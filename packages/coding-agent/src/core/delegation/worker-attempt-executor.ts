@@ -16,7 +16,7 @@ import type { AgentMessage, ThinkingLevel } from "../../kernel/types.ts";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
-import type { WorkerCommandReceipt, WorkerRequest } from "../autonomy/contracts.ts";
+import type { WorkerCommandReceipt, WorkerHostVerdict, WorkerRequest } from "../autonomy/contracts.ts";
 import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { type LastSentRequest, sessionLaneSummarizerRequest } from "../compaction-support.ts";
@@ -42,6 +42,18 @@ import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { WorkerCompletionProtocolError, WorkerProviderTurnProtocol } from "./worker-provider-turn-protocol.ts";
 import { appendCommandReceipt, commandReceiptFor } from "./worker-receipts.ts";
+import {
+	buildNeedsMoreRequest,
+	buildReportRequest,
+	createSubmitReportTool,
+	judgeSubmittedReport,
+	MAX_NEEDS_MORE_ROUNDS,
+	MAX_REPORT_REQUESTS,
+	reportWorthRequesting,
+	SUBMIT_REPORT_TOOL_NAME,
+	type WorkerReportCapture,
+	type WorkerReportContext,
+} from "./worker-report.ts";
 import { runWorker, type WorkerRunOutcome } from "./worker-runner.ts";
 import { buildWorkerSystemPrompt } from "./worker-system-prompt.ts";
 import { captureWorkerTerminalOutputArtifact } from "./worker-terminal-output-artifact.ts";
@@ -193,6 +205,10 @@ export interface WorkerAttemptExecutorOptions {
 	/** Applicable owner working preferences for this handoff; see buildWorkerSystemPrompt. */
 	personaGuidance?: string;
 	verificationSubjectTaskId?: string;
+	/** The task's requirement ids, so a report can be asked for and checked against them. */
+	requirementIds?: readonly string[];
+	/** Ask a worker that declares itself done for a checkable report (see worker-report.ts). Off keeps today's text path. */
+	reportHandshake?: boolean;
 	recoveredTerminal?: RecoveredWorkerTerminalCompletion;
 	retentionPolicy?: WorkerConversationRetentionPolicy;
 	signal?: AbortSignal;
@@ -261,6 +277,7 @@ function callbackEvidencedCompletion(
 	result: IsolatedCompletionResult,
 	historyLength: number,
 	emittedMessages: readonly WorkerTranscriptMessage[],
+	endToolName?: string,
 ): { completion: IsolatedCompletionResult; suffix: WorkerTranscriptMessage[] } {
 	if (result.messages !== undefined && result.messages.length < historyLength) {
 		throw new WorkerCompletionProtocolError(
@@ -293,8 +310,22 @@ function callbackEvidencedCompletion(
 		);
 	}
 	const assistants = emittedMessages.filter((message): message is AssistantMessage => message.role === "assistant");
-	const finalMessage = emittedMessages.at(-1);
-	if (finalMessage?.role !== "assistant") {
+	const finalMessage = assistants.at(-1);
+	// A run ends on its last assistant message, or on the results of the tool calls that assistant made when
+	// one of them is the end tool (`submit_report`): the call and its result are both durable, nothing else
+	// may follow it.
+	const trailing = finalMessage ? emittedMessages.slice(emittedMessages.lastIndexOf(finalMessage) + 1) : [];
+	const endedOnEndTool =
+		finalMessage !== undefined &&
+		endToolName !== undefined &&
+		trailing.length > 0 &&
+		finalMessage.content.some((content) => content.type === "toolCall" && content.name === endToolName) &&
+		trailing.every(
+			(message) =>
+				message.role === "toolResult" &&
+				finalMessage.content.some((content) => content.type === "toolCall" && content.id === message.toolCallId),
+		);
+	if (finalMessage === undefined || (trailing.length > 0 && !endedOnEndTool)) {
 		throw new WorkerCompletionProtocolError(
 			"Worker completion protocol did not durably emit an assistant as its terminal message.",
 		);
@@ -342,6 +373,17 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	 */
 	let attemptTranscriptStart = 0;
 	const commandReceipts: WorkerCommandReceipt[] = [];
+	const reportHandshake = options.reportHandshake !== false;
+	const reportCapture: WorkerReportCapture = {};
+	const reportContext: WorkerReportContext = {
+		requirementIds: options.requirementIds ?? [],
+		writeCapable: options.executionPlan.writeEnabled,
+		verifier: options.verificationSubjectTaskId !== undefined,
+	};
+	const submitReportTool = createSubmitReportTool(reportCapture);
+	let reportRequests = 0;
+	let needsMoreRounds = 0;
+	let hostVerdict: WorkerHostVerdict | undefined;
 	const recentToolNames: string[] = [];
 	const recentToolCalls: { name: string; args: unknown }[] = [];
 	const recentToolOutcomes: { name: string; failed: boolean }[] = [];
@@ -351,6 +393,50 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	 * One live supervision observation per executed tool call. The deterministic churn check runs
 	 * first, because repeated broad validation with no new implementation needs no semantic judgment.
 	 */
+	/**
+	 * What a worker that is about to stop is told next. Once it has submitted, the host checks the report
+	 * against its receipts and, when named proof is missing or a claim is contradicted, sends one review;
+	 * a worker that has not submitted is asked once, and once more if it answered in text. Anything else
+	 * lets the run end: the host never forces a report and never fails a worker for not giving one.
+	 */
+	const reportFollowUp = (state: { providerTurns: number; providerTurnLimit: number }): AgentMessage[] => {
+		const budgetLeft = state.providerTurnLimit <= 0 || state.providerTurns < state.providerTurnLimit;
+		const message = (content: string): AgentMessage[] => [{ role: "user", content, timestamp: Date.now() }];
+		const submitted = reportCapture.submitted;
+		if (submitted) {
+			hostVerdict = judgeSubmittedReport({
+				submitted,
+				context: reportContext,
+				receipts: commandReceipts,
+				changedFiles: [...changedFiles],
+			});
+			if (
+				(hostVerdict.verdict === "needs_more" || hostVerdict.verdict === "rejected") &&
+				needsMoreRounds < MAX_NEEDS_MORE_ROUNDS &&
+				budgetLeft
+			) {
+				needsMoreRounds++;
+				reportCapture.submitted = undefined;
+				return message(buildNeedsMoreRequest(hostVerdict));
+			}
+			return [];
+		}
+		if (
+			reportRequests >= MAX_REPORT_REQUESTS ||
+			!budgetLeft ||
+			!reportWorthRequesting({ context: reportContext, receipts: commandReceipts, changedFiles: [...changedFiles] })
+		)
+			return [];
+		reportRequests++;
+		return message(
+			buildReportRequest({
+				context: reportContext,
+				receipts: commandReceipts,
+				changedFiles: [...changedFiles],
+				repeat: reportRequests > 1,
+			}),
+		);
+	};
 	const observeToolCall = async (toolName: string, args: unknown, isError: boolean): Promise<void> => {
 		if (!options.observeWorkerProgress) return;
 		executedToolCalls++;
@@ -862,7 +948,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											workerOutputTokenCeiling,
 											availableTokens ?? Number.POSITIVE_INFINITY,
 										),
-										tools: options.toolSurface.tools,
+										tools: reportHandshake
+											? [...options.toolSurface.tools, submitReportTool]
+											: options.toolSurface.tools,
 										requestPreflight: () => providerTurn.requestPreflight(),
 										// One durable request_snapshot per accepted provider request, so the worker's
 										// request start and reasoning level survive in its own conversation.
@@ -894,6 +982,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											try {
 												signal.throwIfAborted();
 												persistToolRequest(context.assistantMessage);
+												// The report tool records arguments and ends the run; it is not a granted tool.
+												if (context.toolCall.name === SUBMIT_REPORT_TOOL_NAME) return undefined;
 												const decision = await options.toolSurface.beforeToolCall(context, toolSignal);
 												signal.throwIfAborted();
 												if (!decision?.block) {
@@ -1060,7 +1150,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										},
 										// The parent's halt: taken once, at the next request boundary.
 										getHaltRequest: () => options.agentControl.takeLaneHalt(options.laneId),
-										getFollowUpMessages: async (): Promise<AgentMessage[]> => {
+										getFollowUpMessages: async (followUpState): Promise<AgentMessage[]> => {
 											try {
 												signal.throwIfAborted();
 												const messages = options.agentControl.mailboxMessagesForConversation(
@@ -1069,7 +1159,10 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													true,
 												);
 												signal.throwIfAborted();
-												return messages;
+												// The parent's messages come first. Otherwise a worker about to stop is asked for a
+												// checkable report, once, and never when the run has no provider budget left for it.
+												if (messages.length > 0 || !reportHandshake) return messages;
+												return reportFollowUp(followUpState);
 											} catch (error) {
 												retainCallbackFailure(error);
 												throw error;
@@ -1170,7 +1263,12 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								providerTurn.close();
 								if (callbackFailed) throw workerCompletionCallbackFailure(callbackFailure);
 								providerTurn.assertProviderOutputPreflight();
-								const evidenced = callbackEvidencedCompletion(result, historyLength, durableCallbackMessages);
+								const evidenced = callbackEvidencedCompletion(
+									result,
+									historyLength,
+									durableCallbackMessages,
+									reportHandshake ? SUBMIT_REPORT_TOOL_NAME : undefined,
+								);
 								signal.throwIfAborted();
 								const appended = options.conversation.commitTranscript(transcriptCursor, evidenced.suffix, {
 									appendMissing: false,
@@ -1212,6 +1310,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							changedFiles: [...changedFiles],
 							blockers: [...toolIssues],
 							commandReceipts: [...commandReceipts],
+							...(reportCapture.submitted ? { submittedReport: reportCapture.submitted } : {}),
+							...(hostVerdict ? { hostVerdict } : {}),
+							reportRequested: reportRequests > 0,
 						};
 					},
 				});

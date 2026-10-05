@@ -118,7 +118,9 @@ judgment names the questions that came back adverse. A steer names the mission i
 the approach to the worker; steering is advisory, one steer and a grace window before a reroute, and a
 reroute needs an observed stall, repetition or failure. The same evidence is not assessed again, but the evidence is
 everything the questions read: the tool-call count (every four calls), the failures and the changed files
-count, not only the output tail and the stall flags. A worker that fails three evaluations on an attempt
+count, not only the output tail and the stall flags. The semantic judgment starts at five tool calls (the smallest count it was measured on; a live run showed that
+assessing at the first call called a healthy worker stalled), and the deterministic churn check covers early
+work. A worker that fails three evaluations on an attempt
 stops being assessed and keeps running.
 
 Every verdict, `continue` included, is a row in the decision ledger's `supervision_actions` table with its

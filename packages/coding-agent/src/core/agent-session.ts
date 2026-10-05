@@ -193,6 +193,7 @@ import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
 import { type ExplicitGoalStartAuthority, parseExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
 import { proveRequirementChecks } from "./goals/prove-requirement-checks.ts";
 import { runRequirementCheck } from "./goals/requirement-checks.ts";
+import { recordAcceptedWorkerRequirementEvidence } from "./goals/worker-requirement-evidence.ts";
 import { HostTurnReasoningController } from "./host-turn-reasoning.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
 import { subscribeHumanInputActivity } from "./human-input-activity.ts";
@@ -1843,6 +1844,7 @@ export class AgentSession {
 			foreground: this._foregroundRecovery,
 			isDisposed: () => this._disposed,
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
+			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
 			getWorkerClaimSnapshot: (laneId, attemptId) => {
 				const entries = getActiveSessionBranchEntries(this.sessionManager);
 				return attemptId === undefined
@@ -2107,6 +2109,8 @@ export class AgentSession {
 			workerAgentControl: this._backgroundLanes,
 			getOrchestrationProfileCatalog: () => this._backgroundLanes.getOrchestrationProfileCatalog(),
 			getWorkerLaneRecords: () => this._backgroundLanes.getLaneRecords(),
+			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
+			onWorkerReviewAcknowledged: () => this.recordAcceptedWorkerEvidence(),
 			getWorkerClaimSnapshots: () => this.getWorkerClaimSnapshots(),
 			getWorkerResult: (laneId) => this._backgroundLanes.getWorkerResult(laneId),
 			resolveManagedLaneId: (id) => this._backgroundLanes.resolveManagedLaneId(id),
@@ -7095,7 +7099,30 @@ export class AgentSession {
 	}
 
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest, options?: { cwd?: string }): string {
-		return appendWorkerClaimSnapshot(this.sessionManager, claim, request, options);
+		const entryId = appendWorkerClaimSnapshot(this.sessionManager, claim, request, options);
+		this.recordAcceptedWorkerEvidence();
+		return entryId;
+	}
+
+	/**
+	 * Makes accepted worker proof citable by the goal's completion account. It runs after every claim save and
+	 * every review acknowledgement (a claim flagged for review only becomes covered once acknowledged). It never
+	 * satisfies a requirement, and a failure here must not report a saved claim as unsaved.
+	 */
+	recordAcceptedWorkerEvidence(): void {
+		try {
+			recordAcceptedWorkerRequirementEvidence({
+				getGoalState: () => this._goals.getState(),
+				saveGoalState: (state, expected) => this._goals.saveState(state, expected),
+				getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
+				getWorkerClaimSnapshots: () => this.getWorkerClaimSnapshots(),
+			});
+		} catch (error) {
+			this._emit({
+				type: "warning",
+				message: `Worker evidence for the goal was not recorded: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		}
 	}
 
 	getWorkerClaimSnapshots(): WorkerClaim[] {

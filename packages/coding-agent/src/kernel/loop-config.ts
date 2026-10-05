@@ -435,6 +435,14 @@ export type ProviderRequestAdmissionResult =
 	| { action: "send"; maxTokens?: number }
 	| { action: "replan"; context: AgentContext };
 
+/** What a follow-up hook may need to know about the run it is called from. */
+export interface FollowUpState {
+	/** Provider requests spent so far in this run. */
+	readonly providerTurns: number;
+	/** The run's provider-turn limit; 0 or less means unlimited. */
+	readonly providerTurnLimit: number;
+}
+
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 
@@ -718,9 +726,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * Use this for follow-up messages that should wait until the agent finishes.
 	 *
+	 * The argument tells the host how much provider-turn budget the run has left: a message that
+	 * costs another provider request should not be offered when the limit leaves none.
+	 *
 	 * Contract: must not throw or reject. Return [] when no follow-up messages are available.
 	 */
-	getFollowUpMessages?: () => Promise<AgentMessage[]>;
+	getFollowUpMessages?: (state: FollowUpState) => Promise<AgentMessage[]>;
 
 	/**
 	 * Tool execution mode.

@@ -81,6 +81,7 @@ import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-to
 import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-claim.ts";
 import type { WorkerAgentControlPort, WorkerGrantSummary } from "./delegation/worker-agent-control.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
+import { deriveWorkerDispositionFacts } from "./delegation/worker-disposition.ts";
 import { execCommand } from "./exec.ts";
 import { PeerReviewController } from "./expert-routing/peer-review.ts";
 import type { ExtensionImportAuthority } from "./extension-import-authority.ts";
@@ -120,6 +121,7 @@ import { FitnessStore } from "./models/fitness-store.ts";
 import type { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { OrchestrationProfile, WorkerResultContract } from "./orchestration/contracts.ts";
 import type { TaskProfileWriterPort } from "./orchestration/task-profile-writer.ts";
+import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import type { WorkerModelPinPolicy } from "./orchestration/worker-model-pins.ts";
 import { resolvePipelineDefinitionForRun } from "./pipelines/discover.ts";
 import { resolveCurrentProjectPipelineRun } from "./pipelines/run-state.ts";
@@ -491,6 +493,10 @@ export interface RuntimeBuilderDeps {
 	describeWorkerGrant?(laneId: string): WorkerGrantSummary | undefined;
 	getOrchestrationProfileCatalog(): Array<{ profileId: string; role: string; description: string }>;
 	getWorkerLaneRecords(): LaneRecord[];
+	/** The durable task runtime, for the host facts behind a worker's recommended disposition. */
+	getTaskRuntimeSnapshot?(): TaskRuntimeProjection | undefined;
+	/** A worker claim's review was acknowledged: a claim flagged for review only counts toward the goal once acknowledged. */
+	onWorkerReviewAcknowledged?(): void;
 	getWorkerClaimSnapshots(): WorkerClaim[];
 	getWorkerResult?(laneId: string): WorkerResultContract | undefined;
 	/** Confirm a managed dispatch's caller-stable canonical lane id was registered durably before the
@@ -1758,8 +1764,17 @@ export class RuntimeBuilder {
 						...(this.deps.getWorkerResult
 							? { getWorkerResult: (laneId: string) => this.deps.getWorkerResult?.(laneId) }
 							: {}),
-						acknowledgeWorkerReview: (requestId) =>
-							acknowledgeWorkerClaimReview(this.deps.getSessionManager(), requestId),
+						acknowledgeWorkerReview: (requestId) => {
+							const result = acknowledgeWorkerClaimReview(this.deps.getSessionManager(), requestId);
+							if (result.ok) this.deps.onWorkerReviewAcknowledged?.();
+							return result;
+						},
+						getWorkerDispositionFacts: (laneId) =>
+							deriveWorkerDispositionFacts({
+								snapshot: this.deps.getTaskRuntimeSnapshot?.(),
+								goal: this.deps.getGoalStateSnapshot(),
+								laneId,
+							}),
 					},
 					...(profileWriter ? { profileWriter } : {}),
 					warn: (message) => delegatePromptGuidelineWarnings.push(message),

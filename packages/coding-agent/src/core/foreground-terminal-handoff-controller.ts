@@ -1,4 +1,5 @@
 import type { CustomMessage } from "../kernel/index.ts";
+import type { WorkerHostVerdict } from "./autonomy/contracts.ts";
 import type { LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
 import {
 	type BackgroundToolTaskRecord,
@@ -8,6 +9,14 @@ import {
 import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
 import { fenceWorkerClaimValues, workerClaimSettlementLines } from "./delegation/worker-claim.ts";
 import {
+	deriveWorkerDispositionFromProjections,
+	describeWorkerDisposition,
+	describeWorkerHostVerdict,
+	WORKER_DISPOSITION_ADVICE_NOTE,
+	type WorkerDispositionAdvice,
+	workerDispositionGuidance,
+} from "./delegation/worker-disposition.ts";
+import {
 	type WorkerTerminalHandoffRecord,
 	workerTerminalGenerationIdentity,
 } from "./delegation/worker-notification-coordinator.ts";
@@ -16,6 +25,7 @@ import { workerTerminalOutputArtifact } from "./delegation/worker-terminal-outpu
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import type { ArtifactContract, WorkerResultContract } from "./orchestration/contracts.ts";
+import type { TaskRuntimeProjection } from "./orchestration/task-runtime-state.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { utf8PrefixByBytes } from "./util/bounded-value.ts";
 
@@ -87,7 +97,11 @@ function workerSummaryStatus(
 interface ForegroundTerminalHandoffControllerDeps {
 	foreground: ForegroundRecoveryController;
 	isDisposed(): boolean;
-	getGoalStateSnapshot(): Pick<GoalState, "goalId" | "status"> | undefined;
+	getGoalStateSnapshot():
+		| (Pick<GoalState, "goalId" | "status"> & Partial<Pick<GoalState, "requirements">>)
+		| undefined;
+	/** The orchestration projection the recommended disposition reads; absent leaves open-task facts unknown. */
+	getTaskRuntimeSnapshot?(): TaskRuntimeProjection | undefined;
 	/** The claim of the exact generation when `attemptId` is given; never another generation's. */
 	getWorkerClaimSnapshot?(laneId: string, attemptId?: string): WorkerClaimSnapshotPayload | undefined;
 	/** The result of the exact generation when `attemptId` is given; never another generation's. */
@@ -141,6 +155,29 @@ const MAX_DELIVERED_TERMINAL_IDENTITIES = 512;
 const ATTENTION_CLAIM_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["blocked", "partial"]);
 const MAX_ATTENTION_CLAIM_SUMMARY_BYTES = 16 * 1024;
 
+/** The reading guidance for a woken parent: the fixed line when no lane carries advice, else one line per advised lane. */
+function workerHandoffGuidanceLines(
+	records: readonly {
+		laneId: string;
+		recommendedDisposition?: WorkerDispositionAdvice;
+		hostVerdict?: WorkerHostVerdict;
+	}[],
+): string[] {
+	const advised = records.filter((record) => record.recommendedDisposition !== undefined);
+	if (advised.length === 0) {
+		return ["Read each lane with delegate status, verify the claim, then continue or replan the parent task."];
+	}
+	return [
+		`Read each lane with delegate status and verify the claim before acting. ${WORKER_DISPOSITION_ADVICE_NOTE} Next step per lane:`,
+		...advised.flatMap((record) =>
+			record.recommendedDisposition
+				? [`- ${record.laneId}: ${workerDispositionGuidance(record.recommendedDisposition, record.hostVerdict)}`]
+				: [],
+		),
+		"Then continue or replan the parent task.",
+	];
+}
+
 export function buildForegroundWorkerTerminalHandoffContent(
 	records: readonly {
 		laneId: string;
@@ -149,6 +186,10 @@ export function buildForegroundWorkerTerminalHandoffContent(
 		outputArtifact?: ArtifactContract;
 		/** Host-written fan-out group line; reason codes inside it are already identifier-sanitized. */
 		fanout?: string;
+		/** The host's judgment of the claim against the receipts; absent on a legacy claim. */
+		hostVerdict?: WorkerHostVerdict;
+		/** Host advice on the worker's lifecycle; the root decides. */
+		recommendedDisposition?: WorkerDispositionAdvice;
 		claim?: {
 			summary?: string;
 			status?: string;
@@ -209,12 +250,14 @@ export function buildForegroundWorkerTerminalHandoffContent(
 				for (const line of workerClaimSettlementLines(record.claim, sanitize, `worker-claim:${record.laneId}`))
 					lines.push(`  ${line}`);
 			}
+			if (record.hostVerdict) lines.push(`  ${describeWorkerHostVerdict(record.hostVerdict)}`);
+			if (record.recommendedDisposition) lines.push(`  ${describeWorkerDisposition(record.recommendedDisposition)}`);
 			return lines;
 		}),
 		...(omitted > 0 ? [`- ${omitted} additional terminal worker(s) omitted.`] : []),
 		"CAVEMAN MODE - MANDATORY: this event proves terminal persistence and delivery. Do not report missed completion or lost worker state from these records.",
 		...(wakeParent
-			? ["Read each lane with delegate status, verify the claim, then continue or replan the parent task."]
+			? workerHandoffGuidanceLines(included)
 			: [
 					"The owning parent is no longer eligible for automatic continuation. Persist this handoff, but do not continue or replan automatically.",
 				]),
@@ -427,6 +470,8 @@ export class ForegroundTerminalHandoffController {
 					? workerTerminalOutputArtifact(this.deps.getWorkerResult?.(record.laneId, record.attemptId))
 					: undefined;
 			const fanout = index < 8 ? this.deps.getWorkerFanoutNote?.(record.laneId) : undefined;
+			const recommendedDisposition =
+				index < 8 && claim ? this.recommendDisposition(claim, record.laneId, record.attemptId) : undefined;
 			return {
 				summaryItem: {
 					id: record.laneId,
@@ -441,6 +486,8 @@ export class ForegroundTerminalHandoffController {
 				...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
 				...(outputArtifact ? { outputArtifact } : {}),
 				...(fanout ? { fanout } : {}),
+				...(claim?.hostVerdict ? { hostVerdict: claim.hostVerdict } : {}),
+				...(recommendedDisposition ? { recommendedDisposition } : {}),
 				...(claim
 					? {
 							claim: {
@@ -483,6 +530,22 @@ export class ForegroundTerminalHandoffController {
 			},
 			...wake,
 		};
+	}
+
+	/** Advice for the root on one worker's end; an unreachable host fact stays unknown and advises idle. */
+	private recommendDisposition(
+		claim: WorkerClaimSnapshotPayload["claim"],
+		laneId: string,
+		attemptId: string | undefined,
+	): WorkerDispositionAdvice {
+		const goal = this.deps.getGoalStateSnapshot();
+		return deriveWorkerDispositionFromProjections({
+			claim,
+			snapshot: this.deps.getTaskRuntimeSnapshot?.(),
+			goal: goal?.requirements ? { requirements: goal.requirements } : undefined,
+			laneId,
+			...(attemptId !== undefined ? { attemptId } : {}),
+		});
 	}
 
 	private prepareToolDelivery(records: readonly BackgroundToolTaskRecord[]): TerminalDeliveryPlan | undefined {

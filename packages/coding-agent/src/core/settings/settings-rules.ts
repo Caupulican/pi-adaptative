@@ -197,6 +197,7 @@ export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 0;
 export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT = 5;
 
 export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
+export const DEFAULT_WORKER_DELEGATION_REPORT_HANDSHAKE = true;
 
 export const MAX_WORKER_DELEGATION_MAX_USD = Number.MAX_SAFE_INTEGER;
 
@@ -642,6 +643,10 @@ export function normalizeWorkerDelegationLayer(
 	if (Object.hasOwn(value, "writeEnabled")) {
 		if (typeof value.writeEnabled === "boolean") normalized.writeEnabled = value.writeEnabled;
 		else reportInvalidWorkerDelegationField(reportDiagnostic, "writeEnabled", "a boolean");
+	}
+	if (Object.hasOwn(value, "reportHandshake")) {
+		if (typeof value.reportHandshake === "boolean") normalized.reportHandshake = value.reportHandshake;
+		else reportInvalidWorkerDelegationField(reportDiagnostic, "reportHandshake", "a boolean");
 	}
 	if (Object.hasOwn(value, "haltReportDeadlineMs")) {
 		if (

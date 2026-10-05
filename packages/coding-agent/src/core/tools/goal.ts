@@ -453,6 +453,12 @@ async function resolveEvidenceVerified(
 		// this is what stops an unreviewed worker completion from ungating goal completion through
 		// the existing verified/complete gate (goal-tool-core's isVerifiedOrUserEvidence/complete).
 		if (claim.parentReviewRequired === true && claim.parentReviewedAt === undefined) return { verified: false };
+		// The host's own check of the report can refuse what the worker's status claims: a report whose
+		// stated claims are contradicted or missing named proof does not verify a requirement. Absent (an
+		// older claim, or one with nothing to check) and `accepted` verify as before; `unverified` (a text
+		// answer after a report request) stands as it always did, because nothing was checked either way.
+		const verdict = claim.hostVerdict?.verdict;
+		if (verdict === "needs_more" || verdict === "rejected" || verdict === "blocked") return { verified: false };
 		return { verified: claim.status === "completed" };
 	}
 	return { verified: undefined };

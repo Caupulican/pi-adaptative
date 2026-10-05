@@ -304,6 +304,7 @@ export interface WorkerDelegationSettings {
 	maxUsd?: number; // default: 0 (unbounded); a positive value caps spend for one worker task
 	maxWallClockMs?: number; // default: 0 (unbounded); a positive value caps one worker task's cumulative active time
 	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
+	reportHandshake?: boolean; // default: true; a worker about to stop with something checkable (requirement ids, commands, changed files) is asked once for a report the host checks against its receipts; explicit false keeps the plain text path
 	haltReportDeadlineMs?: number; // default: 120000; how long an interrupted worker gets to reach a request boundary and report before it is cancelled
 	maxConcurrent?: number; // default: 5 (above the Codex CLI per-session default of 3); running leaf-worker concurrency; fixed fleet safety ceilings separately bound durable identities and queued dispatches
 	modelPins?: WorkerModelPinsSettings; // optional global/local role pins; absent preserves adaptive routing exactly

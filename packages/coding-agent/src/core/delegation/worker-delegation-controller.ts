@@ -144,6 +144,7 @@ import {
 	type WorkerAuthorityResolutionInput,
 } from "./worker-authority-resolver.ts";
 import {
+	boundedWorkerClaimStrings,
 	INDEPENDENT_VERIFICATION_PENDING_BLOCKER,
 	MAX_WORKER_CLAIM_BLOCKER_CHARS,
 	MAX_WORKER_CLAIM_BLOCKERS,
@@ -716,6 +717,7 @@ export class WorkerDelegationController {
 			getWorkerClaimSnapshot: (laneId) =>
 				getLatestWorkerClaimSnapshot(getActiveSessionBranchEntries(this.deps.getSessionManager()), laneId),
 			getWorkerResult: (laneId) => this.getWorkerLifecycle().getResult(laneId),
+			getGoalState: () => this.deps.getGoalStateSnapshot(),
 			abortLane: (laneId, reasonCode) => this.laneAbortControllers.get(laneId)?.abort(reasonCode),
 			haltReportDeadlineMs: () => this.deps.getSettingsManager().getWorkerDelegationSettings().haltReportDeadlineMs,
 			cancelLane: (laneId, reasonCode) => {
@@ -4360,6 +4362,8 @@ export class WorkerDelegationController {
 			`worker:${startedRecord.laneId}`,
 		);
 		const executor = createWorkerAttemptExecutor({
+			requirementIds: prepared.attempt.dispatch.requirementIds ?? [],
+			reportHandshake: this.deps.getSettingsManager().getWorkerDelegationSettings().reportHandshake,
 			request: workerRequest,
 			grant,
 			executionPlan,
@@ -4557,8 +4561,25 @@ export class WorkerDelegationController {
 				const settledOutcome = ladder
 					? rejudgedOutcome(rawOutcome, workerRequest, executionPlan.cwd, {
 							...rawOutcome.claim,
-							inconclusive: ladder.unsettled.length > 0 ? ladder.unsettled : undefined,
-							...(ladder.settled.length > 0 ? { systemOneSettled: ladder.settled } : {}),
+							// The ladder's lines carry the evidence's own words and can outrun the claim's bound; an unbounded
+							// line failed the whole delegation ("claim.inconclusive[0] exceeds 1000 characters").
+							inconclusive:
+								ladder.unsettled.length > 0
+									? boundedWorkerClaimStrings(
+											ladder.unsettled,
+											MAX_WORKER_CLAIM_BLOCKERS,
+											MAX_WORKER_CLAIM_BLOCKER_CHARS,
+										)
+									: undefined,
+							...(ladder.settled.length > 0
+								? {
+										systemOneSettled: boundedWorkerClaimStrings(
+											ladder.settled,
+											MAX_WORKER_CLAIM_BLOCKERS,
+											MAX_WORKER_CLAIM_BLOCKER_CHARS,
+										),
+									}
+								: {}),
 							...(ladder.ownerFollowUp ? { ownerFollowUp: ladder.ownerFollowUp } : {}),
 						})
 					: rawOutcome;

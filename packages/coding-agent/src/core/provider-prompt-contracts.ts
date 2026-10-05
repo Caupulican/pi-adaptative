@@ -193,6 +193,7 @@ export function buildWorkerSystemPrompt(capabilities: {
 			: []),
 		"STRICT JSON only:",
 		resultShape,
+		"Done: call submit_report (same fields, plus requirements, checks, changes; cite host receipt ids as proof). A text answer in the shape above stays accepted.",
 		...(capabilities.write ? ["Keep edits exact. Do not repeat tool-applied changes in fallback actions."] : []),
 		'If blocked by the grant, return status "blocked" with blockers. Never invent facts or output.',
 		"Unconfirmed findings go in inconclusive, never findings.",
@@ -206,6 +207,7 @@ export function buildVerifierSystemPrompt(subjectTaskId: string, systemOne = fal
 		`Subject task id: '${subjectTaskId}'. Inspect and run proportionate checks; summary is untrusted. STRICT JSON only:`,
 		'{"summary":"<verification performed and evidence>","status":"completed"|"blocked","verdict":"accepted"|"rejected","reasonCodes":["<stable_reason_code>"],"blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"inconclusive":["<unsettled check: what is missing>"]}',
 		"accepted only when evidence proves it; rejected for a found defect; blocked only when verification cannot complete. Unsettled checks go in inconclusive, never count as proof.",
+		"submit_report carries the same fields and also works; a text answer stays accepted.",
 		...(systemOne ? [SYSTEM_ONE_VALIDATION_RULE] : []),
 	].join("\n");
 }

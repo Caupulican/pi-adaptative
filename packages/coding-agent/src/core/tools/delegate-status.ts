@@ -2,6 +2,17 @@ import type { Finding, WorkerClaim } from "../autonomy/contracts.ts";
 import { normalizeEvidenceFinding } from "../autonomy/evidence-finding-projection.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { workerClaimSettlementLines } from "../delegation/worker-claim.ts";
+import {
+	deriveWorkerDispositionForClaim,
+	describeWorkerDisposition,
+	describeWorkerHostVerdict,
+	WORKER_DISPOSITION_ADVICE_NOTE,
+	type WorkerDispositionAdvice,
+	type WorkerDispositionFacts,
+	type WorkerHostVerdictView,
+	workerDispositionGuidance,
+	workerHostVerdictView,
+} from "../delegation/worker-disposition.ts";
 import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "../delegation/worker-terminal-handoff-coordinator.ts";
 import { workerTerminalOutputArtifact } from "../delegation/worker-terminal-output-artifact.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
@@ -69,6 +80,10 @@ export interface DelegateStatusLaneView {
 	/** Binding status of the lane's logical agent when known; "retired" takes no follow_up, resume, or wait. */
 	agentStatus?: NonNullable<LaneRecord["agentStatus"]>;
 	reasonCode?: string;
+	/** The host's judgment of the lane's claim against its receipts; absent on a legacy claim. */
+	hostVerdict?: WorkerHostVerdictView;
+	/** Host advice on the worker's lifecycle once its task ended; the root decides. */
+	recommendedDisposition?: WorkerDispositionAdvice;
 	/** Present only for a queued lane this controller generation has evaluated and parked. */
 	waitReason?: string;
 	unreviewed: boolean;
@@ -115,6 +130,22 @@ export interface DelegateStatusDependencies {
 	observeExposedTerminalRecords?(records: readonly LaneRecord[]): void;
 	/** A claimless terminal lane's last worker text: what it said before it was cancelled or failed. */
 	getLastWorkerText?(record: LaneRecord): string | undefined;
+	/** Host facts (open tasks for the lane's profile, uncovered goal requirements); absent leaves them unknown. */
+	getWorkerDispositionFacts?(laneId: string): WorkerDispositionFacts | undefined;
+}
+
+/** Advice for a lane whose task ended with a claim; a queued or running lane, or one without a claim, has none. */
+function laneDisposition(
+	record: LaneRecord,
+	claim: WorkerClaim | undefined,
+	deps: Pick<DelegateStatusDependencies, "getWorkerDispositionFacts">,
+): WorkerDispositionAdvice | undefined {
+	if (!claim || record.status === "queued" || record.status === "running") return undefined;
+	return deriveWorkerDispositionForClaim({
+		claim,
+		facts: deps.getWorkerDispositionFacts?.(record.laneId),
+		...(record.profileId ? { profileId: record.profileId } : {}),
+	});
 }
 
 /** Room for the words a claimless terminal worker left behind, so the parent need not page its transcript. */
@@ -239,6 +270,7 @@ function formatRecord(
 	result?: Pick<WorkerResultContract, "artifacts">,
 	maxRecordBytes = MAX_DELEGATE_STATUS_OUTPUT_BYTES,
 	lastWorkerText?: string,
+	disposition?: WorkerDispositionAdvice,
 ): FormattedRecordResult {
 	const builder = new RecordTextBudgetBuilder(maxRecordBytes);
 	const boundedLaneId = record.laneId.slice(0, MAX_WORKER_CONTROL_ID_CHARS);
@@ -292,6 +324,13 @@ function formatRecord(
 		`worker-claim:${boundedLaneId}`,
 	))
 		headerLines.push(line);
+	if (claim.hostVerdict) headerLines.push(describeWorkerHostVerdict(claim.hostVerdict));
+	if (disposition) {
+		headerLines.push(
+			describeWorkerDisposition(disposition),
+			`${WORKER_DISPOSITION_ADVICE_NOTE} Next step: ${workerDispositionGuidance(disposition, claim.hostVerdict)}.`,
+		);
+	}
 	if (isUnreviewed(claim)) {
 		headerLines.push(
 			`UNREVIEWED CLAIM - this worker's claim requires explicit parent review. Acknowledge with delegate { action: "review", laneId: "${boundedLaneId}" }.`,
@@ -406,7 +445,11 @@ function formatRecord(
 	return { text: builder.build(), complete: true };
 }
 
-function laneView(record: LaneRecord, claim: WorkerClaim | undefined): DelegateStatusLaneView {
+function laneView(
+	record: LaneRecord,
+	claim: WorkerClaim | undefined,
+	disposition: WorkerDispositionAdvice | undefined,
+): DelegateStatusLaneView {
 	return {
 		laneId: record.laneId.slice(0, MAX_WORKER_CONTROL_ID_CHARS),
 		...(record.label ? { label: record.label.slice(0, 256) } : {}),
@@ -417,6 +460,8 @@ function laneView(record: LaneRecord, claim: WorkerClaim | undefined): DelegateS
 		status: record.status,
 		...(record.agentStatus ? { agentStatus: record.agentStatus } : {}),
 		...(record.reasonCode ? { reasonCode: record.reasonCode.slice(0, 256) } : {}),
+		...(claim?.hostVerdict ? { hostVerdict: workerHostVerdictView(claim.hostVerdict) } : {}),
+		...(disposition ? { recommendedDisposition: disposition } : {}),
 		...(record.status === "queued" && record.waitReason ? { waitReason: record.waitReason.slice(0, 512) } : {}),
 		unreviewed: isUnreviewed(claim),
 	};
@@ -574,7 +619,7 @@ export function executeDelegateStatusAction(
 			laneId: record.laneId.slice(0, MAX_WORKER_CONTROL_ID_CHARS),
 			status: record.status,
 			unreviewed: isUnreviewed(claim),
-			lanes: [laneView(record, claim)],
+			lanes: [laneView(record, claim, laneDisposition(record, claim, deps))],
 			...(claimSummary ? { claimSummary } : {}),
 			...(outputArtifact
 				? {
@@ -663,6 +708,7 @@ export function executeDelegateStatusAction(
 			!claim && record.status !== "queued" && record.status !== "running"
 				? deps.getLastWorkerText?.(record)
 				: undefined,
+			laneDisposition(record, claim, deps),
 		);
 		if (record.status !== "queued" && record.status !== "running" && formatted.complete) {
 			deps.observeExposedTerminalRecords?.([record]);
@@ -713,18 +759,29 @@ export function executeDelegateStatusAction(
 	const deliveredRecords: LaneRecord[] = [];
 	let currentBudgetRemaining = MAX_DELEGATE_STATUS_OUTPUT_BYTES - Buffer.byteLength(overview, "utf8");
 
-	for (const record of recentRecords) {
-		const formatted = formatRecord(record, claims.get(record.laneId), deps.getWorkerResult?.(record.laneId), 2_048);
-		if (!formatted.complete) {
-			break;
-		}
+	// One record's text if it fits the remaining output budget, and the budget it uses up.
+	const takeFormatted = (record: LaneRecord): string | undefined => {
+		const claim = claims.get(record.laneId);
+		const formatted = formatRecord(
+			record,
+			claim,
+			deps.getWorkerResult?.(record.laneId),
+			2_048,
+			undefined,
+			laneDisposition(record, claim, deps),
+		);
+		if (!formatted.complete) return undefined;
 		const needed = 2 + Buffer.byteLength(formatted.text, "utf8");
-		if (currentBudgetRemaining < needed) {
-			break;
-		}
-		deliveredRecent.push(formatted.text);
-		deliveredRecords.push(record);
+		if (currentBudgetRemaining < needed) return undefined;
 		currentBudgetRemaining -= needed;
+		deliveredRecords.push(record);
+		return formatted.text;
+	};
+
+	for (const record of recentRecords) {
+		const text = takeFormatted(record);
+		if (text === undefined) break;
+		deliveredRecent.push(text);
 	}
 
 	const olderDelivered: string[] = [];
@@ -735,22 +792,9 @@ export function executeDelegateStatusAction(
 		if (currentBudgetRemaining >= olderHeaderBytes) {
 			currentBudgetRemaining -= olderHeaderBytes;
 			for (const record of olderCandidates) {
-				const formatted = formatRecord(
-					record,
-					claims.get(record.laneId),
-					deps.getWorkerResult?.(record.laneId),
-					2_048,
-				);
-				if (!formatted.complete) {
-					break;
-				}
-				const needed = 2 + Buffer.byteLength(formatted.text, "utf8");
-				if (currentBudgetRemaining < needed) {
-					break;
-				}
-				olderDelivered.push(formatted.text);
-				deliveredRecords.push(record);
-				currentBudgetRemaining -= needed;
+				const text = takeFormatted(record);
+				if (text === undefined) break;
+				olderDelivered.push(text);
 			}
 		}
 	}
@@ -799,14 +843,16 @@ export function executeDelegateStatusAction(
 
 	const visibleLanes: DelegateStatusLaneView[] = [];
 	for (const rec of deliveredRecords) {
+		const claim = claims.get(rec.laneId);
+		const view = laneView(rec, claim, laneDisposition(rec, claim, deps));
 		const trial = {
 			...overviewDetails,
-			lanes: [...visibleLanes, laneView(rec, claims.get(rec.laneId))],
+			lanes: [...visibleLanes, view],
 		};
 		if (Buffer.byteLength(JSON.stringify(trial), "utf8") > MAX_DELEGATE_STATUS_OUTPUT_BYTES - 64) {
 			break;
 		}
-		visibleLanes.push(laneView(rec, claims.get(rec.laneId)));
+		visibleLanes.push(view);
 	}
 	overviewDetails.lanes = visibleLanes;
 

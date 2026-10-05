@@ -51,6 +51,9 @@ export const STEER_GRACE_TOOL_CALLS = 3;
  */
 export const ASSESSMENT_TOOL_CALL_STEP = 4;
 
+/** Tool calls a worker needs before the semantic judgment reads it: the smallest count it was measured on. */
+export const MIN_ASSESSED_TOOL_CALLS = 5;
+
 export const WORKER_SUPERVISION_DECISION_IDS = [
 	"meaningful_progress",
 	"worker_stuck",
@@ -130,7 +133,7 @@ export class WorkerSemanticSupervisor {
 		this.steering = deps.steering;
 		this.decisionEngine = deps.decisionEngine;
 		this.debounceMs = deps.debounceMs ?? 5000;
-		this.minToolCalls = deps.minToolCalls ?? 2;
+		this.minToolCalls = deps.minToolCalls ?? MIN_ASSESSED_TOOL_CALLS;
 		this.minElapsedMs = deps.minElapsedMs ?? 3000;
 		this.maxFailures = deps.maxFailures ?? 3;
 	}
@@ -192,7 +195,10 @@ export class WorkerSemanticSupervisor {
 	 */
 	shouldAssess(attempt: LiveWorkerAttempt): boolean {
 		// FR-062: No assessment for very short workers
-		if (attempt.toolCalls < this.minToolCalls && attempt.elapsedMs < this.minElapsedMs) {
+		// The semantic judgment is only as good as the evidence it reads, and it was measured on workers with at
+		// least five tool calls: a worker that has made one or two has shown nothing to judge, however slow its
+		// first turn was. Early churn is still caught by the deterministic check.
+		if (attempt.toolCalls < this.minToolCalls || attempt.elapsedMs < this.minElapsedMs) {
 			return false;
 		}
 

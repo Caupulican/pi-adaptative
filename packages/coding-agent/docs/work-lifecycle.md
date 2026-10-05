@@ -87,6 +87,19 @@ When checks are green and the owner requested or authorized a checkpoint, create
 
 **Exit condition:** every required criterion has trusted evidence, integrated review is clean, no active work remains, authorized local checkpointing is complete, and either delivery is complete or Pi is explicitly waiting at an external authorization boundary. Any failed criterion loops to Contract, Plan/Route, or Execute.
 
+## Worker completion handshake
+
+A worker that is about to stop with something the host can check (task requirement ids, commands it ran, files it changed) is asked once for a report instead of being taken at its word. The host records what it saw (a receipt per command: tool, bounded credential-free command head, error state, exit code, output path; the files it changed) and sends one request: submit a report through `submit_report`, with a status for each requirement id, the checks it ran citing receipt names (`c1`, `c2`), the files it changed and what each does, what remains, what it assumed, what could regress. `submit_report` is a per-attempt tool outside the worker's granted surface (it records its arguments and ends the run through the loop's ordinary tool-batch termination, so the transcript keeps a complete call and result). A worker is never forced: a plain text answer is accepted and parsed as before (`outputFormat` `unstructured_after_request`, host verdict `unverified`), one repair request is allowed, and no request is made when the provider-turn budget leaves no room. `workerDelegation.reportHandshake: false` restores the plain text path.
+
+The host checks a submitted report against its receipts in code and records a verdict on the claim:
+
+- `accepted`: the stated claims match the receipts; the requirement ids the report marked met are `coveredRequirementIds`.
+- `needs_more`: named proof is missing (a requirement with no entry or no evidence, a check with no receipt, changed files with no explanation). The worker gets one follow-up turn with the list.
+- `rejected`: a stated claim is contradicted (a check reported passed whose receipt shows a failure, a change reported for a file the host recorded no change to). The same single follow-up applies.
+- `blocked`: the worker reported a blocker. `unverified`: nothing could be checked.
+
+The verdict is advice: the host never closes, cancels or retires a worker. The root receives it on the terminal handoff, in `delegate status` and in `delegate list`, together with a recommended disposition derived from host facts: `needs_follow_up` for a missing or contradicted proof, a blocker, an unsettled finding or an unreviewed change; `idle` when the goal still has open requirements this worker's task correlation can take or other open tasks for its profile (an idle worker is reused on the exact same model and context by the next compatible `start` or `follow_up`); `retire` when nothing further needs it. The root decides. For a goal with several workers, a requirement counts as covered only when a completed claim with an accepted verdict lists it and its review is settled; that coverage becomes verified `worker` evidence the goal's completion account can cite, and a claim whose verdict is `needs_more`, `rejected` or `blocked` cannot verify a requirement. Nothing satisfies a requirement automatically: the model still calls `satisfy_requirement` with the evidence.
+
 ## Current-code audit
 
 ### Retained as authoritative

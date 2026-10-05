@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { UserMessage } from "@caupulican/pi-ai";
 import type { AgentHaltRequest, AgentMessage } from "../../kernel/index.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
+import type { WorkerHostVerdict } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
@@ -62,6 +63,16 @@ import {
 } from "./worker-conversation-store.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { formatWorkerDispatchWait, type WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
+import {
+	deriveClaimOnlyWorkerDisposition,
+	deriveWorkerDispositionFromProjections,
+	describeWorkerDisposition,
+	describeWorkerHostVerdict,
+	WORKER_DISPOSITION_ADVICE_NOTE,
+	type WorkerDispositionAdvice,
+	workerDispositionGuidance,
+	workerHostVerdictView,
+} from "./worker-disposition.ts";
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import { normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
 import { attemptVerification } from "./worker-lane-projection.ts";
@@ -88,6 +99,8 @@ export interface WorkerAgentControlCoordinatorOptions {
 		Partial<Pick<WorkerDispatchScheduler, "getWaitState">>;
 	statusChanged(): void;
 	getWorkerClaimSnapshot?(laneId: string): WorkerClaimSnapshotPayload | undefined;
+	/** The goal state the recommended disposition reads; absent leaves uncovered requirements unknown. */
+	getGoalState?(): Pick<GoalState, "requirements"> | undefined;
 	getWorkerResult?(laneId: string): Pick<WorkerResultContract, "artifacts"> | undefined;
 	abortLane(laneId: string, reasonCode: string): void;
 	cancelLane(laneId: string, reasonCode: string): LaneRecord | undefined;
@@ -156,6 +169,10 @@ export function buildWorkerTerminalHandoffContent(args: {
 		systemOneSettled?: readonly string[];
 		ownerFollowUp?: string;
 	};
+	/** The host's judgment of the claim against the receipts; absent on a legacy claim. */
+	hostVerdict?: WorkerHostVerdict;
+	/** Advice for the receiving agent; the root decides. */
+	recommendedDisposition?: WorkerDispositionAdvice;
 }): string {
 	const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
 	// This content is stored and replayed against a durable mailbox record, so the fence nonce is fixed per
@@ -186,6 +203,13 @@ export function buildWorkerTerminalHandoffContent(args: {
 			? [`blockers (untrusted worker evidence):\n${fence(args.claim.blockers)}`]
 			: []),
 		...(args.claim ? workerClaimSettlementLines(args.claim, sanitize, source, nonce) : []),
+		...(args.hostVerdict ? [describeWorkerHostVerdict(args.hostVerdict)] : []),
+		...(args.recommendedDisposition
+			? [
+					describeWorkerDisposition(args.recommendedDisposition),
+					`${WORKER_DISPOSITION_ADVICE_NOTE} Next step: ${workerDispositionGuidance(args.recommendedDisposition, args.hostVerdict)}.`,
+				]
+			: []),
 		"CAVEMAN MODE - MANDATORY: terminal handoff means worker state was retained. Read the full transcript, verify the claim, then continue or replan within the admitted grant. Do not call this lost state or harness failure.",
 		"MANDATORY: read every transcript page before judging this result.",
 		`Start with delegate action="transcript" agentId="${args.childAgentId}" cursor=0.`,
@@ -1920,6 +1944,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const content = buildWorkerTerminalHandoffContent({
 			...args,
 			...(outputArtifact ? { outputArtifact } : {}),
+			...(snapshot?.claim?.hostVerdict ? { hostVerdict: snapshot.claim.hostVerdict } : {}),
+			...(snapshot?.claim ? { recommendedDisposition: deriveClaimOnlyWorkerDisposition(snapshot.claim) } : {}),
 			...(snapshot?.claim
 				? {
 						claim: {
@@ -2485,6 +2511,10 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			attempt?.result?.nextAction === "independent_verification_required"
 				? attemptVerification(this.options.getLifecycle().getTaskRuntimeSnapshot(), attempt)
 				: undefined;
+		const endedTask =
+			activity === "idle" && agent.status === "registered" && attempt?.result
+				? this.projectEndedTask(attempt)
+				: undefined;
 		return {
 			agentId: agent.agentId,
 			...(agent.parentAgentId ? { parentAgentId: agent.parentAgentId } : {}),
@@ -2514,10 +2544,33 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				(verification !== undefined && verification.verdict !== "accepted"))
 				? { awaitingParent: true as const }
 				: {}),
+			...(endedTask
+				? {
+						...(endedTask.hostVerdict ? { hostVerdict: endedTask.hostVerdict } : {}),
+						recommendedDisposition: endedTask.advice,
+					}
+				: {}),
 			controllable: !callerAgentId || this.agentIsInCallerSubtree(agent, callerAgentId),
 			createdAt: agent.createdAt,
 			updatedAt: agent.updatedAt,
 		};
+	}
+
+	/** The host verdict and advice for the claim an idle worker's latest task ended with; none without a claim. */
+	private projectEndedTask(
+		attempt: AttemptRuntimeState,
+	): { hostVerdict?: ReturnType<typeof workerHostVerdictView>; advice: WorkerDispositionAdvice } | undefined {
+		const laneId = attempt.dispatch.logicalLaneId ?? attempt.taskId;
+		const claim = this.options.getWorkerClaimSnapshot?.(laneId)?.claim;
+		if (!claim) return undefined;
+		const advice = deriveWorkerDispositionFromProjections({
+			claim,
+			snapshot: this.options.getLifecycle().getTaskRuntimeSnapshot(),
+			goal: this.options.getGoalState?.(),
+			laneId,
+			attemptId: attempt.attemptId,
+		});
+		return { ...(claim.hostVerdict ? { hostVerdict: workerHostVerdictView(claim.hostVerdict) } : {}), advice };
 	}
 
 	private assertIdempotencyTarget(targetAgentId: string, idempotencyKey: string): void {

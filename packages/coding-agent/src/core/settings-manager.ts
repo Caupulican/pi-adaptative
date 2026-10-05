@@ -74,6 +74,7 @@ import {
 	DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,
 	DEFAULT_WORKER_DELEGATION_MAX_USD,
 	DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
+	DEFAULT_WORKER_DELEGATION_REPORT_HANDSHAKE,
 	DEFAULT_WORKER_DELEGATION_THINKING,
 	DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
 	DEFAULT_WORKTREE_SYNC_GATE_TIMEOUT_MS,
@@ -3478,6 +3479,10 @@ export class SettingsManager {
 				typeof configured.writeEnabled === "boolean"
 					? configured.writeEnabled
 					: DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
+			reportHandshake:
+				typeof configured.reportHandshake === "boolean"
+					? configured.reportHandshake
+					: DEFAULT_WORKER_DELEGATION_REPORT_HANDSHAKE,
 			haltReportDeadlineMs: sanitizeIntegerSetting(
 				configured.haltReportDeadlineMs,
 				DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,

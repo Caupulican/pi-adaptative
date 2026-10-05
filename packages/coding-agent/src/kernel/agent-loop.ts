@@ -832,7 +832,9 @@ async function runLoop(
 		}
 
 		// Agent would stop here. Check for follow-up messages.
-		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
+		const followUpMessages =
+			(await config.getFollowUpMessages?.({ providerTurns: continuationState.providerTurns, providerTurnLimit })) ||
+			[];
 		if (followUpMessages.length > 0) {
 			// Set as pending so inner loop processes them
 			pendingMessages = followUpMessages;

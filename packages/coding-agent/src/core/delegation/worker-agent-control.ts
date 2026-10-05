@@ -22,6 +22,7 @@ import type {
 	SessionRootReplyWaitResult,
 } from "./session-root-mailbox.ts";
 import { WorkerConversationStore } from "./worker-conversation-store.ts";
+import type { WorkerDispositionAdvice, WorkerHostVerdictView } from "./worker-disposition.ts";
 import type { FanoutGroupReport } from "./worker-fanout.ts";
 import { readWorkerMailboxRecord, workerMailboxPath, writeWorkerMailboxRecord } from "./worker-mailbox-record.ts";
 import type { WorkerTaskSessionView } from "./worker-task-view.ts";
@@ -385,6 +386,10 @@ export interface WorkerAgentView {
 	 * because it is waiting on the parent, who answers with `follow_up` on the same agentId.
 	 */
 	awaitingParent?: true;
+	/** The host's judgment of the latest claim against its receipts; absent on a legacy claim or while a task runs. */
+	hostVerdict?: WorkerHostVerdictView;
+	/** Host advice on this worker's lifecycle once its task ended; the root decides, nothing acts on it. */
+	recommendedDisposition?: WorkerDispositionAdvice;
 	/** True when this caller may start/transcript/cancel the agent. Session-root lists are all true. */
 	controllable: boolean;
 	createdAt: string;

@@ -5,6 +5,7 @@ import type {
 	GateOutcome,
 	WorkerClaim,
 	WorkerCommandReceipt,
+	WorkerHostVerdict,
 	WorkerRequest,
 } from "../autonomy/contracts.ts";
 import {
@@ -37,6 +38,7 @@ import {
 	normalizeWorkerClaimForHost,
 	validateWorkerClaim,
 } from "./worker-claim.ts";
+import type { SubmittedWorkerReport } from "./worker-report.ts";
 
 export {
 	buildVerifierSystemPrompt,
@@ -65,6 +67,12 @@ export interface WorkerCompletion {
 	blockers?: readonly string[];
 	/** Commands the worker ran, as the host recorded them. */
 	commandReceipts?: readonly WorkerCommandReceipt[];
+	/** The report the worker submitted through `submit_report`, when it did. */
+	submittedReport?: SubmittedWorkerReport;
+	/** The host's check of that report against its receipts. */
+	hostVerdict?: WorkerHostVerdict;
+	/** The worker was asked for a report; set when it answered in text instead. */
+	reportRequested?: boolean;
 }
 
 export interface WorkerRunnerOptions {
@@ -408,6 +416,20 @@ function finalizeTerminalClaim(args: {
 	});
 }
 
+/** A report submitted through `submit_report` as the parsed envelope the claim assembly already consumes. */
+function parsedFromSubmittedReport(submitted: SubmittedWorkerReport): ParsedWorkerOutput {
+	return {
+		summary: submitted.summary,
+		status: submitted.status,
+		blockers: [...submitted.blockers],
+		inconclusive: [...submitted.inconclusive],
+		findings: submitted.findings.map((finding) => ({ summary: finding.summary, confidence: finding.confidence })),
+		actions: [],
+		...(submitted.verdict ? { verdict: submitted.verdict } : {}),
+		reasonCodes: [...submitted.reasonCodes],
+	};
+}
+
 export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRunOutcome> {
 	const now = options.now ?? (() => new Date().toISOString());
 	const baseClaim = {
@@ -554,7 +576,21 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 			costUsd,
 		});
 	}
-	const parsed = parseWorkerOutput(completion.text);
+	const parsed = completion.submittedReport
+		? parsedFromSubmittedReport(completion.submittedReport)
+		: parseWorkerOutput(completion.text);
+	// A worker that was asked for a checkable report and answered in text gets no host verdict worth the name.
+	const unverifiedAfterRequest: WorkerHostVerdict | undefined =
+		completion.reportRequested && !completion.submittedReport
+			? {
+					verdict: "unverified",
+					coveredRequirementIds: [],
+					missing: [],
+					reasonCodes: ["report_requested_text_answer"],
+					judgedBy: "code",
+					at: now(),
+				}
+			: undefined;
 	if (!parsed) {
 		const malformedRecord = extractMalformedWorkerRecord(completion.text);
 		if (malformedRecord) {
@@ -606,9 +642,10 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 			const claim: WorkerClaim = {
 				...completionBaseClaim,
 				status: blocked ? "blocked" : "completed",
-				outputFormat: "plain_text",
+				outputFormat: completion.reportRequested ? "unstructured_after_request" : "plain_text",
 				summary,
 				...(blocked ? { blockers: completionBlockers } : {}),
+				...(unverifiedAfterRequest ? { hostVerdict: unverifiedAfterRequest } : {}),
 			};
 			return finalizeTerminalClaim({
 				request: options.request,
@@ -752,7 +789,17 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		...baseClaim,
 		changedFiles,
 		status: parsed.status === "blocked" || allBlockers.length > 0 ? "blocked" : "completed",
+		outputFormat: completion.submittedReport
+			? "report"
+			: completion.reportRequested
+				? "unstructured_after_request"
+				: "structured",
 		summary: parsed.summary,
+		...(completion.submittedReport ? { report: completion.submittedReport.report } : {}),
+		...(completion.commandReceipts?.length ? { commandReceipts: completion.commandReceipts } : {}),
+		...((completion.hostVerdict ?? unverifiedAfterRequest)
+			? { hostVerdict: (completion.hostVerdict ?? unverifiedAfterRequest) as WorkerHostVerdict }
+			: {}),
 		...(allBlockers.length > 0 ? { blockers: allBlockers } : {}),
 		...(parsed.inconclusive.length > 0 ? { inconclusive: parsed.inconclusive } : {}),
 		...(evidence ? { evidence } : {}),
