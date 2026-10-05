@@ -163,6 +163,7 @@ try {
 		console.error(`Detection pass: ${report.statistics.total.sources} sources after pinned 50-token/cross-format normalization.`);
 	}
 	if (report?.duplicates?.length > 0) printCloneSummary(report);
-	if (reportDirectory) console.error(`Full jscpd evidence: ${join(reportDirectory, reportFilename)}`);
+	if (report && reportDirectory) console.error(`Full jscpd evidence: ${join(reportDirectory, reportFilename)}`);
+	else console.error("No readable clone report was loaded for this run.");
 	process.exitCode = 1;
 }

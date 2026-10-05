@@ -1,3 +1,5 @@
+import { readBoundedResponseText } from "../../providers/account-request.ts";
+import { ANTIGRAVITY_CLIENT_CONFIG } from "../../providers/antigravity-client-config.generated.ts";
 import {
 	ANTIGRAVITY_CATALOG_VERSION,
 	ANTIGRAVITY_PROVIDER,
@@ -7,6 +9,7 @@ import {
 import { awaitAuthorizationInput, parseAuthorizationInput } from "./authorization-input.ts";
 import { base64urlEncode, generatePKCE } from "./pkce.ts";
 import { OAuthRefreshCompletedError } from "./refresh-completed-error.ts";
+import { createOAuthRequestSignal } from "./request-signal.ts";
 import { parseOAuthTokenCredentials } from "./token-credentials.ts";
 import type { OAuthCredentials, OAuthProviderInterface } from "./types.ts";
 
@@ -22,15 +25,27 @@ async function exchangeToken(
 	previous?: OAuthCredentials,
 	signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
+	const requestSignal = createOAuthRequestSignal(signal);
 	const response = await fetch("https://oauth2.googleapis.com/token", {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		redirect: "error",
 		body: new URLSearchParams({ client_id: CLIENT_ID, client_secret: CLIENT_SECRET, ...fields }),
-		signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
+		signal: requestSignal,
 	});
-	if (!response.ok) throw new Error(`Antigravity token exchange failed (HTTP ${response.status})`);
-	const token: unknown = await response.json();
+	if (!response.ok) {
+		await response.body?.cancel().catch(() => {});
+		throw new Error(`Antigravity token exchange failed (HTTP ${response.status})`);
+	}
+	const raw = await readBoundedResponseText(response, 64 * 1024);
+	requestSignal.throwIfAborted();
+	if (raw === undefined) throw new Error("Antigravity token response exceeded the 64 KiB limit");
+	let token: unknown;
+	try {
+		token = JSON.parse(raw);
+	} catch {
+		throw new Error("Invalid Antigravity token response JSON");
+	}
 	signal?.throwIfAborted();
 	return {
 		...previous,
@@ -95,7 +110,10 @@ export const antigravityOAuthProvider: OAuthProviderInterface = {
 		return credentials.access;
 	},
 	needsRefresh(credentials) {
-		return credentials.catalogVersion !== ANTIGRAVITY_CATALOG_VERSION;
+		return (
+			credentials.catalogVersion !== ANTIGRAVITY_CATALOG_VERSION ||
+			credentials.clientVersion !== ANTIGRAVITY_CLIENT_CONFIG.version
+		);
 	},
 	modifyModels(models, credentials) {
 		const discovered = parseAntigravityModels(credentials.modelCatalog ?? {});

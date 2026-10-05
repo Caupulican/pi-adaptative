@@ -5,10 +5,13 @@
  * It is only intended for CLI use, not browser environments.
  */
 
-import type { Server } from "node:http";
+import type { createServer, Server } from "node:http";
+import { readBoundedResponseText } from "../../providers/account-request.ts";
+import { isRecord } from "../value-guards.ts";
 import { awaitAuthorizationInput, parseAuthorizationInput, raceAuthorizationInput } from "./authorization-input.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
 import { generatePKCE } from "./pkce.ts";
+import { createOAuthRequestSignal } from "./request-signal.ts";
 import { parseOAuthTokenCredentials } from "./token-credentials.ts";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface } from "./types.ts";
 
@@ -20,7 +23,7 @@ type CallbackServerInfo = {
 };
 
 type NodeApis = {
-	createServer: typeof import("node:http").createServer;
+	createServer: typeof createServer;
 };
 
 let nodeApis: NodeApis | null = null;
@@ -30,8 +33,8 @@ const decode = (s: string) => atob(s);
 const CLIENT_ID = decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
 const AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize";
 const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
-const CALLBACK_HOST = process.env.PI_OAUTH_CALLBACK_HOST || "127.0.0.1";
 const CALLBACK_PORT = 53692;
+const MAX_OAUTH_RESPONSE_BYTES = 64 * 1024;
 const CALLBACK_PATH = "/callback";
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`;
 const MANUAL_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
@@ -47,8 +50,8 @@ const SCOPES = ["org:create_api_key", ...INFERENCE_SCOPES].join(" ");
 
 class AnthropicOAuthRequestError extends Error {
 	readonly invalidScope: boolean;
-	constructor(status: number, invalidScope: boolean) {
-		super(`Anthropic OAuth request failed (HTTP ${status})`);
+	constructor(status: number, invalidScope: boolean, bodyTimedOut = false) {
+		super(`Anthropic OAuth request failed (HTTP ${status})${bodyTimedOut ? "; response body timed out" : ""}`);
 		this.invalidScope = invalidScope;
 	}
 }
@@ -91,6 +94,7 @@ function formatErrorDetails(error: unknown): string {
 
 async function startCallbackServer(expectedState: string): Promise<CallbackServerInfo> {
 	const { createServer } = await getNodeApis();
+	const callbackHost = process.env.PI_OAUTH_CALLBACK_HOST || "127.0.0.1";
 
 	return new Promise((resolve, reject) => {
 		let settleWait: ((value: { code: string; state: string } | Error | null) => void) | undefined;
@@ -145,10 +149,18 @@ async function startCallbackServer(expectedState: string): Promise<CallbackServe
 		});
 
 		server.on("error", (err) => {
+			// The startup promise is already settled after listen; terminal errors must also
+			// reach the authorization waiter, which retains them as values until it attaches.
+			settleWait?.(err);
 			reject(err);
 		});
+		server.on("close", () => {
+			const error = new Error("Anthropic OAuth callback server closed before authorization completed");
+			settleWait?.(error);
+			reject(error);
+		});
 
-		server.listen(CALLBACK_PORT, CALLBACK_HOST, () => {
+		server.listen(CALLBACK_PORT, callbackHost, () => {
 			resolve({
 				server,
 				redirectUri: REDIRECT_URI,
@@ -172,8 +184,7 @@ async function postJson(
 	signal?: AbortSignal,
 	inspectScopeError = false,
 ): Promise<unknown> {
-	signal?.throwIfAborted();
-	const requestSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
+	const requestSignal = createOAuthRequestSignal(signal);
 	let response: Response;
 	try {
 		response = await fetch(url, {
@@ -193,17 +204,21 @@ async function postJson(
 	signal?.throwIfAborted();
 	if (!response.ok) {
 		let invalidScope = false;
+		let bodyTimedOut = false;
 		if (inspectScopeError && response.status === 400) {
 			try {
-				const data: unknown = await response.json();
-				if (data && typeof data === "object" && "error" in data) {
+				const raw = await readBoundedResponseText(response, MAX_OAUTH_RESPONSE_BYTES);
+				const data: unknown = raw === undefined ? undefined : JSON.parse(raw);
+				if (isRecord(data)) {
 					const error = data.error;
-					invalidScope =
-						error === "invalid_scope" ||
-						(typeof error === "object" && error !== null && "type" in error && error.type === "invalid_scope");
+					invalidScope = error === "invalid_scope" || (isRecord(error) && error.type === "invalid_scope");
 				}
 			} catch {
 				// Unparseable response bodies never authorize the scope fallback.
+			}
+			if (requestSignal.aborted) {
+				invalidScope = false;
+				bodyTimedOut = true;
 			}
 		}
 		try {
@@ -212,17 +227,25 @@ async function postJson(
 			// Cleanup must not replace the HTTP status with untrusted transport diagnostics.
 		}
 		signal?.throwIfAborted();
-		throw new AnthropicOAuthRequestError(response.status, invalidScope);
+		throw new AnthropicOAuthRequestError(response.status, invalidScope, bodyTimedOut);
 	}
-	let data: unknown;
+	let raw: string | undefined;
 	try {
-		data = await response.json();
+		raw = await readBoundedResponseText(response, MAX_OAUTH_RESPONSE_BYTES);
 	} catch {
 		signal?.throwIfAborted();
-		throw new Error("Anthropic OAuth returned invalid JSON");
+		throw new Error(
+			requestSignal.aborted ? "Anthropic OAuth request timed out" : "Anthropic OAuth response read failed",
+		);
 	}
 	signal?.throwIfAborted();
-	return data;
+	if (requestSignal.aborted) throw new Error("Anthropic OAuth request timed out");
+	if (raw === undefined) throw new Error("Anthropic OAuth response exceeded the 64 KiB limit");
+	try {
+		return JSON.parse(raw) as unknown;
+	} catch {
+		throw new Error("Anthropic OAuth returned invalid JSON");
+	}
 }
 
 async function exchangeAuthorizationCode(

@@ -96,9 +96,8 @@ export function pickWorkflowConclusion(runs, sha) {
 
 /**
  * The release gate's verdict on main's own CI for the exact commit a release would start from.
- * main CI runs the tests each commit touched and carries a red run forward into the next commit,
- * so a green run on this commit means nothing earlier on main is still failing. A release built
- * on a red main ships known failures into the tag's full suite.
+ * Main CI runs the current build/check matrix and explicit provider regressions. A release built
+ * on a red main ships known failures into the tag's repeated quality gate.
  */
 export function mainCiGateDecision(runs, sha) {
 	const picked = pickWorkflowConclusion(runs, sha);

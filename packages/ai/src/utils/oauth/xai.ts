@@ -1,8 +1,10 @@
 /** xAI OAuth device-code flow. */
 
+import { readBoundedResponseText } from "../../providers/account-request.ts";
 import { XAI_CLI_PROXY_BASE_URL, XAI_CLI_VERSION_HEADERS, xaiCliHeaders } from "../../providers/xai-cli-identity.ts";
 import type { Api, Model } from "../../types.ts";
 import { pollOAuthDeviceCodeFlow } from "./device-code.ts";
+import { createOAuthRequestSignal } from "./request-signal.ts";
 import { parseOAuthTokenCredentials } from "./token-credentials.ts";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderInterface } from "./types.ts";
 
@@ -12,6 +14,7 @@ const XAI_SCOPE =
 const XAI_DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code";
 const XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token";
 const DEFAULT_TOKEN_LIFETIME_SECONDS = 3600;
+const MAX_OAUTH_RESPONSE_BYTES = 64 * 1024;
 const XAI_DEVICE_FLOW_HEADERS = {
 	...XAI_CLI_VERSION_HEADERS,
 	"x-grok-client-surface": "cli",
@@ -73,7 +76,7 @@ async function postForm(
 	options: { signal?: AbortSignal; headers?: Record<string, string> } = {},
 ): Promise<OAuthHttpResponse> {
 	const { signal } = options;
-	signal?.throwIfAborted();
+	const requestSignal = createOAuthRequestSignal(signal);
 	let response: Response;
 	try {
 		response = await fetch(url, {
@@ -85,21 +88,28 @@ async function postForm(
 			},
 			body: new URLSearchParams(fields),
 			redirect: "error",
-			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
+			signal: requestSignal,
 		});
 	} catch (error) {
 		if (signal?.aborted) throw new Error("Login cancelled");
 		throw error;
 	}
 
-	signal?.throwIfAborted();
 	let body: JsonObject;
 	try {
-		const parsed = (await response.json()) as unknown;
+		requestSignal.throwIfAborted();
+		const text = await readBoundedResponseText(response, MAX_OAUTH_RESPONSE_BYTES);
+		requestSignal.throwIfAborted();
+		if (text === undefined) throw new Error(`xAI OAuth response exceeded the 64 KiB limit (HTTP ${response.status})`);
+		const parsed = JSON.parse(text) as unknown;
 		body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as JsonObject) : {};
-	} catch {
+	} catch (error) {
 		if (signal?.aborted) throw new Error("Login cancelled");
+		requestSignal.throwIfAborted();
+		if (!(error instanceof SyntaxError)) throw error;
 		throw new Error(`xAI OAuth returned invalid JSON (HTTP ${response.status})`);
+	} finally {
+		await response.body?.cancel().catch(() => {});
 	}
 	signal?.throwIfAborted();
 	return { ok: response.ok, status: response.status, body };

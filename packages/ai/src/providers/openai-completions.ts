@@ -30,6 +30,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { parseProviderReportedCost } from "../usage.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
@@ -170,6 +171,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 
 	(async () => {
 		const output = createAssistantMessage(model);
+		let response: Response | undefined;
 
 		try {
 			const apiKey = getOpenAICompletionsApiKey(model, options?.apiKey);
@@ -194,10 +196,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				options?.onPayload,
 			);
 			const requestOptions = createRetryFreeRequestOptions(options);
-			const { data: openaiStream, response } = await retryProviderRequest(
+			const result = await retryProviderRequest(
 				() => client.chat.completions.create(params, requestOptions).withResponse(),
 				createProviderRetryOptions(options),
 			);
+			response = result.response;
+			const openaiStream = result.data;
 			await beginAssistantResponseStream(stream, output, response, model, options?.onResponse);
 
 			interface StreamingToolCallBlock extends ToolCall {
@@ -214,6 +218,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			let textBlock: TextContent | null = null;
 			let thinkingBlock: ThinkingContent | null = null;
 			let hasFinishReason = false;
+			const reportedCostState: { cost?: number } = {};
 			const toolCallBlocksByIndex = new Map<number, StreamingToolCallBlock>();
 			const toolCallBlocksById = new Map<string, StreamingToolCallBlock>();
 			const toolCallIdCounts = new Map<string, number>();
@@ -351,7 +356,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					output.responseModel ||= chunk.model;
 				}
 				if (chunk.usage) {
-					output.usage = parseChunkUsage(chunk.usage, model);
+					output.usage = parseChunkUsage(chunk.usage, model, reportedCostState);
 				}
 
 				const choice = (Array.isArray(chunk.choices) ? chunk.choices[0] : undefined) as
@@ -362,7 +367,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				// Fallback: some providers (e.g., Moonshot) return usage
 				// in choice.usage instead of the standard chunk.usage
 				if (!chunk.usage && (choice as any).usage) {
-					output.usage = parseChunkUsage((choice as any).usage, model);
+					output.usage = parseChunkUsage((choice as any).usage, model, reportedCostState);
 				}
 
 				// OpenRouter can normalize an upstream network_error to stop while retaining the
@@ -507,6 +512,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				},
 				scratchFields: ["index", "partialArgs", "partialArgsComplete", "streamIndex"],
 			});
+		} finally {
+			// A response hook may fail before the SDK iterator ever acquires the response body.
+			await response?.body?.cancel().catch(() => {});
 		}
 	})();
 
@@ -1131,6 +1139,7 @@ function parseChunkUsage(
 		cost?: number;
 	},
 	model: Model<"openai-completions">,
+	reportedCostState: { cost?: number },
 ): AssistantMessage["usage"] {
 	const promptTokens = rawUsage.prompt_tokens || 0;
 	const cacheReadTokens = rawUsage.prompt_tokens_details?.cached_tokens ?? rawUsage.prompt_cache_hit_tokens ?? 0;
@@ -1147,15 +1156,17 @@ function parseChunkUsage(
 	const input = Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens);
 	// OpenAI completion_tokens already includes reasoning_tokens.
 	const outputTokens = rawUsage.completion_tokens || 0;
+	const providerCost = parseProviderReportedCost(rawUsage.cost, reportedCostState.cost);
 	const usage: AssistantMessage["usage"] = {
 		input,
 		output: outputTokens,
 		cacheRead: cacheReadTokens,
 		cacheWrite: cacheWriteTokens,
 		totalTokens: input + outputTokens + cacheReadTokens + cacheWriteTokens,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: rawUsage.cost || 0 },
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: providerCost ?? 0 },
 	};
-	calculateCost(model, usage, { providerSuppliedTotal: Boolean(rawUsage.cost) });
+	calculateCost(model, usage, { providerSuppliedTotal: providerCost !== undefined });
+	reportedCostState.cost = providerCost;
 	return usage;
 }
 

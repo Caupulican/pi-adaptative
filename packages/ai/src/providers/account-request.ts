@@ -25,18 +25,24 @@ export async function readBoundedResponseText(response: Response, maxBytes: numb
 	const decoder = new TextDecoder();
 	let bytes = 0;
 	const parts: string[] = [];
-	while (true) {
-		const next = await reader.read();
-		if (next.done) break;
-		bytes += next.value.byteLength;
-		if (bytes > maxBytes) {
-			await reader.cancel().catch(() => {});
-			return undefined;
+	let complete = false;
+	try {
+		while (true) {
+			const next = await reader.read();
+			if (next.done) {
+				complete = true;
+				break;
+			}
+			bytes += next.value.byteLength;
+			if (bytes > maxBytes) return undefined;
+			parts.push(decoder.decode(next.value, { stream: true }));
 		}
-		parts.push(decoder.decode(next.value, { stream: true }));
+		parts.push(decoder.decode());
+		return parts.join("");
+	} finally {
+		if (!complete) await reader.cancel().catch(() => {});
+		reader.releaseLock();
 	}
-	parts.push(decoder.decode());
-	return parts.join("");
 }
 
 async function readBoundedText(response: Response, request: AccountJsonRequest): Promise<string> {

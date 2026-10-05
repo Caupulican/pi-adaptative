@@ -5,9 +5,12 @@ import {
 	antigravityHeaders,
 	antigravityObject,
 	antigravityThinkingBudget,
+	antigravityThinkingLevel,
 	resolveAntigravityProjectOnce,
 } from "../utils/antigravity.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
+import { readBoundedResponseText } from "./account-request.ts";
+import { parseAntigravityCredits } from "./antigravity-credits.ts";
 import {
 	buildGoogleSimpleOptions,
 	type GoogleGenAiClient,
@@ -86,24 +89,22 @@ async function* readAntigravityEvents(
 				}
 			}
 		}
-		if (raw.usageMetadata !== undefined) {
-			const usage = antigravityObject(raw.usageMetadata);
-			for (const key of [
-				"promptTokenCount",
-				"candidatesTokenCount",
-				"thoughtsTokenCount",
-				"cachedContentTokenCount",
-				"totalTokenCount",
-			]) {
-				if (usage[key] !== undefined && (!Number.isSafeInteger(usage[key]) || (usage[key] as number) < 0))
-					throw new Error("Invalid Antigravity token usage");
-			}
-			if (((usage.cachedContentTokenCount as number) ?? 0) > ((usage.promptTokenCount as number) ?? 0))
-				throw new Error("Invalid Antigravity cached usage");
-		}
 		return {
 			candidates: raw.candidates as GoogleGenAiResponse["candidates"],
+			// The shared Google stream owns usage validation, merging and accounting for every transport.
 			usageMetadata: raw.usageMetadata as GoogleGenAiResponse["usageMetadata"],
+			...(envelope.consumedCredits !== undefined || envelope.remainingCredits !== undefined
+				? {
+						usageCredits: {
+							...(envelope.consumedCredits !== undefined
+								? { consumedCredits: parseAntigravityCredits(envelope.consumedCredits) }
+								: {}),
+							...(envelope.remainingCredits !== undefined
+								? { remainingCredits: parseAntigravityCredits(envelope.remainingCredits) }
+								: {}),
+						},
+					}
+				: {}),
 			responseId:
 				typeof envelope.traceId === "string"
 					? envelope.traceId
@@ -152,6 +153,7 @@ async function generateAntigravityContent(
 	for (const [key, value] of Object.entries(antigravityHeaders(token))) headers.set(key, value);
 	headers.set("Accept", "text/event-stream");
 	const budget = model.reasoning ? antigravityThinkingBudget(model) : undefined;
+	const thinkingLevel = antigravityThinkingLevel(model);
 	// Thinking counts inside the output cap on every upstream (Anthropic rejects a cap at or below the
 	// budget): a fixed budget runs on top of the caller's cap for the answer, within the model's maximum.
 	const requestedOutput = config?.maxOutputTokens;
@@ -183,8 +185,12 @@ async function generateAntigravityContent(
 				generationConfig: {
 					temperature: config?.temperature,
 					maxOutputTokens,
-					// The model's own catalog budget, never pi's level mapping; no budget recorded, no config.
-					...(budget !== undefined ? { thinkingConfig: { thinkingBudget: budget, includeThoughts: true } } : {}),
+					// ProtoJSON accepts the native enum number. Never send a budget with an adaptive level.
+					...(thinkingLevel !== undefined
+						? { thinkingConfig: { thinkingLevel, includeThoughts: true } }
+						: budget !== undefined
+							? { thinkingConfig: { thinkingBudget: budget, includeThoughts: true } }
+							: {}),
 				},
 			},
 		}),
@@ -208,7 +214,7 @@ const MAX_ERROR_DETAIL_CHARS = 500;
  * classifier can tell a bad request from a model the account cannot use.
  */
 async function antigravityErrorDetail(response: Response): Promise<string> {
-	const raw = (await response.text().catch(() => "")).trim();
+	const raw = ((await readBoundedResponseText(response, 64 * 1024).catch(() => "")) ?? "").trim();
 	if (!raw) return "";
 	let detail = raw;
 	try {

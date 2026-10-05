@@ -1,4 +1,4 @@
-export type CredentialContentProjectionFailure = "accessor" | "cycle" | "collision";
+export type CredentialContentProjectionFailure = "accessor" | "cycle" | "collision" | "signed-content";
 
 export class CredentialContentProjectionError extends Error {
 	readonly failure: CredentialContentProjectionFailure;
@@ -13,13 +13,16 @@ export class CredentialContentProjectionError extends Error {
 class CredentialContentNormalizationRequired extends Error {}
 
 export type ContentPath = readonly (string | number)[];
+export type CredentialStringProjector = (path: ContentPath, text: string, parent: object, root: unknown) => string;
+export type CredentialKeyPreserver = (path: ContentPath, key: string, parent: object, root: unknown) => boolean;
 
 /** Projects decoded provider content without serializing secrets into quoted or escaped text. */
 export function redactCredentialContent<T>(
 	value: T,
 	redact: (text: string) => string,
-	preserveKey?: (path: ContentPath, key: string) => boolean,
+	preserveKey?: CredentialKeyPreserver,
 	preserveValue?: (path: ContentPath, value: object) => boolean,
+	projectString?: CredentialStringProjector,
 ): T {
 	const path: (string | number)[] = [];
 	const active = new WeakSet<object>();
@@ -90,12 +93,12 @@ export function redactCredentialContent<T>(
 				const keepKey =
 					typeof key !== "string" ||
 					(Array.isArray(frame.value) && typeof key === "string" && /^(0|[1-9]\d*)$/u.test(key)) ||
-					preserveKey?.(path, key) === true;
+					preserveKey?.(path, key, frame.value, value) === true;
 				const nextKey = typeof key === "string" && !keepKey ? redact(key) : key;
 				path.push(pathKey);
 				const child = descriptor.value;
 				if (typeof child === "string") {
-					const nextValue = redact(child);
+					const nextValue = projectString ? projectString(path, child, frame.value, value) : redact(child);
 					if (nextKey !== key || nextValue !== child) {
 						frame.changes ??= new Map();
 						frame.changes.set(key, { nextKey, nextValue });
@@ -166,6 +169,6 @@ export function redactCredentialContent<T>(
 		if (!(error instanceof CredentialContentNormalizationRequired)) throw error;
 		const normalized = JSON.stringify(value);
 		if (normalized === undefined) return undefined as T;
-		return redactCredentialContent(JSON.parse(normalized), redact, preserveKey, preserveValue);
+		return redactCredentialContent(JSON.parse(normalized), redact, preserveKey, preserveValue, projectString);
 	}
 }

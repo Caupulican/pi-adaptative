@@ -17,6 +17,21 @@ test("full matrix proof rejects each missing, duplicate, pending or skipped job 
 	assert.equal(hasCompleteCiMatrix(Array.from({ length: 2 }, () => complete[0])), false);
 });
 
+test("publication rejects omitted or non-successful provider regressions on either platform", () => {
+	const complete = completeCiJobs();
+	for (let index = 0; index < complete.length; index++) {
+		for (const conclusion of ["missing", "skipped", "failure", null]) {
+			const jobs = complete.map((job, position) => position !== index ? job : {
+				...job,
+				steps: conclusion === "missing"
+					? job.steps.filter((step) => step.name !== "Provider regressions")
+					: job.steps.map((step) => step.name === "Provider regressions" ? { ...step, conclusion } : step),
+			});
+			assert.equal(hasCompleteCiMatrix(jobs), false, `${index}/${conclusion}`);
+		}
+	}
+});
+
 test("proof binds successful runs to the requested SHA and examines the complete jobs from one run", () => {
 	const sha = "a".repeat(40);
 	const complete = completeCiJobs();

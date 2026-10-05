@@ -1,5 +1,6 @@
 import type {
 	AnthropicOAuthUsage,
+	AntigravityAccountUsage,
 	Api,
 	Model,
 	OpenAICodexLimitReachedType,
@@ -112,6 +113,7 @@ export function openAICodexCredentialHeaders(
 	return registry.authStorage.getOAuthRequestHeaders(OPENAI_CODEX_PROVIDER, accessToken);
 }
 export const ANTHROPIC_PROVIDER = "anthropic";
+export const ANTIGRAVITY_PROVIDER = "google-antigravity";
 export const OPENROUTER_PROVIDER = "openrouter";
 export const XAI_PROVIDER = "xai";
 
@@ -313,6 +315,68 @@ export function anthropicUsageSnapshot(
 			...(window.resetsAt !== undefined ? { resetsAt: window.resetsAt } : {}),
 		})),
 		...(locked?.lockedReason ? { limitReached: providerText(locked.lockedReason) } : {}),
+	};
+}
+
+export function antigravityUsageSnapshot(
+	usage: AntigravityAccountUsage,
+): Omit<AccountUsageSnapshot, "observedAt" | "source"> {
+	const windows: UsageWindow[] = [];
+	const details: string[] = [];
+	const limits: string[] = [];
+	if (usage.description) details.push(providerText(usage.description, 1000));
+	for (const group of usage.groups) {
+		const name = providerText(group.name, 80);
+		if (group.description) details.push(`${name}: ${providerText(group.description, 300)}`);
+		for (const bucket of group.buckets) {
+			const label = `${name} ${providerText(bucket.window || bucket.name, 80)}`;
+			if (bucket.disabled) limits.push(`${label} disabled`);
+			if (bucket.description && bucket.remaining.kind !== "fraction")
+				details.push(`${label}: ${providerText(bucket.description, 300)}`);
+			switch (bucket.remaining.kind) {
+				case "fraction":
+					windows.push({
+						label,
+						usedPercent: (1 - bucket.remaining.fraction) * 100,
+						...(bucket.resetsAt !== undefined ? { resetsAt: bucket.resetsAt } : {}),
+						...(bucket.description ? { detail: providerText(bucket.description, 300) } : {}),
+					});
+					if (bucket.remaining.fraction === 0 && !bucket.disabled) limits.push(`${label} exhausted`);
+					break;
+				case "amount":
+					details.push(
+						`${label}: ${bucket.remaining.amount.toLocaleString("en-US")} remaining${
+							bucket.resetsAt !== undefined ? `; resets ${new Date(bucket.resetsAt).toISOString()}` : ""
+						}`,
+					);
+					if (bucket.remaining.amount === 0 && !bucket.disabled) limits.push(`${label} exhausted`);
+					break;
+				case "unreported":
+					details.push(
+						`${label}: remaining quota unreported${
+							bucket.resetsAt !== undefined ? `; resets ${new Date(bucket.resetsAt).toISOString()}` : ""
+						}`,
+					);
+					break;
+				default: {
+					const exhaustive: never = bucket.remaining;
+					throw new Error(`Unknown Antigravity quota: ${exhaustive}`);
+				}
+			}
+		}
+	}
+	const balance = usage.credits
+		.map(
+			(credit) =>
+				`${providerText(credit.type)}: ${credit.amount.toLocaleString("en-US")} available (minimum ${credit.minimum} to use)`,
+		)
+		.join("; ");
+	return {
+		windows,
+		...(usage.plan ? { plan: providerText(usage.plan, 80) } : {}),
+		...(balance ? { balance } : {}),
+		...(limits.length > 0 ? { limitReached: limits.join("; ") } : {}),
+		...(details.length > 0 ? { details } : {}),
 	};
 }
 

@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- Displayed Antigravity account plan, shared model-group quotas, reset times and available credits in `/usage`.
+
+### Fixed
+
+- Preserved issued opaque OpenAI reasoning, Google thought and Anthropic thinking signatures through credential redaction and payload hooks, while retaining redaction of readable content. Signed Anthropic thinking that requires redaction now withholds the request instead of corrupting its signature.
+- Confined opaque image data and transport signals to their actual request protocol paths, so image-shaped tool arguments remain subject to credential redaction.
+- Preserved issued encrypted reasoning details in OpenAI-compatible Completions histories and payload hooks without exempting ordinary user or tool content.
+- Retained files, index and commits after failed release preparation or repair instead of destructively resetting the shared worktree; separated tag-promotion messages from artifact-publication status.
+- Required successful provider-regression evidence on Linux and Windows before release publication, including guards against omitted or skipped regression steps.
+
 ## [0.103.2] - 2026-10-05
 
 ### Changed

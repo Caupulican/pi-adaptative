@@ -25,8 +25,7 @@ permissions:
   contents: write
 
 jobs:
-  # Tag publication is what runs the complete Linux/Windows matrix. Ordinary
-  # main/PR commits do not.
+  # Repeat the Linux/Windows matrix on the exact tag before artifact publication.
   quality-gate:
     permissions:
       contents: read

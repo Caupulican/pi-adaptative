@@ -82,6 +82,9 @@ jobs:
         if: runner.os == 'Linux'
         run: npm run check
 
+      - name: Provider regressions
+        run: npm run check:provider-regressions
+
       # A contract test may change only alongside docs/doctrine.md (see contracts.json). The
       # pre-commit chain checks the staged tree; a push is checked over its commit range.
       - name: Contract-doctrine gate

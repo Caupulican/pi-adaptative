@@ -8,6 +8,7 @@ import type {
 	TextContent,
 	ThinkingContent,
 	ToolCall,
+	UsageDetails,
 } from "../types.ts";
 import { calculateCost } from "../usage.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
@@ -26,6 +27,7 @@ import {
 	retainThoughtSignature,
 	toGoogleGenAiThinkingConfig,
 } from "./google-shared.ts";
+import { type GoogleUsageMetadata, mergeGoogleUsage, projectGoogleUsage } from "./google-usage.ts";
 import {
 	applyProviderPayloadHook,
 	completeAssistantStream,
@@ -37,7 +39,10 @@ import {
 import { buildBaseOptions } from "./simple-options.ts";
 
 // The stream consumes wire fields, not SDK response getters or client implementation details.
-export type GoogleGenAiResponse = Pick<GenerateContentResponse, "candidates" | "usageMetadata" | "responseId">;
+export type GoogleGenAiResponse = Pick<GenerateContentResponse, "candidates" | "responseId"> & {
+	usageMetadata?: GoogleUsageMetadata;
+	usageCredits?: Pick<UsageDetails, "consumedCredits" | "remainingCredits">;
+};
 
 export interface GoogleGenAiClient {
 	models: {
@@ -88,7 +93,11 @@ export function streamGoogleGenAi<TApi extends GoogleApiType>(
 			let generatedToolCallCount = 0;
 			const blocks = output.content;
 			const blockIndex = () => blocks.length - 1;
+			let usageMetadata: GoogleUsageMetadata | undefined;
+			let usageCredits: GoogleGenAiResponse["usageCredits"];
 			for await (const chunk of googleStream) {
+				if (chunk.usageMetadata !== undefined) usageMetadata = mergeGoogleUsage(usageMetadata, chunk.usageMetadata);
+				if (chunk.usageCredits) usageCredits = { ...usageCredits, ...chunk.usageCredits };
 				output.responseId ||= chunk.responseId;
 				const candidate = chunk.candidates?.[0];
 				if (candidate?.content?.parts) {
@@ -183,23 +192,8 @@ export function streamGoogleGenAi<TApi extends GoogleApiType>(
 					}
 				}
 
-				if (chunk.usageMetadata) {
-					output.usage = {
-						input:
-							(chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
-						output:
-							(chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
-						cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
-						cacheWrite: 0,
-						totalTokens: chunk.usageMetadata.totalTokenCount || 0,
-						cost: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							total: 0,
-						},
-					};
+				if (chunk.usageMetadata !== undefined || chunk.usageCredits !== undefined) {
+					output.usage = projectGoogleUsage(usageMetadata ?? {}, usageCredits);
 					calculateCost(model, output.usage);
 				}
 			}

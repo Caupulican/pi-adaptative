@@ -1,15 +1,18 @@
+import { requestBoundedAccountJson } from "../providers/account-request.ts";
 import { ANTIGRAVITY_CLIENT_CONFIG } from "../providers/antigravity-client-config.generated.ts";
 import type { Model, ThinkingBudgets, ThinkingLevelMap } from "../types.ts";
+import { isRecord } from "./value-guards.ts";
 
 export const ANTIGRAVITY_PROVIDER = "google-antigravity";
 export const ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
-
-function isAntigravityObject(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
+export const ANTIGRAVITY_ACCOUNT_METADATA = {
+	ideType: "ANTIGRAVITY",
+	platform: "PLATFORM_UNSPECIFIED",
+	pluginType: "GEMINI",
+} as const;
 
 export function antigravityObject(value: unknown): Record<string, unknown> {
-	if (!isAntigravityObject(value)) throw new Error("Invalid Antigravity response");
+	if (!isRecord(value)) throw new Error("Invalid Antigravity response");
 	return value;
 }
 
@@ -34,38 +37,51 @@ export async function antigravityRequest(
 	body: unknown,
 	signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-	const response = await fetch(`${ANTIGRAVITY_ENDPOINT}/v1internal:${method}`, {
-		method: "POST",
-		headers: antigravityHeaders(token),
-		body: JSON.stringify(body),
-		redirect: "error",
-		signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
-	});
-	if (!response.ok) {
-		const error = new Error(`Antigravity ${method} failed (HTTP ${response.status})`);
-		(error as Error & { status?: number }).status = response.status;
-		throw error;
-	}
-	return antigravityObject(await response.json());
+	return antigravityObject(
+		await requestBoundedAccountJson({
+			url: `${ANTIGRAVITY_ENDPOINT}/v1internal:${method}`,
+			headers: new Headers(antigravityHeaders(token)),
+			init: { method: "POST", body: JSON.stringify(body) },
+			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
+			label: `Antigravity ${method}`,
+			createError: (message, status, retryAfterMs) => Object.assign(new Error(message), { status, retryAfterMs }),
+		}),
+	);
 }
 
 /**
- * An Antigravity model is a fixed thinking preset: its catalog `thinkingBudget` (-1 is dynamic) is
- * what separates the -low and -high variants of one model, and it is the only thinking configuration
- * every advertised model accepts (measured: Gemini rejects the MINIMAL level, GPT-OSS rejects any
- * level). The model therefore declares one thinking level, named from its budget, and the transport
- * sends the budget itself; pi's level scale is never mapped onto it.
+ * Catalog variants are fixed presets. Budget models (Gemini and GPT-OSS) send their own budget;
+ * adaptive models send the catalog level (1=LOW, 2=MEDIUM, 3=HIGH), not a caller-selected scale.
  */
-function antigravityThinkingPreset(budget: number): {
+function antigravityThinkingPreset(
+	preset: { kind: "budget"; value: number } | { kind: "adaptive"; value: 1 | 2 | 3 },
+	id: string,
+): {
 	level: "low" | "medium" | "high";
 	thinkingLevelMap: ThinkingLevelMap;
-	thinkingBudgets: ThinkingBudgets;
+	thinkingBudgets?: ThinkingBudgets;
 } {
-	const level = budget < 0 || budget >= 8192 ? "high" : budget >= 2048 ? "medium" : "low";
+	// Variant identity is authoritative: GPT-OSS Medium has an 8192-token budget.
+	const namedLevel = id.endsWith("-low")
+		? "low"
+		: id.endsWith("-medium")
+			? "medium"
+			: id.endsWith("-high")
+				? "high"
+				: undefined;
+	const level =
+		preset.kind === "adaptive"
+			? preset.value === 1
+				? "low"
+				: preset.value === 2
+					? "medium"
+					: "high"
+			: (namedLevel ??
+				(preset.value < 0 || preset.value >= 8192 ? "high" : preset.value >= 2048 ? "medium" : "low"));
 	return {
 		level,
 		thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null, [level]: level },
-		thinkingBudgets: { [level]: budget },
+		...(preset.kind === "budget" ? { thinkingBudgets: { [level]: preset.value } } : {}),
 	};
 }
 
@@ -76,7 +92,7 @@ function antigravityUpstream(backend: string): "google" | "anthropic" | "openai"
 
 /** The backend field worth persisting from a catalog entry: which provider serves the model. */
 function antigravityBackend(entry: unknown): { apiProvider?: string } {
-	const provider = isAntigravityObject(entry) ? entry.apiProvider : undefined;
+	const provider = isRecord(entry) ? entry.apiProvider : undefined;
 	return typeof provider === "string" && /^API_PROVIDER_[A-Z_]{1,60}$/.test(provider) ? { apiProvider: provider } : {};
 }
 
@@ -88,12 +104,27 @@ export function antigravityThinkingBudget(model: Model<"google-antigravity">): n
 	return values.length === 1 ? values[0] : undefined;
 }
 
+export function antigravityThinkingLevel(model: Model<"google-antigravity">): 1 | 2 | 3 | undefined {
+	if (!model.reasoning || model.thinkingBudgets || !model.thinkingLevelMap) return undefined;
+	if (Object.values(model.thinkingLevelMap).filter((value) => value != null).length !== 1) return undefined;
+	switch (model.defaultThinkingLevel) {
+		case "low":
+			return 1;
+		case "medium":
+			return 2;
+		case "high":
+			return 3;
+		default:
+			return undefined;
+	}
+}
+
 export function parseAntigravityModels(raw: unknown): Model<"google-antigravity">[] {
 	const entries = Object.entries(antigravityObject(raw));
 	if (entries.length > 200) throw new Error("Antigravity model catalog exceeds its size limit");
 	const models: Model<"google-antigravity">[] = [];
 	for (const [id, value] of entries) {
-		if (!isAntigravityObject(value)) continue;
+		if (!isRecord(value)) continue;
 		const info = value;
 		// This adapter exposes chat models, not internal completion or image-generation routes.
 		if (!/^(?:gemini|claude|gpt|o[1-9])-[a-z0-9.-]+$/.test(id) || id.includes("image") || info.isInternal) continue;
@@ -106,7 +137,19 @@ export function parseAntigravityModels(raw: unknown): Model<"google-antigravity"
 			reasoning && Number.isSafeInteger(info.thinkingBudget) && (info.thinkingBudget as number) >= -1
 				? (info.thinkingBudget as number)
 				: undefined;
-		const preset = budget !== undefined ? antigravityThinkingPreset(budget) : undefined;
+		const nativeLevel = info.thinkingLevel;
+		const adaptiveLevel =
+			reasoning &&
+			info.supportsAdaptiveThinking === true &&
+			(nativeLevel === 1 || nativeLevel === 2 || nativeLevel === 3)
+				? nativeLevel
+				: undefined;
+		const preset =
+			adaptiveLevel !== undefined
+				? antigravityThinkingPreset({ kind: "adaptive", value: adaptiveLevel }, id)
+				: budget !== undefined
+					? antigravityThinkingPreset({ kind: "budget", value: budget }, id)
+					: undefined;
 		// The catalog names the backend; only Gemini reads the JSON-schema tool field.
 		const backend = typeof info.apiProvider === "string" ? info.apiProvider : undefined;
 		models.push({
@@ -120,7 +163,7 @@ export function parseAntigravityModels(raw: unknown): Model<"google-antigravity"
 				? {
 						defaultThinkingLevel: preset.level,
 						thinkingLevelMap: preset.thinkingLevelMap,
-						thinkingBudgets: preset.thinkingBudgets,
+						...(preset.thinkingBudgets ? { thinkingBudgets: preset.thinkingBudgets } : {}),
 					}
 				: {}),
 			input: info.supportsImages === true ? ["text", "image"] : ["text"],
@@ -138,20 +181,61 @@ export function parseAntigravityModels(raw: unknown): Model<"google-antigravity"
  * startup, not per request; a refreshed token is a new key and resolves again. Concurrent first
  * calls share one lookup, and a failed lookup is not kept.
  */
-const resolvedProjects = new Map<string, Promise<string>>();
+interface ProjectLookup {
+	promise: Promise<string>;
+	controller: AbortController;
+	waiters: number;
+	settled: boolean;
+}
+const resolvedProjects = new Map<string, ProjectLookup>();
 const MAX_RESOLVED_PROJECTS = 16;
 
-export function resolveAntigravityProjectOnce(token: string, signal?: AbortSignal): Promise<string> {
-	const known = resolvedProjects.get(token);
-	if (known) return known;
-	const lookup = resolveAntigravityProject(token, signal);
-	resolvedProjects.set(token, lookup);
-	if (resolvedProjects.size > MAX_RESOLVED_PROJECTS)
-		resolvedProjects.delete(resolvedProjects.keys().next().value as string);
-	lookup.catch(() => {
-		if (resolvedProjects.get(token) === lookup) resolvedProjects.delete(token);
+export async function resolveAntigravityProjectOnce(token: string, signal?: AbortSignal): Promise<string> {
+	signal?.throwIfAborted();
+	let lookup = resolvedProjects.get(token);
+	if (!lookup) {
+		const controller = new AbortController();
+		lookup = { promise: resolveAntigravityProject(token, controller.signal), controller, waiters: 0, settled: false };
+		const created = lookup;
+		resolvedProjects.set(token, created);
+		if (resolvedProjects.size > MAX_RESOLVED_PROJECTS)
+			resolvedProjects.delete(resolvedProjects.keys().next().value as string);
+		created.promise.then(
+			() => {
+				created.settled = true;
+			},
+			() => {
+				created.settled = true;
+				if (resolvedProjects.get(token) === created) resolvedProjects.delete(token);
+			},
+		);
+	}
+	const shared = lookup;
+	return new Promise<string>((resolve, reject) => {
+		let finished = false;
+		const finish = (result: { project: string } | { error: unknown }) => {
+			if (finished) return;
+			finished = true;
+			signal?.removeEventListener("abort", onAbort);
+			shared.waiters--;
+			if ("project" in result) resolve(result.project);
+			else reject(result.error);
+		};
+		const onAbort = () => {
+			finish({ error: signal?.reason });
+			if (shared.waiters === 0 && !shared.settled) {
+				if (resolvedProjects.get(token) === shared) resolvedProjects.delete(token);
+				shared.controller.abort();
+			}
+		};
+		shared.waiters++;
+		signal?.addEventListener("abort", onAbort, { once: true });
+		shared.promise.then(
+			(project) => finish({ project }),
+			(error: unknown) => finish({ error }),
+		);
+		if (signal?.aborted) onAbort();
 	});
-	return lookup;
 }
 
 export async function resolveAntigravityProject(token: string, signal?: AbortSignal): Promise<string> {
@@ -159,10 +243,14 @@ export async function resolveAntigravityProject(token: string, signal?: AbortSig
 		token,
 		"loadCodeAssist",
 		{
-			metadata: { ideType: "ANTIGRAVITY", platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" },
+			metadata: ANTIGRAVITY_ACCOUNT_METADATA,
 		},
 		signal,
 	);
+	return antigravityProjectId(account);
+}
+
+export function antigravityProjectId(account: Record<string, unknown>): string {
 	const project = account.cloudaicompanionProject;
 	const projectId = typeof project === "string" ? project : project ? antigravityObject(project).id : undefined;
 	if (typeof projectId !== "string" || !projectId.trim()) {
@@ -176,14 +264,15 @@ export async function resolveAntigravityProject(token: string, signal?: AbortSig
 /**
  * The shape of the model catalog this adapter stores. Raise it whenever discovery starts persisting a
  * field the adapter reads (thinking budgets and backends are version 2): a stored catalog of an older
- * version is refreshed instead of silently running models without what it lacks.
+ * version is refreshed instead of silently running models without what it lacks. Version 3 adds
+ * adaptive thinking levels and the discovery client's version.
  */
-export const ANTIGRAVITY_CATALOG_VERSION = 2;
+export const ANTIGRAVITY_CATALOG_VERSION = 3;
 
 export async function discoverAntigravityAccount(
 	token: string,
 	signal?: AbortSignal,
-): Promise<{ projectId: string; modelCatalog: unknown; catalogVersion: number }> {
+): Promise<{ projectId: string; modelCatalog: unknown; catalogVersion: number; clientVersion: string }> {
 	const projectId = await resolveAntigravityProject(token, signal);
 	const response = await antigravityRequest(token, "fetchAvailableModels", { project: projectId }, signal);
 	if (!Array.isArray(response.agentModelSorts) || response.agentModelSorts.length > 20)
@@ -216,11 +305,19 @@ export async function discoverAntigravityAccount(
 				...(antigravityThinkingBudget(model) !== undefined
 					? { thinkingBudget: antigravityThinkingBudget(model) }
 					: {}),
+				...(antigravityThinkingLevel(model) !== undefined
+					? { thinkingLevel: antigravityThinkingLevel(model), supportsAdaptiveThinking: true }
+					: {}),
 				...(response.models && typeof antigravityObject(response.models)[model.id] === "object"
 					? antigravityBackend(antigravityObject(response.models)[model.id])
 					: {}),
 			},
 		]),
 	);
-	return { projectId, modelCatalog, catalogVersion: ANTIGRAVITY_CATALOG_VERSION };
+	return {
+		projectId,
+		modelCatalog,
+		catalogVersion: ANTIGRAVITY_CATALOG_VERSION,
+		clientVersion: ANTIGRAVITY_CLIENT_CONFIG.version,
+	};
 }

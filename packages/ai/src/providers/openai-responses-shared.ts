@@ -29,6 +29,7 @@ import type {
 	ToolCall,
 	Usage,
 } from "../types.ts";
+import { parseProviderReportedCost } from "../usage.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
@@ -434,6 +435,7 @@ export async function processResponsesStream<TApi extends Api>(
 	let currentReasoningSummaryPartText = "";
 	let sawTerminalResponseEvent = false;
 	let committedSuccessfulTerminal = false;
+	let reportedCost: number | undefined;
 	const reasoningBlocksById = new Map<string, ThinkingContent>();
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
@@ -662,6 +664,10 @@ export async function processResponsesStream<TApi extends Api>(
 		if (response?.id) {
 			output.responseId = response.id;
 		}
+		const providerCost = parseProviderReportedCost(
+			(response.usage as { cost?: unknown } | undefined)?.cost,
+			reportedCost,
+		);
 		if (response?.usage) {
 			const inputDetails = response.usage.input_tokens_details as InputTokenDetailsWithOrchestration | undefined;
 			const outputDetails = response.usage.output_tokens_details as OutputTokenDetailsWithOrchestration | undefined;
@@ -679,7 +685,6 @@ export async function processResponsesStream<TApi extends Api>(
 				cacheReadTokens += orchestrationInputCachedTokens;
 				outputTokens += orchestrationOutputTokens;
 			}
-			const providerCost = (response.usage as { cost?: number }).cost ?? 0;
 			output.usage = {
 				// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input.
 				// Sakana Fugu Ultra also reports billable orchestration tokens in token details fields.
@@ -689,12 +694,12 @@ export async function processResponsesStream<TApi extends Api>(
 				cacheRead: cacheReadTokens,
 				cacheWrite: cacheWriteTokens,
 				totalTokens,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: providerCost },
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: providerCost ?? 0 },
 			};
 		}
 		calculateCost(model, output.usage, {
 			// response.usage is absent on some streams; this call sits outside the guard above.
-			providerSuppliedTotal: Boolean((response.usage as { cost?: number } | undefined)?.cost),
+			providerSuppliedTotal: providerCost !== undefined,
 		});
 		applyFuguUltraPricing(model, output.usage);
 		if (options?.applyServiceTierPricing) {
@@ -702,7 +707,7 @@ export async function processResponsesStream<TApi extends Api>(
 				? options.resolveServiceTier(response?.service_tier, options.serviceTier)
 				: (response?.service_tier ?? options.serviceTier);
 			options.applyServiceTierPricing(output.usage, serviceTier);
-			if (output.usage.cost.estimate === "base-rates") {
+			if (output.usage.cost.estimate === "base-rates" && providerCost === undefined) {
 				output.diagnostics = [
 					...(output.diagnostics ?? []),
 					{
@@ -713,6 +718,12 @@ export async function processResponsesStream<TApi extends Api>(
 				];
 			}
 		}
+		// Model/tier estimators still price the components; an actual reported total wins last.
+		if (providerCost !== undefined) {
+			output.usage.cost.total = providerCost;
+			delete output.usage.cost.estimate;
+		}
+		reportedCost = providerCost;
 		applyResponseOutput(response.output ?? []);
 		// Map status to stop reason. An incomplete response is a length stop only when the output cap
 		// ended it; any other reason (a content filter) ended the answer early and is reported as such.

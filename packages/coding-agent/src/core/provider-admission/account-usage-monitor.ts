@@ -1,6 +1,8 @@
 import {
 	AnthropicAccountError,
+	AntigravityAccountError,
 	getAnthropicOAuthUsage,
+	getAntigravityAccountUsage,
 	getOpenAICodexUsage,
 	getOpenRouterAccountUsage,
 	getXaiAccountUsage,
@@ -14,8 +16,10 @@ import {
 	type AccountUsageRequest,
 	type AccountUsageSnapshot,
 	ANTHROPIC_PROVIDER,
+	ANTIGRAVITY_PROVIDER,
 	type AuthenticatedAccount,
 	anthropicUsageSnapshot,
+	antigravityUsageSnapshot,
 	codexUsageSnapshot,
 	OPENAI_CODEX_PROVIDER,
 	OPENROUTER_PROVIDER,
@@ -89,6 +93,28 @@ export function createAnthropicUsageAdapter(fetchImpl?: typeof fetch): AccountUs
 	};
 }
 
+export function createAntigravityUsageAdapter(fetchImpl?: typeof fetch): AccountUsageAdapter {
+	return {
+		provider: ANTIGRAVITY_PROVIDER,
+		request(account, registry) {
+			if (!isSubscriptionLogin(account)) return undefined;
+			return {
+				account,
+				run: async (signal, isCurrent) => {
+					const accessToken = await registry.getApiKeyForProvider(ANTIGRAVITY_PROVIDER);
+					if (!isCurrent()) return undefined;
+					const credential = registry.authStorage.get(ANTIGRAVITY_PROVIDER);
+					if (!accessToken || credential?.type !== "oauth" || credential.access !== accessToken)
+						throw new AccountCredentialsUnavailableError();
+					return antigravityUsageSnapshot(
+						await getAntigravityAccountUsage({ accessToken, signal, ...(fetchImpl ? { fetch: fetchImpl } : {}) }),
+					);
+				},
+			};
+		},
+	};
+}
+
 export function createOpenRouterUsageAdapter(fetchImpl?: typeof fetch): AccountUsageAdapter {
 	return {
 		provider: OPENROUTER_PROVIDER,
@@ -151,7 +177,8 @@ export function describeAccountFailure(error: unknown): string {
 		error instanceof OpenAICodexAccountError ||
 		error instanceof AnthropicAccountError ||
 		error instanceof OpenRouterAccountError ||
-		error instanceof XaiAccountError
+		error instanceof XaiAccountError ||
+		error instanceof AntigravityAccountError
 	) {
 		const status = error.status;
 		if (status === undefined || status < 400) return "unreadable response";
@@ -182,7 +209,8 @@ function retryAfterOf(error: unknown): number | undefined {
 		error instanceof OpenAICodexAccountError ||
 		error instanceof AnthropicAccountError ||
 		error instanceof OpenRouterAccountError ||
-		error instanceof XaiAccountError;
+		error instanceof XaiAccountError ||
+		error instanceof AntigravityAccountError;
 	return isAccountError && typeof error.retryAfterMs === "number" && error.retryAfterMs > 0
 		? error.retryAfterMs
 		: undefined;
@@ -205,6 +233,7 @@ export class AccountUsageMonitor {
 		this.adapters = options.adapters ?? [
 			createOpenAICodexUsageAdapter(),
 			createAnthropicUsageAdapter(),
+			createAntigravityUsageAdapter(),
 			createOpenRouterUsageAdapter(),
 			createXaiUsageAdapter(),
 		];

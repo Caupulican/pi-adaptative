@@ -362,14 +362,55 @@ export interface ToolCall {
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
 }
 
+export interface UsageCredit {
+	type: string;
+	amount: number;
+	minimum: number;
+}
+
+export interface UsageModalityTokens {
+	modality?: string;
+	tokens: number;
+}
+
+export interface UsageBillableUnits {
+	textCount?: number;
+	imageCount?: number;
+	videoDurationSeconds?: number;
+	audioDurationSeconds?: number;
+}
+
+/** Provider-supplied breakdowns, not additional tokens or dollar-denominated costs. */
+export interface UsageDetails {
+	promptTokens?: number;
+	answerTokens?: number;
+	reasoningTokens?: number;
+	toolPromptTokens?: number;
+	promptModalities?: UsageModalityTokens[];
+	cacheModalities?: UsageModalityTokens[];
+	answerModalities?: UsageModalityTokens[];
+	toolPromptModalities?: UsageModalityTokens[];
+	trafficType?: string;
+	billablePrompt?: UsageBillableUnits;
+	billableCache?: UsageBillableUnits;
+	toolCalls?: { functionName?: string; count: number; serverExecuted: boolean }[];
+	consumedCredits?: UsageCredit[];
+	remainingCredits?: UsageCredit[];
+	cacheWriteWindows?: { ttlSeconds: number; tokens: number }[];
+	serverToolRequests?: { webSearch?: number; webFetch?: number };
+	serviceTier?: string;
+	inferenceRegion?: string;
+}
+
 export interface Usage {
 	input: number;
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
 	totalTokens: number;
+	details?: UsageDetails;
 	cost: {
-		/** A tier with no published dollar rates uses base model rates, not the actual premium. */
+		/** A tier with no published dollar rates uses base model rates, not its tier-specific price. */
 		estimate?: "base-rates";
 		input: number;
 		output: number;

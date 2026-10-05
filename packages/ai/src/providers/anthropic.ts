@@ -7,7 +7,6 @@ import type {
 	RawMessageStreamEvent,
 	ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages.js";
-import { calculateCost } from "../models.ts";
 import {
 	isToolSchemaSearchDetails,
 	measureToolSchemaDisclosureRequest,
@@ -44,6 +43,7 @@ import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 
 import { ANTHROPIC_MESSAGES_USER_AGENT } from "./anthropic-identity.ts";
+import { AnthropicUsageAccumulator } from "./anthropic-usage.ts";
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import {
@@ -283,15 +283,14 @@ const ANTHROPIC_MESSAGE_EVENTS: ReadonlySet<string> = new Set([
 ]);
 
 function flushSseEvent(state: SseDecoderState): ServerSentEvent | null {
-	if (!state.event && state.data.length === 0) {
-		return null;
-	}
-
-	const event: ServerSentEvent = {
-		event: state.event,
-		data: state.data.join("\n"),
-		raw: [...state.raw],
-	};
+	const event: ServerSentEvent | null =
+		!state.event && state.data.length === 0
+			? null
+			: {
+					event: state.event,
+					data: state.data.join("\n"),
+					raw: [...state.raw],
+				};
 	state.event = null;
 	state.data = [];
 	state.raw = [];
@@ -329,7 +328,6 @@ function decodeSseLine(line: string, state: SseDecoderState): ServerSentEvent | 
 	return null;
 }
 
-const MAX_SSE_LINE_CHARS = 64 * 1024 * 1024;
 const MAX_SSE_EVENT_CHARS = 8 * 1024 * 1024;
 
 async function* iterateSseMessages(
@@ -339,7 +337,8 @@ async function* iterateSseMessages(
 	const reader = body.getReader();
 	const decoder = new TextDecoder();
 	const state: SseDecoderState = { event: null, data: [], raw: [], chars: 0 };
-	const lines = new StreamingLineDecoder(MAX_SSE_LINE_CHARS);
+	const lines = new StreamingLineDecoder(MAX_SSE_EVENT_CHARS);
+	let complete = false;
 
 	try {
 		while (true) {
@@ -349,6 +348,7 @@ async function* iterateSseMessages(
 
 			const { value, done } = await reader.read();
 			if (done) {
+				complete = true;
 				break;
 			}
 
@@ -373,6 +373,7 @@ async function* iterateSseMessages(
 			yield trailingEvent;
 		}
 	} finally {
+		if (!complete) await reader.cancel().catch(() => {});
 		reader.releaseLock();
 	}
 }
@@ -390,7 +391,7 @@ async function* iterateAnthropicEvents(
 
 	for await (const sse of iterateSseMessages(response.body, signal)) {
 		if (sse.event === "error") {
-			throw new Error(sse.data);
+			throw new Error(sse.data.slice(0, 500));
 		}
 
 		if (!ANTHROPIC_MESSAGE_EVENTS.has(sse.event ?? "")) {
@@ -399,22 +400,30 @@ async function* iterateAnthropicEvents(
 
 		try {
 			const event = parseJsonWithRepair<RawMessageStreamEvent>(sse.data);
+			if (event.type !== sse.event) throw new Error("Anthropic SSE event discriminator mismatch");
+			if (sawMessageEnd || (!sawMessageStart && event.type !== "message_start"))
+				throw new Error("Anthropic stream has out-of-order message boundaries");
 			if (event.type === "message_start") {
+				if (sawMessageStart) throw new Error("Anthropic stream repeated message_start");
 				sawMessageStart = true;
 			} else if (event.type === "message_stop") {
 				sawMessageEnd = true;
 			}
 			yield event;
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			const message = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+			const raw = sse.raw
+				.slice(0, 4)
+				.map((line) => line.slice(0, 125))
+				.join("\\n");
 			throw new Error(
-				`Could not parse Anthropic SSE event ${sse.event}: ${message}; data=${sse.data}; raw=${sse.raw.join("\\n")}`,
+				`Could not parse Anthropic SSE event ${sse.event}: ${message}; data=${sse.data.slice(0, 500)}; raw=${raw}`,
 			);
 		}
 	}
 
-	if (sawMessageStart && !sawMessageEnd) {
-		throw new Error("Anthropic stream ended before message_stop");
+	if (!sawMessageStart || !sawMessageEnd) {
+		throw new Error("Anthropic stream ended without a complete message_start/message_stop sequence");
 	}
 }
 
@@ -515,7 +524,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 
 	(async () => {
 		const output = createAssistantMessage(model);
+		const usageAccumulator = new AnthropicUsageAccumulator(model, output.usage);
 		const disclosureStartedAt = Date.now();
+		let response: Response | undefined;
 
 		try {
 			let client: Anthropic;
@@ -582,7 +593,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					retryOptions,
 				);
 
-			const response = await executeWithAuthRecovery(model.provider, options, async (replacementKey) => {
+			response = await executeWithAuthRecovery(model.provider, options, async (replacementKey) => {
 				if (replacementKey) {
 					apiKey = replacementKey;
 					const created = initClient(apiKey);
@@ -607,38 +618,39 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			const blocks = output.content as Block[];
 			const startBlock = (block: Block, type: "text_start" | "thinking_start" | "toolcall_start"): void => {
 				output.content.push(block);
-				stream.push({ type, contentIndex: output.content.length - 1, partial: output });
+				const contentIndex = output.content.length - 1;
+				stream.push({ type, contentIndex, partial: output });
+				// JSON/proxy consumers reconstruct content from deltas, not start-event snapshots.
+				if (block.type !== "toolCall") {
+					const delta = block.type === "text" ? block.text : block.thinking;
+					if (delta)
+						stream.push({
+							type: block.type === "text" ? "text_delta" : "thinking_delta",
+							contentIndex,
+							delta,
+							partial: output,
+						});
+				}
 			};
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
-					// Capture initial token usage from message_start event
-					// This ensures we have input token counts even if the stream is aborted early
-					output.usage.input = event.message.usage.input_tokens || 0;
-					output.usage.output = event.message.usage.output_tokens || 0;
-					output.usage.cacheRead = event.message.usage.cache_read_input_tokens || 0;
-					output.usage.cacheWrite = event.message.usage.cache_creation_input_tokens || 0;
-					// Anthropic doesn't provide total_tokens, compute from components
-					output.usage.totalTokens =
-						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-					if ((event.message.usage as any).cost !== undefined) {
-						output.usage.cost.total = (event.message.usage as any).cost || 0;
-					}
-					calculateCost(model, output.usage);
+					// Initial input/cache counts remain available if this response aborts early.
+					usageAccumulator.update(event.message.usage);
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "text") {
 						const block: Block = {
 							type: "text",
-							text: "",
+							text: event.content_block.text,
 							index: event.index,
 						};
 						startBlock(block, "text_start");
 					} else if (event.content_block.type === "thinking") {
 						const block: Block = {
 							type: "thinking",
-							thinking: "",
-							thinkingSignature: "",
+							thinking: event.content_block.thinking,
+							thinkingSignature: event.content_block.signature,
 							index: event.index,
 						};
 						startBlock(block, "thinking_start");
@@ -704,8 +716,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						const index = blocks.findIndex((b) => b.index === event.index);
 						const block = blocks[index];
 						if (block && block.type === "thinking") {
-							block.thinkingSignature = block.thinkingSignature || "";
-							block.thinkingSignature += event.delta.signature;
+							// The native CLI and SDK treat this as the authoritative signature, not a fragment.
+							block.thinkingSignature = event.delta.signature;
 						}
 					}
 				} else if (event.type === "content_block_stop") {
@@ -730,6 +742,14 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						} else if (block.type === "toolCall") {
 							if (block.partialJson.length > 0) {
 								block.arguments = parseStreamingJson(block.partialJson);
+							} else if (Object.keys(block.arguments).length > 0) {
+								// A seed-only input has no JSON fragments; publish it once before toolcall_end.
+								stream.push({
+									type: "toolcall_delta",
+									contentIndex: index,
+									delta: JSON.stringify(block.arguments),
+									partial: output,
+								});
 							}
 							// Finalize in-place and strip the scratch buffer so replay only
 							// carries parsed arguments.
@@ -746,30 +766,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					if (event.delta.stop_reason) {
 						output.stopReason = mapAnthropicStopReason(event.delta.stop_reason);
 					}
-					// Only update usage fields if present (not null).
-					// Preserves input_tokens from message_start when proxies omit it in message_delta.
-					if (event.usage) {
-						if (event.usage.input_tokens != null) {
-							output.usage.input = event.usage.input_tokens;
-						}
-						if (event.usage.output_tokens != null) {
-							output.usage.output = event.usage.output_tokens;
-						}
-						if (event.usage.cache_read_input_tokens != null) {
-							output.usage.cacheRead = event.usage.cache_read_input_tokens;
-						}
-						if (event.usage.cache_creation_input_tokens != null) {
-							output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
-						}
-						const providerCost = (event.usage as { cost?: number }).cost;
-						if (providerCost !== undefined) {
-							output.usage.cost.total = providerCost || 0;
-						}
+					if (event.usage != null) {
+						usageAccumulator.update(event.usage);
 					}
-					// Anthropic doesn't provide total_tokens, compute from components
-					output.usage.totalTokens =
-						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-					calculateCost(model, output.usage);
 				}
 			}
 
@@ -794,6 +793,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				formatError: (caught) => (caught instanceof Error ? caught.message : JSON.stringify(caught)),
 				scratchFields: ["index", "partialJson"],
 			});
+		} finally {
+			// Cover response-hook failures before the SSE iterator acquires a reader as well.
+			await response?.body?.cancel().catch(() => {});
 		}
 	})();
 
@@ -1139,12 +1141,6 @@ function convertMessages(
 
 	// Transform messages for cross-provider compatibility
 	const transformedMessages = transformMessages(messages, model, normalizeToolCallId);
-	let latestAssistantIndex = -1;
-	for (let i = 0; i < transformedMessages.length; i++) {
-		if (transformedMessages[i].role === "assistant") {
-			latestAssistantIndex = i;
-		}
-	}
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
@@ -1189,7 +1185,6 @@ function convertMessages(
 			}
 		} else if (msg.role === "assistant") {
 			const blocks: ContentBlockParam[] = [];
-			const isLatestAssistantMessage = i === latestAssistantIndex;
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
@@ -1199,23 +1194,6 @@ function convertMessages(
 						text: sanitizeSurrogates(block.text),
 					});
 				} else if (block.type === "thinking") {
-					// The latest assistant message may contain signed thinking blocks that
-					// Anthropic requires to be replayed byte-for-byte with the signature.
-					if (isLatestAssistantMessage && (block.redacted || block.thinkingSignature?.trim())) {
-						if (block.redacted) {
-							blocks.push({
-								type: "redacted_thinking",
-								data: block.thinkingSignature!,
-							});
-						} else {
-							blocks.push({
-								type: "thinking",
-								thinking: block.thinking,
-								signature: block.thinkingSignature!,
-							});
-						}
-						continue;
-					}
 					// Redacted thinking: pass the opaque payload back as redacted_thinking
 					if (block.redacted) {
 						blocks.push({
@@ -1246,7 +1224,8 @@ function convertMessages(
 					} else {
 						blocks.push({
 							type: "thinking",
-							thinking: sanitizeSurrogates(block.thinking),
+							// Every signed block must replay unchanged, including older assistant turns.
+							thinking: block.thinking,
 							signature: thinkingSignature,
 						});
 					}

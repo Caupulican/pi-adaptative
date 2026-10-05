@@ -2,8 +2,8 @@ import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 const REQUIRED_JOBS = new Map([
-	["Build, check (ubuntu-latest)", ["Build", "Check"]],
-	["Build, check (windows-latest)", ["Build"]],
+	["Build, check (ubuntu-latest)", ["Build", "Check", "Provider regressions"]],
+	["Build, check (windows-latest)", ["Build", "Provider regressions"]],
 ]);
 
 const CALLER_JOB_PREFIX = "quality-gate / ";
@@ -19,7 +19,7 @@ export function normalizeCiJobs(jobs) {
 	}));
 }
 
-/** A green workflow can skip steps. Require every distinct platform job and its actual build and check steps. */
+/** A green workflow can skip steps. Require each platform's build/check and provider-regression evidence. */
 export function hasCompleteCiMatrix(jobs) {
 	if (!Array.isArray(jobs)) return false;
 	return [...REQUIRED_JOBS].every(([name, steps]) => {

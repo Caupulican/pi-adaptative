@@ -31,11 +31,8 @@ import {
 import type { ProviderAdmissionLedger } from "./provider-admission/ledger.ts";
 import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { isCredentialSecretKey } from "./secrets/credential-content-mock.ts";
-import {
-	type ContentPath,
-	CredentialContentProjectionError,
-	redactCredentialContent,
-} from "./secrets/credential-model-content.ts";
+import { CredentialContentProjectionError, redactCredentialContent } from "./secrets/credential-model-content.ts";
+import { createProviderRequestSecretPolicy } from "./secrets/provider-request-secrets.ts";
 import { redactTokenShapes } from "./security/secret-text.ts";
 import type {
 	ResolvedProviderAdmissionSettings,
@@ -159,14 +156,22 @@ function combineCredentialValues(
 	return [...values];
 }
 
-function redactRequestContext(context: Context, redact: (text: string) => string): Context {
+function redactRequestContext(
+	context: Context,
+	redact: (text: string) => string,
+	policy: ReturnType<typeof createProviderRequestSecretPolicy>,
+): Context {
 	const preserveKey = (path: readonly (string | number)[], key: string) =>
 		REQUEST_IDENTITY_FIELDS.has(key) || (key === "name" && (path.at(-2) === "tools" || path.at(-2) === "content"));
-	const preserveImage = (_path: readonly (string | number)[], value: object) => {
-		const type = Object.getOwnPropertyDescriptor(value, "type");
-		return type?.enumerable === true && "value" in type && type.value === "image";
-	};
-	return redactCredentialContent(context, redact, preserveKey, preserveImage);
+	// Only typed image data is opaque, through the string policy. An arbitrary object whose
+	// type is "image" (for example inside tool arguments) still needs ordinary redaction.
+	return redactCredentialContent(
+		context,
+		redact,
+		(path, key, parent, root) => preserveKey(path, key) || policy.contextKey(path, key, parent, root),
+		undefined,
+		policy.contextString,
+	);
 }
 
 function failedRedactionStream(
@@ -210,7 +215,8 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 			// Known values are exact; token shapes are the floor for keys the host has never seen. Both are
 			// unconditional: a session without a credential boundary still never sends a recognizable key.
 			const redact = (text: string) => redactTokenShapes(redactKnown(text));
-			redactedContext = redactRequestContext(context, redact);
+			const secretPolicy = createProviderRequestSecretPolicy(context, model, redact);
+			redactedContext = redactRequestContext(context, redact, secretPolicy);
 			const onPayload = options?.onPayload;
 			redactedOptions = onPayload
 				? {
@@ -218,19 +224,23 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 						onPayload: async (payload: unknown, payloadModel: Parameters<NonNullable<typeof onPayload>>[1]) => {
 							// A provider payload may carry its transport signal (Google-style `config.abortSignal`):
 							// it holds no text and must reach the transport as the same live object.
-							const preserveSignal = (_path: ContentPath, value: object) => value instanceof AbortSignal;
 							const safePayload = redactCredentialContent(
 								payload,
 								redact,
-								(_path, key) => isPayloadIdentityKey(key),
-								preserveSignal,
+								(path, key, parent, root) =>
+									isPayloadIdentityKey(key) || secretPolicy.payloadKey(path, key, parent, root),
+								secretPolicy.payloadObject,
+								secretPolicy.payloadString,
 							);
 							const hooked = await onPayload(safePayload, payloadModel);
+							const finalPayload = hooked === undefined ? safePayload : hooked;
 							return redactCredentialContent(
-								hooked === undefined ? safePayload : hooked,
+								finalPayload,
 								redact,
-								(_path, key) => isPayloadIdentityKey(key),
-								preserveSignal,
+								(path, key, parent, root) =>
+									isPayloadIdentityKey(key) || secretPolicy.payloadKey(path, key, parent, root),
+								secretPolicy.payloadObject,
+								secretPolicy.payloadString,
 							);
 						},
 					}
@@ -238,7 +248,11 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 		} catch (error) {
 			if (options?.signal?.aborted) throw error;
 			const reason =
-				error instanceof CredentialContentProjectionError ? error.failure : "credential source unavailable";
+				error instanceof CredentialContentProjectionError
+					? error.failure === "signed-content"
+						? "signed thinking contains credentials and cannot be replayed unchanged"
+						: error.failure
+					: "credential source unavailable";
 			return failedRedactionStream(model, new Error(reason, { cause: error }));
 		}
 		// Provider failures retain the transport owner's classification and retry behavior.

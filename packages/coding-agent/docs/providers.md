@@ -73,6 +73,10 @@ Those instances can run concurrently. Switching `/model` in one instance only ch
 
 Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party harness usage draws from [extra usage](https://claude.ai/settings/usage) and is billed per token, not against Claude plan limits.
 
+Pi uses the locally verified Claude Code request identity for OAuth Messages and account usage. Signed thinking and redacted-thinking payloads replay unchanged. If signed readable thinking contains credentials that must be redacted, Pi withholds the request instead of altering the signed block.
+
+Per-response `usage.details` retains supplied reasoning-token subtotals, cache-write TTL breakdowns, server-tool request counts, service tier and inference region. These details do not add tokens a second time. Provider-reported costs, including zero, remain authoritative across partial updates. When a nonstandard Anthropic tier has no reported cost or bundled tier price, Pi labels the dollar figure as a base-rate estimate.
+
 ### GitHub Copilot
 
 - Press Enter for github.com, or enter your GitHub Enterprise Server domain
@@ -82,13 +86,17 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 
 Run `/login google-antigravity`, open the authorization URL, and paste the code or callback URL shown after Google sign-in. Pi stores its own OAuth credentials and refreshes them five minutes before expiry. Complete Antigravity account setup first if Google does not return an accessible project.
 
-Use `/model` to select an advertised Gemini, Claude, or GPT-OSS model under `google-antigravity`. Models, context limits, image support, upstream tool schemas, and thinking budgets come from the account's service catalog. Gemini effort selection switches between the advertised presets; each preset sends its catalog budget. Pi preserves service IDs such as `gemini-pro-agent` even when the native CLI displays a different ID for the same model.
+Use `/model` to select an advertised Gemini, Claude, or GPT-OSS model under `google-antigravity`. Models, context limits, image support, upstream tool schemas, and thinking presets come from the account's service catalog. Gemini effort selection switches between the advertised budget presets. Adaptive models send their catalog thinking level instead of a budget. Pi preserves service IDs such as `gemini-pro-agent` even when the native CLI displays a different ID for the same model.
 
 ```bash
 pi --provider google-antigravity --model gemini-3.8-flash-low
 ```
 
-Pi's provider connects directly to Antigravity and does not require the `agy` executable. Model discovery refreshes with OAuth; a new model appears when the service advertises it to your account.
+Pi's provider connects directly to Antigravity and does not require the `agy` executable. Model discovery refreshes with OAuth. A change to Pi's catalog format or bundled Antigravity client version also triggers a refresh, so stored model capabilities do not survive those changes unchanged.
+
+Use `/usage` to see the plan, shared model-group quotas, reset times, and available AI credits. Pi reads `loadCodeAssist` and `retrieveUserQuotaSummary` with its own OAuth credential. Fraction quotas become used percentages. Amount quotas remain amounts. Disabled or exhausted buckets appear as limits. Reading usage does not activate paid credits. Session token totals already include thinking output and cached input; account quota windows are separate from those token totals.
+
+Google session input includes separately reported tool-result prompt tokens. Per-response `usage.details` in session records and RPC events retains supplied prompt, answer, reasoning and tool-prompt counts; modality breakdowns; traffic type; billable units; tool-call statistics; and Antigravity consumed and remaining credits. These details are not added to token totals a second time or converted into dollar costs. Optional fields absent from the service remain absent; partial usage events preserve previously supplied fields. `/usage` shows aggregate session tokens and the separate account quota summary, not every per-response detail.
 
 ## API Keys
 

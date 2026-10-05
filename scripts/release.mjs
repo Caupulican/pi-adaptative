@@ -10,19 +10,19 @@
  *   node scripts/release.mjs adopt
  *   node scripts/release.mjs status
  *
- * The release flow is split into two gated phases. The complete ci.yml matrix runs
- * only on the version tag (build-binaries.yml quality-gate), not on ordinary commits.
+ * The release flow is split into two gated phases. The ci.yml matrix gates main
+ * and runs again on the version tag through build-binaries.yml quality-gate.
  *
  * PREPARE (major|minor|patch|x.y.z) - a pure function of the committed tree, no tag:
  * 1. Preflight: on main, clean tree, origin/main is an ancestor of HEAD, prospective tag unused.
- * 2. The release command never runs the full suite locally. GitHub Actions on the tag is
- *    the full-suite authority.
+ * 2. Run local checks below; GitHub Actions on the exact tag is the platform/provider and
+ *    artifact-acceptance authority.
  * 3. Bump version via npm run version:xxx or set an explicit version.
  * 4. Update CHANGELOG.md files: [Unreleased] -> [version] - date.
  * 5. Run checks.
  * 6. Commit "Release vX.Y.Z" and push main.
  * 7. Add new [Unreleased] sections to changelogs, commit, and push main again.
- * Any failure during steps 3-7 resets the local tree back to the preflight commit.
+ * Any failure during steps 3-7 retains files, index and commits for state-aware recovery.
  *
  * REPAIR - recover an untagged prepared version after a gate exposed a required fix:
  * - Require the original Release commit in current main's ancestry, a free version tag,
@@ -47,6 +47,7 @@ import { execSync } from "child_process";
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
 import { parseGithubOriginSlug } from "./github-origin.mjs";
+import { executeReleaseMutation } from "./release-recovery.mjs";
 import {
 	matchesReleaseCandidateSubject,
 	partitionReleaseChanges,
@@ -287,7 +288,7 @@ function preflight(prospectiveVersion, recoveredPaths = new Set()) {
 
 	const status = run("git status --porcelain", { silent: true });
 	if (status && collectChangedPaths(status).some((path) => !recoveredPaths.has(path))) {
-		console.error("Error: Uncommitted changes detected. Commit or stash first.");
+		console.error("Error: Uncommitted changes detected. Commit owned changes or resolve unexpected changes before releasing.");
 		console.error(status);
 		process.exit(1);
 	}
@@ -311,19 +312,14 @@ function preflight(prospectiveVersion, recoveredPaths = new Set()) {
 	return preflightSha;
 }
 
-function rollbackToPreflightSha(preflightSha) {
-	console.error(`Rolling back local changes to preflight commit ${preflightSha}...`);
-	run(`git reset --hard ${preflightSha}`, { ignoreError: true });
-}
-
 function prepareRelease() {
 	console.log("\n=== Preparing release ===\n");
 	const prospectiveVersion = computeProspectiveVersion();
 	const preflightSha = preflight(prospectiveVersion);
 
-	try {
-		// 2. The tag workflow is the full-suite authority. Prepare never runs the local suite.
-		console.log(`GitHub Actions on the version tag is the full-suite authority; no local suite is run.\n`);
+	return executeReleaseMutation({ phase: "prepare", sha: preflightSha }, () => {
+		// 2. Local checks do not replace exact-tag platform/provider and artifact gates.
+		console.log(`Local checks run below; exact-tag GitHub platform/provider and artifact gates remain required.\n`);
 
 		// 3. Bump or set version
 		const version = bumpOrSetVersion(RELEASE_TARGET);
@@ -337,10 +333,7 @@ function prepareRelease() {
 		finishPreparedRelease(`Release v${version}`);
 
 		return version;
-	} catch (error) {
-		rollbackToPreflightSha(preflightSha);
-		throw error;
-	}
+	});
 }
 
 function findReleaseCandidateSha(version, includeRepairs = true) {
@@ -407,7 +400,7 @@ function prepareReleaseRepair() {
 		throw new Error(`Original release commit ${originalReleaseSha} is not an ancestor of HEAD; refusing release repair.`);
 	}
 
-	try {
+	return executeReleaseMutation({ phase: "repair", sha: preflightSha }, () => {
 		console.log(`Repairing prepared version ${version} without another version bump...`);
 		removeEmptyUnreleasedSections(version);
 		console.log();
@@ -415,10 +408,7 @@ function prepareReleaseRepair() {
 		finishPreparedRelease(`Repair release v${version}`);
 
 		return version;
-	} catch (error) {
-		rollbackToPreflightSha(preflightSha);
-		throw error;
-	}
+	});
 }
 
 async function waitForWorkflow(sha, workflow, options = {}) {
@@ -535,7 +525,7 @@ function pruneAfterRelease() {
 	} catch (error) {
 		console.warn(
 			`Warning: release branch cleanup failed (${error instanceof Error ? error.message : String(error)}). ` +
-				'The release is complete; run "npm run release:prune" to retry.',
+				'Tag promotion is complete; artifact publication is separately gated. Run "npm run release:prune" to retry cleanup.',
 		);
 	}
 }

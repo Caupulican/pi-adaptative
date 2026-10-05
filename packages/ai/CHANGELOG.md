@@ -1,5 +1,27 @@
 ## [Unreleased]
 
+### Added
+
+- Added Antigravity account plan, shared quota windows, reset times and AI credit balances.
+- Preserved supplied Google usage breakdowns, billable units, tool-call statistics and Antigravity inference credits in per-response usage details.
+- Retained supplied Anthropic reasoning, cache-TTL, server-tool, service-tier and inference-region usage details without double-counting token subtotals.
+
+### Changed
+
+- Updated the Antigravity client identity to AGY 1.2.17 and refreshed stored catalogs when their format or client version changes.
+- Applied advertised adaptive thinking levels and fixed the GPT-OSS Medium preset identity.
+
+### Fixed
+
+- Counted Google tool-result prompt tokens without double-counting modality subtotals, and retained counts across partial usage events.
+- Isolated cancellation between concurrent Antigravity project lookups and bounded discovery and inference error-body reads.
+- Released bounded response readers on success, overflow and read failure.
+- Bounded Anthropic OAuth responses, preserved body-timeout classification and settled callback-server failures during authorization.
+- Preserved Anthropic seeded content and signed thinking through stream projection and replay; replaced signature deltas as the native client does.
+- Reset Anthropic keepalive frames, enforced complete stream boundaries and cleaned up failed stream and response-hook bodies.
+- Retained provider-reported costs, including zero and partial updates, across Anthropic and OpenAI-compatible usage paths; labeled unpriced Anthropic tiers as base-rate estimates.
+- Bounded Grok OAuth response bodies and preserved response-body timeout causes; confirmed the current stable Grok 1.0.46 protocol identity against the local binary.
+
 ## [0.103.2] - 2026-10-05
 
 ### Changed

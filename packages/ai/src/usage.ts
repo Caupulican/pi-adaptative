@@ -1,5 +1,14 @@
 import type { Api, Model, Usage } from "./types.ts";
 
+/** Zero is an authoritative reported cost; only absent/null costs use model-rate estimates. */
+export function parseProviderReportedCost(value: unknown, previous?: number): number | undefined {
+	const reported = value == null ? previous : value;
+	if (reported === undefined) return undefined;
+	if (typeof reported !== "number" || !Number.isFinite(reported) || reported < 0)
+		throw new Error("Invalid provider-reported cost");
+	return reported;
+}
+
 export function calculateCost<TApi extends Api>(
 	model: Model<TApi>,
 	usage: Usage,
