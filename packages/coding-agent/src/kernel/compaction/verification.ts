@@ -625,6 +625,36 @@ function buildActiveTaskLines(source: string): string[] {
 	return `User: ${source}`.replaceAll("\r\n", "\n").split("\n").map(escapeActiveTaskHeadingLine);
 }
 
+/**
+ * Provider view of a checkpoint whose covered history is no longer the current task.
+ * Replaces the Active Task body and leaves every other line as written. A summary with no
+ * Active Task heading is returned unchanged: there is no stale task section to correct.
+ */
+export function projectCurrentActiveTask(summary: string, source: string): string {
+	const task = source.trim();
+	if (!task) return summary;
+	const lines = summary.split(/\r?\n/);
+	const out: string[] = [];
+	let replaced = false;
+	let index = 0;
+	while (index < lines.length) {
+		const line = lines[index] ?? "";
+		const match = /^(##|###)\s+(.+?)\s*$/.exec(line);
+		if (!replaced && match && match[2].trim().toLowerCase() === "active task") {
+			out.push(line);
+			index++;
+			while (index < lines.length && !/^(?:##|###)\s+/.test(lines[index] ?? "")) index++;
+			out.push(...buildActiveTaskLines(task));
+			if (index < lines.length) out.push("");
+			replaced = true;
+			continue;
+		}
+		out.push(line);
+		index++;
+	}
+	return replaced ? out.join("\n") : summary;
+}
+
 function findNextDoneNumber(lines: string[]): number {
 	let max = 0;
 	for (const line of lines) {

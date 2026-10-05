@@ -303,6 +303,24 @@ export interface PreparedCompactionRecord {
 	readonly preparedAt: number;
 }
 
+/**
+ * The session entry keeps this copy. `applyResult` adds the transcript pointer on the compaction
+ * entry, and that assignment must not change the prepared summary that was written.
+ */
+function isolatedPreparedRecord(record: PreparedCompactionRecord): PreparedCompactionRecord {
+	return {
+		result: {
+			...record.result,
+			...(record.result.summarizedGapEntryIds !== undefined
+				? { summarizedGapEntryIds: [...record.result.summarizedGapEntryIds] }
+				: {}),
+		},
+		lane: { ...record.lane },
+		settingsKey: record.settingsKey,
+		preparedAt: record.preparedAt,
+	};
+}
+
 /** What the applied retention plan did to the branch this compaction actually compacted. */
 export interface AppliedRetentionAudit {
 	readonly stats: CompactionAuditStats;
@@ -529,7 +547,7 @@ export class CompactionController {
 		const activeTask = this.deps.getActiveTask?.();
 		const retentionDecisions = this.activeRetentionDecisions;
 		const sourceBranch = retentionDecisions ? this.getRawCompactionBranch() : branch;
-		return prepareCompaction(sourceBranch, settings, {
+		const preparation = prepareCompaction(sourceBranch, settings, {
 			...options,
 			...(activeTask ? { activeTask } : {}),
 			packHostRecords: (messages) =>
@@ -537,6 +555,12 @@ export class CompactionController {
 					retentionDecisions ? applyRetentionDecisionsToMessages(messages, retentionDecisions).messages : messages,
 				),
 		});
+		if (!preparation?.retention) return preparation;
+		// The branch passed above can omit lifecycle entries and retention-dropped tool pairs. The
+		// covered entry is the real session leaf, so those omitted entries stay out of the suffix and
+		// a message appended after this preparation stays in.
+		const coveredThroughEntryId = this.deps.sessionManager.getLeafEntry()?.id;
+		return coveredThroughEntryId ? { ...preparation, coveredThroughEntryId } : preparation;
 	}
 
 	private beginCompactionLifecycle(preparation: CompactionPreparation): void {
@@ -1706,8 +1730,9 @@ export class CompactionController {
 			settingsKey,
 			preparedAt: Date.now(),
 		};
-		this.deps.sessionManager.appendCustomEntry(COMPACTION_PREPARED_CUSTOM_TYPE, record);
-		return record;
+		const stored = isolatedPreparedRecord(record);
+		this.deps.sessionManager.appendCustomEntry(COMPACTION_PREPARED_CUSTOM_TYPE, stored);
+		return stored;
 	}
 
 	/** Whether the live branch still leads from `entryId` with no request or compaction after it. */
@@ -1740,13 +1765,31 @@ export class CompactionController {
 			if (entry.type === "custom" && entry.customType === COMPACTION_PREPARED_CUSTOM_TYPE) {
 				const record = entry.data as PreparedCompactionRecord | undefined;
 				const lane = record?.lane;
-				return lane &&
-					record.settingsKey === settingsKey &&
-					lane.provider === model.provider &&
-					lane.id === model.id &&
-					lane.api === model.api
-					? record
-					: undefined;
+				if (
+					!lane ||
+					record.settingsKey !== settingsKey ||
+					lane.provider !== model.provider ||
+					lane.id !== model.id ||
+					lane.api !== model.api
+				) {
+					return undefined;
+				}
+				// Records written before coveredThroughEntryId existed were appended as a child of the
+				// leaf the summary read. Messages after that leaf, including the one that opens the
+				// next turn, were not in the summary. The returned record is a copy so applying it
+				// cannot rewrite the summary stored on this entry.
+				const isolated = isolatedPreparedRecord(record);
+				if (
+					isolated.result.retention?.mode === "original-user" &&
+					!isolated.result.coveredThroughEntryId &&
+					entry.parentId
+				) {
+					return {
+						...isolated,
+						result: { ...isolated.result, coveredThroughEntryId: entry.parentId },
+					};
+				}
+				return isolated;
 			}
 		}
 		return undefined;
@@ -1966,39 +2009,48 @@ export class CompactionController {
 							...result,
 							firstKeptEntryId: preparation.firstKeptEntryId,
 							retention: preparation.retention,
+							...(preparation.coveredThroughEntryId
+								? { coveredThroughEntryId: preparation.coveredThroughEntryId }
+								: {}),
+							...(preparation.summarizedGapEntryIds !== undefined
+								? { summarizedGapEntryIds: [...preparation.summarizedGapEntryIds] }
+								: {}),
 						}
 					: result,
 		};
 	}
 
 	private async applyResult(result: CompactionResult, fromExtension: boolean): Promise<string> {
+		let applied: CompactionResult = { ...result };
 		if (this.deps.decorateCompactionDetails) {
-			result.details = this.deps.decorateCompactionDetails(result.details);
+			applied = { ...applied, details: this.deps.decorateCompactionDetails(applied.details) };
 		}
 		const sessionFile = this.deps.sessionManager.getSessionFile();
-		if (result.retention?.mode === "original-user" && sessionFile) {
+		if (applied.retention?.mode === "original-user" && sessionFile) {
 			const transcriptPointer = `Full pre-compaction transcript: ${sessionFile}`;
-			if (!result.summary.includes(transcriptPointer)) {
-				result.summary = `${result.summary.trimEnd()}\n\n${transcriptPointer}`;
+			if (!applied.summary.includes(transcriptPointer)) {
+				applied = { ...applied, summary: `${applied.summary.trimEnd()}\n\n${transcriptPointer}` };
 			}
 		}
 		const compactionEntryId = this.deps.sessionManager.appendCompaction(
-			result.summary,
-			result.firstKeptEntryId,
-			result.tokensBefore,
-			result.details,
+			applied.summary,
+			applied.firstKeptEntryId,
+			applied.tokensBefore,
+			applied.details,
 			fromExtension,
-			result.usage,
-			result.retention,
+			applied.usage,
+			applied.retention,
+			applied.coveredThroughEntryId,
+			applied.summarizedGapEntryIds,
 		);
 		this.deps.refreshAfterCompaction();
 		const sessionModel = this.deps.getModel();
-		if (sessionModel && result.tokensBefore > 0) {
+		if (sessionModel && applied.tokensBefore > 0) {
 			this.deps.recordCompactionOutcome?.({
 				model: sessionModel,
-				tokensBefore: result.tokensBefore,
+				tokensBefore: applied.tokensBefore,
 				tokensAfter: this.measureLiveContextTokens(),
-				outputTokens: result.usage?.output ?? 0,
+				outputTokens: applied.usage?.output ?? 0,
 			});
 		}
 		if (this.pendingEarlyCompactionPrediction) {
@@ -2015,7 +2067,7 @@ export class CompactionController {
 		}
 		const savedEntry = this.deps.sessionManager
 			.getEntries()
-			.find((entry) => entry.type === "compaction" && entry.summary === result.summary) as
+			.find((entry) => entry.type === "compaction" && entry.summary === applied.summary) as
 			| CompactionEntry
 			| undefined;
 		if (savedEntry) {

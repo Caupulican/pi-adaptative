@@ -572,7 +572,7 @@ export class InteractiveMode {
 			maybeStartAutonomyReview: (messages) => this.maybeStartAutonomyReview(messages),
 			offerMisalignmentContinuation: (block) => this.offerMisalignmentContinuation(block),
 			checkShutdownRequested: () => this.checkShutdownRequested(),
-			rebuildChatFromMessages: () => this.rebuildChatFromMessages(),
+			rebuildChatFromMessages: (options) => this.rebuildChatFromMessages(options),
 			flushCompactionQueue: (options) => this.flushCompactionQueue(options),
 		});
 		this.layout = new InteractiveLayout({
@@ -2531,13 +2531,18 @@ export class InteractiveMode {
 		});
 	}
 
-	private async rebuildChatFromMessages(): Promise<void> {
-		if (!this.tuiHistoryLoaded) {
+	private async rebuildChatFromMessages(options?: { checkpointWhenDeferred?: boolean }): Promise<boolean> {
+		if (!this.tuiHistoryLoaded && !options?.checkpointWhenDeferred) {
 			this.showDeferredHistoryPlaceholder({ requestRender: true });
-			return;
+			return false;
 		}
 		const context = this.sessionManager.buildSessionContext();
 		await this.renderSessionContext(context);
+		// The provider context is what a history load renders. After compaction that context is the
+		// checkpoint, not the pre-compaction entry tree. Marking it loaded keeps a later rebuild from
+		// replacing the checkpoint with the hidden-history placeholder.
+		if (options?.checkpointWhenDeferred) this.tuiHistoryLoaded = true;
+		return true;
 	}
 
 	// =========================================================================
@@ -3353,7 +3358,9 @@ export class InteractiveMode {
 			getAutoLearnModelOptions: () => this.getAutoLearnModelOptions(),
 			setupAutocompleteProvider: () => this.setupAutocompleteProvider(),
 			updateEditorBorderColor: () => this.updateEditorBorderColor(),
-			rebuildChatFromMessages: () => this.rebuildChatFromMessages(),
+			rebuildChatFromMessages: async () => {
+				await this.rebuildChatFromMessages();
+			},
 			updateThinkingBlockVisibility: () => this.updateThinkingBlockVisibility(),
 			validateSelfModificationSource: (settings) => this.validateSelfModificationSource(settings),
 			applyAutonomyMode: (mode, scope) => this.applyAutonomyMode(mode, scope),

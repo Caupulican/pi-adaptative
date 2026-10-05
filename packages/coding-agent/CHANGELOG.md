@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Fixed
+
+- A session-replacement compaction prepared while the lane is idle keeps messages that arrive after the summarized history, including the owner message that opens the next turn.
+- Reloading a session-replacement checkpoint written before that boundary keeps the same unsummarized messages when the applied summary is still the `compaction_prepared` entry on the branch.
+- When a user message arrives after the summarized history, the provider sees that message as the current task. The stored summary remains the summary of the history it covered.
+- The prepared summary stored on the session keeps the text that was written. The transcript pointer is added on the compaction entry only.
+- After compaction the screen shows the checkpoint the model sees, including the message that opened the turn, even when session history was hidden. Pre-compaction turns are not left on screen, and the stored summary is not appended a second time.
+- A message an earlier session-replacement checkpoint left out of its summary stays in the provider context after a later checkpoint, until a summary records that it included that message.
+
 ## [0.103.0] - 2026-10-04
 
 ### Breaking Changes

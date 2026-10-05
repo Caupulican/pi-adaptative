@@ -1522,7 +1522,15 @@ export class WorkerConversation {
 				const verified = await policy.generateVerifiedCompaction(preparation);
 				signal?.throwIfAborted();
 				assertApplicableCompactionResult(verified, preparation);
-				result = verified;
+				result = {
+					...verified,
+					...(preparation.coveredThroughEntryId
+						? { coveredThroughEntryId: preparation.coveredThroughEntryId }
+						: {}),
+					...(preparation.summarizedGapEntryIds !== undefined
+						? { summarizedGapEntryIds: [...preparation.summarizedGapEntryIds] }
+						: {}),
+				};
 				status = "compacted_verified";
 			} catch {
 				// Cancellation/suspension transfers transcript ownership. The retiring owner must
@@ -1552,6 +1560,9 @@ export class WorkerConversation {
 				result.details,
 				false,
 				result.usage,
+				result.retention,
+				result.coveredThroughEntryId,
+				result.summarizedGapEntryIds,
 			);
 		});
 		const context = this.getProviderContext();

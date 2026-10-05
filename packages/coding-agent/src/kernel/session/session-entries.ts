@@ -40,6 +40,20 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	tokensBefore: number;
 	/** Optional non-contiguous retention policy for provider-native session replacement. */
 	retention?: CompactionRetention;
+	/**
+	 * Last session entry this checkpoint accounted for. Absent on checkpoints written before the field
+	 * existed. A reload still emits the unsummarized suffix when a `compaction_prepared` entry on this
+	 * branch is the summary that was applied and no request or compaction sits between them. Otherwise
+	 * the rebuild does not invent a boundary.
+	 */
+	coveredThroughEntryId?: string;
+	/**
+	 * Entry ids of original-user gaps that this summary's provider input contained. Absent on
+	 * checkpoints written before the field existed: those summaries did not contain earlier gaps, so a
+	 * later rebuild emits them. An empty array means this summary contained no such gap. A listed id
+	 * is already in the summary and is not emitted again.
+	 */
+	summarizedGapEntryIds?: string[];
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 	/** Usage from every LLM call that produced or verified this summary. */

@@ -18,6 +18,8 @@ import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
 import type { ImageContent, Message, TextContent, Usage } from "@caupulican/pi-ai/types";
+import { ACTIVE_TASK_SOURCE_MAX_CHARS, clampText } from "../compaction/extraction.ts";
+import { projectCurrentActiveTask } from "../compaction/verification.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -376,48 +378,207 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
+/** Same custom type as `COMPACTION_PREPARED_CUSTOM_TYPE` in the compaction controller. The kernel cannot import that module. */
+const COMPACTION_PREPARED_ENTRY_TYPE = "compaction_prepared";
+/** Trailer `applyResult` appends to an original-user summary. The prepared record keeps the summary without it. */
+const PREPARED_SUMMARY_TRANSCRIPT_TRAILER = /^\n\nFull pre-compaction transcript: [^\n]+$/;
+
+function userMessageText(message: AgentMessage): string {
+	if (message.role !== "user") return "";
+	const content = message.content;
+	if (typeof content === "string") return content.trim();
+	const parts: string[] = [];
+	for (const block of content) {
+		if (block.type === "text") parts.push(block.text);
+	}
+	return (parts.length === 1 ? parts[0] : parts.join(" ")).trim();
+}
+
+/** Summary text of an original-user `compaction_prepared` entry that names its parent. */
+function readPreparedSummary(entry: SessionEntry): string | undefined {
+	if (entry.type !== "custom" || entry.customType !== COMPACTION_PREPARED_ENTRY_TYPE || !entry.parentId) {
+		return undefined;
+	}
+	const data = entry.data;
+	if (typeof data !== "object" || data === null || !("result" in data)) return undefined;
+	const result = data.result;
+	if (typeof result !== "object" || result === null) return undefined;
+	if (!("summary" in result) || typeof result.summary !== "string" || result.summary.trimEnd().length === 0) {
+		return undefined;
+	}
+	if (!("retention" in result) || typeof result.retention !== "object" || result.retention === null) return undefined;
+	if (!("mode" in result.retention) || result.retention.mode !== "original-user") return undefined;
+	return result.summary;
+}
+
+function appliedSummaryMatchesPrepared(applied: string, prepared: string): boolean {
+	const base = prepared.trimEnd();
+	if (applied === base) return true;
+	if (!applied.startsWith(base)) return false;
+	return PREPARED_SUMMARY_TRANSCRIPT_TRAILER.test(applied.slice(base.length));
+}
+
+/**
+ * Parent of the latest prepared summary that this compaction applied. A request or another compaction
+ * between them means the prepared summary is not this checkpoint, and no boundary is invented.
+ */
+function recoveredCoveredEntryId(
+	path: readonly SessionEntry[],
+	compactionIdx: number,
+	appliedSummary: string,
+): string | undefined {
+	let coveredId: string | undefined;
+	for (let i = 0; i < compactionIdx; i++) {
+		const entry = path[i];
+		const prepared = readPreparedSummary(entry);
+		if (!prepared || !appliedSummaryMatchesPrepared(appliedSummary, prepared)) continue;
+		let blocked = false;
+		for (let j = i + 1; j < compactionIdx; j++) {
+			const between = path[j]?.type;
+			if (between === "request_snapshot" || between === "compaction") {
+				blocked = true;
+				break;
+			}
+		}
+		if (!blocked && entry.parentId) coveredId = entry.parentId;
+	}
+	return coveredId;
+}
+
+function latestUserText(entries: readonly SessionEntry[], anchorId: string | undefined): string {
+	let text = "";
+	for (const entry of entries) {
+		if (!entry || (anchorId !== undefined && entry.id === anchorId) || entry.type !== "message") continue;
+		const next = userMessageText(entry.message);
+		if (next) text = next;
+	}
+	return text;
+}
+
+interface OriginalUserCut {
+	compaction: CompactionEntry;
+	index: number;
+	coveredIdx: number;
+}
+
+function originalUserCuts(path: readonly SessionEntry[]): OriginalUserCut[] {
+	const cuts: OriginalUserCut[] = [];
+	for (let i = 0; i < path.length; i++) {
+		const entry = path[i];
+		if (entry?.type !== "compaction" || entry.retention?.mode !== "original-user") continue;
+		const coveredThroughEntryId = entry.coveredThroughEntryId ?? recoveredCoveredEntryId(path, i, entry.summary);
+		const coveredIdx =
+			coveredThroughEntryId === undefined
+				? -1
+				: path.findIndex((candidate) => candidate.id === coveredThroughEntryId);
+		cuts.push({ compaction: entry, index: i, coveredIdx });
+	}
+	return cuts;
+}
+
+function isProjectedGapEntry(entry: SessionEntry): boolean {
+	return (
+		entry.type === "message" ||
+		entry.type === "custom_message" ||
+		(entry.type === "branch_summary" && Boolean(entry.summary))
+	);
+}
+
+function gapEntries(path: readonly SessionEntry[], cut: OriginalUserCut): SessionEntry[] {
+	if (cut.coveredIdx < 0 || cut.coveredIdx >= cut.index) return [];
+	const anchorId = cut.compaction.retention?.userEntryId;
+	const entries: SessionEntry[] = [];
+	for (let i = cut.coveredIdx + 1; i < cut.index; i++) {
+		const entry = path[i];
+		if (!entry || entry.id === anchorId || !isProjectedGapEntry(entry)) continue;
+		entries.push(entry);
+	}
+	return entries;
+}
+
+/** A later checkpoint lists this id only when its summary was built from a projection that contained it. */
+function gapOwnedByLaterSummary(path: readonly SessionEntry[], entryId: string, cutIndex: number): boolean {
+	for (let i = cutIndex + 1; i < path.length; i++) {
+		const later = path[i];
+		if (later?.type !== "compaction" || !later.summarizedGapEntryIds?.includes(entryId)) continue;
+		return true;
+	}
+	return false;
+}
+
+/**
+ * Gap entries the current projection emits. These are the messages a summary of this projection
+ * contains and must record. A later checkpoint that lists an id already summarized it.
+ */
+function projectedGapEntries(path: readonly SessionEntry[]): SessionEntry[] {
+	const projected: SessionEntry[] = [];
+	const seen = new Set<string>();
+	for (const cut of originalUserCuts(path)) {
+		for (const entry of gapEntries(path, cut)) {
+			if (seen.has(entry.id) || gapOwnedByLaterSummary(path, entry.id, cut.index)) continue;
+			seen.add(entry.id);
+			projected.push(entry);
+		}
+	}
+	return projected;
+}
+
+function branchPath(
+	entries: SessionEntry[],
+	leafId?: string | null,
+	byId?: Map<string, SessionEntry>,
+): SessionEntry[] | undefined {
+	if (!byId) {
+		byId = new Map<string, SessionEntry>();
+		for (const entry of entries) byId.set(entry.id, entry);
+	}
+	if (leafId === null) return undefined;
+	let leaf = leafId ? byId.get(leafId) : undefined;
+	if (!leaf) leaf = entries[entries.length - 1];
+	if (!leaf) return undefined;
+	const path: SessionEntry[] = [];
+	visitSessionAncestry(leaf, byId, (entry) => {
+		path.push(entry);
+	});
+	path.reverse();
+	return path;
+}
+
+/**
+ * Entry ids of original-user gaps that `buildSessionContext` emits for this branch. Session-replacement
+ * preparation stores them on the checkpoint so the next rebuild does not emit messages the summary included.
+ */
+export function summarizedGapEntryIds(entries: SessionEntry[], leafId?: string | null): string[] {
+	const path = branchPath(entries, leafId);
+	if (!path) return [];
+	let latest: CompactionEntry | undefined;
+	for (const entry of path) {
+		if (entry.type === "compaction") latest = entry;
+	}
+	if (latest?.retention?.mode !== "original-user") return [];
+	return projectedGapEntries(path).map((entry) => entry.id);
+}
+
 /**
  * Build the session context from entries using tree traversal.
  * If leafId is provided, walks from that entry to root.
  * Handles compaction and branch summaries along the path.
+ *
+ * The latest compaction is the checkpoint. Its own unsummarized suffix, and any earlier
+ * original-user gap that no later checkpoint recorded as part of its summary, are emitted
+ * after that summary. A stored `coveredThroughEntryId` is never replaced by recovery.
+ * The stored summary text is not rewritten. When the emitted suffix contains a user message,
+ * only the provider view of Active Task names the latest of those messages.
  */
 export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionContext {
-	// Build uuid index if not available
-	if (!byId) {
-		byId = new Map<string, SessionEntry>();
-		for (const entry of entries) {
-			byId.set(entry.id, entry);
-		}
-	}
-
-	// Find leaf
-	let leaf: SessionEntry | undefined;
-	if (leafId === null) {
-		// Explicitly null - return no messages (navigated to before first entry)
+	const path = branchPath(entries, leafId, byId);
+	if (!path) {
 		return { messages: [], thinkingLevel: "off", model: null };
 	}
-	if (leafId) {
-		leaf = byId.get(leafId);
-	}
-	if (!leaf) {
-		// Fallback to last entry (when leafId is undefined)
-		leaf = entries[entries.length - 1];
-	}
-
-	if (!leaf) {
-		return { messages: [], thinkingLevel: "off", model: null };
-	}
-
-	// Walk from leaf to root, then reverse once. Repeated front insertion makes long branches quadratic.
-	const path: SessionEntry[] = [];
-	visitSessionAncestry(leaf, byId, (entry) => {
-		path.push(entry);
-	});
-	path.reverse();
 
 	// Extract settings and find compaction
 	let thinkingLevel = "off";
@@ -434,9 +595,6 @@ export function buildSessionContext(
 		}
 	}
 
-	// Build messages and collect corresponding entries. Standard compaction emits the summary followed
-	// by a contiguous recent tail. Session replacement instead retains one sparse original-user anchor
-	// before the summary, matching providers whose compactor atomically replaces the live transcript.
 	const messages: AgentMessage[] = [];
 
 	const appendMessage = (entry: SessionEntry) => {
@@ -472,11 +630,22 @@ export function buildSessionContext(
 						)
 				: undefined;
 
+		const restoredGaps = compaction.retention?.mode === "original-user" ? projectedGapEntries(path) : [];
+		const unsummarizedTask = compaction.retention
+			? clampText(
+					latestUserText([...restoredGaps, ...path.slice(compactionIdx + 1)], compaction.retention.userEntryId),
+					ACTIVE_TASK_SOURCE_MAX_CHARS,
+				)
+			: "";
+		const providerSummary = unsummarizedTask
+			? projectCurrentActiveTask(compaction.summary, unsummarizedTask)
+			: compaction.summary;
+
 		if (originalUserEntry) appendMessage(originalUserEntry);
 		messages.push(
 			retainSynthesizedSessionContextMessage(
 				createCompactionSummaryMessage(
-					compaction.summary,
+					providerSummary,
 					compaction.tokensBefore,
 					compaction.timestamp,
 					compaction.details,
@@ -521,6 +690,8 @@ export function buildSessionContext(
 		if (!compaction.retention) {
 			// Emit the standard contiguous tail before compaction, starting from firstKeptEntryId.
 			for (let i = firstKeptIdx; i < compactionIdx; i++) appendMessage(path[i]);
+		} else {
+			for (const entry of restoredGaps) appendMessage(entry);
 		}
 
 		// Emit messages after compaction
@@ -1956,8 +2127,23 @@ export class SessionManager {
 		fromHook?: boolean,
 		usage?: Usage,
 		retention?: CompactionRetention,
+		coveredThroughEntryId?: string,
+		summarizedGapEntryIds?: readonly string[],
 	): string {
 		const compactionParentId = this.leafId;
+		if (coveredThroughEntryId !== undefined) {
+			let covered = false;
+			const leaf = compactionParentId ? this.byId.get(compactionParentId) : undefined;
+			visitSessionAncestry(leaf, this.byId, (current) => {
+				if (current.id === coveredThroughEntryId) {
+					covered = true;
+					return false;
+				}
+			});
+			if (!covered) {
+				throw new Error(`Compaction coveredThroughEntryId is not on the active branch: ${coveredThroughEntryId}.`);
+			}
+		}
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
 			id: generateId(this.byId),
@@ -1967,6 +2153,8 @@ export class SessionManager {
 			firstKeptEntryId,
 			tokensBefore,
 			retention,
+			...(coveredThroughEntryId !== undefined ? { coveredThroughEntryId } : {}),
+			...(summarizedGapEntryIds !== undefined ? { summarizedGapEntryIds: [...summarizedGapEntryIds] } : {}),
 			details,
 			usage,
 			fromHook,

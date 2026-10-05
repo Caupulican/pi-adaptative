@@ -8,7 +8,6 @@ import type { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import { latestAssistantCommentaryLabel } from "../../core/message-phase.ts";
 import { getToolCallRepairInfo } from "../../kernel/agent-loop.ts";
 import { type AgentMessage, retainedToolInvocation, type ToolCallRepairInfo } from "../../kernel/index.ts";
-import { createCompactionSummaryMessage } from "../../kernel/messages.ts";
 import type { SessionManager } from "../../kernel/node.ts";
 import { keyText } from "../../presentation/keybinding-hints.ts";
 import { theme } from "../../presentation/theme-model.ts";
@@ -83,7 +82,12 @@ export interface InteractiveEventPort {
 	/** A Codex misalignment block with an explanation and a steer: the owner may continue past it. */
 	offerMisalignmentContinuation(block: MisalignmentBlock): void;
 	checkShutdownRequested(): Promise<void>;
-	rebuildChatFromMessages(): Promise<void>;
+	/**
+	 * Rebuild the visible chat from session context. When `checkpointWhenDeferred` is set and TUI
+	 * history has not been loaded, render the provider context (the checkpoint) instead of the
+	 * hidden-history placeholder or the pre-compaction turns.
+	 */
+	rebuildChatFromMessages(options?: { checkpointWhenDeferred?: boolean }): Promise<boolean>;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 }
 
@@ -579,14 +583,7 @@ export class InteractiveEventController {
 							`Compaction fell back to a deterministic checkpoint (${fallback.cause}): the narrative summary was lost; only files and task facts were kept.`,
 						);
 					}
-					await this.port.rebuildChatFromMessages();
-					this.port.addMessageToChat(
-						createCompactionSummaryMessage(
-							event.result.summary,
-							event.result.tokensBefore,
-							new Date().toISOString(),
-						),
-					);
+					await this.port.rebuildChatFromMessages({ checkpointWhenDeferred: true });
 					this.port.footer.invalidate();
 				} else if (event.errorMessage) {
 					this.port.activityLane?.finish("runtime:compaction", "failure", {

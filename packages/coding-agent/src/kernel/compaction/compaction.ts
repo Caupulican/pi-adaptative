@@ -25,7 +25,7 @@ import {
 import { PrefixFold } from "../prefix-fold.ts";
 import { ESTIMATED_IMAGE_CHARS, estimateProviderRequestTokens } from "../provider-request-estimator.ts";
 import type { CompactionEntry, CompactionRetention, SessionEntry } from "../session/session-entries.ts";
-import { buildSessionContext } from "../session/session-manager.ts";
+import { buildSessionContext, summarizedGapEntryIds } from "../session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../types.ts";
 import { addUsage, createEmptyUsage } from "../usage.ts";
 import {
@@ -161,6 +161,16 @@ export interface CompactionResult<T = unknown> {
 	tokensBefore: number;
 	/** Sparse history retained when compaction atomically replaces the provider-visible session. */
 	retention?: CompactionRetention;
+	/**
+	 * Last session entry this checkpoint accounted for. Messages appended after it are not in the
+	 * summary and stay in provider context. Set for session-replacement; absent otherwise.
+	 */
+	coveredThroughEntryId?: string;
+	/**
+	 * Original-user gap entries this summary's provider input contained. Set for session-replacement,
+	 * including an empty array when there were none. Absent on older results.
+	 */
+	summarizedGapEntryIds?: string[];
 	/** Provider usage spent generating this checkpoint, including chunk and verification retries. */
 	usage?: Usage;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
@@ -1324,6 +1334,16 @@ export interface CompactionPreparation {
 	previousSummary?: string;
 	/** Sparse history contract persisted with a session-replacement checkpoint. */
 	retention?: CompactionRetention;
+	/**
+	 * Last entry of the branch this preparation read. The host may move it forward to the real session
+	 * leaf when the branch it passed was a projection that omitted later entries.
+	 */
+	coveredThroughEntryId?: string;
+	/**
+	 * Gap entries `buildSessionContext` currently emits for this branch. The summary is about to
+	 * include them, and the applied checkpoint records the ids so they are not emitted again.
+	 */
+	summarizedGapEntryIds?: string[];
 	/** File operations extracted from messagesToSummarize */
 	fileOps: FileOperations;
 	/** Facts extracted from the compacted span for verification gating */
@@ -1437,6 +1457,7 @@ export function prepareCompaction(
 		);
 
 		const messagesToSummarize = options?.packHostRecords ? options.packHostRecords(liveMessages) : liveMessages;
+		const coveredThroughEntryId = pathEntries[pathEntries.length - 1]?.id;
 		return {
 			firstKeptEntryId: originalUserEntry.id,
 			messagesToSummarize,
@@ -1445,6 +1466,8 @@ export function prepareCompaction(
 			isSplitTurn: false,
 			tokensBefore,
 			retention: { mode: "original-user", userEntryId: originalUserEntry.id },
+			...(coveredThroughEntryId ? { coveredThroughEntryId } : {}),
+			summarizedGapEntryIds: summarizedGapEntryIds(pathEntries),
 			fileOps,
 			facts,
 			settings,
@@ -1633,6 +1656,8 @@ export async function compact(
 		tokensBefore,
 		previousSummary,
 		retention,
+		coveredThroughEntryId,
+		summarizedGapEntryIds: gapEntryIds,
 		fileOps,
 		settings,
 		facts: factsFromPreparation,
@@ -1687,6 +1712,8 @@ export async function compact(
 			firstKeptEntryId,
 			tokensBefore,
 			retention,
+			...(coveredThroughEntryId ? { coveredThroughEntryId } : {}),
+			...(gapEntryIds !== undefined ? { summarizedGapEntryIds: [...gapEntryIds] } : {}),
 			usage: summaryUsage,
 			details: {
 				readFiles,
@@ -1705,7 +1732,15 @@ export async function compact(
 }
 
 export function createDeterministicCompaction(preparation: CompactionPreparation): CompactionResult {
-	const { firstKeptEntryId, tokensBefore, retention, fileOps, facts } = preparation;
+	const {
+		firstKeptEntryId,
+		tokensBefore,
+		retention,
+		coveredThroughEntryId,
+		summarizedGapEntryIds: gapEntryIds,
+		fileOps,
+		facts,
+	} = preparation;
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no UUID - session may need migration");
 	}
@@ -1781,6 +1816,8 @@ export function createDeterministicCompaction(preparation: CompactionPreparation
 		firstKeptEntryId,
 		tokensBefore,
 		retention,
+		...(coveredThroughEntryId ? { coveredThroughEntryId } : {}),
+		...(gapEntryIds !== undefined ? { summarizedGapEntryIds: [...gapEntryIds] } : {}),
 		details: {
 			readFiles,
 			modifiedFiles,
