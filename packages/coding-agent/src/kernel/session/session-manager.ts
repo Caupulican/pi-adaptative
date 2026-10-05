@@ -567,8 +567,10 @@ export function summarizedGapEntryIds(entries: SessionEntry[], leafId?: string |
  * The latest compaction is the checkpoint. Its own unsummarized suffix, and any earlier
  * original-user gap that no later checkpoint recorded as part of its summary, are emitted
  * after that summary. A stored `coveredThroughEntryId` is never replaced by recovery.
- * The stored summary text is not rewritten. When the emitted suffix contains a user message,
- * only the provider view of Active Task names the latest of those messages.
+ * The stored summary text is not rewritten. When a restored gap contains a user message, only the
+ * provider view of Active Task names the latest of those messages. Messages after the checkpoint are
+ * never read: they follow the summary in context, and rewriting the summary at the head of the
+ * request on each of them would break the cached prefix every user turn.
  */
 export function buildSessionContext(
 	entries: SessionEntry[],
@@ -632,10 +634,7 @@ export function buildSessionContext(
 
 		const restoredGaps = compaction.retention?.mode === "original-user" ? projectedGapEntries(path) : [];
 		const unsummarizedTask = compaction.retention
-			? clampText(
-					latestUserText([...restoredGaps, ...path.slice(compactionIdx + 1)], compaction.retention.userEntryId),
-					ACTIVE_TASK_SOURCE_MAX_CHARS,
-				)
+			? clampText(latestUserText(restoredGaps, compaction.retention.userEntryId), ACTIVE_TASK_SOURCE_MAX_CHARS)
 			: "";
 		const providerSummary = unsummarizedTask
 			? projectCurrentActiveTask(compaction.summary, unsummarizedTask)
