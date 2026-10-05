@@ -36,7 +36,7 @@ jobs:
       full_suite: true
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     env:
@@ -307,7 +307,7 @@ jobs:
 
   benchmark-linux-binary:
     name: Benchmark Linux binary (x64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     permissions:
       contents: read
@@ -357,7 +357,7 @@ jobs:
   verify-release-binary-performance:
     name: Gate native Windows binary performance
     if: github.event_name == 'push' || inputs.verify_only == true || inputs.skip_windows_verify != true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [benchmark-linux-binary, verify-windows-binary]
     permissions:
       contents: read
@@ -402,7 +402,7 @@ jobs:
     name: Verify exact-commit release provenance
     if: github.event_name == 'push' || inputs.verify_only != true
     needs: [quality-gate]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
@@ -450,7 +450,7 @@ jobs:
 
   release:
     if: github.event_name == 'push' || inputs.verify_only != true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # GitHub release publication stays blocked until both native Windows binaries pass
     # functional RPC smoke and absolute startup/warm-path budgets. Linux-relative
     # ratios remain in the report as cross-runner performance telemetry.

@@ -28,11 +28,18 @@ concurrency:
 
 jobs:
   build-check:
-    name: Build, check (${{ matrix.os }})
+    # `label` is the stable job name scripts/release-ci-proof.mjs requires; `os` is the runner image. The Linux image
+    # is pinned: the standalone Linux binaries are built here, and a moving `ubuntu-latest` raises their glibc floor
+    # when GitHub migrates the label.
+    name: Build, check (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-24.04
+            label: ubuntu-latest
+          - os: windows-latest
+            label: windows-latest
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
