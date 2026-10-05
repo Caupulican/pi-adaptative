@@ -5,6 +5,7 @@ import { arch, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getBinDir, getPackageDependencyVersion } from "../config.ts";
+import { withHostWrite } from "./host-write-window.ts";
 
 export const JSCPD_VERSION = getPackageDependencyVersion("jscpd");
 
@@ -176,11 +177,13 @@ export function ensureManagedJscpd(managedBinDir: string = getBinDir()): string 
 			`Bundled jscpd ${JSCPD_VERSION} is unavailable for ${platform()}/${arch()}. Reinstall Pi for this platform.`,
 		);
 	}
-	const installed = installBundledJscpdBinary({
-		...source,
-		managedBinDir,
-		targetPlatform: platform(),
-	});
+	const installed = withHostWrite(managedBinDir, () =>
+		installBundledJscpdBinary({
+			...source,
+			managedBinDir,
+			targetPlatform: platform(),
+		}),
+	);
 	cachedManagedPath = { path: installed, mtimeMs: statSync(installed).mtimeMs };
 	return installed;
 }

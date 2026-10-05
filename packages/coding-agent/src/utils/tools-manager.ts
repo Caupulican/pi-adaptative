@@ -27,6 +27,7 @@ import { getAgentDir, getBinDir, getPackageDependencyVersion } from "../config.t
 import { cacheDir as agentCacheDir, cacheFile } from "../core/agent-paths.ts";
 import { ensureManagedJscpd, JSCPD_VERSION } from "./bundled-jscpd.ts";
 import { spawnProcess, waitForChildProcessWithTermination } from "./child-process.ts";
+import { withHostWriteAsync } from "./host-write-window.ts";
 import { getProcessWorkRun } from "./work-directory.ts";
 import { extractZipFile } from "./zip-extractor.ts";
 
@@ -649,7 +650,7 @@ export function runExclusiveToolDownload(
 ): Promise<string | undefined> {
 	const existing = toolDownloadPromises.get(tool);
 	if (existing) return existing;
-	const promise = installer().finally(() => {
+	const promise = withHostWriteAsync(managedToolsDir(), installer).finally(() => {
 		if (toolDownloadPromises.get(tool) === promise) {
 			toolDownloadPromises.delete(tool);
 		}

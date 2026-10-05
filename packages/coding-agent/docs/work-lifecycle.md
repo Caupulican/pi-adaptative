@@ -93,7 +93,7 @@ A worker that is about to stop with something the host can check (task requireme
 
 The host checks a submitted report against its receipts in code and records a verdict on the claim:
 
-- `accepted`: the stated claims match the receipts; the requirement ids the report marked met are `coveredRequirementIds`.
+- `accepted`: the stated claims match the receipts; the requirement ids the report marked met are `coveredRequirementIds`. A completed claim whose changed files are in scope and whose report the host accepted needs no explicit `delegate review`: the host already checked it. Blockers, inconclusive findings and any other verdict still require the parent's review.
 - `needs_more`: named proof is missing (a requirement with no entry or no evidence, a check with no receipt, changed files with no explanation), or a requirement is honestly reported partial or not met. When the proof is missing the worker gets one follow-up turn with the list; an honest partial or not-met report gets no follow-up (there is nothing left to prove) and reaches the root as it is.
 - `rejected`: a stated claim is contradicted (a check reported passed whose receipt shows a failure, a change reported for a file the host recorded no change to). The same single follow-up applies.
 - `blocked`: the worker reported a blocker. `unverified`: nothing could be checked.

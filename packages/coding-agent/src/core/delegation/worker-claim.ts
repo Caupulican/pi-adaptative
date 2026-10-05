@@ -701,6 +701,16 @@ export function validateWorkerClaim(args: {
 		}
 
 		if (claim.inconclusive && claim.inconclusive.length > 0) return inconclusiveReview(claim.inconclusive);
+		// The host checked the submitted report against its own receipts and recorded changes and accepted it: the
+		// files and checks are verified, so an extra explicit review would only latch the parent.
+		if (claim.hostVerdict?.verdict === "accepted") {
+			return {
+				outcome: "allow",
+				gate: "worker_claim",
+				reasonCode: "allowed",
+				message: "Worker claim changed files in scope and the host accepted its checked report.",
+			};
+		}
 		// Files are inside scope, but worker output is untrusted
 		return {
 			outcome: "ask-user",

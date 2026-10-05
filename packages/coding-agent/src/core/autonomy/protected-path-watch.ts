@@ -19,6 +19,7 @@
 
 import { lstatSync, readdirSync } from "node:fs";
 import path from "node:path";
+import { hostWroteDuring } from "../../utils/host-write-window.ts";
 import { AGENT_ROOT_DIRECTORY_NAMES, AGENT_ROOT_FILE_NAMES } from "../agent-paths.ts";
 import { HOST_FINDING_PREFIX } from "./host-finding-prefixes.ts";
 import { getHarnessWriteProtectedPaths } from "./lane-private-paths.ts";
@@ -150,6 +151,7 @@ export class ProtectedPathWatch {
 	private readonly seen = new Set<string>();
 	private omitted = 0;
 	private runBaseline: Fingerprints | undefined;
+	private runBaselineAt = 0;
 	private truncatedWatch = false;
 
 	constructor(options: ProtectedPathWatchOptions) {
@@ -181,7 +183,9 @@ export class ProtectedPathWatch {
 
 	/** Take the lane-start baseline (idempotent: the first call wins). */
 	start(): void {
-		this.runBaseline ??= this.snapshot();
+		if (this.runBaseline) return;
+		this.runBaselineAt = Date.now();
+		this.runBaseline = this.snapshot();
 	}
 
 	/**
@@ -192,6 +196,7 @@ export class ProtectedPathWatch {
 	async guard<T>(run: () => Promise<T>): Promise<T> {
 		this.start();
 		let before: Fingerprints | undefined;
+		const startedAt = Date.now();
 		try {
 			before = this.snapshot();
 		} catch {
@@ -201,7 +206,12 @@ export class ProtectedPathWatch {
 			return await run();
 		} finally {
 			try {
-				if (before) for (const change of changesBetween(before, this.snapshot())) this.record(change, "command");
+				if (before) {
+					const endedAt = Date.now();
+					for (const change of changesBetween(before, this.snapshot())) {
+						if (!hostWroteDuring(change.path, startedAt, endedAt)) this.record(change, "command");
+					}
+				}
 			} catch {
 				// Detection is evidence, never a gate: an unreadable path cannot fail the worker's command.
 			}
@@ -216,8 +226,11 @@ export class ProtectedPathWatch {
 		try {
 			if (this.runBaseline) {
 				const alreadyReported = new Set(this.recorded.map((finding) => finding.path));
+				const endedAt = Date.now();
 				for (const change of changesBetween(this.runBaseline, this.snapshot())) {
-					if (!alreadyReported.has(change.path)) this.record(change, "run");
+					if (!alreadyReported.has(change.path) && !hostWroteDuring(change.path, this.runBaselineAt, endedAt)) {
+						this.record(change, "run");
+					}
 				}
 			}
 		} catch {
