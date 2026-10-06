@@ -12,8 +12,10 @@
 - Confined opaque image data and transport signals to their actual request protocol paths, so image-shaped tool arguments remain subject to credential redaction.
 - Preserved issued encrypted reasoning details in OpenAI-compatible Completions histories and payload hooks without exempting ordinary user or tool content.
 - Retained files, index and commits after failed release preparation or repair instead of destructively resetting the shared worktree; separated tag-promotion messages from artifact-publication status.
-- Required successful provider-regression evidence on Linux and Windows before release publication, including guards against omitted or skipped regression steps.
+- Required successful provider-regression and fresh sandbox dependency-installation evidence on Linux and Windows before release publication, including guards against omitted or skipped regression steps.
 - Kept pre-commit diagnostics in plain technical text while retaining explicit error and warning severity.
+- Bound release preparation, repair and adoption to the exact main revision validated by CI, rejecting intervening HEAD or branch changes before mutation.
+- Added reproducible, source-pinned Node-contract dependency adapters with bounded pattern nesting, AST ancestry and pre-allocation range admission shared by expansion and compilation, plus strict RSA digest-algorithm parameter validation without downgrading the sandbox SDK or build tools.
 
 ## [0.103.2] - 2026-10-05
 

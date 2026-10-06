@@ -1,0 +1,23 @@
+{
+	"name": "pi-certificate-codec",
+	"version": "1.4.0-pi.1",
+	"private": true,
+	"type": "commonjs",
+	"main": "lib/index.js",
+	"license": "BSD-3-Clause",
+	"dependencies": {},
+	"files": [
+		"lib",
+		"index.js",
+		"LICENSE",
+		"PROVENANCE.json"
+	],
+	"engines": {
+		"node": ">=24.20.0"
+	},
+	"browser": {
+		"buffer": false,
+		"crypto": false,
+		"process": false
+	}
+}

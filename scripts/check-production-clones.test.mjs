@@ -115,6 +115,9 @@ test("production clone scope covers every owned runtime language without broad e
 	assert.ok(paths.has("packages/coding-agent/src/core/export-html/template.html"));
 	assert.ok(paths.has("scripts/collect-pi-incident.ps1"));
 	assert.ok(paths.has("scripts/build-binaries.sh"));
+	for (const owner of ["pattern-policy.cjs", "digest-policy.cjs", "definitions.mjs"])
+		assert.ok(paths.has(`scripts/dependency-forks/${owner}`), "owned hardening code must remain scanned");
+	assert.ok(paths.has("scripts/lib/dependency-fork-builder.mjs"));
 	assert.ok(
 		productionCandidates.length > 600,
 		`expected the production scope to contain more than 600 files, found ${productionCandidates.length}`,

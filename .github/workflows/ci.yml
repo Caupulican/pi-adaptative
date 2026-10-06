@@ -85,6 +85,13 @@ jobs:
       - name: Provider regressions
         run: npm run check:provider-regressions
 
+      - name: Dependency hardening
+        if: runner.os == 'Windows'
+        run: npm run check:dependency-forks
+
+      - name: Dependency fork installation
+        run: npm run check:sandbox-fork-install
+
       # A contract test may change only alongside docs/doctrine.md (see contracts.json). The
       # pre-commit chain checks the staged tree; a push is checked over its commit range.
       - name: Contract-doctrine gate

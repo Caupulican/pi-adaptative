@@ -1,0 +1,33 @@
+{
+	"upstream": {
+		"name": "braces",
+		"version": "3.0.3",
+		"integrity": "sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA=="
+	},
+	"advisory": "GHSA-vfj7-8cjw-p6xm",
+	"patchedFiles": [
+		"lib/parse.js",
+		"lib/compile.js",
+		"lib/stringify.js",
+		"lib/expand.js",
+		"lib/utils.js"
+	],
+	"ownedHelpers": {
+		"lib/pattern-policy.cjs": "scripts/dependency-forks/pattern-policy.cjs"
+	},
+	"contract": "Node main/lib contract consumed by Pi; upstream browser/Flash distribution artifacts are not used or republished.",
+	"sourceOwner": "scripts/dependency-forks/definitions.mjs",
+	"generator": "scripts/generate-dependency-forks.mjs",
+	"hashes": {
+		"lib/compile.js": "fa51f7dc24ad78c95a14defec3ab2d96fe3ad8462227eaf24da84c44851e446b",
+		"lib/constants.js": "c18ac5adb57308f1ce42a28552da3a31f5d83709743ebd9a636336813a744d4b",
+		"lib/expand.js": "555abb704829f4669a655cde8b2cc7f404188d08574feb633c6ed5be01be7aab",
+		"lib/parse.js": "24ac8e4f17fb8c9a875adf2131520b7d082c886feb3738266731aeda6ec4e4b4",
+		"lib/stringify.js": "711f49411c19099ed550d54bd950c70e1d83809924a5ea88822c6ceaf9e8d77a",
+		"lib/utils.js": "595ccbc63f63fb33e1af0dc0aa2c77f8ef8f785924db097e94e91d88e814ebb2",
+		"index.js": "332ea07c7b006361aad12aa994ca75dc1db8e8382b884909e2f38f10b85c88a4",
+		"LICENSE": "35bdd8a44339719441900fb50fbefc5e2dca1ca662cbaed7a687de842c8b70f2",
+		"lib/pattern-policy.cjs": "5d4261ab2869cc940f7bc9a161d8a4beb81e9e9e59ed09996ed73770ae59367d",
+		"package.json": "efe0b568403b4162f2746ce86c5bc19861d02d196f356754b7b51d9e74b3d217"
+	}
+}

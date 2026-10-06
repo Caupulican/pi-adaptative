@@ -36,7 +36,7 @@ for (const [name, version] of Object.entries(versionMap).sort()) {
 // Verify all versions are the same (lockstep)
 const versions = new Set(Object.values(versionMap));
 if (versions.size > 1) {
-	console.error('\n❌ ERROR: Not all packages have the same version!');
+	console.error('\nERROR: Not all packages have the same version!');
 	console.error('Expected lockstep versioning. Run one of:');
 	console.error('  npm run version:patch');
 	console.error('  npm run version:minor');
@@ -44,7 +44,7 @@ if (versions.size > 1) {
 	process.exit(1);
 }
 
-console.log('\n✅ All packages at same version (lockstep)');
+console.log('\nAll packages at same version (lockstep)');
 
 function syncDependencyGroup(pkg, field) {
 	const dependencies = pkg.data[field];
@@ -78,5 +78,5 @@ for (const pkg of Object.values(packages)) {
 if (totalUpdates === 0) {
 	console.log('\nAll inter-package dependencies already in sync.');
 } else {
-	console.log(`\n✅ Updated ${totalUpdates} dependency version(s)`);
+	console.log(`\nUpdated ${totalUpdates} dependency version(s)`);
 }

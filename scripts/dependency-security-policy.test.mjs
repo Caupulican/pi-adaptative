@@ -1,21 +1,72 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { validateRequiredSecurityOverrides } from "./lib/dependency-security-policy.mjs";
+import { validateRequiredSecurityOverrides as validatePolicy } from "./lib/dependency-security-policy.mjs";
 
 function readJson(path) {
 	return JSON.parse(readFileSync(path, "utf8"));
 }
 
+// Older unit cases isolate unrelated version rules. Supply the new independent fork contract
+// explicitly; the real-tree and fork-negative cases below call the production policy directly.
+function validateRequiredSecurityOverrides(root, lock, agent) {
+	return validatePolicy({ ...root, devDependencies: {
+		braces: "file:./vendor/pi-pattern-guard", "node-forge": "file:./packages/coding-agent/examples/extensions/sandbox/vendor/pi-certificate-codec", ...root.devDependencies,
+	}, overrides: {
+		braces: "$braces",
+		"node-forge": "$node-forge",
+		...root.overrides,
+	} }, { ...lock, packages: {
+		"node_modules/braces": { link: true, resolved: "vendor/pi-pattern-guard" },
+		"vendor/pi-pattern-guard": { version: "3.0.3-pi.1" },
+		"node_modules/node-forge": { link: true, resolved: "packages/coding-agent/examples/extensions/sandbox/vendor/pi-certificate-codec" },
+		"packages/coding-agent/examples/extensions/sandbox/vendor/pi-certificate-codec": { version: "1.4.0-pi.1" },
+		...lock.packages,
+	} }, agent);
+}
+
 test("the root manifest and lockfile enforce every required security override", () => {
 	assert.deepEqual(
-		validateRequiredSecurityOverrides(
+		validatePolicy(
 			readJson("package.json"),
 			readJson("package-lock.json"),
 			readJson("packages/coding-agent/package.json"),
 		),
 		[],
 	);
+});
+
+test("removing a required fork or restoring an upstream resolution fails the safety gate", () => {
+	const root = readJson("package.json");
+	const lock = readJson("package-lock.json");
+	const agent = readJson("packages/coding-agent/package.json");
+	for (const name of ["braces", "node-forge"]) {
+		const omitted = structuredClone(root);
+		delete omitted.overrides[name];
+		assert.ok(validatePolicy(omitted, lock, agent).some((failure) => failure.includes(`overrides.${name}`)));
+		const upstream = structuredClone(lock);
+		upstream.packages[`node_modules/${name}`] = { name, version: name === "braces" ? "3.0.3" : "1.4.0" };
+		assert.ok(validatePolicy(root, upstream, agent).some((failure) => failure.includes(`${name} must resolve`)));
+	}
+});
+
+test("local-fork evidence rejects wrong paths, missing targets, malformed links and nested upstream copies", () => {
+	const root = readJson("package.json");
+	const lock = readJson("package-lock.json");
+	const agent = readJson("packages/coding-agent/package.json");
+	const path = lock.packages["node_modules/braces"].resolved;
+	for (const mutate of [
+		(value) => { value.packages["node_modules/braces"].resolved = "wrong/path"; value.packages["wrong/path"] = value.packages[path]; },
+		(value) => { delete value.packages[path]; },
+		(value) => { value.packages[path].version = "3.0.3"; },
+		(value) => { value.packages[path].name = "braces"; },
+		(value) => { value.packages["node_modules/braces"].link = "true"; },
+		(value) => { value.packages["node_modules/other/node_modules/braces"] = { version: "3.0.3" }; },
+	]) {
+		const changed = structuredClone(lock);
+		mutate(changed);
+		assert.ok(validatePolicy(root, changed, agent).some((failure) => failure.includes("braces must resolve")));
+	}
 });
 
 test("a vulnerable resolution fails even when the manifest claims the patched override", () => {

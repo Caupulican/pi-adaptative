@@ -1,6 +1,15 @@
-/** Execute one synchronous release mutation phase without compensating over a shared worktree. */
-export function executeReleaseMutation(checkpoint, mutate) {
+/** A green CI verdict authorizes only its exact main revision, never a later HEAD. */
+export function assertReleaseSourceIdentity(expectedSha, current) {
+	if (typeof expectedSha !== "string" || !/^[a-f0-9]{40}$/.test(expectedSha) ||
+		current?.sha !== expectedSha || current.branch !== "main") {
+		throw new Error(`Release source changed after CI validation: expected main at ${expectedSha ?? "missing"}, found ${current?.branch ?? "missing"} at ${current?.sha ?? "missing"}. No mutation admitted.`);
+	}
+}
+
+/** Execute one synchronous, revision-fenced mutation phase without compensating over a shared worktree. */
+export function executeReleaseMutation(checkpoint, readSource, mutate) {
 	try {
+		assertReleaseSourceIdentity(checkpoint.sha, readSource());
 		return mutate();
 	} catch (error) {
 		try {

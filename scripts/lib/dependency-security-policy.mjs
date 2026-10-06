@@ -1,3 +1,5 @@
+import { DEPENDENCY_FORKS } from "../dependency-forks/definitions.mjs";
+
 export const requiredSecurityOverrides = new Map([
 	["nanoid", "3.3.18"],
 	["brace-expansion", "5.0.12"],
@@ -10,6 +12,11 @@ const requiredSelectorSecurityOverrides = [
 
 export function validateRequiredSecurityOverrides(rootPackage, rootLockfile, codingAgentPackage) {
 	const failures = [];
+	for (const fork of DEPENDENCY_FORKS) {
+		const expected = `file:./${fork.directory}`;
+		if (rootPackage.overrides?.[fork.original] !== `$${fork.original}` || rootPackage.devDependencies?.[fork.original] !== expected)
+			failures.push(`package.json: overrides.${fork.original} must use the pinned local fork ${expected}`);
+	}
 	for (const [name, requiredVersion] of requiredSecurityOverrides) {
 		const overrideVersion = rootPackage.overrides?.[name];
 		if (overrideVersion !== requiredVersion) {
@@ -52,6 +59,20 @@ export function validateRequiredSecurityOverrides(rootPackage, rootLockfile, cod
 	for (const [name, version] of Object.entries(rootPackage.overrides ?? {})) {
 		if (typeof version !== "string") continue;
 		if (requiredSelectorSecurityOverrides.some((required) => required.selector === name)) continue;
+		const fork = DEPENDENCY_FORKS.find((entry) => entry.original === name);
+		if (fork) {
+			let found = false;
+			for (const [path, entry] of Object.entries(rootLockfile.packages ?? {})) {
+				if (path !== `node_modules/${name}` && !path.endsWith(`/node_modules/${name}`)) continue;
+				found = true;
+				const target = rootLockfile.packages?.[fork.directory];
+				if (entry.link !== true || entry.resolved !== fork.directory || !target || target.link ||
+					target.version !== fork.version || (target.name !== undefined && target.name !== fork.name))
+					failures.push(`package-lock.json: ${path} must resolve to ${fork.name}@${fork.version}`);
+			}
+			if (!found) failures.push(`package-lock.json: ${name} must have a hardened installed resolution`);
+			continue;
+		}
 		for (const [path, entry] of Object.entries(rootLockfile.packages ?? {})) {
 			if (path !== `node_modules/${name}` && !path.endsWith(`/node_modules/${name}`)) continue;
 			if (entry.version !== version) {

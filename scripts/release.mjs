@@ -47,7 +47,7 @@ import { execSync } from "child_process";
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
 import { parseGithubOriginSlug } from "./github-origin.mjs";
-import { executeReleaseMutation } from "./release-recovery.mjs";
+import { assertReleaseSourceIdentity, executeReleaseMutation } from "./release-recovery.mjs";
 import {
 	matchesReleaseCandidateSubject,
 	partitionReleaseChanges,
@@ -107,6 +107,13 @@ function sleep(ms) {
 function getVersion() {
 	const pkg = JSON.parse(readFileSync("packages/ai/package.json", "utf-8"));
 	return pkg.version;
+}
+
+function getReleaseSource() {
+	return {
+		branch: run("git rev-parse --abbrev-ref HEAD", { silent: true }).trim(),
+		sha: run("git rev-parse HEAD", { silent: true }).trim(),
+	};
 }
 
 function compareVersions(a, b) {
@@ -277,7 +284,7 @@ function assertTagIsFree(version) {
 }
 
 // All preflight checks are read-only (no local or remote mutation), so failures exit directly.
-function preflight(prospectiveVersion, recoveredPaths = new Set()) {
+function preflight(prospectiveVersion, validatedSha, recoveredPaths = new Set()) {
 	console.log("Running preflight checks...");
 
 	const branch = run("git rev-parse --abbrev-ref HEAD", { silent: true }).trim();
@@ -307,17 +314,19 @@ function preflight(prospectiveVersion, recoveredPaths = new Set()) {
 
 	assertTagIsFree(prospectiveVersion);
 
-	const preflightSha = run("git rev-parse HEAD", { silent: true }).trim();
+	const source = getReleaseSource();
+	assertReleaseSourceIdentity(validatedSha, source);
+	const preflightSha = source.sha;
 	console.log(`  Preflight OK at ${preflightSha} (prospective version ${prospectiveVersion})\n`);
 	return preflightSha;
 }
 
-function prepareRelease() {
+function prepareRelease(validatedSha) {
 	console.log("\n=== Preparing release ===\n");
 	const prospectiveVersion = computeProspectiveVersion();
-	const preflightSha = preflight(prospectiveVersion);
+	const preflightSha = preflight(prospectiveVersion, validatedSha);
 
-	return executeReleaseMutation({ phase: "prepare", sha: preflightSha }, () => {
+	return executeReleaseMutation({ phase: "prepare", sha: preflightSha }, getReleaseSource, () => {
 		// 2. Local checks do not replace exact-tag platform/provider and artifact gates.
 		console.log(`Local checks run below; exact-tag GitHub platform/provider and artifact gates remain required.\n`);
 
@@ -350,7 +359,7 @@ function findReleaseCandidateSha(version, includeRepairs = true) {
 	return undefined;
 }
 
-function adoptRelease() {
+function adoptRelease(validatedSha) {
 	const version = getVersion();
 	// Recover only bytes this deterministic transformation would have written from HEAD.
 	// An unrelated edit, including another session's changelog note, still fails preflight.
@@ -360,16 +369,17 @@ function adoptRelease() {
 		const expected = prepareAdoptedChangelog(original, version);
 		if (readFileSync(path, "utf8") === expected) recoveredPaths.add(path);
 	}
-	preflight(version, recoveredPaths);
+	const preflightSha = preflight(version, validatedSha, recoveredPaths);
 	if (findReleaseCandidateSha(version)) throw new Error("A canonical candidate already exists; use release:repair or release:promote.");
 	validateAdoptionVersions(".", version);
 	const updates = getChangelogs().map((path) => ({ path, content: prepareAdoptedChangelog(readFileSync(path, "utf8"), version) }));
 	if (updates.length === 0) throw new Error("No changelogs found for release adoption.");
-	console.log(`Adopting prepared version ${version} without another version bump...`);
-	for (const update of updates) writeFileSync(update.path, update.content);
-	// On failure, retain the bounded edits for inspection. Never reset a shared worktree.
-	finishPreparedRelease(`Release v${version}`);
-	return version;
+	return executeReleaseMutation({ phase: "adopt", sha: preflightSha }, getReleaseSource, () => {
+		console.log(`Adopting prepared version ${version} without another version bump...`);
+		for (const update of updates) writeFileSync(update.path, update.content);
+		finishPreparedRelease(`Release v${version}`);
+		return version;
+	});
 }
 
 function finishPreparedRelease(subject) {
@@ -384,10 +394,10 @@ function finishPreparedRelease(subject) {
 	run("git push origin main");
 }
 
-function prepareReleaseRepair() {
+function prepareReleaseRepair(validatedSha) {
 	console.log("\n=== Repairing untagged release ===\n");
 	const version = getVersion();
-	const preflightSha = preflight(version);
+	const preflightSha = preflight(version, validatedSha);
 	const originalReleaseSha = findReleaseCandidateSha(version, false);
 	if (!originalReleaseSha) {
 		throw new Error(`Could not find the original "Release v${version}" commit; refusing release repair.`);
@@ -400,7 +410,7 @@ function prepareReleaseRepair() {
 		throw new Error(`Original release commit ${originalReleaseSha} is not an ancestor of HEAD; refusing release repair.`);
 	}
 
-	return executeReleaseMutation({ phase: "repair", sha: preflightSha }, () => {
+	return executeReleaseMutation({ phase: "repair", sha: preflightSha }, getReleaseSource, () => {
 		console.log(`Repairing prepared version ${version} without another version bump...`);
 		removeEmptyUnreleasedSections(version);
 		console.log();
@@ -478,7 +488,7 @@ async function requireGreenMainCi() {
 		const decision = mainCiGateDecision(runs, sha);
 		if (decision.verdict === "green") {
 			console.log(`  ${MAIN_CI_WORKFLOW} succeeded on ${sha}\n`);
-			return;
+			return sha;
 		}
 		if (decision.verdict === "red") {
 			const urls = runs.filter((entry) => entry.headSha === sha).map((entry) => entry.url).join("\n  ");
@@ -610,16 +620,17 @@ try {
 	} else if (RELEASE_TARGET === "prune") {
 		pruneReleaseBranches({ dryRun: process.argv.includes("--dry-run") });
 	} else if (RELEASE_TARGET === "adopt") {
-		await promoteRelease(adoptRelease());
+		const validatedSha = await requireGreenMainCi();
+		await promoteRelease(adoptRelease(validatedSha));
 	} else if (RELEASE_TARGET === "promote") {
 		await promoteRelease();
 	} else if (isRepairTarget) {
-		await requireGreenMainCi();
-		const version = prepareReleaseRepair();
+		const validatedSha = await requireGreenMainCi();
+		const version = prepareReleaseRepair(validatedSha);
 		await promoteRelease(version);
 	} else {
-		await requireGreenMainCi();
-		const version = prepareRelease();
+		const validatedSha = await requireGreenMainCi();
+		const version = prepareRelease(validatedSha);
 		await promoteRelease(version);
 	}
 } catch (error) {

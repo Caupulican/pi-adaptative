@@ -12,7 +12,8 @@
 	"scripts": {
 		"clean": "npm run clean --workspaces",
 		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../coding-agent && npm run build",
-		"check": "biome check --error-on-warnings . && npm run check:biome-semantic-safety && npm run check:release-binary-benchmark && npm run check:pinned-deps && npm run check:typescript-toolchain && npm run check:ts-imports && npm run check:coordinator-boundaries && npm run check:kernel-layer && npm run check:multi-tenancy-census && npm run check:clone-config && npm run check:clones && npm run check:contract-doctrine && npm run check:precommit-gate && npm run check:architecture-map && npm run check:output-reduction && node scripts/run-tsc.mjs --noEmit && npm run check:browser-smoke",
+		"check": "biome check --error-on-warnings . && npm run check:biome-semantic-safety && npm run check:release-binary-benchmark && npm run check:pinned-deps && npm run check:dependency-forks && npm run check:typescript-toolchain && npm run check:ts-imports && npm run check:coordinator-boundaries && npm run check:kernel-layer && npm run check:multi-tenancy-census && npm run check:clone-config && npm run check:clones && npm run check:contract-doctrine && npm run check:precommit-gate && npm run check:architecture-map && npm run check:output-reduction && node scripts/run-tsc.mjs --noEmit && npm run check:browser-smoke",
+		"check:sandbox-fork-install": "node scripts/check-sandbox-fork-install.mjs",
 		"format": "biome format --write .",
 		"check:biome-semantic-safety": "node --test scripts/biome-semantic-safety.test.mjs",
 		"check:browser-smoke": "node --test scripts/browser-smoke-node-import-policy.test.mjs && node scripts/check-browser-smoke.mjs",
@@ -34,6 +35,7 @@
 		"check:multi-tenancy-census": "node --test scripts/multi-tenancy-census.test.mjs",
 		"check:model-catalog": "node packages/ai/scripts/check-model-catalog.mjs",
 		"check:pinned-deps": "node --test scripts/dependency-security-policy.test.mjs && node scripts/check-pinned-deps.mjs",
+		"check:dependency-forks": "node scripts/generate-dependency-forks.mjs && node --test scripts/dependency-forks.test.mjs",
 		"check:release-binary-benchmark": "node --test scripts/install-standalone.test.mjs scripts/install-standalone-windows.test.mjs scripts/release-binary-rpc-benchmark.test.mjs scripts/release-binary-performance-gate.test.mjs",
 		"check:typescript-toolchain": "node --test scripts/typescript-toolchain.test.mjs",
 		"check:ts-imports": "node scripts/check-ts-relative-imports.mjs",
@@ -61,6 +63,8 @@
 		"prepare": "husky"
 	},
 	"devDependencies": {
+		"braces": "file:./vendor/pi-pattern-guard",
+		"node-forge": "file:./packages/coding-agent/examples/extensions/sandbox/vendor/pi-certificate-codec",
 		"@anthropic-ai/sandbox-runtime": "0.0.75",
 		"@biomejs/biome": "2.5.12",
 		"@types/node": "24.13.3",
@@ -80,6 +84,8 @@
 	},
 	"version": "0.0.3",
 	"overrides": {
+		"braces": "$braces",
+		"node-forge": "$node-forge",
 		"brace-expansion": "5.0.12",
 		"nanoid": "3.3.18",
 		"protobufjs": "7.6.6",

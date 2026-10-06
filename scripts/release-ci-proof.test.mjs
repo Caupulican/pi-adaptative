@@ -8,6 +8,7 @@ test("full matrix proof rejects each missing, duplicate, pending or skipped job 
 	const complete = completeCiJobs();
 	assert.equal(hasCompleteCiMatrix(complete), true);
 	for (let index = 0; index < complete.length; index++) {
+		if (index === 1) assert.equal(hasCompleteCiMatrix(complete.map((job, position) => position !== index ? job : { ...job, steps: job.steps.filter((step) => step.name !== "Dependency hardening") })), false);
 		assert.equal(hasCompleteCiMatrix(complete.filter((_, i) => i !== index)), false);
 		assert.equal(hasCompleteCiMatrix([...complete, complete[index]]), false);
 		for (const patch of [{ status: "in_progress" }, { conclusion: "skipped" }, { steps: [] }]) {
@@ -17,17 +18,19 @@ test("full matrix proof rejects each missing, duplicate, pending or skipped job 
 	assert.equal(hasCompleteCiMatrix(Array.from({ length: 2 }, () => complete[0])), false);
 });
 
-test("publication rejects omitted or non-successful provider regressions on either platform", () => {
+test("publication rejects omitted or non-successful provider and fork-install regressions on either platform", () => {
 	const complete = completeCiJobs();
 	for (let index = 0; index < complete.length; index++) {
+		for (const required of ["Provider regressions", "Dependency fork installation"]) {
 		for (const conclusion of ["missing", "skipped", "failure", null]) {
 			const jobs = complete.map((job, position) => position !== index ? job : {
 				...job,
 				steps: conclusion === "missing"
-					? job.steps.filter((step) => step.name !== "Provider regressions")
-					: job.steps.map((step) => step.name === "Provider regressions" ? { ...step, conclusion } : step),
+					? job.steps.filter((step) => step.name !== required)
+					: job.steps.map((step) => step.name === required ? { ...step, conclusion } : step),
 			});
 			assert.equal(hasCompleteCiMatrix(jobs), false, `${index}/${conclusion}`);
+		}
 		}
 	}
 });

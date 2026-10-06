@@ -2,8 +2,8 @@ import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 const REQUIRED_JOBS = new Map([
-	["Build, check (ubuntu-latest)", ["Build", "Check", "Provider regressions"]],
-	["Build, check (windows-latest)", ["Build", "Provider regressions"]],
+	["Build, check (ubuntu-latest)", ["Build", "Check", "Provider regressions", "Dependency fork installation"]],
+	["Build, check (windows-latest)", ["Build", "Provider regressions", "Dependency hardening", "Dependency fork installation"]],
 ]);
 
 const CALLER_JOB_PREFIX = "quality-gate / ";
