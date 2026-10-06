@@ -716,7 +716,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						const index = blocks.findIndex((b) => b.index === event.index);
 						const block = blocks[index];
 						if (block && block.type === "thinking") {
-							// The native CLI and SDK treat this as the authoritative signature, not a fragment.
+							// Signature deltas replace the authoritative value; they are not fragments.
 							block.thinkingSignature = event.delta.signature;
 						}
 					}
@@ -1030,7 +1030,7 @@ function buildParams(
 		stream: true,
 	};
 
-	// For OAuth tokens, we MUST include Claude Code identity
+	// Subscription authentication requires its protocol identity.
 	if (isOAuthToken) {
 		params.system = [
 			{

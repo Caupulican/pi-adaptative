@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Refreshed Anthropic OAuth request compatibility metadata for inference and account usage.
+
+### Fixed
+
+- Corrected verification documentation to describe conditional pre-commit tooling tests accurately.
+
 ## [0.103.3] - 2026-10-05
 
 ### Added

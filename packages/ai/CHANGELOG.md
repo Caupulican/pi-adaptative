@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Refreshed Anthropic OAuth request compatibility metadata for inference and account usage.
+
 ## [0.103.3] - 2026-10-05
 
 ### Added

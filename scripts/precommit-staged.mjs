@@ -8,8 +8,8 @@
  * contract-doctrine gate (already staged-aware), the browser smoke check when its inputs are staged,
  * and one project type check when a TypeScript source is staged (per-file type checking is unsound:
  * an importer of the changed file can break). Everything else in `npm run check` stays a CI and
- * release gate. The hook runs no tests; it reports the branch's last recorded CI verdict (see
- * ci-status.mjs) as a warning.
+ * release gate. The conditional browser smoke check includes focused tooling tests; the hook
+ * also reports the branch's last recorded CI verdict (see ci-status.mjs) as a warning.
  *
  * `--dry-run` prints the plan for the current staged set without running anything.
  */
