@@ -96,3 +96,11 @@ test("prepare, repair and adoption all receive the validated main CI revision", 
 	assert.equal((release.match(/const validatedSha = await requireGreenMainCi\(\)/g) ?? []).length, 3);
 	assert.match(release, /assertReleaseSourceIdentity\(validatedSha, source\)/);
 });
+
+test("promotion reports workflow evidence without claiming tests or published artifacts", () => {
+	const release = readFileSync(new URL("./release.mjs", import.meta.url), "utf8");
+	assert.match(release, /destructive\.yml workflow gate succeeded/);
+	assert.match(release, /this does not establish test coverage/);
+	assert.match(release, /standalone artifact publication remains gated/);
+	assert.doesNotMatch(release, /Destructive suite (?:succeeded|did not succeed)|=== Released/);
+});

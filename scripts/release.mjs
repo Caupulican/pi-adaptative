@@ -581,7 +581,7 @@ async function promoteRelease(versionArg) {
 	const destructive = await waitForDestructive(releaseSha, version);
 	if (destructive !== "success") {
 		throw new Error(
-			`Destructive suite did not succeed for release commit ${releaseSha} (conclusion: ${destructive}). ` +
+			`destructive.yml workflow gate did not succeed for release commit ${releaseSha} (conclusion: ${destructive}). ` +
 				"No tag was created. Fix or rerun destructive.yml, then run \"npm run release:promote\" to resume.",
 		);
 	}
@@ -592,7 +592,7 @@ async function promoteRelease(versionArg) {
 		console.log(`\n=== ${tag} already promoted ===\n`);
 		return;
 	}
-	console.log(`  Destructive suite succeeded for ${releaseSha}. Tagging ${tag}...`);
+	console.log(`  destructive.yml workflow gate succeeded for ${releaseSha}; this does not establish test coverage. Tagging ${tag}...`);
 	try {
 		// Release tags are plain lightweight refs. Disable host-level forced tag
 		// signing/annotation (tag.gpgSign) so tagging never depends on local
@@ -605,7 +605,7 @@ async function promoteRelease(versionArg) {
 	}
 
 	pruneAfterRelease();
-	console.log(`\n=== Released ${tag}; standalone binary publishing starts now ===\n`);
+	console.log(`\n=== Promoted ${tag}; standalone artifact publication remains gated ===\n`);
 }
 
 // Main flow
