@@ -35,7 +35,7 @@
 		"check:multi-tenancy-census": "node --test scripts/multi-tenancy-census.test.mjs",
 		"check:model-catalog": "node packages/ai/scripts/check-model-catalog.mjs",
 		"check:pinned-deps": "node --test scripts/dependency-security-policy.test.mjs && node scripts/check-pinned-deps.mjs",
-		"check:dependency-forks": "node scripts/generate-dependency-forks.mjs && node --test scripts/dependency-forks.test.mjs",
+		"check:dependency-forks": "node scripts/generate-dependency-forks.mjs && node --test scripts/dependency-forks.test.mjs scripts/source-map-security.test.mjs",
 		"check:release-binary-benchmark": "node --test scripts/install-standalone.test.mjs scripts/install-standalone-windows.test.mjs scripts/release-binary-rpc-benchmark.test.mjs scripts/release-binary-performance-gate.test.mjs",
 		"check:typescript-toolchain": "node --test scripts/typescript-toolchain.test.mjs",
 		"check:ts-imports": "node scripts/check-ts-relative-imports.mjs",
@@ -63,6 +63,8 @@
 		"prepare": "husky"
 	},
 	"devDependencies": {
+		"source-map-js": "file:./vendor/pi-source-map-codec",
+		"magicast": "file:./vendor/pi-config-transform",
 		"braces": "file:./vendor/pi-pattern-guard",
 		"node-forge": "file:./packages/coding-agent/examples/extensions/sandbox/vendor/pi-certificate-codec",
 		"@anthropic-ai/sandbox-runtime": "0.0.75",
@@ -91,6 +93,8 @@
 		"protobufjs": "7.6.6",
 		"rimraf": "6.1.3",
 		"shell-quote": "1.10.0",
+		"source-map-js": "$source-map-js",
+		"magicast": "$magicast",
 		"undici@7": "7.29.1",
 		"undici@8": "8.10.2",
 		"ws": "8.21.3",

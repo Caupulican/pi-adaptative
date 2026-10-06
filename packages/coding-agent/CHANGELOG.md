@@ -9,6 +9,7 @@
 ### Fixed
 
 - Corrected verification documentation to describe conditional pre-commit tooling tests accurately.
+- Hardened shared source-map processing, removed a vulnerable bundled decoder, and corrected indexed-map positions and round trips.
 
 ## [0.103.3] - 2026-10-05
 

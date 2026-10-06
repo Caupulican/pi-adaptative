@@ -1,0 +1,28 @@
+{
+	"name": "pi-config-transform",
+	"version": "0.5.4-pi.1",
+	"private": true,
+	"type": "module",
+	"main": "./dist/index.js",
+	"license": "MIT",
+	"dependencies": {
+		"@babel/parser": "7.29.8",
+		"@babel/types": "7.29.8",
+		"source-map-js": "file:../pi-source-map-codec"
+	},
+	"files": [
+		"dist",
+		"LICENSE",
+		"PROVENANCE.json"
+	],
+	"engines": {
+		"node": ">=24.20.0"
+	},
+	"exports": {
+		".": "./dist/index.js",
+		"./core": "./dist/core.js",
+		"./helpers": "./dist/helpers.js",
+		"./package.json": "./package.json"
+	},
+	"types": "./dist/index.d.ts"
+}

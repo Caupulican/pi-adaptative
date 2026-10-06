@@ -1,26 +1,26 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { DEPENDENCY_FORKS } from "./dependency-forks/definitions.mjs";
 import { validateRequiredSecurityOverrides as validatePolicy } from "./lib/dependency-security-policy.mjs";
 
 function readJson(path) {
 	return JSON.parse(readFileSync(path, "utf8"));
 }
 
-// Older unit cases isolate unrelated version rules. Supply the new independent fork contract
-// explicitly; the real-tree and fork-negative cases below call the production policy directly.
+// Isolated version-rule cases supply independent contracts explicitly. Real-tree and
+// focused negative cases below call the complete production policy directly.
 function validateRequiredSecurityOverrides(root, lock, agent) {
 	return validatePolicy({ ...root, devDependencies: {
-		braces: "file:./vendor/pi-pattern-guard", "node-forge": "file:./packages/coding-agent/examples/extensions/sandbox/vendor/pi-certificate-codec", ...root.devDependencies,
+		...Object.fromEntries(DEPENDENCY_FORKS.map((fork) => [fork.original, `file:./${fork.directory}`])), ...root.devDependencies,
 	}, overrides: {
-		braces: "$braces",
-		"node-forge": "$node-forge",
+		...Object.fromEntries(DEPENDENCY_FORKS.map((fork) => [fork.original, `$${fork.original}`])),
 		...root.overrides,
 	} }, { ...lock, packages: {
-		"node_modules/braces": { link: true, resolved: "vendor/pi-pattern-guard" },
-		"vendor/pi-pattern-guard": { version: "3.0.3-pi.1" },
-		"node_modules/node-forge": { link: true, resolved: "packages/coding-agent/examples/extensions/sandbox/vendor/pi-certificate-codec" },
-		"packages/coding-agent/examples/extensions/sandbox/vendor/pi-certificate-codec": { version: "1.4.0-pi.1" },
+		...Object.fromEntries(DEPENDENCY_FORKS.flatMap((fork) => [
+			[`node_modules/${fork.original}`, { link: true, resolved: fork.directory }],
+			[fork.directory, { name: fork.name, version: fork.version }],
+		])),
 		...lock.packages,
 	} }, agent);
 }
@@ -40,12 +40,12 @@ test("removing a required fork or restoring an upstream resolution fails the saf
 	const root = readJson("package.json");
 	const lock = readJson("package-lock.json");
 	const agent = readJson("packages/coding-agent/package.json");
-	for (const name of ["braces", "node-forge"]) {
+	for (const { original: name, upstreamVersion } of DEPENDENCY_FORKS) {
 		const omitted = structuredClone(root);
 		delete omitted.overrides[name];
 		assert.ok(validatePolicy(omitted, lock, agent).some((failure) => failure.includes(`overrides.${name}`)));
 		const upstream = structuredClone(lock);
-		upstream.packages[`node_modules/${name}`] = { name, version: name === "braces" ? "3.0.3" : "1.4.0" };
+		upstream.packages[`node_modules/${name}`] = { name, version: upstreamVersion };
 		assert.ok(validatePolicy(root, upstream, agent).some((failure) => failure.includes(`${name} must resolve`)));
 	}
 });
@@ -67,6 +67,23 @@ test("local-fork evidence rejects wrong paths, missing targets, malformed links 
 		mutate(changed);
 		assert.ok(validatePolicy(root, changed, agent).some((failure) => failure.includes("braces must resolve")));
 	}
+});
+
+test("source-map safety policy rejects removed pins and vulnerable direct or nested resolutions", () => {
+	const root = readJson("package.json");
+	const lock = readJson("package-lock.json");
+	const agent = readJson("packages/coding-agent/package.json");
+	const omitted = structuredClone(root);
+	delete omitted.overrides["source-map-js"];
+	assert.ok(validatePolicy(omitted, lock, agent).some((failure) => failure.includes("overrides.source-map-js")));
+	for (const path of ["node_modules/source-map-js", "node_modules/consumer/node_modules/source-map-js"]) {
+		const vulnerable = structuredClone(lock);
+		vulnerable.packages[path] = { version: "1.2.1" };
+		assert.ok(validatePolicy(root, vulnerable, agent).includes(`package-lock.json: ${path} must resolve to pi-source-map-codec@1.2.2-pi.1`));
+	}
+	const missing = structuredClone(lock);
+	delete missing.packages["node_modules/source-map-js"];
+	assert.ok(validatePolicy(root, missing, agent).some((failure) => failure.includes("source-map-js must have a hardened installed resolution")));
 });
 
 test("a vulnerable resolution fails even when the manifest claims the patched override", () => {

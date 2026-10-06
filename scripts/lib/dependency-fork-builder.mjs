@@ -21,25 +21,41 @@ export function buildDependencyForkFiles(root, definition) {
 		if (metadata.name !== definition.original || metadata.version !== definition.upstreamVersion)
 			throw new Error(`Dependency source identity mismatch: ${definition.original}`);
 		const files = new Map();
-		for (const entry of readdirSync(join(upstream, "lib"), { withFileTypes: true })) {
-			if (!entry.isFile() || !entry.name.endsWith(".js")) throw new Error(`Unexpected upstream lib entry: ${entry.name}`);
-			files.set(`lib/${entry.name}`, readFileSync(join(upstream, "lib", entry.name)));
+		if (definition.sourceFiles) {
+			for (const path of definition.sourceFiles) files.set(path, readFileSync(join(upstream, path)));
+		} else {
+			for (const entry of readdirSync(join(upstream, "lib"), { withFileTypes: true })) {
+				if (!entry.isFile() || !entry.name.endsWith(".js")) throw new Error(`Unexpected upstream lib entry: ${entry.name}`);
+				files.set(`lib/${entry.name}`, readFileSync(join(upstream, "lib", entry.name)));
+			}
+			if (definition.main === "index.js") files.set("index.js", readFileSync(join(upstream, "index.js")));
 		}
-		if (definition.main === "index.js") files.set("index.js", readFileSync(join(upstream, "index.js")));
 		files.set("LICENSE", readFileSync(join(upstream, "LICENSE")));
 		const patched = [];
 		for (const patch of definition.patches) {
 			const previous = files.get(patch.file)?.toString("utf8");
-			if (previous === undefined || previous.split(patch.before).length - 1 !== (patch.count ?? 1))
+			let before = patch.before;
+			if (patch.region && previous !== undefined) {
+				const { start, end, sha256 } = patch.region;
+				if (previous.split(start).length !== 2 || previous.split(end).length !== 2)
+					throw new Error(`Dependency region boundary mismatch: ${definition.original}/${patch.file}`);
+				before = previous.slice(previous.indexOf(start), previous.indexOf(end));
+				if (createHash("sha256").update(before).digest("hex") !== sha256)
+					throw new Error(`Dependency region integrity mismatch: ${definition.original}/${patch.file}`);
+			}
+			if (previous === undefined || typeof before !== "string" || !before || previous.split(before).length - 1 !== (patch.count ?? 1))
 				throw new Error(`Dependency patch witness mismatch: ${definition.original}/${patch.file}`);
-			files.set(patch.file, Buffer.from(previous.replaceAll(patch.before, patch.after)));
+			files.set(patch.file, Buffer.from(previous.replaceAll(before, patch.after)));
 			patched.push(patch.file);
 		}
 		for (const [destination, owner] of Object.entries(definition.helpers)) files.set(destination, readFileSync(resolve(root, owner)));
 		const packageJson = {
-			name: definition.name, version: definition.version, private: true, type: "commonjs", main: definition.main,
-			license: definition.license, dependencies: definition.dependencies, files: ["lib", "index.js", "LICENSE", "PROVENANCE.json"],
+			name: definition.name, version: definition.version, private: true, type: metadata.type ?? "commonjs", main: definition.main,
+			license: definition.license, dependencies: definition.dependencies,
+			files: definition.sourceFiles ? [...new Set([...files.keys()].map((path) => path.split("/")[0])), "PROVENANCE.json"] : ["lib", "index.js", "LICENSE", "PROVENANCE.json"],
 			engines: { node: ">=24.20.0" },
+			...(metadata.exports ? { exports: metadata.exports } : {}),
+			...(metadata.types ? { types: metadata.types } : {}),
 			...(metadata.browser ? { browser: metadata.browser } : {}),
 		};
 		files.set("package.json", Buffer.from(`${JSON.stringify(packageJson, null, "\t")}\n`));
@@ -47,7 +63,7 @@ export function buildDependencyForkFiles(root, definition) {
 		files.set("PROVENANCE.json", Buffer.from(`${JSON.stringify({
 			upstream: { name: definition.original, version: definition.upstreamVersion, integrity: definition.integrity },
 			advisory: definition.advisory, patchedFiles: [...new Set(patched)], ownedHelpers: definition.helpers,
-			contract: "Node main/lib contract consumed by Pi; upstream browser/Flash distribution artifacts are not used or republished.",
+			contract: definition.sourceFiles ? "Pinned Node module entry points and declarations; embedded source-map processing is owned by the shared codec." : "Node main/lib contract consumed by Pi; upstream browser/Flash distribution artifacts are not used or republished.",
 			sourceOwner: "scripts/dependency-forks/definitions.mjs", generator: "scripts/generate-dependency-forks.mjs", hashes,
 		}, null, "\t")}\n`));
 		return files;

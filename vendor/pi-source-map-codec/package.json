@@ -1,0 +1,19 @@
+{
+	"name": "pi-source-map-codec",
+	"version": "1.2.2-pi.1",
+	"private": true,
+	"type": "commonjs",
+	"main": "source-map.js",
+	"license": "BSD-3-Clause",
+	"dependencies": {},
+	"files": [
+		"source-map.js",
+		"source-map.d.ts",
+		"lib",
+		"LICENSE",
+		"PROVENANCE.json"
+	],
+	"engines": {
+		"node": ">=24.20.0"
+	}
+}

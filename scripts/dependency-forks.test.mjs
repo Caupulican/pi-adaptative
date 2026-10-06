@@ -39,7 +39,7 @@ test("generated adapters exactly reproduce pinned upstream sources plus owned pa
 });
 
 test("real consumers resolve the hardened adapters, not upstream registry modules", () => {
-	for (const [consumer, name] of [["micromatch", "braces"], ["@anthropic-ai/sandbox-runtime", "node-forge"]]) {
+	for (const [consumer, name] of [["micromatch", "braces"], ["@anthropic-ai/sandbox-runtime", "node-forge"], ["postcss", "source-map-js"], ["@vitest/coverage-v8", "magicast"], ["magicast", "source-map-js"]]) {
 		const definition = DEPENDENCY_FORKS.find((entry) => entry.original === name);
 		const consumerRequire = createRequire(require.resolve(consumer));
 		const expected = realpathSync(join(root, definition.directory, definition.main));

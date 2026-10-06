@@ -1,0 +1,27 @@
+{
+	"upstream": {
+		"name": "magicast",
+		"version": "0.5.4",
+		"integrity": "sha512-llBEhWm1SacoRwgHUoQJYtwp4PBLF4faQi5TCpIGyGs9n4y5+juI0tDgyKIfpqxckRHaHzouUEph3THklWh03w=="
+	},
+	"advisory": "GHSA-68fv-2mgg-jv7q",
+	"patchedFiles": [
+		"dist/builders-pgs2P7Vh.js"
+	],
+	"ownedHelpers": {},
+	"contract": "Pinned Node module entry points and declarations; embedded source-map processing is owned by the shared codec.",
+	"sourceOwner": "scripts/dependency-forks/definitions.mjs",
+	"generator": "scripts/generate-dependency-forks.mjs",
+	"hashes": {
+		"dist/builders-pgs2P7Vh.js": "59db22af2647be0f8e9faf36ec4201b244f048b1de103813ec55a76b1a82a56c",
+		"dist/core.js": "e326eef6a0d73f27a7d1debaf5ecaf3939a9c37c3a847b4bb92a0b4e36b8795e",
+		"dist/helpers.js": "ce0d1af528a288331d16f6d1ef3ab63f28053d8adaf859bcd543e0f77f503e9c",
+		"dist/index.js": "9c089923dca26d842dcc42d035fa82212513c9384d3a3843e096246e8646a1ae",
+		"dist/core.d.ts": "5141a2f00705df813329336691247c5830a88b3aa4814cb3f6df1d15cac91edf",
+		"dist/helpers.d.ts": "d0babdaee6333fab02d8cb8931bce4cb1573d2d84b3c71af15c7933c45cdc4d9",
+		"dist/index.d.ts": "63ffe1fc2e6b9c25c7bc4935f9e70da1f44ac5dcf8cb72ee3df6fa99aa573f71",
+		"dist/types-BneF6GqE.d.ts": "f311aa1cdd34dfb7d29c180c7419ec6a4c478acd4d76d4ef3abd559f9f8f897a",
+		"LICENSE": "7917b04272f3f7c11f9fb89716742747a77f5906ebe5a81e70cbd090b8c7f961",
+		"package.json": "e33dce577ab71a8cd5a532879e929fb4c8c377452df9cabea85118d9d778d859"
+	}
+}

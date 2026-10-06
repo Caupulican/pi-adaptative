@@ -1,5 +1,37 @@
 export const DEPENDENCY_FORKS = [
 	{
+		original: "source-map-js", upstreamVersion: "1.2.2", name: "pi-source-map-codec", version: "1.2.2-pi.1",
+		archive: "scripts/dependency-forks/sources/source-map-js-1.2.2.tar.gz",
+		integrity: "sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==",
+		directory: "vendor/pi-source-map-codec", main: "source-map.js", license: "BSD-3-Clause", dependencies: {},
+		advisory: "GHSA-68fv-2mgg-jv7q", helpers: {},
+		sourceFiles: ["source-map.js", "source-map.d.ts", ...["array-set", "base64-vlq", "base64", "binary-search", "mapping-list", "quick-sort", "source-map-consumer", "source-map-generator", "source-node", "util"].map((name) => `lib/${name}.js`), ...["source-map-consumer", "source-map-generator", "source-node"].map((name) => `lib/${name}.d.ts`)],
+		patches: [
+			{ file: "lib/source-map-consumer.js", before: " *     line number is 1-based. \n", after: " *     line number is 1-based.\n" },
+			{ file: "lib/source-map-generator.js", before: "if (sourceRoot !== null)", after: "if (sourceRoot != null)" },
+			{ file: "lib/source-map-consumer.js", before: "section.generatedOffset.generatedColumn);", after: "(section.generatedOffset.generatedColumn - 1));" },
+			{ file: "lib/source-map-consumer.js", before: "      // Only consider this section if the requested source is in the list of\n      // sources of the consumer.\n      if (section.consumer._findSourceIndex(util.getArg(aArgs, 'source')) === -1) {\n        continue;\n      }\n", after: "" },
+			{ file: "lib/source-map-consumer.js", before: "if (generatedPosition)", after: "if (generatedPosition.line != null && generatedPosition.column != null)" },
+			{ file: "lib/source-map-consumer.js", before: "section.generatedOffset.generatedLine === generatedPosition.line", after: "generatedPosition.line === 1" },
+			{ file: "lib/source-map-consumer.js", before: "section.generatedOffset.generatedLine === mapping.generatedLine", after: "mapping.generatedLine === 1" },
+			{ file: "lib/source-map-consumer.js", before: "if (mapping.name)", after: "if (mapping.name != null)" },
+			{ file: "lib/source-map-consumer.js", before: "var source = section.consumer._sources.at(mapping.source);\n        if(source !== null) {\n          source = util.computeSourceURL(section.consumer.sourceRoot, source, this._sourceMapURL);\n        }\n        this._sources.add(source);\n        source = this._sources.indexOf(source);", after: "var source = null;\n        if (mapping.source != null) {\n          source = section.consumer._sources.at(mapping.source);\n          source = util.computeSourceURL(section.consumer.sourceRoot, source, this._sourceMapURL);\n          this._sources.add(source);\n          source = this._sources.indexOf(source);\n        }" },
+		],
+	},
+	{
+		original: "magicast", upstreamVersion: "0.5.4", name: "pi-config-transform", version: "0.5.4-pi.1",
+		archive: "scripts/dependency-forks/sources/magicast-0.5.4.tgz",
+		integrity: "sha512-llBEhWm1SacoRwgHUoQJYtwp4PBLF4faQi5TCpIGyGs9n4y5+juI0tDgyKIfpqxckRHaHzouUEph3THklWh03w==",
+		directory: "vendor/pi-config-transform", main: "./dist/index.js", license: "MIT",
+		dependencies: { "@babel/parser": "7.29.8", "@babel/types": "7.29.8", "source-map-js": "file:../pi-source-map-codec" },
+		advisory: "GHSA-68fv-2mgg-jv7q", helpers: {},
+		sourceFiles: ["dist/builders-pgs2P7Vh.js", "dist/core.js", "dist/helpers.js", "dist/index.js", "dist/core.d.ts", "dist/helpers.d.ts", "dist/index.d.ts", "dist/types-BneF6GqE.d.ts"],
+		patches: [
+			{ file: "dist/builders-pgs2P7Vh.js", before: "import * as babelParser from \"@babel/parser\";", after: "import * as babelParser from \"@babel/parser\";\nimport * as import_source_map from \"source-map-js\";" },
+			{ file: "dist/builders-pgs2P7Vh.js", region: { start: "//#region node_modules/.pnpm/source-map-js@1.2.1/node_modules/source-map-js/lib/base64.js", end: "const n$2 = namedTypes$1;", sha256: "a556521a7d147f37354b7d166cb5407c4e9eeb367f1301fea7dd45db2252cbec" }, after: "//#region vendor/recast/lib/util.ts\n" },
+		],
+	},
+	{
 		original: "braces", upstreamVersion: "3.0.3", name: "pi-pattern-guard", version: "3.0.3-pi.1",
 		archive: "scripts/dependency-forks/sources/braces-3.0.3.tar.gz",
 		integrity: "sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA==",
