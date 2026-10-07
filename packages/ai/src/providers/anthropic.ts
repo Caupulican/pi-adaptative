@@ -37,12 +37,12 @@ import type {
 import { type AssistantMessageDiagnostic, appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
+import { awaitAuthorizationInput } from "../utils/oauth/authorization-input.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
-
-import { ANTHROPIC_MESSAGES_USER_AGENT } from "./anthropic-identity.ts";
+import { type AnthropicCompatibilitySnapshot, resolveAnthropicCompatibility } from "./anthropic-identity.ts";
 import { AnthropicUsageAccumulator } from "./anthropic-usage.ts";
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
@@ -198,8 +198,8 @@ export interface AnthropicOptions extends StreamOptions {
 	/**
 	 * Effort level for adaptive thinking models.
 	 * Controls how much thinking Claude allocates:
-	 * - "max": Always thinks with no constraints (Opus 4.6 only)
-	 * - "xhigh": Highest reasoning level (Opus 4.7)
+	 * - "max": Maximum capability on models that advertise this effort
+	 * - "xhigh": Extended effort on models that advertise this level
 	 * - "high": Always thinks, deep reasoning
 	 * - "medium": Moderate thinking, may skip for simple queries
 	 * - "low": Minimal thinking, skips for simple tasks
@@ -527,6 +527,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 		const usageAccumulator = new AnthropicUsageAccumulator(model, output.usage);
 		const disclosureStartedAt = Date.now();
 		let response: Response | undefined;
+		let compatibility: Promise<AnthropicCompatibilitySnapshot> | undefined;
 
 		try {
 			let client: Anthropic;
@@ -542,7 +543,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				context.tools ?? [],
 			);
 
-			const initClient = (key: string | undefined) => {
+			const initClient = async (key: string | undefined) => {
 				if (!key && !hasAuthorizationHeader(model.headers, options?.headers)) {
 					throw new Error(`No API key for provider: ${model.provider}`);
 				}
@@ -555,23 +556,39 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					});
 				}
 
-				return createClient(
+				const created = await createClient(
 					model,
 					key,
 					options?.interleavedThinking ?? true,
 					shouldUseFineGrainedToolStreamingBeta(model, context),
 					toolDisclosure.enabled,
+					() => (compatibility ??= awaitAuthorizationInput(resolveAnthropicCompatibility, options?.signal)),
 					options?.headers,
 					copilotDynamicHeaders,
 					cacheSessionId,
 				);
+				if (
+					created.compatibility &&
+					!output.diagnostics?.some((entry) => entry.type === "anthropic_client_compatibility")
+				) {
+					appendAssistantMessageDiagnostic(output, {
+						type: "anthropic_client_compatibility",
+						timestamp: Date.now(),
+						details: {
+							inspection: created.compatibility.inspection,
+							installedVersion: created.compatibility.installedVersion,
+							message: created.compatibility.warning,
+						},
+					});
+				}
+				return created;
 			};
 
 			if (options?.client) {
 				client = options.client;
 				isOAuth = false;
 			} else {
-				const created = initClient(apiKey);
+				const created = await initClient(apiKey);
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
@@ -596,7 +613,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			response = await executeWithAuthRecovery(model.provider, options, async (replacementKey) => {
 				if (replacementKey) {
 					apiKey = replacementKey;
-					const created = initClient(apiKey);
+					const created = await initClient(apiKey);
 					client = created.client;
 					isOAuth = created.isOAuthToken;
 					toolNameMap = createToolNameMap(
@@ -804,7 +821,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 
 /**
  * Map ThinkingLevel to Anthropic effort levels for adaptive thinking.
- * Note: effort "max" is only valid on Opus 4.6, while Opus 4.7 supports "xhigh".
+ * The catalog defines which effort levels each model supports.
  */
 function mapThinkingLevelToEffort(
 	model: Model<"anthropic-messages">,
@@ -866,16 +883,17 @@ function createAnthropicSdkClient(options: AnthropicClientOptions): Anthropic {
 	return new Anthropic({ ...options, dangerouslyAllowBrowser: true });
 }
 
-function createClient(
+async function createClient(
 	model: Model<"anthropic-messages">,
 	apiKey: string | undefined,
 	interleavedThinking: boolean,
 	useFineGrainedToolStreamingBeta: boolean,
 	useToolSchemaDisclosure: boolean,
+	getCompatibility: () => Promise<AnthropicCompatibilitySnapshot>,
 	optionsHeaders?: Record<string, string>,
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
-): { client: Anthropic; isOAuthToken: boolean } {
+): Promise<{ client: Anthropic; isOAuthToken: boolean; compatibility?: AnthropicCompatibilitySnapshot }> {
 	// Adaptive thinking models have interleaved thinking built in, so skip the beta header.
 	const needsInterleavedBeta = interleavedThinking && model.compat?.forceAdaptiveThinking !== true;
 	const betaFeatures: string[] = [];
@@ -953,6 +971,7 @@ function createClient(
 	}
 
 	if (isOAuthToken(apiKey)) {
+		const compatibility = await getCompatibility();
 		const client = createAnthropicSdkClient({
 			apiKey: null,
 			authToken: apiKey,
@@ -962,7 +981,7 @@ function createClient(
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
 					"anthropic-beta": ["claude-code-20250219", "oauth-2025-04-20", ...betaFeatures].join(","),
-					"user-agent": ANTHROPIC_MESSAGES_USER_AGENT,
+					"user-agent": compatibility.identity.messagesUserAgent,
 					"x-app": "cli",
 				},
 				model.headers,
@@ -970,7 +989,7 @@ function createClient(
 			),
 		});
 
-		return { client, isOAuthToken: true };
+		return { client, isOAuthToken: true, compatibility };
 	}
 
 	// API key auth

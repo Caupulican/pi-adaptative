@@ -1,5 +1,24 @@
 ## [Unreleased]
 
+### Added
+
+- Added cached local Claude discovery for OAuth identity, with reviewed installation checks covering login and refresh code and an explicit packaged fallback for unfamiliar installations.
+- Added Claude Haiku 5.5 with adaptive thinking, all five effort levels, a 1M context window and 128K output.
+
+### Changed
+
+- Refreshed Anthropic OAuth request compatibility metadata and the model catalog from live upstream feeds, including OpenRouter.
+- Centralized shared catalog feed projection and model-family fallback metadata.
+
+### Fixed
+
+- Pinned one compatibility snapshot through each OAuth operation and shared executable discovery with identity synchronization tools.
+- Preserved ordered OpenRouter context pricing overrides in catalog cost tiers, including inherited rates for omitted prices.
+- Preserved Vercel AI Gateway input, output and cache context pricing tiers.
+- Reported model catalog totals after deduplication.
+- Omitted unsupported temperature parameters for Claude Haiku 5.5.
+- Applied adaptive thinking, native effort levels and prompt caching to Claude Haiku 5.5 on Bedrock.
+
 ## [0.103.4] - 2026-10-06
 
 ### Changed

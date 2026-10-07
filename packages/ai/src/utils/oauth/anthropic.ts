@@ -7,6 +7,8 @@
 
 import type { createServer, Server } from "node:http";
 import { readBoundedResponseText } from "../../providers/account-request.ts";
+import type { AnthropicOAuthProtocol } from "../../providers/anthropic-compatibility-profile.ts";
+import { resolveAnthropicCompatibility } from "../../providers/anthropic-identity.ts";
 import { isRecord } from "../value-guards.ts";
 import { awaitAuthorizationInput, parseAuthorizationInput, raceAuthorizationInput } from "./authorization-input.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
@@ -29,24 +31,10 @@ type NodeApis = {
 let nodeApis: NodeApis | null = null;
 let nodeApisPromise: Promise<NodeApis> | null = null;
 
-const decode = (s: string) => atob(s);
-const CLIENT_ID = decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
-const AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize";
-const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 const CALLBACK_PORT = 53692;
 const MAX_OAUTH_RESPONSE_BYTES = 64 * 1024;
 const CALLBACK_PATH = "/callback";
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`;
-const MANUAL_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
-const INFERENCE_SCOPES = [
-	"user:profile",
-	"user:inference",
-	"user:sessions:claude_code",
-	"user:mcp_servers",
-	"user:file_upload",
-	"user:plugins",
-];
-const SCOPES = ["org:create_api_key", ...INFERENCE_SCOPES].join(" ");
 
 class AnthropicOAuthRequestError extends Error {
 	readonly invalidScope: boolean;
@@ -249,6 +237,7 @@ async function postJson(
 }
 
 async function exchangeAuthorizationCode(
+	protocol: AnthropicOAuthProtocol,
 	code: string,
 	state: string,
 	verifier: string,
@@ -258,10 +247,10 @@ async function exchangeAuthorizationCode(
 	let tokenData: unknown;
 	try {
 		tokenData = await postJson(
-			TOKEN_URL,
+			protocol.tokenUrl,
 			{
 				grant_type: "authorization_code",
-				client_id: CLIENT_ID,
+				client_id: protocol.clientId,
 				code,
 				state,
 				redirect_uri: redirectUri,
@@ -272,7 +261,7 @@ async function exchangeAuthorizationCode(
 	} catch (error) {
 		signal?.throwIfAborted();
 		throw new Error(
-			`Token exchange request failed. url=${TOKEN_URL}; redirect_uri=${redirectUri}; response_type=authorization_code; details=${formatErrorDetails(error)}`,
+			`Token exchange request failed. url=${protocol.tokenUrl}; redirect_uri=${redirectUri}; response_type=authorization_code; details=${formatErrorDetails(error)}`,
 		);
 	}
 
@@ -290,6 +279,9 @@ export async function loginAnthropic(options: {
 	signal?: AbortSignal;
 }): Promise<OAuthCredentials> {
 	options.signal?.throwIfAborted();
+	const compatibility = await awaitAuthorizationInput(resolveAnthropicCompatibility, options.signal);
+	if (compatibility.warning) options.onProgress?.(compatibility.warning);
+	const protocol = compatibility.oauth;
 	const { verifier, challenge } = await generatePKCE();
 	options.signal?.throwIfAborted();
 	const expectedState = crypto.randomUUID();
@@ -309,23 +301,23 @@ export async function loginAnthropic(options: {
 
 	let code: string | undefined;
 	let state: string | undefined;
-	const redirectUriForExchange = server?.redirectUri ?? MANUAL_REDIRECT_URI;
+	const redirectUriForExchange = server?.redirectUri ?? protocol.manualRedirectUri;
 
 	try {
 		options.signal?.throwIfAborted();
 		const authParams = new URLSearchParams({
 			code: "true",
-			client_id: CLIENT_ID,
+			client_id: protocol.clientId,
 			response_type: "code",
 			redirect_uri: redirectUriForExchange,
-			scope: SCOPES,
+			scope: ["org:create_api_key", ...protocol.inferenceScopes].join(" "),
 			code_challenge: challenge,
 			code_challenge_method: "S256",
 			state: expectedState,
 		});
 
 		options.onAuth({
-			url: `${AUTHORIZE_URL}?${authParams.toString()}`,
+			url: `${protocol.authorizeUrl}?${authParams.toString()}`,
 			instructions:
 				"Complete login in your browser. If the browser is on another machine, paste the final redirect URL here.",
 		});
@@ -383,7 +375,7 @@ export async function loginAnthropic(options: {
 		}
 
 		options.onProgress?.("Exchanging authorization code for tokens...");
-		return await exchangeAuthorizationCode(code, state, verifier, redirectUriForExchange, options.signal);
+		return await exchangeAuthorizationCode(protocol, code, state, verifier, redirectUriForExchange, options.signal);
 	} finally {
 		server?.cancelWait();
 		server?.server.close();
@@ -395,7 +387,13 @@ export async function loginAnthropic(options: {
  */
 export async function refreshAnthropicToken(
 	refreshToken: string,
-	options: { scopes?: unknown; clientId?: unknown; subscriptionType?: unknown; signal?: AbortSignal } = {},
+	options: {
+		scopes?: unknown;
+		clientId?: unknown;
+		subscriptionType?: unknown;
+		signal?: AbortSignal;
+		onProgress?: (message: string) => void;
+	} = {},
 ): Promise<OAuthCredentials> {
 	options.signal?.throwIfAborted();
 	if (
@@ -410,6 +408,9 @@ export async function refreshAnthropicToken(
 	if (options.clientId !== undefined && (typeof options.clientId !== "string" || !options.clientId.trim())) {
 		throw new Error("Anthropic stored OAuth client identity is invalid");
 	}
+	const compatibility = await awaitAuthorizationInput(resolveAnthropicCompatibility, options.signal);
+	if (compatibility.warning) options.onProgress?.(compatibility.warning);
+	const protocol = compatibility.oauth;
 	const originalScopes: string[] = options.scopes === undefined ? [] : [...options.scopes];
 	const clientId = options.clientId;
 	const hasInference = originalScopes.includes("user:inference");
@@ -417,7 +418,7 @@ export async function refreshAnthropicToken(
 		!clientId && (hasInference || (typeof options.subscriptionType === "string" && !!options.subscriptionType));
 	const scopes = migrate
 		? [
-				...INFERENCE_SCOPES,
+				...protocol.inferenceScopes,
 				...originalScopes.filter(
 					(scope) =>
 						scope === "user:projects:read" ||
@@ -428,25 +429,27 @@ export async function refreshAnthropicToken(
 			]
 		: originalScopes.length
 			? originalScopes
-			: INFERENCE_SCOPES;
+			: protocol.inferenceScopes;
 	const body = {
 		grant_type: "refresh_token",
-		client_id: clientId ?? CLIENT_ID,
+		client_id: clientId ?? protocol.clientId,
 		refresh_token: refreshToken,
 		scope: [...new Set(scopes)].join(" "),
 	};
 	let data: unknown;
 	try {
 		try {
-			data = await postJson(TOKEN_URL, body, options.signal, migrate && hasInference);
+			data = await postJson(protocol.tokenUrl, body, options.signal, migrate && hasInference);
 		} catch (error) {
 			if (!migrate || !hasInference || !(error instanceof AnthropicOAuthRequestError) || !error.invalidScope)
 				throw error;
-			data = await postJson(TOKEN_URL, { ...body, scope: originalScopes.join(" ") }, options.signal);
+			data = await postJson(protocol.tokenUrl, { ...body, scope: originalScopes.join(" ") }, options.signal);
 		}
 	} catch (error) {
 		options.signal?.throwIfAborted();
-		throw new Error(`Anthropic token refresh request failed. url=${TOKEN_URL}; details=${formatErrorDetails(error)}`);
+		throw new Error(
+			`Anthropic token refresh request failed. url=${protocol.tokenUrl}; details=${formatErrorDetails(error)}`,
+		);
 	}
 
 	return {

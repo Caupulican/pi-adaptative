@@ -1,6 +1,11 @@
+import { awaitAuthorizationInput } from "../utils/oauth/authorization-input.ts";
 import { isRecord } from "../utils/value-guards.ts";
 import { requestBoundedAccountJson } from "./account-request.ts";
-import { ANTHROPIC_USAGE_USER_AGENT } from "./anthropic-identity.ts";
+import {
+	ANTHROPIC_USAGE_USER_AGENT,
+	type AnthropicCompatibilitySnapshot,
+	resolveAnthropicCompatibility,
+} from "./anthropic-identity.ts";
 
 export const ANTHROPIC_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 export const ANTHROPIC_OAUTH_USAGE_USER_AGENT = ANTHROPIC_USAGE_USER_AGENT;
@@ -48,6 +53,7 @@ export type AnthropicExtraUsage = {
 export type AnthropicOAuthUsage = {
 	windows: AnthropicUsageWindow[];
 	extraUsage?: AnthropicExtraUsage;
+	compatibility?: AnthropicCompatibilitySnapshot;
 };
 
 function optionalAmount(value: unknown, field: string): number | undefined {
@@ -110,13 +116,14 @@ export async function getAnthropicOAuthUsage(options: AnthropicAccountRequestOpt
 	if (!token || token.length > 64 * 1024 || /[^\x21-\x7e]/.test(token)) {
 		throw new AnthropicAccountError("Anthropic OAuth access token is not a valid header value.");
 	}
+	const compatibility = await awaitAuthorizationInput(resolveAnthropicCompatibility, options.signal);
 	const json = await requestBoundedAccountJson({
 		url: ANTHROPIC_OAUTH_USAGE_URL,
 		headers: new Headers({
 			Accept: "application/json",
 			Authorization: `Bearer ${token}`,
 			"anthropic-beta": ANTHROPIC_OAUTH_BETA,
-			"User-Agent": ANTHROPIC_OAUTH_USAGE_USER_AGENT,
+			"User-Agent": compatibility.identity.usageUserAgent,
 		}),
 		init: { method: "GET" },
 		signal: options.signal,
@@ -131,5 +138,5 @@ export async function getAnthropicOAuthUsage(options: AnthropicAccountRequestOpt
 		if (window) windows.push(window);
 	}
 	const extraUsage = parseExtraUsage(json.extra_usage);
-	return { windows, ...(extraUsage ? { extraUsage } : {}) };
+	return { windows, ...(extraUsage ? { extraUsage } : {}), compatibility };
 }

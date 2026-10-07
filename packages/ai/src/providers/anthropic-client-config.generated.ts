@@ -1,5 +1,5 @@
 export const ANTHROPIC_CLIENT_CONFIG = {
-	version: "2.1.291",
-	messagesUserAgent: "claude-cli/2.1.291 (external, cli)",
-	usageUserAgent: "claude-code/2.1.291",
+	version: "2.1.293",
+	messagesUserAgent: "claude-cli/2.1.293 (external, cli)",
+	usageUserAgent: "claude-code/2.1.293",
 } as const;

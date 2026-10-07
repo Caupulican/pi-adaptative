@@ -2,7 +2,7 @@
 
 Unified LLM API with automatic model discovery, provider configuration, token and cost tracking, and simple context persistence and hand-off to other models mid-session.
 
-**Note**: This library only includes models that support tool calling (function calling), as this is essential for agentic workflows.
+**Note**: The chat catalog includes tool-capable models and specialized decision models. Image-generation models use a separate API.
 
 ## Table of Contents
 
@@ -435,7 +435,7 @@ Do not use `stream()` or `complete()` for image generation. Image generation is 
 ### Basic Image Generation
 
 ```typescript
-import { getImageModel, generateImages } from '@mariozechner/pi-ai';
+import { getImageModel, generateImages } from '@caupulican/pi-ai';
 
 const model = getImageModel('openrouter', 'google/gemini-2.5-flash-image');
 
@@ -488,7 +488,7 @@ console.log(model.output);  // ['image'] or ['image', 'text']
 - Some models accept image input, others are text-to-image only. Check `model.input`.
 - Like the streaming APIs, image generation supports options such as `apiKey`, `signal`, `headers`, `onPayload`, and `onResponse`, and results may include `stopReason`, `responseId`, and `usage`.
 - If you want a model to analyze images in a conversation or call tools, use the regular `stream()` / `complete()` APIs with a model that supports image input.
-- At the moment, image generation is available through only one provider, OpenRouter.
+- Image generation is available through OpenRouter and OpenAI Codex.
 
 ## Thinking/Reasoning
 
@@ -1156,7 +1156,9 @@ Several providers require OAuth authentication instead of static API keys:
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
 - **GitHub Copilot** (Copilot subscription)
 
-After updating Claude Code, run `npm run sync:claude-identity --workspace=packages/ai`, then rebuild and restart Pi to apply the generated Anthropic OAuth identities to Messages and usage requests.
+Claude OAuth requests discover the installed `claude` executable automatically; `PI_CLAUDE_PATH` can select an explicit executable. Discovery is cached and shared by login, token refresh, Messages and account usage. Pi adopts the installed identity only when the executable matches a reviewed login/refresh compatibility profile. An unfamiliar or unavailable installation keeps the packaged implementation. Login progress and Messages session warnings report that fallback; standalone refresh callers can supply `onProgress`, and successful account-usage results expose their compatibility snapshot. Each operation retains one profile through its completion, including login callback handling and token exchange.
+
+Use `resolveAnthropicCompatibility()` from `@caupulican/pi-ai` to inspect the selected identity, source and warning. Pi executes only the bounded `claude --version` query; compatibility inspection reads bytes without evaluating extracted source. No Claude updater runs. A changed native image needs a source review and packaged implementation update when its OAuth behavior differs; matching version text alone is insufficient. The `sync:claude-identity` development command uses the same admission check before updating packaged defaults.
 
 For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` to your project ID.
 

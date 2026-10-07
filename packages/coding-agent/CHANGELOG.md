@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Reported Claude compatibility fallback through the session warning channel without repeating unchanged warnings.
+
 ## [0.103.4] - 2026-10-06
 
 ### Changed

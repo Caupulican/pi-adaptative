@@ -11,13 +11,14 @@ import {
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/providers/cloudflare.ts";
 import { detectOpenRouterCacheControlFormat } from "../src/providers/openrouter-cache.ts";
+import { isAnthropicHaiku55 } from "../src/providers/anthropic-model-family.ts";
 import type {
 	AnthropicMessagesCompat,
 	Api,
 	KnownProvider,
 	Model,
 	ModelServiceTier,
-	ModelThinkingLevel,
+	ThinkingLevel,
 	OpenAICompletionsCompat,
 	OpenAIResponsesCompat,
 } from "../src/types.ts";
@@ -75,7 +76,27 @@ interface AiGatewayModel {
 		output?: string | number;
 		input_cache_read?: string | number;
 		input_cache_write?: string | number;
+		input_tiers?: AiGatewayPriceTier[];
+		output_tiers?: AiGatewayPriceTier[];
+		input_cache_read_tiers?: AiGatewayPriceTier[];
+		input_cache_write_tiers?: AiGatewayPriceTier[];
 	};
+}
+
+interface AiGatewayPriceTier {
+	min?: number;
+	max?: number;
+	cost: string | number;
+}
+
+interface OpenRouterModel {
+	id: string;
+	name: string;
+	architecture?: { modality?: string; output_modalities?: string[] };
+	supported_parameters?: string[];
+	pricing?: unknown;
+	context_length?: number;
+	top_provider?: { max_completion_tokens?: number };
 }
 
 const COPILOT_STATIC_HEADERS = {
@@ -221,61 +242,21 @@ const FUGU_MODELS: Model<"openai-responses">[] = [
 ];
 const TYPESAFE_BASE_URL = "https://api.typesafe.ai/v1/systemone";
 const TYPESAFE_MODELS: Model<"openai-completions">[] = [
-	{
-		id: "jev-1.13.0",
-		name: "Jev 1.13",
-		api: "openai-completions",
-		provider: "typesafe",
-		kind: "judge",
-		baseUrl: TYPESAFE_BASE_URL,
-		reasoning: false,
-		input: ["text"],
-		cost: {
-			input: 0.25,
-			output: 1.25,
-			cacheRead: 0,
-			cacheWrite: 0,
-		},
-		contextWindow: 32_000,
-		maxTokens: 4096,
-	},
-	{
-		id: "jev-latest",
-		name: "Jev Latest",
-		api: "openai-completions",
-		provider: "typesafe",
-		kind: "judge",
-		baseUrl: TYPESAFE_BASE_URL,
-		reasoning: false,
-		input: ["text"],
-		cost: {
-			input: 0.25,
-			output: 1.25,
-			cacheRead: 0,
-			cacheWrite: 0,
-		},
-		contextWindow: 32_000,
-		maxTokens: 4096,
-	},
-	{
-		id: "jev-preview",
-		name: "Jev Preview",
-		api: "openai-completions",
-		provider: "typesafe",
-		kind: "judge",
-		baseUrl: TYPESAFE_BASE_URL,
-		reasoning: false,
-		input: ["text"],
-		cost: {
-			input: 0.25,
-			output: 1.25,
-			cacheRead: 0,
-			cacheWrite: 0,
-		},
-		contextWindow: 32_000,
-		maxTokens: 4096,
-	},
-];
+	{ id: "jev-1.13.0", name: "Jev 1.13" },
+	{ id: "jev-latest", name: "Jev Latest" },
+	{ id: "jev-preview", name: "Jev Preview" },
+].map((identity) => ({
+	...identity,
+	api: "openai-completions",
+	provider: "typesafe",
+	kind: "judge",
+	baseUrl: TYPESAFE_BASE_URL,
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0.25, output: 1.25, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 32_000,
+	maxTokens: 4096,
+}));
 const ZAI_TOOL_STREAM_UNSUPPORTED_MODELS = new Set(["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v"]);
 const EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS = new Set([
 	"github-copilot:claude-haiku-4.5",
@@ -360,6 +341,24 @@ function getModelsDevCost(cost: ModelsDevCost | undefined): ModelCost {
 	};
 }
 
+function getModelsDevMetadata(model: ModelsDevModel): Pick<Model<Api>, "reasoning" | "input" | "cost" | "contextWindow" | "maxTokens"> {
+	return {
+		reasoning: model.reasoning === true,
+		input: model.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+		cost: getModelsDevCost(model.cost),
+		contextWindow: model.limit?.context || 4096,
+		maxTokens: model.limit?.output || 4096,
+	};
+}
+
+function createModelsDevCatalogEntry(
+	id: string,
+	model: ModelsDevModel,
+	endpoint: Pick<Model<Api>, "api" | "provider" | "baseUrl">,
+): Model<Api> {
+	return { id, name: model.name || id, ...endpoint, ...getModelsDevMetadata(model) };
+}
+
 // OpenAI bills a GPT-5.4/5.5/5.6 request whose total input exceeds 272k tokens at the
 // long-context rate for the whole request: input, cache read and cache write ×2, output ×1.5.
 // models.dev publishes the same tier; this helper only backs the fallback entries used while
@@ -374,7 +373,7 @@ interface CodexCatalogueModel {
 	minimal_client_version?: string;
 	context_window: number;
 	input_modalities: string[];
-	default_reasoning_level?: ModelThinkingLevel;
+	default_reasoning_level?: ThinkingLevel;
 	supported_reasoning_levels: string[];
 	multi_agent_reasoning_effort?: string;
 	use_responses_lite?: boolean;
@@ -492,6 +491,7 @@ function isAnthropicAdaptiveThinkingModel(modelId: string): boolean {
 		modelId.includes("sonnet-4.6") ||
 		modelId.includes("sonnet-5") ||
 		modelId.includes("sonnet.5") ||
+		isAnthropicHaiku55(modelId) ||
 		modelId.includes("fable-5")
 	);
 }
@@ -504,7 +504,8 @@ function isAnthropicTemperatureUnsupportedModel(modelId: string): boolean {
 		id.includes("opus-4-8") ||
 		id.includes("opus-4.8") ||
 		id.includes("opus-5") ||
-		id.includes("opus.5")
+		id.includes("opus.5") ||
+		isAnthropicHaiku55(id)
 	);
 }
 
@@ -571,7 +572,7 @@ function applyThinkingLevelMetadata(model: Model<any>, modelId = model.id): void
 	}
 	// Anthropic adaptive-thinking effort support:
 	// - max is available on all adaptive-thinking Claude models.
-	// - xhigh is available on Opus 4.7/4.8/5, Sonnet 5, and Fable 5.
+	// - xhigh is available on Opus 4.7/4.8/5, Sonnet 5, Haiku 5.5, and Fable 5.
 	if (
 		modelId.includes("opus-4-6") ||
 		modelId.includes("opus-4.6") ||
@@ -588,9 +589,13 @@ function applyThinkingLevelMetadata(model: Model<any>, modelId = model.id): void
 		modelId.includes("opus-5") ||
 		modelId.includes("opus.5") ||
 		modelId.includes("sonnet-5") ||
-		modelId.includes("sonnet.5")
+		modelId.includes("sonnet.5") ||
+		isAnthropicHaiku55(modelId)
 	) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh", max: "max" });
+	}
+	if (isAnthropicHaiku55(modelId)) {
+		model.defaultThinkingLevel = "medium";
 	}
 	if (modelId.includes("fable-5")) {
 		mergeThinkingLevelMap(model, { off: null, xhigh: "xhigh", max: "max" });
@@ -706,7 +711,7 @@ async function fetchOpenRouterModels(): Promise<{
 			"https://openrouter.ai/api/v1/models?output_modalities=all",
 			headers,
 		);
-		const data = await response.json();
+		const data = await response.json() as { data: OpenRouterModel[] };
 
 		const models: Model<"openai-completions">[] = [];
 		const metadata = new Map<string, OpenRouterCatalogMetadata>();
@@ -717,10 +722,8 @@ async function fetchOpenRouterModels(): Promise<{
 			if (!model.supported_parameters?.includes("tools") && !isDecisionModel) continue;
 
 			// Parse provider from model ID
-			let provider: KnownProvider = "openrouter";
-			let modelKey = model.id;
-
-			modelKey = model.id; // Keep full ID for OpenRouter
+			const provider: KnownProvider = "openrouter";
+			const modelKey = model.id;
 
 			// Parse input modalities
 			const input: ("text" | "image")[] = ["text"];
@@ -752,7 +755,7 @@ async function fetchOpenRouterModels(): Promise<{
 			}
 		}
 
-		console.log(`Fetched ${models.length} tool-capable models from OpenRouter`);
+		console.log(`Fetched ${models.length} catalog models from OpenRouter`);
 		return { models, metadata };
 	} catch (error) {
 		throw new Error("Failed to fetch OpenRouter models", { cause: error });
@@ -763,15 +766,17 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from Vercel AI Gateway API...");
 		const response = await fetchModelCatalogResponse(`${AI_GATEWAY_MODELS_URL}/models`);
-		const data = await response.json();
+		const data = await response.json() as { data?: AiGatewayModel[] };
 		const models: Model<any>[] = [];
 
-		const toNumber = (value: string | number | undefined): number => {
-			if (typeof value === "number") {
-				return Number.isFinite(value) ? value : 0;
+		const perMillionRate = (value: unknown): number => {
+			if (value == null) return 0;
+			if ((typeof value !== "number" && typeof value !== "string") || (typeof value === "string" && !value.trim())) {
+				throw new Error("Invalid Vercel AI Gateway price");
 			}
-			const parsed = parseFloat(value ?? "0");
-			return Number.isFinite(parsed) ? parsed : 0;
+			const scaled = Number(value) * 1_000_000;
+			if (!Number.isFinite(scaled) || scaled < 0) throw new Error("Invalid Vercel AI Gateway price");
+			return Number(scaled.toPrecision(15));
 		};
 
 		const items = Array.isArray(data.data) ? (data.data as AiGatewayModel[]) : [];
@@ -785,10 +790,42 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 				input.push("image");
 			}
 
-			const inputCost = toNumber(model.pricing?.input) * 1_000_000;
-			const outputCost = toNumber(model.pricing?.output) * 1_000_000;
-			const cacheReadCost = toNumber(model.pricing?.input_cache_read) * 1_000_000;
-			const cacheWriteCost = toNumber(model.pricing?.input_cache_write) * 1_000_000;
+			const cost: Model<Api>["cost"] = {
+				input: perMillionRate(model.pricing?.input),
+				output: perMillionRate(model.pricing?.output),
+				cacheRead: perMillionRate(model.pricing?.input_cache_read),
+				cacheWrite: perMillionRate(model.pricing?.input_cache_write),
+			};
+			const tierRates = new Map<number, NonNullable<Model<Api>["cost"]["tiers"]>[number]>();
+			for (const [field, target] of [
+				["input_tiers", "input"],
+				["output_tiers", "output"],
+				["input_cache_read_tiers", "cacheRead"],
+				["input_cache_write_tiers", "cacheWrite"],
+			] as const) {
+				for (const tier of model.pricing?.[field] ?? []) {
+					const minimum = tier.min ?? 0;
+					if (!Number.isSafeInteger(minimum) || minimum < 0) {
+						throw new Error(`Invalid Vercel AI Gateway ${field} threshold for ${model.id}`);
+					}
+					if (tier.cost == null) throw new Error(`Missing Vercel AI Gateway ${field} price for ${model.id}`);
+					const rate = perMillionRate(tier.cost);
+					if (minimum === 0) {
+						cost[target] = rate;
+						continue;
+					}
+					const threshold = minimum - 1;
+					const rates = tierRates.get(threshold) ?? { inputTokensAbove: threshold };
+					rates[target] = rate;
+					tierRates.set(threshold, rates);
+				}
+			}
+			const tiers = [...tierRates.values()].sort((left, right) => left.inputTokensAbove - right.inputTokensAbove);
+			const inheritedRates = { ...cost };
+			for (const tier of tiers) {
+				Object.assign(inheritedRates, tier);
+				Object.assign(tier, inheritedRates);
+			}
 
 			models.push({
 				id: model.id,
@@ -798,12 +835,7 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 				provider: "vercel-ai-gateway",
 				reasoning: tags.includes("reasoning"),
 				input,
-				cost: {
-					input: inputCost,
-					output: outputCost,
-					cacheRead: cacheReadCost,
-					cacheWrite: cacheWriteCost,
-				},
+				cost: { ...cost, ...(tiers.length > 0 ? { tiers } : {}) },
 				contextWindow: model.context_window || 4096,
 				maxTokens: model.max_tokens || 4096,
 			});
@@ -820,7 +852,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from models.dev API...");
 		const response = await fetchModelCatalogResponse("https://models.dev/api.json");
-		const data = await response.json();
+		const data = await response.json() as Record<string, { models?: Record<string, ModelsDevModel> }>;
 
 		const models: Model<any>[] = [];
 
@@ -831,7 +863,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				if (m.tool_call !== true) continue;
 				if (BEDROCK_INFERENCE_PROFILE_ONLY_MODEL_IDS.has(modelId)) continue;
 
-				let id = modelId;
+				const id = modelId;
 
 				if (id.startsWith("ai21.jamba")) {
 					// These models doesn't support tool use in streaming mode
@@ -870,11 +902,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					api: "anthropic-messages",
 					provider: "anthropic",
 					baseUrl: "https://api.anthropic.com",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...getModelsDevMetadata(m),
 				});
 			}
 		}
@@ -891,11 +919,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					api: "google-generative-ai",
 					provider: "google",
 					baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...getModelsDevMetadata(m),
 				});
 			}
 		}
@@ -912,11 +936,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					api: "openai-responses",
 					provider: "openai",
 					baseUrl: "https://api.openai.com/v1",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...getModelsDevMetadata(m),
 				});
 			}
 		}
@@ -933,11 +953,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					api: "openai-completions",
 					provider: "groq",
 					baseUrl: "https://api.groq.com/openai/v1",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...getModelsDevMetadata(m),
 				});
 			}
 		}
@@ -954,11 +970,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					api: "openai-completions",
 					provider: "cerebras",
 					baseUrl: "https://api.cerebras.ai/v1",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...getModelsDevMetadata(m),
 				});
 			}
 		}
@@ -975,11 +987,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					api: "openai-completions",
 					provider: "cloudflare-workers-ai",
 					baseUrl: CLOUDFLARE_WORKERS_AI_BASE_URL,
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...getModelsDevMetadata(m),
 					compat: { sendSessionAffinityHeaders: true },
 				});
 			}
@@ -1025,11 +1033,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					api,
 					provider: "cloudflare-ai-gateway",
 					baseUrl,
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...getModelsDevMetadata(m),
 					...(compat ? { compat } : {}),
 				});
 			}
@@ -1050,11 +1054,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "xai",
 					baseUrl: "https://api.x.ai/v1",
 					...(useResponsesApi ? { compat: { ...XAI_RESPONSES_COMPAT } } : {}),
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...getModelsDevMetadata(m),
 				});
 			}
 		}
@@ -1098,11 +1098,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					api: "mistral-conversations",
 					provider: "mistral",
 					baseUrl: "https://api.mistral.ai",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...getModelsDevMetadata(m),
 				});
 			}
 		}
@@ -1144,11 +1140,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "fireworks",
 					// Fireworks Anthropic-compatible API - SDK appends /v1/messages
 					baseUrl: "https://api.fireworks.ai/inference",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...getModelsDevMetadata(m),
 					// Fireworks prompt caching uses automatic prefix matching + session affinity.
 					// x-session-affinity routes requests to the same replica for cache hits.
 					// cache_control on tools and eager_input_streaming are not supported.
@@ -1202,9 +1194,10 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		] as const;
 
 		for (const variant of opencodeVariants) {
-			if (!data[variant.key]?.models) continue;
+			const variantModels = data[variant.key]?.models;
+			if (!variantModels) continue;
 
-			for (const [modelId, model] of Object.entries(data[variant.key].models)) {
+			for (const [modelId, model] of Object.entries(variantModels)) {
 				const m = model as ModelsDevModel & { status?: string };
 				if (m.tool_call !== true) continue;
 				if (m.status === "deprecated") continue;
@@ -1292,7 +1285,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				if (m.status === "deprecated") continue;
 
 				// Claude 4.x and 5.x models route to Anthropic Messages API.
-				const isCopilotClaude = /^claude-(fable|haiku|sonnet|opus)-[45]([.\-]|$)/.test(modelId);
+				const isCopilotClaude = /^claude-(fable|haiku|sonnet|opus)-[45]([.-]|$)/.test(modelId);
 				// GPT-5/6, OSWE, and MAI-Code models use the Responses endpoint.
 				const needsResponsesApi =
 					modelId.startsWith("gpt-5") || isOpenAiGpt6(modelId) || modelId.startsWith("oswe") || modelId.startsWith("mai-");
@@ -1345,19 +1338,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					const m = model as ModelsDevModel;
 					if (m.tool_call !== true) continue;
 
-					models.push({
-						id: modelId,
-						name: m.name || modelId,
-						api: "anthropic-messages",
-						provider,
-						// MiniMax's Anthropic-compatible API - SDK appends /v1/messages
-						baseUrl,
-						reasoning: m.reasoning === true,
-						input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-						cost: getModelsDevCost(m.cost),
-						contextWindow: m.limit?.context || 4096,
-						maxTokens: m.limit?.output || 4096,
-					});
+					models.push(createModelsDevCatalogEntry(modelId, m, { api: "anthropic-messages", provider, baseUrl }));
 				}
 			}
 		}
@@ -1366,7 +1347,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		const kimiData = data["kimi-for-coding"] || data["kimi-code-plan-global"] || data["kimi-code-plan-cn"];
 		if (kimiData?.models) {
 			const kimiModels = kimiData.models as Record<string, ModelsDevModel>;
-			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
+			const hasCanonicalModel = Object.hasOwn(kimiModels, "kimi-for-coding");
 
 			const kimiAliases = new Set(["k2p5", "k2p6"]);
 
@@ -1389,11 +1370,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://api.kimi.com/coding",
 					headers: { ...KIMI_STATIC_HEADERS },
 					compat: { authFormat: "bearer" },
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...getModelsDevMetadata(m),
 				});
 			}
 		}
@@ -1419,16 +1396,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				if (m.tool_call !== true) continue;
 
 				models.push({
-					id: modelId,
-					name: m.name || modelId,
-					api: "openai-completions",
-					provider,
-					baseUrl,
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...createModelsDevCatalogEntry(modelId, m, { api: "openai-completions", provider, baseUrl }),
 					compat: moonshotCompat,
 				});
 			}
@@ -1463,11 +1431,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						provider,
 						baseUrl,
 						compat: xiaomiCompat,
-						reasoning: m.reasoning === true,
-						input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-						cost: getModelsDevCost(m.cost),
-						contextWindow: m.limit?.context || 4096,
-						maxTokens: m.limit?.output || 4096,
+						...getModelsDevMetadata(m),
 					});
 				}
 			}
@@ -1487,11 +1451,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider,
 					baseUrl,
 					compat: QWEN_TOKEN_PLAN_COMPAT,
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: getModelsDevCost(m.cost),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...getModelsDevMetadata(m),
 				});
 			}
 		}
@@ -1663,10 +1623,10 @@ async function generateModels() {
 					? {
 							tiers: grok47.cost.tiers.map((tier) => ({
 								...tier,
-								input: roundCost(tier.input * 1.5),
-								output: roundCost(tier.output * 1.5),
-								cacheRead: roundCost(tier.cacheRead * 1.5),
-								cacheWrite: roundCost(tier.cacheWrite * 1.5),
+								input: roundCost((tier.input ?? grok47.cost.input) * 1.5),
+								output: roundCost((tier.output ?? grok47.cost.output) * 1.5),
+								cacheRead: roundCost((tier.cacheRead ?? grok47.cost.cacheRead) * 1.5),
+								cacheWrite: roundCost((tier.cacheWrite ?? grok47.cost.cacheWrite) * 1.5),
 							})),
 						}
 					: {}),
@@ -1711,66 +1671,20 @@ async function generateModels() {
 		});
 	}
 
-	// Add missing Claude Opus 4.6
-	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-opus-4-6")) {
+	for (const version of ["4.6", "4.7", "4.8"]) {
+		const id = `claude-opus-${version.replace(".", "-")}`;
+		if (allModels.some((model) => model.provider === "anthropic" && model.id === id)) continue;
 		allModels.push({
-			id: "claude-opus-4-6",
-			name: "Claude Opus 4.6",
+			id,
+			name: `Claude Opus ${version}`,
 			api: "anthropic-messages",
 			baseUrl: "https://api.anthropic.com",
 			provider: "anthropic",
 			reasoning: true,
 			input: ["text", "image"],
-			cost: {
-				input: 5,
-				output: 25,
-				cacheRead: 0.5,
-				cacheWrite: 6.25,
-			},
-			contextWindow: 1000000,
-			maxTokens: 128000,
-		});
-	}
-
-	// Add missing Claude Opus 4.7
-	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-opus-4-7")) {
-		allModels.push({
-			id: "claude-opus-4-7",
-			name: "Claude Opus 4.7",
-			api: "anthropic-messages",
-			baseUrl: "https://api.anthropic.com",
-			provider: "anthropic",
-			reasoning: true,
-			input: ["text", "image"],
-			cost: {
-				input: 5,
-				output: 25,
-				cacheRead: 0.5,
-				cacheWrite: 6.25,
-			},
-			contextWindow: 1000000,
-			maxTokens: 128000,
-		});
-	}
-
-	// Add missing Claude Opus 4.8
-	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-opus-4-8")) {
-		allModels.push({
-			id: "claude-opus-4-8",
-			name: "Claude Opus 4.8",
-			api: "anthropic-messages",
-			baseUrl: "https://api.anthropic.com",
-			provider: "anthropic",
-			reasoning: true,
-			input: ["text", "image"],
-			cost: {
-				input: 5,
-				output: 25,
-				cacheRead: 0.5,
-				cacheWrite: 6.25,
-			},
-			contextWindow: 1000000,
-			maxTokens: 128000,
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
 		});
 	}
 
@@ -2005,10 +1919,12 @@ async function generateModels() {
 		});
 	}
 
-	if (!allModels.some((m) => m.provider === "github-copilot" && m.id === "gpt-5.2-codex")) {
+	for (const version of ["5.2", "5.3"]) {
+		const id = `gpt-${version}-codex`;
+		if (allModels.some((model) => model.provider === "github-copilot" && model.id === id)) continue;
 		allModels.push({
-			id: "gpt-5.2-codex",
-			name: "GPT-5.2 Codex",
+			id,
+			name: `GPT-${version} Codex`,
 			api: "openai-responses",
 			provider: "github-copilot",
 			baseUrl: "https://api.individual.githubcopilot.com",
@@ -2016,36 +1932,9 @@ async function generateModels() {
 			reasoning: true,
 			thinkingLevelMap: { off: null, minimal: "low", xhigh: "xhigh" },
 			input: ["text", "image"],
-			cost: {
-				input: 1.75,
-				output: 14,
-				cacheRead: 0.175,
-				cacheWrite: 0,
-			},
-			contextWindow: 400000,
-			maxTokens: 128000,
-		});
-	}
-
-	if (!allModels.some((m) => m.provider === "github-copilot" && m.id === "gpt-5.3-codex")) {
-		allModels.push({
-			id: "gpt-5.3-codex",
-			name: "GPT-5.3 Codex",
-			api: "openai-responses",
-			provider: "github-copilot",
-			baseUrl: "https://api.individual.githubcopilot.com",
-			headers: { ...COPILOT_STATIC_HEADERS },
-			reasoning: true,
-			thinkingLevelMap: { off: null, minimal: "low", xhigh: "xhigh" },
-			input: ["text", "image"],
-			cost: {
-				input: 1.75,
-				output: 14,
-				cacheRead: 0.175,
-				cacheWrite: 0,
-			},
-			contextWindow: 400000,
-			maxTokens: 128000,
+			cost: { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
 		});
 	}
 
@@ -2289,45 +2178,16 @@ async function generateModels() {
 		});
 	}
 
-	if (!allModels.some(m => m.provider === "openrouter" && m.id === "typesafe/jev-1.13")) {
+	for (const [id, source] of [["typesafe/jev-1.13", TYPESAFE_MODELS[0]], ["typesafe/jev-latest", TYPESAFE_MODELS[1]]] as const) {
+		if (allModels.some((model) => model.provider === "openrouter" && model.id === id)) continue;
 		allModels.push({
-			id: "typesafe/jev-1.13",
-			name: "TypeSafe: Jev 1.13",
-			kind: "judge",
-			api: "openai-completions",
+			...source,
+			id,
+			name: `TypeSafe: ${source.name}`,
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
-			reasoning: false,
-			input: ["text"],
-			cost: {
-				input: 0.25,
-				output: 1.25,
-				cacheRead: 0,
-				cacheWrite: 0,
-			},
-			contextWindow: 32000,
-			maxTokens: 4096,
-		});
-	}
-
-	if (!allModels.some(m => m.provider === "openrouter" && m.id === "typesafe/jev-latest")) {
-		allModels.push({
-			id: "typesafe/jev-latest",
-			name: "TypeSafe: Jev Latest",
-			kind: "judge",
-			api: "openai-completions",
-			provider: "openrouter",
-			baseUrl: "https://openrouter.ai/api/v1",
-			reasoning: false,
-			input: ["text"],
-			cost: {
-				input: 0.25,
-				output: 1.25,
-				cacheRead: 0,
-				cacheWrite: 0,
-			},
-			contextWindow: 32000,
-			maxTokens: 4096,
+			input: [...source.input],
+			cost: { ...source.cost },
 		});
 	}
 
@@ -2352,9 +2212,6 @@ async function generateModels() {
 		{
 			id: "gemini-3-pro-preview",
 			name: "Gemini 3 Pro Preview (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 },
@@ -2364,9 +2221,6 @@ async function generateModels() {
 		{
 			id: "gemini-3.1-pro-preview",
 			name: "Gemini 3.1 Pro Preview (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 },
@@ -2376,9 +2230,6 @@ async function generateModels() {
 		{
 			id: "gemini-3.1-pro-preview-customtools",
 			name: "Gemini 3.1 Pro Preview Custom Tools (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 },
@@ -2388,9 +2239,6 @@ async function generateModels() {
 		{
 			id: "gemini-3-flash-preview",
 			name: "Gemini 3 Flash Preview (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0 },
@@ -2400,9 +2248,6 @@ async function generateModels() {
 		{
 			id: "gemini-2.0-flash",
 			name: "Gemini 2.0 Flash (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: false,
 			input: ["text", "image"],
 			cost: { input: 0.15, output: 0.6, cacheRead: 0.0375, cacheWrite: 0 },
@@ -2412,9 +2257,6 @@ async function generateModels() {
 		{
 			id: "gemini-2.0-flash-lite",
 			name: "Gemini 2.0 Flash Lite (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 0.075, output: 0.3, cacheRead: 0.01875, cacheWrite: 0 },
@@ -2424,9 +2266,6 @@ async function generateModels() {
 		{
 			id: "gemini-2.5-pro",
 			name: "Gemini 2.5 Pro (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
@@ -2436,9 +2275,6 @@ async function generateModels() {
 		{
 			id: "gemini-2.5-flash",
 			name: "Gemini 2.5 Flash (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 },
@@ -2448,9 +2284,6 @@ async function generateModels() {
 		{
 			id: "gemini-2.5-flash-lite-preview-09-2025",
 			name: "Gemini 2.5 Flash Lite Preview 09-25 (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 0.1, output: 0.4, cacheRead: 0.01, cacheWrite: 0 },
@@ -2460,9 +2293,6 @@ async function generateModels() {
 		{
 			id: "gemini-2.5-flash-lite",
 			name: "Gemini 2.5 Flash Lite (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 0.1, output: 0.4, cacheRead: 0.01, cacheWrite: 0 },
@@ -2472,9 +2302,6 @@ async function generateModels() {
 		{
 			id: "gemini-1.5-pro",
 			name: "Gemini 1.5 Pro (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: false,
 			input: ["text", "image"],
 			cost: { input: 1.25, output: 5, cacheRead: 0.3125, cacheWrite: 0 },
@@ -2484,9 +2311,6 @@ async function generateModels() {
 		{
 			id: "gemini-1.5-flash",
 			name: "Gemini 1.5 Flash (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: false,
 			input: ["text", "image"],
 			cost: { input: 0.075, output: 0.3, cacheRead: 0.01875, cacheWrite: 0 },
@@ -2496,16 +2320,19 @@ async function generateModels() {
 		{
 			id: "gemini-1.5-flash-8b",
 			name: "Gemini 1.5 Flash-8B (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
 			reasoning: false,
 			input: ["text", "image"],
 			cost: { input: 0.0375, output: 0.15, cacheRead: 0.01, cacheWrite: 0 },
 			contextWindow: 1000000,
 			maxTokens: 8192,
 		},
-	];
+	].map((spec): Model<"google-vertex"> => ({
+		...spec,
+		api: "google-vertex",
+		provider: "google-vertex",
+		baseUrl: VERTEX_BASE_URL,
+		input: spec.input as ("text" | "image")[],
+	}));
 	allModels.push(...vertexModels);
 
 	const azureOpenAiModels: Model<Api>[] = allModels
@@ -2661,11 +2488,12 @@ export const MODELS: Readonly<Record<string, Readonly<Record<string, Model<Api>>
 	}
 
 	// Print statistics
-	const totalModels = allModels.length;
-	const reasoningModels = allModels.filter(m => m.reasoning).length;
+	const catalogModels = Object.values(providers).flatMap((models) => Object.values(models));
+	const totalModels = catalogModels.length;
+	const reasoningModels = catalogModels.filter(m => m.reasoning).length;
 
 	console.log(`\nModel Statistics:`);
-	console.log(`  Total tool-capable models: ${totalModels}`);
+	console.log(`  Total catalog models: ${totalModels}`);
 	console.log(`  Reasoning-capable models: ${reasoningModels}`);
 
 	for (const [provider, models] of Object.entries(providers)) {

@@ -1,40 +1,12 @@
-import { execFileSync } from "node:child_process";
-import { accessSync, constants, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { findInstalledCli, readInstalledCliVersion } from "../src/utils/installed-cli.ts";
 
-export function installedCliVersion(command, executableArg, versionPattern, label) {
-	let executable;
-	if (executableArg) {
-		executable = realpathSync(isAbsolute(executableArg) ? executableArg : resolve(executableArg));
-	} else {
-		for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-			if (!directory) continue;
-			for (const name of process.platform === "win32" ? [`${command}.exe`, command] : [command]) {
-				const candidate = join(directory, name);
-				try {
-					accessSync(candidate, constants.X_OK);
-					if (statSync(candidate).isFile()) {
-						executable = realpathSync(candidate);
-						break;
-					}
-				} catch {
-					continue;
-				}
-			}
-			if (executable) break;
-		}
-	}
-	if (!executable) throw new Error(`${label} executable was not found on PATH; pass its local path explicitly`);
-	const versionOutput = execFileSync(executable, ["--version"], {
-		encoding: "utf8",
-		timeout: 5000,
-		maxBuffer: 1024,
-		stdio: ["ignore", "pipe", "pipe"],
-	}).trim();
-	const match = versionPattern.exec(versionOutput);
-	if (!match) throw new Error(`Installed ${label} did not report a supported version`);
-	return match[1];
+export async function installedCliVersion(command, executableArg, versionPattern, label) {
+	const installation = await findInstalledCli(command, executableArg);
+	if (!installation) throw new Error(`${label} executable was not found on PATH; pass its local path explicitly`);
+	return readInstalledCliVersion(installation, versionPattern);
 }
 
 export function writeClientIdentity(outputArg, defaultOutput, constantName, config, label) {

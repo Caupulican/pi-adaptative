@@ -49,6 +49,7 @@ import { createHttpProxyAgentsForTarget } from "../utils/node-http-proxy.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import { isRecord as isSchemaRecord } from "../utils/value-guards.ts";
+import { isAnthropicHaiku55 } from "./anthropic-model-family.ts";
 import { getRecoverableBedrockSsoError } from "./bedrock-sso.ts";
 import {
 	applyProviderPayloadHook,
@@ -193,7 +194,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 					system: buildSystemPrompt(context.systemPrompt, model, cacheRetention),
 					inferenceConfig: {
 						...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
-						...(options.temperature !== undefined && { temperature: options.temperature }),
+						...(options.temperature !== undefined &&
+							!isAnthropicHaiku55(model.id) &&
+							!isAnthropicHaiku55(model.name) && { temperature: options.temperature }),
 					},
 					toolConfig: convertToolConfig(context.tools, options.toolChoice, toolNameMap),
 					additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
@@ -555,7 +558,7 @@ function handleContentBlockStop(
 }
 
 /**
- * Check if the model supports adaptive thinking (Opus 4.6+, Sonnet 4.6).
+ * Build normalized model identifiers for capability matching.
  * Checks both model ID and model name to support application inference profiles
  * whose ARNs don't contain the model name.
  */
@@ -577,7 +580,8 @@ function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean 
 			s.includes("opus-5") ||
 			s.includes("sonnet-4-6") ||
 			s.includes("sonnet-5") ||
-			s.includes("fable-5"),
+			s.includes("fable-5") ||
+			isAnthropicHaiku55(s),
 	);
 }
 
@@ -589,7 +593,8 @@ function supportsNativeXhighEffort(model: Model<"bedrock-converse-stream">): boo
 			s.includes("opus-4-8") ||
 			s.includes("opus-5") ||
 			s.includes("sonnet-5") ||
-			s.includes("fable-5"),
+			s.includes("fable-5") ||
+			isAnthropicHaiku55(s),
 	);
 }
 
@@ -620,7 +625,7 @@ function isAnthropicClaudeModel(model: Model<"bedrock-converse-stream">): boolea
 
 /**
  * Check if the model supports prompt caching.
- * Supported: Claude 3.5 Haiku, Claude 3.7 Sonnet, Claude 4.x models
+ * Supports the Claude families recognized below, including Claude Haiku 5.5.
  *
  * For base models and system-defined inference profiles the model ID / ARN
  * contains the model name, so we can decide locally.
@@ -640,8 +645,13 @@ function supportsPromptCaching(model: Model<"bedrock-converse-stream">): boolean
 		if (typeof process !== "undefined" && process.env.AWS_BEDROCK_FORCE_CACHE === "1") return true;
 		return false;
 	}
-	// Claude 5 models (fable-5, opus-5, sonnet-5)
-	if (candidates.some((s) => s.includes("fable-5") || s.includes("opus-5") || s.includes("sonnet-5"))) return true;
+	// Claude 5 models
+	if (
+		candidates.some(
+			(s) => s.includes("fable-5") || s.includes("opus-5") || s.includes("sonnet-5") || isAnthropicHaiku55(s),
+		)
+	)
+		return true;
 	// Claude 4.x models (opus-4, sonnet-4, haiku-4)
 	if (candidates.some((s) => s.includes("-4-"))) return true;
 	// Claude 3.7 Sonnet

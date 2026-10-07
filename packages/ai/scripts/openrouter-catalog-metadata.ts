@@ -15,6 +15,37 @@ export interface OpenRouterCatalogMetadata {
 export function parseOpenRouterCatalogCost(value: unknown): Model<"openai-completions">["cost"] {
 	if (value != null && !isRecord(value)) throw new Error("Invalid OpenRouter price object");
 	const pricing = isRecord(value) ? value : {};
+	const cost = parseOpenRouterRates(pricing);
+	if (pricing.overrides == null) return cost;
+	if (!Array.isArray(pricing.overrides)) throw new Error("Invalid OpenRouter price overrides");
+	const overrides = pricing.overrides.flatMap((override: unknown) => {
+		if (!isRecord(override)) throw new Error("Invalid OpenRouter price override");
+		// Time-dependent discounts cannot be represented as context-window tiers.
+		if (
+			override.min_prompt_tokens === undefined ||
+			override.utc_start !== undefined || override.utc_end !== undefined || override.utc_days !== undefined ||
+			override.max_prompt_tokens !== undefined
+		) return [];
+		if (
+			typeof override.min_prompt_tokens !== "number" ||
+			!Number.isSafeInteger(override.min_prompt_tokens) ||
+			override.min_prompt_tokens < 0
+		) throw new Error("Invalid OpenRouter prompt-token price threshold");
+		return [{ threshold: override.min_prompt_tokens, pricing: override }];
+	});
+	const thresholds = [...new Set(overrides.map((override) => override.threshold))].sort((left, right) => left - right);
+	const tiers = thresholds.map((threshold) => {
+		let effective = pricing;
+		// Later applicable overrides win per price key, irrespective of threshold ordering.
+		for (const override of overrides) {
+			if (override.threshold <= threshold) effective = { ...effective, ...override.pricing };
+		}
+		return { inputTokensAbove: threshold, ...parseOpenRouterRates(effective) };
+	});
+	return { ...cost, ...(tiers.length > 0 ? { tiers } : {}) };
+}
+
+function parseOpenRouterRates(pricing: Record<string, unknown>): Omit<Model<"openai-completions">["cost"], "tiers"> {
 	const rate = (field: string): number => {
 		const raw = pricing[field];
 		if (raw == null) return 0;
@@ -25,7 +56,7 @@ export function parseOpenRouterCatalogCost(value: unknown): Model<"openai-comple
 		const scaled = price * 1_000_000;
 		if (!Number.isFinite(price) || !Number.isFinite(scaled)) throw new Error(`Invalid OpenRouter ${field} price`);
 		// Zero is the existing unavailable-price fallback, not a claim of free routing.
-		return Math.max(0, scaled);
+		return Math.max(0, Number(scaled.toPrecision(15)));
 	};
 	return { input: rate("prompt"), output: rate("completion"), cacheRead: rate("input_cache_read"), cacheWrite: rate("input_cache_write") };
 }

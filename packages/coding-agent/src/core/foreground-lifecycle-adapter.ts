@@ -9,6 +9,7 @@ import type { SessionManager, SessionMessageBatchEntry } from "../kernel/session
 import { ForegroundLifecycleController, type ProviderRetryLifecycleEvent } from "./foreground-lifecycle-controller.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import { type ProviderLimitStore, providerLimitFromFailure } from "./provider-admission/limit-state.ts";
+import { ProviderCompatibilityWarnings } from "./provider-compatibility-warnings.ts";
 
 /**
  * Host-side adapter for the foreground lifecycle boundary.
@@ -24,6 +25,7 @@ export class ForegroundLifecycleAdapter {
 	private readonly observeMessagePersisted: ((message: Message, entryId: string) => void) | undefined;
 	private readonly liveWarningSink: (() => ((message: string) => void) | undefined) | undefined;
 	private pendingWarnings: string[] = [];
+	private readonly compatibilityWarnings = new ProviderCompatibilityWarnings();
 
 	/**
 	 * `getMutationScope` names the session whose group lock these emission-order announcements order
@@ -96,6 +98,8 @@ export class ForegroundLifecycleAdapter {
 
 	recordTransportTelemetry(message: AssistantMessage): void {
 		this.lifecycle.recordTransportTelemetry(message);
+		const warning = this.compatibilityWarnings.read(message);
+		if (warning) this.warn(warning);
 	}
 
 	/**
