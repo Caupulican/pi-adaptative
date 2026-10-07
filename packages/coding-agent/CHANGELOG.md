@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Synchronized bundled extension lockfiles with their pinned manifests, including the Anthropic example's current SDK and package identity.
+
 ## [0.103.5] - 2026-10-07
 
 ### Added
