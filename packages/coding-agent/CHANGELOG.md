@@ -2,6 +2,8 @@
 
 ### Added
 
+- Added cached local Claude discovery for OAuth compatibility, retaining the packaged login and refresh flow with a warning for unreviewed installations.
+- Added Claude Haiku 5.5 with adaptive thinking and effort levels, and refreshed the model catalog with OpenRouter and Vercel context pricing tiers.
 - Reported Claude compatibility fallback through the session warning channel without repeating unchanged warnings.
 
 ## [0.103.4] - 2026-10-06
