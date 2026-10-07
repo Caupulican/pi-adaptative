@@ -6,6 +6,10 @@
 - Added Claude Haiku 5.5 with adaptive thinking and effort levels, and refreshed the model catalog with OpenRouter and Vercel context pricing tiers.
 - Reported Claude compatibility fallback through the session warning channel without repeating unchanged warnings.
 
+### Fixed
+
+- Reported release workflow dispatch failures immediately instead of waiting for a workflow that was never started.
+
 ## [0.103.4] - 2026-10-06
 
 ### Changed

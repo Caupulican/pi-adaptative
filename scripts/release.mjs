@@ -448,13 +448,7 @@ async function waitForWorkflow(sha, workflow, options = {}) {
 				}
 				console.log(`  No ${workflow} run on ${sha}; dispatching on ${dispatchRef}...`);
 				run(`git push origin ${shellQuote(sha)}:refs/heads/${dispatchRef}`);
-				const dispatchedRun = run(
-					`gh workflow run ${workflow} -R ${shellQuote(repo)} --ref ${shellQuote(dispatchRef)}`,
-					{ ignoreError: true },
-				);
-				if (dispatchedRun === undefined) {
-					throw new Error(`Failed to dispatch ${workflow} on ${dispatchRef}.`);
-				}
+				run(`gh workflow run ${workflow} -R ${shellQuote(repo)} --ref ${shellQuote(dispatchRef)}`);
 				dispatched = true;
 			} else {
 				console.log(`  ${workflow} run not registered yet...`);
