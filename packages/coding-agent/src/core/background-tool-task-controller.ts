@@ -22,6 +22,7 @@ import {
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "./context/tool-output-packer.ts";
 import { oneLine } from "./provider-tool-text.ts";
+import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
 import { releaseExclusiveHold } from "./tools/file-mutation-queue.ts";
 import { hasOnlyKeys, isPlainRecord, isRecordObject } from "./util/value-guards.ts";
 
@@ -117,6 +118,20 @@ type BackgroundToolVerification = VerificationRecord & {
 };
 
 export type BackgroundToolTaskRef = Pick<BackgroundToolTaskRecord, "taskId" | "toolCallId" | "goalId" | "status">;
+
+/** Read-only physical ownership diagnostics; durable terminal status is not execution settlement. */
+export interface BackgroundToolTaskResourceSnapshot {
+	readonly disposed: boolean;
+	readonly physicalExecutions: number;
+	readonly runningTaskIds: readonly string[];
+	readonly handoffRequests: number;
+	readonly waitingConsumers: number;
+	readonly taskWatchdogs: number;
+	readonly queuedNotifications: number;
+	readonly activeNotificationRecords: number;
+	readonly notificationDrainActive: boolean;
+	readonly notificationRetryActive: boolean;
+}
 
 /** Match a goal/task_steps evidence uri to a session background tool task by task id or toolCallId. */
 export function findBackgroundToolTask<T extends BackgroundToolTaskRef>(
@@ -730,6 +745,10 @@ export class BackgroundToolTaskController {
 	private readonly deps: BackgroundToolTaskControllerDeps;
 	private readonly tasks = new Map<string, BackgroundToolTaskState>();
 	private readonly handoffRequests = new Map<string, Set<() => void>>();
+	/** Physical completion is distinct from a fenced terminal record after cancellation. */
+	private readonly executions = new Map<string, Promise<void>>();
+	private readonly executionFailures: string[] = [];
+	private executionFailureCount = 0;
 	private readonly queuedNotifications: Array<{ record: BackgroundToolTaskRecord; wakeParent: boolean }> = [];
 	private readonly activeNotificationRecords = new Set<BackgroundToolTaskRecord>();
 	private notificationDrain: Promise<void> | undefined;
@@ -818,9 +837,18 @@ export class BackgroundToolTaskController {
 			);
 		});
 		this.emitLiveTasks();
-		context.completion.then(
+		const execution = context.completion.then(
 			(completion) => this.settle(state, completion),
 			(error) => this.settleRejected(state, error),
+		);
+		this.executions.set(taskId, execution);
+		void execution.then(
+			() => this.executions.delete(taskId),
+			(error: unknown) => {
+				this.executions.delete(taskId);
+				this.retainExecutionFailure(error);
+				this.reportError(`Failed to settle background tool task ${taskId}`, error);
+			},
 		);
 		// The call has left the batch: it is a detached session task now, so it must stop holding the
 		// process-wide exclusive mutation barrier its tool took when it started. A command requested as
@@ -846,6 +874,25 @@ export class BackgroundToolTaskController {
 
 	list(): BackgroundToolTaskRecord[] {
 		return [...this.tasks.values()].map((state) => ({ ...state.record }));
+	}
+
+	getResourceSnapshot(): BackgroundToolTaskResourceSnapshot {
+		const states = [...this.tasks.values()];
+		return {
+			disposed: this.disposed,
+			physicalExecutions: this.executions.size,
+			runningTaskIds: states
+				.filter((state) => state.record.status === "running")
+				.map((state) => state.record.taskId),
+			handoffRequests: [...this.handoffRequests.values()].reduce((count, requests) => count + requests.size, 0),
+			waitingConsumers: states.reduce((count, state) => count + state.waitingConsumers, 0),
+			taskWatchdogs: states.filter((state) => state.terminalWatchdog !== undefined).length,
+			queuedNotifications: this.queuedNotifications.length,
+			activeNotificationRecords: this.activeNotificationRecords.size,
+			notificationDrainActive: this.notificationDrain !== undefined,
+			notificationRetryActive:
+				this.notificationRetryTimer !== undefined || this.notificationRetryCompletion !== undefined,
+		};
 	}
 
 	/**
@@ -972,21 +1019,84 @@ export class BackgroundToolTaskController {
 				try {
 					state.cancel();
 				} catch (error) {
+					this.retainExecutionFailure(error);
 					this.reportError(`Failed to cancel background tool task ${state.record.taskId}`, error);
 				}
-				this.finishState(
-					state,
-					"canceled",
-					"Session ended before the background tool completed.",
-					undefined,
-					false,
-				);
+				try {
+					this.finishState(
+						state,
+						"canceled",
+						"Session ended before the background tool completed.",
+						undefined,
+						false,
+					);
+				} catch (error) {
+					this.retainExecutionFailure(error);
+					this.reportError(`Failed to retain canceled background tool task ${state.record.taskId}`, error);
+				}
 			}
 		}
-		await this.waitForNotifications();
+		let watchdog: ReturnType<typeof setTimeout> | undefined;
+		const failures: unknown[] = [];
+		try {
+			// Preserve bounded cancellation while refusing to report successful release for an
+			// executor that is still running after its terminal record was fenced.
+			await Promise.race([
+				Promise.allSettled([...this.executions.values()]),
+				new Promise<never>((_resolve, reject) => {
+					watchdog = setTimeout(
+						() =>
+							reject(
+								new Error(
+									`Background tool execution did not settle within ${this.cancelGraceMs}ms during shutdown`,
+								),
+							),
+						this.cancelGraceMs,
+					);
+				}),
+			]);
+		} catch (error) {
+			failures.push(error);
+		} finally {
+			clearTimeout(watchdog);
+		}
+		try {
+			await this.waitForNotifications();
+		} catch (error) {
+			failures.push(error);
+		}
+		failures.push(...this.executionFailures.map((message) => new Error(message)));
+		if (failures.length) {
+			const failureCount = failures.length + this.executionFailureCount - this.executionFailures.length;
+			throw new AggregateError(failures, `Background tool execution settlement failed (${failureCount} failure(s))`);
+		}
 	}
 
 	private settle(state: BackgroundToolTaskState, completion: BackgroundToolCallCompletion): void {
+		const invocation =
+			completion.toolCall.id === state.record.toolCallId && completion.toolCall.name === state.record.toolName
+				? retainedToolInvocation(completion.result.details)
+				: undefined;
+		if (invocation?.postprocessingFailures.includes("cleanup")) {
+			const admitted = state.record.piToolInvocation;
+			const correlated =
+				admitted !== undefined &&
+				invocation.requestId === admitted.requestId &&
+				invocation.executionScope === admitted.executionScope;
+			this.retainExecutionFailure(
+				new Error(
+					correlated
+						? `Background tool cleanup failed: ${state.record.taskId}`
+						: `Background tool cleanup receipt identity mismatch: ${state.record.taskId}`,
+				),
+			);
+			if (state.record.status !== "running" && correlated) {
+				// Keep execution evidence after a canceled terminal without treating a cleanup failure
+				// as permission to repeat the operation or as passing verification.
+				state.record = { ...state.record, piToolInvocation: invocation };
+				this.persist(state.record);
+			}
+		}
 		if (state.record.status !== "running") return;
 		const status = state.cancellationRequested ? "canceled" : completion.isError ? "failed" : "completed";
 		const output = renderCompletionOutput(completion);
@@ -997,13 +1107,14 @@ export class BackgroundToolTaskController {
 			completion.result.usage,
 			true,
 			retainedToolVerification(completion.result.details),
-			completion.toolCall.id === state.record.toolCallId && completion.toolCall.name === state.record.toolName
-				? retainedToolInvocation(completion.result.details)
-				: undefined,
+			invocation,
 		);
 	}
 
 	private settleRejected(state: BackgroundToolTaskState, error: unknown): void {
+		// Operation failures are fulfilled tool results with isError. A rejected physical completion
+		// instead carries finalization/cleanup failure, even after the record was fenced canceled.
+		this.retainExecutionFailure(error);
 		if (state.record.status !== "running") return;
 		const status = state.cancellationRequested ? "canceled" : "failed";
 		const output = error instanceof Error ? error.message : String(error);
@@ -1342,6 +1453,29 @@ export class BackgroundToolTaskController {
 				this.reportError(`Failed to prune artifact for background tool task ${state.record.taskId}`, error);
 			}
 		}
+	}
+
+	private retainExecutionFailure(error: unknown): void {
+		this.executionFailureCount++;
+		if (this.executionFailures.length >= MAX_RETAINED_TERMINAL_TASKS) return;
+		const pending: unknown[] = [error];
+		const messages: string[] = [];
+		for (let visited = 0; pending.length > 0 && visited < 8; visited++) {
+			const current = pending.shift();
+			try {
+				messages.push(
+					boundedRedactedDiagnosticText(current instanceof Error ? current.message : String(current)) ??
+						"Background cleanup failure",
+				);
+			} catch {
+				messages.push("Unprintable background cleanup failure");
+			}
+			if (current instanceof AggregateError) {
+				for (let index = 0; index < Math.min(current.errors.length, 8); index++)
+					pending.push(current.errors[index]);
+			}
+		}
+		this.executionFailures.push(messages.join(" | ").slice(0, 1024));
 	}
 
 	private reportError(message: string, error: unknown): void {

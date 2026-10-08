@@ -43,6 +43,19 @@ interface WorkerLaneObserver {
 	deferredGeneration: boolean;
 }
 
+export interface WorkerDispatchResourceSnapshot {
+	readonly admissionClosed: boolean;
+	readonly queuedCount: number;
+	readonly deferredCount: number;
+	readonly preflightPromiseCount: number;
+	readonly preflightTokenCount: number;
+	readonly runningPromiseCount: number;
+	readonly pendingCancellationCount: number;
+	readonly laneObserverCount: number;
+	readonly queueCapacityListenerCount: number;
+	readonly queueCapacityNotificationPending: boolean;
+}
+
 /** One line for status views: `write_reservation: … (since 2026-09-08T08:14:26.000Z)`. */
 export function formatWorkerDispatchWait(state: WorkerDispatchWaitState): string {
 	return `${state.reason}${state.detail ? `: ${state.detail}` : ""} (since ${state.since})`;
@@ -101,6 +114,10 @@ export class WorkerDispatchScheduler {
 		}
 	>();
 	private readonly preflights = new Map<string, symbol>();
+	/** Physical validation work outlives removal of its queue ownership token. */
+	private readonly preflightCompletions = new Set<Promise<void>>();
+	private readonly shutdownErrors = new Set<unknown>();
+	private stopped = false;
 	private readonly validated = new Set<string>();
 	private readonly pendingCancellations = new Map<string, PendingCancellation>();
 	private readonly reservationBlocked = new Set<string>();
@@ -123,6 +140,22 @@ export class WorkerDispatchScheduler {
 
 	get queuedCount(): number {
 		return this.queued.size;
+	}
+
+	/** Process-local resource ownership only; reading never drains or reconciles the queue. */
+	getResourceSnapshot(): WorkerDispatchResourceSnapshot {
+		return {
+			admissionClosed: this.stopped,
+			queuedCount: this.queued.size,
+			deferredCount: this.deferred.size,
+			preflightPromiseCount: this.preflightCompletions.size,
+			preflightTokenCount: this.preflights.size,
+			runningPromiseCount: this.running.size,
+			pendingCancellationCount: this.pendingCancellations.size,
+			laneObserverCount: [...this.laneObservers.values()].reduce((count, observers) => count + observers.size, 0),
+			queueCapacityListenerCount: this.queueCapacityListeners.size,
+			queueCapacityNotificationPending: this.queueCapacityNotificationPending,
+		};
 	}
 
 	/** Why a queued lane is still waiting, or undefined once it left the queue or was never admitted. */
@@ -165,6 +198,7 @@ export class WorkerDispatchScheduler {
 		priority = false,
 		dispatchToken = this.options.getDispatchToken?.(record.laneId),
 	): void {
+		if (this.stopped || this.options.isDisposed()) throw new Error("session_disposed");
 		if (this.running.has(record.laneId)) {
 			// The previous run is still unwinding (an interrupt aborted it and a resume followed at once):
 			// queue the lane the moment that run settles, instead of dropping the resume.
@@ -309,7 +343,7 @@ export class WorkerDispatchScheduler {
 			(outcome) => {
 				let observed: WorkerLaneOutcome = { state: "ran", outcome };
 				try {
-					if (!outcome.started) {
+					if (!outcome.started && !this.stopped && !this.options.isDisposed()) {
 						const reasonCode = outcome.skipReason ?? "worker_not_started";
 						const cancellation = this.cancelWithOutcome(laneId, reasonCode, dispatchToken);
 						if (cancellation.state === "failed")
@@ -322,12 +356,17 @@ export class WorkerDispatchScheduler {
 				}
 			},
 			(error: unknown) => {
+				if (this.stopped) this.shutdownErrors.add(error);
 				let observed: WorkerLaneOutcome = { state: "failed", error };
 				try {
-					const cancellation = this.cancelWithOutcome(laneId, "worker_background_error", dispatchToken);
-					if (cancellation.state === "failed")
-						this.retainPendingCancellation(laneId, "worker_background_error", dispatchToken);
-					else if (cancellation.state === "unowned") observed = { state: "unowned" };
+					// Shutdown already fenced the attempt for restart. A failed physical release must
+					// reject the join without replacing that suspension with a durable cancellation.
+					if (!this.stopped && !this.options.isDisposed()) {
+						const cancellation = this.cancelWithOutcome(laneId, "worker_background_error", dispatchToken);
+						if (cancellation.state === "failed")
+							this.retainPendingCancellation(laneId, "worker_background_error", dispatchToken);
+						else if (cancellation.state === "unowned") observed = { state: "unowned" };
+					}
 					this.warnBestEffort(
 						`Worker ${laneId} rejected: ${error instanceof Error ? error.message : String(error)}`,
 					);
@@ -389,6 +428,7 @@ export class WorkerDispatchScheduler {
 		try {
 			pending.deregister?.();
 		} catch (error) {
+			if (this.stopped) this.shutdownErrors.add(error);
 			this.warnBestEffort(
 				`Worker ${laneId} cancellation reload-gate deregistration failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
@@ -413,6 +453,7 @@ export class WorkerDispatchScheduler {
 					: this.options.cancel(laneId, reasonCode, dispatchToken);
 			return cancelled === false ? { state: "unowned" } : { state: "cancelled" };
 		} catch (error) {
+			if (this.stopped) this.shutdownErrors.add(error);
 			this.warnBestEffort(
 				`Worker ${laneId} cancellation failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
@@ -423,7 +464,7 @@ export class WorkerDispatchScheduler {
 	private finishTrackedRun(laneId: string): void {
 		this.running.delete(laneId);
 		this.runningDispatchTokens.delete(laneId);
-		if (this.options.isDisposed()) {
+		if (this.stopped || this.options.isDisposed()) {
 			// A disposed generation has no future scheduler signal. Its durable state is recovered by the
 			// next generation, so do not leak this generation's process-local reload blocker.
 			if (this.deferred.delete(laneId)) {
@@ -438,6 +479,7 @@ export class WorkerDispatchScheduler {
 
 	/** Transfer retained resumes into real bounded queue slots without an ownership gap. */
 	private promoteDeferred(): void {
+		if (this.stopped || this.options.isDisposed()) return;
 		const candidates = [...this.deferred].sort(
 			([, left], [, right]) => Number(right.priority) - Number(left.priority),
 		);
@@ -513,11 +555,27 @@ export class WorkerDispatchScheduler {
 		if (this.preflights.has(laneId)) return;
 		const token = Symbol();
 		this.preflights.set(laneId, token);
+		const terminal = Promise.withResolvers<void>();
+		const completion = terminal.promise;
+		// The callback may synchronously initiate shutdown before returning its pending validation.
+		// Publish physical ownership first; withdrawing a queue token never withdraws this join.
+		this.preflightCompletions.add(completion);
+		void completion.then(
+			() => this.preflightCompletions.delete(completion),
+			(error: unknown) => {
+				this.preflightCompletions.delete(completion);
+				this.shutdownErrors.add(error);
+				this.warnBestEffort(
+					`Worker ${laneId} preflight completion failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			},
+		);
 		void (async () => {
 			let result: Exclude<WorkerDispatchAdmission, { action: "wait" }>;
 			try {
 				result = await this.options.preflight!(request, record);
 			} catch (error) {
+				if (this.stopped) this.shutdownErrors.add(error);
 				this.warnBestEffort(
 					`Worker ${laneId} preflight failed: ${error instanceof Error ? error.message : String(error)}`,
 				);
@@ -525,7 +583,7 @@ export class WorkerDispatchScheduler {
 			}
 			if (this.preflights.get(laneId) !== token) return;
 			this.preflights.delete(laneId);
-			if (this.options.isDisposed() || !this.queued.has(laneId)) return;
+			if (this.stopped || this.options.isDisposed() || !this.queued.has(laneId)) return;
 			const ownership = this.currentQueuedRecord(laneId);
 			if (ownership.state === "missing") {
 				this.removeQueued(laneId);
@@ -559,11 +617,11 @@ export class WorkerDispatchScheduler {
 			}
 			this.validated.add(laneId);
 			this.redrainBestEffort(laneId);
-		})();
+		})().then(terminal.resolve, terminal.reject);
 	}
 
 	drain(reservationAvailable = false): void {
-		if (this.options.isDisposed()) return;
+		if (this.stopped || this.options.isDisposed()) return;
 		if (reservationAvailable) this.reservationAvailabilityRequested = true;
 		if (this.draining) {
 			this.redrainRequested = true;
@@ -580,6 +638,7 @@ export class WorkerDispatchScheduler {
 				const passReservationAvailable = this.reservationAvailabilityRequested;
 				this.reservationAvailabilityRequested = false;
 				for (const [laneId, request] of [...this.queued]) {
+					if (this.stopped || this.options.isDisposed()) break;
 					if (this.pendingCancellations.has(laneId)) continue;
 					if (this.reservationBlocked.has(laneId) && !passReservationAvailable) continue;
 					const ownership = this.currentQueuedRecord(laneId);
@@ -597,6 +656,7 @@ export class WorkerDispatchScheduler {
 					}
 					const record = ownership.record;
 					const admission = this.options.admit(request, record);
+					if (this.stopped || this.options.isDisposed()) break;
 					if (admission.action === "wait") {
 						this.validated.delete(laneId);
 						this.recordWait(laneId, admission);
@@ -644,6 +704,7 @@ export class WorkerDispatchScheduler {
 					}
 					const dispatchToken = this.queuedDispatchTokens.get(laneId);
 					this.removeQueued(laneId);
+					if (this.stopped || this.options.isDisposed()) break;
 					let run: Promise<WorkerDelegationRunOutcome>;
 					let started = true;
 					try {
@@ -659,10 +720,19 @@ export class WorkerDispatchScheduler {
 					// handed the lane to may be announced, and only with the lane's own current record.
 					if (started) this.announceLaneStart(laneId);
 				}
-			} while ((this.redrainRequested || this.reservationAvailabilityRequested) && !this.options.isDisposed());
+			} while (
+				(this.redrainRequested || this.reservationAvailabilityRequested) &&
+				!this.stopped &&
+				!this.options.isDisposed()
+			);
 		} finally {
 			this.draining = false;
 		}
+	}
+
+	/** The controller owns permanent shutdown; ordinary queue cancellation remains reusable. */
+	closeAdmission(): void {
+		this.stopped = true;
 	}
 
 	cancelQueued(): void {
@@ -697,6 +767,20 @@ export class WorkerDispatchScheduler {
 		}
 	}
 
+	/** Join physical work, including preflights whose queue tokens were already withdrawn. */
+	async waitForShutdown(): Promise<void> {
+		if (!this.stopped) throw new Error("Worker scheduler shutdown has not started.");
+		while (this.preflightCompletions.size > 0 || this.running.size > 0) {
+			const results = await Promise.allSettled([...this.preflightCompletions, ...this.running.values()]);
+			for (const result of results) {
+				if (result.status === "rejected") this.shutdownErrors.add(result.reason);
+			}
+		}
+		if (this.shutdownErrors.size > 0) {
+			throw new AggregateError([...this.shutdownErrors], "Worker scheduler shutdown failed.");
+		}
+	}
+
 	dropQueued(laneId: string): boolean {
 		// A cancel also withdraws a resume that was waiting for the previous run to settle.
 		const hadDeferred = this.deferred.delete(laneId);
@@ -722,6 +806,7 @@ export class WorkerDispatchScheduler {
 		try {
 			deregister?.();
 		} catch (error) {
+			if (this.stopped) this.shutdownErrors.add(error);
 			this.warnBestEffort(
 				`Worker ${laneId} reload-gate deregistration failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
@@ -739,6 +824,7 @@ export class WorkerDispatchScheduler {
 		this.queueCapacityNotificationPending = true;
 		queueMicrotask(() => {
 			this.queueCapacityNotificationPending = false;
+			if (this.stopped || this.options.isDisposed()) return;
 			this.queueCapacityListeners.notify(
 				(listener) => listener(),
 				(error) => {

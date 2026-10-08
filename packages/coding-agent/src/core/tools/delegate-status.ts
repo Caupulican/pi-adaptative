@@ -1,6 +1,7 @@
 import type { Finding, WorkerClaim } from "../autonomy/contracts.ts";
 import { normalizeEvidenceFinding } from "../autonomy/evidence-finding-projection.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { WorkerClaimSnapshotPayload } from "../delegation/session-worker-claim.ts";
 import { workerClaimSettlementLines } from "../delegation/worker-claim.ts";
 import {
 	deriveWorkerDispositionForClaim,
@@ -123,15 +124,17 @@ export type AcknowledgeWorkerReviewResult =
 
 export interface DelegateStatusDependencies {
 	getLaneRecords(): LaneRecord[];
-	getWorkerClaimSnapshots(): WorkerClaim[];
-	getWorkerResult?(laneId: string): Pick<WorkerResultContract, "artifacts"> | undefined;
+	/** Canonical claim proof for this task and generation; absent proof never adopts an older claim. */
+	getWorkerClaimSnapshot(taskId: string, attemptId: string): WorkerClaimSnapshotPayload | undefined;
+	/** Exact attempt result, never the task's currently selected generation. */
+	getWorkerResult?(attemptId: string): Pick<WorkerResultContract, "artifacts"> | undefined;
 	acknowledgeWorkerReview?(requestId: string): AcknowledgeWorkerReviewResult;
 	/** Mark only terminal records that made it into this bounded status response as exposed. */
 	observeExposedTerminalRecords?(records: readonly LaneRecord[]): void;
 	/** A claimless terminal lane's last worker text: what it said before it was cancelled or failed. */
 	getLastWorkerText?(record: LaneRecord): string | undefined;
 	/** Host facts (open tasks for the lane's profile, uncovered goal requirements); absent leaves them unknown. */
-	getWorkerDispositionFacts?(laneId: string): WorkerDispositionFacts | undefined;
+	getWorkerDispositionFacts?(taskId: string, attemptId: string): WorkerDispositionFacts | undefined;
 }
 
 /** Advice for a lane whose task ended with a claim; a queued or running lane, or one without a claim, has none. */
@@ -143,7 +146,8 @@ function laneDisposition(
 	if (!claim || record.status === "queued" || record.status === "running") return undefined;
 	return deriveWorkerDispositionForClaim({
 		claim,
-		facts: deps.getWorkerDispositionFacts?.(record.laneId),
+		facts:
+			record.attemptId === undefined ? undefined : deps.getWorkerDispositionFacts?.(record.laneId, record.attemptId),
 		...(record.profileId ? { profileId: record.profileId } : {}),
 	});
 }
@@ -587,8 +591,20 @@ export function executeDelegateStatusAction(
 	}
 
 	const records = deps.getLaneRecords().filter(isDelegatedWorkerLane);
-	const claims = new Map(deps.getWorkerClaimSnapshots().map((claim) => [claim.requestId, claim]));
-	const unreviewedRecords = records.filter((record) => isUnreviewed(claims.get(record.laneId)));
+	// Resolve each displayed record's own generation once; historical records never borrow newer
+	// proof, and a current generation with no claim never borrows an earlier task or attempt.
+	const terminalSnapshots = new Map(
+		records.map((record) => [
+			record,
+			record.attemptId === undefined
+				? undefined
+				: {
+						claim: deps.getWorkerClaimSnapshot(record.laneId, record.attemptId)?.claim,
+						result: deps.getWorkerResult?.(record.attemptId),
+					},
+		]),
+	);
+	const unreviewedRecords = records.filter((record) => isUnreviewed(terminalSnapshots.get(record)?.claim));
 
 	if (input.laneId !== undefined) {
 		if (input.laneId.length > MAX_WORKER_CONTROL_ID_CHARS || !input.laneId.trim()) {
@@ -605,8 +621,8 @@ export function executeDelegateStatusAction(
 				details: { started: false, action, kind: "error", reason: "unknown_worker_lane" },
 			};
 		}
-		const claim = claims.get(record.laneId);
-		const workerResult = deps.getWorkerResult?.(record.laneId);
+		const claim = terminalSnapshots.get(record)?.claim;
+		const workerResult = terminalSnapshots.get(record)?.result;
 		const outputArtifact = workerTerminalOutputArtifact(workerResult);
 		const findings = projectClaimFindings(claim?.evidence?.findings);
 		const claimSummary = claim?.summary ? utf8PrefixByBytes(claim.summary, 1_024) : undefined;
@@ -761,11 +777,11 @@ export function executeDelegateStatusAction(
 
 	// One record's text if it fits the remaining output budget, and the budget it uses up.
 	const takeFormatted = (record: LaneRecord): string | undefined => {
-		const claim = claims.get(record.laneId);
+		const claim = terminalSnapshots.get(record)?.claim;
 		const formatted = formatRecord(
 			record,
 			claim,
-			deps.getWorkerResult?.(record.laneId),
+			terminalSnapshots.get(record)?.result,
 			2_048,
 			undefined,
 			laneDisposition(record, claim, deps),
@@ -843,7 +859,7 @@ export function executeDelegateStatusAction(
 
 	const visibleLanes: DelegateStatusLaneView[] = [];
 	for (const rec of deliveredRecords) {
-		const claim = claims.get(rec.laneId);
+		const claim = terminalSnapshots.get(rec)?.claim;
 		const view = laneView(rec, claim, laneDisposition(rec, claim, deps));
 		const trial = {
 			...overviewDetails,

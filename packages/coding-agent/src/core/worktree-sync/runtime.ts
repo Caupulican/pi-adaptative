@@ -25,6 +25,14 @@ export interface RuntimeSettingsSource {
 	getWorktreeSyncSettings(): ResolvedWorktreeSyncSettings;
 }
 
+/**
+ * Host-supplied process and file-probe boundary of the worktree engine. Members left out resolve to
+ * the production defaults (real git executor, real `fs` probes, same-host pid liveness).
+ */
+export type WorktreeSyncEnginePorts = Partial<
+	Pick<WorktreeSyncEngineDeps, "exec" | "fileExists" | "readFile" | "isPidAlive" | "now" | "pid">
+>;
+
 export interface WorktreeSyncEngineConfig {
 	cwd: string;
 	agentDir: string;
@@ -33,6 +41,8 @@ export interface WorktreeSyncEngineConfig {
 	signal?: AbortSignal;
 	/** When System One bound this task to local commits, land and rebase onto this branch. */
 	integrationBranch?: () => string | undefined;
+	/** Process/probe ports for embedders that run the engine outside the local git executable. */
+	ports?: WorktreeSyncEnginePorts;
 }
 
 /** Build production engine deps from session facts + resolved settings. */
@@ -40,8 +50,10 @@ export function buildWorktreeSyncEngineDeps(config: WorktreeSyncEngineConfig): W
 	const settings = config.settingsManager.getWorktreeSyncSettings();
 	const boundBranch = config.integrationBranch?.();
 	const mainBranchOverride = boundBranch || settings.mainBranch;
+	const ports = config.ports ?? {};
 	return {
-		exec: createDefaultWorktreeSyncExec(),
+		...ports,
+		exec: ports.exec ?? createDefaultWorktreeSyncExec(),
 		cwd: config.cwd,
 		worktreesBaseDir: settings.worktreesRoot ?? worktreesDir(config.agentDir),
 		options: {

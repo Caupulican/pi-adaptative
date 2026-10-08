@@ -44,6 +44,8 @@ export interface BashExecutionControllerDeps {
 	getShellSessionKey?(): string;
 	/** Owner-authorized credential environment resolved for the current project. */
 	getEnvironment?(cwd: string): NodeJS.ProcessEnv;
+	/** The host's configured shell backend, shared with model-facing tools and worker lanes. */
+	getShellOperations?(): BashOperations | undefined;
 	/** Exact-value redaction applied before owner shell results enter model/session history. */
 	redactSensitiveText?(text: string): string;
 }
@@ -81,6 +83,7 @@ export class BashExecutionController {
 	 * command, which retries the whole resolution and reports the actionable runtime error.
 	 */
 	async prewarmShell(platform: NodeJS.Platform = process.platform): Promise<void> {
+		if (this.deps.getShellOperations?.()) return;
 		if (platform !== "win32") return;
 		try {
 			const windowsShell = this.deps.getSettingsManager().getWindowsShellSettings();
@@ -105,7 +108,8 @@ export class BashExecutionController {
 		const shellPath = this.deps.getSettingsManager().getShellPath();
 		const windowsShell = this.deps.getSettingsManager().getWindowsShellSettings();
 		const platform = options?.platform ?? process.platform;
-		const enableGitFilter = !options?.operations && !commandPrefix && !shellPath;
+		const shellOperations = options?.operations ?? this.deps.getShellOperations?.();
+		const enableGitFilter = !shellOperations && !commandPrefix && !shellPath;
 		const cwd = this.deps.getSessionManager().getCwd();
 		const edgeSettings = this.deps.getSettingsManager().getEdgeSettings?.();
 		if (edgeSettings?.mode === "yolo") {
@@ -130,7 +134,7 @@ export class BashExecutionController {
 			...this.deps.getEnvironment?.(cwd),
 		});
 		const environment: NodeJS.ProcessEnv =
-			options?.operations === undefined
+			shellOperations === undefined
 				? getShellEnv(inheritedEnvironment, platform, buildShellSessionContext(this.deps))
 				: inheritedEnvironment;
 		delete environment.BW_SESSION;
@@ -138,7 +142,7 @@ export class BashExecutionController {
 			{
 				shellPath,
 				commandPrefix,
-				operations: options?.operations,
+				operations: shellOperations,
 				sessionKey: this.shellSessionKey,
 				pythonEngine: options?.pythonEngine ?? windowsShell.pythonEngine,
 				engineOptions: { gnuToolsDir: windowsShell.gnuToolsDir },
@@ -148,7 +152,7 @@ export class BashExecutionController {
 
 		try {
 			const preparedEnvironment =
-				options?.operations === undefined
+				shellOperations === undefined
 					? await prepareManagedShellEnvironment(command, environment, options?.managedToolResolver)
 					: environment;
 			const result = await executeBashWithOperations(command, cwd, operations, {

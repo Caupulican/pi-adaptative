@@ -5,12 +5,13 @@
  * it ran, files it changed), the host sends one request: submit a report through `submit_report`,
  * citing the host's own records (receipt ids, changed files) as proof. The tool records the report and
  * ends the run through the loop's ordinary tool-batch termination, so the transcript keeps a complete
- * call and result. A worker is never forced: a text answer is still accepted, parsed as before and marked
- * `unstructured_after_request`, and nothing here turns a finished worker into a blocked one.
+ * call and result. A text answer without a submitted report follows the existing parsing path and is
+ * marked `unstructured_after_request`. An incomplete typed report is retained during bounded correction.
  *
  * The host then checks the report against its receipts in code (`judgeSubmittedReport`): a claimed pass
- * with a failing receipt is contradicted, a requirement with no evidence needs more. The verdict is
- * advice to the root, which owns the worker's lifecycle.
+ * with a failing receipt is contradicted, a requirement with no evidence needs more. The selected last
+ * or replacement report is judged against final host evidence; an adverse verdict blocks the claim
+ * through normal worker validation. The root still owns lifecycle and independent verification.
  */
 
 import { isAbsolute, resolve } from "node:path";

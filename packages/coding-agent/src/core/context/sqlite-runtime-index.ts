@@ -5,7 +5,7 @@ import type { ContextItem } from "./context-item.ts";
 import type { ContextStore, PolicyDecisionRecord, RetrievalRecord } from "./context-store.ts";
 import type { MemoryIndexRecord, MemoryIndexStore } from "./memory-index-store.ts";
 import type { PolicyDecision } from "./policy-types.ts";
-import { openSqliteDatabase, type SqliteDatabase } from "./sqlite-database.ts";
+import { constructSqliteDatabase, type SqliteDatabase } from "./sqlite-database.ts";
 
 export const SQLITE_RUNTIME_INDEX_SCHEMA_VERSION = 2;
 
@@ -39,24 +39,17 @@ function prepareDatabasePath(databasePath: string): void {
 	mkdirSync(dirname(databasePath), { recursive: true });
 }
 
-function openDatabase(options: SqliteRuntimeIndexOptions): SqliteDatabase {
+function openDatabase<T>(options: SqliteRuntimeIndexOptions, build: (database: SqliteDatabase) => T): T {
 	prepareDatabasePath(options.databasePath);
-	const database = openSqliteDatabase({
-		databasePath: options.databasePath,
-		busyTimeoutMs: options.busyTimeoutMs,
-	});
-	try {
+	return constructSqliteDatabase(options, (database) => {
 		database.exec(`
 			PRAGMA foreign_keys = ON;
 			PRAGMA busy_timeout = ${options.busyTimeoutMs ?? 5_000};
 			PRAGMA journal_mode = WAL;
 		`);
 		migrateSqliteRuntimeIndex(database);
-		return database;
-	} catch (error) {
-		database[Symbol.dispose]();
-		throw error;
-	}
+		return build(database);
+	});
 }
 
 function currentSchemaVersion(database: SqliteDatabase): number {
@@ -280,8 +273,8 @@ function memoryIndexRecordFromRow(row: Record<string, unknown> | undefined): Mem
 }
 
 export function createSqliteContextStore(options: SqliteRuntimeIndexOptions): SqliteContextStore {
-	const database = openDatabase(options);
-	const upsertItem = database.prepare(`
+	return openDatabase(options, (database) => {
+		const upsertItem = database.prepare(`
 		INSERT INTO context_items (
 			id, kind, retention_class, source, created_at_turn, last_used_at_turn, token_estimate, byte_estimate, payload_json
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -295,112 +288,116 @@ export function createSqliteContextStore(options: SqliteRuntimeIndexOptions): Sq
 			byte_estimate = excluded.byte_estimate,
 			payload_json = excluded.payload_json
 	`);
-	const getItem = database.prepare("SELECT payload_json FROM context_items WHERE id = ?");
-	const listItems = database.prepare("SELECT payload_json FROM context_items ORDER BY created_at_turn, id");
-	const removeItem = database.prepare("DELETE FROM context_items WHERE id = ?");
-	const recordPolicyDecision = database.prepare(`
+		const getItem = database.prepare("SELECT payload_json FROM context_items WHERE id = ?");
+		const listItems = database.prepare("SELECT payload_json FROM context_items ORDER BY created_at_turn, id");
+		const removeItem = database.prepare("DELETE FROM context_items WHERE id = ?");
+		const recordPolicyDecision = database.prepare(`
 		INSERT INTO policy_decisions (
 			id, context_item_id, recorded_at_turn, decision_kind, selected_action, mode, applied, payload_json
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`);
-	const listAllPolicyDecisions = database.prepare(
-		"SELECT payload_json FROM policy_decisions ORDER BY recorded_at_turn, id",
-	);
-	const listPolicyDecisionsByItem = database.prepare(
-		"SELECT payload_json FROM policy_decisions WHERE context_item_id = ? ORDER BY recorded_at_turn, id",
-	);
-	const recordRetrieval = database.prepare(`
+		const listAllPolicyDecisions = database.prepare(
+			"SELECT payload_json FROM policy_decisions ORDER BY recorded_at_turn, id",
+		);
+		const listPolicyDecisionsByItem = database.prepare(
+			"SELECT payload_json FROM policy_decisions WHERE context_item_id = ? ORDER BY recorded_at_turn, id",
+		);
+		const recordRetrieval = database.prepare(`
 		INSERT INTO retrieval_records (
 			id, context_item_id, requested_at_turn, slice_kind, result_summary, payload_json
 		) VALUES (?, ?, ?, ?, ?, ?)
 	`);
-	const listAllRetrievals = database.prepare(
-		"SELECT payload_json FROM retrieval_records ORDER BY requested_at_turn, id",
-	);
-	const listRetrievalsByItem = database.prepare(
-		"SELECT payload_json FROM retrieval_records WHERE context_item_id = ? ORDER BY requested_at_turn, id",
-	);
+		const listAllRetrievals = database.prepare(
+			"SELECT payload_json FROM retrieval_records ORDER BY requested_at_turn, id",
+		);
+		const listRetrievalsByItem = database.prepare(
+			"SELECT payload_json FROM retrieval_records WHERE context_item_id = ? ORDER BY requested_at_turn, id",
+		);
 
-	return {
-		upsertItem(item: ContextItem): void {
-			upsertItem.run(
-				item.id,
-				item.kind,
-				item.retentionClass,
-				item.source,
-				item.createdAtTurn,
-				item.lastUsedAtTurn ?? null,
-				item.tokenEstimate,
-				item.byteEstimate,
-				JSON.stringify(item),
-			);
-		},
+		return {
+			upsertItem(item: ContextItem): void {
+				upsertItem.run(
+					item.id,
+					item.kind,
+					item.retentionClass,
+					item.source,
+					item.createdAtTurn,
+					item.lastUsedAtTurn ?? null,
+					item.tokenEstimate,
+					item.byteEstimate,
+					JSON.stringify(item),
+				);
+			},
 
-		getItem(id: string): ContextItem | undefined {
-			return contextItemFromRow(getItem.get(id));
-		},
+			getItem(id: string): ContextItem | undefined {
+				return contextItemFromRow(getItem.get(id));
+			},
 
-		listItems(): ContextItem[] {
-			return listItems.all().flatMap((row) => {
-				const item = contextItemFromRow(row);
-				return item === undefined ? [] : [item];
-			});
-		},
+			listItems(): ContextItem[] {
+				return listItems.all().flatMap((row) => {
+					const item = contextItemFromRow(row);
+					return item === undefined ? [] : [item];
+				});
+			},
 
-		removeItem(id: string): void {
-			removeItem.run(id);
-		},
+			removeItem(id: string): void {
+				removeItem.run(id);
+			},
 
-		recordPolicyDecision(record: PolicyDecisionRecord): void {
-			recordPolicyDecision.run(
-				record.id,
-				record.contextItemId ?? null,
-				record.recordedAtTurn,
-				record.decision.kind,
-				record.decision.selectedAction,
-				record.decision.mode,
-				record.decision.applied ? 1 : 0,
-				JSON.stringify(record),
-			);
-		},
+			recordPolicyDecision(record: PolicyDecisionRecord): void {
+				recordPolicyDecision.run(
+					record.id,
+					record.contextItemId ?? null,
+					record.recordedAtTurn,
+					record.decision.kind,
+					record.decision.selectedAction,
+					record.decision.mode,
+					record.decision.applied ? 1 : 0,
+					JSON.stringify(record),
+				);
+			},
 
-		listPolicyDecisions(contextItemId?: string): PolicyDecisionRecord[] {
-			const rows =
-				contextItemId === undefined ? listAllPolicyDecisions.all() : listPolicyDecisionsByItem.all(contextItemId);
-			return rows.flatMap((row) => {
-				const record = policyDecisionRecordFromRow(row);
-				return record === undefined ? [] : [record];
-			});
-		},
+			listPolicyDecisions(contextItemId?: string): PolicyDecisionRecord[] {
+				const rows =
+					contextItemId === undefined
+						? listAllPolicyDecisions.all()
+						: listPolicyDecisionsByItem.all(contextItemId);
+				return rows.flatMap((row) => {
+					const record = policyDecisionRecordFromRow(row);
+					return record === undefined ? [] : [record];
+				});
+			},
 
-		recordRetrieval(record: RetrievalRecord): void {
-			recordRetrieval.run(
-				record.id,
-				record.contextItemId,
-				record.requestedAtTurn,
-				record.sliceKind,
-				record.resultSummary,
-				JSON.stringify(record),
-			);
-		},
+			recordRetrieval(record: RetrievalRecord): void {
+				recordRetrieval.run(
+					record.id,
+					record.contextItemId,
+					record.requestedAtTurn,
+					record.sliceKind,
+					record.resultSummary,
+					JSON.stringify(record),
+				);
+			},
 
-		listRetrievals(contextItemId?: string): RetrievalRecord[] {
-			const rows = contextItemId === undefined ? listAllRetrievals.all() : listRetrievalsByItem.all(contextItemId);
-			return rows.flatMap((row) => {
-				const record = retrievalRecordFromRow(row);
-				return record === undefined ? [] : [record];
-			});
-		},
+			listRetrievals(contextItemId?: string): RetrievalRecord[] {
+				const rows =
+					contextItemId === undefined ? listAllRetrievals.all() : listRetrievalsByItem.all(contextItemId);
+				return rows.flatMap((row) => {
+					const record = retrievalRecordFromRow(row);
+					return record === undefined ? [] : [record];
+				});
+			},
 
-		close(): void {
-			database[Symbol.dispose]();
-		},
-	};
+			close(): void {
+				database[Symbol.dispose]();
+			},
+		};
+	});
 }
 
 export function createSqliteMemoryIndexStore(options: SqliteRuntimeIndexOptions): SqliteMemoryIndexStore {
-	const database = openDatabase(options);
-	const upsert = database.prepare(`
+	return openDatabase(options, (database) => {
+		const upsert = database.prepare(`
 		INSERT INTO memory_index (
 			provider_id, item_id, scope, kind, title, summary, indexed_at_turn, stale, payload_json
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -413,57 +410,58 @@ export function createSqliteMemoryIndexStore(options: SqliteRuntimeIndexOptions)
 			stale = excluded.stale,
 			payload_json = excluded.payload_json
 	`);
-	const get = database.prepare("SELECT payload_json FROM memory_index WHERE provider_id = ? AND item_id = ?");
-	const listAll = database.prepare("SELECT payload_json FROM memory_index ORDER BY provider_id, item_id");
-	const listByScope = database.prepare(
-		"SELECT payload_json FROM memory_index WHERE scope = ? ORDER BY provider_id, item_id",
-	);
-	const markStale = database.prepare(
-		"UPDATE memory_index SET stale = 1, payload_json = ? WHERE provider_id = ? AND item_id = ?",
-	);
-	const remove = database.prepare("DELETE FROM memory_index WHERE provider_id = ? AND item_id = ?");
+		const get = database.prepare("SELECT payload_json FROM memory_index WHERE provider_id = ? AND item_id = ?");
+		const listAll = database.prepare("SELECT payload_json FROM memory_index ORDER BY provider_id, item_id");
+		const listByScope = database.prepare(
+			"SELECT payload_json FROM memory_index WHERE scope = ? ORDER BY provider_id, item_id",
+		);
+		const markStale = database.prepare(
+			"UPDATE memory_index SET stale = 1, payload_json = ? WHERE provider_id = ? AND item_id = ?",
+		);
+		const remove = database.prepare("DELETE FROM memory_index WHERE provider_id = ? AND item_id = ?");
 
-	return {
-		upsert(record: MemoryIndexRecord): void {
-			upsert.run(
-				record.ref.providerId,
-				record.ref.itemId,
-				record.ref.scope,
-				record.ref.kind,
-				record.title ?? null,
-				record.summary,
-				record.indexedAtTurn,
-				record.stale ? 1 : 0,
-				JSON.stringify(record),
-			);
-		},
+		return {
+			upsert(record: MemoryIndexRecord): void {
+				upsert.run(
+					record.ref.providerId,
+					record.ref.itemId,
+					record.ref.scope,
+					record.ref.kind,
+					record.title ?? null,
+					record.summary,
+					record.indexedAtTurn,
+					record.stale ? 1 : 0,
+					JSON.stringify(record),
+				);
+			},
 
-		get(providerId: string, itemId: string): MemoryIndexRecord | undefined {
-			return memoryIndexRecordFromRow(get.get(providerId, itemId));
-		},
+			get(providerId: string, itemId: string): MemoryIndexRecord | undefined {
+				return memoryIndexRecordFromRow(get.get(providerId, itemId));
+			},
 
-		list(scope?: MemoryIndexRecord["ref"]["scope"]): MemoryIndexRecord[] {
-			const rows = scope === undefined ? listAll.all() : listByScope.all(scope);
-			return rows.flatMap((row) => {
-				const record = memoryIndexRecordFromRow(row);
-				return record === undefined ? [] : [record];
-			});
-		},
+			list(scope?: MemoryIndexRecord["ref"]["scope"]): MemoryIndexRecord[] {
+				const rows = scope === undefined ? listAll.all() : listByScope.all(scope);
+				return rows.flatMap((row) => {
+					const record = memoryIndexRecordFromRow(row);
+					return record === undefined ? [] : [record];
+				});
+			},
 
-		markStale(providerId: string, itemId: string): void {
-			const existing = memoryIndexRecordFromRow(get.get(providerId, itemId));
-			if (existing === undefined) return;
-			markStale.run(JSON.stringify({ ...existing, stale: true }), providerId, itemId);
-		},
+			markStale(providerId: string, itemId: string): void {
+				const existing = memoryIndexRecordFromRow(get.get(providerId, itemId));
+				if (existing === undefined) return;
+				markStale.run(JSON.stringify({ ...existing, stale: true }), providerId, itemId);
+			},
 
-		remove(providerId: string, itemId: string): void {
-			remove.run(providerId, itemId);
-		},
+			remove(providerId: string, itemId: string): void {
+				remove.run(providerId, itemId);
+			},
 
-		close(): void {
-			database[Symbol.dispose]();
-		},
-	};
+			close(): void {
+				database[Symbol.dispose]();
+			},
+		};
+	});
 }
 
 export interface SqlitePathAliasRow {
@@ -529,64 +527,65 @@ function preparePathAliasReads(database: SqliteDatabase): PathAliasReads {
 }
 
 export function createSqlitePathAliasStore(options: SqliteRuntimeIndexOptions): SqlitePathAliasStore {
-	const database = openDatabase(options);
-	const { list, getMeta } = preparePathAliasReads(database);
-	const upsert = database.prepare(
-		"INSERT INTO path_aliases(full_path, alias_id, created_at_turn) VALUES(?, ?, ?) ON CONFLICT(full_path) DO NOTHING",
-	);
-	const setMeta = database.prepare(
-		"INSERT INTO path_alias_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-	);
-	const listScanned = database.prepare("SELECT fingerprint FROM path_alias_scanned");
-	const insertScanned = database.prepare(
-		"INSERT INTO path_alias_scanned(fingerprint) VALUES(?) ON CONFLICT DO NOTHING",
-	);
-	const inTransaction = (write: () => void): void => {
-		database.exec("BEGIN");
-		try {
-			write();
-			database.exec("COMMIT");
-		} catch (error) {
+	return openDatabase(options, (database) => {
+		const { list, getMeta } = preparePathAliasReads(database);
+		const upsert = database.prepare(
+			"INSERT INTO path_aliases(full_path, alias_id, created_at_turn) VALUES(?, ?, ?) ON CONFLICT(full_path) DO NOTHING",
+		);
+		const setMeta = database.prepare(
+			"INSERT INTO path_alias_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+		);
+		const listScanned = database.prepare("SELECT fingerprint FROM path_alias_scanned");
+		const insertScanned = database.prepare(
+			"INSERT INTO path_alias_scanned(fingerprint) VALUES(?) ON CONFLICT DO NOTHING",
+		);
+		const inTransaction = (write: () => void): void => {
+			database.exec("BEGIN");
 			try {
-				database.exec("ROLLBACK");
-			} catch {
-				// The primary failure is rethrown below; a rollback error on an already-
-				// aborted transaction must not mask it.
+				write();
+				database.exec("COMMIT");
+			} catch (error) {
+				try {
+					database.exec("ROLLBACK");
+				} catch {
+					// The primary failure is rethrown below; a rollback error on an already-
+					// aborted transaction must not mask it.
+				}
+				throw error;
 			}
-			throw error;
-		}
-	};
-	return {
-		list,
-		upsert(row: SqlitePathAliasRow): void {
-			upsert.run(row.fullPath, row.aliasId, row.createdAtTurn);
-		},
-		upsertMany(rows: readonly SqlitePathAliasRow[]): void {
-			if (rows.length === 0) return;
-			inTransaction(() => {
-				for (const row of rows) upsert.run(row.fullPath, row.aliasId, row.createdAtTurn);
-			});
-		},
-		getMeta,
-		setMeta(key: string, value: string): void {
-			setMeta.run(key, value);
-		},
-		listScanned(): string[] {
-			return listScanned.all().map((row) => String((row as Record<string, unknown>).fingerprint));
-		},
-		insertScanned(fingerprints: readonly string[]): void {
-			if (fingerprints.length === 0) return;
-			inTransaction(() => {
-				for (const fingerprint of fingerprints) insertScanned.run(fingerprint);
-			});
-		},
-		close(): void {
-			try {
-				database.exec("PRAGMA wal_checkpoint(TRUNCATE);");
-			} catch {}
-			database[Symbol.dispose]();
-		},
-	};
+		};
+		return {
+			list,
+			upsert(row: SqlitePathAliasRow): void {
+				upsert.run(row.fullPath, row.aliasId, row.createdAtTurn);
+			},
+			upsertMany(rows: readonly SqlitePathAliasRow[]): void {
+				if (rows.length === 0) return;
+				inTransaction(() => {
+					for (const row of rows) upsert.run(row.fullPath, row.aliasId, row.createdAtTurn);
+				});
+			},
+			getMeta,
+			setMeta(key: string, value: string): void {
+				setMeta.run(key, value);
+			},
+			listScanned(): string[] {
+				return listScanned.all().map((row) => String((row as Record<string, unknown>).fingerprint));
+			},
+			insertScanned(fingerprints: readonly string[]): void {
+				if (fingerprints.length === 0) return;
+				inTransaction(() => {
+					for (const fingerprint of fingerprints) insertScanned.run(fingerprint);
+				});
+			},
+			close(): void {
+				try {
+					database.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+				} catch {}
+				database[Symbol.dispose]();
+			},
+		};
+	});
 }
 
 export interface SqlitePathAliasReadOnlyStore {
@@ -609,8 +608,7 @@ export function openPathAliasStoreReadOnly(
 	options: SqliteRuntimeIndexOptions,
 ): SqlitePathAliasReadOnlyStore | undefined {
 	if (!existsSync(options.databasePath)) return undefined;
-	const database = openSqliteDatabase(options);
-	try {
+	return constructSqliteDatabase(options, (database) => {
 		// Connection-scoped only — never persisted to the database file — so this cannot
 		// regress the zero-write guarantee above.
 		database.exec(`PRAGMA busy_timeout = ${options.busyTimeoutMs ?? 5_000};`);
@@ -622,8 +620,5 @@ export function openPathAliasStoreReadOnly(
 				database[Symbol.dispose]();
 			},
 		};
-	} catch (error) {
-		database[Symbol.dispose]();
-		throw error;
-	}
+	});
 }

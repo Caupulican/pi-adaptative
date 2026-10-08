@@ -40,6 +40,7 @@ import {
 	type WorkerAgentControlScope,
 	type WorkerAgentLaneResolution,
 	WorkerAgentMailbox,
+	type WorkerAgentMailboxResourceSnapshot,
 	type WorkerAgentMessage,
 	type WorkerAgentMessageOptions,
 	type WorkerAgentNewTaskCorrelation,
@@ -98,10 +99,12 @@ export interface WorkerAgentControlCoordinatorOptions {
 	scheduler: Pick<WorkerDispatchScheduler, "enqueue" | "track" | "drain" | "dropQueued"> &
 		Partial<Pick<WorkerDispatchScheduler, "getWaitState">>;
 	statusChanged(): void;
-	getWorkerClaimSnapshot?(laneId: string): WorkerClaimSnapshotPayload | undefined;
+	/** The claim of this exact task and terminal generation; missing proof never adopts an older claim. */
+	getWorkerClaimSnapshot?(taskId: string, attemptId: string): WorkerClaimSnapshotPayload | undefined;
 	/** The goal state the recommended disposition reads; absent leaves uncovered requirements unknown. */
 	getGoalState?(): Pick<GoalState, "requirements"> | undefined;
-	getWorkerResult?(laneId: string): Pick<WorkerResultContract, "artifacts"> | undefined;
+	/** Exact attempt result for a terminal delivery, never a newer result selected by its task. */
+	getWorkerResult?(attemptId: string): Pick<WorkerResultContract, "artifacts"> | undefined;
 	abortLane(laneId: string, reasonCode: string): void;
 	cancelLane(laneId: string, reasonCode: string): LaneRecord | undefined;
 	taskStartHeadroomSkipReason?(agent: AgentBindingContract): string | undefined;
@@ -134,6 +137,13 @@ export interface WorkerAgentControlCoordinatorOptions {
 }
 
 type QueuedPeerMessage = ReturnType<WorkerAgentMailbox["enqueueWithReceipt"]>;
+
+export interface WorkerAgentControlResourceSnapshot {
+	readonly stateListenerCount: number;
+	readonly reconcilingTaskBearingCount: number;
+	readonly scheduledReconciliationCount: number;
+	readonly loadedMailboxes: readonly WorkerAgentMailboxResourceSnapshot[];
+}
 
 const MAX_BROADCAST_ERROR_CHARS = 512;
 
@@ -280,6 +290,16 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 
 	getProcessOwnerId(): string {
 		return this.options.processOwnerId;
+	}
+
+	/** Observe only already-loaded mailbox owners; no getMailbox, reconciliation or admission. */
+	getResourceSnapshot(): WorkerAgentControlResourceSnapshot {
+		return {
+			stateListenerCount: this.stateListeners.size,
+			reconcilingTaskBearingCount: this.reconcilingTaskBearingAgentIds.size,
+			scheduledReconciliationCount: this.taskBearingContinuationAgentIds.size,
+			loadedMailboxes: [...this.mailboxes.values()].map((mailbox) => mailbox.getResourceSnapshot()),
+		};
 	}
 
 	listWorkerAgents(scope: WorkerAgentControlScope = {}): WorkerAgentView[] {
@@ -1939,8 +1959,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const parent = this.requireKnownAgent(args.parentAgentId);
 		const latest = this.latestAgentAttempt(parent);
 		const active = latest?.status === "queued" || latest?.status === "leased" || latest?.status === "running";
-		const snapshot = this.options.getWorkerClaimSnapshot?.(args.record.laneId);
-		const outputArtifact = workerTerminalOutputArtifact(this.options.getWorkerResult?.(args.record.laneId));
+		const snapshot = this.options.getWorkerClaimSnapshot?.(args.record.laneId, args.terminalAttemptId);
+		const outputArtifact = workerTerminalOutputArtifact(this.options.getWorkerResult?.(args.terminalAttemptId));
 		const content = buildWorkerTerminalHandoffContent({
 			...args,
 			...(outputArtifact ? { outputArtifact } : {}),
@@ -2560,8 +2580,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	private projectEndedTask(
 		attempt: AttemptRuntimeState,
 	): { hostVerdict?: ReturnType<typeof workerHostVerdictView>; advice: WorkerDispositionAdvice } | undefined {
-		const laneId = attempt.dispatch.logicalLaneId ?? attempt.taskId;
-		const claim = this.options.getWorkerClaimSnapshot?.(laneId)?.claim;
+		const laneId = attempt.taskId;
+		const claim = this.options.getWorkerClaimSnapshot?.(laneId, attempt.attemptId)?.claim;
 		if (!claim) return undefined;
 		const advice = deriveWorkerDispositionFromProjections({
 			claim,

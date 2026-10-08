@@ -47,6 +47,8 @@ import type { SettingsManager } from "./settings-manager.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import type { ToolArgumentValidationStats } from "./tool-recovery-stats.ts";
+import type { BashOperations } from "./tools/schemas/bash.ts";
+import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 export { type ParsedSkillBlock, parseSkillBlock } from "./skill-block.mjs";
 
@@ -163,6 +165,10 @@ export interface AgentSessionConfig {
 	steeringPlane?: SystemOneSteeringPlane;
 	/** Diagnostic readiness gate for adaptive runtime components. */
 	adaptiveReadiness?: AdaptiveRuntimeReadiness;
+	/** Process and file-probe ports for the worktree-sync engine; see {@link WorktreeSyncEnginePorts}. */
+	worktreeSyncEnginePorts?: WorktreeSyncEnginePorts;
+	/** Shell backend for bash, shared by root and every worker lane (see CreateAgentSessionOptions). */
+	shellOperations?: BashOperations;
 }
 
 export interface ExtensionBindings {

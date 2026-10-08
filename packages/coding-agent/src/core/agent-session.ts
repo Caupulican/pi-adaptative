@@ -145,7 +145,6 @@ import { CostGuardController } from "./cost-guard-controller.ts";
 import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import {
 	appendWorkerClaimSnapshot,
-	getLatestWorkerClaimSnapshot,
 	getWorkerClaimSnapshotForAttempt,
 	getWorkerClaimSnapshots,
 } from "./delegation/session-worker-claim.ts";
@@ -422,6 +421,7 @@ import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
 import { shareTextBudget } from "./util/text-budget.ts";
 import { currentWorkUnit, openWorkUnit, WORKER_RECEIPTS_CUSTOM_TYPE, workUnitWindow } from "./work-units.ts";
+import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 // ============================================================================
 // Stream-idle watchdog wiring
@@ -626,6 +626,8 @@ export class AgentSession {
 	private readonly _goals: GoalSessionController;
 	private readonly _isChildSession: boolean;
 	private _baseToolsOverride?: Record<string, AgentTool>;
+	private readonly _worktreeSyncEnginePorts?: WorktreeSyncEnginePorts;
+	private readonly _shellOperations?: BashOperations;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionContext["mode"] = "print";
@@ -1253,6 +1255,7 @@ export class AgentSession {
 			getAgentDir: () => this._agentDir,
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
+			getWorktreeSyncEnginePorts: () => this._worktreeSyncEnginePorts,
 			getResourceLoader: () => this._resourceLoader,
 			getActiveOrchestrationProfile: () => config.orchestrationProfile,
 			getModelRegistry: () => this._modelRegistry,
@@ -1856,16 +1859,17 @@ export class AgentSession {
 			isDisposed: () => this._disposed,
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
-			getWorkerClaimSnapshot: (laneId, attemptId) => {
-				const entries = getActiveSessionBranchEntries(this.sessionManager);
-				return attemptId === undefined
-					? getLatestWorkerClaimSnapshot(entries, laneId)
-					: getWorkerClaimSnapshotForAttempt(entries, laneId, attemptId);
-			},
-			getWorkerResult: (laneId, attemptId) =>
-				attemptId !== undefined
-					? this._backgroundLanes.getWorkerAttemptResult(attemptId)
-					: this._backgroundLanes.getWorkerResult(laneId),
+			getWorkerClaimSnapshot: (laneId, attemptId) =>
+				attemptId === undefined
+					? undefined
+					: getWorkerClaimSnapshotForAttempt(
+							getActiveSessionBranchEntries(this.sessionManager),
+							laneId,
+							attemptId,
+						),
+			// Exact attempt only: a record without its attempt has no proof, so it never reads its lane's latest result.
+			getWorkerResult: (_laneId, attemptId) =>
+				attemptId === undefined ? undefined : this._backgroundLanes.getWorkerAttemptResult(attemptId),
 			getWorkerFanoutNote: (laneId) => fanoutNoteForLane(this._backgroundLanes.getWorkerFanoutGroups(), laneId),
 			startCustomMessageTurn: (message, lease, goalId) =>
 				this._durableCustomMessageTurns.start(message, lease, goalId),
@@ -2005,6 +2009,8 @@ export class AgentSession {
 		this._isExplicitModel = config.isExplicitModel ?? false;
 		this._isExplicitThinking = config.isExplicitThinking ?? false;
 		this._baseToolsOverride = config.baseToolsOverride;
+		this._worktreeSyncEnginePorts = config.worktreeSyncEnginePorts;
+		this._shellOperations = config.shellOperations;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._runtimeBuilder = new RuntimeBuilder({
 			getAgent: () => this.agent,
@@ -2036,6 +2042,8 @@ export class AgentSession {
 			getSelfCompactTool: () =>
 				this._isChildSession ? undefined : createSelfCompactToolDefinition(() => this._selfCompaction),
 			getBaseToolsOverride: () => this._baseToolsOverride,
+			getShellOperations: () => this._shellOperations,
+			getWorktreeSyncEnginePorts: () => this._worktreeSyncEnginePorts,
 			getRequestedActiveToolNames: () => this._requestedActiveToolNames,
 			setRequestedActiveToolNames: (names) => {
 				this._requestedActiveToolNames = names;
@@ -2123,7 +2131,9 @@ export class AgentSession {
 			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
 			onWorkerReviewAcknowledged: () => this.recordAcceptedWorkerEvidence(),
 			getWorkerClaimSnapshots: () => this.getWorkerClaimSnapshots(),
-			getWorkerResult: (laneId) => this._backgroundLanes.getWorkerResult(laneId),
+			getWorkerClaimSnapshot: (taskId, attemptId) =>
+				getWorkerClaimSnapshotForAttempt(getActiveSessionBranchEntries(this.sessionManager), taskId, attemptId),
+			getWorkerResult: (attemptId) => this._backgroundLanes.getWorkerAttemptResult(attemptId),
 			resolveManagedLaneId: (id) => this._backgroundLanes.resolveManagedLaneId(id),
 			runWorkerDelegationOnce: (request) => this.runWorkerDelegationOnce(request),
 			runModelFitness: (args) => this.runModelFitness(args),
@@ -2281,6 +2291,7 @@ export class AgentSession {
 			getShellSessionKey: () => this._shellSessionKey,
 			getEnvironment: (cwd) => this._runtimeBuilder.credentialManager.getEnvironmentForCwd(cwd) ?? {},
 			redactSensitiveText: (text) => this._runtimeBuilder.credentialManager.redactSensitiveText(text),
+			getShellOperations: () => this._shellOperations,
 		});
 		this._profileFilter = new ProfileFilterController({
 			getSettingsManager: () => this.settingsManager,
@@ -4733,7 +4744,7 @@ export class AgentSession {
 		safely(() => this._localPrefixWarm.cancel());
 		safely(() => this.agent.abort("session dispose"));
 		track(() => this._gatewayRegistry.stop());
-		track(() => this._backgroundToolTasks.shutdown());
+		trackRequired(() => this._backgroundToolTasks.shutdown());
 		track(() => this._runtimeBuilder.dispose());
 		safely(() => this._localRuntimeController.dispose());
 		safely(() => this._reflection.dispose());
@@ -4749,8 +4760,11 @@ export class AgentSession {
 		safely(() => this._toolPerformanceStore.close());
 		safely(() => this._modelAdaptationStore.close());
 		// The decision ledger holds an open SQLite handle under the agent directory; Windows refuses to
-		// remove that directory while it is open, and the rows are already durable.
-		safely(() => this._decisionLedger?.close());
+		// remove that directory while it is open, and the rows are already durable. A close failure is a
+		// required release failure: it rejects `disposeAndWait()` instead of being discarded.
+		trackRequired(async () => {
+			this._decisionLedger?.close();
+		});
 		this._decisionLedger = undefined;
 		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
 		safely(() => this._disconnectFromAgent());
@@ -4772,14 +4786,16 @@ export class AgentSession {
 		});
 		track(() => this._toolRecoveryLogger.shutdown());
 		safely(() => cleanupSessionResources(this.sessionId));
-		// Best-effort final sweep for any grep/find artifact already released (reference
-		// count zero) but not yet reclaimed -- e.g. a release whose cleanup() call failed
-		// transiently. This is conservative: it never releases a still-referenced
-		// artifact, so a session that ends before context-gc ever evicts a result (too
-		// short to cross preserveRecentMessages) correctly leaves that artifact in place,
-		// resolvable if the same session is resumed later. It does not sweep OTHER
-		// sessions' artifact directories.
-		safely(() => this._pipeline.cleanupToolArtifactStoreOnDispose());
+		// Final sweep for any grep/find artifact already released (reference count zero) but
+		// not yet reclaimed -- e.g. a release whose cleanup() call failed transiently. This is
+		// conservative: it never releases a still-referenced artifact, so a session that ends
+		// before context-gc ever evicts a result (too short to cross preserveRecentMessages)
+		// correctly leaves that artifact in place, resolvable if the same session is resumed
+		// later. It does not sweep OTHER sessions' artifact directories. Its failures are
+		// required release failures and reject `disposeAndWait()`; they are not discarded.
+		trackRequired(async () => {
+			this._pipeline.cleanupToolArtifactStoreOnDispose();
+		});
 		this._workerContextPolicyLanes.clear();
 		this._disposeCompletion = finish();
 	}
@@ -6582,6 +6598,26 @@ export class AgentSession {
 
 	waitForForegroundIdle(): Promise<void> {
 		return this._foregroundRecovery.waitForIdle();
+	}
+
+	/**
+	 * Readonly settlement snapshot of the resources this session owns, read from each owner's own fields. It never recovers,
+	 * admits, loads or resets anything, so it stays valid after disposal.
+	 */
+	getResourceSnapshot(): {
+		readonly foregroundRecovery: ReturnType<ForegroundRecoveryController["getResourceSnapshot"]>;
+		readonly terminalHandoffs: ReturnType<ForegroundTerminalHandoffController["getResourceSnapshot"]>;
+		readonly backgroundToolTasks: ReturnType<BackgroundToolTaskController["getResourceSnapshot"]>;
+		readonly eventListeners: number;
+		readonly workers: ReturnType<BackgroundLaneController["getWorkerResourceSnapshot"]>;
+	} {
+		return {
+			foregroundRecovery: this._foregroundRecovery.getResourceSnapshot(),
+			terminalHandoffs: this._terminalHandoffs.getResourceSnapshot(),
+			backgroundToolTasks: this._backgroundToolTasks.getResourceSnapshot(),
+			eventListeners: this._eventListeners.length,
+			workers: this._backgroundLanes.getWorkerResourceSnapshot(),
+		};
 	}
 
 	// =========================================================================

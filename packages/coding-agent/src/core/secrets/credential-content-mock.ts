@@ -60,6 +60,9 @@ export function isCredentialSecretKey(key: string): boolean {
 		.toLowerCase()
 		.split(/[^a-z0-9]+/u)
 		.filter((word) => word.length > 0);
+	// A worktree lane key is a public operation selector, carried verbatim between tool results and calls.
+	// Values still pass through the independent known/secret-shaped value redactor.
+	if (words.join("") === "lanekey") return false;
 	if (["source", "path", "name", "names", "count", "type"].includes(words.at(-1) ?? "")) return false;
 	return words.some((word) => SECRET_KEY_WORDS.has(word)) || SECRET_KEY_WORDS.has(words.join(""));
 }

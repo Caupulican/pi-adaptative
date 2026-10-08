@@ -418,8 +418,18 @@ export class PathAliasRuntime {
 	}
 
 	close(): void {
-		this.persistScanned();
-		this.store?.close();
+		let failure: { error: unknown } | undefined;
+		try {
+			this.persistScanned();
+		} catch (error) {
+			failure = { error };
+		}
+		try {
+			this.store?.close();
+		} catch (error) {
+			if (failure) throw new AggregateError([failure.error, error], "Path alias persistence and close failed");
+			throw error;
+		}
 		this.store = undefined;
 		this.records = [];
 		this.loaded = false;
@@ -428,6 +438,7 @@ export class PathAliasRuntime {
 		this.reservationHistoryScanned = false;
 		this.scanned = new Set();
 		this.pendingScanned = [];
+		if (failure) throw failure.error;
 	}
 
 	private ensureLoaded(): void {

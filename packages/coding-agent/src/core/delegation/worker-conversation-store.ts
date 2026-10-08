@@ -18,6 +18,7 @@ import {
 	isWireNativeAgentMessageRole,
 } from "../../kernel/messages.ts";
 import { measureJsonStringUtf8Bytes } from "../../kernel/provider-request-estimator.ts";
+import { indexSessionLifecycle, type SessionLifecycleToolResult } from "../../kernel/session/lifecycle-ledger.ts";
 import { compactToolResultDetailsForRetention } from "../../kernel/session/message-retention.ts";
 import {
 	assertValidSessionId,
@@ -277,6 +278,12 @@ type WorkerSessionMessage = Extract<WorkerSessionEntry, { type: "message" }>["me
  * reasoning on why these, and only these, are the roles a worker transcript can legitimately hold.
  */
 export type WorkerTranscriptMessage = Message | CustomMessage;
+
+export interface WorkerAttemptTranscriptSnapshot {
+	readonly attemptId: string;
+	readonly messages: readonly { readonly entryId: string; readonly message: Message }[];
+	readonly toolResults: readonly SessionLifecycleToolResult[];
+}
 
 function isRawWorkerTranscriptMessage(message: WorkerSessionMessage): message is WorkerTranscriptMessage {
 	return isCoreConversationMessageRole(message.role);
@@ -1223,6 +1230,51 @@ export class WorkerConversation {
 			omittedMessages,
 			serializedBytes,
 		};
+	}
+
+	/** Exact modern attempt window for bounded recovery; missing, repeated or oversized evidence refuses replay. */
+	getAttemptTranscript(attemptId: string): WorkerAttemptTranscriptSnapshot | undefined {
+		if (this.usageAccountingVersion !== 1) return undefined;
+		const normalizedAttemptId = assertAttemptUsageId(attemptId);
+		if (normalizedAttemptId !== attemptId) return undefined;
+		return this.withCanonicalSessionLock(
+			(sessionManager) => {
+				const boundary = attemptUsageBoundaryIndex(sessionManager, normalizedAttemptId);
+				if (boundary < 0 || attemptUsageBoundaryIndex(sessionManager, normalizedAttemptId, boundary + 1) >= 0)
+					return undefined;
+				const next = attemptUsageBoundaryIndex(sessionManager, undefined, boundary + 1);
+				const end = next < 0 ? sessionManager.getEntryCount() : next;
+				if (end - boundary > MAX_SESSION_ENTRY_VISIT_COUNT) return undefined;
+				const entries: WorkerSessionEntry[] = [];
+				const messages: { entryId: string; message: Message }[] = [];
+				let bytes = 2;
+				let omitted = false;
+				visitWorkerSessionEntries(sessionManager, boundary + 1, end, (entry, _index, persistedBytes) => {
+					if (omitted) return;
+					const size = persistedBytes ?? boundedJsonBytes(entry, MAX_WORKER_TRANSCRIPT_PAGE_BYTES);
+					if (bytes + size + 1 > MAX_WORKER_TRANSCRIPT_PAGE_BYTES) {
+						omitted = true;
+						return;
+					}
+					bytes += size + 1;
+					entries.push(entry);
+					const message = rawWorkerTranscriptMessage(entry);
+					if (!message || !isWireNativeWorkerTranscriptMessage(message)) return;
+					if (messages.length >= MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES) {
+						omitted = true;
+						return;
+					}
+					messages.push({ entryId: entry.id, message: structuredClone(message) });
+				});
+				if (omitted) return undefined;
+				const lifecycle = indexSessionLifecycle(entries);
+				if (lifecycle.ambiguousResultEntryIds.length > 0 || lifecycle.unmatchedResultEntryIds.length > 0)
+					return undefined;
+				return { attemptId, messages, toolResults: lifecycle.toolResults.map((result) => ({ ...result })) };
+			},
+			false,
+			"inspection",
+		);
 	}
 
 	/** Last durable provider message owned by one attempt, never an earlier persistent-worker turn. */

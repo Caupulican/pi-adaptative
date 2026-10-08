@@ -17,7 +17,7 @@ import { registerInFlightWork } from "../reload-blockers.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { WorktreeLaneLifecycle } from "../worktree-sync/lane-lifecycle.ts";
-import { getLatestWorkerClaimSnapshot } from "./session-worker-claim.ts";
+import { getWorkerClaimSnapshotForAttempt } from "./session-worker-claim.ts";
 import {
 	inconclusiveLinesIn,
 	normalizeWorkerClaimForHost,
@@ -423,11 +423,13 @@ export class ManagedLaneController {
 	/** A replay after a crash between claim append and lifecycle finalization must not duplicate the claim. */
 	private hasPersistedClaimForAttempt(claim: WorkerClaim): boolean {
 		if (!claim.terminalAttemptId) return false;
-		const latest = getLatestWorkerClaimSnapshot(
-			getActiveSessionBranchEntries(this.deps.getSessionManager()),
-			claim.requestId,
+		return (
+			getWorkerClaimSnapshotForAttempt(
+				getActiveSessionBranchEntries(this.deps.getSessionManager()),
+				claim.requestId,
+				claim.terminalAttemptId,
+			) !== undefined
 		);
-		return latest?.claim.terminalAttemptId === claim.terminalAttemptId;
 	}
 
 	private compileGrant(

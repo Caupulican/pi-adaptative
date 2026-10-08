@@ -429,19 +429,32 @@ export class ContextPipeline {
 	}
 
 	/**
-	 * Best-effort final sweep of any already-released (zero-reference) tool-output artifact at
-	 * session dispose. Reads the field (not the getter) so a session that never packed anything
-	 * doesn't force-create a store/dir just to sweep it.
+	 * Final sweep of already-released (zero-reference) tool-output artifacts and independent
+	 * context resources. All releases are attempted, and failures are retained. Reads the field
+	 * rather than the getter so an unused artifact store is not created merely for disposal.
 	 */
 	cleanupToolArtifactStoreOnDispose(): void {
-		this._toolArtifactStore?.cleanup();
-		this._pathAliasRuntime?.close();
-		this._pathAliasRuntime = undefined;
-		this._contextStoreRetentionLease?.release();
-		this._contextStoreRetentionLease = undefined;
-		if (this._ephemeralContextRoot) {
-			removeProcessScratchDirectory(this._ephemeralContextRoot);
-			this._ephemeralContextRoot = undefined;
+		const failures: unknown[] = [];
+		for (const release of [
+			() => this._toolArtifactStore?.cleanup(),
+			() => {
+				this._pathAliasRuntime?.close();
+				this._pathAliasRuntime = undefined;
+			},
+			() => {
+				this._contextStoreRetentionLease?.release();
+				this._contextStoreRetentionLease = undefined;
+			},
+			() => {
+				if (this._ephemeralContextRoot) removeProcessScratchDirectory(this._ephemeralContextRoot);
+				this._ephemeralContextRoot = undefined;
+			},
+		]) {
+			try {
+				release();
+			} catch (error) {
+				failures.push(error);
+			}
 		}
 		// Release memoized message references promptly so a disposed session's messages are
 		// GC-eligible even if this ContextPipeline instance itself briefly lingers.
@@ -450,6 +463,7 @@ export class ContextPipeline {
 		this._auditMemoMessages = [];
 		this._tokenMemoMessages = [];
 		this._latestCompactionScan.reset();
+		if (failures.length) throw new AggregateError(failures, "Context storage cleanup failed");
 	}
 
 	/**

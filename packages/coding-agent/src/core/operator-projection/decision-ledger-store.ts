@@ -10,7 +10,7 @@
 
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { openSqliteDatabase, type SqliteDatabase } from "../context/sqlite-database.ts";
+import { constructSqliteDatabase, type SqliteDatabase } from "../context/sqlite-database.ts";
 import { getParentPid } from "../process-identity.ts";
 import { getSessionRole, type SessionRole } from "../session-role.ts";
 import type { SemanticDoubtDecision } from "../system-one/semantic-doubts.ts";
@@ -230,11 +230,13 @@ export class DecisionLedgerStore {
 		};
 		// The driver opens files, not directories: the state dir is ours to create.
 		mkdirSync(dirname(options.databasePath), { recursive: true });
-		this.database = openSqliteDatabase({
-			databasePath: options.databasePath,
-			...(options.busyTimeoutMs !== undefined ? { busyTimeoutMs: options.busyTimeoutMs } : {}),
-		});
-		this.database.exec(`
+		this.database = constructSqliteDatabase(
+			{
+				databasePath: options.databasePath,
+				...(options.busyTimeoutMs !== undefined ? { busyTimeoutMs: options.busyTimeoutMs } : {}),
+			},
+			(database) => {
+				database.exec(`
 			PRAGMA journal_mode = WAL;
 			CREATE TABLE IF NOT EXISTS ledger_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 			CREATE TABLE IF NOT EXISTS stage_entries (
@@ -394,40 +396,43 @@ export class DecisionLedgerStore {
 				PRIMARY KEY (session_id, fingerprint)
 			);
 		`);
-		// Ledgers created before observations carried these columns gain them; their rows stay unassigned.
-		const columns = new Set(
-			this.database
-				.prepare("PRAGMA table_info(cache_observations)")
-				.all()
-				.map((column) => column.name),
+				// Ledgers created before observations carried these columns gain them; their rows stay unassigned.
+				const columns = new Set(
+					database
+						.prepare("PRAGMA table_info(cache_observations)")
+						.all()
+						.map((column) => column.name),
+				);
+				for (const column of ["lineage", "holder"]) {
+					if (!columns.has(column)) database.exec(`ALTER TABLE cache_observations ADD COLUMN ${column} TEXT`);
+				}
+				database.exec(
+					"CREATE INDEX IF NOT EXISTS cache_observations_lineage ON cache_observations (session_id, lineage, observed_at)",
+				);
+				const evaluationColumns = new Set(
+					database
+						.prepare("PRAGMA table_info(semantic_evaluations)")
+						.all()
+						.map((column) => column.name),
+				);
+				for (const column of ["scope_kind", "scope_id", "question_namespace", "question_states"])
+					if (!evaluationColumns.has(column))
+						database.exec(`ALTER TABLE semantic_evaluations ADD COLUMN ${column} TEXT`);
+				// Effect readings are a shared cache, but each now records the session that wrote it; earlier rows stay unassigned.
+				const effectColumns = new Set(
+					database
+						.prepare("PRAGMA table_info(operation_effects)")
+						.all()
+						.map((column) => column.name),
+				);
+				if (!effectColumns.has("session_id"))
+					database.exec("ALTER TABLE operation_effects ADD COLUMN session_id TEXT");
+				database
+					.prepare("INSERT OR IGNORE INTO ledger_meta (key, value) VALUES ('schema_version', ?)")
+					.run(String(DECISION_LEDGER_SCHEMA_VERSION));
+				return database;
+			},
 		);
-		for (const column of ["lineage", "holder"]) {
-			if (!columns.has(column)) this.database.exec(`ALTER TABLE cache_observations ADD COLUMN ${column} TEXT`);
-		}
-		this.database.exec(
-			"CREATE INDEX IF NOT EXISTS cache_observations_lineage ON cache_observations (session_id, lineage, observed_at)",
-		);
-		const evaluationColumns = new Set(
-			this.database
-				.prepare("PRAGMA table_info(semantic_evaluations)")
-				.all()
-				.map((column) => column.name),
-		);
-		for (const column of ["scope_kind", "scope_id", "question_namespace", "question_states"])
-			if (!evaluationColumns.has(column))
-				this.database.exec(`ALTER TABLE semantic_evaluations ADD COLUMN ${column} TEXT`);
-		// Effect readings are a shared cache, but each now records the session that wrote it; earlier rows stay unassigned.
-		const effectColumns = new Set(
-			this.database
-				.prepare("PRAGMA table_info(operation_effects)")
-				.all()
-				.map((column) => column.name),
-		);
-		if (!effectColumns.has("session_id"))
-			this.database.exec("ALTER TABLE operation_effects ADD COLUMN session_id TEXT");
-		this.database
-			.prepare("INSERT OR IGNORE INTO ledger_meta (key, value) VALUES ('schema_version', ?)")
-			.run(String(DECISION_LEDGER_SCHEMA_VERSION));
 	}
 
 	/**

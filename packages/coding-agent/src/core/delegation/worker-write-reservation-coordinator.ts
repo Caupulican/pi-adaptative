@@ -58,6 +58,13 @@ export interface WorkerWriteReservationWaitYield {
 	lease: WorkerWriteReservationLease;
 }
 
+export interface WorkerWriteReservationResourceSnapshot {
+	readonly heldLeases: readonly Readonly<WorkerWriteReservationLease>[];
+	readonly watchCount: number;
+	readonly availabilityListenerCount: number;
+	readonly availabilityDeliveryDepth: number;
+}
+
 export interface WorkerWriteReservationCoordinatorOptions {
 	agentDir: string;
 	getCwd(): string;
@@ -84,6 +91,16 @@ export class WorkerWriteReservationCoordinator {
 	constructor(options: WorkerWriteReservationCoordinatorOptions) {
 		this.options = options;
 		this.store = new WorkerWriteReservationStore({ agentDir: options.agentDir });
+	}
+
+	/** Clone this owner's actual leases; never discover, acquire, release or attach a watcher. */
+	getResourceSnapshot(): WorkerWriteReservationResourceSnapshot {
+		return {
+			heldLeases: [...this.leases.values()].map((lease) => ({ ...lease, writeScopes: [...lease.writeScopes] })),
+			watchCount: this.watchDisposes.size,
+			availabilityListenerCount: this.availabilityListeners.size,
+			availabilityDeliveryDepth: this.availabilityDeliveryDepth,
+		};
 	}
 
 	acquire(
@@ -163,16 +180,9 @@ export class WorkerWriteReservationCoordinator {
 		expectedAttemptId: string,
 		expectedFencingToken: number,
 	): WorkerWriteReservationWaitYield | undefined {
-		const held = this.leases.get(laneId);
+		if (!this.leases.has(laneId)) return undefined;
+		const held = this.releaseOwnedLease(laneId, expectedAttemptId, expectedFencingToken, true);
 		if (!held) return undefined;
-		if (held.attemptId !== expectedAttemptId || held.fencingToken !== expectedFencingToken) {
-			throw new Error("Worker wait cannot yield a write reservation owned by another attempt fence.");
-		}
-		const released = this.store.release(held);
-		if (released.kind === "stale_fence") {
-			throw new Error("Worker wait write reservation yield encountered a stale attempt fence.");
-		}
-		this.forgetLease(laneId, held);
 		return {
 			laneId,
 			lease: { ...held, writeScopes: [...held.writeScopes] },
@@ -217,22 +227,48 @@ export class WorkerWriteReservationCoordinator {
 	}
 
 	release(laneId: string, expectedAttemptId?: string, expectedFencingToken?: number): void {
+		this.releaseOwnedLease(laneId, expectedAttemptId, expectedFencingToken, false);
+	}
+
+	/** Required physical cleanup keeps its exact lease until the durable release is proven. */
+	releaseRequired(laneId: string, expectedAttemptId: string, expectedFencingToken: number): void {
+		this.releaseOwnedLease(laneId, expectedAttemptId, expectedFencingToken, true);
+	}
+
+	private releaseOwnedLease(
+		laneId: string,
+		expectedAttemptId: string | undefined,
+		expectedFencingToken: number | undefined,
+		required: boolean,
+	): WorkerWriteReservationLease | undefined {
 		const held = this.leases.get(laneId);
 		if (!held) {
 			this.blockedByLocalLaneIds.delete(laneId);
 			return;
 		}
-		if (expectedAttemptId !== undefined && held.attemptId !== expectedAttemptId) return;
-		if (expectedFencingToken !== undefined && held.fencingToken !== expectedFencingToken) return;
+		if (
+			this.hasFenceMismatch(laneId, expectedAttemptId ?? held.attemptId, expectedFencingToken ?? held.fencingToken)
+		) {
+			if (required)
+				throw new Error(`Worker ${laneId} cannot release a write reservation owned by another attempt fence.`);
+			return;
+		}
+		let released = false;
 		try {
-			this.store.release(held);
+			const result = this.store.release(held);
+			if (required && result.kind !== "released" && result.kind !== "not_found") {
+				throw new Error(`Worker ${laneId} required write reservation release encountered ${result.kind}.`);
+			}
+			released = true;
 		} catch (error) {
+			if (required) throw error;
 			this.warnBestEffort(
 				`Failed to release worker write reservation ${laneId}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		} finally {
-			this.forgetLease(laneId, held);
+			if (released || !required) this.forgetLease(laneId, held);
 		}
+		return held;
 	}
 
 	recoverProvenStale(): void {
@@ -261,24 +297,53 @@ export class WorkerWriteReservationCoordinator {
 	}
 
 	dispose(): void {
+		this.disposeOwnedResources(false);
+	}
+
+	/** Close every observer independently; physically unresolved lanes retain their fenced leases. */
+	disposeRequired(canRelease: (laneId: string) => boolean = () => true): void {
+		this.disposeOwnedResources(true, canRelease);
+	}
+
+	private disposeOwnedResources(required: boolean, canRelease?: (laneId: string) => boolean): void {
+		const errors: unknown[] = [];
 		const watchers = [...this.watchDisposes];
 		this.watchDisposes.clear();
+		this.availabilityListeners.clear();
 		for (const [workspace, dispose] of watchers) {
 			try {
 				dispose();
 			} catch (error) {
+				if (required) {
+					errors.push(error);
+					this.watchDisposes.set(workspace, dispose);
+				}
 				this.warnBestEffort(
 					`Worker write reservation watcher ${workspace} teardown failed: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
 		}
-		this.availabilityListeners.clear();
-		// Release every held lease through the same path release() uses (best-effort store release,
-		// warn on failure, forgetLease bookkeeping) — dispose() previously dropped this coordinator's
-		// in-memory map of them without ever releasing the underlying durable reservations, leaking
-		// them until an unrelated recoverProvenStale() pass eventually proved the owner dead.
-		for (const laneId of [...this.leases.keys()]) this.release(laneId);
-		this.blockedByLocalLaneIds.clear();
+		for (const [laneId, lease] of [...this.leases]) {
+			try {
+				if (canRelease && !canRelease(laneId)) continue;
+				if (required) this.releaseRequired(laneId, lease.attemptId, lease.fencingToken);
+				else this.release(laneId);
+			} catch (error) {
+				errors.push(error);
+			}
+		}
+		if (!required || this.leases.size === 0) this.blockedByLocalLaneIds.clear();
+		if (required && this.leases.size > 0) {
+			const retained = [...this.leases.values()].map(
+				(lease) => `${lease.taskId}:${lease.attemptId}:${lease.fencingToken}`,
+			);
+			errors.push(
+				new Error(
+					`Worker shutdown retained ${retained.length} exact write reservation lease(s): ${retained.slice(0, 8).join(", ")}.`,
+				),
+			);
+		}
+		if (errors.length > 0) throw new AggregateError(errors, "Worker write reservation shutdown failed.");
 	}
 
 	private workspace(cwd = this.options.getCwd()) {

@@ -1,14 +1,26 @@
-import type { Message, Usage } from "@caupulican/pi-ai";
+import type { Message } from "@caupulican/pi-ai";
+import { Value } from "typebox/value";
+import { executionContextScope } from "../../kernel/tool-invocation-binding.ts";
+import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
+import type { WorkerCommandReceipt } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { reconcileAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant, ResourcePointer, RiskBudget } from "../orchestration/contracts.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
+import type { RecoveredWorkerTerminalCompletion } from "./worker-attempt-executor.ts";
 import type { WorkerConversation } from "./worker-conversation-store.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import type { WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import type { PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
+import { appendCommandReceipt, commandReceiptFor } from "./worker-receipts.ts";
+import {
+	SUBMIT_REPORT_TOOL_NAME,
+	type SubmittedWorkerReport,
+	submitReportParameters,
+	submittedReportFromArguments,
+} from "./worker-report.ts";
 import { evaluateWorkerRetry } from "./worker-retry-policy.ts";
 
 export type WorkerRecoveryDispatchResult = { started: true } | { started: false; skipReason: string };
@@ -455,19 +467,86 @@ export class WorkerRecoveryCoordinator {
 	recoveredTerminalCompletion(
 		conversation: WorkerConversation,
 		attemptId: string,
-	): { text: string; usage: Usage; stopReason: string } | undefined {
-		const last = conversation.getLastAttemptMessage(attemptId);
+	): RecoveredWorkerTerminalCompletion | undefined {
+		const transcript = conversation.getAttemptTranscript(attemptId);
+		if (!transcript || transcript.attemptId !== attemptId) return undefined;
+		const last = transcript.messages.at(-1)?.message;
 		if (last?.role !== "assistant" || last.stopReason === "error" || last.stopReason === "aborted") {
 			return undefined;
 		}
 		if (last.content.some((content) => content.type === "toolCall")) return undefined;
+		const attempt = this.options.lifecycle.getTaskRuntimeSnapshot().attempts[attemptId];
+		if (!attempt) return undefined;
+		const context = attempt.dispatch.executionContract?.worker.executionContext;
+		const scope = context
+			? executionContextScope({
+					...context,
+					sessionId: conversation.getResumeContext().sessionId,
+					taskId: attempt.taskId,
+				})
+			: undefined;
+		const calls = new Map<string, { name: string; arguments: unknown; entryId: string }>();
+		const results = new Set<string>();
+		const blockers = new Set<string>();
+		const commandReceipts: WorkerCommandReceipt[] = [];
+		let submittedReport: SubmittedWorkerReport | undefined;
+		for (const { entryId, message } of transcript.messages) {
+			if (message.role === "assistant") {
+				for (const content of message.content) {
+					if (content.type !== "toolCall") continue;
+					if (calls.has(content.id)) return undefined;
+					calls.set(content.id, { name: content.name, arguments: content.arguments, entryId });
+				}
+			} else if (message.role === "toolResult") {
+				const call = calls.get(message.toolCallId);
+				if (!call || results.has(message.toolCallId) || call.name !== message.toolName) return undefined;
+				const binding = transcript.toolResults.find((result) => result.resultMessageEntryId === entryId);
+				const invocation = retainedToolInvocation(message.details);
+				if (
+					!binding?.requestId ||
+					binding.assistantMessageEntryId !== call.entryId ||
+					binding.callId !== message.toolCallId ||
+					binding.toolName !== call.name ||
+					!invocation ||
+					invocation.requestId !== binding.requestId ||
+					invocation.execution !== "completed" ||
+					(invocation.executionScope !== undefined && invocation.executionScope !== scope)
+				)
+					return undefined;
+				for (const failure of invocation.postprocessingFailures)
+					blockers.add(`recovered tool ${failure} failure for provider request ${invocation.requestId}`);
+				results.add(message.toolCallId);
+				if (call.name === SUBMIT_REPORT_TOOL_NAME) {
+					if (invocation.operationStatus !== "success") return undefined;
+					if (!Value.Check(submitReportParameters, call.arguments)) return undefined;
+					submittedReport = submittedReportFromArguments(call.arguments);
+				}
+				const receipt = commandReceiptFor({
+					toolCallId: message.toolCallId,
+					toolName: call.name,
+					args: call.arguments,
+					isError: message.isError || invocation.operationStatus === "error",
+					result: message,
+				});
+				if (receipt) appendCommandReceipt(commandReceipts, receipt);
+			}
+		}
+		if ([...calls.keys()].some((id) => !results.has(id))) return undefined;
 		const text = last.content
 			.filter(
 				(content): content is Extract<(typeof last.content)[number], { type: "text" }> => content.type === "text",
 			)
 			.map((content) => content.text)
 			.join("");
-		return { text, usage: last.usage, stopReason: last.stopReason };
+		return {
+			attemptId,
+			text,
+			usage: last.usage,
+			stopReason: last.stopReason,
+			commandReceipts,
+			blockers: [...blockers],
+			...(submittedReport ? { submittedReport } : {}),
+		};
 	}
 
 	/** Reconstruct legacy usage only before generation-attributed accounting becomes authoritative. */

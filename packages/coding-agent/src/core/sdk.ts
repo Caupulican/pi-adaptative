@@ -101,6 +101,8 @@ import {
 	createWriteTool,
 	withFileMutationQueue,
 } from "./tools/index.ts";
+import type { BashOperations } from "./tools/schemas/bash.ts";
+import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
@@ -171,6 +173,15 @@ export interface CreateAgentSessionOptions {
 	orchestrationProfile?: OrchestrationProfile;
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
+	/** Shell backend for bash, shared by root and every worker lane; the native host shell is used when unset. */
+	shellOperations?: BashOperations;
+	/**
+	 * Process and file-probe ports for the worktree-sync engine (for example an embedder's own git
+	 * executor). Members left out use the production defaults.
+	 */
+	worktreeSyncEnginePorts?: WorktreeSyncEnginePorts;
+	/** HTTP transport for System One's decision endpoint; omitted means the global fetch. */
+	systemOneFetch?: typeof fetch;
 
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
@@ -702,6 +713,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if ((await access.resolve()).kind === "ready") {
 			const reviewer = new SystemOneReviewer({
 				access,
+				fetch: options.systemOneFetch,
 				credentialBoundary: systemOneCredentialBoundary,
 				onUsage: (receipt) => {
 					sessionManager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, {
@@ -845,6 +857,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		initialActiveToolNames,
 		allowedToolNames,
 		excludedToolNames,
+		shellOperations: options.shellOperations,
+		worktreeSyncEnginePorts: options.worktreeSyncEnginePorts,
 		extensionRunnerRef,
 		toolProfileFilter,
 		isExplicitModel: orchestrationProfile ? true : (options.isExplicitModel ?? options.model != null),

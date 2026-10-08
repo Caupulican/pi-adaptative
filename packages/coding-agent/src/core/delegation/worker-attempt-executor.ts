@@ -51,20 +51,25 @@ import {
 	MAX_REPORT_REQUESTS,
 	reportWorthRequesting,
 	SUBMIT_REPORT_TOOL_NAME,
+	type SubmittedWorkerReport,
 	type WorkerReportCapture,
 	type WorkerReportContext,
 	worthAFollowUpTurn,
 } from "./worker-report.ts";
-import { runWorker, type WorkerRunOutcome } from "./worker-runner.ts";
+import { runWorker, type WorkerCompletion, type WorkerRunnerOptions, type WorkerRunOutcome } from "./worker-runner.ts";
 import { buildWorkerSystemPrompt } from "./worker-system-prompt.ts";
 import { captureWorkerTerminalOutputArtifact } from "./worker-terminal-output-artifact.ts";
 import { WorkerTreeBudgetExceededError } from "./worker-tree-budget-coordinator.ts";
 import { WorkerUsageAccounting } from "./worker-usage-accounting.ts";
 
 export interface RecoveredWorkerTerminalCompletion {
+	attemptId: string;
 	text: string;
 	usage: Usage;
 	stopReason: string;
+	submittedReport?: SubmittedWorkerReport;
+	commandReceipts: readonly WorkerCommandReceipt[];
+	blockers: readonly string[];
 }
 
 /** The live mutable state that must be visible to session disposal before provider work yields. */
@@ -83,6 +88,8 @@ export interface WorkerAttemptExecutionResult {
 	outputArtifact?: ArtifactContract;
 }
 
+type WorkerCompletionInput = Parameters<WorkerRunnerOptions["complete"]>[0];
+
 /**
  * Backoff policy for transient worker provider failures. Without it, a dropped provider socket
  * kills the attempt instantly at $0 spend and an immediate re-dispatch hits the same dead
@@ -98,6 +105,8 @@ const WORKER_PROVIDER_RETRY_POLICY: RetryPolicy = {
 
 const RECENT_SUPERVISION_TOOL_WINDOW = 8;
 const CONSECUTIVE_TOOL_FAILURE_THRESHOLD = 3;
+/** Provider/child-loop settlement has no process kill tier; its grace is independent of shell disposal. */
+const WORKER_PHYSICAL_SETTLEMENT_GRACE_MS = 5_000;
 
 export async function runProviderCompletionWithBackoff(args: {
 	attempt: () => Promise<IsolatedCompletionResult>;
@@ -364,7 +373,67 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	ledger: WorkerAttemptExecutionLedger;
 	checkpointUsage(summary: string): AttemptUsageSnapshot;
 	run(): Promise<WorkerAttemptExecutionResult>;
+	/** Logical cancellation may return first; this joins actual admitted inner calls separately. */
+	waitForPhysicalSettlement(): Promise<void>;
 } {
+	const physicalSettlements = new Set<Promise<void>>();
+	let physicalAdmissionClosed = false;
+	let physicalWait: Promise<void> | undefined;
+	const trackPhysicalCompletion = <Input, Output>(
+		execute: (input: Input) => Promise<Output>,
+	): ((input: Input) => Promise<Output>) => {
+		return (input) => {
+			if (physicalAdmissionClosed)
+				return Promise.reject(new Error("Worker physical completion admission is closed."));
+			const terminal = Promise.withResolvers<void>();
+			physicalSettlements.add(terminal.promise);
+			const settle = (): void => {
+				physicalSettlements.delete(terminal.promise);
+				terminal.resolve();
+			};
+			let completion: Promise<Output>;
+			try {
+				// Registration precedes any synchronous host callback. Return the actual call promise;
+				// its task rejection still counts as physical settlement for the independent join.
+				completion = execute(input);
+			} catch (error) {
+				settle();
+				return Promise.reject(error);
+			}
+			void completion.then(settle, settle);
+			return completion;
+		};
+	};
+	const runIsolatedCompletion = trackPhysicalCompletion((input: IsolatedCompletionOptions) =>
+		options.runIsolatedCompletion(input),
+	);
+	const waitForPhysicalSettlement = (): Promise<void> => {
+		if (physicalWait) return physicalWait;
+		physicalAdmissionClosed = true;
+		const drain = async (): Promise<void> => {
+			while (physicalSettlements.size > 0) await Promise.allSettled([...physicalSettlements]);
+		};
+		if (physicalSettlements.size === 0) {
+			physicalWait = Promise.resolve();
+			return physicalWait;
+		}
+		let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+		const watchdog = new Promise<never>((_, reject) => {
+			watchdogTimer = setTimeout(() => {
+				reject(
+					new Error(
+						`Worker ${options.agentId} attempt ${options.durableHandle.attemptId} physical settlement timed out after ${WORKER_PHYSICAL_SETTLEMENT_GRACE_MS}ms with ${physicalSettlements.size} inner call(s) still pending.`,
+					),
+				);
+			}, WORKER_PHYSICAL_SETTLEMENT_GRACE_MS);
+			// This required join owns the process lifetime even when pending calls are pure promises.
+		});
+		physicalWait = Promise.race([drain(), watchdog]).finally(() => {
+			if (watchdogTimer) clearTimeout(watchdogTimer);
+		});
+		void physicalWait.catch(() => undefined);
+		return physicalWait;
+	};
 	const changedFiles = new Set(options.conversation.getChangedFiles(options.durableHandle.attemptId));
 	const toolIssues = new Set<string>();
 	const attemptStartedAt = Date.now();
@@ -376,6 +445,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	const commandReceipts: WorkerCommandReceipt[] = [];
 	const reportHandshake = options.reportHandshake !== false;
 	const reportCapture: WorkerReportCapture = {};
+	/** One bounded typed report from this executor, retained while a replacement is requested. */
+	let lastSubmittedReport: SubmittedWorkerReport | undefined;
 	const reportContext: WorkerReportContext = {
 		requirementIds: options.requirementIds ?? [],
 		writeCapable: options.executionPlan.writeEnabled,
@@ -384,7 +455,14 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	const submitReportTool = createSubmitReportTool(reportCapture);
 	let reportRequests = 0;
 	let needsMoreRounds = 0;
-	let hostVerdict: WorkerHostVerdict | undefined;
+	const judgeReport = (submitted: SubmittedWorkerReport): WorkerHostVerdict =>
+		judgeSubmittedReport({
+			submitted,
+			context: reportContext,
+			receipts: commandReceipts,
+			changedFiles: [...changedFiles],
+			cwd: options.cwd,
+		});
 	const recentToolNames: string[] = [];
 	const recentToolCalls: { name: string; args: unknown }[] = [];
 	const recentToolOutcomes: { name: string; failed: boolean }[] = [];
@@ -405,13 +483,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		const message = (content: string): AgentMessage[] => [{ role: "user", content, timestamp: Date.now() }];
 		const submitted = reportCapture.submitted;
 		if (submitted) {
-			hostVerdict = judgeSubmittedReport({
-				submitted,
-				context: reportContext,
-				receipts: commandReceipts,
-				changedFiles: [...changedFiles],
-				cwd: options.cwd,
-			});
+			lastSubmittedReport = submitted;
+			const hostVerdict = judgeReport(submitted);
 			if (worthAFollowUpTurn(hostVerdict) && needsMoreRounds < MAX_NEEDS_MORE_ROUNDS && budgetLeft) {
 				needsMoreRounds++;
 				reportCapture.submitted = undefined;
@@ -573,6 +646,27 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				fencingToken: options.durableHandle.fencingToken,
 			})
 		: undefined;
+	const projectCompletion = (text: string, stopReason: string, costUsd: number): WorkerCompletion => {
+		terminalOutput = text;
+		const finalChangedFiles = sealChangedFiles();
+		const submittedReport = reportCapture.submitted ?? lastSubmittedReport;
+		const hostVerdict = submittedReport ? judgeReport(submittedReport) : undefined;
+		const reportBlockers =
+			hostVerdict && hostVerdict.verdict !== "accepted"
+				? [`worker report ${hostVerdict.verdict}: ${hostVerdict.reasonCodes[0] ?? "report_not_accepted"}`]
+				: [];
+		return {
+			text,
+			costUsd,
+			stopReason,
+			changedFiles: finalChangedFiles,
+			blockers: [...toolIssues, ...reportBlockers],
+			commandReceipts: [...commandReceipts],
+			...(submittedReport ? { submittedReport } : {}),
+			...(hostVerdict ? { hostVerdict } : {}),
+			reportRequested: reportRequests > 0,
+		};
+	};
 	let retentionWarningEmitted = false;
 	/** The latest accepted provider request of this attempt, for the response that answers it. */
 	let lastRequest: { snapshot: SessionRequestSnapshotInput; openedAt: number } | undefined;
@@ -707,7 +801,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 									// instruction: sent as is, on the worker lane's affinity. Otherwise a standalone prompt.
 									const structured =
 										requestOptions.cacheRetention !== undefined && requestOptions.cacheRetention !== "none";
-									completion = await options.runIsolatedCompletion({
+									completion = await runIsolatedCompletion({
 										...(structured ? { requestContext: context } : {}),
 										systemPrompt: context.systemPrompt ?? "",
 										messages: context.messages,
@@ -786,6 +880,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	return {
 		ledger,
 		checkpointUsage,
+		waitForPhysicalSettlement,
 		async run(): Promise<WorkerAttemptExecutionResult> {
 			attemptTranscriptStart = options.conversation.getRawTranscript().length;
 			if (ran) throw new Error("A worker attempt executor may run only once.");
@@ -832,16 +927,24 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								},
 							}
 						: {}),
-					complete: async ({ systemPrompt, userPrompt, signal }) => {
+					complete: trackPhysicalCompletion(async (input: WorkerCompletionInput) => {
+						const { systemPrompt, userPrompt, signal } = input;
 						observeUsageSignal(signal);
 						if (options.recoveredTerminal) {
-							terminalOutput = options.recoveredTerminal.text;
+							if (options.recoveredTerminal.attemptId !== options.durableHandle.attemptId)
+								throw new WorkerCompletionProtocolError(
+									"Recovered worker terminal belongs to another attempt.",
+								);
+							lastSubmittedReport = options.recoveredTerminal.submittedReport;
+							for (const blocker of options.recoveredTerminal.blockers) toolIssues.add(blocker);
+							for (const receipt of options.recoveredTerminal.commandReceipts)
+								appendCommandReceipt(commandReceipts, { ...receipt });
 							checkpointUsage("Reused the persisted terminal worker assistant response after recovery.");
-							return {
-								text: options.recoveredTerminal.text,
-								costUsd: currentUsage().costUsd,
-								stopReason: options.recoveredTerminal.stopReason,
-							};
+							return projectCompletion(
+								options.recoveredTerminal.text,
+								options.recoveredTerminal.stopReason,
+								currentUsage().costUsd,
+							);
 						}
 						const retentionPolicy = createRetentionPolicy(signal);
 						const persistedToolAssistantIds = new Set<string>();
@@ -923,7 +1026,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								// The conversation's sent-prefix marks, carried across its runs like root's.
 								const requestPrefix = options.conversation.requestPrefix(history);
 								try {
-									result = await options.runIsolatedCompletion({
+									result = await runIsolatedCompletion({
 										prefixState: requestPrefix.state,
 										systemPrompt: buildWorkerSystemPrompt({
 											soul: options.soul,
@@ -1300,19 +1403,10 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 						const cumulativeUsage = checkpointUsage(
 							"Verified the callback-persisted worker conversation terminal suffix.",
 						);
-						terminalOutput = completion.text;
-						return {
-							text: completion.text,
-							costUsd: cumulativeUsage.costUsd,
-							stopReason: String(completion.stopReason),
-							changedFiles: [...changedFiles],
-							blockers: [...toolIssues],
-							commandReceipts: [...commandReceipts],
-							...(reportCapture.submitted ? { submittedReport: reportCapture.submitted } : {}),
-							...(hostVerdict ? { hostVerdict } : {}),
-							reportRequested: reportRequests > 0,
-						};
-					},
+						// A replacement or further work can change the evidence. Never reuse an earlier
+						// accepted verdict, and never lose a typed report merely because correction ended in text.
+						return projectCompletion(completion.text, String(completion.stopReason), cumulativeUsage.costUsd);
+					}),
 				});
 				stopUsageClock();
 				const usage = checkpointUsage("Persisted final cumulative worker usage before terminal result.");

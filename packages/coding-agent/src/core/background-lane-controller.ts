@@ -85,7 +85,7 @@ import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
-import { buildWorktreeSyncEngineDeps } from "./worktree-sync/runtime.ts";
+import { buildWorktreeSyncEngineDeps, type WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
 
@@ -97,6 +97,8 @@ export interface BackgroundLaneControllerDeps
 		Pick<ManagedLaneControllerDeps, "recordUnsettledForOwner"> {
 	/** The full settings manager: this coordinator hands it to every lane, each of which reads only its own port. */
 	getSettingsManager(): SettingsManager;
+	/** Host-supplied worktree-sync engine ports, forwarded into every engine-deps build. */
+	getWorktreeSyncEnginePorts(): WorktreeSyncEnginePorts | undefined;
 	/** True iff the active surface can terminalize a goal through `goal` or `update_goal`.
 	 * Explicit tool/profile exclusion and the worker-role ceiling still disable continuation. */
 	isGoalToolActive(): boolean;
@@ -226,6 +228,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			settingsManager,
 			sessionId: this.deps.getSessionId(),
 			integrationBranch: () => this.deps.localCommitBranch?.() || undefined,
+			ports: this.deps.getWorktreeSyncEnginePorts(),
 		});
 	}
 
@@ -407,7 +410,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		];
 	}
 
-	/** Does not materialize the worker controller when UAC omitted delegation. */
+	/** Worker resources of the worker controller this session has already loaded. Never constructs one: undefined means none was loaded. */
+	getWorkerResourceSnapshot(): ReturnType<WorkerDelegationController["getResourceSnapshot"]> | undefined {
+		return this._workers?.getResourceSnapshot();
+	}
+
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined {
 		return this._workerLifecycle?.getTaskRuntimeSnapshot();
 	}

@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+### Added
+
+- Added three composed harness journeys for standalone conversations, orchestration, and mixed worker/worktree operation, with scripted external transports and virtual storage.
+- Added SDK ports for shell execution, worktree engine operations, and System One HTTP transport, shared with worker lanes.
+
+### Fixed
+
+- Closed SQLite connections when store construction fails, released independent context resources after persistence errors, and retained required cleanup failures in `disposeAndWait()`.
+- Joined physical background tool completion during shutdown and retained bounded cleanup-failure evidence after cancellation.
+- Joined worker admission, queued validation, and execution cleanup during shutdown, retaining failed reservation and project releases behind their ownership fences.
+- Retained typed worker reports through bounded correction and rechecked current host evidence at completion and recovery, refusing incomplete durable invocation proof.
+- Bound worker status, disposition advice, and handoff artifacts to the current task and exact attempt instead of earlier worker claims.
+- Preserved public worktree lane selectors through credential projection while retaining secret-value redaction.
+- Used the configured shell backend for owner bash execution and skipped local shell prewarm when an alternate backend is configured.
+
 ## [0.103.6] - 2026-10-07
 
 ### Fixed

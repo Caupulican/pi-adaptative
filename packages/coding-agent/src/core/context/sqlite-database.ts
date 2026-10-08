@@ -115,3 +115,21 @@ function openNodeDatabase(options: OpenSqliteDatabaseOptions): SqliteDatabase {
 export function openSqliteDatabase(options: OpenSqliteDatabaseOptions): SqliteDatabase {
 	return isBunRuntime() ? openBunDatabase(options) : openNodeDatabase(options);
 }
+
+/** Retain a connection only after its owner's entire construction, including statement preparation, succeeds. */
+export function constructSqliteDatabase<T>(
+	options: OpenSqliteDatabaseOptions,
+	build: (database: SqliteDatabase) => T,
+): T {
+	const database = openSqliteDatabase(options);
+	try {
+		return build(database);
+	} catch (error) {
+		try {
+			database[Symbol.dispose]();
+		} catch (cleanup) {
+			throw new AggregateError([error, cleanup], "SQLite construction and cleanup failed");
+		}
+		throw error;
+	}
+}

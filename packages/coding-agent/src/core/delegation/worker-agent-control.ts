@@ -235,6 +235,15 @@ export interface WorkerAgentMailboxOptions {
 	projectClaim?: SpecialistContextClaim;
 }
 
+export interface WorkerAgentMailboxResourceSnapshot {
+	readonly parentSessionId: string;
+	readonly agentId: string;
+	readonly listenerCount: number;
+	readonly hasOpenObligation: boolean;
+	readonly pendingMessageIds: readonly string[];
+	readonly replyAcknowledgementIds: readonly string[];
+}
+
 export interface WorkerAgentTranscriptPage {
 	agentId: string;
 	cursor: number;
@@ -1355,6 +1364,21 @@ export class WorkerAgentMailbox {
 
 	getProjectClaim(): SpecialistContextClaim | undefined {
 		return this.projectClaim ? structuredClone(this.projectClaim) : undefined;
+	}
+
+	/** Inspect the existing durable state through its canonical open-obligation rule; never write it. */
+	getResourceSnapshot(): WorkerAgentMailboxResourceSnapshot {
+		const state = this.read();
+		return {
+			parentSessionId: this.parentSessionId,
+			agentId: this.agentId,
+			listenerCount: this.listeners.size,
+			hasOpenObligation: workerMailboxHasOpenObligation(state),
+			pendingMessageIds: state.messages.filter(isPendingMessage).map((message) => message.messageId),
+			replyAcknowledgementIds: state.replyAcknowledgements.map(
+				(acknowledgement) => acknowledgement.acknowledgementId,
+			),
+		};
 	}
 
 	/** Exclude admission until the owner finishes publishing availability under its transcript lock. */

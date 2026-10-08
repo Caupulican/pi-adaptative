@@ -76,6 +76,7 @@ export interface SharedLaneToolOptions {
 		| "windowsShellPythonEngine"
 		| "windowsShellEngineOptions"
 		| "spawnHook"
+		| "operations"
 	>;
 	readonly python?: Pick<PythonToolOptions, "outputReduction" | "omitEnvironmentVariables" | "environment">;
 	readonly runProcess?: Pick<RunProcessToolOptions, "attributionEnvironment">;

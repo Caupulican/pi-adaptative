@@ -125,10 +125,18 @@ import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-se
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
 import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
 import { selectSanitizedContextFork } from "./sanitized-context-fork.ts";
-import { getLatestWorkerClaimSnapshot, getWorkerClaimSnapshotForAttempt } from "./session-worker-claim.ts";
+import { getWorkerClaimSnapshotForAttempt } from "./session-worker-claim.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
-import { type WorkerAgentControlPort, type WorkerGrantSummary, workerAgentMessageId } from "./worker-agent-control.ts";
-import { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
+import {
+	type WorkerAgentControlPort,
+	type WorkerAgentMailboxResourceSnapshot,
+	type WorkerGrantSummary,
+	workerAgentMessageId,
+} from "./worker-agent-control.ts";
+import {
+	WorkerAgentControlCoordinator,
+	type WorkerAgentControlResourceSnapshot,
+} from "./worker-agent-control-coordinator.ts";
 import {
 	createWorkerAttemptExecutor,
 	type WorkerResponseObservation,
@@ -167,6 +175,7 @@ import { WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS, WorkerDirectoryAdmission } from 
 import {
 	formatWorkerDispatchWait,
 	type WorkerDispatchAdmission,
+	type WorkerDispatchResourceSnapshot,
 	WorkerDispatchScheduler,
 } from "./worker-dispatch-scheduler.ts";
 import {
@@ -234,6 +243,7 @@ import { boundHostFindings, WorkerWriteOverlapTracker } from "./worker-write-ove
 import {
 	formatWorkerWriteReservationBlock,
 	WorkerWriteReservationCoordinator,
+	type WorkerWriteReservationResourceSnapshot,
 	type WorkerWriteReservationWaitYield,
 } from "./worker-write-reservation-coordinator.ts";
 
@@ -610,9 +620,39 @@ type InFlightWorkerLedger = {
 	cwd: string;
 };
 
+export interface WorkerDelegationResourceSnapshot {
+	readonly ingressPromiseCount: number;
+	readonly executionPromiseCount: number;
+	readonly executingHolds: readonly { readonly agentId: string; readonly count: number }[];
+	readonly inFlightLedgerCount: number;
+	readonly laneAbortControllerCount: number;
+	readonly shellSessionCount: number;
+	readonly pendingTerminalHandoffCount: number;
+	readonly scheduler: WorkerDispatchResourceSnapshot;
+	readonly reservations: WorkerWriteReservationResourceSnapshot;
+	readonly control: WorkerAgentControlResourceSnapshot;
+	readonly ownedProjectClaims: readonly {
+		readonly sessionId: string;
+		readonly claim: Readonly<SpecialistContextClaim>;
+		readonly agents: readonly {
+			readonly agentId: string;
+			readonly agentStatus: AgentBindingContract["status"];
+			readonly attemptId: string | undefined;
+			readonly attemptStatus: AttemptRuntimeState["status"] | undefined;
+			readonly executingHoldCount: number;
+			readonly mailboxLoaded: boolean;
+			readonly mailbox: WorkerAgentMailboxResourceSnapshot | undefined;
+		}[];
+	}[];
+}
+
 export class WorkerDelegationController {
 	private readonly deps: WorkerDelegationControllerDeps;
 	private readonly workerAbort = new AbortController();
+	/** Actual admitted continuations and execution promises, independent of durable lane status. */
+	private readonly workerCompletions = new Map<Promise<unknown>, "ingress" | "execution">();
+	private readonly shutdownErrors = new Set<unknown>();
+	private shutdownCompletion: Promise<void> | undefined;
 	private readonly directories = new WorkerDirectoryAdmission();
 	private readonly lifecycle: WorkerLifecycle;
 	private profileResolver: WorkerProfileResolver | undefined;
@@ -681,7 +721,7 @@ export class WorkerDelegationController {
 		});
 		this.scheduler = new WorkerDispatchScheduler({
 			agentDir: this.deps.getAgentDir?.() ?? "",
-			isDisposed: () => this.deps.isDisposed(),
+			isDisposed: () => this.deps.isDisposed() || this.workerAbort.signal.aborted,
 			admit: (request, record) => this.workerDispatchAdmission(request, record),
 			preflight: async (_request, record) => {
 				const reasonCode = await this.validateWorkerDirectory(record);
@@ -733,7 +773,8 @@ export class WorkerDelegationController {
 			getConversationClaim: (agent) => this.claimAgentProjectContext(agent),
 			peekConversationClaim: (agent) => this.projectClaims.get(agent.resumeContext.sessionId),
 			withConversationAdmission: (agent, operation) => this.withProjectContextAdmission(agent, operation),
-			isControlAvailable: () => this.deps.isDelegateToolActive(),
+			isControlAvailable: () =>
+				!this.workerAbort.signal.aborted && !this.deps.isDisposed() && this.deps.isDelegateToolActive(),
 			getLifecycle: () => this.getWorkerLifecycle(),
 			recoveredRequest: (attempt) => this.recovery.recoveredRequest(attempt),
 			run: (request, record) => this.runOnce(request, undefined, record),
@@ -742,9 +783,13 @@ export class WorkerDelegationController {
 				this.terminalHandoffs.signal();
 				this.notifications.statusChanged();
 			},
-			getWorkerClaimSnapshot: (laneId) =>
-				getLatestWorkerClaimSnapshot(getActiveSessionBranchEntries(this.deps.getSessionManager()), laneId),
-			getWorkerResult: (laneId) => this.getWorkerLifecycle().getResult(laneId),
+			getWorkerClaimSnapshot: (taskId, attemptId) =>
+				getWorkerClaimSnapshotForAttempt(
+					getActiveSessionBranchEntries(this.deps.getSessionManager()),
+					taskId,
+					attemptId,
+				),
+			getWorkerResult: (attemptId) => this.getWorkerLifecycle().getTaskRuntimeSnapshot().attempts[attemptId]?.result,
 			getGoalState: () => this.deps.getGoalStateSnapshot(),
 			abortLane: (laneId, reasonCode) => this.laneAbortControllers.get(laneId)?.abort(reasonCode),
 			haltReportDeadlineMs: () => this.deps.getSettingsManager().getWorkerDelegationSettings().haltReportDeadlineMs,
@@ -754,7 +799,8 @@ export class WorkerDelegationController {
 				// abort is asynchronous, and an in-flight edit or shell command can still write. The
 				// run's own `finally` releases it (fenced to that attempt), and a queued worker waiting on
 				// the same paths is woken by that release.
-				if (!this.scheduler.isRunning(laneId)) this.writeReservations.release(laneId);
+				if (!this.workerAbort.signal.aborted && !this.hasExecutingWorkerResources(laneId))
+					this.writeReservations.release(laneId);
 				// A worker that was running reports what it changed even though it never got to speak.
 				const inFlight = this.inFlightLedgers.get(laneId);
 				const attemptStatus = inFlight ? this.getWorkerLifecycle().getActiveAttempt(laneId)?.status : undefined;
@@ -824,6 +870,12 @@ export class WorkerDelegationController {
 		return !this.executingSpecialistIds.has(agentId);
 	}
 
+	private hasExecutingWorkerResources(laneId: string): boolean {
+		const attempt = this.lifecycle.getActiveAttempt(laneId);
+		const agentId = attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? laneId;
+		return !this.isSpecialistSettled(agentId);
+	}
+
 	private beginSpecialistExecution(agentId: string | undefined): () => void {
 		if (!agentId) return () => {};
 		this.executingSpecialistIds.set(agentId, (this.executingSpecialistIds.get(agentId) ?? 0) + 1);
@@ -871,7 +923,11 @@ export class WorkerDelegationController {
 	private cancelScheduledWorker(laneId: string, reasonCode: string, expectedAttemptId?: string): boolean {
 		if (!this.ownsProjectLane(laneId)) return false;
 		try {
-			this.writeReservations.release(laneId);
+			// Direct runs may never be scheduler-tracked, and a failed disposal keeps its physical hold.
+			// Neither cancellation nor a rejected scheduler result proves the reservation is releasable.
+			// Shutdown releases queued/preflight reservations through the strict bulk owner after joining.
+			if (!this.workerAbort.signal.aborted && !this.hasExecutingWorkerResources(laneId))
+				this.writeReservations.release(laneId);
 		} catch (error) {
 			this.safeWarn(
 				`Failed to release worker ${laneId} before cancellation: ${error instanceof Error ? error.message : String(error)}`,
@@ -897,6 +953,44 @@ export class WorkerDelegationController {
 	/** The coordinator's process identity is also the durable execution lease owner. */
 	getAgentControlProcessOwnerId(): string {
 		return this.agentControl.getProcessOwnerId();
+	}
+
+	/** Read existing resource owners without recovery, new admissions or lazy composition. */
+	getResourceSnapshot(): WorkerDelegationResourceSnapshot {
+		const completions = [...this.workerCompletions.values()];
+		const control = this.agentControl.getResourceSnapshot();
+		const agents = this.projectClaims.size > 0 ? Object.values(this.lifecycle.getTaskRuntimeSnapshot().agents) : [];
+		return {
+			ingressPromiseCount: completions.filter((kind) => kind === "ingress").length,
+			executionPromiseCount: completions.filter((kind) => kind === "execution").length,
+			executingHolds: [...this.executingSpecialistIds].map(([agentId, count]) => ({ agentId, count })),
+			inFlightLedgerCount: this.inFlightLedgers.size,
+			laneAbortControllerCount: this.laneAbortControllers.size,
+			shellSessionCount: this.shellSessionKeys.size,
+			pendingTerminalHandoffCount: this.terminalHandoffs.retainedCount,
+			scheduler: this.scheduler.getResourceSnapshot(),
+			reservations: this.writeReservations.getResourceSnapshot(),
+			control,
+			ownedProjectClaims: [...this.projectClaims].map(([sessionId, claim]) => ({
+				sessionId,
+				claim: { ...claim },
+				agents: agents
+					.filter((agent) => agent.resumeContext.sessionId === sessionId)
+					.map((agent) => {
+						const attempt = this.lifecycle.getLatestAgentAttempt(agent.agentId);
+						const mailbox = control.loadedMailboxes.find((mailbox) => mailbox.agentId === agent.agentId);
+						return {
+							agentId: agent.agentId,
+							agentStatus: agent.status,
+							attemptId: attempt?.attemptId,
+							attemptStatus: attempt?.status,
+							executingHoldCount: this.executingSpecialistIds.get(agent.agentId) ?? 0,
+							mailboxLoaded: mailbox !== undefined,
+							mailbox,
+						};
+					}),
+			})),
+		};
 	}
 
 	recordTerminal(record: LaneRecord): void {
@@ -970,6 +1064,11 @@ export class WorkerDelegationController {
 	}
 
 	abort(): Promise<void> {
+		if (this.shutdownCompletion) return this.shutdownCompletion;
+		const shutdown = Promise.withResolvers<void>();
+		this.shutdownCompletion = shutdown.promise;
+		void shutdown.promise.catch(() => undefined);
+		this.scheduler.closeAdmission();
 		this.runTeardownStep("abort worker execution", () => this.workerAbort.abort());
 		// Abort makes further tool admission impossible. Seal every already-admitted mutation before
 		// restart suspension snapshots the conversation; the bounded executor may not resume in time.
@@ -977,6 +1076,7 @@ export class WorkerDelegationController {
 			try {
 				ledger.sealChangedFiles();
 			} catch (error) {
+				this.shutdownErrors.add(error);
 				this.safeWarn(
 					`Failed to seal worker mutation state ${laneId} during teardown: ${error instanceof Error ? error.message : String(error)}`,
 				);
@@ -993,6 +1093,7 @@ export class WorkerDelegationController {
 				suspendedAttemptIds.add(attemptId);
 			}
 		} catch (error) {
+			this.shutdownErrors.add(error);
 			this.safeWarn(
 				`Failed to persist worker restart suspension during teardown: ${error instanceof Error ? error.message : String(error)}`,
 			);
@@ -1001,15 +1102,24 @@ export class WorkerDelegationController {
 		try {
 			records = this.lifecycle.getRecords();
 		} catch (error) {
+			this.shutdownErrors.add(error);
 			this.safeWarn(
 				`Failed to inspect durable worker records during teardown: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 		for (const record of records) {
 			if (record.status !== "queued" && record.status !== "running") continue;
-			if (!this.ownsProjectLane(record.laneId)) continue;
+			let ownsLane = false;
+			let attemptId: string | undefined;
+			this.runTeardownStep(`inspect worker ${record.laneId} teardown ownership`, () => {
+				ownsLane = this.ownsProjectLane(record.laneId);
+				attemptId = this.lifecycle.getActiveAttempt(record.laneId)?.attemptId;
+			});
+			if (!ownsLane) continue;
 			const ledger = this.inFlightLedgers.get(record.laneId);
-			if (ledger && suspendedAttemptIds.has(ledger.handle.attemptId)) {
+			// onStarted may dispose after the lease binds but before the execution ledger exists.
+			// The exact suspended attempt, rather than ledger presence, owns restart recovery.
+			if (attemptId && suspendedAttemptIds.has(attemptId)) {
 				this.inFlightLedgers.delete(record.laneId);
 				continue;
 			}
@@ -1020,6 +1130,7 @@ export class WorkerDelegationController {
 						this.publishTerminalRecord(canceled);
 					}
 				} catch (error) {
+					this.shutdownErrors.add(error);
 					this.safeWarn(
 						`Failed to cancel durable queued worker ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
 					);
@@ -1032,6 +1143,7 @@ export class WorkerDelegationController {
 					this.persistCancelledClaim(record.laneId, ledger, "canceled on session dispose", "session_disposed"),
 				);
 			} catch (error) {
+				this.shutdownErrors.add(error);
 				this.safeWarn(
 					`Failed to persist canceled worker claim ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
 				);
@@ -1042,9 +1154,7 @@ export class WorkerDelegationController {
 		this.runTeardownStep("cancel queued worker dispatches", () => this.scheduler.cancelQueued());
 		this.runTeardownStep("dispose worker recovery", () => this.recovery.dispose());
 		this.runTeardownStep("dispose worker terminal handoffs", () => this.terminalHandoffs.dispose());
-		this.runTeardownStep("dispose worker write reservations", () => this.writeReservations.dispose());
 		const shellShutdowns: Promise<void>[] = [];
-		const shellShutdownErrors: unknown[] = [];
 		for (const shellSessionKey of this.shellSessionKeys) {
 			try {
 				// The shared execution owner synchronously kills every shell tier and lane, then resolves
@@ -1052,34 +1162,79 @@ export class WorkerDelegationController {
 				// returned aggregate instead of letting worker processes escape as detached cleanup.
 				shellShutdowns.push(disposeShellExecutionSessionAndWait(shellSessionKey));
 			} catch (error) {
-				shellShutdownErrors.push(error);
+				this.shutdownErrors.add(error);
 			}
 		}
 		this.shellSessionKeys.clear();
-		this.runTeardownStep("clear worker conversation cache", () => this.conversations.clearCache());
-		const completion = Promise.allSettled(shellShutdowns).then((results) => {
+		const completion = Promise.allSettled([
+			...shellShutdowns,
+			this.joinWorkerCompletions(),
+			this.scheduler.waitForShutdown(),
+		]).then((results) => {
 			for (const result of results) {
-				if (result.status === "rejected") shellShutdownErrors.push(result.reason);
+				if (result.status === "rejected") this.shutdownErrors.add(result.reason);
 			}
-			for (const error of shellShutdownErrors) {
-				this.safeWarn(
-					`Worker shell terminal release failed during teardown: ${error instanceof Error ? error.message : String(error)}`,
-				);
+			// A reservation and transcript remain owned until every admitted continuation physically ends.
+			this.runTeardownStep("dispose worker write reservations", () =>
+				this.writeReservations.disposeRequired((laneId) => !this.hasExecutingWorkerResources(laneId)),
+			);
+			this.runTeardownStep("clear worker conversation cache", () => this.conversations.clearCache());
+			if (this.executingSpecialistIds.size > 0) {
+				this.shutdownErrors.add(new Error("Worker shutdown retained unresolved specialist execution resources."));
 			}
-			if (shellShutdownErrors.length === 1) throw shellShutdownErrors[0];
-			if (shellShutdownErrors.length > 1) {
-				throw new AggregateError(shellShutdownErrors, "Worker shell terminal release failed.");
+			for (const error of this.shutdownErrors) {
+				this.safeWarn(`Worker shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			if (this.shutdownErrors.size > 0) {
+				throw new AggregateError([...this.shutdownErrors], "Worker shutdown failed.");
 			}
 		});
-		void completion.catch(() => undefined);
-		return completion;
+		void completion.then(shutdown.resolve, shutdown.reject);
+		return shutdown.promise;
 	}
 
-	private runTeardownStep(label: string, step: () => void): void {
+	private runTeardownStep(label: string, step: () => void, errors = this.shutdownErrors): void {
 		try {
 			step();
 		} catch (error) {
+			errors.add(error);
 			this.safeWarn(`Failed to ${label}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private retainWorkerCompletion<T>(completion: Promise<T>, required = false): Promise<T> {
+		this.workerCompletions.set(completion, required ? "execution" : "ingress");
+		void completion.then(
+			() => this.workerCompletions.delete(completion),
+			(error: unknown) => {
+				this.workerCompletions.delete(completion);
+				if (required || this.workerAbort.signal.aborted) this.shutdownErrors.add(error);
+			},
+		);
+		return completion;
+	}
+
+	private runAdmittedWorker<T>(run: () => Promise<T>): Promise<T> {
+		// Register before invoking admission: onStarted or another synchronous host callback may
+		// initiate disposal before the async method returns its promise to this caller.
+		const completion = Promise.withResolvers<T>();
+		this.retainWorkerCompletion(completion.promise);
+		try {
+			void run().then(completion.resolve, completion.reject);
+		} catch (error) {
+			completion.reject(error);
+		}
+		return completion.promise;
+	}
+
+	private async joinWorkerCompletions(): Promise<void> {
+		// Settlements may finish an already-admitted start's cleanup. Await that work's actual promise;
+		// neither durable terminals nor absence from the scheduler prove the resource owner has ended.
+		while (this.workerCompletions.size > 0) {
+			const results = await Promise.allSettled([...this.workerCompletions.keys()]);
+			for (const result of results) {
+				if (result.status === "rejected") this.shutdownErrors.add(result.reason);
+			}
 		}
 	}
 
@@ -1423,7 +1578,8 @@ export class WorkerDelegationController {
 		pinnedContract?: WorkerExecutionContract,
 		selectedBinding?: OrchestrationModelBinding,
 	): WorkerAdmission {
-		if (this.deps.isDisposed()) return { ok: false, skipReason: "session_disposed" };
+		if (this.deps.isDisposed() || this.workerAbort.signal.aborted)
+			return { ok: false, skipReason: "session_disposed" };
 		// Same rule as the durable ledger: emptiness is judged on the trimmed view, but the brief the
 		// worker receives is exactly the caller's text.
 		const instructions = request.instructions;
@@ -2831,9 +2987,16 @@ export class WorkerDelegationController {
 		}
 	}
 
-	private releaseSettledProjectContext(agentId: string, conversation?: WorkerConversation): void {
+	private releaseSettledProjectContext(
+		agentId: string,
+		conversation?: WorkerConversation,
+		completedExecution = false,
+	): void {
 		const agent = this.lifecycle.getAgent(agentId);
-		if (!this.isSpecialistSettled(agentId)) return;
+		// Required execution cleanup calls only after physical disposal and still owns its one hold.
+		// Do not drop that hold before an attempted project release succeeds, or steal another run's hold.
+		if (!this.isSpecialistSettled(agentId) && (!completedExecution || this.executingSpecialistIds.get(agentId) !== 1))
+			return;
 		const latest = agent ? this.lifecycle.getLatestAgentAttempt(agentId) : this.lifecycle.getActiveAttempt(agentId);
 		if (latest && NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(latest.status)) return;
 		if (!agent && latest?.status === "cancelled" && !latest.lease) {
@@ -2846,6 +3009,7 @@ export class WorkerDelegationController {
 					if (sessionId) this.projectClaims.delete(sessionId);
 					this.projectAgents.delete(agentId);
 				} catch (error) {
+					if (completedExecution) throw error;
 					this.safeWarn(
 						`Worker allocation release failed: ${error instanceof Error ? error.message : String(error)}`,
 					);
@@ -2864,11 +3028,16 @@ export class WorkerDelegationController {
 					expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
 					projectClaim: claim,
 				});
-			this.agentControl.releaseQuiescentContext(agentId, () => {
+			const released = this.agentControl.releaseQuiescentContext(agentId, () => {
 				this.conversations.releaseProjectContext(current);
+				if (completedExecution && this.projectClaims.get(agent.resumeContext.sessionId) !== claim)
+					throw new Error(`Worker ${agentId} project release lost its exact owned claim.`);
 				this.projectClaims.delete(agent.resumeContext.sessionId);
 			});
+			if (completedExecution && released && this.projectClaims.has(agent.resumeContext.sessionId))
+				throw new Error(`Worker ${agentId} project release retained its completed claim.`);
 		} catch (error) {
+			if (completedExecution) throw error;
 			this.safeWarn(`Worker project release failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
@@ -3629,7 +3798,15 @@ export class WorkerDelegationController {
 		return queueSlotsNeeded > queueSlotsFree ? "worker_dispatch_queue_full" : undefined;
 	}
 
-	async start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
+	start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
+		if (this.workerAbort.signal.aborted) return Promise.resolve({ started: false, skipReason: "session_disposed" });
+		return this.runAdmittedWorker(() => this.startWorker(request, signal));
+	}
+
+	private async startWorker(
+		request: WorkerDelegationRequest,
+		signal?: AbortSignal,
+	): Promise<QueuedWorkerAttemptOutcome> {
 		const capturedRequest = structuredClone(request);
 		if (capturedRequest.fanoutRemaining !== undefined && capturedRequest.fanoutRemaining > 1) {
 			const headroomSkipReason = this.fanoutHeadroomSkipReason(capturedRequest, capturedRequest.fanoutRemaining);
@@ -3650,7 +3827,7 @@ export class WorkerDelegationController {
 		}
 		if (!outcome.started) {
 			// A start that never ran leaves its fresh worktree lane unused: remove it.
-			void this.laneIsolation?.discard(selected.admission.executionPlan.cwd);
+			await this.laneIsolation?.discard(selected.admission.executionPlan.cwd);
 			return outcome;
 		}
 		return {
@@ -3736,6 +3913,8 @@ export class WorkerDelegationController {
 		pinnedContract?: WorkerExecutionContract,
 		preparedAdmission?: Extract<WorkerAdmission, { ok: true }>,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord; modelPinBypass?: WorkerRole } {
+		if (this.workerAbort.signal.aborted || this.deps.isDisposed())
+			return { started: false, skipReason: "session_disposed" };
 		const admission = preparedAdmission ?? this.admitNewWorkerRequest(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
 		const { settings, shipment } = admission;
@@ -3825,7 +4004,17 @@ export class WorkerDelegationController {
 		}
 	}
 
-	async runOnce(
+	runOnce(
+		request: WorkerDelegationRequest,
+		onStarted?: (record: LaneRecord) => void,
+		existingRecord?: LaneRecord,
+		directoryValidated = false,
+	): Promise<WorkerDelegationRunOutcome> {
+		if (this.workerAbort.signal.aborted) return Promise.resolve({ started: false, skipReason: "session_disposed" });
+		return this.runAdmittedWorker(() => this.runWorkerOnce(request, onStarted, existingRecord, directoryValidated));
+	}
+
+	private async runWorkerOnce(
 		request: WorkerDelegationRequest,
 		onStarted?: (record: LaneRecord) => void,
 		existingRecord?: LaneRecord,
@@ -3871,7 +4060,7 @@ export class WorkerDelegationController {
 			releaseAllocation?.();
 		}
 		const { completion, ...settled } = outcome;
-		if (!settled.started && admission) void this.laneIsolation?.discard(admission.executionPlan.cwd);
+		if (!settled.started && admission) await this.laneIsolation?.discard(admission.executionPlan.cwd);
 		return completion ?? settled;
 	}
 
@@ -3945,6 +4134,8 @@ export class WorkerDelegationController {
 		preparedAdmission?: Extract<WorkerAdmission, { ok: true }>,
 		newWorkerAdmissionChecked = false,
 	): PreparedWorkerRun {
+		if (this.workerAbort.signal.aborted || this.deps.isDisposed())
+			return { started: false, skipReason: "session_disposed" };
 		const pinnedContract = existingRecord
 			? this.getWorkerLifecycle().getActiveAttempt(existingRecord.laneId)?.dispatch.executionContract
 			: undefined;
@@ -4138,6 +4329,10 @@ export class WorkerDelegationController {
 		const checkpointUsage = lifecycle.getAttemptUsage(startedRecord.laneId);
 		const initialUsage = this.recovery.initialUsage(conversation, checkpointUsage, durableHandle.attemptId);
 		onStarted?.(startedRecord);
+		if (this.workerAbort.signal.aborted || this.deps.isDisposed()) {
+			// The shutdown barrier still owns this admission and releases its reservation strictly.
+			return { started: true, record: lifecycle.getRecord(startedRecord.laneId) ?? startedRecord };
+		}
 		const maxUsd = grant.budget.maxCostUsd;
 		const executionPolicy = orchestrationProfile.executionPolicy;
 		const agentBinding = lifecycle.getAgent(agentId);
@@ -4468,6 +4663,7 @@ export class WorkerDelegationController {
 		// Held for this specialist across the whole execution and released only after the finally has
 		// awaited tool-surface disposal: a terminal record is not evidence that its resources are gone.
 		// Claimed as the last statement before the closure, so its matching finally always runs.
+		const cleanupErrors = new Set<unknown>();
 		const releaseSpecialist = this.beginSpecialistExecution(agentId);
 		const completion = (async (): Promise<WorkerDelegationRunOutcome> => {
 			try {
@@ -4861,32 +5057,92 @@ export class WorkerDelegationController {
 				this.deps.emit({ type: "warning", message: `Worker delegation failed: ${message}` });
 				return { started: true, record };
 			} finally {
-				leaseHeartbeat.stop();
-				this.writeReservations.release(startedRecord.laneId, durableHandle.attemptId, durableHandle.fencingToken);
-				this.yieldedCapacityAttemptIds.delete(durableHandle.attemptId);
-				this.yieldedWriteReservations.delete(durableHandle.attemptId);
-				this.writeOverlaps.end(startedRecord.laneId);
-				this.inFlightLedgers.delete(startedRecord.laneId);
-				this.laneAbortControllers.delete(startedRecord.laneId);
-				this.agentControl.clearLaneHalt(startedRecord.laneId);
-				let resourcesReleased = false;
+				this.runTeardownStep("stop worker lease heartbeat", () => leaseHeartbeat.stop(), cleanupErrors);
+				let physicalSettled = false;
 				try {
-					await toolSurface.dispose();
-					resourcesReleased = true;
+					await executor.waitForPhysicalSettlement();
+					physicalSettled = true;
 				} catch (error) {
+					cleanupErrors.add(error);
 					this.safeWarn(
-						`Worker mutation payload cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+						`Worker inner completion cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
-				// Failed cleanup leaves resource ownership unresolved. Keep both the local execution
-				// hold and the durable project claim until that ownership can be resolved.
-				if (resourcesReleased) releaseSpecialist();
-				if (resourcesReleased) this.releaseSettledProjectContext(agentId, conversation);
-				this.agentControl.signalStateChanged();
-				deregisterInFlight();
-				if (!this.deps.isDisposed()) this.scheduler.drain(true);
+				// A logical timeout/cancellation is not physical release. Keep the live tool surface,
+				// fenced leases, project claim, specialist hold and reload blocker when joining fails.
+				if (physicalSettled) {
+					this.yieldedCapacityAttemptIds.delete(durableHandle.attemptId);
+					this.yieldedWriteReservations.delete(durableHandle.attemptId);
+					this.runTeardownStep(
+						"end worker write overlap",
+						() => this.writeOverlaps.end(startedRecord.laneId),
+						cleanupErrors,
+					);
+					this.inFlightLedgers.delete(startedRecord.laneId);
+					this.laneAbortControllers.delete(startedRecord.laneId);
+					this.runTeardownStep(
+						"clear worker lane halt",
+						() => this.agentControl.clearLaneHalt(startedRecord.laneId),
+						cleanupErrors,
+					);
+					let toolsReleased = false;
+					try {
+						await toolSurface.dispose();
+						toolsReleased = true;
+					} catch (error) {
+						cleanupErrors.add(error);
+						this.safeWarn(
+							`Worker mutation payload cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+					// A child may still write while tool disposal waits for its physical close. Keep its
+					// fenced reservation until that release succeeds, including when shutdown fails.
+					if (toolsReleased) {
+						this.runTeardownStep(
+							"release worker write reservation",
+							() =>
+								this.writeReservations.releaseRequired(
+									startedRecord.laneId,
+									durableHandle.attemptId,
+									durableHandle.fencingToken,
+								),
+							cleanupErrors,
+						);
+					}
+					// Failed cleanup leaves resource ownership unresolved. Keep both the local execution
+					// hold and the durable project claim until that ownership can be resolved.
+					if (cleanupErrors.size === 0) {
+						this.runTeardownStep(
+							"release worker project context",
+							() => this.releaseSettledProjectContext(agentId, conversation, true),
+							cleanupErrors,
+						);
+						if (cleanupErrors.size === 0) releaseSpecialist();
+					}
+				}
+				this.runTeardownStep("signal worker cleanup", () => this.agentControl.signalStateChanged(), cleanupErrors);
+				if (physicalSettled) this.runTeardownStep("deregister worker execution", deregisterInFlight, cleanupErrors);
+				if (cleanupErrors.size === 0 && !this.deps.isDisposed() && !this.workerAbort.signal.aborted)
+					this.scheduler.drain(true);
 			}
-		})();
+		})().then(
+			(outcome) => {
+				if (cleanupErrors.size > 0)
+					throw new AggregateError([...cleanupErrors], `Worker ${agentId} resource release failed.`);
+				return outcome;
+			},
+			(error: unknown) => {
+				if (cleanupErrors.size > 0)
+					throw new AggregateError(
+						[error, ...cleanupErrors],
+						`Worker ${agentId} execution and resource release failed.`,
+					);
+				throw error;
+			},
+		);
+		// Every execution entrance reaches this owner, including direct runOnce callers that never
+		// register with the scheduler. Retain the exact promise containing physical resource cleanup.
+		this.retainWorkerCompletion(completion, true);
 		return {
 			started: true,
 			record: startedRecord,
@@ -4908,6 +5164,7 @@ export class WorkerDelegationController {
 
 	/** Start every capacity-eligible queued worker at the owner session's foreground-idle boundary. */
 	drain(): void {
+		if (this.workerAbort.signal.aborted || this.deps.isDisposed()) return;
 		this.retryRaceCancels();
 		this.recovery.recover();
 		this.scheduler.drain();

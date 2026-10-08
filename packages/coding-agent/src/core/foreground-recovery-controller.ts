@@ -40,6 +40,15 @@ export interface ForegroundSubmissionLease {
 	readonly epoch: number;
 }
 
+export interface ForegroundRecoveryResourceSnapshot {
+	readonly shutdown: boolean;
+	readonly activeRuns: number;
+	readonly submissionEpoch: number | undefined;
+	readonly idleWaiters: number;
+	readonly activityListeners: number;
+	readonly retrying: boolean;
+}
+
 export interface ForegroundRecoveryControllerDeps {
 	agent: Agent;
 	/** See `BillingFailoverControllerDeps.applyFailoverModel`. */
@@ -171,6 +180,18 @@ export class ForegroundRecoveryController {
 
 	getActivitySnapshot(sessionId: string): { sessionId: string; epoch?: number; busy: boolean } {
 		return { sessionId, epoch: this.getCurrentSubmissionEpoch(), busy: this.isBusy };
+	}
+
+	/** Derive physical ownership without releasing a lease or constructing another runtime owner. */
+	getResourceSnapshot(): ForegroundRecoveryResourceSnapshot {
+		return {
+			shutdown: this.shutdownReason !== undefined,
+			activeRuns: this.activeRuns,
+			submissionEpoch: this.submissionLease?.epoch,
+			idleWaiters: this.idleWaiters.size,
+			activityListeners: this.activityListeners.size,
+			retrying: this.retry.isRetrying,
+		};
 	}
 
 	/** Attach before the caller checks aborted; preparation still needs the level-triggered run gate. */

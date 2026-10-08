@@ -78,6 +78,7 @@ import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
 import type { ContextGcReport } from "./context-gc.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
+import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
 import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-claim.ts";
 import type { WorkerAgentControlPort, WorkerGrantSummary } from "./delegation/worker-agent-control.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
@@ -203,6 +204,7 @@ import { createPipelineToolDefinition } from "./tools/pipeline.ts";
 import { createReadTool } from "./tools/read.ts";
 import { createRunProcessToolDefinition } from "./tools/run-process.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
+import type { BashOperations } from "./tools/schemas/bash.ts";
 import { createSecretStoreToolDefinition } from "./tools/secret-store.ts";
 import { disposeShellExecutionSession } from "./tools/shell-execution-session.ts";
 import { createSkillVaultToolDefinition, createWorkerSkillVaultToolDefinition } from "./tools/skill.ts";
@@ -225,7 +227,7 @@ import { isWorkerProcessToolAllowed } from "./worker-tool-ceiling.ts";
 import { createLane, releaseLane } from "./worktree-sync/git-engine.ts";
 import { getBoundWorktreeLaneKey } from "./worktree-sync/lane-binding.ts";
 import { WorktreeLaneGate } from "./worktree-sync/lane-gate.ts";
-import { buildWorktreeSyncEngineDeps } from "./worktree-sync/runtime.ts";
+import { buildWorktreeSyncEngineDeps, type WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface RuntimeBuilderSettingsSource {
@@ -354,6 +356,10 @@ export interface RuntimeBuilderDeps {
 	getCustomTools(): ToolDefinition[];
 	/** Optional plain-tool override; when set, the built-in factory + core diagnostics are skipped. */
 	getBaseToolsOverride(): Record<string, AgentTool> | undefined;
+	/** The shell backend bash runs through for root and worker lanes; undefined keeps the host shell. */
+	getShellOperations(): BashOperations | undefined;
+	/** Host-supplied worktree-sync engine ports, forwarded into every engine-deps build. */
+	getWorktreeSyncEnginePorts(): WorktreeSyncEnginePorts | undefined;
 	/** Pre-filter tool REQUEST (never the capability/profile-filtered active set) preserved across a rebuild. */
 	getRequestedActiveToolNames(): string[] | undefined;
 	setRequestedActiveToolNames(names: string[] | undefined): void;
@@ -497,8 +503,12 @@ export interface RuntimeBuilderDeps {
 	getTaskRuntimeSnapshot?(): TaskRuntimeProjection | undefined;
 	/** A worker claim's review was acknowledged: a claim flagged for review only counts toward the goal once acknowledged. */
 	onWorkerReviewAcknowledged?(): void;
+	/** Goal callers only: the request-keyed claim history. Delegate status reads exact attempts through the port below. */
 	getWorkerClaimSnapshots(): WorkerClaim[];
-	getWorkerResult?(laneId: string): WorkerResultContract | undefined;
+	/** Canonical claim proof for one task and generation; absent proof never adopts an older claim. */
+	getWorkerClaimSnapshot(taskId: string, attemptId: string): WorkerClaimSnapshotPayload | undefined;
+	/** Exact attempt result only, never the task's currently selected generation. */
+	getWorkerResult?(attemptId: string): WorkerResultContract | undefined;
 	/** Confirm a managed dispatch's caller-stable canonical lane id was registered durably before the
 	 * goal binds it (`BackgroundLaneController.resolveManagedLaneId`). */
 	resolveManagedLaneId(callerLaneId: string): string | undefined;
@@ -1240,11 +1250,13 @@ export class RuntimeBuilder {
 			rulesFiles: toolOutputSettings.rulesFile ? [toolOutputSettings.rulesFile] : [],
 			agentDir: this.deps.getAgentDir(),
 		};
+		const shellOperations = this.deps.getShellOperations();
 		const toolOptions: ToolDefinitionOptions = {
 			read: { autoResizeImages, fileEncodings },
 			bash: {
 				outputReduction,
 				commandPrefix: shellCommandPrefix,
+				...(shellOperations ? { operations: shellOperations } : {}),
 				shellPath,
 				sessionKey: this.deps.getShellSessionKey(),
 				// Not `sessionKey`: a task-directory invocation rebinds that to its own shell lane, while
@@ -1305,6 +1317,7 @@ export class RuntimeBuilder {
 				outputReduction,
 				...(shellCommandPrefix !== undefined ? { commandPrefix: shellCommandPrefix } : {}),
 				...(shellPath !== undefined ? { shellPath } : {}),
+				...(shellOperations ? { operations: shellOperations } : {}),
 				platform: process.platform,
 				windowsShellPythonEngine: windowsShell.pythonEngine,
 				windowsShellEngineOptions: { gnuToolsDir: windowsShell.gnuToolsDir },
@@ -1489,6 +1502,7 @@ export class RuntimeBuilder {
 					settingsManager: this.deps.getSettingsManager(),
 					sessionId: this.deps.getSessionManager().getSessionId(),
 					integrationBranch: () => this.deps.integrationBranch?.() || undefined,
+					ports: this.deps.getWorktreeSyncEnginePorts(),
 				});
 			const shouldBuildGoalExecutor =
 				toolAccess.allows(LEGACY_GOAL_TOOL_NAME) || GOAL_LIFECYCLE_TOOL_NAMES.some(toolAccess.allows);
@@ -1760,20 +1774,22 @@ export class RuntimeBuilder {
 					...(workerAgentControl ? { workerAgentControl } : {}),
 					status: {
 						getLaneRecords: () => this.deps.getWorkerLaneRecords(),
-						getWorkerClaimSnapshots: () => this.deps.getWorkerClaimSnapshots(),
+						getWorkerClaimSnapshot: (taskId: string, attemptId: string) =>
+							this.deps.getWorkerClaimSnapshot(taskId, attemptId),
 						...(this.deps.getWorkerResult
-							? { getWorkerResult: (laneId: string) => this.deps.getWorkerResult?.(laneId) }
+							? { getWorkerResult: (attemptId: string) => this.deps.getWorkerResult?.(attemptId) }
 							: {}),
 						acknowledgeWorkerReview: (requestId) => {
 							const result = acknowledgeWorkerClaimReview(this.deps.getSessionManager(), requestId);
 							if (result.ok) this.deps.onWorkerReviewAcknowledged?.();
 							return result;
 						},
-						getWorkerDispositionFacts: (laneId) =>
+						getWorkerDispositionFacts: (taskId: string, attemptId: string) =>
 							deriveWorkerDispositionFacts({
 								snapshot: this.deps.getTaskRuntimeSnapshot?.(),
 								goal: this.deps.getGoalStateSnapshot(),
-								laneId,
+								laneId: taskId,
+								attemptId,
 							}),
 					},
 					...(profileWriter ? { profileWriter } : {}),

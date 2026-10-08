@@ -143,6 +143,11 @@ interface TerminalDeliveryPlan {
 /** Task ids read by a delivery; a plan that delivered nothing, or no tool output, reports none. */
 type DeliveryReceipt = readonly string[];
 
+export interface ForegroundTerminalHandoffResourceSnapshot {
+	readonly pendingDeliveries: number;
+	readonly activeDeliveryIdentities: number;
+}
+
 interface PendingTerminalDelivery {
 	prepare(): TerminalDeliveryPlan | undefined;
 	resolve(receipt: DeliveryReceipt): void;
@@ -289,6 +294,14 @@ export class ForegroundTerminalHandoffController {
 
 	constructor(deps: ForegroundTerminalHandoffControllerDeps) {
 		this.deps = deps;
+	}
+
+	/** Pending records and actual delivery lifetime differ; the bounded replay cache is intentionally retained. */
+	getResourceSnapshot(): ForegroundTerminalHandoffResourceSnapshot {
+		return {
+			pendingDeliveries: this.pending.size,
+			activeDeliveryIdentities: this.terminalDeliveries.size,
+		};
 	}
 
 	async notifyWorkers(records: readonly WorkerTerminalHandoffRecord[]): Promise<void> {
