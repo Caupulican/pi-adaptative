@@ -7,6 +7,7 @@
 
 ### Fixed
 
+- Kept failed Windows shell commands owned until their child processes physically close and awaited worker shell shutdown before releasing reservations and execution holds.
 - Preserved the current objective route and recovery brief through provider context planning and same-turn compaction, clearing it when owner input is admitted or execution ends.
 - Preserved Windows shell working directories across commands by resolving host intent once and reporting the engine's actual initial and final directories, including detached calls.
 - Refused busy session reloads before lifecycle repair, preserving the running tool's actual result and terminal record.

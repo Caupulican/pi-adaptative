@@ -6,6 +6,7 @@ import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
+import { settleIndependentLifecycle } from "../lifecycle-settlement.ts";
 import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
 import { readOnlyShellViolation } from "../model-router/tool-escalation.ts";
 import {
@@ -40,7 +41,7 @@ import { createPythonTool, type PythonToolOptions } from "../tools/python.ts";
 import { createReadTool, type ReadToolOptions } from "../tools/read.ts";
 import { createRepoReadTool } from "../tools/repo-read.ts";
 import { createRunProcessTool, type RunProcessToolOptions } from "../tools/run-process.ts";
-import { disposeShellExecutionSession } from "../tools/shell-execution-session.ts";
+import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
 import { createToolSchemaSearchDefinition } from "../tools/tool_search.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
@@ -543,22 +544,18 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 
 	return {
 		tools,
-		dispose: async () => {
-			try {
-				toolUsage.close();
-			} finally {
-				try {
-					if (options.shellSessionKey) disposeShellExecutionSession(options.shellSessionKey);
-				} finally {
-					try {
-						runEnvironment?.dispose();
-					} finally {
-						// Billing or shell failure cannot retain the lane's hold on the worktree scope.
-						await fileMutationIntents.dispose();
-					}
-				}
-			}
-		},
+		dispose: () =>
+			settleIndependentLifecycle(
+				[
+					() => toolUsage.close(),
+					() =>
+						options.shellSessionKey ? disposeShellExecutionSessionAndWait(options.shellSessionKey) : undefined,
+					() => runEnvironment?.dispose(),
+					() => fileMutationIntents.dispose(),
+				],
+				"Lane tool surface disposal failed",
+				{ sequential: true },
+			),
 		allowedTools,
 		deniedTools,
 		unboundAllowPatterns,

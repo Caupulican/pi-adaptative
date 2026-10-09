@@ -31,6 +31,7 @@ function installExitHook(): void {
 
 export class PersistentProcessCoordinator {
 	private currentChild: ChildProcess | null = null;
+	private currentTerminal: Promise<void> | null = null;
 	private readonly pendingChildTerminals = new Set<Promise<void>>();
 	private queue: Promise<void> = Promise.resolve();
 	private disposed = false;
@@ -46,6 +47,14 @@ export class PersistentProcessCoordinator {
 
 	get terminalPromise(): Promise<void> {
 		return this.waitForTerminalRelease();
+	}
+
+	/** Exact physical close for the owned child, without joining this coordinator's serialized task queue. */
+	getChildTerminal(child: ChildProcess): Promise<void> {
+		if (this.currentChild !== child || !this.currentTerminal) {
+			throw new Error("Persistent process coordinator does not own the requested child terminal");
+		}
+		return this.currentTerminal;
 	}
 
 	runSerialized<T>(task: () => Promise<T>): Promise<T> {
@@ -79,7 +88,7 @@ export class PersistentProcessCoordinator {
 		} else {
 			trackDetachedChild(child);
 		}
-		this.trackTerminal(child);
+		this.currentTerminal = this.trackTerminal(child);
 
 		child.stdout?.on("data", (data: Buffer) => {
 			if (this.currentChild === child) handlers.onStdout(data);
@@ -196,7 +205,7 @@ export class PersistentProcessCoordinator {
 		}
 	}
 
-	private trackTerminal(child: ChildProcess): void {
+	private trackTerminal(child: ChildProcess): Promise<void> {
 		let settled = false;
 		let resolveTerminal: () => void;
 		const terminalPromise = new Promise<void>((resolve) => {
@@ -217,12 +226,14 @@ export class PersistentProcessCoordinator {
 		this.pendingChildTerminals.add(terminalPromise);
 		child.on("error", handleTerminalError);
 		child.once("close", settleTerminal);
+		return terminalPromise;
 	}
 
 	private clear(child: ChildProcess): boolean {
 		if (this.currentChild !== child) return false;
 		untrackDetachedChild(child);
 		this.currentChild = null;
+		this.currentTerminal = null;
 		return true;
 	}
 }

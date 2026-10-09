@@ -291,18 +291,25 @@ class PersistentWindowsShellEngineSession {
 		const effectiveCwd = resolveEffectiveCwd(state, cwd, forceCwd);
 		const effectiveEnv = mergeEffectiveEnv(state, env ?? getShellEnv());
 		if (this.gnuToolsDir === undefined) this.gnuToolsDir = this.resolveGnuToolsDir();
-		const child = await this.ensureChild(effectiveEnv, true, signal);
+		const { child, terminal } = await this.ensureChild(effectiveEnv, true, signal);
+		let admissionError: Error | undefined;
 		if (this.disposed) {
-			this.killChild();
-			throw new Error(`Windows shell engine session "${this.key}" is disposed`);
+			admissionError = new Error(`Windows shell engine session "${this.key}" is disposed`);
+		} else if (signal?.aborted) {
+			admissionError = new Error("aborted");
+		} else if (!child.stdin || !child.stdout || !child.stderr || child !== this.coordinator.child) {
+			admissionError = new Error("Failed to start Windows shell engine coordinator");
 		}
-		if (signal?.aborted) {
-			this.killChild();
-			throw new Error("aborted");
-		}
-		if (!child.stdin || !child.stdout || !child.stderr || child !== this.coordinator.child) {
-			this.killChild();
-			throw new Error("Failed to start Windows shell engine coordinator");
+		if (admissionError) {
+			const failures: unknown[] = [admissionError];
+			try {
+				if (child === this.coordinator.child) this.killChild();
+			} catch (killError) {
+				failures.push(killError);
+			}
+			await terminal;
+			if (failures.length === 1) throw failures[0];
+			throw new AggregateError(failures, "Windows shell engine admission failed");
 		}
 
 		const timeoutMs = timeout !== undefined && timeout > 0 ? timeout * 1000 : undefined;
@@ -324,6 +331,7 @@ class PersistentWindowsShellEngineSession {
 		try {
 			return await new Promise<WindowsShellEngineResult>((resolve, reject) => {
 				let settled = false;
+				let failing = false;
 				let pendingOutput: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 				let controlBuffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 				let controlOverflow = false;
@@ -353,10 +361,30 @@ class PersistentWindowsShellEngineSession {
 						: controlBuffer.toString("utf8");
 
 				const failAndReset = (error: Error): void => {
-					if (settled) return;
-					emitPending(pendingOutput.length);
-					this.killChild();
-					settle(() => reject(error));
+					if (settled || failing) return;
+					failing = true;
+					const failures: unknown[] = [error];
+					try {
+						emitPending(pendingOutput.length);
+					} catch (outputError) {
+						failures.push(outputError);
+					}
+					try {
+						if (child === this.coordinator.child) this.killChild();
+					} catch (killError) {
+						failures.push(killError);
+					}
+					// Keep the admitted operation alive until its own child closes. The global terminal
+					// promise also joins this task's queue and would deadlock if awaited here.
+					void terminal.then(() =>
+						settle(() =>
+							reject(
+								failures.length === 1
+									? failures[0]
+									: new AggregateError(failures, "Windows shell engine reset failed"),
+							),
+						),
+					);
 				};
 
 				const protocolFailure = (message: string): WindowsShellEngineFailure => {
@@ -365,14 +393,14 @@ class PersistentWindowsShellEngineSession {
 				};
 
 				const maybeComplete = (): void => {
-					if (!sawOutputBarrier || !controlFrame || settled || completionScheduled) return;
+					if (!sawOutputBarrier || !controlFrame || settled || failing || completionScheduled) return;
 					completionScheduled = true;
 					// stdout and stderr are independent pipes. Keep this request active through the
 					// next check phase so already-delivered post-barrier bytes are rejected here,
 					// never forwarded into a queued request that starts in a promise microtask.
 					setImmediate(() => {
 						const frame = controlFrame;
-						if (settled || this.activeExec !== active || !frame) return;
+						if (settled || failing || this.activeExec !== active || !frame) return;
 						applyEngineFrame(state, frame);
 						if (frame.unsupported) {
 							// A missing working directory is reported with the same text the local shell
@@ -392,6 +420,7 @@ class PersistentWindowsShellEngineSession {
 
 				const active: ActiveEngineExec = {
 					onStdout: (data) => {
+						if (settled || failing) return;
 						if (sawOutputBarrier) {
 							failAndReset(protocolFailure("Windows shell engine emitted output after its terminal barrier."));
 							return;
@@ -412,7 +441,7 @@ class PersistentWindowsShellEngineSession {
 						emitPending(pendingOutput.length - (outputBarrier.length - 1));
 					},
 					onStderr: (data) => {
-						if (controlOverflow) return;
+						if (settled || failing || controlOverflow) return;
 						if (controlBuffer.length + data.length > MAX_CONTROL_FRAME_BYTES) {
 							controlOverflow = true;
 							failAndReset(protocolFailure("Windows shell engine control frame overflowed."));
@@ -442,13 +471,10 @@ class PersistentWindowsShellEngineSession {
 					},
 					onChildClose: (code) => {
 						const capturedOutput = capturedControl();
-						emitPending(pendingOutput.length);
-						settle(() =>
-							reject(
-								new WindowsShellEngineFailure(
-									`Windows shell engine coordinator exited (${code ?? "null"}) before a complete terminal handoff.\n${capturedOutput}`,
-									capturedOutput,
-								),
+						failAndReset(
+							new WindowsShellEngineFailure(
+								`Windows shell engine coordinator exited (${code ?? "null"}) before a complete terminal handoff.\n${capturedOutput}`,
+								capturedOutput,
 							),
 						);
 					},
@@ -482,8 +508,13 @@ class PersistentWindowsShellEngineSession {
 		}
 	}
 
-	private async ensureChild(env: NodeJS.ProcessEnv, acquire = true, signal?: AbortSignal): Promise<ChildProcess> {
-		if (this.coordinator.child) return this.coordinator.child;
+	private async ensureChild(
+		env: NodeJS.ProcessEnv,
+		acquire = true,
+		signal?: AbortSignal,
+	): Promise<{ child: ChildProcess; terminal: Promise<void> }> {
+		const existing = this.coordinator.child;
+		if (existing) return { child: existing, terminal: this.coordinator.getChildTerminal(existing) };
 		const runtimeSignal = signal
 			? AbortSignal.any([this.lifetimeController.signal, signal])
 			: this.lifetimeController.signal;
@@ -527,7 +558,7 @@ class PersistentWindowsShellEngineSession {
 			onError: (error) => this.activeExec?.fail(error),
 			onClose: (code) => this.activeExec?.onChildClose(code),
 		});
-		return child;
+		return { child, terminal: this.coordinator.getChildTerminal(child) };
 	}
 
 	private killChild(): void {
