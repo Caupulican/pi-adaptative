@@ -7357,6 +7357,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				90_000,
 			);
 			await withDeadline(trace, "second large held", e11SecondHeld.promise, 90_000);
+			await withDeadline(trace, "second held foreground idle", session.waitForForegroundIdle(), 90_000);
 			await withDeadline(
 				trace,
 				"held status turn",
@@ -10498,6 +10499,26 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 					},
 				]),
 			);
+			// Readiness through the existing public wait: idle is reported only once the specialist is settled, so the repair never
+			// races release of the adverse attempt's tools and resource holds. The public ready predicate does not join the outer
+			// execution promise tail or registry deregistration. The adverse attempt stays the single terminal attempt of this agent.
+			const lateReady = await withDeadline(
+				trace,
+				"late agent idle before repair",
+				session.backgroundLanes.waitForWorkerAgent(lateAgentId, 60_000),
+				70_000,
+			);
+			expect(lateReady.timedOut, "the late agent settles inside its wait").toBe(false);
+			expect(lateReady.status, "the late agent is idle before the repair").toBe("idle");
+			expect(
+				Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {})
+					.filter(
+						(attempt) =>
+							(attempt.agentId ?? attempt.dispatch.logicalLaneId) === lateAgentId && attempt.status !== "queued",
+					)
+					.map((attempt) => attempt.attemptId),
+				"the adverse attempt is still the one terminal attempt after the wait",
+			).toEqual([adverseAttempt.attemptId]);
 			const repair = session.backgroundLanes.followUpSessionRootWorkerAgent(
 				lateAgentId,
 				"Submit the corrected report with the module change.",

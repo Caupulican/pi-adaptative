@@ -1564,7 +1564,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		}));
 	}
 
-	/** One event-driven wait set with one shared caller-capacity lease; never per-agent promise polling. */
+	/** Wait for nonactive workers, including idle resource release, with one shared caller-capacity lease. */
 	waitForWorkerAgents(
 		agentIds: readonly string[],
 		mode: WorkerAgentWaitMode,
@@ -1605,9 +1605,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			}
 		};
 		const waitSatisfied = (statuses: typeof baselineStatuses) => {
-			return mode === "any"
-				? statuses.some(({ status }) => status !== "active")
-				: statuses.every(({ status }) => status !== "active");
+			// Durable idleness can precede tool-surface disposal. The same resource owner that
+			// gates reuse must release the specialist before an idle wait can report readiness.
+			const ready = ({ agentId, status }: (typeof statuses)[number]) =>
+				status !== "active" && (status !== "idle" || this.options.isSpecialistSettled?.(agentId) !== false);
+			return mode === "any" ? statuses.some(ready) : statuses.every(ready);
 		};
 		const result = (statuses: typeof baselineStatuses, timedOut: boolean, snapshot: TaskRuntimeProjection) => {
 			const latestAttempts = this.latestAttemptsByAgent(snapshot);
