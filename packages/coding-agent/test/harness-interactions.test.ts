@@ -7063,6 +7063,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 			const e11SecondReported = createBarrier();
 			// The second generation's provider turn is held before its terminal: the status reads happen while it runs.
 			const e11SecondHeld = createBarrier();
+			let e11SecondEpoch: number | undefined;
 			const e11SecondRelease = createBarrier();
 			const e11SmallReported = createBarrier();
 			const startIdentity = (): { agentId: string; laneId: string } => {
@@ -7234,6 +7235,11 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				]),
 				{
 					name: "e11-follow-large-started",
+					check: () => {
+						e11SecondEpoch = session.getForegroundActivity().epoch;
+						if (e11SecondEpoch === undefined)
+							throw new Error("the second report foreground turn holds no submission epoch");
+					},
 					reply: { content: [{ type: "text", text: "The second large report is running." }] },
 				},
 				dynamicCalls("e11-status-current", () => [
@@ -7350,14 +7356,69 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 			await withDeadline(trace, "large worker reported", e11Reported.promise, 90_000);
 			await withDeadline(trace, "E11 read turn settled", session.waitForForegroundIdle(), 90_000);
 			await withDeadline(trace, "chunked artifact read", session.prompt("Read the large output in chunks."), 90_000);
-			await withDeadline(
-				trace,
-				"second large report requested",
-				session.prompt("Ask for the second large report."),
-				90_000,
+			// One owned epoch promise and listener, armed before the second request. Its outcome is tagged at once, so the wait
+			// never rethrows an observer cause on its own. Independent causes are collected after the block, scenario first.
+			const e11Epoch: { settle?: { resolve: () => void; reject: (cause: unknown) => void } } = {};
+			const e11Released = new Promise<void>((resolve, reject) => {
+				e11Epoch.settle = { resolve, reject };
+			});
+			const e11Outcome = e11Released.then(
+				() => ({ released: true as const }),
+				(cause: unknown) => ({ released: false as const, cause }),
 			);
-			await withDeadline(trace, "second large held", e11SecondHeld.promise, 90_000);
-			await withDeadline(trace, "second held foreground idle", session.waitForForegroundIdle(), 90_000);
+			const e11Check = (): void => {
+				const settle = e11Epoch.settle;
+				if (settle === undefined || e11SecondEpoch === undefined) return;
+				try {
+					if (
+						session.getForegroundActivity().epoch !== e11SecondEpoch &&
+						session.getResourceSnapshot().foregroundRecovery.activeRuns === 0
+					) {
+						e11Epoch.settle = undefined;
+						settle.resolve();
+					}
+				} catch (error) {
+					e11Epoch.settle = undefined;
+					settle.reject(error);
+				}
+			};
+			const e11Unsubscribe = session.subscribeForegroundActivity(e11Check);
+			let scenarioCaught = false;
+			let scenarioCause: unknown;
+			let scenarioCutoff = false;
+			let observedOutcome: { released: true } | { released: false; cause: unknown } | undefined;
+			try {
+				await withDeadline(
+					trace,
+					"second large report requested",
+					session.prompt("Ask for the second large report."),
+					90_000,
+				);
+				await withDeadline(trace, "second large held", e11SecondHeld.promise, 90_000);
+				if (e11SecondEpoch === undefined) throw new Error("the second report foreground epoch was never captured");
+				e11Check();
+				await withDeadline(trace, "second foreground epoch released", e11Outcome, 90_000);
+			} catch (error) {
+				scenarioCaught = true;
+				scenarioCause = error;
+			} finally {
+				e11Unsubscribe();
+				const pending = e11Epoch.settle;
+				if (pending !== undefined && scenarioCaught) {
+					e11Epoch.settle = undefined;
+					scenarioCutoff = true;
+					pending.reject(scenarioCause);
+				}
+				observedOutcome = await e11Outcome;
+			}
+			const e11Causes: unknown[] = [];
+			if (scenarioCaught) e11Causes.push(scenarioCause);
+			if (observedOutcome !== undefined && !observedOutcome.released && !scenarioCutoff) {
+				e11Causes.push(observedOutcome.cause);
+			}
+			if (e11Causes.length === 1) throw e11Causes[0];
+			if (e11Causes.length > 1)
+				throw new AggregateError(e11Causes, "the second report foreground observation failed");
 			await withDeadline(
 				trace,
 				"held status turn",
@@ -10994,6 +11055,20 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 					"C's persisted completion after its handoff is the scripted stop and answer",
 				).toEqual({ stopReason: "stop", text: "Writer c is reported." });
 				const laneC = e10StartC.laneId;
+				// C readiness through the existing public wait, after its handoff and tail proofs above: idle only once its specialist settles.
+				const cBefore = { taskId: e10AttemptOf(laneC)?.taskId, attemptId: e10AttemptOf(laneC)?.attemptId };
+				const cReady = await withDeadline(
+					trace,
+					"C agent idle after its tail",
+					session.backgroundLanes.waitForWorkerAgent(e10StartC.agentId, 60_000),
+					70_000,
+				);
+				expect(cReady.timedOut, "C settles inside its wait").toBe(false);
+				expect(cReady.status, "C is idle after its tail").toBe("idle");
+				expect(
+					{ taskId: e10AttemptOf(laneC)?.taskId, attemptId: e10AttemptOf(laneC)?.attemptId },
+					"C keeps its exact task and attempt",
+				).toEqual(cBefore);
 				// The completed disjoint writer proves the held scope did not block it; A and D stay held; B still waits.
 				expect(
 					{
@@ -11060,6 +11135,31 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 						fencingToken: e10BAttemptLease?.fencingToken,
 					},
 				]);
+				// All four admitted agents, after every A-D handoff proof above: idle through the existing public batch wait, before the final global idle.
+				const admittedAgentIds = [e10StartA.agentId, e10StartB.agentId, e10StartC.agentId, e10StartD.agentId];
+				const admittedIdentities = () =>
+					[laneA, laneB, laneC, laneD].map((lane) => ({
+						taskId: e10AttemptOf(lane)?.taskId,
+						attemptId: e10AttemptOf(lane)?.attemptId,
+					}));
+				const admittedBefore = admittedIdentities();
+				const admittedReady = await withDeadline(
+					trace,
+					"A-D agents idle after every handoff",
+					session.backgroundLanes.waitForWorkerAgents(admittedAgentIds, "all", 60_000),
+					70_000,
+				);
+				expect(admittedReady.timedOut, "the four admitted agents settle inside their wait").toBe(false);
+				expect(admittedReady.statuses, "the wait reports exactly the four admitted agents").toHaveLength(4);
+				expect(
+					admittedAgentIds.map(
+						(agentId) => admittedReady.statuses.find((status) => status.agentId === agentId)?.status,
+					),
+					"all four admitted agents are idle",
+				).toEqual(["idle", "idle", "idle", "idle"]);
+				expect(admittedIdentities(), "the four exact task and attempt identities are unchanged").toEqual(
+					admittedBefore,
+				);
 				await withDeadline(trace, "E10 settled", session.waitForForegroundIdle(), 90_000);
 				offE10Tail();
 				expect(
