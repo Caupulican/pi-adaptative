@@ -45,6 +45,7 @@ import { getInFlightWorkUnits } from "../src/core/reload-blockers.ts";
 import { isCredentialSecretKey, mockCredentialFields } from "../src/core/secrets/credential-content-mock.ts";
 import type { ExecutionState } from "../src/core/system-one/types.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, readOptionalToolIntent } from "../src/core/tool-applicability-gate.ts";
+import { createAskQuestionToolDefinition } from "../src/core/tools/ask-question.ts";
 import { createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { localFileMutationIntentOperations } from "../src/core/tools/file-mutation-intent.ts";
 import { routeShellContract } from "../src/core/tools/shell-contract-router.ts";
@@ -2103,7 +2104,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			).toBeUndefined();
 			// Companion: the same captured prefix, copied unchanged to a fresh path, reopened by a fresh owner with no UI bound. Without
 			// a UI there is no presentation, so the resume records the question as unanswered (owner_unavailable): no answer and no
-			// authority. The owner's own 300000 ms window is not elapsed here; it is covered by the separate deadline case at the end.
+			// authority. The owner's window is not elapsed here; the separate short-window case at the end covers its elapsed path.
 			const unavailableCutPath = harnessPath("durable-cut", "ask-scope-unavailable.jsonl");
 			expect(world.io.existsSync(unavailableCutPath), "the companion prefix path is fresh").toBe(false);
 			world.io.writeFileSync(unavailableCutPath, capturedCut);
@@ -5454,13 +5455,26 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				world.warnings.filter((message) => message.includes("Jev System One unavailable")).length,
 				"the intentional evaluator outage warns exactly as its scripted turn requires",
 			).toBe(world.systemOne.enabled ? 1 : 0);
-			// Default owner window, not shortened: a question nobody answers stays open for the native default window, then resolves to the
-			// unanswered result. The presenter's gate is never released, so only the native deadline's abort can settle the presentation.
+			// Production default window, asserted on its own: the short window below replaces it only for this session's ask tool.
+			expect(DEFAULT_OWNER_WAIT_TIMEOUT_MS, "the production owner window keeps its default").toBe(300_000);
+			// Short owner window, simulated: the native ask tool with a 1000 ms ownerWaitTimeoutMs replaces the built-in ask_question for this
+			// session. A question nobody answers stays open for that window, then resolves to the unanswered result. The presenter's gate is
+			// never released, so only the native deadline's abort can settle the presentation.
+			const SHORT_OWNER_WAIT_MS = 1_000;
 			const DEADLINE_CALL_ID = "deadline-ask-1";
 			const deadlinePresented = createBarrier();
 			const deadlineNeverAnswered = createBarrier();
 			let deadlineRequestId: string | undefined;
-			const deadlineAsk = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
+			const deadlineManager = world.createSessionManager();
+			const deadlineAsk = await world.createRootSession("root", {
+				sessionManager: deadlineManager,
+				customTools: [
+					createAskQuestionToolDefinition({
+						sessionManager: deadlineManager,
+						ownerWaitTimeoutMs: SHORT_OWNER_WAIT_MS,
+					}),
+				],
+			});
 			await deadlineAsk.session.bindExtensions({ uiContext: world.humanInput.ui });
 			world.provider.enqueue(
 				"root",
@@ -5512,16 +5526,11 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			const deadlineStarted = Date.now();
 			const deadlineTurn = deadlineAsk.session.prompt("Ask which limit applies once the owner window closes.");
 			await withDeadline(trace, "deadline question presented", deadlinePresented.promise);
-			await withDeadline(
-				trace,
-				"default owner window elapsed",
-				deadlineTurn,
-				DEFAULT_OWNER_WAIT_TIMEOUT_MS + 60_000,
-			);
+			await withDeadline(trace, "short owner window elapsed", deadlineTurn, 10_000);
 			expect(
 				Date.now() - deadlineStarted,
-				"the owner window elapsed in full: the presented question waited the native default before it settled",
-			).toBeGreaterThanOrEqual(DEFAULT_OWNER_WAIT_TIMEOUT_MS - 1_000);
+				"the owner window elapsed in full: the presented question waited the short native window before it settled",
+			).toBeGreaterThanOrEqual(SHORT_OWNER_WAIT_MS - 100);
 			await withDeadline(trace, "deadline presentation settled", world.humanInput.join());
 			expect(
 				getLatestHumanInputSnapshots(deadlineAsk.sessionManager).find(
@@ -5536,7 +5545,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			trace.mark("root", "deadline.window");
 		},
 	);
-}, 900_000);
+}, 300_000);
 
 /** Text of every `delegate` tool result the session recorded, in order (structured, not line-prefix matched). */
 function delegateResultTexts(session: AgentSession): string[] {
