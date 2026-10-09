@@ -81,6 +81,24 @@ export function parseTranscriptSourceHandle(handle: string, projectId: string): 
 	return { projectId, sessionId, entryId, part, digest };
 }
 
+const TRANSCRIPT_NODE_HANDLE_PREFIX = "txn";
+const NODE_HANDLE_HEX_CHARS = 16;
+
+/**
+ * Handle of a summary node: `txn:<first 16 hex chars of the node id>`. A node handle names a summary,
+ * never a source: it cannot be passed to the source reader, and the summary's cited `tx:` handles are
+ * the only way to its exact text.
+ */
+export function formatTranscriptNodeHandle(nodeId: string): string {
+	return `${TRANSCRIPT_NODE_HANDLE_PREFIX}:${nodeId.slice(0, NODE_HANDLE_HEX_CHARS)}`;
+}
+
+/** The 16-hex node-id prefix named by a `txn:` handle, or undefined when `handle` is not one. */
+export function parseTranscriptNodeHandle(handle: string): string | undefined {
+	const match = /^txn:([a-f0-9]{16})$/.exec(handle.trim());
+	return match?.[1];
+}
+
 export function sameTranscriptSource(left: TranscriptSourceRef, right: TranscriptSourceRef): boolean {
 	return (
 		left.projectId === right.projectId &&
@@ -95,11 +113,14 @@ export function sameTranscriptSource(left: TranscriptSourceRef, right: Transcrip
 // Capture policy
 // ---------------------------------------------------------------------------------------------
 
+/** The host record carrying the current session's history frontier (and its cleared form). */
+export const TRANSCRIPT_FRONTIER_CUSTOM_TYPE = "transcript_frontier";
+
 /** Custom message types the harness generates from memory itself; they are never captured as history. */
 export const TRANSCRIPT_EXCLUDED_CUSTOM_TYPES: ReadonlySet<string> = new Set([
 	"memory_context",
 	"memory_evidence",
-	"transcript_frontier",
+	TRANSCRIPT_FRONTIER_CUSTOM_TYPE,
 ]);
 
 /** Marker that identifies recall pages; a message containing it is generated memory, not history. */

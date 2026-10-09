@@ -89,6 +89,17 @@ export interface MemoryRetrievalSettings {
 	maxResults?: number; // default: 5, clamped to [1, 20]
 	includeInPrompt?: boolean; // default: true -- budget-gated safe-auto prompt inclusion
 	allowExternalEgress?: boolean; // default: false -- explicit opt-in for raw query egress
+	history?: MemoryHistorySettings;
+}
+
+/** Opt-in memory history hierarchy (summaries of captured history plus a bounded history frontier). */
+export interface MemoryHistorySettings {
+	hierarchy?: boolean; // default: false -- durable summary hierarchy + history frontier; exact local recall is NOT governed by this switch
+	summaryModel?: string; // model ref ("provider/id" or bare id) for summaries; required for the hierarchy to run
+	allowExternalSummaryEgress?: boolean; // default: false -- sending captured history to a non-local summarizer is external egress
+	maxConcurrentSummaries?: number; // default: 2, clamped to [1, 4]
+	frontierMaxBytes?: number; // default: 4096 UTF-8 bytes of serialized history allowance, clamped to [1024, 16384]
+	retentionDays?: number; // default: unset -- derived summaries live as long as their canonical sessions; when set, summary nodes whose sources are older are revoked
 }
 
 export interface ContextCurationSettings {

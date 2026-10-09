@@ -11,6 +11,7 @@
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import {
 	formatTranscriptSourceHandle,
+	parseTranscriptNodeHandle,
 	parseTranscriptSourceHandle,
 	type TranscriptCoverage,
 	type TranscriptReadUnavailable,
@@ -188,6 +189,103 @@ export function extractTranscriptSourceHandles(text: string, projectId: string):
 	)) {
 		const ref = parseTranscriptSourceHandle(match[0], projectId);
 		if (ref !== undefined) found.add(formatTranscriptSourceHandle(ref));
+	}
+	return [...found];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Summary node expansion
+// ---------------------------------------------------------------------------------------------
+
+export interface TranscriptNodeSummaryView {
+	/** `txn:` handle of the summary node. */
+	handle: string;
+	quality: string;
+	level: number;
+	spanRange: { fromIndex: number; toIndexExclusive: number };
+	coveredFrom?: string;
+	coveredTo?: string;
+	text: string;
+}
+
+export interface TranscriptNodeSourceView {
+	/** `tx:` handle of one covered source part. */
+	handle: string;
+	role: string;
+	toolName?: string;
+	isError?: boolean;
+	timestamp?: string;
+	bytes: number;
+}
+
+export type TranscriptNodeExpansion =
+	| {
+			status: "ok";
+			node: TranscriptNodeSummaryView;
+			/** A parent: its two child summaries, oldest first. */
+			children?: TranscriptNodeSummaryView[];
+			/** A leaf: the exact source parts it covers, in order. */
+			sources?: TranscriptNodeSourceView[];
+	  }
+	| { status: TranscriptReadUnavailableStatus | "invalid_handle"; reason: string };
+
+/** One level of zoom into the summary hierarchy. Read-only; backed by the same store the frontier comes from. */
+export interface TranscriptNodeExpander {
+	expand(handle: string): Promise<TranscriptNodeExpansion>;
+}
+
+function describeNode(view: TranscriptNodeSummaryView): string {
+	const stamps =
+		view.coveredFrom !== undefined || view.coveredTo !== undefined
+			? ` ${view.coveredFrom ?? "?"}..${view.coveredTo ?? "?"}`
+			: "";
+	return `[${view.handle}] level ${view.level}, spans [${view.spanRange.fromIndex},${view.spanRange.toIndexExclusive})${stamps}, ${view.quality}`;
+}
+
+/** Expand a `txn:` handle into its two child summaries (parent) or its covered source handles (leaf). */
+export async function expandTranscriptNode(
+	expander: TranscriptNodeExpander | undefined,
+	handle: string,
+): Promise<TranscriptToolOutcome> {
+	if (expander === undefined) return failure("unavailable", "The summary hierarchy is not available in this session.");
+	const expansion = await expander.expand(handle);
+	if (expansion.status !== "ok") return failure(expansion.status, expansion.reason);
+	const lines = [describeNode(expansion.node), wrapUntrustedText(expansion.node.text, HISTORY_UNTRUSTED_SOURCE)];
+	if (expansion.children && expansion.children.length > 0) {
+		lines.push(
+			"Children (open one with action 'history_expand'):",
+			...expansion.children.map((child) =>
+				[describeNode(child), wrapUntrustedText(child.text, HISTORY_UNTRUSTED_SOURCE)].join("\n"),
+			),
+		);
+	}
+	if (expansion.sources && expansion.sources.length > 0) {
+		lines.push(
+			"Covered sources (open exact text with action 'history_source'):",
+			...expansion.sources.map(
+				(source) =>
+					`- [${source.handle}] ${source.role}${source.toolName ? ` ${source.toolName}` : ""}${source.isError ? " (error)" : ""}${source.timestamp ? ` ${source.timestamp}` : ""}, ${source.bytes} bytes`,
+			),
+		);
+	}
+	return {
+		ok: true,
+		text: lines.join("\n"),
+		details: {
+			success: true,
+			handle: expansion.node.handle,
+			children: (expansion.children ?? []).map((child) => child.handle),
+			sources: (expansion.sources ?? []).map((source) => source.handle),
+		},
+	};
+}
+
+/** Canonical `txn:` summary-node handles named in `text`; used to record which nodes a worker was shown. */
+export function extractTranscriptNodeHandles(text: string): string[] {
+	const found = new Set<string>();
+	for (const match of text.matchAll(/(?<![A-Za-z0-9._:-])txn:[a-f0-9]{16}(?![A-Za-z0-9_:-])/g)) {
+		const prefix = parseTranscriptNodeHandle(match[0]);
+		if (prefix !== undefined) found.add(`txn:${prefix}`);
 	}
 	return [...found];
 }

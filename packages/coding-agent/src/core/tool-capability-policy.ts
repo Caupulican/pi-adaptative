@@ -229,7 +229,10 @@ export function toolCapabilityRequirementClauses(
 		// list inspects current memory and history recall reads captured conversation evidence; both return
 		// before any write path in the memory tool.
 		const isRead =
-			record?.action === "list" || record?.action === "history_search" || record?.action === "history_source";
+			record?.action === "list" ||
+			record?.action === "history_search" ||
+			record?.action === "history_source" ||
+			record?.action === "history_expand";
 		return isUnambiguousQuery || isRead ? [["memory.query"]] : [["memory.mutate"]];
 	}
 	if (name === "goal" && args !== undefined) {

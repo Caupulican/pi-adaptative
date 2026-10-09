@@ -214,6 +214,7 @@ import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./
 import { type CurationProposals, SkillCurator } from "./learning/skill-curator.ts";
 import { LocalPrefixWarmController } from "./local-prefix-warm-controller.ts";
 import { LocalRuntimeController } from "./local-runtime-controller.ts";
+import { ActiveBranchProbe } from "./memory/active-branch-probe.ts";
 import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "./memory/providers/file-store.ts";
 import { MemoryController } from "./memory-controller.ts";
 import {
@@ -331,6 +332,7 @@ import {
 } from "./reply-route.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import { latestRequestSnapshot } from "./request-snapshot-fingerprints.ts";
+import { LaneModelResolver } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import {
 	appendEvidenceBundleSnapshot,
@@ -1462,6 +1464,13 @@ export class AgentSession {
 			getSessionCwd: () => this._cwd,
 			getObjectiveId: () => this.objectiveMutationId(),
 		});
+		const historyModels = new LaneModelResolver({
+			getCwd: () => this._cwd,
+			getModel: () => this.model ?? undefined,
+			getModelRegistry: () => this._modelRegistry,
+			getSettingsManager: () => this.settingsManager,
+			isModelExhausted: (model) => this._isModelUnusable(model),
+		});
 		this._memory = new MemoryController({
 			acquireSystemSwitchLease: () => {
 				if (
@@ -1504,6 +1513,20 @@ export class AgentSession {
 			getGoalState: () => this.getGoalStateSnapshot(),
 			emitWarning: (message) => this._foregroundLifecycle.warn(message),
 			admitUserPreference: (request) => this._reflection.admitUserPreference(request),
+			subscribeEntriesPersisted: (listener) => this.sessionManager.onEntriesPersisted(listener),
+			hierarchy: {
+				// The configured summary model resolves through the one lane-model boundary: configured and
+				// authenticated models only, no second router and no credential client.
+				summarizer: {
+					resolveModel: (reference) => historyModels.resolveModel(reference),
+					runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
+					addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
+					getSessionId: () => this.sessionManager.getSessionId(),
+				},
+				activeBranch: new ActiveBranchProbe(this.sessionManager),
+				isForegroundBusy: () => this._foregroundRecovery.isBusy,
+				subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
+			},
 		});
 		this._compactionSupport = new CompactionSupport({
 			getModel: () => this.model,

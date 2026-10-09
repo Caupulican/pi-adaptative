@@ -25,6 +25,7 @@ import { isDeepStrictEqual } from "node:util";
 import { type AgentMessage, createCustomMessage, HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
 import type { SessionEntriesPersistedEvent } from "../kernel/session/session-manager.ts";
 import { configFile, okfMemoryDir, projectMemoryDir } from "./agent-paths.ts";
+import { estimateTokensFromText } from "./context/context-item.ts";
 import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
 import { createFileStoreMemoryProvider } from "./context/file-store-memory-provider.ts";
 import { createLocalGraphMemoryProvider } from "./context/local-graph-memory-provider.ts";
@@ -35,10 +36,15 @@ import {
 	type MemoryRetrievalDiagnostics,
 	sanitizeMemoryRetrievalReportForDiagnostics,
 	sanitizeTranscriptHistoryForDiagnostics,
+	type TranscriptHierarchyStatus,
 	type TranscriptHistoryStatus,
 	type TranscriptMemoryDiagnostics,
 } from "./context/memory-diagnostics.ts";
-import { type MemoryPromptBudget, resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
+import {
+	type MemoryPromptBudget,
+	reserveMemoryPromptBudget,
+	resolveMemoryPromptBudget,
+} from "./context/memory-prompt-budget.ts";
 import type { MemoryPromptPlan } from "./context/memory-prompt-plan.ts";
 import {
 	type MemoryProvider as ContextMemoryProvider,
@@ -56,6 +62,7 @@ import {
 } from "./context/transcript-memory-provider.ts";
 import type { MemoryProvider } from "./extensions/types.ts";
 import type { GoalState } from "./goals/goal-state.ts";
+import type { ActiveBranchView } from "./memory/active-branch-probe.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import {
@@ -71,11 +78,27 @@ import {
 import { IcmProvider } from "./memory/providers/icm.ts";
 import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
 import {
+	type FrontierBranchFence,
+	type TranscriptFrontierState,
+	TranscriptHierarchyHost,
+	type TranscriptHierarchyHostDeps,
+	type TranscriptHistorySettings,
+} from "./memory/transcript-hierarchy-host.ts";
+import {
 	formatTranscriptSourceHandle,
+	parseTranscriptNodeHandle,
 	parseTranscriptSourceHandle,
+	TRANSCRIPT_FRONTIER_CUSTOM_TYPE,
 	type TranscriptSourceReader,
+	utf8ByteLength,
 } from "./memory/transcript-memory-contracts.ts";
-import { extractTranscriptSourceHandles, openTranscriptSource } from "./memory/transcript-source-tools.ts";
+import {
+	expandTranscriptNode,
+	extractTranscriptNodeHandles,
+	extractTranscriptSourceHandles,
+	openTranscriptSource,
+	type TranscriptNodeExpander,
+} from "./memory/transcript-source-tools.ts";
 import type {
 	UserPreferenceAdmissionRequest,
 	UserPreferenceAdmissionResult,
@@ -97,6 +120,10 @@ export interface MemoryControllerSettingsSource {
 	};
 	getMemorySystem(): MemorySystem;
 	setMemorySystem(system: MemorySystem, scope?: SettingsScope): void;
+	/** Opt-in summary hierarchy settings. Absent in narrow hosts: the hierarchy is then off. */
+	getMemoryHistorySettings?(): TranscriptHistorySettings;
+	/** Effective-settings change event; the hierarchy restarts when a setting that shapes it changed. */
+	subscribeChanges?(listener: () => void): () => void;
 }
 
 /**
@@ -128,6 +155,12 @@ function latestUserMessageText(messages: AgentMessage[]): string {
 	return "";
 }
 
+const HISTORY_FRONTIER_CLEARED_TEXT =
+	"HISTORY FRONTIER: none. Earlier history frontier records are stale (the summary hierarchy is off, has nothing for this session yet, does not fit this model's budget, or the conversation has not been compacted); search memory history when earlier conversation matters.";
+const HISTORY_FRONTIER_WRAPPER_BYTES = utf8ByteLength(
+	wrapUntrustedText("", "memory:history-frontier", { nonce: "0".repeat(32) }),
+);
+
 /** Durable record kind carrying the tiered memory evidence block (and its cleared form). */
 export const MEMORY_EVIDENCE_CUSTOM_TYPE = "memory_evidence";
 const MEMORY_EVIDENCE_CLEARED_TEXT =
@@ -143,6 +176,14 @@ interface ComposedMemoryEvidence {
 	transcriptAdmittedCount?: number;
 	admittedRecall?: { text: string; query: string };
 }
+
+/** What the history frontier took out of the one memory allowance, so the evidence block fits the rest. */
+interface FrontierReserve {
+	bytes: number;
+	estimatedTokens: number;
+}
+
+const NO_FRONTIER_RESERVE: FrontierReserve = { bytes: 0, estimatedTokens: 0 };
 
 /** Same host records: kind, content and cleared form, ignoring timestamps. */
 function sameHostRecords(left: readonly AgentMessage[], right: readonly AgentMessage[]): boolean {
@@ -217,6 +258,8 @@ const ENABLED_EXTERNAL_MEMORY_EGRESS_POLICY = {
 } as const;
 
 const MAX_PRE_COMPRESS_MEMORY_CHARS = 4_000;
+/** Bytes of the history frontier a delegated lane's memory snapshot may carry. */
+const LANE_FRONTIER_BYTES = 3_000;
 /** Transcript sources one delegated lane may hold open at a time; the oldest admission is dropped first. */
 const MAX_ADMITTED_LANE_SOURCES = 512;
 
@@ -273,6 +316,14 @@ export interface MemoryControllerDeps {
 	 * at initialization.
 	 */
 	subscribeEntriesPersisted?(listener: (event: SessionEntriesPersistedEvent) => void): () => void;
+	/**
+	 * What the summary hierarchy needs from the session: the model registry, the isolated-completion
+	 * boundary, the usage ledger and the foreground activity signal. Absent in narrow hosts: no hierarchy.
+	 */
+	hierarchy?: Pick<TranscriptHierarchyHostDeps, "summarizer" | "isForegroundBusy" | "subscribeForegroundActivity"> & {
+		/** The live branch position, so the frontier only ever describes the active ancestry. */
+		activeBranch: ActiveBranchView;
+	};
 }
 
 /** Extension-contributed memory state staged across an atomic runtime reload. */
@@ -324,6 +375,10 @@ export class MemoryController {
 	/** Active generation's transcript recall provider: the one backend for history search and source reads. */
 	private _transcriptRecall: TranscriptRecallProvider | undefined;
 	private _unsubscribeEntriesPersisted: (() => void) | undefined;
+	/** Summary hierarchy host (OKF sessions only); absent in narrow hosts. */
+	private readonly _hierarchy: TranscriptHierarchyHost | undefined;
+	private readonly _activeBranch: ActiveBranchView | undefined;
+	private _unsubscribeSettingsChanges: (() => void) | undefined;
 	/** R4: tracks whether injected recall is actually used, to adapt the recall gate. */
 	private readonly _effectivenessTracker = new EffectivenessTracker();
 	/** Memory providers registered by extensions via pi.registerMemoryProvider, applied on (re)init. */
@@ -348,6 +403,43 @@ export class MemoryController {
 
 	constructor(deps: MemoryControllerDeps) {
 		this.deps = deps;
+		const hierarchy = deps.hierarchy;
+		this._activeBranch = hierarchy?.activeBranch;
+		if (hierarchy) {
+			const { activeBranch: _activeBranch, ...hostDeps } = hierarchy;
+			this._hierarchy = new TranscriptHierarchyHost({
+				...hostDeps,
+				getAgentDir: () => deps.getAgentDir(),
+				getSessionId: () => deps.getSessionId(),
+				projectId: () => this._projectId(),
+				isChildSession: () => deps.isChildSession(),
+				getHistorySettings: () => this._historySettings(),
+				isRetrievalEnabled: () => deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
+				emitWarning: (message) => deps.emitWarning(message),
+			});
+			// Settings that shape the coordinator are applied on the change event, never by polling.
+			this._unsubscribeSettingsChanges = deps.getSettingsManager().subscribeChanges?.(() => {
+				void this._hierarchy?.settingsChanged();
+			});
+		}
+	}
+
+	private _historySettings(): TranscriptHistorySettings {
+		return (
+			this.deps.getSettingsManager().getMemoryHistorySettings?.() ?? {
+				hierarchy: false,
+				summaryModel: undefined,
+				allowExternalSummaryEgress: false,
+				maxConcurrentSummaries: 1,
+				frontierMaxBytes: 0,
+				retentionDays: undefined,
+			}
+		);
+	}
+
+	/** Forget one session's derived history summaries; the canonical session is untouched. */
+	forgetHistorySession(sessionId: string): Promise<void> {
+		return this._hierarchy?.forgetSession(sessionId) ?? Promise.resolve();
 	}
 
 	getActiveMemorySystem(): MemorySystem | undefined {
@@ -427,6 +519,7 @@ export class MemoryController {
 				![
 					"memory_context",
 					MEMORY_EVIDENCE_CUSTOM_TYPE,
+					TRANSCRIPT_FRONTIER_CUSTOM_TYPE,
 					"user_persona",
 					"reflection_cue",
 					"reflection_turn_trigger",
@@ -487,9 +580,14 @@ export class MemoryController {
 			const legacy = this._legacyMemoryEnabled();
 			this._memoryGeneration++;
 			this._fileStoreWriter = undefined;
+			// The coordinator stops, and persists its terminal record, before the reader it uses is released.
+			const hierarchyStopped = this._hierarchy?.detach();
+			this._unsubscribeSettingsChanges?.();
+			this._unsubscribeSettingsChanges = undefined;
 			this._releaseTranscriptRecall();
 			this._activeMemorySystem = undefined;
 			this._transitioning = true;
+			await hierarchyStopped;
 			await this._lifecycleTail;
 			if (legacy) await this._memoryManager.onSessionEnd();
 			await this._memoryManager.shutdownAll();
@@ -773,6 +871,7 @@ export class MemoryController {
 		headroom: PromptHeadroom | undefined,
 		queryPass: boolean,
 		hasInclusionReport: boolean,
+		reserved: FrontierReserve,
 	): ComposedMemoryEvidence {
 		try {
 			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
@@ -797,7 +896,7 @@ export class MemoryController {
 				return cleared("no_results");
 			}
 
-			const budget = this._memoryBudget(settings.maxResults, headroom);
+			const budget = reserveMemoryPromptBudget(this._memoryBudget(settings.maxResults, headroom), reserved);
 			const block = composeTieredMemoryPromptBlock(candidates, budget);
 			if (!block.text) {
 				return cleared("empty_block", { includedCount: block.includedCount, omittedCount: block.omittedCount });
@@ -897,21 +996,42 @@ export class MemoryController {
 		const headroom = this.deps.getPromptHeadroom?.(messages);
 		const queryPass = this._lastLongTermQueryAttempted;
 		const hasInclusionReport = this._latestMemoryPromptInclusionReport !== undefined;
-		const compose = () => ({
-			evidence: this._composeMemoryEvidence(report, headroom, queryPass, hasInclusionReport),
-			persona: this._userPersonaRecords(headroom),
-		});
+		// The live branch at preview: a plan captured before a branch switch or a new compaction is replanned.
+		const branch = this._activeBranch?.snapshot();
+		const compose = () => {
+			// One allowance: the frontier takes its share first (it is the stable record), the evidence block
+			// composes within the rest, so the two can never add up past the headroom-derived budget.
+			const frontier = this._composeHistoryFrontier(headroom);
+			return {
+				frontier,
+				evidence: this._composeMemoryEvidence(report, headroom, queryPass, hasInclusionReport, frontier.reserved),
+				persona: this._userPersonaRecords(headroom),
+			};
+		};
 		const composed = compose();
-		const records = [...composed.evidence.records, ...composed.persona];
+		const records = [...composed.frontier.records, ...composed.evidence.records, ...composed.persona];
 		return {
 			messages: [...messages, ...records],
 			isCurrent: () => {
 				if (!this._legacyMemoryEnabled() || generation !== this._memoryGeneration) return false;
 				if (revision !== this._memoryContentRevision) return false;
+				const liveBranch = this._activeBranch?.snapshot();
+				if (
+					liveBranch?.epoch !== branch?.epoch ||
+					liveBranch?.compaction?.entryId !== branch?.compaction?.entryId
+				) {
+					return false;
+				}
 				const current = compose();
-				return sameHostRecords([...current.evidence.records, ...current.persona], records);
+				return sameHostRecords(
+					[...current.frontier.records, ...current.evidence.records, ...current.persona],
+					records,
+				);
 			},
-			commit: () => this._publishMemoryEvidence(composed.evidence),
+			commit: () => {
+				this._publishMemoryEvidence(composed.evidence);
+				this._hierarchy?.noteFrontierState(composed.frontier.state);
+			},
 		};
 	}
 
@@ -932,6 +1052,82 @@ export class MemoryController {
 		const writer = this.getFileStoreWriter();
 		if (!writer) return { ok: false, message: "Managed memory is not available in this session." };
 		return writer.restoreManaged(target);
+	}
+
+	/**
+	 * The live branch as a frontier fence: the first entry the live context keeps after the latest
+	 * compaction on the ACTIVE ancestry, or the reason there is none. The frontier describes only history
+	 * compacted away on this branch.
+	 */
+	private _frontierFence(): { fence: FrontierBranchFence } | { state: TranscriptFrontierState } {
+		const branch = this._activeBranch;
+		const compaction = branch?.snapshot().compaction;
+		if (branch === undefined || compaction === undefined) return { state: "not_compacted" };
+		const firstKept = compaction.firstKeptEntryId;
+		return {
+			fence: {
+				firstKeptEntryId: firstKept,
+				isCompactedAway: (entryId) => branch.isStrictAncestor(entryId, firstKept),
+				isInLiveContext: (entryId) => branch.isAncestorOrSelf(firstKept, entryId),
+			},
+		};
+	}
+
+	/**
+	 * The current session's history frontier as one `transcript_frontier` host record, drawn from the same
+	 * headroom-derived allowance as the evidence block: at most half of it, further capped by
+	 * `frontierMaxBytes`, wrapper bytes charged. It describes only history compacted away on the live branch
+	 * (the nodes entirely above the latest compaction's first kept entry on the active ancestry); spans still
+	 * in context are not re-sent, and a frontier whose entries are off the live branch (after a branch
+	 * switch) is reported as `lineage_mismatch` and never shown. It never rewrites a sent record: the
+	 * planner appends a new record only when the content changes and clears the old one in place. When
+	 * there is nothing to show the record is the cleared form, which the planner appends only over an
+	 * earlier frontier record. A frontier that changes after preview makes the plan not current, so the
+	 * change enters the next plan only.
+	 */
+	private _composeHistoryFrontier(headroom: PromptHeadroom | undefined): {
+		records: AgentMessage[];
+		reserved: FrontierReserve;
+		state: TranscriptFrontierState;
+	} {
+		const host = this._hierarchy;
+		if (host === undefined) return { records: [], reserved: NO_FRONTIER_RESERVE, state: "not_running" };
+		const cleared = (state: TranscriptFrontierState) => ({
+			records: [this._hostTransient(TRANSCRIPT_FRONTIER_CUSTOM_TYPE, HISTORY_FRONTIER_CLEARED_TEXT, true)],
+			reserved: NO_FRONTIER_RESERVE,
+			state,
+		});
+		try {
+			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+			if (!settings.enabled || !settings.includeInPrompt) return cleared("not_running");
+			const fenced = this._frontierFence();
+			if ("state" in fenced) return cleared(fenced.state);
+			const budget = this._memoryBudget(settings.maxResults, headroom);
+			if (!budget.enabled || budget.maxBytes === undefined) return cleared("no_room");
+			const allowance = Math.floor(budget.maxBytes / 2) - HISTORY_FRONTIER_WRAPPER_BYTES;
+			if (allowance <= 0) return cleared("no_room");
+			const preview = host.previewFrontier(allowance, fenced.fence);
+			if (preview.state !== "shown") return cleared(preview.state);
+			const boundaryId = createHash("sha256").update(preview.text).digest("hex").slice(0, 32);
+			const wrapped = wrapUntrustedText(preview.text, "memory:history-frontier", { nonce: boundaryId });
+			return {
+				records: [this._hostTransient(TRANSCRIPT_FRONTIER_CUSTOM_TYPE, wrapped, false)],
+				reserved: { bytes: utf8ByteLength(wrapped), estimatedTokens: estimateTokensFromText(wrapped) },
+				state: "shown",
+			};
+		} catch {
+			// A frontier failure never clears or replaces what is on record, and never fails the request.
+			return { records: [], reserved: NO_FRONTIER_RESERVE, state: "not_running" };
+		}
+	}
+
+	/** The summary-hierarchy zoom for one memory generation; disabled retrieval answers with a policy refusal. */
+	private _currentHistoryExpander(generation: number): TranscriptNodeExpander | undefined {
+		if (generation !== this._memoryGeneration || !this._legacyMemoryEnabled() || !this._hierarchy) return undefined;
+		if (!this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled) {
+			return { expand: async () => ({ status: "forbidden", reason: "Memory retrieval is disabled by policy." }) };
+		}
+		return this._hierarchy.expander();
 	}
 
 	/**
@@ -1020,6 +1216,7 @@ export class MemoryController {
 	 */
 	getTranscriptHistoryStatus(): TranscriptHistoryStatus {
 		const enabled = this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled;
+		const hierarchy: TranscriptHierarchyStatus | undefined = this._hierarchy?.status();
 		const recall = this._legacyMemoryEnabled() ? this._transcriptRecall : undefined;
 		const health = recall?.health();
 		const availability: TranscriptHistoryStatus["availability"] = !enabled
@@ -1051,6 +1248,7 @@ export class MemoryController {
 					}
 				: {}),
 			admittedInPromptCount: this._latestTranscriptAdmittedCount,
+			...(hierarchy ? { hierarchy } : {}),
 		};
 	}
 
@@ -1190,17 +1388,44 @@ export class MemoryController {
 		return {
 			read: async (query) => {
 				const snapshot = await this.readMemorySnapshotForLane(query);
-				for (const handle of extractTranscriptSourceHandles(snapshot.content, this._projectId())) {
+				for (const handle of [
+					...extractTranscriptSourceHandles(snapshot.content, this._projectId()),
+					...extractTranscriptNodeHandles(snapshot.content),
+				]) {
 					admit(handle, snapshot.sourceGeneration);
 				}
 				return snapshot.content;
 			},
 			readSource: async (ref, cursor) => {
+				const nodePrefix = parseTranscriptNodeHandle(ref);
+				if (nodePrefix !== undefined) {
+					const nodeHandle = `txn:${nodePrefix}`;
+					const nodeGeneration = admitted.get(nodeHandle);
+					if (nodeGeneration === undefined) {
+						throw new Error(
+							"memory_source_forbidden: this summary was not cited to this worker by a memory_read result; run memory_read with a query that surfaces it.",
+						);
+					}
+					if (nodeGeneration !== this._memoryGeneration || !this._legacyMemoryEnabled()) {
+						throw new LaneMemorySnapshotStaleError();
+					}
+					const expanded = await expandTranscriptNode(this._currentHistoryExpander(nodeGeneration), nodeHandle);
+					if (nodeGeneration !== this._memoryGeneration) throw new LaneMemorySnapshotStaleError();
+					if (!expanded.ok) throw new Error(`memory_source_${expanded.status}: ${expanded.reason}`);
+					// What an admitted expansion returns is part of what the lane was shown.
+					for (const key of ["children", "sources"] as const) {
+						const handles = expanded.details[key];
+						if (Array.isArray(handles)) {
+							for (const handle of handles) if (typeof handle === "string") admit(handle, nodeGeneration);
+						}
+					}
+					return expanded.text;
+				}
 				const projectId = this._projectId();
 				const parsed = parseTranscriptSourceHandle(ref, projectId);
 				if (parsed === undefined) {
 					throw new Error(
-						"memory_source_invalid: ref is not a valid transcript source handle (expected tx:<session>:<entry>:<part>:<digest>).",
+						"memory_source_invalid: ref is not a valid transcript handle (expected tx:<session>:<entry>:<part>:<digest> or txn:<16 hex>).",
 					);
 				}
 				const handle = formatTranscriptSourceHandle(parsed);
@@ -1297,7 +1522,16 @@ export class MemoryController {
 		const okf = okfReport.results
 			.map(({ item }) => `[OKF ${item.title ?? item.id}] ${item.summary}\n${item.content ?? ""}`)
 			.join("\n\n");
-		const combined = [staticBlock, okf, lifecycleRecall, renderLaneHistory(historyReport)]
+		const fenced = this._frontierFence();
+		const frontier =
+			this._hierarchy && "fence" in fenced
+				? this._hierarchy.previewFrontier(LANE_FRONTIER_BYTES, fenced.fence)
+				: undefined;
+		const frontierText =
+			frontier?.state === "shown"
+				? `History frontier (summaries of earlier conversation; pass a txn: handle as ref to expand one):\n${frontier.text}`
+				: "";
+		const combined = [staticBlock, frontierText, okf, lifecycleRecall, renderLaneHistory(historyReport)]
 			.filter((part) => part.trim().length > 0)
 			.join("\n\n")
 			.slice(0, 8000);
@@ -1358,6 +1592,8 @@ export class MemoryController {
 		this._memoryManager = manager;
 		this._activeMemorySystem = undefined;
 		this._fileStoreWriter = undefined;
+		// The previous generation's coordinator stops (and records its terminal handoff) before its reader goes.
+		const hierarchyStopped = this._hierarchy?.detach();
 		this._releaseTranscriptRecall();
 		this._transitioning = true;
 		this._initializationFailed = false;
@@ -1382,6 +1618,7 @@ export class MemoryController {
 		this._lifecycleTail = this._lifecycleTail
 			.then(async () => {
 				try {
+					await hierarchyStopped;
 					await previous.shutdownAll();
 					if (generation !== this._memoryGeneration) return;
 					let writer: FileStoreProvider | undefined;
@@ -1398,6 +1635,7 @@ export class MemoryController {
 							...(admitUserPreference ? { admitUserPreference: (request) => admitUserPreference(request) } : {}),
 							transcriptReader: () => this._currentTranscriptReader(generation),
 							projectId: () => this._projectId(),
+							historyExpander: () => this._currentHistoryExpander(generation),
 						});
 						manager.registerProvider(writer);
 						const recall = new TranscriptRecallProvider();
@@ -1433,6 +1671,17 @@ export class MemoryController {
 					this._activeMemorySystem = system;
 					this._fileStoreWriter = writer;
 					this._transcriptRecall = transcriptRecall;
+					if (transcriptRecall) {
+						// Started in the background: the store load must not hold up memory initialization. It is
+						// current only for this generation, whatever transitions happen later.
+						void this._hierarchy?.attach(
+							transcriptRecall,
+							() =>
+								generation === this._memoryGeneration &&
+								this._activeMemorySystem !== undefined &&
+								this._activeMemorySystem !== "icm",
+						);
+					}
 					if (writer) this._reportManagedNotices(writer);
 				} catch (error) {
 					await manager.shutdownAll().catch(() => {});

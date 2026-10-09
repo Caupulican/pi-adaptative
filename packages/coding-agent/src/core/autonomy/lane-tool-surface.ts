@@ -108,7 +108,7 @@ const laneMemoryFields = Type.Object({
 			minLength: 1,
 			maxLength: MAX_LANE_MEMORY_REF_CHARS,
 			description:
-				"A transcript source handle (tx:...) cited by an earlier memory_read result in this task; opens its exact text instead of searching",
+				"A transcript source handle (tx:...) or history summary handle (txn:...) cited by an earlier memory_read result in this task; opens its exact text or expands the summary instead of searching",
 		}),
 	),
 	cursor: Type.Optional(
@@ -294,7 +294,7 @@ function createLaneTools(
 			label: "Read Memory",
 			readOnly: true,
 			description:
-				"Retrieve bounded, source-labeled standing memory relevant to this delegated task (query). Results may cite transcript source handles (tx:...); pass one back as ref (with an optional cursor) to read that source's exact text. Read-only: no memory writes or lifecycle actions are available.",
+				"Retrieve bounded, source-labeled standing memory relevant to this delegated task (query). Results may cite transcript source handles (tx:...) and history summary handles (txn:...); pass one back as ref (with an optional cursor for tx:) to read that source's exact text or to expand that summary one level. Read-only: no memory writes or lifecycle actions are available.",
 			parameters: laneMemorySchema,
 			execute: async (_toolCallId, params) => {
 				const { query: rawQuery, ref, cursor } = params as LaneMemoryParams;

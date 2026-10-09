@@ -101,6 +101,45 @@ export function sanitizeMemoryRetrievalReportForDiagnostics(
 // Past-session history (transcript recall)
 // ---------------------------------------------------------------------------------------------
 
+/** One finished batch of summary work, as a bounded terminal record. */
+export interface TranscriptHierarchyBatch {
+	batchId: number;
+	outcome: "completed" | "stopped";
+	succeeded: number;
+	failed: number;
+	cancelled: number;
+	stale: number;
+	interrupted: number;
+	endedAt: number;
+}
+
+/** The summary hierarchy as the operator sees it; the diagnostic projection is derived from it. */
+export interface TranscriptHierarchyStatus {
+	state: "off" | "starting" | "running" | "stopped";
+	/** Why the hierarchy is not running (real cause, operator view only). */
+	disabledReason?: string;
+	/** Jobs by state. */
+	counts: Record<string, number>;
+	/** Age of the oldest job that is not finished; absent when there is no backlog. */
+	oldestBacklogAgeMs?: number;
+	/** Recent job failures: `reason` is a fixed class, `message` the real cause (operator view only). */
+	failures: { level: number; reason: string; message: string; at: number }[];
+	/** Recovery states found while loading derived state, in words (operator view only). */
+	recoveryIssues: string[];
+	acceptedNodes: number;
+	/** Why the latest committed request did or did not carry the history frontier. */
+	frontierState?: string;
+	/** The current session's frontier, when one exists. */
+	frontier?: {
+		revision: number;
+		bytes: number;
+		nodeCount: number;
+		omittedBeforeIndex: number;
+		coveredThroughIndex: number;
+	};
+	recentBatches: TranscriptHierarchyBatch[];
+}
+
 /** What the operator-facing view knows about history recall; the diagnostic projection is derived from it. */
 export interface TranscriptHistoryStatus {
 	availability: "disabled" | "unavailable" | "loading" | "active";
@@ -119,6 +158,8 @@ export interface TranscriptHistoryStatus {
 	};
 	/** Transcript items admitted into the prompt memory block of the latest query pass. */
 	admittedInPromptCount: number;
+	/** Absent when the summary hierarchy was never configured for this session. */
+	hierarchy?: TranscriptHierarchyStatus;
 }
 
 export interface ReasonCount {
@@ -137,6 +178,19 @@ export interface TranscriptCoverageDiagnostics {
 	lastError?: { at: string; kind: string };
 }
 
+/** Allow-list projection of the hierarchy: counts and fixed failure classes only, never a cause text or a path. */
+export interface TranscriptHierarchyDiagnostics {
+	state: TranscriptHierarchyStatus["state"];
+	counts: Record<string, number>;
+	oldestBacklogAgeMs?: number;
+	failureClasses: ReasonCount[];
+	recoveryIssueCount: number;
+	acceptedNodes: number;
+	frontierState?: string;
+	frontier?: TranscriptHierarchyStatus["frontier"];
+	lastBatch?: TranscriptHierarchyBatch;
+}
+
 export interface TranscriptMemoryDiagnostics {
 	availability: TranscriptHistoryStatus["availability"];
 	coverage?: TranscriptCoverageDiagnostics;
@@ -147,6 +201,7 @@ export interface TranscriptMemoryDiagnostics {
 		failure?: string;
 	};
 	admittedInPromptCount: number;
+	hierarchy?: TranscriptHierarchyDiagnostics;
 }
 
 const TOP_REASONS = 5;
@@ -199,6 +254,24 @@ export function sanitizeTranscriptHistoryForDiagnostics(status: TranscriptHistor
 				}
 			: {}),
 		admittedInPromptCount: status.admittedInPromptCount,
+		...(status.hierarchy ? { hierarchy: sanitizeHierarchyForDiagnostics(status.hierarchy) } : {}),
+	};
+}
+
+function sanitizeHierarchyForDiagnostics(status: TranscriptHierarchyStatus): TranscriptHierarchyDiagnostics {
+	const classes: Record<string, number> = {};
+	for (const failure of status.failures) classes[failure.reason] = (classes[failure.reason] ?? 0) + 1;
+	const lastBatch = status.recentBatches[status.recentBatches.length - 1];
+	return {
+		state: status.state,
+		counts: { ...status.counts },
+		...(status.oldestBacklogAgeMs !== undefined ? { oldestBacklogAgeMs: status.oldestBacklogAgeMs } : {}),
+		failureClasses: topReasons(classes),
+		recoveryIssueCount: status.recoveryIssues.length,
+		acceptedNodes: status.acceptedNodes,
+		...(status.frontierState ? { frontierState: status.frontierState } : {}),
+		...(status.frontier ? { frontier: { ...status.frontier } } : {}),
+		...(lastBatch ? { lastBatch: { ...lastBatch } } : {}),
 	};
 }
 
@@ -228,6 +301,35 @@ export function formatTranscriptMemoryLines(diagnostics: TranscriptMemoryDiagnos
 				? `failed (${retrieval.failure ?? "error"})`
 				: `${retrieval.status}, ${retrieval.resultCount} result(s), ${retrieval.sourceRefCount} source ref(s)`;
 		lines.push(`  latest retrieval: ${outcome}; ${diagnostics.admittedInPromptCount} admitted into the prompt block`);
+	}
+	if (diagnostics.hierarchy) lines.push(...formatHierarchyLines(diagnostics.hierarchy));
+	return lines;
+}
+
+function formatHierarchyLines(hierarchy: TranscriptHierarchyDiagnostics): string[] {
+	const counts = Object.entries(hierarchy.counts)
+		.filter(([, count]) => count > 0)
+		.map(([state, count]) => `${state}=${count}`)
+		.join(", ");
+	const lines = [
+		`History hierarchy: ${hierarchy.state}; ${hierarchy.acceptedNodes} accepted node(s); jobs ${counts || "none"}${hierarchy.oldestBacklogAgeMs !== undefined ? `; oldest backlog ${Math.round(hierarchy.oldestBacklogAgeMs / 1000)}s` : ""}`,
+	];
+	if (hierarchy.frontierState) lines.push(`  history frontier in the latest request: ${hierarchy.frontierState}`);
+	if (hierarchy.frontier) {
+		lines.push(
+			`  frontier revision ${hierarchy.frontier.revision}: ${hierarchy.frontier.nodeCount} node(s), ${hierarchy.frontier.bytes} bytes, spans [${hierarchy.frontier.omittedBeforeIndex},${hierarchy.frontier.coveredThroughIndex}) covered`,
+		);
+	}
+	if (hierarchy.failureClasses.length > 0) {
+		lines.push(`  recent failures${describeReasonCounts(hierarchy.failureClasses)}`);
+	}
+	if (hierarchy.recoveryIssueCount > 0)
+		lines.push(`  ${hierarchy.recoveryIssueCount} recovery issue(s) found at load`);
+	if (hierarchy.lastBatch) {
+		const batch = hierarchy.lastBatch;
+		lines.push(
+			`  last batch #${batch.batchId} ${batch.outcome}: ${batch.succeeded} succeeded, ${batch.failed} failed, ${batch.stale} stale, ${batch.cancelled} cancelled, ${batch.interrupted} interrupted`,
+		);
 	}
 	return lines;
 }

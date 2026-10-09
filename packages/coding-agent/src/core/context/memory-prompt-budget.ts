@@ -130,3 +130,24 @@ export function resolveMemoryPromptBudget(input: MemoryPromptBudgetInput): Memor
 		maxResults: Math.min(configuredMaxResults, 10),
 	};
 }
+
+/**
+ * The share of one memory allowance that remains after another record of the same allowance (the history
+ * frontier) took `reserved`. The frontier and the evidence block are drawn from the one headroom-derived
+ * budget, never from two independent ones; a remainder that cannot hold a minimum line disables the block.
+ */
+export function reserveMemoryPromptBudget(
+	budget: MemoryPromptBudget,
+	reserved: { bytes: number; estimatedTokens: number },
+): MemoryPromptBudget {
+	if (!budget.enabled || (reserved.bytes <= 0 && reserved.estimatedTokens <= 0)) return budget;
+	const maxEstimatedTokens = Math.max(0, budget.maxEstimatedTokens - reserved.estimatedTokens);
+	if (maxEstimatedTokens < estimateTokensFromChars(MIN_MEMORY_LINE_CHARS)) {
+		return { ...disabled("history_frontier_consumes_budget", budget.compact) };
+	}
+	return {
+		...budget,
+		maxEstimatedTokens,
+		...(budget.maxBytes !== undefined ? { maxBytes: Math.max(0, budget.maxBytes - reserved.bytes) } : {}),
+	};
+}

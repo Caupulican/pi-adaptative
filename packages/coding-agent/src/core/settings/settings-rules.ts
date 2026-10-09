@@ -54,8 +54,47 @@ export const MEMORY_RETRIEVAL_MAX_RESULTS_MAX = 20;
 
 export const MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT = 5;
 
-export function clampMemoryRetrievalMaxResults(value: number): number {
+export function clampMemoryRetrievalMaxResults(value: unknown): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) return MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT;
 	return Math.min(MEMORY_RETRIEVAL_MAX_RESULTS_MAX, Math.max(MEMORY_RETRIEVAL_MAX_RESULTS_MIN, Math.trunc(value)));
+}
+
+export const MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_MIN = 1;
+
+export const MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_MAX = 4;
+
+export const MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_DEFAULT = 2;
+
+export function clampMemoryHistoryMaxConcurrentSummaries(value: unknown): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) return MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_DEFAULT;
+	return Math.min(
+		MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_MAX,
+		Math.max(MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_MIN, Math.trunc(value)),
+	);
+}
+
+export const MEMORY_HISTORY_FRONTIER_MAX_BYTES_MIN = 1024;
+
+export const MEMORY_HISTORY_FRONTIER_MAX_BYTES_MAX = 16384;
+
+export const MEMORY_HISTORY_FRONTIER_MAX_BYTES_DEFAULT = 4096;
+
+export function clampMemoryHistoryFrontierMaxBytes(value: unknown): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) return MEMORY_HISTORY_FRONTIER_MAX_BYTES_DEFAULT;
+	return Math.min(
+		MEMORY_HISTORY_FRONTIER_MAX_BYTES_MAX,
+		Math.max(MEMORY_HISTORY_FRONTIER_MAX_BYTES_MIN, Math.trunc(value)),
+	);
+}
+
+export const MEMORY_HISTORY_RETENTION_DAYS_MIN = 1;
+
+export const MEMORY_HISTORY_RETENTION_DAYS_MAX = 3650;
+
+/** Unset (undefined) means no time-based revocation; a non-finite or non-number value is treated as unset. */
+export function clampMemoryHistoryRetentionDays(value: unknown): number | undefined {
+	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+	return Math.min(MEMORY_HISTORY_RETENTION_DAYS_MAX, Math.max(MEMORY_HISTORY_RETENTION_DAYS_MIN, Math.trunc(value)));
 }
 
 export const DEFAULT_AUTONOMY_MAX_STALL_TURNS = DEFAULT_GOAL_CONTINUE_MAX_STALL_TURNS;

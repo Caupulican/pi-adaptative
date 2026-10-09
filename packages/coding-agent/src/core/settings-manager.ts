@@ -34,6 +34,9 @@ import { mergeResourceProfileMap, mergeResourceProfileSettings } from "./resourc
 import { isWorkerSession } from "./session-role.ts";
 import {
 	appendFilter,
+	clampMemoryHistoryFrontierMaxBytes,
+	clampMemoryHistoryMaxConcurrentSummaries,
+	clampMemoryHistoryRetentionDays,
 	clampMemoryRetrievalMaxResults,
 	collectLegacyDisabledFilterFromSettings,
 	DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE,
@@ -108,6 +111,8 @@ import {
 	MAX_WORKER_DELEGATION_MAX_CONCURRENT,
 	MAX_WORKER_DELEGATION_MAX_USD,
 	MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
+	MEMORY_HISTORY_FRONTIER_MAX_BYTES_DEFAULT,
+	MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_DEFAULT,
 	MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT,
 	MIN_BACKGROUND_TOOL_CALL_AFTER_MS,
 	MIN_TOOL_EXECUTION_CONCURRENCY,
@@ -138,6 +143,7 @@ import type {
 	LearningPolicyLayer,
 	LearningPolicySettings,
 	LocalRuntimesSettings,
+	MemoryHistorySettings,
 	MemoryRetrievalSettings,
 	MemorySystem,
 	ModelCapabilityMode,
@@ -2447,13 +2453,78 @@ export class SettingsManager {
 		};
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);
-			projectSettings.contextPolicy = { ...projectSettings.contextPolicy, memory: normalized };
+			const history = projectSettings.contextPolicy?.memory?.history;
+			projectSettings.contextPolicy = {
+				...projectSettings.contextPolicy,
+				memory: { ...normalized, history },
+			};
 			this.markProjectModified("contextPolicy");
 			this.saveProjectSettings(projectSettings);
 			return;
 		}
 
-		this.globalSettings.contextPolicy = { ...this.globalSettings.contextPolicy, memory: normalized };
+		const history = this.globalSettings.contextPolicy?.memory?.history;
+		this.globalSettings.contextPolicy = {
+			...this.globalSettings.contextPolicy,
+			memory: { ...normalized, history },
+		};
+		this.markModified("contextPolicy");
+		this.save();
+	}
+
+	getMemoryHistorySettings(): {
+		hierarchy: boolean;
+		summaryModel: string | undefined;
+		allowExternalSummaryEgress: boolean;
+		maxConcurrentSummaries: number;
+		frontierMaxBytes: number;
+		retentionDays: number | undefined;
+	} {
+		const history = this.settings.contextPolicy?.memory?.history;
+		return {
+			hierarchy: history?.hierarchy ?? false,
+			summaryModel: history?.summaryModel?.trim() || undefined,
+			allowExternalSummaryEgress: history?.allowExternalSummaryEgress === true,
+			maxConcurrentSummaries: clampMemoryHistoryMaxConcurrentSummaries(
+				history?.maxConcurrentSummaries ?? MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_DEFAULT,
+			),
+			frontierMaxBytes: clampMemoryHistoryFrontierMaxBytes(
+				history?.frontierMaxBytes ?? MEMORY_HISTORY_FRONTIER_MAX_BYTES_DEFAULT,
+			),
+			retentionDays: clampMemoryHistoryRetentionDays(history?.retentionDays),
+		};
+	}
+
+	setMemoryHistorySettings(settings: MemoryHistorySettings, scope: SettingsScope = "global"): void {
+		const normalized: MemoryHistorySettings = {
+			hierarchy: settings.hierarchy,
+			summaryModel: settings.summaryModel?.trim() || undefined,
+			allowExternalSummaryEgress: settings.allowExternalSummaryEgress,
+			maxConcurrentSummaries:
+				settings.maxConcurrentSummaries === undefined
+					? undefined
+					: clampMemoryHistoryMaxConcurrentSummaries(settings.maxConcurrentSummaries),
+			frontierMaxBytes:
+				settings.frontierMaxBytes === undefined
+					? undefined
+					: clampMemoryHistoryFrontierMaxBytes(settings.frontierMaxBytes),
+			retentionDays: clampMemoryHistoryRetentionDays(settings.retentionDays),
+		};
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.contextPolicy = {
+				...projectSettings.contextPolicy,
+				memory: { ...projectSettings.contextPolicy?.memory, history: normalized },
+			};
+			this.markProjectModified("contextPolicy");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.contextPolicy = {
+			...this.globalSettings.contextPolicy,
+			memory: { ...this.globalSettings.contextPolicy?.memory, history: normalized },
+		};
 		this.markModified("contextPolicy");
 		this.save();
 	}

@@ -56,6 +56,12 @@ function describeHistory(status: TranscriptHistoryStatus): string {
 	if (status.unavailableReason) lines.push(`  unavailable: ${status.unavailableReason}`);
 	const retrievalError = status.latestRetrieval?.error;
 	if (retrievalError) lines.push(`  retrieval error detail: ${retrievalError}`);
+	const hierarchy = status.hierarchy;
+	if (hierarchy?.disabledReason) lines.push(`  hierarchy not running: ${hierarchy.disabledReason}`);
+	for (const failure of hierarchy?.failures.slice(-5) ?? []) {
+		lines.push(`  hierarchy failure (level ${failure.level}, ${failure.reason}): ${failure.message}`);
+	}
+	for (const issue of hierarchy?.recoveryIssues ?? []) lines.push(`  hierarchy recovery: ${issue}`);
 	return lines.join("\n");
 }
 

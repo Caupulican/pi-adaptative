@@ -4,6 +4,7 @@
 
 - Exact source-linked history recall: the `memory` tool gains read-only `history_search` and `history_source` actions that return cited `tx:` source handles and open the exact captured text of past conversation entries (user, assistant, tool calls and tool results) with UTF-8-safe paging and typed unavailable statuses. Delegated workers can open sources cited to them through `memory_read`.
 - Session persistence publishes a post-commit signal (`SessionManager.onEntriesPersisted`); history recall ingests committed entries incrementally instead of only at startup.
+- Opt-in history summary hierarchy (`contextPolicy.memory.history.*`): background summaries of captured history in durable, individually revocable nodes (`txn:` handles), a bounded history frontier inside the memory allowance once a conversation is compacted, the read-only `history_expand` action, retention revocation, and a bounded terminal handoff per batch of work. Summaries are untrusted evidence with handles, never authority.
 - `/memory history` and `context_audit` report history recall coverage, skipped/uncaptured reasons, the last indexing error and the latest retrieval and prompt-admission outcome.
 
 ### Changed
