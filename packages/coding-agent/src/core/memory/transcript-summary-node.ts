@@ -372,7 +372,8 @@ function parseRef(value: unknown): TranscriptSourceRef | undefined {
 	return { projectId, sessionId, entryId, part, digest };
 }
 
-function parseRefs(value: unknown): TranscriptSourceRef[] | undefined {
+/** Source parts from an untrusted array; undefined when any entry is malformed. */
+export function parseSourceRefs(value: unknown): TranscriptSourceRef[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 	const refs: TranscriptSourceRef[] = [];
 	for (const entry of value) {
@@ -383,18 +384,28 @@ function parseRefs(value: unknown): TranscriptSourceRef[] | undefined {
 	return refs;
 }
 
-/** Validate an untrusted node record (a file read back from disk) and recompute its identity. */
-export function parseSummaryNode(value: unknown): TranscriptSummaryNodeParse {
-	if (!isPlainRecord(value)) return { ok: false, reason: "node is not an object" };
-	const fail = (reason: string): TranscriptSummaryNodeParse => ({ ok: false, reason });
+export interface TranscriptSummaryHeader {
+	id: string;
+	sessionId: string;
+	level: number;
+	ordinal: number;
+	spanRange: TranscriptSummarySpanRange;
+}
+
+export type TranscriptSummaryHeaderParse =
+	| { ok: true; header: TranscriptSummaryHeader }
+	| { ok: false; reason: string };
+
+/**
+ * The fields a persisted node and a persisted job share: id, session, level, ordinal and a non-empty span
+ * range. The one owner of their validation, so a node file and a job record cannot disagree on it.
+ */
+export function parseSummaryHeader(value: Record<string, unknown>): TranscriptSummaryHeaderParse {
+	const fail = (reason: string): TranscriptSummaryHeaderParse => ({ ok: false, reason });
 	if (typeof value.id !== "string" || value.id.length === 0) return fail("id is missing");
-	if (value.schemaVersion !== TRANSCRIPT_SUMMARY_SCHEMA_VERSION) return fail("unsupported schema version");
-	if (value.recipeVersion !== TRANSCRIPT_SUMMARY_RECIPE_VERSION) return fail("unsupported recipe version");
+	if (typeof value.sessionId !== "string" || value.sessionId.length === 0) return fail("sessionId is missing");
 	if (!isNonNegativeInteger(value.level)) return fail("level is invalid");
 	if (!isNonNegativeInteger(value.ordinal)) return fail("ordinal is invalid");
-	if (typeof value.sessionId !== "string" || value.sessionId.length === 0) return fail("sessionId is missing");
-	if (typeof value.lineageDigest !== "string" || value.lineageDigest.length === 0)
-		return fail("lineageDigest is missing");
 	const range = value.spanRange;
 	if (
 		!isPlainRecord(range) ||
@@ -404,9 +415,39 @@ export function parseSummaryNode(value: unknown): TranscriptSummaryNodeParse {
 		return fail("spanRange is invalid");
 	}
 	if (range.toIndexExclusive <= range.fromIndex) return fail("spanRange is empty");
-	const sourceRefs = parseRefs(value.sourceRefs);
+	return {
+		ok: true,
+		header: {
+			id: value.id,
+			sessionId: value.sessionId,
+			level: value.level,
+			ordinal: value.ordinal,
+			spanRange: { fromIndex: range.fromIndex, toIndexExclusive: range.toIndexExclusive },
+		},
+	};
+}
+
+/** Two child ids from an untrusted value; undefined unless it is exactly two strings. */
+export function parseChildPair(value: unknown): [string, string] | undefined {
+	return Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && typeof value[1] === "string"
+		? [value[0], value[1]]
+		: undefined;
+}
+
+/** Validate an untrusted node record (a file read back from disk) and recompute its identity. */
+export function parseSummaryNode(value: unknown): TranscriptSummaryNodeParse {
+	if (!isPlainRecord(value)) return { ok: false, reason: "node is not an object" };
+	const fail = (reason: string): TranscriptSummaryNodeParse => ({ ok: false, reason });
+	if (value.schemaVersion !== TRANSCRIPT_SUMMARY_SCHEMA_VERSION) return fail("unsupported schema version");
+	if (value.recipeVersion !== TRANSCRIPT_SUMMARY_RECIPE_VERSION) return fail("unsupported recipe version");
+	const parsedHeader = parseSummaryHeader(value);
+	if (!parsedHeader.ok) return fail(parsedHeader.reason);
+	const { header } = parsedHeader;
+	if (typeof value.lineageDigest !== "string" || value.lineageDigest.length === 0)
+		return fail("lineageDigest is missing");
+	const sourceRefs = parseSourceRefs(value.sourceRefs);
 	if (sourceRefs === undefined || sourceRefs.length === 0) return fail("sourceRefs is invalid");
-	const contextRefs = parseRefs(value.contextRefs);
+	const contextRefs = parseSourceRefs(value.contextRefs);
 	if (contextRefs === undefined) return fail("contextRefs is invalid");
 	if (typeof value.text !== "string" || value.text.length === 0) return fail("text is empty");
 	const bytes = utf8ByteLength(value.text);
@@ -424,23 +465,17 @@ export function parseSummaryNode(value: unknown): TranscriptSummaryNodeParse {
 	if (typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt)))
 		return fail("createdAt is invalid");
 
-	let children: [string, string] | undefined;
-	if (value.children !== undefined) {
-		const raw = value.children;
-		if (!Array.isArray(raw) || raw.length !== 2 || typeof raw[0] !== "string" || typeof raw[1] !== "string") {
-			return fail("children is invalid");
-		}
-		children = [raw[0], raw[1]];
-	}
+	const children = value.children === undefined ? undefined : parseChildPair(value.children);
+	if (value.children !== undefined && children === undefined) return fail("children is invalid");
 	const node: TranscriptSummaryNode = {
-		id: value.id,
+		id: header.id,
 		schemaVersion: value.schemaVersion,
 		recipeVersion: value.recipeVersion,
-		level: value.level,
-		ordinal: value.ordinal,
-		sessionId: value.sessionId,
+		level: header.level,
+		ordinal: header.ordinal,
+		sessionId: header.sessionId,
 		lineageDigest: value.lineageDigest,
-		spanRange: { fromIndex: range.fromIndex, toIndexExclusive: range.toIndexExclusive },
+		spanRange: header.spanRange,
 		sourceRefs,
 		...(children ? { children } : {}),
 		contextRefs,

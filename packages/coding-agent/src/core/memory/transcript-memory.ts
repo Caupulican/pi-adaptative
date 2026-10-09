@@ -400,13 +400,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	/** Cancel the timer and subscriptions, abort in-flight work, requeue it for the next start, save the jobs. */
 	async stop(): Promise<void> {
 		if (!this.started && !this.scheduler) return;
-		this.started = false;
-		this.epoch += 1;
-		if (this.timer !== undefined) this.ports.clearTimer(this.timer);
-		this.timer = undefined;
-		for (const unsubscribe of this.unsubscribers.splice(0)) unsubscribe();
-		const running = [...this.inFlight.values()];
-		for (const entry of running) entry.controller.abort();
+		const running = this.haltBackground();
 		await Promise.allSettled(running.map((entry) => entry.done));
 		await this.tail;
 		const scheduler = this.scheduler;
@@ -445,13 +439,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			);
 			if (result.status !== "published") return this.fatal(`forgetting ${sessionId} was refused: ${result.status}`);
 			this.forgottenSessions.add(sessionId);
-			const touched = this.sessionsOf(result.revoked);
-			this.afterRevocation(result.revoked, result.revision, [sessionId]);
-			this.dropFrontiers([sessionId, ...result.removedFrontiers]);
-			this.runtime.delete(sessionId);
-			touched.delete(sessionId);
-			await this.republishFrontiers([...touched], scheduled);
-			this.markJobsDirty();
+			await this.applyRevocationOf(sessionId, result, scheduled);
 		});
 	}
 
@@ -621,15 +609,26 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		return { enabled: false, reason };
 	}
 
-	/** An unrecoverable condition (superseded writer, corrupt manifest): stop doing background work and say why. */
-	private fatal(reason: string): void {
-		this.disabledReason = reason;
+	/**
+	 * Stop all background activity at once: results of the old epoch are discarded, the retry timer and
+	 * subscriptions are released and in-flight work is aborted. Returns the aborted entries so a stop can
+	 * wait for them to settle.
+	 */
+	private haltBackground(): { controller: AbortController; done: Promise<void> }[] {
 		this.started = false;
 		this.epoch += 1;
 		if (this.timer !== undefined) this.ports.clearTimer(this.timer);
 		this.timer = undefined;
 		for (const unsubscribe of this.unsubscribers.splice(0)) unsubscribe();
-		for (const entry of this.inFlight.values()) entry.controller.abort();
+		const running = [...this.inFlight.values()];
+		for (const entry of running) entry.controller.abort();
+		return running;
+	}
+
+	/** An unrecoverable condition (superseded writer, corrupt manifest): stop doing background work and say why. */
+	private fatal(reason: string): void {
+		this.disabledReason = reason;
+		this.haltBackground();
 		// A coordinator that stops itself still emits its terminal signal, with the real cause.
 		this.finishBatch("stopped", this.scheduler?.counts().running ?? 0, reason);
 	}
@@ -774,6 +773,19 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		this.endSessionJobs(sessionId, "stale");
 		const result = await writer.invalidateSession(sessionId);
 		if (result.status !== "published") return this.fatal(`invalidating ${sessionId} was refused: ${result.status}`);
+		await this.applyRevocationOf(sessionId, result, epoch);
+	}
+
+	/**
+	 * Mirror a published revocation of one session's derived history locally: unindex the revoked nodes,
+	 * drop the frontiers they were in, forget the session's discovery state and republish the frontiers of
+	 * the other sessions that lost a dependent node.
+	 */
+	private async applyRevocationOf(
+		sessionId: string,
+		result: { revoked: readonly string[]; revision: number; removedFrontiers: readonly string[] },
+		epoch: number,
+	): Promise<void> {
 		const touched = this.sessionsOf(result.revoked);
 		this.afterRevocation(result.revoked, result.revision, [sessionId]);
 		this.dropFrontiers([sessionId, ...result.removedFrontiers]);
@@ -1095,15 +1107,8 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				: "CONTEXT: none available.",
 			`SOURCE:\n${wrapUntrustedText(covered.map(withHandle).join("\n"), "memory:summary-source")}`,
 		].join("\n\n");
-		const reply = await summarizer.summarize(
-			{ system: SUMMARY_SYSTEM_PROMPT, prompt, maxOutputBytes: TRANSCRIPT_SUMMARY_MAX_BYTES },
-			signal,
-		);
-		const projectId = refs[0]?.projectId ?? "";
-		const check = validateSummaryText(reply.text, { projectId, sourceRefs: refs, contextRefs });
-		if (!check.ok) {
-			return { kind: "fail", failure: { kind: "malformed", message: `${check.reason}: ${check.detail}` } };
-		}
+		const reply = await this.summarizeChecked(summarizer, prompt, signal, refs, contextRefs);
+		if ("outcome" in reply) return reply.outcome;
 		return {
 			kind: "node",
 			node: this.makeNode({
@@ -1194,6 +1199,22 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			"Merge the two adjacent SUMMARIES below, oldest first, into one summary of both. Keep every cited handle that still matters.",
 			`SUMMARIES:\n${wrapUntrustedText([left, right].map(describe).join("\n"), "memory:summary-source")}`,
 		].join("\n\n");
+		const reply = await this.summarizeChecked(summarizer, prompt, signal, sourceRefs, []);
+		if ("outcome" in reply) return reply.outcome;
+		return {
+			kind: "node",
+			node: this.makeNode({ ...base, text: reply.text, quality: "model_summary", model: reply.model }),
+		};
+	}
+
+	/** One summary call and its deterministic admission; a rejected reply is a malformed failure, never clipped. */
+	private async summarizeChecked(
+		summarizer: TranscriptSummarizerPort,
+		prompt: string,
+		signal: AbortSignal,
+		sourceRefs: readonly TranscriptSourceRef[],
+		contextRefs: readonly TranscriptSourceRef[],
+	): Promise<{ text: string; model: string } | { outcome: JobOutcome }> {
 		const reply = await summarizer.summarize(
 			{ system: SUMMARY_SYSTEM_PROMPT, prompt, maxOutputBytes: TRANSCRIPT_SUMMARY_MAX_BYTES },
 			signal,
@@ -1201,15 +1222,14 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		const check = validateSummaryText(reply.text, {
 			projectId: sourceRefs[0]?.projectId ?? "",
 			sourceRefs,
-			contextRefs: [],
+			contextRefs,
 		});
 		if (!check.ok) {
-			return { kind: "fail", failure: { kind: "malformed", message: `${check.reason}: ${check.detail}` } };
+			return {
+				outcome: { kind: "fail", failure: { kind: "malformed", message: `${check.reason}: ${check.detail}` } },
+			};
 		}
-		return {
-			kind: "node",
-			node: this.makeNode({ ...base, text: reply.text, quality: "model_summary", model: reply.model }),
-		};
+		return reply;
 	}
 
 	private egressBlocked(summarizer: TranscriptSummarizerPort): string | undefined {

@@ -726,8 +726,14 @@ export class TranscriptSummaryWriter {
 		this.fence = fence;
 	}
 
-	/** Accept nodes, advance cursors and set frontiers in one manifest write. */
-	async publish(transaction: TranscriptSummaryPublishTransaction): Promise<TranscriptSummaryPublishResult> {
+	/**
+	 * Run `body` under the store lock with the manifest this writer's fence still owns. The one owner of the
+	 * fence check: a missing or corrupt manifest and a superseded fence come back as typed refusals before
+	 * the body runs.
+	 */
+	private fenced<T>(
+		body: (manifest: TranscriptSummaryManifest) => Promise<T>,
+	): Promise<T | { status: "manifest_corrupt"; detail: string } | { status: "fenced"; currentFence: number }> {
 		return this.store.locked(async () => {
 			const read = await this.store.readManifest();
 			if (read.status !== "ok") {
@@ -735,9 +741,16 @@ export class TranscriptSummaryWriter {
 					? { status: "manifest_corrupt" as const, detail: read.detail }
 					: { status: "fenced" as const, currentFence: 0 };
 			}
-			const manifest = read.manifest;
-			if (manifest.writerFence !== this.fence)
-				return { status: "fenced" as const, currentFence: manifest.writerFence };
+			if (read.manifest.writerFence !== this.fence) {
+				return { status: "fenced" as const, currentFence: read.manifest.writerFence };
+			}
+			return body(read.manifest);
+		});
+	}
+
+	/** Accept nodes, advance cursors and set frontiers in one manifest write. */
+	async publish(transaction: TranscriptSummaryPublishTransaction): Promise<TranscriptSummaryPublishResult> {
+		return this.fenced(async (manifest) => {
 			if (transaction.expectedRevision !== undefined && transaction.expectedRevision !== manifest.revision) {
 				return { status: "stale_revision" as const, currentRevision: manifest.revision };
 			}
@@ -846,16 +859,7 @@ export class TranscriptSummaryWriter {
 		reason: TranscriptSummaryRevocationReason,
 		options: { dropSessionCursor?: string; tombstoneSession?: string } = {},
 	): Promise<TranscriptSummaryRevokeResult> {
-		return this.store.locked(async () => {
-			const read = await this.store.readManifest();
-			if (read.status !== "ok") {
-				return read.status === "corrupt"
-					? { status: "manifest_corrupt" as const, detail: read.detail }
-					: { status: "fenced" as const, currentFence: 0 };
-			}
-			const manifest = read.manifest;
-			if (manifest.writerFence !== this.fence)
-				return { status: "fenced" as const, currentFence: manifest.writerFence };
+		return this.fenced(async (manifest) => {
 			return this.applyRevocation(
 				manifest,
 				predicate,
@@ -882,16 +886,7 @@ export class TranscriptSummaryWriter {
 
 	/** Replace the persisted job list. Terminal jobs are pruned oldest-first; live work is never pruned. */
 	async saveJobs(jobs: readonly TranscriptSummaryJob[]): Promise<TranscriptSummaryJobsSaveResult> {
-		return this.store.locked(async () => {
-			const read = await this.store.readManifest();
-			if (read.status !== "ok") {
-				return read.status === "corrupt"
-					? { status: "manifest_corrupt" as const, detail: read.detail }
-					: { status: "fenced" as const, currentFence: 0 };
-			}
-			if (read.manifest.writerFence !== this.fence) {
-				return { status: "fenced" as const, currentFence: read.manifest.writerFence };
-			}
+		return this.fenced(async () => {
 			const live = jobs.filter((job) => !isTerminalSummaryJobState(job.state));
 			if (live.length > TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS) {
 				return { status: "jobs_overflow" as const, active: live.length };

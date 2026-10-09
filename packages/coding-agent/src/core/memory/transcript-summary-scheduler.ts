@@ -27,6 +27,9 @@ import {
 	isNonNegativeInteger,
 	leafJobKey,
 	parentJobKey,
+	parseChildPair,
+	parseSourceRefs,
+	parseSummaryHeader,
 	type TranscriptSummaryNode,
 	type TranscriptSummarySpanRange,
 } from "./transcript-summary-node.ts";
@@ -561,20 +564,10 @@ function isFiniteNumber(value: unknown): value is number {
 export function parseSummaryJob(value: unknown): TranscriptSummaryJobParse {
 	const fail = (reason: string): TranscriptSummaryJobParse => ({ ok: false, reason });
 	if (!isPlainRecord(value)) return fail("job is not an object");
-	if (typeof value.id !== "string" || value.id.length === 0) return fail("id is missing");
 	if (value.kind !== "leaf" && value.kind !== "parent") return fail("kind is invalid");
-	if (typeof value.sessionId !== "string" || value.sessionId.length === 0) return fail("sessionId is missing");
-	if (!isNonNegativeInteger(value.level) || !isNonNegativeInteger(value.ordinal))
-		return fail("level or ordinal is invalid");
-	const range = value.spanRange;
-	if (
-		!isPlainRecord(range) ||
-		!isNonNegativeInteger(range.fromIndex) ||
-		!isNonNegativeInteger(range.toIndexExclusive)
-	) {
-		return fail("spanRange is invalid");
-	}
-	if (range.toIndexExclusive <= range.fromIndex) return fail("spanRange is empty");
+	const parsedHeader = parseSummaryHeader(value);
+	if (!parsedHeader.ok) return fail(parsedHeader.reason);
+	const { header } = parsedHeader;
 	if (typeof value.state !== "string" || !JOB_STATES.includes(value.state as TranscriptSummaryJobState)) {
 		return fail("state is invalid");
 	}
@@ -587,36 +580,12 @@ export function parseSummaryJob(value: unknown): TranscriptSummaryJobParse {
 	if (value.state === "retry_wait" && value.nextRetryAt === undefined) return fail("retry_wait needs nextRetryAt");
 	let sourceRefs: TranscriptSourceRef[] | undefined;
 	if (value.kind === "leaf") {
-		if (!Array.isArray(value.sourceRefs) || value.sourceRefs.length === 0) return fail("leaf needs sourceRefs");
 		if (value.children !== undefined) return fail("a leaf job cannot have children");
-		sourceRefs = [];
-		for (const entry of value.sourceRefs) {
-			if (
-				!isPlainRecord(entry) ||
-				typeof entry.projectId !== "string" ||
-				typeof entry.sessionId !== "string" ||
-				typeof entry.entryId !== "string" ||
-				!isNonNegativeInteger(entry.part) ||
-				typeof entry.digest !== "string"
-			) {
-				return fail("sourceRefs entry is invalid");
-			}
-			sourceRefs.push({
-				projectId: entry.projectId,
-				sessionId: entry.sessionId,
-				entryId: entry.entryId,
-				part: entry.part,
-				digest: entry.digest,
-			});
-		}
-	} else if (
-		!Array.isArray(value.children) ||
-		value.children.length !== 2 ||
-		typeof value.children[0] !== "string" ||
-		typeof value.children[1] !== "string"
-	) {
-		return fail("parent needs two children");
+		sourceRefs = parseSourceRefs(value.sourceRefs);
+		if (sourceRefs === undefined || sourceRefs.length === 0) return fail("leaf needs sourceRefs");
 	}
+	const children = parseChildPair(value.children);
+	if (value.kind === "parent" && children === undefined) return fail("parent needs two children");
 	let error: TranscriptSummaryJobError | undefined;
 	if (value.lastError !== undefined) {
 		const raw = value.lastError;
@@ -630,18 +599,15 @@ export function parseSummaryJob(value: unknown): TranscriptSummaryJobParse {
 		}
 		error = { message: raw.message, reason: raw.reason, transient: raw.transient };
 	}
-	const children = Array.isArray(value.children)
-		? ([value.children[0], value.children[1]] as [string, string])
-		: undefined;
 	return {
 		ok: true,
 		job: {
-			id: value.id,
+			id: header.id,
 			kind: value.kind,
-			sessionId: value.sessionId,
-			level: value.level,
-			ordinal: value.ordinal,
-			spanRange: { fromIndex: range.fromIndex, toIndexExclusive: range.toIndexExclusive },
+			sessionId: header.sessionId,
+			level: header.level,
+			ordinal: header.ordinal,
+			spanRange: header.spanRange,
 			...(sourceRefs ? { sourceRefs } : {}),
 			...(children ? { children } : {}),
 			state: value.state as TranscriptSummaryJobState,
