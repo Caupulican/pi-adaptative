@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { PassThrough } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
@@ -30,7 +30,22 @@ export type WorkerProjectClaims = NonNullable<
 >["ownedProjectClaims"];
 
 export const SCRIPTED_TRACKS = ["root", "worker-a", "worker-b", "worker-c"] as const;
-export const HARNESS_PROJECT_CWD = "/harness/project";
+const HARNESS_ROOT = resolve("/harness");
+
+/**
+ * The one composition owner for fixture and test paths: a native path under the fixture root. Every path the fixture
+ * registers, compares or hands to production is built here, so the host's separator and drive are the same everywhere.
+ */
+export function harnessPath(...segments: string[]): string {
+	return resolve(HARNESS_ROOT, ...segments);
+}
+
+export const HARNESS_PROJECT_CWD = harnessPath("project");
+
+/** A native path under the project root: the composition owner for project-relative fixture and test paths. */
+export function projectPath(...segments: string[]): string {
+	return resolve(HARNESS_PROJECT_CWD, ...segments);
+}
 
 const TYPESAFE_FIXTURE_KEY = "apikey_harness_fixture_0001";
 const HARNESS_PROVIDER_FIXTURE_KEY = "harness-fixture-credential";
@@ -495,6 +510,17 @@ interface GitOutcome {
 
 const NOT_A_REPOSITORY = "fatal: not a git repository (or any of the parent directories): .git\n";
 
+/** Whether `target` is `directory` or lies beneath it, judged by native relative paths rather than a textual prefix. */
+function isWithin(directory: string, target: string): boolean {
+	const path = relative(directory, target);
+	return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
+
+/** A repository-relative file name in Git's wire form: forward slashes whatever the host separator. */
+function gitRelative(from: string, to: string): string {
+	return relative(from, to).split(sep).join("/");
+}
+
 /**
  * Stateful git for the worktree-sync engine and the SDK's own git reads. Commits, branches, worktrees, the
  * staged snapshot, merges and rebases are real state transitions; the working files and the git dirs live in
@@ -517,8 +543,8 @@ export class VirtualGit {
 
 	constructor(io: VirtualFileSystem, root: string) {
 		this.io = io;
-		this.root = root;
-		this.commonDir = join(root, ".git");
+		this.root = resolve(root);
+		this.commonDir = join(this.root, ".git");
 	}
 
 	/** Creates the repository with one commit of `committed` on `branch`, checked out at the root. */
@@ -659,7 +685,7 @@ export class VirtualGit {
 		const target = resolve(cwd);
 		let best: GitWorktree | undefined;
 		for (const worktree of this.worktrees.values()) {
-			const inside = target === worktree.path || target.startsWith(`${worktree.path}/`);
+			const inside = isWithin(worktree.path, target);
 			if (inside && (best === undefined || worktree.path.length > best.path.length)) best = worktree;
 		}
 		return best;
@@ -756,7 +782,7 @@ export class VirtualGit {
 				if (entry.name === ".git") continue;
 				const absolute = join(directory, entry.name);
 				if (entry.isDirectory()) visit(absolute);
-				else if (entry.isFile()) found.push(relative(worktree.path, absolute));
+				else if (entry.isFile()) found.push(gitRelative(worktree.path, absolute));
 			}
 		};
 		visit(worktree.path);
@@ -1093,7 +1119,7 @@ export class VirtualGit {
 		const worktree = this.worktreeFor(cwd);
 		if (!worktree) return { code: 128, stdout: "", stderr: NOT_A_REPOSITORY };
 		for (const path of args.filter((arg) => arg !== "--")) {
-			const rel = relative(worktree.path, resolve(cwd, path));
+			const rel = gitRelative(worktree.path, resolve(cwd, path));
 			const working = this.readWorking(worktree, rel);
 			if (working === undefined) worktree.index.delete(rel);
 			else worktree.index.set(rel, working);
@@ -1945,7 +1971,7 @@ export class HarnessWorld {
 
 	constructor(options: HarnessWorldOptions) {
 		this.systemOne = new ScriptedSystemOneTransport(options.systemOneEnabled);
-		this.agentDir = `/harness/agent-${options.name}`;
+		this.agentDir = harnessPath(`agent-${options.name}`);
 		this.warningAllowances = options.warningAllowances ?? [];
 		this.git = new VirtualGit(this.io, HARNESS_PROJECT_CWD);
 		this.windowsShell = new ScriptedWindowsShellProcesses(this.io, this.shell, this.processTable);

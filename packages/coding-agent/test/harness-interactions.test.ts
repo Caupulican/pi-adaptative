@@ -15,6 +15,7 @@ import {
 	workerProjectSpecializationFile,
 } from "../src/core/agent-paths.ts";
 import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.ts";
+import { canonicalPathScopeIdentity } from "../src/core/autonomy/path-scope.ts";
 import {
 	type BackgroundToolTaskRecord,
 	loadBackgroundToolTaskRecordsNewestFirst,
@@ -54,6 +55,8 @@ import {
 	HARNESS_PROJECT_CWD,
 	type HarnessWorld,
 	type HarnessWorldOptions,
+	harnessPath,
+	projectPath,
 	runHarnessWorld,
 	type SystemOneDecodedRequest,
 	settlementState,
@@ -115,7 +118,11 @@ async function runJourney(
 	}
 }
 
-const LIMITS_PATH = `${HARNESS_PROJECT_CWD}/src/limits.ts`;
+const LIMITS_PATH = projectPath("src", "limits.ts");
+const E0_SRC_PATH = projectPath("src");
+/** The two raw deltas a read path streams as: the first ends inside the directory name, the second starts at its separator. */
+const E0_FIRST_DELTA = JSON.stringify({ path: E0_SRC_PATH }).slice(0, -2);
+const E0_SECOND_DELTA = `${JSON.stringify(LIMITS_PATH.slice(E0_SRC_PATH.length)).slice(1, -1)}"}`;
 const TASK_REQUEST = `Read ${LIMITS_PATH}, change MAX_RETRIES from 3 to 5, and remember that I prefer tabs over spaces.`;
 const FOLLOW_UP_REQUEST = "Also keep the tab preference in mind.";
 
@@ -128,23 +135,23 @@ const CAPTURED_ACCESS = localFileMutationIntentOperations.access;
  */
 const COMPACTION_SUMMARY = [
 	"## Active Task",
-	"User: Read /harness/project/src/limits.ts, change MAX_RETRIES from 3 to 5, and remember that I prefer tabs over spaces.",
+	`User: Read ${LIMITS_PATH}, change MAX_RETRIES from 3 to 5, and remember that I prefer tabs over spaces.`,
 	"",
 	"### Mandatory Rules",
 	"(none)",
 	"",
 	"## Working Set",
-	"- /harness/project/src/limits.ts — EDIT",
+	`- ${LIMITS_PATH} — EDIT`,
 	"",
 	"## Files",
-	"- /harness/project/src/limits.ts",
+	`- ${LIMITS_PATH}`,
 	"",
 	"## Open Problems",
 	"(none)",
 	"",
 	"## Done",
-	"1. READ /harness/project/src/limits.ts",
-	"2. EDIT /harness/project/src/limits.ts",
+	`1. READ ${LIMITS_PATH}`,
+	`2. EDIT ${LIMITS_PATH}`,
 	"3. MEMORY saved the owner's tab preference to USER.md",
 	"",
 	"## Key Decisions",
@@ -154,7 +161,7 @@ const COMPACTION_SUMMARY = [
 	"- The owner prefers tabs over spaces.",
 	"",
 	"## Critical Context",
-	"- /harness/project/src/limits.ts holds MAX_RETRIES = 5 after the edit.",
+	`- ${LIMITS_PATH} holds MAX_RETRIES = 5 after the edit.`,
 ].join("\n");
 
 /**
@@ -529,7 +536,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			],
 			files: {
 				[LIMITS_PATH]: "export const MAX_RETRIES = 3;\n",
-				[`${HARNESS_PROJECT_CWD}/src/features/retry/configuration/limits.ts`]:
+				[projectPath("src", "features", "retry", "configuration", "limits.ts")]:
 					'export const RETRY_CONFIGURATION = "long";\n',
 			},
 			// Guarded edge: no standing grant for destructive filesystem operations, so the operator is asked.
@@ -541,11 +548,11 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			// The operation table captured at module evaluation must reach the virtual tree, not the host.
 			await expect(localFileMutationIntentOperations.access(LIMITS_PATH, constants.R_OK)).resolves.toBeUndefined();
 			await expect(
-				localFileMutationIntentOperations.access(`${HARNESS_PROJECT_CWD}/missing.ts`, constants.R_OK),
+				localFileMutationIntentOperations.access(projectPath("missing.ts"), constants.R_OK),
 			).rejects.toThrow("virtual filesystem");
 			// Exclusive copy, as the production edit and write paths issue it: an existing destination is refused and
 			// keeps its bytes; an absent destination is created in the virtual tree.
-			const copySource = `${HARNESS_PROJECT_CWD}/src/copy-source.ts`;
+			const copySource = projectPath("src", "copy-source.ts");
 			world.io.seed(copySource, "export const COPIED = true;\n");
 			await expect(
 				localFileMutationIntentOperations.copyFileExclusive(copySource, LIMITS_PATH),
@@ -553,7 +560,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				code: "EEXIST",
 			});
 			expect(world.io.readFileSync(LIMITS_PATH, "utf8")).toBe(ORIGINAL_LIMITS);
-			const copyTarget = `${HARNESS_PROJECT_CWD}/src/copy-target.ts`;
+			const copyTarget = projectPath("src", "copy-target.ts");
 			await expect(
 				localFileMutationIntentOperations.copyFileExclusive(copySource, copyTarget),
 			).resolves.toBeUndefined();
@@ -571,7 +578,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			const escapesBeforeAttach = world.guard.escapes.length;
 			let refusal: unknown;
 			try {
-				database.exec(`ATTACH DATABASE '${HARNESS_PROJECT_CWD}/evil.db' AS evil`);
+				database.exec(`ATTACH DATABASE '${projectPath("evil.db")}' AS evil`);
 			} catch (error) {
 				refusal = error;
 			}
@@ -623,7 +630,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					labels: [],
 				});
 				// VACUUM INTO writes a whole database file; load_extension runs native code. Both are controls the authorizer answers.
-				const vacuum = probeSql(`VACUUM INTO '${HARNESS_PROJECT_CWD}/vacuum-target.db'`);
+				const vacuum = probeSql(`VACUUM INTO '${projectPath("vacuum-target.db")}'`);
 				expect(
 					{ statement: "VACUUM INTO", error: vacuum.error, labels: vacuum.labels },
 					"VACUUM INTO is refused by the RAM authorizer",
@@ -632,7 +639,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					error: "Error: authorization denied",
 					labels: ["sqlite.attach"],
 				});
-				const extension = probeSql(`SELECT load_extension('${HARNESS_PROJECT_CWD}/missing.so')`);
+				const extension = probeSql(`SELECT load_extension('${projectPath("missing.so")}')`);
 				expect(
 					{ statement: "load_extension", error: extension.error, labels: extension.labels },
 					"load_extension is refused by the RAM authorizer",
@@ -647,7 +654,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			// File-backed read-only consumer: the writer creates the file, then the read-only handle opens on that backing. The
 			// read-only consumer may not change persistent metadata (refused by exact label); the writer's value stays unchanged,
 			// and the connection-only busy_timeout setting stays supported on the read-only handle.
-			const statePath = `${HARNESS_PROJECT_CWD}/state.db`;
+			const statePath = projectPath("state.db");
 			const writer = new sqlite.DatabaseSync(statePath);
 			let reader: typeof writer | undefined;
 			try {
@@ -826,7 +833,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			await withDeadline(trace, "task turn", session.prompt(TASK_REQUEST));
 			trace.mark("root", "task.reply");
 			// The add is durable: its managed file holds the saved entry, bytes on disk, not only a success flag.
-			expect(world.io.readFileSync(`${world.agentDir}/USER.md`, "utf8")).toContain(
+			expect(world.io.readFileSync(resolve(world.agentDir, "USER.md"), "utf8")).toContain(
 				"The owner prefers tabs over spaces.",
 			);
 			expect(world.io.readFileSync(LIMITS_PATH, "utf8"), toolOutcomes(session)).toContain("MAX_RETRIES = 5");
@@ -1012,7 +1019,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 
 			// Long project path after compaction. The first read names the raw path; the minted alias then appears in the
 			// request-visible PATH ALIASES legend, and the model reads through that alias. The short limits.ts stays unaliased.
-			const longPath = `${HARNESS_PROJECT_CWD}/src/features/retry/configuration/limits.ts`;
+			const longPath = projectPath("src", "features", "retry", "configuration", "limits.ts");
 			let longAlias: string | undefined;
 			const longRequest = `Read ${longPath} and summarize the retry configuration.`;
 			const priorIntent = readOptionalToolIntent(
@@ -1091,13 +1098,21 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			}
 			// The alias is persisted in the session's SQL alias store, not only in the transcript: read it back through a read-only
 			// connection, then close that connection before the body continues.
-			const aliasStore = `${world.agentDir}/work/context/sessions/${created.sessionManager.getSessionId()}/index/runtime.sqlite`;
+			const aliasStore = resolve(
+				world.agentDir,
+				"work",
+				"context",
+				"sessions",
+				created.sessionManager.getSessionId(),
+				"index",
+				"runtime.sqlite",
+			);
 			if (!world.io.existsSync(aliasStore)) throw new Error(`the alias store was not written: ${aliasStore}`);
 			const storedAliases = readPathAliases(aliasStore);
-			expect(storedAliases, "the alias store holds the minted mapping").toContainEqual({
-				full_path: longPath,
-				alias_id: longAlias,
-			});
+			expect(
+				storedAliases.map((row) => ({ full_path: resolve(row.full_path), alias_id: row.alias_id })),
+				"the alias store holds the minted mapping",
+			).toContainEqual({ full_path: resolve(longPath), alias_id: longAlias });
 
 			// Approval. A destructive bash command asks the operator, who denies the first attempt: production refuses it before the
 			// shell is reached, so nothing reaches the shell transport. The same command, approved, executes exactly one scripted effect.
@@ -1861,7 +1876,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					{ label: "Production", description: "Use the production limit." },
 				],
 			};
-			const cutPath = "/harness/durable-cut/ask-scope.jsonl";
+			const cutPath = harnessPath("durable-cut", "ask-scope.jsonl");
 			const presented = createBarrier();
 			const holdAsk = createBarrier();
 			let presentedRequestId: string | undefined;
@@ -1894,7 +1909,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					if (world.io.existsSync(cutPath))
 						throw new Error("the durable cut is already written: cuts are immutable");
 					const bytes = String(world.io.readFileSync(sessionFile, "utf8"));
-					world.io.mkdirSync("/harness/durable-cut", { recursive: true });
+					world.io.mkdirSync(harnessPath("durable-cut"), { recursive: true });
 					world.io.writeFileSync(cutPath, bytes);
 					capturedCut = bytes;
 					presentedRequestId = request.requestId;
@@ -2068,7 +2083,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			// Companion: the same captured prefix, copied unchanged to a fresh path, reopened by a fresh owner with no UI bound. Without
 			// a UI there is no presentation, so the resume records the question as unanswered (owner_unavailable): no answer and no
 			// authority. The owner's own 300000 ms window is not elapsed here; it is covered by the separate deadline case at the end.
-			const unavailableCutPath = "/harness/durable-cut/ask-scope-unavailable.jsonl";
+			const unavailableCutPath = harnessPath("durable-cut", "ask-scope-unavailable.jsonl");
 			expect(world.io.existsSync(unavailableCutPath), "the companion prefix path is fresh").toBe(false);
 			world.io.writeFileSync(unavailableCutPath, capturedCut);
 			expect(
@@ -2527,16 +2542,16 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 									type: "toolCall",
 									id: "e0-read-1",
 									name: "read",
-									arguments: { path: `${HARNESS_PROJECT_CWD}/src` },
+									arguments: { path: projectPath("src") },
 								},
 							],
-							event: { type: "toolcall_delta", contentIndex: 0, delta: `{"path":"${HARNESS_PROJECT_CWD}/src` },
+							event: { type: "toolcall_delta", contentIndex: 0, delta: E0_FIRST_DELTA },
 						},
 						{
 							partialContent: [
 								{ type: "toolCall", id: "e0-read-1", name: "read", arguments: { path: LIMITS_PATH } },
 							],
-							event: { type: "toolcall_delta", contentIndex: 0, delta: '/limits.ts"}' },
+							event: { type: "toolcall_delta", contentIndex: 0, delta: E0_SECOND_DELTA },
 						},
 						{
 							partialContent: [
@@ -2564,7 +2579,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			const e0Failures: unknown[] = [];
 			try {
 				await withDeadline(trace, "E0 native toolcall_end observed", e0EndSeen.promise, 60_000);
-				e0OwnedCall.arguments.path = `${HARNESS_PROJECT_CWD}/src/mutated-by-scenario.ts`;
+				e0OwnedCall.arguments.path = projectPath("src", "mutated-by-scenario.ts");
 			} catch (error) {
 				e0Failures.push(error);
 			} finally {
@@ -2603,7 +2618,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				.filter((args, index, all) => index === 0 || all[index - 1] !== args);
 			expect(e0Intermediate, "the partial arguments are exactly the three native frames, in order").toEqual([
 				JSON.stringify({}),
-				JSON.stringify({ path: `${HARNESS_PROJECT_CWD}/src` }),
+				JSON.stringify({ path: projectPath("src") }),
 				JSON.stringify({ path: LIMITS_PATH }),
 			]);
 			expect(
@@ -2637,7 +2652,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					if (
 						block?.type === "toolCall" &&
 						block.id === "e0-abort-1" &&
-						JSON.stringify(block.arguments) === JSON.stringify({ path: `${HARNESS_PROJECT_CWD}/src` })
+						JSON.stringify(block.arguments) === JSON.stringify({ path: projectPath("src") })
 					) {
 						e0AbortPartials.release();
 					}
@@ -2660,16 +2675,16 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 								type: "toolCall",
 								id: "e0-abort-1",
 								name: "read",
-								arguments: { path: `${HARNESS_PROJECT_CWD}/src` },
+								arguments: { path: projectPath("src") },
 							},
 						],
-						event: { type: "toolcall_delta", contentIndex: 0, delta: `{"path":"${HARNESS_PROJECT_CWD}/src` },
+						event: { type: "toolcall_delta", contentIndex: 0, delta: E0_FIRST_DELTA },
 					},
 					{
 						partialContent: [
 							{ type: "toolCall", id: "e0-abort-1", name: "read", arguments: { path: LIMITS_PATH } },
 						],
-						event: { type: "toolcall_delta", contentIndex: 0, delta: '/limits.ts"}' },
+						event: { type: "toolcall_delta", contentIndex: 0, delta: E0_SECOND_DELTA },
 						check: (request) => {
 							const signal = request.options?.signal;
 							if (signal === undefined)
@@ -3093,7 +3108,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			const m4Session = m4Created.session;
 			const m4WorkerDone = createBarrier();
 			const m4Wake = createBarrier();
-			const M4_RAW_PATH = `${world.agentDir}/memory/user.md`;
+			const M4_RAW_PATH = resolve(world.agentDir, "memory", "user.md");
 			const m4Query = "short functions";
 			const m4OverBound = "x".repeat(4_097);
 			world.provider.enqueue(
@@ -3850,7 +3865,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			// the teardown must keep is predeclared from the pre-fault identity: the exact lease, the exact claim tuple with its shutdown shape, the hold
 			// count, and the durable reservation bytes. The reservation store's unlink fails before mutation. The owner's certificate accepts exactly that
 			// predeclared retention. A later process reaps the dead owner's lease when a fresh owner starts a writer on the same scope.
-			const E13_SCOPE = `${HARNESS_PROJECT_CWD}/e13/out`;
+			const E13_SCOPE = projectPath("e13", "out");
 			const e13Admitted = createBarrier();
 			const e13Gate = createBarrier();
 			const e13Wake = createBarrier();
@@ -4067,7 +4082,9 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				expect(e13Second?.parentSessionId, "the fresh lease names the fresh parent session").toBe(
 					e13Fresh.sessionManager.getSessionId(),
 				);
-				expect(e13Second?.writeScopes, "the fresh lease keeps the exact scope").toEqual([E13_SCOPE]);
+				expect(e13Second?.writeScopes, "the fresh lease keeps the exact scope").toEqual([
+					canonicalPathScopeIdentity(E13_SCOPE),
+				]);
 				const e13FreshAttempt = Object.values(
 					e13Fresh.session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {},
 				).find((attempt) => attempt.attemptId === e13Second?.attemptId);
@@ -4119,7 +4136,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			// E13 after-mutation (required release): the store unlink completes and then fails. The durable store has lost the lease while the owner still
 			// holds it in memory, so the required release keeps the lease, its execution hold and its claim, and the disposal reports the exact unlink
 			// cause together with the retained lease. Every identity is predeclared from the admitted writer before the fault.
-			const E13A_SCOPE = `${HARNESS_PROJECT_CWD}/e13a/out`;
+			const E13A_SCOPE = projectPath("e13a", "out");
 			const e13aAdmitted = createBarrier();
 			const e13aGate = createBarrier();
 			const e13aCreated = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
@@ -4426,7 +4443,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				watchCount: 1,
 			});
 
-			const E13W_SCOPE = `${HARNESS_PROJECT_CWD}/e13w/out`;
+			const E13W_SCOPE = projectPath("e13w", "out");
 			// E13 watcher-only teardown (required release): one owner runs a writer to a typed completion; native cleanup releases its lease, claim and
 			// hold. The owner then keeps only its reservation observer: no availability subscribers remain, and the physical observer keeps its one native change callback. That observer's close fails at disposal: the cause is
 			// reported, the owner's registration stays, and the observer is cut off only after this native proof. Identities are predeclared before the fault.
@@ -4650,7 +4667,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			// observed pending before the shell gate is released, and the gate is released in a finally so the producer can join even when the teardown fails.
 			const e13bAdmitted = createBarrier();
 			const e13bShellGate = createBarrier();
-			const E13B_SCOPE = `${HARNESS_PROJECT_CWD}/e13b/out`;
+			const E13B_SCOPE = projectPath("e13b", "out");
 			const e13bCreated = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
 			const e13bSession = e13bCreated.session;
 			world.shell.enqueue({
@@ -5202,7 +5219,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			const winCommand = "Write-Output 'win-contract'";
 			const winMissing = "Get-Item 'win-missing.txt'";
 			// A real directory of the seeded project. The persistent cd changes the native cwd; the commands after it must run from that changed cwd.
-			const winDir = `${HARNESS_PROJECT_CWD}/src/features/retry/configuration`;
+			const winDir = projectPath("src", "features", "retry", "configuration");
 			const winChange = 'cd "src/features/retry/configuration"';
 			const winAfter = "Get-Item 'limits.ts'";
 			const winPlan = [winCommand, winChange, winAfter, winMissing];
@@ -5599,12 +5616,12 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 			const workersMayRead = createBarrier();
 			let blockedAgentId: string | undefined;
 			let mainBeforeApproval: string | undefined;
-			const scratchDir = `${HARNESS_PROJECT_CWD}/scratch`;
+			const scratchDir = projectPath("scratch");
 			const scratchGit = `${scratchDir}/.git`;
 			let orchestrationRoot: AgentSession | undefined;
 			// The same captured reference, in a second world: its own file resolves, and the first world's file does not.
 			await expect(CAPTURED_ACCESS(LIMITS_PATH, constants.R_OK)).resolves.toBeUndefined();
-			await expect(CAPTURED_ACCESS(`${HARNESS_PROJECT_CWD}/src/copy-source.ts`, constants.R_OK)).rejects.toThrow(
+			await expect(CAPTURED_ACCESS(projectPath("src", "copy-source.ts"), constants.R_OK)).rejects.toThrow(
 				"virtual filesystem",
 			);
 
@@ -5727,7 +5744,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						}
 						if (
 							world.git.refSha("refs/heads/main") !== mainBeforeApproval ||
-							!world.io.existsSync(`${HARNESS_PROJECT_CWD}/.git`)
+							!world.io.existsSync(projectPath(".git"))
 						) {
 							throw new Error("the approval touched the main repository");
 						}
@@ -6233,8 +6250,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 			const vitestPassed = ["Test Files  1 passed (1)\n", "Tests  1 passed (1)\n"];
 			// The same command run from another directory is a different verification identity: its pass must not clear the
 			// obligation the failure opened in the project directory.
-			const GAP5_DIR = `${HARNESS_PROJECT_CWD}/gap5/elsewhere`;
-			const gap5Command = `cd ${GAP5_DIR} && ${VITEST_COMMAND}`;
+			const GAP5_DIR = projectPath("gap5", "elsewhere");
+			const gap5Command = `cd gap5/elsewhere && ${VITEST_COMMAND}`;
 			const limitsIs = (value: number): void => {
 				const actual = world.io.readFileSync(LIMITS_PATH, "utf8");
 				if (actual !== `export const MAX_RETRIES = ${value};\n`) {
@@ -6596,7 +6613,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						{
 							id: "mixed-fail-1",
 							name: "read",
-							arguments: { path: `${HARNESS_PROJECT_CWD}/src/does-not-exist.ts` },
+							arguments: { path: projectPath("src", "does-not-exist.ts") },
 						},
 						{
 							id: "mixed-status-ok-1",
@@ -9374,22 +9391,16 @@ function legendLinesOf(request: ScriptedRequest): string[] {
 		.filter((line) => /^p\/\S+=\S+$/.test(line));
 }
 
-/** The alias the request-visible legend assigns to an absolute path, when the legend carries it. */
+/**
+ * The alias the request-visible legend assigns to an absolute path, when the legend carries it. The legend names a file
+ * relative to the project root or absolutely; both spellings resolve natively, so either form matches the same file.
+ */
 function legendAliasFor(request: ScriptedRequest, absolutePath: string): string | undefined {
-	const display = absolutePath.startsWith(`${HARNESS_PROJECT_CWD}/`)
-		? absolutePath.slice(HARNESS_PROJECT_CWD.length + 1)
-		: absolutePath;
+	const target = resolve(absolutePath);
 	for (const text of requestTexts(request)) {
 		for (const line of text.split("\n")) {
 			const match = /^(p\/\S+)=(\S+)$/.exec(line);
-			if (
-				match?.[1] &&
-				(match[2] === absolutePath ||
-					match[2] === display ||
-					resolve(HARNESS_PROJECT_CWD, match[2]) === absolutePath)
-			) {
-				return match[1];
-			}
+			if (match?.[1] && resolve(HARNESS_PROJECT_CWD, match[2]) === target) return match[1];
 		}
 	}
 	return undefined;
@@ -9478,10 +9489,10 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			// dirty from the start, so lanes are created explicitly and the worker is started on its request-visible lane checkout.
 			settings: { defaultTools: [...DEFAULT_ACTIVE_TOOL_NAMES, "worktree_sync"] },
 			files: {
-				[`${HARNESS_PROJECT_CWD}/src/limits.ts`]: ORIGINAL_LIMITS,
-				[`${HARNESS_PROJECT_CWD}/src/owner.md`]: OWNER_DRAFT_DIRTY,
-				[`${HARNESS_PROJECT_CWD}/src/notes.md`]: NOTES_V1,
-				"/harness/e10-outside/d.txt": "E10-SENTINEL\n",
+				[projectPath("src", "limits.ts")]: ORIGINAL_LIMITS,
+				[projectPath("src", "owner.md")]: OWNER_DRAFT_DIRTY,
+				[projectPath("src", "notes.md")]: NOTES_V1,
+				[harnessPath("e10-outside", "d.txt")]: "E10-SENTINEL\n",
 			},
 			repository: {
 				committed: { "src/limits.ts": ORIGINAL_LIMITS, "src/owner.md": OWNER_DRAFT_V1, "src/notes.md": NOTES_V1 },
@@ -9613,7 +9624,7 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 								type: "toolCall",
 								id: "mixed-read-fail-j3",
 								name: "read",
-								arguments: { path: `${HARNESS_PROJECT_CWD}/src/does-not-exist.ts` },
+								arguments: { path: projectPath("src", "does-not-exist.ts") },
 							},
 						],
 						stopReason: "toolUse",
@@ -10006,7 +10017,7 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			// Stale replacement after integration. An external atomic save renames a new node over the notes file while a
 			// descriptor opened earlier is still held: the root's edit from its earlier read is refused, the held descriptor
 			// keeps the bytes of the node it opened, and the path shows the replacement.
-			const notesPath = `${HARNESS_PROJECT_CWD}/src/notes.md`;
+			const notesPath = projectPath("src", "notes.md");
 			let heldDescriptor: number | undefined;
 			// Late attempt through the real identity fence. A third worker holds its first request at a gate and ignores the request abort. The owner
 			// force-suspends the exact attempt while that request is held and queues the valid-current run behind the physical hold. The stale
@@ -10473,11 +10484,11 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			// waits on the reservation its start receipt names; a disjoint writer completes beside the held one; an out-of-scope write
 			// is refused and leaves a pre-existing sentinel unchanged. Every start is bound to its own lane, task and attempt.
 			const E10_MODEL = "worker-c";
-			const E10_SHARED = `${HARNESS_PROJECT_CWD}/e10/shared`;
+			const E10_SHARED = projectPath("e10", "shared");
 			const E10_NESTED = `${E10_SHARED}/nested`;
-			const E10_C_SCOPE = `${HARNESS_PROJECT_CWD}/e10/other/c`;
-			const E10_D_SCOPE = `${HARNESS_PROJECT_CWD}/e10/other/d`;
-			const E10_OUTSIDE = "/harness/e10-outside/d.txt";
+			const E10_C_SCOPE = projectPath("e10", "other", "c");
+			const E10_D_SCOPE = projectPath("e10", "other", "d");
+			const E10_OUTSIDE = harnessPath("e10-outside", "d.txt");
 			const E10_SENTINEL = "E10-SENTINEL\n";
 			const E10_INSTRUCTIONS = {
 				a: "E10-WORKER-A writes its file in the shared checkout and reports.",
@@ -10861,8 +10872,12 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 				expect(e10HeldLease(laneA)?.attemptId, "A's held lease is A's own attempt").toBe(
 					e10AttemptOf(laneA)?.attemptId,
 				);
-				expect(e10HeldLease(laneA)?.writeScopes, "A's held lease covers the shared scope").toContain(E10_SHARED);
-				expect(e10HeldLease(laneD)?.writeScopes, "D's held lease covers its own scope").toContain(E10_D_SCOPE);
+				expect(e10HeldLease(laneA)?.writeScopes, "A's held lease covers the shared scope").toContain(
+					canonicalPathScopeIdentity(E10_SHARED),
+				);
+				expect(e10HeldLease(laneD)?.writeScopes, "D's held lease covers its own scope").toContain(
+					canonicalPathScopeIdentity(E10_D_SCOPE),
+				);
 				await withDeadline(trace, "C reported", e10Woke.c.promise, 90_000).catch((error: unknown) => {
 					throw new Error(`${error instanceof Error ? error.message : String(error)}\n${toolOutcomes(session)}`);
 				});
@@ -10915,7 +10930,9 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 						?.filter((lease) => lease.taskId === laneB)
 						.map((lease) => ({
 							attemptId: lease.attemptId,
-							nested: lease.writeScopes.some((scope) => scope.endsWith("/e10/shared/nested")),
+							nested: lease.writeScopes.some(
+								(scope) => scope === canonicalPathScopeIdentity(projectPath("e10", "shared", "nested")),
+							),
 						})),
 					"B's physical lease at its first request is its own attempt over its nested scope",
 				).toEqual([{ attemptId: e10AttemptOf(laneB)?.attemptId, nested: true }]);
@@ -11080,14 +11097,12 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 					integrationAdmission = {
 						mainSha: world.git.refSha("refs/heads/main"),
 						limits: String(world.io.readFileSync(LIMITS_PATH, "utf8")),
-						late: String(world.io.readFileSync(`${HARNESS_PROJECT_CWD}/src/late.ts`, "utf8")),
+						late: String(world.io.readFileSync(projectPath("src", "late.ts"), "utf8")),
 					};
 					if (world.io.readFileSync(LIMITS_PATH, "utf8") !== "export const MAX_RETRIES = 5;\n") {
 						throw new Error("the run saw a limits value other than 5");
 					}
-					if (
-						world.io.readFileSync(`${HARNESS_PROJECT_CWD}/src/late.ts`, "utf8") !== "export const LATE = true;\n"
-					) {
+					if (world.io.readFileSync(projectPath("src", "late.ts"), "utf8") !== "export const LATE = true;\n") {
 						throw new Error("the run saw no landed late module");
 					}
 				},
@@ -11773,17 +11788,17 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 											serves: [requirement],
 										},
 										{
-											path: "/harness/project:e10/shared/a.txt",
+											path: `${HARNESS_PROJECT_CWD}:e10/shared/a.txt`,
 											reason: "Writes the shared file A: the held writer of the overlap proof.",
 											serves: [requirement],
 										},
 										{
-											path: "/harness/project:e10/shared/nested/b.txt",
+											path: `${HARNESS_PROJECT_CWD}:e10/shared/nested/b.txt`,
 											reason: "Writes the nested file B: the queued writer admitted after A's release.",
 											serves: [requirement],
 										},
 										{
-											path: "/harness/project:e10/other/c/c.txt",
+											path: `${HARNESS_PROJECT_CWD}:e10/other/c/c.txt`,
 											reason: "Writes the disjoint file C: the writer that completed beside the held scope.",
 											serves: [requirement],
 										},
@@ -11918,7 +11933,7 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 					"the limits file is unchanged since the integration admission",
 				).toBe(integrationAdmission?.limits);
 				expect(
-					world.io.readFileSync(`${HARNESS_PROJECT_CWD}/src/late.ts`, "utf8"),
+					world.io.readFileSync(projectPath("src", "late.ts"), "utf8"),
 					"the landed module is unchanged since the integration admission",
 				).toBe(integrationAdmission?.late);
 				expect(fIntegration?.verified, "the admitted integration evidence is verified by the ledger").toBe(true);
@@ -12108,10 +12123,10 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			trace.mark("root", "restart.reply");
 			await withDeadline(trace, "restored foreground settled", restarted.waitForForegroundIdle(), 60_000);
 
-			expect(world.io.readFileSync(`${HARNESS_PROJECT_CWD}/src/limits.ts`, "utf8"), toolOutcomes(session)).toBe(
+			expect(world.io.readFileSync(projectPath("src", "limits.ts"), "utf8"), toolOutcomes(session)).toBe(
 				"export const MAX_RETRIES = 5;\n",
 			);
-			expect(world.io.readFileSync(`${HARNESS_PROJECT_CWD}/src/owner.md`, "utf8")).toBe(OWNER_DRAFT_DIRTY);
+			expect(world.io.readFileSync(projectPath("src", "owner.md"), "utf8")).toBe(OWNER_DRAFT_DIRTY);
 		},
 	);
 }, 360_000);
