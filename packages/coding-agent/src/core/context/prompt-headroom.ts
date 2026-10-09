@@ -21,11 +21,34 @@ export interface PromptHeadroom {
 	reservedTokens: number;
 }
 
-export interface PromptHeadroomInput {
+/** The parts of a request that are fixed before any conversation: system prompt and active tools. */
+export interface RequestEnvelope {
 	model: Model<Api> | undefined;
 	systemPrompt: string;
 	tools: readonly Tool[];
 	textToolCallProtocol: SimpleStreamOptions["textToolCallProtocol"];
+}
+
+/**
+ * Estimated tokens of the request envelope alone (system prompt and tool schemas, as the provider
+ * receives them). The one owner of this recipe: headroom planning and the base-configuration warning
+ * both measure the envelope here.
+ */
+export function estimateRequestEnvelopeTokens(envelope: RequestEnvelope): number {
+	return estimateProviderRequestTokens(
+		materializeProviderRequest(
+			{
+				systemPrompt: envelope.systemPrompt,
+				messages: [],
+				tools: projectToolsForProvider(envelope.tools),
+			},
+			{ textToolCallProtocol: envelope.textToolCallProtocol },
+		).context,
+		envelope.model,
+	);
+}
+
+export interface PromptHeadroomInput extends RequestEnvelope {
 	/** The messages the request will carry, without the memory block. */
 	messages: readonly AgentMessage[];
 	/** The compaction reserve in force for this model (already adapted to its window): the room kept for the reply. */
@@ -49,20 +72,7 @@ export function estimatePromptHeadroom(input: PromptHeadroomInput): PromptHeadro
 	const contextWindow = input.model?.contextWindow ?? 0;
 	const outputReserve = Math.min(input.maxOutputTokens ?? 0, Math.floor(contextWindow * OUTPUT_RESERVE_WINDOW_SHARE));
 	const messages = estimateContextTokens(input.messages);
-	const envelopeTokens =
-		messages.lastUsageIndex === null
-			? estimateProviderRequestTokens(
-					materializeProviderRequest(
-						{
-							systemPrompt: input.systemPrompt,
-							messages: [],
-							tools: projectToolsForProvider(input.tools),
-						},
-						{ textToolCallProtocol: input.textToolCallProtocol },
-					).context,
-					input.model,
-				)
-			: 0;
+	const envelopeTokens = messages.lastUsageIndex === null ? estimateRequestEnvelopeTokens(input) : 0;
 	return {
 		currentPromptTokens: envelopeTokens + messages.tokens,
 		reservedTokens: Math.max(input.compactionReserveTokens, outputReserve),

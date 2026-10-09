@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai/overflow";
-import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import type { Agent } from "../kernel/agent.ts";
 import {
 	assessCompactionNeed,
@@ -19,7 +18,6 @@ import {
 import { runCompactionLoop } from "../kernel/compaction/loop.ts";
 import type { ResolvedProviderRequestAuth, StreamFn } from "../kernel/index.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
-import { estimateProviderRequestTokens } from "../kernel/provider-request-estimator.ts";
 import { projectToolsForProvider } from "../kernel/provider-tool-projection.ts";
 import {
 	classifyFailure,
@@ -61,6 +59,7 @@ import {
 } from "./compaction/evidence-retention-projection.ts";
 import { type LastSentRequest, sameCacheLane, sessionLaneSummarizerRequest } from "./compaction-support.ts";
 import { IdlePreparationTimer } from "./context/idle-preparation-timer.ts";
+import { estimateRequestEnvelopeTokens } from "./context/prompt-headroom.ts";
 import { packSupersededHostRecords } from "./context-gc.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
@@ -766,17 +765,12 @@ export class CompactionController {
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
 
-		const baseTokens = estimateProviderRequestTokens(
-			materializeProviderRequest(
-				{
-					systemPrompt: this.deps.agent.state.systemPrompt,
-					messages: [],
-					tools: projectToolsForProvider(this.deps.agent.state.tools),
-				},
-				{ textToolCallProtocol: this.deps.agent.textToolCallProtocol },
-			).context,
+		const baseTokens = estimateRequestEnvelopeTokens({
 			model,
-		);
+			systemPrompt: this.deps.agent.state.systemPrompt,
+			tools: this.deps.agent.state.tools,
+			textToolCallProtocol: this.deps.agent.textToolCallProtocol,
+		});
 
 		if (baseTokens >= contextWindow) {
 			this.deps.emit({
