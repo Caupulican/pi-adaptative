@@ -7271,7 +7271,49 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					],
 					(request) => {
 						if (!JSON.stringify(request.context.messages).includes(E11_REPORT_SECOND)) {
-							throw new Error("the second large report did not reach the root");
+							// Bounded mismatch diagnostic: pure reads and one console line, taken before the same primary Error is thrown.
+							// The attempt read is keyed by the admitted agent identity, because the running-attempt binding is declared later.
+							const primary = new Error("the second large report did not reach the root");
+							const mismatchDx: unknown[] = [];
+							try {
+								const foreground = session.getResourceSnapshot().foregroundRecovery;
+								const activity = session.getForegroundActivity();
+								const agentId = startIdentity().agentId;
+								const mismatch = JSON.stringify({
+									sequence: request.sequence,
+									modelId: request.model.id,
+									oldCapturedEpoch: e11SecondEpoch,
+									activityEpoch: activity.epoch,
+									activityBusy: activity.busy,
+									submissionEpoch: foreground.submissionEpoch,
+									activeRuns: foreground.activeRuns,
+									pendingIdleContinuation: session.backgroundLanes.hasPendingIdleContinuation(),
+									agentId,
+									agentAttempts: Object.values(
+										session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {},
+									)
+										.filter((attempt) => attempt.agentId === agentId)
+										.map((attempt) => ({
+											attemptId: attempt.attemptId,
+											taskId: attempt.taskId,
+											status: attempt.status,
+											reasonCode: attempt.reasonCode,
+										})),
+									lastRequestTexts: requestTexts(request)
+										.slice(-8)
+										.map((text) => text.slice(0, 750)),
+								});
+								console.error(`second report handoff mismatch: ${mismatch}`);
+							} catch (error) {
+								mismatchDx.push(error);
+							}
+							if (mismatchDx.length > 0) {
+								throw new AggregateError(
+									[primary, ...mismatchDx],
+									"the second report handoff diagnostic failed",
+								);
+							}
+							throw primary;
 						}
 						e11SecondReported.release();
 					},
