@@ -36,6 +36,10 @@
           "path": "compaction.md"
         },
         {
+          "title": "Memory",
+          "path": "memory.md"
+        },
+        {
           "title": "Workbench",
           "path": "workbench.md"
         },

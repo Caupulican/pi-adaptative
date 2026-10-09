@@ -37,6 +37,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Keybindings](keybindings.md) - default shortcuts and custom keybindings.
 - [Sessions](sessions.md) - session management, branching, and tree navigation.
 - [Compaction](compaction.md) - context compaction and branch summarization.
+- [Memory](memory.md) - curated memory, recoverable history recall, source handles, typed statuses, and diagnostics.
 - [FastContext scout](scout.md) - read-only repository scout setup and 10 GB local profile.
 - [Tool repair](tool-repair.md) - repaired tool-call arguments, health diagnostics, kill switches, and replay workflow.
 - [Task steps](task-steps.md) - native session checklist, slash commands, persistence, and delegation migration.
