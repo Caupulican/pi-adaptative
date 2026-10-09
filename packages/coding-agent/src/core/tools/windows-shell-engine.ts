@@ -55,6 +55,12 @@ interface WindowsShellEngineControlFrame extends WindowsShellEngineFrame {
 	requestId: string;
 }
 
+interface WindowsShellEngineResult {
+	exitCode: number | null;
+	initialCwd: string;
+	cwd: string;
+}
+
 interface WindowsShellEngineRequest {
 	requestId: string;
 	command: string;
@@ -233,7 +239,7 @@ class PersistentWindowsShellEngineSession {
 		command: string,
 		cwd: string,
 		options: Parameters<BashOperations["exec"]>[2],
-	): Promise<{ exitCode: number | null }> {
+	): Promise<WindowsShellEngineResult> {
 		// The router normalizes CRLF for the bash tool; direct callers of the engine get the same grammar.
 		const script = command.replace(/\r\n?/g, "\n");
 		return this.coordinator.runSerialized(() => this.execNow(script, cwd, options));
@@ -277,7 +283,7 @@ class PersistentWindowsShellEngineSession {
 		command: string,
 		cwd: string,
 		{ onData, signal, timeout, env, forceCwd }: Parameters<BashOperations["exec"]>[2],
-	): Promise<{ exitCode: number | null }> {
+	): Promise<WindowsShellEngineResult> {
 		if (this.disposed) throw new Error(`Windows shell engine session "${this.key}" is disposed`);
 		if (signal?.aborted) throw new Error("aborted");
 
@@ -316,7 +322,7 @@ class PersistentWindowsShellEngineSession {
 
 		this.coordinator.setLoopRef(true);
 		try {
-			return await new Promise<{ exitCode: number | null }>((resolve, reject) => {
+			return await new Promise<WindowsShellEngineResult>((resolve, reject) => {
 				let settled = false;
 				let pendingOutput: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 				let controlBuffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
@@ -365,19 +371,20 @@ class PersistentWindowsShellEngineSession {
 					// next check phase so already-delivered post-barrier bytes are rejected here,
 					// never forwarded into a queued request that starts in a promise microtask.
 					setImmediate(() => {
-						if (settled || this.activeExec !== active || !controlFrame) return;
-						applyEngineFrame(state, controlFrame);
-						if (controlFrame.unsupported) {
+						const frame = controlFrame;
+						if (settled || this.activeExec !== active || !frame) return;
+						applyEngineFrame(state, frame);
+						if (frame.unsupported) {
 							// A missing working directory is reported with the same text the local shell
 							// backend uses, so the condition reads identically on every tier and platform.
 							const unsupportedMessage =
-								controlFrame.unsupported.construct === "cwd-missing"
+								frame.unsupported.construct === "cwd-missing"
 									? missingWorkingDirectoryMessage(effectiveCwd, "bash")
-									: controlFrame.unsupported.message;
+									: frame.unsupported.message;
 							settle(() => reject(new Error(unsupportedMessage)));
 							return;
 						}
-						settle(() => resolve({ exitCode: controlFrame?.exitCode ?? null }));
+						settle(() => resolve({ exitCode: frame.exitCode, initialCwd: effectiveCwd, cwd: frame.cwd }));
 					});
 				};
 
@@ -597,7 +604,7 @@ async function execOnEngineLane(
 	command: string,
 	cwd: string,
 	execOptions: Parameters<BashOperations["exec"]>[2],
-): Promise<{ exitCode: number | null }> {
+): Promise<WindowsShellEngineResult> {
 	const { pool, laneOptions } = acquireEngineLanes(sessionKey, options);
 	const laneKey = await pool.acquire(execOptions.signal);
 	try {
@@ -629,7 +636,7 @@ async function execOnDetachedEngineSession(
 	command: string,
 	cwd: string,
 	execOptions: Parameters<BashOperations["exec"]>[2],
-): Promise<{ exitCode: number | null }> {
+): Promise<WindowsShellEngineResult> {
 	const key = `${sessionKey}#detached-${++detachedEngineSessionCount}`;
 	try {
 		return await acquireWindowsShellEngineSession(key, options).exec(command, cwd, execOptions);

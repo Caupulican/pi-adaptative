@@ -5,6 +5,7 @@ import https from "node:https";
 import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import { basename, dirname, resolve, sep } from "node:path";
+import nativeProcess from "node:process";
 import type { DatabaseSync as NativeDatabaseSync } from "node:sqlite";
 import { PassThrough, Writable } from "node:stream";
 import tls from "node:tls";
@@ -26,12 +27,35 @@ export interface IoOperation {
 	readonly destination?: string;
 }
 
+export interface IoFault {
+	readonly name: string;
+	readonly kind: "write" | "append" | "unlink" | "rm" | "rename" | "watch.close";
+	readonly matches: (operation: IoOperation, data?: Buffer) => boolean;
+	readonly code?: string;
+	readonly phase?: "before" | "after";
+	readonly times?: number;
+}
+
 interface OpenFile {
 	path: string;
 	readonly node: VirtualNode;
 	position: number;
 	append: boolean;
 	writable: boolean;
+}
+
+export interface VirtualWatcherSnapshot {
+	readonly id: number;
+	readonly path: string;
+	readonly recursive: boolean;
+	readonly listenerCount: number;
+}
+
+interface VirtualWatcher {
+	readonly id: number;
+	readonly path: string;
+	readonly emitter: EventEmitter;
+	readonly recursive: boolean;
 }
 
 function ioError(code: string, path: string): NodeJS.ErrnoException {
@@ -44,19 +68,52 @@ function bytes(value: unknown): Buffer {
 	throw new TypeError("Virtual write requires string or Uint8Array data");
 }
 
+function fileTypeMethods(node: VirtualNode) {
+	return {
+		isDirectory: () => node.kind === "directory",
+		isFile: () => node.kind === "file",
+		isSymbolicLink: () => node.kind === "symlink",
+		isBlockDevice: () => false,
+		isCharacterDevice: () => false,
+		isFIFO: () => false,
+		isSocket: () => false,
+	};
+}
+
+/** Only modeled namespace/content/metadata mutations notify watchers; observations stay in the IO ledger. */
+const WATCH_CHANGE_OPERATIONS: ReadonlySet<string> = new Set([
+	"write",
+	"append",
+	"mkdir",
+	"unlink",
+	"rm",
+	"change",
+	"truncate",
+	"utimes",
+]);
+
 /** All fixture and production-store bytes live here. Unimplemented operations fail, never fall through. */
 export class VirtualFileSystem {
 	readonly operations: IoOperation[] = [];
 	readonly cwd: string;
 	private readonly nodes = new Map<string, VirtualNode>();
 	private readonly descriptors = new Map<number, OpenFile>();
-	private readonly watchers = new Set<{ path: string; emitter: EventEmitter; recursive: boolean }>();
+	private readonly watchers = new Set<VirtualWatcher>();
+	private nextWatcher = 1;
+	/** Bounded physical closure evidence, separate from the native owner's retained disposer/fence. */
+	readonly watcherClosures: Array<{
+		readonly id: number;
+		readonly path: string;
+		readonly reason: "close" | "cutoff";
+	}> = [];
 	private readonly streams = new Set<Writable>();
 	private readonly directories = new Set<object>();
 	private nextDescriptor = 100;
 	private nextIdentity = 1;
 	private nextTemporary = 1;
 	private revision = Date.now();
+	private readonly faults: Array<{ readonly fault: IoFault; remaining: number }> = [];
+	readonly consumedFaults: string[] = [];
 
 	constructor(cwd = "/harness/project") {
 		this.cwd = resolve(cwd);
@@ -64,6 +121,35 @@ export class VirtualFileSystem {
 		this.operations.length = 0;
 	}
 
+	failNext(fault: IoFault): void {
+		const remaining = fault.times ?? 1;
+		if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > 32 || this.faults.length >= 32)
+			throw new RangeError("Virtual IO fault queue must be bounded");
+		if (fault.matches.constructor.name === "AsyncFunction") throw new TypeError("IO fault matching is synchronous");
+		this.faults.push({ fault, remaining });
+	}
+
+	assertFaultsConsumed(): void {
+		if (this.faults.length)
+			throw new Error(
+				`Unconsumed IO faults: ${this.faults.map(({ fault, remaining }) => `${fault.name}:${remaining}`).join(",")}`,
+			);
+	}
+
+	private fault(operation: IoOperation, phase: "before" | "after", data?: Buffer): void {
+		const index = this.faults.findIndex(
+			({ fault }) =>
+				fault.kind === operation.kind && (fault.phase ?? "before") === phase && fault.matches(operation, data),
+		);
+		if (index < 0) return;
+		const entry = this.faults[index]!;
+		if (--entry.remaining === 0) this.faults.splice(index, 1);
+		this.consumedFaults.push(entry.fault.name);
+		throw Object.assign(ioError(entry.fault.code ?? "EIO", operation.path), {
+			message: `Scripted IO fault ${entry.fault.name}: ${operation.kind} '${operation.path}'`,
+			faultName: entry.fault.name,
+		});
+	}
 	path(value: unknown): string {
 		if (value instanceof URL) return resolve(fileURLToPath(value));
 		if (typeof value === "number") {
@@ -134,21 +220,12 @@ export class VirtualFileSystem {
 			this.appendFileSync(value, data);
 			return;
 		}
+		this.fault({ kind: "write", path }, "before", bytes(data));
 		if (!this.nodes.has(dirname(path))) throw ioError("ENOENT", dirname(path));
 		if (this.nodes.get(path)?.kind === "directory") throw ioError("EISDIR", path);
-		const node = this.nodes.get(path);
-		if (node) {
-			node.data = bytes(data);
-			node.modified = ++this.revision;
-		} else {
-			this.nodes.set(path, {
-				kind: "file",
-				data: bytes(data),
-				modified: ++this.revision,
-				identity: this.nextIdentity++,
-			});
-		}
+		this.setFileData(path, bytes(data));
 		this.note("write", path);
+		this.fault({ kind: "write", path }, "after", bytes(data));
 	}
 
 	async writeFile(value: unknown, data: unknown, options?: unknown): Promise<void> {
@@ -157,21 +234,28 @@ export class VirtualFileSystem {
 
 	appendFileSync(value: unknown, data: unknown): void {
 		const path = this.path(value);
+		this.fault({ kind: "append", path }, "before", bytes(data));
 		const previous = this.nodes.get(path);
 		if (previous && previous.kind !== "file") throw ioError("EISDIR", path);
 		if (!this.nodes.has(dirname(path))) throw ioError("ENOENT", dirname(path));
-		if (previous) {
-			previous.data = Buffer.concat([previous.data, bytes(data)]);
-			previous.modified = ++this.revision;
+		this.setFileData(path, previous ? Buffer.concat([previous.data, bytes(data)]) : bytes(data));
+		this.note("append", path);
+		this.fault({ kind: "append", path }, "after", bytes(data));
+	}
+
+	private setFileData(path: string, data: Buffer): void {
+		const node = this.nodes.get(path);
+		if (node) {
+			node.data = data;
+			node.modified = ++this.revision;
 		} else {
 			this.nodes.set(path, {
 				kind: "file",
-				data: bytes(data),
+				data,
 				modified: ++this.revision,
 				identity: this.nextIdentity++,
 			});
 		}
-		this.note("append", path);
 	}
 
 	mkdirSync(value: unknown, options?: unknown): string | undefined {
@@ -243,13 +327,7 @@ export class VirtualFileSystem {
 			rdev: 0,
 			blksize: 4096,
 			blocks: 1,
-			isDirectory: () => node.kind === "directory",
-			isFile: () => node.kind === "file",
-			isSymbolicLink: () => node.kind === "symlink",
-			isBlockDevice: () => false,
-			isCharacterDevice: () => false,
-			isFIFO: () => false,
-			isSocket: () => false,
+			...fileTypeMethods(node),
 		};
 		if ((options as { bigint?: boolean } | undefined)?.bigint) {
 			const modifiedNs = BigInt(Math.trunc(node.modified)) * 1_000_000n;
@@ -290,13 +368,7 @@ export class VirtualFileSystem {
 					name: basename(child),
 					parentPath: path,
 					path,
-					isDirectory: () => node.kind === "directory",
-					isFile: () => node.kind === "file",
-					isSymbolicLink: () => node.kind === "symlink",
-					isBlockDevice: () => false,
-					isCharacterDevice: () => false,
-					isFIFO: () => false,
-					isSocket: () => false,
+					...fileTypeMethods(node),
 				};
 			});
 	}
@@ -336,14 +408,17 @@ export class VirtualFileSystem {
 
 	unlinkSync(value: unknown): void {
 		const path = this.path(value);
+		this.fault({ kind: "unlink", path }, "before");
 		if (!this.nodes.has(path)) throw ioError("ENOENT", path);
 		if (this.nodes.get(path)?.kind === "directory") throw ioError("EISDIR", path);
 		this.nodes.delete(path);
 		this.note("unlink", path);
+		this.fault({ kind: "unlink", path }, "after");
 	}
 
 	rmSync(value: unknown, options?: unknown): void {
 		const path = this.path(value);
+		this.fault({ kind: "rm", path }, "before");
 		const flags = options as { force?: boolean; recursive?: boolean } | undefined;
 		if (!this.nodes.has(path)) {
 			if (flags?.force) return;
@@ -354,11 +429,13 @@ export class VirtualFileSystem {
 		for (const child of children) this.nodes.delete(child);
 		this.nodes.delete(path);
 		this.note("rm", path);
+		this.fault({ kind: "rm", path }, "after");
 	}
 
 	renameSync(source: unknown, destination: unknown): void {
 		const from = this.path(source);
 		const to = this.path(destination);
+		this.fault({ kind: "rename", path: from, destination: to }, "before");
 		if (!this.nodes.has(from) || !this.nodes.has(dirname(to))) throw ioError("ENOENT", from);
 		const entries = [...this.nodes].filter(([path]) => path === from || path.startsWith(`${from}${sep}`));
 		for (const [path, node] of entries) {
@@ -369,6 +446,7 @@ export class VirtualFileSystem {
 		for (const descriptor of this.descriptors.values()) if (descriptor.path === from) descriptor.path = to;
 		this.operations.push({ kind: "rename", path: from, destination: to });
 		this.note("change", to);
+		this.fault({ kind: "rename", path: from, destination: to }, "after");
 	}
 
 	copyFileSync(source: unknown, destination: unknown, flags = 0): void {
@@ -453,6 +531,33 @@ export class VirtualFileSystem {
 				`Virtual IO leaked: files=${this.descriptors.size}; watchers=${this.watchers.size}; streams=${this.streams.size}; directories=${this.directories.size}`,
 			);
 		}
+	}
+
+	/** Derive only already-open physical observers; inspection never creates or closes one. */
+	getWatcherSnapshot(): readonly VirtualWatcherSnapshot[] {
+		return [...this.watchers].map((record) => ({
+			id: record.id,
+			path: record.path,
+			recursive: record.recursive,
+			listenerCount: record.emitter.eventNames().reduce((sum, name) => sum + record.emitter.listenerCount(name), 0),
+		}));
+	}
+
+	/**
+	 * External transport cutoff ONLY after a scenario proves this exact observer was retained by a failed
+	 * native cleanup. It does not invoke/repair the native disposer or remove any native fence.
+	 */
+	cutoffRetainedWatcher(expected: Pick<VirtualWatcherSnapshot, "id" | "path">): void {
+		const matches = [...this.watchers].filter((record) => record.id === expected.id && record.path === expected.path);
+		if (matches.length !== 1) throw new Error(`No exact retained watcher ${expected.id} at ${expected.path}`);
+		this.closeWatcher(matches[0]!, "cutoff");
+	}
+
+	private closeWatcher(record: VirtualWatcher, reason: "close" | "cutoff"): void {
+		if (!this.watchers.delete(record)) return;
+		record.emitter.removeAllListeners();
+		if (this.watcherClosures.length === 256) this.watcherClosures.shift();
+		this.watcherClosures.push({ id: record.id, path: record.path, reason });
 	}
 
 	nodeFsPromisesExports(): Record<string, unknown> {
@@ -563,8 +668,10 @@ export class VirtualFileSystem {
 			},
 			watch: (value: unknown, options?: unknown, listener?: unknown) => {
 				const path = this.realpathSync(value);
+				if (this.watchers.size >= 256) throw new Error("Virtual watcher admission exceeds bounded capacity");
 				const emitter = new EventEmitter();
 				const record = {
+					id: this.nextWatcher++,
 					path,
 					emitter,
 					recursive: (options as { recursive?: boolean } | undefined)?.recursive === true,
@@ -574,8 +681,9 @@ export class VirtualFileSystem {
 				if (typeof callback === "function") emitter.on("change", (event, name) => callback(event, name));
 				return Object.assign(emitter, {
 					close: () => {
-						this.watchers.delete(record);
-						emitter.removeAllListeners();
+						this.fault({ kind: "watch.close", path }, "before");
+						this.closeWatcher(record, "close");
+						this.fault({ kind: "watch.close", path }, "after");
 					},
 					ref: () => emitter,
 					unref: () => emitter,
@@ -635,11 +743,16 @@ export class VirtualFileSystem {
 		return api;
 	}
 
-	private readDescriptorFile(fd: number, options?: unknown): Buffer | string {
+	private fileDescriptor(fd: number): OpenFile {
 		const descriptor = this.descriptors.get(fd);
 		if (!descriptor) throw ioError("EBADF", String(fd));
+		if (descriptor.node.kind !== "file") throw ioError("EISDIR", descriptor.path);
+		return descriptor;
+	}
+
+	private readDescriptorFile(fd: number, options?: unknown): Buffer | string {
+		const descriptor = this.fileDescriptor(fd);
 		const node = descriptor.node;
-		if (node?.kind !== "file") throw ioError("EISDIR", descriptor.path);
 		const result = node.data.subarray(descriptor.position);
 		descriptor.position = node.data.length;
 		const encoding = typeof options === "string" ? options : (options as { encoding?: string } | undefined)?.encoding;
@@ -654,10 +767,8 @@ export class VirtualFileSystem {
 		length: number,
 		position: number | null,
 	): number {
-		const descriptor = this.descriptors.get(fd);
-		if (!descriptor) throw ioError("EBADF", String(fd));
+		const descriptor = this.fileDescriptor(fd);
 		const node = descriptor.node;
-		if (node?.kind !== "file") throw ioError("EISDIR", descriptor.path);
 		const start = position ?? descriptor.position;
 		const amount = Math.max(0, Math.min(length, node.data.length - start));
 		buffer.set(node.data.subarray(start, start + amount), offset);
@@ -672,6 +783,7 @@ export class VirtualFileSystem {
 		if (!descriptor.writable) throw ioError("EBADF", descriptor.path);
 		const node = descriptor.node;
 		if (node?.kind !== "file") throw ioError("EISDIR", descriptor.path);
+		this.fault({ kind: "write", path: descriptor.path }, "before", data);
 		const start = descriptor.append ? node.data.length : (position ?? descriptor.position);
 		const replacement = Buffer.alloc(Math.max(node.data.length, start + data.length));
 		node.data.copy(replacement);
@@ -680,6 +792,7 @@ export class VirtualFileSystem {
 		node.modified = ++this.revision;
 		if (position === null || position === undefined) descriptor.position = start + data.length;
 		this.note("write", descriptor.path);
+		this.fault({ kind: "write", path: descriptor.path }, "after", data);
 		return data.length;
 	}
 
@@ -705,6 +818,7 @@ export class VirtualFileSystem {
 
 	private note(kind: string, path: string): void {
 		this.operations.push({ kind, path });
+		if (!WATCH_CHANGE_OPERATIONS.has(kind)) return;
 		for (const record of this.watchers) {
 			if (
 				record.path === path ||
@@ -724,6 +838,8 @@ export interface EffectPorts {
 	process?(operation: string, arguments_: readonly unknown[]): unknown;
 	/** Virtual process-table signaling/liveness. No signal is sent to a host process. */
 	signal?(pid: number, signal?: NodeJS.Signals | number): boolean;
+	/** Current virtual generation's PID, read by the real owner-id constructors; restored with the guard. */
+	pid?(): number;
 	fetch?: typeof globalThis.fetch;
 	/** Keep the native SQL engine but route every database's storage to RAM. */
 	sqlite?: "memory";
@@ -758,6 +874,18 @@ export class EffectGuard {
 			builtinBoundary.set("fs", filesystem);
 			builtinBoundary.set("fsPromises", this.io.nodeFsPromisesExports());
 			this.restore.push(() => builtinBoundary.clear());
+			if (this.ports.pid) {
+				for (const target of new Set([process, nativeProcess])) {
+					const originalPid = Object.getOwnPropertyDescriptor(target, "pid");
+					if (!originalPid?.configurable) throw new Error("Cannot install virtual process identity");
+					Object.defineProperty(target, "pid", {
+						configurable: true,
+						enumerable: originalPid.enumerable,
+						get: this.ports.pid,
+					});
+					this.restore.push(() => Object.defineProperty(target, "pid", originalPid));
+				}
+			}
 			const reject =
 				(kind: string) =>
 				(..._arguments: unknown[]): never => {
@@ -829,7 +957,8 @@ export class EffectGuard {
 		} catch (error) {
 			failures.push(error);
 		}
-		if (this.escapes.length) failures.push(new Error(`Unexpected live IO attempts: ${this.escapes.join(", ")}`));
+		if (this.escapes.length)
+			failures.push(new Error(`IO attempts refused by the harness: ${this.escapes.join(", ")}`));
 		if (failures.length) throw new AggregateError(failures, "External effect boundary violations");
 	}
 
@@ -872,7 +1001,7 @@ export class EffectGuard {
 
 	private reject(kind: string): never {
 		this.escapes.push(kind);
-		throw new Error(`Live external effect blocked: ${kind}`);
+		throw new Error(`IO operation refused by the harness: ${kind}`);
 	}
 
 	private replace(target: object, name: string, value: unknown): void {

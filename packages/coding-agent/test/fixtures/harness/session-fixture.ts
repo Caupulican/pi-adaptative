@@ -2,20 +2,33 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { PassThrough } from "node:stream";
+import { isDeepStrictEqual } from "node:util";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
+import type { WorkerWriteReservationLease } from "../../../src/core/delegation/worker-write-reservation.ts";
 import type { ExecResult } from "../../../src/core/exec.ts";
 import { getResumableHumanInputSnapshot } from "../../../src/core/human-input.ts";
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
+import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import type { Settings } from "../../../src/core/settings/settings-schema.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
+import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "../../../src/core/tool-applicability-gate.ts";
+import type { ToolDef } from "../../../src/core/tools/index.ts";
 import { SessionManager } from "../../../src/kernel/session/session-manager.ts";
+import { ScriptedHumanInput } from "./scripted-human-input.ts";
 import { HARNESS_API, HARNESS_PROVIDER, ScriptedProvider } from "./scripted-provider.ts";
+import { ScriptedWindowsShellProcesses } from "./scripted-windows-shell.ts";
 import { EffectGuard, VirtualFileSystem } from "./virtual-io.ts";
+import { VirtualProcessTable } from "./virtual-process-table.ts";
 import { VirtualShell } from "./virtual-shell.ts";
 
 /** Script tracks: the root session, each delegated worker, and the compaction summarizer share the root's track. */
+/** The worker claims a disposed owner may keep by design, typed from the owner's own resource snapshot. */
+export type WorkerProjectClaims = NonNullable<
+	ReturnType<AgentSession["getResourceSnapshot"]>["workers"]
+>["ownedProjectClaims"];
+
 export const SCRIPTED_TRACKS = ["root", "worker-a", "worker-b", "worker-c"] as const;
 export const HARNESS_PROJECT_CWD = "/harness/project";
 
@@ -38,6 +51,23 @@ export class HarnessTrace {
 			(error: unknown) => {
 				this.liveWork.delete(settled);
 				this.rejectedWork.push(error);
+			},
+		);
+		this.liveWork.add(settled);
+		return work;
+	}
+
+	/**
+	 * Joins a native promise's physical settlement only. It records no outcome: a rejection is handled on the original promise and
+	 * its cause is discarded here, so the owner that started the work judges the result through its own receipts and warnings.
+	 */
+	observe<T>(work: Promise<T>): Promise<T> {
+		const settled: Promise<void> = work.then(
+			() => {
+				this.liveWork.delete(settled);
+			},
+			() => {
+				this.liveWork.delete(settled);
 			},
 		);
 		this.liveWork.add(settled);
@@ -92,14 +122,73 @@ export async function withDeadline<T>(trace: HarnessTrace, label: string, work: 
 	}
 }
 
-interface JudgeQuestion {
+export interface JudgeQuestion {
 	type: "choice" | "noul" | "score";
+	instructions?: string;
 	criteria?: Record<string, unknown> | unknown[];
+}
+
+/** One System One request as the production sent it: the projected state and the questions asked over it. */
+export interface SystemOneDecodedRequest {
+	readonly phase: string;
+	readonly state: unknown;
+	readonly questions: Readonly<Record<string, JudgeQuestion>>;
 }
 
 interface JudgeRequestBody {
 	model: string;
+	state: unknown;
 	questions: Record<string, JudgeQuestion>;
+}
+
+/**
+ * Request-local controls of one phase: `expect` checks the decoded request before any answer, `gate` holds the answers.
+ * `families` answers a dynamic question family (ids that are built per tool call, such as `keep_call::<callId>`): every
+ * id that starts with a key takes that key's judgment, and the family is declared and consumed as one unit.
+ */
+export interface ScriptedPhaseOptions {
+	readonly expect?: (request: SystemOneDecodedRequest) => void;
+	readonly gate?: Promise<unknown>;
+	readonly families?: Readonly<Record<string, ScriptedJudgment>>;
+	/**
+	 * The evaluator is unavailable for every request of the phase: each one answers HTTP 503 after its gate. The declared
+	 * judgments it carries count as consumed by that intended outage, which is recorded apart from unscripted requests.
+	 */
+	readonly outage?: boolean;
+	/** Called when a request is admitted: its questions are validated and answered, and it now waits at its gate. */
+	readonly onAdmit?: () => void;
+	/**
+	 * The request ignores its caller's abort and answers after its gate, as an evaluator that is not cancelled does. The
+	 * owner may settle on the abort while the physical request stays in flight until it answers. Requires a gate.
+	 */
+	readonly ignoresAbort?: boolean;
+}
+
+/** The owner-visible state a System One question reads by name: `owner_messages[N]` and `optional_tools[N]`. */
+function stateIndexedBy(state: unknown, field: string, index: number): boolean {
+	if (typeof state !== "object" || state === null) return false;
+	const list = (state as Record<string, unknown>)[field];
+	return Array.isArray(list) && index < list.length;
+}
+
+/**
+ * Bounded instruction-reference check: a question that names `owner_messages[N]` or `optional_tools[N]` must find that
+ * element in the decoded state. A question pointing past the state it was built from is a wrong input, not an answer.
+ */
+function checkInstructionReferences(request: SystemOneDecodedRequest): void {
+	for (const [id, question] of Object.entries(request.questions)) {
+		const instructions = question.instructions ?? "";
+		const indexed = /^(carries|optional_tool)_(\d+)$/.exec(id);
+		if (indexed === null) continue;
+		const index = Number(indexed[2]);
+		const field = indexed[1] === "carries" ? "owner_messages" : "optional_tools";
+		if (!instructions.includes(`${field}[${index}]`)) {
+			throw new Error(`question ${id} does not name ${field}[${index}] in its instructions`);
+		}
+		if (!stateIndexedBy(request.state, field, index)) {
+			throw new Error(`question ${id} names ${field}[${index}] which the decoded state does not carry`);
+		}
+	}
 }
 
 /**
@@ -154,10 +243,42 @@ function judgmentAnswer(judgment: ScriptedJudgment, question: JudgeQuestion): Re
 const SYSTEM_ONE_MODELS_URL = "https://api.typesafe.ai/v1/models";
 const SYSTEM_ONE_DECISIONS_URL = "https://api.typesafe.ai/v1/systemone";
 
+/** Serialized optional-intent entries by id: the exact bytes a restored session keeps, and the ids an off window may not add to. */
+function optionalIntentSnapshot(manager: SessionManager): Map<string, string> {
+	return new Map(
+		manager
+			.getEntries()
+			.filter((entry) => entry.type === "custom" && entry.customType === OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)
+			.map((entry): [string, string] => [entry.id, JSON.stringify(entry)]),
+	);
+}
+
+function transportAbortError(): Error {
+	return Object.assign(new Error("The operation was aborted."), { name: "AbortError" });
+}
+
 export class ScriptedSystemOneTransport {
+	readonly enabled: boolean;
+	readonly requests: Array<{ readonly method: string; readonly url: string }> = [];
+
+	constructor(enabled: boolean) {
+		this.enabled = enabled;
+	}
 	readonly unscripted: string[] = [];
+	/** Every decoded request of the enabled transport, in arrival order, for scenario oracles and negative controls. */
+	readonly decoded: SystemOneDecodedRequest[] = [];
 	private phase = "unentered";
 	private expected = new Map<string, ScriptedJudgment>();
+	private families = new Map<string, ScriptedJudgment>();
+	private expectRequest: ((request: SystemOneDecodedRequest) => void) | undefined;
+	private gate: Promise<unknown> | undefined;
+	private outage = false;
+	private onAdmit: (() => void) | undefined;
+	private ignoresAbort = false;
+	/** Transport requests still in flight, settled or not: an owner's abort does not end a physical request. */
+	private readonly inFlight = new Set<Promise<void>>();
+	/** Requests a phase answered as an unavailable evaluator: intended by the scenario, never unscripted. */
+	readonly intendedOutages: string[] = [];
 	/** "phase:id" pairs a production request answered. */
 	private readonly consumed = new Set<string>();
 	/** "phase:id" pairs a phase declared, in order. */
@@ -165,11 +286,26 @@ export class ScriptedSystemOneTransport {
 	/** Declared pairs whose phase ended before any production request asked them. */
 	private readonly unconsumed: string[] = [];
 
-	enterPhase(name: string, judgments: Readonly<Record<string, ScriptedJudgment>>): void {
+	enterPhase(
+		name: string,
+		judgments: Readonly<Record<string, ScriptedJudgment>>,
+		options: ScriptedPhaseOptions = {},
+	): void {
 		this.closePhase();
 		this.phase = name;
-		this.expected = new Map(Object.entries(judgments));
+		// These are semantic-plane inputs only. Off runs supply no answers and reject every attempted transport call.
+		this.expected = new Map(this.enabled ? Object.entries(judgments) : []);
+		this.families = new Map(this.enabled ? Object.entries(options.families ?? {}) : []);
+		this.expectRequest = options.expect;
+		this.gate = options.gate;
+		this.outage = this.enabled && options.outage === true;
+		if (options.ignoresAbort === true && options.gate === undefined) {
+			throw new Error("A transport request that ignores abort requires an explicit gate");
+		}
+		this.onAdmit = options.onAdmit;
+		this.ignoresAbort = options.ignoresAbort === true;
 		for (const id of this.expected.keys()) this.declared.push(`${name}:${id}`);
+		for (const prefix of this.families.keys()) this.declared.push(`${name}:${prefix}*`);
 	}
 
 	private closePhase(): void {
@@ -177,30 +313,108 @@ export class ScriptedSystemOneTransport {
 			const key = `${this.phase}:${id}`;
 			if (!this.consumed.has(key)) this.unconsumed.push(key);
 		}
+		for (const prefix of this.families.keys()) {
+			const key = `${this.phase}:${prefix}*`;
+			if (!this.consumed.has(key)) this.unconsumed.push(key);
+		}
 		this.expected = new Map();
+		this.families = new Map();
+		this.expectRequest = undefined;
+		this.gate = undefined;
+		this.outage = false;
+		this.onAdmit = undefined;
+		this.ignoresAbort = false;
 	}
 
 	/** Ends the last phase, then fails on any declared judgment no production request consumed. */
 	assertConsumed(): void {
 		this.closePhase();
+		if (this.enabled ? this.consumed.size === 0 : this.requests.length !== 0) {
+			throw new Error(`System One ${this.enabled ? "on consumed no judgments" : "off made transport requests"}`);
+		}
 		if (this.unconsumed.length > 0) {
 			throw new Error(`Declared System One judgments never consumed: ${this.unconsumed.join(", ")}`);
 		}
 	}
 
-	readonly fetch: typeof fetch = async (input, init) => {
+	readonly fetch: typeof fetch = (input, init) => {
+		const work = this.answer(input, init);
+		const settled = work.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.inFlight.add(settled);
+		void settled.then(() => this.inFlight.delete(settled));
+		return work;
+	};
+
+	/** Joins every transport request still in flight: a request whose owner aborted is physical until it answers. */
+	async joinInFlight(): Promise<void> {
+		while (this.inFlight.size > 0) await Promise.all([...this.inFlight]);
+	}
+
+	assertInFlightSettled(): void {
+		if (this.inFlight.size > 0)
+			throw new Error(`System One transport requests still in flight: ${this.inFlight.size}`);
+	}
+
+	/** Holds a request at its gate. A request that does not ignore abort rejects when its caller aborts while it waits. */
+	private async holdAtGate(gate: Promise<unknown>, signal: AbortSignal | null | undefined): Promise<void> {
+		if (signal === undefined || signal === null) {
+			await gate;
+			return;
+		}
+		if (signal.aborted) throw transportAbortError();
+		await new Promise<void>((resolve, reject) => {
+			const onAbort = (): void => reject(transportAbortError());
+			signal.addEventListener("abort", onAbort, { once: true });
+			gate.then(() => {
+				signal.removeEventListener("abort", onAbort);
+				resolve();
+			}, reject);
+		});
+	}
+
+	private readonly answer = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 		const method = init?.method ?? "GET";
+		this.requests.push({ method, url });
+		if (!this.enabled) {
+			this.unscripted.push(`${this.phase}: System One off attempted ${method} ${url}`);
+			throw new Error(`System One is disabled: ${method} ${url}`);
+		}
 		if (method === "GET" && url === SYSTEM_ONE_MODELS_URL) return Response.json({ data: [] });
 		if (method !== "POST" || url !== SYSTEM_ONE_DECISIONS_URL || typeof init?.body !== "string") {
 			this.unscripted.push(`${this.phase}: ${method} ${url}`);
 			throw new Error(`Unscripted System One request: ${method} ${url}`);
 		}
 		const body = JSON.parse(init.body) as JudgeRequestBody;
+		// The request answers from the phase that received it, even when a gate holds it past a phase change.
+		const phase = this.phase;
+		const expected = this.expected;
+		const families = this.families;
+		const gate = this.gate;
+		const outage = this.outage;
+		const onAdmit = this.onAdmit;
+		const ignoresAbort = this.ignoresAbort;
+		const decoded: SystemOneDecodedRequest = { phase, state: body.state, questions: body.questions };
+		this.decoded.push(decoded);
+		try {
+			checkInstructionReferences(decoded);
+			this.expectRequest?.(decoded);
+		} catch (error) {
+			const detail = `${phase}: state mismatch: ${error instanceof Error ? error.message : String(error)}`;
+			this.unscripted.push(detail);
+			throw new Error(detail);
+		}
+		// Admission snapshot: every question is validated and answered now, before the gate, so a held request answers what it
+		// was admitted with. An outage is the only exemption, and it still requires each question to have a fitting judgment.
 		const answers: Record<string, unknown> = {};
 		const rejected: string[] = [];
 		for (const [id, question] of Object.entries(body.questions)) {
-			const judgment = this.expected.get(id);
+			const direct = expected.get(id);
+			const family = direct === undefined ? [...families].find(([prefix]) => id.startsWith(prefix)) : undefined;
+			const judgment = direct ?? family?.[1];
 			if (judgment === undefined) {
 				const offered = Object.keys(question.criteria ?? {}).join("|");
 				rejected.push(`${id}:${question.type}[${offered}]`);
@@ -208,15 +422,22 @@ export class ScriptedSystemOneTransport {
 			}
 			try {
 				answers[id] = judgmentAnswer(judgment, question);
-				this.consumed.add(`${this.phase}:${id}`);
+				this.consumed.add(family === undefined ? `${phase}:${id}` : `${phase}:${family[0]}*`);
 			} catch (error) {
 				rejected.push(`${id}: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
 		if (rejected.length > 0) {
-			const detail = `${this.phase}: System One questions without an explicit judgment: ${rejected.join(", ")}`;
+			const detail = `${phase}: System One questions without an explicit judgment: ${rejected.join(", ")}`;
 			this.unscripted.push(detail);
 			throw new Error(detail);
+		}
+		onAdmit?.();
+		if (gate !== undefined) await this.holdAtGate(gate, ignoresAbort ? undefined : init?.signal);
+		if (outage) {
+			// The configured outage cause: the validated questions are answered by a 503, recorded apart from unscripted requests.
+			this.intendedOutages.push(`${phase}: ${method} ${url}`);
+			return Response.json({ error: "evaluator unavailable" }, { status: 503 });
 		}
 		return Response.json({ model: body.model, answers, usage: { input_tokens: 10, output_tokens: 5 } });
 	};
@@ -1274,35 +1495,6 @@ export class VirtualGit {
 }
 
 /**
- * Virtual process table. The only live identity is the in-process host pid: liveness probes (signal 0) answer
- * for it, any other pid is ESRCH, and a nonzero signal would reach a process the fixture never admitted, so it is
- * refused and recorded (the close path asserts none was attempted).
- */
-export class VirtualProcessTable {
-	readonly self: number = process.pid;
-	readonly refused: string[] = [];
-
-	isAlive(pid: number): boolean {
-		return pid === this.self;
-	}
-
-	signal(pid: number, signal?: NodeJS.Signals | number): boolean {
-		if (!this.isAlive(pid)) {
-			throw Object.assign(new Error(`kill ESRCH: no virtual process ${pid}`), { code: "ESRCH", syscall: "kill" });
-		}
-		// Node's default signal for process.kill is SIGTERM, which is nonzero.
-		if (signal === 0) return true;
-		const label = `kill ${pid} ${signal ?? "SIGTERM"}`;
-		this.refused.push(label);
-		throw new Error(`Live signal refused: ${label}`);
-	}
-
-	assertClean(): void {
-		if (this.refused.length > 0) throw new Error(`Refused virtual signals: ${this.refused.join("; ")}`);
-	}
-}
-
-/**
  * Child-process boundary. `git` answers come from the stateful repository; any other command is rejected.
  * Sync results mirror the real child_process contract: a non-zero status throws with its stderr.
  */
@@ -1419,6 +1611,71 @@ function settledWorkers(workers: ReturnType<AgentSession["getResourceSnapshot"]>
  * Settlement of one session's owned resources, read from the owners' fields after its disposal: nothing is active, pending, watched
  * or listening, and the background tool tasks are disposed. A value that is not settled fails with the whole snapshot.
  */
+/** The exact retention a disposed owner keeps by design, predeclared before its disposal. Nothing else may be retained. */
+/**
+ * The settlement of a native promise after one event-loop turn: "pending" until it settles. The observed promise is read, never
+ * replaced, and its rejection is handled here so the observer adds no unhandled rejection.
+ */
+export async function settlementState(work: Promise<unknown>): Promise<"pending" | "settled"> {
+	let state: "pending" | "settled" = "pending";
+	void work.then(
+		() => {
+			state = "settled";
+		},
+		() => {
+			state = "settled";
+		},
+	);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	return state;
+}
+
+interface CertifiedOwnerRetention {
+	readonly claims: WorkerProjectClaims;
+	readonly leases: readonly WorkerWriteReservationLease[];
+	readonly executingHolds: readonly { readonly agentId: string; readonly count: number }[];
+	readonly watchCount: number;
+	readonly laneAbortControllers: number;
+}
+
+/** The one oracle for a disposed owner's receipt: exact predeclared retention, every other resource settled. Certification and close both use it. */
+function assertCertifiedOwnerRetention(
+	snapshot: ReturnType<AgentSession["getResourceSnapshot"]>,
+	expected: CertifiedOwnerRetention,
+	label: string,
+): void {
+	const workers = snapshot.workers;
+	if (workers === undefined) throw new Error(`${label} carries no worker snapshot`);
+	if (!isDeepStrictEqual(workers.ownedProjectClaims, expected.claims)) {
+		throw new Error(`${label} retains claims other than the predeclared ones`);
+	}
+	if (!isDeepStrictEqual(workers.reservations.heldLeases, expected.leases)) {
+		throw new Error(`${label} retains write leases other than the predeclared ones`);
+	}
+	if (!isDeepStrictEqual(workers.executingHolds, expected.executingHolds)) {
+		throw new Error(`${label} retains execution holds other than the predeclared ones`);
+	}
+	if (workers.laneAbortControllerCount !== expected.laneAbortControllers) {
+		throw new Error(`${label} retains lane abort controllers other than the predeclared count`);
+	}
+	if (workers.reservations.watchCount !== expected.watchCount) {
+		throw new Error(`${label} retains reservation observers other than the predeclared count`);
+	}
+	assertResourcesSettled(
+		{
+			...snapshot,
+			workers: {
+				...workers,
+				ownedProjectClaims: [],
+				executingHolds: [],
+				laneAbortControllerCount: 0,
+				reservations: { ...workers.reservations, heldLeases: [], watchCount: 0 },
+			},
+		},
+		label,
+	);
+}
+
 function assertResourcesSettled(snapshot: ReturnType<AgentSession["getResourceSnapshot"]>, label: string): void {
 	const settled = {
 		foregroundRecovery: {
@@ -1513,9 +1770,11 @@ export class HarnessProcesses {
 	/** Child causes retained after their spawn leaves `settling`, so every later drain still reports them. */
 	private readonly causes: unknown[] = [];
 	private readonly git: VirtualGit;
+	private readonly windows: ScriptedWindowsShellProcesses;
 
-	constructor(git: VirtualGit) {
+	constructor(git: VirtualGit, windows: ScriptedWindowsShellProcesses) {
 		this.git = git;
+		this.windows = windows;
 	}
 
 	/** Joins every spawned child: its stdio has closed and its close has fired. Failures are aggregated, never dropped. */
@@ -1526,6 +1785,9 @@ export class HarnessProcesses {
 	}
 
 	run(operation: string, args: readonly unknown[]): unknown {
+		// The Windows runtime answers only its own provisioned executables; every other operation keeps its existing dispatch.
+		const windowsResult = this.windows.tryRun(operation, args);
+		if (windowsResult?.handled) return windowsResult.value;
 		const [file, argv, options] = args;
 		if (operation === "spawn" && file === "git" && Array.isArray(argv)) {
 			// The state is read at spawn time, as git reads its repository when it starts.
@@ -1596,6 +1858,12 @@ export class HarnessProcesses {
 
 export interface HarnessWorldOptions {
 	readonly name: string;
+	readonly systemOneEnabled: boolean;
+	/**
+	 * Priced or window-configured scripted tracks. Applied to the provider before the registry is built, so the catalog,
+	 * the router pool and every session read the same configured descriptor the scripted requests report.
+	 */
+	readonly modelOptions?: Readonly<Record<string, Parameters<ScriptedProvider["configureModel"]>[1]>>;
 	/** Exact warning allowances of this journey: every other captured warning fails the close, after cleanup. */
 	readonly warningAllowances?: readonly RegExp[];
 	readonly files?: Readonly<Record<string, string>>;
@@ -1629,42 +1897,69 @@ export async function runHarnessWorld(
 export class HarnessWorld {
 	readonly trace = new HarnessTrace();
 	readonly io = new VirtualFileSystem(HARNESS_PROJECT_CWD);
-	readonly systemOne = new ScriptedSystemOneTransport();
+	readonly systemOne: ScriptedSystemOneTransport;
 	readonly git: VirtualGit;
 	readonly processTable = new VirtualProcessTable();
 	readonly processes: HarnessProcesses;
+	readonly windowsShell: ScriptedWindowsShellProcesses;
 	readonly guard: EffectGuard;
 	readonly provider: ScriptedProvider;
 	/** The scripted shell transport: bash runs through it for root and every worker lane. */
 	readonly shell = new VirtualShell();
+	/** The external human-input presentation: only native askQuestions is scripted; the close path cuts it off and asserts it settled. */
+	readonly humanInput = new ScriptedHumanInput();
 	readonly authStorage: AuthStorage;
 	readonly modelRegistry: ModelRegistry;
 	readonly settingsManager: SettingsManager;
+	/** The settings the world's manager was built from: a per-session override clones it and changes only the System One flag. */
+	private readonly baseSettings: Parameters<typeof SettingsManager.inMemory>[0];
 	readonly sessions: AgentSession[] = [];
 	/** Every warning any session of this world emitted, in order: journeys classify them before they close. */
 	readonly warnings: string[] = [];
 	private readonly warningAllowances: readonly RegExp[];
 	private readonly everySession: AgentSession[] = [];
+	/** Immutable disposal certificates: a disposed owner's snapshot taken at disposal, and the exact claims it keeps by design. */
+	private readonly retainedDisposals = new Map<
+		AgentSession,
+		{
+			readonly snapshot: ReturnType<AgentSession["getResourceSnapshot"]>;
+			readonly expectation: CertifiedOwnerRetention;
+		}
+	>();
 	private readonly everySessionManager: SessionManager[] = [];
+	/** Each manager's open System One window: the mode its latest session binding runs in, and the intent entries it began with. */
+	private readonly systemOneWindows = new Map<
+		SessionManager,
+		{ readonly enabled: boolean; readonly before: ReadonlyMap<string, string> }
+	>();
+	/** Violations recorded as each window closes; close reports them. */
+	private readonly systemOneWindowFailures: string[] = [];
 	/** The external approval port's own callbacks (setEdgeConfirmation): asked, in flight and settled. Native human input is separate. */
 	readonly externalConfirmations = { asked: 0, inFlight: 0, settled: 0 };
 	private readonly warningSubscriptions: Array<() => void> = [];
+	/** The public isolated completions the owners started, in start order: the original promises the owners hold. */
+	readonly isolatedCompletions: Promise<unknown>[] = [];
 	/** Per-world agent directory: stores cached by path (SQLite, host stores) never leak between journeys. */
 	readonly agentDir: string;
 	private disposed = false;
 
 	constructor(options: HarnessWorldOptions) {
+		this.systemOne = new ScriptedSystemOneTransport(options.systemOneEnabled);
 		this.agentDir = `/harness/agent-${options.name}`;
 		this.warningAllowances = options.warningAllowances ?? [];
 		this.git = new VirtualGit(this.io, HARNESS_PROJECT_CWD);
-		this.processes = new HarnessProcesses(this.git);
+		this.windowsShell = new ScriptedWindowsShellProcesses(this.io, this.shell, this.processTable);
+		this.processes = new HarnessProcesses(this.git, this.windowsShell);
 		this.guard = new EffectGuard(this.io, {
 			sqlite: "memory",
 			process: (operation, args) => this.processes.run(operation, args),
 			signal: (pid, signal) => this.processTable.signal(pid, signal),
+			pid: () => this.processTable.self,
 			fetch: this.systemOne.fetch,
 		});
 		this.guard.install();
+		// The installed managed uv and interpreter are provisioned once per world, after the guard, at their actual canonical paths.
+		this.windowsShell.provisionInstalledRuntime(HARNESS_PROJECT_CWD);
 		let provider: ScriptedProvider | undefined;
 		// A failure while building the world must not leave the process-wide guard or the provider registration installed.
 		try {
@@ -1680,6 +1975,9 @@ export class HarnessWorld {
 			}
 			provider = new ScriptedProvider(`harness-${options.name}`);
 			this.provider = provider;
+			for (const [modelId, modelOptions] of Object.entries(options.modelOptions ?? {})) {
+				provider.configureModel(modelId, modelOptions);
+			}
 			provider.register();
 			this.authStorage = AuthStorage.inMemory({
 				typesafe: { type: "api_key", key: TYPESAFE_FIXTURE_KEY },
@@ -1692,21 +1990,20 @@ export class HarnessWorld {
 				api: HARNESS_API,
 				baseUrl: "https://harness.invalid",
 				apiKey: HARNESS_PROVIDER_FIXTURE_KEY,
-				models: SCRIPTED_TRACKS.map((id) => ({
-					id,
-					name: `Scripted ${id}`,
-					reasoning: false,
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 32768,
-					maxTokens: 4096,
-				})),
+				// Registry descriptors come from the same provider.model() the scripted requests report, so a priced or
+				// window-configured track is priced identically in the catalog and on the wire.
+				models: SCRIPTED_TRACKS.map((id) => {
+					const { name, reasoning, input, cost, contextWindow, maxTokens } = this.provider.model(id);
+					return { id, name, reasoning, input, cost, contextWindow, maxTokens };
+				}),
 			});
 			// The owner's model favorites: the router pool that delegation admits workers from is built from them.
-			this.settingsManager = SettingsManager.inMemory({
+			this.baseSettings = {
 				modelFavorites: SCRIPTED_TRACKS.map((modelId) => ({ provider: HARNESS_PROVIDER, modelId })),
 				...options.settings,
-			});
+				systemOne: { ...options.settings?.systemOne, enabled: options.systemOneEnabled },
+			};
+			this.settingsManager = SettingsManager.inMemory(this.baseSettings);
 		} catch (error) {
 			const failures: unknown[] = [error];
 			// Registration rolls back first: the guard restore must not run while a scripted track stays registered.
@@ -1728,27 +2025,63 @@ export class HarnessWorld {
 	/** Root session in normal user-facing mode, bound to the scripted root track `modelId`. */
 	async createRootSession(
 		modelId = "root",
-		options: { readonly sessionManager?: SessionManager; readonly agentDir?: string } = {},
+		options: {
+			readonly sessionManager?: SessionManager;
+			readonly agentDir?: string;
+			/** This session's System One mode: the world's transport and settings stay as they are; only this session's binding changes. */
+			readonly systemOneEnabled?: boolean;
+			/** An owner-authored host profile owns the root's model and tools; the SDK forbids a model option alongside it. */
+			readonly orchestrationProfile?: OrchestrationProfile;
+			/** Caller-owned tools (for example a platform bash definition) offered to this session in addition to the native set. */
+			readonly customTools?: ToolDef[];
+			/**
+			 * Omits the world's POSIX shell operations, so the session's native platform engine runs the platform it selects. Defaults to
+			 * omitted on win32 (the world's POSIX shell is not the platform shell there) and kept on POSIX hosts.
+			 */
+			readonly omitShellOperations?: boolean;
+		} = {},
 	): Promise<{ session: AgentSession; sessionManager: SessionManager }> {
 		const sessionManager = options.sessionManager ?? SessionManager.inMemory(HARNESS_PROJECT_CWD);
+		const systemOneEnabled = options.systemOneEnabled ?? this.systemOne.enabled;
+		const omitShellOperations = options.omitShellOperations ?? process.platform === "win32";
+		// A session that selects the other mode gets its own settings clone; every other setting is the world's.
+		const settingsManager =
+			systemOneEnabled === this.systemOne.enabled
+				? this.settingsManager
+				: SettingsManager.inMemory({
+						...this.baseSettings,
+						systemOne: { ...this.baseSettings?.systemOne, enabled: systemOneEnabled },
+					});
+		// The manager's previous window ends here; this binding's window begins with the intent entries the manager holds before it runs.
+		const intentBefore = optionalIntentSnapshot(sessionManager);
+		this.closeSystemOneWindow(sessionManager, intentBefore);
+		this.systemOneWindows.set(sessionManager, { enabled: systemOneEnabled, before: intentBefore });
 		const { session } = await createAgentSession({
 			cwd: HARNESS_PROJECT_CWD,
 			agentDir: options.agentDir ?? this.agentDir,
 			authStorage: this.authStorage,
 			modelRegistry: this.modelRegistry,
-			settingsManager: this.settingsManager,
+			settingsManager,
 			sessionManager,
-			model: this.provider.model(modelId),
+			...(options.orchestrationProfile === undefined
+				? { model: this.provider.model(modelId) }
+				: { orchestrationProfile: options.orchestrationProfile }),
 			// Worker tracks are admitted through the router pool: with routing on, delegation accepts only pool members.
 			routerPool: {
 				source: "sdk_models",
 				models: SCRIPTED_TRACKS.map((id) => ({ model: this.provider.model(id) })),
 			},
 			systemOneFetch: this.systemOne.fetch,
-			shellOperations: this.shell,
+			systemOneEnabled,
+			...(omitShellOperations ? {} : { shellOperations: this.shell }),
+			customTools: options.customTools,
 			// Worktree-sync git runs against the same stateful repository the SDK's own git reads see.
 			worktreeSyncEnginePorts: {
-				exec: (command, args, options) => this.git.exec(command, args, options),
+				// Git runs against the virtual repository; the engine's sh/cmd gate commands run through the scripted shell port.
+				exec: (command, args, options) =>
+					command === "git"
+						? this.git.exec(command, args, options)
+						: this.shell.execEngine(command, args, options),
 				isPidAlive: (pid) => this.processTable.isAlive(pid),
 				pid: this.processTable.self,
 			},
@@ -1769,6 +2102,12 @@ export class HarnessWorld {
 		const continueGoalLoop = session.continueGoalLoop.bind(session);
 		session.continueGoalLoop = (...args: Parameters<AgentSession["continueGoalLoop"]>) =>
 			trace.track(continueGoalLoop(...args));
+		// Navigation stays tracked: its own exact abort resolves as a cancelled result, so a rejection is unexpected and must reach close.
+		const navigateTree = session.navigateTree.bind(session);
+		session.navigateTree = (...args: Parameters<AgentSession["navigateTree"]>) => trace.track(navigateTree(...args));
+		const runIsolatedCompletion = session.runIsolatedCompletion.bind(session);
+		session.runIsolatedCompletion = (...args: Parameters<AgentSession["runIsolatedCompletion"]>) =>
+			this.recordIsolatedCompletion(trace.observe(runIsolatedCompletion(...args)));
 		this.warningSubscriptions.push(
 			session.subscribe((event) => {
 				if (event.type === "warning") this.warnings.push(event.message);
@@ -1777,6 +2116,9 @@ export class HarnessWorld {
 		this.everySession.push(session);
 		this.everySessionManager.push(sessionManager);
 		this.sessions.push(session);
+		if ((session.systemOneController !== undefined) !== systemOneEnabled) {
+			throw new Error(`System One ${systemOneEnabled ? "on" : "off"} session binding mismatch`);
+		}
 		return { session, sessionManager };
 	}
 
@@ -1809,6 +2151,11 @@ export class HarnessWorld {
 	 * Disposes one session inside the scenario body and takes its settlement out of the close list, so the body
 	 * asserts exactly what this disposal rejected with. Resolves to the rejection, or undefined when it completed.
 	 */
+	private recordIsolatedCompletion<T>(completion: Promise<T>): Promise<T> {
+		this.isolatedCompletions.push(completion);
+		return completion;
+	}
+
 	async disposeSessionInBody(session: AgentSession): Promise<{ readonly error: unknown } | undefined> {
 		if (!this.sessions.includes(session)) throw new Error("Session is not owned by this world");
 		// Each disposal step is its own attempt: a failed abort or wait never skips the disposal. Ownership leaves the world only
@@ -1834,6 +2181,53 @@ export class HarnessWorld {
 			error:
 				failures.length === 1 ? failures[0] : new AggregateError(failures, "Session disposal in the body failed"),
 		};
+	}
+
+	/**
+	 * Certify an owner this world disposed, at the boundary before any cutback. The receipt is read here from the owner itself: it
+	 * must already have left the active list, carry a worker snapshot, keep exactly the predeclared claims, and leave every other
+	 * resource settled. Close checks the stored receipt and never reads the disposed owner again.
+	 */
+	certifyDisposedOwner(
+		session: AgentSession,
+		expectedClaims: WorkerProjectClaims,
+		expectedRetention: {
+			readonly leases?: readonly WorkerWriteReservationLease[];
+			readonly executingHolds?: readonly { readonly agentId: string; readonly count: number }[];
+			readonly watchCount?: number;
+			readonly laneAbortControllers?: number;
+		} = {},
+	): void {
+		if (!this.everySession.includes(session)) throw new Error("the certified owner was not created by this world");
+		if (this.sessions.includes(session)) throw new Error("the certified owner is still active; dispose it first");
+		if (this.retainedDisposals.has(session)) throw new Error("the certified owner already has a disposal receipt");
+		const snapshot = session.getResourceSnapshot();
+		const expectation: CertifiedOwnerRetention = {
+			claims: expectedClaims,
+			leases: expectedRetention.leases ?? [],
+			executingHolds: expectedRetention.executingHolds ?? [],
+			watchCount: expectedRetention.watchCount ?? 0,
+			laneAbortControllers: expectedRetention.laneAbortControllers ?? 0,
+		};
+		assertCertifiedOwnerRetention(snapshot, expectation, "disposed owner receipt");
+		this.retainedDisposals.set(session, {
+			snapshot: structuredClone(snapshot),
+			expectation: structuredClone(expectation),
+		});
+	}
+
+	/** Ends a manager's open System One window. An off window keeps the intent entries it began with, byte for byte, and adds none. */
+	private closeSystemOneWindow(manager: SessionManager, now: ReadonlyMap<string, string>): void {
+		const window = this.systemOneWindows.get(manager);
+		if (window === undefined || window.enabled) return;
+		for (const [id, bytes] of window.before) {
+			if (now.get(id) !== bytes)
+				this.systemOneWindowFailures.push(`optional intent ${id} changed while System One was off`);
+		}
+		for (const id of now.keys()) {
+			if (!window.before.has(id))
+				this.systemOneWindowFailures.push(`optional intent ${id} was created while System One was off`);
+		}
 	}
 
 	/**
@@ -1885,15 +2279,20 @@ export class HarnessWorld {
 			}
 			for (const unsubscribe of this.warningSubscriptions) attempt(unsubscribe);
 			await attemptAsync(() => this.provider.dispose());
+			await attemptAsync(() => this.humanInput.dispose());
 			await attemptAsync(() => this.shell.dispose());
 			await attemptAsync(() => this.processes.drain());
+			attempt(() => this.windowsShell.assertDrained());
+			await attemptAsync(() => this.windowsShell.disposeAndWait());
 			const checks: Array<() => void> = [
 				() => this.provider.assertDrained(),
 				() => this.shell.assertDrained(),
+				() => this.humanInput.assertDrained(),
 				() => this.io.assertNoOpenResources(),
 				// Application connections must be released by their owners after the sessions above are disposed.
 				() => this.guard.assertNoOpenSqliteHandles(),
 				() => this.processTable.assertClean(),
+				() => this.io.assertFaultsConsumed(),
 				() => this.guard.assertSqliteFaultsConsumed(),
 				() => this.guard.assertNoEscapes(),
 				() => {
@@ -1905,6 +2304,7 @@ export class HarnessWorld {
 						throw new Error(`Unscripted judgment requests: ${this.systemOne.unscripted.join("; ")}`);
 				},
 				() => this.systemOne.assertConsumed(),
+				() => this.systemOne.assertInFlightSettled(),
 				() => {
 					if (this.git.unscripted.length)
 						throw new Error(`Unscripted git commands: ${this.git.unscripted.join("; ")}`);
@@ -1916,8 +2316,26 @@ export class HarnessWorld {
 					if (unclassified.length > 0) throw new Error(`Unclassified warnings: ${JSON.stringify(unclassified)}`);
 				},
 			];
+			// Each manager's last window ends at close; no binding after it can extend it. Off windows report through the failure list.
+			for (const manager of this.systemOneWindows.keys()) {
+				this.closeSystemOneWindow(manager, optionalIntentSnapshot(manager));
+			}
+			attempt(() => {
+				// An off window keeps the intent entries of its baseline byte for byte, and no native turn inside it may add an intent entry.
+				if (this.systemOneWindowFailures.length > 0) throw new Error(this.systemOneWindowFailures.join("; "));
+			});
 			this.everySession.forEach((session, index) => {
-				attempt(() => assertResourcesSettled(session.getResourceSnapshot(), `session ${index}`));
+				const retained = this.retainedDisposals.get(session);
+				if (retained === undefined)
+					attempt(() => assertResourcesSettled(session.getResourceSnapshot(), `session ${index}`));
+				else
+					attempt(() => {
+						assertCertifiedOwnerRetention(
+							retained.snapshot,
+							retained.expectation,
+							`session ${index} disposal certificate`,
+						);
+					});
 			});
 			this.everySessionManager.forEach((manager, index) => {
 				attempt(() => {

@@ -9,6 +9,8 @@ import type {
 } from "../kernel/index.ts";
 import type { SessionLifecycleInspection, SessionManager } from "../kernel/session/session-manager.ts";
 import { sessionLifecycleToolIdentityKey } from "../kernel/session/session-manager.ts";
+import { getResumableHumanInputSnapshot } from "./human-input.ts";
+import { humanInputToolName } from "./human-input-request.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import { dumpProviderRequest } from "./request-dump.ts";
 import { buildRequestSnapshotInput } from "./request-snapshot-fingerprints.ts";
@@ -318,13 +320,7 @@ export class ForegroundLifecycleController {
 					announceToolCall(call.callId, call.index, kind, batchId, mutationScope, announcer),
 				);
 			}
-			for (const identity of identities) this.startedTools.set(this.toolKey(identity), identity);
-			for (const identity of identities) {
-				const callKey = this.callKey(identity.callId, identity.toolName);
-				const pending = this.pendingToolsByCall.get(callKey) ?? new Set<string>();
-				pending.add(this.toolKey(identity));
-				this.pendingToolsByCall.set(callKey, pending);
-			}
+			for (const identity of identities) this.trackStartedTool(identity);
 			signal?.throwIfAborted();
 			return reservation;
 		} catch (error) {
@@ -343,6 +339,16 @@ export class ForegroundLifecycleController {
 
 	private callKey(callId: string, toolName: string): string {
 		return `${callId}\u0000${toolName}`;
+	}
+
+	/** Associate one canonically started call with its eventual result, including native question replay. */
+	private trackStartedTool(identity: StartedToolIdentity): void {
+		const key = this.toolKey(identity);
+		this.startedTools.set(key, identity);
+		const callKey = this.callKey(identity.callId, identity.toolName);
+		const pending = this.pendingToolsByCall.get(callKey) ?? new Set<string>();
+		pending.add(key);
+		this.pendingToolsByCall.set(callKey, pending);
 	}
 
 	/** Called after the canonical message entry has been appended by AgentSession. */
@@ -413,6 +419,18 @@ export class ForegroundLifecycleController {
 		}
 		const plan = this.deps.sessionManager.planSessionLifecycleRepair();
 		const index = this.deps.sessionManager.getSessionLifecycleIndex();
+		const humanInput = getResumableHumanInputSnapshot(this.deps.sessionManager);
+		// Human request snapshots identify a call, not a provider generation. Reused ids cannot be
+		// assigned to a foreground start by guess, including a competing never-started call.
+		const humanClosers = humanInput
+			? plan.toolClosers.filter((closer) => closer.callId === humanInput.request.toolCallId)
+			: [];
+		const preservedCloser =
+			humanInput &&
+			humanClosers.length === 1 &&
+			humanClosers[0]!.toolName === humanInputToolName(humanInput.request.toolName)
+				? humanClosers[0]
+				: undefined;
 		const warnings: string[] = [];
 		for (const closer of plan.providerRequestClosers) {
 			this.deps.sessionManager.appendProviderRequestTerminal(closer.requestId, closer.outcome);
@@ -424,6 +442,18 @@ export class ForegroundLifecycleController {
 			);
 			const call = record?.assistantCalls[0];
 			if (!call) continue;
+			if (record?.start && closer === preservedCloser) {
+				// The native input owner can still settle this exact durable question. A generic UNKNOWN
+				// result would erase its replay eligibility. Restore only the canonical result association;
+				// no tool body, mutation reservation or authority is replayed here.
+				this.trackStartedTool({
+					requestId: record.start.requestId,
+					assistantMessageEntryId: record.start.assistantMessageEntryId,
+					callId: record.start.callId,
+					toolName: record.start.toolName,
+				});
+				continue;
+			}
 			const synthetic = this.appendRepairResult(closer.toolName, closer.callId, closer.code);
 			if (closer.sourceEntryId && closer.requestId !== undefined) {
 				this.deps.sessionManager.appendForegroundToolTerminal(

@@ -15,6 +15,11 @@ export interface HumanInputRequest {
 	createdAt: string;
 }
 
+/** One default identity for native question creation and replay of requests that omit a tool name. */
+export function humanInputToolName(toolName: string | undefined): string {
+	return toolName ?? "ask_question";
+}
+
 export interface HumanInputQuestion {
 	id: string;
 	header: string;

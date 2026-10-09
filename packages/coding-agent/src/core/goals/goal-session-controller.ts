@@ -26,6 +26,7 @@ import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import { systemOneAbortReason } from "../system-one/foreground-control.ts";
 import { openWorkUnit } from "../work-units.ts";
+import type { RoutedGoalContext } from "./compact-goal-context.ts";
 import type { GoalCompletionOwnerDecision } from "./goal-completion-owner-decision.ts";
 import { buildObjectiveRoutePrompt, GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import {
@@ -126,6 +127,7 @@ export interface GoalExecutionLease {
 
 interface MutableGoalExecutionLease extends GoalExecutionLease {
 	goalId?: string;
+	routedContext?: RoutedGoalContext;
 	adoptNewGoal: boolean;
 	adoptionBaselineGoalId?: string;
 	provisionalTokenBudget?: number;
@@ -387,6 +389,7 @@ export class GoalSessionController {
 	}
 
 	activateQueuedOwnerChatGoal(message: AgentMessage, messages: readonly { role: string; content?: unknown }[]): void {
+		if (this.executionLease) this.executionLease.routedContext = undefined;
 		const queued = this.queuedOwnerChatGoals.get(message);
 		if (!queued) return;
 		this.queuedOwnerChatGoals.delete(message);
@@ -498,13 +501,20 @@ export class GoalSessionController {
 	/** Begin one foreground execution, binding immediately or when it creates a new goal. */
 	beginExecution(
 		goalId: string | undefined,
-		options: { adoptNewGoal?: boolean; provisionalTokenBudget?: number } = {},
+		options: {
+			adoptNewGoal?: boolean;
+			provisionalTokenBudget?: number;
+			routedPrompt?: Pick<RoutedGoalContext, "content" | "timestamp">;
+		} = {},
 	): GoalExecutionLease | undefined {
 		if (this.executionLease) throw new Error("Goal execution attribution is already active");
 		const state = this.getState();
 		if (goalId && (!state || state.goalId !== goalId || !isGoalExecutionActive(state.status))) return undefined;
 		const lease: MutableGoalExecutionLease = {
 			...(goalId ? { goalId } : {}),
+			...(goalId && options.routedPrompt
+				? { routedContext: Object.freeze({ goalId, ...options.routedPrompt }) }
+				: {}),
 			[goalExecutionLeaseMarker]: true,
 			adoptNewGoal: options.adoptNewGoal === true,
 			...(options.adoptNewGoal && state ? { adoptionBaselineGoalId: state.goalId } : {}),
@@ -525,6 +535,16 @@ export class GoalSessionController {
 		if (this.executionLease !== lease) throw new Error("Cannot end goal execution attribution owned by another run");
 		this.flushPendingExecutionUsage(this.executionLease, true);
 		this.executionLease = undefined;
+	}
+
+	/** Stable identity of the current routed instruction; no history replay or goal adoption. */
+	getRoutedGoalContext(): RoutedGoalContext | undefined {
+		const lease = this.executionLease;
+		if (!lease?.routedContext || lease.goalId !== lease.routedContext.goalId) return undefined;
+		const state = this.getState();
+		return state && state.goalId === lease.routedContext.goalId && isGoalExecutionActive(state.status)
+			? lease.routedContext
+			: undefined;
 	}
 
 	/**

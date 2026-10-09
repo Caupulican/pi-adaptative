@@ -33,6 +33,14 @@ const LEGACY_GOAL_CONTINUATION_PREFIX = "Goal continuation context\n============
 
 export interface GoalContextProjection {
 	continuationTurn: boolean;
+	routedContext?: RoutedGoalContext;
+}
+
+/** Actual routed instruction owned by one live goal execution, independent of compacted history. */
+export interface RoutedGoalContext {
+	readonly goalId: string;
+	readonly content: string;
+	readonly timestamp: number;
 }
 
 function messageText(message: AgentMessage): string {
@@ -70,8 +78,14 @@ function latestContinuationTriggerIndex(messages: AgentMessage[]): number {
 }
 
 /** Capture continuation-only facts before historical goal payloads are removed for context GC. */
-export function captureGoalContextProjection(messages: AgentMessage[]): GoalContextProjection {
-	return { continuationTurn: latestContinuationTriggerIndex(messages) >= 0 };
+export function captureGoalContextProjection(
+	messages: AgentMessage[],
+	routedContext?: RoutedGoalContext,
+): GoalContextProjection {
+	return {
+		continuationTurn: routedContext !== undefined || latestContinuationTriggerIndex(messages) >= 0,
+		routedContext,
+	};
 }
 
 /** Remaining budget as a 10% step (100, 90, ..., 0), so the record changes only when the bucket does. */
@@ -142,6 +156,7 @@ export function injectCompactGoalContext(
 ): AgentMessage[] {
 	const filtered = messages.filter((message) => !isGoalContinuationPayload(message));
 	if (!state || !isGoalExecutionActive(state.status)) return filtered;
+	const routedContext = projection.routedContext;
 	return [
 		...filtered,
 		createCustomMessage(
@@ -151,5 +166,19 @@ export function injectCompactGoalContext(
 			{ goalId: state.goalId, revision: state.revision ?? 0 },
 			new Date().toISOString(),
 		),
+		...(routedContext?.goalId === state.goalId
+			? [
+					{
+						role: "custom" as const,
+						customType: GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
+						// Array content passes through the native transient adapter without writing another
+						// durable trigger. The execution lease supplies it again after same-turn compaction.
+						content: [{ type: "text" as const, text: routedContext.content }],
+						display: false,
+						details: { goalId: routedContext.goalId },
+						timestamp: routedContext.timestamp,
+					},
+				]
+			: []),
 	];
 }

@@ -183,7 +183,11 @@ import {
 	resolveGoalCompletionOwnerDecision,
 } from "./goals/goal-completion-owner-decision.ts";
 import { DEFAULT_GOAL_WORKER_WAIT_MS } from "./goals/goal-continuation-defaults.ts";
-import { buildObjectiveRoutePrompt } from "./goals/goal-continuation-prompt.ts";
+import {
+	buildObjectiveRoutePrompt,
+	GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
+	OBJECTIVE_ROUTE_PROMPT_PREFIX,
+} from "./goals/goal-continuation-prompt.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
@@ -317,6 +321,7 @@ import { ProviderRequestRuntimeController } from "./provider-request-runtime-con
 import { appendQueuedInputRecord, type RecordableQueuedInput, readQueuedInputRecord } from "./queued-input-record.ts";
 import { ReflectionController } from "./reflection-controller.ts";
 import { ReflectionTurnLifecycle } from "./reflection-turn-lifecycle.ts";
+import { assertReloadQuiescent } from "./reload-blockers.ts";
 import {
 	CONVERSATION_TALKER_CUSTOM_TYPE,
 	type ConversationTalkerRecord,
@@ -363,7 +368,7 @@ import {
 import { formatClarificationQuestion } from "./system-one/clarification.ts";
 import { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
 import { sameLaneVerificationDirective } from "./system-one/control-directive.ts";
-import { type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one/controller.ts";
+import { normalizeUserRequest, type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one/controller.ts";
 import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import { OperationGate } from "./system-one/operation-gate.ts";
 import { operationGateLedgerBindings, prewarmOperationGate } from "./system-one/operation-gate-wiring.ts";
@@ -1722,6 +1727,7 @@ export class AgentSession {
 			}),
 			getGoalState: () => this.getGoalStateSnapshot(),
 			skillVault: this._skillVault,
+			getRoutedGoalContext: () => this._goals.getRoutedGoalContext(),
 			getEdgeGrants: () => this.getEdgeGrants(),
 			applyPathAliases: (messages) => this._pipeline.applyPathAliases(messages),
 		});
@@ -3559,6 +3565,11 @@ export class AgentSession {
 				};
 			this._newestJudgedOwnerOrder = acceptedOrder;
 		}
+		// Normal-off: no evaluator means no semantic intent is recorded, aborted, scanned or warned about.
+		const controller = this._systemOneController;
+		if (!controller) return { status: "skipped" as const };
+		// A blank message carries no request to classify, so no intent state is written for it.
+		if (normalizeUserRequest(request) === undefined) return { status: "skipped" as const };
 		this._optionalIntentAbort?.abort(OWNER_INTENT_SUPERSEDED);
 		const intentAbort = new AbortController();
 		this._optionalIntentAbort = intentAbort;
@@ -3588,8 +3599,7 @@ export class AgentSession {
 				: {}),
 		};
 		const pendingId = manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, pendingIntent);
-		const controller = this._systemOneController;
-		const classification = controller?.classifyUserRequest(request, rules, {
+		const classification = controller.classifyUserRequest(request, rules, {
 			capabilitiesPending,
 			optionalTools: {
 				candidates,
@@ -3599,23 +3609,21 @@ export class AgentSession {
 			signal,
 		});
 		// An aborted judgment decides nothing, so its request does not wait for the evaluator to notice.
-		classification?.catch(() => undefined);
+		classification.catch(() => undefined);
 		const aborted = signal;
 		let stopWatchingAbort = (): void => {};
-		let outcome: Awaited<NonNullable<typeof classification>> | { status: "unavailable"; reason: string };
+		let outcome: Awaited<typeof classification>;
 		try {
-			outcome = classification
-				? await Promise.race([
-						classification,
-						new Promise<{ status: "unavailable"; reason: string }>((resolve) => {
-							const settle = () =>
-								resolve({ status: "unavailable", reason: "Owner intent classification was aborted" });
-							if (aborted.aborted) return settle();
-							aborted.addEventListener("abort", settle, { once: true });
-							stopWatchingAbort = () => aborted.removeEventListener("abort", settle);
-						}),
-					])
-				: { status: "unavailable" as const, reason: "System One classification is not configured" };
+			outcome = await Promise.race([
+				classification,
+				new Promise<{ status: "unavailable"; reason: string }>((resolve) => {
+					const settle = () =>
+						resolve({ status: "unavailable", reason: "Owner intent classification was aborted" });
+					if (aborted.aborted) return settle();
+					aborted.addEventListener("abort", settle, { once: true });
+					stopWatchingAbort = () => aborted.removeEventListener("abort", settle);
+				}),
+			]);
 		} finally {
 			stopWatchingAbort();
 		}
@@ -6085,6 +6093,13 @@ export class AgentSession {
 		const goalExecutionLease = this._goals.beginExecution(admittedGoalId, {
 			adoptNewGoal: goalToolStartAuthority !== undefined,
 			provisionalTokenBudget: goalToolStartAuthority?.tokenBudget,
+			routedPrompt:
+				options?.internalContextType === GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE &&
+				promptMessage.role === "custom" &&
+				typeof promptMessage.content === "string" &&
+				promptMessage.content.startsWith(OBJECTIVE_ROUTE_PROMPT_PREFIX)
+					? { content: promptMessage.content, timestamp: promptMessage.timestamp }
+					: undefined,
 		});
 		this._goals.setStartAuthority(goalToolStartAuthority);
 		try {
@@ -6867,6 +6882,7 @@ export class AgentSession {
 	}
 
 	async reload(): Promise<void> {
+		assertReloadQuiescent(this._agentDir, this.isStreaming, this.isCompacting, "reload");
 		this._foregroundLifecycle.reload();
 		this._reflection.invalidateCurrentTurnCueStateCache();
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;

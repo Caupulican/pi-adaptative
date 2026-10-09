@@ -38,7 +38,7 @@ import {
 	resolveHumanInput,
 	unansweredOwnerQuestionText,
 } from "../human-input.ts";
-import type { HumanInputQuestion } from "../human-input-request.ts";
+import { type HumanInputQuestion, humanInputToolName } from "../human-input-request.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { SessionImageStore } from "../session-image-store.ts";
 import {
@@ -923,7 +923,7 @@ function unansweredResult(
 }
 
 export function createAskQuestionToolDefinition(options: AskQuestionToolOptions = {}) {
-	const name = options.name ?? "ask_question";
+	const name = humanInputToolName(options.name);
 	return defineTool<typeof askQuestionSchema, AskQuestionToolDetails>({
 		name,
 		label: options.label ?? "Ask Question",

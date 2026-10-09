@@ -2,11 +2,16 @@
 
 ### Added
 
-- Added three composed harness journeys for standalone conversations, orchestration, and mixed worker/worktree operation, with scripted external transports and virtual storage.
+- Added three composed harness journeys for standalone conversations, orchestration, and mixed worker/worktree operation, each running with System One enabled and disabled, with scripted external transports and virtual storage.
 - Added SDK ports for shell execution, worktree engine operations, and System One HTTP transport, shared with worker lanes.
 
 ### Fixed
 
+- Preserved the current objective route and recovery brief through provider context planning and same-turn compaction, clearing it when owner input is admitted or execution ends.
+- Preserved Windows shell working directories across commands by resolving host intent once and reporting the engine's actual initial and final directories, including detached calls.
+- Refused busy session reloads before lifecycle repair, preserving the running tool's actual result and terminal record.
+- Preserved unfinished native owner questions during session lifecycle repair so their original request can resume and settle its exact tool call once.
+- Skipped semantic owner-intent writes for System One off and blank queued input, preserving standing intent and avoiding misleading evaluator warnings.
 - Closed SQLite connections when store construction fails, released independent context resources after persistence errors, and retained required cleanup failures in `disposeAndWait()`.
 - Joined physical background tool completion during shutdown and retained bounded cleanup-failure evidence after cancellation.
 - Joined worker admission, queued validation, and execution cleanup during shutdown, retaining failed reservation and project releases behind their ownership fences.

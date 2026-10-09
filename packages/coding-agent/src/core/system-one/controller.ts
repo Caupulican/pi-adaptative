@@ -93,6 +93,12 @@ const RULE_AUTHORITY_QUESTION_IDS: ReadonlySet<string> = new Set([
  */
 export const USER_REQUEST_RULE_BUDGET = 8_000;
 
+/** The owner's request as it is classified, or undefined when it carries no content to classify. */
+export function normalizeUserRequest(request: string): string | undefined {
+	const userRequest = request.trim();
+	return userRequest || undefined;
+}
+
 export interface UserRequestClassification {
 	readonly optionalToolIntent?: OptionalToolIntent;
 	/** Not a clear no: the request may turn a kind of model on or off; ask the pool questions. */
@@ -107,8 +113,10 @@ export interface UserRequestClassification {
 }
 
 /**
- * `skipped` means nothing could have changed, so nothing was asked. `unavailable` means the
- * question was asked and System One did not answer -- which is not the same as a clean "no".
+ * `skipped` means no semantic evaluation ran, so there is no judgment either way: the request was empty,
+ * no question could change anything, or no System One controller was bound (the normal-off path). It never
+ * means a classified "nothing changed". `unavailable` means the question was asked and System One did not
+ * answer -- which is not the same as a clean "no".
  */
 export type UserRequestClassificationOutcome =
 	| { readonly status: "classified"; readonly classification: UserRequestClassification }
@@ -478,8 +486,8 @@ export class SystemOneController {
 		/** `signal`: the owner's submission; an abort before the run starts cancels the classification too. */
 		options: { capabilitiesPending?: boolean; signal?: AbortSignal; optionalTools?: OptionalToolRequestContext } = {},
 	): Promise<UserRequestClassificationOutcome> {
-		const userRequest = request.trim();
-		if (!userRequest) return { status: "skipped" };
+		const userRequest = normalizeUserRequest(request);
+		if (userRequest === undefined) return { status: "skipped" };
 		const rules = writtenRules.trim().slice(0, USER_REQUEST_RULE_BUDGET);
 		const askCapabilities = options.capabilitiesPending !== false;
 		const asked: QuestionPack = {};

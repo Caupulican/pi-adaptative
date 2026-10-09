@@ -19,7 +19,11 @@ import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "./context/path-alias-table.ts";
 import { frozenPrefixLength } from "./context/prefix-stability.ts";
 import type { ContextGcReport, ContextGcResult } from "./context-gc.ts";
-import { captureGoalContextProjection, injectCompactGoalContext } from "./goals/compact-goal-context.ts";
+import {
+	captureGoalContextProjection,
+	injectCompactGoalContext,
+	type RoutedGoalContext,
+} from "./goals/compact-goal-context.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { CurrentTurnReflectionCuePlan } from "./reflection-controller.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
@@ -71,6 +75,7 @@ export interface ProviderRequestContextControllerDeps {
 	previewTaskAutomationContext?(): TaskAutomationContextPlan;
 	previewSelfCompactionGuidance?(): { readonly content: string | undefined; readonly cleared: string };
 	getGoalState?(): GoalState | undefined;
+	getRoutedGoalContext?(): RoutedGoalContext | undefined;
 	skillVault?: Pick<
 		SkillVaultController,
 		"previewSystemPromptSection" | "getContextRevision" | "previewExclusionReminder" | "commitSystemPromptSection"
@@ -260,7 +265,8 @@ export class ProviderRequestContextController {
 		const extensionPlan = this.deps.transformExtensions
 			? await this.deps.transformExtensions(transformed)
 			: { messages: transformed, transientMessages: [] as AgentMessage[] };
-		const goalContextProjection = captureGoalContextProjection(extensionPlan.messages);
+		const routedGoalContext = this.deps.getRoutedGoalContext?.();
+		const goalContextProjection = captureGoalContextProjection(extensionPlan.messages, routedGoalContext);
 		const reflectionCuePlan = this.deps.previewReflectionCue?.();
 		const directoryPlan = this.deps.previewTaskDirectoryContext?.();
 		const directoryContent =
@@ -409,6 +415,7 @@ export class ProviderRequestContextController {
 			(skillVault?.getContextRevision() ?? 0) === skillRevision &&
 			// The goal snapshot is one shared frozen value per journal position (session-goal-state.ts).
 			this.deps.getGoalState?.() === goalState &&
+			this.deps.getRoutedGoalContext?.() === routedGoalContext &&
 			resolveAuthorityContext(this.deps.getEdgeGrants, messages, extensionPlan.messages) === authorityContext;
 		// One projection serves preview, currency check and commit. The plan is a pure function of the
 		// durable messages (same array, same objects), the dependencies `dependenciesCurrent` tracks,

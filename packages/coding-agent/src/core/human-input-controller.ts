@@ -12,7 +12,7 @@ import {
 	resolveHumanInput,
 	unansweredOwnerQuestionText,
 } from "./human-input.ts";
-import type { HumanInputRequest } from "./human-input-request.ts";
+import { type HumanInputRequest, humanInputToolName } from "./human-input-request.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 
 interface HumanInputControllerDeps {
@@ -119,7 +119,7 @@ export class HumanInputController {
 			const toolResult: ToolResultMessage = {
 				role: "toolResult",
 				toolCallId: pending.request.toolCallId,
-				toolName: pending.request.toolName ?? "ask_question",
+				toolName: humanInputToolName(pending.request.toolName),
 				content: [
 					{
 						type: "text",

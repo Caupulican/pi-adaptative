@@ -53,11 +53,14 @@ export function applyEngineFrame(state: WindowsShellState, frame: EngineFrameSta
  * at least one `cd`, otherwise the host-requested cwd. Both tiers call this with the SAME session
  * state so a `cd` in the engine is observed by the very next PS-tier call.
  */
+export function previewEffectiveCwd(state: WindowsShellState, requestedCwd: string, forceCwd = false): string {
+	return forceCwd || state.hostCwd !== requestedCwd ? requestedCwd : state.cwd;
+}
+
+/** Commit host directory intent at execution admission; previews and result reporting never mutate it. */
 export function resolveEffectiveCwd(state: WindowsShellState, requestedCwd: string, forceCwd = false): string {
-	if (forceCwd || state.hostCwd !== requestedCwd) {
-		state.hostCwd = requestedCwd;
-		state.cwd = requestedCwd;
-	}
+	state.cwd = previewEffectiveCwd(state, requestedCwd, forceCwd);
+	state.hostCwd = requestedCwd;
 	return state.cwd;
 }
 

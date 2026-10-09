@@ -8,6 +8,7 @@ import {
 	type SimpleStreamOptions,
 	type StreamOptions,
 	type ToolCall,
+	type Usage,
 	unregisterApiProviders,
 } from "@caupulican/pi-ai";
 
@@ -25,6 +26,19 @@ export interface ScriptedReply {
 	content: AssistantMessage["content"];
 	stopReason?: AssistantMessage["stopReason"];
 	errorMessage?: string;
+	/** Actual externally reported accounting, consumed by the native budget owners. */
+	usage?: Usage;
+}
+
+export interface ScriptedPartialFrame {
+	readonly partialContent: AssistantMessage["content"];
+	readonly event:
+		| { type: "text_start" | "toolcall_start"; contentIndex: number }
+		| { type: "text_delta" | "toolcall_delta"; contentIndex: number; delta: string }
+		| { type: "text_end"; contentIndex: number; content: string }
+		| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall };
+	readonly gate?: Promise<void>;
+	check?(request: ScriptedRequest): void;
 }
 
 export interface ScriptStep {
@@ -32,6 +46,9 @@ export interface ScriptStep {
 	gate?: Promise<void>;
 	/** Late-result control: ignore only the request's abort; provider disposal still cancels and joins this producer. */
 	ignoresAbort?: boolean;
+	/** Explicit failed-physical-join control; the scenario MUST eventually release its gate and join this producer. */
+	ignoresLifetimeAbort?: boolean;
+	frames?: readonly ScriptedPartialFrame[];
 	check?(request: ScriptedRequest): void;
 	/** Synchronous observation of the actual terminal emitted by this transport, including late or canceled terminals. */
 	onTerminal?(request: ScriptedRequest, message: AssistantMessage): void;
@@ -41,6 +58,12 @@ export interface ScriptStep {
 	maxRequests?: number;
 	/** Reply callbacks are synchronous; controlled asynchronous ordering belongs in the cancellable gate. */
 	reply: ScriptedReply | ((request: ScriptedRequest) => ScriptedReply);
+}
+
+interface ScriptTrack {
+	readonly modelId: string;
+	readonly matches?: (request: ScriptedRequest) => boolean;
+	readonly steps: ScriptStep[];
 }
 
 export interface Barrier {
@@ -89,7 +112,11 @@ export class ScriptedProvider {
 		requestAborted: boolean;
 		ignoredRequestAbort: boolean;
 	}> = [];
-	private readonly scripts = new Map<string, ScriptStep[]>();
+	private readonly scripts = new Map<string, ScriptTrack>();
+	private readonly modelOptions = new Map<
+		string,
+		Partial<Pick<Model<typeof HARNESS_API>, "cost" | "contextWindow" | "maxTokens" | "input">>
+	>();
 	private readonly stepRequests = new Map<ScriptStep, number>();
 	private readonly active = new Set<AbortController>();
 	private readonly producers = new Set<Promise<void>>();
@@ -115,30 +142,66 @@ export class ScriptedProvider {
 			contextWindow,
 			maxTokens: 4096,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			...structuredClone(this.modelOptions.get(id) ?? {}),
 		};
 	}
 
+	configureModel(
+		id: string,
+		options: Partial<Pick<Model<typeof HARNESS_API>, "cost" | "contextWindow" | "maxTokens" | "input">>,
+	): void {
+		if (this.requests.length || this.disposed) throw new Error("Configure model metadata before requests start");
+		this.modelOptions.set(id, structuredClone(options));
+	}
+
 	enqueue(modelId: string, ...steps: ScriptStep[]): void {
+		this.enqueueTrack(modelId, modelId, undefined, ...steps);
+	}
+
+	/** Route concurrent same-model actors by their actual request context; ambiguity fails closed. */
+	enqueueTrack(
+		trackId: string,
+		modelId: string,
+		matches: ((request: ScriptedRequest) => boolean) | undefined,
+		...steps: ScriptStep[]
+	): void {
 		if (this.disposed || this.lifetimeAbort.signal.aborted)
 			throw new Error("Cannot enqueue work after provider cutoff");
+		if (matches?.constructor.name === "AsyncFunction")
+			throw new TypeError("Script track selection must be synchronous");
 		for (const step of steps) {
-			for (const callback of [step.reply, step.check, step.until, step.onTerminal]) {
+			for (const callback of [
+				step.reply,
+				step.check,
+				step.until,
+				step.onTerminal,
+				...(step.frames?.map((frame) => frame.check) ?? []),
+			]) {
 				if (typeof callback === "function" && callback.constructor.name === "AsyncFunction") {
 					throw new TypeError(`Step ${step.name} must use synchronous callbacks and an external gate`);
 				}
+			}
+			if (
+				step.ignoresLifetimeAbort &&
+				(!step.ignoresAbort || (!step.gate && !step.frames?.some((frame) => frame.gate)))
+			) {
+				throw new Error(`Step ${step.name} requires an explicit gated request-abort-ignoring lifetime control`);
 			}
 			if (step.maxRequests !== undefined && (!Number.isSafeInteger(step.maxRequests) || step.maxRequests < 1)) {
 				throw new RangeError(`Step ${step.name} requires a positive bounded maxRequests`);
 			}
 		}
-		const script = this.scripts.get(modelId) ?? [];
-		script.push(...steps);
-		this.scripts.set(modelId, script);
+		const script = this.scripts.get(trackId);
+		if (script && (script.modelId !== modelId || script.matches !== matches))
+			throw new Error(`Track ${trackId} identity changed`);
+		const track = script ?? { modelId, matches, steps: [] };
+		track.steps.push(...steps);
+		this.scripts.set(trackId, track);
 	}
 
-	/** Scenario phase boundary only: pending script inputs differ from physical producer settlement. */
-	getPendingStepNames(modelId: string): readonly string[] {
-		return (this.scripts.get(modelId) ?? []).map((step) => step.name);
+	/** Scenario phase boundary by track identity (the model id for default tracks), not physical settlement. */
+	getPendingStepNames(trackId: string): readonly string[] {
+		return (this.scripts.get(trackId)?.steps ?? []).map((step) => step.name);
 	}
 
 	register(): void {
@@ -157,7 +220,9 @@ export class ScriptedProvider {
 	}
 
 	assertDrained(): void {
-		const remaining = [...this.scripts].flatMap(([model, steps]) => steps.map((step) => `${model}:${step.name}`));
+		const remaining = [...this.scripts].flatMap(([trackId, track]) =>
+			track.steps.map((step) => `${trackId}:${step.name}`),
+		);
 		if (remaining.length || this.active.size || this.producers.size || this.failures.length) {
 			throw new Error(
 				`Script not settled: pending=${remaining.join(",")}; active=${this.active.size}; producers=${this.producers.size}; failures=${this.failures.join(";")}`,
@@ -174,9 +239,26 @@ export class ScriptedProvider {
 		} catch (error) {
 			failures.push(error);
 		}
-		const settled = await Promise.allSettled([...this.producers]);
-		failures.push(...settled.flatMap((result) => (result.status === "rejected" ? [result.reason] : [])));
+		failures.push(...(await this.joinProducerFailures()));
 		if (failures.length) throw new AggregateError(failures, "Scripted provider producer cleanup failed");
+	}
+
+	/**
+	 * Join transport work after its native owners stop, keeping registration and pending scripts for a fresh owner.
+	 * This does not close admission or judge native outcomes; sticky script failures remain subject to assertDrained.
+	 */
+	async waitForProducers(): Promise<void> {
+		const failures = await this.joinProducerFailures();
+		if (failures.length) throw new AggregateError(failures, "Scripted provider producer join failed");
+	}
+
+	private async joinProducerFailures(): Promise<unknown[]> {
+		const failures: unknown[] = [];
+		while (this.producers.size > 0) {
+			const settled = await Promise.allSettled([...this.producers]);
+			failures.push(...settled.flatMap((result) => (result.status === "rejected" ? [result.reason] : [])));
+		}
+		return failures;
 	}
 
 	/** Begin world-level transport cutoff without unregistering while production shutdown is still unwinding. */
@@ -203,6 +285,11 @@ export class ScriptedProvider {
 		context: Context,
 		options: StreamOptions | undefined,
 	): AssistantMessageEventStream {
+		if (this.disposed || this.lifetimeAbort.signal.aborted) {
+			const detail = "Provider request after lifetime cutoff";
+			this.failures.push(detail);
+			throw new Error(detail);
+		}
 		const stream = new AssistantMessageEventStream();
 		const request: ScriptedRequest = {
 			sequence: this.requests.length + 1,
@@ -246,13 +333,25 @@ export class ScriptedProvider {
 			stopReason: "stop",
 			timestamp: this.lastTimestamp,
 		};
-		stream.push({ type: "start", partial: message });
+		stream.push({ type: "start", partial: structuredClone(message) });
 		let step: ScriptStep | undefined;
 		let cancellation = signal;
 		try {
-			const steps = this.scripts.get(request.model.id);
+			const matches = [...this.scripts].filter(
+				([, track]) =>
+					track.modelId === request.model.id &&
+					track.steps.length > 0 &&
+					(!track.matches || track.matches(request)),
+			);
+			if (matches.length !== 1)
+				throw new Error(
+					`Provider request ${request.sequence} matches ${matches.length} script tracks for ${request.model.id}`,
+				);
+			const [trackId, track] = matches[0]!;
+			const steps = track.steps;
 			step = steps?.[0];
 			if (step?.ignoresAbort) cancellation = this.lifetimeAbort.signal;
+			if (step?.ignoresLifetimeAbort) cancellation = new AbortController().signal;
 			if (cancellation.aborted) throw cancellation.reason;
 			if (!step) throw new Error(`Unexpected provider request ${request.sequence} for ${request.model.id}`);
 			const count = (this.stepRequests.get(step) ?? 0) + 1;
@@ -263,7 +362,7 @@ export class ScriptedProvider {
 				steps!.shift();
 				this.stepRequests.delete(step);
 			}
-			this.reached.push(`${request.model.id}:${step.name}`);
+			this.reached.push(`${trackId}:${step.name}`);
 			if (cancellation.aborted) throw cancellation.reason;
 			if (step.gate) {
 				let onAbort!: () => void;
@@ -280,11 +379,34 @@ export class ScriptedProvider {
 			if (cancellation.aborted) throw cancellation.reason;
 			const reply = typeof step.reply === "function" ? step.reply(request) : step.reply;
 			if (cancellation.aborted) throw cancellation.reason;
+			if (reply.usage) message.usage = structuredClone(reply.usage);
+			for (const frame of step.frames ?? []) {
+				if (cancellation.aborted) throw cancellation.reason;
+				frame.check?.(request);
+				if (frame.gate) {
+					if (cancellation.aborted) throw cancellation.reason;
+					let stop!: () => void;
+					try {
+						await Promise.race([
+							frame.gate,
+							new Promise<never>((_resolve, reject) => {
+								stop = () => reject(cancellation.reason);
+								cancellation.addEventListener("abort", stop, { once: true });
+							}),
+						]);
+					} finally {
+						cancellation.removeEventListener("abort", stop);
+					}
+				}
+				if (cancellation.aborted) throw cancellation.reason;
+				message.content = structuredClone(frame.partialContent);
+				stream.push(structuredClone({ ...frame.event, partial: message }));
+			}
 			message.content = structuredClone(reply.content);
 			message.stopReason =
 				reply.stopReason ?? (message.content.some((item) => item.type === "toolCall") ? "toolUse" : "stop");
 			message.errorMessage = reply.errorMessage;
-			for (const [contentIndex, block] of message.content.entries()) {
+			for (const [contentIndex, block] of (step.frames === undefined ? message.content : []).entries()) {
 				if (block.type === "text") {
 					stream.push({ type: "text_start", contentIndex, partial: message });
 					stream.push({ type: "text_delta", contentIndex, delta: block.text, partial: message });
@@ -306,9 +428,10 @@ export class ScriptedProvider {
 				stream.push({ type: "done", reason: message.stopReason, message });
 			}
 		} catch (error) {
-			message.stopReason = cancellation.aborted ? "aborted" : "error";
+			const cancelled = cancellation.aborted && error === cancellation.reason;
+			message.stopReason = cancelled ? "aborted" : "error";
 			message.errorMessage = error instanceof Error ? error.message : String(error);
-			if (!cancellation.aborted) this.failures.push(message.errorMessage);
+			if (!cancelled) this.failures.push(message.errorMessage);
 			stream.push({ type: "error", reason: message.stopReason, error: message });
 		} finally {
 			stream.end(message);

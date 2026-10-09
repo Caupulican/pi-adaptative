@@ -80,7 +80,12 @@ import {
 	type WindowsShellEngineOptions,
 	WindowsShellEngineUnavailableError,
 } from "./windows-shell-engine.ts";
-import { getOrCreateWindowsShellState, mergeEffectiveEnv, resolveEffectiveCwd } from "./windows-shell-state.ts";
+import {
+	getOrCreateWindowsShellState,
+	mergeEffectiveEnv,
+	previewEffectiveCwd,
+	resolveEffectiveCwd,
+} from "./windows-shell-state.ts";
 
 /** Low-level silence bound retained for direct shell-operation consumers. Agent tool calls always pass a wall-clock bound. */
 const DEFAULT_COMMAND_SILENCE_MS = 600_000;
@@ -312,7 +317,7 @@ export function createLocalPlatformShellOperations(
 				// runtime unavailable) reads the SAME session state so a `cd`/`export` the engine
 				// made is observed by the very next floor call.
 				const state = getOrCreateWindowsShellState(engineSessionKey);
-				resolvedCwd = resolveEffectiveCwd(state, cwd, execOptions.forceCwd);
+				resolvedCwd = previewEffectiveCwd(state, cwd, execOptions.forceCwd);
 				resolvedExecOptions = { ...execOptions, env: mergeEffectiveEnv(state, execOptions.env ?? getShellEnv()) };
 				if (route.kind === "python-engine") {
 					try {
@@ -323,12 +328,19 @@ export function createLocalPlatformShellOperations(
 						const engineCommand = options.commandPrefix
 							? `${options.commandPrefix}\n${route.command}`
 							: route.command;
-						return await engineOperations.exec(engineCommand, cwd, execOptions);
+						return await engineOperations.exec(
+							engineCommand,
+							execOptions.detached === true ? resolvedCwd : cwd,
+							execOptions,
+						);
 					} catch (error) {
 						route = floorRouteAfterEngineOutage(command, platform, error);
 					}
 				}
-				if (route.kind === "powershell") resolvedCommand = route.command;
+				if (route.kind === "powershell") {
+					resolvedCommand = route.command;
+					if (execOptions.detached !== true) resolvedCwd = resolveEffectiveCwd(state, cwd, execOptions.forceCwd);
+				}
 			}
 			if (options.commandPrefix) resolvedCommand = `${options.commandPrefix}\n${resolvedCommand}`;
 			return operations.exec(resolvedCommand, resolvedCwd, resolvedExecOptions);
@@ -1078,7 +1090,7 @@ function createShellToolDefinition(
 					// The engine is the sole state mutator (D4); the floor (engine off, or the engine's
 					// runtime unavailable) reads the SAME session state so a `cd`/`export` the engine
 					// made is observed by the very next floor call.
-					effectiveCwd = resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd, options?.forceCwd);
+					effectiveCwd = previewEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd, options?.forceCwd);
 				}
 				const prepareSpawn = async (backend: string) => {
 					// The operator's commandPrefix runs where the command runs: in the engine it is bash
@@ -1105,10 +1117,17 @@ function createShellToolDefinition(
 					return { resolvedCommand, spawnContext };
 				};
 				let prepared = await prepareSpawn(backendCommand);
-				const execute = (engine: boolean, target: typeof prepared) =>
-					(engine && engineOperations ? engineOperations : ops).exec(
+				const execute = (engine: boolean, target: typeof prepared) => {
+					if (routesWindowsContract && !engine && !detached) {
+						resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd, options?.forceCwd);
+					}
+					// A foreground engine owns host intent; a detached engine starts from the previewed
+					// session directory in private state. An intentional hook cwd override owns its request.
+					const requestedCwd =
+						engine && !detached && target.spawnContext.cwd === effectiveCwd ? cwd : target.spawnContext.cwd;
+					return (engine && engineOperations ? engineOperations : ops).exec(
 						target.spawnContext.command,
-						target.spawnContext.cwd,
+						requestedCwd,
 						{
 							onData,
 							signal,
@@ -1118,6 +1137,7 @@ function createShellToolDefinition(
 							detached,
 						},
 					);
+				};
 				const runCommand = async () => {
 					if (!engineRoute) return execute(false, prepared);
 					try {
@@ -1231,9 +1251,7 @@ function createShellToolDefinition(
 								// exactly as it would have without the filter, and the filtered run happens
 								// where it landed.
 								const moved = await runInSession(cdCommand, collectCd);
-								const movedCwd = routesWindowsContract
-									? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
-									: (moved.cwd ?? moved.spawnCwd);
+								const movedCwd = moved.cwd ?? moved.spawnCwd;
 								if (moved.exitCode !== 0) throw await failedCd(moved.exitCode, movedCwd);
 								gitCwd = movedCwd;
 							}
@@ -1338,12 +1356,9 @@ function createShellToolDefinition(
 					expectedNoMatch ? "(no matches)" : "(no output)",
 					projection,
 				);
-				// The true directory the command ran in: the session-reported $PWD on POSIX,
-				// the state-tracked effective cwd on the Windows contract (the runner protocol
-				// does not report one), or the host-requested cwd for per-command backends.
-				const reportedCwd = routesWindowsContract
-					? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
-					: (sessionCwd ?? spawnCwd);
+				// Actual backend frames own reported cwd, including detached engine frames. Backends
+				// without a final directory report fall back to their own invocation, never shared state.
+				const reportedCwd = sessionCwd ?? spawnCwd;
 				const verification =
 					initialCwd === undefined || verificationCommand === undefined
 						? undefined

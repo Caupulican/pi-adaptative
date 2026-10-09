@@ -1,9 +1,8 @@
 name: CI
 
-# Build and check on Linux and Windows. The test suite was removed on 2026-10-04 and is rebuilt by
-# area from git history, so there is no test planning, sharding or carry-forward here; the
-# release tag runs the same jobs (build-binaries.yml quality-gate) and release-ci-proof.mjs
-# requires them by name.
+# Build and check on Linux and Windows, including provider regressions and the three harness
+# journeys. The release tag reuses these jobs through build-binaries.yml's quality-gate;
+# release-ci-proof.mjs requires successful matrix jobs and their named evidence steps.
 on:
   push:
     branches: [main]
@@ -84,6 +83,9 @@ jobs:
 
       - name: Provider regressions
         run: npm run check:provider-regressions
+
+      - name: Harness journeys
+        run: npm exec --workspace packages/coding-agent -- vitest run test/harness-interactions.test.ts
 
       - name: Dependency hardening
         if: runner.os == 'Windows'
