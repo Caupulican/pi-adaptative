@@ -7,6 +7,7 @@
 
 ### Fixed
 
+- Released terminal workers' exact project claims when retirement races their final resource cleanup, preserving suspended and failed-cleanup ownership fences.
 - Allowed owner input to acquire an unoccupied foreground while a future continuation is pending, preserving live execution and evaluation fences and pending-aware settlement.
 - Acquired terminal handoff turns through the canonical foreground lease without waiting for future-only continuation settlement.
 - Waited for idle worker resource release before completing a worker wait, preserving suspended outcomes and bounded cleanup timeouts.

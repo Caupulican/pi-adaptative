@@ -3016,7 +3016,7 @@ export class WorkerDelegationController {
 				}
 			}
 		}
-		if (agent?.status !== "registered") return;
+		if (agent?.status !== "registered" && agent?.status !== "retired") return;
 		const claim = this.projectClaims.get(agent.resumeContext.sessionId);
 		if (!claim) return;
 		try {
