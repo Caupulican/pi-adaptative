@@ -75,7 +75,11 @@ import type { CapabilityTierPolicy } from "./capability-tier.ts";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
 import type { SelfCompactionView } from "./compaction/self-compaction-controller.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
-import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
+import type {
+	MemoryPromptInclusionReport,
+	MemoryRetrievalDiagnostics,
+	TranscriptMemoryDiagnostics,
+} from "./context/memory-diagnostics.ts";
 import type { ContextGcReport } from "./context-gc.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
 import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
@@ -429,7 +433,11 @@ export interface RuntimeBuilderDeps {
 	/** Live memory manager — its provider tools join the registry. */
 	getMemoryManager(): MemoryManager;
 	/** Memory retrieval + prompt-inclusion diagnostics for the core diagnostics tool. */
-	getMemoryAuditDiagnostics(): { retrieval: MemoryRetrievalDiagnostics; promptInclusion: MemoryPromptInclusionReport };
+	getMemoryAuditDiagnostics(): {
+		retrieval: MemoryRetrievalDiagnostics;
+		promptInclusion: MemoryPromptInclusionReport;
+		transcript: TranscriptMemoryDiagnostics;
+	};
 	getSelfCompactionView?(): SelfCompactionView;
 	/** Drop extension-contributed pending memory providers before a reload re-registers them. */
 	clearPendingMemoryProviders(): void;

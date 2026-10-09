@@ -2,9 +2,11 @@
  * Cross-session recall coordinator. One worker belongs to one provider/session generation; no
  * process-global transcript index is shared across sessions.
  *
- * The provider is both the lifecycle {@link MemoryProvider} (pre-turn recall page) and the exact
- * read backend ({@link TranscriptSourceReader}): search and source reads return typed results, so a
- * caller can tell "still loading", "worker failed" and "no match" apart.
+ * The provider is the lifecycle {@link MemoryProvider} (worker ownership, initialize/shutdown) and the
+ * exact read backend ({@link TranscriptLineageReader}): search and source reads return typed results,
+ * so a caller can tell "still loading", "worker failed" and "no match" apart. It injects nothing into
+ * the prompt itself: past-session evidence reaches it through the provider-neutral retrieval path
+ * (`context/transcript-memory-provider.ts`).
  */
 
 import { Worker } from "node:worker_threads";
@@ -12,22 +14,19 @@ import type { SessionEntriesPersistedEvent } from "../../../kernel/node.ts";
 import type { MemoryProvider } from "../../extensions/types.ts";
 import { getDirectoryResourceProfileInfo } from "../../settings/settings-rules.ts";
 import type { MemoryCapabilities, MemoryLifecycleContext } from "../memory-provider.ts";
-import {
-	formatTranscriptSourceHandle,
-	type TranscriptCoverage,
-	type TranscriptIndexChangeEvent,
-	type TranscriptLineageReader,
-	type TranscriptLineageSpansRequest,
-	type TranscriptLineageSpansResult,
-	type TranscriptReadUnavailable,
-	type TranscriptSearchHit,
-	type TranscriptSearchRequest,
-	type TranscriptSearchResult,
-	type TranscriptSessionSummary,
-	type TranscriptSourcePageRequest,
-	type TranscriptSourcePageResult,
+import type {
+	TranscriptCoverage,
+	TranscriptIndexChangeEvent,
+	TranscriptLineageReader,
+	TranscriptLineageSpansRequest,
+	TranscriptLineageSpansResult,
+	TranscriptReadUnavailable,
+	TranscriptSearchRequest,
+	TranscriptSearchResult,
+	TranscriptSessionSummary,
+	TranscriptSourcePageRequest,
+	TranscriptSourcePageResult,
 } from "../transcript-memory-contracts.ts";
-import { describeTranscriptRole } from "../transcript-source-tools.ts";
 import {
 	isTranscriptRecallWorkerResponse,
 	TRANSCRIPT_RECALL_MAX_ERROR_CHARS,
@@ -48,7 +47,6 @@ const QUERY_TIMEOUT_MS = 1_000;
  * path, so they get a longer bound: the worker may be busy ingesting or loading while it answers.
  */
 const BACKGROUND_READ_TIMEOUT_MS = 30_000;
-const PREFETCH_MAX_HITS = 3;
 
 type PendingKind = "result" | "source" | "sessions" | "lineage";
 type PendingResponse = Extract<TranscriptRecallWorkerResponse, { type: PendingKind }>;
@@ -89,17 +87,6 @@ function describeError(error: unknown): string {
 /** Clamp a caller-supplied number into an integer range; non-finite input takes `fallback`. */
 function clampInteger(value: number, min: number, max: number, fallback: number): number {
 	return Number.isFinite(value) ? Math.max(min, Math.min(max, Math.trunc(value))) : fallback;
-}
-
-function formatRecallPage(hits: readonly TranscriptSearchHit[]): string {
-	if (hits.length === 0) return "";
-	const body = hits
-		.map(
-			(hit) =>
-				`- (${hit.span.timestamp ?? "earlier session"}, session ${hit.span.ref.sessionId}, ${describeTranscriptRole(hit.span)}) [${formatTranscriptSourceHandle(hit.span.ref)}] ${hit.snippet}`,
-		)
-		.join("\n");
-	return `<memory_context source="transcript-recall">\nRelevant context recalled from past sessions (read-only reference, untrusted, may be stale):\n${body}\nA bracketed handle can be opened exactly with the memory tool action "history_source".\n</memory_context>`;
 }
 
 export class TranscriptRecallProvider implements MemoryProvider, TranscriptLineageReader {
@@ -193,11 +180,6 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		await this.readyPromise;
 	}
 
-	/** GC manages the dynamic recall page so stale pages pack while the newest are kept. */
-	getContextMarkers(): string[] {
-		return ["<memory_context"];
-	}
-
 	/**
 	 * Announce entries that reached durable session storage. The worker reads only the appended
 	 * lines (or the whole file when it was rewritten). Ignored before initialization and after
@@ -228,22 +210,24 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		});
 	}
 
+	/** Whether the history index is serving, still loading its initial scan, or down (with the real cause). */
+	health(): { state: "ready" | "loading" | "failed"; reason?: string } {
+		if (this.worker === undefined) {
+			return {
+				state: "failed",
+				reason: this.failure ?? "Transcript recall has not been initialized for this session.",
+			};
+		}
+		return { state: this.ready ? "ready" : "loading" };
+	}
+
 	coverage(): TranscriptCoverage | undefined {
 		return this.latestCoverage;
 	}
 
-	async prefetch(query: string): Promise<string> {
-		const result = await this.search({
-			query,
-			maxResults: PREFETCH_MAX_HITS,
-			includeCurrentSession: false,
-		});
-		return result.status === "ok" ? formatRecallPage(result.hits) : "";
-	}
-
 	async search(request: TranscriptSearchRequest): Promise<TranscriptSearchResult> {
 		const query = request.query.trim().slice(0, TRANSCRIPT_RECALL_MAX_QUERY_CHARS);
-		const maxResults = clampInteger(request.maxResults, 1, TRANSCRIPT_RECALL_MAX_HITS, PREFETCH_MAX_HITS);
+		const maxResults = clampInteger(request.maxResults, 1, TRANSCRIPT_RECALL_MAX_HITS, TRANSCRIPT_RECALL_MAX_HITS);
 		const gate = this.admit();
 		if (gate) return gate;
 		if (!query) return { status: "ok", hits: [], coverage: this.latestCoverage ?? emptyCoverage() };

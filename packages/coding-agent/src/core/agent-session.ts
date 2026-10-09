@@ -130,11 +130,12 @@ import type { ContextProjection } from "./context/context-projection.ts";
 import type { EnforcePromptPolicyResult, PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyGcCorrelationReport, PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
 import { CONTEXT_VISIBILITY_LONG_CHARS, CONTEXT_VISIBILITY_SHORT_CHARS } from "./context/context-query-visibility.ts";
-import type { MemoryPromptInclusionReport } from "./context/memory-diagnostics.ts";
+import type { MemoryPromptInclusionReport, TranscriptHistoryStatus } from "./context/memory-diagnostics.ts";
 import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-provider-contract.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "./context/path-alias-tool-wrap.ts";
+import { estimatePromptHeadroom } from "./context/prompt-headroom.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
 import type { ContextGcReport, ContextGcResult } from "./context-gc.ts";
 import { ContextPipeline, type ContextPolicyLane } from "./context-pipeline.ts";
@@ -1487,6 +1488,19 @@ export class AgentSession {
 			isChildSession: () => this._isChildSession,
 			refreshToolRegistry: () => this._refreshToolRegistry(),
 			getContextWindow: () => this.model?.contextWindow,
+			getPromptHeadroom: (messages) =>
+				estimatePromptHeadroom({
+					model: this.model,
+					systemPrompt: this.agent.state.systemPrompt,
+					tools: this.agent.state.tools,
+					textToolCallProtocol: this.agent.textToolCallProtocol,
+					messages,
+					compactionReserveTokens: this._getAdaptedCompactionSettings().reserveTokens,
+					maxOutputTokens: Math.min(
+						this.settingsManager.getMaxOutputTokens(),
+						this.getCapabilityTierPolicy().maxOutputTokens,
+					),
+				}),
 			getGoalState: () => this.getGoalStateSnapshot(),
 			emitWarning: (message) => this._foregroundLifecycle.warn(message),
 			admitUserPreference: (request) => this._reflection.admitUserPreference(request),
@@ -3346,6 +3360,11 @@ export class AgentSession {
 	}
 
 	/** Managed memory files against their managed revisions (operator recovery view). */
+	/** Operator view of past-session history recall (coverage, latest retrieval, prompt admission). */
+	getTranscriptHistoryStatus(): TranscriptHistoryStatus {
+		return this._memory.getTranscriptHistoryStatus();
+	}
+
 	memoryDriftReport(): Promise<ManagedMemoryDriftEntry[]> {
 		return this._memory.memoryDriftReport();
 	}
@@ -5634,8 +5653,9 @@ export class AgentSession {
 		let promptMessage: AgentMessage | undefined;
 		let routingStarted = false;
 		let pendingNextTurnCount = 0;
-		// Effectiveness feedback: remember the recall page + the query so we can score, after the
-		// response, whether the agent actually used the recalled context.
+		// Effectiveness feedback: remember the extension recall page + the query so we can score, after the
+		// response, whether the agent actually used the recalled context. Past-session history is scored
+		// from what the prompt memory block admitted (see `takeAdmittedRecall`), not from this page.
 		let injectedRecall = "";
 		let recallQuery = "";
 		let admittedGoalId = options?.goalExecutionId;
@@ -5943,7 +5963,10 @@ export class AgentSession {
 			// Stable turn-owned timestamps preserve the prompt prefix across requests.
 			const turnTimestamp = new Date(promptMessage.timestamp).toISOString();
 
+			// Past-session history is retrieved with the other memory providers and admitted by the prompt
+			// memory block. This page carries only extension lifecycle providers' own prefetch output.
 			// Recall is data, gated before I/O; ICM and trivial turns skip it.
+			this._memory.clearAdmittedRecall();
 			if (!options?.internalContextType && this._memory.shouldAttemptRecall(expandedText)) {
 				try {
 					const recall = await this._memory.prefetchRecall(expandedText);
@@ -6219,10 +6242,12 @@ export class AgentSession {
 
 		// Score whether the agent actually used the recalled context, so the recall gate can adapt.
 		// Not for a cancelled submission: it has no response of its own to score (see above).
-		if (injectedRecall && !submissionSignal?.aborted) {
+		const admittedRecall = this._memory.takeAdmittedRecall();
+		const scoredRecall = [injectedRecall, admittedRecall?.text].filter(Boolean).join("\n");
+		if (scoredRecall && !submissionSignal?.aborted) {
 			const responseText = assistantAnswerText(this._findLastAssistantMessage());
 			if (responseText) {
-				this._memory.recordRecallOutcome(injectedRecall, recallQuery, responseText);
+				this._memory.recordRecallOutcome(scoredRecall, admittedRecall?.query ?? recallQuery, responseText);
 			}
 		}
 

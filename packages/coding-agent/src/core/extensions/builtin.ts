@@ -8,7 +8,12 @@ import {
 import type { CompactionEntry, SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { SelfCompactionView } from "../compaction/self-compaction-controller.ts";
-import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "../context/memory-diagnostics.ts";
+import {
+	formatTranscriptMemoryLines,
+	type MemoryPromptInclusionReport,
+	type MemoryRetrievalDiagnostics,
+	type TranscriptMemoryDiagnostics,
+} from "../context/memory-diagnostics.ts";
 import type { ContextGcReport } from "../context-gc.ts";
 import { boundedTextPreview } from "../text-preview.ts";
 import type { ToolDefinition, ToolInfo } from "./types.ts";
@@ -188,7 +193,8 @@ function formatMemoryProviderLines(retrieval: MemoryRetrievalDiagnostics): strin
 	return retrieval.providerReports.map((providerReport) => {
 		const rejection =
 			providerReport.rejectionReasons.length > 0 ? `; rejected: ${providerReport.rejectionReasons.join(", ")}` : "";
-		return `  provider ${providerReport.providerId}: ${providerReport.status} (${providerReport.resultCount} result(s)${rejection})`;
+		const failure = providerReport.failure !== undefined ? `; failure: ${providerReport.failure}` : "";
+		return `  provider ${providerReport.providerId}: ${providerReport.status} (${providerReport.resultCount} result(s)${rejection}${failure})`;
 	});
 }
 
@@ -213,6 +219,7 @@ export function createCoreDiagnosticsToolDefinitions(
 	getMemoryDiagnostics?: () => {
 		retrieval: MemoryRetrievalDiagnostics;
 		promptInclusion: MemoryPromptInclusionReport;
+		transcript: TranscriptMemoryDiagnostics;
 	},
 	getSelfCompactionView?: () => SelfCompactionView | undefined,
 ): ToolDefinition[] {
@@ -319,6 +326,7 @@ export function createCoreDiagnosticsToolDefinitions(
 								formatMemoryRetrievalLine(memoryDiagnostics.retrieval),
 								...formatMemoryProviderLines(memoryDiagnostics.retrieval),
 								formatMemoryPromptInclusionLine(memoryDiagnostics.promptInclusion),
+								...formatTranscriptMemoryLines(memoryDiagnostics.transcript),
 							]
 						: []),
 					"",

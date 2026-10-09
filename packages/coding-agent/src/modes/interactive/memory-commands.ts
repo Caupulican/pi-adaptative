@@ -5,11 +5,17 @@
  * model cannot resolve that and must not; the operator can: adopt the on-disk content, or restore
  * the managed content. `drift` shows where each file stands.
  */
+import {
+	formatTranscriptMemoryLines,
+	sanitizeTranscriptHistoryForDiagnostics,
+	type TranscriptHistoryStatus,
+} from "../../core/context/memory-diagnostics.ts";
 import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "../../core/memory/providers/file-store.ts";
 
 import type { MemorySystem } from "../../core/settings/settings-schema.ts";
 
 export interface MemoryCommandHost {
+	getTranscriptHistoryStatus(): TranscriptHistoryStatus;
 	memoryDriftReport(): Promise<ManagedMemoryDriftEntry[]>;
 	memoryAcceptDrift(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }>;
 	memoryRestoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }>;
@@ -21,7 +27,7 @@ export interface MemoryCommandHost {
 }
 
 export const MEMORY_COMMAND_USAGE =
-	"/memory drift · /memory accept <memory|project|user> · /memory restore <memory|project|user> · /memory system [okf|icm]";
+	"/memory drift · /memory history · /memory accept <memory|project|user> · /memory restore <memory|project|user> · /memory system [okf|icm]";
 
 const TARGETS = new Set<ManagedMemoryTarget>(["memory", "project", "user"]);
 
@@ -37,6 +43,20 @@ function describe(entry: ManagedMemoryDriftEntry): string {
 	const managed =
 		entry.managedChars !== undefined ? `managed ${entry.managedChars} chars stored` : "managed content not stored";
 	return `- ${entry.target}: ${entry.label} — ${state}; on disk ${entry.currentChars} chars; ${managed}\n  ${entry.path}`;
+}
+
+/**
+ * Past-session history recall as the operator sees it: the safe diagnostic lines plus the real failure
+ * text the model-facing projection withholds (it may name a path). No history content is printed.
+ */
+function describeHistory(status: TranscriptHistoryStatus): string {
+	const lines = formatTranscriptMemoryLines(sanitizeTranscriptHistoryForDiagnostics(status));
+	const indexingError = status.coverage?.lastError;
+	if (indexingError) lines.push(`  indexing error detail (${indexingError.at}): ${indexingError.message}`);
+	if (status.unavailableReason) lines.push(`  unavailable: ${status.unavailableReason}`);
+	const retrievalError = status.latestRetrieval?.error;
+	if (retrievalError) lines.push(`  retrieval error detail: ${retrievalError}`);
+	return lines.join("\n");
 }
 
 export async function handleMemoryCommand(host: MemoryCommandHost, text: string): Promise<void> {
@@ -57,6 +77,10 @@ export async function handleMemoryCommand(host: MemoryCommandHost, text: string)
 				...entries.map(describe),
 			].join("\n"),
 		);
+		return;
+	}
+	if (action === "history") {
+		host.showText(describeHistory(host.getTranscriptHistoryStatus()));
 		return;
 	}
 	if (action === "accept" || action === "restore") {

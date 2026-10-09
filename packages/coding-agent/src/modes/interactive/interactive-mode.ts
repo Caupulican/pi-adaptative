@@ -3307,6 +3307,7 @@ export class InteractiveMode {
 
 	private memoryCommandHost() {
 		return {
+			getTranscriptHistoryStatus: () => this.session.getTranscriptHistoryStatus(),
 			memoryDriftReport: () => this.session.memoryDriftReport(),
 			memoryAcceptDrift: (target: ManagedMemoryTarget) => this.session.memoryAcceptDrift(target),
 			memoryRestoreManaged: (target: ManagedMemoryTarget) => this.session.memoryRestoreManaged(target),

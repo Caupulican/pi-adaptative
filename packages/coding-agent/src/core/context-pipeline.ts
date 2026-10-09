@@ -1001,11 +1001,12 @@ export class ContextPipeline {
 	): ContextGcResult {
 		try {
 			const settings = this.deps.getSettingsManager().getContextGcSettings();
-			// Merge the ACTIVE memory providers' own page markers (e.g. transcript-recall's
-			// "<memory_context") into the semantic-memory marker list. The settings default is
-			// provider-agnostic and non-empty, so without this merge the recall pages the bundled
-			// default provider actually emits are never recognized as semantic-memory pages and
-			// accumulate raw for the life of the session — the exact growth Bug #7 GC exists to stop.
+			// Merge the ACTIVE memory providers' own page markers (those an extension provider declares
+			// for the `memory_context` pages its lifecycle `prefetch` returns) into the semantic-memory
+			// marker list. The settings default is provider-agnostic and non-empty, so without this merge
+			// a custom marker is never recognized as a semantic-memory page and its pages accumulate raw
+			// for the life of the session — the exact growth Bug #7 GC exists to stop. The bundled
+			// transcript recall emits no page: its evidence rides the `memory_evidence` record.
 			const providerMarkers = this.deps.getMemoryManager().getContextMarkers();
 			const curationSettings = this.deps.getSettingsManager().getContextCurationSettings();
 			// Curator work is collected during the pass and enqueued only from `commit()`, so the

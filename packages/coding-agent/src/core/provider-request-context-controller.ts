@@ -15,6 +15,7 @@ import type { ContextAuditReport } from "./context/context-audit.ts";
 import type { ContextProjection } from "./context/context-projection.ts";
 import type { EnforcePromptPolicyResult } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
+import type { MemoryPromptPlan } from "./context/memory-prompt-plan.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "./context/path-alias-table.ts";
 import { frozenPrefixLength } from "./context/prefix-stability.ts";
@@ -69,7 +70,8 @@ export interface ProviderRequestContextControllerDeps {
 	): EnforcePromptPolicyResult;
 	enqueueRelevanceCuration?(messages: AgentMessage[], report: PromptPolicyShadowReport): void;
 	maybeDrainBrainCuration?(): void;
-	appendMemoryEvidence?(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[];
+	/** Add the memory records for this request; the returned plan joins the request plan's currency and commit. */
+	appendMemoryEvidence?(messages: AgentMessage[], report: MemoryRetrievalReport): MemoryPromptPlan;
 	previewReflectionCue?(): CurrentTurnReflectionCuePlan | undefined;
 	previewTaskDirectoryContext?(): TaskDirectoryContextPlan;
 	previewTaskAutomationContext?(): TaskAutomationContextPlan;
@@ -369,10 +371,11 @@ export class ProviderRequestContextController {
 			...previewEnforcement.messages.slice(previewGc.messages.length),
 			...previewEnforcement.transientMessages,
 		];
-		const withMemory =
+		const memoryPlan =
 			memoryReport && this.deps.appendMemoryEvidence
 				? this.deps.appendMemoryEvidence([...compactableMessages, ...withExtensionTransients], memoryReport)
-				: [...compactableMessages, ...withExtensionTransients];
+				: undefined;
+		const withMemory = memoryPlan?.messages ?? [...compactableMessages, ...withExtensionTransients];
 		const beforeSkill = injectCompactGoalContext(withMemory, goalState, goalContextProjection);
 		if (!sameMessages(beforeSkill.slice(0, compactableMessages.length), compactableMessages)) {
 			throw new Error("Provider request transient contributors changed compactable history");
@@ -409,6 +412,9 @@ export class ProviderRequestContextController {
 
 		const dependenciesCurrent = () =>
 			extensionPlan.isCurrent?.() !== false &&
+			// The memory records were composed against one memory generation, content revision and
+			// headroom; a request planned against a different memory state is planned again.
+			memoryPlan?.isCurrent() !== false &&
 			reflectionCuePlan?.isCurrent() !== false &&
 			directoryPlan?.isCurrent() !== false &&
 			automationPlan?.isCurrent() !== false &&
@@ -446,6 +452,8 @@ export class ProviderRequestContextController {
 					throw new Error("Committed active skill context diverged from its accepted plan");
 				}
 				reflectionCuePlan?.commit();
+				// Published only now: a discarded plan leaves memory diagnostics and recall accounting untouched.
+				memoryPlan?.commit();
 				if (contextProjection) this.deps.commitContextProjection?.(contextProjection);
 			},
 		};

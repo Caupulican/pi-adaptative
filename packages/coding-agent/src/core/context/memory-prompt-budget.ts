@@ -13,6 +13,12 @@ export interface MemoryPromptBudget {
 	maxLines: number;
 	maxEstimatedTokens: number;
 	maxChars: number;
+	/**
+	 * Ceiling on the block's UTF-8 byte length. Tokens and characters are estimates that read multi-byte
+	 * text as cheap; bytes are the unit the wire and the stored record actually carry. Absent on a hand
+	 * built allowance that sets no byte bound; every budget this module resolves sets it.
+	 */
+	maxBytes?: number;
 	maxResults: number;
 	reason?: string;
 }
@@ -28,6 +34,13 @@ const MIN_MEMORY_LINE_CHARS = 48;
 /** Generous bounded safety ceiling for maxChars, independent of token/line budget. */
 const GENEROUS_MAX_CHARS = 64_000;
 
+/**
+ * UTF-8 bytes allowed per estimated token. The estimator reads four characters as one token, so
+ * ASCII text reaches the token limit at four bytes per estimated token; eight leaves ASCII untouched
+ * and caps text averaging more than two bytes per character at twice the ASCII byte weight.
+ */
+const MAX_BYTES_PER_ESTIMATED_TOKEN = 8;
+
 function disabled(reason: string, compact = false): MemoryPromptBudget {
 	return {
 		enabled: false,
@@ -35,6 +48,7 @@ function disabled(reason: string, compact = false): MemoryPromptBudget {
 		maxLines: 0,
 		maxEstimatedTokens: 0,
 		maxChars: 0,
+		maxBytes: 0,
 		maxResults: 0,
 		reason,
 	};
@@ -48,6 +62,7 @@ function disabled(reason: string, compact = false): MemoryPromptBudget {
  * - `maxLines` via `estimateLineCount`
  * - `maxEstimatedTokens` via `estimateTokensFromText`
  * - `maxChars` strictly as a JS-character count (NOT UTF-8 bytes)
+ * - `maxBytes`, when set, as the UTF-8 byte length (`Buffer.byteLength`)
  *
  * The `estimateTokensFromText` estimator is approximate (chars / 4);
  * no model tokenizer is used here. It must never be treated as
@@ -56,7 +71,7 @@ function disabled(reason: string, compact = false): MemoryPromptBudget {
 export function memoryTextFitsBudget(text: string, budget: MemoryPromptBudget): boolean {
 	if (!budget.enabled) return false;
 	if (
-		[budget.maxLines, budget.maxEstimatedTokens, budget.maxChars].some(
+		[budget.maxLines, budget.maxEstimatedTokens, budget.maxChars, budget.maxBytes ?? 0].some(
 			(limit) => !Number.isFinite(limit) || limit < 0,
 		)
 	) {
@@ -66,6 +81,7 @@ export function memoryTextFitsBudget(text: string, budget: MemoryPromptBudget): 
 	if (estimateTokensFromText(text) > budget.maxEstimatedTokens) return false;
 	// maxChars is a JS-character compatibility/resource bound, NOT UTF-8 bytes.
 	if (text.length > budget.maxChars) return false;
+	if (budget.maxBytes !== undefined && Buffer.byteLength(text, "utf8") > budget.maxBytes) return false;
 	return true;
 }
 
@@ -94,6 +110,7 @@ export function resolveMemoryPromptBudget(input: MemoryPromptBudgetInput): Memor
 			maxLines: COMPACT_MAX_LINES,
 			maxEstimatedTokens,
 			maxChars: GENEROUS_MAX_CHARS,
+			maxBytes: maxEstimatedTokens * MAX_BYTES_PER_ESTIMATED_TOKEN,
 			maxResults: Math.min(configuredMaxResults, 3),
 		};
 	}
@@ -109,6 +126,7 @@ export function resolveMemoryPromptBudget(input: MemoryPromptBudgetInput): Memor
 		maxLines: NORMAL_MAX_LINES,
 		maxEstimatedTokens,
 		maxChars: GENEROUS_MAX_CHARS,
+		maxBytes: maxEstimatedTokens * MAX_BYTES_PER_ESTIMATED_TOKEN,
 		maxResults: Math.min(configuredMaxResults, 10),
 	};
 }

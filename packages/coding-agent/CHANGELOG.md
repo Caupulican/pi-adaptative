@@ -4,15 +4,19 @@
 
 - Exact source-linked history recall: the `memory` tool gains read-only `history_search` and `history_source` actions that return cited `tx:` source handles and open the exact captured text of past conversation entries (user, assistant, tool calls and tool results) with UTF-8-safe paging and typed unavailable statuses. Delegated workers can open sources cited to them through `memory_read`.
 - Session persistence publishes a post-commit signal (`SessionManager.onEntriesPersisted`); history recall ingests committed entries incrementally instead of only at startup.
+- `/memory history` and `context_audit` report history recall coverage, skipped/uncaptured reasons, the last indexing error and the latest retrieval and prompt-admission outcome.
 
 ### Changed
 
 - Transcript recall indexes every eligible project session by canonical entry and selected branch lineage within an explicit 16 MiB budget, replacing the 60-file / 8,000-character prefix index; coverage reports skipped and uncaptured content by reason. Recall pages show the session and source handle of each hit.
+- History recall is a provider in the common memory retrieval path, admitted at the lowest memory tier with an age-weighted score below curated memory; the separate pre-turn transcript page is removed (extension prefetch is unchanged). Provider failures, policy blocks and no-match stay distinct in the retrieval report.
+- The prompt memory block is part of the request plan: it is replanned when memory generation, content revision or headroom changes, its diagnostics are published only when the plan commits, later requests of a turn reuse the turn's retrieval, and its allowance accounts for the estimated system prompt, tools, messages and reply reserve with an explicit UTF-8 byte ceiling.
 
 ### Fixed
 
 - Retrieved memory candidates keep their retrieval score and stale/conflict flags instead of a fixed 0.5 score, so prompt admission applies its freshness rules.
 - The `memory` tool's `list` action is classified as a read (`memory.query`) instead of a mutation.
+- A disabled or emptied memory evidence block now sends its cleared form, so earlier evidence no longer reads as current.
 
 ## [0.103.7] - 2026-10-09
 

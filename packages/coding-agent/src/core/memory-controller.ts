@@ -11,15 +11,17 @@
  * child-session flag, and the tool-registry refresh — is reached through narrow deps accessors rather
  * than the whole AgentSession.
  *
- * Context-transform boundary (deliberate): {@link runMemoryRetrieval} and
- * {@link maybeAppendMemoryEvidenceBlock} are invoked from the session's context transform as one-line
- * delegations. This controller deliberately imports no compaction/context-pipeline internals — it only
- * ever reads settings and builds the retrieval report + the bounded evidence block, so the transform
- * stays the single owner of the pass ordering.
+ * Request-planning boundary (deliberate): {@link runMemoryRetrieval} and {@link appendPromptMemory} are
+ * invoked by the provider-request context controller (`ProviderRequestContextController.plan`) as
+ * one-line delegations through the session's deps. This controller deliberately imports no
+ * compaction/context-pipeline internals — it only ever reads settings and builds the retrieval report
+ * + the bounded evidence block, and the plan it returns publishes nothing until the request plan is
+ * accepted, so the request controller stays the single owner of the pass ordering and of commit.
  */
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { type AgentMessage, createCustomMessage, HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
 import type { SessionEntriesPersistedEvent } from "../kernel/session/session-manager.ts";
 import { configFile, okfMemoryDir, projectMemoryDir } from "./agent-paths.ts";
@@ -32,8 +34,12 @@ import {
 	type MemoryPromptInclusionReport,
 	type MemoryRetrievalDiagnostics,
 	sanitizeMemoryRetrievalReportForDiagnostics,
+	sanitizeTranscriptHistoryForDiagnostics,
+	type TranscriptHistoryStatus,
+	type TranscriptMemoryDiagnostics,
 } from "./context/memory-diagnostics.ts";
 import { type MemoryPromptBudget, resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
+import type { MemoryPromptPlan } from "./context/memory-prompt-plan.ts";
 import {
 	type MemoryProvider as ContextMemoryProvider,
 	DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY,
@@ -42,6 +48,12 @@ import {
 import { type MemoryRetrievalReport, retrieveMemoryForContext } from "./context/memory-retrieval.ts";
 import { composeTieredMemoryPromptBlock, type MemoryTierCandidate } from "./context/memory-tier-composer.ts";
 import { createOkfMemoryProvider, loadOkfMemoryBundle } from "./context/okf-memory-provider.ts";
+import type { PromptHeadroom } from "./context/prompt-headroom.ts";
+import {
+	createTranscriptMemoryProvider,
+	TRANSCRIPT_MEMORY_PROVIDER_ID,
+	transcriptSummaryBody,
+} from "./context/transcript-memory-provider.ts";
 import type { MemoryProvider } from "./extensions/types.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
@@ -116,6 +128,83 @@ function latestUserMessageText(messages: AgentMessage[]): string {
 	return "";
 }
 
+/** Durable record kind carrying the tiered memory evidence block (and its cleared form). */
+export const MEMORY_EVIDENCE_CUSTOM_TYPE = "memory_evidence";
+const MEMORY_EVIDENCE_CLEARED_TEXT =
+	"MEMORY EVIDENCE: none. Earlier memory evidence records are stale (no current evidence, or it is disabled or outside this model's budget); search memory again when evidence matters.";
+
+/** What one composition of the memory evidence record produced, before anything is published. */
+interface ComposedMemoryEvidence {
+	/** The evidence record or its cleared form; empty when this pass has nothing to say. */
+	records: AgentMessage[];
+	/** The inclusion decision to publish; absent leaves the standing one. */
+	inclusion?: MemoryPromptInclusionReport;
+	/** Transcript items admitted into the block; present only for a pass that queried history. */
+	transcriptAdmittedCount?: number;
+	admittedRecall?: { text: string; query: string };
+}
+
+/** Same host records: kind, content and cleared form, ignoring timestamps. */
+function sameHostRecords(left: readonly AgentMessage[], right: readonly AgentMessage[]): boolean {
+	if (left.length !== right.length) return false;
+	return left.every((message, index) => {
+		const other = right[index];
+		return (
+			message.role === "custom" &&
+			other?.role === "custom" &&
+			message.customType === other.customType &&
+			isDeepStrictEqual(message.content, other.content) &&
+			isDeepStrictEqual(message.details, other.details)
+		);
+	});
+}
+
+/** Identity of the user turn the latest user message opens; "" when the transcript has no user message. */
+function latestUserTurnKey(messages: AgentMessage[], text: string): string {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message?.role !== "user") continue;
+		return `${message.timestamp}:${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
+	}
+	return "";
+}
+
+/** What the user-turn request retrieved, kept so later requests of the same turn present the same evidence. */
+interface TurnRetrieval {
+	turnKey: string;
+	generation: number;
+	/** Memory content revision the report was retrieved at. */
+	revision: number;
+	queriedLongTerm: boolean;
+	queriedTranscript: boolean;
+	report: MemoryRetrievalReport;
+}
+
+/** The tier-composer source label of a transcript candidate (`memory:<providerId>`). */
+const TRANSCRIPT_SOURCE_LABEL = `memory:${TRANSCRIPT_MEMORY_PROVIDER_ID}`;
+
+/**
+ * Past-session history for a delegated lane: hits WITH their `tx:` handles (the lane's source admission
+ * is derived from them), or the real reason history could not be searched. A failure is stated, never
+ * rendered as an empty page.
+ */
+function renderLaneHistory(report: MemoryRetrievalReport): string {
+	const providerReport = report.providerReports.find((entry) => entry.providerId === TRANSCRIPT_MEMORY_PROVIDER_ID);
+	if (providerReport?.status === "failed") {
+		return `Past session history was not searched (${providerReport.error ?? "unknown failure"}).`;
+	}
+	if (providerReport?.status === "blocked") {
+		return `Past session history was not searched (blocked: ${providerReport.rejectionReasons.join(", ")}).`;
+	}
+	if (report.results.length === 0) return "";
+	const lines = report.results.map(({ item }) => `- ${item.summary}`);
+	return [
+		"Relevant context recalled from past sessions (read-only reference, untrusted, may be stale):",
+		...lines,
+		"Pass a bracketed handle back as ref to read that source's exact text.",
+	].join("\n");
+}
+
 function emptyMemoryRetrievalReport(maxResults: number): MemoryRetrievalReport {
 	return { request: { query: "", maxResults }, providerReports: [], results: [], contextItems: [] };
 }
@@ -166,6 +255,11 @@ export interface MemoryControllerDeps {
 	getContextWindow(): number | undefined;
 	/** Latest active goal state, used for short-term current-work memory. */
 	getGoalState(): GoalState | undefined;
+	/**
+	 * Headroom of the request the memory block will join (prompt already carried, reply reserve) for these
+	 * messages. Absent in narrow hosts: the budget is then bounded by the context window alone.
+	 */
+	getPromptHeadroom?(messages: readonly AgentMessage[]): PromptHeadroom | undefined;
 	/** The session's operator-facing warning path; managed-memory notices are reported through it. */
 	emitWarning(message: string): void;
 	/**
@@ -212,8 +306,17 @@ export class MemoryController {
 	private _localGraphResolved = false;
 	private _latestMemoryRetrievalReport: MemoryRetrievalReport | undefined = undefined;
 	private _latestMemoryPromptInclusionReport: MemoryPromptInclusionReport | undefined = undefined;
-	/** True only when this pass actually admitted long-term providers. */
+	/** True only when this pass actually admitted long-term providers or the transcript history provider. */
 	private _lastLongTermQueryAttempted = false;
+	/**
+	 * Transcript evidence the latest prompt memory block actually admitted, for recall-effectiveness
+	 * scoring. Written by the block composer, consumed (and cleared) once per submitted turn.
+	 */
+	private _admittedRecall: { text: string; query: string } | undefined;
+	/** The latest user turn's retrieval, reused by the turn's later requests (see `runMemoryRetrieval`). */
+	private _turnRetrieval: TurnRetrieval | undefined;
+	/** Transcript items the latest query pass admitted into the prompt block (diagnostics). */
+	private _latestTranscriptAdmittedCount = 0;
 	/** Plug-and-play memory subsystem. Recreated on each (re)initialize so reload is safe. */
 	private _memoryManager: MemoryManager = new MemoryManager();
 	/** Active generation's single durable file/OKF writer, also used by parent-owned reflection. */
@@ -323,7 +426,7 @@ export class MemoryController {
 				!icm ||
 				![
 					"memory_context",
-					"memory_evidence",
+					MEMORY_EVIDENCE_CUSTOM_TYPE,
 					"user_persona",
 					"reflection_cue",
 					"reflection_turn_trigger",
@@ -444,10 +547,19 @@ export class MemoryController {
 		return this._localGraphProvider;
 	}
 
-	private _memoryBudget(configuredMaxResults: number) {
+	/** The history backend as a retrieval provider, bound to one memory generation. */
+	private _getTranscriptMemoryProvider(generation: number): ContextMemoryProvider {
+		return createTranscriptMemoryProvider(
+			() => this._currentTranscriptReader(generation),
+			() => this._projectId(),
+		);
+	}
+
+	private _memoryBudget(configuredMaxResults: number, headroom?: PromptHeadroom) {
 		return resolveMemoryPromptBudget({
 			contextWindow: this.deps.getContextWindow(),
 			configuredMaxResults,
+			...(headroom ?? {}),
 		});
 	}
 
@@ -478,6 +590,7 @@ export class MemoryController {
 		if (!this._legacyMemoryEnabled()) return emptyMemoryRetrievalReport(0);
 		const generation = this._memoryGeneration;
 		let queriedLongTerm = false;
+		let queriedTranscript = false;
 		try {
 			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 			if (!settings.enabled) {
@@ -487,7 +600,25 @@ export class MemoryController {
 				return report;
 			}
 			const query = latestUserMessageText(messages);
-			const budget = this._memoryBudget(settings.maxResults);
+			const userTurn = lastMessageIsUserTurn(messages);
+			const turnKey = latestUserTurnKey(messages, query);
+			// Later requests of a turn (tool loops) are not user-turn requests, so they query no
+			// long-term or history provider. They present the turn's own evidence instead: reused as is
+			// while memory is unchanged, retrieved again with the turn's decisions when it changed. A new
+			// user turn decides and queries afresh.
+			const turn = this._turnRetrieval;
+			const carried =
+				!userTurn && turnKey !== "" && turn?.turnKey === turnKey && turn.generation === generation
+					? turn
+					: undefined;
+			if (carried && carried.revision === this._memoryContentRevision) {
+				queriedLongTerm = carried.queriedLongTerm;
+				queriedTranscript = carried.queriedTranscript;
+				this._lastLongTermQueryAttempted = queriedLongTerm || queriedTranscript;
+				return carried.report;
+			}
+			const revision = this._memoryContentRevision;
+			const budget = this._memoryBudget(settings.maxResults, this.deps.getPromptHeadroom?.(messages));
 			const currentWork = collectCurrentWorkMemory({ goalState: this.deps.getGoalState() });
 			const longTermDecision = shouldQueryLongTermMemory({
 				latestUserText: query,
@@ -495,8 +626,13 @@ export class MemoryController {
 				budget,
 				currentWorkCandidateCount: currentWork.length,
 			});
-			queriedLongTerm = longTermDecision.shouldQuery && lastMessageIsUserTurn(messages);
-			this._lastLongTermQueryAttempted = queriedLongTerm;
+			queriedLongTerm = carried ? carried.queriedLongTerm : longTermDecision.shouldQuery && userTurn;
+			// Past-session history keeps its own recall gate (substantial turn, adaptive to how useful
+			// recall has been) alongside the long-term trigger: either one asks the history provider.
+			queriedTranscript = carried
+				? carried.queriedTranscript
+				: userTurn && (queriedLongTerm || this.shouldAttemptRecall(query));
+			this._lastLongTermQueryAttempted = queriedLongTerm || queriedTranscript;
 			const queryFileStore = this._shouldQueryFileStoreFallback(budget);
 			const providers = queryFileStore ? [this._getFileStoreMemoryProvider(budget)] : [];
 			if (queriedLongTerm) {
@@ -512,6 +648,7 @@ export class MemoryController {
 				const graph = this._getLocalGraphProvider();
 				if (graph) providers.push(graph);
 			}
+			if (queriedTranscript) providers.push(this._getTranscriptMemoryProvider(generation));
 			const maxResults = budget.enabled ? Math.min(settings.maxResults, budget.maxResults) : settings.maxResults;
 			const report = await retrieveMemoryForContext(
 				providers,
@@ -529,18 +666,29 @@ export class MemoryController {
 				return emptyMemoryRetrievalReport(0);
 			if (
 				queriedLongTerm ||
+				queriedTranscript ||
 				this._latestMemoryRetrievalReport === undefined ||
 				(queryFileStore && report.contextItems.length > 0)
 			) {
 				this._latestMemoryRetrievalReport = report;
 			}
+			if (turnKey !== "" && (userTurn || carried)) {
+				this._turnRetrieval = {
+					turnKey,
+					generation,
+					revision,
+					queriedLongTerm,
+					queriedTranscript,
+					report,
+				};
+			}
 			return report;
 		} catch {
 			if (!this._legacyMemoryEnabled() || generation !== this._memoryGeneration)
 				return emptyMemoryRetrievalReport(0);
-			this._lastLongTermQueryAttempted = queriedLongTerm;
+			this._lastLongTermQueryAttempted = queriedLongTerm || queriedTranscript;
 			const report = emptyMemoryRetrievalReport(0);
-			if (queriedLongTerm || this._latestMemoryRetrievalReport === undefined) {
+			if (queriedLongTerm || queriedTranscript || this._latestMemoryRetrievalReport === undefined) {
 				this._latestMemoryRetrievalReport = report;
 			}
 			return report;
@@ -562,7 +710,17 @@ export class MemoryController {
 			ref?.providerId === "pi-file-store" && ref.kind === "user_preference"
 				? "rule:user"
 				: `memory:${ref?.providerId ?? item.source}`;
-		const tier = ref?.kind === "user_preference" ? "standing" : "long_term";
+		// Past conversations are untrusted episodic evidence: they take only the budget curated memory
+		// leaves, whatever their word overlap with the query. Tradeoff, chosen deliberately: a block
+		// already full of curated lines admits no history, so recall of old conversation yields to
+		// current standing, work and long-term memory; `context_audit` shows when that happens (history
+		// retrieved, none admitted into the prompt block).
+		const tier =
+			ref?.kind === "user_preference"
+				? "standing"
+				: ref?.providerId === TRANSCRIPT_MEMORY_PROVIDER_ID
+					? "evidence_pointer"
+					: "long_term";
 		return {
 			id: item.id,
 			tier,
@@ -588,30 +746,34 @@ export class MemoryController {
 	/**
 	 * Bounded prompt-surfacing for local memory evidence (see context/memory-tier-composer.ts):
 	 * default-on, but gated on TWO settings (`enabled` AND `includeInPrompt`) plus at least one
-	 * current-work, standing, or retrieved memory candidate -- the first
-	 * two are belt-and-suspenders on top of the fact that `runMemoryRetrieval` already
-	 * leaves `contextItems` empty whenever `enabled` is false, regardless of
-	 * `includeInPrompt`. Reuses the `report` this pass's `runMemoryRetrieval` call already
-	 * computed -- never re-queries the provider here.
+	 * current-work, standing, or retrieved memory candidate. Reuses the `report` this pass's
+	 * `runMemoryRetrieval` call already computed -- never re-queries a provider here.
 	 *
-	 * Appends exactly one `custom`/"memory_evidence" message wrapped by `wrapUntrustedText`
-	 * (the same fenced boundary + always-on system-prompt rule used for other untrusted content)
-	 * to the END of `messages`. It is a host transient in the transient-record sense
-	 * (agent-core transient-records.ts): string content keyed by its customType, so the request
-	 * planner records it durably once and again only when the recall changes, never displayed,
-	 * and its boundary id derives from the block's content so identical recall is byte-identical.
-	 * Superseded records are packed by context GC. Before this, the message carried its text as a
-	 * content array with a fresh random id per request: never a record, rebuilt at the tail of
-	 * every request, so the previous request's last message changed on every request and the
-	 * provider's prompt cache was re-prefilled from that point every time.
+	 * Composes exactly one `custom`/"memory_evidence" record wrapped by `wrapUntrustedText` (the same
+	 * fenced boundary + always-on system-prompt rule used for other untrusted content). It is a host
+	 * transient in the transient-record sense (kernel transient-records.ts): string content keyed by its
+	 * customType, so the request planner records it durably once and again only when the recall changes,
+	 * never displayed; its boundary id and timestamp derive from the block's content so identical recall
+	 * is byte-identical. Superseded records are packed by context GC.
 	 *
-	 * Also records a `MemoryPromptInclusionReport` (context/memory-diagnostics.ts) at each
-	 * branch below, for context_audit's diagnostic surface only -- this is pure bookkeeping
-	 * alongside the existing branches, not a new branch/condition: the messages returned
-	 * are unchanged by this recording.
+	 * When the block is disabled, excluded from the prompt, found nothing on a pass that queried, or fits
+	 * no candidate into the budget, the record is the cleared form (`HOST_TRANSIENT_CLEARED_DETAILS`): the
+	 * planner appends it once, only over an earlier evidence record, so a stale block is never left
+	 * looking current. A pass that queried nothing and has no candidates says nothing: the earlier block
+	 * remains the latest evidence there is.
+	 *
+	 * Composing is pure: it reads memory state and returns the records plus the diagnostics to publish.
+	 * `appendPromptMemory` publishes them only when the surrounding provider plan commits.
+	 *
+	 * @param queryPass whether the pass that produced `report` queried long-term or history providers
+	 * @param hasInclusionReport whether an earlier inclusion decision exists to leave standing
 	 */
-	maybeAppendMemoryEvidenceBlock(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[] {
-		if (!this._legacyMemoryEnabled()) return messages;
+	private _composeMemoryEvidence(
+		report: MemoryRetrievalReport,
+		headroom: PromptHeadroom | undefined,
+		queryPass: boolean,
+		hasInclusionReport: boolean,
+	): ComposedMemoryEvidence {
 		try {
 			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 			const candidates = this._memoryCandidates(report);
@@ -620,89 +782,98 @@ export class MemoryController {
 				includeInPrompt: settings.includeInPrompt,
 				selectedItemCount: candidates.length,
 			};
-			if (!settings.enabled) {
-				this._latestMemoryPromptInclusionReport = {
-					...base,
-					status: "disabled",
-					includedCount: 0,
-					omittedCount: 0,
-					blockChars: 0,
-				};
-				return messages;
-			}
-			if (!settings.includeInPrompt) {
-				this._latestMemoryPromptInclusionReport = {
-					...base,
-					status: "include_disabled",
-					includedCount: 0,
-					omittedCount: 0,
-					blockChars: 0,
-				};
-				return messages;
-			}
+			const cleared = (
+				status: MemoryPromptInclusionReport["status"],
+				counts: { includedCount: number; omittedCount: number } = { includedCount: 0, omittedCount: 0 },
+			): ComposedMemoryEvidence => ({
+				records: [this._hostTransient(MEMORY_EVIDENCE_CUSTOM_TYPE, MEMORY_EVIDENCE_CLEARED_TEXT, true)],
+				inclusion: { ...base, status, ...counts, blockChars: 0 },
+				...(queryPass ? { transcriptAdmittedCount: 0 } : {}),
+			});
+			if (!settings.enabled) return cleared("disabled");
+			if (!settings.includeInPrompt) return cleared("include_disabled");
 			if (candidates.length === 0) {
-				if (!this._lastLongTermQueryAttempted && this._latestMemoryPromptInclusionReport) {
-					return messages;
-				}
-				this._latestMemoryPromptInclusionReport = {
-					...base,
-					status: "no_results",
-					includedCount: 0,
-					omittedCount: 0,
-					blockChars: 0,
-				};
-				return messages;
+				if (!queryPass && hasInclusionReport) return { records: [] };
+				return cleared("no_results");
 			}
 
-			const budget = this._memoryBudget(settings.maxResults);
+			const budget = this._memoryBudget(settings.maxResults, headroom);
 			const block = composeTieredMemoryPromptBlock(candidates, budget);
 			if (!block.text) {
-				this._latestMemoryPromptInclusionReport = {
-					...base,
-					status: "empty_block",
-					includedCount: block.includedCount,
-					omittedCount: block.omittedCount,
-					blockChars: 0,
-				};
-				return messages;
+				return cleared("empty_block", { includedCount: block.includedCount, omittedCount: block.omittedCount });
 			}
 
 			// The boundary id is a function of the content: unpredictable to whoever authored the
 			// content (it would have to contain its own digest), and identical for identical recall.
 			const boundaryId = createHash("sha256").update(block.text).digest("hex").slice(0, 32);
 			const wrapped = wrapUntrustedText(block.text, "memory:tiered", { nonce: boundaryId });
-			const evidenceMessage = createCustomMessage(
-				"memory_evidence",
-				wrapped,
-				false,
-				undefined,
-				new Date().toISOString(),
-			);
-			this._latestMemoryPromptInclusionReport = {
-				...base,
-				status: "included",
-				includedCount: block.includedCount,
-				omittedCount: block.omittedCount,
-				blockChars: wrapped.length,
-				sourceLabel: "memory:tiered",
+			const admitted = this._admittedTranscript(candidates, block.includedIds, report.request.query);
+			return {
+				records: [this._hostTransient(MEMORY_EVIDENCE_CUSTOM_TYPE, wrapped, false)],
+				inclusion: {
+					...base,
+					status: "included",
+					includedCount: block.includedCount,
+					omittedCount: block.omittedCount,
+					blockChars: wrapped.length,
+					sourceLabel: "memory:tiered",
+				},
+				...(queryPass ? { transcriptAdmittedCount: admitted.count } : {}),
+				...(admitted.recall ? { admittedRecall: admitted.recall } : {}),
 			};
-			return [...messages, evidenceMessage];
 		} catch {
-			// `base` may not exist yet if the throw happened before it was computed (e.g.
-			// settings access or `report.contextItems` itself threw), so this branch cannot
-			// rely on it -- fall back to safe, fixed defaults rather than risk referencing
-			// a partially-evaluated value.
-			this._latestMemoryPromptInclusionReport = {
-				enabled: false,
-				includeInPrompt: false,
-				selectedItemCount: 0,
-				status: "failed",
-				includedCount: 0,
-				omittedCount: 0,
-				blockChars: 0,
+			// Settings access or the report itself threw before the counts existed: safe fixed defaults,
+			// and no record, so a failure never clears or replaces evidence already on record.
+			return {
+				records: [],
+				inclusion: {
+					enabled: false,
+					includeInPrompt: false,
+					selectedItemCount: 0,
+					status: "failed",
+					includedCount: 0,
+					omittedCount: 0,
+					blockChars: 0,
+				},
 			};
-			return messages;
 		}
+	}
+
+	/**
+	 * Which transcript items a composed block admitted. Only a pass that queried history reports a
+	 * count; the recall text is the snippet bodies, without their handles, for effectiveness scoring.
+	 */
+	private _admittedTranscript(
+		candidates: readonly MemoryTierCandidate[],
+		includedIds: readonly string[],
+		query: string,
+	): { count: number; recall?: { text: string; query: string } } {
+		const included = new Set(includedIds);
+		const bodies = candidates
+			.filter((candidate) => included.has(candidate.id) && candidate.sourceLabel === TRANSCRIPT_SOURCE_LABEL)
+			.map((candidate) => transcriptSummaryBody(candidate.summary));
+		return bodies.length > 0 ? { count: bodies.length, recall: { text: bodies.join("\n"), query } } : { count: 0 };
+	}
+
+	/** Publish a committed plan's diagnostics and admitted-recall record. */
+	private _publishMemoryEvidence(composed: ComposedMemoryEvidence): void {
+		if (composed.inclusion) this._latestMemoryPromptInclusionReport = composed.inclusion;
+		if (composed.transcriptAdmittedCount !== undefined) {
+			this._latestTranscriptAdmittedCount = composed.transcriptAdmittedCount;
+		}
+		if (composed.admittedRecall) this._admittedRecall = composed.admittedRecall;
+	}
+
+	/** Forget any admitted-recall record; called when a turn starts so an aborted turn cannot leak into the next. */
+	clearAdmittedRecall(): void {
+		this._admittedRecall = undefined;
+	}
+
+	/** The transcript evidence the prompt block admitted for this turn, once; undefined when none was. */
+	takeAdmittedRecall(): { text: string; query: string } | undefined {
+		const admitted = this._admittedRecall;
+		this._admittedRecall = undefined;
+		return admitted;
 	}
 
 	/** Read-only inspection of the latest memory-prompt-inclusion decision, for tests/debugging and context_audit. */
@@ -710,9 +881,38 @@ export class MemoryController {
 		return this._latestMemoryPromptInclusionReport ?? defaultMemoryPromptInclusionReport();
 	}
 
-	/** The plan's memory transients in pass order: the evidence block, then the persona record. */
-	appendPromptMemory(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[] {
-		return this.maybeAppendUserPersonaRecord(this.maybeAppendMemoryEvidenceBlock(messages, report));
+	/**
+	 * The plan's memory records in pass order: the evidence block (or its cleared form), then the persona
+	 * record. Nothing is published while planning. The returned plan is current only while the memory
+	 * generation, the content revision and the records composed from the same report under the same
+	 * headroom are unchanged, so a request planned against a different memory state is planned again;
+	 * `commit` publishes the inclusion report and the admitted-recall record once the plan is accepted.
+	 */
+	appendPromptMemory(messages: AgentMessage[], report: MemoryRetrievalReport): MemoryPromptPlan {
+		const generation = this._memoryGeneration;
+		if (!this._legacyMemoryEnabled()) {
+			return { messages, isCurrent: () => generation === this._memoryGeneration, commit: () => {} };
+		}
+		const revision = this._memoryContentRevision;
+		const headroom = this.deps.getPromptHeadroom?.(messages);
+		const queryPass = this._lastLongTermQueryAttempted;
+		const hasInclusionReport = this._latestMemoryPromptInclusionReport !== undefined;
+		const compose = () => ({
+			evidence: this._composeMemoryEvidence(report, headroom, queryPass, hasInclusionReport),
+			persona: this._userPersonaRecords(headroom),
+		});
+		const composed = compose();
+		const records = [...composed.evidence.records, ...composed.persona];
+		return {
+			messages: [...messages, ...records],
+			isCurrent: () => {
+				if (!this._legacyMemoryEnabled() || generation !== this._memoryGeneration) return false;
+				if (revision !== this._memoryContentRevision) return false;
+				const current = compose();
+				return sameHostRecords([...current.evidence.records, ...current.persona], records);
+			},
+			commit: () => this._publishMemoryEvidence(composed.evidence),
+		};
 	}
 
 	/** Managed memory files against their managed revisions (operator recovery view). */
@@ -748,43 +948,45 @@ export class MemoryController {
 	 * Content is deterministic per revision, so an unchanged snapshot is never re-sent. Child
 	 * sessions, whose static block is empty as well, contribute nothing.
 	 */
-	maybeAppendUserPersonaRecord(messages: AgentMessage[]): AgentMessage[] {
+	private _userPersonaRecords(headroom: PromptHeadroom | undefined): AgentMessage[] {
 		try {
 			const writer = this.getFileStoreWriter();
-			if (writer === undefined) return messages;
+			if (writer === undefined) return [];
 			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 			if (!settings.enabled || !settings.includeInPrompt) {
 				return [
-					...messages,
-					this._personaMessage(
+					this._hostTransient(
+						USER_PERSONA_CUSTOM_TYPE,
 						"USER PERSONA: memory is disabled or excluded from the prompt in this session; earlier persona records are stale.",
 						true,
 					),
 				];
 			}
-			const budget = this._memoryBudget(settings.maxResults);
+			const budget = this._memoryBudget(settings.maxResults, headroom);
 			const projection = writer.userPersonaProjection(
 				budget.enabled || budget.reason !== "missing_context_window" ? budget : undefined,
 			);
-			if (projection === undefined) return messages;
+			if (projection === undefined) return [];
 			if (!projection.changed) {
 				return projection.content === undefined
-					? messages
-					: [...messages, this._personaMessage(projection.content, true)];
+					? []
+					: [this._hostTransient(USER_PERSONA_CUSTOM_TYPE, projection.content, true)];
 			}
-			if (projection.content !== undefined) return [...messages, this._personaMessage(projection.content, false)];
+			if (projection.content !== undefined) {
+				return [this._hostTransient(USER_PERSONA_CUSTOM_TYPE, projection.content, false)];
+			}
 			const overBudget = `USER PERSONA: USER.md changed (revision ${projection.revision}) beyond this model's memory budget; earlier persona records are stale. Read USER.md when preferences matter.`;
-			return [...messages, this._personaMessage(overBudget, true)];
+			return [this._hostTransient(USER_PERSONA_CUSTOM_TYPE, overBudget, true)];
 		} catch {
-			return messages;
+			return [];
 		}
 	}
 
-	/** A persona record (content) or cleared marker, with a content-derived timestamp so retries are byte-identical. */
-	private _personaMessage(text: string, cleared: boolean): AgentMessage {
+	/** A host transient (content) or its cleared marker, with a content-derived timestamp so retries are byte-identical. */
+	private _hostTransient(customType: string, text: string, cleared: boolean): AgentMessage {
 		const digest = createHash("sha256").update(text).digest();
 		return createCustomMessage(
-			USER_PERSONA_CUSTOM_TYPE,
+			customType,
 			text,
 			false,
 			cleared ? HOST_TRANSIENT_CLEARED_DETAILS : undefined,
@@ -801,11 +1003,54 @@ export class MemoryController {
 	getMemoryAuditDiagnostics(): {
 		retrieval: MemoryRetrievalDiagnostics;
 		promptInclusion: MemoryPromptInclusionReport;
+		transcript: TranscriptMemoryDiagnostics;
 	} {
 		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 		return {
 			retrieval: sanitizeMemoryRetrievalReportForDiagnostics(this.getMemoryRetrievalReport(), settings),
 			promptInclusion: this.getMemoryPromptInclusionReport(),
+			transcript: sanitizeTranscriptHistoryForDiagnostics(this.getTranscriptHistoryStatus()),
+		};
+	}
+
+	/**
+	 * Operator view of past-session history recall: index coverage, the transcript provider's slot in
+	 * the latest retrieval pass (with its real failure text) and what the prompt block admitted. Reads
+	 * stored state only; never queries.
+	 */
+	getTranscriptHistoryStatus(): TranscriptHistoryStatus {
+		const enabled = this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled;
+		const recall = this._legacyMemoryEnabled() ? this._transcriptRecall : undefined;
+		const health = recall?.health();
+		const availability: TranscriptHistoryStatus["availability"] = !enabled
+			? "disabled"
+			: health === undefined || health.state === "failed"
+				? "unavailable"
+				: health.state === "loading"
+					? "loading"
+					: "active";
+		const coverage = availability === "active" ? recall?.coverage() : undefined;
+		const report = this._latestMemoryRetrievalReport;
+		const providerReport = report?.providerReports.find(
+			(entry) => entry.providerId === TRANSCRIPT_MEMORY_PROVIDER_ID,
+		);
+		return {
+			availability,
+			...(health?.state === "failed" && health.reason !== undefined ? { unavailableReason: health.reason } : {}),
+			...(coverage ? { coverage } : {}),
+			...(report && providerReport
+				? {
+						latestRetrieval: {
+							status: providerReport.status,
+							resultCount: providerReport.resultCount,
+							sourceRefCount: report.results.filter(
+								(result) => result.item.providerId === TRANSCRIPT_MEMORY_PROVIDER_ID,
+							).length,
+							...(providerReport.error !== undefined ? { error: providerReport.error } : {}),
+						},
+					}
+				: {}),
+			admittedInPromptCount: this._latestTranscriptAdmittedCount,
 		};
 	}
 
@@ -1024,16 +1269,22 @@ export class MemoryController {
 		const staticBlock = this._memoryManager
 			.buildSystemPromptBlockFresh(input.budget)
 			.replace(FILE_STORE_MEMORY_SYSTEM_NOTE, "[Read-only snapshot for a delegated worker.]");
-		const [recalled, okfReport] = await Promise.all([
+		const retrievalOptions = {
+			createdAtTurn: input.turnIndex,
+			maxResults: input.maxResults,
+			defaultLocalPolicy: DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
+		};
+		const [lifecycleRecall, okfReport, historyReport] = await Promise.all([
 			this.prefetchRecall(input.query),
 			retrieveMemoryForContext(
 				[this._getMemoryOkfProvider()],
 				{ query: input.query, maxResults: input.maxResults },
-				{
-					createdAtTurn: input.turnIndex,
-					maxResults: input.maxResults,
-					defaultLocalPolicy: DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
-				},
+				retrievalOptions,
+			),
+			retrieveMemoryForContext(
+				[this._getTranscriptMemoryProvider(input.generation)],
+				{ query: input.query, maxResults: input.maxResults },
+				retrievalOptions,
 			),
 		]);
 		if (
@@ -1046,7 +1297,7 @@ export class MemoryController {
 		const okf = okfReport.results
 			.map(({ item }) => `[OKF ${item.title ?? item.id}] ${item.summary}\n${item.content ?? ""}`)
 			.join("\n\n");
-		const combined = [staticBlock, okf, recalled]
+		const combined = [staticBlock, okf, lifecycleRecall, renderLaneHistory(historyReport)]
 			.filter((part) => part.trim().length > 0)
 			.join("\n\n")
 			.slice(0, 8000);
@@ -1118,6 +1369,9 @@ export class MemoryController {
 		this._latestMemoryRetrievalReport = undefined;
 		this._latestMemoryPromptInclusionReport = undefined;
 		this._lastLongTermQueryAttempted = false;
+		this._admittedRecall = undefined;
+		this._turnRetrieval = undefined;
+		this._latestTranscriptAdmittedCount = 0;
 		// Managed notices are deduped per target and kind by the on-disk revision they describe and must
 		// SURVIVE a reload: re-initializing the same memory system re-reads the same files, so clearing
 		// here re-announced a drift the operator had already been told about (see _reportManagedNotices).

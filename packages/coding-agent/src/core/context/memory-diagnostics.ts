@@ -11,6 +11,7 @@
  * allow-list cannot leak a field it was never told to copy.
  */
 
+import type { TranscriptCoverage } from "../memory/transcript-memory-contracts.ts";
 import type { MemoryPolicyRejectionReason } from "./memory-provider-contract.ts";
 import type { MemoryProviderRetrievalStatus, MemoryRetrievalReport } from "./memory-retrieval.ts";
 
@@ -51,6 +52,18 @@ export interface MemoryRetrievalProviderDiagnostics {
 	status: MemoryProviderRetrievalStatus;
 	rejectionReasons: MemoryPolicyRejectionReason[];
 	resultCount: number;
+	/**
+	 * For a failed provider, the leading typed status of its error (`pending`, `unavailable`, ...) or
+	 * `error` when it carries none. The error text itself is never projected: it may embed a path.
+	 */
+	failure?: string;
+}
+
+/** Typed reader statuses a transcript provider error may start with (`<status>: <reason>`). */
+const TYPED_FAILURE_STATUS = /^(pending|unavailable|forbidden|not_found|expired|uncaptured|stale_snapshot):/;
+
+export function failureClassOfError(error: string | undefined): string {
+	return TYPED_FAILURE_STATUS.exec(error ?? "")?.[1] ?? "error";
 }
 
 export interface MemoryRetrievalDiagnostics {
@@ -78,7 +91,143 @@ export function sanitizeMemoryRetrievalReportForDiagnostics(
 			status: providerReport.status,
 			rejectionReasons: [...providerReport.rejectionReasons],
 			resultCount: providerReport.resultCount,
+			...(providerReport.status === "failed" ? { failure: failureClassOfError(providerReport.error) } : {}),
 		})),
 		selectedItemCount: report.contextItems.length,
 	};
+}
+
+// ---------------------------------------------------------------------------------------------
+// Past-session history (transcript recall)
+// ---------------------------------------------------------------------------------------------
+
+/** What the operator-facing view knows about history recall; the diagnostic projection is derived from it. */
+export interface TranscriptHistoryStatus {
+	availability: "disabled" | "unavailable" | "loading" | "active";
+	/** Why the index is unavailable (real cause). Operator view only. */
+	unavailableReason?: string;
+	/** Absent while the index is loading or when the backend is unavailable. */
+	coverage?: TranscriptCoverage;
+	/** The transcript provider's slot in the latest retrieval pass, when it was queried. */
+	latestRetrieval?: {
+		status: MemoryProviderRetrievalStatus;
+		resultCount: number;
+		/** Returned hits that each name an exact source (`tx:` handle). */
+		sourceRefCount: number;
+		/** The provider's real failure text. Operator view only. */
+		error?: string;
+	};
+	/** Transcript items admitted into the prompt memory block of the latest query pass. */
+	admittedInPromptCount: number;
+}
+
+export interface ReasonCount {
+	reason: string;
+	count: number;
+}
+
+export interface TranscriptCoverageDiagnostics {
+	sessionsIndexed: number;
+	sessionsSkipped: number;
+	spansIndexed: number;
+	spansUncaptured: number;
+	truncated: boolean;
+	skipped: ReasonCount[];
+	uncaptured: ReasonCount[];
+	lastError?: { at: string; kind: string };
+}
+
+export interface TranscriptMemoryDiagnostics {
+	availability: TranscriptHistoryStatus["availability"];
+	coverage?: TranscriptCoverageDiagnostics;
+	latestRetrieval?: {
+		status: MemoryProviderRetrievalStatus;
+		resultCount: number;
+		sourceRefCount: number;
+		failure?: string;
+	};
+	admittedInPromptCount: number;
+}
+
+const TOP_REASONS = 5;
+const MAX_ERROR_KIND_CHARS = 64;
+
+function topReasons(reasons: Readonly<Record<string, number>>): ReasonCount[] {
+	return Object.entries(reasons)
+		.map(([reason, count]) => ({ reason, count }))
+		.sort((left, right) => right.count - left.count || left.reason.localeCompare(right.reason))
+		.slice(0, TOP_REASONS);
+}
+
+/** Allow-list projection: counts, reason keys and the error CLASS only; never text that may hold a path or content. */
+export function sanitizeTranscriptHistoryForDiagnostics(status: TranscriptHistoryStatus): TranscriptMemoryDiagnostics {
+	const coverage = status.coverage;
+	const retrieval = status.latestRetrieval;
+	return {
+		availability: status.availability,
+		...(coverage
+			? {
+					coverage: {
+						sessionsIndexed: coverage.sessionsIndexed,
+						sessionsSkipped: coverage.sessionsSkipped,
+						spansIndexed: coverage.spansIndexed,
+						spansUncaptured: coverage.spansUncaptured,
+						truncated: coverage.truncated,
+						skipped: topReasons(coverage.skipped),
+						uncaptured: topReasons(coverage.uncaptured),
+						...(coverage.lastError
+							? {
+									lastError: {
+										at: coverage.lastError.at,
+										kind:
+											coverage.lastError.message.split(": ", 1)[0]?.slice(0, MAX_ERROR_KIND_CHARS) ??
+											"error",
+									},
+								}
+							: {}),
+					},
+				}
+			: {}),
+		...(retrieval
+			? {
+					latestRetrieval: {
+						status: retrieval.status,
+						resultCount: retrieval.resultCount,
+						sourceRefCount: retrieval.sourceRefCount,
+						...(retrieval.status === "failed" ? { failure: failureClassOfError(retrieval.error) } : {}),
+					},
+				}
+			: {}),
+		admittedInPromptCount: status.admittedInPromptCount,
+	};
+}
+
+function describeReasonCounts(reasons: readonly ReasonCount[]): string {
+	return reasons.length === 0 ? "" : ` (${reasons.map(({ reason, count }) => `${reason}=${count}`).join(", ")})`;
+}
+
+/** Bounded, deterministic lines for context_audit and `/memory history`: safe metadata only. */
+export function formatTranscriptMemoryLines(diagnostics: TranscriptMemoryDiagnostics): string[] {
+	const lines: string[] = [];
+	const coverage = diagnostics.coverage;
+	if (coverage) {
+		lines.push(
+			`History recall: ${diagnostics.availability}; ${coverage.sessionsIndexed} session(s) indexed, ${coverage.sessionsSkipped} skipped${describeReasonCounts(coverage.skipped)}; ${coverage.spansIndexed} span(s) indexed, ${coverage.spansUncaptured} uncaptured${describeReasonCounts(coverage.uncaptured)}; indexing ${coverage.truncated ? "truncated by its budget" : "complete"}`,
+		);
+		if (coverage.lastError)
+			lines.push(`  last indexing error at ${coverage.lastError.at}: ${coverage.lastError.kind}`);
+	} else {
+		lines.push(
+			`History recall: ${diagnostics.availability}${diagnostics.availability === "active" ? "; coverage not yet reported" : ""}`,
+		);
+	}
+	const retrieval = diagnostics.latestRetrieval;
+	if (retrieval) {
+		const outcome =
+			retrieval.status === "failed"
+				? `failed (${retrieval.failure ?? "error"})`
+				: `${retrieval.status}, ${retrieval.resultCount} result(s), ${retrieval.sourceRefCount} source ref(s)`;
+		lines.push(`  latest retrieval: ${outcome}; ${diagnostics.admittedInPromptCount} admitted into the prompt block`);
+	}
+	return lines;
 }
