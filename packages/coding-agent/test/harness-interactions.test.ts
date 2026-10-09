@@ -7022,8 +7022,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 			const settlement: Partial<
 				Record<
 					| "afterObligationOpen"
-					| "afterE11Start"
-					| "afterE11Settled"
+					| "afterE11AuxStart"
+					| "afterE11AuxSettled"
 					| "beforeCompact"
 					| "afterApply"
 					| "afterFreshOpen"
@@ -7033,784 +7033,6 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				>
 			> = {};
 			settlement.afterObligationOpen = settlementFacts(session, created.sessionManager, autonomy);
-			// E11 (large worker output through the native artifact, read back by native status): a worker emits a large distinct text
-			// block and a truthful typed report in one final assistant message. The raw text becomes the artifact; status by agentId
-			// names it; a small follow-up report must borrow no older pointer; the historical lane keeps its own pointer.
-			const E11_LARGE = [
-				"E11-LARGE-OUTPUT-MARKER",
-				...Array.from(
-					{ length: 1400 },
-					(_unused, index) =>
-						`E11 report line ${index}: checkpoint ${index % 97} recorded value ${(index * 2654435761) % 1000003}.`,
-				),
-			].join("\n");
-			// A second, distinct large generation: its own marker and lines, so each generation has its own digest.
-			const E11_LARGE_SECOND = [
-				"E11-SECOND-LARGE-MARKER",
-				...Array.from(
-					{ length: 1400 },
-					(_unused, index) =>
-						`E11 second report line ${index}: segment ${index % 89} recorded value ${(index * 1103515245) % 999983}.`,
-				),
-			].join("\n");
-			const E11_REPORT = "The large output is reported.";
-			const E11_REPORT_SECOND = "The second large output is reported.";
-			const E11_SMALL = "Small report is ready.";
-			expect(Buffer.byteLength(E11_LARGE), "the output exceeds the inline threshold").toBeGreaterThan(
-				WORKER_TERMINAL_OUTPUT_INLINE_BYTES,
-			);
-			const e11Reported = createBarrier();
-			const e11SecondReported = createBarrier();
-			// The second generation's provider turn is held before its terminal: the status reads happen while it runs.
-			const e11SecondHeld = createBarrier();
-			let e11SecondEpoch: number | undefined;
-			const e11SecondRelease = createBarrier();
-			const e11SmallReported = createBarrier();
-			const startIdentity = (): { agentId: string; laneId: string } => {
-				for (const message of session.messages) {
-					if (message.role !== "toolResult" || message.toolName !== "delegate") continue;
-					const details = message.details as
-						| { started?: unknown; label?: unknown; agentId?: unknown; laneId?: unknown }
-						| undefined;
-					if (
-						details?.started === true &&
-						details.label === "Report the large output once." &&
-						typeof details.agentId === "string" &&
-						typeof details.laneId === "string"
-					) {
-						return { agentId: details.agentId, laneId: details.laneId };
-					}
-				}
-				throw new Error("the start result carries no agent or lane id");
-			};
-			// The first generation's artifact file, resolved from the admitted attempt's native result at the read's request.
-			const e11ArtifactPath = (): string => {
-				// Pure projection read: the admitted agent's first attempt that carries a native result, at the read's request.
-				const attempt = Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).find(
-					(candidate) => candidate.taskId === startIdentity().laneId && candidate.result !== undefined,
-				);
-				const uri = attempt?.result?.artifacts[0]?.uri;
-				if (typeof uri !== "string") throw new Error("the first large attempt carries no artifact");
-				return fileURLToPath(uri);
-			};
-			// The continuation offset a truncated read announces; a read without one is the last chunk.
-			const e11ContinuationOffset = (request: ScriptedRequest, toolCallId: string): number => {
-				const result = request.context.messages.find(
-					(message) => message.role === "toolResult" && message.toolCallId === toolCallId,
-				);
-				const text =
-					result?.role === "toolResult"
-						? result.content.map((block) => (block.type === "text" ? block.text : "")).join("")
-						: "";
-				const match = /Use offset=(\d+) to continue\./.exec(text);
-				if (!match) throw new Error(`the read ${toolCallId} announces no continuation`);
-				return Number(match[1]);
-			};
-			const e11Observed: {
-				sequence?: number;
-				stopReason?: string;
-				blockTypes?: string[];
-				textBytes?: number;
-				markerCount?: number;
-			} = {};
-			world.provider.enqueue(
-				"worker-c",
-				{
-					name: "e11-large-report",
-					onTerminal: (request, message) => {
-						const text = message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
-						e11Observed.sequence = request.sequence;
-						e11Observed.stopReason = message.stopReason;
-						e11Observed.blockTypes = message.content.map((block) => block.type);
-						e11Observed.textBytes = Buffer.byteLength(text);
-						e11Observed.markerCount = text.split("E11-LARGE-OUTPUT-MARKER").length - 1;
-					},
-					reply: {
-						content: [
-							{ type: "text", text: E11_LARGE },
-							{
-								type: "toolCall",
-								id: "e11-report-1",
-								name: "submit_report",
-								arguments: { status: "completed", summary: E11_REPORT },
-							},
-						],
-						stopReason: "toolUse",
-					},
-				},
-				{
-					name: "e11-second-large-report",
-					check: () => {
-						e11SecondHeld.release();
-					},
-					gate: e11SecondRelease.promise,
-					reply: {
-						content: [
-							{ type: "text", text: E11_LARGE_SECOND },
-							{
-								type: "toolCall",
-								id: "e11-report-2",
-								name: "submit_report",
-								arguments: { status: "completed", summary: E11_REPORT_SECOND },
-							},
-						],
-						stopReason: "toolUse",
-					},
-				},
-				{
-					name: "e11-small-report",
-					reply: {
-						content: [
-							{
-								type: "toolCall",
-								id: "e11-small-1",
-								name: "submit_report",
-								arguments: { status: "completed", summary: E11_SMALL },
-							},
-						],
-						stopReason: "toolUse",
-					},
-				},
-			);
-			world.provider.enqueue(
-				"root",
-				calls("e11-start", [
-					{
-						id: "e11-start-1",
-						name: "delegate",
-						arguments: {
-							action: "start",
-							model: { provider: "harness-script", modelId: "worker-c" },
-							instructions: "Report the large output once.",
-						},
-					},
-				]),
-				{ name: "e11-started", reply: { content: [{ type: "text", text: "The large worker is running." }] } },
-				dynamicCalls(
-					"e11-handoff",
-					(request) => [
-						{
-							id: "e11-status-1",
-							name: "delegate",
-							arguments: { action: "status", agentId: latestAgentIdForTrack(request, "worker-c") },
-						},
-					],
-					(request) => {
-						if (!JSON.stringify(request.context.messages).includes(E11_REPORT)) {
-							throw new Error("the large worker's report did not reach the root");
-						}
-						if (
-							JSON.stringify(world.provider.getPendingStepNames("worker-c")) !==
-							JSON.stringify(["e11-second-large-report", "e11-small-report"])
-						) {
-							throw new Error(
-								`the large turn left other steps pending: ${JSON.stringify(world.provider.getPendingStepNames("worker-c"))}`,
-							);
-						}
-						e11Reported.release();
-					},
-				),
-				{ name: "e11-read", reply: { content: [{ type: "text", text: "The large output is read." }] } },
-				dynamicCalls("e11-chunk-1", () => [
-					{ id: "e11-read-1", name: "read", arguments: { path: e11ArtifactPath() } },
-				]),
-				dynamicCalls("e11-chunk-2", (request) => [
-					{
-						id: "e11-read-2",
-						name: "read",
-						arguments: { path: e11ArtifactPath(), offset: e11ContinuationOffset(request, "e11-read-1") },
-					},
-				]),
-				{ name: "e11-chunked", reply: { content: [{ type: "text", text: "The artifact is read in chunks." }] } },
-				dynamicCalls("e11-follow-large", (request) => [
-					{
-						id: "e11-follow-large-1",
-						name: "delegate",
-						arguments: {
-							action: "follow_up",
-							agentId: latestAgentIdForTrack(request, "worker-c"),
-							message: "Report the second large output.",
-						},
-					},
-				]),
-				{
-					name: "e11-follow-large-started",
-					check: () => {
-						e11SecondEpoch = session.getForegroundActivity().epoch;
-						if (e11SecondEpoch === undefined)
-							throw new Error("the second report foreground turn holds no submission epoch");
-					},
-					reply: { content: [{ type: "text", text: "The second large report is running." }] },
-				},
-				dynamicCalls("e11-status-current", () => [
-					{
-						id: "e11-status-current-1",
-						name: "delegate",
-						arguments: { action: "status", agentId: startIdentity().agentId },
-					},
-				]),
-				dynamicCalls("e11-status-historical-held", () => [
-					{
-						id: "e11-status-historical-1",
-						name: "delegate",
-						arguments: { action: "status", laneId: startIdentity().laneId },
-					},
-				]),
-				{
-					name: "e11-held-read",
-					reply: { content: [{ type: "text", text: "The second report is still running." }] },
-				},
-				dynamicCalls(
-					"e11-second-handoff",
-					(request) => [
-						{
-							id: "e11-status-4",
-							name: "delegate",
-							arguments: { action: "status", agentId: latestAgentIdForTrack(request, "worker-c") },
-						},
-					],
-					(request) => {
-						if (!JSON.stringify(request.context.messages).includes(E11_REPORT_SECOND)) {
-							// Bounded mismatch diagnostic: pure reads and one console line, taken before the same primary Error is thrown.
-							// The attempt read is keyed by the admitted agent identity, because the running-attempt binding is declared later.
-							const primary = new Error("the second large report did not reach the root");
-							const mismatchDx: unknown[] = [];
-							try {
-								const foreground = session.getResourceSnapshot().foregroundRecovery;
-								const activity = session.getForegroundActivity();
-								const agentId = startIdentity().agentId;
-								const mismatch = JSON.stringify({
-									sequence: request.sequence,
-									modelId: request.model.id,
-									oldCapturedEpoch: e11SecondEpoch,
-									activityEpoch: activity.epoch,
-									activityBusy: activity.busy,
-									submissionEpoch: foreground.submissionEpoch,
-									activeRuns: foreground.activeRuns,
-									pendingIdleContinuation: session.backgroundLanes.hasPendingIdleContinuation(),
-									agentId,
-									agentAttempts: Object.values(
-										session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {},
-									)
-										.filter((attempt) => attempt.agentId === agentId)
-										.map((attempt) => ({
-											attemptId: attempt.attemptId,
-											taskId: attempt.taskId,
-											status: attempt.status,
-											reasonCode: attempt.reasonCode,
-										})),
-									lastRequestTexts: requestTexts(request)
-										.slice(-8)
-										.map((text) => text.slice(0, 750)),
-								});
-								console.error(`second report handoff mismatch: ${mismatch}`);
-							} catch (error) {
-								mismatchDx.push(error);
-							}
-							if (mismatchDx.length > 0) {
-								throw new AggregateError(
-									[primary, ...mismatchDx],
-									"the second report handoff diagnostic failed",
-								);
-							}
-							throw primary;
-						}
-						e11SecondReported.release();
-					},
-				),
-				{
-					name: "e11-second-read",
-					reply: { content: [{ type: "text", text: "The second large output is read." }] },
-				},
-				dynamicCalls("e11-follow", (request) => [
-					{
-						id: "e11-follow-1",
-						name: "delegate",
-						arguments: {
-							action: "follow_up",
-							agentId: latestAgentIdForTrack(request, "worker-c"),
-							message: "Report briefly.",
-						},
-					},
-				]),
-				{
-					name: "e11-follow-started",
-					reply: { content: [{ type: "text", text: "The brief follow-up is running." }] },
-				},
-				dynamicCalls(
-					"e11-small-handoff",
-					(request) => [
-						{
-							id: "e11-status-2",
-							name: "delegate",
-							arguments: { action: "status", agentId: latestAgentIdForTrack(request, "worker-c") },
-						},
-					],
-					(request) => {
-						if (!JSON.stringify(request.context.messages).includes(E11_SMALL)) {
-							throw new Error("the small follow-up report did not reach the root");
-						}
-						e11SmallReported.release();
-					},
-				),
-				dynamicCalls("e11-historical", () => [
-					{
-						id: "e11-status-3",
-						name: "delegate",
-						arguments: { action: "status", laneId: startIdentity().laneId },
-					},
-				]),
-				dynamicCalls("e11-retire", () => [
-					{
-						id: "e11-retire-1",
-						name: "delegate",
-						arguments: { action: "retire", agentId: startIdentity().agentId },
-					},
-				]),
-				{ name: "e11-done", reply: { content: [{ type: "text", text: "Both reports are read." }] } },
-			);
-			// The E11 owner words are classified where the turn reads the policy: this phase carries the verification families and the
-			// continuation family the previous intent now asks.
-			world.systemOne.enterPhase("e11", {
-				changes_model_pools: { kind: "noul", probability: 0.02 },
-				capabilities_authorized: { kind: "noul", probability: 0.02 },
-				local_commits_only: { kind: "noul", probability: 0.02 },
-				lifts_delivery_block: { kind: "noul", probability: 0.02 },
-				full_handoff: { kind: "noul", probability: 0.02 },
-				optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
-				step_relevant: { kind: "noul", probability: 0.97 },
-				evidence_sufficient_to_act: { kind: "noul", probability: 0.97 },
-				unsupported_assumption_present: { kind: "noul", probability: 0.02 },
-				route: { kind: "choice", choice: "inspect", confidence: 0.97 },
-				action_accomplished_step: { kind: "noul", probability: 0.02 },
-				conclusions_supported: { kind: "noul", probability: 0.97 },
-				scope_violation: { kind: "noul", probability: 0.02 },
-				unrelated_behavior_change: { kind: "noul", probability: 0.02 },
-				replan_required: { kind: "noul", probability: 0.02 },
-				next_status: { kind: "choice", choice: "continue", confidence: 0.97 },
-			});
-			await withDeadline(
-				trace,
-				"E11 start turn",
-				session.prompt("Start the large report worker and read its output."),
-			);
-			settlement.afterE11Start = settlementFacts(session, created.sessionManager, autonomy);
-			await withDeadline(trace, "large worker reported", e11Reported.promise, 90_000);
-			await withDeadline(trace, "E11 read turn settled", session.waitForForegroundIdle(), 90_000);
-			await withDeadline(trace, "chunked artifact read", session.prompt("Read the large output in chunks."), 90_000);
-			// One owned epoch promise and listener, armed before the second request. Its outcome is tagged at once, so the wait
-			// never rethrows an observer cause on its own. Independent causes are collected after the block, scenario first.
-			const e11Epoch: { settle?: { resolve: () => void; reject: (cause: unknown) => void } } = {};
-			const e11Released = new Promise<void>((resolve, reject) => {
-				e11Epoch.settle = { resolve, reject };
-			});
-			const e11Outcome = e11Released.then(
-				() => ({ released: true as const }),
-				(cause: unknown) => ({ released: false as const, cause }),
-			);
-			const e11Check = (): void => {
-				const settle = e11Epoch.settle;
-				if (settle === undefined || e11SecondEpoch === undefined) return;
-				try {
-					if (
-						session.getForegroundActivity().epoch !== e11SecondEpoch &&
-						session.getResourceSnapshot().foregroundRecovery.activeRuns === 0
-					) {
-						e11Epoch.settle = undefined;
-						settle.resolve();
-					}
-				} catch (error) {
-					e11Epoch.settle = undefined;
-					settle.reject(error);
-				}
-			};
-			const e11Unsubscribe = session.subscribeForegroundActivity(e11Check);
-			let scenarioCaught = false;
-			let scenarioCause: unknown;
-			let scenarioCutoff = false;
-			let observedOutcome: { released: true } | { released: false; cause: unknown } | undefined;
-			try {
-				await withDeadline(
-					trace,
-					"second large report requested",
-					session.prompt("Ask for the second large report."),
-					90_000,
-				);
-				await withDeadline(trace, "second large held", e11SecondHeld.promise, 90_000);
-				if (e11SecondEpoch === undefined) throw new Error("the second report foreground epoch was never captured");
-				e11Check();
-				await withDeadline(trace, "second foreground epoch released", e11Outcome, 90_000);
-			} catch (error) {
-				scenarioCaught = true;
-				scenarioCause = error;
-			} finally {
-				e11Unsubscribe();
-				const pending = e11Epoch.settle;
-				if (pending !== undefined && scenarioCaught) {
-					e11Epoch.settle = undefined;
-					scenarioCutoff = true;
-					pending.reject(scenarioCause);
-				}
-				observedOutcome = await e11Outcome;
-			}
-			const e11Causes: unknown[] = [];
-			if (scenarioCaught) e11Causes.push(scenarioCause);
-			if (observedOutcome !== undefined && !observedOutcome.released && !scenarioCutoff) {
-				e11Causes.push(observedOutcome.cause);
-			}
-			if (e11Causes.length === 1) throw e11Causes[0];
-			if (e11Causes.length > 1)
-				throw new AggregateError(e11Causes, "the second report foreground observation failed");
-			// Bounded held-status diagnostic. Pure reads only: BEFORE capture runs immediately before the same prompt call, with no await
-			// between them. A post-rejection capture, the console line and serialization are recorded in order after the primary error, and
-			// only actual diagnostic failures aggregate with it. Health is the public getter, bound to decisionEngine presence (qualified).
-			const heldStatusDx: unknown[] = [];
-			const captureHeldStatus = (): Record<string, unknown> => {
-				const activity = session.getForegroundActivity();
-				const foreground = session.getResourceSnapshot().foregroundRecovery;
-				const health = session.getSemanticPlaneHealth();
-				return {
-					oldCapturedEpoch: e11SecondEpoch,
-					activityEpoch: activity.epoch,
-					activityBusy: activity.busy,
-					submissionEpoch: foreground.submissionEpoch,
-					activeRuns: foreground.activeRuns,
-					foregroundRetrying: foreground.retrying,
-					isStreaming: session.isStreaming,
-					isCompacting: session.isCompacting,
-					isRetrying: session.isRetrying,
-					pendingIdleContinuation: session.backgroundLanes.hasPendingIdleContinuation(),
-					semanticState: health.state,
-					inFlightEvaluationIds: (health.inFlightEvaluations ?? []).map((evaluation) => evaluation.evaluationId),
-					completedEvaluationIds: session
-						.getSemanticEvaluations()
-						.slice(-20)
-						.map((record) => record.evaluationId),
-				};
-			};
-			let heldStatusBefore: Record<string, unknown> | undefined;
-			try {
-				heldStatusBefore = captureHeldStatus();
-			} catch (error) {
-				heldStatusDx.push(error);
-			}
-			const heldStatusPrompt = session.prompt("Check the second report while it runs.");
-			try {
-				await withDeadline(trace, "held status turn", heldStatusPrompt, 90_000);
-			} catch (primary) {
-				let heldStatusAfter: Record<string, unknown> | undefined;
-				try {
-					heldStatusAfter = captureHeldStatus();
-				} catch (error) {
-					heldStatusDx.push(error);
-				}
-				let heldStatusText = "unserializable";
-				try {
-					heldStatusText = JSON.stringify({ before: heldStatusBefore, after: heldStatusAfter }).slice(0, 5000);
-				} catch (error) {
-					heldStatusDx.push(error);
-				}
-				try {
-					console.error(`held status prompt refused: ${heldStatusText}`);
-				} catch (error) {
-					heldStatusDx.push(error);
-				}
-				if (heldStatusDx.length > 0) {
-					throw new AggregateError([primary, ...heldStatusDx], "held status diagnostic failed after the refusal");
-				}
-				throw primary;
-			}
-			if (heldStatusDx.length === 1) {
-				throw heldStatusDx[0];
-			}
-			if (heldStatusDx.length > 1) {
-				throw new AggregateError(heldStatusDx, "held status diagnostic capture failed before a successful prompt");
-			}
-			// Bounded control: while the second generation runs, its display carries no first-generation claim, pointer or digest and no
-			// terminal result. It shows no current terminal yet; generation identity is pinned separately below.
-			const e11HeldDetails = (toolCallId: string): Record<string, unknown> => {
-				const entry = created.sessionManager
-					.getBranch()
-					.find(
-						(candidate) =>
-							candidate.type === "message" &&
-							candidate.message.role === "toolResult" &&
-							candidate.message.toolCallId === toolCallId,
-					);
-				if (entry?.type !== "message" || entry.message.role !== "toolResult") {
-					throw new Error(`no durable status result for ${toolCallId}`);
-				}
-				return (entry.message.details ?? {}) as Record<string, unknown>;
-			};
-			const e11Running = Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).find(
-				(attempt) => attempt.agentId === startIdentity().agentId && attempt.status === "running",
-			);
-			if (e11Running === undefined) throw new Error("the second generation has no running attempt");
-			const e11Current = e11HeldDetails("e11-status-current-1");
-			const e11Historical = e11HeldDetails("e11-status-historical-1");
-			expect(
-				{ agentId: e11Current.agentId, laneId: e11Current.laneId },
-				"the running display names the admitted agent and its own lane",
-			).toEqual({ agentId: startIdentity().agentId, laneId: e11Running.taskId });
-			expect(e11Current.claimSummary, "the running attempt borrows no first-generation claim").toBeUndefined();
-			expect(
-				e11Current.outputArtifactUri,
-				"the running attempt borrows no first-generation pointer",
-			).toBeUndefined();
-			expect(JSON.stringify(e11Current), "the running display carries no first-generation proof").not.toContain(
-				E11_REPORT,
-			);
-			expect(JSON.stringify(e11Current), "the running display carries no first-generation digest").not.toContain(
-				createHash("sha256").update(E11_LARGE).digest("hex"),
-			);
-			expect(
-				{ laneId: e11Historical.laneId, claimSummary: e11Historical.claimSummary },
-				"the historical lane still names the first generation's claim",
-			).toEqual({ laneId: startIdentity().laneId, claimSummary: E11_REPORT });
-			expect(typeof e11Historical.outputArtifactUri, "the historical lane keeps its first pointer").toBe("string");
-			e11SecondRelease.release();
-			await withDeadline(trace, "second large report", e11SecondReported.promise, 90_000);
-			await withDeadline(trace, "second large read settled", session.waitForForegroundIdle(), 90_000);
-			await withDeadline(trace, "brief follow-up", session.prompt("Ask for a brief follow-up report."), 90_000);
-			await withDeadline(trace, "small worker reported", e11SmallReported.promise, 90_000);
-			await withDeadline(trace, "E11 foreground settled", session.waitForForegroundIdle(), 90_000);
-			settlement.afterE11Settled = settlementFacts(session, created.sessionManager, autonomy);
-			// Accepted native receipt linkage: the first generation's completed report has its matched successful submit receipt on the worker's own
-			// persisted transcript, under its own call id. The incomplete side is pinned in the late block; this is the accepted side.
-			const e11WorkerId = startIdentity().agentId;
-			const e11Binding = session.backgroundLanes.getTaskRuntimeSnapshot()?.agents[e11WorkerId];
-			if (e11Binding === undefined) throw new Error("the E11 worker has no binding for its receipts");
-			const e11Transcript = new WorkerConversationStore()
-				.open({
-					agentDir: world.agentDir,
-					resumeContext: e11Binding.resumeContext,
-					expectedLogicalAgentId: e11WorkerId,
-				})
-				.getRawTranscript();
-			expect(
-				matchedSubmitReceiptIn(e11Transcript, "e11-report-1"),
-				"the accepted report has its matched successful submit receipt on the worker's persisted transcript",
-			).toBe(true);
-			// Durable canonical identities: each status read is found on the branch by its own tool call id, never by position.
-			const e11Branch = created.sessionManager.getBranch();
-			const e11Status = (toolCallId: string) => {
-				const entry = e11Branch.find(
-					(candidate) =>
-						candidate.type === "message" &&
-						candidate.message.role === "toolResult" &&
-						candidate.message.toolCallId === toolCallId,
-				);
-				if (entry?.type !== "message" || entry.message.role !== "toolResult") {
-					throw new Error(`no durable status result for ${toolCallId}`);
-				}
-				return entry.message.details as
-					| {
-							outputArtifactUri?: unknown;
-							outputArtifactSizeBytes?: unknown;
-							agentId?: unknown;
-							laneId?: unknown;
-							claimSummary?: unknown;
-					  }
-					| undefined;
-			};
-			const latestStatus = e11Status("e11-status-1");
-			const followedStatus = e11Status("e11-status-2");
-			const historicalStatus = e11Status("e11-status-3");
-			const admitted = startIdentity();
-			expect(
-				{ agentId: latestStatus?.agentId, laneId: latestStatus?.laneId, claimSummary: latestStatus?.claimSummary },
-				"the latest status names the admitted agent and its lane, and its own summary",
-			).toEqual({ agentId: admitted.agentId, laneId: admitted.laneId, claimSummary: E11_REPORT });
-			expect(followedStatus?.agentId, "the follow-up stays on the admitted agent").toBe(admitted.agentId);
-			expect(followedStatus?.laneId, "the follow-up status names its own lane, not the first").not.toBe(
-				admitted.laneId,
-			);
-			expect(followedStatus?.claimSummary, "the follow-up summary is its own").toBe(E11_SMALL);
-			// The small third generation is its own admitted task: the one attempt that is neither the first nor the captured second.
-			const e11Third = Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).filter(
-				(attempt) =>
-					attempt.agentId === admitted.agentId &&
-					attempt.attemptId !== e11Running.attemptId &&
-					attempt.taskId !== admitted.laneId,
-			);
-			expect(
-				e11Third.map((attempt) => attempt.taskId),
-				"exactly one third attempt is admitted",
-			).toHaveLength(1);
-			expect(followedStatus?.laneId, "the small status names the third attempt's own task").toBe(
-				e11Third[0]?.taskId,
-			);
-			expect(e11Observed, "the large step emitted one text-and-tool-call terminal with the exact text").toEqual({
-				sequence: expect.any(Number),
-				stopReason: "toolUse",
-				blockTypes: ["text", "toolCall"],
-				textBytes: Buffer.byteLength(E11_LARGE),
-				markerCount: 1,
-			});
-			// Capture, native result and projection are separate observables, checked in that order: the file on disk under its
-			// content digest, then the admitted attempt's native result, then the status pointer.
-			// One observable chain, checked once so the failure names the layer: the file system, the admitted attempt's native
-			// result, and the status pointer. Only names, counts, digests and sizes are recorded, never the raw text.
-			const largeSha = createHash("sha256").update(E11_LARGE).digest("hex");
-			const outputFiles = [...world.io.fileEntries().keys()].filter((path) =>
-				path.includes("worker-output-artifacts"),
-			);
-			// The admitted task's own attempt, read from the native task runtime: the start lane is the task id of its first attempt.
-			const admittedAttemptId = Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).find(
-				(attempt) => attempt.taskId === admitted.laneId && attempt.result !== undefined,
-			)?.attemptId;
-			if (admittedAttemptId === undefined) throw new Error("the admitted lane carries no attempt id");
-			const nativeAttempt = session.backgroundLanes.getWorkerAttemptResult(admittedAttemptId);
-			const nativeUri = nativeAttempt?.artifacts[0]?.uri;
-			const persistedReport = [...world.io.fileEntries()]
-				.filter(([path]) => path.includes("worker-conversations") && path.endsWith(".jsonl"))
-				.flatMap(([, content]) => content.split("\n").filter((line) => line.length > 0))
-				.map(
-					(line) =>
-						JSON.parse(line) as {
-							message?: { role?: string; content?: Array<{ type: string; text?: string; id?: string }> };
-						} & { role?: string; content?: Array<{ type: string; text?: string; id?: string }> },
-				)
-				.map((entry) => entry.message ?? entry)
-				.find(
-					(message) =>
-						message.role === "assistant" &&
-						message.content?.some((block) => block.type === "toolCall" && block.id === "e11-report-1"),
-				);
-			const persistedText = (persistedReport?.content ?? [])
-				.map((block) => (block.type === "text" ? (block.text ?? "") : ""))
-				.join("");
-			const e11Chain = {
-				persistedAssistantTextBytes: Buffer.byteLength(persistedText),
-				persistedMarkerCount: persistedText.split("E11-LARGE-OUTPUT-MARKER").length - 1,
-				outputArtifactFileCount: outputFiles.length,
-				matchingDigestFileCount: outputFiles.filter((path) => path.endsWith(`-${largeSha}.txt`)).length,
-				nativeResultPresent: nativeAttempt !== undefined,
-				nativeArtifactDigests: nativeAttempt?.artifacts.map((artifact) => artifact.digest),
-				nativeArtifactSizes: nativeAttempt?.artifacts.map((artifact) => artifact.sizeBytes),
-				nativeEvidenceCount: nativeAttempt?.evidence.length,
-				projectedUri: latestStatus?.outputArtifactUri,
-			};
-			expect(
-				e11Chain,
-				"the large output is persisted, captured to disk, carried by the native attempt, and projected by status",
-			).toEqual({
-				persistedAssistantTextBytes: Buffer.byteLength(E11_LARGE),
-				persistedMarkerCount: 1,
-				outputArtifactFileCount: 2,
-				matchingDigestFileCount: 1,
-				nativeResultPresent: true,
-				nativeArtifactDigests: [largeSha],
-				nativeArtifactSizes: [Buffer.byteLength(E11_LARGE)],
-				nativeEvidenceCount: expect.any(Number),
-				projectedUri: nativeUri,
-			});
-			const artifactUri = latestStatus?.outputArtifactUri;
-			if (typeof artifactUri !== "string") throw new Error("the latest status carries no artifact pointer");
-			expect(artifactUri.startsWith("file:"), "the pointer is a file URI").toBe(true);
-			const artifactPath = fileURLToPath(artifactUri);
-			expect(String(world.io.readFileSync(artifactPath, "utf8")), "the artifact holds the exact raw output").toBe(
-				E11_LARGE,
-			);
-			expect(
-				artifactPath.endsWith(`-${createHash("sha256").update(E11_LARGE).digest("hex")}.txt`),
-				"the file name carries the content digest",
-			).toBe(true);
-			expect(latestStatus?.outputArtifactSizeBytes, "the pointer size matches the bytes").toBe(
-				Buffer.byteLength(E11_LARGE),
-			);
-			expect(followedStatus?.outputArtifactUri, "a small follow-up report borrows no older pointer").toBeUndefined();
-			expect(historicalStatus?.outputArtifactUri, "the historical lane keeps its own pointer").toBe(artifactUri);
-			// Two distinct large generations, then a small current report: each status names its own generation, and the
-			// chunked root read of the first generation reconstructs the exact bytes that the host verifies by digest.
-			const secondStatus = e11Status("e11-status-4");
-			const secondUri = secondStatus?.outputArtifactUri;
-			if (typeof secondUri !== "string") throw new Error("the second large status carries no artifact pointer");
-			const secondPath = fileURLToPath(secondUri);
-			// Exact generation pins: the second status names the attempt captured while it ran, its pointer and size are that attempt's
-			// own result, and its persisted assistant text is the second report's exact bytes in the admitted conversation.
-			const admittedConversation =
-				session.backgroundLanes.getTaskRuntimeSnapshot()?.agents[admitted.agentId]?.resumeContext.sessionFile;
-			expect(admittedConversation, "the admitted resume context names its conversation file").toBeDefined();
-			expect(secondStatus?.laneId, "the second status names the captured second attempt's task").toBe(
-				e11Running.taskId,
-			);
-			const secondAttemptArtifact = session.backgroundLanes.getWorkerAttemptResult(e11Running.attemptId)
-				?.artifacts[0];
-			expect(
-				{ uri: secondUri, sizeBytes: secondStatus?.outputArtifactSizeBytes },
-				"the second pointer and size are the captured attempt's own artifact",
-			).toEqual({ uri: secondAttemptArtifact?.uri, sizeBytes: secondAttemptArtifact?.sizeBytes });
-			expect(
-				createHash("sha256")
-					.update(String(world.io.readFileSync(secondPath, "utf8")))
-					.digest("hex"),
-				"the file hashes to the attempt's own content digest",
-			).toBe(secondAttemptArtifact?.digest);
-			expect(
-				secondAttemptArtifact?.metadata,
-				"the attempt's artifact metadata names sha256 and completeness",
-			).toMatchObject({
-				digestAlgorithm: "sha256",
-				complete: true,
-			});
-			expect(
-				persistedGenerationText(world, "e11-report-2", admittedConversation),
-				"the second report's persisted text is its exact bytes",
-			).toBe(E11_LARGE_SECOND);
-			expect(
-				{
-					agentId: secondStatus?.agentId,
-					claimSummary: secondStatus?.claimSummary,
-					sizeBytes: secondStatus?.outputArtifactSizeBytes,
-				},
-				"the second large status names the admitted agent, its own summary and its size",
-			).toEqual({
-				agentId: admitted.agentId,
-				claimSummary: E11_REPORT_SECOND,
-				sizeBytes: Buffer.byteLength(E11_LARGE_SECOND),
-			});
-			expect(secondPath, "the second generation has its own artifact file").not.toBe(artifactPath);
-			expect(
-				secondPath.endsWith(`-${createHash("sha256").update(E11_LARGE_SECOND).digest("hex")}.txt`),
-				"the second artifact is named by its own digest",
-			).toBe(true);
-			expect(String(world.io.readFileSync(secondPath, "utf8")), "the second artifact holds the exact output").toBe(
-				E11_LARGE_SECOND,
-			);
-			// Durable canonical read results by call id, without the provider envelope or the continuation notice.
-			const readText = (toolCallId: string): string => {
-				const entry = e11Branch.find(
-					(candidate) =>
-						candidate.type === "message" &&
-						candidate.message.role === "toolResult" &&
-						candidate.message.toolCallId === toolCallId,
-				);
-				if (entry?.type !== "message" || entry.message.role !== "toolResult") {
-					throw new Error(`no durable read result for ${toolCallId}`);
-				}
-				return entry.message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
-			};
-			const withoutReadEnvelope = (text: string): string =>
-				text
-					.replace(/^<untrusted_content[^>]*>\n?/, "")
-					.replace(/\n?<\/untrusted_content>$/, "")
-					.replace(/\n*\[Showing lines [^\n]*\]$/, "");
-			expect(readText("e11-read-2"), "the final chunk announces no further continuation").not.toContain(
-				"Use offset=",
-			);
-			const reconstructed = [readText("e11-read-1"), readText("e11-read-2")].map(withoutReadEnvelope).join("\n");
-			expect(reconstructed, "the chunked root read reconstructs the exact first output").toBe(E11_LARGE);
-			expect(
-				createHash("sha256").update(reconstructed).digest("hex"),
-				"the chunked bytes match the content digest the attempt carries",
-			).toBe(largeSha);
-			expect(
-				createHash("sha256")
-					.update(String(world.io.readFileSync(artifactPath, "utf8")))
-					.digest("hex"),
-				"the host reads the same bytes from the artifact file",
-			).toBe(largeSha);
 			// The same bounded goal continuation runs through each mode's native loop: semantic objective routing on,
 			// ordinary goal continuation off. Goal and delegate remain available in both; no profile trims the root surface.
 			// Checkpoint while the failed obligation stays open: the root compacts past the failed receipt, is disposed, and the
@@ -7833,10 +7055,6 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				replan_required: { kind: "noul", probability: 0.02 },
 				next_status: { kind: "choice", choice: "continue", confidence: 0.97 },
 				...completionJudgments,
-				// The completion cycle after the host resume asks the claim and patch questions of the repaired, rechecked work.
-				claim_supported: { kind: "noul", probability: 0.97 },
-				patch_matches_requirements: { kind: "noul", probability: 0.97 },
-				side_effects_acceptable: { kind: "noul", probability: 0.97 },
 				work_remaining: { kind: "noul", probability: 0.97 },
 				missing_work_class: { kind: "choice", choice: "implement", confidence: 0.97 },
 				evidence_sufficient: { kind: "noul", probability: 0.02 },
@@ -8131,6 +7349,804 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 			expect(eRecord?.piVerification?.status, "the canonical record carries the passing verification receipt").toBe(
 				"passed",
 			);
+			{
+				// E11 runs on an auxiliary root with no goal, so it proves the large-output artifact, the native status pointer and the chunked
+				// read on that root alone, with no live goal competing for it. The main root's default goal continuation stays enabled and independent.
+				const session = eSession;
+				const created = eAux;
+				// E11 (large worker output through the native artifact, read back by native status): a worker emits a large distinct text
+				// block and a truthful typed report in one final assistant message. The raw text becomes the artifact; status by agentId
+				// names it; a small follow-up report must borrow no older pointer; the historical lane keeps its own pointer.
+				const E11_LARGE = [
+					"E11-LARGE-OUTPUT-MARKER",
+					...Array.from(
+						{ length: 1400 },
+						(_unused, index) =>
+							`E11 report line ${index}: checkpoint ${index % 97} recorded value ${(index * 2654435761) % 1000003}.`,
+					),
+				].join("\n");
+				// A second, distinct large generation: its own marker and lines, so each generation has its own digest.
+				const E11_LARGE_SECOND = [
+					"E11-SECOND-LARGE-MARKER",
+					...Array.from(
+						{ length: 1400 },
+						(_unused, index) =>
+							`E11 second report line ${index}: segment ${index % 89} recorded value ${(index * 1103515245) % 999983}.`,
+					),
+				].join("\n");
+				const E11_REPORT = "The large output is reported.";
+				const E11_REPORT_SECOND = "The second large output is reported.";
+				const E11_SMALL = "Small report is ready.";
+				expect(Buffer.byteLength(E11_LARGE), "the output exceeds the inline threshold").toBeGreaterThan(
+					WORKER_TERMINAL_OUTPUT_INLINE_BYTES,
+				);
+				const e11Reported = createBarrier();
+				const e11SecondReported = createBarrier();
+				// The second generation's provider turn is held before its terminal: the status reads happen while it runs.
+				const e11SecondHeld = createBarrier();
+				let e11SecondEpoch: number | undefined;
+				const e11SecondRelease = createBarrier();
+				const e11SmallReported = createBarrier();
+				const startIdentity = (): { agentId: string; laneId: string } => {
+					for (const message of session.messages) {
+						if (message.role !== "toolResult" || message.toolName !== "delegate") continue;
+						const details = message.details as
+							| { started?: unknown; label?: unknown; agentId?: unknown; laneId?: unknown }
+							| undefined;
+						if (
+							details?.started === true &&
+							details.label === "Report the large output once." &&
+							typeof details.agentId === "string" &&
+							typeof details.laneId === "string"
+						) {
+							return { agentId: details.agentId, laneId: details.laneId };
+						}
+					}
+					throw new Error("the start result carries no agent or lane id");
+				};
+				// The first generation's artifact file, resolved from the admitted attempt's native result at the read's request.
+				const e11ArtifactPath = (): string => {
+					// Pure projection read: the admitted agent's first attempt that carries a native result, at the read's request.
+					const attempt = Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).find(
+						(candidate) => candidate.taskId === startIdentity().laneId && candidate.result !== undefined,
+					);
+					const uri = attempt?.result?.artifacts[0]?.uri;
+					if (typeof uri !== "string") throw new Error("the first large attempt carries no artifact");
+					return fileURLToPath(uri);
+				};
+				// The continuation offset a truncated read announces; a read without one is the last chunk.
+				const e11ContinuationOffset = (request: ScriptedRequest, toolCallId: string): number => {
+					const result = request.context.messages.find(
+						(message) => message.role === "toolResult" && message.toolCallId === toolCallId,
+					);
+					const text =
+						result?.role === "toolResult"
+							? result.content.map((block) => (block.type === "text" ? block.text : "")).join("")
+							: "";
+					const match = /Use offset=(\d+) to continue\./.exec(text);
+					if (!match) throw new Error(`the read ${toolCallId} announces no continuation`);
+					return Number(match[1]);
+				};
+				const e11Observed: {
+					sequence?: number;
+					stopReason?: string;
+					blockTypes?: string[];
+					textBytes?: number;
+					markerCount?: number;
+				} = {};
+				world.provider.enqueue(
+					"worker-c",
+					{
+						name: "e11-large-report",
+						onTerminal: (request, message) => {
+							const text = message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+							e11Observed.sequence = request.sequence;
+							e11Observed.stopReason = message.stopReason;
+							e11Observed.blockTypes = message.content.map((block) => block.type);
+							e11Observed.textBytes = Buffer.byteLength(text);
+							e11Observed.markerCount = text.split("E11-LARGE-OUTPUT-MARKER").length - 1;
+						},
+						reply: {
+							content: [
+								{ type: "text", text: E11_LARGE },
+								{
+									type: "toolCall",
+									id: "e11-report-1",
+									name: "submit_report",
+									arguments: { status: "completed", summary: E11_REPORT },
+								},
+							],
+							stopReason: "toolUse",
+						},
+					},
+					{
+						name: "e11-second-large-report",
+						check: () => {
+							e11SecondHeld.release();
+						},
+						gate: e11SecondRelease.promise,
+						reply: {
+							content: [
+								{ type: "text", text: E11_LARGE_SECOND },
+								{
+									type: "toolCall",
+									id: "e11-report-2",
+									name: "submit_report",
+									arguments: { status: "completed", summary: E11_REPORT_SECOND },
+								},
+							],
+							stopReason: "toolUse",
+						},
+					},
+					{
+						name: "e11-small-report",
+						reply: {
+							content: [
+								{
+									type: "toolCall",
+									id: "e11-small-1",
+									name: "submit_report",
+									arguments: { status: "completed", summary: E11_SMALL },
+								},
+							],
+							stopReason: "toolUse",
+						},
+					},
+				);
+				world.provider.enqueue(
+					"root",
+					calls("e11-start", [
+						{
+							id: "e11-start-1",
+							name: "delegate",
+							arguments: {
+								action: "start",
+								model: { provider: "harness-script", modelId: "worker-c" },
+								instructions: "Report the large output once.",
+							},
+						},
+					]),
+					{ name: "e11-started", reply: { content: [{ type: "text", text: "The large worker is running." }] } },
+					dynamicCalls(
+						"e11-handoff",
+						(request) => [
+							{
+								id: "e11-status-1",
+								name: "delegate",
+								arguments: { action: "status", agentId: latestAgentIdForTrack(request, "worker-c") },
+							},
+						],
+						(request) => {
+							if (!JSON.stringify(request.context.messages).includes(E11_REPORT)) {
+								throw new Error("the large worker's report did not reach the root");
+							}
+							if (
+								JSON.stringify(world.provider.getPendingStepNames("worker-c")) !==
+								JSON.stringify(["e11-second-large-report", "e11-small-report"])
+							) {
+								throw new Error(
+									`the large turn left other steps pending: ${JSON.stringify(world.provider.getPendingStepNames("worker-c"))}`,
+								);
+							}
+							e11Reported.release();
+						},
+					),
+					{ name: "e11-read", reply: { content: [{ type: "text", text: "The large output is read." }] } },
+					dynamicCalls("e11-chunk-1", () => [
+						{ id: "e11-read-1", name: "read", arguments: { path: e11ArtifactPath() } },
+					]),
+					dynamicCalls("e11-chunk-2", (request) => [
+						{
+							id: "e11-read-2",
+							name: "read",
+							arguments: { path: e11ArtifactPath(), offset: e11ContinuationOffset(request, "e11-read-1") },
+						},
+					]),
+					{ name: "e11-chunked", reply: { content: [{ type: "text", text: "The artifact is read in chunks." }] } },
+					dynamicCalls("e11-follow-large", (request) => [
+						{
+							id: "e11-follow-large-1",
+							name: "delegate",
+							arguments: {
+								action: "follow_up",
+								agentId: latestAgentIdForTrack(request, "worker-c"),
+								message: "Report the second large output.",
+							},
+						},
+					]),
+					{
+						name: "e11-follow-large-started",
+						check: () => {
+							e11SecondEpoch = session.getForegroundActivity().epoch;
+							if (e11SecondEpoch === undefined)
+								throw new Error("the second report foreground turn holds no submission epoch");
+						},
+						reply: { content: [{ type: "text", text: "The second large report is running." }] },
+					},
+					dynamicCalls("e11-status-current", () => [
+						{
+							id: "e11-status-current-1",
+							name: "delegate",
+							arguments: { action: "status", agentId: startIdentity().agentId },
+						},
+					]),
+					dynamicCalls("e11-status-historical-held", () => [
+						{
+							id: "e11-status-historical-1",
+							name: "delegate",
+							arguments: { action: "status", laneId: startIdentity().laneId },
+						},
+					]),
+					{
+						name: "e11-held-read",
+						reply: { content: [{ type: "text", text: "The second report is still running." }] },
+					},
+					dynamicCalls(
+						"e11-second-handoff",
+						(request) => [
+							{
+								id: "e11-status-4",
+								name: "delegate",
+								arguments: { action: "status", agentId: latestAgentIdForTrack(request, "worker-c") },
+							},
+						],
+						(request) => {
+							if (!JSON.stringify(request.context.messages).includes(E11_REPORT_SECOND)) {
+								// Bounded mismatch diagnostic: pure reads and one console line, taken before the same primary Error is thrown.
+								// The attempt read is keyed by the admitted agent identity, because the running-attempt binding is declared later.
+								const primary = new Error("the second large report did not reach the root");
+								const mismatchDx: unknown[] = [];
+								try {
+									const foreground = session.getResourceSnapshot().foregroundRecovery;
+									const activity = session.getForegroundActivity();
+									const agentId = startIdentity().agentId;
+									const mismatch = JSON.stringify({
+										sequence: request.sequence,
+										modelId: request.model.id,
+										oldCapturedEpoch: e11SecondEpoch,
+										activityEpoch: activity.epoch,
+										activityBusy: activity.busy,
+										submissionEpoch: foreground.submissionEpoch,
+										activeRuns: foreground.activeRuns,
+										pendingIdleContinuation: session.backgroundLanes.hasPendingIdleContinuation(),
+										agentId,
+										agentAttempts: Object.values(
+											session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {},
+										)
+											.filter((attempt) => attempt.agentId === agentId)
+											.map((attempt) => ({
+												attemptId: attempt.attemptId,
+												taskId: attempt.taskId,
+												status: attempt.status,
+												reasonCode: attempt.reasonCode,
+											})),
+										lastRequestTexts: requestTexts(request)
+											.slice(-8)
+											.map((text) => text.slice(0, 750)),
+									});
+									console.error(`second report handoff mismatch: ${mismatch}`);
+								} catch (error) {
+									mismatchDx.push(error);
+								}
+								if (mismatchDx.length > 0) {
+									throw new AggregateError(
+										[primary, ...mismatchDx],
+										"the second report handoff diagnostic failed",
+									);
+								}
+								throw primary;
+							}
+							e11SecondReported.release();
+						},
+					),
+					{
+						name: "e11-second-read",
+						reply: { content: [{ type: "text", text: "The second large output is read." }] },
+					},
+					dynamicCalls("e11-follow", (request) => [
+						{
+							id: "e11-follow-1",
+							name: "delegate",
+							arguments: {
+								action: "follow_up",
+								agentId: latestAgentIdForTrack(request, "worker-c"),
+								message: "Report briefly.",
+							},
+						},
+					]),
+					{
+						name: "e11-follow-started",
+						reply: { content: [{ type: "text", text: "The brief follow-up is running." }] },
+					},
+					dynamicCalls(
+						"e11-small-handoff",
+						(request) => [
+							{
+								id: "e11-status-2",
+								name: "delegate",
+								arguments: { action: "status", agentId: latestAgentIdForTrack(request, "worker-c") },
+							},
+						],
+						(request) => {
+							if (!JSON.stringify(request.context.messages).includes(E11_SMALL)) {
+								throw new Error("the small follow-up report did not reach the root");
+							}
+							e11SmallReported.release();
+						},
+					),
+					dynamicCalls("e11-historical", () => [
+						{
+							id: "e11-status-3",
+							name: "delegate",
+							arguments: { action: "status", laneId: startIdentity().laneId },
+						},
+					]),
+					dynamicCalls("e11-retire", () => [
+						{
+							id: "e11-retire-1",
+							name: "delegate",
+							arguments: { action: "retire", agentId: startIdentity().agentId },
+						},
+					]),
+					{ name: "e11-done", reply: { content: [{ type: "text", text: "Both reports are read." }] } },
+				);
+				// This auxiliary root has no goal, so its judgments are the owner-policy keys only: the goal's per-turn families are not
+				// requested here, and no other family is declared.
+				world.systemOne.enterPhase("e11", {
+					changes_model_pools: { kind: "noul", probability: 0.02 },
+					capabilities_authorized: { kind: "noul", probability: 0.02 },
+					local_commits_only: { kind: "noul", probability: 0.02 },
+					lifts_delivery_block: { kind: "noul", probability: 0.02 },
+					full_handoff: { kind: "noul", probability: 0.02 },
+					optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+				});
+				await withDeadline(
+					trace,
+					"E11 start turn",
+					session.prompt("Start the large report worker and read its output."),
+				);
+				settlement.afterE11AuxStart = settlementFacts(session, created.sessionManager, autonomy);
+				await withDeadline(trace, "large worker reported", e11Reported.promise, 90_000);
+				await withDeadline(trace, "E11 read turn settled", session.waitForForegroundIdle(), 90_000);
+				await withDeadline(
+					trace,
+					"chunked artifact read",
+					session.prompt("Read the large output in chunks."),
+					90_000,
+				);
+				// One owned epoch promise and listener, armed before the second request. Its outcome is tagged at once, so the wait
+				// never rethrows an observer cause on its own. Independent causes are collected after the block, scenario first.
+				const e11Epoch: { settle?: { resolve: () => void; reject: (cause: unknown) => void } } = {};
+				const e11Released = new Promise<void>((resolve, reject) => {
+					e11Epoch.settle = { resolve, reject };
+				});
+				const e11Outcome = e11Released.then(
+					() => ({ released: true as const }),
+					(cause: unknown) => ({ released: false as const, cause }),
+				);
+				const e11Check = (): void => {
+					const settle = e11Epoch.settle;
+					if (settle === undefined || e11SecondEpoch === undefined) return;
+					try {
+						if (
+							session.getForegroundActivity().epoch !== e11SecondEpoch &&
+							session.getResourceSnapshot().foregroundRecovery.activeRuns === 0
+						) {
+							e11Epoch.settle = undefined;
+							settle.resolve();
+						}
+					} catch (error) {
+						e11Epoch.settle = undefined;
+						settle.reject(error);
+					}
+				};
+				const e11Unsubscribe = session.subscribeForegroundActivity(e11Check);
+				let scenarioCaught = false;
+				let scenarioCause: unknown;
+				let scenarioCutoff = false;
+				let observedOutcome: { released: true } | { released: false; cause: unknown } | undefined;
+				try {
+					await withDeadline(
+						trace,
+						"second large report requested",
+						session.prompt("Ask for the second large report."),
+						90_000,
+					);
+					await withDeadline(trace, "second large held", e11SecondHeld.promise, 90_000);
+					if (e11SecondEpoch === undefined)
+						throw new Error("the second report foreground epoch was never captured");
+					e11Check();
+					await withDeadline(trace, "second foreground epoch released", e11Outcome, 90_000);
+				} catch (error) {
+					scenarioCaught = true;
+					scenarioCause = error;
+				} finally {
+					e11Unsubscribe();
+					const pending = e11Epoch.settle;
+					if (pending !== undefined && scenarioCaught) {
+						e11Epoch.settle = undefined;
+						scenarioCutoff = true;
+						pending.reject(scenarioCause);
+					}
+					observedOutcome = await e11Outcome;
+				}
+				const e11Causes: unknown[] = [];
+				if (scenarioCaught) e11Causes.push(scenarioCause);
+				if (observedOutcome !== undefined && !observedOutcome.released && !scenarioCutoff) {
+					e11Causes.push(observedOutcome.cause);
+				}
+				if (e11Causes.length === 1) throw e11Causes[0];
+				if (e11Causes.length > 1)
+					throw new AggregateError(e11Causes, "the second report foreground observation failed");
+				// Bounded held-status diagnostic. Pure reads only: BEFORE capture runs immediately before the same prompt call, with no await
+				// between them. A post-rejection capture, the console line and serialization are recorded in order after the primary error, and
+				// only actual diagnostic failures aggregate with it. Health is the public getter, bound to decisionEngine presence (qualified).
+				const heldStatusDx: unknown[] = [];
+				const captureHeldStatus = (): Record<string, unknown> => {
+					const activity = session.getForegroundActivity();
+					const foreground = session.getResourceSnapshot().foregroundRecovery;
+					const health = session.getSemanticPlaneHealth();
+					return {
+						oldCapturedEpoch: e11SecondEpoch,
+						activityEpoch: activity.epoch,
+						activityBusy: activity.busy,
+						submissionEpoch: foreground.submissionEpoch,
+						activeRuns: foreground.activeRuns,
+						foregroundRetrying: foreground.retrying,
+						isStreaming: session.isStreaming,
+						isCompacting: session.isCompacting,
+						isRetrying: session.isRetrying,
+						pendingIdleContinuation: session.backgroundLanes.hasPendingIdleContinuation(),
+						semanticState: health.state,
+						inFlightEvaluationIds: (health.inFlightEvaluations ?? []).map(
+							(evaluation) => evaluation.evaluationId,
+						),
+						completedEvaluationIds: session
+							.getSemanticEvaluations()
+							.slice(-20)
+							.map((record) => record.evaluationId),
+					};
+				};
+				let heldStatusBefore: Record<string, unknown> | undefined;
+				try {
+					heldStatusBefore = captureHeldStatus();
+				} catch (error) {
+					heldStatusDx.push(error);
+				}
+				const heldStatusPrompt = session.prompt("Check the second report while it runs.");
+				try {
+					await withDeadline(trace, "held status turn", heldStatusPrompt, 90_000);
+				} catch (primary) {
+					let heldStatusAfter: Record<string, unknown> | undefined;
+					try {
+						heldStatusAfter = captureHeldStatus();
+					} catch (error) {
+						heldStatusDx.push(error);
+					}
+					let heldStatusText = "unserializable";
+					try {
+						heldStatusText = JSON.stringify({ before: heldStatusBefore, after: heldStatusAfter }).slice(0, 5000);
+					} catch (error) {
+						heldStatusDx.push(error);
+					}
+					try {
+						console.error(`held status prompt refused: ${heldStatusText}`);
+					} catch (error) {
+						heldStatusDx.push(error);
+					}
+					if (heldStatusDx.length > 0) {
+						throw new AggregateError(
+							[primary, ...heldStatusDx],
+							"held status diagnostic failed after the refusal",
+						);
+					}
+					throw primary;
+				}
+				if (heldStatusDx.length === 1) {
+					throw heldStatusDx[0];
+				}
+				if (heldStatusDx.length > 1) {
+					throw new AggregateError(
+						heldStatusDx,
+						"held status diagnostic capture failed before a successful prompt",
+					);
+				}
+				// Bounded control: while the second generation runs, its display carries no first-generation claim, pointer or digest and no
+				// terminal result. It shows no current terminal yet; generation identity is pinned separately below.
+				const e11HeldDetails = (toolCallId: string): Record<string, unknown> => {
+					const entry = created.sessionManager
+						.getBranch()
+						.find(
+							(candidate) =>
+								candidate.type === "message" &&
+								candidate.message.role === "toolResult" &&
+								candidate.message.toolCallId === toolCallId,
+						);
+					if (entry?.type !== "message" || entry.message.role !== "toolResult") {
+						throw new Error(`no durable status result for ${toolCallId}`);
+					}
+					return (entry.message.details ?? {}) as Record<string, unknown>;
+				};
+				const e11Running = Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).find(
+					(attempt) => attempt.agentId === startIdentity().agentId && attempt.status === "running",
+				);
+				if (e11Running === undefined) throw new Error("the second generation has no running attempt");
+				const e11Current = e11HeldDetails("e11-status-current-1");
+				const e11Historical = e11HeldDetails("e11-status-historical-1");
+				expect(
+					{ agentId: e11Current.agentId, laneId: e11Current.laneId },
+					"the running display names the admitted agent and its own lane",
+				).toEqual({ agentId: startIdentity().agentId, laneId: e11Running.taskId });
+				expect(e11Current.claimSummary, "the running attempt borrows no first-generation claim").toBeUndefined();
+				expect(
+					e11Current.outputArtifactUri,
+					"the running attempt borrows no first-generation pointer",
+				).toBeUndefined();
+				expect(JSON.stringify(e11Current), "the running display carries no first-generation proof").not.toContain(
+					E11_REPORT,
+				);
+				expect(JSON.stringify(e11Current), "the running display carries no first-generation digest").not.toContain(
+					createHash("sha256").update(E11_LARGE).digest("hex"),
+				);
+				expect(
+					{ laneId: e11Historical.laneId, claimSummary: e11Historical.claimSummary },
+					"the historical lane still names the first generation's claim",
+				).toEqual({ laneId: startIdentity().laneId, claimSummary: E11_REPORT });
+				expect(typeof e11Historical.outputArtifactUri, "the historical lane keeps its first pointer").toBe(
+					"string",
+				);
+				e11SecondRelease.release();
+				await withDeadline(trace, "second large report", e11SecondReported.promise, 90_000);
+				await withDeadline(trace, "second large read settled", session.waitForForegroundIdle(), 90_000);
+				await withDeadline(trace, "brief follow-up", session.prompt("Ask for a brief follow-up report."), 90_000);
+				await withDeadline(trace, "small worker reported", e11SmallReported.promise, 90_000);
+				await withDeadline(trace, "E11 foreground settled", session.waitForForegroundIdle(), 90_000);
+				settlement.afterE11AuxSettled = settlementFacts(session, created.sessionManager, autonomy);
+				// Accepted native receipt linkage: the first generation's completed report has its matched successful submit receipt on the worker's own
+				// persisted transcript, under its own call id. The incomplete side is pinned in the late block; this is the accepted side.
+				const e11WorkerId = startIdentity().agentId;
+				const e11Binding = session.backgroundLanes.getTaskRuntimeSnapshot()?.agents[e11WorkerId];
+				if (e11Binding === undefined) throw new Error("the E11 worker has no binding for its receipts");
+				const e11Transcript = new WorkerConversationStore()
+					.open({
+						agentDir: world.agentDir,
+						resumeContext: e11Binding.resumeContext,
+						expectedLogicalAgentId: e11WorkerId,
+					})
+					.getRawTranscript();
+				expect(
+					matchedSubmitReceiptIn(e11Transcript, "e11-report-1"),
+					"the accepted report has its matched successful submit receipt on the worker's persisted transcript",
+				).toBe(true);
+				// Durable canonical identities: each status read is found on the branch by its own tool call id, never by position.
+				const e11Branch = created.sessionManager.getBranch();
+				const e11Status = (toolCallId: string) => {
+					const entry = e11Branch.find(
+						(candidate) =>
+							candidate.type === "message" &&
+							candidate.message.role === "toolResult" &&
+							candidate.message.toolCallId === toolCallId,
+					);
+					if (entry?.type !== "message" || entry.message.role !== "toolResult") {
+						throw new Error(`no durable status result for ${toolCallId}`);
+					}
+					return entry.message.details as
+						| {
+								outputArtifactUri?: unknown;
+								outputArtifactSizeBytes?: unknown;
+								agentId?: unknown;
+								laneId?: unknown;
+								claimSummary?: unknown;
+						  }
+						| undefined;
+				};
+				const latestStatus = e11Status("e11-status-1");
+				const followedStatus = e11Status("e11-status-2");
+				const historicalStatus = e11Status("e11-status-3");
+				const admitted = startIdentity();
+				expect(
+					{
+						agentId: latestStatus?.agentId,
+						laneId: latestStatus?.laneId,
+						claimSummary: latestStatus?.claimSummary,
+					},
+					"the latest status names the admitted agent and its lane, and its own summary",
+				).toEqual({ agentId: admitted.agentId, laneId: admitted.laneId, claimSummary: E11_REPORT });
+				expect(followedStatus?.agentId, "the follow-up stays on the admitted agent").toBe(admitted.agentId);
+				expect(followedStatus?.laneId, "the follow-up status names its own lane, not the first").not.toBe(
+					admitted.laneId,
+				);
+				expect(followedStatus?.claimSummary, "the follow-up summary is its own").toBe(E11_SMALL);
+				// The small third generation is its own admitted task: the one attempt that is neither the first nor the captured second.
+				const e11Third = Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).filter(
+					(attempt) =>
+						attempt.agentId === admitted.agentId &&
+						attempt.attemptId !== e11Running.attemptId &&
+						attempt.taskId !== admitted.laneId,
+				);
+				expect(
+					e11Third.map((attempt) => attempt.taskId),
+					"exactly one third attempt is admitted",
+				).toHaveLength(1);
+				expect(followedStatus?.laneId, "the small status names the third attempt's own task").toBe(
+					e11Third[0]?.taskId,
+				);
+				expect(e11Observed, "the large step emitted one text-and-tool-call terminal with the exact text").toEqual({
+					sequence: expect.any(Number),
+					stopReason: "toolUse",
+					blockTypes: ["text", "toolCall"],
+					textBytes: Buffer.byteLength(E11_LARGE),
+					markerCount: 1,
+				});
+				// Capture, native result and projection are separate observables, checked in that order: the file on disk under its
+				// content digest, then the admitted attempt's native result, then the status pointer.
+				// One observable chain, checked once so the failure names the layer: the file system, the admitted attempt's native
+				// result, and the status pointer. Only names, counts, digests and sizes are recorded, never the raw text.
+				const largeSha = createHash("sha256").update(E11_LARGE).digest("hex");
+				const outputFiles = [...world.io.fileEntries().keys()].filter((path) =>
+					path.includes("worker-output-artifacts"),
+				);
+				// The admitted task's own attempt, read from the native task runtime: the start lane is the task id of its first attempt.
+				const admittedAttemptId = Object.values(
+					session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {},
+				).find((attempt) => attempt.taskId === admitted.laneId && attempt.result !== undefined)?.attemptId;
+				if (admittedAttemptId === undefined) throw new Error("the admitted lane carries no attempt id");
+				const nativeAttempt = session.backgroundLanes.getWorkerAttemptResult(admittedAttemptId);
+				const nativeUri = nativeAttempt?.artifacts[0]?.uri;
+				const persistedReport = [...world.io.fileEntries()]
+					.filter(([path]) => path.includes("worker-conversations") && path.endsWith(".jsonl"))
+					.flatMap(([, content]) => content.split("\n").filter((line) => line.length > 0))
+					.map(
+						(line) =>
+							JSON.parse(line) as {
+								message?: { role?: string; content?: Array<{ type: string; text?: string; id?: string }> };
+							} & { role?: string; content?: Array<{ type: string; text?: string; id?: string }> },
+					)
+					.map((entry) => entry.message ?? entry)
+					.find(
+						(message) =>
+							message.role === "assistant" &&
+							message.content?.some((block) => block.type === "toolCall" && block.id === "e11-report-1"),
+					);
+				const persistedText = (persistedReport?.content ?? [])
+					.map((block) => (block.type === "text" ? (block.text ?? "") : ""))
+					.join("");
+				const e11Chain = {
+					persistedAssistantTextBytes: Buffer.byteLength(persistedText),
+					persistedMarkerCount: persistedText.split("E11-LARGE-OUTPUT-MARKER").length - 1,
+					outputArtifactFileCount: outputFiles.length,
+					matchingDigestFileCount: outputFiles.filter((path) => path.endsWith(`-${largeSha}.txt`)).length,
+					nativeResultPresent: nativeAttempt !== undefined,
+					nativeArtifactDigests: nativeAttempt?.artifacts.map((artifact) => artifact.digest),
+					nativeArtifactSizes: nativeAttempt?.artifacts.map((artifact) => artifact.sizeBytes),
+					nativeEvidenceCount: nativeAttempt?.evidence.length,
+					projectedUri: latestStatus?.outputArtifactUri,
+				};
+				expect(
+					e11Chain,
+					"the large output is persisted, captured to disk, carried by the native attempt, and projected by status",
+				).toEqual({
+					persistedAssistantTextBytes: Buffer.byteLength(E11_LARGE),
+					persistedMarkerCount: 1,
+					outputArtifactFileCount: 2,
+					matchingDigestFileCount: 1,
+					nativeResultPresent: true,
+					nativeArtifactDigests: [largeSha],
+					nativeArtifactSizes: [Buffer.byteLength(E11_LARGE)],
+					nativeEvidenceCount: expect.any(Number),
+					projectedUri: nativeUri,
+				});
+				const artifactUri = latestStatus?.outputArtifactUri;
+				if (typeof artifactUri !== "string") throw new Error("the latest status carries no artifact pointer");
+				expect(artifactUri.startsWith("file:"), "the pointer is a file URI").toBe(true);
+				const artifactPath = fileURLToPath(artifactUri);
+				expect(String(world.io.readFileSync(artifactPath, "utf8")), "the artifact holds the exact raw output").toBe(
+					E11_LARGE,
+				);
+				expect(
+					artifactPath.endsWith(`-${createHash("sha256").update(E11_LARGE).digest("hex")}.txt`),
+					"the file name carries the content digest",
+				).toBe(true);
+				expect(latestStatus?.outputArtifactSizeBytes, "the pointer size matches the bytes").toBe(
+					Buffer.byteLength(E11_LARGE),
+				);
+				expect(
+					followedStatus?.outputArtifactUri,
+					"a small follow-up report borrows no older pointer",
+				).toBeUndefined();
+				expect(historicalStatus?.outputArtifactUri, "the historical lane keeps its own pointer").toBe(artifactUri);
+				// Two distinct large generations, then a small current report: each status names its own generation, and the
+				// chunked root read of the first generation reconstructs the exact bytes that the host verifies by digest.
+				const secondStatus = e11Status("e11-status-4");
+				const secondUri = secondStatus?.outputArtifactUri;
+				if (typeof secondUri !== "string") throw new Error("the second large status carries no artifact pointer");
+				const secondPath = fileURLToPath(secondUri);
+				// Exact generation pins: the second status names the attempt captured while it ran, its pointer and size are that attempt's
+				// own result, and its persisted assistant text is the second report's exact bytes in the admitted conversation.
+				const admittedConversation =
+					session.backgroundLanes.getTaskRuntimeSnapshot()?.agents[admitted.agentId]?.resumeContext.sessionFile;
+				expect(admittedConversation, "the admitted resume context names its conversation file").toBeDefined();
+				expect(secondStatus?.laneId, "the second status names the captured second attempt's task").toBe(
+					e11Running.taskId,
+				);
+				const secondAttemptArtifact = session.backgroundLanes.getWorkerAttemptResult(e11Running.attemptId)
+					?.artifacts[0];
+				expect(
+					{ uri: secondUri, sizeBytes: secondStatus?.outputArtifactSizeBytes },
+					"the second pointer and size are the captured attempt's own artifact",
+				).toEqual({ uri: secondAttemptArtifact?.uri, sizeBytes: secondAttemptArtifact?.sizeBytes });
+				expect(
+					createHash("sha256")
+						.update(String(world.io.readFileSync(secondPath, "utf8")))
+						.digest("hex"),
+					"the file hashes to the attempt's own content digest",
+				).toBe(secondAttemptArtifact?.digest);
+				expect(
+					secondAttemptArtifact?.metadata,
+					"the attempt's artifact metadata names sha256 and completeness",
+				).toMatchObject({
+					digestAlgorithm: "sha256",
+					complete: true,
+				});
+				expect(
+					persistedGenerationText(world, "e11-report-2", admittedConversation),
+					"the second report's persisted text is its exact bytes",
+				).toBe(E11_LARGE_SECOND);
+				expect(
+					{
+						agentId: secondStatus?.agentId,
+						claimSummary: secondStatus?.claimSummary,
+						sizeBytes: secondStatus?.outputArtifactSizeBytes,
+					},
+					"the second large status names the admitted agent, its own summary and its size",
+				).toEqual({
+					agentId: admitted.agentId,
+					claimSummary: E11_REPORT_SECOND,
+					sizeBytes: Buffer.byteLength(E11_LARGE_SECOND),
+				});
+				expect(secondPath, "the second generation has its own artifact file").not.toBe(artifactPath);
+				expect(
+					secondPath.endsWith(`-${createHash("sha256").update(E11_LARGE_SECOND).digest("hex")}.txt`),
+					"the second artifact is named by its own digest",
+				).toBe(true);
+				expect(
+					String(world.io.readFileSync(secondPath, "utf8")),
+					"the second artifact holds the exact output",
+				).toBe(E11_LARGE_SECOND);
+				// Durable canonical read results by call id, without the provider envelope or the continuation notice.
+				const readText = (toolCallId: string): string => {
+					const entry = e11Branch.find(
+						(candidate) =>
+							candidate.type === "message" &&
+							candidate.message.role === "toolResult" &&
+							candidate.message.toolCallId === toolCallId,
+					);
+					if (entry?.type !== "message" || entry.message.role !== "toolResult") {
+						throw new Error(`no durable read result for ${toolCallId}`);
+					}
+					return entry.message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+				};
+				const withoutReadEnvelope = (text: string): string =>
+					text
+						.replace(/^<untrusted_content[^>]*>\n?/, "")
+						.replace(/\n?<\/untrusted_content>$/, "")
+						.replace(/\n*\[Showing lines [^\n]*\]$/, "");
+				expect(readText("e11-read-2"), "the final chunk announces no further continuation").not.toContain(
+					"Use offset=",
+				);
+				const reconstructed = [readText("e11-read-1"), readText("e11-read-2")].map(withoutReadEnvelope).join("\n");
+				expect(reconstructed, "the chunked root read reconstructs the exact first output").toBe(E11_LARGE);
+				expect(
+					createHash("sha256").update(reconstructed).digest("hex"),
+					"the chunked bytes match the content digest the attempt carries",
+				).toBe(largeSha);
+				expect(
+					createHash("sha256")
+						.update(String(world.io.readFileSync(artifactPath, "utf8")))
+						.digest("hex"),
+					"the host reads the same bytes from the artifact file",
+				).toBe(largeSha);
+			}
 			expect(
 				await world.disposeSessionInBody(eSession),
 				"the auxiliary stale-pass root disposes cleanly",
