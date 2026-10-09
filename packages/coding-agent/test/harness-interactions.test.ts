@@ -8852,6 +8852,41 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				{ attemptId: e7BSettled?.attemptId, dispatch: e7BSettled?.dispatch, agentId: e7BSettled?.agentId },
 				"B's birth attempt and its compiled contract survive the fresh recovery",
 			).toEqual({ attemptId: e7BAttempt?.attemptId, dispatch: e7BAttempt?.dispatch, agentId: e7StartB.agentId });
+			// B's birth agent is idle with its resources released before the follow-up is admitted: the wait is the readiness gate, and it
+			// observes exactly B's first generation as terminal. Its outcome is bounded by the deadline, never joined as a promise elsewhere.
+			const e7BReady = await withDeadline(
+				trace,
+				"E7 B birth agent idle before the follow-up",
+				e7Fresh.session.backgroundLanes.waitForWorkerAgent(e7StartB.agentId, 60_000),
+				70_000,
+			);
+			expect(e7BReady.timedOut, "B's birth agent settles inside its wait").toBe(false);
+			expect(e7BReady.status, "B is idle before the follow-up is admitted").toBe("idle");
+			expect(e7BReady.terminalLaneIds, "the wait observes exactly B's first generation as terminal").toEqual([
+				e7StartB.laneId,
+			]);
+			// The pinned birth attempt is read again from the pure runtime projection after the wait: same agent, task, attempt and
+			// completed status, and its compiled dispatch is the one captured at birth.
+			const e7BPinnedAttemptId = e7BSettled?.attemptId;
+			if (e7BPinnedAttemptId === undefined) throw new Error("B's birth attempt is not in the fresh runtime");
+			const e7BReceipt = e7Fresh.session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts[e7BPinnedAttemptId];
+			expect(e7BReceipt, "B's pinned birth attempt is present after the wait").toBeDefined();
+			expect(
+				{
+					attemptId: e7BReceipt?.attemptId,
+					agentId: e7BReceipt?.agentId,
+					taskId: e7BReceipt?.taskId,
+					status: e7BReceipt?.status,
+					dispatch: e7BReceipt?.dispatch,
+				},
+				"B's pinned birth attempt is unchanged after the wait",
+			).toEqual({
+				attemptId: e7BPinnedAttemptId,
+				agentId: e7StartB.agentId,
+				taskId: e7StartB.laneId,
+				status: "completed",
+				dispatch: e7BAttempt?.dispatch,
+			});
 			// Post-birth native control through the public seam: the recovered owner admits one follow-up to B with an explicit replay key,
 			// a thread, and an expected reply. B's turn is held after the control is delivered; B's answer is then recorded through the public
 			// reply path against the admitted message; only then is B released. Its handoff must name the admitted lane, and replaying the same
