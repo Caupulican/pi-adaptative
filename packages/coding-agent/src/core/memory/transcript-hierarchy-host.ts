@@ -10,7 +10,9 @@
  */
 
 import type { TranscriptHierarchyStatus } from "../context/memory-diagnostics.ts";
-import { limitFrontierToPrefix, renderFrontier } from "./transcript-frontier.ts";
+import type { SemanticDecisionEngine } from "../decision/engine.ts";
+import type { ActiveBranchEntryStanding } from "./active-branch-probe.ts";
+import { type FrontierAudience, projectFrontierView, renderFrontierView } from "./transcript-frontier.ts";
 import {
 	TranscriptMemory,
 	type TranscriptMemoryStatus,
@@ -19,12 +21,14 @@ import {
 import type { TranscriptLineageReader } from "./transcript-memory-contracts.ts";
 import type { TranscriptNodeExpander } from "./transcript-source-tools.ts";
 import { resolveTranscriptSummarizer, type TranscriptSummarizerDeps } from "./transcript-summarizer.ts";
+import { createSemanticSummaryAdmission, type TranscriptSummaryAdmissionPort } from "./transcript-summary-admission.ts";
 import { TranscriptSummaryStore } from "./transcript-summary-store.ts";
 
 export interface TranscriptHistorySettings {
 	hierarchy: boolean;
 	summaryModel: string | undefined;
 	allowExternalSummaryEgress: boolean;
+	allowExternalAdmissionEgress: boolean;
 	maxConcurrentSummaries: number;
 	frontierMaxBytes: number;
 	retentionDays: number | undefined;
@@ -39,6 +43,11 @@ export interface TranscriptHierarchyHostDeps {
 	getHistorySettings(): TranscriptHistorySettings;
 	isRetrievalEnabled(): boolean;
 	summarizer: TranscriptSummarizerDeps;
+	/**
+	 * The session's recording semantic engine (System One), the one judge that admits model summaries. Resolved
+	 * per judgment: undefined while System One is not bound, and then model summaries are held, never accepted unjudged.
+	 */
+	getAdmissionEngine(): SemanticDecisionEngine | undefined;
 	/** True while the foreground owns the provider; background summaries wait for it to end. */
 	isForegroundBusy(): boolean;
 	/** Foreground activity changes (a submission starts or ends). No polling. */
@@ -48,16 +57,12 @@ export interface TranscriptHierarchyHostDeps {
 }
 
 /**
- * The live branch as the frontier is fenced against it: the first entry the live context keeps after the
- * latest compaction, and the two ancestry questions the fence asks. The frontier may only describe
- * history that was compacted away on THIS branch.
+ * The live branch as the frontier is fenced against it: for every source entry, whether the live context
+ * still shows it after the latest compaction. The frontier describes only history compacted away on THIS
+ * branch, and never what the live context already carries verbatim.
  */
 export interface FrontierBranchFence {
-	firstKeptEntryId: string;
-	/** The entry lies above `firstKeptEntryId` on the live branch (it was compacted away). */
-	isCompactedAway(entryId: string): boolean;
-	/** `firstKeptEntryId` lies on the path to this entry (the entry is in or after the live context). */
-	isInLiveContext(entryId: string): boolean;
+	standing(entryId: string): ActiveBranchEntryStanding;
 }
 
 /** Why a frontier is, or is not, shown for one provider request. */
@@ -69,10 +74,14 @@ export type TranscriptFrontierState =
 	| "not_compacted"
 	/** The coordinator has no accepted nodes for this session yet. */
 	| "no_frontier"
+	/** The frontier names model summaries without an admission under the current contract: withheld until re-admitted. */
+	| "not_admitted"
 	/** The frontier's covered entries are not on the live branch (after a branch switch): never described. */
 	| "lineage_mismatch"
 	/** The frontier covers only history that is still in the live context. */
 	| "live_context"
+	/** The frontier names summaries past the retention window that are not revoked yet: withheld, never shown. */
+	| "expired"
 	/** The allowance cannot hold even the frame and one record. */
 	| "no_room";
 
@@ -91,6 +100,8 @@ const DISABLED_EXPANDER_REASON = "the summary hierarchy is not running";
 
 export class TranscriptHierarchyHost {
 	private readonly deps: TranscriptHierarchyHostDeps;
+	private readonly admission: TranscriptSummaryAdmissionPort;
+	private lastHeldWarning: string | undefined;
 	private coordinator: TranscriptMemory | undefined;
 	private reader: TranscriptLineageReader | undefined;
 	private isCurrent: () => boolean = () => false;
@@ -103,6 +114,7 @@ export class TranscriptHierarchyHost {
 
 	constructor(deps: TranscriptHierarchyHostDeps) {
 		this.deps = deps;
+		this.admission = createSemanticSummaryAdmission({ getEngine: () => deps.getAdmissionEngine() });
 	}
 
 	/** Bind the hierarchy to one memory generation's history index and (re)start it as settings allow. */
@@ -142,35 +154,36 @@ export class TranscriptHierarchyHost {
 	}
 
 	/**
-	 * The current session's frontier, cut to the history compacted away on the live branch and rendered
-	 * within `allowanceBytes` (further capped by `frontierMaxBytes`). Nodes that reach into the live context
-	 * are not shown, and a frontier whose entries are off the live branch is reported, never described.
+	 * The current session's frontier as the live branch sees it, rendered within `allowanceBytes` (further capped
+	 * by `frontierMaxBytes`): the compacted-away coverage minus whatever the live context still shows (see
+	 * {@link projectFrontierView}). The persisted selection is never changed. A frontier with nothing compacted
+	 * away is reported as live context, and one whose entries are off the live branch is reported, never described.
+	 * `audience` only picks the tool names its pointers use (the root's history actions or a lane's `memory_read`).
 	 */
-	previewFrontier(allowanceBytes: number, fence: FrontierBranchFence): TranscriptFrontierPreview {
+	previewFrontier(
+		allowanceBytes: number,
+		fence: FrontierBranchFence,
+		audience: FrontierAudience = "root",
+	): TranscriptFrontierPreview {
 		const coordinator = this.coordinator;
 		if (!coordinator?.isRunning()) return { state: "not_running" };
 		const sessionId = this.deps.getSessionId();
+		if (coordinator.frontierExpired(sessionId)) return { state: "expired" };
+		if (coordinator.frontierNotAdmitted(sessionId)) return { state: "not_admitted" };
 		const snapshot = coordinator.frontierSnapshot(sessionId);
 		if (!snapshot || snapshot.selection.nodeIds.length === 0) return { state: "no_frontier" };
-		const lastEntryId = (node: { sourceRefs: readonly { entryId: string }[] }): string | undefined =>
-			node.sourceRefs[node.sourceRefs.length - 1]?.entryId;
-		const limited = limitFrontierToPrefix(snapshot.selection, snapshot.nodes, (node) => {
-			const entryId = lastEntryId(node);
-			return entryId !== undefined && fence.isCompactedAway(entryId);
-		});
-		if (limited.keptCount === 0) {
-			const first = snapshot.nodes.get(snapshot.selection.nodeIds[0] as string);
-			const entryId = first ? lastEntryId(first) : undefined;
-			return {
-				state: entryId !== undefined && fence.isInLiveContext(entryId) ? "live_context" : "lineage_mismatch",
-			};
+		const view = projectFrontierView(snapshot.selection, snapshot.nodes, (entryId) => fence.standing(entryId));
+		if (view.items.every((item) => item.kind === "visible")) {
+			return { state: view.offBranch ? "lineage_mismatch" : "live_context" };
 		}
-		const truncated = limited.keptCount < snapshot.selection.nodeIds.length;
-		const rendering = renderFrontier(limited.selection, snapshot.nodes, {
+		const rendering = renderFrontierView(view, {
 			sessionId,
+			revision: snapshot.selection.revision,
+			omittedBeforeIndex: snapshot.selection.omittedBeforeIndex,
 			// A cut at the compaction boundary leaves nothing missing; only a frontier that reaches it can have a gap.
-			...(!truncated && snapshot.gap ? { gap: snapshot.gap } : {}),
+			...(!view.truncated && snapshot.gap ? { gap: snapshot.gap } : {}),
 			allowanceBytes: Math.min(allowanceBytes, this.deps.getHistorySettings().frontierMaxBytes),
+			audience,
 		});
 		return rendering.text === ""
 			? { state: "no_room" }
@@ -235,6 +248,9 @@ export class TranscriptHierarchyHost {
 						settings.summaryModel,
 						settings.maxConcurrentSummaries,
 						settings.allowExternalSummaryEgress,
+						settings.allowExternalAdmissionEgress,
+						// The retention wake is armed from persisted metadata at start, so a new window restarts it.
+						settings.retentionDays,
 					])
 				: undefined;
 		if (reason !== undefined || this.appliedSignature !== signature || this.coordinator?.isRunning() === false) {
@@ -250,11 +266,13 @@ export class TranscriptHierarchyHost {
 			reader,
 			store: new TranscriptSummaryStore({ agentDir: this.deps.getAgentDir(), projectId: this.deps.projectId() }),
 			summarizer: summarizer.summarizer,
+			admission: this.admission,
 			settings: () => {
 				const live = this.deps.getHistorySettings();
 				return {
 					hierarchy: live.hierarchy,
 					allowExternalSummaryEgress: live.allowExternalSummaryEgress,
+					allowExternalAdmissionEgress: live.allowExternalAdmissionEgress,
 					maxConcurrentSummaries: live.maxConcurrentSummaries,
 					frontierMaxBytes: live.frontierMaxBytes,
 					...(live.retentionDays !== undefined ? { retentionDays: live.retentionDays } : {}),
@@ -310,6 +328,15 @@ export class TranscriptHierarchyHost {
 				`History summaries: ${event.failed} job(s) failed, ${event.succeeded} succeeded${cause ? ` (first cause: ${cause.reason}: ${cause.message})` : ""}. Exact history recall is unaffected.`,
 			);
 		}
+		// Held model-summary work is neither failed nor done: say so once per distinct cause, plainly.
+		if (event.held !== undefined && event.held > 0) {
+			if (event.heldReason !== this.lastHeldWarning) {
+				this.lastHeldWarning = event.heldReason;
+				this.deps.emitWarning(
+					`History summaries: ${event.held} model summary job(s) are held: ${event.heldReason ?? "a condition is not met"}. Exact copies and exact history recall are unaffected.`,
+				);
+			}
+		} else this.lastHeldWarning = undefined;
 	}
 
 	private mapStatus(
@@ -331,6 +358,28 @@ export class TranscriptHierarchyHost {
 			})),
 			recoveryIssues: [...status.recoveryIssues],
 			acceptedNodes: status.acceptedNodes,
+			admission: {
+				contractVersion: status.admission.contractVersion,
+				...(status.admission.blocked ? { blocked: { ...status.admission.blocked } } : {}),
+				heldJobs: status.admission.heldJobs,
+				...(status.admission.heldReason !== undefined ? { heldReason: status.admission.heldReason } : {}),
+				judgments: { ...status.admission.judgments },
+				unapprovedNodes: status.admission.unapprovedNodes,
+				readmission: { ...status.admission.readmission },
+			},
+			retention: {
+				scope: status.retention.scope,
+				...(status.retention.days !== undefined ? { days: status.retention.days } : {}),
+				...(status.retention.nextDeadlineAt !== undefined
+					? { nextDeadlineAt: status.retention.nextDeadlineAt }
+					: {}),
+				eventTimeUnknownSources: status.retention.eventTimeUnknownSources,
+				sessionTimestampSources: status.retention.sessionTimestampSources,
+				heldForAnchor: status.retention.heldForAnchor,
+			},
+			pendingParentRederivations: status.pendingParentRederivations,
+			spentAttempts: { ...status.spentAttempts },
+			...(status.lastRevocation ? { lastRevocation: { ...status.lastRevocation } } : {}),
 			...(frontierState ? { frontierState } : {}),
 			...(frontier
 				? {

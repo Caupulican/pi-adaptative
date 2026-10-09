@@ -55,8 +55,12 @@ import type {
 	HmoeWeights,
 } from "../expert-routing/vocabulary.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
-import type { WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
-import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
+import type { LaneMemoryCapacitySource, WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
+import {
+	deriveModelCapabilityProfile,
+	type ModelCapabilityProfile,
+	resolveWorkerOutputTokenCeiling,
+} from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
 import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
@@ -125,6 +129,7 @@ import { executeToolkitScript } from "../toolkit/script-runner.ts";
 import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
 import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
+import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
 import { selectSanitizedContextFork } from "./sanitized-context-fork.ts";
 import { getWorkerClaimSnapshotForAttempt } from "./session-worker-claim.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
@@ -327,6 +332,11 @@ function reservationWait(
 	};
 }
 
+/** Root's compaction reserve on the worker's own window: never more than a quarter of it. */
+function laneCompactionReserveTokens(contextWindow: number, reserveTokens: number): number {
+	return Math.min(reserveTokens, Math.floor(contextWindow * 0.25));
+}
+
 function workerConversationRetentionPolicy(
 	model: Model<Api>,
 	settingsManager: WorkerDelegationControllerSettingsSource,
@@ -339,7 +349,7 @@ function workerConversationRetentionPolicy(
 	// trigger is the early band, where a compaction runs only when its price admits it.
 	const laneSettings = {
 		...settings,
-		reserveTokens: Math.min(settings.reserveTokens, Math.floor(contextWindow * 0.25)),
+		reserveTokens: laneCompactionReserveTokens(contextWindow, settings.reserveTokens),
 	};
 	const modelTrigger =
 		model.autoCompactionTriggerTokens && model.autoCompactionTriggerTokens > 0
@@ -465,8 +475,11 @@ export interface WorkerDelegationControllerDeps {
 	 * worktree lane is judged against its own scope and not the process's.
 	 */
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest, options?: { cwd?: string }): string;
-	/** A fresh read-only memory port for one lane; the handles it admits never reach another lane. */
-	createLaneMemoryBroker(): WorkerMemoryBroker;
+	/**
+	 * A fresh read-only memory port for one lane; the handles it admits never reach another lane. Reads are
+	 * sized against `capacity`: the receiving lane's own request, never the root model's.
+	 */
+	createLaneMemoryBroker(capacity: LaneMemoryCapacitySource): WorkerMemoryBroker;
 	/** Bounded applicable owner working preferences for a handoff, or undefined when there are none. */
 	getHandoffPersonaGuidance?(): string | undefined;
 	/** Session-owned artifact store broker; worker adapters receive fresh retrieval tools only. */
@@ -4444,6 +4457,15 @@ export class WorkerDelegationController {
 			: undefined;
 		// The run-wide baseline is the state at the worker's start, not at its first command.
 		protectedPathWatch?.start();
+		const compactionSettings = this.deps.getSettingsManager().getCompactionSettings();
+		const laneMemoryCapacity = new LaneMemoryCapacityTracker({
+			model,
+			compactionReserveTokens: compactionSettings.enabled
+				? laneCompactionReserveTokens(Math.floor(model.contextWindow ?? 0), compactionSettings.reserveTokens)
+				: 0,
+			maxOutputTokens: resolveWorkerOutputTokenCeiling(model),
+			remainingTokenAllowance: () => toolSurface.gateway?.remainingTokenBudget(),
+		});
 		const toolSurface = createLaneToolSurface({
 			workerLabel: agentId,
 			...(protectedPathWatch ? { protectedPathWatch } : {}),
@@ -4457,7 +4479,9 @@ export class WorkerDelegationController {
 			...(executionContext ? { bindTool: (tool) => this.directories.bindTool(tool, executionContext) } : {}),
 			deniedPaths: executionPlan.deniedPaths,
 			writeProtectedPaths: getHarnessWriteProtectedPaths(executionPlan.cwd, this.deps.getAgentDir()),
-			memoryBroker: executionPlan.readMemory ? this.deps.createLaneMemoryBroker() : undefined,
+			memoryBroker: executionPlan.readMemory
+				? this.deps.createLaneMemoryBroker(laneMemoryCapacity.source)
+				: undefined,
 			writeEnabled: executionPlan.writeEnabled,
 			writePaths: executionPlan.writePaths,
 			...(executionPlan.processEnabled && executionPolicy ? { executionPolicy } : {}),
@@ -4632,6 +4656,7 @@ export class WorkerDelegationController {
 			warn: (message) => this.safeWarn(message),
 			...(this.deps.observeWorkerProgress ? { observeWorkerProgress: this.deps.observeWorkerProgress } : {}),
 			...(this.deps.observeWorkerRequest ? { observeWorkerRequest: this.deps.observeWorkerRequest } : {}),
+			onRequestAccepted: (context) => laneMemoryCapacity.noteRequestAccepted(context),
 			...(this.deps.observeWorkerResponse ? { observeWorkerResponse: this.deps.observeWorkerResponse } : {}),
 			...(this.deps.createWorkerToolSelection
 				? { toolSelection: this.deps.createWorkerToolSelection(model, toolSurface.tools) }

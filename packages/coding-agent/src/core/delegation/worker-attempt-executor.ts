@@ -1,6 +1,6 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
+import type { Api, AssistantMessage, Context, Message, Model, Usage } from "@caupulican/pi-ai";
 import { compact } from "../../kernel/compaction/compaction.ts";
 import type { AgentContextPlan, AgentContextPlanRequest } from "../../kernel/index.ts";
 import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
@@ -246,6 +246,8 @@ export interface WorkerAttemptExecutorOptions {
 	 * tokens of its fixed prefix (system prompt and tool schemas) on the attempt's first request.
 	 */
 	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput, prefixTokens?: number): void;
+	/** Each accepted provider request of this worker, as sent: the receiving capacity a memory read sizes against. */
+	onRequestAccepted?(context: Context): void;
 	/** A worker compaction's measured effect, recorded where root records its own. */
 	recordCompactionOutcome?(outcome: { tokensBefore: number; tokensAfter: number; outputTokens: number }): void;
 	/** Tool selection on the worker's model (see {@link WorkerToolSelection}). */
@@ -1065,6 +1067,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												context: context.context,
 												sourceMessages: context.sourceContext.messages,
 											};
+											options.onRequestAccepted?.(context.context);
 											// The history the marks index: the next run re-anchors them against it.
 											requestPrefix.source = context.sourceContext.messages;
 											options.observeWorkerRequest?.(

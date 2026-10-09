@@ -20,9 +20,12 @@ import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	canTransitionSummaryJob,
 	isTerminalSummaryJobState,
+	TRANSCRIPT_SUMMARY_MAX_BYTES,
 	type TranscriptSourceRef,
 	type TranscriptSummaryJobState,
+	utf8ByteLength,
 } from "./transcript-memory-contracts.ts";
+import { summaryTextDigest } from "./transcript-summary-admission.ts";
 import {
 	isNonNegativeInteger,
 	leafJobKey,
@@ -38,6 +41,11 @@ export const TRANSCRIPT_SUMMARY_DEFAULT_CONCURRENCY = 2;
 export const TRANSCRIPT_SUMMARY_MAX_ATTEMPTS = 3;
 /** New leaf work is refused beyond this many non-terminal jobs; the producer must back off. */
 export const TRANSCRIPT_SUMMARY_MAX_ACTIVE_JOBS = 1_500;
+/**
+ * Jobs held for an outside condition do not count toward the active ceiling (a long hold must not stop exact
+ * copies from being discovered), but live jobs stay bounded below the store's persisted-job ceiling.
+ */
+export const TRANSCRIPT_SUMMARY_MAX_LIVE_JOBS = 1_900;
 
 export const TRANSCRIPT_SUMMARY_RETRY_POLICY: RetryPolicy = {
 	maxAttempts: TRANSCRIPT_SUMMARY_MAX_ATTEMPTS,
@@ -51,9 +59,25 @@ export type TranscriptSummaryJobKind = "leaf" | "parent";
 export interface TranscriptSummaryJobError {
 	/** The real cause, verbatim from the failing call. */
 	message: string;
-	/** `provider` classification reason, or `malformed` / `policy`, with `_attempts_exhausted` when the retry budget ended. */
+	/** `provider` classification reason, or `malformed` / `policy`; `<reason>_attempts_exhausted` when a failure ended the retry budget, `attempts_exhausted` when dispatch refused a job whose attempts were already spent. */
 	reason: string;
 	transient: boolean;
+}
+
+/**
+ * A summarizer reply that passed the deterministic checks and awaits (or lost) its admission, kept on the job
+ * so a retry or a restart judges it again instead of paying the summarizer again. Bound to the exact input it
+ * answered (`inputKey`, the digest of the prompt) and to the recipe; used only while both still match. It is
+ * not a node: nothing reads it as accepted text, and it is dropped when the job leaves the queue.
+ */
+export interface TranscriptSummaryPendingReply {
+	text: string;
+	model: string;
+	/** SHA-256 hex of `text`. */
+	textDigest: string;
+	/** Digest of the prompt (the exact input) this reply answered. */
+	inputKey: string;
+	recipeVersion: number;
 }
 
 export interface TranscriptSummaryJob {
@@ -77,6 +101,8 @@ export interface TranscriptSummaryJob {
 	lastError?: TranscriptSummaryJobError;
 	/** Set when the job is `ready`: the accepted node it produced. */
 	nodeId?: string;
+	/** Queued, running or retrying jobs only: see {@link TranscriptSummaryPendingReply}. */
+	pendingReply?: TranscriptSummaryPendingReply;
 	createdAt: number;
 	updatedAt: number;
 	terminalAt?: number;
@@ -95,6 +121,16 @@ export interface TranscriptSummaryLeafInput {
 	sourceRefs: TranscriptSourceRef[];
 }
 
+/**
+ * What one dispatch produced: the job to run (if a slot and a queued job were available) and the queued jobs
+ * the dispatch refused because their attempt budget was already spent. Exhausted jobs are terminal `failed`
+ * with reason `attempts_exhausted`; the owner reports them like any other terminal failure.
+ */
+export interface TranscriptSummaryClaim {
+	job?: TranscriptSummaryJob;
+	exhausted: TranscriptSummaryJob[];
+}
+
 export type TranscriptSummaryEnqueueResult =
 	| { status: "created" | "exists"; job: TranscriptSummaryJob }
 	| { status: "backpressure"; active: number };
@@ -108,6 +144,25 @@ export interface TranscriptSummaryFailure {
 	message: string;
 	kind: "provider" | "transient" | "malformed" | "policy";
 	provider?: string;
+	/** A more precise fixed class than the kind's default (`source_not_ready`, `malformed`, `policy`); recorded as the job's error reason. */
+	reason?: string;
+}
+
+/**
+ * The compact, persisted remainder of a terminal `failed` job once the job list pruned it: enough that an
+ * identical job key found again cannot be granted a fresh attempt budget.
+ */
+export interface TranscriptSummarySpentAttempt {
+	sessionId: string;
+	/** Attempts started before the job ended. */
+	attempts: number;
+	maxAttempts: number;
+	/** The job's terminal failure class. */
+	reason: string;
+	/** The real cause, bounded. */
+	message: string;
+	/** When the job ended (epoch ms). */
+	at: number;
 }
 
 export interface TranscriptSummarySchedulerOptions {
@@ -117,6 +172,14 @@ export interface TranscriptSummarySchedulerOptions {
 	retryPolicy?: RetryPolicy;
 	/** Jitter source; injectable so a retry schedule is reproducible. */
 	random?: () => number;
+}
+
+/** What a batch of revoked nodes did to the scheduler. */
+export interface TranscriptSummaryRevocation {
+	/** `ready` jobs removed because their accepted node is gone: a ready job is proof of completion only while its node is accepted. */
+	dropped: TranscriptSummaryJob[];
+	/** Parent jobs enqueued again because both aligned children are still ready. */
+	readmitted: TranscriptSummaryJob[];
 }
 
 export interface TranscriptSummaryRecovery {
@@ -149,6 +212,10 @@ export class TranscriptSummaryScheduler {
 	/** Ready nodes by slot, so sibling lookup is one map read. */
 	private readonly readyBySlot = new Map<string, TranscriptSummaryReadyNode>();
 	private readonly slotByNode = new Map<string, string>();
+	/** The `ready` job that produced each ready node: a job is `ready` exactly while its node is in `slotByNode`. */
+	private readonly readyJobByNode = new Map<string, string>();
+	/** Spent attempt budgets of pruned terminal jobs, by job key: identical work found again is not given a fresh budget. */
+	private readonly spent = new Map<string, TranscriptSummarySpentAttempt>();
 	private readonly concurrency: number;
 	private readonly maxAttempts: number;
 	private readonly maxActiveJobs: number;
@@ -175,75 +242,130 @@ export class TranscriptSummaryScheduler {
 	 * Enqueue the leaf for a committed run of spans. Idempotent per coverage: a job that already exists
 	 * (in any state but `cancelled` / `stale`, which are replaced by a fresh one) is returned unchanged.
 	 */
-	enqueueLeaf(input: TranscriptSummaryLeafInput, now: number): TranscriptSummaryEnqueueResult {
+	enqueueLeaf(
+		input: TranscriptSummaryLeafInput,
+		now: number,
+		held?: ReadonlyMap<string, unknown>,
+	): TranscriptSummaryEnqueueResult {
 		const id = leafJobKey({ sessionId: input.sessionId, sourceRefs: input.sourceRefs });
 		const existing = this.jobs.get(id);
 		if (existing && existing.state !== "cancelled" && existing.state !== "stale") {
 			return { status: "exists", job: { ...existing } };
 		}
-		const active = this.activeCount();
-		if (active >= this.maxActiveJobs) return { status: "backpressure", active };
-		return {
-			status: "created",
-			job: this.insert(
-				{
-					id,
-					kind: "leaf",
-					sessionId: input.sessionId,
-					level: 0,
-					ordinal: input.ordinal,
-					spanRange: { ...input.spanRange },
-					sourceRefs: [...input.sourceRefs],
-				},
-				now,
-			),
+		const base = {
+			id,
+			kind: "leaf" as const,
+			sessionId: input.sessionId,
+			level: 0,
+			ordinal: input.ordinal,
+			spanRange: { ...input.spanRange },
+			sourceRefs: [...input.sourceRefs],
 		};
+		// A terminal job whose budget was spent comes back as that same failure, not as new work.
+		const revived = this.reviveSpent(base, now);
+		if (revived) return { status: "exists", job: revived };
+		const live = this.activeCount();
+		let heldQueued = 0;
+		if (held) for (const id of held.keys()) if (this.queued.has(id)) heldQueued += 1;
+		const active = live - heldQueued;
+		if (active >= this.maxActiveJobs || live >= TRANSCRIPT_SUMMARY_MAX_LIVE_JOBS) {
+			return { status: "backpressure", active };
+		}
+		return { status: "created", job: this.insert(base, now) };
+	}
+
+	/** Remember the spent budgets of terminal jobs the job list pruned (persisted by the store). */
+	noteSpent(records: Readonly<Record<string, TranscriptSummarySpentAttempt>>): void {
+		for (const [id, record] of Object.entries(records)) this.spent.set(id, { ...record });
+	}
+
+	spentCount(): number {
+		return this.spent.size;
+	}
+
+	/** Sessions that still have a spent-budget record, so the owner can drop the records of vanished sessions. */
+	spentSessionIds(): Set<string> {
+		return new Set([...this.spent.values()].map((record) => record.sessionId));
+	}
+
+	/** Forget the spent-budget records of sessions that are forgotten for good or no longer exist. */
+	forgetSpentOf(sessionIds: ReadonlySet<string>): void {
+		for (const [id, record] of this.spent) if (sessionIds.has(record.sessionId)) this.spent.delete(id);
+	}
+
+	/** The failed job a spent record stands for, tracked like any other terminal job; undefined without a record. */
+	private reviveSpent(
+		base: Pick<
+			TranscriptSummaryJob,
+			"id" | "kind" | "sessionId" | "level" | "ordinal" | "spanRange" | "sourceRefs" | "children"
+		>,
+		now: number,
+	): TranscriptSummaryJob | undefined {
+		const record = this.spent.get(base.id);
+		if (!record) return undefined;
+		const job: TranscriptSummaryJob = {
+			...base,
+			state: "failed",
+			attempts: record.attempts,
+			maxAttempts: record.maxAttempts,
+			lastError: { message: record.message, reason: record.reason, transient: false },
+			createdAt: record.at,
+			updatedAt: now,
+			terminalAt: record.at,
+		};
+		this.jobs.set(job.id, job);
+		this.track(job);
+		return { ...job };
 	}
 
 	/**
 	 * A node became ready (a job finished, or an accepted node was restored). When its aligned sibling is
 	 * ready too, the parent job is enqueued and returned; otherwise nothing is. Registering the same node
-	 * again is a no-op. Parent jobs are bounded by the ready nodes that produce them and bypass
-	 * backpressure, so a pair of ready children can never be stranded.
+	 * again does not register twice, but still admits the parent when that is missing. Parent jobs are bounded
+	 * by the ready nodes that produce them and bypass backpressure, so a pair of ready children can never be
+	 * stranded.
 	 */
 	onNodeReady(node: TranscriptSummaryReadyNode, now: number): TranscriptSummaryJob[] {
 		const key = slotKey(node.sessionId, node.level, node.ordinal);
 		const registered = this.readyBySlot.get(key);
-		if (registered) {
-			if (registered.id === node.id) return [];
+		if (registered && registered.id !== node.id) {
 			throw new Error(
 				`Slot ${node.sessionId} level ${node.level} ordinal ${node.ordinal} already holds ready node ${registered.id}; refusing ${node.id}.`,
 			);
 		}
-		this.readyBySlot.set(key, { ...node, spanRange: { ...node.spanRange } });
-		this.slotByNode.set(node.id, key);
-
-		const siblingOrdinal = node.ordinal % 2 === 0 ? node.ordinal + 1 : node.ordinal - 1;
-		const sibling = this.readyBySlot.get(slotKey(node.sessionId, node.level, siblingOrdinal));
-		if (!sibling) return [];
-		const [left, right] = node.ordinal % 2 === 0 ? [node, sibling] : [sibling, node];
-		if (left.spanRange.toIndexExclusive !== right.spanRange.fromIndex) {
-			throw new Error(`Sibling nodes ${left.id} and ${right.id} are not adjacent on session ${node.sessionId}.`);
+		if (!registered) {
+			this.readyBySlot.set(key, { ...node, spanRange: { ...node.spanRange } });
+			this.slotByNode.set(node.id, key);
 		}
-		const level = node.level + 1;
+		return this.admitParent(node.sessionId, node.level + 1, Math.floor(node.ordinal / 2), now);
+	}
+
+	/**
+	 * The one admission rule for a parent job: both aligned children ready and no live job for that pair. A
+	 * `ready` job here is live because the ready index only holds accepted nodes (see {@link revokeNodes}).
+	 */
+	private admitParent(sessionId: string, level: number, ordinal: number, now: number): TranscriptSummaryJob[] {
+		const left = this.readyBySlot.get(slotKey(sessionId, level - 1, ordinal * 2));
+		const right = this.readyBySlot.get(slotKey(sessionId, level - 1, ordinal * 2 + 1));
+		if (!left || !right) return [];
+		if (left.spanRange.toIndexExclusive !== right.spanRange.fromIndex) {
+			throw new Error(`Sibling nodes ${left.id} and ${right.id} are not adjacent on session ${sessionId}.`);
+		}
 		const children: [string, string] = [left.id, right.id];
-		const id = parentJobKey({ sessionId: node.sessionId, level, children });
+		const id = parentJobKey({ sessionId, level, children });
 		const existing = this.jobs.get(id);
 		if (existing && existing.state !== "cancelled" && existing.state !== "stale") return [];
-		return [
-			this.insert(
-				{
-					id,
-					kind: "parent",
-					sessionId: node.sessionId,
-					level,
-					ordinal: left.ordinal / 2,
-					spanRange: { fromIndex: left.spanRange.fromIndex, toIndexExclusive: right.spanRange.toIndexExclusive },
-					children,
-				},
-				now,
-			),
-		];
+		const base = {
+			id,
+			kind: "parent" as const,
+			sessionId,
+			level,
+			ordinal,
+			spanRange: { fromIndex: left.spanRange.fromIndex, toIndexExclusive: right.spanRange.toIndexExclusive },
+			children,
+		};
+		if (this.reviveSpent(base, now)) return [];
+		return [this.insert(base, now)];
 	}
 
 	// ---- run ----------------------------------------------------------------------------------
@@ -262,15 +384,56 @@ export class TranscriptSummaryScheduler {
 		return promoted;
 	}
 
-	/** Start the oldest queued job when a slot is free. Counts the attempt. */
-	claimNext(now: number): TranscriptSummaryJob | undefined {
+	/**
+	 * Start the oldest queued job when a slot is free and count the attempt. The attempt budget is enforced
+	 * here, the one place a provider call is authorized: a queued job that has already started
+	 * `maxAttempts` attempts (an interrupt, stop or restart keeps the count) is never started again and ends
+	 * `failed` with reason `attempts_exhausted`. Identical work is a retry of the same job; a changed recipe
+	 * or input is a different job key and starts with a fresh budget.
+	 */
+	claimNext(now: number, skip?: (job: TranscriptSummaryJob) => boolean): TranscriptSummaryClaim {
 		this.promoteDue(now);
-		if (this.running.size >= this.concurrency) return undefined;
-		const id = this.queued.values().next().value;
-		if (id === undefined) return undefined;
-		const job = this.mustGet(id);
-		this.transition(job, "running", now);
-		job.attempts += 1;
+		const exhausted: TranscriptSummaryJob[] = [];
+		if (this.running.size >= this.concurrency) return { exhausted };
+		for (const id of this.queued) {
+			const job = this.mustGet(id);
+			if (skip?.(job)) continue;
+			if (job.attempts >= job.maxAttempts) {
+				const spent = job.lastError ? ` Last failure: ${job.lastError.message}` : "";
+				exhausted.push(
+					this.finishFailed(
+						job,
+						{
+							message: `The attempt budget is spent: ${job.attempts} of ${job.maxAttempts} attempts were started and none completed.${spent}`,
+							reason: "attempts_exhausted",
+							transient: true,
+						},
+						now,
+					),
+				);
+				continue;
+			}
+			this.transition(job, "running", now);
+			job.attempts += 1;
+			return { job: { ...job }, exhausted };
+		}
+		return { exhausted };
+	}
+
+	/**
+	 * Put a running job back on the queue because the work it reached cannot run yet for a reason outside the
+	 * job (an evaluator that is not bound, an egress setting, an unadmitted child summary), BEFORE any provider
+	 * call was made for it. The attempt this claim counted is returned, since no call was authorized by it,
+	 * and the cause is recorded on the job. Anything that did reach a provider is never deferred: use
+	 * {@link interrupt} or {@link failJob}, which keep the count. The owner must stop claiming the job until
+	 * its condition clears (the `skip` of {@link claimNext}), or it would only be claimed and deferred again.
+	 */
+	defer(jobId: string, cause: { message: string; reason: string }, now: number): TranscriptSummaryJob | undefined {
+		const job = this.mustGet(jobId);
+		if (job.state !== "running") return undefined;
+		this.transition(job, "queued", now);
+		job.attempts = Math.max(0, job.attempts - 1);
+		job.lastError = { message: cause.message, reason: cause.reason, transient: true };
 		return { ...job };
 	}
 
@@ -293,6 +456,7 @@ export class TranscriptSummaryScheduler {
 		}
 		this.transition(job, "ready", now);
 		job.nodeId = node.id;
+		this.readyJobByNode.set(node.id, job.id);
 		return this.onNodeReady(node, now);
 	}
 
@@ -305,11 +469,15 @@ export class TranscriptSummaryScheduler {
 		if (!job) throw new Error(`Unknown summary job ${jobId}.`);
 		if (isTerminalSummaryJobState(job.state)) return undefined;
 		if (failure.kind === "malformed" || failure.kind === "policy") {
-			return this.finishFailed(job, { message: failure.message, reason: failure.kind, transient: false }, now);
+			return this.finishFailed(
+				job,
+				{ message: failure.message, reason: failure.reason ?? failure.kind, transient: false },
+				now,
+			);
 		}
 		const classified =
 			failure.kind === "transient"
-				? { reason: "source_not_ready", retryable: true, retryAfterMs: undefined }
+				? { reason: failure.reason ?? "source_not_ready", retryable: true, retryAfterMs: undefined }
 				: classifyFailure({
 						message: failure.message,
 						...(failure.provider !== undefined ? { provider: failure.provider } : {}),
@@ -361,26 +529,73 @@ export class TranscriptSummaryScheduler {
 		return this.endJob(jobId, "stale", now);
 	}
 
-	/** End every non-terminal job of a session and forget its ready nodes. Used when its history is invalidated. */
-	endSession(sessionId: string, to: "cancelled" | "stale", now: number): TranscriptSummaryJob[] {
+	/**
+	 * End every non-terminal job of a session and forget its ready nodes and the ready jobs that produced them.
+	 * Used when its history is invalidated: a ready job must not outlive the node it vouches for.
+	 */
+	endSession(
+		sessionId: string,
+		to: "cancelled" | "stale",
+		now: number,
+	): { ended: TranscriptSummaryJob[]; droppedReady: TranscriptSummaryJob[] } {
 		const ended: TranscriptSummaryJob[] = [];
 		for (const id of [...(this.jobsBySession.get(sessionId) ?? [])]) {
 			const job = this.endJob(id, to, now);
 			if (job) ended.push(job);
 		}
-		for (const nodeId of [...this.slotByNode.keys()]) {
-			const slot = this.slotByNode.get(nodeId);
-			if (slot?.startsWith(`${sessionId}\u0000`)) this.forgetNode(nodeId);
+		const sessionNodes: string[] = [];
+		for (const nodeId of this.slotByNode.keys()) {
+			if (this.slotByNode.get(nodeId)?.startsWith(`${sessionId}\u0000`)) sessionNodes.push(nodeId);
 		}
-		return ended;
+		return { ended, droppedReady: this.dropReady(sessionNodes).dropped };
 	}
 
-	/** Drop a node from the ready index, e.g. after its revocation, so it can never pair into a new parent. */
-	forgetNode(nodeId: string): void {
-		const slot = this.slotByNode.get(nodeId);
-		if (slot === undefined) return;
-		this.slotByNode.delete(nodeId);
-		this.readyBySlot.delete(slot);
+	/**
+	 * Accepted nodes were revoked (invalidation, retention, recovery). Reconciles the scheduler with the
+	 * store's accepted-node evidence exactly as {@link recover} does at restart: each node leaves the ready
+	 * index and the `ready` job that produced it is removed, so unchanged source refs enqueue again instead of
+	 * resolving to a completion whose node is gone. With `readmit`, every revoked parent whose two children
+	 * are still ready is then admitted again, even though registering an unchanged child is otherwise a
+	 * no-op. The owner passes `readmit: false` when the revoked identity is forgotten for good (retention):
+	 * re-deriving it could only be refused. All removals happen before any admission, so the result does
+	 * not depend on the order the nodes arrive in.
+	 */
+	revokeNodes(nodeIds: Iterable<string>, now: number, options: { readmit: boolean }): TranscriptSummaryRevocation {
+		const { dropped, nodes } = this.dropReady(nodeIds);
+		const readmitted: TranscriptSummaryJob[] = [];
+		if (options.readmit) {
+			for (const node of nodes) {
+				if (node.level >= 1) readmitted.push(...this.admitParent(node.sessionId, node.level, node.ordinal, now));
+			}
+		}
+		return { dropped, readmitted };
+	}
+
+	/** Remove nodes from the ready index together with their `ready` jobs. */
+	private dropReady(nodeIds: Iterable<string>): {
+		dropped: TranscriptSummaryJob[];
+		nodes: TranscriptSummaryReadyNode[];
+	} {
+		const dropped: TranscriptSummaryJob[] = [];
+		const nodes: TranscriptSummaryReadyNode[] = [];
+		for (const nodeId of nodeIds) {
+			const slot = this.slotByNode.get(nodeId);
+			if (slot !== undefined) {
+				const node = this.readyBySlot.get(slot);
+				if (node) nodes.push(node);
+				this.slotByNode.delete(nodeId);
+				this.readyBySlot.delete(slot);
+			}
+			const jobId = this.readyJobByNode.get(nodeId);
+			if (jobId === undefined) continue;
+			this.readyJobByNode.delete(nodeId);
+			const job = this.jobs.get(jobId);
+			if (job?.state !== "ready" || job.nodeId !== nodeId) continue;
+			this.jobs.delete(jobId);
+			this.jobsBySession.get(job.sessionId)?.delete(jobId);
+			dropped.push({ ...job });
+		}
+		return { dropped, nodes };
 	}
 
 	// ---- restart ------------------------------------------------------------------------------
@@ -412,6 +627,7 @@ export class TranscriptSummaryScheduler {
 			};
 			this.jobs.set(job.id, job);
 			this.track(job);
+			if (job.state === "ready" && job.nodeId) this.readyJobByNode.set(job.nodeId, job.id);
 			if (job.state === "running") {
 				this.transition(job, "queued", now);
 				recovery.interrupted.push(job.id);
@@ -527,7 +743,17 @@ export class TranscriptSummaryScheduler {
 		job.state = to;
 		job.updatedAt = now;
 		if (isTerminalSummaryJobState(to)) job.terminalAt = now;
+		// A kept reply serves a job that will run again; a job that is ready or finished has no use for it.
+		if (to === "ready" || isTerminalSummaryJobState(to)) delete job.pendingReply;
 		this.track(job);
+	}
+
+	/** Keep (or drop, with `undefined`) the validated reply a running, queued or waiting job will reuse. */
+	setPendingReply(jobId: string, reply: TranscriptSummaryPendingReply | undefined): void {
+		const job = this.jobs.get(jobId);
+		if (!job || job.state === "ready" || isTerminalSummaryJobState(job.state)) return;
+		if (reply === undefined) delete job.pendingReply;
+		else job.pendingReply = { ...reply };
 	}
 
 	private finishFailed(
@@ -560,6 +786,41 @@ function isFiniteNumber(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value);
 }
 
+/** One untrusted persisted spent-budget record; undefined when malformed. */
+export function parseSpentAttempt(value: unknown): TranscriptSummarySpentAttempt | undefined {
+	if (!isPlainRecord(value)) return undefined;
+	if (typeof value.sessionId !== "string" || value.sessionId.length === 0) return undefined;
+	if (!isNonNegativeInteger(value.attempts) || !isNonNegativeInteger(value.maxAttempts)) return undefined;
+	if (typeof value.reason !== "string" || typeof value.message !== "string" || !isFiniteNumber(value.at)) {
+		return undefined;
+	}
+	return {
+		sessionId: value.sessionId,
+		attempts: value.attempts,
+		maxAttempts: value.maxAttempts,
+		reason: value.reason,
+		message: value.message,
+		at: value.at,
+	};
+}
+
+/**
+ * One untrusted persisted pending reply; undefined when malformed, oversized or not the reply its digest names.
+ * A damaged reply is dropped, not the job: it only costs the summarizer call it would have saved.
+ */
+function parsePendingReply(value: unknown): TranscriptSummaryPendingReply | undefined {
+	if (!isPlainRecord(value)) return undefined;
+	const { text, model, textDigest, inputKey, recipeVersion } = value;
+	if (typeof text !== "string" || text.trim().length === 0 || utf8ByteLength(text) > TRANSCRIPT_SUMMARY_MAX_BYTES) {
+		return undefined;
+	}
+	if (typeof model !== "string" || model.length === 0 || model.length > 200) return undefined;
+	if (typeof textDigest !== "string" || textDigest !== summaryTextDigest(text)) return undefined;
+	if (typeof inputKey !== "string" || inputKey.length === 0 || inputKey.length > 64) return undefined;
+	if (!isNonNegativeInteger(recipeVersion)) return undefined;
+	return { text, model, textDigest, inputKey, recipeVersion };
+}
+
 /** Validate one untrusted persisted job. */
 export function parseSummaryJob(value: unknown): TranscriptSummaryJobParse {
 	const fail = (reason: string): TranscriptSummaryJobParse => ({ ok: false, reason });
@@ -586,6 +847,7 @@ export function parseSummaryJob(value: unknown): TranscriptSummaryJobParse {
 	}
 	const children = parseChildPair(value.children);
 	if (value.kind === "parent" && children === undefined) return fail("parent needs two children");
+	const pendingReply = value.pendingReply === undefined ? undefined : parsePendingReply(value.pendingReply);
 	let error: TranscriptSummaryJobError | undefined;
 	if (value.lastError !== undefined) {
 		const raw = value.lastError;
@@ -616,6 +878,9 @@ export function parseSummaryJob(value: unknown): TranscriptSummaryJobParse {
 			...(value.nextRetryAt !== undefined ? { nextRetryAt: value.nextRetryAt as number } : {}),
 			...(error ? { lastError: error } : {}),
 			...(typeof value.nodeId === "string" ? { nodeId: value.nodeId } : {}),
+			...(pendingReply && (value.state === "queued" || value.state === "running" || value.state === "retry_wait")
+				? { pendingReply }
+				: {}),
 			createdAt: value.createdAt,
 			updatedAt: value.updatedAt,
 			...(value.terminalAt !== undefined ? { terminalAt: value.terminalAt as number } : {}),

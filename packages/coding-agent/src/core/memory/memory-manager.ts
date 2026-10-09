@@ -331,7 +331,8 @@ export class MemoryManager {
 		}
 	}
 
-	public async onPreCompress(): Promise<string> {
+	/** One insight per contributing provider, each a whole record for the caller to bound. */
+	public async onPreCompress(): Promise<string[]> {
 		const insights: string[] = [];
 		for (const p of this.providers) {
 			if (!this.activeProviders.has(p.name) || !p.onPreCompress) {
@@ -342,7 +343,7 @@ export class MemoryManager {
 				insights.push(result.value);
 			}
 		}
-		return insights.join("\n\n");
+		return insights;
 	}
 
 	public async onSessionEnd(): Promise<void> {

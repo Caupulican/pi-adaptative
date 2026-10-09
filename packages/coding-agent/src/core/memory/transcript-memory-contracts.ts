@@ -211,20 +211,34 @@ export interface TranscriptSearchHit {
 	snippet: string;
 }
 
-/** Accounting of what history the index covers and what it skipped, with reasons. */
+/**
+ * Accounting of what history the index covers and what it did not, with reasons. Sessions are counted
+ * by identity: `sessionsEligible` are this project's sessions whose header identifies them, and each is
+ * exactly one of indexed, unsupported, or skipped. Files with no readable identity are only skipped.
+ */
 export interface TranscriptCoverage {
+	/** Project sessions with a readable identity (indexed, unsupported, or skipped for a stated reason). */
+	sessionsEligible: number;
 	sessionsIndexed: number;
+	/** Eligible sessions whose on-disk format cannot be captured with stable handles. */
+	sessionsUnsupported: number;
 	sessionsSkipped: number;
 	spansIndexed: number;
 	spansUncaptured: number;
 	/** Distinct session-level skip reasons with counts, bounded. */
 	skipped: Record<string, number>;
+	/** Distinct reasons eligible sessions cannot be captured, with counts, bounded. */
+	unsupported: Record<string, number>;
 	/** Distinct span-level uncaptured reasons with counts, bounded. */
 	uncaptured: Record<string, number>;
+	/** Sources that failed to read or ingest and are not indexed right now (a subset of the skipped ones). */
+	activeFailures: number;
 	/** True when the indexing budget stopped before every eligible session was read. */
 	truncated: boolean;
-	/** The most recent non-fatal read, ingest, source or query failure, with when it happened. */
+	/** The most recent non-fatal read, ingest, source or query failure, with when it happened. Historical evidence: later successes do not clear it. */
 	lastError?: { at: string; message: string };
+	/** When a source that had failed to read or ingest last became readable again. */
+	lastRecoveryAt?: string;
 }
 
 export interface TranscriptSearchRequest {

@@ -64,6 +64,20 @@ interface QueuedIngest {
 	rewritten: boolean;
 }
 
+/**
+ * Whether the history index is serving, still loading its initial scan, or down (with the real cause).
+ * A stopped transport and a slow one are different facts: `stoppedAt` marks the worker that ended,
+ * `readTimeouts` the reads that gave up on a worker that is still there.
+ */
+export interface TranscriptRecallHealth {
+	state: "ready" | "loading" | "failed";
+	reason?: string;
+	/** When the worker stopped serving; absent while it serves and when it never started. */
+	stoppedAt?: string;
+	/** Reads of this worker generation that timed out, with when the latest did. */
+	readTimeouts?: { count: number; lastAt: string };
+}
+
 export interface TranscriptRecallProviderOptions {
 	workerSpecifier?: string | URL;
 	maxPendingQueries?: number;
@@ -84,6 +98,11 @@ function describeError(error: unknown): string {
 	return (error instanceof Error ? error.message : String(error)).slice(0, TRANSCRIPT_RECALL_MAX_ERROR_CHARS);
 }
 
+function describeMalformedResponse(value: unknown): string {
+	const type = typeof value === "object" && value !== null ? (value as { type?: unknown }).type : undefined;
+	return typeof type === "string" ? `a malformed '${type.slice(0, 32)}' response` : "a malformed response";
+}
+
 /** Clamp a caller-supplied number into an integer range; non-finite input takes `fallback`. */
 function clampInteger(value: number, min: number, max: number, fallback: number): number {
 	return Number.isFinite(value) ? Math.max(min, Math.min(max, Math.trunc(value))) : fallback;
@@ -100,6 +119,8 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 	private ready = false;
 	private projectId: string | undefined;
 	private failure: string | undefined;
+	private stoppedAt: string | undefined;
+	private readTimeouts: { count: number; lastAt: string } | undefined;
 	private latestCoverage: TranscriptCoverage | undefined;
 	private readyPromise: Promise<void> | undefined;
 	private resolveReady: (() => void) | undefined;
@@ -126,6 +147,8 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		const generation = ++this.generation;
 		this.ready = false;
 		this.failure = undefined;
+		this.stoppedAt = undefined;
+		this.readTimeouts = undefined;
 		this.latestCoverage = undefined;
 		this.projectId = undefined;
 		this.queuedIngests.clear();
@@ -210,15 +233,17 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		});
 	}
 
-	/** Whether the history index is serving, still loading its initial scan, or down (with the real cause). */
-	health(): { state: "ready" | "loading" | "failed"; reason?: string } {
-		if (this.worker === undefined) {
-			return {
-				state: "failed",
-				reason: this.failure ?? "Transcript recall has not been initialized for this session.",
-			};
-		}
-		return { state: this.ready ? "ready" : "loading" };
+	health(): TranscriptRecallHealth {
+		const health: TranscriptRecallHealth =
+			this.worker === undefined
+				? {
+						state: "failed",
+						reason: this.failure ?? "Transcript recall has not been initialized for this session.",
+					}
+				: { state: this.ready ? "ready" : "loading" };
+		if (this.stoppedAt !== undefined) health.stoppedAt = this.stoppedAt;
+		if (this.readTimeouts !== undefined) health.readTimeouts = { ...this.readTimeouts };
+		return health;
 	}
 
 	coverage(): TranscriptCoverage | undefined {
@@ -353,14 +378,14 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		const requestId = this.requestId++;
 		const timeoutMs = expect === "sessions" || expect === "lineage" ? BACKGROUND_READ_TIMEOUT_MS : QUERY_TIMEOUT_MS;
 		return new Promise((resolve) => {
-			const timeout = setTimeout(
-				() =>
-					this.finishRequest(requestId, {
-						status: "unavailable",
-						reason: `Transcript read timed out after ${timeoutMs} ms.`,
-					}),
-				timeoutMs,
-			);
+			const timeout = setTimeout(() => {
+				if (!this.pending.has(requestId)) return;
+				this.readTimeouts = { count: (this.readTimeouts?.count ?? 0) + 1, lastAt: new Date().toISOString() };
+				this.finishRequest(requestId, {
+					status: "unavailable",
+					reason: `Transcript read timed out after ${timeoutMs} ms.`,
+				});
+			}, timeoutMs);
 			timeout.unref();
 			// `handleWorkerMessage` resolves a pending request only with a response of the kind it expects.
 			const settle = (outcome: PendingResponse | TranscriptReadUnavailable): void =>
@@ -384,7 +409,15 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 	}
 
 	private handleWorkerMessage(worker: Worker, generation: number, value: unknown): void {
-		if (this.worker !== worker || this.generation !== generation || !isTranscriptRecallWorkerResponse(value)) {
+		if (this.worker !== worker || this.generation !== generation) return;
+		if (!isTranscriptRecallWorkerResponse(value)) {
+			// A reply outside the protocol can never settle its read; stop the channel with that cause
+			// instead of leaving every pending read to time out with no explanation.
+			this.handleWorkerFailure(
+				worker,
+				generation,
+				`Transcript recall worker sent ${describeMalformedResponse(value)}.`,
+			);
 			return;
 		}
 		const message: TranscriptRecallWorkerResponse = value;
@@ -437,6 +470,7 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 		this.ready = false;
 		this.latestCoverage = undefined;
 		this.failure = reason;
+		this.stoppedAt = new Date().toISOString();
 		this.queuedIngests.clear();
 		this.finishReady();
 		this.finishRequestsFor(worker, { status: "unavailable", reason });
@@ -487,12 +521,16 @@ export class TranscriptRecallProvider implements MemoryProvider, TranscriptLinea
 
 function emptyCoverage(): TranscriptCoverage {
 	return {
+		sessionsEligible: 0,
 		sessionsIndexed: 0,
+		sessionsUnsupported: 0,
 		sessionsSkipped: 0,
 		spansIndexed: 0,
 		spansUncaptured: 0,
 		skipped: {},
+		unsupported: {},
 		uncaptured: {},
+		activeFailures: 0,
 		truncated: false,
 	};
 }

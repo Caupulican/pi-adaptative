@@ -113,6 +113,61 @@ export interface TranscriptHierarchyBatch {
 	endedAt: number;
 }
 
+/** How derived-summary retention applies; counts and instants only. The setting ages out DERIVED summaries, never canonical transcripts or exact reads. */
+export interface TranscriptHierarchyRetention {
+	scope: "derived_summaries_only";
+	days?: number;
+	/** When the next accepted summary reaches its retention deadline. */
+	nextDeadlineAt?: number;
+	/** Source parts without an event time that age from their first capture (`event_time_unknown`). */
+	eventTimeUnknownSources: number;
+	/** Source parts without an entry time that age from the canonical session timestamp. */
+	sessionTimestampSources: number;
+	/** Source parts the anchor ceiling refused: dependent summaries are held. */
+	heldForAnchor: number;
+}
+
+/** The latest revocation of derived history and what was done about the summaries built on it. */
+export interface TranscriptHierarchyRevocation {
+	at: number;
+	reason: "invalidated" | "retention" | "forgotten" | "admission_rejected" | "admission_uncertain";
+	revokedNodes: number;
+	droppedReadyJobs: number;
+	readmittedParents: number;
+}
+
+/** Why model summary work cannot proceed: a fixed class (safe in diagnostics) and the real cause in words (operator view only). */
+export type TranscriptHierarchyBlockKind =
+	| "no_summarizer"
+	| "summary_egress_not_allowed"
+	| "no_admission_evaluator"
+	| "admission_egress_not_allowed"
+	| "admission_not_bound"
+	| "admission_not_calibrated";
+
+/**
+ * Evidence-quality admission of model summaries. Exact copies are never judged. A model summary is accepted
+ * only after a System One judgment; while one cannot run, model summaries are held and exact copies still flow.
+ */
+export interface TranscriptHierarchyAdmission {
+	contractVersion: number;
+	blocked?: { kind: TranscriptHierarchyBlockKind; reason: string };
+	/** Model-summary jobs held before any provider call. */
+	heldJobs: number;
+	heldReason?: string;
+	judgments: { accepted: number; rejected: number; uncertain: number; unavailable: number };
+	/** Accepted model summaries without a current admission: never shown or expanded as approved. */
+	unapprovedNodes: number;
+	readmission: {
+		admitted: number;
+		rejected: number;
+		uncertain: number;
+		unavailable: number;
+		/** Unapproved nodes by the wait code that says why each is not approved. */
+		waitingFor: Partial<Record<string, number>>;
+	};
+}
+
 /** The summary hierarchy as the operator sees it; the diagnostic projection is derived from it. */
 export interface TranscriptHierarchyStatus {
 	state: "off" | "starting" | "running" | "stopped";
@@ -127,6 +182,13 @@ export interface TranscriptHierarchyStatus {
 	/** Recovery states found while loading derived state, in words (operator view only). */
 	recoveryIssues: string[];
 	acceptedNodes: number;
+	admission?: TranscriptHierarchyAdmission;
+	retention?: TranscriptHierarchyRetention;
+	/** Parents being derived again after a revocation: those ranges are covered by their children meanwhile. */
+	pendingParentRederivations?: number;
+	/** Spent attempt budgets kept for pruned failed jobs (`refused`: past `bound`, those budgets are unprotected). */
+	spentAttempts?: { recorded: number; bound: number; refused: number };
+	lastRevocation?: TranscriptHierarchyRevocation;
 	/** Why the latest committed request did or did not carry the history frontier. */
 	frontierState?: string;
 	/** The current session's frontier, when one exists. */
@@ -147,6 +209,8 @@ export interface TranscriptHistoryStatus {
 	unavailableReason?: string;
 	/** Absent while the index is loading or when the backend is unavailable. */
 	coverage?: TranscriptCoverage;
+	/** Transport facts the availability alone does not say: when it stopped, and reads that gave up on it. */
+	transport?: TranscriptTransportDiagnostics;
 	/** The transcript provider's slot in the latest retrieval pass, when it was queried. */
 	latestRetrieval?: {
 		status: MemoryProviderRetrievalStatus;
@@ -168,14 +232,26 @@ export interface ReasonCount {
 }
 
 export interface TranscriptCoverageDiagnostics {
+	sessionsEligible: number;
 	sessionsIndexed: number;
+	sessionsUnsupported: number;
 	sessionsSkipped: number;
 	spansIndexed: number;
 	spansUncaptured: number;
 	truncated: boolean;
 	skipped: ReasonCount[];
+	unsupported: ReasonCount[];
 	uncaptured: ReasonCount[];
+	/** Sources failing to read right now; a `lastError` with none failing is history, not a current fault. */
+	activeFailures: number;
 	lastError?: { at: string; kind: string };
+	lastRecoveryAt?: string;
+}
+
+/** Timestamps and counts only. A stopped transport's cause text is operator-view only (it may name a path). */
+export interface TranscriptTransportDiagnostics {
+	stoppedAt?: string;
+	readTimeouts?: { count: number; lastAt: string };
 }
 
 /** Allow-list projection of the hierarchy: counts and fixed failure classes only, never a cause text or a path. */
@@ -186,6 +262,14 @@ export interface TranscriptHierarchyDiagnostics {
 	failureClasses: ReasonCount[];
 	recoveryIssueCount: number;
 	acceptedNodes: number;
+	/** Counts and the fixed block class only; never the cause text. */
+	admission?: Omit<TranscriptHierarchyAdmission, "blocked" | "heldReason"> & {
+		blockedKind?: TranscriptHierarchyBlockKind;
+	};
+	retention?: TranscriptHierarchyRetention;
+	pendingParentRederivations?: number;
+	spentAttempts?: TranscriptHierarchyStatus["spentAttempts"];
+	lastRevocation?: TranscriptHierarchyRevocation;
 	frontierState?: string;
 	frontier?: TranscriptHierarchyStatus["frontier"];
 	lastBatch?: TranscriptHierarchyBatch;
@@ -194,6 +278,7 @@ export interface TranscriptHierarchyDiagnostics {
 export interface TranscriptMemoryDiagnostics {
 	availability: TranscriptHistoryStatus["availability"];
 	coverage?: TranscriptCoverageDiagnostics;
+	transport?: TranscriptTransportDiagnostics;
 	latestRetrieval?: {
 		status: MemoryProviderRetrievalStatus;
 		resultCount: number;
@@ -223,12 +308,17 @@ export function sanitizeTranscriptHistoryForDiagnostics(status: TranscriptHistor
 		...(coverage
 			? {
 					coverage: {
+						sessionsEligible: coverage.sessionsEligible,
 						sessionsIndexed: coverage.sessionsIndexed,
+						sessionsUnsupported: coverage.sessionsUnsupported,
 						sessionsSkipped: coverage.sessionsSkipped,
 						spansIndexed: coverage.spansIndexed,
 						spansUncaptured: coverage.spansUncaptured,
 						truncated: coverage.truncated,
 						skipped: topReasons(coverage.skipped),
+						unsupported: topReasons(coverage.unsupported),
+						activeFailures: coverage.activeFailures,
+						...(coverage.lastRecoveryAt ? { lastRecoveryAt: coverage.lastRecoveryAt } : {}),
 						uncaptured: topReasons(coverage.uncaptured),
 						...(coverage.lastError
 							? {
@@ -243,6 +333,7 @@ export function sanitizeTranscriptHistoryForDiagnostics(status: TranscriptHistor
 					},
 				}
 			: {}),
+		...(status.transport ? { transport: { ...status.transport } } : {}),
 		...(retrieval
 			? {
 					latestRetrieval: {
@@ -269,6 +360,24 @@ function sanitizeHierarchyForDiagnostics(status: TranscriptHierarchyStatus): Tra
 		failureClasses: topReasons(classes),
 		recoveryIssueCount: status.recoveryIssues.length,
 		acceptedNodes: status.acceptedNodes,
+		...(status.admission
+			? {
+					admission: {
+						contractVersion: status.admission.contractVersion,
+						...(status.admission.blocked ? { blockedKind: status.admission.blocked.kind } : {}),
+						heldJobs: status.admission.heldJobs,
+						judgments: { ...status.admission.judgments },
+						unapprovedNodes: status.admission.unapprovedNodes,
+						readmission: { ...status.admission.readmission },
+					},
+				}
+			: {}),
+		...(status.retention ? { retention: { ...status.retention } } : {}),
+		...(status.pendingParentRederivations !== undefined
+			? { pendingParentRederivations: status.pendingParentRederivations }
+			: {}),
+		...(status.spentAttempts ? { spentAttempts: { ...status.spentAttempts } } : {}),
+		...(status.lastRevocation ? { lastRevocation: { ...status.lastRevocation } } : {}),
 		...(status.frontierState ? { frontierState: status.frontierState } : {}),
 		...(status.frontier ? { frontier: { ...status.frontier } } : {}),
 		...(lastBatch ? { lastBatch: { ...lastBatch } } : {}),
@@ -285,14 +394,25 @@ export function formatTranscriptMemoryLines(diagnostics: TranscriptMemoryDiagnos
 	const coverage = diagnostics.coverage;
 	if (coverage) {
 		lines.push(
-			`History recall: ${diagnostics.availability}; ${coverage.sessionsIndexed} session(s) indexed, ${coverage.sessionsSkipped} skipped${describeReasonCounts(coverage.skipped)}; ${coverage.spansIndexed} span(s) indexed, ${coverage.spansUncaptured} uncaptured${describeReasonCounts(coverage.uncaptured)}; indexing ${coverage.truncated ? "truncated by its budget" : "complete"}`,
+			`History recall: ${diagnostics.availability}; ${coverage.sessionsEligible} eligible session(s): ${coverage.sessionsIndexed} indexed, ${coverage.sessionsUnsupported} unsupported${describeReasonCounts(coverage.unsupported)}; ${coverage.sessionsSkipped} skipped${describeReasonCounts(coverage.skipped)}; ${coverage.spansIndexed} span(s) indexed, ${coverage.spansUncaptured} uncaptured${describeReasonCounts(coverage.uncaptured)}; ${coverage.truncated ? "indexing cut off by its budget" : "no budget cutoff"}; sessions not indexed cannot be found`,
 		);
-		if (coverage.lastError)
-			lines.push(`  last indexing error at ${coverage.lastError.at}: ${coverage.lastError.kind}`);
+		if (coverage.activeFailures > 0) lines.push(`  ${coverage.activeFailures} source(s) failing to read now`);
+		if (coverage.lastError) {
+			lines.push(
+				`  ${coverage.activeFailures > 0 ? "last" : "historical"} indexing error at ${coverage.lastError.at}: ${coverage.lastError.kind}${coverage.activeFailures > 0 ? "" : " (no source failing now)"}`,
+			);
+		}
+		if (coverage.lastRecoveryAt)
+			lines.push(`  a failing source last became readable again at ${coverage.lastRecoveryAt}`);
 	} else {
 		lines.push(
 			`History recall: ${diagnostics.availability}${diagnostics.availability === "active" ? "; coverage not yet reported" : ""}`,
 		);
+	}
+	const transport = diagnostics.transport;
+	if (transport?.stoppedAt) lines.push(`  transport stopped at ${transport.stoppedAt}`);
+	if (transport?.readTimeouts) {
+		lines.push(`  ${transport.readTimeouts.count} read(s) timed out, latest at ${transport.readTimeouts.lastAt}`);
 	}
 	const retrieval = diagnostics.latestRetrieval;
 	if (retrieval) {
@@ -303,6 +423,45 @@ export function formatTranscriptMemoryLines(diagnostics: TranscriptMemoryDiagnos
 		lines.push(`  latest retrieval: ${outcome}; ${diagnostics.admittedInPromptCount} admitted into the prompt block`);
 	}
 	if (diagnostics.hierarchy) lines.push(...formatHierarchyLines(diagnostics.hierarchy));
+	return lines;
+}
+
+const BLOCK_SENTENCES: Readonly<Record<TranscriptHierarchyBlockKind, string>> = {
+	no_summarizer: "no summary model is configured",
+	summary_egress_not_allowed: "the summary model is external and allowExternalSummaryEgress is off",
+	no_admission_evaluator: "no summary admission evaluator is configured",
+	admission_egress_not_allowed:
+		"sending history to the remote System One evaluator needs contextPolicy.memory.history.allowExternalAdmissionEgress (a local summary model does not make it local)",
+	admission_not_bound: "System One is not bound to this session",
+	admission_not_calibrated: "the bound evaluator does not report calibrated probabilities",
+};
+
+function formatAdmissionLines(admission: TranscriptHierarchyDiagnostics["admission"]): string[] {
+	if (!admission) return [];
+	const lines: string[] = [];
+	if (admission.blockedKind) {
+		lines.push(
+			`  model summaries are held (${BLOCK_SENTENCES[admission.blockedKind]}); exact copies and exact history recall are unaffected${admission.heldJobs > 0 ? `; ${admission.heldJobs} job(s) waiting` : ""}`,
+		);
+	} else if (admission.heldJobs > 0) {
+		lines.push(`  ${admission.heldJobs} model summary job(s) held until their child summaries are admitted`);
+	}
+	const judged = admission.judgments;
+	if (judged.accepted + judged.rejected + judged.uncertain + judged.unavailable > 0) {
+		lines.push(
+			`  summary admission (contract ${admission.contractVersion}): ${judged.accepted} accepted, ${judged.rejected} rejected, ${judged.uncertain} uncertain, ${judged.unavailable} evaluator-unavailable`,
+		);
+	}
+	if (admission.unapprovedNodes > 0) {
+		const re = admission.readmission;
+		lines.push(
+			`  ${admission.unapprovedNodes} accepted summary(ies) predate the current admission contract and are not shown as approved until re-admitted (re-admitted ${re.admitted}, rejected ${re.rejected}, uncertain ${re.uncertain}, unavailable ${re.unavailable})`,
+		);
+		const waits = Object.entries(re.waitingFor)
+			.filter(([, count]) => (count ?? 0) > 0)
+			.map(([wait, count]) => `${wait} ${count}`);
+		if (waits.length > 0) lines.push(`  unapproved summaries wait for: ${waits.join(", ")}`);
+	}
 	return lines;
 }
 
@@ -320,11 +479,49 @@ function formatHierarchyLines(hierarchy: TranscriptHierarchyDiagnostics): string
 			`  frontier revision ${hierarchy.frontier.revision}: ${hierarchy.frontier.nodeCount} node(s), ${hierarchy.frontier.bytes} bytes, spans [${hierarchy.frontier.omittedBeforeIndex},${hierarchy.frontier.coveredThroughIndex}) covered`,
 		);
 	}
+	lines.push(...formatAdmissionLines(hierarchy.admission));
 	if (hierarchy.failureClasses.length > 0) {
 		lines.push(`  recent failures${describeReasonCounts(hierarchy.failureClasses)}`);
 	}
 	if (hierarchy.recoveryIssueCount > 0)
 		lines.push(`  ${hierarchy.recoveryIssueCount} recovery issue(s) found at load`);
+	const retention = hierarchy.retention;
+	if (retention) {
+		lines.push(
+			`  retention: ${retention.days !== undefined ? `${retention.days} day(s)` : "off"}; ages DERIVED summaries only, canonical transcripts and exact reads are never erased by it${retention.nextDeadlineAt !== undefined ? `; next summary deadline ${new Date(retention.nextDeadlineAt).toISOString()}` : ""}`,
+		);
+		if (retention.eventTimeUnknownSources > 0) {
+			lines.push(
+				`  event_time_unknown: ${retention.eventTimeUnknownSources} source part(s) have no event time and age from their first capture`,
+			);
+		}
+		if (retention.sessionTimestampSources > 0) {
+			lines.push(
+				`  ${retention.sessionTimestampSources} source part(s) without an entry time age from the canonical session timestamp`,
+			);
+		}
+		if (retention.heldForAnchor > 0) {
+			lines.push(
+				`  ${retention.heldForAnchor} source part(s) could not be anchored; summaries depending on them are held`,
+			);
+		}
+	}
+	if (hierarchy.spentAttempts && (hierarchy.spentAttempts.recorded > 0 || hierarchy.spentAttempts.refused > 0)) {
+		const spent = hierarchy.spentAttempts;
+		lines.push(
+			`  ${spent.recorded} spent attempt budget(s) kept for pruned failed jobs (bound ${spent.bound})${spent.refused > 0 ? `; ${spent.refused} could not be kept, so those jobs would get a fresh budget` : ""}`,
+		);
+	}
+	if (hierarchy.lastRevocation) {
+		const revocation = hierarchy.lastRevocation;
+		lines.push(
+			`  last revocation (${revocation.reason}): ${revocation.revokedNodes} node(s), ${revocation.droppedReadyJobs} completed job(s) dropped, ${revocation.readmittedParents} parent(s) derived again`,
+		);
+	}
+	if (hierarchy.pendingParentRederivations)
+		lines.push(
+			`  ${hierarchy.pendingParentRederivations} parent summary(ies) being derived again; those ranges are covered at child level meanwhile`,
+		);
 	if (hierarchy.lastBatch) {
 		const batch = hierarchy.lastBatch;
 		lines.push(

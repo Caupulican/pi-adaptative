@@ -1404,7 +1404,7 @@ export class AgentSession {
 			recordUnsettledForOwner: (items) => this._deliverToOwner(items),
 			notifyWorktreeLane: (text) => this._steerSessionNotice("worktree-sync-notice", text),
 			notifyParentSession: (customType, text) => this._steerSessionNotice(customType, text),
-			createLaneMemoryBroker: () => this._memory.createLaneMemoryBroker(),
+			createLaneMemoryBroker: (capacity) => this._memory.createLaneMemoryBroker(capacity),
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
 			getContextGcStoreDir: () => this._pipeline.contextGcStorageDir(),
 			getArtifactStore: () => this._getToolArtifactStore(),
@@ -1524,6 +1524,9 @@ export class AgentSession {
 					getSessionId: () => this.sessionManager.getSessionId(),
 				},
 				activeBranch: new ActiveBranchProbe(this.sessionManager),
+				// The judge that admits model summaries is the session's one recording System One engine, so its
+				// usage reaches the session ledger and its judgments the Jev ledger like every other evaluation.
+				getAdmissionEngine: () => this._recordingSemanticEngine(),
 				isForegroundBusy: () => this._foregroundRecovery.isBusy,
 				subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
 			},

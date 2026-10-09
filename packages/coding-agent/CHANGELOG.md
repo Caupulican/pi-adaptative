@@ -5,6 +5,7 @@
 - Exact source-linked history recall: the `memory` tool gains read-only `history_search` and `history_source` actions that return cited `tx:` source handles and open the exact captured text of past conversation entries (user, assistant, tool calls and tool results) with UTF-8-safe paging and typed unavailable statuses. Delegated workers can open sources cited to them through `memory_read`.
 - Session persistence publishes a post-commit signal (`SessionManager.onEntriesPersisted`); history recall ingests committed entries incrementally instead of only at startup.
 - Opt-in history summary hierarchy (`contextPolicy.memory.history.*`): background summaries of captured history in durable, individually revocable nodes (`txn:` handles), a bounded history frontier inside the memory allowance once a conversation is compacted, the read-only `history_expand` action, retention revocation, and a bounded terminal handoff per batch of work. Summaries are untrusted evidence with handles, never authority.
+- Model summaries of captured history pass an admission gate before use: System One judges, in separate yes/no judgments, that every statement is supported by its source, that owner constraints are kept, and that failed or pending steps are not reported as done. Setting `contextPolicy.memory.history.allowExternalAdmissionEgress` (default `false`) allows the remote evaluator to receive the history. Until admitted, a summary is held or not approved, so it is never published, shown in the frontier or expanded as text; summaries from before the contract are re-judged from their sources.
 - `/memory history` and `context_audit` report history recall coverage, skipped/uncaptured reasons, the last indexing error and the latest retrieval and prompt-admission outcome.
 
 ### Changed
@@ -12,12 +13,17 @@
 - Transcript recall indexes every eligible project session by canonical entry and selected branch lineage within an explicit 16 MiB budget, replacing the 60-file / 8,000-character prefix index; coverage reports skipped and uncaptured content by reason. Recall pages show the session and source handle of each hit.
 - History recall is a provider in the common memory retrieval path, admitted at the lowest memory tier with an age-weighted score below curated memory; the separate pre-turn transcript page is removed (extension prefetch is unchanged). Provider failures, policy blocks and no-match stay distinct in the retrieval report.
 - The prompt memory block is part of the request plan: it is replanned when memory generation, content revision or headroom changes, its diagnostics are published only when the plan commits, later requests of a turn reuse the turn's retrieval, and its allowance accounts for the estimated system prompt, tools, messages and reply reserve with an explicit UTF-8 byte ceiling.
+- Delegated `memory_read` snapshots are sized against the receiving worker's own model window, last accepted request, reply reserve and remaining token allowance, and admitted as whole source-labelled records. When that capacity is unknown or exhausted, the worker gets a stated `Memory is constrained` reason instead of memory.
+- `contextPolicy.memory.history.retentionDays` ages out derived summaries only, never transcripts or exact history reads. A source's age is its entry's event time, else its session timestamp, else its first capture. Retention and forgetting revocations are permanent; only invalidation and an admission verdict of rejected or uncertain re-derive a summary.
 
 ### Fixed
 
 - Retrieved memory candidates keep their retrieval score and stale/conflict flags instead of a fixed 0.5 score, so prompt admission applies its freshness rules.
 - The `memory` tool's `list` action is classified as a read (`memory.query`) instead of a mutation.
 - A disabled or emptied memory evidence block now sends its cleared form, so earlier evidence no longer reads as current.
+- Delegated `memory_read` no longer cuts worker memory at a fixed 8,000 characters mid-record. The snapshot is sized against the receiving worker's own room and admitted as whole records, with the omission stated.
+- Reflection's OKF snapshot and the pre-compression handoff no longer cut memory mid-document: a record is kept whole or left out, and the omission is stated.
+- The history recall worker reports a broken channel once, with its cause, and a malformed reply is reported instead of being dropped silently.
 
 ## [0.103.7] - 2026-10-09
 

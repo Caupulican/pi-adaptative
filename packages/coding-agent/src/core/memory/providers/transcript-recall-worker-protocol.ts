@@ -316,16 +316,20 @@ function isLastError(value: unknown): value is NonNullable<TranscriptCoverage["l
 function isCoverage(value: unknown): value is TranscriptCoverage {
 	if (
 		!isRecord(value) ||
+		!isCount(value.sessionsEligible) ||
 		!isCount(value.sessionsIndexed) ||
+		!isCount(value.sessionsUnsupported) ||
 		!isCount(value.sessionsSkipped) ||
 		!isCount(value.spansIndexed) ||
 		!isCount(value.spansUncaptured) ||
+		!isCount(value.activeFailures) ||
 		typeof value.truncated !== "boolean" ||
-		(value.lastError !== undefined && !isLastError(value.lastError))
+		(value.lastError !== undefined && !isLastError(value.lastError)) ||
+		(value.lastRecoveryAt !== undefined && !isNonEmptyBoundedString(value.lastRecoveryAt, MAX_TIMESTAMP_CHARS))
 	) {
 		return false;
 	}
-	return isReasonCounts(value.skipped) && isReasonCounts(value.uncaptured);
+	return isReasonCounts(value.skipped) && isReasonCounts(value.unsupported) && isReasonCounts(value.uncaptured);
 }
 
 function isIdList(value: unknown): boolean {

@@ -18,8 +18,10 @@
  * re-ranks.
  */
 
+import type { ActiveBranchEntryStanding } from "./active-branch-probe.ts";
 import {
 	formatTranscriptNodeHandle,
+	formatTranscriptSourceHandle,
 	TRANSCRIPT_SUMMARY_RECIPE_VERSION,
 	utf8ByteLength,
 } from "./transcript-memory-contracts.ts";
@@ -139,19 +141,36 @@ interface Frame {
 	gap?: string;
 }
 
+/**
+ * Who reads the rendering, and so which tools its pointers may name: the root session (the `memory` tool's
+ * history actions) or a delegated lane (only `memory_read`). One renderer; the audience only picks tool names.
+ */
+export type FrontierAudience = "root" | "lane";
+
+function searchOrOpenTools(audience: FrontierAudience): string {
+	return audience === "lane"
+		? "memory_read (a query searches; a tx: handle as ref opens a source)"
+		: "the memory tool (history_search, history_source)";
+}
+
+function expandCall(audience: FrontierAudience, handle: string): string {
+	return audience === "lane" ? `memory_read with ref ${handle}` : `history_expand ${handle}`;
+}
+
 function buildFrame(
 	sessionId: string,
 	revision: number,
 	omittedBeforeIndex: number,
 	coveredThroughIndex: number,
 	gap: TranscriptFrontierGap | undefined,
+	audience: FrontierAudience = "root",
 ): Frame {
 	const frame: Frame = {
 		open: `<transcript_history session="${sessionId}" revision="${revision}" covered="[${omittedBeforeIndex},${coveredThroughIndex})">`,
 		close: "</transcript_history>",
 	};
 	if (omittedBeforeIndex > 0) {
-		frame.pointer = `[omitted spans 0..${omittedBeforeIndex}) are not summarized here; search or open their sources with the memory tool (history_search, history_source)]`;
+		frame.pointer = `[omitted spans 0..${omittedBeforeIndex}) are not summarized here; search or open their sources with ${searchOrOpenTools(audience)}]`;
 	}
 	if (gap) {
 		frame.gap = `[no summary yet for spans [${gap.fromIndex},${gap.toIndexExclusive}): ${singleLine(gap.reason)}; their exact sources stay readable]`;
@@ -181,54 +200,90 @@ function gapFor(
 	return { fromIndex: coveredThroughIndex, toIndexExclusive: tail.toIndexExclusive, reason: tail.reason };
 }
 
+/** One line or node record of a rendering, with the span interval it speaks about. */
+interface RenderableRecord {
+	text: string;
+	fromIndex: number;
+	toIndexExclusive: number;
+	/** Set when the record is an accepted node's own record. */
+	nodeId?: string;
+}
+
+/**
+ * Frame, pointer and records measured in UTF-8 bytes with every wrapper and status line charged. If the
+ * records no longer fit the allowance, the oldest whole records are folded into the pointer; a record is never
+ * cut, and when not even the frame fits the text is empty.
+ */
+function renderRecords(
+	records: readonly RenderableRecord[],
+	frame: { sessionId: string; revision: number; omittedBeforeIndex: number; coveredThroughIndex: number },
+	options: { gap?: TranscriptFrontierGap; allowanceBytes: number; audience?: FrontierAudience },
+): TranscriptFrontierRendering {
+	let first = 0;
+	for (;;) {
+		const omitted =
+			first < records.length ? (records[first] as RenderableRecord).fromIndex : frame.coveredThroughIndex;
+		const effectiveOmitted = first === 0 ? frame.omittedBeforeIndex : omitted;
+		const built = buildFrame(
+			frame.sessionId,
+			frame.revision,
+			effectiveOmitted,
+			frame.coveredThroughIndex,
+			options.gap,
+			options.audience,
+		);
+		const included = records.slice(first);
+		const bytes = frameBytes(built) + included.reduce((sum, record) => sum + utf8ByteLength(record.text) + 1, 0);
+		if (bytes <= options.allowanceBytes) {
+			return {
+				text: assemble(
+					built,
+					included.map((record) => record.text),
+				),
+				bytes,
+				includedNodeIds: included.flatMap((record) => (record.nodeId === undefined ? [] : [record.nodeId])),
+				omittedBeforeIndex: effectiveOmitted,
+			};
+		}
+		if (first >= records.length) {
+			return { text: "", bytes: 0, includedNodeIds: [], omittedBeforeIndex: frame.coveredThroughIndex };
+		}
+		first += 1;
+	}
+}
+
 /**
  * Deterministic rendering of a selection: one record per node (`txn:` handle, half-open span range,
- * source timestamps, quality, text), the coarse pointer and the gap record. Measured in UTF-8 bytes with
- * every wrapper and status line charged. If the selection no longer fits the allowance, the oldest whole
- * records are folded into the pointer; a record is never cut, and when not even the frame fits the text
- * is empty.
+ * source timestamps, quality, text), the coarse pointer and the gap record.
  */
 export function renderFrontier(
 	selection: TranscriptFrontierSelection,
 	nodes: ReadonlyMap<string, TranscriptFrontierNode>,
 	options: { sessionId: string; gap?: TranscriptFrontierGap; allowanceBytes?: number },
 ): TranscriptFrontierRendering {
-	const allowance = options.allowanceBytes ?? selection.allowanceBytes;
-	const members = selection.nodeIds.map((id) => {
+	const records = selection.nodeIds.map((id): RenderableRecord => {
 		const node = nodes.get(id);
 		if (!node) throw new Error(`Frontier node ${id} is not among the accepted nodes.`);
-		return node;
+		return {
+			text: renderRecord(node),
+			fromIndex: node.spanRange.fromIndex,
+			toIndexExclusive: node.spanRange.toIndexExclusive,
+			nodeId: id,
+		};
 	});
-	const records = members.map(renderRecord);
-	let first = 0;
-	for (;;) {
-		const omitted =
-			first < members.length
-				? (members[first] as TranscriptFrontierNode).spanRange.fromIndex
-				: selection.coveredThroughIndex;
-		const effectiveOmitted = first === 0 ? selection.omittedBeforeIndex : omitted;
-		const frame = buildFrame(
-			options.sessionId,
-			selection.revision,
-			effectiveOmitted,
-			selection.coveredThroughIndex,
-			options.gap,
-		);
-		const included = records.slice(first);
-		const bytes = frameBytes(frame) + included.reduce((sum, record) => sum + utf8ByteLength(record) + 1, 0);
-		if (bytes <= allowance) {
-			return {
-				text: assemble(frame, included),
-				bytes,
-				includedNodeIds: selection.nodeIds.slice(first),
-				omittedBeforeIndex: effectiveOmitted,
-			};
-		}
-		if (first >= members.length) {
-			return { text: "", bytes: 0, includedNodeIds: [], omittedBeforeIndex: selection.coveredThroughIndex };
-		}
-		first += 1;
-	}
+	return renderRecords(
+		records,
+		{
+			sessionId: options.sessionId,
+			revision: selection.revision,
+			omittedBeforeIndex: selection.omittedBeforeIndex,
+			coveredThroughIndex: selection.coveredThroughIndex,
+		},
+		{
+			...(options.gap ? { gap: options.gap } : {}),
+			allowanceBytes: options.allowanceBytes ?? selection.allowanceBytes,
+		},
+	);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -526,37 +581,166 @@ export function selectFrontier(input: TranscriptFrontierInput): TranscriptFronti
 	};
 }
 
+// ---------------------------------------------------------------------------------------------
+// Live-branch view
+// ---------------------------------------------------------------------------------------------
+
+/** Compacted-away sources a mixed record points at by handle; the rest are reachable by expanding the node. */
+const MAX_POINTER_SOURCE_HANDLES = 4;
+
+/** One stretch of a persisted selection as the live branch sees it. */
+export type FrontierViewItem =
+	/** Accepted node whose every covered source was compacted away. */
+	| { kind: "node"; node: TranscriptFrontierNode }
+	/** A stretch the live context still shows verbatim: not repeated. */
+	| { kind: "visible"; fromIndex: number; toIndexExclusive: number }
+	/** A leaf covering both compacted-away and still-visible sources: withheld, pointed at. */
+	| {
+			kind: "mixed";
+			node: TranscriptFrontierNode;
+			visibleSpans: number;
+			compactedHandles: string[];
+			compactedSpans: number;
+	  };
+
+export interface FrontierView {
+	/** Chronological stretches from the first one the view speaks about. */
+	items: FrontierViewItem[];
+	/** The selection reaches past the last item: the live tail was cut, or the view stopped off the branch. */
+	truncated: boolean;
+	/** The view stopped at a node covering a source that is not on the active branch. */
+	offBranch: boolean;
+}
+
+function itemRange(item: FrontierViewItem): { fromIndex: number; toIndexExclusive: number } {
+	return item.kind === "visible" ? item : item.node.spanRange;
+}
+
 /**
- * The leading run of a selection whose nodes satisfy `precedes`, as a selection of its own. The nodes of a
- * selection are chronological and `precedes` must be monotone along them (true for a prefix, false after),
- * which holds for "entirely before a point of one ancestry"; the boundary is found by bisection. The view
- * keeps the persisted revision: it is the same frontier, cut at a boundary the caller owns.
+ * The frontier as the live branch sees it: the compacted-away coverage of the persisted selection, minus what
+ * the live context still shows. A pure, view-only projection; the selection, its nodes and their ordinals are
+ * never touched, and a recipe change alone may regroup coverage.
+ *
+ * Each selected node is classified by the standing of the sources it covers. All compacted away: kept. All
+ * visible: a `visible` stretch, not repeated. A mixed parent is expanded to its two children (accepted nodes
+ * of the same lineage) and each is classified in turn; a mixed leaf cannot be split without rewriting opaque
+ * model text, so it becomes a pointer that keeps its compacted-away source handles discoverable. A node
+ * covering a source off the active branch ends the view. The visible tail after the last compacted-away
+ * stretch is dropped.
  */
-export function limitFrontierToPrefix(
+export function projectFrontierView(
 	selection: TranscriptFrontierSelection,
 	nodes: ReadonlyMap<string, TranscriptFrontierNode>,
-	precedes: (node: TranscriptFrontierNode) => boolean,
-): { selection: TranscriptFrontierSelection; keptCount: number } {
-	const members = selection.nodeIds.map((id) => {
+	standingOf: (entryId: string) => ActiveBranchEntryStanding,
+): FrontierView {
+	const items: FrontierViewItem[] = [];
+	let offBranch = false;
+	let truncated = false;
+	const pushVisible = (fromIndex: number, toIndexExclusive: number): void => {
+		const last = items[items.length - 1];
+		if (last?.kind === "visible" && last.toIndexExclusive === fromIndex) last.toIndexExclusive = toIndexExclusive;
+		else items.push({ kind: "visible", fromIndex, toIndexExclusive });
+	};
+	const visit = (node: TranscriptFrontierNode): void => {
+		if (offBranch) return;
+		let compacted = 0;
+		let visible = 0;
+		let off = 0;
+		const compactedRefs: typeof node.sourceRefs = [];
+		for (const ref of node.sourceRefs) {
+			const standing = standingOf(ref.entryId);
+			if (standing === "compacted") {
+				compacted += 1;
+				if (compactedRefs.length < MAX_POINTER_SOURCE_HANDLES) compactedRefs.push(ref);
+			} else if (standing === "visible") visible += 1;
+			else off += 1;
+		}
+		if (off === 0 && visible === 0) {
+			items.push({ kind: "node", node });
+			return;
+		}
+		if (off === 0 && compacted === 0) {
+			pushVisible(node.spanRange.fromIndex, node.spanRange.toIndexExclusive);
+			return;
+		}
+		const [leftId, rightId] = node.children ?? [];
+		const left = leftId === undefined ? undefined : nodes.get(leftId);
+		const right = rightId === undefined ? undefined : nodes.get(rightId);
+		if (left && right) {
+			visit(left);
+			visit(right);
+			return;
+		}
+		if (off > 0) {
+			offBranch = true;
+			return;
+		}
+		items.push({
+			kind: "mixed",
+			node,
+			visibleSpans: visible,
+			compactedSpans: compacted,
+			compactedHandles: compactedRefs.map(formatTranscriptSourceHandle),
+		});
+	};
+	for (const id of selection.nodeIds) {
 		const node = nodes.get(id);
 		if (!node) throw new Error(`Frontier node ${id} is not among the accepted nodes.`);
-		return node;
-	});
-	let low = 0;
-	let high = members.length;
-	while (low < high) {
-		const middle = Math.floor((low + high) / 2);
-		if (precedes(members[middle] as TranscriptFrontierNode)) low = middle + 1;
-		else high = middle;
+		visit(node);
+		if (offBranch) break;
 	}
-	if (low === members.length) return { selection, keptCount: low };
-	const last = members[low - 1];
-	return {
-		selection: {
-			...selection,
-			nodeIds: selection.nodeIds.slice(0, low),
-			coveredThroughIndex: last ? last.spanRange.toIndexExclusive : selection.omittedBeforeIndex,
+	while (items[items.length - 1]?.kind === "visible") {
+		items.pop();
+		truncated = true;
+	}
+	return { items, truncated: truncated || offBranch, offBranch };
+}
+
+function renderMixedPointer(item: Extract<FrontierViewItem, { kind: "mixed" }>, audience: FrontierAudience): string {
+	const handle = formatTranscriptNodeHandle(item.node.id);
+	const { fromIndex, toIndexExclusive } = item.node.spanRange;
+	const more = item.compactedSpans - item.compactedHandles.length;
+	const sources = `${item.compactedHandles.join(" ")}${more > 0 ? ` and ${more} more` : ""}`;
+	return `[spans [${fromIndex},${toIndexExclusive}) of ${handle} also cover ${item.visibleSpans} span(s) the live context still shows, so its summary is withheld; compacted-away sources: ${sources}; list them all with ${expandCall(audience, handle)}]`;
+}
+
+/**
+ * Render a live-branch view: node records, one line per still-visible stretch and per withheld mixed
+ * record, the coarse pointer and the gap record, under the same byte accounting as {@link renderFrontier}.
+ */
+export function renderFrontierView(
+	view: FrontierView,
+	options: {
+		sessionId: string;
+		revision: number;
+		omittedBeforeIndex: number;
+		gap?: TranscriptFrontierGap;
+		allowanceBytes: number;
+		audience?: FrontierAudience;
+	},
+): TranscriptFrontierRendering {
+	const audience = options.audience ?? "root";
+	const records = view.items.map((item): RenderableRecord => {
+		const { fromIndex, toIndexExclusive } = itemRange(item);
+		if (item.kind === "node") {
+			return { text: renderRecord(item.node), fromIndex, toIndexExclusive, nodeId: item.node.id };
+		}
+		if (item.kind === "mixed") return { text: renderMixedPointer(item, audience), fromIndex, toIndexExclusive };
+		return {
+			text: `[spans [${fromIndex},${toIndexExclusive}) remain in the live context and are not repeated here]`,
+			fromIndex,
+			toIndexExclusive,
+		};
+	});
+	const last = records[records.length - 1];
+	return renderRecords(
+		records,
+		{
+			sessionId: options.sessionId,
+			revision: options.revision,
+			omittedBeforeIndex: options.omittedBeforeIndex,
+			coveredThroughIndex: last ? last.toIndexExclusive : options.omittedBeforeIndex,
 		},
-		keptCount: low,
-	};
+		{ ...(options.gap ? { gap: options.gap } : {}), allowanceBytes: options.allowanceBytes, audience },
+	);
 }

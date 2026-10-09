@@ -4,9 +4,12 @@
  * rebuilt from them, and nothing here is a second conversation log.
  *
  * Layout under `<agentDir>/state/transcript-memory/<projectId>/`:
- *   nodes/<id>.json   immutable node content, written BEFORE anything references it
+ *   nodes/<id>.json   immutable node content, written BEFORE anything references it (identity and text never change;
+ *                     the only later rewrite is `annotateAdmission`, which adds the admission record of a model summary)
  *   manifest.json     schema, writer fence, revision, session cursors, accepted nodes, frontiers, tombstones
  *   jobs.json         bounded scheduler state
+ *   retention-anchors.json  retention anchors (per session timestamp, per first-capture source), independent of recipes and jobs
+ *   spent-attempts.json     spent attempt budgets of pruned terminal failed jobs, independent of the job list
  *   writer.lock       advisory lock guarding the manifest transaction
  *
  * Writer model: one lease with a durable fencing token. `acquireWriter` increments `writerFence` under the
@@ -37,15 +40,38 @@ import {
 	TRANSCRIPT_SUMMARY_SCHEMA_VERSION,
 } from "./transcript-memory-contracts.ts";
 import {
+	needsReadmission,
+	summaryTextDigest,
+	TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
+	type TranscriptSummaryAdmissionRecord,
+} from "./transcript-summary-admission.ts";
+import {
 	isNonNegativeInteger,
 	parseSummaryNode,
 	type TranscriptSummaryNode,
 	validateParentChildren,
 } from "./transcript-summary-node.ts";
-import { parseSummaryJob, type TranscriptSummaryJob } from "./transcript-summary-scheduler.ts";
+import {
+	parseSpentAttempt,
+	parseSummaryJob,
+	type TranscriptSummaryJob,
+	type TranscriptSummarySpentAttempt,
+} from "./transcript-summary-scheduler.ts";
 
 export const TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS = 2_000;
 export const TRANSCRIPT_SUMMARY_MAX_TOMBSTONES = 10_000;
+/**
+ * Retention anchored sources kept (first-capture sources plus session-timestamp memberships). An anchor is
+ * never evicted by age (that would reset a source's age); past this, new ones are refused. Anchors leave only
+ * with a forgotten or vanished session.
+ */
+export const TRANSCRIPT_SUMMARY_MAX_RETENTION_ANCHORS = 20_000;
+/**
+ * Spent-attempt records kept. A record leaves only with a forgotten or vanished session; past this bound the
+ * job that would need a new record is pruned unrecorded and the refusal is reported.
+ */
+export const TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS = 20_000;
+const MAX_SPENT_MESSAGE_CHARS = 300;
 /** Terminal handoff records kept (newest last). */
 export const TRANSCRIPT_SUMMARY_MAX_TERMINALS = 50;
 /** Unreferenced node and temporary files younger than this are never swept: their writer may still publish. */
@@ -76,8 +102,27 @@ export interface TranscriptSummaryAcceptedNode {
 	children?: [string, string];
 	/** Handles of the context sources the node consulted (coverage is derivable from the range). */
 	contextRefs: string[];
-	/** Oldest timestamp among coverage and context dependencies; retention expires the node past its cutoff. */
+	/** Oldest event time among coverage and context dependencies; anchors for undated sources are kept apart. */
 	oldestDependencyAt?: string;
+}
+
+/**
+ * Retention anchors: where a source's age starts when its canonical entry carries no usable event time.
+ * `sessions`: the canonical session timestamp (a bound no later than the entry), kept ONCE per session with the
+ * undated sources it covers (`<entryId>:<part>:<digest>`); dated sources never age from it. `sources`: the
+ * instant the hierarchy first saw a source in a session that records no timestamp either; its event time
+ * stays unknown and is reported as such.
+ */
+export interface TranscriptRetentionAnchors {
+	sources: Record<string, { at: string }>;
+	sessions: Record<string, { at: string; sources: string[] }>;
+}
+
+/** One undated source to anchor, by `tx:` handle, and the basis that decides how it is stored. */
+export interface TranscriptAnchorRequest {
+	handle: string;
+	at: string;
+	basis: "session_timestamp" | "first_capture";
 }
 
 /** A published frontier selection for one lineage; its meaning belongs to transcript-frontier.ts, its integrity to the store. */
@@ -249,6 +294,14 @@ export type TranscriptSummaryPublishResult =
 	| { status: "invalid"; reason: string }
 	| { status: "manifest_corrupt"; detail: string };
 
+export type TranscriptSummaryAnnotateResult =
+	| { status: "annotated"; node: TranscriptSummaryNode }
+	| { status: "not_accepted" }
+	| { status: "unreadable"; reason: string }
+	| { status: "invalid"; reason: string }
+	| { status: "fenced"; currentFence: number }
+	| { status: "manifest_corrupt"; detail: string };
+
 export type TranscriptSummaryRevokeResult =
 	| {
 			status: "published";
@@ -263,8 +316,24 @@ export type TranscriptSummaryRevokeResult =
 	| { status: "manifest_corrupt"; detail: string };
 
 export type TranscriptSummaryJobsSaveResult =
-	| { status: "saved"; pruned: string[] }
+	/**
+	 * `spent`: budgets of the pruned `failed` jobs newly recorded; `unrecorded`: pruned failed jobs the record
+	 * bound refused (their budget is no longer protected).
+	 */
+	| { status: "saved"; pruned: string[]; spent: Record<string, TranscriptSummarySpentAttempt>; unrecorded: number }
 	| { status: "jobs_overflow"; active: number }
+	| { status: "fenced"; currentFence: number }
+	| { status: "manifest_corrupt"; detail: string };
+
+export type TranscriptSummaryAnchorResult =
+	| { status: "saved"; added: number }
+	/** The anchor file is at its ceiling: the sources in `refused` were not anchored and must not be treated as ageless. */
+	| { status: "capacity"; added: number; refused: string[] }
+	| { status: "fenced"; currentFence: number }
+	| { status: "manifest_corrupt"; detail: string };
+
+export type TranscriptSummarySessionRecordsResult =
+	| { status: "saved"; anchors: number; spent: number }
 	| { status: "fenced"; currentFence: number }
 	| { status: "manifest_corrupt"; detail: string };
 
@@ -281,6 +350,8 @@ export type TranscriptSummaryRecoveryIssue =
 	| { kind: "child_missing"; nodeId: string; childId: string }
 	| { kind: "frontier_dangling"; frontier: string; nodeId: string }
 	| { kind: "jobs_corrupt"; detail: string }
+	| { kind: "anchors_corrupt"; detail: string }
+	| { kind: "spent_corrupt"; detail: string }
 	| { kind: "terminals_corrupt"; detail: string };
 
 export interface TranscriptSummaryTerminalCause {
@@ -308,6 +379,10 @@ export interface TranscriptSummaryTerminalRecord {
 	startedAt: number;
 	endedAt: number;
 	causes: TranscriptSummaryTerminalCause[];
+	/** Model-summary jobs still held when the batch ended (egress, no evaluator, unadmitted children); not failures, not finished. */
+	held?: number;
+	/** The cause recorded on a held job, bounded. */
+	heldReason?: string;
 	/** Set when the coordinator stopped itself because of an unrecoverable condition (superseded writer, corrupt store). */
 	stopReason?: string;
 }
@@ -318,6 +393,9 @@ export interface TranscriptSummaryStoreState {
 	/** Every accepted node that loaded and validated. */
 	nodes: Map<string, TranscriptSummaryNode>;
 	jobs: TranscriptSummaryJob[];
+	retentionAnchors: TranscriptRetentionAnchors;
+	/** Spent attempt budgets by job key. */
+	spentAttempts: Record<string, TranscriptSummarySpentAttempt>;
 	/** The persisted terminal handoff records, oldest first. */
 	terminals: TranscriptSummaryTerminalRecord[];
 	issues: TranscriptSummaryRecoveryIssue[];
@@ -353,6 +431,17 @@ function sessionOfHandle(handle: string): string | undefined {
 	return handle.split(":")[1];
 }
 
+/** `<entryId>:<part>:<digest>`: a source's identity inside its session (the handle without `tx:<sessionId>:`). */
+export function sourceKeyOfHandle(handle: string): string {
+	return handle.split(":").slice(2).join(":");
+}
+
+function anchoredCount(anchors: TranscriptRetentionAnchors): number {
+	let count = Object.keys(anchors.sources).length;
+	for (const session of Object.values(anchors.sessions)) count += session.sources.length;
+	return count;
+}
+
 function isTerminalRecord(value: unknown): value is TranscriptSummaryTerminalRecord {
 	if (!isPlainRecord(value)) return false;
 	return (
@@ -375,6 +464,8 @@ export class TranscriptSummaryStore {
 	private readonly manifestPath: string;
 	private readonly jobsPath: string;
 	private readonly terminalsPath: string;
+	private readonly anchorsPath: string;
+	private readonly spentPath: string;
 	private readonly lockPath: string;
 	private readonly now: () => number;
 
@@ -387,6 +478,8 @@ export class TranscriptSummaryStore {
 		this.manifestPath = join(this.root, "manifest.json");
 		this.jobsPath = join(this.root, "jobs.json");
 		this.terminalsPath = join(this.root, "terminals.json");
+		this.anchorsPath = join(this.root, "retention-anchors.json");
+		this.spentPath = join(this.root, "spent-attempts.json");
 		this.lockPath = join(this.root, "writer.lock");
 		this.now = options.now ?? Date.now;
 	}
@@ -454,8 +547,10 @@ export class TranscriptSummaryStore {
 				}
 			}
 			const jobs = await this.readJobs(issues);
+			const retentionAnchors = await this.readAnchors(issues);
+			const spentAttempts = await this.readSpent(issues);
 			const terminals = await this.readTerminals(issues);
-			return { manifest, nodes, jobs, terminals, issues };
+			return { manifest, nodes, jobs, retentionAnchors, spentAttempts, terminals, issues };
 		});
 	}
 
@@ -614,6 +709,144 @@ export class TranscriptSummaryStore {
 		return jobs;
 	}
 
+	/**
+	 * @internal Caller holds the lock. Damaged entries are reported and left out; the rest are kept. The
+	 * earlier shape (one `{at, basis}` record per source under `anchors`) is read too: its session-timestamp
+	 * records fold into one record per session, so no valid anchor is lost by the change of shape.
+	 */
+	async readAnchors(issues: TranscriptSummaryRecoveryIssue[]): Promise<TranscriptRetentionAnchors> {
+		const anchors: TranscriptRetentionAnchors = { sources: {}, sessions: {} };
+		const raw = await this.readOptional(this.anchorsPath);
+		if (raw === undefined) return anchors;
+		let value: unknown;
+		try {
+			value = JSON.parse(raw);
+		} catch (error) {
+			issues.push({
+				kind: "anchors_corrupt",
+				detail: `retention-anchors.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+			});
+			return anchors;
+		}
+		if (!isPlainRecord(value) || value.schemaVersion !== TRANSCRIPT_SUMMARY_SCHEMA_VERSION) {
+			issues.push({ kind: "anchors_corrupt", detail: "retention-anchors.json has an unsupported shape" });
+			return anchors;
+		}
+		const validAt = (entry: unknown): entry is Record<string, unknown> & { at: string } =>
+			isPlainRecord(entry) && typeof entry.at === "string" && !Number.isNaN(Date.parse(entry.at));
+		let damaged = 0;
+		const foldSession = (sessionId: string, at: string, sources: readonly string[]) => {
+			const known = anchors.sessions[sessionId];
+			if (!known) {
+				anchors.sessions[sessionId] = { at, sources: [...sources] };
+				return;
+			}
+			if (Date.parse(at) < Date.parse(known.at)) known.at = at;
+			for (const key of sources) if (!known.sources.includes(key)) known.sources.push(key);
+		};
+		if (isPlainRecord(value.sources)) {
+			for (const [handle, entry] of Object.entries(value.sources)) {
+				if (validAt(entry)) anchors.sources[handle] = { at: entry.at };
+				else damaged += 1;
+			}
+		}
+		if (isPlainRecord(value.sessions)) {
+			for (const [sessionId, entry] of Object.entries(value.sessions)) {
+				if (
+					validAt(entry) &&
+					Array.isArray(entry.sources) &&
+					entry.sources.every((key) => typeof key === "string")
+				) {
+					foldSession(sessionId, entry.at, entry.sources as string[]);
+				} else damaged += 1;
+			}
+		}
+		if (isPlainRecord(value.anchors)) {
+			for (const [handle, entry] of Object.entries(value.anchors)) {
+				if (!validAt(entry) || (entry.basis !== "session_timestamp" && entry.basis !== "first_capture")) {
+					damaged += 1;
+				} else if (entry.basis === "first_capture") {
+					anchors.sources[handle] = { at: entry.at };
+				} else {
+					foldSession(sessionOfHandle(handle) ?? "", entry.at, [sourceKeyOfHandle(handle)]);
+				}
+			}
+		}
+		if (damaged > 0) {
+			issues.push({ kind: "anchors_corrupt", detail: `${damaged} retention anchor entr(ies) are invalid` });
+		}
+		return anchors;
+	}
+
+	/** @internal Caller holds the lock. */
+	async writeAnchors(anchors: TranscriptRetentionAnchors): Promise<void> {
+		await writeFileAtomic(
+			this.anchorsPath,
+			`${JSON.stringify({ schemaVersion: TRANSCRIPT_SUMMARY_SCHEMA_VERSION, sources: anchors.sources, sessions: anchors.sessions })}\n`,
+			{ mode: 0o600 },
+		);
+	}
+
+	/** @internal Caller holds the lock. Damaged entries are reported and left out; the rest are kept. */
+	async readSpent(issues: TranscriptSummaryRecoveryIssue[]): Promise<Record<string, TranscriptSummarySpentAttempt>> {
+		const records: Record<string, TranscriptSummarySpentAttempt> = {};
+		const raw = await this.readOptional(this.spentPath);
+		if (raw === undefined) return records;
+		let value: unknown;
+		try {
+			value = JSON.parse(raw);
+		} catch (error) {
+			issues.push({
+				kind: "spent_corrupt",
+				detail: `spent-attempts.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+			});
+			return records;
+		}
+		if (
+			!isPlainRecord(value) ||
+			value.schemaVersion !== TRANSCRIPT_SUMMARY_SCHEMA_VERSION ||
+			!isPlainRecord(value.jobs)
+		) {
+			issues.push({ kind: "spent_corrupt", detail: "spent-attempts.json has an unsupported shape" });
+			return records;
+		}
+		let damaged = 0;
+		for (const [id, entry] of Object.entries(value.jobs)) {
+			const record = parseSpentAttempt(entry);
+			if (record) records[id] = record;
+			else damaged += 1;
+		}
+		if (damaged > 0) {
+			issues.push({ kind: "spent_corrupt", detail: `${damaged} spent-attempt record(s) are invalid` });
+		}
+		return records;
+	}
+
+	/** @internal Caller holds the lock. */
+	async writeSpent(records: Readonly<Record<string, TranscriptSummarySpentAttempt>>): Promise<void> {
+		await writeFileAtomic(
+			this.spentPath,
+			`${JSON.stringify({ schemaVersion: TRANSCRIPT_SUMMARY_SCHEMA_VERSION, jobs: records })}\n`,
+			{ mode: 0o600 },
+		);
+	}
+
+	/** @internal Caller holds the lock. Keep the damaged bytes of one derived file beside it. */
+	async backupCorrupt(file: "jobs" | "anchors" | "spent"): Promise<void> {
+		const path = file === "jobs" ? this.jobsPath : file === "anchors" ? this.anchorsPath : this.spentPath;
+		const raw = await this.readOptional(path);
+		if (raw !== undefined) await writeFileAtomic(`${path}.corrupt.${this.now()}`, raw, { mode: 0o600 });
+	}
+
+	private async readOptional(path: string): Promise<string | undefined> {
+		try {
+			return await fs.readFile(path, "utf8");
+		} catch (error) {
+			if (isMissingFileError(error)) return undefined;
+			throw error;
+		}
+	}
+
 	/** @internal Caller holds the lock. */
 	async readTerminals(issues: TranscriptSummaryRecoveryIssue[]): Promise<TranscriptSummaryTerminalRecord[]> {
 		let raw: string;
@@ -659,18 +892,6 @@ export class TranscriptSummaryStore {
 			if (isMissingFileError(error)) return undefined;
 			throw error;
 		}
-	}
-
-	/** @internal Caller holds the lock. */
-	async backupCorruptJobs(): Promise<void> {
-		let raw: string;
-		try {
-			raw = await fs.readFile(this.jobsPath, "utf8");
-		} catch (error) {
-			if (isMissingFileError(error)) return;
-			throw error;
-		}
-		await writeFileAtomic(`${this.jobsPath}.corrupt.${this.now()}`, raw, { mode: 0o600 });
 	}
 
 	/** @internal Caller holds the lock. */
@@ -772,6 +993,14 @@ export class TranscriptSummaryWriter {
 			for (const node of incoming) {
 				const parsed = parseSummaryNode(JSON.parse(JSON.stringify(node)));
 				if (!parsed.ok) return { status: "invalid" as const, reason: `node ${node.id}: ${parsed.reason}` };
+				// A model summary is accepted only with an admission under the current contract: an unadmitted one is
+				// never published, so "accepted and unapproved" can only be a node from before the contract.
+				if (needsReadmission(parsed.node)) {
+					return {
+						status: "invalid" as const,
+						reason: `node ${node.id}: a model summary needs an admission under contract ${TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION}`,
+					};
+				}
 				if (node.children) {
 					const left = await lookup(node.children[0]);
 					const right = await lookup(node.children[1]);
@@ -849,6 +1078,41 @@ export class TranscriptSummaryWriter {
 	}
 
 	/**
+	 * Record a current admission on an already accepted model summary (re-admission of a node accepted before
+	 * the admission contract, or under an older one). The node's identity, text and coverage are untouched: the
+	 * admission must be for exactly the stored text, and the file is rewritten atomically with only the record added.
+	 */
+	async annotateAdmission(
+		nodeId: string,
+		admission: TranscriptSummaryAdmissionRecord,
+	): Promise<TranscriptSummaryAnnotateResult> {
+		return this.fenced(async (manifest) => {
+			if (!manifest.acceptedNodes[nodeId]) return { status: "not_accepted" as const };
+			const read = await this.store.readNode(nodeId);
+			if (read.status !== "ok") {
+				return { status: "unreadable" as const, reason: read.status === "missing" ? "missing" : read.reason };
+			}
+			if (read.node.quality !== "model_summary") {
+				return { status: "invalid" as const, reason: "only a model summary carries an admission" };
+			}
+			if (admission.textDigest !== summaryTextDigest(read.node.text)) {
+				return { status: "invalid" as const, reason: "the admission judged different text than the node holds" };
+			}
+			const annotated: TranscriptSummaryNode = { ...read.node, admission };
+			const parsed = parseSummaryNode(JSON.parse(JSON.stringify(annotated)));
+			if (!parsed.ok) return { status: "invalid" as const, reason: parsed.reason };
+			if (needsReadmission(parsed.node)) {
+				return {
+					status: "invalid" as const,
+					reason: `the admission is not under contract ${TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION}`,
+				};
+			}
+			await this.store.writeNodeFile(parsed.node);
+			return { status: "annotated" as const, node: parsed.node };
+		});
+	}
+
+	/**
 	 * Revoke every accepted node the predicate matches and, transitively, every node that has a revoked
 	 * node as a child. Frontiers naming a revoked node are removed, session cursors are pulled back to the
 	 * earliest revoked position, and the node files are deleted after the manifest no longer references
@@ -884,7 +1148,12 @@ export class TranscriptSummaryWriter {
 		);
 	}
 
-	/** Replace the persisted job list. Terminal jobs are pruned oldest-first; live work is never pruned. */
+	/**
+	 * Replace the persisted job list. Terminal jobs are pruned oldest-first; live work is never pruned. A pruned
+	 * `failed` job leaves a compact spent-budget record (written before the list, so a crash cannot lose it) so
+	 * the identical job found again is not granted a fresh attempt budget. Records are bounded by
+	 * {@link TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS}; past it the job is pruned unrecorded and counted.
+	 */
 	async saveJobs(jobs: readonly TranscriptSummaryJob[]): Promise<TranscriptSummaryJobsSaveResult> {
 		return this.fenced(async () => {
 			const live = jobs.filter((job) => !isTerminalSummaryJobState(job.state));
@@ -895,10 +1164,109 @@ export class TranscriptSummaryWriter {
 				.filter((job) => isTerminalSummaryJobState(job.state))
 				.sort((a, b) => (b.terminalAt ?? b.updatedAt) - (a.terminalAt ?? a.updatedAt));
 			const keepTerminal = terminal.slice(0, TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS - live.length);
-			const pruned = terminal.slice(keepTerminal.length).map((job) => job.id);
+			const prunedJobs = terminal.slice(keepTerminal.length);
+			const spent: Record<string, TranscriptSummarySpentAttempt> = {};
+			let unrecorded = 0;
+			const failed = prunedJobs.filter((job) => job.state === "failed");
+			if (failed.length > 0) {
+				const records = await this.store.readSpent([]);
+				let count = Object.keys(records).length;
+				for (const job of failed) {
+					if (records[job.id]) continue;
+					if (count >= TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS) {
+						unrecorded += 1;
+						continue;
+					}
+					const record: TranscriptSummarySpentAttempt = {
+						sessionId: job.sessionId,
+						attempts: job.attempts,
+						maxAttempts: job.maxAttempts,
+						reason: job.lastError?.reason ?? "failed",
+						message: (job.lastError?.message ?? "").slice(0, MAX_SPENT_MESSAGE_CHARS),
+						at: job.terminalAt ?? job.updatedAt,
+					};
+					records[job.id] = record;
+					spent[job.id] = record;
+					count += 1;
+				}
+				if (Object.keys(spent).length > 0) await this.store.writeSpent(records);
+			}
 			const kept = new Set([...live, ...keepTerminal].map((job) => job.id));
 			await this.store.writeJobs(jobs.filter((job) => kept.has(job.id)));
-			return { status: "saved" as const, pruned };
+			return { status: "saved" as const, pruned: prunedJobs.map((job) => job.id), spent, unrecorded };
+		});
+	}
+
+	/**
+	 * Record retention anchors, set-if-absent: an existing anchor is never replaced, which is what keeps a
+	 * source's age across invalidation, re-admission and recipe rebuilds. Anchors live outside recipes, nodes
+	 * and jobs. A session-timestamp anchor is one record per session; a first-capture anchor is per source. At
+	 * the ceiling nothing is evicted; the refused handles are returned so the caller can hold the work with an
+	 * explicit cause instead of treating those sources as ageless.
+	 */
+	async anchorSources(requests: readonly TranscriptAnchorRequest[]): Promise<TranscriptSummaryAnchorResult> {
+		return this.fenced(async () => {
+			const anchors = await this.store.readAnchors([]);
+			let count = anchoredCount(anchors);
+			let added = 0;
+			const refused: string[] = [];
+			for (const { handle, at, basis } of requests) {
+				const sessionId = sessionOfHandle(handle) ?? "";
+				const key = sourceKeyOfHandle(handle);
+				if (anchors.sources[handle] || anchors.sessions[sessionId]?.sources.includes(key)) continue;
+				if (count >= TRANSCRIPT_SUMMARY_MAX_RETENTION_ANCHORS) {
+					refused.push(handle);
+					continue;
+				}
+				if (basis === "first_capture") {
+					anchors.sources[handle] = { at };
+				} else {
+					const session = anchors.sessions[sessionId] ?? { at, sources: [] };
+					session.sources.push(key);
+					anchors.sessions[sessionId] = session;
+				}
+				count += 1;
+				added += 1;
+			}
+			if (added > 0) await this.store.writeAnchors(anchors);
+			return refused.length > 0
+				? { status: "capacity" as const, added, refused }
+				: { status: "saved" as const, added };
+		});
+	}
+
+	/**
+	 * Forget what is kept per session (retention anchors and spent-attempt records) for sessions that are
+	 * forgotten for good or no longer exist. Never by age: an age-based drop would reset a source's age or grant
+	 * a spent job a fresh budget.
+	 */
+	async dropSessionRecords(sessionIds: ReadonlySet<string>): Promise<TranscriptSummarySessionRecordsResult> {
+		return this.fenced(async () => {
+			const anchors = await this.store.readAnchors([]);
+			let droppedAnchors = 0;
+			for (const handle of Object.keys(anchors.sources)) {
+				if (sessionIds.has(sessionOfHandle(handle) ?? "")) {
+					delete anchors.sources[handle];
+					droppedAnchors += 1;
+				}
+			}
+			for (const sessionId of Object.keys(anchors.sessions)) {
+				if (sessionIds.has(sessionId)) {
+					droppedAnchors += anchors.sessions[sessionId]?.sources.length ?? 0;
+					delete anchors.sessions[sessionId];
+				}
+			}
+			if (droppedAnchors > 0) await this.store.writeAnchors(anchors);
+			const records = await this.store.readSpent([]);
+			let droppedSpent = 0;
+			for (const [id, record] of Object.entries(records)) {
+				if (sessionIds.has(record.sessionId)) {
+					delete records[id];
+					droppedSpent += 1;
+				}
+			}
+			if (droppedSpent > 0) await this.store.writeSpent(records);
+			return { status: "saved" as const, anchors: droppedAnchors, spent: droppedSpent };
 		});
 	}
 
@@ -911,6 +1279,8 @@ export class TranscriptSummaryWriter {
 		const damaged = new Set<string>();
 		const frontiers = new Set<string>();
 		let jobsCorrupt = false;
+		let anchorsCorrupt = false;
+		let spentCorrupt = false;
 		for (const issue of issues) {
 			if (
 				issue.kind === "node_missing" ||
@@ -923,6 +1293,10 @@ export class TranscriptSummaryWriter {
 				frontiers.add(issue.frontier);
 			} else if (issue.kind === "jobs_corrupt") {
 				jobsCorrupt = true;
+			} else if (issue.kind === "anchors_corrupt") {
+				anchorsCorrupt = true;
+			} else if (issue.kind === "spent_corrupt") {
+				spentCorrupt = true;
 			}
 		}
 		const report: TranscriptSummaryRecoveryReport = { revoked: [], removedFrontiers: [], jobsRewritten: false };
@@ -940,16 +1314,29 @@ export class TranscriptSummaryWriter {
 			report.removedFrontiers = result.removedFrontiers;
 		}
 		if (jobsCorrupt) {
-			await this.store.locked(async () => {
-				const read = await this.store.readManifest();
-				if (read.status !== "ok" || read.manifest.writerFence !== this.fence) {
-					throw new Error("Recovery writer was superseded.");
-				}
-				const validJobs = await this.store.readJobs([]);
-				await this.store.backupCorruptJobs();
-				await this.store.writeJobs(validJobs);
-			});
+			await this.rewriteValid(
+				() => this.store.readJobs([]),
+				() => this.store.backupCorrupt("jobs"),
+				(valid) => this.store.writeJobs(valid),
+			);
 			report.jobsRewritten = true;
+		}
+		if (anchorsCorrupt) {
+			// An anchor lost to damage cannot be reconstructed: that source is anchored again at its next
+			// sighting, and the damage stays disclosed as a recovery issue.
+			await this.rewriteValid(
+				() => this.store.readAnchors([]),
+				() => this.store.backupCorrupt("anchors"),
+				(valid) => this.store.writeAnchors(valid),
+			);
+		}
+		if (spentCorrupt) {
+			// A record lost to damage cannot be reconstructed; the disclosure is the recovery issue.
+			await this.rewriteValid(
+				() => this.store.readSpent([]),
+				() => this.store.backupCorrupt("spent"),
+				(valid) => this.store.writeSpent(valid),
+			);
 		}
 		return report;
 	}
@@ -975,6 +1362,23 @@ export class TranscriptSummaryWriter {
 			const read = await this.store.readManifest();
 			if (read.status !== "ok" || read.manifest.writerFence !== this.fence) return [];
 			return this.store.sweep(new Set(Object.keys(read.manifest.acceptedNodes)), minAgeMs);
+		});
+	}
+
+	/** Keep the damaged bytes beside the file and rewrite it from its valid entries, under the lock and this writer's fence. */
+	private async rewriteValid<T>(
+		readValid: () => Promise<T>,
+		backup: () => Promise<void>,
+		write: (valid: T) => Promise<void>,
+	): Promise<void> {
+		await this.store.locked(async () => {
+			const read = await this.store.readManifest();
+			if (read.status !== "ok" || read.manifest.writerFence !== this.fence) {
+				throw new Error("Recovery writer was superseded.");
+			}
+			const valid = await readValid();
+			await backup();
+			await write(valid);
 		});
 	}
 

@@ -62,19 +62,37 @@ export interface PromptHeadroomInput extends RequestEnvelope {
  * compaction reserve is already the room kept free for the reply, so adding the output cap would count
  * the same reply twice and switch memory off on windows where it fits. The output cap counts for at most
  * a quarter of the window (the same bound compaction applies to its reserve), because the planner
- * narrows an oversized cap to what the window leaves rather than refusing the request.
- *
+ * narrows an oversized cap to what the window leaves rather than refusing the request. The one owner of
+ * this recipe: root headroom and a delegated lane's receiving headroom both reserve through it.
+ */
+export function estimateReplyReserveTokens(input: {
+	contextWindow: number;
+	compactionReserveTokens: number;
+	maxOutputTokens: number | undefined;
+}): number {
+	const outputReserve = Math.min(
+		input.maxOutputTokens ?? 0,
+		Math.floor(input.contextWindow * OUTPUT_RESERVE_WINDOW_SHARE),
+	);
+	return Math.max(input.compactionReserveTokens, outputReserve);
+}
+
+/**
  * When an assistant usage report covers the message prefix, its total already includes the system
  * prompt and the tool schemas, so only the unreported tail is added to it; without one, the envelope
- * (system prompt and tools) is estimated and added to the message estimate.
+ * (system prompt and tools) is estimated and added to the message estimate. The reply is reserved by
+ * {@link estimateReplyReserveTokens}.
  */
 export function estimatePromptHeadroom(input: PromptHeadroomInput): PromptHeadroom {
 	const contextWindow = input.model?.contextWindow ?? 0;
-	const outputReserve = Math.min(input.maxOutputTokens ?? 0, Math.floor(contextWindow * OUTPUT_RESERVE_WINDOW_SHARE));
 	const messages = estimateContextTokens(input.messages);
 	const envelopeTokens = messages.lastUsageIndex === null ? estimateRequestEnvelopeTokens(input) : 0;
 	return {
 		currentPromptTokens: envelopeTokens + messages.tokens,
-		reservedTokens: Math.max(input.compactionReserveTokens, outputReserve),
+		reservedTokens: estimateReplyReserveTokens({
+			contextWindow,
+			compactionReserveTokens: input.compactionReserveTokens,
+			maxOutputTokens: input.maxOutputTokens,
+		}),
 	};
 }

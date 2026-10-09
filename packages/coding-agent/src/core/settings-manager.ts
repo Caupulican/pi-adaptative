@@ -2476,6 +2476,7 @@ export class SettingsManager {
 		hierarchy: boolean;
 		summaryModel: string | undefined;
 		allowExternalSummaryEgress: boolean;
+		allowExternalAdmissionEgress: boolean;
 		maxConcurrentSummaries: number;
 		frontierMaxBytes: number;
 		retentionDays: number | undefined;
@@ -2485,6 +2486,7 @@ export class SettingsManager {
 			hierarchy: history?.hierarchy ?? false,
 			summaryModel: history?.summaryModel?.trim() || undefined,
 			allowExternalSummaryEgress: history?.allowExternalSummaryEgress === true,
+			allowExternalAdmissionEgress: history?.allowExternalAdmissionEgress === true,
 			maxConcurrentSummaries: clampMemoryHistoryMaxConcurrentSummaries(
 				history?.maxConcurrentSummaries ?? MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_DEFAULT,
 			),
@@ -2500,6 +2502,7 @@ export class SettingsManager {
 			hierarchy: settings.hierarchy,
 			summaryModel: settings.summaryModel?.trim() || undefined,
 			allowExternalSummaryEgress: settings.allowExternalSummaryEgress,
+			allowExternalAdmissionEgress: settings.allowExternalAdmissionEgress,
 			maxConcurrentSummaries:
 				settings.maxConcurrentSummaries === undefined
 					? undefined

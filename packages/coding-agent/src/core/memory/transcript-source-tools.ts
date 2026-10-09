@@ -74,10 +74,15 @@ function describeReasons(reasons: Readonly<Record<string, number>>): string {
 }
 
 function describeCoverage(coverage: TranscriptCoverage): string {
+	const failing =
+		coverage.activeFailures > 0 ? ` ${coverage.activeFailures} source(s) are failing to read right now.` : "";
 	const lastError = coverage.lastError
-		? ` Last indexing error at ${coverage.lastError.at}: ${coverage.lastError.message.replace(/\s+/g, " ").slice(0, COVERAGE_ERROR_CHARS)}`
+		? ` Last indexing error at ${coverage.lastError.at}${coverage.activeFailures > 0 ? "" : " (historical; no source is failing now)"}: ${coverage.lastError.message.replace(/\s+/g, " ").slice(0, COVERAGE_ERROR_CHARS)}`
 		: "";
-	return `Coverage: ${coverage.sessionsIndexed} sessions indexed, ${coverage.sessionsSkipped} skipped${describeReasons(coverage.skipped)}; ${coverage.spansIndexed} spans indexed, ${coverage.spansUncaptured} uncaptured${describeReasons(coverage.uncaptured)}; indexing ${coverage.truncated ? "truncated by its budget" : "complete"}.${lastError}`;
+	const recovered = coverage.lastRecoveryAt
+		? ` A failing source last became readable again at ${coverage.lastRecoveryAt}.`
+		: "";
+	return `Coverage: ${coverage.sessionsEligible} eligible session(s): ${coverage.sessionsIndexed} indexed, ${coverage.sessionsUnsupported} unsupported${describeReasons(coverage.unsupported)}; ${coverage.sessionsSkipped} skipped${describeReasons(coverage.skipped)}; ${coverage.spansIndexed} spans indexed, ${coverage.spansUncaptured} uncaptured${describeReasons(coverage.uncaptured)}; ${coverage.truncated ? "indexing was cut off by its budget" : "no budget cutoff"}. Sessions that are not indexed cannot be found by this search.${failing}${lastError}${recovered}`;
 }
 
 function renderHit(hit: TranscriptSearchHit): string {

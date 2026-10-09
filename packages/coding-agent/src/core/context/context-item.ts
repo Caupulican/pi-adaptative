@@ -147,6 +147,11 @@ export function estimateTokensFromChars(charCount: number): number {
 	return Math.ceil(Math.max(0, charCount) / NO_TOKENIZER_CHARS_PER_TOKEN);
 }
 
+/** The most characters whose estimated token count stays within `tokens` (the inverse of {@link estimateTokensFromChars}). */
+export function charsWithinEstimatedTokens(tokens: number): number {
+	return Math.max(0, Math.floor(tokens)) * NO_TOKENIZER_CHARS_PER_TOKEN;
+}
+
 export function estimateTokensFromText(text: string): number {
 	return estimateTokensFromChars(text.length);
 }

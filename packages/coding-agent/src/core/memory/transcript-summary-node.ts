@@ -25,6 +25,7 @@ import {
 	utf8ByteLength,
 } from "./transcript-memory-contracts.ts";
 import { extractTranscriptSourceHandles } from "./transcript-source-tools.ts";
+import { parseSummaryAdmission, type TranscriptSummaryAdmissionRecord } from "./transcript-summary-admission.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Record
@@ -71,14 +72,21 @@ export interface TranscriptSummaryNode {
 	bytes: number;
 	quality: TranscriptSummaryQuality;
 	model?: string;
+	/**
+	 * Model summaries only: the evidence-quality admission that makes the text semantically approved
+	 * (see `transcript-summary-admission.ts`). A model summary without a record under the current admission
+	 * contract is accepted-but-unapproved: it is never shown or expanded as approved text until re-admitted.
+	 */
+	admission?: TranscriptSummaryAdmissionRecord;
 	/** Timestamp of the first covered span, when the source recorded one. */
 	coveredFrom?: string;
 	/** Timestamp of the last covered span, when the source recorded one. */
 	coveredTo?: string;
 	/**
-	 * Oldest timestamp among everything this node depends on, coverage AND context (a parent: its
-	 * children's as well). Retention expires a node when this is older than the cutoff. Absent when no
-	 * dependency carried a timestamp, in which case age can never expire the node.
+	 * Oldest EVENT time among everything this node depends on, coverage AND context (a parent: its
+	 * children's as well). Absent when no dependency carried a timestamp. That never means ageless:
+	 * sources without an event time age from a persisted retention anchor kept in the store beside the
+	 * nodes (see `TranscriptRetentionAnchor`), and retention takes the oldest of both.
 	 */
 	oldestDependencyAt?: string;
 	createdAt: string;
@@ -462,6 +470,13 @@ export function parseSummaryNode(value: unknown): TranscriptSummaryNodeParse {
 		}
 	}
 	if (value.quality === "exact_copy" && value.model !== undefined) return fail("an exact copy cannot name a model");
+	let admission: TranscriptSummaryAdmissionRecord | undefined;
+	if (value.admission !== undefined) {
+		if (value.quality !== "model_summary") return fail("only a model summary carries an admission");
+		const parsedAdmission = parseSummaryAdmission(value.admission);
+		if (!parsedAdmission.ok) return fail(parsedAdmission.reason);
+		admission = parsedAdmission.admission;
+	}
 	if (typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt)))
 		return fail("createdAt is invalid");
 
@@ -483,6 +498,7 @@ export function parseSummaryNode(value: unknown): TranscriptSummaryNodeParse {
 		bytes,
 		quality: value.quality,
 		...(typeof value.model === "string" ? { model: value.model } : {}),
+		...(admission ? { admission } : {}),
 		...(typeof value.coveredFrom === "string" ? { coveredFrom: value.coveredFrom } : {}),
 		...(typeof value.coveredTo === "string" ? { coveredTo: value.coveredTo } : {}),
 		...(typeof value.oldestDependencyAt === "string" ? { oldestDependencyAt: value.oldestDependencyAt } : {}),

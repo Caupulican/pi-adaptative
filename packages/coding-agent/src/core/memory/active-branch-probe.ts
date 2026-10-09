@@ -1,27 +1,33 @@
 /**
  * The live branch of a session as the history frontier needs to see it: where the leaf is, which
- * compaction is the latest one on the active ancestry, and whether one entry lies above another.
+ * compaction is the latest one on the active ancestry, and, per source entry, whether the live context
+ * still shows it.
  *
- * Every answer comes from walking parent links through the session tree owner; nothing hydrates a
- * branch's messages. The walks are incremental: while the leaf only advances by appends, a sync walks
- * just the appended entries, and an ancestry answer, which can never change (entries are immutable),
- * is remembered. A leaf that is not a descendant of the previous one is a branch switch and bumps the
+ * The leaf and compaction come from walking parent links through the session tree owner; nothing hydrates a
+ * branch's messages. The walks are incremental: while the leaf only advances by appends, a sync walks just
+ * the appended entries. A leaf that is not a descendant of the previous one is a branch switch and bumps the
  * epoch, so a plan captured before the switch can tell it is no longer current.
+ *
+ * What the live context still shows after a compaction is not a cutoff: `original-user` retention keeps the
+ * original user message and restored gap entries, and carried-forward records stay. That membership comes
+ * from the kernel's one retention owner (`retainedEntryIdsBeforeCompaction`); this module only indexes it,
+ * once per branch epoch and compaction, never restating a retention rule.
  */
 
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
+import { retainedEntryIdsBeforeCompaction } from "../../kernel/session/session-manager.ts";
 
 export interface ActiveBranchSource {
 	getLeafId(): string | null;
 	getEntry(id: string): SessionEntry | undefined;
 	getEntryCount(): number;
+	/** The active branch's entries, root first. */
+	getBranch(): SessionEntry[];
 }
 
 export interface ActiveBranchCompaction {
 	/** The compaction entry on the active ancestry. */
 	entryId: string;
-	/** First entry the live context keeps; everything above it on the ancestry was compacted away. */
-	firstKeptEntryId: string;
 }
 
 export interface ActiveBranchSnapshot {
@@ -30,25 +36,52 @@ export interface ActiveBranchSnapshot {
 	epoch: number;
 	/** The nearest compaction on the active ancestry, if any. */
 	compaction: ActiveBranchCompaction | undefined;
+	/**
+	 * Identity of what the live context retains from before the latest compaction: it changes with a branch
+	 * switch or a new compaction, never with appended entries. A view prepared under another revision is stale.
+	 */
+	retentionRevision: string;
+}
+
+/**
+ * Whether the live context still shows one source entry after the latest compaction.
+ * `compacted`: the entry is on the branch before the compaction and only its summary remains.
+ * `visible`: the entry is verbatim in the live context (retained across the compaction, or after it).
+ * `off_branch`: the entry is not on the active ancestry.
+ */
+export type ActiveBranchEntryStanding = "compacted" | "visible" | "off_branch";
+
+/** The branch as of its latest compaction, answering the standing of any source entry. */
+export interface ActiveBranchRetention {
+	revision: string;
+	standing(entryId: string): ActiveBranchEntryStanding;
 }
 
 /** The narrow view the memory controller reads. */
 export interface ActiveBranchView {
 	snapshot(): ActiveBranchSnapshot;
-	/** Whether `ancestorId` is a strict ancestor of `entryId`. */
-	isStrictAncestor(ancestorId: string, entryId: string): boolean;
-	/** Whether `ancestorId` is `entryId` or one of its ancestors. */
-	isAncestorOrSelf(ancestorId: string, entryId: string): boolean;
+	/** The retention view of the latest compaction on the active branch; undefined while it has none. */
+	retention(): ActiveBranchRetention | undefined;
 }
 
-const MAX_REMEMBERED_ANCESTRY_ANSWERS = 512;
+interface RetentionIndex {
+	revision: string;
+	compactionEntryId: string;
+	/** Ids positioned before the compaction entry on the branch. */
+	before: ReadonlySet<string>;
+	/** The subset of `before` the live context still emits. */
+	retained: ReadonlySet<string>;
+	/** Ids after the compaction entry, to the leaf the index last followed. */
+	after: Set<string>;
+	afterLeafId: string | null;
+}
 
 export class ActiveBranchProbe implements ActiveBranchView {
 	private readonly source: ActiveBranchSource;
 	private leafId: string | null | undefined;
 	private epoch = 0;
 	private compaction: ActiveBranchCompaction | undefined;
-	private readonly answers = new Map<string, boolean>();
+	private index: RetentionIndex | undefined;
 
 	constructor(source: ActiveBranchSource) {
 		this.source = source;
@@ -56,34 +89,64 @@ export class ActiveBranchProbe implements ActiveBranchView {
 
 	snapshot(): ActiveBranchSnapshot {
 		this.sync();
-		return { leafId: this.leafId ?? null, epoch: this.epoch, compaction: this.compaction };
+		return {
+			leafId: this.leafId ?? null,
+			epoch: this.epoch,
+			compaction: this.compaction,
+			retentionRevision: this.revision(),
+		};
 	}
 
-	isStrictAncestor(ancestorId: string, entryId: string): boolean {
-		if (ancestorId === entryId) return false;
-		const key = `${ancestorId}>${entryId}`;
-		const known = this.answers.get(key);
-		if (known !== undefined) return known;
-		let found = false;
-		this.walk(this.source.getEntry(entryId)?.parentId ?? null, (id) => {
-			if (id !== ancestorId) return true;
-			found = true;
-			return false;
+	retention(): ActiveBranchRetention | undefined {
+		this.sync();
+		const compaction = this.compaction;
+		if (compaction === undefined) return undefined;
+		const index = this.indexFor(compaction);
+		this.followLeaf(index);
+		return {
+			revision: index.revision,
+			standing: (entryId) => {
+				if (index.before.has(entryId)) return index.retained.has(entryId) ? "visible" : "compacted";
+				// The compaction entry itself and everything after it on this branch are in the live context.
+				return entryId === index.compactionEntryId || index.after.has(entryId) ? "visible" : "off_branch";
+			},
+		};
+	}
+
+	private revision(): string {
+		return `${this.epoch}:${this.compaction?.entryId ?? "none"}`;
+	}
+
+	private indexFor(compaction: ActiveBranchCompaction): RetentionIndex {
+		const revision = this.revision();
+		if (this.index?.revision === revision) return this.index;
+		const path = this.source.getBranch();
+		const position = path.findIndex((entry) => entry.id === compaction.entryId);
+		const before = new Set<string>();
+		for (let i = 0; i < position; i++) before.add((path[i] as SessionEntry).id);
+		const after = new Set<string>();
+		for (let i = position + 1; i < path.length; i++) after.add((path[i] as SessionEntry).id);
+		this.index = {
+			revision,
+			compactionEntryId: compaction.entryId,
+			before,
+			retained: retainedEntryIdsBeforeCompaction(path),
+			after,
+			afterLeafId: this.leafId ?? null,
+		};
+		return this.index;
+	}
+
+	/** Entries appended since the index last followed the leaf join the live tail; nothing is rebuilt. */
+	private followLeaf(index: RetentionIndex): void {
+		const leaf = this.leafId ?? null;
+		if (index.afterLeafId === leaf) return;
+		this.walk(leaf, (id) => {
+			if (id === index.afterLeafId || id === index.compactionEntryId) return false;
+			index.after.add(id);
+			return true;
 		});
-		this.remember(key, found);
-		return found;
-	}
-
-	isAncestorOrSelf(ancestorId: string, entryId: string): boolean {
-		return ancestorId === entryId || this.isStrictAncestor(ancestorId, entryId);
-	}
-
-	private remember(key: string, answer: boolean): void {
-		this.answers.set(key, answer);
-		if (this.answers.size > MAX_REMEMBERED_ANCESTRY_ANSWERS) {
-			const oldest = this.answers.keys().next().value;
-			if (oldest !== undefined) this.answers.delete(oldest);
-		}
+		index.afterLeafId = leaf;
 	}
 
 	/** Visit ancestors from `startId` upward (inclusive) while `visit` returns true; bounded by the entry count. */
@@ -112,7 +175,7 @@ export class ActiveBranchProbe implements ActiveBranchView {
 				return false;
 			}
 			if (nearest === undefined && entry.type === "compaction") {
-				nearest = { entryId: entry.id, firstKeptEntryId: entry.firstKeptEntryId };
+				nearest = { entryId: entry.id };
 			}
 			return true;
 		});

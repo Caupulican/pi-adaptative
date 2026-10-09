@@ -97,9 +97,10 @@ export interface MemoryHistorySettings {
 	hierarchy?: boolean; // default: false -- durable summary hierarchy + history frontier; exact local recall is NOT governed by this switch
 	summaryModel?: string; // model ref ("provider/id" or bare id) for summaries; required for the hierarchy to run
 	allowExternalSummaryEgress?: boolean; // default: false -- sending captured history to a non-local summarizer is external egress
+	allowExternalAdmissionEgress?: boolean; // default: false -- sending captured history to the remote System One evaluator that admits model summaries is external egress, independent of the summarizer's egress; without it model summaries are held (exact copies still flow)
 	maxConcurrentSummaries?: number; // default: 2, clamped to [1, 4]
 	frontierMaxBytes?: number; // default: 4096 UTF-8 bytes of serialized history allowance, clamped to [1024, 16384]
-	retentionDays?: number; // default: unset -- derived summaries live as long as their canonical sessions; when set, summary nodes whose sources are older are revoked
+	retentionDays?: number; // default: unset -- derived summaries live as long as their canonical sessions; when set, DERIVED summary nodes whose sources are older are revoked (never canonical transcripts or exact history reads); a source with no event time ages from its canonical session timestamp, else from its first capture
 }
 
 export interface ContextCurationSettings {

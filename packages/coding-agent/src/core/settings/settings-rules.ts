@@ -48,15 +48,22 @@ import type {
 	WorktreeSyncPolicySetting,
 } from "./settings-schema.ts";
 
+/** Single owner of the non-finite check: NaN, ±Infinity, and non-number input are "no usable number". Callers choose the fallback. */
+export function finiteNumberOrUndefined(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 export const MEMORY_RETRIEVAL_MAX_RESULTS_MIN = 1;
 
 export const MEMORY_RETRIEVAL_MAX_RESULTS_MAX = 20;
 
 export const MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT = 5;
 
+/** Policy: non-finite -> default; finite out-of-range -> clamped to [min, max]; fractions truncated. */
 export function clampMemoryRetrievalMaxResults(value: unknown): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) return MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT;
-	return Math.min(MEMORY_RETRIEVAL_MAX_RESULTS_MAX, Math.max(MEMORY_RETRIEVAL_MAX_RESULTS_MIN, Math.trunc(value)));
+	const finite = finiteNumberOrUndefined(value);
+	if (finite === undefined) return MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT;
+	return Math.min(MEMORY_RETRIEVAL_MAX_RESULTS_MAX, Math.max(MEMORY_RETRIEVAL_MAX_RESULTS_MIN, Math.trunc(finite)));
 }
 
 export const MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_MIN = 1;
@@ -65,11 +72,13 @@ export const MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_MAX = 4;
 
 export const MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_DEFAULT = 2;
 
+/** Policy: non-finite -> default; finite out-of-range -> clamped to [min, max]; fractions truncated. */
 export function clampMemoryHistoryMaxConcurrentSummaries(value: unknown): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) return MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_DEFAULT;
+	const finite = finiteNumberOrUndefined(value);
+	if (finite === undefined) return MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_DEFAULT;
 	return Math.min(
 		MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_MAX,
-		Math.max(MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_MIN, Math.trunc(value)),
+		Math.max(MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_MIN, Math.trunc(finite)),
 	);
 }
 
@@ -79,11 +88,13 @@ export const MEMORY_HISTORY_FRONTIER_MAX_BYTES_MAX = 16384;
 
 export const MEMORY_HISTORY_FRONTIER_MAX_BYTES_DEFAULT = 4096;
 
+/** Policy: non-finite -> default; finite out-of-range -> clamped to [min, max]; fractions truncated. */
 export function clampMemoryHistoryFrontierMaxBytes(value: unknown): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) return MEMORY_HISTORY_FRONTIER_MAX_BYTES_DEFAULT;
+	const finite = finiteNumberOrUndefined(value);
+	if (finite === undefined) return MEMORY_HISTORY_FRONTIER_MAX_BYTES_DEFAULT;
 	return Math.min(
 		MEMORY_HISTORY_FRONTIER_MAX_BYTES_MAX,
-		Math.max(MEMORY_HISTORY_FRONTIER_MAX_BYTES_MIN, Math.trunc(value)),
+		Math.max(MEMORY_HISTORY_FRONTIER_MAX_BYTES_MIN, Math.trunc(finite)),
 	);
 }
 
@@ -91,10 +102,11 @@ export const MEMORY_HISTORY_RETENTION_DAYS_MIN = 1;
 
 export const MEMORY_HISTORY_RETENTION_DAYS_MAX = 3650;
 
-/** Unset (undefined) means no time-based revocation; a non-finite or non-number value is treated as unset. */
+/** Unset (undefined) means no time-based revocation; a non-finite or non-number value is treated as unset. Policy: finite out-of-range -> clamped to [min, max]. */
 export function clampMemoryHistoryRetentionDays(value: unknown): number | undefined {
-	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-	return Math.min(MEMORY_HISTORY_RETENTION_DAYS_MAX, Math.max(MEMORY_HISTORY_RETENTION_DAYS_MIN, Math.trunc(value)));
+	const finite = finiteNumberOrUndefined(value);
+	if (finite === undefined) return undefined;
+	return Math.min(MEMORY_HISTORY_RETENTION_DAYS_MAX, Math.max(MEMORY_HISTORY_RETENTION_DAYS_MIN, Math.trunc(finite)));
 }
 
 export const DEFAULT_AUTONOMY_MAX_STALL_TURNS = DEFAULT_GOAL_CONTINUE_MAX_STALL_TURNS;
@@ -576,12 +588,12 @@ export function parseTimeoutSetting(value: unknown, settingName: string): number
 	return undefined;
 }
 
-/** Stall bounds must be strictly positive — 0 is not "disabled" here (it would stall instantly). */
 /** True when a stall block still carries the pre-split, class-less bounds. */
 export function hasLegacyStreamStallBounds(stall: StreamStallBudgetSettings | undefined): boolean {
 	return stall?.connectMs !== undefined || stall?.activeIdleMs !== undefined || stall?.quietIdleMs !== undefined;
 }
 
+/** Stall bounds must be strictly positive — 0 is not "disabled" here (it would stall instantly). */
 export function parseStallBoundMs(value: unknown, settingName: string): number | undefined {
 	if (value === undefined) return undefined;
 	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
@@ -592,16 +604,19 @@ export function parseStallBoundMs(value: unknown, settingName: string): number |
 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
 
+/** Policy: non-integer (including non-finite) or out-of-range -> fallback; never clamped. */
 export function sanitizeIntegerSetting(value: unknown, fallback: number, min: number, max: number): number {
 	if (typeof value !== "number" || !Number.isInteger(value)) return fallback;
 	if (value < min || value > max) return fallback;
 	return value;
 }
 
+/** Policy: non-finite -> fallback; out-of-range -> fallback; never clamped. */
 export function sanitizeNumberSetting(value: unknown, fallback: number, min: number, max: number): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-	if (value < min || value > max) return fallback;
-	return value;
+	const finite = finiteNumberOrUndefined(value);
+	if (finite === undefined) return fallback;
+	if (finite < min || finite > max) return fallback;
+	return finite;
 }
 
 export function reportInvalidWorkerDelegationField(

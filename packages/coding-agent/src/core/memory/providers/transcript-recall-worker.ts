@@ -1,7 +1,14 @@
 import { closeSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parentPort } from "node:worker_threads";
-import { getDefaultSessionDir, isAutoLearnSessionId, resolvePath, type SessionEntry } from "../../../kernel/node.ts";
+import {
+	FIRST_SESSION_VERSION_WITH_ENTRY_IDS,
+	getDefaultSessionDirCandidates,
+	isAutoLearnSessionId,
+	readSessionHeaderResult,
+	resolvePath,
+	type SessionEntry,
+} from "../../../kernel/node.ts";
 import { TranscriptIndex } from "../transcript-index.ts";
 import {
 	formatTranscriptSourceHandle,
@@ -41,6 +48,13 @@ const MAX_REASON_CHARS = 96;
 
 const SKIP_BYTE_LIMIT = "byte_limit";
 const SKIP_FILE_TOO_LARGE = "file_too_large";
+/** Eligible session that exists at more than one location with contents that are not the same file. */
+const SKIP_AMBIGUOUS_IDENTITY = "ambiguous_session_identity";
+/** Format reasons: the file cannot be captured with handles that survive a restart. */
+const UNSUPPORTED_PRE_ID_FORMAT = "unsupported_format:pre_id_v1";
+const UNSUPPORTED_INVALID_SESSION_ID = "unsupported_format:invalid_session_id";
+/** A skip or failure reason produced by `failureReason`: the source is not indexed because reading it failed. */
+const FAILURE_REASON = /^(read|ingest|source|query|sessions|lineage)_error:/;
 
 const port = parentPort;
 if (!port) throw new Error("transcript recall worker requires parentPort");
@@ -60,6 +74,14 @@ interface SessionRecord {
 	accountedBytes: number;
 	/** Why the session is not held in memory. */
 	skip?: string;
+}
+
+/** Session header fields the catalog needs. `version` is absent from format-v1 headers. */
+interface SessionHeaderInfo {
+	sessionId: string;
+	cwd?: string;
+	timestamp?: string;
+	version?: number;
 }
 
 interface PendingIngest {
@@ -92,17 +114,44 @@ let recordsById = new Map<string, SessionRecord>();
 let recordsByPath = new Map<string, SessionRecord>();
 /** Files that were seen but have no session identity in this project, by path. */
 let skippedPaths = new Map<string, string>();
+/** Files of eligible sessions whose format cannot be captured with stable handles, by path. */
+let unsupportedPaths = new Map<string, { sessionId: string; reason: string }>();
+/** Sessions found at several locations whose contents are not the same file, with every path seen. */
+let ambiguousSessions = new Map<string, Set<string>>();
+/** Paths that are the same file (or a byte-identical copy) as an already catalogued session, by path. */
+let mergedPaths = new Map<string, string>();
 let pendingIngests = new Map<string, PendingIngest>();
-/** Bounded message of the most recent non-fatal read, ingest or source failure. */
+/** Bounded message of the most recent non-fatal read, ingest or source failure. Never cleared by a later success. */
 let lastError: { at: string; message: string } | undefined;
+/** When a source that had failed to read or ingest last became readable again. */
+let lastRecoveryAt: string | undefined;
+/** Set once a send to the parent has failed: that channel is not used again and the worker terminates. */
+let transportFailure: Error | undefined;
 /** Sessions whose spans changed, and those whose earlier spans may have changed, since the last change post. */
 let changedSessionIds = new Set<string>();
 let invalidatedSessionIds = new Set<string>();
 let flushScheduled = false;
 let transientLoad: TransientLoad | undefined;
 
+/**
+ * Send to the parent. A failed send is transport loss, not a work error: it is never reported through
+ * the channel that just failed. The real cause is kept, the channel is not used again, and the worker
+ * ends through its uncaught-error path, so the parent settles every pending read once with that cause.
+ */
 function post(response: TranscriptRecallWorkerResponse): void {
-	workerPort.postMessage(response);
+	if (transportFailure) return;
+	try {
+		workerPort.postMessage(response);
+	} catch (error) {
+		const failure = new Error(
+			`transcript recall worker could not deliver a '${response.type}' response: ${errorMessage(error)}`,
+			{ cause: error },
+		);
+		transportFailure = failure;
+		setImmediate(() => {
+			throw failure;
+		});
+	}
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -146,9 +195,13 @@ function resetState(): void {
 	recordsById = new Map();
 	recordsByPath = new Map();
 	skippedPaths = new Map();
+	unsupportedPaths = new Map();
+	ambiguousSessions = new Map();
+	mergedPaths = new Map();
 	pendingIngests = new Map();
 	transientLoad = undefined;
 	lastError = undefined;
+	lastRecoveryAt = undefined;
 	changedSessionIds = new Set();
 	invalidatedSessionIds = new Set();
 }
@@ -256,37 +309,107 @@ function consumeSession(
 	return { offset, exceeded };
 }
 
-function readSessionHeader(path: string): { sessionId: string; cwd?: string; timestamp?: string } | undefined {
-	const fd = openSync(path, "r");
-	try {
-		const buffer = Buffer.allocUnsafe(HEADER_READ_BYTES);
-		const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
-		const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
-		if (newline === -1 && bytesRead === buffer.length) return undefined;
-		const line = buffer.subarray(0, newline === -1 ? bytesRead : newline).toString("utf8");
-		const parsed: unknown = JSON.parse(line);
-		if (!isRecord(parsed) || parsed.type !== "session") return undefined;
-		const id = parsed.id;
-		if (typeof id !== "string" || id.length === 0 || id.length > TRANSCRIPT_RECALL_MAX_ID_CHARS) return undefined;
-		const header: { sessionId: string; cwd?: string; timestamp?: string } = { sessionId: id };
-		if (typeof parsed.cwd === "string") header.cwd = parsed.cwd;
-		if (typeof parsed.timestamp === "string") header.timestamp = parsed.timestamp.slice(0, 128);
-		return header;
-	} catch (error) {
-		if (error instanceof SyntaxError) return undefined;
-		throw error;
-	} finally {
-		closeSync(fd);
+/**
+ * The catalog view of a session file's header: undefined when the file is not a session or its id cannot
+ * name a handle. An I/O failure is thrown with its real cause, never folded into "not a session".
+ */
+function readSessionHeader(path: string): SessionHeaderInfo | undefined {
+	const result = readSessionHeaderResult(path, HEADER_READ_BYTES);
+	if (!result.ok) {
+		if (result.reason === "unreadable") throw result.cause;
+		return undefined;
 	}
+	const { id, cwd, timestamp, version } = result.header;
+	if (id.length === 0 || id.length > TRANSCRIPT_RECALL_MAX_ID_CHARS) return undefined;
+	const header: SessionHeaderInfo = { sessionId: id };
+	if (typeof version === "number") header.version = version;
+	if (typeof cwd === "string") header.cwd = cwd;
+	if (typeof timestamp === "string") header.timestamp = timestamp.slice(0, 128);
+	return header;
 }
 
 // ---------------------------------------------------------------------------------------------
 // Session catalog and retention
 // ---------------------------------------------------------------------------------------------
 
+/** Whether two files hold byte-identical content of the given size. Stops at the first difference. */
+function haveEqualBytes(left: string, right: string, size: number): boolean {
+	const leftFd = openSync(left, "r");
+	try {
+		const rightFd = openSync(right, "r");
+		try {
+			const leftBuffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+			const rightBuffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+			for (let position = 0; position < size; ) {
+				const length = Math.min(READ_CHUNK_BYTES, size - position);
+				const leftRead = readSync(leftFd, leftBuffer, 0, length, position);
+				const rightRead = readSync(rightFd, rightBuffer, 0, length, position);
+				if (leftRead !== length || rightRead !== length) return false;
+				if (!leftBuffer.subarray(0, length).equals(rightBuffer.subarray(0, length))) return false;
+				position += length;
+			}
+			return true;
+		} finally {
+			closeSync(rightFd);
+		}
+	} finally {
+		closeSync(leftFd);
+	}
+}
+
 /**
- * Resolve a session file into a catalog record, or record why it has no session identity in this
- * project. Files of other working directories and auto-learn sessions are ineligible, not skipped.
+ * Whether two paths hold the same session file: one underlying file, or a byte-identical copy (a
+ * session that exists in both the current and the legacy directory). Anything else with one session id
+ * is a contradictory identity.
+ */
+function isSameSessionFile(left: string, right: string): boolean {
+	const leftStat = statSync(left);
+	const rightStat = statSync(right);
+	if (leftStat.ino !== 0 && leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino) return true;
+	if (leftStat.size !== rightStat.size || leftStat.size > MAX_FILE_BYTES) return false;
+	return haveEqualBytes(left, right, leftStat.size);
+}
+
+/** A source that had failed to read or ingest is readable again. */
+function noteRecovery(): void {
+	lastRecoveryAt = new Date().toISOString();
+}
+
+/**
+ * A second file claims a session id that is already catalogued. The same file (or a byte-identical copy)
+ * is merged into the existing record; contradictory contents make the identity ambiguous: nothing of
+ * that session is indexed, because handles into either copy could resolve to the wrong text.
+ */
+function resolveDuplicate(existing: SessionRecord, path: string, key: string, phase: FailurePhase): undefined {
+	let same: boolean;
+	try {
+		same = isSameSessionFile(existing.path, path);
+	} catch (error) {
+		skippedPaths.set(key, failureReason(phase, error));
+		return undefined;
+	}
+	if (same) {
+		mergedPaths.set(key, existing.sessionId);
+		return undefined;
+	}
+	const paths = new Set([pathKey(existing.path), key]);
+	for (const [mergedKey, sessionId] of mergedPaths) {
+		if (sessionId === existing.sessionId) {
+			paths.add(mergedKey);
+			mergedPaths.delete(mergedKey);
+		}
+	}
+	unloadRecord(existing, SKIP_AMBIGUOUS_IDENTITY);
+	recordsById.delete(existing.sessionId);
+	recordsByPath.delete(pathKey(existing.path));
+	ambiguousSessions.set(existing.sessionId, paths);
+	return undefined;
+}
+
+/**
+ * Resolve a session file into a catalog record, or record why it has no capturable session identity in
+ * this project. Files of other working directories and auto-learn sessions are ineligible, not skipped.
+ * Eligible files whose format cannot carry stable handles are unsupported, never captured with invented ids.
  */
 function describeFile(path: string, mtimeMs: number, phase: FailurePhase): SessionRecord | undefined {
 	const key = pathKey(path);
@@ -301,17 +424,30 @@ function describeFile(path: string, mtimeMs: number, phase: FailurePhase): Sessi
 		skippedPaths.set(key, "no_header");
 		return undefined;
 	}
+	const previous = skippedPaths.get(key);
+	if (previous !== undefined && FAILURE_REASON.test(previous)) noteRecovery();
 	skippedPaths.delete(key);
+	unsupportedPaths.delete(key);
+	mergedPaths.delete(key);
 	if (isAutoLearnSessionId(header.sessionId)) return undefined;
 	if (!header.cwd || pathKey(header.cwd) !== pathKey(workingDirectory)) return undefined;
 	if (!isTranscriptSessionIdResolvable(projectId, header.sessionId)) {
-		skippedPaths.set(key, "invalid_session_id");
+		unsupportedPaths.set(key, { sessionId: header.sessionId, reason: UNSUPPORTED_INVALID_SESSION_ID });
 		return undefined;
 	}
-	if (recordsById.has(header.sessionId)) {
-		skippedPaths.set(key, "duplicate_session_id");
+	// A format-v1 file has no entry ids; the kernel assigns random ones when it migrates the file, so
+	// handles minted from an in-memory migration would not survive a restart.
+	if (header.version === undefined || header.version < FIRST_SESSION_VERSION_WITH_ENTRY_IDS) {
+		unsupportedPaths.set(key, { sessionId: header.sessionId, reason: UNSUPPORTED_PRE_ID_FORMAT });
 		return undefined;
 	}
+	const ambiguous = ambiguousSessions.get(header.sessionId);
+	if (ambiguous) {
+		ambiguous.add(key);
+		return undefined;
+	}
+	const existing = recordsById.get(header.sessionId);
+	if (existing) return resolveDuplicate(existing, path, key, phase);
 	const record: SessionRecord = {
 		sessionId: header.sessionId,
 		path,
@@ -341,6 +477,7 @@ function unloadRecord(record: SessionRecord, skip: string): void {
 
 function adoptState(record: SessionRecord, state: SessionCaptureState, offset: number): void {
 	retainedBytes += state.retainedBytes - record.accountedBytes;
+	if (record.skip !== undefined && FAILURE_REASON.test(record.skip)) noteRecovery();
 	record.accountedBytes = state.retainedBytes;
 	record.state = state;
 	record.offset = offset;
@@ -407,12 +544,19 @@ function countReason(reasons: Map<string, number>, reason: string, amount = 1): 
 
 function computeCoverage(): TranscriptCoverage {
 	const skipped = new Map<string, number>();
+	const unsupported = new Map<string, number>();
 	const uncaptured = new Map<string, number>();
 	let sessionsIndexed = 0;
 	let sessionsSkipped = 0;
 	let spansIndexed = 0;
 	let spansUncaptured = 0;
+	let activeFailures = 0;
 	let truncated = false;
+	const skip = (reason: string): void => {
+		sessionsSkipped++;
+		countReason(skipped, reason);
+		if (FAILURE_REASON.test(reason)) activeFailures++;
+	};
 	for (const record of recordsById.values()) {
 		if (record.state) {
 			sessionsIndexed++;
@@ -422,25 +566,36 @@ function computeCoverage(): TranscriptCoverage {
 				countReason(uncaptured, reason, count);
 			}
 		} else if (record.skip) {
-			sessionsSkipped++;
-			countReason(skipped, record.skip);
+			skip(record.skip);
 			if (record.skip === SKIP_BYTE_LIMIT || record.skip === SKIP_FILE_TOO_LARGE) truncated = true;
 		}
 	}
-	for (const reason of skippedPaths.values()) {
-		sessionsSkipped++;
-		countReason(skipped, reason);
+	for (let ambiguous = 0; ambiguous < ambiguousSessions.size; ambiguous++) skip(SKIP_AMBIGUOUS_IDENTITY);
+	// A session unsupported at one path but captured (or ambiguous) at another is counted there, once.
+	const unsupportedIds = new Map<string, string>();
+	for (const { sessionId, reason } of unsupportedPaths.values()) {
+		if (!recordsById.has(sessionId) && !ambiguousSessions.has(sessionId) && !unsupportedIds.has(sessionId)) {
+			unsupportedIds.set(sessionId, reason);
+		}
 	}
+	for (const reason of unsupportedIds.values()) countReason(unsupported, reason);
+	// Files with no readable identity cannot be attributed to a session; they are skipped, not eligible.
+	for (const reason of skippedPaths.values()) skip(reason);
 	const coverage: TranscriptCoverage = {
+		sessionsEligible: recordsById.size + ambiguousSessions.size + unsupportedIds.size,
 		sessionsIndexed,
+		sessionsUnsupported: unsupportedIds.size,
 		sessionsSkipped,
 		spansIndexed,
 		spansUncaptured,
 		skipped: foldReasons(skipped),
+		unsupported: foldReasons(unsupported),
 		uncaptured: foldReasons(uncaptured),
+		activeFailures,
 		truncated,
 	};
 	if (lastError !== undefined) coverage.lastError = lastError;
+	if (lastRecoveryAt !== undefined) coverage.lastRecoveryAt = lastRecoveryAt;
 	return coverage;
 }
 
@@ -448,29 +603,41 @@ function computeCoverage(): TranscriptCoverage {
 // Initialization and incremental ingestion
 // ---------------------------------------------------------------------------------------------
 
-function buildIndex(): void {
-	const dir = getDefaultSessionDir(workingDirectory, agentDirectory);
-	let names: string[];
-	try {
-		names = readdirSync(dir);
-	} catch (error) {
-		if (errorCode(error) === "ENOENT") return;
-		throw error;
-	}
+/**
+ * Session files of the project's current and legacy default directories, newest first (the current
+ * directory wins a tie). The current directory failing to list is fatal to the scan; a legacy directory
+ * failing is a skipped source, so extra coverage can never take down coverage that already worked.
+ */
+function discoverSessionFiles(): Array<{ path: string; mtimeMs: number; size: number }> {
 	const files: Array<{ path: string; mtimeMs: number; size: number }> = [];
-	for (const name of names) {
-		if (!name.endsWith(".jsonl")) continue;
-		const path = join(dir, name);
+	const directories = getDefaultSessionDirCandidates(workingDirectory, agentDirectory);
+	for (const [position, dir] of directories.entries()) {
+		let names: string[];
 		try {
-			const metadata = statSync(path);
-			if (metadata.isFile() && metadata.size > 0)
-				files.push({ path, mtimeMs: metadata.mtimeMs, size: metadata.size });
+			names = readdirSync(dir);
 		} catch (error) {
-			skippedPaths.set(pathKey(path), failureReason("read", error));
+			if (errorCode(error) === "ENOENT") continue;
+			if (position === 0) throw error;
+			skippedPaths.set(pathKey(dir), failureReason("read", error));
+			continue;
+		}
+		for (const name of names) {
+			if (!name.endsWith(".jsonl")) continue;
+			const path = join(dir, name);
+			try {
+				const metadata = statSync(path);
+				if (metadata.isFile() && metadata.size > 0)
+					files.push({ path, mtimeMs: metadata.mtimeMs, size: metadata.size });
+			} catch (error) {
+				skippedPaths.set(pathKey(path), failureReason("read", error));
+			}
 		}
 	}
-	files.sort((left, right) => right.mtimeMs - left.mtimeMs);
-	for (const file of files) {
+	return files.sort((left, right) => right.mtimeMs - left.mtimeMs);
+}
+
+function buildIndex(): void {
+	for (const file of discoverSessionFiles()) {
 		const record = describeFile(file.path, file.mtimeMs, "read");
 		if (!record) continue;
 		if (file.size > MAX_FILE_BYTES) {
@@ -622,9 +789,25 @@ function loadSessionForRead(record: SessionRecord): SessionCaptureState | Transc
 	return state;
 }
 
+/** Why a session id has no catalog record: contradictory copies, an uncapturable format, or not in this project. */
+function missingSessionResult(sessionId: string): TranscriptReadUnavailable {
+	if (ambiguousSessions.has(sessionId)) {
+		return unavailable(
+			"unavailable",
+			`Session ${sessionId} exists at several locations with different contents (${SKIP_AMBIGUOUS_IDENTITY}).`,
+		);
+	}
+	for (const unsupported of unsupportedPaths.values()) {
+		if (unsupported.sessionId === sessionId) {
+			return unavailable("unavailable", `Session ${sessionId} cannot be read from history (${unsupported.reason}).`);
+		}
+	}
+	return unavailable("not_found", `Session ${sessionId} is not in this project's history.`);
+}
+
 function readSource(request: TranscriptRecallSourceRequest): TranscriptSourcePageResult {
 	const record = recordsById.get(request.sessionId);
-	if (!record) return unavailable("not_found", `Session ${request.sessionId} is not in this project's history.`);
+	if (!record) return missingSessionResult(request.sessionId);
 	const state = record.state ?? loadSessionForRead(record);
 	if (!(state instanceof SessionCaptureState)) return state;
 
@@ -698,7 +881,7 @@ function listSessions(): { status: "ok"; sessions: TranscriptSessionSummary[] } 
 
 function readLineage(request: TranscriptRecallLineageRequest): TranscriptLineageSpansResult {
 	const record = recordsById.get(request.sessionId);
-	if (!record) return unavailable("not_found", `Session ${request.sessionId} is not in this project's history.`);
+	if (!record) return missingSessionResult(request.sessionId);
 	const state = record.state;
 	if (!state) {
 		return unavailable(
@@ -820,7 +1003,7 @@ function handle(request: TranscriptRecallWorkerRequest): void {
 }
 
 workerPort.on("message", (value: unknown) => {
-	if (!isTranscriptRecallWorkerRequest(value)) return;
+	if (transportFailure || !isTranscriptRecallWorkerRequest(value)) return;
 	try {
 		handle(value);
 	} catch (error) {

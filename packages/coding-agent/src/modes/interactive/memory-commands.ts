@@ -52,8 +52,13 @@ function describe(entry: ManagedMemoryDriftEntry): string {
 function describeHistory(status: TranscriptHistoryStatus): string {
 	const lines = formatTranscriptMemoryLines(sanitizeTranscriptHistoryForDiagnostics(status));
 	const indexingError = status.coverage?.lastError;
-	if (indexingError) lines.push(`  indexing error detail (${indexingError.at}): ${indexingError.message}`);
-	if (status.unavailableReason) lines.push(`  unavailable: ${status.unavailableReason}`);
+	if (indexingError) {
+		const failing = (status.coverage?.activeFailures ?? 0) > 0;
+		lines.push(
+			`  ${failing ? "indexing error detail" : "historical indexing error detail, no source failing now"} (${indexingError.at}): ${indexingError.message}`,
+		);
+	}
+	if (status.unavailableReason) lines.push(`  transport unavailable: ${status.unavailableReason}`);
 	const retrievalError = status.latestRetrieval?.error;
 	if (retrievalError) lines.push(`  retrieval error detail: ${retrievalError}`);
 	const hierarchy = status.hierarchy;
@@ -62,6 +67,9 @@ function describeHistory(status: TranscriptHistoryStatus): string {
 		lines.push(`  hierarchy failure (level ${failure.level}, ${failure.reason}): ${failure.message}`);
 	}
 	for (const issue of hierarchy?.recoveryIssues ?? []) lines.push(`  hierarchy recovery: ${issue}`);
+	const admission = hierarchy?.admission;
+	if (admission?.blocked) lines.push(`  model summaries held: ${admission.blocked.reason}`);
+	if (admission?.heldReason) lines.push(`  held job cause: ${admission.heldReason}`);
 	return lines.join("\n");
 }
 

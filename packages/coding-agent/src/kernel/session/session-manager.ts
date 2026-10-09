@@ -71,6 +71,8 @@ import { invalidSessionParentCycle, visitSessionAncestry } from "./session-tree.
 export * from "./lifecycle-ledger.ts";
 
 export const CURRENT_SESSION_VERSION = 4;
+/** First session format version whose entries all carry `id`/`parentId`; earlier files get random ids when migrated. */
+export const FIRST_SESSION_VERSION_WITH_ENTRY_IDS = 2;
 /** Maximum borrowed entries one non-copying SessionManager visit may inspect. */
 export const MAX_SESSION_ENTRY_VISIT_COUNT = 1_024;
 /** Maximum normal message/custom-message records in one atomic append batch. */
@@ -354,7 +356,7 @@ function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 
 	if (version >= CURRENT_SESSION_VERSION) return false;
 
-	if (version < 2) migrateV1ToV2(entries);
+	if (version < FIRST_SESSION_VERSION_WITH_ENTRY_IDS) migrateV1ToV2(entries);
 	if (version < 3) migrateV2ToV3(entries);
 	if (version < 4) migrateV3ToV4(entries);
 
@@ -574,6 +576,97 @@ export function summarizedGapEntryIds(entries: SessionEntry[], leafId?: string |
 	return projectedGapEntries(path).map((entry) => entry.id);
 }
 
+/** What a rebuilt context emits verbatim from before the compaction entry of a branch path. */
+interface CompactedContextSelection {
+	compactionIdx: number;
+	/** The retained original user message, in `original-user` mode. */
+	originalUserEntry: SessionMessageEntry | undefined;
+	/** The original-user gap entries a rebuild restores; empty in the standard mode. */
+	restoredGaps: SessionEntry[];
+	/** Transient records carried forward from before the cut, in path order. */
+	carried: SessionEntry[];
+	/** Entries before the compaction entry that stay verbatim: the kept tail, or the restored gaps. */
+	retained: SessionEntry[];
+}
+
+/**
+ * The one owner of which entries before a compaction stay in the context: `buildSessionContext` emits them
+ * and {@link retainedEntryIdsBeforeCompaction} reports them, so no other module restates the retention rules.
+ */
+function selectCompactedContext(path: readonly SessionEntry[], compaction: CompactionEntry): CompactedContextSelection {
+	// Find compaction index in path
+	const compactionIdx = path.findIndex((e) => e.type === "compaction" && e.id === compaction.id);
+	const originalUserEntry =
+		compaction.retention?.mode === "original-user"
+			? path
+					.slice(0, compactionIdx)
+					.find(
+						(entry): entry is SessionMessageEntry =>
+							entry.id === compaction.retention?.userEntryId &&
+							entry.type === "message" &&
+							entry.message.role === "user",
+					)
+			: undefined;
+
+	const restoredGaps = compaction.retention?.mode === "original-user" ? projectedGapEntries(path) : [];
+
+	// Transient records (append-on-change host and kernel records: skill context, goal context,
+	// legend deltas, failure ledger) that fell before the cut are carried forward: the last record
+	// of each kind, every record of a cumulative kind. Without them the reconciler sees no durable
+	// instance after compaction and re-appends every kind on the next request, re-sending the same
+	// content the compacted history already carried. Kinds with a record in the kept tail need none.
+	let firstKeptIdx = compactionIdx;
+	for (let i = 0; i < compactionIdx; i++) {
+		if (path[i].id === compaction.firstKeptEntryId) {
+			firstKeptIdx = i;
+			break;
+		}
+	}
+	const tailKinds = new Set<string>();
+	for (let i = firstKeptIdx; i < path.length; i++) {
+		const entry = path[i];
+		if (entry.type === "custom_message" && classifyTransientRecord(entry.content, entry.details).transient) {
+			tailKinds.add(entry.customType);
+		}
+	}
+	const carriedByKind = new Map<string, SessionEntry[]>();
+	for (let i = 0; i < firstKeptIdx; i++) {
+		const entry = path[i];
+		if (entry.type !== "custom_message" || tailKinds.has(entry.customType)) continue;
+		const record = classifyTransientRecord(entry.content, entry.details);
+		if (!record.transient) continue;
+		if (record.cumulative) {
+			const list = carriedByKind.get(entry.customType) ?? [];
+			list.push(entry);
+			carriedByKind.set(entry.customType, list);
+		} else carriedByKind.set(entry.customType, [entry]);
+	}
+	const carried = [...carriedByKind.values()].flat().sort((a, b) => path.indexOf(a) - path.indexOf(b));
+
+	const retained = compaction.retention ? restoredGaps : path.slice(firstKeptIdx, compactionIdx);
+	return { compactionIdx, originalUserEntry, restoredGaps, carried, retained };
+}
+
+/**
+ * Ids of the entries positioned before the latest compaction of a branch path that the rebuilt context still
+ * emits: the kept tail (or, in `original-user` mode, the retained user message and restored gaps) and the
+ * carried-forward transient records. Everything else before that compaction was compacted away. Empty when
+ * the path holds no compaction.
+ */
+export function retainedEntryIdsBeforeCompaction(path: readonly SessionEntry[]): ReadonlySet<string> {
+	let compaction: CompactionEntry | undefined;
+	for (const entry of path) {
+		if (entry.type === "compaction") compaction = entry;
+	}
+	const retained = new Set<string>();
+	if (!compaction) return retained;
+	const selection = selectCompactedContext(path, compaction);
+	if (selection.originalUserEntry) retained.add(selection.originalUserEntry.id);
+	for (const entry of selection.carried) retained.add(entry.id);
+	for (const entry of selection.retained) retained.add(entry.id);
+	return retained;
+}
+
 /**
  * Build the session context from entries using tree traversal.
  * If leafId is provided, walks from that entry to root.
@@ -633,21 +726,8 @@ export function buildSessionContext(
 	};
 
 	if (compaction) {
-		// Find compaction index in path
-		const compactionIdx = path.findIndex((e) => e.type === "compaction" && e.id === compaction.id);
-		const originalUserEntry =
-			compaction.retention?.mode === "original-user"
-				? path
-						.slice(0, compactionIdx)
-						.find(
-							(entry): entry is SessionMessageEntry =>
-								entry.id === compaction.retention?.userEntryId &&
-								entry.type === "message" &&
-								entry.message.role === "user",
-						)
-				: undefined;
-
-		const restoredGaps = compaction.retention?.mode === "original-user" ? projectedGapEntries(path) : [];
+		const selection = selectCompactedContext(path, compaction);
+		const { compactionIdx, originalUserEntry, restoredGaps } = selection;
 		const unsummarizedTask = compaction.retention
 			? clampText(latestUserText(restoredGaps, compaction.retention.userEntryId), ACTIVE_TASK_SOURCE_MAX_CHARS)
 			: "";
@@ -667,46 +747,8 @@ export function buildSessionContext(
 			),
 		);
 
-		// Transient records (append-on-change host and kernel records: skill context, goal context,
-		// legend deltas, failure ledger) that fell before the cut are carried forward: the last record
-		// of each kind, every record of a cumulative kind. Without them the reconciler sees no durable
-		// instance after compaction and re-appends every kind on the next request, re-sending the same
-		// content the compacted history already carried. Kinds with a record in the kept tail need none.
-		let firstKeptIdx = compactionIdx;
-		for (let i = 0; i < compactionIdx; i++) {
-			if (path[i].id === compaction.firstKeptEntryId) {
-				firstKeptIdx = i;
-				break;
-			}
-		}
-		const tailKinds = new Set<string>();
-		for (let i = firstKeptIdx; i < path.length; i++) {
-			const entry = path[i];
-			if (entry.type === "custom_message" && classifyTransientRecord(entry.content, entry.details).transient) {
-				tailKinds.add(entry.customType);
-			}
-		}
-		const carriedByKind = new Map<string, SessionEntry[]>();
-		for (let i = 0; i < firstKeptIdx; i++) {
-			const entry = path[i];
-			if (entry.type !== "custom_message" || tailKinds.has(entry.customType)) continue;
-			const record = classifyTransientRecord(entry.content, entry.details);
-			if (!record.transient) continue;
-			if (record.cumulative) {
-				const list = carriedByKind.get(entry.customType) ?? [];
-				list.push(entry);
-				carriedByKind.set(entry.customType, list);
-			} else carriedByKind.set(entry.customType, [entry]);
-		}
-		const carried = [...carriedByKind.values()].flat().sort((a, b) => path.indexOf(a) - path.indexOf(b));
-		for (const entry of carried) appendMessage(entry);
-
-		if (!compaction.retention) {
-			// Emit the standard contiguous tail before compaction, starting from firstKeptEntryId.
-			for (let i = firstKeptIdx; i < compactionIdx; i++) appendMessage(path[i]);
-		} else {
-			for (const entry of restoredGaps) appendMessage(entry);
-		}
+		for (const entry of selection.carried) appendMessage(entry);
+		for (const entry of selection.retained) appendMessage(entry);
 
 		// Emit messages after compaction
 		for (let i = compactionIdx + 1; i < path.length; i++) {
@@ -744,7 +786,8 @@ function getDefaultSessionDirPath(cwd: string, agentDir: string): string {
 	return join(resolvedAgentDir, "sessions", getEncodedSessionDirName(cwd));
 }
 
-function getDefaultSessionDirCandidates(cwd: string, agentDir: string): string[] {
+/** Current default session directory first, then the legacy-encoded one when it differs. */
+export function getDefaultSessionDirCandidates(cwd: string, agentDir: string): string[] {
 	const current = getDefaultSessionDirPath(cwd, agentDir);
 	const legacy = getLegacySessionDirPath(cwd, agentDir);
 	return current === legacy ? [current] : [current, legacy];
@@ -950,28 +993,52 @@ function retainedStringChars(value: unknown, stopAfter: number): number {
 	return chars;
 }
 
-function readSessionHeader(filePath: string): SessionHeader | null {
+/**
+ * Outcome of reading a session file's first line. `unreadable` carries the I/O error so a caller can
+ * tell a file it could not open from a file that is simply not a session (`not_a_header`: empty,
+ * longer than the byte bound, malformed JSON, or not a `session` record with a string id).
+ */
+export type SessionHeaderReadResult =
+	| { ok: true; header: SessionHeader }
+	| { ok: false; reason: "unreadable"; cause: unknown }
+	| { ok: false; reason: "not_a_header" };
+
+/** Read and parse the header line of a session file, looking at no more than `maxBytes` of it. */
+export function readSessionHeaderResult(
+	filePath: string,
+	maxBytes: number = MAX_SESSION_HEADER_BYTES,
+): SessionHeaderReadResult {
+	let line: string;
 	try {
 		const fd = openSync(filePath, "r");
-		const buffer = Buffer.alloc(MAX_SESSION_HEADER_BYTES + 1);
-		let bytesRead: number;
 		try {
-			bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+			const buffer = Buffer.alloc(maxBytes + 1);
+			const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+			const newlineIndex = buffer.subarray(0, bytesRead).indexOf(0x0a);
+			if (newlineIndex < 0 && bytesRead > maxBytes) return { ok: false, reason: "not_a_header" };
+			line = buffer.toString("utf8", 0, newlineIndex >= 0 ? newlineIndex : bytesRead);
 		} finally {
 			closeSync(fd);
 		}
-		const newlineIndex = buffer.indexOf(0x0a, 0);
-		if (newlineIndex < 0 && bytesRead > MAX_SESSION_HEADER_BYTES) return null;
-		const firstLine = buffer.toString("utf8", 0, newlineIndex >= 0 ? newlineIndex : bytesRead);
-		if (!firstLine) return null;
-		const header = JSON.parse(firstLine) as Record<string, unknown>;
-		if (header.type !== "session" || typeof header.id !== "string") {
-			return null;
-		}
-		return header as unknown as SessionHeader;
-	} catch {
-		return null;
+	} catch (cause) {
+		return { ok: false, reason: "unreadable", cause };
 	}
+	if (!line) return { ok: false, reason: "not_a_header" };
+	let header: Record<string, unknown>;
+	try {
+		header = JSON.parse(line) as Record<string, unknown>;
+	} catch {
+		return { ok: false, reason: "not_a_header" };
+	}
+	if (header === null || typeof header !== "object" || header.type !== "session" || typeof header.id !== "string") {
+		return { ok: false, reason: "not_a_header" };
+	}
+	return { ok: true, header: header as unknown as SessionHeader };
+}
+
+function readSessionHeader(filePath: string): SessionHeader | null {
+	const result = readSessionHeaderResult(filePath);
+	return result.ok ? result.header : null;
 }
 
 /** Resolve the bounded parent-file chain that authoritatively defines a fork's session lineage. */

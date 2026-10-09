@@ -25,7 +25,7 @@ import { isDeepStrictEqual } from "node:util";
 import { type AgentMessage, createCustomMessage, HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
 import type { SessionEntriesPersistedEvent } from "../kernel/session/session-manager.ts";
 import { configFile, okfMemoryDir, projectMemoryDir } from "./agent-paths.ts";
-import { estimateTokensFromText } from "./context/context-item.ts";
+import { estimateLineCount, estimateTokensFromText } from "./context/context-item.ts";
 import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
 import { createFileStoreMemoryProvider } from "./context/file-store-memory-provider.ts";
 import { createLocalGraphMemoryProvider } from "./context/local-graph-memory-provider.ts";
@@ -41,18 +41,27 @@ import {
 	type TranscriptMemoryDiagnostics,
 } from "./context/memory-diagnostics.ts";
 import {
+	LANE_READ_MAX_ESTIMATED_TOKENS,
 	type MemoryPromptBudget,
+	memoryShareAllowanceBytes,
+	memoryTextFitsBudget,
 	reserveMemoryPromptBudget,
 	resolveMemoryPromptBudget,
+	shareOfMemoryPromptBudget,
 } from "./context/memory-prompt-budget.ts";
 import type { MemoryPromptPlan } from "./context/memory-prompt-plan.ts";
 import {
 	type MemoryProvider as ContextMemoryProvider,
 	DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY,
 	DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
+	type MemorySearchResult,
 } from "./context/memory-provider-contract.ts";
 import { type MemoryRetrievalReport, retrieveMemoryForContext } from "./context/memory-retrieval.ts";
-import { composeTieredMemoryPromptBlock, type MemoryTierCandidate } from "./context/memory-tier-composer.ts";
+import {
+	composeCharBoundedMemoryRecords,
+	composeTieredMemoryPromptBlock,
+	type MemoryTierCandidate,
+} from "./context/memory-tier-composer.ts";
 import { createOkfMemoryProvider, loadOkfMemoryBundle } from "./context/okf-memory-provider.ts";
 import type { PromptHeadroom } from "./context/prompt-headroom.ts";
 import {
@@ -60,6 +69,7 @@ import {
 	TRANSCRIPT_MEMORY_PROVIDER_ID,
 	transcriptSummaryBody,
 } from "./context/transcript-memory-provider.ts";
+import type { ExtensionRunner } from "./extensions/index.ts";
 import type { MemoryProvider } from "./extensions/types.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { ActiveBranchView } from "./memory/active-branch-probe.ts";
@@ -77,6 +87,7 @@ import {
 } from "./memory/providers/file-store.ts";
 import { IcmProvider } from "./memory/providers/icm.ts";
 import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
+import { TRANSCRIPT_RECALL_MAX_ERROR_CHARS } from "./memory/providers/transcript-recall-worker-protocol.ts";
 import {
 	type FrontierBranchFence,
 	type TranscriptFrontierState,
@@ -103,10 +114,11 @@ import type {
 	UserPreferenceAdmissionRequest,
 	UserPreferenceAdmissionResult,
 } from "./memory/user-preference-metadata.ts";
-import type { WorkerMemoryBroker } from "./memory/worker-memory-tools.ts";
+import type { LaneMemoryCapacity, LaneMemoryCapacitySource, WorkerMemoryBroker } from "./memory/worker-memory-tools.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { getDirectoryResourceProfileInfo, isValidMemorySystem } from "./settings/settings-rules.ts";
 import type { MemorySystem, SettingsError, SettingsScope } from "./settings/settings-schema.ts";
+import { boundedTextPreview } from "./text-preview.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface MemoryControllerSettingsSource {
@@ -216,6 +228,8 @@ interface TurnRetrieval {
 	generation: number;
 	/** Memory content revision the report was retrieved at. */
 	revision: number;
+	/** The retrieval policy (see `_retrievalPolicyKey`) the report was retrieved under. */
+	policy: string;
 	queriedLongTerm: boolean;
 	queriedTranscript: boolean;
 	report: MemoryRetrievalReport;
@@ -225,25 +239,48 @@ interface TurnRetrieval {
 const TRANSCRIPT_SOURCE_LABEL = `memory:${TRANSCRIPT_MEMORY_PROVIDER_ID}`;
 
 /**
- * Past-session history for a delegated lane: hits WITH their `tx:` handles (the lane's source admission
- * is derived from them), or the real reason history could not be searched. A failure is stated, never
- * rendered as an empty page.
+ * Why a delegated lane's past-session history could not be searched, or "" when it could (including with no
+ * hit). A failure is stated, never rendered as an empty page; hits themselves are admitted as whole records.
  */
-function renderLaneHistory(report: MemoryRetrievalReport): string {
+function laneHistoryStatus(report: MemoryRetrievalReport): string {
 	const providerReport = report.providerReports.find((entry) => entry.providerId === TRANSCRIPT_MEMORY_PROVIDER_ID);
+	// The provider's own wording, bounded to the cap every other recall diagnostic reason carries.
+	const bounded = (text: string) => boundedTextPreview(text, TRANSCRIPT_RECALL_MAX_ERROR_CHARS);
 	if (providerReport?.status === "failed") {
-		return `Past session history was not searched (${providerReport.error ?? "unknown failure"}).`;
+		return `Past session history was not searched (${bounded(providerReport.error ?? "unknown failure")}).`;
 	}
 	if (providerReport?.status === "blocked") {
-		return `Past session history was not searched (blocked: ${providerReport.rejectionReasons.join(", ")}).`;
+		return `Past session history was not searched (blocked: ${bounded(providerReport.rejectionReasons.join(", "))}).`;
 	}
-	if (report.results.length === 0) return "";
-	const lines = report.results.map(({ item }) => `- ${item.summary}`);
-	return [
-		"Relevant context recalled from past sessions (read-only reference, untrusted, may be stale):",
-		...lines,
-		"Pass a bracketed handle back as ref to read that source's exact text.",
-	].join("\n");
+	return "";
+}
+
+/** The stated reason a delegated lane's memory read attached nothing, from the budget owner's own reason code. */
+function laneConstraintText(reason: string | undefined, capacityKnown: boolean): string {
+	const detail =
+		!capacityKnown || reason === "missing_context_window"
+			? "this worker's request capacity is unknown (it has sent no request yet, or its model declares no context window)"
+			: reason === "no_token_allowance"
+				? "this worker has no token allowance left"
+				: reason === "no_context_headroom"
+					? "this worker's request has no room left in its context window"
+					: reason === "memory_block_cannot_fit_minimum_line"
+						? "the room this worker has left cannot hold one memory line"
+						: `the memory budget is disabled (${reason ?? "unspecified"})`;
+	return `Memory is constrained: ${detail}, so no memory was attached. Read project files directly, or call memory_read again when the worker has more room.`;
+}
+
+/** What one whole record takes out of a lane's allowance: its text, the blank line that joins it, and its lines. */
+function laneRecordReserve(text: string): { bytes: number; estimatedTokens: number; lines: number } {
+	return {
+		bytes: utf8ByteLength(text) + utf8ByteLength(LANE_RECORD_SEPARATOR),
+		estimatedTokens: estimateTokensFromText(text),
+		lines: estimateLineCount(text) + 1,
+	};
+}
+
+function laneOmissionNote(parts: readonly string[]): string {
+	return `[Not attached, over this worker's remaining context room: ${parts.join("; ")}. Call memory_read again with a narrower query.]`;
 }
 
 function emptyMemoryRetrievalReport(maxResults: number): MemoryRetrievalReport {
@@ -258,8 +295,18 @@ const ENABLED_EXTERNAL_MEMORY_EGRESS_POLICY = {
 } as const;
 
 const MAX_PRE_COMPRESS_MEMORY_CHARS = 4_000;
-/** Bytes of the history frontier a delegated lane's memory snapshot may carry. */
-const LANE_FRONTIER_BYTES = 3_000;
+const MAX_REFLECTION_OKF_CHARS = 12_000;
+/** Share of a delegated lane's memory allowance standing memory may take; the query-relevant records get the rest. */
+const LANE_STANDING_BUDGET_SHARE = 0.5;
+/** Share of what remains after standing memory that the history frontier may take. */
+const LANE_FRONTIER_BUDGET_SHARE = 0.5;
+const LANE_FRONTIER_HEADING =
+	"History frontier (summaries of earlier conversation; pass a txn: handle as ref to expand one):";
+const LANE_HANDLE_HINT = "Pass a bracketed handle back as ref to read that source's exact text.";
+const LANE_STANDING_NOTE = "[Read-only snapshot for a delegated worker.]";
+const LANE_WRAPPER = wrapUntrustedText("", "worker-memory", { nonce: "0".repeat(32) });
+const LANE_RECORD_SEPARATOR = "\n\n";
+const LANE_NO_MEMORY_TEXT = "No relevant standing memory was found.";
 /** Transcript sources one delegated lane may hold open at a time; the oldest admission is dropped first. */
 const MAX_ADMITTED_LANE_SOURCES = 512;
 
@@ -270,11 +317,23 @@ const POLICY_BLOCKED_HISTORY_READER: TranscriptSourceReader = {
 	coverage: () => undefined,
 };
 
-function boundPreCompressMemory(text: string): string {
-	const trimmed = text.trim();
-	if (trimmed.length <= MAX_PRE_COMPRESS_MEMORY_CHARS) return trimmed;
-	const suffix = "\n...[memory handoff truncated]";
-	return `${trimmed.slice(0, MAX_PRE_COMPRESS_MEMORY_CHARS - suffix.length).trimEnd()}${suffix}`;
+/** The pre-compression handoff: each provider's insight is a whole record; one that does not fit is left out and counted. */
+function boundPreCompressMemory(insights: readonly string[]): string {
+	const candidates = insights.flatMap((insight, index): MemoryTierCandidate[] => {
+		const text = insight.trim();
+		if (text.length === 0) return [];
+		const firstLine = text.split("\n", 1)[0] ?? text;
+		return [
+			{
+				id: String(index).padStart(4, "0"),
+				tier: "long_term",
+				sourceLabel: "memory:pre-compress",
+				summary: text,
+				pointerSummary: `${firstLine} (rest omitted: over the handoff bound)`,
+			},
+		];
+	});
+	return composeCharBoundedMemoryRecords(candidates, MAX_PRE_COMPRESS_MEMORY_CHARS).text;
 }
 
 export interface MemoryControllerDeps {
@@ -320,7 +379,10 @@ export interface MemoryControllerDeps {
 	 * What the summary hierarchy needs from the session: the model registry, the isolated-completion
 	 * boundary, the usage ledger and the foreground activity signal. Absent in narrow hosts: no hierarchy.
 	 */
-	hierarchy?: Pick<TranscriptHierarchyHostDeps, "summarizer" | "isForegroundBusy" | "subscribeForegroundActivity"> & {
+	hierarchy?: Pick<
+		TranscriptHierarchyHostDeps,
+		"summarizer" | "isForegroundBusy" | "subscribeForegroundActivity" | "getAdmissionEngine"
+	> & {
 		/** The live branch position, so the frontier only ever describes the active ancestry. */
 		activeBranch: ActiveBranchView;
 	};
@@ -366,6 +428,8 @@ export class MemoryController {
 	private _admittedRecall: { text: string; query: string } | undefined;
 	/** The latest user turn's retrieval, reused by the turn's later requests (see `runMemoryRetrieval`). */
 	private _turnRetrieval: TurnRetrieval | undefined;
+	/** The retrieval policy each report was produced under, so a plan built from it can tell it went stale. */
+	private readonly _reportPolicy = new WeakMap<MemoryRetrievalReport, string>();
 	/** Transcript items the latest query pass admitted into the prompt block (diagnostics). */
 	private _latestTranscriptAdmittedCount = 0;
 	/** Plug-and-play memory subsystem. Recreated on each (re)initialize so reload is safe. */
@@ -430,6 +494,7 @@ export class MemoryController {
 				hierarchy: false,
 				summaryModel: undefined,
 				allowExternalSummaryEgress: false,
+				allowExternalAdmissionEgress: false,
 				maxConcurrentSummaries: 1,
 				frontierMaxBytes: 0,
 				retentionDays: undefined,
@@ -489,7 +554,7 @@ export class MemoryController {
 	}
 
 	/** Bind extension projection to one memory generation; never mutate durable history. */
-	createContextProjection(getRunner: () => import("./extensions/index.ts").ExtensionRunner) {
+	createContextProjection(getRunner: () => ExtensionRunner) {
 		return async (messages: AgentMessage[]) => {
 			const runner = getRunner();
 			const generation = this._memoryGeneration;
@@ -689,11 +754,14 @@ export class MemoryController {
 		const generation = this._memoryGeneration;
 		let queriedLongTerm = false;
 		let queriedTranscript = false;
+		let policy: string | undefined;
 		try {
 			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+			policy = this._retrievalPolicyKey();
 			if (!settings.enabled) {
 				this._lastLongTermQueryAttempted = false;
 				const report = emptyMemoryRetrievalReport(settings.maxResults);
+				this._reportPolicy.set(report, policy);
 				this._latestMemoryRetrievalReport = report;
 				return report;
 			}
@@ -702,14 +770,14 @@ export class MemoryController {
 			const turnKey = latestUserTurnKey(messages, query);
 			// Later requests of a turn (tool loops) are not user-turn requests, so they query no
 			// long-term or history provider. They present the turn's own evidence instead: reused as is
-			// while memory is unchanged, retrieved again with the turn's decisions when it changed. A new
-			// user turn decides and queries afresh.
+			// while memory and the retrieval policy are unchanged, retrieved again with the turn's decisions
+			// when either changed. A new user turn decides and queries afresh.
 			const turn = this._turnRetrieval;
 			const carried =
 				!userTurn && turnKey !== "" && turn?.turnKey === turnKey && turn.generation === generation
 					? turn
 					: undefined;
-			if (carried && carried.revision === this._memoryContentRevision) {
+			if (carried && carried.revision === this._memoryContentRevision && carried.policy === policy) {
 				queriedLongTerm = carried.queriedLongTerm;
 				queriedTranscript = carried.queriedTranscript;
 				this._lastLongTermQueryAttempted = queriedLongTerm || queriedTranscript;
@@ -770,11 +838,13 @@ export class MemoryController {
 			) {
 				this._latestMemoryRetrievalReport = report;
 			}
+			this._reportPolicy.set(report, policy);
 			if (turnKey !== "" && (userTurn || carried)) {
 				this._turnRetrieval = {
 					turnKey,
 					generation,
 					revision,
+					policy,
 					queriedLongTerm,
 					queriedTranscript,
 					report,
@@ -786,6 +856,8 @@ export class MemoryController {
 				return emptyMemoryRetrievalReport(0);
 			this._lastLongTermQueryAttempted = queriedLongTerm || queriedTranscript;
 			const report = emptyMemoryRetrievalReport(0);
+			// A failed retrieval is still a report produced under the policy in force: a plan built on it goes stale with it.
+			if (policy !== undefined) this._reportPolicy.set(report, policy);
 			if (queriedLongTerm || queriedTranscript || this._latestMemoryRetrievalReport === undefined) {
 				this._latestMemoryRetrievalReport = report;
 			}
@@ -796,6 +868,22 @@ export class MemoryController {
 	/** Read-only inspection of the latest memory-retrieval report, for tests/debugging. */
 	getMemoryRetrievalReport(): MemoryRetrievalReport {
 		return this._latestMemoryRetrievalReport ?? emptyMemoryRetrievalReport(0);
+	}
+
+	/**
+	 * Everything besides the memory content revision that decides what a retrieval may return: the retrieval
+	 * settings and the providers extensions contributed. A report or plan produced under another policy is
+	 * not current, whatever the content revision says.
+	 */
+	private _retrievalPolicyKey(): string {
+		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+		return JSON.stringify([
+			settings.enabled,
+			settings.maxResults,
+			settings.includeInPrompt,
+			settings.allowExternalEgress,
+			this._pendingContextMemoryProviders.map((provider) => [provider.id, provider.capabilities.localOnly]),
+		]);
 	}
 
 	private _candidateForContextItem(
@@ -996,7 +1084,8 @@ export class MemoryController {
 		const headroom = this.deps.getPromptHeadroom?.(messages);
 		const queryPass = this._lastLongTermQueryAttempted;
 		const hasInclusionReport = this._latestMemoryPromptInclusionReport !== undefined;
-		// The live branch at preview: a plan captured before a branch switch or a new compaction is replanned.
+		const reportPolicy = this._reportPolicy.get(report);
+		// The live branch's retention at preview: a plan captured before a branch switch or a new compaction is replanned.
 		const branch = this._activeBranch?.snapshot();
 		const compose = () => {
 			// One allowance: the frontier takes its share first (it is the stable record), the evidence block
@@ -1015,13 +1104,10 @@ export class MemoryController {
 			isCurrent: () => {
 				if (!this._legacyMemoryEnabled() || generation !== this._memoryGeneration) return false;
 				if (revision !== this._memoryContentRevision) return false;
-				const liveBranch = this._activeBranch?.snapshot();
-				if (
-					liveBranch?.epoch !== branch?.epoch ||
-					liveBranch?.compaction?.entryId !== branch?.compaction?.entryId
-				) {
-					return false;
-				}
+				// A report retrieved under another policy (egress, result cap, contributed providers) is stale.
+				if (reportPolicy !== undefined && reportPolicy !== this._retrievalPolicyKey()) return false;
+				// A view prepared under another branch epoch or retention (a new compaction) is replanned.
+				if (this._activeBranch?.snapshot().retentionRevision !== branch?.retentionRevision) return false;
 				const current = compose();
 				return sameHostRecords(
 					[...current.frontier.records, ...current.evidence.records, ...current.persona],
@@ -1055,31 +1141,26 @@ export class MemoryController {
 	}
 
 	/**
-	 * The live branch as a frontier fence: the first entry the live context keeps after the latest
-	 * compaction on the ACTIVE ancestry, or the reason there is none. The frontier describes only history
-	 * compacted away on this branch.
+	 * The live branch as a frontier fence: per source entry, whether the live context still shows it after the
+	 * latest compaction on the ACTIVE ancestry (a kept tail, `original-user` retention and carried records all
+	 * stay visible), or the reason there is no compaction. The frontier describes only history compacted away
+	 * on this branch.
 	 */
 	private _frontierFence(): { fence: FrontierBranchFence } | { state: TranscriptFrontierState } {
-		const branch = this._activeBranch;
-		const compaction = branch?.snapshot().compaction;
-		if (branch === undefined || compaction === undefined) return { state: "not_compacted" };
-		const firstKept = compaction.firstKeptEntryId;
-		return {
-			fence: {
-				firstKeptEntryId: firstKept,
-				isCompactedAway: (entryId) => branch.isStrictAncestor(entryId, firstKept),
-				isInLiveContext: (entryId) => branch.isAncestorOrSelf(firstKept, entryId),
-			},
-		};
+		const retention = this._activeBranch?.retention();
+		if (retention === undefined) return { state: "not_compacted" };
+		return { fence: { standing: (entryId) => retention.standing(entryId) } };
 	}
 
 	/**
 	 * The current session's history frontier as one `transcript_frontier` host record, drawn from the same
-	 * headroom-derived allowance as the evidence block: at most half of it, further capped by
-	 * `frontierMaxBytes`, wrapper bytes charged. It describes only history compacted away on the live branch
-	 * (the nodes entirely above the latest compaction's first kept entry on the active ancestry); spans still
-	 * in context are not re-sent, and a frontier whose entries are off the live branch (after a branch
-	 * switch) is reported as `lineage_mismatch` and never shown. It never rewrites a sent record: the
+	 * headroom-derived allowance as the evidence block: at most half of it in bytes AND in estimated tokens (the
+	 * byte ceiling alone would let it spend every token and starve the evidence block), further capped by
+	 * `frontierMaxBytes`, wrapper bytes charged. It describes only history compacted away on the live branch:
+	 * what the live context still shows verbatim after the latest compaction (a kept tail, `original-user`
+	 * retention, carried records) is not re-sent, and a mixed node keeps its compacted-away evidence reachable
+	 * by pointer. A frontier whose entries are off the live branch (after a branch switch) is reported as
+	 * `lineage_mismatch` and never shown. It never rewrites a sent record: the
 	 * planner appends a new record only when the content changes and clears the old one in place. When
 	 * there is nothing to show the record is the cleared form, which the planner appends only over an
 	 * earlier frontier record. A frontier that changes after preview makes the plan not current, so the
@@ -1104,7 +1185,7 @@ export class MemoryController {
 			if ("state" in fenced) return cleared(fenced.state);
 			const budget = this._memoryBudget(settings.maxResults, headroom);
 			if (!budget.enabled || budget.maxBytes === undefined) return cleared("no_room");
-			const allowance = Math.floor(budget.maxBytes / 2) - HISTORY_FRONTIER_WRAPPER_BYTES;
+			const allowance = memoryShareAllowanceBytes(budget, 0.5) - HISTORY_FRONTIER_WRAPPER_BYTES;
 			if (allowance <= 0) return cleared("no_room");
 			const preview = host.previewFrontier(allowance, fenced.fence);
 			if (preview.state !== "shown") return cleared(preview.state);
@@ -1235,6 +1316,14 @@ export class MemoryController {
 			availability,
 			...(health?.state === "failed" && health.reason !== undefined ? { unavailableReason: health.reason } : {}),
 			...(coverage ? { coverage } : {}),
+			...(health && (health.stoppedAt !== undefined || health.readTimeouts !== undefined)
+				? {
+						transport: {
+							...(health.stoppedAt !== undefined ? { stoppedAt: health.stoppedAt } : {}),
+							...(health.readTimeouts !== undefined ? { readTimeouts: health.readTimeouts } : {}),
+						},
+					}
+				: {}),
 			...(report && providerReport
 				? {
 						latestRetrieval: {
@@ -1296,16 +1385,21 @@ export class MemoryController {
 				projectRoot: project.root,
 				maxDocuments: 64,
 			}).entries;
-			const snapshot = entries
-				.map(({ path, parsed }) => {
-					const item = parsed.item;
-					return item === undefined
-						? ""
-						: `[OKF ${path}] ${item.title ?? "Untitled"}: ${item.summary}\n${item.content ?? ""}`;
-				})
-				.filter((entry) => entry.length > 0)
-				.join("\n\n")
-				.slice(0, 12_000);
+			const candidates = entries.flatMap(({ path, parsed }, index): MemoryTierCandidate[] => {
+				const item = parsed.item;
+				if (item === undefined) return [];
+				const heading = `[OKF ${path}] ${item.title ?? "Untitled"}: ${item.summary}`;
+				return [
+					{
+						id: String(index).padStart(4, "0"),
+						tier: "long_term",
+						sourceLabel: "memory:okf",
+						summary: `${heading}\n${item.content ?? ""}`,
+						pointerSummary: `${heading} (full document omitted: over the snapshot bound)`,
+					},
+				];
+			});
+			const snapshot = composeCharBoundedMemoryRecords(candidates, MAX_REFLECTION_OKF_CHARS).text;
 			return snapshot.length > 0 ? wrapUntrustedText(snapshot, "memory:reflection-okf") : "";
 		} catch {
 			return "";
@@ -1325,10 +1419,13 @@ export class MemoryController {
 	}
 
 	/**
-	 * One immutable delegated-memory snapshot. Equivalent concurrent reads share the exact promise and
-	 * object while completed reads are discarded, so a later call observes fresh external state.
+	 * One immutable delegated-memory snapshot, sized against the RECEIVING lane (`capacity`): its own window, the
+	 * request it already carries, the reply room it keeps and the tokens it may still spend, never the root
+	 * model's. Equivalent concurrent reads (same memory state, retrieval policy, lane request and allowance) share
+	 * the exact promise and object while completed reads are discarded, so a later call observes fresh external
+	 * state. A lane whose capacity is unknown or exhausted gets a stated constraint, never an assumption of room.
 	 */
-	readMemorySnapshotForLane(query: string): Promise<LaneMemoryReadSnapshot> {
+	readMemorySnapshotForLane(query: string, capacity: LaneMemoryCapacitySource): Promise<LaneMemoryReadSnapshot> {
 		const generation = this._memoryGeneration;
 		const revision = this._memoryContentRevision;
 		if (!this._legacyMemoryEnabled()) {
@@ -1347,19 +1444,37 @@ export class MemoryController {
 			);
 		}
 		const normalizedQuery = query.trim();
-		const budget = this._memoryBudget(settings.maxResults);
-		const maxResults = Math.min(3, settings.maxResults);
+		const lane = capacity();
+		const budget = this._laneMemoryBudget(settings.maxResults, lane);
+		if (!budget.enabled) {
+			return Promise.resolve(
+				this._laneMemorySnapshot(generation, revision, laneConstraintText(budget.reason, lane !== undefined)),
+			);
+		}
+		const maxResults = Math.min(3, budget.maxResults);
 		const turnIndex = this.deps.getTurnIndex();
-		const key = JSON.stringify([generation, revision, turnIndex, normalizedQuery, maxResults, budget]);
+		const policy = this._retrievalPolicyKey();
+		const key = JSON.stringify([
+			generation,
+			revision,
+			policy,
+			turnIndex,
+			normalizedQuery,
+			maxResults,
+			budget,
+			lane?.revision,
+		]);
 		const active = this._laneMemoryReads.get(key);
 		if (active) return active;
 		const loading = this._loadLaneMemorySnapshot({
 			generation,
 			revision,
+			policy,
 			query: normalizedQuery,
 			maxResults,
 			turnIndex,
 			budget,
+			capacity,
 			lifecycleTail: this._lifecycleTail,
 		});
 		this._laneMemoryReads.set(key, loading);
@@ -1371,12 +1486,30 @@ export class MemoryController {
 		return loading;
 	}
 
+	/** The allowance a delegated lane's read may fill, resolved by the one budget owner on the lane's own request. */
+	private _laneMemoryBudget(configuredMaxResults: number, lane: LaneMemoryCapacity | undefined): MemoryPromptBudget {
+		return resolveMemoryPromptBudget({
+			contextWindow: lane?.contextWindow,
+			configuredMaxResults,
+			ceilingTokens: LANE_READ_MAX_ESTIMATED_TOKENS,
+			...(lane
+				? {
+						currentPromptTokens: lane.currentPromptTokens,
+						reservedTokens: lane.reservedTokens,
+						...(lane.remainingTokenAllowance !== undefined
+							? { remainingTokenAllowance: lane.remainingTokenAllowance }
+							: {}),
+					}
+				: {}),
+		});
+	}
+
 	/**
 	 * One delegated lane's read-only memory port. Its snapshot reads record which transcript sources the
 	 * lane was actually shown (admission is per broker, so another lane's handles never carry over), and
 	 * `readSource` opens only those, inside the memory generation that issued them.
 	 */
-	createLaneMemoryBroker(): WorkerMemoryBroker {
+	createLaneMemoryBroker(capacity: LaneMemoryCapacitySource): WorkerMemoryBroker {
 		const admitted = new Map<string, number>();
 		const admit = (handle: string, generation: number): void => {
 			admitted.delete(handle);
@@ -1387,7 +1520,7 @@ export class MemoryController {
 		};
 		return {
 			read: async (query) => {
-				const snapshot = await this.readMemorySnapshotForLane(query);
+				const snapshot = await this.readMemorySnapshotForLane(query, capacity);
 				for (const handle of [
 					...extractTranscriptSourceHandles(snapshot.content, this._projectId()),
 					...extractTranscriptNodeHandles(snapshot.content),
@@ -1474,26 +1607,64 @@ export class MemoryController {
 		this._transcriptRecall = undefined;
 	}
 
+	/** Whether a delegated read planned against `input` still describes the memory, policy and lane it will serve. */
+	private _laneReadCurrent(input: {
+		generation: number;
+		revision: number;
+		policy: string;
+		budget: MemoryPromptBudget;
+		capacity: LaneMemoryCapacitySource;
+	}): boolean {
+		if (
+			!this._legacyMemoryEnabled() ||
+			input.generation !== this._memoryGeneration ||
+			input.revision !== this._memoryContentRevision ||
+			input.policy !== this._retrievalPolicyKey()
+		) {
+			return false;
+		}
+		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+		return isDeepStrictEqual(this._laneMemoryBudget(settings.maxResults, input.capacity()), input.budget);
+	}
+
+	/** A delegated lane's search hit as a composer candidate; OKF documents also carry a whole pointer form. */
+	private _laneCandidate(result: MemorySearchResult, tier: MemoryTierCandidate["tier"]): MemoryTierCandidate {
+		const { item } = result;
+		const heading = `[OKF ${item.title ?? item.id}] ${item.summary}`;
+		const okf = tier !== "evidence_pointer";
+		return {
+			id: item.id,
+			tier,
+			sourceLabel: `memory:${item.providerId}`,
+			summary: okf ? `${heading}\n${item.content ?? ""}` : item.summary,
+			...(okf ? { pointerSummary: `${heading} (full document omitted: over this worker's remaining room)` } : {}),
+			score: result.score,
+			...(item.stale !== undefined ? { stale: item.stale } : {}),
+			...(item.conflict !== undefined ? { conflict: item.conflict } : {}),
+		};
+	}
+
+	/**
+	 * One delegated lane's snapshot, admitted as whole source-labelled records into the ONE allowance resolved
+	 * on the receiving lane: the wrapper, the status and omission lines, standing memory (at most half), the
+	 * history frontier (at most half of the rest) and then the query-relevant records, ranked and fitted by the
+	 * tier composer. Nothing is cut: a record that does not fit is left out (an OKF document may appear as its
+	 * whole pointer form) and the omission is stated, so a `tx:`/`txn:` handle is never split. Lines are bounded
+	 * per block, so stacked blocks can pass `maxLines` in total while bytes and tokens stay inside the allowance.
+	 */
 	private async _loadLaneMemorySnapshot(input: {
 		generation: number;
 		revision: number;
+		policy: string;
 		query: string;
 		maxResults: number;
 		turnIndex: number;
 		budget: MemoryPromptBudget;
+		capacity: LaneMemoryCapacitySource;
 		lifecycleTail: Promise<void>;
 	}): Promise<LaneMemoryReadSnapshot> {
 		await input.lifecycleTail;
-		if (
-			!this._legacyMemoryEnabled() ||
-			input.generation !== this._memoryGeneration ||
-			input.revision !== this._memoryContentRevision
-		) {
-			throw new LaneMemorySnapshotStaleError();
-		}
-		const staticBlock = this._memoryManager
-			.buildSystemPromptBlockFresh(input.budget)
-			.replace(FILE_STORE_MEMORY_SYSTEM_NOTE, "[Read-only snapshot for a delegated worker.]");
+		if (!this._laneReadCurrent(input)) throw new LaneMemorySnapshotStaleError();
 		const retrievalOptions = {
 			createdAtTurn: input.turnIndex,
 			maxResults: input.maxResults,
@@ -1512,32 +1683,95 @@ export class MemoryController {
 				retrievalOptions,
 			),
 		]);
-		if (
-			!this._legacyMemoryEnabled() ||
-			input.generation !== this._memoryGeneration ||
-			input.revision !== this._memoryContentRevision
-		) {
-			throw new LaneMemorySnapshotStaleError();
+		if (!this._laneReadCurrent(input)) throw new LaneMemorySnapshotStaleError();
+
+		const candidates: MemoryTierCandidate[] = [
+			...okfReport.results.map((result) => this._laneCandidate(result, "long_term")),
+			...historyReport.results.map((result) => this._laneCandidate(result, "evidence_pointer")),
+		];
+		const lifecycleText = lifecycleRecall.trim();
+		if (lifecycleText.length > 0) {
+			candidates.push({
+				id: "lifecycle-recall",
+				tier: "long_term",
+				sourceLabel: "memory:lifecycle",
+				summary: lifecycleText,
+				score: 0.5,
+			});
 		}
-		const okf = okfReport.results
-			.map(({ item }) => `[OKF ${item.title ?? item.id}] ${item.summary}\n${item.content ?? ""}`)
-			.join("\n\n");
+		const status = laneHistoryStatus(historyReport);
+		const hasHistoryCandidates = candidates.some((candidate) => candidate.sourceLabel === TRANSCRIPT_SOURCE_LABEL);
+		const constrained = (reason: string | undefined) =>
+			this._laneMemorySnapshot(input.generation, input.revision, laneConstraintText(reason, true));
+		// Reserved before any record competes: the wrapper and the short lines that state what is missing.
+		let remaining = reserveMemoryPromptBudget(input.budget, {
+			bytes: utf8ByteLength(LANE_WRAPPER),
+			estimatedTokens: estimateTokensFromText(LANE_WRAPPER),
+			lines: 2,
+		});
+		const worstOmissionNote = laneOmissionNote(["standing memory", `${candidates.length} retrieved record(s)`]);
+		for (const text of [status, hasHistoryCandidates ? LANE_HANDLE_HINT : "", worstOmissionNote]) {
+			if (text.length > 0) remaining = reserveMemoryPromptBudget(remaining, laneRecordReserve(text));
+		}
+		if (!remaining.enabled) return constrained(remaining.reason);
+
+		const omitted: string[] = [];
+		// Standing memory takes at most half of the allowance, and only as the whole block the provider fitted.
+		const standingBudget = shareOfMemoryPromptBudget(remaining, LANE_STANDING_BUDGET_SHARE);
+		const standingRaw = this._memoryManager
+			.buildSystemPromptBlockFresh(standingBudget.enabled ? standingBudget : remaining)
+			.replace(FILE_STORE_MEMORY_SYSTEM_NOTE, LANE_STANDING_NOTE)
+			.trim();
+		const standingText =
+			standingBudget.enabled && memoryTextFitsBudget(standingRaw, standingBudget) ? standingRaw : "";
+		if (standingRaw.length > 0 && standingText.length === 0) omitted.push("standing memory");
+		if (standingText.length > 0) remaining = reserveMemoryPromptBudget(remaining, laneRecordReserve(standingText));
+
+		// The frontier takes at most half of what is left, in whole node records (bytes and tokens, as at the root).
+		let frontierText = "";
 		const fenced = this._frontierFence();
-		const frontier =
-			this._hierarchy && "fence" in fenced
-				? this._hierarchy.previewFrontier(LANE_FRONTIER_BYTES, fenced.fence)
-				: undefined;
-		const frontierText =
-			frontier?.state === "shown"
-				? `History frontier (summaries of earlier conversation; pass a txn: handle as ref to expand one):\n${frontier.text}`
-				: "";
-		const combined = [staticBlock, frontierText, okf, lifecycleRecall, renderLaneHistory(historyReport)]
-			.filter((part) => part.trim().length > 0)
-			.join("\n\n")
-			.slice(0, 8000);
-		const content =
-			combined.length > 0 ? wrapUntrustedText(combined, "worker-memory") : "No relevant standing memory was found.";
-		return this._laneMemorySnapshot(input.generation, input.revision, content);
+		if (this._hierarchy && "fence" in fenced && remaining.enabled) {
+			const allowance =
+				memoryShareAllowanceBytes(remaining, LANE_FRONTIER_BUDGET_SHARE) -
+				utf8ByteLength(LANE_FRONTIER_HEADING) -
+				utf8ByteLength(LANE_RECORD_SEPARATOR) -
+				1;
+			if (allowance > 0) {
+				const preview = this._hierarchy.previewFrontier(allowance, fenced.fence, "lane");
+				if (preview.state === "shown") frontierText = [LANE_FRONTIER_HEADING, preview.text].join("\n");
+			}
+			if (frontierText.length > 0) {
+				remaining = reserveMemoryPromptBudget(remaining, { ...laneRecordReserve(frontierText), lines: 0 });
+			}
+		}
+
+		const block = composeTieredMemoryPromptBlock(candidates, remaining);
+		const admitted = new Set(block.includedIds);
+		const transcriptAdmitted = candidates.some(
+			(candidate) => admitted.has(candidate.id) && candidate.sourceLabel === TRANSCRIPT_SOURCE_LABEL,
+		);
+		// Stale, conflicting and secret-like records are policy exclusions; only records that did not fit are stated.
+		const notFitting = remaining.enabled
+			? block.diagnostics.filter(({ reason }) => reason === "budget_exhausted" || reason === "oversized_item").length
+			: candidates.length;
+		if (notFitting > 0) omitted.push(`${notFitting} retrieved record(s)`);
+		const parts = [
+			standingText,
+			frontierText,
+			block.text ?? "",
+			status,
+			transcriptAdmitted ? LANE_HANDLE_HINT : "",
+			omitted.length > 0 ? laneOmissionNote(omitted) : "",
+		].filter((part) => part.length > 0);
+		if (parts.length === 0) return this._laneMemorySnapshot(input.generation, input.revision, LANE_NO_MEMORY_TEXT);
+		const combined = parts.join(LANE_RECORD_SEPARATOR);
+		// The boundary id is a function of the content, so an unchanged snapshot is byte-identical.
+		const nonce = createHash("sha256").update(combined).digest("hex").slice(0, 32);
+		return this._laneMemorySnapshot(
+			input.generation,
+			input.revision,
+			wrapUntrustedText(combined, "worker-memory", { nonce }),
+		);
 	}
 
 	private _laneMemorySnapshot(
