@@ -21,6 +21,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { type AgentMessage, createCustomMessage, HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
+import type { SessionEntriesPersistedEvent } from "../kernel/session/session-manager.ts";
 import { configFile, okfMemoryDir, projectMemoryDir } from "./agent-paths.ts";
 import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
 import { createFileStoreMemoryProvider } from "./context/file-store-memory-provider.ts";
@@ -57,10 +58,17 @@ import {
 } from "./memory/providers/file-store.ts";
 import { IcmProvider } from "./memory/providers/icm.ts";
 import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
+import {
+	formatTranscriptSourceHandle,
+	parseTranscriptSourceHandle,
+	type TranscriptSourceReader,
+} from "./memory/transcript-memory-contracts.ts";
+import { extractTranscriptSourceHandles, openTranscriptSource } from "./memory/transcript-source-tools.ts";
 import type {
 	UserPreferenceAdmissionRequest,
 	UserPreferenceAdmissionResult,
 } from "./memory/user-preference-metadata.ts";
+import type { WorkerMemoryBroker } from "./memory/worker-memory-tools.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { getDirectoryResourceProfileInfo, isValidMemorySystem } from "./settings/settings-rules.ts";
 import type { MemorySystem, SettingsError, SettingsScope } from "./settings/settings-schema.ts";
@@ -120,6 +128,15 @@ const ENABLED_EXTERNAL_MEMORY_EGRESS_POLICY = {
 } as const;
 
 const MAX_PRE_COMPRESS_MEMORY_CHARS = 4_000;
+/** Transcript sources one delegated lane may hold open at a time; the oldest admission is dropped first. */
+const MAX_ADMITTED_LANE_SOURCES = 512;
+
+/** History reads under disabled memory retrieval: a typed policy refusal, never an empty success. */
+const POLICY_BLOCKED_HISTORY_READER: TranscriptSourceReader = {
+	search: async () => ({ status: "forbidden", reason: "Memory retrieval is disabled by policy." }),
+	readSource: async () => ({ status: "forbidden", reason: "Memory retrieval is disabled by policy." }),
+	coverage: () => undefined,
+};
 
 function boundPreCompressMemory(text: string): string {
 	const trimmed = text.trim();
@@ -156,6 +173,12 @@ export interface MemoryControllerDeps {
 	 * gate, audit). Absent only in narrow hosts; the file-store then labels writes unverified.
 	 */
 	admitUserPreference?(request: UserPreferenceAdmissionRequest): Promise<UserPreferenceAdmissionResult>;
+	/**
+	 * Durable-publication events of this session's entries, for incremental history ingestion. The
+	 * returned function unsubscribes. Absent in narrow hosts: recall then covers only what it indexed
+	 * at initialization.
+	 */
+	subscribeEntriesPersisted?(listener: (event: SessionEntriesPersistedEvent) => void): () => void;
 }
 
 /** Extension-contributed memory state staged across an atomic runtime reload. */
@@ -195,6 +218,9 @@ export class MemoryController {
 	private _memoryManager: MemoryManager = new MemoryManager();
 	/** Active generation's single durable file/OKF writer, also used by parent-owned reflection. */
 	private _fileStoreWriter: FileStoreProvider | undefined;
+	/** Active generation's transcript recall provider: the one backend for history search and source reads. */
+	private _transcriptRecall: TranscriptRecallProvider | undefined;
+	private _unsubscribeEntriesPersisted: (() => void) | undefined;
 	/** R4: tracks whether injected recall is actually used, to adapt the recall gate. */
 	private readonly _effectivenessTracker = new EffectivenessTracker();
 	/** Memory providers registered by extensions via pi.registerMemoryProvider, applied on (re)init. */
@@ -358,6 +384,7 @@ export class MemoryController {
 			const legacy = this._legacyMemoryEnabled();
 			this._memoryGeneration++;
 			this._fileStoreWriter = undefined;
+			this._releaseTranscriptRecall();
 			this._activeMemorySystem = undefined;
 			this._transitioning = true;
 			await this._lifecycleTail;
@@ -541,7 +568,9 @@ export class MemoryController {
 			tier,
 			sourceLabel,
 			summary,
-			score: 0.5,
+			score: item.retrievalScore ?? 0.5,
+			...(item.stale !== undefined ? { stale: item.stale } : {}),
+			...(item.conflict !== undefined ? { conflict: item.conflict } : {}),
 			evidenceRefs: item.evidenceRefs,
 		};
 	}
@@ -899,9 +928,80 @@ export class MemoryController {
 		return loading;
 	}
 
-	/** Bounded, read-only memory view for an explicitly authorized delegated worker. */
-	readMemoryForLane(query: string): Promise<string> {
-		return this.readMemorySnapshotForLane(query).then((snapshot) => snapshot.content);
+	/**
+	 * One delegated lane's read-only memory port. Its snapshot reads record which transcript sources the
+	 * lane was actually shown (admission is per broker, so another lane's handles never carry over), and
+	 * `readSource` opens only those, inside the memory generation that issued them.
+	 */
+	createLaneMemoryBroker(): WorkerMemoryBroker {
+		const admitted = new Map<string, number>();
+		const admit = (handle: string, generation: number): void => {
+			admitted.delete(handle);
+			admitted.set(handle, generation);
+			if (admitted.size <= MAX_ADMITTED_LANE_SOURCES) return;
+			const oldest = admitted.keys().next().value;
+			if (oldest !== undefined) admitted.delete(oldest);
+		};
+		return {
+			read: async (query) => {
+				const snapshot = await this.readMemorySnapshotForLane(query);
+				for (const handle of extractTranscriptSourceHandles(snapshot.content, this._projectId())) {
+					admit(handle, snapshot.sourceGeneration);
+				}
+				return snapshot.content;
+			},
+			readSource: async (ref, cursor) => {
+				const projectId = this._projectId();
+				const parsed = parseTranscriptSourceHandle(ref, projectId);
+				if (parsed === undefined) {
+					throw new Error(
+						"memory_source_invalid: ref is not a valid transcript source handle (expected tx:<session>:<entry>:<part>:<digest>).",
+					);
+				}
+				const handle = formatTranscriptSourceHandle(parsed);
+				const generation = admitted.get(handle);
+				if (generation === undefined) {
+					throw new Error(
+						"memory_source_forbidden: this source was not cited to this worker by a memory_read result; run memory_read with a query that surfaces it.",
+					);
+				}
+				if (generation !== this._memoryGeneration || !this._legacyMemoryEnabled()) {
+					throw new LaneMemorySnapshotStaleError();
+				}
+				const outcome = await openTranscriptSource(this._currentTranscriptReader(generation), projectId, {
+					ref: handle,
+					cursor,
+				});
+				if (generation !== this._memoryGeneration) throw new LaneMemorySnapshotStaleError();
+				if (!outcome.ok) throw new Error(`memory_source_${outcome.status}: ${outcome.reason}`);
+				// A continuation of an admitted source is part of what the lane was shown.
+				const nextPartHandle = outcome.details.nextPartHandle;
+				if (typeof nextPartHandle === "string") admit(nextPartHandle, generation);
+				return outcome.text;
+			},
+		};
+	}
+
+	/** The project identity transcript handles are scoped to; the same key the project memory files use. */
+	private _projectId(): string {
+		return getDirectoryResourceProfileInfo(this.deps.getCwd(), this.deps.getAgentDir()).hash;
+	}
+
+	/**
+	 * The history reader for one memory generation. A replaced generation, offline legacy memory or an
+	 * ICM session has none; disabled retrieval answers with a typed policy refusal instead of silence.
+	 */
+	private _currentTranscriptReader(generation: number): TranscriptSourceReader | undefined {
+		if (generation !== this._memoryGeneration || !this._legacyMemoryEnabled()) return undefined;
+		if (!this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled) return POLICY_BLOCKED_HISTORY_READER;
+		return this._transcriptRecall;
+	}
+
+	/** Drop the active generation's recall backend and its persistence subscription. */
+	private _releaseTranscriptRecall(): void {
+		this._unsubscribeEntriesPersisted?.();
+		this._unsubscribeEntriesPersisted = undefined;
+		this._transcriptRecall = undefined;
 	}
 
 	private async _loadLaneMemorySnapshot(input: {
@@ -1007,6 +1107,7 @@ export class MemoryController {
 		this._memoryManager = manager;
 		this._activeMemorySystem = undefined;
 		this._fileStoreWriter = undefined;
+		this._releaseTranscriptRecall();
 		this._transitioning = true;
 		this._initializationFailed = false;
 		this._shutdownPromise = undefined;
@@ -1030,6 +1131,7 @@ export class MemoryController {
 					await previous.shutdownAll();
 					if (generation !== this._memoryGeneration) return;
 					let writer: FileStoreProvider | undefined;
+					let transcriptRecall: TranscriptRecallProvider | undefined;
 					if (system === "icm") {
 						manager.registerProvider(new IcmProvider());
 					} else {
@@ -1040,9 +1142,18 @@ export class MemoryController {
 								this._memoryOkfProvider = undefined;
 							},
 							...(admitUserPreference ? { admitUserPreference: (request) => admitUserPreference(request) } : {}),
+							transcriptReader: () => this._currentTranscriptReader(generation),
+							projectId: () => this._projectId(),
 						});
 						manager.registerProvider(writer);
-						manager.registerProvider(new TranscriptRecallProvider());
+						const recall = new TranscriptRecallProvider();
+						transcriptRecall = recall;
+						manager.registerProvider(recall);
+						// Subscribed before initialization so no committed batch falls between the provider's
+						// initial scan and the first event; a stale generation's batches never reach it.
+						this._unsubscribeEntriesPersisted = this.deps.subscribeEntriesPersisted?.((event) => {
+							if (generation === this._memoryGeneration) recall.notifyEntriesPersisted(event);
+						});
 						for (const provider of this._pendingMemoryProviders) {
 							try {
 								manager.registerProvider(provider);
@@ -1067,6 +1178,7 @@ export class MemoryController {
 					}
 					this._activeMemorySystem = system;
 					this._fileStoreWriter = writer;
+					this._transcriptRecall = transcriptRecall;
 					if (writer) this._reportManagedNotices(writer);
 				} catch (error) {
 					await manager.shutdownAll().catch(() => {});
@@ -1074,6 +1186,7 @@ export class MemoryController {
 						this._memoryManager = new MemoryManager();
 						this._activeMemorySystem = undefined;
 						this._fileStoreWriter = undefined;
+						this._releaseTranscriptRecall();
 						this._initializationFailed = true;
 					}
 					console.error("Memory subsystem init failed:", error instanceof Error ? error.message : String(error));

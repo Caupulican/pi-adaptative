@@ -274,5 +274,8 @@ export function memorySearchResultToContextItem(result: MemorySearchResult, crea
 		evidenceRefs: contextEvidenceRefs(item.evidenceRefs),
 		tokenEstimate: estimateTokensFromText(summary),
 		byteEstimate: estimateByteLength(summary),
+		retrievalScore: result.score,
+		...(item.stale !== undefined ? { stale: item.stale } : {}),
+		...(item.conflict !== undefined ? { conflict: item.conflict } : {}),
 	};
 }

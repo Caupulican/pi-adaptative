@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+### Added
+
+- Exact source-linked history recall: the `memory` tool gains read-only `history_search` and `history_source` actions that return cited `tx:` source handles and open the exact captured text of past conversation entries (user, assistant, tool calls and tool results) with UTF-8-safe paging and typed unavailable statuses. Delegated workers can open sources cited to them through `memory_read`.
+- Session persistence publishes a post-commit signal (`SessionManager.onEntriesPersisted`); history recall ingests committed entries incrementally instead of only at startup.
+
+### Changed
+
+- Transcript recall indexes every eligible project session by canonical entry and selected branch lineage within an explicit 16 MiB budget, replacing the 60-file / 8,000-character prefix index; coverage reports skipped and uncaptured content by reason. Recall pages show the session and source handle of each hit.
+
+### Fixed
+
+- Retrieved memory candidates keep their retrieval score and stale/conflict flags instead of a fixed 0.5 score, so prompt admission applies its freshness rules.
+- The `memory` tool's `list` action is classified as a read (`memory.query`) instead of a mutation.
+
 ## [0.103.7] - 2026-10-09
 
 ### Added

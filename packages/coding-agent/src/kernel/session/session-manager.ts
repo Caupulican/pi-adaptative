@@ -203,6 +203,20 @@ export interface SessionInfo {
 	allMessagesText: string;
 }
 
+/**
+ * A batch of entries that reached durable session storage. Emitted only after the physical write
+ * returned; entries buffered before the first reply are announced together with the flush that
+ * persisted them. `rewritten` marks a whole-file rewrite: earlier byte offsets are no longer valid.
+ */
+export interface SessionEntriesPersistedEvent {
+	sessionId: string;
+	sessionFile: string;
+	entryIds: readonly string[];
+	rewritten: boolean;
+}
+
+export type SessionEntriesPersistedListener = (event: SessionEntriesPersistedEvent) => void;
+
 export type ReadonlySessionManager = Pick<
 	SessionManager,
 	| "getCwd"
@@ -221,6 +235,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntryCount"
 	| "visitEntries"
 	| "readEntryJsonPrefix"
+	| "onEntriesPersisted"
 	| "getTree"
 	| "getSessionName"
 	| "getSessionLifecycleIndex"
@@ -1299,6 +1314,7 @@ export class SessionManager {
 	private branchCustomEntriesCache: BranchCustomEntriesCache | undefined;
 	private persistenceStateUncertain = false;
 	private inheritedSessionIds = new Set<string>();
+	private readonly entriesPersistedListeners = new Set<SessionEntriesPersistedListener>();
 
 	private constructor(
 		cwd: string,
@@ -1557,7 +1573,13 @@ export class SessionManager {
 			closeSync(fd);
 		}
 		renameSync(tempFile, targetFile);
-		if (targetFile === this.sessionFile) this._resetEntryFileIndex();
+		if (targetFile === this.sessionFile) {
+			this._resetEntryFileIndex();
+			this._emitEntriesPersisted(
+				this.fileEntries.flatMap((entry) => (entry.type === "session" ? [] : [entry.id])),
+				true,
+			);
+		}
 	}
 
 	isPersisted(): boolean {
@@ -1797,6 +1819,7 @@ export class SessionManager {
 		signal?.throwIfAborted();
 		if (!this.flushed && !shouldFlush) return;
 
+		const initialFlush = !this.flushed;
 		try {
 			if (!this.flushed) {
 				this._ensureSessionFileParent(this.sessionFile);
@@ -1817,6 +1840,34 @@ export class SessionManager {
 			// surviving canonical prefix.
 			this.persistenceStateUncertain = true;
 			throw error;
+		}
+		const persistedIds = initialFlush
+			? [...this.fileEntries, ...entries].flatMap((entry) => (entry.type === "session" ? [] : [entry.id]))
+			: entries.map((entry) => entry.id);
+		this._emitEntriesPersisted(persistedIds, false);
+	}
+
+	/**
+	 * Subscribe to durable persistence of committed entries. In-memory appends that have not reached
+	 * the session file are never announced; a failed or uncertain write announces nothing.
+	 */
+	onEntriesPersisted(listener: SessionEntriesPersistedListener): () => void {
+		this.entriesPersistedListeners.add(listener);
+		return () => {
+			this.entriesPersistedListeners.delete(listener);
+		};
+	}
+
+	private _emitEntriesPersisted(entryIds: readonly string[], rewritten: boolean): void {
+		const sessionFile = this.sessionFile;
+		if (!sessionFile || this.entriesPersistedListeners.size === 0) return;
+		const event: SessionEntriesPersistedEvent = { sessionId: this.sessionId, sessionFile, entryIds, rewritten };
+		for (const listener of this.entriesPersistedListeners) {
+			try {
+				listener(event);
+			} catch {
+				// A derived-index observer never fails the canonical write it observes.
+			}
 		}
 	}
 

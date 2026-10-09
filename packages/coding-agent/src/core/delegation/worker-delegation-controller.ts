@@ -55,6 +55,7 @@ import type {
 	HmoeWeights,
 } from "../expert-routing/vocabulary.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
+import type { WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
@@ -464,7 +465,8 @@ export interface WorkerDelegationControllerDeps {
 	 * worktree lane is judged against its own scope and not the process's.
 	 */
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest, options?: { cwd?: string }): string;
-	readMemoryForLane(query: string): Promise<string>;
+	/** A fresh read-only memory port for one lane; the handles it admits never reach another lane. */
+	createLaneMemoryBroker(): WorkerMemoryBroker;
 	/** Bounded applicable owner working preferences for a handoff, or undefined when there are none. */
 	getHandoffPersonaGuidance?(): string | undefined;
 	/** Session-owned artifact store broker; worker adapters receive fresh retrieval tools only. */
@@ -4455,7 +4457,7 @@ export class WorkerDelegationController {
 			...(executionContext ? { bindTool: (tool) => this.directories.bindTool(tool, executionContext) } : {}),
 			deniedPaths: executionPlan.deniedPaths,
 			writeProtectedPaths: getHarnessWriteProtectedPaths(executionPlan.cwd, this.deps.getAgentDir()),
-			readMemory: executionPlan.readMemory ? (query) => this.deps.readMemoryForLane(query) : undefined,
+			memoryBroker: executionPlan.readMemory ? this.deps.createLaneMemoryBroker() : undefined,
 			writeEnabled: executionPlan.writeEnabled,
 			writePaths: executionPlan.writePaths,
 			...(executionPlan.processEnabled && executionPolicy ? { executionPolicy } : {}),

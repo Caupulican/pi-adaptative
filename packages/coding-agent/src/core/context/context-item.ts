@@ -59,6 +59,14 @@ export interface ContextTranscriptRef {
 	sessionEntryId: string;
 	branchId?: string;
 	messageIndex?: number;
+	/** Project that owns the historical session when the entry comes from cross-session recall. */
+	projectId?: string;
+	/** Session that owns the historical entry when it is not the current session. */
+	sessionId?: string;
+	/** Part index within a multi-part historical entry. */
+	part?: number;
+	/** Content digest of the referenced historical entry, for integrity checks against drift. */
+	digest?: string;
 }
 
 export type ContextEvidenceRef =
@@ -84,6 +92,12 @@ export interface ContextItem {
 	invalidates?: string[];
 	pinReason?: string;
 	expiresAfterGoalId?: string;
+	/** Relevance score carried from the memory search result so prompt admission can rank items. */
+	retrievalScore?: number;
+	/** Set when the memory search result is flagged stale, so prompt admission can apply freshness. */
+	stale?: boolean;
+	/** Conflict description carried from the memory search result, when the item disagrees with another. */
+	conflict?: string;
 }
 
 export interface InvalidatedAssumptionItem {

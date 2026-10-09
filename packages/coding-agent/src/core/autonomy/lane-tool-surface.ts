@@ -7,7 +7,7 @@ import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { settleIndependentLifecycle } from "../lifecycle-settlement.ts";
-import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
+import { WORKER_MEMORY_READ_TOOL_NAME, type WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import { readOnlyShellViolation } from "../model-router/tool-escalation.ts";
 import {
 	CapabilityGateway,
@@ -95,12 +95,32 @@ const WRITE_LANE_TOOL_NAMES = ["write", "edit"] as const;
 const PYTHON_LANE_TOOL_NAME = "python" as const;
 const PROCESS_LANE_TOOL_NAME = "run_process" as const;
 const MAX_LANE_MEMORY_QUERY_CHARS = 4_096;
-const laneMemorySchema = Type.Object({
-	query: Type.String({
-		maxLength: MAX_LANE_MEMORY_QUERY_CHARS,
-		description: "What relevant standing memory or prior evidence to retrieve",
-	}),
+const MAX_LANE_MEMORY_REF_CHARS = 600;
+const laneMemoryFields = Type.Object({
+	query: Type.Optional(
+		Type.String({
+			maxLength: MAX_LANE_MEMORY_QUERY_CHARS,
+			description: "What relevant standing memory or prior evidence to retrieve",
+		}),
+	),
+	ref: Type.Optional(
+		Type.String({
+			minLength: 1,
+			maxLength: MAX_LANE_MEMORY_REF_CHARS,
+			description:
+				"A transcript source handle (tx:...) cited by an earlier memory_read result in this task; opens its exact text instead of searching",
+		}),
+	),
+	cursor: Type.Optional(
+		Type.Integer({ minimum: 0, description: "With ref: byte cursor from the previous page's continuation hint" }),
+	),
 });
+// Exactly one of query (search) or ref (open a cited source); the explicit object root and parent
+// properties stay for subscription-provider projection, as in the root memory tool.
+const laneMemorySchema = {
+	...laneMemoryFields,
+	anyOf: [Type.Object({ query: Type.String() }), Type.Object({ ref: Type.String() })],
+};
 type LaneMemoryParams = Static<typeof laneMemorySchema>;
 const WRITE_LANE_TOOL_NAME_SET = new Set<string>(WRITE_LANE_TOOL_NAMES);
 const PROCESS_TOOL_NAMES = new Set<string>([STABLE_SHELL_TOOL_NAME, PYTHON_LANE_TOOL_NAME, PROCESS_LANE_TOOL_NAME]);
@@ -144,8 +164,8 @@ export interface LaneToolSurfaceOptions {
 	 * so no mode and no explicit write scope can reach them.
 	 */
 	writeProtectedPaths?: readonly string[];
-	/** Orchestrator-requested, policy-filtered read-only memory retrieval. Omitted means no memory tool. */
-	readMemory?: (query: string) => Promise<string>;
+	/** Orchestrator-requested, policy-filtered read-only memory broker. Omitted means no memory tool. */
+	memoryBroker?: WorkerMemoryBroker;
 	/** Research never sets this. Workers require both this flag and at least one write path. */
 	writeEnabled?: boolean;
 	writePaths?: readonly string[];
@@ -216,7 +236,7 @@ function createLaneTools(
 	mutationScope: string,
 	toolUsage: LaneToolUsage,
 	privatePathBoundary?: CredentialExposureBoundary,
-	readMemory?: (query: string) => Promise<string>,
+	memoryBroker?: WorkerMemoryBroker,
 	executionPolicy?: OrchestrationExecutionPolicy,
 	processMaxWallClockMs = 0,
 	shellSessionKey?: string,
@@ -268,23 +288,33 @@ function createLaneTools(
 			}),
 		);
 	}
-	if (readMemory) {
+	if (memoryBroker) {
 		factories.set(WORKER_MEMORY_READ_TOOL_NAME, () => ({
 			name: WORKER_MEMORY_READ_TOOL_NAME,
 			label: "Read Memory",
 			readOnly: true,
 			description:
-				"Retrieve bounded, source-labeled standing memory relevant to this delegated task. Read-only: no memory writes or lifecycle actions are available.",
+				"Retrieve bounded, source-labeled standing memory relevant to this delegated task (query). Results may cite transcript source handles (tx:...); pass one back as ref (with an optional cursor) to read that source's exact text. Read-only: no memory writes or lifecycle actions are available.",
 			parameters: laneMemorySchema,
 			execute: async (_toolCallId, params) => {
-				const query = (params as LaneMemoryParams).query?.trim();
+				const { query: rawQuery, ref, cursor } = params as LaneMemoryParams;
+				if (ref !== undefined) {
+					if (rawQuery !== undefined) {
+						throw new Error("memory_query_invalid: pass either query or ref, not both.");
+					}
+					return {
+						content: [{ type: "text" as const, text: await memoryBroker.readSource(ref, cursor) }],
+						details: { readOnly: true },
+					};
+				}
+				const query = rawQuery?.trim();
 				if (!query || query.length > MAX_LANE_MEMORY_QUERY_CHARS) {
 					throw new Error(
 						`memory_query_invalid: query must contain from 1 through ${MAX_LANE_MEMORY_QUERY_CHARS} characters.`,
 					);
 				}
 				return {
-					content: [{ type: "text" as const, text: await readMemory(query) }],
+					content: [{ type: "text" as const, text: await memoryBroker.read(query) }],
 					details: { readOnly: true },
 				};
 			},
@@ -354,7 +384,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	const builtInCandidateNames = [
 		...READ_ONLY_LANE_TOOL_NAMES,
 		...(schemaSearchCapable ? [TOOL_SCHEMA_SEARCH_NAME] : []),
-		...(options.readMemory ? [WORKER_MEMORY_READ_TOOL_NAME] : []),
+		...(options.memoryBroker ? [WORKER_MEMORY_READ_TOOL_NAME] : []),
 		...(writeCapable ? WRITE_LANE_TOOL_NAMES : []),
 		...(pythonCapable ? [PYTHON_LANE_TOOL_NAME] : []),
 		...(options.executionPolicy ? [PROCESS_LANE_TOOL_NAME] : []),
@@ -511,7 +541,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		mutationScope,
 		toolUsage,
 		privatePathBoundary,
-		options.readMemory,
+		options.memoryBroker,
 		options.executionPolicy,
 		options.processMaxWallClockMs,
 		options.shellSessionKey,

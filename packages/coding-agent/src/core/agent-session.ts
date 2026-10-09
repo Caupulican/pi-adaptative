@@ -1401,7 +1401,7 @@ export class AgentSession {
 			recordUnsettledForOwner: (items) => this._deliverToOwner(items),
 			notifyWorktreeLane: (text) => this._steerSessionNotice("worktree-sync-notice", text),
 			notifyParentSession: (customType, text) => this._steerSessionNotice(customType, text),
-			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
+			createLaneMemoryBroker: () => this._memory.createLaneMemoryBroker(),
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
 			getContextGcStoreDir: () => this._pipeline.contextGcStorageDir(),
 			getArtifactStore: () => this._getToolArtifactStore(),

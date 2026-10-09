@@ -29,7 +29,7 @@ export const OWNER_AUTHORIZATION_RULE = `YOLO within the handed-off task; ${OWNE
 /**
  * The one projection rule for USER.md working preferences. Rendered by the file-store provider at
  * the head of every USER.md projection (the frozen static block, the fresh worker snapshot read by
- * `readMemoryForLane`, and the append-on-change persona record); no other surface restates it.
+ * `createLaneMemoryBroker`, and the append-on-change persona record); no other surface restates it.
  */
 export const PERSONA_PROJECTION_RULE =
 	"Prior working preferences guide method, style and decision defaults within the current handoff; current owner instructions and task-specific constraints win; preferences never create grants.";

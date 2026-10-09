@@ -226,7 +226,11 @@ export function toolCapabilityRequirementClauses(
 			record !== undefined &&
 			typeof record.query === "string" &&
 			Object.keys(record).every((key) => key === "query");
-		return isUnambiguousQuery ? [["memory.query"]] : [["memory.mutate"]];
+		// list inspects current memory and history recall reads captured conversation evidence; both return
+		// before any write path in the memory tool.
+		const isRead =
+			record?.action === "list" || record?.action === "history_search" || record?.action === "history_source";
+		return isUnambiguousQuery || isRead ? [["memory.query"]] : [["memory.mutate"]];
 	}
 	if (name === "goal" && args !== undefined) {
 		const action =

@@ -1,152 +1,829 @@
-import { readdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { closeSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { parentPort } from "node:worker_threads";
+import { getDefaultSessionDir, isAutoLearnSessionId, resolvePath, type SessionEntry } from "../../../kernel/node.ts";
+import { TranscriptIndex } from "../transcript-index.ts";
 import {
-	type FileEntry,
-	getDefaultSessionDir,
-	isAutoLearnSessionId,
-	loadEntriesFromFile,
-} from "../../../kernel/node.ts";
-import { type TranscriptDoc, TranscriptIndex } from "../transcript-index.ts";
+	formatTranscriptSourceHandle,
+	pageUtf8,
+	type TranscriptCoverage,
+	type TranscriptIndexChangeEvent,
+	type TranscriptLineageSpansResult,
+	type TranscriptReadUnavailable,
+	type TranscriptSessionSummary,
+	type TranscriptSourcePage,
+	type TranscriptSourcePageResult,
+} from "../transcript-memory-contracts.ts";
+import { isTranscriptSessionIdResolvable, SessionCaptureState } from "../transcript-source.ts";
 import {
 	isTranscriptRecallWorkerRequest,
 	TRANSCRIPT_RECALL_MAX_ERROR_CHARS,
-	TRANSCRIPT_RECALL_MAX_HITS,
-	TRANSCRIPT_RECALL_MAX_QUERY_CHARS,
+	TRANSCRIPT_RECALL_MAX_ID_CHARS,
+	TRANSCRIPT_RECALL_MAX_LISTED_SESSIONS,
 	TRANSCRIPT_RECALL_MAX_SNIPPET_CHARS,
+	type TranscriptRecallInitializeRequest,
+	type TranscriptRecallLineageRequest,
+	type TranscriptRecallQueryRequest,
+	type TranscriptRecallSourceRequest,
+	type TranscriptRecallWorkerRequest,
 	type TranscriptRecallWorkerResponse,
 } from "./transcript-recall-worker-protocol.ts";
 
-const MAX_SESSIONS = 60;
-const MAX_DOC_CHARS = 8_000;
-const MAX_TOTAL_CHARS = 500_000;
-const MAX_FILE_BYTES = 8_000_000;
+/** Total UTF-8 bytes of captured span text retained in memory across every indexed session. */
+const MAX_RETAINED_BYTES = 16 * 1024 * 1024;
+/** Session files above this size are not read; they are reported in coverage. */
+const MAX_FILE_BYTES = 64 * 1024 * 1024;
+const READ_CHUNK_BYTES = 1024 * 1024;
+const HEADER_READ_BYTES = 64 * 1024;
+const MIN_SCORE = 0.34;
+const MAX_COVERAGE_REASONS = 31;
+const MAX_REASON_CHARS = 96;
+
+const SKIP_BYTE_LIMIT = "byte_limit";
+const SKIP_FILE_TOO_LARGE = "file_too_large";
+
 const port = parentPort;
 if (!port) throw new Error("transcript recall worker requires parentPort");
 const workerPort = port;
 
+interface SessionRecord {
+	sessionId: string;
+	path: string;
+	mtimeMs: number;
+	timestamp?: string;
+	isCurrent: boolean;
+	/** Present while the session's captured text is held in memory and indexed. */
+	state?: SessionCaptureState;
+	/** Byte offset just past the last complete line captured into `state`. */
+	offset: number;
+	/** Bytes of `state` currently charged against the retention budget. */
+	accountedBytes: number;
+	/** Why the session is not held in memory. */
+	skip?: string;
+}
+
+interface PendingIngest {
+	path: string;
+	rewritten: boolean;
+}
+
+type FailurePhase = "read" | "ingest" | "source" | "query" | "sessions" | "lineage";
+
+interface ConsumeOutcome {
+	offset: number;
+	exceeded: boolean;
+}
+
+interface TransientLoad {
+	path: string;
+	mtimeMs: number;
+	size: number;
+	state: SessionCaptureState;
+}
+
 let generation = -1;
-let index: TranscriptIndex | undefined;
+let projectId = "";
+let agentDirectory = "";
+let currentSessionId = "";
+let workingDirectory = "";
+let index = new TranscriptIndex();
+let retainedBytes = 0;
+let recordsById = new Map<string, SessionRecord>();
+let recordsByPath = new Map<string, SessionRecord>();
+/** Files that were seen but have no session identity in this project, by path. */
+let skippedPaths = new Map<string, string>();
+let pendingIngests = new Map<string, PendingIngest>();
+/** Bounded message of the most recent non-fatal read, ingest or source failure. */
+let lastError: { at: string; message: string } | undefined;
+/** Sessions whose spans changed, and those whose earlier spans may have changed, since the last change post. */
+let changedSessionIds = new Set<string>();
+let invalidatedSessionIds = new Set<string>();
+let flushScheduled = false;
+let transientLoad: TransientLoad | undefined;
 
 function post(response: TranscriptRecallWorkerResponse): void {
 	workerPort.postMessage(response);
 }
 
-workerPort.on("message", (value: unknown) => {
-	if (!isTranscriptRecallWorkerRequest(value)) return;
-	if (value.type === "shutdown") {
-		post({ type: "stopped", generation: value.generation });
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object";
+}
+
+function errorMessage(error: unknown): string {
+	return (error instanceof Error ? error.message : String(error)).slice(0, TRANSCRIPT_RECALL_MAX_ERROR_CHARS);
+}
+
+function errorCode(error: unknown): string {
+	if (isRecord(error) && typeof error.code === "string") return error.code.slice(0, MAX_REASON_CHARS);
+	return (error instanceof Error ? error.name : "error").slice(0, MAX_REASON_CHARS);
+}
+
+/**
+ * Record a non-fatal failure: keeps the bounded real message as `lastError` and returns the coverage
+ * reason (`read_error:<code>`, `ingest_error:<code>`) naming the phase and the error class.
+ */
+function failureReason(phase: FailurePhase, error: unknown): string {
+	const reason = `${phase}_error:${errorCode(error)}`;
+	lastError = {
+		at: new Date().toISOString(),
+		message: `${reason}: ${errorMessage(error)}`.slice(0, TRANSCRIPT_RECALL_MAX_ERROR_CHARS),
+	};
+	return reason;
+}
+
+/**
+ * Identity of a session file for catalog lookup. Uses the kernel's own path resolution, and compares
+ * case-insensitively on Windows, so differently spelled paths of one file are the same session.
+ */
+function pathKey(path: string): string {
+	const resolved = resolvePath(path);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function resetState(): void {
+	index = new TranscriptIndex();
+	retainedBytes = 0;
+	recordsById = new Map();
+	recordsByPath = new Map();
+	skippedPaths = new Map();
+	pendingIngests = new Map();
+	transientLoad = undefined;
+	lastError = undefined;
+	changedSessionIds = new Set();
+	invalidatedSessionIds = new Set();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reading session files
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Stream complete lines from `startOffset`, bounded to the file size at open. Returns the offset just
+ * past the last consumed line. An unterminated tail is offered to `onTail`; it is consumed only when
+ * that returns true (a complete JSON line written without its newline), otherwise it is left for the
+ * next read because the writer may still be appending it.
+ */
+function readCompleteLines(
+	path: string,
+	startOffset: number,
+	onLine: (line: string) => boolean,
+	onTail: (line: string) => boolean,
+): number {
+	const fd = openSync(path, "r");
+	try {
+		const end = fstatSync(fd).size;
+		const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+		let position = startOffset;
+		let consumed = startOffset;
+		let pending: Buffer[] = [];
+		let pendingBytes = 0;
+		while (position < end) {
+			const bytesRead = readSync(fd, buffer, 0, Math.min(buffer.length, end - position), position);
+			if (bytesRead === 0) break;
+			const chunkStart = position;
+			position += bytesRead;
+			const view = buffer.subarray(0, bytesRead);
+			let segmentStart = 0;
+			while (segmentStart < bytesRead) {
+				const newline = view.indexOf(0x0a, segmentStart);
+				if (newline === -1) {
+					const rest = Buffer.from(view.subarray(segmentStart));
+					pending.push(rest);
+					pendingBytes += rest.length;
+					break;
+				}
+				const piece = view.subarray(segmentStart, newline);
+				const lineBytes = pending.length === 0 ? piece : Buffer.concat([...pending, piece]);
+				pending = [];
+				pendingBytes = 0;
+				segmentStart = newline + 1;
+				consumed = chunkStart + segmentStart;
+				if (!onLine(lineBytes.toString("utf8"))) return consumed;
+			}
+		}
+		if (pendingBytes > 0 && onTail(Buffer.concat(pending).toString("utf8"))) consumed = end;
+		return consumed;
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * Capture the entries of one session file into `state`, from `startOffset`. Stops early (exceeded)
+ * when the state's retained text passes `limitBytes`, so an oversized session is never fully parsed.
+ */
+function consumeSession(
+	path: string,
+	state: SessionCaptureState,
+	startOffset: number,
+	limitBytes: number,
+): ConsumeOutcome {
+	let exceeded = false;
+	const accept = (line: string, complete: boolean): boolean => {
+		if (line.trim() === "") return true;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			if (complete) state.noteUncapturedLine("malformed_line");
+			return complete;
+		}
+		if (!isRecord(parsed) || typeof parsed.type !== "string") {
+			state.noteUncapturedLine("malformed_line");
+			return true;
+		}
+		if (parsed.type === "session") return true;
+		const hasId = typeof parsed.id === "string" && parsed.id.length > 0 && parsed.id.length <= 256;
+		const hasParent = parsed.parentId === null || typeof parsed.parentId === "string";
+		if (!hasId || !hasParent) {
+			state.noteUncapturedLine("missing_entry_id");
+			return true;
+		}
+		state.add(parsed as unknown as SessionEntry);
+		if (complete && state.retainedBytes > limitBytes) {
+			exceeded = true;
+			return false;
+		}
+		return true;
+	};
+	const offset = readCompleteLines(
+		path,
+		startOffset,
+		(line) => accept(line, true),
+		(line) => accept(line, false),
+	);
+	if (!exceeded && state.retainedBytes > limitBytes) exceeded = true;
+	return { offset, exceeded };
+}
+
+function readSessionHeader(path: string): { sessionId: string; cwd?: string; timestamp?: string } | undefined {
+	const fd = openSync(path, "r");
+	try {
+		const buffer = Buffer.allocUnsafe(HEADER_READ_BYTES);
+		const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+		const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
+		if (newline === -1 && bytesRead === buffer.length) return undefined;
+		const line = buffer.subarray(0, newline === -1 ? bytesRead : newline).toString("utf8");
+		const parsed: unknown = JSON.parse(line);
+		if (!isRecord(parsed) || parsed.type !== "session") return undefined;
+		const id = parsed.id;
+		if (typeof id !== "string" || id.length === 0 || id.length > TRANSCRIPT_RECALL_MAX_ID_CHARS) return undefined;
+		const header: { sessionId: string; cwd?: string; timestamp?: string } = { sessionId: id };
+		if (typeof parsed.cwd === "string") header.cwd = parsed.cwd;
+		if (typeof parsed.timestamp === "string") header.timestamp = parsed.timestamp.slice(0, 128);
+		return header;
+	} catch (error) {
+		if (error instanceof SyntaxError) return undefined;
+		throw error;
+	} finally {
+		closeSync(fd);
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Session catalog and retention
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Resolve a session file into a catalog record, or record why it has no session identity in this
+ * project. Files of other working directories and auto-learn sessions are ineligible, not skipped.
+ */
+function describeFile(path: string, mtimeMs: number, phase: FailurePhase): SessionRecord | undefined {
+	const key = pathKey(path);
+	let header: ReturnType<typeof readSessionHeader>;
+	try {
+		header = readSessionHeader(path);
+	} catch (error) {
+		skippedPaths.set(key, failureReason(phase, error));
+		return undefined;
+	}
+	if (!header) {
+		skippedPaths.set(key, "no_header");
+		return undefined;
+	}
+	skippedPaths.delete(key);
+	if (isAutoLearnSessionId(header.sessionId)) return undefined;
+	if (!header.cwd || pathKey(header.cwd) !== pathKey(workingDirectory)) return undefined;
+	if (!isTranscriptSessionIdResolvable(projectId, header.sessionId)) {
+		skippedPaths.set(key, "invalid_session_id");
+		return undefined;
+	}
+	if (recordsById.has(header.sessionId)) {
+		skippedPaths.set(key, "duplicate_session_id");
+		return undefined;
+	}
+	const record: SessionRecord = {
+		sessionId: header.sessionId,
+		path,
+		mtimeMs,
+		isCurrent: header.sessionId === currentSessionId,
+		offset: 0,
+		accountedBytes: 0,
+	};
+	if (header.timestamp !== undefined) record.timestamp = header.timestamp;
+	recordsById.set(record.sessionId, record);
+	recordsByPath.set(key, record);
+	return record;
+}
+
+function unloadRecord(record: SessionRecord, skip: string): void {
+	if (record.state) {
+		changedSessionIds.add(record.sessionId);
+		invalidatedSessionIds.add(record.sessionId);
+	}
+	retainedBytes -= record.accountedBytes;
+	index.removeSession(record.sessionId);
+	record.state = undefined;
+	record.offset = 0;
+	record.accountedBytes = 0;
+	record.skip = skip;
+}
+
+function adoptState(record: SessionRecord, state: SessionCaptureState, offset: number): void {
+	retainedBytes += state.retainedBytes - record.accountedBytes;
+	record.accountedBytes = state.retainedBytes;
+	record.state = state;
+	record.offset = offset;
+	record.skip = undefined;
+	changedSessionIds.add(record.sessionId);
+	index.replaceSession(record.sessionId, state.spans(), { current: record.isCurrent });
+}
+
+/** Read one whole session file into memory under `limitBytes`, or record why it was not held. */
+function loadRecord(record: SessionRecord, limitBytes: number, phase: FailurePhase): void {
+	const state = new SessionCaptureState(projectId, record.sessionId);
+	let outcome: ConsumeOutcome;
+	try {
+		outcome = consumeSession(record.path, state, 0, limitBytes);
+	} catch (error) {
+		unloadRecord(record, failureReason(phase, error));
+		return;
+	}
+	if (outcome.exceeded) {
+		unloadRecord(record, SKIP_BYTE_LIMIT);
+		return;
+	}
+	try {
+		state.finalize();
+	} catch {
+		unloadRecord(record, "invalid_entry_graph");
+		return;
+	}
+	// Replacing a held state is a whole-file reload: earlier spans may differ.
+	if (record.state) invalidatedSessionIds.add(record.sessionId);
+	adoptState(record, state, outcome.offset);
+}
+
+/** Evict the oldest historical sessions until retained text fits, then the protected one if it alone cannot. */
+function evictFor(protectedRecord: SessionRecord): void {
+	while (retainedBytes > MAX_RETAINED_BYTES) {
+		let victim: SessionRecord | undefined;
+		for (const record of recordsById.values()) {
+			if (!record.state || record.isCurrent || record === protectedRecord) continue;
+			if (!victim || record.mtimeMs < victim.mtimeMs) victim = record;
+		}
+		if (!victim) break;
+		unloadRecord(victim, SKIP_BYTE_LIMIT);
+	}
+	if (retainedBytes > MAX_RETAINED_BYTES && protectedRecord.state) unloadRecord(protectedRecord, SKIP_BYTE_LIMIT);
+}
+
+/** Keep the most frequent reasons and fold the rest into `other`, so a coverage record stays bounded. */
+function foldReasons(reasons: ReadonlyMap<string, number>): Record<string, number> {
+	const ranked = [...reasons].sort((left, right) => right[1] - left[1]);
+	const folded: Record<string, number> = {};
+	let other = 0;
+	ranked.forEach(([reason, count], position) => {
+		if (position < MAX_COVERAGE_REASONS) folded[reason] = count;
+		else other += count;
+	});
+	if (other > 0) folded.other = other;
+	return folded;
+}
+
+function countReason(reasons: Map<string, number>, reason: string, amount = 1): void {
+	reasons.set(reason, (reasons.get(reason) ?? 0) + amount);
+}
+
+function computeCoverage(): TranscriptCoverage {
+	const skipped = new Map<string, number>();
+	const uncaptured = new Map<string, number>();
+	let sessionsIndexed = 0;
+	let sessionsSkipped = 0;
+	let spansIndexed = 0;
+	let spansUncaptured = 0;
+	let truncated = false;
+	for (const record of recordsById.values()) {
+		if (record.state) {
+			sessionsIndexed++;
+			spansIndexed += record.state.spanCount;
+			for (const [reason, count] of Object.entries(record.state.uncaptured)) {
+				spansUncaptured += count;
+				countReason(uncaptured, reason, count);
+			}
+		} else if (record.skip) {
+			sessionsSkipped++;
+			countReason(skipped, record.skip);
+			if (record.skip === SKIP_BYTE_LIMIT || record.skip === SKIP_FILE_TOO_LARGE) truncated = true;
+		}
+	}
+	for (const reason of skippedPaths.values()) {
+		sessionsSkipped++;
+		countReason(skipped, reason);
+	}
+	const coverage: TranscriptCoverage = {
+		sessionsIndexed,
+		sessionsSkipped,
+		spansIndexed,
+		spansUncaptured,
+		skipped: foldReasons(skipped),
+		uncaptured: foldReasons(uncaptured),
+		truncated,
+	};
+	if (lastError !== undefined) coverage.lastError = lastError;
+	return coverage;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Initialization and incremental ingestion
+// ---------------------------------------------------------------------------------------------
+
+function buildIndex(): void {
+	const dir = getDefaultSessionDir(workingDirectory, agentDirectory);
+	let names: string[];
+	try {
+		names = readdirSync(dir);
+	} catch (error) {
+		if (errorCode(error) === "ENOENT") return;
+		throw error;
+	}
+	const files: Array<{ path: string; mtimeMs: number; size: number }> = [];
+	for (const name of names) {
+		if (!name.endsWith(".jsonl")) continue;
+		const path = join(dir, name);
+		try {
+			const metadata = statSync(path);
+			if (metadata.isFile() && metadata.size > 0)
+				files.push({ path, mtimeMs: metadata.mtimeMs, size: metadata.size });
+		} catch (error) {
+			skippedPaths.set(pathKey(path), failureReason("read", error));
+		}
+	}
+	files.sort((left, right) => right.mtimeMs - left.mtimeMs);
+	for (const file of files) {
+		const record = describeFile(file.path, file.mtimeMs, "read");
+		if (!record) continue;
+		if (file.size > MAX_FILE_BYTES) {
+			record.skip = SKIP_FILE_TOO_LARGE;
+			continue;
+		}
+		loadRecord(record, MAX_RETAINED_BYTES - retainedBytes, "read");
+	}
+}
+
+function applyIngest(path: string, rewritten: boolean): void {
+	let metadata: ReturnType<typeof statSync>;
+	try {
+		metadata = statSync(path);
+	} catch (error) {
+		recordIngestFailure(path, error);
+		return;
+	}
+	let record = recordsByPath.get(pathKey(path));
+	if (!record) {
+		record = describeFile(path, metadata.mtimeMs, "ingest");
+		if (!record) return;
+	}
+	record.mtimeMs = metadata.mtimeMs;
+	if (metadata.size > MAX_FILE_BYTES) {
+		unloadRecord(record, SKIP_FILE_TOO_LARGE);
+		return;
+	}
+	const state = record.state;
+	if (state && !rewritten && metadata.size === record.offset) return;
+	if (!state || rewritten || metadata.size < record.offset) {
+		loadRecord(record, MAX_RETAINED_BYTES, "ingest");
+		evictFor(record);
+		return;
+	}
+
+	const previousBranch = state.branchEntryIds;
+	let outcome: ConsumeOutcome;
+	try {
+		outcome = consumeSession(record.path, state, record.offset, MAX_RETAINED_BYTES);
+	} catch (error) {
+		unloadRecord(record, failureReason("ingest", error));
+		return;
+	}
+	if (outcome.exceeded) {
+		unloadRecord(record, SKIP_BYTE_LIMIT);
+		return;
+	}
+	try {
+		state.finalize();
+	} catch {
+		unloadRecord(record, "invalid_entry_graph");
+		return;
+	}
+	// A selected lineage that is no longer a prefix extension of the previous one is a branch switch.
+	if (!state.lineageExtends(previousBranch)) invalidatedSessionIds.add(record.sessionId);
+	adoptState(record, state, outcome.offset);
+	evictFor(record);
+}
+
+/** One file's ingest failure is a skip reason and a diagnostic, never the end of the worker. */
+function recordIngestFailure(path: string, error: unknown): void {
+	const reason = failureReason("ingest", error);
+	const known = recordsByPath.get(pathKey(path));
+	if (known) unloadRecord(known, reason);
+	else skippedPaths.set(pathKey(path), reason);
+}
+
+/** Apply every queued ingest, coalesced per file. */
+function flushIngests(): void {
+	if (pendingIngests.size === 0) return;
+	const batch = [...pendingIngests.values()];
+	pendingIngests = new Map();
+	for (const { path, rewritten } of batch) {
+		try {
+			applyIngest(path, rewritten);
+		} catch (error) {
+			recordIngestFailure(path, error);
+		}
+	}
+	const change = takeIndexChange();
+	post({
+		type: "coverage",
+		generation,
+		coverage: computeCoverage(),
+		...(change ? { change } : {}),
+	});
+}
+
+/** The accumulated change since the last post, or undefined when nothing changed. */
+function takeIndexChange(): TranscriptIndexChangeEvent | undefined {
+	if (changedSessionIds.size === 0 && invalidatedSessionIds.size === 0) return undefined;
+	const change: TranscriptIndexChangeEvent = {
+		sessionIds: [...changedSessionIds],
+		invalidatedSessionIds: [...invalidatedSessionIds],
+	};
+	changedSessionIds = new Set();
+	invalidatedSessionIds = new Set();
+	return change;
+}
+
+function queueIngest(path: string, rewritten: boolean): void {
+	const key = pathKey(path);
+	pendingIngests.set(key, { path, rewritten: (pendingIngests.get(key)?.rewritten ?? false) || rewritten });
+	if (flushScheduled) return;
+	flushScheduled = true;
+	setImmediate(() => {
+		flushScheduled = false;
+		try {
+			flushIngests();
+		} catch (error) {
+			post({ type: "failed", generation, error: errorMessage(error) });
+		}
+	});
+}
+
+// ---------------------------------------------------------------------------------------------
+// Source reads
+// ---------------------------------------------------------------------------------------------
+
+function unavailable(status: TranscriptReadUnavailable["status"], reason: string): TranscriptReadUnavailable {
+	return { status, reason: reason.slice(0, TRANSCRIPT_RECALL_MAX_ERROR_CHARS) };
+}
+
+/** Capture one session that is not held in memory, for a single source read. Keeps the last one. */
+function loadSessionForRead(record: SessionRecord): SessionCaptureState | TranscriptReadUnavailable {
+	let metadata: ReturnType<typeof statSync>;
+	try {
+		metadata = statSync(record.path);
+	} catch (error) {
+		if (errorCode(error) === "ENOENT") return unavailable("expired", "The session file no longer exists.");
+		return unavailable("unavailable", `Session file could not be read: ${errorMessage(error)}`);
+	}
+	if (metadata.size > MAX_FILE_BYTES) {
+		return unavailable("unavailable", `The session file exceeds the ${MAX_FILE_BYTES} byte capture limit.`);
+	}
+	const cached = transientLoad;
+	if (cached && cached.path === record.path && cached.mtimeMs === metadata.mtimeMs && cached.size === metadata.size) {
+		return cached.state;
+	}
+	const state = new SessionCaptureState(projectId, record.sessionId);
+	try {
+		consumeSession(record.path, state, 0, Number.POSITIVE_INFINITY);
+		state.finalize();
+	} catch (error) {
+		return unavailable("unavailable", `Session file could not be captured: ${errorMessage(error)}`);
+	}
+	transientLoad = { path: record.path, mtimeMs: metadata.mtimeMs, size: metadata.size, state };
+	return state;
+}
+
+function readSource(request: TranscriptRecallSourceRequest): TranscriptSourcePageResult {
+	const record = recordsById.get(request.sessionId);
+	if (!record) return unavailable("not_found", `Session ${request.sessionId} is not in this project's history.`);
+	const state = record.state ?? loadSessionForRead(record);
+	if (!(state instanceof SessionCaptureState)) return state;
+
+	const found = state.lookup(request.entryId, request.part);
+	if (!found.entryExists) {
+		return unavailable("not_found", `Entry ${request.entryId} is not a conversation entry of this session.`);
+	}
+	if (!found.part) {
+		if (found.uncapturedReason !== undefined) {
+			return unavailable(
+				"uncaptured",
+				`Part ${request.part} of this entry was not captured: ${found.uncapturedReason}.`,
+			);
+		}
+		return unavailable("not_found", `Entry ${request.entryId} has no part ${request.part}.`);
+	}
+	if (found.part.span.ref.digest !== request.digest) {
+		return unavailable("stale_snapshot", "The source content changed since the handle was issued.");
+	}
+	const page = pageUtf8(found.part.text, request.cursor, request.maxBytes);
+	const result: TranscriptSourcePage = {
+		status: "ok",
+		span: found.part.span,
+		text: page.text,
+		cursor: page.cursor,
+	};
+	if (page.nextCursor !== undefined) result.nextCursor = page.nextCursor;
+	if (found.nextPart) result.nextPartHandle = formatTranscriptSourceHandle(found.nextPart.span.ref);
+	return result;
+}
+
+/** Run a read that answers with a typed result; a throw becomes `unavailable` with its real cause. */
+function guarded<T>(phase: FailurePhase, read: () => T): T | TranscriptReadUnavailable {
+	try {
+		return read();
+	} catch (error) {
+		return unavailable("unavailable", `${failureReason(phase, error)}: ${errorMessage(error)}`);
+	}
+}
+
+/** Indexed sessions in chronological order (header timestamp, then session id). */
+function listSessions(): { status: "ok"; sessions: TranscriptSessionSummary[] } | TranscriptReadUnavailable {
+	const indexed = [...recordsById.values()].filter((record) => record.state !== undefined);
+	if (indexed.length > TRANSCRIPT_RECALL_MAX_LISTED_SESSIONS) {
+		return unavailable(
+			"unavailable",
+			`${indexed.length} sessions are indexed; listing is limited to ${TRANSCRIPT_RECALL_MAX_LISTED_SESSIONS}.`,
+		);
+	}
+	indexed.sort((left, right) => {
+		const leftKey = left.timestamp ?? "";
+		const rightKey = right.timestamp ?? "";
+		if (leftKey !== rightKey) return leftKey < rightKey ? -1 : 1;
+		return left.sessionId < right.sessionId ? -1 : left.sessionId > right.sessionId ? 1 : 0;
+	});
+	const sessions: TranscriptSessionSummary[] = [];
+	for (const record of indexed) {
+		const state = record.state;
+		if (!state) continue;
+		const summary: TranscriptSessionSummary = {
+			sessionId: record.sessionId,
+			current: record.isCurrent,
+			selectedSpanCount: state.selectedSpans().length,
+			lineageDigest: state.lineageDigest(),
+		};
+		if (record.timestamp !== undefined) summary.timestamp = record.timestamp;
+		sessions.push(summary);
+	}
+	return { status: "ok", sessions };
+}
+
+function readLineage(request: TranscriptRecallLineageRequest): TranscriptLineageSpansResult {
+	const record = recordsById.get(request.sessionId);
+	if (!record) return unavailable("not_found", `Session ${request.sessionId} is not in this project's history.`);
+	const state = record.state;
+	if (!state) {
+		return unavailable(
+			"unavailable",
+			`Session ${request.sessionId} is not indexed (${record.skip ?? "not loaded"}).`,
+		);
+	}
+	const selected = state.selectedSpans();
+	return {
+		status: "ok",
+		sessionId: record.sessionId,
+		lineageDigest: state.lineageDigest(),
+		fromIndex: request.fromIndex,
+		spans: selected.slice(request.fromIndex, request.fromIndex + request.maxSpans).map((part) => part.span),
+		total: selected.length,
+	};
+}
+
+// ---------------------------------------------------------------------------------------------
+// Message handling
+// ---------------------------------------------------------------------------------------------
+
+function initialize(request: TranscriptRecallInitializeRequest): void {
+	generation = request.generation;
+	projectId = request.projectId;
+	currentSessionId = request.sessionId;
+	workingDirectory = request.cwd;
+	agentDirectory = request.agentDir;
+	resetState();
+	try {
+		buildIndex();
+	} catch (error) {
+		resetState();
+		post({ type: "failed", generation, error: errorMessage(error) });
+		return;
+	}
+	// The initial scan is not a change; the ready response announces what became available instead.
+	changedSessionIds = new Set();
+	invalidatedSessionIds = new Set();
+	const indexed = [...recordsById.values()].filter((record) => record.state !== undefined);
+	post({
+		type: "ready",
+		generation,
+		coverage: computeCoverage(),
+		// Above the listing ceiling the consumer learns the same limit from `listSessions`.
+		...(indexed.length <= TRANSCRIPT_RECALL_MAX_LISTED_SESSIONS
+			? { change: { sessionIds: indexed.map((record) => record.sessionId), invalidatedSessionIds: [] } }
+			: {}),
+	});
+}
+
+function query(request: TranscriptRecallQueryRequest): void {
+	try {
+		runQuery(request);
+	} catch (error) {
+		failureReason("query", error);
+		post({ type: "queryFailed", generation, requestId: request.requestId, error: errorMessage(error) });
+	}
+}
+
+function runQuery(request: TranscriptRecallQueryRequest): void {
+	flushIngests();
+	const hits = index.query(request.query, {
+		k: request.maxResults,
+		minScore: MIN_SCORE,
+		maxSnippetChars: TRANSCRIPT_RECALL_MAX_SNIPPET_CHARS,
+		includeAlternateBranches: request.includeAlternateBranches,
+		includeCurrentSession: request.includeCurrentSession,
+	});
+	post({ type: "result", generation, requestId: request.requestId, hits });
+}
+
+function handle(request: TranscriptRecallWorkerRequest): void {
+	if (request.type === "shutdown") {
+		post({ type: "stopped", generation: request.generation });
 		workerPort.close();
 		return;
 	}
-	if (value.type === "initialize") {
-		generation = value.generation;
-		try {
-			index = new TranscriptIndex(buildDocs(value.sessionId, value.cwd, value.agentDir));
-			post({ type: "ready", generation, size: index.size });
-		} catch (error) {
-			index = undefined;
-			post({
-				type: "failed",
-				generation,
-				error: (error instanceof Error ? error.message : String(error)).slice(0, TRANSCRIPT_RECALL_MAX_ERROR_CHARS),
-			});
-		}
+	if (request.type === "initialize") {
+		initialize(request);
 		return;
 	}
+	if (request.generation !== generation) return;
+	switch (request.type) {
+		case "ingest":
+			queueIngest(request.sessionFile, request.rewritten);
+			break;
+		case "query":
+			query(request);
+			break;
+		case "sessions":
+			flushIngests();
+			post({
+				type: "sessions",
+				generation,
+				requestId: request.requestId,
+				result: guarded("sessions", listSessions),
+			});
+			break;
+		case "lineage":
+			flushIngests();
+			post({
+				type: "lineage",
+				generation,
+				requestId: request.requestId,
+				result: guarded("lineage", () => readLineage(request)),
+			});
+			break;
+		case "source":
+			flushIngests();
+			post({
+				type: "source",
+				generation,
+				requestId: request.requestId,
+				result: guarded("source", () => readSource(request)),
+			});
+			break;
+	}
+}
 
-	if (value.generation !== generation) return;
-	const hits =
-		index?.query(value.query.slice(0, TRANSCRIPT_RECALL_MAX_QUERY_CHARS), {
-			k: TRANSCRIPT_RECALL_MAX_HITS,
-			minScore: 0.34,
-			maxSnippetChars: TRANSCRIPT_RECALL_MAX_SNIPPET_CHARS,
-		}) ?? [];
-	post({ type: "result", generation, requestId: value.requestId, hits });
+workerPort.on("message", (value: unknown) => {
+	if (!isTranscriptRecallWorkerRequest(value)) return;
+	try {
+		handle(value);
+	} catch (error) {
+		post({ type: "failed", generation: value.generation, error: errorMessage(error) });
+	}
 });
-
-function buildDocs(currentSessionId: string, cwd: string, agentDir: string): TranscriptDoc[] {
-	const docs: TranscriptDoc[] = [];
-	let dir: string;
-	try {
-		dir = getDefaultSessionDir(cwd, agentDir);
-	} catch {
-		return docs;
-	}
-
-	let files: Array<{ path: string; mtime: number }>;
-	try {
-		files = readdirSync(dir)
-			.filter((name) => name.endsWith(".jsonl"))
-			.map((name) => {
-				const path = join(dir, name);
-				let mtime = 0;
-				let size = 0;
-				try {
-					const metadata = statSync(path);
-					mtime = metadata.mtimeMs;
-					size = metadata.size;
-				} catch {}
-				return { path, mtime, size };
-			})
-			.filter((file) => file.size > 0 && file.size <= MAX_FILE_BYTES)
-			.sort((left, right) => right.mtime - left.mtime)
-			.slice(0, MAX_SESSIONS);
-	} catch {
-		return docs;
-	}
-
-	let total = 0;
-	for (const { path } of files) {
-		let entries: FileEntry[];
-		try {
-			entries = loadEntriesFromFile(path);
-		} catch {
-			continue;
-		}
-		const header = entries.find(
-			(entry): entry is Extract<FileEntry, { type: "session" }> => entry.type === "session",
-		);
-		const sessionId = header?.id;
-		if (!sessionId || sessionId === currentSessionId || isAutoLearnSessionId(sessionId)) continue;
-		if (header.cwd && resolve(header.cwd) !== resolve(cwd)) continue;
-
-		const text = extractSessionText(entries, MAX_DOC_CHARS);
-		if (!text.trim()) continue;
-		docs.push({
-			sessionId: sessionId.slice(0, 256),
-			timestamp: typeof header.timestamp === "string" ? header.timestamp.slice(0, 128) : undefined,
-			text,
-		});
-		total += text.length;
-		if (total >= MAX_TOTAL_CHARS) break;
-	}
-	return docs;
-}
-
-function extractSessionText(entries: FileEntry[], maxChars: number): string {
-	const parts: string[] = [];
-	let length = 0;
-	for (const entry of entries) {
-		if (entry.type !== "message") continue;
-		const message = entry.message;
-		if (message.role !== "user" && message.role !== "assistant") continue;
-		const content = message.content;
-		let text = "";
-		if (typeof content === "string") {
-			text = content;
-		} else if (Array.isArray(content)) {
-			text = content
-				.map((block) =>
-					block && typeof block === "object" && "type" in block && block.type === "text" ? (block.text ?? "") : "",
-				)
-				.join(" ");
-		}
-		text = text.trim();
-		if (!text || text.includes('<memory_context source="transcript-recall"')) continue;
-		parts.push(text);
-		length += text.length;
-		if (length >= maxChars) break;
-	}
-	return parts.join("\n").slice(0, maxChars);
-}
