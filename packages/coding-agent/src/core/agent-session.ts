@@ -1806,10 +1806,11 @@ export class AgentSession {
 			isExtendedBusy: () => {
 				return (
 					(this._systemOneController?.isEvaluating ?? false) ||
-					this._semanticPlaneHealth.getHealth(true).state === "evaluating" ||
-					(!isOwnIdleContinuationAdmission() && this._backgroundLanes.hasPendingIdleContinuation())
+					this._semanticPlaneHealth.getHealth(true).state === "evaluating"
 				);
 			},
+			hasPendingIdleContinuation: () =>
+				!isOwnIdleContinuationAdmission() && this._backgroundLanes.hasPendingIdleContinuation(),
 			prepareRun: async () => {
 				this.agent.state.systemPrompt = this._systemPromptBuilder.enforceSystemPromptBudget(this.systemPrompt);
 				await this._toolProtocol.ensureActiveModelProtocol();

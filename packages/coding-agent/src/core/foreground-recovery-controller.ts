@@ -76,6 +76,7 @@ export interface ForegroundRecoveryControllerDeps {
 	holdUndeliveredQueue?(): void;
 	isCompacting?: () => boolean;
 	isExtendedBusy?: () => boolean;
+	hasPendingIdleContinuation?: () => boolean;
 }
 
 /** Owns the complete logical foreground run plus retry/failover/compaction recovery ordering. */
@@ -144,6 +145,10 @@ export class ForegroundRecoveryController {
 	}
 
 	get isBusy(): boolean {
+		return this.hasForegroundOccupancy() || this.deps.hasPendingIdleContinuation?.() === true;
+	}
+
+	private hasForegroundOccupancy(): boolean {
 		return (
 			this.submissionLease !== undefined ||
 			this.isRunActive ||
@@ -156,7 +161,7 @@ export class ForegroundRecoveryController {
 
 	/** Atomically reserve the full foreground lifecycle, including asynchronous prompt preparation. */
 	tryAcquireSubmission(): ForegroundSubmissionLease | undefined {
-		if (this.shutdownReason || this.isBusy) return undefined;
+		if (this.shutdownReason || this.hasForegroundOccupancy()) return undefined;
 		const lease: ForegroundSubmissionLease = {
 			[foregroundSubmissionLeaseMarker]: true,
 			epoch: this.nextSubmissionEpoch++,
