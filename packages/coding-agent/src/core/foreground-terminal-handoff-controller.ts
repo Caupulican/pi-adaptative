@@ -430,21 +430,19 @@ export class ForegroundTerminalHandoffController {
 	private async deliverWhenIdle(pending: PendingTerminalDelivery): Promise<void> {
 		try {
 			while (this.pending.has(pending)) {
-				await this.deps.foreground.waitForIdle();
-				if (!this.pending.has(pending)) return;
-				this.assertLive("terminal handoff was waiting for foreground idle");
-				const lease = this.deps.foreground.tryAcquireSubmission();
-				if (!lease) continue;
-				if (!this.pending.delete(pending)) {
-					this.deps.foreground.releaseSubmission(lease);
-					return;
-				}
+				const lease = await this.deps.foreground.acquireSubmission();
+				let transferred = false;
 				try {
+					if (!this.pending.delete(pending)) return;
+					this.assertLive("terminal handoff was waiting for foreground admission");
 					const plan = pending.prepare();
+					transferred = true;
 					await this.deliverWithLease(plan, lease);
 					pending.resolve(plan?.deliveredTaskIds ?? NOTHING_DELIVERED);
 				} catch (error) {
 					pending.reject(error);
+				} finally {
+					if (!transferred) this.deps.foreground.releaseSubmission(lease);
 				}
 				return;
 			}

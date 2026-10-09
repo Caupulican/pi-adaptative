@@ -227,7 +227,27 @@ export class ForegroundRecoveryController {
 			if (this.shutdownReason) throw this.shutdownReason;
 			const lease = this.tryAcquireSubmission();
 			if (lease) return lease;
-			await this.waitForIdle();
+			// Streaming owns the Agent's native idle signal. Future continuation settlement does
+			// not own submission authority, so the remaining wait uses the admission predicate.
+			await this.deps.agent.waitForIdle();
+			await new Promise<void>((resolve) => {
+				const stop = (): void => {
+					unsubscribe();
+					this.idleWaiters.delete(stop);
+					resolve();
+				};
+				const unsubscribe = this.activityListeners.subscribe(stop);
+				this.idleWaiters.add(stop);
+				try {
+					// Register before rechecking. A newly started stream returns to the native idle
+					// wait above instead of depending on a host activity notification for its end.
+					if (this.shutdownReason || !this.hasForegroundOccupancy() || this.deps.agent.state.isStreaming) stop();
+				} catch (error) {
+					unsubscribe();
+					this.idleWaiters.delete(stop);
+					throw error;
+				}
+			});
 		}
 	}
 
