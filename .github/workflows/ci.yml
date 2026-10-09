@@ -85,7 +85,9 @@ jobs:
         run: npm run check:provider-regressions
 
       - name: Harness journeys
-        run: npm exec --workspace packages/coding-agent -- vitest run test/harness-interactions.test.ts
+        # Surface orchestration admission failures before the two real five-minute owner deadlines.
+        # The focused run never replaces the complete three-case, on/off journey proof.
+        run: npm exec --workspace packages/coding-agent -- vitest run test/harness-interactions.test.ts -t orchestration && npm exec --workspace packages/coding-agent -- vitest run test/harness-interactions.test.ts
 
       - name: Dependency hardening
         if: runner.os == 'Windows'

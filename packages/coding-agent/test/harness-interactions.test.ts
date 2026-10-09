@@ -7419,12 +7419,71 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 			if (e11Causes.length === 1) throw e11Causes[0];
 			if (e11Causes.length > 1)
 				throw new AggregateError(e11Causes, "the second report foreground observation failed");
-			await withDeadline(
-				trace,
-				"held status turn",
-				session.prompt("Check the second report while it runs."),
-				90_000,
-			);
+			// Bounded held-status diagnostic. Pure reads only: BEFORE capture runs immediately before the same prompt call, with no await
+			// between them. A post-rejection capture, the console line and serialization are recorded in order after the primary error, and
+			// only actual diagnostic failures aggregate with it. Health is the public getter, bound to decisionEngine presence (qualified).
+			const heldStatusDx: unknown[] = [];
+			const captureHeldStatus = (): Record<string, unknown> => {
+				const activity = session.getForegroundActivity();
+				const foreground = session.getResourceSnapshot().foregroundRecovery;
+				const health = session.getSemanticPlaneHealth();
+				return {
+					oldCapturedEpoch: e11SecondEpoch,
+					activityEpoch: activity.epoch,
+					activityBusy: activity.busy,
+					submissionEpoch: foreground.submissionEpoch,
+					activeRuns: foreground.activeRuns,
+					foregroundRetrying: foreground.retrying,
+					isStreaming: session.isStreaming,
+					isCompacting: session.isCompacting,
+					isRetrying: session.isRetrying,
+					pendingIdleContinuation: session.backgroundLanes.hasPendingIdleContinuation(),
+					semanticState: health.state,
+					inFlightEvaluationIds: (health.inFlightEvaluations ?? []).map((evaluation) => evaluation.evaluationId),
+					completedEvaluationIds: session
+						.getSemanticEvaluations()
+						.slice(-20)
+						.map((record) => record.evaluationId),
+				};
+			};
+			let heldStatusBefore: Record<string, unknown> | undefined;
+			try {
+				heldStatusBefore = captureHeldStatus();
+			} catch (error) {
+				heldStatusDx.push(error);
+			}
+			const heldStatusPrompt = session.prompt("Check the second report while it runs.");
+			try {
+				await withDeadline(trace, "held status turn", heldStatusPrompt, 90_000);
+			} catch (primary) {
+				let heldStatusAfter: Record<string, unknown> | undefined;
+				try {
+					heldStatusAfter = captureHeldStatus();
+				} catch (error) {
+					heldStatusDx.push(error);
+				}
+				let heldStatusText = "unserializable";
+				try {
+					heldStatusText = JSON.stringify({ before: heldStatusBefore, after: heldStatusAfter }).slice(0, 5000);
+				} catch (error) {
+					heldStatusDx.push(error);
+				}
+				try {
+					console.error(`held status prompt refused: ${heldStatusText}`);
+				} catch (error) {
+					heldStatusDx.push(error);
+				}
+				if (heldStatusDx.length > 0) {
+					throw new AggregateError([primary, ...heldStatusDx], "held status diagnostic failed after the refusal");
+				}
+				throw primary;
+			}
+			if (heldStatusDx.length === 1) {
+				throw heldStatusDx[0];
+			}
+			if (heldStatusDx.length > 1) {
+				throw new AggregateError(heldStatusDx, "held status diagnostic capture failed before a successful prompt");
+			}
 			// Bounded control: while the second generation runs, its display carries no first-generation claim, pointer or digest and no
 			// terminal result. It shows no current terminal yet; generation identity is pinned separately below.
 			const e11HeldDetails = (toolCallId: string): Record<string, unknown> => {
