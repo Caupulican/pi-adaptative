@@ -2,7 +2,7 @@ import "./fixtures/harness/builtin-install.ts";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import type { CheckOptions, LockOptions, UnlockOptions } from "proper-lockfile";
@@ -46,6 +46,7 @@ import type { ExecutionState } from "../src/core/system-one/types.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, readOptionalToolIntent } from "../src/core/tool-applicability-gate.ts";
 import { createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { localFileMutationIntentOperations } from "../src/core/tools/file-mutation-intent.ts";
+import { routeShellContract } from "../src/core/tools/shell-contract-router.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 import { isRecordObject } from "../src/core/util/value-guards.ts";
 import type { SessionManager } from "../src/kernel/session/session-manager.ts";
@@ -1367,9 +1368,13 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				output: "direct-default\n",
 				exitCode: 0,
 			});
+			// The per-call backend receives the command the platform wrapper hands an explicit backend (no python engine): the contract
+			// native floor form on win32, the source unchanged elsewhere. An unsupported route fails the scenario here.
+			const explicitRoute = routeShellContract("echo direct-explicit", process.platform, { pythonEngine: false });
+			if (explicitRoute.kind === "unsupported") throw new Error(explicitRoute.error);
 			explicitShell.enqueue({
 				name: "direct-explicit",
-				command: "echo direct-explicit",
+				command: explicitRoute.command,
 				cwd: HARNESS_PROJECT_CWD,
 				output: "direct-explicit\n",
 				exitCode: 0,
@@ -11296,7 +11301,7 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			// log: the first on its own, the second against the first's bytes. No session getter stands in for persisted state here.
 			const e12Record = (name: string): string | undefined => {
 				for (const [path, content] of world.io.fileEntries()) {
-					if (path.endsWith(`/${name}`)) return content;
+					if (basename(path) === name) return content;
 				}
 				return undefined;
 			};
