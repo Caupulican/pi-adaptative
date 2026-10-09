@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import type { CheckOptions, LockOptions, UnlockOptions } from "proper-lockfile";
 import { expect, it } from "vitest";
@@ -1319,6 +1320,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			// Cancellation. The turn is held at its provider gate until the operator aborts it: the abort persists the turn
 			// as aborted, the current input is answered by the next turn, the held reply never reaches the transcript, and
 			// the cancelled root starts no worker.
+			const currentInput = ownerInputCapture(session, "Current input after the cancel.");
 			const providerReached = createBarrier();
 			const neverReleased = createBarrier();
 			const turnStarted = createBarrier();
@@ -1335,18 +1337,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				},
 				{
 					name: "current-input-reply",
-					check: (request) => {
-						const owner = request.context.messages.filter((message) => message.role === "user").at(-1);
-						const observed =
-							typeof owner?.content === "string"
-								? owner.content
-								: owner?.content.map((block) => (block.type === "text" ? block.text : "")).join("");
-						if (observed !== "Current input after the cancel.") {
-							throw new Error(
-								`the current-input reply does not answer the owner latest input: ${JSON.stringify(observed)?.slice(0, 200)}`,
-							);
-						}
-					},
+					check: (request) => currentInput.check(request),
 					reply: { content: [{ type: "text", text: "Current input handled." }] },
 				},
 			);
@@ -1508,7 +1499,16 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				"a token-shaped lane key is masked",
 			).not.toContain(tokenLaneKey);
 
-			await withDeadline(trace, "current input after the cancel", session.prompt("Current input after the cancel."));
+			currentInput.arm();
+			try {
+				await withDeadline(
+					trace,
+					"current input after the cancel",
+					session.prompt("Current input after the cancel."),
+				);
+			} finally {
+				currentInput.disarm();
+			}
 			trace.mark("root", "current-input.reply");
 			const transcript = JSON.stringify(session.messages);
 			expect(transcript).toContain("Current input handled.");
@@ -9239,6 +9239,71 @@ function requirementIdOf(request: ScriptedRequest): string {
 
 /** The marker of the root reflection checkpoint: the reflection turn's own prompt, which the production loop sends after a unit of work. */
 const REFLECTION_CHECKPOINT_MARKER = "Reflection checkpoint: the unit of work above has ended.";
+
+/**
+ * Epoch-scoped identity of one owner input. The observer reads the native message_end of the owner's own user message and
+ * the submission epoch it was emitted under. The provider check then requires the CURRENT epoch to equal that captured epoch,
+ * and exactly one wire user message to carry the captured content and timestamp. Observer failures are kept in the order they
+ * occur; the check rethrows a single one unchanged and aggregates several.
+ */
+interface OwnerInputCapture {
+	arm(): void;
+	disarm(): void;
+	check(request: ScriptedRequest): void;
+}
+
+function ownerInputCapture(session: AgentSession, text: string): OwnerInputCapture {
+	let unsubscribe: (() => void) | undefined;
+	let captured: { readonly content: unknown; readonly timestamp: number; readonly epoch: number } | undefined;
+	const failures: unknown[] = [];
+	const observe = (event: AgentSessionEvent): void => {
+		try {
+			if (event.type !== "message_end" || event.message.role !== "user") return;
+			const content = event.message.content;
+			const joined =
+				typeof content === "string"
+					? content
+					: content.map((block) => (block.type === "text" ? block.text : "")).join("");
+			if (joined !== text) return;
+			if (captured !== undefined) throw new Error(`the owner input "${text}" was emitted twice in one prompt`);
+			const epoch = session.getResourceSnapshot().foregroundRecovery.submissionEpoch;
+			if (epoch === undefined) throw new Error("the owner input was emitted with no submission lease held");
+			captured = { content: structuredClone(content), timestamp: event.message.timestamp, epoch };
+		} catch (error) {
+			failures.push(error);
+		}
+	};
+	return {
+		arm: () => {
+			unsubscribe = session.subscribe(observe);
+		},
+		disarm: () => {
+			unsubscribe?.();
+			unsubscribe = undefined;
+		},
+		check: (request) => {
+			if (failures.length === 1) throw failures[0];
+			if (failures.length > 1) throw new AggregateError(failures, "the owner input capture failed more than once");
+			const owner = captured;
+			if (owner === undefined) throw new Error(`the owner input "${text}" was never captured`);
+			const current = session.getResourceSnapshot().foregroundRecovery.submissionEpoch;
+			if (current === undefined || current !== owner.epoch) {
+				throw new Error(
+					`the current submission epoch ${current} does not equal the captured owner epoch ${owner.epoch}`,
+				);
+			}
+			const bound = request.context.messages.filter(
+				(message) =>
+					message.role === "user" &&
+					message.timestamp === owner.timestamp &&
+					isDeepStrictEqual(message.content, owner.content),
+			);
+			if (bound.length !== 1) {
+				throw new Error(`expected exactly one wire user message bound to the owner input, found ${bound.length}`);
+			}
+		},
+	};
+}
 
 /** True when a request-visible message carries the marker text. */
 function requestCarriesMarker(request: ScriptedRequest, marker: string): boolean {
