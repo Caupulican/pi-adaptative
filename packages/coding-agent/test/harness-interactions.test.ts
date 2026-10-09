@@ -1333,7 +1333,22 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					gate: neverReleased.promise,
 					reply: { content: [{ type: "text", text: "This reply is never delivered." }] },
 				},
-				text("current-input-reply", "Current input handled."),
+				{
+					name: "current-input-reply",
+					check: (request) => {
+						const owner = request.context.messages.filter((message) => message.role === "user").at(-1);
+						const observed =
+							typeof owner?.content === "string"
+								? owner.content
+								: owner?.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+						if (observed !== "Current input after the cancel.") {
+							throw new Error(
+								`the current-input reply does not answer the owner latest input: ${JSON.stringify(observed)?.slice(0, 200)}`,
+							);
+						}
+					},
+					reply: { content: [{ type: "text", text: "Current input handled." }] },
+				},
 			);
 			const cancelledPrompt = session
 				.prompt("Start a long task that the operator cancels.")
@@ -1348,15 +1363,6 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				session.messages.some((message) => message.role === "assistant" && message.stopReason === "aborted"),
 				"the cancelled turn must persist as an aborted assistant message",
 			).toBe(true);
-			await withDeadline(trace, "current input after the cancel", session.prompt("Current input after the cancel."));
-			trace.mark("root", "current-input.reply");
-			const transcript = JSON.stringify(session.messages);
-			expect(transcript).toContain("Current input handled.");
-			expect(transcript, "a cancelled turn's held reply must not reach the transcript").not.toContain(
-				"This reply is never delivered.",
-			);
-			expect(delegateResultTexts(session), "a cancelled root starts no worker").toEqual([]);
-			expect(world.provider.reached.filter((step) => !step.startsWith("root:"))).toEqual([]);
 
 			// User bash, driven directly (no model turn). Prewarm with a configured backend starts nothing local; the default backend
 			// runs the command through the scripted shell; a per-call operations override runs through its own backend instead.
@@ -1501,6 +1507,16 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				mockCredentialFields(`{"laneKey":"${tokenLaneKey}"}`),
 				"a token-shaped lane key is masked",
 			).not.toContain(tokenLaneKey);
+
+			await withDeadline(trace, "current input after the cancel", session.prompt("Current input after the cancel."));
+			trace.mark("root", "current-input.reply");
+			const transcript = JSON.stringify(session.messages);
+			expect(transcript).toContain("Current input handled.");
+			expect(transcript, "a cancelled turn's held reply must not reach the transcript").not.toContain(
+				"This reply is never delivered.",
+			);
+			expect(delegateResultTexts(session), "a cancelled root starts no worker").toEqual([]);
+			expect(world.provider.reached.filter((step) => !step.startsWith("root:"))).toEqual([]);
 
 			// The background turns ask no judgment of their own; the cleanup turns ask the owner-message question.
 			const backgroundJudgments = {
