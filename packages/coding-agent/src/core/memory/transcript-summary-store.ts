@@ -5,18 +5,24 @@
  *
  * Layout under `<agentDir>/state/transcript-memory/<projectId>/`:
  *   nodes/<id>.json   immutable node content, written BEFORE anything references it (identity and text never change;
- *                     the only later rewrite is `annotateAdmission`, which adds the admission record of a model summary)
- *   manifest.json     schema, writer fence, revision, session cursors, accepted nodes, frontiers, tombstones
+ *                     the only later rewrite is `annotateAdmission`, which adds the admission record of a model summary;
+ *                     republishing a dormant node writes the same content again)
+ *   manifest.json     schema, writer fence, revision, session cursors, accepted nodes, frontiers, tombstones,
+ *                     dormant nodes (content of nodes revoked by a lineage change, kept only to be reused)
  *   jobs.json         bounded scheduler state
  *   retention-anchors.json  retention anchors (per session timestamp, per first-capture source), independent of recipes and jobs
- *   spent-attempts.json     spent attempt budgets of pruned terminal failed jobs, independent of the job list
+ *   spent-attempts.json     terminal-proof ledger, independent of the job list: one bounded record per admitted job
+ *                           identity (a reservation while its job lives, its spent budget once it failed) and the
+ *                           durable holds (`saturatedSince`, `lostProofSince`)
  *   writer.lock       advisory lock guarding the manifest transaction
  *
  * Writer model: one lease with a durable fencing token. `acquireWriter` increments `writerFence` under the
  * lock; every transaction re-reads the manifest under the same lock and refuses to publish when the fence
  * is no longer the caller's or the expected revision moved. A newer lease therefore supersedes an older
  * one without any shared in-memory state. Node acceptance, the session cursor and frontier references are
- * one manifest write, so a published frontier can never name a node that was not accepted and present.
+ * one manifest write, so a published frontier can never name a node that was not accepted and present. The
+ * manifest `revision` advances with every write that changes what `load()` returns to a reader (accepted nodes,
+ * frontiers, tombstones, retention anchors, admission annotations), so a reader comparing it knows when to reload.
  *
  * Durability, stated plainly: `writeFileAtomic` (core/util/atomic-file.ts) writes a uniquely named temporary
  * file and renames it over the destination. It never calls `fsync` on the file or on the directory. That
@@ -31,7 +37,7 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { stateFile } from "../agent-paths.ts";
-import { isMissingFileError, withFileLock, writeFileAtomic } from "../util/atomic-file.ts";
+import { FileLockDeadlineError, isMissingFileError, withFileLock, writeFileAtomic } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { TranscriptFrontierSelection } from "./transcript-frontier.ts";
 import {
@@ -52,26 +58,32 @@ import {
 	validateParentChildren,
 } from "./transcript-summary-node.ts";
 import {
-	parseSpentAttempt,
+	parseProofRecord,
 	parseSummaryJob,
+	proofKindFor,
+	TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS,
+	TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS,
 	type TranscriptSummaryJob,
-	type TranscriptSummarySpentAttempt,
+	type TranscriptSummaryProofHold,
+	type TranscriptSummaryProofRecord,
+	type TranscriptSummaryRekey,
 } from "./transcript-summary-scheduler.ts";
 
-export const TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS = 2_000;
 export const TRANSCRIPT_SUMMARY_MAX_TOMBSTONES = 10_000;
+/**
+ * Dormant nodes kept; past this the oldest parked are evicted (their files deleted). A dormant node is only a
+ * cache of paid content for an identity that may come back: evicting one costs a rebuild, never proof.
+ */
+export const TRANSCRIPT_SUMMARY_MAX_DORMANT_NODES = 2_000;
 /**
  * Retention anchored sources kept (first-capture sources plus session-timestamp memberships). An anchor is
  * never evicted by age (that would reset a source's age); past this, new ones are refused. Anchors leave only
  * with a forgotten or vanished session.
  */
 export const TRANSCRIPT_SUMMARY_MAX_RETENTION_ANCHORS = 20_000;
-/**
- * Spent-attempt records kept. A record leaves only with a forgotten or vanished session; past this bound the
- * job that would need a new record is pruned unrecorded and the refusal is reported.
- */
-export const TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS = 20_000;
 const MAX_SPENT_MESSAGE_CHARS = 300;
+/** The ledger shape with reservations and holds; a file without it was written before reservations existed. */
+const PROOF_LEDGER_VERSION = 2;
 /** Terminal handoff records kept (newest last). */
 export const TRANSCRIPT_SUMMARY_MAX_TERMINALS = 50;
 /** Unreferenced node and temporary files younger than this are never swept: their writer may still publish. */
@@ -123,6 +135,11 @@ export interface TranscriptAnchorRequest {
 	handle: string;
 	at: string;
 	basis: "session_timestamp" | "first_capture";
+	/**
+	 * The same source's handle under capture version 1 (its text-only digest). An anchor recorded under it moves to
+	 * `handle` with its own age and basis instead of a new one being stamped: an upgrade never makes a source younger.
+	 */
+	legacyHandle?: string;
 }
 
 /** A published frontier selection for one lineage; its meaning belongs to transcript-frontier.ts, its integrity to the store. */
@@ -144,6 +161,18 @@ export interface TranscriptSummaryManifest {
 	frontiers: Record<string, TranscriptSummaryFrontierRecord>;
 	/** Retention revocations only: a late result for a forgotten node must not be able to republish it. */
 	tombstones: Record<string, TranscriptSummaryTombstone>;
+	/**
+	 * Nodes revoked because their coverage left the live lineage (a branch switch), parked with their file kept
+	 * so the identical identity found again is republished without paying again. Never accepted, never read: no
+	 * frontier, discovery or expansion path sees them. Retention, forgetting and a vanished session purge them.
+	 */
+	dormant: Record<string, TranscriptSummaryDormantEntry>;
+}
+
+export interface TranscriptSummaryDormantEntry {
+	sessionId: string;
+	/** ISO instant it was parked; eviction takes the oldest first. */
+	parkedAt: string;
 }
 
 function emptyManifest(writerFence: number): TranscriptSummaryManifest {
@@ -155,6 +184,7 @@ function emptyManifest(writerFence: number): TranscriptSummaryManifest {
 		acceptedNodes: {},
 		frontiers: {},
 		tombstones: {},
+		dormant: {},
 	};
 }
 
@@ -267,6 +297,19 @@ function parseManifest(raw: string): ManifestParse {
 		}
 		manifest.tombstones[id] = { revokedAt: raw.revokedAt, reason: raw.reason };
 	}
+	// A manifest written before dormant nodes existed has none.
+	if (value.dormant !== undefined && !isPlainRecord(value.dormant)) return fail("dormant section is invalid");
+	for (const [id, raw] of Object.entries(value.dormant ?? {})) {
+		if (
+			!NODE_ID_PATTERN.test(id) ||
+			!isPlainRecord(raw) ||
+			typeof raw.sessionId !== "string" ||
+			typeof raw.parkedAt !== "string"
+		) {
+			return fail(`dormant node ${id} is invalid`);
+		}
+		manifest.dormant[id] = { sessionId: raw.sessionId, parkedAt: raw.parkedAt };
+	}
 	return { ok: true, manifest };
 }
 
@@ -295,7 +338,7 @@ export type TranscriptSummaryPublishResult =
 	| { status: "manifest_corrupt"; detail: string };
 
 export type TranscriptSummaryAnnotateResult =
-	| { status: "annotated"; node: TranscriptSummaryNode }
+	| { status: "annotated"; node: TranscriptSummaryNode; revision: number }
 	| { status: "not_accepted" }
 	| { status: "unreadable"; reason: string }
 	| { status: "invalid"; reason: string }
@@ -309,31 +352,82 @@ export type TranscriptSummaryRevokeResult =
 			/** Every node removed from the accepted set: the matches and all of their transitive dependents. */
 			revoked: string[];
 			removedFrontiers: string[];
+			/** Revoked nodes parked as dormant (their files kept). */
+			parked: string[];
+			/** Dormant nodes removed: purged (retention, forgetting, a vanished session, damage) or evicted by the bound. */
+			purged: string[];
 			/** Node files that could not be deleted; the nodes are revoked either way and the files are unreferenced. */
 			unlinkFailures: { id: string; error: string }[];
 	  }
 	| { status: "fenced"; currentFence: number }
 	| { status: "manifest_corrupt"; detail: string };
 
+/** Durable terminal-proof capacity as persisted; the bound is {@link TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS}. */
+export interface TranscriptSummaryProofStatus {
+	/** Durable terminal-proof records: spent budgets plus reservations. */
+	recorded: number;
+	/** Reservations held by admitted identities whose job has not ended. */
+	reserved: number;
+	/** `possibly_lost_proof` when proof may have been lost, else `capacity` while the ledger is at its bound. */
+	hold?: TranscriptSummaryProofHold;
+}
+
 export type TranscriptSummaryJobsSaveResult =
-	/**
-	 * `spent`: budgets of the pruned `failed` jobs newly recorded; `unrecorded`: pruned failed jobs the record
-	 * bound refused (their budget is no longer protected).
-	 */
-	| { status: "saved"; pruned: string[]; spent: Record<string, TranscriptSummarySpentAttempt>; unrecorded: number }
+	| {
+			status: "saved";
+			/** Terminal jobs removed from the list. A job whose spent or carried attempts lack a record is never among them. */
+			pruned: string[];
+			/** Proof records this save wrote: new reservations, spent budgets of failures, carried attempts of stale jobs. */
+			proof: Record<string, TranscriptSummaryProofRecord>;
+			/** Records released because their job ended without spending a budget (ready, or stale/cancelled before any attempt). */
+			released: string[];
+			/** Live jobs the ledger bound refused a reservation: none of them may start chargeable work. */
+			refused: string[];
+			/** Terminal jobs kept past the job-list bound because no durable record of their attempts could be written. */
+			retained: number;
+			/**
+			 * The requested budget moves now durable: applied by this save, or already settled (nothing left under the old
+			 * key). A skipped one is absent.
+			 */
+			rekeyed: TranscriptSummaryRekey[];
+			ledger: TranscriptSummaryProofStatus;
+	  }
 	| { status: "jobs_overflow"; active: number }
 	| { status: "fenced"; currentFence: number }
 	| { status: "manifest_corrupt"; detail: string };
 
 export type TranscriptSummaryAnchorResult =
-	| { status: "saved"; added: number }
+	/**
+	 * `revision`: the manifest revision after this write (advanced when anchors were added or moved). `recorded`: the
+	 * anchors now held for the requested handles, with the age they actually carry (a moved one keeps its version 1
+	 * age); `moved`: the version 1 handles they were moved from.
+	 */
+	| { status: "saved"; added: number; recorded: TranscriptAnchorRequest[]; moved: string[]; revision: number }
 	/** The anchor file is at its ceiling: the sources in `refused` were not anchored and must not be treated as ageless. */
-	| { status: "capacity"; added: number; refused: string[] }
+	| {
+			status: "capacity";
+			added: number;
+			recorded: TranscriptAnchorRequest[];
+			moved: string[];
+			refused: string[];
+			revision: number;
+	  }
 	| { status: "fenced"; currentFence: number }
 	| { status: "manifest_corrupt"; detail: string };
 
 export type TranscriptSummarySessionRecordsResult =
-	| { status: "saved"; anchors: number; spent: number }
+	/**
+	 * `spent`: budget records (spent and carried) dropped; `dormant`: dormant nodes of those sessions purged;
+	 * `revision`: the manifest revision after the write.
+	 */
+	| {
+			status: "saved";
+			anchors: number;
+			spent: number;
+			dormant: string[];
+			ledger: TranscriptSummaryProofStatus;
+			revision: number;
+	  }
 	| { status: "fenced"; currentFence: number }
 	| { status: "manifest_corrupt"; detail: string };
 
@@ -349,6 +443,7 @@ export type TranscriptSummaryRecoveryIssue =
 	| { kind: "node_mismatch"; nodeId: string; detail: string }
 	| { kind: "child_missing"; nodeId: string; childId: string }
 	| { kind: "frontier_dangling"; frontier: string; nodeId: string }
+	| { kind: "dormant_damaged"; nodeId: string; detail: string }
 	| { kind: "jobs_corrupt"; detail: string }
 	| { kind: "anchors_corrupt"; detail: string }
 	| { kind: "spent_corrupt"; detail: string }
@@ -366,6 +461,25 @@ export interface TranscriptSummaryTerminalCause {
  * The bounded terminal handoff of one finished batch of summary work. The owner decides whether and how
  * to surface it; a successful batch is a diagnostic record and must never inject a chat turn.
  */
+/**
+ * Why a job waits before any provider call. `model_work`: the summarizer or the admission judge cannot run.
+ * `children`: a parent's children are not admitted yet. `proof`: the terminal-proof ledger has no slot. `persistence`:
+ * the save that should make its attempt durable failed. `reconciliation`: a recovered leaf whose version 1 budget is
+ * not adopted yet (its session has not been read since the start).
+ */
+export type TranscriptSummaryHoldKind = "model_work" | "children" | "proof" | "persistence" | "reconciliation";
+
+/** Held jobs per hold kind; a kind with none is absent. */
+export type TranscriptSummaryHeldByKind = Partial<Record<TranscriptSummaryHoldKind, number>>;
+
+const HOLD_KINDS: readonly TranscriptSummaryHoldKind[] = [
+	"model_work",
+	"children",
+	"proof",
+	"persistence",
+	"reconciliation",
+];
+
 export interface TranscriptSummaryTerminalRecord {
 	batchId: number;
 	/** `completed`: every job reached a terminal state. `stopped`: the coordinator stopped with work left. */
@@ -379,10 +493,14 @@ export interface TranscriptSummaryTerminalRecord {
 	startedAt: number;
 	endedAt: number;
 	causes: TranscriptSummaryTerminalCause[];
-	/** Model-summary jobs still held when the batch ended (egress, no evaluator, unadmitted children); not failures, not finished. */
+	/** Jobs still held when the batch ended (see {@link TranscriptSummaryHoldKind}); not failures, not finished. */
 	held?: number;
-	/** The cause recorded on a held job, bounded. */
+	/** The kind of the first held job's hold. */
+	heldKind?: TranscriptSummaryHoldKind;
+	/** The real cause recorded with that hold when it was set, bounded. */
 	heldReason?: string;
+	/** Held jobs per hold kind; their sum is `held`. */
+	heldByKind?: TranscriptSummaryHeldByKind;
 	/** Set when the coordinator stopped itself because of an unrecoverable condition (superseded writer, corrupt store). */
 	stopReason?: string;
 }
@@ -392,10 +510,12 @@ export interface TranscriptSummaryStoreState {
 	manifest: TranscriptSummaryManifest | undefined;
 	/** Every accepted node that loaded and validated. */
 	nodes: Map<string, TranscriptSummaryNode>;
+	/** Dormant nodes that loaded and validated: for reuse by the summary coordinator only, never for a reader. */
+	dormant: Map<string, TranscriptSummaryNode>;
 	jobs: TranscriptSummaryJob[];
 	retentionAnchors: TranscriptRetentionAnchors;
-	/** Spent attempt budgets by job key. */
-	spentAttempts: Record<string, TranscriptSummarySpentAttempt>;
+	/** The terminal-proof ledger: records by job key and the capacity they leave. */
+	proof: { records: Record<string, TranscriptSummaryProofRecord>; status: TranscriptSummaryProofStatus };
 	/** The persisted terminal handoff records, oldest first. */
 	terminals: TranscriptSummaryTerminalRecord[];
 	issues: TranscriptSummaryRecoveryIssue[];
@@ -422,7 +542,49 @@ export interface TranscriptSummaryStoreOptions {
 // Store
 // ---------------------------------------------------------------------------------------------
 
-type ManifestRead =
+/** A store read that could not be served: the real cause (an I/O or lock failure, or the caller's deadline). */
+export interface TranscriptSummaryStoreUnavailable {
+	status: "unavailable";
+	reason: string;
+}
+
+/** A bounded load that reached its deadline between file reads: it stops there, and its lock is released. */
+class StoreReadDeadlineError extends Error {}
+
+function pastDeadline(deadlineAt: number | undefined): void {
+	if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new StoreReadDeadlineError();
+}
+
+/** A system I/O error (it names its syscall) or a lock that is held or compromised. */
+function isStoreIoError(error: unknown): error is Error {
+	if (!(error instanceof Error)) return false;
+	if ("syscall" in error && typeof error.syscall === "string") return true;
+	return "code" in error && (error.code === "ELOCKED" || error.code === "ECOMPROMISED");
+}
+
+/**
+ * The store's read boundary for readers (`readManifest`, `load`): an I/O or lock failure, a lock wait past the
+ * deadline and a load that ran out of time become a typed real-cause `unavailable`, so a reader keeps its exact
+ * history hits. Anything else is a programming error and still rejects. File damage is never decided here: it stays
+ * `corrupt` from the parsers, so a transient error can never make recovery revoke anything.
+ */
+async function readBoundary<T>(what: string, read: () => Promise<T>): Promise<T | TranscriptSummaryStoreUnavailable> {
+	try {
+		return await read();
+	} catch (error) {
+		if (error instanceof FileLockDeadlineError) {
+			return { status: "unavailable", reason: `the summary store is busy: ${what} ${error.message}` };
+		}
+		if (error instanceof StoreReadDeadlineError) {
+			return { status: "unavailable", reason: `${what} did not finish before the operation deadline` };
+		}
+		if (isStoreIoError(error)) return { status: "unavailable", reason: `${what} failed: ${error.message}` };
+		throw error;
+	}
+}
+
+/** One whole read of the manifest file: absent, parsed and valid, or damaged (with its raw bytes). */
+export type ManifestRead =
 	| { status: "missing" }
 	| { status: "ok"; manifest: TranscriptSummaryManifest }
 	| { status: "corrupt"; detail: string; raw: string };
@@ -442,9 +604,82 @@ function anchoredCount(anchors: TranscriptRetentionAnchors): number {
 	return count;
 }
 
+/** The terminal-proof ledger file, parsed. */
+interface ProofLedger {
+	records: Record<string, TranscriptSummaryProofRecord>;
+	/** When the record count last reached the bound; cleared as soon as a slot is free. */
+	saturatedSince?: string;
+	/**
+	 * The latest instant terminal proof may have been lost (a full ledger from before reservations existed, damaged
+	 * proof). Never cleared: which identities lost their budget is unknowable, so sessions started at or before it
+	 * admit no new identity (see the scheduler's admission rule).
+	 */
+	lostProofSince?: string;
+	/** False when the file is missing or has the shape from before reservations: the next ledger write converts it. */
+	current: boolean;
+}
+
+function isInstant(value: unknown): value is string {
+	return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
+function proofStatus(ledger: ProofLedger): TranscriptSummaryProofStatus {
+	let reserved = 0;
+	for (const record of Object.values(ledger.records)) if (record.kind === "reserved") reserved += 1;
+	const hold: TranscriptSummaryProofHold | undefined =
+		ledger.lostProofSince !== undefined
+			? { cause: "possibly_lost_proof", since: ledger.lostProofSince }
+			: ledger.saturatedSince !== undefined
+				? { cause: "capacity", since: ledger.saturatedSince }
+				: undefined;
+	return { recorded: Object.keys(ledger.records).length, reserved, ...(hold ? { hold } : {}) };
+}
+
+/** Keep the capacity hold in step with the record count; true when it changed. */
+function noteSaturation(ledger: ProofLedger, at: number): boolean {
+	const saturated = Object.keys(ledger.records).length >= TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS;
+	if (saturated === (ledger.saturatedSince !== undefined)) return false;
+	if (saturated) ledger.saturatedSince = new Date(at).toISOString();
+	else delete ledger.saturatedSince;
+	return true;
+}
+
+/**
+ * Move the anchor recorded under a source's capture version 1 handle to its current handle, keeping its age and its
+ * basis (a first-capture anchor stays per source; a session-timestamp membership is renamed within its session).
+ * Undefined when version 1 recorded no anchor for it. The anchor count does not change.
+ */
+function moveLegacyAnchor(
+	anchors: TranscriptRetentionAnchors,
+	legacyHandle: string,
+	handle: string,
+): TranscriptAnchorRequest | undefined {
+	const first = anchors.sources[legacyHandle];
+	if (first) {
+		delete anchors.sources[legacyHandle];
+		anchors.sources[handle] = { at: first.at };
+		return { handle, at: first.at, basis: "first_capture" };
+	}
+	const session = anchors.sessions[sessionOfHandle(legacyHandle) ?? ""];
+	const position = session?.sources.indexOf(sourceKeyOfHandle(legacyHandle)) ?? -1;
+	if (!session || position === -1) return undefined;
+	session.sources[position] = sourceKeyOfHandle(handle);
+	return { handle, at: session.at, basis: "session_timestamp" };
+}
+
+/** A per-kind count of held jobs: only known kinds, each a non-negative integer. */
+function isHeldByKind(value: unknown): value is TranscriptSummaryHeldByKind {
+	if (!isPlainRecord(value)) return false;
+	return Object.entries(value).every(
+		([kind, count]) => HOLD_KINDS.some((known) => known === kind) && isNonNegativeInteger(count),
+	);
+}
+
 function isTerminalRecord(value: unknown): value is TranscriptSummaryTerminalRecord {
 	if (!isPlainRecord(value)) return false;
 	return (
+		(value.heldKind === undefined || HOLD_KINDS.some((kind) => kind === value.heldKind)) &&
+		(value.heldByKind === undefined || isHeldByKind(value.heldByKind)) &&
 		isNonNegativeInteger(value.batchId) &&
 		(value.outcome === "completed" || value.outcome === "stopped") &&
 		isNonNegativeInteger(value.succeeded) &&
@@ -487,79 +722,112 @@ export class TranscriptSummaryStore {
 	/**
 	 * Read and verify everything: the manifest schema, every accepted node file (parse, identity, agreement
 	 * with its manifest entry), parent/child links, frontier references and the job list. Damage is returned
-	 * as `issues`; nothing is repaired or dropped silently.
+	 * as `issues`; nothing is repaired or dropped silently. Typed at the store's read boundary ({@link readBoundary}).
+	 * With `deadlineAt`, waiting for the lock is bounded and the load stops between file reads once it has passed,
+	 * releasing the lock; a file read already started is not preemptible, so it can settle one read past the deadline.
+	 * `lockAdmissionDeadlineAt` bounds only the wait for the lock (the earlier of the two applies there); a load that
+	 * was admitted runs its reads under `deadlineAt` alone. A wait past either is the typed `unavailable`.
 	 */
-	async load(): Promise<TranscriptSummaryStoreState> {
-		return this.locked(async () => {
-			const issues: TranscriptSummaryRecoveryIssue[] = [];
-			const nodes = new Map<string, TranscriptSummaryNode>();
-			const read = await this.readManifest();
-			let manifest: TranscriptSummaryManifest | undefined;
-			if (read.status === "corrupt") issues.push({ kind: "manifest_corrupt", detail: read.detail });
-			if (read.status === "ok") manifest = read.manifest;
-			if (manifest) {
-				for (const [id, entry] of Object.entries(manifest.acceptedNodes)) {
-					const result = await this.readNode(id);
-					if (result.status === "missing") {
-						issues.push({ kind: "node_missing", nodeId: id });
-						continue;
-					}
-					if (result.status === "corrupt") {
-						issues.push({ kind: "node_corrupt", nodeId: id, detail: result.reason });
-						continue;
-					}
-					const node = result.node;
-					if (
-						node.level !== entry.level ||
-						node.ordinal !== entry.ordinal ||
-						node.sessionId !== entry.sessionId ||
-						node.spanRange.fromIndex !== entry.fromIndex ||
-						node.spanRange.toIndexExclusive !== entry.toIndexExclusive
-					) {
-						issues.push({
-							kind: "node_mismatch",
-							nodeId: id,
-							detail: "node file disagrees with its manifest entry",
-						});
-						continue;
-					}
-					nodes.set(id, node);
+	async load(
+		options: { deadlineAt?: number; lockAdmissionDeadlineAt?: number } = {},
+	): Promise<TranscriptSummaryStoreState | TranscriptSummaryStoreUnavailable> {
+		const { deadlineAt, lockAdmissionDeadlineAt } = options;
+		const admissionBy =
+			deadlineAt === undefined
+				? lockAdmissionDeadlineAt
+				: lockAdmissionDeadlineAt === undefined
+					? deadlineAt
+					: Math.min(deadlineAt, lockAdmissionDeadlineAt);
+		return readBoundary("loading the summary store", () =>
+			this.locked(() => this.loadLocked(deadlineAt), admissionBy),
+		);
+	}
+
+	/** Caller holds the lock. */
+	private async loadLocked(deadlineAt: number | undefined): Promise<TranscriptSummaryStoreState> {
+		const issues: TranscriptSummaryRecoveryIssue[] = [];
+		const nodes = new Map<string, TranscriptSummaryNode>();
+		const dormant = new Map<string, TranscriptSummaryNode>();
+		pastDeadline(deadlineAt);
+		const read = await this.readManifestFile();
+		let manifest: TranscriptSummaryManifest | undefined;
+		if (read.status === "corrupt") issues.push({ kind: "manifest_corrupt", detail: read.detail });
+		if (read.status === "ok") manifest = read.manifest;
+		if (manifest) {
+			for (const [id, entry] of Object.entries(manifest.acceptedNodes)) {
+				pastDeadline(deadlineAt);
+				const result = await this.readNode(id);
+				if (result.status === "missing") {
+					issues.push({ kind: "node_missing", nodeId: id });
+					continue;
 				}
-				for (const [id, node] of nodes) {
-					if (!node.children) continue;
-					const [leftId, rightId] = node.children;
-					const left = nodes.get(leftId);
-					const right = nodes.get(rightId);
-					if (!left || !right) {
-						issues.push({ kind: "child_missing", nodeId: id, childId: left ? rightId : leftId });
-						continue;
-					}
-					const check = validateParentChildren(node, left, right);
-					if (!check.ok) issues.push({ kind: "node_mismatch", nodeId: id, detail: check.reason });
+				if (result.status === "corrupt") {
+					issues.push({ kind: "node_corrupt", nodeId: id, detail: result.reason });
+					continue;
 				}
-				for (const [name, frontier] of Object.entries(manifest.frontiers)) {
-					for (const nodeId of frontier.nodeIds) {
-						if (!manifest.acceptedNodes[nodeId] || !nodes.has(nodeId)) {
-							issues.push({ kind: "frontier_dangling", frontier: name, nodeId });
-							break;
-						}
+				const node = result.node;
+				if (
+					node.level !== entry.level ||
+					node.ordinal !== entry.ordinal ||
+					node.sessionId !== entry.sessionId ||
+					node.spanRange.fromIndex !== entry.fromIndex ||
+					node.spanRange.toIndexExclusive !== entry.toIndexExclusive
+				) {
+					issues.push({
+						kind: "node_mismatch",
+						nodeId: id,
+						detail: "node file disagrees with its manifest entry",
+					});
+					continue;
+				}
+				nodes.set(id, node);
+			}
+			for (const [id, node] of nodes) {
+				if (!node.children) continue;
+				const [leftId, rightId] = node.children;
+				const left = nodes.get(leftId);
+				const right = nodes.get(rightId);
+				if (!left || !right) {
+					issues.push({ kind: "child_missing", nodeId: id, childId: left ? rightId : leftId });
+					continue;
+				}
+				const check = validateParentChildren(node, left, right);
+				if (!check.ok) issues.push({ kind: "node_mismatch", nodeId: id, detail: check.reason });
+			}
+			for (const [name, frontier] of Object.entries(manifest.frontiers)) {
+				for (const nodeId of frontier.nodeIds) {
+					if (!manifest.acceptedNodes[nodeId] || !nodes.has(nodeId)) {
+						issues.push({ kind: "frontier_dangling", frontier: name, nodeId });
+						break;
 					}
 				}
 			}
-			const jobs = await this.readJobs(issues);
-			const retentionAnchors = await this.readAnchors(issues);
-			const spentAttempts = await this.readSpent(issues);
-			const terminals = await this.readTerminals(issues);
-			return { manifest, nodes, jobs, retentionAnchors, spentAttempts, terminals, issues };
-		});
-	}
-
-	/** The current manifest, or undefined when none exists or it is corrupt (`load()` reports which). */
-	async manifest(): Promise<TranscriptSummaryManifest | undefined> {
-		return this.locked(async () => {
-			const read = await this.readManifest();
-			return read.status === "ok" ? read.manifest : undefined;
-		});
+		}
+		for (const [id, entry] of Object.entries(manifest?.dormant ?? {})) {
+			pastDeadline(deadlineAt);
+			const result = await this.readNode(id);
+			const detail =
+				result.status === "missing"
+					? "file missing"
+					: result.status === "corrupt"
+						? result.reason
+						: result.node.sessionId !== entry.sessionId
+							? "file disagrees with its manifest entry"
+							: undefined;
+			if (detail !== undefined) issues.push({ kind: "dormant_damaged", nodeId: id, detail });
+			else if (result.status === "ok") dormant.set(id, result.node);
+		}
+		// No new file read starts once the deadline has passed; one already started cannot be preempted.
+		pastDeadline(deadlineAt);
+		const jobs = await this.readJobs(issues);
+		pastDeadline(deadlineAt);
+		const retentionAnchors = await this.readAnchors(issues);
+		pastDeadline(deadlineAt);
+		const ledger = await this.readProof(issues);
+		pastDeadline(deadlineAt);
+		const terminals = await this.readTerminals(issues);
+		const proof = { records: ledger.records, status: proofStatus(ledger) };
+		return { manifest, nodes, dormant, jobs, retentionAnchors, proof, terminals, issues };
 	}
 
 	/** Read one node file, fully validated. */
@@ -595,7 +863,7 @@ export class TranscriptSummaryStore {
 	 */
 	async acquireWriter(options: { recoverCorrupt?: boolean } = {}): Promise<TranscriptSummaryWriterAcquisition> {
 		return this.locked(async () => {
-			const read = await this.readManifest();
+			const read = await this.readManifestFile();
 			let manifest: TranscriptSummaryManifest;
 			if (read.status === "missing") {
 				manifest = emptyManifest(1);
@@ -614,13 +882,32 @@ export class TranscriptSummaryStore {
 
 	// ---- internals shared with the writer ------------------------------------------------------
 
-	/** @internal */
-	locked<T>(fn: () => Promise<T>): Promise<T> {
-		return withFileLock(this.lockPath, fn);
+	/** @internal With `deadlineAt`, waiting for the lock is bounded (`FileLockDeadlineError`); the section is not. */
+	locked<T>(fn: () => Promise<T>, deadlineAt?: number): Promise<T> {
+		return withFileLock(this.lockPath, fn, deadlineAt !== undefined ? { deadlineAt } : undefined);
 	}
 
-	/** @internal Caller holds the lock. */
-	async readManifest(): Promise<ManifestRead> {
+	/**
+	 * One whole read of the manifest, for readers: typed at the store's read boundary ({@link readBoundary}), and not
+	 * started once `deadlineAt` has passed. Correct without the lock: the manifest is only ever replaced by
+	 * `writeManifest`, an atomic temporary-file-then-rename (`writeFileAtomic`), so a reader sees the previous or the
+	 * next manifest, never a torn one, and a read-only owner may compare its revision unlocked. One started file read is
+	 * not preemptible: it can settle after the deadline.
+	 */
+	async readManifest(
+		options: { deadlineAt?: number } = {},
+	): Promise<ManifestRead | TranscriptSummaryStoreUnavailable> {
+		return readBoundary("reading the summary manifest", async () => {
+			pastDeadline(options.deadlineAt);
+			return this.readManifestFile();
+		});
+	}
+
+	/**
+	 * @internal The raw manifest read the writer's fenced sections, writer acquisition and recovery use under the lock;
+	 * an I/O failure rejects there, where it ends the transaction.
+	 */
+	async readManifestFile(): Promise<ManifestRead> {
 		let raw: string;
 		try {
 			raw = await fs.readFile(this.manifestPath, "utf8");
@@ -664,7 +951,11 @@ export class TranscriptSummaryStore {
 		);
 	}
 
-	/** @internal Caller holds the lock. */
+	/**
+	 * @internal Caller holds the lock. The writer never persists more than {@link TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS}
+	 * live jobs (`saveJobs` refuses with `jobs_overflow`), so a live entry past that bound is damage like any other: it is
+	 * reported as `jobs_corrupt` and left out, and recovery rewrites the bounded list and records possibly lost proof.
+	 */
 	async readJobs(issues: TranscriptSummaryRecoveryIssue[]): Promise<TranscriptSummaryJob[]> {
 		let raw: string;
 		try {
@@ -693,6 +984,8 @@ export class TranscriptSummaryStore {
 		}
 		const jobs: TranscriptSummaryJob[] = [];
 		const seen = new Set<string>();
+		let live = 0;
+		let overLive = 0;
 		for (const entry of value.jobs) {
 			const parsed = parseSummaryJob(entry);
 			if (!parsed.ok) {
@@ -704,7 +997,20 @@ export class TranscriptSummaryStore {
 				continue;
 			}
 			seen.add(parsed.job.id);
+			if (!isTerminalSummaryJobState(parsed.job.state)) {
+				if (live >= TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS) {
+					overLive += 1;
+					continue;
+				}
+				live += 1;
+			}
 			jobs.push(parsed.job);
+		}
+		if (overLive > 0) {
+			issues.push({
+				kind: "jobs_corrupt",
+				detail: `${overLive} live jobs past the bound of ${TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS} the writer keeps`,
+			});
 		}
 		return jobs;
 	}
@@ -787,11 +1093,17 @@ export class TranscriptSummaryStore {
 		);
 	}
 
-	/** @internal Caller holds the lock. Damaged entries are reported and left out; the rest are kept. */
-	async readSpent(issues: TranscriptSummaryRecoveryIssue[]): Promise<Record<string, TranscriptSummarySpentAttempt>> {
-		const records: Record<string, TranscriptSummarySpentAttempt> = {};
+	/**
+	 * @internal Caller holds the lock. Damaged entries are reported and left out; the rest are kept (the recovery
+	 * that rewrites them also records the possible loss, see `applyRecovery`). A file in the shape written before
+	 * reservations existed reads as spent budgets; if it is full, its writer pruned failed jobs unrecorded and
+	 * counted the refusals only in memory, so proof may have been lost: `lostProofSince` is set to now and
+	 * persisted by the next ledger write.
+	 */
+	async readProof(issues: TranscriptSummaryRecoveryIssue[]): Promise<ProofLedger> {
+		const ledger: ProofLedger = { records: {}, current: false };
 		const raw = await this.readOptional(this.spentPath);
-		if (raw === undefined) return records;
+		if (raw === undefined) return ledger;
 		let value: unknown;
 		try {
 			value = JSON.parse(raw);
@@ -800,7 +1112,7 @@ export class TranscriptSummaryStore {
 				kind: "spent_corrupt",
 				detail: `spent-attempts.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
 			});
-			return records;
+			return ledger;
 		}
 		if (
 			!isPlainRecord(value) ||
@@ -808,27 +1120,42 @@ export class TranscriptSummaryStore {
 			!isPlainRecord(value.jobs)
 		) {
 			issues.push({ kind: "spent_corrupt", detail: "spent-attempts.json has an unsupported shape" });
-			return records;
+			return ledger;
 		}
 		let damaged = 0;
 		for (const [id, entry] of Object.entries(value.jobs)) {
-			const record = parseSpentAttempt(entry);
-			if (record) records[id] = record;
+			const record = parseProofRecord(entry);
+			if (record) ledger.records[id] = record;
 			else damaged += 1;
 		}
 		if (damaged > 0) {
-			issues.push({ kind: "spent_corrupt", detail: `${damaged} spent-attempt record(s) are invalid` });
+			issues.push({ kind: "spent_corrupt", detail: `${damaged} terminal-proof record(s) are invalid` });
 		}
-		return records;
+		ledger.current = value.proofVersion === PROOF_LEDGER_VERSION;
+		if (ledger.current) {
+			if (isInstant(value.saturatedSince)) ledger.saturatedSince = value.saturatedSince;
+			if (isInstant(value.lostProofSince)) ledger.lostProofSince = value.lostProofSince;
+		} else if (Object.keys(ledger.records).length >= TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS) {
+			ledger.lostProofSince = new Date(this.now()).toISOString();
+		}
+		return ledger;
 	}
 
-	/** @internal Caller holds the lock. */
-	async writeSpent(records: Readonly<Record<string, TranscriptSummarySpentAttempt>>): Promise<void> {
+	/** @internal Caller holds the lock. Always written in the current shape. */
+	async writeProof(ledger: ProofLedger): Promise<void> {
+		const { records, saturatedSince, lostProofSince } = ledger;
 		await writeFileAtomic(
 			this.spentPath,
-			`${JSON.stringify({ schemaVersion: TRANSCRIPT_SUMMARY_SCHEMA_VERSION, jobs: records })}\n`,
+			`${JSON.stringify({
+				schemaVersion: TRANSCRIPT_SUMMARY_SCHEMA_VERSION,
+				proofVersion: PROOF_LEDGER_VERSION,
+				jobs: records,
+				...(saturatedSince !== undefined ? { saturatedSince } : {}),
+				...(lostProofSince !== undefined ? { lostProofSince } : {}),
+			})}\n`,
 			{ mode: 0o600 },
 		);
+		ledger.current = true;
 	}
 
 	/** @internal Caller holds the lock. Keep the damaged bytes of one derived file beside it. */
@@ -956,7 +1283,7 @@ export class TranscriptSummaryWriter {
 		body: (manifest: TranscriptSummaryManifest) => Promise<T>,
 	): Promise<T | { status: "manifest_corrupt"; detail: string } | { status: "fenced"; currentFence: number }> {
 		return this.store.locked(async () => {
-			const read = await this.store.readManifest();
+			const read = await this.store.readManifestFile();
 			if (read.status !== "ok") {
 				return read.status === "corrupt"
 					? { status: "manifest_corrupt" as const, detail: read.detail }
@@ -967,6 +1294,18 @@ export class TranscriptSummaryWriter {
 			}
 			return body(read.manifest);
 		});
+	}
+
+	/**
+	 * Caller holds the lock under this writer's fence, after writing state a reader loads outside the manifest
+	 * (anchors, a node file's admission). The manifest revision is what a reader compares to know `load()` would
+	 * now return something else, so such a write advances it in the same fenced section; the returned revision
+	 * is the writer's new expected revision.
+	 */
+	private async advanceRevision(manifest: TranscriptSummaryManifest): Promise<number> {
+		const revision = manifest.revision + 1;
+		await this.store.writeManifest({ ...manifest, revision });
+		return revision;
 	}
 
 	/** Accept nodes, advance cursors and set frontiers in one manifest write. */
@@ -1058,9 +1397,12 @@ export class TranscriptSummaryWriter {
 				sessions: { ...manifest.sessions, ...(transaction.sessions ?? {}) },
 				acceptedNodes: { ...manifest.acceptedNodes },
 				frontiers: { ...manifest.frontiers, ...(transaction.frontiers ?? {}) },
+				dormant: { ...manifest.dormant },
 			};
 			for (const name of transaction.removeFrontiers ?? []) delete next.frontiers[name];
 			for (const node of incoming) {
+				// Accepting a dormant identity unparks it in the same write (its file now holds the accepted content).
+				delete next.dormant[node.id];
 				next.acceptedNodes[node.id] = {
 					level: node.level,
 					ordinal: node.ordinal,
@@ -1108,7 +1450,8 @@ export class TranscriptSummaryWriter {
 				};
 			}
 			await this.store.writeNodeFile(parsed.node);
-			return { status: "annotated" as const, node: parsed.node };
+			// The annotation changes the node a reader loads (it becomes approved): the revision says so.
+			return { status: "annotated" as const, node: parsed.node, revision: await this.advanceRevision(manifest) };
 		});
 	}
 
@@ -1117,21 +1460,33 @@ export class TranscriptSummaryWriter {
 	 * node as a child. Frontiers naming a revoked node are removed, session cursors are pulled back to the
 	 * earliest revoked position, and the node files are deleted after the manifest no longer references
 	 * them. `retention` additionally tombstones the ids so a late result cannot republish forgotten content.
+	 *
+	 * Dormant nodes: with `park` (an `invalidated` revocation only: coverage that left the live lineage) the
+	 * revoked nodes are parked as dormant and their files kept instead of deleted. Dormant nodes of
+	 * `tombstoneSession` / `dropSessionCursor` (forgetting, a vanished session) and those `purgeDormant` matches
+	 * are purged and their files deleted; a `retention` purge also tombstones them. Past
+	 * {@link TRANSCRIPT_SUMMARY_MAX_DORMANT_NODES} the oldest parked are evicted. All in the same manifest write.
 	 */
 	async revokeNodes(
 		predicate: (id: string, entry: TranscriptSummaryAcceptedNode) => boolean,
 		reason: TranscriptSummaryRevocationReason,
-		options: { dropSessionCursor?: string; tombstoneSession?: string } = {},
+		options: {
+			dropSessionCursor?: string;
+			tombstoneSession?: string;
+			park?: boolean;
+			purgeDormant?: (id: string, entry: TranscriptSummaryDormantEntry) => boolean;
+		} = {},
 	): Promise<TranscriptSummaryRevokeResult> {
+		if (options.park === true && reason !== "invalidated") {
+			throw new RangeError("Only an invalidated revocation parks nodes as dormant.");
+		}
 		return this.fenced(async (manifest) => {
-			return this.applyRevocation(
-				manifest,
-				predicate,
-				reason,
-				options.dropSessionCursor,
-				[],
-				options.tombstoneSession,
-			);
+			return this.applyRevocation(manifest, predicate, reason, {
+				...(options.dropSessionCursor !== undefined ? { dropSessionCursor: options.dropSessionCursor } : {}),
+				...(options.tombstoneSession !== undefined ? { tombstoneSession: options.tombstoneSession } : {}),
+				park: options.park === true,
+				...(options.purgeDormant ? { purgeDormant: options.purgeDormant } : {}),
+			});
 		});
 	}
 
@@ -1149,51 +1504,148 @@ export class TranscriptSummaryWriter {
 	}
 
 	/**
-	 * Replace the persisted job list. Terminal jobs are pruned oldest-first; live work is never pruned. A pruned
-	 * `failed` job leaves a compact spent-budget record (written before the list, so a crash cannot lose it) so
-	 * the identical job found again is not granted a fresh attempt budget. Records are bounded by
-	 * {@link TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS}; past it the job is pruned unrecorded and counted.
+	 * Replace the persisted job list and keep the terminal-proof ledger in step with it, in one fenced write (the
+	 * ledger first, so a crash leaves at worst a record the list no longer needs, never a list that outran its
+	 * proof). In order:
+	 *  1. a reservation or carried record whose job ended without spending a budget (ready, or stale/cancelled
+	 *     before any attempt) is released, and so is a reservation whose job is gone; a carried record whose job
+	 *     was pruned stays;
+	 *  2. a failed job's record becomes its spent budget in place, and a job that went stale or was cancelled after
+	 *     starting attempts keeps them as a carried record (found again, it resumes with them); one without a
+	 *     record (written before reservations existed, or after damage) takes a free slot, else it has no durable
+	 *     equivalent yet;
+	 *  3. every live job without a record is reserved below {@link TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS}, else
+	 *     `refused`: its owner must not let it reach a provider;
+	 *  4. the capacity hold follows the count.
+	 * Terminal jobs are then pruned oldest-first; live work is never pruned, and neither is a job whose spent or
+	 * carried attempts have no durable record: it stays in the list (past its bound, counted in `retained`) until
+	 * one exists.
 	 */
-	async saveJobs(jobs: readonly TranscriptSummaryJob[]): Promise<TranscriptSummaryJobsSaveResult> {
+	async saveJobs(
+		jobs: readonly TranscriptSummaryJob[],
+		options: { rekeys?: readonly TranscriptSummaryRekey[] } = {},
+	): Promise<TranscriptSummaryJobsSaveResult> {
 		return this.fenced(async () => {
 			const live = jobs.filter((job) => !isTerminalSummaryJobState(job.state));
 			if (live.length > TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS) {
 				return { status: "jobs_overflow" as const, active: live.length };
 			}
+			const ledger = await this.store.readProof([]);
+			const { records } = ledger;
+			const at = this.store.clock();
+			const byId = new Map(jobs.map((job) => [job.id, job]));
+			const proof: Record<string, TranscriptSummaryProofRecord> = {};
+			const released: string[] = [];
+			const refused: string[] = [];
+			const unproven = new Set<string>();
+			// Capture-version budgets the scheduler matched to their current job key move or merge first, before anything
+			// is released or recorded under either key (a version 1 job's key is no longer any live job's). A merge
+			// records its total on the current record and removes the version 1 record in this one ledger write, so it
+			// is applied exactly once and never lost to a crash before the job list is written.
+			const rekeyed: TranscriptSummaryRekey[] = [];
+			for (const rekey of options.rekeys ?? []) {
+				const { from, to, merged } = rekey;
+				const record = records[from];
+				// Nothing is left under the version 1 key (an earlier save applied this move before it failed, or the
+				// session's records were dropped): the move is settled, not pending.
+				if (record === undefined) {
+					rekeyed.push(rekey);
+					continue;
+				}
+				if (record.kind !== "spent" && record.kind !== "carried") continue;
+				const target = records[to];
+				let next: TranscriptSummaryProofRecord;
+				if (target === undefined) next = record;
+				else if (merged === undefined) continue;
+				else if (target.kind === "reserved")
+					next = { ...target, attemptsFloor: Math.max(target.attemptsFloor ?? 0, merged) };
+				else if (target.kind === "carried") next = { ...target, attempts: Math.max(target.attempts, merged) };
+				// A spent budget is final: only the version 1 record leaves.
+				else next = target;
+				records[to] = next;
+				delete records[from];
+				proof[to] = next;
+				rekeyed.push(rekey);
+			}
+			for (const [id, record] of Object.entries(records)) {
+				if (record.kind === "spent") continue;
+				const job = byId.get(id);
+				// A carried record outlives its pruned job (that is its purpose); a reservation does not.
+				const needed = job ? proofKindFor(job) : record.kind === "carried" ? "carried" : undefined;
+				if (needed === undefined) {
+					delete records[id];
+					released.push(id);
+				}
+			}
+			let count = Object.keys(records).length;
+			for (const job of jobs) {
+				const needed = proofKindFor(job);
+				if (needed !== "spent" && needed !== "carried") continue;
+				const held = records[job.id];
+				if (held?.kind === "spent") continue;
+				if (needed === "carried" && held?.kind === "carried" && held.attempts >= job.attempts) continue;
+				// A held record becomes the budget in its own slot; a job without one needs a free slot, else it keeps
+				// its evidence in the job list (see `unproven`).
+				if (held === undefined && count >= TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS) {
+					unproven.add(job.id);
+					continue;
+				}
+				if (held === undefined) count += 1;
+				const endedAt = job.terminalAt ?? job.updatedAt;
+				const record: TranscriptSummaryProofRecord =
+					needed === "spent"
+						? {
+								kind: "spent",
+								sessionId: job.sessionId,
+								attempts: job.attempts,
+								maxAttempts: job.maxAttempts,
+								reason: job.lastError?.reason ?? "failed",
+								message: (job.lastError?.message ?? "").slice(0, MAX_SPENT_MESSAGE_CHARS),
+								at: endedAt,
+							}
+						: { kind: "carried", sessionId: job.sessionId, attempts: job.attempts, at: endedAt };
+				records[job.id] = record;
+				proof[job.id] = record;
+			}
+			for (const job of live) {
+				if (records[job.id] !== undefined) continue;
+				if (count >= TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS) {
+					refused.push(job.id);
+					continue;
+				}
+				const record: TranscriptSummaryProofRecord = { kind: "reserved", sessionId: job.sessionId, at };
+				records[job.id] = record;
+				proof[job.id] = record;
+				count += 1;
+			}
+			const holdChanged = noteSaturation(ledger, at);
+			if (
+				!ledger.current ||
+				holdChanged ||
+				rekeyed.length > 0 ||
+				released.length > 0 ||
+				Object.keys(proof).length > 0
+			) {
+				await this.store.writeProof(ledger);
+			}
 			const terminal = jobs
 				.filter((job) => isTerminalSummaryJobState(job.state))
 				.sort((a, b) => (b.terminalAt ?? b.updatedAt) - (a.terminalAt ?? a.updatedAt));
 			const keepTerminal = terminal.slice(0, TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS - live.length);
-			const prunedJobs = terminal.slice(keepTerminal.length);
-			const spent: Record<string, TranscriptSummarySpentAttempt> = {};
-			let unrecorded = 0;
-			const failed = prunedJobs.filter((job) => job.state === "failed");
-			if (failed.length > 0) {
-				const records = await this.store.readSpent([]);
-				let count = Object.keys(records).length;
-				for (const job of failed) {
-					if (records[job.id]) continue;
-					if (count >= TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS) {
-						unrecorded += 1;
-						continue;
-					}
-					const record: TranscriptSummarySpentAttempt = {
-						sessionId: job.sessionId,
-						attempts: job.attempts,
-						maxAttempts: job.maxAttempts,
-						reason: job.lastError?.reason ?? "failed",
-						message: (job.lastError?.message ?? "").slice(0, MAX_SPENT_MESSAGE_CHARS),
-						at: job.terminalAt ?? job.updatedAt,
-					};
-					records[job.id] = record;
-					spent[job.id] = record;
-					count += 1;
-				}
-				if (Object.keys(spent).length > 0) await this.store.writeSpent(records);
-			}
-			const kept = new Set([...live, ...keepTerminal].map((job) => job.id));
-			await this.store.writeJobs(jobs.filter((job) => kept.has(job.id)));
-			return { status: "saved" as const, pruned: prunedJobs.map((job) => job.id), spent, unrecorded };
+			const prunable = terminal.slice(keepTerminal.length);
+			const pruned = prunable.filter((job) => !unproven.has(job.id)).map((job) => job.id);
+			const prunedIds = new Set(pruned);
+			await this.store.writeJobs(jobs.filter((job) => !prunedIds.has(job.id)));
+			return {
+				status: "saved" as const,
+				pruned,
+				proof,
+				released,
+				refused,
+				retained: prunable.length - pruned.length,
+				rekeyed,
+				ledger: proofStatus(ledger),
+			};
 		});
 	}
 
@@ -1205,43 +1657,72 @@ export class TranscriptSummaryWriter {
 	 * explicit cause instead of treating those sources as ageless.
 	 */
 	async anchorSources(requests: readonly TranscriptAnchorRequest[]): Promise<TranscriptSummaryAnchorResult> {
-		return this.fenced(async () => {
+		return this.fenced(async (manifest) => {
 			const anchors = await this.store.readAnchors([]);
 			let count = anchoredCount(anchors);
 			let added = 0;
 			const refused: string[] = [];
-			for (const { handle, at, basis } of requests) {
+			const recorded: TranscriptAnchorRequest[] = [];
+			const moved: string[] = [];
+			for (const request of requests) {
+				const { handle, at, basis } = request;
 				const sessionId = sessionOfHandle(handle) ?? "";
 				const key = sourceKeyOfHandle(handle);
-				if (anchors.sources[handle] || anchors.sessions[sessionId]?.sources.includes(key)) continue;
+				// Already held: reported with the age the store holds, so `recorded` names every anchor requested.
+				const held = anchors.sources[handle];
+				if (held) {
+					recorded.push({ handle, at: held.at, basis: "first_capture" });
+					continue;
+				}
+				const session = anchors.sessions[sessionId];
+				if (session?.sources.includes(key)) {
+					recorded.push({ handle, at: session.at, basis: "session_timestamp" });
+					continue;
+				}
+				const { legacyHandle } = request;
+				const carried = legacyHandle === undefined ? undefined : moveLegacyAnchor(anchors, legacyHandle, handle);
+				if (carried && legacyHandle !== undefined) {
+					recorded.push(carried);
+					moved.push(legacyHandle);
+					continue;
+				}
 				if (count >= TRANSCRIPT_SUMMARY_MAX_RETENTION_ANCHORS) {
 					refused.push(handle);
 					continue;
 				}
 				if (basis === "first_capture") {
 					anchors.sources[handle] = { at };
+					recorded.push({ handle, at, basis });
 				} else {
-					const session = anchors.sessions[sessionId] ?? { at, sources: [] };
-					session.sources.push(key);
-					anchors.sessions[sessionId] = session;
+					// A source joins its session's one anchor, and carries that anchor's age.
+					const joined = session ?? { at, sources: [] };
+					joined.sources.push(key);
+					anchors.sessions[sessionId] = joined;
+					recorded.push({ handle, at: joined.at, basis });
 				}
 				count += 1;
 				added += 1;
 			}
-			if (added > 0) await this.store.writeAnchors(anchors);
+			let revision = manifest.revision;
+			if (added > 0 || moved.length > 0) {
+				await this.store.writeAnchors(anchors);
+				revision = await this.advanceRevision(manifest);
+			}
 			return refused.length > 0
-				? { status: "capacity" as const, added, refused }
-				: { status: "saved" as const, added };
+				? { status: "capacity" as const, added, recorded, moved, refused, revision }
+				: { status: "saved" as const, added, recorded, moved, revision };
 		});
 	}
 
 	/**
-	 * Forget what is kept per session (retention anchors and spent-attempt records) for sessions that are
+	 * Forget what is kept per session (retention anchors, spent-attempt records and dormant nodes) for sessions that are
 	 * forgotten for good or no longer exist. Never by age: an age-based drop would reset a source's age or grant
-	 * a spent job a fresh budget.
+	 * a spent job a fresh budget. This is the only way a spent or carried record leaves the ledger. Reservations are not
+	 * dropped here: they end with their job in `saveJobs`, so a live job of such a session keeps its slot. A
+	 * freed slot lifts a capacity hold, never `lostProofSince`.
 	 */
 	async dropSessionRecords(sessionIds: ReadonlySet<string>): Promise<TranscriptSummarySessionRecordsResult> {
-		return this.fenced(async () => {
+		return this.fenced(async (manifest) => {
 			const anchors = await this.store.readAnchors([]);
 			let droppedAnchors = 0;
 			for (const handle of Object.keys(anchors.sources)) {
@@ -1256,28 +1737,47 @@ export class TranscriptSummaryWriter {
 					delete anchors.sessions[sessionId];
 				}
 			}
+			const dormant = { ...manifest.dormant };
+			const purged = Object.keys(dormant).filter((id) => sessionIds.has(dormant[id]?.sessionId ?? ""));
+			for (const id of purged) delete dormant[id];
+			let revision = manifest.revision;
 			if (droppedAnchors > 0) await this.store.writeAnchors(anchors);
-			const records = await this.store.readSpent([]);
+			if (droppedAnchors > 0 || purged.length > 0) {
+				revision = await this.advanceRevision({ ...manifest, dormant });
+				// The manifest no longer references them; only now remove their content.
+				for (const id of purged) await this.store.unlinkNodeFile(id);
+			}
+			const ledger = await this.store.readProof([]);
 			let droppedSpent = 0;
-			for (const [id, record] of Object.entries(records)) {
-				if (sessionIds.has(record.sessionId)) {
-					delete records[id];
+			for (const [id, record] of Object.entries(ledger.records)) {
+				if (record.kind !== "reserved" && sessionIds.has(record.sessionId)) {
+					delete ledger.records[id];
 					droppedSpent += 1;
 				}
 			}
-			if (droppedSpent > 0) await this.store.writeSpent(records);
-			return { status: "saved" as const, anchors: droppedAnchors, spent: droppedSpent };
+			const holdChanged = noteSaturation(ledger, this.store.clock());
+			if (!ledger.current || holdChanged || droppedSpent > 0) await this.store.writeProof(ledger);
+			return {
+				status: "saved" as const,
+				anchors: droppedAnchors,
+				spent: droppedSpent,
+				dormant: purged,
+				ledger: proofStatus(ledger),
+				revision,
+			};
 		});
 	}
 
 	/**
 	 * Apply the repair for the issues `load()` reported: revoke damaged nodes and their ancestors, drop
-	 * dangling frontiers, and rewrite a corrupt job list from its valid entries (the damaged bytes are kept).
+	 * dangling frontiers, and rewrite a corrupt job list or proof ledger from its valid entries (the damaged bytes
+	 * are kept), recording in the ledger that terminal proof may have been lost.
 	 * A corrupt manifest is not repaired here; it is replaced through `acquireWriter({ recoverCorrupt })`.
 	 */
 	async applyRecovery(issues: readonly TranscriptSummaryRecoveryIssue[]): Promise<TranscriptSummaryRecoveryReport> {
 		const damaged = new Set<string>();
 		const frontiers = new Set<string>();
+		const damagedDormant = new Set<string>();
 		let jobsCorrupt = false;
 		let anchorsCorrupt = false;
 		let spentCorrupt = false;
@@ -1291,6 +1791,9 @@ export class TranscriptSummaryWriter {
 				damaged.add(issue.nodeId);
 			} else if (issue.kind === "frontier_dangling") {
 				frontiers.add(issue.frontier);
+			} else if (issue.kind === "dormant_damaged") {
+				// A cache entry that cannot be read is purged; nothing depends on it.
+				damagedDormant.add(issue.nodeId);
 			} else if (issue.kind === "jobs_corrupt") {
 				jobsCorrupt = true;
 			} else if (issue.kind === "anchors_corrupt") {
@@ -1300,14 +1803,18 @@ export class TranscriptSummaryWriter {
 			}
 		}
 		const report: TranscriptSummaryRecoveryReport = { revoked: [], removedFrontiers: [], jobsRewritten: false };
-		if (damaged.size > 0 || frontiers.size > 0) {
+		if (damaged.size > 0 || frontiers.size > 0 || damagedDormant.size > 0) {
 			const result = await this.store.locked(async () => {
-				const read = await this.store.readManifest();
+				const read = await this.store.readManifestFile();
 				if (read.status !== "ok") throw new Error("Recovery needs a readable manifest.");
 				if (read.manifest.writerFence !== this.fence) throw new Error("Recovery writer was superseded.");
 				const manifest = read.manifest;
 				for (const name of frontiers) delete manifest.frontiers[name];
-				return this.applyRevocation(manifest, (id) => damaged.has(id), "recovery", undefined, [...frontiers]);
+				return this.applyRevocation(manifest, (id) => damaged.has(id), "recovery", {
+					alsoRemoveFrontiers: [...frontiers],
+					park: false,
+					purgeDormant: (id) => damagedDormant.has(id),
+				});
 			});
 			if (result.status !== "published") throw new Error(`Recovery was not published: ${result.status}.`);
 			report.revoked = result.revoked;
@@ -1330,12 +1837,15 @@ export class TranscriptSummaryWriter {
 				(valid) => this.store.writeAnchors(valid),
 			);
 		}
-		if (spentCorrupt) {
-			// A record lost to damage cannot be reconstructed; the disclosure is the recovery issue.
+		if (spentCorrupt || jobsCorrupt) {
+			// A proof record or a job (and the attempts it carried) lost to damage cannot be reconstructed, and which
+			// identity it was is unknowable: the ledger keeps every valid record and records that proof may have been
+			// lost now, so no new identity of an existing session can start with a budget it may already have spent.
+			const lostAt = new Date(this.store.clock()).toISOString();
 			await this.rewriteValid(
-				() => this.store.readSpent([]),
-				() => this.store.backupCorrupt("spent"),
-				(valid) => this.store.writeSpent(valid),
+				() => this.store.readProof([]),
+				() => (spentCorrupt ? this.store.backupCorrupt("spent") : Promise.resolve()),
+				(valid) => this.store.writeProof({ ...valid, lostProofSince: lostAt }),
 			);
 		}
 		return report;
@@ -1347,7 +1857,7 @@ export class TranscriptSummaryWriter {
 	 */
 	async recordTerminal(record: TranscriptSummaryTerminalRecord): Promise<boolean> {
 		return this.store.locked(async () => {
-			const read = await this.store.readManifest();
+			const read = await this.store.readManifestFile();
 			if (read.status !== "ok" || read.manifest.writerFence !== this.fence) return false;
 			const events = await this.store.readTerminals([]);
 			events.push(record);
@@ -1356,12 +1866,13 @@ export class TranscriptSummaryWriter {
 		});
 	}
 
-	/** Delete node files no manifest entry references and that are old enough that no writer can still publish them. */
+	/** Delete node files no accepted or dormant entry references and that are old enough that no writer can still publish them. */
 	async sweepOrphans(minAgeMs = TRANSCRIPT_SUMMARY_ORPHAN_MIN_AGE_MS): Promise<string[]> {
 		return this.store.locked(async () => {
-			const read = await this.store.readManifest();
+			const read = await this.store.readManifestFile();
 			if (read.status !== "ok" || read.manifest.writerFence !== this.fence) return [];
-			return this.store.sweep(new Set(Object.keys(read.manifest.acceptedNodes)), minAgeMs);
+			const referenced = [...Object.keys(read.manifest.acceptedNodes), ...Object.keys(read.manifest.dormant)];
+			return this.store.sweep(new Set(referenced), minAgeMs);
 		});
 	}
 
@@ -1372,7 +1883,7 @@ export class TranscriptSummaryWriter {
 		write: (valid: T) => Promise<void>,
 	): Promise<void> {
 		await this.store.locked(async () => {
-			const read = await this.store.readManifest();
+			const read = await this.store.readManifestFile();
 			if (read.status !== "ok" || read.manifest.writerFence !== this.fence) {
 				throw new Error("Recovery writer was superseded.");
 			}
@@ -1382,15 +1893,20 @@ export class TranscriptSummaryWriter {
 		});
 	}
 
-	/** Caller holds the lock and has verified the fence. */
+	/** Caller holds the lock and has verified the fence. See {@link revokeNodes} for the dormant rules. */
 	private async applyRevocation(
 		manifest: TranscriptSummaryManifest,
 		predicate: (id: string, entry: TranscriptSummaryAcceptedNode) => boolean,
 		reason: TranscriptSummaryRevocationReason,
-		dropSessionCursor: string | undefined,
-		alsoRemoveFrontiers: readonly string[] = [],
-		tombstoneSession?: string,
+		options: {
+			dropSessionCursor?: string;
+			alsoRemoveFrontiers?: readonly string[];
+			tombstoneSession?: string;
+			park: boolean;
+			purgeDormant?: (id: string, entry: TranscriptSummaryDormantEntry) => boolean;
+		},
 	): Promise<TranscriptSummaryRevokeResult> {
+		const { dropSessionCursor, tombstoneSession } = options;
 		const revoked = new Set<string>();
 		for (const [id, entry] of Object.entries(manifest.acceptedNodes)) {
 			if (predicate(id, entry)) revoked.add(id);
@@ -1421,7 +1937,22 @@ export class TranscriptSummaryWriter {
 			acceptedNodes: { ...manifest.acceptedNodes },
 			frontiers: { ...manifest.frontiers },
 			tombstones: { ...manifest.tombstones },
+			dormant: { ...manifest.dormant },
 		};
+		const now = new Date(this.store.clock()).toISOString();
+		// Dormant nodes of a forgotten or vanished session can never be reused; the others go only when asked.
+		const purged: string[] = [];
+		for (const [id, entry] of Object.entries(next.dormant)) {
+			const purge =
+				entry.sessionId === tombstoneSession ||
+				entry.sessionId === dropSessionCursor ||
+				options.purgeDormant?.(id, entry) === true;
+			if (purge) {
+				delete next.dormant[id];
+				purged.push(id);
+				if (reason === "retention") next.tombstones[id] = { revokedAt: now, reason };
+			}
+		}
 		// Only a revoked LEAF moves a session cursor back: leaves are what the cursor counts. A revoked parent
 		// leaves its children in place, so the span range it covered is still covered.
 		const earliestLeafBySession = new Map<string, { fromIndex: number; ordinal: number }>();
@@ -1433,8 +1964,16 @@ export class TranscriptSummaryWriter {
 				earliestLeafBySession.set(entry.sessionId, { fromIndex: entry.fromIndex, ordinal: entry.ordinal });
 			}
 			delete next.acceptedNodes[id];
-			if (reason === "retention") {
-				next.tombstones[id] = { revokedAt: new Date(this.store.clock()).toISOString(), reason };
+			if (reason === "retention") next.tombstones[id] = { revokedAt: now, reason };
+			if (options.park) next.dormant[id] = { sessionId: entry.sessionId, parkedAt: now };
+		}
+		const dormantIds = Object.keys(next.dormant);
+		if (dormantIds.length > TRANSCRIPT_SUMMARY_MAX_DORMANT_NODES) {
+			for (const id of dormantIds
+				.sort((a, b) => (next.dormant[a]?.parkedAt ?? "").localeCompare(next.dormant[b]?.parkedAt ?? ""))
+				.slice(0, dormantIds.length - TRANSCRIPT_SUMMARY_MAX_DORMANT_NODES)) {
+				delete next.dormant[id];
+				purged.push(id);
 			}
 		}
 		for (const [sessionId, earliest] of earliestLeafBySession) {
@@ -1448,13 +1987,10 @@ export class TranscriptSummaryWriter {
 			}
 		}
 		if (tombstoneSession !== undefined) {
-			next.tombstones[`session:${tombstoneSession}`] = {
-				revokedAt: new Date(this.store.clock()).toISOString(),
-				reason: "retention",
-			};
+			next.tombstones[`session:${tombstoneSession}`] = { revokedAt: now, reason: "retention" };
 		}
 		if (dropSessionCursor !== undefined) delete next.sessions[dropSessionCursor];
-		const removedFrontiers: string[] = [...alsoRemoveFrontiers];
+		const removedFrontiers: string[] = [...(options.alsoRemoveFrontiers ?? [])];
 		for (const [name, frontier] of Object.entries(next.frontiers)) {
 			if (frontier.nodeIds.some((nodeId) => revoked.has(nodeId))) {
 				delete next.frontiers[name];
@@ -1472,15 +2008,25 @@ export class TranscriptSummaryWriter {
 		}
 		await this.store.writeManifest(next);
 
-		// The manifest no longer references the nodes; only now remove their content.
+		// The manifest no longer references the nodes (accepted or dormant); only now remove their content. A parked
+		// node keeps its file: the dormant entry references it.
+		const parked = [...revoked].filter((id) => next.dormant[id] !== undefined);
 		const unlinkFailures: { id: string; error: string }[] = [];
-		for (const id of revoked) {
+		for (const id of new Set([...[...revoked].filter((id) => next.dormant[id] === undefined), ...purged])) {
 			try {
 				await this.store.unlinkNodeFile(id);
 			} catch (error) {
 				unlinkFailures.push({ id, error: error instanceof Error ? error.message : String(error) });
 			}
 		}
-		return { status: "published", revision: next.revision, revoked: [...revoked], removedFrontiers, unlinkFailures };
+		return {
+			status: "published",
+			revision: next.revision,
+			revoked: [...revoked],
+			removedFrontiers,
+			parked,
+			purged,
+			unlinkFailures,
+		};
 	}
 }

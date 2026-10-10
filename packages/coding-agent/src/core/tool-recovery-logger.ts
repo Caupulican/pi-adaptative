@@ -3,19 +3,13 @@ import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
 import type { ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
 import { readToolFailureTelemetry } from "../kernel/tool-failure-memory.ts";
 import { isWorkerSession } from "./session-role.ts";
+import type { ToolRecoveryLogAckMessage, ToolRecoveryLogWorkerMessage } from "./tool-recovery-log-processor.ts";
 import {
 	createToolArgumentValidationLogRecord,
 	createToolExecutionFailureLogRecord,
 	type ToolRecoveryLogWorkerRecord,
 } from "./tool-recovery-log-records.ts";
 import type { ToolArgumentValidationLogRecord, ToolExecutionFailureLogRecord } from "./tool-recovery-records.ts";
-
-interface ToolRecoveryLogAckMessage {
-	type: "ack";
-	batchId: number;
-	written: number;
-	failed: number;
-}
 
 export interface ToolRecoveryLoggerStats {
 	enabled: boolean;
@@ -63,7 +57,10 @@ function isToolRecoveryLogAckMessage(value: unknown): value is ToolRecoveryLogAc
 	);
 }
 
-function createDefaultWorkerSpecifier(): URL {
+function createDefaultWorkerSpecifier(): string | URL {
+	// Bun compiled executables resolve an embedded worker by its build entrypoint path, not by
+	// new URL(..., import.meta.url); scripts/build-binaries.sh must list this worker as an entrypoint.
+	if (typeof process.versions.bun === "string") return "./src/core/tool-recovery-log-worker.ts";
 	const isTypeScriptRuntime = import.meta.url.endsWith(".ts");
 	return new URL(
 		isTypeScriptRuntime ? "./tool-recovery-log-worker.ts" : "./tool-recovery-log-worker.js",
@@ -210,8 +207,9 @@ export class ToolRecoveryLogger {
 		const worker = this.worker;
 		this.worker = undefined;
 		if (!worker) return;
+		const message: ToolRecoveryLogWorkerMessage = { type: "shutdown" };
 		try {
-			worker.postMessage({ type: "shutdown" });
+			worker.postMessage(message);
 		} catch {}
 		void worker.terminate().catch(() => undefined);
 	}
@@ -235,8 +233,9 @@ export class ToolRecoveryLogger {
 		const batchId = this.batchId++;
 		this.inFlightBatchId = batchId;
 		this.inFlightWorker = worker;
+		const message: ToolRecoveryLogWorkerMessage = { type: "records", batchId, records };
 		try {
-			worker.postMessage({ type: "records", batchId, records });
+			worker.postMessage(message);
 		} catch (error) {
 			this.debug(`tool recovery logger post failed: ${error instanceof Error ? error.message : String(error)}`);
 			this.handleWorkerFailure(worker, error instanceof Error ? error : new Error(String(error)));

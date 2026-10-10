@@ -127,6 +127,7 @@ import {
 	parseProfileFileDefinition,
 	parseStallBoundMs,
 	parseTimeoutSetting,
+	resolveMemorySystem,
 	sanitizeGnuToolsDirSetting,
 	sanitizeIntegerSetting,
 	sanitizeNumberSetting,
@@ -2824,7 +2825,7 @@ export class SettingsManager {
 	}
 
 	getMemorySystem(): MemorySystem {
-		return isValidMemorySystem(this.settings.memorySystem) ? this.settings.memorySystem : "okf";
+		return resolveMemorySystem(this.settings.memorySystem);
 	}
 
 	setMemorySystem(system: MemorySystem, scope: SettingsScope = "global"): void {

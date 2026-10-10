@@ -399,6 +399,34 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		},
 	},
 	{
+		// A typed not-ready status (`pending: <what> is still loading`, or `... not ready yet`): the operation did
+		// not run, and its answer changes with time alone, so one unchanged retry is admitted.
+		name: "notReady",
+		phase: "execution",
+		failureCode: "not_ready",
+		retainDiagnostic: true,
+		unchangedRetryLimit: 1,
+		guidance:
+			"Not ready yet; nothing ran. One unchanged retry is admitted; if it is still not ready, continue other work and retry later.",
+		matches(message: string): boolean {
+			return /pending: [^\n]*\b(?:is|are) (?:still loading|not ready yet)\b/i.test(message);
+		},
+	},
+	{
+		// A read invalidated by a concurrent change before delivery (`... changed while ... was in flight; retry
+		// ...`): a fresh identical read is the remedy, so one unchanged retry is admitted.
+		name: "changedInFlight",
+		phase: "execution",
+		failureCode: "changed_in_flight",
+		retainDiagnostic: true,
+		unchangedRetryLimit: 1,
+		guidance:
+			"The source changed while the read was in flight; nothing stale was delivered. One unchanged retry is admitted.",
+		matches(message: string): boolean {
+			return /\bchanged while [^\n]* was in flight\b[^\n]*\bretry\b/i.test(message);
+		},
+	},
+	{
 		name: "timedOut",
 		phase: "timeout",
 		failureCode: "timeout",

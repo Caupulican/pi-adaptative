@@ -524,7 +524,7 @@ export class ReflectionController {
 	private activeRunToken: string | undefined;
 	/** True when the memory system is ICM — gates legacy OKF/USER/MEMORY I/O and automatic reflection. */
 	private isIcmMode(): boolean {
-		return this.deps.getSettingsManager().getMemorySystem?.() === "icm";
+		return this.deps.getSettingsManager().getMemorySystem() === "icm";
 	}
 
 	/** True only while the one dedicated reflection turn is running; gates cue visibility entirely. */

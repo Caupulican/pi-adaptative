@@ -1871,6 +1871,14 @@ export interface MemoryProvider {
 	shutdown(): Promise<void>;
 	// context surface:
 	systemPromptBlock?(budget?: MemoryPromptBudget): string;
+	/**
+	 * A token that changes exactly when `systemPromptBlock` would render differently for the same budget
+	 * because of state the provider reads at composition (a policy, not content it was told about). The memory
+	 * manager keys its cached static block on it, so a rebuilt system prompt picks up the change while an
+	 * unchanged token keeps the block byte-identical. Omit it when the block depends only on the budget and
+	 * on what `initialize` loaded.
+	 */
+	systemPromptBlockKey?(): string;
 	prefetch?(query: string): Promise<string>;
 	syncTurn?(user: string, assistant: string): Promise<void>;
 	onPreCompress?(): Promise<string>;

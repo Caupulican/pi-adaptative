@@ -1494,6 +1494,7 @@ export class AgentSession {
 			getAgentDir: () => this._agentDir,
 			getCwd: () => this._cwd,
 			getSessionId: () => this.sessionManager.getSessionId(),
+			getSessionFile: () => this.sessionManager.getSessionFile(),
 			isChildSession: () => this._isChildSession,
 			refreshToolRegistry: () => this._refreshToolRegistry(),
 			getContextWindow: () => this.model?.contextWindow,
@@ -3385,12 +3386,12 @@ export class AgentSession {
 		return new VerificationObligationTracker(this.agent.state.messages).getActiveIds();
 	}
 
-	/** Managed memory files against their managed revisions (operator recovery view). */
 	/** Operator view of past-session history recall (coverage, latest retrieval, prompt admission). */
 	getTranscriptHistoryStatus(): TranscriptHistoryStatus {
 		return this._memory.getTranscriptHistoryStatus();
 	}
 
+	/** Managed memory files against their managed revisions (operator recovery view). */
 	memoryDriftReport(): Promise<ManagedMemoryDriftEntry[]> {
 		return this._memory.memoryDriftReport();
 	}
@@ -3403,6 +3404,11 @@ export class AgentSession {
 	/** Operator authority: restore the last managed content of a memory file. */
 	memoryRestoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
 		return this._memory.memoryRestoreManaged(target);
+	}
+
+	/** Operator authority: forget one session's derived history summaries; the canonical session is untouched. */
+	forgetHistorySession(sessionId: string): Promise<{ ok: boolean; message: string }> {
+		return this._memory.forgetHistorySession(sessionId);
 	}
 
 	/** Every active verification obligation with what the operator can read about it. */

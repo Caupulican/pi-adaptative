@@ -1,7 +1,11 @@
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import type { HarnessCapability } from "./capability-contract.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
-import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_READ_TOOL_NAME } from "./memory/worker-memory-tools.ts";
+import {
+	isRootMemoryReadAction,
+	ROOT_MEMORY_TOOL_NAME,
+	WORKER_MEMORY_READ_TOOL_NAME,
+} from "./memory/worker-memory-tools.ts";
 import type { CapabilityEnforcementKind, OrchestrationProfile } from "./orchestration/contracts.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 
@@ -227,12 +231,9 @@ export function toolCapabilityRequirementClauses(
 			typeof record.query === "string" &&
 			Object.keys(record).every((key) => key === "query");
 		// list inspects current memory and history recall reads captured conversation evidence; both return
-		// before any write path in the memory tool.
-		const isRead =
-			record?.action === "list" ||
-			record?.action === "history_search" ||
-			record?.action === "history_source" ||
-			record?.action === "history_expand";
+		// before any write path in the memory tool. Every action the history-only (ICM) `memory` tool admits
+		// is a history action, so that tool is never classified as mutating.
+		const isRead = isRootMemoryReadAction(record?.action);
 		return isUnambiguousQuery || isRead ? [["memory.query"]] : [["memory.mutate"]];
 	}
 	if (name === "goal" && args !== undefined) {

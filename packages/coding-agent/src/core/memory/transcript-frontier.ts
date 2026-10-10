@@ -18,6 +18,7 @@
  * re-ranks.
  */
 
+import { estimateLineCount } from "../context/context-item.ts";
 import type { ActiveBranchEntryStanding } from "./active-branch-probe.ts";
 import {
 	formatTranscriptNodeHandle,
@@ -188,6 +189,11 @@ function frameBytes(frame: Frame): number {
 	);
 }
 
+/** Lines of the assembled frame alone: open, pointer and gap (each one line), close. */
+function frameLines(frame: Frame): number {
+	return 2 + (frame.pointer ? 1 : 0) + (frame.gap ? 1 : 0);
+}
+
 function assemble(frame: Frame, records: readonly string[]): string {
 	return `${frame.open}\n${frame.pointer ? `${frame.pointer}\n` : ""}${records.map((record) => `${record}\n`).join("")}${frame.gap ? `${frame.gap}\n` : ""}${frame.close}`;
 }
@@ -210,14 +216,19 @@ interface RenderableRecord {
 }
 
 /**
- * Frame, pointer and records measured in UTF-8 bytes with every wrapper and status line charged. If the
- * records no longer fit the allowance, the oldest whole records are folded into the pointer; a record is never
- * cut, and when not even the frame fits the text is empty.
+ * Frame, pointer and records measured in UTF-8 bytes, and in lines when a line allowance is given, with every
+ * wrapper and status line charged. If the records no longer fit either allowance, the oldest whole records are
+ * folded into the pointer; a record is never cut, and when not even the frame fits the text is empty.
  */
 function renderRecords(
 	records: readonly RenderableRecord[],
 	frame: { sessionId: string; revision: number; omittedBeforeIndex: number; coveredThroughIndex: number },
-	options: { gap?: TranscriptFrontierGap; allowanceBytes: number; audience?: FrontierAudience },
+	options: {
+		gap?: TranscriptFrontierGap;
+		allowanceBytes: number;
+		allowanceLines?: number;
+		audience?: FrontierAudience;
+	},
 ): TranscriptFrontierRendering {
 	let first = 0;
 	for (;;) {
@@ -234,7 +245,11 @@ function renderRecords(
 		);
 		const included = records.slice(first);
 		const bytes = frameBytes(built) + included.reduce((sum, record) => sum + utf8ByteLength(record.text) + 1, 0);
-		if (bytes <= options.allowanceBytes) {
+		const lines = frameLines(built) + included.reduce((sum, record) => sum + estimateLineCount(record.text), 0);
+		if (
+			bytes <= options.allowanceBytes &&
+			(options.allowanceLines === undefined || lines <= options.allowanceLines)
+		) {
 			return {
 				text: assemble(
 					built,
@@ -706,7 +721,8 @@ function renderMixedPointer(item: Extract<FrontierViewItem, { kind: "mixed" }>, 
 
 /**
  * Render a live-branch view: node records, one line per still-visible stretch and per withheld mixed
- * record, the coarse pointer and the gap record, under the same byte accounting as {@link renderFrontier}.
+ * record, the coarse pointer and the gap record, under the same byte accounting as {@link renderFrontier}
+ * and within `allowanceLines` lines of the whole rendering (frame, pointer and gap lines included).
  */
 export function renderFrontierView(
 	view: FrontierView,
@@ -716,6 +732,7 @@ export function renderFrontierView(
 		omittedBeforeIndex: number;
 		gap?: TranscriptFrontierGap;
 		allowanceBytes: number;
+		allowanceLines: number;
 		audience?: FrontierAudience;
 	},
 ): TranscriptFrontierRendering {
@@ -741,6 +758,11 @@ export function renderFrontierView(
 			omittedBeforeIndex: options.omittedBeforeIndex,
 			coveredThroughIndex: last ? last.toIndexExclusive : options.omittedBeforeIndex,
 		},
-		{ ...(options.gap ? { gap: options.gap } : {}), allowanceBytes: options.allowanceBytes, audience },
+		{
+			...(options.gap ? { gap: options.gap } : {}),
+			allowanceBytes: options.allowanceBytes,
+			allowanceLines: options.allowanceLines,
+			audience,
+		},
 	);
 }

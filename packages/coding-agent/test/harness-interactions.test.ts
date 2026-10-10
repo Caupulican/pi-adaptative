@@ -12,6 +12,7 @@ import {
 	decisionLedgerFile,
 	orchestrationSessionDir,
 	sessionRootMailboxFile,
+	stateFile,
 	workerContextForkFile,
 	workerProjectSpecializationFile,
 } from "../src/core/agent-paths.ts";
@@ -21,6 +22,7 @@ import {
 	type BackgroundToolTaskRecord,
 	loadBackgroundToolTaskRecordsNewestFirst,
 } from "../src/core/background-tool-task-controller.ts";
+import type { TranscriptHistoryStatus } from "../src/core/context/memory-diagnostics.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../src/core/default-tool-surface.ts";
 import { sessionRootAddress, sessionRootReplyMessageId } from "../src/core/delegation/session-root-mailbox.ts";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
@@ -36,6 +38,14 @@ import {
 	getLatestHumanInputSnapshots,
 	getResumableHumanInputSnapshot,
 } from "../src/core/human-input.ts";
+import { ICM_HISTORY_GUIDANCE } from "../src/core/memory/providers/icm.ts";
+import {
+	TRANSCRIPT_RECALL_RESULT_MARKER,
+	TRANSCRIPT_SUMMARY_SCHEMA_VERSION,
+	TRANSCRIPT_SUMMARY_TARGET_BYTES,
+} from "../src/core/memory/transcript-memory-contracts.ts";
+import { TRANSCRIPT_LEAF_MAX_SOURCE_BYTES } from "../src/core/memory/transcript-summary-node.ts";
+import { TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS } from "../src/core/memory/transcript-summary-scheduler.ts";
 import type { ObjectiveRoute } from "../src/core/objective-execution/objective-route.ts";
 import { DecisionLedgerStore } from "../src/core/operator-projection/decision-ledger-store.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
@@ -43,6 +53,8 @@ import { OrchestrationProfileStore } from "../src/core/orchestration/profile-sto
 import { goalObjectiveId } from "../src/core/orchestration/work-state-projection.ts";
 import { getInFlightWorkUnits } from "../src/core/reload-blockers.ts";
 import { isCredentialSecretKey, mockCredentialFields } from "../src/core/secrets/credential-content-mock.ts";
+import { getDirectoryResourceProfileInfo } from "../src/core/settings/settings-rules.ts";
+import type { Settings } from "../src/core/settings/settings-schema.ts";
 import type { ExecutionState } from "../src/core/system-one/types.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, readOptionalToolIntent } from "../src/core/tool-applicability-gate.ts";
 import { createAskQuestionToolDefinition } from "../src/core/tools/ask-question.ts";
@@ -52,8 +64,8 @@ import { routeShellContract } from "../src/core/tools/shell-contract-router.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 import { isRecordObject } from "../src/core/util/value-guards.ts";
 import type { SessionManager } from "../src/kernel/session/session-manager.ts";
-import type { ScriptedRequest, ScriptStep } from "./fixtures/harness/scripted-provider.ts";
-import { calls, createBarrier, fail, text } from "./fixtures/harness/scripted-provider.ts";
+import type { ScriptedReply, ScriptedRequest, ScriptStep } from "./fixtures/harness/scripted-provider.ts";
+import { calls, createBarrier, fail, HARNESS_PROVIDER, text } from "./fixtures/harness/scripted-provider.ts";
 import {
 	HARNESS_PROJECT_CWD,
 	type HarnessWorld,
@@ -521,6 +533,322 @@ function toolOutcomes(session: AgentSession): string {
 		.join("\n");
 }
 
+/**
+ * ICM history scenarios. One canonical past session is written through the production session owner, so every byte the
+ * history backend reads is production-written. Its captured spans form an exact-copy leaf (the notes), a model leaf (the
+ * rollout log ending in a retained decision that starts past the old 8,000-character prefix index) and an unsealed tail
+ * whose shell call fails.
+ */
+const ICM_NOTES: ReadonlyArray<readonly [string, string]> = [
+	["Note A1: the staging host is quiet.", "Noted A1, staging is quiet."],
+	["Note A2: the staging disk is clean.", "Noted A2, the disk is clean."],
+	["Note A3: the staging queue is empty.", "Noted A3, the queue is empty."],
+	["Note A4: the staging clock is synced.", "Noted A4, the clock is synced."],
+];
+const ICM_LOG_REQUEST = "Record the rollout log.";
+const ICM_LOG_CONTINUE = "Continue the log.";
+const ICM_LOG_WAVES = ["alpha", "beta", "gamma"] as const;
+/** The old index kept the first 8,000 characters of a session's user and assistant text. */
+const ICM_OLD_PREFIX_CHARS = 8_000;
+const ICM_DECISION =
+	"Decision ZEPHYR-7: keep the retry budget at seven per hour; never raise it without owner approval.";
+const ICM_DECISION_REPLY = "Recorded decision ZEPHYR-7.";
+const ICM_DECISION_QUERY = "retry budget seven per hour";
+const ICM_NOTES_QUERY = "staging host quiet";
+const ICM_TAIL_REQUEST = "Check the zephyr settings file.";
+const ICM_TAIL_COMMAND = "cat config/zephyr-settings.yaml";
+const ICM_TAIL_STDERR = "cat: config/zephyr-settings.yaml: No such file or directory\n";
+const ICM_TAIL_QUERY = "zephyr-settings.yaml No such file";
+const ICM_TAIL_REPLY = "The zephyr settings file is missing.";
+/** Scripted model summaries: the leaf over the rollout log and the parent over both leaves. */
+const ICM_LEAF_SUMMARY =
+	"The owner had a three-wave rollout log recorded and then set decision ZEPHYR-7: the retry budget stays at seven per hour and is raised only with owner approval.";
+const ICM_PARENT_SUMMARY =
+	"Earlier notes record a quiet, clean staging host; the later rollout log ends with decision ZEPHYR-7 keeping the retry budget at seven per hour.";
+/**
+ * The tight history reader's token grant, and what its second response reports spending: the scripted default usage of
+ * the first response (24 tokens) plus this leaves 60 tokens, room for no whole history record, source page or expansion.
+ */
+const W_TIGHT_GRANT = 6_000;
+const W_TIGHT_SPEND = 5_916;
+/** The judgments a plain owner request that leads to a tool call consumes (the E4 set). */
+const ICM_INTAKE_JUDGMENTS = {
+	changes_model_pools: { kind: "noul", probability: 0.02 },
+	local_commits_only: { kind: "noul", probability: 0.02 },
+	lifts_delivery_block: { kind: "noul", probability: 0.02 },
+	full_handoff: { kind: "noul", probability: 0.02 },
+	optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+	capabilities_authorized: { kind: "noul", probability: 0.02 },
+} as const;
+
+/**
+ * The same intake judgments in a world without a guarded edge setting: no standing grant is decided, so the
+ * capabilities question is not asked (journey 3).
+ */
+const ICM_INTAKE_JUDGMENTS_UNGUARDED = {
+	changes_model_pools: ICM_INTAKE_JUDGMENTS.changes_model_pools,
+	local_commits_only: ICM_INTAKE_JUDGMENTS.local_commits_only,
+	lifts_delivery_block: ICM_INTAKE_JUDGMENTS.lifts_delivery_block,
+	full_handoff: ICM_INTAKE_JUDGMENTS.full_handoff,
+	optional_tool_0: ICM_INTAKE_JUDGMENTS.optional_tool_0,
+} as const;
+
+/**
+ * One distinctive rollout log reply; its words appear in neither the decision nor the notes. Every sentence is numbered:
+ * production collapses a sentence repeated inside one paragraph as degenerate output, so a tiled sentence would not be
+ * persisted as written.
+ */
+function icmRolloutLog(wave: string): string {
+	return Array.from(
+		{ length: 70 },
+		(_, index) => `${wave} rollout entry ${index + 1}: canary wave ${index + 1} settled.`,
+	)
+		.join(" ")
+		.slice(0, 2_600);
+}
+
+/** The history settings that let the hierarchy build with the scripted summarizer and the scripted evaluator. */
+function icmHierarchySettings(summaryTrack: string): Partial<Settings> {
+	return {
+		memorySystem: undefined,
+		contextPolicy: {
+			memory: {
+				history: {
+					hierarchy: true,
+					summaryModel: `${HARNESS_PROVIDER}/${summaryTrack}`,
+					allowExternalSummaryEgress: true,
+					allowExternalAdmissionEgress: true,
+				},
+			},
+		},
+	};
+}
+
+/** The summary hierarchy as the session's operator status reports it; fails when the session has none. */
+function icmHierarchy(session: AgentSession): NonNullable<TranscriptHistoryStatus["hierarchy"]> {
+	const hierarchy = session.getTranscriptHistoryStatus().hierarchy;
+	if (hierarchy === undefined) throw new Error("the session reports no summary hierarchy");
+	return hierarchy;
+}
+
+/** System One admission requests the transport answered so far (the summary admission program's question). */
+function icmAdmissionRequests(world: HarnessWorld): number {
+	return world.systemOne.decoded.filter((request) => "summary_supported" in request.questions).length;
+}
+
+/** Provider requests a scripted track answered so far. */
+function icmTrackRequests(world: HarnessWorld, track: string): number {
+	return world.provider.reached.filter((name) => name.startsWith(`${track}:`)).length;
+}
+
+/** The newest result of `toolName` in the request's latest tool batch; fails when the batch carried none. */
+function icmLatestResult(request: ScriptedRequest, toolName: string): { isError: boolean; text: string } {
+	const result = latestBatchResults(request)
+		.filter((candidate) => candidate.toolName === toolName)
+		.at(-1);
+	if (result === undefined) throw new Error(`the latest batch carries no ${toolName} result`);
+	return result;
+}
+
+/** Every rendered hit line of a history read: its `tx:` handle and its source description. */
+function icmHits(text: string): Array<{ handle: string; description: string; line: string }> {
+	return [...text.matchAll(/\[(tx:[^\]\s]+)\] \(([^)]*)\)([^\n]*)/g)].map((match) => ({
+		handle: match[1] ?? "",
+		description: match[2] ?? "",
+		line: match[0],
+	}));
+}
+
+/**
+ * The exact-source handle named on the first line of `text` that contains `marker`, in any rendering (root hits put
+ * the handle first, a worker's memory snapshot puts it after the source description).
+ */
+function icmHandleOnLine(text: string, marker: string): string | undefined {
+	const line = text.split("\n").find((candidate) => candidate.includes(marker));
+	return line === undefined ? undefined : /tx:[A-Za-z0-9._-]+:[A-Za-z0-9._-]+:\d+:[a-f0-9]{16}/.exec(line)?.[0];
+}
+
+/** Every approved summary record listed beside history hits: its `txn:` handle, quality and covered handles. */
+function icmSummaries(text: string): Array<{ handle: string; quality: string; covers: string }> {
+	return [
+		...text.matchAll(/\[(txn:[a-f0-9]{16})\] level \d+[^\n]*?, (exact_copy|model_summary), covers ([^\n]*)/g),
+	].map((match) => ({ handle: match[1] ?? "", quality: match[2] ?? "", covers: match[3] ?? "" }));
+}
+
+/**
+ * A step after a history read. A read that its first call started may answer the typed `pending` of a backend still
+ * loading; the harness records it as a not-ready tool failure and admits exactly one unchanged retry, which this step
+ * issues. A second `pending` fails the step. Once settled, `next` replies.
+ */
+function icmAfterHistoryRead(
+	name: string,
+	toolName: string,
+	repeat: { readonly id: string; readonly arguments: Record<string, unknown> },
+	next: (result: { isError: boolean; text: string }, request: ScriptedRequest) => ScriptedReply,
+): ScriptStep {
+	let retried = false;
+	const pending = (request: ScriptedRequest): boolean => {
+		const result = icmLatestResult(request, toolName);
+		return result.isError && /transcript history pending|"failureCode":"not_ready"/.test(result.text);
+	};
+	return {
+		name,
+		maxRequests: 2,
+		until: (request) => !pending(request),
+		reply: (request) => {
+			if (!pending(request)) return next(icmLatestResult(request, toolName), request);
+			if (retried)
+				throw new Error(
+					`${name}: the history read is still pending after its one admitted retry: ${icmLatestResult(request, toolName).text.slice(0, 600)}`,
+				);
+			retried = true;
+			return {
+				content: [{ type: "toolCall", id: `${repeat.id}-again`, name: toolName, arguments: repeat.arguments }],
+				stopReason: "toolUse",
+			};
+		},
+	};
+}
+
+/** One tool-call reply. */
+function icmCall(id: string, name: string, args: Record<string, unknown>): ScriptedReply {
+	return { content: [{ type: "toolCall", id, name, arguments: args }], stopReason: "toolUse" };
+}
+
+/** Reads of one file the virtual tree recorded since `from`. */
+function icmReadsOf(world: HarnessWorld, file: string, from: number): number {
+	return world.io.operations.slice(from).filter((operation) => operation.kind === "read" && operation.path === file)
+		.length;
+}
+
+/**
+ * Writes the canonical past session through a production ICM root bound to `agentDir`, then disposes it. The layout is
+ * checked against the leaf bounds before any turn runs: the notes render within the exact-copy target, the log group
+ * stays within one leaf's source bytes, and the decision starts past the old prefix index. The writer runs with System
+ * One off: it prepares input history, and its own turns are not under test. Returns the session id and file.
+ */
+async function seedIcmPastSession(
+	world: HarnessWorld,
+	agentDir: string,
+): Promise<{ readonly sessionId: string; readonly file: string }> {
+	const noteTexts = ICM_NOTES.flat();
+	const renderedNotes = ICM_NOTES.flatMap(([note, reply]) => [`user: ${note}`, `assistant: ${reply}`]).join("\n");
+	const logTexts = [
+		ICM_LOG_REQUEST,
+		icmRolloutLog(ICM_LOG_WAVES[0]),
+		ICM_LOG_CONTINUE,
+		icmRolloutLog(ICM_LOG_WAVES[1]),
+		ICM_LOG_CONTINUE,
+		icmRolloutLog(ICM_LOG_WAVES[2]),
+		ICM_DECISION,
+		ICM_DECISION_REPLY,
+	];
+	if (Buffer.byteLength(renderedNotes) > TRANSCRIPT_SUMMARY_TARGET_BYTES)
+		throw new Error("the seeded notes no longer fit the exact-copy target");
+	if (logTexts.reduce((sum, text) => sum + Buffer.byteLength(text), 0) > TRANSCRIPT_LEAF_MAX_SOURCE_BYTES)
+		throw new Error("the seeded log no longer fits one leaf");
+	if ([...noteTexts, ...logTexts.slice(0, 6)].join("\n").length <= ICM_OLD_PREFIX_CHARS)
+		throw new Error("the seeded decision no longer starts past the old prefix index");
+	const prompts = [
+		...ICM_NOTES.map(([note]) => note),
+		ICM_LOG_REQUEST,
+		ICM_LOG_CONTINUE,
+		ICM_LOG_CONTINUE,
+		ICM_DECISION,
+		ICM_TAIL_REQUEST,
+	];
+	world.provider.enqueue(
+		"root",
+		...ICM_NOTES.map(([, reply], index) => text(`icm-seed-note-${index + 1}`, reply)),
+		...ICM_LOG_WAVES.map((wave) => text(`icm-seed-log-${wave}`, icmRolloutLog(wave))),
+		text("icm-seed-decision", ICM_DECISION_REPLY),
+		calls("icm-seed-tail-call", [{ id: "icm-seed-tail-1", name: "bash", arguments: { command: ICM_TAIL_COMMAND } }]),
+		text("icm-seed-tail-reply", ICM_TAIL_REPLY),
+	);
+	world.shell.enqueue({
+		name: "icm-seed-missing-settings",
+		command: ICM_TAIL_COMMAND,
+		cwd: HARNESS_PROJECT_CWD,
+		output: "",
+		stderr: ICM_TAIL_STDERR,
+		exitCode: 1,
+	});
+	const writer = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		systemOneEnabled: false,
+		settings: { memorySystem: undefined },
+	});
+	for (const [index, prompt] of prompts.entries()) {
+		await withDeadline(world.trace, `ICM seed turn ${index + 1}`, writer.session.prompt(prompt));
+	}
+	const roles = writer.sessionManager
+		.getEntries()
+		.flatMap((entry) => (entry.type === "message" ? [entry.message.role] : []));
+	expect(roles.slice(0, 16), "the notes and the log are eight owner/assistant exchanges").toEqual(
+		Array.from({ length: 16 }, (_, index) => (index % 2 === 0 ? "user" : "assistant")),
+	);
+	// The layout guards above hold only for the texts production persisted: compare them with what was scripted.
+	const persistedTexts = writer.sessionManager
+		.getEntries()
+		.flatMap((entry) =>
+			entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant")
+				? [
+						typeof entry.message.content === "string"
+							? entry.message.content
+							: entry.message.content.map((block) => (block.type === "text" ? block.text : "")).join(""),
+					]
+				: [],
+		);
+	expect(persistedTexts.slice(0, 16), "the notes and the log are persisted exactly as written").toEqual([
+		...noteTexts,
+		...logTexts,
+	]);
+	expect(roles.slice(16), "the tail is one owner request, the failed shell call and the reply").toEqual([
+		"user",
+		"assistant",
+		"toolResult",
+		"assistant",
+	]);
+	const file = writer.sessionManager.getSessionFile();
+	if (file === undefined) throw new Error("the seeded ICM session has no file");
+	const sessionId = writer.sessionManager.getSessionId();
+	expect(await world.disposeSessionInBody(writer.session), "the ICM seed writer disposes cleanly").toBeUndefined();
+	return { sessionId, file };
+}
+
+/**
+ * Builds the summary hierarchy over everything under `agentDir` with one hierarchy-on ICM root and waits, event-driven
+ * on the store's durable writes, until the status shows `built`. Summary admissions arrive inside the given phase.
+ */
+async function buildIcmHierarchy(
+	world: HarnessWorld,
+	agentDir: string,
+	settings: Partial<Settings>,
+	built: (hierarchy: NonNullable<TranscriptHistoryStatus["hierarchy"]>) => boolean,
+): Promise<NonNullable<TranscriptHistoryStatus["hierarchy"]>> {
+	const builder = await world.createRootSession("root", { agentDir, settings });
+	await withDeadline(
+		world.trace,
+		"ICM summary hierarchy built",
+		world.io.waitForMutation(() => {
+			// The host attaches in the background: until it reports a hierarchy there is nothing to judge yet.
+			const hierarchy = builder.session.getTranscriptHistoryStatus().hierarchy;
+			return hierarchy !== undefined && built(hierarchy);
+		}),
+		60_000,
+	).catch((error: unknown) => {
+		// The hierarchy's own status is the evidence of what it built, held or failed instead.
+		const hierarchy = builder.session.getTranscriptHistoryStatus().hierarchy;
+		throw new Error(
+			`${error instanceof Error ? error.message : String(error)}; hierarchy: ${JSON.stringify(hierarchy ?? null).slice(0, 2_000)}`,
+		);
+	});
+	const hierarchy = icmHierarchy(builder.session);
+	expect(await world.disposeSessionInBody(builder.session), "the hierarchy builder disposes cleanly").toBeUndefined();
+	return hierarchy;
+}
+
 it("standalone root conversation: greeting, task with tools and memory, compaction, queued input, continuation", async () => {
 	await runJourney(
 		{
@@ -536,6 +864,8 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				/^Worker worker-\d+ provider request failed \(server_error\); retrying in \d+s \(attempt [23]\/3\)\.$/,
 				/^Worker worker-\d+ failed \(server_error\); retrying from the persisted transcript in \d+s \(attempt 2\)\.$/,
 				/^A queued message was not delivered because the session context changed before it was admitted\. It is kept in full in the pending queue; restore it to the editor to send it again: Queued owner input while the summary is held\.$/,
+				// ICM history (System One off): the model leaf of the seeded log is held, reported once by the hierarchy owner.
+				/^History summaries: 1 model summary job\(s\) are held: System One is not bound to this session, so no admission judgment can run\. Exact copies and exact history recall are unaffected\.$/,
 			],
 			files: {
 				[LIMITS_PATH]: "export const MAX_RETRIES = 3;\n",
@@ -3278,6 +3608,397 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			expect(await world.disposeSessionInBody(m4Session), "the M4 owner disposes cleanly").toBeUndefined();
 			trace.mark("root", "e4.delegated-memory");
 
+			// ICM history (I1-I6). The production default is ICM: an absent memorySystem setting (an undefined key is absent in
+			// the stored settings) selects it. Everything runs under its own agent directory, so the history backend and the
+			// summary hierarchy see only the past session written here, never the OKF sessions above.
+			const icmAgentDir = `${world.agentDir}-icm`;
+			const icmThreads = world.guard.threads;
+			const icmOperationsStart = world.io.operations.length;
+			const icmStartedBeforeSeed = icmThreads.startedTotal;
+			// I1: the canonical past session, written by production through an ICM root.
+			const icmSeed = await seedIcmPastSession(world, icmAgentDir);
+			expect(icmThreads.startedTotal, "writing a session in ICM starts no history worker").toBe(
+				icmStartedBeforeSeed,
+			);
+			trace.mark("root", "icm.seeded");
+
+			// I2/I3: a fresh default-ICM root. Before its first explicit history request the prompt offers on-demand history and no
+			// legacy memory, the memory tool is history-only, no worker has started and no past session body has been read. The
+			// explicit request then starts the backend, finds the retained decision and opens it and the failed shell call exactly.
+			// The baseline is taken before the root exists: constructing and binding it must not start or scan anything either.
+			const icmStartedBeforeRead = icmThreads.startedTotal;
+			const icmOperationsBeforeRead = world.io.operations.length;
+			const icmReadOwner = await world.createRootSession("root", {
+				agentDir: icmAgentDir,
+				settings: { memorySystem: undefined },
+			});
+			expect(icmReadOwner.session.getMemorySystem(), "an absent memorySystem setting resolves to ICM").toBe("icm");
+			expect(
+				icmReadOwner.session.getTranscriptHistoryStatus().availability,
+				"the ICM history index is bound but not started",
+			).toBe("on_demand");
+			let icmDecisionHandle: string | undefined;
+			let icmFailureHandle: string | undefined;
+			world.provider.enqueue(
+				"root",
+				{
+					name: "icm-surface",
+					check: (request) => {
+						const prompt = request.context.systemPrompt ?? "";
+						if (!prompt.includes(ICM_HISTORY_GUIDANCE))
+							throw new Error("the ICM prompt does not offer on-demand history");
+						if (prompt.includes("=== Persistent Memory (file-store) ==="))
+							throw new Error("the ICM prompt carries the legacy memory block");
+						if (requestTexts(request).some((entry) => entry.includes("<memory_context")))
+							throw new Error("the ICM request carries automatically retrieved memory");
+						const memoryTool = (request.context.tools ?? []).find((tool) => tool.name === "memory");
+						const schema = JSON.stringify(memoryTool?.parameters ?? {});
+						if (!schema.includes('"history_search"') || schema.includes('"add"') || schema.includes('"target"'))
+							throw new Error(`the ICM memory tool is not history-only: ${schema.slice(0, 400)}`);
+						if (
+							icmThreads.startedTotal !== icmStartedBeforeRead ||
+							icmReadsOf(world, icmSeed.file, icmOperationsBeforeRead) !== 0
+						)
+							throw new Error("the past session was scanned before any explicit history request");
+					},
+					reply: icmCall("icm-search-1", "memory", { action: "history_search", query: ICM_DECISION_QUERY }),
+				},
+				icmAfterHistoryRead(
+					"icm-decision-found",
+					"memory",
+					{ id: "icm-search-1", arguments: { action: "history_search", query: ICM_DECISION_QUERY } },
+					(result) => {
+						if (result.isError || result.text.includes("No matching history was found."))
+							throw new Error(`the decision search did not succeed: ${result.text.slice(0, 600)}`);
+						const hit = icmHits(result.text).find(
+							(candidate) =>
+								candidate.description.includes(`session ${icmSeed.sessionId}`) &&
+								candidate.description.includes(", user") &&
+								candidate.line.includes("retry budget"),
+						);
+						if (hit === undefined)
+							throw new Error(`the owner's decision is not a hit: ${result.text.slice(0, 900)}`);
+						icmDecisionHandle = hit.handle;
+						return {
+							content: [
+								{
+									type: "toolCall",
+									id: "icm-source-1",
+									name: "memory",
+									arguments: { action: "history_source", ref: hit.handle },
+								},
+								{
+									type: "toolCall",
+									id: "icm-search-2",
+									name: "memory",
+									arguments: { action: "history_search", query: ICM_TAIL_QUERY },
+								},
+							],
+							stopReason: "toolUse",
+						};
+					},
+				),
+				dynamicCalls("icm-failure-found", (request) => {
+					const results = latestBatchResults(request).filter((result) => result.toolName === "memory");
+					const source = results.find((result) => result.text.includes("Source ["));
+					const failures = results.find((result) => result.text.includes("Coverage:"));
+					if (
+						source?.isError !== false ||
+						!source.text.includes(ICM_DECISION) ||
+						!source.text.includes("End of source.")
+					)
+						throw new Error(`the decision source did not open exactly: ${source?.text.slice(0, 600) ?? "none"}`);
+					if (!source.text.includes(`Source [${icmDecisionHandle}] (`) || !source.text.includes(", user)"))
+						throw new Error("the opened source does not name its handle and owner role");
+					const failure = icmHits(failures?.text ?? "").find(
+						(candidate) => candidate.description.includes("tool bash") && candidate.description.includes("error"),
+					);
+					if (failure === undefined)
+						throw new Error(`the failed shell result is not a hit: ${failures?.text.slice(0, 900) ?? "none"}`);
+					icmFailureHandle = failure.handle;
+					return [
+						{ id: "icm-source-2", name: "memory", arguments: { action: "history_source", ref: failure.handle } },
+					];
+				}),
+				{
+					name: "icm-failure-opened",
+					check: (request) => {
+						const opened = icmLatestResult(request, "memory");
+						if (opened.isError || !opened.text.includes("No such file or directory"))
+							throw new Error(`the failed shell result did not open: ${opened.text.slice(0, 600)}`);
+						if (
+							!opened.text.includes(`Source [${icmFailureHandle}] (`) ||
+							!opened.text.includes("tool bash, error")
+						)
+							throw new Error("the opened failure does not carry its tool and error status");
+					},
+					reply: { content: [{ type: "text", text: "The decision and the failed settings read are recovered." }] },
+				},
+			);
+			world.systemOne.enterPhase("icm-read", ICM_INTAKE_JUDGMENTS);
+			await withDeadline(
+				trace,
+				"ICM exact history turn",
+				icmReadOwner.session.prompt(
+					"Find the retry budget decision in past conversations and open its exact source.",
+				),
+			);
+			expect(icmThreads.startedTotal, "the first explicit history request started exactly one worker").toBe(
+				icmStartedBeforeRead + 1,
+			);
+			const icmReadDetails = lastToolResultDetails(icmReadOwner.session, "memory");
+			expect(
+				isRecordObject(icmReadDetails) && icmReadDetails[TRANSCRIPT_RECALL_RESULT_MARKER] === true,
+				"a history result is marked as recalled history",
+			).toBe(true);
+			expect(
+				await world.disposeSessionInBody(icmReadOwner.session),
+				"the ICM reader disposes cleanly",
+			).toBeUndefined();
+			expect(icmThreads.liveCount, "the reader's disposal terminates its history worker").toBe(0);
+			// Default-off construction: no root asked for the hierarchy, so no summary store exists.
+			expect(
+				world.io.existsSync(stateFile(icmAgentDir, "transcript-memory")),
+				"default ICM writes no summary store",
+			).toBe(false);
+			trace.mark("root", "icm.exact-recall");
+
+			// I4: the opt-in hierarchy over the past session. With System One on the scripted summary of the rollout log and the
+			// parent over both leaves pass the real admission; with it off the model leaf is held before any call. The notes are an
+			// exact copy either way. Summary and admission traffic reach only the scripted provider and transport.
+			const icmSummaryTrack = "worker-c";
+			expect(world.provider.getPendingStepNames(icmSummaryTrack), "the summary track is idle").toEqual([]);
+			if (world.systemOne.enabled) {
+				world.provider.enqueue(
+					icmSummaryTrack,
+					{
+						name: "icm-leaf-summary",
+						check: (request) => {
+							const prompt = JSON.stringify(request.context.messages);
+							if (!prompt.includes("SOURCE:") || !prompt.includes("retry budget at seven per hour"))
+								throw new Error("the first summary request is not the rollout log leaf");
+						},
+						reply: { content: [{ type: "text", text: ICM_LEAF_SUMMARY }] },
+					},
+					{
+						name: "icm-parent-summary",
+						check: (request) => {
+							if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+								throw new Error("the second summary request does not merge the admitted leaf");
+						},
+						reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+					},
+				);
+			}
+			world.systemOne.enterPhase("icm-admission", {
+				summary_supported: { kind: "noul", probability: 0.97 },
+				owner_constraints_preserved: { kind: "noul", probability: 0.97 },
+				status_reported_honestly: { kind: "noul", probability: 0.97 },
+			});
+			// Counted from here: the track and the transport may have served earlier parts of the journey.
+			const icmBuildSummariesBefore = icmTrackRequests(world, icmSummaryTrack);
+			const icmBuildAdmissionsBefore = icmAdmissionRequests(world);
+			const icmBuilt = await buildIcmHierarchy(
+				world,
+				icmAgentDir,
+				icmHierarchySettings(icmSummaryTrack),
+				(hierarchy) =>
+					world.systemOne.enabled
+						? hierarchy.acceptedNodes === 3
+						: hierarchy.acceptedNodes === 1 && (hierarchy.admission?.heldJobs ?? 0) >= 1,
+			);
+			expect(
+				{
+					accepted: icmBuilt.acceptedNodes,
+					summaries: icmTrackRequests(world, icmSummaryTrack) - icmBuildSummariesBefore,
+					admissions: icmAdmissionRequests(world) - icmBuildAdmissionsBefore,
+				},
+				"the hierarchy built the exact copy, and the model summaries only when System One judged them",
+			).toEqual(
+				world.systemOne.enabled
+					? { accepted: 3, summaries: 2, admissions: 2 }
+					: { accepted: 1, summaries: 0, admissions: 0 },
+			);
+			trace.mark("root", "icm.hierarchy-built");
+
+			// I5: a later ICM root with the hierarchy off and no summary model reads what was approved: discovery beside the
+			// hits, expansion to exact sources, and no summary or admission request. Its own recalled results are never captured.
+			const icmSummariesBefore = icmTrackRequests(world, icmSummaryTrack);
+			const icmAdmissionsBefore = icmAdmissionRequests(world);
+			const icmEscapesBefore = world.guard.escapes.length;
+			const icmView = await world.createRootSession("root", {
+				agentDir: icmAgentDir,
+				sessionManager: world.createSessionManager(icmAgentDir),
+				settings: { memorySystem: undefined },
+			});
+			const icmViewSession = icmView.sessionManager.getSessionId();
+			let icmNotesSummary: string | undefined;
+			world.provider.enqueue(
+				"root",
+				calls("icm-view-notes", [
+					{ id: "icm-view-1", name: "memory", arguments: { action: "history_search", query: ICM_NOTES_QUERY } },
+				]),
+				icmAfterHistoryRead(
+					"icm-view-notes-found",
+					"memory",
+					{ id: "icm-view-1", arguments: { action: "history_search", query: ICM_NOTES_QUERY } },
+					(result) => {
+						const summary = icmSummaries(result.text).find((candidate) => candidate.quality === "exact_copy");
+						if (result.isError || summary === undefined)
+							throw new Error(`the notes search lists no approved exact copy: ${result.text.slice(0, 900)}`);
+						icmNotesSummary = summary.handle;
+						return {
+							content: [
+								{
+									type: "toolCall",
+									id: "icm-view-2",
+									name: "memory",
+									arguments: { action: "history_expand", ref: summary.handle },
+								},
+								{
+									type: "toolCall",
+									id: "icm-view-3",
+									name: "memory",
+									arguments: { action: "history_search", query: ICM_DECISION_QUERY },
+								},
+							],
+							stopReason: "toolUse",
+						};
+					},
+				),
+				dynamicCalls("icm-view-expanded", (request) => {
+					const results = latestBatchResults(request).filter((result) => result.toolName === "memory");
+					const expanded = results.find((result) => !result.text.includes("Coverage:"));
+					const decision = results.find((result) => result.text.includes("Coverage:"));
+					const source =
+						expanded?.isError === false ? /- \[(tx:[^\]]+)\] user/.exec(expanded.text)?.[1] : undefined;
+					if (source === undefined || !expanded?.text.includes(`[${icmNotesSummary}] level 0`))
+						throw new Error(
+							`the exact copy did not expand to its sources: ${expanded?.text.slice(0, 900) ?? "none"}`,
+						);
+					const decisionSummaries = icmSummaries(decision?.text ?? "");
+					if (decision?.isError !== false || icmHits(decision.text).length === 0)
+						throw new Error(`the decision search failed: ${decision?.text.slice(0, 600) ?? "none"}`);
+					const modelSummaries = decisionSummaries.filter((summary) => summary.quality === "model_summary");
+					if (
+						world.systemOne.enabled
+							? !decision.text.includes(ICM_LEAF_SUMMARY) || modelSummaries.length !== 1
+							: modelSummaries.length !== 0
+					)
+						throw new Error(
+							`the decision's summaries do not match what was admitted: ${decision.text.slice(0, 1200)}`,
+						);
+					return [{ id: "icm-view-4", name: "memory", arguments: { action: "history_source", ref: source } }];
+				}),
+				calls("icm-view-opened", [
+					{
+						id: "icm-view-5",
+						name: "memory",
+						arguments: { action: "history_search", query: ICM_DECISION_QUERY, maxResults: 10 },
+					},
+				]),
+				{
+					name: "icm-view-own-recall",
+					check: (request) => {
+						const repeat = icmLatestResult(request, "memory");
+						const recalled = icmHits(repeat.text).filter(
+							(hit) =>
+								hit.description.includes(`session ${icmViewSession}`) &&
+								hit.description.includes("tool_result"),
+						);
+						if (recalled.length > 0)
+							throw new Error(`a recalled history result was captured again: ${recalled[0]?.line}`);
+						if (!repeat.text.includes("recalled_history="))
+							throw new Error(`the recalled results are not reported as uncaptured: ${repeat.text.slice(-600)}`);
+					},
+					reply: { content: [{ type: "text", text: "The approved summaries and their sources are read." }] },
+				},
+			);
+			world.systemOne.enterPhase("icm-view", ICM_INTAKE_JUDGMENTS);
+			await withDeadline(
+				trace,
+				"ICM approved summary turn",
+				icmView.session.prompt("Look up the staging notes and the retry budget decision, with their summaries."),
+			);
+			expect(
+				icmView.session.messages.some(
+					(message) =>
+						message.role === "toolResult" &&
+						message.content.some(
+							(block) => block.type === "text" && block.text.includes(ICM_NOTES[0]?.[0] ?? ""),
+						),
+				),
+				"a source reached through the expansion opens with its exact text",
+			).toBe(true);
+			expect(
+				await world.disposeSessionInBody(icmView.session),
+				"the ICM summary reader disposes cleanly",
+			).toBeUndefined();
+			expect(
+				{
+					summaries: icmTrackRequests(world, icmSummaryTrack) - icmSummariesBefore,
+					admissions: icmAdmissionRequests(world) - icmAdmissionsBefore,
+					escapes: world.guard.escapes.slice(icmEscapesBefore),
+				},
+				"reading approved summaries makes no summary, admission or network request",
+			).toEqual({ summaries: 0, admissions: 0, escapes: [] });
+			trace.mark("root", "icm.read-only-reopen");
+
+			// I6: retrieval disabled is a typed policy refusal that starts nothing and reads nothing, and no ICM root wrote a
+			// legacy memory store.
+			const icmStartedBeforeDisabled = icmThreads.startedTotal;
+			const icmOperationsBeforeDisabled = world.io.operations.length;
+			const icmDisabled = await world.createRootSession("root", {
+				agentDir: icmAgentDir,
+				settings: { memorySystem: undefined, contextPolicy: { memory: { enabled: false } } },
+			});
+			world.provider.enqueue(
+				"root",
+				calls("icm-disabled-search", [
+					{
+						id: "icm-disabled-1",
+						name: "memory",
+						arguments: { action: "history_search", query: ICM_DECISION_QUERY },
+					},
+				]),
+				{
+					name: "icm-disabled-refused",
+					check: (request) => {
+						const refused = icmLatestResult(request, "memory");
+						if (!refused.isError || !refused.text.includes("transcript history forbidden"))
+							throw new Error(`disabled retrieval was not refused by policy: ${refused.text.slice(0, 600)}`);
+					},
+					reply: { content: [{ type: "text", text: "History retrieval is disabled here." }] },
+				},
+			);
+			world.systemOne.enterPhase("icm-disabled", ICM_INTAKE_JUDGMENTS);
+			await withDeadline(
+				trace,
+				"ICM disabled history turn",
+				icmDisabled.session.prompt("Find the retry budget decision in past conversations."),
+			);
+			expect(
+				{
+					started: icmThreads.startedTotal - icmStartedBeforeDisabled,
+					reads: icmReadsOf(world, icmSeed.file, icmOperationsBeforeDisabled),
+				},
+				"disabled retrieval starts no worker and reads no session",
+			).toEqual({ started: 0, reads: 0 });
+			expect(
+				await world.disposeSessionInBody(icmDisabled.session),
+				"the disabled reader disposes cleanly",
+			).toBeUndefined();
+			const legacyWrites = world.io.operations
+				.slice(icmOperationsStart)
+				.filter(
+					(operation) =>
+						["write", "append", "rename"].includes(operation.kind) &&
+						!relative(icmAgentDir, operation.destination ?? operation.path).startsWith("..") &&
+						/^(USER|MEMORY)\.md$/.test(basename(operation.destination ?? operation.path)),
+				);
+			expect(legacyWrites, "no ICM root writes a legacy memory store").toEqual([]);
+			trace.mark("root", "icm.negative-controls");
+
 			// E8 (worker budget and bash): a read-only worker runs its bash through the scripted shell. Each provider response is charged to the
 			// preset's token budget, with cache reads at the cache-read weight: 1,000 input and 20,000 cache-read tokens charge 3,000, not 21,000.
 			// The second response exhausts the 5,500 budget, so its read is refused and no third provider request reaches the scripted provider.
@@ -5627,6 +6348,9 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 			// Exact expected refusal of the E7 negative control: the busy, dead-owner A is never resumed, and nothing else is allowed.
 			warningAllowances: [
 				/^Worker conversation setup failed: Worker queued context has no proof of never-started, dead-owner recovery\.$/,
+				// ICM worker history: the rejected model leaf (System One on) or the held one (off), reported by the hierarchy owner.
+				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_rejected: [^\n]+\)\. Exact history recall is unaffected\.$/,
+				/^History summaries: 1 model summary job\(s\) are held: System One is not bound to this session, so no admission judgment can run\. Exact copies and exact history recall are unaffected\.$/,
 			],
 			files: { [LIMITS_PATH]: "export const MAX_RETRIES = 3;\n" },
 			// A clean checkout on main: a fresh writer worker gets its own worktree lane (dirty checkouts fall back to shared).
@@ -9246,6 +9970,381 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				await world.disposeSessionInBody(e7Fresh.session),
 				"the recovered owner disposes cleanly",
 			).toBeUndefined();
+
+			// ICM worker history reads (W1-W5). A default-ICM root grants a reader worker the bounded memory_read broker. The worker
+			// queries history explicitly, opens only what it was shown, and a policy change while one of its reads is in flight
+			// fences that read; a fresh query reacquires access. The model summary of the rollout log is rejected by System One
+			// (held when it is off), so no read anywhere shows its text.
+			const wAgentDir = `${world.agentDir}-icm`;
+			const wThreads = world.guard.threads;
+			const wSeed = await seedIcmPastSession(world, wAgentDir);
+			const wSummaryTrack = "worker-b";
+			expect(world.provider.getPendingStepNames(wSummaryTrack), "the summary track is idle").toEqual([]);
+			expect(world.provider.getPendingStepNames("worker-a"), "the reader track is idle").toEqual([]);
+			if (world.systemOne.enabled) {
+				world.provider.enqueue(wSummaryTrack, {
+					name: "w-leaf-summary",
+					check: (request) => {
+						if (!JSON.stringify(request.context.messages).includes("retry budget at seven per hour"))
+							throw new Error("the summary request is not the rollout log leaf");
+					},
+					reply: { content: [{ type: "text", text: ICM_LEAF_SUMMARY }] },
+				});
+			}
+			// A decisive no on support: the leaf is rejected without a retry, so no parent is ever judged.
+			world.systemOne.enterPhase("w-admission", {
+				summary_supported: { kind: "noul", probability: 0.02 },
+				owner_constraints_preserved: { kind: "noul", probability: 0.97 },
+			});
+			// Counted from here: worker-b served the delegated agents earlier in this journey.
+			const wSummariesBefore = icmTrackRequests(world, wSummaryTrack);
+			const wBuilt = await buildIcmHierarchy(world, wAgentDir, icmHierarchySettings(wSummaryTrack), (hierarchy) =>
+				world.systemOne.enabled
+					? hierarchy.acceptedNodes === 1 && (hierarchy.admission?.judgments.rejected ?? 0) === 1
+					: hierarchy.acceptedNodes === 1 && (hierarchy.admission?.heldJobs ?? 0) >= 1,
+			);
+			expect(
+				{ accepted: wBuilt.acceptedNodes, summaries: icmTrackRequests(world, wSummaryTrack) - wSummariesBefore },
+				"only the exact copy is accepted; the model summary is rejected or held",
+			).toEqual({ accepted: 1, summaries: world.systemOne.enabled ? 1 : 0 });
+			trace.mark("root", "w.hierarchy-rejected");
+
+			// W1: the owner-authored reader presets, as in the delegated memory read of the standalone journey. The tight reader's
+			// token grant is what its receiving allowance is measured against once its own responses have spent it.
+			const wReaderStore = new OrchestrationProfileStore({
+				agentDir: wAgentDir,
+				cwd: HARNESS_PROJECT_CWD,
+				projectTrusted: false,
+			});
+			for (const [profileId, description, budget] of [
+				["icm-reader", "Read-only reader with the bounded history read.", {}],
+				["icm-tight-reader", "Read-only history reader with a 6,000-token grant.", { maxTokens: W_TIGHT_GRANT }],
+			] as const) {
+				wReaderStore.save(
+					{
+						schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+						profileId,
+						description,
+						role: "explorer",
+						modelPolicy: {
+							mode: "fixed",
+							candidates: [{ provider: "harness-script", modelId: "worker-a", thinkingLevel: "off" }],
+						},
+						capabilityCeiling: ["filesystem.read", "memory.query"],
+						readOnly: true,
+						toolNames: ["read", "memory_read"],
+						resourceProfileNames: [],
+						dispatchProfileIds: [],
+						budget,
+						maxConcurrent: 1,
+						leaseTtlMs: 60_000,
+						requireIndependentVerification: false,
+						createdAt: "2026-10-09T00:00:00.000Z",
+						updatedAt: "2026-10-09T00:00:00.000Z",
+					},
+					"global",
+				);
+			}
+			const wRoot = await world.createRootSession("root", {
+				agentDir: wAgentDir,
+				settings: { memorySystem: undefined },
+			});
+			const wDone = createBarrier();
+			const wWake = createBarrier();
+			let wUnshown: string | undefined;
+			let wDecision: string | undefined;
+			const wRejectedTextShown = (text: string): boolean => text.includes(ICM_LEAF_SUMMARY);
+			world.provider.enqueue(
+				"root",
+				calls("w-notes", [
+					{ id: "w-notes-1", name: "memory", arguments: { action: "history_search", query: ICM_NOTES_QUERY } },
+				]),
+				icmAfterHistoryRead(
+					"w-notes-found",
+					"memory",
+					{ id: "w-notes-1", arguments: { action: "history_search", query: ICM_NOTES_QUERY } },
+					(result) => {
+						// A note hit the worker is never shown (it queries only the decision): valid, but not cited to that worker.
+						wUnshown = icmHits(result.text).find((hit) => hit.line.includes("Note A1"))?.handle;
+						if (result.isError || wUnshown === undefined)
+							throw new Error(`the root notes search found no note: ${result.text.slice(0, 600)}`);
+						return icmCall("w-start-1", "delegate", {
+							action: "start",
+							profileId: "icm-reader",
+							instructions:
+								"Find the retry budget decision in past conversations through memory_read, then submit your report.",
+						});
+					},
+				),
+				{
+					name: "w-start-reply",
+					check: (request) => {
+						const started = latestBatchResults(request).find((result) => result.toolName === "delegate");
+						if (started?.isError || !started?.text.includes("delegate started (running)"))
+							throw new Error(`the history reader did not start: ${started?.text ?? "no result"}`);
+					},
+					reply: { content: [{ type: "text", text: "The history reader is started." }] },
+				},
+				{
+					name: "w-wake",
+					maxRequests: 8,
+					until: (request) => {
+						const everything = JSON.stringify(request.context.messages);
+						const done =
+							everything.includes("Background worker terminal handoff") && everything.includes("succeeded");
+						if (done) wWake.release();
+						return done;
+					},
+					reply: { content: [{ type: "text", text: "Background work is still settling." }] },
+				},
+			);
+			world.provider.enqueue(
+				"worker-a",
+				{
+					name: "w-worker-query",
+					check: (request) => {
+						const offered = (request.context.tools ?? []).map((tool) => tool.name);
+						if (!offered.includes("memory_read"))
+							throw new Error(`the worker is not offered memory_read: ${offered.join(", ")}`);
+						if (offered.includes("memory")) throw new Error("the worker is offered the root memory tool");
+					},
+					reply: icmCall("w-read-1", "memory_read", { query: ICM_DECISION_QUERY }),
+				},
+				{
+					name: "w-worker-open",
+					check: (request) => {
+						const read = icmLatestResult(request, "memory_read");
+						if (read.isError || !read.text.includes("retry budget"))
+							throw new Error(
+								`the worker's history query did not return the decision: ${read.text.slice(0, 900)}`,
+							);
+						if (wRejectedTextShown(read.text)) throw new Error("the worker was shown an unapproved summary");
+						wDecision = icmHandleOnLine(read.text, "retry budget");
+						if (wDecision === undefined || !wDecision.startsWith(`tx:${wSeed.sessionId}:`))
+							throw new Error("the worker's result names no decision handle of the past session");
+					},
+					reply: (): ScriptedReply => ({
+						content: [
+							{ type: "toolCall", id: "w-read-2", name: "memory_read", arguments: { ref: wDecision } },
+							{ type: "toolCall", id: "w-read-3", name: "memory_read", arguments: { ref: wUnshown } },
+						],
+						stopReason: "toolUse",
+					}),
+				},
+				{
+					name: "w-worker-fence",
+					check: (request) => {
+						const reads = latestBatchResults(request).filter((result) => result.toolName === "memory_read");
+						const shown = reads.find((result) => !result.isError);
+						const unshown = reads.find((result) => result.isError);
+						if (shown?.isError !== false || !shown.text.includes(ICM_DECISION))
+							throw new Error(`the shown source did not open exactly: ${shown?.text.slice(0, 600) ?? "none"}`);
+						if (unshown?.isError !== true || !unshown.text.includes("memory_source_forbidden"))
+							throw new Error(`an unshown source was not refused: ${unshown?.text.slice(0, 600) ?? "none"}`);
+						// The next exact read is in flight when the owner disables history retrieval.
+						wThreads.interceptNext("source", () =>
+							wRoot.settingsManager.applyOverrides({ contextPolicy: { memory: { enabled: false } } }),
+						);
+					},
+					reply: (): ScriptedReply => icmCall("w-read-4", "memory_read", { ref: wDecision }),
+				},
+				{
+					name: "w-worker-retry",
+					check: (request) => {
+						const fenced = icmLatestResult(request, "memory_read");
+						if (!fenced.isError || !fenced.text.includes("memory_snapshot_stale"))
+							throw new Error(
+								`the read in flight across the policy change was delivered: ${fenced.text.slice(0, 600)}`,
+							);
+						wRoot.settingsManager.applyOverrides({ contextPolicy: { memory: { enabled: true } } });
+					},
+					reply: icmCall("w-read-5", "memory_read", { query: ICM_DECISION_QUERY }),
+				},
+				{
+					name: "w-worker-report",
+					check: (request) => {
+						const fresh = icmLatestResult(request, "memory_read");
+						if (fresh.isError || !fresh.text.includes("retry budget") || wRejectedTextShown(fresh.text))
+							throw new Error(`the fresh query did not reacquire the decision: ${fresh.text.slice(0, 600)}`);
+						wDone.release();
+					},
+					reply: icmCall("w-report", "submit_report", {
+						status: "completed",
+						summary: "Decision ZEPHYR-7 keeps the retry budget at seven per hour.",
+					}),
+				},
+			);
+			world.systemOne.enterPhase("w-start", ICM_INTAKE_JUDGMENTS);
+			await withDeadline(
+				trace,
+				"W start turn",
+				wRoot.session.prompt("Search the staging notes, then start a reader for the retry budget decision."),
+			);
+			await withDeadline(trace, "W worker reported", wDone.promise);
+			await withDeadline(trace, "W handoff woke the root", wWake.promise, 60_000);
+			await withDeadline(trace, "W root idle after the wake", wRoot.session.waitForForegroundIdle());
+			expect(
+				world.provider.reached.filter((name) => name.startsWith("worker-a:w-")),
+				"the history reader ran its five steps exactly once",
+			).toEqual([
+				"worker-a:w-worker-query",
+				"worker-a:w-worker-open",
+				"worker-a:w-worker-fence",
+				"worker-a:w-worker-retry",
+				"worker-a:w-worker-report",
+			]);
+			expect(
+				wRoot.session.messages.some(
+					(message) =>
+						message.role === "toolResult" &&
+						message.content.some((block) => block.type === "text" && wRejectedTextShown(block.text)),
+				),
+				"no root result shows the unapproved summary",
+			).toBe(false);
+			trace.mark("root", "w.worker-history");
+
+			// W5: the receiving allowance. A second reader first reads with room to spare, so it is shown the decision and the
+			// notes summary. Its next response reports the spending that leaves it 60 tokens of its grant; the same query, the
+			// shown source and the shown summary then answer the typed over-room statement, never a cut record.
+			const tightDone = createBarrier();
+			const tightWake = createBarrier();
+			let tightDecision: string | undefined;
+			let tightNotes: string | undefined;
+			const overRoom = /Not attached, over this worker's remaining context room|Memory is constrained: /;
+			world.provider.enqueue(
+				"root",
+				calls("w-tight-start", [
+					{
+						id: "w-tight-start-1",
+						name: "delegate",
+						arguments: {
+							action: "start",
+							profileId: "icm-tight-reader",
+							instructions:
+								"Read the retry budget decision and the staging notes summary through memory_read, then submit your report.",
+						},
+					},
+				]),
+				{
+					name: "w-tight-start-reply",
+					check: (request) => {
+						const started = latestBatchResults(request).find((result) => result.toolName === "delegate");
+						if (started?.isError || !started?.text.includes("delegate started (running)"))
+							throw new Error(`the tight reader did not start: ${started?.text ?? "no result"}`);
+					},
+					reply: { content: [{ type: "text", text: "The tight reader is started." }] },
+				},
+				{
+					name: "w-tight-wake",
+					maxRequests: 8,
+					until: (request) => {
+						const everything = JSON.stringify(request.context.messages);
+						// The tight reader's own handoff carries its report summary; the first reader's handoff does not.
+						const done = everything.includes("The history did not fit the remaining room.");
+						if (done) tightWake.release();
+						return done;
+					},
+					reply: { content: [{ type: "text", text: "Background work is still settling." }] },
+				},
+			);
+			world.provider.enqueue(
+				"worker-a",
+				{
+					name: "w-tight-roomy",
+					reply: {
+						content: [
+							{
+								type: "toolCall",
+								id: "w-tight-1",
+								name: "memory_read",
+								arguments: { query: ICM_DECISION_QUERY },
+							},
+							{ type: "toolCall", id: "w-tight-2", name: "memory_read", arguments: { query: ICM_NOTES_QUERY } },
+						],
+						stopReason: "toolUse",
+					},
+				},
+				{
+					name: "w-tight-spend",
+					check: (request) => {
+						const reads = latestBatchResults(request).filter((result) => result.toolName === "memory_read");
+						tightDecision = reads.map((read) => icmHandleOnLine(read.text, "retry budget")).find(Boolean);
+						tightNotes = /txn:[a-f0-9]{16}/.exec(
+							reads.find((read) => read.text.includes("Note A"))?.text ?? "",
+						)?.[0];
+						if (tightDecision === undefined || tightNotes === undefined)
+							throw new Error(
+								`the roomy reads did not show the decision and the notes summary: ${JSON.stringify(reads).slice(0, 900)}`,
+							);
+					},
+					reply: (): ScriptedReply => ({
+						content: [
+							{
+								type: "toolCall",
+								id: "w-tight-3",
+								name: "memory_read",
+								arguments: { query: ICM_DECISION_QUERY },
+							},
+							{ type: "toolCall", id: "w-tight-4", name: "memory_read", arguments: { ref: tightDecision } },
+							{ type: "toolCall", id: "w-tight-5", name: "memory_read", arguments: { ref: tightNotes } },
+						],
+						stopReason: "toolUse",
+						usage: { ...createEmptyUsage(), input: W_TIGHT_SPEND, totalTokens: W_TIGHT_SPEND },
+					}),
+				},
+				{
+					name: "w-tight-report",
+					check: (request) => {
+						const reads = latestBatchResults(request).filter((result) => result.toolName === "memory_read");
+						const query = reads.find(
+							(read) => overRoom.test(read.text) && !read.text.startsWith("[Not attached:"),
+						);
+						const source = reads.find((read) => read.text.includes("even a minimal page of this source"));
+						const expansion = reads.find((read) => read.text.includes("this summary's expansion does not fit"));
+						if (reads.length !== 3 || query === undefined || source === undefined || expansion === undefined)
+							throw new Error(
+								`the tight reads were not refused by the receiving allowance: ${JSON.stringify(reads).slice(0, 1200)}`,
+							);
+						for (const read of reads) {
+							if (
+								read.isError ||
+								read.text.includes("ZEPHYR") ||
+								read.text.includes("Note A") ||
+								/\[tx:/.test(read.text)
+							)
+								throw new Error(`a tight read delivered part of a record: ${read.text.slice(0, 600)}`);
+						}
+						tightDone.release();
+					},
+					reply: {
+						content: [
+							{
+								type: "toolCall",
+								id: "w-tight-report",
+								name: "submit_report",
+								arguments: { status: "completed", summary: "The history did not fit the remaining room." },
+							},
+						],
+						stopReason: "toolUse",
+						usage: createEmptyUsage(),
+					},
+				},
+			);
+			world.systemOne.enterPhase("w-tight-start", ICM_INTAKE_JUDGMENTS);
+			await withDeadline(
+				trace,
+				"W5 start turn",
+				wRoot.session.prompt("Start a tight reader for the retry budget decision and the staging notes."),
+			);
+			await withDeadline(trace, "W5 tight reader reported", tightDone.promise);
+			await withDeadline(trace, "W5 handoff woke the root", tightWake.promise, 60_000);
+			await withDeadline(trace, "W5 root idle after the wake", wRoot.session.waitForForegroundIdle());
+			expect(
+				await world.disposeSessionInBody(wRoot.session),
+				"the ICM orchestration root disposes cleanly",
+			).toBeUndefined();
+			expect(wThreads.liveCount, "every history worker exited with its owner").toBe(0);
+			trace.mark("root", "w.receiving-allowance");
 		},
 	);
 }, 360_000);
@@ -9797,6 +10896,11 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			// worktree_sync is opt-in: the owner's default-tools setting names it alongside the default surface. The owner's draft is
 			// dirty from the start, so lanes are created explicitly and the worker is started on its request-visible lane checkout.
 			settings: { defaultTools: [...DEFAULT_ACTIVE_TOOL_NAMES, "worktree_sync"] },
+			// ICM recovery parts: held model leaves, without System One or without admission egress, reported by the hierarchy owner.
+			warningAllowances: [
+				/^History summaries: 1 model summary job\(s\) are held: System One is not bound to this session, so no admission judgment can run\. Exact copies and exact history recall are unaffected\.$/,
+				/^History summaries: \d+ model summary job\(s\) are held: external summary admission egress is not allowed by settings: the evaluator is a remote service and a local summary model does not make it local\. Exact copies and exact history recall are unaffected\.$/,
+			],
 			files: {
 				[projectPath("src", "limits.ts")]: ORIGINAL_LIMITS,
 				[projectPath("src", "owner.md")]: OWNER_DRAFT_DIRTY,
@@ -12495,6 +13599,414 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 				"export const MAX_RETRIES = 5;\n",
 			);
 			expect(world.io.readFileSync(projectPath("src", "owner.md"), "utf8")).toBe(OWNER_DRAFT_DIRTY);
+
+			// ICM mixed/recovery (M1-M5), after the owner's restart above. Each part runs under its own agent directory.
+			expect(
+				await world.disposeSessionInBody(restarted),
+				"the restored root disposes before the ICM parts",
+			).toBeUndefined();
+			const mThreads = world.guard.threads;
+			const mAgentDir = `${world.agentDir}-icm`;
+			const mSeed = await seedIcmPastSession(world, mAgentDir);
+			const decisionHit = (result: { isError: boolean; text: string }): string => {
+				const hit = icmHits(result.text).find(
+					(candidate) =>
+						candidate.description.includes(`session ${mSeed.sessionId}`) &&
+						candidate.line.includes("retry budget"),
+				);
+				if (result.isError || hit === undefined)
+					throw new Error(`the decision is not a hit: ${result.text.slice(0, 900)}`);
+				return hit.handle;
+			};
+
+			// M1: explicit ICM -> OKF -> ICM on one idle root. Both modes read the same canonical evidence through one backend per
+			// generation: the switch ends the old worker before the new generation runs, and the tools follow the mode.
+			const mSwitch = await world.createRootSession("root", {
+				agentDir: mAgentDir,
+				settings: { memorySystem: "icm" },
+			});
+			const memoryToolSchema = (request: ScriptedRequest): string =>
+				JSON.stringify((request.context.tools ?? []).find((tool) => tool.name === "memory")?.parameters ?? {});
+			const handles: string[] = [];
+			const schemas: string[] = [];
+			const switchTurn = async (label: string, prompt: string): Promise<void> => {
+				world.provider.enqueue(
+					"root",
+					{
+						name: `${label}-call`,
+						check: (request) => {
+							schemas.push(memoryToolSchema(request));
+						},
+						reply: icmCall(`${label}-1`, "memory", { action: "history_search", query: ICM_DECISION_QUERY }),
+					},
+					icmAfterHistoryRead(
+						`${label}-settled`,
+						"memory",
+						{ id: `${label}-1`, arguments: { action: "history_search", query: ICM_DECISION_QUERY } },
+						(result) => {
+							handles.push(decisionHit(result));
+							return { content: [{ type: "text", text: "The decision is found." }] };
+						},
+					),
+				);
+				world.systemOne.enterPhase(label, ICM_INTAKE_JUDGMENTS_UNGUARDED);
+				await withDeadline(trace, label, mSwitch.session.prompt(prompt));
+				await withDeadline(trace, `${label} idle`, mSwitch.session.waitForForegroundIdle());
+			};
+			await switchTurn("m1-icm", "Find the retry budget decision in past conversations.");
+			const switchedToOkf = await withDeadline(trace, "switch to OKF", mSwitch.session.setMemorySystem("okf"));
+			expect(switchedToOkf.ok, switchedToOkf.message).toBe(true);
+			expect(mThreads.liveCount, "the OKF generation runs one worker; the ICM one ended").toBe(1);
+			await switchTurn("m1-okf", "Find the retry budget decision again, now in OKF.");
+			const switchedToIcm = await withDeadline(trace, "switch back to ICM", mSwitch.session.setMemorySystem("icm"));
+			expect(switchedToIcm.ok, switchedToIcm.message).toBe(true);
+			expect(mThreads.liveCount, "the new ICM generation starts nothing until a history request").toBe(0);
+			await switchTurn("m1-icm-again", "Find the retry budget decision once more, back in ICM.");
+			expect(new Set(handles).size, "every mode opens the same canonical source").toBe(1);
+			expect(
+				schemas.map((schema) => schema.includes('"add"')),
+				"only the OKF generation offers curated memory actions",
+			).toEqual([false, true, false]);
+			expect(
+				await world.disposeSessionInBody(mSwitch.session),
+				"the switching root disposes cleanly",
+			).toBeUndefined();
+			expect(mThreads.liveCount, "no worker outlives the switching root").toBe(0);
+			trace.mark("root", "icm.mode-switch");
+
+			// M2: build, then restart. The reopened owner reuses the paid summaries and admissions, and its terminal-proof records
+			// are the ones the first owner left.
+			const mSummaryTrack = "worker-a";
+			expect(world.provider.getPendingStepNames(mSummaryTrack), "the summary track is idle").toEqual([]);
+			if (world.systemOne.enabled) {
+				world.provider.enqueue(mSummaryTrack, text("m2-leaf-summary", ICM_LEAF_SUMMARY), {
+					name: "m2-parent-summary",
+					check: (request) => {
+						if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+							throw new Error("the second summary request does not merge the admitted leaf");
+					},
+					reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+				});
+			}
+			world.systemOne.enterPhase("m2-admission", {
+				summary_supported: { kind: "noul", probability: 0.97 },
+				owner_constraints_preserved: { kind: "noul", probability: 0.97 },
+				status_reported_honestly: { kind: "noul", probability: 0.97 },
+			});
+			const mBuiltCondition = (hierarchy: NonNullable<TranscriptHistoryStatus["hierarchy"]>): boolean =>
+				world.systemOne.enabled
+					? hierarchy.acceptedNodes === 3
+					: hierarchy.acceptedNodes === 1 && (hierarchy.admission?.heldJobs ?? 0) >= 1;
+			const mFirst = await buildIcmHierarchy(world, mAgentDir, icmHierarchySettings(mSummaryTrack), mBuiltCondition);
+			const mPaid = { summaries: icmTrackRequests(world, mSummaryTrack), admissions: icmAdmissionRequests(world) };
+			world.systemOne.enterPhase("m2-restart", {});
+			const mAgain = await buildIcmHierarchy(world, mAgentDir, icmHierarchySettings(mSummaryTrack), mBuiltCondition);
+			expect(
+				{
+					summaries: icmTrackRequests(world, mSummaryTrack),
+					admissions: icmAdmissionRequests(world),
+					accepted: mAgain.acceptedNodes,
+					proof: { recorded: mAgain.spentAttempts?.recorded, reserved: mAgain.spentAttempts?.reserved },
+				},
+				"the restart pays for nothing again and keeps the terminal-proof records",
+			).toEqual({
+				...mPaid,
+				accepted: mFirst.acceptedNodes,
+				proof: { recorded: mFirst.spentAttempts?.recorded, reserved: mFirst.spentAttempts?.reserved },
+			});
+			trace.mark("root", "icm.restart");
+
+			// M3: a branch switch in the past session makes the notes summary stale: its covered spans left the selected lineage,
+			// so expansion refuses it instead of serving text about another branch.
+			let mNotesSummary: string | undefined;
+			const mBranch = await world.createRootSession("root", {
+				agentDir: mAgentDir,
+				sessionManager: world.openSessionManager(mSeed.file, mAgentDir),
+				settings: { memorySystem: undefined },
+			});
+			world.provider.enqueue(
+				"root",
+				calls("m3-notes", [
+					{ id: "m3-notes-1", name: "memory", arguments: { action: "history_search", query: ICM_NOTES_QUERY } },
+				]),
+				icmAfterHistoryRead(
+					"m3-notes-found",
+					"memory",
+					{ id: "m3-notes-1", arguments: { action: "history_search", query: ICM_NOTES_QUERY } },
+					(result) => {
+						mNotesSummary = icmSummaries(result.text).find((summary) => summary.quality === "exact_copy")?.handle;
+						if (mNotesSummary === undefined)
+							throw new Error(`no approved notes summary is listed: ${result.text.slice(0, 900)}`);
+						return { content: [{ type: "text", text: "The notes summary is listed." }] };
+					},
+				),
+			);
+			world.systemOne.enterPhase("m3-notes", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			await withDeadline(
+				trace,
+				"M3 notes turn",
+				mBranch.session.prompt("List the staging notes and their summary."),
+			);
+			const secondNote = mBranch.sessionManager
+				.getEntries()
+				.find(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						JSON.stringify(entry.message.content).includes("Note A2"),
+				);
+			if (secondNote === undefined) throw new Error("the past session has no second note");
+			const mNavigated = await withDeadline(trace, "M3 branch switch", mBranch.session.navigateTree(secondNote.id));
+			expect(mNavigated.cancelled, "the branch switch applies").toBe(false);
+			world.provider.enqueue(
+				"root",
+				dynamicCalls("m3-expand", () => [
+					{ id: "m3-expand-1", name: "memory", arguments: { action: "history_expand", ref: mNotesSummary } },
+				]),
+				{
+					name: "m3-expand-refused",
+					check: (request) => {
+						const expanded = icmLatestResult(request, "memory");
+						if (!expanded.isError || !expanded.text.includes("stale_snapshot"))
+							throw new Error(`a summary of a replaced branch was expanded: ${expanded.text.slice(0, 600)}`);
+					},
+					reply: { content: [{ type: "text", text: "That summary no longer matches this branch." }] },
+				},
+			);
+			world.systemOne.enterPhase("m3-expand", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			await withDeadline(
+				trace,
+				"M3 stale expansion turn",
+				mBranch.session.prompt("Expand the staging notes summary."),
+			);
+			expect(await world.disposeSessionInBody(mBranch.session), "the branch owner disposes cleanly").toBeUndefined();
+			trace.mark("root", "icm.branch-stale");
+
+			// M4: retention revocation and expiry, with a neighbour that stays. Two past sessions carry the same notes; one is aged
+			// thirty days. Model summaries are kept out (no admission egress), so only the two exact copies are built.
+			const rAgentDir = `${world.agentDir}-icm-retention`;
+			const rFresh = await seedIcmPastSession(world, rAgentDir);
+			const rAged = await seedIcmPastSession(world, rAgentDir);
+			// Fabricated age on a production-written file: the session owner has no clock port, so the timestamps of the
+			// second session are moved back thirty days on the virtual disk. Ids, texts and digests are untouched.
+			const ageMs = 30 * 24 * 60 * 60 * 1000;
+			const agedLines = String(world.io.readFileSync(rAged.file, "utf8"))
+				.split("\n")
+				.map((line) => {
+					if (line.trim() === "") return line;
+					const entry = JSON.parse(line) as { timestamp?: unknown; message?: { timestamp?: unknown } };
+					if (typeof entry.timestamp === "string")
+						entry.timestamp = new Date(Date.parse(entry.timestamp) - ageMs).toISOString();
+					if (typeof entry.message?.timestamp === "number") entry.message.timestamp -= ageMs;
+					return JSON.stringify(entry);
+				});
+			world.io.writeFileSync(rAged.file, agedLines.join("\n"));
+			const exactOnly = (retentionDays?: number): Partial<Settings> => ({
+				memorySystem: undefined,
+				contextPolicy: {
+					memory: {
+						// Summary egress is allowed so the coordinator runs; admission egress is not, so model work is held before
+						// any call in both System One modes and only exact copies are built.
+						history: {
+							hierarchy: true,
+							summaryModel: `${HARNESS_PROVIDER}/${mSummaryTrack}`,
+							allowExternalSummaryEgress: true,
+							allowExternalAdmissionEgress: false,
+							...(retentionDays === undefined ? {} : { retentionDays }),
+						},
+					},
+				},
+			});
+			world.systemOne.enterPhase("m4-build", {});
+			await buildIcmHierarchy(world, rAgentDir, exactOnly(), (hierarchy) => hierarchy.acceptedNodes === 2);
+			const rSummaries = new Map<string, string>();
+			const rReader = await world.createRootSession("root", {
+				agentDir: rAgentDir,
+				settings: { memorySystem: undefined },
+			});
+			world.provider.enqueue(
+				"root",
+				calls("m4-notes", [
+					{ id: "m4-notes-1", name: "memory", arguments: { action: "history_search", query: ICM_NOTES_QUERY } },
+				]),
+				icmAfterHistoryRead(
+					"m4-notes-found",
+					"memory",
+					{ id: "m4-notes-1", arguments: { action: "history_search", query: ICM_NOTES_QUERY } },
+					(result) => {
+						for (const summary of icmSummaries(result.text)) {
+							for (const session of [rFresh.sessionId, rAged.sessionId]) {
+								if (summary.covers.includes(`tx:${session}:`)) rSummaries.set(session, summary.handle);
+							}
+						}
+						return { content: [{ type: "text", text: "Both notes summaries are listed." }] };
+					},
+				),
+			);
+			world.systemOne.enterPhase("m4-notes", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			await withDeadline(
+				trace,
+				"M4 notes turn",
+				rReader.session.prompt("List the staging notes summaries of both sessions."),
+			);
+			expect(
+				await world.disposeSessionInBody(rReader.session),
+				"the retention reader disposes cleanly",
+			).toBeUndefined();
+			expect(rSummaries.size, "each session's notes have an approved exact copy").toBe(2);
+			// The owner sets one day of retention: the coordinator revokes the aged session's derived summary, never its source.
+			world.systemOne.enterPhase("m4-retention", {});
+			const revoked = await buildIcmHierarchy(
+				world,
+				rAgentDir,
+				exactOnly(1),
+				(hierarchy) => hierarchy.lastRevocation?.reason === "retention",
+			);
+			expect(revoked.acceptedNodes, "the fresh session's exact copy stays").toBe(1);
+			const rAfter = await world.createRootSession("root", {
+				agentDir: rAgentDir,
+				settings: { memorySystem: undefined, contextPolicy: { memory: { history: { retentionDays: 1 } } } },
+			});
+			world.provider.enqueue(
+				"root",
+				dynamicCalls("m4-expand", () => [
+					{
+						id: "m4-expand-aged",
+						name: "memory",
+						arguments: { action: "history_expand", ref: rSummaries.get(rAged.sessionId) },
+					},
+					{
+						id: "m4-expand-fresh",
+						name: "memory",
+						arguments: { action: "history_expand", ref: rSummaries.get(rFresh.sessionId) },
+					},
+					{
+						id: "m4-search-aged",
+						name: "memory",
+						arguments: { action: "history_search", query: ICM_NOTES_QUERY, maxResults: 10 },
+					},
+				]),
+				{
+					name: "m4-expanded",
+					check: (request) => {
+						const results = latestBatchResults(request).filter((result) => result.toolName === "memory");
+						const search = results.find((result) => result.text.includes("Coverage:"));
+						const expansions = results.filter((result) => result !== search);
+						const aged = expansions.find((result) => result.isError);
+						const fresh = expansions.find((result) => !result.isError);
+						const batch = JSON.stringify(
+							results.map((result) => ({ isError: result.isError, text: result.text.slice(0, 400) })),
+						);
+						if (aged?.isError !== true || !/not_found|expired/.test(aged.text))
+							throw new Error(`the revoked summary was still expanded: ${batch}`);
+						if (fresh?.isError !== false || !fresh.text.includes("Covered sources"))
+							throw new Error(`the neighbouring summary was lost: ${batch}`);
+						if (
+							!icmHits(search?.text ?? "").some((hit) => hit.description.includes(`session ${rAged.sessionId}`))
+						)
+							throw new Error("the aged session's exact source is no longer found");
+					},
+					reply: { content: [{ type: "text", text: "Only the fresh summary remains; both sources stay." }] },
+				},
+			);
+			world.systemOne.enterPhase("m4-expand", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			await withDeadline(trace, "M4 expansion turn", rAfter.session.prompt("Expand both staging notes summaries."));
+			expect(
+				await world.disposeSessionInBody(rAfter.session),
+				"the retention owner disposes cleanly",
+			).toBeUndefined();
+			trace.mark("root", "icm.retention");
+
+			// M5: a legacy ledger at its bound (written before terminal proof was durable) means attempts may have been lost. The
+			// store holds new summary work durably instead of granting fresh budgets; exact history reads still work, and a
+			// restart keeps the hold.
+			const sAgentDir = `${world.agentDir}-icm-saturated`;
+			const sSeed = await seedIcmPastSession(world, sAgentDir);
+			const sProjectId = getDirectoryResourceProfileInfo(HARNESS_PROJECT_CWD, sAgentDir).hash;
+			const legacyJobs: Record<string, unknown> = {};
+			for (let index = 0; index < TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS; index++) {
+				legacyJobs[createHash("sha256").update(`legacy-job-${index}`).digest("hex")] = {
+					// The records belong to the seeded past session: records of a session the complete index shows absent are
+					// reclaimed through the canonical confirmed-absence path, which is exactly the authority allowed to drop them.
+					sessionId: sSeed.sessionId,
+					attempts: 3,
+					maxAttempts: 3,
+					reason: "provider_attempts_exhausted",
+					message: "legacy failure",
+					at: Date.parse("2026-09-01T00:00:00.000Z"),
+				};
+			}
+			world.io.seed(
+				stateFile(sAgentDir, "transcript-memory", sProjectId, "spent-attempts.json"),
+				`${JSON.stringify({ schemaVersion: TRANSCRIPT_SUMMARY_SCHEMA_VERSION, jobs: legacyJobs })}\n`,
+			);
+			const sSummariesBefore = icmTrackRequests(world, mSummaryTrack);
+			const sAdmissionsBefore = icmAdmissionRequests(world);
+			const heldByLostProof = (hierarchy: NonNullable<TranscriptHistoryStatus["hierarchy"]>): boolean =>
+				hierarchy.spentAttempts?.hold?.cause === "possibly_lost_proof";
+			world.systemOne.enterPhase("m5-held", {});
+			const sHeld = await buildIcmHierarchy(world, sAgentDir, icmHierarchySettings(mSummaryTrack), heldByLostProof);
+			const sRestarted = await buildIcmHierarchy(
+				world,
+				sAgentDir,
+				icmHierarchySettings(mSummaryTrack),
+				heldByLostProof,
+			);
+			expect(
+				{
+					accepted: [sHeld.acceptedNodes, sRestarted.acceptedNodes],
+					recorded: [sHeld.spentAttempts?.recorded, sRestarted.spentAttempts?.recorded],
+					since: sRestarted.spentAttempts?.hold?.since,
+					summaries: icmTrackRequests(world, mSummaryTrack) - sSummariesBefore,
+					admissions: icmAdmissionRequests(world) - sAdmissionsBefore,
+				},
+				"a full legacy ledger holds new work across a restart and restores no attempt",
+			).toEqual({
+				accepted: [0, 0],
+				recorded: [TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS, TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS],
+				since: sHeld.spentAttempts?.hold?.since,
+				summaries: 0,
+				admissions: 0,
+			});
+			const sReader = await world.createRootSession("root", {
+				agentDir: sAgentDir,
+				settings: icmHierarchySettings(mSummaryTrack),
+			});
+			world.provider.enqueue(
+				"root",
+				calls("m5-search", [
+					{
+						id: "m5-search-1",
+						name: "memory",
+						arguments: { action: "history_search", query: ICM_DECISION_QUERY },
+					},
+				]),
+				icmAfterHistoryRead(
+					"m5-found",
+					"memory",
+					{ id: "m5-search-1", arguments: { action: "history_search", query: ICM_DECISION_QUERY } },
+					(result) => {
+						if (!icmHits(result.text).some((hit) => hit.description.includes(`session ${sSeed.sessionId}`)))
+							throw new Error(`exact history is not readable under the hold: ${result.text.slice(0, 600)}`);
+						return { content: [{ type: "text", text: "The decision is still found." }] };
+					},
+				),
+			);
+			world.systemOne.enterPhase("m5-read", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			await withDeadline(
+				trace,
+				"M5 exact read under the hold",
+				sReader.session.prompt("Find the retry budget decision while summaries are held."),
+			);
+			expect(icmHierarchy(sReader.session).spentAttempts?.hold?.cause, "the hold survives every owner").toBe(
+				"possibly_lost_proof",
+			);
+			expect(
+				await world.disposeSessionInBody(sReader.session),
+				"the saturated reader disposes cleanly",
+			).toBeUndefined();
+			expect(mThreads.liveCount, "no history worker outlives the ICM parts").toBe(0);
+			trace.mark("root", "icm.proof-hold");
 		},
 	);
 }, 360_000);

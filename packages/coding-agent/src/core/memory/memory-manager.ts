@@ -221,9 +221,29 @@ export class MemoryManager {
 			: `${budget.enabled}:${budget.compact}:${budget.maxLines}:${budget.maxEstimatedTokens}:${budget.maxChars}`;
 	}
 
+	/**
+	 * The static block's cache key: the budget plus every active provider's declared block token, so the block
+	 * is composed again only when a provider's own rendering policy changed, never per turn.
+	 */
+	private blockKey(budget?: MemoryPromptBudget): string {
+		const tokens: string[] = [];
+		for (const p of this.providers) {
+			if (!this.activeProviders.has(p.name) || !p.systemPromptBlockKey) continue;
+			try {
+				tokens.push(`${p.name}=${p.systemPromptBlockKey()}`);
+			} catch (err) {
+				// Same isolation as composition: one provider's failure never breaks the prompt. A failed token is
+				// its own key, so the block is composed again and the provider's block failure is logged there too.
+				console.error(`Memory provider ${p.name} failed to give its system prompt block key:`, err);
+				tokens.push(`${p.name}!`);
+			}
+		}
+		return JSON.stringify([MemoryManager.budgetKey(budget), tokens]);
+	}
+
 	/** The cached static block for a budget; composed on a miss, never announced to providers as installed. */
 	public buildSystemPromptBlock(budget?: MemoryPromptBudget): string {
-		const key = MemoryManager.budgetKey(budget);
+		const key = this.blockKey(budget);
 		if (this.systemPromptBlockCache !== undefined && this.systemPromptBlockCache.key === key) {
 			return this.systemPromptBlockCache.text;
 		}
@@ -240,7 +260,7 @@ export class MemoryManager {
 	 * retrieval fallback) does not install a prompt and therefore never moves that snapshot.
 	 */
 	public freezeSystemPromptBlock(budget?: MemoryPromptBudget): string {
-		const key = MemoryManager.budgetKey(budget);
+		const key = this.blockKey(budget);
 		const text =
 			this.systemPromptBlockCache !== undefined && this.systemPromptBlockCache.key === key
 				? this.systemPromptBlockCache.text

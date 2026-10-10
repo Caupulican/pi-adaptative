@@ -118,13 +118,21 @@ function toSearchResult(hit: TranscriptSearchHit, now: number): MemorySearchResu
 	};
 }
 
+/**
+ * `includeCurrentSession`: also search this session's own history. Off for the root prompt's automatic
+ * retrieval (the live context already carries it); on for an ICM worker's explicit query, which, like the
+ * root's history_search, has no frontier and has never seen the parent's conversation. `deadlineAt`: the
+ * calling tool call's one deadline, passed unchanged to the search; absent for automatic retrieval.
+ */
 export function createTranscriptMemoryProvider(
 	reader: () => TranscriptSourceReader | undefined,
 	projectId: () => string,
+	includeCurrentSession = false,
+	deadlineAt?: number,
 ): MemoryProvider {
 	return {
 		id: TRANSCRIPT_MEMORY_PROVIDER_ID,
-		label: "Past session history",
+		label: "Conversation history",
 		source: "transcript_recall",
 		capabilities: TRANSCRIPT_MEMORY_CAPABILITIES,
 		async search(request: MemorySearchRequest): Promise<MemorySearchResult[]> {
@@ -134,7 +142,8 @@ export function createTranscriptMemoryProvider(
 			const result = await backend.search({
 				query: request.query,
 				maxResults: request.maxResults,
-				includeCurrentSession: false,
+				includeCurrentSession,
+				...(deadlineAt !== undefined ? { deadlineAt } : {}),
 			});
 			if (result.status !== "ok") throw new Error(`${result.status}: ${result.reason}`);
 			const now = Date.now();

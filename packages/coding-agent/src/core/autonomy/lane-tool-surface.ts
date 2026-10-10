@@ -7,6 +7,9 @@ import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { settleIndependentLifecycle } from "../lifecycle-settlement.ts";
+import { historyRefusalKind } from "../memory/history-tool.ts";
+import { TRANSCRIPT_RECALL_RESULT_MARKER } from "../memory/transcript-memory-contracts.ts";
+import { reasonSentence } from "../memory/transcript-source-tools.ts";
 import { WORKER_MEMORY_READ_TOOL_NAME, type WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import { readOnlyShellViolation } from "../model-router/tool-escalation.ts";
 import {
@@ -100,7 +103,7 @@ const laneMemoryFields = Type.Object({
 	query: Type.Optional(
 		Type.String({
 			maxLength: MAX_LANE_MEMORY_QUERY_CHARS,
-			description: "What relevant standing memory or prior evidence to retrieve",
+			description: "What prior conversation evidence or memory to retrieve",
 		}),
 	),
 	ref: Type.Optional(
@@ -294,28 +297,38 @@ function createLaneTools(
 			label: "Read Memory",
 			readOnly: true,
 			description:
-				"Retrieve bounded, source-labeled standing memory relevant to this delegated task (query). Results may cite transcript source handles (tx:...) and history summary handles (txn:...); pass one back as ref (with an optional cursor for tx:) to read that source's exact text or to expand that summary one level. Read-only: no memory writes or lifecycle actions are available.",
+				"Retrieve bounded, source-labeled memory relevant to this delegated task (query): past-conversation evidence and, where the session keeps it, standing memory. Results may cite transcript source handles (tx:...) and history summary handles (txn:...); pass one back as ref (with an optional cursor for tx:) to read that source's exact text or to expand that summary one level. Read-only: no memory writes or lifecycle actions are available.",
 			parameters: laneMemorySchema,
 			execute: async (_toolCallId, params) => {
 				const { query: rawQuery, ref, cursor } = params as LaneMemoryParams;
+				// A typed refusal reaches the worker verbatim (pointers included) with the root's error kind and marker.
+				const refusal = (status: string, text: string) => ({
+					content: [{ type: "text" as const, text }],
+					details: { readOnly: true, status, [TRANSCRIPT_RECALL_RESULT_MARKER]: true },
+					isError: true,
+					errorKind: historyRefusalKind(status),
+				});
+				// A malformed request is typed `invalid_request`, as the root's history actions type theirs.
+				const invalidQuery = (reason: string) =>
+					refusal("invalid_request", `memory_query_invalid: ${reasonSentence(reason)}`);
 				if (ref !== undefined) {
-					if (rawQuery !== undefined) {
-						throw new Error("memory_query_invalid: pass either query or ref, not both.");
+					if (rawQuery !== undefined) return invalidQuery("pass either query or ref, not both");
+					const answer = await memoryBroker.readSource(ref, cursor);
+					if (answer.ok) {
+						return {
+							content: [{ type: "text" as const, text: answer.text }],
+							details: { readOnly: true, [TRANSCRIPT_RECALL_RESULT_MARKER]: true },
+						};
 					}
-					return {
-						content: [{ type: "text" as const, text: await memoryBroker.readSource(ref, cursor) }],
-						details: { readOnly: true },
-					};
+					return refusal(answer.status, answer.text);
 				}
 				const query = rawQuery?.trim();
 				if (!query || query.length > MAX_LANE_MEMORY_QUERY_CHARS) {
-					throw new Error(
-						`memory_query_invalid: query must contain from 1 through ${MAX_LANE_MEMORY_QUERY_CHARS} characters.`,
-					);
+					return invalidQuery(`query must contain from 1 through ${MAX_LANE_MEMORY_QUERY_CHARS} characters`);
 				}
 				return {
 					content: [{ type: "text" as const, text: await memoryBroker.read(query) }],
-					details: { readOnly: true },
+					details: { readOnly: true, [TRANSCRIPT_RECALL_RESULT_MARKER]: true },
 				};
 			},
 		}));

@@ -1,6 +1,6 @@
 /**
  * Read-only presentation of recoverable history for the model-facing surfaces: the root `memory` tool
- * (`history_search`, `history_source`) and the worker `memory_read` broker. One renderer and one
+ * (`history_search`, `history_source`, `history_expand`) and the worker `memory_read` broker. One renderer and one
  * outcome shape, so a root read and an admitted worker read report the same facts the same way.
  *
  * Every non-ok outcome carries the reader's typed status and reason verbatim. "pending", "unavailable",
@@ -18,6 +18,7 @@ import {
 	type TranscriptReadUnavailableStatus,
 	type TranscriptSearchHit,
 	type TranscriptSourceReader,
+	type TranscriptSourceRef,
 	type TranscriptSourceSpan,
 } from "./transcript-memory-contracts.ts";
 
@@ -34,14 +35,54 @@ export type TranscriptToolStatus = TranscriptReadUnavailableStatus | "invalid_ha
 
 export type TranscriptToolOutcome =
 	| { ok: true; text: string; details: Record<string, unknown> }
-	| { ok: false; status: TranscriptToolStatus; reason: string; text: string };
+	| {
+			ok: false;
+			status: TranscriptToolStatus;
+			reason: string;
+			text: string;
+			/**
+			 * On a `stale_snapshot` source read whose entry and part still exist: the `tx:` handle of the current
+			 * source at that position (a handle only, never text), for a fresh exact read. Typed, never parsed.
+			 */
+			currentHandle?: string;
+	  };
 
-function failure(status: TranscriptToolStatus, reason: string): TranscriptToolOutcome {
-	return { ok: false, status, reason, text: `Error: transcript history ${status}: ${reason}` };
+/**
+ * A refusal reason as one sentence: capitalised and ending in a full stop. Reasons come from many owners (the
+ * reader, the catalog, the coordinator, an error message); every rendering of one shows it in this form.
+ */
+export function reasonSentence(reason: string): string {
+	const text = reason.trim();
+	if (text === "") return text;
+	const capitalised = `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+	return /[.!?]$/.test(capitalised) ? capitalised : `${capitalised}.`;
 }
 
+/** The one refusal rendering: the typed status token stays exactly as given, the reason is one sentence. */
+function failure(status: TranscriptToolStatus, reason: string, currentHandle?: string): TranscriptToolOutcome {
+	const sentence = reasonSentence(reason);
+	return {
+		ok: false,
+		status,
+		reason: sentence,
+		text: `Error: transcript history ${status}: ${sentence}`,
+		...(currentHandle !== undefined ? { currentHandle } : {}),
+	};
+}
+
+/**
+ * A reader refusal. A stale source read that names the current source at its position says so in the reason (the
+ * handle, never text) and carries it as `currentHandle`, so recovery is one fresh exact read.
+ */
 function unavailable(result: TranscriptReadUnavailable): TranscriptToolOutcome {
-	return failure(result.status, result.reason);
+	if (result.status !== "stale_snapshot" || result.currentRef === undefined)
+		return failure(result.status, result.reason);
+	const currentHandle = formatTranscriptSourceHandle(result.currentRef);
+	return failure(
+		result.status,
+		`${reasonSentence(result.reason)} Current source at this position: [${currentHandle}]`,
+		currentHandle,
+	);
 }
 
 /** Role label of a span; a harness-synthesized message reads `assistant(host)`, never as model output. */
@@ -94,11 +135,96 @@ export interface TranscriptHistorySearchInput {
 	query: string;
 	maxResults?: number;
 	includeAlternateBranches?: boolean;
+	/** Epoch ms the whole tool call must end by, set once where it starts; bounds the search and the summary lookup. */
+	deadlineAt?: number;
+}
+
+/** Options of one summary read: the operation deadline set once where the tool call starts. */
+export interface TranscriptSummaryReadOptions {
+	deadlineAt?: number;
+}
+
+/** An approved summary node that covers search hits: a whole record, approved text only. */
+export interface TranscriptSummaryReference {
+	/** `txn:<16 hex>` */
+	handle: string;
+	level: number;
+	quality: string;
+	coveredFrom?: string;
+	coveredTo?: string;
+	text: string;
+	/** `tx:` handles among the requested hits that this node covers. */
+	covers: string[];
+}
+
+/**
+ * What a summary lookup found: every covering summary judged in one bounded check, or the typed reason none
+ * could be judged. Never a partial answer.
+ */
+export type TranscriptSummaryLookupResult =
+	| { status: "ok"; summaries: TranscriptSummaryReference[] }
+	| TranscriptReadUnavailable;
+
+/**
+ * Approved, live, unexpired summaries covering a set of source hits, at most `limits.maxNodes` whole nodes.
+ * A typed status when they cannot be judged now; never an empty success in place of a failure.
+ */
+export interface TranscriptSummaryLookup {
+	summariesFor(
+		refs: readonly TranscriptSourceRef[],
+		limits: { maxNodes: number },
+		options?: TranscriptSummaryReadOptions,
+	): Promise<TranscriptSummaryLookupResult>;
+}
+
+/** ` from..to` when a covered time range is known, else the empty string. */
+function describeCovered(view: { coveredFrom?: string; coveredTo?: string }): string {
+	return view.coveredFrom !== undefined || view.coveredTo !== undefined
+		? ` ${view.coveredFrom ?? "?"}..${view.coveredTo ?? "?"}`
+		: "";
+}
+
+/**
+ * The heading of one summary reference: its handle, level, covered time range, quality and the hits it
+ * covers. The one rendering of a reference, for the root search and an admitted worker read alike.
+ */
+export function describeSummaryReference(summary: TranscriptSummaryReference): string {
+	return `[${summary.handle}] level ${summary.level}${describeCovered(summary)}, ${summary.quality}, covers ${summary.covers.join(", ")}`;
+}
+
+/**
+ * The summaries covering a search's hits, rendered after them. A lookup that cannot answer is one typed
+ * status line next to the hits; it never hides them and never reads as "no summaries".
+ */
+async function describeCoveringSummaries(
+	lookup: TranscriptSummaryLookup,
+	hits: readonly TranscriptSearchHit[],
+	maxNodes: number,
+	options: TranscriptSummaryReadOptions,
+): Promise<{ text: string | undefined; handles: string[] }> {
+	const found = await lookup.summariesFor(
+		hits.map((hit) => hit.span.ref),
+		{ maxNodes },
+		options,
+	);
+	if (found.status !== "ok") {
+		return {
+			text: `Summary lookup ${found.status}: ${reasonSentence(found.reason)} The hits above are unaffected.`,
+			handles: [],
+		};
+	}
+	if (found.summaries.length === 0) return { text: undefined, handles: [] };
+	const records = found.summaries.map((summary) => `${describeSummaryReference(summary)}\n${summary.text}`);
+	return {
+		text: `Approved summaries covering these hits (expand one with action 'history_expand' and its bracketed txn handle as 'ref'):\n${wrapUntrustedText(records.join("\n"), HISTORY_UNTRUSTED_SOURCE)}`,
+		handles: found.summaries.map((summary) => summary.handle),
+	};
 }
 
 export async function searchTranscriptHistory(
 	reader: TranscriptSourceReader | undefined,
 	input: TranscriptHistorySearchInput,
+	summaries?: TranscriptSummaryLookup,
 ): Promise<TranscriptToolOutcome> {
 	const query = input.query.trim();
 	if (query.length === 0 || query.length > TRANSCRIPT_HISTORY_MAX_QUERY_CHARS) {
@@ -120,6 +246,7 @@ export async function searchTranscriptHistory(
 		maxResults,
 		includeCurrentSession: true,
 		...(input.includeAlternateBranches === true ? { includeAlternateBranches: true } : {}),
+		...(input.deadlineAt !== undefined ? { deadlineAt: input.deadlineAt } : {}),
 	});
 	if (result.status !== "ok") return unavailable(result);
 	const coverage = describeCoverage(result.coverage);
@@ -128,17 +255,26 @@ export async function searchTranscriptHistory(
 		result.hits.length === 0
 			? "No matching history was found."
 			: `${wrapUntrustedText(result.hits.map(renderHit).join("\n"), HISTORY_UNTRUSTED_SOURCE)}\nOpen a hit's exact text with action 'history_source' and its bracketed handle as 'ref'.`;
+	const covering =
+		summaries !== undefined && result.hits.length > 0
+			? await describeCoveringSummaries(
+					summaries,
+					result.hits,
+					maxResults,
+					input.deadlineAt !== undefined ? { deadlineAt: input.deadlineAt } : {},
+				)
+			: { text: undefined, handles: [] };
 	return {
 		ok: true,
-		text: `${body}\n${coverage}`,
-		details: { success: true, hits: handles, coverage: result.coverage },
+		text: [body, ...(covering.text !== undefined ? [covering.text] : []), coverage].join("\n"),
+		details: { success: true, hits: handles, summaries: covering.handles, coverage: result.coverage },
 	};
 }
 
 export async function openTranscriptSource(
 	reader: TranscriptSourceReader | undefined,
 	projectId: string | undefined,
-	input: { ref: string; cursor?: number },
+	input: { ref: string; cursor?: number; maxBytes?: number; deadlineAt?: number },
 ): Promise<TranscriptToolOutcome> {
 	if (reader === undefined || projectId === undefined) {
 		return failure("unavailable", "Transcript history is not available in this session.");
@@ -154,7 +290,17 @@ export async function openTranscriptSource(
 	if (!Number.isSafeInteger(cursor) || cursor < 0) {
 		return failure("invalid_request", "cursor must be a non-negative integer.");
 	}
-	const page = await reader.readSource({ ref, cursor, maxBytes: TRANSCRIPT_SOURCE_PAGE_BYTES });
+	// A receiving lane may ask for a smaller page to fit its remaining room; never a larger one.
+	const maxBytes = input.maxBytes ?? TRANSCRIPT_SOURCE_PAGE_BYTES;
+	if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > TRANSCRIPT_SOURCE_PAGE_BYTES) {
+		return failure("invalid_request", `maxBytes must be an integer from 1 through ${TRANSCRIPT_SOURCE_PAGE_BYTES}.`);
+	}
+	const page = await reader.readSource({
+		ref,
+		cursor,
+		maxBytes,
+		...(input.deadlineAt !== undefined ? { deadlineAt: input.deadlineAt } : {}),
+	});
 	if (page.status !== "ok") return unavailable(page);
 	const handle = formatTranscriptSourceHandle(page.span.ref);
 	const header = `Source [${handle}] (${describeSpan(page.span)}) part ${page.span.ref.part}, bytes ${page.cursor}-${page.cursor + Buffer.byteLength(page.text, "utf8")} of ${page.span.bytes}`;
@@ -236,24 +382,21 @@ export type TranscriptNodeExpansion =
 
 /** One level of zoom into the summary hierarchy. Read-only; backed by the same store the frontier comes from. */
 export interface TranscriptNodeExpander {
-	expand(handle: string): Promise<TranscriptNodeExpansion>;
+	expand(handle: string, options?: TranscriptSummaryReadOptions): Promise<TranscriptNodeExpansion>;
 }
 
 function describeNode(view: TranscriptNodeSummaryView): string {
-	const stamps =
-		view.coveredFrom !== undefined || view.coveredTo !== undefined
-			? ` ${view.coveredFrom ?? "?"}..${view.coveredTo ?? "?"}`
-			: "";
-	return `[${view.handle}] level ${view.level}, spans [${view.spanRange.fromIndex},${view.spanRange.toIndexExclusive})${stamps}, ${view.quality}`;
+	return `[${view.handle}] level ${view.level}, spans [${view.spanRange.fromIndex},${view.spanRange.toIndexExclusive})${describeCovered(view)}, ${view.quality}`;
 }
 
 /** Expand a `txn:` handle into its two child summaries (parent) or its covered source handles (leaf). */
 export async function expandTranscriptNode(
 	expander: TranscriptNodeExpander | undefined,
 	handle: string,
+	options: TranscriptSummaryReadOptions = {},
 ): Promise<TranscriptToolOutcome> {
 	if (expander === undefined) return failure("unavailable", "The summary hierarchy is not available in this session.");
-	const expansion = await expander.expand(handle);
+	const expansion = await expander.expand(handle, options);
 	if (expansion.status !== "ok") return failure(expansion.status, expansion.reason);
 	const lines = [describeNode(expansion.node), wrapUntrustedText(expansion.node.text, HISTORY_UNTRUSTED_SOURCE)];
 	if (expansion.children && expansion.children.length > 0) {

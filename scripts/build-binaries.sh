@@ -139,6 +139,7 @@ BINARY_ENTRYPOINTS=(
     ./dist/bun/cli.js
     ./src/utils/image-resize-worker.ts
     ./src/core/memory/providers/transcript-recall-worker.ts
+    ./src/core/tool-recovery-log-worker.ts
 )
 
 for platform in "${PLATFORMS[@]}"; do

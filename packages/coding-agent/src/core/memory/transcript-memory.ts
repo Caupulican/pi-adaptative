@@ -17,6 +17,7 @@
  * USER/MEMORY/OKF, declares a gate passed or marks a goal done.
  */
 
+import { createHash } from "node:crypto";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import {
 	selectFrontier,
@@ -27,14 +28,18 @@ import {
 import {
 	formatTranscriptNodeHandle,
 	formatTranscriptSourceHandle,
+	isCurrentCaptureIdentity,
 	isTerminalSummaryJobState,
-	parseTranscriptNodeHandle,
 	sameTranscriptSource,
+	TRANSCRIPT_CAPTURE_VERSION,
+	TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT,
 	TRANSCRIPT_SUMMARY_MAX_BYTES,
 	TRANSCRIPT_SUMMARY_RECIPE_VERSION,
 	TRANSCRIPT_SUMMARY_SCHEMA_VERSION,
 	TRANSCRIPT_SUMMARY_TARGET_BYTES,
+	type TranscriptCoverage,
 	type TranscriptLineageReader,
+	type TranscriptLineageSpansResult,
 	type TranscriptReadUnavailable,
 	type TranscriptSourceRef,
 	type TranscriptSourceSpan,
@@ -42,14 +47,19 @@ import {
 	transcriptDigest,
 	utf8ByteLength,
 } from "./transcript-memory-contracts.ts";
-import type { TranscriptNodeExpander, TranscriptNodeExpansion } from "./transcript-source-tools.ts";
+import type {
+	TranscriptNodeExpander,
+	TranscriptNodeExpansion,
+	TranscriptSummaryLookup,
+	TranscriptSummaryLookupResult,
+	TranscriptSummaryReadOptions,
+} from "./transcript-source-tools.ts";
 import {
 	admissionBlockFromSummary,
 	admissionBlocksFromCaptures,
 	admissionEgressBlocked,
 	admissionRecordFromResult,
 	needsReadmission,
-	summaryApproval,
 	summaryTextDigest,
 	TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
 	type TranscriptSummaryAdmissionPort,
@@ -57,34 +67,55 @@ import {
 	type TranscriptSummaryAdmissionRequest,
 	type TranscriptSummaryAdmissionResult,
 } from "./transcript-summary-admission.ts";
+import { TranscriptBoundedRead } from "./transcript-summary-bounded-read.ts";
+import {
+	coversLiveSpans,
+	TranscriptSummaryCatalog,
+	type TranscriptSummaryReadContext,
+	transcriptRetentionCutoff,
+} from "./transcript-summary-catalog.ts";
 import {
 	exactCopyText,
 	groupLeafSpans,
+	isCurrentCaptureNode,
 	leafIdentity,
+	leafJobKey,
+	legacyCaptureRef,
 	parentIdentity,
+	parentJobKey,
 	renderCaptureText,
 	type TranscriptCaptureText,
 	type TranscriptSummaryNode,
 	validateSummaryText,
 } from "./transcript-summary-node.ts";
 import {
+	TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS,
+	type TranscriptSummaryClaimToken,
 	type TranscriptSummaryFailure,
 	type TranscriptSummaryJob,
+	type TranscriptSummaryKeptAdmission,
 	type TranscriptSummaryPendingReply,
+	type TranscriptSummaryProofHold,
 	TranscriptSummaryScheduler,
 	type TranscriptSummarySchedulerOptions,
 } from "./transcript-summary-scheduler.ts";
 import type {
+	ManifestRead,
 	TranscriptAnchorRequest,
+	TranscriptSummaryHeldByKind,
+	TranscriptSummaryHoldKind,
+	TranscriptSummaryJobsSaveResult,
+	TranscriptSummaryProofStatus,
 	TranscriptSummaryPublishResult,
 	TranscriptSummaryRecoveryIssue,
+	TranscriptSummaryRevokeResult,
 	TranscriptSummarySessionCursor,
 	TranscriptSummaryStore,
+	TranscriptSummaryStoreState,
 	TranscriptSummaryTerminalCause,
 	TranscriptSummaryTerminalRecord,
 	TranscriptSummaryWriter,
 } from "./transcript-summary-store.ts";
-import { sourceKeyOfHandle, TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS } from "./transcript-summary-store.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Ports
@@ -144,6 +175,9 @@ export interface TranscriptMemoryPorts {
 	onTerminal(event: TranscriptMemoryTerminalEvent): void;
 	onFrontierChanged(lineageKey: string, revision: number): void;
 }
+
+/** What forgetting one session did: `forgotten` once it is durable and applied, else the real cause. */
+export type TranscriptForgetOutcome = { status: "forgotten" } | { status: "refused"; reason: string };
 
 export type TranscriptMemoryStartResult =
 	| { enabled: true; recoveryIssues: readonly TranscriptSummaryRecoveryIssue[] }
@@ -216,6 +250,7 @@ export type TranscriptReadmissionWait =
 	| "child_not_approved"
 	| "source_coverage_changed"
 	| "source_unreadable"
+	| "source_read_refused"
 	| "judgment_discarded"
 	| "store_refused"
 	| "admission_mismatch";
@@ -224,12 +259,21 @@ export interface TranscriptMemoryAdmissionStatus {
 	contractVersion: number;
 	/** Set while model summaries cannot be built or judged; exact copies still flow. */
 	blocked?: TranscriptMemoryModelWorkBlock;
-	/** Model-summary jobs claimed and held before any provider call; they resume when the condition clears. */
+	/** Summary jobs held before any provider call; they resume when the condition clears. */
 	heldJobs: number;
-	/** Why jobs are held, when they are. */
+	/** The kind of the first held job's hold, when any is held. */
+	heldKind?: TranscriptSummaryHoldKind;
+	/** The real cause recorded with that hold when it was set. */
 	heldReason?: string;
+	/** Held jobs per hold kind (the kinds with none are absent); their sum is `heldJobs`. */
+	heldByKind?: TranscriptSummaryHeldByKind;
 	/** Job-level judgments since this coordinator started. */
 	judgments: { accepted: number; rejected: number; uncertain: number; unavailable: number };
+	/**
+	 * Acceptances kept with a reply and published again without asking the evaluator, since this coordinator started.
+	 * Not a judgment and in none of `judgments`; a kept reply that is judged again is counted there, not here.
+	 */
+	reused: number;
 	/** Accepted model summaries without an admission under the current contract: never shown or expanded as approved. */
 	unapprovedNodes: number;
 	/** What re-admission of those nodes found since this coordinator started. */
@@ -263,15 +307,27 @@ export interface TranscriptMemoryStatus {
 	 * those ranges are covered at child level.
 	 */
 	pendingParentRederivations: number;
-	/** Spent attempt budgets kept for pruned failed jobs, so identical work found again gets no fresh budget. */
-	spentAttempts: { recorded: number; bound: number; refused: number };
+	/**
+	 * Durable terminal-proof capacity (contract C10): every admitted job identity holds a record, a reservation
+	 * while its job lives, its spent budget once it failed, its carried attempts once it went stale or was cancelled
+	 * after starting one, so identical work found again never gets a fresh budget. `hold`: new identities are held, for lack of a slot (`capacity`) or because proof may have been lost
+	 * before `since` (`possibly_lost_proof`, sessions started by then only).
+	 */
+	spentAttempts: { recorded: number; reserved: number; bound: number; hold?: TranscriptSummaryProofHold };
 	lastRevocation?: TranscriptMemoryRevocationRecord;
 	frontierCount: number;
 	/** The most recently changed frontiers, bounded. */
 	frontiers: TranscriptMemoryFrontierStatus[];
 	/** The latest terminal handoff records (persisted ones included), newest last. */
 	recentBatches: TranscriptMemoryTerminalEvent[];
-	lastInternalError?: string;
+	/** The latest internal cause and when it was recorded: one slot the next cause overwrites, never cleared. */
+	lastInternalError?: TranscriptMemoryInternalCause;
+}
+
+/** An internal cause the coordinator recorded, with the ISO time it was recorded at. */
+export interface TranscriptMemoryInternalCause {
+	cause: string;
+	at: string;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -285,9 +341,11 @@ const ENUMERATION_PAGE_SPANS = 256;
 const ENUMERATION_PAGE_MARGIN = 16;
 const SOURCE_READ_BYTES = 8 * 1024;
 const SOURCE_READ_PAGES = 8;
-const DAY_MS = 24 * 60 * 60 * 1000;
 /** `setTimeout` runs a longer delay immediately; a farther deadline is reached by re-arming. */
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+/** Bounded backoff for retrying a job save that failed (I/O, overflow): 1 s doubling to at most one minute. */
+const JOB_SAVE_RETRY_BASE_MS = 1_000;
+const JOB_SAVE_RETRY_MAX_MS = 60_000;
 /** Expired roots revoked per drain; the rest follow through the mailbox so foreground work is never starved. */
 const RETENTION_REVOKE_BATCH = 256;
 const MAX_RECENT_FAILURES = 20;
@@ -308,12 +366,29 @@ const READMISSION_WAIT_TEXT: Record<TranscriptReadmissionWait, string> = {
 	evaluator_unavailable: "the evaluator did not answer; re-admission retries later",
 	child_not_approved: "a child summary is not approved yet",
 	source_coverage_changed: "its sources changed since it was built",
-	source_unreadable: "a source could not be re-read for judgment",
+	source_unreadable: "a source could not be re-read for judgment; re-admission retries later",
+	source_read_refused: "a source part cannot be read within the read bound, so it cannot be re-read for judgment",
 	judgment_discarded: "a source, child or policy fence changed while it was judged",
 	store_refused: "the store refused its admission record",
 	admission_mismatch: "its text no longer matches the admission it carries",
 };
 const MAX_HELD_REASON_CHARS = 200;
+const COORDINATOR_NOT_RUNNING = "the summary coordinator is not running";
+/**
+ * The cursor digest of a session whose coverage no full verification vouches for. A lineage digest is never empty,
+ * so a runtime built from such a cursor never matches the live lineage and its first read verifies everything.
+ */
+const UNVERIFIED_LINEAGE_DIGEST = "";
+const RECONCILIATION_WAITING =
+	"a recovered summary job waits until its session is read again, so the budget it had under capture version 1 is adopted first";
+const CLAIM_SUPERSEDED_BEFORE_DISPATCH =
+	"the job's spending authority changed after its claim (a merged budget, a floor or a transition); the claim was returned before dispatch";
+const CLAIM_SUPERSEDED_BEFORE_SUMMARY =
+	"the job's spending authority changed during source preparation; the claim was returned before the summarizer call";
+const CLAIM_SUPERSEDED_BEFORE_ADMISSION =
+	"the job's spending authority changed before the admission call; the claim made no paid call and was returned";
+const CLAIM_SUPERSEDED_AFTER_SUMMARY =
+	"the job's spending authority changed after its summarizer call; that attempt stays spent and its reply is kept";
 
 const SUMMARY_SYSTEM_PROMPT = [
 	"You write compact factual summaries of earlier parts of a coding-assistant conversation, so a later reader can decide which exact source to open.",
@@ -333,22 +408,84 @@ const SUMMARY_SYSTEM_PROMPT = [
  * `held`: the job reached model work that cannot run yet for a reason outside the job, before any provider
  * call. It goes back to the queue with its attempt returned and is not claimed again until `scope` clears:
  * `model_work` (egress, no evaluator) clears when the coordinator can run model work again, `children` when a
- * child summary is admitted.
+ * child summary is admitted, `proof` when a terminal-proof slot frees.
  */
+/**
+ * `persistence`: the save that should have made the claimed attempt durable did not succeed; released by the next
+ * acknowledged save.
+ */
+type HoldScope = TranscriptSummaryHoldKind;
+
+/** A job held before any provider call: the kind of condition that releases it and the real cause, set with it. */
+interface ParkedHold {
+	scope: HoldScope;
+	reason: string;
+}
+
 type JobOutcome =
 	| { kind: "node"; node: TranscriptSummaryNode }
-	| { kind: "held"; scope: "model_work" | "children"; reason: string }
+	| { kind: "held"; scope: HoldScope; reason: string }
 	| { kind: "fail"; failure: TranscriptSummaryFailure }
+	/** The claim lost its spending authority before any provider call: returned, never below the durable floor. */
+	| { kind: "abandoned"; reason: string }
+	/** The claim lost its authority after its summarizer call: that attempt is spent, the paid reply stays kept. */
+	| { kind: "superseded"; reason: string }
 	| { kind: "stale"; reason: string }
 	| { kind: "aborted" };
+
+/** A source read that returned no text: a transient failure (the index did not answer), or an answer that it cannot. */
+type SourceReadFailure = Extract<JobOutcome, { kind: "fail" | "stale" }>;
+
+type PublishedRevocation = Extract<TranscriptSummaryRevokeResult, { status: "published" }>;
+
+/**
+ * What {@link TranscriptMemory.revokeDeadCoverage} decided: nothing dead (with the digest of the newest lineage it
+ * verified on, undefined when no page was read), dead coverage revoked and the session read again, or no judgment.
+ */
+type CoverageVerdict =
+	| { kind: "unchanged"; digest: string | undefined }
+	| { kind: "changed" }
+	| { kind: "unreadable"; cause: string };
+
+/**
+ * What one read of a leaf's whole dependency answered ({@link TranscriptMemory.readLiveDependency}): its spans are
+ * exactly live (`covered`), the index answered that they are not (`not_covered`, with why), or the index did not
+ * answer (`unanswered`, the transient failure that read is): nothing is known about the spans then.
+ */
+type DependencyVerdict =
+	| { kind: "covered"; live: Extract<TranscriptLineageSpansResult, { status: "ok" }> }
+	| { kind: "not_covered"; reason: string }
+	| { kind: "unanswered"; outcome: Extract<JobOutcome, { kind: "fail" }> };
+
+/** A verification of a session's whole coverage that found nothing dead: the newest lineage it read, and its stamp. */
+interface VerifiedLineage {
+	digest: string;
+	stamp: string | undefined;
+}
 
 interface SessionRuntime {
 	/** Where leaf enumeration continues: the next group starts here with this ordinal. */
 	next: { fromIndex: number; ordinal: number };
 	total: number;
-	/** Lineage digest the cursor was last verified against. */
+	/**
+	 * Lineage digest every accepted node and live job of the session was last verified against; undefined when no
+	 * verification vouches for the whole coverage (the next read verifies it). A fresh runtime takes the cursor's
+	 * digest, which carries the same guarantee ({@link advanceCursor}). A publication certified on the session moves
+	 * it to the publication's lineage; one verified on another lineage clears it.
+	 */
 	verifiedDigest: string | undefined;
-	/** Enumeration stopped at the active-job ceiling and must resume when a job finishes. */
+	/**
+	 * The {@link lineageStamp} of a read that saw `verifiedDigest` in this run (the verification itself, or a probe
+	 * that answered exactly that digest); undefined when none did. A later read with the same stamp saw the same
+	 * positions, at most appended to, so every node and job verified on `verifiedDigest` is live on its lineage too
+	 * ({@link vouchesFor}). Set only with `verifiedDigest` and cleared with it. In-process only: the cursor digest is
+	 * the certificate across restarts.
+	 */
+	verifiedStamp: string | undefined;
+	/**
+	 * Enumeration stopped at the active-job ceiling or at the terminal-proof bound and must resume when a job
+	 * finishes or a proof slot frees.
+	 */
 	backpressured: boolean;
 }
 
@@ -360,10 +497,6 @@ interface BatchState {
 	cancelled: number;
 	stale: number;
 	causes: TranscriptMemoryTerminalCause[];
-}
-
-function leafKey(sessionId: string, fromIndex: number): string {
-	return `${sessionId}\u0000${fromIndex}`;
 }
 
 function minTimestamp(values: readonly (string | undefined)[]): string | undefined {
@@ -380,6 +513,18 @@ function minTimestamp(values: readonly (string | undefined)[]): string | undefin
 	return best;
 }
 
+/** The real cause of a job save that did not succeed. */
+function describeSaveRefusal(saved: Exclude<TranscriptSummaryJobsSaveResult, { status: "saved" }>): string {
+	switch (saved.status) {
+		case "jobs_overflow":
+			return `job list overflow (${saved.active} active)`;
+		case "fenced":
+			return `fenced (the writer was superseded; current fence ${saved.currentFence})`;
+		case "manifest_corrupt":
+			return `manifest_corrupt: ${saved.detail}`;
+	}
+}
+
 function describeIssue(issue: TranscriptSummaryRecoveryIssue): string {
 	switch (issue.kind) {
 		case "manifest_corrupt":
@@ -394,12 +539,14 @@ function describeIssue(issue: TranscriptSummaryRecoveryIssue): string {
 			return `node ${issue.nodeId.slice(0, 16)} lost child ${issue.childId.slice(0, 16)}`;
 		case "frontier_dangling":
 			return `frontier ${issue.frontier} references missing node ${issue.nodeId.slice(0, 16)}`;
+		case "dormant_damaged":
+			return `dormant node ${issue.nodeId.slice(0, 16)} unreadable (purged): ${issue.detail}`;
 		case "jobs_corrupt":
 			return `jobs file damaged: ${issue.detail}`;
 		case "anchors_corrupt":
 			return `retention anchors damaged: ${issue.detail}`;
 		case "spent_corrupt":
-			return `spent attempt records damaged: ${issue.detail}`;
+			return `terminal-proof ledger damaged: ${issue.detail}`;
 		case "terminals_corrupt":
 			return `terminal record file damaged: ${issue.detail}`;
 	}
@@ -423,7 +570,29 @@ function withHandle(item: TranscriptCaptureText): string {
 	return `[${formatTranscriptSourceHandle(item.span.ref)}] ${renderCaptureText(item)}`;
 }
 
-export class TranscriptMemory implements TranscriptNodeExpander {
+/**
+ * What a lineage read observed of its session: the index generation and the session's lineage revision, which the
+ * index bumps whenever positions of the selected lineage may have changed and never on a pure append. Reads with the
+ * same stamp saw one lineage (a later one possibly longer); undefined when the read does not name the session.
+ */
+function lineageStamp(read: Extract<TranscriptLineageSpansResult, { status: "ok" }>): string | undefined {
+	const session = read.observation.sessions.find((entry) => entry.sessionId === read.sessionId);
+	return session === undefined ? undefined : `${read.observation.generation}:${session.lineageRevision}`;
+}
+
+/**
+ * Whether `runtime` vouches for the lineage `read` saw: it is the verified lineage, or a read with the same
+ * {@link lineageStamp} saw the verified one (the same positions, only appended to since). Two unknown stamps never
+ * match.
+ */
+function vouchesFor(runtime: SessionRuntime, read: Extract<TranscriptLineageSpansResult, { status: "ok" }>): boolean {
+	return (
+		runtime.verifiedDigest === read.lineageDigest ||
+		(runtime.verifiedStamp !== undefined && runtime.verifiedStamp === lineageStamp(read))
+	);
+}
+
+export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSummaryLookup {
 	private readonly ports: TranscriptMemoryPorts;
 	private started = false;
 	private epoch = 0;
@@ -433,14 +602,20 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	private tail: Promise<void> = Promise.resolve();
 	private readonly unsubscribers: (() => void)[] = [];
 	private timer: unknown;
-	private readonly inFlight = new Map<string, { controller: AbortController; done: Promise<void> }>();
+	/**
+	 * Work in flight, keyed per CLAIM (`claimId`): a re-claim of the same job never replaces an older claim's entry, so
+	 * every running controller stays reachable for abort and stop until its own work settles.
+	 */
+	private readonly inFlight = new Map<number, { jobId: string; controller: AbortController; done: Promise<void> }>();
 
 	private manifestRevision = 0;
-	private readonly nodes = new Map<string, TranscriptSummaryNode>();
-	private readonly nodesBySession = new Map<string, Map<string, TranscriptSummaryNode>>();
-	private readonly leafByStart = new Map<string, TranscriptSummaryNode>();
-	/** Node ids by their 16-hex `txn:` handle prefix (more than one entry means an ambiguous handle). */
-	private readonly nodeIdsByHandle = new Map<string, Set<string>>();
+	/** The accepted-node mirror, its retention anchors and every read-side check on them. */
+	private readonly catalog = new TranscriptSummaryCatalog();
+	/**
+	 * Dormant nodes mirrored from the store: content of nodes revoked because their coverage left the live lineage,
+	 * kept only so the identical identity is republished without paying again. Never in the catalog, never read.
+	 */
+	private readonly dormant = new Map<string, TranscriptSummaryNode>();
 	private starting = false;
 	/** The terminal handoff of a stop, awaited by `stop()` before the writer is released. */
 	private stopHandoff: Promise<void> | undefined;
@@ -450,29 +625,57 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	private readonly frontierBytes = new Map<string, { bytes: number; gap?: TranscriptFrontierGap }>();
 	private readonly forgottenSessions = new Set<string>();
 	private readonly runtime = new Map<string, SessionRuntime>();
-	/** First-capture anchors by `tx:` source handle, mirrored from the store. Set once per source, never replaced. */
-	private readonly sourceAnchors = new Map<string, string>();
-	/** One session-timestamp anchor per session with the undated sources it covers (`<entryId>:<part>:<digest>`). */
-	private readonly sessionAnchors = new Map<string, { at: string; sources: Set<string> }>();
-	/** Spent-attempt records the record bound refused this run: those budgets are not protected from pruning. */
-	private spentRefused = 0;
+	/**
+	 * Sessions the index reported invalidated whose coverage has not been judged since. Their next answered read
+	 * revokes dead coverage whatever the digests say: the event is the index's own evidence that earlier spans
+	 * changed, independent of the digest bookkeeping (a verification records its probe's digest, while its pages may
+	 * have been read on a later lineage). Kept across a mirror reload (which drops every runtime), dropped with the
+	 * session.
+	 */
+	private readonly revocationDue = new Set<string>();
+	/** The terminal-proof capacity the store last reported (load, save, session-record drop); status only. */
+	private proofLedger: TranscriptSummaryProofStatus = { recorded: 0, reserved: 0 };
 	/** Sources the anchor ceiling refused, so work depending on them is held. */
 	private readonly heldForAnchor = new Set<string>();
 	/** Canonical session timestamps; `null` records a session that has none. */
 	private readonly sessionTimestamps = new Map<string, string | null>();
-	/** Retention instant per node id (`null`: nothing to age it by). Cleared when anchors or nodes change. */
-	private readonly retentionTimes = new Map<string, number | null>();
-	private retentionDeadline: { days: number; at: number | undefined } | undefined;
 	private lastRevocation: TranscriptMemoryRevocationRecord | undefined;
 	/** Accepted nodes that still need anchors for their undated sources (a session listing was unavailable). */
 	private undatedNodesPending = false;
 	/** The save of the latest job list: a started attempt is durable before its provider call. */
 	private jobsSaved: Promise<void> = Promise.resolve();
+	/**
+	 * The durable acknowledgement: each live job's attempt count in the job list the latest successful save of this
+	 * run wrote (the snapshot taken when that save started). A claimed attempt reaches a provider only when covered.
+	 */
+	private readonly durableAttempts = new Map<string, number>();
+	/** The kept reply (its text digest) each job had in the job list the latest successful save of this run wrote. */
+	private readonly durableReplies = new Map<string, string>();
+	/**
+	 * The delivery fence's manifest reads: one bounded-read owner per run, created at start and dropped on stop. A
+	 * caller is settled by its own deadline; the flight runs under none (the owner races it).
+	 */
+	private manifestReads: TranscriptBoundedRead<ManifestRead> | undefined;
+	/**
+	 * Start-up order: `convert` (the first save turns stale version 1 jobs into durable carried budgets), then
+	 * `reconcile` (every recovered job adopts its version 1 budget), then `reconciled` (the save of that), then `open`:
+	 * only that save's acknowledgement opens admission, dispatch and discovery.
+	 */
+	private startPhase: "convert" | "reconcile" | "reconciled" | "open" = "convert";
+	/** Discovery reached before admission opened; opening starts it. */
+	private discoveryHeld = false;
+	/** The real cause of the latest failed job save, until a save succeeds. */
+	private saveFailure: string | undefined;
+	private saveFailures = 0;
+	/** When the failed job save is tried again (through the one lifecycle timer). */
+	private saveRetryAt: number | undefined;
 
 	/** Jobs held before any provider call, by the scope of the condition that releases them. */
-	private readonly parked = new Map<string, "model_work" | "children">();
+	private readonly parked = new Map<string, ParkedHold>();
 	private modelWorkBlocked = false;
 	private readonly judgments = { accepted: 0, rejected: 0, uncertain: 0, unavailable: 0 };
+	/** Kept acceptances published again without a new judgment ({@link TranscriptMemoryAdmissionStatus.reused}). */
+	private reusedAdmissions = 0;
 	/**
 	 * What re-admission found for accepted model summaries without a current admission, this run. `waiting`
 	 * carries the wait code that says why the judgment has not happened (or was discarded).
@@ -490,7 +693,8 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	private jobsDirty = false;
 	private recoveryIssues: string[] = [];
 	private readonly recentFailures: TranscriptMemoryFailureRecord[] = [];
-	private lastInternalError: string | undefined;
+	/** Written only by {@link noteInternalCause}. */
+	private lastInternalError: TranscriptMemoryInternalCause | undefined;
 
 	constructor(ports: TranscriptMemoryPorts) {
 		this.ports = ports;
@@ -516,7 +720,9 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		const epoch = ++this.epoch;
 		const { store } = this.ports;
 
-		let state = await store.load();
+		const loaded = await store.load();
+		if ("status" in loaded) return this.disable(`the summary store could not be read: ${loaded.reason}`);
+		let state = loaded;
 		const issues = [...state.issues];
 		let acquisition = await store.acquireWriter();
 		if (acquisition.status === "manifest_corrupt") {
@@ -528,69 +734,79 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		if (issues.some((issue) => issue.kind !== "manifest_corrupt")) {
 			await writer.applyRecovery(issues);
 		}
-		if (issues.length > 0) state = await store.load();
+		if (issues.length > 0) {
+			const reloaded = await store.load();
+			if ("status" in reloaded) return this.disable(`the summary store could not be read: ${reloaded.reason}`);
+			state = reloaded;
+		}
 		this.recoveryIssues = issues.map(describeIssue).slice(0, MAX_STATUS_ISSUES);
 
 		this.writer = writer;
 		const scheduler = new TranscriptSummaryScheduler({
 			...this.ports.scheduler,
+			// Opened by this run's first acknowledged save, which converts version 1 budgets durably first.
+			admission: "closed",
 			concurrency: Math.max(1, settings.maxConcurrentSummaries),
+			// Under a possibly-lost-proof hold, only a session known to have started after it admits new identities.
+			sessionStartedAt: (sessionId) => {
+				const stamp = this.sessionTimestamps.get(sessionId);
+				const at = stamp ? Date.parse(stamp) : Number.NaN;
+				return Number.isNaN(at) ? undefined : at;
+			},
 		});
 		this.scheduler = scheduler;
-		this.nodes.clear();
-		this.nodesBySession.clear();
-		this.nodeIdsByHandle.clear();
-		this.leafByStart.clear();
-		this.cursors.clear();
-		this.frontiers.clear();
-		this.frontierBytes.clear();
-		this.forgottenSessions.clear();
 		this.runtime.clear();
-		this.sourceAnchors.clear();
-		this.sessionAnchors.clear();
-		this.spentRefused = 0;
+		this.revocationDue.clear();
+		this.proofLedger = state.proof.status;
 		this.heldForAnchor.clear();
 		this.sessionTimestamps.clear();
-		this.retentionTimes.clear();
-		this.retentionDeadline = undefined;
 		this.lastRevocation = undefined;
 		this.undatedNodesPending = false;
 		this.parked.clear();
 		this.modelWorkBlocked = false;
 		this.judgments.accepted = this.judgments.rejected = this.judgments.uncertain = this.judgments.unavailable = 0;
+		this.reusedAdmissions = 0;
 		this.readmissionState.clear();
 		this.readmissionRetryAt = undefined;
-		for (const [handle, anchor] of Object.entries(state.retentionAnchors.sources)) {
-			this.sourceAnchors.set(handle, anchor.at);
-		}
-		for (const [sessionId, anchor] of Object.entries(state.retentionAnchors.sessions)) {
-			this.sessionAnchors.set(sessionId, { at: anchor.at, sources: new Set(anchor.sources) });
-		}
-		scheduler.noteSpent(state.spentAttempts);
+		this.durableAttempts.clear();
+		this.durableReplies.clear();
+		this.manifestReads = new TranscriptBoundedRead<ManifestRead>(() => this.ports.store.readManifest());
+		this.startPhase = "convert";
+		this.discoveryHeld = false;
+		this.saveFailure = undefined;
+		this.saveFailures = 0;
+		this.saveRetryAt = undefined;
+		// Before recovery, so every recovered job keeps the durable reservation it already holds.
+		scheduler.noteProof(state.proof.records);
+		scheduler.setProofHold(state.proof.status.hold);
 		this.persistedBatches = [...state.terminals];
-		const manifest = state.manifest;
-		this.manifestRevision = manifest?.revision ?? 0;
-		for (const [sessionId, cursor] of Object.entries(manifest?.sessions ?? {})) this.cursors.set(sessionId, cursor);
-		for (const [name, frontier] of Object.entries(manifest?.frontiers ?? {})) this.frontiers.set(name, frontier);
-		for (const key of Object.keys(manifest?.tombstones ?? {})) {
-			if (key.startsWith(SESSION_TOMBSTONE_PREFIX))
-				this.forgottenSessions.add(key.slice(SESSION_TOMBSTONE_PREFIX.length));
-		}
-		for (const node of state.nodes.values()) this.indexNode(node);
+		this.loadMirror(state);
 		const now = this.ports.now();
-		scheduler.recover(state.jobs, now, new Set(this.nodes.keys()));
-		for (const node of this.nodes.values()) scheduler.onNodeReady(node, now);
+		// The accepted nodes are the completion evidence: a job that published before a stop settles `ready` from its node.
+		scheduler.recover(state.jobs, now, new Map([...this.catalog.values()].map((node) => [node.id, node])));
+		// Jobs and nodes of an older capture version name inputs that are no longer current identities. Their jobs end
+		// stale before anything is claimed (a started attempt is carried under its version 1 key, where the current job
+		// finds it again), and their nodes never enter the ready index; discovery revokes and re-derives them first.
+		for (const job of scheduler.snapshot()) {
+			if (!isTerminalSummaryJobState(job.state) && !isCurrentCaptureNode(job)) scheduler.markStale(job.id, now);
+		}
+		for (const node of this.catalog.values()) if (isCurrentCaptureNode(node)) scheduler.onNodeReady(node, now);
 
 		this.started = true;
+		// The first save reserves recovered live jobs and persists a converted ledger before anything is discovered.
+		this.markJobsDirty();
 		this.unsubscribers.push(
 			this.ports.reader.onIndexChanged((event) => {
 				const scheduled = this.epoch;
 				void this.enqueue(async () => {
 					if (!this.live(scheduled)) return;
 					if (this.undatedNodesPending) await this.anchorUndatedNodes(scheduled);
-					for (const sessionId of event.invalidatedSessionIds) await this.invalidateSession(sessionId, scheduled);
+					// An invalidated session is revoked by its one read below, never read a second time here.
+					for (const sessionId of event.invalidatedSessionIds) this.revocationDue.add(sessionId);
 					const touched = new Set([...event.sessionIds, ...event.invalidatedSessionIds]);
 					for (const sessionId of touched) await this.reconcileSession(sessionId, scheduled);
+					// The index changed: held recovered leaves of sessions it did not name are tried again.
+					await this.reconcileHeldSessions(touched, scheduled);
 					this.pump(scheduled);
 				});
 			}),
@@ -599,28 +815,183 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				void this.enqueue(async () => this.pump(scheduled));
 			}),
 		);
-		// Source discovery runs on the mailbox in the background; the owner is not held up by it.
+		// Source discovery runs on the mailbox in the background; the owner is not held up by it. It runs after the first
+		// save (queued above) is acknowledged; when that save failed, the retry that succeeds starts it.
 		void this.enqueue(async () => {
 			if (!this.live(epoch)) return;
-			await this.anchorUndatedNodes(epoch);
-			await this.applyRetention(epoch);
-			// Nodes accepted before the admission contract are not approved: frontiers published with them are rebuilt without.
-			await this.republishFrontiers(
-				[...this.frontiers.keys()].filter((name) => this.frontierNotAdmitted(name)),
-				epoch,
-			);
-			await this.reconcileAll(epoch);
-			this.pump(epoch);
+			if (this.startPhase !== "open") {
+				this.discoveryHeld = true;
+				return;
+			}
+			await this.discover(epoch);
 		});
 		return { enabled: true, recoveryIssues: issues };
+	}
+
+	/**
+	 * Start-up reconciliation of recovered work (after the conversion save, before admission opens), so no claim can
+	 * be taken against a version 1 budget that is still unmerged. A recovered PARENT adopts its budget now, keyed by
+	 * its children's legacy identities; one whose child is gone or of an older capture version ends stale with that
+	 * cause (its inputs are gone or being retired). A recovered LEAF cannot be keyed from its persisted refs (they
+	 * carry no text digests), so it is held (`reconciliation`) and unclaimable until the enumeration that reads its
+	 * coverage adopts its budget and releases it (see {@link enumerateLeaves}); a leaf whose coverage or session is
+	 * gone leaves the hold through the stale or invalidation transition that ends it. Nothing is skipped.
+	 */
+	private reconcileRecovered(epoch: number): void {
+		const scheduler = this.scheduler;
+		if (!scheduler || !this.live(epoch)) return;
+		const now = this.ports.now();
+		for (const job of scheduler.snapshot()) {
+			if (job.state === "ready" || isTerminalSummaryJobState(job.state)) continue;
+			if (job.kind === "leaf") {
+				this.parked.set(job.id, { scope: "reconciliation", reason: RECONCILIATION_WAITING });
+				continue;
+			}
+			const left = job.children ? this.catalog.get(job.children[0]) : undefined;
+			const right = job.children ? this.catalog.get(job.children[1]) : undefined;
+			if (!left || !right) {
+				scheduler.markStale(job.id, now);
+				this.recordFailure(job, "stale", "a child node is no longer accepted");
+				continue;
+			}
+			if (left.legacyIdentity === undefined || right.legacyIdentity === undefined) {
+				scheduler.markStale(job.id, now);
+				this.recordFailure(job, "stale", "a child node is of an older capture version and is being retired");
+				continue;
+			}
+			scheduler.reconcileLegacy(
+				job.id,
+				parentJobKey({
+					sessionId: job.sessionId,
+					level: job.level,
+					children: [left.legacyIdentity, right.legacyIdentity],
+				}),
+			);
+		}
+		this.startPhase = "reconciled";
+		this.markJobsDirty();
+	}
+
+	/** Retire older captures, anchor, apply retention, rebuild unapproved frontiers and reconcile every session. */
+	private async discover(epoch: number): Promise<void> {
+		await this.retireLegacyCapture(epoch);
+		if (!this.live(epoch)) return;
+		await this.anchorUndatedNodes(epoch);
+		await this.applyRetention(epoch);
+		// Nodes accepted before the admission contract are not approved: frontiers published with them are rebuilt without.
+		await this.republishFrontiers(
+			[...this.frontiers.keys()].filter((name) => this.frontierNotAdmitted(name)),
+			epoch,
+		);
+		await this.reconcileAll(epoch);
+		this.pump(epoch);
+	}
+
+	/**
+	 * Take the store's derived state into the mirror in one synchronous step: its revision with the cursors,
+	 * frontiers, forgotten sessions, accepted nodes, anchors and dormant nodes it describes. The one load path of a
+	 * start and of a reload after the store moved past the mirror.
+	 */
+	private loadMirror(state: TranscriptSummaryStoreState): void {
+		const manifest = state.manifest;
+		this.manifestRevision = manifest?.revision ?? 0;
+		this.cursors.clear();
+		this.frontiers.clear();
+		this.frontierBytes.clear();
+		this.forgottenSessions.clear();
+		for (const [sessionId, cursor] of Object.entries(manifest?.sessions ?? {})) this.cursors.set(sessionId, cursor);
+		for (const [name, frontier] of Object.entries(manifest?.frontiers ?? {})) this.frontiers.set(name, frontier);
+		for (const key of Object.keys(manifest?.tombstones ?? {})) {
+			if (key.startsWith(SESSION_TOMBSTONE_PREFIX))
+				this.forgottenSessions.add(key.slice(SESSION_TOMBSTONE_PREFIX.length));
+		}
+		this.catalog.replace(state.nodes.values(), state.retentionAnchors);
+		this.dormant.clear();
+		for (const [id, node] of state.dormant) this.dormant.set(id, node);
+	}
+
+	/**
+	 * The store moved past this mirror (`stale_revision`: a revision this coordinator did not apply). A revision is
+	 * never adopted without its mirror (contract C6): the mirror is reloaded through the start's load path, discovery
+	 * restarts from the reloaded cursors, and the scheduler's ready index follows the reloaded accepted set. Damage the
+	 * load reports is not repaired mid-run: the coordinator stops with the real cause and recovers at its next start.
+	 */
+	private async reloadMirror(epoch: number): Promise<boolean> {
+		const state = await this.ports.store.load();
+		const scheduler = this.scheduler;
+		if (!this.live(epoch) || !scheduler) return false;
+		if ("status" in state) {
+			// Not adopted: the mirror keeps its own revision, so reads are refused until a reload succeeds.
+			this.noteInternalCause(`reloading the summary mirror: ${state.reason}`);
+			return false;
+		}
+		if (!state.manifest || state.issues.length > 0) {
+			const detail = state.issues.map(describeIssue).join("; ") || "the manifest is missing";
+			this.fatal(`the summary store moved past this coordinator and needs recovery: ${detail}`);
+			return false;
+		}
+		const before = new Set(this.catalog.ids());
+		this.loadMirror(state);
+		this.runtime.clear();
+		const now = this.ports.now();
+		scheduler.revokeNodes(
+			[...before].filter((id) => !state.nodes.has(id)),
+			now,
+			{ readmit: false },
+		);
+		for (const node of state.nodes.values()) {
+			if (!before.has(node.id) && isCurrentCaptureNode(node)) scheduler.onNodeReady(node, now);
+		}
+		return true;
+	}
+
+	/**
+	 * Capture version 2 binds every input a summary consumed into its source handles. Accepted nodes of an older
+	 * version are never served or extended: they are revoked as `invalidated` (derived again from their sources, not
+	 * forgotten), and older dormant nodes are purged so they stop holding the dormant cap, in one manifest write.
+	 */
+	private async retireLegacyCapture(epoch: number): Promise<void> {
+		const writer = this.writer;
+		if (!writer || !this.live(epoch)) return;
+		const accepted = new Set(
+			[...this.catalog.values()].filter((node) => !isCurrentCaptureNode(node)).map((node) => node.id),
+		);
+		const dormant = new Set(
+			[...this.dormant.values()].filter((node) => !isCurrentCaptureNode(node)).map((node) => node.id),
+		);
+		if (accepted.size === 0 && dormant.size === 0) return;
+		const result = await writer.revokeNodes((id) => accepted.has(id), "invalidated", {
+			purgeDormant: (id) => dormant.has(id),
+		});
+		if (result.status !== "published") {
+			if (this.live(epoch))
+				this.fatal(`retiring summaries of an older capture version was refused: ${result.status}`);
+			return;
+		}
+		if (!this.live(epoch)) {
+			// Durable already: the mirror takes it with its revision even though this run will not continue (C6).
+			this.mirrorRevocation(result, "invalidated", undefined, 0);
+			return;
+		}
+		await this.applyRevocation(result, epoch, { reason: "invalidated" });
 	}
 
 	/** Cancel the timer and subscriptions, abort in-flight work, requeue it for the next start, save the jobs. */
 	async stop(): Promise<void> {
 		if (!this.started && !this.scheduler) return;
 		const running = this.haltBackground();
-		await Promise.allSettled(running.map((entry) => entry.done));
-		await this.readmitting?.done;
+		// Settled, never thrown past: the stop must reach its terminal signal. An unexpected rejection keeps its cause.
+		const settled = await Promise.allSettled([
+			...running.map((entry) => entry.done),
+			...(this.readmitting ? [this.readmitting.done] : []),
+		]);
+		for (const result of settled) {
+			if (result.status === "rejected") {
+				this.noteInternalCause(
+					`background work failed at stop: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+				);
+			}
+		}
 		await this.tail;
 		const scheduler = this.scheduler;
 		const writer = this.writer;
@@ -631,23 +1002,74 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				if (job.state === "running" && scheduler.interrupt(job.id, now)) interrupted += 1;
 			}
 		}
-		if (scheduler && writer) await writer.saveJobs(scheduler.snapshot());
+		if (scheduler && writer) {
+			// The stop always reaches its terminal signal; a save that failed keeps its real cause for the status.
+			try {
+				const saved = await writer.saveJobs(scheduler.snapshot(), { rekeys: scheduler.rekeysToSave() });
+				if (saved.status !== "saved") this.noteInternalCause(`saving jobs at stop: ${describeSaveRefusal(saved)}`);
+			} catch (error) {
+				this.noteInternalCause(
+					`saving jobs at stop failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
 		this.finishBatch("stopped", interrupted);
-		await this.stopHandoff;
-		this.stopHandoff = undefined;
-		this.inFlight.clear();
-		this.writer = undefined;
-		this.scheduler = undefined;
+		try {
+			await this.stopHandoff;
+		} finally {
+			// Released however the owner's terminal callback ended; its own failure still reaches the caller.
+			this.stopHandoff = undefined;
+			this.inFlight.clear();
+			this.writer = undefined;
+			this.scheduler = undefined;
+			this.manifestReads = undefined;
+		}
 	}
 
 	/**
 	 * Forget one session: revoke its nodes, the nodes that consulted it as context and all their ancestors,
 	 * record a tombstone so it is never summarized again, and drop its cursor. Source sessions are untouched.
+	 * `forgotten` only once the revocation is published, applied to the mirror and the session's records dropped;
+	 * otherwise `refused` with the real cause.
 	 */
-	async forgetSession(sessionId: string): Promise<void> {
+	async forgetSession(sessionId: string): Promise<TranscriptForgetOutcome> {
 		const scheduled = this.epoch;
+		let outcome: TranscriptForgetOutcome | undefined;
 		await this.enqueue(async () => {
-			if (!this.live(scheduled) || !this.writer || !this.scheduler) return;
+			if (!this.live(scheduled) || !this.writer || !this.scheduler) {
+				outcome = {
+					status: "refused",
+					reason:
+						this.readUnavailable()?.reason ??
+						"the memory generation changed before the session could be forgotten",
+				};
+				return;
+			}
+			// A session nothing here or in the canonical history knows is refused before any write: a typed-wrong id
+			// must not leave a permanent tombstone.
+			if (!this.holdsSession(sessionId)) {
+				const probe = await this.ports.reader.listLineageSpans({ sessionId, fromIndex: 0, maxSpans: 1 });
+				if (probe.status === "not_found") {
+					outcome = { status: "refused", reason: `unknown session ${sessionId}: nothing was forgotten` };
+					return;
+				}
+				if (probe.status !== "ok") {
+					outcome = {
+						status: "refused",
+						reason: `could not confirm that session ${sessionId} exists (${probe.status}: ${probe.reason}): nothing was forgotten`,
+					};
+					return;
+				}
+				if (!this.live(scheduled) || !this.writer) {
+					outcome = {
+						status: "refused",
+						reason:
+							this.readUnavailable()?.reason ??
+							"the memory generation changed before the session could be forgotten",
+					};
+					return;
+				}
+			}
 			this.abortSession(sessionId);
 			const droppedReady = this.endSessionJobs(sessionId, "cancelled");
 			const result = await this.writer.revokeNodes(
@@ -656,13 +1078,47 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				"retention",
 				{ dropSessionCursor: sessionId, tombstoneSession: sessionId },
 			);
-			if (result.status !== "published") return this.fatal(`forgetting ${sessionId} was refused: ${result.status}`);
+			if (result.status !== "published") {
+				const reason = `forgetting ${sessionId} was refused: ${result.status}`;
+				this.fatal(reason);
+				outcome = { status: "refused", reason };
+				return;
+			}
 			this.forgottenSessions.add(sessionId);
-			// A forgotten session is never summarized again: its anchors and spent budgets can no longer matter.
-			if (!(await this.dropSessionRecords(new Set([sessionId])))) return;
+			// The mirror takes the revocation in the same step as its revision, before any later write: a later write's
+			// revision must never be adopted while revoked nodes are still indexed (contract C6).
 			await this.applyRevocation(result, scheduled, { reason: "forgotten", dropSession: sessionId, droppedReady });
+			// A forgotten session is never summarized again: its anchors and spent budgets can no longer matter.
+			if (!(await this.dropSessionRecords(new Set([sessionId])))) {
+				outcome = {
+					status: "refused",
+					reason: `the summaries of ${sessionId} were revoked, but dropping its retention records was refused: ${this.disabledReason ?? "the summary hierarchy stopped"}`,
+				};
+				return;
+			}
+			outcome = { status: "forgotten" };
 			this.pump(scheduled);
 		});
+		// The mailbox keeps a thrown error as the internal error; it is the real cause of a forget that did not finish.
+		return outcome ?? { status: "refused", reason: this.lastInternalError?.cause ?? "forgetting did not complete" };
+	}
+
+	/**
+	 * Whether anything durable here is keyed by this session: its tombstone, cursor or frontier, its accepted or
+	 * dormant nodes, a node of another session that consulted it as context, its retention anchors, or the
+	 * scheduler's jobs, terminal-proof records and held parent slots.
+	 */
+	private holdsSession(sessionId: string): boolean {
+		return (
+			this.forgottenSessions.has(sessionId) ||
+			this.cursors.has(sessionId) ||
+			this.frontiers.has(sessionId) ||
+			(this.catalog.sessionNodes(sessionId)?.size ?? 0) > 0 ||
+			[...this.catalog.values()].some((node) => node.contextRefs.some((ref) => ref.sessionId === sessionId)) ||
+			[...this.dormant.values()].some((node) => node.sessionId === sessionId) ||
+			this.catalog.anchoredSessionIds().includes(sessionId) ||
+			(this.scheduler?.holdsSession(sessionId) ?? false)
+		);
 	}
 
 	// ---- diagnostics --------------------------------------------------------------------------
@@ -698,13 +1154,11 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				};
 			});
 		let aged = 0;
-		for (const node of this.nodes.values()) {
+		for (const node of this.catalog.values()) {
 			const refs = [...node.sourceRefs, ...node.contextRefs];
-			if (refs.some((ref) => this.anchorAt(ref) !== undefined)) aged += 1;
+			if (refs.some((ref) => this.catalog.anchorAt(ref) !== undefined)) aged += 1;
 		}
-		const firstCapture = this.sourceAnchors.size;
-		let sessionAnchored = 0;
-		for (const anchor of this.sessionAnchors.values()) sessionAnchored += anchor.sources.size;
+		const anchored = this.catalog.anchorCounts();
 		const retentionDays = this.ports.settings().retentionDays;
 		const nextDeadlineAt = this.nextRetentionAt();
 		let pendingParents = 0;
@@ -725,28 +1179,29 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			...(oldest !== undefined ? { oldestBacklogAgeMs: Math.max(0, this.ports.now() - oldest) } : {}),
 			recentFailures: [...this.recentFailures],
 			recoveryIssues: [...this.recoveryIssues],
-			acceptedNodes: this.nodes.size,
+			acceptedNodes: this.catalog.size,
 			nodesAgedByAnchor: aged,
 			admission: this.admissionStatus(),
 			retention: {
 				scope: "derived_summaries_only",
 				...(retentionDays !== undefined ? { days: retentionDays } : {}),
 				...(nextDeadlineAt !== undefined ? { nextDeadlineAt } : {}),
-				eventTimeUnknownSources: firstCapture,
-				sessionTimestampSources: sessionAnchored,
+				eventTimeUnknownSources: anchored.firstCapture,
+				sessionTimestampSources: anchored.sessionTimestamp,
 				heldForAnchor: this.heldForAnchor.size,
 			},
 			pendingParentRederivations: pendingParents,
 			spentAttempts: {
-				recorded: this.scheduler?.spentCount() ?? 0,
+				recorded: this.proofLedger.recorded,
+				reserved: this.proofLedger.reserved,
 				bound: TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS,
-				refused: this.spentRefused,
+				...(this.proofLedger.hold ? { hold: { ...this.proofLedger.hold } } : {}),
 			},
 			...(this.lastRevocation ? { lastRevocation: { ...this.lastRevocation } } : {}),
 			frontierCount: this.frontiers.size,
 			frontiers,
 			recentBatches: this.persistedBatches.slice(-MAX_STATUS_BATCHES),
-			...(this.lastInternalError ? { lastInternalError: this.lastInternalError } : {}),
+			...(this.lastInternalError ? { lastInternalError: { ...this.lastInternalError } } : {}),
 		};
 	}
 
@@ -760,7 +1215,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		const blocked = this.modelWorkBlock();
 		let unapproved = 0;
 		const waitingFor: Partial<Record<TranscriptReadmissionWait, number>> = {};
-		for (const node of this.nodes.values()) {
+		for (const node of this.catalog.values()) {
 			const wait = this.unapprovedWait(node);
 			if (wait === undefined) continue;
 			unapproved += 1;
@@ -768,13 +1223,20 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		}
 		const readmission = { admitted: 0, rejected: 0, uncertain: 0, unavailable: 0 };
 		for (const { state } of this.readmissionState.values()) if (state !== "waiting") readmission[state] += 1;
-		const heldReason = this.heldReason();
+		const held = this.firstHold();
 		return {
 			contractVersion: TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
 			...(blocked ? { blocked } : {}),
 			heldJobs: this.parked.size,
-			...(heldReason !== undefined ? { heldReason: bounded(heldReason, MAX_HELD_REASON_CHARS) } : {}),
+			...(held
+				? {
+						heldKind: held.scope,
+						heldReason: bounded(held.reason, MAX_HELD_REASON_CHARS),
+						heldByKind: this.holdCounts(),
+					}
+				: {}),
 			judgments: { ...this.judgments },
+			reused: this.reusedAdmissions,
 			unapprovedNodes: unapproved,
 			readmission: { ...readmission, waitingFor },
 		};
@@ -782,13 +1244,17 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 
 	// ---- admission ----------------------------------------------------------------------------
 
-	/** The cause recorded on the first held job, when any is held. */
-	private heldReason(): string | undefined {
-		if (this.parked.size === 0) return undefined;
-		const job = this.scheduler
-			?.snapshot()
-			.find((entry) => this.parked.has(entry.id) && entry.lastError !== undefined);
-		return job?.lastError?.message;
+	/** How many jobs each kind of hold holds, so no claim made for the first hold is read as true of all of them. */
+	private holdCounts(): TranscriptSummaryHeldByKind {
+		const counts: TranscriptSummaryHeldByKind = {};
+		for (const { scope } of this.parked.values()) counts[scope] = (counts[scope] ?? 0) + 1;
+		return counts;
+	}
+
+	/** The first held job's hold: its kind and the cause recorded when it was set (never a job's earlier error). */
+	private firstHold(): ParkedHold | undefined {
+		for (const hold of this.parked.values()) return hold;
+		return undefined;
 	}
 
 	/**
@@ -821,44 +1287,38 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		return undefined;
 	}
 
-	/**
-	 * Whether a node is semantically approved under the current admission contract: an exact copy, or a model
-	 * summary with a current admission whose model-summary children are approved too. Pure and read-only.
-	 */
-	private isApproved(node: TranscriptSummaryNode | undefined): boolean {
-		return node !== undefined && summaryApproval(node, (id) => this.nodes.get(id)).approved;
-	}
-
 	/** True while a persisted frontier names a summary that has no admission under the current contract. */
 	frontierNotAdmitted(lineageKey: string): boolean {
 		const selection = this.frontiers.get(lineageKey);
-		const nodes = this.nodesBySession.get(lineageKey);
-		return !!selection && !!nodes && selection.nodeIds.some((id) => !this.isApproved(nodes.get(id)));
+		const nodes = this.catalog.sessionNodes(lineageKey);
+		return !!selection && !!nodes && selection.nodeIds.some((id) => !this.catalog.isApproved(nodes.get(id)));
 	}
 
 	/** Parked jobs that are no longer queued (finished, stale, revoked) have nothing left to release. */
 	private pruneParked(): void {
 		const scheduler = this.scheduler;
 		for (const id of [...this.parked.keys()]) {
-			if (scheduler?.get(id)?.state !== "queued") this.parked.delete(id);
+			const state = scheduler?.get(id)?.state;
+			// A job waiting for its retry is still held: it would otherwise come back unheld when it is due.
+			if (state !== "queued" && state !== "retry_wait") this.parked.delete(id);
 		}
 	}
 
 	/** Release parked jobs whose condition (`scope`) cleared; they are claimed again on the next pump. */
-	private releaseParked(scope: "model_work" | "children"): void {
-		for (const [id, parkedScope] of this.parked) if (parkedScope === scope) this.parked.delete(id);
+	private releaseParked(scope: HoldScope): void {
+		for (const [id, hold] of this.parked) if (hold.scope === scope) this.parked.delete(id);
 	}
 
 	/** The persisted selection and its accepted nodes for one lineage, for the prompt projection to render. */
 	frontierSnapshot(lineageKey: string):
 		| {
 				selection: TranscriptFrontierSelection;
-				nodes: Map<string, TranscriptSummaryNode>;
+				nodes: ReadonlyMap<string, TranscriptSummaryNode>;
 				gap?: TranscriptFrontierGap;
 		  }
 		| undefined {
 		const selection = this.frontiers.get(lineageKey);
-		const nodes = this.nodesBySession.get(lineageKey);
+		const nodes = this.catalog.sessionNodes(lineageKey);
 		if (!selection || !nodes) return undefined;
 		// A late retention wake must never expose expired derived text: the frontier is withheld until it is revoked.
 		if (this.frontierExpired(lineageKey)) return undefined;
@@ -868,99 +1328,131 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		return { selection, nodes, ...(gap ? { gap } : {}) };
 	}
 
-	/** True while a persisted frontier names a summary past the retention window that has not been revoked yet. */
+	/**
+	 * True while a persisted frontier names a summary retention withholds: past the window and not revoked yet, or
+	 * with no retention age to judge it by while retention is on (never treated as ageless). The catalog's read
+	 * rule decides; approval stays with {@link frontierNotAdmitted}.
+	 */
 	frontierExpired(lineageKey: string): boolean {
 		const selection = this.frontiers.get(lineageKey);
-		const nodes = this.nodesBySession.get(lineageKey);
-		return !!selection && !!nodes && selection.nodeIds.some((id) => this.isNodeExpired(nodes.get(id)));
+		const nodes = this.catalog.sessionNodes(lineageKey);
+		const cutoff = this.retentionCutoff();
+		return (
+			!!selection &&
+			!!nodes &&
+			selection.nodeIds.some((id) => {
+				const node = nodes.get(id);
+				const refusal = node && this.catalog.readRefusal(node, cutoff);
+				return refusal === "expired" || refusal === "age_unknown";
+			})
+		);
 	}
 
 	/**
-	 * One level of zoom: a parent expands into its two child summaries, a leaf into the exact source
-	 * parts it covers. Typed statuses, never an empty success: `pending` while the store loads,
-	 * `unavailable` while the hierarchy is off or stopped, `not_found` for a handle no accepted node has,
-	 * `stale_snapshot` when a covered source is no longer the live one.
+	 * One level of zoom through the catalog. Typed statuses, never an empty success: `pending` while the store
+	 * loads and `unavailable` while the hierarchy is off or stopped; everything else is the catalog's.
 	 */
-	async expand(handle: string): Promise<TranscriptNodeExpansion> {
-		const prefix = parseTranscriptNodeHandle(handle);
-		if (prefix === undefined) {
-			return { status: "invalid_handle", reason: "ref is not a summary node handle (expected txn:<16 hex>)." };
-		}
-		if (!this.started) {
-			return this.starting
-				? { status: "pending", reason: "the summary hierarchy is still loading" }
-				: { status: "unavailable", reason: this.disabledReason ?? "the summary hierarchy is not running" };
-		}
-		const ids = this.nodeIdsByHandle.get(prefix);
-		if (!ids || ids.size === 0) {
-			return {
-				status: "not_found",
-				reason: "no accepted summary node has this handle; it may be pending, revoked or never built",
-			};
-		}
-		if (ids.size > 1) return { status: "invalid_handle", reason: "this node handle is ambiguous" };
-		const node = this.nodes.get([...ids][0] as string);
-		if (!node) return { status: "not_found", reason: "the summary node was revoked" };
-		if (this.isNodeExpired(node)) {
-			return {
-				status: "expired",
-				reason:
-					"this derived summary is past the retention window (retentionDays) and is being revoked; exact source recall is unaffected",
-			};
-		}
-		if (!this.isApproved(node)) return this.notAdmittedExpansion(node);
-		const view = (entry: TranscriptSummaryNode) => ({
-			handle: formatTranscriptNodeHandle(entry.id),
-			quality: entry.quality,
-			level: entry.level,
-			spanRange: { ...entry.spanRange },
-			...(entry.coveredFrom !== undefined ? { coveredFrom: entry.coveredFrom } : {}),
-			...(entry.coveredTo !== undefined ? { coveredTo: entry.coveredTo } : {}),
-			text: entry.text,
+	async expand(handle: string, options: TranscriptSummaryReadOptions = {}): Promise<TranscriptNodeExpansion> {
+		const unavailable = this.readUnavailable();
+		return this.catalog.expand(handle, {
+			...this.catalogReadContext(options),
+			...(unavailable ? { unavailable } : {}),
+			unapprovedReason: (node) => {
+				const wait = this.unapprovedWait(node) ?? "not_yet_judged";
+				return wait === "not_yet_judged"
+					? (this.modelWorkBlock()?.reason ?? READMISSION_WAIT_TEXT.not_yet_judged)
+					: READMISSION_WAIT_TEXT[wait];
+			},
 		});
-		if (node.children) {
-			const children = node.children.map((id) => this.nodes.get(id));
-			if (children.some((child) => child === undefined)) {
-				return { status: "stale_snapshot", reason: "a child summary of this node was revoked" };
-			}
-			return { status: "ok", node: view(node), children: (children as TranscriptSummaryNode[]).map(view) };
-		}
-		const live = await this.ports.reader.listLineageSpans({
-			sessionId: node.sessionId,
-			fromIndex: node.spanRange.fromIndex,
-			maxSpans: node.sourceRefs.length,
-		});
-		if (live.status !== "ok") return { status: live.status, reason: live.reason };
-		if (
-			live.spans.length !== node.sourceRefs.length ||
-			!live.spans.every((span, position) =>
-				sameTranscriptSource(span.ref, node.sourceRefs[position] as TranscriptSourceRef),
-			)
-		) {
-			return { status: "stale_snapshot", reason: "the covered spans are no longer the live sources" };
-		}
+	}
+
+	/** Approved summaries covering these source hits (contract C5), through the catalog; typed like `expand` while not running. */
+	async summariesFor(
+		refs: readonly TranscriptSourceRef[],
+		limits: { maxNodes: number },
+		options: TranscriptSummaryReadOptions = {},
+	): Promise<TranscriptSummaryLookupResult> {
+		const unavailable = this.readUnavailable();
+		if (unavailable) return unavailable;
+		return this.catalog.approvedSummariesCovering(refs, limits, this.catalogReadContext(options));
+	}
+
+	/**
+	 * The catalog read context of this coordinator: a tool call waits on it (foreground bound), the retention cutoff
+	 * is asked at every judgment, the caller's whole-operation deadline passes through, and {@link confirmMirror} is
+	 * the delivery fence.
+	 */
+	private catalogReadContext(options: TranscriptSummaryReadOptions): TranscriptSummaryReadContext {
 		return {
-			status: "ok",
-			node: view(node),
-			sources: live.spans.map((span) => ({
-				handle: formatTranscriptSourceHandle(span.ref),
-				role: span.role,
-				...(span.toolName !== undefined ? { toolName: span.toolName } : {}),
-				...(span.isError ? { isError: true } : {}),
-				...(span.timestamp !== undefined ? { timestamp: span.timestamp } : {}),
-				bytes: span.bytes,
-			})),
+			reader: this.ports.reader,
+			cutoff: () => this.retentionCutoff(),
+			priority: "foreground",
+			...(options.deadlineAt !== undefined ? { deadlineAt: options.deadlineAt } : {}),
+			confirm: () => this.confirmMirror(options.deadlineAt),
 		};
+	}
+
+	/**
+	 * The delivery fence of a catalog read: the in-place mirror may serve text only while it reflects the store as it
+	 * is now. The writer lease does not prove that: another `acquireWriter` supersedes it and this writer learns only on
+	 * its next write. The manifest revision does, because every write of this coordinator adopts the revision it
+	 * produced in the same step as the mirror change (contract C6). A missing manifest or a revision this mirror does
+	 * not reflect means the summary store moved under the read; it is refused naming the store, with the shared
+	 * changed-in-flight wording the retry policy classifies.
+	 */
+	private async confirmMirror(
+		deadlineAt: number | undefined,
+	): Promise<{ catalog: TranscriptSummaryCatalog } | TranscriptReadUnavailable> {
+		const reads = this.manifestReads;
+		const epoch = this.epoch;
+		// The bounded reads exist exactly while a run is started (created by its start, dropped by its stop).
+		if (!reads)
+			return this.readUnavailable() ?? { status: "unavailable", reason: "the summary hierarchy is not running" };
+		// A fence: only a manifest read that starts after this call can confirm the mirror, and this caller is settled
+		// by its own deadline whatever the read does.
+		const read = await reads.fence(deadlineAt);
+		const unavailable = this.readUnavailable();
+		if (unavailable) return unavailable;
+		// The coordinator was replaced while the read was out: nothing from the earlier run is adopted.
+		if (epoch !== this.epoch) {
+			return { status: "stale_snapshot", reason: `The summary store ${TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT}.` };
+		}
+		// An I/O or lock failure, or the caller's deadline, with its real cause: the reader keeps its exact hits.
+		if (read.status !== "ok" && read.status !== "missing" && read.status !== "corrupt") return read;
+		if (read.status === "corrupt") {
+			return {
+				status: "unavailable",
+				reason: `the summary store manifest is damaged (${read.detail}); exact history recall is unaffected`,
+			};
+		}
+		if (read.status === "missing" || read.manifest.revision !== this.manifestRevision) {
+			return {
+				status: "stale_snapshot",
+				reason: `The summary store ${TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT}.`,
+			};
+		}
+		return { catalog: this.catalog };
+	}
+
+	/** Why node reads cannot be served now: `pending` while the store loads, `unavailable` while off or stopped. */
+	private readUnavailable(): TranscriptReadUnavailable | undefined {
+		if (this.started) return undefined;
+		return this.starting
+			? { status: "pending", reason: "the summary hierarchy is still loading" }
+			: { status: "unavailable", reason: this.disabledReason ?? "the summary hierarchy is not running" };
 	}
 
 	/** Record what re-admission found for a node; `wait` says why a judgment has not happened or was discarded. */
 	private setReadmission(nodeId: string, state: ReadmissionHoldState, wait?: TranscriptReadmissionWait): void {
 		this.readmissionState.set(nodeId, wait === undefined ? { state } : { state, wait });
+		// A source that could not be read now (the index did not answer the lineage or a part read) is read again after
+		// the re-admission backoff, like an evaluator that did not answer. An answered refusal is never armed here.
+		if (wait === "source_unreadable") this.readmissionRetryAt ??= this.ports.now() + READMISSION_RETRY_MS;
 	}
 
 	/** Why an accepted node is not approved, or undefined when it is approved. Pure apart from the re-admission record. */
 	private unapprovedWait(node: TranscriptSummaryNode): TranscriptReadmissionWait | undefined {
-		const approval = summaryApproval(node, (id) => this.nodes.get(id));
+		const approval = this.catalog.approval(node);
 		if (approval.approved) return undefined;
 		if (approval.reason === "child_not_approved") return "child_not_approved";
 		if (approval.reason === "text_changed") return "admission_mismatch";
@@ -971,28 +1463,16 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		return hold?.wait ?? "not_yet_judged";
 	}
 
-	/**
-	 * A model summary without an admission under the current contract is accepted but not approved: its text is
-	 * not offered. Its exact sources stay readable, and the reply names them, so recovery needs nothing from it.
-	 */
-	private notAdmittedExpansion(node: TranscriptSummaryNode): TranscriptNodeExpansion {
-		const wait = this.unapprovedWait(node) ?? "not_yet_judged";
-		const why =
-			wait === "not_yet_judged"
-				? (this.modelWorkBlock()?.reason ?? READMISSION_WAIT_TEXT.not_yet_judged)
-				: READMISSION_WAIT_TEXT[wait];
-		const sources = node.sourceRefs.slice(0, 8).map(formatTranscriptSourceHandle);
-		return {
-			status: "unavailable",
-			reason: `this summary has not passed the current admission contract (${why}); open its exact sources instead: ${sources.join(", ")}${node.sourceRefs.length > sources.length ? ", ..." : ""}`,
-		};
+	/** Record `cause` as the latest internal cause, timed by the coordinator's clock: the one writer of that slot. */
+	private noteInternalCause(cause: string): void {
+		this.lastInternalError = { cause, at: new Date(this.ports.now()).toISOString() };
 	}
 
 	// ---- mailbox ------------------------------------------------------------------------------
 
 	private enqueue(task: () => Promise<void>): Promise<void> {
 		const run = this.tail.then(task).catch((error: unknown) => {
-			this.lastInternalError = error instanceof Error ? error.message : String(error);
+			this.noteInternalCause(error instanceof Error ? error.message : String(error));
 		});
 		this.tail = run;
 		return run;
@@ -1034,40 +1514,6 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 
 	// ---- indexing helpers ---------------------------------------------------------------------
 
-	private indexNode(node: TranscriptSummaryNode): void {
-		this.retentionDeadline = undefined;
-		this.nodes.set(node.id, node);
-		let bySession = this.nodesBySession.get(node.sessionId);
-		if (!bySession) {
-			bySession = new Map();
-			this.nodesBySession.set(node.sessionId, bySession);
-		}
-		bySession.set(node.id, node);
-		const prefix = parseTranscriptNodeHandle(formatTranscriptNodeHandle(node.id));
-		if (prefix !== undefined) {
-			const ids = this.nodeIdsByHandle.get(prefix) ?? new Set<string>();
-			ids.add(node.id);
-			this.nodeIdsByHandle.set(prefix, ids);
-		}
-		if (node.level === 0) this.leafByStart.set(leafKey(node.sessionId, node.spanRange.fromIndex), node);
-	}
-
-	private unindexNode(id: string): void {
-		const node = this.nodes.get(id);
-		if (!node) return;
-		this.nodes.delete(id);
-		this.nodesBySession.get(node.sessionId)?.delete(id);
-		const prefix = parseTranscriptNodeHandle(formatTranscriptNodeHandle(id));
-		if (prefix !== undefined) {
-			const ids = this.nodeIdsByHandle.get(prefix);
-			ids?.delete(id);
-			if (ids?.size === 0) this.nodeIdsByHandle.delete(prefix);
-		}
-		if (node.level === 0) this.leafByStart.delete(leafKey(node.sessionId, node.spanRange.fromIndex));
-		this.retentionTimes.delete(id);
-		this.retentionDeadline = undefined;
-	}
-
 	/**
 	 * Apply a published revocation to the local mirror and reconcile the scheduler with it: the revoked
 	 * nodes leave the ready index, the ready jobs that vouched for them are dropped (the rule restart recovery
@@ -1081,7 +1527,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		alreadyDroppedReady: number,
 	): void {
 		this.manifestRevision = revision;
-		for (const id of revoked) this.unindexNode(id);
+		for (const id of revoked) this.catalog.unindex(id);
 		for (const sessionId of droppedCursors) this.cursors.delete(sessionId);
 		// Only an invalidation can be derived again: a retention or forgetting revocation is permanent, so its
 		// identity is never re-admitted (re-deriving it could only be refused at publication).
@@ -1102,7 +1548,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	private sessionsOf(nodeIds: readonly string[]): Set<string> {
 		const sessions = new Set<string>();
 		for (const id of nodeIds) {
-			const node = this.nodes.get(id);
+			const node = this.catalog.get(id);
 			if (node) sessions.add(node.sessionId);
 		}
 		return sessions;
@@ -1128,14 +1574,44 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	private async reconcileAll(epoch: number): Promise<void> {
 		const sessions = await this.ports.reader.listSessions();
 		if (sessions.status !== "ok") {
-			this.lastInternalError = `listing sessions: ${sessions.status}: ${sessions.reason}`;
+			this.noteInternalCause(`listing sessions: ${sessions.status}: ${sessions.reason}`);
+			// A failed listing still reaches the recovered leaves held for reconciliation, by their own sessions.
+			await this.reconcileHeldSessions(new Set(), epoch);
 			return;
 		}
 		for (const session of sessions.sessions) this.sessionTimestamps.set(session.sessionId, session.timestamp ?? null);
-		if (!(await this.dropOrphanedSessionRecords(new Set(sessions.sessions.map((s) => s.sessionId))))) return;
+		// False only when the writer is gone or the drop was refused (the coordinator stopped).
+		const listed = new Set(sessions.sessions.map((s) => s.sessionId));
+		if (!(await this.dropOrphanedSessionRecords(listed, sessions.coverage))) return;
+		const visited = new Set<string>();
 		for (const session of sessions.sessions) {
 			if (!this.live(epoch)) return;
+			visited.add(session.sessionId);
 			await this.reconcileSession(session.sessionId, epoch);
+		}
+		await this.reconcileHeldSessions(visited, epoch);
+	}
+
+	/**
+	 * Reach every session that still owns a recovered leaf held for reconciliation and was not visited: a session
+	 * deleted while pi was down, skipped or unsupported by the index, or beyond a listing that failed or was cut off.
+	 * The probe in {@link reconcileSession} ends a session that is gone through invalidation (its held jobs end stale)
+	 * and enumerates a readable one, which adopts and releases its held leaves. A probe that is unavailable leaves
+	 * them held; this runs again on the next index change and lifecycle timer wake (never by polling), until each is
+	 * reconciled or ended. Bounded by the held set.
+	 */
+	private async reconcileHeldSessions(visited: ReadonlySet<string>, epoch: number): Promise<void> {
+		const scheduler = this.scheduler;
+		if (!scheduler) return;
+		const sessions = new Set<string>();
+		for (const [id, hold] of this.parked) {
+			if (hold.scope !== "reconciliation") continue;
+			const sessionId = scheduler.get(id)?.sessionId;
+			if (sessionId !== undefined && !visited.has(sessionId)) sessions.add(sessionId);
+		}
+		for (const sessionId of sessions) {
+			if (!this.live(epoch)) return;
+			await this.reconcileSession(sessionId, epoch);
 		}
 	}
 
@@ -1145,12 +1621,14 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	 * as counts, never per session id, so absence can be confirmed only when those counts are all zero and the
 	 * indexed count equals the listing: then the listing is the whole catalog. Otherwise nothing is dropped (a
 	 * skipped, unreadable or unsupported session keeps its anchors and spent budgets, or its age would reset
-	 * when it returns). Never by age.
+	 * when it returns). Never by age. `coverage` is the one the listing answer carried: counts that describe exactly
+	 * the catalog `indexed` was listed from, never a later snapshot that may describe another one.
 	 */
-	private async dropOrphanedSessionRecords(indexed: ReadonlySet<string>): Promise<boolean> {
-		const coverage = this.ports.reader.coverage();
+	private async dropOrphanedSessionRecords(
+		indexed: ReadonlySet<string>,
+		coverage: TranscriptCoverage,
+	): Promise<boolean> {
 		if (
-			coverage === undefined ||
 			coverage.truncated ||
 			coverage.sessionsSkipped > 0 ||
 			coverage.sessionsUnsupported > 0 ||
@@ -1161,20 +1639,20 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			return true;
 		}
 		const referenced = new Set<string>();
-		for (const node of this.nodes.values()) {
+		for (const node of this.catalog.values()) {
 			referenced.add(node.sessionId);
 			for (const ref of node.contextRefs) referenced.add(ref.sessionId);
 		}
 		const held = new Set<string>([
-			...this.sessionAnchors.keys(),
-			...[...this.sourceAnchors.keys()].map((handle) => handle.split(":")[1] ?? ""),
+			...this.catalog.anchoredSessionIds(),
 			...(this.scheduler?.spentSessionIds() ?? []),
+			...[...this.dormant.values()].map((node) => node.sessionId),
 		]);
 		const orphans = new Set([...held].filter((sessionId) => !indexed.has(sessionId) && !referenced.has(sessionId)));
 		return orphans.size === 0 || (await this.dropSessionRecords(orphans));
 	}
 
-	/** Remove anchors and spent budgets of these sessions from the store and from the local mirror. */
+	/** Remove anchors, spent budgets and dormant nodes of these sessions from the store and from the local mirrors. */
 	private async dropSessionRecords(sessionIds: ReadonlySet<string>): Promise<boolean> {
 		const result = await this.writer?.dropSessionRecords(sessionIds);
 		if (!result) return false;
@@ -1182,17 +1660,50 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			this.fatal(`dropping session records was refused: ${result.status}`);
 			return false;
 		}
-		for (const sessionId of sessionIds) this.sessionAnchors.delete(sessionId);
-		for (const handle of [...this.sourceAnchors.keys()]) {
-			if (sessionIds.has(handle.split(":")[1] ?? "")) this.sourceAnchors.delete(handle);
-		}
+		this.manifestRevision = result.revision;
+		this.catalog.dropSessionAnchors(sessionIds);
+		for (const id of result.dormant) this.dormant.delete(id);
 		this.scheduler?.forgetSpentOf(sessionIds);
-		this.retentionTimes.clear();
-		this.retentionDeadline = undefined;
+		this.scheduler?.setProofHold(result.ledger.hold);
+		this.proofLedger = result.ledger;
+		// The only reclaim of spent budgets: a freed slot gives held work another chance (never a lost-proof scope).
+		if (result.spent > 0 && this.live(this.epoch)) this.releaseProofHolds(this.epoch);
 		return true;
 	}
 
+	/**
+	 * Reconcile one session and project the outcome onto its recovered leaves still held for reconciliation: the
+	 * one wrapper every caller uses (start-up discovery, index changes, held sessions, revocations). While the run
+	 * is live, an unanswered read sets their reason to its real cause, and a read that went through resets it to the
+	 * current waiting reason. It never releases a hold: only enumeration that adopts a leaf's budget does.
+	 */
 	private async reconcileSession(sessionId: string, epoch: number): Promise<void> {
+		const unread = await this.reconcileSessionRead(sessionId, epoch);
+		const scheduler = this.scheduler;
+		if (!this.live(epoch) || !scheduler) return;
+		const reason =
+			unread === undefined
+				? RECONCILIATION_WAITING
+				: `a recovered summary job waits for its session to be read again (${unread}), so the budget it had under capture version 1 is adopted first`;
+		for (const [id, hold] of this.parked) {
+			if (hold.scope !== "reconciliation" || scheduler.get(id)?.sessionId !== sessionId) continue;
+			this.parked.set(id, { scope: "reconciliation", reason });
+		}
+	}
+
+	/**
+	 * Probe, then revoke dead coverage or enumerate. Returns the real cause when the session could not be read now:
+	 * the probe (neither readable nor confirmed gone), the verification read after a lineage change, the read that
+	 * rediscovers the session after a revocation, or an enumeration page; undefined otherwise. It never projects:
+	 * the wrapper whose read started it does. Dead coverage is revoked when the runtime does not vouch for the probe's
+	 * lineage ({@link vouchesFor}: neither the verified digest nor, after a pure append, the verified stamp) or when
+	 * the index invalidated the session ({@link revocationDue}); a due revocation is taken only by a read that
+	 * answers, and stays due when its verification does not. Every page the verification and the enumeration read
+	 * must carry the probe's {@link lineageStamp}: one that does not means the lineage moved during verification,
+	 * nothing is recorded and the revocation is due again. A read that enumerated certifies the cursor when the
+	 * runtime vouches for a lineage the cursor does not name ({@link certifyCursor}).
+	 */
+	private async reconcileSessionRead(sessionId: string, epoch: number): Promise<string | undefined> {
 		const scheduler = this.scheduler;
 		if (!this.live(epoch) || !scheduler || this.forgottenSessions.has(sessionId)) return;
 		const probe = await this.ports.reader.listLineageSpans({ sessionId, fromIndex: 0, maxSpans: 1 });
@@ -1202,8 +1713,8 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			return;
 		}
 		if (probe.status !== "ok") {
-			this.lastInternalError = `reading ${sessionId}: ${probe.status}: ${probe.reason}`;
-			return;
+			this.noteInternalCause(`reading ${sessionId}: ${probe.status}: ${probe.reason}`);
+			return `${probe.status}: ${probe.reason}`;
 		}
 		let runtime = this.runtime.get(sessionId);
 		if (!runtime) {
@@ -1212,40 +1723,233 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				next: { fromIndex: cursor?.coveredSpanCount ?? 0, ordinal: cursor?.nextOrdinal ?? 0 },
 				total: probe.total,
 				verifiedDigest: cursor?.lineageDigest,
+				verifiedStamp: undefined,
 				backpressured: false,
 			};
 			this.runtime.set(sessionId, runtime);
 		}
 		runtime.total = probe.total;
-		if (runtime.verifiedDigest !== probe.lineageDigest) {
-			if (!(await this.coverageStillLive(sessionId))) {
-				await this.invalidateSession(sessionId, epoch);
-				return this.reconcileSession(sessionId, epoch);
+		const stamp = lineageStamp(probe);
+		// Taken before the revocation, so the read that rediscovers the session after a change is not forced again: it
+		// starts from the verification this read made ({@link restartDiscovery}) and verifies again only if the
+		// lineage moved since.
+		const due = this.revocationDue.delete(sessionId);
+		if (due || !vouchesFor(runtime, probe)) {
+			// The lineage moved (a branch switch, a rewrite): keep what is still live, revoke the rest. A change
+			// rediscovers the session itself and answers that read's cause here; an unreadable lineage is not judged
+			// and the next read tries again.
+			const dead = await this.revokeDeadCoverage(sessionId, epoch, stamp);
+			if (dead.kind === "unreadable") {
+				if (due) this.revocationDue.add(sessionId);
+				return dead.cause;
 			}
-			runtime.verifiedDigest = probe.lineageDigest;
+			if (dead.kind === "changed") return;
+			// Every node and job is still live. The newest lineage the verification read: its pages share the probe's
+			// stamp, so the probe's lineage is a prefix of it, and a check that passed on spans appended since is
+			// verified on it, not on the probe's.
+			this.restartDiscovery(sessionId, runtime, { digest: dead.digest ?? probe.lineageDigest, stamp });
+		} else if (runtime.verifiedDigest === probe.lineageDigest) {
+			// The probe saw exactly the verified lineage, so its stamp names that lineage from now on: a pure append
+			// keeps the stamp and needs no verification.
+			runtime.verifiedStamp = stamp;
 		}
-		await this.enumerateLeaves(sessionId, runtime, epoch);
+		const unread = await this.enumerateLeaves(sessionId, runtime, epoch, stamp);
+		await this.certifyCursor(sessionId, runtime, epoch);
+		return unread;
 	}
 
-	/** The newest accepted leaf's source parts must still be exactly the live spans at its position. */
-	private async coverageStillLive(sessionId: string): Promise<boolean> {
-		let last: TranscriptSummaryNode | undefined;
-		for (const node of this.nodesBySession.get(sessionId)?.values() ?? []) {
-			if (node.level === 0 && (!last || node.spanRange.toIndexExclusive > last.spanRange.toIndexExclusive))
-				last = node;
-		}
-		if (!last) return true;
-		const live = await this.ports.reader.listLineageSpans({
-			sessionId,
-			fromIndex: last.spanRange.fromIndex,
-			maxSpans: last.sourceRefs.length,
+	/**
+	 * Discovery of a session restarts from its cursor, the end of its live prefix: groups enumeration passed over
+	 * without a job (expired ones) may differ on the new lineage. The runtime vouches for `verified`, a verification
+	 * of the session's whole coverage its caller just completed with nothing dead left, else for the cursor's digest
+	 * as a fresh runtime does.
+	 */
+	private restartDiscovery(sessionId: string, runtime: SessionRuntime, verified: VerifiedLineage | undefined): void {
+		const cursor = this.cursors.get(sessionId);
+		runtime.next = { fromIndex: cursor?.coveredSpanCount ?? 0, ordinal: cursor?.nextOrdinal ?? 0 };
+		runtime.backpressured = false;
+		runtime.verifiedDigest = verified ? verified.digest : cursor?.lineageDigest;
+		runtime.verifiedStamp = verified?.stamp;
+	}
+
+	/**
+	 * Record durably what the runtime vouches for when the session's cursor names another lineage, so a later start
+	 * trusts the cursor instead of verifying the whole coverage again. The two differ only after a verification of
+	 * the whole coverage (a fresh runtime takes the cursor's digest, a certified publication writes both, and an
+	 * uncertified one clears the runtime's), so this writes once per such verification and never in the steady
+	 * state. Only the digest changes; nothing is written while a revocation is due, by a runtime a reload replaced,
+	 * or for a session without a cursor (it has no accepted coverage to certify). A revision is never adopted
+	 * without its mirror (C6).
+	 */
+	private async certifyCursor(sessionId: string, runtime: SessionRuntime, epoch: number): Promise<void> {
+		const { writer } = this;
+		const cursor = this.cursors.get(sessionId);
+		const digest = runtime.verifiedDigest;
+		if (!writer || !this.live(epoch) || this.runtime.get(sessionId) !== runtime) return;
+		if (this.revocationDue.has(sessionId) || !cursor || digest === undefined || cursor.lineageDigest === digest)
+			return;
+		const certified: TranscriptSummarySessionCursor = { ...cursor, lineageDigest: digest };
+		const result = await writer.publish({
+			expectedRevision: this.manifestRevision,
+			sessions: { [sessionId]: certified },
 		});
-		if (live.status !== "ok" || live.spans.length !== last.sourceRefs.length) return live.status !== "ok";
-		return live.spans.every((span, position) =>
-			sameTranscriptSource(span.ref, last.sourceRefs[position] as TranscriptSourceRef),
-		);
+		if (result.status === "published") {
+			// Durable already: the mirror takes it with its revision whether or not this run continues (C6).
+			this.manifestRevision = result.revision;
+			this.cursors.set(sessionId, certified);
+			return;
+		}
+		if (!this.live(epoch)) return;
+		if (result.status === "stale_revision") await this.reloadMirror(epoch);
+		else this.fatal(`certifying the cursor of ${sessionId} was refused: ${result.status}`);
 	}
 
+	/**
+	 * The selected lineage of a session changed. Keep every accepted node whose coverage is still live and revoke
+	 * only the rest, so switching a branch away and back never summarizes the shared prefix again:
+	 * - an accepted leaf is live when its context and covered spans are exactly the live spans at its position;
+	 *   a dead leaf is revoked with every ancestor (the store closes over parents) and, as before, any node of
+	 *   another session that consulted this one as context; the store pulls the session cursor back to the
+	 *   earliest revoked leaf, the end of the live prefix, all in one fenced write (a refusal is fatal);
+	 * - a live leaf job whose spans are no longer live, and a parent job whose child was revoked, end `stale`
+	 *   (their started attempts are carried); every other job is untouched.
+	 * The lineage is read in pages from each check's own start (at most {@link ENUMERATION_PAGE_SPANS} spans per
+	 * read, every check at most 8 spans plus its context). A session that is gone is invalidated whole; a read
+	 * that does not answer decides nothing: no node is kept or revoked on missing evidence (expansion and
+	 * discovery revalidate every leaf live on their own) and the next read tries again.
+	 * After a change the session is read again through {@link reconcileSessionRead}, never through the wrapper:
+	 * that read's unanswered cause returns as `unreadable`, so the caller's wrapper projects it once. What is left
+	 * of the session passed this verification, so its runtime restarts vouching for it ({@link restartDiscovery}):
+	 * the re-read verifies again only if the lineage moved since, or a mirror reload dropped the runtime.
+	 * Every page must carry `stamp`, the {@link lineageStamp} of the read that started the verification; a page
+	 * that does not means the lineage moved during verification: nothing is judged ({@link lineageMoved}).
+	 * `unchanged` carries the digest of the newest page read, the lineage every check was verified on.
+	 */
+	private async revokeDeadCoverage(
+		sessionId: string,
+		epoch: number,
+		stamp: string | undefined,
+	): Promise<CoverageVerdict> {
+		const { writer, scheduler } = this;
+		if (!this.live(epoch) || !writer || !scheduler) return { kind: "unreadable", cause: COORDINATOR_NOT_RUNNING };
+		const checks: { from: number; refs: readonly TranscriptSourceRef[]; nodeId?: string; jobId?: string }[] = [];
+		const deadLeaves = new Set<string>();
+		for (const node of this.catalog.sessionNodes(sessionId)?.values() ?? []) {
+			if (node.level !== 0) continue;
+			// The catalog owns a leaf's dependency range (its context and covered parts); one it cannot place on the
+			// lineage (unverifiable, inconsistent) is never readable, so it is not kept either.
+			const dependency = this.catalog.dependency(node);
+			if (dependency?.kind !== "range") deadLeaves.add(node.id);
+			else checks.push({ from: dependency.fromIndex, refs: dependency.refs, nodeId: node.id });
+		}
+		for (const job of scheduler.snapshot()) {
+			if (job.sessionId !== sessionId || job.kind !== "leaf" || isTerminalSummaryJobState(job.state)) continue;
+			checks.push({ from: job.spanRange.fromIndex, refs: job.sourceRefs ?? [], jobId: job.id });
+		}
+		checks.sort((a, b) => a.from - b.from);
+		const deadJobs: string[] = [];
+		let page: Extract<TranscriptLineageSpansResult, { status: "ok" }> | undefined;
+		for (const check of checks) {
+			const to = check.from + check.refs.length;
+			const pageEnd = page ? page.fromIndex + page.spans.length : 0;
+			if (!page || check.from < page.fromIndex || (to > pageEnd && pageEnd < page.total)) {
+				const read = await this.ports.reader.listLineageSpans({
+					sessionId,
+					fromIndex: check.from,
+					maxSpans: ENUMERATION_PAGE_SPANS,
+				});
+				if (!this.live(epoch)) return { kind: "unreadable", cause: COORDINATOR_NOT_RUNNING };
+				if (read.status === "not_found") {
+					await this.invalidateSession(sessionId, epoch);
+					return { kind: "changed" };
+				}
+				if (read.status !== "ok") {
+					this.noteInternalCause(`verifying ${sessionId} after a lineage change: ${read.status}: ${read.reason}`);
+					return {
+						kind: "unreadable",
+						cause: `verifying the lineage after a change: ${read.status}: ${read.reason}`,
+					};
+				}
+				const readStamp = lineageStamp(read);
+				if (readStamp === undefined || readStamp !== stamp) {
+					return {
+						kind: "unreadable",
+						cause: this.lineageMoved(sessionId, "verifying the lineage after a change"),
+					};
+				}
+				page = read;
+			}
+			const window = page.spans.slice(check.from - page.fromIndex, to - page.fromIndex);
+			if (coversLiveSpans({ ...page, spans: window }, check.refs)) continue;
+			if (check.nodeId !== undefined) deadLeaves.add(check.nodeId);
+			if (check.jobId !== undefined) deadJobs.push(check.jobId);
+		}
+		if (deadLeaves.size === 0 && deadJobs.length === 0) return { kind: "unchanged", digest: page?.lineageDigest };
+		const verified: VerifiedLineage | undefined = page ? { digest: page.lineageDigest, stamp } : undefined;
+		if (deadLeaves.size === 0) {
+			this.staleJobs(deadJobs);
+			const runtime = this.runtime.get(sessionId);
+			if (runtime) this.restartDiscovery(sessionId, runtime, verified);
+			this.markJobsDirty();
+			const unread = await this.reconcileSessionRead(sessionId, epoch);
+			return unread === undefined ? { kind: "changed" } : { kind: "unreadable", cause: unread };
+		}
+		const result = await writer.revokeNodes(
+			(id, entry) =>
+				deadLeaves.has(id) ||
+				(entry.sessionId !== sessionId && entry.contextRefs.some((handle) => handle.split(":")[1] === sessionId)),
+			"invalidated",
+			// Their content is parked dormant: switching back republishes the identical identity without paying again.
+			{ park: true },
+		);
+		if (!this.live(epoch)) {
+			// Durable already: the mirror takes it with its revision even though this run will not continue (C6).
+			if (result.status === "published") this.mirrorRevocation(result, "invalidated", undefined, 0);
+			return { kind: "changed" };
+		}
+		if (result.status !== "published") {
+			this.fatal(`revoking the dead coverage of ${sessionId} was refused: ${result.status}`);
+			return { kind: "changed" };
+		}
+		const revoked = new Set(result.revoked);
+		for (const job of scheduler.snapshot()) {
+			if (
+				job.kind === "parent" &&
+				!isTerminalSummaryJobState(job.state) &&
+				job.children?.some((id) => revoked.has(id))
+			)
+				deadJobs.push(job.id);
+		}
+		this.staleJobs(deadJobs);
+		await this.applyRevocation(result, epoch, { reason: "invalidated", rereadSession: { sessionId, verified } });
+		const unread = await this.reconcileSessionRead(sessionId, epoch);
+		return unread === undefined ? { kind: "changed" } : { kind: "unreadable", cause: unread };
+	}
+
+	/**
+	 * The lineage of a session moved while one derivation was reading it (a page's {@link lineageStamp} differs from
+	 * the read that started it): nothing that derivation gathered is recorded, and the session's next read verifies
+	 * its coverage whatever the digests say. Returns the cause.
+	 */
+	private lineageMoved(sessionId: string, during: string): string {
+		this.revocationDue.add(sessionId);
+		const cause = `${during}: the lineage moved during verification`;
+		this.noteInternalCause(`${cause} (${sessionId})`);
+		return cause;
+	}
+
+	/** End these jobs `stale` (their coverage is no longer live): in-flight work is aborted, the batch counts them. */
+	private staleJobs(jobIds: readonly string[]): void {
+		const scheduler = this.scheduler;
+		if (!scheduler) return;
+		const now = this.ports.now();
+		const ids = new Set(jobIds);
+		for (const entry of this.inFlight.values()) if (ids.has(entry.jobId)) entry.controller.abort();
+		for (const id of jobIds) if (scheduler.markStale(id, now)) this.countTerminal("stale");
+		this.maybeFinishBatch();
+	}
+
+	/** The session is gone: everything derived from it is revoked and its cursor dropped. */
 	private async invalidateSession(sessionId: string, epoch: number): Promise<void> {
 		const { writer, scheduler } = this;
 		if (!this.live(epoch) || !writer || !scheduler) return;
@@ -1261,57 +1965,108 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	 * forgetting): unindex the revoked nodes, reconcile the scheduler, drop the frontiers they were in, take
 	 * back the cursors the store pulled, reset discovery for every affected session, republish the frontiers
 	 * of the sessions that kept nodes and discover again what the revocation uncovered. `dropSession`, when
-	 * given, loses its cursor and discovery state outright; its caller discovers it again.
+	 * given, loses its cursor and discovery state outright; its caller discovers it again. `rereadSession`, when
+	 * given, takes its pulled-back cursor like every affected session but keeps its runtime, restarted to vouch for
+	 * the verification its caller just made ({@link restartDiscovery}; a reload below drops it with every runtime),
+	 * and is not discovered here: its caller reads it again itself and hands the outcome to its own wrapper.
 	 */
 	private async applyRevocation(
-		result: { revoked: readonly string[]; revision: number; removedFrontiers: readonly string[] },
+		result: PublishedRevocation,
 		epoch: number,
-		options: { reason: TranscriptMemoryRevocationRecord["reason"]; dropSession?: string; droppedReady?: number },
+		options: {
+			reason: TranscriptMemoryRevocationRecord["reason"];
+			dropSession?: string;
+			rereadSession?: { sessionId: string; verified: VerifiedLineage | undefined };
+			droppedReady?: number;
+		},
 	): Promise<void> {
-		const { dropSession } = options;
+		const { dropSession, rereadSession: reread } = options;
 		const affected = this.sessionsOf(result.revoked);
-		this.afterRevocation(
-			result.revoked,
-			result.revision,
-			dropSession !== undefined ? [dropSession] : [],
-			options.reason,
-			options.droppedReady ?? 0,
-		);
+		this.mirrorRevocation(result, options.reason, dropSession, options.droppedReady ?? 0);
 		this.dropFrontiers([...(dropSession !== undefined ? [dropSession] : []), ...result.removedFrontiers]);
 		if (dropSession !== undefined) {
 			this.runtime.delete(dropSession);
+			this.revocationDue.delete(dropSession);
 			affected.delete(dropSession);
 		}
 		// The store pulled the cursors of sessions that lost leaves back; discovery resumes from them.
-		const manifest = affected.size > 0 ? await this.ports.store.manifest() : undefined;
+		const read = affected.size > 0 ? await this.ports.store.readManifest() : undefined;
+		// A manifest that cannot be read leaves those cursors unknown: discovery restarts them from the start of the
+		// lineage, where every accepted leaf is recognized again.
+		if (read !== undefined && read.status !== "ok") {
+			this.noteInternalCause(
+				`reading cursors after a revocation: ${read.status === "unavailable" ? read.reason : read.status}`,
+			);
+		}
+		const manifest = read?.status === "ok" ? read.manifest : undefined;
 		for (const sessionId of affected) {
 			const cursor = manifest?.sessions[sessionId];
 			if (cursor) this.cursors.set(sessionId, cursor);
 			else this.cursors.delete(sessionId);
-			this.runtime.delete(sessionId);
+			const runtime = this.runtime.get(sessionId);
+			if (runtime && sessionId === reread?.sessionId) this.restartDiscovery(sessionId, runtime, reread.verified);
+			else this.runtime.delete(sessionId);
 		}
 		await this.republishFrontiers([...affected], epoch);
 		this.markJobsDirty();
-		for (const sessionId of affected) await this.reconcileSession(sessionId, epoch);
+		for (const sessionId of affected) {
+			if (sessionId !== reread?.sessionId) await this.reconcileSession(sessionId, epoch);
+		}
+	}
+
+	/**
+	 * The mirror side of a published revocation, in one synchronous step with its revision (contract C6): parked
+	 * content is taken before the catalog lets it go, then the nodes leave the catalog and the scheduler. A durable
+	 * revocation is always mirrored, even by a run that is no longer live; everything after it is the caller's.
+	 */
+	private mirrorRevocation(
+		result: PublishedRevocation,
+		reason: TranscriptMemoryRevocationRecord["reason"],
+		dropSession: string | undefined,
+		droppedReady: number,
+	): void {
+		for (const id of result.parked) {
+			const node = this.catalog.get(id);
+			if (node) this.dormant.set(id, node);
+		}
+		for (const id of result.purged) this.dormant.delete(id);
+		this.afterRevocation(
+			result.revoked,
+			result.revision,
+			dropSession !== undefined ? [dropSession] : [],
+			reason,
+			droppedReady,
+		);
 	}
 
 	private abortSession(sessionId: string): void {
 		const scheduler = this.scheduler;
 		if (!scheduler) return;
-		for (const job of scheduler.snapshot()) {
-			if (job.sessionId === sessionId) this.inFlight.get(job.id)?.controller.abort();
-		}
+		const ids = new Set(scheduler.snapshot().flatMap((job) => (job.sessionId === sessionId ? [job.id] : [])));
+		for (const entry of this.inFlight.values()) if (ids.has(entry.jobId)) entry.controller.abort();
 	}
 
 	/**
 	 * Enumerate sealed leaf groups from the enumeration cursor and enqueue the ones not yet built. Groups
 	 * are deterministic from the start of the lineage, so an ordinal is a pure function of position.
 	 */
-	private async enumerateLeaves(sessionId: string, runtime: SessionRuntime, epoch: number): Promise<void> {
+	/**
+	 * Returns the real cause when a read it needed was unavailable or the lineage moved under it (a page without
+	 * `stamp`, the probe's {@link lineageStamp}; see {@link reconcileSession}); else undefined.
+	 */
+	private async enumerateLeaves(
+		sessionId: string,
+		runtime: SessionRuntime,
+		epoch: number,
+		stamp: string | undefined,
+	): Promise<string | undefined> {
 		const scheduler = this.scheduler;
 		if (!scheduler) return;
 		const cutoff = this.retentionCutoff();
 		runtime.backpressured = false;
+		// Under a possibly-lost-proof hold the scheduler admits only sessions known to have started after it: learn
+		// this session's start first (an unavailable listing leaves it held until its next index event).
+		if (this.proofLedger.hold?.cause === "possibly_lost_proof") await this.sessionTimestamp(sessionId);
 		while (this.live(epoch)) {
 			const page = await this.ports.reader.listLineageSpans({
 				sessionId,
@@ -1320,9 +2075,13 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			});
 			if (!this.live(epoch)) return;
 			if (page.status !== "ok") {
-				this.lastInternalError = `enumerating ${sessionId}: ${page.status}: ${page.reason}`;
-				return;
+				this.noteInternalCause(`enumerating ${sessionId}: ${page.status}: ${page.reason}`);
+				return `enumerating the lineage: ${page.status}: ${page.reason}`;
 			}
+			// Groups and positions from another lineage than the probe's are never enqueued.
+			const pageStamp = lineageStamp(page);
+			if (pageStamp === undefined || pageStamp !== stamp)
+				return this.lineageMoved(sessionId, "enumerating the lineage");
 			if (page.spans.length === 0) return;
 			const pageEnd = page.fromIndex + page.spans.length;
 			const truncated = pageEnd < page.total;
@@ -1335,7 +2094,10 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			if (
 				undated.length > 0 &&
 				!(await this.anchorRefs(
-					undated.map((span) => span.ref),
+					undated.map((span) => ({
+						ref: span.ref,
+						legacyHandle: formatTranscriptSourceHandle(legacyCaptureRef(span)),
+					})),
 					epoch,
 				))
 			)
@@ -1343,7 +2105,15 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			if (!this.live(epoch)) return;
 			for (const group of groups) {
 				const refs = group.spans.map((span) => span.ref);
-				const existing = this.leafByStart.get(leafKey(sessionId, group.fromIndex));
+				const legacyKey = leafJobKey({ sessionId, sourceRefs: group.spans.map(legacyCaptureRef) });
+				// A recovered leaf held for reconciliation: this read of its coverage gives its version 1 key, so its budget
+				// is adopted now (whatever this group leads to below) and the hold released.
+				const jobId = leafJobKey({ sessionId, sourceRefs: refs });
+				if (this.parked.get(jobId)?.scope === "reconciliation") {
+					scheduler.reconcileLegacy(jobId, legacyKey);
+					this.parked.delete(jobId);
+				}
+				const existing = this.catalog.leafAt(sessionId, group.fromIndex);
 				if (existing) {
 					const same =
 						existing.sourceRefs.length === refs.length &&
@@ -1351,9 +2121,9 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 							sameTranscriptSource(ref, refs[position] as TranscriptSourceRef),
 						);
 					if (!same) {
-						await this.invalidateSession(sessionId, epoch);
-						// What the invalidation uncovered is discovered again; unchanged refs enqueue afresh.
-						return this.reconcileSession(sessionId, epoch);
+						// The lineage changed under this leaf: the dead coverage is revoked and the session rediscovered.
+						const dead = await this.revokeDeadCoverage(sessionId, epoch, stamp);
+						return dead.kind === "unreadable" ? dead.cause : undefined;
 					}
 				} else if (!this.isExpired(group.spans, cutoff)) {
 					const result = scheduler.enqueueLeaf(
@@ -1362,12 +2132,25 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 							ordinal: runtime.next.ordinal,
 							spanRange: { fromIndex: group.fromIndex, toIndexExclusive: group.toIndexExclusive },
 							sourceRefs: refs,
+							legacyKey,
 						},
 						this.ports.now(),
 						this.parked,
 					);
 					if (result.status === "backpressure") {
 						runtime.backpressured = true;
+						return;
+					}
+					// Before this run's first acknowledged save: the cursor stays, discovery reconciles every session after it.
+					if (result.status === "admission_closed") return;
+					// A held identity was not created: the cursor stays on it. Capacity resumes when a slot frees (and the
+					// save makes the pending reservations and the hold durable); a lost-proof scope looks again on the
+					// session's next index event.
+					if (result.status === "held") {
+						if (result.cause === "capacity") {
+							runtime.backpressured = true;
+							this.markJobsDirty();
+						}
 						return;
 					}
 					if (result.status === "created") this.noteEnqueued();
@@ -1386,25 +2169,15 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	// it, and time is never inferred from order or digests.
 
 	private retentionCutoff(): number | undefined {
-		const days = this.ports.settings().retentionDays;
-		return days === undefined ? undefined : this.ports.now() - days * DAY_MS;
+		return transcriptRetentionCutoff(this.ports.settings().retentionDays, this.ports.now());
 	}
 
 	/** The entry's event time, else its persisted anchor; undefined only for a source not yet anchored. */
 	private spanTime(span: TranscriptSourceSpan): number | undefined {
 		const stamped = span.timestamp === undefined ? Number.NaN : Date.parse(span.timestamp);
 		if (!Number.isNaN(stamped)) return stamped;
-		const anchor = this.anchorAt(span.ref);
+		const anchor = this.catalog.anchorAt(span.ref);
 		return anchor === undefined ? undefined : Date.parse(anchor);
-	}
-
-	/** The persisted anchor a source ages from, when it has one: its own first capture, else its session's timestamp. */
-	private anchorAt(ref: TranscriptSourceRef): string | undefined {
-		const handle = formatTranscriptSourceHandle(ref);
-		const first = this.sourceAnchors.get(handle);
-		if (first !== undefined) return first;
-		const session = this.sessionAnchors.get(ref.sessionId);
-		return session?.sources.has(sourceKeyOfHandle(handle)) ? session.at : undefined;
 	}
 
 	private isExpired(spans: readonly TranscriptSourceSpan[], cutoff: number | undefined): boolean {
@@ -1423,52 +2196,9 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		return at === undefined || at < cutoff;
 	}
 
-	/**
-	 * The oldest instant a node depends on: its recorded dependency time (coverage and context event times),
-	 * the anchors of its coverage and context sources, and everything its children depend on.
-	 */
-	private nodeRetentionTime(node: TranscriptSummaryNode): number | undefined {
-		const known = this.retentionTimes.get(node.id);
-		if (known !== undefined) return known ?? undefined;
-		let oldest = Number.POSITIVE_INFINITY;
-		const consider = (at: number | undefined) => {
-			if (at !== undefined && !Number.isNaN(at) && at < oldest) oldest = at;
-		};
-		if (node.oldestDependencyAt !== undefined) consider(Date.parse(node.oldestDependencyAt));
-		for (const ref of [...node.sourceRefs, ...node.contextRefs]) {
-			const anchor = this.anchorAt(ref);
-			if (anchor !== undefined) consider(Date.parse(anchor));
-		}
-		for (const childId of node.children ?? []) {
-			const child = this.nodes.get(childId);
-			if (child) consider(this.nodeRetentionTime(child));
-		}
-		const time = oldest === Number.POSITIVE_INFINITY ? undefined : oldest;
-		this.retentionTimes.set(node.id, time ?? null);
-		return time;
-	}
-
-	private isNodeExpired(node: TranscriptSummaryNode | undefined): boolean {
-		const cutoff = this.retentionCutoff();
-		if (cutoff === undefined || !node) return false;
-		const at = this.nodeRetentionTime(node);
-		return at !== undefined && at < cutoff;
-	}
-
 	/** The instant the next accepted node expires; undefined when retention is off or nothing can expire. */
 	private nextRetentionAt(): number | undefined {
-		const days = this.ports.settings().retentionDays;
-		if (days === undefined) return undefined;
-		if (this.retentionDeadline?.days !== days) {
-			let oldest: number | undefined;
-			for (const node of this.nodes.values()) {
-				const at = this.nodeRetentionTime(node);
-				if (at !== undefined && (oldest === undefined || at < oldest)) oldest = at;
-			}
-			// One millisecond past the instant a node's age reaches the window, so a wake never fires before it is due.
-			this.retentionDeadline = { days, at: oldest === undefined ? undefined : oldest + days * DAY_MS + 1 };
-		}
-		return this.retentionDeadline.at;
+		return this.catalog.nextRetentionAt(this.ports.settings().retentionDays);
 	}
 
 	/**
@@ -1479,7 +2209,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		if (!this.sessionTimestamps.has(sessionId)) {
 			const sessions = await this.ports.reader.listSessions();
 			if (sessions.status !== "ok") {
-				this.lastInternalError = `listing sessions for retention anchors: ${sessions.status}: ${sessions.reason}`;
+				this.noteInternalCause(`listing sessions for retention anchors: ${sessions.status}: ${sessions.reason}`);
 				return undefined;
 			}
 			for (const session of sessions.sessions)
@@ -1494,49 +2224,44 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	 * Persist an anchor for each source that has none yet (set-if-absent in the store). Returns false when the
 	 * anchor ceiling refused any of them: that work is held with a diagnostic, never treated as ageless.
 	 */
-	private async anchorRefs(refs: readonly TranscriptSourceRef[], epoch: number): Promise<boolean> {
+	private async anchorRefs(
+		sources: readonly { ref: TranscriptSourceRef; legacyHandle?: string }[],
+		epoch: number,
+	): Promise<boolean> {
 		const writer = this.writer;
 		if (!writer || !this.live(epoch)) return false;
 		const requests: TranscriptAnchorRequest[] = [];
 		const seen = new Set<string>();
-		for (const ref of refs) {
+		for (const { ref, legacyHandle } of sources) {
 			const handle = formatTranscriptSourceHandle(ref);
-			if (this.anchorAt(ref) !== undefined || seen.has(handle)) continue;
+			if (this.catalog.anchorAt(ref) !== undefined || seen.has(handle)) continue;
 			seen.add(handle);
 			const stamp = await this.sessionTimestamp(ref.sessionId);
 			// The listing is unavailable: hold this drain and retry, rather than settle for a weaker basis for good.
 			if (stamp === undefined) return false;
-			requests.push(
-				stamp !== null
-					? { handle, at: new Date(Date.parse(stamp)).toISOString(), basis: "session_timestamp" }
-					: { handle, at: new Date(this.ports.now()).toISOString(), basis: "first_capture" },
-			);
+			requests.push({
+				...(stamp !== null
+					? { handle, at: new Date(Date.parse(stamp)).toISOString(), basis: "session_timestamp" as const }
+					: { handle, at: new Date(this.ports.now()).toISOString(), basis: "first_capture" as const }),
+				// The store moves an anchor the same source had under capture version 1, with its age, instead.
+				...(legacyHandle !== undefined ? { legacyHandle } : {}),
+			});
 		}
 		if (requests.length === 0) return true;
 		const result = await writer.anchorSources(requests);
-		if (!this.live(epoch)) return false;
 		if (result.status === "fenced" || result.status === "manifest_corrupt") {
-			this.fatal(`recording retention anchors was refused: ${result.status}`);
+			if (this.live(epoch)) this.fatal(`recording retention anchors was refused: ${result.status}`);
 			return false;
 		}
+		// Durable already: the mirror takes the anchors with their revision whether or not this run continues (C6).
+		this.manifestRevision = result.revision;
 		const refused = new Set(result.status === "capacity" ? result.refused : []);
-		for (const { handle, at, basis } of requests) {
-			if (refused.has(handle)) {
-				this.heldForAnchor.add(handle);
-				continue;
-			}
-			this.heldForAnchor.delete(handle);
-			if (basis === "first_capture") this.sourceAnchors.set(handle, at);
-			else {
-				const sessionId = handle.split(":")[1] ?? "";
-				const session = this.sessionAnchors.get(sessionId) ?? { at, sources: new Set<string>() };
-				session.sources.add(sourceKeyOfHandle(handle));
-				this.sessionAnchors.set(sessionId, session);
-			}
-		}
-		this.retentionTimes.clear();
-		this.retentionDeadline = undefined;
-		return refused.size === 0;
+		for (const handle of refused) this.heldForAnchor.add(handle);
+		for (const { handle } of result.recorded) this.heldForAnchor.delete(handle);
+		// The anchors as the store holds them now: a moved one leaves its version 1 handle and carries its age.
+		this.catalog.forgetAnchors(result.moved);
+		this.catalog.recordAnchors(result.recorded);
+		return this.live(epoch) && refused.size === 0;
 	}
 
 	/**
@@ -1545,11 +2270,11 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	 * so no accepted node stays unable to age.
 	 */
 	private async anchorUndatedNodes(epoch: number): Promise<void> {
-		const refs: TranscriptSourceRef[] = [];
-		for (const node of this.nodes.values()) {
+		const refs: { ref: TranscriptSourceRef }[] = [];
+		for (const node of this.catalog.values()) {
 			if (node.oldestDependencyAt !== undefined) continue;
 			for (const ref of [...node.sourceRefs, ...node.contextRefs]) {
-				if (this.anchorAt(ref) === undefined) refs.push(ref);
+				if (this.catalog.anchorAt(ref) === undefined) refs.push({ ref });
 			}
 		}
 		// A listing that was unavailable leaves the rest pending; the next index event tries again.
@@ -1566,18 +2291,29 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		const writer = this.writer;
 		if (cutoff === undefined || !writer || !this.live(epoch)) return;
 		const due: { id: string; at: number }[] = [];
-		for (const node of this.nodes.values()) {
-			const at = this.nodeRetentionTime(node);
+		for (const node of this.catalog.values()) {
+			const at = this.catalog.nodeRetentionTime(node);
 			if (at !== undefined && at < cutoff) due.push({ id: node.id, at });
 		}
-		if (due.length === 0) return;
+		// Dormant content past the window (or whose age cannot be bounded) is purged too: it could never be
+		// republished, and derived text must not outlive its sources' window.
+		const dueDormant = new Set<string>();
+		for (const node of this.dormant.values()) {
+			const at = this.dormantRetentionTime(node);
+			if (at === undefined || at < cutoff) dueDormant.add(node.id);
+		}
+		if (due.length === 0 && dueDormant.size === 0) return;
 		due.sort((a, b) => a.at - b.at);
 		const batch = new Set(due.slice(0, RETENTION_REVOKE_BATCH).map((entry) => entry.id));
-		const result = await writer.revokeNodes((id) => batch.has(id), "retention");
+		const result = await writer.revokeNodes((id) => batch.has(id), "retention", {
+			purgeDormant: (id) => dueDormant.has(id),
+		});
 		if (result.status !== "published") return this.fatal(`retention was refused: ${result.status}`);
 		// Nodes this coordinator holds as accepted must be in the manifest; if none are, the mirror is broken and
 		// another pass would find the same nodes forever. Stop with the real cause instead.
-		if (result.revoked.length === 0) return this.fatal("retention found accepted nodes the manifest does not hold");
+		if (batch.size > 0 && result.revoked.length === 0) {
+			return this.fatal("retention found accepted nodes the manifest does not hold");
+		}
 		await this.applyRevocation(result, epoch, { reason: "retention" });
 		if (due.length > batch.size) {
 			void this.enqueue(async () => {
@@ -1588,12 +2324,33 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		}
 	}
 
+	/**
+	 * The retention instant of a dormant node: its own dependencies (judged by the catalog) and, for a parent, every
+	 * child's, children looked up among accepted and dormant nodes. A parent's own fields cannot bound it alone: it
+	 * names its children's covered sources and their dated dependencies, never their context sources, so an undated
+	 * context source (aged by its anchor) is visible only through the child. A child that is neither accepted nor
+	 * dormant leaves the age unknown (undefined), which retention purges: the parent is only a cache.
+	 */
+	private dormantRetentionTime(node: TranscriptSummaryNode): number | undefined {
+		let oldest = this.catalog.nodeRetentionTime(node);
+		if (oldest === undefined) return undefined;
+		for (const childId of node.children ?? []) {
+			const child = this.catalog.get(childId) ?? this.dormant.get(childId);
+			const at = child === undefined ? undefined : this.dormantRetentionTime(child);
+			if (at === undefined) return undefined;
+			if (at < oldest) oldest = at;
+		}
+		return oldest;
+	}
+
 	// ---- frontier -----------------------------------------------------------------------------
 
 	private computeFrontier(sessionId: string, extra?: TranscriptSummaryNode) {
 		// Only approved summaries are described: a model summary without a current admission stays out (and so does
 		// every model parent built on it) until it is re-admitted. Its sources are still reachable by exact recall.
-		const members = [...(this.nodesBySession.get(sessionId)?.values() ?? [])].filter((node) => this.isApproved(node));
+		const members = [...(this.catalog.sessionNodes(sessionId)?.values() ?? [])].filter((node) =>
+			this.catalog.isApproved(node),
+		);
 		if (extra) members.push(extra);
 		const total = this.runtime.get(sessionId)?.total;
 		return selectFrontier({
@@ -1607,8 +2364,8 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				? {
 						tail: {
 							toIndexExclusive: total,
-							reason: [...(this.nodesBySession.get(sessionId)?.values() ?? [])].some(
-								(node) => !this.isApproved(node),
+							reason: [...(this.catalog.sessionNodes(sessionId)?.values() ?? [])].some(
+								(node) => !this.catalog.isApproved(node),
 							)
 								? "summaries pending, awaiting admission, or not yet captured"
 								: "summaries pending or not yet captured",
@@ -1625,10 +2382,10 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		const frontiers: Record<string, TranscriptFrontierSelection> = {};
 		const removeFrontiers: string[] = [];
 		for (const sessionId of new Set(sessionIds)) {
-			const nodes = this.nodesBySession.get(sessionId);
+			const nodes = this.catalog.sessionNodes(sessionId);
 			if (!nodes?.size) continue;
 			// Nothing approved is left to describe: the persisted frontier is removed rather than left naming withheld nodes.
-			if (![...nodes.values()].some((node) => this.isApproved(node))) {
+			if (![...nodes.values()].some((node) => this.catalog.isApproved(node))) {
 				if (this.frontiers.has(sessionId)) removeFrontiers.push(sessionId);
 				continue;
 			}
@@ -1643,7 +2400,8 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			...(removeFrontiers.length > 0 ? { removeFrontiers } : {}),
 		});
 		if (published.status !== "published") {
-			if (published.status === "stale_revision") this.manifestRevision = published.currentRevision;
+			// A revision is never adopted without its mirror (C6): the store moved past it, so the mirror is reloaded.
+			if (published.status === "stale_revision") await this.reloadMirror(epoch);
 			else this.fatal(`publishing frontiers was refused: ${published.status}`);
 			return;
 		}
@@ -1672,33 +2430,72 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		}
 		this.modelWorkBlocked = blocked;
 		this.pruneParked();
-		while (this.ports.canRunBackground()) {
+		// Parents held at the live-job cap come back once live work fell below it.
+		if (scheduler.admitBelowLiveBound(this.ports.now()).length > 0) this.noteEnqueued();
+		// Nothing is claimed before admission opens: recovered work has not adopted its version 1 budgets yet.
+		while (this.startPhase === "open" && this.ports.canRunBackground()) {
 			// Dispatch is the one place the attempt budget is enforced: an exhausted job never reaches a provider.
 			// Held jobs wait for their condition; claiming them again would only hold them again.
 			const claim = scheduler.claimNext(this.ports.now(), (candidate) => this.parked.has(candidate.id));
 			for (const spent of claim.exhausted) this.settleExhausted(spent, epoch);
-			const job = claim.job;
-			if (!job) break;
+			if (!claim.claimed) break;
+			const { job, token } = claim.claimed;
 			this.noteEnqueued();
 			this.markJobsDirty();
-			// The started attempt is durable before its provider call, so a crash cannot grant another one.
+			// The started attempt is durable before its provider call, so a crash cannot grant another one: the save that
+			// includes this claim must ACKNOWLEDGE its attempt count (a failed save only leaves the barrier settled). That
+			// same save reserved the job's terminal proof or refused it: only a job holding its record may reach a
+			// provider (a recovered job included), so its failure can always be kept. Both are required.
 			const persisted = this.jobsSaved;
 			const controller = new AbortController();
 			const done = persisted
-				.then(() =>
+				.then((): JobOutcome | Promise<JobOutcome> =>
 					controller.signal.aborted || !this.live(epoch)
-						? ({ kind: "aborted" } as const)
-						: this.runJob(job, summarizer, controller.signal, epoch),
+						? { kind: "aborted" }
+						: (this.durableAttempts.get(job.id) ?? -1) < job.attempts
+							? { kind: "held", scope: "persistence", reason: this.persistenceHoldReason() }
+							: !scheduler.hasProof(job.id)
+								? { kind: "held", scope: "proof", reason: this.proofHoldReason() }
+								: // The claim itself must still be the job's authority: a merge or any other change since the
+									// claim (while its save was pending) makes it stale, whatever the acknowledged count says.
+									!scheduler.isClaimCurrent(token)
+									? { kind: "abandoned", reason: CLAIM_SUPERSEDED_BEFORE_DISPATCH }
+									: this.runJob(job, token, summarizer, controller.signal, epoch),
 				)
-				.then((outcome) => this.enqueue(async () => this.settle(job, outcome, epoch)));
-			this.inFlight.set(job.id, { controller, done });
-			void done.finally(() => {
-				if (this.inFlight.get(job.id)?.done === done) this.inFlight.delete(job.id);
-			});
+				.then((outcome) => this.enqueue(async () => this.settle(job, token, outcome, epoch)));
+			this.inFlight.set(token.claimId, { jobId: job.id, controller, done });
+			void done.finally(() => this.inFlight.delete(token.claimId));
 		}
 		this.maybeStartReadmission(epoch);
 		this.maybeFinishBatch();
 		this.armTimer(epoch);
+	}
+
+	/** Why a claimed attempt was not made durable: the real cause of the failed save. */
+	private persistenceHoldReason(): string {
+		return `the job list holding this attempt was not saved (${this.saveFailure ?? "no save acknowledged it"}); it waits for the next successful save, retried with backoff`;
+	}
+
+	/** Why a claimed job could not get its terminal-proof record, from the capacity the store last reported. */
+	private proofHoldReason(): string {
+		const { recorded, hold } = this.proofLedger;
+		const since = hold ? `; ${hold.cause} hold since ${hold.since}` : "";
+		return `the terminal-proof ledger has no slot for this job (${recorded} of ${TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS} records${since}); it waits so its attempt budget can always be kept`;
+	}
+
+	/**
+	 * A terminal-proof slot freed (a released reservation, a reclaimed session): jobs and parents held for one
+	 * get another chance, and enumeration stopped at the bound resumes. What still does not fit is held again.
+	 */
+	private releaseProofHolds(epoch: number): void {
+		const scheduler = this.scheduler;
+		if (!scheduler) return;
+		this.releaseParked("proof");
+		if (scheduler.retryProofHolds(this.ports.now()).length > 0) this.noteEnqueued();
+		for (const [sessionId, runtime] of this.runtime) {
+			if (runtime.backpressured) this.resumeDeferredEnumeration(sessionId, epoch);
+		}
+		this.pump(epoch);
 	}
 
 	/** A queued job whose attempts were all spent: terminal `failed` / `attempts_exhausted`, reported like any failure. */
@@ -1721,9 +2518,12 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		if (this.timer !== undefined) this.ports.clearTimer(this.timer);
 		this.timer = undefined;
 		if (!this.live(epoch)) return;
-		const candidates = [this.scheduler?.nextWakeAt(), this.nextRetentionAt(), this.readmissionRetryAt].filter(
-			(value): value is number => value !== undefined,
-		);
+		const candidates = [
+			this.scheduler?.nextWakeAt(),
+			this.nextRetentionAt(),
+			this.readmissionRetryAt,
+			this.saveRetryAt,
+		].filter((value): value is number => value !== undefined);
 		if (candidates.length === 0) return;
 		const at = Math.min(...candidates);
 		this.timer = this.ports.setTimer(
@@ -1732,9 +2532,13 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				void this.enqueue(async () => {
 					if (!this.live(epoch) || !this.scheduler) return;
 					this.scheduler.promoteDue(this.ports.now());
+					// A failed job save that is due is tried again by this save.
+					if (this.saveRetryAt !== undefined && this.saveRetryAt <= this.ports.now()) this.saveRetryAt = undefined;
 					this.markJobsDirty();
 					const due = this.nextRetentionAt();
 					if (due !== undefined && due <= this.ports.now()) await this.applyRetention(epoch);
+					// A lifecycle wake also retries held recovered leaves whose sessions could not be read before.
+					if (this.startPhase === "open") await this.reconcileHeldSessions(new Set(), epoch);
 					this.pump(epoch);
 				});
 			},
@@ -1744,6 +2548,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 
 	private async runJob(
 		job: TranscriptSummaryJob,
+		token: TranscriptSummaryClaimToken,
 		summarizer: TranscriptSummarizerPort,
 		signal: AbortSignal,
 		epoch: number,
@@ -1751,8 +2556,8 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		try {
 			const outcome =
 				job.kind === "leaf"
-					? await this.buildLeaf(job, summarizer, signal)
-					: await this.buildParent(job, summarizer, signal);
+					? await this.buildLeaf(job, token, summarizer, signal)
+					: await this.buildParent(job, token, summarizer, signal);
 			return signal.aborted || !this.live(epoch) ? { kind: "aborted" } : outcome;
 		} catch (error) {
 			if (signal.aborted) return { kind: "aborted" };
@@ -1763,7 +2568,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		}
 	}
 
-	private failureFor(unavailable: TranscriptReadUnavailable): JobOutcome {
+	private failureFor(unavailable: TranscriptReadUnavailable): SourceReadFailure {
 		if (unavailable.status === "pending" || unavailable.status === "unavailable") {
 			return {
 				kind: "fail",
@@ -1773,8 +2578,12 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		return { kind: "stale", reason: `source ${unavailable.status}: ${unavailable.reason}` };
 	}
 
-	/** Exact part text, verified against the digest the reference carries. */
-	private async readText(ref: TranscriptSourceRef): Promise<{ text: string } | { outcome: JobOutcome }> {
+	/**
+	 * Exact part text, verified through the one capture identity: the text with the span's own metadata (role, tool,
+	 * error status, timestamp, origin) must be exactly what the span's handle names.
+	 */
+	private async readText(span: TranscriptSourceSpan): Promise<{ text: string } | { outcome: SourceReadFailure }> {
+		const { ref } = span;
 		let cursor = 0;
 		let text = "";
 		for (let page = 0; page < SOURCE_READ_PAGES; page++) {
@@ -1782,9 +2591,14 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			if (result.status !== "ok") return { outcome: this.failureFor(result) };
 			text += result.text;
 			if (result.nextCursor === undefined) {
-				return transcriptDigest(text) === ref.digest
+				return isCurrentCaptureIdentity(ref, span, text)
 					? { text }
-					: { outcome: { kind: "stale", reason: "source text no longer matches its digest" } };
+					: {
+							outcome: {
+								kind: "stale",
+								reason: "the source text or its recorded metadata no longer match its identity",
+							},
+						};
 			}
 			cursor = result.nextCursor;
 		}
@@ -1795,6 +2609,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 
 	private async buildLeaf(
 		job: TranscriptSummaryJob,
+		token: TranscriptSummaryClaimToken,
 		summarizer: TranscriptSummarizerPort,
 		signal: AbortSignal,
 	): Promise<JobOutcome> {
@@ -1805,15 +2620,10 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			maxSpans: refs.length,
 		});
 		if (live.status !== "ok") return this.failureFor(live);
-		if (
-			live.spans.length !== refs.length ||
-			!live.spans.every((span, position) => sameTranscriptSource(span.ref, refs[position] as TranscriptSourceRef))
-		) {
-			return { kind: "stale", reason: "the covered spans changed" };
-		}
+		if (!coversLiveSpans(live, refs)) return { kind: "stale", reason: "the covered spans changed" };
 		const covered: TranscriptCaptureText[] = [];
 		for (const span of live.spans) {
-			const read = await this.readText(span.ref);
+			const read = await this.readText(span);
 			if ("outcome" in read) return read.outcome;
 			covered.push({ span, text: read.text });
 		}
@@ -1833,6 +2643,11 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 					...base,
 					level: 0,
 					id: leafIdentity({ sessionId: job.sessionId, sourceRefs: refs, contextRefs: [] }),
+					legacyIdentity: leafIdentity({
+						sessionId: job.sessionId,
+						sourceRefs: live.spans.map(legacyCaptureRef),
+						contextRefs: [],
+					}),
 					sourceRefs: refs,
 					contextRefs: [],
 					text: exact,
@@ -1845,9 +2660,15 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		const blocked = this.modelWorkBlock();
 		if (blocked) return { kind: "held", scope: "model_work", reason: blocked.reason };
 
-		const context = await this.readContext(job, signal);
+		const context = await this.readContext(job, signal, lineageStamp(live));
 		if ("outcome" in context) return context.outcome;
 		const contextRefs = context.items.map((item) => item.span.ref);
+		// Covered spans were verified live above and the context was read from the same lineage.
+		const reusable = this.reusableDormant(
+			leafIdentity({ sessionId: job.sessionId, sourceRefs: refs, contextRefs }),
+			job,
+		);
+		if (reusable) return { kind: "node", node: reusable };
 		const prompt = [
 			"Summarize the SOURCE.",
 			context.items.length > 0
@@ -1855,7 +2676,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				: "CONTEXT: none available.",
 			`SOURCE:\n${wrapUntrustedText(covered.map(withHandle).join("\n"), "memory:summary-source")}`,
 		].join("\n\n");
-		const reply = await this.summarizeChecked(job, summarizer, prompt, signal, refs, contextRefs, {
+		const reply = await this.summarizeChecked(job, token, summarizer, prompt, signal, refs, contextRefs, {
 			level: 0,
 			target: admissionBlocksFromCaptures(covered),
 			context: admissionBlocksFromCaptures(context.items),
@@ -1867,6 +2688,11 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				...base,
 				level: 0,
 				id: leafIdentity({ sessionId: job.sessionId, sourceRefs: refs, contextRefs }),
+				legacyIdentity: leafIdentity({
+					sessionId: job.sessionId,
+					sourceRefs: live.spans.map(legacyCaptureRef),
+					contextRefs: context.items.map((item) => legacyCaptureRef(item.span)),
+				}),
 				sourceRefs: refs,
 				contextRefs,
 				text: reply.text,
@@ -1881,10 +2707,42 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		};
 	}
 
-	/** Up to two preceding spans of the same selected lineage within 2 KiB: nearest first, then chronological. */
+	/**
+	 * The dormant node of exactly this identity, when it may be published again with no summarizer or evaluator
+	 * call: the same position as the job, and the catalog's read rule finds it neither expired, of unknown age nor
+	 * unapproved under the CURRENT admission contract (a parent judged with its accepted children). The caller has
+	 * verified its covered and context spans live. Otherwise undefined, and the job builds normally: never a
+	 * partial reuse. Publication then takes the normal fenced path with every publication fence.
+	 *
+	 * The node is returned exactly as parked: node content is immutable, so a publication that fails after writing
+	 * the node file leaves the dormant entry's content as it was. The lineage the coverage was verified against at
+	 * publication is recorded on the session cursor when the rest of the session was verified on it too
+	 * ({@link advanceCursor}).
+	 */
+	private reusableDormant(id: string, job: TranscriptSummaryJob): TranscriptSummaryNode | undefined {
+		const node = this.dormant.get(id);
+		if (
+			!node ||
+			!isCurrentCaptureNode(node) ||
+			node.level !== job.level ||
+			node.ordinal !== job.ordinal ||
+			node.spanRange.fromIndex !== job.spanRange.fromIndex ||
+			node.spanRange.toIndexExclusive !== job.spanRange.toIndexExclusive
+		) {
+			return undefined;
+		}
+		return this.catalog.readRefusal(node, this.retentionCutoff()) === undefined ? node : undefined;
+	}
+
+	/**
+	 * Up to two preceding spans of the same selected lineage within 2 KiB: nearest first, then chronological. The
+	 * listing must carry `stamp`, the {@link lineageStamp} of the covered spans' read; otherwise context and covered
+	 * spans would come from two lineages, and the job ends stale to be enumerated again.
+	 */
 	private async readContext(
 		job: TranscriptSummaryJob,
 		signal: AbortSignal,
+		stamp: string | undefined,
 	): Promise<{ items: TranscriptCaptureText[] } | { outcome: JobOutcome }> {
 		const from = job.spanRange.fromIndex;
 		const count = Math.min(TRANSCRIPT_MEMORY_CONTEXT_SPANS, from);
@@ -1895,6 +2753,10 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			maxSpans: count,
 		});
 		if (preceding.status !== "ok") return { items: [] };
+		const precedingStamp = lineageStamp(preceding);
+		if (precedingStamp === undefined || precedingStamp !== stamp) {
+			return { outcome: { kind: "stale", reason: "the lineage moved during verification" } };
+		}
 		const chosen: TranscriptSourceSpan[] = [];
 		let bytes = 0;
 		for (const span of [...preceding.spans].reverse()) {
@@ -1912,7 +2774,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		const items: TranscriptCaptureText[] = [];
 		for (const span of chosen) {
 			if (signal.aborted) return { outcome: { kind: "aborted" } };
-			const read = await this.readText(span.ref);
+			const read = await this.readText(span);
 			// Context is optional: a part that cannot be read exactly is left out, never guessed at.
 			if ("outcome" in read) return { items: [] };
 			items.push({ span, text: read.text });
@@ -1922,12 +2784,13 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 
 	private async buildParent(
 		job: TranscriptSummaryJob,
+		token: TranscriptSummaryClaimToken,
 		summarizer: TranscriptSummarizerPort,
 		signal: AbortSignal,
 	): Promise<JobOutcome> {
 		const children = job.children;
-		const left = children ? this.nodes.get(children[0]) : undefined;
-		const right = children ? this.nodes.get(children[1]) : undefined;
+		const left = children ? this.catalog.get(children[0]) : undefined;
+		const right = children ? this.catalog.get(children[1]) : undefined;
 		if (!children || !left || !right) return { kind: "stale", reason: "a child node is no longer accepted" };
 		const sourceRefs = [...left.sourceRefs, ...right.sourceRefs];
 		const base = {
@@ -1937,6 +2800,15 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			ordinal: job.ordinal,
 			level: job.level,
 			id: parentIdentity({ sessionId: job.sessionId, level: job.level, children, contextRefs: [] }),
+			legacyIdentity:
+				left.legacyIdentity !== undefined && right.legacyIdentity !== undefined
+					? parentIdentity({
+							sessionId: job.sessionId,
+							level: job.level,
+							children: [left.legacyIdentity, right.legacyIdentity],
+							contextRefs: [],
+						})
+					: undefined,
 			children,
 			sourceRefs,
 			contextRefs: [] as TranscriptSourceRef[],
@@ -1955,7 +2827,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		if (blocked) return { kind: "held", scope: "model_work", reason: blocked.reason };
 		// A parent is judged only against children that are themselves approved: merging an unadmitted summary would
 		// make the parent "supported" by text nothing has checked against its sources.
-		const unapproved = [left, right].find((child) => !this.isApproved(child));
+		const unapproved = [left, right].find((child) => !this.catalog.isApproved(child));
 		if (unapproved) {
 			return {
 				kind: "held",
@@ -1963,13 +2835,16 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				reason: `child summary ${formatTranscriptNodeHandle(unapproved.id)} is not admitted under the current contract; a parent is judged only after both children are approved`,
 			};
 		}
+		// Both children are accepted and approved here (anything else was held above).
+		const reusable = this.reusableDormant(base.id, job);
+		if (reusable) return { kind: "node", node: reusable };
 		const describe = (node: TranscriptSummaryNode): string =>
 			`[${formatTranscriptNodeHandle(node.id)}] spans [${node.spanRange.fromIndex},${node.spanRange.toIndexExclusive}) ${node.quality}: ${node.text}`;
 		const prompt = [
 			"Merge the two adjacent SUMMARIES below, oldest first, into one summary of both. Keep every cited handle that still matters.",
 			`SUMMARIES:\n${wrapUntrustedText([left, right].map(describe).join("\n"), "memory:summary-source")}`,
 		].join("\n\n");
-		const reply = await this.summarizeChecked(job, summarizer, prompt, signal, sourceRefs, [], {
+		const reply = await this.summarizeChecked(job, token, summarizer, prompt, signal, sourceRefs, [], {
 			level: job.level,
 			target: [left, right].map(admissionBlockFromSummary),
 			context: [],
@@ -2001,6 +2876,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	 */
 	private async summarizeChecked(
 		job: TranscriptSummaryJob,
+		token: TranscriptSummaryClaimToken,
 		summarizer: TranscriptSummarizerPort,
 		prompt: string,
 		signal: AbortSignal,
@@ -2014,13 +2890,14 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				outcome: { kind: "held", scope: "model_work", reason: "no summary admission evaluator is configured" },
 			};
 		}
-		// A validated reply kept on the job (an evaluator retry, a restart between reply and judgment) is judged again
-		// instead of paying the summarizer again, but only for the exact input and recipe it answered, and only if it
-		// still passes the deterministic checks.
+		// A validated reply kept on the job (an evaluator retry, a restart between reply and judgment) is used instead
+		// of paying the summarizer again, but only for the exact input and recipe it answered, and only if it still
+		// passes the deterministic checks. It is judged again unless its acceptance was kept with it (below).
 		const inputKey = transcriptDigest(prompt);
 		const checks = { projectId: sourceRefs[0]?.projectId ?? "", sourceRefs, contextRefs };
 		const kept = job.pendingReply;
 		let reply: { text: string; model: string };
+		let paid = false;
 		if (
 			kept !== undefined &&
 			kept.inputKey === inputKey &&
@@ -2029,6 +2906,11 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		) {
 			reply = { text: kept.text, model: kept.model };
 		} else {
+			// The provider boundary: checked synchronously, with nothing awaited between this check and the call.
+			if (!this.scheduler?.isClaimCurrent(token)) {
+				return { outcome: { kind: "abandoned", reason: CLAIM_SUPERSEDED_BEFORE_SUMMARY } };
+			}
+			paid = true;
 			reply = await summarizer.summarize(
 				{ system: SUMMARY_SYSTEM_PROMPT, prompt, maxOutputBytes: TRANSCRIPT_SUMMARY_MAX_BYTES },
 				signal,
@@ -2039,27 +2921,48 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 					outcome: { kind: "fail", failure: { kind: "malformed", message: `${check.reason}: ${check.detail}` } },
 				};
 			}
-			// Durable before the judgment starts: the paid reply survives whatever happens to the evaluator or the process.
-			await this.keepReply(job.id, {
+			// Kept durably before the judgment starts when the save acknowledges it, so the paid reply survives whatever
+			// happens to the evaluator or the process; otherwise it is judged un-kept, with the cause recorded.
+			await this.keepReply(token, {
 				text: reply.text,
 				model: reply.model,
 				textDigest: summaryTextDigest(reply.text),
 				inputKey,
 				recipeVersion: TRANSCRIPT_SUMMARY_RECIPE_VERSION,
+				captureVersion: TRANSCRIPT_CAPTURE_VERSION,
 			});
 		}
-		const result = await port.admit(
-			{
-				recipeVersion: TRANSCRIPT_SUMMARY_RECIPE_VERSION,
-				...admissionInput,
-				candidate: reply.text,
-			},
-			signal,
-		);
+		// The second paid call, checked the same way. A claim superseded after its summarizer call has spent that
+		// attempt: the round ends with the paid reply kept, the increment is not returned.
+		if (!this.scheduler?.isClaimCurrent(token)) {
+			return {
+				outcome: paid
+					? { kind: "superseded", reason: CLAIM_SUPERSEDED_AFTER_SUMMARY }
+					: { kind: "abandoned", reason: CLAIM_SUPERSEDED_BEFORE_ADMISSION },
+			};
+		}
+		// An acceptance kept with the reused reply (a retry after the judgment: an index that did not answer at
+		// publication, a restart before it) is the verdict on this exact reply, input and contract. It is published
+		// again, not asked again, so the evaluator is neither paid twice nor able to flip it, and is counted as reused,
+		// never as a judgment. Publication re-checks the policy and contract fences whatever produced the judgment.
+		const request = { recipeVersion: TRANSCRIPT_SUMMARY_RECIPE_VERSION, ...admissionInput };
+		const inputDigest = createHash("sha256").update(JSON.stringify(request), "utf8").digest("hex");
+		const keptAdmission = paid ? undefined : kept?.admission;
+		if (
+			keptAdmission !== undefined &&
+			keptAdmission.inputDigest === inputDigest &&
+			keptAdmission.record.contractVersion === TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION &&
+			keptAdmission.record.textDigest === summaryTextDigest(reply.text)
+		) {
+			this.reusedAdmissions += 1;
+			return { ...reply, admission: keptAdmission.record };
+		}
+		const result = await port.admit({ ...request, candidate: reply.text }, signal);
 		if (result.disposition === "accepted") {
 			this.judgments.accepted += 1;
 			const admission = admissionRecordFromResult(result, reply.text, new Date(this.ports.now()).toISOString());
 			if (!admission) throw new Error("an accepted admission produced no record");
+			await this.keepAdmission(token, { record: admission, inputDigest });
 			return { ...reply, admission };
 		}
 		const detail = describeAdmission(result);
@@ -2092,15 +2995,51 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		};
 	}
 
-	/** Record the validated reply on the running job and wait until the job list holding it is saved. */
-	private async keepReply(jobId: string, reply: TranscriptSummaryPendingReply): Promise<void> {
+	/**
+	 * Record the validated reply on the running job and wait for the save of the job list holding it. Kept only when
+	 * that save acknowledged it ({@link durableReplies}). Otherwise the real cause is recorded and the reply is taken
+	 * off the job again: it is used for this judgment un-kept, never reported as saved, and its summarizer call stays
+	 * charged to the attempt (which was durable before the call).
+	 */
+	private async keepReply(token: TranscriptSummaryClaimToken, reply: TranscriptSummaryPendingReply): Promise<void> {
+		const { jobId } = token;
+		// Only while this claim still owns the job: a late claim never attaches to (or takes from) a replacement.
 		await this.enqueue(async () => {
 			const scheduler = this.scheduler;
-			if (scheduler?.get(jobId)?.state !== "running") return;
+			if (!scheduler?.ownsClaim(token)) return;
 			scheduler.setPendingReply(jobId, reply);
 			this.markJobsDirty();
 		});
 		await this.jobsSaved;
+		if (this.durableReplies.get(jobId) === reply.textDigest) return;
+		await this.enqueue(async () => {
+			const scheduler = this.scheduler;
+			if (!scheduler?.ownsClaim(token)) return;
+			if (scheduler.get(jobId)?.pendingReply?.textDigest === reply.textDigest)
+				scheduler.setPendingReply(jobId, undefined);
+			this.noteInternalCause(
+				`the summary reply of job ${jobId.slice(0, 16)} was not kept: ${this.saveFailure ?? "the save holding it was not acknowledged"}`,
+			);
+		});
+	}
+
+	/**
+	 * Attach an acceptance to the kept reply it judged, for the claim that still owns the job and only while that same
+	 * reply is kept (a reply that was not kept carries nothing). No save of its own: the job's settlement saves the job
+	 * list ({@link afterTerminal}), so the acceptance is durable with the retry state it serves, and one lost before
+	 * that save (a crash before settlement) is only judged again.
+	 */
+	private async keepAdmission(
+		token: TranscriptSummaryClaimToken,
+		admission: TranscriptSummaryKeptAdmission,
+	): Promise<void> {
+		await this.enqueue(async () => {
+			const scheduler = this.scheduler;
+			if (!scheduler?.ownsClaim(token)) return;
+			const pending = scheduler.get(token.jobId)?.pendingReply;
+			if (pending?.textDigest !== admission.record.textDigest) return;
+			scheduler.setPendingReply(token.jobId, { ...pending, admission });
+		});
 	}
 
 	private egressBlocked(summarizer: TranscriptSummarizerPort): string | undefined {
@@ -2112,14 +3051,30 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	private makeNode(
 		fields: Omit<
 			TranscriptSummaryNode,
-			"schemaVersion" | "recipeVersion" | "bytes" | "createdAt" | "coveredFrom" | "coveredTo" | "oldestDependencyAt"
-		> & { coveredFrom: string | undefined; coveredTo: string | undefined; oldestDependencyAt: string | undefined },
+			| "schemaVersion"
+			| "recipeVersion"
+			| "bytes"
+			| "createdAt"
+			| "coveredFrom"
+			| "coveredTo"
+			| "oldestDependencyAt"
+			| "captureVersion"
+			| "legacyIdentity"
+		> & {
+			coveredFrom: string | undefined;
+			coveredTo: string | undefined;
+			oldestDependencyAt: string | undefined;
+			/** Every construction site states it; see {@link TranscriptSummaryNode.legacyIdentity}. */
+			legacyIdentity: string | undefined;
+		},
 	): TranscriptSummaryNode {
-		const { coveredFrom, coveredTo, oldestDependencyAt, ...rest } = fields;
+		const { coveredFrom, coveredTo, oldestDependencyAt, legacyIdentity, ...rest } = fields;
 		return {
 			...rest,
 			schemaVersion: TRANSCRIPT_SUMMARY_SCHEMA_VERSION,
 			recipeVersion: TRANSCRIPT_SUMMARY_RECIPE_VERSION,
+			captureVersion: TRANSCRIPT_CAPTURE_VERSION,
+			...(legacyIdentity !== undefined ? { legacyIdentity } : {}),
 			bytes: utf8ByteLength(fields.text),
 			...(coveredFrom !== undefined ? { coveredFrom } : {}),
 			...(coveredTo !== undefined ? { coveredTo } : {}),
@@ -2131,86 +3086,132 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	// ---- settling -----------------------------------------------------------------------------
 
 	/** Apply a finished job on the mailbox: publish a node, or record why not. Late results are discarded. */
-	private async settle(job: TranscriptSummaryJob, outcome: JobOutcome, epoch: number): Promise<void> {
+	private async settle(
+		job: TranscriptSummaryJob,
+		token: TranscriptSummaryClaimToken,
+		outcome: JobOutcome,
+		epoch: number,
+	): Promise<void> {
 		const { scheduler, writer } = this;
 		if (!scheduler || !writer) return;
 		const now = this.ports.now();
-		const current = scheduler.get(job.id);
-		if (current?.state !== "running") return;
+		// Settled only by the claim that owns the job: a late callback of an older claim (the job was replaced and
+		// claimed again under the same id) mutates and records nothing.
+		if (!scheduler.ownsClaim(token)) return;
 		if (outcome.kind === "aborted" || !this.live(epoch)) {
 			if (this.started && epoch === this.epoch) scheduler.interrupt(job.id, now);
 			return;
 		}
-		if (outcome.kind === "stale") {
-			scheduler.markStale(job.id, now);
-			this.recordFailure(job, "stale", outcome.reason);
-			this.countTerminal("stale");
+		if (outcome.kind === "stale" || outcome.kind === "fail") {
+			this.settleFailure(job, outcome, now);
 			this.afterTerminal(job, epoch);
 			return;
 		}
 		if (outcome.kind === "held") {
 			// Not a failure and not terminal: no provider call was made, so the attempt is returned and the job waits.
-			const reason = outcome.scope === "children" ? "admission_children_pending" : "admission_held";
-			if (scheduler.defer(job.id, { message: outcome.reason, reason }, now)) {
-				this.parked.set(job.id, outcome.scope);
+			const reason =
+				outcome.scope === "children"
+					? "admission_children_pending"
+					: outcome.scope === "proof"
+						? "proof_capacity"
+						: outcome.scope === "persistence"
+							? "persistence_unacknowledged"
+							: "admission_held";
+			if (scheduler.abandonClaim(token, { message: outcome.reason, reason }, now)) {
+				this.parked.set(job.id, { scope: outcome.scope, reason: outcome.reason });
+				// A failed save is retried on its backoff, not at once; that save carries this returned attempt too.
+				if (outcome.scope !== "persistence" || this.saveRetryAt === undefined) this.markJobsDirty();
+			}
+			this.pump(epoch);
+			return;
+		}
+		if (outcome.kind === "abandoned") {
+			// No provider call was made under this claim: it is returned (never below the durable floor) and the job is
+			// judged again under its current budget, which ends it exhausted when nothing is left.
+			if (scheduler.abandonClaim(token, { message: outcome.reason, reason: "claim_superseded" }, now)) {
 				this.markJobsDirty();
 			}
 			this.pump(epoch);
 			return;
 		}
-		if (outcome.kind === "fail") {
-			const next = scheduler.failJob(job.id, outcome.failure, now);
-			if (next?.state === "failed") {
-				this.recordFailure(job, next.lastError?.reason ?? outcome.failure.kind, outcome.failure.message);
-				this.countTerminal("failed", job, next.lastError?.reason ?? outcome.failure.kind, outcome.failure.message);
-			}
-			this.afterTerminal(job, epoch);
+		if (outcome.kind === "superseded") {
+			// The summarizer was paid under this claim: the attempt stays counted and the kept reply is judged next time.
+			scheduler.interrupt(job.id, now);
+			this.noteInternalCause(outcome.reason);
+			this.markJobsDirty();
+			this.pump(epoch);
 			return;
 		}
-		await this.publishResult(job, outcome.node, epoch);
+		await this.publishResult(job, token, outcome.node, epoch);
 		this.afterTerminal(job, epoch);
 	}
 
-	private async publishResult(job: TranscriptSummaryJob, node: TranscriptSummaryNode, epoch: number): Promise<void> {
+	/**
+	 * End the owning claim's run on a stale or failed outcome, with its real cause: `stale` is terminal; a failure
+	 * goes through the scheduler's retry rule (a transient one keeps the job's kept reply for the retry) and is
+	 * recorded once it is final. The caller checked ownership with no await since, and runs {@link afterTerminal}.
+	 */
+	private settleFailure(
+		job: TranscriptSummaryJob,
+		outcome: Extract<JobOutcome, { kind: "stale" | "fail" }>,
+		now: number,
+	): void {
+		const scheduler = this.scheduler;
+		if (!scheduler) return;
+		if (outcome.kind === "stale") {
+			scheduler.markStale(job.id, now);
+			this.recordFailure(job, "stale", outcome.reason);
+			this.countTerminal("stale");
+			return;
+		}
+		const next = scheduler.failJob(job.id, outcome.failure, now);
+		if (next?.state === "failed") {
+			this.recordFailure(job, next.lastError?.reason ?? outcome.failure.kind, outcome.failure.message);
+			this.countTerminal("failed", job, next.lastError?.reason ?? outcome.failure.kind, outcome.failure.message);
+		}
+	}
+
+	/**
+	 * Publish a built node for the claim that owns its job. Ownership is checked synchronously after every await and
+	 * right before every mutation (no await between the check and the change): a claim that lost its job never
+	 * publishes and never settles or records anything for the job's replacement. A publication that did land is
+	 * mirrored regardless (C6); only the job's own settlement is the owner's.
+	 */
+	private async publishResult(
+		job: TranscriptSummaryJob,
+		token: TranscriptSummaryClaimToken,
+		node: TranscriptSummaryNode,
+		epoch: number,
+	): Promise<void> {
 		const { scheduler, writer } = this;
 		if (!scheduler || !writer) return;
 		const now = this.ports.now();
-		// The summarized sources must still be the live ones at the moment of publication.
+		// The summarized sources and their context must still be the live ones at the moment of publication, by one
+		// read ({@link readLiveDependency}). The lineage they were verified against vouches for this leaf only; the
+		// cursor records it only when the rest of the session was verified on that same lineage ({@link advanceCursor}).
+		let live: Extract<TranscriptLineageSpansResult, { status: "ok" }> | undefined;
 		if (job.kind === "leaf") {
-			const live = await this.ports.reader.listLineageSpans({
-				sessionId: job.sessionId,
-				fromIndex: job.spanRange.fromIndex,
-				maxSpans: node.sourceRefs.length,
-			});
-			if (!this.live(epoch)) return this.settleAborted(job, epoch);
-			const stillLive =
-				live.status === "ok" &&
-				live.spans.length === node.sourceRefs.length &&
-				live.spans.every((span, position) =>
-					sameTranscriptSource(span.ref, node.sourceRefs[position] as TranscriptSourceRef),
-				);
-			if (!stillLive) {
-				scheduler.markStale(job.id, now);
-				this.recordFailure(job, "stale", "the covered spans changed before publication");
-				this.countTerminal("stale");
-				return;
-			}
-		} else if (!job.children?.every((id) => this.nodes.has(id))) {
-			scheduler.markStale(job.id, now);
-			this.recordFailure(job, "stale", "a child node was revoked before publication");
-			this.countTerminal("stale");
+			live = await this.readPublishedDependency(job, token, node, epoch);
+			if (!live) return;
+		} else if (!job.children?.every((id) => this.catalog.has(id))) {
+			this.settleFailure(job, { kind: "stale", reason: "a child node was revoked before publication" }, now);
 			return;
-		} else if (node.quality === "model_summary" && !job.children.every((id) => this.isApproved(this.nodes.get(id)))) {
-			scheduler.markStale(job.id, now);
-			this.recordFailure(job, "stale", "a child summary lost its admission before publication");
-			this.countTerminal("stale");
+		} else if (
+			node.quality === "model_summary" &&
+			!job.children.every((id) => this.catalog.isApproved(this.catalog.get(id)))
+		) {
+			this.settleFailure(
+				job,
+				{ kind: "stale", reason: "a child summary lost its admission before publication" },
+				now,
+			);
 			return;
 		}
 		// The policy fence is read again after the asynchronous admission: if the evaluator can no longer be used (an
 		// egress setting withdrawn, System One unbound), the admitted text is discarded, never published on a
 		// judgment the owner has since stopped permitting. The call was made, so the attempt stays counted.
 		if (node.quality === "model_summary" && this.modelWorkBlock() !== undefined)
-			return this.settleAborted(job, epoch);
+			return this.settleAborted(token, epoch);
 		if (needsReadmission(node)) {
 			const reason = "the model summary carries no admission under the current contract; it is not published";
 			const failed = scheduler.failJob(
@@ -2229,7 +3230,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		}
 		// A result that depends on a source past the retention window is never published, however late it arrives.
 		// The job ends `failed` (not `stale`, which a rediscovery would replace and rebuild in a loop).
-		if (this.isNodeExpired(node)) {
+		if (this.catalog.isNodeExpired(node, this.retentionCutoff())) {
 			const reason =
 				"the summary depends on a source past the retention window (retentionDays); it is not published";
 			const failed = scheduler.failJob(job.id, { kind: "policy", message: reason }, now);
@@ -2242,8 +3243,16 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		let cursorUpdate: TranscriptSummarySessionCursor | undefined;
 		let frontier: TranscriptFrontierResult | undefined;
 		for (let attempt = 0; attempt < 2; attempt++) {
-			cursorUpdate = job.kind === "leaf" ? this.advanceCursor(node) : undefined;
+			// A change the index learned since the dependency was read (across the reload below) is read again: the
+			// publication stands on one current answer.
+			if (live && this.ports.reader.observationCurrent(live.observation).status !== "current") {
+				live = await this.readPublishedDependency(job, token, node, epoch);
+				if (!live) return;
+			}
+			cursorUpdate = live ? this.advanceCursor(node, live) : undefined;
 			frontier = this.computeFrontier(node.sessionId, node);
+			// A claim that no longer owns its job never publishes (a reload below can end the job, too).
+			if (!scheduler.ownsClaim(token)) return;
 			result = await writer.publish({
 				expectedRevision: this.manifestRevision,
 				nodes: [node],
@@ -2251,16 +3260,33 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				...(frontier.changed ? { frontiers: { [node.sessionId]: frontier.selection } } : {}),
 			});
 			if (result.status !== "stale_revision") break;
-			this.manifestRevision = result.currentRevision;
+			// A revision is never adopted without its mirror (C6): reload it, then compute the publication again.
+			if (!(await this.reloadMirror(epoch))) return this.settleAborted(token, epoch);
 		}
 		if (!result || !frontier) return;
+		const owned = scheduler.ownsClaim(token);
 		if (result.status === "published") {
 			this.manifestRevision = result.revision;
-			this.indexNode(node);
+			// The store unparked a dormant identity in the same write.
+			this.dormant.delete(node.id);
+			this.catalog.index(node);
 			// A parent held for an unapproved child may be able to run now (a rebuilt child keeps its identity, so the
 			// scheduler would not admit the parent again). Released jobs re-check on claim and hold again if still blocked.
 			this.releaseParked("children");
-			if (cursorUpdate) this.cursors.set(node.sessionId, cursorUpdate);
+			if (cursorUpdate) {
+				this.cursors.set(node.sessionId, cursorUpdate);
+				// Certified: the runtime vouched for the leaf's lineage ({@link advanceCursor}) and now names it, as the
+				// cursor does; its stamp still names the same positions. Otherwise the rest of the session was not verified
+				// on the lineage this leaf was: the runtime no longer vouches for the whole coverage, and its next read
+				// verifies it.
+				const runtime = this.runtime.get(node.sessionId);
+				if (runtime && cursorUpdate.lineageDigest !== UNVERIFIED_LINEAGE_DIGEST)
+					runtime.verifiedDigest = cursorUpdate.lineageDigest;
+				else if (runtime) {
+					runtime.verifiedDigest = undefined;
+					runtime.verifiedStamp = undefined;
+				}
+			}
 			this.frontierBytes.set(node.sessionId, {
 				bytes: frontier.bytes,
 				...(frontier.gap ? { gap: frontier.gap } : {}),
@@ -2269,14 +3295,17 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				this.frontiers.set(node.sessionId, frontier.selection);
 				this.ports.onFrontierChanged(node.sessionId, frontier.selection.revision);
 			}
-			scheduler.completeJob(job.id, node, this.ports.now());
-			this.countTerminal("succeeded");
+			if (owned) {
+				scheduler.completeJob(job.id, node, this.ports.now());
+				this.countTerminal("succeeded");
+			}
 			return;
 		}
 		if (result.status === "fenced" || result.status === "manifest_corrupt") {
 			this.fatal(`publication refused: ${result.status}`);
 			return;
 		}
+		if (!owned) return;
 		if (result.status === "revoked") {
 			// Forgotten by retention: the identity is permanently refused, so the job ends `failed` and is not rebuilt.
 			const reason = "the node was forgotten by retention; it is not republished";
@@ -2297,27 +3326,97 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		}
 	}
 
-	private settleAborted(job: TranscriptSummaryJob, epoch: number): void {
-		if (this.started && epoch === this.epoch) this.scheduler?.interrupt(job.id, this.ports.now());
+	private settleAborted(token: TranscriptSummaryClaimToken, epoch: number): void {
+		if (this.started && epoch === this.epoch && this.scheduler?.ownsClaim(token)) {
+			this.scheduler.interrupt(token.jobId, this.ports.now());
+		}
 	}
 
-	/** The cursor after accepting `leaf`, advanced across every contiguous accepted leaf. */
-	private advanceCursor(leaf: TranscriptSummaryNode): TranscriptSummarySessionCursor {
-		const previous = this.cursors.get(leaf.sessionId) ?? {
-			lineageDigest: leaf.lineageDigest,
-			coveredSpanCount: 0,
-			nextOrdinal: 0,
-		};
-		let covered = previous.coveredSpanCount;
-		let nextOrdinal = previous.nextOrdinal;
+	/**
+	 * One read of a leaf's whole dependency, its context and covered spans as the catalog places them (the one
+	 * validity rule), judged from that one observation ({@link DependencyVerdict}). A read the index did not answer
+	 * is classified as for a build ({@link failureFor}): `pending` and `unavailable` are `unanswered`, any other refusal
+	 * (the session is gone, a source expired) is an answer that the spans are not live.
+	 */
+	private async readLiveDependency(node: TranscriptSummaryNode): Promise<DependencyVerdict> {
+		const dependency = this.catalog.dependency(node);
+		if (dependency?.kind !== "range")
+			return { kind: "not_covered", reason: "its dependency cannot be verified against the lineage" };
+		const live = await this.ports.reader.listLineageSpans({
+			sessionId: node.sessionId,
+			fromIndex: dependency.fromIndex,
+			maxSpans: dependency.refs.length,
+		});
+		if (live.status === "ok") {
+			return coversLiveSpans(live, dependency.refs)
+				? { kind: "covered", live }
+				: { kind: "not_covered", reason: "the covered spans or their context changed" };
+		}
+		const outcome = this.failureFor(live);
+		return outcome.kind === "fail"
+			? { kind: "unanswered", outcome }
+			: { kind: "not_covered", reason: outcome.reason };
+	}
+
+	/**
+	 * {@link readLiveDependency} for the claim publishing `node`: the covering read, or undefined when the publication
+	 * must stop, already settled: an aborted run, a lost claim, the job ended `stale` because the index answered that
+	 * its spans or their context are not live, or a transient failure because the index did not answer (the job
+	 * retries with its kept reply).
+	 */
+	private async readPublishedDependency(
+		job: TranscriptSummaryJob,
+		token: TranscriptSummaryClaimToken,
+		node: TranscriptSummaryNode,
+		epoch: number,
+	): Promise<Extract<TranscriptLineageSpansResult, { status: "ok" }> | undefined> {
+		const verdict = await this.readLiveDependency(node);
+		if (!this.live(epoch)) {
+			this.settleAborted(token, epoch);
+			return undefined;
+		}
+		if (!this.scheduler?.ownsClaim(token)) return undefined;
+		if (verdict.kind === "covered") return verdict.live;
+		this.settleFailure(
+			job,
+			verdict.kind === "unanswered"
+				? verdict.outcome
+				: { kind: "stale", reason: `${verdict.reason} (at publication)` },
+			this.ports.now(),
+		);
+		return undefined;
+	}
+
+	/**
+	 * The cursor after accepting `leaf`, advanced across every contiguous accepted leaf. Its digest says that every
+	 * accepted node of the session was verified live on that lineage, which a fresh runtime trusts without reading.
+	 * `leafRead` is the read that verified the leaf's own dependency at publication; its digest (not the node's
+	 * build-time field: a reused dormant node carries the one from when it was built) is recorded only when the rest
+	 * of the session was verified on the same lineage, and never while a revocation is due: the runtime vouches for
+	 * that read's lineage ({@link vouchesFor}: it is the verified digest, or the verified stamp is that read's, so the
+	 * nodes verified then sit at the same positions of the leaf's lineage), else, with no runtime, the cursor's digest
+	 * is that digest. Otherwise the cursor is marked {@link UNVERIFIED_LINEAGE_DIGEST}.
+	 */
+	private advanceCursor(
+		leaf: TranscriptSummaryNode,
+		leafRead: Extract<TranscriptLineageSpansResult, { status: "ok" }>,
+	): TranscriptSummarySessionCursor {
+		const current = this.cursors.get(leaf.sessionId);
+		const runtime = this.runtime.get(leaf.sessionId);
+		const leafDigest = leafRead.lineageDigest;
+		const verifiedThere =
+			!this.revocationDue.has(leaf.sessionId) &&
+			(runtime ? vouchesFor(runtime, leafRead) : current?.lineageDigest === leafDigest);
+		const lineageDigest = verifiedThere ? leafDigest : UNVERIFIED_LINEAGE_DIGEST;
+		let covered = current?.coveredSpanCount ?? 0;
+		let nextOrdinal = current?.nextOrdinal ?? 0;
 		for (;;) {
-			const candidate =
-				leaf.spanRange.fromIndex === covered ? leaf : this.leafByStart.get(leafKey(leaf.sessionId, covered));
+			const candidate = leaf.spanRange.fromIndex === covered ? leaf : this.catalog.leafAt(leaf.sessionId, covered);
 			if (!candidate) break;
 			covered = candidate.spanRange.toIndexExclusive;
 			nextOrdinal = candidate.ordinal + 1;
 		}
-		return { lineageDigest: leaf.lineageDigest, coveredSpanCount: covered, nextOrdinal };
+		return { lineageDigest, coveredSpanCount: covered, nextOrdinal };
 	}
 
 	/** After any terminal transition: resume deferred enumeration, save jobs, close the batch, arm the timer. */
@@ -2333,30 +3432,106 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		if (!this.runtime.get(sessionId)?.backpressured) return;
 		void this.enqueue(async () => {
 			if (!this.live(epoch)) return;
-			const current = this.runtime.get(sessionId);
-			if (current) await this.enumerateLeaves(sessionId, current, epoch);
+			// Through the one wrapper: an enumeration page that does not answer is projected onto the session's
+			// held leaves like any other read.
+			if (this.runtime.has(sessionId)) await this.reconcileSession(sessionId, epoch);
 			this.pump(epoch);
 		});
 	}
 
 	// ---- jobs persistence ---------------------------------------------------------------------
 
+	/**
+	 * Save the job list on the mailbox. Every outcome is handled here, inside the persistence owner: a thrown save,
+	 * an overflow or any other refusal is recorded with its real cause and retried on a bounded backoff, so the
+	 * mailbox's generic catch can never turn a failed save into a met barrier. Only a `saved` outcome of this run
+	 * acknowledges attempts ({@link durableAttempts}), opens admission and releases persistence holds; a superseded
+	 * writer or a corrupt manifest stops the coordinator.
+	 */
 	private markJobsDirty(): void {
 		if (this.jobsDirty) return;
 		this.jobsDirty = true;
+		const epoch = this.epoch;
 		this.jobsSaved = this.enqueue(async () => {
 			this.jobsDirty = false;
 			const { scheduler, writer } = this;
 			if (!scheduler || !writer) return;
-			const saved = await writer.saveJobs(scheduler.snapshot());
+			// The acknowledgement covers exactly this snapshot: a claim made after it waits for the next save.
+			const snapshot = scheduler.snapshot();
+			let saved: TranscriptSummaryJobsSaveResult;
+			try {
+				saved = await writer.saveJobs(snapshot, { rekeys: scheduler.rekeysToSave() });
+			} catch (error) {
+				this.jobSaveFailed(`saving jobs failed: ${error instanceof Error ? error.message : String(error)}`, epoch);
+				return;
+			}
 			if (saved.status === "saved") {
-				scheduler.noteSpent(saved.spent);
+				scheduler.rekeysSaved(saved.rekeyed);
+				const freed = saved.released.length > 0 || saved.ledger.recorded < this.proofLedger.recorded;
+				scheduler.noteProof(saved.proof, saved.released);
+				scheduler.setProofHold(saved.ledger.hold);
+				// Only what the store pruned leaves memory: a failed job it kept for lack of a proof record stays.
 				scheduler.forgetTerminal(saved.pruned);
-				this.spentRefused += saved.unrecorded;
+				this.proofLedger = saved.ledger;
+				// A refused job needs nothing here: its pre-call check finds no record and holds it before any call.
+				if (freed && this.live(this.epoch)) this.releaseProofHolds(this.epoch);
+				if (this.live(epoch)) this.acknowledgeSave(snapshot, scheduler, epoch);
 			} else if (saved.status === "fenced" || saved.status === "manifest_corrupt") {
-				this.fatal(`saving jobs was refused: ${saved.status}`);
-			} else this.lastInternalError = `job list overflow (${saved.active} active)`;
+				this.fatal(`saving jobs was refused: ${describeSaveRefusal(saved)}`);
+			} else this.jobSaveFailed(`saving jobs was refused: ${describeSaveRefusal(saved)}`, epoch);
 		});
+	}
+
+	/**
+	 * A save of this run succeeded: the attempts in its snapshot are durable (an overwrite, so an attempt a later
+	 * save returned is no longer covered), the first one opens admission and starts discovery, and jobs held for
+	 * persistence may be claimed again.
+	 */
+	private acknowledgeSave(
+		snapshot: readonly TranscriptSummaryJob[],
+		scheduler: TranscriptSummaryScheduler,
+		epoch: number,
+	): void {
+		this.durableAttempts.clear();
+		this.durableReplies.clear();
+		for (const job of snapshot) {
+			if (isTerminalSummaryJobState(job.state)) continue;
+			this.durableAttempts.set(job.id, job.attempts);
+			if (job.pendingReply) this.durableReplies.set(job.id, job.pendingReply.textDigest);
+		}
+		this.saveFailure = undefined;
+		this.saveFailures = 0;
+		this.saveRetryAt = undefined;
+		if (this.startPhase === "convert") {
+			// Version 1 budgets are durable carried records now: recovered parents adopt theirs and recovered leaves are
+			// held until enumeration adopts theirs, before anything runs.
+			this.startPhase = "reconcile";
+			void this.enqueue(async () => {
+				this.reconcileRecovered(epoch);
+			});
+		} else if (this.startPhase === "reconciled") {
+			this.startPhase = "open";
+			if (scheduler.openAdmission(this.ports.now()).length > 0) this.noteEnqueued();
+			if (this.discoveryHeld) {
+				this.discoveryHeld = false;
+				void this.enqueue(async () => {
+					if (this.live(epoch)) await this.discover(epoch);
+				});
+			}
+		}
+		this.releaseParked("persistence");
+		this.pump(epoch);
+	}
+
+	/** A job save of this run failed: record the real cause and try again on the bounded backoff. */
+	private jobSaveFailed(cause: string, epoch: number): void {
+		this.noteInternalCause(cause);
+		if (!this.live(epoch)) return;
+		this.saveFailure = cause;
+		this.saveFailures += 1;
+		const delay = Math.min(JOB_SAVE_RETRY_MAX_MS, JOB_SAVE_RETRY_BASE_MS * 2 ** (this.saveFailures - 1));
+		this.saveRetryAt = this.ports.now() + delay;
+		this.armTimer(epoch);
 	}
 
 	// ---- re-admission -------------------------------------------------------------------------
@@ -2370,7 +3545,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 
 	/** Accepted model summaries without a current admission and not yet judged this run, children before parents. */
 	private readmissionCandidates(): TranscriptSummaryNode[] {
-		return [...this.nodes.values()]
+		return [...this.catalog.values()]
 			.filter((node) => needsReadmission(node) && !this.readmissionState.has(node.id))
 			.sort((a, b) => a.level - b.level || a.ordinal - b.ordinal);
 	}
@@ -2383,7 +3558,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			if (this.ports.now() < this.readmissionRetryAt) return;
 			this.readmissionRetryAt = undefined;
 			for (const [id, hold] of this.readmissionState) {
-				if (hold.state === "unavailable") this.readmissionState.delete(id);
+				if (hold.state === "unavailable" || hold.wait === "source_unreadable") this.readmissionState.delete(id);
 			}
 		}
 		if (this.readmissionCandidates().length === 0) return;
@@ -2418,8 +3593,10 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				}
 				const result = await port.admit(prepared.request, signal);
 				await this.enqueue(async () => this.applyReadmission(node, result, epoch));
-				// A judgment the fences refused leaves the node undecided; it must not be judged again in a loop.
-				if (!this.readmissionState.has(node.id) && this.nodes.get(node.id) === node) {
+				// A judgment left without a state leaves the node undecided; it must not be judged again in a loop. A live
+				// fence records its own cause ({@link readmissionWait}); what remains is a run that is ending (stopped,
+				// superseded or fatal: its own cause stands) or an apply that threw (the mailbox recorded the error).
+				if (!this.readmissionState.has(node.id) && this.catalog.get(node.id) === node) {
 					this.setReadmission(node.id, "waiting", "judgment_discarded");
 				}
 				if (result.disposition === "unavailable") {
@@ -2429,7 +3606,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			}
 		} catch (error) {
 			if (!signal.aborted) {
-				this.lastInternalError = `re-admission failed: ${error instanceof Error ? error.message : String(error)}`;
+				this.noteInternalCause(`re-admission failed: ${error instanceof Error ? error.message : String(error)}`);
 				// Not tried again at once: the same node would be picked first and fail the same way.
 				this.readmissionRetryAt = this.ports.now() + READMISSION_RETRY_MS;
 			}
@@ -2446,8 +3623,8 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 	): Promise<{ request: TranscriptSummaryAdmissionRequest } | { wait: TranscriptReadmissionWait } | undefined> {
 		const base = { recipeVersion: node.recipeVersion, level: node.level, candidate: node.text };
 		if (node.children) {
-			const children = node.children.map((id) => this.nodes.get(id));
-			if (children.some((child) => !this.isApproved(child))) return { wait: "child_not_approved" };
+			const children = node.children.map((id) => this.catalog.get(id));
+			if (children.some((child) => !this.catalog.isApproved(child))) return { wait: "child_not_approved" };
 			return {
 				request: {
 					...base,
@@ -2461,12 +3638,20 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			fromIndex: node.spanRange.fromIndex,
 			maxSpans: node.sourceRefs.length,
 		});
-		if (!this.sameCoverage(live, node)) return { wait: "source_coverage_changed" };
+		if (live.status !== "ok") return { wait: this.readmissionSourceWait(node, this.failureFor(live)) };
+		if (!coversLiveSpans(live, node.sourceRefs)) {
+			return {
+				wait: this.readmissionSourceWait(node, {
+					kind: "stale",
+					reason: "the live lineage no longer covers its sources",
+				}),
+			};
+		}
 		const covered: TranscriptCaptureText[] = [];
-		for (const span of (live as { spans: TranscriptSourceSpan[] }).spans) {
+		for (const span of live.spans) {
 			if (signal.aborted) return undefined;
-			const read = await this.readText(span.ref);
-			if ("outcome" in read) return { wait: "source_unreadable" };
+			const read = await this.readText(span);
+			if ("outcome" in read) return { wait: this.readmissionSourceWait(node, read.outcome) };
 			covered.push({ span, text: read.text });
 		}
 		// Context the summary consulted, when it can still be read exactly. Without it the judge sees less, so a
@@ -2483,7 +3668,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			if (preceding.status === "ok") {
 				for (const ref of node.contextRefs) {
 					const span = preceding.spans.find((candidate) => sameTranscriptSource(candidate.ref, ref));
-					const read = span ? await this.readText(span.ref) : undefined;
+					const read = span ? await this.readText(span) : undefined;
 					if (span && read && !("outcome" in read)) context.push({ span, text: read.text });
 				}
 			}
@@ -2497,18 +3682,35 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		};
 	}
 
-	/** The listed spans are exactly the leaf's covered source parts. */
-	private sameCoverage(
-		live: Awaited<ReturnType<TranscriptLineageReader["listLineageSpans"]>>,
-		node: TranscriptSummaryNode,
-	): boolean {
-		return (
-			live.status === "ok" &&
-			live.spans.length === node.sourceRefs.length &&
-			live.spans.every((span, position) =>
-				sameTranscriptSource(span.ref, node.sourceRefs[position] as TranscriptSourceRef),
-			)
+	/**
+	 * Why a re-admission source read that returned no text, or a lineage read that answered the sources are not
+	 * covered (passed as `stale` with that answer's reason), waits: the one place every re-admission source wait is
+	 * decided, classified as for a build ({@link failureFor} and {@link readText}), with its cause recorded. Only a
+	 * transient failure (the index did not answer: nothing is known yet) is `source_unreadable`, read again after the
+	 * backoff. Anything else is an answer, not retried on the backoff: a source that changed, is gone or is no longer
+	 * covered (`stale`) is `source_coverage_changed`, a part the read refuses for good (beyond the read bound) is
+	 * `source_read_refused`.
+	 */
+	private readmissionSourceWait(node: TranscriptSummaryNode, outcome: SourceReadFailure): TranscriptReadmissionWait {
+		if (outcome.kind === "stale") return this.readmissionWait(node, "source_coverage_changed", outcome.reason);
+		return this.readmissionWait(
+			node,
+			outcome.failure.kind === "transient" ? "source_unreadable" : "source_read_refused",
+			outcome.failure.message,
 		);
+	}
+
+	/**
+	 * Record why `node` waits and return that wait: the one writer of a re-admission cause, for the source waits
+	 * ({@link readmissionSourceWait}) and for a judgment a live fence discarded (`judgment_discarded`).
+	 */
+	private readmissionWait(
+		node: TranscriptSummaryNode,
+		wait: TranscriptReadmissionWait,
+		cause: string,
+	): TranscriptReadmissionWait {
+		this.noteInternalCause(`re-admission of ${node.id.slice(0, 16)}: ${cause}`);
+		return wait;
 	}
 
 	/** Apply a re-admission judgment on the mailbox, behind the same fences as a publication. */
@@ -2518,23 +3720,36 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		epoch: number,
 	): Promise<void> {
 		const { writer } = this;
-		if (!writer || !this.live(epoch) || this.nodes.get(node.id) !== node) return;
+		if (!writer || !this.live(epoch) || this.catalog.get(node.id) !== node) return;
 		// Source and policy fences, read again after the asynchronous judgment.
-		if (this.modelWorkBlock() !== undefined) return;
+		const block = this.modelWorkBlock();
+		if (block !== undefined) {
+			this.setReadmission(
+				node.id,
+				"waiting",
+				this.readmissionWait(node, "judgment_discarded", `judgment discarded by the policy fence: ${block.reason}`),
+			);
+			return;
+		}
 		if (node.children) {
-			if (node.children.some((id) => !this.isApproved(this.nodes.get(id)))) {
+			if (node.children.some((id) => !this.catalog.isApproved(this.catalog.get(id)))) {
 				this.setReadmission(node.id, "waiting", "child_not_approved");
 				return;
 			}
 		} else {
-			const live = await this.ports.reader.listLineageSpans({
-				sessionId: node.sessionId,
-				fromIndex: node.spanRange.fromIndex,
-				maxSpans: node.sourceRefs.length,
-			});
-			if (!this.live(epoch) || this.nodes.get(node.id) !== node) return;
-			if (!this.sameCoverage(live, node)) {
-				this.setReadmission(node.id, "waiting", "source_coverage_changed");
+			const verdict = await this.readLiveDependency(node);
+			if (!this.live(epoch) || this.catalog.get(node.id) !== node) return;
+			if (verdict.kind === "unanswered") {
+				// Nothing is known about the sources: the judgment is not recorded and the node is judged again later.
+				this.setReadmission(node.id, "waiting", this.readmissionSourceWait(node, verdict.outcome));
+				return;
+			}
+			if (verdict.kind === "not_covered") {
+				this.setReadmission(
+					node.id,
+					"waiting",
+					this.readmissionSourceWait(node, { kind: "stale", reason: verdict.reason }),
+				);
 				return;
 			}
 		}
@@ -2553,8 +3768,20 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 		};
 		if (result.disposition === "accepted") {
 			const admission = admissionRecordFromResult(result, node.text, new Date(this.ports.now()).toISOString());
-			if (!admission) return;
+			if (!admission) {
+				this.setReadmission(
+					node.id,
+					"waiting",
+					this.readmissionWait(node, "judgment_discarded", "an accepted re-admission produced no record"),
+				);
+				return;
+			}
 			const annotated = await writer.annotateAdmission(node.id, admission);
+			// Durable already: the mirror takes it with its revision whether or not this run continues (C6).
+			if (annotated.status === "annotated") {
+				this.manifestRevision = annotated.revision;
+				this.catalog.index(annotated.node);
+			}
 			if (!this.live(epoch)) return;
 			if (annotated.status === "fenced" || annotated.status === "manifest_corrupt") {
 				this.fatal(`recording an admission was refused: ${annotated.status}`);
@@ -2565,7 +3792,6 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 				note("readmission_refused", `the store refused the admission: ${annotated.status}`);
 				return;
 			}
-			this.indexNode(annotated.node);
 			this.setReadmission(node.id, "admitted");
 			this.countTerminal("succeeded");
 			// Approval changed: parents that waited on this child may be judged, parked parent jobs may run, and the
@@ -2585,7 +3811,11 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			this.setReadmission(node.id, result.disposition);
 			note(reason, detail);
 			const revoked = await writer.revokeNodes((id) => id === node.id, "recovery");
-			if (!this.live(epoch)) return;
+			if (!this.live(epoch)) {
+				// Durable already: the mirror takes it with its revision even though this run will not continue (C6).
+				if (revoked.status === "published") this.mirrorRevocation(revoked, reason, undefined, 0);
+				return;
+			}
 			if (revoked.status !== "published") {
 				this.fatal(`revoking a ${result.disposition} summary was refused: ${revoked.status}`);
 				return;
@@ -2657,6 +3887,7 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 					});
 		if (!batch) return;
 		this.batch = undefined;
+		const held = this.firstHold();
 		const event: TranscriptMemoryTerminalEvent = {
 			batchId: batch.id,
 			outcome,
@@ -2668,8 +3899,13 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			startedAt: batch.startedAt,
 			endedAt: this.ports.now(),
 			causes: batch.causes,
-			...(this.parked.size > 0
-				? { held: this.parked.size, heldReason: bounded(this.heldReason() ?? "held", MAX_HELD_REASON_CHARS) }
+			...(held
+				? {
+						held: this.parked.size,
+						heldKind: held.scope,
+						heldReason: bounded(held.reason, MAX_HELD_REASON_CHARS),
+						heldByKind: this.holdCounts(),
+					}
 				: {}),
 			...(stopReason !== undefined ? { stopReason: bounded(stopReason, MAX_CAUSE_MESSAGE_CHARS) } : {}),
 		};
@@ -2681,10 +3917,12 @@ export class TranscriptMemory implements TranscriptNodeExpander {
 			// persistence failure stated in the diagnostics rather than hidden.
 			try {
 				if (writer && !(await writer.recordTerminal(event))) {
-					this.lastInternalError = "terminal handoff was not persisted: the writer was superseded";
+					this.noteInternalCause("terminal handoff was not persisted: the writer was superseded");
 				}
 			} catch (error) {
-				this.lastInternalError = `terminal handoff was not persisted: ${error instanceof Error ? error.message : String(error)}`;
+				this.noteInternalCause(
+					`terminal handoff was not persisted: ${error instanceof Error ? error.message : String(error)}`,
+				);
 			}
 			this.ports.onTerminal(event);
 		};

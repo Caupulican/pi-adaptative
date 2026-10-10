@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- ICM is now the default memory system. Omitted or invalid `memorySystem` settings resolve to ICM; legacy curated memory, automatic memory retrieval and automatic reflection require explicit `memorySystem: "okf"` selection or `/memory system okf`. History recall and the opt-in summary hierarchy work in both systems; in ICM history is read only on explicit request. Existing explicit selections and stored memory files are preserved.
+
 ### Added
 
 - Exact source-linked history recall: the `memory` tool gains read-only `history_search` and `history_source` actions that return cited `tx:` source handles and open the exact captured text of past conversation entries (user, assistant, tool calls and tool results) with UTF-8-safe paging and typed unavailable statuses. Delegated workers can open sources cited to them through `memory_read`.
@@ -7,6 +11,10 @@
 - Opt-in history summary hierarchy (`contextPolicy.memory.history.*`): background summaries of captured history in durable, individually revocable nodes (`txn:` handles), a bounded history frontier inside the memory allowance once a conversation is compacted, the read-only `history_expand` action, retention revocation, and a bounded terminal handoff per batch of work. Summaries are untrusted evidence with handles, never authority.
 - Model summaries of captured history pass an admission gate before use: System One judges, in separate yes/no judgments, that every statement is supported by its source, that owner constraints are kept, and that failed or pending steps are not reported as done. Setting `contextPolicy.memory.history.allowExternalAdmissionEgress` (default `false`) allows the remote evaluator to receive the history. Until admitted, a summary is held or not approved, so it is never published, shown in the frontier or expanded as text; summaries from before the contract are re-judged from their sources.
 - `/memory history` and `context_audit` report history recall coverage, skipped/uncaptured reasons, the last indexing error and the latest retrieval and prompt-admission outcome.
+- History recall in ICM: the root `memory` tool is history-only (`history_search`, `history_source`, `history_expand`; no curated-memory actions), and a granted worker reads history through `memory_read`, with no standing memory, persona or frontier. The history index of an ICM session starts on the first explicit history request; until then no past session is read and `/memory history` shows `on_demand`.
+- `history_search` lists the approved summaries that cover its hits as whole `txn:` records beside them, so summaries are discoverable on demand in both memory systems without an automatic frontier. Held, rejected and unapproved summaries are never shown as text.
+- Approved summaries stay readable with the hierarchy off or without a summary model: a read-only view of the summary store serves discovery and `history_expand` with the same approval, expiry and branch checks and no model, admission or egress call.
+- `/memory history forget <session> <session>` forgets one session's derived history summaries (the repeated session id is the confirmation); the transcript is untouched and the session is never summarized again. It reports the real cause, such as no active summary hierarchy, when nothing was forgotten.
 
 ### Changed
 
@@ -18,6 +26,19 @@
 
 ### Fixed
 
+- A summary job identity found again after its failed job was pruned at the 20,000-record bound could start with a fresh attempt budget. Each admitted identity now reserves a durable terminal-proof record before any chargeable call; at the bound new identities are held with a durable `capacity` cause, a failed job is never pruned without its record, and a legacy ledger already at the bound sets a durable `possibly_lost_proof` hold for sessions started before it. Exact history reads are never held.
+- The results of history reads are no longer captured as history again, so the summary hierarchy never indexes or summarizes the system's own recall.
+- A history read that finds the index still loading now waits for it within its own deadline, whoever started the index, instead of returning `pending` at once; a read that is still not ready is admitted one unchanged retry.
+- A summary is no longer served when history it was built from changed, including the context entries before its range, a source's role, tool call, error status, timestamp or origin, or a rewrite or branch switch the index learnt of while the read was in flight: expansion and discovery check the exact range themselves, recheck retention, revocation and the index state at delivery, and refuse with the exact sources to open instead. Summaries built under the earlier text-only source identity are rebuilt, keeping their spent attempts and source ages. A parent zoom costs one range check instead of reading every descendant source, and each history tool call has one deadline for all its reads.
+- An unreadable, locked or slow summary store no longer fails `history_search`, `history_expand` or a worker `memory_read`: the summary lookup reports a typed status beside the exact hits, and store reads wait no longer than the call's deadline.
+- A summary job no longer calls the model when saving its attempt count failed: the job is held with the save's cause and retried, instead of spending an attempt that a restart would grant again. A stopped summary hierarchy always reports its stop, even when its last save fails.
+- A recovered summary job can no longer make a paid call on spending its earlier run already used: its claim is checked against the current budget right before each paid call, earlier attempts are never subtracted back, and recovered leaf jobs wait until that spending is merged. Held summary work is reported per hold kind, and exact copies are said to be unaffected only when every hold kind spares them.
+- A summary retried after an accepted admission judgment (an index that did not answer at publication, or a restart after the job list was saved) publishes the kept verdict instead of paying the evaluator again, while its reply, admission input and contract are unchanged; `/memory history` counts such reuses separately from judgments.
+- `/memory history` shows the summary coordinator's newest internal cause (a failed save, an unread source, a discarded judgment) with the time it was recorded, instead of keeping it out of view; the model-facing `context_audit` view still omits it.
+- The first history read in a session stored outside the default session directories now includes that session's own committed history.
+- Worker summary and source refusals reach the worker whole, exact-source pointers included, instead of being cut to 240 characters.
+- Standalone binaries now embed the tool-recovery log worker, so recovery records are written there instead of silently never starting the worker.
+- Turning memory retrieval on or off mid-session now updates the ICM guidance in the rebuilt system prompt instead of keeping the block composed under the old policy.
 - Retrieved memory candidates keep their retrieval score and stale/conflict flags instead of a fixed 0.5 score, so prompt admission applies its freshness rules.
 - The `memory` tool's `list` action is classified as a read (`memory.query`) instead of a mutation.
 - A disabled or emptied memory evidence block now sends its cleared form, so earlier evidence no longer reads as current.

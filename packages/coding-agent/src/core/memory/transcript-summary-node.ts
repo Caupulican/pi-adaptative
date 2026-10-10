@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	formatTranscriptSourceHandle,
+	TRANSCRIPT_CAPTURE_VERSION,
 	TRANSCRIPT_SUMMARY_MAX_BYTES,
 	TRANSCRIPT_SUMMARY_RECIPE_VERSION,
 	TRANSCRIPT_SUMMARY_SCHEMA_VERSION,
@@ -89,7 +90,33 @@ export interface TranscriptSummaryNode {
 	 * nodes (see `TranscriptRetentionAnchor`), and retention takes the oldest of both.
 	 */
 	oldestDependencyAt?: string;
+	/**
+	 * The capture identity version its source handles were taken under ({@link TRANSCRIPT_CAPTURE_VERSION}); absent
+	 * means 1, text-only digests that did not bind role, tool, error status, timestamp or origin. Only a node of the
+	 * current version may be served or reused: {@link isCurrentCaptureNode}.
+	 */
+	captureVersion?: number;
+	/**
+	 * Migration only: the identity this node would have had under capture version 1 (a leaf over its refs with
+	 * text-only digests, {@link legacyCaptureRef}; a parent over its children's legacy identities). Spent and carried
+	 * attempt budgets recorded under version 1 job keys are found again through it, so an upgrade never grants a fresh
+	 * budget for the same work. Absent when it could not be computed.
+	 */
+	legacyIdentity?: string;
 	createdAt: string;
+}
+
+/** Whether a node's source handles were taken under the current capture identity: the one version predicate. */
+export function isCurrentCaptureNode(node: Pick<TranscriptSummaryNode, "captureVersion">): boolean {
+	return (node.captureVersion ?? 1) === TRANSCRIPT_CAPTURE_VERSION;
+}
+
+/**
+ * A span's ref as capture version 1 named it: the same session, entry and part with the text-only digest. The one
+ * rule for reaching version 1 evidence (job keys, node identities, anchor handles) from a current span.
+ */
+export function legacyCaptureRef(span: Pick<TranscriptSourceSpan, "ref" | "textDigest">): TranscriptSourceRef {
+	return { ...span.ref, digest: span.textDigest };
 }
 
 function sha256(value: unknown): string {
@@ -479,6 +506,13 @@ export function parseSummaryNode(value: unknown): TranscriptSummaryNodeParse {
 	}
 	if (typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt)))
 		return fail("createdAt is invalid");
+	if (value.captureVersion !== undefined && (!isNonNegativeInteger(value.captureVersion) || value.captureVersion < 1))
+		return fail("captureVersion is invalid");
+	if (
+		value.legacyIdentity !== undefined &&
+		(typeof value.legacyIdentity !== "string" || !/^[a-f0-9]{64}$/.test(value.legacyIdentity))
+	)
+		return fail("legacyIdentity is invalid");
 
 	const children = value.children === undefined ? undefined : parseChildPair(value.children);
 	if (value.children !== undefined && children === undefined) return fail("children is invalid");
@@ -502,6 +536,8 @@ export function parseSummaryNode(value: unknown): TranscriptSummaryNodeParse {
 		...(typeof value.coveredFrom === "string" ? { coveredFrom: value.coveredFrom } : {}),
 		...(typeof value.coveredTo === "string" ? { coveredTo: value.coveredTo } : {}),
 		...(typeof value.oldestDependencyAt === "string" ? { oldestDependencyAt: value.oldestDependencyAt } : {}),
+		...(typeof value.captureVersion === "number" ? { captureVersion: value.captureVersion } : {}),
+		...(typeof value.legacyIdentity === "string" ? { legacyIdentity: value.legacyIdentity } : {}),
 		createdAt: value.createdAt,
 	};
 	if (node.level === 0) {

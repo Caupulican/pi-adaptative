@@ -60,12 +60,23 @@ function estimateJsonLikeBytes(value: unknown, maxBytes: number): { bytes: numbe
  */
 export const MAX_TUI_RETAINED_DETAILS_BYTES = 512 * 1024;
 
+/** Tool-result `details` key marking a history read result: recalled evidence, never captured again as history. */
+export const RECALLED_HISTORY_DETAIL_KEY = "transcriptRecall";
+
+/** Whether a tool's own details carry the recalled-history marker; read before any rebuild replaces them. */
+export function hasRecalledHistoryMarker(details: unknown): boolean {
+	if (!details || typeof details !== "object") return false;
+	const descriptor = Object.getOwnPropertyDescriptor(details, RECALLED_HISTORY_DETAIL_KEY);
+	return descriptor !== undefined && "value" in descriptor && descriptor.value === true;
+}
+
 /**
  * Details keys that are receipts: small mechanical facts about what the tool did (a test verification,
  * the checks a goal completion reran) that consumers read after the result is retained, such as the
  * end-of-turn claim check. The stub keeps them; dropping one turns a proven claim into an unproven one.
+ * The recalled-history marker is one too: dropping it would let history capture index its own recall.
  */
-export const RETAINED_RECEIPT_DETAIL_KEYS = ["piVerification", "piReceipts"] as const;
+export const RETAINED_RECEIPT_DETAIL_KEYS = ["piVerification", "piReceipts", RECALLED_HISTORY_DETAIL_KEY] as const;
 const MAX_RETAINED_RECEIPT_BYTES = 4 * 1024;
 
 /** Replace oversized details on any retained holder with a small truncation stub that keeps its receipts. */

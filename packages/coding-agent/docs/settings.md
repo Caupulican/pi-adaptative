@@ -459,19 +459,23 @@ Semantic memory packing only targets tool results and Automata/Mind custom conte
 
 ### Memory system
 
-`memorySystem` selects one active system: `"okf"` (the backward-compatible default) or `"icm"`. This is separate from retrieval controls. The inactive system is offline, not deleted.
+`memorySystem` selects one active system: `"icm"` (the default) or `"okf"` (explicit opt-in). An omitted or invalid selection resolves to ICM through the settings owner; startup, prompts, and reflection use that same resolved selection. This is separate from retrieval controls. Existing explicit selections remain effective, and the inactive system is offline, not deleted.
 
-Use `/memory system` to inspect the selected system, `/memory system icm` to switch to ICM, and `/memory system okf` to return. Switching applies to the current directory profile and requires an idle session; it rebuilds memory providers and tools rather than requiring a process restart. A failed switch is reported as a failure, not as successful activation.
+Use `/memory system` to inspect the selected system, `/memory system icm` to select ICM explicitly, and `/memory system okf` to opt in to OKF. Switching applies to the current directory profile and requires an idle session; it rebuilds memory providers and tools rather than requiring a process restart. A failed switch is reported as a failure, not as successful activation.
 
 **ICM mode** stores persistent Markdown memory in the user catalog under `~/.pi/agent/memory` and stores reusable pipelines under `~/.pi/agent/pipelines`. The current workspace remains the project source and task-artifact boundary; ICM does not scaffold memory or pipeline folders there unless the user explicitly requests project-local artifacts. Only routing and scoped path pointers are surfaced automatically; references and working artifacts are read or searched on demand with native tools. Large files remain on disk and can be read in pages. Read-response and model-context limits are resource controls, not storage quotas. Reference contents remain evidence, not tool authority or new security instructions.
 
-Legacy file-store, OKF, transcript recall, memory CRUD, and automatic memory-reflection paths are inactive in ICM mode. Existing legacy files are preserved unchanged; switching does not migrate or delete them. Switching back restores their availability. Historical generated legacy recall is excluded from the active ICM provider view without deleting the session transcript.
+The legacy file-store and OKF stores, memory CRUD actions, automatic memory retrieval and prompt memory blocks, persona and automatic memory reflection are inactive in ICM mode. Existing legacy files are preserved unchanged; switching does not migrate or delete them. Switching back restores their availability. Historical generated legacy recall is excluded from the active ICM provider view without deleting the session transcript.
 
-### Context Memory (OKF mode)
+History recall is available in both systems through one backend. In ICM the root `memory` tool offers only `history_search` (with approved summaries listed beside the hits), `history_source` and `history_expand`; the index starts on the first explicit history request, and a granted worker reads history through `memory_read`. Summary and admission egress keep their own settings below; switching the memory system changes neither. See [Memory and history recall](memory.md).
+
+### Context memory and history
+
+`contextPolicy.memory.enabled` and the `history.*` keys apply in both memory systems: with retrieval disabled every history read is refused by policy and no history index starts. `includeInPrompt`, `maxResults` and `allowExternalEgress` govern OKF automatic retrieval.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `contextPolicy.memory.enabled` | boolean | `true` | Enable local safe-auto memory retrieval |
+| `contextPolicy.memory.enabled` | boolean | `true` | Enable memory retrieval: OKF safe-auto retrieval and history reads in both systems |
 | `contextPolicy.memory.includeInPrompt` | boolean | `true` | Include retrieved memory only when the active model budget permits it |
 | `contextPolicy.memory.maxResults` | number | `5` | Maximum retrieval results before tier/budget pruning; clamped to 1-20 |
 | `contextPolicy.memory.allowExternalEgress` | boolean | `false` | Explicitly allow eligible external memory providers to receive bounded, non-secret-like query text |

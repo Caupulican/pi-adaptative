@@ -33,6 +33,7 @@ import {
 	startPlannedAgentProviderRequest,
 	startPlannedAgentProviderRequestWithId,
 } from "./provider-request-planner.ts";
+import { hasRecalledHistoryMarker, RECALLED_HISTORY_DETAIL_KEY } from "./session/message-retention.ts";
 import { boundedFailureCode } from "./tool-failure-code.ts";
 import {
 	assessToolFailure,
@@ -2658,6 +2659,9 @@ async function finalizeExecutedToolCall(
 	// Capture the executor's validated receipt before a hook can mutate or replace its details.
 	// Presentation/policy failures must not erase a completed check or invent a different pass.
 	const verificationDetails = retainedVerificationDetails(result.details);
+	// Same for the recalled-history marker: a harness failure record that replaces a history read's details
+	// is still that read's result, and history capture must not index it as conversation.
+	const recalledHistory = hasRecalledHistoryMarker(result.details);
 	let isError = executed.isError;
 	const failureMessage = executed.failureMessage ?? "";
 	const errorClass = executed.errorClass;
@@ -2811,6 +2815,14 @@ async function finalizeExecutedToolCall(
 	if (verificationDetails) {
 		Object.defineProperty(invocationDetails, "piVerification", {
 			value: verificationDetails.piVerification,
+			enumerable: true,
+			writable: false,
+			configurable: false,
+		});
+	}
+	if (recalledHistory) {
+		Object.defineProperty(invocationDetails, RECALLED_HISTORY_DETAIL_KEY, {
+			value: true,
 			enumerable: true,
 			writable: false,
 			configurable: false,

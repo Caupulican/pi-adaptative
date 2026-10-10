@@ -1,15 +1,21 @@
 import {
+	TRANSCRIPT_LINEAGE_MAX_RANGE_CHECKS,
 	TRANSCRIPT_MAX_PARTS_PER_ENTRY,
 	type TranscriptCaptureRole,
 	type TranscriptCoverage,
 	type TranscriptIndexChangeEvent,
+	type TranscriptIndexObservation,
 	type TranscriptLineage,
+	type TranscriptLineageRangeCheck,
+	type TranscriptLineageRangeVerdict,
+	type TranscriptLineageReader,
 	type TranscriptLineageSpansResult,
-	type TranscriptReadUnavailable,
+	type TranscriptLineageVerifyResult,
 	type TranscriptReadUnavailableStatus,
 	type TranscriptSearchHit,
 	type TranscriptSessionSummary,
 	type TranscriptSourcePageResult,
+	type TranscriptSourceRef,
 	type TranscriptSourceSpan,
 } from "../transcript-memory-contracts.ts";
 
@@ -22,7 +28,8 @@ export const TRANSCRIPT_RECALL_MAX_ERROR_CHARS = 500;
 export const TRANSCRIPT_RECALL_MAX_SOURCE_PAGE_BYTES = 16_384;
 export const TRANSCRIPT_RECALL_MIN_SOURCE_PAGE_BYTES = 4;
 export const TRANSCRIPT_RECALL_MAX_ID_CHARS = 256;
-export const TRANSCRIPT_RECALL_MAX_PATH_CHARS = 4_096;
+/** The longest path a supported platform accepts (Windows extended-length paths), so no real session path is refused. */
+export const TRANSCRIPT_RECALL_MAX_PATH_CHARS = 32_767;
 
 /** Ceiling on sessions in one listing or change event; beyond it the worker answers `unavailable`. */
 export const TRANSCRIPT_RECALL_MAX_LISTED_SESSIONS = 50_000;
@@ -42,6 +49,11 @@ export interface TranscriptRecallInitializeRequest {
 	agentDir: string;
 	cwd: string;
 	projectId: string;
+	/**
+	 * The active session's file, so the start scan captures it even when it is stored outside the project's
+	 * default session directories. Absent when the host cannot name it.
+	 */
+	sessionFile?: string;
 }
 
 export interface TranscriptRecallQueryRequest {
@@ -81,6 +93,13 @@ export interface TranscriptRecallLineageRequest {
 	maxSpans: number;
 }
 
+export interface TranscriptRecallVerifyRequest {
+	type: "verify";
+	generation: number;
+	requestId: number;
+	checks: TranscriptLineageRangeCheck[];
+}
+
 export interface TranscriptRecallIngestRequest {
 	type: "ingest";
 	generation: number;
@@ -88,6 +107,8 @@ export interface TranscriptRecallIngestRequest {
 	sessionFile: string;
 	/** True when the session file was rewritten and earlier byte offsets are no longer valid. */
 	rewritten: boolean;
+	/** The parent's post-order sequence of this ingest in its generation (from 1); answers report the highest received. */
+	seq: number;
 }
 
 export interface TranscriptRecallShutdownRequest {
@@ -101,6 +122,7 @@ export type TranscriptRecallWorkerRequest =
 	| TranscriptRecallSourceRequest
 	| TranscriptRecallSessionsRequest
 	| TranscriptRecallLineageRequest
+	| TranscriptRecallVerifyRequest
 	| TranscriptRecallIngestRequest
 	| TranscriptRecallShutdownRequest;
 
@@ -134,11 +156,14 @@ export interface TranscriptRecallQueryFailedResponse {
 	error: string;
 }
 
+/** A listing and the coverage of the one index state it was taken from. */
+export type TranscriptRecallSessionsResult = Awaited<ReturnType<TranscriptLineageReader["listSessions"]>>;
+
 export interface TranscriptRecallSessionsResponse {
 	type: "sessions";
 	generation: number;
 	requestId: number;
-	result: { status: "ok"; sessions: TranscriptSessionSummary[] } | TranscriptReadUnavailable;
+	result: TranscriptRecallSessionsResult;
 }
 
 export interface TranscriptRecallLineageResponse {
@@ -148,12 +173,31 @@ export interface TranscriptRecallLineageResponse {
 	result: TranscriptLineageSpansResult;
 }
 
+export interface TranscriptRecallVerifyResponse {
+	type: "verify";
+	generation: number;
+	requestId: number;
+	result: TranscriptLineageVerifyResult;
+}
+
+/** A session's new lineage revision and the lowest selected-lineage position its change can have affected. */
+export interface TranscriptRecallLineageBump {
+	sessionId: string;
+	lineageRevision: number;
+	lowestChanged: number;
+}
+
 export interface TranscriptRecallCoverageResponse {
 	type: "coverage";
 	generation: number;
 	coverage: TranscriptCoverage;
 	/** Present when an ingest changed, reloaded or evicted sessions. */
 	change?: TranscriptIndexChangeEvent;
+	/**
+	 * One per invalidated session of `change`, posted before any later answer. A ready response carries none: every
+	 * revision of a new generation starts at 0.
+	 */
+	bumps?: TranscriptRecallLineageBump[];
 }
 
 export interface TranscriptRecallFailedResponse {
@@ -174,6 +218,7 @@ export type TranscriptRecallWorkerResponse =
 	| TranscriptRecallSourceResponse
 	| TranscriptRecallSessionsResponse
 	| TranscriptRecallLineageResponse
+	| TranscriptRecallVerifyResponse
 	| TranscriptRecallCoverageResponse
 	| TranscriptRecallFailedResponse
 	| TranscriptRecallStoppedResponse;
@@ -196,6 +241,24 @@ function isCount(value: unknown): value is number {
 
 function isIntegerInRange(value: unknown, min: number, max: number): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max;
+}
+
+const RANGE_DIGEST = /^[0-9a-f]{32}$/;
+
+/**
+ * One well-formed range check: a session id, `fromIndex >= 0`, `count >= 1`, a range end that is still a safe
+ * integer, and a fixed-width lowercase hex range digest.
+ */
+export function isTranscriptRecallRangeCheck(value: unknown): value is TranscriptLineageRangeCheck {
+	return (
+		isRecord(value) &&
+		isNonEmptyBoundedString(value.sessionId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
+		isCount(value.fromIndex) &&
+		isIntegerInRange(value.count, 1, Number.MAX_SAFE_INTEGER) &&
+		Number.isSafeInteger(value.fromIndex + value.count) &&
+		typeof value.digest === "string" &&
+		RANGE_DIGEST.test(value.digest)
+	);
 }
 
 export function isTranscriptRecallWorkerRequest(value: unknown): value is TranscriptRecallWorkerRequest {
@@ -234,18 +297,29 @@ export function isTranscriptRecallWorkerRequest(value: unknown): value is Transc
 				isCount(value.fromIndex) &&
 				isIntegerInRange(value.maxSpans, 1, TRANSCRIPT_RECALL_MAX_LINEAGE_SPANS)
 			);
+		case "verify":
+			return (
+				isCount(value.requestId) &&
+				Array.isArray(value.checks) &&
+				value.checks.length >= 1 &&
+				value.checks.length <= TRANSCRIPT_LINEAGE_MAX_RANGE_CHECKS &&
+				value.checks.every(isTranscriptRecallRangeCheck)
+			);
 		case "ingest":
 			return (
 				isNonEmptyBoundedString(value.sessionId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
 				isNonEmptyBoundedString(value.sessionFile, TRANSCRIPT_RECALL_MAX_PATH_CHARS) &&
-				typeof value.rewritten === "boolean"
+				typeof value.rewritten === "boolean" &&
+				isIntegerInRange(value.seq, 1, Number.MAX_SAFE_INTEGER)
 			);
 		case "initialize":
 			return (
 				isNonEmptyBoundedString(value.sessionId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
 				isNonEmptyBoundedString(value.agentDir, TRANSCRIPT_RECALL_MAX_PATH_CHARS) &&
 				isNonEmptyBoundedString(value.cwd, TRANSCRIPT_RECALL_MAX_PATH_CHARS) &&
-				isNonEmptyBoundedString(value.projectId, TRANSCRIPT_RECALL_MAX_ID_CHARS)
+				isNonEmptyBoundedString(value.projectId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
+				(value.sessionFile === undefined ||
+					isNonEmptyBoundedString(value.sessionFile, TRANSCRIPT_RECALL_MAX_PATH_CHARS))
 			);
 		default:
 			return false;
@@ -264,15 +338,20 @@ const UNAVAILABLE_STATUSES: ReadonlySet<TranscriptReadUnavailableStatus> = new S
 	"unavailable",
 ]);
 
-function isSourceSpan(value: unknown): value is TranscriptSourceSpan {
-	if (!isRecord(value) || !isRecord(value.ref)) return false;
-	const ref = value.ref;
+function isSourceRef(value: unknown): value is TranscriptSourceRef {
 	return (
-		isNonEmptyBoundedString(ref.projectId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
-		isNonEmptyBoundedString(ref.sessionId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
-		isNonEmptyBoundedString(ref.entryId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
-		isIntegerInRange(ref.part, 0, MAX_PART_INDEX) &&
-		isNonEmptyBoundedString(ref.digest, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
+		isRecord(value) &&
+		isNonEmptyBoundedString(value.projectId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
+		isNonEmptyBoundedString(value.sessionId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
+		isNonEmptyBoundedString(value.entryId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
+		isIntegerInRange(value.part, 0, MAX_PART_INDEX) &&
+		isNonEmptyBoundedString(value.digest, TRANSCRIPT_RECALL_MAX_ID_CHARS)
+	);
+}
+
+function isSourceSpan(value: unknown): value is TranscriptSourceSpan {
+	if (!isRecord(value) || !isSourceRef(value.ref)) return false;
+	return (
 		typeof value.role === "string" &&
 		CAPTURE_ROLES.has(value.role as TranscriptCaptureRole) &&
 		typeof value.lineage === "string" &&
@@ -282,7 +361,39 @@ function isSourceSpan(value: unknown): value is TranscriptSourceSpan {
 		(value.toolCallId === undefined || isBoundedString(value.toolCallId, TRANSCRIPT_RECALL_MAX_ID_CHARS)) &&
 		(value.isError === undefined || typeof value.isError === "boolean") &&
 		(value.origin === undefined || value.origin === "host") &&
-		isCount(value.bytes)
+		isCount(value.bytes) &&
+		isNonEmptyBoundedString(value.textDigest, TRANSCRIPT_RECALL_MAX_ID_CHARS)
+	);
+}
+
+function isObservation(value: unknown): value is TranscriptIndexObservation {
+	return (
+		isRecord(value) &&
+		Number.isSafeInteger(value.generation) &&
+		isCount(value.ingestSeq) &&
+		Array.isArray(value.sessions) &&
+		value.sessions.length <= TRANSCRIPT_LINEAGE_MAX_RANGE_CHECKS &&
+		value.sessions.every(
+			(session) =>
+				isRecord(session) &&
+				isNonEmptyBoundedString(session.sessionId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
+				isCount(session.lineageRevision) &&
+				isCount(session.dependsThrough),
+		)
+	);
+}
+
+function isLineageBumps(value: unknown): boolean {
+	return (
+		Array.isArray(value) &&
+		value.length <= TRANSCRIPT_RECALL_MAX_LISTED_SESSIONS &&
+		value.every(
+			(bump) =>
+				isRecord(bump) &&
+				isNonEmptyBoundedString(bump.sessionId, TRANSCRIPT_RECALL_MAX_ID_CHARS) &&
+				isIntegerInRange(bump.lineageRevision, 1, Number.MAX_SAFE_INTEGER) &&
+				isCount(bump.lowestChanged),
+		)
 	);
 }
 
@@ -348,7 +459,9 @@ function isUnavailable(value: Record<string, unknown>): boolean {
 	return (
 		typeof value.status === "string" &&
 		UNAVAILABLE_STATUSES.has(value.status as TranscriptReadUnavailableStatus) &&
-		isBoundedString(value.reason, TRANSCRIPT_RECALL_MAX_ERROR_CHARS)
+		isBoundedString(value.reason, TRANSCRIPT_RECALL_MAX_ERROR_CHARS) &&
+		// The recovery pointer exists only on a stale exact-source answer.
+		(value.currentRef === undefined || (value.status === "stale_snapshot" && isSourceRef(value.currentRef)))
 	);
 }
 
@@ -363,13 +476,14 @@ function isSessionSummary(value: unknown): value is TranscriptSessionSummary {
 	);
 }
 
-function isSessionsResult(value: unknown): boolean {
+function isSessionsResult(value: unknown): value is TranscriptRecallSessionsResult {
 	if (!isRecord(value)) return false;
 	if (value.status === "ok") {
 		return (
 			Array.isArray(value.sessions) &&
 			value.sessions.length <= TRANSCRIPT_RECALL_MAX_LISTED_SESSIONS &&
-			value.sessions.every(isSessionSummary)
+			value.sessions.every(isSessionSummary) &&
+			isCoverage(value.coverage)
 		);
 	}
 	return isUnavailable(value);
@@ -385,7 +499,25 @@ function isLineageResult(value: unknown): value is TranscriptLineageSpansResult 
 			isCount(value.total) &&
 			Array.isArray(value.spans) &&
 			value.spans.length <= TRANSCRIPT_RECALL_MAX_LINEAGE_SPANS &&
-			value.spans.every(isSourceSpan)
+			value.spans.every(isSourceSpan) &&
+			isObservation(value.observation)
+		);
+	}
+	return isUnavailable(value);
+}
+
+const RANGE_VERDICTS: ReadonlySet<TranscriptLineageRangeVerdict> = new Set(["live", "moved", "session_gone"]);
+
+function isVerifyResult(value: unknown): value is TranscriptLineageVerifyResult {
+	if (!isRecord(value)) return false;
+	if (value.status === "ok") {
+		return (
+			Array.isArray(value.verdicts) &&
+			value.verdicts.length <= TRANSCRIPT_LINEAGE_MAX_RANGE_CHECKS &&
+			value.verdicts.every(
+				(verdict) => typeof verdict === "string" && RANGE_VERDICTS.has(verdict as TranscriptLineageRangeVerdict),
+			) &&
+			isObservation(value.observation)
 		);
 	}
 	return isUnavailable(value);
@@ -409,8 +541,13 @@ export function isTranscriptRecallWorkerResponse(value: unknown): value is Trans
 	if (!isRecord(value) || !Number.isSafeInteger(value.generation)) return false;
 	switch (value.type) {
 		case "ready":
-		case "coverage":
 			return isCoverage(value.coverage) && (value.change === undefined || isIndexChange(value.change));
+		case "coverage":
+			return (
+				isCoverage(value.coverage) &&
+				(value.change === undefined || isIndexChange(value.change)) &&
+				(value.bumps === undefined || isLineageBumps(value.bumps))
+			);
 		case "failed":
 			return isBoundedString(value.error, TRANSCRIPT_RECALL_MAX_ERROR_CHARS);
 		case "stopped":
@@ -430,6 +567,8 @@ export function isTranscriptRecallWorkerResponse(value: unknown): value is Trans
 			return isCount(value.requestId) && isSessionsResult(value.result);
 		case "lineage":
 			return isCount(value.requestId) && isLineageResult(value.result);
+		case "verify":
+			return isCount(value.requestId) && isVerifyResult(value.result);
 		default:
 			return false;
 	}

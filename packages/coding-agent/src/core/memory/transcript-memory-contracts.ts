@@ -9,6 +9,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { RECALLED_HISTORY_DETAIL_KEY } from "../../kernel/session/message-retention.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Source identity
@@ -26,7 +27,11 @@ export interface TranscriptSourceRef {
 	sessionId: string;
 	entryId: string;
 	part: number;
-	/** First 16 hex chars of the SHA-256 of the captured part text. */
+	/**
+	 * The part's capture identity ({@link transcriptCaptureIdentity}, version {@link TRANSCRIPT_CAPTURE_VERSION}):
+	 * the captured text together with the metadata summarization, admission and retention consume. Any change to
+	 * either is a different source.
+	 */
 	digest: string;
 }
 
@@ -49,6 +54,11 @@ export interface TranscriptSourceSpan {
 	origin?: "host";
 	/** UTF-8 byte length of the captured part text. */
 	bytes: number;
+	/**
+	 * {@link transcriptDigest} of the part text alone (the version-1 handle digest). Never an identity: it serves
+	 * only the validated carry of evidence recorded under version 1 (spent attempts, first-capture ages).
+	 */
+	textDigest: string;
 }
 
 const TRANSCRIPT_HANDLE_PREFIX = "tx";
@@ -56,8 +66,65 @@ const SOURCE_ID_PATTERN = /^[A-Za-z0-9._-]{1,256}$/;
 const DIGEST_PATTERN = /^[a-f0-9]{16}$/;
 export const TRANSCRIPT_MAX_PARTS_PER_ENTRY = 4_096;
 
+/** First 16 hex chars of the SHA-256 of `text` alone. Not a source identity; see {@link transcriptCaptureIdentity}. */
 export function transcriptDigest(text: string): string {
 	return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
+}
+
+/**
+ * Version of the capture identity. Version 1 handles hashed the part text alone; version 2 binds the text and the
+ * metadata consumed downstream. Derived state built from another version is never served (it is re-derived), and
+ * evidence recorded under version 1 is carried only where it can be validated.
+ */
+export const TRANSCRIPT_CAPTURE_VERSION = 2;
+const CAPTURE_IDENTITY_TAG = "pi-transcript-capture-v2";
+
+/** Everything one captured part's identity binds: its text and the metadata rendering, admission and retention read. */
+export interface TranscriptCaptureInputs {
+	text: string;
+	role: TranscriptCaptureRole;
+	timestamp?: string;
+	toolName?: string;
+	toolCallId?: string;
+	isError?: boolean;
+	origin?: "host";
+}
+
+/**
+ * The one capture identity: the first 16 hex chars (64 bits) of a domain-separated SHA-256 over a fixed-order JSON
+ * array of the inputs, absent fields as `null`, so absent, empty and false stay distinct. Capture, source-read
+ * validation and coordinator re-reads all go through it ({@link isCurrentCaptureIdentity}). The selected/alternate
+ * lineage label is deliberately not bound: branch and position validity are the lineage range check's job.
+ * Collision model: accidental only, about 2^-64 per changed part; not resistant to crafted input.
+ */
+export function transcriptCaptureIdentity(inputs: TranscriptCaptureInputs): string {
+	const encoded = JSON.stringify([
+		CAPTURE_IDENTITY_TAG,
+		inputs.text,
+		inputs.role,
+		inputs.timestamp ?? null,
+		inputs.toolName ?? null,
+		inputs.toolCallId ?? null,
+		inputs.isError ?? null,
+		inputs.origin ?? null,
+	]);
+	return createHash("sha256").update(encoded, "utf8").digest("hex").slice(0, 16);
+}
+
+/** The capture inputs of a span whose part text is `text`. */
+export function transcriptCaptureInputs(span: TranscriptSourceSpan, text: string): TranscriptCaptureInputs {
+	const inputs: TranscriptCaptureInputs = { text, role: span.role };
+	if (span.timestamp !== undefined) inputs.timestamp = span.timestamp;
+	if (span.toolName !== undefined) inputs.toolName = span.toolName;
+	if (span.toolCallId !== undefined) inputs.toolCallId = span.toolCallId;
+	if (span.isError !== undefined) inputs.isError = span.isError;
+	if (span.origin !== undefined) inputs.origin = span.origin;
+	return inputs;
+}
+
+/** Whether `text` with `span`'s metadata is exactly the source `ref` names: the one identity verifier. */
+export function isCurrentCaptureIdentity(ref: TranscriptSourceRef, span: TranscriptSourceSpan, text: string): boolean {
+	return transcriptCaptureIdentity(transcriptCaptureInputs(span, text)) === ref.digest;
 }
 
 /** Opaque handle the model passes back to open a source: `tx:<sessionId>:<entryId>:<part>:<digest>`. */
@@ -126,10 +193,21 @@ export const TRANSCRIPT_EXCLUDED_CUSTOM_TYPES: ReadonlySet<string> = new Set([
 /** Marker that identifies recall pages; a message containing it is generated memory, not history. */
 export const TRANSCRIPT_RECALL_PAGE_MARKER = "<memory_context";
 
+/**
+ * Tool-result `details` key set to `true` on every history read result (the root `memory` history actions and
+ * the worker `memory_read`). Such a result is recalled evidence, never captured again as history, so the
+ * system never indexes or summarizes its own recall. The canonical session log keeps it unchanged.
+ */
+export const TRANSCRIPT_RECALL_RESULT_MARKER = RECALLED_HISTORY_DETAIL_KEY;
+
+/** The typed policy refusal every history reader, zoom, lookup and status gives while memory retrieval is disabled. */
+export const MEMORY_RETRIEVAL_DISABLED_REASON = "Memory retrieval is disabled by policy.";
+
 /** Reasons a source is not available as captured history. */
 export type TranscriptUncapturedReason =
 	| "secret_like"
 	| "generated_memory"
+	| "recalled_history"
 	| "empty"
 	| "binary_or_image"
 	| "part_limit"
@@ -202,6 +280,12 @@ export type TranscriptReadUnavailableStatus =
 export interface TranscriptReadUnavailable {
 	status: TranscriptReadUnavailableStatus;
 	reason: string;
+	/**
+	 * Set only on a `stale_snapshot` from an exact source read whose entry and part still exist: the current source
+	 * at that position, so a caller can recover the exact text through a fresh read. Never text; never parsed from
+	 * `reason`.
+	 */
+	currentRef?: TranscriptSourceRef;
 }
 
 /** One search hit: a cited source span plus a bounded display snippet of that span. */
@@ -248,6 +332,8 @@ export interface TranscriptSearchRequest {
 	includeAlternateBranches?: boolean;
 	/** Include the current session's own committed history. Default false (it is already in context). */
 	includeCurrentSession?: boolean;
+	/** As {@link TranscriptLineageSpansRequest.deadlineAt}. */
+	deadlineAt?: number;
 }
 
 export type TranscriptSearchResult =
@@ -259,6 +345,8 @@ export interface TranscriptSourcePageRequest {
 	/** UTF-8 byte offset into the part text. Default 0. */
 	cursor?: number;
 	maxBytes: number;
+	/** As {@link TranscriptLineageSpansRequest.deadlineAt}. */
+	deadlineAt?: number;
 }
 
 export interface TranscriptSourcePage {
@@ -285,11 +373,24 @@ export interface TranscriptSessionSummary {
 	lineageDigest: string;
 }
 
+/** Bound of one explicit (foreground) history operation, a tool call: one second. */
+export const TRANSCRIPT_FOREGROUND_READ_MS = 1_000;
+
 export interface TranscriptLineageSpansRequest {
 	sessionId: string;
 	/** Zero-based position on the selected lineage to start from. */
 	fromIndex: number;
 	maxSpans: number;
+	/**
+	 * `foreground` when an explicit history read (a tool call) waits on it, so it gets the foreground read bound;
+	 * default `background` (summary construction), which may wait out ingestion.
+	 */
+	priority?: "foreground" | "background";
+	/**
+	 * Epoch ms the whole operation this read belongs to must end by, set once where a tool call starts and
+	 * passed unchanged to every read it makes; the read's own bound still applies when it is sooner.
+	 */
+	deadlineAt?: number;
 }
 
 export type TranscriptLineageSpansResult =
@@ -301,7 +402,133 @@ export type TranscriptLineageSpansResult =
 			spans: TranscriptSourceSpan[];
 			/** Total captured spans on the selected lineage. */
 			total: number;
+			/** What the index had observed when it answered; judged at delivery by {@link TranscriptLineageReader.observationCurrent}. */
+			observation: TranscriptIndexObservation;
 	  }
+	| TranscriptReadUnavailable;
+
+// ---------------------------------------------------------------------------------------------
+// Lineage range verification (bounded dependency validation)
+// ---------------------------------------------------------------------------------------------
+
+const LINEAGE_TERM_TAG = "pi-transcript-lineage-term-v1";
+/** Lineage range digests are sums of terms modulo 2^128. */
+export const TRANSCRIPT_LINEAGE_DIGEST_MODULUS = 1n << 128n;
+
+/**
+ * The term one source part contributes at one selected-lineage position: a domain-separated SHA-256 of the
+ * position and the part's handle, truncated to 128 bits. Binding the position makes order and shifts count.
+ */
+export function transcriptLineageTerm(position: number, ref: TranscriptSourceRef): bigint {
+	const hex = createHash("sha256")
+		.update(`${LINEAGE_TERM_TAG}\u0000${position}\u0000${formatTranscriptSourceHandle(ref)}`, "utf8")
+		.digest("hex")
+		.slice(0, 32);
+	return BigInt(`0x${hex}`);
+}
+
+/** A sum of lineage terms as the fixed-width hex digest both sides compare. */
+export function formatTranscriptLineageDigest(sum: bigint): string {
+	const reduced =
+		((sum % TRANSCRIPT_LINEAGE_DIGEST_MODULUS) + TRANSCRIPT_LINEAGE_DIGEST_MODULUS) %
+		TRANSCRIPT_LINEAGE_DIGEST_MODULUS;
+	return reduced.toString(16).padStart(32, "0");
+}
+
+/**
+ * Digest of these exact parts at consecutive selected-lineage positions from `fromIndex`. The index answers the
+ * same digest for any range in O(1) from prefix sums of the same terms, so a node's whole dependency range is
+ * checked without reading or transferring its spans, and appending to a lineage never changes an earlier range.
+ *
+ * Threat model: this is a staleness detector over the local owner's own canonical history, not an authority
+ * boundary, and it detects only what the part identities bind. The terms are 128-bit, so two different sets of
+ * identities collide in the aggregate with probability about 2^-128 by accident; but each identity is itself a
+ * 64-bit digest ({@link transcriptCaptureIdentity}), so an accidental miss of one changed part is about 2^-64. An
+ * additive digest is not collision-resistant against a deliberately crafted set of terms (generalized birthday);
+ * the worst case of a forged match is serving an approved summary of the same project.
+ *
+ * Cost on the index side: prefix sums are built lazily, so the first check that reaches a position hashes every
+ * position up to it (cold, O(positions)); checks inside the built prefix are O(1) (warm). A rebuild of the lineage
+ * resets the prefix.
+ */
+export function transcriptLineageRangeDigest(fromIndex: number, refs: readonly TranscriptSourceRef[]): string {
+	if (!Number.isSafeInteger(fromIndex) || fromIndex < 0) throw new RangeError("Lineage range start must be >= 0.");
+	if (refs.length === 0) throw new RangeError("Lineage range must cover at least one part.");
+	let sum = 0n;
+	for (const [offset, ref] of refs.entries()) sum += transcriptLineageTerm(fromIndex + offset, ref);
+	return formatTranscriptLineageDigest(sum);
+}
+
+/** Most range checks one {@link TranscriptLineageReader.verifyLineageRanges} request carries; more is `unavailable`. */
+export const TRANSCRIPT_LINEAGE_MAX_RANGE_CHECKS = 256;
+
+/**
+ * The retryable tail of every summary-read refusal caused by a change during the read (store revision, revocation,
+ * generation or retrieval policy). The shared retry policy's `changedInFlight` class matches on "changed while";
+ * each refusal names its own subject in front of it.
+ */
+export const TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT = "changed while the summary read was in flight; retry the read";
+
+/** One range of a session's selected lineage that must hold exactly the parts whose digest is `digest`. */
+export interface TranscriptLineageRangeCheck {
+	sessionId: string;
+	fromIndex: number;
+	count: number;
+	/** {@link transcriptLineageRangeDigest} of the expected parts. */
+	digest: string;
+}
+
+/**
+ * `live`: the range holds exactly the expected parts; `moved`: it does not, or the lineage is shorter than the
+ * range; `session_gone`: the session is not in this project's history (a lineage page answers `not_found`). A
+ * catalogued session that is not indexed now makes the whole request `unavailable`, never `session_gone`.
+ */
+export type TranscriptLineageRangeVerdict = "live" | "moved" | "session_gone";
+
+export interface TranscriptLineageVerifyRequest {
+	checks: readonly TranscriptLineageRangeCheck[];
+	/** As {@link TranscriptLineageSpansRequest.priority}. */
+	priority?: "foreground" | "background";
+	/** As {@link TranscriptLineageSpansRequest.deadlineAt}. */
+	deadlineAt?: number;
+}
+
+/** One verdict per check, in request order. */
+export type TranscriptLineageVerifyResult =
+	| { status: "ok"; verdicts: TranscriptLineageRangeVerdict[]; observation: TranscriptIndexObservation }
+	| TranscriptReadUnavailable;
+
+/**
+ * What one lineage or verify answer depended on, as the index had applied it when it answered. Delivery judges it
+ * after the read's last await with {@link TranscriptLineageReader.observationCurrent}, synchronously.
+ *
+ * Linearization contract: summary text is delivered only if, at one synchronous point after the last await, the
+ * store revision, the catalog, the retention cutoff and this observation are all current AS KNOWN TO THE PARENT
+ * PROCESS. Freshness is against indexed and notified state: a filesystem change the index has not been notified of
+ * or has not ingested is not detected, and a change notified after that point is not covered. The judgment relies
+ * on the worker's messages reaching the parent in the order they were posted (the platform's MessagePort FIFO).
+ */
+export interface TranscriptIndexObservation {
+	/** Backend generation that answered. */
+	generation: number;
+	/** Highest parent ingest sequence the index had received (and so applied) when it answered. */
+	ingestSeq: number;
+	/**
+	 * Each session the answer depended on: its lineage revision (monotone per session for the generation, bumped
+	 * whenever positions of its selected lineage may have changed, never on a pure append) and the exclusive end
+	 * position the answer depended on.
+	 */
+	sessions: readonly { sessionId: string; lineageRevision: number; dependsThrough: number }[];
+}
+
+/**
+ * `current`: nothing the observation depended on has changed. `changed`: a session it depended on changed, or has a
+ * notified change the index has not applied yet (retryable; `reason` names the subject). `unavailable`: the backend
+ * that answered is gone, failed or replaced.
+ */
+export type TranscriptObservationVerdict =
+	| { status: "current" }
+	| { status: "changed"; reason: string }
 	| TranscriptReadUnavailable;
 
 /** Which sessions changed in the index; consumers re-read what they need. */
@@ -320,10 +547,31 @@ export interface TranscriptSourceReader {
 
 /** The reader surface the summary hierarchy needs in addition to search and source reads. */
 export interface TranscriptLineageReader extends TranscriptSourceReader {
-	listSessions(): Promise<{ status: "ok"; sessions: TranscriptSessionSummary[] } | TranscriptReadUnavailable>;
+	/**
+	 * Every catalogued session, plus the index coverage taken in the SAME answer, so a caller can judge the listing
+	 * against counts that describe exactly that catalog state (a later {@link coverage} may describe another one).
+	 */
+	listSessions(): Promise<
+		{ status: "ok"; sessions: TranscriptSessionSummary[]; coverage: TranscriptCoverage } | TranscriptReadUnavailable
+	>;
 	listLineageSpans(request: TranscriptLineageSpansRequest): Promise<TranscriptLineageSpansResult>;
+	/**
+	 * Check selected-lineage ranges against expected range digests in one bounded request: no span bodies and no
+	 * span transfer, O(1) per check in the index. At most {@link TRANSCRIPT_LINEAGE_MAX_RANGE_CHECKS} checks.
+	 */
+	verifyLineageRanges(request: TranscriptLineageVerifyRequest): Promise<TranscriptLineageVerifyResult>;
+	/**
+	 * Judge an observation against what the parent knows now: synchronous, no I/O, so it can run after a read's
+	 * last await with nothing in between it and the delivery. See {@link TranscriptIndexObservation}.
+	 */
+	observationCurrent(observation: TranscriptIndexObservation): TranscriptObservationVerdict;
 	/** Event-driven change signal; the returned function unsubscribes. */
 	onIndexChanged(listener: (event: TranscriptIndexChangeEvent) => void): () => void;
+	/**
+	 * Start indexing on purpose (idempotent per backend generation). Owners that index in the background call it
+	 * after subscribing to {@link onIndexChanged}; explicit reads start an idle backend themselves.
+	 */
+	start(): void;
 }
 
 /** Page `text` from a UTF-8 byte cursor without splitting a code point. */

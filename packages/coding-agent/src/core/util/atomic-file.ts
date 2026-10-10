@@ -105,6 +105,29 @@ export interface AtomicFileLockOptions {
 	stale?: number;
 	/** Explicit proper-lockfile directory path; defaults to `${filePath}.lock`. */
 	lockfilePath?: string;
+	/**
+	 * Opt-in operation deadline for the async lock (epoch ms, `Date.now()` clock). Absent, nothing changes. Present,
+	 * no new work starts after it: a caller already past it never joins this process's queue for the path; one still
+	 * queued when it passes leaves; one admitted after it does not start; every acquisition attempt (the first and
+	 * each one after a backoff) is preceded by the check; and a lock that is won after it is released again without
+	 * running the critical section. Each of these ends in {@link FileLockDeadlineError}. A critical section already
+	 * entered is never interrupted, and an acquisition attempt already submitted to the filesystem is not preemptible:
+	 * it can complete after the deadline, which is why a late lock is released rather than prevented. The lock is
+	 * always released by the operation that took it.
+	 */
+	deadlineAt?: number;
+}
+
+/** A lock wait that reached its {@link AtomicFileLockOptions.deadlineAt}: the critical section did not run and no lock is held. */
+export class FileLockDeadlineError extends Error {
+	readonly code = "ELOCKDEADLINE";
+	readonly filePath: string;
+
+	constructor(filePath: string, waitingFor: string) {
+		super(`timed out waiting for the lock on ${filePath} (${waitingFor})`);
+		this.name = "FileLockDeadlineError";
+		this.filePath = filePath;
+	}
 }
 
 export interface AtomicFileWriteOptions {
@@ -203,8 +226,11 @@ async function withSerializedPathOperation<T>(
 	tails: PendingPathOperations,
 	filePath: string,
 	fn: () => Promise<T>,
+	deadlineAt?: number,
 ): Promise<T> {
 	const key = pathOperationKey(filePath);
+	// A caller already past its deadline never joins the queue, so nothing is ever chained behind it.
+	if (deadlineAt !== undefined) throwIfPastDeadline(filePath, deadlineAt, "the deadline passed before it was queued");
 	const preceding = tails.get(key) ?? Promise.resolve();
 	let releaseTail: (() => void) | undefined;
 	const tail = new Promise<void>((resolveTail) => {
@@ -212,8 +238,22 @@ async function withSerializedPathOperation<T>(
 	});
 	tails.set(key, tail);
 
-	await preceding;
+	if (deadlineAt === undefined) await preceding;
+	else if (!(await settlesBy(preceding, deadlineAt))) {
+		// Leaving at the deadline, this caller's tail still resolves only once its predecessor settles, so the
+		// operation queued after it never overtakes the one ahead of it.
+		void preceding.then(() => {
+			releaseTail?.();
+			if (tails.get(key) === tail) tails.delete(key);
+		});
+		throw new FileLockDeadlineError(filePath, "an earlier operation in this process still holds the path");
+	}
 	try {
+		// Admission is checked again here: an already settled predecessor can win the wait above at any time. The
+		// first thing `fn` does is the work being admitted (for a file lock, preparing its directory).
+		if (deadlineAt !== undefined) {
+			throwIfPastDeadline(filePath, deadlineAt, "the deadline passed before the operation was admitted");
+		}
 		return await fn();
 	} finally {
 		releaseTail?.();
@@ -253,6 +293,14 @@ function retryDelayMs(options: AtomicFileLockOptions, attempt: number): number {
 	const factor = Number.isFinite(configuredFactor) ? Math.max(1, configuredFactor) : 2;
 	return Math.min(minDelay * factor ** (attempt - 1), maxDelay);
 }
+
+/**
+ * The default async lock's worst-case wait for a lock held elsewhere: the sum of its backoff gaps over the default
+ * retry count, by the same capped doubling ({@link retryDelayMs}). Derived, so it follows the constants.
+ */
+export const DEFAULT_FILE_LOCK_RETRY_WINDOW_MS = Array.from({ length: DEFAULT_RETRIES }, (_, index) =>
+	retryDelayMs({}, index + 1),
+).reduce((total, gap) => total + gap, 0);
 
 /**
  * Acquire a synchronous advisory file lock and return its release function. This is the shared
@@ -307,26 +355,90 @@ export async function withFileLock<T>(
 	fn: () => Promise<T> | T,
 	options?: AtomicFileLockOptions,
 ): Promise<T> {
-	return withSerializedPathOperation(pendingAsyncFileLockTails, options?.lockfilePath ?? filePath, async () => {
-		await ensureLockDir(filePath, options?.lockfilePath);
-		const release = await lockfile.lock(filePath, {
-			lockfilePath: options?.lockfilePath,
-			realpath: options?.realpath ?? DEFAULT_REALPATH,
-			retries: {
-				retries: retryCount(options ?? {}),
-				factor: options?.retryFactor ?? 2,
-				minTimeout: options?.minRetryDelayMs ?? RETRY_MIN_TIMEOUT_MS,
-				maxTimeout: options?.maxRetryDelayMs ?? RETRY_MAX_TIMEOUT_MS,
-			},
-			stale: options?.stale,
-		});
+	const deadlineAt = options?.deadlineAt;
+	return withSerializedPathOperation(
+		pendingAsyncFileLockTails,
+		options?.lockfilePath ?? filePath,
+		async () => {
+			await ensureLockDir(filePath, options?.lockfilePath);
+			const lockOptions = {
+				lockfilePath: options?.lockfilePath,
+				realpath: options?.realpath ?? DEFAULT_REALPATH,
+				stale: options?.stale,
+			};
+			const release =
+				deadlineAt === undefined
+					? await lockfile.lock(filePath, {
+							...lockOptions,
+							retries: {
+								retries: retryCount(options ?? {}),
+								factor: options?.retryFactor ?? 2,
+								minTimeout: options?.minRetryDelayMs ?? RETRY_MIN_TIMEOUT_MS,
+								maxTimeout: options?.maxRetryDelayMs ?? RETRY_MAX_TIMEOUT_MS,
+							},
+						})
+					: await lockByDeadline(filePath, lockOptions, options ?? {}, deadlineAt);
+			try {
+				// A lock won after the deadline (an attempt already submitted can complete late) is released by the
+				// cleanup below without running the critical section.
+				if (deadlineAt !== undefined)
+					throwIfPastDeadline(filePath, deadlineAt, "the lock was taken after the deadline");
+				return await fn();
+			} finally {
+				// See {@link withFileLockSync} — cleanup failures must not mask fn()'s outcome.
+				await retryTransientWin32(release).catch(() => {});
+			}
+		},
+		deadlineAt,
+	);
+}
+
+/** Whether `promise` settles before `deadlineAt` (an already settled one always does). */
+async function settlesBy(promise: Promise<void>, deadlineAt: number): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise.then(() => true),
+			new Promise<boolean>((resolveRace) => {
+				timer = setTimeout(() => resolveRace(false), Math.max(0, deadlineAt - Date.now()));
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** The one expiry rule of the deadline path: past `deadlineAt`, no new work starts. */
+function throwIfPastDeadline(filePath: string, deadlineAt: number, waitingFor: string): void {
+	if (Date.now() >= deadlineAt) throw new FileLockDeadlineError(filePath, waitingFor);
+}
+
+/**
+ * Take a lock held elsewhere one attempt at a time (proper-lockfile `retries: 0`), backing off as configured. Every
+ * attempt, the first and each one after a backoff, starts only while `deadlineAt` allows; past it,
+ * {@link FileLockDeadlineError}. Any failure other than "held" (`ELOCKED`) propagates.
+ */
+async function lockByDeadline(
+	filePath: string,
+	lockOptions: { lockfilePath: string | undefined; realpath: boolean; stale: number | undefined },
+	options: AtomicFileLockOptions,
+	deadlineAt: number,
+): Promise<() => Promise<void>> {
+	for (let attempt = 1; ; attempt++) {
+		throwIfPastDeadline(
+			filePath,
+			deadlineAt,
+			attempt === 1 ? "the deadline passed before the lock was attempted" : "another holder has the lock",
+		);
 		try {
-			return await fn();
-		} finally {
-			// See {@link withFileLockSync} — cleanup failures must not mask fn()'s outcome.
-			await retryTransientWin32(release).catch(() => {});
+			return await lockfile.lock(filePath, { ...lockOptions, retries: 0 });
+		} catch (error) {
+			const held = typeof error === "object" && error !== null && "code" in error && error.code === "ELOCKED";
+			if (!held) throw error;
+			const gap = Math.min(retryDelayMs(options, attempt), Math.max(0, deadlineAt - Date.now()));
+			await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, gap));
 		}
-	});
+	}
 }
 
 /**

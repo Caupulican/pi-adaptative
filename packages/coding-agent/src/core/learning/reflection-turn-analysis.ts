@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AgentMessage } from "../../kernel/index.ts";
+import { isRootMemoryHistoryAction, ROOT_MEMORY_TOOL_NAME } from "../memory/worker-memory-tools.ts";
 import type { DemandSignals } from "./reflection-engine.ts";
 
 const REFLECTION_TURN_MAX_CHARS = 12_000;
@@ -73,6 +74,12 @@ export function analyzeReflectionTurn(messages: AgentMessage[], complexTaskThres
 	const userParts: string[] = [];
 	const assistantParts: string[] = [];
 	const toolNames = new Set<string>();
+	/**
+	 * Ids of curated `memory` calls. History reads (`history_*`) are recalled evidence, not durable facts, so they
+	 * neither signal durable work nor enter the digest.
+	 */
+	const curatedMemoryCallIds = new Set<string>();
+	let curatedMemoryUse = false;
 	let toolCalls = 0;
 	let toolResults = 0;
 
@@ -95,6 +102,11 @@ export function analyzeReflectionTurn(messages: AgentMessage[], complexTaskThres
 				if (candidate.type === "toolCall") {
 					toolCalls += 1;
 					if (typeof candidate.name === "string") toolNames.add(candidate.name);
+					const action = (candidate.arguments as { action?: unknown } | undefined)?.action;
+					if (candidate.name === ROOT_MEMORY_TOOL_NAME && !isRootMemoryHistoryAction(action)) {
+						curatedMemoryUse = true;
+						if (typeof candidate.id === "string") curatedMemoryCallIds.add(candidate.id);
+					}
 				}
 			}
 		}
@@ -102,9 +114,11 @@ export function analyzeReflectionTurn(messages: AgentMessage[], complexTaskThres
 			toolResults += 1;
 			if (typeof raw.toolName === "string") toolNames.add(raw.toolName);
 			else if (role === "bashExecution") toolNames.add("bash");
-			// Memory writes are the durable facts reflection may promote to skills. Other tool
-			// payloads stay excluded so logs/secrets never enter the learning digest.
-			if (role === "toolResult" && raw.toolName === "memory") {
+			// Curated memory is the durable fact set reflection may promote to skills. Other tool
+			// payloads stay excluded so logs/secrets never enter the learning digest, and so do history
+			// reads (recalled evidence): the call decides, because a failed read's result may be a
+			// rebuilt harness record.
+			if (role === "toolResult" && typeof raw.toolCallId === "string" && curatedMemoryCallIds.has(raw.toolCallId)) {
 				const text = messageText(message).trim();
 				if (text) semanticLines.push(`memory: ${boundReflectionSemanticText(text, 1_500)}`);
 			}
@@ -122,9 +136,7 @@ export function analyzeReflectionTurn(messages: AgentMessage[], complexTaskThres
 	const explicitUserMemoryInstruction =
 		userParts.length > 0 && userParts.every((part) => EXPLICIT_DURABLE_SIGNAL.test(part));
 	const hasDurableSignal =
-		hasExplicitDurableSignal ||
-		toolNames.has("memory") ||
-		(toolCallCount > 0 && DURABLE_WORK_SIGNAL.test(assistantText));
+		hasExplicitDurableSignal || curatedMemoryUse || (toolCallCount > 0 && DURABLE_WORK_SIGNAL.test(assistantText));
 	const trigger: DemandSignals["trigger"] = hadCorrection
 		? "corrective"
 		: hasDurableSignal

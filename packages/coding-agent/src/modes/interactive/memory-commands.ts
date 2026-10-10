@@ -19,6 +19,7 @@ export interface MemoryCommandHost {
 	memoryDriftReport(): Promise<ManagedMemoryDriftEntry[]>;
 	memoryAcceptDrift(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }>;
 	memoryRestoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }>;
+	forgetHistorySession(sessionId: string): Promise<{ ok: boolean; message: string }>;
 	getMemorySystem(): MemorySystem;
 	setMemorySystem(system: MemorySystem): Promise<{ ok: boolean; message: string }>;
 	showStatus(message: string): void;
@@ -27,7 +28,7 @@ export interface MemoryCommandHost {
 }
 
 export const MEMORY_COMMAND_USAGE =
-	"/memory drift · /memory history · /memory accept <memory|project|user> · /memory restore <memory|project|user> · /memory system [okf|icm]";
+	"/memory drift · /memory history · /memory history forget <session> <session> · /memory accept <memory|project|user> · /memory restore <memory|project|user> · /memory system [okf|icm]";
 
 const TARGETS = new Set<ManagedMemoryTarget>(["memory", "project", "user"]);
 
@@ -58,24 +59,41 @@ function describeHistory(status: TranscriptHistoryStatus): string {
 			`  ${failing ? "indexing error detail" : "historical indexing error detail, no source failing now"} (${indexingError.at}): ${indexingError.message}`,
 		);
 	}
-	if (status.unavailableReason) lines.push(`  transport unavailable: ${status.unavailableReason}`);
+	// Only a worker that stopped serving (it carries `stoppedAt`) is a transport failure; a child session, a
+	// memory switch or a failed start is not, and is labelled as plain unavailability.
+	if (status.unavailableReason) {
+		const label = status.transport?.stoppedAt !== undefined ? "transport stopped" : "history unavailable";
+		lines.push(`  ${label}: ${status.unavailableReason}`);
+	}
 	const retrievalError = status.latestRetrieval?.error;
 	if (retrievalError) lines.push(`  retrieval error detail: ${retrievalError}`);
 	const hierarchy = status.hierarchy;
 	if (hierarchy?.disabledReason) lines.push(`  hierarchy not running: ${hierarchy.disabledReason}`);
+	if (hierarchy?.readAccessReason) lines.push(`  summary read access detail: ${hierarchy.readAccessReason}`);
 	for (const failure of hierarchy?.failures.slice(-5) ?? []) {
 		lines.push(`  hierarchy failure (level ${failure.level}, ${failure.reason}): ${failure.message}`);
 	}
 	for (const issue of hierarchy?.recoveryIssues ?? []) lines.push(`  hierarchy recovery: ${issue}`);
+	// One slot the next cause overwrites, not cleared when its condition ends: its time says how old it is.
+	const internalCause = hierarchy?.lastInternalError;
+	if (internalCause) {
+		lines.push(
+			`  coordinator's latest internal cause (newest only, recorded ${internalCause.at}, may be over): ${internalCause.cause}`,
+		);
+	}
 	const admission = hierarchy?.admission;
 	if (admission?.blocked) lines.push(`  model summaries held: ${admission.blocked.reason}`);
-	if (admission?.heldReason) lines.push(`  held job cause: ${admission.heldReason}`);
+	if (admission?.heldReason) {
+		lines.push(
+			`  first held job cause${admission.heldKind !== undefined ? ` (hold: ${admission.heldKind})` : ""}: ${admission.heldReason}`,
+		);
+	}
 	return lines.join("\n");
 }
 
 export async function handleMemoryCommand(host: MemoryCommandHost, text: string): Promise<void> {
 	const args = text.replace(/^\/memory\b/, "").trim();
-	const [action = "drift", target] = args.split(/\s+/).filter(Boolean);
+	const [action = "drift", target, ...rest] = args.split(/\s+/).filter(Boolean);
 	if (action === "drift" || action === "") {
 		const entries = await host.memoryDriftReport();
 		if (entries.length === 0) {
@@ -94,7 +112,23 @@ export async function handleMemoryCommand(host: MemoryCommandHost, text: string)
 		return;
 	}
 	if (action === "history") {
-		host.showText(describeHistory(host.getTranscriptHistoryStatus()));
+		if (target === undefined) {
+			host.showText(describeHistory(host.getTranscriptHistoryStatus()));
+			return;
+		}
+		// Forgetting revokes a session's derived summaries for good; the repeated session id is the confirmation.
+		const [sessionId, repeated] = rest;
+		if (target !== "forget" || sessionId === undefined || repeated !== sessionId || rest.length !== 2) {
+			host.showError(
+				target === "forget"
+					? "Repeat the session id to confirm: /memory history forget <session> <session>"
+					: MEMORY_COMMAND_USAGE,
+			);
+			return;
+		}
+		const result = await host.forgetHistorySession(sessionId);
+		if (result.ok) host.showStatus(result.message);
+		else host.showError(result.message);
 		return;
 	}
 	if (action === "accept" || action === "restore") {

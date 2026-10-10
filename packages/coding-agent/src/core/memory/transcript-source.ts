@@ -13,17 +13,24 @@ import type { FileEntry } from "../../kernel/session/session-manager.ts";
 import { collectSessionBranch } from "../../kernel/session/session-tree.ts";
 import { hasSecretLikeText } from "../security/secret-text.ts";
 import {
+	formatTranscriptLineageDigest,
 	formatTranscriptSourceHandle,
 	parseTranscriptSourceHandle,
+	sameTranscriptSource,
 	splitUtf8,
+	TRANSCRIPT_LINEAGE_DIGEST_MODULUS,
 	TRANSCRIPT_MAX_PARTS_PER_ENTRY,
 	TRANSCRIPT_PART_MAX_BYTES,
 	TRANSCRIPT_RECALL_PAGE_MARKER,
+	TRANSCRIPT_RECALL_RESULT_MARKER,
 	type TranscriptCaptureRole,
 	type TranscriptLineage,
 	type TranscriptSourceSpan,
 	type TranscriptUncapturedReason,
+	transcriptCaptureIdentity,
+	transcriptCaptureInputs,
 	transcriptDigest,
+	transcriptLineageTerm,
 	utf8ByteLength,
 } from "./transcript-memory-contracts.ts";
 
@@ -177,8 +184,20 @@ export function captureEntry(entry: SessionEntry, projectId: string, sessionId: 
 		return finish([]);
 	}
 	if (entry.type !== "message") return undefined;
+	// A history read's result is recalled evidence: capturing it again would make the system index and
+	// summarize its own recall. The canonical entry stays as it is; only its derived capture is left out.
+	const message: unknown = entry.message;
+	if (
+		isRecord(message) &&
+		message.role === "toolResult" &&
+		isRecord(message.details) &&
+		message.details[TRANSCRIPT_RECALL_RESULT_MARKER] === true
+	) {
+		note("recalled_history");
+		return finish([]);
+	}
 
-	const units = messageUnits(entry.message, uncaptured);
+	const units = messageUnits(message, uncaptured);
 	if (units === undefined) {
 		note("other_message_role");
 		return finish([]);
@@ -211,16 +230,20 @@ export function captureEntry(entry: SessionEntry, projectId: string, sessionId: 
 			}
 			const chunk = chunks[index] ?? "";
 			const span: TranscriptSourceSpan = {
-				ref: { projectId, sessionId, entryId: entry.id, part: parts.length, digest: transcriptDigest(chunk) },
+				ref: { projectId, sessionId, entryId: entry.id, part: parts.length, digest: "" },
 				role: unit.role,
 				lineage: "selected",
 				bytes: utf8ByteLength(chunk),
+				textDigest: transcriptDigest(chunk),
 			};
 			if (typeof entry.timestamp === "string") span.timestamp = entry.timestamp;
 			if (entry.origin === "local") span.origin = "host";
 			if (unit.toolName !== undefined) span.toolName = unit.toolName;
 			if (unit.toolCallId !== undefined) span.toolCallId = unit.toolCallId;
 			if (unit.isError !== undefined) span.isError = unit.isError;
+			// The identity binds the text and the metadata just attached, through the same input builder the
+			// verifier (`isCurrentCaptureIdentity`) uses.
+			span.ref.digest = transcriptCaptureIdentity(transcriptCaptureInputs(span, chunk));
 			parts.push({ span, text: chunk });
 		}
 	}
@@ -242,6 +265,11 @@ export class SessionCaptureState {
 	private count = 0;
 	private branchIds: string[] = [];
 	private selectedList: CapturedSpan[] = [];
+	/**
+	 * `termPrefix[i]`: sum of the lineage terms of `selectedList[0..i)`, modulo 2^128. Extended lazily up to the
+	 * furthest position a range check needed; an append leaves it valid, a lineage rebuild resets it.
+	 */
+	private termPrefix: bigint[] = [0n];
 	private lineageHash: Hash | undefined;
 	private digestValue = transcriptDigest("");
 
@@ -320,6 +348,7 @@ export class SessionCaptureState {
 		if (!grew || hash === undefined) {
 			hash = createHash("sha256");
 			this.selectedList = [];
+			this.termPrefix = [0n];
 			from = 0;
 		}
 		for (let position = from; position < ids.length; position++) {
@@ -341,6 +370,38 @@ export class SessionCaptureState {
 				if (part.span.lineage !== lineage) part.span = { ...part.span, lineage };
 			}
 		}
+	}
+
+	/**
+	 * The first selected-lineage position whose part differs from `previous` (an earlier selected list of this
+	 * session): positions before it hold the same sources. When one list is a prefix of the other it is the shorter
+	 * length. The lowest position a lineage change can have affected.
+	 */
+	firstChangedPosition(previous: readonly CapturedSpan[]): number {
+		const shared = Math.min(previous.length, this.selectedList.length);
+		for (let position = 0; position < shared; position++) {
+			const before = previous[position];
+			const after = this.selectedList[position];
+			if (!before || !after || !sameTranscriptSource(before.span.ref, after.span.ref)) return position;
+		}
+		return shared;
+	}
+
+	/**
+	 * The lineage range digest of `count` selected-lineage parts from `fromIndex`: the same value as
+	 * `transcriptLineageRangeDigest(fromIndex, refs)` of the parts there, read from prefix sums, so a check costs
+	 * O(1) once the prefix reaches the range. Undefined when the lineage is shorter than the range.
+	 */
+	rangeDigest(fromIndex: number, count: number): string | undefined {
+		const to = fromIndex + count;
+		if (to > this.selectedList.length) return undefined;
+		for (let position = this.termPrefix.length - 1; position < to; position++) {
+			const part = this.selectedList[position];
+			if (!part) return undefined;
+			const sum = (this.termPrefix[position] ?? 0n) + transcriptLineageTerm(position, part.span.ref);
+			this.termPrefix.push(sum % TRANSCRIPT_LINEAGE_DIGEST_MODULUS);
+		}
+		return formatTranscriptLineageDigest((this.termPrefix[to] ?? 0n) - (this.termPrefix[fromIndex] ?? 0n));
 	}
 
 	spans(): CapturedSpan[] {

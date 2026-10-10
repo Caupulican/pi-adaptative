@@ -11,7 +11,8 @@
  * allow-list cannot leak a field it was never told to copy.
  */
 
-import type { TranscriptCoverage } from "../memory/transcript-memory-contracts.ts";
+import { MEMORY_RETRIEVAL_DISABLED_REASON, type TranscriptCoverage } from "../memory/transcript-memory-contracts.ts";
+import type { TranscriptSummaryHeldByKind, TranscriptSummaryHoldKind } from "../memory/transcript-summary-store.ts";
 import type { MemoryPolicyRejectionReason } from "./memory-provider-contract.ts";
 import type { MemoryProviderRetrievalStatus, MemoryRetrievalReport } from "./memory-retrieval.ts";
 
@@ -154,8 +155,15 @@ export interface TranscriptHierarchyAdmission {
 	blocked?: { kind: TranscriptHierarchyBlockKind; reason: string };
 	/** Model-summary jobs held before any provider call. */
 	heldJobs: number;
+	/** The FIRST hold's kind (a fixed class, safe in diagnostics); statements about all held jobs use `heldByKind`. */
+	heldKind?: TranscriptSummaryHoldKind;
+	/** Held jobs counted per hold kind (fixed classes and counts, safe in diagnostics); present when `heldJobs > 0`. */
+	heldByKind?: TranscriptSummaryHeldByKind;
+	/** The hold's real cause in words (operator view only). */
 	heldReason?: string;
 	judgments: { accepted: number; rejected: number; uncertain: number; unavailable: number };
+	/** Reuses of a kept acceptance published again without a new judgment (events, not distinct acceptances); never counted in `judgments`. */
+	reused: number;
 	/** Accepted model summaries without a current admission: never shown or expanded as approved. */
 	unapprovedNodes: number;
 	readmission: {
@@ -167,6 +175,9 @@ export interface TranscriptHierarchyAdmission {
 		waitingFor: Partial<Record<string, number>>;
 	};
 }
+
+/** How approved stored summaries are read (see {@link TranscriptHierarchyStatus.readAccess}). */
+export type TranscriptHierarchyReadAccess = "coordinator" | "read_only_view" | "forbidden" | "unavailable";
 
 /** The summary hierarchy as the operator sees it; the diagnostic projection is derived from it. */
 export interface TranscriptHierarchyStatus {
@@ -181,13 +192,29 @@ export interface TranscriptHierarchyStatus {
 	failures: { level: number; reason: string; message: string; at: number }[];
 	/** Recovery states found while loading derived state, in words (operator view only). */
 	recoveryIssues: string[];
-	acceptedNodes: number;
+	/** Accepted summary nodes the running coordinator holds; absent when no coordinator counts them. */
+	acceptedNodes?: number;
+	/**
+	 * How approved stored summaries are read right now: through the running coordinator, through the read-only
+	 * view (construction off; reads need no model, admission or egress), refused by policy, or not at all.
+	 */
+	readAccess?: TranscriptHierarchyReadAccess;
+	/** The real cause behind `readAccess` (operator view only). */
+	readAccessReason?: string;
 	admission?: TranscriptHierarchyAdmission;
 	retention?: TranscriptHierarchyRetention;
 	/** Parents being derived again after a revocation: those ranges are covered by their children meanwhile. */
 	pendingParentRederivations?: number;
-	/** Spent attempt budgets kept for pruned failed jobs (`refused`: past `bound`, those budgets are unprotected). */
-	spentAttempts?: { recorded: number; bound: number; refused: number };
+	/**
+	 * Durable terminal-proof capacity: `recorded` proof records (spent and reserved) of `bound`, `reserved` held by
+	 * admitted jobs that have not ended, and the durable saturation hold that keeps new summary work from starting.
+	 */
+	spentAttempts?: {
+		recorded: number;
+		reserved: number;
+		bound: number;
+		hold?: { cause: "capacity" | "possibly_lost_proof"; since: string };
+	};
 	lastRevocation?: TranscriptHierarchyRevocation;
 	/** Why the latest committed request did or did not carry the history frontier. */
 	frontierState?: string;
@@ -200,11 +227,19 @@ export interface TranscriptHierarchyStatus {
 		coveredThroughIndex: number;
 	};
 	recentBatches: TranscriptHierarchyBatch[];
+	/**
+	 * The coordinator's latest internal cause (re-admission waits, discarded judgments, unread sources, save
+	 * failures) and the ISO time it was recorded at: one slot the next cause overwrites, not cleared when the
+	 * condition ends. The cause is bounded in bytes, a cut cause ending with a truncation marker. Operator view only:
+	 * it may embed a block reason or a path, so the diagnostic projection never carries it.
+	 */
+	lastInternalError?: { cause: string; at: string };
 }
 
 /** What the operator-facing view knows about history recall; the diagnostic projection is derived from it. */
 export interface TranscriptHistoryStatus {
-	availability: "disabled" | "unavailable" | "loading" | "active";
+	/** `on_demand`: the index is bound but not started; the first history request starts it (it may answer `pending`). */
+	availability: "disabled" | "unavailable" | "on_demand" | "loading" | "active";
 	/** Why the index is unavailable (real cause). Operator view only. */
 	unavailableReason?: string;
 	/** Absent while the index is loading or when the backend is unavailable. */
@@ -254,14 +289,19 @@ export interface TranscriptTransportDiagnostics {
 	readTimeouts?: { count: number; lastAt: string };
 }
 
-/** Allow-list projection of the hierarchy: counts and fixed failure classes only, never a cause text or a path. */
+/**
+ * Allow-list projection of the hierarchy: counts and fixed failure classes only, never a cause text or a path
+ * (so neither `disabledReason`, `readAccessReason`, failure messages, recovery issues nor `lastInternalError`).
+ */
 export interface TranscriptHierarchyDiagnostics {
 	state: TranscriptHierarchyStatus["state"];
 	counts: Record<string, number>;
 	oldestBacklogAgeMs?: number;
 	failureClasses: ReasonCount[];
 	recoveryIssueCount: number;
-	acceptedNodes: number;
+	acceptedNodes?: number;
+	/** The fixed read-access class only; never its cause text. */
+	readAccess?: TranscriptHierarchyReadAccess;
 	/** Counts and the fixed block class only; never the cause text. */
 	admission?: Omit<TranscriptHierarchyAdmission, "blocked" | "heldReason"> & {
 		blockedKind?: TranscriptHierarchyBlockKind;
@@ -359,14 +399,20 @@ function sanitizeHierarchyForDiagnostics(status: TranscriptHierarchyStatus): Tra
 		...(status.oldestBacklogAgeMs !== undefined ? { oldestBacklogAgeMs: status.oldestBacklogAgeMs } : {}),
 		failureClasses: topReasons(classes),
 		recoveryIssueCount: status.recoveryIssues.length,
-		acceptedNodes: status.acceptedNodes,
+		...(status.acceptedNodes !== undefined ? { acceptedNodes: status.acceptedNodes } : {}),
+		...(status.readAccess !== undefined ? { readAccess: status.readAccess } : {}),
 		...(status.admission
 			? {
 					admission: {
 						contractVersion: status.admission.contractVersion,
 						...(status.admission.blocked ? { blockedKind: status.admission.blocked.kind } : {}),
 						heldJobs: status.admission.heldJobs,
+						...(status.admission.heldKind !== undefined ? { heldKind: status.admission.heldKind } : {}),
+						...(status.admission.heldByKind !== undefined
+							? { heldByKind: { ...status.admission.heldByKind } }
+							: {}),
 						judgments: { ...status.admission.judgments },
+						reused: status.admission.reused,
 						unapprovedNodes: status.admission.unapprovedNodes,
 						readmission: { ...status.admission.readmission },
 					},
@@ -376,7 +422,14 @@ function sanitizeHierarchyForDiagnostics(status: TranscriptHierarchyStatus): Tra
 		...(status.pendingParentRederivations !== undefined
 			? { pendingParentRederivations: status.pendingParentRederivations }
 			: {}),
-		...(status.spentAttempts ? { spentAttempts: { ...status.spentAttempts } } : {}),
+		...(status.spentAttempts
+			? {
+					spentAttempts: {
+						...status.spentAttempts,
+						...(status.spentAttempts.hold ? { hold: { ...status.spentAttempts.hold } } : {}),
+					},
+				}
+			: {}),
 		...(status.lastRevocation ? { lastRevocation: { ...status.lastRevocation } } : {}),
 		...(status.frontierState ? { frontierState: status.frontierState } : {}),
 		...(status.frontier ? { frontier: { ...status.frontier } } : {}),
@@ -406,7 +459,7 @@ export function formatTranscriptMemoryLines(diagnostics: TranscriptMemoryDiagnos
 			lines.push(`  a failing source last became readable again at ${coverage.lastRecoveryAt}`);
 	} else {
 		lines.push(
-			`History recall: ${diagnostics.availability}${diagnostics.availability === "active" ? "; coverage not yet reported" : ""}`,
+			`History recall: ${diagnostics.availability}${diagnostics.availability === "active" ? "; coverage not yet reported" : diagnostics.availability === "on_demand" ? "; the index starts on the first history request" : ""}`,
 		);
 	}
 	const transport = diagnostics.transport;
@@ -436,20 +489,38 @@ const BLOCK_SENTENCES: Readonly<Record<TranscriptHierarchyBlockKind, string>> = 
 	admission_not_calibrated: "the bound evaluator does not report calibrated probabilities",
 };
 
+/** Hold kinds that never hold an exact copy: only model summary work waits under them. */
+const EXACT_COPY_SPARING_HOLDS: ReadonlySet<string> = new Set<TranscriptSummaryHoldKind>(["model_work", "children"]);
+
+/** ` (kind n, kind n)` for every hold kind holding jobs, or "" when the counts are not known. */
+function describeHeldByKind(heldByKind: TranscriptSummaryHeldByKind | undefined): string {
+	const counts = Object.entries(heldByKind ?? {}).filter(([, count]) => (count ?? 0) > 0);
+	return counts.length === 0 ? "" : ` (${counts.map(([kind, count]) => `${kind} ${count}`).join(", ")})`;
+}
+
 function formatAdmissionLines(admission: TranscriptHierarchyDiagnostics["admission"]): string[] {
 	if (!admission) return [];
 	const lines: string[] = [];
+	const held =
+		admission.heldJobs > 0 ? `${admission.heldJobs} summary job(s)${describeHeldByKind(admission.heldByKind)}` : "";
 	if (admission.blockedKind) {
+		// Exact copies flow only when every held job waits under a hold that spares them; with unknown counts, unclaimed.
+		const exactCopiesFlow =
+			admission.heldJobs === 0 ||
+			(admission.heldByKind !== undefined &&
+				Object.entries(admission.heldByKind).every(
+					([kind, count]) => (count ?? 0) === 0 || EXACT_COPY_SPARING_HOLDS.has(kind),
+				));
 		lines.push(
-			`  model summaries are held (${BLOCK_SENTENCES[admission.blockedKind]}); exact copies and exact history recall are unaffected${admission.heldJobs > 0 ? `; ${admission.heldJobs} job(s) waiting` : ""}`,
+			`  model summaries are held (${BLOCK_SENTENCES[admission.blockedKind]}); ${exactCopiesFlow ? "exact copies and exact history recall are unaffected" : "exact history recall is unaffected"}${held ? `; ${held} waiting` : ""}`,
 		);
 	} else if (admission.heldJobs > 0) {
-		lines.push(`  ${admission.heldJobs} model summary job(s) held until their child summaries are admitted`);
+		lines.push(`  ${held} held`);
 	}
 	const judged = admission.judgments;
-	if (judged.accepted + judged.rejected + judged.uncertain + judged.unavailable > 0) {
+	if (judged.accepted + judged.rejected + judged.uncertain + judged.unavailable + admission.reused > 0) {
 		lines.push(
-			`  summary admission (contract ${admission.contractVersion}): ${judged.accepted} accepted, ${judged.rejected} rejected, ${judged.uncertain} uncertain, ${judged.unavailable} evaluator-unavailable`,
+			`  summary admission (contract ${admission.contractVersion}): ${judged.accepted} accepted, ${judged.rejected} rejected, ${judged.uncertain} uncertain, ${judged.unavailable} evaluator-unavailable${admission.reused > 0 ? `; ${admission.reused} reuse(s) of a kept acceptance without a new judgment` : ""}`,
 		);
 	}
 	if (admission.unapprovedNodes > 0) {
@@ -465,14 +536,23 @@ function formatAdmissionLines(admission: TranscriptHierarchyDiagnostics["admissi
 	return lines;
 }
 
+const READ_ACCESS_SENTENCES: Readonly<Record<TranscriptHierarchyReadAccess, string>> = {
+	coordinator: "approved summaries are read through the running hierarchy",
+	read_only_view:
+		"approved stored summaries are readable on demand through a read-only view; no summaries are being built, and reading them needs no model, admission or egress",
+	forbidden: `refused: ${MEMORY_RETRIEVAL_DISABLED_REASON}`,
+	unavailable: "unavailable: stored summaries cannot be read in this session right now",
+};
+
 function formatHierarchyLines(hierarchy: TranscriptHierarchyDiagnostics): string[] {
 	const counts = Object.entries(hierarchy.counts)
 		.filter(([, count]) => count > 0)
 		.map(([state, count]) => `${state}=${count}`)
 		.join(", ");
 	const lines = [
-		`History hierarchy: ${hierarchy.state}; ${hierarchy.acceptedNodes} accepted node(s); jobs ${counts || "none"}${hierarchy.oldestBacklogAgeMs !== undefined ? `; oldest backlog ${Math.round(hierarchy.oldestBacklogAgeMs / 1000)}s` : ""}`,
+		`History hierarchy: ${hierarchy.state}${hierarchy.acceptedNodes !== undefined ? `; ${hierarchy.acceptedNodes} accepted node(s)` : ""}; jobs ${counts || "none"}${hierarchy.oldestBacklogAgeMs !== undefined ? `; oldest backlog ${Math.round(hierarchy.oldestBacklogAgeMs / 1000)}s` : ""}`,
 	];
+	if (hierarchy.readAccess) lines.push(`  summary reads: ${READ_ACCESS_SENTENCES[hierarchy.readAccess]}`);
 	if (hierarchy.frontierState) lines.push(`  history frontier in the latest request: ${hierarchy.frontierState}`);
 	if (hierarchy.frontier) {
 		lines.push(
@@ -506,11 +586,18 @@ function formatHierarchyLines(hierarchy: TranscriptHierarchyDiagnostics): string
 			);
 		}
 	}
-	if (hierarchy.spentAttempts && (hierarchy.spentAttempts.recorded > 0 || hierarchy.spentAttempts.refused > 0)) {
+	if (hierarchy.spentAttempts && (hierarchy.spentAttempts.recorded > 0 || hierarchy.spentAttempts.hold)) {
 		const spent = hierarchy.spentAttempts;
 		lines.push(
-			`  ${spent.recorded} spent attempt budget(s) kept for pruned failed jobs (bound ${spent.bound})${spent.refused > 0 ? `; ${spent.refused} could not be kept, so those jobs would get a fresh budget` : ""}`,
+			`  terminal-proof capacity: ${spent.recorded} of ${spent.bound} record(s) held, ${spent.reserved} reserved by running jobs`,
 		);
+		if (spent.hold) {
+			lines.push(
+				spent.hold.cause === "capacity"
+					? `  new summary work held since ${spent.hold.since}: terminal-proof capacity full; exact history recall is unaffected`
+					: `  possibly lost proof (legacy ledger full or damaged): sessions started before ${spent.hold.since} get no new summary work; exact history recall is unaffected`,
+			);
+		}
 	}
 	if (hierarchy.lastRevocation) {
 		const revocation = hierarchy.lastRevocation;

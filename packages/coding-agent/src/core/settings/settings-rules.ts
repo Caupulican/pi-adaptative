@@ -820,6 +820,11 @@ export function isValidMemorySystem(value: unknown): value is MemorySystem {
 	return typeof value === "string" && (value === "okf" || value === "icm");
 }
 
+/** The mandatory default: legacy OKF memory runs only when explicitly selected. */
+export function resolveMemorySystem(value: unknown): MemorySystem {
+	return isValidMemorySystem(value) ? value : "icm";
+}
+
 export const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 
 export function isThinkingLevel(value: unknown): value is ThinkingLevel {

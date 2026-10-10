@@ -12,6 +12,7 @@ import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import { builtinBoundary } from "./builtin-boundary.ts";
 import { type SqliteFaultOperation, VirtualSqlite } from "./sqlite-io.ts";
+import { VirtualWorkerThreads } from "./virtual-worker.ts";
 
 interface VirtualNode {
 	kind: "file" | "directory" | "symlink";
@@ -114,6 +115,12 @@ export class VirtualFileSystem {
 	private revision = Date.now();
 	private readonly faults: Array<{ readonly fault: IoFault; remaining: number }> = [];
 	readonly consumedFaults: string[] = [];
+	/** Scenario conditions re-read after each modeled mutation; see {@link waitForMutation}. */
+	private readonly mutationWaiters = new Set<{
+		readonly holds: () => boolean;
+		readonly resolve: () => void;
+		readonly reject: (error: unknown) => void;
+	}>();
 
 	constructor(cwd = "/harness/project") {
 		this.cwd = resolve(cwd);
@@ -525,6 +532,17 @@ export class VirtualFileSystem {
 		if (typeof fd !== "number" || !this.descriptors.delete(fd)) throw ioError("EBADF", String(fd));
 	}
 
+	/**
+	 * Event-driven wait for durable state: `holds` is evaluated now and then on a later turn after every modeled mutation
+	 * (write, rename, removal), never on a timer. The caller bounds the wait with its own deadline.
+	 */
+	waitForMutation(holds: () => boolean): Promise<void> {
+		if (holds()) return Promise.resolve();
+		return new Promise((resolve, reject) => {
+			this.mutationWaiters.add({ holds, resolve, reject });
+		});
+	}
+
 	assertNoOpenResources(): void {
 		if (this.descriptors.size || this.watchers.size || this.streams.size || this.directories.size) {
 			throw new Error(
@@ -819,6 +837,21 @@ export class VirtualFileSystem {
 	private note(kind: string, path: string): void {
 		this.operations.push({ kind, path });
 		if (!WATCH_CHANGE_OPERATIONS.has(kind)) return;
+		if (this.mutationWaiters.size > 0) {
+			// A later turn: the owner that wrote finishes its synchronous bookkeeping before the condition is read.
+			setImmediate(() => {
+				for (const waiter of [...this.mutationWaiters]) {
+					try {
+						if (!waiter.holds()) continue;
+						this.mutationWaiters.delete(waiter);
+						waiter.resolve();
+					} catch (error) {
+						this.mutationWaiters.delete(waiter);
+						waiter.reject(error);
+					}
+				}
+			});
+		}
 		for (const record of this.watchers) {
 			if (
 				record.path === path ||
@@ -853,12 +886,14 @@ export class EffectGuard {
 	private readonly ports: EffectPorts;
 	private readonly restore: Array<() => void> = [];
 	private readonly sqlite: VirtualSqlite;
+	private readonly workerThreads: VirtualWorkerThreads;
 	private installed = false;
 
 	constructor(io: VirtualFileSystem, ports: EffectPorts = {}) {
 		this.io = io;
 		this.ports = ports;
 		this.sqlite = new VirtualSqlite(io, (kind) => this.reject(kind));
+		this.workerThreads = new VirtualWorkerThreads((kind) => this.reject(kind));
 	}
 
 	install(): void {
@@ -920,11 +955,9 @@ export class EffectGuard {
 			this.replace(net.Socket.prototype, "connect", reject("net.Socket.connect"));
 			this.replace(net.Server.prototype, "listen", reject("net.Server.listen"));
 			this.replace(tls, "connect", reject("tls.connect"));
-			const threads = process.getBuiltinModule("node:worker_threads");
-			if (threads) {
-				const blocked = reject("worker_threads.Worker");
-				const Worker = (...arguments_: unknown[]) => blocked(...arguments_);
-				builtinBoundary.set("workerThreads", { Worker });
+			// A constructible class: the boundary reaches it through Reflect.construct, so a refusal is recorded, never a TypeError.
+			if (process.getBuiltinModule("node:worker_threads")) {
+				builtinBoundary.set("workerThreads", { Worker: this.workerThreads.Worker });
 			}
 			const sqlite = process.getBuiltinModule("node:sqlite");
 			if (sqlite) {
@@ -962,6 +995,17 @@ export class EffectGuard {
 		if (failures.length) throw new AggregateError(failures, "External effect boundary violations");
 	}
 
+	/** Every started worker exited through its owner, and every scripted worker intercept was reached. */
+	assertWorkersSettled(): void {
+		this.workerThreads.assertNoLiveWorkers();
+		this.workerThreads.assertNoPendingIntercepts();
+	}
+
+	/** The world's worker-thread boundary, for scenario observation of started workers and their inbound requests. */
+	get threads(): VirtualWorkerThreads {
+		return this.workerThreads;
+	}
+
 	assertNoOpenSqliteHandles(): void {
 		const handles = this.sqlite.openHandles();
 		if (handles.length) throw new Error(`Application SQLite handles leaked: ${handles.join(", ")}`);
@@ -978,6 +1022,7 @@ export class EffectGuard {
 	dispose(): void {
 		this.installed = false;
 		const failures: unknown[] = [];
+		this.workerThreads.cutoff();
 		try {
 			this.sqlite.dispose();
 		} catch (error) {

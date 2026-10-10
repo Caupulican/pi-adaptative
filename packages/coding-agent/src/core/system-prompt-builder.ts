@@ -306,9 +306,9 @@ export class SystemPromptBuilder {
 		return "PI TOOL APPLICABILITY: active means available, not required. Use extension/project/account tools when the current request asks for the service, its data or its action; naming the tool is not required, and when unsure you decide. Tool-specific guidance cannot widen this gate. Cwd, repository, project name, prior session, wildcard profile, inferred dependence, and tool guidance alone are not triggers. Missing optional credentials never block unrelated work or justify speculative secret_store use.";
 	}
 
-	/** True when the configured memory system is ICM (Interleaved Context Memory). */
+	/** True when the configured memory system is Intentional Context Management (ICM). */
 	private isIcmMode(): boolean {
-		return this.deps.getSettingsManager().getMemorySystem?.() === "icm";
+		return this.deps.getSettingsManager().getMemorySystem() === "icm";
 	}
 
 	private _buildProjectInstructionIsolationPrompt(profile: ModelCapabilityProfile): string | undefined {
@@ -386,7 +386,7 @@ export class SystemPromptBuilder {
 - ${DELEGATION_DECISION_RULE}
 - For useful delegation, start or reuse a suitable idle worker before doing its task yourself. Give scope, expected evidence, and write ownership; do not duplicate running or queued work.
 - Use targeted assignments for specific worker tasks; broadcast is for common coordination evidence only.
-- Worker memory access is read-only via the memory_read broker; root memory owns mutation and lifecycle.
+- ${this.isIcmMode() ? "Worker memory access is read-only via the memory_read broker: past-conversation history only; ICM catalog files follow the worker's ordinary file grants." : "Worker memory access is read-only via the memory_read broker; root memory owns mutation and lifecycle."}
 - Respect explicit user restrictions and granted authority; do not ask for redundant permission. Never bypass admission or change settings to force a worker. If admission fails, use the reported reason to choose safe local progress or report a genuine blocker.
 - Continue parent work while workers run; wait only at a true dependency, then inspect status and handoffs event-driven.
 - Parent owns integration, verification, security and approval decisions, and writes unless authority explicitly grants worker writes.

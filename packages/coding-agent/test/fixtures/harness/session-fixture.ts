@@ -443,7 +443,8 @@ export class ScriptedSystemOneTransport {
 			}
 		}
 		if (rejected.length > 0) {
-			const detail = `${phase}: System One questions without an explicit judgment: ${rejected.join(", ")}`;
+			// A bounded excerpt of the decoded state names which production request asked, so the close is diagnosable.
+			const detail = `${phase}: System One questions without an explicit judgment: ${rejected.join(", ")} (state: ${JSON.stringify(body.state).slice(0, 600)})`;
 			this.unscripted.push(detail);
 			throw new Error(detail);
 		}
@@ -2026,6 +2027,8 @@ export class HarnessWorld {
 			// The owner's model favorites: the router pool that delegation admits workers from is built from them.
 			this.baseSettings = {
 				modelFavorites: SCRIPTED_TRACKS.map((modelId) => ({ provider: HARNESS_PROVIDER, modelId })),
+				// These journeys exercise legacy memory and reflection; production defaults to ICM.
+				memorySystem: "okf",
 				...options.settings,
 				systemOne: { ...options.settings?.systemOne, enabled: options.systemOneEnabled },
 			};
@@ -2065,18 +2068,29 @@ export class HarnessWorld {
 			 * omitted on win32 (the world's POSIX shell is not the platform shell there) and kept on POSIX hosts.
 			 */
 			readonly omitShellOperations?: boolean;
+			/**
+			 * Settings of this session only, layered over the world's: the session gets its own manager, so a change it makes
+			 * (a memory-system switch, a policy override) never reaches another session. A key set to `undefined` is absent
+			 * in the stored settings (the in-memory store serializes through JSON), so it exercises the production default.
+			 */
+			readonly settings?: Partial<Settings>;
 		} = {},
-	): Promise<{ session: AgentSession; sessionManager: SessionManager }> {
+	): Promise<{ session: AgentSession; sessionManager: SessionManager; settingsManager: SettingsManager }> {
 		const sessionManager = options.sessionManager ?? SessionManager.inMemory(HARNESS_PROJECT_CWD);
 		const systemOneEnabled = options.systemOneEnabled ?? this.systemOne.enabled;
 		const omitShellOperations = options.omitShellOperations ?? process.platform === "win32";
-		// A session that selects the other mode gets its own settings clone; every other setting is the world's.
+		// A session that selects the other mode or its own settings gets its own settings clone; every other setting is the world's.
 		const settingsManager =
-			systemOneEnabled === this.systemOne.enabled
+			systemOneEnabled === this.systemOne.enabled && options.settings === undefined
 				? this.settingsManager
 				: SettingsManager.inMemory({
 						...this.baseSettings,
-						systemOne: { ...this.baseSettings?.systemOne, enabled: systemOneEnabled },
+						...options.settings,
+						systemOne: {
+							...this.baseSettings?.systemOne,
+							...options.settings?.systemOne,
+							enabled: systemOneEnabled,
+						},
 					});
 		// The manager's previous window ends here; this binding's window begins with the intent entries the manager holds before it runs.
 		const intentBefore = optionalIntentSnapshot(sessionManager);
@@ -2145,17 +2159,17 @@ export class HarnessWorld {
 		if ((session.systemOneController !== undefined) !== systemOneEnabled) {
 			throw new Error(`System One ${systemOneEnabled ? "on" : "off"} session binding mismatch`);
 		}
-		return { session, sessionManager };
+		return { session, sessionManager, settingsManager };
 	}
 
 	/** A file-backed session manager; its session file is written to the virtual tree on the first reply. */
-	createSessionManager(): SessionManager {
-		return SessionManager.create(HARNESS_PROJECT_CWD, this.agentDir);
+	createSessionManager(agentDir = this.agentDir): SessionManager {
+		return SessionManager.create(HARNESS_PROJECT_CWD, agentDir);
 	}
 
 	/** Reopens a session file written earlier in this world, as its owner would after a restart. */
-	openSessionManager(file: string): SessionManager {
-		return SessionManager.open(file, this.agentDir);
+	openSessionManager(file: string, agentDir = this.agentDir): SessionManager {
+		return SessionManager.open(file, agentDir);
 	}
 
 	/** Reads a descriptor the scenario opened earlier: a positional read sees the node the descriptor was opened on. */
@@ -2317,6 +2331,8 @@ export class HarnessWorld {
 				() => this.io.assertNoOpenResources(),
 				// Application connections must be released by their owners after the sessions above are disposed.
 				() => this.guard.assertNoOpenSqliteHandles(),
+				// Every started worker thread must have been terminated or closed by its owner, and every scripted intercept reached.
+				() => this.guard.assertWorkersSettled(),
 				() => this.processTable.assertClean(),
 				() => this.io.assertFaultsConsumed(),
 				() => this.guard.assertSqliteFaultsConsumed(),
