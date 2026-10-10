@@ -1,6 +1,5 @@
 #!/bin/sh
 
-# Staged-scoped gates only (guards, staged formatting, contract doctrine, conditional browser-smoke
-# tooling tests and one project type check). The full `npm run check` chain runs in CI and before
-# a release, never here.
+# Staged-scoped non-test gates only (guards, staged formatting, contract doctrine, browser-impact
+# reporting and one project type check). Tests are run separately under the owner's three-journey limit.
 node scripts/precommit-staged.mjs

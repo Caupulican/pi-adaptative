@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated Claude OAuth client identity to 2.1.296 for reviewed installations and packaged fallback compatibility.
+
 ## [0.103.7] - 2026-10-09
 
 ## [0.103.6] - 2026-10-07

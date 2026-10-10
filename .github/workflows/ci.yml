@@ -1,8 +1,7 @@
 name: CI
 
-# Build and check on Linux and Windows, including provider regressions and the three harness
-# journeys. The release tag reuses these jobs through build-binaries.yml's quality-gate;
-# release-ci-proof.mjs requires successful matrix jobs and their named evidence steps.
+# Build, static checks and only the three existing harness journeys. The release verifier retains
+# its separately required evidence and therefore cannot certify a release under this test limit.
 on:
   push:
     branches: [main]
@@ -16,7 +15,7 @@ on:
         required: false
         type: string
       full_suite:
-        description: Kept for callers; build and check always run in full
+        description: Kept for callers; automatic tests remain limited to the three harness journeys
         required: false
         type: boolean
         default: false
@@ -81,20 +80,8 @@ jobs:
         if: runner.os == 'Linux'
         run: npm run check
 
-      - name: Provider regressions
-        run: npm run check:provider-regressions
-
       - name: Harness journeys
-        # Surface orchestration admission failures before the two real five-minute owner deadlines.
-        # The focused run never replaces the complete three-case, on/off journey proof.
-        run: npm exec --workspace packages/coding-agent -- vitest run test/harness-interactions.test.ts -t orchestration && npm exec --workspace packages/coding-agent -- vitest run test/harness-interactions.test.ts
-
-      - name: Dependency hardening
-        if: runner.os == 'Windows'
-        run: npm run check:dependency-forks
-
-      - name: Dependency fork installation
-        run: npm run check:sandbox-fork-install
+        run: npm run check:harness-journeys
 
       # A contract test may change only alongside docs/doctrine.md (see contracts.json). The
       # pre-commit chain checks the staged tree; a push is checked over its commit range.

@@ -5,11 +5,13 @@
  * The hook used to run the repo-wide `npm run format` and the whole `npm run check` chain on every
  * commit (about two minutes, most of it on files the commit never touched). This gate looks only at
  * what is staged: the exclude/lockfile guards, biome on the staged files biome.json covers, the
- * contract-doctrine gate (already staged-aware), the browser smoke check when its inputs are staged,
- * and one project type check when a TypeScript source is staged (per-file type checking is unsound:
- * an importer of the changed file can break). Everything else in `npm run check` stays a CI and
- * release gate. The conditional browser smoke check includes focused tooling tests; the hook
- * also reports the branch's last recorded CI verdict (see ci-status.mjs) as a warning.
+ * contract-doctrine gate (already staged-aware), browser-impact reporting, and one project type
+ * check when a TypeScript source is staged (per-file type checking is unsound:
+ * an importer of the changed file can break). The full static check remains separate. Other
+ * validation procedures remain explicit commands. Tests are never launched by this hook: the
+ * owner's allowed tests are the three harness journeys. Browser smoke remains a separate command
+ * and is not authorized by a commit.
+ * The hook also reports the branch's last recorded CI verdict (see ci-status.mjs) as a warning.
  *
  * `--dry-run` prints the plan for the current staged set without running anything.
  */
@@ -95,7 +97,7 @@ export function stagedCopyPath(path) {
 	return `${directory}.precommit-staged-${name}`;
 }
 
-/** Pure planner: staged repo-relative paths plus biome includes → the gates this commit buys. */
+/** Pure planner: staged paths → formatting/type gates and whether browser inputs are affected. */
 export function planStagedGates(staged, options) {
 	const files = staged.map((path) => path.replaceAll("\\", "/"));
 	return {
@@ -215,7 +217,9 @@ export function main(argv = process.argv.slice(2)) {
 		}
 	}
 	run("contract-doctrine gate", process.execPath, [join(scriptsDir, "check-contract-doctrine.mjs")]);
-	if (plan.browserSmoke) run("browser smoke check", "npm", ["run", "check:browser-smoke"]);
+	if (plan.browserSmoke) {
+		process.stdout.write("precommit: browser inputs changed; smoke not run (owner permits only the three harness journeys)\n");
+	}
 	reportCiVerdict();
 	if (plan.typecheck) run("project type check (staged TypeScript source)", process.execPath, [join(scriptsDir, "run-tsc.mjs"), "--noEmit"]);
 	process.stdout.write(`precommit: staged gates passed in ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
