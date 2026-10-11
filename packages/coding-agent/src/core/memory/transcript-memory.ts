@@ -1363,7 +1363,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 					const owed = scheduler.releasedReceiptsState().entries.length;
 					if (owed > 0) {
 						this.noteInternalCause(
-							`${this.lastInternalError?.cause ?? "the owed usage receipts could not be saved"}; ${owed} owed usage receipt(s) are not durable and end with this run`,
+							`the update of the owed-receipt queue (${owed} pending entries) was not saved at stop, so only what an older queue or job record holds survives; cause: ${this.lastInternalError?.cause ?? "the owed usage receipts could not be saved"}`,
 						);
 					}
 				} else if (saved.status !== "saved") {
@@ -4665,6 +4665,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				// Only what the store pruned leaves memory: a failed job it kept for lack of a proof record stays.
 				scheduler.forgetTerminal(saved.pruned);
 				this.proofLedger = saved.ledger;
+				// A forget whose last reservation this save released may now be recordable as applied: the save is the event
+				// that frees it, so the check follows it (no timer, no polling; it writes nothing while session data remains).
+				if (this.live(epoch) && this.forgetRevision > this.forgetAppliedRevision) {
+					void this.enqueue(async () => this.recordForgetApplied(epoch));
+				}
 				// A refused job needs nothing here: its pre-call check finds no record and holds it before any call.
 				if (freed && this.live(this.epoch)) this.releaseProofHolds(this.epoch);
 				if (this.live(epoch)) this.acknowledgeSave(snapshot, scheduler, epoch);
