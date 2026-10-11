@@ -867,6 +867,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private forgetRevision = 0;
 	/** Ready jobs dropped when a forget stopped the session's work, counted by the removal that follows. */
 	private earlyDroppedReady = 0;
+	/** A refresh of the permanent forget state is already queued on the mailbox. */
+	private forgetRefreshQueued = false;
 	/** The forget revision the manifest records as fully applied (a forget file below it is unknown: rollback). */
 	private forgetAppliedRevision = 0;
 	/** When owed usage receipts are tried again (one lifecycle timer), on a bounded backoff. */
@@ -1414,6 +1416,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			this.abortSession(sessionId);
 			this.earlyDroppedReady += this.endSessionJobs(sessionId, "cancelled");
 			const pending = await this.refreshForgetState(scheduled);
+			this.earlyDroppedReady = 0;
 			outcome = pending === undefined ? { status: "forgotten" } : { status: "forgotten", cleanupPending: pending };
 			this.pump(scheduled);
 		});
@@ -1471,10 +1474,14 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		return `dropping the retention records of ${sessionId} could not be written: ${dropped.reason}`;
 	}
 
-	/** The parked (dormant) nodes the forget state denies: the ones naming a forgotten session and the summaries built on them. */
-	private deniedDormantIds(): Set<string> {
-		if (this.forgottenSessions.size === 0) return new Set();
-		const denied = forgottenNodeIds([...this.catalog.values(), ...this.dormant.values()], this.forgottenSessions);
+	/**
+	 * The parked (dormant) nodes the forget state denies (those naming a forgotten session and the summaries built on them);
+	 * with `only`, the ones that session alone denies.
+	 */
+	private deniedDormantIds(only?: string): Set<string> {
+		const forgotten = only === undefined ? this.forgottenSessions : new Set([only]);
+		if (forgotten.size === 0) return new Set();
+		const denied = forgottenNodeIds([...this.catalog.values(), ...this.dormant.values()], forgotten);
 		return new Set([...denied].filter((id) => this.dormant.has(id)));
 	}
 
@@ -1519,6 +1526,16 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 	}
 
+	/** Ask the mailbox to adopt the permanent forget state once: requests that arrive while one is queued share it. */
+	private queueForgetRefresh(epoch: number): void {
+		if (this.forgetRefreshQueued) return;
+		this.forgetRefreshQueued = true;
+		void this.enqueue(async () => {
+			this.forgetRefreshQueued = false;
+			await this.refreshForgetState(epoch);
+		});
+	}
+
 	/** Re-read the permanent forget state (another root may have forgotten a session) and apply what is new. */
 	private async refreshForgetState(epoch: number): Promise<string | undefined> {
 		const read = await this.ports.store.readForgottenSessions();
@@ -1550,7 +1567,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			this.frontiers.has(sessionId) ||
 			(this.catalog.sessionNodes(sessionId)?.size ?? 0) > 0 ||
 			[...this.catalog.values()].some((node) => node.contextRefs.some((ref) => ref.sessionId === sessionId)) ||
-			this.deniedDormantIds().size > 0 ||
+			this.deniedDormantIds(sessionId).size > 0 ||
 			this.catalog.anchoredSessionIds().includes(sessionId) ||
 			(this.scheduler?.holdsSession(sessionId, { liveOnly: true }) ?? false)
 		);
@@ -1902,9 +1919,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		if (forget.status !== "ok") return forget;
 		if (forget.revision !== this.forgetRevision) {
-			void this.enqueue(async () => {
-				await this.refreshForgetState(epoch);
-			});
+			this.queueForgetRefresh(epoch);
 			return {
 				status: "stale_snapshot",
 				reason: `The summary store ${TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT}.`,
@@ -1986,6 +2001,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	/** Everything one run keeps in memory to retry or reuse later (store work, receipt retry timing, paid-claim marks): a start and a halt both drop it. Kept paid verdicts live on the jobs, durably. */
 	private resetRetryState(): void {
 		this.earlyDroppedReady = 0;
+		this.forgetRefreshQueued = false;
 		this.storeRetry = emptyStoreRetry();
 		this.storeRetryAt = undefined;
 		this.storeRetryFailures = 0;
@@ -3234,12 +3250,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			};
 		}
 		if (read.revision !== this.forgetRevision) {
-			// What the store says is denied now holds for this claim at once (every guard below reads this set); the
-			// removal of the derived data follows on the mailbox.
-			for (const forgotten of read.sessions) this.forgottenSessions.add(forgotten);
-			void this.enqueue(async () => {
-				await this.refreshForgetState(epoch);
-			});
+			// What the store says is denied now holds for this claim at once (every guard below reads this set) and stops the
+			// work already running on it; the removal of the derived data follows on the mailbox.
+			const fresh = [...read.sessions].filter((forgotten) => !this.forgottenSessions.has(forgotten));
+			for (const forgotten of fresh) this.forgottenSessions.add(forgotten);
+			for (const forgotten of fresh) this.abortSession(forgotten);
+			this.queueForgetRefresh(epoch);
 		}
 		if (!read.sessions.has(sessionId)) return undefined;
 		return { kind: "stale", reason: `session ${sessionId} was forgotten` };
@@ -3340,10 +3356,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const context = await this.readContext(job, signal, lineageStamp(live));
 		if ("outcome" in context) return context.outcome;
 		const contextRefs = context.items.map((item) => item.span.ref);
-		// No model is sent context from a forgotten session (a forked lineage can carry its parent's spans).
-		if (contextRefs.some((ref) => this.forgottenSessions.has(ref.sessionId))) {
-			return { kind: "stale", reason: "a context span belongs to a forgotten session" };
-		}
 		// Covered spans were verified live above and the context was read from the same lineage.
 		const reusable = this.reusableDormant(
 			leafIdentity({ sessionId: job.sessionId, sourceRefs: refs, contextRefs }),
