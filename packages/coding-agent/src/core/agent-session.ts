@@ -408,6 +408,7 @@ import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
 import { captureSessionTaskDirectoryContext } from "./tasks/task-directory-context.ts";
 import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
+import { writeTerminalWarnings } from "./terminal-warnings.ts";
 import {
 	enforceExplicitOptionalToolRequest,
 	MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS,
@@ -489,6 +490,29 @@ class SubmissionPreflightAborted extends Error {
 	}
 }
 
+/** Most warnings a session holds while no listener is attached. Past it the count is disclosed instead (see takeUndeliveredWarnings). */
+const MAX_UNLISTENED_WARNINGS = 100;
+/**
+ * How long a quitting session waits for its run to settle before the run's handlers are released. The same few seconds the worker's
+ * physical settlement grace uses (worker-attempt-executor.ts). Past it, the run's final message may not be persisted, and that is disclosed.
+ */
+const CLOSING_RUN_SETTLE_MS = 5_000;
+
+/** Resolves true once `run` settles, false when `ms` pass first. The timer is cleared either way. */
+async function runSettlesWithin(run: Promise<void>, ms: number): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			run.then(() => true),
+			new Promise<boolean>((resolve) => {
+				timer = setTimeout(() => resolve(false), ms);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	private readonly sessionManager: SessionManager;
@@ -505,6 +529,10 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _unsubscribeSettingsChanges?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
+	/** Warnings raised while no listener is attached: shown to the first subscriber, or taken by the terminal drain. */
+	private readonly _unlistenedWarnings: string[] = [];
+	private readonly _onClosingWarnings: (warnings: readonly string[]) => void;
+	private _unlistenedWarningsDropped = 0;
 	private _extensionsChangedListeners: Array<() => void> = [];
 
 	/** Steering/follow-up/extension-command queues (see pending-input-queue-controller.ts); assigned
@@ -795,6 +823,7 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this._onClosingWarnings = config.onClosingWarnings ?? writeTerminalWarnings;
 		this._systemOneController = config.systemOneController;
 		// Without a checked catalog nothing is known up front, but a provider's refusal is still recorded.
 		this._accountModels =
@@ -4198,7 +4227,14 @@ export class AgentSession {
 	 * so its host takes them to deliver on the session that survives.
 	 */
 	takeUndeliveredWarnings(): string[] {
-		return this._foregroundLifecycle.drainWarnings();
+		const warnings = [...this._foregroundLifecycle.drainWarnings(), ...this._unlistenedWarnings.splice(0)];
+		if (this._unlistenedWarningsDropped > 0) {
+			warnings.push(
+				`${this._unlistenedWarningsDropped} warning(s) raised while no listener was attached were not held.`,
+			);
+			this._unlistenedWarningsDropped = 0;
+		}
+		return warnings;
 	}
 
 	/**
@@ -4458,6 +4494,10 @@ export class AgentSession {
 	}
 
 	private _emit(event: AgentSessionEvent): void {
+		if (event.type === "warning" && this._eventListeners.length === 0) {
+			this._holdUnlistenedWarning(event.message);
+			return;
+		}
 		for (const listener of [...this._eventListeners]) {
 			try {
 				// Public listeners are observers. Freeze this emission's generation and invoke it
@@ -4471,6 +4511,13 @@ export class AgentSession {
 				// Listener failures must not affect session event dispatch or operation completion.
 			}
 		}
+	}
+
+	/** Holds a warning no listener takes, bounded like `emitHostWarning` bounds its message. */
+	private _holdUnlistenedWarning(message: string): void {
+		if (this._unlistenedWarnings.length < MAX_UNLISTENED_WARNINGS)
+			this._unlistenedWarnings.push(message.slice(0, 500));
+		else this._unlistenedWarningsDropped += 1;
 	}
 
 	private _emitQueueUpdate(): void {
@@ -4738,6 +4785,7 @@ export class AgentSession {
 	subscribe(listener: AgentSessionEventListener): () => void {
 		this._eventListeners.push(listener);
 		this._foregroundLifecycle.emitPendingWarnings((message) => this._emit({ type: "warning", message }));
+		for (const message of this._unlistenedWarnings.splice(0)) this._emit({ type: "warning", message });
 
 		// Return unsubscribe function for this specific listener
 		return () => {
@@ -4854,7 +4902,7 @@ export class AgentSession {
 		});
 		this._decisionLedger = undefined;
 		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
-		safely(() => this._disconnectFromAgent());
+		this._eventListeners = [];
 		// Ordered, not parallel, and that ordering is the point. The lifecycle abort unwinds any in-flight
 		// reflection turn; awaiting it here means its `agent_end` — and the memory turn-sync that boundary
 		// schedules — have both happened BEFORE `_memory.shutdown()` captures the lifecycle tail it
@@ -4868,13 +4916,23 @@ export class AgentSession {
 		track(async () => {
 			try {
 				this._reflectionTurnLifecycle.abort();
+				// The aborted run still emits its trailing events (its partial message, then agent_end), which this session persists
+				// and syncs to memory. They are handled before the internal subscription is released; the listeners are already gone.
+				try {
+					if (!(await runSettlesWithin(this.agent.waitForIdle(), CLOSING_RUN_SETTLE_MS))) {
+						this._holdUnlistenedWarning(
+							`A run did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its final message may not have been persisted.`,
+						);
+					}
+				} finally {
+					safely(() => this._disconnectFromAgent());
+				}
 				await this.settleReflectionTurn();
 				await this._memory.shutdown();
 			} finally {
-				// After memory: a history summary still in flight records its spend through this owner. Its handoff is emitted while
-				// the listeners are still attached, so it reaches the host; they are dropped right after, even when memory failed.
+				// After memory: a history summary still in flight records its spend through this owner. The listeners are already
+				// dropped, so a handoff raised here is held by the session; the runtime that ends it takes the held warnings.
 				safely(() => this._semanticUsage.dispose());
-				this._eventListeners = [];
 			}
 		});
 		track(() => this._toolRecoveryLogger.shutdown());
@@ -4894,9 +4952,20 @@ export class AgentSession {
 	}
 
 	/** Dispose synchronously-visible state, then await all session-owned asynchronous shutdowns. */
-	async disposeAndWait(): Promise<void> {
+	/**
+	 * Disposes the session and waits for its shutdown. The warnings it still holds then go to its closing sink, unless the owner
+	 * takes them itself: a runtime does, through takeUndeliveredWarnings, and passes `drainClosingWarnings: false`.
+	 */
+	async disposeAndWait(options?: { readonly drainClosingWarnings?: boolean }): Promise<void> {
 		this.dispose();
-		await this._disposeCompletion;
+		try {
+			await this._disposeCompletion;
+		} finally {
+			if (options?.drainClosingWarnings !== false) {
+				const warnings = this.takeUndeliveredWarnings();
+				if (warnings.length > 0) this._onClosingWarnings(warnings);
+			}
+		}
 	}
 
 	// =========================================================================

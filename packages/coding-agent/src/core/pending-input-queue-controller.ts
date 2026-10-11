@@ -157,7 +157,7 @@ export class PendingInputQueueController {
 	}
 
 	getCommands(): readonly string[] {
-		return this._queuedExtensionCommands;
+		return this._closed ? [] : this._queuedExtensionCommands;
 	}
 
 	snapshot(): PendingQueueSnapshot {
@@ -526,7 +526,7 @@ export class PendingInputQueueController {
 
 	/** Pop the next queued extension command, if any. Caller is responsible for the isStreaming gate. */
 	shiftCommand(): string | undefined {
-		return this._queuedExtensionCommands.shift();
+		return this._closed ? undefined : this._queuedExtensionCommands.shift();
 	}
 
 	/**

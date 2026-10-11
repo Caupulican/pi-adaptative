@@ -10,6 +10,7 @@ import type { AssistantMessage, ImageContent } from "@caupulican/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { expandMessageForDisplay } from "../core/context/path-alias-display.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
+import { neutralizeControls } from "../core/terminal-warnings.ts";
 import { projectSessionEventForJson } from "./json-event-projection.ts";
 import { registerTerminationSignalHandlers } from "./termination-signals.ts";
 
@@ -104,7 +105,8 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			if (mode === "json") {
 				writeRawStdout(`${JSON.stringify(projectSessionEventForJson(event))}\n`);
 			} else if (event.type === "warning") {
-				console.warn(event.severity === "info" ? event.message : `Warning: ${event.message}`);
+				const shown = neutralizeControls(event.message);
+				console.warn(event.severity === "info" ? shown : `Warning: ${shown}`);
 			}
 		});
 		session.announceRestoredQueuedInput();

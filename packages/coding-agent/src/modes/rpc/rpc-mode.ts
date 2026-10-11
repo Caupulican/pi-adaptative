@@ -26,6 +26,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
+import type { TerminalWarnings } from "../../core/terminal-warnings.ts";
 import { type Theme, theme } from "../../presentation/theme-model.ts";
 import { projectSessionEventForJson } from "../json-event-projection.ts";
 import { registerTerminationSignalHandlers } from "../termination-signals.ts";
@@ -53,7 +54,7 @@ export type {
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
-export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<never> {
+export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarnings: TerminalWarnings): Promise<never> {
 	takeOverStdout();
 	process.env.PI_CODING_AGENT = "true";
 	process.env.AI_AGENT = "pi";
@@ -64,6 +65,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		writeRawStdout(serializeJsonLine(obj));
 	};
+	// Closing warnings go to the client as the warning events it already receives, while the stream is open (until shutdown releases them).
+	terminalWarnings.attach((warnings) => {
+		for (const message of warnings) output(projectSessionEventForJson({ type: "warning", message }));
+	});
 
 	const success = <T extends RpcCommand["type"]>(
 		id: string | undefined,
@@ -768,6 +773,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		if (signal !== "SIGTERM") {
 			await flushRawStdout();
 		}
+		// The stream is closed: any warning from here on goes to stderr.
+		terminalWarnings.release();
 		process.exit(exitCode);
 	}
 

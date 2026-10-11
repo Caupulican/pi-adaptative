@@ -1053,7 +1053,19 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				/^Optional integrations stay available; owner intent for them was not classified: Jev System One unavailable for impact 'read_only': TypeSafe HTTP 503\.$/,
 				/^Optional integrations stay available; owner intent for them was not classified: the judgment was uncertain\.$/,
 				/^Failed to release worker write reservation [^:]+: Scripted IO fault e13-release-rename-fails\b/,
-				/^Worker write reservation watcher [\s\S]+ teardown failed: Scripted IO fault e13j-watch-close-fails: watch\.close '[^']+'$/,
+				/^Worker write reservation watcher (?:\/harness\/project|[A-Z]:\\harness\\project) teardown failed: Scripted IO fault e13j-watch-close-fails: watch\.close '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations)'$/,
+				// Terminal disclosures of the e13 worker shutdowns: each message exactly, the platform root narrowed to its POSIX or drive-letter form and
+				// the reservation name to its 64-hex digest. A fault-free owner discloses none (the e13 fresh owner's control).
+				/^Failed to release worker write reservation: Scripted IO fault e13-release-unlink-fails: unlink '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations\/|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations\\)[0-9a-f]{64}\.json'$/,
+				/^Failed to release worker write reservation: Scripted IO fault e13a-release-unlink-after: unlink '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations\/|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations\\)[0-9a-f]{64}\.json'$/,
+				/^Failed to release worker write reservation: Scripted IO fault e13j-release-unlink-fails: unlink '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations\/|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations\\)[0-9a-f]{64}\.json'$/,
+				/^Worker worker-1 rejected: Worker worker-1 resource release failed\.$/,
+				/^Failed to dispose worker write reservations: Worker write reservation shutdown failed\.$/,
+				/^Worker shutdown failed: Worker worker-1 resource release failed\.$/,
+				/^Worker shutdown failed: Worker scheduler shutdown failed\.$/,
+				/^Worker shutdown failed: Worker write reservation shutdown failed\.$/,
+				/^Worker shutdown failed: Worker shutdown retained unresolved specialist execution resources\.$/,
+				/^Worker write reservation watcher (?:\/harness\/project|[A-Z]:\\harness\\project) teardown failed: Scripted IO fault e13w-watch-close-fails: watch\.close '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations)'$/,
 				/^Worker worker-\d+ provider request failed \(server_error\); retrying in \d+s \(attempt [23]\/3\)\.$/,
 				/^Worker worker-\d+ failed \(server_error\); retrying from the persisted transcript in \d+s \(attempt 2\)\.$/,
 				/^A queued message was not delivered because the session context changed before it was admitted\. It is kept in full in the pending queue; restore it to the editor to send it again: Queued owner input while the summary is held\.$/,
@@ -6170,10 +6182,15 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					e13Failures.push(error);
 				}
 				try {
+					const e13FreshMark = world.warnings.length;
 					expect(
 						await world.disposeSessionInBody(e13Fresh.session),
 						"the E13 fresh owner disposes cleanly",
 					).toBeUndefined();
+					expect(
+						world.warnings.slice(e13FreshMark),
+						"the E13 fresh owner, with no fault armed, discloses nothing at close",
+					).toEqual([]);
 				} catch (error) {
 					e13Failures.push(error);
 				}
@@ -7673,6 +7690,94 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				"the memory gate owner disposes cleanly",
 			).toBeUndefined();
 			trace.mark("root", "memory.gate");
+			// Quit mid-run: the owner is disposed while its scripted reply is still streaming, with no abort first. The disposal aborts the run
+			// and waits for it to end, so the partial assistant message is kept in the session file with its stop reason. The idle-quit control
+			// disposes after its turn completed: its complete message is kept and no partial one is.
+			const qmAssistants = (file: string) =>
+				(world.io.peekFile(file) ?? "")
+					.split("\n")
+					.filter((line) => line.length > 0)
+					.map(
+						(line) =>
+							JSON.parse(line) as {
+								type?: string;
+								message?: { role?: string; stopReason?: string; content?: { type?: string; text?: string }[] };
+							},
+					)
+					.filter((entry) => entry.type === "message" && entry.message?.role === "assistant")
+					.map((entry) => ({
+						stopReason: entry.message?.stopReason,
+						text: (entry.message?.content ?? [])
+							.map((block) => (block.type === "text" ? (block.text ?? "") : ""))
+							.join(""),
+					}));
+			const qmHold = createBarrier();
+			const qmStreaming = createBarrier();
+			const qmCreated = await world.createRootSession("root", {
+				sessionManager: world.createSessionManager(),
+				settings: { memorySystem: undefined },
+			});
+			const qmSession = qmCreated.session;
+			const qmFile = qmCreated.sessionManager.getSessionFile();
+			if (qmFile === undefined) throw new Error("the quit witness owner has no file");
+			world.provider.enqueue("root", {
+				name: "quit-mid-run",
+				frames: [
+					{ partialContent: [{ type: "text", text: "" }], event: { type: "text_start", contentIndex: 0 } },
+					{
+						partialContent: [{ type: "text", text: "The partial reply" }],
+						event: { type: "text_delta", contentIndex: 0, delta: "The partial reply" },
+					},
+					{
+						partialContent: [{ type: "text", text: "The partial reply" }],
+						event: { type: "text_end", contentIndex: 0, content: "The partial reply" },
+						gate: qmHold.promise,
+					},
+				],
+				reply: { content: [{ type: "text", text: "The partial reply and its end" }] },
+			});
+			const qmUnsubscribe = qmSession.subscribe((event) => {
+				if (event.type === "message_update" && JSON.stringify(event).includes("The partial reply"))
+					qmStreaming.release();
+			});
+			const qmPrompt = qmSession.prompt("Start a reply and quit while it streams.").catch((error: unknown) => error);
+			await withDeadline(trace, "quit: the partial reply streams", qmStreaming.promise);
+			qmUnsubscribe();
+			await withDeadline(
+				trace,
+				"quit: the owner disposes while the reply streams",
+				qmSession.disposeAndWait(),
+				60_000,
+			);
+			await qmPrompt;
+			expect(
+				qmAssistants(qmFile),
+				"the quit keeps the partial reply in the session file with its stop reason, and no complete reply",
+			).toEqual([{ stopReason: "aborted", text: "The partial reply" }]);
+
+			const qmIdleCreated = await world.createRootSession("root", {
+				sessionManager: world.createSessionManager(),
+				settings: { memorySystem: undefined },
+			});
+			const qmIdleFile = qmIdleCreated.sessionManager.getSessionFile();
+			if (qmIdleFile === undefined) throw new Error("the idle-quit control owner has no file");
+			world.provider.enqueue("root", {
+				name: "quit-idle-control",
+				reply: { content: [{ type: "text", text: "Noted." }] },
+			});
+			await withDeadline(
+				trace,
+				"idle quit: the control turn completes",
+				qmIdleCreated.session.prompt("Say hello before quitting."),
+			);
+			expect(
+				await world.disposeSessionInBody(qmIdleCreated.session),
+				"the idle-quit control owner disposes cleanly",
+			).toBeUndefined();
+			expect(qmAssistants(qmIdleFile), "the idle quit keeps its complete reply and no partial one").toEqual([
+				{ stopReason: "stop", text: "Noted." },
+			]);
+			trace.mark("root", "quit.mid-run");
 		},
 	);
 }, 300_000);
@@ -7797,6 +7902,9 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				// R-receipt: one valid paid answer is kept while its usage receipt cannot be written (exactly one job, the
 				// usage-receipt hold; its cause is the fence that the receipt's refused re-attempt settles, and the receipt's own write error is its pending warning).
 				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: Session persistence state is uncertain after a failed write; the paid answer is kept and its usage receipt is retried; it is not bought again\. Exact history recall is unaffected\.$/,
+				// R-owed shutdown: the stop's owed-queue write is refused. The stop reason is bounded to 300 characters, so its cause is cut inside the
+				// path (the cut is fixed per platform: the POSIX root and the Windows drive-letter root differ in the path only).
+				/^History summaries stopped: the owed-receipt queue update was not saved \(1 entry newer than the last saved queue; one that no older queue or job record holds is lost\); cause: saving the owed usage receipts: saving owed receipts failed: EIO: Scripted IO fault ro-stop-owed-write: rename '(?:\/harness\/agent-journey-2-system-one-on-i|[A-Z]:\\harness\\agent-journey-2-system-one-on)…\. Exact history recall is unaffected\.$/,
 				// N-receipt: the same one-receipt hold reported with its raw write failure (the owner, before its retry), and by the
 				// coordinator that does not own the receipt, whose cause names the owner session (never written by that coordinator).
 				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: Scripted IO fault nr-receipt-append: [^\n]*\. Exact history recall is unaffected\.$/,
@@ -16081,11 +16189,13 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					// assistant messages, and a reopen records the same single row.
 					type UToolEntry = {
 						type?: string;
+						customType?: string;
+						data?: { route?: string; usage: { input: number; cost: { total: number } } };
 						message?: {
 							role?: string;
 							toolName?: string;
 							toolCallId?: string;
-							usage?: { input: number };
+							usage?: { input: number; cost: { total: number } };
 							content?: { type?: string; id?: string }[];
 						};
 					};
@@ -16094,19 +16204,35 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							.split("\n")
 							.filter((line) => line.length > 0)
 							.map((line) => JSON.parse(line) as UToolEntry);
-					// The statistics' input tokens: every assistant message's, then every semantic row's (a tool result carries no usage here).
-					const uToolInputTotal = (file: string): number =>
-						uToolEntries(file)
-							.filter((entry) => entry.message?.role === "assistant")
-							.reduce((total, entry) => total + (entry.message?.usage?.input ?? 0), 0) +
-						(world.io.fileEntries().get(file) ?? "")
-							.split("\n")
-							.filter((line) => line.includes('"customType":"semantic_usage"'))
-							.reduce(
-								(total, line) =>
-									total + (JSON.parse(line) as { data: { usage: { input: number } } }).data.usage.input,
-								0,
-							);
+					// Totals read from the file in its own order, as the accumulators sum them, so the floats compare exactly. An entry's usage
+					// counts only when `counts` says so.
+					const uToolTotals = (
+						file: string,
+						counts: (entry: UToolEntry) => boolean,
+					): { cost: number; input: number } => {
+						let cost = 0;
+						let input = 0;
+						for (const entry of uToolEntries(file)) {
+							const usage = counts(entry) ? (entry.data?.usage ?? entry.message?.usage) : undefined;
+							if (usage === undefined) continue;
+							cost += usage.cost.total;
+							input += usage.input;
+						}
+						return { cost, input };
+					};
+					const uUsageMessage = (entry: UToolEntry): boolean =>
+						entry.message?.role === "assistant" || entry.message?.role === "toolResult";
+					// The current cost counts every semantic row once. The statistics count the assistant and tool-result usage and the root
+					// systemone tool's rows only: the other rows are current cost, not statistics.
+					const uCurrentTotals = (file: string) =>
+						uToolTotals(file, (entry) => uUsageMessage(entry) || entry.customType === "semantic_usage");
+					const uStatsTotals = (file: string) =>
+						uToolTotals(
+							file,
+							(entry) =>
+								uUsageMessage(entry) ||
+								(entry.customType === "semantic_usage" && entry.data?.route === "system_one_tool"),
+						);
 					const uToolOkDir = `${world.agentDir}-usage-tool-ok`;
 					const uToolOk = await uOwnerAt(uToolOkDir);
 					await uOwnerTurn(uToolOk.session, "u-tool-ok");
@@ -16141,6 +16267,9 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							routes: uRowRoutes(uToolOkFile),
 							unique: new Set(uRowIds(uToolOkFile)).size,
 							requests: world.systemOne.decoded.length - uToolOkRequests,
+							asked: world.systemOne.decoded
+								.slice(uToolOkRequests)
+								.map((request) => Object.keys(request.questions).sort().join(",")),
 							pending: world.io.existsSync(uToolOkSidecar),
 							warnings: uUsageWarnings(uToolOkMark).length,
 							usageOnResult: uToolOkEnds.map((result) => Object.keys(result).includes("usage")),
@@ -16151,12 +16280,17 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 								)
 								.map((entry) => Object.keys(entry.message ?? {}).includes("usage")),
 						},
-						"the unfenced root review is paid once and recorded once as a system_one_tool row, and neither its result nor its persisted toolResult carries usage",
+						"every paid request records one row in request order, only the review's row carries the root systemone route, and neither its result nor its persisted toolResult carries usage",
 					).toEqual({
-						routes: ["system_one_tool"],
-						unique: 1,
-						// The owner-policy queue at the tool call: one screen (the greeting), one intake classification (the review), one review.
+						// File order: the greeting's screen and the review's intake (no route), then the review (the root systemone tool).
+						routes: [undefined, undefined, "system_one_tool"],
+						unique: 3,
 						requests: 3,
+						asked: [
+							"carries_0",
+							"capabilities_authorized,changes_model_pools,full_handoff,lifts_delivery_block,local_commits_only,optional_tool_0",
+							"claim",
+						],
 						pending: false,
 						warnings: 0,
 						usageOnResult: [false],
@@ -16164,14 +16298,22 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					});
 					expect(
 						{
-							cost: uToolOk.session.getCostSummary().currentCost === uSum(uRowCosts(uToolOkFile)),
-							stats: uToolOk.session.getSessionStats().cost === uSum(uRowCosts(uToolOkFile)),
-							tokens: uToolOk.session.getSessionStats().tokens.input === uToolInputTotal(uToolOkFile),
+							cost: uToolOk.session.getCostSummary().currentCost === uCurrentTotals(uToolOkFile).cost,
+							stats: uToolOk.session.getSessionStats().cost === uStatsTotals(uToolOkFile).cost,
+							tokens: uToolOk.session.getSessionStats().tokens.input === uStatsTotals(uToolOkFile).input,
 						},
-						"the current cost and the statistics count the row once; the statistics' tokens are the assistant messages' plus the row's",
+						"the current cost counts every row once; the statistics count the assistant messages and the root tool's row once, and their tokens likewise",
 					).toEqual({ cost: true, stats: true, tokens: true });
+					expect(
+						{
+							rowSum: uToolOk.session.getCostSummary().currentCost === uSum(uRowCosts(uToolOkFile)),
+							rowPerRequest: uRowIds(uToolOkFile).length === world.systemOne.decoded.length - uToolOkRequests,
+						},
+						"the current cost is the sum of the three rows, and each paid request has its own row",
+					).toEqual({ rowSum: true, rowPerRequest: true });
 					const uToolOkRows = uRowIds(uToolOkFile);
 					const uToolOkCost = uToolOk.session.getCostSummary().currentCost;
+					const uToolOkStats = uToolOk.session.getSessionStats().cost;
 					await uDispose(uToolOk.session, "the normal-order root-tool owner disposes cleanly", undefined);
 					const uToolOkReopened = await uOwnerAt(uToolOkDir, uToolOkFile);
 					expect(
@@ -16179,9 +16321,10 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							rows: uRowIds(uToolOkFile),
 							sidecar: world.io.existsSync(uToolOkSidecar),
 							cost: uToolOkReopened.session.getCostSummary().currentCost === uToolOkCost,
+							stats: uToolOkReopened.session.getSessionStats().cost === uToolOkStats,
 						},
-						"a reopen records the same single row and counts it once",
-					).toEqual({ rows: uToolOkRows, sidecar: false, cost: true });
+						"a reopen records the same rows once and counts them the same",
+					).toEqual({ rows: uToolOkRows, sidecar: false, cost: true, stats: true });
 					await uDispose(
 						uToolOkReopened.session,
 						"the reopened normal-order root-tool owner disposes cleanly",
@@ -16205,9 +16348,11 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						name: "u-tool-row-append",
 						kind: "append",
 						code: "EIO",
+						// The review's row is the write that fails; the intake row written before it is kept.
 						matches: (operation, data) =>
 							operation.path.endsWith(".jsonl") &&
-							(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
+							(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false) &&
+							(data?.toString("utf8").includes('"route":"system_one_tool"') ?? false),
 					});
 					await expect(
 						withDeadline(
@@ -16221,11 +16366,17 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					if (uToolFile === undefined) throw new Error("U-usage: the fenced root-tool owner session has no file");
 					const uToolSidecar = uSidecarOf(uToolFile, uTool.sessionManager.getSessionId());
 					const uToolIds = uHeldIds(uToolSidecar);
+					const uToolBeforeRows = uRowIds(uToolFile);
+					// The turn ends on the refused tool result: its assistant tool call was persisted before the tool ran, and no result for that call
+					// reaches the file. The reopened transcript therefore holds the call without its result.
 					expect(
 						{
 							requests: world.systemOne.decoded.length - uToolRequests,
-							rows: uRowIds(uToolFile),
+							routes: uRowRoutes(uToolFile),
 							held: uToolIds.length,
+							asked: world.systemOne.decoded
+								.slice(uToolRequests)
+								.map((request) => Object.keys(request.questions).sort().join(",")),
 							persistedCalls: uToolEntries(uToolFile).filter(
 								(entry) =>
 									entry.message?.role === "assistant" &&
@@ -16237,8 +16388,18 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 								(entry) => entry.message?.role === "toolResult" && entry.message.toolCallId === "u-tool-call-1",
 							).length,
 						},
-						"the root review is paid once, its receipt is held while the fenced row is not written, and the call is persisted without its result",
-					).toEqual({ requests: 2, rows: [], held: 1, persistedCalls: 1, persistedResults: 0 });
+						"the intake row is written, the review is paid once and its receipt is held while its row is not written, and the call is persisted without its result",
+					).toEqual({
+						requests: 2,
+						asked: [
+							"capabilities_authorized,changes_model_pools,full_handoff,lifts_delivery_block,local_commits_only,optional_tool_0",
+							"claim",
+						],
+						routes: [undefined],
+						held: 1,
+						persistedCalls: 1,
+						persistedResults: 0,
+					});
 					expect(
 						uUsageWarnings(uToolMark),
 						"the failed row append is the only usage warning, with its own cause",
@@ -16264,14 +16425,14 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							sidecar: world.io.existsSync(uToolSidecar),
 							routes: uRowRoutes(uToolFile),
 							requests: world.systemOne.decoded.length - uToolReopenRequests,
-							cost: uToolReopened.session.getCostSummary().currentCost === uSum(uRowCosts(uToolFile)),
-							stats: uToolReopened.session.getSessionStats().cost === uSum(uRowCosts(uToolFile)),
+							cost: uToolReopened.session.getCostSummary().currentCost === uCurrentTotals(uToolFile).cost,
+							stats: uToolReopened.session.getSessionStats().cost === uStatsTotals(uToolFile).cost,
 						},
-						"the reopened owner records the same receipt once, as a system_one_tool row, and counts it once in its cost and statistics",
+						"the reopened owner records the review's receipt once, after the intake row, and counts both rows in its cost and only the root tool's row in its statistics",
 					).toEqual({
-						rows: uToolIds,
+						rows: [...uToolBeforeRows, ...uToolIds],
 						sidecar: false,
-						routes: ["system_one_tool"],
+						routes: [undefined, "system_one_tool"],
 						requests: 0,
 						cost: true,
 						stats: true,

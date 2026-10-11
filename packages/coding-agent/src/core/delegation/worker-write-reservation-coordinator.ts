@@ -79,13 +79,22 @@ export interface WorkerWriteReservationCoordinatorOptions {
  * Owns one controller process's write-reservation lifecycle: admission, exact-fence release,
  * event-driven queue wakeup, and fail-closed recovery of positively dead owners.
  */
+/** A workspace as a message names it: its repository root once, and its execution root as well when it is another path. */
+function workspaceLabel(workspace: WorkerWriteReservationWorkspace): string {
+	return [...new Set([workspace.repositoryRoot, workspace.executionRoot])].join(" and ");
+}
+
 export class WorkerWriteReservationCoordinator {
 	private readonly options: WorkerWriteReservationCoordinatorOptions;
 	private readonly store: WorkerWriteReservationStore;
 	private readonly leases = new Map<string, WorkerWriteReservationLease>();
 	private readonly blockedByLocalLaneIds = new Map<string, Set<string>>();
 	private readonly availabilityListeners = new Set<() => void>();
-	private readonly watchDisposes = new Map<string, () => void>();
+	/** Keyed by the workspace identity; the workspace is kept beside its watcher so a teardown failure can name it readably. */
+	private readonly watchDisposes = new Map<
+		string,
+		{ readonly workspace: WorkerWriteReservationWorkspace; readonly dispose: () => void }
+	>();
 	private availabilityDeliveryDepth = 0;
 
 	constructor(options: WorkerWriteReservationCoordinatorOptions) {
@@ -310,16 +319,16 @@ export class WorkerWriteReservationCoordinator {
 		const watchers = [...this.watchDisposes];
 		this.watchDisposes.clear();
 		this.availabilityListeners.clear();
-		for (const [workspace, dispose] of watchers) {
+		for (const [key, watch] of watchers) {
 			try {
-				dispose();
+				watch.dispose();
 			} catch (error) {
 				if (required) {
 					errors.push(error);
-					this.watchDisposes.set(workspace, dispose);
+					this.watchDisposes.set(key, watch);
 				}
 				this.warnBestEffort(
-					`Worker write reservation watcher ${workspace} teardown failed: ${error instanceof Error ? error.message : String(error)}`,
+					`Worker write reservation watcher ${workspaceLabel(watch.workspace)} teardown failed: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
 		}
@@ -550,9 +559,9 @@ export class WorkerWriteReservationCoordinator {
 	private ensureWatch(workspace = this.workspace()): void {
 		const key = `${workspace.repositoryRoot}\0${workspace.executionRoot}`;
 		if (this.watchDisposes.has(key)) return;
-		this.watchDisposes.set(
-			key,
-			this.store.watchAvailability(workspace, () => this.emitAvailability()),
-		);
+		this.watchDisposes.set(key, {
+			workspace,
+			dispose: this.store.watchAvailability(workspace, () => this.emitAvailability()),
+		});
 	}
 }

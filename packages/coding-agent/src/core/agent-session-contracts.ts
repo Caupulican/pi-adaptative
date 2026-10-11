@@ -110,6 +110,8 @@ export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
 export interface AgentSessionConfig {
 	agent: Agent;
+	/** Receives the warnings this session still holds when `disposeAndWait()` closes it. Defaults to stderr (see terminal-warnings). */
+	onClosingWarnings?: (warnings: readonly string[]) => void;
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
 	cwd: string;

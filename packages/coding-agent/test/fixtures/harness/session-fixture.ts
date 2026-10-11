@@ -2224,6 +2224,8 @@ export class HarnessWorld {
 		const { session, getExtensionRunner, extensionsResult } = await createAgentSession({
 			cwd: HARNESS_PROJECT_CWD,
 			agentDir,
+			// Closing warnings (a session's terminal disclosures) reach the world's warnings, not the process's stderr.
+			onClosingWarnings: (warnings) => this.warnings.push(...warnings),
 			authStorage: this.authStorage,
 			modelRegistry: this.modelRegistry,
 			settingsManager,

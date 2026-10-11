@@ -399,8 +399,8 @@ export class ForegroundRecoveryController {
 				// backoff), and an abort landing there has no run to reach either -- without this the
 				// next `continue()` would be a full provider turn on a cancelled submission. A retry the
 				// recovery just prepared is closed here as cancelled, not left counting towards a
-				// continuation that never comes.
-				if (signal?.aborted) {
+				// continuation that never comes. A shut-down recovery (the session is closing) starts no further round either.
+				if (signal?.aborted || this.shutdownReason) {
 					this.finishRetry(false, "Submission cancelled");
 					return;
 				}

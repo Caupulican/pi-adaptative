@@ -222,6 +222,11 @@ export interface CreateAgentSessionOptions {
 	runtimeUpdateController?: RuntimeUpdateController;
 	/** Optional session objective prompt. */
 	prompt?: string;
+	/**
+	 * Receives the warnings the session still holds when `disposeAndWait()` closes it. Defaults to stderr, one line per warning.
+	 * A session created under an AgentSessionRuntime is drained by its runtime instead.
+	 */
+	onClosingWarnings?: (warnings: readonly string[]) => void;
 }
 
 /** Result from createAgentSession */
@@ -841,6 +846,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const session = new AgentSession({
 			agent,
+			onClosingWarnings: options.onClosingWarnings,
 			sessionManager,
 			settingsManager,
 			cwd,

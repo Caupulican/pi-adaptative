@@ -61,6 +61,7 @@ import type {
 	SettingsScope,
 } from "../../core/settings/settings-schema.ts";
 import { collectSelfModificationSourceCandidates } from "../../core/system-prompt-builder.ts";
+import type { TerminalWarnings } from "../../core/terminal-warnings.ts";
 import { isRecordObject } from "../../core/util/value-guards.ts";
 import type { SessionContext, SessionManager, TruncationResult } from "../../kernel/node.ts";
 import type { AgentMessage, ToolCallRepairInfo } from "../../kernel/types.ts";
@@ -182,6 +183,11 @@ export function formatResumeCommand(sessionManager: SessionManager): string | un
  * Options for InteractiveMode initialization.
  */
 export interface InteractiveModeOptions {
+	/**
+	 * Where the closing warnings go. Held while the TUI runs, so they never land on the screen; written to stderr once the terminal is
+	 * restored (stop()).
+	 */
+	terminalWarnings?: TerminalWarnings;
 	/** Providers that were migrated to auth.json (shows warning) */
 	migratedProviders?: string[];
 	/** Warning message if session model couldn't be restored */
@@ -356,6 +362,7 @@ export class InteractiveMode {
 	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
 		this.runtimeHost = runtimeHost;
 		this.options = options;
+		options.terminalWarnings?.hold();
 		this.hasHumanAudience = (options.hasHumanAudience ?? true) && getSessionRole() === "main";
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.extensionUiHost.resetExtensionUI();
@@ -4144,5 +4151,7 @@ export class InteractiveMode {
 			this.ui.stop();
 			this.isInitialized = false;
 		}
+		// The terminal is restored: the warnings held for the TUI can be written now.
+		this.options.terminalWarnings?.release();
 	}
 }

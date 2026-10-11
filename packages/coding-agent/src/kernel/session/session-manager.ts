@@ -3045,11 +3045,21 @@ export class SessionManager {
 	}
 
 	/**
-	 * Whether the session file holds this entry's canonical JSONL line, whatever its length or content. The line is located by a
-	 * scan of the file, so no size bound applies; a buffered entry not yet written is absent. A failed read throws.
+	 * The byte offsets of the given entries' canonical JSONL lines, for the lines the file holds at or past `fromOffset` (a line
+	 * boundary). One sequential scan from `fromOffset` to the end of the file, stopping early once every id is found; an id absent
+	 * from that range, including a buffered entry not yet written, is not in the result. The entry index is neither read nor
+	 * changed. Undefined when more than `maxBytes` lie past `fromOffset`: the scan is not run. A failed read throws.
 	 */
-	hasEntryInFile(entryId: string): boolean {
-		return this.sessionFile !== undefined && this._getEntryFileLocation(entryId) !== undefined;
+	entryFileOffsetsFrom(
+		entryIds: ReadonlySet<string>,
+		fromOffset: number,
+		maxBytes: number,
+	): ReadonlyMap<string, number> | undefined {
+		if (this.sessionFile === undefined || !existsSync(this.sessionFile)) return new Map();
+		if (statSync(this.sessionFile).size - fromOffset > maxBytes) return undefined;
+		const locations = new Map<string, SessionEntryFileLocation>();
+		indexSessionEntryFileLocations(this.sessionFile, fromOffset, locations, entryIds);
+		return new Map([...locations].map(([id, location]) => [id, location.offset]));
 	}
 
 	/**

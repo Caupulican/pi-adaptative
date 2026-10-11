@@ -86,6 +86,7 @@ import {
 import { getSessionRole } from "./core/session-role.ts";
 import { SessionSupervisionRuntime } from "./core/session-supervision-runtime.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
+import { TerminalWarnings } from "./core/terminal-warnings.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { startCliPowerShellWarmStart } from "./core/tools/early-powershell-session.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
@@ -1062,10 +1063,13 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	};
 	time("createRuntime");
+	// The warnings a quitting session still holds: the host that owns the terminal decides where they are shown (see the modes).
+	const terminalWarnings = new TerminalWarnings();
 	const runtime = await createAgentSessionRuntime(createRuntime, {
 		cwd: sessionManager.getCwd(),
 		agentDir,
 		sessionManager,
+		onTerminalWarnings: (warnings) => terminalWarnings.write(warnings),
 	});
 	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
@@ -1277,7 +1281,7 @@ export async function main(args: string[], options?: MainOptions) {
 	if (appMode === "rpc") {
 		printTimings();
 		const { runRpcMode } = await import("./modes/rpc/rpc-mode.ts");
-		await runRpcMode(runtime);
+		await runRpcMode(runtime, terminalWarnings);
 	} else if (appMode === "interactive") {
 		const nativePiRuntime = new SessionNativePiActivityRuntime({
 			deferInitialSettlement: true,
@@ -1288,6 +1292,7 @@ export async function main(args: string[], options?: MainOptions) {
 		await nativePiRuntime.start(session, runtime);
 		const { InteractiveMode } = await import("./modes/interactive/interactive-mode.ts");
 		const interactiveMode = new InteractiveMode(runtime, {
+			terminalWarnings,
 			migratedProviders,
 			modelFallbackMessage,
 			initialMessage,

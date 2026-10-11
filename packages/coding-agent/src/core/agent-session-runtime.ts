@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, constants as fsConstants, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, constants as fsConstants, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { SessionManager } from "../kernel/session/session-manager.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -22,6 +22,7 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
+import { writeTerminalWarnings } from "./terminal-warnings.ts";
 
 /**
  * Result returned by runtime creation.
@@ -77,14 +78,19 @@ export interface AgentSessionSwitchOptions {
 
 /**
  * A session file a replacement created. When the replacement is discarded its file goes, unless it holds paid usage rows that
- * no other session records (those stay as evidence). `copiedEntryIds` are the entry ids the file shares with its source (a branch's
- * copied rows keep their source's ids; a byte copy's rows are its source's), captured when the copy was made, or undefined for a
- * new session.
+ * appended after its copy (those stay as evidence). `copyBaseline` marks where the copied rows end in the file: only rows appended
+ * after it are the candidate's. Undefined for a new session, which copied no rows.
  */
 interface CreatedSession {
 	readonly sessionManager: SessionManager;
-	readonly copiedEntryIds: ReadonlySet<string> | undefined;
+	readonly copyBaseline: CopyBaseline | undefined;
 }
+
+/**
+ * The byte size of a replacement's file once its copied rows are on disk: a row located at or past it was appended by the
+ * candidate. `unreadable` when the size cannot be read, so the caller keeps the file.
+ */
+type CopyBaseline = { readonly bytes: number } | { readonly unreadable: unknown };
 
 /** A discard in progress: routed before the candidate is shut down, decided once it is shut down. */
 interface PendingDiscard {
@@ -94,50 +100,53 @@ interface PendingDiscard {
 
 const PAID_ROW_TYPES: ReadonlySet<string> = new Set([SEMANTIC_USAGE_CUSTOM_TYPE, SPAWNED_USAGE_CUSTOM_TYPE]);
 
-/** The entry ids a session file holds: the rows a byte copy of it shares with it. A line that is not JSON holds no entry. */
-function entryIdsOfFile(path: string): Set<string> {
-	const ids = new Set<string>();
-	for (const line of readFileSync(path, "utf8").split("\n")) {
-		if (line.trim().length === 0) continue;
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(line);
-		} catch {
-			continue;
-		}
-		if (typeof parsed === "object" && parsed !== null && "id" in parsed && typeof parsed.id === "string") {
-			ids.add(parsed.id);
-		}
+/**
+ * The copy baseline of a replacement's file as it stands once its copied rows are written. A file not yet written holds no copied
+ * bytes yet, so its baseline is 0; a reply written to it later carries the copied rows too, and they then count as kept.
+ */
+function copyBaselineOf(path: string | undefined): CopyBaseline {
+	if (path === undefined || !existsSync(path)) return { bytes: 0 };
+	try {
+		return { bytes: statSync(path).size };
+	} catch (error: unknown) {
+		return { unreadable: error };
 	}
-	return ids;
 }
 
-/** The entry ids a session manager holds, as a copy of it shares them. */
-function entryIdsOfManager(manager: SessionManager): ReadonlySet<string> {
-	return new Set(manager.getEntries().map((entry) => entry.id));
+/** Most paid usage rows a discard counts. Past it the rows are unknown and the file is kept. */
+const MAX_DISCARD_PAID_ROWS = 10_000;
+/** Most bytes a discard scans past the copy baseline. Past it the rows are unknown and the file is kept. */
+const MAX_DISCARD_SCAN_BYTES = 64 * 1024 * 1024;
+
+function causeText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 /**
- * Paid usage rows the created session's file holds that no other session records. A row counts when the file holds its line,
- * whatever the line's content or length: a buffered row is not in the file (its retained journal copy, if any, is the
- * disclosure), and a row the file shares with its source (`copiedEntryIds`) is recorded by that source. A file that cannot be
- * read has unknown rows: the caller keeps it.
+ * Paid usage rows the created session's file holds that no other session records: the paid rows located at or past the copy
+ * baseline, which only the candidate appended. A copied row is located before the baseline, and a buffered row is not in the
+ * file (its retained journal copy, if any, is the disclosure). Unknown when the baseline or the file cannot be read, or when the
+ * session holds more than MAX_DISCARD_PAID_ROWS paid rows or more than MAX_DISCARD_SCAN_BYTES lie past the baseline: the caller
+ * keeps the file.
  */
-function countUniquePaidRows(created: CreatedSession): { readonly rows: number } | { readonly unreadable: unknown } {
-	const { copiedEntryIds, sessionManager } = created;
+function countUniquePaidRows(created: CreatedSession): { readonly rows: number } | { readonly unknown: string } {
+	const { copyBaseline, sessionManager } = created;
 	try {
-		const rows = sessionManager
-			.getEntries()
-			.filter(
-				(entry) =>
-					entry.type === "custom" &&
-					PAID_ROW_TYPES.has(entry.customType) &&
-					!copiedEntryIds?.has(entry.id) &&
-					sessionManager.hasEntryInFile(entry.id),
-			).length;
-		return { rows };
+		if (copyBaseline !== undefined && "unreadable" in copyBaseline)
+			return { unknown: causeText(copyBaseline.unreadable) };
+		const paidIds = new Set<string>();
+		for (const entry of sessionManager.getEntries()) {
+			if (entry.type !== "custom" || !PAID_ROW_TYPES.has(entry.customType)) continue;
+			if (paidIds.size === MAX_DISCARD_PAID_ROWS)
+				return { unknown: `more than ${MAX_DISCARD_PAID_ROWS} paid usage rows` };
+			paidIds.add(entry.id);
+		}
+		const located = sessionManager.entryFileOffsetsFrom(paidIds, copyBaseline?.bytes ?? 0, MAX_DISCARD_SCAN_BYTES);
+		if (located === undefined)
+			return { unknown: `more than ${MAX_DISCARD_SCAN_BYTES} bytes appended after the copy` };
+		return { rows: located.size };
 	} catch (error: unknown) {
-		return { unreadable: error };
+		return { unknown: causeText(error) };
 	}
 }
 
@@ -166,7 +175,7 @@ async function disposeAbandonedSession(failure: CreatedSessionFailure): Promise<
 	routeDiscardedSessionUsage(failure.sessionManager, (message) => handoff.push(message));
 	let disposeError: unknown;
 	try {
-		await failure.session.disposeAndWait();
+		await failure.session.disposeAndWait({ drainClosingWarnings: false });
 	} catch (error: unknown) {
 		disposeError = error;
 	}
@@ -175,15 +184,17 @@ async function disposeAbandonedSession(failure: CreatedSessionFailure): Promise<
 	disposeDiscardedSessionUsage(failure.sessionManager);
 	finishDiscardedSessionUsage(failure.sessionManager, "none");
 	releaseDiscardedSessionUsage(failure.sessionManager);
+	// The disclosures travel with both outcomes: beside the cause, and beside the cause and the disposal failure.
+	const disclosures = handoff.join(" ");
 	if (disposeError !== undefined) {
 		return new AggregateError(
 			[failure.cause, disposeError],
-			"Session creation failed, and the created session could not be disposed.",
+			`Session creation failed, and the created session could not be disposed.${disclosures.length > 0 ? ` ${disclosures}` : ""}`,
 		);
 	}
 	if (handoff.length === 0) return failure.cause;
 	const cause = failure.cause instanceof Error ? failure.cause.message : String(failure.cause);
-	return new Error(`${cause} ${handoff.join(" ")}`, { cause: failure.cause });
+	return new Error(`${cause} ${disclosures}`, { cause: failure.cause });
 }
 
 /** The failure a runtime factory raised, without the session it handed back. */
@@ -302,6 +313,8 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 	private _getExtensionRunner: () => ExtensionRunner;
 	private _services: AgentSessionServices;
 	private readonly createRuntime: CreateAgentSessionRuntimeFactory;
+	/** Receives the warnings of a session that ended on quit: no live session is left to show them. */
+	private readonly terminalWarnings: (warnings: readonly string[]) => void;
 	private _diagnostics: AgentSessionRuntimeDiagnostic[];
 	/** Warnings of discarded sessions, delivered on the live session once one exists. */
 	private readonly discardedWarnings: string[] = [];
@@ -322,12 +335,17 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 	};
 	private readonly sessionResources: AgentSessionRuntimeResource[] = [];
 
-	constructor(initial: CreateAgentSessionRuntimeResult, createRuntime: CreateAgentSessionRuntimeFactory) {
+	constructor(
+		initial: CreateAgentSessionRuntimeResult,
+		createRuntime: CreateAgentSessionRuntimeFactory,
+		terminalWarnings: (warnings: readonly string[]) => void,
+	) {
 		this._session = initial.session;
 		this._sessionManager = initial.sessionManager;
 		this._getExtensionRunner = initial.getExtensionRunner;
 		this._services = initial.services;
 		this.createRuntime = createRuntime;
+		this.terminalWarnings = terminalWarnings;
 		this._diagnostics = initial.diagnostics;
 		this._modelFallbackMessage = initial.modelFallbackMessage;
 	}
@@ -428,12 +446,14 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			stopResources: true,
 			invalidateHost: true,
 		});
+		// The replaced session's held warnings are shown on the session that replaces it, or with the error if none survives.
+		this.discardedWarnings.push(...this._session.takeUndeliveredWarnings());
 		if (errors.length === 1) throw errors[0];
 		if (errors.length > 1) throw new AggregateError(errors, "Session runtime teardown failed.");
 	}
 
 	private async discardPrepared(result: { readonly session: AgentSession }): Promise<void> {
-		await result.session.disposeAndWait();
+		await result.session.disposeAndWait({ drainClosingWarnings: false });
 	}
 
 	/**
@@ -466,7 +486,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 
 	/**
 	 * Decides a discard's file once the candidate is shut down, so the rows its final pass persisted count as kept. The file goes
-	 * only when it is readable and holds no row that no other session records; otherwise it stays, with a notice naming why.
+	 * only when it is readable and holds no paid row appended after its copy; otherwise it stays, with a notice naming why.
 	 * The owner's handoff is produced with the same disposition.
 	 */
 	private finishDiscard(discard: PendingDiscard): void {
@@ -478,21 +498,21 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		}
 		const path = sessionManager.getSessionFile();
 		const counted = countUniquePaidRows(created);
-		const disposition: DiscardDisposition = "unreadable" in counted || counted.rows > 0 ? "kept" : "removed";
+		const disposition: DiscardDisposition = "unknown" in counted || counted.rows > 0 ? "kept" : "removed";
 		finishDiscardedSessionUsage(sessionManager, disposition);
 		if (disposition === "removed") this.removeCreatedSessionFile(path);
 		else if (path !== undefined) {
 			this.discardedWarnings.push(
-				"unreadable" in counted
+				"unknown" in counted
 					? pathNotice(
 							"Usage handoff: the paid usage rows of ",
 							path,
-							` could not be read back (${counted.unreadable instanceof Error ? counted.unreadable.message : String(counted.unreadable)}), so this rejected replacement's session file is kept as recovery evidence.`,
+							` could not be counted (${counted.unknown}), so this rejected replacement's session file is kept as recovery evidence.`,
 						)
 					: pathNotice(
 							`Usage handoff: ${counted.rows} paid usage row(s) are present in `,
 							path,
-							", a session file of a rejected replacement kept because no other session records them.",
+							", a session file of a rejected replacement kept as recovery evidence; rows copied from a source session may also be recorded there.",
 						),
 			);
 		}
@@ -518,25 +538,25 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		sessionManager: SessionManager,
 		previousSessionFile: string | undefined,
 		withSession: SessionReplacementCommitOptions["withSession"],
-		copiedEntryIds: ReadonlySet<string> | undefined,
+		copyBaseline: CopyBaseline | undefined,
 	): Promise<void> {
 		const prepared = await this.prepareReplacement(
 			sessionManager,
 			{ type: "session_start", reason: "fork", previousSessionFile },
-			{ sessionManager, copiedEntryIds },
+			{ sessionManager, copyBaseline },
 		);
 		await this.commitReplacement(prepared, {
 			reason: "fork",
 			targetSessionFile: sessionManager.getSessionFile(),
 			withSession,
-			createdSession: { sessionManager, copiedEntryIds },
+			createdSession: { sessionManager, copyBaseline },
 		});
 	}
 
 	/**
 	 * Discards a candidate that never became active. Its owner is routed to the live session first; a session a failed factory
 	 * handed back is then disposed in full (through the path discardPrepared uses); last, its file is decided: removed, or kept
-	 * when it holds rows no other session records. If the disposal itself fails, both failures are reported.
+	 * when it holds paid rows appended after its copy. If the disposal itself fails, both failures are reported.
 	 */
 	private async discardCreatedSession(
 		sessionManager: SessionManager,
@@ -613,6 +633,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				restore?.undeliveredWarnings,
 			);
 		}
+		this.flushDiscardedWarnings();
 		if (options.withSession) {
 			try {
 				await options.withSession(this.session.createReplacedSessionContext());
@@ -700,12 +721,18 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			this.flushDiscardedWarnings();
 		} catch (recoveryError: unknown) {
 			if (restored) {
+				// The restored session shuts down with the rollback: its held warnings and owner handoff are collected like a discard's.
+				const restoredDiscard = this.beginDiscard({
+					session: restored.session,
+					sessionManager: restored.sessionManager,
+				});
 				cleanupErrors.push(
 					...(await this.shutdownRuntime(restored, "resume", failed.session.sessionFile, {
 						stopResources: true,
 						invalidateHost: true,
 					})),
 				);
+				this.finishDiscard(restoredDiscard);
 			} else if (recoveryError instanceof CreatedSessionFailure) {
 				// The restore factory created the session before it failed: that session is handed back, so it is disposed here.
 				const handedBack = this.beginDiscard({
@@ -792,7 +819,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		}
 		if (!progress.sessionDisposed) {
 			try {
-				await target.session.disposeAndWait();
+				await target.session.disposeAndWait({ drainClosingWarnings: false });
 				progress.sessionDisposed = true;
 			} catch (error: unknown) {
 				errors.push(error);
@@ -873,7 +900,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		const prepared = await this.prepareReplacement(
 			sessionManager,
 			{ type: "session_start", reason: "new", previousSessionFile },
-			{ sessionManager, copiedEntryIds: undefined },
+			{ sessionManager, copyBaseline: undefined },
 		);
 		if (options?.setup) {
 			try {
@@ -885,7 +912,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			} catch (error) {
 				await this.discardCreatedSession(
 					sessionManager,
-					{ sessionManager, copiedEntryIds: undefined },
+					{ sessionManager, copyBaseline: undefined },
 					error,
 					prepared.session,
 				);
@@ -896,7 +923,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			reason: "new",
 			targetSessionFile: sessionManager.getSessionFile(),
 			withSession: options?.withSession,
-			createdSession: { sessionManager, copiedEntryIds: undefined },
+			createdSession: { sessionManager, copyBaseline: undefined },
 		});
 		return { cancelled: false };
 	}
@@ -964,31 +991,21 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				sessionManager,
 				previousSessionFile,
 				options?.withSession,
-				entryIdsOfManager(sourceSessionManager),
+				copyBaselineOf(forkedSessionPath),
 			);
 			return { cancelled: false, selectedText };
 		}
 
 		let sessionManager: SessionManager;
-		let forkedEntryIds: ReadonlySet<string> | undefined;
+		let copyBaseline: CopyBaseline | undefined;
 		if (!targetLeafId) {
 			sessionManager = SessionManager.inMemory(this.cwd);
 			sessionManager.newSession({ parentSession: this.session.sessionFile });
 		} else {
 			sessionManager = this.sessionManager.createBranchedSessionManager(targetLeafId);
-			forkedEntryIds = entryIdsOfManager(this.sessionManager);
+			copyBaseline = copyBaselineOf(sessionManager.getSessionFile());
 		}
-		const prepared = await this.prepareReplacement(
-			sessionManager,
-			{ type: "session_start", reason: "fork", previousSessionFile },
-			{ sessionManager, copiedEntryIds: forkedEntryIds },
-		);
-		await this.commitReplacement(prepared, {
-			reason: "fork",
-			targetSessionFile: sessionManager.getSessionFile(),
-			withSession: options?.withSession,
-			createdSession: { sessionManager, copiedEntryIds: forkedEntryIds },
-		});
+		await this.replaceWithFork(sessionManager, previousSessionFile, options?.withSession, copyBaseline);
 		return { cancelled: false, selectedText };
 	}
 
@@ -1024,26 +1041,26 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			copied = true;
 		}
 
-		let copiedEntryIds: ReadonlySet<string> | undefined;
+		let copyBaseline: CopyBaseline | undefined;
 		let sessionManager: SessionManager;
 		try {
-			// The copy's own rows, read as the copy was made: a later change to the source file cannot alter what this copy shares with it.
-			if (copied) copiedEntryIds = entryIdsOfFile(destinationPath);
 			sessionManager = SessionManager.open(destinationPath, this.services.agentDir, sessionDir, cwdOverride);
 			assertSessionCwdExists(sessionManager, this.cwd);
 		} catch (error) {
 			if (copied) this.removeCreatedSessionFile(destinationPath);
 			throw error;
 		}
+		// Taken once open has settled the copy (a migrating open rewrites the file), so every copied row lies before it.
+		if (copied) copyBaseline = copyBaselineOf(destinationPath);
 		const prepared = await this.prepareReplacement(
 			sessionManager,
 			{ type: "session_start", reason: "resume", previousSessionFile },
-			copied ? { sessionManager, copiedEntryIds } : undefined,
+			copied ? { sessionManager, copyBaseline } : undefined,
 		);
 		await this.commitReplacement(prepared, {
 			reason: "resume",
 			targetSessionFile: sessionManager.getSessionFile(),
-			createdSession: copied ? { sessionManager, copiedEntryIds } : undefined,
+			createdSession: copied ? { sessionManager, copyBaseline } : undefined,
 		});
 		return { cancelled: false };
 	}
@@ -1066,6 +1083,9 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				invalidateHost: true,
 				progress: this.disposeProgress,
 			});
+			// The quitting session's held warnings have no live session left to show them: they go to the terminal sink.
+			this.discardedWarnings.push(...this._session.takeUndeliveredWarnings());
+			this.terminalWarnings(this.takeDiscardedWarnings());
 			if (errors.length === 1) throw errors[0];
 			if (errors.length > 1) throw new AggregateError(errors, "Session runtime disposal failed.");
 			this._disposed = true;
@@ -1092,6 +1112,8 @@ export async function createAgentSessionRuntime(
 		agentDir: string;
 		sessionManager: SessionManager;
 		sessionStartEvent?: SessionStartEvent;
+		/** Shows the warnings of a session that ended on quit. Defaults to stderr (see writeTerminalWarnings). */
+		onTerminalWarnings?: (warnings: readonly string[]) => void;
 	},
 ): Promise<AgentSessionRuntime> {
 	assertSessionCwdExists(options.sessionManager, options.cwd);
@@ -1102,5 +1124,5 @@ export async function createAgentSessionRuntime(
 		if (error instanceof CreatedSessionFailure) throw await disposeAbandonedSession(error);
 		throw error;
 	}
-	return new AgentSessionRuntime(result, createRuntime);
+	return new AgentSessionRuntime(result, createRuntime, options.onTerminalWarnings ?? writeTerminalWarnings);
 }
