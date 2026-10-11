@@ -4073,10 +4073,12 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				lock: false,
 				staged: [],
 			});
-			// Jobs the crash state holds queued (System One off: the held model leaf) are never completed by recovery.
-			const r14AQueued = icmStoredJobs(r14ARead, icmStoreFiles)
-				.filter((job) => job.state === "queued")
-				.map((job) => job.id);
+			// Jobs the crash state holds unsettled besides the published target (System One off: the held model leaf, which
+			// the crash state may hold queued or already claimed) are never completed by recovery.
+			const r14AOthers = icmStoredJobs(r14ARead, icmStoreFiles).filter(
+				(job) => job.id !== r14AJob.id && (job.state === "queued" || job.state === "running"),
+			);
+			const r14AQueued = r14AOthers.map((job) => job.id);
 			if (world.systemOne.enabled) {
 				const r14C = r14Captures.c;
 				const r14B = r14Captures.b;
@@ -4275,7 +4277,12 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					paid: { summaries: 0, admissions: 0 },
 					queuedCompleted: 0,
 				});
-				expect(r14AQueued.length, "the off crash state holds the model leaf queued").toBeGreaterThan(0);
+				expect(
+					r14AQueued.length,
+					`the off crash state holds the model leaf unsettled (stored jobs: ${JSON.stringify(
+						icmStoredJobs(r14ARead, icmStoreFiles).map((job) => ({ kind: job.kind, state: job.state })),
+					)})`,
+				).toBeGreaterThan(0);
 			}
 			trace.mark("root", "icm.r14-recovery");
 
@@ -11661,9 +11668,25 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					// Physical settlement only (its outcome is the coordinator's to judge): C1's run has resolved before the stale.
 					if (lC1Completion !== undefined)
 						await withDeadline(trace, "R16-E C1 settled", Promise.allSettled([lC1Completion]));
-					lOwner.sessionManager.branch(lBack);
-					lOwner.sessionManager.appendCustomEntry("r16e-back", { step: "back" });
+					// The owner comes back only once the handler's verification page has answered on the away lineage: the
+					// lineage-stamp fence refuses a verification that straddles a change, so a switch back before that answer
+					// would stale nothing (the failure the fence exists to prevent). The witness runs just before the parent
+					// receives that page, so the back ingest is queued behind it: the handler stales J on the away answer,
+					// then re-reads on the back lineage, re-enqueues J and claims it (C2) before C1's settlement runs.
+					const lVerified = wThreads.onResponse(
+						"r16e-verification-page",
+						"lineage",
+						(_response, request) => {
+							const facts = request as { sessionId?: unknown; maxSpans?: unknown };
+							return facts.sessionId === lSeed.sessionId && facts.maxSpans !== 1;
+						},
+						() => {
+							lOwner.sessionManager.branch(lBack);
+							lOwner.sessionManager.appendCustomEntry("r16e-back", { step: "back" });
+						},
+					);
 					lProbe.release();
+					await withDeadline(trace, "R16-E verification page answered on the away lineage", lVerified);
 					await withDeadline(trace, "R16-E C2 claimed in the same handler", lC2Reached.promise);
 					const lStatus = icmHierarchy(lOwner.session);
 					expect(
@@ -16849,7 +16872,7 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 					heldJobs: 1,
 					reconciliation: 1,
 					heldKind: "reconciliation",
-					cause: expect.stringContaining("read_error:EACCES"),
+					cause: expect.stringContaining("ingest_error:EACCES"),
 					revocation: undefined,
 					accepted: uBuilt.acceptedNodes,
 					stale: 0,

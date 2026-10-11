@@ -371,6 +371,8 @@ function nextAuthority(): number {
 export class TranscriptSummaryScheduler {
 	private readonly jobs = new Map<string, TranscriptSummaryJob>();
 	private readonly queued = new Set<string>();
+	/** Claims returned per job by {@link failJob} (no provider call was made); bounds the refund. In memory only. */
+	private readonly returnedClaims = new Map<string, number>();
 	private readonly running = new Set<string>();
 	private readonly retryWait = new Set<string>();
 	private readonly jobsBySession = new Map<string, Set<string>>();
@@ -943,6 +945,7 @@ export class TranscriptSummaryScheduler {
 	/** The completion itself, shared by {@link completeJob} and recovery: the job is `ready` for exactly this node. */
 	private settleReady(job: TranscriptSummaryJob, node: Pick<TranscriptSummaryNode, "id">, now: number): void {
 		this.transition(job, "ready", now);
+		this.returnedClaims.delete(job.id);
 		job.nodeId = node.id;
 		this.readyJobByNode.set(node.id, job.id);
 	}
@@ -982,7 +985,12 @@ export class TranscriptSummaryScheduler {
 	 * Record a failed attempt. A transient provider failure with attempts left waits for its retry; every
 	 * other failure ends the job with the real cause. A failure reported for an already terminal job is ignored.
 	 */
-	failJob(jobId: string, failure: TranscriptSummaryFailure, now: number): TranscriptSummaryJob | undefined {
+	failJob(
+		jobId: string,
+		failure: TranscriptSummaryFailure,
+		now: number,
+		options?: { readonly returnClaim?: boolean },
+	): TranscriptSummaryJob | undefined {
 		const job = this.jobs.get(jobId);
 		if (!job) throw new Error(`Unknown summary job ${jobId}.`);
 		if (isTerminalSummaryJobState(job.state)) return undefined;
@@ -1003,6 +1011,17 @@ export class TranscriptSummaryScheduler {
 		if (!classified.retryable) {
 			return this.finishFailed(job, { message: failure.message, reason: classified.reason, transient: false }, now);
 		}
+		// A retryable failure of a claim that made no provider call (it only reused a kept reply: a store write or an
+		// unanswered read failed) gives back that claim's own increment, never below the durable record, as
+		// {@link defer} does: the attempt budget bounds paid calls, and a call that was not made must not exhaust it.
+		// The returns are bounded per job (a persistent outage ends the job at the budget as before, after as many
+		// returned claims as the budget has attempts), so the refund never makes a retry unbounded.
+		const delayAttempts = job.attempts;
+		const returned = this.returnedClaims.get(job.id) ?? 0;
+		if (options?.returnClaim && returned < job.maxAttempts) {
+			this.returnedClaims.set(job.id, returned + 1);
+			job.attempts = Math.max(this.durableFloor(job.id), job.attempts - 1, 0);
+		}
 		if (job.attempts >= job.maxAttempts) {
 			return this.finishFailed(
 				job,
@@ -1012,7 +1031,7 @@ export class TranscriptSummaryScheduler {
 		}
 		let delayMs: number;
 		try {
-			delayMs = computeRetryDelayMs(this.retryPolicy, job.attempts, {
+			delayMs = computeRetryDelayMs(this.retryPolicy, delayAttempts, {
 				random: this.random,
 				...(classified.retryAfterMs !== undefined ? { retryAfterMs: classified.retryAfterMs } : {}),
 			});
@@ -1334,6 +1353,7 @@ export class TranscriptSummaryScheduler {
 		now: number,
 	): TranscriptSummaryJob {
 		this.transition(job, "failed", now);
+		this.returnedClaims.delete(job.id);
 		delete job.nextRetryAt;
 		job.lastError = error;
 		return { ...job };
