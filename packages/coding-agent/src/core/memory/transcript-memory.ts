@@ -3132,19 +3132,22 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// Held jobs wait for their condition; claiming them again would only hold them again.
 			const claim = scheduler.claimNext(this.ports.now(), (candidate) => {
 				if (this.parked.has(candidate.id)) return true;
-				// A kept paid verdict whose receipt is owed to ANOTHER session can only be recorded by a coordinator of that
-				// session. Claiming it here would reserve a durable attempt for a call this coordinator never makes, and repeated
-				// starts of other sessions would exhaust the job's budget and discard a valid paid summary: it stays held instead.
+				// A kept paid verdict (current admission contract) whose receipt is owed to ANOTHER session can only be recorded by a
+				// coordinator of that session, which also owns any replacement of that verdict (changed input or text: the owner claims
+				// the job, judges again and setPendingVerdict hands the replaced receipt to the owed queue). A claim here would only save
+				// a started attempt, then return it, for a call this coordinator never makes: write churn on every start, and an attempt
+				// kept if a stop or crash lands between the claim and its settle (interrupt and recover leave attempts alone). A verdict
+				// under another contract version is not reused by any session, so it stays claimable and is judged again.
 				const verdict = candidate.pendingVerdict;
 				if (
 					verdict !== undefined &&
+					verdict.contractVersion === TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION &&
 					verdict.ownerSessionId !== this.ports.ownerSessionId() &&
 					verdict.receipts.some((receipt) => receipt.status === "unrecorded")
 				) {
 					this.parked.set(candidate.id, {
 						scope: "usage_receipt",
-						reason:
-							"the paid answer's usage receipt belongs to another session and is recorded when a coordinator starts in it",
+						reason: `the paid answer's usage receipt belongs to session ${verdict.ownerSessionId}, which is not this session; it is recorded when a coordinator starts in it`,
 					});
 					return true;
 				}

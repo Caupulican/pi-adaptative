@@ -196,9 +196,12 @@ export interface TranscriptSummaryPendingVerdict {
 
 /** Bounded per-job work counters, kept separately so status never merges unlike units. */
 export interface TranscriptSummaryJobLedger {
-	/** Admission requests (`admit` calls) this job made. */
+	/**
+	 * Admission requests this job made that PAID: an `admit` call that returned, or one that was aborted after a transport
+	 * attempt had already been charged (its carried receipts). An aborted call that was never charged is not counted.
+	 */
 	semanticRequests: number;
-	/** Reviewer transport attempts behind those requests. */
+	/** Paid reviewer responses behind those requests (a response that reported usage; at least one per counted request). */
 	transportAttempts: number;
 	/** Receipts persisted on the first or a retried persistence stage. */
 	receiptsRecorded: number;

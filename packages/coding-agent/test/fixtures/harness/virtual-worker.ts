@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { basename, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TranscriptRecallProcessor } from "../../../src/core/memory/providers/transcript-recall-processor.ts";
+import { isTranscriptRecallWorkerResponse } from "../../../src/core/memory/providers/transcript-recall-worker-protocol.ts";
 import { ToolRecoveryLogProcessor } from "../../../src/core/tool-recovery-log-processor.ts";
 
 /** The worker side of a hosted processor's port: what each production `parentPort` adapter provides. */
@@ -145,7 +146,7 @@ class VirtualHostedWorker extends EventEmitter {
 	private toParent(response: unknown): void {
 		// A closed port drops sends; a send that cannot be cloned throws to the processor as transport loss.
 		if (!this.running) return;
-		const message = structuredClone(response);
+		const message = this.host.replaceResponse(this, structuredClone(response));
 		const hold = this.host.claimHold("outbound", this, message);
 		if (hold === undefined && this.outboundBacklog.length === 0) {
 			this.deliver(message);
@@ -206,6 +207,12 @@ class VirtualHostedWorker extends EventEmitter {
 			this.settleExit(code);
 		});
 	}
+}
+
+export interface WorkerReplacement {
+	readonly name: string;
+	/** Resolves with the response the parent receives in place of the processor's, once that response is sent. */
+	readonly reached: Promise<unknown>;
 }
 
 /** A held request or response: `held` until the scenario releases it. */
@@ -296,6 +303,13 @@ export class VirtualWorkerThreads {
 		readonly matches?: (message: unknown) => boolean;
 	}> = [];
 	private readonly holds: WorkerHoldRecord[] = [];
+	private readonly replacements: Array<{
+		readonly name: string;
+		readonly type: string;
+		readonly matches: (response: unknown, request: unknown) => boolean;
+		readonly result: unknown;
+		readonly reach: (message: unknown) => void;
+	}> = [];
 	private readonly witnesses: Array<{
 		readonly name: string;
 		readonly type: string;
@@ -362,6 +376,54 @@ export class VirtualWorkerThreads {
 		matches: (response: unknown, request: unknown) => boolean = () => true,
 	): WorkerHold {
 		return this.armHold(name, "outbound", type, matches);
+	}
+
+	/**
+	 * Replaces the next response of `type` that `matches` (judged with the request it answers) by a response of the same
+	 * request carrying `result`, before the parent receives it: the parent sees the port's answer, not the processor's.
+	 * The substitute must pass the production response validator; a refused substitute is reported and the original is
+	 * delivered, so the close fails rather than the parent reading a malformed reply.
+	 */
+	replaceNextResult(
+		name: string,
+		type: string,
+		matches: (response: unknown, request: unknown) => boolean,
+		result: unknown,
+	): WorkerReplacement {
+		if (this.replacements.length >= MAX_WORKER_HOOKS)
+			throw new RangeError("Worker response replacements must be bounded");
+		let reach!: (message: unknown) => void;
+		const reached = new Promise<unknown>((resolve) => {
+			reach = resolve;
+		});
+		this.replacements.push({ name, type, matches, result, reach });
+		return { name, reached };
+	}
+
+	/** The response the parent receives in place of `message`: the armed replacement it meets, substituted once. */
+	replaceResponse(worker: VirtualHostedWorker, message: unknown): unknown {
+		const type = messageType(message);
+		const request = this.requestOf(worker, message);
+		const index = this.replacements.findIndex((candidate) => {
+			if (candidate.type !== type) return false;
+			try {
+				return candidate.matches(message, request);
+			} catch (error) {
+				this.hookFailures.push(`worker replacement ${candidate.name} matcher threw: ${String(error)}`);
+				return false;
+			}
+		});
+		if (index < 0) return message;
+		const [replacement] = this.replacements.splice(index, 1);
+		if (replacement === undefined) return message;
+		// Same request, type and generation: only the answer changes.
+		const substitute = { ...(message as Record<string, unknown>), result: structuredClone(replacement.result) };
+		if (!isTranscriptRecallWorkerResponse(substitute)) {
+			this.hookFailures.push(`worker replacement ${replacement.name} is not a protocol response`);
+			return message;
+		}
+		replacement.reach(substitute);
+		return substitute;
 	}
 
 	/**
@@ -505,6 +567,10 @@ export class VirtualWorkerThreads {
 		if (this.witnesses.length)
 			problems.push(
 				`Worker response witnesses never reached: ${this.witnesses.map((entry) => entry.name).join(", ")}`,
+			);
+		if (this.replacements.length)
+			problems.push(
+				`Worker response replacements never reached: ${this.replacements.map((entry) => entry.name).join(", ")}`,
 			);
 		problems.push(...this.hookFailures);
 		if (problems.length) throw new Error(problems.join("; "));

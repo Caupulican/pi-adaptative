@@ -40,13 +40,17 @@ import {
 	getResumableHumanInputSnapshot,
 } from "../src/core/human-input.ts";
 import { ICM_HISTORY_GUIDANCE } from "../src/core/memory/providers/icm.ts";
+import { TRANSCRIPT_MEMORY_CONTEXT_SPANS } from "../src/core/memory/transcript-memory.ts";
 import {
 	TRANSCRIPT_RECALL_RESULT_MARKER,
 	TRANSCRIPT_SUMMARY_MAX_BYTES,
 	TRANSCRIPT_SUMMARY_SCHEMA_VERSION,
 	TRANSCRIPT_SUMMARY_TARGET_BYTES,
 } from "../src/core/memory/transcript-memory-contracts.ts";
-import { TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION } from "../src/core/memory/transcript-summary-admission.ts";
+import {
+	summaryTextDigest,
+	TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
+} from "../src/core/memory/transcript-summary-admission.ts";
 import { TRANSCRIPT_LEAF_MAX_SOURCE_BYTES } from "../src/core/memory/transcript-summary-node.ts";
 import { TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS } from "../src/core/memory/transcript-summary-scheduler.ts";
 import type { ObjectiveRoute } from "../src/core/objective-execution/objective-route.ts";
@@ -923,7 +927,12 @@ interface IcmStoredJob {
 	readonly spanRange: { readonly fromIndex: number; readonly toIndexExclusive: number };
 	readonly pendingReply?: { readonly textDigest: string };
 	readonly lastError?: { readonly reason: string; readonly message: string };
-	readonly ledger?: { readonly semanticRequests: number };
+	readonly ledger?: {
+		readonly semanticRequests: number;
+		readonly transportAttempts: number;
+		readonly receiptsRecorded: number;
+		readonly reused: number;
+	};
 	/** The kept paid verdict: its receipts stay owed (`unrecorded`) until the owner records each one. */
 	readonly pendingVerdict?: {
 		readonly ownerSessionId: string;
@@ -13065,248 +13074,350 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				).toBeUndefined();
 				trace.mark("root", "icm.receipt-hold");
 
-				// C-replaced (a kept verdict replaced by a judgment under another contract revision): a kept verdict is reused only for
-				// the contract it judged. Between two sessions the stored verdict is prepared for another revision (valid external
-				// preparation: the job stays live with its kept reply, its owner and its receipts). The reopened leaf therefore pays a
-				// second judgment, whose own usage write also fails, and the replacement moves the old verdict's receipt to the owed
-				// queue instead of dropping it. A third session records both receipts and the parent's, each exactly once, and buys
-				// nothing for the leaf again. System One on only: a kept verdict belongs to a model leaf.
+				// C-replaced (a kept verdict replaced by a judgment of another input or contract): a kept verdict is reused only for
+				// the input and contract it judged. Two variants replace it on the reopen. "contract": the stored verdict is prepared
+				// for another revision (valid external preparation: the job stays live with its kept reply, its owner and its
+				// receipts), so the same input is judged again. "context": the reopened session cannot read the leaf's preceding
+				// context (its lineage listing answers unavailable), so the input changes: the leaf's summary input key and the
+				// judgment's input digest differ while the reply text and the contract do not, and the reply is paid again. Either
+				// way the reopened leaf pays a second judgment, whose own usage write also fails, and the replacement moves the old
+				// verdict's receipt to the owed queue instead of dropping it. A third session records both receipts and the parent's,
+				// each exactly once. "context" keeps its context unavailable for the third session too, so the kept reply and verdict
+				// of the second session are reused and the leaf is not bought again. System One on only: a kept verdict belongs to a
+				// model leaf.
 				if (world.systemOne.enabled) {
-					const cxAgentDir = `${world.agentDir}-icm-contract`;
-					await seedIcmPastSession(world, cxAgentDir);
-					const cxStore = icmStore(cxAgentDir);
-					const cxLeafJudgments = {
-						summary_supported: cAdmission.summary_supported,
-						owner_constraints_preserved: cAdmission.owner_constraints_preserved,
-					};
-					const cxBefore = { summaries: icmTrackRequests(world, cTrack), admissions: icmAdmissionRequests(world) };
-					const cxPaid = () => ({
-						summaries: icmTrackRequests(world, cTrack) - cxBefore.summaries,
-						admissions: icmAdmissionRequests(world) - cxBefore.admissions,
-					});
-					type CxReceipt = { reportId?: string; status: string };
-					type CxVerdict = { ownerSessionId: string; contractVersion: number; receipts: CxReceipt[] };
-					// The leaf's kept verdict as the job list holds it (undefined once the leaf no longer keeps one).
-					const cxVerdict = (): CxVerdict | undefined =>
-						(
-							icmStoredJobs(icmLiveStore(world), cxStore) as (IcmStoredJob & {
-								readonly pendingVerdict?: CxVerdict;
-							})[]
-						).find((job) => job.kind === "leaf" && job.spanRange.fromIndex === 8)?.pendingVerdict;
-					// The owed queue as the file holds it, and the usage rows of the owner session file.
-					const cxOwed = (): { ownerSessionId: string; receipt: CxReceipt }[] => {
-						const raw = world.io.peekFile(cxStore.owed);
-						return raw === undefined
-							? []
-							: (JSON.parse(raw) as { entries: { ownerSessionId: string; receipt: CxReceipt }[] }).entries;
-					};
-					const cxRows = (file: string): (string | undefined)[] =>
-						(world.io.fileEntries().get(file) ?? "")
-							.split("\n")
-							.filter((line) => line.includes('"customType":"semantic_usage"'))
-							.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId);
-					const cxReceiptFault = (name: string) =>
-						world.io.failNext({
-							name,
-							kind: "append",
-							code: "EIO",
-							matches: (operation, data) =>
-								operation.path.endsWith(".jsonl") &&
-								(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
+					for (const cxVariant of ["contract", "context"] as const) {
+						const cxAgentDir = `${world.agentDir}-icm-replaced-${cxVariant}`;
+						const cxSeed = await seedIcmPastSession(world, cxAgentDir);
+						const cxStore = icmStore(cxAgentDir);
+						// The leaf's preceding context listing (two spans before its first span, the leaf starting at span 8). The
+						// second and third sessions of "context" answer it unavailable, once each.
+						const cxContextCount = Math.min(TRANSCRIPT_MEMORY_CONTEXT_SPANS, 8);
+						const cxContextListing = (request: unknown): boolean => {
+							const facts = request as { sessionId?: unknown; fromIndex?: unknown; maxSpans?: unknown };
+							return (
+								facts.sessionId === cxSeed.sessionId &&
+								facts.fromIndex === 8 - cxContextCount &&
+								facts.maxSpans === cxContextCount
+							);
+						};
+						const cxContextUnavailable = (name: string) =>
+							world.guard.threads.replaceNextResult(
+								name,
+								"lineage",
+								(_response, request) => cxContextListing(request),
+								{
+									status: "unavailable",
+									reason: "the leaf's preceding context cannot be read (scripted)",
+								},
+							);
+						const cxLogBefore = world.guard.threads.messageLog.length;
+						// The context listings this segment's port answered unavailable: the request as the worker received it, and the
+						// answer the parent received for that same request.
+						const cxContextUnavailableAnswers = (): number => {
+							const log = world.guard.threads.messageLog.slice(cxLogBefore);
+							const listings = new Set(
+								log
+									.filter((record) => record.direction === "inbound" && record.type === "lineage")
+									.filter((record) => cxContextListing(record.facts))
+									.map((record) => record.requestId),
+							);
+							return log.filter(
+								(record) =>
+									record.direction === "outbound" &&
+									record.type === "lineage" &&
+									record.facts.status === "unavailable" &&
+									record.requestId !== undefined &&
+									listings.has(record.requestId),
+							).length;
+						};
+						const cxLeafJudgments = {
+							summary_supported: cAdmission.summary_supported,
+							owner_constraints_preserved: cAdmission.owner_constraints_preserved,
+						};
+						const cxBefore = {
+							summaries: icmTrackRequests(world, cTrack),
+							admissions: icmAdmissionRequests(world),
+						};
+						const cxPaid = () => ({
+							summaries: icmTrackRequests(world, cTrack) - cxBefore.summaries,
+							admissions: icmAdmissionRequests(world) - cxBefore.admissions,
 						});
+						type CxReceipt = { reportId?: string; status: string };
+						type CxVerdict = {
+							ownerSessionId: string;
+							inputDigest: string;
+							textDigest: string;
+							contractVersion: number;
+							receipts: CxReceipt[];
+						};
+						// The leaf's kept verdict as the job list holds it (undefined once the leaf no longer keeps one).
+						const cxVerdict = (): CxVerdict | undefined =>
+							(
+								icmStoredJobs(icmLiveStore(world), cxStore) as (IcmStoredJob & {
+									readonly pendingVerdict?: CxVerdict;
+								})[]
+							).find((job) => job.kind === "leaf" && job.spanRange.fromIndex === 8)?.pendingVerdict;
+						// The owed queue as the file holds it, and the usage rows of the owner session file.
+						const cxOwed = (): { ownerSessionId: string; receipt: CxReceipt }[] => {
+							const raw = world.io.peekFile(cxStore.owed);
+							return raw === undefined
+								? []
+								: (JSON.parse(raw) as { entries: { ownerSessionId: string; receipt: CxReceipt }[] }).entries;
+						};
+						const cxRows = (file: string): (string | undefined)[] =>
+							(world.io.fileEntries().get(file) ?? "")
+								.split("\n")
+								.filter((line) => line.includes('"customType":"semantic_usage"'))
+								.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId);
+						const cxReceiptFault = (name: string) =>
+							world.io.failNext({
+								name,
+								kind: "append",
+								code: "EIO",
+								matches: (operation, data) =>
+									operation.path.endsWith(".jsonl") &&
+									(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
+							});
 
-					// First session: the leaf's paid answer is valid, its usage write fails, and the leaf is held with its verdict kept.
-					world.provider.enqueue(cTrack, text("cx-leaf-summary", ICM_LEAF_SUMMARY));
-					const cxFirst = await world.createRootSession("root", {
-						agentDir: cxAgentDir,
-						sessionManager: world.createSessionManager(cxAgentDir),
-						settings: { memorySystem: undefined },
-					});
-					world.provider.enqueue("root", {
-						name: "cx-owner-turn",
-						reply: { content: [{ type: "text", text: "Noted." }] },
-					});
-					world.systemOne.enterPhase("cx-owner-turn", {});
-					await withDeadline(trace, "C-replaced owner turn", cxFirst.session.prompt("Say hello."));
-					const cxOwnerId = cxFirst.sessionManager.getSessionId();
-					world.systemOne.enterPhase("cx-first", cxLeafJudgments);
-					cxReceiptFault("cx-first-receipt-append");
-					cxFirst.settingsManager.applyOverrides({
-						contextPolicy: { memory: { history: icmHierarchySettings(cTrack).contextPolicy?.memory?.history } },
-					});
-					await withDeadline(
-						trace,
-						"C-replaced first leaf held for its usage receipt",
-						world.io.waitForMutation(
-							() =>
-								cxFirst.session.getTranscriptHistoryStatus().hierarchy?.admission?.heldByKind?.usage_receipt ===
-								1,
-						),
-					);
-					await withDeadline(
-						trace,
-						"C-replaced first verdict durable",
-						world.io.waitForMutation(
-							() => cxVerdict()?.receipts.some((receipt) => receipt.status === "unrecorded") === true,
-						),
-					);
-					const cxFirstVerdict = cxVerdict();
-					const cxOldReceipt = cxFirstVerdict?.receipts[0]?.reportId;
-					const cxFirstFile = cxFirst.sessionManager.getSessionFile();
-					if (cxFirstFile === undefined) throw new Error("C-replaced: the owner session has no file");
-					expect(
-						{
-							paid: cxPaid(),
-							held: icmHierarchy(cxFirst.session).admission?.heldByKind,
-							verdict: {
-								owner: cxFirstVerdict?.ownerSessionId === cxOwnerId,
-								contract: cxFirstVerdict?.contractVersion,
-								receipts: cxFirstVerdict?.receipts.map((receipt) => receipt.status),
+						// First session: the leaf's paid answer is valid, its usage write fails, and the leaf is held with its verdict kept.
+						world.provider.enqueue(cTrack, {
+							name: "cx-leaf-summary",
+							check: (request) => {
+								if (!JSON.stringify(request.context.messages).includes("CONTEXT (earlier turns"))
+									throw new Error("the first leaf summary carries no context");
 							},
-							owed: cxOwed(),
-							rows: cxRows(cxFirstFile).length,
-						},
-						"a valid answer whose usage write failed is kept under the current contract, with no owed receipt and no usage row",
-					).toEqual({
-						paid: { summaries: 1, admissions: 1 },
-						held: { usage_receipt: 1 },
-						verdict: {
-							owner: true,
-							contract: TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
-							receipts: ["unrecorded"],
-						},
-						owed: [],
-						rows: 0,
-					});
-					expect(typeof cxOldReceipt, "the kept verdict names its receipt by a string id").toBe("string");
-					expect(
-						await world.disposeSessionInBody(cxFirst.session),
-						"the first C-replaced owner disposes",
-					).toBeUndefined();
-
-					// Valid external preparation between the sessions: the kept verdict is stored under another contract revision. The
-					// record stays a live job with its reply, owner and receipt; the job-list parser takes any revision of 1 or more.
-					const cxRaw = JSON.parse(world.io.peekFile(cxStore.jobs) ?? "{}") as {
-						schemaVersion: number;
-						jobs: {
-							kind: string;
-							spanRange: { fromIndex: number };
-							pendingVerdict?: { contractVersion: number };
-						}[];
-					};
-					const cxStored = cxRaw.jobs.find((job) => job.kind === "leaf" && job.spanRange.fromIndex === 8);
-					if (cxStored?.pendingVerdict === undefined)
-						throw new Error("C-replaced: the held leaf carries no kept verdict");
-					cxStored.pendingVerdict.contractVersion = TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION + 1;
-					world.io.seed(cxStore.jobs, `${JSON.stringify(cxRaw)}\n`);
-
-					// Second session (a fresh manager on the same file): the stored verdict no longer matches the contract, so the leaf
-					// pays a second judgment; its usage write fails on the fresh manager's first write. The replacement releases the old
-					// verdict's receipt to the owed queue, and the new verdict holds its own receipt.
-					world.systemOne.enterPhase("cx-second", cxLeafJudgments);
-					cxReceiptFault("cx-second-receipt-append");
-					const cxSecond = await world.createRootSession("root", {
-						agentDir: cxAgentDir,
-						sessionManager: world.openSessionManager(cxFirstFile, cxAgentDir),
-						settings: icmHierarchySettings(cTrack),
-					});
-					await withDeadline(
-						trace,
-						"C-replaced second judgment held for its own usage receipt",
-						world.io.waitForMutation(
-							() =>
-								cxSecond.session.getTranscriptHistoryStatus().hierarchy?.admission?.heldByKind
-									?.usage_receipt === 1 && cxOwed().length === 1,
-						),
-					);
-					const cxSecondVerdict = cxVerdict();
-					const cxNewReceipt = cxSecondVerdict?.receipts[0]?.reportId;
-					expect(
-						{
-							paid: cxPaid(),
-							held: icmHierarchy(cxSecond.session).admission?.heldByKind,
-							owed: cxOwed().map((entry) => ({ owner: entry.ownerSessionId, receipt: entry.receipt.reportId })),
+							reply: { content: [{ type: "text", text: ICM_LEAF_SUMMARY }] },
+						});
+						const cxFirst = await world.createRootSession("root", {
+							agentDir: cxAgentDir,
+							sessionManager: world.createSessionManager(cxAgentDir),
+							settings: { memorySystem: undefined },
+						});
+						world.provider.enqueue("root", {
+							name: "cx-owner-turn",
+							reply: { content: [{ type: "text", text: "Noted." }] },
+						});
+						world.systemOne.enterPhase("cx-owner-turn", {});
+						await withDeadline(trace, "C-replaced owner turn", cxFirst.session.prompt("Say hello."));
+						const cxOwnerId = cxFirst.sessionManager.getSessionId();
+						world.systemOne.enterPhase("cx-first", cxLeafJudgments);
+						cxReceiptFault("cx-first-receipt-append");
+						cxFirst.settingsManager.applyOverrides({
+							contextPolicy: {
+								memory: { history: icmHierarchySettings(cTrack).contextPolicy?.memory?.history },
+							},
+						});
+						await withDeadline(
+							trace,
+							"C-replaced first leaf held for its usage receipt",
+							world.io.waitForMutation(
+								() =>
+									cxFirst.session.getTranscriptHistoryStatus().hierarchy?.admission?.heldByKind
+										?.usage_receipt === 1,
+							),
+						);
+						await withDeadline(
+							trace,
+							"C-replaced first verdict durable",
+							world.io.waitForMutation(
+								() => cxVerdict()?.receipts.some((receipt) => receipt.status === "unrecorded") === true,
+							),
+						);
+						const cxFirstVerdict = cxVerdict();
+						const cxOldReceipt = cxFirstVerdict?.receipts[0]?.reportId;
+						const cxFirstFile = cxFirst.sessionManager.getSessionFile();
+						if (cxFirstFile === undefined) throw new Error("C-replaced: the owner session has no file");
+						expect(
+							{
+								paid: cxPaid(),
+								held: icmHierarchy(cxFirst.session).admission?.heldByKind,
+								verdict: {
+									owner: cxFirstVerdict?.ownerSessionId === cxOwnerId,
+									contract: cxFirstVerdict?.contractVersion,
+									receipts: cxFirstVerdict?.receipts.map((receipt) => receipt.status),
+								},
+								owed: cxOwed(),
+								rows: cxRows(cxFirstFile).length,
+							},
+							"a valid answer whose usage write failed is kept under the current contract, with no owed receipt and no usage row",
+						).toEqual({
+							paid: { summaries: 1, admissions: 1 },
+							held: { usage_receipt: 1 },
 							verdict: {
-								contract: cxSecondVerdict?.contractVersion,
-								owner: cxSecondVerdict?.ownerSessionId === cxOwnerId,
-								receipts: cxSecondVerdict?.receipts.map((receipt) => ({
-									status: receipt.status,
-									reportId: receipt.reportId,
+								owner: true,
+								contract: TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
+								receipts: ["unrecorded"],
+							},
+							owed: [],
+							rows: 0,
+						});
+						expect(typeof cxOldReceipt, "the kept verdict names its receipt by a string id").toBe("string");
+						expect(
+							await world.disposeSessionInBody(cxFirst.session),
+							"the first C-replaced owner disposes",
+						).toBeUndefined();
+
+						if (cxVariant === "contract") {
+							// Valid external preparation between the sessions: the kept verdict is stored under another contract revision. The
+							// record stays a live job with its reply, owner and receipt; the job-list parser takes any revision of 1 or more.
+							const cxRaw = JSON.parse(world.io.peekFile(cxStore.jobs) ?? "{}") as {
+								schemaVersion: number;
+								jobs: {
+									kind: string;
+									spanRange: { fromIndex: number };
+									pendingVerdict?: { contractVersion: number };
+								}[];
+							};
+							const cxStored = cxRaw.jobs.find((job) => job.kind === "leaf" && job.spanRange.fromIndex === 8);
+							if (cxStored?.pendingVerdict === undefined)
+								throw new Error("C-replaced: the held leaf carries no kept verdict");
+							cxStored.pendingVerdict.contractVersion = TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION + 1;
+							world.io.seed(cxStore.jobs, `${JSON.stringify(cxRaw)}\n`);
+						} else {
+							// The second session's leaf reads its context from the lineage: that listing answers unavailable (one read).
+							world.provider.enqueue(cTrack, {
+								name: "cx-leaf-summary-without-context",
+								check: (request) => {
+									if (!JSON.stringify(request.context.messages).includes("CONTEXT: none available."))
+										throw new Error("the second leaf summary still carries its context");
+								},
+								reply: { content: [{ type: "text", text: ICM_LEAF_SUMMARY }] },
+							});
+						}
+
+						// Second session (a fresh manager on the same file): the kept verdict no longer matches its judgment (the stored
+						// contract, or the context-free input), so the leaf pays a second judgment; its usage write fails on the fresh
+						// manager's first write. The replacement releases the old verdict's receipt to the owed queue, and the new verdict
+						// holds its own receipt.
+						const cxContextRead2 =
+							cxVariant === "context" ? cxContextUnavailable("cx-context-unavailable-2") : undefined;
+						world.systemOne.enterPhase("cx-second", cxLeafJudgments);
+						cxReceiptFault("cx-second-receipt-append");
+						const cxSecond = await world.createRootSession("root", {
+							agentDir: cxAgentDir,
+							sessionManager: world.openSessionManager(cxFirstFile, cxAgentDir),
+							settings: icmHierarchySettings(cTrack),
+						});
+						await withDeadline(
+							trace,
+							"C-replaced second judgment held for its own usage receipt",
+							world.io.waitForMutation(
+								() =>
+									cxSecond.session.getTranscriptHistoryStatus().hierarchy?.admission?.heldByKind
+										?.usage_receipt === 1 && cxOwed().length === 1,
+							),
+						);
+						if (cxContextRead2 !== undefined)
+							await withDeadline(trace, "C-replaced second context read answered", cxContextRead2.reached);
+						const cxSecondVerdict = cxVerdict();
+						const cxNewReceipt = cxSecondVerdict?.receipts[0]?.reportId;
+						expect(
+							{
+								paid: cxPaid(),
+								held: icmHierarchy(cxSecond.session).admission?.heldByKind,
+								owed: cxOwed().map((entry) => ({
+									owner: entry.ownerSessionId,
+									receipt: entry.receipt.reportId,
 								})),
+								verdict: {
+									contract: cxSecondVerdict?.contractVersion,
+									owner: cxSecondVerdict?.ownerSessionId === cxOwnerId,
+									receipts: cxSecondVerdict?.receipts.map((receipt) => ({
+										status: receipt.status,
+										reportId: receipt.reportId,
+									})),
+								},
+								// Only the input digest may differ for "context"; the text and the contract are the same.
+								changed: {
+									inputDigest: cxSecondVerdict?.inputDigest !== cxFirstVerdict?.inputDigest,
+									textDigest: cxSecondVerdict?.textDigest !== cxFirstVerdict?.textDigest,
+								},
+								rows: cxRows(cxFirstFile).length,
 							},
-							rows: cxRows(cxFirstFile).length,
-						},
-						"the replaced verdict's receipt is owed to the queue, and the new verdict holds its own receipt, with no usage row",
-					).toEqual({
-						paid: { summaries: 1, admissions: 2 },
-						held: { usage_receipt: 1 },
-						owed: [{ owner: cxOwnerId, receipt: cxOldReceipt }],
-						verdict: {
-							contract: TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
-							owner: true,
-							receipts: [{ status: "unrecorded", reportId: cxNewReceipt }],
-						},
-						rows: 0,
-					});
-					expect(cxNewReceipt, "the new judgment's receipt is not the replaced one").not.toBe(cxOldReceipt);
-					expect(
-						await world.disposeSessionInBody(cxSecond.session),
-						"the second C-replaced owner disposes",
-					).toBeUndefined();
+							"the replaced verdict's receipt is owed to the queue, and the new verdict holds its own receipt, with no usage row",
+						).toEqual({
+							paid: { summaries: cxVariant === "context" ? 2 : 1, admissions: 2 },
+							held: { usage_receipt: 1 },
+							owed: [{ owner: cxOwnerId, receipt: cxOldReceipt }],
+							verdict: {
+								contract: TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
+								owner: true,
+								receipts: [{ status: "unrecorded", reportId: cxNewReceipt }],
+							},
+							changed: { inputDigest: cxVariant === "context", textDigest: false },
+							rows: 0,
+						});
+						expect(cxNewReceipt, "the new judgment's receipt is not the replaced one").not.toBe(cxOldReceipt);
+						expect(
+							await world.disposeSessionInBody(cxSecond.session),
+							"the second C-replaced owner disposes",
+						).toBeUndefined();
 
-					// Third session, no faults: the owed receipt and the kept verdict's receipt are recorded once each, the parent is judged
-					// on its own, and the owed queue is emptied.
-					world.provider.enqueue(cTrack, {
-						name: "cx-parent-summary",
-						check: (request) => {
-							if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
-								throw new Error("the replaced-verdict parent does not merge the leaf");
-						},
-						reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
-					});
-					world.systemOne.enterPhase("cx-third", cAdmission);
-					const cxThird = await world.createRootSession("root", {
-						agentDir: cxAgentDir,
-						sessionManager: world.openSessionManager(cxFirstFile, cxAgentDir),
-						settings: icmHierarchySettings(cTrack),
-					});
-					await withDeadline(
-						trace,
-						"C-replaced third session records both receipts and builds the parent",
-						world.io.waitForMutation(
-							() =>
-								cxOwed().length === 0 &&
-								cxRows(cxFirstFile).length === 3 &&
-								Object.keys(icmStoredManifest(icmLiveStore(world), cxStore)?.acceptedNodes ?? {}).length === 3,
-						),
-						60_000,
-					);
-					const cxRecorded = cxRows(cxFirstFile);
-					expect(
-						{
-							paid: cxPaid(),
-							rows: { count: cxRecorded.length, unique: new Set(cxRecorded).size },
-							oldRecorded: cxRecorded.includes(cxOldReceipt),
-							newRecorded: cxRecorded.includes(cxNewReceipt),
-							owed: cxOwed(),
-							receiptsPending: icmHierarchy(cxThird.session).admission?.work.receiptsPending,
-							held: icmHierarchy(cxThird.session).admission?.heldByKind,
-						},
-						"each receipt is recorded once after the reopen, the leaf is not bought again, and the owed queue is empty",
-					).toEqual({
-						paid: { summaries: 2, admissions: 3 },
-						rows: { count: 3, unique: 3 },
-						oldRecorded: true,
-						newRecorded: true,
-						owed: [],
-						receiptsPending: 0,
-						held: undefined,
-					});
-					expect(
-						await world.disposeSessionInBody(cxThird.session),
-						"the third C-replaced owner disposes cleanly",
-					).toBeUndefined();
-					trace.mark("root", "icm.replaced-verdict");
+						// Third session, no faults: the owed receipt and the kept verdict's receipt are recorded once each, the parent is judged
+						// on its own, and the owed queue is emptied.
+						world.provider.enqueue(cTrack, {
+							name: "cx-parent-summary",
+							check: (request) => {
+								if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+									throw new Error("the replaced-verdict parent does not merge the leaf");
+							},
+							reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+						});
+						// "context" keeps the context unavailable here as well: the leaf's input is the context-free one the second judgment
+						// kept, so its reply and verdict are reused with no call.
+						const cxContextRead3 =
+							cxVariant === "context" ? cxContextUnavailable("cx-context-unavailable-3") : undefined;
+						world.systemOne.enterPhase("cx-third", cAdmission);
+						const cxThird = await world.createRootSession("root", {
+							agentDir: cxAgentDir,
+							sessionManager: world.openSessionManager(cxFirstFile, cxAgentDir),
+							settings: icmHierarchySettings(cTrack),
+						});
+						if (cxContextRead3 !== undefined)
+							await withDeadline(trace, "C-replaced third context read answered", cxContextRead3.reached);
+						await withDeadline(
+							trace,
+							"C-replaced third session records both receipts and builds the parent",
+							world.io.waitForMutation(
+								() =>
+									cxOwed().length === 0 &&
+									cxRows(cxFirstFile).length === 3 &&
+									Object.keys(icmStoredManifest(icmLiveStore(world), cxStore)?.acceptedNodes ?? {}).length ===
+										3,
+							),
+							60_000,
+						);
+						const cxRecorded = cxRows(cxFirstFile);
+						expect(
+							{
+								paid: cxPaid(),
+								rows: { count: cxRecorded.length, unique: new Set(cxRecorded).size },
+								oldRecorded: cxRecorded.includes(cxOldReceipt),
+								newRecorded: cxRecorded.includes(cxNewReceipt),
+								owed: cxOwed(),
+								receiptsPending: icmHierarchy(cxThird.session).admission?.work.receiptsPending,
+								held: icmHierarchy(cxThird.session).admission?.heldByKind,
+								// Every lineage listing of the leaf's context that the port answered unavailable, by its request.
+								contextUnavailable: cxContextUnavailableAnswers(),
+							},
+							"each receipt is recorded once after the reopen, the leaf is not bought again, and the owed queue is empty",
+						).toEqual({
+							paid: { summaries: cxVariant === "context" ? 3 : 2, admissions: 3 },
+							rows: { count: 3, unique: 3 },
+							oldRecorded: true,
+							newRecorded: true,
+							owed: [],
+							receiptsPending: 0,
+							held: undefined,
+							contextUnavailable: cxVariant === "context" ? 2 : 0,
+						});
+						expect(
+							await world.disposeSessionInBody(cxThird.session),
+							"the third C-replaced owner disposes cleanly",
+						).toBeUndefined();
+						trace.mark("root", `icm.replaced-verdict-${cxVariant}`);
+					}
 				}
 
 				for (const roVariant of ["retry", "interrupt", "crash", "shutdown"] as const) {
@@ -13676,6 +13787,147 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					).toBeUndefined();
 					trace.mark("root", `icm.abort-receipt-${raVariant}`);
 				}
+
+				// R-stop (a stop, not a forget, ends the held evaluator call of a job that stays): the carried outage of R-abort, a
+				// paid 503 whose retry is held at the gate, is ended by the in-process restart of R16 (a changed signature setting stops
+				// the coordinator, which aborts and joins its claim). The carried receipt is recorded at once, so the job is saved
+				// queued with its attempt, its kept reply and its counters: one semantic request, one transport attempt, one receipt.
+				// The restarted coordinator claims the job again with those counters carried, reuses the kept reply and pays the
+				// judgment once; nothing already counted is counted again.
+				const rsAgentDir = `${world.agentDir}-icm-stop`;
+				await seedIcmPastSession(world, rsAgentDir);
+				const rsStore = icmStore(rsAgentDir);
+				world.provider.enqueue(cTrack, text("rs-leaf-summary", ICM_LEAF_SUMMARY));
+				world.provider.enqueue(cTrack, {
+					name: "rs-parent-summary",
+					check: (request) => {
+						if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+							throw new Error("the R-stop parent does not merge the leaf");
+					},
+					reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+				});
+				const rsFirst = await world.createRootSession("root", {
+					agentDir: rsAgentDir,
+					sessionManager: world.createSessionManager(rsAgentDir),
+					settings: { memorySystem: undefined },
+				});
+				world.provider.enqueue("root", {
+					name: "rs-owner-turn",
+					reply: { content: [{ type: "text", text: "Noted." }] },
+				});
+				world.systemOne.enterPhase("rs-owner-turn", {});
+				await withDeadline(trace, "R-stop owner turn", rsFirst.session.prompt("Say hello."));
+				const rsFile = rsFirst.sessionManager.getSessionFile();
+				if (rsFile === undefined) throw new Error("R-stop: the owner session has no file");
+				const rsReports = () =>
+					world.io
+						.fileEntries()
+						.get(rsFile)
+						?.split("\n")
+						.filter((line) => line.includes('"customType":"semantic_usage"'))
+						.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId) ?? [];
+				const rsLeafJob = (read: IcmStoreRead) =>
+					icmStoredJobs(read, rsStore).find((job) => job.kind === "leaf" && job.spanRange.fromIndex === 8);
+				const rsJudgments = {
+					summary_supported: cAdmission.summary_supported,
+					owner_constraints_preserved: cAdmission.owner_constraints_preserved,
+				};
+				let rsAdmissions = 0;
+				const rsGate = createBarrier();
+				const rsAdmitted = createBarrier();
+				const rsRestartGate = createBarrier();
+				const rsRestarted = createBarrier();
+				// The first request is a paid 503; its retry is admitted and held at the gate until the stop aborts it.
+				world.systemOne.enterPhase("rs-answering", rsJudgments, {
+					gate: rsGate.promise,
+					paidOutageFirst: true,
+					onAdmit: () => {
+						rsAdmissions += 1;
+						if (rsAdmissions === 2) rsAdmitted.release();
+					},
+				});
+				const rsPaidBefore = {
+					summaries: icmTrackRequests(world, cTrack),
+					admissions: icmAdmissionRequests(world),
+				};
+				rsFirst.settingsManager.applyOverrides({
+					contextPolicy: { memory: { history: icmHierarchySettings(cTrack).contextPolicy?.memory?.history } },
+				});
+				try {
+					await withDeadline(trace, "R-stop judgment held at the evaluator", rsAdmitted.promise);
+					// The stop. The save it makes is observed; the restarted coordinator's claim is the next judgment and waits at its gate.
+					const rsStopSave = icmObserveNextJobsSave(world, rsStore, "r-stop-save");
+					world.systemOne.enterPhase("rs-restarted", rsJudgments, {
+						gate: rsRestartGate.promise,
+						onAdmit: () => rsRestarted.release(),
+					});
+					rsFirst.settingsManager.applyOverrides({
+						contextPolicy: { memory: { history: { maxConcurrentSummaries: 3 } } },
+					});
+					await withDeadline(trace, "R-stop restarted judgment held", rsRestarted.promise);
+					const rsStopped = rsStopSave()?.jobs.find((job) => job.kind === "leaf" && job.spanRange.fromIndex === 8);
+					const rsClaimed = rsLeafJob(icmLiveStore(world));
+					expect(
+						{
+							stop: {
+								state: rsStopped?.state,
+								attempts: rsStopped?.attempts,
+								ledger: rsStopped?.ledger,
+								keptReply: rsStopped?.pendingReply?.textDigest === summaryTextDigest(ICM_LEAF_SUMMARY),
+								verdict: rsStopped?.pendingVerdict,
+							},
+							restart: { state: rsClaimed?.state, attempts: rsClaimed?.attempts, ledger: rsClaimed?.ledger },
+							paid: {
+								summaries: icmTrackRequests(world, cTrack) - rsPaidBefore.summaries,
+								admissions: icmAdmissionRequests(world) - rsPaidBefore.admissions,
+							},
+							rows: rsReports().length,
+						},
+						"the stop saves the job queued with its kept reply and one recorded receipt; the restart claims it again with those counters and pays the judgment once",
+					).toEqual({
+						stop: {
+							state: "queued",
+							attempts: 1,
+							ledger: { semanticRequests: 1, transportAttempts: 1, receiptsRecorded: 1, reused: 0 },
+							keptReply: true,
+							verdict: undefined,
+						},
+						restart: {
+							state: "running",
+							attempts: 2,
+							ledger: { semanticRequests: 1, transportAttempts: 1, receiptsRecorded: 1, reused: 0 },
+						},
+						paid: { summaries: 1, admissions: 3 },
+						rows: 1,
+					});
+					rsRestartGate.release();
+					await withDeadline(
+						trace,
+						"R-stop hierarchy rebuilt",
+						world.io.waitForMutation(() => icmAcceptedAt(icmLiveStore(world), rsStore, 1, 0) !== undefined),
+						60_000,
+					);
+					const rsRecorded = rsReports();
+					expect(
+						{
+							paid: {
+								summaries: icmTrackRequests(world, cTrack) - rsPaidBefore.summaries,
+								admissions: icmAdmissionRequests(world) - rsPaidBefore.admissions,
+							},
+							reports: { count: rsRecorded.length, unique: new Set(rsRecorded).size },
+						},
+						"the carried receipt is recorded once, the restarted judgment and the parent each record one receipt, and nothing is bought twice",
+					).toEqual({ paid: { summaries: 2, admissions: 4 }, reports: { count: 3, unique: 3 } });
+				} finally {
+					rsGate.release();
+					rsRestartGate.release();
+				}
+				await withDeadline(trace, "R-stop paid responses settled", world.systemOne.joinInFlight());
+				expect(
+					await world.disposeSessionInBody(rsFirst.session),
+					"the R-stop owner disposes cleanly",
+				).toBeUndefined();
+				trace.mark("root", "icm.stop-receipt");
 
 				// R-readmit: model summaries that carry no admission under the current contract (as after a contract change) are
 				// not approved. Their admission record is removed from the two stored node files (valid external preparation: the
