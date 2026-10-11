@@ -3832,6 +3832,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			// E4 default policy: the same reader under the default egress policy (external egress closed) hands no read to the external
 			// lifecycle provider, the normal read included. Its own root keeps the handoff wake unambiguous, and its worker runs the same query.
 			const m4DefaultPrefetches: string[] = [];
+			const m4DefaultRegistrations: string[] = [];
 			const m4Default = await world.createRootSession("root", {
 				sessionManager: world.createSessionManager(),
 				extensionFactories: [
@@ -3843,7 +3844,9 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 								egress: "external",
 								isAvailable: () => true,
 								getCapabilities: () => ({ surfaces: ["context"] }),
-								initialize: async () => {},
+								initialize: async () => {
+									m4DefaultRegistrations.push("m4-external-lifecycle");
+								},
 								shutdown: async () => {},
 								prefetch: async (query) => {
 									m4DefaultPrefetches.push(query);
@@ -3940,6 +3943,10 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			await withDeadline(trace, "M4 default-policy worker reported", m4DefaultDone.promise);
 			await withDeadline(trace, "M4 default-policy handoff woke the root", m4DefaultWake.promise, 60_000);
 			await withDeadline(trace, "M4 default-policy root idle", m4Default.session.waitForForegroundIdle());
+			expect(
+				m4DefaultRegistrations,
+				"the default-policy session initializes the external lifecycle provider, so the zero-call oracle below is not vacuous",
+			).toEqual(["m4-external-lifecycle"]);
 			expect(
 				m4DefaultPrefetches,
 				"the default egress policy never hands the normal read to the external lifecycle provider",
@@ -7546,16 +7553,32 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			// Root memory query gate: an external context memory provider is queried only by a turn that passes the long-term trigger
 			// and carries no credential shape, with external egress explicitly enabled. The secret turn runs first and the normal turn
 			// after it, on the same session, so the normal turn proves the blocked turn left the provider usable. The key is joined from
-			// two literals (no source line carries it whole).
+			// two literals (no source line carries it whole). The prompts say "Recall", not "Remember": "remember" is a durable or correction
+			// signal (learning/reflection-turn-analysis.ts) that would buy an internal reflection turn on the root track and consume the
+			// scripted steps below. "Recall" keeps the explicit-recall trigger that the gate under test depends on.
 			const memoryKey = ["AIzaD3kQ9vL", "m2Xp8Rt4Wz6Yc1Nb5Hj7Fg0TsUe9"].join("");
-			const memorySecretQuery = `Remember this key for the release deploy: ${memoryKey}`;
-			const memoryNormalQuery = "Remember the release preference for this project.";
+			const memorySecretQuery = `Recall this key for the release deploy: ${memoryKey}`;
+			const memoryNormalQuery = "Recall the release preference for this project.";
 			const memoryProviderId = "harness-context-memory";
 			const memorySearches: string[] = [];
 			world.provider.enqueue(
 				"root",
-				text("memory-secret-reply", "The secret query was withheld."),
-				text("memory-normal-reply", "The preference was looked up."),
+				{
+					name: "memory-secret-reply",
+					check: (request) => {
+						if (!requestTexts(request).some((entry) => entry.includes("Recall this key for the release deploy")))
+							throw new Error("the first root request is not the secret turn");
+					},
+					reply: { content: [{ type: "text", text: "The secret query was withheld." }] },
+				},
+				{
+					name: "memory-normal-reply",
+					check: (request) => {
+						if (!requestTexts(request).some((entry) => entry.includes(memoryNormalQuery)))
+							throw new Error("the second root request is not the normal turn");
+					},
+					reply: { content: [{ type: "text", text: "The preference was looked up." }] },
+				},
 			);
 			const memoryOwner = await world.createRootSession("root", {
 				sessionManager: world.createSessionManager(),
