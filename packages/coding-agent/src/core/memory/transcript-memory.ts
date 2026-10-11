@@ -61,6 +61,7 @@ import {
 	admissionRecordFromResult,
 	needsReadmission,
 	parseSemanticReceipt,
+	receiptsOf,
 	summaryTextDigest,
 	TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
 	type TranscriptAdmissionUnavailableCause,
@@ -3835,7 +3836,14 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		// The evaluator call is paid work of this claim too: its attempt is not given back by a later failure.
 		this.paidClaims.add(token.claimId);
-		const result = await port.admit(request, signal);
+		let result: Awaited<ReturnType<TranscriptSummaryAdmissionPort["admit"]>>;
+		try {
+			result = await port.admit(request, signal);
+		} catch (error) {
+			// An aborted call that had already been answered by some transport attempt still owes those usage receipts.
+			this.settleCarriedReceipts(port, error);
+			throw error;
+		}
 		// The unit of work is counted as it happened: one semantic request, one transport attempt per paid response.
 		const receipts = this.settleReceipts(port, result.receipts, this.ports.ownerSessionId());
 		// The job may have ended (and left the list) while the call was in flight: its receipts are still settled below.
@@ -3858,6 +3866,18 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		// The result carries the receipts as they stand now (recorded), not as the evaluator returned them.
 		return { result: { ...result, receipts }, reused: false };
+	}
+
+	/** The receipts a failed call carried are recorded now; the ones that cannot be written go to the owed queue. Never dropped. */
+	private settleCarriedReceipts(port: TranscriptSummaryAdmissionPort, error: unknown): void {
+		const carried = receiptsOf(error);
+		const scheduler = this.scheduler;
+		if (carried.length === 0 || !scheduler) return;
+		const owner = this.ports.ownerSessionId();
+		const unrecorded = this.settleReceipts(port, carried, owner).filter((receipt) => receipt.status === "unrecorded");
+		if (unrecorded.length === 0) return;
+		scheduler.returnReleasedReceipts(unrecorded.map((receipt) => ({ ownerSessionId: owner, receipt })));
+		this.markJobsDirty();
 	}
 
 	/**
