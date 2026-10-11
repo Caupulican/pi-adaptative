@@ -93,6 +93,7 @@ import {
 	validateSummaryText,
 } from "./transcript-summary-node.ts";
 import {
+	readmissionJobKey,
 	TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS,
 	type TranscriptSummaryClaimToken,
 	type TranscriptSummaryFailure,
@@ -270,7 +271,9 @@ export type TranscriptReadmissionWait =
 	| "judgment_discarded"
 	| "store_refused"
 	| "store_unavailable"
-	| "admission_mismatch";
+	| "admission_mismatch"
+	/** Its re-admission job ended failed (its budget is spent): it is not judged again for this text and contract. */
+	| "readmission_failed";
 
 export interface TranscriptMemoryAdmissionStatus {
 	contractVersion: number;
@@ -407,6 +410,8 @@ const READMISSION_WAIT_TEXT: Record<TranscriptReadmissionWait, string> = {
 	store_refused: "the store refused its admission record",
 	store_unavailable: "the store could not record its judgment; re-admission retries later",
 	admission_mismatch: "its text no longer matches the admission it carries",
+	readmission_failed:
+		"its re-admission failed and its attempt budget is spent; it is not judged again for this text and contract",
 };
 const MAX_HELD_REASON_CHARS = 200;
 /** A hold's cause is cut to this on its own, so it always fits inside {@link MAX_HELD_REASON_CHARS} ({@link holdReason}). */
@@ -473,6 +478,8 @@ type JobOutcome =
 	/** The claim lost its authority after its summarizer call: that attempt is spent, the paid reply stays kept. */
 	| { kind: "superseded"; reason: string }
 	| { kind: "stale"; reason: string }
+	/** A re-admission whose node is already approved under its identity (its admission was made durable before a stop). */
+	| { kind: "approved" }
 	/** A re-admission judgment (paid now, or reused from a kept verdict) to apply to its node. */
 	| {
 			kind: "readmitted";
@@ -1272,14 +1279,14 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			return "stopped";
 		}
 		const before = new Set(this.catalog.ids());
+		const gone = [...before].filter((id) => !state.nodes.has(id));
+		// Read before the mirror is replaced: the sessions of the nodes that are gone.
+		const goneSessions = this.sessionsOf(gone);
 		this.loadMirror(state);
 		this.runtime.clear();
 		const now = this.ports.now();
-		scheduler.revokeNodes(
-			[...before].filter((id) => !state.nodes.has(id)),
-			now,
-			{ readmit: false },
-		);
+		scheduler.revokeNodes(gone, now, { readmit: false });
+		this.endRevokedReadmissions(goneSessions, new Set(gone));
 		for (const node of state.nodes.values()) {
 			if (!before.has(node.id) && isCurrentCaptureNode(node)) scheduler.onNodeReady(node, now);
 		}
@@ -1350,9 +1357,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// The stop always reaches its terminal signal; a save that failed keeps its real cause for the status.
 			try {
 				const saved = await this.saveJobsInOrder(scheduler, writer, this.epoch, scheduler.snapshot());
-				if (saved === undefined) {
-					this.noteInternalCause("the jobs were not saved at stop: the owed usage receipts are not durable");
-				} else if (saved.status !== "saved") {
+				// An unsaved queue already recorded its real cause (saveOwedReceipts); the stop adds nothing over it.
+				if (saved !== undefined && saved.status !== "saved") {
 					this.noteInternalCause(`saving jobs at stop: ${describeSaveRefusal(saved)}`);
 				}
 			} catch (error) {
@@ -1976,8 +1982,25 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const hold = this.readmissionState.get(node.id);
 		if (hold?.state === "rejected") return "judged_rejected";
 		if (hold?.state === "uncertain") return "judged_uncertain";
-		if (hold?.state === "unavailable") return "evaluator_unavailable";
+		// An outage is a wait only while its job still retries: a job that ended failed has spent its identity for good.
+		if (hold?.state === "unavailable" && !this.readmissionFailed(node)) return "evaluator_unavailable";
+		// A job that ended failed spent its identity: that outranks the wait it last reported while it still retried.
+		if (this.readmissionFailed(node)) return "readmission_failed";
 		return hold?.wait ?? "not_yet_judged";
+	}
+
+	/**
+	 * Whether this node's re-admission job ended failed. Read from the scheduler, not from the hold, so it holds after a
+	 * restart (the holds are per run) and for an outage that exhausted the job's attempts.
+	 */
+	private readmissionFailed(node: TranscriptSummaryNode): boolean {
+		const identity = readmissionJobKey(
+			node.id,
+			TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
+			summaryTextDigest(node.text),
+			node.recipeVersion,
+		);
+		return this.scheduler?.get(identity)?.state === "failed";
 	}
 
 	/**
@@ -2080,16 +2103,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	): void {
 		this.manifestRevision = revision;
 		const revokedSet = new Set(revoked);
-		for (const sessionId of this.sessionsOf(revoked)) {
-			for (const _ended of this.scheduler?.endReadmissions(
-				sessionId,
-				revokedSet,
-				this.ports.now(),
-				this.settlingReadmissions,
-			) ?? []) {
-				this.countTerminal("stale");
-			}
-		}
+		this.endRevokedReadmissions(this.sessionsOf(revoked), revokedSet);
 		for (const id of revoked) {
 			this.catalog.unindex(id);
 		}
@@ -2107,6 +2121,25 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			droppedReadyJobs: alreadyDroppedReady + (reconciled?.dropped.length ?? 0),
 			readmittedParents: reconciled?.readmitted.length ?? 0,
 		};
+	}
+
+	/**
+	 * End the re-admission jobs of revoked nodes in these sessions: a judgment of a node that is gone is no longer wanted, so
+	 * its in-flight request is aborted rather than left to pay, and each ended job counts as stale.
+	 */
+	private endRevokedReadmissions(sessionIds: Iterable<string>, revoked: ReadonlySet<string>): void {
+		for (const sessionId of sessionIds) {
+			for (const ended of this.scheduler?.endReadmissions(
+				sessionId,
+				revoked,
+				this.ports.now(),
+				this.settlingReadmissions,
+			) ?? []) {
+				for (const entry of this.inFlight.values()) if (entry.jobId === ended.id) entry.controller.abort();
+				// A job that had already finished (ready) was counted when it did; only a job ended here is stale.
+				if (ended.state !== "ready") this.countTerminal("stale");
+			}
+		}
 	}
 
 	/** Sessions that own any of these nodes. Call before the nodes are unindexed. */
@@ -3695,7 +3728,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if ("outcome" in judged) return { outcome: judged.outcome };
 		const result = judged.result;
 		if (result.disposition === "accepted") {
-			this.judgments.accepted += 1;
+			this.countJudgment(result.disposition, judged.reused);
 			const admission = admissionRecordFromResult(result, reply.text, new Date(this.ports.now()).toISOString());
 			// A broken invariant, not a provider failure: it ends the job with its own class instead of reaching
 			// `runJob`'s provider classification.
@@ -3718,7 +3751,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (result.disposition === "unavailable" && result.cause === "invalid_output") {
 			// A paid answer that failed the evaluator contract is evidence of nothing: never reused, never approved, and not an
 			// outage to retry. The job ends with that cause.
-			this.judgments.unavailable += 1;
+			this.countJudgment("unavailable", judged.reused);
 			return {
 				outcome: {
 					kind: "fail",
@@ -3732,13 +3765,13 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			result.cause !== "request_refused"
 		) {
 			// Temporary: the validated reply stays on the job for the retry.
-			this.judgments.unavailable += 1;
+			this.countJudgment("unavailable", judged.reused);
 			return {
 				outcome: { kind: "fail", failure: { kind: "transient", reason: "admission_unavailable", message: detail } },
 			};
 		}
 		if (result.disposition === "unavailable") {
-			this.judgments.unavailable += 1;
+			this.countJudgment("unavailable", judged.reused);
 			return {
 				outcome: {
 					kind: "fail",
@@ -3746,13 +3779,19 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				},
 			};
 		}
-		this.judgments[result.disposition] += 1;
+		this.countJudgment(result.disposition, judged.reused);
 		return {
 			outcome: {
 				kind: "fail",
 				failure: { kind: "malformed", reason: `admission_${result.disposition}`, message: detail },
 			},
 		};
+	}
+
+	/** A fresh verdict is a judgment; a kept verdict applied again is a reuse event (only an acceptance counts as one), never a judgment. */
+	private countJudgment(disposition: keyof TranscriptMemoryAdmissionStatus["judgments"], replayed: boolean): void {
+		if (!replayed) this.judgments[disposition] += 1;
+		else if (disposition === "accepted") this.reusedAdmissions += 1;
 	}
 
 	/**
@@ -3803,10 +3842,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		});
 		if (receipts.some((receipt) => receipt.status === "unrecorded")) {
 			// Kept on the job whatever the disposition: a verdict is not lost, and no receipt is dropped.
-			await this.keepVerdict(
+			const kept = await this.keepVerdict(
 				token,
 				verdictOf(result, receipts, token.attempt, this.ports.ownerSessionId(), verdictKey),
 			);
+			// The job ended while its paid call was in flight: its receipts went to the owed queue and nothing is held.
+			if (!kept) return { outcome: { kind: "aborted" } };
 			return { outcome: this.receiptHold(receipts) };
 		}
 		// The result carries the receipts as they stand now (recorded), not as the evaluator returned them.
@@ -3860,14 +3901,27 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private async keepVerdict(
 		token: TranscriptSummaryClaimToken,
 		verdict: TranscriptSummaryPendingVerdict,
-	): Promise<void> {
+	): Promise<boolean> {
+		let kept = false;
 		await this.enqueue(async () => {
 			const scheduler = this.scheduler;
-			if (!scheduler?.ownsClaim(token)) return;
-			scheduler.setPendingVerdict(token.jobId, verdict);
-			this.markJobsDirty();
+			if (scheduler?.ownsClaim(token)) {
+				scheduler.setPendingVerdict(token.jobId, verdict);
+				kept = true;
+				this.markJobsDirty();
+			} else if (scheduler) {
+				// The job ended while its paid call was in flight, so no verdict can be kept on it: the receipts still owed go to
+				// the owner's queue, as a job that ends holding them hands them over (see releaseOwedReceipts). Never dropped.
+				scheduler.returnReleasedReceipts(
+					verdict.receipts
+						.filter((receipt) => receipt.status === "unrecorded")
+						.map((receipt) => ({ ownerSessionId: verdict.ownerSessionId, receipt })),
+				);
+				this.markJobsDirty();
+			}
 		});
 		await this.jobsSaved;
+		return kept;
 	}
 
 	/** Arm the bounded retry of owed usage receipts (1 s doubling to one minute while writes keep failing). */
@@ -4021,6 +4075,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		if (outcome.kind === "readmitted") {
 			await this.settleReadmitted(job, token, outcome, epoch);
+			this.afterTerminal(job, epoch);
+			return;
+		}
+		if (outcome.kind === "approved") {
+			// No provider call was made under this claim, so its attempt is returned (as for a reused verdict).
+			scheduler.completeReadmission(job.id, now, { reused: true });
 			this.afterTerminal(job, epoch);
 			return;
 		}
@@ -4806,7 +4866,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	/**
 	 * The body of a re-admission job under its claim: re-read the node's sources (or its approved children), judge the
 	 * exact text once (or reuse the kept paid verdict), and hand the judgment to {@link settleReadmitted}. A node that is
-	 * gone, already approved or whose text changed ends the job stale: its identity names the text it judges.
+	 * gone or whose text changed ends the job stale: its identity names the text it judges. A node already approved (its
+	 * admission was made durable before a stop) completes the job ready with its attempt returned, without a call.
 	 */
 	private async readmitNode(
 		job: TranscriptSummaryJob,
@@ -4815,8 +4876,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	): Promise<JobOutcome> {
 		const port = this.ports.admission;
 		const node = job.nodeId !== undefined ? this.catalog.get(job.nodeId) : undefined;
-		if (!node || !needsReadmission(node))
-			return { kind: "stale", reason: "the summary is gone or no longer needs re-admission" };
+		if (!node) return { kind: "stale", reason: "the summary is gone" };
+		// Approved already: the admission of this identity was made durable before the job could settle (a stop in between).
+		if (!needsReadmission(node)) return { kind: "approved" };
 		if (this.nodeDenied(node)) return { kind: "stale", reason: "the summary belongs to a forgotten session" };
 		if (!port) return { kind: "held", scope: "model_work", reason: "no summary admission evaluator is configured" };
 		const block = this.modelWorkBlock();
@@ -4881,9 +4943,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const scheduler = this.scheduler;
 		if (!scheduler) return;
 		const { node, result, reused, inputDigest } = outcome;
-		// A kept verdict applied again is a reuse event, never a new judgment; a fresh one is counted once.
-		if (reused) this.reusedAdmissions += 1;
-		else this.judgments[result.disposition] += 1;
+		// A kept verdict applied again is a reuse event, never a new judgment; a fresh one is counted once. Only an acceptance
+		// is reused as one (status.reused): a kept rejection or outage is replayed without a judgment and counts nowhere.
+		if (!reused) this.judgments[result.disposition] += 1;
+		else if (result.disposition === "accepted") this.reusedAdmissions += 1;
 		this.settlingReadmissions.add(job.id);
 		try {
 			await this.applyReadmission(node, result, epoch);
@@ -4913,6 +4976,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				scheduler.abandonClaim(token, { message: result.reason, reason: result.cause }, now);
 				this.parked.set(job.id, { scope: "model_work", reason: result.reason });
 			} else if (result.cause === "evaluator_error") {
+				// A replayed outage made no paid call, so its claim's attempt is returned; a fresh one keeps it (its call was paid).
 				this.settleFailure(
 					job,
 					{
@@ -4920,6 +4984,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 						failure: { kind: "transient", reason: "admission_unavailable", message: result.reason },
 					},
 					now,
+					reused,
 				);
 			} else {
 				this.settleFailure(
@@ -5117,6 +5182,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		epoch: number,
 	): Promise<void> {
 		const { writer } = this;
+		// The outcome this judgment records is its own: a hold an earlier attempt left on the node is never read as its result.
+		this.readmissionState.delete(node.id);
 		if (!writer || !this.live(epoch) || this.catalog.get(node.id) !== node) return;
 		// Source and policy fences, read again after the asynchronous judgment.
 		const block = this.modelWorkBlock();
@@ -5163,7 +5230,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				at: this.ports.now(),
 			});
 			if (this.recentFailures.length > MAX_RECENT_FAILURES) this.recentFailures.shift();
-			this.countTerminal("failed", subject, reason, message);
 		};
 		if (result.disposition === "accepted") {
 			const admission = admissionRecordFromResult(result, node.text, new Date(this.ports.now()).toISOString());
@@ -5233,6 +5299,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				);
 			}
 			if (revoked.status === "unavailable") return this.readmissionWriteFailed(node, epoch, revoked.reason, true);
+			// Counted once, here: the verdict is final for this text once its revocation is durable. An outage, a refused or a
+			// failed store write is counted when its job ends, and a replay of the same verdict is not counted again.
+			if (revoked.status === "published") this.countTerminal("failed", subject, reason, detail);
 			if (!this.live(epoch)) {
 				// Durable already: the mirror takes it with its revision even though this run will not continue (C6).
 				if (revoked.status === "published") this.mirrorRevocation(revoked, reason, undefined, 0);

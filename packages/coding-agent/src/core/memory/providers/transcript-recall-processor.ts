@@ -201,7 +201,11 @@ function readCompleteLines(
 		const end = fstatSync(fd).size;
 		// An append continues the prefix the held state was captured from. Checked on this very descriptor, so the bytes read
 		// next belong to the file instance the check describes; a replaced or migrated file reads nothing and reloads.
-		if (expectedProbe !== undefined && startOffset > 0 && probePrefixAt(fd, startOffset) !== expectedProbe) {
+		if (
+			expectedProbe !== undefined &&
+			startOffset > 0 &&
+			(expectedProbe === PROBE_UNREADABLE || probePrefixAt(fd, startOffset) !== expectedProbe)
+		) {
 			return { offset: startOffset, size: end, probe: "", diverged: true };
 		}
 		const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
@@ -241,6 +245,8 @@ function readCompleteLines(
 	}
 }
 
+/** The probe of a read that failed: it never vouches for a later append, so the next append reloads. */
+const PROBE_UNREADABLE = "unreadable";
 const PROBE_HEAD_BYTES = 256;
 const PROBE_TAIL_BYTES = 64;
 
@@ -265,7 +271,7 @@ function probePrefixAt(fd: number, offset: number): string {
 			.update(tail.subarray(0, tailRead))
 			.digest("hex");
 	} catch {
-		return "unreadable";
+		return PROBE_UNREADABLE;
 	}
 }
 
@@ -996,7 +1002,10 @@ export class TranscriptRecallProcessor {
 		return ingested;
 	}
 
-	/** The catalog record of a session, after one failure refresh when it is missing and failures are recorded. */
+	/**
+	 * The catalog record of a session, after one refresh when it is missing: recorded failed sources are re-read, then the
+	 * session directories are listed once for files another writer created (each unknown file is ingested like a scan would).
+	 */
 	private catalogRecord(sessionId: string): SessionRecord | undefined {
 		const record = this.recordsById.get(sessionId);
 		if (record || !this.refreshFailedSources()) return record;

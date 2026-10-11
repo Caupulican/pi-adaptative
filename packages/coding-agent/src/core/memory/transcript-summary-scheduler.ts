@@ -1371,7 +1371,9 @@ export class TranscriptSummaryScheduler {
 			// The ledger is noted first: a budget merged into this job may be durable only there (see adoptLegacyBudget).
 			this.applyDurableFloor(job);
 			this.track(job);
-			if (job.state === "ready" && job.nodeId) this.readyJobByNode.set(job.nodeId, job.id);
+			// Only the job that produced a node maps to it: a readmission judges an existing node and never produces one.
+			if (job.state === "ready" && job.nodeId && job.kind !== "readmission")
+				this.readyJobByNode.set(job.nodeId, job.id);
 			if (job.state === "running") {
 				// Published and accepted before the stop, but the `ready` state was not saved: it completes from that
 				// node (running to ready is the legal completion), and its reservation is released like any completion's.
