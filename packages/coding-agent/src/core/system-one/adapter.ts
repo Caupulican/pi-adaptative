@@ -1,6 +1,10 @@
 import { abortableSleep } from "@caupulican/pi-ai/abort-signals";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
-import { SystemOneReviewError } from "../review/system-one-review-port.ts";
+import {
+	SystemOneInvalidResponseError,
+	type SystemOneReceipt,
+	SystemOneReviewError,
+} from "../review/system-one-review-port.ts";
 import { TypeSafeEvidenceError, TypeSafeInputError } from "../review/typesafe-contract.ts";
 import type { SystemOneAccessResolver } from "./access.ts";
 import { SYSTEM_ONE_PINNED_MODEL } from "./catalog.ts";
@@ -23,6 +27,8 @@ export interface JevEvaluationResponse {
 		output_tokens?: number;
 	};
 	latency_ms: number;
+	/** Persistence outcome of each paid provider response behind this answer. Absent when the reviewer persists nothing. */
+	receipts?: readonly SystemOneReceipt[];
 }
 
 export interface JevAdapterEvaluateOptions {
@@ -50,6 +56,8 @@ export interface SystemOneReviewerLike {
 			usage?: { input_tokens?: number; output_tokens?: number };
 		};
 		elapsedMs: number;
+		/** Absent for a reviewer that persists no usage; the real reviewer always supplies it. */
+		receipts?: readonly SystemOneReceipt[];
 	}>;
 }
 
@@ -65,33 +73,38 @@ export type JevFailureKind =
 export class JevAdapterFailure extends Error {
 	readonly kind: JevFailureKind;
 	readonly originalMessage: string;
+	/** Paid provider responses the failure carries, so a caller can settle their receipts. Empty when none were paid. */
+	readonly receipts: readonly SystemOneReceipt[];
 
 	constructor(kind: JevFailureKind, originalMessage: string, impact: string, cause?: unknown) {
 		super(`Jev System One ${kind} for impact '${impact}': ${originalMessage}`, { cause });
 		this.name = "JevAdapterFailure";
 		this.kind = kind;
 		this.originalMessage = originalMessage;
+		this.receipts = cause instanceof SystemOneReviewError ? cause.receipts : [];
 	}
 }
 
+/**
+ * Typed contract failures first (no text matching). The text fallback reads transport and provider text only;
+ * a response that failed validation is always a typed `invalid_response`, never an outage.
+ */
 export function classifyJevFailure(error: unknown, aborted: boolean): JevFailureKind {
 	if (aborted) return "cancelled";
 	if (error instanceof TypeSafeEvidenceError || error instanceof TypeSafeInputError) return "invalid_request";
+	if (error instanceof SystemOneInvalidResponseError) return "invalid_response";
 	if (error instanceof SystemOneReviewError) {
-		if (error.failureKind === "usage_recording") return "unavailable";
 		const status = error.transportAttempts.at(-1)?.status;
 		if (status === 400 || status === 422) return "invalid_request";
 		if (status === 429) return "rate_limit";
 		if (status !== undefined && status >= 400) return "unavailable";
 	}
 	const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
-	if (/Model drift detected/i.test(text)) return "model_drift";
 	if (/AbortError|aborted/i.test(text)) return "cancelled";
 	if (/timeout|ETIMEDOUT/i.test(text)) return "timeout";
 	if (/\bHTTP\s+(?:400|422)\b/i.test(text)) return "invalid_request";
 	if (/\b429\b|rate limit/i.test(text)) return "rate_limit";
 	if (/\b401\b|\b403\b|\b503\b|ECONNREFUSED|unavailable|ENOTFOUND/i.test(text)) return "unavailable";
-	if (/Missing answer|Invalid noul|Invalid choice|question coverage|incomplete/i.test(text)) return "invalid_response";
 	return "unavailable";
 }
 
@@ -224,8 +237,10 @@ export class SystemOneJevAdapter implements JevAdapter {
 				// R-007: Log the concrete model version returned and reject unexpected model drift
 				const modelsMatch = driver.matchesModel(targetModel, returnedModel);
 				if (this.config.model.pin_required && !modelsMatch) {
-					throw new Error(
+					throw new JevAdapterFailure(
+						"model_drift",
 						`Model drift detected: requested pinned model '${targetModel}', but Jev endpoint returned '${returnedModel}' (R-007)`,
+						impact,
 					);
 				}
 
@@ -247,6 +262,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 					answers,
 					usage: result.response.usage,
 					latency_ms,
+					receipts: result.receipts ?? [],
 				};
 			} catch (error) {
 				lastError = error;
@@ -263,11 +279,6 @@ export class SystemOneJevAdapter implements JevAdapter {
 				) {
 					throw new JevAdapterFailure(classifyJevFailure(error, false), error.message, impact, error);
 				}
-				// If model drift was detected, do not retry
-				if (error instanceof Error && error.message.includes("Model drift detected")) {
-					throw error;
-				}
-
 				const classified = classifyFailure({ message: error instanceof Error ? error.message : String(error) });
 				if (!classified.retryable) break;
 

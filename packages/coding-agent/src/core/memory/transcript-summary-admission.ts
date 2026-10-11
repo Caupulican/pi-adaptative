@@ -23,8 +23,10 @@
  * recording engine over System One). No second evaluator client or model router lives here, and System One
  * availability and configuration stay with its owner. When the engine is the session's recording engine over
  * the reviewer built in sdk.ts, its usage is charged where every System One response already is: that
- * reviewer's per-response `semantic_usage` receipt, retries included. Charging therefore depends on the
- * host handing this port that engine, not on anything in this file.
+ * reviewer's per-response `semantic_usage` receipt, retries included. Each paid response's persistence outcome
+ * rides back on the result as a receipt; an unrecorded one is retried through `recordReceipt` with the same
+ * `reportId`, never by asking the evaluator again. Charging therefore depends on the host handing this port that
+ * engine and the usage sink, not on anything in this file.
  *
  * Egress is the evaluator's own and is always `external`: System One is a remote service, so a local
  * summarizer does not make admission local. The coordinator refuses to call an external admission port
@@ -34,10 +36,13 @@
  */
 
 import { createHash } from "node:crypto";
+import type { Usage } from "@caupulican/pi-ai";
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import { decisivelyHolds } from "../decision/evaluation.ts";
 import { isNoulProbability, noulBand } from "../decision/noul.ts";
 import { createDecisionProgram } from "../decision/program.ts";
+import { DecisionEngineProtocolError } from "../decision/protocol-error.ts";
+import type { SystemOneReceipt, TypeSafeUsageReceipt } from "../review/system-one-review-port.ts";
 import { JevAdapterFailure } from "../system-one/adapter.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import {
@@ -79,6 +84,11 @@ const PROGRAM_ID = "memory-summary-admission";
 export type TranscriptAdmissionJudgmentId = "support" | "constraints" | "status";
 
 const JUDGMENT_IDS: readonly TranscriptAdmissionJudgmentId[] = ["support", "constraints", "status"];
+
+/** Whether an untrusted value names one of the admission judgments. */
+export function isTranscriptAdmissionJudgmentId(value: unknown): value is TranscriptAdmissionJudgmentId {
+	return JUDGMENT_IDS.some((id) => id === value);
+}
 
 /** The decision id each judgment is asked under. */
 const DECISION_ID: Readonly<Record<TranscriptAdmissionJudgmentId, string>> = {
@@ -193,6 +203,12 @@ interface AdmissionResultBase {
 	judged: TranscriptAdmissionJudgmentId[];
 	/** P(the judgment holds) for each asked judgment that was answered, in [0, 1]. */
 	confidences: Partial<Record<TranscriptAdmissionJudgmentId, number>>;
+	/**
+	 * The paid provider responses behind this result, each with its persistence outcome. An `unrecorded` receipt is
+	 * owed a {@link TranscriptSummaryAdmissionPort.recordReceipt} retry before the job may report success. Empty when
+	 * no paid call happened (no evaluator bound, input too large).
+	 */
+	receipts: readonly SystemOneReceipt[];
 }
 
 export type TranscriptSummaryAdmissionResult =
@@ -210,17 +226,19 @@ export type TranscriptSummaryAdmissionResult =
 	  });
 
 /**
- * Why no judgment was obtained. `evaluator_error` (an outage, a timeout, an answer that did not parse) is
- * temporary; `not_bound` and `not_calibrated` are conditions the owner can change; `input_too_large` and
- * `request_refused` (the evaluator's credential guard or schema refused this exact input) will repeat
- * for the same input, so the coordinator must not spend retries on them.
+ * Why no judgment was obtained. `evaluator_error` (an outage, a timeout) is temporary; `not_bound` and
+ * `not_calibrated` are conditions the owner can change; `input_too_large` and `request_refused` (the evaluator's
+ * credential guard or schema refused this exact input) will repeat for the same input, so the coordinator must
+ * not spend retries on them. `invalid_output` is a paid answer that failed the evaluator contract: it is evidence
+ * of nothing, is never reused or approved, and is not an outage to retry.
  */
 export type TranscriptAdmissionUnavailableCause =
 	| "not_bound"
 	| "not_calibrated"
 	| "input_too_large"
 	| "request_refused"
-	| "evaluator_error";
+	| "evaluator_error"
+	| "invalid_output";
 
 /**
  * The port the summary coordinator calls. `egress` is the evaluator's own classification. An abort rejects
@@ -236,6 +254,12 @@ export interface TranscriptSummaryAdmissionPort {
 	 */
 	availability(): { cause: "not_bound" | "not_calibrated"; reason: string } | undefined;
 	admit(request: TranscriptSummaryAdmissionRequest, signal: AbortSignal): Promise<TranscriptSummaryAdmissionResult>;
+	/**
+	 * Persist one paid receipt whose persistence stage failed, with the same `reportId` as its first attempt
+	 * (readers dedupe by it, so a retry after an uncertain acknowledgment counts once). Never calls the evaluator.
+	 * Throws when the write fails again; the caller keeps the job held with that cause.
+	 */
+	recordReceipt(receipt: SystemOneReceipt): void;
 }
 
 /**
@@ -261,6 +285,17 @@ export interface SemanticSummaryAdmissionDeps {
 	 * or switched later applies to the next job. Undefined while System One is not bound.
 	 */
 	getEngine(): SemanticDecisionEngine | undefined;
+	/**
+	 * The usage ledger sink for one paid receipt: the same sink the reviewer writes through. Throws when the
+	 * write fails. Owner-session routing lives in the host's closure, not here.
+	 */
+	recordUsage(receipt: TypeSafeUsageReceipt): void;
+}
+
+/** The receipts a failed engine call still owes: paid responses the adapter or engine carried on the error. */
+function receiptsOf(error: unknown): readonly SystemOneReceipt[] {
+	if (error instanceof JevAdapterFailure || error instanceof DecisionEngineProtocolError) return error.receipts ?? [];
+	return [];
 }
 
 const DATA_NOTICE =
@@ -334,12 +369,16 @@ export function createSemanticSummaryAdmission(deps: SemanticSummaryAdmissionDep
 	return {
 		egress: "external",
 		availability: () => problem(deps.getEngine()),
+		recordReceipt(receipt) {
+			deps.recordUsage(receipt.payload);
+		},
 		async admit(request, signal) {
 			const judged = applicableAdmissionJudgments(request);
 			const unavailable = (
 				cause: TranscriptAdmissionUnavailableCause,
 				reason: string,
 				evaluator?: TranscriptAdmissionEvaluator,
+				receipts: readonly SystemOneReceipt[] = [],
 			): TranscriptSummaryAdmissionResult => ({
 				disposition: "unavailable",
 				cause,
@@ -347,6 +386,7 @@ export function createSemanticSummaryAdmission(deps: SemanticSummaryAdmissionDep
 				judged,
 				confidences: {},
 				reason: boundedReason(reason),
+				receipts,
 				...(evaluator ? { evaluator } : {}),
 			});
 			const engine = deps.getEngine();
@@ -388,18 +428,24 @@ export function createSemanticSummaryAdmission(deps: SemanticSummaryAdmissionDep
 				});
 			} catch (error) {
 				if (signal.aborted) throw error;
+				// An answer that failed the evaluator contract is invalid output: never reused, never retried as an outage.
+				const invalid =
+					error instanceof DecisionEngineProtocolError ||
+					(error instanceof JevAdapterFailure && error.kind === "invalid_response");
 				// The evaluator refusing this exact input (a credential in it, an invalid request) repeats for the same input.
 				const refused = error instanceof JevAdapterFailure && error.kind === "invalid_request";
 				return unavailable(
-					refused ? "request_refused" : "evaluator_error",
+					invalid ? "invalid_output" : refused ? "request_refused" : "evaluator_error",
 					error instanceof Error ? error.message : String(error),
 					evaluator,
+					receiptsOf(error),
 				);
 			}
 			const answered: AdmissionResultBase = {
 				contractVersion: TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
 				judged,
 				confidences: {},
+				receipts: evaluation.audit?.receipts ?? [],
 			};
 			const model = evaluation.engine.model || engine.model;
 			const answeredBy: TranscriptAdmissionEvaluator = { engineId: engine.id, model };
@@ -410,9 +456,10 @@ export function createSemanticSummaryAdmission(deps: SemanticSummaryAdmissionDep
 				if (result?.kind !== "boolean" || !isNoulProbability(result.probabilityTrue)) {
 					return {
 						...unavailable(
-							"evaluator_error",
+							"invalid_output",
 							`the evaluator returned no probability for the ${id} judgment`,
 							answeredBy,
+							answered.receipts,
 						),
 						confidences: answered.confidences,
 					};
@@ -550,6 +597,111 @@ export function parseSummaryAdmission(value: unknown): TranscriptSummaryAdmissio
 			admittedAt,
 		},
 	};
+}
+
+const RECEIPT_KEYS = ["status", "reportId", "attempt", "cause", "payload"] as const;
+const RECEIPT_PAYLOAD_KEYS = [
+	"receiptId",
+	"provider",
+	"model",
+	"attempt",
+	"usage",
+	"costStatus",
+	"costProvenance",
+] as const;
+const RECEIPT_USAGE_KEYS = ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const;
+const RECEIPT_COST_KEYS = ["input", "output", "cacheRead", "cacheWrite", "total"] as const;
+const MAX_RECEIPT_TEXT_CHARS = 200;
+
+function isReceiptCount(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isReceiptMoney(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isReceiptText(value: unknown): value is string {
+	return typeof value === "string" && value.length > 0 && value.length <= MAX_RECEIPT_TEXT_CHARS;
+}
+
+/**
+ * One untrusted persisted paid-receipt record (a System One response's priced usage and its persistence outcome);
+ * undefined when malformed. Fails closed: an unknown field, a count that is not a safe integer, a receipt whose
+ * payload names another identity, or an `unrecorded` receipt without its cause is not a receipt.
+ */
+export function parseSemanticReceipt(value: unknown): SystemOneReceipt | undefined {
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, RECEIPT_KEYS)) return undefined;
+	const { status, reportId, attempt, cause, payload } = value;
+	if (status !== "recorded" && status !== "unrecorded") return undefined;
+	if (!isReceiptText(reportId) || !isReceiptCount(attempt)) return undefined;
+	if (status === "recorded" && cause !== undefined) return undefined;
+	if (status === "unrecorded" && !isReceiptText(cause)) return undefined;
+	if (!isPlainRecord(payload) || !hasOnlyKeys(payload, RECEIPT_PAYLOAD_KEYS)) return undefined;
+	const { receiptId, provider, model, attempt: payloadAttempt, usage, costStatus, costProvenance } = payload;
+	if (receiptId !== reportId || payloadAttempt !== attempt) return undefined;
+	if (!isReceiptText(provider) || !isReceiptText(model)) return undefined;
+	if (costStatus !== "catalog_priced" && costStatus !== "unpriced") return undefined;
+	let provenance: { provider: string; model: string } | undefined;
+	if (costProvenance !== undefined) {
+		if (
+			!isPlainRecord(costProvenance) ||
+			!hasOnlyKeys(costProvenance, ["provider", "model"]) ||
+			!isReceiptText(costProvenance.provider) ||
+			!isReceiptText(costProvenance.model)
+		)
+			return undefined;
+		provenance = { provider: costProvenance.provider, model: costProvenance.model };
+	}
+	if (!isPlainRecord(usage) || !hasOnlyKeys(usage, RECEIPT_USAGE_KEYS)) return undefined;
+	const { input, output, cacheRead, cacheWrite, totalTokens, cost } = usage;
+	if (
+		!isReceiptCount(input) ||
+		!isReceiptCount(output) ||
+		!isReceiptCount(cacheRead) ||
+		!isReceiptCount(cacheWrite) ||
+		!isReceiptCount(totalTokens)
+	)
+		return undefined;
+	if (!isPlainRecord(cost) || !hasOnlyKeys(cost, RECEIPT_COST_KEYS)) return undefined;
+	const costInput = cost.input;
+	const costOutput = cost.output;
+	const costCacheRead = cost.cacheRead;
+	const costCacheWrite = cost.cacheWrite;
+	const costTotal = cost.total;
+	if (
+		!isReceiptMoney(costInput) ||
+		!isReceiptMoney(costOutput) ||
+		!isReceiptMoney(costCacheRead) ||
+		!isReceiptMoney(costCacheWrite) ||
+		!isReceiptMoney(costTotal)
+	)
+		return undefined;
+	const priced: Usage = {
+		input,
+		output,
+		cacheRead,
+		cacheWrite,
+		totalTokens,
+		cost: {
+			input: costInput,
+			output: costOutput,
+			cacheRead: costCacheRead,
+			cacheWrite: costCacheWrite,
+			total: costTotal,
+		},
+	};
+	const record: TypeSafeUsageReceipt = {
+		receiptId,
+		provider,
+		model,
+		attempt,
+		usage: priced,
+		costStatus,
+		...(provenance ? { costProvenance: provenance } : {}),
+	};
+	if (status === "recorded") return { status, reportId, attempt, payload: record };
+	return isReceiptText(cause) ? { status, reportId, attempt, cause, payload: record } : undefined;
 }
 
 /** The fields of a node that approval reads; a node satisfies it structurally. */

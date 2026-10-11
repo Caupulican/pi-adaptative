@@ -37,7 +37,7 @@ import {
 	isUnscopedBedrockProxy,
 } from "./bedrock-scope.ts";
 import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
-import { SEMANTIC_USAGE_CUSTOM_TYPE } from "./cost/usage-records.ts";
+import { SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf } from "./cost/usage-records.ts";
 import { resolveEffectiveCompletionProfile } from "./decision/completion-profile.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
@@ -716,14 +716,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				fetch: options.systemOneFetch,
 				credentialBoundary: systemOneCredentialBoundary,
 				onUsage: (receipt) => {
-					sessionManager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, {
-						reportId: receipt.receiptId,
-						provider: receipt.provider,
-						model: receipt.model,
-						attempt: receipt.attempt,
-						usage: receipt.usage,
-						costStatus: receipt.costStatus,
-					});
+					sessionManager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf(receipt));
 				},
 			});
 			const adapter = new SystemOneJevAdapter(reviewer, createSystemOneConfig({ enabled: true }), {

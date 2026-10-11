@@ -453,7 +453,7 @@ export interface MemoryControllerDeps {
 	 */
 	hierarchy?: Pick<
 		TranscriptHierarchyHostDeps,
-		"summarizer" | "isForegroundBusy" | "subscribeForegroundActivity" | "getAdmissionEngine"
+		"summarizer" | "isForegroundBusy" | "subscribeForegroundActivity" | "getAdmissionEngine" | "recordUsage"
 	> & {
 		/** The live branch position, so the frontier only ever describes the active ancestry. */
 		activeBranch: ActiveBranchView;
@@ -1319,8 +1319,10 @@ export class MemoryController {
 				},
 				state: "shown",
 			};
-		} catch {
-			// A frontier failure never clears or replaces what is on record, and never fails the request.
+		} catch (error) {
+			// A frontier failure never clears or replaces what is on record, and never fails the request; its cause is
+			// recorded on the coordinator's diagnostics, not lost.
+			host.noteFrontierFault(error);
 			return { records: [], reserved: NO_FRONTIER_RESERVE, state: "not_running" };
 		}
 	}

@@ -1,3 +1,4 @@
+import type { SystemOneReceipt } from "../review/system-one-review-port.ts";
 import type { ConfidenceProvenance, DecisionConfidence } from "./confidence.ts";
 import { type NoulBand, type NoulDirection, noulBand, settledFromBand } from "./noul.ts";
 
@@ -108,6 +109,8 @@ export interface DecisionEvaluationAudit {
 	readonly consequence?: string;
 	readonly fallbackChain?: readonly string[];
 	readonly policyDisposition?: string;
+	/** Persistence outcome of each paid provider response behind this evaluation (retries included). */
+	readonly receipts?: readonly SystemOneReceipt[];
 }
 
 export interface DecisionEvaluation {

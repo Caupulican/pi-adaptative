@@ -23,6 +23,28 @@ export interface SemanticUsageReport {
 	costStatus?: "catalog_priced" | "unpriced";
 }
 
+/**
+ * The one mapping from a semantic evaluation receipt to the session's usage record, so the reviewer's usage sink and
+ * the retry of an unrecorded receipt write the identical entry (aggregation dedupes by `reportId`).
+ */
+export function semanticUsageReportOf(receipt: {
+	receiptId: string;
+	provider: string;
+	model: string;
+	attempt: number;
+	usage: Usage;
+	costStatus?: SemanticUsageReport["costStatus"];
+}): SemanticUsageReport {
+	return {
+		reportId: receipt.receiptId,
+		provider: receipt.provider,
+		model: receipt.model,
+		attempt: receipt.attempt,
+		usage: receipt.usage,
+		...(receipt.costStatus !== undefined ? { costStatus: receipt.costStatus } : {}),
+	};
+}
+
 export interface SpawnedUsageTotals {
 	cost: number;
 	reports: number;

@@ -36,7 +36,11 @@ import type {
 import { TranscriptBoundedRead } from "./transcript-summary-bounded-read.ts";
 import { TranscriptSummaryCatalog, type TranscriptSummaryReadContext } from "./transcript-summary-catalog.ts";
 import type { TranscriptSummaryNode } from "./transcript-summary-node.ts";
-import type { TranscriptSummaryRecoveryIssue, TranscriptSummaryStore } from "./transcript-summary-store.ts";
+import {
+	SESSION_TOMBSTONE_KEY_PREFIX,
+	type TranscriptSummaryRecoveryIssue,
+	type TranscriptSummaryStore,
+} from "./transcript-summary-store.ts";
 
 export interface TranscriptSummaryViewDeps {
 	store: TranscriptSummaryStore;
@@ -47,6 +51,11 @@ export interface TranscriptSummaryViewDeps {
 
 /** The manifest revision of a store that has no manifest yet: nothing was ever accepted. */
 const NO_MANIFEST = -1;
+
+/** The cache key of one load: the manifest revision and the permanent forget state's revision. */
+function loadKey(manifestRevision: number, forgetRevision: number): string {
+	return `${manifestRevision}:${forgetRevision}`;
+}
 
 /** The store as loaded: its catalog, and the detail of damaged retention anchors when they were damaged. */
 interface LoadedSummaries {
@@ -69,7 +78,7 @@ function damagedNodeId(issue: TranscriptSummaryRecoveryIssue): string | undefine
 
 export class TranscriptSummaryView implements TranscriptNodeExpander, TranscriptSummaryLookup {
 	private readonly deps: TranscriptSummaryViewDeps;
-	private loaded: { ticket: number; revision: number; summaries: LoadedSummaries } | undefined;
+	private loaded: { ticket: number; revision: string; summaries: LoadedSummaries } | undefined;
 	/** Store loads: one running plus one queued for fences, each caller settled by its own deadline. */
 	private readonly loads = new TranscriptBoundedRead<LoadedSummaries>((ticket) => this.refresh(ticket));
 
@@ -136,7 +145,17 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 		const read = await this.deps.store.readManifest();
 		if (read.status === "unavailable") return { status: "unavailable", reason: read.reason };
 		if (read.status === "corrupt") return damaged(read.detail);
-		const revision = read.status === "ok" ? read.manifest.revision : NO_MANIFEST;
+		// The permanent forget state is part of what a load reflects: a session forgotten since is denied at once, and an
+		// unknown state serves no summaries (it never reads as "nothing was forgotten").
+		const forget = await this.deps.store.readForgottenSessions();
+		if (forget.status === "unknown") {
+			return {
+				status: "unavailable",
+				reason: `the permanent forget state is unknown (${forget.reason}); summaries stay unavailable and exact history recall is unaffected`,
+			};
+		}
+		if (forget.status === "unavailable") return { status: "unavailable", reason: forget.reason };
+		const revision = loadKey(read.status === "ok" ? read.manifest.revision : NO_MANIFEST, forget.revision);
 		if (this.loaded?.revision === revision) return this.loaded.summaries;
 		const catalog = new TranscriptSummaryCatalog();
 		if (read.status === "missing") return this.remember(ticket, revision, { catalog });
@@ -160,13 +179,21 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 				}
 			}
 		}
+		// Legacy markers still in the manifest deny exactly as the permanent state does until the store migrates them.
+		const forgotten = new Set(forget.sessions);
+		for (const key of Object.keys(state.manifest?.tombstones ?? {})) {
+			if (key.startsWith(SESSION_TOMBSTONE_KEY_PREFIX))
+				forgotten.add(key.slice(SESSION_TOMBSTONE_KEY_PREFIX.length));
+		}
+		const denied = (node: TranscriptSummaryNode): boolean =>
+			forgotten.has(node.sessionId) || node.contextRefs.some((ref) => forgotten.has(ref.sessionId));
 		catalog.replace(
-			[...state.nodes.values()].filter((node) => !left.has(node.id)),
+			[...state.nodes.values()].filter((node) => !left.has(node.id) && !denied(node)),
 			state.retentionAnchors,
 		);
 		const anchors = state.issues.find((issue) => issue.kind === "anchors_corrupt");
 		// The revision the nodes were loaded at, not the one read before: a publication in between reloads next time.
-		return this.remember(ticket, state.manifest?.revision ?? NO_MANIFEST, {
+		return this.remember(ticket, loadKey(state.manifest?.revision ?? NO_MANIFEST, forget.revision), {
 			catalog,
 			...(anchors ? { anchorsDamaged: anchors.detail } : {}),
 		});
@@ -178,7 +205,7 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 	 * must not replace a newer one. Ordering by start rather than by revision value also adopts a store whose
 	 * revision restarted lower after a corrupt-manifest rebuild. The caller answers from what it loaded either way.
 	 */
-	private remember(ticket: number, revision: number, summaries: LoadedSummaries): LoadedSummaries {
+	private remember(ticket: number, revision: string, summaries: LoadedSummaries): LoadedSummaries {
 		if (this.loaded === undefined || ticket > this.loaded.ticket) this.loaded = { ticket, revision, summaries };
 		return summaries;
 	}

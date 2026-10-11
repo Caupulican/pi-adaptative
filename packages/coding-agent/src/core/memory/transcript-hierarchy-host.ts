@@ -13,6 +13,7 @@
 
 import type { TranscriptHierarchyStatus } from "../context/memory-diagnostics.ts";
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
+import type { TypeSafeUsageReceipt } from "../review/system-one-review-port.ts";
 import type { ActiveBranchEntryStanding } from "./active-branch-probe.ts";
 import { type FrontierAudience, projectFrontierView, renderFrontierView } from "./transcript-frontier.ts";
 import {
@@ -38,6 +39,7 @@ import { resolveTranscriptSummarizer, type TranscriptSummarizerDeps } from "./tr
 import { createSemanticSummaryAdmission, type TranscriptSummaryAdmissionPort } from "./transcript-summary-admission.ts";
 import { transcriptRetentionCutoff } from "./transcript-summary-catalog.ts";
 import {
+	forgetRefusalCause,
 	type TranscriptSummaryHeldByKind,
 	type TranscriptSummaryHoldKind,
 	TranscriptSummaryStore,
@@ -68,6 +70,8 @@ export interface TranscriptHierarchyHostDeps {
 	 * per judgment: undefined while System One is not bound, and then model summaries are held, never accepted unjudged.
 	 */
 	getAdmissionEngine(): SemanticDecisionEngine | undefined;
+	/** Writes a semantic usage receipt to the session's usage record (idempotent by receipt id); throws when it cannot. */
+	recordUsage(receipt: TypeSafeUsageReceipt): void;
 	/** True while the foreground owns the provider; background summaries wait for it to end. */
 	isForegroundBusy(): boolean;
 	/** Foreground activity changes (a submission starts or ends). No polling. */
@@ -126,6 +130,7 @@ const HOLD_KINDS: Record<TranscriptSummaryHoldKind, { label: string; sparesExact
 	proof: { label: "terminal-proof capacity", sparesExactCopies: false },
 	persistence: { label: "state not yet saved durably", sparesExactCopies: false },
 	reconciliation: { label: "awaiting session reconciliation", sparesExactCopies: false },
+	usage_receipt: { label: "paid answer awaiting its usage receipt", sparesExactCopies: false },
 };
 
 /** The kinds holding at least one job, in a fixed order. */
@@ -189,7 +194,10 @@ export class TranscriptHierarchyHost {
 
 	constructor(deps: TranscriptHierarchyHostDeps) {
 		this.deps = deps;
-		this.admission = createSemanticSummaryAdmission({ getEngine: () => deps.getAdmissionEngine() });
+		this.admission = createSemanticSummaryAdmission({
+			getEngine: () => deps.getAdmissionEngine(),
+			recordUsage: (receipt) => deps.recordUsage(receipt),
+		});
 	}
 
 	/** Bind the hierarchy to one memory generation's history index and (re)start it as settings allow. */
@@ -216,15 +224,37 @@ export class TranscriptHierarchyHost {
 	}
 
 	/**
-	 * Forget a session's derived history, by operator or retention authority. The outcome is the running
-	 * coordinator's (`forgotten`, or `refused` with its cause); with none running nothing can be forgotten, and
-	 * that is a refusal, never a silent success.
+	 * Forget a session's derived history, by operator or retention authority. The command is the store's permanent
+	 * forget state, so it works with or without background construction: a running coordinator records it and removes
+	 * the derived data at once; without one the command is recorded through the same store owner and every reader
+	 * denies the session from then on, while the derived data is removed the next time a coordinator runs. The session
+	 * must be known to the canonical history (an unknown id writes nothing), and a storage failure writes nothing.
 	 */
 	async forgetSession(sessionId: string): Promise<TranscriptForgetOutcome> {
-		if (!this.coordinator?.isRunning()) {
-			return { status: "refused", reason: "no history hierarchy is active; nothing was forgotten" };
+		if (this.coordinator?.isRunning()) return this.coordinator.forgetSession(sessionId);
+		const reader = this.reader;
+		if (!reader || !this.isCurrent()) return { status: "refused", reason: NOT_ATTACHED_REASON };
+		const probe = await reader.listLineageSpans({ sessionId, fromIndex: 0, maxSpans: 1 });
+		if (probe.status === "not_found") {
+			return { status: "refused", reason: `unknown session ${sessionId}: nothing was forgotten` };
 		}
-		return this.coordinator.forgetSession(sessionId);
+		if (probe.status !== "ok") {
+			return {
+				status: "refused",
+				reason: `could not confirm that session ${sessionId} exists (${probe.status}: ${probe.reason}): nothing was forgotten`,
+			};
+		}
+		const recorded = await this.openStore().recordForget(sessionId);
+		const refusal = forgetRefusalCause(recorded);
+		if (refusal !== undefined) {
+			return { status: "refused", reason: `forgetting ${sessionId} could not be recorded: ${refusal}` };
+		}
+		// The read-only view loads again against the new forget state; nothing it cached about the session survives.
+		this.view = undefined;
+		return {
+			status: "forgotten",
+			cleanupPending: "no coordinator is running; the derived summaries are removed the next time one runs",
+		};
 	}
 
 	/** The zoom surface; resolves its source per call so a restart or a new generation is never held on to. */
@@ -278,6 +308,13 @@ export class TranscriptHierarchyHost {
 		return rendering.text === ""
 			? { state: "no_room" }
 			: { state: "shown", text: rendering.text, bytes: rendering.bytes, revision: snapshot.selection.revision };
+	}
+
+	/** Record the cause of a frontier composition failure (the request continues without a frontier). */
+	noteFrontierFault(error: unknown): void {
+		this.coordinator?.recordExternalCause(
+			`composing the history frontier: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
 
 	/** Record why the latest committed request did or did not carry the frontier (diagnostics only). */
@@ -415,6 +452,7 @@ export class TranscriptHierarchyHost {
 		}
 		if (this.coordinator) return;
 		const coordinator = new TranscriptMemory({
+			ownerSessionId: () => this.deps.getSessionId(),
 			reader,
 			store: this.openStore(),
 			summarizer: summarizer.summarizer,

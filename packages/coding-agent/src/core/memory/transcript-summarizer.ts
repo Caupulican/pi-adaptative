@@ -27,6 +27,25 @@ export interface TranscriptSummarizerDeps {
 		options: { label?: string; sourceSessionId?: string; reportId: string },
 	): string | undefined;
 	getSessionId(): string;
+	/**
+	 * Records a summary call's spend that the usage ledger refused to take. Must not throw: it runs in the call's
+	 * `finally`, where a throw would replace the reply or the error already in flight.
+	 */
+	recordSpendFailure(cause: string): void;
+}
+
+/** Charge one summary call's spend to the owning session. A refused write is recorded, never thrown over the call. */
+function recordSummarySpend(deps: TranscriptSummarizerDeps, spent: Usage): void {
+	try {
+		reportSpawnedUsage(deps, spent, {
+			kind: SUMMARY_USAGE_KIND,
+			label: SUMMARY_USAGE_KIND,
+			sessionId: deps.getSessionId(),
+			identity: randomUUID(),
+		});
+	} catch (error) {
+		deps.recordSpendFailure(error instanceof Error ? error.message : String(error));
+	}
 }
 
 export type TranscriptSummarizerResolution =
@@ -79,12 +98,7 @@ export function resolveTranscriptSummarizer(
 					return { text: completion.text, model: modelRef };
 				} finally {
 					// Charged whether or not the reply was accepted: the tokens were spent either way.
-					reportSpawnedUsage(deps, spent, {
-						kind: SUMMARY_USAGE_KIND,
-						label: SUMMARY_USAGE_KIND,
-						sessionId: deps.getSessionId(),
-						identity: randomUUID(),
-					});
+					recordSummarySpend(deps, spent);
 				}
 			},
 		},

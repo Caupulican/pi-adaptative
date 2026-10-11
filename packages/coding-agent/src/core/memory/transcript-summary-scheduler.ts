@@ -31,7 +31,8 @@ import {
 	RetryDelayExceededError,
 	type RetryPolicy,
 } from "../../kernel/reliability/index.ts";
-import { isPlainRecord } from "../util/value-guards.ts";
+import type { SystemOneReceipt } from "../review/system-one-review-port.ts";
+import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import {
 	canTransitionSummaryJob,
 	isTerminalSummaryJobState,
@@ -43,8 +44,12 @@ import {
 	utf8ByteLength,
 } from "./transcript-memory-contracts.ts";
 import {
+	isTranscriptAdmissionJudgmentId,
+	parseSemanticReceipt,
 	parseSummaryAdmission,
 	summaryTextDigest,
+	type TranscriptAdmissionEvaluator,
+	type TranscriptAdmissionJudgmentId,
 	type TranscriptSummaryAdmissionRecord,
 } from "./transcript-summary-admission.ts";
 import {
@@ -81,6 +86,22 @@ export const TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS = 2_000;
  * or confirmed-absent session.
  */
 export const TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS = 20_000;
+/**
+ * The serialized size of one kept verdict. Its receipts are capped by the attempt budget and each carries one priced
+ * usage record, so a verdict stays well inside this bound; a larger one is refused rather than stored.
+ */
+export const TRANSCRIPT_SUMMARY_MAX_VERDICT_BYTES = 4_096;
+
+/** Work counts across every job; one unit per field, never merged (see {@link TranscriptSummaryScheduler.workCounts}). */
+export interface TranscriptSummaryWorkCounts {
+	logicalAttempts: number;
+	semanticRequests: number;
+	transportAttempts: number;
+	receiptsRecorded: number;
+	/** Receipts still owed a persistence retry, in kept verdicts. */
+	receiptsPending: number;
+	reused: number;
+}
 
 export const TRANSCRIPT_SUMMARY_RETRY_POLICY: RetryPolicy = {
 	maxAttempts: TRANSCRIPT_SUMMARY_MAX_ATTEMPTS,
@@ -89,7 +110,11 @@ export const TRANSCRIPT_SUMMARY_RETRY_POLICY: RetryPolicy = {
 	jitterRatio: 0.2,
 };
 
-export type TranscriptSummaryJobKind = "leaf" | "parent";
+/**
+ * `readmission`: re-judge an existing model-summary node under the current admission contract. It produces no new
+ * node and summarizes nothing; its `nodeId` is the node it judges and it carries no sources or children.
+ */
+export type TranscriptSummaryJobKind = "leaf" | "parent" | "readmission";
 
 export interface TranscriptSummaryJobError {
 	/** The real cause, verbatim from the failing call. */
@@ -135,8 +160,50 @@ export interface TranscriptSummaryKeptAdmission {
 	inputDigest: string;
 }
 
+/**
+ * The paid admission verdict a job keeps while it can still be used: the decision a judged input reached and the
+ * receipts that paid for it. Kept so a retry of a failed persistence stage (a receipt not yet recorded) does not buy
+ * the answer again, and so an answer's verdict is never re-derived from a different input. Reused only while the
+ * job lives and `inputDigest`, `textDigest` and `contractVersion` still match. Dropped at the job's terminal
+ * transition or when it becomes `ready`. An invalid answer is never kept: it ends the attempt.
+ */
+export interface TranscriptSummaryPendingVerdict {
+	/** The session whose usage ledger the receipts belong to. */
+	ownerSessionId: string;
+	/** Digest of the admission input this verdict judged. */
+	inputDigest: string;
+	/** SHA-256 hex of the text this verdict judged. */
+	textDigest: string;
+	contractVersion: number;
+	/** The logical attempt (claim) that paid for this verdict. */
+	attempt: number;
+	/**
+	 * `invalid_output` is retained only so an owed receipt can still be settled before the job ends: it is never a
+	 * judgment, is never reused as evidence, and is never published. Its `judged` list is empty.
+	 */
+	disposition: "accepted" | "rejected" | "uncertain" | "invalid_output";
+	reason?: string;
+	judged: TranscriptAdmissionJudgmentId[];
+	confidences: Partial<Record<TranscriptAdmissionJudgmentId, number>>;
+	evaluator: TranscriptAdmissionEvaluator;
+	/** Every paid response behind this verdict with its persistence outcome; `unrecorded` ones are owed a retry. */
+	receipts: SystemOneReceipt[];
+}
+
+/** Bounded per-job work counters, kept separately so status never merges unlike units. */
+export interface TranscriptSummaryJobLedger {
+	/** Admission requests (`admit` calls) this job made. */
+	semanticRequests: number;
+	/** Reviewer transport attempts behind those requests. */
+	transportAttempts: number;
+	/** Receipts persisted on the first or a retried persistence stage. */
+	receiptsRecorded: number;
+	/** Verdicts reused from the job's kept verdict, costing no evaluator call. */
+	reused: number;
+}
+
 export interface TranscriptSummaryJob {
-	/** Scheduling key: {@link leafJobKey} / {@link parentJobKey}. The produced node id is `nodeId`, known once built. */
+	/** Scheduling key: {@link leafJobKey} / {@link parentJobKey} / {@link readmissionJobKey}. The produced node id is `nodeId`, known once built. */
 	id: string;
 	kind: TranscriptSummaryJobKind;
 	sessionId: string;
@@ -154,10 +221,17 @@ export interface TranscriptSummaryJob {
 	maxAttempts: number;
 	nextRetryAt?: number;
 	lastError?: TranscriptSummaryJobError;
-	/** Set when the job is `ready`: the accepted node it produced. */
+	/**
+	 * Set when the job is `ready`: the accepted node it produced. A readmission job always has it: the node it judges,
+	 * from creation (the node already exists, so readmission never registers a new one).
+	 */
 	nodeId?: string;
 	/** Queued, running or retrying jobs only: see {@link TranscriptSummaryPendingReply}. */
 	pendingReply?: TranscriptSummaryPendingReply;
+	/** Queued, running or retrying jobs only: see {@link TranscriptSummaryPendingVerdict}. */
+	pendingVerdict?: TranscriptSummaryPendingVerdict;
+	/** Work counters; absent until the job made its first admission request. */
+	ledger?: TranscriptSummaryJobLedger;
 	/**
 	 * The capture identity version its source handles (or children) were taken under; absent means 1. A job of an
 	 * older version names inputs that are no longer the current identity, so the owner ends it stale at start.
@@ -350,6 +424,32 @@ const JOB_STATES: readonly TranscriptSummaryJobState[] = [
 	"stale",
 ];
 
+/** What a readmission job judges: one existing model-summary node, under the contract and recipe it was built with. */
+export interface TranscriptSummaryReadmissionInput {
+	nodeId: string;
+	sessionId: string;
+	level: number;
+	ordinal: number;
+	spanRange: TranscriptSummarySpanRange;
+	contractVersion: number;
+	recipeVersion: number;
+	/** SHA-256 hex of the node text under judgment; changed text is a different job. */
+	textDigest: string;
+}
+
+/**
+ * Identity of a readmission job: the node, the admission contract, the text judged and the recipe. Changing any of
+ * them is a different job, so a verdict is never reused for a node whose text or contract moved.
+ */
+export function readmissionJobKey(
+	nodeId: string,
+	contractVersion: number,
+	textDigest: string,
+	recipeVersion: number,
+): string {
+	return `readmission:${summaryTextDigest(JSON.stringify([nodeId, contractVersion, textDigest, recipeVersion]))}`;
+}
+
 function slotKey(sessionId: string, level: number, ordinal: number): string {
 	return `${sessionId}\u0000${level}\u0000${ordinal}`;
 }
@@ -367,6 +467,12 @@ function nextAuthority(): number {
 	authoritySequence += 1;
 	return authoritySequence;
 }
+
+/** What a new job identity is created from (everything but its state). */
+type NewJobBase = Pick<
+	TranscriptSummaryJob,
+	"id" | "kind" | "sessionId" | "level" | "ordinal" | "spanRange" | "sourceRefs" | "children" | "nodeId"
+>;
 
 export class TranscriptSummaryScheduler {
 	private readonly jobs = new Map<string, TranscriptSummaryJob>();
@@ -446,10 +552,6 @@ export class TranscriptSummaryScheduler {
 		const id = leafJobKey({ sessionId: input.sessionId, sourceRefs: input.sourceRefs });
 		// Before an existing job is returned: its version 1 budget merges into it (see adoptLegacyBudget).
 		this.adoptLegacyBudget(id, input.legacyKey);
-		const existing = this.jobs.get(id);
-		if (existing && existing.state !== "cancelled" && existing.state !== "stale") {
-			return { status: "exists", job: { ...existing } };
-		}
 		const base = {
 			id,
 			kind: "leaf" as const,
@@ -459,7 +561,24 @@ export class TranscriptSummaryScheduler {
 			spanRange: { ...input.spanRange },
 			sourceRefs: [...input.sourceRefs],
 		};
-		// A terminal job whose budget was spent comes back as that same failure, not as new work.
+		return this.admitNewJob(base, now, held);
+	}
+
+	/**
+	 * The admission every new job identity goes through: an identity already live or ready is returned unchanged, a terminal job whose budget was spent comes back as that same
+	 * failure (not as new work), the live-job bounds apply (jobs `held` on a condition do not count against the active
+	 * bound), and the terminal-proof ledger must be able to take the identity.
+	 */
+	private admitNewJob(
+		base: NewJobBase,
+		now: number,
+		held?: ReadonlyMap<string, unknown>,
+	): TranscriptSummaryEnqueueResult {
+		// An identity that is already live or ready (any state but cancelled or stale, which are replaced) is unchanged.
+		const existing = this.jobs.get(base.id);
+		if (existing && existing.state !== "cancelled" && existing.state !== "stale") {
+			return { status: "exists", job: { ...existing } };
+		}
 		const revived = this.reviveSpent(base, now);
 		if (revived) return { status: "exists", job: revived };
 		const live = this.activeCount();
@@ -469,9 +588,29 @@ export class TranscriptSummaryScheduler {
 		if (active >= this.maxActiveJobs || live >= TRANSCRIPT_SUMMARY_MAX_LIVE_JOBS) {
 			return { status: "backpressure", active };
 		}
-		const refusal = this.proofRefusal(id, input.sessionId);
+		const refusal = this.proofRefusal(base.id, base.sessionId);
 		if (refusal) return { status: "held", cause: refusal };
 		return { status: "created", job: this.insert(base, now) };
+	}
+
+	/**
+	 * Enqueue the readmission of one existing model-summary node. Admission follows the leaf rule: a new identity whose
+	 * terminal proof the ledger cannot take is `held` and nothing is created. A spent identity comes back as its failure
+	 * (never as fresh work), and an identity that is already live or ready is returned unchanged.
+	 */
+	enqueueReadmission(input: TranscriptSummaryReadmissionInput, now: number): TranscriptSummaryEnqueueResult {
+		if (!this.admissionOpen) return { status: "admission_closed" };
+		const id = readmissionJobKey(input.nodeId, input.contractVersion, input.textDigest, input.recipeVersion);
+		const base = {
+			id,
+			kind: "readmission" as const,
+			sessionId: input.sessionId,
+			level: input.level,
+			ordinal: input.ordinal,
+			spanRange: { ...input.spanRange },
+			nodeId: input.nodeId,
+		};
+		return this.admitNewJob(base, now);
 	}
 
 	// ---- terminal proof -----------------------------------------------------------------------
@@ -743,7 +882,7 @@ export class TranscriptSummaryScheduler {
 	private reviveSpent(
 		base: Pick<
 			TranscriptSummaryJob,
-			"id" | "kind" | "sessionId" | "level" | "ordinal" | "spanRange" | "sourceRefs" | "children"
+			"id" | "kind" | "sessionId" | "level" | "ordinal" | "spanRange" | "sourceRefs" | "children" | "nodeId"
 		>,
 		now: number,
 	): TranscriptSummaryJob | undefined {
@@ -940,6 +1079,42 @@ export class TranscriptSummaryScheduler {
 			throw new Error(`Node ${node.id} does not match the coverage of summary job ${jobId}.`);
 		this.settleReady(job, node, now);
 		return this.onNodeReady(node, now);
+	}
+
+	/**
+	 * A readmission's verdict is settled: the job is `ready` for the node it judged. Registers nothing, because the node
+	 * already exists and this job does not produce it. `reused` means the claim was answered by a kept verdict, so the
+	 * claim's own attempt is returned (never below the durable record): reuse costs no attempt.
+	 */
+	completeReadmission(jobId: string, now: number, options: { reused: boolean }): TranscriptSummaryJob | undefined {
+		const job = this.mustGet(jobId);
+		if (job.kind !== "readmission") throw new Error(`Summary job ${jobId} is not a readmission.`);
+		if (isTerminalSummaryJobState(job.state)) return undefined;
+		this.transition(job, "ready", now);
+		this.returnedClaims.delete(job.id);
+		if (options.reused) job.attempts = Math.max(this.durableFloor(job.id), job.attempts - 1, 0);
+		return { ...job };
+	}
+
+	/**
+	 * Readmission jobs that judge these nodes end when the node is revoked, its text changed or its session is forgotten
+	 * for this node: a live one becomes `stale`, and a ready one is removed as a ready producer is when its node goes.
+	 * Scoped to one session, so the work is bounded by that session's jobs.
+	 */
+	endReadmissions(sessionId: string, nodeIds: ReadonlySet<string>, now: number): TranscriptSummaryJob[] {
+		const ended: TranscriptSummaryJob[] = [];
+		for (const id of [...(this.jobsBySession.get(sessionId) ?? [])]) {
+			const job = this.jobs.get(id);
+			if (job?.kind !== "readmission" || job.nodeId === undefined || !nodeIds.has(job.nodeId)) continue;
+			if (job.state === "ready") {
+				this.removeJob(job);
+				ended.push({ ...job });
+				continue;
+			}
+			const stale = this.endJob(id, "stale", now);
+			if (stale) ended.push(stale);
+		}
+		return ended;
 	}
 
 	/** The completion itself, shared by {@link completeJob} and recovery: the job is `ready` for exactly this node. */
@@ -1254,7 +1429,7 @@ export class TranscriptSummaryScheduler {
 	private insert(
 		base: Pick<
 			TranscriptSummaryJob,
-			"id" | "kind" | "sessionId" | "level" | "ordinal" | "spanRange" | "sourceRefs" | "children"
+			"id" | "kind" | "sessionId" | "level" | "ordinal" | "spanRange" | "sourceRefs" | "children" | "nodeId"
 		>,
 		now: number,
 	): TranscriptSummaryJob {
@@ -1336,8 +1511,101 @@ export class TranscriptSummaryScheduler {
 		job.updatedAt = now;
 		if (isTerminalSummaryJobState(to)) job.terminalAt = now;
 		// A kept reply serves a job that will run again; a job that is ready or finished has no use for it.
-		if (to === "ready" || isTerminalSummaryJobState(to)) delete job.pendingReply;
+		// A kept verdict is paid-for evidence of the job it judged: it ends with the job, not with a claim.
+		if (to === "ready" || isTerminalSummaryJobState(to)) {
+			delete job.pendingReply;
+			delete job.pendingVerdict;
+		}
 		this.track(job);
+	}
+
+	/**
+	 * Keep (or drop, with `undefined`) the paid verdict of a live job. A ready or terminal job keeps none, so a verdict
+	 * with a receipt still owed is never dropped by a transition: the owner holds the job until that receipt is recorded.
+	 * Throws when such a job would lose an owed receipt, or when the record exceeds its bound.
+	 */
+	setPendingVerdict(jobId: string, verdict: TranscriptSummaryPendingVerdict | undefined): void {
+		const job = this.mustGet(jobId);
+		if (verdict === undefined) {
+			if (job.pendingVerdict?.receipts.some((receipt) => receipt.status === "unrecorded")) {
+				throw new Error(`Summary job ${jobId} still owes a receipt; its verdict cannot be dropped.`);
+			}
+			delete job.pendingVerdict;
+			return;
+		}
+		if (job.state === "ready" || isTerminalSummaryJobState(job.state)) {
+			if (verdict.receipts.some((receipt) => receipt.status === "unrecorded")) {
+				throw new Error(`Summary job ${jobId} is ${job.state} and would lose a receipt still owed.`);
+			}
+			return;
+		}
+		if (utf8ByteLength(JSON.stringify(verdict)) > TRANSCRIPT_SUMMARY_MAX_VERDICT_BYTES) {
+			throw new RangeError(`Summary verdict of ${jobId} exceeds ${TRANSCRIPT_SUMMARY_MAX_VERDICT_BYTES} bytes.`);
+		}
+		job.pendingVerdict = { ...verdict, receipts: verdict.receipts.map((receipt) => ({ ...receipt })) };
+	}
+
+	/**
+	 * The kept verdict of a live job, only while it still judges this exact input, text and contract. Reading does not
+	 * consume it: a receipt still owed stays owed until the owner records it.
+	 */
+	pendingVerdictFor(
+		jobId: string,
+		expect: { inputDigest: string; textDigest: string; contractVersion: number },
+	): TranscriptSummaryPendingVerdict | undefined {
+		const verdict = this.jobs.get(jobId)?.pendingVerdict;
+		if (
+			verdict === undefined ||
+			verdict.inputDigest !== expect.inputDigest ||
+			verdict.textDigest !== expect.textDigest ||
+			verdict.contractVersion !== expect.contractVersion
+		) {
+			return undefined;
+		}
+		return { ...verdict, receipts: verdict.receipts.map((receipt) => ({ ...receipt })) };
+	}
+
+	/** Add work counts to a job's ledger. Counts only grow; each delta is a bounded non-negative count. */
+	addWork(jobId: string, delta: Partial<TranscriptSummaryJobLedger>): void {
+		const job = this.mustGet(jobId);
+		for (const value of Object.values(delta)) {
+			if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+				throw new RangeError(`Summary work counts take non-negative integers; got ${value}.`);
+			}
+		}
+		const ledger = job.ledger ?? { semanticRequests: 0, transportAttempts: 0, receiptsRecorded: 0, reused: 0 };
+		job.ledger = {
+			semanticRequests: ledger.semanticRequests + (delta.semanticRequests ?? 0),
+			transportAttempts: ledger.transportAttempts + (delta.transportAttempts ?? 0),
+			receiptsRecorded: ledger.receiptsRecorded + (delta.receiptsRecorded ?? 0),
+			reused: ledger.reused + (delta.reused ?? 0),
+		};
+	}
+
+	/**
+	 * Work counts across every job, one unit per field and never merged: logical attempts (claims), admission requests,
+	 * reviewer transport attempts, receipts recorded, receipts still owed, and verdicts reused.
+	 */
+	workCounts(): TranscriptSummaryWorkCounts {
+		const counts: TranscriptSummaryWorkCounts = {
+			logicalAttempts: 0,
+			semanticRequests: 0,
+			transportAttempts: 0,
+			receiptsRecorded: 0,
+			receiptsPending: 0,
+			reused: 0,
+		};
+		for (const job of this.jobs.values()) {
+			counts.logicalAttempts += job.attempts;
+			counts.semanticRequests += job.ledger?.semanticRequests ?? 0;
+			counts.transportAttempts += job.ledger?.transportAttempts ?? 0;
+			counts.receiptsRecorded += job.ledger?.receiptsRecorded ?? 0;
+			counts.reused += job.ledger?.reused ?? 0;
+			for (const receipt of job.pendingVerdict?.receipts ?? []) {
+				if (receipt.status === "unrecorded") counts.receiptsPending += 1;
+			}
+		}
+		return counts;
 	}
 
 	/** Keep (or drop, with `undefined`) the validated reply a running, queued or waiting job will reuse. */
@@ -1458,11 +1726,112 @@ function parseKeptAdmission(value: unknown, textDigest: string): TranscriptSumma
 		: undefined;
 }
 
+const VERDICT_KEYS = [
+	"ownerSessionId",
+	"inputDigest",
+	"textDigest",
+	"contractVersion",
+	"attempt",
+	"disposition",
+	"reason",
+	"judged",
+	"confidences",
+	"evaluator",
+	"receipts",
+] as const;
+const LEDGER_KEYS = ["semanticRequests", "transportAttempts", "receiptsRecorded", "reused"] as const;
+const MAX_VERDICT_RECEIPTS = 8;
+
+/**
+ * One untrusted persisted kept verdict. Fails closed: an unknown field, an unknown judgment, a confidence outside
+ * [0, 1], a malformed receipt, or a record over its bound is not a verdict. The owner of the job fails the load on it
+ * rather than dropping it, because an owed receipt named there would otherwise vanish silently.
+ */
+function parsePendingVerdict(value: unknown): TranscriptSummaryPendingVerdict | undefined {
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, VERDICT_KEYS)) return undefined;
+	const { ownerSessionId, inputDigest, textDigest, contractVersion, attempt, disposition, reason } = value;
+	if (typeof ownerSessionId !== "string" || ownerSessionId.length === 0 || ownerSessionId.length > 200)
+		return undefined;
+	if (typeof inputDigest !== "string" || !/^[0-9a-f]{64}$/.test(inputDigest)) return undefined;
+	if (typeof textDigest !== "string" || !/^[0-9a-f]{64}$/.test(textDigest)) return undefined;
+	if (!isNonNegativeInteger(contractVersion) || contractVersion < 1) return undefined;
+	if (!isNonNegativeInteger(attempt) || attempt < 1) return undefined;
+	if (
+		disposition !== "accepted" &&
+		disposition !== "rejected" &&
+		disposition !== "uncertain" &&
+		disposition !== "invalid_output"
+	)
+		return undefined;
+	if (reason !== undefined && (typeof reason !== "string" || reason.length > 400)) return undefined;
+	const { judged, confidences, evaluator, receipts } = value;
+	if (!Array.isArray(judged)) return undefined;
+	if (disposition === "invalid_output" ? judged.length !== 0 : judged.length < 1 || judged.length > 3)
+		return undefined;
+	const judgedIds: TranscriptAdmissionJudgmentId[] = [];
+	for (const id of judged) {
+		if (!isTranscriptAdmissionJudgmentId(id) || judgedIds.includes(id)) return undefined;
+		judgedIds.push(id);
+	}
+	if (!isPlainRecord(confidences)) return undefined;
+	const confidenceRecord: Partial<Record<TranscriptAdmissionJudgmentId, number>> = {};
+	for (const [key, confidence] of Object.entries(confidences)) {
+		if (!isTranscriptAdmissionJudgmentId(key) || !judgedIds.includes(key)) return undefined;
+		if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+			return undefined;
+		}
+		confidenceRecord[key] = confidence;
+	}
+	if (!isPlainRecord(evaluator) || !hasOnlyKeys(evaluator, ["engineId", "model"])) return undefined;
+	if (typeof evaluator.engineId !== "string" || evaluator.engineId.length === 0 || evaluator.engineId.length > 200) {
+		return undefined;
+	}
+	if (typeof evaluator.model !== "string" || evaluator.model.length === 0 || evaluator.model.length > 200) {
+		return undefined;
+	}
+	if (!Array.isArray(receipts) || receipts.length > MAX_VERDICT_RECEIPTS) return undefined;
+	const parsedReceipts: SystemOneReceipt[] = [];
+	for (const raw of receipts) {
+		const receipt = parseSemanticReceipt(raw);
+		if (receipt === undefined) return undefined;
+		parsedReceipts.push(receipt);
+	}
+	const verdict: TranscriptSummaryPendingVerdict = {
+		ownerSessionId,
+		inputDigest,
+		textDigest,
+		contractVersion,
+		attempt,
+		disposition,
+		...(reason !== undefined ? { reason } : {}),
+		judged: judgedIds,
+		confidences: confidenceRecord,
+		evaluator: { engineId: evaluator.engineId, model: evaluator.model },
+		receipts: parsedReceipts,
+	};
+	return utf8ByteLength(JSON.stringify(verdict)) <= TRANSCRIPT_SUMMARY_MAX_VERDICT_BYTES ? verdict : undefined;
+}
+
+/** One untrusted persisted work-count record; undefined when any count is not a non-negative integer. */
+function parseWorkLedger(value: unknown): TranscriptSummaryJobLedger | undefined {
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, LEDGER_KEYS)) return undefined;
+	const { semanticRequests, transportAttempts, receiptsRecorded, reused } = value;
+	if (
+		!isNonNegativeInteger(semanticRequests) ||
+		!isNonNegativeInteger(transportAttempts) ||
+		!isNonNegativeInteger(receiptsRecorded) ||
+		!isNonNegativeInteger(reused)
+	) {
+		return undefined;
+	}
+	return { semanticRequests, transportAttempts, receiptsRecorded, reused };
+}
+
 /** Validate one untrusted persisted job. */
 export function parseSummaryJob(value: unknown): TranscriptSummaryJobParse {
 	const fail = (reason: string): TranscriptSummaryJobParse => ({ ok: false, reason });
 	if (!isPlainRecord(value)) return fail("job is not an object");
-	if (value.kind !== "leaf" && value.kind !== "parent") return fail("kind is invalid");
+	if (value.kind !== "leaf" && value.kind !== "parent" && value.kind !== "readmission") return fail("kind is invalid");
 	const parsedHeader = parseSummaryHeader(value);
 	if (!parsedHeader.ok) return fail(parsedHeader.reason);
 	const { header } = parsedHeader;
@@ -1484,9 +1853,23 @@ export function parseSummaryJob(value: unknown): TranscriptSummaryJobParse {
 		sourceRefs = parseSourceRefs(value.sourceRefs);
 		if (sourceRefs === undefined || sourceRefs.length === 0) return fail("leaf needs sourceRefs");
 	}
+	if (value.kind === "readmission") {
+		if (value.sourceRefs !== undefined || value.children !== undefined) {
+			return fail("a readmission job carries no sources or children");
+		}
+		if (typeof value.nodeId !== "string" || value.nodeId.length === 0)
+			return fail("a readmission job needs its nodeId");
+	}
 	const children = parseChildPair(value.children);
 	if (value.kind === "parent" && children === undefined) return fail("parent needs two children");
 	const pendingReply = value.pendingReply === undefined ? undefined : parsePendingReply(value.pendingReply);
+	// A damaged verdict fails the job: dropping it could hide a receipt the job still owes.
+	const pendingVerdict = value.pendingVerdict === undefined ? undefined : parsePendingVerdict(value.pendingVerdict);
+	if (value.pendingVerdict !== undefined && pendingVerdict === undefined) return fail("pendingVerdict is invalid");
+	const live = value.state === "queued" || value.state === "running" || value.state === "retry_wait";
+	if (pendingVerdict !== undefined && !live) return fail("pendingVerdict is kept on a job that is not live");
+	const ledger = value.ledger === undefined ? undefined : parseWorkLedger(value.ledger);
+	if (value.ledger !== undefined && ledger === undefined) return fail("ledger is invalid");
 	let error: TranscriptSummaryJobError | undefined;
 	if (value.lastError !== undefined) {
 		const raw = value.lastError;
@@ -1520,6 +1903,8 @@ export function parseSummaryJob(value: unknown): TranscriptSummaryJobParse {
 			...(pendingReply && (value.state === "queued" || value.state === "running" || value.state === "retry_wait")
 				? { pendingReply }
 				: {}),
+			...(pendingVerdict ? { pendingVerdict } : {}),
+			...(ledger ? { ledger } : {}),
 			...(typeof value.captureVersion === "number" ? { captureVersion: value.captureVersion } : {}),
 			createdAt: value.createdAt,
 			updatedAt: value.updatedAt,

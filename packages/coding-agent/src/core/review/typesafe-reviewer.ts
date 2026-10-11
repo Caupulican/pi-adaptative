@@ -8,10 +8,14 @@ import type { SystemOneAccessResolver } from "../system-one/access.ts";
 import { getSystemOneProviderDriver, type SystemOneProviderDriver } from "../system-one/provider-driver.ts";
 import {
 	type SystemOneEvaluationRecord,
+	SystemOneInvalidResponseError,
+	SystemOneObserverError,
+	type SystemOneReceipt,
 	SystemOneReviewError,
 	type SystemOneReviewRecord,
 	type SystemOneReviewResponseObserver,
 	type SystemOneTransportAttempt,
+	type TypeSafeUsageReceipt,
 } from "./system-one-review-port.ts";
 import {
 	type EvaluationInput,
@@ -23,8 +27,9 @@ import {
 	validateEvaluationResponse,
 	validateTypeSafeInput,
 } from "./typesafe-contract.ts";
-import { type PricedTypeSafeUsage, priceTypeSafeUsage } from "./typesafe-usage.ts";
+import { priceTypeSafeUsage } from "./typesafe-usage.ts";
 
+export type { SystemOneReceipt, TypeSafeUsageReceipt } from "./system-one-review-port.ts";
 export type { ReviewInput } from "./typesafe-contract.ts";
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -99,13 +104,6 @@ function decodeReviewResponse(
 	};
 }
 
-export interface TypeSafeUsageReceipt extends PricedTypeSafeUsage {
-	readonly receiptId: string;
-	readonly provider: string;
-	readonly model: string;
-	readonly attempt: number;
-}
-
 export interface SystemOneReviewerDeps {
 	/**
 	 * The session's System One access: provider, pinned model and key, resolved at every call so a
@@ -120,7 +118,10 @@ export interface SystemOneReviewerDeps {
 	model?: string;
 	endpoint?: string;
 	modelsEndpoint?: string;
-	/** One durable, provider-priced receipt for every response carrying valid usage, retries included. */
+	/**
+	 * One durable, provider-priced receipt for every response carrying valid usage, retries included. A throwing
+	 * sink leaves that receipt `unrecorded` on the result; it never discards a received answer.
+	 */
 	onUsage?(receipt: TypeSafeUsageReceipt): void;
 	/** The same host credential boundary that protects model requests and tool output. */
 	credentialBoundary?: Pick<
@@ -316,6 +317,17 @@ export class SystemOneReviewer {
 		if (TYPESAFE_API_CREDENTIAL.test(body)) throw new Error(`${providerName} evidence contains an API credential`);
 		const requestSha256 = createHash("sha256").update(body).digest("hex");
 		const evaluationId = randomUUID();
+		const receipts: SystemOneReceipt[] = [];
+		// A failed write leaves its receipt unrecorded for the caller to retry; the answer it priced is still returned.
+		const recordReceipt = (payload: TypeSafeUsageReceipt): SystemOneReceipt => {
+			try {
+				this.deps.onUsage?.(payload);
+				return { status: "recorded", reportId: payload.receiptId, attempt: payload.attempt, payload };
+			} catch (error) {
+				const cause = redact(error instanceof Error ? error.message : String(error)).slice(0, 200);
+				return { status: "unrecorded", reportId: payload.receiptId, attempt: payload.attempt, cause, payload };
+			}
+		};
 		const timeout = new AbortController();
 		const timer = setTimeout(() => timeout.abort(), 50_000);
 		const combined = combineAbortSignals([signal, timeout.signal]);
@@ -376,24 +388,33 @@ export class SystemOneReviewer {
 					const decoded = decodeReviewResponse(text, key, redact);
 					raw = decoded.raw;
 					attempt.response = raw;
-					try {
-						const reportedUsage = getEvaluationUsage(raw);
-						if (reportedUsage) {
-							const priced = priceTypeSafeUsage(driver.id, request.model, reportedUsage);
-							this.deps.onUsage?.({
-								...priced,
+					// Valid usage is priced and recorded even for a rejected body: the provider charged for it.
+					const reportedUsage = getEvaluationUsage(raw);
+					if (reportedUsage && this.deps.onUsage) {
+						receipts.push(
+							recordReceipt({
+								...priceTypeSafeUsage(driver.id, request.model, reportedUsage),
 								receiptId: `${evaluationId}:${attempts}`,
 								provider: driver.id,
 								model: request.model,
 								attempt: attempts,
-							});
-						}
-						onResponse?.(transportAttempts, { provider: driver.id, model: request.model });
-					} catch {
-						// A local persistence failure must never inherit provider retry metadata.
-						throw new Error(`${providerName} usage recording failed`);
+							}),
+						);
 					}
-					if (decoded.duplicateKeys) throw new Error(`Invalid ${providerName} response: duplicate JSON member`);
+					try {
+						onResponse?.(transportAttempts, { provider: driver.id, model: request.model });
+					} catch (error) {
+						throw new SystemOneObserverError(`${providerName} response observer failed`, error);
+					}
+					if (decoded.duplicateKeys)
+						throw new SystemOneInvalidResponseError(
+							`Invalid ${providerName} response: duplicate JSON member`,
+							requestSha256,
+							safeRequest,
+							raw,
+							transportAttempts,
+							receipts,
+						);
 					if (!response.ok) {
 						if (response.status === 401 || response.status === 403) {
 							this.verifiedKey = undefined;
@@ -409,7 +430,18 @@ export class SystemOneReviewer {
 				{ maxRetries: 2, maxRetryDelayMs: 15_000, signal: combined.signal },
 			);
 			combined.signal?.throwIfAborted();
-			validateEvaluationResponse(raw, safeRequest);
+			try {
+				validateEvaluationResponse(raw, safeRequest);
+			} catch (error) {
+				throw new SystemOneInvalidResponseError(
+					error instanceof Error ? error.message : String(error),
+					requestSha256,
+					safeRequest,
+					raw,
+					transportAttempts,
+					receipts,
+				);
+			}
 			this.verifiedKey = key;
 			return {
 				request: safeRequest,
@@ -418,26 +450,20 @@ export class SystemOneReviewer {
 				attempts,
 				transportAttempts,
 				elapsedMs: Date.now() - started,
+				receipts,
 			};
 		} catch (error) {
+			// Typed contract failures and observer failures keep their class; their receipts are already attached.
+			if (error instanceof SystemOneInvalidResponseError || error instanceof SystemOneObserverError) throw error;
 			// Keep arbitrary transport messages out; sanitize the accepted diagnostic with the request snapshot.
 			const errorRegex =
-				/^(Invalid (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) HTTP|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) network error|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response exceeds|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) usage recording failed|Empty (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|Server requested)/;
+				/^(Invalid (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) HTTP|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) network error|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response exceeds|Empty (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|Server requested)/;
 			const message = combined.signal?.aborted
 				? `${providerName} review cancelled or timed out`
 				: error instanceof Error && errorRegex.test(error.message)
 					? error.message
 					: `${providerName} request failed`;
-			throw new SystemOneReviewError(
-				redact(message),
-				requestSha256,
-				safeRequest,
-				raw,
-				transportAttempts,
-				error instanceof Error && error.message === `${providerName} usage recording failed`
-					? "usage_recording"
-					: "transport",
-			);
+			throw new SystemOneReviewError(redact(message), requestSha256, safeRequest, raw, transportAttempts, receipts);
 		} finally {
 			clearTimeout(timer);
 			combined.cleanup();

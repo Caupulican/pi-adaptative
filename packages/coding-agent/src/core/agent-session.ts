@@ -456,7 +456,7 @@ import {
 	type SessionStats,
 	type WorkerDelegationRunOutcome,
 } from "./agent-session-contracts.ts";
-import type { SpawnedUsageTotals } from "./cost/usage-records.ts";
+import { SEMANTIC_USAGE_CUSTOM_TYPE, type SpawnedUsageTotals, semanticUsageReportOf } from "./cost/usage-records.ts";
 
 export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-protocol-controller.ts";
 
@@ -1523,11 +1523,16 @@ export class AgentSession {
 					runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 					addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 					getSessionId: () => this.sessionManager.getSessionId(),
+					recordSpendFailure: (cause) =>
+						this._foregroundLifecycle.warn(`History summary spend report failed: ${cause}`),
 				},
 				activeBranch: new ActiveBranchProbe(this.sessionManager),
 				// The judge that admits model summaries is the session's one recording System One engine, so its
 				// usage reaches the session ledger and its judgments the Jev ledger like every other evaluation.
 				getAdmissionEngine: () => this._recordingSemanticEngine(),
+				recordUsage: (receipt) => {
+					this.sessionManager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf(receipt));
+				},
 				isForegroundBusy: () => this._foregroundRecovery.isBusy,
 				subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
 			},

@@ -2484,8 +2484,10 @@ export class SettingsManager {
 	} {
 		const history = this.settings.contextPolicy?.memory?.history;
 		return {
-			hierarchy: history?.hierarchy ?? false,
-			summaryModel: history?.summaryModel?.trim() || undefined,
+			// Stored settings are unvalidated JSON: only the boolean true opts in (as the egress flags below), and only a
+			// string names a model, so a hand-edited "false" or a number never starts or breaks history construction.
+			hierarchy: history?.hierarchy === true,
+			summaryModel: typeof history?.summaryModel === "string" ? history.summaryModel.trim() || undefined : undefined,
 			allowExternalSummaryEgress: history?.allowExternalSummaryEgress === true,
 			allowExternalAdmissionEgress: history?.allowExternalAdmissionEgress === true,
 			maxConcurrentSummaries: clampMemoryHistoryMaxConcurrentSummaries(
