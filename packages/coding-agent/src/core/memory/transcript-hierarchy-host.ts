@@ -27,6 +27,7 @@ import {
 	TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT,
 	type TranscriptLineageReader,
 	type TranscriptReadUnavailable,
+	type TranscriptSummaryTimeSource,
 	truncateUtf8,
 	utf8ByteLength,
 } from "./transcript-memory-contracts.ts";
@@ -72,6 +73,8 @@ export interface TranscriptHierarchyHostDeps {
 	getAdmissionEngine(): SemanticDecisionEngine | undefined;
 	/** Writes a semantic usage receipt to the session's usage record (idempotent by receipt id); throws when it cannot. */
 	recordUsage(receipt: TypeSafeUsageReceipt): void;
+	/** Domain time and its timers; absent means the system clock and real (unref'd) timers. */
+	time?: TranscriptSummaryTimeSource;
 	/** True while the foreground owns the provider; background summaries wait for it to end. */
 	isForegroundBusy(): boolean;
 	/** Foreground activity changes (a submission starts or ends). No polling. */
@@ -163,6 +166,17 @@ function describeHold(
 }
 
 const NOT_ATTACHED_REASON = "No history index is attached.";
+
+/** The default time source: the system clock and real timers that never keep the process alive. */
+const SYSTEM_TIME: TranscriptSummaryTimeSource = {
+	now: () => Date.now(),
+	setTimer: (callback, delayMs) => {
+		const timer = setTimeout(callback, delayMs);
+		timer.unref();
+		return timer;
+	},
+	clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
 /** How long a coordinator-less forget waits, once, for a loading history index to say whether the session exists. */
 const FORGET_PROBE_WAIT_MS = 10_000;
 const HIERARCHY_OFF_REASON = "The summary hierarchy is off.";
@@ -193,9 +207,11 @@ export class TranscriptHierarchyHost {
 	private chain: Promise<void> = Promise.resolve();
 	private lastError: string | undefined;
 	private frontierState: TranscriptFrontierState | undefined;
+	private readonly time: TranscriptSummaryTimeSource;
 
 	constructor(deps: TranscriptHierarchyHostDeps) {
 		this.deps = deps;
+		this.time = deps.time ?? SYSTEM_TIME;
 		this.admission = createSemanticSummaryAdmission({
 			getEngine: () => deps.getAdmissionEngine(),
 			recordUsage: (receipt) => deps.recordUsage(receipt),
@@ -395,7 +411,7 @@ export class TranscriptHierarchyHost {
 			this.view ??= new TranscriptSummaryView({
 				store: this.openStore(),
 				reader: route.reader,
-				cutoff: () => transcriptRetentionCutoff(this.deps.getHistorySettings().retentionDays, Date.now()),
+				cutoff: () => transcriptRetentionCutoff(this.deps.getHistorySettings().retentionDays, this.time.now()),
 			});
 			source = this.view;
 		}
@@ -429,7 +445,11 @@ export class TranscriptHierarchyHost {
 	}
 
 	private openStore(): TranscriptSummaryStore {
-		return new TranscriptSummaryStore({ agentDir: this.deps.getAgentDir(), projectId: this.deps.projectId() });
+		return new TranscriptSummaryStore({
+			agentDir: this.deps.getAgentDir(),
+			projectId: this.deps.projectId(),
+			now: () => this.time.now(),
+		});
 	}
 
 	private request(): Promise<void> {
@@ -504,13 +524,9 @@ export class TranscriptHierarchyHost {
 					if (!this.deps.isForegroundBusy()) listener();
 				}),
 			isCurrent: () => this.isCurrent() && this.deps.isRetrievalEnabled(),
-			now: () => Date.now(),
-			setTimer: (callback, delayMs) => {
-				const timer = setTimeout(callback, delayMs);
-				timer.unref();
-				return timer;
-			},
-			clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+			now: () => this.time.now(),
+			setTimer: (callback, delayMs) => this.time.setTimer(callback, delayMs),
+			clearTimer: (handle) => this.time.clearTimer(handle),
 			onTerminal: (event) => this.reportTerminal(event),
 			onFrontierChanged: () => {},
 		});

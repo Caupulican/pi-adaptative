@@ -12382,8 +12382,10 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				});
 				// The owner session must have replied once: a session file is written only from its first reply on, and a receipt
 				// held back in memory could not fail. The hierarchy is switched on later, live, in this same session.
+				// File-backed: a default harness session is in memory and would never append to a session file.
 				const rcFirst = await world.createRootSession("root", {
 					agentDir: rcAgentDir,
+					sessionManager: world.createSessionManager(rcAgentDir),
 					settings: { memorySystem: undefined },
 				});
 				world.provider.enqueue("root", {
@@ -16512,6 +16514,24 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 				paid: { summaries: 0, admissions: 0 },
 				forgetFileSame: true,
 			});
+
+			// Orphan age on the injected domain clock: an unreferenced node file (what a crash can leave) is kept while it is
+			// younger than the sweep age and removed by the next start once domain time has moved past it. The clock is the one
+			// the hierarchy reads for ages and timers; advancing it is an event, nothing waits.
+			const fgOrphan = resolve(fgStore.root, "nodes", `${"ab".repeat(32)}.json`);
+			world.io.seed(fgOrphan, "{}");
+			await fgRestartOnce("m3d-orphan-young");
+			const fgYoungKept = world.io.peekFile(fgOrphan) !== undefined;
+			world.historyClock.advance(11 * 60 * 1000);
+			const fgAfterAdvance = await fgRestartOnce("m3d-orphan-old");
+			expect(
+				{
+					youngKept: fgYoungKept,
+					oldRemoved: world.io.peekFile(fgOrphan) === undefined,
+					neighbour: fgAfterAdvance.accepted,
+				},
+				"an unreferenced node file survives while young and is swept once the domain clock passes its age",
+			).toEqual({ youngKept: true, oldRemoved: true, neighbour: 1 });
 
 			// Fail closed: a damaged forget file means "unknown", never "nothing was forgotten".
 			world.io.seed(fgStore.forgotten, '{"schemaVersion":1,"kind":"forgotten_sessions"');

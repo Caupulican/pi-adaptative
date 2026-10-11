@@ -1533,6 +1533,7 @@ export class AgentSession {
 				recordUsage: (receipt) => {
 					this.sessionManager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf(receipt));
 				},
+				...(config.historyTimeSource !== undefined ? { time: config.historyTimeSource } : {}),
 				isForegroundBusy: () => this._foregroundRecovery.isBusy,
 				subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
 			},

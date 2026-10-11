@@ -44,6 +44,7 @@ import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefi
 import { resolveFastModeServiceTier } from "./fast-mode.ts";
 import { ObjectivePrimaryBindingError } from "./goals/goal-session-controller.ts";
 import type { IntegrityExtension } from "./hooks/index.ts";
+import type { TranscriptSummaryTimeSource } from "./memory/transcript-memory-contracts.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import { AccountModelCatalog } from "./model-router/account-models.ts";
@@ -182,6 +183,8 @@ export interface CreateAgentSessionOptions {
 	worktreeSyncEnginePorts?: WorktreeSyncEnginePorts;
 	/** HTTP transport for System One's decision endpoint; omitted means the global fetch. */
 	systemOneFetch?: typeof fetch;
+	/** The time source of the history summary hierarchy (retry waits, retention and orphan ages); default: the system clock. */
+	historyTimeSource?: TranscriptSummaryTimeSource;
 
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
@@ -862,6 +865,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		orchestrationProfile,
 		sessionStartEvent: options.sessionStartEvent,
 		systemOneController,
+		...(options.historyTimeSource !== undefined ? { historyTimeSource: options.historyTimeSource } : {}),
 		accountModels,
 		executionLoopMode,
 		objectiveExecutionController,

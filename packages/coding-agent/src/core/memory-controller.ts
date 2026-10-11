@@ -453,7 +453,7 @@ export interface MemoryControllerDeps {
 	 */
 	hierarchy?: Pick<
 		TranscriptHierarchyHostDeps,
-		"summarizer" | "isForegroundBusy" | "subscribeForegroundActivity" | "getAdmissionEngine" | "recordUsage"
+		"summarizer" | "isForegroundBusy" | "subscribeForegroundActivity" | "getAdmissionEngine" | "recordUsage" | "time"
 	> & {
 		/** The live branch position, so the frontier only ever describes the active ancestry. */
 		activeBranch: ActiveBranchView;

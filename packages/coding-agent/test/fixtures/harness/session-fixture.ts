@@ -8,6 +8,7 @@ import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import type { WorkerWriteReservationLease } from "../../../src/core/delegation/worker-write-reservation.ts";
 import type { ExecResult } from "../../../src/core/exec.ts";
 import { getResumableHumanInputSnapshot } from "../../../src/core/human-input.ts";
+import type { TranscriptSummaryTimeSource } from "../../../src/core/memory/transcript-memory-contracts.ts";
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
@@ -1921,10 +1922,69 @@ export async function runHarnessWorld(
  * One composed world: virtual IO, effect guard, scripted provider and System One transport, and the
  * production SDK session built on top of them. Disposal settles every resource it opened.
  */
+/**
+ * The summary hierarchy's time source in a journey: the wall clock plus an offset the scenario advances, with real
+ * timers. Until `advance` is called it behaves exactly like the system clock, so a journey that never advances it is
+ * unchanged. `advance` moves domain time forward and fires, once and in due order, every timer that is then due, so a
+ * long wait (an orphan age, a retry backoff) is reached by an event instead of by waiting. I/O deadlines stay real.
+ */
+export class HarnessHistoryClock implements TranscriptSummaryTimeSource {
+	private offsetMs = 0;
+	private nextHandle = 1;
+	private readonly pending = new Map<
+		number,
+		{ readonly callback: () => void; readonly dueAt: number; readonly timer: ReturnType<typeof setTimeout> }
+	>();
+
+	now(): number {
+		return Date.now() + this.offsetMs;
+	}
+
+	setTimer(callback: () => void, delayMs: number): number {
+		const handle = this.nextHandle++;
+		const timer = setTimeout(() => {
+			this.pending.delete(handle);
+			callback();
+		}, delayMs);
+		timer.unref();
+		this.pending.set(handle, { callback, dueAt: this.now() + delayMs, timer });
+		return handle;
+	}
+
+	clearTimer(handle: unknown): void {
+		if (typeof handle !== "number") return;
+		const entry = this.pending.get(handle);
+		if (!entry) return;
+		clearTimeout(entry.timer);
+		this.pending.delete(handle);
+	}
+
+	/** Timers armed and not yet fired or cleared. */
+	get armedTimers(): number {
+		return this.pending.size;
+	}
+
+	/** Moves domain time forward by `ms` and fires every timer that is then due; returns how many fired. */
+	advance(ms: number): number {
+		this.offsetMs += ms;
+		const due = [...this.pending.entries()]
+			.filter(([, entry]) => entry.dueAt <= this.now())
+			.sort((left, right) => left[1].dueAt - right[1].dueAt);
+		for (const [handle, entry] of due) {
+			clearTimeout(entry.timer);
+			this.pending.delete(handle);
+			entry.callback();
+		}
+		return due.length;
+	}
+}
+
 export class HarnessWorld {
 	readonly trace = new HarnessTrace();
 	readonly io = new VirtualFileSystem(HARNESS_PROJECT_CWD);
 	readonly systemOne: ScriptedSystemOneTransport;
+	/** The history hierarchy's time source for every root session of this world (see {@link HarnessHistoryClock}). */
+	readonly historyClock = new HarnessHistoryClock();
 	readonly git: VirtualGit;
 	readonly processTable = new VirtualProcessTable();
 	readonly processes: HarnessProcesses;
@@ -2112,6 +2172,7 @@ export class HarnessWorld {
 				models: SCRIPTED_TRACKS.map((id) => ({ model: this.provider.model(id) })),
 			},
 			systemOneFetch: this.systemOne.fetch,
+			historyTimeSource: this.historyClock,
 			systemOneEnabled,
 			...(omitShellOperations ? {} : { shellOperations: this.shell }),
 			customTools: options.customTools,

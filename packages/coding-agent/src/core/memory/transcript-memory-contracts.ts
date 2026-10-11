@@ -574,6 +574,17 @@ export interface TranscriptLineageReader extends TranscriptSourceReader {
 	start(): void;
 }
 
+/**
+ * The one time source of the summary hierarchy's domain decisions (retry backoff, retention age, orphan age, store
+ * timestamps) and of the timers that wake them. I/O deadlines and lock waits are not domain time: they stay on the wall
+ * clock. The default is the system clock; a host may inject another so long waits are reached by events, not by waiting.
+ */
+export interface TranscriptSummaryTimeSource {
+	now(): number;
+	setTimer(callback: () => void, delayMs: number): unknown;
+	clearTimer(handle: unknown): void;
+}
+
 /** Page `text` from a UTF-8 byte cursor without splitting a code point. */
 export function pageUtf8(
 	text: string,
