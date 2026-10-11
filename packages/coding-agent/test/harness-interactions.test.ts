@@ -12390,7 +12390,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					name: "rc-owner-turn",
 					reply: { content: [{ type: "text", text: "Noted." }] },
 				});
-				world.systemOne.enterPhase("rc-owner-turn", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+				world.systemOne.enterPhase("rc-owner-turn", {});
 				await withDeadline(trace, "R-receipt owner turn", rcFirst.session.prompt("Say hello."));
 				world.systemOne.enterPhase("rc-answering", cAdmission);
 				const rcPaidBefore = {
@@ -12416,7 +12416,13 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						const admission = rcFirst.session.getTranscriptHistoryStatus().hierarchy?.admission;
 						return admission?.heldByKind?.usage_receipt === 1;
 					}),
-				);
+				).catch((error: unknown) => {
+					// The hierarchy's own status is the evidence of what the leaf did instead of holding.
+					const status = rcFirst.session.getTranscriptHistoryStatus().hierarchy;
+					throw new Error(
+						`${error instanceof Error ? error.message : String(error)}; hierarchy: ${JSON.stringify(status ?? null).slice(0, 2_500)}; pending summary steps: ${JSON.stringify(world.provider.getPendingStepNames(cTrack))}`,
+					);
+				});
 				const rcHeld = icmHierarchy(rcFirst.session);
 				expect(
 					{
