@@ -7774,7 +7774,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				// N-receipt: the same one-receipt hold reported with its raw write failure (the owner, before its retry), and by the
 				// coordinator that does not own the receipt, whose cause names the owner session (never written by that coordinator).
 				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: Scripted IO fault nr-receipt-append: [^\n]*\. Exact history recall is unaffected\.$/,
-				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: The paid answer's usage receipt belongs to another session and is recorded when a coordinator starts in it\. Exact history recall is unaffected\.$/,
+				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: The paid answer's usage receipt belongs to session [0-9a-f-]+, which is not this session; it is recorded when a coordinator starts in it\. Exact history recall is unaffected\.$/,
 			],
 			files: { [LIMITS_PATH]: "export const MAX_RETRIES = 3;\n" },
 			// A clean checkout on main: a fresh writer worker gets its own worktree lane (dirty checkouts fall back to shared).
