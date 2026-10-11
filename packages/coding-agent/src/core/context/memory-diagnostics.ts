@@ -204,6 +204,8 @@ export interface TranscriptHierarchyStatus {
 	recoveryIssues: string[];
 	/** Accepted summary nodes the running coordinator holds; absent when no coordinator counts them. */
 	acceptedNodes?: number;
+	/** UTF-8 bytes of the accepted nodes' text the coordinator holds resident (each node holds at most 1,024). */
+	catalogBytes?: number;
 	/**
 	 * How approved stored summaries are read right now: through the running coordinator, through the read-only
 	 * view (construction off; reads need no model, admission or egress), refused by policy, or not at all.

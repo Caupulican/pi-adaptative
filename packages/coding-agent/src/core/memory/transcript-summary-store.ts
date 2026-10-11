@@ -16,6 +16,9 @@
  *   spent-attempts.json     terminal-proof ledger, independent of the job list: one bounded record per admitted job
  *                           identity (a reservation while its job lives, its spent budget once it failed) and the
  *                           durable holds (`saturatedSince`, `lostProofSince`)
+ *   owed-receipts.json      usage receipts a paid response still owes after its job ended (bounded, schema v1)
+ *   <file>.corrupt.<stamp>  the damaged bytes of one file, kept beside it; the newest
+ *                           {@link TRANSCRIPT_SUMMARY_MAX_CORRUPT_BACKUPS} per file are kept, older ones are deleted
  *   writer.lock       advisory lock guarding the manifest transaction
  *
  * Writer model: one lease with a durable fencing token. `acquireWriter` increments `writerFence` under the
@@ -39,7 +42,7 @@
 
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { stateFile } from "../agent-paths.ts";
 import { FileLockDeadlineError, isMissingFileError, withFileLock, writeFileAtomic } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -66,6 +69,7 @@ import {
 	parseSummaryJob,
 	proofKindFor,
 	TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS,
+	TRANSCRIPT_SUMMARY_MAX_RELEASED_RECEIPTS,
 	TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS,
 	type TranscriptSummaryJob,
 	type TranscriptSummaryProofHold,
@@ -101,6 +105,15 @@ const MAX_SPENT_MESSAGE_CHARS = 300;
 const PROOF_LEDGER_VERSION = 2;
 /** Terminal handoff records kept (newest last). */
 export const TRANSCRIPT_SUMMARY_MAX_TERMINALS = 50;
+/**
+ * Corrupt backups kept per damaged file: the newest. Older ones are deleted when a backup is written and by the orphan
+ * sweep. Bounded by count, not age: the damaged bytes of a quiet file are its only copy and are never swept by age.
+ */
+export const TRANSCRIPT_SUMMARY_MAX_CORRUPT_BACKUPS = 5;
+/** Owed usage receipts the owed-receipts file holds: the same bound as the scheduler's in-memory queue of released receipts. */
+export const TRANSCRIPT_SUMMARY_MAX_OWED_RECEIPT_ENTRIES = TRANSCRIPT_SUMMARY_MAX_RELEASED_RECEIPTS;
+/** Corrupt-backup deletions that failed kept on the store for the status (the most recent; the total is counted). */
+const MAX_RECENT_BACKUP_PRUNE_FAILURES = 20;
 /** Unreferenced node and temporary files younger than this are never swept: their writer may still publish. */
 export const TRANSCRIPT_SUMMARY_ORPHAN_MIN_AGE_MS = 10 * 60 * 1000;
 
@@ -118,6 +131,9 @@ const FORGOTTEN_FILE_KEYS: ReadonlySet<string> = new Set([
 	"digest",
 	"lostAt",
 ]);
+const OWED_RECEIPTS_FILE_KEYS: ReadonlySet<string> = new Set(["schemaVersion", "kind", "entries"]);
+const OWED_RECEIPTS_KIND = "owed_receipts";
+const OWED_RECEIPT_ENTRY_KEYS: ReadonlySet<string> = new Set(["ownerSessionId", "receipt"]);
 
 // ---------------------------------------------------------------------------------------------
 // Manifest
@@ -219,84 +235,83 @@ function legacyMarksOf(
 }
 
 /**
- * What a damaged manifest's bytes still prove, read strictly. `ok` only when every field this store relies on is valid
- * (the fence seed, the applied forget revision and every legacy marker); `invalid` names the first field that is not;
- * `unparseable` means nothing can be read.
+ * What a damaged manifest's bytes still prove, each fact read on its own: one damaged field never hides another (the
+ * applied forget revision in particular). A field is absent when its own bytes do not prove it.
  */
-type ManifestSalvage =
-	| { status: "unparseable" }
-	| { status: "invalid"; reason: string }
-	| {
-			status: "ok";
-			writerFence?: number;
-			forgetRevisionApplied?: number;
-			legacy: Map<string, TranscriptSummaryTombstone>;
-	  };
+interface ManifestSalvage {
+	writerFence?: number;
+	forgetRevisionApplied?: number;
+	/** The legacy markers the bytes prove. Undefined when the tombstones section is unreadable, so whether any exist is unknown. */
+	legacy?: Map<string, TranscriptSummaryTombstone>;
+	/** Session ids whose legacy marker is present but malformed: known to exist, not carried. */
+	legacyDamaged: string[];
+}
 
 function salvageManifestBytes(raw: string): ManifestSalvage {
 	let value: unknown;
 	try {
 		value = JSON.parse(raw);
 	} catch {
-		return { status: "unparseable" };
+		return { legacyDamaged: [] };
 	}
-	if (!isPlainRecord(value)) return { status: "invalid", reason: "manifest is not an object" };
-	if (!isPlainRecord(value.tombstones)) {
-		return { status: "invalid", reason: "manifest tombstones are missing or not an object" };
-	}
+	if (!isPlainRecord(value)) return { legacyDamaged: [] };
 	const writerFence = isNonNegativeInteger(value.writerFence) ? value.writerFence : undefined;
 	const forgetRevisionApplied = isNonNegativeInteger(value.forgetRevisionApplied)
 		? value.forgetRevisionApplied
 		: undefined;
-	if (value.writerFence !== undefined && writerFence === undefined) {
-		return { status: "invalid", reason: "manifest writerFence is invalid" };
-	}
-	if (value.forgetRevisionApplied !== undefined && forgetRevisionApplied === undefined) {
-		return { status: "invalid", reason: "manifest forgetRevisionApplied is invalid" };
-	}
+	if (!isPlainRecord(value.tombstones)) return { writerFence, forgetRevisionApplied, legacyDamaged: [] };
 	const legacy = new Map<string, TranscriptSummaryTombstone>();
+	const legacyDamaged: string[] = [];
 	for (const [key, entry] of Object.entries(value.tombstones)) {
 		if (!key.startsWith(SESSION_TOMBSTONE_KEY_PREFIX)) continue;
+		const id = key.slice(SESSION_TOMBSTONE_KEY_PREFIX.length);
 		if (
 			!isPlainRecord(entry) ||
 			typeof entry.revokedAt !== "string" ||
 			(entry.reason !== "retention" && entry.reason !== "invalidated" && entry.reason !== "recovery")
 		) {
-			return { status: "invalid", reason: `legacy forget marker ${key} is malformed` };
+			legacyDamaged.push(id);
+			continue;
 		}
-		legacy.set(key.slice(SESSION_TOMBSTONE_KEY_PREFIX.length), { revokedAt: entry.revokedAt, reason: entry.reason });
+		legacy.set(id, { revokedAt: entry.revokedAt, reason: entry.reason });
 	}
-	return { status: "ok", writerFence, forgetRevisionApplied, legacy };
+	return { writerFence, forgetRevisionApplied, legacy, legacyDamaged };
 }
 
 /**
- * The manifest facts the forget state depends on. A readable manifest is known; a damaged one is known only when its bytes
- * still prove those facts strictly (`salvageManifestBytes`); a missing one is a store that was never leased.
+ * The manifest facts the forget state depends on, as far as the manifest's bytes prove them. `damage` is set when the
+ * manifest is not readable as a whole. The legacy markers of an unreadable tombstones section are then unknown; the
+ * forgotten-session file decides for them. That is sound because the file is first written only by a writer that read the
+ * manifest whole (`acquireWriter` carries every legacy marker before it writes, and a missing file under an unreadable
+ * manifest is refused), so it holds every legacy marker that manifest carried.
  */
-type ManifestKnowledge =
-	| { status: "known"; writerFence?: number; applied?: number; legacy: Map<string, TranscriptSummaryTombstone> }
-	| { status: "unknown"; reason: string };
+interface ManifestKnowledge {
+	damage?: string;
+	writerFence?: number;
+	applied?: number;
+	legacy: Map<string, TranscriptSummaryTombstone>;
+	/** Legacy session ids whose marker is malformed: the forgotten-session file must hold each of them. */
+	legacyDamaged: string[];
+}
 
 function manifestKnowledge(read: ManifestRead): ManifestKnowledge {
-	if (read.status === "missing") return { status: "known", legacy: new Map() };
+	if (read.status === "missing") return { legacy: new Map(), legacyDamaged: [] };
 	if (read.status === "ok") {
 		return {
-			status: "known",
 			writerFence: read.manifest.writerFence,
 			applied: read.manifest.forgetRevisionApplied,
 			legacy: legacyMarksOf(read.manifest.tombstones),
+			legacyDamaged: [],
 		};
 	}
 	const salvage = salvageManifestBytes(read.raw);
-	if (salvage.status === "ok") {
-		return {
-			status: "known",
-			writerFence: salvage.writerFence,
-			applied: salvage.forgetRevisionApplied,
-			legacy: salvage.legacy,
-		};
-	}
-	return { status: "unknown", reason: salvage.status === "invalid" ? salvage.reason : read.detail };
+	return {
+		damage: read.detail,
+		writerFence: salvage.writerFence,
+		applied: salvage.forgetRevisionApplied,
+		legacy: salvage.legacy ?? new Map(),
+		legacyDamaged: salvage.legacyDamaged,
+	};
 }
 
 /** A session id the forget file can hold: 1 to 256 characters, none of them control characters. */
@@ -359,6 +374,28 @@ interface ForgetFile {
 
 type ForgetFileParse = { ok: true; file: ForgetFile } | { ok: false; reason: string };
 
+/** The shared strict envelope of the store's small JSON files: valid JSON object, only the allowed keys, this schema version and kind. */
+function parseStoreFileEnvelope(
+	raw: string,
+	allowedKeys: ReadonlySet<string>,
+	kind: string,
+): { ok: true; value: Record<string, unknown> } | { ok: false; reason: string } {
+	let value: unknown;
+	try {
+		value = JSON.parse(raw);
+	} catch (error) {
+		return { ok: false, reason: `not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
+	}
+	if (!isPlainRecord(value)) return { ok: false, reason: "not an object" };
+	for (const key of Object.keys(value)) {
+		if (!allowedKeys.has(key)) return { ok: false, reason: `unknown key ${key}` };
+	}
+	if (value.schemaVersion !== TRANSCRIPT_SUMMARY_SCHEMA_VERSION || value.kind !== kind) {
+		return { ok: false, reason: "unsupported schema version or kind" };
+	}
+	return { ok: true, value };
+}
+
 /** One read of the forget file: absent, verified, or damaged (with its raw bytes, kept beside it on repair). */
 type ForgetFileRead =
 	| { status: "missing" }
@@ -368,19 +405,9 @@ type ForgetFileRead =
 /** Strict: unknown keys, a bad id, an entry that is not `{forgottenAt: instant}`, a count over the bound or a digest mismatch all fail. */
 function parseForgetFile(raw: string): ForgetFileParse {
 	const fail = (reason: string): ForgetFileParse => ({ ok: false, reason });
-	let value: unknown;
-	try {
-		value = JSON.parse(raw);
-	} catch (error) {
-		return fail(`not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
-	}
-	if (!isPlainRecord(value)) return fail("not an object");
-	for (const key of Object.keys(value)) {
-		if (!FORGOTTEN_FILE_KEYS.has(key)) return fail(`unknown key ${key}`);
-	}
-	if (value.schemaVersion !== TRANSCRIPT_SUMMARY_SCHEMA_VERSION || value.kind !== FORGOTTEN_SESSIONS_KIND) {
-		return fail("unsupported schema version or kind");
-	}
+	const envelope = parseStoreFileEnvelope(raw, FORGOTTEN_FILE_KEYS, FORGOTTEN_SESSIONS_KIND);
+	if (!envelope.ok) return envelope;
+	const value = envelope.value;
 	const { revision, digest, lostAt } = value;
 	if (!isNonNegativeInteger(revision)) return fail("revision is invalid");
 	if (typeof digest !== "string" || !DIGEST_PATTERN.test(digest)) return fail("digest is invalid");
@@ -427,6 +454,47 @@ function absorbLegacyMarks(
 		added += 1;
 	}
 	return { added };
+}
+
+/** One read of the owed-receipts file: absent, verified, or damaged (its bytes are kept by the writer before any replacement). */
+type OwedFileRead =
+	| { status: "missing" }
+	| { status: "ok"; entries: TranscriptSummaryOwedReceipt[] }
+	| { status: "corrupt"; detail: string };
+
+/**
+ * One owed receipt entry: exactly `{ownerSessionId, receipt}`, a session id by the same rule as the forget file and a plain
+ * object receipt. The receipt's own shape is the owner's to parse; the store only keeps it.
+ */
+function isOwedReceiptEntry(value: unknown): value is TranscriptSummaryOwedReceipt {
+	return (
+		isPlainRecord(value) &&
+		Object.keys(value).every((key) => OWED_RECEIPT_ENTRY_KEYS.has(key)) &&
+		isForgetSessionId(value.ownerSessionId) &&
+		isPlainRecord(value.receipt)
+	);
+}
+
+/** Strict: unknown keys, a count over the bound, or an entry that is not {@link isOwedReceiptEntry} fail the whole file. */
+type OwedReceiptsParse = { ok: true; entries: TranscriptSummaryOwedReceipt[] } | { ok: false; reason: string };
+
+function parseOwedReceipts(raw: string): OwedReceiptsParse {
+	const fail = (reason: string) => ({ ok: false as const, reason });
+	const envelope = parseStoreFileEnvelope(raw, OWED_RECEIPTS_FILE_KEYS, OWED_RECEIPTS_KIND);
+	if (!envelope.ok) return envelope;
+	const value = envelope.value;
+	if (!Array.isArray(value.entries)) return fail("entries is missing or not a list");
+	if (value.entries.length > TRANSCRIPT_SUMMARY_MAX_OWED_RECEIPT_ENTRIES) {
+		return fail(
+			`${value.entries.length} owed receipts exceed the bound of ${TRANSCRIPT_SUMMARY_MAX_OWED_RECEIPT_ENTRIES}`,
+		);
+	}
+	const entries: TranscriptSummaryOwedReceipt[] = [];
+	for (const [index, entry] of value.entries.entries()) {
+		if (!isOwedReceiptEntry(entry)) return fail(`owed receipt entry ${index} is not {ownerSessionId, receipt}`);
+		entries.push({ ownerSessionId: entry.ownerSessionId, receipt: entry.receipt });
+	}
+	return { ok: true, entries };
 }
 
 /** The forget predicate `invalidateSession` revokes by: the node's own session, or a session it consulted as context. */
@@ -764,8 +832,40 @@ export type TranscriptSummaryRecoveryIssue =
 	| { kind: "anchors_corrupt"; detail: string }
 	| { kind: "spent_corrupt"; detail: string }
 	| { kind: "terminals_corrupt"; detail: string }
+	/** The owed-receipts file is damaged: read as no receipts, its bytes kept beside it before any write replaces it. */
+	| { kind: "owed_receipts_corrupt"; detail: string }
 	/** The permanent forget state cannot be trusted (damaged, rolled back, or missing where it must exist); summaries stay off. */
 	| { kind: "forgotten_unknown"; detail: string };
+
+/** One deletion of an old corrupt backup that failed. It is recorded, never thrown: the damage handling it followed still stands. */
+export interface TranscriptSummaryBackupPruneFailure {
+	path: string;
+	error: string;
+}
+
+/** The backup a damage handling wrote, and the older backups of the same file its bound could not delete. */
+export interface TranscriptSummaryCorruptBackup {
+	/** The damaged file's path plus `.corrupt.<stamp>`; the stamp is numeric, never reused, and the newest backup of that file. */
+	path: string;
+	pruneFailures: TranscriptSummaryBackupPruneFailure[];
+}
+
+/**
+ * A paid response's usage receipt that is still owed, with the session it is owed to. The receipt is the owner's payload:
+ * the store holds it as a plain object and never parses it.
+ */
+export interface TranscriptSummaryOwedReceipt {
+	ownerSessionId: string;
+	receipt: unknown;
+}
+
+export type TranscriptSummaryOwedReceiptsSaveResult =
+	| { status: "saved"; corruptBackup?: TranscriptSummaryCorruptBackup }
+	/** More entries than {@link TRANSCRIPT_SUMMARY_MAX_OWED_RECEIPT_ENTRIES}: nothing was written. */
+	| { status: "overflow"; bound: number }
+	| { status: "fenced"; currentFence: number }
+	| { status: "manifest_corrupt"; detail: string }
+	| TranscriptSummaryStoreUnavailable;
 
 export interface TranscriptSummaryTerminalCause {
 	jobId: string;
@@ -855,11 +955,18 @@ export function forgetRefusalCause(result: TranscriptSummaryForgetResult): strin
 }
 
 /**
- * `repaired`: the damaged state was replaced by an acknowledged file that holds only the legacy markers that were readable; the
- * forgets the damaged file held are lost and `lostAt` says when they were acknowledged as lost. `not_damaged`: the state is known.
+ * `repaired`: the damaged state was replaced by an acknowledged file that holds the legacy markers that were readable, and the
+ * forgets the damaged file held beyond them are lost; `lostAt` says when they were acknowledged as lost. A legacy marker whose
+ * session is readable but whose instant is not is carried at `lostAt` and named in `unreadableMarks`, so its session stays
+ * denied. `corruptBackup` is the damaged forget file's bytes, kept. `not_damaged`: the state is known.
  */
 export type TranscriptSummaryForgetRepairResult =
-	| { status: "repaired"; lostAt: string }
+	| {
+			status: "repaired";
+			lostAt: string;
+			unreadableMarks: string[];
+			corruptBackup?: TranscriptSummaryCorruptBackup;
+	  }
 	| { status: "not_damaged" }
 	| { status: "unknown"; reason: string }
 	| TranscriptSummaryStoreUnavailable;
@@ -887,11 +994,13 @@ export interface TranscriptSummaryStoreState {
 	proof: { records: Record<string, TranscriptSummaryProofRecord>; status: TranscriptSummaryProofStatus };
 	/** The persisted terminal handoff records, oldest first. */
 	terminals: TranscriptSummaryTerminalRecord[];
+	/** The owed usage receipts of ended jobs, as persisted; damaged bytes read as none and are reported as an issue. */
+	owedReceipts: TranscriptSummaryOwedReceipt[];
 	issues: TranscriptSummaryRecoveryIssue[];
 }
 
 export type TranscriptSummaryWriterAcquisition =
-	| { status: "acquired"; writer: TranscriptSummaryWriter }
+	| { status: "acquired"; writer: TranscriptSummaryWriter; corruptBackup?: TranscriptSummaryCorruptBackup }
 	| { status: "manifest_corrupt"; detail: string }
 	/** The permanent forget state is unknown (or its legacy markers cannot be carried): no lease is taken, nothing is written. */
 	| { status: "forget_unknown"; reason: string }
@@ -901,6 +1010,8 @@ export interface TranscriptSummaryRecoveryReport {
 	revoked: string[];
 	removedFrontiers: string[];
 	jobsRewritten: boolean;
+	/** The backup kept for each damaged file the recovery rewrote. */
+	corruptBackups: TranscriptSummaryCorruptBackup[];
 }
 
 export interface TranscriptSummaryStoreOptions {
@@ -1095,8 +1206,12 @@ export class TranscriptSummaryStore {
 	private readonly terminalsPath: string;
 	private readonly anchorsPath: string;
 	private readonly spentPath: string;
+	private readonly owedPath: string;
 	private readonly lockPath: string;
 	private readonly now: () => number;
+	/** Corrupt-backup deletions that failed in this process: the count, and the most recent ones (see {@link corruptBackupPruneFailures}). */
+	private backupPruneFailureTotal = 0;
+	private readonly recentBackupPruneFailures: TranscriptSummaryBackupPruneFailure[] = [];
 
 	constructor(options: TranscriptSummaryStoreOptions) {
 		if (!PROJECT_ID_PATTERN.test(options.projectId)) {
@@ -1110,6 +1225,7 @@ export class TranscriptSummaryStore {
 		this.terminalsPath = join(this.root, "terminals.json");
 		this.anchorsPath = join(this.root, "retention-anchors.json");
 		this.spentPath = join(this.root, "spent-attempts.json");
+		this.owedPath = join(this.root, "owed-receipts.json");
 		this.lockPath = join(this.root, "writer.lock");
 		this.now = options.now ?? Date.now;
 	}
@@ -1225,6 +1341,8 @@ export class TranscriptSummaryStore {
 		const ledger = await this.readProof(issues);
 		pastDeadline(deadlineAt);
 		const terminals = await this.readTerminals(issues);
+		pastDeadline(deadlineAt);
+		const owedReceipts = await this.readOwedReceipts(issues);
 		const proof = { records: ledger.records, status: proofStatus(ledger) };
 		return {
 			manifest,
@@ -1234,6 +1352,7 @@ export class TranscriptSummaryStore {
 			retentionAnchors,
 			proof,
 			terminals,
+			owedReceipts,
 			issues,
 			forgotten: publicForgetState(forgetView),
 		};
@@ -1284,6 +1403,8 @@ export class TranscriptSummaryStore {
 			}
 			// Legacy markers the file does not hold yet are written into it first, and verified, while the manifest still
 			// carries them. The manifest drops them only in `markForgetApplied`, once the file holds each one.
+			// `fileRevision` is the revision the forget file holds from here on (an absorb below advances it).
+			let fileRevision = view.revision;
 			if (view.legacy.size > 0) {
 				const sessions = new Map(view.fileSessions);
 				const absorbed = absorbLegacyMarks(sessions, view.legacy);
@@ -1297,28 +1418,33 @@ export class TranscriptSummaryStore {
 					}
 					const failed = await this.writeForgetFile(view.revision + 1, sessions);
 					if (failed) return failed;
+					fileRevision = view.revision + 1;
 				}
 			}
 			let manifest: TranscriptSummaryManifest;
+			let corruptBackup: TranscriptSummaryCorruptBackup | undefined;
 			if (read.status === "missing") {
 				manifest = emptyManifest(1);
 			} else if (read.status === "ok") {
 				manifest = { ...read.manifest, writerFence: read.manifest.writerFence + 1 };
 			} else {
-				await writeFileAtomic(`${this.manifestPath}.corrupt.${this.now()}`, read.raw, { mode: 0o600 });
-				// The replacement carries what the damaged bytes still prove strictly: the fence seed (never the domain clock,
-				// and above any fence the bytes held), the applied forget revision and the legacy markers, kept until applied.
+				corruptBackup = await this.writeCorruptBackup(this.manifestPath, read.raw);
+				// The replacement is a fresh derived state: no node, cursor or frontier survives it, so every forget the forget file
+				// holds is already applied to it. It records that revision, or a higher one the damaged bytes still prove (forgetView
+				// refused a file below that). The fence seed comes from the bytes, above any fence they held, never the domain clock.
 				const knowledge = manifestKnowledge(read);
-				const fence = knowledge.status === "known" ? (knowledge.writerFence ?? 0) : 0;
-				manifest = emptyManifest(Math.max(1, Date.now(), fence + 1));
-				if (knowledge.status === "known") {
-					if (knowledge.applied !== undefined) manifest.forgetRevisionApplied = knowledge.applied;
-					for (const [id, mark] of knowledge.legacy)
-						manifest.tombstones[`${SESSION_TOMBSTONE_KEY_PREFIX}${id}`] = mark;
-				}
+				manifest = emptyManifest(Math.max(1, Date.now(), (knowledge.writerFence ?? 0) + 1));
+				const applied = Math.max(fileRevision, knowledge.applied ?? 0);
+				if (applied > 0) manifest.forgetRevisionApplied = applied;
+				for (const [id, mark] of knowledge.legacy)
+					manifest.tombstones[`${SESSION_TOMBSTONE_KEY_PREFIX}${id}`] = mark;
 			}
 			await this.writeManifest(manifest);
-			return { status: "acquired" as const, writer: new TranscriptSummaryWriter(this, manifest.writerFence) };
+			return {
+				status: "acquired" as const,
+				writer: new TranscriptSummaryWriter(this, manifest.writerFence),
+				...(corruptBackup ? { corruptBackup } : {}),
+			};
 		});
 	}
 
@@ -1384,16 +1510,29 @@ export class TranscriptSummaryStore {
 				const knowledge = manifestKnowledge(read);
 				const file = await this.readForgetFile();
 				const sessions = new Map<string, string>();
-				if (knowledge.status === "known") {
-					const absorbed = absorbLegacyMarks(sessions, knowledge.legacy);
-					if ("reason" in absorbed) return { status: "unknown", reason: absorbed.reason };
-				}
+				const absorbed = absorbLegacyMarks(sessions, knowledge.legacy);
+				if ("reason" in absorbed) return { status: "unknown", reason: absorbed.reason };
 				// A file that is intact (valid digest) but below the manifest's applied revision was rolled back: what it records is
 				// still real and is kept; only the guarantee that nothing newer was lost is given up (`lostAt` says so).
 				if (file.status === "ok") {
-					for (const [id, entry] of Object.entries(file.file.sessions)) {
-						if (!sessions.has(id)) sessions.set(id, entry.forgottenAt);
+					for (const [id, forgottenAt] of file.file.sessions) {
+						if (!sessions.has(id)) sessions.set(id, forgottenAt);
 					}
+				}
+				const lostAt = new Date(this.now()).toISOString();
+				// A malformed legacy marker: its session is readable, its instant is not. The session stays denied, carried at the
+				// acknowledgment instant, and is named in the result so the operator sees which instant was not kept.
+				const unreadableMarks: string[] = [];
+				for (const id of knowledge.legacyDamaged) {
+					if (sessions.has(id)) continue;
+					if (!isForgetSessionId(id)) {
+						return {
+							status: "unknown",
+							reason: "a legacy forget marker has an invalid session id and cannot be carried",
+						};
+					}
+					sessions.set(id, lostAt);
+					unreadableMarks.push(id);
 				}
 				if (sessions.size > TRANSCRIPT_SUMMARY_MAX_FORGOTTEN_SESSIONS) {
 					return {
@@ -1403,14 +1542,17 @@ export class TranscriptSummaryStore {
 				}
 				const prior =
 					file.status === "ok" ? file.file.revision : file.status === "corrupt" ? rawForgetRevision(file.raw) : 0;
-				const applied = knowledge.status === "known" ? (knowledge.applied ?? 0) : 0;
-				if (file.status !== "missing") {
-					await writeFileAtomic(`${this.forgetPath}.corrupt.${this.now()}`, file.raw, { mode: 0o600 });
-				}
-				const lostAt = new Date(this.now()).toISOString();
+				const applied = knowledge.applied ?? 0;
+				const corruptBackup =
+					file.status === "missing" ? undefined : await this.writeCorruptBackup(this.forgetPath, file.raw);
 				const failed = await this.writeForgetFile(Math.max(prior, applied) + 1, sessions, lostAt);
 				if (failed) return failed;
-				return { status: "repaired", lostAt };
+				return {
+					status: "repaired",
+					lostAt,
+					unreadableMarks,
+					...(corruptBackup ? { corruptBackup } : {}),
+				};
 			},
 		);
 	}
@@ -1437,14 +1579,11 @@ export class TranscriptSummaryStore {
 		const knowledge = manifestKnowledge(read);
 		const revision = file.status === "ok" ? file.file.revision : 0;
 		const fileSessions: ReadonlyMap<string, string> = file.status === "ok" ? file.file.sessions : new Map();
-		if (knowledge.status === "unknown") {
-			if (file.status === "missing") {
-				return {
-					status: "unknown",
-					reason: `the forgotten-session file is missing and the manifest is unreadable: ${knowledge.reason}`,
-				};
-			}
-			return { status: "ok", revision, fileSessions, sessions: fileSessions, legacy: new Map() };
+		if (file.status === "missing" && knowledge.damage !== undefined) {
+			return {
+				status: "unknown",
+				reason: `the forgotten-session file is missing and the manifest is unreadable: ${knowledge.damage}`,
+			};
 		}
 		if (file.status === "missing" && knowledge.applied !== undefined) {
 			return {
@@ -1452,10 +1591,17 @@ export class TranscriptSummaryStore {
 				reason: `the forgotten-session file is missing but the manifest records forget revision ${knowledge.applied}`,
 			};
 		}
+		// The applied revision is checked whenever the bytes prove it, even when the rest of the manifest is damaged.
 		if (file.status === "ok" && knowledge.applied !== undefined && file.file.revision < knowledge.applied) {
 			return {
 				status: "unknown",
 				reason: `the forgotten-session file is at revision ${file.file.revision}, below the applied revision ${knowledge.applied}`,
+			};
+		}
+		if (knowledge.legacyDamaged.some((id) => !fileSessions.has(id))) {
+			return {
+				status: "unknown",
+				reason: "a legacy forget marker is malformed and the forgotten-session file does not hold its session",
 			};
 		}
 		const sessions = new Map(fileSessions);
@@ -1771,8 +1917,13 @@ export class TranscriptSummaryStore {
 		ledger.current = true;
 	}
 
-	/** @internal Caller holds the lock. Keep the damaged bytes of one derived file beside it. */
-	async backupCorrupt(file: "jobs" | "anchors" | "spent" | "terminals"): Promise<void> {
+	/**
+	 * @internal Caller holds the lock. Keep the damaged bytes of one derived file beside it as its newest backup. Undefined when
+	 * the file does not exist.
+	 */
+	async backupCorrupt(
+		file: "jobs" | "anchors" | "spent" | "terminals" | "owed",
+	): Promise<TranscriptSummaryCorruptBackup | undefined> {
 		const path =
 			file === "jobs"
 				? this.jobsPath
@@ -1780,9 +1931,129 @@ export class TranscriptSummaryStore {
 					? this.anchorsPath
 					: file === "spent"
 						? this.spentPath
-						: this.terminalsPath;
+						: file === "owed"
+							? this.owedPath
+							: this.terminalsPath;
 		const raw = await this.readOptional(path);
-		if (raw !== undefined) await writeFileAtomic(`${path}.corrupt.${this.now()}`, raw, { mode: 0o600 });
+		return raw === undefined ? undefined : this.writeCorruptBackup(path, raw);
+	}
+
+	/**
+	 * @internal Caller holds the lock. Writes `raw` as the newest backup of `base` (a file in the store root). Its stamp is the
+	 * clock's instant, or one past the newest backup already present when the clock is not ahead of it, so a name is never
+	 * reused and the new backup always sorts newest, even under a clock that went backwards. Then the backups of `base` beyond
+	 * {@link TRANSCRIPT_SUMMARY_MAX_CORRUPT_BACKUPS} are deleted. A deletion that fails is recorded and returned, never thrown:
+	 * the backup just written is what the damage handling needs.
+	 */
+	async writeCorruptBackup(base: string, raw: string): Promise<TranscriptSummaryCorruptBackup> {
+		const newest = (await this.corruptBackupStamps(base)).reduce((max, stamp) => Math.max(max, stamp), 0);
+		const path = `${base}.corrupt.${Math.max(Math.floor(this.now()), newest + 1)}`;
+		await writeFileAtomic(path, raw, { mode: 0o600 });
+		const { failures } = await this.pruneCorruptBackups(base);
+		return { path, pruneFailures: failures };
+	}
+
+	/** The numeric stamps of the backups of `base` present now (`<base name>.corrupt.<digits>` in the store root). */
+	private async corruptBackupStamps(base: string): Promise<number[]> {
+		const prefix = `${basename(base)}.corrupt.`;
+		return (await this.listDirectory(dirname(base)))
+			.filter((name) => name.startsWith(prefix) && /^\d+$/.test(name.slice(prefix.length)))
+			.map((name) => Number(name.slice(prefix.length)));
+	}
+
+	/**
+	 * @internal Caller holds the lock. Deletes every backup of `base` beyond the newest {@link TRANSCRIPT_SUMMARY_MAX_CORRUPT_BACKUPS}.
+	 * A backup already gone is not a failure; any other failure is returned and recorded, and the remaining deletions still run.
+	 */
+	async pruneCorruptBackups(
+		base: string,
+	): Promise<{ removed: string[]; failures: TranscriptSummaryBackupPruneFailure[] }> {
+		const dir = dirname(base);
+		const prefix = `${basename(base)}.corrupt.`;
+		const backups = (await this.listDirectory(dir))
+			.filter((name) => name.startsWith(prefix) && /^\d+$/.test(name.slice(prefix.length)))
+			.map((name) => ({ name, stamp: Number(name.slice(prefix.length)) }))
+			.sort((a, b) => b.stamp - a.stamp);
+		const removed: string[] = [];
+		const failures: TranscriptSummaryBackupPruneFailure[] = [];
+		for (const { name } of backups.slice(TRANSCRIPT_SUMMARY_MAX_CORRUPT_BACKUPS)) {
+			const path = join(dir, name);
+			try {
+				await fs.unlink(path);
+				removed.push(name);
+			} catch (error) {
+				if (isMissingFileError(error)) continue;
+				const failure = { path, error: error instanceof Error ? error.message : String(error) };
+				failures.push(failure);
+				this.recordBackupPruneFailure(failure);
+			}
+		}
+		return { removed, failures };
+	}
+
+	/**
+	 * @internal Caller holds the lock. Count-bounded pruning of the backups of every derived file (the orphan sweep's share).
+	 * Returns the names removed, relative to the store root.
+	 */
+	async pruneAllCorruptBackups(): Promise<string[]> {
+		const removed: string[] = [];
+		for (const base of [
+			this.manifestPath,
+			this.forgetPath,
+			this.jobsPath,
+			this.anchorsPath,
+			this.spentPath,
+			this.terminalsPath,
+			this.owedPath,
+		]) {
+			removed.push(...(await this.pruneCorruptBackups(base)).removed);
+		}
+		return removed;
+	}
+
+	private recordBackupPruneFailure(failure: TranscriptSummaryBackupPruneFailure): void {
+		this.backupPruneFailureTotal += 1;
+		this.recentBackupPruneFailures.push(failure);
+		if (this.recentBackupPruneFailures.length > MAX_RECENT_BACKUP_PRUNE_FAILURES)
+			this.recentBackupPruneFailures.shift();
+	}
+
+	/**
+	 * Corrupt-backup deletions that failed in this process: how many, and the most recent few. Recorded, never thrown, so a
+	 * caller whose return type cannot carry them (the boolean terminal handoff) still leaves them reportable here.
+	 */
+	corruptBackupPruneFailures(): { total: number; recent: TranscriptSummaryBackupPruneFailure[] } {
+		return { total: this.backupPruneFailureTotal, recent: [...this.recentBackupPruneFailures] };
+	}
+
+	/** @internal Caller holds the lock. Missing is no receipts; damage is read here, not thrown, so the caller decides what to keep. */
+	async readOwedFile(): Promise<OwedFileRead> {
+		const raw = await this.readOptional(this.owedPath);
+		if (raw === undefined) return { status: "missing" };
+		const parsed = parseOwedReceipts(raw);
+		return parsed.ok ? { status: "ok", entries: parsed.entries } : { status: "corrupt", detail: parsed.reason };
+	}
+
+	/**
+	 * @internal Caller holds the lock. Damage is reported as `owed_receipts_corrupt` and read as no receipts. The bytes are kept
+	 * only by the writer, before it replaces the file (see `saveOwedReceipts` and `applyRecovery`).
+	 */
+	async readOwedReceipts(issues: TranscriptSummaryRecoveryIssue[]): Promise<TranscriptSummaryOwedReceipt[]> {
+		const read = await this.readOwedFile();
+		if (read.status === "corrupt") {
+			issues.push({ kind: "owed_receipts_corrupt", detail: read.detail });
+			return [];
+		}
+		return read.status === "ok" ? read.entries : [];
+	}
+
+	/** @internal Caller holds the lock. Always written in the current shape: an empty list is an empty file, which reads as no receipts. */
+	async writeOwedReceipts(entries: readonly TranscriptSummaryOwedReceipt[]): Promise<void> {
+		await writeFileAtomic(
+			this.owedPath,
+			`${JSON.stringify({ schemaVersion: TRANSCRIPT_SUMMARY_SCHEMA_VERSION, kind: OWED_RECEIPTS_KIND, entries })}\n`,
+			{ mode: 0o600 },
+		);
 	}
 
 	private async readOptional(path: string): Promise<string | undefined> {
@@ -2381,6 +2652,28 @@ export class TranscriptSummaryWriter {
 	}
 
 	/**
+	 * Replace the owed-receipts file with `entries`, the usage receipts paid responses still owe (bounded by
+	 * {@link TRANSCRIPT_SUMMARY_MAX_OWED_RECEIPT_ENTRIES}). An entry the reader would refuse is a caller error: it is never written.
+	 * Damage in the file being replaced is backed up first; a failed backup fails the section, so no damaged bytes are overwritten.
+	 */
+	async saveOwedReceipts(
+		entries: readonly TranscriptSummaryOwedReceipt[],
+	): Promise<TranscriptSummaryOwedReceiptsSaveResult> {
+		if (!entries.every((entry) => isOwedReceiptEntry(entry))) {
+			throw new RangeError("An owed receipt is {ownerSessionId: a session id, receipt: an object}.");
+		}
+		return this.fenced("saving owed receipts", async (): Promise<TranscriptSummaryOwedReceiptsSaveResult> => {
+			if (entries.length > TRANSCRIPT_SUMMARY_MAX_OWED_RECEIPT_ENTRIES) {
+				return { status: "overflow", bound: TRANSCRIPT_SUMMARY_MAX_OWED_RECEIPT_ENTRIES };
+			}
+			const read = await this.store.readOwedFile();
+			const corruptBackup = read.status === "corrupt" ? await this.store.backupCorrupt("owed") : undefined;
+			await this.store.writeOwedReceipts(entries);
+			return corruptBackup ? { status: "saved", corruptBackup } : { status: "saved" };
+		});
+	}
+
+	/**
 	 * Record retention anchors, set-if-absent: an existing anchor is never replaced, which is what keeps a
 	 * source's age across invalidation, re-admission and recipe rebuilds. Anchors live outside recipes, nodes
 	 * and jobs. A session-timestamp anchor is one record per session; a first-capture anchor is per source. At
@@ -2568,6 +2861,7 @@ export class TranscriptSummaryWriter {
 		let jobsCorrupt = false;
 		let anchorsCorrupt = false;
 		let spentCorrupt = false;
+		let owedCorrupt = false;
 		for (const issue of issues) {
 			if (
 				issue.kind === "node_missing" ||
@@ -2587,9 +2881,16 @@ export class TranscriptSummaryWriter {
 				anchorsCorrupt = true;
 			} else if (issue.kind === "spent_corrupt") {
 				spentCorrupt = true;
+			} else if (issue.kind === "owed_receipts_corrupt") {
+				owedCorrupt = true;
 			}
 		}
-		const report: TranscriptSummaryRecoveryReport = { revoked: [], removedFrontiers: [], jobsRewritten: false };
+		const report: TranscriptSummaryRecoveryReport = {
+			revoked: [],
+			removedFrontiers: [],
+			jobsRewritten: false,
+			corruptBackups: [],
+		};
 		if (damaged.size > 0 || frontiers.size > 0 || damagedDormant.size > 0) {
 			const result = await this.store.locked(async () => {
 				const read = await this.store.readManifestFile();
@@ -2608,32 +2909,44 @@ export class TranscriptSummaryWriter {
 			report.removedFrontiers = result.removedFrontiers;
 		}
 		if (jobsCorrupt) {
-			await this.rewriteValid(
+			const kept = await this.rewriteValid(
 				() => this.store.readJobs([]),
 				() => this.store.backupCorrupt("jobs"),
 				(valid) => this.store.writeJobs(valid),
 			);
+			if (kept) report.corruptBackups.push(kept);
 			report.jobsRewritten = true;
 		}
 		if (anchorsCorrupt) {
 			// An anchor lost to damage cannot be reconstructed: that source is anchored again at its next
 			// sighting, and the damage stays disclosed as a recovery issue.
-			await this.rewriteValid(
+			const kept = await this.rewriteValid(
 				() => this.store.readAnchors([]),
 				() => this.store.backupCorrupt("anchors"),
 				(valid) => this.store.writeAnchors(valid),
 			);
+			if (kept) report.corruptBackups.push(kept);
 		}
 		if (spentCorrupt || jobsCorrupt) {
 			// A proof record or a job (and the attempts it carried) lost to damage cannot be reconstructed, and which
 			// identity it was is unknowable: the ledger keeps every valid record and records that proof may have been
 			// lost now, so no new identity of an existing session can start with a budget it may already have spent.
 			const lostAt = new Date(this.store.clock()).toISOString();
-			await this.rewriteValid(
+			const kept = await this.rewriteValid(
 				() => this.store.readProof([]),
-				() => (spentCorrupt ? this.store.backupCorrupt("spent") : Promise.resolve()),
+				() => (spentCorrupt ? this.store.backupCorrupt("spent") : Promise.resolve(undefined)),
 				(valid) => this.store.writeProof({ ...valid, lostProofSince: lostAt }),
 			);
+			if (kept) report.corruptBackups.push(kept);
+		}
+		if (owedCorrupt) {
+			// The damaged bytes are kept first, then the file is written from its valid entries (none: the file is damaged as a whole).
+			const kept = await this.rewriteValid(
+				() => this.store.readOwedReceipts([]),
+				() => this.store.backupCorrupt("owed"),
+				(valid) => this.store.writeOwedReceipts(valid),
+			);
+			if (kept) report.corruptBackups.push(kept);
 		}
 		return report;
 	}
@@ -2648,7 +2961,8 @@ export class TranscriptSummaryWriter {
 			if (read.status !== "ok" || read.manifest.writerFence !== this.fence) return false;
 			const issues: TranscriptSummaryRecoveryIssue[] = [];
 			const events = await this.store.readTerminals(issues);
-			// The rewrite below drops what the read could not keep: the damaged bytes are kept beside the file first.
+			// The rewrite below drops what the read could not keep: the damaged bytes are kept beside the file first. The boolean
+			// contract stays; a backup whose old-backup deletion failed is recorded on the store (`corruptBackupPruneFailures`).
 			if (issues.length > 0) await this.store.backupCorrupt("terminals");
 			events.push(record);
 			await this.store.writeTerminals(events.slice(-TRANSCRIPT_SUMMARY_MAX_TERMINALS));
@@ -2658,7 +2972,9 @@ export class TranscriptSummaryWriter {
 
 	/**
 	 * Delete node files no accepted or dormant entry references, and staged temporary files at the store root, once they
-	 * are old enough that no writer can still publish them (see `sweep`). Nothing is removed by a superseded writer.
+	 * are old enough that no writer can still publish them (see `sweep`). Corrupt backups are bounded by count, not by age: each
+	 * derived file keeps its newest {@link TRANSCRIPT_SUMMARY_MAX_CORRUPT_BACKUPS} backups whatever their age, since a quiet
+	 * file's damaged bytes are its only copy. Nothing is removed by a superseded writer.
 	 * The summary coordinator runs it once per start, after recovery.
 	 */
 	async sweepOrphans(minAgeMs = TRANSCRIPT_SUMMARY_ORPHAN_MIN_AGE_MS): Promise<string[]> {
@@ -2666,24 +2982,29 @@ export class TranscriptSummaryWriter {
 			const read = await this.store.readManifestFile();
 			if (read.status !== "ok" || read.manifest.writerFence !== this.fence) return [];
 			const referenced = [...Object.keys(read.manifest.acceptedNodes), ...Object.keys(read.manifest.dormant)];
-			return this.store.sweep(new Set(referenced), minAgeMs);
+			const swept = await this.store.sweep(new Set(referenced), minAgeMs);
+			return [...swept, ...(await this.store.pruneAllCorruptBackups())];
 		});
 	}
 
-	/** Keep the damaged bytes beside the file and rewrite it from its valid entries, under the lock and this writer's fence. */
+	/**
+	 * Keep the damaged bytes beside the file and rewrite it from its valid entries, under the lock and this writer's fence.
+	 * Returns the backup the damaged bytes were kept as (undefined when there were none).
+	 */
 	private async rewriteValid<T>(
 		readValid: () => Promise<T>,
-		backup: () => Promise<void>,
+		backup: () => Promise<TranscriptSummaryCorruptBackup | undefined>,
 		write: (valid: T) => Promise<void>,
-	): Promise<void> {
-		await this.store.locked(async () => {
+	): Promise<TranscriptSummaryCorruptBackup | undefined> {
+		return this.store.locked(async () => {
 			const read = await this.store.readManifestFile();
 			if (read.status !== "ok" || read.manifest.writerFence !== this.fence) {
 				throw new Error("Recovery writer was superseded.");
 			}
 			const valid = await readValid();
-			await backup();
+			const kept = await backup();
 			await write(valid);
+			return kept;
 		});
 	}
 

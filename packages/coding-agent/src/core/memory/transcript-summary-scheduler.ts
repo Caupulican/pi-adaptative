@@ -487,6 +487,8 @@ export class TranscriptSummaryScheduler {
 	private readonly releasedReceipts: { ownerSessionId: string; receipt: SystemOneReceipt }[] = [];
 	/** Owed receipts dropped because the released queue overflowed (never silently: counted in the work counters). */
 	private lostReceipts = 0;
+	/** Counts every change of the released-receipt queue, so the owner persists it exactly when it moved. */
+	private releasedReceiptsVersion = 0;
 	private readonly running = new Set<string>();
 	private readonly retryWait = new Set<string>();
 	private readonly jobsBySession = new Map<string, Set<string>>();
@@ -1553,6 +1555,7 @@ export class TranscriptSummaryScheduler {
 		for (const receipt of verdict.receipts) {
 			if (receipt.status !== "unrecorded") continue;
 			this.releasedReceipts.push({ ownerSessionId: verdict.ownerSessionId, receipt: { ...receipt } });
+			this.releasedReceiptsVersion += 1;
 		}
 		while (this.releasedReceipts.length > TRANSCRIPT_SUMMARY_MAX_RELEASED_RECEIPTS) {
 			this.releasedReceipts.shift();
@@ -1567,11 +1570,24 @@ export class TranscriptSummaryScheduler {
 
 	/** Receipts owed by jobs that have since ended, oldest first; taking them empties the queue (the owner re-adds what it cannot record). */
 	takeReleasedReceipts(): { ownerSessionId: string; receipt: SystemOneReceipt }[] {
+		this.releasedReceiptsVersion += 1;
 		return this.releasedReceipts.splice(0);
+	}
+
+	/** The queue as it stands with the version of that state (persisted by the owner when the version moved). */
+	releasedReceiptsState(): { version: number; entries: { ownerSessionId: string; receipt: SystemOneReceipt }[] } {
+		return {
+			version: this.releasedReceiptsVersion,
+			entries: this.releasedReceipts.map((entry) => ({
+				ownerSessionId: entry.ownerSessionId,
+				receipt: { ...entry.receipt },
+			})),
+		};
 	}
 
 	/** Put back receipts the owner could not record yet (the same bound applies). */
 	returnReleasedReceipts(owed: { ownerSessionId: string; receipt: SystemOneReceipt }[]): void {
+		this.releasedReceiptsVersion += 1;
 		this.releasedReceipts.unshift(...owed);
 		while (this.releasedReceipts.length > TRANSCRIPT_SUMMARY_MAX_RELEASED_RECEIPTS) {
 			this.releasedReceipts.shift();

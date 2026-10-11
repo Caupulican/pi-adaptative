@@ -60,6 +60,7 @@ import {
 	admissionEgressBlocked,
 	admissionRecordFromResult,
 	needsReadmission,
+	parseSemanticReceipt,
 	summaryTextDigest,
 	TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
 	type TranscriptAdmissionUnavailableCause,
@@ -328,6 +329,8 @@ export interface TranscriptMemoryStatus {
 	recentFailures: TranscriptMemoryFailureRecord[];
 	recoveryIssues: string[];
 	acceptedNodes: number;
+	/** UTF-8 bytes of the accepted nodes' text resident in the mirror (each node holds at most TRANSCRIPT_SUMMARY_MAX_BYTES). */
+	catalogBytes: number;
 	/** Accepted nodes whose retention age rests on an anchor rather than an event time. */
 	nodesAgedByAnchor: number;
 	admission: TranscriptMemoryAdmissionStatus;
@@ -463,7 +466,7 @@ interface ParkedHold {
 
 type JobOutcome =
 	| { kind: "node"; node: TranscriptSummaryNode }
-	| { kind: "held"; scope: HoldScope; reason: string }
+	| { kind: "held"; scope: HoldScope; reason: string; waitsForOwnerSession?: true }
 	| { kind: "fail"; failure: TranscriptSummaryFailure }
 	/** The claim lost its spending authority before any provider call: returned, never below the durable floor. */
 	| { kind: "abandoned"; reason: string }
@@ -705,6 +708,8 @@ function describeIssue(issue: TranscriptSummaryRecoveryIssue): string {
 	switch (issue.kind) {
 		case "manifest_corrupt":
 			return `manifest corrupt: ${issue.detail}`;
+		case "owed_receipts_corrupt":
+			return `owed usage receipts file damaged: ${issue.detail}`;
 		case "node_missing":
 			return `node ${issue.nodeId.slice(0, 16)} missing`;
 		case "node_corrupt":
@@ -946,6 +951,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private batch: BatchState | undefined;
 	private batchCounter = 0;
 	private jobsDirty = false;
+	/** The released-receipt queue version last made durable in `owed-receipts.json`. */
+	private owedReceiptsSavedVersion = 0;
 	private recoveryIssues: string[] = [];
 	private readonly recentFailures: TranscriptMemoryFailureRecord[] = [];
 	/** Written only by {@link noteInternalCause}. */
@@ -1087,6 +1094,16 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const now = this.ports.now();
 		// The accepted nodes are the completion evidence: a job that published before a stop settles `ready` from its node.
 		scheduler.recover(state.jobs, now, new Map([...this.catalog.values()].map((node) => [node.id, node])));
+		// Receipts owed by jobs that ended before the stop were persisted: a paid response's spend survives the restart.
+		const owed: { ownerSessionId: string; receipt: SystemOneReceipt }[] = [];
+		for (const entry of state.owedReceipts) {
+			const receipt = parseSemanticReceipt(entry.receipt);
+			if (receipt === undefined)
+				this.noteInternalCause("a persisted owed usage receipt was malformed and could not be restored");
+			else owed.push({ ownerSessionId: entry.ownerSessionId, receipt });
+		}
+		scheduler.returnReleasedReceipts(owed);
+		this.owedReceiptsSavedVersion = scheduler.releasedReceiptsState().version;
 		// Jobs and nodes of an older capture version name inputs that are no longer current identities. Their jobs end
 		// stale before anything is claimed (a started attempt is carried under its version 1 key, where the current job
 		// finds it again), and their nodes never enter the ready index; discovery revokes and re-derives them first.
@@ -1415,8 +1432,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// Whatever the state read and the removal do next, the session's own model work stops now.
 			this.abortSession(sessionId);
 			this.earlyDroppedReady += this.endSessionJobs(sessionId, "cancelled");
-			const pending = await this.refreshForgetState(scheduled);
-			this.earlyDroppedReady = 0;
+			let pending: string | undefined;
+			try {
+				pending = await this.refreshForgetState(scheduled);
+			} finally {
+				this.earlyDroppedReady = 0;
+			}
 			outcome = pending === undefined ? { status: "forgotten" } : { status: "forgotten", cleanupPending: pending };
 			this.pump(scheduled);
 		});
@@ -1632,6 +1653,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			recentFailures: [...this.recentFailures],
 			recoveryIssues: [...this.recoveryIssues],
 			acceptedNodes: this.catalog.size,
+			catalogBytes: [...this.catalog.values()].reduce((total, node) => total + node.bytes, 0),
 			nodesAgedByAnchor: aged,
 			admission: this.admissionStatus(),
 			retention: {
@@ -3249,7 +3271,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				reason: `the permanent forget state could not be confirmed (${read.status}: ${read.reason})`,
 			};
 		}
-		if (read.revision !== this.forgetRevision) {
+		// A job of a stopped generation never adopts state or queues work into the generation that replaced it.
+		if (read.revision !== this.forgetRevision && this.live(epoch)) {
 			// What the store says is denied now holds for this claim at once (every guard below reads this set) and stops the
 			// work already running on it; the removal of the derived data follows on the mailbox.
 			const fresh = [...read.sessions].filter((forgotten) => !this.forgottenSessions.has(forgotten));
@@ -3754,7 +3777,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			const recordedNow = countRecorded(settled) - countRecorded(owed.receipts);
 			if (settled.some((receipt) => receipt.status === "unrecorded")) {
 				scheduler?.addWork(job.id, { receiptsRecorded: recordedNow });
-				return { outcome: this.receiptHold(settled) };
+				return { outcome: this.receiptHold(settled, owed.ownerSessionId !== this.ports.ownerSessionId()) };
 			}
 			scheduler?.addWork(job.id, { reused: 1, receiptsRecorded: recordedNow });
 			const result = resultFromVerdict(owed, settled);
@@ -3812,14 +3835,20 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	}
 
 	/** The hold for a paid answer whose usage receipt is owed: the real cause of the first receipt that is still unwritten. */
-	private receiptHold(receipts: readonly SystemOneReceipt[]): JobOutcome {
+	private receiptHold(receipts: readonly SystemOneReceipt[], foreignOwner = false): JobOutcome {
 		const owed = receipts.find((receipt) => receipt.status === "unrecorded");
 		const cause = owed?.cause ?? "the usage receipt was not recorded";
 		this.noteInternalCause(`a paid evaluator answer is held for its usage receipt: ${cause}`);
 		return {
 			kind: "held",
 			scope: "usage_receipt",
-			reason: holdReason(cause, "the paid answer is kept and its usage receipt is retried; it is not bought again"),
+			reason: holdReason(
+				cause,
+				foreignOwner
+					? "the paid answer is kept; its usage receipt belongs to another session and is recorded when a coordinator starts in that session"
+					: "the paid answer is kept and its usage receipt is retried; it is not bought again",
+			),
+			...(foreignOwner ? { waitsForOwnerSession: true as const } : {}),
 		};
 	}
 
@@ -3866,9 +3895,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		if (still.length === 0) {
 			this.receiptRetryFailures = 0;
+			this.markJobsDirty();
 			return;
 		}
 		scheduler.returnReleasedReceipts(still);
+		this.markJobsDirty();
 		this.noteInternalCause(
 			`${still.length} usage receipt(s) of ended jobs are still owed: ${still[0]?.receipt.cause ?? "not recorded"}`,
 		);
@@ -4002,9 +4033,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			if (paidCall) scheduler.interrupt(job.id, now);
 			else scheduler.abandonClaim(token, { message: outcome.reason, reason: "usage_receipt_pending" }, now);
 			this.parked.set(job.id, { scope: "usage_receipt", reason: outcome.reason });
-			// Every owed receipt is retried on the bounded backoff, including one owed to another session (it waits, at the
-			// slowest step, for that session to be this one): a parked job is never left without a wake.
-			this.armReceiptRetry();
+			// A receipt owed to THIS session is retried on the bounded backoff. One owed to another session cannot be recorded
+			// here, ever (a coordinator's session never changes): it waits for the event that can settle it, the start of a
+			// coordinator in the owning session, where the persisted job and its kept verdict are claimed and recorded.
+			if (outcome.waitsForOwnerSession !== true) this.armReceiptRetry();
 			this.markJobsDirty();
 			this.pump(epoch);
 			return;
@@ -4510,6 +4542,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			}
 			if (saved.status === "saved") {
 				scheduler.rekeysSaved(saved.rekeyed);
+				await this.saveOwedReceipts(scheduler, writer, epoch);
 				const freed = saved.released.length > 0 || saved.ledger.recorded < this.proofLedger.recorded;
 				scheduler.noteProof(saved.proof, saved.released);
 				scheduler.setProofHold(saved.ledger.hold);
@@ -4524,6 +4557,34 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			} else if (saved.status === "unavailable") this.jobSaveFailed(saved.reason, epoch);
 			else this.jobSaveFailed(`saving jobs was refused: ${describeSaveRefusal(saved)}`, epoch);
 		});
+	}
+
+	/** Persist the queue of receipts owed by ended jobs when it changed since the last durable copy. */
+	private async saveOwedReceipts(
+		scheduler: TranscriptSummaryScheduler,
+		writer: TranscriptSummaryWriter,
+		epoch: number,
+	): Promise<void> {
+		const state = scheduler.releasedReceiptsState();
+		if (state.version === this.owedReceiptsSavedVersion) return;
+		try {
+			const saved = await writer.saveOwedReceipts(state.entries);
+			if (!this.live(epoch)) return;
+			if (saved.status === "saved") this.owedReceiptsSavedVersion = state.version;
+			else if (saved.status === "fenced" || saved.status === "manifest_corrupt") {
+				this.fatal(`saving the owed usage receipts was refused: ${saved.status}`);
+			} else {
+				// The next save attempt (bounded backoff) retries the queue, never a tight loop.
+				this.jobSaveFailed(
+					`saving the owed usage receipts: ${saved.status === "unavailable" ? saved.reason : `${saved.status} (bound ${saved.bound})`}`,
+					epoch,
+				);
+			}
+		} catch (error) {
+			this.noteInternalCause(
+				`saving the owed usage receipts failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	/**

@@ -636,6 +636,7 @@ export class TranscriptHierarchyHost {
 			})),
 			recoveryIssues: [...status.recoveryIssues],
 			acceptedNodes: status.acceptedNodes,
+			catalogBytes: status.catalogBytes,
 			// The operator view's admission has exactly the coordinator's fields: a copy, nested records included.
 			admission: {
 				...status.admission,

@@ -16742,6 +16742,132 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			).toBeUndefined();
 			trace.mark("root", "icm.forget-command");
 
+			// M3e (a failed removal write, the due retry on the injected clock): the owner forgets a session while its derived data
+			// cannot be removed (the manifest write fails once). The permanent marker is already durable, so the outcome is
+			// forgotten with the removal pending: the live mirror refuses the session's summary at once (the stored manifest still
+			// holds its node), the neighbour's stays readable, a retry timer is armed on the domain clock, and advancing the clock
+			// past the backoff removes the data. After disposal no timer of the hierarchy is left armed.
+			const fwAgentDir = `${world.agentDir}-icm-failed-removal`;
+			const fwGone = await seedIcmPastSession(world, fwAgentDir);
+			const fwKept = await seedIcmPastSession(world, fwAgentDir);
+			const fwStore = icmStore(fwAgentDir);
+			world.systemOne.enterPhase("m3e-build", {});
+			await buildIcmHierarchy(world, fwAgentDir, exactOnly(), (hierarchy) => hierarchy.acceptedNodes === 2);
+			const fwHandles = new Map<string, string>();
+			const fwSearch = (id: string) => ({
+				id,
+				name: "memory",
+				arguments: { action: "history_search", query: ICM_NOTES_QUERY, maxResults: 10 },
+			});
+			const fwCoord = await world.createRootSession("root", { agentDir: fwAgentDir, settings: exactOnly() });
+			await withDeadline(
+				trace,
+				"M3e coordinator running with both summaries",
+				world.io.waitForMutation(() => fwCoord.session.getTranscriptHistoryStatus().hierarchy?.acceptedNodes === 2),
+			);
+			world.provider.enqueue(
+				"root",
+				calls("m3e-list", [fwSearch("m3e-list-1")]),
+				icmAfterHistoryRead("m3e-listed", "memory", fwSearch("m3e-list-1"), (result) => {
+					for (const summary of icmSummaries(result.text)) {
+						for (const session of [fwGone.sessionId, fwKept.sessionId]) {
+							if (summary.covers.includes(`tx:${session}:`)) fwHandles.set(session, summary.handle);
+						}
+					}
+					return { content: [{ type: "text", text: "Both summaries are listed." }] };
+				}),
+			);
+			world.systemOne.enterPhase("m3e-list", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			await withDeadline(
+				trace,
+				"M3e list turn",
+				fwCoord.session.prompt("List the staging notes summaries of both sessions."),
+			);
+			expect(fwHandles.size, "each session has an approved exact copy before the forget").toBe(2);
+			world.io.failNext({
+				name: "m3e-removal-write",
+				kind: "rename",
+				code: "EIO",
+				matches: (operation) => operation.destination === fwStore.manifest,
+			});
+			const fwForgot = await withDeadline(
+				trace,
+				"M3e forget",
+				fwCoord.session.forgetHistorySession(fwGone.sessionId),
+			);
+			const fwNodesOf = (sessionId: string) =>
+				Object.values(icmStoredManifest(icmLiveStore(world), fwStore)?.acceptedNodes ?? {}).filter(
+					(node) => node.sessionId === sessionId,
+				).length;
+			expect(
+				{
+					forgot: fwForgot.ok,
+					markerDurable: Object.keys(
+						(JSON.parse(world.io.peekFile(fwStore.forgotten) ?? "{}") as { sessions?: Record<string, unknown> })
+							.sessions ?? {},
+					),
+					removalPending: fwNodesOf(fwGone.sessionId),
+					neighbourStored: fwNodesOf(fwKept.sessionId),
+					retryArmed: world.historyClock.armedTimers > 0,
+				},
+				"the marker is durable, the removal is pending after its write failed, and a retry is armed on the domain clock",
+			).toEqual({
+				forgot: true,
+				markerDurable: [fwGone.sessionId],
+				removalPending: 1,
+				neighbourStored: 1,
+				retryArmed: true,
+			});
+			world.provider.enqueue(
+				"root",
+				dynamicCalls("m3e-expand", () => [
+					{
+						id: "m3e-expand-gone",
+						name: "memory",
+						arguments: { action: "history_expand", ref: fwHandles.get(fwGone.sessionId) },
+					},
+					{
+						id: "m3e-expand-kept",
+						name: "memory",
+						arguments: { action: "history_expand", ref: fwHandles.get(fwKept.sessionId) },
+					},
+				]),
+				{
+					name: "m3e-expanded",
+					check: (request) => {
+						const results = latestBatchResults(request).filter((result) => result.toolName === "memory");
+						const gone = results.find((result) => result.isError);
+						const kept = results.find((result) => !result.isError);
+						if (gone?.isError !== true || !/not_found|forgotten/.test(gone.text) || gone.text.includes("Note A1"))
+							throw new Error(`the pending-removal summary was served: ${gone?.text.slice(0, 500)}`);
+						if (kept?.isError !== false || !kept.text.includes("Covered sources"))
+							throw new Error(`the neighbouring summary was lost: ${kept?.text.slice(0, 500)}`);
+					},
+					reply: {
+						content: [{ type: "text", text: "The forgotten summary is refused while its removal is pending." }],
+					},
+				},
+			);
+			world.systemOne.enterPhase("m3e-read", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			await withDeadline(trace, "M3e read turn", fwCoord.session.prompt("Expand both summaries."));
+			// The backoff elapses on the domain clock: the deferred removal runs and lands.
+			const fwFired = world.historyClock.advance(120_000);
+			await withDeadline(
+				trace,
+				"M3e removal retried on the due timer",
+				world.io.waitForMutation(() => fwNodesOf(fwGone.sessionId) === 0),
+			);
+			expect(
+				{ fired: fwFired > 0, goneNodes: fwNodesOf(fwGone.sessionId), neighbourNodes: fwNodesOf(fwKept.sessionId) },
+				"the due timer ran the pending removal and only the forgotten session's data went",
+			).toEqual({ fired: true, goneNodes: 0, neighbourNodes: 1 });
+			expect(
+				await world.disposeSessionInBody(fwCoord.session),
+				"the M3e coordinator disposes cleanly",
+			).toBeUndefined();
+			expect(world.historyClock.armedTimers, "no hierarchy timer stays armed after disposal").toBe(0);
+			trace.mark("root", "icm.failed-removal-retry");
+
 			// M4: retention revocation and expiry, with a neighbour that stays. Two past sessions carry the same notes; one is aged
 			// thirty days. Model summaries are kept out (no admission egress), so only the two exact copies are built.
 			const rAgentDir = `${world.agentDir}-icm-retention`;

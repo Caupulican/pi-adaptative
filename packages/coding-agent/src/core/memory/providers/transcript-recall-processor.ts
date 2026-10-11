@@ -6,7 +6,7 @@
  * no side effects; file I/O is synchronous `node:fs`.
  */
 
-import { closeSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readdirSync, readSync, type Stats, statSync } from "node:fs";
 import { join } from "node:path";
 import {
 	FIRST_SESSION_VERSION_WITH_ENTRY_IDS,
@@ -92,6 +92,11 @@ interface SessionRecord {
 	state?: SessionCaptureState;
 	/** Byte offset just past the last complete line captured into `state`. */
 	offset: number;
+	/**
+	 * File size observed by the capture that produced `state`: growth past it is new content. `offset` lags it by a
+	 * partial trailing line (a writer still appending, or one that stopped mid-line). Zero while not held.
+	 */
+	observedSize: number;
 	/** Bytes of `state` currently charged against the retention budget. */
 	accountedBytes: number;
 	/** Why the session is not held in memory. */
@@ -127,8 +132,13 @@ interface PendingIngest {
 
 type FailurePhase = "read" | "ingest" | "source" | "query" | "sessions" | "lineage" | "verify";
 
-interface ConsumeOutcome {
+/** Where a capture stopped: the offset past its last consumed line, and the file size it observed. */
+interface CaptureExtent {
 	offset: number;
+	size: number;
+}
+
+interface ConsumeOutcome extends CaptureExtent {
 	exceeded: boolean;
 }
 
@@ -167,16 +177,17 @@ function pathKey(path: string): string {
 
 /**
  * Stream complete lines from `startOffset`, bounded to the file size at open. Returns the offset just
- * past the last consumed line. An unterminated tail is offered to `onTail`; it is consumed only when
- * that returns true (a complete JSON line written without its newline), otherwise it is left for the
- * next read because the writer may still be appending it.
+ * past the last consumed line and the bytes observed (the size at open, or where a short read stopped). An
+ * unterminated tail is offered to `onTail`; it is consumed only when that returns true (a complete JSON line
+ * written without its newline), otherwise it is left for the next read because the writer may still be
+ * appending it.
  */
 function readCompleteLines(
 	path: string,
 	startOffset: number,
 	onLine: (line: string) => boolean,
 	onTail: (line: string) => boolean,
-): number {
+): CaptureExtent {
 	const fd = openSync(path, "r");
 	try {
 		const end = fstatSync(fd).size;
@@ -206,11 +217,11 @@ function readCompleteLines(
 				pendingBytes = 0;
 				segmentStart = newline + 1;
 				consumed = chunkStart + segmentStart;
-				if (!onLine(lineBytes.toString("utf8"))) return consumed;
+				if (!onLine(lineBytes.toString("utf8"))) return { offset: consumed, size: position };
 			}
 		}
-		if (pendingBytes > 0 && onTail(Buffer.concat(pending).toString("utf8"))) consumed = end;
-		return consumed;
+		if (pendingBytes > 0 && onTail(Buffer.concat(pending).toString("utf8"))) consumed = position;
+		return { offset: consumed, size: position };
 	} finally {
 		closeSync(fd);
 	}
@@ -254,14 +265,14 @@ function consumeSession(
 		}
 		return true;
 	};
-	const offset = readCompleteLines(
+	const extent = readCompleteLines(
 		path,
 		startOffset,
 		(line) => accept(line, true),
 		(line) => accept(line, false),
 	);
 	if (!exceeded && state.retainedBytes > limitBytes) exceeded = true;
-	return { offset, exceeded };
+	return { ...extent, exceeded };
 }
 
 /**
@@ -386,6 +397,8 @@ export class TranscriptRecallProcessor {
 	private flushScheduled = false;
 	/** Whether the current request already re-read the recorded failed sources. */
 	private failuresRefreshed = false;
+	/** Sessions the current request already brought to their file state (see refreshSession). */
+	private sessionsRefreshed = new Set<string>();
 	private transientLoad: TransientLoad | undefined;
 
 	constructor(port: TranscriptRecallProcessorPort) {
@@ -541,6 +554,7 @@ export class TranscriptRecallProcessor {
 			mtimeMs,
 			isCurrent: header.sessionId === this.currentSessionId,
 			offset: 0,
+			observedSize: 0,
 			accountedBytes: 0,
 		};
 		if (header.timestamp !== undefined) record.timestamp = header.timestamp;
@@ -558,16 +572,18 @@ export class TranscriptRecallProcessor {
 		this.index.removeSession(record.sessionId);
 		record.state = undefined;
 		record.offset = 0;
+		record.observedSize = 0;
 		record.accountedBytes = 0;
 		record.skip = skip;
 	}
 
-	private adoptState(record: SessionRecord, state: SessionCaptureState, offset: number): void {
+	private adoptState(record: SessionRecord, state: SessionCaptureState, capture: CaptureExtent): void {
 		this.retainedBytes += state.retainedBytes - record.accountedBytes;
 		if (record.skip !== undefined && FAILURE_REASON.test(record.skip)) this.noteRecovery();
 		record.accountedBytes = state.retainedBytes;
 		record.state = state;
-		record.offset = offset;
+		record.offset = capture.offset;
+		record.observedSize = capture.size;
 		record.skip = undefined;
 		this.changedSessionIds.add(record.sessionId);
 		this.index.replaceSession(record.sessionId, state.spans(), { current: record.isCurrent });
@@ -575,8 +591,8 @@ export class TranscriptRecallProcessor {
 
 	/**
 	 * Capture `record`'s file from `startOffset` into `state` under `limitBytes` and finalize its lineage.
-	 * Returns the offset past the captured lines, or undefined after unloading the record with the reason
-	 * it could not be held (read failure, byte limit, invalid entry graph).
+	 * Returns where the capture stopped (the offset past the captured lines and the bytes observed), or undefined
+	 * after unloading the record with the reason it could not be held (read failure, byte limit, invalid entry graph).
 	 */
 	private captureInto(
 		record: SessionRecord,
@@ -584,7 +600,7 @@ export class TranscriptRecallProcessor {
 		startOffset: number,
 		limitBytes: number,
 		phase: FailurePhase,
-	): number | undefined {
+	): CaptureExtent | undefined {
 		let outcome: ConsumeOutcome;
 		try {
 			outcome = consumeSession(record.path, state, startOffset, limitBytes);
@@ -602,17 +618,17 @@ export class TranscriptRecallProcessor {
 			this.unloadRecord(record, "invalid_entry_graph");
 			return undefined;
 		}
-		return outcome.offset;
+		return { offset: outcome.offset, size: outcome.size };
 	}
 
 	/** Read one whole session file into memory under `limitBytes`, or record why it was not held. */
 	private loadRecord(record: SessionRecord, limitBytes: number, phase: FailurePhase): void {
 		const state = new SessionCaptureState(this.projectId, record.sessionId);
-		const offset = this.captureInto(record, state, 0, limitBytes, phase);
-		if (offset === undefined) return;
+		const capture = this.captureInto(record, state, 0, limitBytes, phase);
+		if (capture === undefined) return;
 		// Replacing a held state is a whole-file reload: earlier spans may differ.
 		if (record.state) this.invalidate(record.sessionId, state.firstChangedPosition(record.state.selectedSpans()));
-		this.adoptState(record, state, offset);
+		this.adoptState(record, state, capture);
 	}
 
 	/** Evict the oldest historical sessions until retained text fits, then the protected one if it alone cannot. */
@@ -748,27 +764,25 @@ export class TranscriptRecallProcessor {
 		}
 	}
 
-	private applyIngest(path: string, rewritten: boolean): void {
-		let metadata: ReturnType<typeof statSync>;
-		try {
-			metadata = statSync(path);
-		} catch (error) {
-			this.recordIngestFailure(path, error);
-			return;
-		}
+	/**
+	 * Apply one file's change at the stat the caller took. The held state is extended from its offset when the file
+	 * grew past what it observed, and reloaded when the file shrank or was rewritten; a file that is not past its
+	 * observed size is not read. The recorded mtime moves only with content that was actually captured.
+	 */
+	private applyIngest(path: string, rewritten: boolean, metadata: Stats): void {
 		let record = this.recordsByPath.get(pathKey(path));
 		if (!record) {
 			record = this.describeFile(path, metadata.mtimeMs, "ingest");
 			if (!record) return;
 		}
-		record.mtimeMs = metadata.mtimeMs;
 		if (metadata.size > MAX_FILE_BYTES) {
 			this.unloadRecord(record, SKIP_FILE_TOO_LARGE);
 			return;
 		}
 		const state = record.state;
-		if (state && !rewritten && metadata.size === record.offset) return;
-		if (!state || rewritten || metadata.size < record.offset) {
+		if (state && !rewritten && metadata.size === record.observedSize) return;
+		record.mtimeMs = metadata.mtimeMs;
+		if (!state || rewritten || metadata.size < record.observedSize) {
 			this.loadRecord(record, MAX_RETAINED_BYTES, "ingest");
 			this.evictFor(record);
 			return;
@@ -777,13 +791,13 @@ export class TranscriptRecallProcessor {
 		const previousBranch = state.branchEntryIds;
 		// A rebuild in `finalize` replaces the selected list, so this keeps the previous one for comparison.
 		const previousSelected = state.selectedSpans();
-		const offset = this.captureInto(record, state, record.offset, MAX_RETAINED_BYTES, "ingest");
-		if (offset === undefined) return;
+		const capture = this.captureInto(record, state, record.offset, MAX_RETAINED_BYTES, "ingest");
+		if (capture === undefined) return;
 		// A selected lineage that is no longer a prefix extension of the previous one is a branch switch.
 		if (!state.lineageExtends(previousBranch)) {
 			this.invalidate(record.sessionId, state.firstChangedPosition(previousSelected));
 		}
-		this.adoptState(record, state, offset);
+		this.adoptState(record, state, capture);
 		this.evictFor(record);
 	}
 
@@ -816,10 +830,13 @@ export class TranscriptRecallProcessor {
 		this.skippedPaths.set(pathKey(path), { reason, path });
 	}
 
-	/** Ingest one file; its failure is a skip reason and a diagnostic, never the end of the batch or the scan. */
-	private ingestFile(path: string, rewritten: boolean): void {
+	/**
+	 * Ingest one file, at `observed` when the caller already took its stat or at a fresh one. A failure is a skip
+	 * reason and a diagnostic, never the end of the batch or the scan.
+	 */
+	private ingestFile(path: string, rewritten: boolean, observed?: Stats): void {
 		try {
-			this.applyIngest(path, rewritten);
+			this.applyIngest(path, rewritten, observed ?? statSync(path));
 		} catch (error) {
 			this.recordIngestFailure(path, error);
 		}
@@ -901,6 +918,52 @@ export class TranscriptRecallProcessor {
 		const record = this.recordsById.get(sessionId);
 		if (record || !this.refreshFailedSources()) return record;
 		return this.recordsById.get(sessionId);
+	}
+
+	/**
+	 * Bring one session to the file state at this request's stat. This is the linearization point of every read that
+	 * answers from a held lineage: the answer describes the session file as it is at that stat, never the index as it
+	 * was at the last ingest, so a file another writer (another root, a worker, another process) appended or rewrote
+	 * is re-ingested through the ingest path before the answer. Compared with what the state observed: growth past the
+	 * observed size is an append from the held offset; a shrink, or an unchanged size with a changed mtime, is a rewrite
+	 * (reload); an unchanged file is not read. A record that failed to load is re-attempted by the read that names it,
+	 * so a transient failure does not stay unavailable until a later persist event. A stat failure takes the ingest
+	 * failure path: the record is unloaded with its reason and the read answers unavailable, never "absent" and never
+	 * "unchanged". One stat per call, and at most one call per session per request. Returns whether the session's held
+	 * state or its skip reason changed, so the caller posts that change (with its lineage bumps) before answering; a
+	 * failure that repeats unchanged is not a change.
+	 */
+	private refreshSession(record: SessionRecord): boolean {
+		const failed = record.skip !== undefined && FAILURE_REASON.test(record.skip);
+		if (record.state === undefined && !failed) return false;
+		if (this.sessionsRefreshed.has(record.sessionId)) return false;
+		this.sessionsRefreshed.add(record.sessionId);
+		const skipBefore = record.skip;
+		let metadata: Stats;
+		try {
+			metadata = statSync(record.path);
+		} catch (error) {
+			this.recordIngestFailure(record.path, error);
+			return record.skip !== skipBefore;
+		}
+		if (!record.state) {
+			this.ingestFile(record.path, false, metadata);
+			return record.state !== undefined || record.skip !== skipBefore;
+		}
+		if (metadata.size > record.observedSize) {
+			this.ingestFile(record.path, false, metadata);
+		} else if (metadata.size < record.observedSize || metadata.mtimeMs !== record.mtimeMs) {
+			this.ingestFile(record.path, true, metadata);
+		} else {
+			return false;
+		}
+		return record.state !== undefined || record.skip !== skipBefore;
+	}
+
+	/** The refresh a single-session read runs before it answers: the named session, with any change posted first. */
+	private refreshSessionForRead(sessionId: string): void {
+		const record = this.recordsById.get(sessionId);
+		if (record && this.refreshSession(record)) this.postCoverage();
 	}
 
 	/** Mark that positions of a session's selected lineage from `lowestChanged` on may have changed. */
@@ -1037,6 +1100,7 @@ export class TranscriptRecallProcessor {
 	}
 
 	private readSource(request: TranscriptRecallSourceRequest): TranscriptSourcePageResult {
+		this.refreshSessionForRead(request.sessionId);
 		const record = this.catalogRecord(request.sessionId);
 		if (!record) return this.missingSessionResult(request.sessionId);
 		const state = record.state ?? this.loadSessionForRead(record);
@@ -1093,17 +1157,26 @@ export class TranscriptRecallProcessor {
 	}
 
 	/**
-	 * Indexed sessions in chronological order (header timestamp, then session id), with the coverage of the same
-	 * index state: both are read synchronously here, so no ingest can land between them.
+	 * Indexed sessions in chronological order (header timestamp, then session id), with the coverage of the same index
+	 * state. Each listed session is first brought to its file state at this request's stat, because its lineage digest
+	 * and span count are part of the answer. Discovery of new files is not part of a listing and keeps its existing
+	 * granularity. The limit is checked before any stat, so a listing over it costs none.
 	 */
 	private listSessions(): TranscriptRecallSessionsResult {
-		const indexed = [...this.recordsById.values()].filter((record) => record.state !== undefined);
-		if (indexed.length > TRANSCRIPT_RECALL_MAX_LISTED_SESSIONS) {
+		const held = [...this.recordsById.values()].filter((record) => record.state !== undefined);
+		if (held.length > TRANSCRIPT_RECALL_MAX_LISTED_SESSIONS) {
 			return unavailable(
 				"unavailable",
-				`${indexed.length} sessions are indexed; listing is limited to ${TRANSCRIPT_RECALL_MAX_LISTED_SESSIONS}.`,
+				`${held.length} sessions are indexed; listing is limited to ${TRANSCRIPT_RECALL_MAX_LISTED_SESSIONS}.`,
 			);
 		}
+		let changed = false;
+		for (const record of held) {
+			if (this.refreshSession(record)) changed = true;
+		}
+		if (changed) this.postCoverage();
+		// A session whose file was found gone or unreadable is no longer held: it leaves the listing, and the coverage says why.
+		const indexed = held.filter((record) => record.state !== undefined);
 		indexed.sort((left, right) => {
 			const leftKey = left.timestamp ?? "";
 			const rightKey = right.timestamp ?? "";
@@ -1141,6 +1214,7 @@ export class TranscriptRecallProcessor {
 	}
 
 	private readLineage(request: TranscriptRecallLineageRequest): TranscriptLineageSpansResult {
+		this.refreshSessionForRead(request.sessionId);
 		const state = this.heldLineage(request.sessionId);
 		if (!(state instanceof SessionCaptureState)) return state;
 		const selected = state.selectedSpans();
@@ -1174,6 +1248,14 @@ export class TranscriptRecallProcessor {
 		// a session already judged: every verdict and every observed revision come from one index state. Within this
 		// request `heldLineage` then only looks up (a request refreshes at most once).
 		if ([...dependsThrough.keys()].some((sessionId) => !this.recordsById.has(sessionId))) this.refreshFailedSources();
+		// Every named session is then brought to its file state at this request's stat, before any verdict, so every
+		// verdict and observed revision comes from that state; one coverage post carries the refresh's lineage bumps.
+		let changed = false;
+		for (const sessionId of dependsThrough.keys()) {
+			const record = this.recordsById.get(sessionId);
+			if (record && this.refreshSession(record)) changed = true;
+		}
+		if (changed) this.postCoverage();
 		const verdicts: TranscriptLineageRangeVerdict[] = [];
 		for (const check of request.checks) {
 			const state = this.heldLineage(check.sessionId);
@@ -1237,6 +1319,11 @@ export class TranscriptRecallProcessor {
 		}
 	}
 
+	/**
+	 * Ranks the index as of the last applied ingest or refresh. A query names no session, so no session is brought to
+	 * its file state here: that would cost one stat per indexed session on every query. Consumers that act on lineage
+	 * or read source text go through lineage, verify or source, which do refresh the sessions they name.
+	 */
 	private runQuery(request: TranscriptRecallQueryRequest): void {
 		this.flushIngests();
 		const hits = this.index.query(request.query, {
@@ -1260,8 +1347,10 @@ export class TranscriptRecallProcessor {
 			return;
 		}
 		if (request.generation !== this.generation) return;
-		// Each request may re-read recorded failed sources once (see refreshFailedSources).
+		// Each request may re-read recorded failed sources once (see refreshFailedSources) and bring each named
+		// session to its file state once (see refreshSession).
 		this.failuresRefreshed = false;
+		this.sessionsRefreshed = new Set();
 		switch (request.type) {
 			case "ingest":
 				this.receivedIngestSeq = Math.max(this.receivedIngestSeq, request.seq);
