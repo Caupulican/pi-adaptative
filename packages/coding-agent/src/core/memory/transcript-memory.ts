@@ -1349,8 +1349,16 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (scheduler && writer) {
 			// The stop always reaches its terminal signal; a save that failed keeps its real cause for the status.
 			try {
-				const saved = await writer.saveJobs(scheduler.snapshot(), { rekeys: scheduler.rekeysToSave() });
-				if (saved.status !== "saved") this.noteInternalCause(`saving jobs at stop: ${describeSaveRefusal(saved)}`);
+				// The same order as every save: the owed receipts first. Jobs that no longer carry a receipt are never written
+				// over the last durable copy of it; when the queue cannot be made durable the older job record stays.
+				const snapshot = scheduler.snapshot();
+				if (!(await this.saveOwedReceipts(scheduler, writer, this.epoch))) {
+					this.noteInternalCause("the jobs were not saved at stop: the owed usage receipts are not durable");
+				} else {
+					const saved = await writer.saveJobs(snapshot, { rekeys: scheduler.rekeysToSave() });
+					if (saved.status !== "saved")
+						this.noteInternalCause(`saving jobs at stop: ${describeSaveRefusal(saved)}`);
+				}
 			} catch (error) {
 				this.noteInternalCause(
 					`saving jobs at stop failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -4576,11 +4584,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (state.version === this.owedReceiptsSavedVersion) return true;
 		try {
 			const saved = await writer.saveOwedReceipts(state.entries);
-			if (!this.live(epoch)) return false;
+			// Durable is durable, also when this run has stopped meanwhile: the stop's own save relies on it.
 			if (saved.status === "saved") {
 				this.owedReceiptsSavedVersion = state.version;
 				return true;
 			}
+			if (!this.live(epoch)) return false;
 			if (saved.status === "fenced" || saved.status === "manifest_corrupt") {
 				this.fatal(`saving the owed usage receipts was refused: ${saved.status}`);
 				return false;

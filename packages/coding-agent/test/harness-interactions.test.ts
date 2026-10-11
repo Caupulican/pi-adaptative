@@ -12504,15 +12504,18 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				).toBeUndefined();
 				trace.mark("root", "icm.receipt-hold");
 
-				for (const roVariant of ["retry", "interrupt"] as const) {
+				for (const roVariant of ["retry", "interrupt", "crash", "shutdown"] as const) {
 					// R-owed (receipts a paid answer still owes after its job ended): the leaf is held for its usage receipt as in
 					// R-receipt, then its session is forgotten, which ends the job and hands the owed receipt to the owed queue. The
 					// first write of the owed-receipts file is refused: nothing is acknowledged and no file appears. The bounded retry
 					// (the domain clock) makes it durable. The session is then reopened from the same file: the owed receipt is
-					// recorded exactly once, the file is emptied, and nothing is bought again. Two variants share the refusal: "retry" makes the
+					// recorded exactly once, the file is emptied, and nothing is bought again. Three variants: "retry" makes the
 					// write durable on the bounded retry (whose own receipt attempt also fails, so the receipt returns to the queue)
 					// before the restart; "interrupt" restarts while the write is still refused, so the receipt is conserved only by the
-					// job record the refused save did not replace.
+					// job record the refused save did not replace; "crash" is the opposite partial write (the owed file is saved, the jobs save that
+					// would drop the receipt from the job is refused). "shutdown" disposes the owner while the owed write is still refused and keeps what the stop itself writes (the
+					// stop saves the owed queue before the jobs that no longer carry the receipt). The interrupting variants put the two files back to their state
+					// at the interruption after the dispose, so a clean shutdown flush cannot stand in for the interruption.
 					const roAgentDir = `${world.agentDir}-icm-owed-${roVariant}`;
 					const roSeed = await seedIcmPastSession(world, roAgentDir);
 					const roStore = icmStore(roAgentDir);
@@ -12553,25 +12556,33 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 								1,
 						),
 					);
+					// "crash" lets the owed file land and refuses the jobs save that follows it; the others refuse the owed write.
+					const roRefusedFile = roVariant === "crash" ? roStore.jobs : roStore.owed;
 					const roRefused = world.io.waitForOperation(
-						(operation) => operation.code === "EIO" && operation.destination === roStore.owed,
+						(operation) => operation.code === "EIO" && operation.destination === roRefusedFile,
 					);
 					world.io.failNext({
-						name: "ro-owed-write",
+						name: "ro-refused-write",
 						kind: "rename",
 						code: "EIO",
-						matches: (operation) => operation.destination === roStore.owed,
+						matches: (operation) => operation.destination === roRefusedFile,
 					});
 					const roForgot = await withDeadline(
 						trace,
 						"R-owed forget",
 						roFirst.session.forgetHistorySession(roSeed.sessionId),
 					);
-					await withDeadline(trace, "R-owed first owed write refused", roRefused);
+					await withDeadline(trace, "R-owed refused write", roRefused);
+					const roOwedEntries = () => {
+						const text = world.io.peekFile(roStore.owed);
+						return text === undefined ? undefined : (JSON.parse(text) as { entries: unknown[] }).entries.length;
+					};
 					expect(
-						{ forgot: roForgot.ok, owedFile: world.io.peekFile(roStore.owed) },
-						"a refused owed-receipts write leaves no file and acknowledges nothing",
-					).toEqual({ forgot: true, owedFile: undefined });
+						{ forgot: roForgot.ok, owedEntries: roOwedEntries() },
+						roVariant === "crash"
+							? "the owed receipt is durable before the jobs save that drops it, which was refused"
+							: "a refused owed-receipts write leaves no file and acknowledges nothing",
+					).toEqual({ forgot: true, owedEntries: roVariant === "crash" ? 1 : undefined });
 					const roJobsCarry = icmStoredJobs(cLive, roStore).filter((job) =>
 						JSON.stringify(job).includes('"unrecorded"'),
 					);
@@ -12600,7 +12611,16 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					}
 					const roOwnerFile = roFirst.sessionManager.getSessionFile();
 					if (roOwnerFile === undefined) throw new Error("R-owed: the owner session has no file");
+					// The state at the interruption: restored after the dispose for the interrupting variants.
+					const roInterrupted =
+						roVariant === "retry" || roVariant === "shutdown"
+							? undefined
+							: [roStore.owed, roStore.jobs].map((file) => [file, world.io.peekFile(file)] as const);
 					await world.disposeSessionInBody(roFirst.session);
+					for (const [file, text] of roInterrupted ?? []) {
+						if (text !== undefined) world.io.seed(file, text);
+						else if (world.io.peekFile(file) !== undefined) world.io.unlinkSync(file);
+					}
 					const roSecond = await world.createRootSession("root", {
 						agentDir: roAgentDir,
 						sessionManager: world.openSessionManager(roOwnerFile, roAgentDir),

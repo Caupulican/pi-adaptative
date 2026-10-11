@@ -456,7 +456,7 @@ import {
 	type SessionStats,
 	type WorkerDelegationRunOutcome,
 } from "./agent-session-contracts.ts";
-import { SEMANTIC_USAGE_CUSTOM_TYPE, type SpawnedUsageTotals, semanticUsageReportOf } from "./cost/usage-records.ts";
+import { appendSemanticUsageOnce, type SpawnedUsageTotals } from "./cost/usage-records.ts";
 
 export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-protocol-controller.ts";
 
@@ -1531,7 +1531,7 @@ export class AgentSession {
 				// usage reaches the session ledger and its judgments the Jev ledger like every other evaluation.
 				getAdmissionEngine: () => this._recordingSemanticEngine(),
 				recordUsage: (receipt) => {
-					this.sessionManager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf(receipt));
+					appendSemanticUsageOnce(this.sessionManager, receipt);
 				},
 				...(config.historyTimeSource !== undefined ? { time: config.historyTimeSource } : {}),
 				isForegroundBusy: () => this._foregroundRecovery.isBusy,

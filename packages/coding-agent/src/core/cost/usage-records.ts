@@ -45,6 +45,33 @@ export function semanticUsageReportOf(receipt: {
 	};
 }
 
+/** The part of a session manager the once-only append needs: its entries and the custom append. */
+interface SemanticUsageLedger {
+	getEntries(): readonly { type: string; customType?: string; data?: unknown }[];
+	appendCustomEntry(customType: string, data: unknown): unknown;
+}
+
+/**
+ * Append a semantic usage report unless the session already holds one with the same report id. A receipt can reach the
+ * recorder twice (a restart that finds it in both the owed queue and an older job record); the cost readers skip a
+ * repeated id, and this keeps the durable rows themselves unique.
+ */
+export function appendSemanticUsageOnce(
+	ledger: SemanticUsageLedger,
+	receipt: Parameters<typeof semanticUsageReportOf>[0],
+): void {
+	const report = semanticUsageReportOf(receipt);
+	const held = ledger
+		.getEntries()
+		.some(
+			(entry) =>
+				entry.type === "custom" &&
+				entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE &&
+				(entry.data as { reportId?: unknown } | undefined)?.reportId === report.reportId,
+		);
+	if (!held) ledger.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, report);
+}
+
 export interface SpawnedUsageTotals {
 	cost: number;
 	reports: number;
