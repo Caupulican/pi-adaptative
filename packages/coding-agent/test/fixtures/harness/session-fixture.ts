@@ -171,6 +171,12 @@ export interface ScriptedPhaseOptions {
 	 * judgments it carries count as consumed by that intended outage, which is recorded apart from unscripted requests.
 	 */
 	readonly outage?: boolean;
+	/**
+	 * The evaluator answers every request of the phase with a PAID response that breaks its contract (no answer for any
+	 * asked question), after its gate. The declared judgments count as consumed by that intended invalid answer, which is
+	 * recorded apart from unscripted requests.
+	 */
+	readonly invalidAnswer?: boolean;
 	/** Called when a request is admitted: its questions are validated and answered, and it now waits at its gate. */
 	readonly onAdmit?: () => void;
 	/**
@@ -289,12 +295,15 @@ export class ScriptedSystemOneTransport {
 	private expectRequest: ((request: SystemOneDecodedRequest) => void) | undefined;
 	private gate: Promise<unknown> | undefined;
 	private outage = false;
+	private invalidAnswer = false;
 	private onAdmit: (() => void) | undefined;
 	private ignoresAbort = false;
 	/** Transport requests still in flight, settled or not: an owner's abort does not end a physical request. */
 	private readonly inFlight = new Set<Promise<void>>();
 	/** Requests a phase answered as an unavailable evaluator: intended by the scenario, never unscripted. */
 	readonly intendedOutages: string[] = [];
+	/** Requests a phase answered with an intentionally invalid paid response: intended by the scenario, never unscripted. */
+	readonly intendedInvalidAnswers: string[] = [];
 	/** "phase:id" pairs a production request answered. */
 	private readonly consumed = new Set<string>();
 	/** "phase:id" pairs a phase declared, in order. */
@@ -315,6 +324,7 @@ export class ScriptedSystemOneTransport {
 		this.expectRequest = options.expect;
 		this.gate = options.gate;
 		this.outage = this.enabled && options.outage === true;
+		this.invalidAnswer = this.enabled && options.invalidAnswer === true;
 		if (options.ignoresAbort === true && options.gate === undefined) {
 			throw new Error("A transport request that ignores abort requires an explicit gate");
 		}
@@ -338,6 +348,7 @@ export class ScriptedSystemOneTransport {
 		this.expectRequest = undefined;
 		this.gate = undefined;
 		this.outage = false;
+		this.invalidAnswer = false;
 		this.onAdmit = undefined;
 		this.ignoresAbort = false;
 	}
@@ -411,6 +422,7 @@ export class ScriptedSystemOneTransport {
 		const families = this.families;
 		const gate = this.gate;
 		const outage = this.outage;
+		const invalidAnswer = this.invalidAnswer;
 		const onAdmit = this.onAdmit;
 		const ignoresAbort = this.ignoresAbort;
 		const decoded: SystemOneDecodedRequest = { phase, state: body.state, questions: body.questions };
@@ -455,6 +467,11 @@ export class ScriptedSystemOneTransport {
 			// The configured outage cause: the validated questions are answered by a 503, recorded apart from unscripted requests.
 			this.intendedOutages.push(`${phase}: ${method} ${url}`);
 			return Response.json({ error: "evaluator unavailable" }, { status: 503 });
+		}
+		if (invalidAnswer) {
+			// The configured invalid answer: a paid response (usage included) that answers none of the asked questions.
+			this.intendedInvalidAnswers.push(`${phase}: ${method} ${url}`);
+			return Response.json({ model: body.model, answers: {}, usage: { input_tokens: 10, output_tokens: 5 } });
 		}
 		return Response.json({ model: body.model, answers, usage: { input_tokens: 10, output_tokens: 5 } });
 	};

@@ -7363,6 +7363,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				// R13-A: the held build (no admission egress) and the build that finds the spent maximum.
 				/^History summaries: 1 model summary job\(s\) are held: external summary admission egress is not allowed by settings: the evaluator is a remote service and a local summary model does not make it local\. Exact copies and exact history recall are unaffected\.$/,
 				/^History summaries: 1 job\(s\) failed, 0 succeeded \(first cause: attempts_exhausted: The attempt budget is spent: 3 of 3 attempts were started and none completed\.[^\n]*\)\. Exact history recall is unaffected\.$/,
+				// R-invalid: the invalid paid answer ends the leaf (the first of the 'first cause' shapes of a failed job).
+				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_invalid_output: [^\n]+\)\. Exact history recall is unaffected\.$/,
 				// R-receipt: one valid paid answer is kept while its usage receipt cannot be written (exactly one job, the
 				// usage-receipt hold, the session's real write failure as the cause).
 				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: [^\n]*Session persistence state is uncertain after a failed write[^\n]*\. Exact history recall is unaffected\.$/,
@@ -12567,6 +12569,69 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					"the re-admission session disposes cleanly",
 				).toBeUndefined();
 				trace.mark("root", "icm.readmission-jobs");
+
+				// R-invalid: a PAID evaluator answer that breaks its contract (it answers none of the asked questions) is evidence
+				// of nothing. It is never reused, never approved and never retried as an outage: the leaf ends failed with the
+				// invalid-output cause after exactly one evaluator request, and the paid answer's usage receipt is still recorded.
+				const ivAgentDir = `${world.agentDir}-icm-invalid`;
+				const ivStore = icmStore(ivAgentDir);
+				await seedIcmPastSession(world, ivAgentDir);
+				world.provider.enqueue(cTrack, text("iv-leaf-summary", ICM_LEAF_SUMMARY));
+				world.systemOne.enterPhase(
+					"iv-invalid",
+					{
+						summary_supported: cAdmission.summary_supported,
+						owner_constraints_preserved: cAdmission.owner_constraints_preserved,
+					},
+					{ invalidAnswer: true },
+				);
+				const ivBefore = { summaries: icmTrackRequests(world, cTrack), admissions: icmAdmissionRequests(world) };
+				const ivOwner = await world.createRootSession("root", {
+					agentDir: ivAgentDir,
+					settings: icmHierarchySettings(cTrack),
+				});
+				await withDeadline(
+					trace,
+					"R-invalid leaf ended on the invalid answer",
+					world.io.waitForMutation(() =>
+						(ivOwner.session.getTranscriptHistoryStatus().hierarchy?.failures ?? []).some(
+							(failure) => failure.reason === "admission_invalid_output",
+						),
+					),
+				);
+				const ivDone = icmHierarchy(ivOwner.session);
+				const ivLeaf = icmJobAt(cLive, ivStore, "leaf", 8);
+				expect(
+					{
+						failures: ivDone.failures.map((failure) => failure.reason),
+						requests: {
+							summaries: icmTrackRequests(world, cTrack) - ivBefore.summaries,
+							admissions: icmAdmissionRequests(world) - ivBefore.admissions,
+						},
+						invalidAnswers: world.systemOne.intendedInvalidAnswers.filter((entry) =>
+							entry.startsWith("iv-invalid:"),
+						).length,
+						receipts: {
+							recorded: ivDone.admission?.work.receiptsRecorded,
+							pending: ivDone.admission?.work.receiptsPending,
+						},
+						held: ivDone.admission?.heldByKind,
+						leaf: { state: ivLeaf?.state, attempts: ivLeaf?.attempts, kept: ivLeaf?.pendingReply !== undefined },
+					},
+					"an invalid paid answer ends the job once, is not retried or reused, and its receipt is recorded",
+				).toEqual({
+					failures: ["admission_invalid_output"],
+					requests: { summaries: 1, admissions: 1 },
+					invalidAnswers: 1,
+					receipts: { recorded: 1, pending: 0 },
+					held: undefined,
+					leaf: { state: "failed", attempts: 1, kept: false },
+				});
+				expect(
+					await world.disposeSessionInBody(ivOwner.session),
+					"the invalid-answer session disposes cleanly",
+				).toBeUndefined();
+				trace.mark("root", "icm.invalid-output");
 			}
 		},
 	);
