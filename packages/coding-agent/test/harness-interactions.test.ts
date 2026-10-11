@@ -45,6 +45,7 @@ import {
 	TRANSCRIPT_SUMMARY_SCHEMA_VERSION,
 	TRANSCRIPT_SUMMARY_TARGET_BYTES,
 } from "../src/core/memory/transcript-memory-contracts.ts";
+import { TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION } from "../src/core/memory/transcript-summary-admission.ts";
 import { TRANSCRIPT_LEAF_MAX_SOURCE_BYTES } from "../src/core/memory/transcript-summary-node.ts";
 import { TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS } from "../src/core/memory/transcript-summary-scheduler.ts";
 import type { ObjectiveRoute } from "../src/core/objective-execution/objective-route.ts";
@@ -907,6 +908,7 @@ interface IcmStoredJob {
 	readonly state: string;
 	readonly attempts: number;
 	readonly level: number;
+	readonly sessionId: string;
 	readonly nodeId?: string;
 	readonly spanRange: { readonly fromIndex: number; readonly toIndexExclusive: number };
 	readonly pendingReply?: { readonly textDigest: string };
@@ -12073,6 +12075,173 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 			expect(await world.disposeSessionInBody(pOwner.session), "the O13b owner disposes cleanly").toBeUndefined();
 			trace.mark("root", "icm.o13b-publication");
 
+			// O13R (the store revision moves under the retry of a claim that reused its paid reply). The first publication fails
+			// as in O13b, keeping the reply and its acceptance. In the moved variant the store then moves twice under the retry:
+			// once before its first publish (stale), and once between the mirror's reload and the second publish (stale again).
+			// Each move is an external manifest write with the same content and a higher revision (`world.io.seed`), placed at a
+			// reached boundary: the reload's first node read, which runs inside its locked load, and the next store lock after
+			// that reload. The claim ends "the revision moved twice" and returns its own attempt (returnsClaim): the job is
+			// retried with the attempt count it had before the failed publish, and no summarizer or evaluator call is made. The
+			// control makes no moves, so its retry publishes on the first try. System One on only: a kept reply exists only for a
+			// model summary, and an exact copy keeps none to return.
+			if (world.systemOne.enabled) {
+				for (const rvVariant of ["moved", "control"] as const) {
+					const rvAgentDir = `${world.agentDir}-icm-revision-${rvVariant}`;
+					await seedIcmPastSession(world, rvAgentDir);
+					const rvStore = icmStore(rvAgentDir);
+					const rvNodes = `${resolve(rvStore.root, "nodes")}${sep}`;
+					const rvFault = `rv-${rvVariant}-node-write`;
+					world.io.failNext({
+						name: rvFault,
+						kind: "write",
+						matches: (operation, data) =>
+							operation.path.startsWith(rvNodes) && String(data ?? "").includes(ICM_LEAF_SUMMARY),
+					});
+					world.provider.enqueue(cTrack, text(`rv-${rvVariant}-leaf-summary`, ICM_LEAF_SUMMARY), {
+						name: `rv-${rvVariant}-parent-summary`,
+						check: (request) => {
+							if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+								throw new Error(`the O13R ${rvVariant} parent does not merge the leaf`);
+						},
+						reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+					});
+					world.systemOne.enterPhase(`rv-${rvVariant}-admission`, cAdmission);
+					const rvPaidBefore = {
+						summaries: icmTrackRequests(world, cTrack),
+						admissions: icmAdmissionRequests(world),
+					};
+					const rvPaid = () => ({
+						summaries: icmTrackRequests(world, cTrack) - rvPaidBefore.summaries,
+						admissions: icmAdmissionRequests(world) - rvPaidBefore.admissions,
+					});
+					const rvOwner = await world.createRootSession("root", {
+						agentDir: rvAgentDir,
+						settings: icmHierarchySettings(cTrack),
+					});
+					const rvJob = () => icmJobAt(cLive, rvStore, "leaf", 8);
+					await withDeadline(
+						trace,
+						`O13R ${rvVariant} publication failed into a retry`,
+						world.io.waitForMutation(() => rvJob()?.state === "retry_wait"),
+					);
+					expect(
+						{
+							fault: world.io.consumedFaults.includes(rvFault),
+							job: { state: rvJob()?.state, attempts: rvJob()?.attempts, reason: rvJob()?.lastError?.reason },
+							paid: rvPaid(),
+						},
+						"the first publication failed into a retry with its paid reply and acceptance kept",
+					).toEqual({
+						fault: true,
+						job: { state: "retry_wait", attempts: 1, reason: "store_unavailable" },
+						paid: { summaries: 1, admissions: 1 },
+					});
+
+					// Quiescent before the moves: the exact-copy leaf at span 0 is accepted (its publication is the store's only other write
+					// here, and its node is the one a reload reads) and no claim is running, so the start revision is the mirror's.
+					await withDeadline(
+						trace,
+						`O13R ${rvVariant} leaf at span 0 accepted and idle`,
+						world.io.waitForMutation(
+							() =>
+								icmAcceptedAt(cLive, rvStore, 0, 0) !== undefined &&
+								(icmHierarchy(rvOwner.session).counts.running ?? 0) === 0,
+						),
+					);
+					const rvStart = icmStoredManifest(cLive, rvStore)?.revision;
+					if (rvStart === undefined) throw new Error(`O13R ${rvVariant}: the store has no manifest`);
+					const rvMove = (revision: number) => {
+						const manifest = icmStoredManifest(cLive, rvStore);
+						if (manifest === undefined) throw new Error(`O13R ${rvVariant}: the manifest is gone`);
+						world.io.seed(rvStore.manifest, `${JSON.stringify({ ...manifest, revision })}\n`);
+					};
+					// The first move lands before the retry's first publish, which therefore sees a revision the mirror lacks.
+					if (rvVariant === "moved") rvMove(rvStart + 1);
+					const rvReloadRead =
+						rvVariant === "moved"
+							? world.io.holdNext({
+									name: "rv-reload-node-read",
+									kind: "readFile",
+									matches: (operation) => operation.path.startsWith(rvNodes),
+								})
+							: undefined;
+					expect(
+						world.historyClock.advance(12_000),
+						"the first retry is due within its 10-12 s backoff",
+					).toBeGreaterThan(0);
+					if (rvReloadRead !== undefined) {
+						const reloadRead = await withDeadline(
+							trace,
+							"O13R reload reached its node read",
+							rvReloadRead.reached,
+						);
+						expect(reloadRead.path.startsWith(rvNodes), "the reload's held read is a node read").toBe(true);
+						// Armed before the reload is released, so the next store lock taken after it is the one held here.
+						const rvNextLock = world.io.holdNext({
+							name: "rv-next-store-lock",
+							kind: "mkdir",
+							matches: (operation) => operation.path === rvStore.lock,
+						});
+						rvReloadRead.release();
+						const nextLock = await withDeadline(trace, "O13R next store lock reached", rvNextLock.reached);
+						expect(nextLock.path, "the lock after the reload is the store's writer lock").toBe(rvStore.lock);
+						// The second move lands after the reload read the manifest and before the second publish reads it.
+						rvMove(rvStart + 2);
+						rvNextLock.release();
+						await withDeadline(
+							trace,
+							"O13R revision moved twice settled as a retry",
+							world.io.waitForMutation(
+								() => rvJob()?.lastError?.message === "the revision moved twice (stale_revision)",
+							),
+						);
+						expect(
+							{
+								job: { state: rvJob()?.state, attempts: rvJob()?.attempts, reason: rvJob()?.lastError?.reason },
+								paid: rvPaid(),
+							},
+							"the claim that reused its paid reply returns its attempt when the revision moved twice, with no paid call",
+						).toEqual({
+							job: { state: "retry_wait", attempts: 1, reason: "store_revision_moved" },
+							paid: { summaries: 1, admissions: 1 },
+						});
+						expect(
+							world.historyClock.advance(24_000),
+							"the second retry is due within its 20-24 s backoff",
+						).toBeGreaterThan(0);
+					}
+					await withDeadline(
+						trace,
+						`O13R ${rvVariant} retry published`,
+						world.io.waitForMutation(
+							() =>
+								rvJob()?.state === "ready" &&
+								Object.keys(icmStoredManifest(cLive, rvStore)?.acceptedNodes ?? {}).length === 3,
+						),
+						60_000,
+					);
+					const rvDone = icmHierarchy(rvOwner.session);
+					expect(
+						{
+							job: { state: rvJob()?.state, attempts: rvJob()?.attempts },
+							paid: rvPaid(),
+							reused: rvDone.admission?.reused,
+						},
+						"the retry publishes the kept reply under its kept acceptance, paying nothing twice",
+					).toEqual({
+						job: { state: "ready", attempts: 2 },
+						paid: { summaries: 2, admissions: 2 },
+						// Each claim that published from the kept acceptance counts one reuse: the moved variant has two such claims.
+						reused: rvVariant === "moved" ? 2 : 1,
+					});
+					expect(
+						await world.disposeSessionInBody(rvOwner.session),
+						`the O13R ${rvVariant} owner disposes cleanly`,
+					).toBeUndefined();
+					trace.mark("root", `icm.o13r-${rvVariant}`);
+				}
+			}
+
 			// D1-A (one row for the design's D1-A and O13a): a claimed attempt reaches a provider only after a save of this run
 			// acknowledged it. The first save that holds a running claim fails through the real write; the claim is held for
 			// persistence with that cause, and the next job-list save (the retry, or the next claim's save) is held at its
@@ -12544,6 +12713,250 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				).toBeUndefined();
 				trace.mark("root", "icm.receipt-hold");
 
+				// C-replaced (a kept verdict replaced by a judgment under another contract revision): a kept verdict is reused only for
+				// the contract it judged. Between two sessions the stored verdict is prepared for another revision (valid external
+				// preparation: the job stays live with its kept reply, its owner and its receipts). The reopened leaf therefore pays a
+				// second judgment, whose own usage write also fails, and the replacement moves the old verdict's receipt to the owed
+				// queue instead of dropping it. A third session records both receipts and the parent's, each exactly once, and buys
+				// nothing for the leaf again. System One on only: a kept verdict belongs to a model leaf.
+				if (world.systemOne.enabled) {
+					const cxAgentDir = `${world.agentDir}-icm-contract`;
+					await seedIcmPastSession(world, cxAgentDir);
+					const cxStore = icmStore(cxAgentDir);
+					const cxLeafJudgments = {
+						summary_supported: cAdmission.summary_supported,
+						owner_constraints_preserved: cAdmission.owner_constraints_preserved,
+					};
+					const cxBefore = { summaries: icmTrackRequests(world, cTrack), admissions: icmAdmissionRequests(world) };
+					const cxPaid = () => ({
+						summaries: icmTrackRequests(world, cTrack) - cxBefore.summaries,
+						admissions: icmAdmissionRequests(world) - cxBefore.admissions,
+					});
+					type CxReceipt = { reportId?: string; status: string };
+					type CxVerdict = { ownerSessionId: string; contractVersion: number; receipts: CxReceipt[] };
+					// The leaf's kept verdict as the job list holds it (undefined once the leaf no longer keeps one).
+					const cxVerdict = (): CxVerdict | undefined =>
+						(
+							icmStoredJobs(icmLiveStore(world), cxStore) as (IcmStoredJob & {
+								readonly pendingVerdict?: CxVerdict;
+							})[]
+						).find((job) => job.kind === "leaf" && job.spanRange.fromIndex === 8)?.pendingVerdict;
+					// The owed queue as the file holds it, and the usage rows of the owner session file.
+					const cxOwed = (): { ownerSessionId: string; receipt: CxReceipt }[] => {
+						const raw = world.io.peekFile(cxStore.owed);
+						return raw === undefined
+							? []
+							: (JSON.parse(raw) as { entries: { ownerSessionId: string; receipt: CxReceipt }[] }).entries;
+					};
+					const cxRows = (file: string): (string | undefined)[] =>
+						(world.io.fileEntries().get(file) ?? "")
+							.split("\n")
+							.filter((line) => line.includes('"customType":"semantic_usage"'))
+							.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId);
+					const cxReceiptFault = (name: string) =>
+						world.io.failNext({
+							name,
+							kind: "append",
+							code: "EIO",
+							matches: (operation, data) =>
+								operation.path.endsWith(".jsonl") &&
+								(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
+						});
+
+					// First session: the leaf's paid answer is valid, its usage write fails, and the leaf is held with its verdict kept.
+					world.provider.enqueue(cTrack, text("cx-leaf-summary", ICM_LEAF_SUMMARY));
+					const cxFirst = await world.createRootSession("root", {
+						agentDir: cxAgentDir,
+						sessionManager: world.createSessionManager(cxAgentDir),
+						settings: { memorySystem: undefined },
+					});
+					world.provider.enqueue("root", {
+						name: "cx-owner-turn",
+						reply: { content: [{ type: "text", text: "Noted." }] },
+					});
+					world.systemOne.enterPhase("cx-owner-turn", {});
+					await withDeadline(trace, "C-replaced owner turn", cxFirst.session.prompt("Say hello."));
+					const cxOwnerId = cxFirst.sessionManager.getSessionId();
+					world.systemOne.enterPhase("cx-first", cxLeafJudgments);
+					cxReceiptFault("cx-first-receipt-append");
+					cxFirst.settingsManager.applyOverrides({
+						contextPolicy: { memory: { history: icmHierarchySettings(cTrack).contextPolicy?.memory?.history } },
+					});
+					await withDeadline(
+						trace,
+						"C-replaced first leaf held for its usage receipt",
+						world.io.waitForMutation(
+							() =>
+								cxFirst.session.getTranscriptHistoryStatus().hierarchy?.admission?.heldByKind?.usage_receipt ===
+								1,
+						),
+					);
+					await withDeadline(
+						trace,
+						"C-replaced first verdict durable",
+						world.io.waitForMutation(
+							() => cxVerdict()?.receipts.some((receipt) => receipt.status === "unrecorded") === true,
+						),
+					);
+					const cxFirstVerdict = cxVerdict();
+					const cxOldReceipt = cxFirstVerdict?.receipts[0]?.reportId;
+					const cxFirstFile = cxFirst.sessionManager.getSessionFile();
+					if (cxFirstFile === undefined) throw new Error("C-replaced: the owner session has no file");
+					expect(
+						{
+							paid: cxPaid(),
+							held: icmHierarchy(cxFirst.session).admission?.heldByKind,
+							verdict: {
+								owner: cxFirstVerdict?.ownerSessionId === cxOwnerId,
+								contract: cxFirstVerdict?.contractVersion,
+								receipts: cxFirstVerdict?.receipts.map((receipt) => receipt.status),
+							},
+							owed: cxOwed(),
+							rows: cxRows(cxFirstFile).length,
+						},
+						"a valid answer whose usage write failed is kept under the current contract, with no owed receipt and no usage row",
+					).toEqual({
+						paid: { summaries: 1, admissions: 1 },
+						held: { usage_receipt: 1 },
+						verdict: {
+							owner: true,
+							contract: TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
+							receipts: ["unrecorded"],
+						},
+						owed: [],
+						rows: 0,
+					});
+					expect(typeof cxOldReceipt, "the kept verdict names its receipt by a string id").toBe("string");
+					expect(
+						await world.disposeSessionInBody(cxFirst.session),
+						"the first C-replaced owner disposes",
+					).toBeUndefined();
+
+					// Valid external preparation between the sessions: the kept verdict is stored under another contract revision. The
+					// record stays a live job with its reply, owner and receipt; the job-list parser takes any revision of 1 or more.
+					const cxRaw = JSON.parse(world.io.peekFile(cxStore.jobs) ?? "{}") as {
+						schemaVersion: number;
+						jobs: {
+							kind: string;
+							spanRange: { fromIndex: number };
+							pendingVerdict?: { contractVersion: number };
+						}[];
+					};
+					const cxStored = cxRaw.jobs.find((job) => job.kind === "leaf" && job.spanRange.fromIndex === 8);
+					if (cxStored?.pendingVerdict === undefined)
+						throw new Error("C-replaced: the held leaf carries no kept verdict");
+					cxStored.pendingVerdict.contractVersion = TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION + 1;
+					world.io.seed(cxStore.jobs, `${JSON.stringify(cxRaw)}\n`);
+
+					// Second session (a fresh manager on the same file): the stored verdict no longer matches the contract, so the leaf
+					// pays a second judgment; its usage write fails on the fresh manager's first write. The replacement releases the old
+					// verdict's receipt to the owed queue, and the new verdict holds its own receipt.
+					world.systemOne.enterPhase("cx-second", cxLeafJudgments);
+					cxReceiptFault("cx-second-receipt-append");
+					const cxSecond = await world.createRootSession("root", {
+						agentDir: cxAgentDir,
+						sessionManager: world.openSessionManager(cxFirstFile, cxAgentDir),
+						settings: icmHierarchySettings(cTrack),
+					});
+					await withDeadline(
+						trace,
+						"C-replaced second judgment held for its own usage receipt",
+						world.io.waitForMutation(
+							() =>
+								cxSecond.session.getTranscriptHistoryStatus().hierarchy?.admission?.heldByKind
+									?.usage_receipt === 1 && cxOwed().length === 1,
+						),
+					);
+					const cxSecondVerdict = cxVerdict();
+					const cxNewReceipt = cxSecondVerdict?.receipts[0]?.reportId;
+					expect(
+						{
+							paid: cxPaid(),
+							held: icmHierarchy(cxSecond.session).admission?.heldByKind,
+							owed: cxOwed().map((entry) => ({ owner: entry.ownerSessionId, receipt: entry.receipt.reportId })),
+							verdict: {
+								contract: cxSecondVerdict?.contractVersion,
+								owner: cxSecondVerdict?.ownerSessionId === cxOwnerId,
+								receipts: cxSecondVerdict?.receipts.map((receipt) => ({
+									status: receipt.status,
+									reportId: receipt.reportId,
+								})),
+							},
+							rows: cxRows(cxFirstFile).length,
+						},
+						"the replaced verdict's receipt is owed to the queue, and the new verdict holds its own receipt, with no usage row",
+					).toEqual({
+						paid: { summaries: 1, admissions: 2 },
+						held: { usage_receipt: 1 },
+						owed: [{ owner: cxOwnerId, receipt: cxOldReceipt }],
+						verdict: {
+							contract: TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
+							owner: true,
+							receipts: [{ status: "unrecorded", reportId: cxNewReceipt }],
+						},
+						rows: 0,
+					});
+					expect(cxNewReceipt, "the new judgment's receipt is not the replaced one").not.toBe(cxOldReceipt);
+					expect(
+						await world.disposeSessionInBody(cxSecond.session),
+						"the second C-replaced owner disposes",
+					).toBeUndefined();
+
+					// Third session, no faults: the owed receipt and the kept verdict's receipt are recorded once each, the parent is judged
+					// on its own, and the owed queue is emptied.
+					world.provider.enqueue(cTrack, {
+						name: "cx-parent-summary",
+						check: (request) => {
+							if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+								throw new Error("the replaced-verdict parent does not merge the leaf");
+						},
+						reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+					});
+					world.systemOne.enterPhase("cx-third", cAdmission);
+					const cxThird = await world.createRootSession("root", {
+						agentDir: cxAgentDir,
+						sessionManager: world.openSessionManager(cxFirstFile, cxAgentDir),
+						settings: icmHierarchySettings(cTrack),
+					});
+					await withDeadline(
+						trace,
+						"C-replaced third session records both receipts and builds the parent",
+						world.io.waitForMutation(
+							() =>
+								cxOwed().length === 0 &&
+								cxRows(cxFirstFile).length === 3 &&
+								Object.keys(icmStoredManifest(icmLiveStore(world), cxStore)?.acceptedNodes ?? {}).length === 3,
+						),
+						60_000,
+					);
+					const cxRecorded = cxRows(cxFirstFile);
+					expect(
+						{
+							paid: cxPaid(),
+							rows: { count: cxRecorded.length, unique: new Set(cxRecorded).size },
+							oldRecorded: cxRecorded.includes(cxOldReceipt),
+							newRecorded: cxRecorded.includes(cxNewReceipt),
+							owed: cxOwed(),
+							receiptsPending: icmHierarchy(cxThird.session).admission?.work.receiptsPending,
+							held: icmHierarchy(cxThird.session).admission?.heldByKind,
+						},
+						"each receipt is recorded once after the reopen, the leaf is not bought again, and the owed queue is empty",
+					).toEqual({
+						paid: { summaries: 2, admissions: 3 },
+						rows: { count: 3, unique: 3 },
+						oldRecorded: true,
+						newRecorded: true,
+						owed: [],
+						receiptsPending: 0,
+						held: undefined,
+					});
+					expect(
+						await world.disposeSessionInBody(cxThird.session),
+						"the third C-replaced owner disposes cleanly",
+					).toBeUndefined();
+					trace.mark("root", "icm.replaced-verdict");
+				}
+
 				for (const roVariant of ["retry", "interrupt", "crash", "shutdown"] as const) {
 					// R-owed (receipts a paid answer still owes after its job ended): the leaf is held for its usage receipt as in
 					// R-receipt, then its session is forgotten, which ends the job and hands the owed receipt to the owed queue. The
@@ -12825,6 +13238,13 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							return text !== undefined && (JSON.parse(text) as { entries: unknown[] }).entries.length === 1;
 						}),
 					);
+					// The owed entry as the store holds it before the reopen: its receipt id and the session that owes it.
+					const raQueued = (
+						JSON.parse(world.io.peekFile(raStore.owed) ?? "{}") as {
+							entries: { ownerSessionId: string; receipt: { reportId?: string } }[];
+						}
+					).entries;
+					const raOwnerId = raFirst.sessionManager.getSessionId();
 					const raOwnerFile = raFirst.sessionManager.getSessionFile();
 					if (raOwnerFile === undefined) throw new Error("R-abort: the owner session has no file");
 					expect(
@@ -12871,6 +13291,16 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						// "carried" paid for two requests (the paid 503 and the held retry); neither is bought again after the restart.
 						requests: { summaries: 1, admissions: raVariant === "answered" ? 1 : 2 },
 					});
+					// The usage row recorded after the restart is the receipt the owed file held before it: the same id, owed by the owner session.
+					const raQueuedIds = raQueued.map((entry) => entry.receipt.reportId);
+					expect(raQueuedIds, "the owed entry names its receipt by a string id").toEqual([expect.any(String)]);
+					expect(raReports(), "the recorded usage row is the receipt queued before the reopen").toEqual(
+						raQueuedIds,
+					);
+					expect(
+						raQueued.map((entry) => entry.ownerSessionId),
+						"the owed receipt belongs to the owner session that paid for it",
+					).toEqual([raOwnerId]);
 					expect(
 						await world.disposeSessionInBody(raSecond.session),
 						"the R-abort reopened owner disposes cleanly",
@@ -13241,6 +13671,230 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					proof: 0,
 				});
 				trace.mark("root", "icm.readmission-outage-cancel");
+
+				// N-cancel (a neighbour session in the store the forget acts on): forgetting the target leaves the neighbour's live
+				// job, its proof records and its owed entries value-identical. The neighbour's leaf fails on an invalid evaluator
+				// answer, so its identity is spent (a `spent` record); its parent waits on that child, parked, holding one reserved
+				// identity with no attempt spent. The target is then held at the evaluator as in W8 cancel and forgotten. The
+				// neighbour is read from the forget's own jobs save and again from a restart's save, and the target's job and proof
+				// are gone from both.
+				const nbAgentDir = `${world.agentDir}-icm-neighbour`;
+				const nbStore = icmStore(nbAgentDir);
+				const nbSeedSession = async (label: string) => {
+					const seed = await seedIcmPastSession(world, nbAgentDir);
+					world.provider.enqueue(cTrack, text(`nb-${label}-leaf`, ICM_LEAF_SUMMARY), {
+						name: `nb-${label}-parent`,
+						check: (request) => {
+							if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+								throw new Error(`N-cancel ${label}: the parent does not merge its leaf`);
+						},
+						reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+					});
+					return seed;
+				};
+				const nbNeighbour = await nbSeedSession("neighbour");
+				world.systemOne.enterPhase("nb-build-neighbour", cAdmission);
+				await buildIcmHierarchy(
+					world,
+					nbAgentDir,
+					icmHierarchySettings(cTrack),
+					(hierarchy) => hierarchy.acceptedNodes === 3,
+				);
+				const nbTarget = await nbSeedSession("target");
+				world.systemOne.enterPhase("nb-build-target", cAdmission);
+				await buildIcmHierarchy(
+					world,
+					nbAgentDir,
+					icmHierarchySettings(cTrack),
+					(hierarchy) => hierarchy.acceptedNodes === 6,
+				);
+				// The accepted node of a session at a level (and span start, for the leaves): the store lists both sessions' nodes.
+				const nbNode = (sessionId: string, level: number, fromIndex?: number): string => {
+					const id = Object.entries(icmStoredManifest(icmLiveStore(world), nbStore)?.acceptedNodes ?? {}).find(
+						([, entry]) =>
+							entry.sessionId === sessionId &&
+							entry.level === level &&
+							(fromIndex === undefined || entry.fromIndex === fromIndex),
+					)?.[0];
+					if (id === undefined)
+						throw new Error(`N-cancel: no accepted node at level ${level} of session ${sessionId}`);
+					return id;
+				};
+				// Strips the admission of one model summary (valid external preparation, as R-readmit and W8 do).
+				const nbStrip = (nodeId: string) => {
+					const nodePath = resolve(nbStore.root, "nodes", `${nodeId}.json`);
+					const node = JSON.parse(world.io.peekFile(nodePath) ?? "{}") as {
+						quality?: string;
+						admission?: unknown;
+					};
+					if (node.quality !== "model_summary" || node.admission === undefined)
+						throw new Error(`N-cancel: node ${nodeId.slice(0, 12)} carries no admission to strip`);
+					node.admission = undefined;
+					world.io.seed(nodePath, `${JSON.stringify(node)}\n`);
+				};
+				// The neighbour's and the target's persisted state: jobs by id and attempts, and proof records by job key.
+				const nbStateOf = (
+					jobs: readonly IcmStoredJob[],
+					ledger: ReturnType<typeof icmStoredLedger>,
+					sessionId: string,
+				) => ({
+					jobs: jobs
+						.filter((job) => job.sessionId === sessionId)
+						.map((job) => ({ id: job.id, attempts: job.attempts, state: job.state })),
+					proof: Object.entries(ledger)
+						.filter(([, record]) => (record as { sessionId?: string }).sessionId === sessionId)
+						.map(([key, record]) => ({ key, record })),
+				});
+				const nbLiveState = (sessionId: string) =>
+					nbStateOf(
+						icmStoredJobs(icmLiveStore(world), nbStore),
+						icmStoredLedger(icmLiveStore(world), nbStore),
+						sessionId,
+					);
+				const nbOwed = (): unknown[] => {
+					const raw = world.io.peekFile(nbStore.owed);
+					return raw === undefined ? [] : (JSON.parse(raw) as { entries: unknown[] }).entries;
+				};
+
+				const nbNeighbourLeaf = nbNode(nbNeighbour.sessionId, 0, 8);
+				const nbNeighbourParent = nbNode(nbNeighbour.sessionId, 1);
+				nbStrip(nbNeighbourLeaf);
+				nbStrip(nbNeighbourParent);
+				world.systemOne.enterPhase(
+					"nb-invalid",
+					{
+						summary_supported: cAdmission.summary_supported,
+						owner_constraints_preserved: cAdmission.owner_constraints_preserved,
+					},
+					{ invalidAnswer: true },
+				);
+				const nbOwnerB = await world.createRootSession("root", {
+					agentDir: nbAgentDir,
+					settings: icmHierarchySettings(cTrack),
+				});
+				await withDeadline(
+					trace,
+					"N-cancel: the neighbour's leaf failed on its invalid answer and its parent waits on it",
+					world.io.waitForMutation(() => {
+						const hierarchy = nbOwnerB.session.getTranscriptHistoryStatus().hierarchy;
+						return (
+							(hierarchy?.failures ?? []).some((failure) => failure.reason === "admission_invalid_output") &&
+							hierarchy?.admission?.readmission.waitingFor.child_not_approved === 1
+						);
+					}),
+					60_000,
+				);
+				expect(
+					await world.disposeSessionInBody(nbOwnerB.session),
+					"the neighbour's invalid-answer owner disposes cleanly",
+				).toBeUndefined();
+				// Strip only the target's leaf now: the target is judged by the held run below, not by the invalid run above.
+				nbStrip(nbNode(nbTarget.sessionId, 0, 8));
+
+				const nbHeld = createBarrier();
+				const nbAdmitted = createBarrier();
+				world.systemOne.enterPhase("nb-held", w8Judgments, {
+					gate: nbHeld.promise,
+					onAdmit: () => nbAdmitted.release(),
+				});
+				const nbOwnerD = await world.createRootSession("root", {
+					agentDir: nbAgentDir,
+					settings: icmHierarchySettings(cTrack),
+				});
+				let nbBaseline: { neighbour: ReturnType<typeof nbStateOf>; owed: unknown[] } | undefined;
+				try {
+					await withDeadline(trace, "N-cancel: the target's judgment held at the evaluator", nbAdmitted.promise);
+					// The baseline the forget is judged against: the neighbour's live job and proof, read from the store before the forget.
+					nbBaseline = { neighbour: nbLiveState(nbNeighbour.sessionId), owed: nbOwed() };
+					const nbTargetBefore = nbLiveState(nbTarget.sessionId);
+					expect(
+						{
+							neighbour: {
+								jobs: nbBaseline.neighbour.jobs.map((job) => job.attempts),
+								proof: nbBaseline.neighbour.proof
+									.map((entry) => (entry.record as { kind: string }).kind)
+									.sort(),
+							},
+							target: {
+								jobs: nbTargetBefore.jobs.map((job) => job.attempts),
+								proof: nbTargetBefore.proof.map((entry) => (entry.record as { kind: string }).kind),
+							},
+							owed: nbBaseline.owed,
+						},
+						"before the forget the neighbour holds a parked job and a spent identity, and the target holds its one judged attempt",
+					).toEqual({
+						neighbour: { jobs: [0], proof: ["reserved", "spent"] },
+						target: { jobs: [1], proof: ["reserved"] },
+						owed: [],
+					});
+					const nbForgetSave = icmObserveNextJobsSave(world, nbStore, "nb-cancel-forget-save");
+					const nbForgot = await withDeadline(
+						trace,
+						"N-cancel forget of the target while its judgment is held",
+						nbOwnerD.session.forgetHistorySession(nbTarget.sessionId),
+					);
+					expect(
+						nbForgot.ok,
+						`the target's forget is accepted while its judgment is held: ${nbForgot.message}`,
+					).toBe(true);
+					await withDeadline(trace, "N-cancel aborted judgment settled", world.systemOne.joinInFlight());
+					await withDeadline(
+						trace,
+						"N-cancel forget save",
+						world.io.waitForMutation(() => nbForgetSave() !== undefined),
+					);
+					const nbSaved = nbForgetSave();
+					expect(
+						{
+							neighbour: nbStateOf(nbSaved?.jobs ?? [], nbSaved?.ledger ?? {}, nbNeighbour.sessionId),
+							target: nbStateOf(nbSaved?.jobs ?? [], nbSaved?.ledger ?? {}, nbTarget.sessionId),
+							owed: nbOwed(),
+						},
+						"the target's forget save leaves the neighbour's job, proof and owed entries unchanged and writes none of the target's",
+					).toEqual({
+						neighbour: nbBaseline.neighbour,
+						target: { jobs: [], proof: [] },
+						owed: [],
+					});
+				} finally {
+					nbHeld.release();
+				}
+				if (nbBaseline === undefined) throw new Error("N-cancel: no baseline was taken before the forget");
+				expect(
+					await world.disposeSessionInBody(nbOwnerD.session),
+					"the neighbour's cancel owner disposes cleanly",
+				).toBeUndefined();
+
+				// A restart's own save, observed before its dispose, is read against the same baseline.
+				const nbRestartSave = icmObserveNextJobsSave(world, nbStore, "nb-cancel-restart-save");
+				world.systemOne.enterPhase("nb-cancel-restart", {});
+				const nbRestart = await world.createRootSession("root", {
+					agentDir: nbAgentDir,
+					settings: icmHierarchySettings(cTrack),
+				});
+				await withDeadline(
+					trace,
+					"N-cancel restart save",
+					world.io.waitForMutation(() => nbRestartSave() !== undefined),
+				);
+				const nbRestarted = nbRestartSave();
+				expect(
+					{
+						neighbour: nbStateOf(nbRestarted?.jobs ?? [], nbRestarted?.ledger ?? {}, nbNeighbour.sessionId),
+						target: nbStateOf(nbRestarted?.jobs ?? [], nbRestarted?.ledger ?? {}, nbTarget.sessionId),
+						owed: nbOwed(),
+					},
+					"after a restart's save the neighbour is still value-identical to the baseline and the target is still absent",
+				).toEqual({
+					neighbour: nbBaseline.neighbour,
+					target: { jobs: [], proof: [] },
+					owed: [],
+				});
+				expect(
+					await world.disposeSessionInBody(nbRestart.session),
+					"the neighbour's restart owner disposes cleanly",
+				).toBeUndefined();
+				trace.mark("root", "icm.neighbour-cancel");
 
 				// R-egress: the admission egress switch is read live. With it off the model leaf is held before any call (no
 				// summarizer request, no evaluator request); switching it on in the running session releases the hold and the

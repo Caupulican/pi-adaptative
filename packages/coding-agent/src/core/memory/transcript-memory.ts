@@ -3841,7 +3841,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			result = await port.admit(request, signal);
 		} catch (error) {
 			// An aborted call that had already been answered by some transport attempt still owes those usage receipts.
-			this.settleCarriedReceipts(port, error);
+			this.settleCarriedReceipts(port, error, job.id);
 			throw error;
 		}
 		// The unit of work is counted as it happened: one semantic request, one transport attempt per paid response.
@@ -3868,13 +3868,27 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		return { result: { ...result, receipts }, reused: false };
 	}
 
-	/** The receipts a failed call carried are recorded now; the ones that cannot be written go to the owed queue. Never dropped. */
-	private settleCarriedReceipts(port: TranscriptSummaryAdmissionPort, error: unknown): void {
+	/**
+	 * The receipts a failed (aborted) call carried are recorded now; the ones that cannot be written go to the owed queue.
+	 * Never dropped. A call that carried paid receipts was paid work of the job, counted once here like an answered one; an
+	 * abort that carried none is not counted (nothing was paid), and a job that already left the list has no counters.
+	 */
+	private settleCarriedReceipts(port: TranscriptSummaryAdmissionPort, error: unknown, jobId: string): void {
 		const carried = receiptsOf(error);
 		const scheduler = this.scheduler;
 		if (carried.length === 0 || !scheduler) return;
 		const owner = this.ports.ownerSessionId();
-		const unrecorded = this.settleReceipts(port, carried, owner).filter((receipt) => receipt.status === "unrecorded");
+		const settled = this.settleReceipts(port, carried, owner);
+		if (scheduler.get(jobId) !== undefined) {
+			scheduler.addWork(jobId, {
+				semanticRequests: 1,
+				transportAttempts: Math.max(1, settled.length),
+				receiptsRecorded: countRecorded(settled),
+			});
+			// The counters are made durable with the next save, also when every receipt was recorded.
+			this.markJobsDirty();
+		}
+		const unrecorded = settled.filter((receipt) => receipt.status === "unrecorded");
 		if (unrecorded.length === 0) return;
 		scheduler.returnReleasedReceipts(unrecorded.map((receipt) => ({ ownerSessionId: owner, receipt })));
 		this.markJobsDirty();
@@ -4425,7 +4439,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const reason = result.status === "invalid" ? result.reason : `the revision moved twice (${result.status})`;
 		const failed = scheduler.failJob(
 			job.id,
-			{ kind: result.status === "invalid" ? "malformed" : "transient", message: reason },
+			result.status === "invalid"
+				? { kind: "malformed", message: reason }
+				: { kind: "transient", reason: "store_revision_moved", message: reason },
 			this.ports.now(),
 			{ returnClaim: this.returnsClaim(job, paidCall) },
 		);

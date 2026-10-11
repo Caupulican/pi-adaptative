@@ -204,14 +204,20 @@ export class SystemOneJevAdapter implements JevAdapter {
 				key.length >= 6 &&
 				(serializedPayload.includes(key) || serializedPayload.includes(JSON.stringify(key).slice(1, -1)))
 			) {
-				throw new Error(
+				// A refusal of this exact input (nothing was sent): typed, so no caller reads it as an outage to retry.
+				throw new JevAdapterFailure(
+					"invalid_request",
 					"TypeSafe System One detected user API key in review payload; outgoing request blocked to prevent credential leakage (R-032)",
+					impact,
 				);
 			}
 		}
 		if (containsCredential(serializedPayload, userKeys)) {
-			throw new Error(
+			// A refusal of this exact input (nothing was sent): typed, so no caller reads it as an outage to retry.
+			throw new JevAdapterFailure(
+				"invalid_request",
 				"TypeSafe System One detected sensitive credential in review payload; outgoing request blocked to prevent credential leakage (R-032)",
+				impact,
 			);
 		}
 
