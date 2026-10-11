@@ -7363,6 +7363,9 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				// R13-A: the held build (no admission egress) and the build that finds the spent maximum.
 				/^History summaries: 1 model summary job\(s\) are held: external summary admission egress is not allowed by settings: the evaluator is a remote service and a local summary model does not make it local\. Exact copies and exact history recall are unaffected\.$/,
 				/^History summaries: 1 job\(s\) failed, 0 succeeded \(first cause: attempts_exhausted: The attempt budget is spent: 3 of 3 attempts were started and none completed\.[^\n]*\)\. Exact history recall is unaffected\.$/,
+				// R-receipt: one valid paid answer is kept while its usage receipt cannot be written (exactly one job, the
+				// usage-receipt hold, the session's real write failure as the cause).
+				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: [^\n]*Session persistence state is uncertain after a failed write[^\n]*\. Exact history recall is unaffected\.$/,
 			],
 			files: { [LIMITS_PATH]: "export const MAX_RETRIES = 3;\n" },
 			// A clean checkout on main: a fresh writer worker gets its own worktree lane (dirty checkouts fall back to shared).
