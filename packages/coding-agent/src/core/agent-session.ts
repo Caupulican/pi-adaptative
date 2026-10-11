@@ -4854,10 +4854,7 @@ export class AgentSession {
 		});
 		this._decisionLedger = undefined;
 		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
-		// Before the listeners are dropped, so the handoff warning it may emit still reaches the host.
-		safely(() => this._semanticUsage.dispose());
 		safely(() => this._disconnectFromAgent());
-		this._eventListeners = [];
 		// Ordered, not parallel, and that ordering is the point. The lifecycle abort unwinds any in-flight
 		// reflection turn; awaiting it here means its `agent_end` — and the memory turn-sync that boundary
 		// schedules — have both happened BEFORE `_memory.shutdown()` captures the lifecycle tail it
@@ -4869,9 +4866,16 @@ export class AgentSession {
 		// abort is a no-op, the settle then waits out a full provider turn, and it executes against
 		// infrastructure this method has already torn down.
 		track(async () => {
-			this._reflectionTurnLifecycle.abort();
-			await this.settleReflectionTurn();
-			await this._memory.shutdown();
+			try {
+				this._reflectionTurnLifecycle.abort();
+				await this.settleReflectionTurn();
+				await this._memory.shutdown();
+			} finally {
+				// After memory: a history summary still in flight records its spend through this owner. Its handoff is emitted while
+				// the listeners are still attached, so it reaches the host; they are dropped right after, even when memory failed.
+				safely(() => this._semanticUsage.dispose());
+				this._eventListeners = [];
+			}
 		});
 		track(() => this._toolRecoveryLogger.shutdown());
 		safely(() => cleanupSessionResources(this.sessionId));

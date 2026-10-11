@@ -401,7 +401,9 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	private reconcileQueued = false;
 	private unsubscribePersisted: (() => void) | undefined;
 	private isDisposed = false;
-	private discardDisposition: DiscardDisposition = "none";
+	/** Set when a discard routes this owner's warnings: its handoff then waits for the runtime's file decision (finishDiscard). */
+	private discardRouted = false;
+	private deferredHandoff: ((disposition: DiscardDisposition) => void) | undefined;
 	private overflow: { usage: Usage; reports: number } | undefined;
 
 	constructor(ledger: SemanticUsageLedgerPort) {
@@ -614,10 +616,20 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		this.warnSink = undefined;
 	}
 
-	/** Routes this owner's warnings, its dispose handoff included, to `warn`: the session is being discarded and no subscriber will attach to it. */
-	routeDiscardedWarnings(warn: (message: string) => void, disposition: DiscardDisposition): void {
-		this.discardDisposition = disposition;
+	/**
+	 * Routes this owner's warnings, its dispose handoff included, to `warn`: the session is being discarded and no subscriber will
+	 * attach to it. The handoff waits for the runtime's file decision (finishDiscard), so it names the decided disposition.
+	 */
+	routeDiscardedWarnings(warn: (message: string) => void): void {
+		this.discardRouted = true;
 		this.bindDiagnostics(warn);
+	}
+
+	/** Produces a routed discard's handoff now that the runtime has decided its file. The owner must already be disposed. */
+	emitDiscardHandoff(disposition: DiscardDisposition): void {
+		const handoff = this.deferredHandoff;
+		this.deferredHandoff = undefined;
+		handoff?.(disposition);
 	}
 
 	dispose(): void {
@@ -635,28 +647,32 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		const snapshot = this.snapshot();
 		const total = snapshot.retained + snapshot.unretained + snapshot.confirmedUnremoved + snapshot.unmatched.length;
 		if (total === 0) return;
-		// Kept reports have no canonical row in a file that is never written or is discarded: they are unmatched recovery
-		// evidence at the sidecar path, named last so a long path is the only part a host's length bound can cut.
-		const sessionFile = this.bound.sessionFile;
-		const neverWritten = sessionFile !== undefined && !existsSync(sessionFile);
-		const cause = neverWritten
-			? "session file never written"
-			: this.discardDisposition === "removed"
-				? "session file discarded with the rejected replacement"
-				: this.discardDisposition === "kept"
-					? "session file kept as recovery evidence"
-					: undefined;
-		const evidence = snapshot.retained > 0 && cause !== undefined ? this.boundSlot?.path : undefined;
-		const counts = `${snapshot.unretained} not retained, ${snapshot.confirmedUnremoved} confirmed row(s) with a journal copy left, ${snapshot.unmatched.length} unmatched journal(s)`;
-		if (evidence === undefined) {
-			this.warn(
-				`Usage handoff: ${snapshot.retained} usage report(s) pending in the session journal, ${counts}; none is charged to another session.`,
-			);
-		} else {
-			const lead = `Usage handoff: ${snapshot.retained} usage report(s) cannot be recorded (${cause}); kept as unmatched recovery evidence at `;
-			const tail = `. ${counts}; none is charged to another session.`;
-			this.warn(pathNotice(lead, evidence, tail));
-		}
+		const handoff = (disposition: DiscardDisposition): void => {
+			// Kept reports have no canonical row in a file that is never written or is discarded: they are unmatched recovery
+			// evidence at the sidecar path, named last so a long path is the only part a host's length bound can cut.
+			const sessionFile = this.bound.sessionFile;
+			const neverWritten = sessionFile !== undefined && !existsSync(sessionFile);
+			const cause = neverWritten
+				? "session file never written"
+				: disposition === "removed"
+					? "session file discarded with the rejected replacement"
+					: disposition === "kept"
+						? "session file kept as recovery evidence"
+						: undefined;
+			const evidence = snapshot.retained > 0 && cause !== undefined ? this.boundSlot?.path : undefined;
+			const counts = `${snapshot.unretained} not retained, ${snapshot.confirmedUnremoved} confirmed row(s) with a journal copy left, ${snapshot.unmatched.length} unmatched journal(s)`;
+			if (evidence === undefined) {
+				this.warn(
+					`Usage handoff: ${snapshot.retained} usage report(s) pending in the session journal, ${counts}; none is charged to another session.`,
+				);
+			} else {
+				const lead = `Usage handoff: ${snapshot.retained} usage report(s) cannot be recorded (${cause}); kept as unmatched recovery evidence at `;
+				const tail = `. ${counts}; none is charged to another session.`;
+				this.warn(pathNotice(lead, evidence, tail));
+			}
+		};
+		if (this.discardRouted) this.deferredHandoff = handoff;
+		else handoff("none");
 	}
 
 	private confirmReceipt(receipt: TypeSafeUsageReceipt): SemanticUsageOutcome {
@@ -1351,9 +1367,17 @@ export function sessionSemanticUsageOf(manager: SessionManager): SessionSemantic
 	return delivery;
 }
 
-/** Finishes a discarded session's owner (idempotent): its handoff is produced now, on the route. Never creates an owner. */
+/**
+ * Disposes a discarded session's owner (idempotent): its final reconcile runs here, so the runtime decides the session file
+ * only after it. Never creates an owner.
+ */
 export function disposeDiscardedSessionUsage(manager: SessionManager): void {
 	deliveries.get(manager)?.dispose();
+}
+
+/** Produces a discarded session's routed handoff with the runtime's file decision. Never creates an owner. */
+export function finishDiscardedSessionUsage(manager: SessionManager, disposition: DiscardDisposition): void {
+	deliveries.get(manager)?.emitDiscardHandoff(disposition);
 }
 
 /** Releases a discarded session's owner from the route once its warnings are taken. Never creates an owner. */
@@ -1365,10 +1389,6 @@ export function releaseDiscardedSessionUsage(manager: SessionManager): void {
  * Routes a discarded session's owner warnings (its dispose handoff, and any buffered before the route) to `warn`. Never
  * creates an owner: a session that never had one has no warnings to route, and creating one would recover the journal again.
  */
-export function routeDiscardedSessionUsage(
-	manager: SessionManager,
-	warn: (message: string) => void,
-	disposition: DiscardDisposition,
-): void {
-	deliveries.get(manager)?.routeDiscardedWarnings(warn, disposition);
+export function routeDiscardedSessionUsage(manager: SessionManager, warn: (message: string) => void): void {
+	deliveries.get(manager)?.routeDiscardedWarnings(warn);
 }

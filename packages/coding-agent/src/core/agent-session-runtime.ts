@@ -7,11 +7,11 @@ import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agen
 import {
 	type DiscardDisposition,
 	disposeDiscardedSessionUsage,
+	finishDiscardedSessionUsage,
 	pathNotice,
 	releaseDiscardedSessionUsage,
 	routeDiscardedSessionUsage,
 } from "./cost/semantic-usage-delivery.ts";
-import { classifyCustomEntryPersisted } from "./cost/spawned-usage-receipt.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE, SPAWNED_USAGE_CUSTOM_TYPE } from "./cost/usage-records.ts";
 import type {
 	ExtensionRunner,
@@ -77,19 +77,19 @@ export interface AgentSessionSwitchOptions {
 
 /**
  * A session file a replacement created. When the replacement is discarded its file goes, unless it holds paid usage rows that
- * no other session records (those stay as evidence). `copiedFrom` is the manager a branch copied its rows from (a copied row
- * keeps its source's id), the file a byte copy was made from, or undefined for a new session.
+ * no other session records (those stay as evidence). `copiedEntryIds` are the entry ids the file shares with its source (a branch's
+ * copied rows keep their source's ids; a byte copy's rows are its source's), captured when the copy was made, or undefined for a
+ * new session.
  */
 interface CreatedSession {
 	readonly sessionManager: SessionManager;
-	readonly copiedFrom: SessionManager | { readonly sourceFile: string } | undefined;
+	readonly copiedEntryIds: ReadonlySet<string> | undefined;
 }
 
-/** A discard in progress: decided before the candidate is shut down, carried out once this session is the live one. */
+/** A discard in progress: routed before the candidate is shut down, decided once it is shut down. */
 interface PendingDiscard {
+	readonly sessionManager: SessionManager;
 	readonly created: CreatedSession | undefined;
-	readonly disposition: DiscardDisposition;
-	readonly keptRows: number;
 }
 
 const PAID_ROW_TYPES: ReadonlySet<string> = new Set([SEMANTIC_USAGE_CUSTOM_TYPE, SPAWNED_USAGE_CUSTOM_TYPE]);
@@ -112,28 +112,33 @@ function entryIdsOfFile(path: string): Set<string> {
 	return ids;
 }
 
+/** The entry ids a session manager holds, as a copy of it shares them. */
+function entryIdsOfManager(manager: SessionManager): ReadonlySet<string> {
+	return new Set(manager.getEntries().map((entry) => entry.id));
+}
+
 /**
- * Paid usage rows the created session's file holds that no other session records. Only rows that reached the file count: a
- * buffered row is not in the file, and its retained journal copy (if any) is the disclosure. A branch's copied row keeps its
- * source's id, and a byte copy's rows are its source file's.
+ * Paid usage rows the created session's file holds that no other session records. A row counts when the file holds its line,
+ * whatever the line's content or length: a buffered row is not in the file (its retained journal copy, if any, is the
+ * disclosure), and a row the file shares with its source (`copiedEntryIds`) is recorded by that source. A file that cannot be
+ * read has unknown rows: the caller keeps it.
  */
-function uniquePaidRowCount(created: CreatedSession): number {
-	const { copiedFrom, sessionManager } = created;
-	const sourceIds =
-		copiedFrom === undefined
-			? undefined
-			: copiedFrom instanceof SessionManager
-				? new Set(copiedFrom.getEntries().map((entry) => entry.id))
-				: entryIdsOfFile(copiedFrom.sourceFile);
-	return sessionManager
-		.getEntries()
-		.filter(
-			(entry) =>
-				entry.type === "custom" &&
-				PAID_ROW_TYPES.has(entry.customType) &&
-				!sourceIds?.has(entry.id) &&
-				classifyCustomEntryPersisted(sessionManager, entry.id, entry.customType, () => true) === "persisted",
-		).length;
+function countUniquePaidRows(created: CreatedSession): { readonly rows: number } | { readonly unreadable: unknown } {
+	const { copiedEntryIds, sessionManager } = created;
+	try {
+		const rows = sessionManager
+			.getEntries()
+			.filter(
+				(entry) =>
+					entry.type === "custom" &&
+					PAID_ROW_TYPES.has(entry.customType) &&
+					!copiedEntryIds?.has(entry.id) &&
+					sessionManager.hasEntryInFile(entry.id),
+			).length;
+		return { rows };
+	} catch (error: unknown) {
+		return { unreadable: error };
+	}
 }
 
 /**
@@ -158,16 +163,24 @@ export class CreatedSessionFailure extends Error {
  */
 async function disposeAbandonedSession(failure: CreatedSessionFailure): Promise<unknown> {
 	const handoff: string[] = [];
-	routeDiscardedSessionUsage(failure.sessionManager, (message) => handoff.push(message), "none");
+	routeDiscardedSessionUsage(failure.sessionManager, (message) => handoff.push(message));
+	let disposeError: unknown;
 	try {
 		await failure.session.disposeAndWait();
-	} catch (disposeError: unknown) {
+	} catch (error: unknown) {
+		disposeError = error;
+	}
+	// Taken after the disposal, which is what raises the session's own late warnings; the owner's handoff follows its disposal.
+	handoff.push(...failure.session.takeUndeliveredWarnings());
+	disposeDiscardedSessionUsage(failure.sessionManager);
+	finishDiscardedSessionUsage(failure.sessionManager, "none");
+	releaseDiscardedSessionUsage(failure.sessionManager);
+	if (disposeError !== undefined) {
 		return new AggregateError(
 			[failure.cause, disposeError],
 			"Session creation failed, and the created session could not be disposed.",
 		);
 	}
-	releaseDiscardedSessionUsage(failure.sessionManager);
 	if (handoff.length === 0) return failure.cause;
 	const cause = failure.cause instanceof Error ? failure.cause.message : String(failure.cause);
 	return new Error(`${cause} ${handoff.join(" ")}`, { cause: failure.cause });
@@ -437,39 +450,50 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 	}
 
 	/**
-	 * Routes a discarded candidate's warnings to the surviving session: its owner's handoff as it is produced, and the warnings
-	 * its own lifecycle holds (raised before this route, or during its shutdown) when they are taken.
+	 * Routes a discarded candidate's warnings to the surviving session: its owner's handoff once its file is decided, and the
+	 * warnings its own lifecycle holds (raised before this route, or during its shutdown) when they are taken.
 	 */
 	private beginDiscard(candidate: {
 		session?: AgentSession;
 		sessionManager: SessionManager;
 		created?: CreatedSession;
 	}): PendingDiscard {
-		const keptRows = candidate.created ? uniquePaidRowCount(candidate.created) : 0;
-		const disposition: DiscardDisposition =
-			candidate.created === undefined ? "none" : keptRows > 0 ? "kept" : "removed";
 		if (candidate.session) this.discardedSessions.push(candidate.session);
 		this.discardedManagers.push(candidate.sessionManager);
-		routeDiscardedSessionUsage(
-			candidate.sessionManager,
-			(message) => this.discardedWarnings.push(message),
-			disposition,
-		);
-		return { created: candidate.created, disposition, keptRows };
+		routeDiscardedSessionUsage(candidate.sessionManager, (message) => this.discardedWarnings.push(message));
+		return { sessionManager: candidate.sessionManager, created: candidate.created };
 	}
 
-	/** Carries out a discard's file decision: the file goes, or stays with a notice naming its paid rows. */
+	/**
+	 * Decides a discard's file once the candidate is shut down, so the rows its final pass persisted count as kept. The file goes
+	 * only when it is readable and holds no row that no other session records; otherwise it stays, with a notice naming why.
+	 * The owner's handoff is produced with the same disposition.
+	 */
 	private finishDiscard(discard: PendingDiscard): void {
-		if (discard.created === undefined) return;
-		const path = discard.created.sessionManager.getSessionFile();
-		if (discard.disposition === "removed") this.removeCreatedSessionFile(path);
-		else if (discard.disposition === "kept" && path !== undefined) {
+		const { created, sessionManager } = discard;
+		disposeDiscardedSessionUsage(sessionManager);
+		if (created === undefined) {
+			finishDiscardedSessionUsage(sessionManager, "none");
+			return;
+		}
+		const path = sessionManager.getSessionFile();
+		const counted = countUniquePaidRows(created);
+		const disposition: DiscardDisposition = "unreadable" in counted || counted.rows > 0 ? "kept" : "removed";
+		finishDiscardedSessionUsage(sessionManager, disposition);
+		if (disposition === "removed") this.removeCreatedSessionFile(path);
+		else if (path !== undefined) {
 			this.discardedWarnings.push(
-				pathNotice(
-					`Usage handoff: ${discard.keptRows} paid usage row(s) are recorded in `,
-					path,
-					", a session file of a rejected replacement kept because no other session records them.",
-				),
+				"unreadable" in counted
+					? pathNotice(
+							"Usage handoff: the paid usage rows of ",
+							path,
+							` could not be read back (${counted.unreadable instanceof Error ? counted.unreadable.message : String(counted.unreadable)}), so this rejected replacement's session file is kept as recovery evidence.`,
+						)
+					: pathNotice(
+							`Usage handoff: ${counted.rows} paid usage row(s) are present in `,
+							path,
+							", a session file of a rejected replacement kept because no other session records them.",
+						),
 			);
 		}
 	}
@@ -494,18 +518,18 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		sessionManager: SessionManager,
 		previousSessionFile: string | undefined,
 		withSession: SessionReplacementCommitOptions["withSession"],
-		copiedFrom: SessionManager | undefined,
+		copiedEntryIds: ReadonlySet<string> | undefined,
 	): Promise<void> {
 		const prepared = await this.prepareReplacement(
 			sessionManager,
 			{ type: "session_start", reason: "fork", previousSessionFile },
-			{ sessionManager, copiedFrom },
+			{ sessionManager, copiedEntryIds },
 		);
 		await this.commitReplacement(prepared, {
 			reason: "fork",
 			targetSessionFile: sessionManager.getSessionFile(),
 			withSession,
-			createdSession: { sessionManager, copiedFrom },
+			createdSession: { sessionManager, copiedEntryIds },
 		});
 	}
 
@@ -530,7 +554,6 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				disposalError = failure;
 			}
 		}
-		disposeDiscardedSessionUsage(sessionManager);
 		this.finishDiscard(discard);
 		this.flushDiscardedWarnings();
 		if (disposalError !== undefined) {
@@ -683,14 +706,29 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 						invalidateHost: true,
 					})),
 				);
+			} else if (recoveryError instanceof CreatedSessionFailure) {
+				// The restore factory created the session before it failed: that session is handed back, so it is disposed here.
+				const handedBack = this.beginDiscard({
+					session: recoveryError.session,
+					sessionManager: recoveryError.sessionManager,
+				});
+				try {
+					await this.discardPrepared({ session: recoveryError.session });
+				} catch (disposeError: unknown) {
+					cleanupErrors.push(disposeError);
+				}
+				this.finishDiscard(handedBack);
 			}
 			this.apply(previous);
 			// No restored session survives this failure: the routed warnings travel with the error the host renders.
 			return {
 				error:
 					cleanupErrors.length > 0
-						? new AggregateError([...cleanupErrors, recoveryError], "Session rollback and cleanup failed.")
-						: recoveryError,
+						? new AggregateError(
+								[...cleanupErrors, unwrapCreation(recoveryError)],
+								"Session rollback and cleanup failed.",
+							)
+						: unwrapCreation(recoveryError),
 				undeliveredWarnings: this.takeDiscardedWarnings(),
 			};
 		}
@@ -835,7 +873,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		const prepared = await this.prepareReplacement(
 			sessionManager,
 			{ type: "session_start", reason: "new", previousSessionFile },
-			{ sessionManager, copiedFrom: undefined },
+			{ sessionManager, copiedEntryIds: undefined },
 		);
 		if (options?.setup) {
 			try {
@@ -847,7 +885,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			} catch (error) {
 				await this.discardCreatedSession(
 					sessionManager,
-					{ sessionManager, copiedFrom: undefined },
+					{ sessionManager, copiedEntryIds: undefined },
 					error,
 					prepared.session,
 				);
@@ -858,7 +896,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			reason: "new",
 			targetSessionFile: sessionManager.getSessionFile(),
 			withSession: options?.withSession,
-			createdSession: { sessionManager, copiedFrom: undefined },
+			createdSession: { sessionManager, copiedEntryIds: undefined },
 		});
 		return { cancelled: false };
 	}
@@ -922,27 +960,34 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			if (!forkedSessionPath) {
 				throw new Error("Failed to create forked session");
 			}
-			await this.replaceWithFork(sessionManager, previousSessionFile, options?.withSession, sourceSessionManager);
+			await this.replaceWithFork(
+				sessionManager,
+				previousSessionFile,
+				options?.withSession,
+				entryIdsOfManager(sourceSessionManager),
+			);
 			return { cancelled: false, selectedText };
 		}
 
 		let sessionManager: SessionManager;
+		let forkedEntryIds: ReadonlySet<string> | undefined;
 		if (!targetLeafId) {
 			sessionManager = SessionManager.inMemory(this.cwd);
 			sessionManager.newSession({ parentSession: this.session.sessionFile });
 		} else {
 			sessionManager = this.sessionManager.createBranchedSessionManager(targetLeafId);
+			forkedEntryIds = entryIdsOfManager(this.sessionManager);
 		}
 		const prepared = await this.prepareReplacement(
 			sessionManager,
 			{ type: "session_start", reason: "fork", previousSessionFile },
-			{ sessionManager, copiedFrom: targetLeafId ? this.sessionManager : undefined },
+			{ sessionManager, copiedEntryIds: forkedEntryIds },
 		);
 		await this.commitReplacement(prepared, {
 			reason: "fork",
 			targetSessionFile: sessionManager.getSessionFile(),
 			withSession: options?.withSession,
-			createdSession: { sessionManager, copiedFrom: targetLeafId ? this.sessionManager : undefined },
+			createdSession: { sessionManager, copiedEntryIds: forkedEntryIds },
 		});
 		return { cancelled: false, selectedText };
 	}
@@ -979,9 +1024,11 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			copied = true;
 		}
 
-		const copiedFrom = copied ? { sourceFile: resolvedPath } : undefined;
+		let copiedEntryIds: ReadonlySet<string> | undefined;
 		let sessionManager: SessionManager;
 		try {
+			// The copy's own rows, read as the copy was made: a later change to the source file cannot alter what this copy shares with it.
+			if (copied) copiedEntryIds = entryIdsOfFile(destinationPath);
 			sessionManager = SessionManager.open(destinationPath, this.services.agentDir, sessionDir, cwdOverride);
 			assertSessionCwdExists(sessionManager, this.cwd);
 		} catch (error) {
@@ -991,12 +1038,12 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		const prepared = await this.prepareReplacement(
 			sessionManager,
 			{ type: "session_start", reason: "resume", previousSessionFile },
-			copied ? { sessionManager, copiedFrom } : undefined,
+			copied ? { sessionManager, copiedEntryIds } : undefined,
 		);
 		await this.commitReplacement(prepared, {
 			reason: "resume",
 			targetSessionFile: sessionManager.getSessionFile(),
-			createdSession: copied ? { sessionManager, copiedFrom } : undefined,
+			createdSession: copied ? { sessionManager, copiedEntryIds } : undefined,
 		});
 		return { cancelled: false };
 	}

@@ -16126,6 +16126,9 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						reply: { content: [{ type: "text", text: "The claim is supported by the evidence." }] },
 					});
 					world.systemOne.enterPhase("u-tool-ok", {
+						// The greeting is screened in one request and set aside as small talk; the newest message is classified in full.
+						carries_0: { kind: "noul", probability: 0.97 },
+						...ICM_INTAKE_JUDGMENTS,
 						claim: { kind: "choice", choice: "supports", confidence: 0.99 },
 					});
 					await withDeadline(
@@ -16152,7 +16155,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					).toEqual({
 						routes: ["system_one_tool"],
 						unique: 1,
-						requests: 1,
+						// The owner-policy queue at the tool call: one screen (the greeting), one intake classification (the review), one review.
+						requests: 3,
 						pending: false,
 						warnings: 0,
 						usageOnResult: [false],
@@ -16193,6 +16197,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						reply: icmCall("u-tool-call-1", SYSTEM_ONE_TOOL_NAME, uToolReview),
 					});
 					world.systemOne.enterPhase("u-tool-review", {
+						// Only the newest message is pending: it is classified in full, then the review.
+						...ICM_INTAKE_JUDGMENTS,
 						claim: { kind: "choice", choice: "supports", confidence: 0.99 },
 					});
 					world.io.failNext({
@@ -16232,7 +16238,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							).length,
 						},
 						"the root review is paid once, its receipt is held while the fenced row is not written, and the call is persisted without its result",
-					).toEqual({ requests: 1, rows: [], held: 1, persistedCalls: 1, persistedResults: 0 });
+					).toEqual({ requests: 2, rows: [], held: 1, persistedCalls: 1, persistedResults: 0 });
 					expect(
 						uUsageWarnings(uToolMark),
 						"the failed row append is the only usage warning, with its own cause",

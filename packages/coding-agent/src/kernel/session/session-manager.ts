@@ -3045,6 +3045,14 @@ export class SessionManager {
 	}
 
 	/**
+	 * Whether the session file holds this entry's canonical JSONL line, whatever its length or content. The line is located by a
+	 * scan of the file, so no size bound applies; a buffered entry not yet written is absent. A failed read throws.
+	 */
+	hasEntryInFile(entryId: string): boolean {
+		return this.sessionFile !== undefined && this._getEntryFileLocation(entryId) !== undefined;
+	}
+
+	/**
 	 * Read only a bounded UTF-8 prefix of one persisted entry's canonical JSONL record.
 	 * This lets owners classify cold payloads without invoking a disk-backed message getter or
 	 * allocating the complete retained line. Returns undefined for in-memory or unknown entries.
