@@ -71,6 +71,8 @@ import {
 import { TranscriptBoundedRead } from "./transcript-summary-bounded-read.ts";
 import {
 	coversLiveSpans,
+	forgottenNodeIds,
+	namesForgottenSession,
 	TranscriptSummaryCatalog,
 	type TranscriptSummaryReadContext,
 	transcriptRetentionCutoff,
@@ -863,6 +865,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private readonly forgottenSessions = new Set<string>();
 	/** The revision of the permanent forget state this mirror reflects (0 before any forget). */
 	private forgetRevision = 0;
+	/** Ready jobs dropped when a forget stopped the session's work, counted by the removal that follows. */
+	private earlyDroppedReady = 0;
 	/** The forget revision the manifest records as fully applied (a forget file below it is unknown: rollback). */
 	private forgetAppliedRevision = 0;
 	/** When owed usage receipts are tried again (one lifecycle timer), on a bounded backoff. */
@@ -953,11 +957,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		this.catalog.setDenial((node) => this.nodeDenied(node));
 	}
 
-	/** Whether the permanent forget state denies this node: its session, a session it consulted, or any summary it is built on. */
+	/** Whether the permanent forget state denies this node: it names a forgotten session, or a summary it is built on does. */
 	private nodeDenied(node: TranscriptSummaryNode, seen: Set<string> = new Set()): boolean {
 		if (this.forgottenSessions.size === 0) return false;
-		if (this.forgottenSessions.has(node.sessionId)) return true;
-		if (node.contextRefs.some((ref) => this.forgottenSessions.has(ref.sessionId))) return true;
+		if (namesForgottenSession(node, this.forgottenSessions)) return true;
 		for (const childId of node.children ?? []) {
 			if (seen.has(childId)) continue;
 			seen.add(childId);
@@ -1196,35 +1199,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * frontiers, forgotten sessions, accepted nodes, anchors and dormant nodes it describes. The one load path of a
 	 * start and of a reload after the store moved past the mirror.
 	 */
-	/**
-	 * The ids of the nodes the permanent forget state denies: nodes of a forgotten session, nodes that consulted one as
-	 * context, and every ancestor built on those (a parent does not carry its children's context).
-	 */
-	private deniedNodeIds(
-		nodes: Iterable<Pick<TranscriptSummaryNode, "id" | "sessionId" | "contextRefs" | "children">>,
-	): Set<string> {
-		const all = [...nodes];
-		const denied = new Set(
-			all
-				.filter(
-					(node) =>
-						this.forgottenSessions.has(node.sessionId) ||
-						node.contextRefs.some((ref) => this.forgottenSessions.has(ref.sessionId)),
-				)
-				.map((node) => node.id),
-		);
-		for (let grew = denied.size > 0; grew; ) {
-			grew = false;
-			for (const node of all) {
-				if (!denied.has(node.id) && node.children?.some((child) => denied.has(child))) {
-					denied.add(node.id);
-					grew = true;
-				}
-			}
-		}
-		return denied;
-	}
-
 	private loadMirror(state: TranscriptSummaryStoreState): void {
 		const manifest = state.manifest;
 		this.manifestRevision = manifest?.revision ?? 0;
@@ -1438,7 +1412,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			this.forgottenSessions.add(sessionId);
 			// Whatever the state read and the removal do next, the session's own model work stops now.
 			this.abortSession(sessionId);
-			this.endSessionJobs(sessionId, "cancelled");
+			this.earlyDroppedReady += this.endSessionJobs(sessionId, "cancelled");
 			const pending = await this.refreshForgetState(scheduled);
 			outcome = pending === undefined ? { status: "forgotten" } : { status: "forgotten", cleanupPending: pending };
 			this.pump(scheduled);
@@ -1464,12 +1438,23 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (!writer || !this.scheduler || !this.live(epoch))
 			return "the memory generation changed before the removal ran";
 		this.abortSession(sessionId);
-		const droppedReady = this.endSessionJobs(sessionId, "cancelled");
+		const droppedReady = this.takeEarlyDroppedReady() + this.endSessionJobs(sessionId, "cancelled");
+		const dormantDenied = new Set(
+			[...this.dormant.values()]
+				.filter(
+					(node) => node.sessionId === sessionId || node.contextRefs.some((ref) => ref.sessionId === sessionId),
+				)
+				.map((node) => node.id),
+		);
 		const result = await writer.revokeNodes(
 			(_id, entry) =>
 				entry.sessionId === sessionId || entry.contextRefs.some((handle) => handle.split(":")[1] === sessionId),
 			"retention",
-			{ dropSessionCursor: sessionId },
+			{
+				dropSessionCursor: sessionId,
+				// Parked (dormant) nodes of the session and the ones that consulted it as context go with it.
+				purgeDormant: (id) => dormantDenied.has(id),
+			},
 		);
 		if (result.status === "unavailable") {
 			this.deferStoreWork(result.reason, { forgets: [sessionId] }, epoch);
@@ -1490,6 +1475,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			return `dropping the retention records of ${sessionId} was refused: ${this.disabledReason ?? "the summary hierarchy stopped"}`;
 		this.deferStoreWork(dropped.reason, { forgets: [sessionId] }, epoch);
 		return `dropping the retention records of ${sessionId} could not be written: ${dropped.reason}`;
+	}
+
+	private takeEarlyDroppedReady(): number {
+		const dropped = this.earlyDroppedReady;
+		this.earlyDroppedReady = 0;
+		return dropped;
 	}
 
 	/** Remove the derived data of every forgotten session that still has any (start-up, a reload, another root's forget). */
@@ -1558,7 +1549,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			this.frontiers.has(sessionId) ||
 			(this.catalog.sessionNodes(sessionId)?.size ?? 0) > 0 ||
 			[...this.catalog.values()].some((node) => node.contextRefs.some((ref) => ref.sessionId === sessionId)) ||
-			[...this.dormant.values()].some((node) => node.sessionId === sessionId) ||
+			[...this.dormant.values()].some(
+				(node) => node.sessionId === sessionId || node.contextRefs.some((ref) => ref.sessionId === sessionId),
+			) ||
 			this.catalog.anchoredSessionIds().includes(sessionId) ||
 			(this.scheduler?.holdsSession(sessionId, { liveOnly: true }) ?? false)
 		);
@@ -1774,7 +1767,13 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const nodes = this.catalog.sessionNodes(lineageKey);
 		if (!selection || !nodes) return undefined;
 		// A forgotten session's frontier, or one naming a denied summary, is never described.
-		if (this.forgottenSessions.has(lineageKey) || [...nodes.values()].some((node) => this.nodeDenied(node))) {
+		if (
+			this.forgottenSessions.has(lineageKey) ||
+			selection.nodeIds.some((id) => {
+				const named = this.catalog.get(id);
+				return named !== undefined && this.nodeDenied(named);
+			})
+		) {
 			return undefined;
 		}
 		// A late retention wake must never expose expired derived text: the frontier is withheld until it is revoked.
@@ -3450,6 +3449,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const left = children ? this.catalog.get(children[0]) : undefined;
 		const right = children ? this.catalog.get(children[1]) : undefined;
 		if (!children || !left || !right) return { kind: "stale", reason: "a child node is no longer accepted" };
+		// No model is sent text derived from a forgotten session, whether or not its removal has landed yet.
+		if (this.nodeDenied(left) || this.nodeDenied(right)) {
+			return { kind: "stale", reason: "a child summary belongs to a forgotten session" };
+		}
 		const sourceRefs = [...left.sourceRefs, ...right.sourceRefs];
 		const base = {
 			sessionId: job.sessionId,
@@ -4628,7 +4631,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** Accepted model summaries without a current admission, children before parents. */
 	private readmissionCandidates(): TranscriptSummaryNode[] {
-		const denied = this.deniedNodeIds(this.catalog.values());
+		const denied = forgottenNodeIds(this.catalog.values(), this.forgottenSessions);
 		return [...this.catalog.values()]
 			.filter((node) => needsReadmission(node) && !denied.has(node.id))
 			.sort((a, b) => a.level - b.level || a.ordinal - b.ordinal);
@@ -4677,6 +4680,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const node = job.nodeId !== undefined ? this.catalog.get(job.nodeId) : undefined;
 		if (!node || !needsReadmission(node))
 			return { kind: "stale", reason: "the summary is gone or no longer needs re-admission" };
+		if (this.nodeDenied(node)) return { kind: "stale", reason: "the summary belongs to a forgotten session" };
 		if (!port) return { kind: "held", scope: "model_work", reason: "no summary admission evaluator is configured" };
 		const block = this.modelWorkBlock();
 		if (block !== undefined) return { kind: "held", scope: "model_work", reason: block.reason };

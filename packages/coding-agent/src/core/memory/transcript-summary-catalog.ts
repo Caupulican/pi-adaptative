@@ -108,6 +108,34 @@ function leafKey(sessionId: string, fromIndex: number): string {
 	return `${sessionId}\u0000${fromIndex}`;
 }
 
+/** The fields the permanent-forget rule reads from a node. */
+export type ForgetDeniableNode = Pick<TranscriptSummaryNode, "id" | "sessionId" | "contextRefs" | "children">;
+
+/** Whether a node itself names a forgotten session: it belongs to one, or consulted one as context. */
+export function namesForgottenSession(node: ForgetDeniableNode, forgotten: ReadonlySet<string>): boolean {
+	return forgotten.has(node.sessionId) || node.contextRefs.some((ref) => forgotten.has(ref.sessionId));
+}
+
+/**
+ * The ids the permanent forget state denies among `nodes`: the nodes that name a forgotten session and every summary
+ * built on them (a parent does not carry its children's context, so it is found through its children). The one rule:
+ * the coordinator's catalog and the read-only view both apply it.
+ */
+export function forgottenNodeIds(nodes: Iterable<ForgetDeniableNode>, forgotten: ReadonlySet<string>): Set<string> {
+	const all = [...nodes];
+	const denied = new Set(all.filter((node) => namesForgottenSession(node, forgotten)).map((node) => node.id));
+	for (let grew = denied.size > 0; grew; ) {
+		grew = false;
+		for (const node of all) {
+			if (!denied.has(node.id) && node.children?.some((child) => denied.has(child))) {
+				denied.add(node.id);
+				grew = true;
+			}
+		}
+	}
+	return denied;
+}
+
 /** Why a node's text cannot be read now; see {@link TranscriptSummaryCatalog.readRefusal}. */
 export type ReadRefusal = "expired" | "age_unknown" | "unapproved" | "forgotten";
 

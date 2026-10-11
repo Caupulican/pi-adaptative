@@ -34,7 +34,11 @@ import type {
 	TranscriptSummaryReadOptions,
 } from "./transcript-source-tools.ts";
 import { TranscriptBoundedRead } from "./transcript-summary-bounded-read.ts";
-import { TranscriptSummaryCatalog, type TranscriptSummaryReadContext } from "./transcript-summary-catalog.ts";
+import {
+	forgottenNodeIds,
+	TranscriptSummaryCatalog,
+	type TranscriptSummaryReadContext,
+} from "./transcript-summary-catalog.ts";
 import type { TranscriptSummaryNode } from "./transcript-summary-node.ts";
 import {
 	SESSION_TOMBSTONE_KEY_PREFIX,
@@ -185,23 +189,9 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 			if (key.startsWith(SESSION_TOMBSTONE_KEY_PREFIX))
 				forgotten.add(key.slice(SESSION_TOMBSTONE_KEY_PREFIX.length));
 		}
-		// Nodes of a forgotten session, nodes that consulted one as context, and every ancestor built on those (a parent does
-		// not carry its children's context, so it is found through its children).
-		const denied = new Set<string>();
-		for (const node of state.nodes.values()) {
-			if (forgotten.has(node.sessionId) || node.contextRefs.some((ref) => forgotten.has(ref.sessionId))) {
-				denied.add(node.id);
-			}
-		}
-		for (let grew = denied.size > 0; grew; ) {
-			grew = false;
-			for (const node of state.nodes.values()) {
-				if (!denied.has(node.id) && node.children?.some((child) => denied.has(child))) {
-					denied.add(node.id);
-					grew = true;
-				}
-			}
-		}
+		// The one permanent-forget rule (shared with the coordinator's catalog): the nodes naming a forgotten session and every
+		// summary built on them.
+		const denied = forgottenNodeIds(state.nodes.values(), forgotten);
 		catalog.replace(
 			[...state.nodes.values()].filter((node) => !left.has(node.id) && !denied.has(node.id)),
 			state.retentionAnchors,

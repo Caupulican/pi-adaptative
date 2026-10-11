@@ -218,6 +218,8 @@ export class SystemOneJevAdapter implements JevAdapter {
 		let attempts = 0;
 		const maxAttempts = 3;
 		let lastError: unknown;
+		// Every paid response any attempt received: a failure that ends the evaluation still owes their receipts.
+		let owedReceipts: readonly SystemOneReceipt[] = [];
 		// One deadline bounds the whole evaluation, retries and backoff included.
 		const timeoutMs = options?.timeoutMs;
 		const deadline = timeoutMs !== undefined ? AbortSignal.timeout(timeoutMs) : undefined;
@@ -230,9 +232,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 				`System One evaluation exceeded its ${timeoutMs} ms budget`,
 				impact,
 				undefined,
-				lastError instanceof SystemOneReviewError || lastError instanceof SystemOneObserverError
-					? lastError.receipts
-					: undefined,
+				owedReceipts.length > 0 ? owedReceipts : undefined,
 			);
 
 		while (attempts < maxAttempts) {
@@ -289,6 +289,9 @@ export class SystemOneJevAdapter implements JevAdapter {
 				};
 			} catch (error) {
 				lastError = error;
+				if (error instanceof SystemOneReviewError || error instanceof SystemOneObserverError) {
+					owedReceipts = [...owedReceipts, ...error.receipts];
+				}
 				if (error instanceof JevAdapterFailure) {
 					throw error;
 				}
@@ -308,7 +311,13 @@ export class SystemOneJevAdapter implements JevAdapter {
 				// R-067: Bounded backoff for transient or rate limit errors
 				if (attempts < maxAttempts) {
 					const backoffMs = Math.min(1000 * 2 ** (attempts - 1) + Math.random() * 200, 5000);
-					await this.sleep(backoffMs, signal);
+					try {
+						await this.sleep(backoffMs, signal);
+					} catch (sleepError) {
+						// The deadline ending the backoff is the evaluation's timeout, with the receipts it owes.
+						if (deadline?.aborted && !options?.signal?.aborted) throw timedOut();
+						throw sleepError;
+					}
 				}
 			}
 		}
@@ -317,6 +326,12 @@ export class SystemOneJevAdapter implements JevAdapter {
 		const kind = classifyJevFailure(lastError, Boolean(options?.signal?.aborted));
 		// Never turn an invalid/incomplete typed response into empty successful answers.
 		// Advisory callers catch JevAdapterFailure and continue without a fake evaluation.
-		throw new JevAdapterFailure(kind, original, impact, lastError);
+		throw new JevAdapterFailure(
+			kind,
+			original,
+			impact,
+			lastError,
+			owedReceipts.length > 0 ? owedReceipts : undefined,
+		);
 	}
 }
