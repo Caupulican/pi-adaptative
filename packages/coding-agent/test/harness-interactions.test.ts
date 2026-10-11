@@ -13857,7 +13857,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					await withDeadline(trace, "R-stop judgment held at the evaluator", rsAdmitted.promise);
 					// The stop. The save it makes is observed; the restarted coordinator's claim is the next judgment and waits at its gate.
 					const rsStopSave = icmObserveNextJobsSave(world, rsStore, "r-stop-save");
-					world.systemOne.enterPhase("rs-restarted", rsJudgments, {
+					// The restarted coordinator judges the leaf and then its parent (summaries as targets), which also asks the honesty question.
+					world.systemOne.enterPhase("rs-restarted", cAdmission, {
 						gate: rsRestartGate.promise,
 						onAdmit: () => rsRestarted.release(),
 					});
