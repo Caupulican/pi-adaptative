@@ -13883,10 +13883,10 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							},
 							rows: rsReports().length,
 						},
-						"the stop saves the job queued with its kept reply and one recorded receipt; the restart claims it again with those counters and pays the judgment once",
+						"the first save after the abort carries the counters of the paid call (the claim is still running, the stop interrupts it afterwards) with the kept reply and one recorded receipt; the restart claims it again with those counters and pays the judgment once",
 					).toEqual({
 						stop: {
-							state: "queued",
+							state: "running",
 							attempts: 1,
 							ledger: { semanticRequests: 1, transportAttempts: 1, receiptsRecorded: 1, reused: 0 },
 							keptReply: true,
