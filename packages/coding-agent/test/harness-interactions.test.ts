@@ -12628,8 +12628,20 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					const roInterrupted =
 						roVariant === "retry" || roVariant === "shutdown"
 							? undefined
-							: [roStore.owed, roStore.jobs].map((file) => [file, world.io.peekFile(file)] as const);
-					await world.disposeSessionInBody(roFirst.session);
+							: [roStore.owed, roStore.jobs, roStore.ledger].map(
+									(file) => [file, world.io.peekFile(file)] as const,
+								);
+					if (roVariant === "shutdown") {
+						// The shutdown itself is refused: the stop's own owed write fails, so it writes no jobs either.
+						world.io.failNext({
+							name: "ro-stop-owed-write",
+							kind: "rename",
+							code: "EIO",
+							matches: (operation) => operation.destination === roStore.owed,
+						});
+					}
+					const roDisposed = await world.disposeSessionInBody(roFirst.session);
+					expect(roDisposed, `${roVariant}: the owner disposes without throwing`).toBeUndefined();
 					if (roVariant !== "retry") {
 						// The actual shutdown boundary: the stop wrote the owed queue before the jobs that no longer carry the receipt.
 						expect(
@@ -12639,13 +12651,20 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 									JSON.stringify(job).includes('"unrecorded"'),
 								).length,
 							},
-							`${roVariant}: the stop made the owed queue durable before it replaced the job record`,
-						).toEqual({ owedEntries: 1, jobsCarry: 0 });
+							roVariant === "shutdown"
+								? "a refused owed write at the stop leaves the older job record as the receipt's durable copy"
+								: `${roVariant}: the stop made the owed queue durable before it replaced the job record`,
+						).toEqual(
+							roVariant === "shutdown"
+								? { owedEntries: undefined, jobsCarry: 1 }
+								: { owedEntries: 1, jobsCarry: 0 },
+						);
 					}
 					for (const [file, text] of roInterrupted ?? []) {
 						if (text !== undefined) world.io.seed(file, text);
 						else if (world.io.peekFile(file) !== undefined) world.io.unlinkSync(file);
 					}
+					expect(roReports().length, `${roVariant}: no semantic usage row is durable before the reopen`).toBe(0);
 					const roSecond = await world.createRootSession("root", {
 						agentDir: roAgentDir,
 						sessionManager: world.openSessionManager(roOwnerFile, roAgentDir),
@@ -12751,6 +12770,68 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					"the re-admission session disposes cleanly",
 				).toBeUndefined();
 				trace.mark("root", "icm.readmission-jobs");
+
+				// R-egress: the admission egress switch is read live. With it off the model leaf is held before any call (no
+				// summarizer request, no evaluator request); switching it on in the running session releases the hold and the
+				// hierarchy is built: leaf and parent, two summarizer requests and two admissions.
+				const egAgentDir = `${world.agentDir}-icm-egress`;
+				await seedIcmPastSession(world, egAgentDir);
+				const egStore = icmStore(egAgentDir);
+				const egHistory = icmHierarchySettings(cTrack).contextPolicy?.memory?.history;
+				world.provider.enqueue(cTrack, text("eg-leaf-summary", ICM_LEAF_SUMMARY), {
+					name: "eg-parent-summary",
+					check: (request) => {
+						if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+							throw new Error("the egress-row parent does not merge the leaf");
+					},
+					reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+				});
+				world.systemOne.enterPhase("eg-held", {});
+				const egBefore = { summaries: icmTrackRequests(world, cTrack), admissions: icmAdmissionRequests(world) };
+				const egSession = await world.createRootSession("root", {
+					agentDir: egAgentDir,
+					settings: {
+						...icmHierarchySettings(cTrack),
+						contextPolicy: { memory: { history: { ...egHistory, allowExternalAdmissionEgress: false } } },
+					},
+				});
+				await withDeadline(
+					trace,
+					"R-egress leaf held while admission egress is off",
+					world.io.waitForMutation(
+						() =>
+							egSession.session.getTranscriptHistoryStatus().hierarchy?.admission?.heldByKind?.model_work === 1,
+					),
+				);
+				expect(
+					{
+						summaries: icmTrackRequests(world, cTrack) - egBefore.summaries,
+						admissions: icmAdmissionRequests(world) - egBefore.admissions,
+						built: icmAcceptedAt(cLive, egStore, 0, 8) !== undefined,
+					},
+					"with admission egress off nothing is requested and nothing is accepted",
+				).toEqual({ summaries: 0, admissions: 0, built: false });
+				world.systemOne.enterPhase("eg-answering", cAdmission);
+				egSession.settingsManager.applyOverrides({ contextPolicy: { memory: { history: egHistory } } });
+				await withDeadline(
+					trace,
+					"R-egress built after the switch was turned on",
+					world.io.waitForMutation(() => icmAcceptedAt(cLive, egStore, 1, 0) !== undefined),
+					60_000,
+				);
+				expect(
+					{
+						summaries: icmTrackRequests(world, cTrack) - egBefore.summaries,
+						admissions: icmAdmissionRequests(world) - egBefore.admissions,
+						held: icmHierarchy(egSession.session).admission?.heldByKind,
+					},
+					"turning the switch on releases the hold and builds the hierarchy",
+				).toEqual({ summaries: 2, admissions: 2, held: undefined });
+				expect(
+					await world.disposeSessionInBody(egSession.session),
+					"the egress-row owner disposes cleanly",
+				).toBeUndefined();
+				trace.mark("root", "icm.egress-live");
 
 				// R-invalid: a PAID evaluator answer that breaks its contract (it answers none of the asked questions) is evidence
 				// of nothing. It is never reused, never approved and never retried as an outage: the leaf ends failed with the
