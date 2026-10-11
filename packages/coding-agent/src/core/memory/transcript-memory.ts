@@ -100,6 +100,7 @@ import {
 } from "./transcript-summary-scheduler.ts";
 import {
 	type ManifestRead,
+	SESSION_TOMBSTONE_KEY_PREFIX,
 	storeUnavailable,
 	type TranscriptAnchorRequest,
 	type TranscriptSummaryAnnotateResult,
@@ -359,7 +360,6 @@ const MAX_CAUSE_MESSAGE_CHARS = 300;
 const MAX_STATUS_FRONTIERS = 20;
 const MAX_STATUS_ISSUES = 20;
 const MAX_STATUS_BATCHES = 5;
-const SESSION_TOMBSTONE_PREFIX = "session:";
 /** Re-admission of accepted-but-unapproved nodes backs off this long after an evaluator that did not answer. */
 const READMISSION_RETRY_MS = 5 * 60 * 1000;
 type ReadmissionHoldState = "admitted" | "rejected" | "uncertain" | "unavailable" | "waiting";
@@ -830,7 +830,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const loaded = await store.load();
 		if ("status" in loaded) return this.disable(`the summary store could not be read: ${loaded.reason}`);
 		let state = loaded;
-		const issues = [...state.issues];
+		let issues = [...state.issues];
 		let acquisition = await store.acquireWriter();
 		if (acquisition.status === "manifest_corrupt") {
 			// Derived state only: the damaged bytes are kept beside it and the hierarchy is rebuilt from sources.
@@ -838,6 +838,14 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		if (acquisition.status !== "acquired") return this.disable(`the store refused a writer: ${acquisition.status}`);
 		const writer = acquisition.writer;
+		// Another writer may have run between the first load and the lease (a claim saved, a node revoked). The first load
+		// only established that the store is readable: every earlier writer is fenced now, so what the run derives from
+		// (jobs and their attempts, proof, nodes) is loaded again after the lease, never carried over from before it.
+		const current = await store.load();
+		if ("status" in current) return this.disable(`the summary store could not be read: ${current.reason}`);
+		state = current;
+		// A damaged manifest the lease replaced is still reported (the replacement loads clean).
+		issues = [...issues.filter((issue) => issue.kind === "manifest_corrupt"), ...state.issues];
 		if (issues.some((issue) => issue.kind !== "manifest_corrupt")) {
 			await writer.applyRecovery(issues);
 		}
@@ -1026,8 +1034,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		for (const [sessionId, cursor] of Object.entries(manifest?.sessions ?? {})) this.cursors.set(sessionId, cursor);
 		for (const [name, frontier] of Object.entries(manifest?.frontiers ?? {})) this.frontiers.set(name, frontier);
 		for (const key of Object.keys(manifest?.tombstones ?? {})) {
-			if (key.startsWith(SESSION_TOMBSTONE_PREFIX))
-				this.forgottenSessions.add(key.slice(SESSION_TOMBSTONE_PREFIX.length));
+			if (key.startsWith(SESSION_TOMBSTONE_KEY_PREFIX))
+				this.forgottenSessions.add(key.slice(SESSION_TOMBSTONE_KEY_PREFIX.length));
 		}
 		this.catalog.replace(state.nodes.values(), state.retentionAnchors);
 		this.dormant.clear();
@@ -2730,7 +2738,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			this.scheduler?.nextWakeAt(),
 			// Deferred retention waits for the store retry, so a due deadline cannot re-arm the timer at once.
 			this.storeRetry.retention ? undefined : this.nextRetentionAt(),
-			this.readmissionRetryAt,
+			// A run in progress takes its own retry when it ends (its end pumps and re-arms); a due instant read now would
+			// only wake the timer at once, and each wake saves the job list.
+			this.readmitting ? undefined : this.readmissionRetryAt,
 			this.saveRetryAt,
 			this.storeRetryAt,
 		].filter((value): value is number => value !== undefined);
@@ -3678,6 +3688,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			job.id,
 			{ kind: result.status === "invalid" ? "malformed" : "transient", message: reason },
 			this.ports.now(),
+			{ returnClaim: this.returnsClaim(job, paidCall) },
 		);
 		if (failed?.state === "failed") {
 			this.recordFailure(job, failed.lastError?.reason ?? "publish", reason);

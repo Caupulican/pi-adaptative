@@ -71,6 +71,9 @@ import {
 } from "./transcript-summary-scheduler.ts";
 
 export const TRANSCRIPT_SUMMARY_MAX_TOMBSTONES = 10_000;
+
+/** Key prefix of a forgotten session's permanent tombstone; the coordinator restores `forgottenSessions` from it. */
+export const SESSION_TOMBSTONE_KEY_PREFIX = "session:";
 /**
  * Dormant nodes kept; past this the oldest parked are evicted (their files deleted). A dormant node is only a
  * cache of paid content for an identity that may come back: evicting one costs a rebuild, never proof.
@@ -174,6 +177,29 @@ export interface TranscriptSummaryDormantEntry {
 	sessionId: string;
 	/** ISO instant it was parked; eviction takes the oldest first. */
 	parkedAt: string;
+}
+
+/** The `session:` tombstones a damaged manifest's bytes still hold (valid JSON with a valid tombstone entry); none otherwise. */
+function salvageSessionTombstones(raw: string): Record<string, TranscriptSummaryTombstone> {
+	let value: unknown;
+	try {
+		value = JSON.parse(raw);
+	} catch {
+		return {};
+	}
+	if (!isPlainRecord(value) || !isPlainRecord(value.tombstones)) return {};
+	const salvaged: Record<string, TranscriptSummaryTombstone> = {};
+	for (const [id, entry] of Object.entries(value.tombstones)) {
+		if (
+			id.startsWith(SESSION_TOMBSTONE_KEY_PREFIX) &&
+			isPlainRecord(entry) &&
+			typeof entry.revokedAt === "string" &&
+			(entry.reason === "retention" || entry.reason === "invalidated" || entry.reason === "recovery")
+		) {
+			salvaged[id] = { revokedAt: entry.revokedAt, reason: entry.reason };
+		}
+	}
+	return salvaged;
 }
 
 function emptyManifest(writerFence: number): TranscriptSummaryManifest {
@@ -904,6 +930,9 @@ export class TranscriptSummaryStore {
 			} else if (options.recoverCorrupt === true) {
 				await writeFileAtomic(`${this.manifestPath}.corrupt.${this.now()}`, read.raw, { mode: 0o600 });
 				manifest = emptyManifest(Math.max(1, this.now()));
+				// A forgotten session's marker is the only durable record that it is never summarized again: it is carried
+				// across the replacement from whatever the damaged bytes still hold.
+				Object.assign(manifest.tombstones, salvageSessionTombstones(read.raw));
 			} else {
 				return { status: "manifest_corrupt" as const, detail: read.detail };
 			}
@@ -2059,7 +2088,10 @@ export class TranscriptSummaryWriter {
 			}
 		}
 		if (tombstoneSession !== undefined) {
-			next.tombstones[`session:${tombstoneSession}`] = { revokedAt: now, reason: "retention" };
+			next.tombstones[`${SESSION_TOMBSTONE_KEY_PREFIX}${tombstoneSession}`] = {
+				revokedAt: now,
+				reason: "retention",
+			};
 		}
 		if (dropSessionCursor !== undefined) delete next.sessions[dropSessionCursor];
 		const removedFrontiers: string[] = [...(options.alsoRemoveFrontiers ?? [])];
@@ -2069,7 +2101,10 @@ export class TranscriptSummaryWriter {
 				removedFrontiers.push(name);
 			}
 		}
-		const tombstoneIds = Object.keys(next.tombstones);
+		// The bound applies to per-node tombstones (a late result of a retention-revoked node must not republish). A
+		// forgotten session's marker is permanent: it is the only durable record that the session is never summarized
+		// again, so no amount of later node revocation may evict it.
+		const tombstoneIds = Object.keys(next.tombstones).filter((id) => !id.startsWith(SESSION_TOMBSTONE_KEY_PREFIX));
 		if (tombstoneIds.length > TRANSCRIPT_SUMMARY_MAX_TOMBSTONES) {
 			tombstoneIds
 				.sort((a, b) => (next.tombstones[a]?.revokedAt ?? "").localeCompare(next.tombstones[b]?.revokedAt ?? ""))
