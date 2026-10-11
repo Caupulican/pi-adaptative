@@ -911,6 +911,7 @@ interface IcmStoredJob {
 	readonly spanRange: { readonly fromIndex: number; readonly toIndexExclusive: number };
 	readonly pendingReply?: { readonly textDigest: string };
 	readonly lastError?: { readonly reason: string; readonly message: string };
+	readonly ledger?: { readonly semanticRequests: number };
 }
 
 /** A store file's text: from a crash capture, or from the live tree (no ledger entry, no fault, no hold). */
@@ -942,6 +943,7 @@ function icmStoredLedger(
 
 interface IcmStoredManifest {
 	readonly revision: number;
+	readonly writerFence?: number;
 	readonly sessions: Record<string, { readonly coveredSpanCount: number; readonly lineageDigest: string }>;
 	readonly acceptedNodes: Record<
 		string,
@@ -4265,6 +4267,42 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				});
 			} else {
 				// R14-A (off): the exact notes leaf; the model leaf stays held, so nothing is paid in either run.
+				// W7: the captured span-8 record at this capture point. The store saves a reservation for every live job in the same
+				// save as the job list, so the held leaf holds one. It never reached the summarizer, so it has no kept reply. Its state
+				// is what its one claim left: running with that claim, or queued with the claim returned when the model-work hold
+				// deferred it (`lastError` then carries that deferral reason, never a failure).
+				expect(
+					{
+						reservation:
+							r14AModelLeaf === undefined
+								? undefined
+								: icmStoredLedger(r14ARead, icmStoreFiles)[r14AModelLeaf.id]?.kind,
+						summarizerReply: r14AModelLeaf?.pendingReply,
+						unsettled: r14AModelLeaf?.state === "queued" || r14AModelLeaf?.state === "running",
+						attemptsMatchState:
+							r14AModelLeaf?.state === "running"
+								? r14AModelLeaf.attempts === 1
+								: r14AModelLeaf?.state === "queued" && r14AModelLeaf.attempts === 0,
+						// The deferral reasons of `abandonClaim` (a claim returned before any provider call), never a failure reason.
+						failureFree:
+							r14AModelLeaf?.lastError === undefined ||
+							[
+								"admission_held",
+								"admission_children_pending",
+								"proof_capacity",
+								"persistence_unacknowledged",
+								"claim_superseded",
+								"usage_receipt_pending",
+							].includes(r14AModelLeaf.lastError.reason),
+					},
+					"crash state A: the span-8 model leaf is reserved, unanswered and unsettled, with its attempt matching its state",
+				).toEqual({
+					reservation: "reserved",
+					summarizerReply: undefined,
+					unsettled: true,
+					attemptsMatchState: true,
+					failureFree: true,
+				});
 				world.systemOne.enterPhase("r14a-restart", {});
 				const r14ARun = await r14Restart(
 					"r14a",
@@ -12509,13 +12547,15 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					// R-receipt, then its session is forgotten, which ends the job and hands the owed receipt to the owed queue. The
 					// first write of the owed-receipts file is refused: nothing is acknowledged and no file appears. The bounded retry
 					// (the domain clock) makes it durable. The session is then reopened from the same file: the owed receipt is
-					// recorded exactly once, the file is emptied, and nothing is bought again. Three variants: "retry" makes the
+					// recorded exactly once, the file is emptied, and nothing is bought again. Four variants. "retry" makes the
 					// write durable on the bounded retry (whose own receipt attempt also fails, so the receipt returns to the queue)
-					// before the restart; "interrupt" restarts while the write is still refused, so the receipt is conserved only by the
-					// job record the refused save did not replace; "crash" is the opposite partial write (the owed file is saved, the jobs save that
-					// would drop the receipt from the job is refused). "shutdown" disposes the owner while the owed write is still refused and keeps what the stop itself writes (the
-					// stop saves the owed queue before the jobs that no longer carry the receipt). The interrupting variants put the two files back to their state
-					// at the interruption after the dispose, so a clean shutdown flush cannot stand in for the interruption.
+					// before the restart. "interrupt" restarts while the write is still refused, so the receipt is conserved only by
+					// the job record the refused save did not replace. "crash" is the opposite partial write: the owed file is saved,
+					// and the jobs save that would drop the receipt from the job is refused. "shutdown" disposes the owner with a second
+					// fault armed on the owed write the stop itself makes (the stop saves the owed queue before the jobs that no longer
+					// carry the receipt). That stop write is refused too, so no owed file appears and the stop writes no job list: the
+					// older job record that still carries the receipt stays its durable copy. The interrupting variants put the two files
+					// back to their state at the interruption after the dispose, so a clean shutdown flush cannot stand in for the interruption.
 					const roAgentDir = `${world.agentDir}-icm-owed-${roVariant}`;
 					const roSeed = await seedIcmPastSession(world, roAgentDir);
 					const roStore = icmStore(roAgentDir);
@@ -12771,6 +12811,221 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					"the re-admission session disposes cleanly",
 				).toBeUndefined();
 				trace.mark("root", "icm.readmission-jobs");
+
+				// W8 (readmission under an evaluator outage, and a forget while its judgment is held): each case builds its own store and
+				// strips the admission of its model leaf, as R-readmit does, so the store holds one readmission job. Outage: every request
+				// answers 503, a transient failure that retries on the scheduler's backoff (10-12 s, then 20-24 s; the history clock is
+				// advanced to each due retry, no sleep) and ends failed when its three attempts are spent. The restart reads that failure:
+				// no evaluator request, the identity stays spent, and the per-run counters start at zero. Cancel: a forget while the
+				// judgment is held aborts the request and cancels the job; an aborted request returns no answer, so it adds no semantic
+				// request and no judgment, while its claim keeps its attempt.
+				const w8Build = async (label: string) => {
+					const agentDir = `${world.agentDir}-icm-readmit-${label}`;
+					const seed = await seedIcmPastSession(world, agentDir);
+					const store = icmStore(agentDir);
+					world.provider.enqueue(cTrack, text(`w8-${label}-leaf`, ICM_LEAF_SUMMARY), {
+						name: `w8-${label}-parent`,
+						check: (request) => {
+							if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+								throw new Error(`W8 ${label}: the parent does not merge the leaf`);
+						},
+						reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+					});
+					world.systemOne.enterPhase(`w8-${label}-build`, cAdmission);
+					await buildIcmHierarchy(
+						world,
+						agentDir,
+						icmHierarchySettings(cTrack),
+						(hierarchy) => hierarchy.acceptedNodes === 3,
+					);
+					const leaf = icmAcceptedAt(icmLiveStore(world), store, 0, 8);
+					const nodePath = resolve(store.root, "nodes", `${leaf ?? "missing"}.json`);
+					const node = JSON.parse(world.io.peekFile(nodePath) ?? "{}") as {
+						quality?: string;
+						admission?: unknown;
+					};
+					if (leaf === undefined || node.quality !== "model_summary" || node.admission === undefined)
+						throw new Error(`W8 ${label}: the model leaf carries no admission to strip`);
+					node.admission = undefined;
+					world.io.seed(nodePath, `${JSON.stringify(node)}\n`);
+					return { agentDir, store, sessionId: seed.sessionId };
+				};
+				// The work the build's own jobs carry, so each readmission run is compared on its own units.
+				const w8Work = (store: IcmStore) => {
+					const jobs = icmStoredJobs(icmLiveStore(world), store);
+					return {
+						attempts: jobs.reduce((total, job) => total + job.attempts, 0),
+						semanticRequests: jobs.reduce((total, job) => total + (job.ledger?.semanticRequests ?? 0), 0),
+					};
+				};
+				const w8Judged = { accepted: 0, rejected: 0, uncertain: 0, unavailable: 0 };
+
+				const w8o = await w8Build("outage");
+				const w8oJob = () =>
+					icmStoredJobs(icmLiveStore(world), w8o.store).find((job) => job.kind === "readmission");
+				world.systemOne.enterPhase("w8-outage", cAdmission, { outage: true });
+				const w8oSession = await world.createRootSession("root", {
+					agentDir: w8o.agentDir,
+					settings: icmHierarchySettings(cTrack),
+				});
+				await withDeadline(
+					trace,
+					"W8 first outage waits for its retry",
+					world.io.waitForMutation(() => w8oJob()?.state === "retry_wait"),
+				);
+				expect(
+					{
+						attempts: w8oJob()?.attempts,
+						waiting: icmHierarchy(w8oSession.session).admission?.readmission.waitingFor,
+					},
+					"an unanswered evaluator is a transient retry: the readmission job waits and does not fail",
+				).toEqual({ attempts: 1, waiting: { child_not_approved: 1, evaluator_unavailable: 1 } });
+				expect(
+					world.historyClock.advance(12_000),
+					"the first retry is due within its 10-12 s backoff",
+				).toBeGreaterThan(0);
+				await withDeadline(
+					trace,
+					"W8 second outage waits for its retry",
+					world.io.waitForMutation(() => w8oJob()?.state === "retry_wait" && w8oJob()?.attempts === 2),
+				);
+				expect(
+					world.historyClock.advance(24_000),
+					"the second retry is due within its 20-24 s backoff",
+				).toBeGreaterThan(0);
+				await withDeadline(
+					trace,
+					"W8 outage spent its attempts",
+					world.io.waitForMutation(() => icmHierarchy(w8oSession.session).recentBatches.at(-1)?.failed === 1),
+				);
+				const w8oEnd = icmHierarchy(w8oSession.session);
+				expect(
+					{
+						job: {
+							state: w8oJob()?.state,
+							attempts: w8oJob()?.attempts,
+							semanticRequests: w8oJob()?.ledger?.semanticRequests,
+							reason: w8oJob()?.lastError?.reason,
+						},
+						judgments: w8oEnd.admission?.judgments,
+						readmission: w8oEnd.admission?.readmission,
+						exhausted: w8oEnd.failures.filter(
+							(failure) => failure.reason === "admission_unavailable_attempts_exhausted",
+						).length,
+						batchFailed: w8oEnd.recentBatches.at(-1)?.failed,
+					},
+					"the spent outage ends the readmission job failed, counted as one unavailable node with its wait recorded",
+				).toEqual({
+					job: {
+						state: "failed",
+						attempts: 3,
+						semanticRequests: 3,
+						reason: "admission_unavailable_attempts_exhausted",
+					},
+					judgments: { ...w8Judged, unavailable: 3 },
+					readmission: {
+						...w8Judged,
+						unavailable: 1,
+						waitingFor: { child_not_approved: 1, readmission_failed: 1 },
+					},
+					exhausted: 1,
+					batchFailed: 1,
+				});
+				const w8oWork = w8oEnd.admission?.work;
+				expect(
+					await world.disposeSessionInBody(w8oSession.session),
+					"the outage owner disposes cleanly",
+				).toBeUndefined();
+
+				// The restart reads the spent identity from the store: no evaluator request, the work persists, the per-run counters are zero.
+				world.systemOne.enterPhase("w8-restart", {});
+				const w8oRequests = icmAdmissionRequests(world);
+				const w8oSaved = icmObserveNextJobsSave(world, w8o.store, "w8-restart-save");
+				const w8oRestart = await world.createRootSession("root", {
+					agentDir: w8o.agentDir,
+					settings: icmHierarchySettings(cTrack),
+				});
+				await withDeadline(
+					trace,
+					"W8 restart saved its job list",
+					world.io.waitForMutation(() => w8oSaved() !== undefined),
+				);
+				expect(
+					{
+						work: icmHierarchy(w8oRestart.session).admission?.work,
+						judgments: icmHierarchy(w8oRestart.session).admission?.judgments,
+						readmission: icmHierarchy(w8oRestart.session).admission?.readmission,
+						requests: icmAdmissionRequests(world) - w8oRequests,
+						job: { state: w8oJob()?.state, attempts: w8oJob()?.attempts },
+					},
+					"after the restart the work persists, the per-run counters start at zero, and nothing is judged again",
+				).toEqual({
+					work: w8oWork,
+					judgments: w8Judged,
+					readmission: {
+						...w8Judged,
+						unavailable: 0,
+						waitingFor: { child_not_approved: 1, readmission_failed: 1 },
+					},
+					requests: 0,
+					job: { state: "failed", attempts: 3 },
+				});
+				expect(
+					await world.disposeSessionInBody(w8oRestart.session),
+					"the restarted owner disposes cleanly",
+				).toBeUndefined();
+
+				const w8c = await w8Build("cancel");
+				const w8cBuilt = w8Work(w8c.store);
+				const w8cHeld = createBarrier();
+				const w8cAdmitted = createBarrier();
+				world.systemOne.enterPhase("w8-held", cAdmission, {
+					gate: w8cHeld.promise,
+					onAdmit: () => w8cAdmitted.release(),
+				});
+				const w8cSession = await world.createRootSession("root", {
+					agentDir: w8c.agentDir,
+					settings: icmHierarchySettings(cTrack),
+				});
+				try {
+					await withDeadline(trace, "W8 judgment held at the evaluator", w8cAdmitted.promise);
+					const w8cHeldWork = icmHierarchy(w8cSession.session).admission?.work;
+					const w8cForgot = await withDeadline(
+						trace,
+						"W8 forget while the judgment is held",
+						w8cSession.session.forgetHistorySession(w8c.sessionId),
+					);
+					expect(w8cForgot.ok, `the forget is accepted while the judgment is held: ${w8cForgot.message}`).toBe(
+						true,
+					);
+					await withDeadline(trace, "W8 aborted judgment settled", world.systemOne.joinInFlight());
+					const w8cEnd = icmHierarchy(w8cSession.session);
+					expect(
+						{
+							cancelled: w8cEnd.counts.cancelled,
+							judgments: w8cEnd.admission?.judgments,
+							// The held claim's attempt was counted when it was admitted; the aborted request added no semantic request.
+							readmissionWork: {
+								attempts: (w8cEnd.admission?.work.logicalAttempts ?? 0) - w8cBuilt.attempts,
+								semanticRequests: (w8cEnd.admission?.work.semanticRequests ?? 0) - w8cBuilt.semanticRequests,
+							},
+							unchangedByCancel: w8cEnd.admission?.work,
+						},
+						"a forget cancels the held readmission job: no judgment, no semantic request, and its claim keeps its attempt",
+					).toEqual({
+						cancelled: 1,
+						judgments: w8Judged,
+						readmissionWork: { attempts: 1, semanticRequests: 0 },
+						unchangedByCancel: w8cHeldWork,
+					});
+				} finally {
+					w8cHeld.release();
+				}
+				expect(
+					await world.disposeSessionInBody(w8cSession.session),
+					"the cancel owner disposes cleanly",
+				).toBeUndefined();
+				trace.mark("root", "icm.readmission-outage-cancel");
 
 				// R-egress: the admission egress switch is read live. With it off the model leaf is held before any call (no
 				// summarizer request, no evaluator request); switching it on in the running session releases the hold and the
@@ -17012,6 +17267,141 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			).toBeUndefined();
 			trace.mark("root", "icm.forget-command");
 
+			// W4 (cross-root forget at the delivery fence): a coordinator-less owner forgets a session while a coordinator-less reader's
+			// expansion of its exact copy waits at the fence's manifest read. The forget writes only the forget file, so the manifest
+			// is untouched; the fence's load still re-reads that file, drops the denied node, and the expansion is refused as changed in
+			// flight, its text not delivered. A retry finds the summary gone.
+			const wAgentDir = `${world.agentDir}-icm-cross-forget`;
+			const wSeed = await seedIcmPastSession(world, wAgentDir);
+			const wStore = icmStore(wAgentDir);
+			world.systemOne.enterPhase("w4-build", {});
+			await buildIcmHierarchy(world, wAgentDir, exactOnly(), (hierarchy) => hierarchy.acceptedNodes === 1);
+			const wNotes = icmAcceptedAt(icmLiveStore(world), wStore, 0, 0);
+			if (wNotes === undefined) throw new Error("W4: the notes exact copy is not accepted");
+			const wNotesTxn = `txn:${wNotes.slice(0, 16)}`;
+			const wReader = await world.createRootSession("root", {
+				agentDir: wAgentDir,
+				settings: { memorySystem: undefined },
+			});
+			const wOwner = await world.createRootSession("root", {
+				agentDir: wAgentDir,
+				settings: { memorySystem: undefined },
+			});
+			await withDeadline(
+				trace,
+				"W4 owner history host attached",
+				world.io.waitForMutation(
+					() => wOwner.session.getTranscriptHistoryStatus().hierarchy?.readAccess === "read_only_view",
+				),
+			);
+			// Normal order: before the forget the same expansion opens the exact copy.
+			world.provider.enqueue(
+				"root",
+				calls("w4-open", [
+					{ id: "w4-open-1", name: "memory", arguments: { action: "history_expand", ref: wNotesTxn } },
+				]),
+				{
+					name: "w4-opened",
+					check: (request) => {
+						const expanded = icmLatestResult(request, "memory");
+						if (expanded.isError || !expanded.text.includes("Covered sources"))
+							throw new Error(
+								`W4: the summary does not expand before the forget: ${expanded.text.slice(0, 600)}`,
+							);
+					},
+					reply: { content: [{ type: "text", text: "The notes summary expands." }] },
+				},
+			);
+			world.systemOne.enterPhase("w4-open", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			await withDeadline(
+				trace,
+				"W4 expansion before the forget",
+				wReader.session.prompt("Expand the staging notes summary."),
+			);
+			const wManifestBefore = world.io.peekFile(wStore.manifest);
+			let wFenceHold: ReturnType<HarnessWorld["io"]["holdNext"]> | undefined;
+			const wFenceArmed = createBarrier();
+			mThreads.interceptNext(
+				"lineage",
+				() => {
+					wFenceHold = world.io.holdNext({
+						name: "w4-fence-read",
+						kind: "readFile",
+						matches: (operation) => operation.path === wStore.manifest && !world.io.existsSync(wStore.lock),
+					});
+					wFenceArmed.release();
+				},
+				(message) => {
+					const facts = message as { sessionId?: unknown; fromIndex?: unknown; maxSpans?: unknown };
+					return facts.sessionId === wSeed.sessionId && facts.fromIndex === 0 && facts.maxSpans === 8;
+				},
+			);
+			world.provider.enqueue(
+				"root",
+				calls("w4-expand", [
+					{ id: "w4-expand-1", name: "memory", arguments: { action: "history_expand", ref: wNotesTxn } },
+				]),
+				{
+					name: "w4-refused",
+					check: (request) => {
+						const expanded = icmLatestResult(request, "memory");
+						if (
+							!expanded.isError ||
+							!expanded.text.includes("stale_snapshot") ||
+							!expanded.text.includes("changed while the summary read was in flight") ||
+							expanded.text.includes("Note A1")
+						)
+							throw new Error(
+								`W4: a summary forgotten during its read was delivered: ${expanded.text.slice(0, 600)}`,
+							);
+					},
+					reply: icmCall("w4-expand-2", "memory", { action: "history_expand", ref: wNotesTxn }),
+				},
+				{
+					name: "w4-gone",
+					check: (request) => {
+						const expanded = icmLatestResult(request, "memory");
+						if (!expanded.isError || !expanded.text.includes("not_found"))
+							throw new Error(`W4: the forgotten summary is still expandable: ${expanded.text.slice(0, 600)}`);
+					},
+					reply: { content: [{ type: "text", text: "That session was forgotten." }] },
+				},
+			);
+			world.systemOne.enterPhase("w4-read", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			const wTurn = trace.track(wReader.session.prompt("Expand the staging notes summary again."));
+			try {
+				await withDeadline(trace, "W4 fence read armed", wFenceArmed.promise);
+				const hold = wFenceHold;
+				if (hold === undefined) throw new Error("W4: the fence read hold was not armed");
+				await withDeadline(trace, "W4 fence read reached", hold.reached);
+				const forgotten = await withDeadline(
+					trace,
+					"W4 forget",
+					wOwner.session.forgetHistorySession(wSeed.sessionId),
+				);
+				expect(
+					forgotten.ok,
+					`the coordinator-less owner forgets the session while the read waits at its fence: ${forgotten.message}`,
+				).toBe(true);
+				hold.release();
+				await withDeadline(trace, "W4 reader turn", wTurn);
+			} finally {
+				wFenceHold?.release();
+			}
+			expect(await world.disposeSessionInBody(wReader.session), "the W4 reader disposes cleanly").toBeUndefined();
+			expect(await world.disposeSessionInBody(wOwner.session), "the W4 owner disposes cleanly").toBeUndefined();
+			const wForgetFile = JSON.parse(world.io.peekFile(wStore.forgotten) ?? "null") as {
+				sessions?: Record<string, unknown>;
+			} | null;
+			expect(
+				{
+					manifestUntouched: world.io.peekFile(wStore.manifest) === wManifestBefore,
+					forgotten: Object.keys(wForgetFile?.sessions ?? {}),
+				},
+				"the coordinator-less forget writes the forget file alone, and the fence denies the summary at delivery",
+			).toEqual({ manifestUntouched: true, forgotten: [wSeed.sessionId] });
+			trace.mark("root", "icm.cross-root-forget");
+
 			// M3e (a failed removal write, the due retry on the injected clock): the owner forgets a session while its derived data
 			// cannot be removed (the manifest write fails once). The permanent marker is already durable, so the outcome is
 			// forgotten with the removal pending: the live mirror refuses the session's summary at once (the stored manifest still
@@ -17175,6 +17565,113 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			).toBeUndefined();
 			expect(world.historyClock.armedTimers, "no hierarchy timer stays armed after disposal").toBe(0);
 			trace.mark("root", "icm.failed-removal-retry");
+
+			// W1 (startup lease race): a coordinator that took its lease is held at its discovery listing. Discovery is queued after
+			// its first save and sits outside every store lock section, so reaching the hold is the witness that the first save was
+			// acknowledged under the stale lease. A second coordinator then takes the lease and builds the hierarchy; the held one
+			// resumes and its next save is fenced, so it writes no node file, no manifest, no job list and no ledger, pays for no
+			// summary or admission, and stops with the fence as its recorded cause. The hold must stay outside the lock: a hold inside
+			// a lock section would queue the second coordinator's load behind it, since the lock tail is shared per path in this process.
+			const lAgentDir = `${world.agentDir}-icm-lease-race`;
+			await seedIcmPastSession(world, lAgentDir);
+			const lStore = icmStore(lAgentDir);
+			const lListing = mThreads.holdNextResponse("w1-stale-listing", "sessions");
+			world.systemOne.enterPhase("w1-stale", {});
+			const lStale = await world.createRootSession("root", {
+				agentDir: lAgentDir,
+				settings: icmHierarchySettings(mSummaryTrack),
+			});
+			await withDeadline(trace, "W1 stale coordinator held after its lease", lListing.reached);
+			const lStaleFence = icmStoredManifest(icmLiveStore(world), lStore)?.writerFence;
+			expect(
+				icmHierarchy(lStale.session).disabledReason,
+				"normal order: the stale coordinator is still running before a second coordinator takes the lease",
+			).toBeUndefined();
+			expect(
+				world.provider.getPendingStepNames(mSummaryTrack),
+				"the summary track is idle before the second coordinator",
+			).toEqual([]);
+			if (world.systemOne.enabled) {
+				world.provider.enqueue(mSummaryTrack, text("w1-leaf-summary", ICM_LEAF_SUMMARY), {
+					name: "w1-parent-summary",
+					check: (request) => {
+						if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+							throw new Error("W1: the second coordinator's parent request does not merge the admitted leaf");
+					},
+					reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+				});
+			}
+			world.systemOne.enterPhase("w1-admission", {
+				summary_supported: { kind: "noul", probability: 0.97 },
+				owner_constraints_preserved: { kind: "noul", probability: 0.97 },
+				status_reported_honestly: { kind: "noul", probability: 0.97 },
+			});
+			let lFresh: NonNullable<TranscriptHistoryStatus["hierarchy"]> | undefined;
+			let lFenced: Promise<unknown> | undefined;
+			let lFreshFence: number | undefined;
+			let lManifest: string | undefined;
+			let lJobs: string | undefined;
+			let lLedger: string | undefined;
+			let lTracks = 0;
+			let lAdmissions = 0;
+			let lMark = 0;
+			try {
+				lFresh = await buildIcmHierarchy(world, lAgentDir, icmHierarchySettings(mSummaryTrack), mBuiltCondition);
+				lFreshFence = icmStoredManifest(icmLiveStore(world), lStore)?.writerFence;
+				lManifest = world.io.peekFile(lStore.manifest);
+				lJobs = world.io.peekFile(lStore.jobs);
+				lLedger = world.io.peekFile(lStore.ledger);
+				lTracks = icmTrackRequests(world, mSummaryTrack);
+				lAdmissions = icmAdmissionRequests(world);
+				lMark = world.io.operations.length;
+				lFenced = world.io.waitForOperation(
+					(operation) => operation.kind === "rm" && operation.path === lStore.lock,
+				);
+			} finally {
+				lListing.release();
+			}
+			if (lFresh === undefined || lFenced === undefined) throw new Error("W1: the second coordinator did not build");
+			await withDeadline(trace, "W1 stale coordinator released its store lock", lFenced);
+			// Read before disposal: the refusal is the stale coordinator's own status, which its disposal detaches.
+			const lRefusal = icmHierarchy(lStale.session).disabledReason ?? "";
+			expect(
+				await world.disposeSessionInBody(lStale.session),
+				"the stale coordinator disposes cleanly",
+			).toBeUndefined();
+			const lWrites = world.io.operations
+				.slice(lMark)
+				.filter(
+					(operation) =>
+						["write", "append", "rename", "unlink", "rm"].includes(operation.kind) &&
+						(operation.destination ?? operation.path).startsWith(resolve(lStore.root, "nodes")),
+				).length;
+			expect(
+				{
+					fenceMoved: (lFreshFence ?? 0) - (lStaleFence ?? 0),
+					refusal: lRefusal.includes(`fenced (the writer was superseded; current fence ${lFreshFence})`),
+					nodeWrites: lWrites,
+					manifestUnchanged: world.io.peekFile(lStore.manifest) === lManifest,
+					jobsUnchanged: world.io.peekFile(lStore.jobs) === lJobs,
+					ledgerUnchanged: world.io.peekFile(lStore.ledger) === lLedger,
+					summaries: icmTrackRequests(world, mSummaryTrack) - lTracks,
+					admissions: icmAdmissionRequests(world) - lAdmissions,
+				},
+				"a superseded coordinator's next save is fenced: it writes, publishes and pays nothing, and stops with the fence as its cause",
+			).toEqual({
+				fenceMoved: 1,
+				refusal: true,
+				nodeWrites: 0,
+				manifestUnchanged: true,
+				jobsUnchanged: true,
+				ledgerUnchanged: true,
+				summaries: 0,
+				admissions: 0,
+			});
+			expect(
+				Object.keys(icmStoredManifest(icmLiveStore(world), lStore)?.acceptedNodes ?? {}).length,
+				"the second coordinator's accepted nodes are the ones the store keeps",
+			).toBe(lFresh.acceptedNodes);
+			trace.mark("root", "icm.lease-race");
 
 			// M4: retention revocation and expiry, with a neighbour that stays. Two past sessions carry the same notes; one is aged
 			// thirty days. Model summaries are kept out (no admission egress), so only the two exact copies are built.
