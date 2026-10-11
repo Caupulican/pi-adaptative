@@ -1437,6 +1437,17 @@ export class TranscriptSummaryScheduler {
 		}
 	}
 
+	/**
+	 * Forget every finished job of a session (forgotten sessions keep no budget evidence): their carried attempts would
+	 * otherwise be written again by the next job save, after the session's records were dropped.
+	 */
+	dropTerminalJobsOfSession(sessionId: string): void {
+		for (const id of [...(this.jobsBySession.get(sessionId) ?? [])]) {
+			const job = this.jobs.get(id);
+			if (job && isTerminalSummaryJobState(job.state)) this.removeJob(job);
+		}
+	}
+
 	// ---- internals ----------------------------------------------------------------------------
 
 	private activeCount(): number {
@@ -1636,6 +1647,17 @@ export class TranscriptSummaryScheduler {
 		}
 		if (utf8ByteLength(JSON.stringify(verdict)) > TRANSCRIPT_SUMMARY_MAX_VERDICT_BYTES) {
 			throw new RangeError(`Summary verdict of ${jobId} exceeds ${TRANSCRIPT_SUMMARY_MAX_VERDICT_BYTES} bytes.`);
+		}
+		// A different judgment replaces the kept one (its input or text changed): the receipts the replaced verdict still
+		// owes go to the owner's queue first, never dropped with it.
+		const previous = job.pendingVerdict;
+		if (
+			previous !== undefined &&
+			(previous.inputDigest !== verdict.inputDigest ||
+				previous.contractVersion !== verdict.contractVersion ||
+				previous.textDigest !== verdict.textDigest)
+		) {
+			this.releaseOwedReceipts(job);
 		}
 		job.pendingVerdict = { ...verdict, receipts: verdict.receipts.map((receipt) => ({ ...receipt })) };
 	}

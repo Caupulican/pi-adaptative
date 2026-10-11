@@ -1497,6 +1497,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		// revision must never be adopted while revoked nodes are still indexed (contract C6).
 		await this.applyRevocation(result, epoch, { reason: "forgotten", dropSession: sessionId, droppedReady });
 		// A forgotten session is never summarized again: its anchors and spent budgets can no longer matter.
+		// The session's finished jobs leave the list first: a later job save would write their carried budgets again.
+		this.scheduler?.dropTerminalJobsOfSession(sessionId);
 		const dropped = await this.dropSessionRecords(new Set([sessionId]));
 		if (dropped === true) return undefined;
 		if (dropped === false)
@@ -1600,7 +1602,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			[...this.catalog.values()].some((node) => node.contextRefs.some((ref) => ref.sessionId === sessionId)) ||
 			this.deniedDormantIds(sessionId).size > 0 ||
 			this.catalog.anchoredSessionIds().includes(sessionId) ||
-			(this.scheduler?.holdsSession(sessionId, { liveOnly: true }) ?? false)
+			// Finished jobs count too: applying the forget drops them, so they cannot keep it pending, and a forget skipped
+			// while they remain would let their carried budgets come back with the next job save.
+			(this.scheduler?.holdsSession(sessionId) ?? false)
 		);
 	}
 
@@ -3834,12 +3838,14 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const result = await port.admit(request, signal);
 		// The unit of work is counted as it happened: one semantic request, one transport attempt per paid response.
 		const receipts = this.settleReceipts(port, result.receipts, this.ports.ownerSessionId());
-		scheduler?.addWork(job.id, {
-			semanticRequests: 1,
-			// At least the one request made, even when no usage sink is bound and no paid response carried a receipt.
-			transportAttempts: Math.max(1, receipts.length),
-			receiptsRecorded: countRecorded(receipts),
-		});
+		// The job may have ended (and left the list) while the call was in flight: its receipts are still settled below.
+		if (scheduler?.get(job.id) !== undefined)
+			scheduler.addWork(job.id, {
+				semanticRequests: 1,
+				// At least the one request made, even when no usage sink is bound and no paid response carried a receipt.
+				transportAttempts: Math.max(1, receipts.length),
+				receiptsRecorded: countRecorded(receipts),
+			});
 		if (receipts.some((receipt) => receipt.status === "unrecorded")) {
 			// Kept on the job whatever the disposition: a verdict is not lost, and no receipt is dropped.
 			const kept = await this.keepVerdict(

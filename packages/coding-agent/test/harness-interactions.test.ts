@@ -7405,6 +7405,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				/^History summaries: 1 job\(s\) failed, 0 succeeded \(first cause: attempts_exhausted: The attempt budget is spent: 3 of 3 attempts were started and none completed\.[^\n]*\)\. Exact history recall is unaffected\.$/,
 				// R-invalid: the invalid paid answer ends the leaf (the first of the 'first cause' shapes of a failed job).
 				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_invalid_output: [^\n]+\)\. Exact history recall is unaffected\.$/,
+				// W8: the readmission whose evaluator stays unavailable ends failed with its attempts spent.
+				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_unavailable_attempts_exhausted: [^\n]+\)\. Exact history recall is unaffected\.$/,
 				// R-receipt: the failed usage write itself is reported once (the unrecorded spend), with the write's real cause.
 				/^A System One usage receipt could not be recorded \([^\n]*\); its spend is not in this session's usage record\.$/,
 				// R-receipt: one valid paid answer is kept while its usage receipt cannot be written (exactly one job, the
@@ -12859,11 +12861,17 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					};
 				};
 				const w8Judged = { accepted: 0, rejected: 0, uncertain: 0, unavailable: 0 };
+				const w8Readmitted = { admitted: 0, rejected: 0, uncertain: 0, unavailable: 0 };
+				// The leaf at span 8 holds owner and assistant traffic only, so the evaluator asks the two questions the other leaf rows declare.
+				const w8Judgments = {
+					summary_supported: cAdmission.summary_supported,
+					owner_constraints_preserved: cAdmission.owner_constraints_preserved,
+				};
 
 				const w8o = await w8Build("outage");
 				const w8oJob = () =>
 					icmStoredJobs(icmLiveStore(world), w8o.store).find((job) => job.kind === "readmission");
-				world.systemOne.enterPhase("w8-outage", cAdmission, { outage: true });
+				world.systemOne.enterPhase("w8-outage", w8Judgments, { outage: true });
 				const w8oSession = await world.createRootSession("root", {
 					agentDir: w8o.agentDir,
 					settings: icmHierarchySettings(cTrack),
@@ -12924,7 +12932,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					},
 					judgments: { ...w8Judged, unavailable: 3 },
 					readmission: {
-						...w8Judged,
+						...w8Readmitted,
 						unavailable: 1,
 						waitingFor: { child_not_approved: 1, readmission_failed: 1 },
 					},
@@ -12963,8 +12971,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					work: w8oWork,
 					judgments: w8Judged,
 					readmission: {
-						...w8Judged,
-						unavailable: 0,
+						...w8Readmitted,
 						waitingFor: { child_not_approved: 1, readmission_failed: 1 },
 					},
 					requests: 0,
@@ -12979,7 +12986,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				const w8cBuilt = w8Work(w8c.store);
 				const w8cHeld = createBarrier();
 				const w8cAdmitted = createBarrier();
-				world.systemOne.enterPhase("w8-held", cAdmission, {
+				world.systemOne.enterPhase("w8-held", w8Judgments, {
 					gate: w8cHeld.promise,
 					onAdmit: () => w8cAdmitted.release(),
 				});
@@ -12990,6 +12997,13 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				try {
 					await withDeadline(trace, "W8 judgment held at the evaluator", w8cAdmitted.promise);
 					const w8cHeldWork = icmHierarchy(w8cSession.session).admission?.work;
+					// Before the forget the held claim is durable: the readmission job carries its one started attempt.
+					expect(
+						icmStoredJobs(icmLiveStore(world), w8c.store)
+							.filter((job) => job.kind === "readmission")
+							.map((job) => job.attempts),
+						"the held readmission claim is durable with its one attempt before the forget",
+					).toEqual([1]);
 					const w8cForgot = await withDeadline(
 						trace,
 						"W8 forget while the judgment is held",
@@ -13002,21 +13016,25 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					const w8cEnd = icmHierarchy(w8cSession.session);
 					expect(
 						{
-							cancelled: w8cEnd.counts.cancelled,
 							judgments: w8cEnd.admission?.judgments,
-							// The held claim's attempt was counted when it was admitted; the aborted request added no semantic request.
-							readmissionWork: {
-								attempts: (w8cEnd.admission?.work.logicalAttempts ?? 0) - w8cBuilt.attempts,
-								semanticRequests: (w8cEnd.admission?.work.semanticRequests ?? 0) - w8cBuilt.semanticRequests,
+							// The held call added no semantic request; its claim added one attempt on top of the build's.
+							heldClaim: {
+								attempts: (w8cHeldWork?.logicalAttempts ?? -1) - w8cBuilt.attempts,
+								semanticRequests: (w8cHeldWork?.semanticRequests ?? -1) - w8cBuilt.semanticRequests,
 							},
-							unchangedByCancel: w8cEnd.admission?.work,
+							// A permanently forgotten session keeps no job-derived work: every job of the session (the cancelled
+							// readmission and the build's finished jobs) left the list, so nothing of it is counted.
+							afterForget: {
+								attempts: w8cEnd.admission?.work.logicalAttempts,
+								semanticRequests: w8cEnd.admission?.work.semanticRequests,
+								cancelledJobs: w8cEnd.counts.cancelled,
+							},
 						},
-						"a forget cancels the held readmission job: no judgment, no semantic request, and its claim keeps its attempt",
+						"a forget cancels the held readmission job: no judgment, no semantic request, and the session's jobs leave the list",
 					).toEqual({
-						cancelled: 1,
 						judgments: w8Judged,
-						readmissionWork: { attempts: 1, semanticRequests: 0 },
-						unchangedByCancel: w8cHeldWork,
+						heldClaim: { attempts: 1, semanticRequests: 0 },
+						afterForget: { attempts: 0, semanticRequests: 0, cancelledJobs: 0 },
 					});
 				} finally {
 					w8cHeld.release();
@@ -13025,6 +13043,40 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					await world.disposeSessionInBody(w8cSession.session),
 					"the cancel owner disposes cleanly",
 				).toBeUndefined();
+				// The forgotten session keeps no budget evidence: after the ordinary save of the stop, and again after a restart's own
+				// save, no job and no proof record of it is stored (a later save does not write its carried attempts back).
+				const w8cStored = () => ({
+					jobs: icmStoredJobs(icmLiveStore(world), w8c.store).length,
+					proof: Object.values(icmStoredLedger(icmLiveStore(world), w8c.store)).filter(
+						(record) => (record as { sessionId?: string }).sessionId === w8c.sessionId,
+					).length,
+				});
+				expect(
+					w8cStored(),
+					"after the stop's save no job or proof record of the forgotten session is stored",
+				).toEqual({
+					jobs: 0,
+					proof: 0,
+				});
+				const w8cSaved = icmObserveNextJobsSave(world, w8c.store, "w8-cancel-restart-save");
+				world.systemOne.enterPhase("w8-cancel-restart", {});
+				const w8cRestart = await world.createRootSession("root", {
+					agentDir: w8c.agentDir,
+					settings: icmHierarchySettings(cTrack),
+				});
+				await withDeadline(
+					trace,
+					"W8 cancel restart saved",
+					world.io.waitForMutation(() => w8cSaved() !== undefined),
+				);
+				expect(
+					await world.disposeSessionInBody(w8cRestart.session),
+					"the cancel restart disposes cleanly",
+				).toBeUndefined();
+				expect(w8cStored(), "after a restart's save the forgotten session is still absent").toEqual({
+					jobs: 0,
+					proof: 0,
+				});
 				trace.mark("root", "icm.readmission-outage-cancel");
 
 				// R-egress: the admission egress switch is read live. With it off the model leaf is held before any call (no
@@ -13707,6 +13759,8 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			warningAllowances: [
 				/^History summaries: 1 model summary job\(s\) are held: System One is not bound to this session, so no admission judgment can run\. Exact copies and exact history recall are unaffected\.$/,
 				/^History summaries: \d+ model summary job\(s\) are held: external summary admission egress is not allowed by settings: the evaluator is a remote service and a local summary model does not make it local\. Exact copies and exact history recall are unaffected\.$/,
+				// W1: the stale coordinator's first save after another coordinator took the lease is fenced, and it stops with that cause.
+				/^History summaries stopped: saving jobs was refused: fenced \(the writer was superseded; current fence \d+\)\. Exact history recall is unaffected\.$/,
 			],
 			files: {
 				[projectPath("src", "limits.ts")]: ORIGINAL_LIMITS,
