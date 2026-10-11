@@ -311,6 +311,9 @@ export class TranscriptHierarchyHost {
 		const repaired = await this.openStore().repairForgottenSessions(true);
 		if (repaired.status === "repaired") {
 			this.view = undefined;
+			// A coordinator that stopped on the unknown state is replaced only by a changed signature: it is made to differ so
+			// the restart this repair exists for actually happens.
+			this.appliedSignature = undefined;
 			await this.request();
 			return {
 				ok: true,

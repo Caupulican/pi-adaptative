@@ -720,7 +720,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				// The session exists only after this reviewer does: the warning path is bound once it does.
 				onReceiptUnrecorded: (receipt) =>
 					unrecordedReceiptWarning.notify?.(
-						`A System One usage receipt could not be recorded (${receipt.cause ?? "write failed"}); its spend is not in this session's usage record.`,
+						`A System One usage receipt could not be recorded (${receipt.cause || "write failed"}); its spend is not in this session's usage record.`,
 					),
 				fetch: options.systemOneFetch,
 				credentialBoundary: systemOneCredentialBoundary,

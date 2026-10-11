@@ -223,8 +223,17 @@ export class SystemOneJevAdapter implements JevAdapter {
 		const deadline = timeoutMs !== undefined ? AbortSignal.timeout(timeoutMs) : undefined;
 		const signal =
 			deadline && options?.signal ? AbortSignal.any([options.signal, deadline]) : (deadline ?? options?.signal);
+		// A timeout that follows a paid response still owes that response's receipts.
 		const timedOut = () =>
-			new JevAdapterFailure("timeout", `System One evaluation exceeded its ${timeoutMs} ms budget`, impact);
+			new JevAdapterFailure(
+				"timeout",
+				`System One evaluation exceeded its ${timeoutMs} ms budget`,
+				impact,
+				undefined,
+				lastError instanceof SystemOneReviewError || lastError instanceof SystemOneObserverError
+					? lastError.receipts
+					: undefined,
+			);
 
 		while (attempts < maxAttempts) {
 			if (deadline?.aborted && !options?.signal?.aborted) throw timedOut();

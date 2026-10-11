@@ -461,7 +461,7 @@ interface ParkedHold {
 
 type JobOutcome =
 	| { kind: "node"; node: TranscriptSummaryNode }
-	| { kind: "held"; scope: HoldScope; reason: string; retry?: false }
+	| { kind: "held"; scope: HoldScope; reason: string }
 	| { kind: "fail"; failure: TranscriptSummaryFailure }
 	/** The claim lost its spending authority before any provider call: returned, never below the durable floor. */
 	| { kind: "abandoned"; reason: string }
@@ -948,6 +948,23 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	constructor(ports: TranscriptMemoryPorts) {
 		this.ports = ports;
+		// Reads of a forgotten session's text are refused at the catalog's one read gate from the moment it is recorded,
+		// while the nodes stay indexed for the removal that follows.
+		this.catalog.setDenial((node) => this.nodeDenied(node));
+	}
+
+	/** Whether the permanent forget state denies this node: its session, a session it consulted, or any summary it is built on. */
+	private nodeDenied(node: TranscriptSummaryNode, seen: Set<string> = new Set()): boolean {
+		if (this.forgottenSessions.size === 0) return false;
+		if (this.forgottenSessions.has(node.sessionId)) return true;
+		if (node.contextRefs.some((ref) => this.forgottenSessions.has(ref.sessionId))) return true;
+		for (const childId of node.children ?? []) {
+			if (seen.has(childId)) continue;
+			seen.add(childId);
+			const child = this.catalog.get(childId);
+			if (child !== undefined && this.nodeDenied(child, seen)) return true;
+		}
+		return false;
 	}
 
 	// ---- lifecycle ----------------------------------------------------------------------------
@@ -1208,11 +1225,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		return denied;
 	}
 
-	/** Take the denied nodes out of the mirror at once: a forgotten session is not served while its removal is pending. */
-	private hideForgotten(): void {
-		for (const id of this.deniedNodeIds(this.catalog.values())) this.catalog.unindex(id);
-	}
-
 	private loadMirror(state: TranscriptSummaryStoreState): void {
 		const manifest = state.manifest;
 		this.manifestRevision = manifest?.revision ?? 0;
@@ -1233,14 +1245,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			for (const sessionId of state.forgotten.sessions) this.forgottenSessions.add(sessionId);
 			this.forgetRevision = state.forgotten.revision;
 		}
-		const deniedNodes = this.deniedNodeIds(state.nodes.values());
-		this.catalog.replace(
-			[...state.nodes.values()].filter((node) => !deniedNodes.has(node.id)),
-			state.retentionAnchors,
-		);
+		// Denied nodes stay indexed (the removal of a forgotten session's data finds them there); reads refuse them at the gate.
+		this.catalog.replace(state.nodes.values(), state.retentionAnchors);
 		this.dormant.clear();
-		const deniedDormant = this.deniedNodeIds(state.dormant.values());
-		for (const [id, node] of state.dormant) if (!deniedDormant.has(id)) this.dormant.set(id, node);
+		for (const [id, node] of state.dormant) this.dormant.set(id, node);
 	}
 
 	/**
@@ -1428,6 +1436,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// The marker is durable: the session is denied now. The file may also hold sessions another root forgot, so the whole
 			// state is adopted (and every pending removal applied) instead of only this revision number.
 			this.forgottenSessions.add(sessionId);
+			// Whatever the state read and the removal do next, the session's own model work stops now.
+			this.abortSession(sessionId);
+			this.endSessionJobs(sessionId, "cancelled");
 			const pending = await this.refreshForgetState(scheduled);
 			outcome = pending === undefined ? { status: "forgotten" } : { status: "forgotten", cleanupPending: pending };
 			this.pump(scheduled);
@@ -1452,8 +1463,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const writer = this.writer;
 		if (!writer || !this.scheduler || !this.live(epoch))
 			return "the memory generation changed before the removal ran";
-		// Denied before anything can fail: readers of this mirror no longer see the session, whether or not the write below lands.
-		this.hideForgotten();
 		this.abortSession(sessionId);
 		const droppedReady = this.endSessionJobs(sessionId, "cancelled");
 		const result = await writer.revokeNodes(
@@ -1526,12 +1535,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// An unknown state is never read as "nothing forgotten": the coordinator stops with the cause.
 			if (read.status === "unknown") this.fatal(`the permanent forget state became unknown: ${read.reason}`);
 			else this.noteInternalCause(`reading the permanent forget state: ${read.reason}`);
-			this.hideForgotten();
 			return `reading the permanent forget state: ${read.reason}`;
 		}
 		for (const sessionId of read.sessions) this.forgottenSessions.add(sessionId);
 		this.forgetRevision = read.revision;
-		this.hideForgotten();
 		return this.applyPendingForgets(epoch);
 	}
 
@@ -1766,6 +1773,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const selection = this.frontiers.get(lineageKey);
 		const nodes = this.catalog.sessionNodes(lineageKey);
 		if (!selection || !nodes) return undefined;
+		// A forgotten session's frontier, or one naming a denied summary, is never described.
+		if (this.forgottenSessions.has(lineageKey) || [...nodes.values()].some((node) => this.nodeDenied(node))) {
+			return undefined;
+		}
 		// A late retention wake must never expose expired derived text: the frontier is withheld until it is revoked.
 		if (this.frontierExpired(lineageKey)) return undefined;
 		// Likewise a summary without a current admission is never described until it is re-admitted.
@@ -3700,7 +3711,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			const recordedNow = countRecorded(settled) - countRecorded(owed.receipts);
 			if (settled.some((receipt) => receipt.status === "unrecorded")) {
 				scheduler?.addWork(job.id, { receiptsRecorded: recordedNow });
-				return { outcome: this.receiptHold(settled, owed.ownerSessionId === this.ports.ownerSessionId()) };
+				return { outcome: this.receiptHold(settled) };
 			}
 			scheduler?.addWork(job.id, { reused: 1, receiptsRecorded: recordedNow });
 			const result = resultFromVerdict(owed, settled);
@@ -3758,7 +3769,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	}
 
 	/** The hold for a paid answer whose usage receipt is owed: the real cause of the first receipt that is still unwritten. */
-	private receiptHold(receipts: readonly SystemOneReceipt[], retry = true): JobOutcome {
+	private receiptHold(receipts: readonly SystemOneReceipt[]): JobOutcome {
 		const owed = receipts.find((receipt) => receipt.status === "unrecorded");
 		const cause = owed?.cause ?? "the usage receipt was not recorded";
 		this.noteInternalCause(`a paid evaluator answer is held for its usage receipt: ${cause}`);
@@ -3766,7 +3777,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			kind: "held",
 			scope: "usage_receipt",
 			reason: holdReason(cause, "the paid answer is kept and its usage receipt is retried; it is not bought again"),
-			...(retry ? {} : { retry: false as const }),
 		};
 	}
 
@@ -3811,7 +3821,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			const [settled] = this.settleReceipts(port, [entry.receipt], entry.ownerSessionId);
 			if (settled?.status === "unrecorded") still.push({ ownerSessionId: entry.ownerSessionId, receipt: settled });
 		}
-		if (still.length === 0) return;
+		if (still.length === 0) {
+			this.receiptRetryFailures = 0;
+			return;
+		}
 		scheduler.returnReleasedReceipts(still);
 		this.noteInternalCause(
 			`${still.length} usage receipt(s) of ended jobs are still owed: ${still[0]?.receipt.cause ?? "not recorded"}`,
@@ -3946,8 +3959,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			if (paidCall) scheduler.interrupt(job.id, now);
 			else scheduler.abandonClaim(token, { message: outcome.reason, reason: "usage_receipt_pending" }, now);
 			this.parked.set(job.id, { scope: "usage_receipt", reason: outcome.reason });
-			// A receipt owed to another session waits for that session; retrying it here would only write nothing, forever.
-			if (outcome.retry !== false) this.armReceiptRetry();
+			// Every owed receipt is retried on the bounded backoff, including one owed to another session (it waits, at the
+			// slowest step, for that session to be this one): a parked job is never left without a wake.
+			this.armReceiptRetry();
 			this.markJobsDirty();
 			this.pump(epoch);
 			return;
@@ -4931,7 +4945,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		cause: string,
 	): TranscriptReadmissionWait {
 		// A wait is a normal state of the judgment, not a fault: it is an event, and never overwrites the active fault cause.
-		this.noteBenignEvent(`re-admission of ${node.id.slice(0, 16)}: ${cause}`);
+		// A permanent refusal of a source read is a fault.
+		const record = `re-admission of ${node.id.slice(0, 16)}: ${cause}`;
+		if (wait === "source_read_refused") this.noteInternalCause(record);
+		else this.noteBenignEvent(record);
 		return wait;
 	}
 

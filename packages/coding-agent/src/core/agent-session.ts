@@ -3412,11 +3412,12 @@ export class AgentSession {
 		return this._memory.memoryRestoreManaged(target);
 	}
 
-	/** Operator authority: forget one session's derived history summaries; the canonical session is untouched. */
+	/** Operator authority: repair an unknown permanent forget state (a damaged, rolled-back or missing file). */
 	repairHistoryForgetState(): Promise<{ ok: boolean; message: string }> {
 		return this._memory.repairHistoryForgetState();
 	}
 
+	/** Operator authority: forget one session's derived history summaries; the canonical session is untouched. */
 	forgetHistorySession(sessionId: string): Promise<{ ok: boolean; message: string }> {
 		return this._memory.forgetHistorySession(sessionId);
 	}

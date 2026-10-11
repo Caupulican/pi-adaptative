@@ -109,7 +109,7 @@ function leafKey(sessionId: string, fromIndex: number): string {
 }
 
 /** Why a node's text cannot be read now; see {@link TranscriptSummaryCatalog.readRefusal}. */
-export type ReadRefusal = "expired" | "age_unknown" | "unapproved";
+export type ReadRefusal = "expired" | "age_unknown" | "unapproved" | "forgotten";
 
 /**
  * Why a node's dependencies do not vouch for its text: `moved` (the live range holds other parts),
@@ -261,6 +261,12 @@ function refusalReply(
 	refusal: ReadRefusal,
 	context: TranscriptSummaryExpansionContext,
 ): TranscriptNodeExpansion {
+	if (refusal === "forgotten") {
+		return {
+			status: "not_found",
+			reason: "this summary belongs to a forgotten session and is not served; exact source recall is unaffected",
+		};
+	}
 	if (refusal === "expired") {
 		return {
 			status: "expired",
@@ -305,6 +311,11 @@ export class TranscriptSummaryCatalog {
 	/** Retention instant per node id (`null`: nothing to age it by). Cleared when anchors or nodes change. */
 	private readonly retentionTimes = new Map<string, number | null>();
 	private retentionDeadline: { days: number; at: number | undefined } | undefined;
+	/**
+	 * Whether the permanent forget state denies a node (set by the coordinator that owns that state). Denied nodes stay
+	 * indexed, so the removal of their data still finds them, but no read of their text is ever served.
+	 */
+	private denial: ((node: TranscriptSummaryNode) => boolean) | undefined;
 	/**
 	 * Dependency ranges by node id; complete ones of indexed nodes only, so `unindex` and `replace` bound it. Ids are
 	 * content addresses, so an entry never goes stale.
@@ -549,10 +560,16 @@ export class TranscriptSummaryCatalog {
 	 * no retention age to judge it by while retention is on (never treated as ageless), or not approved.
 	 */
 	readRefusal(node: TranscriptSummaryNode, cutoff: number | undefined): ReadRefusal | undefined {
+		if (this.denial?.(node)) return "forgotten";
 		if (this.isNodeExpired(node, cutoff)) return "expired";
 		if (cutoff !== undefined && this.nodeRetentionTime(node) === undefined) return "age_unknown";
 		if (!this.isApproved(node)) return "unapproved";
 		return undefined;
+	}
+
+	/** Install the predicate that denies reading a node (the permanent forget state); undefined removes it. */
+	setDenial(denial: ((node: TranscriptSummaryNode) => boolean) | undefined): void {
+		this.denial = denial;
 	}
 
 	/** The reply for the first of these nodes whose text cannot be read under `cutoff`. */
