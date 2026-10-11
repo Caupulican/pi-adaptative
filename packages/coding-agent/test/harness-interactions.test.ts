@@ -556,6 +556,11 @@ const ICM_OLD_PREFIX_CHARS = 8_000;
 const ICM_DECISION =
 	"Decision ZEPHYR-7: keep the retry budget at seven per hour; never raise it without owner approval.";
 const ICM_DECISION_REPLY = "Recorded decision ZEPHYR-7.";
+/**
+ * The decision reply of the credential row: a Google-style key that the admission's credential check refuses, written so the
+ * transcript's secret filter keeps the entry. The key is joined from two literals so no source line carries a whole key.
+ */
+const ICM_CREDENTIAL_REPLY = `${ICM_DECISION_REPLY} Staging maps key ${["AIza", "0123456789abcdefghijklmnopqrstuvwxy"].join("")}.`;
 const ICM_DECISION_QUERY = "retry budget seven per hour";
 const ICM_NOTES_QUERY = "staging host quiet";
 const ICM_TAIL_REQUEST = "Check the zephyr settings file.";
@@ -733,7 +738,9 @@ function icmReadsOf(world: HarnessWorld, file: string, from: number): number {
 async function seedIcmPastSession(
 	world: HarnessWorld,
 	agentDir: string,
+	options: { readonly decisionReply?: string } = {},
 ): Promise<{ readonly sessionId: string; readonly file: string }> {
+	const decisionReply = options.decisionReply ?? ICM_DECISION_REPLY;
 	const noteTexts = ICM_NOTES.flat();
 	const renderedNotes = ICM_NOTES.flatMap(([note, reply]) => [`user: ${note}`, `assistant: ${reply}`]).join("\n");
 	const logTexts = [
@@ -744,7 +751,7 @@ async function seedIcmPastSession(
 		ICM_LOG_CONTINUE,
 		icmRolloutLog(ICM_LOG_WAVES[2]),
 		ICM_DECISION,
-		ICM_DECISION_REPLY,
+		decisionReply,
 	];
 	if (Buffer.byteLength(renderedNotes) > TRANSCRIPT_SUMMARY_TARGET_BYTES)
 		throw new Error("the seeded notes no longer fit the exact-copy target");
@@ -764,7 +771,7 @@ async function seedIcmPastSession(
 		"root",
 		...ICM_NOTES.map(([, reply], index) => text(`icm-seed-note-${index + 1}`, reply)),
 		...ICM_LOG_WAVES.map((wave) => text(`icm-seed-log-${wave}`, icmRolloutLog(wave))),
-		text("icm-seed-decision", ICM_DECISION_REPLY),
+		text("icm-seed-decision", decisionReply),
 		calls("icm-seed-tail-call", [{ id: "icm-seed-tail-1", name: "bash", arguments: { command: ICM_TAIL_COMMAND } }]),
 		text("icm-seed-tail-reply", ICM_TAIL_REPLY),
 	);
@@ -946,6 +953,8 @@ function icmStoredLedger(
 interface IcmStoredManifest {
 	readonly revision: number;
 	readonly writerFence?: number;
+	/** The forget revision the manifest has applied; absent until a forget was recorded as carried out. */
+	readonly forgetRevisionApplied?: number;
 	readonly sessions: Record<string, { readonly coveredSpanCount: number; readonly lineageDigest: string }>;
 	readonly acceptedNodes: Record<
 		string,
@@ -956,6 +965,12 @@ interface IcmStoredManifest {
 function icmStoredManifest(read: IcmStoreRead, store: IcmStore): IcmStoredManifest | undefined {
 	const text = read(store.manifest);
 	return text === undefined ? undefined : (JSON.parse(text) as IcmStoredManifest);
+}
+
+/** The forget revision the store's forget file holds; 0 when no forget was ever recorded in that store. */
+function icmForgetRevision(read: IcmStoreRead, store: IcmStore): number {
+	const text = read(store.forgotten);
+	return text === undefined ? 0 : (JSON.parse(text) as { revision: number }).revision;
 }
 
 /** The accepted node at `level` starting at `fromIndex`, by id; undefined when none is accepted. */
@@ -974,16 +989,19 @@ function icmJobAt(
 	return icmStoredJobs(read, store).find((job) => job.kind === kind && job.spanRange.fromIndex === fromIndex);
 }
 
+/** A jobs save as committed: its job list, its ledger, and the manifest's applied forget revision at that moment. */
+interface IcmObservedSave {
+	readonly jobs: IcmStoredJob[];
+	readonly ledger: ReturnType<typeof icmStoredLedger>;
+	readonly forgetRevisionApplied: number;
+}
+
 /**
  * Captures the job list and ledger the moment the next save commits its job list (just after its rename): what a
  * restart persisted first. A non-perturbing observation; the close fails if no save commits.
  */
-function icmObserveNextJobsSave(
-	world: HarnessWorld,
-	store: IcmStore,
-	name: string,
-): () => { readonly jobs: IcmStoredJob[]; readonly ledger: ReturnType<typeof icmStoredLedger> } | undefined {
-	let saved: { jobs: IcmStoredJob[]; ledger: ReturnType<typeof icmStoredLedger> } | undefined;
+function icmObserveNextJobsSave(world: HarnessWorld, store: IcmStore, name: string): () => IcmObservedSave | undefined {
+	let saved: IcmObservedSave | undefined;
 	world.io.observeNext({
 		name,
 		kind: "rename",
@@ -991,7 +1009,11 @@ function icmObserveNextJobsSave(
 		matches: (operation) => operation.destination === store.jobs,
 		onMatch: () => {
 			const live = icmLiveStore(world);
-			saved = { jobs: icmStoredJobs(live, store), ledger: icmStoredLedger(live, store) };
+			saved = {
+				jobs: icmStoredJobs(live, store),
+				ledger: icmStoredLedger(live, store),
+				forgetRevisionApplied: icmStoredManifest(live, store)?.forgetRevisionApplied ?? 0,
+			};
 		},
 	});
 	return () => saved;
@@ -7407,6 +7429,11 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				/^History summaries: 1 job\(s\) failed, 0 succeeded \(first cause: attempts_exhausted: The attempt budget is spent: 3 of 3 attempts were started and none completed\.[^\n]*\)\. Exact history recall is unaffected\.$/,
 				// R-invalid: the invalid paid answer ends the leaf (the first of the 'first cause' shapes of a failed job).
 				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_invalid_output: [^\n]+\)\. Exact history recall is unaffected\.$/,
+				// R-credential: a credential-shaped string in the leaf's admission payload is refused before anything is sent (a policy failure).
+				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_request_refused: [^\n]+\)\. Exact history recall is unaffected\.$/,
+				// R-owed shutdown: the refused stop's terminal warning. The disposed session has no live warning sink, so the warning is held
+				// by the foreground lifecycle and never emitted; this entry applies only if a sink exists again.
+				/^History summaries stopped: the owed-receipt queue update was not saved \(\d+ (?:entry|entries) newer than the last saved queue; older queue and job-record copies are kept\); cause: [^\n]+\. Exact history recall is unaffected\.$/,
 				// W8: the readmission whose evaluator stays unavailable ends failed with its attempts spent.
 				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_unavailable_attempts_exhausted: [^\n]+\)\. Exact history recall is unaffected\.$/,
 				// N-cancel: the neighbour's parent stays parked on its failed child.
@@ -13100,6 +13127,23 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					}
 					const roDisposed = await world.disposeSessionInBody(roFirst.session);
 					expect(roDisposed, `${roVariant}: the owner disposes without throwing`).toBeUndefined();
+					// The refused stop names the owed queue it could not save, its pending count and the refused fault, as its terminal
+					// cause. The dispose clears the session's listeners before the memory shutdown, so the cause is read after the dispose
+					// from the operator status, where the host keeps the stop's reason. Only the refused stop carries it.
+					const roStopCause = roFirst.session.getTranscriptHistoryStatus().hierarchy?.disabledReason ?? "";
+					expect(
+						{
+							queueNotSaved: /owed-receipt queue update was not saved \(1 entr(?:y|ies) newer/.test(roStopCause),
+							fault: roStopCause.includes("EIO") && roStopCause.includes("ro-stop-owed-write"),
+						},
+						roVariant === "shutdown"
+							? "the refused stop names the unsaved owed queue, its pending count and the refused fault"
+							: `${roVariant}: the stop names no unsaved owed queue`,
+					).toEqual(
+						roVariant === "shutdown"
+							? { queueNotSaved: true, fault: true }
+							: { queueNotSaved: false, fault: false },
+					);
 					if (roVariant !== "retry") {
 						// The actual shutdown boundary: the stop wrote the owed queue before the jobs that no longer carry the receipt.
 						expect(
@@ -13570,6 +13614,15 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							.map((job) => job.attempts),
 						"the held readmission claim is durable with its one attempt before the forget",
 					).toEqual([1]);
+					// Before the forget the store records no applied forget revision and holds no forget file: the revision the witness below
+					// reaches is one the forget itself wrote.
+					expect(
+						{
+							applied: icmStoredManifest(icmLiveStore(world), w8c.store)?.forgetRevisionApplied ?? 0,
+							forgetRevision: icmForgetRevision(icmLiveStore(world), w8c.store),
+						},
+						"before the forget the store records no applied forget revision and holds no forget file",
+					).toEqual({ applied: 0, forgetRevision: 0 });
 					const w8cForgetSave = icmObserveNextJobsSave(world, w8c.store, "w8-cancel-forget-save");
 					const w8cForgot = await withDeadline(
 						trace,
@@ -13597,6 +13650,29 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						},
 						"the save that follows the forget writes no job and no proof record of the forgotten session",
 					).toEqual({ jobs: 0, proof: 0 });
+					// The save that followed the forget landed before its revision was recorded as applied: the store still reads below the
+					// forget file's revision at that save. The coordinator is still running and nothing else arrives, so the applied
+					// revision is recorded from that save alone; the stored manifest reaches the forget file's revision by itself.
+					const w8cForgetRevision = icmForgetRevision(icmLiveStore(world), w8c.store);
+					expect(
+						{ appliedAtForgetSave: w8cLive?.forgetRevisionApplied, forgetRecorded: w8cForgetRevision > 0 },
+						"the forget's own save lands before its revision is recorded as applied",
+					).toEqual({ appliedAtForgetSave: 0, forgetRecorded: true });
+					await withDeadline(
+						trace,
+						"W8 cancel applied forget revision recorded while idle",
+						world.io.waitForMutation(
+							() =>
+								icmStoredManifest(icmLiveStore(world), w8c.store)?.forgetRevisionApplied === w8cForgetRevision,
+						),
+					);
+					expect(
+						{
+							applied: icmStoredManifest(icmLiveStore(world), w8c.store)?.forgetRevisionApplied,
+							forgetRevision: icmForgetRevision(icmLiveStore(world), w8c.store),
+						},
+						"once idle the stored applied forget revision equals the forget file's revision",
+					).toEqual({ applied: w8cForgetRevision, forgetRevision: w8cForgetRevision });
 					const w8cEnd = icmHierarchy(w8cSession.session);
 					expect(
 						{
@@ -14028,6 +14104,109 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					"the invalid-answer session disposes cleanly",
 				).toBeUndefined();
 				trace.mark("root", "icm.invalid-output");
+
+				// R-credential: a credential-shaped string in the leaf's admission payload is refused by the admission adapter before anything
+				// is sent. The refusal is a policy failure, never an outage: one summarizer request, no admission request, no intended outage,
+				// one attempt, no retry wait, and the failure is reported once. The owner's exact history still finds the decision the leaf covers.
+				const crAgentDir = `${world.agentDir}-icm-credential`;
+				const crStore = icmStore(crAgentDir);
+				const crSeed = await seedIcmPastSession(world, crAgentDir, { decisionReply: ICM_CREDENTIAL_REPLY });
+				world.provider.enqueue(cTrack, text("cr-leaf-summary", ICM_LEAF_SUMMARY));
+				// No judgment is declared: an admission request that reached the transport would be unscripted, which fails the journey.
+				world.systemOne.enterPhase("cr-refused", {});
+				const crBefore = {
+					summaries: icmTrackRequests(world, cTrack),
+					admissions: icmAdmissionRequests(world),
+					outages: world.systemOne.intendedOutages.length,
+				};
+				const crOwner = await world.createRootSession("root", {
+					agentDir: crAgentDir,
+					settings: icmHierarchySettings(cTrack),
+				});
+				await withDeadline(
+					trace,
+					"R-credential leaf refused at admission",
+					world.io.waitForMutation(() =>
+						(crOwner.session.getTranscriptHistoryStatus().hierarchy?.failures ?? []).some(
+							(failure) => failure.reason === "admission_request_refused",
+						),
+					),
+				);
+				const crDone = icmHierarchy(crOwner.session);
+				const crLeaf = icmJobAt(cLive, crStore, "leaf", 8);
+				expect(
+					{
+						failures: crDone.failures.map((failure) => failure.reason),
+						requests: {
+							summaries: icmTrackRequests(world, cTrack) - crBefore.summaries,
+							admissions: icmAdmissionRequests(world) - crBefore.admissions,
+						},
+						outages: world.systemOne.intendedOutages.length - crBefore.outages,
+						retryWait: crDone.counts.retry_wait ?? 0,
+						leaf: { state: crLeaf?.state, attempts: crLeaf?.attempts },
+					},
+					"a credential in the leaf's admission payload is refused before any request, once, without an outage retry",
+				).toEqual({
+					failures: ["admission_request_refused"],
+					requests: { summaries: 1, admissions: 0 },
+					outages: 0,
+					retryWait: 0,
+					leaf: { state: "failed", attempts: 1 },
+				});
+				// The decision the refused leaf covers is still exact history: the owner's own text is found, not a summary of it.
+				let crRecalled = false;
+				world.systemOne.enterPhase("cr-recall", ICM_INTAKE_JUDGMENTS);
+				world.provider.enqueue(
+					"root",
+					{
+						name: "cr-search",
+						reply: icmCall("cr-search-1", "memory", { action: "history_search", query: ICM_DECISION_QUERY }),
+					},
+					icmAfterHistoryRead(
+						"cr-decision-found",
+						"memory",
+						{ id: "cr-search-1", arguments: { action: "history_search", query: ICM_DECISION_QUERY } },
+						(result) => {
+							if (result.isError || result.text.includes("No matching history was found."))
+								throw new Error(`the decision search did not succeed: ${result.text.slice(0, 600)}`);
+							const hit = icmHits(result.text).find(
+								(candidate) =>
+									candidate.description.includes(`session ${crSeed.sessionId}`) &&
+									candidate.description.includes(", user") &&
+									candidate.line.includes("retry budget"),
+							);
+							if (hit === undefined)
+								throw new Error(`the owner's decision is not a hit: ${result.text.slice(0, 900)}`);
+							crRecalled = true;
+							return { content: [{ type: "text", text: "The decision is retained." }] };
+						},
+					),
+				);
+				await withDeadline(
+					trace,
+					"R-credential exact recall",
+					crOwner.session.prompt("Find the retry budget decision."),
+				);
+				expect(
+					{
+						recalled: crRecalled,
+						failures: icmHierarchy(crOwner.session).failures.map((failure) => failure.reason),
+						requests: {
+							summaries: icmTrackRequests(world, cTrack) - crBefore.summaries,
+							admissions: icmAdmissionRequests(world) - crBefore.admissions,
+						},
+					},
+					"the owner's exact decision is still recalled after the refusal, and the refusal is not repeated",
+				).toEqual({
+					recalled: true,
+					failures: ["admission_request_refused"],
+					requests: { summaries: 1, admissions: 0 },
+				});
+				expect(
+					await world.disposeSessionInBody(crOwner.session),
+					"the credential-refusal owner disposes cleanly",
+				).toBeUndefined();
+				trace.mark("root", "icm.credential-refused");
 			}
 		},
 	);

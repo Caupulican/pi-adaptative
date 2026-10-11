@@ -613,6 +613,11 @@ function receiptCause(error: unknown): string {
 	return bounded(message.length > 0 ? message : "the usage write failed", 200);
 }
 
+/** The identity of one owed receipt: its owner session and report id. */
+function owedKey(entry: { ownerSessionId: string; receipt: SystemOneReceipt }): string {
+	return `${entry.ownerSessionId}\u0000${entry.receipt.reportId}`;
+}
+
 function countRecorded(receipts: readonly SystemOneReceipt[]): number {
 	return receipts.filter((receipt) => receipt.status === "recorded").length;
 }
@@ -961,6 +966,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private jobsDirty = false;
 	/** The released-receipt queue version last made durable in `owed-receipts.json`. */
 	private owedReceiptsSavedVersion = 0;
+	/** Keys (owner session + report id) of the entries in the last owed queue made durable, for the stop's count of newer ones. */
+	private owedSavedKeys = new Set<string>();
 	private recoveryIssues: string[] = [];
 	private readonly recentFailures: TranscriptMemoryFailureRecord[] = [];
 	/** Written only by {@link noteInternalCause}. */
@@ -1111,6 +1118,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		scheduler.returnReleasedReceipts(owed);
 		this.owedReceiptsSavedVersion = scheduler.releasedReceiptsState().version;
+		this.owedSavedKeys = new Set(owed.map(owedKey));
 		scheduler.recover(state.jobs, now, new Map([...this.catalog.values()].map((node) => [node.id, node])));
 		// Jobs and nodes of an older capture version name inputs that are no longer current identities. Their jobs end
 		// stale before anything is claimed (a started attempt is carried under its version 1 key, where the current job
@@ -1354,18 +1362,19 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				if (job.state === "running" && scheduler.interrupt(job.id, now)) interrupted += 1;
 			}
 		}
+		let stopReason: string | undefined;
 		if (scheduler && writer) {
 			// The stop always reaches its terminal signal; a save that failed keeps its real cause for the status.
 			try {
 				const saved = await this.saveJobsInOrder(scheduler, writer, this.epoch, scheduler.snapshot());
-				// An unsaved queue already recorded its real cause (saveOwedReceipts); the stop adds what that leaves unsaved.
+				// An unsaved queue update ends this run: its terminal event (shown by the host and persisted) names it. Older copies
+				// of a receipt (the last saved queue, the job record) are kept by a failed queue write, so only the entries newer
+				// than the last saved queue are counted, and nothing is claimed lost.
 				if (saved === undefined) {
-					const owed = scheduler.releasedReceiptsState().entries.length;
-					if (owed > 0) {
-						this.noteInternalCause(
-							`the update of the owed-receipt queue (${owed} pending entries) was not saved at stop, so only what an older queue or job record holds survives; cause: ${this.lastInternalError?.cause ?? "the owed usage receipts could not be saved"}`,
-						);
-					}
+					const newer = scheduler
+						.releasedReceiptsState()
+						.entries.filter((entry) => !this.owedSavedKeys.has(owedKey(entry))).length;
+					stopReason = `the owed-receipt queue update was not saved (${newer} ${newer === 1 ? "entry" : "entries"} newer than the last saved queue; older queue and job-record copies are kept); cause: ${this.lastInternalError?.cause ?? "the owed usage receipts could not be saved"}`;
 				} else if (saved.status !== "saved") {
 					this.noteInternalCause(`saving jobs at stop: ${describeSaveRefusal(saved)}`);
 				}
@@ -1375,7 +1384,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				);
 			}
 		}
-		this.finishBatch("stopped", interrupted);
+		this.finishBatch("stopped", interrupted, stopReason);
 		try {
 			await this.stopHandoff;
 		} finally {
@@ -4712,6 +4721,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// Durable is durable, also when this run has stopped meanwhile: the stop's own save relies on it.
 			if (saved.status === "saved") {
 				this.owedReceiptsSavedVersion = state.version;
+				this.owedSavedKeys = new Set(state.entries.map(owedKey));
 				return true;
 			}
 			// The real cause is kept whether or not this run is still live (a stop reports through it).

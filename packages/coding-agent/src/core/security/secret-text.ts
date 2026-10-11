@@ -19,6 +19,12 @@ const CONTEXTUAL_SECRET_PATTERNS: readonly RegExp[] = [
 	/\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|account[_-]?key|private[_-]?key|sharedaccesssignature|authorization|credential|secret|password)\b\s*[:=]\s*\S+/i,
 ];
 
+/**
+ * Formats masked in text bound for a model but kept by the transcript filter (hasSecretLikeText), so exact history recall
+ * still holds the owner's own text while the outgoing request does not carry the key.
+ */
+const OUTBOUND_ONLY_TOKEN_SHAPES: readonly RegExp[] = [/\bAIza[0-9A-Za-z_-]{35}\b/, /\bglpat-[0-9A-Za-z_-]{20,}\b/];
+
 const SECRET_LIKE_PATTERNS: readonly RegExp[] = [...TOKEN_SHAPE_PATTERNS, ...CONTEXTUAL_SECRET_PATTERNS];
 
 function replaceAllMatches(text: string, patterns: readonly RegExp[], replacement: string): string {
@@ -34,7 +40,7 @@ function replaceAllMatches(text: string, patterns: readonly RegExp[], replacemen
  * mechanical floor for text bound for a model: it needs no credential inventory and no judgment.
  */
 export function redactTokenShapes(text: string): string {
-	return replaceAllMatches(text, TOKEN_SHAPE_PATTERNS, "[REDACTED_SECRET]");
+	return replaceAllMatches(text, [...TOKEN_SHAPE_PATTERNS, ...OUTBOUND_ONLY_TOKEN_SHAPES], "[REDACTED_SECRET]");
 }
 
 export const MAX_RETAINED_DIAGNOSTIC_CHARS = 240;
