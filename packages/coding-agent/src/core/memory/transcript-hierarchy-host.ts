@@ -163,6 +163,8 @@ function describeHold(
 }
 
 const NOT_ATTACHED_REASON = "No history index is attached.";
+/** How long a coordinator-less forget waits, once, for a loading history index to say whether the session exists. */
+const FORGET_PROBE_WAIT_MS = 10_000;
 const HIERARCHY_OFF_REASON = "The summary hierarchy is off.";
 
 /** The operator view's bound on the coordinator's latest internal cause, marker included. */
@@ -234,7 +236,7 @@ export class TranscriptHierarchyHost {
 		if (this.coordinator?.isRunning()) return this.coordinator.forgetSession(sessionId);
 		const reader = this.reader;
 		if (!reader || !this.isCurrent()) return { status: "refused", reason: NOT_ATTACHED_REASON };
-		const probe = await reader.listLineageSpans({ sessionId, fromIndex: 0, maxSpans: 1 });
+		const probe = await this.probeSession(reader, sessionId);
 		if (probe.status === "not_found") {
 			return { status: "refused", reason: `unknown session ${sessionId}: nothing was forgotten` };
 		}
@@ -255,6 +257,31 @@ export class TranscriptHierarchyHost {
 			status: "forgotten",
 			cleanupPending: "no coordinator is running; the derived summaries are removed the next time one runs",
 		};
+	}
+
+	/**
+	 * Whether the canonical history knows `sessionId`. A read starts an idle index itself and may answer `pending` while it
+	 * loads: the answer is awaited once, on the index's own change event (never polled), bounded by
+	 * {@link FORGET_PROBE_WAIT_MS}, and the read is repeated.
+	 */
+	private async probeSession(reader: TranscriptLineageReader, sessionId: string) {
+		const read = () => reader.listLineageSpans({ sessionId, fromIndex: 0, maxSpans: 1 });
+		const first = await read();
+		if (first.status !== "pending") return first;
+		await new Promise<void>((resolve) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const unsubscribe = reader.onIndexChanged(() => {
+				unsubscribe();
+				if (timer !== undefined) clearTimeout(timer);
+				resolve();
+			});
+			timer = setTimeout(() => {
+				unsubscribe();
+				resolve();
+			}, FORGET_PROBE_WAIT_MS);
+			timer.unref();
+		});
+		return read();
 	}
 
 	/** The zoom surface; resolves its source per call so a restart or a new generation is never held on to. */

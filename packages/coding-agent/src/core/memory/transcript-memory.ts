@@ -857,6 +857,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private readonly forgottenSessions = new Set<string>();
 	/** The revision of the permanent forget state this mirror reflects (0 before any forget). */
 	private forgetRevision = 0;
+	/** The forget revision the manifest records as fully applied (a forget file below it is unknown: rollback). */
+	private forgetAppliedRevision = 0;
 	/** When owed usage receipts are tried again (one lifecycle timer), on a bounded backoff. */
 	private receiptRetryAt: number | undefined;
 	private receiptRetryFailures = 0;
@@ -1177,6 +1179,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		this.frontierBytes.clear();
 		this.forgottenSessions.clear();
 		this.forgetRevision = 0;
+		this.forgetAppliedRevision = manifest?.forgetRevisionApplied ?? 0;
 		for (const [sessionId, cursor] of Object.entries(manifest?.sessions ?? {})) this.cursors.set(sessionId, cursor);
 		for (const [name, frontier] of Object.entries(manifest?.frontiers ?? {})) this.frontiers.set(name, frontier);
 		// Legacy markers still in the manifest deny exactly as the permanent state does until the store migrates them.
@@ -1378,6 +1381,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			this.forgottenSessions.add(sessionId);
 			this.forgetRevision = Math.max(this.forgetRevision, recorded.revision);
 			const pending = await this.applyForgottenSession(sessionId, scheduled);
+			if (pending === undefined) await this.recordForgetApplied(scheduled);
 			outcome = pending === undefined ? { status: "forgotten" } : { status: "forgotten", cleanupPending: pending };
 			this.pump(scheduled);
 		});
@@ -1437,6 +1441,26 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			if (!this.holdsSessionData(sessionId)) continue;
 			const pending = await this.applyForgottenSession(sessionId, epoch);
 			if (pending !== undefined) this.noteInternalCause(pending);
+		}
+		await this.recordForgetApplied(epoch);
+	}
+
+	/**
+	 * Once every forgotten session's derived data is gone, the manifest records the forget revision as applied: from then
+	 * on a forget file below that revision (lost or rolled back) reads as unknown, never as "nothing was forgotten". The
+	 * write leaves the manifest revision unchanged, so the mirror needs no reload.
+	 */
+	private async recordForgetApplied(epoch: number): Promise<void> {
+		const writer = this.writer;
+		if (!writer || !this.live(epoch) || this.forgetRevision < 1 || this.forgetRevision <= this.forgetAppliedRevision)
+			return;
+		if ([...this.forgottenSessions].some((sessionId) => this.holdsSessionData(sessionId))) return;
+		const recorded = await writer.markForgetApplied(this.forgetRevision);
+		if (recorded.status === "applied") this.forgetAppliedRevision = recorded.forgetRevisionApplied;
+		else if (recorded.status === "fenced" || recorded.status === "manifest_corrupt") {
+			this.fatal(`recording the applied forget revision was refused: ${recorded.status}`);
+		} else {
+			this.noteInternalCause(`recording the applied forget revision: ${recorded.reason}`);
 		}
 	}
 

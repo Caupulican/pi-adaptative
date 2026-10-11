@@ -16238,8 +16238,10 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			});
 			await withDeadline(
 				trace,
-				"M3d history index attached",
-				world.io.waitForMutation(() => fgOwner.session.getTranscriptHistoryStatus().availability === "active"),
+				"M3d history host attached",
+				world.io.waitForMutation(
+					() => fgOwner.session.getTranscriptHistoryStatus().hierarchy?.readAccess === "read_only_view",
+				),
 			);
 			const fgManifestBefore = world.io.peekFile(fgStore.manifest);
 			const fgUnknown = await withDeadline(
@@ -16435,7 +16437,9 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			await withDeadline(
 				trace,
 				"M3d malformed settings attached",
-				world.io.waitForMutation(() => fgMalformed.session.getTranscriptHistoryStatus().availability === "active"),
+				world.io.waitForMutation(
+					() => fgMalformed.session.getTranscriptHistoryStatus().hierarchy?.readAccess === "read_only_view",
+				),
 			);
 			expect(
 				{
