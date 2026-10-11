@@ -1358,8 +1358,15 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// The stop always reaches its terminal signal; a save that failed keeps its real cause for the status.
 			try {
 				const saved = await this.saveJobsInOrder(scheduler, writer, this.epoch, scheduler.snapshot());
-				// An unsaved queue already recorded its real cause (saveOwedReceipts); the stop adds nothing over it.
-				if (saved !== undefined && saved.status !== "saved") {
+				// An unsaved queue already recorded its real cause (saveOwedReceipts); the stop adds what that leaves unsaved.
+				if (saved === undefined) {
+					const owed = scheduler.releasedReceiptsState().entries.length;
+					if (owed > 0) {
+						this.noteInternalCause(
+							`${this.lastInternalError?.cause ?? "the owed usage receipts could not be saved"}; ${owed} owed usage receipt(s) are not durable and end with this run`,
+						);
+					}
+				} else if (saved.status !== "saved") {
 					this.noteInternalCause(`saving jobs at stop: ${describeSaveRefusal(saved)}`);
 				}
 			} catch (error) {
