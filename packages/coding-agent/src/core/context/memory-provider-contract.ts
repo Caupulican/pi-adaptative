@@ -1,4 +1,4 @@
-import { hasSecretLikeText } from "../security/secret-text.ts";
+import { hasMaskableSecretText } from "../security/secret-text.ts";
 import {
 	type ContextEvidenceRef,
 	type ContextItem,
@@ -166,7 +166,7 @@ export const DEFAULT_LOCAL_MEMORY_EGRESS_POLICY: MemoryEgressPolicy = {
 };
 
 export function hasSecretLikeMemoryText(text: string): boolean {
-	return hasSecretLikeText(text);
+	return hasMaskableSecretText(text);
 }
 
 export function validateMemorySearchRequest(

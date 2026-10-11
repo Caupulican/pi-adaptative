@@ -1369,7 +1369,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				const saved = await this.saveJobsInOrder(scheduler, writer, this.epoch, scheduler.snapshot());
 				// An unsaved queue update ends this run: its terminal event (shown by the host and persisted) names it. Older copies
 				// of a receipt (the last saved queue, the job record) are kept by a failed queue write, so only the entries newer
-				// than the last saved queue are counted, and nothing is claimed lost.
+				// than the last saved queue are counted. An entry only this run held (carried by an aborted call, or whose job had
+				// already ended) has no older copy, and the message says so.
 				if (saved === undefined) {
 					const newer = scheduler
 						.releasedReceiptsState()

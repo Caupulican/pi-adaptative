@@ -24,11 +24,17 @@ const CONTEXTUAL_SECRET_PATTERNS: readonly RegExp[] = [
  * still holds the owner's own text while the outgoing request does not carry the key.
  */
 const OUTBOUND_ONLY_TOKEN_SHAPES: readonly RegExp[] = [
-	/\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/,
-	/\bglpat-[0-9A-Za-z_-]{20,}(?![0-9A-Za-z_-])/,
+	/\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_])/,
+	/\bglpat-[0-9A-Za-z_-]{20,}(?![0-9A-Za-z_])/,
 ];
 
 const SECRET_LIKE_PATTERNS: readonly RegExp[] = [...TOKEN_SHAPE_PATTERNS, ...CONTEXTUAL_SECRET_PATTERNS];
+/**
+ * Everything masked or refused when text leaves the transcript: the transcript filter's patterns plus the outbound-only
+ * shapes. The transcript filter itself ({@link hasSecretLikeText}) stays narrower on purpose, so exact recall keeps the
+ * owner's own text; diagnostics, outgoing model text and the memory write/query gates use this wider set.
+ */
+const SECRET_MASK_PATTERNS: readonly RegExp[] = [...SECRET_LIKE_PATTERNS, ...OUTBOUND_ONLY_TOKEN_SHAPES];
 
 function replaceAllMatches(text: string, patterns: readonly RegExp[], replacement: string): string {
 	let redacted = text;
@@ -53,8 +59,13 @@ export function hasSecretLikeText(text: string): boolean {
 	return SECRET_LIKE_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+/** Whether text carries a shape that must not be stored by a memory write or sent in a memory query (the wider set). */
+export function hasMaskableSecretText(text: string): boolean {
+	return SECRET_MASK_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 export function redactKnownSecrets(text: string): string {
-	return replaceAllMatches(text, SECRET_LIKE_PATTERNS, "[REDACTED]");
+	return replaceAllMatches(text, SECRET_MASK_PATTERNS, "[REDACTED]");
 }
 
 /** Retain one redacted diagnostic line with bounded regex work and durable output size. */
