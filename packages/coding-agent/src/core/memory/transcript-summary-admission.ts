@@ -36,14 +36,18 @@
  */
 
 import { createHash } from "node:crypto";
-import type { Usage } from "@caupulican/pi-ai";
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import { decisivelyHolds } from "../decision/evaluation.ts";
 import { isNoulProbability, noulBand } from "../decision/noul.ts";
 import { createDecisionProgram } from "../decision/program.ts";
 import { DecisionEngineProtocolError } from "../decision/protocol-error.ts";
-import type { SystemOneReceipt, TypeSafeUsageReceipt } from "../review/system-one-review-port.ts";
-import { JevAdapterFailure } from "../system-one/adapter.ts";
+import {
+	type SystemOneReceipt,
+	SystemOneReviewError,
+	type TypeSafeUsageReceipt,
+} from "../review/system-one-review-port.ts";
+import { isReceiptCount, isReceiptText, parseTypeSafeUsageReceipt } from "../review/typesafe-usage-receipt-codec.ts";
+import { JevAdapterFailure, SystemOnePreSendError } from "../system-one/adapter.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import {
 	formatTranscriptNodeHandle,
@@ -209,6 +213,13 @@ interface AdmissionResultBase {
 	 * no paid call happened (no evaluator bound, input too large).
 	 */
 	receipts: readonly SystemOneReceipt[];
+	/**
+	 * Whether at least one provider request was sent for this result. False for a result produced before any send (no
+	 * evaluator bound, input too large, a refusal of the exact input before the request, a usage lease refused before
+	 * payment); true for every answered result and for every failure that may have reached the provider. The caller counts
+	 * a semantic request and a transport attempt only when this is true.
+	 */
+	requestSent: boolean;
 }
 
 export type TranscriptSummaryAdmissionResult =
@@ -290,6 +301,26 @@ export interface SemanticSummaryAdmissionDeps {
 	 * write fails. Owner-session routing lives in the host's closure, not here.
 	 */
 	recordUsage(receipt: TypeSafeUsageReceipt): void;
+}
+
+/**
+ * Whether a failed engine call may have reached the provider. False only when the failure proves nothing was sent: a
+ * reviewer error that recorded no transport attempt (a refusal before the fetch, including a usage lease refused before
+ * payment), an adapter-level refusal of the exact input (a credential in the payload) that is not a transport error, or a
+ * configuration refusal raised before the loop (no key configured, a model System One does not run).
+ * Everything else (timeouts, network failures, provider errors, invalid answers) is treated as sent.
+ */
+function requestMayHaveBeenSent(error: unknown): boolean {
+	const review =
+		error instanceof SystemOneReviewError
+			? error
+			: error instanceof JevAdapterFailure && error.cause instanceof SystemOneReviewError
+				? error.cause
+				: undefined;
+	if (error instanceof SystemOnePreSendError) return false;
+	if (review) return review.transportAttempts.length > 0;
+	if (error instanceof JevAdapterFailure && error.kind === "invalid_request") return false;
+	return true;
 }
 
 /** The receipts a failed engine call still owes: paid responses the adapter or engine carried on the error. */
@@ -379,6 +410,7 @@ export function createSemanticSummaryAdmission(deps: SemanticSummaryAdmissionDep
 				reason: string,
 				evaluator?: TranscriptAdmissionEvaluator,
 				receipts: readonly SystemOneReceipt[] = [],
+				requestSent = false,
 			): TranscriptSummaryAdmissionResult => ({
 				disposition: "unavailable",
 				cause,
@@ -387,6 +419,7 @@ export function createSemanticSummaryAdmission(deps: SemanticSummaryAdmissionDep
 				confidences: {},
 				reason: boundedReason(reason),
 				receipts,
+				requestSent,
 				...(evaluator ? { evaluator } : {}),
 			});
 			const engine = deps.getEngine();
@@ -439,6 +472,7 @@ export function createSemanticSummaryAdmission(deps: SemanticSummaryAdmissionDep
 					error instanceof Error ? error.message : String(error),
 					evaluator,
 					receiptsOf(error),
+					requestMayHaveBeenSent(error),
 				);
 			}
 			const answered: AdmissionResultBase = {
@@ -446,6 +480,7 @@ export function createSemanticSummaryAdmission(deps: SemanticSummaryAdmissionDep
 				judged,
 				confidences: {},
 				receipts: evaluation.audit?.receipts ?? [],
+				requestSent: true,
 			};
 			const model = evaluation.engine.model || engine.model;
 			const answeredBy: TranscriptAdmissionEvaluator = { engineId: engine.id, model };
@@ -460,6 +495,7 @@ export function createSemanticSummaryAdmission(deps: SemanticSummaryAdmissionDep
 							`the evaluator returned no probability for the ${id} judgment`,
 							answeredBy,
 							answered.receipts,
+							true,
 						),
 						confidences: answered.confidences,
 					};
@@ -600,30 +636,6 @@ export function parseSummaryAdmission(value: unknown): TranscriptSummaryAdmissio
 }
 
 const RECEIPT_KEYS = ["status", "reportId", "attempt", "cause", "payload"] as const;
-const RECEIPT_PAYLOAD_KEYS = [
-	"receiptId",
-	"provider",
-	"model",
-	"attempt",
-	"usage",
-	"costStatus",
-	"costProvenance",
-] as const;
-const RECEIPT_USAGE_KEYS = ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const;
-const RECEIPT_COST_KEYS = ["input", "output", "cacheRead", "cacheWrite", "total"] as const;
-const MAX_RECEIPT_TEXT_CHARS = 200;
-
-function isReceiptCount(value: unknown): value is number {
-	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isReceiptMoney(value: unknown): value is number {
-	return typeof value === "number" && Number.isFinite(value) && value >= 0;
-}
-
-function isReceiptText(value: unknown): value is string {
-	return typeof value === "string" && value.length > 0 && value.length <= MAX_RECEIPT_TEXT_CHARS;
-}
 
 /**
  * One untrusted persisted paid-receipt record (a System One response's priced usage and its persistence outcome);
@@ -637,69 +649,8 @@ export function parseSemanticReceipt(value: unknown): SystemOneReceipt | undefin
 	if (!isReceiptText(reportId) || !isReceiptCount(attempt)) return undefined;
 	if (status === "recorded" && cause !== undefined) return undefined;
 	if (status === "unrecorded" && !isReceiptText(cause)) return undefined;
-	if (!isPlainRecord(payload) || !hasOnlyKeys(payload, RECEIPT_PAYLOAD_KEYS)) return undefined;
-	const { receiptId, provider, model, attempt: payloadAttempt, usage, costStatus, costProvenance } = payload;
-	if (receiptId !== reportId || payloadAttempt !== attempt) return undefined;
-	if (!isReceiptText(provider) || !isReceiptText(model)) return undefined;
-	if (costStatus !== "catalog_priced" && costStatus !== "unpriced") return undefined;
-	let provenance: { provider: string; model: string } | undefined;
-	if (costProvenance !== undefined) {
-		if (
-			!isPlainRecord(costProvenance) ||
-			!hasOnlyKeys(costProvenance, ["provider", "model"]) ||
-			!isReceiptText(costProvenance.provider) ||
-			!isReceiptText(costProvenance.model)
-		)
-			return undefined;
-		provenance = { provider: costProvenance.provider, model: costProvenance.model };
-	}
-	if (!isPlainRecord(usage) || !hasOnlyKeys(usage, RECEIPT_USAGE_KEYS)) return undefined;
-	const { input, output, cacheRead, cacheWrite, totalTokens, cost } = usage;
-	if (
-		!isReceiptCount(input) ||
-		!isReceiptCount(output) ||
-		!isReceiptCount(cacheRead) ||
-		!isReceiptCount(cacheWrite) ||
-		!isReceiptCount(totalTokens)
-	)
-		return undefined;
-	if (!isPlainRecord(cost) || !hasOnlyKeys(cost, RECEIPT_COST_KEYS)) return undefined;
-	const costInput = cost.input;
-	const costOutput = cost.output;
-	const costCacheRead = cost.cacheRead;
-	const costCacheWrite = cost.cacheWrite;
-	const costTotal = cost.total;
-	if (
-		!isReceiptMoney(costInput) ||
-		!isReceiptMoney(costOutput) ||
-		!isReceiptMoney(costCacheRead) ||
-		!isReceiptMoney(costCacheWrite) ||
-		!isReceiptMoney(costTotal)
-	)
-		return undefined;
-	const priced: Usage = {
-		input,
-		output,
-		cacheRead,
-		cacheWrite,
-		totalTokens,
-		cost: {
-			input: costInput,
-			output: costOutput,
-			cacheRead: costCacheRead,
-			cacheWrite: costCacheWrite,
-			total: costTotal,
-		},
-	};
-	const record: TypeSafeUsageReceipt = {
-		receiptId,
-		provider,
-		model,
-		attempt,
-		usage: priced,
-		costStatus,
-		...(provenance ? { costProvenance: provenance } : {}),
-	};
+	const record = parseTypeSafeUsageReceipt(payload);
+	if (!record || record.receiptId !== reportId || record.attempt !== attempt) return undefined;
 	if (status === "recorded") return { status, reportId, attempt, payload: record };
 	return isReceiptText(cause) ? { status, reportId, attempt, cause, payload: record } : undefined;
 }

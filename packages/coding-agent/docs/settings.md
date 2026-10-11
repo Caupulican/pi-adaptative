@@ -707,7 +707,7 @@ Bash validates rule files at tool creation. Python validates them before each fi
 { "sessionDir": ".pi/sessions" }
 ```
 
-When multiple sources specify a session directory, precedence is `--session-dir`, `PI_CODING_AGENT_SESSION_DIR`, then `sessionDir` in settings.json.
+When multiple sources specify a session directory, precedence is `--session-dir`, `PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR`, then `sessionDir` in settings.json.
 
 ### Model Cycling
 

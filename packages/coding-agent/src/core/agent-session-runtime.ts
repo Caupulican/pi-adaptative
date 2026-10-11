@@ -1,9 +1,10 @@
-import { copyFileSync, existsSync, constants as fsConstants, mkdirSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, constants as fsConstants, mkdirSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { SessionManager } from "../kernel/session/session-manager.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
+import { sessionJournalPaths } from "./cost/semantic-usage-journal.ts";
 import type {
 	ExtensionRunner,
 	ReplacedSessionContext,
@@ -295,11 +296,15 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 	}
 
 	private removeCreatedSessionFile(sessionFile: string | undefined): void {
-		if (!sessionFile || sessionFile === this.session.sessionFile || !existsSync(sessionFile)) return;
+		if (!sessionFile || sessionFile === this.session.sessionFile) return;
 		try {
-			unlinkSync(sessionFile);
+			// The usage-journal sidecars go even when the file was never written: a receipt can be paid before the first write,
+			// and its sidecar then has no file to record into.
+			for (const path of [sessionFile, ...sessionJournalPaths(sessionFile)]) {
+				rmSync(path, { recursive: true, force: true });
+			}
 		} catch {
-			// Best-effort rollback of an artifact created solely for the rejected replacement.
+			// Best-effort rollback of artifacts created solely for the rejected replacement.
 		}
 	}
 

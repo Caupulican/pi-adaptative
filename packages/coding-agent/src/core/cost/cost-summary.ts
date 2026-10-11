@@ -102,6 +102,31 @@ export function aggregateCurrentSessionCostsFromEntries(entries: readonly Sessio
 	return totals;
 }
 
+/**
+ * The current totals plus the held reports the ledger does not carry yet. Read-only: the accumulator and its seen set
+ * stay as they are, so a report counts once whether its ledger row arrives before or after this projection.
+ */
+export function projectPendingSemanticCost(
+	accumulator: CurrentSessionCostAccumulator,
+	pending: readonly SemanticUsageReport[],
+): CurrentSessionCostTotals {
+	let ownCost = accumulator.ownCost;
+	let costEstimate = accumulator.costEstimate;
+	for (const report of pending) {
+		const total = getUsageTotalCost(report.usage);
+		if (total === undefined || accumulator.seenSemanticReportIds.has(report.reportId)) continue;
+		ownCost += total;
+		if (report.usage.cost.estimate === "base-rates") costEstimate = "base-rates";
+	}
+	return {
+		...(costEstimate ? { costEstimate } : {}),
+		ownCost,
+		subagentCost: accumulator.subagentCost,
+		subagentReports: accumulator.subagentReports,
+		currentCost: ownCost + accumulator.subagentCost,
+	};
+}
+
 export function createSessionCostSummary(args: {
 	entries?: readonly SessionEntry[];
 	dailyTotals: DailyUsageTotals;

@@ -679,6 +679,8 @@ function resultFromVerdict(
 		judged: [...verdict.judged],
 		confidences: { ...verdict.confidences },
 		receipts,
+		// A kept verdict stands for a response that was sent and paid; replaying it sends nothing (it is counted as reused).
+		requestSent: true,
 	};
 	if (verdict.disposition === "accepted") {
 		return { ...base, disposition: "accepted", evaluator: { ...verdict.evaluator } };
@@ -3886,10 +3888,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		// The unit of work is counted as it happened: one semantic request, one transport attempt per paid response.
 		const receipts = this.settleReceipts(port, result.receipts, this.ports.ownerSessionId());
 		// The job may have ended (and left the list) while the call was in flight: its receipts are still settled below.
-		if (scheduler?.get(job.id) !== undefined)
+		// Counted only when a provider request was sent: a result produced before any send (no evaluator, input too large, a
+		// refusal of the exact input, a usage lease refused before payment) reports no semantic request and no transport attempt.
+		if (scheduler?.get(job.id) !== undefined && result.requestSent)
 			scheduler.addWork(job.id, {
 				semanticRequests: 1,
-				// At least the one request made, even when no usage sink is bound and no paid response carried a receipt.
+				// At least one per counted request, even when no usage sink is bound and no response carried a receipt.
 				transportAttempts: Math.max(1, receipts.length),
 				receiptsRecorded: countRecorded(receipts),
 			});

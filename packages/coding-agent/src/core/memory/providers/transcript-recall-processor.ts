@@ -106,9 +106,13 @@ interface SessionRecord {
 	skip?: string;
 }
 
-/** Session header fields the catalog needs. `version` is absent from format-v1 headers. */
+/**
+ * Session header fields the catalog needs. `version` is absent from format-v1 headers. When `idValid` is false the header's
+ * id is not a valid session id: `sessionId` is then not a handle and must not name anything.
+ */
 interface SessionHeaderInfo {
 	sessionId: string;
+	idValid: boolean;
 	cwd?: string;
 	timestamp?: string;
 	version?: number;
@@ -331,13 +335,13 @@ function consumeSession(
  */
 function readSessionHeader(path: string): SessionHeaderInfo | undefined {
 	const result = readSessionHeaderResult(path, HEADER_READ_BYTES);
-	if (!result.ok) {
-		if (result.reason === "unreadable") throw result.cause;
-		return undefined;
-	}
+	if (!result.ok && result.reason === "unreadable") throw result.cause;
+	if (!result.ok && result.reason === "not_a_header") return undefined;
 	const { id, cwd, timestamp, version } = result.header;
-	if (id.length === 0 || id.length > TRANSCRIPT_RECALL_MAX_ID_CHARS) return undefined;
-	const header: SessionHeaderInfo = { sessionId: id };
+	// An id the kernel refuses is a session file this catalog cannot capture: it is reported as unsupported, not hidden.
+	const idValid = result.ok;
+	if (idValid && id.length > TRANSCRIPT_RECALL_MAX_ID_CHARS) return undefined;
+	const header: SessionHeaderInfo = { sessionId: idValid ? id : "", idValid };
 	if (typeof version === "number") header.version = version;
 	if (typeof cwd === "string") header.cwd = cwd;
 	if (typeof timestamp === "string") header.timestamp = timestamp.slice(0, 128);
@@ -581,6 +585,11 @@ export class TranscriptRecallProcessor {
 		this.mergedPaths.delete(key);
 		if (isAutoLearnSessionId(header.sessionId)) return undefined;
 		if (!header.cwd || pathKey(header.cwd) !== pathKey(this.workingDirectory)) return undefined;
+		if (!header.idValid) {
+			// Keyed by the file, never by the refused id: each such file is one unsupported session file of this project.
+			this.unsupportedPaths.set(key, { sessionId: `invalid:${key}`, reason: UNSUPPORTED_INVALID_SESSION_ID });
+			return undefined;
+		}
 		if (!isTranscriptSessionIdResolvable(this.projectId, header.sessionId)) {
 			this.unsupportedPaths.set(key, { sessionId: header.sessionId, reason: UNSUPPORTED_INVALID_SESSION_ID });
 			return undefined;

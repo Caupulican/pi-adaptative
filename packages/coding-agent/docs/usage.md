@@ -44,8 +44,9 @@ Every value says when it was fetched or seen in responses. Data older than 15 mi
 
 Footer cost labels match the `/usage`, `/session`, and autonomy status cost line:
 
-- **CURRENT** is the current session file's total recorded cost, including assistant usage and any **SUBAGENTS** cost.
-- **TODAY** is this host's active session-storage total for the local calendar day; it rolls over at local midnight.
+- **CURRENT** is the current session file's total recorded cost, including assistant usage, System One usage reports and any **SUBAGENTS** cost. A System One usage report that has been paid for but is not yet written to the session file (the session file has no first reply yet, or a write failed and the report is held in the session's usage journal) is counted once, by report id, until the row is recorded. That includes a report that could not be retained in the session journal (the journal is unreadable, or the session id is not a safe file name): it is still paid spend, even though no journal copy exists.
+- **TODAY** is this host's active session-storage total for the local calendar day; it rolls over at local midnight. It counts only usage rows already recorded in session storage, so it can be lower than **CURRENT** while a report is held pending its recording.
+- Session statistics reported to RPC clients sum the usage recorded on session entries (assistant and tool-result messages, including the result of a `systemone` tool call, and compaction and branch summaries); System One reviewer usage rows and delegated (spawned) spend, held or recorded, are not part of them.
 - **SUBAGENTS** appears only when delegated/spawned workers reported cost in the current session, and that amount is already included in **CURRENT**.
 
 For ChatGPT Plus/Pro via OpenAI Codex OAuth, token usage is still recorded for context/cost estimates, but subscription quota windows come from OpenAI Codex response headers. Those windows reset at the server-provided `x-codex-*-reset-at` epoch seconds and may include multiple metered families; they are not the same as Pi's local-midnight **TODAY** window and are not treated as paid API spend.
@@ -255,7 +256,7 @@ cat README.md | pi -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-Built-in tools include `read`, `edit`, `write`, `grep`, `find`, `ls`, `ask_question`, `secret_store`, and the uv-managed `python` tool. The agent always sees one stable `bash` tool contract. On Windows, Pi parses its supported simple-command grammar and converts it deterministically to PowerShell; unsupported shell constructs fail closed. Agent, interactive, and RPC shell calls have a 120-second wall-clock default, and Python calls default to 30 seconds. Native goal, task-step, human-question, secret-store, delegation, context, and toolkit tools are activated when their capability/profile gates allow them.
+Built-in tools include `read`, `edit`, `write`, `grep`, `find`, `ls`, `ask_question`, `secret_store`, and the uv-managed `python` tool. The agent always sees one stable `bash` tool contract. On Windows, every call runs through one executor: the bundled shell engine parses the supported Bash grammar and owns the session state, a PowerShell floor takes one simple command per call when the engine is disabled or cannot start, and constructs outside the supported grammar fail closed with a named error (see [Windows](windows.md)). Agent, interactive, and RPC shell calls have a 120-second wall-clock default, and Python calls default to 30 seconds. Native goal, task-step, human-question, secret-store, delegation, context, and toolkit tools are activated when their capability/profile gates allow them.
 
 ### Resource Options
 
@@ -335,8 +336,8 @@ pi --exclude-tools ask_question
 
 | Variable | Description |
 |----------|-------------|
-| `PI_CODING_AGENT_DIR` | Override config directory; default is `~/.pi/agent` |
-| `PI_CODING_AGENT_SESSION_DIR` | Override session storage directory; overridden by `--session-dir` |
+| `PI_ADAPTATIVE_CODING_AGENT_DIR` | Override config directory; default is `~/.pi/agent`. The name is derived from the app name (`pi-adaptative`), with every character outside `A-Z0-9_` turned into `_` |
+| `PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR` | Override session storage directory; overridden by `--session-dir` |
 | `PI_PACKAGE_DIR` | Override package directory, useful for Nix/Guix store paths |
 | `PI_OFFLINE` | Disable startup network operations, including update checks and package update checks |
 | `PI_SKIP_VERSION_CHECK` | Skip the Pi version update check at startup. This prevents the GitHub Releases latest-version request |

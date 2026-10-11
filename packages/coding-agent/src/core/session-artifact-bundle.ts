@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { lstat, rm, unlink } from "node:fs/promises";
 import { orchestrationSessionDir } from "./agent-paths.ts";
+import { sessionJournalPaths } from "./cost/semantic-usage-journal.ts";
 import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
 
 export type SessionArtifactDeletionMethod = "trash" | "unlink";
@@ -12,9 +13,16 @@ export interface SessionArtifactPathDeletion {
 	error?: string;
 }
 
+type SessionArtifactBundlePart =
+	| SessionArtifactPathDeletion
+	| { ok: true; method: "absent" }
+	| { ok: false; method: "preserved" };
+
 export interface ForegroundSessionBundleDeletion {
 	foreground: SessionArtifactPathDeletion;
-	workerArtifacts: SessionArtifactPathDeletion | { ok: true; method: "absent" } | { ok: false; method: "preserved" };
+	/** The session's usage-journal sidecars: they record spend into this file and cannot outlive it. */
+	journal: SessionArtifactBundlePart;
+	workerArtifacts: SessionArtifactBundlePart;
 	complete: boolean;
 }
 
@@ -66,22 +74,48 @@ export async function removePathWithTrashFallback(path: string): Promise<Session
  * namespace. No age-based cleanup is performed. If the foreground file moves first but its worker
  * bundle cannot, the result reports that partial state rather than claiming a full deletion.
  */
+/** Every usage-journal sidecar of the session file, removed one by one under the same policy; preserved when they cannot be listed. */
+async function removeJournalSidecars(
+	sessionPath: string,
+	removePath: (path: string) => Promise<SessionArtifactPathDeletion>,
+): Promise<SessionArtifactBundlePart> {
+	let paths: string[];
+	try {
+		paths = sessionJournalPaths(sessionPath);
+	} catch {
+		return { ok: false, method: "preserved" };
+	}
+	if (paths.length === 0) return { ok: true, method: "absent" };
+	let last: SessionArtifactPathDeletion = { ok: true, method: "trash" };
+	for (const path of paths) {
+		last = await removePath(path);
+		if (!last.ok) return last;
+	}
+	return last;
+}
+
 export async function deleteForegroundSessionBundle(
 	options: DeleteForegroundSessionBundleOptions,
 ): Promise<ForegroundSessionBundleDeletion> {
 	const removePath = options.removePath ?? removePathWithTrashFallback;
 	const foreground = await removePath(options.sessionPath);
 	if (!foreground.ok) {
-		return { foreground, workerArtifacts: { ok: false, method: "preserved" }, complete: false };
+		return {
+			foreground,
+			journal: { ok: false, method: "preserved" },
+			workerArtifacts: { ok: false, method: "preserved" },
+			complete: false,
+		};
 	}
 
+	const journal = await removeJournalSidecars(options.sessionPath, removePath);
 	const workerArtifactsPath = orchestrationSessionDir(options.agentDir, options.parentSessionId);
 	if (!WorkerConversationStore.reserveBundleDeletion(options.agentDir, options.parentSessionId)) {
-		return { foreground, workerArtifacts: { ok: false, method: "preserved" }, complete: false };
+		return { foreground, journal, workerArtifacts: { ok: false, method: "preserved" }, complete: false };
 	}
 	if (!existsSync(workerArtifactsPath)) {
-		return { foreground, workerArtifacts: { ok: true, method: "absent" }, complete: true };
+		return { foreground, journal, workerArtifacts: { ok: true, method: "absent" }, complete: journal.ok };
 	}
 	const workerArtifacts = await removePath(workerArtifactsPath);
-	return { foreground, workerArtifacts, complete: workerArtifacts.ok };
+	return { foreground, journal, workerArtifacts, complete: journal.ok && workerArtifacts.ok };
 }

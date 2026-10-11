@@ -94,8 +94,14 @@ export function findChildSessionFile(sessionDir: string, sessionId: string): str
 	return undefined;
 }
 
-/** Whole-session spend, including direct entry charges and already-rolled-up descendants. */
-export function aggregateCumulativeUsageFromSessionEntries(entries: readonly SessionEntry[]): Usage {
+/**
+ * Whole-session spend, including direct entry charges and already-rolled-up descendants. `pending` are held semantic
+ * reports the ledger does not carry yet; a report already in `entries` is counted once, from its row.
+ */
+export function aggregateCumulativeUsageFromSessionEntries(
+	entries: readonly SessionEntry[],
+	pending: readonly SemanticUsageReport[] = [],
+): Usage {
 	const total = createEmptyUsage();
 	const seenSpawnedReportIds = new Set<string>();
 	const seenSemanticReportIds = new Set<string>();
@@ -118,6 +124,11 @@ export function aggregateCumulativeUsageFromSessionEntries(entries: readonly Ses
 			seenSemanticReportIds.add(data.reportId);
 			addUsage(total, data.usage);
 		}
+	}
+	for (const report of pending) {
+		if (seenSemanticReportIds.has(report.reportId) || !isUsage(report.usage)) continue;
+		seenSemanticReportIds.add(report.reportId);
+		addUsage(total, report.usage);
 	}
 	return total;
 }

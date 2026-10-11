@@ -50,6 +50,44 @@ export interface SystemOneReceipt {
 	readonly payload: TypeSafeUsageReceipt;
 }
 
+/**
+ * Most provider responses one evaluation can receive: the first attempt plus the reviewer's provider retries
+ * (`maxRetries` is this minus one). The usage sink reserves this many slots per evaluation.
+ */
+export const SYSTEM_ONE_RESPONSES_PER_EVALUATION = 3;
+
+/**
+ * What the usage sink did with one paid response. `physically_recorded` means the identical row is confirmed in
+ * the session's ledger; `durably_pending` means the receipt is retained and that row is not confirmed yet; and
+ * `unretained` means only the in-process receipt object exists. Only the first confirms the spend.
+ */
+export type SystemOneUsageOutcome =
+	| { readonly kind: "physically_recorded" }
+	| { readonly kind: "durably_pending"; readonly cause: string }
+	| { readonly kind: "unretained"; readonly cause: string };
+
+/** The usage slots of one evaluation: each paid response is recorded through it, and unused slots are released. */
+export interface SystemOneUsageLease {
+	/** Records one paid response. Never throws: a failure is an `unretained` outcome. */
+	record(receipt: TypeSafeUsageReceipt): SystemOneUsageOutcome;
+	/** Returns the slots no response used. Idempotent. */
+	release(): void;
+}
+
+/** The session's usage sink: an evaluation begins a lease before any provider call is paid. */
+export interface SystemOneUsageSink {
+	/** Throws {@link SystemOneUsageRefusal} when no slot can be reserved; nothing has been paid at that point. */
+	begin(): SystemOneUsageLease;
+}
+
+/** The usage sink cannot admit a new paid evaluation, so none is made. */
+export class SystemOneUsageRefusal extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "SystemOneUsageRefusal";
+	}
+}
+
 /** Shared evaluation record consumed by the System One tool and retained-evidence path. */
 export interface SystemOneEvaluationRecord {
 	readonly request: EvaluationInput & { model: string };

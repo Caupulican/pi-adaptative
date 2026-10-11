@@ -660,8 +660,8 @@ pi --thinking high "Solve this complex problem"
 
 | Variable | Description |
 |----------|-------------|
-| `PI_CODING_AGENT_DIR` | Override config directory (default: `~/.pi/agent`) |
-| `PI_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
+| `PI_ADAPTATIVE_CODING_AGENT_DIR` | Override config directory (default: `~/.pi/agent`) |
+| `PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
 | `PI_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
 | `PI_OFFLINE` | Disable startup network operations, including update checks and package update checks |
 | `PI_SKIP_VERSION_CHECK` | Skip the Pi Adaptative GitHub Releases version check at startup |

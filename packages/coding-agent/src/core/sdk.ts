@@ -37,7 +37,7 @@ import {
 	isUnscopedBedrockProxy,
 } from "./bedrock-scope.ts";
 import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
-import { SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf } from "./cost/usage-records.ts";
+import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { resolveEffectiveCompletionProfile } from "./decision/completion-profile.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
@@ -705,134 +705,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			? false
 			: systemOneSettings.enabled && process.env.PI_SYSTEM_ONE_DISABLED !== "1");
 
-	const unrecordedReceiptWarning: { notify?: (message: string) => void } = {};
 	const hookCoordinator =
 		options.hookCoordinator ??
 		(options.integrityExtensions ? new IntegrityHookCoordinator(options.integrityExtensions) : undefined);
-
-	if (!systemOneController && systemOneEnabled) {
-		const access = systemOneAccessFromSession(settingsManager, authStorage, options.systemOneProvider);
-		// A session without any System One key starts without System One, as before; with one, every
-		// evaluation resolves provider, model and key anew, so a provider switch needs no restart.
-		if ((await access.resolve()).kind === "ready") {
-			const reviewer = new SystemOneReviewer({
-				access,
-				// The session exists only after this reviewer does: the warning path is bound once it does.
-				onReceiptUnrecorded: (receipt) =>
-					unrecordedReceiptWarning.notify?.(
-						`A System One usage receipt could not be recorded (${receipt.cause || "write failed"}); its spend is not in this session's usage record.`,
-					),
-				fetch: options.systemOneFetch,
-				credentialBoundary: systemOneCredentialBoundary,
-				onUsage: (receipt) => {
-					sessionManager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf(receipt));
-				},
-			});
-			const adapter = new SystemOneJevAdapter(reviewer, createSystemOneConfig({ enabled: true }), {
-				access,
-				getUserKeys: () => access.keys(),
-			});
-
-			let baselineRevision = "unknown";
-			try {
-				baselineRevision =
-					execFileSync("git", ["rev-parse", "HEAD"], {
-						cwd,
-						encoding: "utf-8",
-						stdio: ["ignore", "pipe", "ignore"],
-					}).trim() || "unknown";
-			} catch {
-				// Non-git directory
-			}
-			const store = new ExecutionStore({
-				run_id: sessionManager.getSessionId(),
-				objective: {
-					request: "",
-					normalized_goal: "",
-					acceptance_criteria: [],
-					constraints: [],
-				},
-				repo: {
-					root: cwd,
-					baseline_revision: baselineRevision,
-					current_revision: baselineRevision,
-				},
-			});
-			systemOneController = new SystemOneController({
-				store,
-				adapter,
-				userKeys: await access.keys(),
-				hookCoordinator,
-			});
-		}
-	}
-
-	// Routing is judged by System One, so an unset `modelRouter.enabled` follows whether this session has it.
-	settingsManager.setModelRouterDefaultEnabled(systemOneController !== undefined);
-
-	// Restore messages if session has existing data
-	if (hasExistingSession) {
-		agent.state.messages = existingSession.messages;
-		// Loading a prior session's history: the sanitizer mark indexed into whatever array a
-		// previous Agent lifetime built, not this one. See Agent.resetSanitizerPrefixHorizon's doc
-		// comment.
-		agent.resetSanitizerPrefixHorizon();
-		if (!hasThinkingEntry) {
-			sessionManager.appendThinkingLevelChange(thinkingLevel);
-		}
-		if (systemOneController) {
-			try {
-				const currentRevision = execFileSync("git", ["rev-parse", "HEAD"], {
-					cwd,
-					encoding: "utf-8",
-					stdio: ["ignore", "pipe", "ignore"],
-				}).trim();
-				if (currentRevision) {
-					systemOneController.store.revalidateOnResume(currentRevision);
-				}
-			} catch {
-				// Non-git directory
-			}
-			if (systemOneController.hookCoordinator?.hasExtensions()) {
-				await systemOneController.hookCoordinator.runHook("resume", {
-					schema_version: "1.0",
-					run_id: sessionManager.getSessionId(),
-					session_id: sessionManager.getSessionId(),
-					hook: "resume",
-					impact: "read_only",
-				});
-			}
-		}
-	} else {
-		// Save initial model and thinking level for new sessions so they can be restored on resume
-		if (model) {
-			sessionManager.appendModelChange(model.provider, model.id);
-		}
-		sessionManager.appendThinkingLevelChange(thinkingLevel);
-		if (systemOneController?.hookCoordinator?.hasExtensions()) {
-			await systemOneController.hookCoordinator.runHook("session_start", {
-				schema_version: "1.0",
-				run_id: sessionManager.getSessionId(),
-				session_id: sessionManager.getSessionId(),
-				hook: "session_start",
-				impact: "read_only",
-			});
-		}
-	}
-
-	let steeringPlane = options.steeringPlane;
-	const adaptiveReadiness = options.adaptiveReadiness;
-	const objectiveExecutionController = options.objectiveExecutionController;
-	// System One decides the loop whenever it is bound; without a controller the legacy continuation
-	// stays the decider. An explicit option or setting always wins.
-	const executionLoopMode: ExecutionLoopMode =
-		options.executionLoopMode ??
-		systemOneSettings.loopMode ??
-		(systemOneController ? "objective_primary" : "legacy_goal");
-
-	// Phase A — Core session construction (AgentSession, runtimeUpdates, skillVault, extensionRunner, backgroundLanes)
-	// Which models the owner's accounts offer, asked of the providers while the session starts; the
-	// first turn waits for the answer before anything is routed.
+	// The session's one usage owner, recovered before any paid work. It exists whether or not System One is bound,
+	// so pending usage from an earlier run is never left unreplayed.
+	// Which models the owner's accounts offer, read by the provider path below; constructing it starts no work.
 	const accountModels = new AccountModelCatalog({
 		getModels: () => modelRegistry.getAll(),
 		hasConfiguredAuth: (model) => modelRegistry.hasConfiguredAuth(model),
@@ -841,93 +719,275 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return auth.ok ? { apiKey: auth.apiKey, credentialHeaders: auth.credentialHeaders } : undefined;
 		},
 	});
-	void accountModels.refresh();
+	const semanticUsage = sessionSemanticUsageOf(sessionManager);
+	try {
+		if (!systemOneController && systemOneEnabled) {
+			const access = systemOneAccessFromSession(settingsManager, authStorage, options.systemOneProvider);
+			// A session without any System One key starts without System One, as before; with one, every
+			// evaluation resolves provider, model and key anew, so a provider switch needs no restart.
+			if ((await access.resolve()).kind === "ready") {
+				const reviewer = new SystemOneReviewer({
+					access,
+					fetch: options.systemOneFetch,
+					credentialBoundary: systemOneCredentialBoundary,
+					usage: semanticUsage,
+				});
+				const adapter = new SystemOneJevAdapter(reviewer, createSystemOneConfig({ enabled: true }), {
+					access,
+					getUserKeys: () => access.keys(),
+				});
 
-	const session = new AgentSession({
-		agent,
-		sessionManager,
-		settingsManager,
-		cwd,
-		agentDir,
-		scopedModels: orchestrationModel
-			? [{ model: orchestrationModel.model, thinkingLevel: orchestrationModel.binding.thinkingLevel }]
-			: options.scopedModels,
-		routerPool: options.routerPool,
-		resourceLoader,
-		customTools: options.customTools,
-		modelRegistry,
-		initialActiveToolNames,
-		allowedToolNames,
-		excludedToolNames,
-		shellOperations: options.shellOperations,
-		worktreeSyncEnginePorts: options.worktreeSyncEnginePorts,
-		extensionRunnerRef,
-		toolProfileFilter,
-		isExplicitModel: orchestrationProfile ? true : (options.isExplicitModel ?? options.model != null),
-		isExplicitThinking: orchestrationProfile
-			? true
-			: (options.isExplicitThinking ?? options.thinkingLevel !== undefined),
-		isChildSession,
-		orchestrationProfile,
-		sessionStartEvent: options.sessionStartEvent,
-		systemOneController,
-		...(options.historyTimeSource !== undefined ? { historyTimeSource: options.historyTimeSource } : {}),
-		accountModels,
-		executionLoopMode,
-		objectiveExecutionController,
-		steeringPlane,
-		adaptiveReadiness:
-			adaptiveReadiness ??
-			(steeringPlane || systemOneController ? new AdaptiveRuntimeReadiness({ isUnbound: true }) : undefined),
-	});
-	sessionRef.current = session;
-	unrecordedReceiptWarning.notify = (message) => session.emitHostWarning(message);
-	// The AgentSession constructor builds the first runner; a reload swaps it through the same ref.
-	const getExtensionRunner = (): ExtensionRunner => {
-		const runner = extensionRunnerRef.current;
-		if (!runner) throw new Error("The session's extension runner is built by its constructor and must exist here.");
-		return runner;
-	};
-	session.setWorkEvidenceJournal(createSessionWorkEvidenceJournal(() => sessionManager));
-	await session.recoverGoalWorkEvidence();
-
-	// Phase B — Adaptive runtime late binding to live session-owned ports
-	if ((steeringPlane || systemOneController) && !options.adaptiveReadiness) {
-		const persistentPath = steeringCertificatesFile(agentDir);
-		const certificates = steeringPlane?.certificates ?? new SteeringCertificateStore(persistentPath);
-		if (!steeringPlane && systemOneController) {
-			steeringPlane = new SystemOneSteeringPlane({
-				adapter: systemOneController.adapter,
-				certificates,
-				policy: DEFAULT_STEERING_POLICY,
-			});
+				let baselineRevision = "unknown";
+				try {
+					baselineRevision =
+						execFileSync("git", ["rev-parse", "HEAD"], {
+							cwd,
+							encoding: "utf-8",
+							stdio: ["ignore", "pipe", "ignore"],
+						}).trim() || "unknown";
+				} catch {
+					// Non-git directory
+				}
+				const store = new ExecutionStore({
+					run_id: sessionManager.getSessionId(),
+					objective: {
+						request: "",
+						normalized_goal: "",
+						acceptance_criteria: [],
+						constraints: [],
+					},
+					repo: {
+						root: cwd,
+						baseline_revision: baselineRevision,
+						current_revision: baselineRevision,
+					},
+				});
+				systemOneController = new SystemOneController({
+					store,
+					adapter,
+					userKeys: await access.keys(),
+					hookCoordinator,
+				});
+			}
 		}
 
-		const fitnessStore = FitnessStore.forAgentDir(agentDir);
-		const adaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
-		const orchestrationStore = new OrchestrationEventStore({
+		// Routing is judged by System One, so an unset `modelRouter.enabled` follows whether this session has it.
+		settingsManager.setModelRouterDefaultEnabled(systemOneController !== undefined);
+
+		// Restore messages if session has existing data
+		if (hasExistingSession) {
+			agent.state.messages = existingSession.messages;
+			// Loading a prior session's history: the sanitizer mark indexed into whatever array a
+			// previous Agent lifetime built, not this one. See Agent.resetSanitizerPrefixHorizon's doc
+			// comment.
+			agent.resetSanitizerPrefixHorizon();
+			if (!hasThinkingEntry) {
+				sessionManager.appendThinkingLevelChange(thinkingLevel);
+			}
+			if (systemOneController) {
+				try {
+					const currentRevision = execFileSync("git", ["rev-parse", "HEAD"], {
+						cwd,
+						encoding: "utf-8",
+						stdio: ["ignore", "pipe", "ignore"],
+					}).trim();
+					if (currentRevision) {
+						systemOneController.store.revalidateOnResume(currentRevision);
+					}
+				} catch {
+					// Non-git directory
+				}
+				if (systemOneController.hookCoordinator?.hasExtensions()) {
+					await systemOneController.hookCoordinator.runHook("resume", {
+						schema_version: "1.0",
+						run_id: sessionManager.getSessionId(),
+						session_id: sessionManager.getSessionId(),
+						hook: "resume",
+						impact: "read_only",
+					});
+				}
+			}
+		} else {
+			// Save initial model and thinking level for new sessions so they can be restored on resume
+			if (model) {
+				sessionManager.appendModelChange(model.provider, model.id);
+			}
+			sessionManager.appendThinkingLevelChange(thinkingLevel);
+			if (systemOneController?.hookCoordinator?.hasExtensions()) {
+				await systemOneController.hookCoordinator.runHook("session_start", {
+					schema_version: "1.0",
+					run_id: sessionManager.getSessionId(),
+					session_id: sessionManager.getSessionId(),
+					hook: "session_start",
+					impact: "read_only",
+				});
+			}
+		}
+
+		let steeringPlane = options.steeringPlane;
+		const adaptiveReadiness = options.adaptiveReadiness;
+		const objectiveExecutionController = options.objectiveExecutionController;
+		// System One decides the loop whenever it is bound; without a controller the legacy continuation
+		// stays the decider. An explicit option or setting always wins.
+		const executionLoopMode: ExecutionLoopMode =
+			options.executionLoopMode ??
+			systemOneSettings.loopMode ??
+			(systemOneController ? "objective_primary" : "legacy_goal");
+
+		// Phase A — Core session construction (AgentSession, runtimeUpdates, skillVault, extensionRunner, backgroundLanes)
+		// The account catalog's refresh asks the providers while the session starts; the first turn waits for the answer
+		// before anything is routed.
+		void accountModels.refresh();
+
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd,
 			agentDir,
-			sessionId: sessionManager.getSessionId(),
+			scopedModels: orchestrationModel
+				? [{ model: orchestrationModel.model, thinkingLevel: orchestrationModel.binding.thinkingLevel }]
+				: options.scopedModels,
+			routerPool: options.routerPool,
+			resourceLoader,
+			customTools: options.customTools,
+			modelRegistry,
+			initialActiveToolNames,
+			allowedToolNames,
+			excludedToolNames,
+			shellOperations: options.shellOperations,
+			worktreeSyncEnginePorts: options.worktreeSyncEnginePorts,
+			extensionRunnerRef,
+			toolProfileFilter,
+			isExplicitModel: orchestrationProfile ? true : (options.isExplicitModel ?? options.model != null),
+			isExplicitThinking: orchestrationProfile
+				? true
+				: (options.isExplicitThinking ?? options.thinkingLevel !== undefined),
+			isChildSession,
+			orchestrationProfile,
+			sessionStartEvent: options.sessionStartEvent,
+			systemOneController,
+			...(options.historyTimeSource !== undefined ? { historyTimeSource: options.historyTimeSource } : {}),
+			accountModels,
+			executionLoopMode,
+			objectiveExecutionController,
+			steeringPlane,
+			adaptiveReadiness:
+				adaptiveReadiness ??
+				(steeringPlane || systemOneController ? new AdaptiveRuntimeReadiness({ isUnbound: true }) : undefined),
 		});
-		const durableTaskRuntime = new DurableTaskRuntime({
-			store: orchestrationStore,
-		});
-		const taskProfileStore = new SessionTaskProfileStore(sessionManager);
-		const foregroundBaseProfile =
-			orchestrationProfile ??
-			(model
-				? ({
+		sessionRef.current = session;
+		// The AgentSession constructor builds the first runner; a reload swaps it through the same ref.
+		const getExtensionRunner = (): ExtensionRunner => {
+			const runner = extensionRunnerRef.current;
+			if (!runner)
+				throw new Error("The session's extension runner is built by its constructor and must exist here.");
+			return runner;
+		};
+		session.setWorkEvidenceJournal(createSessionWorkEvidenceJournal(() => sessionManager));
+		await session.recoverGoalWorkEvidence();
+
+		// Phase B — Adaptive runtime late binding to live session-owned ports
+		if ((steeringPlane || systemOneController) && !options.adaptiveReadiness) {
+			const persistentPath = steeringCertificatesFile(agentDir);
+			const certificates = steeringPlane?.certificates ?? new SteeringCertificateStore(persistentPath);
+			if (!steeringPlane && systemOneController) {
+				steeringPlane = new SystemOneSteeringPlane({
+					adapter: systemOneController.adapter,
+					certificates,
+					policy: DEFAULT_STEERING_POLICY,
+				});
+			}
+
+			const fitnessStore = FitnessStore.forAgentDir(agentDir);
+			const adaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
+			const orchestrationStore = new OrchestrationEventStore({
+				agentDir,
+				sessionId: sessionManager.getSessionId(),
+			});
+			const durableTaskRuntime = new DurableTaskRuntime({
+				store: orchestrationStore,
+			});
+			const taskProfileStore = new SessionTaskProfileStore(sessionManager);
+			const foregroundBaseProfile =
+				orchestrationProfile ??
+				(model
+					? ({
+							schemaVersion: 1,
+							profileId: "default-foreground",
+							description: "Default foreground session profile",
+							role: "implementer",
+							modelPolicy: {
+								mode: "fixed",
+								candidates: [
+									{
+										provider: model.provider,
+										modelId: model.id,
+										thinkingLevel: (thinkingLevel as any) ?? "medium",
+									},
+								],
+							},
+							capabilityCeiling: [
+								"filesystem.read",
+								"filesystem.write",
+								"process.exec",
+								"tests.execute",
+								"repo.read",
+								"worktree.read",
+								"worktree.mutate",
+							],
+							toolNames: allowedToolNames ?? initialActiveToolNames,
+							resourceProfileNames: [],
+							dispatchProfileIds: [],
+							budget: {
+								maxTokens: 100_000,
+								maxCostUsd: 10,
+								maxWallClockMs: 60_000,
+								maxAttempts: 10,
+							},
+							maxConcurrent: 1,
+							leaseTtlMs: 120_000,
+							requireIndependentVerification: false,
+							createdAt: new Date().toISOString(),
+							updatedAt: new Date().toISOString(),
+						} as OrchestrationProfile)
+					: undefined);
+			const taskProfileWriter = new TaskProfileWriter({
+				agentDir,
+				cwd,
+				store: taskProfileStore,
+				getSettingsManager: () => settingsManager,
+				getModelRegistry: () => modelRegistry,
+				isModelExhausted: () => false,
+				getActiveOrchestrationProfile: () => orchestrationProfile ?? foregroundBaseProfile,
+				getInheritedBaseProfile: () => orchestrationProfile ?? foregroundBaseProfile,
+			});
+			const contractFactory = {
+				createContract: (input: {
+					profileId: string;
+					specialistId: string;
+					expertBinding: {
+						providerId: string;
+						modelId: string;
+						routingBand: string;
+						capabilityTier: string;
+					};
+					authorityRole: string;
+					toolNames: readonly string[];
+				}) => {
+					const stored = taskProfileStore.load().registry.get(input.profileId);
+					const profile: OrchestrationProfile = stored?.profile ?? {
 						schemaVersion: 1,
-						profileId: "default-foreground",
-						description: "Default foreground session profile",
-						role: "implementer",
+						profileId: input.profileId,
+						role: (input.authorityRole as any) || "implementer",
+						description: `Specialist worker profile for ${input.specialistId}`,
 						modelPolicy: {
 							mode: "fixed",
 							candidates: [
 								{
-									provider: model.provider,
-									modelId: model.id,
-									thinkingLevel: (thinkingLevel as any) ?? "medium",
+									provider: input.expertBinding.providerId,
+									modelId: input.expertBinding.modelId,
+									thinkingLevel: "high" as const,
 								},
 							],
 						},
@@ -940,304 +1000,245 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							"worktree.read",
 							"worktree.mutate",
 						],
-						toolNames: allowedToolNames ?? initialActiveToolNames,
+						toolNames: [...input.toolNames],
 						resourceProfileNames: [],
 						dispatchProfileIds: [],
-						budget: {
-							maxTokens: 100_000,
-							maxCostUsd: 10,
-							maxWallClockMs: 60_000,
-							maxAttempts: 10,
-						},
+						budget: { maxTokens: 100_000, maxCostUsd: 10, maxWallClockMs: 60_000, maxAttempts: 10 },
 						maxConcurrent: 1,
 						leaseTtlMs: 120_000,
 						requireIndependentVerification: false,
 						createdAt: new Date().toISOString(),
 						updatedAt: new Date().toISOString(),
-					} as OrchestrationProfile)
-				: undefined);
-		const taskProfileWriter = new TaskProfileWriter({
-			agentDir,
-			cwd,
-			store: taskProfileStore,
-			getSettingsManager: () => settingsManager,
-			getModelRegistry: () => modelRegistry,
-			isModelExhausted: () => false,
-			getActiveOrchestrationProfile: () => orchestrationProfile ?? foregroundBaseProfile,
-			getInheritedBaseProfile: () => orchestrationProfile ?? foregroundBaseProfile,
-		});
-		const contractFactory = {
-			createContract: (input: {
-				profileId: string;
-				specialistId: string;
-				expertBinding: {
-					providerId: string;
-					modelId: string;
-					routingBand: string;
-					capabilityTier: string;
-				};
-				authorityRole: string;
-				toolNames: readonly string[];
-			}) => {
-				const stored = taskProfileStore.load().registry.get(input.profileId);
-				const profile: OrchestrationProfile = stored?.profile ?? {
-					schemaVersion: 1,
-					profileId: input.profileId,
-					role: (input.authorityRole as any) || "implementer",
-					description: `Specialist worker profile for ${input.specialistId}`,
-					modelPolicy: {
-						mode: "fixed",
-						candidates: [
-							{
+					};
+					const contract = createWorkerExecutionContract({
+						worker: {
+							profile,
+							modelBinding: {
 								provider: input.expertBinding.providerId,
 								modelId: input.expertBinding.modelId,
-								thinkingLevel: "high" as const,
+								thinkingLevel:
+									profile.modelPolicy.candidates.find(
+										(candidate) =>
+											candidate.provider === input.expertBinding.providerId &&
+											candidate.modelId === input.expertBinding.modelId,
+									)?.thinkingLevel ??
+									profile.modelPolicy.candidates[0]?.thinkingLevel ??
+									"high",
 							},
-						],
-					},
-					capabilityCeiling: [
-						"filesystem.read",
-						"filesystem.write",
-						"process.exec",
-						"tests.execute",
-						"repo.read",
-						"worktree.read",
-						"worktree.mutate",
-					],
-					toolNames: [...input.toolNames],
-					resourceProfileNames: [],
-					dispatchProfileIds: [],
-					budget: { maxTokens: 100_000, maxCostUsd: 10, maxWallClockMs: 60_000, maxAttempts: 10 },
-					maxConcurrent: 1,
-					leaseTtlMs: 120_000,
-					requireIndependentVerification: false,
-					createdAt: new Date().toISOString(),
-					updatedAt: new Date().toISOString(),
-				};
-				const contract = createWorkerExecutionContract({
-					worker: {
-						profile,
-						modelBinding: {
-							provider: input.expertBinding.providerId,
-							modelId: input.expertBinding.modelId,
-							thinkingLevel:
-								profile.modelPolicy.candidates.find(
-									(candidate) =>
-										candidate.provider === input.expertBinding.providerId &&
-										candidate.modelId === input.expertBinding.modelId,
-								)?.thinkingLevel ??
-								profile.modelPolicy.candidates[0]?.thinkingLevel ??
-								"high",
+							authority: {
+								cwd,
+								capabilities: [...profile.capabilityCeiling],
+								toolNames: [...profile.toolNames],
+								readPaths: profile.capabilityCeiling.some(
+									(cap) => cap === "filesystem.read" || cap === "worktree.read",
+								)
+									? [cwd]
+									: [],
+								writePaths: profile.capabilityCeiling.some(
+									(cap) => cap === "filesystem.write" || cap === "worktree.mutate",
+								)
+									? [cwd]
+									: [],
+								deniedPaths: [],
+								budget: { ...profile.budget },
+							},
+							resourcePointers: [],
 						},
+					});
+					return {
+						...contract,
 						authority: {
-							cwd,
-							capabilities: [...profile.capabilityCeiling],
-							toolNames: [...profile.toolNames],
-							readPaths: profile.capabilityCeiling.some(
-								(cap) => cap === "filesystem.read" || cap === "worktree.read",
-							)
-								? [cwd]
-								: [],
-							writePaths: profile.capabilityCeiling.some(
-								(cap) => cap === "filesystem.write" || cap === "worktree.mutate",
-							)
-								? [cwd]
-								: [],
-							deniedPaths: [],
-							budget: { ...profile.budget },
+							...contract.worker.authority,
+							role: input.authorityRole,
 						},
-						resourcePointers: [],
-					},
-				});
-				return {
-					...contract,
-					authority: {
-						...contract.worker.authority,
-						role: input.authorityRole,
-					},
-					modelBinding: contract.worker.modelBinding,
-				};
-			},
-		};
-
-		const getOwnerRules = () => session.renderOwnerRulesForMission();
-		const workerDispatcher = new RealWorkerDispatcher({
-			session,
-			provenance: "production-live",
-			getOwnerRules,
-		});
-
-		// Synthesized capability artifacts are agent runtime state keyed to the session that built
-		// them, so a synthesis never shows up as a project change.
-		const capabilityArtifactRoot = capabilityArtifactsDir(agentDir, sessionManager.getSessionId());
-
-		const capabilityBuilder = new RealCapabilityBuilder({
-			taskRuntime: durableTaskRuntime,
-			taskProfiles: taskProfileWriter,
-			contractFactory,
-			runWorkerOnce: (req) => session.runWorkerDelegationOnce(req as any),
-			cwd,
-			capabilityArtifactRoot,
-			provenance: "production-live",
-			getOwnerRules,
-		});
-
-		const scriptRegistry = new RealScriptRegistry();
-		const proofRunner = new CapabilityProofRunner();
-		const mechanicalVerifier = new RealMechanicalVerifier({
-			proofRunner,
-			scriptRegistry,
-			extensionRunner: getExtensionRunner(),
-			skillVault: session.getSkillVault(),
-			cwd,
-			provenance: "production-live",
-		});
-
-		const charter =
-			options.charter ??
-			compileExecutionCharter({
-				objectiveId: `obj-${sessionManager.getSessionId()}`,
-				prompt: options.prompt ?? "Perform safe scoped execution with full adaptive runtime",
-				admission: observeDeliveryAdmission(cwd),
-			});
-
-		// The objective loop routes over the goal the owner started: reconcile it into the durable
-		// objective, read budgets from the goal's lease, repairs into durable tasks, limitations from the
-		// open verifications. The raw task runtime alone knows none of that.
-		const objectiveRuntime = new SessionObjectiveRuntime({
-			runtime: durableTaskRuntime,
-			cwd,
-			getGoalState: () => session.getGoalStateSnapshot(),
-			synchronizeGoalState: (goal) => session.backgroundLanes.synchronizeGoalState(goal),
-			getVerificationObligations: () => session.getVerificationObligations(),
-			noteDecision: (kind, detail) =>
-				session.operatorProjection.eventBridge.recordPlanMilestone(
-					kind === "repair" ? "Repair requested" : "Replan requested",
-					detail,
-				),
-		});
-		const stack = createProductionAdaptiveRuntimeStack({
-			agentDir,
-			persistentPath,
-			steeringPlane: steeringPlane ?? undefined,
-			modelRegistry,
-			getCandidateModels: () =>
-				session.getRouterCandidatePool().models.filter((candidate) => session.isModelAllowed(candidate)),
-			fitnessStore,
-			adaptationStore,
-			...(systemOneController ? { getSelectionJudge: () => systemOneController } : {}),
-			taskRuntime: durableTaskRuntime,
-			objectiveRuntime,
-			loopMode: executionLoopMode,
-			completionProfile: resolveEffectiveCompletionProfile({
-				requestedProfile: systemOneSettings.completionProfile,
-				steeringMode: steeringPlane?.policy.mode,
-				systemOneBound: Boolean(steeringPlane || systemOneController),
-			}),
-			taskProfiles: taskProfileWriter,
-			contractFactory,
-			capabilityBuilder,
-			runtimeUpdateController: session.runtimeUpdates,
-			workerDispatcher,
-			mechanicalVerifier,
-			scriptRegistry,
-			skillVault: session.getSkillVault(),
-			extensionRunner: getExtensionRunner(),
-			charter,
-			cwd,
-			capabilityArtifactRoot,
-			getOwnerRules,
-			projectRules: session.projectRules,
-			proofRunner,
-			kindSupportContext: {
-				projectInstructionsEnabled: settingsManager.areProjectInstructionsEnabled(),
-			},
-			// The live extension runtime: loads an extension by path and exposes the active registry,
-			// which is what makes `extension` an activatable kind rather than an advertised one.
-			extensionRuntime: {
-				reload: (extensionPath) => session.reloadExtension(extensionPath),
-				listActive: () =>
-					getExtensionRunner().activeExtensions.map((extension) => ({
-						// `resolvedPath` is what the runtime actually loaded, which is what an
-						// activation lookup has to match against the artifact it was given.
-						name: basename(extension.path),
-						path: extension.resolvedPath,
-					})),
-			},
-		});
-
-		session.attachAdaptiveRuntime({ ...stack, charter });
-	}
-
-	if (systemOneController) {
-		const readActiveRepository = () => {
-			const repositoryRoot = readWorkRepositoryRoot(session.taskCwd) ?? session.taskCwd;
-			let currentRevision = "unversioned";
-			try {
-				currentRevision =
-					execFileSync("git", ["rev-parse", "HEAD"], {
-						cwd: repositoryRoot,
-						encoding: "utf-8",
-						stdio: ["ignore", "pipe", "ignore"],
-					}).trim() || currentRevision;
-			} catch {
-				// A non-git task workspace has no repository revision to project.
-			}
-			const baselineRevision =
-				session.getGoalWorkEvidence().find((scope) => scope.baseline?.root === repositoryRoot)?.baseline
-					?.revision ?? currentRevision;
-			return {
-				repositoryRoot,
-				currentRevision,
-				baselineRevision,
+						modelBinding: contract.worker.modelBinding,
+					};
+				},
 			};
-		};
-		systemOneController.setTruthSource(() => {
-			const goal = session.getGoalStateSnapshot();
-			const repository = readActiveRepository();
-			return projectCanonicalTruth({
-				goal,
-				runtime: session.backgroundLanes.getTaskRuntimeSnapshot(),
-				verificationObligations: session.getVerificationObligations(),
-				lastRoute: session.objectiveExecutionController?.getLastRoute(),
-				currentRevision: repository.currentRevision,
-				repository: { root: repository.repositoryRoot, baseline_revision: repository.baselineRevision },
-			});
-		});
-		systemOneController.syncCanonicalTruth();
-		systemOneController.setWorkDiffSource(() => {
-			const goal = session.getGoalStateSnapshot();
-			return goal ? readGoalWorkDiff(session.getGoalWorkEvidence()) : undefined;
-		});
-	}
-	if (executionLoopMode === "objective_primary" && !session.objectiveExecutionController) {
-		await session.disposeAndWait();
-		throw new ObjectivePrimaryBindingError("ObjectiveExecutionController");
-	}
-	try {
-		// The initial runtime has now bound providers from profile-granted extensions. Re-resolve the
-		// profile model against that authoritative registry generation, then resync model capability.
-		await session.reapplyActiveProfileModelSettings();
-		if (modelFallbackMessage?.startsWith("Profile model resolution error:")) {
-			modelFallbackMessage = undefined;
-		}
-	} catch (error) {
-		// Preserve the established non-fatal fallback for a genuinely unresolved profile model.
-		if (!modelFallbackMessage?.startsWith("Profile model resolution error:")) {
-			await session.disposeAndWait();
-			throw error;
-		}
-	}
-	// File-store memory tools exist only after providers initialize. Do this here so an SDK session
-	// that never calls bindExtensions still has the requested `memory` tool when the grant allows it.
-	await session.initializeMemory();
-	const extensionsResult = resourceLoader.getExtensions();
 
-	return {
-		session,
-		sessionManager,
-		getExtensionRunner,
-		extensionsResult,
-		modelFallbackMessage,
-	};
+			const getOwnerRules = () => session.renderOwnerRulesForMission();
+			const workerDispatcher = new RealWorkerDispatcher({
+				session,
+				provenance: "production-live",
+				getOwnerRules,
+			});
+
+			// Synthesized capability artifacts are agent runtime state keyed to the session that built
+			// them, so a synthesis never shows up as a project change.
+			const capabilityArtifactRoot = capabilityArtifactsDir(agentDir, sessionManager.getSessionId());
+
+			const capabilityBuilder = new RealCapabilityBuilder({
+				taskRuntime: durableTaskRuntime,
+				taskProfiles: taskProfileWriter,
+				contractFactory,
+				runWorkerOnce: (req) => session.runWorkerDelegationOnce(req as any),
+				cwd,
+				capabilityArtifactRoot,
+				provenance: "production-live",
+				getOwnerRules,
+			});
+
+			const scriptRegistry = new RealScriptRegistry();
+			const proofRunner = new CapabilityProofRunner();
+			const mechanicalVerifier = new RealMechanicalVerifier({
+				proofRunner,
+				scriptRegistry,
+				extensionRunner: getExtensionRunner(),
+				skillVault: session.getSkillVault(),
+				cwd,
+				provenance: "production-live",
+			});
+
+			const charter =
+				options.charter ??
+				compileExecutionCharter({
+					objectiveId: `obj-${sessionManager.getSessionId()}`,
+					prompt: options.prompt ?? "Perform safe scoped execution with full adaptive runtime",
+					admission: observeDeliveryAdmission(cwd),
+				});
+
+			// The objective loop routes over the goal the owner started: reconcile it into the durable
+			// objective, read budgets from the goal's lease, repairs into durable tasks, limitations from the
+			// open verifications. The raw task runtime alone knows none of that.
+			const objectiveRuntime = new SessionObjectiveRuntime({
+				runtime: durableTaskRuntime,
+				cwd,
+				getGoalState: () => session.getGoalStateSnapshot(),
+				synchronizeGoalState: (goal) => session.backgroundLanes.synchronizeGoalState(goal),
+				getVerificationObligations: () => session.getVerificationObligations(),
+				noteDecision: (kind, detail) =>
+					session.operatorProjection.eventBridge.recordPlanMilestone(
+						kind === "repair" ? "Repair requested" : "Replan requested",
+						detail,
+					),
+			});
+			const stack = createProductionAdaptiveRuntimeStack({
+				agentDir,
+				persistentPath,
+				steeringPlane: steeringPlane ?? undefined,
+				modelRegistry,
+				getCandidateModels: () =>
+					session.getRouterCandidatePool().models.filter((candidate) => session.isModelAllowed(candidate)),
+				fitnessStore,
+				adaptationStore,
+				...(systemOneController ? { getSelectionJudge: () => systemOneController } : {}),
+				taskRuntime: durableTaskRuntime,
+				objectiveRuntime,
+				loopMode: executionLoopMode,
+				completionProfile: resolveEffectiveCompletionProfile({
+					requestedProfile: systemOneSettings.completionProfile,
+					steeringMode: steeringPlane?.policy.mode,
+					systemOneBound: Boolean(steeringPlane || systemOneController),
+				}),
+				taskProfiles: taskProfileWriter,
+				contractFactory,
+				capabilityBuilder,
+				runtimeUpdateController: session.runtimeUpdates,
+				workerDispatcher,
+				mechanicalVerifier,
+				scriptRegistry,
+				skillVault: session.getSkillVault(),
+				extensionRunner: getExtensionRunner(),
+				charter,
+				cwd,
+				capabilityArtifactRoot,
+				getOwnerRules,
+				projectRules: session.projectRules,
+				proofRunner,
+				kindSupportContext: {
+					projectInstructionsEnabled: settingsManager.areProjectInstructionsEnabled(),
+				},
+				// The live extension runtime: loads an extension by path and exposes the active registry,
+				// which is what makes `extension` an activatable kind rather than an advertised one.
+				extensionRuntime: {
+					reload: (extensionPath) => session.reloadExtension(extensionPath),
+					listActive: () =>
+						getExtensionRunner().activeExtensions.map((extension) => ({
+							// `resolvedPath` is what the runtime actually loaded, which is what an
+							// activation lookup has to match against the artifact it was given.
+							name: basename(extension.path),
+							path: extension.resolvedPath,
+						})),
+				},
+			});
+
+			session.attachAdaptiveRuntime({ ...stack, charter });
+		}
+
+		if (systemOneController) {
+			const readActiveRepository = () => {
+				const repositoryRoot = readWorkRepositoryRoot(session.taskCwd) ?? session.taskCwd;
+				let currentRevision = "unversioned";
+				try {
+					currentRevision =
+						execFileSync("git", ["rev-parse", "HEAD"], {
+							cwd: repositoryRoot,
+							encoding: "utf-8",
+							stdio: ["ignore", "pipe", "ignore"],
+						}).trim() || currentRevision;
+				} catch {
+					// A non-git task workspace has no repository revision to project.
+				}
+				const baselineRevision =
+					session.getGoalWorkEvidence().find((scope) => scope.baseline?.root === repositoryRoot)?.baseline
+						?.revision ?? currentRevision;
+				return {
+					repositoryRoot,
+					currentRevision,
+					baselineRevision,
+				};
+			};
+			systemOneController.setTruthSource(() => {
+				const goal = session.getGoalStateSnapshot();
+				const repository = readActiveRepository();
+				return projectCanonicalTruth({
+					goal,
+					runtime: session.backgroundLanes.getTaskRuntimeSnapshot(),
+					verificationObligations: session.getVerificationObligations(),
+					lastRoute: session.objectiveExecutionController?.getLastRoute(),
+					currentRevision: repository.currentRevision,
+					repository: { root: repository.repositoryRoot, baseline_revision: repository.baselineRevision },
+				});
+			});
+			systemOneController.syncCanonicalTruth();
+			systemOneController.setWorkDiffSource(() => {
+				const goal = session.getGoalStateSnapshot();
+				return goal ? readGoalWorkDiff(session.getGoalWorkEvidence()) : undefined;
+			});
+		}
+		if (executionLoopMode === "objective_primary" && !session.objectiveExecutionController) {
+			await session.disposeAndWait();
+			throw new ObjectivePrimaryBindingError("ObjectiveExecutionController");
+		}
+		try {
+			// The initial runtime has now bound providers from profile-granted extensions. Re-resolve the
+			// profile model against that authoritative registry generation, then resync model capability.
+			await session.reapplyActiveProfileModelSettings();
+			if (modelFallbackMessage?.startsWith("Profile model resolution error:")) {
+				modelFallbackMessage = undefined;
+			}
+		} catch (error) {
+			// Preserve the established non-fatal fallback for a genuinely unresolved profile model.
+			if (!modelFallbackMessage?.startsWith("Profile model resolution error:")) {
+				await session.disposeAndWait();
+				throw error;
+			}
+		}
+		// File-store memory tools exist only after providers initialize. Do this here so an SDK session
+		// that never calls bindExtensions still has the requested `memory` tool when the grant allows it.
+		await session.initializeMemory();
+		const extensionsResult = resourceLoader.getExtensions();
+
+		return {
+			session,
+			sessionManager,
+			getExtensionRunner,
+			extensionsResult,
+			modelFallbackMessage,
+		};
+	} catch (error) {
+		// The owner was made for this session and no session took it: release its timers and listeners before rethrowing.
+		semanticUsage.dispose();
+		throw error;
+	}
 }

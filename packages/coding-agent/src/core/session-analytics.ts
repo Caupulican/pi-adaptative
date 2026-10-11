@@ -30,6 +30,7 @@ import {
 	type CurrentSessionCostAccumulator,
 	createCurrentSessionCostAccumulator,
 	createSessionCostSummary,
+	projectPendingSemanticCost,
 	type SessionCostSummary,
 } from "./cost/cost-summary.ts";
 import {
@@ -39,6 +40,7 @@ import {
 	formatDailyUsageBreakdown,
 	getLocalDayWindow,
 } from "./cost/daily-usage.ts";
+import type { SemanticUsageProjection } from "./cost/semantic-usage-delivery.ts";
 import { aggregateCumulativeUsageFromSessionEntries } from "./cost/session-usage.ts";
 import {
 	deliverSpawnedUsageReceipt,
@@ -77,6 +79,13 @@ export interface SessionAnalyticsDeps {
 	getModel(): Model<any> | undefined;
 	/** Session log — entries feed spawned-usage roll-up, daily totals, branch export. */
 	getSessionManager(): SessionManager;
+	/**
+	 * Paid System One usage the session's ledger does not carry yet. CURRENT (getCostSummary) and the cumulative rollup
+	 * (getCumulativeUsage) count it, once by report id. getSessionStats does not: its tokens and cost sum the usage recorded
+	 * on session entries (assistant and tool-result messages, which includes a `systemone` tool call's own result usage, and
+	 * compaction and branch summaries), so System One reviewer usage rows and spawned spend, pending or not, stay out of them.
+	 */
+	getPendingSemanticUsage(): SemanticUsageProjection;
 	/** Settings — the export theme is read here. */
 	getSettingsManager(): SessionAnalyticsSettingsSource;
 	/** Resolve a tool definition for the HTML export's custom-tool renderer. */
@@ -114,6 +123,7 @@ export class SessionAnalytics {
 	 * rescanning a long session log there turns redraw into O(entries) work per frame. */
 	private _costSummaryCache?: {
 		entryCount: number;
+		pendingRevision: number;
 		dailyTotals: DailyUsageTotals;
 		windowStartMs: number;
 		windowEndMs: number;
@@ -298,7 +308,10 @@ export class SessionAnalytics {
 	 * silently under-counts the grandchildren.
 	 */
 	getCumulativeUsage(): Usage {
-		return aggregateCumulativeUsageFromSessionEntries(this.deps.getSessionManager().getEntries());
+		return aggregateCumulativeUsageFromSessionEntries(
+			this.deps.getSessionManager().getEntries(),
+			this.deps.getPendingSemanticUsage().reports,
+		);
 	}
 
 	/**
@@ -408,9 +421,11 @@ export class SessionAnalytics {
 		const entryCount = sessionManager.getEntryCount?.() ?? sessionManager.getEntries().length;
 		const window = getLocalDayWindow(now);
 		const dailyTotals = this.getDailyUsageTotals(now);
+		const pending = this.deps.getPendingSemanticUsage();
 		const cached = this._costSummaryCache;
 		if (
 			cached?.entryCount === entryCount &&
+			cached.pendingRevision === pending.revision &&
 			cached.dailyTotals === dailyTotals &&
 			cached.windowStartMs === window.startMs &&
 			cached.windowEndMs === window.endMs
@@ -418,12 +433,13 @@ export class SessionAnalytics {
 			return cached.summary;
 		}
 		const summary = createSessionCostSummary({
-			currentTotals: this.getCurrentSessionCostTotals(),
+			currentTotals: projectPendingSemanticCost(this.getCurrentSessionCostTotals(), pending.reports),
 			dailyTotals,
 			todayWindow: window,
 		});
 		this._costSummaryCache = {
 			entryCount,
+			pendingRevision: pending.revision,
 			dailyTotals,
 			windowStartMs: window.startMs,
 			windowEndMs: window.endMs,

@@ -23,6 +23,37 @@ function matchesSpawnedUsageReceipt(data: unknown, usage: Usage, options: Spawne
 	);
 }
 
+/**
+ * Classify the canonical JSONL row of one custom entry. `persisted` only when the row on disk matches; `pending` while it
+ * is not readable yet (buffered before the first reply, or no file); `conflict` when a row at that identity differs.
+ */
+export function classifyCustomEntryPersisted(
+	session: Pick<SessionManager, "readEntryJsonPrefix">,
+	entryId: string,
+	customType: string,
+	matches: (data: unknown) => boolean,
+): "persisted" | "pending" | "conflict" {
+	const json = session.readEntryJsonPrefix(entryId, 64 * 1024);
+	if (json === undefined) return "pending";
+	let persisted: unknown;
+	try {
+		persisted = JSON.parse(json);
+	} catch (error) {
+		if (error instanceof SyntaxError) return "pending";
+		throw error;
+	}
+	if (
+		!isPlainRecord(persisted) ||
+		persisted.id !== entryId ||
+		persisted.type !== "custom" ||
+		persisted.customType !== customType ||
+		!matches(persisted.data)
+	) {
+		return "conflict";
+	}
+	return "persisted";
+}
+
 /** Confirm physical parent persistence through its existing idempotent ingestion owner. */
 export function deliverSpawnedUsageReceipt(
 	session: Pick<SessionManager, "getSessionId" | "getEntry" | "getEntries" | "readEntryJsonPrefix">,
@@ -52,23 +83,9 @@ export function deliverSpawnedUsageReceipt(
 	) {
 		throw new Error("Spawned usage receipt identity conflicts with the parent ledger.");
 	}
-	const json = session.readEntryJsonPrefix(entry.id, 64 * 1024);
-	if (json === undefined) return "pending";
-	let persisted: unknown;
-	try {
-		persisted = JSON.parse(json);
-	} catch (error) {
-		if (error instanceof SyntaxError) return "pending";
-		throw error;
-	}
-	if (
-		!isPlainRecord(persisted) ||
-		persisted.id !== entry.id ||
-		persisted.type !== "custom" ||
-		persisted.customType !== SPAWNED_USAGE_CUSTOM_TYPE ||
-		!matchesSpawnedUsageReceipt(persisted.data, usage, options)
-	) {
-		throw new Error("Spawned usage persisted receipt conflicts with the parent ledger.");
-	}
-	return "persisted";
+	const physical = classifyCustomEntryPersisted(session, entry.id, SPAWNED_USAGE_CUSTOM_TYPE, (data) =>
+		matchesSpawnedUsageReceipt(data, usage, options),
+	);
+	if (physical === "conflict") throw new Error("Spawned usage persisted receipt conflicts with the parent ledger.");
+	return physical;
 }

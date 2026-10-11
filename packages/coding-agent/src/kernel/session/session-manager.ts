@@ -249,8 +249,16 @@ function createSessionId(): string {
 	return uuidv7();
 }
 
+/**
+ * The one session id rule: a single alphanumeric token, with '-', '_' and '.' allowed inside it. Every id the kernel
+ * mints (UUID v4 before uuidv7, UUID v7 now) and every explicit id it has accepted since explicit ids existed satisfies it.
+ */
+export function isValidSessionId(id: string): boolean {
+	return /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(id);
+}
+
 export function assertValidSessionId(id: string): void {
-	if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(id)) {
+	if (!isValidSessionId(id)) {
 		throw new Error(
 			"Session id must be non-empty, contain only alphanumeric characters, '-', '_', and '.', and start and end with an alphanumeric character",
 		);
@@ -1001,7 +1009,9 @@ function retainedStringChars(value: unknown, stopAfter: number): number {
 export type SessionHeaderReadResult =
 	| { ok: true; header: SessionHeader }
 	| { ok: false; reason: "unreadable"; cause: unknown }
-	| { ok: false; reason: "not_a_header" };
+	| { ok: false; reason: "not_a_header" }
+	/** A session header whose id is not a valid session id: the file is not adopted, and nothing is derived from the id. */
+	| { ok: false; reason: "invalid_session_id"; header: SessionHeader };
 
 /** Read and parse the header line of a session file, looking at no more than `maxBytes` of it. */
 export function readSessionHeaderResult(
@@ -1033,7 +1043,27 @@ export function readSessionHeaderResult(
 	if (header === null || typeof header !== "object" || header.type !== "session" || typeof header.id !== "string") {
 		return { ok: false, reason: "not_a_header" };
 	}
+	// The header's fields are returned for diagnostics only: its id is not a valid session id, so nothing may use it as a handle.
+	if (!isValidSessionId(header.id)) {
+		return { ok: false, reason: "invalid_session_id", header: header as unknown as SessionHeader };
+	}
 	return { ok: true, header: header as unknown as SessionHeader };
+}
+
+/**
+ * A session file a manager adopts must begin with a valid session header whose id is a valid session id. The id is later
+ * a file name (journal sidecars, owner follow-up files), so it is judged here, before anything adopts it or touches the
+ * file. The first JSONL record is authoritative: a later valid header must not launder a malformed prefix. An empty file
+ * has no header to judge.
+ */
+function assertAdoptableSessionHeader(filePath: string): void {
+	if (!existsSync(filePath) || statSync(filePath).size === 0) return;
+	const result = readSessionHeaderResult(filePath);
+	if (result.ok) return;
+	if (result.reason === "invalid_session_id") {
+		throw new Error(`Session file header id is not a valid session id: ${filePath}`);
+	}
+	throw new Error(`Session file does not begin with a valid session header: ${filePath}`);
 }
 
 function readSessionHeader(filePath: string): SessionHeader | null {
@@ -1152,6 +1182,9 @@ function getMessageActivityTime(entry: SessionMessageEntry): number | undefined 
 
 async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	try {
+		// The header is admitted exactly as the open path admits it: a file whose header id is not a valid session id is not
+		// listed, since opening it would be refused.
+		if (!readSessionHeaderResult(filePath).ok) return null;
 		const stats = await stat(filePath);
 		let header: SessionHeader | null = null;
 		let messageCount = 0;
@@ -1405,6 +1438,8 @@ export class SessionManager {
 
 	/** Switch to a different session file (used for resume and branching) */
 	setSessionFile(sessionFile: string): void {
+		// Judged before this manager changes any state: a rejected file leaves the manager and the file as they were.
+		assertAdoptableSessionHeader(resolvePath(sessionFile));
 		const recoveringUncertainWrite = this.persistenceStateUncertain;
 		this.persistenceStateUncertain = true;
 		try {
@@ -1440,12 +1475,6 @@ export class SessionManager {
 		this._resetEntryFileIndex(true);
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
-			// The physical first JSONL record is authoritative. A later valid header must not
-			// launder a malformed, blank, or oversized prefix that the streaming parser skips.
-			if (statSync(this.sessionFile).size > 0 && !readSessionHeader(this.sessionFile)) {
-				throw new Error(`Session file does not begin with a valid session header: ${this.sessionFile}`);
-			}
-
 			// The session file is the cold payload arena. Release each large payload as
 			// soon as its JSONL record is parsed so GC can reclaim it during this pass;
 			// waiting until the complete history is loaded makes peak heap proportional
@@ -1651,6 +1680,11 @@ export class SessionManager {
 
 	isPersisted(): boolean {
 		return this.persist;
+	}
+
+	/** Whether a failed write left the file's state unknown: appends are refused until the file is reopened. */
+	isPersistenceStateUncertain(): boolean {
+		return this.persistenceStateUncertain;
 	}
 
 	getCwd(): string {

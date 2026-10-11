@@ -5,6 +5,7 @@ import {
 	SystemOneObserverError,
 	type SystemOneReceipt,
 	SystemOneReviewError,
+	SystemOneUsageRefusal,
 } from "../review/system-one-review-port.ts";
 import { TypeSafeEvidenceError, TypeSafeInputError } from "../review/typesafe-contract.ts";
 import type { SystemOneAccessResolver } from "./access.ts";
@@ -70,6 +71,18 @@ export type JevFailureKind =
 	| "timeout"
 	| "cancelled"
 	| "model_drift";
+
+/**
+ * A refusal raised before any request could be sent (no key configured, a model that is not the one System One runs).
+ * It stays a plain `Error` for every caller; callers that account for sent requests read `preSend`.
+ */
+export class SystemOnePreSendError extends Error {
+	readonly preSend = true;
+	constructor(message: string) {
+		super(message);
+		this.name = "SystemOnePreSendError";
+	}
+}
 
 export class JevAdapterFailure extends Error {
 	readonly kind: JevFailureKind;
@@ -177,12 +190,12 @@ export class SystemOneJevAdapter implements JevAdapter {
 				userKey = outcome.access.apiKey;
 				// The access decides the version; the caller's id is only accepted when it names the same one.
 				if (input.model !== undefined && !driver.matchesModel(outcome.access.model, input.model))
-					throw new Error(`System One runs ${outcome.access.model}; ${input.model} was requested`);
+					throw new SystemOnePreSendError(`System One runs ${outcome.access.model}; ${input.model} was requested`);
 				targetModel = outcome.access.model;
 			} else credentialHint = outcome.setup;
 		} else userKey = (await this.deps.getApiKey?.())?.trim();
 		if (!userKey) {
-			throw new Error(
+			throw new SystemOnePreSendError(
 				`${driver.displayName} System One requires an API key configured by the user (${credentialHint}). No fallback or default credential is permitted.`,
 			);
 		}
@@ -311,6 +324,8 @@ export class SystemOneJevAdapter implements JevAdapter {
 				};
 			} catch (error) {
 				lastError = error;
+				// A usage lease refused before payment is not an outage: nothing was sent, so it is neither classified nor retried.
+				if (error instanceof SystemOneUsageRefusal) throw new SystemOnePreSendError(error.message);
 				if (error instanceof SystemOneReviewError || error instanceof SystemOneObserverError) {
 					owedReceipts = [...owedReceipts, ...error.receipts];
 				}

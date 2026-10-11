@@ -197,11 +197,15 @@ export interface TranscriptSummaryPendingVerdict {
 /** Bounded per-job work counters, kept separately so status never merges unlike units. */
 export interface TranscriptSummaryJobLedger {
 	/**
-	 * Admission requests this job made that PAID: an `admit` call that returned, or one that was aborted after a transport
-	 * attempt had already been charged (its carried receipts). An aborted call that was never charged is not counted.
+	 * Admission calls of this job that sent at least one provider request and returned, or were aborted after a charged
+	 * response (their carried receipts). A call refused before any send (no evaluator, input too large, a refusal of the
+	 * exact input, a usage lease refused before payment) and an abort that carried no charge are not counted.
 	 */
 	semanticRequests: number;
-	/** Paid reviewer responses behind those requests (a response that reported usage; at least one per counted request). */
+	/**
+	 * Provider responses behind those requests, at least one per counted request (a response that reported usage has a
+	 * receipt). It is a count of responses, not a charge: spend is the receipts.
+	 */
 	transportAttempts: number;
 	/** Receipts persisted on the first or a retried persistence stage. */
 	receiptsRecorded: number;
@@ -488,7 +492,7 @@ export class TranscriptSummaryScheduler {
 	private readonly returnedClaims = new Map<string, number>();
 	/** Receipts still owed by jobs that have ended (bounded; see {@link releaseOwedReceipts}). */
 	private readonly releasedReceipts: { ownerSessionId: string; receipt: SystemOneReceipt }[] = [];
-	/** Owed receipts dropped because the released queue overflowed (never silently: counted in the work counters). */
+	/** Owed receipts dropped from the released queue on overflow (never silently: counted in the work counters). */
 	private lostReceipts = 0;
 	/** Counts every change of the released-receipt queue, so the owner persists it exactly when it moved. */
 	private releasedReceiptsVersion = 0;
@@ -1563,7 +1567,8 @@ export class TranscriptSummaryScheduler {
 	/**
 	 * A job that ends (ready, failed, cancelled, stale) while a paid response's usage receipt is still owed hands the owed
 	 * receipts to the owner's queue, so ending a job never silently drops spend that was not recorded. The queue is
-	 * bounded; when it overflows, the oldest are counted as lost, never hidden.
+	 * bounded; when it overflows, the oldest are dropped from the queue and counted as lost, never hidden. A dropped receipt
+	 * is not necessarily unrecoverable: the usage journal may still hold it.
 	 */
 	private releaseOwedReceipts(job: TranscriptSummaryJob): void {
 		const verdict = job.pendingVerdict;
@@ -1609,10 +1614,13 @@ export class TranscriptSummaryScheduler {
 		};
 	}
 
-	/** Put back receipts the owner could not record yet (the same bound applies). */
+	/**
+	 * Put back receipts the owner could not record yet (the same bound applies). They are appended: they are the newest owed
+	 * spend, so an overflow drops the oldest queued entries first and never the receipts just returned.
+	 */
 	returnReleasedReceipts(owed: { ownerSessionId: string; receipt: SystemOneReceipt }[]): void {
 		this.releasedReceiptsVersion += 1;
-		this.releasedReceipts.unshift(
+		this.releasedReceipts.push(
 			...owed.filter(
 				(entry, index) =>
 					!this.queuesReceipt(entry.ownerSessionId, entry.receipt.reportId) &&

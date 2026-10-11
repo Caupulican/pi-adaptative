@@ -7,6 +7,7 @@ import { redactCredentialContent } from "../secrets/credential-model-content.ts"
 import type { SystemOneAccessResolver } from "../system-one/access.ts";
 import { getSystemOneProviderDriver, type SystemOneProviderDriver } from "../system-one/provider-driver.ts";
 import {
+	SYSTEM_ONE_RESPONSES_PER_EVALUATION,
 	type SystemOneEvaluationRecord,
 	SystemOneInvalidResponseError,
 	SystemOneObserverError,
@@ -15,6 +16,10 @@ import {
 	type SystemOneReviewRecord,
 	type SystemOneReviewResponseObserver,
 	type SystemOneTransportAttempt,
+	type SystemOneUsageLease,
+	type SystemOneUsageOutcome,
+	SystemOneUsageRefusal,
+	type SystemOneUsageSink,
 	type TypeSafeUsageReceipt,
 } from "./system-one-review-port.ts";
 import {
@@ -119,15 +124,11 @@ export interface SystemOneReviewerDeps {
 	endpoint?: string;
 	modelsEndpoint?: string;
 	/**
-	 * One durable, provider-priced receipt for every response carrying valid usage, retries included. A throwing
-	 * sink leaves that receipt `unrecorded` on the result; it never discards a received answer.
+	 * One durable, provider-priced receipt for every response carrying valid usage, retries included. Each evaluation
+	 * leases its slots from this sink before any provider call. A receipt the sink does not record is returned
+	 * `unrecorded` with its cause; the answer is still returned, so a received answer is never discarded.
 	 */
-	onUsage?(receipt: TypeSafeUsageReceipt): void;
-	/**
-	 * A paid response's usage could not be written (`onUsage` threw). The answer is still returned with the receipt marked
-	 * unrecorded; this lets every caller's owner see the unrecorded spend, not only a caller that reads `receipts`.
-	 */
-	onReceiptUnrecorded?(receipt: SystemOneReceipt): void;
+	usage?: SystemOneUsageSink;
 	/** The same host credential boundary that protects model requests and tool output. */
 	credentialBoundary?: Pick<
 		CredentialExposureBoundary,
@@ -323,27 +324,24 @@ export class SystemOneReviewer {
 		const requestSha256 = createHash("sha256").update(body).digest("hex");
 		const evaluationId = randomUUID();
 		const receipts: SystemOneReceipt[] = [];
-		// A failed write leaves its receipt unrecorded for the caller to retry; the answer it priced is still returned.
-		const recordReceipt = (payload: TypeSafeUsageReceipt): SystemOneReceipt => {
+		// A receipt the sink does not record stays unrecorded for its owner to retry; the answer it priced is still returned.
+		const recordReceipt = (lease: SystemOneUsageLease, payload: TypeSafeUsageReceipt): SystemOneReceipt => {
+			let outcome: SystemOneUsageOutcome;
 			try {
-				this.deps.onUsage?.(payload);
-				return { status: "recorded", reportId: payload.receiptId, attempt: payload.attempt, payload };
+				outcome = lease.record(payload);
 			} catch (error) {
-				const cause = redact(error instanceof Error ? error.message : String(error)).slice(0, 200);
-				const unrecorded: SystemOneReceipt = {
-					status: "unrecorded",
-					reportId: payload.receiptId,
-					attempt: payload.attempt,
-					cause,
-					payload,
-				};
-				try {
-					this.deps.onReceiptUnrecorded?.(unrecorded);
-				} catch {
-					// Reporting the unrecorded spend never fails the evaluation it reports on.
-				}
-				return unrecorded;
+				outcome = { kind: "unretained", cause: error instanceof Error ? error.message : String(error) };
 			}
+			if (outcome.kind === "physically_recorded") {
+				return { status: "recorded", reportId: payload.receiptId, attempt: payload.attempt, payload };
+			}
+			return {
+				status: "unrecorded",
+				reportId: payload.receiptId,
+				attempt: payload.attempt,
+				cause: redact(outcome.cause).slice(0, 200) || "usage was not recorded",
+				payload,
+			};
 		};
 		const timeout = new AbortController();
 		const timer = setTimeout(() => timeout.abort(), 50_000);
@@ -352,7 +350,10 @@ export class SystemOneReviewer {
 		let attempts = 0;
 		const transportAttempts: SystemOneTransportAttempt[] = [];
 		let raw: unknown;
+		let lease: SystemOneUsageLease | undefined;
 		try {
+			// Before any provider call: a refused lease is a typed evaluation failure with nothing paid.
+			lease = this.deps.usage?.begin();
 			raw = await retryProviderRequest(
 				async () => {
 					combined.signal?.throwIfAborted();
@@ -407,9 +408,9 @@ export class SystemOneReviewer {
 					attempt.response = raw;
 					// Valid usage is priced and recorded even for a rejected body: the provider charged for it.
 					const reportedUsage = getEvaluationUsage(raw);
-					if (reportedUsage && this.deps.onUsage) {
+					if (reportedUsage && lease) {
 						receipts.push(
-							recordReceipt({
+							recordReceipt(lease, {
 								...priceTypeSafeUsage(driver.id, request.model, reportedUsage),
 								receiptId: `${evaluationId}:${attempts}`,
 								provider: driver.id,
@@ -444,7 +445,7 @@ export class SystemOneReviewer {
 					}
 					return raw;
 				},
-				{ maxRetries: 2, maxRetryDelayMs: 15_000, signal: combined.signal },
+				{ maxRetries: SYSTEM_ONE_RESPONSES_PER_EVALUATION - 1, maxRetryDelayMs: 15_000, signal: combined.signal },
 			);
 			combined.signal?.throwIfAborted();
 			try {
@@ -472,6 +473,8 @@ export class SystemOneReviewer {
 		} catch (error) {
 			// Typed contract failures and observer failures keep their class; their receipts are already attached.
 			if (error instanceof SystemOneInvalidResponseError || error instanceof SystemOneObserverError) throw error;
+			// A refused lease is a typed pre-payment failure: it passes through unwrapped so the adapter can classify it as not sent.
+			if (error instanceof SystemOneUsageRefusal) throw error;
 			// Keep arbitrary transport messages out; sanitize the accepted diagnostic with the request snapshot.
 			const errorRegex =
 				/^(Invalid (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) HTTP|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) network error|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response exceeds|Empty (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|Server requested)/;
@@ -484,6 +487,7 @@ export class SystemOneReviewer {
 		} finally {
 			clearTimeout(timer);
 			combined.cleanup();
+			lease?.release();
 		}
 	}
 }

@@ -456,7 +456,8 @@ import {
 	type SessionStats,
 	type WorkerDelegationRunOutcome,
 } from "./agent-session-contracts.ts";
-import { appendSemanticUsageOnce, type SpawnedUsageTotals } from "./cost/usage-records.ts";
+import { type SessionSemanticUsageDelivery, sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
+import type { SpawnedUsageTotals } from "./cost/usage-records.ts";
 
 export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-protocol-controller.ts";
 
@@ -595,6 +596,8 @@ export class AgentSession {
 	/** Usage/cost/stats accounting, /context estimate, and session export (see session-analytics.ts);
 	 * owns the spawned-usage and daily-usage memo caches. */
 	private readonly _analytics: SessionAnalytics;
+	/** The session manager's usage owner: pending paid usage, admission confirmations, and the reviewer's sink. */
+	private readonly _semanticUsage: SessionSemanticUsageDelivery;
 	private readonly _treeNavigator: SessionTreeNavigator;
 	private readonly _costGuard: CostGuardController;
 	/** Host-turn reasoning policy (host-turn-reasoning.ts): the latest decision and this session's lowered count. */
@@ -1531,7 +1534,9 @@ export class AgentSession {
 				// usage reaches the session ledger and its judgments the Jev ledger like every other evaluation.
 				getAdmissionEngine: () => this._recordingSemanticEngine(),
 				recordUsage: (receipt) => {
-					appendSemanticUsageOnce(this.sessionManager, receipt);
+					// Admission keeps its receipt until this confirms the identical row; a pending one stays owed.
+					const outcome = this._semanticUsage.confirm(receipt);
+					if (outcome.kind !== "physically_recorded") throw new Error(outcome.cause);
 				},
 				...(config.historyTimeSource !== undefined ? { time: config.historyTimeSource } : {}),
 				isForegroundBusy: () => this._foregroundRecovery.isBusy,
@@ -2270,11 +2275,16 @@ export class AgentSession {
 				this._extensionErrorListener = listener;
 			},
 		});
+		// The usage owner is shared with the reviewer through the session manager. It is bound to this session's
+		// warnings only now: warnings raised while it recovered are buffered until the foreground lifecycle exists.
+		this._semanticUsage = sessionSemanticUsageOf(this.sessionManager);
+		this._semanticUsage.bindDiagnostics((message) => this.emitHostWarning(message));
 		this._analytics = new SessionAnalytics({
 			getState: () => this.state,
 			getMessages: () => this.messages,
 			getModel: () => this.model,
 			getSessionManager: () => this.sessionManager,
+			getPendingSemanticUsage: () => this._semanticUsage.pendingProjection(),
 			getSettingsManager: () => this.settingsManager,
 			getToolDefinition: (name) => this.getToolDefinition(name),
 			getToolRecoveryEventLogPath: () => this._toolRecoveryEventLogPath,
@@ -4838,6 +4848,8 @@ export class AgentSession {
 		});
 		this._decisionLedger = undefined;
 		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
+		// Before the listeners are dropped, so the handoff warning it may emit still reaches the host.
+		safely(() => this._semanticUsage.dispose());
 		safely(() => this._disconnectFromAgent());
 		this._eventListeners = [];
 		// Ordered, not parallel, and that ordering is the point. The lifecycle abort unwinds any in-flight
