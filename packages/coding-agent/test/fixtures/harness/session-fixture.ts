@@ -2175,8 +2175,9 @@ export class HarnessWorld {
 			 */
 			readonly settings?: Partial<Settings>;
 			/**
-			 * Extension factories loaded into this session only, through a resource loader built exactly as the SDK builds its default one
-			 * plus these factories. Factories register their owner-facing behavior on the session's own events.
+			 * Extension factories loaded into this session only: the fixture builds a DefaultResourceLoader with these factories and reloads it
+			 * (a supplied loader is not reloaded by createAgentSession). Factories register their behavior on the session's own events, which
+			 * fire only once the scenario binds the session (`bindExtensions`), as production modes do.
 			 */
 			readonly extensionFactories?: readonly ExtensionFactory[];
 		} = {},
@@ -2202,6 +2203,18 @@ export class HarnessWorld {
 		this.closeSystemOneWindow(sessionManager, intentBefore);
 		this.systemOneWindows.set(sessionManager, { enabled: systemOneEnabled, before: intentBefore });
 		const agentDir = options.agentDir ?? this.agentDir;
+		// A supplied loader is not reloaded by createAgentSession, and only reload() runs the extension factories: load them here,
+		// as the SDK does for the loader it builds itself. The session still has to be bound (bindExtensions) to emit session_start.
+		let extensionLoader: DefaultResourceLoader | undefined;
+		if (options.extensionFactories !== undefined) {
+			extensionLoader = new DefaultResourceLoader({
+				cwd: HARNESS_PROJECT_CWD,
+				agentDir,
+				settingsManager,
+				extensionFactories: [...options.extensionFactories],
+			});
+			await extensionLoader.reload();
+		}
 		const { session } = await createAgentSession({
 			cwd: HARNESS_PROJECT_CWD,
 			agentDir,
@@ -2209,16 +2222,7 @@ export class HarnessWorld {
 			modelRegistry: this.modelRegistry,
 			settingsManager,
 			sessionManager,
-			...(options.extensionFactories === undefined
-				? {}
-				: {
-						resourceLoader: new DefaultResourceLoader({
-							cwd: HARNESS_PROJECT_CWD,
-							agentDir,
-							settingsManager,
-							extensionFactories: [...options.extensionFactories],
-						}),
-					}),
+			...(extensionLoader === undefined ? {} : { resourceLoader: extensionLoader }),
 			...(options.orchestrationProfile === undefined
 				? { model: this.provider.model(modelId) }
 				: { orchestrationProfile: options.orchestrationProfile }),

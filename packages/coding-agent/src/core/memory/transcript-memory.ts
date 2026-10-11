@@ -1367,7 +1367,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// The stop always reaches its terminal signal; a save that failed keeps its real cause for the status.
 			try {
 				const saved = await this.saveJobsInOrder(scheduler, writer, this.epoch, scheduler.snapshot());
-				// An unsaved queue update ends this run: its terminal event (shown by the host and persisted) names it. Older copies
+				// An unsaved queue update ends this run: its terminal event names it (the host keeps it as the status cause; the warning itself is not shown on the dispose path, where the session's listeners are already cleared). Older copies
 				// of a receipt (the last saved queue, the job record) are kept by a failed queue write, so only the entries newer
 				// than the last saved queue are counted. An entry only this run held (carried by an aborted call, or whose job had
 				// already ended) has no older copy, and the message says so.

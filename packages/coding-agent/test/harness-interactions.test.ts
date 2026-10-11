@@ -3629,13 +3629,42 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				cwd: HARNESS_PROJECT_CWD,
 				projectTrusted: false,
 			}).save(M4_READER_PROFILE, "global");
-			const m4Created = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
+			// The external lifecycle provider records every prefetch it is handed. Egress is allowed, so the secret predicate is the gate under
+			// test: a closed egress policy would skip the provider for every query and prove nothing about the query text.
+			const m4LifecyclePrefetches: string[] = [];
+			const m4Created = await world.createRootSession("root", {
+				sessionManager: world.createSessionManager(),
+				settings: { contextPolicy: { memory: { allowExternalEgress: true } } },
+				extensionFactories: [
+					(pi) => {
+						// Registration waits for session_start, which only bindExtensions emits: the session is bound below.
+						pi.on("session_start", () => {
+							pi.registerMemoryProvider({
+								name: "m4-external-lifecycle",
+								egress: "external",
+								isAvailable: () => true,
+								getCapabilities: () => ({ surfaces: ["context"] }),
+								initialize: async () => {},
+								shutdown: async () => {},
+								prefetch: async (query) => {
+									m4LifecyclePrefetches.push(query);
+									return "";
+								},
+							});
+						});
+					},
+				],
+			});
 			const m4Session = m4Created.session;
+			// The factory registers at session_start, which only bindExtensions emits: bind before the reader starts.
+			await m4Session.bindExtensions({ uiContext: world.humanInput.ui });
 			const m4WorkerDone = createBarrier();
 			const m4Wake = createBarrier();
 			const M4_RAW_PATH = resolve(world.agentDir, "memory", "user.md");
 			const m4Query = "short functions";
 			const m4OverBound = "x".repeat(4_097);
+			// The worker's memory_read query reaches the lifecycle prefetch; in-process delegate instructions do not (no AgentSession.prompt runs).
+			const m4SecretQuery = `Look up the staging maps key ${ICM_CREDENTIAL_KEY}`;
 			world.provider.enqueue(
 				"root",
 				calls("m4-start", [
@@ -3687,6 +3716,12 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 							{ type: "toolCall", id: "m4-read-over", name: "memory_read", arguments: { query: m4OverBound } },
 							{
 								type: "toolCall",
+								id: "m4-read-secret",
+								name: "memory_read",
+								arguments: { query: m4SecretQuery },
+							},
+							{
+								type: "toolCall",
 								id: "m4-mutate",
 								name: "memory",
 								arguments: {
@@ -3710,6 +3745,11 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 						);
 						if (!ok?.text.includes(m4Query))
 							throw new Error(`the valid query did not return the saved preference: ${ok?.text ?? "none"}`);
+						// Both reads return broker text, not a refusal: the secret read takes the same lane path as the normal read, which reaches the provider below.
+						const served = latestBatchResults(request).filter(
+							(result) => result.toolName === "memory_read" && !result.isError,
+						);
+						if (served.length !== 2) throw new Error(`expected 2 served memory reads, found ${served.length}`);
 						const over = latestBatchResults(request)
 							.filter((result) => result.toolName === "memory_read")
 							.find((result) => result.isError);
@@ -3778,8 +3818,137 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				world.provider.reached.filter((name) => name.startsWith("worker-a")),
 				"the memory reader ran its two worker steps exactly once",
 			).toEqual(["worker-a:worker-a-read", "worker-a:worker-a-report"]);
+			expect(
+				m4LifecyclePrefetches.filter((query) => query.includes(ICM_CREDENTIAL_KEY)),
+				"the secret-shaped worker read never reaches the external lifecycle provider",
+			).toEqual([]);
+			expect(
+				m4LifecyclePrefetches.filter((query) => query === m4Query),
+				"the normal worker read reaches the external lifecycle provider exactly once",
+			).toEqual([m4Query]);
 			expect(await world.disposeSessionInBody(m4Session), "the M4 owner disposes cleanly").toBeUndefined();
 			trace.mark("root", "e4.delegated-memory");
+
+			// E4 default policy: the same reader under the default egress policy (external egress closed) hands no read to the external
+			// lifecycle provider, the normal read included. Its own root keeps the handoff wake unambiguous, and its worker runs the same query.
+			const m4DefaultPrefetches: string[] = [];
+			const m4Default = await world.createRootSession("root", {
+				sessionManager: world.createSessionManager(),
+				extensionFactories: [
+					(pi) => {
+						// Registration waits for session_start, which only bindExtensions emits: the session is bound below.
+						pi.on("session_start", () => {
+							pi.registerMemoryProvider({
+								name: "m4-external-lifecycle",
+								egress: "external",
+								isAvailable: () => true,
+								getCapabilities: () => ({ surfaces: ["context"] }),
+								initialize: async () => {},
+								shutdown: async () => {},
+								prefetch: async (query) => {
+									m4DefaultPrefetches.push(query);
+									return "";
+								},
+							});
+						});
+					},
+				],
+			});
+			await m4Default.session.bindExtensions({ uiContext: world.humanInput.ui });
+			const m4DefaultDone = createBarrier();
+			const m4DefaultWake = createBarrier();
+			world.provider.enqueue(
+				"root",
+				calls("m4d-start", [
+					{
+						id: "m4d-start-1",
+						name: "delegate",
+						arguments: {
+							action: "start",
+							profileId: "m4-reader",
+							instructions: "Read the saved short-functions preference through memory, then submit your report.",
+						},
+					},
+				]),
+				{
+					name: "m4d-start-reply",
+					check: (request) => {
+						const started = latestBatchResults(request).find((result) => result.toolName === "delegate");
+						if (started?.isError || !started?.text.includes("delegate started (running)"))
+							throw new Error(`the default-policy reader did not start: ${started?.text ?? "no result"}`);
+					},
+					reply: { content: [{ type: "text", text: "The default-policy reader is started." }] },
+				},
+				{
+					name: "m4d-wake",
+					maxRequests: 8,
+					until: (request) => {
+						const everything = JSON.stringify(request.context.messages);
+						const done =
+							everything.includes("Background worker terminal handoff") && everything.includes("succeeded");
+						if (done) m4DefaultWake.release();
+						return done;
+					},
+					reply: { content: [{ type: "text", text: "Background work is still settling." }] },
+				},
+			);
+			world.provider.enqueue(
+				"worker-a",
+				{
+					name: "worker-a-default-read",
+					check: (request) => {
+						const offered = (request.context.tools ?? []).map((tool) => tool.name);
+						if (!offered.includes("memory_read"))
+							throw new Error(`the default-policy worker is not offered memory_read: ${offered.join(", ")}`);
+					},
+					reply: {
+						content: [{ type: "toolCall", id: "m4d-read", name: "memory_read", arguments: { query: m4Query } }],
+						stopReason: "toolUse",
+					},
+				},
+				{
+					name: "worker-a-default-report",
+					check: (request) => {
+						const ok = latestBatchResults(request).find(
+							(result) => result.toolName === "memory_read" && !result.isError,
+						);
+						if (!ok?.text.includes(m4Query))
+							throw new Error(
+								`the default-policy read did not return the saved preference: ${ok?.text ?? "none"}`,
+							);
+						m4DefaultDone.release();
+					},
+					reply: {
+						content: [
+							{
+								type: "toolCall",
+								id: "m4d-report",
+								name: "submit_report",
+								arguments: { status: "completed", summary: "The preference was read through memory." },
+							},
+						],
+						stopReason: "toolUse",
+					},
+				},
+			);
+			world.systemOne.enterPhase("m4d-start", e4Judgments);
+			await withDeadline(
+				trace,
+				"M4 default-policy start turn",
+				m4Default.session.prompt("Start a reader for the short-functions preference."),
+			);
+			await withDeadline(trace, "M4 default-policy worker reported", m4DefaultDone.promise);
+			await withDeadline(trace, "M4 default-policy handoff woke the root", m4DefaultWake.promise, 60_000);
+			await withDeadline(trace, "M4 default-policy root idle", m4Default.session.waitForForegroundIdle());
+			expect(
+				m4DefaultPrefetches,
+				"the default egress policy never hands the normal read to the external lifecycle provider",
+			).toEqual([]);
+			expect(
+				await world.disposeSessionInBody(m4Default.session),
+				"the default-policy owner disposes cleanly",
+			).toBeUndefined();
+			trace.mark("root", "e4.default-policy");
 
 			// ICM history (I1-I6). The production default is ICM: an absent memorySystem setting (an undefined key is absent in
 			// the stored settings) selects it. Everything runs under its own agent directory, so the history backend and the
@@ -7374,9 +7543,10 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			).toBeUndefined();
 			trace.mark("root", "deadline.window");
 
-			// Root memory query gate: an extension's context memory provider is queried only by a turn that passes the long-term trigger
-			// and carries no credential shape. The secret turn runs first and the normal turn after it, on the same session, so the normal
-			// turn proves the blocked turn left the provider usable. The key is joined from two literals (no source line carries it whole).
+			// Root memory query gate: an external context memory provider is queried only by a turn that passes the long-term trigger
+			// and carries no credential shape, with external egress explicitly enabled. The secret turn runs first and the normal turn
+			// after it, on the same session, so the normal turn proves the blocked turn left the provider usable. The key is joined from
+			// two literals (no source line carries it whole).
 			const memoryKey = ["AIzaD3kQ9vL", "m2Xp8Rt4Wz6Yc1Nb5Hj7Fg0TsUe9"].join("");
 			const memorySecretQuery = `Remember this key for the release deploy: ${memoryKey}`;
 			const memoryNormalQuery = "Remember the release preference for this project.";
@@ -7390,14 +7560,15 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			const memoryOwner = await world.createRootSession("root", {
 				sessionManager: world.createSessionManager(),
 				systemOneEnabled: false,
+				settings: { contextPolicy: { memory: { allowExternalEgress: true } } },
 				extensionFactories: [
 					(pi) => {
-						// Registration waits for session_start: extension factories run before the runtime is bound to the session.
+						// Registration waits for session_start, which only bindExtensions emits: the session is bound below, before its first prompt.
 						pi.on("session_start", () => {
 							pi.registerContextMemoryProvider({
 								id: memoryProviderId,
 								label: "Harness context memory",
-								source: "custom_local",
+								source: "external_provider",
 								capabilities: {
 									search: true,
 									fetch: false,
@@ -7408,7 +7579,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 									graph: false,
 									citations: false,
 									scopes: ["session"],
-									localOnly: true,
+									localOnly: false,
 								},
 								search: async (request) => {
 									memorySearches.push(request.query);
@@ -7420,6 +7591,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					},
 				],
 			});
+			await memoryOwner.session.bindExtensions({ uiContext: world.humanInput.ui });
 			const memorySession = memoryOwner.session;
 			await withDeadline(trace, "memory secret turn", memorySession.prompt(memorySecretQuery));
 			trace.mark("root", "memory.secret");
