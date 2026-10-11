@@ -604,7 +604,8 @@ export type TranscriptSummaryJobState =
 	| "stale";
 
 const SUMMARY_JOB_TRANSITIONS: Readonly<Record<TranscriptSummaryJobState, readonly TranscriptSummaryJobState[]>> = {
-	queued: ["running", "cancelled", "stale"],
+	// `failed`: dispatch ends a queued job whose attempt budget is already spent (`attempts_exhausted`) without claiming it.
+	queued: ["running", "failed", "cancelled", "stale"],
 	running: ["ready", "retry_wait", "failed", "cancelled", "stale", "queued"],
 	retry_wait: ["queued", "cancelled", "stale"],
 	ready: [],

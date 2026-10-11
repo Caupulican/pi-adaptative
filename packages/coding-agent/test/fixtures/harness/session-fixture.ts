@@ -2296,6 +2296,9 @@ export class HarnessWorld {
 			}
 		};
 		try {
+			// A scenario hold still pending is released first, so no owner's disposal waits on a gate; each one is reported at the checks.
+			attempt(() => this.io.cutoffHolds());
+			attempt(() => this.guard.threads.cutoffHolds());
 			// Cutoff: every session's root, compaction, summary and bash work is aborted without awaiting the abort; the provider then cancels
 			// its uncooperative producers; only then are the cutoffs awaited and the tracked owner work joined.
 			const cutoffs: Array<Promise<void>> = [];

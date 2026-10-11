@@ -31,7 +31,8 @@
  * file or manifest can be missing or empty even though a rename returned. This store therefore treats
  * every file as untrusted on load (schema, identity and cross-references are verified) and reports damage
  * as an explicit recovery state; derived content is rebuilt from canonical sessions, never trusted blindly.
- * A crash between writing node files and the manifest leaves only unreferenced node files, swept by age.
+ * A crash between writing node files and the manifest leaves only unreferenced node files, and a crash between writing
+ * a temporary file and its rename leaves only that temporary file; both are swept by age when the coordinator starts.
  */
 
 import { promises as fs } from "node:fs";
@@ -335,7 +336,8 @@ export type TranscriptSummaryPublishResult =
 	| { status: "stale_revision"; currentRevision: number }
 	| { status: "revoked"; nodeIds: string[] }
 	| { status: "invalid"; reason: string }
-	| { status: "manifest_corrupt"; detail: string };
+	| { status: "manifest_corrupt"; detail: string }
+	| TranscriptSummaryStoreUnavailable;
 
 export type TranscriptSummaryAnnotateResult =
 	| { status: "annotated"; node: TranscriptSummaryNode; revision: number }
@@ -343,7 +345,8 @@ export type TranscriptSummaryAnnotateResult =
 	| { status: "unreadable"; reason: string }
 	| { status: "invalid"; reason: string }
 	| { status: "fenced"; currentFence: number }
-	| { status: "manifest_corrupt"; detail: string };
+	| { status: "manifest_corrupt"; detail: string }
+	| TranscriptSummaryStoreUnavailable;
 
 export type TranscriptSummaryRevokeResult =
 	| {
@@ -360,7 +363,8 @@ export type TranscriptSummaryRevokeResult =
 			unlinkFailures: { id: string; error: string }[];
 	  }
 	| { status: "fenced"; currentFence: number }
-	| { status: "manifest_corrupt"; detail: string };
+	| { status: "manifest_corrupt"; detail: string }
+	| TranscriptSummaryStoreUnavailable;
 
 /** Durable terminal-proof capacity as persisted; the bound is {@link TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS}. */
 export interface TranscriptSummaryProofStatus {
@@ -377,7 +381,11 @@ export type TranscriptSummaryJobsSaveResult =
 			status: "saved";
 			/** Terminal jobs removed from the list. A job whose spent or carried attempts lack a record is never among them. */
 			pruned: string[];
-			/** Proof records this save wrote: new reservations, spent budgets of failures, carried attempts of stale jobs. */
+			/**
+			 * The ledger's record for every listed job that has one after this save: the ones it wrote (new reservations, spent
+			 * budgets of failures, carried attempts of stale jobs) and the ones it found and kept, including records an earlier
+			 * save made durable before it failed at the job list. The owner's proof mirror follows the durable ledger exactly.
+			 */
 			proof: Record<string, TranscriptSummaryProofRecord>;
 			/** Records released because their job ended without spending a budget (ready, or stale/cancelled before any attempt). */
 			released: string[];
@@ -394,7 +402,8 @@ export type TranscriptSummaryJobsSaveResult =
 	  }
 	| { status: "jobs_overflow"; active: number }
 	| { status: "fenced"; currentFence: number }
-	| { status: "manifest_corrupt"; detail: string };
+	| { status: "manifest_corrupt"; detail: string }
+	| TranscriptSummaryStoreUnavailable;
 
 export type TranscriptSummaryAnchorResult =
 	/**
@@ -413,7 +422,8 @@ export type TranscriptSummaryAnchorResult =
 			revision: number;
 	  }
 	| { status: "fenced"; currentFence: number }
-	| { status: "manifest_corrupt"; detail: string };
+	| { status: "manifest_corrupt"; detail: string }
+	| TranscriptSummaryStoreUnavailable;
 
 export type TranscriptSummarySessionRecordsResult =
 	/**
@@ -429,7 +439,8 @@ export type TranscriptSummarySessionRecordsResult =
 			revision: number;
 	  }
 	| { status: "fenced"; currentFence: number }
-	| { status: "manifest_corrupt"; detail: string };
+	| { status: "manifest_corrupt"; detail: string }
+	| TranscriptSummaryStoreUnavailable;
 
 export type TranscriptSummaryNodeRead =
 	| { status: "ok"; node: TranscriptSummaryNode }
@@ -563,22 +574,43 @@ function isStoreIoError(error: unknown): error is Error {
 }
 
 /**
- * The store's read boundary for readers (`readManifest`, `load`): an I/O or lock failure, a lock wait past the
- * deadline and a load that ran out of time become a typed real-cause `unavailable`, so a reader keeps its exact
- * history hits. Anything else is a programming error and still rejects. File damage is never decided here: it stays
- * `corrupt` from the parsers, so a transient error can never make recovery revoke anything.
+ * The store's one classification of a store operation that threw (`what` names the operation): an I/O or lock
+ * failure, a lock wait past its deadline and a load that ran out of time are the typed real-cause `unavailable`;
+ * anything else is a programming error, undefined here. Readers get it through {@link readBoundary}; an owner whose
+ * store write threw classifies the failure with it, so both sides name the same causes the same way.
+ */
+export function storeUnavailable(what: string, error: unknown): TranscriptSummaryStoreUnavailable | undefined {
+	if (error instanceof FileLockDeadlineError) {
+		return { status: "unavailable", reason: `the summary store is busy: ${what} ${withErrorCode(error)}` };
+	}
+	if (error instanceof StoreReadDeadlineError) {
+		return { status: "unavailable", reason: `${what} did not finish before the operation deadline` };
+	}
+	if (isStoreIoError(error)) return { status: "unavailable", reason: `${what} failed: ${withErrorCode(error)}` };
+	return undefined;
+}
+
+/**
+ * An error's message led by its code (`ELOCKED: Lock file is already being held`), so the cause names its class even
+ * when the message does not. A message that already starts with its code (Node's `EIO: i/o error, ...`) is kept as is.
+ */
+function withErrorCode(error: Error): string {
+	const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
+	return code === undefined || error.message.startsWith(`${code}:`) ? error.message : `${code}: ${error.message}`;
+}
+
+/**
+ * The store's read boundary for readers (`readManifest`, `load`): what {@link storeUnavailable} classifies becomes
+ * a typed real-cause `unavailable`, so a reader keeps its exact history hits. Anything else is a programming error
+ * and still rejects. File damage is never decided here: it stays `corrupt` from the parsers, so a transient error
+ * can never make recovery revoke anything.
  */
 async function readBoundary<T>(what: string, read: () => Promise<T>): Promise<T | TranscriptSummaryStoreUnavailable> {
 	try {
 		return await read();
 	} catch (error) {
-		if (error instanceof FileLockDeadlineError) {
-			return { status: "unavailable", reason: `the summary store is busy: ${what} ${error.message}` };
-		}
-		if (error instanceof StoreReadDeadlineError) {
-			return { status: "unavailable", reason: `${what} did not finish before the operation deadline` };
-		}
-		if (isStoreIoError(error)) return { status: "unavailable", reason: `${what} failed: ${error.message}` };
+		const unavailable = storeUnavailable(what, error);
+		if (unavailable) return unavailable;
 		throw error;
 	}
 }
@@ -1221,37 +1253,54 @@ export class TranscriptSummaryStore {
 		}
 	}
 
-	/** @internal Caller holds the lock. */
-	async sweep(accepted: ReadonlySet<string>, minAgeMs: number): Promise<string[]> {
-		let names: string[];
+	/**
+	 * @internal Caller holds the lock. Remove what nothing will read again once it is older than `minAgeMs`: files in
+	 * `nodes/` that `referenced` does not name (node content whose publication never reached the manifest) and staged
+	 * temporary files at the store root (`*.tmp`, left by a crash between writing and renaming; a write that fails removes
+	 * its own). Damaged-file backups (`*.corrupt.*`), the lock and the store's own files are never touched. A younger file
+	 * is kept: its writer may still be publishing it. Returns the removed paths, relative to the store root.
+	 */
+	async sweep(referenced: ReadonlySet<string>, minAgeMs: number): Promise<string[]> {
+		const removed: string[] = [];
+		const cutoff = this.now() - minAgeMs;
+		for (const name of await this.listDirectory(this.nodesDir)) {
+			const id = name.endsWith(".json") ? name.slice(0, -".json".length) : undefined;
+			if (id !== undefined && referenced.has(id)) continue;
+			if (await this.removeOlderThan(join(this.nodesDir, name), cutoff)) removed.push(`nodes/${name}`);
+		}
+		for (const name of await this.listDirectory(this.root)) {
+			if (name.endsWith(".tmp") && (await this.removeOlderThan(join(this.root, name), cutoff))) removed.push(name);
+		}
+		return removed;
+	}
+
+	/** The names in a directory; none when it does not exist. */
+	private async listDirectory(path: string): Promise<string[]> {
 		try {
-			names = await fs.readdir(this.nodesDir);
+			return await fs.readdir(path);
 		} catch (error) {
 			if (isMissingFileError(error)) return [];
 			throw error;
 		}
-		const removed: string[] = [];
-		const cutoff = this.now() - minAgeMs;
-		for (const name of names) {
-			const id = name.endsWith(".json") ? name.slice(0, -".json".length) : undefined;
-			if (id !== undefined && accepted.has(id)) continue;
-			const path = join(this.nodesDir, name);
-			let mtimeMs: number;
-			try {
-				mtimeMs = (await fs.stat(path)).mtimeMs;
-			} catch (error) {
-				if (isMissingFileError(error)) continue;
-				throw error;
-			}
-			if (mtimeMs > cutoff) continue;
-			try {
-				await fs.unlink(path);
-				removed.push(name);
-			} catch (error) {
-				if (!isMissingFileError(error)) throw error;
-			}
+	}
+
+	/** Unlink `path` when its modification time is at or before `cutoff`; true when this call removed it. */
+	private async removeOlderThan(path: string, cutoff: number): Promise<boolean> {
+		let mtimeMs: number;
+		try {
+			mtimeMs = (await fs.stat(path)).mtimeMs;
+		} catch (error) {
+			if (isMissingFileError(error)) return false;
+			throw error;
 		}
-		return removed;
+		if (mtimeMs > cutoff) return false;
+		try {
+			await fs.unlink(path);
+			return true;
+		} catch (error) {
+			if (isMissingFileError(error)) return false;
+			throw error;
+		}
 	}
 
 	/** @internal */
@@ -1277,23 +1326,37 @@ export class TranscriptSummaryWriter {
 	/**
 	 * Run `body` under the store lock with the manifest this writer's fence still owns. The one owner of the
 	 * fence check: a missing or corrupt manifest and a superseded fence come back as typed refusals before
-	 * the body runs.
+	 * the body runs. The write boundary too: an I/O or lock failure anywhere in the section (`what` names the write)
+	 * comes back as the typed `unavailable` {@link storeUnavailable} classifies, so the caller handles it like any other
+	 * refusal; anything else is a programming error and still rejects.
 	 */
-	private fenced<T>(
+	private async fenced<T>(
+		what: string,
 		body: (manifest: TranscriptSummaryManifest) => Promise<T>,
-	): Promise<T | { status: "manifest_corrupt"; detail: string } | { status: "fenced"; currentFence: number }> {
-		return this.store.locked(async () => {
-			const read = await this.store.readManifestFile();
-			if (read.status !== "ok") {
-				return read.status === "corrupt"
-					? { status: "manifest_corrupt" as const, detail: read.detail }
-					: { status: "fenced" as const, currentFence: 0 };
-			}
-			if (read.manifest.writerFence !== this.fence) {
-				return { status: "fenced" as const, currentFence: read.manifest.writerFence };
-			}
-			return body(read.manifest);
-		});
+	): Promise<
+		| T
+		| { status: "manifest_corrupt"; detail: string }
+		| { status: "fenced"; currentFence: number }
+		| TranscriptSummaryStoreUnavailable
+	> {
+		try {
+			return await this.store.locked(async () => {
+				const read = await this.store.readManifestFile();
+				if (read.status !== "ok") {
+					return read.status === "corrupt"
+						? { status: "manifest_corrupt" as const, detail: read.detail }
+						: { status: "fenced" as const, currentFence: 0 };
+				}
+				if (read.manifest.writerFence !== this.fence) {
+					return { status: "fenced" as const, currentFence: read.manifest.writerFence };
+				}
+				return body(read.manifest);
+			});
+		} catch (error) {
+			const unavailable = storeUnavailable(what, error);
+			if (unavailable) return unavailable;
+			throw error;
+		}
 	}
 
 	/**
@@ -1310,7 +1373,7 @@ export class TranscriptSummaryWriter {
 
 	/** Accept nodes, advance cursors and set frontiers in one manifest write. */
 	async publish(transaction: TranscriptSummaryPublishTransaction): Promise<TranscriptSummaryPublishResult> {
-		return this.fenced(async (manifest) => {
+		return this.fenced("publishing to the summary store", async (manifest) => {
 			if (transaction.expectedRevision !== undefined && transaction.expectedRevision !== manifest.revision) {
 				return { status: "stale_revision" as const, currentRevision: manifest.revision };
 			}
@@ -1428,7 +1491,7 @@ export class TranscriptSummaryWriter {
 		nodeId: string,
 		admission: TranscriptSummaryAdmissionRecord,
 	): Promise<TranscriptSummaryAnnotateResult> {
-		return this.fenced(async (manifest) => {
+		return this.fenced("recording a summary admission", async (manifest) => {
 			if (!manifest.acceptedNodes[nodeId]) return { status: "not_accepted" as const };
 			const read = await this.store.readNode(nodeId);
 			if (read.status !== "ok") {
@@ -1480,7 +1543,7 @@ export class TranscriptSummaryWriter {
 		if (options.park === true && reason !== "invalidated") {
 			throw new RangeError("Only an invalidated revocation parks nodes as dormant.");
 		}
-		return this.fenced(async (manifest) => {
+		return this.fenced("revoking summary nodes", async (manifest) => {
 			return this.applyRevocation(manifest, predicate, reason, {
 				...(options.dropSessionCursor !== undefined ? { dropSessionCursor: options.dropSessionCursor } : {}),
 				...(options.tombstoneSession !== undefined ? { tombstoneSession: options.tombstoneSession } : {}),
@@ -1525,7 +1588,7 @@ export class TranscriptSummaryWriter {
 		jobs: readonly TranscriptSummaryJob[],
 		options: { rekeys?: readonly TranscriptSummaryRekey[] } = {},
 	): Promise<TranscriptSummaryJobsSaveResult> {
-		return this.fenced(async () => {
+		return this.fenced("saving jobs", async () => {
 			const live = jobs.filter((job) => !isTerminalSummaryJobState(job.state));
 			if (live.length > TRANSCRIPT_SUMMARY_MAX_PERSISTED_JOBS) {
 				return { status: "jobs_overflow" as const, active: live.length };
@@ -1628,6 +1691,11 @@ export class TranscriptSummaryWriter {
 			) {
 				await this.store.writeProof(ledger);
 			}
+			// Records this save found and kept are acknowledged too, after the write decision (they changed nothing on disk).
+			for (const job of jobs) {
+				const held = records[job.id];
+				if (held !== undefined) proof[job.id] ??= held;
+			}
 			const terminal = jobs
 				.filter((job) => isTerminalSummaryJobState(job.state))
 				.sort((a, b) => (b.terminalAt ?? b.updatedAt) - (a.terminalAt ?? a.updatedAt));
@@ -1657,7 +1725,7 @@ export class TranscriptSummaryWriter {
 	 * explicit cause instead of treating those sources as ageless.
 	 */
 	async anchorSources(requests: readonly TranscriptAnchorRequest[]): Promise<TranscriptSummaryAnchorResult> {
-		return this.fenced(async (manifest) => {
+		return this.fenced("recording retention anchors", async (manifest) => {
 			const anchors = await this.store.readAnchors([]);
 			let count = anchoredCount(anchors);
 			let added = 0;
@@ -1722,7 +1790,7 @@ export class TranscriptSummaryWriter {
 	 * freed slot lifts a capacity hold, never `lostProofSince`.
 	 */
 	async dropSessionRecords(sessionIds: ReadonlySet<string>): Promise<TranscriptSummarySessionRecordsResult> {
-		return this.fenced(async (manifest) => {
+		return this.fenced("dropping session records", async (manifest) => {
 			const anchors = await this.store.readAnchors([]);
 			let droppedAnchors = 0;
 			for (const handle of Object.keys(anchors.sources)) {
@@ -1866,7 +1934,11 @@ export class TranscriptSummaryWriter {
 		});
 	}
 
-	/** Delete node files no accepted or dormant entry references and that are old enough that no writer can still publish them. */
+	/**
+	 * Delete node files no accepted or dormant entry references, and staged temporary files at the store root, once they
+	 * are old enough that no writer can still publish them (see `sweep`). Nothing is removed by a superseded writer.
+	 * The summary coordinator runs it once per start, after recovery.
+	 */
 	async sweepOrphans(minAgeMs = TRANSCRIPT_SUMMARY_ORPHAN_MIN_AGE_MS): Promise<string[]> {
 		return this.store.locked(async () => {
 			const read = await this.store.readManifestFile();

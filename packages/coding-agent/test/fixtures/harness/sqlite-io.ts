@@ -29,6 +29,19 @@ const WRITE_ACTIONS = new Set(
 		.map(([, code]) => code),
 );
 
+/**
+ * Pragmas that only read the schema (their argument names a table or index). They set no connection state, so running
+ * one while another handle shares the same RAM backing is what concurrent connections to one real file do.
+ */
+const SCHEMA_INTROSPECTION_PRAGMAS: ReadonlySet<string> = new Set([
+	"table_info",
+	"table_xinfo",
+	"index_list",
+	"index_info",
+	"index_xinfo",
+	"foreign_key_list",
+]);
+
 /** Logical file identities persist in the virtual tree; their native SQL backing remains entirely in RAM. */
 export class VirtualSqlite {
 	private readonly files: SqliteFiles;
@@ -109,7 +122,8 @@ export class VirtualSqlite {
 					action === constants.SQLITE_PRAGMA &&
 					second !== null &&
 					[...authorized.handles].filter((lease) => lease.open).length > 1 &&
-					!["busy_timeout", "journal_mode"].includes(name ?? "")
+					!["busy_timeout", "journal_mode"].includes(name ?? "") &&
+					!SCHEMA_INTROSPECTION_PRAGMAS.has(name ?? "")
 				) {
 					try {
 						this.reject("sqlite.concurrent_connection_pragma");

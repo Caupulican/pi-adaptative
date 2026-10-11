@@ -1141,11 +1141,6 @@ function firstText(message: ToolResultMessage): string {
 	return "";
 }
 
-function fastTextSignature(text: string): string {
-	if (text.length <= 128) return text;
-	return `${text.length}:${text.slice(0, 48)}:${text.slice(-48)}`;
-}
-
 /**
  * Everything the failure-context fold knows after processing a prefix of the history. Kept as one
  * object so the fold can be RESUMED from where it stopped instead of re-walking the history on
@@ -1417,7 +1412,9 @@ function foldToolFailureContext(
 			// The hot path: every successful result re-derives this on every request. See
 			// memoizedOperationIdentity's doc comment.
 			const identity = memoizedOperationIdentity(call, executionScope);
-			const opKey = identity.failureKey;
+			// Erasure needs the exact operation: the volatile-normalized failure key folds ids, hashes and
+			// timestamps together, so two reads of different `txn:<hex>` refs would supersede each other.
+			const opKey = identity.executionKey;
 			resolveToolFailures(fold, identity);
 			const previousOperation = latestSuccessfulByOpKey.get(opKey);
 			// A call erased on an earlier request stays erased whatever the mark says now; a new
@@ -1429,7 +1426,9 @@ function foldToolFailureContext(
 
 			const textPayload = firstText(message);
 			if (textPayload.length >= 64) {
-				const payloadKey = `payload:${executionScope ?? ""}:${fastTextSignature(textPayload)}`;
+				// The whole result, exactly: a head/tail sample or the first text block alone would erase a
+				// result whose remaining content differs. The fold is incremental, so each result hashes once.
+				const payloadKey = `payload:${executionScope ?? ""}:${structuredHash(message.content, false)}`;
 				const previousPayload = latestSuccessfulByPayloadKey.get(payloadKey);
 				if (previousPayload && (omittedCallIds.has(previousPayload.callId) || erasable(previousPayload.index))) {
 					omittedCallIds.add(previousPayload.callId);

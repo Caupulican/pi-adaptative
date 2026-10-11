@@ -78,6 +78,7 @@ import {
 	type WorkerProjectClaims,
 	withDeadline,
 } from "./fixtures/harness/session-fixture.ts";
+import type { VirtualTreeCapture } from "./fixtures/harness/virtual-io.ts";
 import { VirtualShell } from "./fixtures/harness/virtual-shell.ts";
 
 /**
@@ -817,6 +818,36 @@ async function seedIcmPastSession(
 	return { sessionId, file };
 }
 
+/** The short owner exchanges that seal the past session's tail (spans 16-23: the shell request, its call, its failure, its reply, and two exchanges). */
+const ICM_TAIL_SEAL: ReadonlyArray<readonly [string, string]> = [
+	["Seal the tail, part one.", "Tail sealed, part one."],
+	["Seal the tail, part two.", "Tail sealed, part two."],
+	// A group is sealed only when a later span closes it, so a third exchange follows the eight.
+	["Seal the tail, part three.", "Tail sealed, part three."],
+];
+
+/**
+ * TAIL-SEAL: owner exchanges appended to the past session through a production root that owns its file (System
+ * One off: it prepares input history), so the tail becomes one sealed group of eight spans whose exact copy holds the
+ * failed shell call. Whether that copy fits the exact-copy target is judged where the hierarchy builds it.
+ */
+async function sealIcmTail(world: HarnessWorld, agentDir: string, seed: { readonly file: string }): Promise<void> {
+	world.provider.enqueue(
+		"root",
+		...ICM_TAIL_SEAL.map(([, reply], index) => text(`icm-tail-seal-${index + 1}`, reply)),
+	);
+	const writer = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.openSessionManager(seed.file, agentDir),
+		systemOneEnabled: false,
+		settings: { memorySystem: undefined },
+	});
+	for (const [index, [prompt]] of ICM_TAIL_SEAL.entries()) {
+		await withDeadline(world.trace, `ICM tail seal turn ${index + 1}`, writer.session.prompt(prompt));
+	}
+	expect(await world.disposeSessionInBody(writer.session), "the tail-seal writer disposes cleanly").toBeUndefined();
+}
+
 /**
  * Builds the summary hierarchy over everything under `agentDir` with one hierarchy-on ICM root and waits, event-driven
  * on the store's durable writes, until the status shows `built`. Summary admissions arrive inside the given phase.
@@ -847,6 +878,113 @@ async function buildIcmHierarchy(
 	const hierarchy = icmHierarchy(builder.session);
 	expect(await world.disposeSessionInBody(builder.session), "the hierarchy builder disposes cleanly").toBeUndefined();
 	return hierarchy;
+}
+
+/** The production summary store of `agentDir` (its own layout) and the files the recovery and outage rows read. */
+function icmStore(agentDir: string) {
+	const root = stateFile(
+		agentDir,
+		"transcript-memory",
+		getDirectoryResourceProfileInfo(HARNESS_PROJECT_CWD, agentDir).hash,
+	);
+	return {
+		root,
+		manifest: resolve(root, "manifest.json"),
+		jobs: resolve(root, "jobs.json"),
+		ledger: resolve(root, "spent-attempts.json"),
+		lock: resolve(root, "writer.lock.lock"),
+	};
+}
+type IcmStore = ReturnType<typeof icmStore>;
+
+/** One persisted summary job, as `jobs.json` holds it (the fields the rows judge). */
+interface IcmStoredJob {
+	readonly id: string;
+	readonly kind: "leaf" | "parent";
+	readonly state: string;
+	readonly attempts: number;
+	readonly level: number;
+	readonly nodeId?: string;
+	readonly spanRange: { readonly fromIndex: number; readonly toIndexExclusive: number };
+	readonly pendingReply?: { readonly textDigest: string };
+	readonly lastError?: { readonly reason: string; readonly message: string };
+}
+
+/** A store file's text: from a crash capture, or from the live tree (no ledger entry, no fault, no hold). */
+type IcmStoreRead = (path: string) => string | undefined;
+
+function icmLiveStore(world: HarnessWorld): IcmStoreRead {
+	return (path) => world.io.peekFile(path);
+}
+
+function icmCapturedStore(capture: VirtualTreeCapture): IcmStoreRead {
+	return (path) => capture.files.get(path)?.toString();
+}
+
+function icmStoredJobs(read: IcmStoreRead, store: IcmStore): IcmStoredJob[] {
+	const text = read(store.jobs);
+	return text === undefined ? [] : (JSON.parse(text) as { jobs: IcmStoredJob[] }).jobs;
+}
+
+/** The terminal-proof ledger's records by job key (`reserved`, `carried` or `spent`). */
+function icmStoredLedger(
+	read: IcmStoreRead,
+	store: IcmStore,
+): Record<string, { readonly kind: string; readonly attempts?: number }> {
+	const text = read(store.ledger);
+	return text === undefined
+		? {}
+		: (JSON.parse(text) as { jobs: Record<string, { kind: string; attempts?: number }> }).jobs;
+}
+
+interface IcmStoredManifest {
+	readonly revision: number;
+	readonly sessions: Record<string, { readonly coveredSpanCount: number; readonly lineageDigest: string }>;
+	readonly acceptedNodes: Record<string, { readonly level: number; readonly fromIndex: number }>;
+}
+
+function icmStoredManifest(read: IcmStoreRead, store: IcmStore): IcmStoredManifest | undefined {
+	const text = read(store.manifest);
+	return text === undefined ? undefined : (JSON.parse(text) as IcmStoredManifest);
+}
+
+/** The accepted node at `level` starting at `fromIndex`, by id; undefined when none is accepted. */
+function icmAcceptedAt(read: IcmStoreRead, store: IcmStore, level: number, fromIndex: number): string | undefined {
+	const accepted = icmStoredManifest(read, store)?.acceptedNodes ?? {};
+	return Object.entries(accepted).find(([, entry]) => entry.level === level && entry.fromIndex === fromIndex)?.[0];
+}
+
+/** The persisted job of `kind` whose slot starts at `fromIndex`; undefined when the list has none. */
+function icmJobAt(
+	read: IcmStoreRead,
+	store: IcmStore,
+	kind: "leaf" | "parent",
+	fromIndex: number,
+): IcmStoredJob | undefined {
+	return icmStoredJobs(read, store).find((job) => job.kind === kind && job.spanRange.fromIndex === fromIndex);
+}
+
+/**
+ * Captures the job list and ledger the moment the next save commits its job list (just after its rename): what a
+ * restart persisted first. A non-perturbing observation; the close fails if no save commits.
+ */
+function icmObserveNextJobsSave(
+	world: HarnessWorld,
+	store: IcmStore,
+	name: string,
+): () => { readonly jobs: IcmStoredJob[]; readonly ledger: ReturnType<typeof icmStoredLedger> } | undefined {
+	let saved: { jobs: IcmStoredJob[]; ledger: ReturnType<typeof icmStoredLedger> } | undefined;
+	world.io.observeNext({
+		name,
+		kind: "rename",
+		phase: "after",
+		matches: (operation) => operation.destination === store.jobs,
+		onMatch: () => {
+			const live = icmLiveStore(world);
+			saved = { jobs: icmStoredJobs(live, store), ledger: icmStoredLedger(live, store) };
+		},
+	});
+	return () => saved;
 }
 
 it("standalone root conversation: greeting, task with tools and memory, compaction, queued input, continuation", async () => {
@@ -3790,10 +3928,64 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					},
 				);
 			}
-			world.systemOne.enterPhase("icm-admission", {
+			// R14 crash states (family 2), taken during this same build by observations that change nothing, so the build and
+			// its counts below are the unobserved ones. A normal stop saves the jobs and would hide them; these are the disk
+			// states between two production writes, restored and restarted after the build.
+			// - A: the lock release right after the publication that accepted the target leaf (node and cursor durable, the job
+			//   still `running`, its reservation held). With System One on the target is the model log leaf; off, the model
+			//   leaf is held, so the target is the exact notes leaf.
+			// - C (on): the leaf's admission request, before its publication (the kept reply durable, no node).
+			// - B (on): inside the save after the parent's publication, after its ledger write and before its job list rename.
+			const icmStoreFiles = icmStore(icmAgentDir);
+			const icmLive = icmLiveStore(world);
+			const r14LeafFrom = world.systemOne.enabled ? 8 : 0;
+			const r14Captures: {
+				a?: VirtualTreeCapture;
+				aLock?: boolean;
+				b?: VirtualTreeCapture;
+				c?: VirtualTreeCapture;
+			} = {};
+			world.io.observeNext({
+				name: "r14-capture-a",
+				kind: "rm",
+				phase: "after",
+				matches: (operation) =>
+					operation.path === icmStoreFiles.lock &&
+					icmAcceptedAt(icmLive, icmStoreFiles, 0, r14LeafFrom) !== undefined,
+				onMatch: () => {
+					r14Captures.a = world.io.captureTree(icmStoreFiles.root);
+					r14Captures.aLock = world.io.existsSync(icmStoreFiles.lock);
+				},
+			});
+			if (world.systemOne.enabled) {
+				world.io.observeNext({
+					name: "r14-capture-b",
+					kind: "rename",
+					phase: "before",
+					matches: (operation) => {
+						if (operation.destination !== icmStoreFiles.jobs) return false;
+						const parent = icmJobAt(icmLive, icmStoreFiles, "parent", 0);
+						return (
+							icmAcceptedAt(icmLive, icmStoreFiles, 1, 0) !== undefined &&
+							parent?.state === "running" &&
+							icmStoredLedger(icmLive, icmStoreFiles)[parent.id] === undefined
+						);
+					},
+					onMatch: () => {
+						r14Captures.b = world.io.captureTree(icmStoreFiles.root);
+					},
+				});
+			}
+			const icmAdmissionJudgments = {
 				summary_supported: { kind: "noul", probability: 0.97 },
 				owner_constraints_preserved: { kind: "noul", probability: 0.97 },
 				status_reported_honestly: { kind: "noul", probability: 0.97 },
+			} as const;
+			world.systemOne.enterPhase("icm-admission", icmAdmissionJudgments, {
+				onAdmit: () => {
+					// The first admission is the leaf's (the parent needs the admitted leaf).
+					r14Captures.c ??= world.io.captureTree(icmStoreFiles.root);
+				},
 			});
 			// Counted from here: the track and the transport may have served earlier parts of the journey.
 			const icmBuildSummariesBefore = icmTrackRequests(world, icmSummaryTrack);
@@ -3821,6 +4013,550 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			);
 			trace.mark("root", "icm.hierarchy-built");
 
+			// R14: restarts from the real crash states. Each restore puts the store back byte for byte (after the builder's
+			// producers are joined), then a fresh production owner starts on it and recovers through its own load.
+			const r14LeafDigest = createHash("sha256").update(ICM_LEAF_SUMMARY).digest("hex");
+			const r14Restart = async (
+				label: string,
+				capture: VirtualTreeCapture,
+				built: (hierarchy: NonNullable<TranscriptHistoryStatus["hierarchy"]>) => boolean,
+				afterRestore?: () => void,
+			) => {
+				await world.provider.waitForProducers();
+				world.io.restoreTree(capture);
+				afterRestore?.();
+				const firstSave = icmObserveNextJobsSave(world, icmStoreFiles, `${label}-first-save`);
+				const before = {
+					summaries: icmTrackRequests(world, icmSummaryTrack),
+					admissions: icmAdmissionRequests(world),
+				};
+				const hierarchy = await buildIcmHierarchy(
+					world,
+					icmAgentDir,
+					icmHierarchySettings(icmSummaryTrack),
+					(status) => firstSave() !== undefined && built(status),
+				);
+				const saved = firstSave();
+				if (saved === undefined) throw new Error(`${label}: the restart saved no job list`);
+				return {
+					hierarchy,
+					saved,
+					paid: {
+						summaries: icmTrackRequests(world, icmSummaryTrack) - before.summaries,
+						admissions: icmAdmissionRequests(world) - before.admissions,
+					},
+				};
+			};
+			const r14A = r14Captures.a;
+			if (r14A === undefined) throw new Error("R14: no lock release followed the target leaf's publication");
+			const r14ARead = icmCapturedStore(r14A);
+			const r14ANode = icmAcceptedAt(r14ARead, icmStoreFiles, 0, r14LeafFrom);
+			const r14AJob = icmJobAt(r14ARead, icmStoreFiles, "leaf", r14LeafFrom);
+			if (r14ANode === undefined || r14AJob === undefined) throw new Error("R14: capture A lacks its leaf or job");
+			expect(
+				{
+					job: { state: r14AJob.state, attempts: r14AJob.attempts, keptReply: r14AJob.pendingReply?.textDigest },
+					cursor: icmStoredManifest(r14ARead, icmStoreFiles)?.sessions[icmSeed.sessionId]?.coveredSpanCount,
+					reservation: icmStoredLedger(r14ARead, icmStoreFiles)[r14AJob.id]?.kind,
+					lock: r14Captures.aLock,
+					staged: [...r14A.files.keys()].filter((path) => path.endsWith(".tmp")),
+				},
+				"crash state A: the leaf and its cursor are durable while its job is still running and reserved",
+			).toEqual({
+				job: {
+					state: "running",
+					attempts: 1,
+					keptReply: world.systemOne.enabled ? r14LeafDigest : undefined,
+				},
+				cursor: r14LeafFrom + 8,
+				reservation: "reserved",
+				lock: false,
+				staged: [],
+			});
+			// Jobs the crash state holds queued (System One off: the held model leaf) are never completed by recovery.
+			const r14AQueued = icmStoredJobs(r14ARead, icmStoreFiles)
+				.filter((job) => job.state === "queued")
+				.map((job) => job.id);
+			if (world.systemOne.enabled) {
+				const r14C = r14Captures.c;
+				const r14B = r14Captures.b;
+				if (r14C === undefined || r14B === undefined) throw new Error("R14: capture B or C was not taken");
+				// R14-C: a crash BEFORE publication. No accepted evidence: the job is interrupted, held until enumeration
+				// adopts its budget, claimed with its kept attempt count, and its durable kept reply is judged again (no
+				// acceptance was kept with it), never paid again and never settled ready from a nearby node or the cursor.
+				const r14CRead = icmCapturedStore(r14C);
+				const r14CJob = icmJobAt(r14CRead, icmStoreFiles, "leaf", r14LeafFrom);
+				expect(
+					{
+						job: {
+							state: r14CJob?.state,
+							attempts: r14CJob?.attempts,
+							keptReply: r14CJob?.pendingReply?.textDigest,
+						},
+						node: icmAcceptedAt(r14CRead, icmStoreFiles, 0, r14LeafFrom),
+						reservation:
+							r14CJob === undefined ? undefined : icmStoredLedger(r14CRead, icmStoreFiles)[r14CJob.id]?.kind,
+						lock: r14C.directories.includes(icmStoreFiles.lock),
+						staged: [...r14C.files.keys()].filter((path) => path.endsWith(".tmp")),
+					},
+					"crash state C: the reply is kept on the running, reserved job and nothing is published",
+				).toEqual({
+					job: { state: "running", attempts: 1, keptReply: r14LeafDigest },
+					node: undefined,
+					reservation: "reserved",
+					lock: false,
+					staged: [],
+				});
+				let r14CClaimed: IcmStoredJob | undefined;
+				world.provider.enqueue(icmSummaryTrack, {
+					name: "r14c-parent-summary",
+					check: (request) => {
+						if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+							throw new Error("the R14-C parent request does not merge the republished leaf");
+					},
+					reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+				});
+				world.systemOne.enterPhase("r14c-admission", icmAdmissionJudgments, {
+					onAdmit: () => {
+						r14CClaimed ??= icmJobAt(icmLive, icmStoreFiles, "leaf", r14LeafFrom);
+					},
+				});
+				const r14CRun = await r14Restart("r14c", r14C, (status) => status.acceptedNodes === 3);
+				expect(
+					{
+						claimed: { state: r14CClaimed?.state, attempts: r14CClaimed?.attempts },
+						firstSave: ((job) => job && { state: job.state, attempts: job.attempts })(
+							r14CRun.saved.jobs.find((job) => job.id === r14CJob?.id),
+						),
+						paid: r14CRun.paid,
+						reused: r14CRun.hierarchy.admission?.reused,
+						leaf: icmAcceptedAt(icmLive, icmStoreFiles, 0, r14LeafFrom) !== undefined,
+					},
+					"a crash before publication re-judges the kept reply at the next attempt and pays the summarizer only for the parent",
+				).toEqual({
+					claimed: { state: "running", attempts: 2 },
+					firstSave: { state: "queued", attempts: 1 },
+					paid: { summaries: 1, admissions: 2 },
+					reused: 0,
+					leaf: true,
+				});
+				const r14CText = icmStoredJobs(icmLive, icmStoreFiles).find((job) => job.id === r14CJob?.id);
+				expect(
+					{ state: r14CText?.state, attempts: r14CText?.attempts },
+					"the R14-C leaf completed on its second attempt",
+				).toEqual({ state: "ready", attempts: 2 });
+
+				// R14-A (on): a crash AFTER the leaf's publication. Exact accepted evidence settles the leaf at start, in the
+				// restart's first saved job list, with no new admission and its reservation released; only the parent is built.
+				world.provider.enqueue(icmSummaryTrack, {
+					name: "r14a-parent-summary",
+					check: (request) => {
+						if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+							throw new Error("the R14-A parent request does not merge the recovered leaf");
+					},
+					reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+				});
+				world.systemOne.enterPhase("r14a-admission", icmAdmissionJudgments);
+				const r14ARun = await r14Restart("r14a", r14A, (status) => status.acceptedNodes === 3);
+				const r14ASettled = r14ARun.saved.jobs.find((job) => job.id === r14AJob.id);
+				expect(
+					{
+						settled: { state: r14ASettled?.state, nodeId: r14ASettled?.nodeId, attempts: r14ASettled?.attempts },
+						reservation: r14ARun.saved.ledger[r14AJob.id],
+						paid: r14ARun.paid,
+						held: r14ARun.hierarchy.admission?.heldByKind?.reconciliation ?? 0,
+					},
+					"a crash after publication settles the leaf from its accepted node and pays only for the parent",
+				).toEqual({
+					settled: { state: "ready", nodeId: r14ANode, attempts: 1 },
+					reservation: undefined,
+					paid: { summaries: 1, admissions: 1 },
+					held: 0,
+				});
+
+				// R14-B (on): the parent's crash state, taken inside its fenced save, holds the lock directory and the staged job
+				// list. The lock directory is stripped on restore (stated deviation: a held-lock restart tests lock takeover, a
+				// family-4 row); the staged file is kept and no recovery issue names it.
+				const r14BRead = icmCapturedStore(r14B);
+				const r14BParent = icmAcceptedAt(r14BRead, icmStoreFiles, 1, 0);
+				const r14BJob = icmJobAt(r14BRead, icmStoreFiles, "parent", 0);
+				if (r14BParent === undefined || r14BJob === undefined) throw new Error("R14: capture B lacks its parent");
+				expect(
+					{
+						job: { state: r14BJob.state, attempts: r14BJob.attempts },
+						reservation: icmStoredLedger(r14BRead, icmStoreFiles)[r14BJob.id],
+						lock: r14B.directories.includes(icmStoreFiles.lock),
+						staged: [...r14B.files.keys()].filter((path) => path.startsWith(`${icmStoreFiles.jobs}.`)).length,
+					},
+					"crash state B: the parent is accepted, its reservation released, its job still running mid-save",
+				).toEqual({ job: { state: "running", attempts: 1 }, reservation: undefined, lock: true, staged: 1 });
+				world.systemOne.enterPhase("r14b-restart", {});
+				const r14BRun = await r14Restart(
+					"r14b",
+					{ ...r14B, directories: r14B.directories.filter((path) => path !== icmStoreFiles.lock) },
+					(status) => status.acceptedNodes === 3,
+				);
+				const r14BSettled = r14BRun.saved.jobs.find((job) => job.id === r14BJob.id);
+				expect(
+					{
+						settled: { state: r14BSettled?.state, nodeId: r14BSettled?.nodeId, attempts: r14BSettled?.attempts },
+						reservation: r14BRun.saved.ledger[r14BJob.id],
+						paid: r14BRun.paid,
+						issues: r14BRun.hierarchy.recoveryIssues,
+					},
+					"a parent published before its save settles from its node with no paid work and no new reservation",
+				).toEqual({
+					settled: { state: "ready", nodeId: r14BParent, attempts: 1 },
+					reservation: undefined,
+					paid: { summaries: 0, admissions: 0 },
+					issues: [],
+				});
+				// Change 11 (family 4): the same crash state WITH the lock directory the crashed writer held. Its holder is gone,
+				// so its mtime is old (aged on the disk, as a crash leaves it): production's own lock takes it over as stale,
+				// then recovers exactly as above.
+				world.systemOne.enterPhase("r14b-held-lock", {});
+				await world.provider.waitForProducers();
+				const r14LockFailuresBefore = world.io.failedOperations.length;
+				const r14HeldRun = await r14Restart(
+					"r14b-held-lock",
+					{ ...r14B, directories: [...r14B.directories] },
+					(status) => status.acceptedNodes === 3,
+					() =>
+						(world.io.nodeFsExports() as { utimesSync(path: string, atime: Date, mtime: Date): void }).utimesSync(
+							icmStoreFiles.lock,
+							new Date(Date.now() - 60_000),
+							new Date(Date.now() - 60_000),
+						),
+				);
+				const r14HeldSettled = r14HeldRun.saved.jobs.find((job) => job.id === r14BJob.id);
+				expect(
+					{
+						contended: world.io.failedOperations
+							.slice(r14LockFailuresBefore)
+							.some(
+								(operation) =>
+									operation.kind === "mkdir" &&
+									operation.path === icmStoreFiles.lock &&
+									operation.code === "EEXIST",
+							),
+						settled: { state: r14HeldSettled?.state, nodeId: r14HeldSettled?.nodeId },
+						paid: r14HeldRun.paid,
+						lock: world.io.existsSync(icmStoreFiles.lock),
+					},
+					"a crashed writer's stale lock is taken over by production, and recovery settles the parent as before",
+				).toEqual({
+					contended: true,
+					settled: { state: "ready", nodeId: r14BParent },
+					paid: { summaries: 0, admissions: 0 },
+					lock: false,
+				});
+			} else {
+				// R14-A (off): the exact notes leaf; the model leaf stays held, so nothing is paid in either run.
+				world.systemOne.enterPhase("r14a-restart", {});
+				const r14ARun = await r14Restart(
+					"r14a",
+					r14A,
+					(status) => status.acceptedNodes === 1 && (status.admission?.heldJobs ?? 0) >= 1,
+				);
+				const r14ASettled = r14ARun.saved.jobs.find((job) => job.id === r14AJob.id);
+				expect(
+					{
+						settled: { state: r14ASettled?.state, nodeId: r14ASettled?.nodeId, attempts: r14ASettled?.attempts },
+						reservation: r14ARun.saved.ledger[r14AJob.id],
+						paid: r14ARun.paid,
+						queuedCompleted: r14ARun.saved.jobs.filter(
+							(job) => r14AQueued.includes(job.id) && job.state === "ready",
+						).length,
+					},
+					"a crash after the exact copy's publication settles it from its node; a queued job is never completed",
+				).toEqual({
+					settled: { state: "ready", nodeId: r14ANode, attempts: 1 },
+					reservation: undefined,
+					paid: { summaries: 0, admissions: 0 },
+					queuedCompleted: 0,
+				});
+				expect(r14AQueued.length, "the off crash state holds the model leaf queued").toBeGreaterThan(0);
+			}
+			trace.mark("root", "icm.r14-recovery");
+
+			// Family 4 (standalone): the summary store cannot be read, on both read routes. The faults are Node-shaped errors
+			// thrown by the virtual filesystem's own reads, so the store's read boundary classifies them as production would.
+			// Each is armed when the recall worker receives the tool's request, so no earlier read can consume it.
+			const oNotesNode = icmAcceptedAt(icmLive, icmStoreFiles, 0, 0);
+			if (oNotesNode === undefined) throw new Error("family 4: the notes exact copy is not accepted");
+			const oNotesPath = resolve(icmStoreFiles.root, "nodes", `${oNotesNode}.json`);
+			const oStoreWrites = (from: number): string[] =>
+				world.io.operations
+					.slice(from)
+					.filter(
+						(operation) =>
+							["write", "append", "rename", "unlink", "rm"].includes(operation.kind) &&
+							(operation.destination ?? operation.path).startsWith(icmStoreFiles.root) &&
+							// Taking and releasing the store lock is how a locked read runs, not a store write.
+							operation.path !== icmStoreFiles.lock,
+					)
+					.map((operation) => `${operation.kind} ${operation.destination ?? operation.path}`);
+			const oSearch = (id: string) =>
+				icmCall(id, "memory", { action: "history_search", query: ICM_NOTES_QUERY, maxResults: 10 });
+			/** A notes search answered with its hits and one typed `unavailable` summary line naming the fault. */
+			const oUnavailable = (
+				label: string,
+				result: { isError: boolean; text: string },
+				cause: string,
+				fault: string,
+			) => {
+				if (
+					result.isError ||
+					icmHits(result.text).length === 0 ||
+					!result.text.includes("Summary lookup unavailable: ") ||
+					!result.text.toLowerCase().includes(cause) ||
+					!result.text.includes(`Scripted IO fault ${fault}:`) ||
+					!result.text.includes("The hits above are unaffected.") ||
+					icmSummaries(result.text).length !== 0
+				)
+					throw new Error(
+						`${label}: the search is not hits plus a typed unavailable lookup: ${result.text.slice(0, 900)}`,
+					);
+			};
+			const oListed = (label: string, result: { isError: boolean; text: string }) => {
+				if (result.isError || !icmSummaries(result.text).some((summary) => summary.quality === "exact_copy"))
+					throw new Error(`${label}: the approved exact copy is not listed again: ${result.text.slice(0, 900)}`);
+			};
+
+			// O1 (manifest read) and O2 (a node read inside the locked load), read-only view root; then the control.
+			const oViewOpsStart = world.io.operations.length;
+			const oView = await world.createRootSession("root", {
+				agentDir: icmAgentDir,
+				settings: { memorySystem: undefined },
+			});
+			const oArm = (fault: Parameters<HarnessWorld["io"]["failNext"]>[0]) =>
+				world.guard.threads.interceptNext("query", () => world.io.failNext(fault));
+			oArm({
+				name: "o1-manifest-read",
+				kind: "read",
+				code: "EACCES",
+				matches: (operation) => operation.path === icmStoreFiles.manifest,
+			});
+			world.provider.enqueue(
+				"root",
+				calls("o1-search", [
+					{
+						id: "o1-1",
+						name: "memory",
+						arguments: { action: "history_search", query: ICM_NOTES_QUERY, maxResults: 10 },
+					},
+				]),
+				icmAfterHistoryRead(
+					"o1-judged",
+					"memory",
+					{ id: "o1-1", arguments: { action: "history_search", query: ICM_NOTES_QUERY, maxResults: 10 } },
+					(result) => {
+						oUnavailable("O1", result, "reading the summary manifest failed", "o1-manifest-read");
+						oArm({
+							name: "o2-node-read",
+							kind: "read",
+							code: "EACCES",
+							matches: (operation) => operation.path === oNotesPath,
+						});
+						return oSearch("o2-1");
+					},
+				),
+				{
+					name: "o2-judged",
+					reply: (request) => {
+						oUnavailable(
+							"O2",
+							icmLatestResult(request, "memory"),
+							"loading the summary store failed",
+							"o2-node-read",
+						);
+						if (world.io.existsSync(icmStoreFiles.lock))
+							throw new Error("O2: the failed locked load left the lock directory behind");
+						return oSearch("o-view-control");
+					},
+				},
+				{
+					name: "o-view-control",
+					check: (request) => oListed("O1/O2 control", icmLatestResult(request, "memory")),
+					reply: { content: [{ type: "text", text: "The summary store read again after the faults." }] },
+				},
+			);
+			world.systemOne.enterPhase("o-view", ICM_INTAKE_JUDGMENTS);
+			await withDeadline(
+				trace,
+				"O1/O2 view outage turn",
+				oView.session.prompt("Look up the staging notes summary."),
+			);
+			expect(
+				{
+					faults: world.io.consumedFaults.filter((name) => name === "o1-manifest-read" || name === "o2-node-read"),
+					writes: oStoreWrites(oViewOpsStart),
+					lock: world.io.existsSync(icmStoreFiles.lock),
+				},
+				"each unreadable store file is a typed unavailable lookup; the view writes nothing and keeps no lock",
+			).toEqual({ faults: ["o1-manifest-read", "o2-node-read"], writes: [], lock: false });
+			expect(
+				await world.disposeSessionInBody(oView.session),
+				"the outage view root disposes cleanly",
+			).toBeUndefined();
+
+			// O3: the same manifest fault on a running coordinator's delivery fence (its unlocked read; the writer's own reads
+			// run under the lock directory). The coordinator records nothing for a reader's failed read and keeps running.
+			const oCoordinator = await world.createRootSession("root", {
+				agentDir: icmAgentDir,
+				settings: icmHierarchySettings(icmSummaryTrack),
+			});
+			world.systemOne.enterPhase("o3-start", {});
+			await withDeadline(
+				trace,
+				"O3 coordinator running",
+				world.io.waitForMutation(
+					() => oCoordinator.session.getTranscriptHistoryStatus().hierarchy?.state === "running",
+				),
+			);
+			const oFenceBefore = icmHierarchy(oCoordinator.session);
+			oArm({
+				name: "o3-fence-read",
+				kind: "read",
+				code: "EACCES",
+				matches: (operation) =>
+					operation.path === icmStoreFiles.manifest && !world.io.existsSync(icmStoreFiles.lock),
+			});
+			world.provider.enqueue(
+				"root",
+				calls("o3-search", [
+					{
+						id: "o3-1",
+						name: "memory",
+						arguments: { action: "history_search", query: ICM_NOTES_QUERY, maxResults: 10 },
+					},
+				]),
+				icmAfterHistoryRead(
+					"o3-judged",
+					"memory",
+					{ id: "o3-1", arguments: { action: "history_search", query: ICM_NOTES_QUERY, maxResults: 10 } },
+					(result) => {
+						oUnavailable("O3", result, "reading the summary manifest failed", "o3-fence-read");
+						return oSearch("o3-control");
+					},
+				),
+				{
+					name: "o3-control",
+					check: (request) => oListed("O3 control", icmLatestResult(request, "memory")),
+					reply: { content: [{ type: "text", text: "The running hierarchy served the summary again." }] },
+				},
+			);
+			world.systemOne.enterPhase("o3-read", ICM_INTAKE_JUDGMENTS);
+			await withDeadline(
+				trace,
+				"O3 fence outage turn",
+				oCoordinator.session.prompt("Look up the staging notes summary."),
+			);
+			const oFenceAfter = icmHierarchy(oCoordinator.session);
+			expect(
+				{
+					fault: world.io.consumedFaults.includes("o3-fence-read"),
+					state: oFenceAfter.state,
+					accepted: oFenceAfter.acceptedNodes,
+					internalCause: oFenceAfter.lastInternalError,
+					issues: oFenceAfter.recoveryIssues,
+				},
+				"a reader's failed fence read changes nothing in the running hierarchy",
+			).toEqual({
+				fault: true,
+				state: "running",
+				accepted: oFenceBefore.acceptedNodes,
+				internalCause: oFenceBefore.lastInternalError,
+				issues: [],
+			});
+			expect(
+				await world.disposeSessionInBody(oCoordinator.session),
+				"the fence outage root disposes cleanly",
+			).toBeUndefined();
+
+			// O16: the store cannot be read when a coordinator starts. It does not start (the real cause is its status), writes
+			// nothing, and history reads fall back to the read-only view; a later start, after the fault, runs normally.
+			const oStartOpsStart = world.io.operations.length;
+			world.io.failNext({
+				name: "o16-start-read",
+				kind: "read",
+				code: "EACCES",
+				matches: (operation) =>
+					operation.path === icmStoreFiles.manifest && world.io.existsSync(icmStoreFiles.lock),
+			});
+			const oStartFailed = world.io.waitForOperation(
+				(operation) => operation.path === icmStoreFiles.manifest && operation.code === "EACCES",
+			);
+			const oStartless = await world.createRootSession("root", {
+				agentDir: icmAgentDir,
+				settings: icmHierarchySettings(icmSummaryTrack),
+			});
+			await withDeadline(trace, "O16 start-up read failed", oStartFailed);
+			const oStopped = icmHierarchy(oStartless.session);
+			expect(
+				{
+					state: oStopped.state,
+					reason: /the summary store could not be read: .*Scripted IO fault o16-start-read:/i.test(
+						oStopped.disabledReason ?? "",
+					),
+					writes: oStoreWrites(oStartOpsStart),
+				},
+				"a store unreadable at start-up keeps the coordinator stopped with its real cause and writes nothing",
+			).toEqual({ state: "stopped", reason: true, writes: [] });
+			world.provider.enqueue(
+				"root",
+				calls("o16-search", [
+					{
+						id: "o16-1",
+						name: "memory",
+						arguments: { action: "history_search", query: ICM_NOTES_QUERY, maxResults: 10 },
+					},
+				]),
+				icmAfterHistoryRead(
+					"o16-judged",
+					"memory",
+					{ id: "o16-1", arguments: { action: "history_search", query: ICM_NOTES_QUERY, maxResults: 10 } },
+					(result) => {
+						oListed("O16 view fallback", result);
+						return { content: [{ type: "text", text: "The approved summary is read without the hierarchy." }] };
+					},
+				),
+			);
+			world.systemOne.enterPhase("o16-read", ICM_INTAKE_JUDGMENTS);
+			await withDeadline(
+				trace,
+				"O16 fallback turn",
+				oStartless.session.prompt("Look up the staging notes summary."),
+			);
+			expect(oStoreWrites(oStartOpsStart), "the stopped hierarchy wrote nothing to the store").toEqual([]);
+			expect(
+				await world.disposeSessionInBody(oStartless.session),
+				"the stopped hierarchy root disposes cleanly",
+			).toBeUndefined();
+			const oRestartSave = icmObserveNextJobsSave(world, icmStoreFiles, "o16-restart-save");
+			const oRestartPaid = {
+				summaries: icmTrackRequests(world, icmSummaryTrack),
+				admissions: icmAdmissionRequests(world),
+			};
+			world.systemOne.enterPhase("o16-restart", {});
+			const oRestarted = await buildIcmHierarchy(
+				world,
+				icmAgentDir,
+				icmHierarchySettings(icmSummaryTrack),
+				(status) => status.state === "running" && oRestartSave() !== undefined,
+			);
+			expect(
+				{
+					accepted: oRestarted.acceptedNodes,
+					paid: {
+						summaries: icmTrackRequests(world, icmSummaryTrack) - oRestartPaid.summaries,
+						admissions: icmAdmissionRequests(world) - oRestartPaid.admissions,
+					},
+				},
+				"after the fault the hierarchy starts normally and pays for nothing again",
+			).toEqual({ accepted: icmBuilt.acceptedNodes, paid: { summaries: 0, admissions: 0 } });
+			trace.mark("root", "icm.store-outages");
+
 			// I5: a later ICM root with the hierarchy off and no summary model reads what was approved: discovery beside the
 			// hits, expansion to exact sources, and no summary or admission request. Its own recalled results are never captured.
 			const icmSummariesBefore = icmTrackRequests(world, icmSummaryTrack);
@@ -3833,6 +4569,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			});
 			const icmViewSession = icmView.sessionManager.getSessionId();
 			let icmNotesSummary: string | undefined;
+			let icmViewOpened: string | undefined;
 			world.provider.enqueue(
 				"root",
 				calls("icm-view-notes", [
@@ -3890,13 +4627,19 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 						);
 					return [{ id: "icm-view-4", name: "memory", arguments: { action: "history_source", ref: source } }];
 				}),
-				calls("icm-view-opened", [
-					{
-						id: "icm-view-5",
-						name: "memory",
-						arguments: { action: "history_search", query: ICM_DECISION_QUERY, maxResults: 10 },
+				{
+					...calls("icm-view-opened", [
+						{
+							id: "icm-view-5",
+							name: "memory",
+							arguments: { action: "history_search", query: ICM_DECISION_QUERY, maxResults: 10 },
+						},
+					]),
+					// Diagnostic only: the opened source's result, named by the assertion below when it fails.
+					check: (request) => {
+						icmViewOpened = icmLatestResult(request, "memory").text.slice(0, 900);
 					},
-				]),
+				},
 				{
 					name: "icm-view-own-recall",
 					check: (request) => {
@@ -3928,7 +4671,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 							(block) => block.type === "text" && block.text.includes(ICM_NOTES[0]?.[0] ?? ""),
 						),
 				),
-				"a source reached through the expansion opens with its exact text",
+				`a source reached through the expansion opens with its exact text (opened: ${icmViewOpened ?? "none"})`,
 			).toBe(true);
 			expect(
 				await world.disposeSessionInBody(icmView.session),
@@ -3998,6 +4741,256 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				);
 			expect(legacyWrites, "no ICM root writes a legacy memory store").toEqual([]);
 			trace.mark("root", "icm.negative-controls");
+
+			// I7 (R7, and the D1 context rule with System One on): a summary's identity binds its sources' metadata, not only
+			// their text. Only the timestamp of the Note A4 reply (position 7: the notes' last covered part, and context of the
+			// log leaf) changes on disk while no root holds the session; its text is byte-identical. A byte-identical rewrite
+			// is the control: it keeps every handle. Each read runs in a fresh root, so its index scans the file anew.
+			const i7Notes = icmAcceptedAt(icmLive, icmStoreFiles, 0, 0);
+			const i7Log = icmAcceptedAt(icmLive, icmStoreFiles, 0, 8);
+			if (i7Notes === undefined || (world.systemOne.enabled && i7Log === undefined))
+				throw new Error("I7: the built leaves are not accepted");
+			const i7Expanded = [i7Notes, ...(world.systemOne.enabled && i7Log !== undefined ? [i7Log] : [])].map(
+				(id) => `txn:${id.slice(0, 16)}`,
+			);
+			const i7Query = "staging clock is synced";
+			const i7ReplyHandle = (text: string): string | undefined =>
+				icmHits(text).find((hit) => hit.description.includes("assistant") && hit.line.includes("clock is synced"))
+					?.handle;
+			/** One fresh read-only root: the Note A4 reply's hit handle, then every built leaf's expansion. */
+			const i7Read = async (
+				label: string,
+			): Promise<{ handle: string; expansions: Array<{ isError: boolean; text: string }> }> => {
+				let handle: string | undefined;
+				let expansions: Array<{ isError: boolean; text: string }> = [];
+				const reader = await world.createRootSession("root", {
+					agentDir: icmAgentDir,
+					settings: { memorySystem: undefined },
+				});
+				world.provider.enqueue(
+					"root",
+					calls(`${label}-search`, [
+						{
+							id: `${label}-1`,
+							name: "memory",
+							arguments: { action: "history_search", query: i7Query, maxResults: 10 },
+						},
+					]),
+					icmAfterHistoryRead(
+						`${label}-found`,
+						"memory",
+						{ id: `${label}-1`, arguments: { action: "history_search", query: i7Query, maxResults: 10 } },
+						(result) => {
+							handle = i7ReplyHandle(result.text);
+							if (result.isError || handle === undefined)
+								throw new Error(`${label}: the Note A4 reply is not a hit: ${result.text.slice(0, 900)}`);
+							// One expansion per request: each result is sent before the next call is made.
+							return icmCall(`${label}-expand-0`, "memory", { action: "history_expand", ref: i7Expanded[0] });
+						},
+					),
+					...i7Expanded.slice(1).map(
+						(ref, offset): ScriptStep => ({
+							name: `${label}-expand-step-${offset + 1}`,
+							reply: icmCall(`${label}-expand-${offset + 1}`, "memory", { action: "history_expand", ref }),
+						}),
+					),
+					{
+						name: `${label}-expanded`,
+						check: (request) => {
+							// Each expansion's own result, by its tool call id.
+							expansions = i7Expanded.map((_ref, index) => {
+								const found = request.context.messages.find(
+									(message) =>
+										message.role === "toolResult" && message.toolCallId === `${label}-expand-${index}`,
+								);
+								if (found?.role !== "toolResult")
+									return {
+										isError: true,
+										text: `no result; tail: ${JSON.stringify(
+											request.context.messages
+												.slice(-6)
+												.map((message) =>
+													message.role === "toolResult"
+														? `toolResult:${message.toolCallId}`
+														: message.role === "assistant"
+															? `assistant:${message.content.map((block) => (block.type === "toolCall" ? block.id : block.type)).join(",")}`
+															: message.role,
+												),
+										)}`,
+									};
+								return {
+									isError: found.isError,
+									text: found.content
+										.map((block) => (block.type === "text" ? block.text : block.type))
+										.join("\n"),
+								};
+							});
+						},
+						reply: { content: [{ type: "text", text: "The notes summary was read." }] },
+					},
+				);
+				world.systemOne.enterPhase(label, ICM_INTAKE_JUDGMENTS);
+				await withDeadline(trace, `${label} turn`, reader.session.prompt("Expand the staging notes summary."));
+				expect(
+					await world.disposeSessionInBody(reader.session),
+					`the ${label} root disposes cleanly`,
+				).toBeUndefined();
+				if (handle === undefined) throw new Error(`${label}: no hit handle was read`);
+				return { handle, expansions };
+			};
+			const i7SeedText = String(world.io.readFileSync(icmSeed.file, "utf8"));
+			world.io.writeFileSync(icmSeed.file, i7SeedText);
+			const i7Control = await i7Read("i7-control");
+			expect(
+				i7Control.expansions.map((result) => result.isError === false && result.text.includes("Covered sources")),
+				`a byte-identical rewrite keeps every summary expandable: ${JSON.stringify(i7Control.expansions.map((result) => result.text.slice(0, 300)))}`,
+			).toEqual(i7Expanded.map(() => true));
+			const i7Lines = i7SeedText.split("\n");
+			const i7Index = i7Lines.findIndex((line) => {
+				if (line.trim() === "") return false;
+				const entry = JSON.parse(line) as { type?: string; message?: { role?: string; content?: unknown } };
+				return (
+					entry.type === "message" &&
+					entry.message?.role === "assistant" &&
+					JSON.stringify(entry.message.content).includes("Noted A4")
+				);
+			});
+			if (i7Index < 0) throw new Error("I7: the Note A4 reply is not in the session file");
+			const i7Entry = JSON.parse(i7Lines[i7Index] ?? "") as { timestamp: string; message: { content: unknown } };
+			const i7Content = JSON.stringify(i7Entry.message.content);
+			i7Entry.timestamp = new Date(Date.parse(i7Entry.timestamp) + 1_000).toISOString();
+			i7Lines[i7Index] = JSON.stringify(i7Entry);
+			world.io.writeFileSync(icmSeed.file, i7Lines.join("\n"));
+			expect(JSON.stringify(i7Entry.message.content), "only the reply's metadata changed").toBe(i7Content);
+			const i7Changed = await i7Read("i7-changed");
+			const i7Key = (handle: string): string => handle.slice(0, handle.lastIndexOf(":"));
+			expect(
+				{
+					sameSource: i7Key(i7Changed.handle) === i7Key(i7Control.handle),
+					sameIdentity: i7Changed.handle === i7Control.handle,
+					refused: i7Changed.expansions.map(
+						(result) =>
+							result.isError &&
+							result.text.includes("stale_snapshot") &&
+							result.text.includes("no longer the live history"),
+					),
+				},
+				"a metadata-only change is a new source identity: every summary over it, or with it as context, is refused",
+			).toEqual({ sameSource: true, sameIdentity: false, refused: i7Expanded.map(() => true) });
+			// The coordinator revokes what the change killed and derives it again: the exact copy for free; with System One on,
+			// the log leaf (its context changed, so its identity did) and the parent are paid and judged once each.
+			if (world.systemOne.enabled) {
+				world.provider.enqueue(
+					icmSummaryTrack,
+					{
+						name: "i7-leaf-summary",
+						check: (request) => {
+							if (!JSON.stringify(request.context.messages).includes("retry budget at seven per hour"))
+								throw new Error("the I7 rebuild does not summarize the log leaf");
+						},
+						reply: { content: [{ type: "text", text: ICM_LEAF_SUMMARY }] },
+					},
+					{
+						name: "i7-parent-summary",
+						check: (request) => {
+							if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+								throw new Error("the I7 parent does not merge the rebuilt leaf");
+						},
+						reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+					},
+				);
+			}
+			world.systemOne.enterPhase("i7-rebuild", world.systemOne.enabled ? icmAdmissionJudgments : {});
+			const i7PaidBefore = {
+				summaries: icmTrackRequests(world, icmSummaryTrack),
+				admissions: icmAdmissionRequests(world),
+			};
+			const i7Rebuilt = await buildIcmHierarchy(
+				world,
+				icmAgentDir,
+				icmHierarchySettings(icmSummaryTrack),
+				(status) =>
+					status.lastRevocation?.reason === "invalidated" && status.acceptedNodes === icmBuilt.acceptedNodes,
+			);
+			const i7NewNotes = icmAcceptedAt(icmLive, icmStoreFiles, 0, 0);
+			expect(
+				{
+					revoked: i7Rebuilt.lastRevocation?.revokedNodes,
+					notesRebuilt: i7NewNotes !== undefined && i7NewNotes !== i7Notes,
+					logRebuilt: world.systemOne.enabled ? icmAcceptedAt(icmLive, icmStoreFiles, 0, 8) !== i7Log : true,
+					paid: {
+						summaries: icmTrackRequests(world, icmSummaryTrack) - i7PaidBefore.summaries,
+						admissions: icmAdmissionRequests(world) - i7PaidBefore.admissions,
+					},
+				},
+				"the restart revokes every summary the metadata change killed and rebuilds each, paying only for model summaries",
+			).toEqual({
+				revoked: icmBuilt.acceptedNodes,
+				notesRebuilt: true,
+				logRebuilt: true,
+				paid: world.systemOne.enabled ? { summaries: 2, admissions: 2 } : { summaries: 0, admissions: 0 },
+			});
+			trace.mark("root", "icm.metadata-identity");
+
+			// G-DEDUP (noticed while building I7): two history reads of different summaries in one tool batch must both reach
+			// the model's next request; neither supersedes the other. System One on only: off has one approved summary (two
+			// expansions of the same summary are the same operation).
+			if (world.systemOne.enabled) {
+				const gRefs = [
+					icmAcceptedAt(icmLive, icmStoreFiles, 0, 0),
+					icmAcceptedAt(icmLive, icmStoreFiles, 0, 8),
+				].map((id) => (id === undefined ? undefined : `txn:${id.slice(0, 16)}`));
+				if (gRefs.some((ref) => ref === undefined)) throw new Error("G-DEDUP: the rebuilt leaves are not accepted");
+				const gReader = await world.createRootSession("root", {
+					agentDir: icmAgentDir,
+					settings: { memorySystem: undefined },
+				});
+				let gResults: Array<string | undefined> = [];
+				world.provider.enqueue(
+					"root",
+					calls("g-dedup-search", [
+						{ id: "g-dedup-1", name: "memory", arguments: { action: "history_search", query: ICM_NOTES_QUERY } },
+					]),
+					icmAfterHistoryRead(
+						"g-dedup-expand",
+						"memory",
+						{ id: "g-dedup-1", arguments: { action: "history_search", query: ICM_NOTES_QUERY } },
+						() => ({
+							content: gRefs.map((ref, index) => ({
+								type: "toolCall" as const,
+								id: `g-dedup-expand-${index}`,
+								name: "memory",
+								arguments: { action: "history_expand", ref },
+							})),
+							stopReason: "toolUse",
+						}),
+					),
+					{
+						name: "g-dedup-read",
+						check: (request) => {
+							gResults = gRefs.map((_ref, index) => {
+								const found = request.context.messages.find(
+									(message) =>
+										message.role === "toolResult" && message.toolCallId === `g-dedup-expand-${index}`,
+								);
+								return found?.role === "toolResult" && !found.isError ? found.toolCallId : undefined;
+							});
+						},
+						reply: { content: [{ type: "text", text: "Both summaries were expanded." }] },
+					},
+				);
+				world.systemOne.enterPhase("g-dedup", ICM_INTAKE_JUDGMENTS);
+				await withDeadline(trace, "G-DEDUP turn", gReader.session.prompt("Expand both summaries."));
+				expect(
+					await world.disposeSessionInBody(gReader.session),
+					"the G-DEDUP root disposes cleanly",
+				).toBeUndefined();
+				expect(gResults, "two distinct reads in one batch both reach the model's next request").toEqual([
+					"g-dedup-expand-0",
+					"g-dedup-expand-1",
+				]);
+				trace.mark("root", "icm.distinct-reads-kept");
+			}
 
 			// E8 (worker budget and bash): a read-only worker runs its bash through the scripted shell. Each provider response is charged to the
 			// preset's token budget, with cache reads at the cache-read weight: 1,000 input and 20,000 cache-read tokens charge 3,000, not 21,000.
@@ -6351,6 +7344,9 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				// ICM worker history: the rejected model leaf (System One on) or the held one (off), reported by the hierarchy owner.
 				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_rejected: [^\n]+\)\. Exact history recall is unaffected\.$/,
 				/^History summaries: 1 model summary job\(s\) are held: System One is not bound to this session, so no admission judgment can run\. Exact copies and exact history recall are unaffected\.$/,
+				// R13-A: the held build (no admission egress) and the build that finds the spent maximum.
+				/^History summaries: 1 model summary job\(s\) are held: external summary admission egress is not allowed by settings: the evaluator is a remote service and a local summary model does not make it local\. Exact copies and exact history recall are unaffected\.$/,
+				/^History summaries: 1 job\(s\) failed, 0 succeeded \(first cause: attempts_exhausted: The attempt budget is spent: 3 of 3 attempts were started and none completed\.[^\n]*\)\. Exact history recall is unaffected\.$/,
 			],
 			files: { [LIMITS_PATH]: "export const MAX_RETRIES = 3;\n" },
 			// A clean checkout on main: a fresh writer worker gets its own worktree lane (dirty checkouts fall back to shared).
@@ -10345,6 +11341,983 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 			).toBeUndefined();
 			expect(wThreads.liveCount, "every history worker exited with its owner").toBe(0);
 			trace.mark("root", "w.receiving-allowance");
+
+			// Family 1 (claim and attempt ownership), each part under its own agent directory with its own past session.
+			const cTrack = "worker-c";
+			expect(world.provider.getPendingStepNames(cTrack), "the claims summary track is idle").toEqual([]);
+			const cAdmission = {
+				summary_supported: { kind: "noul", probability: 0.97 },
+				owner_constraints_preserved: { kind: "noul", probability: 0.97 },
+				status_reported_honestly: { kind: "noul", probability: 0.97 },
+			} as const;
+			const cLive = icmLiveStore(world);
+
+			// R16-A/B: a replaced claim's late effects never touch its replacement. The builder owns the past session, so a
+			// branch switch it persists reaches its own coordinator: the log leaf J is claimed (C1) and held at the summarizer;
+			// the branch moves away (a persisted entry makes the index see it), J ends stale and C1 is aborted; the branch comes
+			// back and J is claimed again (C2, held at its summarizer, abort-respecting). Only then does C1's paid reply arrive
+			// (it ignored the abort). C1's settlement must leave C2 running and tracked: an in-process restart then aborts C2
+			// through the coordinator's own in-flight controllers, the stop save holds J with its attempts and no kept reply, and
+			// the restarted coordinator makes the final attempt (C3), which pays and publishes its own reply.
+			const rAgentDir = `${world.agentDir}-icm-claims`;
+			const rSeed = await seedIcmPastSession(world, rAgentDir);
+			const rStore = icmStore(rAgentDir);
+			const rTexts = {
+				c1: "Late reply: the rollout log ended with decision ZEPHYR-7 keeping the retry budget at seven per hour.",
+				c2: "Second reply: the rollout log ended with decision ZEPHYR-7 keeping the retry budget at seven per hour.",
+				c3: "Final reply: the rollout log ended with decision ZEPHYR-7 keeping the retry budget at seven per hour.",
+			};
+			const rLeafJob = () => icmJobAt(cLive, rStore, "leaf", 8);
+			const rC1Reached = createBarrier();
+			const rC1Gate = createBarrier();
+			const rC1Done = createBarrier();
+			const rC2Reached = createBarrier();
+			const rC2Gate = createBarrier();
+			const rC2Done = createBarrier();
+			const rC3Reached = createBarrier();
+			const rSeen: {
+				c1?: IcmStoredJob;
+				c2?: IcmStoredJob;
+				c3?: IcmStoredJob;
+				c1Completion?: Promise<unknown>;
+				c1Terminal?: { stopReason: string; requestAborted: boolean };
+				c2Terminal?: { stopReason: string; requestAborted: boolean };
+			} = {};
+			const rTerminalOf = (sequence: number) =>
+				world.provider.terminals.find((entry) => entry.sequence === sequence);
+			if (world.systemOne.enabled) {
+				world.provider.enqueue(
+					cTrack,
+					{
+						name: "r16-c1",
+						gate: rC1Gate.promise,
+						ignoresAbort: true,
+						check: () => {
+							rSeen.c1 = rLeafJob();
+							// The summarizer's isolated completion was started just before this request: its outer settlement.
+							rSeen.c1Completion = world.isolatedCompletions.at(-1);
+							rC1Reached.release();
+						},
+						onTerminal: (request) => {
+							const terminal = rTerminalOf(request.sequence);
+							if (terminal)
+								rSeen.c1Terminal = { stopReason: terminal.stopReason, requestAborted: terminal.requestAborted };
+							rC1Done.release();
+						},
+						reply: { content: [{ type: "text", text: rTexts.c1 }] },
+					},
+					{
+						name: "r16-c2",
+						gate: rC2Gate.promise,
+						check: () => {
+							rSeen.c2 = rLeafJob();
+							rC2Reached.release();
+						},
+						onTerminal: (request) => {
+							const terminal = rTerminalOf(request.sequence);
+							if (terminal)
+								rSeen.c2Terminal = { stopReason: terminal.stopReason, requestAborted: terminal.requestAborted };
+							rC2Done.release();
+						},
+						reply: { content: [{ type: "text", text: rTexts.c2 }] },
+					},
+					{
+						name: "r16-c3",
+						check: () => {
+							rSeen.c3 = rLeafJob();
+							rC3Reached.release();
+						},
+						reply: { content: [{ type: "text", text: rTexts.c3 }] },
+					},
+					{
+						name: "r16-parent",
+						check: (request) => {
+							if (!JSON.stringify(request.context.messages).includes(rTexts.c3))
+								throw new Error("the R16 parent does not merge the final attempt's leaf");
+						},
+						reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+					},
+				);
+			}
+			world.systemOne.enterPhase("r16-admission", cAdmission);
+			const rPaidBefore = { summaries: icmTrackRequests(world, cTrack), admissions: icmAdmissionRequests(world) };
+			const rBuilder = await world.createRootSession("root", {
+				agentDir: rAgentDir,
+				sessionManager: world.openSessionManager(rSeed.file, rAgentDir),
+				settings: icmHierarchySettings(cTrack),
+			});
+			const rEntries = rBuilder.sessionManager.getEntries();
+			const rLastEntry = rEntries.at(-1)?.id;
+			const rNoteA4 = rEntries.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "assistant" &&
+					JSON.stringify(entry.message.content).includes("Noted A4"),
+			)?.id;
+			if (rLastEntry === undefined || rNoteA4 === undefined)
+				throw new Error("R16: the past session has no branch points");
+			try {
+				if (world.systemOne.enabled) {
+					await withDeadline(trace, "R16 C1 reached the summarizer", rC1Reached.promise);
+					expect(
+						{ state: rSeen.c1?.state, attempts: rSeen.c1?.attempts },
+						"C1's attempt is durable before its provider call",
+					).toEqual({ state: "running", attempts: 1 });
+				} else {
+					// Off: the model leaf is held before any call; its returned claim leaves no attempt.
+					await withDeadline(
+						trace,
+						"R16 held leaf persisted",
+						world.io.waitForMutation(() => rLeafJob()?.lastError?.reason === "admission_held"),
+					);
+				}
+				const rAway = await withDeadline(trace, "R16 branch away", rBuilder.session.navigateTree(rNoteA4));
+				expect(rAway.cancelled, "the branch switch away applies").toBe(false);
+				rBuilder.sessionManager.appendCustomEntry("r16-away", { step: "away" });
+				await withDeadline(
+					trace,
+					"R16 J ended stale",
+					world.io.waitForMutation(() => rLeafJob()?.state === "stale"),
+				);
+				const rBack = await withDeadline(trace, "R16 branch back", rBuilder.session.navigateTree(rLastEntry));
+				expect(rBack.cancelled, "the branch switch back applies").toBe(false);
+				rBuilder.sessionManager.appendCustomEntry("r16-back", { step: "back" });
+				if (world.systemOne.enabled) {
+					await withDeadline(trace, "R16 C2 reached the summarizer", rC2Reached.promise);
+					expect(
+						{ state: rSeen.c2?.state, attempts: rSeen.c2?.attempts },
+						"the replacement claim is attempt 2 of the same job",
+					).toEqual({ state: "running", attempts: 2 });
+					// C1's paid reply arrives now, after its claim was replaced; its own settlement completes too.
+					rC1Gate.release();
+					await withDeadline(trace, "R16 C1 terminal", rC1Done.promise);
+					const rC1Outer =
+						rSeen.c1Completion === undefined
+							? undefined
+							: await withDeadline(trace, "R16 C1 settled", rSeen.c1Completion);
+					expect(rSeen.c1Terminal, "C1 delivered late, after its request was aborted").toEqual({
+						stopReason: "stop",
+						requestAborted: true,
+					});
+					expect(
+						["stop", "aborted"].includes(String((rC1Outer as { stopReason?: unknown } | undefined)?.stopReason)),
+						"C1's isolated completion settled (stop inside the abort grace, aborted after it)",
+					).toBe(true);
+					const rAfterC1 = rLeafJob();
+					expect(
+						{
+							state: rAfterC1?.state,
+							attempts: rAfterC1?.attempts,
+							keptC1:
+								rAfterC1?.pendingReply?.textDigest === createHash("sha256").update(rTexts.c1).digest("hex"),
+						},
+						"C1's late effects leave the replacement running at attempt 2 with nothing of C1 kept",
+					).toEqual({ state: "running", attempts: 2, keptC1: false });
+					// The in-process restart: a changed signature setting stops the coordinator, which aborts and joins its
+					// in-flight claims. C2 is aborted only if C1's settlement did not clear its in-flight entry.
+					const rStopSave = icmObserveNextJobsSave(world, rStore, "r16-stop-save");
+					rBuilder.settingsManager.applyOverrides({
+						contextPolicy: { memory: { history: { maxConcurrentSummaries: 3 } } },
+					});
+					await withDeadline(trace, "R16 C2 aborted by the stop", rC2Done.promise);
+					expect(rSeen.c2Terminal, "the stop aborted C2 through its in-flight controller").toEqual({
+						stopReason: "aborted",
+						requestAborted: true,
+					});
+					await withDeadline(trace, "R16 C3 reached the summarizer", rC3Reached.promise);
+					const rStopped = rStopSave()?.jobs.find((job) => job.id === rSeen.c2?.id);
+					expect(
+						{
+							stop: { state: rStopped?.state, attempts: rStopped?.attempts, kept: rStopped?.pendingReply },
+							c3: { state: rSeen.c3?.state, attempts: rSeen.c3?.attempts },
+						},
+						"the stop keeps J's two attempts and no reply; the restart makes the final attempt",
+					).toEqual({
+						stop: { state: "queued", attempts: 2, kept: undefined },
+						c3: { state: "running", attempts: 3 },
+					});
+					await withDeadline(
+						trace,
+						"R16 hierarchy rebuilt",
+						world.io.waitForMutation(() => icmAcceptedAt(cLive, rStore, 1, 0) !== undefined),
+					);
+					const rLeafNode = icmAcceptedAt(cLive, rStore, 0, 8);
+					const rLeafText =
+						rLeafNode === undefined
+							? undefined
+							: (
+									JSON.parse(
+										world.io.peekFile(resolve(rStore.root, "nodes", `${rLeafNode}.json`)) ?? "{}",
+									) as { text?: string }
+								).text;
+					expect(
+						{
+							leafText: rLeafText,
+							paid: {
+								summaries: icmTrackRequests(world, cTrack) - rPaidBefore.summaries,
+								admissions: icmAdmissionRequests(world) - rPaidBefore.admissions,
+							},
+							c1Judged: world.systemOne.decoded.some((request) =>
+								JSON.stringify(request.state).includes(rTexts.c1),
+							),
+						},
+						"only the final attempt's reply is judged and published; C1 and C2 were paid and never judged",
+					).toEqual({ leafText: rTexts.c3, paid: { summaries: 4, admissions: 2 }, c1Judged: false });
+				} else {
+					await withDeadline(
+						trace,
+						"R16 held leaf re-enqueued",
+						world.io.waitForMutation(() => {
+							const job = rLeafJob();
+							return job?.state === "queued" && job.lastError?.reason === "admission_held";
+						}),
+					);
+					expect(
+						{
+							attempts: rLeafJob()?.attempts,
+							summaries: icmTrackRequests(world, cTrack) - rPaidBefore.summaries,
+							admissions: icmAdmissionRequests(world) - rPaidBefore.admissions,
+						},
+						"off: the held leaf never reaches a provider across the branch away and back, and keeps no attempt",
+					).toEqual({ attempts: 0, summaries: 0, admissions: 0 });
+				}
+			} finally {
+				rC1Gate.release();
+				rC2Gate.release();
+			}
+			expect(await world.disposeSessionInBody(rBuilder.session), "the R16 builder disposes cleanly").toBeUndefined();
+			await world.provider.waitForProducers();
+			trace.mark("root", "icm.r16-claims");
+
+			// R16-E (fail kind, the work order's exact ordering; System One on, the model leaf): the old claim's outcome is
+			// resolved BEFORE the stale and settled AFTER the same task replaced it. The change handler that will stale J is held
+			// at its first index read (the probe); C1's summarizer fails meanwhile, so its `fail` outcome waits behind that task.
+			// The owner's branch comes back before the probe answers (its ingest queues behind the probe on the port), so the
+			// handler stales J, re-reads, re-enqueues and claims it again (C2) before C1's settlement runs: that settlement must
+			// return at its ownership check, recording no failure and moving J nowhere. The `node` kind needs the old claim's
+			// last source read held, which on a FIFO worker port also holds the handler's reads: stated limit.
+			if (world.systemOne.enabled) {
+				const lAgentDir = `${world.agentDir}-icm-late-fail`;
+				const lSeed = await seedIcmPastSession(world, lAgentDir);
+				const lStore = icmStore(lAgentDir);
+				const lJob = () => icmJobAt(cLive, lStore, "leaf", 8);
+				const lC1Gate = createBarrier();
+				const lC1Reached = createBarrier();
+				const lC1Done = createBarrier();
+				const lC2Reached = createBarrier();
+				const lC2Gate = createBarrier();
+				let lC1Completion: Promise<unknown> | undefined;
+				let lC2Job: IcmStoredJob | undefined;
+				world.provider.enqueue(
+					cTrack,
+					{
+						...fail("r16e-c1", "the late summarizer failure"),
+						gate: lC1Gate.promise,
+						check: () => {
+							lC1Completion = world.isolatedCompletions.at(-1);
+							lC1Reached.release();
+						},
+						onTerminal: () => lC1Done.release(),
+					},
+					{
+						name: "r16e-c2",
+						gate: lC2Gate.promise,
+						check: () => {
+							lC2Job = lJob();
+							lC2Reached.release();
+						},
+						reply: { content: [{ type: "text", text: ICM_LEAF_SUMMARY }] },
+					},
+				);
+				world.systemOne.enterPhase("r16e-build", {});
+				const lOwner = await world.createRootSession("root", {
+					agentDir: lAgentDir,
+					sessionManager: world.openSessionManager(lSeed.file, lAgentDir),
+					settings: icmHierarchySettings(cTrack),
+				});
+				const lEntries = lOwner.sessionManager.getEntries();
+				const lBack = lEntries.at(-1)?.id;
+				const lAway = lEntries.find(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						JSON.stringify(entry.message).includes("Noted A4"),
+				)?.id;
+				if (lBack === undefined || lAway === undefined)
+					throw new Error("R16-E: the past session has no branch points");
+				let lProbe: ReturnType<typeof wThreads.holdNext> | undefined;
+				try {
+					await withDeadline(trace, "R16-E C1 at the summarizer", lC1Reached.promise);
+					lProbe = wThreads.holdNext("r16e-handler-probe", "lineage", (message) => {
+						const facts = message as { sessionId?: unknown; fromIndex?: unknown; maxSpans?: unknown };
+						return facts.sessionId === lSeed.sessionId && facts.fromIndex === 0 && facts.maxSpans === 1;
+					});
+					lOwner.sessionManager.branch(lAway);
+					lOwner.sessionManager.appendCustomEntry("r16e-away", { step: "away" });
+					await withDeadline(trace, "R16-E handler probe held", lProbe.reached);
+					// C1 fails now, while the handler holds the mailbox: its outcome is `fail`, settled behind the handler.
+					lC1Gate.release();
+					await withDeadline(trace, "R16-E C1 failed", lC1Done.promise);
+					// Physical settlement only (its outcome is the coordinator's to judge): C1's run has resolved before the stale.
+					if (lC1Completion !== undefined)
+						await withDeadline(trace, "R16-E C1 settled", Promise.allSettled([lC1Completion]));
+					lOwner.sessionManager.branch(lBack);
+					lOwner.sessionManager.appendCustomEntry("r16e-back", { step: "back" });
+					lProbe.release();
+					await withDeadline(trace, "R16-E C2 claimed in the same handler", lC2Reached.promise);
+					const lStatus = icmHierarchy(lOwner.session);
+					expect(
+						{
+							c2: { state: lC2Job?.state, attempts: lC2Job?.attempts },
+							failures: lStatus.failures.length,
+							retrying: lStatus.counts.retry_wait ?? 0,
+							lastError: lJob()?.lastError?.reason,
+						},
+						"the old claim's late failure, settled after its replacement, records nothing and moves the replacement nowhere",
+					).toEqual({ c2: { state: "running", attempts: 2 }, failures: 0, retrying: 0, lastError: undefined });
+				} finally {
+					lC1Gate.release();
+					lProbe?.release();
+				}
+				expect(
+					await world.disposeSessionInBody(lOwner.session),
+					"the R16-E owner disposes cleanly",
+				).toBeUndefined();
+				lC2Gate.release();
+				await world.provider.waitForProducers();
+				trace.mark("root", "icm.r16e-late-fail");
+			}
+
+			// O4 and W6 (worker delivery). A root that owns the W past session (hierarchy off: it reads through the view)
+			// starts a reader worker. O4: the summary store manifest cannot be read during the worker's query: the hits stay,
+			// the summary lookup is a typed unavailable line, and the shown source still opens. W6 (R6): while the worker's
+			// expansion of the notes summary waits for its delivery fence (the fence's manifest read is held), the idle root
+			// persists a branch switch on its own session: the fence then judges the index observation and refuses the read
+			// as changed in flight, and the root's own reader refuses the same summary as no longer the live history.
+			const w6Store = icmStore(wAgentDir);
+			const w6NotesNode = icmAcceptedAt(cLive, w6Store, 0, 0);
+			if (w6NotesNode === undefined) throw new Error("W6: the W notes exact copy is not accepted");
+			const w6NotesTxn = `txn:${w6NotesNode.slice(0, 16)}`;
+			const w6Root = await world.createRootSession("root", {
+				agentDir: wAgentDir,
+				sessionManager: world.openSessionManager(wSeed.file, wAgentDir),
+				settings: { memorySystem: undefined },
+			});
+			const w6NoteA2 = w6Root.sessionManager
+				.getEntries()
+				.find(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						JSON.stringify(entry.message.content).includes("Note A2"),
+				)?.id;
+			if (w6NoteA2 === undefined) throw new Error("W6: the past session has no second note");
+			const w6Go = createBarrier();
+			const w6Held = createBarrier();
+			const w6Done = createBarrier();
+			const w6Wake = createBarrier();
+			let w6Hold: ReturnType<HarnessWorld["io"]["holdNext"]> | undefined;
+			let w6Decision: string | undefined;
+			const w6OpsStart = world.io.operations.length;
+			const w6LogStart = wThreads.messageLog.length;
+			world.provider.enqueue(
+				"root",
+				calls("w6-start", [
+					{
+						id: "w6-start-1",
+						name: "delegate",
+						arguments: {
+							action: "start",
+							profileId: "icm-reader",
+							instructions:
+								"Find the retry budget decision and expand the staging notes summary through memory_read, then submit your report.",
+						},
+					},
+				]),
+				{
+					name: "w6-start-reply",
+					check: (request) => {
+						const started = latestBatchResults(request).find((result) => result.toolName === "delegate");
+						if (started?.isError || !started?.text.includes("delegate started (running)"))
+							throw new Error(`the W6 reader did not start: ${started?.text ?? "no result"}`);
+					},
+					reply: { content: [{ type: "text", text: "The reader is started." }] },
+				},
+				{
+					name: "w6-wake",
+					maxRequests: 8,
+					until: (request) => {
+						const everything = JSON.stringify(request.context.messages);
+						const done = everything.includes("The notes summary was refused in flight.");
+						if (done) w6Wake.release();
+						return done;
+					},
+					reply: (request) =>
+						JSON.stringify(request.context.messages).includes("The notes summary was refused in flight.")
+							? icmCall("w6-root-expand", "memory", { action: "history_expand", ref: w6NotesTxn })
+							: { content: [{ type: "text", text: "Background work is still settling." }] },
+				},
+				{
+					name: "w6-root-refused",
+					check: (request) => {
+						const expanded = icmLatestResult(request, "memory");
+						if (
+							!expanded.isError ||
+							!expanded.text.includes("stale_snapshot") ||
+							!expanded.text.includes("no longer the live history") ||
+							expanded.text.includes("Note A1")
+						)
+							throw new Error(`the root served a summary of another branch: ${expanded.text.slice(0, 600)}`);
+					},
+					reply: { content: [{ type: "text", text: "That summary is no longer the live history." }] },
+				},
+			);
+			world.provider.enqueue(
+				"worker-a",
+				{
+					name: "w6-o4-query",
+					check: () => {
+						wThreads.interceptNext("query", () =>
+							world.io.failNext({
+								name: "o4-manifest-read",
+								kind: "read",
+								code: "EACCES",
+								matches: (operation) => operation.path === w6Store.manifest,
+							}),
+						);
+					},
+					reply: icmCall("w6-read-1", "memory_read", { query: ICM_DECISION_QUERY }),
+				},
+				{
+					name: "w6-o4-open",
+					check: (request) => {
+						const read = icmLatestResult(request, "memory_read");
+						w6Decision = icmHandleOnLine(read.text, "retry budget");
+						if (
+							read.isError ||
+							w6Decision === undefined ||
+							!read.text.includes("were not looked up") ||
+							!read.text.includes("Scripted IO fault o4-manifest-read:")
+						)
+							throw new Error(`O4: the worker's hits lost or the lookup not typed: ${read.text.slice(0, 900)}`);
+					},
+					reply: (): ScriptedReply => icmCall("w6-read-2", "memory_read", { ref: w6Decision }),
+				},
+				{
+					name: "w6-notes-query",
+					check: (request) => {
+						const opened = icmLatestResult(request, "memory_read");
+						if (opened.isError || !opened.text.includes(ICM_DECISION))
+							throw new Error(`O4: the shown source did not open exactly: ${opened.text.slice(0, 600)}`);
+					},
+					reply: icmCall("w6-read-3", "memory_read", { query: ICM_NOTES_QUERY }),
+				},
+				{
+					name: "w6-expand",
+					gate: w6Go.promise,
+					check: (request) => {
+						const listed = icmLatestResult(request, "memory_read");
+						if (listed.isError || !listed.text.includes(w6NotesTxn))
+							throw new Error(`W6: the notes summary is not cited to the worker: ${listed.text.slice(0, 900)}`);
+						// The expansion's lineage listing is in flight: the next manifest read is its delivery fence.
+						wThreads.interceptNext(
+							"lineage",
+							() => {
+								w6Hold = world.io.holdNext({
+									name: "w6-fence-read",
+									kind: "readFile",
+									matches: (operation) => operation.path === w6Store.manifest,
+								});
+								w6Held.release();
+							},
+							(message) => {
+								const facts = message as { fromIndex?: unknown; maxSpans?: unknown };
+								return facts.fromIndex === 0 && facts.maxSpans === 8;
+							},
+						);
+					},
+					reply: icmCall("w6-read-4", "memory_read", { ref: w6NotesTxn }),
+				},
+				{
+					name: "w6-report",
+					check: (request) => {
+						const expanded = icmLatestResult(request, "memory_read");
+						if (
+							!/changed while the summary read was in flight/i.test(expanded.text) ||
+							expanded.text.includes("no longer the live history") ||
+							expanded.text.includes("Note A1")
+						)
+							throw new Error(
+								`W6: the in-flight expansion was delivered or judged early: ${expanded.text.slice(0, 600)}`,
+							);
+						w6Done.release();
+					},
+					reply: icmCall("w6-report-1", "submit_report", {
+						status: "completed",
+						summary: "The notes summary was refused in flight.",
+					}),
+				},
+			);
+			world.systemOne.enterPhase("w6-start", ICM_INTAKE_JUDGMENTS);
+			try {
+				await withDeadline(trace, "W6 start turn", w6Root.session.prompt("Start a reader for the history."));
+				await withDeadline(trace, "W6 root idle", w6Root.session.waitForForegroundIdle());
+				w6Go.release();
+				await withDeadline(trace, "W6 fence read armed", w6Held.promise);
+				const hold = w6Hold;
+				if (hold === undefined) throw new Error("W6: the fence hold was not armed");
+				await withDeadline(trace, "W6 fence read reached", hold.reached);
+				// The idle root persists a branch switch on its own session: its provider posts the ingest now.
+				w6Root.sessionManager.branch(w6NoteA2);
+				w6Root.sessionManager.appendCustomEntry("w6-switch", { step: "switch" });
+				hold.release();
+				await withDeadline(trace, "W6 worker reported", w6Done.promise);
+				await withDeadline(trace, "W6 handoff woke the root", w6Wake.promise, 60_000);
+				await withDeadline(trace, "W6 root idle after the wake", w6Root.session.waitForForegroundIdle());
+			} finally {
+				w6Go.release();
+				w6Hold?.release();
+			}
+			const w6Messages = wThreads.messageLog.slice(w6LogStart);
+			const w6Lineage = w6Messages.findIndex(
+				(entry) =>
+					entry.direction === "inbound" &&
+					entry.type === "lineage" &&
+					entry.facts.fromIndex === 0 &&
+					entry.facts.maxSpans === 8,
+			);
+			expect(
+				{
+					fault: world.io.consumedFaults.includes("o4-manifest-read"),
+					ingestAfterListing:
+						w6Lineage >= 0 &&
+						w6Messages.slice(w6Lineage).some((entry) => entry.direction === "inbound" && entry.type === "ingest"),
+					storeWrites: world.io.operations
+						.slice(w6OpsStart)
+						.filter(
+							(operation) =>
+								["write", "rename"].includes(operation.kind) &&
+								(operation.destination ?? operation.path).startsWith(w6Store.root),
+						).length,
+				},
+				"the index learned the switch while the expansion was in flight; no reader wrote to the store",
+			).toEqual({ fault: true, ingestAfterListing: true, storeWrites: 0 });
+			expect(await world.disposeSessionInBody(w6Root.session), "the W6 root disposes cleanly").toBeUndefined();
+			expect(wThreads.liveCount, "every W6 history worker exited with its owner").toBe(0);
+			trace.mark("root", "icm.w6-delivery");
+
+			// O13b (D-OUT-1): a store write that fails while the owning claim publishes settles that claim as a transient
+			// retry with the real cause; it never leaves the job running. The write of the target leaf's node file fails
+			// through the real write (System One on: the model leaf, so the retry publishes its kept reply under its kept
+			// acceptance with no summarizer or evaluator call, counted as reused; off: the exact notes copy). The retry is
+			// the scheduler's own backoff (10-12 s), awaited on the store's writes, no sleep.
+			const pAgentDir = `${world.agentDir}-icm-publish`;
+			await seedIcmPastSession(world, pAgentDir);
+			const pStore = icmStore(pAgentDir);
+			const pFrom = world.systemOne.enabled ? 8 : 0;
+			const pMarker = world.systemOne.enabled ? ICM_LEAF_SUMMARY : "Note A1";
+			world.io.failNext({
+				name: "o13b-node-write",
+				kind: "write",
+				matches: (operation, data) =>
+					operation.path.startsWith(`${resolve(pStore.root, "nodes")}${sep}`) &&
+					String(data ?? "").includes(pMarker),
+			});
+			if (world.systemOne.enabled) {
+				world.provider.enqueue(cTrack, text("o13b-leaf-summary", ICM_LEAF_SUMMARY), {
+					name: "o13b-parent-summary",
+					check: (request) => {
+						if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+							throw new Error("the O13b parent does not merge the leaf");
+					},
+					reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+				});
+			}
+			world.systemOne.enterPhase("o13b-admission", world.systemOne.enabled ? cAdmission : {});
+			const pPaidBefore = { summaries: icmTrackRequests(world, cTrack), admissions: icmAdmissionRequests(world) };
+			const pOwner = await world.createRootSession("root", {
+				agentDir: pAgentDir,
+				settings: icmHierarchySettings(cTrack),
+			});
+			const pJob = () => icmJobAt(cLive, pStore, "leaf", pFrom);
+			await withDeadline(
+				trace,
+				"O13b publication failed into a retry",
+				world.io.waitForMutation(() => pJob()?.state === "retry_wait"),
+			);
+			const pWaiting = icmHierarchy(pOwner.session);
+			expect(
+				{
+					fault: world.io.consumedFaults.includes("o13b-node-write"),
+					job: { state: pJob()?.state, attempts: pJob()?.attempts, reason: pJob()?.lastError?.reason },
+					cause: pWaiting.lastInternalError?.cause,
+					running: pWaiting.counts.running ?? 0,
+				},
+				"a failed publication write is a transient retry of the owning claim with its real cause, never a stranded run",
+			).toEqual({
+				fault: true,
+				job: { state: "retry_wait", attempts: 1, reason: "store_unavailable" },
+				cause: expect.stringMatching(
+					/^publishing to the summary store failed: EIO: Scripted IO fault o13b-node-write:/,
+				),
+				running: 0,
+			});
+			await withDeadline(
+				trace,
+				"O13b retry published",
+				world.io.waitForMutation(
+					() =>
+						pJob()?.state === "ready" &&
+						Object.keys(icmStoredManifest(cLive, pStore)?.acceptedNodes ?? {}).length ===
+							(world.systemOne.enabled ? 3 : 1),
+				),
+				60_000,
+			);
+			const pDone = icmHierarchy(pOwner.session);
+			expect(
+				{
+					job: { state: pJob()?.state, attempts: pJob()?.attempts },
+					paid: {
+						summaries: icmTrackRequests(world, cTrack) - pPaidBefore.summaries,
+						admissions: icmAdmissionRequests(world) - pPaidBefore.admissions,
+					},
+					reused: pDone.admission?.reused,
+				},
+				"the retry publishes what was paid and judged, without paying or judging it again",
+			).toEqual({
+				job: { state: "ready", attempts: 2 },
+				paid: world.systemOne.enabled ? { summaries: 2, admissions: 2 } : { summaries: 0, admissions: 0 },
+				reused: world.systemOne.enabled ? 1 : 0,
+			});
+			expect(await world.disposeSessionInBody(pOwner.session), "the O13b owner disposes cleanly").toBeUndefined();
+			trace.mark("root", "icm.o13b-publication");
+
+			// D1-A (one row for the design's D1-A and O13a): a claimed attempt reaches a provider only after a save of this run
+			// acknowledged it. The first save that holds a running claim fails through the real write; the claim is held for
+			// persistence with that cause, and the next job-list save (the retry, or the next claim's save) is held at its
+			// write, so the hold is read while it stands, not raced against the production retry. One claim per save keeps
+			// the faulted job the only held one.
+			const dAgentDir = `${world.agentDir}-icm-d1`;
+			await seedIcmPastSession(world, dAgentDir);
+			const dStore = icmStore(dAgentDir);
+			const dJobsStaging = (path: string): boolean => path.startsWith(`${dStore.jobs}.`) && path.endsWith(".tmp");
+			// The hold on the next job-list write is armed inside the failing write itself, so no save can slip between them.
+			let dHeldSave: ReturnType<HarnessWorld["io"]["holdNext"]> | undefined;
+			const dArmed = createBarrier();
+			world.io.failNext({
+				name: "d1-claim-save",
+				kind: "write",
+				matches: (operation, data) => {
+					if (!dJobsStaging(operation.path) || !String(data ?? "").includes('"state":"running"')) return false;
+					dHeldSave = world.io.holdNext({
+						name: "d1-next-save",
+						kind: "writeFile",
+						matches: (next) => dJobsStaging(next.path),
+					});
+					dArmed.release();
+					return true;
+				},
+			});
+			if (world.systemOne.enabled) {
+				world.provider.enqueue(cTrack, text("d1-leaf-summary", ICM_LEAF_SUMMARY), {
+					name: "d1-parent-summary",
+					check: (request) => {
+						if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+							throw new Error("the D1 parent does not merge the leaf");
+					},
+					reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+				});
+			}
+			world.systemOne.enterPhase("d1-admission", world.systemOne.enabled ? cAdmission : {});
+			const dPaidBefore = { summaries: icmTrackRequests(world, cTrack), admissions: icmAdmissionRequests(world) };
+			const dOwner = await world.createRootSession("root", {
+				agentDir: dAgentDir,
+				settings: {
+					memorySystem: undefined,
+					contextPolicy: {
+						memory: {
+							history: {
+								hierarchy: true,
+								summaryModel: `${HARNESS_PROVIDER}/${cTrack}`,
+								allowExternalSummaryEgress: true,
+								allowExternalAdmissionEgress: true,
+								maxConcurrentSummaries: 1,
+							},
+						},
+					},
+				},
+			});
+			await withDeadline(trace, "D1 claim save failed", dArmed.promise);
+			const dHold = dHeldSave;
+			if (dHold === undefined) throw new Error("D1: the claim save never failed");
+			try {
+				await withDeadline(trace, "D1 next save reached", dHold.reached);
+				const dHeld = icmHierarchy(dOwner.session);
+				expect(
+					{
+						heldJobs: dHeld.admission?.heldJobs,
+						heldKind: dHeld.admission?.heldKind,
+						internalCause: dHeld.lastInternalError?.cause,
+						summaries: icmTrackRequests(world, cTrack) - dPaidBefore.summaries,
+						accepted: dHeld.acceptedNodes,
+					},
+					"an unacknowledged claim is held for persistence with the save's real cause, before any provider call",
+				).toEqual({
+					heldJobs: 1,
+					heldKind: "persistence",
+					internalCause: expect.stringMatching(/^saving jobs failed: EIO: Scripted IO fault d1-claim-save:/),
+					summaries: 0,
+					accepted: 0,
+				});
+			} finally {
+				dHold.release();
+			}
+			await withDeadline(
+				trace,
+				"D1 built after the save",
+				world.io.waitForMutation(() => {
+					const accepted = icmStoredManifest(cLive, dStore)?.acceptedNodes ?? {};
+					return Object.keys(accepted).length === (world.systemOne.enabled ? 3 : 1);
+				}),
+			);
+			expect(
+				{
+					notes: ((job) => job && { state: job.state, attempts: job.attempts })(
+						icmJobAt(cLive, dStore, "leaf", 0),
+					),
+					paid: {
+						summaries: icmTrackRequests(world, cTrack) - dPaidBefore.summaries,
+						admissions: icmAdmissionRequests(world) - dPaidBefore.admissions,
+					},
+				},
+				"after the acknowledged save the held claim runs once, its returned attempt never counted twice",
+			).toEqual({
+				notes: { state: "ready", attempts: 1 },
+				paid: world.systemOne.enabled ? { summaries: 2, admissions: 2 } : { summaries: 0, admissions: 0 },
+			});
+			expect(await world.disposeSessionInBody(dOwner.session), "the D1 owner disposes cleanly").toBeUndefined();
+			trace.mark("root", "icm.d1-persistence");
+
+			// R13-A: the attempt budget counts claims and never resets across restarts. A paid claim keeps its attempt; a
+			// held one (no provider call) returns its own increment; the final attempt is made; a spent maximum is never
+			// reopened. Each build is a fresh owner on the same store, stopped while its claim is at the summarizer.
+			const bAgentDir = `${world.agentDir}-icm-budget`;
+			await seedIcmPastSession(world, bAgentDir);
+			const bStore = icmStore(bAgentDir);
+			const bLeafJob = () => icmJobAt(cLive, bStore, "leaf", 8);
+			const bPaidBefore = { summaries: icmTrackRequests(world, cTrack), admissions: icmAdmissionRequests(world) };
+			/** One owner whose leaf claim is held at the summarizer (abort-respecting), then disposed. */
+			const bPaidBuild = async (label: string, attempt: number): Promise<void> => {
+				const reached = createBarrier();
+				const gate = createBarrier();
+				let claimed: IcmStoredJob | undefined;
+				world.provider.enqueue(cTrack, {
+					name: label,
+					gate: gate.promise,
+					check: () => {
+						claimed = bLeafJob();
+						reached.release();
+					},
+					reply: { content: [{ type: "text", text: ICM_LEAF_SUMMARY }] },
+				});
+				const owner = await world.createRootSession("root", {
+					agentDir: bAgentDir,
+					settings: icmHierarchySettings(cTrack),
+				});
+				try {
+					await withDeadline(trace, `${label} reached`, reached.promise);
+					expect({ state: claimed?.state, attempts: claimed?.attempts }, `${label}: the claim is durable`).toEqual(
+						{
+							state: "running",
+							attempts: attempt,
+						},
+					);
+				} finally {
+					expect(await world.disposeSessionInBody(owner.session), `${label}: the owner disposes`).toBeUndefined();
+					gate.release();
+				}
+				await world.provider.waitForProducers();
+				expect(
+					{ state: bLeafJob()?.state, attempts: bLeafJob()?.attempts },
+					`${label}: the stop keeps the paid attempt`,
+				).toEqual({ state: "queued", attempts: attempt });
+			};
+			if (world.systemOne.enabled) {
+				world.systemOne.enterPhase("r13-builds", {});
+				await bPaidBuild("r13-build-1", 1);
+				await bPaidBuild("r13-build-2", 2);
+				// Build 3: admission egress off, so the claim (attempt 3) is held before any call and returns its increment.
+				const bHeld = await world.createRootSession("root", {
+					agentDir: bAgentDir,
+					settings: {
+						...icmHierarchySettings(cTrack),
+						contextPolicy: {
+							memory: {
+								history: {
+									hierarchy: true,
+									summaryModel: `${HARNESS_PROVIDER}/${cTrack}`,
+									allowExternalSummaryEgress: true,
+									allowExternalAdmissionEgress: false,
+								},
+							},
+						},
+					},
+				});
+				await withDeadline(
+					trace,
+					"r13-build-3 held",
+					world.io.waitForMutation(() => bLeafJob()?.lastError?.reason === "admission_held"),
+				);
+				expect(
+					{
+						job: { state: bLeafJob()?.state, attempts: bLeafJob()?.attempts },
+						held: icmHierarchy(bHeld.session).admission?.heldByKind?.model_work,
+					},
+					"a held claim returns its own increment and is never counted as spent",
+				).toEqual({ job: { state: "queued", attempts: 2 }, held: 1 });
+				expect(await world.disposeSessionInBody(bHeld.session), "r13-build-3: the owner disposes").toBeUndefined();
+				// Build 4: the legitimate final attempt is claimed (and interrupted while paid).
+				await bPaidBuild("r13-build-4", 3);
+				// Builds 5 and 6: the spent maximum is never reopened; nothing is claimed or paid.
+				for (const label of ["r13-build-5", "r13-build-6"]) {
+					const spent = await buildIcmHierarchy(
+						world,
+						bAgentDir,
+						icmHierarchySettings(cTrack),
+						() => bLeafJob()?.state === "failed",
+					);
+					expect(
+						{
+							job: {
+								state: bLeafJob()?.state,
+								attempts: bLeafJob()?.attempts,
+								reason: bLeafJob()?.lastError?.reason,
+							},
+							ledger: ((record) => record && { kind: record.kind, attempts: record.attempts })(
+								icmStoredLedger(cLive, bStore)[bLeafJob()?.id ?? ""],
+							),
+							failure:
+								label === "r13-build-5"
+									? spent.failures.some((failure) => failure.reason === "attempts_exhausted")
+									: true,
+						},
+						`${label}: the exhausted job stays failed with its spent record`,
+					).toEqual({
+						job: { state: "failed", attempts: 3, reason: "attempts_exhausted" },
+						ledger: { kind: "spent", attempts: 3 },
+						failure: true,
+					});
+				}
+				expect(
+					{
+						summaries: icmTrackRequests(world, cTrack) - bPaidBefore.summaries,
+						admissions: icmAdmissionRequests(world) - bPaidBefore.admissions,
+					},
+					"three paid claims in six restarts, no admission: the budget never reset",
+				).toEqual({ summaries: 3, admissions: 0 });
+			} else {
+				// Off: every build holds the model leaf before a call, so its durable attempts stay 0 and nothing is spent.
+				world.systemOne.enterPhase("r13-builds", {});
+				for (const label of ["r13-off-1", "r13-off-2"]) {
+					await buildIcmHierarchy(
+						world,
+						bAgentDir,
+						icmHierarchySettings(cTrack),
+						() => bLeafJob()?.lastError?.reason === "admission_held",
+					);
+					expect(
+						{ state: bLeafJob()?.state, attempts: bLeafJob()?.attempts },
+						`${label}: the held leaf keeps no attempt`,
+					).toEqual({ state: "queued", attempts: 0 });
+				}
+				expect(icmTrackRequests(world, cTrack) - bPaidBefore.summaries, "off: no claim was paid").toBe(0);
+			}
+			trace.mark("root", "icm.r13-budget");
+
+			// O13c (System One on): an evaluator that does not answer (HTTP 503) is a transient failure, retried within the
+			// attempt budget after the scheduler's backoff with the kept reply (the summarizer is not paid again) and the
+			// evaluator asked again; it never ends the job as a policy refusal. Off has no evaluator (W holds the leaf).
+			if (world.systemOne.enabled) {
+				const eAgentDir = `${world.agentDir}-icm-outage`;
+				await seedIcmPastSession(world, eAgentDir);
+				const eStore = icmStore(eAgentDir);
+				const eOutage = createBarrier();
+				world.provider.enqueue(cTrack, text("o13c-leaf-summary", ICM_LEAF_SUMMARY), {
+					name: "o13c-parent-summary",
+					check: (request) => {
+						if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+							throw new Error("the O13c parent does not merge the leaf");
+					},
+					reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+				});
+				// The evaluator's first request carries the first two questions; every attempt at it answers 503.
+				world.systemOne.enterPhase(
+					"o13c-outage",
+					{
+						summary_supported: cAdmission.summary_supported,
+						owner_constraints_preserved: cAdmission.owner_constraints_preserved,
+					},
+					{ outage: true, onAdmit: () => eOutage.release() },
+				);
+				const ePaidBefore = { summaries: icmTrackRequests(world, cTrack), admissions: icmAdmissionRequests(world) };
+				const eOwner = await world.createRootSession("root", {
+					agentDir: eAgentDir,
+					settings: icmHierarchySettings(cTrack),
+				});
+				await withDeadline(trace, "O13c admission reached the outage", eOutage.promise);
+				await withDeadline(
+					trace,
+					"O13c leaf waits for its retry",
+					world.io.waitForMutation(() => icmJobAt(cLive, eStore, "leaf", 8)?.state === "retry_wait"),
+				);
+				const eWaiting = icmJobAt(cLive, eStore, "leaf", 8);
+				const eStatus = icmHierarchy(eOwner.session);
+				expect(
+					{
+						job: { state: eWaiting?.state, attempts: eWaiting?.attempts, reason: eWaiting?.lastError?.reason },
+						kept:
+							eWaiting?.pendingReply?.textDigest === createHash("sha256").update(ICM_LEAF_SUMMARY).digest("hex"),
+						unavailable: eStatus.admission?.judgments.unavailable,
+						outages: world.systemOne.intendedOutages.some((entry) => entry.startsWith("o13c-outage:")),
+					},
+					"an unanswered evaluator is a transient retry that keeps the paid reply",
+				).toEqual({
+					job: { state: "retry_wait", attempts: 1, reason: "admission_unavailable" },
+					kept: true,
+					unavailable: 1,
+					outages: true,
+				});
+				// The evaluator answers again from here; the retry is the scheduler's own backoff (10-12 s), no sleep.
+				world.systemOne.enterPhase("o13c-answering", cAdmission);
+				await withDeadline(
+					trace,
+					"O13c built after the retry",
+					world.io.waitForMutation(() => icmAcceptedAt(cLive, eStore, 1, 0) !== undefined),
+					60_000,
+				);
+				const eDone = icmHierarchy(eOwner.session);
+				expect(
+					{
+						leaf: ((job) => job && { state: job.state, attempts: job.attempts })(
+							icmJobAt(cLive, eStore, "leaf", 8),
+						),
+						paid: {
+							summaries: icmTrackRequests(world, cTrack) - ePaidBefore.summaries,
+							admissions: icmAdmissionRequests(world) - ePaidBefore.admissions,
+						},
+						judgments: eDone.admission?.judgments,
+						reused: eDone.admission?.reused,
+					},
+					"the retry judges the kept reply again without paying the summarizer, then the parent is built",
+				).toEqual({
+					leaf: { state: "ready", attempts: 2 },
+					paid: { summaries: 2, admissions: 3 },
+					judgments: { accepted: 2, rejected: 0, uncertain: 0, unavailable: 1 },
+					reused: 0,
+				});
+				expect(await world.disposeSessionInBody(eOwner.session), "the O13c owner disposes cleanly").toBeUndefined();
+				trace.mark("root", "icm.o13c-outage");
+			}
 		},
 	);
 }, 360_000);
@@ -13714,7 +15687,192 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 				accepted: mFirst.acceptedNodes,
 				proof: { recorded: mFirst.spentAttempts?.recorded, reserved: mFirst.spentAttempts?.reserved },
 			});
+			// N1c positive control: one more start of the certified idle store. Once its enumeration page from the cursor was
+			// answered, its reads are known: one probe of the session, and no verification page below the cursor.
+			const mCursor = icmStoredManifest(icmLiveStore(world), icmStore(mAgentDir))?.sessions[mSeed.sessionId]
+				?.coveredSpanCount;
+			if (mCursor === undefined) throw new Error("M2: the built session has no cursor");
+			const mControlLog = mThreads.messageLog.length;
+			const mEnumerated = mThreads.onResponse("m2-enumeration", "lineage", (_response, request) => {
+				const facts = request as { sessionId?: unknown; fromIndex?: unknown } | undefined;
+				return facts?.sessionId === mSeed.sessionId && facts.fromIndex === mCursor;
+			});
+			world.systemOne.enterPhase("m2-control", {});
+			const mControl = await world.createRootSession("root", {
+				agentDir: mAgentDir,
+				settings: icmHierarchySettings(mSummaryTrack),
+			});
+			await withDeadline(trace, "M2 control enumerated from the cursor", mEnumerated);
+			const mControlReads = mThreads.messageLog
+				.slice(mControlLog)
+				.filter(
+					(entry) =>
+						entry.direction === "inbound" &&
+						entry.type === "lineage" &&
+						entry.facts.sessionId === mSeed.sessionId,
+				);
+			expect(
+				{
+					probed: mControlReads.some((entry) => entry.facts.fromIndex === 0 && entry.facts.maxSpans === 1),
+					verificationPages: mControlReads.filter(
+						(entry) => entry.facts.fromIndex === 0 && entry.facts.maxSpans !== 1,
+					).length,
+				},
+				"a certified idle session is probed and never verified again below its cursor",
+			).toEqual({ probed: true, verificationPages: 0 });
+			expect(
+				await world.disposeSessionInBody(mControl.session),
+				"the M2 control root disposes cleanly",
+			).toBeUndefined();
 			trace.mark("root", "icm.restart");
+
+			// O9 and O10 (family 4, caller deadlines), on a root whose own coordinator runs. O9: the expansion's delivery-fence
+			// read of the manifest is held; the caller is settled at its own 1 s deadline with the bounded-read timeout, and the
+			// late read, released after that answer, changes nothing. O10: the recall worker's answer to a source read is held;
+			// the read times out, is counted, and the late answer is dropped. Both reads work again afterwards.
+			const dlRoot = await world.createRootSession("root", {
+				agentDir: mAgentDir,
+				settings: icmHierarchySettings(mSummaryTrack),
+			});
+			const dlStore = icmStore(mAgentDir);
+			let dlNotesTxn: string | undefined;
+			let dlNoteHit: string | undefined;
+			let dlFence: ReturnType<HarnessWorld["io"]["holdNext"]> | undefined;
+			let dlSource: ReturnType<typeof mThreads.holdNextResponse> | undefined;
+			let dlBefore: NonNullable<TranscriptHistoryStatus["hierarchy"]> | undefined;
+			let dlLateRead: Promise<unknown> | undefined;
+			world.provider.enqueue(
+				"root",
+				calls("dl-search", [
+					{ id: "dl-search-1", name: "memory", arguments: { action: "history_search", query: ICM_NOTES_QUERY } },
+				]),
+				icmAfterHistoryRead(
+					"dl-found",
+					"memory",
+					{ id: "dl-search-1", arguments: { action: "history_search", query: ICM_NOTES_QUERY } },
+					(result) => {
+						dlNotesTxn = icmSummaries(result.text).find((summary) => summary.quality === "exact_copy")?.handle;
+						dlNoteHit = icmHits(result.text).find((hit) => hit.line.includes("Note A1"))?.handle;
+						if (dlNotesTxn === undefined || dlNoteHit === undefined)
+							throw new Error(`O9: the notes summary or hit is missing: ${result.text.slice(0, 900)}`);
+						mThreads.interceptNext(
+							"lineage",
+							() => {
+								dlFence = world.io.holdNext({
+									name: "o9-fence-read",
+									kind: "readFile",
+									matches: (operation) =>
+										operation.path === dlStore.manifest && !world.io.existsSync(dlStore.lock),
+								});
+							},
+							(message) => {
+								const facts = message as { fromIndex?: unknown; maxSpans?: unknown };
+								return facts.fromIndex === 0 && facts.maxSpans === 8;
+							},
+						);
+						return icmCall("dl-expand-1", "memory", { action: "history_expand", ref: dlNotesTxn });
+					},
+				),
+				{
+					name: "o9-timed-out",
+					reply: (request) => {
+						const expanded = icmLatestResult(request, "memory");
+						if (
+							!expanded.isError ||
+							!expanded.text
+								.toLowerCase()
+								.includes(
+									"the summary store read operation timed out before its deadline; exact history recall is unaffected",
+								) ||
+							expanded.text.includes("Note A1")
+						)
+							throw new Error(
+								`O9: the held fence read did not settle the caller by its deadline: ${expanded.text.slice(0, 600)}`,
+							);
+						const fence = dlFence;
+						if (fence === undefined) throw new Error("O9: the fence read was never held");
+						// Released only after the caller's answer: the late read must adopt nothing.
+						dlBefore = icmHierarchy(dlRoot.session);
+						dlLateRead = world.io.waitForOperation(
+							(operation) => operation.kind === "read" && operation.path === dlStore.manifest,
+						);
+						fence.release();
+						dlSource = mThreads.holdNextResponse("o10-source-answer", "source");
+						return icmCall("dl-source-1", "memory", { action: "history_source", ref: dlNoteHit });
+					},
+				},
+				{
+					name: "o10-timed-out",
+					reply: (request) => {
+						const opened = icmLatestResult(request, "memory");
+						// Two production timers bound this read at the same instant (the tool's deadline and the request's own
+						// foreground timeout), so either typed timeout wording answers it; reported as a noticed item.
+						if (
+							!opened.isError ||
+							!/Transcript read request timed out after 1000 ms\.|The history operation timed out: its deadline passed before the read completed\./.test(
+								opened.text,
+							)
+						)
+							throw new Error(`O10: the withheld source read did not time out: ${opened.text.slice(0, 600)}`);
+						const held = dlSource;
+						if (held === undefined) throw new Error("O10: the source answer was never held");
+						held.release();
+						return icmCall("dl-expand-2", "memory", { action: "history_expand", ref: dlNotesTxn });
+					},
+				},
+				{
+					name: "o9-control",
+					reply: (request) => {
+						const expanded = icmLatestResult(request, "memory");
+						if (expanded.isError || !expanded.text.includes("Covered sources"))
+							throw new Error(`O9: the expansion does not work again: ${expanded.text.slice(0, 600)}`);
+						return icmCall("dl-source-2", "memory", { action: "history_source", ref: dlNoteHit });
+					},
+				},
+				{
+					name: "o10-control",
+					check: (request) => {
+						const opened = icmLatestResult(request, "memory");
+						if (opened.isError || !opened.text.includes("Note A1"))
+							throw new Error(`O10: the source does not open again: ${opened.text.slice(0, 600)}`);
+					},
+					reply: { content: [{ type: "text", text: "Both reads work again." }] },
+				},
+			);
+			world.systemOne.enterPhase("dl-reads", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			try {
+				await withDeadline(
+					trace,
+					"O9/O10 deadline turn",
+					dlRoot.session.prompt("Expand and open the staging notes."),
+				);
+			} finally {
+				dlFence?.release();
+				dlSource?.release();
+			}
+			if (dlLateRead === undefined || dlBefore === undefined)
+				throw new Error("O9: the late read was never released");
+			await withDeadline(trace, "O9 late read completed", dlLateRead);
+			const dlAfter = icmHierarchy(dlRoot.session);
+			const dlTransport = dlRoot.session.getTranscriptHistoryStatus().transport;
+			expect(
+				{
+					accepted: dlAfter.acceptedNodes,
+					internalCause: dlAfter.lastInternalError,
+					issues: dlAfter.recoveryIssues,
+					readTimeouts: (dlTransport?.readTimeouts?.count ?? 0) >= 1,
+					stopped: dlTransport?.stoppedAt,
+				},
+				"late completions adopt nothing: the hierarchy is unchanged and the transport is counted, not stopped",
+			).toEqual({
+				accepted: dlBefore.acceptedNodes,
+				internalCause: dlBefore.lastInternalError,
+				issues: [],
+				readTimeouts: true,
+				stopped: undefined,
+			});
+			expect(await world.disposeSessionInBody(dlRoot.session), "the deadline root disposes cleanly").toBeUndefined();
+			trace.mark("root", "icm.read-deadlines");
 
 			// M3: a branch switch in the past session makes the notes summary stale: its covered spans left the selected lineage,
 			// so expansion refuses it instead of serving text about another branch.
@@ -13767,7 +15925,13 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 					name: "m3-expand-refused",
 					check: (request) => {
 						const expanded = icmLatestResult(request, "memory");
-						if (!expanded.isError || !expanded.text.includes("stale_snapshot"))
+						// The specific refusal: the covered spans left the live lineage (a session_gone or inconsistent refusal is also
+						// stale_snapshot and would not establish this).
+						if (
+							!expanded.isError ||
+							!expanded.text.includes("stale_snapshot") ||
+							!expanded.text.includes("no longer the live history")
+						)
 							throw new Error(`a summary of a replaced branch was expanded: ${expanded.text.slice(0, 600)}`);
 					},
 					reply: { content: [{ type: "text", text: "That summary no longer matches this branch." }] },
@@ -13781,6 +15945,182 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			);
 			expect(await world.disposeSessionInBody(mBranch.session), "the branch owner disposes cleanly").toBeUndefined();
 			trace.mark("root", "icm.branch-stale");
+
+			// M3c (R6 at the confirm await, and forgetting): the owner forgets the past session through the session surface
+			// while a reader's expansion of its notes summary waits for its delivery fence (the fence's manifest read is held).
+			// The fence sees the node gone and refuses the read as changed in flight; a retry finds it gone. With System One on,
+			// the log leaf's summarizer reply is held across the forget (it ignores the abort): it is never published, and a
+			// restart does not rebuild the forgotten session.
+			const fAgentDir = `${world.agentDir}-icm-forget`;
+			const fSeed = await seedIcmPastSession(world, fAgentDir);
+			const fStore = icmStore(fAgentDir);
+			const fLive = icmLiveStore(world);
+			const fNotesAccepted = () => icmAcceptedAt(fLive, fStore, 0, 0) !== undefined;
+			const fReplyGate = createBarrier();
+			const fReplyReached = createBarrier();
+			const fReplyDone = createBarrier();
+			let fReplyCompletion: Promise<unknown> | undefined;
+			expect(world.provider.getPendingStepNames(mSummaryTrack), "the forget summary track is idle").toEqual([]);
+			if (world.systemOne.enabled) {
+				world.provider.enqueue(mSummaryTrack, {
+					name: "m3c-held-leaf",
+					gate: fReplyGate.promise,
+					ignoresAbort: true,
+					check: () => {
+						fReplyCompletion = world.isolatedCompletions.at(-1);
+						fReplyReached.release();
+					},
+					onTerminal: () => fReplyDone.release(),
+					reply: { content: [{ type: "text", text: ICM_LEAF_SUMMARY }] },
+				});
+			}
+			world.systemOne.enterPhase("m3c-build", {});
+			const fCoordinator = await world.createRootSession("root", {
+				agentDir: fAgentDir,
+				settings: icmHierarchySettings(mSummaryTrack),
+			});
+			const fFence = createBarrier();
+			let fHold: ReturnType<HarnessWorld["io"]["holdNext"]> | undefined;
+			try {
+				await withDeadline(trace, "M3c notes accepted", world.io.waitForMutation(fNotesAccepted));
+				if (world.systemOne.enabled)
+					await withDeadline(trace, "M3c log leaf at the summarizer", fReplyReached.promise);
+				const fNotes = icmAcceptedAt(fLive, fStore, 0, 0);
+				if (fNotes === undefined) throw new Error("M3c: the notes are not accepted");
+				const fNotesTxn = `txn:${fNotes.slice(0, 16)}`;
+				const fReader = await world.createRootSession("root", {
+					agentDir: fAgentDir,
+					settings: { memorySystem: undefined },
+				});
+				mThreads.interceptNext(
+					"lineage",
+					() => {
+						fHold = world.io.holdNext({
+							name: "m3c-fence-read",
+							kind: "readFile",
+							matches: (operation) => operation.path === fStore.manifest && !world.io.existsSync(fStore.lock),
+						});
+						fFence.release();
+					},
+					(message) => {
+						const facts = message as { sessionId?: unknown; fromIndex?: unknown; maxSpans?: unknown };
+						return facts.sessionId === fSeed.sessionId && facts.fromIndex === 0 && facts.maxSpans === 8;
+					},
+				);
+				world.provider.enqueue(
+					"root",
+					calls("m3c-expand", [
+						{ id: "m3c-expand-1", name: "memory", arguments: { action: "history_expand", ref: fNotesTxn } },
+					]),
+					{
+						name: "m3c-refused",
+						check: (request) => {
+							const expanded = icmLatestResult(request, "memory");
+							if (
+								!expanded.isError ||
+								!expanded.text.includes("stale_snapshot") ||
+								!expanded.text.includes("changed while the summary read was in flight") ||
+								expanded.text.includes("Note A1")
+							)
+								throw new Error(
+									`a summary forgotten during its read was delivered: ${expanded.text.slice(0, 600)}`,
+								);
+						},
+						reply: icmCall("m3c-expand-2", "memory", { action: "history_expand", ref: fNotesTxn }),
+					},
+					{
+						name: "m3c-gone",
+						check: (request) => {
+							const expanded = icmLatestResult(request, "memory");
+							if (!expanded.isError || !expanded.text.includes("not_found"))
+								throw new Error(`the forgotten summary is still expandable: ${expanded.text.slice(0, 600)}`);
+						},
+						reply: { content: [{ type: "text", text: "That session was forgotten." }] },
+					},
+				);
+				world.systemOne.enterPhase("m3c-read", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+				const fTurn = trace.track(fReader.session.prompt("Expand the staging notes summary."));
+				await withDeadline(trace, "M3c fence read armed", fFence.promise);
+				const hold = fHold;
+				if (hold === undefined) throw new Error("M3c: the fence hold was not armed");
+				await withDeadline(trace, "M3c fence read reached", hold.reached);
+				const forgotten = await withDeadline(
+					trace,
+					"M3c forget",
+					fCoordinator.session.forgetHistorySession(fSeed.sessionId),
+				);
+				expect(
+					forgotten.ok,
+					`the session is forgotten while the read waits at its fence: ${forgotten.message}`,
+				).toBe(true);
+				hold.release();
+				await withDeadline(trace, "M3c reader turn", fTurn);
+				expect(
+					await world.disposeSessionInBody(fReader.session),
+					"the M3c reader disposes cleanly",
+				).toBeUndefined();
+				if (world.systemOne.enabled) {
+					// The held reply arrives after the forget: its claim was aborted, and nothing of it is published.
+					fReplyGate.release();
+					await withDeadline(trace, "M3c held reply terminal", fReplyDone.promise);
+					if (fReplyCompletion !== undefined)
+						await withDeadline(trace, "M3c held reply settled", fReplyCompletion);
+				}
+				const fManifest = icmStoredManifest(fLive, fStore);
+				expect(
+					{
+						accepted: Object.keys(fManifest?.acceptedNodes ?? {}).length,
+						cursor: fManifest?.sessions[fSeed.sessionId],
+						liveJobs: icmStoredJobs(fLive, fStore).filter(
+							(job) => !["ready", "failed", "cancelled", "stale"].includes(job.state),
+						).length,
+					},
+					"the forgotten session keeps no summary, cursor or live job, and the late reply published nothing",
+				).toEqual({ accepted: 0, cursor: undefined, liveJobs: 0 });
+			} finally {
+				fReplyGate.release();
+				fHold?.release();
+			}
+			expect(
+				await world.disposeSessionInBody(fCoordinator.session),
+				"the M3c coordinator disposes cleanly",
+			).toBeUndefined();
+			await world.provider.waitForProducers();
+			const fPaidBefore = {
+				summaries: icmTrackRequests(world, mSummaryTrack),
+				admissions: icmAdmissionRequests(world),
+			};
+			const fRestartSave = icmObserveNextJobsSave(world, fStore, "m3c-restart-save");
+			// The restarted coordinator's discovery reads the session listing: once its answer was delivered, the forgotten
+			// session had its chance to be rebuilt.
+			const fListed = mThreads.onResponse("m3c-restart-listing", "sessions", () => true);
+			world.systemOne.enterPhase("m3c-restart", {});
+			const fRestart = await world.createRootSession("root", {
+				agentDir: fAgentDir,
+				settings: icmHierarchySettings(mSummaryTrack),
+			});
+			await withDeadline(trace, "M3c restart listed its sessions", fListed);
+			await withDeadline(
+				trace,
+				"M3c restart saved",
+				world.io.waitForMutation(() => fRestartSave() !== undefined),
+			);
+			const fRestarted = icmHierarchy(fRestart.session);
+			expect(await world.disposeSessionInBody(fRestart.session), "the M3c restart disposes cleanly").toBeUndefined();
+			expect(
+				{
+					accepted: fRestarted.acceptedNodes,
+					jobs: icmStoredJobs(fLive, fStore).filter(
+						(job) => !["ready", "failed", "cancelled", "stale"].includes(job.state),
+					).length,
+					paid: {
+						summaries: icmTrackRequests(world, mSummaryTrack) - fPaidBefore.summaries,
+						admissions: icmAdmissionRequests(world) - fPaidBefore.admissions,
+					},
+				},
+				"a restart never rebuilds a forgotten session",
+			).toEqual({ accepted: 0, jobs: 0, paid: { summaries: 0, admissions: 0 } });
+			trace.mark("root", "icm.forget-fence");
 
 			// M4: retention revocation and expiry, with a neighbour that stays. Two past sessions carry the same notes; one is aged
 			// thirty days. Model summaries are kept out (no admission egress), so only the two exact copies are built.
@@ -13867,6 +16207,8 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 				agentDir: rAgentDir,
 				settings: { memorySystem: undefined, contextPolicy: { memory: { history: { retentionDays: 1 } } } },
 			});
+			const m4LogStart = mThreads.messageLog.length;
+			const m4AvailabilityBefore = rAfter.session.getTranscriptHistoryStatus().availability;
 			world.provider.enqueue(
 				"root",
 				dynamicCalls("m4-expand", () => [
@@ -13894,9 +16236,18 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 						const expansions = results.filter((result) => result !== search);
 						const aged = expansions.find((result) => result.isError);
 						const fresh = expansions.find((result) => !result.isError);
-						const batch = JSON.stringify(
-							results.map((result) => ({ isError: result.isError, text: result.text.slice(0, 400) })),
-						);
+						// M4 witness (round-3 incident): the batch, plus this root's worker messages in the order the parent saw
+						// them (requests when posted, answers when received) and the availability before the batch.
+						const batch = JSON.stringify({
+							results: results.map((result) => ({ isError: result.isError, text: result.text.slice(0, 400) })),
+							availabilityBefore: m4AvailabilityBefore,
+							messages: mThreads.messageLog
+								.slice(m4LogStart)
+								.map(
+									(entry) =>
+										`${entry.seq}:${entry.worker}:${entry.direction}:${entry.type}:${entry.facts.status ?? ""}`,
+								),
+						});
 						if (aged?.isError !== true || !/not_found|expired/.test(aged.text))
 							throw new Error(`the revoked summary was still expanded: ${batch}`);
 						if (fresh?.isError !== false || !fresh.text.includes("Covered sources"))
@@ -13911,6 +16262,24 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			);
 			world.systemOne.enterPhase("m4-expand", ICM_INTAKE_JUDGMENTS_UNGUARDED);
 			await withDeadline(trace, "M4 expansion turn", rAfter.session.prompt("Expand both staging notes summaries."));
+			// The current admit rule's observable: every read of this root's index (lineage, verify, query) was posted after
+			// the parent received its worker's ready answer. A pass does not establish the round-3 cause (candidate A).
+			const m4Messages = mThreads.messageLog.slice(m4LogStart);
+			const m4Ready = m4Messages.findIndex((entry) => entry.direction === "outbound" && entry.type === "ready");
+			const m4Reads = m4Messages
+				.map((entry, index) => ({ entry, index }))
+				.filter(
+					({ entry }) =>
+						entry.direction === "inbound" && ["lineage", "verify", "query", "source"].includes(entry.type),
+				);
+			expect(
+				{
+					ready: m4Ready >= 0,
+					readsBeforeReady: m4Reads.filter(({ index }) => index < m4Ready).length,
+					availabilityAfter: rAfter.session.getTranscriptHistoryStatus().availability,
+				},
+				`the batch's reads waited for the ready index: ${JSON.stringify(m4Messages.map((entry) => `${entry.seq}:${entry.direction}:${entry.type}`))}`,
+			).toEqual({ ready: true, readsBeforeReady: 0, availabilityAfter: "active" });
 			expect(
 				await world.disposeSessionInBody(rAfter.session),
 				"the retention owner disposes cleanly",
@@ -14007,6 +16376,531 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			).toBeUndefined();
 			expect(mThreads.liveCount, "no history worker outlives the ICM parts").toBe(0);
 			trace.mark("root", "icm.proof-hold");
+
+			// M9 (family 3): lineage changes made by the past session's own owner, seen by its running coordinator.
+			// - FR-5 control: a pure append is vouched by the probe's stamp; nothing below the cursor is verified or revoked.
+			// - FR-10: a branch switch to the decision kills the log leaf (and, with System One on, the parent over it) while
+			//   the notes stay; switching back republishes the parked leaf and parent with no summarizer or evaluator call.
+			// - FR-5 (N1d): a second switch is undone while the verification page of the first is in flight; that pass judges
+			//   nothing ("the lineage moved during verification") and the re-read on the final lineage revokes nothing live.
+			const vAgentDir = `${world.agentDir}-icm-lineage`;
+			const vSeed = await seedIcmPastSession(world, vAgentDir);
+			const vStore = icmStore(vAgentDir);
+			const vLive = icmLiveStore(world);
+			const vAccepted = () => Object.keys(icmStoredManifest(vLive, vStore)?.acceptedNodes ?? {}).length;
+			const vBuilt = world.systemOne.enabled ? 3 : 1;
+			expect(world.provider.getPendingStepNames(mSummaryTrack), "the lineage summary track is idle").toEqual([]);
+			if (world.systemOne.enabled) {
+				world.provider.enqueue(mSummaryTrack, text("m9-leaf-summary", ICM_LEAF_SUMMARY), {
+					name: "m9-parent-summary",
+					check: (request) => {
+						if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+							throw new Error("the M9 parent does not merge the leaf");
+					},
+					reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+				});
+			}
+			world.systemOne.enterPhase(
+				"m9-admission",
+				world.systemOne.enabled
+					? {
+							summary_supported: { kind: "noul", probability: 0.97 },
+							owner_constraints_preserved: { kind: "noul", probability: 0.97 },
+							status_reported_honestly: { kind: "noul", probability: 0.97 },
+						}
+					: {},
+			);
+			const vOwner = await world.createRootSession("root", {
+				agentDir: vAgentDir,
+				sessionManager: world.openSessionManager(vSeed.file, vAgentDir),
+				settings: icmHierarchySettings(mSummaryTrack),
+			});
+			await withDeadline(
+				trace,
+				"M9 built",
+				world.io.waitForMutation(() => vAccepted() === vBuilt),
+			);
+			const vEntries = vOwner.sessionManager.getEntries();
+			const vEntry = (role: string, marker: string): string => {
+				const id = vEntries.find(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === role &&
+						JSON.stringify(entry.message).includes(marker),
+				)?.id;
+				if (id === undefined) throw new Error(`M9: no ${role} entry carries ${marker}`);
+				return id;
+			};
+			const vDecision = vEntry("user", "Decision ZEPHYR-7");
+			const vNoteA2 = vEntry("user", "Note A2");
+			const vStatus = () => icmHierarchy(vOwner.session);
+			const vReads = (from: number) =>
+				mThreads.messageLog
+					.slice(from)
+					.filter(
+						(entry) =>
+							entry.direction === "inbound" &&
+							entry.type === "lineage" &&
+							entry.facts.sessionId === vSeed.sessionId,
+					);
+			const vProbeAnswered = (name: string) =>
+				mThreads.onResponse(name, "lineage", (_response, request) => {
+					const facts = request as { sessionId?: unknown; fromIndex?: unknown; maxSpans?: unknown } | undefined;
+					return facts?.sessionId === vSeed.sessionId && facts.fromIndex === 0 && facts.maxSpans === 1;
+				});
+			// FR-5 control: a pure append.
+			const vAppendFrom = mThreads.messageLog.length;
+			const vBeforeAppend = vStatus();
+			const vAppendProbed = vProbeAnswered("m9-append-probe");
+			vOwner.sessionManager.appendCustomEntry("m9-append", { step: "append" });
+			await withDeadline(trace, "M9 append probed", vAppendProbed);
+			expect(
+				{
+					verified: vReads(vAppendFrom).filter(
+						(entry) => entry.facts.fromIndex === 0 && entry.facts.maxSpans !== 1,
+					).length,
+					revocation: vStatus().lastRevocation,
+					accepted: vAccepted(),
+				},
+				"a pure append is vouched by its stamp: nothing below the cursor is verified, revoked or rebuilt",
+			).toEqual({ verified: 0, revocation: vBeforeAppend.lastRevocation, accepted: vBuilt });
+			// FR-10: away to the decision and back.
+			const vPaidBefore = {
+				summaries: icmTrackRequests(world, mSummaryTrack),
+				admissions: icmAdmissionRequests(world),
+			};
+			const vBack = vOwner.sessionManager.getLeafId();
+			if (vBack === null) throw new Error("M9: the owner has no leaf");
+			const vAway = await withDeadline(trace, "M9 branch away", vOwner.session.navigateTree(vDecision));
+			expect(vAway.cancelled, "the switch to the decision applies").toBe(false);
+			vOwner.sessionManager.appendCustomEntry("m9-away", { step: "away" });
+			const vLeafJob = () => icmJobAt(vLive, vStore, "leaf", 8);
+			await withDeadline(
+				trace,
+				"M9 log leaf ended",
+				world.io.waitForMutation(() =>
+					world.systemOne.enabled ? vAccepted() === 1 : vLeafJob()?.state === "stale",
+				),
+			);
+			const vAwayStatus = vStatus();
+			expect(
+				{
+					notes: icmAcceptedAt(vLive, vStore, 0, 0) !== undefined,
+					revoked: world.systemOne.enabled ? vAwayStatus.lastRevocation?.revokedNodes : 0,
+				},
+				"the switch kills the log leaf and the parent over it, never the notes",
+			).toEqual({ notes: true, revoked: world.systemOne.enabled ? 2 : 0 });
+			const vReturn = await withDeadline(trace, "M9 branch back", vOwner.session.navigateTree(vBack));
+			expect(vReturn.cancelled, "the switch back applies").toBe(false);
+			vOwner.sessionManager.appendCustomEntry("m9-back", { step: "back" });
+			await withDeadline(
+				trace,
+				"M9 restored",
+				world.io.waitForMutation(() =>
+					world.systemOne.enabled
+						? vAccepted() === 3
+						: vLeafJob()?.state === "queued" && vLeafJob()?.lastError?.reason === "admission_held",
+				),
+			);
+			expect(
+				{
+					accepted: vAccepted(),
+					paid: {
+						summaries: icmTrackRequests(world, mSummaryTrack) - vPaidBefore.summaries,
+						admissions: icmAdmissionRequests(world) - vPaidBefore.admissions,
+					},
+				},
+				"switching back reuses the parked summaries: nothing is summarized or judged again",
+			).toEqual({ accepted: vBuilt, paid: { summaries: 0, admissions: 0 } });
+			// FR-5 (N1d): a switch that kills the notes, undone while its verification page is in flight.
+			const vMovedFrom = mThreads.messageLog.length;
+			const vBeforeMove = vStatus();
+			const vFinal = vOwner.sessionManager.getLeafId();
+			if (vFinal === null) throw new Error("M9: the owner has no leaf after the switch back");
+			const vPageMatches = (message: unknown): boolean => {
+				const facts = message as { sessionId?: unknown; fromIndex?: unknown; maxSpans?: unknown } | undefined;
+				return facts?.sessionId === vSeed.sessionId && facts.fromIndex === 0 && facts.maxSpans !== 1;
+			};
+			const vMoveArmed = createBarrier();
+			mThreads.interceptNext(
+				"lineage",
+				() => {
+					// The owner switches back while this verification page is in flight: the page answers a later lineage.
+					vOwner.sessionManager.branch(vFinal);
+					vOwner.sessionManager.appendCustomEntry("m9-undo", { step: "undo" });
+					vMoveArmed.release();
+				},
+				vPageMatches,
+			);
+			const vMovedDelivered = mThreads.onResponse("m9-moved-page", "lineage", (_response, request) =>
+				vPageMatches(request),
+			);
+			vOwner.sessionManager.branch(vNoteA2);
+			vOwner.sessionManager.appendCustomEntry("m9-kill-notes", { step: "kill" });
+			await withDeadline(trace, "M9 page in flight when the switch was undone", vMoveArmed.promise);
+			await withDeadline(trace, "M9 moved page delivered", vMovedDelivered);
+			const vMoved = vStatus();
+			expect(
+				{
+					cause: vMoved.lastInternalError?.cause.startsWith(
+						"verifying the lineage after a change: the lineage moved during verification",
+					),
+					revocation: vMoved.lastRevocation,
+					accepted: vAccepted(),
+				},
+				"a verification pass that spans two lineages judges nothing",
+			).toEqual({ cause: true, revocation: vBeforeMove.lastRevocation, accepted: vBuilt });
+			// The due mark forces one more verification on the final lineage, which keeps every live summary.
+			const vRecheck = mThreads.onResponse("m9-recheck-page", "lineage", (_response, request) =>
+				vPageMatches(request),
+			);
+			await withDeadline(trace, "M9 final lineage verified", vRecheck);
+			expect(
+				{
+					reread: vReads(vMovedFrom).filter((entry) => vPageMatches(entry.facts)).length >= 2,
+					revocation: vStatus().lastRevocation,
+					accepted: vAccepted(),
+					notes: icmAcceptedAt(vLive, vStore, 0, 0) !== undefined,
+				},
+				"the forced re-read on the final lineage revokes nothing that is live",
+			).toEqual({ reread: true, revocation: vBeforeMove.lastRevocation, accepted: vBuilt, notes: true });
+			expect(await world.disposeSessionInBody(vOwner.session), "the M9 owner disposes cleanly").toBeUndefined();
+			trace.mark("root", "icm.lineage-freshness");
+
+			// M8 (N1c, with the R14 settlement it composes): no dead source is vouched by an uncertified cursor, across a
+			// restart. With the tail sealed, the log leaf X (a model leaf, held at its summarizer: a hold that blocks no worker
+			// read) is in flight while the tail leaf Y is accepted. Released, X reads its publication dependency, and the
+			// owner's branch switch (killing Y) is applied by the index just before that read answers. X publishes; the change
+			// handler's first probe is held, and the store is captured there: X's node and cursor are durable, its job still
+			// running. The process continues and heals in place; the captured state is then restored and restarted. System One
+			// off has no model leaf to hold outside the worker port (exact copies have no other boundary between their build
+			// read and their publication): stated limit.
+			if (world.systemOne.enabled) {
+				const nAgentDir = `${world.agentDir}-icm-n1c`;
+				const nSeed = await seedIcmPastSession(world, nAgentDir);
+				await sealIcmTail(world, nAgentDir, nSeed);
+				const nStore = icmStore(nAgentDir);
+				const nLive = icmLiveStore(world);
+				const nGate = createBarrier();
+				const nReached = createBarrier();
+				world.provider.enqueue(
+					mSummaryTrack,
+					{
+						name: "m8-x-leaf",
+						gate: nGate.promise,
+						check: () => nReached.release(),
+						reply: { content: [{ type: "text", text: ICM_LEAF_SUMMARY }] },
+					},
+					{
+						name: "m8-parent",
+						check: (request) => {
+							if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+								throw new Error("the M8 parent does not merge X");
+						},
+						reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+					},
+				);
+				world.systemOne.enterPhase("m8-admission", {
+					summary_supported: { kind: "noul", probability: 0.97 },
+					owner_constraints_preserved: { kind: "noul", probability: 0.97 },
+					status_reported_honestly: { kind: "noul", probability: 0.97 },
+				});
+				const nOwner = await world.createRootSession("root", {
+					agentDir: nAgentDir,
+					sessionManager: world.openSessionManager(nSeed.file, nAgentDir),
+					settings: icmHierarchySettings(mSummaryTrack),
+				});
+				const nY = () => icmAcceptedAt(nLive, nStore, 0, 16);
+				let nCapture: VirtualTreeCapture | undefined;
+				let nProbe: ReturnType<typeof mThreads.holdNext> | undefined;
+				const nProbeArmed = createBarrier();
+				try {
+					await withDeadline(trace, "M8 X at the summarizer", nReached.promise);
+					await withDeadline(
+						trace,
+						"M8 Y accepted",
+						world.io.waitForMutation(() => nY() !== undefined),
+					).catch((error: unknown) => {
+						throw new Error(
+							`${error instanceof Error ? error.message : String(error)}; jobs: ${JSON.stringify(
+								icmStoredJobs(nLive, nStore).map((job) => [
+									job.kind,
+									job.spanRange,
+									job.state,
+									job.lastError?.reason,
+								]),
+							)}; hierarchy: ${JSON.stringify(icmHierarchy(nOwner.session)).slice(0, 1500)}`,
+						);
+					});
+					const nYNode = nY();
+					const yText = JSON.parse(world.io.peekFile(resolve(nStore.root, "nodes", `${nYNode}.json`)) ?? "{}") as {
+						text?: string;
+						quality?: string;
+					};
+					// TAIL-SEAL precondition: the sealed tail renders within the exact-copy target, so it is one exact copy.
+					expect(
+						{
+							quality: yText.quality,
+							fits: Buffer.byteLength(yText.text ?? "") <= TRANSCRIPT_SUMMARY_TARGET_BYTES,
+						},
+						"the sealed tail is an exact copy within the target",
+					).toEqual({ quality: "exact_copy", fits: true });
+					const nEntries = nOwner.sessionManager.getEntries();
+					const nCall = nEntries.find(
+						(entry) =>
+							entry.type === "message" &&
+							entry.message.role === "assistant" &&
+							JSON.stringify(entry.message).includes(ICM_TAIL_COMMAND),
+					)?.id;
+					if (nCall === undefined) throw new Error("M8: the tail has no shell call entry");
+					// X's publication dependency read (its context and covered spans, 6..16): the owner switches the branch at the
+					// shell call (killing Y) as that read reaches the index; the index applies the ingest before answering it.
+					mThreads.interceptNext(
+						"lineage",
+						() => {
+							nOwner.sessionManager.branch(nCall);
+							nOwner.sessionManager.appendCustomEntry("m8-switch", { step: "switch" });
+							// The change handler's first read after the publication is its probe: held there for the capture.
+							nProbe = mThreads.holdNext("m8-handler-probe", "lineage", (message) => {
+								const facts = message as { sessionId?: unknown; fromIndex?: unknown; maxSpans?: unknown };
+								return facts.sessionId === nSeed.sessionId && facts.fromIndex === 0 && facts.maxSpans === 1;
+							});
+							nProbeArmed.release();
+						},
+						(message) => {
+							const facts = message as { sessionId?: unknown; fromIndex?: unknown; maxSpans?: unknown };
+							return facts.sessionId === nSeed.sessionId && facts.fromIndex === 6 && facts.maxSpans === 10;
+						},
+					);
+					nGate.release();
+					await withDeadline(trace, "M8 dependency read intercepted", nProbeArmed.promise);
+					const probe = nProbe;
+					if (probe === undefined) throw new Error("M8: the probe hold was not armed");
+					await withDeadline(trace, "M8 handler probe reached", probe.reached);
+					nCapture = world.io.captureTree(nStore.root);
+					probe.release();
+					// The process heals in place: its verification revokes Y and certifies the cursor; the parent is built.
+					await withDeadline(
+						trace,
+						"M8 in-process heal",
+						world.io.waitForMutation(() => {
+							const manifest = icmStoredManifest(nLive, nStore);
+							return (
+								nY() === undefined &&
+								icmAcceptedAt(nLive, nStore, 1, 0) !== undefined &&
+								(manifest?.sessions[nSeed.sessionId]?.lineageDigest ?? "") !== ""
+							);
+						}),
+					);
+				} finally {
+					nGate.release();
+					nProbe?.release();
+				}
+				expect(await world.disposeSessionInBody(nOwner.session), "the M8 owner disposes cleanly").toBeUndefined();
+				await world.provider.waitForProducers();
+				const capture = nCapture;
+				if (capture === undefined) throw new Error("M8: no crash state was captured");
+				const nCaptured = icmCapturedStore(capture);
+				const nX = icmAcceptedAt(nCaptured, nStore, 0, 8);
+				const nXJob = icmJobAt(nCaptured, nStore, "leaf", 8);
+				expect(
+					{
+						x: nX !== undefined,
+						xJob: nXJob?.state,
+						y: icmAcceptedAt(nCaptured, nStore, 0, 16) !== undefined,
+						cursor: icmStoredManifest(nCaptured, nStore)?.sessions[nSeed.sessionId],
+						lock: capture.directories.includes(nStore.lock),
+					},
+					"the crash state: X and an uncertified cursor are durable, X's job still running, dead Y still accepted",
+				).toEqual({
+					x: true,
+					xJob: "running",
+					y: true,
+					// The cursor passes X and the already accepted (now dead) Y, with no verified digest.
+					cursor: { lineageDigest: "", coveredSpanCount: 24, nextOrdinal: 3 },
+					lock: false,
+				});
+				world.io.restoreTree(capture);
+				const nPaidBefore = {
+					summaries: icmTrackRequests(world, mSummaryTrack),
+					admissions: icmAdmissionRequests(world),
+				};
+				const nLogStart = mThreads.messageLog.length;
+				const nFirstSave = icmObserveNextJobsSave(world, nStore, "m8-restart-save");
+				world.systemOne.enterPhase("m8-restart", {});
+				const nRestart = await world.createRootSession("root", { agentDir: nAgentDir, settings: exactOnly() });
+				await withDeadline(
+					trace,
+					"M8 restart verified the cursor",
+					world.io.waitForMutation(
+						() =>
+							nY() === undefined &&
+							(icmStoredManifest(nLive, nStore)?.sessions[nSeed.sessionId]?.lineageDigest ?? "") !== "",
+					),
+				);
+				const nRestarted = icmHierarchy(nRestart.session);
+				const nSettled = nFirstSave()?.jobs.find((job) => job.id === nXJob?.id);
+				expect(
+					{
+						revocation: {
+							reason: nRestarted.lastRevocation?.reason,
+							revoked: nRestarted.lastRevocation?.revokedNodes,
+						},
+						verified: mThreads.messageLog
+							.slice(nLogStart)
+							.some(
+								(entry) =>
+									entry.direction === "inbound" &&
+									entry.type === "lineage" &&
+									entry.facts.sessionId === nSeed.sessionId &&
+									entry.facts.fromIndex === 0 &&
+									entry.facts.maxSpans !== 1,
+							),
+						x: { state: nSettled?.state, nodeId: nSettled?.nodeId },
+						reconciliationHeld: nRestarted.admission?.heldByKind?.reconciliation ?? 0,
+						paid: {
+							summaries: icmTrackRequests(world, mSummaryTrack) - nPaidBefore.summaries,
+							admissions: icmAdmissionRequests(world) - nPaidBefore.admissions,
+						},
+					},
+					"the restart verifies below the uncertified cursor, revokes dead Y, and settles X from its node with no paid work",
+				).toEqual({
+					revocation: { reason: "invalidated", revoked: 1 },
+					verified: true,
+					x: { state: "ready", nodeId: nX },
+					reconciliationHeld: 0,
+					paid: { summaries: 0, admissions: 0 },
+				});
+				expect(
+					await world.disposeSessionInBody(nRestart.session),
+					"the M8 restart disposes cleanly",
+				).toBeUndefined();
+				trace.mark("root", "icm.n1c-restart");
+			}
+
+			// M6 (R15/F10 with the N1e guard): a recovered leaf whose session the index cannot read stays held for
+			// reconciliation with the read's real cause; unreadable is never "gone". A store with the model leaf persisted
+			// queued (admission egress off) restarts under an owner that keeps the session file and can still read it, while the
+			// index cannot (an EACCES on the worker's own opens, as a sharing violation would be). Nothing is revoked, released,
+			// paid or dropped. Readability restored and one owner entry later, enumeration adopts the leaf and it is held again
+			// for its real block (model work), its budget adopted, not granted.
+			const uAgentDir = `${world.agentDir}-icm-unreadable`;
+			const uSeed = await seedIcmPastSession(world, uAgentDir);
+			const uStore = icmStore(uAgentDir);
+			const uLive = icmLiveStore(world);
+			world.systemOne.enterPhase("m6-build", {});
+			const uBuilt = await buildIcmHierarchy(
+				world,
+				uAgentDir,
+				exactOnly(),
+				(hierarchy) => hierarchy.acceptedNodes === 1 && (hierarchy.admission?.heldJobs ?? 0) >= 1,
+			);
+			const uLeaf = () => icmJobAt(uLive, uStore, "leaf", 8);
+			expect(
+				{ state: uLeaf()?.state, reason: uLeaf()?.lastError?.reason },
+				"the model leaf is persisted queued, held for model work",
+			).toEqual({ state: "queued", reason: "admission_held" });
+			const uLedgerBefore = world.io.peekFile(uStore.ledger);
+			const uAnchorsBefore = world.io.peekFile(resolve(uStore.root, "retention-anchors.json"));
+			const uDenied = world.io.denyUntilCleared({
+				name: "m6-index-unreadable",
+				kind: "open",
+				code: "EACCES",
+				scope: "worker",
+				matches: (operation) => operation.path === uSeed.file,
+			});
+			const uProbeMatches = (_response: unknown, request: unknown): boolean => {
+				const facts = request as { sessionId?: unknown; fromIndex?: unknown; maxSpans?: unknown } | undefined;
+				return facts?.sessionId === uSeed.sessionId && facts.fromIndex === 0 && facts.maxSpans === 1;
+			};
+			const uHeldProbe = mThreads.onResponse("m6-held-probe", "lineage", uProbeMatches);
+			const uPaidBefore = {
+				summaries: icmTrackRequests(world, mSummaryTrack),
+				admissions: icmAdmissionRequests(world),
+			};
+			world.systemOne.enterPhase("m6-restart", {});
+			const uOwner = await world.createRootSession("root", {
+				agentDir: uAgentDir,
+				sessionManager: world.openSessionManager(uSeed.file, uAgentDir),
+				settings: exactOnly(),
+			});
+			try {
+				await withDeadline(trace, "M6 held-session probe answered", uHeldProbe);
+				const uHeld = icmHierarchy(uOwner.session);
+				expect(
+					{
+						denied: uDenied.hits > 0,
+						heldJobs: uHeld.admission?.heldJobs,
+						reconciliation: uHeld.admission?.heldByKind?.reconciliation,
+						heldKind: uHeld.admission?.heldKind,
+						cause: uHeld.lastInternalError?.cause,
+						revocation: uHeld.lastRevocation,
+						accepted: uHeld.acceptedNodes,
+						stale: uHeld.failures.filter((failure) => failure.reason === "stale").length,
+						recorded: uHeld.spentAttempts?.recorded,
+						paid: {
+							summaries: icmTrackRequests(world, mSummaryTrack) - uPaidBefore.summaries,
+							admissions: icmAdmissionRequests(world) - uPaidBefore.admissions,
+						},
+					},
+					"an unreadable session's recovered leaf stays held with the read's real cause; nothing is revoked or paid",
+				).toEqual({
+					denied: true,
+					heldJobs: 1,
+					reconciliation: 1,
+					heldKind: "reconciliation",
+					cause: expect.stringContaining("read_error:EACCES"),
+					revocation: undefined,
+					accepted: uBuilt.acceptedNodes,
+					stale: 0,
+					recorded: uBuilt.spentAttempts?.recorded,
+					paid: { summaries: 0, admissions: 0 },
+				});
+				// N1e guard: the unreadable session is absent from the listing, and no record of it is dropped.
+				expect(
+					{
+						ledger: world.io.peekFile(uStore.ledger) === uLedgerBefore,
+						anchors: world.io.peekFile(resolve(uStore.root, "retention-anchors.json")) === uAnchorsBefore,
+						failing: (uOwner.session.getTranscriptHistoryStatus().coverage?.activeFailures ?? 0) > 0,
+					},
+					"records of an unreadable session survive while the index reports it failing",
+				).toEqual({ ledger: true, anchors: true, failing: true });
+				// Readability restored: the owner's next persisted entry makes the index read the session again.
+				uDenied.clear();
+				const uJobsBefore = world.io.peekFile(uStore.jobs);
+				uOwner.sessionManager.appendCustomEntry("m6-restore", { step: "restore" });
+				await withDeadline(
+					trace,
+					"M6 leaf adopted and held again for model work",
+					world.io.waitForMutation(
+						() =>
+							world.io.peekFile(uStore.jobs) !== uJobsBefore &&
+							uLeaf()?.state === "queued" &&
+							uLeaf()?.lastError?.reason === "admission_held",
+					),
+				);
+				const uRestored = icmHierarchy(uOwner.session);
+				expect(
+					{
+						reconciliation: uRestored.admission?.heldByKind?.reconciliation ?? 0,
+						modelWork: uRestored.admission?.heldByKind?.model_work,
+						recorded: uRestored.spentAttempts?.recorded,
+						attempts: uLeaf()?.attempts,
+						failing: uOwner.session.getTranscriptHistoryStatus().coverage?.activeFailures,
+					},
+					"once readable, enumeration adopts the leaf's budget and it is held again for its real block",
+				).toEqual({
+					reconciliation: 0,
+					modelWork: 1,
+					recorded: uBuilt.spentAttempts?.recorded,
+					attempts: 0,
+					failing: 0,
+				});
+			} finally {
+				uDenied.clear();
+			}
+			expect(await world.disposeSessionInBody(uOwner.session), "the M6 owner disposes cleanly").toBeUndefined();
+			trace.mark("root", "icm.unreadable-session");
 		},
 	);
 }, 360_000);

@@ -10,6 +10,7 @@ import type { DatabaseSync as NativeDatabaseSync } from "node:sqlite";
 import { PassThrough, Writable } from "node:stream";
 import tls from "node:tls";
 import { fileURLToPath } from "node:url";
+import { getSystemErrorMap } from "node:util";
 import { builtinBoundary } from "./builtin-boundary.ts";
 import { type SqliteFaultOperation, VirtualSqlite } from "./sqlite-io.ts";
 import { VirtualWorkerThreads } from "./virtual-worker.ts";
@@ -26,16 +27,101 @@ export interface IoOperation {
 	readonly kind: string;
 	readonly path: string;
 	readonly destination?: string;
+	/** The open flags, on an `open` operation handed to a fault or observer matcher (never in the ledger). */
+	readonly flags?: string;
 }
+
+/** An operation that failed: its natural or injected error code, and the ledger length when it failed (its position). */
+export interface IoFailedOperation extends IoOperation {
+	readonly code: string;
+	readonly at: number;
+}
+
+export type IoFaultKind =
+	| "write"
+	| "append"
+	| "unlink"
+	| "rm"
+	| "rename"
+	| "watch.close"
+	| "read"
+	| "open"
+	| "stat"
+	| "readdir"
+	| "mkdir";
 
 export interface IoFault {
 	readonly name: string;
-	readonly kind: "write" | "append" | "unlink" | "rm" | "rename" | "watch.close";
+	readonly kind: IoFaultKind;
 	readonly matches: (operation: IoOperation, data?: Buffer) => boolean;
 	readonly code?: string;
 	readonly phase?: "before" | "after";
 	readonly times?: number;
+	/**
+	 * `worker`: only operations made while a hosted worker callback runs, such as the recall processor's synchronous
+	 * session reads; the owner's own reads of the same file still succeed (a read that fails for the index only).
+	 */
+	readonly scope?: "worker";
 }
+
+/** A persistent fault: every matching operation fails until the scenario clears it. Close fails if it is never cleared or never hit. */
+export interface IoDenial {
+	readonly name: string;
+	/** Operations refused so far. */
+	readonly hits: number;
+	/** Restores the operation; returns the number of refused operations. */
+	clear(): number;
+}
+
+/** A one-shot synchronous observation inside the matching operation: it throws nothing and changes nothing. */
+export interface IoObserver {
+	readonly name: string;
+	readonly kind: IoFaultKind;
+	readonly phase?: "before" | "after";
+	readonly matches: (operation: IoOperation, data?: Buffer) => boolean;
+	readonly onMatch: (operation: IoOperation, data?: Buffer) => void;
+}
+
+/** The asynchronous operations a scenario can hold at their call: the operation runs, against the state then current, on release. */
+export type IoHoldKind = "readFile" | "mkdir" | "writeFile" | "rename";
+
+export interface IoHold {
+	readonly name: string;
+	/** Resolves when a production call reached the hold; the operation has not run yet. */
+	readonly reached: Promise<IoOperation>;
+	/** Runs the held operation now; idempotent. Releasing an unreached hold disarms it and fails the close. */
+	release(): void;
+}
+
+/** A crash-state capture of one directory tree: every file's bytes and every directory, by native path. */
+export interface VirtualTreeCapture {
+	readonly root: string;
+	readonly files: ReadonlyMap<string, Buffer>;
+	readonly directories: readonly string[];
+}
+
+/** The libuv errno Node reports for a system error code on this platform; absent for codes that are not system errors. */
+const SYSTEM_ERRNO: ReadonlyMap<string, number> = new Map(
+	[...getSystemErrorMap()].map(([errno, [name]]): [string, number] => [name, errno]),
+);
+
+/** The syscall a real operation of each fault kind names in its error (`watch.close` is no syscall). */
+const FAULT_SYSCALL: Readonly<Record<IoFaultKind, string | undefined>> = {
+	write: "write",
+	append: "write",
+	unlink: "unlink",
+	rm: "rm",
+	rename: "rename",
+	"watch.close": undefined,
+	read: "read",
+	open: "open",
+	stat: "stat",
+	readdir: "scandir",
+	mkdir: "mkdir",
+};
+
+const MAX_PENDING_HOLDS = 8;
+const MAX_OBSERVERS = 8;
 
 interface OpenFile {
 	path: string;
@@ -59,8 +145,27 @@ interface VirtualWatcher {
 	readonly recursive: boolean;
 }
 
-function ioError(code: string, path: string): NodeJS.ErrnoException {
-	return Object.assign(new Error(`${code}: virtual filesystem '${path}'`), { code, path });
+/**
+ * A Node-shaped system error: `code`, `path`, and, for a system error code, the platform `errno` and the `syscall` the
+ * real operation names, so production classifies it as it classifies a real one. The message stays the fixture's.
+ */
+function ioError(code: string, path: string, syscall?: string): NodeJS.ErrnoException {
+	const errno = SYSTEM_ERRNO.get(code);
+	return Object.assign(
+		new Error(`${code}: virtual filesystem '${path}'`),
+		{ code, path },
+		errno !== undefined && syscall !== undefined ? { errno, syscall } : {},
+	);
+}
+
+interface HoldRecord {
+	readonly name: string;
+	readonly kind: IoHoldKind;
+	readonly matches: (operation: IoOperation) => boolean;
+	state: "armed" | "reached" | "released";
+	readonly gate: Promise<void>;
+	readonly open: () => void;
+	readonly reach: (operation: IoOperation) => void;
 }
 
 function bytes(value: unknown): Buffer {
@@ -112,9 +217,29 @@ export class VirtualFileSystem {
 	private nextDescriptor = 100;
 	private nextIdentity = 1;
 	private nextTemporary = 1;
-	private revision = Date.now();
-	private readonly faults: Array<{ readonly fault: IoFault; remaining: number }> = [];
+	/** The last modification time handed out: wall clock, strictly increasing, so write order is kept and ages are real. */
+	private lastModified = 0;
+	private readonly faults: Array<{
+		readonly fault: IoFault;
+		remaining: number;
+		readonly denial?: { hits: number; cleared: boolean };
+	}> = [];
 	readonly consumedFaults: string[] = [];
+	/** Persistent faults by name, kept after clearing so the close can check each was hit. */
+	private readonly denials = new Map<string, { hits: number; cleared: boolean }>();
+	private readonly observers: IoObserver[] = [];
+	readonly consumedObservers: string[] = [];
+	private readonly holds: HoldRecord[] = [];
+	/** Hook misuse found while production ran (a throwing observer, a hold released unreached or at cutoff); reported at close. */
+	private readonly hookFailures: string[] = [];
+	/** Every operation that failed, natural or injected, in order: what a scenario waits on for a refused attempt. */
+	readonly failedOperations: IoFailedOperation[] = [];
+	private readonly operationWaiters = new Set<{
+		readonly matches: (operation: IoOperation & { readonly code?: string }) => boolean;
+		readonly resolve: (operation: IoOperation & { readonly code?: string }) => void;
+	}>();
+	/** Depth of hosted worker callbacks running now: a `scope: "worker"` fault applies only inside one. */
+	private workerDepth = 0;
 	/** Scenario conditions re-read after each modeled mutation; see {@link waitForMutation}. */
 	private readonly mutationWaiters = new Set<{
 		readonly holds: () => boolean;
@@ -136,32 +261,287 @@ export class VirtualFileSystem {
 		this.faults.push({ fault, remaining });
 	}
 
+	/** Fails every matching operation until `clear()`; see {@link IoDenial}. */
+	denyUntilCleared(fault: Omit<IoFault, "times">): IoDenial {
+		if (this.faults.length >= 32) throw new RangeError("Virtual IO fault queue must be bounded");
+		if (fault.matches.constructor.name === "AsyncFunction") throw new TypeError("IO fault matching is synchronous");
+		if (this.denials.has(fault.name)) throw new Error(`IO denial ${fault.name} is already declared`);
+		const denial = { hits: 0, cleared: false };
+		this.denials.set(fault.name, denial);
+		const entry = { fault, remaining: Number.POSITIVE_INFINITY, denial };
+		this.faults.push(entry);
+		const faults = this.faults;
+		return {
+			name: fault.name,
+			get hits() {
+				return denial.hits;
+			},
+			clear: () => {
+				const index = faults.indexOf(entry);
+				if (index >= 0) faults.splice(index, 1);
+				denial.cleared = true;
+				return denial.hits;
+			},
+		};
+	}
+
+	/** Arms a one-shot synchronous observation; see {@link IoObserver}. Close fails if it never matched. */
+	observeNext(observer: IoObserver): void {
+		if (this.observers.length >= MAX_OBSERVERS) throw new RangeError("Virtual IO observers must be bounded");
+		for (const callback of [observer.matches, observer.onMatch]) {
+			if (callback.constructor.name === "AsyncFunction") throw new TypeError("IO observation is synchronous");
+		}
+		this.observers.push(observer);
+	}
+
+	/**
+	 * Holds the next matching asynchronous call of `kind` at its call, before it touches the tree; the scenario releases
+	 * it. The callback API is built from the promise exports, so one hold also covers a callback caller (proper-lockfile's
+	 * `mkdir`). A call that matches no hold runs exactly as before.
+	 */
+	holdNext(hold: {
+		readonly name: string;
+		readonly kind: IoHoldKind;
+		readonly matches: (operation: IoOperation) => boolean;
+	}): IoHold {
+		if (this.holds.length >= MAX_PENDING_HOLDS) throw new RangeError("Virtual IO holds must be bounded");
+		if (hold.matches.constructor.name === "AsyncFunction") throw new TypeError("IO hold matching is synchronous");
+		let open!: () => void;
+		const gate = new Promise<void>((resolveGate) => {
+			open = resolveGate;
+		});
+		let reach!: (operation: IoOperation) => void;
+		const reached = new Promise<IoOperation>((resolveReached) => {
+			reach = resolveReached;
+		});
+		const record: HoldRecord = { ...hold, state: "armed", gate, open, reach };
+		this.holds.push(record);
+		return {
+			name: hold.name,
+			reached,
+			release: () => this.releaseHold(record, false),
+		};
+	}
+
+	private releaseHold(record: HoldRecord, cutoff: boolean): void {
+		const index = this.holds.indexOf(record);
+		if (index < 0) return;
+		this.holds.splice(index, 1);
+		if (record.state === "armed") this.hookFailures.push(`IO hold ${record.name} was never reached`);
+		else if (cutoff) this.hookFailures.push(`IO hold ${record.name} was still held at the world's close`);
+		record.state = "released";
+		record.open();
+	}
+
+	/** World close, before sessions are disposed: every hold still pending is released (and reported) so no owner waits on it. */
+	cutoffHolds(): void {
+		for (const record of [...this.holds]) this.releaseHold(record, true);
+	}
+
+	/** A held call waits at its gate and then runs; any other call runs at once, exactly as without holds. */
+	private whenReleased<T>(kind: IoHoldKind, operation: IoOperation | undefined, run: () => Promise<T>): Promise<T> {
+		const record =
+			operation === undefined
+				? undefined
+				: this.holds.find(
+						(candidate) => candidate.state === "armed" && candidate.kind === kind && candidate.matches(operation),
+					);
+		if (record === undefined || operation === undefined) return run();
+		record.state = "reached";
+		record.reach(operation);
+		return record.gate.then(run);
+	}
+
+	/** The native path a held call names, or undefined when it names none (an unopened descriptor). */
+	private holdPath(value: unknown): string | undefined {
+		try {
+			return this.path(value);
+		} catch {
+			return undefined;
+		}
+	}
+
 	assertFaultsConsumed(): void {
-		if (this.faults.length)
-			throw new Error(
-				`Unconsumed IO faults: ${this.faults.map(({ fault, remaining }) => `${fault.name}:${remaining}`).join(",")}`,
+		const problems: string[] = [];
+		const pending = this.faults.filter((entry) => entry.denial === undefined);
+		if (pending.length)
+			problems.push(
+				`Unconsumed IO faults: ${pending.map(({ fault, remaining }) => `${fault.name}:${remaining}`).join(",")}`,
 			);
+		for (const [name, denial] of this.denials) {
+			if (!denial.cleared) problems.push(`IO denial ${name} was never cleared`);
+			else if (denial.hits === 0) problems.push(`IO denial ${name} refused no operation`);
+		}
+		if (this.observers.length)
+			problems.push(`Unconsumed IO observers: ${this.observers.map((observer) => observer.name).join(",")}`);
+		if (this.holds.length) problems.push(`Unreleased IO holds: ${this.holds.map((hold) => hold.name).join(",")}`);
+		problems.push(...this.hookFailures);
+		if (problems.length) throw new Error(problems.join("; "));
+	}
+
+	/** Runs one hosted worker callback with the worker scope set (see {@link IoFault.scope}); the processors read synchronously. */
+	runInWorker(callback: () => void): void {
+		this.workerDepth++;
+		try {
+			callback();
+		} finally {
+			this.workerDepth--;
+		}
 	}
 
 	private fault(operation: IoOperation, phase: "before" | "after", data?: Buffer): void {
+		this.observe(operation, phase, data);
 		const index = this.faults.findIndex(
 			({ fault }) =>
-				fault.kind === operation.kind && (fault.phase ?? "before") === phase && fault.matches(operation, data),
+				fault.kind === operation.kind &&
+				(fault.phase ?? "before") === phase &&
+				(fault.scope !== "worker" || this.workerDepth > 0) &&
+				fault.matches(operation, data),
 		);
 		if (index < 0) return;
 		const entry = this.faults[index]!;
-		if (--entry.remaining === 0) this.faults.splice(index, 1);
+		if (entry.denial !== undefined) entry.denial.hits++;
+		else if (--entry.remaining === 0) this.faults.splice(index, 1);
 		this.consumedFaults.push(entry.fault.name);
-		throw Object.assign(ioError(entry.fault.code ?? "EIO", operation.path), {
+		const code = entry.fault.code ?? "EIO";
+		this.recordFailure(operation, code);
+		throw Object.assign(ioError(code, operation.path, FAULT_SYSCALL[entry.fault.kind]), {
 			message: `Scripted IO fault ${entry.fault.name}: ${operation.kind} '${operation.path}'`,
 			faultName: entry.fault.name,
 		});
 	}
-	path(value: unknown): string {
+
+	private observe(operation: IoOperation, phase: "before" | "after", data?: Buffer): void {
+		if (this.observers.length === 0) return;
+		const index = this.observers.findIndex((observer) => {
+			if (observer.kind !== operation.kind || (observer.phase ?? "before") !== phase) return false;
+			try {
+				return observer.matches(operation, data);
+			} catch (error) {
+				this.hookFailures.push(`IO observer ${observer.name} matcher threw: ${String(error)}`);
+				return false;
+			}
+		});
+		if (index < 0) return;
+		const [observer] = this.observers.splice(index, 1);
+		if (observer === undefined) return;
+		this.consumedObservers.push(observer.name);
+		try {
+			observer.onMatch(operation, data);
+		} catch (error) {
+			// An observation never perturbs the operation it watches; its own failure is reported at close.
+			this.hookFailures.push(
+				`IO observer ${observer.name} failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	/** A natural failure: recorded with its position, then returned for the caller to throw. */
+	private failure(
+		kind: string,
+		code: string,
+		path: string,
+		syscall?: string,
+		destination?: string,
+	): NodeJS.ErrnoException {
+		this.recordFailure({ kind, path, ...(destination === undefined ? {} : { destination }) }, code);
+		return ioError(code, path, syscall);
+	}
+
+	private recordFailure(operation: IoOperation, code: string): void {
+		const failed: IoFailedOperation = {
+			kind: operation.kind,
+			path: operation.path,
+			...(operation.destination === undefined ? {} : { destination: operation.destination }),
+			code,
+			at: this.operations.length,
+		};
+		this.failedOperations.push(failed);
+		this.notifyOperation(failed);
+	}
+
+	/**
+	 * Event-driven wait for one operation: a ledger entry or a failed attempt that `matches`, recorded after this call.
+	 * Resolved on a later turn, so the owner that ran it finishes its synchronous work first. The caller bounds the wait.
+	 */
+	waitForOperation(
+		matches: (operation: IoOperation & { readonly code?: string }) => boolean,
+	): Promise<IoOperation & { readonly code?: string }> {
+		return new Promise((resolveWait) => {
+			this.operationWaiters.add({ matches, resolve: resolveWait });
+		});
+	}
+
+	private notifyOperation(operation: IoOperation & { readonly code?: string }): void {
+		for (const waiter of [...this.operationWaiters]) {
+			if (!waiter.matches(operation)) continue;
+			this.operationWaiters.delete(waiter);
+			setImmediate(() => waiter.resolve(operation));
+		}
+	}
+
+	/** Appends to the ledger and wakes operation waiters. */
+	private log(operation: IoOperation): void {
+		this.operations.push(operation);
+		if (this.operationWaiters.size > 0) this.notifyOperation(operation);
+	}
+
+	/** A modification time: the wall clock, never equal to or below the last one handed out. */
+	private stamp(): number {
+		this.lastModified = Math.max(Date.now(), this.lastModified + 1);
+		return this.lastModified;
+	}
+
+	/** The bytes of a file now, for scenario inspection: no ledger entry, no fault, no hold. */
+	peekFile(path: string): string | undefined {
+		const node = this.nodes.get(this.path(path));
+		return node?.kind === "file" ? node.data.toString() : undefined;
+	}
+
+	/** Every file and directory under `root` (inclusive), byte exact, without touching the ledger, faults or holds. */
+	captureTree(root: string): VirtualTreeCapture {
+		const base = this.path(root);
+		const inside = (path: string): boolean => path === base || path.startsWith(`${base}${sep}`);
+		const files = new Map<string, Buffer>();
+		const directories: string[] = [];
+		for (const [path, node] of this.nodes) {
+			if (!inside(path)) continue;
+			if (node.kind === "file") files.set(path, Buffer.from(node.data));
+			else if (node.kind === "directory") directories.push(path);
+		}
+		directories.sort();
+		return { root: base, files, directories };
+	}
+
+	/**
+	 * Puts `root` back to exactly `capture`, as an external writer would (modeled operations, so watchers and waiters see
+	 * them): everything under it the capture lacks is removed, then the captured directories and file bytes are written.
+	 * Throws unless the tree then equals the capture.
+	 */
+	restoreTree(capture: VirtualTreeCapture): void {
+		const now = this.captureTree(capture.root);
+		const keptDirectories = new Set(capture.directories);
+		for (const path of now.files.keys()) if (!capture.files.has(path)) this.unlinkSync(path);
+		for (const path of [...now.directories].reverse()) {
+			if (!keptDirectories.has(path) && this.nodes.has(path)) this.rmSync(path, { recursive: true });
+		}
+		for (const path of capture.directories) this.mkdirSync(path, { recursive: true });
+		for (const [path, data] of capture.files) {
+			if (!this.nodes.get(path)?.data.equals(data)) this.writeFileSync(path, data);
+		}
+		const after = this.captureTree(capture.root);
+		const same =
+			after.directories.join("\n") === capture.directories.join("\n") &&
+			after.files.size === capture.files.size &&
+			[...capture.files].every(([path, data]) => after.files.get(path)?.equals(data) === true);
+		if (!same) throw new Error(`The tree under ${capture.root} does not equal its capture after the restore`);
+	}
+
+	path(value: unknown, syscall = "open"): string {
 		if (value instanceof URL) return resolve(fileURLToPath(value));
 		if (typeof value === "number") {
 			const descriptor = this.descriptors.get(value);
-			if (!descriptor) throw ioError("EBADF", String(value));
+			if (!descriptor) throw ioError("EBADF", String(value), syscall);
 			return descriptor.path;
 		}
 		if (Buffer.isBuffer(value)) return resolve(this.cwd, value.toString());
@@ -183,30 +563,43 @@ export class VirtualFileSystem {
 
 	existsSync(value: unknown): boolean {
 		try {
-			return this.nodes.has(this.realpathSync(value));
+			return this.resolveExisting(value) !== undefined;
 		} catch {
 			return false;
 		}
 	}
 
-	realpathSync(value: unknown): string {
+	/** The canonical path `value` names when it exists, following symlinks; undefined when it does not. Records nothing. */
+	private resolveExisting(value: unknown): string | undefined {
 		let path = this.path(value);
 		const seen = new Set<string>();
 		while (this.nodes.get(path)?.kind === "symlink") {
-			if (seen.has(path)) throw ioError("ELOOP", path);
+			if (seen.has(path)) return undefined;
 			seen.add(path);
 			path = resolve(dirname(path), this.nodes.get(path)?.target ?? "");
 		}
-		if (!this.nodes.has(path)) throw ioError("ENOENT", path);
+		return this.nodes.has(path) ? path : undefined;
+	}
+
+	realpathSync(value: unknown, syscall = "realpath", kind = "realpath"): string {
+		let path = this.path(value, syscall);
+		const seen = new Set<string>();
+		while (this.nodes.get(path)?.kind === "symlink") {
+			if (seen.has(path)) throw this.failure(kind, "ELOOP", path, syscall);
+			seen.add(path);
+			path = resolve(dirname(path), this.nodes.get(path)?.target ?? "");
+		}
+		if (!this.nodes.has(path)) throw this.failure(kind, "ENOENT", path, syscall);
 		return path;
 	}
 
 	readFileSync(value: unknown, options?: unknown): Buffer | string {
 		if (typeof value === "number") return this.readDescriptorFile(value, options);
-		const path = this.realpathSync(value);
+		const path = this.realpathSync(value, "open", "read");
+		this.fault({ kind: "read", path }, "before");
 		const node = this.nodes.get(path)!;
-		if (node.kind !== "file") throw ioError("EISDIR", path);
-		this.operations.push({ kind: "read", path });
+		if (node.kind !== "file") throw this.failure("read", "EISDIR", path, "read");
+		this.log({ kind: "read", path });
 		const encoding = typeof options === "string" ? options : (options as { encoding?: string } | undefined)?.encoding;
 		return encoding ? node.data.toString(encoding as BufferEncoding) : Buffer.from(node.data);
 	}
@@ -222,14 +615,14 @@ export class VirtualFileSystem {
 		}
 		const path = this.path(value);
 		const flag = (options as { flag?: string } | undefined)?.flag;
-		if (flag?.includes("x") && this.nodes.has(path)) throw ioError("EEXIST", path);
+		if (flag?.includes("x") && this.nodes.has(path)) throw this.failure("write", "EEXIST", path, "open");
 		if (flag?.startsWith("a")) {
 			this.appendFileSync(value, data);
 			return;
 		}
 		this.fault({ kind: "write", path }, "before", bytes(data));
-		if (!this.nodes.has(dirname(path))) throw ioError("ENOENT", dirname(path));
-		if (this.nodes.get(path)?.kind === "directory") throw ioError("EISDIR", path);
+		if (!this.nodes.has(dirname(path))) throw this.failure("write", "ENOENT", dirname(path), "open");
+		if (this.nodes.get(path)?.kind === "directory") throw this.failure("write", "EISDIR", path, "open");
 		this.setFileData(path, bytes(data));
 		this.note("write", path);
 		this.fault({ kind: "write", path }, "after", bytes(data));
@@ -243,8 +636,8 @@ export class VirtualFileSystem {
 		const path = this.path(value);
 		this.fault({ kind: "append", path }, "before", bytes(data));
 		const previous = this.nodes.get(path);
-		if (previous && previous.kind !== "file") throw ioError("EISDIR", path);
-		if (!this.nodes.has(dirname(path))) throw ioError("ENOENT", dirname(path));
+		if (previous && previous.kind !== "file") throw this.failure("append", "EISDIR", path, "open");
+		if (!this.nodes.has(dirname(path))) throw this.failure("append", "ENOENT", dirname(path), "open");
 		this.setFileData(path, previous ? Buffer.concat([previous.data, bytes(data)]) : bytes(data));
 		this.note("append", path);
 		this.fault({ kind: "append", path }, "after", bytes(data));
@@ -254,33 +647,35 @@ export class VirtualFileSystem {
 		const node = this.nodes.get(path);
 		if (node) {
 			node.data = data;
-			node.modified = ++this.revision;
+			node.modified = this.stamp();
 		} else {
 			this.nodes.set(path, {
 				kind: "file",
 				data,
-				modified: ++this.revision,
+				modified: this.stamp(),
 				identity: this.nextIdentity++,
 			});
 		}
 	}
 
 	mkdirSync(value: unknown, options?: unknown): string | undefined {
-		const path = this.path(value);
+		const path = this.path(value, "mkdir");
 		const recursive = (options as { recursive?: boolean } | undefined)?.recursive === true;
 		if (this.nodes.has(path)) {
-			if (!recursive || this.nodes.get(path)?.kind !== "directory") throw ioError("EEXIST", path);
+			if (!recursive || this.nodes.get(path)?.kind !== "directory")
+				throw this.failure("mkdir", "EEXIST", path, "mkdir");
 			return undefined;
 		}
+		this.fault({ kind: "mkdir", path }, "before");
 		const parent = dirname(path);
 		if (parent !== path && !this.nodes.has(parent)) {
-			if (!recursive) throw ioError("ENOENT", parent);
+			if (!recursive) throw this.failure("mkdir", "ENOENT", parent, "mkdir");
 			this.mkdirSync(parent, { recursive: true });
 		}
 		this.nodes.set(path, {
 			kind: "directory",
 			data: Buffer.alloc(0),
-			modified: ++this.revision,
+			modified: this.stamp(),
 			identity: this.nextIdentity++,
 		});
 		this.note("mkdir", path);
@@ -292,9 +687,9 @@ export class VirtualFileSystem {
 	}
 
 	mkdtempSync(prefix: unknown): string {
-		const start = this.path(prefix);
+		const start = this.path(prefix, "mkdtemp");
 		const parent = dirname(start);
-		if (this.nodes.get(parent)?.kind !== "directory") throw ioError("ENOENT", parent);
+		if (this.nodes.get(parent)?.kind !== "directory") throw this.failure("mkdtemp", "ENOENT", parent, "mkdtemp");
 		for (let attempt = 0; attempt < 1000; attempt++) {
 			const path = `${start}${(this.nextTemporary++).toString(36).padStart(6, "0")}`;
 			if (this.nodes.has(path)) continue;
@@ -302,19 +697,22 @@ export class VirtualFileSystem {
 			this.note("mkdtemp", path);
 			return path;
 		}
-		throw ioError("EEXIST", start);
+		throw this.failure("mkdtemp", "EEXIST", start, "mkdtemp");
 	}
 
 	statSync(value: unknown, options?: unknown) {
 		const descriptor = typeof value === "number" ? this.descriptors.get(value) : undefined;
-		if (typeof value === "number" && !descriptor) throw ioError("EBADF", String(value));
+		if (typeof value === "number" && !descriptor) throw this.failure("stat", "EBADF", String(value), "fstat");
+		const lstat = (options as { lstat?: boolean } | undefined)?.lstat === true;
+		const syscall = descriptor ? "fstat" : lstat ? "lstat" : "stat";
 		const path = descriptor
 			? descriptor.path
-			: (options as { lstat?: boolean } | undefined)?.lstat
-				? this.path(value)
-				: this.realpathSync(value);
+			: lstat
+				? this.path(value, syscall)
+				: this.realpathSync(value, syscall, "stat");
 		const node = descriptor?.node ?? this.nodes.get(path);
-		if (!node) throw ioError("ENOENT", path);
+		if (!node) throw this.failure("stat", "ENOENT", path, syscall);
+		this.fault({ kind: "stat", path }, "before");
 		const snapshot = {
 			size: node.data.length,
 			mtimeMs: node.modified,
@@ -364,8 +762,9 @@ export class VirtualFileSystem {
 	}
 
 	readdirSync(value: unknown, options?: unknown): unknown[] {
-		const path = this.realpathSync(value);
-		if (this.nodes.get(path)?.kind !== "directory") throw ioError("ENOTDIR", path);
+		const path = this.realpathSync(value, "scandir", "readdir");
+		if (this.nodes.get(path)?.kind !== "directory") throw this.failure("readdir", "ENOTDIR", path, "scandir");
+		this.fault({ kind: "readdir", path }, "before");
 		const children = [...this.nodes].filter(([child]) => child !== path && dirname(child) === path);
 		return children
 			.sort(([left], [right]) => left.localeCompare(right))
@@ -381,7 +780,7 @@ export class VirtualFileSystem {
 	}
 
 	opendirSync(value: unknown) {
-		const path = this.realpathSync(value);
+		const path = this.realpathSync(value, "opendir", "readdir");
 		const entries = this.readdirSync(path, { withFileTypes: true });
 		let position = 0;
 		let closed = false;
@@ -414,25 +813,25 @@ export class VirtualFileSystem {
 	}
 
 	unlinkSync(value: unknown): void {
-		const path = this.path(value);
+		const path = this.path(value, "unlink");
 		this.fault({ kind: "unlink", path }, "before");
-		if (!this.nodes.has(path)) throw ioError("ENOENT", path);
-		if (this.nodes.get(path)?.kind === "directory") throw ioError("EISDIR", path);
+		if (!this.nodes.has(path)) throw this.failure("unlink", "ENOENT", path, "unlink");
+		if (this.nodes.get(path)?.kind === "directory") throw this.failure("unlink", "EISDIR", path, "unlink");
 		this.nodes.delete(path);
 		this.note("unlink", path);
 		this.fault({ kind: "unlink", path }, "after");
 	}
 
-	rmSync(value: unknown, options?: unknown): void {
-		const path = this.path(value);
+	rmSync(value: unknown, options?: unknown, syscall = "rm"): void {
+		const path = this.path(value, syscall);
 		this.fault({ kind: "rm", path }, "before");
 		const flags = options as { force?: boolean; recursive?: boolean } | undefined;
 		if (!this.nodes.has(path)) {
 			if (flags?.force) return;
-			throw ioError("ENOENT", path);
+			throw this.failure("rm", "ENOENT", path, syscall);
 		}
 		const children = [...this.nodes.keys()].filter((child) => child.startsWith(`${path}${sep}`));
-		if (children.length && !flags?.recursive) throw ioError("ENOTEMPTY", path);
+		if (children.length && !flags?.recursive) throw this.failure("rm", "ENOTEMPTY", path, syscall);
 		for (const child of children) this.nodes.delete(child);
 		this.nodes.delete(path);
 		this.note("rm", path);
@@ -440,37 +839,40 @@ export class VirtualFileSystem {
 	}
 
 	renameSync(source: unknown, destination: unknown): void {
-		const from = this.path(source);
-		const to = this.path(destination);
+		const from = this.path(source, "rename");
+		const to = this.path(destination, "rename");
 		this.fault({ kind: "rename", path: from, destination: to }, "before");
-		if (!this.nodes.has(from) || !this.nodes.has(dirname(to))) throw ioError("ENOENT", from);
+		if (!this.nodes.has(from) || !this.nodes.has(dirname(to)))
+			throw this.failure("rename", "ENOENT", from, "rename", to);
 		const entries = [...this.nodes].filter(([path]) => path === from || path.startsWith(`${from}${sep}`));
 		for (const [path, node] of entries) {
 			this.nodes.delete(path);
-			node.modified = ++this.revision;
+			node.modified = this.stamp();
 			this.nodes.set(`${to}${path.slice(from.length)}`, node);
 		}
 		for (const descriptor of this.descriptors.values()) if (descriptor.path === from) descriptor.path = to;
-		this.operations.push({ kind: "rename", path: from, destination: to });
+		this.log({ kind: "rename", path: from, destination: to });
 		this.note("change", to);
 		this.fault({ kind: "rename", path: from, destination: to }, "after");
 	}
 
 	copyFileSync(source: unknown, destination: unknown, flags = 0): void {
-		const from = this.realpathSync(source);
-		const to = this.path(destination);
-		if ((flags & fs.constants.COPYFILE_EXCL) !== 0 && this.nodes.has(to)) throw ioError("EEXIST", to);
+		const from = this.realpathSync(source, "copyfile", "copy");
+		const to = this.path(destination, "copyfile");
+		if ((flags & fs.constants.COPYFILE_EXCL) !== 0 && this.nodes.has(to))
+			throw this.failure("copy", "EEXIST", to, "copyfile");
 		this.writeFileSync(to, this.readFileSync(from));
-		this.operations.push({ kind: "copy", path: from, destination: to });
+		this.log({ kind: "copy", path: from, destination: to });
 	}
 
 	openSync(value: unknown, flags: unknown): number {
 		const path = this.path(value);
 		if (typeof flags !== "string") throw new Error("Virtual open requires explicit string flags");
-		if (flags.includes("x") && this.nodes.has(path)) throw ioError("EEXIST", path);
+		this.fault({ kind: "open", path, flags }, "before");
+		if (flags.includes("x") && this.nodes.has(path)) throw this.failure("open", "EEXIST", path, "open");
 		if (flags.startsWith("w")) this.writeFileSync(path, "");
 		else if (flags.startsWith("a") && !this.nodes.has(path)) this.writeFileSync(path, "");
-		else if (!this.nodes.has(path)) throw ioError("ENOENT", path);
+		else if (!this.nodes.has(path)) throw this.failure("open", "ENOENT", path, "open");
 		const fd = this.nextDescriptor++;
 		this.descriptors.set(fd, {
 			path,
@@ -529,7 +931,8 @@ export class VirtualFileSystem {
 	}
 
 	closeSync(fd: unknown): void {
-		if (typeof fd !== "number" || !this.descriptors.delete(fd)) throw ioError("EBADF", String(fd));
+		if (typeof fd !== "number" || !this.descriptors.delete(fd))
+			throw this.failure("close", "EBADF", String(fd), "close");
 	}
 
 	/**
@@ -583,25 +986,54 @@ export class VirtualFileSystem {
 			mkdtemp: async (prefix: unknown) => this.mkdtempSync(prefix),
 			opendir: async (path: unknown) => this.opendirSync(path),
 			open: (path: unknown, flags: unknown) => this.open(path, flags),
-			readFile: (path: unknown, options?: unknown) => this.readFile(path, options),
-			writeFile: (path: unknown, data: unknown, options?: unknown) => this.writeFile(path, data, options),
+			readFile: (path: unknown, options?: unknown) => {
+				const target = this.holdPath(path);
+				return this.whenReleased(
+					"readFile",
+					target === undefined ? undefined : { kind: "read", path: target },
+					() => this.readFile(path, options),
+				);
+			},
+			writeFile: (path: unknown, data: unknown, options?: unknown) => {
+				const target = this.holdPath(path);
+				return this.whenReleased(
+					"writeFile",
+					target === undefined ? undefined : { kind: "write", path: target },
+					() => this.writeFile(path, data, options),
+				);
+			},
 			appendFile: async (path: unknown, data: unknown) => this.appendFileSync(path, data),
-			mkdir: (path: unknown, options?: unknown) => this.mkdir(path, options),
+			mkdir: (path: unknown, options?: unknown) => {
+				const target = this.holdPath(path);
+				return this.whenReleased("mkdir", target === undefined ? undefined : { kind: "mkdir", path: target }, () =>
+					this.mkdir(path, options),
+				);
+			},
 			readdir: async (path: unknown, options?: unknown) => this.readdirSync(path, options),
 			stat: async (path: unknown, options?: unknown) => this.statSync(path, options),
 			lstat: async (path: unknown, options?: unknown) =>
 				this.statSync(path, { ...(options as { bigint?: boolean } | undefined), lstat: true }),
 			access: async (path: unknown) => {
-				this.note("access", this.realpathSync(path));
+				this.note("access", this.realpathSync(path, "access", "access"));
 			},
 			realpath: async (path: unknown) => this.realpathSync(path),
 			unlink: async (path: unknown) => this.unlinkSync(path),
 			rm: async (path: unknown, options?: unknown) => this.rmSync(path, options),
-			rmdir: async (path: unknown) => this.rmSync(path),
-			rename: async (from: unknown, to: unknown) => this.renameSync(from, to),
+			rmdir: async (path: unknown) => this.rmSync(path, undefined, "rmdir"),
+			rename: (from: unknown, to: unknown) => {
+				const source = this.holdPath(from);
+				const target = this.holdPath(to);
+				return this.whenReleased(
+					"rename",
+					source === undefined || target === undefined
+						? undefined
+						: { kind: "rename", path: source, destination: target },
+					async () => this.renameSync(from, to),
+				);
+			},
 			copyFile: async (from: unknown, to: unknown, flags?: number) => this.copyFileSync(from, to, flags),
 			chmod: async (path: unknown) => {
-				this.realpathSync(path);
+				this.realpathSync(path, "chmod", "chmod");
 			},
 			utimes: async (path: unknown, _atime: unknown, mtime: unknown) => this.setTimes(path, mtime),
 		};
@@ -627,15 +1059,15 @@ export class VirtualFileSystem {
 				native: (path: unknown) => this.realpathSync(path),
 			}),
 			accessSync: (path: unknown) => {
-				this.realpathSync(path);
+				this.realpathSync(path, "access", "access");
 			},
 			unlinkSync: (path: unknown) => this.unlinkSync(path),
 			rmSync: (path: unknown, options?: unknown) => this.rmSync(path, options),
-			rmdirSync: (path: unknown) => this.rmSync(path),
+			rmdirSync: (path: unknown) => this.rmSync(path, undefined, "rmdir"),
 			renameSync: (from: unknown, to: unknown) => this.renameSync(from, to),
 			copyFileSync: (from: unknown, to: unknown, flags?: number) => this.copyFileSync(from, to, flags),
 			chmodSync: (path: unknown) => {
-				this.realpathSync(path);
+				this.realpathSync(path, "chmod", "chmod");
 			},
 			utimesSync: (path: unknown, _atime: unknown, mtime: unknown) => this.setTimes(path, mtime),
 			openSync: (path: unknown, flags: unknown) => this.openSync(path, flags),
@@ -763,13 +1195,14 @@ export class VirtualFileSystem {
 
 	private fileDescriptor(fd: number): OpenFile {
 		const descriptor = this.descriptors.get(fd);
-		if (!descriptor) throw ioError("EBADF", String(fd));
-		if (descriptor.node.kind !== "file") throw ioError("EISDIR", descriptor.path);
+		if (!descriptor) throw this.failure("read", "EBADF", String(fd), "read");
+		if (descriptor.node.kind !== "file") throw this.failure("read", "EISDIR", descriptor.path, "read");
 		return descriptor;
 	}
 
 	private readDescriptorFile(fd: number, options?: unknown): Buffer | string {
 		const descriptor = this.fileDescriptor(fd);
+		this.fault({ kind: "read", path: descriptor.path }, "before");
 		const node = descriptor.node;
 		const result = node.data.subarray(descriptor.position);
 		descriptor.position = node.data.length;
@@ -786,6 +1219,7 @@ export class VirtualFileSystem {
 		position: number | null,
 	): number {
 		const descriptor = this.fileDescriptor(fd);
+		this.fault({ kind: "read", path: descriptor.path }, "before");
 		const node = descriptor.node;
 		const start = position ?? descriptor.position;
 		const amount = Math.max(0, Math.min(length, node.data.length - start));
@@ -797,17 +1231,17 @@ export class VirtualFileSystem {
 
 	private writeDescriptor(fd: number, data: Buffer, position?: number | null): number {
 		const descriptor = this.descriptors.get(fd);
-		if (!descriptor) throw ioError("EBADF", String(fd));
-		if (!descriptor.writable) throw ioError("EBADF", descriptor.path);
+		if (!descriptor) throw this.failure("write", "EBADF", String(fd), "write");
+		if (!descriptor.writable) throw this.failure("write", "EBADF", descriptor.path, "write");
 		const node = descriptor.node;
-		if (node?.kind !== "file") throw ioError("EISDIR", descriptor.path);
+		if (node?.kind !== "file") throw this.failure("write", "EISDIR", descriptor.path, "write");
 		this.fault({ kind: "write", path: descriptor.path }, "before", data);
 		const start = descriptor.append ? node.data.length : (position ?? descriptor.position);
 		const replacement = Buffer.alloc(Math.max(node.data.length, start + data.length));
 		node.data.copy(replacement);
 		data.copy(replacement, start);
 		node.data = replacement;
-		node.modified = ++this.revision;
+		node.modified = this.stamp();
 		if (position === null || position === undefined) descriptor.position = start + data.length;
 		this.note("write", descriptor.path);
 		this.fault({ kind: "write", path: descriptor.path }, "after", data);
@@ -816,18 +1250,19 @@ export class VirtualFileSystem {
 
 	private truncateDescriptor(fd: number, length: number): void {
 		const descriptor = this.descriptors.get(fd);
-		if (!descriptor?.writable) throw ioError("EBADF", String(fd));
-		if (!Number.isSafeInteger(length) || length < 0) throw ioError("EINVAL", descriptor.path);
+		if (!descriptor?.writable) throw this.failure("truncate", "EBADF", String(fd), "ftruncate");
+		if (!Number.isSafeInteger(length) || length < 0)
+			throw this.failure("truncate", "EINVAL", descriptor.path, "ftruncate");
 		const node = descriptor.node;
 		const replacement = Buffer.alloc(length);
 		node.data.copy(replacement, 0, 0, length);
 		node.data = replacement;
-		node.modified = ++this.revision;
+		node.modified = this.stamp();
 		this.note("truncate", descriptor.path);
 	}
 
 	private setTimes(value: unknown, mtime: unknown): void {
-		const path = this.realpathSync(value);
+		const path = this.realpathSync(value, "utime", "utimes");
 		const milliseconds = mtime instanceof Date ? mtime.getTime() : Number(mtime) * 1000;
 		if (!Number.isFinite(milliseconds)) throw new TypeError("Virtual utimes requires finite time");
 		this.nodes.get(path)!.modified = milliseconds;
@@ -835,7 +1270,7 @@ export class VirtualFileSystem {
 	}
 
 	private note(kind: string, path: string): void {
-		this.operations.push({ kind, path });
+		this.log({ kind, path });
 		if (!WATCH_CHANGE_OPERATIONS.has(kind)) return;
 		if (this.mutationWaiters.size > 0) {
 			// A later turn: the owner that wrote finishes its synchronous bookkeeping before the condition is read.
@@ -893,7 +1328,10 @@ export class EffectGuard {
 		this.io = io;
 		this.ports = ports;
 		this.sqlite = new VirtualSqlite(io, (kind) => this.reject(kind));
-		this.workerThreads = new VirtualWorkerThreads((kind) => this.reject(kind));
+		this.workerThreads = new VirtualWorkerThreads(
+			(kind) => this.reject(kind),
+			(callback) => io.runInWorker(callback),
+		);
 	}
 
 	install(): void {

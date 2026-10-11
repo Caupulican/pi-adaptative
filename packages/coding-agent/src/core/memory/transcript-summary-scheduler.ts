@@ -216,14 +216,15 @@ export type TranscriptSummaryEnqueueResult =
 
 /**
  * `provider`: classify the message and retry only a transient failure. `transient`: the caller has already
- * established the cause is temporary (a source that is not ready yet) and asks for a bounded retry.
- * `malformed` / `policy`: never retried.
+ * established the cause is temporary (a source that is not ready yet, a store that could not be written) and asks
+ * for a bounded retry. `malformed` / `policy`: never retried. `internal`: an invariant of the owner broke (a
+ * programming error); never retried, so it cannot loop.
  */
 export interface TranscriptSummaryFailure {
 	message: string;
-	kind: "provider" | "transient" | "malformed" | "policy";
+	kind: "provider" | "transient" | "malformed" | "policy" | "internal";
 	provider?: string;
-	/** A more precise fixed class than the kind's default (`source_not_ready`, `malformed`, `policy`); recorded as the job's error reason. */
+	/** A more precise fixed class than the kind's default (`source_not_ready`, `malformed`, `policy`, `internal`); recorded as the job's error reason. */
 	reason?: string;
 }
 
@@ -985,7 +986,7 @@ export class TranscriptSummaryScheduler {
 		const job = this.jobs.get(jobId);
 		if (!job) throw new Error(`Unknown summary job ${jobId}.`);
 		if (isTerminalSummaryJobState(job.state)) return undefined;
-		if (failure.kind === "malformed" || failure.kind === "policy") {
+		if (failure.kind === "malformed" || failure.kind === "policy" || failure.kind === "internal") {
 			return this.finishFailed(
 				job,
 				{ message: failure.message, reason: failure.reason ?? failure.kind, transient: false },

@@ -44,7 +44,6 @@ import {
 	type TranscriptSourceRef,
 	type TranscriptSourceSpan,
 	type TranscriptSummaryJobState,
-	transcriptDigest,
 	utf8ByteLength,
 } from "./transcript-memory-contracts.ts";
 import type {
@@ -99,22 +98,25 @@ import {
 	TranscriptSummaryScheduler,
 	type TranscriptSummarySchedulerOptions,
 } from "./transcript-summary-scheduler.ts";
-import type {
-	ManifestRead,
-	TranscriptAnchorRequest,
-	TranscriptSummaryHeldByKind,
-	TranscriptSummaryHoldKind,
-	TranscriptSummaryJobsSaveResult,
-	TranscriptSummaryProofStatus,
-	TranscriptSummaryPublishResult,
-	TranscriptSummaryRecoveryIssue,
-	TranscriptSummaryRevokeResult,
-	TranscriptSummarySessionCursor,
-	TranscriptSummaryStore,
-	TranscriptSummaryStoreState,
-	TranscriptSummaryTerminalCause,
-	TranscriptSummaryTerminalRecord,
-	TranscriptSummaryWriter,
+import {
+	type ManifestRead,
+	storeUnavailable,
+	type TranscriptAnchorRequest,
+	type TranscriptSummaryAnnotateResult,
+	type TranscriptSummaryHeldByKind,
+	type TranscriptSummaryHoldKind,
+	type TranscriptSummaryJobsSaveResult,
+	type TranscriptSummaryProofStatus,
+	type TranscriptSummaryPublishResult,
+	type TranscriptSummaryRecoveryIssue,
+	type TranscriptSummaryRevokeResult,
+	type TranscriptSummarySessionCursor,
+	type TranscriptSummaryStore,
+	type TranscriptSummaryStoreState,
+	type TranscriptSummaryStoreUnavailable,
+	type TranscriptSummaryTerminalCause,
+	type TranscriptSummaryTerminalRecord,
+	type TranscriptSummaryWriter,
 } from "./transcript-summary-store.ts";
 
 // ---------------------------------------------------------------------------------------------
@@ -125,6 +127,8 @@ import type {
 export interface TranscriptSummarizerPort {
 	/** Where the prompt goes. `external` needs `allowExternalSummaryEgress`; the coordinator enforces it before any call. */
 	egress: "local" | "external";
+	/** The model every reply comes from (`provider/id`): part of the key a kept reply is reused under. */
+	readonly model: string;
 	summarize(
 		input: { system: string; prompt: string; maxOutputBytes: number },
 		signal: AbortSignal,
@@ -253,6 +257,7 @@ export type TranscriptReadmissionWait =
 	| "source_read_refused"
 	| "judgment_discarded"
 	| "store_refused"
+	| "store_unavailable"
 	| "admission_mismatch";
 
 export interface TranscriptMemoryAdmissionStatus {
@@ -370,9 +375,12 @@ const READMISSION_WAIT_TEXT: Record<TranscriptReadmissionWait, string> = {
 	source_read_refused: "a source part cannot be read within the read bound, so it cannot be re-read for judgment",
 	judgment_discarded: "a source, child or policy fence changed while it was judged",
 	store_refused: "the store refused its admission record",
+	store_unavailable: "the store could not record its judgment; re-admission retries later",
 	admission_mismatch: "its text no longer matches the admission it carries",
 };
 const MAX_HELD_REASON_CHARS = 200;
+/** A hold's cause is cut to this on its own, so it always fits inside {@link MAX_HELD_REASON_CHARS} ({@link holdReason}). */
+const MAX_HELD_CAUSE_CHARS = 150;
 const COORDINATOR_NOT_RUNNING = "the summary coordinator is not running";
 /**
  * The cursor digest of a session whose coverage no full verification vouches for. A lineage digest is never empty,
@@ -416,7 +424,11 @@ const SUMMARY_SYSTEM_PROMPT = [
  */
 type HoldScope = TranscriptSummaryHoldKind;
 
-/** A job held before any provider call: the kind of condition that releases it and the real cause, set with it. */
+/**
+ * A job held before any provider call: the kind of condition that releases it and the real cause, set with it. A
+ * reason starts with its cause (a hold that carries one composes it with {@link holdReason}), so the bound the status
+ * applies never cuts the cause.
+ */
 interface ParkedHold {
 	scope: HoldScope;
 	reason: string;
@@ -513,9 +525,28 @@ function minTimestamp(values: readonly (string | undefined)[]): string | undefin
 	return best;
 }
 
+/**
+ * Work a store write the store could not serve (its typed `unavailable`) left undone, tried again after the store
+ * backoff ({@link TranscriptMemory.deferStoreWork}): discovery as a whole, retention, anchoring of undated nodes, the
+ * reconciliation of sessions and the republication of frontiers.
+ */
+interface StoreRetryWork {
+	discover: boolean;
+	retention: boolean;
+	anchors: boolean;
+	sessions: Set<string>;
+	frontiers: Set<string>;
+}
+
+function emptyStoreRetry(): StoreRetryWork {
+	return { discover: false, retention: false, anchors: false, sessions: new Set(), frontiers: new Set() };
+}
+
 /** The real cause of a job save that did not succeed. */
 function describeSaveRefusal(saved: Exclude<TranscriptSummaryJobsSaveResult, { status: "saved" }>): string {
 	switch (saved.status) {
+		case "unavailable":
+			return saved.reason;
 		case "jobs_overflow":
 			return `job list overflow (${saved.active} active)`;
 		case "fenced":
@@ -556,6 +587,22 @@ function bounded(text: string, max: number): string {
 	return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
+/** `text` cut to `max` characters in its middle, so its head (what failed) and its tail (where an error code sits) both survive. */
+function boundedMiddle(text: string, max: number): string {
+	if (text.length <= max) return text;
+	const head = Math.floor((max - 1) / 3);
+	return `${text.slice(0, head)}…${text.slice(text.length - (max - 1 - head))}`;
+}
+
+/**
+ * A hold's reason: its cause first, cut on its own to {@link MAX_HELD_CAUSE_CHARS} around its middle, then what the
+ * job waits for. The status bound ({@link MAX_HELD_REASON_CHARS}) then cuts only the explanation, never the cause, so
+ * its identifying code (a reader's `read_error:<code>` near its end, a failed save's errno near its start) is shown.
+ */
+function holdReason(cause: string, waits: string): string {
+	return `${boundedMiddle(cause, MAX_HELD_CAUSE_CHARS)}; ${waits}`;
+}
+
 /** The real cause of a judgment that did not admit, in one bounded line: the disposition, why, who judged and the confidences. */
 function describeAdmission(result: Exclude<TranscriptSummaryAdmissionResult, { disposition: "accepted" }>): string {
 	const confidences = Object.entries(result.confidences)
@@ -568,6 +615,41 @@ function describeAdmission(result: Exclude<TranscriptSummaryAdmissionResult, { d
 
 function withHandle(item: TranscriptCaptureText): string {
 	return `[${formatTranscriptSourceHandle(item.span.ref)}] ${renderCaptureText(item)}`;
+}
+
+/** One part of a summary prompt: instruction text, or untrusted text that is fenced when the prompt is rendered. */
+type SummaryPromptPart = string | { untrusted: string; source: string };
+
+/** A summary prompt as sent, and the key of the logical input it asks about. */
+interface SummaryRequest {
+	prompt: string;
+	inputKey: string;
+}
+
+/**
+ * Build one summary request for `model` from its parts. The prompt fences each untrusted part with a fresh nonce
+ * ({@link wrapUntrustedText}), so it differs on every render. The input key digests the parts unfenced, with the model,
+ * the system prompt and the recipe version: it names the logical input, never the nonce, so a kept reply is reused
+ * exactly when the same model is asked the same input again, and any change of model, source, context, child summary
+ * or instruction text misses.
+ */
+function summaryRequest(model: string, parts: readonly SummaryPromptPart[]): SummaryRequest {
+	return {
+		prompt: parts
+			.map((part) => (typeof part === "string" ? part : wrapUntrustedText(part.untrusted, part.source)))
+			.join(""),
+		inputKey: createHash("sha256")
+			.update(
+				JSON.stringify({
+					recipeVersion: TRANSCRIPT_SUMMARY_RECIPE_VERSION,
+					model,
+					system: SUMMARY_SYSTEM_PROMPT,
+					parts,
+				}),
+				"utf8",
+			)
+			.digest("hex"),
+	};
 }
 
 /**
@@ -669,6 +751,19 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private saveFailures = 0;
 	/** When the failed job save is tried again (through the one lifecycle timer). */
 	private saveRetryAt: number | undefined;
+	/** Store work an unavailable write left undone; see {@link deferStoreWork}. */
+	private storeRetry = emptyStoreRetry();
+	/** When that work is tried again (through the one lifecycle timer), on a backoff that grows while writes keep failing. */
+	private storeRetryAt: number | undefined;
+	private storeRetryFailures = 0;
+	/**
+	 * Re-admission verdicts whose store write could not be served, by node id with the text they judged: applied again
+	 * when the node's turn comes back, never asked of the evaluator again (the verdict was paid for and stands).
+	 */
+	private readonly keptReadmission = new Map<
+		string,
+		{ textDigest: string; verdict: TranscriptSummaryAdmissionResult }
+	>();
 
 	/** Jobs held before any provider call, by the scope of the condition that releases them. */
 	private readonly parked = new Map<string, ParkedHold>();
@@ -739,6 +834,17 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			if ("status" in reloaded) return this.disable(`the summary store could not be read: ${reloaded.reason}`);
 			state = reloaded;
 		}
+		// Files nothing will read again (node content a crash or a failed publication left unreferenced, staged
+		// temporary files) are removed by age under this writer's fence, once the recovered state is final. A sweep the
+		// store could not finish keeps its cause for the status and is tried again at the next start; it never keeps
+		// the hierarchy off.
+		try {
+			await writer.sweepOrphans();
+		} catch (error) {
+			const unavailable = storeUnavailable("sweeping unreferenced summary files", error);
+			if (!unavailable) throw error;
+			this.noteInternalCause(unavailable.reason);
+		}
 		this.recoveryIssues = issues.map(describeIssue).slice(0, MAX_STATUS_ISSUES);
 
 		this.writer = writer;
@@ -776,6 +882,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		this.saveFailure = undefined;
 		this.saveFailures = 0;
 		this.saveRetryAt = undefined;
+		this.storeRetry = emptyStoreRetry();
+		this.storeRetryAt = undefined;
+		this.storeRetryFailures = 0;
+		this.keptReadmission.clear();
 		// Before recovery, so every recovered job keeps the durable reservation it already holds.
 		scheduler.noteProof(state.proof.records);
 		scheduler.setProofHold(state.proof.status.hold);
@@ -874,8 +984,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** Retire older captures, anchor, apply retention, rebuild unapproved frontiers and reconcile every session. */
 	private async discover(epoch: number): Promise<void> {
-		await this.retireLegacyCapture(epoch);
-		if (!this.live(epoch)) return;
+		// Older captures retire before anything is enumerated; when that write cannot be served, discovery as a whole
+		// is tried again after the store backoff.
+		if (!(await this.retireLegacyCapture(epoch)) || !this.live(epoch)) return;
 		await this.anchorUndatedNodes(epoch);
 		await this.applyRetention(epoch);
 		// Nodes accepted before the admission contract are not approved: frontiers published with them are rebuilt without.
@@ -915,20 +1026,22 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * never adopted without its mirror (contract C6): the mirror is reloaded through the start's load path, discovery
 	 * restarts from the reloaded cursors, and the scheduler's ready index follows the reloaded accepted set. Damage the
 	 * load reports is not repaired mid-run: the coordinator stops with the real cause and recovers at its next start.
+	 * Returns `stopped` when this run ended (or ended here), and the store's typed `unavailable` (its cause recorded)
+	 * when the load could not be served while the run is live.
 	 */
-	private async reloadMirror(epoch: number): Promise<boolean> {
+	private async reloadMirror(epoch: number): Promise<"reloaded" | "stopped" | TranscriptSummaryStoreUnavailable> {
 		const state = await this.ports.store.load();
 		const scheduler = this.scheduler;
-		if (!this.live(epoch) || !scheduler) return false;
+		if (!this.live(epoch) || !scheduler) return "stopped";
 		if ("status" in state) {
 			// Not adopted: the mirror keeps its own revision, so reads are refused until a reload succeeds.
 			this.noteInternalCause(`reloading the summary mirror: ${state.reason}`);
-			return false;
+			return state;
 		}
 		if (!state.manifest || state.issues.length > 0) {
 			const detail = state.issues.map(describeIssue).join("; ") || "the manifest is missing";
 			this.fatal(`the summary store moved past this coordinator and needs recovery: ${detail}`);
-			return false;
+			return "stopped";
 		}
 		const before = new Set(this.catalog.ids());
 		this.loadMirror(state);
@@ -942,38 +1055,44 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		for (const node of state.nodes.values()) {
 			if (!before.has(node.id) && isCurrentCaptureNode(node)) scheduler.onNodeReady(node, now);
 		}
-		return true;
+		return "reloaded";
 	}
 
 	/**
 	 * Capture version 2 binds every input a summary consumed into its source handles. Accepted nodes of an older
 	 * version are never served or extended: they are revoked as `invalidated` (derived again from their sources, not
 	 * forgotten), and older dormant nodes are purged so they stop holding the dormant cap, in one manifest write.
+	 * True when discovery may go on.
 	 */
-	private async retireLegacyCapture(epoch: number): Promise<void> {
+	private async retireLegacyCapture(epoch: number): Promise<boolean> {
 		const writer = this.writer;
-		if (!writer || !this.live(epoch)) return;
+		if (!writer || !this.live(epoch)) return false;
 		const accepted = new Set(
 			[...this.catalog.values()].filter((node) => !isCurrentCaptureNode(node)).map((node) => node.id),
 		);
 		const dormant = new Set(
 			[...this.dormant.values()].filter((node) => !isCurrentCaptureNode(node)).map((node) => node.id),
 		);
-		if (accepted.size === 0 && dormant.size === 0) return;
+		if (accepted.size === 0 && dormant.size === 0) return true;
 		const result = await writer.revokeNodes((id) => accepted.has(id), "invalidated", {
 			purgeDormant: (id) => dormant.has(id),
 		});
+		if (result.status === "unavailable") {
+			this.deferStoreWork(result.reason, { discover: true }, epoch);
+			return false;
+		}
 		if (result.status !== "published") {
 			if (this.live(epoch))
 				this.fatal(`retiring summaries of an older capture version was refused: ${result.status}`);
-			return;
+			return false;
 		}
 		if (!this.live(epoch)) {
 			// Durable already: the mirror takes it with its revision even though this run will not continue (C6).
 			this.mirrorRevocation(result, "invalidated", undefined, 0);
-			return;
+			return false;
 		}
 		await this.applyRevocation(result, epoch, { reason: "invalidated" });
+		return true;
 	}
 
 	/** Cancel the timer and subscriptions, abort in-flight work, requeue it for the next start, save the jobs. */
@@ -1070,29 +1189,38 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 					return;
 				}
 			}
-			this.abortSession(sessionId);
-			const droppedReady = this.endSessionJobs(sessionId, "cancelled");
 			const result = await this.writer.revokeNodes(
 				(_id, entry) =>
 					entry.sessionId === sessionId || entry.contextRefs.some((handle) => handle.split(":")[1] === sessionId),
 				"retention",
 				{ dropSessionCursor: sessionId, tombstoneSession: sessionId },
 			);
+			if (result.status === "unavailable") {
+				// Nothing was written: the session is not forgotten, and forgetting it again is the retry.
+				this.noteInternalCause(result.reason);
+				outcome = { status: "refused", reason: `forgetting ${sessionId} could not be written: ${result.reason}` };
+				return;
+			}
 			if (result.status !== "published") {
 				const reason = `forgetting ${sessionId} was refused: ${result.status}`;
 				this.fatal(reason);
 				outcome = { status: "refused", reason };
 				return;
 			}
+			// Torn down only once the revocation is durable: a refused write leaves the session's builds and jobs running.
+			this.abortSession(sessionId);
+			const droppedReady = this.endSessionJobs(sessionId, "cancelled");
 			this.forgottenSessions.add(sessionId);
 			// The mirror takes the revocation in the same step as its revision, before any later write: a later write's
 			// revision must never be adopted while revoked nodes are still indexed (contract C6).
 			await this.applyRevocation(result, scheduled, { reason: "forgotten", dropSession: sessionId, droppedReady });
 			// A forgotten session is never summarized again: its anchors and spent budgets can no longer matter.
-			if (!(await this.dropSessionRecords(new Set([sessionId])))) {
+			const dropped = await this.dropSessionRecords(new Set([sessionId]));
+			if (dropped !== true) {
+				if (dropped !== false) this.noteInternalCause(dropped.reason);
 				outcome = {
 					status: "refused",
-					reason: `the summaries of ${sessionId} were revoked, but dropping its retention records was refused: ${this.disabledReason ?? "the summary hierarchy stopped"}`,
+					reason: `the summaries of ${sessionId} were revoked, but dropping its retention records ${dropped === false ? `was refused: ${this.disabledReason ?? "the summary hierarchy stopped"}` : `could not be written: ${dropped.reason}`}`,
 				};
 				return;
 			}
@@ -1445,9 +1573,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	/** Record what re-admission found for a node; `wait` says why a judgment has not happened or was discarded. */
 	private setReadmission(nodeId: string, state: ReadmissionHoldState, wait?: TranscriptReadmissionWait): void {
 		this.readmissionState.set(nodeId, wait === undefined ? { state } : { state, wait });
-		// A source that could not be read now (the index did not answer the lineage or a part read) is read again after
-		// the re-admission backoff, like an evaluator that did not answer. An answered refusal is never armed here.
-		if (wait === "source_unreadable") this.readmissionRetryAt ??= this.ports.now() + READMISSION_RETRY_MS;
+		// A source that could not be read now (the index did not answer the lineage or a part read), or a store that could
+		// not record the judgment, is tried again after the re-admission backoff, like an evaluator that did not answer.
+		// An answered refusal is never armed here.
+		if (wait === "source_unreadable" || wait === "store_unavailable")
+			this.readmissionRetryAt ??= this.ports.now() + READMISSION_RETRY_MS;
 	}
 
 	/** Why an accepted node is not approved, or undefined when it is approved. Pure apart from the re-admission record. */
@@ -1497,6 +1627,13 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		this.epoch += 1;
 		if (this.timer !== undefined) this.ports.clearTimer(this.timer);
 		this.timer = undefined;
+		// Store work deferred by an unavailable write, and verdicts kept across one, are dropped: the next start derives
+		// that work again (its discovery reconciles every session, applies retention and republishes frontiers), and
+		// nothing of this run stays resident or re-arms the timer.
+		this.storeRetry = emptyStoreRetry();
+		this.storeRetryAt = undefined;
+		this.storeRetryFailures = 0;
+		this.keptReadmission.clear();
 		for (const unsubscribe of this.unsubscribers.splice(0)) unsubscribe();
 		const running = [...this.inFlight.values()];
 		for (const entry of running) entry.controller.abort();
@@ -1527,7 +1664,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		alreadyDroppedReady: number,
 	): void {
 		this.manifestRevision = revision;
-		for (const id of revoked) this.catalog.unindex(id);
+		for (const id of revoked) {
+			this.catalog.unindex(id);
+			this.keptReadmission.delete(id);
+		}
 		for (const sessionId of droppedCursors) this.cursors.delete(sessionId);
 		// Only an invalidation can be derived again: a retention or forgetting revocation is permanent, so its
 		// identity is never re-admitted (re-deriving it could only be refused at publication).
@@ -1649,13 +1789,24 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			...[...this.dormant.values()].map((node) => node.sessionId),
 		]);
 		const orphans = new Set([...held].filter((sessionId) => !indexed.has(sessionId) && !referenced.has(sessionId)));
-		return orphans.size === 0 || (await this.dropSessionRecords(orphans));
+		if (orphans.size === 0) return true;
+		const dropped = await this.dropSessionRecords(orphans);
+		// A drop the store could not write goes to the next discovery after the store backoff; this one goes on.
+		if (dropped !== true && dropped !== false) this.deferStoreWork(dropped.reason, { discover: true }, this.epoch);
+		return dropped !== false;
 	}
 
-	/** Remove anchors, spent budgets and dormant nodes of these sessions from the store and from the local mirrors. */
-	private async dropSessionRecords(sessionIds: ReadonlySet<string>): Promise<boolean> {
+	/**
+	 * Remove anchors, spent budgets and dormant nodes of these sessions from the store and from the local mirrors. False
+	 * when the writer is gone or the drop was refused (the coordinator stopped); the store's `unavailable` when it could
+	 * not be written (nothing changed).
+	 */
+	private async dropSessionRecords(
+		sessionIds: ReadonlySet<string>,
+	): Promise<boolean | TranscriptSummaryStoreUnavailable> {
 		const result = await this.writer?.dropSessionRecords(sessionIds);
 		if (!result) return false;
+		if (result.status === "unavailable") return result;
 		if (result.status !== "saved") {
 			this.fatal(`dropping session records was refused: ${result.status}`);
 			return false;
@@ -1684,7 +1835,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const reason =
 			unread === undefined
 				? RECONCILIATION_WAITING
-				: `a recovered summary job waits for its session to be read again (${unread}), so the budget it had under capture version 1 is adopted first`;
+				: holdReason(
+						unread,
+						"a recovered summary job waits for its session to be read again, so the budget it had under capture version 1 is adopted first",
+					);
 		for (const [id, hold] of this.parked) {
 			if (hold.scope !== "reconciliation" || scheduler.get(id)?.sessionId !== sessionId) continue;
 			this.parked.set(id, { scope: "reconciliation", reason });
@@ -1738,7 +1892,15 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// The lineage moved (a branch switch, a rewrite): keep what is still live, revoke the rest. A change
 			// rediscovers the session itself and answers that read's cause here; an unreadable lineage is not judged
 			// and the next read tries again.
-			const dead = await this.revokeDeadCoverage(sessionId, epoch, stamp);
+			let dead: CoverageVerdict;
+			try {
+				dead = await this.revokeDeadCoverage(sessionId, epoch, stamp);
+			} catch (error) {
+				// A store write that threw left the judgment unmade, as an unreadable verification does: the revocation
+				// stays due for the next read (the mailbox keeps the error as the internal cause).
+				if (due) this.revocationDue.add(sessionId);
+				throw error;
+			}
 			if (dead.kind === "unreadable") {
 				if (due) this.revocationDue.add(sessionId);
 				return dead.cause;
@@ -1800,7 +1962,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			return;
 		}
 		if (!this.live(epoch)) return;
-		if (result.status === "stale_revision") await this.reloadMirror(epoch);
+		// Not certified: the session's next read (or the store retry) certifies it.
+		if (result.status === "unavailable") this.deferStoreWork(result.reason, { sessions: [sessionId] }, epoch);
+		else if (result.status === "stale_revision") await this.reloadMirror(epoch);
 		else this.fatal(`certifying the cursor of ${sessionId} was refused: ${result.status}`);
 	}
 
@@ -1907,6 +2071,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			if (result.status === "published") this.mirrorRevocation(result, "invalidated", undefined, 0);
 			return { kind: "changed" };
 		}
+		if (result.status === "unavailable") {
+			// Nothing was revoked, so nothing is judged: the session is read again after the store backoff.
+			this.deferStoreWork(result.reason, { sessions: [sessionId] }, epoch);
+			return { kind: "unreadable", cause: result.reason };
+		}
 		if (result.status !== "published") {
 			this.fatal(`revoking the dead coverage of ${sessionId} was refused: ${result.status}`);
 			return { kind: "changed" };
@@ -1956,6 +2125,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		this.abortSession(sessionId);
 		const droppedReady = this.endSessionJobs(sessionId, "stale");
 		const result = await writer.invalidateSession(sessionId);
+		if (result.status === "unavailable") {
+			// Its jobs ended above; the probe that finds the session gone runs again after the store backoff.
+			this.deferStoreWork(result.reason, { sessions: [sessionId] }, epoch);
+			return;
+		}
 		if (result.status !== "published") return this.fatal(`invalidating ${sessionId} was refused: ${result.status}`);
 		await this.applyRevocation(result, epoch, { reason: "invalidated", dropSession: sessionId, droppedReady });
 	}
@@ -2091,17 +2265,21 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			if (groups.length === 0) return;
 			// A source without a usable event time is anchored before any decision depends on its age.
 			const undated = groups.flatMap((group) => group.spans).filter((span) => this.spanTime(span) === undefined);
-			if (
-				undated.length > 0 &&
-				!(await this.anchorRefs(
+			if (undated.length > 0) {
+				const anchored = await this.anchorRefs(
 					undated.map((span) => ({
 						ref: span.ref,
 						legacyHandle: formatTranscriptSourceHandle(legacyCaptureRef(span)),
 					})),
 					epoch,
-				))
-			)
-				return;
+				);
+				if (anchored === false) return;
+				if (anchored !== true) {
+					// The anchors could not be written: this session is enumerated again after the store backoff.
+					this.deferStoreWork(anchored.reason, { sessions: [sessionId] }, epoch);
+					return anchored.reason;
+				}
+			}
 			if (!this.live(epoch)) return;
 			for (const group of groups) {
 				const refs = group.spans.map((span) => span.ref);
@@ -2222,12 +2400,13 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/**
 	 * Persist an anchor for each source that has none yet (set-if-absent in the store). Returns false when the
-	 * anchor ceiling refused any of them: that work is held with a diagnostic, never treated as ageless.
+	 * anchor ceiling refused any of them: that work is held with a diagnostic, never treated as ageless. The store's
+	 * `unavailable` when the write could not be served (nothing was anchored; the caller defers its work).
 	 */
 	private async anchorRefs(
 		sources: readonly { ref: TranscriptSourceRef; legacyHandle?: string }[],
 		epoch: number,
-	): Promise<boolean> {
+	): Promise<boolean | TranscriptSummaryStoreUnavailable> {
 		const writer = this.writer;
 		if (!writer || !this.live(epoch)) return false;
 		const requests: TranscriptAnchorRequest[] = [];
@@ -2249,6 +2428,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		if (requests.length === 0) return true;
 		const result = await writer.anchorSources(requests);
+		if (result.status === "unavailable") return result;
 		if (result.status === "fenced" || result.status === "manifest_corrupt") {
 			if (this.live(epoch)) this.fatal(`recording retention anchors was refused: ${result.status}`);
 			return false;
@@ -2277,8 +2457,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				if (this.catalog.anchorAt(ref) === undefined) refs.push({ ref });
 			}
 		}
-		// A listing that was unavailable leaves the rest pending; the next index event tries again.
-		this.undatedNodesPending = refs.length > 0 && !(await this.anchorRefs(refs, epoch));
+		// A listing that was unavailable leaves the rest pending; the next index event tries again. A write that could
+		// not be served is tried again after the store backoff.
+		const anchored = refs.length > 0 ? await this.anchorRefs(refs, epoch) : true;
+		this.undatedNodesPending = anchored !== true;
+		if (anchored !== true && anchored !== false) this.deferStoreWork(anchored.reason, { anchors: true }, epoch);
 	}
 
 	/**
@@ -2308,6 +2491,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const result = await writer.revokeNodes((id) => batch.has(id), "retention", {
 			purgeDormant: (id) => dueDormant.has(id),
 		});
+		if (result.status === "unavailable") {
+			// Expired text stays withheld on every read meanwhile; the revocation is tried again after the store backoff.
+			this.deferStoreWork(result.reason, { retention: true }, epoch);
+			return;
+		}
 		if (result.status !== "published") return this.fatal(`retention was refused: ${result.status}`);
 		// Nodes this coordinator holds as accepted must be in the manifest; if none are, the mirror is broken and
 		// another pass would find the same nodes forever. Stop with the real cause instead.
@@ -2400,8 +2588,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			...(removeFrontiers.length > 0 ? { removeFrontiers } : {}),
 		});
 		if (published.status !== "published") {
-			// A revision is never adopted without its mirror (C6): the store moved past it, so the mirror is reloaded.
-			if (published.status === "stale_revision") await this.reloadMirror(epoch);
+			// A revision is never adopted without its mirror (C6): the store moved past it, so the mirror is reloaded. A
+			// write that could not be served is tried again after the store backoff.
+			if (published.status === "unavailable")
+				this.deferStoreWork(published.reason, { frontiers: sessionIds }, epoch);
+			else if (published.status === "stale_revision") await this.reloadMirror(epoch);
 			else this.fatal(`publishing frontiers was refused: ${published.status}`);
 			return;
 		}
@@ -2473,7 +2664,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** Why a claimed attempt was not made durable: the real cause of the failed save. */
 	private persistenceHoldReason(): string {
-		return `the job list holding this attempt was not saved (${this.saveFailure ?? "no save acknowledged it"}); it waits for the next successful save, retried with backoff`;
+		return holdReason(
+			this.saveFailure ?? "no save acknowledged the job list holding this attempt",
+			"the job list holding this attempt was not saved, so it waits for the next successful save, retried with backoff",
+		);
 	}
 
 	/** Why a claimed job could not get its terminal-proof record, from the capacity the store last reported. */
@@ -2520,9 +2714,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (!this.live(epoch)) return;
 		const candidates = [
 			this.scheduler?.nextWakeAt(),
-			this.nextRetentionAt(),
+			// Deferred retention waits for the store retry, so a due deadline cannot re-arm the timer at once.
+			this.storeRetry.retention ? undefined : this.nextRetentionAt(),
 			this.readmissionRetryAt,
 			this.saveRetryAt,
+			this.storeRetryAt,
 		].filter((value): value is number => value !== undefined);
 		if (candidates.length === 0) return;
 		const at = Math.min(...candidates);
@@ -2536,9 +2732,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 					if (this.saveRetryAt !== undefined && this.saveRetryAt <= this.ports.now()) this.saveRetryAt = undefined;
 					this.markJobsDirty();
 					const due = this.nextRetentionAt();
-					if (due !== undefined && due <= this.ports.now()) await this.applyRetention(epoch);
+					if (!this.storeRetry.retention && due !== undefined && due <= this.ports.now())
+						await this.applyRetention(epoch);
 					// A lifecycle wake also retries held recovered leaves whose sessions could not be read before.
 					if (this.startPhase === "open") await this.reconcileHeldSessions(new Set(), epoch);
+					if (this.storeRetryAt !== undefined && this.storeRetryAt <= this.ports.now())
+						await this.retryStoreWork(epoch);
 					this.pump(epoch);
 				});
 			},
@@ -2669,14 +2868,18 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			job,
 		);
 		if (reusable) return { kind: "node", node: reusable };
-		const prompt = [
-			"Summarize the SOURCE.",
-			context.items.length > 0
-				? `CONTEXT (earlier turns, for resolving references only):\n${wrapUntrustedText(context.items.map(withHandle).join("\n"), "memory:summary-context")}`
-				: "CONTEXT: none available.",
-			`SOURCE:\n${wrapUntrustedText(covered.map(withHandle).join("\n"), "memory:summary-source")}`,
-		].join("\n\n");
-		const reply = await this.summarizeChecked(job, token, summarizer, prompt, signal, refs, contextRefs, {
+		const request = summaryRequest(summarizer.model, [
+			"Summarize the SOURCE.\n\n",
+			...(context.items.length > 0
+				? [
+						"CONTEXT (earlier turns, for resolving references only):\n",
+						{ untrusted: context.items.map(withHandle).join("\n"), source: "memory:summary-context" },
+					]
+				: ["CONTEXT: none available."]),
+			"\n\nSOURCE:\n",
+			{ untrusted: covered.map(withHandle).join("\n"), source: "memory:summary-source" },
+		]);
+		const reply = await this.summarizeChecked(job, token, summarizer, request, signal, refs, contextRefs, {
 			level: 0,
 			target: admissionBlocksFromCaptures(covered),
 			context: admissionBlocksFromCaptures(context.items),
@@ -2840,11 +3043,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (reusable) return { kind: "node", node: reusable };
 		const describe = (node: TranscriptSummaryNode): string =>
 			`[${formatTranscriptNodeHandle(node.id)}] spans [${node.spanRange.fromIndex},${node.spanRange.toIndexExclusive}) ${node.quality}: ${node.text}`;
-		const prompt = [
-			"Merge the two adjacent SUMMARIES below, oldest first, into one summary of both. Keep every cited handle that still matters.",
-			`SUMMARIES:\n${wrapUntrustedText([left, right].map(describe).join("\n"), "memory:summary-source")}`,
-		].join("\n\n");
-		const reply = await this.summarizeChecked(job, token, summarizer, prompt, signal, sourceRefs, [], {
+		const request = summaryRequest(summarizer.model, [
+			"Merge the two adjacent SUMMARIES below, oldest first, into one summary of both. Keep every cited handle that still matters.\n\nSUMMARIES:\n",
+			{ untrusted: [left, right].map(describe).join("\n"), source: "memory:summary-source" },
+		]);
+		const reply = await this.summarizeChecked(job, token, summarizer, request, signal, sourceRefs, [], {
 			level: job.level,
 			target: [left, right].map(admissionBlockFromSummary),
 			context: [],
@@ -2878,7 +3081,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		job: TranscriptSummaryJob,
 		token: TranscriptSummaryClaimToken,
 		summarizer: TranscriptSummarizerPort,
-		prompt: string,
+		summary: SummaryRequest,
 		signal: AbortSignal,
 		sourceRefs: readonly TranscriptSourceRef[],
 		contextRefs: readonly TranscriptSourceRef[],
@@ -2892,8 +3095,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		// A validated reply kept on the job (an evaluator retry, a restart between reply and judgment) is used instead
 		// of paying the summarizer again, but only for the exact input and recipe it answered, and only if it still
-		// passes the deterministic checks. It is judged again unless its acceptance was kept with it (below).
-		const inputKey = transcriptDigest(prompt);
+		// passes the deterministic checks. It is judged again unless its acceptance was kept with it (below). The input is
+		// named by its logical key ({@link summaryRequest}), never by the rendered prompt, whose fences carry a fresh nonce.
+		const { prompt, inputKey } = summary;
 		const checks = { projectId: sourceRefs[0]?.projectId ?? "", sourceRefs, contextRefs };
 		const kept = job.pendingReply;
 		let reply: { text: string; model: string };
@@ -2961,7 +3165,20 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (result.disposition === "accepted") {
 			this.judgments.accepted += 1;
 			const admission = admissionRecordFromResult(result, reply.text, new Date(this.ports.now()).toISOString());
-			if (!admission) throw new Error("an accepted admission produced no record");
+			// A broken invariant, not a provider failure: it ends the job with its own class instead of reaching
+			// `runJob`'s provider classification.
+			if (!admission) {
+				return {
+					outcome: {
+						kind: "fail",
+						failure: {
+							kind: "internal",
+							reason: "internal_error",
+							message: "an accepted admission produced no record",
+						},
+					},
+				};
+			}
 			await this.keepAdmission(token, { record: admission, inputDigest });
 			return { ...reply, admission };
 		}
@@ -3249,55 +3466,111 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				live = await this.readPublishedDependency(job, token, node, epoch);
 				if (!live) return;
 			}
-			cursorUpdate = live ? this.advanceCursor(node, live) : undefined;
-			frontier = this.computeFrontier(node.sessionId, node);
+			try {
+				cursorUpdate = live ? this.advanceCursor(node, live) : undefined;
+				frontier = this.computeFrontier(node.sessionId, node);
+			} catch (error) {
+				return this.settlePublicationFailure(
+					job,
+					token,
+					epoch,
+					this.thrownPublicationFailure("preparing the publication", error),
+				);
+			}
 			// A claim that no longer owns its job never publishes (a reload below can end the job, too).
 			if (!scheduler.ownsClaim(token)) return;
-			result = await writer.publish({
-				expectedRevision: this.manifestRevision,
-				nodes: [node],
-				...(cursorUpdate ? { sessions: { [node.sessionId]: cursorUpdate } } : {}),
-				...(frontier.changed ? { frontiers: { [node.sessionId]: frontier.selection } } : {}),
-			});
+			try {
+				result = await writer.publish({
+					expectedRevision: this.manifestRevision,
+					nodes: [node],
+					...(cursorUpdate ? { sessions: { [node.sessionId]: cursorUpdate } } : {}),
+					...(frontier.changed ? { frontiers: { [node.sessionId]: frontier.selection } } : {}),
+				});
+			} catch (error) {
+				return this.settlePublicationFailure(
+					job,
+					token,
+					epoch,
+					this.thrownPublicationFailure("publishing the summary node", error),
+				);
+			}
+			if (result.status === "unavailable") {
+				this.noteInternalCause(result.reason);
+				return this.settlePublicationFailure(job, token, epoch, {
+					kind: "transient",
+					reason: "store_unavailable",
+					message: result.reason,
+				});
+			}
 			if (result.status !== "stale_revision") break;
 			// A revision is never adopted without its mirror (C6): reload it, then compute the publication again.
-			if (!(await this.reloadMirror(epoch))) return this.settleAborted(token, epoch);
+			let reloaded: "reloaded" | "stopped" | TranscriptSummaryStoreUnavailable;
+			try {
+				reloaded = await this.reloadMirror(epoch);
+			} catch (error) {
+				return this.settlePublicationFailure(
+					job,
+					token,
+					epoch,
+					this.thrownPublicationFailure("reloading the summary mirror", error),
+				);
+			}
+			if (reloaded === "stopped") return this.settleAborted(token, epoch);
+			// The store could not be read: the same cause as a write that failed, retried on the same backoff (the reload
+			// recorded it), never an interrupt that is claimed again at once and spends the budget with no backoff.
+			if (reloaded !== "reloaded") {
+				return this.settlePublicationFailure(job, token, epoch, {
+					kind: "transient",
+					reason: "store_unavailable",
+					message: `reloading the summary mirror: ${reloaded.reason}`,
+				});
+			}
 		}
 		if (!result || !frontier) return;
 		const owned = scheduler.ownsClaim(token);
 		if (result.status === "published") {
-			this.manifestRevision = result.revision;
-			// The store unparked a dormant identity in the same write.
-			this.dormant.delete(node.id);
-			this.catalog.index(node);
-			// A parent held for an unapproved child may be able to run now (a rebuilt child keeps its identity, so the
-			// scheduler would not admit the parent again). Released jobs re-check on claim and hold again if still blocked.
-			this.releaseParked("children");
-			if (cursorUpdate) {
-				this.cursors.set(node.sessionId, cursorUpdate);
-				// Certified: the runtime vouched for the leaf's lineage ({@link advanceCursor}) and now names it, as the
-				// cursor does; its stamp still names the same positions. Otherwise the rest of the session was not verified
-				// on the lineage this leaf was: the runtime no longer vouches for the whole coverage, and its next read
-				// verifies it.
-				const runtime = this.runtime.get(node.sessionId);
-				if (runtime && cursorUpdate.lineageDigest !== UNVERIFIED_LINEAGE_DIGEST)
-					runtime.verifiedDigest = cursorUpdate.lineageDigest;
-				else if (runtime) {
-					runtime.verifiedDigest = undefined;
-					runtime.verifiedStamp = undefined;
+			// Synchronous from here on, but an invariant that breaks (an index conflict, a coverage mismatch at
+			// completion, a frontier listener) must not leave the claim running: it ends `internal_error` instead.
+			try {
+				this.manifestRevision = result.revision;
+				// The store unparked a dormant identity in the same write.
+				this.dormant.delete(node.id);
+				this.catalog.index(node);
+				// A parent held for an unapproved child may be able to run now (a rebuilt child keeps its identity, so the
+				// scheduler would not admit the parent again). Released jobs re-check on claim and hold again if still blocked.
+				this.releaseParked("children");
+				if (cursorUpdate) {
+					this.cursors.set(node.sessionId, cursorUpdate);
+					// Certified: the runtime vouched for the leaf's lineage ({@link advanceCursor}) and now names it, as the
+					// cursor does; its stamp still names the same positions. Otherwise the rest of the session was not
+					// verified on the lineage this leaf was: the runtime no longer vouches for the whole coverage, and its next
+					// read verifies it.
+					const runtime = this.runtime.get(node.sessionId);
+					if (runtime && cursorUpdate.lineageDigest !== UNVERIFIED_LINEAGE_DIGEST)
+						runtime.verifiedDigest = cursorUpdate.lineageDigest;
+					else if (runtime) {
+						runtime.verifiedDigest = undefined;
+						runtime.verifiedStamp = undefined;
+					}
 				}
-			}
-			this.frontierBytes.set(node.sessionId, {
-				bytes: frontier.bytes,
-				...(frontier.gap ? { gap: frontier.gap } : {}),
-			});
-			if (frontier.changed) {
-				this.frontiers.set(node.sessionId, frontier.selection);
-				this.ports.onFrontierChanged(node.sessionId, frontier.selection.revision);
-			}
-			if (owned) {
-				scheduler.completeJob(job.id, node, this.ports.now());
-				this.countTerminal("succeeded");
+				this.frontierBytes.set(node.sessionId, {
+					bytes: frontier.bytes,
+					...(frontier.gap ? { gap: frontier.gap } : {}),
+				});
+				if (frontier.changed) this.frontiers.set(node.sessionId, frontier.selection);
+				if (owned) {
+					scheduler.completeJob(job.id, node, this.ports.now());
+					this.countTerminal("succeeded");
+				}
+				// The listener is told last, once the job settled: whatever it does, the job is already done.
+				if (frontier.changed) this.ports.onFrontierChanged(node.sessionId, frontier.selection.revision);
+			} catch (error) {
+				this.settlePublicationFailure(
+					job,
+					token,
+					epoch,
+					this.thrownPublicationFailure("adopting the published summary node", error),
+				);
 			}
 			return;
 		}
@@ -3330,6 +3603,50 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (this.started && epoch === this.epoch && this.scheduler?.ownsClaim(token)) {
 			this.scheduler.interrupt(token.jobId, this.ports.now());
 		}
+	}
+
+	/**
+	 * The failure a publication step that threw settles with, classified by the store ({@link storeUnavailable}) and
+	 * recorded as the internal cause: an I/O or lock failure is `transient` (`store_unavailable`); anything else broke
+	 * an invariant (a programming error) and is `internal` (`internal_error`), which is never retried.
+	 */
+	private thrownPublicationFailure(what: string, error: unknown): TranscriptSummaryFailure {
+		const unavailable = storeUnavailable(what, error);
+		const failure: TranscriptSummaryFailure = unavailable
+			? { kind: "transient", reason: "store_unavailable", message: unavailable.reason }
+			: {
+					kind: "internal",
+					reason: "internal_error",
+					message: `${what} failed: ${error instanceof Error ? error.message : String(error)}`,
+				};
+		this.noteInternalCause(failure.message);
+		return failure;
+	}
+
+	/**
+	 * Settle a claim whose publication could not be completed, checked with no await since the step that failed: a run
+	 * that is no longer live interrupts it as a stop does, a claim that lost its job settles nothing, and the owning
+	 * claim ends this attempt through the scheduler's retry rule ({@link settleFailure}). A transient failure keeps the
+	 * job's kept reply and kept acceptance for the retry, so neither paid call is made again; a reply whose own save was
+	 * never acknowledged is not kept ({@link keepReply}), and that retry pays for it again. The caller returns to
+	 * {@link settle}, which runs {@link afterTerminal}: the job list is saved and the batch can end.
+	 *
+	 * A write that landed before it threw (the manifest renamed, then a failure) is retried safely: the mirror kept its
+	 * older revision, so a publication answers `stale_revision` and the mirror is reloaded with the node accepted, and
+	 * publishing the same node with the same text again keeps its file and is accepted, never refused as a conflict.
+	 */
+	private settlePublicationFailure(
+		job: TranscriptSummaryJob,
+		token: TranscriptSummaryClaimToken,
+		epoch: number,
+		failure: TranscriptSummaryFailure,
+	): void {
+		if (!this.live(epoch)) {
+			this.settleAborted(token, epoch);
+			return;
+		}
+		if (!this.scheduler?.ownsClaim(token)) return;
+		this.settleFailure(job, { kind: "fail", failure }, this.ports.now());
 	}
 
 	/**
@@ -3478,7 +3795,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				if (this.live(epoch)) this.acknowledgeSave(snapshot, scheduler, epoch);
 			} else if (saved.status === "fenced" || saved.status === "manifest_corrupt") {
 				this.fatal(`saving jobs was refused: ${describeSaveRefusal(saved)}`);
-			} else this.jobSaveFailed(`saving jobs was refused: ${describeSaveRefusal(saved)}`, epoch);
+			} else if (saved.status === "unavailable") this.jobSaveFailed(saved.reason, epoch);
+			else this.jobSaveFailed(`saving jobs was refused: ${describeSaveRefusal(saved)}`, epoch);
 		});
 	}
 
@@ -3523,6 +3841,59 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		this.pump(epoch);
 	}
 
+	/**
+	 * A store write of a mailbox task could not be served (the store's typed `unavailable`): record the real cause and
+	 * keep the work it left undone for {@link retryStoreWork}, on a backoff of 1 s doubling to one minute while writes
+	 * keep failing. The task goes on with what does not depend on the write, so one outage never loses discovery,
+	 * reconciliation or a frontier for the rest of the run.
+	 */
+	private deferStoreWork(
+		cause: string,
+		work: {
+			discover?: boolean;
+			retention?: boolean;
+			anchors?: boolean;
+			sessions?: Iterable<string>;
+			frontiers?: Iterable<string>;
+		},
+		epoch: number,
+	): void {
+		this.noteInternalCause(cause);
+		if (!this.live(epoch)) return;
+		const pending = this.storeRetry;
+		if (work.discover) pending.discover = true;
+		if (work.retention) pending.retention = true;
+		if (work.anchors) pending.anchors = true;
+		for (const sessionId of work.sessions ?? []) pending.sessions.add(sessionId);
+		for (const sessionId of work.frontiers ?? []) pending.frontiers.add(sessionId);
+		this.storeRetryFailures += 1;
+		const delay = Math.min(JOB_SAVE_RETRY_MAX_MS, JOB_SAVE_RETRY_BASE_MS * 2 ** (this.storeRetryFailures - 1));
+		this.storeRetryAt ??= this.ports.now() + delay;
+		this.armTimer(epoch);
+	}
+
+	/**
+	 * Run the store work deferred by unavailable writes, once its backoff is due (on the mailbox, from the lifecycle
+	 * timer). What fails again is deferred again with a longer backoff; a pass that defers nothing resets it.
+	 */
+	private async retryStoreWork(epoch: number): Promise<void> {
+		const work = this.storeRetry;
+		this.storeRetry = emptyStoreRetry();
+		this.storeRetryAt = undefined;
+		const failures = this.storeRetryFailures;
+		if (work.discover) await this.discover(epoch);
+		else {
+			if (work.anchors && this.undatedNodesPending) await this.anchorUndatedNodes(epoch);
+			if (work.retention) await this.applyRetention(epoch);
+		}
+		for (const sessionId of work.sessions) {
+			if (!this.live(epoch)) return;
+			await this.reconcileSession(sessionId, epoch);
+		}
+		if (work.frontiers.size > 0) await this.republishFrontiers([...work.frontiers], epoch);
+		if (this.storeRetryFailures === failures) this.storeRetryFailures = 0;
+	}
+
 	/** A job save of this run failed: record the real cause and try again on the bounded backoff. */
 	private jobSaveFailed(cause: string, epoch: number): void {
 		this.noteInternalCause(cause);
@@ -3558,7 +3929,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			if (this.ports.now() < this.readmissionRetryAt) return;
 			this.readmissionRetryAt = undefined;
 			for (const [id, hold] of this.readmissionState) {
-				if (hold.state === "unavailable" || hold.wait === "source_unreadable") this.readmissionState.delete(id);
+				if (hold.state === "unavailable" || hold.wait === "source_unreadable" || hold.wait === "store_unavailable")
+					this.readmissionState.delete(id);
 			}
 		}
 		if (this.readmissionCandidates().length === 0) return;
@@ -3585,14 +3957,21 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				if (this.modelWorkBlock() !== undefined) return;
 				const node = this.readmissionCandidates()[0];
 				if (!node) return;
-				const prepared = await this.readmissionRequest(node, signal);
-				if (prepared === undefined || signal.aborted) return;
-				if ("wait" in prepared) {
-					this.setReadmission(node.id, "waiting", prepared.wait);
-					continue;
+				// A verdict whose store write could not be served is applied again as it was, never asked again.
+				const kept = this.keptReadmission.get(node.id);
+				const reused = kept !== undefined && kept.textDigest === summaryTextDigest(node.text);
+				let result: TranscriptSummaryAdmissionResult;
+				if (reused) result = kept.verdict;
+				else {
+					const prepared = await this.readmissionRequest(node, signal);
+					if (prepared === undefined || signal.aborted) return;
+					if ("wait" in prepared) {
+						this.setReadmission(node.id, "waiting", prepared.wait);
+						continue;
+					}
+					result = await port.admit(prepared.request, signal);
 				}
-				const result = await port.admit(prepared.request, signal);
-				await this.enqueue(async () => this.applyReadmission(node, result, epoch));
+				await this.enqueue(async () => this.applyReadmission(node, result, epoch, reused));
 				// A judgment left without a state leaves the node undecided; it must not be judged again in a loop. A live
 				// fence records its own cause ({@link readmissionWait}); what remains is a run that is ending (stopped,
 				// superseded or fatal: its own cause stands) or an apply that threw (the mailbox recorded the error).
@@ -3713,12 +4092,37 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		return wait;
 	}
 
-	/** Apply a re-admission judgment on the mailbox, behind the same fences as a publication. */
+	/**
+	 * A re-admission's store write did not record its verdict. When the store could not serve it (`transient`), the node
+	 * waits `store_unavailable` and the verdict is kept with the text it judged: after the re-admission backoff it is
+	 * applied again, never asked of the evaluator again. Any other failure broke an invariant: the judgment is discarded
+	 * with its cause and not tried again this run. A run that ended, or a node the mirror replaced meanwhile, only
+	 * records the cause.
+	 */
+	private readmissionWriteFailed(
+		node: TranscriptSummaryNode,
+		epoch: number,
+		verdict: TranscriptSummaryAdmissionResult,
+		cause: string,
+		transient: boolean,
+	): void {
+		const wait = this.readmissionWait(node, transient ? "store_unavailable" : "judgment_discarded", cause);
+		if (!this.live(epoch) || this.catalog.get(node.id) !== node) return;
+		if (transient) this.keptReadmission.set(node.id, { textDigest: summaryTextDigest(node.text), verdict });
+		this.setReadmission(node.id, "waiting", wait);
+	}
+
+	/**
+	 * Apply a re-admission judgment on the mailbox, behind the same fences as a publication. `reused`: a verdict kept
+	 * across a store write that could not be served, already counted when it was first applied.
+	 */
 	private async applyReadmission(
 		node: TranscriptSummaryNode,
 		result: TranscriptSummaryAdmissionResult,
 		epoch: number,
+		reused: boolean,
 	): Promise<void> {
+		this.keptReadmission.delete(node.id);
 		const { writer } = this;
 		if (!writer || !this.live(epoch) || this.catalog.get(node.id) !== node) return;
 		// Source and policy fences, read again after the asynchronous judgment.
@@ -3776,7 +4180,20 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				);
 				return;
 			}
-			const annotated = await writer.annotateAdmission(node.id, admission);
+			let annotated: TranscriptSummaryAnnotateResult;
+			try {
+				annotated = await writer.annotateAdmission(node.id, admission);
+			} catch (error) {
+				return this.readmissionWriteFailed(
+					node,
+					epoch,
+					result,
+					`recording an admission failed: ${error instanceof Error ? error.message : String(error)}`,
+					false,
+				);
+			}
+			if (annotated.status === "unavailable")
+				return this.readmissionWriteFailed(node, epoch, result, annotated.reason, true);
 			// Durable already: the mirror takes it with its revision whether or not this run continues (C6).
 			if (annotated.status === "annotated") {
 				this.manifestRevision = annotated.revision;
@@ -3809,8 +4226,21 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// start would only pay the evaluator again for the same answer.
 			const reason = result.disposition === "rejected" ? "admission_rejected" : "admission_uncertain";
 			this.setReadmission(node.id, result.disposition);
-			note(reason, detail);
-			const revoked = await writer.revokeNodes((id) => id === node.id, "recovery");
+			if (!reused) note(reason, detail);
+			let revoked: TranscriptSummaryRevokeResult;
+			try {
+				revoked = await writer.revokeNodes((id) => id === node.id, "recovery");
+			} catch (error) {
+				return this.readmissionWriteFailed(
+					node,
+					epoch,
+					result,
+					`revoking a ${result.disposition} summary failed: ${error instanceof Error ? error.message : String(error)}`,
+					false,
+				);
+			}
+			if (revoked.status === "unavailable")
+				return this.readmissionWriteFailed(node, epoch, result, revoked.reason, true);
 			if (!this.live(epoch)) {
 				// Durable already: the mirror takes it with its revision even though this run will not continue (C6).
 				if (revoked.status === "published") this.mirrorRevocation(revoked, reason, undefined, 0);

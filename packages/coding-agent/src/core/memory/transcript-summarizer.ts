@@ -55,6 +55,7 @@ export function resolveTranscriptSummarizer(
 		model: modelRef,
 		summarizer: {
 			egress: isLocalExecutionModel(model) ? "local" : "external",
+			model: modelRef,
 			async summarize(input, signal) {
 				const spent = createEmptyUsage();
 				try {
