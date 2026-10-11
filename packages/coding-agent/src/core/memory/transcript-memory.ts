@@ -674,6 +674,16 @@ function vouchesFor(runtime: SessionRuntime, read: Extract<TranscriptLineageSpan
 	);
 }
 
+/** A failure of the summarizer call itself, carrying the provider it came from for the one failure classifier. */
+class SummarizerCallError extends Error {
+	readonly provider: string | undefined;
+	constructor(model: string, cause: unknown) {
+		super(cause instanceof Error ? cause.message : String(cause), { cause });
+		const slash = model.indexOf("/");
+		this.provider = slash > 0 ? model.slice(0, slash) : undefined;
+	}
+}
+
 export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSummaryLookup {
 	private readonly ports: TranscriptMemoryPorts;
 	private started = false;
@@ -2735,14 +2745,41 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 					// A failed job save that is due is tried again by this save.
 					if (this.saveRetryAt !== undefined && this.saveRetryAt <= this.ports.now()) this.saveRetryAt = undefined;
 					this.markJobsDirty();
-					const due = this.nextRetentionAt();
-					if (!this.storeRetry.retention && due !== undefined && due <= this.ports.now())
-						await this.applyRetention(epoch);
-					// A lifecycle wake also retries held recovered leaves whose sessions could not be read before.
-					if (this.startPhase === "open") await this.reconcileHeldSessions(new Set(), epoch);
-					if (this.storeRetryAt !== undefined && this.storeRetryAt <= this.ports.now())
-						await this.retryStoreWork(epoch);
-					this.pump(epoch);
+					try {
+						const due = this.nextRetentionAt();
+						if (!this.storeRetry.retention && due !== undefined && due <= this.ports.now()) {
+							try {
+								await this.applyRetention(epoch);
+							} catch (error) {
+								// Retention that threw stays due: it is retried on the store backoff, not on a timer that is
+								// due again at once.
+								this.deferStoreWork(
+									error instanceof Error ? error.message : String(error),
+									{ retention: true },
+									epoch,
+								);
+							}
+						}
+						// A lifecycle wake also retries held recovered leaves whose sessions could not be read before.
+						if (this.startPhase === "open") {
+							try {
+								await this.reconcileHeldSessions(new Set(), epoch);
+							} catch (error) {
+								// Its cause is recorded and the next wake reads those sessions again; the store retry below still runs,
+								// so a due backoff is never left to re-arm the timer at once.
+								this.noteInternalCause(
+									`reading held sessions: ${error instanceof Error ? error.message : String(error)}`,
+								);
+							}
+						}
+						if (this.storeRetryAt !== undefined && this.storeRetryAt <= this.ports.now())
+							await this.retryStoreWork(epoch);
+					} finally {
+						// The one wake path: pump claims what is due and re-arms the timer, so a step that threw (the mailbox
+						// records its cause) never leaves a due retry or the next wake unscheduled. Claims still wait for their
+						// durable attempt save and held jobs stay parked.
+						this.pump(epoch);
+					}
 				});
 			},
 			Math.min(MAX_TIMER_DELAY_MS, Math.max(0, at - this.ports.now())),
@@ -2764,9 +2801,17 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			return signal.aborted || !this.live(epoch) ? { kind: "aborted" } : outcome;
 		} catch (error) {
 			if (signal.aborted) return { kind: "aborted" };
+			// A failure of the summarizer call names its originating provider (its `provider/id` model) to the one failure
+			// classifier, so that provider's signatures decide what is retryable; any other failure (the evaluator, a
+			// source read) is classified provider-neutral.
+			const provider = error instanceof SummarizerCallError ? error.provider : undefined;
 			return {
 				kind: "fail",
-				failure: { kind: "provider", message: error instanceof Error ? error.message : String(error) },
+				failure: {
+					kind: "provider",
+					message: error instanceof Error ? error.message : String(error),
+					...(provider !== undefined ? { provider } : {}),
+				},
 			};
 		}
 	}
@@ -3120,10 +3165,14 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			}
 			paid = true;
 			this.paidClaims.add(token.claimId);
-			reply = await summarizer.summarize(
-				{ system: SUMMARY_SYSTEM_PROMPT, prompt, maxOutputBytes: TRANSCRIPT_SUMMARY_MAX_BYTES },
-				signal,
-			);
+			try {
+				reply = await summarizer.summarize(
+					{ system: SUMMARY_SYSTEM_PROMPT, prompt, maxOutputBytes: TRANSCRIPT_SUMMARY_MAX_BYTES },
+					signal,
+				);
+			} catch (error) {
+				throw new SummarizerCallError(summarizer.model, error);
+			}
 			const check = validateSummaryText(reply.text, checks);
 			if (!check.ok) {
 				return {
@@ -3684,7 +3733,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			return;
 		}
 		if (!this.scheduler?.ownsClaim(token)) return;
-		this.settleFailure(job, { kind: "fail", failure }, this.ports.now(), !paidCall);
+		this.settleFailure(job, { kind: "fail", failure }, this.ports.now(), this.returnsClaim(job, paidCall));
 	}
 
 	/**
@@ -3714,6 +3763,15 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	}
 
 	/**
+	 * Whether a retryable failure gives its claim's attempt back: the claim made no paid call and only reused the job's
+	 * kept paid reply, so the budget that bounds paid calls is not spent by republishing it. A claim with no kept reply
+	 * (an exact copy builds locally) has no paid work to protect and keeps its counted attempt.
+	 */
+	private returnsClaim(job: TranscriptSummaryJob, paidCall: boolean): boolean {
+		return !paidCall && this.scheduler?.get(job.id)?.pendingReply !== undefined;
+	}
+
+	/**
 	 * {@link readLiveDependency} for the claim publishing `node`: the covering read, or undefined when the publication
 	 * must stop, already settled: an aborted run, a lost claim, the job ended `stale` because the index answered that
 	 * its spans or their context are not live, or a transient failure because the index did not answer (the job
@@ -3739,7 +3797,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				? verdict.outcome
 				: { kind: "stale", reason: `${verdict.reason} (at publication)` },
 			this.ports.now(),
-			!paidCall,
+			this.returnsClaim(job, paidCall),
 		);
 		return undefined;
 	}

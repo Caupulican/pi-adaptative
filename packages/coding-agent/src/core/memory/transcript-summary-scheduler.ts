@@ -1308,6 +1308,7 @@ export class TranscriptSummaryScheduler {
 		this.unproven.delete(job.id);
 		this.authorityOf.delete(job.id);
 		this.claims.delete(job.id);
+		this.returnedClaims.delete(job.id);
 	}
 
 	private untrackState(jobId: string): void {

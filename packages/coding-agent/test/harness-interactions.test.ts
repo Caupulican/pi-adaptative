@@ -4073,12 +4073,17 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				lock: false,
 				staged: [],
 			});
-			// Jobs the crash state holds unsettled besides the published target (System One off: the held model leaf, which
-			// the crash state may hold queued or already claimed) are never completed by recovery.
-			const r14AOthers = icmStoredJobs(r14ARead, icmStoreFiles).filter(
-				(job) => job.id !== r14AJob.id && (job.state === "queued" || job.state === "running"),
-			);
-			const r14AQueued = r14AOthers.map((job) => job.id);
+			// The model log leaf (span 8: the leaf System One off holds for model work) is the one job the off crash state
+			// must still carry unsettled besides the published notes leaf. Its claim was saved with the notes leaf's, so the
+			// crash state holds it queued or already claimed (its hold is saved after the notes publication); recovery never
+			// completes it. Only this identity can satisfy the witness.
+			const r14AModelLeaf = icmJobAt(r14ARead, icmStoreFiles, "leaf", 8);
+			const r14AQueued =
+				r14AModelLeaf !== undefined &&
+				r14AModelLeaf.id !== r14AJob.id &&
+				(r14AModelLeaf.state === "queued" || r14AModelLeaf.state === "running")
+					? [r14AModelLeaf.id]
+					: [];
 			if (world.systemOne.enabled) {
 				const r14C = r14Captures.c;
 				const r14B = r14Captures.b;
@@ -4279,7 +4284,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				});
 				expect(
 					r14AQueued.length,
-					`the off crash state holds the model leaf unsettled (stored jobs: ${JSON.stringify(
+					`the off crash state holds the model leaf (span 8) unsettled (stored jobs: ${JSON.stringify(
 						icmStoredJobs(r14ARead, icmStoreFiles).map((job) => ({ kind: job.kind, state: job.state })),
 					)})`,
 				).toBeGreaterThan(0);
@@ -12326,7 +12331,13 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						),
 						paid: {
 							summaries: icmTrackRequests(world, cTrack) - ePaidBefore.summaries,
-							admissions: icmAdmissionRequests(world) - ePaidBefore.admissions,
+							// The answered judgments (the leaf's retry and the parent) are one request each; every other request is
+							// an intended 503 the fixture recorded (the evaluator client retries a 503 itself: its count is the
+							// client's, not an expectation of this journey).
+							admissions:
+								icmAdmissionRequests(world) -
+								ePaidBefore.admissions -
+								world.systemOne.intendedOutages.filter((entry) => entry.startsWith("o13c-outage:")).length,
 						},
 						judgments: eDone.admission?.judgments,
 						reused: eDone.admission?.reused,
@@ -12334,10 +12345,19 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					"the retry judges the kept reply again without paying the summarizer, then the parent is built",
 				).toEqual({
 					leaf: { state: "ready", attempts: 2 },
-					paid: { summaries: 2, admissions: 3 },
+					paid: { summaries: 2, admissions: 2 },
 					judgments: { accepted: 2, rejected: 0, uncertain: 0, unavailable: 1 },
 					reused: 0,
 				});
+				// One logical judgment was unavailable (asserted above); the evaluator's reviewer client retries a 503 itself, at
+				// most its three attempts, so the outage requests the fixture recorded are one judgment's transport attempts.
+				const eOutageRequests = world.systemOne.intendedOutages.filter((entry) =>
+					entry.startsWith("o13c-outage:"),
+				).length;
+				expect(
+					eOutageRequests,
+					"the one unavailable judgment cost exactly the reviewer client's three transport attempts",
+				).toBe(3);
 				expect(await world.disposeSessionInBody(eOwner.session), "the O13c owner disposes cleanly").toBeUndefined();
 				trace.mark("root", "icm.o13c-outage");
 			}
