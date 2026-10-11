@@ -892,6 +892,7 @@ function icmStore(agentDir: string) {
 		manifest: resolve(root, "manifest.json"),
 		jobs: resolve(root, "jobs.json"),
 		ledger: resolve(root, "spent-attempts.json"),
+		forgotten: resolve(root, "forgotten-sessions.json"),
 		lock: resolve(root, "writer.lock.lock"),
 	};
 }
@@ -940,7 +941,10 @@ function icmStoredLedger(
 interface IcmStoredManifest {
 	readonly revision: number;
 	readonly sessions: Record<string, { readonly coveredSpanCount: number; readonly lineageDigest: string }>;
-	readonly acceptedNodes: Record<string, { readonly level: number; readonly fromIndex: number }>;
+	readonly acceptedNodes: Record<
+		string,
+		{ readonly level: number; readonly fromIndex: number; readonly sessionId: string }
+	>;
 }
 
 function icmStoredManifest(read: IcmStoreRead, store: IcmStore): IcmStoredManifest | undefined {
@@ -16165,6 +16169,287 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 			).toEqual({ accepted: 0, jobs: 0, paid: { summaries: 0, admissions: 0 } });
 			trace.mark("root", "icm.forget-fence");
 
+			// M3d (permanent forget command, no coordinator running): two past sessions carry the same notes and both get an
+			// approved exact copy. With NO summary coordinator (the hierarchy is off for the owner) one session is forgotten
+			// through the session surface. The command is the permanent forget state in its own store file: it writes no
+			// manifest, every reader denies the session at once, and the next coordinator never rebuilds it. A damaged
+			// manifest cannot revive it; a damaged forget file fails closed (summaries unavailable, exact recall untouched).
+			const exactOnly = (retentionDays?: number): Partial<Settings> => ({
+				memorySystem: undefined,
+				contextPolicy: {
+					memory: {
+						// Summary egress is allowed so the coordinator runs; admission egress is not, so model work is held before
+						// any call in both System One modes and only exact copies are built.
+						history: {
+							hierarchy: true,
+							summaryModel: `${HARNESS_PROVIDER}/${mSummaryTrack}`,
+							allowExternalSummaryEgress: true,
+							allowExternalAdmissionEgress: false,
+							...(retentionDays === undefined ? {} : { retentionDays }),
+						},
+					},
+				},
+			});
+			const fgAgentDir = `${world.agentDir}-icm-forget-command`;
+			const fgGone = await seedIcmPastSession(world, fgAgentDir);
+			const fgKept = await seedIcmPastSession(world, fgAgentDir);
+			const fgStore = icmStore(fgAgentDir);
+			const fgLive = icmLiveStore(world);
+			world.systemOne.enterPhase("m3d-build", {});
+			await buildIcmHierarchy(world, fgAgentDir, exactOnly(), (hierarchy) => hierarchy.acceptedNodes === 2);
+			const fgHandles = new Map<string, string>();
+			const fgSearch = (id: string) => ({
+				id,
+				name: "memory",
+				arguments: { action: "history_search", query: ICM_NOTES_QUERY, maxResults: 10 },
+			});
+			const fgFirst = await world.createRootSession("root", {
+				agentDir: fgAgentDir,
+				settings: { memorySystem: undefined },
+			});
+			world.provider.enqueue(
+				"root",
+				calls("m3d-list", [fgSearch("m3d-list-1")]),
+				icmAfterHistoryRead("m3d-listed", "memory", fgSearch("m3d-list-1"), (result) => {
+					for (const summary of icmSummaries(result.text)) {
+						for (const session of [fgGone.sessionId, fgKept.sessionId]) {
+							if (summary.covers.includes(`tx:${session}:`)) fgHandles.set(session, summary.handle);
+						}
+					}
+					return { content: [{ type: "text", text: "Both summaries are listed." }] };
+				}),
+			);
+			world.systemOne.enterPhase("m3d-list", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			await withDeadline(
+				trace,
+				"M3d list turn",
+				fgFirst.session.prompt("List the staging notes summaries of both sessions."),
+			);
+			expect(
+				await world.disposeSessionInBody(fgFirst.session),
+				"the M3d first reader disposes cleanly",
+			).toBeUndefined();
+			expect(fgHandles.size, "each session has an approved exact copy before the command").toBe(2);
+
+			// The owner's session has the hierarchy off: no coordinator exists. Wait until its history index is attached.
+			const fgOwner = await world.createRootSession("root", {
+				agentDir: fgAgentDir,
+				settings: { memorySystem: undefined },
+			});
+			await withDeadline(
+				trace,
+				"M3d history index attached",
+				world.io.waitForMutation(() => fgOwner.session.getTranscriptHistoryStatus().availability === "active"),
+			);
+			const fgManifestBefore = world.io.peekFile(fgStore.manifest);
+			const fgUnknown = await withDeadline(
+				trace,
+				"M3d unknown id",
+				fgOwner.session.forgetHistorySession("00000000-0000-4000-8000-000000000000"),
+			);
+			const fgAfterUnknown = world.io.peekFile(fgStore.forgotten);
+			const fgForgot = await withDeadline(
+				trace,
+				"M3d forget",
+				fgOwner.session.forgetHistorySession(fgGone.sessionId),
+			);
+			const fgFile = JSON.parse(world.io.peekFile(fgStore.forgotten) ?? "null") as {
+				revision?: number;
+				sessions?: Record<string, unknown>;
+			} | null;
+			expect(
+				{
+					unknownRefused: !fgUnknown.ok,
+					unknownWrote: fgAfterUnknown !== undefined,
+					forgotten: fgForgot.ok,
+					revision: fgFile?.revision,
+					sessions: Object.keys(fgFile?.sessions ?? {}),
+					manifestUntouched: world.io.peekFile(fgStore.manifest) === fgManifestBefore,
+				},
+				"the command with no coordinator records the permanent marker alone: an unknown id writes nothing, the manifest is not touched",
+			).toEqual({
+				unknownRefused: true,
+				unknownWrote: false,
+				forgotten: true,
+				revision: 1,
+				sessions: [fgGone.sessionId],
+				manifestUntouched: true,
+			});
+			// Readers deny the forgotten session at once: its summary is gone, the neighbour's stays, exact history stays.
+			world.provider.enqueue(
+				"root",
+				dynamicCalls("m3d-expand", () => [
+					{
+						id: "m3d-expand-gone",
+						name: "memory",
+						arguments: { action: "history_expand", ref: fgHandles.get(fgGone.sessionId) },
+					},
+					{
+						id: "m3d-expand-kept",
+						name: "memory",
+						arguments: { action: "history_expand", ref: fgHandles.get(fgKept.sessionId) },
+					},
+					fgSearch("m3d-search-after"),
+				]),
+				{
+					name: "m3d-expanded",
+					check: (request) => {
+						const results = latestBatchResults(request).filter((result) => result.toolName === "memory");
+						const search = results.find((result) => result.text.includes("Coverage:"));
+						const expansions = results.filter((result) => result !== search);
+						const gone = expansions.find((result) => result.isError);
+						const kept = expansions.find((result) => !result.isError);
+						if (gone?.isError !== true || !/not_found|forgotten|expired/.test(gone.text))
+							throw new Error(`the forgotten summary was still expandable: ${gone?.text.slice(0, 500)}`);
+						if (kept?.isError !== false || !kept.text.includes("Covered sources"))
+							throw new Error(`the neighbouring summary was lost: ${kept?.text.slice(0, 500)}`);
+						const summaries = icmSummaries(search?.text ?? "");
+						if (summaries.some((summary) => summary.covers.includes(`tx:${fgGone.sessionId}:`)))
+							throw new Error(
+								`a summary of the forgotten session is still listed: ${search?.text.slice(0, 600)}`,
+							);
+						if (
+							!icmHits(search?.text ?? "").some((hit) => hit.description.includes(`session ${fgGone.sessionId}`))
+						)
+							throw new Error(
+								`the forgotten session lost its exact history hits: ${search?.text.slice(0, 600)}`,
+							);
+					},
+					reply: { content: [{ type: "text", text: "The forgotten summary is gone; exact history stays." }] },
+				},
+			);
+			world.systemOne.enterPhase("m3d-read", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			await withDeadline(
+				trace,
+				"M3d read turn",
+				fgOwner.session.prompt("Expand both summaries and search the notes again."),
+			);
+			expect(await world.disposeSessionInBody(fgOwner.session), "the M3d owner disposes cleanly").toBeUndefined();
+
+			// A coordinator that starts later removes the forgotten session's derived data and never rebuilds it, also after
+			// the derived manifest is destroyed (the marker lives in its own file).
+			const fgRestartOnce = async (label: string) => {
+				await world.provider.waitForProducers();
+				const paidBefore = {
+					summaries: icmTrackRequests(world, mSummaryTrack),
+					admissions: icmAdmissionRequests(world),
+				};
+				const saved = icmObserveNextJobsSave(world, fgStore, `${label}-save`);
+				const listed = mThreads.onResponse(`${label}-listing`, "sessions", () => true);
+				world.systemOne.enterPhase(label, {});
+				const restarted = await world.createRootSession("root", { agentDir: fgAgentDir, settings: exactOnly() });
+				await withDeadline(trace, `${label} listed its sessions`, listed);
+				await withDeadline(
+					trace,
+					`${label} saved`,
+					world.io.waitForMutation(() => saved() !== undefined),
+				);
+				// The neighbour's exact copy is (re)built from its sources when the derived manifest was lost: sampled only once it is.
+				await withDeadline(
+					trace,
+					`${label} neighbour accepted`,
+					world.io.waitForMutation(
+						() => (restarted.session.getTranscriptHistoryStatus().hierarchy?.acceptedNodes ?? 0) >= 1,
+					),
+				);
+				const status = icmHierarchy(restarted.session);
+				expect(await world.disposeSessionInBody(restarted.session), `${label} disposes cleanly`).toBeUndefined();
+				const manifest = icmStoredManifest(fgLive, fgStore);
+				return {
+					accepted: status.acceptedNodes,
+					storedSessions: [...new Set(Object.values(manifest?.acceptedNodes ?? {}).map((node) => node.sessionId))],
+					paid: {
+						summaries: icmTrackRequests(world, mSummaryTrack) - paidBefore.summaries,
+						admissions: icmAdmissionRequests(world) - paidBefore.admissions,
+					},
+				};
+			};
+			const fgRestart = await fgRestartOnce("m3d-restart");
+			expect(fgRestart, "a restarted coordinator keeps only the neighbour and pays nothing").toEqual({
+				accepted: 1,
+				storedSessions: [fgKept.sessionId],
+				paid: { summaries: 0, admissions: 0 },
+			});
+			const fgForgottenText = world.io.peekFile(fgStore.forgotten);
+			world.io.seed(fgStore.manifest, "{ this manifest is destroyed");
+			const fgAfterCorruption = await fgRestartOnce("m3d-corrupt-restart");
+			expect(
+				{ ...fgAfterCorruption, forgetFileSame: world.io.peekFile(fgStore.forgotten) === fgForgottenText },
+				"a destroyed manifest is rebuilt from sources but the forgotten session stays forgotten",
+			).toEqual({
+				accepted: 1,
+				storedSessions: [fgKept.sessionId],
+				paid: { summaries: 0, admissions: 0 },
+				forgetFileSame: true,
+			});
+
+			// Fail closed: a damaged forget file means "unknown", never "nothing was forgotten".
+			world.io.seed(fgStore.forgotten, '{"schemaVersion":1,"kind":"forgotten_sessions"');
+			const fgDamaged = await world.createRootSession("root", { agentDir: fgAgentDir, settings: exactOnly() });
+			await withDeadline(
+				trace,
+				"M3d coordinator refused",
+				world.io.waitForMutation(() =>
+					/permanent forget state/.test(
+						fgDamaged.session.getTranscriptHistoryStatus().hierarchy?.disabledReason ?? "",
+					),
+				),
+			);
+			world.provider.enqueue(
+				"root",
+				calls("m3d-damaged", [fgSearch("m3d-damaged-1")]),
+				icmAfterHistoryRead("m3d-damaged-read", "memory", fgSearch("m3d-damaged-1"), (result) => {
+					if (
+						result.isError ||
+						icmHits(result.text).length === 0 ||
+						!result.text.includes("Summary lookup unavailable: ") ||
+						!/permanent forget state/.test(result.text) ||
+						icmSummaries(result.text).length !== 0
+					)
+						throw new Error(
+							`a damaged forget file did not fail closed with exact hits: ${result.text.slice(0, 700)}`,
+						);
+					return { content: [{ type: "text", text: "Summaries are unavailable; exact history answers." }] };
+				}),
+			);
+			world.systemOne.enterPhase("m3d-damaged", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			await withDeadline(trace, "M3d damaged read", fgDamaged.session.prompt("Search the notes again."));
+			expect(
+				await world.disposeSessionInBody(fgDamaged.session),
+				"the M3d damaged-state session disposes cleanly",
+			).toBeUndefined();
+			world.io.seed(fgStore.forgotten, fgForgottenText ?? "");
+
+			// Malformed stored history settings (hand-edited JSON): a string "false" is not an opt-in and a numeric model is not a
+			// model name. The session starts, builds nothing and calls nothing; the egress flags keep their own strict reading.
+			const fgPaidBeforeMalformed = icmTrackRequests(world, mSummaryTrack);
+			const fgMalformed = await world.createRootSession("root", {
+				agentDir: fgAgentDir,
+				settings: {
+					memorySystem: undefined,
+					contextPolicy: {
+						memory: { history: { hierarchy: "false", summaryModel: 5, allowExternalSummaryEgress: true } },
+					},
+				} as unknown as Partial<Settings>,
+			});
+			await withDeadline(
+				trace,
+				"M3d malformed settings attached",
+				world.io.waitForMutation(() => fgMalformed.session.getTranscriptHistoryStatus().availability === "active"),
+			);
+			expect(
+				{
+					state: fgMalformed.session.getTranscriptHistoryStatus().hierarchy?.state,
+					paid: icmTrackRequests(world, mSummaryTrack) - fgPaidBeforeMalformed,
+				},
+				"malformed stored history settings leave the hierarchy off and call nothing",
+			).toEqual({ state: "off", paid: 0 });
+			expect(
+				await world.disposeSessionInBody(fgMalformed.session),
+				"the M3d malformed-settings session disposes cleanly",
+			).toBeUndefined();
+			trace.mark("root", "icm.forget-command");
+
 			// M4: retention revocation and expiry, with a neighbour that stays. Two past sessions carry the same notes; one is aged
 			// thirty days. Model summaries are kept out (no admission egress), so only the two exact copies are built.
 			const rAgentDir = `${world.agentDir}-icm-retention`;
@@ -16184,22 +16469,6 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 					return JSON.stringify(entry);
 				});
 			world.io.writeFileSync(rAged.file, agedLines.join("\n"));
-			const exactOnly = (retentionDays?: number): Partial<Settings> => ({
-				memorySystem: undefined,
-				contextPolicy: {
-					memory: {
-						// Summary egress is allowed so the coordinator runs; admission egress is not, so model work is held before
-						// any call in both System One modes and only exact copies are built.
-						history: {
-							hierarchy: true,
-							summaryModel: `${HARNESS_PROVIDER}/${mSummaryTrack}`,
-							allowExternalSummaryEgress: true,
-							allowExternalAdmissionEgress: false,
-							...(retentionDays === undefined ? {} : { retentionDays }),
-						},
-					},
-				},
-			});
 			world.systemOne.enterPhase("m4-build", {});
 			await buildIcmHierarchy(world, rAgentDir, exactOnly(), (hierarchy) => hierarchy.acceptedNodes === 2);
 			const rSummaries = new Map<string, string>();

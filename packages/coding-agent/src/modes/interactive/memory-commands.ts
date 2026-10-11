@@ -75,6 +75,10 @@ function describeHistory(status: TranscriptHistoryStatus): string {
 	}
 	for (const issue of hierarchy?.recoveryIssues ?? []) lines.push(`  hierarchy recovery: ${issue}`);
 	// One slot the next cause overwrites, not cleared when its condition ends: its time says how old it is.
+	const activeCause = hierarchy?.activeCause;
+	if (activeCause) {
+		lines.push(`  coordinator's latest fault (recorded ${activeCause.at}, may be over): ${activeCause.cause}`);
+	}
 	const internalCause = hierarchy?.lastInternalError;
 	if (internalCause) {
 		lines.push(

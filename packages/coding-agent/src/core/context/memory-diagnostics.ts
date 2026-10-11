@@ -166,6 +166,15 @@ export interface TranscriptHierarchyAdmission {
 	reused: number;
 	/** Accepted model summaries without a current admission: never shown or expanded as approved. */
 	unapprovedNodes: number;
+	/** Paid work in distinct units (see the coordinator's status): attempts, requests, transport attempts, receipts, reuses. */
+	work: {
+		logicalAttempts: number;
+		semanticRequests: number;
+		transportAttempts: number;
+		receiptsRecorded: number;
+		receiptsPending: number;
+		reused: number;
+	};
 	readmission: {
 		admitted: number;
 		rejected: number;
@@ -234,6 +243,8 @@ export interface TranscriptHierarchyStatus {
 	 * it may embed a block reason or a path, so the diagnostic projection never carries it.
 	 */
 	lastInternalError?: { cause: string; at: string };
+	/** The latest FAULT cause (operator view only): benign events never overwrite it. */
+	activeCause?: { cause: string; at: string };
 }
 
 /** What the operator-facing view knows about history recall; the diagnostic projection is derived from it. */
@@ -414,6 +425,7 @@ function sanitizeHierarchyForDiagnostics(status: TranscriptHierarchyStatus): Tra
 						judgments: { ...status.admission.judgments },
 						reused: status.admission.reused,
 						unapprovedNodes: status.admission.unapprovedNodes,
+						work: { ...status.admission.work },
 						readmission: { ...status.admission.readmission },
 					},
 				}

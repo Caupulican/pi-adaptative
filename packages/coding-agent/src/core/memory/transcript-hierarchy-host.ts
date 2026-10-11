@@ -442,7 +442,10 @@ export class TranscriptHierarchyHost {
 						settings.retentionDays,
 					])
 				: undefined;
-		if (reason !== undefined || this.appliedSignature !== signature || this.coordinator?.isRunning() === false) {
+		// A coordinator the store fenced (or that stopped fatally) is terminal for its generation: it is replaced only when this
+		// root attaches again or its own effective signature changes, never by another root's or an unrelated settings change,
+		// so two roots never take the lease from each other by turns.
+		if (reason !== undefined || this.appliedSignature !== signature) {
 			await this.stopCoordinator();
 		}
 		if (reason !== undefined || summarizer === undefined || !summarizer.ok || !reader) {
@@ -559,6 +562,7 @@ export class TranscriptHierarchyHost {
 				...(status.admission.blocked ? { blocked: { ...status.admission.blocked } } : {}),
 				...(status.admission.heldByKind ? { heldByKind: { ...status.admission.heldByKind } } : {}),
 				judgments: { ...status.admission.judgments },
+				work: { ...status.admission.work },
 				readmission: { ...status.admission.readmission },
 			},
 			retention: {
@@ -601,6 +605,9 @@ export class TranscriptHierarchyHost {
 				interrupted: batch.interrupted,
 				endedAt: batch.endedAt,
 			})),
+			...(status.activeCause !== undefined
+				? { activeCause: { cause: boundInternalCause(status.activeCause.cause), at: status.activeCause.at } }
+				: {}),
 			...(status.lastInternalError !== undefined
 				? {
 						lastInternalError: {
