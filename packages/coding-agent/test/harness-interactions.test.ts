@@ -7409,6 +7409,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_invalid_output: [^\n]+\)\. Exact history recall is unaffected\.$/,
 				// W8: the readmission whose evaluator stays unavailable ends failed with its attempts spent.
 				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_unavailable_attempts_exhausted: [^\n]+\)\. Exact history recall is unaffected\.$/,
+				// N-cancel: the neighbour's parent stays parked on its failed child.
+				/^History summaries: 1 model summary job\(s\) are held: a child summary is not approved yet\. Exact copies and exact history recall are unaffected\.$/,
 				// R-receipt: the failed usage write itself is reported once (the unrecorded spend), with the write's real cause.
 				/^A System One usage receipt could not be recorded \([^\n]*\); its spend is not in this session's usage record\.$/,
 				// R-receipt: one valid paid answer is kept while its usage receipt cannot be written (exactly one job, the
@@ -13807,24 +13809,30 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					// The baseline the forget is judged against: the neighbour's live job and proof, read from the store before the forget.
 					nbBaseline = { neighbour: nbLiveState(nbNeighbour.sessionId), owed: nbOwed() };
 					const nbTargetBefore = nbLiveState(nbTarget.sessionId);
+					// A positive, identified baseline (the exact job inventory also holds the builds' finished jobs): the neighbour has a
+					// parked parent that never started (attempts 0), a spent identity and a reserved one; the target has a started
+					// judgment and its reservation.
+					const nbKinds = (entries: { record: unknown }[]) =>
+						entries.map((entry) => (entry.record as { kind: string }).kind);
 					expect(
 						{
 							neighbour: {
-								jobs: nbBaseline.neighbour.jobs.map((job) => job.attempts),
-								proof: nbBaseline.neighbour.proof
-									.map((entry) => (entry.record as { kind: string }).kind)
-									.sort(),
+								hasJobs: nbBaseline.neighbour.jobs.length > 0,
+								parkedParents: nbBaseline.neighbour.jobs.filter((job) => job.attempts === 0).length,
+								finishedJobs: nbBaseline.neighbour.jobs.filter((job) => job.attempts >= 1).length > 0,
+								proof: nbKinds(nbBaseline.neighbour.proof).sort(),
 							},
 							target: {
-								jobs: nbTargetBefore.jobs.map((job) => job.attempts),
-								proof: nbTargetBefore.proof.map((entry) => (entry.record as { kind: string }).kind),
+								parkedParents: nbTargetBefore.jobs.filter((job) => job.attempts === 0).length,
+								hasStartedJudgment: nbTargetBefore.jobs.some((job) => job.attempts >= 1),
+								holdsReservation: nbKinds(nbTargetBefore.proof).includes("reserved"),
 							},
 							owed: nbBaseline.owed,
 						},
-						"before the forget the neighbour holds a parked job and a spent identity, and the target holds its one judged attempt",
+						"before the forget the neighbour holds a parked job and a spent identity, and the target holds a started judgment",
 					).toEqual({
-						neighbour: { jobs: [0], proof: ["reserved", "spent"] },
-						target: { jobs: [1], proof: ["reserved"] },
+						neighbour: { hasJobs: true, parkedParents: 1, finishedJobs: true, proof: ["reserved", "spent"] },
+						target: { parkedParents: 0, hasStartedJudgment: true, holdsReservation: true },
 						owed: [],
 					});
 					const nbForgetSave = icmObserveNextJobsSave(world, nbStore, "nb-cancel-forget-save");

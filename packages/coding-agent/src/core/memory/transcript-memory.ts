@@ -4908,7 +4908,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	/**
 	 * The body of a re-admission job under its claim: re-read the node's sources (or its approved children), judge the
 	 * exact text once (or reuse the kept paid verdict), and hand the judgment to {@link settleReadmitted}. A node that is
-	 * gone or whose text changed ends the job stale: its identity names the text it judges. A node already approved (its
+	 * gone ends the job stale. A revocation that replaced the node ends its readmission jobs first (endRevokedReadmissions), so a job never judges the text of a rebuilt node: its identity names the text it judges. A node already approved (its
 	 * admission was made durable before a stop) completes the job ready with its attempt returned, without a call.
 	 */
 	private async readmitNode(
