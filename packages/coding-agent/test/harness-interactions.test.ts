@@ -23,6 +23,7 @@ import {
 	loadBackgroundToolTaskRecordsNewestFirst,
 } from "../src/core/background-tool-task-controller.ts";
 import type { TranscriptHistoryStatus } from "../src/core/context/memory-diagnostics.ts";
+import { TRANSCRIPT_MEMORY_PROVIDER_ID } from "../src/core/context/transcript-memory-provider.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../src/core/default-tool-surface.ts";
 import { sessionRootAddress, sessionRootReplyMessageId } from "../src/core/delegation/session-root-mailbox.ts";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
@@ -55,6 +56,7 @@ import { OrchestrationProfileStore } from "../src/core/orchestration/profile-sto
 import { goalObjectiveId } from "../src/core/orchestration/work-state-projection.ts";
 import { getInFlightWorkUnits } from "../src/core/reload-blockers.ts";
 import { isCredentialSecretKey, mockCredentialFields } from "../src/core/secrets/credential-content-mock.ts";
+import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../src/core/security/secret-text.ts";
 import { getDirectoryResourceProfileInfo } from "../src/core/settings/settings-rules.ts";
 import type { Settings } from "../src/core/settings/settings-schema.ts";
 import type { ExecutionState } from "../src/core/system-one/types.ts";
@@ -5413,7 +5415,10 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			const e8uCreated = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
 			const e8uSession = e8uCreated.session;
 			const e8uWake = createBarrier();
-			const E8_OPAQUE_ERROR = "scripted opaque failure xyz";
+			// The opaque failure carries a provider-key shape and runs past the retained diagnostic bound, so the persisted worker record
+			// must mask the key and bound the line. The key is joined from two literals so no source line carries it whole.
+			const E8_OPAQUE_KEY = ["AIzaD3kQ9vL", "m2Xp8Rt4Wz6Yc1Nb5Hj7Fg0TsUe9"].join("");
+			const E8_OPAQUE_ERROR = `scripted opaque failure xyz ${E8_OPAQUE_KEY} ${"x".repeat(260)}`;
 			world.provider.enqueue(
 				"root",
 				calls("e8u-start", [
@@ -5468,6 +5473,36 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			).toEqual(["failed"]);
 			expect(e8uAttempts[0]?.result?.reasonCode, "the opaque failure terminalizes as a completion error").toBe(
 				"completion_error",
+			);
+			// The failure is retained on the worker's own persisted transcript: masked, bounded, and without the raw key.
+			const e8uAgentId = e8uAttempts[0]?.agentId;
+			const e8uBinding =
+				e8uAgentId === undefined
+					? undefined
+					: e8uSession.backgroundLanes.getTaskRuntimeSnapshot()?.agents[e8uAgentId];
+			if (e8uAgentId === undefined || e8uBinding === undefined) {
+				throw new Error("the opaque worker has no binding for its persisted transcript");
+			}
+			const e8uPersistedErrors = new WorkerConversationStore()
+				.open({
+					agentDir: world.agentDir,
+					resumeContext: e8uBinding.resumeContext,
+					expectedLogicalAgentId: e8uAgentId,
+				})
+				.getRawTranscript()
+				.flatMap((message) =>
+					message.role === "assistant" && message.errorMessage !== undefined ? [message.errorMessage] : [],
+				);
+			const e8uPersistedError = e8uPersistedErrors.at(-1) ?? "";
+			expect(
+				e8uPersistedError.startsWith("scripted opaque failure xyz [REDACTED] "),
+				"the persisted failure keeps its text with the provider key masked",
+			).toBe(true);
+			expect(e8uPersistedError.includes(E8_OPAQUE_KEY), "the raw key never reaches the persisted record").toBe(
+				false,
+			);
+			expect(e8uPersistedError.length, "the persisted failure is bounded to the retained diagnostic length").toBe(
+				MAX_RETAINED_DIAGNOSTIC_CHARS,
 			);
 			expect(await world.disposeSessionInBody(e8uSession), "the E8 opaque owner disposes cleanly").toBeUndefined();
 			trace.mark("root", "e8.unknown");
@@ -7338,6 +7373,88 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				"the deadline owner disposes cleanly",
 			).toBeUndefined();
 			trace.mark("root", "deadline.window");
+
+			// Root memory query gate: an extension's context memory provider is queried only by a turn that passes the long-term trigger
+			// and carries no credential shape. The secret turn runs first and the normal turn after it, on the same session, so the normal
+			// turn proves the blocked turn left the provider usable. The key is joined from two literals (no source line carries it whole).
+			const memoryKey = ["AIzaD3kQ9vL", "m2Xp8Rt4Wz6Yc1Nb5Hj7Fg0TsUe9"].join("");
+			const memorySecretQuery = `Remember this key for the release deploy: ${memoryKey}`;
+			const memoryNormalQuery = "Remember the release preference for this project.";
+			const memoryProviderId = "harness-context-memory";
+			const memorySearches: string[] = [];
+			world.provider.enqueue(
+				"root",
+				text("memory-secret-reply", "The secret query was withheld."),
+				text("memory-normal-reply", "The preference was looked up."),
+			);
+			const memoryOwner = await world.createRootSession("root", {
+				sessionManager: world.createSessionManager(),
+				systemOneEnabled: false,
+				extensionFactories: [
+					(pi) => {
+						// Registration waits for session_start: extension factories run before the runtime is bound to the session.
+						pi.on("session_start", () => {
+							pi.registerContextMemoryProvider({
+								id: memoryProviderId,
+								label: "Harness context memory",
+								source: "custom_local",
+								capabilities: {
+									search: true,
+									fetch: false,
+									write: false,
+									delete: false,
+									shortTerm: false,
+									longTerm: true,
+									graph: false,
+									citations: false,
+									scopes: ["session"],
+									localOnly: true,
+								},
+								search: async (request) => {
+									memorySearches.push(request.query);
+									return [];
+								},
+								fetch: async () => undefined,
+							});
+						});
+					},
+				],
+			});
+			const memorySession = memoryOwner.session;
+			await withDeadline(trace, "memory secret turn", memorySession.prompt(memorySecretQuery));
+			trace.mark("root", "memory.secret");
+			expect(world.provider.reached, "the secret turn reached the root boundary").toContain(
+				"root:memory-secret-reply",
+			);
+			expect(memorySearches, "the secret query never reaches the extension provider's search").toEqual([]);
+			const blockedReports = memorySession.getMemoryRetrievalReport().providerReports;
+			expect(
+				blockedReports.some((report) => report.providerId === memoryProviderId),
+				"the withheld extension provider is not queried or reported",
+			).toBe(false);
+			expect(
+				blockedReports.find((report) => report.providerId === TRANSCRIPT_MEMORY_PROVIDER_ID),
+				"the transcript provider reports the refusal with its secret_like_query reason",
+			).toMatchObject({ status: "blocked", rejectionReasons: ["secret_like_query"], resultCount: 0 });
+			await withDeadline(trace, "memory normal turn", memorySession.prompt(memoryNormalQuery));
+			trace.mark("root", "memory.normal");
+			expect(world.provider.reached, "the normal turn reached the root boundary").toContain(
+				"root:memory-normal-reply",
+			);
+			expect(memorySearches, "the normal query reaches the extension provider's search exactly once").toEqual([
+				memoryNormalQuery,
+			]);
+			expect(
+				memorySession
+					.getMemoryRetrievalReport()
+					.providerReports.find((report) => report.providerId === memoryProviderId),
+				"the normal query is reported as queried with no rejection",
+			).toMatchObject({ status: "queried", rejectionReasons: [], resultCount: 0 });
+			expect(
+				await world.disposeSessionInBody(memorySession),
+				"the memory gate owner disposes cleanly",
+			).toBeUndefined();
+			trace.mark("root", "memory.gate");
 		},
 	);
 }, 300_000);

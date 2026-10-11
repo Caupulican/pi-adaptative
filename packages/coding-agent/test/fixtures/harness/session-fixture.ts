@@ -7,10 +7,12 @@ import type { AgentSession } from "../../../src/core/agent-session.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import type { WorkerWriteReservationLease } from "../../../src/core/delegation/worker-write-reservation.ts";
 import type { ExecResult } from "../../../src/core/exec.ts";
+import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
 import { getResumableHumanInputSnapshot } from "../../../src/core/human-input.ts";
 import type { TranscriptSummaryTimeSource } from "../../../src/core/memory/transcript-memory-contracts.ts";
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
+import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import type { Settings } from "../../../src/core/settings/settings-schema.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
@@ -2172,6 +2174,11 @@ export class HarnessWorld {
 			 * in the stored settings (the in-memory store serializes through JSON), so it exercises the production default.
 			 */
 			readonly settings?: Partial<Settings>;
+			/**
+			 * Extension factories loaded into this session only, through a resource loader built exactly as the SDK builds its default one
+			 * plus these factories. Factories register their owner-facing behavior on the session's own events.
+			 */
+			readonly extensionFactories?: readonly ExtensionFactory[];
 		} = {},
 	): Promise<{ session: AgentSession; sessionManager: SessionManager; settingsManager: SettingsManager }> {
 		const sessionManager = options.sessionManager ?? SessionManager.inMemory(HARNESS_PROJECT_CWD);
@@ -2194,13 +2201,24 @@ export class HarnessWorld {
 		const intentBefore = optionalIntentSnapshot(sessionManager);
 		this.closeSystemOneWindow(sessionManager, intentBefore);
 		this.systemOneWindows.set(sessionManager, { enabled: systemOneEnabled, before: intentBefore });
+		const agentDir = options.agentDir ?? this.agentDir;
 		const { session } = await createAgentSession({
 			cwd: HARNESS_PROJECT_CWD,
-			agentDir: options.agentDir ?? this.agentDir,
+			agentDir,
 			authStorage: this.authStorage,
 			modelRegistry: this.modelRegistry,
 			settingsManager,
 			sessionManager,
+			...(options.extensionFactories === undefined
+				? {}
+				: {
+						resourceLoader: new DefaultResourceLoader({
+							cwd: HARNESS_PROJECT_CWD,
+							agentDir,
+							settingsManager,
+							extensionFactories: [...options.extensionFactories],
+						}),
+					}),
 			...(options.orchestrationProfile === undefined
 				? { model: this.provider.model(modelId) }
 				: { orchestrationProfile: options.orchestrationProfile }),
