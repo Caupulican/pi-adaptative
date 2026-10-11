@@ -12364,6 +12364,128 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				).toBe(3);
 				expect(await world.disposeSessionInBody(eOwner.session), "the O13c owner disposes cleanly").toBeUndefined();
 				trace.mark("root", "icm.o13c-outage");
+
+				// R-receipt (a VALID paid answer whose usage receipt cannot be written): the evaluator answers the leaf validly,
+				// then the owner session's append of that answer's semantic-usage entry fails once. The answer is not discarded
+				// and not bought again: the job keeps its verdict and holds under the usage-receipt hold with the real cause. The
+				// session is then reopened from the same file (same session id): the receipt is recorded once, the kept verdict is
+				// reused, the leaf is published and the parent is built. Evaluator requests: one for the leaf, one for the parent.
+				const rcAgentDir = `${world.agentDir}-icm-receipt`;
+				await seedIcmPastSession(world, rcAgentDir);
+				world.provider.enqueue(cTrack, text("rc-leaf-summary", ICM_LEAF_SUMMARY), {
+					name: "rc-parent-summary",
+					check: (request) => {
+						if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+							throw new Error("the receipt-row parent does not merge the leaf");
+					},
+					reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+				});
+				// The owner session must have replied once: a session file is written only from its first reply on, and a receipt
+				// held back in memory could not fail. The hierarchy is switched on later, live, in this same session.
+				const rcFirst = await world.createRootSession("root", {
+					agentDir: rcAgentDir,
+					settings: { memorySystem: undefined },
+				});
+				world.provider.enqueue("root", {
+					name: "rc-owner-turn",
+					reply: { content: [{ type: "text", text: "Noted." }] },
+				});
+				world.systemOne.enterPhase("rc-owner-turn", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+				await withDeadline(trace, "R-receipt owner turn", rcFirst.session.prompt("Say hello."));
+				world.systemOne.enterPhase("rc-answering", cAdmission);
+				const rcPaidBefore = {
+					summaries: icmTrackRequests(world, cTrack),
+					admissions: icmAdmissionRequests(world),
+				};
+				world.io.failNext({
+					name: "rc-receipt-append",
+					kind: "append",
+					code: "EIO",
+					matches: (operation, data) =>
+						operation.path.endsWith(".jsonl") &&
+						(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
+				});
+				// Live settings change in the running session: the hierarchy comes up without restarting the session.
+				rcFirst.settingsManager.applyOverrides({
+					contextPolicy: { memory: { history: icmHierarchySettings(cTrack).contextPolicy?.memory?.history } },
+				});
+				await withDeadline(
+					trace,
+					"R-receipt leaf held for its usage receipt",
+					world.io.waitForMutation(() => {
+						const admission = rcFirst.session.getTranscriptHistoryStatus().hierarchy?.admission;
+						return admission?.heldByKind?.usage_receipt === 1;
+					}),
+				);
+				const rcHeld = icmHierarchy(rcFirst.session);
+				expect(
+					{
+						held: rcHeld.admission?.heldByKind,
+						receipts: {
+							recorded: rcHeld.admission?.work.receiptsRecorded,
+							pending: rcHeld.admission?.work.receiptsPending,
+						},
+						requests: {
+							summaries: icmTrackRequests(world, cTrack) - rcPaidBefore.summaries,
+							admissions: icmAdmissionRequests(world) - rcPaidBefore.admissions,
+						},
+					},
+					"a valid answer whose receipt could not be written is held, kept and not bought again",
+				).toEqual({
+					held: { usage_receipt: 1 },
+					receipts: { recorded: 0, pending: 1 },
+					requests: { summaries: 1, admissions: 1 },
+				});
+				const rcOwnerFile = rcFirst.sessionManager.getSessionFile();
+				if (rcOwnerFile === undefined) throw new Error("R-receipt: the owner session has no file");
+				await world.disposeSessionInBody(rcFirst.session);
+				const rcSecond = await world.createRootSession("root", {
+					agentDir: rcAgentDir,
+					sessionManager: world.openSessionManager(rcOwnerFile, rcAgentDir),
+					settings: icmHierarchySettings(cTrack),
+				});
+				await withDeadline(
+					trace,
+					"R-receipt hierarchy built after the owner session was reopened",
+					world.io.waitForMutation(() => {
+						const work = rcSecond.session.getTranscriptHistoryStatus().hierarchy?.admission?.work;
+						return (
+							work !== undefined && work.receiptsRecorded >= 2 && work.receiptsPending === 0 && work.reused >= 1
+						);
+					}),
+					60_000,
+				);
+				const rcDone = icmHierarchy(rcSecond.session);
+				const rcReports = world.io
+					.fileEntries()
+					.get(rcOwnerFile)
+					?.split("\n")
+					.filter((line) => line.includes('"customType":"semantic_usage"'))
+					.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId);
+				expect(
+					{
+						requests: {
+							summaries: icmTrackRequests(world, cTrack) - rcPaidBefore.summaries,
+							admissions: icmAdmissionRequests(world) - rcPaidBefore.admissions,
+						},
+						held: rcDone.admission?.heldByKind,
+						receipts: {
+							pending: rcDone.admission?.work.receiptsPending,
+							uniqueReports: new Set(rcReports).size === (rcReports?.length ?? -1),
+							count: rcReports?.length,
+						},
+					},
+					"the reopened session records the owed receipt once and the leaf verdict is not bought again",
+				).toEqual({
+					requests: { summaries: 2, admissions: 2 },
+					held: undefined,
+					receipts: { pending: 0, uniqueReports: true, count: 2 },
+				});
+				expect(
+					await world.disposeSessionInBody(rcSecond.session),
+					"the receipt-row owner disposes cleanly",
+				).toBeUndefined();
+				trace.mark("root", "icm.receipt-hold");
 			}
 		},
 	);
