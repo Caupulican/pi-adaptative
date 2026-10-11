@@ -7365,6 +7365,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				/^History summaries: 1 job\(s\) failed, 0 succeeded \(first cause: attempts_exhausted: The attempt budget is spent: 3 of 3 attempts were started and none completed\.[^\n]*\)\. Exact history recall is unaffected\.$/,
 				// R-invalid: the invalid paid answer ends the leaf (the first of the 'first cause' shapes of a failed job).
 				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_invalid_output: [^\n]+\)\. Exact history recall is unaffected\.$/,
+				// R-receipt: the failed usage write itself is reported once (the unrecorded spend), with the write's real cause.
+				/^A System One usage receipt could not be recorded \([^\n]*\); its spend is not in this session's usage record\.$/,
 				// R-receipt: one valid paid answer is kept while its usage receipt cannot be written (exactly one job, the
 				// usage-receipt hold, the session's real write failure as the cause).
 				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: [^\n]*Session persistence state is uncertain after a failed write[^\n]*\. Exact history recall is unaffected\.$/,

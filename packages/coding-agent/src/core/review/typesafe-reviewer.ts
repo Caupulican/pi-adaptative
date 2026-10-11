@@ -123,6 +123,11 @@ export interface SystemOneReviewerDeps {
 	 * sink leaves that receipt `unrecorded` on the result; it never discards a received answer.
 	 */
 	onUsage?(receipt: TypeSafeUsageReceipt): void;
+	/**
+	 * A paid response's usage could not be written (`onUsage` threw). The answer is still returned with the receipt marked
+	 * unrecorded; this lets every caller's owner see the unrecorded spend, not only a caller that reads `receipts`.
+	 */
+	onReceiptUnrecorded?(receipt: SystemOneReceipt): void;
 	/** The same host credential boundary that protects model requests and tool output. */
 	credentialBoundary?: Pick<
 		CredentialExposureBoundary,
@@ -325,7 +330,19 @@ export class SystemOneReviewer {
 				return { status: "recorded", reportId: payload.receiptId, attempt: payload.attempt, payload };
 			} catch (error) {
 				const cause = redact(error instanceof Error ? error.message : String(error)).slice(0, 200);
-				return { status: "unrecorded", reportId: payload.receiptId, attempt: payload.attempt, cause, payload };
+				const unrecorded: SystemOneReceipt = {
+					status: "unrecorded",
+					reportId: payload.receiptId,
+					attempt: payload.attempt,
+					cause,
+					payload,
+				};
+				try {
+					this.deps.onReceiptUnrecorded?.(unrecorded);
+				} catch {
+					// Reporting the unrecorded spend never fails the evaluation it reports on.
+				}
+				return unrecorded;
 			}
 		};
 		const timeout = new AbortController();

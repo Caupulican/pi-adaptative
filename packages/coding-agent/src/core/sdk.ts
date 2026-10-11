@@ -705,6 +705,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			? false
 			: systemOneSettings.enabled && process.env.PI_SYSTEM_ONE_DISABLED !== "1");
 
+	const unrecordedReceiptWarning: { notify?: (message: string) => void } = {};
 	const hookCoordinator =
 		options.hookCoordinator ??
 		(options.integrityExtensions ? new IntegrityHookCoordinator(options.integrityExtensions) : undefined);
@@ -716,6 +717,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if ((await access.resolve()).kind === "ready") {
 			const reviewer = new SystemOneReviewer({
 				access,
+				// The session exists only after this reviewer does: the warning path is bound once it does.
+				onReceiptUnrecorded: (receipt) =>
+					unrecordedReceiptWarning.notify?.(
+						`A System One usage receipt could not be recorded (${receipt.cause ?? "write failed"}); its spend is not in this session's usage record.`,
+					),
 				fetch: options.systemOneFetch,
 				credentialBoundary: systemOneCredentialBoundary,
 				onUsage: (receipt) => {
@@ -875,6 +881,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			(steeringPlane || systemOneController ? new AdaptiveRuntimeReadiness({ isUnbound: true }) : undefined),
 	});
 	sessionRef.current = session;
+	unrecordedReceiptWarning.notify = (message) => session.emitHostWarning(message);
 	// The AgentSession constructor builds the first runner; a reload swaps it through the same ref.
 	const getExtensionRunner = (): ExtensionRunner => {
 		const runner = extensionRunnerRef.current;
