@@ -924,6 +924,15 @@ interface IcmStoredJob {
 	readonly pendingReply?: { readonly textDigest: string };
 	readonly lastError?: { readonly reason: string; readonly message: string };
 	readonly ledger?: { readonly semanticRequests: number };
+	/** The kept paid verdict: its receipts stay owed (`unrecorded`) until the owner records each one. */
+	readonly pendingVerdict?: {
+		readonly ownerSessionId: string;
+		readonly receipts: ReadonlyArray<{
+			readonly reportId: string;
+			readonly status: string;
+			readonly attempt: number;
+		}>;
+	};
 }
 
 /** A store file's text: from a crash capture, or from the live tree (no ledger entry, no fault, no hold). */
@@ -7753,6 +7762,10 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				// R-receipt: one valid paid answer is kept while its usage receipt cannot be written (exactly one job, the
 				// usage-receipt hold, the session's real write failure as the cause).
 				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: [^\n]*Session persistence state is uncertain after a failed write[^\n]*\. Exact history recall is unaffected\.$/,
+				// N-receipt: the same one-receipt hold reported with its raw write failure (the owner, before its retry), and by the
+				// coordinator that does not own the receipt, whose cause names the owner session (never written by that coordinator).
+				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: Scripted IO fault nr-receipt-append: [^\n]*\. Exact history recall is unaffected\.$/,
+				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: The paid answer's usage receipt belongs to another session and is recorded when a coordinator starts in it\. Exact history recall is unaffected\.$/,
 			],
 			files: { [LIMITS_PATH]: "export const MAX_RETRIES = 3;\n" },
 			// A clean checkout on main: a fresh writer worker gets its own worktree lane (dirty checkouts fall back to shared).
@@ -14289,6 +14302,369 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					"the neighbour's restart owner disposes cleanly",
 				).toBeUndefined();
 				trace.mark("root", "icm.neighbour-cancel");
+
+				// N-receipt (a neighbour that holds an unrecorded receipt, with a forgotten target beside it): the neighbour's accepted
+				// leaf is judged again (its admission stripped) by a file-backed owner. The evaluator answers validly, but that paid
+				// answer's usage receipt cannot be appended, so the neighbour's job keeps its verdict under the usage-receipt hold. The
+				// owner is then disposed; its stop keeps the held job queued with the verdict. The target's leaf is stripped and held at
+				// the evaluator while a coordinator that does not own the receipt forgets the target. Such a coordinator parks the
+				// neighbour without claiming it (no attempt, no evaluator request, no claim save) and never writes the receipt. The
+				// neighbour's jobs are read at the forget's own save, at that coordinator's stop save, and at the first and stop saves of
+				// three more coordinators on the same store. The owner is then reopened from its file and records the receipt exactly once.
+				const nrAgentDir = `${world.agentDir}-icm-neighbour-receipt`;
+				const nrStore = icmStore(nrAgentDir);
+				const nrJudgments = {
+					summary_supported: cAdmission.summary_supported,
+					owner_constraints_preserved: cAdmission.owner_constraints_preserved,
+				};
+				const nrSeedSession = async (label: string) => {
+					const seed = await seedIcmPastSession(world, nrAgentDir);
+					world.provider.enqueue(cTrack, text(`nr-${label}-leaf`, ICM_LEAF_SUMMARY), {
+						name: `nr-${label}-parent`,
+						check: (request) => {
+							if (!JSON.stringify(request.context.messages).includes(ICM_LEAF_SUMMARY))
+								throw new Error(`N-receipt ${label}: the parent does not merge its leaf`);
+						},
+						reply: { content: [{ type: "text", text: ICM_PARENT_SUMMARY }] },
+					});
+					return seed;
+				};
+				const nrNeighbour = await nrSeedSession("neighbour");
+				world.systemOne.enterPhase("nr-build-neighbour", cAdmission);
+				await buildIcmHierarchy(
+					world,
+					nrAgentDir,
+					icmHierarchySettings(cTrack),
+					(hierarchy) => hierarchy.acceptedNodes === 3,
+				);
+				const nrTarget = await nrSeedSession("target");
+				world.systemOne.enterPhase("nr-build-target", cAdmission);
+				await buildIcmHierarchy(
+					world,
+					nrAgentDir,
+					icmHierarchySettings(cTrack),
+					(hierarchy) => hierarchy.acceptedNodes === 6,
+				);
+				const nrNode = (sessionId: string, level: number, fromIndex?: number): string => {
+					const id = Object.entries(icmStoredManifest(icmLiveStore(world), nrStore)?.acceptedNodes ?? {}).find(
+						([, entry]) =>
+							entry.sessionId === sessionId &&
+							entry.level === level &&
+							(fromIndex === undefined || entry.fromIndex === fromIndex),
+					)?.[0];
+					if (id === undefined)
+						throw new Error(`N-receipt: no accepted node at level ${level} of session ${sessionId}`);
+					return id;
+				};
+				// Strips the admission of one model summary (valid external preparation, as N-cancel does).
+				const nrStrip = (nodeId: string) => {
+					const nodePath = resolve(nrStore.root, "nodes", `${nodeId}.json`);
+					const node = JSON.parse(world.io.peekFile(nodePath) ?? "{}") as {
+						quality?: string;
+						admission?: unknown;
+					};
+					if (node.quality !== "model_summary" || node.admission === undefined)
+						throw new Error(`N-receipt: node ${nodeId.slice(0, 12)} carries no admission to strip`);
+					node.admission = undefined;
+					world.io.seed(nodePath, `${JSON.stringify(node)}\n`);
+				};
+				const nrOwed = (): unknown[] => {
+					const raw = world.io.peekFile(nrStore.owed);
+					return raw === undefined ? [] : (JSON.parse(raw) as { entries: unknown[] }).entries;
+				};
+				// The jobs of one session as a save holds them: identity, state, attempts and the kept verdict, whole.
+				const nrJobsOf = (jobs: readonly IcmStoredJob[], sessionId: string) =>
+					jobs
+						.filter((job) => job.sessionId === sessionId)
+						.map((job) => ({
+							id: job.id,
+							state: job.state,
+							attempts: job.attempts,
+							pendingVerdict: job.pendingVerdict,
+						}));
+				const nrTargetOf = (jobs: readonly IcmStoredJob[], ledger: ReturnType<typeof icmStoredLedger>) => ({
+					jobs: jobs.filter((job) => job.sessionId === nrTarget.sessionId).length,
+					proof: Object.values(ledger).filter(
+						(record) => (record as { sessionId?: string }).sessionId === nrTarget.sessionId,
+					).length,
+				});
+
+				// The owner session is file-backed: its append of the paid answer's usage receipt is the write that fails once.
+				const nrFirst = await world.createRootSession("root", {
+					agentDir: nrAgentDir,
+					sessionManager: world.createSessionManager(nrAgentDir),
+					settings: { memorySystem: undefined },
+				});
+				world.provider.enqueue("root", {
+					name: "nr-owner-turn",
+					reply: { content: [{ type: "text", text: "Noted." }] },
+				});
+				world.systemOne.enterPhase("nr-owner-turn", {});
+				await withDeadline(trace, "N-receipt owner turn", nrFirst.session.prompt("Say hello."));
+				const nrOwnerFile = nrFirst.sessionManager.getSessionFile();
+				if (nrOwnerFile === undefined) throw new Error("N-receipt: the owner session has no file");
+				nrStrip(nrNode(nrNeighbour.sessionId, 0, 8));
+				world.systemOne.enterPhase("nr-answering", nrJudgments);
+				const nrPaidBefore = icmAdmissionRequests(world);
+				world.io.failNext({
+					name: "nr-receipt-append",
+					kind: "append",
+					code: "EIO",
+					matches: (operation, data) =>
+						operation.path.endsWith(".jsonl") &&
+						(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
+				});
+				nrFirst.settingsManager.applyOverrides({
+					contextPolicy: { memory: { history: icmHierarchySettings(cTrack).contextPolicy?.memory?.history } },
+				});
+				await withDeadline(
+					trace,
+					"N-receipt neighbour leaf held for its usage receipt",
+					world.io.waitForMutation(
+						() =>
+							nrFirst.session.getTranscriptHistoryStatus().hierarchy?.admission?.heldByKind?.usage_receipt === 1,
+					),
+				);
+				await withDeadline(
+					trace,
+					"N-receipt held verdict durable",
+					world.io.waitForMutation(
+						() =>
+							icmStoredJobs(icmLiveStore(world), nrStore).filter((job) =>
+								JSON.stringify(job).includes('"unrecorded"'),
+							).length === 1,
+					),
+				);
+				const nrHeldOwner = icmHierarchy(nrFirst.session);
+				expect(
+					{
+						held: nrHeldOwner.admission?.heldByKind,
+						receiptsPending: nrHeldOwner.admission?.work.receiptsPending,
+						requests: icmAdmissionRequests(world) - nrPaidBefore,
+					},
+					"a valid answer whose usage receipt cannot be written is held with its verdict kept, and judged once",
+				).toEqual({ held: { usage_receipt: 1 }, receiptsPending: 1, requests: 1 });
+				expect(
+					await world.disposeSessionInBody(nrFirst.session),
+					"the receipt owner disposes cleanly",
+				).toBeUndefined();
+
+				// The baseline is the owner's stopped state: the neighbour's one held job, queued, with its verdict and one unrecorded receipt.
+				const nrBaseline = nrJobsOf(icmStoredJobs(icmLiveStore(world), nrStore), nrNeighbour.sessionId);
+				expect(
+					{
+						held: nrBaseline
+							.filter((job) => job.pendingVerdict !== undefined)
+							.map((job) => ({
+								state: job.state,
+								statuses: job.pendingVerdict?.receipts.map((receipt) => receipt.status),
+							})),
+						owed: nrOwed(),
+					},
+					"after the owner stops, the neighbour holds one queued job whose verdict owes one unrecorded receipt, and the owed queue is empty",
+				).toEqual({ held: [{ state: "queued", statuses: ["unrecorded"] }], owed: [] });
+
+				// The target's leaf is stripped only now, so the coordinator started next is the one that judges it.
+				nrStrip(nrNode(nrTarget.sessionId, 0, 8));
+				const nrHeld = createBarrier();
+				const nrAdmitted = createBarrier();
+				world.systemOne.enterPhase("nr-held", nrJudgments, {
+					gate: nrHeld.promise,
+					onAdmit: () => nrAdmitted.release(),
+				});
+				const nrRequestsBeforeForget = icmAdmissionRequests(world);
+				const nrCancel = await world.createRootSession("root", {
+					agentDir: nrAgentDir,
+					settings: icmHierarchySettings(cTrack),
+				});
+				try {
+					await withDeadline(trace, "N-receipt: the target's judgment held at the evaluator", nrAdmitted.promise);
+					// The coordinator that does not own the receipt parks the neighbour under the usage-receipt hold; the only
+					// evaluator request it makes is the target's, which the gate holds.
+					expect(
+						{
+							held: nrCancel.session.getTranscriptHistoryStatus().hierarchy?.admission?.heldByKind,
+							requests: icmAdmissionRequests(world) - nrRequestsBeforeForget,
+						},
+						"the coordinator that does not own the receipt holds the neighbour and makes only the target's request",
+					).toEqual({ held: { usage_receipt: 1 }, requests: 1 });
+					const nrForgetSave = icmObserveNextJobsSave(world, nrStore, "nr-cancel-forget-save");
+					const nrForgot = await withDeadline(
+						trace,
+						"N-receipt forget of the target while its judgment is held",
+						nrCancel.session.forgetHistorySession(nrTarget.sessionId),
+					);
+					expect(
+						nrForgot.ok,
+						`the target's forget is accepted while its judgment is held: ${nrForgot.message}`,
+					).toBe(true);
+					await withDeadline(trace, "N-receipt aborted judgment settled", world.systemOne.joinInFlight());
+					await withDeadline(
+						trace,
+						"N-receipt forget save",
+						world.io.waitForMutation(() => nrForgetSave() !== undefined),
+					);
+					const nrSaved = nrForgetSave();
+					expect(
+						{
+							neighbour: nrJobsOf(nrSaved?.jobs ?? [], nrNeighbour.sessionId),
+							target: nrTargetOf(nrSaved?.jobs ?? [], nrSaved?.ledger ?? {}),
+							owed: nrOwed(),
+						},
+						"the target's forget save leaves the neighbour's job, attempts and verdict unchanged and writes none of the target's",
+					).toEqual({ neighbour: nrBaseline, target: { jobs: 0, proof: 0 }, owed: [] });
+				} finally {
+					nrHeld.release();
+				}
+				const nrCancelStop = icmObserveNextJobsSave(world, nrStore, "nr-cancel-stop-save");
+				expect(
+					await world.disposeSessionInBody(nrCancel.session),
+					"the coordinator that does not own the receipt disposes cleanly",
+				).toBeUndefined();
+				await withDeadline(
+					trace,
+					"N-receipt stop save of the coordinator that does not own the receipt",
+					world.io.waitForMutation(() => nrCancelStop() !== undefined),
+					60_000,
+				);
+				const nrCancelStopped = nrCancelStop();
+				expect(
+					{
+						neighbour: nrJobsOf(nrCancelStopped?.jobs ?? [], nrNeighbour.sessionId),
+						target: nrTargetOf(nrCancelStopped?.jobs ?? [], nrCancelStopped?.ledger ?? {}),
+						owed: nrOwed(),
+					},
+					"its stop save leaves the neighbour's job, attempts and verdict unchanged and the target absent",
+				).toEqual({ neighbour: nrBaseline, target: { jobs: 0, proof: 0 }, owed: [] });
+
+				// The next `count` jobs saves of the store, each captured at its rename (as icmObserveNextJobsSave captures one).
+				const nrObserveJobsSaves = (count: number): IcmObservedSave[] => {
+					const saves: IcmObservedSave[] = [];
+					const arm = (): void => {
+						world.io.observeNext({
+							name: `nr-jobs-save-${saves.length + 1}`,
+							kind: "rename",
+							phase: "after",
+							matches: (operation) => operation.destination === nrStore.jobs,
+							onMatch: () => {
+								const live = icmLiveStore(world);
+								saves.push({
+									jobs: icmStoredJobs(live, nrStore),
+									ledger: icmStoredLedger(live, nrStore),
+									forgetRevisionApplied: icmStoredManifest(live, nrStore)?.forgetRevisionApplied ?? 0,
+								});
+								if (saves.length < count) arm();
+							},
+						});
+					};
+					arm();
+					return saves;
+				};
+				// Three more coordinators start on the same store. A start saves twice before it opens admission: its convert save,
+				// then its reconciled save, which opens admission and parks the held work. Both saves show the neighbour as it was.
+				// A command queued after the second save settles only once the coordinator has parked the neighbour, so its status
+				// shows the hold. A refused forget of an unknown session writes nothing, so it serves only as that queued command.
+				for (const restart of [1, 2, 3]) {
+					const nrStartSaves = nrObserveJobsSaves(2);
+					const nrRequestsBeforeStart = icmAdmissionRequests(world);
+					world.systemOne.enterPhase(`nr-start-${restart}`, {});
+					const nrStarted = await world.createRootSession("root", {
+						agentDir: nrAgentDir,
+						settings: icmHierarchySettings(cTrack),
+					});
+					await withDeadline(
+						trace,
+						`N-receipt start ${restart}: its convert and reconciled saves`,
+						world.io.waitForMutation(() => nrStartSaves.length === 2),
+						60_000,
+					);
+					expect(
+						nrStartSaves.map((saved) => ({
+							neighbour: nrJobsOf(saved.jobs, nrNeighbour.sessionId),
+							target: nrTargetOf(saved.jobs, saved.ledger),
+						})),
+						`start ${restart}: its convert and reconciled saves leave the neighbour's job, attempts and verdict unchanged`,
+					).toEqual([
+						{ neighbour: nrBaseline, target: { jobs: 0, proof: 0 } },
+						{ neighbour: nrBaseline, target: { jobs: 0, proof: 0 } },
+					]);
+					const nrBarrier = await withDeadline(
+						trace,
+						`N-receipt start ${restart}: a command queued behind its reconciled save`,
+						nrStarted.session.forgetHistorySession(`nr-unknown-session-${restart}`),
+					);
+					expect(
+						{
+							refused: nrBarrier.ok === false,
+							held: nrStarted.session.getTranscriptHistoryStatus().hierarchy?.admission?.heldByKind,
+							requests: icmAdmissionRequests(world) - nrRequestsBeforeStart,
+							owed: nrOwed(),
+						},
+						`start ${restart}: the neighbour is held under the usage-receipt hold, with no claim, no evaluator request and no owed entry`,
+					).toEqual({ refused: true, held: { usage_receipt: 1 }, requests: 0, owed: [] });
+					const nrStartStop = icmObserveNextJobsSave(world, nrStore, `nr-start-${restart}-stop-save`);
+					expect(
+						await world.disposeSessionInBody(nrStarted.session),
+						`start ${restart}: the coordinator disposes cleanly`,
+					).toBeUndefined();
+					await withDeadline(
+						trace,
+						`N-receipt start ${restart}: its stop save`,
+						world.io.waitForMutation(() => nrStartStop() !== undefined),
+						60_000,
+					);
+					const nrStartStopped = nrStartStop();
+					expect(
+						{
+							neighbour: nrJobsOf(nrStartStopped?.jobs ?? [], nrNeighbour.sessionId),
+							target: nrTargetOf(nrStartStopped?.jobs ?? [], nrStartStopped?.ledger ?? {}),
+							owed: nrOwed(),
+						},
+						`start ${restart}: its stop save leaves the neighbour's job, attempts and verdict unchanged`,
+					).toEqual({ neighbour: nrBaseline, target: { jobs: 0, proof: 0 }, owed: [] });
+				}
+
+				// The owner is reopened from its own file: the owed receipt is recorded once, and no paid answer is bought again.
+				const nrReports = () =>
+					world.io
+						.fileEntries()
+						.get(nrOwnerFile)
+						?.split("\n")
+						.filter((line) => line.includes('"customType":"semantic_usage"'))
+						.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId) ?? [];
+				world.systemOne.enterPhase("nr-reopen", {});
+				const nrReopenRequests = icmAdmissionRequests(world);
+				const nrReopened = await world.createRootSession("root", {
+					agentDir: nrAgentDir,
+					sessionManager: world.openSessionManager(nrOwnerFile, nrAgentDir),
+					settings: icmHierarchySettings(cTrack),
+				});
+				await withDeadline(
+					trace,
+					"N-receipt receipt recorded after the reopen",
+					world.io.waitForMutation(
+						() =>
+							nrReports().length === 1 &&
+							icmStoredJobs(icmLiveStore(world), nrStore).every(
+								(job) => !JSON.stringify(job).includes('"unrecorded"'),
+							),
+					),
+					60_000,
+				);
+				expect(
+					{
+						reports: { count: nrReports().length, unique: new Set(nrReports()).size },
+						pending: icmHierarchy(nrReopened.session).admission?.work.receiptsPending,
+						requests: icmAdmissionRequests(world) - nrReopenRequests,
+						owed: nrOwed(),
+					},
+					"after the reopen the neighbour's receipt is recorded exactly once and nothing is bought again",
+				).toEqual({ reports: { count: 1, unique: 1 }, pending: 0, requests: 0, owed: [] });
+				expect(
+					await world.disposeSessionInBody(nrReopened.session),
+					"the reopened owner disposes cleanly",
+				).toBeUndefined();
+				trace.mark("root", "icm.neighbour-receipt");
 
 				// R-egress: the admission egress switch is read live. With it off the model leaf is held before any call (no
 				// summarizer request, no evaluator request); switching it on in the running session releases the hold and the

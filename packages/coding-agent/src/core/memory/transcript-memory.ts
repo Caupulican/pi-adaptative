@@ -3130,7 +3130,26 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		while (this.startPhase === "open" && this.ports.canRunBackground()) {
 			// Dispatch is the one place the attempt budget is enforced: an exhausted job never reaches a provider.
 			// Held jobs wait for their condition; claiming them again would only hold them again.
-			const claim = scheduler.claimNext(this.ports.now(), (candidate) => this.parked.has(candidate.id));
+			const claim = scheduler.claimNext(this.ports.now(), (candidate) => {
+				if (this.parked.has(candidate.id)) return true;
+				// A kept paid verdict whose receipt is owed to ANOTHER session can only be recorded by a coordinator of that
+				// session. Claiming it here would reserve a durable attempt for a call this coordinator never makes, and repeated
+				// starts of other sessions would exhaust the job's budget and discard a valid paid summary: it stays held instead.
+				const verdict = candidate.pendingVerdict;
+				if (
+					verdict !== undefined &&
+					verdict.ownerSessionId !== this.ports.ownerSessionId() &&
+					verdict.receipts.some((receipt) => receipt.status === "unrecorded")
+				) {
+					this.parked.set(candidate.id, {
+						scope: "usage_receipt",
+						reason:
+							"the paid answer's usage receipt belongs to another session and is recorded when a coordinator starts in it",
+					});
+					return true;
+				}
+				return false;
+			});
 			for (const spent of claim.exhausted) this.settleExhausted(spent, epoch);
 			if (!claim.claimed) break;
 			const { job, token } = claim.claimed;
