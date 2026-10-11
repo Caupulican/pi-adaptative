@@ -901,7 +901,7 @@ type IcmStore = ReturnType<typeof icmStore>;
 /** One persisted summary job, as `jobs.json` holds it (the fields the rows judge). */
 interface IcmStoredJob {
 	readonly id: string;
-	readonly kind: "leaf" | "parent";
+	readonly kind: "leaf" | "parent" | "readmission";
 	readonly state: string;
 	readonly attempts: number;
 	readonly level: number;
@@ -12497,6 +12497,76 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					"the receipt-row owner disposes cleanly",
 				).toBeUndefined();
 				trace.mark("root", "icm.receipt-hold");
+
+				// R-readmit: model summaries that carry no admission under the current contract (as after a contract change) are
+				// not approved. Their admission record is removed from the two stored node files (valid external preparation: the
+				// identity, text and sources are untouched). A new session judges each ONCE as a scheduler job under a claim: the
+				// parent waits for its child, no summarizer is called, exactly two evaluator requests are paid, both nodes end
+				// approved, and the jobs are durable and counted as separate units.
+				const rdStore = icmStore(rcAgentDir);
+				let rdStripped = 0;
+				for (const nodeId of Object.keys(icmStoredManifest(cLive, rdStore)?.acceptedNodes ?? {})) {
+					const nodePath = resolve(rdStore.root, "nodes", `${nodeId}.json`);
+					const node = JSON.parse(world.io.peekFile(nodePath) ?? "{}") as {
+						quality?: string;
+						admission?: unknown;
+					};
+					if (node.quality !== "model_summary" || node.admission === undefined) continue;
+					node.admission = undefined;
+					world.io.seed(nodePath, `${JSON.stringify(node)}\n`);
+					rdStripped += 1;
+				}
+				expect(rdStripped, "both model summaries carried an admission before it was removed").toBe(2);
+				world.systemOne.enterPhase("rd-judging", cAdmission);
+				const rdBefore = { summaries: icmTrackRequests(world, cTrack), admissions: icmAdmissionRequests(world) };
+				const rdSession = await world.createRootSession("root", {
+					agentDir: rcAgentDir,
+					sessionManager: world.openSessionManager(rcOwnerFile, rcAgentDir),
+					settings: icmHierarchySettings(cTrack),
+				});
+				await withDeadline(
+					trace,
+					"R-readmit both summaries approved",
+					world.io.waitForMutation(() => {
+						const admission = rdSession.session.getTranscriptHistoryStatus().hierarchy?.admission;
+						return (
+							admission !== undefined && admission.unapprovedNodes === 0 && admission.readmission.admitted === 2
+						);
+					}),
+					60_000,
+				);
+				const rdDone = icmHierarchy(rdSession.session);
+				const rdJobs = icmStoredJobs(cLive, rdStore).filter((job) => job.kind === "readmission");
+				expect(
+					{
+						paid: {
+							summaries: icmTrackRequests(world, cTrack) - rdBefore.summaries,
+							admissions: icmAdmissionRequests(world) - rdBefore.admissions,
+						},
+						readmission: rdDone.admission?.readmission.admitted,
+						unapproved: rdDone.admission?.unapprovedNodes,
+						jobs: rdJobs.map((job) => job.state),
+						held: rdDone.admission?.heldByKind,
+						approvedOnDisk: Object.keys(icmStoredManifest(cLive, rdStore)?.acceptedNodes ?? {}).filter((nodeId) =>
+							(world.io.peekFile(resolve(rdStore.root, "nodes", `${nodeId}.json`)) ?? "").includes(
+								'"admission"',
+							),
+						).length,
+					},
+					"each unapproved model summary is judged once as a durable job, with no summarizer call",
+				).toEqual({
+					paid: { summaries: 0, admissions: 2 },
+					readmission: 2,
+					unapproved: 0,
+					jobs: ["ready", "ready"],
+					held: undefined,
+					approvedOnDisk: 2,
+				});
+				expect(
+					await world.disposeSessionInBody(rdSession.session),
+					"the re-admission session disposes cleanly",
+				).toBeUndefined();
+				trace.mark("root", "icm.readmission-jobs");
 			}
 		},
 	);
