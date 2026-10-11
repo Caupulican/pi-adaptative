@@ -257,6 +257,14 @@ export function isValidSessionId(id: string): boolean {
 	return /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(id);
 }
 
+/**
+ * A session identity as the records that hold one read it: an id the rule above admits, within the header bytes a session
+ * file's id is read from. A value that fails is refused where it is read; it is never truncated or rehashed to fit.
+ */
+export function isSessionIdentity(value: unknown): value is string {
+	return typeof value === "string" && value.length <= MAX_SESSION_HEADER_BYTES && isValidSessionId(value);
+}
+
 export function assertValidSessionId(id: string): void {
 	if (!isValidSessionId(id)) {
 		throw new Error(
@@ -808,7 +816,7 @@ export function getDefaultSessionDir(cwd: string, agentDir: string): string {
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
 // One line must fit comfortably under V8's max string length (~512MiB chars).
 const MAX_SESSION_LINE_CHARS = 256 * 1024 * 1024;
-const MAX_SESSION_HEADER_BYTES = 64 * 1024;
+export const MAX_SESSION_HEADER_BYTES = 64 * 1024;
 
 function parseSessionEntryLine(line: string): FileEntry | null {
 	if (!line.trim()) return null;

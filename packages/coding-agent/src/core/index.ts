@@ -20,6 +20,7 @@ export {
 	type AgentSessionSwitchOptions,
 	type CreateAgentSessionRuntimeFactory,
 	type CreateAgentSessionRuntimeResult,
+	CreatedSessionFailure,
 	createAgentSessionRuntime,
 	SessionReplacementCallbackError,
 	SessionReplacementRuntimeError,

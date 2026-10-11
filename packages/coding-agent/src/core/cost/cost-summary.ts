@@ -72,7 +72,11 @@ export function accumulateCurrentSessionCostsFromEntries(
 			if (total === undefined || !report?.reportId || accumulator.seenSemanticReportIds.has(report.reportId))
 				continue;
 			accumulator.seenSemanticReportIds.add(report.reportId);
-			accumulator.ownCost += total;
+			// History summary spend was a spawned (background) report before it moved onto this row; it stays background spend.
+			if (report.route === "history_summary") {
+				accumulator.subagentCost += total;
+				accumulator.subagentReports += 1;
+			} else accumulator.ownCost += total;
 			if (report.usage.cost.estimate === "base-rates") accumulator.costEstimate = "base-rates";
 			continue;
 		}
@@ -109,21 +113,35 @@ export function aggregateCurrentSessionCostsFromEntries(entries: readonly Sessio
 export function projectPendingSemanticCost(
 	accumulator: CurrentSessionCostAccumulator,
 	pending: readonly SemanticUsageReport[],
+	overflow?: { readonly usage: Usage; readonly reports: number },
 ): CurrentSessionCostTotals {
 	let ownCost = accumulator.ownCost;
+	let subagentCost = accumulator.subagentCost;
+	let subagentReports = accumulator.subagentReports;
 	let costEstimate = accumulator.costEstimate;
 	for (const report of pending) {
 		const total = getUsageTotalCost(report.usage);
 		if (total === undefined || accumulator.seenSemanticReportIds.has(report.reportId)) continue;
-		ownCost += total;
+		// History summary spend is background spend: the same classification as its recorded row.
+		if (report.route === "history_summary") {
+			subagentCost += total;
+			subagentReports += 1;
+		} else ownCost += total;
 		if (report.usage.cost.estimate === "base-rates") costEstimate = "base-rates";
+	}
+	// Paid history spend the bounded journal had no room for: live only, counted with the background spend it is.
+	const overflowCost = overflow === undefined ? undefined : getUsageTotalCost(overflow.usage);
+	if (overflow !== undefined && overflowCost !== undefined) {
+		subagentCost += overflowCost;
+		subagentReports += overflow.reports;
+		if (overflow.usage.cost.estimate === "base-rates") costEstimate = "base-rates";
 	}
 	return {
 		...(costEstimate ? { costEstimate } : {}),
 		ownCost,
-		subagentCost: accumulator.subagentCost,
-		subagentReports: accumulator.subagentReports,
-		currentCost: ownCost + accumulator.subagentCost,
+		subagentCost,
+		subagentReports,
+		currentCost: ownCost + subagentCost,
 	};
 }
 

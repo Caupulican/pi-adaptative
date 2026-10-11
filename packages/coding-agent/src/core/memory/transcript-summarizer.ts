@@ -4,7 +4,7 @@
  * No router, no credential client and no tools of its own: the model comes from the session's model
  * registry (configured and authenticated models only), the call is one tool-free text completion on the
  * background provider lane (which yields to the foreground), and what it costs is charged to the owning
- * session through the idempotent spawned-usage ledger so background spend stays visible.
+ * session through the session's usage record, retained until it is recorded, so background spend stays visible.
  */
 
 import { randomUUID } from "node:crypto";
@@ -12,7 +12,7 @@ import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
-import { reportSpawnedUsage } from "../spawned-usage.ts";
+import { hasReportableUsage } from "../spawned-usage.ts";
 import type { TranscriptSummarizerPort } from "./transcript-memory.ts";
 
 const SUMMARY_LANE_KIND = "memory-summary";
@@ -22,30 +22,25 @@ export interface TranscriptSummarizerDeps {
 	/** Resolve a configured model reference to a model the session can authenticate; undefined when it cannot. */
 	resolveModel(reference: string): Model<Api> | undefined;
 	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
-	addSpawnedUsage(
-		usage: Usage,
-		options: { label?: string; sourceSessionId?: string; reportId: string },
-	): string | undefined;
-	getSessionId(): string;
 	/**
-	 * Records a summary call's spend that the usage ledger refused to take. Must not throw: it runs in the call's
-	 * `finally`, where a throw would replace the reply or the error already in flight.
+	 * Records one summary call's paid spend in the session's usage record: retained until it is recorded, and warned by the
+	 * record's own owner-facing message when it cannot be. Must not throw: it runs in the call's `finally`, where a throw
+	 * would replace the reply or the error already in flight.
 	 */
-	recordSpendFailure(cause: string): void;
+	recordHistoryUsage(usage: Usage, call: { reportId: string; provider: string; model: string }): void;
 }
 
-/** Charge one summary call's spend to the owning session. A refused write is recorded, never thrown over the call. */
-function recordSummarySpend(deps: TranscriptSummarizerDeps, spent: Usage): void {
-	try {
-		reportSpawnedUsage(deps, spent, {
-			kind: SUMMARY_USAGE_KIND,
-			label: SUMMARY_USAGE_KIND,
-			sessionId: deps.getSessionId(),
-			identity: randomUUID(),
-		});
-	} catch (error) {
-		deps.recordSpendFailure(error instanceof Error ? error.message : String(error));
-	}
+/**
+ * Charge one summary call's spend to the owning session. The report id is unique to the call and short: the journal bounds
+ * every identity text it stores, so the session id is not part of it.
+ */
+function recordSummarySpend(deps: TranscriptSummarizerDeps, spent: Usage, model: Model<Api>): void {
+	if (!hasReportableUsage(spent)) return;
+	deps.recordHistoryUsage(spent, {
+		reportId: `${SUMMARY_USAGE_KIND}:${randomUUID()}`,
+		provider: model.provider,
+		model: model.id,
+	});
 }
 
 export type TranscriptSummarizerResolution =
@@ -98,7 +93,7 @@ export function resolveTranscriptSummarizer(
 					return { text: completion.text, model: modelRef };
 				} finally {
 					// Charged whether or not the reply was accepted: the tokens were spent either way.
-					recordSummarySpend(deps, spent);
+					recordSummarySpend(deps, spent, model);
 				}
 			},
 		},

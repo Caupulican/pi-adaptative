@@ -1524,10 +1524,7 @@ export class AgentSession {
 				summarizer: {
 					resolveModel: (reference) => historyModels.resolveModel(reference),
 					runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
-					addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
-					getSessionId: () => this.sessionManager.getSessionId(),
-					recordSpendFailure: (cause) =>
-						this._foregroundLifecycle.warn(`History summary spend report failed: ${cause}`),
+					recordHistoryUsage: (usage, call) => this._semanticUsage.recordHistoryUsage(usage, call),
 				},
 				activeBranch: new ActiveBranchProbe(this.sessionManager),
 				// The judge that admits model summaries is the session's one recording System One engine, so its
@@ -2078,6 +2075,7 @@ export class AgentSession {
 			getCapabilityTierPolicy: () => this.getCapabilityTierPolicy(),
 			getAgentDir: () => this._agentDir,
 			getSessionManager: () => this.sessionManager,
+			getSemanticUsage: () => this._semanticUsage,
 			getSettingsManager: () => this.settingsManager,
 			integrationBranch: () => this._localCommitBranch || undefined,
 			getModelRegistry: () => this._modelRegistry,
@@ -4196,11 +4194,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Context composition dashboard data: decomposes the per-request payload (system prompt, tool
-	 * schemas, extension contributions, message classes incl. GC/policy stubs and recall pages)
-	 * plus background spend, so users can see exactly what their integrations cost per request.
-	 * Read-only: uses the GC report path (writePayloads=false), never mutates anything.
+	 * Takes the warnings this session raised while no subscriber was attached, once. A discarded candidate has no subscriber,
+	 * so its host takes them to deliver on the session that survives.
 	 */
+	takeUndeliveredWarnings(): string[] {
+		return this._foregroundLifecycle.drainWarnings();
+	}
+
 	/**
 	 * Surface one bounded host warning to the session's subscribers (a UI shows it; it never changes the run).
 	 * One raised before anyone subscribes is kept for the first subscriber.
@@ -4218,6 +4218,12 @@ export class AgentSession {
 		return this._pipeline.peekPathAliasTable();
 	}
 
+	/**
+	 * Context composition dashboard data: decomposes the per-request payload (system prompt, tool
+	 * schemas, extension contributions, message classes incl. GC/policy stubs and recall pages)
+	 * plus background spend, so users can see exactly what their integrations cost per request.
+	 * Read-only: uses the GC report path (writePayloads=false), never mutates anything.
+	 */
 	getContextCompositionReport(): ContextCompositionReport {
 		const rawMessages = this.agent.state.messages.slice();
 		// Dashboard/diagnostic view, not a live provider request: the send-time `sentPrefixCount`

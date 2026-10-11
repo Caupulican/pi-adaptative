@@ -17,6 +17,7 @@ import {
 	workerProjectSpecializationFile,
 } from "../src/core/agent-paths.ts";
 import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.ts";
+import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { canonicalPathScopeIdentity } from "../src/core/autonomy/path-scope.ts";
 import {
 	type BackgroundToolTaskRecord,
@@ -63,6 +64,7 @@ import { isCredentialSecretKey, mockCredentialFields } from "../src/core/secrets
 import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../src/core/security/secret-text.ts";
 import { getDirectoryResourceProfileInfo } from "../src/core/settings/settings-rules.ts";
 import type { Settings } from "../src/core/settings/settings-schema.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "../src/core/system-one/tool-names.ts";
 import type { ExecutionState } from "../src/core/system-one/types.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, readOptionalToolIntent } from "../src/core/tool-applicability-gate.ts";
 import { createAskQuestionToolDefinition } from "../src/core/tools/ask-question.ts";
@@ -1057,8 +1059,9 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				/^A queued message was not delivered because the session context changed before it was admitted\. It is kept in full in the pending queue; restore it to the editor to send it again: Queued owner input while the summary is held\.$/,
 				// ICM history (System One off): the model leaf of the seeded log is held, reported once by the hierarchy owner.
 				/^History summaries: 1 model summary job\(s\) are held: System One is not bound to this session, so no admission judgment can run\. Exact copies and exact history recall are unaffected\.$/,
-				// A file-backed owner that disposes before its first reply still holds the paid usage it wrote (deferred, not failed).
-				/^Session usage handoff: (?:\d+ System One usage report\(s\) pending in the session journal|\d+ System One usage report\(s\) kept in the session journal for a session file that was never written, so they cannot be recorded), 0 not retained, 0 confirmed row\(s\) whose journal copy is not removed, 0 unmatched journal\(s\) kept as evidence; none is charged to another session\.$/,
+				// An owner that disposes with paid usage still unconfirmed keeps it in its journal. The pending form is for a file that exists
+				// with unconfirmed reports; the evidence form is only for a never-replied session whose file was never written.
+				/^Usage handoff: \d+ usage report\(s\) pending in the session journal, 0 not retained, 0 confirmed row\(s\) with a journal copy left, 0 unmatched journal\(s\); none is charged to another session\.$/,
 			],
 			files: {
 				[LIMITS_PATH]: "export const MAX_RETRIES = 3;\n",
@@ -7771,9 +7774,16 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				// R-receipt: the failed usage write itself is reported once, as a pending receipt, with the write's real cause (the first
 				// failed append) or the uncertainty cause (a later response while the session file is fenced).
 				/^A System One usage receipt is pending, not yet in this session's usage record \(Scripted IO fault [^\n]+\); it is retained in the session journal and recorded when a new session manager reads the file\.$/,
-				/^A System One usage receipt is pending, not yet in this session's usage record \(Session persistence state is uncertain after a failed write; the usage report stays pending in the session journal until a new session manager reads the file\); it is retained in the session journal and recorded when a new session manager reads the file\.$/,
+				/^A System One usage receipt is pending, not yet in this session's usage record \(Session persistence state is uncertain after a failed write\); it is retained in the session journal and recorded when a new session manager reads the file\.$/,
+				// History summary spend (its canonical row, route history_summary): held beside a fenced ledger, one notice per kind of
+				// usage, or the write's own cause when its first append is the failed one. The rows are retained in the sidecar.
+				/^A history summary usage report is pending, not yet in this session's usage record \(Session persistence state is uncertain after a failed write\); it is retained in the session journal and recorded when a new session manager reads the file\.$/,
+				/^A history summary usage report is pending, not yet in this session's usage record \(Scripted IO fault [^\n]+\); it is retained in the session journal and recorded when a new session manager reads the file\.$/,
+				// U-usage rollback: a prepared session that never received its first reply is discarded by its failed activation; its kept
+				// paid row is unmatched evidence at its sidecar, reported once on the restored session.
+				/^Usage handoff: 1 usage report\(s\) cannot be recorded \(session file never written\); kept as unmatched recovery evidence at [^\n]+\.usage-pending\.[^\n]+\.json\. 0 not retained, 0 confirmed row\(s\) with a journal copy left, 0 unmatched journal\(s\); none is charged to another session\.$/,
 				// R-receipt and its siblings: the owner session that holds its pending usage at dispose reports the handoff once.
-				/^Session usage handoff: \d+ System One usage report\(s\) pending in the session journal, 0 not retained, \d+ confirmed row\(s\) whose journal copy is not removed, [01] unmatched journal\(s\) kept as evidence; none is charged to another session\.$/,
+				/^Usage handoff: \d+ usage report\(s\) pending in the session journal, 0 not retained, \d+ confirmed row\(s\) with a journal copy left, [012] unmatched journal\(s\); none is charged to another session\.$/,
 				// U-usage bounded faults: another identity's journal beside the file (listed at open), a corrupt journal moved aside at
 				// open, and an unreadable journal retried by the owner that opened it (its retries warn once per distinct message until it recovers).
 				/^\d+ pending usage journal\(s\) from another session identity are kept as evidence and are not charged to this session: [^\n]+\.$/,
@@ -7785,8 +7795,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				/^A System One usage receipt is pending, not yet in this session's usage record \(the session file could not be read to confirm the row \(EIO\)\); it is kept in its session journal until the session file can be read to confirm it\.$/,
 
 				// R-receipt: one valid paid answer is kept while its usage receipt cannot be written (exactly one job, the
-				// usage-receipt hold, the session's real write failure as the cause).
-				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: [^\n]*Session persistence state is uncertain after a failed write[^\n]*\. Exact history recall is unaffected\.$/,
+				// usage-receipt hold; its cause is the fence that the receipt's refused re-attempt settles, and the receipt's own write error is its pending warning).
+				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: Session persistence state is uncertain after a failed write; the paid answer is kept and its usage receipt is retried; it is not bought again\. Exact history recall is unaffected\.$/,
 				// N-receipt: the same one-receipt hold reported with its raw write failure (the owner, before its retry), and by the
 				// coordinator that does not own the receipt, whose cause names the owner session (never written by that coordinator).
 				/^History summaries: 1 summary job\(s\) are held \(1 paid answer awaiting its usage receipt\); first cause: Scripted IO fault nr-receipt-append: [^\n]*\. Exact history recall is unaffected\.$/,
@@ -12961,8 +12971,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				trace.mark("root", "icm.o13c-outage");
 
 				// R-receipt (a VALID paid answer whose usage receipt cannot be written): the evaluator answers the leaf validly,
-				// then the owner session's append of that answer's semantic-usage entry fails once. The answer is not discarded
-				// and not bought again: the job keeps its verdict and holds under the usage-receipt hold with the real cause. The
+				// then the owner session's append of that answer's semantic-usage entry fails once; the summary's own spend row is written before it. The answer is not discarded
+				// and not bought again: the job keeps its verdict and holds under the usage-receipt hold. The receipt's own write error is its pending warning; the hold's cause is the fence that its refused re-attempt settles. The
 				// session is then reopened from the same file (same session id): the receipt is recorded once, the kept verdict is
 				// reused, the leaf is published and the parent is built. Evaluator requests: one for the leaf, one for the parent.
 				const rcAgentDir = `${world.agentDir}-icm-receipt`;
@@ -13000,7 +13010,9 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					code: "EIO",
 					matches: (operation, data) =>
 						operation.path.endsWith(".jsonl") &&
-						(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
+						(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false) &&
+						// The summary's own spend row is written first, so the receipt is the write that fails.
+						!(data?.toString("utf8").includes("memory-history-summary:") ?? false),
 				});
 				// Live settings change in the running session: the hierarchy comes up without restarting the session.
 				rcFirst.settingsManager.applyOverrides({
@@ -13052,8 +13064,16 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					"R-receipt hierarchy built after the owner session was reopened",
 					world.io.waitForMutation(() => {
 						const work = rcSecond.session.getTranscriptHistoryStatus().hierarchy?.admission?.work;
+						// The summary spends are retained beside the admission receipts: the wait is for both to be written to the file.
+						const summarySpends = (world.io.fileEntries().get(rcOwnerFile) ?? "")
+							.split("\n")
+							.filter((line) => line.includes("memory-history-summary:")).length;
 						return (
-							work !== undefined && work.receiptsRecorded >= 2 && work.receiptsPending === 0 && work.reused >= 1
+							work !== undefined &&
+							work.receiptsRecorded >= 2 &&
+							work.receiptsPending === 0 &&
+							work.reused >= 1 &&
+							summarySpends === 2
 						);
 					}),
 					60_000,
@@ -13076,13 +13096,15 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							pending: rcDone.admission?.work.receiptsPending,
 							uniqueReports: new Set(rcReports).size === (rcReports?.length ?? -1),
 							count: rcReports?.length,
+							// Each summary call's paid spend is one canonical row (route history_summary), beside its admission's receipt.
+							summaryRows: rcReports?.filter((id) => id?.startsWith("memory-history-summary:")).length,
 						},
 					},
-					"the reopened session records the owed receipt once and the leaf verdict is not bought again",
+					"the reopened session records each owed receipt and each summary spend once, and the leaf verdict is not bought again",
 				).toEqual({
 					requests: { summaries: 2, admissions: 2 },
 					held: undefined,
-					receipts: { pending: 0, uniqueReports: true, count: 2 },
+					receipts: { pending: 0, uniqueReports: true, count: 4, summaryRows: 2 },
 				});
 				expect(
 					await world.disposeSessionInBody(rcSecond.session),
@@ -13196,7 +13218,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 									(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
 							});
 
-						// First session: the leaf's paid answer is valid, its usage write fails, and the leaf is held with its verdict kept.
+						// First session: the leaf's paid answer is valid; its summary spend row is the first write that fails, the receipt behind it is refused by the fence, and the leaf is held with its verdict kept.
 						world.provider.enqueue(cTrack, {
 							name: "cx-leaf-summary",
 							check: (request) => {
@@ -13398,7 +13420,10 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							world.io.waitForMutation(
 								() =>
 									cxOwed().length === 0 &&
-									cxRows(cxFirstFile).length === 3 &&
+									cxRows(cxFirstFile).filter((id) => !id?.startsWith("memory-history-summary:")).length ===
+										3 &&
+									cxRows(cxFirstFile).filter((id) => id?.startsWith("memory-history-summary:")).length ===
+										(cxVariant === "context" ? 3 : 2) &&
 									Object.keys(icmStoredManifest(icmLiveStore(world), cxStore)?.acceptedNodes ?? {}).length ===
 										3,
 							),
@@ -13408,7 +13433,11 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						expect(
 							{
 								paid: cxPaid(),
-								rows: { count: cxRecorded.length, unique: new Set(cxRecorded).size },
+								rows: {
+									receipts: cxRecorded.filter((id) => !id?.startsWith("memory-history-summary:")).length,
+									summaries: cxRecorded.filter((id) => id?.startsWith("memory-history-summary:")).length,
+									unique: new Set(cxRecorded).size,
+								},
 								oldRecorded: cxRecorded.includes(cxOldReceipt),
 								newRecorded: cxRecorded.includes(cxNewReceipt),
 								owed: cxOwed(),
@@ -13420,7 +13449,11 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							"each receipt is recorded once after the reopen, the leaf is not bought again, and the owed queue is empty",
 						).toEqual({
 							paid: { summaries: cxVariant === "context" ? 3 : 2, admissions: 3 },
-							rows: { count: 3, unique: 3 },
+							rows: {
+								receipts: 3,
+								summaries: cxVariant === "context" ? 3 : 2,
+								unique: cxVariant === "context" ? 6 : 5,
+							},
 							oldRecorded: true,
 							newRecorded: true,
 							owed: [],
@@ -13529,6 +13562,9 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							?.split("\n")
 							.filter((line) => line.includes('"customType":"semantic_usage"'))
 							.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId) ?? [];
+					// The summary's own spend row is the first write that fails and stays with the receipt: both are recorded once after the restart.
+					const roReceipts = () => roReports().filter((id) => !id?.startsWith("memory-history-summary:"));
+					const roSummaries = () => roReports().filter((id) => id?.startsWith("memory-history-summary:"));
 					const roOwedEntries = () => {
 						const text = world.io.peekFile(roStore.owed);
 						return text === undefined ? undefined : (JSON.parse(text) as { entries: unknown[] }).entries.length;
@@ -13548,7 +13584,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					).toBe(1);
 					if (roVariant === "retry") {
 						// The bounded retry (the domain clock) saves the owed queue. The receipt itself cannot be recorded in this
-						// session again (its first failed append leaves the manager's persistence uncertain), so it stays owed and
+						// session again (its first failed append (the summary's spend row) leaves the manager's persistence uncertain), so it stays owed and
 						// durable until the session is reopened.
 						world.historyClock.advance(120_000);
 						await withDeadline(
@@ -13628,7 +13664,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						world.io.waitForMutation(() => {
 							const text = world.io.peekFile(roStore.owed);
 							return (
-								roReports().length === 1 &&
+								roReceipts().length === 1 &&
+								roSummaries().length === 1 &&
 								text !== undefined &&
 								(JSON.parse(text) as { entries: unknown[] }).entries.length === 0
 							);
@@ -13637,7 +13674,11 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					);
 					expect(
 						{
-							reports: { count: roReports().length, unique: new Set(roReports()).size },
+							reports: {
+								count: roReceipts().length,
+								unique: new Set(roReports()).size,
+								summaries: roSummaries().length,
+							},
 							pending: icmHierarchy(roSecond.session).admission?.work.receiptsPending,
 							requests: {
 								summaries: icmTrackRequests(world, cTrack) - roPaidBefore.summaries,
@@ -13645,7 +13686,11 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							},
 						},
 						"the owed receipt is recorded once after the restart and nothing is bought again",
-					).toEqual({ reports: { count: 1, unique: 1 }, pending: 0, requests: { summaries: 1, admissions: 1 } });
+					).toEqual({
+						reports: { count: 1, unique: 2, summaries: 1 },
+						pending: 0,
+						requests: { summaries: 1, admissions: 1 },
+					});
 					expect(
 						await world.disposeSessionInBody(roSecond.session),
 						"the owed-receipt owner disposes cleanly",
@@ -13754,6 +13799,9 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							?.split("\n")
 							.filter((line) => line.includes('"customType":"semantic_usage"'))
 							.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId) ?? [];
+					// The summary's own spend row is the first write that fails, so it is kept with the receipt: both are recorded once after the restart.
+					const raReceipts = () => raReports().filter((id) => !id?.startsWith("memory-history-summary:"));
+					const raSummaries = () => raReports().filter((id) => id?.startsWith("memory-history-summary:"));
 					expect(raReports().length, "no semantic usage row is durable before the reopen").toBe(0);
 					const raSecond = await world.createRootSession("root", {
 						agentDir: raAgentDir,
@@ -13766,7 +13814,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						world.io.waitForMutation(() => {
 							const text = world.io.peekFile(raStore.owed);
 							return (
-								raReports().length === 1 &&
+								raReceipts().length === 1 &&
+								raSummaries().length === 1 &&
 								text !== undefined &&
 								(JSON.parse(text) as { entries: unknown[] }).entries.length === 0
 							);
@@ -13775,7 +13824,11 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					);
 					expect(
 						{
-							reports: { count: raReports().length, unique: new Set(raReports()).size },
+							reports: {
+								count: raReceipts().length,
+								unique: new Set(raReports()).size,
+								summaries: raSummaries().length,
+							},
 							requests: {
 								summaries: icmTrackRequests(world, cTrack) - raPaidBefore.summaries,
 								admissions: icmAdmissionRequests(world) - raPaidBefore.admissions,
@@ -13783,14 +13836,14 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						},
 						"the paid response of an aborted judgment is recorded once after the restart and nothing is bought again",
 					).toEqual({
-						reports: { count: 1, unique: 1 },
+						reports: { count: 1, unique: 2, summaries: 1 },
 						// "carried" paid for two requests (the paid 503 and the held retry); neither is bought again after the restart.
 						requests: { summaries: 1, admissions: raVariant === "answered" ? 1 : 2 },
 					});
 					// The usage row recorded after the restart is the receipt the owed file held before it: the same id, owed by the owner session.
 					const raQueuedIds = raQueued.map((entry) => entry.receipt.reportId);
 					expect(raQueuedIds, "the owed entry names its receipt by a string id").toEqual([expect.any(String)]);
-					expect(raReports(), "the recorded usage row is the receipt queued before the reopen").toEqual(
+					expect(raReceipts(), "the recorded usage row is the receipt queued before the reopen").toEqual(
 						raQueuedIds,
 					);
 					expect(
@@ -13842,6 +13895,9 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						?.split("\n")
 						.filter((line) => line.includes('"customType":"semantic_usage"'))
 						.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId) ?? [];
+				// Each paid summary writes its own spend row at once (no fault here): the receipts and the summary rows are counted apart.
+				const rsReceipts = () => rsReports().filter((id) => !id?.startsWith("memory-history-summary:"));
+				const rsSummaries = () => rsReports().filter((id) => id?.startsWith("memory-history-summary:"));
 				const rsLeafJob = (read: IcmStoreRead) =>
 					icmStoredJobs(read, rsStore).find((job) => job.kind === "leaf" && job.spanRange.fromIndex === 8);
 				const rsJudgments = {
@@ -13898,7 +13954,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 								summaries: icmTrackRequests(world, cTrack) - rsPaidBefore.summaries,
 								admissions: icmAdmissionRequests(world) - rsPaidBefore.admissions,
 							},
-							rows: rsReports().length,
+							rows: { receipts: rsReceipts().length, summaries: rsSummaries().length },
 						},
 						"the first save after the abort carries the counters of the paid call (the claim is still running, the stop interrupts it afterwards) with the kept reply and one recorded receipt; the restart claims it again with those counters and pays the judgment once",
 					).toEqual({
@@ -13915,7 +13971,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							ledger: { semanticRequests: 1, transportAttempts: 1, receiptsRecorded: 1, reused: 0 },
 						},
 						paid: { summaries: 1, admissions: 3 },
-						rows: 1,
+						rows: { receipts: 1, summaries: 1 },
 					});
 					rsRestartGate.release();
 					await withDeadline(
@@ -13931,10 +13987,14 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 								summaries: icmTrackRequests(world, cTrack) - rsPaidBefore.summaries,
 								admissions: icmAdmissionRequests(world) - rsPaidBefore.admissions,
 							},
-							reports: { count: rsRecorded.length, unique: new Set(rsRecorded).size },
+							reports: {
+								receipts: rsReceipts().length,
+								summaries: rsSummaries().length,
+								unique: new Set(rsRecorded).size,
+							},
 						},
 						"the carried receipt is recorded once, the restarted judgment and the parent each record one receipt, and nothing is bought twice",
-					).toEqual({ paid: { summaries: 2, admissions: 4 }, reports: { count: 3, unique: 3 } });
+					).toEqual({ paid: { summaries: 2, admissions: 4 }, reports: { receipts: 3, summaries: 2, unique: 5 } });
 				} finally {
 					rsGate.release();
 					rsRestartGate.release();
@@ -14935,833 +14995,1289 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				).toBeUndefined();
 				trace.mark("root", "icm.neighbour-receipt");
 
-				// U-usage (a paid System One judgment that is not an admission): the usage is retained in the owning session's pending
-				// journal before its row is appended, and the journal entry is removed only after the identical row reads back. The owner
-				// is file-backed. Each storage failure below is one bounded witness; every owner reopens the same session file, so the
-				// journal is replayed by the owner that wrote it and nothing is evaluated again.
-				const uSidecarOf = (file: string, sessionId: string): string => `${file}.usage-pending.${sessionId}.json`;
-				const uRowIds = (file: string): string[] =>
-					(world.io.fileEntries().get(file) ?? "")
-						.split("\n")
-						.filter((line) => line.includes('"customType":"semantic_usage"'))
-						.map((line) => (JSON.parse(line) as { data: { reportId: string } }).data.reportId);
-				const uHeldIds = (sidecar: string): string[] => {
-					const raw = world.io.peekFile(sidecar);
-					if (raw === undefined) return [];
-					return (JSON.parse(raw) as { records: { reportId: string }[] }).records.map((record) => record.reportId);
-				};
-				const uUsageWarnings = (from: number): string[] =>
-					world.warnings
-						.slice(from)
-						.filter(
-							(message) =>
-								message.startsWith("A System One usage receipt") || message.startsWith("Session usage handoff"),
+				// The usage journeys are paid System One judgments, so they run with System One on; a session with System One off binds no controller.
+				if (world.systemOne.enabled) {
+					// U-usage (a paid System One judgment that is not an admission): the usage is retained in the owning session's pending
+					// journal before its row is appended, and the journal entry is removed only after the identical row reads back. The owner
+					// is file-backed. Each storage failure below is one bounded witness; every owner reopens the same session file, so the
+					// journal is replayed by the owner that wrote it and nothing is evaluated again.
+					const uSidecarOf = (file: string, sessionId: string): string =>
+						`${file}.usage-pending.${sessionId}.json`;
+					const uRowIds = (file: string): string[] =>
+						(world.io.fileEntries().get(file) ?? "")
+							.split("\n")
+							.filter((line) => line.includes('"customType":"semantic_usage"'))
+							.map((line) => (JSON.parse(line) as { data: { reportId: string } }).data.reportId);
+					const uHeldIds = (sidecar: string): string[] => {
+						const raw = world.io.peekFile(sidecar);
+						if (raw === undefined) return [];
+						return (JSON.parse(raw) as { records: { reportId: string }[] }).records.map(
+							(record) => record.reportId,
 						);
-				const uOwnerAt = (agentDir: string, file?: string) =>
-					world.createRootSession("root", {
-						agentDir,
-						sessionManager:
-							file === undefined
-								? world.createSessionManager(agentDir)
-								: world.openSessionManager(file, agentDir),
-						settings: { memorySystem: undefined },
-					});
-				// The first reply writes the session file; a session file is written only from its first reply on.
-				const uOwnerTurn = async (session: AgentSession, label: string): Promise<void> => {
-					world.provider.enqueue("root", {
-						name: `${label}-owner-turn`,
-						reply: { content: [{ type: "text", text: "Noted." }] },
-					});
-					world.systemOne.enterPhase(`${label}-owner-turn`, {});
-					await withDeadline(trace, `${label} owner turn`, session.prompt("Say hello."));
-				};
-				// One owner-words screen is one paid System One response: the intake classifier, not an admission judgment.
-				const uScreen = async (session: AgentSession, label: string, words: string): Promise<void> => {
-					const controller = session.systemOneController;
-					if (controller === undefined)
-						throw new Error(`${label}: the owner session has no bound System One controller`);
-					world.systemOne.enterPhase(label, { carries_0: { kind: "noul", probability: 0.02 } });
-					const screened = await withDeadline(trace, label, controller.screenOwnerWords([words]));
-					if (screened.status !== "screened")
-						throw new Error(`${label}: the owner-words screen is ${screened.status}`);
-				};
+					};
+					const uUsageWarnings = (from: number): string[] =>
+						world.warnings
+							.slice(from)
+							.filter(
+								(message) =>
+									message.startsWith("A System One usage receipt") || message.startsWith("Usage handoff"),
+							);
+					const uOwnerAt = (agentDir: string, file?: string) =>
+						world.createRootSession("root", {
+							agentDir,
+							sessionManager:
+								file === undefined
+									? world.createSessionManager(agentDir)
+									: world.openSessionManager(file, agentDir),
+							settings: { memorySystem: undefined },
+						});
+					// The first reply writes the session file; a session file is written only from its first reply on.
+					const uOwnerTurn = async (session: AgentSession, label: string): Promise<void> => {
+						world.provider.enqueue("root", {
+							name: `${label}-owner-turn`,
+							reply: { content: [{ type: "text", text: "Noted." }] },
+						});
+						world.systemOne.enterPhase(`${label}-owner-turn`, {});
+						await withDeadline(trace, `${label} owner turn`, session.prompt("Say hello."));
+					};
+					// One owner-words screen is one paid System One response: the intake classifier, not an admission judgment.
+					const uScreen = async (session: AgentSession, label: string, words: string): Promise<void> => {
+						const controller = session.systemOneController;
+						if (controller === undefined)
+							throw new Error(`${label}: the owner session has no bound System One controller`);
+						world.systemOne.enterPhase(label, { carries_0: { kind: "noul", probability: 0.02 } });
+						const screened = await withDeadline(trace, label, controller.screenOwnerWords([words]));
+						if (screened.status !== "screened")
+							throw new Error(`${label}: the owner-words screen is ${screened.status}`);
+					};
 
-				// Cost of each confirmed row and of each held copy, read from the files: the owner's live totals must equal these sums.
-				const uRowCosts = (file: string): number[] =>
-					(world.io.fileEntries().get(file) ?? "")
-						.split("\n")
-						.filter((line) => line.includes('"customType":"semantic_usage"'))
-						.map(
-							(line) =>
-								(JSON.parse(line) as { data: { usage: { cost: { total: number } } } }).data.usage.cost.total,
-						);
-				const uHeldCosts = (sidecar: string): number[] => {
-					const raw = world.io.peekFile(sidecar);
-					if (raw === undefined) return [];
-					return (
-						JSON.parse(raw) as { records: { payload: { usage: { cost: { total: number } } } }[] }
-					).records.map((record) => record.payload.usage.cost.total);
-				};
-				const uSum = (values: readonly number[]): number => values.reduce((total, value) => total + value, 0);
-				// A journal document with one valid held record of another identity: it must never be imported or charged here.
-				const uForeignDocument = (
-					sessionId: string,
-					sessionFile: string,
-					receiptId: string,
-					headerTimestamp: string | undefined,
-				): string =>
-					JSON.stringify({
-						version: 1,
-						kind: "semantic-usage-pending",
-						sessionId,
-						sessionFile,
-						...(headerTimestamp !== undefined ? { headerTimestamp } : {}),
-						updatedAt: headerTimestamp ?? "2026-10-11T00:00:00.000Z",
-						records: [
-							{
-								reportId: receiptId,
-								createdAt: "2026-10-11T00:00:00.000Z",
-								payload: {
-									receiptId,
-									provider: "typesafe",
-									model: "jev-1.13.0",
-									attempt: 1,
-									usage: {
-										input: 10,
-										output: 5,
-										cacheRead: 0,
-										cacheWrite: 0,
-										totalTokens: 15,
-										cost: { input: 0.0000025, output: 0.00000625, cacheRead: 0, cacheWrite: 0, total: 0.5 },
+					// Cost of each confirmed row and of each held copy, read from the files: the owner's live totals must equal these sums.
+					const uRowCosts = (file: string): number[] =>
+						(world.io.fileEntries().get(file) ?? "")
+							.split("\n")
+							.filter((line) => line.includes('"customType":"semantic_usage"'))
+							.map(
+								(line) =>
+									(JSON.parse(line) as { data: { usage: { cost: { total: number } } } }).data.usage.cost.total,
+							);
+					const uHeldCosts = (sidecar: string): number[] => {
+						const raw = world.io.peekFile(sidecar);
+						if (raw === undefined) return [];
+						return (
+							JSON.parse(raw) as { records: { payload: { usage: { cost: { total: number } } } }[] }
+						).records.map((record) => record.payload.usage.cost.total);
+					};
+					const uSum = (values: readonly number[]): number => values.reduce((total, value) => total + value, 0);
+					// A journal document with one valid held record of another identity: it must never be imported or charged here.
+					const uForeignDocument = (
+						sessionId: string,
+						sessionFile: string,
+						receiptId: string,
+						headerTimestamp: string | undefined,
+					): string =>
+						JSON.stringify({
+							version: 1,
+							kind: "semantic-usage-pending",
+							sessionId,
+							sessionFile,
+							...(headerTimestamp !== undefined ? { headerTimestamp } : {}),
+							updatedAt: headerTimestamp ?? "2026-10-11T00:00:00.000Z",
+							records: [
+								{
+									reportId: receiptId,
+									createdAt: "2026-10-11T00:00:00.000Z",
+									payload: {
+										receiptId,
+										provider: "typesafe",
+										model: "jev-1.13.0",
+										attempt: 1,
+										usage: {
+											input: 10,
+											output: 5,
+											cacheRead: 0,
+											cacheWrite: 0,
+											totalTokens: 15,
+											cost: {
+												input: 0.0000025,
+												output: 0.00000625,
+												cacheRead: 0,
+												cacheWrite: 0,
+												total: 0.5,
+											},
+										},
+										costStatus: "catalog_priced",
 									},
-									costStatus: "catalog_priced",
+								},
+							],
+							conflicts: [],
+							droppedConflicts: 0,
+						});
+
+					// The handoff a disposed owner reports for what it still holds: pending copies, not-retained reports, confirmed rows whose
+					// copy is not removed, and other identities' journals beside the file. Each U-* step asserts its own exact handoff.
+					const uHandoff = (pending: number, unretained: number, confirmed: number, unmatched: number): string =>
+						`Usage handoff: ${pending} usage report(s) pending in the session journal, ${unretained} not retained, ${confirmed} confirmed row(s) with a journal copy left, ${unmatched} unmatched journal(s); none is charged to another session.`;
+					const uDispose = async (
+						session: AgentSession,
+						message: string,
+						handoff: string | undefined,
+					): Promise<void> => {
+						const mark = world.warnings.length;
+						expect(await world.disposeSessionInBody(session), message).toBeUndefined();
+						expect(
+							world.warnings.slice(mark).filter((warning) => warning.startsWith("Usage handoff:")),
+							`${message}: the handoff names exactly what the owner still holds`,
+						).toEqual(handoff === undefined ? [] : [handoff]);
+					};
+
+					// Normal order, then the first failed append: the owner keeps the receipt, the session file is fenced, and the failed row
+					// is not published. A later paid answer is held without another append, and the reopened owner records both once.
+					const uFencedDir = `${world.agentDir}-usage-fenced`;
+					const uFenced = await uOwnerAt(uFencedDir);
+					await uOwnerTurn(uFenced.session, "u-fenced");
+					const uFencedFile = uFenced.sessionManager.getSessionFile();
+					if (uFencedFile === undefined) throw new Error("U-usage: the fenced owner session has no file");
+					const uFencedSidecar = uSidecarOf(uFencedFile, uFenced.sessionManager.getSessionId());
+					const uFencedRequests = world.systemOne.decoded.length;
+					await uScreen(uFenced.session, "u-fenced-control", "Say hello again.");
+					expect(
+						{
+							rows: uRowIds(uFencedFile).length,
+							pending: world.io.existsSync(uFencedSidecar),
+							requests: world.systemOne.decoded.length - uFencedRequests,
+						},
+						"the normal-order control confirms its row before the call returns and keeps no pending copy",
+					).toEqual({ rows: 1, pending: false, requests: 1 });
+					world.io.failNext({
+						name: "u-fenced-row-append",
+						kind: "append",
+						code: "EIO",
+						matches: (operation, data) =>
+							operation.path.endsWith(".jsonl") &&
+							(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
+					});
+					const uFencedWarnings = world.warnings.length;
+					await uScreen(uFenced.session, "u-fenced-first", "Say hello a second time.");
+					// No earlier receipt was held when the write failed: the failed append's own receipt is the only warning, with the write's own cause.
+					expect(
+						uUsageWarnings(uFencedWarnings),
+						"the failed append's receipt is the only warning, with the write's own cause",
+					).toEqual([
+						expect.stringMatching(
+							// The cause is the write's own text, bounded to 200 characters: the path may be cut, so only its opening is exact.
+							/^A System One usage receipt is pending, not yet in this session's usage record \(Scripted IO fault u-fenced-row-append: append '[^\n]*\); it is retained in the session journal and recorded when a new session manager reads the file\.$/,
+						),
+					]);
+					const uFencedAfterFence = world.io.operations.length;
+					await uScreen(uFenced.session, "u-fenced-held", "Say hello a third time.");
+					await uScreen(uFenced.session, "u-fenced-held-again", "Say hello a fourth time.");
+					expect(
+						{
+							rows: uRowIds(uFencedFile).length,
+							held: uHeldIds(uFencedSidecar).length,
+							requests: world.systemOne.decoded.length - uFencedRequests,
+						},
+						"the fenced owner holds each later answer without a row, and each answer is judged once",
+					).toEqual({ rows: 1, held: 3, requests: 4 });
+					expect(
+						world.io.operations
+							.slice(uFencedAfterFence)
+							.filter((operation) => operation.kind === "append" && operation.path === uFencedFile).length,
+						"no append reaches the session file after the fence: the held answers are never written",
+					).toBe(0);
+					expect(
+						uUsageWarnings(uFencedWarnings).slice(1),
+						"the first later receipt carries the fence's wording once; the later held answers are not told again",
+					).toEqual([
+						expect.stringMatching(
+							/^A System One usage receipt is pending, not yet in this session's usage record \(Session persistence state is uncertain after a failed write\); it is retained in the session journal and recorded when a new session manager reads the file\.$/,
+						),
+					]);
+					const uFencedCost = uFenced.session.getCostSummary().currentCost;
+					const uFencedHeld = uHeldIds(uFencedSidecar);
+					expect(uFencedCost, "the live owner counts its confirmed row and each held report once").toBe(
+						uSum([...uRowCosts(uFencedFile), ...uHeldCosts(uFencedSidecar)]),
+					);
+					await uDispose(
+						uFenced.session,
+						"the fenced owner disposes, and its held usage stays in the journal",
+						uHandoff(3, 0, 0, 0),
+					);
+					const uFencedReopened = await uOwnerAt(uFencedDir, uFencedFile);
+					const uFencedAfter = uRowIds(uFencedFile);
+					expect(
+						{
+							rows: uFencedAfter.length,
+							unique: new Set(uFencedAfter).size,
+							heldRecorded: uFencedHeld.every((id) => uFencedAfter.includes(id)),
+							pending: world.io.existsSync(uFencedSidecar),
+							requests: world.systemOne.decoded.length - uFencedRequests,
+							cost: uFencedReopened.session.getCostSummary().currentCost === uFencedCost,
+						},
+						"the reopened owner records each held receipt once under its own report id, with no evaluator request, and counts each row once: no second charge",
+					).toEqual({ rows: 4, unique: 4, heldRecorded: true, pending: false, requests: 4, cost: true });
+					await uDispose(uFencedReopened.session, "the reopened fenced owner disposes cleanly", undefined);
+
+					// Ledger succeeds, acknowledgement fails: the row is confirmed, so nothing is reported unrecorded, and the pending copy waits
+					// until its removal succeeds. The reopened owner removes it without writing the row again. A journal of another identity
+					// beside the file is listed as evidence and is never charged to this session.
+					const uAckDir = `${world.agentDir}-usage-ack`;
+					const uAck = await uOwnerAt(uAckDir);
+					await uOwnerTurn(uAck.session, "u-ack");
+					const uAckFile = uAck.sessionManager.getSessionFile();
+					if (uAckFile === undefined) throw new Error("U-usage: the acknowledgement owner session has no file");
+					const uAckSidecar = uSidecarOf(uAckFile, uAck.sessionManager.getSessionId());
+					const uAckDenial = world.io.denyUntilCleared({
+						name: "u-ack-sidecar-removal-denied",
+						kind: "unlink",
+						matches: (operation) => operation.path === uAckSidecar,
+					});
+					const uAckWarnings = world.warnings.length;
+					await uScreen(uAck.session, "u-ack-screen", "Say hello for the acknowledgement check.");
+					expect(
+						{
+							rows: uRowIds(uAckFile).length,
+							held: uHeldIds(uAckSidecar).length,
+							warnings: uUsageWarnings(uAckWarnings).length,
+						},
+						"the confirmed row is not reported as unrecorded; its pending copy waits for a removal that succeeds",
+					).toEqual({ rows: 1, held: 1, warnings: 0 });
+					const uAckFirst = uHeldIds(uAckSidecar);
+					expect(uRowIds(uAckFile), "the confirmed row is written under the receipt id of its held copy").toEqual(
+						uAckFirst,
+					);
+					expect(uAckDenial.hits, "the sidecar removal was refused").toBeGreaterThan(0);
+					expect(
+						world.warnings
+							.slice(uAckWarnings)
+							.filter(
+								(warning) =>
+									warning ===
+									"The session's usage journal could not be updated (usage journal write failed: EIO); its records are retried.",
+							).length,
+						"the refused removal is reported: the confirmed row's copy could not be removed",
+					).toBeGreaterThan(0);
+					// A refused removal only makes the removal wait: retention stays ready, so the next paid screen is still made, retained and appended.
+					const uAckBeforeSecond = world.systemOne.decoded.length;
+					await uScreen(uAck.session, "u-ack-second", "Say hello after the refused removal.");
+					expect(
+						{
+							requests: world.systemOne.decoded.length - uAckBeforeSecond,
+							rows: uRowIds(uAckFile).length,
+							unique: new Set(uRowIds(uAckFile)).size,
+						},
+						"a refused removal does not stop the next paid screen: its row is appended",
+					).toEqual({ requests: 1, rows: 2, unique: 2 });
+					expect(uRowIds(uAckFile)[0], "the first row keeps the receipt id of its held copy").toBe(uAckFirst[0]);
+					const uAckRowsBefore = uRowIds(uAckFile);
+					const uAckCost = uAck.session.getCostSummary().currentCost;
+					await uDispose(
+						uAck.session,
+						"the acknowledgement owner disposes with its pending copy kept",
+						uHandoff(0, 0, 1, 0),
+					);
+					uAckDenial.clear();
+					// Two other identities' journals sit beside this file: a valid held record and a malformed document. Both are listed as
+					// evidence, neither is read or charged here, and their bytes stay as they were seeded.
+					const uAckForeign = `${uAckFile}.usage-pending.session-of-another-identity.json`;
+					const uAckForeignText = uForeignDocument(
+						"session-of-another-identity",
+						uAckFile,
+						"foreign-receipt-ack",
+						undefined,
+					);
+					world.io.seed(uAckForeign, uAckForeignText);
+					const uAckMalformed = `${uAckFile}.usage-pending.session-of-malformed-identity.json`;
+					world.io.seed(uAckMalformed, "{}\n");
+					const uAckReopenWarnings = world.warnings.length;
+					const uAckSidecarRead = world.io.denyUntilCleared({
+						name: "u-ack-sidecar-read-denied",
+						kind: "read",
+						code: "EIO",
+						matches: (operation) => operation.path === uAckSidecar,
+					});
+					const uAckRequests = world.systemOne.decoded.length;
+					const uAckReopened = await uOwnerAt(uAckDir, uAckFile);
+					expect(
+						{
+							rows: uRowIds(uAckFile),
+							kept: world.io.existsSync(uAckSidecar),
+							requests: world.systemOne.decoded.length - uAckRequests,
+							cost: uAckReopened.session.getCostSummary().currentCost === uAckCost,
+						},
+						"an unreadable journal is kept, not dropped and not evaluated again, and the foreign records are never charged: the cost is still the two confirmed rows",
+					).toEqual({ rows: uAckRowsBefore, kept: true, requests: 0, cost: true });
+					expect(
+						world.warnings
+							.slice(uAckReopenWarnings)
+							.filter((warning) => warning.startsWith("2 pending usage journal(s)")),
+						"the other identities' journals are reported as evidence, by their names",
+					).toEqual([
+						`2 pending usage journal(s) from another session identity are kept as evidence and are not charged to this session: ${basename(uAckForeign)}, ${basename(uAckMalformed)}.`,
+					]);
+					expect(
+						world.warnings
+							.slice(uAckReopenWarnings)
+							.filter(
+								(warning) =>
+									warning ===
+									"The session's usage journal is unavailable (usage journal read failed: EIO); its pending reports are retried.",
+							).length,
+						"the unreadable journal is reported when it is opened",
+					).toBeGreaterThan(0);
+					expect(uAckSidecarRead.hits, "the unreadable journal was read and refused").toBeGreaterThan(0);
+					uAckSidecarRead.clear();
+					await uDispose(
+						uAckReopened.session,
+						"the reopened owner recovers the journal on dispose and disposes",
+						uHandoff(0, 0, 0, 2),
+					);
+					expect(
+						{
+							rows: uRowIds(uAckFile),
+							sidecar: world.io.existsSync(uAckSidecar),
+							foreign: world.io.peekFile(uAckForeign) === uAckForeignText,
+							malformed: world.io.peekFile(uAckMalformed) === "{}\n",
+							requests: world.systemOne.decoded.length - uAckRequests,
+						},
+						"the retried removal leaves the same two rows, both other identities' journals are kept byte for byte as evidence, and no evaluation happens",
+					).toEqual({ rows: uAckRowsBefore, sidecar: false, foreign: true, malformed: true, requests: 0 });
+
+					// Deferred first reply: the owner has written nothing yet, so the paid row waits in the journal, silently, and is acknowledged
+					// only after the first reply's own write makes it physical. A later paid row is then written at once.
+					const uDeferDir = `${world.agentDir}-usage-deferred`;
+					const uDefer = await uOwnerAt(uDeferDir);
+					const uDeferFile = uDefer.sessionManager.getSessionFile();
+					if (uDeferFile === undefined) throw new Error("U-usage: the deferred owner session has no file");
+					const uDeferSidecar = uSidecarOf(uDeferFile, uDefer.sessionManager.getSessionId());
+					const uDeferWarnings = world.warnings.length;
+					await uScreen(uDefer.session, "u-defer-screen", "Say hello before the first reply.");
+					expect(
+						{
+							file: world.io.existsSync(uDeferFile),
+							rows: uRowIds(uDeferFile).length,
+							held: uHeldIds(uDeferSidecar).length,
+							warnings: uUsageWarnings(uDeferWarnings).length,
+						},
+						"a deferred first reply retains its paid row silently: no file, no row, one pending copy",
+					).toEqual({ file: false, rows: 0, held: 1, warnings: 0 });
+					const uDeferIds = uHeldIds(uDeferSidecar);
+					await uOwnerTurn(uDefer.session, "u-defer");
+					await withDeadline(
+						trace,
+						"U-usage deferred row acknowledged after the first reply",
+						world.io.waitForMutation(() => !world.io.existsSync(uDeferSidecar)),
+					);
+					expect(
+						{
+							rows: uRowIds(uDeferFile).length,
+							unique: new Set(uRowIds(uDeferFile)).size,
+							warnings: uUsageWarnings(uDeferWarnings).length,
+						},
+						"the first reply's write carries the deferred row once, and its pending copy is removed after that write",
+					).toEqual({ rows: 1, unique: 1, warnings: 0 });
+					expect(
+						uRowIds(uDeferFile),
+						"the first reply's write carries the deferred receipt under its own id",
+					).toEqual(uDeferIds);
+					await uScreen(uDefer.session, "u-defer-control", "Say hello after the first reply.");
+					expect(
+						{ rows: uRowIds(uDeferFile).length, pending: world.io.existsSync(uDeferSidecar) },
+						"after the first reply a paid row is written at once, with no pending copy",
+					).toEqual({ rows: 2, pending: false });
+					await uDispose(uDefer.session, "the deferred owner disposes cleanly", undefined);
+
+					// Corrupt journal at reopen: the content is kept as evidence in the first free slot, nothing is recovered from it, and
+					// the owner's own next paid row is recorded normally.
+					const uCorruptDir = `${world.agentDir}-usage-corrupt`;
+					const uCorrupt = await uOwnerAt(uCorruptDir);
+					await uOwnerTurn(uCorrupt.session, "u-corrupt");
+					const uCorruptFile = uCorrupt.sessionManager.getSessionFile();
+					if (uCorruptFile === undefined)
+						throw new Error("U-usage: the corrupt-journal owner session has no file");
+					const uCorruptSidecar = uSidecarOf(uCorruptFile, uCorrupt.sessionManager.getSessionId());
+					await uDispose(uCorrupt.session, "the owner that wrote no pending copy disposes cleanly", undefined);
+					world.io.seed(uCorruptSidecar, "not a usage journal\n");
+					const uCorruptWarnings = world.warnings.length;
+					const uCorruptReopened = await uOwnerAt(uCorruptDir, uCorruptFile);
+					expect(
+						world.warnings
+							.slice(uCorruptWarnings)
+							.filter((warning) => warning.startsWith("The session's usage journal")),
+						"the moved-aside journal is reported, with its evidence name and its corrupt reason",
+					).toEqual([
+						`The session's usage journal could not be trusted (usage journal is corrupt: not valid JSON); it is preserved at ${basename(uCorruptSidecar)}.corrupt.1 and its reports are not recovered automatically.`,
+					]);
+					expect(
+						{
+							evidence: world.io.peekFile(`${uCorruptSidecar}.corrupt.1`),
+							sidecar: world.io.existsSync(uCorruptSidecar),
+							rows: uRowIds(uCorruptFile).length,
+						},
+						"a corrupt journal is preserved as evidence at its first free slot, and nothing is recovered from it",
+					).toEqual({ evidence: "not a usage journal\n", sidecar: false, rows: 0 });
+					await uScreen(uCorruptReopened.session, "u-corrupt-screen", "Say hello past the evidence.");
+					expect(
+						{ rows: uRowIds(uCorruptFile).length, pending: world.io.existsSync(uCorruptSidecar) },
+						"the reopened owner records its own paid row once, and the evidence is not replayed",
+					).toEqual({ rows: 1, pending: false });
+					await uDispose(uCorruptReopened.session, "the corrupt-journal owner disposes cleanly", undefined);
+
+					// A journal whose content names another session identity, at this session's own file name, is not imported: it is moved aside
+					// as evidence, and the owner records its own paid row normally.
+					const uIdentityDir = `${world.agentDir}-usage-identity`;
+					const uIdentity = await uOwnerAt(uIdentityDir);
+					await uOwnerTurn(uIdentity.session, "u-identity");
+					const uIdentityFile = uIdentity.sessionManager.getSessionFile();
+					if (uIdentityFile === undefined) throw new Error("U-usage: the identity owner session has no file");
+					const uIdentitySidecar = uSidecarOf(uIdentityFile, uIdentity.sessionManager.getSessionId());
+					const uIdentityHeaderAt = uIdentity.sessionManager.getHeader()?.timestamp;
+					await uDispose(uIdentity.session, "the identity owner disposes cleanly", undefined);
+					world.io.seed(
+						uIdentitySidecar,
+						uForeignDocument(
+							"another-session-identity",
+							uIdentityFile,
+							"foreign-receipt-identity",
+							uIdentityHeaderAt,
+						),
+					);
+					const uIdentityWarnings = world.warnings.length;
+					const uIdentityReopened = await uOwnerAt(uIdentityDir, uIdentityFile);
+					expect(
+						{
+							evidence:
+								world.io.peekFile(`${uIdentitySidecar}.corrupt.1`) ===
+								uForeignDocument(
+									"another-session-identity",
+									uIdentityFile,
+									"foreign-receipt-identity",
+									uIdentityHeaderAt,
+								),
+							sidecar: world.io.existsSync(uIdentitySidecar),
+							rows: uRowIds(uIdentityFile).length,
+						},
+						"a journal that names another session identity is kept as evidence at its first free slot, and nothing is imported from it",
+					).toEqual({ evidence: true, sidecar: false, rows: 0 });
+					expect(
+						world.warnings
+							.slice(uIdentityWarnings)
+							.filter((warning) => warning.startsWith("The session's usage journal")),
+						"the moved-aside journal is reported, by its evidence name and its identity reason",
+					).toEqual([
+						`The session's usage journal could not be trusted (usage journal belongs to another session identity); it is preserved at ${basename(uIdentitySidecar)}.corrupt.1 and its reports are not recovered automatically.`,
+					]);
+					expect(
+						uIdentityReopened.session.getCostSummary().currentCost,
+						"the foreign record is not held: before its own paid row the owner's cost is zero",
+					).toBe(0);
+					await uScreen(uIdentityReopened.session, "u-identity-screen", "Say hello past the foreign journal.");
+					expect(
+						world.io.existsSync(uIdentitySidecar),
+						"the owner's own paid row is confirmed, and no pending copy of the foreign record is left behind",
+					).toBe(false);
+					expect(uRowIds(uIdentityFile), "the row is the owner's own, once").toHaveLength(1);
+					expect(uRowIds(uIdentityFile), "the foreign receipt never appears as a row").not.toContain(
+						"foreign-receipt-identity",
+					);
+					expect(
+						uIdentityReopened.session.getCostSummary().currentCost,
+						"the owner's cost is its own confirmed row, once",
+					).toBe(uSum(uRowCosts(uIdentityFile)));
+					await uDispose(uIdentityReopened.session, "the identity-evidence owner disposes cleanly", undefined);
+
+					// A session file whose header id is not a valid session id is refused at open, before anything reads, writes or derives a
+					// name from it, and the resume and picker listings skip it. Opened normally, any kernel-valid id is journaled under hashed
+					// names when its plain name would not fit the file system.
+					const uRewriteId = (text: string, id: string): string => {
+						const [header = "", ...entries] = text.split("\n");
+						return [JSON.stringify({ ...(JSON.parse(header) as Record<string, unknown>), id }), ...entries].join(
+							"\n",
+						);
+					};
+					const uHeaderDir = `${world.agentDir}-usage-header`;
+					const uHeader = await uOwnerAt(uHeaderDir);
+					await uOwnerTurn(uHeader.session, "u-header");
+					const uHeaderFile = uHeader.sessionManager.getSessionFile();
+					if (uHeaderFile === undefined) throw new Error("U-usage: the header owner session has no file");
+					const uHeaderId = uHeader.sessionManager.getSessionId();
+					await uDispose(
+						uHeader.session,
+						"the owner with a valid id disposes before its header is read again",
+						undefined,
+					);
+					const uHeaderText = world.io.peekFile(uHeaderFile);
+					if (uHeaderText === undefined) throw new Error("U-usage: the header session file is missing");
+					expect(
+						world.openSessionManager(uHeaderFile, uHeaderDir).getSessionId(),
+						"the normal-id control: a uuid-shaped session opens normally under its own id",
+					).toBe(uHeaderId);
+					const uCraftedFile = resolve(dirname(uHeaderFile), "crafted-header-id.jsonl");
+					world.io.seed(uCraftedFile, uRewriteId(uHeaderText, "a/../b"));
+					const uTreeChanges = (before: ReadonlyMap<string, string>, after: ReadonlyMap<string, string>) => ({
+						added: [...after.keys()].filter((path) => !before.has(path)).sort(),
+						removed: [...before.keys()].filter((path) => !after.has(path)).sort(),
+						changed: [...after]
+							.filter(([path, text]) => before.has(path) && before.get(path) !== text)
+							.map(([path]) => path)
+							.sort(),
+					});
+					const uCraftedBefore = world.io.captureTree(uHeaderDir);
+					const uCraftedTreeBefore = new Map(world.io.fileEntries());
+					expect(
+						() => world.openSessionManager(uCraftedFile, uHeaderDir),
+						"a header id with a path separator is refused at open",
+					).toThrow(`Session file header id is not a valid session id: ${uCraftedFile}`);
+					expect(
+						uTreeChanges(uCraftedTreeBefore, world.io.fileEntries()),
+						"the refused open changes nothing in the virtual tree, not even the crafted file",
+					).toEqual({ added: [], removed: [], changed: [] });
+					expect(
+						world.io.captureTree(uHeaderDir),
+						"the refused open changes nothing in the tree, directories and bytes alike, not even the crafted file",
+					).toEqual(uCraftedBefore);
+					expect(
+						SessionManager.continueRecent(HARNESS_PROJECT_CWD, uHeaderDir, dirname(uHeaderFile)).getSessionFile(),
+						"resume skips the refused header and continues the valid session next to it",
+					).toBe(uHeaderFile);
+					expect(
+						(await SessionManager.list(HARNESS_PROJECT_CWD, uHeaderDir, dirname(uHeaderFile))).map(
+							(session) => session.path,
+						),
+						"the picker's listing skips the refused header too: only the valid session is listed",
+					).toEqual([uHeaderFile]);
+
+					// A valid long id (120 characters): its journal name is hashed to fit, and its paid row is recorded once.
+					const uLongDir = `${world.agentDir}-usage-long`;
+					const uLong = await uOwnerAt(uLongDir);
+					await uOwnerTurn(uLong.session, "u-long");
+					const uLongFile = uLong.sessionManager.getSessionFile();
+					if (uLongFile === undefined) throw new Error("U-usage: the long-id owner session has no file");
+					await uDispose(uLong.session, "the long-id owner disposes before its header is rewritten", undefined);
+					const uLongId = `long-${"0123456789abcdef".repeat(8)}`.slice(0, 120);
+					expect(uLongId, "the long id is 120 characters").toHaveLength(120);
+					const uLongText = world.io.peekFile(uLongFile);
+					if (uLongText === undefined) throw new Error("U-usage: the long-id session file is missing");
+					world.io.seed(uLongFile, uRewriteId(uLongText, uLongId));
+					const uLongOwner = await uOwnerAt(uLongDir, uLongFile);
+					expect(uLongOwner.sessionManager.getSessionId(), "the session opens under the long id").toBe(uLongId);
+					const uLongMark = world.io.operations.length;
+					const uLongWarnings = world.warnings.length;
+					await uScreen(uLongOwner.session, "u-long-screen", "Say hello under a long id.");
+					const uLongOps = world.io.operations.slice(uLongMark);
+					const uLongCommits = uLongOps
+						.filter(
+							(operation) =>
+								operation.kind === "rename" && operation.destination?.includes(".usage-pending.") === true,
+						)
+						.map((operation) => operation.destination ?? "");
+					const uLongTmps = uLongOps
+						.filter(
+							(operation) =>
+								operation.kind === "write" &&
+								operation.path.includes(".usage-pending.") &&
+								operation.path.endsWith(".tmp"),
+						)
+						.map((operation) => operation.path);
+					expect(uLongCommits, "the paid row's journal copy is committed exactly once").toHaveLength(1);
+					expect(uLongTmps, "one temporary copy is written for it").toHaveLength(1);
+					const uLongSidecarName = basename(uLongCommits[0] ?? "");
+					const uLongTmpName = basename(uLongTmps[0] ?? "");
+					expect(
+						{
+							sidecarWithinBound: uLongSidecarName.length <= 160,
+							sidecarHashed: /\.usage-pending\.[0-9a-f]{24}\.json$/.test(uLongSidecarName),
+							tmpWithinBound: uLongTmpName.length <= 212,
+						},
+						"the hashed journal names fit the file system, so no write fails for a long name",
+					).toEqual({ sidecarWithinBound: true, sidecarHashed: true, tmpWithinBound: true });
+					const uLongRows = uRowIds(uLongFile);
+					expect(
+						{
+							rows: uLongRows.length,
+							unique: new Set(uLongRows).size,
+							pending: world.io.existsSync(uLongCommits[0] ?? ""),
+							journals: [...world.io.fileEntries().keys()].filter(
+								(path) => dirname(path) === dirname(uLongFile) && path.includes(".usage-pending."),
+							),
+							warnings: uUsageWarnings(uLongWarnings).length,
+						},
+						"the paid row is recorded once under the long id, and no journal copy is left in the session directory",
+					).toEqual({ rows: 1, unique: 1, pending: false, journals: [], warnings: 0 });
+					await uDispose(uLongOwner.session, "the long-id owner disposes cleanly", undefined);
+
+					// A kernel-valid id of 133 characters, in a session file whose own name is longer than the stem bound: the journal's stem and its
+					// token are both hashed, which the 120-character id above does not reach. Its paid row is recorded once.
+					const uWideDir = `${world.agentDir}-usage-wide`;
+					const uWide = await uOwnerAt(uWideDir);
+					await uOwnerTurn(uWide.session, "u-wide");
+					const uWideFile = uWide.sessionManager.getSessionFile();
+					if (uWideFile === undefined) throw new Error("U-usage: the wide-id owner session has no file");
+					await uDispose(uWide.session, "the wide-id owner disposes before its header is rewritten", undefined);
+					const uWideId = `wide-${"abcdefgh".repeat(16)}`;
+					expect(uWideId, "the wide id is 133 characters").toHaveLength(133);
+					const uWideText = world.io.peekFile(uWideFile);
+					if (uWideText === undefined) throw new Error("U-usage: the wide-id session file is missing");
+					const uWideLongFile = resolve(dirname(uWideFile), `${"wide-session-".repeat(9)}.jsonl`);
+					expect(
+						basename(uWideLongFile).length,
+						"the session file name is longer than the stem bound",
+					).toBeGreaterThan(96);
+					world.io.seed(uWideLongFile, uRewriteId(uWideText, uWideId));
+					const uWideOwner = await uOwnerAt(uWideDir, uWideLongFile);
+					expect(uWideOwner.sessionManager.getSessionId(), "the session opens under the wide id").toBe(uWideId);
+					const uWideMark = world.io.operations.length;
+					const uWideWarnings = world.warnings.length;
+					await uScreen(uWideOwner.session, "u-wide-screen", "Say hello under a wide id.");
+					const uWideOps = world.io.operations.slice(uWideMark);
+					const uWideCommits = uWideOps
+						.filter(
+							(operation) =>
+								operation.kind === "rename" && operation.destination?.includes(".usage-pending.") === true,
+						)
+						.map((operation) => operation.destination ?? "");
+					const uWideTmps = uWideOps
+						.filter(
+							(operation) =>
+								operation.kind === "write" &&
+								operation.path.includes(".usage-pending.") &&
+								operation.path.endsWith(".tmp"),
+						)
+						.map((operation) => operation.path);
+					expect(uWideCommits, "the paid row's journal copy is committed exactly once").toHaveLength(1);
+					expect(uWideTmps, "one temporary copy is written for it").toHaveLength(1);
+					const uWideSidecarName = basename(uWideCommits[0] ?? "");
+					const uWideTmpName = basename(uWideTmps[0] ?? "");
+					expect(
+						{
+							sidecarWithinBound: uWideSidecarName.length <= 160,
+							stemAndTokenHashed: /^h-[0-9a-f]{24}\.usage-pending\.[0-9a-f]{24}\.json$/.test(uWideSidecarName),
+							tmpWithinBound: uWideTmpName.length <= 212,
+						},
+						"both the stem and the token of a wide id's journal name are hashed, and the names fit the file system",
+					).toEqual({ sidecarWithinBound: true, stemAndTokenHashed: true, tmpWithinBound: true });
+					const uWideRows = uRowIds(uWideLongFile);
+					expect(
+						{
+							rows: uWideRows.length,
+							unique: new Set(uWideRows).size,
+							pending: world.io.existsSync(uWideCommits[0] ?? ""),
+							journals: [...world.io.fileEntries().keys()].filter(
+								(path) => dirname(path) === dirname(uWideLongFile) && path.includes(".usage-pending."),
+							),
+							warnings: uUsageWarnings(uWideWarnings).length,
+						},
+						"the wide id's paid row is recorded once, and its journal copy is removed once confirmed",
+					).toEqual({ rows: 1, unique: 1, pending: false, journals: [], warnings: 0 });
+					await uDispose(uWideOwner.session, "the wide-id owner disposes cleanly", undefined);
+
+					// Timer recovery: a removal refused by the journal is retried by the owner's own backoff (one unref'd timer, 1 s for its
+					// first step). The refusal is cleared, and the test waits only for the journal to change: nothing disposes or reopens the
+					// owner, and no evaluation runs.
+					const uTimerDir = `${world.agentDir}-usage-timer`;
+					const uTimer = await uOwnerAt(uTimerDir);
+					await uOwnerTurn(uTimer.session, "u-timer");
+					const uTimerFile = uTimer.sessionManager.getSessionFile();
+					if (uTimerFile === undefined) throw new Error("U-usage: the timer owner session has no file");
+					const uTimerSidecar = uSidecarOf(uTimerFile, uTimer.sessionManager.getSessionId());
+					const uTimerDenial = world.io.denyUntilCleared({
+						name: "u-timer-sidecar-removal-denied",
+						kind: "unlink",
+						matches: (operation) => operation.path === uTimerSidecar,
+					});
+					const uTimerWarnings = world.warnings.length;
+					await uScreen(uTimer.session, "u-timer-screen", "Say hello for the timer recovery.");
+					const uTimerIds = uHeldIds(uTimerSidecar);
+					expect(uTimerIds, "the removal is refused: exactly the paid row's copy stays").toHaveLength(1);
+					expect(uRowIds(uTimerFile), "the paid row is in the file once").toEqual(uTimerIds);
+					expect(uTimerDenial.hits, "the removal was refused").toBeGreaterThan(0);
+					expect(
+						world.warnings
+							.slice(uTimerWarnings)
+							.filter(
+								(warning) =>
+									warning ===
+									"The session's usage journal could not be updated (usage journal write failed: EIO); its records are retried.",
+							).length,
+						"the refused removal is reported before the owner's own retry removes the copy",
+					).toBeGreaterThan(0);
+					const uTimerCost = uTimer.session.getCostSummary().currentCost;
+					const uTimerRequests = world.systemOne.decoded.length;
+					uTimerDenial.clear();
+					await withDeadline(
+						trace,
+						"U-usage timer retry removes the confirmed row's copy",
+						world.io.waitForMutation(() => !world.io.existsSync(uTimerSidecar)),
+						30_000,
+					);
+					expect(
+						{
+							rows: uRowIds(uTimerFile),
+							sidecar: world.io.existsSync(uTimerSidecar),
+							requests: world.systemOne.decoded.length - uTimerRequests,
+							cost: uTimer.session.getCostSummary().currentCost === uTimerCost,
+							usage: uUsageWarnings(uTimerWarnings).length,
+						},
+						"the owner's own retry removes the copy: the same single row, no evaluation, its cost counted once",
+					).toEqual({ rows: uTimerIds, sidecar: false, requests: 0, cost: true, usage: 0 });
+					await uDispose(uTimer.session, "the timer-recovered owner disposes cleanly", undefined);
+
+					// Denied journal read at reopen, recovered by the owner's own retry timer: the copy of a confirmed row stays because its
+					// removal is refused. The reopened owner cannot read its journal, so it is not ready. Both refusals then clear, and nothing
+					// disposes or reopens the owner: only its retry timer can load the journal and finish the removal.
+					const uTimerReadDir = `${world.agentDir}-usage-timer-read`;
+					const uTimerRead = await uOwnerAt(uTimerReadDir);
+					await uOwnerTurn(uTimerRead.session, "u-timer-read");
+					const uTimerReadFile = uTimerRead.sessionManager.getSessionFile();
+					if (uTimerReadFile === undefined) throw new Error("U-usage: the timer-read owner session has no file");
+					const uTimerReadSidecar = uSidecarOf(uTimerReadFile, uTimerRead.sessionManager.getSessionId());
+					const uTimerReadRemoval = world.io.denyUntilCleared({
+						name: "u-timer-read-removal-denied",
+						kind: "unlink",
+						matches: (operation) => operation.path === uTimerReadSidecar,
+					});
+					await uScreen(uTimerRead.session, "u-timer-read-screen", "Say hello before the journal read is denied.");
+					const uTimerReadIds = uHeldIds(uTimerReadSidecar);
+					expect(
+						{ rows: uRowIds(uTimerReadFile), removal: world.io.existsSync(uTimerReadSidecar) },
+						"the paid row is in the file once, and its copy waits for a removal that is refused",
+					).toEqual({ rows: uTimerReadIds, removal: true });
+					expect(uTimerReadRemoval.hits, "the removal was refused").toBeGreaterThan(0);
+					const uTimerReadCost = uTimerRead.session.getCostSummary().currentCost;
+					await uDispose(
+						uTimerRead.session,
+						"the owner disposes with its confirmed row's copy kept",
+						uHandoff(0, 0, 1, 0),
+					);
+					uTimerReadRemoval.clear();
+					const uTimerReadDenial = world.io.denyUntilCleared({
+						name: "u-timer-read-sidecar-read-denied",
+						kind: "read",
+						code: "EIO",
+						matches: (operation) => operation.path === uTimerReadSidecar,
+					});
+					const uTimerReadWarnings = world.warnings.length;
+					const uTimerReopened = await uOwnerAt(uTimerReadDir, uTimerReadFile);
+					expect(uTimerReadDenial.hits, "the reopened owner's journal read was refused").toBeGreaterThan(0);
+					expect(
+						world.warnings
+							.slice(uTimerReadWarnings)
+							.filter(
+								(warning) =>
+									warning ===
+									"The session's usage journal is unavailable (usage journal read failed: EIO); its pending reports are retried.",
+							).length,
+						"the refused read is reported, and the owner keeps its journal not ready",
+					).toBeGreaterThan(0);
+					const uTimerReadRequests = world.systemOne.decoded.length;
+					uTimerReadDenial.clear();
+					await withDeadline(
+						trace,
+						"U-usage read recovery: the retry timer loads the journal and removes the confirmed row's copy",
+						world.io.waitForMutation(() => !world.io.existsSync(uTimerReadSidecar)),
+						30_000,
+					);
+					expect(
+						{
+							rows: uRowIds(uTimerReadFile),
+							sidecar: world.io.existsSync(uTimerReadSidecar),
+							requests: world.systemOne.decoded.length - uTimerReadRequests,
+							cost: uTimerReopened.session.getCostSummary().currentCost === uTimerReadCost,
+						},
+						"the retry after the read clears removes the copy: the same single row, no evaluation, its cost counted once",
+					).toEqual({ rows: uTimerReadIds, sidecar: false, requests: 0, cost: true });
+					await uDispose(uTimerReopened.session, "the read-recovered owner disposes cleanly", undefined);
+
+					// Physical read failure while confirming: the row is appended, but the session file cannot be read back. The receipt is
+					// typed pending with the read's own code, its pending copy stays until a confirmed read, and nothing is evaluated again.
+					// Then an unreadable journal at reopen: a paid screen is still made and its row is recorded, while the earlier pending row
+					// stays in the journal until the owner that holds it recovers it. The journal's reads stay refused until cleared, so no
+					// retry timer can change what is observed.
+					const uConfirmDir = `${world.agentDir}-usage-confirm`;
+					const uConfirm = await uOwnerAt(uConfirmDir);
+					await uOwnerTurn(uConfirm.session, "u-confirm");
+					const uConfirmFile = uConfirm.sessionManager.getSessionFile();
+					if (uConfirmFile === undefined) throw new Error("U-usage: the confirm owner session has no file");
+					const uConfirmSidecar = uSidecarOf(uConfirmFile, uConfirm.sessionManager.getSessionId());
+					const uConfirmRequests = world.systemOne.decoded.length;
+					await uScreen(uConfirm.session, "u-confirm-control", "Say hello again.");
+					expect(
+						{
+							rows: uRowIds(uConfirmFile).length,
+							pending: world.io.existsSync(uConfirmSidecar),
+							requests: world.systemOne.decoded.length - uConfirmRequests,
+						},
+						"the confirm control reads its row back at once and keeps no pending copy",
+					).toEqual({ rows: 1, pending: false, requests: 1 });
+					const uConfirmRead = world.io.denyUntilCleared({
+						name: "u-confirm-session-read-denied",
+						kind: "read",
+						code: "EIO",
+						matches: (operation) => operation.path === uConfirmFile,
+					});
+					const uConfirmWarnings = world.warnings.length;
+					await uScreen(uConfirm.session, "u-confirm-pending", "Say hello once more.");
+					expect(
+						uUsageWarnings(uConfirmWarnings),
+						"an unreadable session file leaves the appended row typed pending, with the read's own code as its cause",
+					).toEqual([
+						"A System One usage receipt is pending, not yet in this session's usage record (the session file could not be read to confirm the row (EIO)); it is kept in its session journal until the session file can be read to confirm it.",
+					]);
+
+					expect(
+						uConfirm.session.getCostSummary().currentCost,
+						"at the pending moment the row is in the ledger and held once: its cost counts once",
+					).toBe(uSum(uRowCosts(uConfirmFile)));
+					expect(
+						{
+							rows: uRowIds(uConfirmFile).length,
+							held: uHeldIds(uConfirmSidecar).length,
+							requests: world.systemOne.decoded.length - uConfirmRequests,
+						},
+						"the appended row is in the file, its pending copy waits for a confirmed read, and nothing is evaluated again",
+					).toEqual({ rows: 2, held: 1, requests: 2 });
+					const uConfirmPendingIds = uHeldIds(uConfirmSidecar);
+					expect(
+						uRowIds(uConfirmFile)[1],
+						"the appended row is written under the receipt id of its pending copy",
+					).toBe(uConfirmPendingIds[0]);
+					expect(uConfirmRead.hits, "the confirming read was refused").toBeGreaterThan(0);
+					const uConfirmHitsBeforeDispose = uConfirmRead.hits;
+					await uDispose(
+						uConfirm.session,
+						"the owner disposes with its unconfirmed row kept as pending",
+						uHandoff(1, 0, 0, 0),
+					);
+					expect(uConfirmRead.hits, "the disposal's own confirming read was refused as well").toBeGreaterThan(
+						uConfirmHitsBeforeDispose,
+					);
+					// Disposal's own last reconcile reads the session file too: that read is refused as well, so the pending copy is still in the journal.
+					expect(
+						world.io.existsSync(uConfirmSidecar),
+						"the disposal's confirming read is refused, and the unconfirmed row's pending copy stays in the journal",
+					).toBe(true);
+					uConfirmRead.clear();
+
+					const uConfirmSidecarRead = world.io.denyUntilCleared({
+						name: "u-confirm-sidecar-read-denied",
+						kind: "read",
+						code: "EIO",
+						matches: (operation) => operation.path === uConfirmSidecar,
+					});
+					const uConfirmBlindWarnings = world.warnings.length;
+					const uConfirmBlind = await uOwnerAt(uConfirmDir, uConfirmFile);
+					expect(
+						world.warnings
+							.slice(uConfirmBlindWarnings)
+							.filter(
+								(warning) =>
+									warning ===
+									"The session's usage journal is unavailable (usage journal read failed: EIO); its pending reports are retried.",
+							).length,
+						"the unreadable journal is reported when the blind owner opens it",
+					).toBeGreaterThan(0);
+					const uConfirmBlindSession = uConfirmBlind.session;
+					const uConfirmBlindRequests = world.systemOne.decoded.length;
+					// The journal cannot be read, so the owner keeps it not ready and retries it. The paid screen is still made: its row is
+					// appended and read back, so its receipt is recorded at once, while the sidecar keeps the earlier pending row.
+					await uScreen(uConfirmBlindSession, "u-confirm-blind", "Say hello while the journal is unreadable.");
+					expect(
+						{
+							requests: world.systemOne.decoded.length - uConfirmBlindRequests,
+							rows: uRowIds(uConfirmFile).length,
+							unique: new Set(uRowIds(uConfirmFile)).size,
+							kept: world.io.existsSync(uConfirmSidecar),
+							held: uHeldIds(uConfirmSidecar).length,
+						},
+						"an unreadable journal does not refuse the paid screen: it is evaluated once and its row is recorded, and the pending row stays in the journal",
+					).toEqual({ requests: 1, rows: 3, unique: 3, kept: true, held: 1 });
+					expect(uConfirmSidecarRead.hits, "the unreadable journal was refused at open").toBeGreaterThan(0);
+					const uConfirmBlindCost = uConfirmBlindSession.getCostSummary().currentCost;
+					uConfirmSidecarRead.clear();
+					await uDispose(
+						uConfirmBlindSession,
+						"the blind owner recovers the journal on dispose and disposes",
+						undefined,
+					);
+					expect(
+						{
+							rows: uRowIds(uConfirmFile).length,
+							unique: new Set(uRowIds(uConfirmFile)).size,
+							sidecar: world.io.existsSync(uConfirmSidecar),
+							requests: world.systemOne.decoded.length - uConfirmRequests,
+						},
+						"the recovered journal acknowledges its pending row without a second row or an evaluation",
+					).toEqual({ rows: 3, unique: 3, sidecar: false, requests: 3 });
+					expect(uRowIds(uConfirmFile)[1], "the recovered pending row keeps its receipt id").toBe(
+						uConfirmPendingIds[0],
+					);
+
+					// After recovery a reopened owner counts each confirmed row once, and its next paid screen is recorded at once.
+					const uConfirmAfter = await uOwnerAt(uConfirmDir, uConfirmFile);
+					expect(
+						{
+							rows: uRowIds(uConfirmFile).length,
+							cost: uConfirmAfter.session.getCostSummary().currentCost === uConfirmBlindCost,
+						},
+						"a reopen after recovery counts each confirmed row once",
+					).toEqual({ rows: 3, cost: true });
+					const uConfirmAfterWarnings = world.warnings.length;
+					await uScreen(uConfirmAfter.session, "u-confirm-after", "Say hello after recovery.");
+					expect(
+						{
+							rows: uRowIds(uConfirmFile).length,
+							pending: world.io.existsSync(uConfirmSidecar),
+							warnings: uUsageWarnings(uConfirmAfterWarnings).length,
+						},
+						"after recovery the next paid row is recorded at once, with no warning",
+					).toEqual({ rows: 4, pending: false, warnings: 0 });
+					await uDispose(uConfirmAfter.session, "the recovered owner disposes cleanly", undefined);
+
+					// Automatic rollback of a prepared session that never received its first reply. Its paid screen is retained in the
+					// candidate's journal while its file is unwritten; the candidate's activation then fails, and the rollback restores the
+					// previous session. The discard is reported once, on the restored session, naming the journal as its evidence. The
+					// control replaces the session again with no paid screen: nothing is kept and nothing is reported.
+					const uRollbackDir = `${world.agentDir}-usage-rollback`;
+					const uRollbackFactory: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager }) => {
+						const root = await world.createRootSession("root", {
+							agentDir,
+							sessionManager,
+							settings: { memorySystem: undefined },
+						});
+						return {
+							session: root.session,
+							sessionManager: root.sessionManager,
+							getExtensionRunner: root.getExtensionRunner,
+							extensionsResult: root.extensionsResult,
+							services: {
+								cwd,
+								agentDir,
+								authStorage: world.authStorage,
+								settingsManager: root.settingsManager,
+								modelRegistry: world.modelRegistry,
+								resourceLoader: root.session.resourceLoader,
+								diagnostics: [],
+							},
+							diagnostics: [],
+						};
+					};
+					const uRollbackRuntime = await createAgentSessionRuntime(uRollbackFactory, {
+						cwd: HARNESS_PROJECT_CWD,
+						agentDir: uRollbackDir,
+						sessionManager: world.createSessionManager(uRollbackDir),
+					});
+					await uOwnerTurn(uRollbackRuntime.session, "u-rollback-root");
+					const uRollbackRootFile = uRollbackRuntime.session.sessionFile;
+					if (uRollbackRootFile === undefined) throw new Error("U-usage: the rollback root session has no file");
+					const uRollback = { armed: true, candidate: undefined as { file: string; id: string } | undefined };
+					uRollbackRuntime.registerSessionResource({
+						start: async (session) => {
+							if (!uRollback.armed) return;
+							uRollback.armed = false;
+							const file = session.sessionFile;
+							if (file === undefined) throw new Error("U-usage: the rollback candidate has no file");
+							uRollback.candidate = { file, id: session.sessionId };
+							await uScreen(
+								session,
+								"u-rollback-candidate",
+								"Say hello from the candidate before its activation fails.",
+							);
+							throw new Error("the rollback witness fails the candidate's activation after its paid screen");
+						},
+						stop: () => undefined,
+					});
+					const uRollbackMark = world.warnings.length;
+					await expect(
+						uRollbackRuntime.newSession(),
+						"a failed activation is reported as such, and the previous session is recovered",
+					).rejects.toMatchObject({ phase: "activation", recovered: true });
+					const uCandidate = uRollback.candidate;
+					if (uCandidate === undefined) throw new Error("U-usage: the rollback candidate never activated");
+					const uCandidateSidecar = uSidecarOf(uCandidate.file, uCandidate.id);
+					expect(
+						{
+							fileWritten: world.io.existsSync(uCandidate.file),
+							held: uHeldIds(uCandidateSidecar).length,
+							live: uRollbackRuntime.session.sessionFile,
+						},
+						"the candidate's file is never written, its paid row stays in its journal, and the previous session is live again",
+					).toEqual({ fileWritten: false, held: 1, live: uRollbackRootFile });
+					expect(
+						world.warnings.slice(uRollbackMark).filter((warning) => warning.startsWith("Usage handoff:")),
+						"the discard is reported once, on the restored session, with the candidate's journal as its evidence",
+					).toEqual([
+						`Usage handoff: 1 usage report(s) cannot be recorded (session file never written); kept as unmatched recovery evidence at ${uCandidateSidecar}. 0 not retained, 0 confirmed row(s) with a journal copy left, 0 unmatched journal(s); none is charged to another session.`,
+					]);
+
+					// The host bounds a notice to 500 characters and elides only the middle of the path: the sidecar path must fit whole, so the
+					// notice is asserted exactly (its closing sentence included) rather than cut.
+					expect(
+						uCandidateSidecar.length <=
+							500 -
+								"Usage handoff: 1 usage report(s) cannot be recorded (session file never written); kept as unmatched recovery evidence at "
+									.length -
+								". 0 not retained, 0 confirmed row(s) with a journal copy left, 0 unmatched journal(s); none is charged to another session."
+									.length,
+						"the candidate's sidecar path fits the notice whole",
+					).toBe(true);
+					const uControlMark = world.warnings.length;
+					await expect(
+						uRollbackRuntime.newSession(),
+						"the control replacement with no paid screen completes",
+					).resolves.toEqual({ cancelled: false });
+					const uControlFile = uRollbackRuntime.session.sessionFile;
+					if (uControlFile === undefined) throw new Error("U-usage: the control session has no file");
+					expect(
+						{
+							sidecar: world.io.existsSync(uSidecarOf(uControlFile, uRollbackRuntime.session.sessionId)),
+							handoffs: world.warnings
+								.slice(uControlMark)
+								.filter((warning) => warning.startsWith("Usage handoff:")),
+						},
+						"the normal-order control keeps no journal and reports no handoff",
+					).toEqual({ sidecar: false, handoffs: [] });
+					await uRollbackRuntime.dispose();
+					expect(
+						world.warnings.slice(uControlMark).filter((warning) => warning.startsWith("Usage handoff:")),
+						"disposing the control reports nothing",
+					).toEqual([]);
+
+					// Root systemone tool, paid and fenced: the review's paid response is retained as a pending receipt of route system_one_tool
+					// while its row append fails. The fenced session then refuses the tool result, so the turn ends on that refusal. The tool
+					// result carries no usage of its own: the reviewer records its receipt through the session. The reopened owner records the
+					// same receipt once, and its cost and statistics count it once.
+					const uToolReview = {
+						action: "review",
+						review: {
+							state: "The recorded evidence supports the claim under review.",
+							questions: {
+								claim: {
+									instructions: "Does the recorded evidence support the claim?",
+									criteria: {
+										supports: "Supported",
+										contradicts: "Contradicted",
+										insufficient: "Missing evidence",
+									},
+									expected: "supports",
 								},
 							},
-						],
-						conflicts: [],
-						droppedConflicts: 0,
+						},
+					};
+					const uRowRoutes = (file: string): (string | undefined)[] =>
+						(world.io.fileEntries().get(file) ?? "")
+							.split("\n")
+							.filter((line) => line.includes('"customType":"semantic_usage"'))
+							.map((line) => (JSON.parse(line) as { data: { route?: string } }).data.route);
+					const uToolResults = (session: AgentSession): object[] => {
+						const results: object[] = [];
+						session.subscribe((event) => {
+							if (event.type === "tool_execution_end" && event.toolName === SYSTEM_ONE_TOOL_NAME)
+								results.push(event.result);
+						});
+						return results;
+					};
+					// Root systemone tool through a real prompt turn, unfenced: the review is paid once and recorded once as a system_one_tool row.
+					// The persisted toolResult carries no usage of its own. The current cost and the statistics count the row once beside the
+					// assistant messages, and a reopen records the same single row.
+					type UToolEntry = {
+						type?: string;
+						message?: {
+							role?: string;
+							toolName?: string;
+							toolCallId?: string;
+							usage?: { input: number };
+							content?: { type?: string; id?: string }[];
+						};
+					};
+					const uToolEntries = (file: string): UToolEntry[] =>
+						(world.io.fileEntries().get(file) ?? "")
+							.split("\n")
+							.filter((line) => line.length > 0)
+							.map((line) => JSON.parse(line) as UToolEntry);
+					// The statistics' input tokens: every assistant message's, then every semantic row's (a tool result carries no usage here).
+					const uToolInputTotal = (file: string): number =>
+						uToolEntries(file)
+							.filter((entry) => entry.message?.role === "assistant")
+							.reduce((total, entry) => total + (entry.message?.usage?.input ?? 0), 0) +
+						(world.io.fileEntries().get(file) ?? "")
+							.split("\n")
+							.filter((line) => line.includes('"customType":"semantic_usage"'))
+							.reduce(
+								(total, line) =>
+									total + (JSON.parse(line) as { data: { usage: { input: number } } }).data.usage.input,
+								0,
+							);
+					const uToolOkDir = `${world.agentDir}-usage-tool-ok`;
+					const uToolOk = await uOwnerAt(uToolOkDir);
+					await uOwnerTurn(uToolOk.session, "u-tool-ok");
+					const uToolOkFile = uToolOk.sessionManager.getSessionFile();
+					if (uToolOkFile === undefined)
+						throw new Error("U-usage: the normal-order root-tool owner session has no file");
+					const uToolOkSidecar = uSidecarOf(uToolOkFile, uToolOk.sessionManager.getSessionId());
+					const uToolOkEnds = uToolResults(uToolOk.session);
+					const uToolOkMark = world.warnings.length;
+					const uToolOkRequests = world.systemOne.decoded.length;
+					world.provider.enqueue("root", {
+						name: "u-tool-ok-call",
+						reply: icmCall("u-tool-ok-1", SYSTEM_ONE_TOOL_NAME, uToolReview),
 					});
-
-				// The handoff a disposed owner reports for what it still holds: pending copies, not-retained reports, confirmed rows whose
-				// copy is not removed, and other identities' journals beside the file. Each U-* step asserts its own exact handoff.
-				const uHandoff = (pending: number, unretained: number, confirmed: number, unmatched: number): string =>
-					`Session usage handoff: ${pending} System One usage report(s) pending in the session journal, ${unretained} not retained, ${confirmed} confirmed row(s) whose journal copy is not removed, ${unmatched} unmatched journal(s) kept as evidence; none is charged to another session.`;
-				const uDispose = async (
-					session: AgentSession,
-					message: string,
-					handoff: string | undefined,
-				): Promise<void> => {
-					const mark = world.warnings.length;
-					expect(await world.disposeSessionInBody(session), message).toBeUndefined();
-					expect(
-						world.warnings.slice(mark).filter((warning) => warning.startsWith("Session usage handoff:")),
-						`${message}: the handoff names exactly what the owner still holds`,
-					).toEqual(handoff === undefined ? [] : [handoff]);
-				};
-
-				// Normal order, then the first failed append: the owner keeps the receipt, the session file is fenced, and the failed row
-				// is not published. A later paid answer is held without another append, and the reopened owner records both once.
-				const uFencedDir = `${world.agentDir}-usage-fenced`;
-				const uFenced = await uOwnerAt(uFencedDir);
-				await uOwnerTurn(uFenced.session, "u-fenced");
-				const uFencedFile = uFenced.sessionManager.getSessionFile();
-				if (uFencedFile === undefined) throw new Error("U-usage: the fenced owner session has no file");
-				const uFencedSidecar = uSidecarOf(uFencedFile, uFenced.sessionManager.getSessionId());
-				const uFencedRequests = world.systemOne.decoded.length;
-				await uScreen(uFenced.session, "u-fenced-control", "Say hello again.");
-				expect(
-					{
-						rows: uRowIds(uFencedFile).length,
-						pending: world.io.existsSync(uFencedSidecar),
-						requests: world.systemOne.decoded.length - uFencedRequests,
-					},
-					"the normal-order control confirms its row before the call returns and keeps no pending copy",
-				).toEqual({ rows: 1, pending: false, requests: 1 });
-				world.io.failNext({
-					name: "u-fenced-row-append",
-					kind: "append",
-					code: "EIO",
-					matches: (operation, data) =>
-						operation.path.endsWith(".jsonl") &&
-						(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
-				});
-				const uFencedWarnings = world.warnings.length;
-				await uScreen(uFenced.session, "u-fenced-first", "Say hello a second time.");
-				// No earlier receipt was held when the write failed: the failed append's own receipt is the only warning, with the write's own cause.
-				expect(
-					uUsageWarnings(uFencedWarnings),
-					"the failed append's receipt is the only warning, with the write's own cause",
-				).toEqual([
-					expect.stringMatching(
-						// The cause is the write's own text, bounded to 200 characters: the path may be cut, so only its opening is exact.
-						/^A System One usage receipt is pending, not yet in this session's usage record \(Scripted IO fault u-fenced-row-append: append '[^\n]*\); it is retained in the session journal and recorded when a new session manager reads the file\.$/,
-					),
-				]);
-				const uFencedAfterFence = world.io.operations.length;
-				await uScreen(uFenced.session, "u-fenced-held", "Say hello a third time.");
-				await uScreen(uFenced.session, "u-fenced-held-again", "Say hello a fourth time.");
-				expect(
-					{
-						rows: uRowIds(uFencedFile).length,
-						held: uHeldIds(uFencedSidecar).length,
-						requests: world.systemOne.decoded.length - uFencedRequests,
-					},
-					"the fenced owner holds each later answer without a row, and each answer is judged once",
-				).toEqual({ rows: 1, held: 3, requests: 4 });
-				expect(
-					world.io.operations
-						.slice(uFencedAfterFence)
-						.filter((operation) => operation.kind === "append" && operation.path === uFencedFile).length,
-					"no append reaches the session file after the fence: the held answers are never written",
-				).toBe(0);
-				expect(
-					uUsageWarnings(uFencedWarnings).slice(1),
-					"the first later receipt carries the fence's wording once; the later held answers are not told again",
-				).toEqual([
-					expect.stringMatching(
-						/^A System One usage receipt is pending, not yet in this session's usage record \(Session persistence state is uncertain after a failed write; the usage report stays pending in the session journal until a new session manager reads the file\); it is retained in the session journal and recorded when a new session manager reads the file\.$/,
-					),
-				]);
-				const uFencedCost = uFenced.session.getCostSummary().currentCost;
-				const uFencedHeld = uHeldIds(uFencedSidecar);
-				expect(uFencedCost, "the live owner counts its confirmed row and each held report once").toBeCloseTo(
-					uSum([...uRowCosts(uFencedFile), ...uHeldCosts(uFencedSidecar)]),
-					12,
-				);
-				await uDispose(
-					uFenced.session,
-					"the fenced owner disposes, and its held usage stays in the journal",
-					uHandoff(3, 0, 0, 0),
-				);
-				const uFencedReopened = await uOwnerAt(uFencedDir, uFencedFile);
-				const uFencedAfter = uRowIds(uFencedFile);
-				expect(
-					{
-						rows: uFencedAfter.length,
-						unique: new Set(uFencedAfter).size,
-						heldRecorded: uFencedHeld.every((id) => uFencedAfter.includes(id)),
-						pending: world.io.existsSync(uFencedSidecar),
-						requests: world.systemOne.decoded.length - uFencedRequests,
-					},
-					"the reopened owner records each held receipt once under its own report id, with no evaluator request",
-				).toEqual({ rows: 4, unique: 4, heldRecorded: true, pending: false, requests: 4 });
-				expect(
-					uFencedReopened.session.getCostSummary().currentCost,
-					"the reopened owner counts each row once, equal to the live owner's count: no second charge",
-				).toBeCloseTo(uFencedCost, 12);
-				await uDispose(uFencedReopened.session, "the reopened fenced owner disposes cleanly", undefined);
-
-				// Ledger succeeds, acknowledgement fails: the row is confirmed, so nothing is reported unrecorded, and the pending copy waits
-				// until its removal succeeds. The reopened owner removes it without writing the row again. A journal of another identity
-				// beside the file is listed as evidence and is never charged to this session.
-				const uAckDir = `${world.agentDir}-usage-ack`;
-				const uAck = await uOwnerAt(uAckDir);
-				await uOwnerTurn(uAck.session, "u-ack");
-				const uAckFile = uAck.sessionManager.getSessionFile();
-				if (uAckFile === undefined) throw new Error("U-usage: the acknowledgement owner session has no file");
-				const uAckSidecar = uSidecarOf(uAckFile, uAck.sessionManager.getSessionId());
-				const uAckDenial = world.io.denyUntilCleared({
-					name: "u-ack-sidecar-removal-denied",
-					kind: "unlink",
-					matches: (operation) => operation.path === uAckSidecar,
-				});
-				const uAckWarnings = world.warnings.length;
-				await uScreen(uAck.session, "u-ack-screen", "Say hello for the acknowledgement check.");
-				expect(
-					{
-						rows: uRowIds(uAckFile).length,
-						held: uHeldIds(uAckSidecar).length,
-						warnings: uUsageWarnings(uAckWarnings).length,
-					},
-					"the confirmed row is not reported as unrecorded; its pending copy waits for a removal that succeeds",
-				).toEqual({ rows: 1, held: 1, warnings: 0 });
-				expect(uAckDenial.hits, "the sidecar removal was refused").toBeGreaterThan(0);
-				expect(
-					world.warnings
-						.slice(uAckWarnings)
-						.filter(
-							(warning) =>
-								warning ===
-								"The session's usage journal could not be updated (usage journal write failed: EIO); its records are retried.",
-						).length,
-					"the refused removal is reported: the confirmed row's copy could not be removed",
-				).toBeGreaterThan(0);
-				// A refused removal only makes the removal wait: retention stays ready, so the next paid screen is still made, retained and appended.
-				const uAckBeforeSecond = world.systemOne.decoded.length;
-				await uScreen(uAck.session, "u-ack-second", "Say hello after the refused removal.");
-				expect(
-					{
-						requests: world.systemOne.decoded.length - uAckBeforeSecond,
-						rows: uRowIds(uAckFile).length,
-						unique: new Set(uRowIds(uAckFile)).size,
-					},
-					"a refused removal does not stop the next paid screen: its row is appended",
-				).toEqual({ requests: 1, rows: 2, unique: 2 });
-				const uAckCost = uAck.session.getCostSummary().currentCost;
-				await uDispose(
-					uAck.session,
-					"the acknowledgement owner disposes with its pending copy kept",
-					uHandoff(0, 0, 1, 0),
-				);
-				uAckDenial.clear();
-				// A valid held record of another identity sits beside this file: it is listed as evidence, and it is never read or charged here.
-				const uAckForeign = `${uAckFile}.usage-pending.session-of-another-identity.json`;
-				world.io.seed(
-					uAckForeign,
-					uForeignDocument("session-of-another-identity", uAckFile, "foreign-receipt-ack", undefined),
-				);
-				const uAckReopenWarnings = world.warnings.length;
-				const uAckSidecarRead = world.io.denyUntilCleared({
-					name: "u-ack-sidecar-read-denied",
-					kind: "read",
-					code: "EIO",
-					matches: (operation) => operation.path === uAckSidecar,
-				});
-				const uAckRequests = world.systemOne.decoded.length;
-				const uAckReopened = await uOwnerAt(uAckDir, uAckFile);
-				expect(
-					{
-						rows: uRowIds(uAckFile).length,
-						kept: world.io.existsSync(uAckSidecar),
-						requests: world.systemOne.decoded.length - uAckRequests,
-					},
-					"an unreadable journal is kept, not dropped and not evaluated again, and the confirmed rows stay the only charge",
-				).toEqual({ rows: 2, kept: true, requests: 0 });
-				expect(
-					uAckReopened.session.getCostSummary().currentCost,
-					"the foreign journal's record is never charged: the cost is still the two confirmed rows",
-				).toBeCloseTo(uAckCost, 12);
-				expect(
-					world.warnings
-						.slice(uAckReopenWarnings)
-						.filter((warning) => warning.startsWith("1 pending usage journal(s)")),
-					"the other identity's journal is reported as evidence, by its name",
-				).toEqual([
-					`1 pending usage journal(s) from another session identity are kept as evidence and are not charged to this session: ${basename(uAckForeign)}.`,
-				]);
-				expect(
-					world.warnings
-						.slice(uAckReopenWarnings)
-						.filter(
-							(warning) =>
-								warning ===
-								"The session's usage journal is unavailable (usage journal read failed: EIO); its pending reports are retried.",
-						).length,
-					"the unreadable journal is reported when it is opened",
-				).toBeGreaterThan(0);
-				expect(uAckSidecarRead.hits, "the unreadable journal was read and refused").toBeGreaterThan(0);
-				uAckSidecarRead.clear();
-				await uDispose(
-					uAckReopened.session,
-					"the reopened owner recovers the journal on dispose and disposes",
-					uHandoff(0, 0, 0, 1),
-				);
-				expect(
-					{
-						rows: uRowIds(uAckFile).length,
-						sidecar: world.io.existsSync(uAckSidecar),
-						foreign: world.io.existsSync(uAckForeign),
-						requests: world.systemOne.decoded.length - uAckRequests,
-					},
-					"the retried removal leaves both rows, the other identity's journal is kept as evidence, and no evaluation happens",
-				).toEqual({ rows: 2, sidecar: false, foreign: true, requests: 0 });
-
-				// Deferred first reply: the owner has written nothing yet, so the paid row waits in the journal, silently, and is acknowledged
-				// only after the first reply's own write makes it physical. A later paid row is then written at once.
-				const uDeferDir = `${world.agentDir}-usage-deferred`;
-				const uDefer = await uOwnerAt(uDeferDir);
-				const uDeferFile = uDefer.sessionManager.getSessionFile();
-				if (uDeferFile === undefined) throw new Error("U-usage: the deferred owner session has no file");
-				const uDeferSidecar = uSidecarOf(uDeferFile, uDefer.sessionManager.getSessionId());
-				const uDeferWarnings = world.warnings.length;
-				await uScreen(uDefer.session, "u-defer-screen", "Say hello before the first reply.");
-				expect(
-					{
-						file: world.io.existsSync(uDeferFile),
-						rows: uRowIds(uDeferFile).length,
-						held: uHeldIds(uDeferSidecar).length,
-						warnings: uUsageWarnings(uDeferWarnings).length,
-					},
-					"a deferred first reply retains its paid row silently: no file, no row, one pending copy",
-				).toEqual({ file: false, rows: 0, held: 1, warnings: 0 });
-				await uOwnerTurn(uDefer.session, "u-defer");
-				await withDeadline(
-					trace,
-					"U-usage deferred row acknowledged after the first reply",
-					world.io.waitForMutation(() => !world.io.existsSync(uDeferSidecar)),
-				);
-				expect(
-					{
-						rows: uRowIds(uDeferFile).length,
-						unique: new Set(uRowIds(uDeferFile)).size,
-						warnings: uUsageWarnings(uDeferWarnings).length,
-					},
-					"the first reply's write carries the deferred row once, and its pending copy is removed after that write",
-				).toEqual({ rows: 1, unique: 1, warnings: 0 });
-				await uScreen(uDefer.session, "u-defer-control", "Say hello after the first reply.");
-				expect(
-					{ rows: uRowIds(uDeferFile).length, pending: world.io.existsSync(uDeferSidecar) },
-					"after the first reply a paid row is written at once, with no pending copy",
-				).toEqual({ rows: 2, pending: false });
-				await uDispose(uDefer.session, "the deferred owner disposes cleanly", undefined);
-
-				// Corrupt journal at reopen: the content is kept as evidence in the first free slot, nothing is recovered from it, and
-				// the owner's own next paid row is recorded normally.
-				const uCorruptDir = `${world.agentDir}-usage-corrupt`;
-				const uCorrupt = await uOwnerAt(uCorruptDir);
-				await uOwnerTurn(uCorrupt.session, "u-corrupt");
-				const uCorruptFile = uCorrupt.sessionManager.getSessionFile();
-				if (uCorruptFile === undefined) throw new Error("U-usage: the corrupt-journal owner session has no file");
-				const uCorruptSidecar = uSidecarOf(uCorruptFile, uCorrupt.sessionManager.getSessionId());
-				await uDispose(uCorrupt.session, "the owner that wrote no pending copy disposes cleanly", undefined);
-				world.io.seed(uCorruptSidecar, "not a usage journal\n");
-				const uCorruptWarnings = world.warnings.length;
-				const uCorruptReopened = await uOwnerAt(uCorruptDir, uCorruptFile);
-				expect(
-					world.warnings
-						.slice(uCorruptWarnings)
-						.filter((warning) => warning.startsWith("The session's usage journal")),
-					"the moved-aside journal is reported, with its evidence name and its corrupt reason",
-				).toEqual([
-					`The session's usage journal could not be trusted (usage journal is corrupt: not valid JSON); it is preserved at ${basename(uCorruptSidecar)}.corrupt.1 and its reports are not recovered automatically.`,
-				]);
-				expect(
-					{
-						evidence: world.io.peekFile(`${uCorruptSidecar}.corrupt.1`),
-						sidecar: world.io.existsSync(uCorruptSidecar),
-						rows: uRowIds(uCorruptFile).length,
-					},
-					"a corrupt journal is preserved as evidence at its first free slot, and nothing is recovered from it",
-				).toEqual({ evidence: "not a usage journal\n", sidecar: false, rows: 0 });
-				await uScreen(uCorruptReopened.session, "u-corrupt-screen", "Say hello past the evidence.");
-				expect(
-					{ rows: uRowIds(uCorruptFile).length, pending: world.io.existsSync(uCorruptSidecar) },
-					"the reopened owner records its own paid row once, and the evidence is not replayed",
-				).toEqual({ rows: 1, pending: false });
-				await uDispose(uCorruptReopened.session, "the corrupt-journal owner disposes cleanly", undefined);
-
-				// A journal whose content names another session identity, at this session's own file name, is not imported: it is moved aside
-				// as evidence, and the owner records its own paid row normally.
-				const uIdentityDir = `${world.agentDir}-usage-identity`;
-				const uIdentity = await uOwnerAt(uIdentityDir);
-				await uOwnerTurn(uIdentity.session, "u-identity");
-				const uIdentityFile = uIdentity.sessionManager.getSessionFile();
-				if (uIdentityFile === undefined) throw new Error("U-usage: the identity owner session has no file");
-				const uIdentitySidecar = uSidecarOf(uIdentityFile, uIdentity.sessionManager.getSessionId());
-				const uIdentityHeaderAt = uIdentity.sessionManager.getHeader()?.timestamp;
-				await uDispose(uIdentity.session, "the identity owner disposes cleanly", undefined);
-				world.io.seed(
-					uIdentitySidecar,
-					uForeignDocument(
-						"another-session-identity",
-						uIdentityFile,
-						"foreign-receipt-identity",
-						uIdentityHeaderAt,
-					),
-				);
-				const uIdentityWarnings = world.warnings.length;
-				const uIdentityReopened = await uOwnerAt(uIdentityDir, uIdentityFile);
-				expect(
-					{
-						evidence:
-							world.io.peekFile(`${uIdentitySidecar}.corrupt.1`) ===
-							uForeignDocument(
-								"another-session-identity",
-								uIdentityFile,
-								"foreign-receipt-identity",
-								uIdentityHeaderAt,
-							),
-						sidecar: world.io.existsSync(uIdentitySidecar),
-						rows: uRowIds(uIdentityFile).length,
-					},
-					"a journal that names another session identity is kept as evidence at its first free slot, and nothing is imported from it",
-				).toEqual({ evidence: true, sidecar: false, rows: 0 });
-				expect(
-					world.warnings
-						.slice(uIdentityWarnings)
-						.filter((warning) => warning.startsWith("The session's usage journal")),
-					"the moved-aside journal is reported, by its evidence name and its identity reason",
-				).toEqual([
-					`The session's usage journal could not be trusted (usage journal belongs to another session identity); it is preserved at ${basename(uIdentitySidecar)}.corrupt.1 and its reports are not recovered automatically.`,
-				]);
-				expect(
-					uIdentityReopened.session.getCostSummary().currentCost,
-					"the foreign record is not held: before its own paid row the owner's cost is zero",
-				).toBe(0);
-				await uScreen(uIdentityReopened.session, "u-identity-screen", "Say hello past the foreign journal.");
-				expect(
-					world.io.existsSync(uIdentitySidecar),
-					"the owner's own paid row is confirmed, and no pending copy of the foreign record is left behind",
-				).toBe(false);
-				expect(uRowIds(uIdentityFile), "the row is the owner's own, once").toHaveLength(1);
-				expect(uRowIds(uIdentityFile), "the foreign receipt never appears as a row").not.toContain(
-					"foreign-receipt-identity",
-				);
-				expect(
-					uIdentityReopened.session.getCostSummary().currentCost,
-					"the owner's cost is its own confirmed row, once",
-				).toBeCloseTo(uSum(uRowCosts(uIdentityFile)), 12);
-				await uDispose(uIdentityReopened.session, "the identity-evidence owner disposes cleanly", undefined);
-
-				// A session file whose header id is not a valid session id is refused at open, before anything reads, writes or derives a
-				// name from it, and the resume and picker listings skip it. Opened normally, any kernel-valid id is journaled under hashed
-				// names when its plain name would not fit the file system.
-				const uRewriteId = (text: string, id: string): string => {
-					const [header = "", ...entries] = text.split("\n");
-					return [JSON.stringify({ ...(JSON.parse(header) as Record<string, unknown>), id }), ...entries].join(
-						"\n",
+					world.provider.enqueue("root", {
+						name: "u-tool-ok-final",
+						reply: { content: [{ type: "text", text: "The claim is supported by the evidence." }] },
+					});
+					world.systemOne.enterPhase("u-tool-ok", {
+						claim: { kind: "choice", choice: "supports", confidence: 0.99 },
+					});
+					await withDeadline(
+						trace,
+						"U-usage normal-order root tool turn",
+						uToolOk.session.prompt("Review the claim with the root tool."),
 					);
-				};
-				const uHeaderDir = `${world.agentDir}-usage-header`;
-				const uHeader = await uOwnerAt(uHeaderDir);
-				await uOwnerTurn(uHeader.session, "u-header");
-				const uHeaderFile = uHeader.sessionManager.getSessionFile();
-				if (uHeaderFile === undefined) throw new Error("U-usage: the header owner session has no file");
-				const uHeaderId = uHeader.sessionManager.getSessionId();
-				await uDispose(
-					uHeader.session,
-					"the owner with a valid id disposes before its header is read again",
-					undefined,
-				);
-				const uHeaderText = world.io.peekFile(uHeaderFile);
-				if (uHeaderText === undefined) throw new Error("U-usage: the header session file is missing");
-				expect(
-					world.openSessionManager(uHeaderFile, uHeaderDir).getSessionId(),
-					"the normal-id control: a uuid-shaped session opens normally under its own id",
-				).toBe(uHeaderId);
-				const uCraftedFile = resolve(dirname(uHeaderFile), "crafted-header-id.jsonl");
-				world.io.seed(uCraftedFile, uRewriteId(uHeaderText, "a/../b"));
-				const uCraftedBefore = world.io.captureTree(uHeaderDir);
-				expect(
-					() => world.openSessionManager(uCraftedFile, uHeaderDir),
-					"a header id with a path separator is refused at open",
-				).toThrow(`Session file header id is not a valid session id: ${uCraftedFile}`);
-				expect(
-					world.io.captureTree(uHeaderDir),
-					"the refused open changes nothing in the tree, directories and bytes alike, not even the crafted file",
-				).toEqual(uCraftedBefore);
-				expect(
-					SessionManager.continueRecent(HARNESS_PROJECT_CWD, uHeaderDir, dirname(uHeaderFile)).getSessionFile(),
-					"resume skips the refused header and continues the valid session next to it",
-				).toBe(uHeaderFile);
-				expect(
-					(await SessionManager.list(HARNESS_PROJECT_CWD, uHeaderDir, dirname(uHeaderFile))).map(
-						(session) => session.path,
-					),
-					"the picker's listing skips the refused header too: only the valid session is listed",
-				).toEqual([uHeaderFile]);
-
-				// A valid long id (120 characters): its journal name is hashed to fit, and its paid row is recorded once.
-				const uLongDir = `${world.agentDir}-usage-long`;
-				const uLong = await uOwnerAt(uLongDir);
-				await uOwnerTurn(uLong.session, "u-long");
-				const uLongFile = uLong.sessionManager.getSessionFile();
-				if (uLongFile === undefined) throw new Error("U-usage: the long-id owner session has no file");
-				await uDispose(uLong.session, "the long-id owner disposes before its header is rewritten", undefined);
-				const uLongId = `long-${"0123456789abcdef".repeat(8)}`.slice(0, 120);
-				expect(uLongId, "the long id is 120 characters").toHaveLength(120);
-				const uLongText = world.io.peekFile(uLongFile);
-				if (uLongText === undefined) throw new Error("U-usage: the long-id session file is missing");
-				world.io.seed(uLongFile, uRewriteId(uLongText, uLongId));
-				const uLongOwner = await uOwnerAt(uLongDir, uLongFile);
-				expect(uLongOwner.sessionManager.getSessionId(), "the session opens under the long id").toBe(uLongId);
-				const uLongMark = world.io.operations.length;
-				const uLongWarnings = world.warnings.length;
-				await uScreen(uLongOwner.session, "u-long-screen", "Say hello under a long id.");
-				const uLongOps = world.io.operations.slice(uLongMark);
-				const uLongCommits = uLongOps
-					.filter(
-						(operation) =>
-							operation.kind === "rename" && operation.destination?.includes(".usage-pending.") === true,
-					)
-					.map((operation) => operation.destination ?? "");
-				const uLongTmps = uLongOps
-					.filter(
-						(operation) =>
-							operation.kind === "write" &&
-							operation.path.includes(".usage-pending.") &&
-							operation.path.endsWith(".tmp"),
-					)
-					.map((operation) => operation.path);
-				expect(uLongCommits, "the paid row's journal copy is committed exactly once").toHaveLength(1);
-				expect(uLongTmps, "one temporary copy is written for it").toHaveLength(1);
-				const uLongSidecarName = basename(uLongCommits[0] ?? "");
-				const uLongTmpName = basename(uLongTmps[0] ?? "");
-				expect(
-					{
-						sidecarWithinBound: uLongSidecarName.length <= 160,
-						sidecarHashed: /\.usage-pending\.[0-9a-f]{24}\.json$/.test(uLongSidecarName),
-						tmpWithinBound: uLongTmpName.length <= 212,
-					},
-					"the hashed journal names fit the file system, so no write fails for a long name",
-				).toEqual({ sidecarWithinBound: true, sidecarHashed: true, tmpWithinBound: true });
-				const uLongRows = uRowIds(uLongFile);
-				expect(
-					{
-						rows: uLongRows.length,
-						unique: new Set(uLongRows).size,
-						pending: world.io.existsSync(uLongCommits[0] ?? ""),
-						journals: [...world.io.fileEntries().keys()].filter(
-							(path) => dirname(path) === dirname(uLongFile) && path.includes(".usage-pending."),
+					expect(
+						{
+							routes: uRowRoutes(uToolOkFile),
+							unique: new Set(uRowIds(uToolOkFile)).size,
+							requests: world.systemOne.decoded.length - uToolOkRequests,
+							pending: world.io.existsSync(uToolOkSidecar),
+							warnings: uUsageWarnings(uToolOkMark).length,
+							usageOnResult: uToolOkEnds.map((result) => Object.keys(result).includes("usage")),
+							usageOnToolResult: uToolEntries(uToolOkFile)
+								.filter(
+									(entry) =>
+										entry.message?.role === "toolResult" && entry.message.toolName === SYSTEM_ONE_TOOL_NAME,
+								)
+								.map((entry) => Object.keys(entry.message ?? {}).includes("usage")),
+						},
+						"the unfenced root review is paid once and recorded once as a system_one_tool row, and neither its result nor its persisted toolResult carries usage",
+					).toEqual({
+						routes: ["system_one_tool"],
+						unique: 1,
+						requests: 1,
+						pending: false,
+						warnings: 0,
+						usageOnResult: [false],
+						usageOnToolResult: [false],
+					});
+					expect(
+						{
+							cost: uToolOk.session.getCostSummary().currentCost === uSum(uRowCosts(uToolOkFile)),
+							stats: uToolOk.session.getSessionStats().cost === uSum(uRowCosts(uToolOkFile)),
+							tokens: uToolOk.session.getSessionStats().tokens.input === uToolInputTotal(uToolOkFile),
+						},
+						"the current cost and the statistics count the row once; the statistics' tokens are the assistant messages' plus the row's",
+					).toEqual({ cost: true, stats: true, tokens: true });
+					const uToolOkRows = uRowIds(uToolOkFile);
+					const uToolOkCost = uToolOk.session.getCostSummary().currentCost;
+					await uDispose(uToolOk.session, "the normal-order root-tool owner disposes cleanly", undefined);
+					const uToolOkReopened = await uOwnerAt(uToolOkDir, uToolOkFile);
+					expect(
+						{
+							rows: uRowIds(uToolOkFile),
+							sidecar: world.io.existsSync(uToolOkSidecar),
+							cost: uToolOkReopened.session.getCostSummary().currentCost === uToolOkCost,
+						},
+						"a reopen records the same single row and counts it once",
+					).toEqual({ rows: uToolOkRows, sidecar: false, cost: true });
+					await uDispose(
+						uToolOkReopened.session,
+						"the reopened normal-order root-tool owner disposes cleanly",
+						undefined,
+					);
+					const uToolDir = `${world.agentDir}-usage-tool`;
+					const uTool = await uOwnerAt(uToolDir);
+					const uToolEnds = uToolResults(uTool.session);
+					const uToolMark = world.warnings.length;
+					const uToolRequests = world.systemOne.decoded.length;
+					world.provider.enqueue("root", {
+						name: "u-tool-call",
+						reply: icmCall("u-tool-call-1", SYSTEM_ONE_TOOL_NAME, uToolReview),
+					});
+					world.systemOne.enterPhase("u-tool-review", {
+						claim: { kind: "choice", choice: "supports", confidence: 0.99 },
+					});
+					world.io.failNext({
+						name: "u-tool-row-append",
+						kind: "append",
+						code: "EIO",
+						matches: (operation, data) =>
+							operation.path.endsWith(".jsonl") &&
+							(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
+					});
+					await expect(
+						withDeadline(
+							trace,
+							"U-usage fenced root tool turn",
+							uTool.session.prompt("Review the claim with the root tool."),
 						),
-						warnings: uUsageWarnings(uLongWarnings).length,
-					},
-					"the paid row is recorded once under the long id, and no journal copy is left in the session directory",
-				).toEqual({ rows: 1, unique: 1, pending: false, journals: [], warnings: 0 });
-				await uDispose(uLongOwner.session, "the long-id owner disposes cleanly", undefined);
-
-				// A kernel-valid id of 133 characters, in a session file whose own name is longer than the stem bound: the journal's stem and its
-				// token are both hashed, which the 120-character id above does not reach. Its paid row is recorded once.
-				const uWideDir = `${world.agentDir}-usage-wide`;
-				const uWide = await uOwnerAt(uWideDir);
-				await uOwnerTurn(uWide.session, "u-wide");
-				const uWideFile = uWide.sessionManager.getSessionFile();
-				if (uWideFile === undefined) throw new Error("U-usage: the wide-id owner session has no file");
-				await uDispose(uWide.session, "the wide-id owner disposes before its header is rewritten", undefined);
-				const uWideId = `wide-${"abcdefgh".repeat(16)}`;
-				expect(uWideId, "the wide id is 133 characters").toHaveLength(133);
-				const uWideText = world.io.peekFile(uWideFile);
-				if (uWideText === undefined) throw new Error("U-usage: the wide-id session file is missing");
-				const uWideLongFile = resolve(dirname(uWideFile), `${"wide-session-".repeat(9)}.jsonl`);
-				expect(
-					basename(uWideLongFile).length,
-					"the session file name is longer than the stem bound",
-				).toBeGreaterThan(96);
-				world.io.seed(uWideLongFile, uRewriteId(uWideText, uWideId));
-				const uWideOwner = await uOwnerAt(uWideDir, uWideLongFile);
-				expect(uWideOwner.sessionManager.getSessionId(), "the session opens under the wide id").toBe(uWideId);
-				const uWideMark = world.io.operations.length;
-				const uWideWarnings = world.warnings.length;
-				await uScreen(uWideOwner.session, "u-wide-screen", "Say hello under a wide id.");
-				const uWideOps = world.io.operations.slice(uWideMark);
-				const uWideCommits = uWideOps
-					.filter(
-						(operation) =>
-							operation.kind === "rename" && operation.destination?.includes(".usage-pending.") === true,
-					)
-					.map((operation) => operation.destination ?? "");
-				const uWideTmps = uWideOps
-					.filter(
-						(operation) =>
-							operation.kind === "write" &&
-							operation.path.includes(".usage-pending.") &&
-							operation.path.endsWith(".tmp"),
-					)
-					.map((operation) => operation.path);
-				expect(uWideCommits, "the paid row's journal copy is committed exactly once").toHaveLength(1);
-				expect(uWideTmps, "one temporary copy is written for it").toHaveLength(1);
-				const uWideSidecarName = basename(uWideCommits[0] ?? "");
-				const uWideTmpName = basename(uWideTmps[0] ?? "");
-				expect(
-					{
-						sidecarWithinBound: uWideSidecarName.length <= 160,
-						stemAndTokenHashed: /^h-[0-9a-f]{24}\.usage-pending\.[0-9a-f]{24}\.json$/.test(uWideSidecarName),
-						tmpWithinBound: uWideTmpName.length <= 212,
-					},
-					"both the stem and the token of a wide id's journal name are hashed, and the names fit the file system",
-				).toEqual({ sidecarWithinBound: true, stemAndTokenHashed: true, tmpWithinBound: true });
-				const uWideRows = uRowIds(uWideLongFile);
-				expect(
-					{
-						rows: uWideRows.length,
-						unique: new Set(uWideRows).size,
-						pending: world.io.existsSync(uWideCommits[0] ?? ""),
-						journals: [...world.io.fileEntries().keys()].filter(
-							(path) => dirname(path) === dirname(uWideLongFile) && path.includes(".usage-pending."),
+						"the fenced turn ends on the refused tool result: the session's own persistence refusal",
+					).rejects.toThrow("Session persistence state is uncertain after a failed write");
+					const uToolFile = uTool.sessionManager.getSessionFile();
+					if (uToolFile === undefined) throw new Error("U-usage: the fenced root-tool owner session has no file");
+					const uToolSidecar = uSidecarOf(uToolFile, uTool.sessionManager.getSessionId());
+					const uToolIds = uHeldIds(uToolSidecar);
+					expect(
+						{
+							requests: world.systemOne.decoded.length - uToolRequests,
+							rows: uRowIds(uToolFile),
+							held: uToolIds.length,
+							persistedCalls: uToolEntries(uToolFile).filter(
+								(entry) =>
+									entry.message?.role === "assistant" &&
+									(entry.message.content ?? []).some(
+										(block) => block.type === "toolCall" && block.id === "u-tool-call-1",
+									),
+							).length,
+							persistedResults: uToolEntries(uToolFile).filter(
+								(entry) => entry.message?.role === "toolResult" && entry.message.toolCallId === "u-tool-call-1",
+							).length,
+						},
+						"the root review is paid once, its receipt is held while the fenced row is not written, and the call is persisted without its result",
+					).toEqual({ requests: 1, rows: [], held: 1, persistedCalls: 1, persistedResults: 0 });
+					expect(
+						uUsageWarnings(uToolMark),
+						"the failed row append is the only usage warning, with its own cause",
+					).toEqual([
+						expect.stringMatching(
+							/^A System One usage receipt is pending, not yet in this session's usage record \(Scripted IO fault u-tool-row-append: append '[^\n]*'\); it is retained in the session journal and recorded when a new session manager reads the file\.$/,
 						),
-						warnings: uUsageWarnings(uWideWarnings).length,
-					},
-					"the wide id's paid row is recorded once, and its journal copy is removed once confirmed",
-				).toEqual({ rows: 1, unique: 1, pending: false, journals: [], warnings: 0 });
-				await uDispose(uWideOwner.session, "the wide-id owner disposes cleanly", undefined);
-
-				// Timer recovery: a removal refused by the journal is retried by the owner's own backoff (one unref'd timer, 1 s for its
-				// first step). The refusal is cleared, and the test waits only for the journal to change: nothing disposes or reopens the
-				// owner, and no evaluation runs.
-				const uTimerDir = `${world.agentDir}-usage-timer`;
-				const uTimer = await uOwnerAt(uTimerDir);
-				await uOwnerTurn(uTimer.session, "u-timer");
-				const uTimerFile = uTimer.sessionManager.getSessionFile();
-				if (uTimerFile === undefined) throw new Error("U-usage: the timer owner session has no file");
-				const uTimerSidecar = uSidecarOf(uTimerFile, uTimer.sessionManager.getSessionId());
-				const uTimerDenial = world.io.denyUntilCleared({
-					name: "u-timer-sidecar-removal-denied",
-					kind: "unlink",
-					matches: (operation) => operation.path === uTimerSidecar,
-				});
-				const uTimerWarnings = world.warnings.length;
-				await uScreen(uTimer.session, "u-timer-screen", "Say hello for the timer recovery.");
-				const uTimerIds = uHeldIds(uTimerSidecar);
-				expect(uTimerIds, "the removal is refused: exactly the paid row's copy stays").toHaveLength(1);
-				expect(uRowIds(uTimerFile), "the paid row is in the file once").toEqual(uTimerIds);
-				expect(uTimerDenial.hits, "the removal was refused").toBeGreaterThan(0);
-				expect(
-					world.warnings
-						.slice(uTimerWarnings)
-						.filter(
-							(warning) =>
-								warning ===
-								"The session's usage journal could not be updated (usage journal write failed: EIO); its records are retried.",
-						).length,
-					"the refused removal is reported before the owner's own retry removes the copy",
-				).toBeGreaterThan(0);
-				const uTimerCost = uTimer.session.getCostSummary().currentCost;
-				const uTimerRequests = world.systemOne.decoded.length;
-				uTimerDenial.clear();
-				await withDeadline(
-					trace,
-					"U-usage timer retry removes the confirmed row's copy",
-					world.io.waitForMutation(() => !world.io.existsSync(uTimerSidecar)),
-					30_000,
-				);
-				expect(
-					{
-						rows: uRowIds(uTimerFile),
-						sidecar: world.io.existsSync(uTimerSidecar),
-						requests: world.systemOne.decoded.length - uTimerRequests,
-						cost: uTimer.session.getCostSummary().currentCost === uTimerCost,
-						usage: uUsageWarnings(uTimerWarnings).length,
-					},
-					"the owner's own retry removes the copy: the same single row, no evaluation, its cost counted once",
-				).toEqual({ rows: uTimerIds, sidecar: false, requests: 0, cost: true, usage: 0 });
-				await uDispose(uTimer.session, "the timer-recovered owner disposes cleanly", undefined);
-
-				// Physical read failure while confirming: the row is appended, but the session file cannot be read back. The receipt is
-				// typed pending with the read's own code, its pending copy stays until a confirmed read, and nothing is evaluated again.
-				// Then an unreadable journal at reopen: a paid screen is still made and its row is recorded, while the earlier pending row
-				// stays in the journal until the owner that holds it recovers it. The journal's reads stay refused until cleared, so no
-				// retry timer can change what is observed.
-				const uConfirmDir = `${world.agentDir}-usage-confirm`;
-				const uConfirm = await uOwnerAt(uConfirmDir);
-				await uOwnerTurn(uConfirm.session, "u-confirm");
-				const uConfirmFile = uConfirm.sessionManager.getSessionFile();
-				if (uConfirmFile === undefined) throw new Error("U-usage: the confirm owner session has no file");
-				const uConfirmSidecar = uSidecarOf(uConfirmFile, uConfirm.sessionManager.getSessionId());
-				const uConfirmRequests = world.systemOne.decoded.length;
-				await uScreen(uConfirm.session, "u-confirm-control", "Say hello again.");
-				expect(
-					{
-						rows: uRowIds(uConfirmFile).length,
-						pending: world.io.existsSync(uConfirmSidecar),
-						requests: world.systemOne.decoded.length - uConfirmRequests,
-					},
-					"the confirm control reads its row back at once and keeps no pending copy",
-				).toEqual({ rows: 1, pending: false, requests: 1 });
-				const uConfirmRead = world.io.denyUntilCleared({
-					name: "u-confirm-session-read-denied",
-					kind: "read",
-					code: "EIO",
-					matches: (operation) => operation.path === uConfirmFile,
-				});
-				const uConfirmWarnings = world.warnings.length;
-				await uScreen(uConfirm.session, "u-confirm-pending", "Say hello once more.");
-				expect(
-					uUsageWarnings(uConfirmWarnings),
-					"an unreadable session file leaves the appended row typed pending, with the read's own code as its cause",
-				).toEqual([
-					"A System One usage receipt is pending, not yet in this session's usage record (the session file could not be read to confirm the row (EIO)); it is kept in its session journal until the session file can be read to confirm it.",
-				]);
-
-				expect(
-					uConfirm.session.getCostSummary().currentCost,
-					"at the pending moment the row is in the ledger and held once: its cost counts once",
-				).toBeCloseTo(uSum(uRowCosts(uConfirmFile)), 12);
-				expect(
-					{
-						rows: uRowIds(uConfirmFile).length,
-						held: uHeldIds(uConfirmSidecar).length,
-						requests: world.systemOne.decoded.length - uConfirmRequests,
-					},
-					"the appended row is in the file, its pending copy waits for a confirmed read, and nothing is evaluated again",
-				).toEqual({ rows: 2, held: 1, requests: 2 });
-				expect(uConfirmRead.hits, "the confirming read was refused").toBeGreaterThan(0);
-				const uConfirmHitsBeforeDispose = uConfirmRead.hits;
-				await uDispose(
-					uConfirm.session,
-					"the owner disposes with its unconfirmed row kept as pending",
-					uHandoff(1, 0, 0, 0),
-				);
-				expect(uConfirmRead.hits, "the disposal's own confirming read was refused as well").toBeGreaterThan(
-					uConfirmHitsBeforeDispose,
-				);
-				// Disposal's own last reconcile reads the session file too: that read is refused as well, so the pending copy is still in the journal.
-				expect(
-					world.io.existsSync(uConfirmSidecar),
-					"the disposal's confirming read is refused, and the unconfirmed row's pending copy stays in the journal",
-				).toBe(true);
-				uConfirmRead.clear();
-
-				const uConfirmSidecarRead = world.io.denyUntilCleared({
-					name: "u-confirm-sidecar-read-denied",
-					kind: "read",
-					code: "EIO",
-					matches: (operation) => operation.path === uConfirmSidecar,
-				});
-				const uConfirmBlindWarnings = world.warnings.length;
-				const uConfirmBlind = await uOwnerAt(uConfirmDir, uConfirmFile);
-				expect(
-					world.warnings
-						.slice(uConfirmBlindWarnings)
-						.filter(
-							(warning) =>
-								warning ===
-								"The session's usage journal is unavailable (usage journal read failed: EIO); its pending reports are retried.",
-						).length,
-					"the unreadable journal is reported when the blind owner opens it",
-				).toBeGreaterThan(0);
-				const uConfirmBlindSession = uConfirmBlind.session;
-				const uConfirmBlindRequests = world.systemOne.decoded.length;
-				// The journal cannot be read, so the owner keeps it not ready and retries it. The paid screen is still made: its row is
-				// appended and read back, so its receipt is recorded at once, while the sidecar keeps the earlier pending row.
-				await uScreen(uConfirmBlindSession, "u-confirm-blind", "Say hello while the journal is unreadable.");
-				expect(
-					{
-						requests: world.systemOne.decoded.length - uConfirmBlindRequests,
-						rows: uRowIds(uConfirmFile).length,
-						unique: new Set(uRowIds(uConfirmFile)).size,
-						kept: world.io.existsSync(uConfirmSidecar),
-						held: uHeldIds(uConfirmSidecar).length,
-					},
-					"an unreadable journal does not refuse the paid screen: it is evaluated once and its row is recorded, and the pending row stays in the journal",
-				).toEqual({ requests: 1, rows: 3, unique: 3, kept: true, held: 1 });
-				expect(uConfirmSidecarRead.hits, "the unreadable journal was refused at open").toBeGreaterThan(0);
-				const uConfirmBlindCost = uConfirmBlindSession.getCostSummary().currentCost;
-				uConfirmSidecarRead.clear();
-				await uDispose(
-					uConfirmBlindSession,
-					"the blind owner recovers the journal on dispose and disposes",
-					undefined,
-				);
-				expect(
-					{
-						rows: uRowIds(uConfirmFile).length,
-						unique: new Set(uRowIds(uConfirmFile)).size,
-						sidecar: world.io.existsSync(uConfirmSidecar),
-						requests: world.systemOne.decoded.length - uConfirmRequests,
-					},
-					"the recovered journal acknowledges its pending row without a second row or an evaluation",
-				).toEqual({ rows: 3, unique: 3, sidecar: false, requests: 3 });
-
-				// After recovery a reopened owner counts each confirmed row once, and its next paid screen is recorded at once.
-				const uConfirmAfter = await uOwnerAt(uConfirmDir, uConfirmFile);
-				expect(
-					{
-						rows: uRowIds(uConfirmFile).length,
-						cost: uConfirmAfter.session.getCostSummary().currentCost === uConfirmBlindCost,
-					},
-					"a reopen after recovery counts each confirmed row once",
-				).toEqual({ rows: 3, cost: true });
-				const uConfirmAfterWarnings = world.warnings.length;
-				await uScreen(uConfirmAfter.session, "u-confirm-after", "Say hello after recovery.");
-				expect(
-					{
-						rows: uRowIds(uConfirmFile).length,
-						pending: world.io.existsSync(uConfirmSidecar),
-						warnings: uUsageWarnings(uConfirmAfterWarnings).length,
-					},
-					"after recovery the next paid row is recorded at once, with no warning",
-				).toEqual({ rows: 4, pending: false, warnings: 0 });
-				await uDispose(uConfirmAfter.session, "the recovered owner disposes cleanly", undefined);
+					]);
+					expect(
+						uToolEnds.map((result) => Object.keys(result).includes("usage")),
+						"the root tool result carries no usage of its own: the review's receipt is recorded through the session once",
+					).toEqual([false]);
+					await uDispose(
+						uTool.session,
+						"the fenced root-tool owner disposes with its receipt held",
+						uHandoff(1, 0, 0, 0),
+					);
+					const uToolReopenRequests = world.systemOne.decoded.length;
+					const uToolReopened = await uOwnerAt(uToolDir, uToolFile);
+					expect(
+						{
+							rows: uRowIds(uToolFile),
+							sidecar: world.io.existsSync(uToolSidecar),
+							routes: uRowRoutes(uToolFile),
+							requests: world.systemOne.decoded.length - uToolReopenRequests,
+							cost: uToolReopened.session.getCostSummary().currentCost === uSum(uRowCosts(uToolFile)),
+							stats: uToolReopened.session.getSessionStats().cost === uSum(uRowCosts(uToolFile)),
+						},
+						"the reopened owner records the same receipt once, as a system_one_tool row, and counts it once in its cost and statistics",
+					).toEqual({
+						rows: uToolIds,
+						sidecar: false,
+						routes: ["system_one_tool"],
+						requests: 0,
+						cost: true,
+						stats: true,
+					});
+					await uDispose(uToolReopened.session, "the reopened root-tool owner disposes cleanly", undefined);
+				} else {
+					// System One off binds no controller and keeps no usage: no usage journal exists anywhere in the run.
+					expect(
+						[...world.io.fileEntries().keys()].filter((path) => path.includes(".usage-pending.")),
+						"with System One off, no usage journal is kept anywhere",
+					).toEqual([]);
+				}
 				trace.mark("root", "icm.usage-conservation");
 
 				// R-egress: the admission egress switch is read live. With it off the model leaf is held before any call (no
@@ -16569,8 +17085,9 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 				/^History summaries: \d+ model summary job\(s\) are held: external summary admission egress is not allowed by settings: the evaluator is a remote service and a local summary model does not make it local\. Exact copies and exact history recall are unaffected\.$/,
 				// W1: the stale coordinator's first save after another coordinator took the lease is fenced, and it stops with that cause.
 				/^History summaries stopped: saving jobs was refused: fenced \(the writer was superseded; current fence \d+\)\. Exact history recall is unaffected\.$/,
-				// A file-backed owner that disposes before its first reply still holds the paid usage it wrote (deferred, not failed).
-				/^Session usage handoff: (?:\d+ System One usage report\(s\) pending in the session journal|\d+ System One usage report\(s\) kept in the session journal for a session file that was never written, so they cannot be recorded), 0 not retained, 0 confirmed row\(s\) whose journal copy is not removed, 0 unmatched journal\(s\) kept as evidence; none is charged to another session\.$/,
+				// An owner that disposes with paid usage still unconfirmed keeps it in its journal. The pending form is for a file that exists
+				// with unconfirmed reports; the evidence form is only for a never-replied session whose file was never written.
+				/^Usage handoff: \d+ usage report\(s\) pending in the session journal, 0 not retained, 0 confirmed row\(s\) with a journal copy left, 0 unmatched journal\(s\); none is charged to another session\.$/,
 			],
 			files: {
 				[projectPath("src", "limits.ts")]: ORIGINAL_LIMITS,

@@ -28,6 +28,7 @@ import { ENV_SESSION_DIR, expandTildePath, getAgentDir, VERSION } from "./config
 import {
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeFactory,
+	CreatedSessionFailure,
 	createAgentSessionRuntime,
 } from "./core/agent-session-runtime.ts";
 import {
@@ -1011,47 +1012,54 @@ export async function main(args: string[], options?: MainOptions) {
 						toolProfileFilter: settingsManager.getResourceProfileFilter("tools"),
 					}),
 		});
-		// After the session exists: an unset `modelRouter.enabled` follows whether it has System One.
-		diagnostics.push(
-			...collectModelRouterConfigDiagnostics(settingsManager.getModelRouterSettings(), modelRegistry, agentDir).map(
-				(message) => ({
+		try {
+			// After the session exists: an unset `modelRouter.enabled` follows whether it has System One.
+			diagnostics.push(
+				...collectModelRouterConfigDiagnostics(
+					settingsManager.getModelRouterSettings(),
+					modelRegistry,
+					agentDir,
+				).map((message) => ({
 					type: "warning" as const,
 					message,
-				}),
-			),
-		);
-		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
-		if (created.session.model && cliThinkingOverride) {
-			created.session.setThinkingLevel(created.session.thinkingLevel);
-		}
-		if (orchestrationProfile && orchestrationModel) {
-			const capabilities = [...orchestrationProfile.capabilityCeiling];
-			created.session.capabilityEnvelope = {
-				id: `orchestration-profile:${orchestrationProfile.profileId}`,
-				profileId: orchestrationProfile.profileId,
-				capabilities,
-				allowedTools: [...orchestrationProfile.toolNames],
-				...(capabilities.some(
-					(capability) =>
-						capability === "filesystem.read" ||
-						capability === "filesystem.write" ||
-						capability === "worktree.read" ||
-						capability === "worktree.mutate",
-				)
-					? { allowedPaths: [cwd] }
-					: {}),
-				...(orchestrationProfile.budget.maxCostUsd !== undefined
-					? { maxEstimatedUsd: orchestrationProfile.budget.maxCostUsd }
-					: {}),
-				createdAt: new Date().toISOString(),
-			};
-		}
+				})),
+			);
+			const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
+			if (created.session.model && cliThinkingOverride) {
+				created.session.setThinkingLevel(created.session.thinkingLevel);
+			}
+			if (orchestrationProfile && orchestrationModel) {
+				const capabilities = [...orchestrationProfile.capabilityCeiling];
+				created.session.capabilityEnvelope = {
+					id: `orchestration-profile:${orchestrationProfile.profileId}`,
+					profileId: orchestrationProfile.profileId,
+					capabilities,
+					allowedTools: [...orchestrationProfile.toolNames],
+					...(capabilities.some(
+						(capability) =>
+							capability === "filesystem.read" ||
+							capability === "filesystem.write" ||
+							capability === "worktree.read" ||
+							capability === "worktree.mutate",
+					)
+						? { allowedPaths: [cwd] }
+						: {}),
+					...(orchestrationProfile.budget.maxCostUsd !== undefined
+						? { maxEstimatedUsd: orchestrationProfile.budget.maxCostUsd }
+						: {}),
+					createdAt: new Date().toISOString(),
+				};
+			}
 
-		return {
-			...created,
-			services,
-			diagnostics,
-		};
+			return {
+				...created,
+				services,
+				diagnostics,
+			};
+		} catch (error) {
+			// Hand the created session back: the runtime disposes it in full rather than leaking it.
+			throw new CreatedSessionFailure(created.session, created.sessionManager, error);
+		}
 	};
 	time("createRuntime");
 	const runtime = await createAgentSessionRuntime(createRuntime, {

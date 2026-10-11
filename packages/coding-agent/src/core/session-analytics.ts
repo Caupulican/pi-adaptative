@@ -47,7 +47,13 @@ import {
 	type SpawnedUsageReceiptDisposition,
 	type SpawnedUsageReceiptOptions,
 } from "./cost/spawned-usage-receipt.ts";
-import { SPAWNED_USAGE_CUSTOM_TYPE, type SpawnedUsageReport, type SpawnedUsageTotals } from "./cost/usage-records.ts";
+import {
+	SEMANTIC_USAGE_CUSTOM_TYPE,
+	type SemanticUsageReport,
+	SPAWNED_USAGE_CUSTOM_TYPE,
+	type SpawnedUsageReport,
+	type SpawnedUsageTotals,
+} from "./cost/usage-records.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import type { ContextUsage, ToolDefinition } from "./extensions/index.ts";
@@ -82,8 +88,9 @@ export interface SessionAnalyticsDeps {
 	/**
 	 * Paid System One usage the session's ledger does not carry yet. CURRENT (getCostSummary) and the cumulative rollup
 	 * (getCumulativeUsage) count it, once by report id. getSessionStats does not: its tokens and cost sum the usage recorded
-	 * on session entries (assistant and tool-result messages, which includes a `systemone` tool call's own result usage, and
-	 * compaction and branch summaries), so System One reviewer usage rows and spawned spend, pending or not, stay out of them.
+	 * on session entries (assistant and tool-result messages, which includes a worker lane's `systemone` tool-call result usage,
+	 * and compaction and branch summaries) and the recorded rows of the root `systemone` tool's reviews, each once by report id.
+	 * Other System One reviewer rows, history summary spend and spawned spend, pending or not, stay out of them.
 	 */
 	getPendingSemanticUsage(): SemanticUsageProjection;
 	/** Settings — the export theme is read here. */
@@ -151,10 +158,19 @@ export class SessionAnalytics {
 		let totalMessages = 0;
 		let toolCalls = 0;
 		const usage = createEmptyUsage();
+		// The root systemone tool's recorded reviews are the one System One route in these totals; each counts once by report id.
+		const toolReportIds = new Set<string>();
 
 		for (const entry of this.deps.getSessionManager().getEntries()) {
 			const entryUsage = getSessionEntryUsage(entry);
 			if (entryUsage) addUsage(usage, entryUsage);
+			if (entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
+				const report = entry.data as SemanticUsageReport | undefined;
+				if (report?.route === "system_one_tool" && !toolReportIds.has(report.reportId)) {
+					toolReportIds.add(report.reportId);
+					addUsage(usage, report.usage);
+				}
+			}
 			if (entry.type !== "message") continue;
 			totalMessages++;
 			const message = entry.message;
@@ -308,9 +324,11 @@ export class SessionAnalytics {
 	 * silently under-counts the grandchildren.
 	 */
 	getCumulativeUsage(): Usage {
+		const pending = this.deps.getPendingSemanticUsage();
 		return aggregateCumulativeUsageFromSessionEntries(
 			this.deps.getSessionManager().getEntries(),
-			this.deps.getPendingSemanticUsage().reports,
+			pending.reports,
+			pending.overflow?.usage,
 		);
 	}
 
@@ -412,8 +430,10 @@ export class SessionAnalytics {
 	 * accumulator processes only new entries, so repeated turns do not rescan the full session.
 	 */
 	getSpawnedUsage(): SpawnedUsageTotals {
-		const current = this.getCurrentSessionCostTotals();
-		return { cost: current.subagentCost, reports: current.subagentReports };
+		// The same pending projection as CURRENT: background spend the cost guard and /context read is never below it.
+		const pending = this.deps.getPendingSemanticUsage();
+		const totals = projectPendingSemanticCost(this.getCurrentSessionCostTotals(), pending.reports, pending.overflow);
+		return { cost: totals.subagentCost, reports: totals.subagentReports };
 	}
 
 	getCostSummary(now = new Date()): SessionCostSummary {
@@ -433,7 +453,11 @@ export class SessionAnalytics {
 			return cached.summary;
 		}
 		const summary = createSessionCostSummary({
-			currentTotals: projectPendingSemanticCost(this.getCurrentSessionCostTotals(), pending.reports),
+			currentTotals: projectPendingSemanticCost(
+				this.getCurrentSessionCostTotals(),
+				pending.reports,
+				pending.overflow,
+			),
 			dailyTotals,
 			todayWindow: window,
 		});

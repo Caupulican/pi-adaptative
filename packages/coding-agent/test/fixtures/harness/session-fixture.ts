@@ -13,7 +13,7 @@ import type { TranscriptSummaryTimeSource } from "../../../src/core/memory/trans
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
 import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
-import { createAgentSession } from "../../../src/core/sdk.ts";
+import { type CreateAgentSessionResult, createAgentSession } from "../../../src/core/sdk.ts";
 import type { Settings } from "../../../src/core/settings/settings-schema.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "../../../src/core/tool-applicability-gate.ts";
@@ -2181,7 +2181,13 @@ export class HarnessWorld {
 			 */
 			readonly extensionFactories?: readonly ExtensionFactory[];
 		} = {},
-	): Promise<{ session: AgentSession; sessionManager: SessionManager; settingsManager: SettingsManager }> {
+	): Promise<{
+		session: AgentSession;
+		sessionManager: SessionManager;
+		settingsManager: SettingsManager;
+		getExtensionRunner: CreateAgentSessionResult["getExtensionRunner"];
+		extensionsResult: CreateAgentSessionResult["extensionsResult"];
+	}> {
 		const sessionManager = options.sessionManager ?? SessionManager.inMemory(HARNESS_PROJECT_CWD);
 		const systemOneEnabled = options.systemOneEnabled ?? this.systemOne.enabled;
 		const omitShellOperations = options.omitShellOperations ?? process.platform === "win32";
@@ -2215,7 +2221,7 @@ export class HarnessWorld {
 			});
 			await extensionLoader.reload();
 		}
-		const { session } = await createAgentSession({
+		const { session, getExtensionRunner, extensionsResult } = await createAgentSession({
 			cwd: HARNESS_PROJECT_CWD,
 			agentDir,
 			authStorage: this.authStorage,
@@ -2280,7 +2286,7 @@ export class HarnessWorld {
 		if ((session.systemOneController !== undefined) !== systemOneEnabled) {
 			throw new Error(`System One ${systemOneEnabled ? "on" : "off"} session binding mismatch`);
 		}
-		return { session, sessionManager, settingsManager };
+		return { session, sessionManager, settingsManager, getExtensionRunner, extensionsResult };
 	}
 
 	/** A file-backed session manager; its session file is written to the virtual tree on the first reply. */

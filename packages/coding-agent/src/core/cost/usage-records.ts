@@ -1,4 +1,5 @@
 import type { Usage } from "@caupulican/pi-ai";
+import type { SystemOneUsageRoute } from "../review/system-one-review-port.ts";
 
 export const SPAWNED_USAGE_CUSTOM_TYPE = "spawned_usage";
 export const SEMANTIC_USAGE_CUSTOM_TYPE = "semantic_usage";
@@ -21,6 +22,8 @@ export interface SemanticUsageReport {
 	/** Stable idempotency identity for retry-safe aggregation. */
 	reportId: string;
 	costStatus?: "catalog_priced" | "unpriced";
+	/** Absent for a System One review; set for the routes that are not one (see SystemOneUsageRoute). */
+	route?: SystemOneUsageRoute;
 }
 
 /**
@@ -34,6 +37,7 @@ export function semanticUsageReportOf(receipt: {
 	attempt: number;
 	usage: Usage;
 	costStatus?: SemanticUsageReport["costStatus"];
+	route?: SystemOneUsageRoute;
 }): SemanticUsageReport {
 	return {
 		reportId: receipt.receiptId,
@@ -42,6 +46,7 @@ export function semanticUsageReportOf(receipt: {
 		attempt: receipt.attempt,
 		usage: receipt.usage,
 		...(receipt.costStatus !== undefined ? { costStatus: receipt.costStatus } : {}),
+		...(receipt.route !== undefined ? { route: receipt.route } : {}),
 	};
 }
 

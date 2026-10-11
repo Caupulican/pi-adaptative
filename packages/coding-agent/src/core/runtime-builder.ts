@@ -135,6 +135,7 @@ import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts
 import { assertReloadQuiescent } from "./reload-blockers.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import type { SystemOneUsageSink } from "./review/system-one-review-port.ts";
 import { TypeSafeEvidenceMaterializer } from "./review/typesafe-evidence-materializer.ts";
 import { TypeSafeEvidenceStore } from "./review/typesafe-evidence-store.ts";
 import { SystemOneReviewer } from "./review/typesafe-reviewer.ts";
@@ -333,6 +334,8 @@ export interface RuntimeBuilderDeps {
 	getAgentDir(): string;
 	/** Session log, passed to the extension runner. */
 	getSessionManager(): SessionManager;
+	/** The session's System One usage delivery: the root systemone reviewer records its paid responses through it. */
+	getSemanticUsage(): SystemOneUsageSink;
 	/** Tool/shell/toolkit/resource settings + reload target (settingsManager.reload()). */
 	getSettingsManager(): RuntimeBuilderSettingsSource;
 	/** Branch System One bound this task to. Worktree sync rebases and lands onto it. */
@@ -1407,6 +1410,8 @@ export class RuntimeBuilder {
 						this.deps.getModelRegistry().authStorage,
 					),
 					credentialBoundary: this._credentialExposureBoundary,
+					// Resolved per review: the session's usage delivery is bound after this builder is built.
+					usage: { begin: () => this.deps.getSemanticUsage().begin("system_one_tool") },
 				});
 				this._baseToolDefinitions.set(
 					SYSTEM_ONE_TOOL_NAME,
@@ -1430,6 +1435,8 @@ export class RuntimeBuilder {
 							},
 							credentialBoundary: this._credentialExposureBoundary,
 						}),
+						// The root reviewer records each paid response through the session's usage delivery.
+						true,
 					),
 				);
 			}

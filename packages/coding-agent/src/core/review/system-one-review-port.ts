@@ -29,12 +29,19 @@ export interface SystemOneStatus {
 	readonly message: string;
 }
 
+/**
+ * Where a paid response's usage is charged from. Absent is a System One review; `system_one_tool` is the root systemone tool's
+ * review (counted in the session statistics); `history_summary` is a history summary model call's spend (counted in CURRENT and as background spend).
+ */
+export type SystemOneUsageRoute = "system_one_tool" | "history_summary";
+
 /** The priced usage record handed to the usage sink. `receiptId` is the persistence identity of one response. */
 export interface TypeSafeUsageReceipt extends PricedTypeSafeUsage {
 	readonly receiptId: string;
 	readonly provider: string;
 	readonly model: string;
 	readonly attempt: number;
+	readonly route?: SystemOneUsageRoute;
 }
 
 /**
@@ -76,8 +83,11 @@ export interface SystemOneUsageLease {
 
 /** The session's usage sink: an evaluation begins a lease before any provider call is paid. */
 export interface SystemOneUsageSink {
-	/** Throws {@link SystemOneUsageRefusal} when no slot can be reserved; nothing has been paid at that point. */
-	begin(): SystemOneUsageLease;
+	/**
+	 * Throws {@link SystemOneUsageRefusal} when no slot can be reserved; nothing has been paid at that point. The route says
+	 * where the usage is charged from (see SystemOneUsageRoute); absent is a System One review.
+	 */
+	begin(route?: SystemOneUsageRoute): SystemOneUsageLease;
 }
 
 /** The usage sink cannot admit a new paid evaluation, so none is made. */

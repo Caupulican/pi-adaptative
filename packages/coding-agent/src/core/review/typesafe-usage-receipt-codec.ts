@@ -13,9 +13,10 @@ const RECEIPT_PAYLOAD_KEYS = [
 	"usage",
 	"costStatus",
 	"costProvenance",
+	"route",
 ] as const;
 const RECEIPT_USAGE_KEYS = ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const;
-const RECEIPT_COST_KEYS = ["input", "output", "cacheRead", "cacheWrite", "total"] as const;
+const RECEIPT_COST_KEYS = ["input", "output", "cacheRead", "cacheWrite", "total", "estimate"] as const;
 
 export function isReceiptCount(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -36,8 +37,9 @@ export function isReceiptText(value: unknown): value is string {
  */
 export function parseTypeSafeUsageReceipt(value: unknown): TypeSafeUsageReceipt | undefined {
 	if (!isPlainRecord(value) || !hasOnlyKeys(value, RECEIPT_PAYLOAD_KEYS)) return undefined;
-	const { receiptId, provider, model, attempt, usage, costStatus, costProvenance } = value;
+	const { receiptId, provider, model, attempt, usage, costStatus, costProvenance, route } = value;
 	if (!isReceiptText(receiptId) || !isReceiptCount(attempt)) return undefined;
+	if (route !== undefined && route !== "system_one_tool" && route !== "history_summary") return undefined;
 	if (!isReceiptText(provider) || !isReceiptText(model)) return undefined;
 	if (costStatus !== "catalog_priced" && costStatus !== "unpriced") return undefined;
 	let provenance: { provider: string; model: string } | undefined;
@@ -67,6 +69,9 @@ export function parseTypeSafeUsageReceipt(value: unknown): TypeSafeUsageReceipt 
 	const costCacheRead = cost.cacheRead;
 	const costCacheWrite = cost.cacheWrite;
 	const costTotal = cost.total;
+	// The one estimate a provider reports: a tier priced at base model rates. Any other value is not a receipt.
+	const costEstimate = cost.estimate;
+	if (costEstimate !== undefined && costEstimate !== "base-rates") return undefined;
 	if (
 		!isReceiptMoney(costInput) ||
 		!isReceiptMoney(costOutput) ||
@@ -87,6 +92,7 @@ export function parseTypeSafeUsageReceipt(value: unknown): TypeSafeUsageReceipt 
 			cacheRead: costCacheRead,
 			cacheWrite: costCacheWrite,
 			total: costTotal,
+			...(costEstimate !== undefined ? { estimate: costEstimate } : {}),
 		},
 	};
 	return {
@@ -97,5 +103,6 @@ export function parseTypeSafeUsageReceipt(value: unknown): TypeSafeUsageReceipt 
 		usage: priced,
 		costStatus,
 		...(provenance ? { costProvenance: provenance } : {}),
+		...(route !== undefined ? { route } : {}),
 	};
 }

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { isSessionIdentity } from "../../kernel/session/session-manager.ts";
 import type { TypeSafeUsageReceipt } from "../review/system-one-review-port.ts";
 import { isReceiptCount, isReceiptText, parseTypeSafeUsageReceipt } from "../review/typesafe-usage-receipt-codec.ts";
 import {
@@ -109,25 +110,14 @@ export class SemanticUsageJournalError extends Error {
 }
 
 /**
- * The kernel's own session id rule: an id that is one file-name token cannot leave the session's directory. The id comes from
- * a session header, which the kernel only checks to be a string, so it is checked here before any path. No length cap here:
- * a long id is addressed by its hash (see journalNameOf), so the id itself is never refused for its length.
- */
-const SAFE_JOURNAL_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
-
-export function isSafeJournalId(id: string): boolean {
-	return SAFE_JOURNAL_ID.test(id);
-}
-
-/**
- * Sidecar names stay under 160 characters, so the tmp, lock and evidence names derived from them stay under 255. A longer
- * session file base name is replaced by `h-<hash>` as the stem; a longer session id is replaced by its hash as the token.
+ * Sidecar names stay under 160 characters, so the tmp, lock and evidence names derived from them stay under 255. A session id
+ * can be as long as the header it is read from, so a long id or a long session file base name is not refused: the stem is
+ * replaced by `h-<hash>` when the base name is long, and the token by its hash when it would overflow the name.
  * The name is only an address: the sidecar's content keeps the full session id, which is what readJournal verifies.
  */
 const MAX_SIDECAR_NAME_CHARS = 160;
 const MAX_STEM_CHARS = 96;
 /** The kernel reads a session header within 64 KiB (`MAX_SESSION_HEADER_BYTES`), so no session id is longer than that. */
-const MAX_SESSION_ID_CHARS = 64 * 1024;
 const SHORT_TOKEN = /^[0-9a-f]{24}$/;
 
 function shortToken(text: string): string {
@@ -154,7 +144,7 @@ function journalNameOf(stem: string, sessionId: string): string {
 export function journalSlotOf(identity: SemanticUsageLedgerIdentity): JournalSlot | undefined {
 	if (!identity.persisted || identity.sessionFile === undefined) return undefined;
 	const { sessionFile, sessionId, headerTimestamp } = identity;
-	if (!isSafeJournalId(sessionId)) return undefined;
+	if (!isSessionIdentity(sessionId)) return undefined;
 	return {
 		path: join(dirname(sessionFile), journalNameOf(journalStemOf(sessionFile), sessionId)),
 		sessionId,
@@ -201,8 +191,7 @@ function validateDocument(value: unknown): JournalDocument | undefined {
 	const { version, kind, sessionId, sessionFile, headerTimestamp, updatedAt, records, conflicts, droppedConflicts } =
 		value;
 	if (version !== 1 || kind !== "semantic-usage-pending") return undefined;
-	if (typeof sessionId !== "string" || !isSafeJournalId(sessionId) || sessionId.length > MAX_SESSION_ID_CHARS)
-		return undefined;
+	if (typeof sessionId !== "string" || !isSessionIdentity(sessionId)) return undefined;
 	if (!isReceiptText(updatedAt) || !isReceiptCount(droppedConflicts)) return undefined;
 	if (typeof sessionFile !== "string" || sessionFile.length === 0 || sessionFile.length > MAX_SESSION_FILE_CHARS) {
 		return undefined;
@@ -349,7 +338,11 @@ export function sessionJournalPaths(sessionFile: string): string[] {
 		if (isMissingFileError(error)) return [];
 		throw new SemanticUsageJournalError("unavailable", `usage journal directory read failed: ${errorCodeOf(error)}`);
 	}
-	return names.filter((name) => name.startsWith(prefix)).map((name) => join(dirname(sessionFile), name));
+	// readdir order is the platform's: sorted, so every listing (the unmatched warning included) reads the same on any disk.
+	return names
+		.filter((name) => name.startsWith(prefix))
+		.sort()
+		.map((name) => join(dirname(sessionFile), name));
 }
 
 /**
@@ -365,6 +358,6 @@ export function foreignJournalPaths(sessionFile: string, sessionId: string): str
 		const name = basename(path);
 		if (name === own || !name.endsWith(".json")) return false;
 		const token = name.slice(prefix.length, -".json".length);
-		return isSafeJournalId(token) || SHORT_TOKEN.test(token);
+		return isSessionIdentity(token) || SHORT_TOKEN.test(token);
 	});
 }

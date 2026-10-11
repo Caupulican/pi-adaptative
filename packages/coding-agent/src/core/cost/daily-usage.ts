@@ -95,7 +95,11 @@ function addDailyUsageFromEntries(
 			const data = entry.data as SemanticUsageReport | undefined;
 			if (!data?.usage || !data.reportId || seenSemanticReportIds.has(data.reportId)) continue;
 			seenSemanticReportIds.add(data.reportId);
-			totals.ownCost += data.usage.cost.total;
+			// History summary spend is background spend, as its row was when it was a spawned report.
+			if (data.route === "history_summary") {
+				totals.spawnedCost += data.usage.cost.total;
+				totals.reports += 1;
+			} else totals.ownCost += data.usage.cost.total;
 			addUsage(totals, data.usage);
 			hasUsage = true;
 		}

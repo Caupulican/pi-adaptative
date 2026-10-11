@@ -122,6 +122,8 @@ export function createSystemOneToolDefinition(
 	evidenceMaterializer?: TypeSafeEvidenceMaterializer,
 	uncertainties?: SemanticUncertaintyPort,
 	locator?: Pick<FileLocator, "locate">,
+	// The reviewer records every paid response through the session's usage delivery: the result must not carry the same spend.
+	reviewerRecordsUsage = false,
 ) {
 	const uncertaintyPrompt = uncertainties
 		? "At turn entry and before delivery, inspect active uncertainties. For worker-task questions, gather evidence from the responsible worker and steer it as needed; after reviewing that evidence, the owning session may record an advisory disposition for any current question in its own journal. Include a conservative path or evidence-based decision with concise evidence and reason. Keep mandatory same-lane verification and recheck requirements active. This disposition is not a System One pass, verification proof, certificate proof, or permission. Reject stale questions and questions explicitly scoped to a foreign root session."
@@ -329,7 +331,7 @@ export function createSystemOneToolDefinition(
 					errorKind,
 					content: [{ type: "text" as const, text: JSON.stringify({ ...summary, evidence }) }],
 					details: holder.details,
-					usage: usageProjection?.usage,
+					...(reviewerRecordsUsage ? {} : { usage: usageProjection?.usage }),
 				};
 			} catch {
 				return {
@@ -342,7 +344,7 @@ export function createSystemOneToolDefinition(
 						costStatus: usageProjection?.costStatus ?? "unpriced",
 						...(usageProjection?.costProvenance ? { costProvenance: usageProjection.costProvenance } : {}),
 					},
-					usage: usageProjection?.usage,
+					...(reviewerRecordsUsage ? {} : { usage: usageProjection?.usage }),
 				};
 			}
 		},

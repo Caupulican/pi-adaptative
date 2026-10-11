@@ -3890,6 +3890,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		// The job may have ended (and left the list) while the call was in flight: its receipts are still settled below.
 		// Counted only when a provider request was sent: a result produced before any send (no evaluator, input too large, a
 		// refusal of the exact input, a usage lease refused before payment) reports no semantic request and no transport attempt.
+		// Its logical claim attempt is still consumed (a conservative policy): the counters above are the only thing it leaves at zero.
 		if (scheduler?.get(job.id) !== undefined && result.requestSent)
 			scheduler.addWork(job.id, {
 				semanticRequests: 1,

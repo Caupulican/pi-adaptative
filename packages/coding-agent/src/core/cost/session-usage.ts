@@ -101,6 +101,7 @@ export function findChildSessionFile(sessionDir: string, sessionId: string): str
 export function aggregateCumulativeUsageFromSessionEntries(
 	entries: readonly SessionEntry[],
 	pending: readonly SemanticUsageReport[] = [],
+	overflow?: Usage,
 ): Usage {
 	const total = createEmptyUsage();
 	const seenSpawnedReportIds = new Set<string>();
@@ -130,6 +131,8 @@ export function aggregateCumulativeUsageFromSessionEntries(
 		seenSemanticReportIds.add(report.reportId);
 		addUsage(total, report.usage);
 	}
+	// Paid history spend the bounded journal had no room for: live only.
+	if (overflow !== undefined && isUsage(overflow)) addUsage(total, overflow);
 	return total;
 }
 

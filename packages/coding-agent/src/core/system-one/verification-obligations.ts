@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { MAX_SESSION_HEADER_BYTES } from "../../kernel/session/session-manager.ts";
 
 export const VERIFICATION_OBLIGATIONS_CUSTOM_TYPE = "pi_semantic_verification_obligations";
 
@@ -172,6 +173,18 @@ function isBoundedText(value: unknown, maxLength: number, allowEmpty = false): v
 	);
 }
 
+/**
+ * A receiving or branch identity: any non-blank text whose UTF-8 encoding fits the physical envelope a session file's header is
+ * read in (MAX_SESSION_HEADER_BYTES counts bytes). A session id is the common case; a lane's receiver (`worker:<shell key>`) is
+ * another. Nothing is truncated or rehashed to fit.
+ */
+function isVerificationIdentity(value: unknown): value is string {
+	return (
+		isBoundedText(value, MAX_SESSION_HEADER_BYTES) &&
+		Buffer.byteLength(value as string, "utf8") <= MAX_SESSION_HEADER_BYTES
+	);
+}
+
 function isBoundedReason(value: unknown): value is string {
 	return (
 		typeof value === "string" &&
@@ -266,7 +279,7 @@ function readObligation(candidate: unknown): SemanticVerificationObligation | un
 		!isBoundedText(id, MAX_ID_LENGTH) ||
 		!isBoundedText(source, MAX_SOURCE_LENGTH) ||
 		!isBoundedReason(reason) ||
-		!isBoundedText(receiverId, MAX_ID_LENGTH) ||
+		!isVerificationIdentity(receiverId) ||
 		(candidateKind !== "repository" && candidateKind !== "outcome") ||
 		!isBoundedText(candidateId, MAX_ID_LENGTH) ||
 		!isBoundedText(scope, MAX_SCOPE_LENGTH) ||
@@ -333,7 +346,7 @@ function readReceipt(candidate: unknown): SemanticVerificationReceipt | undefine
 	if (
 		!isBoundedText(id, MAX_ID_LENGTH) ||
 		!isBoundedText(callId, MAX_ID_LENGTH) ||
-		!isBoundedText(receiverId, MAX_ID_LENGTH) ||
+		!isVerificationIdentity(receiverId) ||
 		!isBoundedText(candidateBefore, MAX_ID_LENGTH) ||
 		!isBoundedText(candidateAfter, MAX_ID_LENGTH) ||
 		typeof succeeded !== "boolean" ||
@@ -489,7 +502,7 @@ export class SemanticVerificationObligationTracker {
 
 	private load(): { branchKey: string; snapshot: SemanticVerificationSnapshot } {
 		const branchKey = this.storage.getBranchKey();
-		if (!isBoundedText(branchKey, MAX_ID_LENGTH)) throw new Error("Invalid verification obligation branch key.");
+		if (!isVerificationIdentity(branchKey)) throw new Error("Invalid verification obligation branch key.");
 		if (this.lastBranchKey !== branchKey) {
 			this.lastBranchKey = branchKey;
 			this.branchGeneration++;
@@ -502,7 +515,7 @@ export class SemanticVerificationObligationTracker {
 			}
 			const inherited = normalizeSnapshot(stored, stored.branchKey);
 			const receiverId = this.storage.getReceiverId?.();
-			if (!isBoundedText(receiverId, MAX_ID_LENGTH)) {
+			if (!isVerificationIdentity(receiverId)) {
 				throw new Error("Cannot rebind inherited verification obligations without a receiving session identity.");
 			}
 			const rebound = normalizeSnapshot(
@@ -555,7 +568,7 @@ export class SemanticVerificationObligationTracker {
 		if (
 			!isBoundedText(input.source, MAX_SOURCE_LENGTH) ||
 			!isBoundedReason(input.reason) ||
-			!isBoundedText(input.receiverId, MAX_ID_LENGTH) ||
+			!isVerificationIdentity(input.receiverId) ||
 			(input.candidateKind !== "repository" && input.candidateKind !== "outcome") ||
 			!isBoundedText(input.candidateId, MAX_ID_LENGTH) ||
 			!isBoundedText(input.scope, MAX_SCOPE_LENGTH)
@@ -632,7 +645,7 @@ export class SemanticVerificationObligationTracker {
 	recordReceipt(input: VerificationReceiptInput): void {
 		if (
 			!isBoundedText(input.callId, MAX_ID_LENGTH) ||
-			!isBoundedText(input.receiverId, MAX_ID_LENGTH) ||
+			!isVerificationIdentity(input.receiverId) ||
 			!isBoundedText(input.candidateBefore, MAX_ID_LENGTH) ||
 			!isBoundedText(input.candidateAfter, MAX_ID_LENGTH) ||
 			typeof input.succeeded !== "boolean" ||

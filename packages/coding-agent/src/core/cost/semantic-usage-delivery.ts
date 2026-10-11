@@ -1,15 +1,19 @@
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import type { Usage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
+import { addUsage } from "../../kernel/usage.ts";
 import {
 	SYSTEM_ONE_RESPONSES_PER_EVALUATION,
 	type SystemOneUsageLease,
 	type SystemOneUsageOutcome,
 	SystemOneUsageRefusal,
+	type SystemOneUsageRoute,
 	type SystemOneUsageSink,
 	type TypeSafeUsageReceipt,
 } from "../review/system-one-review-port.ts";
+import { priceCompletedUsage } from "../review/typesafe-usage.ts";
 import { parseTypeSafeUsageReceipt } from "../review/typesafe-usage-receipt-codec.ts";
 import {
 	errorCodeOf,
@@ -70,7 +74,15 @@ export interface SemanticUsageProjection {
 	/** Changes whenever the held set or the live identity binding changes, so a memoized reader can tell its totals are stale. */
 	readonly revision: number;
 	readonly reports: readonly SemanticUsageReport[];
+	/**
+	 * Paid history summary spend the bounded journal had no room for: one sum, counted live and not durable (a reopened
+	 * session does not have it).
+	 */
+	readonly overflow?: { readonly usage: Usage; readonly reports: number };
 }
+
+/** What a discard does with a candidate's own file: removed, kept as evidence, or none (the candidate owns no file). */
+export type DiscardDisposition = "removed" | "kept" | "none";
 
 export interface SemanticUsageSnapshot {
 	/** Held reports with a copy in this session's journal and no confirmed row yet. */
@@ -89,6 +101,8 @@ export interface SessionSemanticUsageDelivery extends SystemOneUsageSink {
 	/** Confirms one receipt for the admission path. Only `physically_recorded` is a confirmed row. */
 	confirm(receipt: TypeSafeUsageReceipt): SemanticUsageOutcome;
 	pendingProjection(): SemanticUsageProjection;
+	/** Records a history summary model call's paid spend through the same retention and canonical row as a System One review. */
+	recordHistoryUsage(usage: Usage, call: { reportId: string; provider: string; model: string }): void;
 	snapshot(): SemanticUsageSnapshot;
 	/** Binds the host's warning sink; warnings raised before the binding are delivered on it. */
 	bindDiagnostics(warn: (message: string) => void): void;
@@ -124,7 +138,7 @@ type CanonicalStep =
 type RetainOutcome = "retained" | "conflict" | "failed";
 
 /** The journal operations whose success or failure is tracked on its own: each recovers and warns independently. */
-type JournalOperation = "read" | "retain" | "remove" | "quarantine" | "reconcile" | "ledger";
+type JournalOperation = "read" | "retain" | "remove" | "quarantine" | "reconcile" | "ledger" | "overflow";
 type WriteOperation = "retain" | "remove";
 
 const CAUSE_MAX_CHARS = 200;
@@ -132,11 +146,46 @@ const RETRY_MIN_MS = 1_000;
 const RETRY_MAX_MS = 60_000;
 const MAX_BUFFERED_WARNINGS = 8;
 const UNMATCHED_NAMES_IN_WARNING = 2;
-const UNCERTAIN_LEDGER_CAUSE =
-	"Session persistence state is uncertain after a failed write; the usage report stays pending in the session journal until a new session manager reads the file";
-const UNSAFE_SESSION_ID_CAUSE = "the session id is not a safe file name for the usage journal";
+// The fact only: the remedy (the journal keeps the report until a new session manager reads the file) is in PENDING_SUFFIX,
+// so a held cause carried in a bounded status line is never cut in the middle of its remedy.
+const UNCERTAIN_LEDGER_CAUSE = "Session persistence state is uncertain after a failed write";
+
+/** The noun a usage warning names: a System One review's receipt, or a history summary's spend report. */
+function usageSubject(route: SystemOneUsageRoute | undefined): string {
+	return route === "history_summary" ? "A history summary usage report" : "A System One usage receipt";
+}
+
+/** The host bounds one warning to this many characters (AgentSession.emitHostWarning); a handoff must fit whole. */
+const HANDOFF_MESSAGE_CHARS = 500;
+
+/** A notice whose path is elided to fit the host's bound, with the text around it kept whole. */
+export function pathNotice(lead: string, path: string, tail: string): string {
+	return `${lead}${elidePath(path, HANDOFF_MESSAGE_CHARS - lead.length - tail.length)}${tail}`;
+}
+
+/**
+ * A path shortened to `budget` UTF-16 units (the host's own measure) by eliding its middle behind an explicit marker. The file
+ * name is kept whole, so the evidence stays identifiable; only the directories are shortened.
+ */
+function elidePath(path: string, budget: number): string {
+	if (path.length <= budget) return path;
+	const marker = "…";
+	const name = basename(path);
+	if (name.length + marker.length > budget) return marker + name.slice(name.length - (budget - marker.length));
+	return `${path.slice(0, budget - name.length - marker.length)}${marker}${name}`;
+}
+
+/** Plain code-unit order: the same on every host, unlike a locale-sensitive comparison. */
+function compareCodeUnits(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+const UNSAFE_SESSION_ID_CAUSE =
+	"the session id does not satisfy the kernel's session id rule, so the usage journal has no file for it";
 const NOT_READY_CAUSE = "the usage journal is not ready; retention waits for it to recover";
 const FULL_CAUSE = "usage journal is full";
+const HISTORY_OVERFLOW_CAUSE = "the usage journal has no room for it";
+/** History summary spend may hold half of the journal's record bound; the other half is System One's. */
+const HISTORY_SUMMARY_SHARE_RECORDS = Math.floor(SEMANTIC_USAGE_JOURNAL_MAX_RECORDS / 2);
 const RECEIPT_CONFLICT_CAUSE = "a different usage report already exists for this receipt identity";
 const JOURNAL_CONFLICT_CAUSE = "the session journal holds a different usage report with this identity";
 const LEDGER_CONFLICT_CAUSE = "the session ledger holds a different usage report with this identity";
@@ -279,13 +328,15 @@ interface LeaseOwner {
 class SemanticUsageLease implements SystemOneUsageLease {
 	private readonly owner: LeaseOwner;
 	private readonly identity: SemanticUsageLedgerIdentity;
+	private readonly route: SystemOneUsageRoute | undefined;
 	private unused: number;
 	private released = false;
 
-	constructor(owner: LeaseOwner, identity: SemanticUsageLedgerIdentity, slots: number) {
+	constructor(owner: LeaseOwner, identity: SemanticUsageLedgerIdentity, slots: number, route?: SystemOneUsageRoute) {
 		this.owner = owner;
 		this.identity = identity;
 		this.unused = slots;
+		this.route = route;
 	}
 
 	record(receipt: TypeSafeUsageReceipt): SystemOneUsageOutcome {
@@ -296,7 +347,10 @@ class SemanticUsageLease implements SystemOneUsageLease {
 			this.unused -= 1;
 			this.owner.returnSlots(1);
 		}
-		return this.owner.recordLease(this.identity, receipt);
+		return this.owner.recordLease(
+			this.identity,
+			this.route === undefined ? receipt : { ...receipt, route: this.route },
+		);
 	}
 
 	release(): void {
@@ -347,6 +401,8 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	private reconcileQueued = false;
 	private unsubscribePersisted: (() => void) | undefined;
 	private isDisposed = false;
+	private discardDisposition: DiscardDisposition = "none";
+	private overflow: { usage: Usage; reports: number } | undefined;
 
 	constructor(ledger: SemanticUsageLedgerPort) {
 		this.ledger = ledger;
@@ -369,7 +425,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	 * when the session identity moved on. An unreadable or unwritable journal never refuses: its receipts are disclosed as
 	 * unretained, and the owner keeps retrying the journal.
 	 */
-	begin(): SystemOneUsageLease {
+	begin(route?: SystemOneUsageRoute): SystemOneUsageLease {
 		if (this.isDisposed) {
 			throw new SystemOneUsageRefusal(
 				"System One usage cannot be recorded: the session has ended, so no evaluation starts",
@@ -385,11 +441,100 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			);
 		}
 		this.reserved += SYSTEM_ONE_RESPONSES_PER_EVALUATION;
-		return new SemanticUsageLease(this, identity, SYSTEM_ONE_RESPONSES_PER_EVALUATION);
+		return new SemanticUsageLease(this, identity, SYSTEM_ONE_RESPONSES_PER_EVALUATION, route);
 	}
 
 	returnSlots(count: number): void {
 		this.reserved -= count;
+	}
+
+	/**
+	 * Already paid, so it is recorded through the System One path (retention, canonical row, subject-named warnings) while the
+	 * journal has room. The bounds are the System One ones, combined: held, plus reserved, plus this report must fit the record
+	 * bound, and history summary spend holds at most half of it, so System One always keeps the other half. Past either bound the
+	 * spend is kept in a bounded live aggregate: counted in this session's live total, warned once, not durable.
+	 */
+	recordHistoryUsage(usage: Usage, call: { reportId: string; provider: string; model: string }): void {
+		if (this.isDisposed) {
+			this.retainAfterEnd(this.historyReceipt(usage, call));
+			return;
+		}
+		const historyHeld = [...this.held.values()].filter((entry) => entry.payload.route === "history_summary").length;
+		const priced = priceCompletedUsage(call.provider, call.model, usage);
+		if (
+			this.held.size + this.reserved + 1 > SEMANTIC_USAGE_JOURNAL_MAX_RECORDS ||
+			historyHeld >= HISTORY_SUMMARY_SHARE_RECORDS
+		) {
+			this.keepOverflow(priced.usage);
+			return;
+		}
+		this.recordLease(this.ledger.identity(), {
+			...priced,
+			receiptId: call.reportId,
+			provider: call.provider,
+			model: call.model,
+			attempt: 1,
+			route: "history_summary",
+		});
+	}
+
+	private historyReceipt(
+		usage: Usage,
+		call: { reportId: string; provider: string; model: string },
+	): TypeSafeUsageReceipt {
+		return {
+			...priceCompletedUsage(call.provider, call.model, usage),
+			receiptId: call.reportId,
+			provider: call.provider,
+			model: call.model,
+			attempt: 1,
+			route: "history_summary",
+		};
+	}
+
+	/**
+	 * A summary that finishes after its session ended. No live owner counts it, so the spend is kept in the session journal alone,
+	 * for the next session manager that opens the file. Without a journal copy it is warned as unretained.
+	 */
+	private retainAfterEnd(receipt: TypeSafeUsageReceipt): void {
+		const slot = this.boundSlot;
+		if (slot !== undefined && this.loaded && this.retainReady) {
+			const entry: HeldReceipt = {
+				payload: receipt,
+				report: semanticUsageReportOf(receipt),
+				createdAt: new Date().toISOString(),
+				retained: false,
+				journalable: true,
+			};
+			if (this.retain(entry, slot) === "retained") {
+				this.warn(
+					"A history summary usage report was kept in the session journal after its session ended; it is recorded when a session manager next opens the file.",
+				);
+				return;
+			}
+		}
+		this.warnUnrecorded(
+			{
+				kind: "unretained",
+				reason: "storage_refused",
+				cause: "the session has ended, and the journal did not take the report",
+			},
+			"history_summary",
+		);
+	}
+
+	/** The one bounded live sum of paid spend the journal had no room for; the warning says it is not durable. */
+	private keepOverflow(usage: Usage): void {
+		if (this.overflow === undefined) this.overflow = { usage: structuredClone(usage), reports: 1 };
+		else {
+			addUsage(this.overflow.usage, usage);
+			this.overflow = { usage: this.overflow.usage, reports: this.overflow.reports + 1 };
+		}
+		this.revision += 1;
+		this.warnOnce(
+			"overflow",
+			`${usageSubject("history_summary")} could not be retained (${HISTORY_OVERFLOW_CAUSE}); its spend is counted in this session's live total only and is lost when the session is reopened.`,
+		);
 	}
 
 	recordLease(identity: SemanticUsageLedgerIdentity, receipt: TypeSafeUsageReceipt): SemanticUsageOutcome {
@@ -403,7 +548,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		if (outcome.kind === "unretained" && outcome.reason === "conflict") return outcome;
 		// Buffering before the first reply is the normal state of a new session, not a write failure.
 		const isBuffered = outcome.kind === "durably_pending" && outcome.reason === "deferred_first_reply";
-		if (outcome.kind !== "physically_recorded" && !isBuffered) this.warnUnrecorded(outcome);
+		if (outcome.kind !== "physically_recorded" && !isBuffered) this.warnUnrecorded(outcome, receipt.route);
 		return outcome;
 	}
 
@@ -423,10 +568,20 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			this.projectionMatches = matches;
 			this.revision += 1;
 		}
-		return {
-			revision: this.revision,
-			reports: matches ? [...this.held.values()].map((entry) => entry.report) : [],
-		};
+		// Ordered by the persisted creation time, then the report id: a live owner and one reopened from the sidecar sum the
+		// same reports in the same order, so their totals are equal to the last bit. Held reports with no journal copy
+		// (unretained) are paid spend, so the live total counts them; no durable record can carry them into a reopened owner,
+		// so a reopened total is lower by exactly that unretained spend. A disclosed, bounded non-durability.
+		const reports = matches
+			? [...this.held.values()]
+					.sort(
+						(left, right) =>
+							compareCodeUnits(left.createdAt, right.createdAt) ||
+							compareCodeUnits(left.report.reportId, right.report.reportId),
+					)
+					.map((entry) => entry.report)
+			: [];
+		return { revision: this.revision, reports, ...(matches && this.overflow ? { overflow: this.overflow } : {}) };
 	}
 
 	snapshot(): SemanticUsageSnapshot {
@@ -454,6 +609,17 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		}
 	}
 
+	/** Stops routing this owner's warnings once they are taken: a late one is held by the owner, never shown at an unrelated flush. */
+	detachDiagnostics(): void {
+		this.warnSink = undefined;
+	}
+
+	/** Routes this owner's warnings, its dispose handoff included, to `warn`: the session is being discarded and no subscriber will attach to it. */
+	routeDiscardedWarnings(warn: (message: string) => void, disposition: DiscardDisposition): void {
+		this.discardDisposition = disposition;
+		this.bindDiagnostics(warn);
+	}
+
 	dispose(): void {
 		if (this.isDisposed) return;
 		try {
@@ -469,16 +635,28 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		const snapshot = this.snapshot();
 		const total = snapshot.retained + snapshot.unretained + snapshot.confirmedUnremoved + snapshot.unmatched.length;
 		if (total === 0) return;
-		// A session file that was never written can never record its buffered rows: the journal copy says so, plainly.
+		// Kept reports have no canonical row in a file that is never written or is discarded: they are unmatched recovery
+		// evidence at the sidecar path, named last so a long path is the only part a host's length bound can cut.
 		const sessionFile = this.bound.sessionFile;
 		const neverWritten = sessionFile !== undefined && !existsSync(sessionFile);
-		const pending =
-			neverWritten && snapshot.retained > 0
-				? `${snapshot.retained} System One usage report(s) kept in the session journal for a session file that was never written, so they cannot be recorded`
-				: `${snapshot.retained} System One usage report(s) pending in the session journal`;
-		this.warn(
-			`Session usage handoff: ${pending}, ${snapshot.unretained} not retained, ${snapshot.confirmedUnremoved} confirmed row(s) whose journal copy is not removed, ${snapshot.unmatched.length} unmatched journal(s) kept as evidence; none is charged to another session.`,
-		);
+		const cause = neverWritten
+			? "session file never written"
+			: this.discardDisposition === "removed"
+				? "session file discarded with the rejected replacement"
+				: this.discardDisposition === "kept"
+					? "session file kept as recovery evidence"
+					: undefined;
+		const evidence = snapshot.retained > 0 && cause !== undefined ? this.boundSlot?.path : undefined;
+		const counts = `${snapshot.unretained} not retained, ${snapshot.confirmedUnremoved} confirmed row(s) with a journal copy left, ${snapshot.unmatched.length} unmatched journal(s)`;
+		if (evidence === undefined) {
+			this.warn(
+				`Usage handoff: ${snapshot.retained} usage report(s) pending in the session journal, ${counts}; none is charged to another session.`,
+			);
+		} else {
+			const lead = `Usage handoff: ${snapshot.retained} usage report(s) cannot be recorded (${cause}); kept as unmatched recovery evidence at `;
+			const tail = `. ${counts}; none is charged to another session.`;
+			this.warn(pathNotice(lead, evidence, tail));
+		}
 	}
 
 	private confirmReceipt(receipt: TypeSafeUsageReceipt): SemanticUsageOutcome {
@@ -739,7 +917,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 
 	private pendingOutcome(entry: HeldReceipt, reason: SemanticUsagePendingReason, cause: string): SemanticUsageOutcome {
 		if (entry.retained) return { kind: "durably_pending", reason, cause };
-		// No journal at all (a persisted session whose id is not a safe file name): the ledger row decides, and only a pending
+		// No journal at all (a persisted session whose id fails the kernel's session id rule): the ledger row decides, and only a pending
 		// row is reported. A receipt the journal's format or bound refuses has its reason in retainFailure instead.
 		if (this.boundSlot === undefined) {
 			return { kind: "unretained", reason: "storage_refused", cause: UNSAFE_SESSION_ID_CAUSE };
@@ -1031,9 +1209,10 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 				// because of a failed write. No caller waits for a reconcile pass, so the pass tells it, with its own cause. A
 				// conflict is not a write failure and keeps its own reporting.
 				const conflict = outcome.kind === "unretained" && outcome.reason === "conflict";
-				if (!fencedBefore && this.fenceCause !== undefined && !conflict) this.warnUnrecorded(outcome);
+				if (!fencedBefore && this.fenceCause !== undefined && !conflict)
+					this.warnUnrecorded(outcome, entry.payload.route);
 			} catch (error) {
-				this.warnUnrecorded(this.unexpectedOutcome(reportId, error));
+				this.warnUnrecorded(this.unexpectedOutcome(reportId, error), this.held.get(reportId)?.payload.route);
 			}
 		}
 		if (slot !== undefined) this.removeStaleCopies(slot);
@@ -1090,17 +1269,18 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			: { kind: "unretained", reason: "storage_refused", cause };
 	}
 
-	private warnUnrecorded(outcome: SemanticUsageOutcome): void {
+	private warnUnrecorded(outcome: SemanticUsageOutcome, route?: SystemOneUsageRoute): void {
 		if (outcome.kind === "physically_recorded") return;
+		const subject = usageSubject(route);
 		if (outcome.kind === "durably_pending") {
-			const message = `A System One usage receipt is pending, not yet in this session's usage record (${outcome.cause}); ${PENDING_SUFFIX[outcome.reason]}.`;
+			const message = `${subject} is pending, not yet in this session's usage record (${outcome.cause}); ${PENDING_SUFFIX[outcome.reason]}.`;
 			// One fence is one fact for the whole session: its pending receipts warn once, not once per receipt.
 			if (outcome.reason === "ledger_uncertain") this.warnOnce("ledger", message);
 			else this.warn(message);
 			return;
 		}
 		this.warn(
-			`A System One usage receipt could not be retained (${outcome.cause}); its spend is not in this session's usage record.`,
+			`${subject} could not be retained (${outcome.cause}); its spend is not in this session's usage record.`,
 		);
 	}
 
@@ -1117,11 +1297,16 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	private noteLedgerFence(steppingId?: string): void {
 		if (this.fenceCause !== undefined) return;
 		this.fenceCause = UNCERTAIN_LEDGER_CAUSE;
-		const heldBefore = [...this.held.values()].some(
-			(entry) => entry.retained && entry.report.reportId !== steppingId,
-		);
-		if (heldBefore) {
-			this.warnUnrecorded({ kind: "durably_pending", reason: "ledger_uncertain", cause: UNCERTAIN_LEDGER_CAUSE });
+		// One notice per kind of usage held before the fence: the stepping receipt is told by its own outcome.
+		const routes = new Set<SystemOneUsageRoute | undefined>();
+		for (const entry of this.held.values()) {
+			if (entry.retained && entry.report.reportId !== steppingId) routes.add(entry.payload.route);
+		}
+		for (const route of routes) {
+			this.warnUnrecorded(
+				{ kind: "durably_pending", reason: "ledger_uncertain", cause: UNCERTAIN_LEDGER_CAUSE },
+				route,
+			);
 		}
 	}
 
@@ -1164,4 +1349,26 @@ export function sessionSemanticUsageOf(manager: SessionManager): SessionSemantic
 	const delivery = new SemanticUsageDelivery(createSessionManagerLedgerPort(manager));
 	deliveries.set(manager, delivery);
 	return delivery;
+}
+
+/** Finishes a discarded session's owner (idempotent): its handoff is produced now, on the route. Never creates an owner. */
+export function disposeDiscardedSessionUsage(manager: SessionManager): void {
+	deliveries.get(manager)?.dispose();
+}
+
+/** Releases a discarded session's owner from the route once its warnings are taken. Never creates an owner. */
+export function releaseDiscardedSessionUsage(manager: SessionManager): void {
+	deliveries.get(manager)?.detachDiagnostics();
+}
+
+/**
+ * Routes a discarded session's owner warnings (its dispose handoff, and any buffered before the route) to `warn`. Never
+ * creates an owner: a session that never had one has no warnings to route, and creating one would recover the journal again.
+ */
+export function routeDiscardedSessionUsage(
+	manager: SessionManager,
+	warn: (message: string) => void,
+	disposition: DiscardDisposition,
+): void {
+	deliveries.get(manager)?.routeDiscardedWarnings(warn, disposition);
 }
