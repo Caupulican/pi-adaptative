@@ -105,6 +105,8 @@ export type TranscriptFrontierState =
 	| "not_admitted"
 	/** The frontier's covered entries are not on the live branch (after a branch switch): never described. */
 	| "lineage_mismatch"
+	/** The mirror no longer reflects the store (another controller changed it) or the store cannot be read: withheld. */
+	| "unconfirmed"
 	/** The frontier covers only history that is still in the live context. */
 	| "live_context"
 	/** The frontier names summaries past the retention window that are not revoked yet: withheld, never shown. */
@@ -351,6 +353,17 @@ export class TranscriptHierarchyHost {
 		return rendering.text === ""
 			? { state: "no_room" }
 			: { state: "shown", text: rendering.text, bytes: rendering.bytes, revision: snapshot.selection.revision };
+	}
+
+	/**
+	 * Confirm, at the request planner's awaited boundary, that the frontier this host would describe still stands: the
+	 * coordinator's mirror against the store. Nothing is described without a running coordinator, so then there is
+	 * nothing to confirm.
+	 */
+	async confirmFrontier(deadlineAt: number): Promise<boolean> {
+		const coordinator = this.coordinator;
+		if (!coordinator?.isRunning()) return true;
+		return coordinator.confirmFrontier(deadlineAt);
 	}
 
 	/** Record the cause of a frontier composition failure (the request continues without a frontier). */

@@ -1479,7 +1479,10 @@ export class TranscriptSummaryScheduler {
 
 	private removeJob(job: TranscriptSummaryJob): void {
 		this.jobs.delete(job.id);
-		this.jobsBySession.get(job.sessionId)?.delete(job.id);
+		// A session with no job left holds no entry: the map is bounded by sessions that have jobs, not sessions ever seen.
+		const sessionJobs = this.jobsBySession.get(job.sessionId);
+		sessionJobs?.delete(job.id);
+		if (sessionJobs?.size === 0) this.jobsBySession.delete(job.sessionId);
 		this.unproven.delete(job.id);
 		this.authorityOf.delete(job.id);
 		this.claims.delete(job.id);

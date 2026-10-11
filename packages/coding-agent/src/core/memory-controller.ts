@@ -534,6 +534,8 @@ export class MemoryController {
 	private _memoryContentRevision = 0;
 	/** Active equivalent reads only. Completed snapshots are not cached across possible external file changes. */
 	private readonly _laneMemoryReads = new Map<string, Promise<LaneMemoryReadSnapshot>>();
+	/** Whether the latest request's history frontier was confirmed against the store (see `runMemoryRetrieval`). */
+	private _frontierConfirmed = false;
 	private _transitioning = false;
 	private _initializationFailed = false;
 
@@ -867,6 +869,11 @@ export class MemoryController {
 	 */
 	async runMemoryRetrieval(messages: AgentMessage[]): Promise<MemoryRetrievalReport> {
 		if (!this._legacyMemoryEnabled()) return emptyMemoryRetrievalReport(0);
+		// The frontier composed synchronously after this call stands only if its mirror still reflects the store: confirmed
+		// here, at the planner's awaited boundary, once per request, and consumed by {@link _composeHistoryFrontier}.
+		this._frontierConfirmed = this._hierarchy
+			? await this._hierarchy.confirmFrontier(Date.now() + TRANSCRIPT_FOREGROUND_READ_MS)
+			: true;
 		const generation = this._memoryGeneration;
 		let queriedLongTerm = false;
 		let queriedTranscript = false;
@@ -1299,6 +1306,7 @@ export class MemoryController {
 			if (!settings.enabled || !settings.includeInPrompt) return cleared("not_running");
 			const fenced = this._frontierFence();
 			if ("state" in fenced) return cleared(fenced.state);
+			if (!this._frontierConfirmed) return cleared("unconfirmed");
 			const budget = this._memoryBudget(settings.maxResults, headroom);
 			if (!budget.enabled || budget.maxBytes === undefined) return cleared("no_room");
 			const allowance =
@@ -1956,7 +1964,12 @@ export class MemoryController {
 		// The frontier takes at most half of what is left, in whole node records (bytes, tokens and lines, as at the root).
 		let frontierText = "";
 		const fenced = this._frontierFence();
-		if (input.legacy && this._hierarchy && "fence" in fenced && remaining.enabled) {
+		// A worker lane's frontier is confirmed against the store like the root's, at this read's awaited boundary.
+		const frontierConfirmed =
+			input.legacy && this._hierarchy && "fence" in fenced && remaining.enabled
+				? await this._hierarchy.confirmFrontier(Date.now() + TRANSCRIPT_FOREGROUND_READ_MS)
+				: false;
+		if (frontierConfirmed && this._hierarchy && "fence" in fenced && remaining.enabled) {
 			const allowance =
 				memoryShareAllowanceBytes(remaining, LANE_FRONTIER_BUDGET_SHARE) -
 				utf8ByteLength(LANE_FRONTIER_HEADING) -

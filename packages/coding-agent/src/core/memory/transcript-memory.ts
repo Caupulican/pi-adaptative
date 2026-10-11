@@ -1871,6 +1871,15 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		return hold?.wait ?? "not_yet_judged";
 	}
 
+	/**
+	 * Whether this mirror still reflects the store (its manifest revision and the permanent forget state). A frontier is
+	 * described to a model only while it does: another controller that revoked or forgot since, or a store that cannot be
+	 * read, leaves the request without one (a cleared record), never with derived text the store no longer stands behind.
+	 */
+	async confirmFrontier(deadlineAt?: number): Promise<boolean> {
+		return "catalog" in (await this.confirmMirror(deadlineAt));
+	}
+
 	/** An owner outside the coordinator (the prompt planner) records a cause on the same diagnostics slot. */
 	recordExternalCause(cause: string): void {
 		this.noteInternalCause(cause);
