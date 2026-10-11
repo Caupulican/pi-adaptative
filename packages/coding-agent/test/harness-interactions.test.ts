@@ -560,7 +560,8 @@ const ICM_DECISION_REPLY = "Recorded decision ZEPHYR-7.";
  * The decision reply of the credential row: a Google-style key that the admission's credential check refuses, written so the
  * transcript's secret filter keeps the entry. The key is joined from two literals so no source line carries a whole key.
  */
-const ICM_CREDENTIAL_REPLY = `${ICM_DECISION_REPLY} Staging maps key ${["AIza", "0123456789abcdefghijklmnopqrstuvwxy"].join("")}.`;
+const ICM_CREDENTIAL_KEY = ["AIza", "0123456789abcdefghijklmnopqrstuvwxy"].join("");
+const ICM_CREDENTIAL_REPLY = `${ICM_DECISION_REPLY} Staging maps key ${ICM_CREDENTIAL_KEY}.`;
 const ICM_DECISION_QUERY = "retry budget seven per hour";
 const ICM_NOTES_QUERY = "staging host quiet";
 const ICM_TAIL_REQUEST = "Check the zephyr settings file.";
@@ -7431,9 +7432,6 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_invalid_output: [^\n]+\)\. Exact history recall is unaffected\.$/,
 				// R-credential: a credential-shaped string in the leaf's admission payload is refused before anything is sent (a policy failure).
 				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_request_refused: [^\n]+\)\. Exact history recall is unaffected\.$/,
-				// R-owed shutdown: the refused stop's terminal warning. The disposed session has no live warning sink, so the warning is held
-				// by the foreground lifecycle and never emitted; this entry applies only if a sink exists again.
-				/^History summaries stopped: the owed-receipt queue update was not saved \(\d+ (?:entry|entries) newer than the last saved queue; older queue and job-record copies are kept\); cause: [^\n]+\. Exact history recall is unaffected\.$/,
 				// W8: the readmission whose evaluator stays unavailable ends failed with its attempts spent.
 				/^History summaries: 1 job\(s\) failed, \d+ succeeded \(first cause: admission_unavailable_attempts_exhausted: [^\n]+\)\. Exact history recall is unaffected\.$/,
 				// N-cancel: the neighbour's parent stays parked on its failed child.
@@ -14111,7 +14109,18 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				const crAgentDir = `${world.agentDir}-icm-credential`;
 				const crStore = icmStore(crAgentDir);
 				const crSeed = await seedIcmPastSession(world, crAgentDir, { decisionReply: ICM_CREDENTIAL_REPLY });
-				world.provider.enqueue(cTrack, text("cr-leaf-summary", ICM_LEAF_SUMMARY));
+				world.provider.enqueue(cTrack, {
+					name: "cr-leaf-summary",
+					// The outgoing floor masks the key shape in the summarizer request while the owner's own text keeps it.
+					check: (request) => {
+						const sent = JSON.stringify(request.context.messages);
+						if (sent.includes(ICM_CREDENTIAL_KEY))
+							throw new Error("the summarizer request carries the credential");
+						if (!sent.includes("[REDACTED_SECRET]"))
+							throw new Error("the summarizer request carries no masked credential");
+					},
+					reply: { content: [{ type: "text", text: ICM_LEAF_SUMMARY }] },
+				});
 				// No judgment is declared: an admission request that reached the transport would be unscripted, which fails the journey.
 				world.systemOne.enterPhase("cr-refused", {});
 				const crBefore = {

@@ -23,7 +23,10 @@ const CONTEXTUAL_SECRET_PATTERNS: readonly RegExp[] = [
  * Formats masked in text bound for a model but kept by the transcript filter (hasSecretLikeText), so exact history recall
  * still holds the owner's own text while the outgoing request does not carry the key.
  */
-const OUTBOUND_ONLY_TOKEN_SHAPES: readonly RegExp[] = [/\bAIza[0-9A-Za-z_-]{35}\b/, /\bglpat-[0-9A-Za-z_-]{20,}\b/];
+const OUTBOUND_ONLY_TOKEN_SHAPES: readonly RegExp[] = [
+	/\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/,
+	/\bglpat-[0-9A-Za-z_-]{20,}(?![0-9A-Za-z_-])/,
+];
 
 const SECRET_LIKE_PATTERNS: readonly RegExp[] = [...TOKEN_SHAPE_PATTERNS, ...CONTEXTUAL_SECRET_PATTERNS];
 

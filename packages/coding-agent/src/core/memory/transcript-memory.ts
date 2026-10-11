@@ -1374,7 +1374,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 					const newer = scheduler
 						.releasedReceiptsState()
 						.entries.filter((entry) => !this.owedSavedKeys.has(owedKey(entry))).length;
-					stopReason = `the owed-receipt queue update was not saved (${newer} ${newer === 1 ? "entry" : "entries"} newer than the last saved queue; older queue and job-record copies are kept); cause: ${this.lastInternalError?.cause ?? "the owed usage receipts could not be saved"}`;
+					stopReason = `the owed-receipt queue update was not saved (${newer} ${newer === 1 ? "entry" : "entries"} newer than the last saved queue; one that no older queue or job record holds is lost); cause: ${this.lastInternalError?.cause ?? "the owed usage receipts could not be saved"}`;
 				} else if (saved.status !== "saved") {
 					this.noteInternalCause(`saving jobs at stop: ${describeSaveRefusal(saved)}`);
 				}

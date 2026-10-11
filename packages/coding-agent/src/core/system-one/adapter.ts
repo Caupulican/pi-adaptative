@@ -325,7 +325,14 @@ export class SystemOneJevAdapter implements JevAdapter {
 					error instanceof TypeSafeEvidenceError ||
 					error instanceof TypeSafeInputError
 				) {
-					throw new JevAdapterFailure(classifyJevFailure(error, false), error.message, impact, error);
+					throw new JevAdapterFailure(
+						classifyJevFailure(error, false),
+						error.message,
+						impact,
+						error,
+						// The earlier attempts' paid receipts (collected above, this error's included) stay with the failure.
+						owedReceipts.length > 0 ? owedReceipts : undefined,
+					);
 				}
 				const classified = classifyFailure({ message: error instanceof Error ? error.message : String(error) });
 				if (!classified.retryable) break;
