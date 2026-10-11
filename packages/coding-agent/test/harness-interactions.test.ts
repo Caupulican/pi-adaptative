@@ -41,6 +41,7 @@ import {
 import { ICM_HISTORY_GUIDANCE } from "../src/core/memory/providers/icm.ts";
 import {
 	TRANSCRIPT_RECALL_RESULT_MARKER,
+	TRANSCRIPT_SUMMARY_MAX_BYTES,
 	TRANSCRIPT_SUMMARY_SCHEMA_VERSION,
 	TRANSCRIPT_SUMMARY_TARGET_BYTES,
 } from "../src/core/memory/transcript-memory-contracts.ts";
@@ -16626,6 +16627,12 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 				);
 				const status = icmHierarchy(restarted.session);
 				expect(await world.disposeSessionInBody(restarted.session), `${label} disposes cleanly`).toBeUndefined();
+				// Repeated generations leave nothing behind: no armed timer, and resident summary text within the per-node bound.
+				expect(world.historyClock.armedTimers, `${label} leaves no hierarchy timer armed`).toBe(0);
+				expect(
+					status.catalogBytes ?? 0,
+					`${label} resident summary text stays within the per-node bound`,
+				).toBeLessThanOrEqual((status.acceptedNodes ?? 0) * TRANSCRIPT_SUMMARY_MAX_BYTES);
 				const manifest = icmStoredManifest(fgLive, fgStore);
 				return {
 					accepted: status.acceptedNodes,
@@ -16861,6 +16868,44 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 				{ fired: fwFired > 0, goneNodes: fwNodesOf(fwGone.sessionId), neighbourNodes: fwNodesOf(fwKept.sessionId) },
 				"the due timer ran the pending removal and only the forgotten session's data went",
 			).toEqual({ fired: true, goneNodes: 0, neighbourNodes: 1 });
+			// Another writer (a second manager on the neighbour's file; this root gets no persist event for it) switches the branch
+			// to the first message and appends: the next expansion must see the file as it is now and refuse the summary.
+			const fwForeign = world.openSessionManager(fwKept.file, fwAgentDir);
+			const fwFirst = fwForeign.getEntries().find((entry) => entry.type === "message")?.id;
+			if (fwFirst === undefined) throw new Error("M3e: the neighbour's session has no message entry");
+			fwForeign.branch(fwFirst);
+			fwForeign.appendCustomEntry("m3e-foreign", { step: "foreign" });
+			world.provider.enqueue(
+				"root",
+				dynamicCalls("m3e-foreign-expand", () => [
+					{
+						id: "m3e-foreign-kept",
+						name: "memory",
+						arguments: { action: "history_expand", ref: fwHandles.get(fwKept.sessionId) },
+					},
+				]),
+				{
+					name: "m3e-foreign-expanded",
+					check: (request) => {
+						const refused = latestBatchResults(request).find((result) => result.toolName === "memory");
+						if (
+							refused === undefined ||
+							!refused.text.includes("stale_snapshot") ||
+							!refused.text.includes("no longer the live history")
+						)
+							throw new Error(
+								`the summary of a file another writer rebranched was served: ${refused?.text.slice(0, 500)}`,
+							);
+					},
+					reply: { content: [{ type: "text", text: "A foreign branch switch is seen by the next read." }] },
+				},
+			);
+			world.systemOne.enterPhase("m3e-foreign", ICM_INTAKE_JUDGMENTS_UNGUARDED);
+			await withDeadline(
+				trace,
+				"M3e foreign-branch turn",
+				fwCoord.session.prompt("Expand the neighbour summary again."),
+			);
 			expect(
 				await world.disposeSessionInBody(fwCoord.session),
 				"the M3e coordinator disposes cleanly",

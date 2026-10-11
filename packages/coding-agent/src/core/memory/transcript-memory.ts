@@ -4845,7 +4845,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const scheduler = this.scheduler;
 		if (!scheduler) return;
 		const { node, result, reused, inputDigest } = outcome;
-		if (!reused) this.judgments[result.disposition] += 1;
+		// A kept verdict applied again is a reuse event, never a new judgment; a fresh one is counted once.
+		if (reused) this.reusedAdmissions += 1;
+		else this.judgments[result.disposition] += 1;
 		this.settlingReadmissions.add(job.id);
 		try {
 			await this.applyReadmission(node, result, epoch);

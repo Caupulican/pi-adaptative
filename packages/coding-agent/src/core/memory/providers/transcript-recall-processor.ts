@@ -6,6 +6,7 @@
  * no side effects; file I/O is synchronous `node:fs`.
  */
 
+import { createHash } from "node:crypto";
 import { closeSync, fstatSync, openSync, readdirSync, readSync, type Stats, statSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -97,6 +98,8 @@ interface SessionRecord {
 	 * partial trailing line (a writer still appending, or one that stopped mid-line). Zero while not held.
 	 */
 	observedSize: number;
+	/** Fingerprint of the head and of the bytes just before `offset` when the state was captured; an append is trusted only while it still matches. */
+	prefixProbe: string;
 	/** Bytes of `state` currently charged against the retention budget. */
 	accountedBytes: number;
 	/** Why the session is not held in memory. */
@@ -222,6 +225,41 @@ function readCompleteLines(
 		}
 		if (pendingBytes > 0 && onTail(Buffer.concat(pending).toString("utf8"))) consumed = position;
 		return { offset: consumed, size: position };
+	} finally {
+		closeSync(fd);
+	}
+}
+
+const PROBE_HEAD_BYTES = 256;
+const PROBE_TAIL_BYTES = 64;
+
+/**
+ * A digest of the first bytes of the file and of the bytes just before `offset`. An append continues the same
+ * prefix, so the digest is unchanged; a file another writer rewrote (a format migration, a rewrite and rename) and
+ * then appended to keeps no such guarantee for its old byte offsets, and the digest differs. An unreadable file
+ * yields a digest that never matches a readable one.
+ */
+function probePrefix(path: string, offset: number): string {
+	if (offset <= 0) return "";
+	let fd: number;
+	try {
+		fd = openSync(path, "r");
+	} catch {
+		return "unreadable";
+	}
+	try {
+		const head = Buffer.alloc(Math.min(PROBE_HEAD_BYTES, offset));
+		const tailLength = Math.min(PROBE_TAIL_BYTES, offset);
+		const tail = Buffer.alloc(tailLength);
+		const headRead = readSync(fd, head, 0, head.length, 0);
+		const tailRead = readSync(fd, tail, 0, tailLength, offset - tailLength);
+		return createHash("sha256")
+			.update(head.subarray(0, headRead))
+			.update("|")
+			.update(tail.subarray(0, tailRead))
+			.digest("hex");
+	} catch {
+		return "unreadable";
 	} finally {
 		closeSync(fd);
 	}
@@ -555,6 +593,7 @@ export class TranscriptRecallProcessor {
 			isCurrent: header.sessionId === this.currentSessionId,
 			offset: 0,
 			observedSize: 0,
+			prefixProbe: "",
 			accountedBytes: 0,
 		};
 		if (header.timestamp !== undefined) record.timestamp = header.timestamp;
@@ -573,6 +612,7 @@ export class TranscriptRecallProcessor {
 		record.state = undefined;
 		record.offset = 0;
 		record.observedSize = 0;
+		record.prefixProbe = "";
 		record.accountedBytes = 0;
 		record.skip = skip;
 	}
@@ -584,6 +624,7 @@ export class TranscriptRecallProcessor {
 		record.state = state;
 		record.offset = capture.offset;
 		record.observedSize = capture.size;
+		record.prefixProbe = probePrefix(record.path, capture.offset);
 		record.skip = undefined;
 		this.changedSessionIds.add(record.sessionId);
 		this.index.replaceSession(record.sessionId, state.spans(), { current: record.isCurrent });
@@ -788,6 +829,13 @@ export class TranscriptRecallProcessor {
 			return;
 		}
 
+		// The held offset means the same prefix only while the head and the bytes before it are unchanged.
+		if (probePrefix(record.path, record.offset) !== record.prefixProbe) {
+			this.loadRecord(record, MAX_RETAINED_BYTES, "ingest");
+			this.evictFor(record);
+			return;
+		}
+
 		const previousBranch = state.branchEntryIds;
 		// A rebuild in `finalize` replaces the selected list, so this keeps the previous one for comparison.
 		const previousSelected = state.selectedSpans();
@@ -875,7 +923,6 @@ export class TranscriptRecallProcessor {
 		if (this.failuresRefreshed) return false;
 		this.failuresRefreshed = true;
 		const failed = [...this.skippedPaths].filter(([, source]) => FAILURE_REASON.test(source.reason));
-		if (failed.length === 0) return false;
 		// Re-read through the path as it was tried: the normalized key need not name the file on disk.
 		for (const [key, { path }] of failed) {
 			let isDirectory: boolean;
@@ -909,8 +956,37 @@ export class TranscriptRecallProcessor {
 				this.ingestFile(file.path, false);
 			}
 		}
+		const discovered = this.ingestUnknownSessionFiles();
+		if (failed.length === 0 && !discovered) return false;
 		this.postCoverage();
 		return true;
+	}
+
+	/**
+	 * Session files another writer (another root, a worker, another process) created after the start scan are
+	 * announced to no one: only this process's own persists reach the index. A read that names a session the index
+	 * does not hold lists the project's session directories once and ingests the files it does not know, exactly as
+	 * the scan would, so a summary of such a session is verified against its file instead of answering `session_gone`.
+	 * Returns whether any file was ingested.
+	 */
+	private ingestUnknownSessionFiles(): boolean {
+		let ingested = false;
+		let files: SessionFile[];
+		try {
+			files = this.discoverSessionFiles();
+		} catch (error) {
+			// The directory cannot be listed now: recorded with its real cause, and the read answers from what is indexed.
+			const [directory] = getDefaultSessionDirCandidates(this.workingDirectory, this.agentDirectory);
+			if (directory !== undefined) this.skipSource(directory, this.failureReason("read", error));
+			return false;
+		}
+		for (const file of files) {
+			const key = pathKey(file.path);
+			if (this.recordsByPath.has(key) || this.mergedPaths.has(key) || this.skippedPaths.has(key)) continue;
+			this.ingestFile(file.path, false);
+			ingested = true;
+		}
+		return ingested;
 	}
 
 	/** The catalog record of a session, after one failure refresh when it is missing and failures are recorded. */
@@ -1320,19 +1396,31 @@ export class TranscriptRecallProcessor {
 	}
 
 	/**
-	 * Ranks the index as of the last applied ingest or refresh. A query names no session, so no session is brought to
-	 * its file state here: that would cost one stat per indexed session on every query. Consumers that act on lineage
-	 * or read source text go through lineage, verify or source, which do refresh the sessions they name.
+	 * Ranks the index as of the last applied ingest or refresh, then brings each session that answered a hit to its
+	 * file state (at most one stat per returned hit, never one per indexed session). When a hit's session changed on
+	 * disk the change is posted with its lineage bumps and the query is answered again from the refreshed index, so a
+	 * delivered snippet and its span lineage describe the file as of this request.
 	 */
 	private runQuery(request: TranscriptRecallQueryRequest): void {
 		this.flushIngests();
-		const hits = this.index.query(request.query, {
-			k: request.maxResults,
-			minScore: MIN_SCORE,
-			maxSnippetChars: TRANSCRIPT_RECALL_MAX_SNIPPET_CHARS,
-			includeAlternateBranches: request.includeAlternateBranches,
-			includeCurrentSession: request.includeCurrentSession,
-		});
+		const run = () =>
+			this.index.query(request.query, {
+				k: request.maxResults,
+				minScore: MIN_SCORE,
+				maxSnippetChars: TRANSCRIPT_RECALL_MAX_SNIPPET_CHARS,
+				includeAlternateBranches: request.includeAlternateBranches,
+				includeCurrentSession: request.includeCurrentSession,
+			});
+		let hits = run();
+		let changed = false;
+		for (const sessionId of new Set(hits.map((hit) => hit.span.ref.sessionId))) {
+			const record = this.recordsById.get(sessionId);
+			if (record && this.refreshSession(record)) changed = true;
+		}
+		if (changed) {
+			this.postCoverage();
+			hits = run();
+		}
 		this.post({ type: "result", generation: this.generation, requestId: request.requestId, hits });
 	}
 
