@@ -1439,13 +1439,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			return "the memory generation changed before the removal ran";
 		this.abortSession(sessionId);
 		const droppedReady = this.takeEarlyDroppedReady() + this.endSessionJobs(sessionId, "cancelled");
-		const dormantDenied = new Set(
-			[...this.dormant.values()]
-				.filter(
-					(node) => node.sessionId === sessionId || node.contextRefs.some((ref) => ref.sessionId === sessionId),
-				)
-				.map((node) => node.id),
-		);
+		const dormantDenied = this.deniedDormantIds();
 		const result = await writer.revokeNodes(
 			(_id, entry) =>
 				entry.sessionId === sessionId || entry.contextRefs.some((handle) => handle.split(":")[1] === sessionId),
@@ -1475,6 +1469,13 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			return `dropping the retention records of ${sessionId} was refused: ${this.disabledReason ?? "the summary hierarchy stopped"}`;
 		this.deferStoreWork(dropped.reason, { forgets: [sessionId] }, epoch);
 		return `dropping the retention records of ${sessionId} could not be written: ${dropped.reason}`;
+	}
+
+	/** The parked (dormant) nodes the forget state denies: the ones naming a forgotten session and the summaries built on them. */
+	private deniedDormantIds(): Set<string> {
+		if (this.forgottenSessions.size === 0) return new Set();
+		const denied = forgottenNodeIds([...this.catalog.values(), ...this.dormant.values()], this.forgottenSessions);
+		return new Set([...denied].filter((id) => this.dormant.has(id)));
 	}
 
 	private takeEarlyDroppedReady(): number {
@@ -1549,9 +1550,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			this.frontiers.has(sessionId) ||
 			(this.catalog.sessionNodes(sessionId)?.size ?? 0) > 0 ||
 			[...this.catalog.values()].some((node) => node.contextRefs.some((ref) => ref.sessionId === sessionId)) ||
-			[...this.dormant.values()].some(
-				(node) => node.sessionId === sessionId || node.contextRefs.some((ref) => ref.sessionId === sessionId),
-			) ||
+			this.deniedDormantIds().size > 0 ||
 			this.catalog.anchoredSessionIds().includes(sessionId) ||
 			(this.scheduler?.holdsSession(sessionId, { liveOnly: true }) ?? false)
 		);
@@ -1986,6 +1985,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** Everything one run keeps in memory to retry or reuse later (store work, receipt retry timing, paid-claim marks): a start and a halt both drop it. Kept paid verdicts live on the jobs, durably. */
 	private resetRetryState(): void {
+		this.earlyDroppedReady = 0;
 		this.storeRetry = emptyStoreRetry();
 		this.storeRetryAt = undefined;
 		this.storeRetryFailures = 0;
@@ -2601,6 +2601,26 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (!scheduler) return;
 		const ids = new Set(scheduler.snapshot().flatMap((job) => (job.sessionId === sessionId ? [job.id] : [])));
 		for (const entry of this.inFlight.values()) if (ids.has(entry.jobId)) entry.controller.abort();
+		this.abortDeniedInputs();
+	}
+
+	/**
+	 * Abort running work of OTHER sessions that is built on denied nodes (a parent over a child that consulted a forgotten
+	 * session, a re-admission of such a node): its inputs are denied now, so it must not reach a model again.
+	 */
+	private abortDeniedInputs(): void {
+		const scheduler = this.scheduler;
+		if (!scheduler) return;
+		for (const entry of this.inFlight.values()) {
+			const job = scheduler.get(entry.jobId);
+			if (!job) continue;
+			const inputs = job.kind === "readmission" ? [job.nodeId] : job.kind === "parent" ? (job.children ?? []) : [];
+			const denied = inputs.some((id) => {
+				const node = id === undefined ? undefined : this.catalog.get(id);
+				return node !== undefined && this.nodeDenied(node);
+			});
+			if (denied) entry.controller.abort();
+		}
 	}
 
 	/**
@@ -3213,10 +3233,14 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				reason: `the permanent forget state could not be confirmed (${read.status}: ${read.reason})`,
 			};
 		}
-		if (read.revision !== this.forgetRevision)
+		if (read.revision !== this.forgetRevision) {
+			// What the store says is denied now holds for this claim at once (every guard below reads this set); the
+			// removal of the derived data follows on the mailbox.
+			for (const forgotten of read.sessions) this.forgottenSessions.add(forgotten);
 			void this.enqueue(async () => {
 				await this.refreshForgetState(epoch);
 			});
+		}
 		if (!read.sessions.has(sessionId)) return undefined;
 		return { kind: "stale", reason: `session ${sessionId} was forgotten` };
 	}
@@ -3316,6 +3340,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const context = await this.readContext(job, signal, lineageStamp(live));
 		if ("outcome" in context) return context.outcome;
 		const contextRefs = context.items.map((item) => item.span.ref);
+		// No model is sent context from a forgotten session (a forked lineage can carry its parent's spans).
+		if (contextRefs.some((ref) => this.forgottenSessions.has(ref.sessionId))) {
+			return { kind: "stale", reason: "a context span belongs to a forgotten session" };
+		}
 		// Covered spans were verified live above and the context was read from the same lineage.
 		const reusable = this.reusableDormant(
 			leafIdentity({ sessionId: job.sessionId, sourceRefs: refs, contextRefs }),
