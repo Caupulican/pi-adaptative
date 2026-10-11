@@ -1349,15 +1349,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (scheduler && writer) {
 			// The stop always reaches its terminal signal; a save that failed keeps its real cause for the status.
 			try {
-				// The same order as every save: the owed receipts first. Jobs that no longer carry a receipt are never written
-				// over the last durable copy of it; when the queue cannot be made durable the older job record stays.
-				const snapshot = scheduler.snapshot();
-				if (!(await this.saveOwedReceipts(scheduler, writer, this.epoch))) {
+				const saved = await this.saveJobsInOrder(scheduler, writer, this.epoch, scheduler.snapshot());
+				if (saved === undefined) {
 					this.noteInternalCause("the jobs were not saved at stop: the owed usage receipts are not durable");
-				} else {
-					const saved = await writer.saveJobs(snapshot, { rekeys: scheduler.rekeysToSave() });
-					if (saved.status !== "saved")
-						this.noteInternalCause(`saving jobs at stop: ${describeSaveRefusal(saved)}`);
+				} else if (saved.status !== "saved") {
+					this.noteInternalCause(`saving jobs at stop: ${describeSaveRefusal(saved)}`);
 				}
 			} catch (error) {
 				this.noteInternalCause(
@@ -4544,14 +4540,14 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// Receipts an ended job handed out of its record are owned by the queue read in the same turn as the snapshot. They are
 			// made durable BEFORE the jobs that no longer carry them: a stop between the two writes finds the receipt in both
 			// places (recording is idempotent by receipt id), never in neither. A refused or failed receipt save acknowledges nothing.
-			if (!(await this.saveOwedReceipts(scheduler, writer, epoch))) return;
-			let saved: TranscriptSummaryJobsSaveResult;
+			let saved: TranscriptSummaryJobsSaveResult | undefined;
 			try {
-				saved = await writer.saveJobs(snapshot, { rekeys: scheduler.rekeysToSave() });
+				saved = await this.saveJobsInOrder(scheduler, writer, epoch, snapshot);
 			} catch (error) {
 				this.jobSaveFailed(`saving jobs failed: ${error instanceof Error ? error.message : String(error)}`, epoch);
 				return;
 			}
+			if (saved === undefined) return;
 			if (saved.status === "saved") {
 				scheduler.rekeysSaved(saved.rekeyed);
 				const freed = saved.released.length > 0 || saved.ledger.recorded < this.proofLedger.recorded;
@@ -4568,6 +4564,21 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			} else if (saved.status === "unavailable") this.jobSaveFailed(saved.reason, epoch);
 			else this.jobSaveFailed(`saving jobs was refused: ${describeSaveRefusal(saved)}`, epoch);
 		});
+	}
+
+	/**
+	 * The one persistence order for the job list, used by every save (ordinary and at stop): the owed-receipt queue first,
+	 * then the jobs that no longer carry those receipts. Returns undefined when the queue is not durable, in which case the
+	 * jobs are not written and the older job record stays the receipt's durable copy.
+	 */
+	private async saveJobsInOrder(
+		scheduler: TranscriptSummaryScheduler,
+		writer: TranscriptSummaryWriter,
+		epoch: number,
+		snapshot: readonly TranscriptSummaryJob[],
+	): Promise<TranscriptSummaryJobsSaveResult | undefined> {
+		if (!(await this.saveOwedReceipts(scheduler, writer, epoch))) return undefined;
+		return writer.saveJobs(snapshot, { rekeys: scheduler.rekeysToSave() });
 	}
 
 	/**
@@ -4589,6 +4600,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				this.owedReceiptsSavedVersion = state.version;
 				return true;
 			}
+			// The real cause is kept whether or not this run is still live (a stop reports through it).
+			this.noteInternalCause(
+				`saving the owed usage receipts: ${saved.status === "unavailable" ? saved.reason : saved.status}`,
+			);
 			if (!this.live(epoch)) return false;
 			if (saved.status === "fenced" || saved.status === "manifest_corrupt") {
 				this.fatal(`saving the owed usage receipts was refused: ${saved.status}`);

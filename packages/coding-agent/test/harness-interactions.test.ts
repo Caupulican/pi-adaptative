@@ -12531,7 +12531,11 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					});
 					world.systemOne.enterPhase("ro-owner-turn", {});
 					await withDeadline(trace, "R-owed owner turn", roFirst.session.prompt("Say hello."));
-					world.systemOne.enterPhase("ro-answering", cAdmission);
+					// The leaf alone is judged here: the parent's honesty question is never asked.
+					world.systemOne.enterPhase("ro-answering", {
+						summary_supported: cAdmission.summary_supported,
+						owner_constraints_preserved: cAdmission.owner_constraints_preserved,
+					});
 					const roPaidBefore = {
 						summaries: icmTrackRequests(world, cTrack),
 						admissions: icmAdmissionRequests(world),
@@ -12556,6 +12560,16 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 								1,
 						),
 					);
+					// The held verdict is durable in the job record first, so no earlier save races the refused one below.
+					await withDeadline(
+						trace,
+						"R-owed held verdict durable",
+						world.io.waitForMutation(
+							() =>
+								icmStoredJobs(cLive, roStore).filter((job) => JSON.stringify(job).includes('"unrecorded"'))
+									.length === 1,
+						),
+					);
 					// "crash" lets the owed file land and refuses the jobs save that follows it; the others refuse the owed write.
 					const roRefusedFile = roVariant === "crash" ? roStore.jobs : roStore.owed;
 					const roRefused = world.io.waitForOperation(
@@ -12573,6 +12587,13 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						roFirst.session.forgetHistorySession(roSeed.sessionId),
 					);
 					await withDeadline(trace, "R-owed refused write", roRefused);
+					const roReports = () =>
+						world.io
+							.fileEntries()
+							.get(roFirst.sessionManager.getSessionFile() ?? "")
+							?.split("\n")
+							.filter((line) => line.includes('"customType":"semantic_usage"'))
+							.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId) ?? [];
 					const roOwedEntries = () => {
 						const text = world.io.peekFile(roStore.owed);
 						return text === undefined ? undefined : (JSON.parse(text) as { entries: unknown[] }).entries.length;
@@ -12591,22 +12612,14 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						"the refused owed write did not replace the job record that still carries the unrecorded receipt",
 					).toBe(1);
 					if (roVariant === "retry") {
-						world.io.failNext({
-							name: "ro-receipt-append-retry",
-							kind: "append",
-							code: "EIO",
-							matches: (operation, data) =>
-								operation.path.endsWith(".jsonl") &&
-								(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
-						});
+						// The bounded retry (the domain clock) saves the owed queue. The receipt itself cannot be recorded in this
+						// session again (its first failed append leaves the manager's persistence uncertain), so it stays owed and
+						// durable until the session is reopened.
 						world.historyClock.advance(120_000);
 						await withDeadline(
 							trace,
 							"R-owed retry made the owed receipt durable",
-							world.io.waitForMutation(() => {
-								const text = world.io.peekFile(roStore.owed);
-								return text !== undefined && (JSON.parse(text) as { entries: unknown[] }).entries.length === 1;
-							}),
+							world.io.waitForMutation(() => roOwedEntries() === 1),
 						);
 					}
 					const roOwnerFile = roFirst.sessionManager.getSessionFile();
@@ -12617,6 +12630,18 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							? undefined
 							: [roStore.owed, roStore.jobs].map((file) => [file, world.io.peekFile(file)] as const);
 					await world.disposeSessionInBody(roFirst.session);
+					if (roVariant !== "retry") {
+						// The actual shutdown boundary: the stop wrote the owed queue before the jobs that no longer carry the receipt.
+						expect(
+							{
+								owedEntries: roOwedEntries(),
+								jobsCarry: icmStoredJobs(cLive, roStore).filter((job) =>
+									JSON.stringify(job).includes('"unrecorded"'),
+								).length,
+							},
+							`${roVariant}: the stop made the owed queue durable before it replaced the job record`,
+						).toEqual({ owedEntries: 1, jobsCarry: 0 });
+					}
 					for (const [file, text] of roInterrupted ?? []) {
 						if (text !== undefined) world.io.seed(file, text);
 						else if (world.io.peekFile(file) !== undefined) world.io.unlinkSync(file);
@@ -12626,13 +12651,6 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						sessionManager: world.openSessionManager(roOwnerFile, roAgentDir),
 						settings: icmHierarchySettings(cTrack),
 					});
-					const roReports = () =>
-						world.io
-							.fileEntries()
-							.get(roOwnerFile)
-							?.split("\n")
-							.filter((line) => line.includes('"customType":"semantic_usage"'))
-							.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId) ?? [];
 					await withDeadline(
 						trace,
 						"R-owed receipt recorded after the restart",

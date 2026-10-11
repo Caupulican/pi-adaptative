@@ -1554,6 +1554,8 @@ export class TranscriptSummaryScheduler {
 		if (verdict === undefined) return;
 		for (const receipt of verdict.receipts) {
 			if (receipt.status !== "unrecorded") continue;
+			// One entry per owed receipt: a restart can find the same receipt in the persisted queue and in an older job record.
+			if (this.queuesReceipt(verdict.ownerSessionId, receipt.reportId)) continue;
 			this.releasedReceipts.push({ ownerSessionId: verdict.ownerSessionId, receipt: { ...receipt } });
 			this.releasedReceiptsVersion += 1;
 		}
@@ -1561,6 +1563,12 @@ export class TranscriptSummaryScheduler {
 			this.releasedReceipts.shift();
 			this.lostReceipts += 1;
 		}
+	}
+
+	private queuesReceipt(ownerSessionId: string, reportId: string): boolean {
+		return this.releasedReceipts.some(
+			(entry) => entry.ownerSessionId === ownerSessionId && entry.receipt.reportId === reportId,
+		);
 	}
 
 	/** Whether receipts owed to `ownerSessionId` by ended jobs are queued (cheap: checked on every pump). */
@@ -1588,7 +1596,16 @@ export class TranscriptSummaryScheduler {
 	/** Put back receipts the owner could not record yet (the same bound applies). */
 	returnReleasedReceipts(owed: { ownerSessionId: string; receipt: SystemOneReceipt }[]): void {
 		this.releasedReceiptsVersion += 1;
-		this.releasedReceipts.unshift(...owed);
+		this.releasedReceipts.unshift(
+			...owed.filter(
+				(entry, index) =>
+					!this.queuesReceipt(entry.ownerSessionId, entry.receipt.reportId) &&
+					owed.findIndex(
+						(other) =>
+							other.ownerSessionId === entry.ownerSessionId && other.receipt.reportId === entry.receipt.reportId,
+					) === index,
+			),
+		);
 		while (this.releasedReceipts.length > TRANSCRIPT_SUMMARY_MAX_RELEASED_RECEIPTS) {
 			this.releasedReceipts.shift();
 			this.lostReceipts += 1;
