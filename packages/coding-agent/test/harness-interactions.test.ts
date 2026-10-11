@@ -894,6 +894,7 @@ function icmStore(agentDir: string) {
 		jobs: resolve(root, "jobs.json"),
 		ledger: resolve(root, "spent-attempts.json"),
 		forgotten: resolve(root, "forgotten-sessions.json"),
+		owed: resolve(root, "owed-receipts.json"),
 		lock: resolve(root, "writer.lock.lock"),
 	};
 }
@@ -12503,6 +12504,146 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 				).toBeUndefined();
 				trace.mark("root", "icm.receipt-hold");
 
+				for (const roVariant of ["retry", "interrupt"] as const) {
+					// R-owed (receipts a paid answer still owes after its job ended): the leaf is held for its usage receipt as in
+					// R-receipt, then its session is forgotten, which ends the job and hands the owed receipt to the owed queue. The
+					// first write of the owed-receipts file is refused: nothing is acknowledged and no file appears. The bounded retry
+					// (the domain clock) makes it durable. The session is then reopened from the same file: the owed receipt is
+					// recorded exactly once, the file is emptied, and nothing is bought again. Two variants share the refusal: "retry" makes the
+					// write durable on the bounded retry (whose own receipt attempt also fails, so the receipt returns to the queue)
+					// before the restart; "interrupt" restarts while the write is still refused, so the receipt is conserved only by the
+					// job record the refused save did not replace.
+					const roAgentDir = `${world.agentDir}-icm-owed-${roVariant}`;
+					const roSeed = await seedIcmPastSession(world, roAgentDir);
+					const roStore = icmStore(roAgentDir);
+					world.provider.enqueue(cTrack, text(`ro-leaf-summary-${roVariant}`, ICM_LEAF_SUMMARY));
+					const roFirst = await world.createRootSession("root", {
+						agentDir: roAgentDir,
+						sessionManager: world.createSessionManager(roAgentDir),
+						settings: { memorySystem: undefined },
+					});
+					world.provider.enqueue("root", {
+						name: "ro-owner-turn",
+						reply: { content: [{ type: "text", text: "Noted." }] },
+					});
+					world.systemOne.enterPhase("ro-owner-turn", {});
+					await withDeadline(trace, "R-owed owner turn", roFirst.session.prompt("Say hello."));
+					world.systemOne.enterPhase("ro-answering", cAdmission);
+					const roPaidBefore = {
+						summaries: icmTrackRequests(world, cTrack),
+						admissions: icmAdmissionRequests(world),
+					};
+					world.io.failNext({
+						name: "ro-receipt-append",
+						kind: "append",
+						code: "EIO",
+						matches: (operation, data) =>
+							operation.path.endsWith(".jsonl") &&
+							(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
+					});
+					roFirst.settingsManager.applyOverrides({
+						contextPolicy: { memory: { history: icmHierarchySettings(cTrack).contextPolicy?.memory?.history } },
+					});
+					await withDeadline(
+						trace,
+						"R-owed leaf held for its usage receipt",
+						world.io.waitForMutation(
+							() =>
+								roFirst.session.getTranscriptHistoryStatus().hierarchy?.admission?.heldByKind?.usage_receipt ===
+								1,
+						),
+					);
+					const roRefused = world.io.waitForOperation(
+						(operation) => operation.code === "EIO" && operation.destination === roStore.owed,
+					);
+					world.io.failNext({
+						name: "ro-owed-write",
+						kind: "rename",
+						code: "EIO",
+						matches: (operation) => operation.destination === roStore.owed,
+					});
+					const roForgot = await withDeadline(
+						trace,
+						"R-owed forget",
+						roFirst.session.forgetHistorySession(roSeed.sessionId),
+					);
+					await withDeadline(trace, "R-owed first owed write refused", roRefused);
+					expect(
+						{ forgot: roForgot.ok, owedFile: world.io.peekFile(roStore.owed) },
+						"a refused owed-receipts write leaves no file and acknowledges nothing",
+					).toEqual({ forgot: true, owedFile: undefined });
+					const roJobsCarry = icmStoredJobs(cLive, roStore).filter((job) =>
+						JSON.stringify(job).includes('"unrecorded"'),
+					);
+					expect(
+						roJobsCarry.length,
+						"the refused owed write did not replace the job record that still carries the unrecorded receipt",
+					).toBe(1);
+					if (roVariant === "retry") {
+						world.io.failNext({
+							name: "ro-receipt-append-retry",
+							kind: "append",
+							code: "EIO",
+							matches: (operation, data) =>
+								operation.path.endsWith(".jsonl") &&
+								(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
+						});
+						world.historyClock.advance(120_000);
+						await withDeadline(
+							trace,
+							"R-owed retry made the owed receipt durable",
+							world.io.waitForMutation(() => {
+								const text = world.io.peekFile(roStore.owed);
+								return text !== undefined && (JSON.parse(text) as { entries: unknown[] }).entries.length === 1;
+							}),
+						);
+					}
+					const roOwnerFile = roFirst.sessionManager.getSessionFile();
+					if (roOwnerFile === undefined) throw new Error("R-owed: the owner session has no file");
+					await world.disposeSessionInBody(roFirst.session);
+					const roSecond = await world.createRootSession("root", {
+						agentDir: roAgentDir,
+						sessionManager: world.openSessionManager(roOwnerFile, roAgentDir),
+						settings: icmHierarchySettings(cTrack),
+					});
+					const roReports = () =>
+						world.io
+							.fileEntries()
+							.get(roOwnerFile)
+							?.split("\n")
+							.filter((line) => line.includes('"customType":"semantic_usage"'))
+							.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId) ?? [];
+					await withDeadline(
+						trace,
+						"R-owed receipt recorded after the restart",
+						world.io.waitForMutation(() => {
+							const text = world.io.peekFile(roStore.owed);
+							return (
+								roReports().length === 1 &&
+								text !== undefined &&
+								(JSON.parse(text) as { entries: unknown[] }).entries.length === 0
+							);
+						}),
+						60_000,
+					);
+					expect(
+						{
+							reports: { count: roReports().length, unique: new Set(roReports()).size },
+							pending: icmHierarchy(roSecond.session).admission?.work.receiptsPending,
+							requests: {
+								summaries: icmTrackRequests(world, cTrack) - roPaidBefore.summaries,
+								admissions: icmAdmissionRequests(world) - roPaidBefore.admissions,
+							},
+						},
+						"the owed receipt is recorded once after the restart and nothing is bought again",
+					).toEqual({ reports: { count: 1, unique: 1 }, pending: 0, requests: { summaries: 1, admissions: 1 } });
+					expect(
+						await world.disposeSessionInBody(roSecond.session),
+						"the owed-receipt owner disposes cleanly",
+					).toBeUndefined();
+					trace.mark("root", `icm.owed-receipt-${roVariant}`);
+				}
+
 				// R-readmit: model summaries that carry no admission under the current contract (as after a contract change) are
 				// not approved. Their admission record is removed from the two stored node files (valid external preparation: the
 				// identity, text and sources are untouched). A new session judges each ONCE as a scheduler job under a claim: the
@@ -16629,10 +16770,12 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 				expect(await world.disposeSessionInBody(restarted.session), `${label} disposes cleanly`).toBeUndefined();
 				// Repeated generations leave nothing behind: no armed timer, and resident summary text within the per-node bound.
 				expect(world.historyClock.armedTimers, `${label} leaves no hierarchy timer armed`).toBe(0);
+				if (status.catalogBytes === undefined || status.acceptedNodes === undefined)
+					throw new Error(`${label}: the status carries no catalogBytes or acceptedNodes evidence`);
 				expect(
-					status.catalogBytes ?? 0,
-					`${label} resident summary text stays within the per-node bound`,
-				).toBeLessThanOrEqual((status.acceptedNodes ?? 0) * TRANSCRIPT_SUMMARY_MAX_BYTES);
+					status.catalogBytes,
+					`${label} resident summary node text stays within the per-node text bound times the node count`,
+				).toBeLessThanOrEqual(status.acceptedNodes * TRANSCRIPT_SUMMARY_MAX_BYTES);
 				const manifest = icmStoredManifest(fgLive, fgStore);
 				return {
 					accepted: status.acceptedNodes,

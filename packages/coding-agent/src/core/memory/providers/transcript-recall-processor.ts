@@ -139,6 +139,10 @@ type FailurePhase = "read" | "ingest" | "source" | "query" | "sessions" | "linea
 interface CaptureExtent {
 	offset: number;
 	size: number;
+	/** {@link probePrefixAt} of the same open file the lines were read from, so it describes exactly the captured bytes. */
+	probe: string;
+	/** Set when the bytes before the start offset no longer match the expected probe: nothing was read and the caller reloads. */
+	diverged?: true;
 }
 
 interface ConsumeOutcome extends CaptureExtent {
@@ -190,10 +194,16 @@ function readCompleteLines(
 	startOffset: number,
 	onLine: (line: string) => boolean,
 	onTail: (line: string) => boolean,
+	expectedProbe?: string,
 ): CaptureExtent {
 	const fd = openSync(path, "r");
 	try {
 		const end = fstatSync(fd).size;
+		// An append continues the prefix the held state was captured from. Checked on this very descriptor, so the bytes read
+		// next belong to the file instance the check describes; a replaced or migrated file reads nothing and reloads.
+		if (expectedProbe !== undefined && startOffset > 0 && probePrefixAt(fd, startOffset) !== expectedProbe) {
+			return { offset: startOffset, size: end, probe: "", diverged: true };
+		}
 		const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
 		let position = startOffset;
 		let consumed = startOffset;
@@ -220,11 +230,12 @@ function readCompleteLines(
 				pendingBytes = 0;
 				segmentStart = newline + 1;
 				consumed = chunkStart + segmentStart;
-				if (!onLine(lineBytes.toString("utf8"))) return { offset: consumed, size: position };
+				if (!onLine(lineBytes.toString("utf8")))
+					return { offset: consumed, size: position, probe: probePrefixAt(fd, consumed) };
 			}
 		}
 		if (pendingBytes > 0 && onTail(Buffer.concat(pending).toString("utf8"))) consumed = position;
-		return { offset: consumed, size: position };
+		return { offset: consumed, size: position, probe: probePrefixAt(fd, consumed) };
 	} finally {
 		closeSync(fd);
 	}
@@ -237,16 +248,11 @@ const PROBE_TAIL_BYTES = 64;
  * A digest of the first bytes of the file and of the bytes just before `offset`. An append continues the same
  * prefix, so the digest is unchanged; a file another writer rewrote (a format migration, a rewrite and rename) and
  * then appended to keeps no such guarantee for its old byte offsets, and the digest differs. An unreadable file
- * yields a digest that never matches a readable one.
+ * yields a digest that never matches a readable one. Read from an open descriptor, so it describes exactly the file
+ * instance the capture reads.
  */
-function probePrefix(path: string, offset: number): string {
+function probePrefixAt(fd: number, offset: number): string {
 	if (offset <= 0) return "";
-	let fd: number;
-	try {
-		fd = openSync(path, "r");
-	} catch {
-		return "unreadable";
-	}
 	try {
 		const head = Buffer.alloc(Math.min(PROBE_HEAD_BYTES, offset));
 		const tailLength = Math.min(PROBE_TAIL_BYTES, offset);
@@ -260,8 +266,6 @@ function probePrefix(path: string, offset: number): string {
 			.digest("hex");
 	} catch {
 		return "unreadable";
-	} finally {
-		closeSync(fd);
 	}
 }
 
@@ -274,6 +278,7 @@ function consumeSession(
 	state: SessionCaptureState,
 	startOffset: number,
 	limitBytes: number,
+	expectedProbe?: string,
 ): ConsumeOutcome {
 	let exceeded = false;
 	const accept = (line: string, complete: boolean): boolean => {
@@ -308,6 +313,7 @@ function consumeSession(
 		startOffset,
 		(line) => accept(line, true),
 		(line) => accept(line, false),
+		expectedProbe,
 	);
 	if (!exceeded && state.retainedBytes > limitBytes) exceeded = true;
 	return { ...extent, exceeded };
@@ -624,7 +630,7 @@ export class TranscriptRecallProcessor {
 		record.state = state;
 		record.offset = capture.offset;
 		record.observedSize = capture.size;
-		record.prefixProbe = probePrefix(record.path, capture.offset);
+		record.prefixProbe = capture.probe;
 		record.skip = undefined;
 		this.changedSessionIds.add(record.sessionId);
 		this.index.replaceSession(record.sessionId, state.spans(), { current: record.isCurrent });
@@ -641,14 +647,16 @@ export class TranscriptRecallProcessor {
 		startOffset: number,
 		limitBytes: number,
 		phase: FailurePhase,
+		expectedProbe?: string,
 	): CaptureExtent | undefined {
 		let outcome: ConsumeOutcome;
 		try {
-			outcome = consumeSession(record.path, state, startOffset, limitBytes);
+			outcome = consumeSession(record.path, state, startOffset, limitBytes, expectedProbe);
 		} catch (error) {
 			this.unloadRecord(record, this.failureReason(phase, error));
 			return undefined;
 		}
+		if (outcome.diverged) return { offset: outcome.offset, size: outcome.size, probe: "", diverged: true };
 		if (outcome.exceeded) {
 			this.unloadRecord(record, SKIP_BYTE_LIMIT);
 			return undefined;
@@ -659,7 +667,7 @@ export class TranscriptRecallProcessor {
 			this.unloadRecord(record, "invalid_entry_graph");
 			return undefined;
 		}
-		return { offset: outcome.offset, size: outcome.size };
+		return { offset: outcome.offset, size: outcome.size, probe: outcome.probe };
 	}
 
 	/** Read one whole session file into memory under `limitBytes`, or record why it was not held. */
@@ -829,18 +837,17 @@ export class TranscriptRecallProcessor {
 			return;
 		}
 
-		// The held offset means the same prefix only while the head and the bytes before it are unchanged.
-		if (probePrefix(record.path, record.offset) !== record.prefixProbe) {
+		const previousBranch = state.branchEntryIds;
+		// A rebuild in `finalize` replaces the selected list, so this keeps the previous one for comparison.
+		const previousSelected = state.selectedSpans();
+		const capture = this.captureInto(record, state, record.offset, MAX_RETAINED_BYTES, "ingest", record.prefixProbe);
+		if (capture === undefined) return;
+		if (capture.diverged) {
+			// The held offset no longer means the same prefix (a rewrite or migration followed by an append): reload whole.
 			this.loadRecord(record, MAX_RETAINED_BYTES, "ingest");
 			this.evictFor(record);
 			return;
 		}
-
-		const previousBranch = state.branchEntryIds;
-		// A rebuild in `finalize` replaces the selected list, so this keeps the previous one for comparison.
-		const previousSelected = state.selectedSpans();
-		const capture = this.captureInto(record, state, record.offset, MAX_RETAINED_BYTES, "ingest");
-		if (capture === undefined) return;
 		// A selected lineage that is no longer a prefix extension of the previous one is a branch switch.
 		if (!state.lineageExtends(previousBranch)) {
 			this.invalidate(record.sessionId, state.firstChangedPosition(previousSelected));
@@ -984,7 +991,7 @@ export class TranscriptRecallProcessor {
 			const key = pathKey(file.path);
 			if (this.recordsByPath.has(key) || this.mergedPaths.has(key) || this.skippedPaths.has(key)) continue;
 			this.ingestFile(file.path, false);
-			ingested = true;
+			if (this.recordsByPath.has(key)) ingested = true;
 		}
 		return ingested;
 	}
@@ -1411,13 +1418,16 @@ export class TranscriptRecallProcessor {
 				includeAlternateBranches: request.includeAlternateBranches,
 				includeCurrentSession: request.includeCurrentSession,
 			});
+		// Each pass brings the sessions of its hits to their file state (once per session per request); a change can
+		// remove a hit and surface another session's, so the query is answered again until a pass changes nothing.
 		let hits = run();
-		let changed = false;
-		for (const sessionId of new Set(hits.map((hit) => hit.span.ref.sessionId))) {
-			const record = this.recordsById.get(sessionId);
-			if (record && this.refreshSession(record)) changed = true;
-		}
-		if (changed) {
+		for (;;) {
+			let changed = false;
+			for (const sessionId of new Set(hits.map((hit) => hit.span.ref.sessionId))) {
+				const record = this.recordsById.get(sessionId);
+				if (record && this.refreshSession(record)) changed = true;
+			}
+			if (!changed) break;
 			this.postCoverage();
 			hits = run();
 		}

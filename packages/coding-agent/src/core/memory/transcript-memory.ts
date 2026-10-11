@@ -1093,7 +1093,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		this.loadMirror(state);
 		const now = this.ports.now();
 		// The accepted nodes are the completion evidence: a job that published before a stop settles `ready` from its node.
-		scheduler.recover(state.jobs, now, new Map([...this.catalog.values()].map((node) => [node.id, node])));
 		// Receipts owed by jobs that ended before the stop were persisted: a paid response's spend survives the restart.
 		const owed: { ownerSessionId: string; receipt: SystemOneReceipt }[] = [];
 		for (const entry of state.owedReceipts) {
@@ -1104,6 +1103,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		scheduler.returnReleasedReceipts(owed);
 		this.owedReceiptsSavedVersion = scheduler.releasedReceiptsState().version;
+		scheduler.recover(state.jobs, now, new Map([...this.catalog.values()].map((node) => [node.id, node])));
 		// Jobs and nodes of an older capture version name inputs that are no longer current identities. Their jobs end
 		// stale before anything is claimed (a started attempt is carried under its version 1 key, where the current job
 		// finds it again), and their nodes never enter the ready index; discovery revokes and re-derives them first.
@@ -4533,6 +4533,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			if (!scheduler || !writer) return;
 			// The acknowledgement covers exactly this snapshot: a claim made after it waits for the next save.
 			const snapshot = scheduler.snapshot();
+			// Receipts an ended job handed out of its record are owned by the queue read in the same turn as the snapshot. They are
+			// made durable BEFORE the jobs that no longer carry them: a stop between the two writes finds the receipt in both
+			// places (recording is idempotent by receipt id), never in neither. A refused or failed receipt save acknowledges nothing.
+			if (!(await this.saveOwedReceipts(scheduler, writer, epoch))) return;
 			let saved: TranscriptSummaryJobsSaveResult;
 			try {
 				saved = await writer.saveJobs(snapshot, { rekeys: scheduler.rekeysToSave() });
@@ -4542,7 +4546,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			}
 			if (saved.status === "saved") {
 				scheduler.rekeysSaved(saved.rekeyed);
-				await this.saveOwedReceipts(scheduler, writer, epoch);
 				const freed = saved.released.length > 0 || saved.ledger.recorded < this.proofLedger.recorded;
 				scheduler.noteProof(saved.proof, saved.released);
 				scheduler.setProofHold(saved.ledger.hold);
@@ -4559,31 +4562,40 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		});
 	}
 
-	/** Persist the queue of receipts owed by ended jobs when it changed since the last durable copy. */
+	/**
+	 * Persist the queue of receipts owed by ended jobs when it changed since the last durable copy. Returns whether the
+	 * queue is durable as of now; a refusal or a thrown write records its real cause, schedules the bounded retry and
+	 * returns false so the caller acknowledges nothing and releases no hold.
+	 */
 	private async saveOwedReceipts(
 		scheduler: TranscriptSummaryScheduler,
 		writer: TranscriptSummaryWriter,
 		epoch: number,
-	): Promise<void> {
+	): Promise<boolean> {
 		const state = scheduler.releasedReceiptsState();
-		if (state.version === this.owedReceiptsSavedVersion) return;
+		if (state.version === this.owedReceiptsSavedVersion) return true;
 		try {
 			const saved = await writer.saveOwedReceipts(state.entries);
-			if (!this.live(epoch)) return;
-			if (saved.status === "saved") this.owedReceiptsSavedVersion = state.version;
-			else if (saved.status === "fenced" || saved.status === "manifest_corrupt") {
-				this.fatal(`saving the owed usage receipts was refused: ${saved.status}`);
-			} else {
-				// The next save attempt (bounded backoff) retries the queue, never a tight loop.
-				this.jobSaveFailed(
-					`saving the owed usage receipts: ${saved.status === "unavailable" ? saved.reason : `${saved.status} (bound ${saved.bound})`}`,
-					epoch,
-				);
+			if (!this.live(epoch)) return false;
+			if (saved.status === "saved") {
+				this.owedReceiptsSavedVersion = state.version;
+				return true;
 			}
-		} catch (error) {
-			this.noteInternalCause(
-				`saving the owed usage receipts failed: ${error instanceof Error ? error.message : String(error)}`,
+			if (saved.status === "fenced" || saved.status === "manifest_corrupt") {
+				this.fatal(`saving the owed usage receipts was refused: ${saved.status}`);
+				return false;
+			}
+			this.jobSaveFailed(
+				`saving the owed usage receipts: ${saved.status === "unavailable" ? saved.reason : `${saved.status} (bound ${saved.bound})`}`,
+				epoch,
 			);
+			return false;
+		} catch (error) {
+			this.jobSaveFailed(
+				`saving the owed usage receipts failed: ${error instanceof Error ? error.message : String(error)}`,
+				epoch,
+			);
+			return false;
 		}
 	}
 
