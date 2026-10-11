@@ -91,6 +91,8 @@ export const TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS = 20_000;
  * usage record, so a verdict stays well inside this bound; a larger one is refused rather than stored.
  */
 export const TRANSCRIPT_SUMMARY_MAX_VERDICT_BYTES = 4_096;
+/** Owed usage receipts of ended jobs the scheduler queues for its owner; more than this are counted as lost. */
+export const TRANSCRIPT_SUMMARY_MAX_RELEASED_RECEIPTS = 256;
 
 /** Work counts across every job; one unit per field, never merged (see {@link TranscriptSummaryScheduler.workCounts}). */
 export interface TranscriptSummaryWorkCounts {
@@ -98,8 +100,10 @@ export interface TranscriptSummaryWorkCounts {
 	semanticRequests: number;
 	transportAttempts: number;
 	receiptsRecorded: number;
-	/** Receipts still owed a persistence retry, in kept verdicts. */
+	/** Receipts still owed a persistence retry: in kept verdicts and in the queue of jobs that have ended. */
 	receiptsPending: number;
+	/** Owed receipts dropped because the bounded queue of ended jobs overflowed. */
+	receiptsLost: number;
 	reused: number;
 }
 
@@ -479,6 +483,10 @@ export class TranscriptSummaryScheduler {
 	private readonly queued = new Set<string>();
 	/** Claims returned per job by {@link failJob} (no provider call was made); bounds the refund. In memory only. */
 	private readonly returnedClaims = new Map<string, number>();
+	/** Receipts still owed by jobs that have ended (bounded; see {@link releaseOwedReceipts}). */
+	private readonly releasedReceipts: { ownerSessionId: string; receipt: SystemOneReceipt }[] = [];
+	/** Owed receipts dropped because the released queue overflowed (never silently: counted in the work counters). */
+	private lostReceipts = 0;
 	private readonly running = new Set<string>();
 	private readonly retryWait = new Set<string>();
 	private readonly jobsBySession = new Map<string, Set<string>>();
@@ -757,10 +765,14 @@ export class TranscriptSummaryScheduler {
 
 	/**
 	 * Whether this scheduler holds anything for the session: a job, a terminal-proof record (reservation, spent or
-	 * carried budget) or a parent slot a proof hold refused.
+	 * carried budget) or a parent slot a proof hold refused. With `liveOnly` a finished job does not count.
 	 */
-	holdsSession(sessionId: string): boolean {
-		if ((this.jobsBySession.get(sessionId)?.size ?? 0) > 0) return true;
+	holdsSession(sessionId: string, options: { liveOnly?: boolean } = {}): boolean {
+		for (const id of this.jobsBySession.get(sessionId) ?? []) {
+			// `liveOnly`: a finished job (cancelled, failed, stale) is history, not work this session still has to be cleared of.
+			const state = this.jobs.get(id)?.state;
+			if (options.liveOnly !== true || (state !== undefined && !isTerminalSummaryJobState(state))) return true;
+		}
 		for (const record of this.proof.values()) if (record.sessionId === sessionId) return true;
 		for (const slot of this.heldParents.values()) if (slot.sessionId === sessionId) return true;
 		return false;
@@ -1101,10 +1113,17 @@ export class TranscriptSummaryScheduler {
 	 * for this node: a live one becomes `stale`, and a ready one is removed as a ready producer is when its node goes.
 	 * Scoped to one session, so the work is bounded by that session's jobs.
 	 */
-	endReadmissions(sessionId: string, nodeIds: ReadonlySet<string>, now: number): TranscriptSummaryJob[] {
+	endReadmissions(
+		sessionId: string,
+		nodeIds: ReadonlySet<string>,
+		now: number,
+		except: ReadonlySet<string> = new Set(),
+	): TranscriptSummaryJob[] {
 		const ended: TranscriptSummaryJob[] = [];
 		for (const id of [...(this.jobsBySession.get(sessionId) ?? [])]) {
 			const job = this.jobs.get(id);
+			// `except`: the job whose own judgment is being applied (its revocation of the node is its result, not its end).
+			if (except.has(id)) continue;
 			if (job?.kind !== "readmission" || job.nodeId === undefined || !nodeIds.has(job.nodeId)) continue;
 			if (job.state === "ready") {
 				this.removeJob(job);
@@ -1517,9 +1536,47 @@ export class TranscriptSummaryScheduler {
 		// A kept verdict is paid-for evidence of the job it judged: it ends with the job, not with a claim.
 		if (to === "ready" || isTerminalSummaryJobState(to)) {
 			delete job.pendingReply;
+			this.releaseOwedReceipts(job);
 			delete job.pendingVerdict;
 		}
 		this.track(job);
+	}
+
+	/**
+	 * A job that ends (ready, failed, cancelled, stale) while a paid response's usage receipt is still owed hands the owed
+	 * receipts to the owner's queue, so ending a job never silently drops spend that was not recorded. The queue is
+	 * bounded; when it overflows, the oldest are counted as lost, never hidden.
+	 */
+	private releaseOwedReceipts(job: TranscriptSummaryJob): void {
+		const verdict = job.pendingVerdict;
+		if (verdict === undefined) return;
+		for (const receipt of verdict.receipts) {
+			if (receipt.status !== "unrecorded") continue;
+			this.releasedReceipts.push({ ownerSessionId: verdict.ownerSessionId, receipt: { ...receipt } });
+		}
+		while (this.releasedReceipts.length > TRANSCRIPT_SUMMARY_MAX_RELEASED_RECEIPTS) {
+			this.releasedReceipts.shift();
+			this.lostReceipts += 1;
+		}
+	}
+
+	/** Whether receipts owed to `ownerSessionId` by ended jobs are queued (cheap: checked on every pump). */
+	hasReleasedReceipts(ownerSessionId: string): boolean {
+		return this.releasedReceipts.some((entry) => entry.ownerSessionId === ownerSessionId);
+	}
+
+	/** Receipts owed by jobs that have since ended, oldest first; taking them empties the queue (the owner re-adds what it cannot record). */
+	takeReleasedReceipts(): { ownerSessionId: string; receipt: SystemOneReceipt }[] {
+		return this.releasedReceipts.splice(0);
+	}
+
+	/** Put back receipts the owner could not record yet (the same bound applies). */
+	returnReleasedReceipts(owed: { ownerSessionId: string; receipt: SystemOneReceipt }[]): void {
+		this.releasedReceipts.unshift(...owed);
+		while (this.releasedReceipts.length > TRANSCRIPT_SUMMARY_MAX_RELEASED_RECEIPTS) {
+			this.releasedReceipts.shift();
+			this.lostReceipts += 1;
+		}
 	}
 
 	/**
@@ -1596,6 +1653,7 @@ export class TranscriptSummaryScheduler {
 			transportAttempts: 0,
 			receiptsRecorded: 0,
 			receiptsPending: 0,
+			receiptsLost: 0,
 			reused: 0,
 		};
 		for (const job of this.jobs.values()) {
@@ -1608,6 +1666,8 @@ export class TranscriptSummaryScheduler {
 				if (receipt.status === "unrecorded") counts.receiptsPending += 1;
 			}
 		}
+		counts.receiptsPending += this.releasedReceipts.length;
+		counts.receiptsLost = this.lostReceipts;
 		return counts;
 	}
 

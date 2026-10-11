@@ -116,9 +116,13 @@ export class SystemOneInvalidResponseError extends SystemOneReviewError {
 
 /** The caller's response observer failed. Not a receipt or provider failure; surfaced as its own error. */
 export class SystemOneObserverError extends Error {
-	constructor(message: string, cause: unknown) {
+	/** The paid responses received before the observer failed: their receipts are still owed to the caller. */
+	readonly receipts: readonly SystemOneReceipt[];
+
+	constructor(message: string, cause: unknown, receipts: readonly SystemOneReceipt[] = []) {
 		super(message, { cause });
 		this.name = "SystemOneObserverError";
+		this.receipts = receipts;
 	}
 }
 

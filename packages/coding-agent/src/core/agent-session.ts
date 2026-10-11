@@ -3413,6 +3413,10 @@ export class AgentSession {
 	}
 
 	/** Operator authority: forget one session's derived history summaries; the canonical session is untouched. */
+	repairHistoryForgetState(): Promise<{ ok: boolean; message: string }> {
+		return this._memory.repairHistoryForgetState();
+	}
+
 	forgetHistorySession(sessionId: string): Promise<{ ok: boolean; message: string }> {
 		return this._memory.forgetHistorySession(sessionId);
 	}

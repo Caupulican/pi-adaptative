@@ -404,7 +404,7 @@ export class SystemOneReviewer {
 					try {
 						onResponse?.(transportAttempts, { provider: driver.id, model: request.model });
 					} catch (error) {
-						throw new SystemOneObserverError(`${providerName} response observer failed`, error);
+						throw new SystemOneObserverError(`${providerName} response observer failed`, error, receipts);
 					}
 					if (decoded.duplicateKeys)
 						throw new SystemOneInvalidResponseError(

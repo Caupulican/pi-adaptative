@@ -578,6 +578,14 @@ export class MemoryController {
 		);
 	}
 
+	/** Repair an unknown permanent forget state on the operator's explicit, loss-acknowledging command. */
+	async repairHistoryForgetState(): Promise<{ ok: boolean; message: string }> {
+		if (!this._hierarchy) {
+			return { ok: false, message: "The summary hierarchy is not available in this session; nothing was repaired." };
+		}
+		return this._hierarchy.repairForgetState();
+	}
+
 	/** Forget one session's derived history summaries; the canonical session is untouched. */
 	async forgetHistorySession(sessionId: string): Promise<{ ok: boolean; message: string }> {
 		if (!this._hierarchy) {

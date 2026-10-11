@@ -173,6 +173,7 @@ export interface TranscriptHierarchyAdmission {
 		transportAttempts: number;
 		receiptsRecorded: number;
 		receiptsPending: number;
+		receiptsLost: number;
 		reused: number;
 	};
 	readmission: {

@@ -302,6 +302,27 @@ export class TranscriptHierarchyHost {
 		return read();
 	}
 
+	/**
+	 * The explicit operator repair of an unknown permanent forget state (a damaged, rolled-back or missing file). The
+	 * damaged file is kept beside it; what is still readable is carried over, and sessions forgotten only in lost records
+	 * can be summarized again. The hierarchy then restarts. A known state is never replaced.
+	 */
+	async repairForgetState(): Promise<{ ok: boolean; message: string }> {
+		const repaired = await this.openStore().repairForgottenSessions(true);
+		if (repaired.status === "repaired") {
+			this.view = undefined;
+			await this.request();
+			return {
+				ok: true,
+				message: `The permanent forget state was repaired at ${repaired.lostAt}; the damaged file was kept beside it. Sessions forgotten only in lost records may be summarized again.`,
+			};
+		}
+		if (repaired.status === "not_damaged") {
+			return { ok: false, message: "The permanent forget state is known and intact; nothing was repaired." };
+		}
+		return { ok: false, message: `The permanent forget state could not be repaired: ${repaired.reason}` };
+	}
+
 	/** The zoom surface; resolves its source per call so a restart or a new generation is never held on to. */
 	expander(): TranscriptNodeExpander {
 		return { expand: (handle, options) => this.readSummaries((source) => source.expand(handle, options)) };

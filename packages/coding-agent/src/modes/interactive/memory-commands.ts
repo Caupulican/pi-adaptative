@@ -20,6 +20,7 @@ export interface MemoryCommandHost {
 	memoryAcceptDrift(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }>;
 	memoryRestoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }>;
 	forgetHistorySession(sessionId: string): Promise<{ ok: boolean; message: string }>;
+	repairHistoryForgetState(): Promise<{ ok: boolean; message: string }>;
 	getMemorySystem(): MemorySystem;
 	setMemorySystem(system: MemorySystem): Promise<{ ok: boolean; message: string }>;
 	showStatus(message: string): void;
@@ -28,7 +29,7 @@ export interface MemoryCommandHost {
 }
 
 export const MEMORY_COMMAND_USAGE =
-	"/memory drift · /memory history · /memory history forget <session> <session> · /memory accept <memory|project|user> · /memory restore <memory|project|user> · /memory system [okf|icm]";
+	"/memory drift · /memory history · /memory history forget <session> <session> · /memory history repair-forget I-accept-lost-forgets · /memory accept <memory|project|user> · /memory restore <memory|project|user> · /memory system [okf|icm]";
 
 const TARGETS = new Set<ManagedMemoryTarget>(["memory", "project", "user"]);
 
@@ -80,7 +81,11 @@ function describeHistory(status: TranscriptHistoryStatus): string {
 		lines.push(`  coordinator's latest fault (recorded ${activeCause.at}, may be over): ${activeCause.cause}`);
 	}
 	const internalCause = hierarchy?.lastInternalError;
-	if (internalCause) {
+	// The newest event is the active fault when nothing benign happened after it: shown once, as the fault.
+	if (
+		internalCause &&
+		!(activeCause && activeCause.cause === internalCause.cause && activeCause.at === internalCause.at)
+	) {
 		lines.push(
 			`  coordinator's latest internal cause (newest only, recorded ${internalCause.at}, may be over): ${internalCause.cause}`,
 		);
@@ -118,6 +123,19 @@ export async function handleMemoryCommand(host: MemoryCommandHost, text: string)
 	if (action === "history") {
 		if (target === undefined) {
 			host.showText(describeHistory(host.getTranscriptHistoryStatus()));
+			return;
+		}
+		if (target === "repair-forget") {
+			// Repairing an unknown forget state can make sessions forgotten only in lost records summarizable again.
+			if (rest.length !== 1 || rest[0] !== "I-accept-lost-forgets") {
+				host.showError(
+					"Acknowledge the possible loss to repair: /memory history repair-forget I-accept-lost-forgets",
+				);
+				return;
+			}
+			const repaired = await host.repairHistoryForgetState();
+			if (repaired.ok) host.showStatus(repaired.message);
+			else host.showError(repaired.message);
 			return;
 		}
 		// Forgetting revokes a session's derived summaries for good; the repeated session id is the confirmation.

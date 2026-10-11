@@ -185,10 +185,25 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 			if (key.startsWith(SESSION_TOMBSTONE_KEY_PREFIX))
 				forgotten.add(key.slice(SESSION_TOMBSTONE_KEY_PREFIX.length));
 		}
-		const denied = (node: TranscriptSummaryNode): boolean =>
-			forgotten.has(node.sessionId) || node.contextRefs.some((ref) => forgotten.has(ref.sessionId));
+		// Nodes of a forgotten session, nodes that consulted one as context, and every ancestor built on those (a parent does
+		// not carry its children's context, so it is found through its children).
+		const denied = new Set<string>();
+		for (const node of state.nodes.values()) {
+			if (forgotten.has(node.sessionId) || node.contextRefs.some((ref) => forgotten.has(ref.sessionId))) {
+				denied.add(node.id);
+			}
+		}
+		for (let grew = denied.size > 0; grew; ) {
+			grew = false;
+			for (const node of state.nodes.values()) {
+				if (!denied.has(node.id) && node.children?.some((child) => denied.has(child))) {
+					denied.add(node.id);
+					grew = true;
+				}
+			}
+		}
 		catalog.replace(
-			[...state.nodes.values()].filter((node) => !left.has(node.id) && !denied(node)),
+			[...state.nodes.values()].filter((node) => !left.has(node.id) && !denied.has(node.id)),
 			state.retentionAnchors,
 		);
 		const anchors = state.issues.find((issue) => issue.kind === "anchors_corrupt");

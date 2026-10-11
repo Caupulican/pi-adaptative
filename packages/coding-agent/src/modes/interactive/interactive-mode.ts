@@ -3312,6 +3312,7 @@ export class InteractiveMode {
 			memoryAcceptDrift: (target: ManagedMemoryTarget) => this.session.memoryAcceptDrift(target),
 			memoryRestoreManaged: (target: ManagedMemoryTarget) => this.session.memoryRestoreManaged(target),
 			forgetHistorySession: (sessionId: string) => this.session.forgetHistorySession(sessionId),
+			repairHistoryForgetState: () => this.session.repairHistoryForgetState(),
 			getMemorySystem: () => this.session.getMemorySystem(),
 			setMemorySystem: (system: MemorySystem) => this.session.setMemorySystem(system),
 			...this.operatorCommandOutput(),

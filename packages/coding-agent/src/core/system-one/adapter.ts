@@ -2,6 +2,7 @@ import { abortableSleep } from "@caupulican/pi-ai/abort-signals";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
 import {
 	SystemOneInvalidResponseError,
+	SystemOneObserverError,
 	type SystemOneReceipt,
 	SystemOneReviewError,
 } from "../review/system-one-review-port.ts";
@@ -76,12 +77,21 @@ export class JevAdapterFailure extends Error {
 	/** Paid provider responses the failure carries, so a caller can settle their receipts. Empty when none were paid. */
 	readonly receipts: readonly SystemOneReceipt[];
 
-	constructor(kind: JevFailureKind, originalMessage: string, impact: string, cause?: unknown) {
+	constructor(
+		kind: JevFailureKind,
+		originalMessage: string,
+		impact: string,
+		cause?: unknown,
+		receipts?: readonly SystemOneReceipt[],
+	) {
 		super(`Jev System One ${kind} for impact '${impact}': ${originalMessage}`, { cause });
 		this.name = "JevAdapterFailure";
 		this.kind = kind;
 		this.originalMessage = originalMessage;
-		this.receipts = cause instanceof SystemOneReviewError ? cause.receipts : [];
+		// A failure raised after a paid response was received (drift, an incomplete answer) carries that response's receipts.
+		this.receipts =
+			receipts ??
+			(cause instanceof SystemOneReviewError || cause instanceof SystemOneObserverError ? cause.receipts : []);
 	}
 }
 
@@ -241,6 +251,8 @@ export class SystemOneJevAdapter implements JevAdapter {
 						"model_drift",
 						`Model drift detected: requested pinned model '${targetModel}', but Jev endpoint returned '${returnedModel}' (R-007)`,
 						impact,
+						undefined,
+						result.receipts ?? [],
 					);
 				}
 
@@ -253,6 +265,8 @@ export class SystemOneJevAdapter implements JevAdapter {
 							"invalid_response",
 							`Incomplete Jev answers: missing '${missing[0]}'`,
 							impact,
+							undefined,
+							result.receipts ?? [],
 						);
 					}
 				}

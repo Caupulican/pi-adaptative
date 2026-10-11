@@ -1388,10 +1388,17 @@ export class TranscriptSummaryStore {
 					const absorbed = absorbLegacyMarks(sessions, knowledge.legacy);
 					if ("reason" in absorbed) return { status: "unknown", reason: absorbed.reason };
 				}
+				// A file that is intact (valid digest) but below the manifest's applied revision was rolled back: what it records is
+				// still real and is kept; only the guarantee that nothing newer was lost is given up (`lostAt` says so).
+				if (file.status === "ok") {
+					for (const [id, entry] of Object.entries(file.file.sessions)) {
+						if (!sessions.has(id)) sessions.set(id, entry.forgottenAt);
+					}
+				}
 				if (sessions.size > TRANSCRIPT_SUMMARY_MAX_FORGOTTEN_SESSIONS) {
 					return {
 						status: "unknown",
-						reason: `the readable legacy forget markers exceed the bound of ${TRANSCRIPT_SUMMARY_MAX_FORGOTTEN_SESSIONS}`,
+						reason: `the readable forget records exceed the bound of ${TRANSCRIPT_SUMMARY_MAX_FORGOTTEN_SESSIONS}`,
 					};
 				}
 				const prior =
