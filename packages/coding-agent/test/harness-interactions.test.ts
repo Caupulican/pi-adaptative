@@ -12531,7 +12531,8 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					});
 					world.systemOne.enterPhase("ro-owner-turn", {});
 					await withDeadline(trace, "R-owed owner turn", roFirst.session.prompt("Say hello."));
-					// The leaf alone is judged here: the parent's honesty question is never asked.
+					// status_reported_honestly is asked for tool traffic, summary or host records; this target holds owner and assistant
+					// traffic only, so only the two questions it is asked are declared.
 					world.systemOne.enterPhase("ro-answering", {
 						summary_supported: cAdmission.summary_supported,
 						owner_constraints_preserved: cAdmission.owner_constraints_preserved,
