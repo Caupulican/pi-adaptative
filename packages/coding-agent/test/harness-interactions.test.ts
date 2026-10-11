@@ -12744,6 +12744,140 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					trace.mark("root", `icm.owed-receipt-${roVariant}`);
 				}
 
+				for (const raVariant of ["answered", "carried"] as const) {
+					// R-abort, variants "answered" and "carried": the forget aborts the held evaluator call of a job that is then gone, and
+					// the usage append fails. In both the reviewer discards the paid answer on the abort and throws an error carrying the
+					// paid receipt: "answered" holds one gated request whose fixture ignores the abort (the answer returns after it);
+					// "carried" answers the first request with a paid 503 and holds the retry, so the usage precedes the abort. The
+					// receipt is not dropped: it is queued durably as owed (no usage row exists yet), the reopened session records it
+					// exactly once, and nothing is bought again.
+					const raAgentDir = `${world.agentDir}-icm-abort-${raVariant}`;
+					const raSeed = await seedIcmPastSession(world, raAgentDir);
+					const raStore = icmStore(raAgentDir);
+					world.provider.enqueue(cTrack, text(`ra-leaf-summary-${raVariant}`, ICM_LEAF_SUMMARY));
+					const raFirst = await world.createRootSession("root", {
+						agentDir: raAgentDir,
+						sessionManager: world.createSessionManager(raAgentDir),
+						settings: { memorySystem: undefined },
+					});
+					world.provider.enqueue("root", {
+						name: "ra-owner-turn",
+						reply: { content: [{ type: "text", text: "Noted." }] },
+					});
+					world.systemOne.enterPhase("ra-owner-turn", {});
+					await withDeadline(trace, "R-abort owner turn", raFirst.session.prompt("Say hello."));
+					let raAdmissions = 0;
+					const raGate = createBarrier();
+					const raAdmitted = createBarrier();
+					world.systemOne.enterPhase(
+						"ra-answering",
+						{
+							summary_supported: cAdmission.summary_supported,
+							owner_constraints_preserved: cAdmission.owner_constraints_preserved,
+						},
+						raVariant === "answered"
+							? { gate: raGate.promise, ignoresAbort: true, onAdmit: () => raAdmitted.release() }
+							: {
+									// "carried": the first request is a paid 503; the reviewer retries and the retry is held at the gate when the
+									// forget aborts it, so the first request's usage is carried on the abort.
+									gate: raGate.promise,
+									paidOutageFirst: true,
+									onAdmit: () => {
+										raAdmissions += 1;
+										if (raAdmissions === 2) raAdmitted.release();
+									},
+								},
+					);
+					const raPaidBefore = {
+						summaries: icmTrackRequests(world, cTrack),
+						admissions: icmAdmissionRequests(world),
+					};
+					world.io.failNext({
+						name: "ra-receipt-append",
+						kind: "append",
+						code: "EIO",
+						matches: (operation, data) =>
+							operation.path.endsWith(".jsonl") &&
+							(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false),
+					});
+					raFirst.settingsManager.applyOverrides({
+						contextPolicy: { memory: { history: icmHierarchySettings(cTrack).contextPolicy?.memory?.history } },
+					});
+					try {
+						await withDeadline(trace, "R-abort judgment held at the evaluator", raAdmitted.promise);
+						const raForgot = await withDeadline(
+							trace,
+							"R-abort forget while the judgment is held",
+							raFirst.session.forgetHistorySession(raSeed.sessionId),
+						);
+						expect(raForgot.ok, `the forget is accepted while the judgment is held: ${raForgot.message}`).toBe(
+							true,
+						);
+					} finally {
+						raGate.release();
+					}
+					await withDeadline(trace, "R-abort paid response settled", world.systemOne.joinInFlight());
+					await withDeadline(
+						trace,
+						"R-abort owed receipt durable",
+						world.io.waitForMutation(() => {
+							const text = world.io.peekFile(raStore.owed);
+							return text !== undefined && (JSON.parse(text) as { entries: unknown[] }).entries.length === 1;
+						}),
+					);
+					const raOwnerFile = raFirst.sessionManager.getSessionFile();
+					if (raOwnerFile === undefined) throw new Error("R-abort: the owner session has no file");
+					expect(
+						await world.disposeSessionInBody(raFirst.session),
+						"the R-abort owner disposes cleanly",
+					).toBeUndefined();
+					const raReports = () =>
+						world.io
+							.fileEntries()
+							.get(raOwnerFile)
+							?.split("\n")
+							.filter((line) => line.includes('"customType":"semantic_usage"'))
+							.map((line) => (JSON.parse(line) as { data?: { reportId?: string } }).data?.reportId) ?? [];
+					expect(raReports().length, "no semantic usage row is durable before the reopen").toBe(0);
+					const raSecond = await world.createRootSession("root", {
+						agentDir: raAgentDir,
+						sessionManager: world.openSessionManager(raOwnerFile, raAgentDir),
+						settings: icmHierarchySettings(cTrack),
+					});
+					await withDeadline(
+						trace,
+						"R-abort receipt recorded after the restart",
+						world.io.waitForMutation(() => {
+							const text = world.io.peekFile(raStore.owed);
+							return (
+								raReports().length === 1 &&
+								text !== undefined &&
+								(JSON.parse(text) as { entries: unknown[] }).entries.length === 0
+							);
+						}),
+						60_000,
+					);
+					expect(
+						{
+							reports: { count: raReports().length, unique: new Set(raReports()).size },
+							requests: {
+								summaries: icmTrackRequests(world, cTrack) - raPaidBefore.summaries,
+								admissions: icmAdmissionRequests(world) - raPaidBefore.admissions,
+							},
+						},
+						"the paid response of an aborted judgment is recorded once after the restart and nothing is bought again",
+					).toEqual({
+						reports: { count: 1, unique: 1 },
+						// "carried" paid for two requests (the paid 503 and the held retry); neither is bought again after the restart.
+						requests: { summaries: 1, admissions: raVariant === "answered" ? 1 : 2 },
+					});
+					expect(
+						await world.disposeSessionInBody(raSecond.session),
+						"the R-abort reopened owner disposes cleanly",
+					).toBeUndefined();
+					trace.mark("root", `icm.abort-receipt-${raVariant}`);
+				}
+
 				// R-readmit: model summaries that carry no admission under the current contract (as after a contract change) are
 				// not approved. Their admission record is removed from the two stored node files (valid external preparation: the
 				// identity, text and sources are untouched). A new session judges each ONCE as a scheduler job under a claim: the
@@ -13004,6 +13138,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							.map((job) => job.attempts),
 						"the held readmission claim is durable with its one attempt before the forget",
 					).toEqual([1]);
+					const w8cForgetSave = icmObserveNextJobsSave(world, w8c.store, "w8-cancel-forget-save");
 					const w8cForgot = await withDeadline(
 						trace,
 						"W8 forget while the judgment is held",
@@ -13013,6 +13148,23 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						true,
 					);
 					await withDeadline(trace, "W8 aborted judgment settled", world.systemOne.joinInFlight());
+					// The ordinary save that follows the forget (not the stop's) is observed as it lands: it writes no job and no
+					// proof record of the forgotten session.
+					await withDeadline(
+						trace,
+						"W8 save after the forget",
+						world.io.waitForMutation(() => w8cForgetSave() !== undefined),
+					);
+					const w8cLive = w8cForgetSave();
+					expect(
+						{
+							jobs: w8cLive?.jobs.length,
+							proof: Object.values(w8cLive?.ledger ?? {}).filter(
+								(record) => (record as { sessionId?: string }).sessionId === w8c.sessionId,
+							).length,
+						},
+						"the save that follows the forget writes no job and no proof record of the forgotten session",
+					).toEqual({ jobs: 0, proof: 0 });
 					const w8cEnd = icmHierarchy(w8cSession.session);
 					expect(
 						{
@@ -13069,6 +13221,17 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 					"W8 cancel restart saved",
 					world.io.waitForMutation(() => w8cSaved() !== undefined),
 				);
+				// The restart's own save, observed before its dispose, writes none of the forgotten session back.
+				const w8cRestartSaved = w8cSaved();
+				expect(
+					{
+						jobs: w8cRestartSaved?.jobs.length,
+						proof: Object.values(w8cRestartSaved?.ledger ?? {}).filter(
+							(record) => (record as { sessionId?: string }).sessionId === w8c.sessionId,
+						).length,
+					},
+					"the restart's save writes no job and no proof record of the forgotten session",
+				).toEqual({ jobs: 0, proof: 0 });
 				expect(
 					await world.disposeSessionInBody(w8cRestart.session),
 					"the cancel restart disposes cleanly",
@@ -17498,6 +17661,15 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 				fwCoord.session.prompt("List the staging notes summaries of both sessions."),
 			);
 			expect(fwHandles.size, "each session has an approved exact copy before the forget").toBe(2);
+			// Which stored job belongs to which session, before the forget: the neighbour's jobs are the control.
+			const fwSessionOfNode = (nodeId: string | undefined) =>
+				nodeId === undefined
+					? undefined
+					: icmStoredManifest(icmLiveStore(world), fwStore)?.acceptedNodes[nodeId]?.sessionId;
+			const fwJobsBefore = icmStoredJobs(icmLiveStore(world), fwStore).map((job) => ({
+				id: job.id,
+				sessionId: fwSessionOfNode(job.nodeId),
+			}));
 			world.io.failNext({
 				name: "m3e-removal-write",
 				kind: "rename",
@@ -17618,6 +17790,19 @@ it("mixed: a root lane and a worker lane in separate worktrees, a real conflict,
 				"the M3e coordinator disposes cleanly",
 			).toBeUndefined();
 			expect(world.historyClock.armedTimers, "no hierarchy timer stays armed after disposal").toBe(0);
+			// After the stop's save: no job of the forgotten session is stored, and none of the neighbour's was lost.
+			const fwJobsAfter = new Set(icmStoredJobs(icmLiveStore(world), fwStore).map((job) => job.id));
+			expect(
+				{
+					forgottenKept: fwJobsBefore.filter(
+						(job) => job.sessionId === fwGone.sessionId && fwJobsAfter.has(job.id),
+					).length,
+					neighbourLost: fwJobsBefore.filter(
+						(job) => job.sessionId === fwKept.sessionId && !fwJobsAfter.has(job.id),
+					).length,
+				},
+				"the forgotten session's jobs are gone and the neighbour keeps every job it had",
+			).toEqual({ forgottenKept: 0, neighbourLost: 0 });
 			trace.mark("root", "icm.failed-removal-retry");
 
 			// W1 (startup lease race): a coordinator that took its lease is held at its discovery listing. Discovery is queued after

@@ -235,9 +235,25 @@ export class SystemOneJevAdapter implements JevAdapter {
 				owedReceipts.length > 0 ? owedReceipts : undefined,
 			);
 
+		// A caller abort after a paid response keeps that response's receipts: the abort error alone would drop them.
+		const abortedWithReceipts = (error: unknown) =>
+			owedReceipts.length > 0
+				? new JevAdapterFailure(
+						"cancelled",
+						error instanceof Error ? error.message : String(error),
+						impact,
+						error,
+						owedReceipts,
+					)
+				: error;
+
 		while (attempts < maxAttempts) {
 			if (deadline?.aborted && !options?.signal?.aborted) throw timedOut();
-			options?.signal?.throwIfAborted();
+			try {
+				options?.signal?.throwIfAborted();
+			} catch (aborted) {
+				throw abortedWithReceipts(aborted);
+			}
 			attempts++;
 
 			try {
@@ -296,7 +312,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 					throw error;
 				}
 				if (deadline?.aborted && !options?.signal?.aborted) throw timedOut();
-				if (options?.signal?.aborted) throw error;
+				if (options?.signal?.aborted) throw abortedWithReceipts(error);
 				// The reviewer already exhausted its provider retry budget. Never multiply it here.
 				if (
 					error instanceof SystemOneReviewError ||
@@ -316,7 +332,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 					} catch (sleepError) {
 						// The deadline ending the backoff is the evaluation's timeout, with the receipts it owes.
 						if (deadline?.aborted && !options?.signal?.aborted) throw timedOut();
-						throw sleepError;
+						throw options?.signal?.aborted ? abortedWithReceipts(sleepError) : sleepError;
 					}
 				}
 			}

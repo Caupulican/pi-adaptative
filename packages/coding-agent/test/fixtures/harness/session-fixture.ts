@@ -177,13 +177,19 @@ export interface ScriptedPhaseOptions {
 	 * recorded apart from unscripted requests.
 	 */
 	readonly invalidAnswer?: boolean;
-	/** Called when a request is admitted: its questions are validated and answered, and it now waits at its gate. */
+	/** Called when a request is admitted: its questions are validated and answered, and it then waits at its gate (a `paidOutageFirst` request answers at once instead). */
 	readonly onAdmit?: () => void;
 	/**
 	 * The request ignores its caller's abort and answers after its gate, as an evaluator that is not cancelled does. The
 	 * owner may settle on the abort while the physical request stays in flight until it answers. Requires a gate.
 	 */
 	readonly ignoresAbort?: boolean;
+	/**
+	 * The first request of the phase is answered HTTP 503 with a PAID body (usage included, as a provider that charged for a
+	 * failed response), before any gate; later requests wait at the gate (abortable unless `ignoresAbort`). The paid outage is
+	 * recorded as an intended outage. Requires a gate.
+	 */
+	readonly paidOutageFirst?: boolean;
 }
 
 /** The owner-visible state a System One question reads by name: `owner_messages[N]` and `optional_tools[N]`. */
@@ -298,6 +304,7 @@ export class ScriptedSystemOneTransport {
 	private invalidAnswer = false;
 	private onAdmit: (() => void) | undefined;
 	private ignoresAbort = false;
+	private paidOutageFirst = false;
 	/** Transport requests still in flight, settled or not: an owner's abort does not end a physical request. */
 	private readonly inFlight = new Set<Promise<void>>();
 	/** Requests a phase answered as an unavailable evaluator: intended by the scenario, never unscripted. */
@@ -328,8 +335,12 @@ export class ScriptedSystemOneTransport {
 		if (options.ignoresAbort === true && options.gate === undefined) {
 			throw new Error("A transport request that ignores abort requires an explicit gate");
 		}
+		if (options.paidOutageFirst === true && options.gate === undefined) {
+			throw new Error("A paid first outage requires an explicit gate for the requests after it");
+		}
 		this.onAdmit = options.onAdmit;
 		this.ignoresAbort = options.ignoresAbort === true;
+		this.paidOutageFirst = this.enabled && options.paidOutageFirst === true;
 		for (const id of this.expected.keys()) this.declared.push(`${name}:${id}`);
 		for (const prefix of this.families.keys()) this.declared.push(`${name}:${prefix}*`);
 	}
@@ -351,6 +362,7 @@ export class ScriptedSystemOneTransport {
 		this.invalidAnswer = false;
 		this.onAdmit = undefined;
 		this.ignoresAbort = false;
+		this.paidOutageFirst = false;
 	}
 
 	/** Ends the last phase, then fails on any declared judgment no production request consumed. */
@@ -462,6 +474,15 @@ export class ScriptedSystemOneTransport {
 			throw new Error(detail);
 		}
 		onAdmit?.();
+		if (this.paidOutageFirst) {
+			// Once per phase: the first request is a paid failure; the retry that follows reaches the gate below.
+			this.paidOutageFirst = false;
+			this.intendedOutages.push(`${phase}: ${method} ${url}`);
+			return Response.json(
+				{ model: body.model, answers: {}, usage: { input_tokens: 10, output_tokens: 5 } },
+				{ status: 503 },
+			);
+		}
 		if (gate !== undefined) await this.holdAtGate(gate, ignoresAbort ? undefined : init?.signal);
 		if (outage) {
 			// The configured outage cause: the validated questions are answered by a 503, recorded apart from unscripted requests.

@@ -293,7 +293,6 @@ export interface SemanticSummaryAdmissionDeps {
 }
 
 /** The receipts a failed engine call still owes: paid responses the adapter or engine carried on the error. */
-/** The usage receipts a failed evaluator call carried (transport attempts that were answered before it failed). */
 export function receiptsOf(error: unknown): readonly SystemOneReceipt[] {
 	if (error instanceof JevAdapterFailure || error instanceof DecisionEngineProtocolError) return error.receipts ?? [];
 	return [];
