@@ -4247,7 +4247,7 @@ export class AgentSession {
 	 * One raised before anyone subscribes is kept for the first subscriber.
 	 */
 	emitHostWarning(message: string): void {
-		this._foregroundLifecycle.warn(message.slice(0, 500));
+		this._foregroundLifecycle.warn(message);
 	}
 
 	/**

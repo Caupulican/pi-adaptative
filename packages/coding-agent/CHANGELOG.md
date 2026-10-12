@@ -14,7 +14,8 @@
 - History recall in ICM: the root `memory` tool is history-only (`history_search`, `history_source`, `history_expand`; no curated-memory actions), and a granted worker reads history through `memory_read`, with no standing memory, persona or frontier. The history index of an ICM session starts on the first explicit history request or when opt-in summary construction starts; until then no past session is read and `/memory history` shows `on_demand`.
 - `history_search` lists the approved summaries that cover its hits as whole `txn:` records beside them, so summaries are discoverable on demand in both memory systems without an automatic frontier. Held, rejected and unapproved summaries are never shown as text.
 - Approved summaries stay readable with the hierarchy off or without a summary model: a read-only view of the summary store serves discovery and `history_expand` with the same approval, expiry and branch checks and no model, admission or egress call.
-- `/memory history forget <session> <session>` forgets one session's derived history summaries (the repeated session id is the confirmation); the transcript is untouched and the session is never summarized again. It reports the real cause, such as no active summary hierarchy, when nothing was forgotten.
+- `/memory history forget <session> <session>` permanently denies one session's derived summaries without changing its transcript, including while summary construction is off. Deferred cleanup is reported. Unknown forget state stops construction; `/memory history repair-forget I-accept-lost-forgets` repairs it only after acknowledging that lost records may allow summaries again.
+- SDK `onClosingWarnings` receives warnings retained by a bare session at `disposeAndWait()`, including pending usage disclosures; stderr remains the default sink.
 
 ### Changed
 
@@ -23,8 +24,6 @@
 - The prompt memory block is part of the request plan: it is replanned when memory generation, content revision or headroom changes, its diagnostics are published only when the plan commits, later requests of a turn reuse the turn's retrieval, and its allowance accounts for the estimated system prompt, tools, messages and reply reserve with an explicit UTF-8 byte ceiling.
 - Delegated `memory_read` snapshots are sized against the receiving worker's own model window, last accepted request, reply reserve and remaining token allowance, and admitted as whole source-labelled records. When that capacity is unknown or exhausted, the worker gets a stated `Memory is constrained` reason instead of memory.
 - `contextPolicy.memory.history.retentionDays` ages out derived summaries only, never transcripts or exact history reads. A source's age is its entry's event time, else its session timestamp, else its first capture. Retention and forgetting revocations are permanent; only invalidation and an admission verdict of rejected or uncertain re-derive a summary.
-
-### Fixed
 
 - A summary job identity found again after its failed job was pruned at the 20,000-record bound could start with a fresh attempt budget. Each admitted identity now reserves a durable terminal-proof record before any chargeable call; at the bound new identities are held with a durable `capacity` cause, a failed job is never pruned without its record, and a legacy ledger already at the bound sets a durable `possibly_lost_proof` hold for sessions started before it. Exact history reads are never held.
 - The results of history reads are no longer captured as history again, so the summary hierarchy never indexes or summarizes the system's own recall.
@@ -37,6 +36,14 @@
 - `/memory history` shows the summary coordinator's newest internal cause (a failed save, an unread source, a discarded judgment) with the time it was recorded, instead of keeping it out of view; the model-facing `context_audit` view still omits it.
 - The first history read in a session stored outside the default session directories now includes that session's own committed history.
 - Worker summary and source refusals reach the worker whole, exact-source pointers included, instead of being cut to 240 characters.
+
+### Fixed
+
+- Owner bash results enter agent state only after canonical session append succeeds. Partial flushes remove completed items and retain the failed suffix, so retrying storage recovery does not replay earlier successes.
+- Host warnings use the shared live/held truncation owner, preserving Unicode boundaries and the omission marker instead of cutting text twice.
+- Superseded HTTP dispatchers retire through their actual graceful-close promises. Final process cleanup waits up to five seconds, reports original close failures and pending timeouts, and preserves caller-installed dispatchers. A failed installation restores prior global state; print, RPC and interactive cleanup attempt HTTP retirement even after another cleanup step fails.
+- Work-run removal validates a bounded ownership snapshot before deleting content, restores exact ownership after recoverable failure, and refuses concurrent new entries at final root removal. Incomplete recovery stays fenced with its causes; acquisition verifies its own surviving lease and rolls back that lease on failure. Retention evicts for counted byte excess, with scan limits and live leases remaining explicit best-effort bounds.
+- Memory-provider diagnostics reach session warning sinks with masked causes. Only required-provider availability and initialization failures already reported by the initialization owner are deduplicated; later lifecycle failures remain visible.
 - Standalone binaries now embed the tool-recovery log worker, so recovery records are written there instead of silently never starting the worker.
 - Turning memory retrieval on or off mid-session now updates the ICM guidance in the rebuilt system prompt instead of keeping the block composed under the old policy.
 - Retrieved memory candidates keep their retrieval score and stale/conflict flags instead of a fixed 0.5 score, so prompt admission applies its freshness rules.

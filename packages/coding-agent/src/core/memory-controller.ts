@@ -2112,11 +2112,17 @@ export class MemoryController {
 		const previousSystem = this._activeMemorySystem;
 		const previous = this._memoryManager;
 		// The manager's failure lines are session warnings, never stderr writes from a host that owns the terminal. The required provider's
-		// own failure is reported by the initialization below (with the same cause), so its lifecycle line is not repeated.
+		// availability and initialization failures are reported by the initialization below (with the same cause), so only those lines are
+		// not repeated; every later lifecycle or callback failure of that provider is a warning of its own.
 		const requiredProvider = system === "icm" ? "icm" : "file-store";
 		const manager = new MemoryManager({
 			report: (line, diagnostic) => {
-				if (diagnostic?.provider === requiredProvider) return;
+				if (
+					diagnostic?.provider === requiredProvider &&
+					(diagnostic.operation === "isAvailable" || diagnostic.operation === "initialize")
+				) {
+					return;
+				}
 				this.deps.emitWarning(line);
 			},
 		});

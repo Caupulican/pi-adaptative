@@ -97,23 +97,155 @@ export function constrainStreamIdleToHttpTimeout(
 	};
 }
 
+/** The dispatcher this module last installed: the only one it closes when superseded. */
+let ownedDispatcher: undici.EnvHttpProxyAgent | undefined;
+let previousDispatcher: undici.Dispatcher | undefined;
+const retirements = new Set<Promise<void>>();
+const retirementFailures: unknown[] = [];
+/** Final process/embedding cleanup grace; settings supersession continues to retire gracefully without a deadline. */
+export const HTTP_DISPOSAL_GRACE_MS = 5_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/** Globals replaced by the installed undici implementation (undici/index.js install). */
+export const HTTP_INSTALL_GLOBAL_NAMES = [
+	"fetch",
+	"Headers",
+	"Response",
+	"Request",
+	"FormData",
+	"WebSocket",
+	"CloseEvent",
+	"ErrorEvent",
+	"MessageEvent",
+	"EventSource",
+] as const;
+
+function retireHttpDispatcher(dispatcher: undici.EnvHttpProxyAgent): void {
+	// Handle rejection immediately, but retain the original cause for the host's cleanup boundary.
+	const retirement = Promise.resolve()
+		.then(() => dispatcher.close())
+		.then(
+			() => {
+				retirements.delete(retirement);
+			},
+			(error: unknown) => {
+				retirements.delete(retirement);
+				retirementFailures.push(error);
+			},
+		);
+	retirements.add(retirement);
+}
+
+/** Join actual graceful-close settlements and report each retained failure once. Does not retire the current pool. */
+export async function awaitHttpDispatcherRetirements(): Promise<void> {
+	await settleHttpDispatcherRetirements();
+	const failures = retirementFailures.splice(0);
+	if (failures.length > 0) throw new AggregateError(failures, "HTTP dispatcher retirement failed");
+}
+
+/** Waiting and reporting are separate: a timed-out final wait must not consume a later close rejection. */
+async function settleHttpDispatcherRetirements(): Promise<void> {
+	while (retirements.size > 0) await Promise.all([...retirements]);
+}
+
+/** Process/embedding shutdown: callers must first stop every session that shares this process-wide pool. */
+export async function disposeHttpDispatcher(timeoutMs: number = HTTP_DISPOSAL_GRACE_MS): Promise<void> {
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMER_DELAY_MS) {
+		throw new RangeError(
+			`HTTP disposal timeout must be positive and at most ${MAX_TIMER_DELAY_MS}ms: ${String(timeoutMs)}`,
+		);
+	}
+	const dispatcher = ownedDispatcher;
+	const failures: unknown[] = [];
+	if (dispatcher) {
+		// A caller-installed replacement owns the global now; never replace or close it.
+		if (undici.getGlobalDispatcher() === dispatcher && previousDispatcher) {
+			try {
+				undici.setGlobalDispatcher(previousDispatcher);
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+		ownedDispatcher = undefined;
+		previousDispatcher = undefined;
+		retireHttpDispatcher(dispatcher);
+	}
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			settleHttpDispatcherRetirements(),
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(
+					() =>
+						reject(
+							new Error(
+								`HTTP dispatcher disposal timed out after ${timeoutMs}ms; ${retirements.size} graceful close(s) remain pending`,
+							),
+						),
+					timeoutMs,
+				);
+			}),
+		]);
+	} catch (error) {
+		failures.push(error);
+	} finally {
+		clearTimeout(timer);
+	}
+	// Report causes already observed even when another close timed out. The losing settlement wait never drains later causes.
+	failures.push(...retirementFailures.splice(0));
+	if (failures.length > 0) throw new AggregateError(failures, "HTTP dispatcher disposal failed");
+}
+
 export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TIMEOUT_MS): void {
 	const normalizedTimeoutMs = parseHttpIdleTimeoutMs(timeoutMs);
 	if (normalizedTimeoutMs === undefined) {
 		throw new Error(`Invalid HTTP idle timeout: ${String(timeoutMs)}`);
 	}
-	undici.setGlobalDispatcher(
-		new undici.EnvHttpProxyAgent({
-			allowH2: false,
-			bodyTimeout: normalizedTimeoutMs,
-			headersTimeout: normalizedTimeoutMs,
-			// Undici 8.7 stopped tunnelling plain-HTTP origins through the proxy's CONNECT; keep
-			// every origin on a tunnel as before (hand-ported from upstream 23842b1e6, #8134).
-			proxyTunnel: true,
-		}),
-	);
-	// Keep fetch and the dispatcher on the same undici implementation. Node 26.0's
-	// bundled fetch can otherwise consume compressed responses through npm undici's
-	// dispatcher without decompressing them, causing response.json() failures.
-	undici.install?.();
+	const dispatcher = new undici.EnvHttpProxyAgent({
+		allowH2: false,
+		bodyTimeout: normalizedTimeoutMs,
+		headersTimeout: normalizedTimeoutMs,
+		// Undici 8.7 stopped tunnelling plain-HTTP origins through the proxy's CONNECT; keep
+		// every origin on a tunnel as before (hand-ported from upstream 23842b1e6, #8134).
+		proxyTunnel: true,
+	});
+	const previousGlobal = undici.getGlobalDispatcher();
+	const previousGlobals = HTTP_INSTALL_GLOBAL_NAMES.map((name) => ({
+		name,
+		descriptor: Object.getOwnPropertyDescriptor(globalThis, name),
+	}));
+	try {
+		undici.setGlobalDispatcher(dispatcher);
+		// Keep fetch and the dispatcher on the same undici implementation. Node 26.0's
+		// bundled fetch can otherwise consume compressed responses through npm undici's
+		// dispatcher without decompressing them, causing response.json() failures.
+		undici.install?.();
+	} catch (error) {
+		retireHttpDispatcher(dispatcher);
+		const failures: unknown[] = [error];
+		if (undici.getGlobalDispatcher() === dispatcher) {
+			try {
+				undici.setGlobalDispatcher(previousGlobal);
+			} catch (rollback) {
+				failures.push(rollback);
+			}
+		}
+		for (const { name, descriptor } of previousGlobals) {
+			try {
+				if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+				else if (!Reflect.deleteProperty(globalThis, name)) throw new Error(`Cannot restore globalThis.${name}`);
+			} catch (rollback) {
+				failures.push(rollback);
+			}
+		}
+		if (failures.length > 1) throw new AggregateError(failures, "HTTP dispatcher installation and rollback failed");
+		throw error;
+	}
+	// Each call replaces the process dispatcher, so the one this module installed before it is closed once superseded: a graceful close
+	// lets its in-flight requests finish and releases its idle connections, instead of leaving one pool per settings application.
+	const superseded = ownedDispatcher;
+	// A caller takeover starts a new ownership interval, even if our former pool still needs retirement.
+	if (previousGlobal !== superseded) previousDispatcher = previousGlobal;
+	ownedDispatcher = dispatcher;
+	if (superseded) retireHttpDispatcher(superseded);
 }

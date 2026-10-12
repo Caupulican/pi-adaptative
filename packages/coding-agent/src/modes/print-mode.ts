@@ -9,8 +9,9 @@
 import type { AssistantMessage, ImageContent } from "@caupulican/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { expandMessageForDisplay } from "../core/context/path-alias-display.ts";
+import { disposeHttpDispatcher } from "../core/http-dispatcher.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
-import { neutralizeControls } from "../core/terminal-warnings.ts";
+import { describeCause, neutralizeControls } from "../core/terminal-warnings.ts";
 import { projectSessionEventForJson } from "./json-event-projection.ts";
 import { registerTerminationSignalHandlers } from "./termination-signals.ts";
 
@@ -51,17 +52,38 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let exitCode = 0;
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
-	let disposed = false;
+	let disposal: Promise<void> | undefined;
+	const cleanupFailures: unknown[] = [];
 
-	const disposeRuntime = async (): Promise<void> => {
-		if (disposed) return;
-		disposed = true;
-		unsubscribe?.();
-		await runtimeHost.dispose();
+	const disposeRuntime = (): Promise<void> => {
+		disposal ??= (async () => {
+			const failures: unknown[] = [];
+			for (const dispose of [
+				() => unsubscribe?.(),
+				() => runtimeHost.dispose(),
+				() => disposeHttpDispatcher(),
+				flushRawStdout,
+			]) {
+				try {
+					await dispose();
+				} catch (error) {
+					failures.push(error);
+				}
+			}
+			if (failures.length === 1) throw failures[0];
+			if (failures.length > 1) throw new AggregateError(failures, "Print runtime, HTTP and output shutdown failed");
+		})();
+		return disposal;
 	};
 
 	const cleanupSignalHandlers = registerTerminationSignalHandlers((exitCode) => {
-		void disposeRuntime().finally(() => process.exit(exitCode));
+		void disposeRuntime().then(
+			() => process.exit(exitCode),
+			(error: unknown) => {
+				console.error(neutralizeControls(`Print shutdown failed: ${describeCause(error)}`));
+				process.exit(exitCode === 0 ? 1 : exitCode);
+			},
+		);
 	});
 
 	runtimeHost.setRebindSession(async () => {
@@ -172,14 +194,19 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		} else if (printUsage) {
 			process.stderr.write(`${PRINT_USAGE_LINE_PREFIX}${JSON.stringify(cumulativeUsage)}\n`);
 		}
-
-		return exitCode;
 	} catch (error: unknown) {
 		console.error(error instanceof Error ? error.message : String(error));
-		return 1;
+		exitCode = 1;
 	} finally {
-		cleanupSignalHandlers();
-		await disposeRuntime();
-		await flushRawStdout();
+		for (const cleanup of [cleanupSignalHandlers, disposeRuntime]) {
+			try {
+				await cleanup();
+			} catch (error) {
+				cleanupFailures.push(error);
+			}
+		}
 	}
+	if (cleanupFailures.length === 1) throw cleanupFailures[0];
+	if (cleanupFailures.length > 1) throw new AggregateError(cleanupFailures, "Print shutdown and output flush failed");
+	return exitCode;
 }

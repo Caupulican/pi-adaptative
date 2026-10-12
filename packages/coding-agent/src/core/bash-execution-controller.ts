@@ -191,17 +191,10 @@ export class BashExecutionController {
 			excludeFromContext: options?.excludeFromContext,
 		};
 
-		// If agent is streaming, defer adding to avoid breaking tool_use/tool_result ordering
-		if (this.deps.isStreaming()) {
-			// Queue for later - will be flushed on agent_end
-			this._pendingBashMessages.push(bashMessage);
-		} else {
-			// Add to agent state immediately
-			this.deps.getAgent().state.messages.push(bashMessage);
-
-			// Save to session
-			this.deps.getSessionManager().appendMessage(bashMessage);
-		}
+		// One publication path for immediate and deferred results. Streaming keeps tool-use/result ordering intact;
+		// a refused canonical append keeps the unpublished result queued for storage recovery.
+		this._pendingBashMessages.push(bashMessage);
+		if (!this.deps.isStreaming()) this.flushPendingBashMessages();
 	}
 
 	/**
@@ -230,14 +223,17 @@ export class BashExecutionController {
 	flushPendingBashMessages(): void {
 		if (this._pendingBashMessages.length === 0) return;
 
-		for (const bashMessage of this._pendingBashMessages) {
-			// Add to agent state
-			this.deps.getAgent().state.messages.push(bashMessage);
-
-			// Save to session
-			this.deps.getSessionManager().appendMessage(bashMessage);
+		let published = 0;
+		try {
+			for (const bashMessage of this._pendingBashMessages) {
+				// Canonical publication may refuse an uncertain write. Do not publish that result into agent state first.
+				this.deps.getSessionManager().appendMessage(bashMessage);
+				this.deps.getAgent().state.messages.push(bashMessage);
+				published++;
+			}
+		} finally {
+			// A later refusal must neither replay earlier successes nor discard the failed suffix.
+			this._pendingBashMessages.splice(0, published);
 		}
-
-		this._pendingBashMessages = [];
 	}
 }

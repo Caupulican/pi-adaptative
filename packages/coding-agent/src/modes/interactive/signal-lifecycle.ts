@@ -14,6 +14,7 @@
 import type { TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import { disposeHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { causeHeadline, describeCause, errorDetail, neutralizeControls } from "../../core/terminal-warnings.ts";
 import { disposeUnclaimedCliPowerShellWarmStart } from "../../core/tools/early-powershell-session.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
@@ -165,6 +166,7 @@ export class SignalLifecycle {
 				await this.runCleanupSteps([
 					() => disposeUnclaimedCliPowerShellWarmStart(),
 					() => this.port.runtimeHost.dispose(),
+					() => disposeHttpDispatcher(),
 					() => this.port.ui.terminal.drainInput(1000),
 					() => this.stopOnce(),
 				]);
@@ -190,6 +192,7 @@ export class SignalLifecycle {
 				() => this.port.ui.terminal.drainInput(1000),
 				() => this.stopOnce(),
 				() => this.port.runtimeHost.dispose(),
+				() => disposeHttpDispatcher(),
 			]);
 		} finally {
 			for (const remove of forceRemovals) remove();

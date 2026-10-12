@@ -12,6 +12,7 @@ import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import { getSystemErrorMap } from "node:util";
 import * as undici from "undici";
+import { disposeHttpDispatcher, HTTP_INSTALL_GLOBAL_NAMES } from "../../../src/core/http-dispatcher.ts";
 import { builtinBoundary } from "./builtin-boundary.ts";
 import { type SqliteFaultOperation, VirtualSqlite } from "./sqlite-io.ts";
 import { VirtualWorkerThreads } from "./virtual-worker.ts";
@@ -767,7 +768,7 @@ export class VirtualFileSystem {
 		if (this.nodes.get(path)?.kind !== "directory") throw this.failure("readdir", "ENOTDIR", path, "scandir");
 		this.fault({ kind: "readdir", path }, "before");
 		const children = [...this.nodes].filter(([child]) => child !== path && dirname(child) === path);
-		return children
+		const entries = children
 			.sort(([left], [right]) => left.localeCompare(right))
 			.map(([child, node]) => {
 				if (!(options as { withFileTypes?: boolean } | undefined)?.withFileTypes) return basename(child);
@@ -778,6 +779,9 @@ export class VirtualFileSystem {
 					...fileTypeMethods(node),
 				};
 			});
+		// A directory syscall has captured its entries before another process's boundary callback can change the namespace.
+		this.observe({ kind: "readdir", path }, "after");
+		return entries;
 	}
 
 	opendirSync(value: unknown) {
@@ -1479,6 +1483,11 @@ export class EffectGuard {
 		this.sqlite.assertFaultsConsumed();
 	}
 
+	/** The world has stopped all sessions before restoring globals; release only the production owner's pools. */
+	async retireHttpDispatchers(): Promise<void> {
+		await disposeHttpDispatcher();
+	}
+
 	dispose(): void {
 		this.installed = false;
 		const failures: unknown[] = [];
@@ -1577,17 +1586,8 @@ export class EffectGuard {
 			label: "undici global dispatcher",
 			holds: () => undici.getGlobalDispatcher() === dispatcher,
 		});
-		for (const name of [
-			"Headers",
-			"Request",
-			"Response",
-			"FormData",
-			"WebSocket",
-			"CloseEvent",
-			"ErrorEvent",
-			"MessageEvent",
-			"EventSource",
-		]) {
+		for (const name of HTTP_INSTALL_GLOBAL_NAMES) {
+			if (name === "fetch") continue; // The pinned fetch has its own restoration and evidence.
 			const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
 			this.restore.push(() => {
 				if (descriptor) Object.defineProperty(globalThis, name, descriptor);

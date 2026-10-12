@@ -46,7 +46,7 @@ import { exportFromFile } from "./core/export-html/index.ts";
 import { onToolOnlyIgnored } from "./core/extensions/tool-only-api.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { dropSessionSecretsFromProcess } from "./core/harness-environment.ts";
-import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
+import { configureHttpDispatcher, disposeHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import { formatLaneWorkerRefusal } from "./core/model-capability.ts";
 import {
@@ -86,7 +86,7 @@ import {
 import { getSessionRole } from "./core/session-role.ts";
 import { SessionSupervisionRuntime } from "./core/session-supervision-runtime.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
-import { TerminalWarnings } from "./core/terminal-warnings.ts";
+import { describeCause, neutralizeControls, TerminalWarnings } from "./core/terminal-warnings.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { startCliPowerShellWarmStart } from "./core/tools/early-powershell-session.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
@@ -156,11 +156,20 @@ export async function disposeRuntimeAndExit(
 	exitCode: number,
 	exit: (code: number) => void = (code) => process.exit(code),
 ): Promise<void> {
-	try {
-		await runtime.dispose();
-	} finally {
-		exit(exitCode);
+	const failures: unknown[] = [];
+	for (const dispose of [() => runtime.dispose(), () => disposeHttpDispatcher()]) {
+		try {
+			await dispose();
+		} catch (error) {
+			failures.push(error);
+		}
 	}
+	if (failures.length > 0) {
+		console.error(neutralizeControls(`Shutdown failed: ${failures.map(describeCause).join("; ")}`));
+	}
+	exit(failures.length > 0 && exitCode === 0 ? 1 : exitCode);
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, "Runtime and HTTP shutdown failed");
 }
 
 function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc"> {

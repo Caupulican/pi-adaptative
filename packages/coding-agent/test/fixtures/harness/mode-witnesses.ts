@@ -1,17 +1,25 @@
 import { type Api, type Model, OPENAI_CODEX_CLIENT_VERSION } from "@caupulican/pi-ai";
 import { getKeybindings, setKeybindings, type Terminal } from "@caupulican/pi-tui";
-import { expect, vi } from "vitest";
+import * as undici from "undici";
+import { expect, type Mock, vi } from "vitest";
 import { AgentSession } from "../../../src/core/agent-session.ts";
 import { type AgentSessionRuntime, createAgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
 import { FooterDataProvider } from "../../../src/core/footer-data-provider.ts";
 import { PROVIDER_RETRY_CUSTOM_TYPE } from "../../../src/core/foreground-lifecycle-controller.ts";
+import {
+	awaitHttpDispatcherRetirements,
+	configureHttpDispatcher,
+	disposeHttpDispatcher,
+} from "../../../src/core/http-dispatcher.ts";
+import { AccountModelCatalog } from "../../../src/core/model-router/account-models.ts";
 import { ModelAdaptationStore } from "../../../src/core/models/adaptation-store.ts";
 import { TerminalWarnings } from "../../../src/core/terminal-warnings.ts";
 import { FooterComponent } from "../../../src/modes/interactive/components/footer.ts";
 import { EditorOverlayHost } from "../../../src/modes/interactive/editor-overlay-host.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
+import { runPrintMode } from "../../../src/modes/print-mode.ts";
 import { initTheme, stopThemeWatcher } from "../../../src/presentation/theme/theme.ts";
 import { trackDetachedChild, untrackDetachedChild } from "../../../src/utils/shell.ts";
 import { type Barrier, createBarrier, fail, HARNESS_API, HARNESS_PROVIDER, text } from "./scripted-provider.ts";
@@ -306,6 +314,37 @@ async function runGuardTwoCauses(): Promise<GuardRun> {
 	host.lifecycle.registerSignalHandlers();
 	await host.lifecycle.shutdown({ fromSignal: true });
 	return guardRunOf(host);
+}
+
+/** The process reporter bounds width, depth and total text independently; cleanup still reaches every step. */
+async function verifyGuardCauseBounds(): Promise<void> {
+	let deep: unknown = new Error("hidden leaf");
+	for (let level = 4; level >= 0; level--) deep = new AggregateError([deep], `depth-${level}`);
+	for (const [cause, expected] of [
+		[deep, "Shutdown failed: depth-0 (depth-1 (depth-2 (depth-3 (depth-4 (1 more causes)))))\n"],
+		[
+			new AggregateError(
+				Array.from({ length: 10 }, (_, index) => new Error(`cause-${index}`)),
+				"wide",
+			),
+			"Shutdown failed: wide (cause-0; cause-1; cause-2; cause-3; cause-4; cause-5; cause-6; cause-7; 2 more causes)\n",
+		],
+		[new Error("a".repeat(2_100)), `Shutdown failed: ${"a".repeat(1_999)}…\n`],
+	] as const) {
+		const host = createGuardHost({ holdDispose: false, stopFails: false, disposeFails: { thrown: cause } });
+		host.lifecycle.registerSignalHandlers();
+		await host.lifecycle.shutdown({ fromSignal: true });
+		expect(host.stderr, "the real shutdown reporter preserves each configured cause bound and elision").toEqual([
+			expected,
+		]);
+		expect(host.log, "bounded reporting never skips drain or terminal restoration").toEqual([
+			"dispose",
+			"drain",
+			"stop",
+		]);
+		expect(host.warnings, "bounded failures still release the held warning").toEqual([GUARD_CLOSING_WARNING]);
+		expect(host.exits, "each bounded failure exits with failure status").toEqual([1]);
+	}
 }
 
 interface InteractiveHarness {
@@ -728,6 +767,307 @@ async function runQuitCrashAfterStop(world: HarnessWorld): Promise<QuitCrashRun>
 	}
 }
 
+interface HttpInstallRun {
+	/** Production replaced the global fetch during the mode's init, and every replacement was undici's own fetch. */
+	readonly replacementsAreUndiciFetch: boolean;
+	readonly replacements: number;
+	/** A caller-created dispatcher is never retired by the production owner. */
+	readonly foreignDispatcherKept: boolean;
+	readonly installedDispatcherIsNew: boolean;
+	/** A second application supersedes the first installed dispatcher, which is then closed; the new one is open. */
+	readonly supersededClosed: boolean;
+	readonly currentOpen: boolean;
+	readonly pendingRetirementKeepsSettingsSynchronous: boolean;
+	readonly rejectedCloseCauseKept: boolean;
+	readonly retirementFailureDrainedOnce: boolean;
+	readonly finalOwnedCloseSettled: boolean;
+	readonly callerReplacementKeptAtDispose: boolean;
+	readonly failedInstallPreservesOwnerAndRetiresNewPool: boolean;
+	readonly callerTakeoverRestoredAfterReconfigure: boolean;
+	readonly disposalTimeoutKeptLateCloseCause: boolean;
+	readonly invalidDisposalTimeoutKeepsOwnership: boolean;
+	readonly disposalTimeoutKeptRecordedCloseCause: boolean;
+}
+
+/**
+ * The real mode's init applies the HTTP dispatcher settings: the world records the fetch replacement that `undici.install()` attempts (and does
+ * not install it), and the dispatcher lifecycle follows the owner's contract: each application closes only the dispatcher it installed before.
+ */
+async function runHttpInstall(world: HarnessWorld): Promise<HttpInstallRun> {
+	await disposeHttpDispatcher();
+	const previous = undici.getGlobalDispatcher();
+	const foreign = new undici.Agent();
+	const foreignClose = vi.spyOn(foreign, "close");
+	const takeover = new undici.Agent();
+	const takeoverClose = vi.spyOn(takeover, "close");
+	undici.setGlobalDispatcher(foreign);
+	const effectsBefore = world.guard.effects.length;
+	let harness: InteractiveHarness | undefined;
+	const failures: unknown[] = [];
+	const closeSpies: Array<{ mockRestore(): void }> = [];
+	const holdClose = createBarrier();
+	const closeReached = createBarrier();
+	const timeoutCloseHold = createBarrier();
+	let result: HttpInstallRun | undefined;
+	try {
+		harness = await createInteractiveHarness(world, { holdDispose: false });
+		await withDeadline(world.trace, "http install: the interactive mode starts", harness.mode.init());
+		const replacements = world.guard.effects
+			.slice(effectsBefore)
+			.filter((effect) => effect.kind === "globalThis.fetch");
+		const installed = undici.getGlobalDispatcher();
+		const realInstalledClose = installed.close.bind(installed);
+		const installedClose = vi.spyOn(installed, "close").mockImplementation(() => {
+			closeReached.release();
+			return holdClose.promise.then(() => realInstalledClose());
+		});
+		closeSpies.push(installedClose);
+		configureHttpDispatcher();
+		const current = undici.getGlobalDispatcher();
+		const currentClose = vi.spyOn(current, "close");
+		closeSpies.push(currentClose);
+		let retirementSettled = false;
+		const retirement = awaitHttpDispatcherRetirements().then(() => {
+			retirementSettled = true;
+		});
+		await withDeadline(world.trace, "http install: close reaches its held boundary", closeReached.promise);
+		const pendingRetirementKeepsSettingsSynchronous = current !== installed && !retirementSettled;
+		holdClose.release();
+		await withDeadline(world.trace, "http install: the superseded pool settles", retirement);
+		const closeResult = installedClose.mock.results[0];
+		if (closeResult?.type !== "return" || !(closeResult.value instanceof Promise)) {
+			throw new Error("HTTP install witness: graceful retirement returned no settlement promise");
+		}
+		await withDeadline(world.trace, "http install: the actual close promise settles", closeResult.value);
+		const currentOpen = currentClose.mock.calls.length === 0;
+		currentClose.mockRestore();
+		const closeFailure = new Error("HTTP install witness: graceful close failed after settling the owned pool");
+		const realCurrentClose = current.close.bind(current);
+		const rejectingClose = vi.spyOn(current, "close").mockImplementation(async () => {
+			await realCurrentClose();
+			throw closeFailure;
+		});
+		closeSpies.push(rejectingClose);
+		configureHttpDispatcher();
+		let rejectedCloseCauseKept = false;
+		try {
+			await withDeadline(
+				world.trace,
+				"http install: rejected close reaches the owner",
+				awaitHttpDispatcherRetirements(),
+			);
+		} catch (error) {
+			rejectedCloseCauseKept =
+				error instanceof AggregateError && error.errors.length === 1 && error.errors[0] === closeFailure;
+		}
+		await withDeadline(
+			world.trace,
+			"http install: the reported failure is drained once",
+			awaitHttpDispatcherRetirements(),
+		);
+		const displacedOwned = undici.getGlobalDispatcher();
+		const displacedClose = vi.spyOn(displacedOwned, "close");
+		closeSpies.push(displacedClose);
+		undici.setGlobalDispatcher(takeover);
+		configureHttpDispatcher();
+		const finalOwned = undici.getGlobalDispatcher();
+		await withDeadline(
+			world.trace,
+			"http install: takeover still retires the displaced owned pool",
+			awaitHttpDispatcherRetirements(),
+		);
+		const displacedCloseResult = displacedClose.mock.results[0];
+		if (displacedCloseResult?.type !== "return" || !(displacedCloseResult.value instanceof Promise)) {
+			throw new Error("HTTP install witness: displaced owned close returned no settlement promise");
+		}
+		await withDeadline(world.trace, "http install: displaced owned close settles", displacedCloseResult.value);
+		const headersDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Headers");
+		const installFailure = new Error("HTTP install witness: Headers installation refused");
+		let failedPoolClose: Mock<undici.Dispatcher["close"]> | undefined;
+		let installCauseKept = false;
+		try {
+			Object.defineProperty(globalThis, "Headers", {
+				configurable: true,
+				get: () => headersDescriptor?.value,
+				set: () => {
+					failedPoolClose = vi.spyOn(undici.getGlobalDispatcher(), "close");
+					closeSpies.push(failedPoolClose);
+					throw installFailure;
+				},
+			});
+			try {
+				configureHttpDispatcher();
+			} catch (error) {
+				installCauseKept = error === installFailure;
+			}
+		} finally {
+			if (headersDescriptor) Object.defineProperty(globalThis, "Headers", headersDescriptor);
+			else Reflect.deleteProperty(globalThis, "Headers");
+		}
+		await withDeadline(
+			world.trace,
+			"http install: failed installation's new pool settles",
+			awaitHttpDispatcherRetirements(),
+		);
+		const failedInstallPreservesOwnerAndRetiresNewPool =
+			installCauseKept && undici.getGlobalDispatcher() === finalOwned && failedPoolClose?.mock.calls.length === 1;
+		const finalClose = vi.spyOn(finalOwned, "close");
+		closeSpies.push(finalClose);
+		await withDeadline(world.trace, "http install: final owned pool settles at shutdown", disposeHttpDispatcher());
+		const finalCloseResult = finalClose.mock.results[0];
+		if (finalCloseResult?.type !== "return" || !(finalCloseResult.value instanceof Promise)) {
+			throw new Error("HTTP install witness: final graceful close returned no settlement promise");
+		}
+		await withDeadline(world.trace, "http install: final actual close promise settles", finalCloseResult.value);
+		const callerTakeoverRestoredAfterReconfigure =
+			undici.getGlobalDispatcher() === takeover &&
+			takeoverClose.mock.calls.length === 0 &&
+			foreignClose.mock.calls.length === 0 &&
+			displacedClose.mock.calls.length === 1 &&
+			finalOwned !== displacedOwned &&
+			finalOwned !== takeover;
+		configureHttpDispatcher();
+		const externallyReplacedOwned = undici.getGlobalDispatcher();
+		const externallyReplacedClose = vi.spyOn(externallyReplacedOwned, "close");
+		closeSpies.push(externallyReplacedClose);
+		undici.setGlobalDispatcher(foreign);
+		await withDeadline(
+			world.trace,
+			"http install: caller replacement keeps global ownership at disposal",
+			disposeHttpDispatcher(),
+		);
+		const callerReplacementKeptAtDispose =
+			undici.getGlobalDispatcher() === foreign && foreignClose.mock.calls.length === 0;
+		configureHttpDispatcher();
+		const failedBeforeTimeoutOwned = undici.getGlobalDispatcher();
+		const realRecordedFailureClose = failedBeforeTimeoutOwned.close.bind(failedBeforeTimeoutOwned);
+		const recordedCloseFailure = new Error(
+			"HTTP install witness: recorded close failure before another pool times out",
+		);
+		const recordedCloseReached = createBarrier();
+		const recordedFailureClose = vi.spyOn(failedBeforeTimeoutOwned, "close").mockImplementation(async () => {
+			recordedCloseReached.release();
+			await realRecordedFailureClose();
+			throw recordedCloseFailure;
+		});
+		closeSpies.push(recordedFailureClose);
+		configureHttpDispatcher();
+		await withDeadline(world.trace, "http install: earlier close reaches its boundary", recordedCloseReached.promise);
+		const recordedFailureResult = recordedFailureClose.mock.results[0];
+		if (recordedFailureResult?.type !== "return" || !(recordedFailureResult.value instanceof Promise)) {
+			throw new Error("HTTP install witness: recorded failure close returned no settlement promise");
+		}
+		const recordedFailureSettled = await withDeadline(
+			world.trace,
+			"http install: earlier real close settles with its cause",
+			recordedFailureResult.value.then(
+				() => false,
+				(error: unknown) => error === recordedCloseFailure,
+			),
+		);
+		const timeoutOwned = undici.getGlobalDispatcher();
+		const realTimeoutClose = timeoutOwned.close.bind(timeoutOwned);
+		const lateCloseFailure = new Error("HTTP install witness: late close rejection after disposal timeout");
+		const timeoutClose = vi.spyOn(timeoutOwned, "close").mockImplementation(async () => {
+			await timeoutCloseHold.promise;
+			await realTimeoutClose();
+			throw lateCloseFailure;
+		});
+		closeSpies.push(timeoutClose);
+		let rejectedTimeouts = 0;
+		for (const invalidTimeout of [0, -1, Number.POSITIVE_INFINITY, Number.NaN]) {
+			try {
+				await disposeHttpDispatcher(invalidTimeout);
+			} catch (error) {
+				if (error instanceof RangeError) rejectedTimeouts++;
+			}
+		}
+		const invalidDisposalTimeoutKeepsOwnership =
+			rejectedTimeouts === 4 &&
+			undici.getGlobalDispatcher() === timeoutOwned &&
+			timeoutClose.mock.calls.length === 0;
+		let timeoutReported = false;
+		let recordedCauseReported = false;
+		try {
+			await withDeadline(
+				world.trace,
+				"http install: held final close reaches disposal timeout",
+				disposeHttpDispatcher(1),
+			);
+		} catch (error) {
+			timeoutReported =
+				error instanceof AggregateError &&
+				error.errors.length === 2 &&
+				error.errors[0] instanceof Error &&
+				error.errors[0].message ===
+					"HTTP dispatcher disposal timed out after 1ms; 1 graceful close(s) remain pending";
+			recordedCauseReported = error instanceof AggregateError && error.errors[1] === recordedCloseFailure;
+		}
+		timeoutCloseHold.release();
+		let lateCauseKept = false;
+		try {
+			await withDeadline(
+				world.trace,
+				"http install: late close rejection remains reportable",
+				awaitHttpDispatcherRetirements(),
+			);
+		} catch (error) {
+			lateCauseKept =
+				error instanceof AggregateError && error.errors.length === 1 && error.errors[0] === lateCloseFailure;
+		}
+		await withDeadline(world.trace, "http install: late close cause drains once", awaitHttpDispatcherRetirements());
+		result = {
+			replacementsAreUndiciFetch:
+				replacements.length > 0 && replacements.every((effect) => effect.arguments[0] === undici.fetch),
+			replacements: replacements.length,
+			foreignDispatcherKept: foreignClose.mock.calls.length === 0 && installed !== foreign,
+			installedDispatcherIsNew: installed !== foreign && current !== installed,
+			supersededClosed: installedClose.mock.calls.length === 1,
+			currentOpen,
+			pendingRetirementKeepsSettingsSynchronous,
+			rejectedCloseCauseKept,
+			retirementFailureDrainedOnce: rejectingClose.mock.calls.length === 1,
+			finalOwnedCloseSettled: finalClose.mock.calls.length === 1 && externallyReplacedClose.mock.calls.length === 1,
+			callerReplacementKeptAtDispose,
+			failedInstallPreservesOwnerAndRetiresNewPool,
+			callerTakeoverRestoredAfterReconfigure,
+			disposalTimeoutKeptLateCloseCause: timeoutReported && lateCauseKept && timeoutClose.mock.calls.length === 1,
+			invalidDisposalTimeoutKeepsOwnership,
+			disposalTimeoutKeptRecordedCloseCause:
+				recordedFailureSettled && recordedCauseReported && recordedFailureClose.mock.calls.length === 1,
+		};
+	} catch (error) {
+		failures.push(error);
+	} finally {
+		holdClose.release();
+		timeoutCloseHold.release();
+		for (const cleanup of [
+			() => harness?.mode.stop(),
+			() => harness?.runtime.dispose(),
+			() => disposeHttpDispatcher(),
+			() => {
+				for (const spy of closeSpies) spy.mockRestore();
+				foreignClose.mockRestore();
+				undici.setGlobalDispatcher(previous);
+				return foreign.close();
+			},
+			() => {
+				takeoverClose.mockRestore();
+				return takeover.close();
+			},
+		]) {
+			try {
+				await cleanup();
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+	}
+	if (failures.length > 0) throw new AggregateError(failures, "HTTP install witness failed");
+	if (!result) throw new Error("HTTP install witness produced no observation");
+	return result;
+}
+
 /** An extension that holds every run at `before_agent_start`: after the submission has its lease, before any provider request. */
 function holdBeforeAgentStart(hold: Barrier, reached: Barrier): ExtensionFactory {
 	return (pi) => {
@@ -1076,6 +1416,7 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 		"both causes share one line: the unconvertible first cause by its plain text, then the drain failure",
 	).toEqual([`Shutdown failed: ${UNCONVERTIBLE_CAUSE_TEXT} (${UNCONVERTIBLE_CAUSE_TEXT}; ${GUARD_DRAIN_FAILURE})\n`]);
 	expect(twoCauses.exits, "a failed signal shutdown exits 1").toEqual([1]);
+	await verifyGuardCauseBounds();
 
 	const quit = await runQuitWithHeldDispose(world);
 	expect(quit.removedGuardsAtDispose, "the quit leaves the process guards armed through the held dispose").toEqual([]);
@@ -1137,6 +1478,55 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 		"release",
 	]);
 
+	const httpInstall = await runHttpInstall(world);
+	expect(
+		httpInstall.replacements,
+		"the mode's init attempts the global fetch replacement at least once",
+	).toBeGreaterThan(0);
+	expect(httpInstall.replacementsAreUndiciFetch, "every recorded fetch replacement is undici's own fetch").toBe(true);
+	expect(httpInstall.foreignDispatcherKept, "the dispatcher found before the mode is foreign and stays open").toBe(
+		true,
+	);
+	expect(httpInstall.installedDispatcherIsNew, "each application installs a new dispatcher").toBe(true);
+	expect(httpInstall.supersededClosed, "the superseded owned dispatcher is closed").toBe(true);
+	expect(httpInstall.currentOpen, "the newly installed dispatcher is open").toBe(true);
+	expect(
+		httpInstall.pendingRetirementKeepsSettingsSynchronous,
+		"settings install a new pool while an older close is held",
+	).toBe(true);
+	expect(httpInstall.rejectedCloseCauseKept, "the retirement owner reports the original close rejection").toBe(true);
+	expect(
+		httpInstall.retirementFailureDrainedOnce,
+		"the close failure is reported once and the pool retired once",
+	).toBe(true);
+	expect(httpInstall.finalOwnedCloseSettled, "shutdown waits for the final owned pool's actual close promise").toBe(
+		true,
+	);
+	expect(
+		httpInstall.callerReplacementKeptAtDispose,
+		"shutdown leaves a caller's replacement installed and unclosed",
+	).toBe(true);
+	expect(
+		httpInstall.failedInstallPreservesOwnerAndRetiresNewPool,
+		"failed installation keeps its cause and prior owner while retiring the new pool",
+	).toBe(true);
+	expect(
+		httpInstall.callerTakeoverRestoredAfterReconfigure,
+		"reconfiguration retires the displaced owned pool and restores the latest caller takeover at disposal",
+	).toBe(true);
+	expect(
+		httpInstall.disposalTimeoutKeptLateCloseCause,
+		"a bounded final wait preserves a late close rejection for one later report",
+	).toBe(true);
+	expect(
+		httpInstall.invalidDisposalTimeoutKeepsOwnership,
+		"invalid disposal grace values leave the current owned pool intact",
+	).toBe(true);
+	expect(
+		httpInstall.disposalTimeoutKeptRecordedCloseCause,
+		"timeout reports an already recorded close cause once while retaining later failures for recovery",
+	).toBe(true);
+
 	const failing = await runInteractiveStop(world, true);
 	expect(failing.failures, "both failing teardown steps are rethrown together, in order").toEqual([
 		INTERACTIVE_STOP_FAILURE,
@@ -1196,6 +1586,9 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	expect(calibration.controlCommitted, "normal order: the run's reply is committed").toBe(true);
 
 	await verifyAccountListingRefusal(world);
+	await verifyRetryClosingAndUnicodeQueue(world);
+	await verifyBillingContinuation(world);
+	await verifyPrintOwner(world);
 }
 
 /** The account the listing describes: the synthetic token carries its claim, and nothing signs or verifies it. */
@@ -1240,7 +1633,12 @@ interface AccountListingRequest {
 }
 
 /** Answers the account catalog's models GET with the wire listing and records what it sent; every other fetch passes through. */
-function serveAccountListing(world: HarnessWorld, requests: AccountListingRequest[], requestBase: number): void {
+function serveAccountListing(
+	world: HarnessWorld,
+	requests: AccountListingRequest[],
+	requestBase: number,
+	options: { available?: boolean; hold?: Barrier; reached?: Barrier } = {},
+): void {
 	world.fetchResponder = (input, init) => {
 		const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
 		if (init?.method !== "GET" || `${url.origin}${url.pathname}` !== `${ACCOUNT_BASE_URL}/api/codex/models`) {
@@ -1253,7 +1651,12 @@ function serveAccountListing(world: HarnessWorld, requests: AccountListingReques
 			authorization: headers.get("authorization"),
 			accountId: headers.get("chatgpt-account-id"),
 		});
-		return Promise.resolve(Response.json(ACCOUNT_LISTING));
+		options.reached?.release();
+		const response =
+			options.available !== false
+				? Response.json(ACCOUNT_LISTING)
+				: Response.json({ error: "Account listing unavailable" }, { status: 503 });
+		return options.hold ? options.hold.promise.then(() => response) : Promise.resolve(response);
 	};
 }
 
@@ -1535,8 +1938,735 @@ async function verifyAccountListingRefusal(world: HarnessWorld): Promise<void> {
 			listingRequests[1]?.requestsBefore,
 			"the control's listing is answered before its first model request",
 		).toBeLessThanOrEqual(control.requestMark - requestBase);
+		await verifyMissingAccountListing(world, `${agentDir}-missing`);
+		await verifyAccountPreflightAbort(world, `${agentDir}-preflight`);
 	} finally {
 		world.fetchResponder = undefined;
 		world.modelRegistry.restoreReloadSnapshot(registry);
+	}
+}
+
+/** An unanswered listing is unknown, not proof the account offers no alternative: only a real refusal makes the warning relevant. */
+async function verifyMissingAccountListing(world: HarnessWorld, agentDir: string): Promise<void> {
+	const requestBase = world.provider.requests.length;
+	const listingRequests: AccountListingRequest[] = [];
+	const escapesBefore = world.guard.escapes.length;
+	serveAccountListing(world, listingRequests, requestBase, { available: false });
+	const controlReply = "An unchecked account model can still answer the control.";
+	for (const refused of [false, true]) {
+		const mark = world.warnings.length;
+		const requestMark = world.provider.requests.length;
+		const created = await world.createRootSession("root", {
+			agentDir,
+			sessionManager: world.createSessionManager(agentDir),
+			settings: { memorySystem: undefined },
+		});
+		const session = created.session;
+		await session.bindExtensions({ uiContext: world.humanInput.ui });
+		await session.setModel(accountModel(world, "worker-a"), { persistSettings: false });
+		const file = created.sessionManager.getSessionFile();
+		if (!file) throw new Error("The missing account listing witness has no persisted session file");
+		const retries: string[] = [];
+		session.subscribe((event) => {
+			if (event.type === "auto_retry_start" || event.type === "auto_retry_end") retries.push(event.type);
+		});
+		world.provider.enqueue(
+			"worker-a",
+			refused
+				? fail("account-no-listing-refusal", ACCOUNT_REFUSAL)
+				: text("account-no-listing-control", controlReply),
+		);
+		await withDeadline(
+			world.trace,
+			"missing account listing: the actual model request completes",
+			session.prompt(ACCOUNT_REFUSED_PROMPT),
+		);
+		const modelAfter = modelRef(session.model);
+		const disposal = await world.disposeSessionInBody(session);
+		const warnings = world.warnings.splice(mark);
+		expect(
+			world.guard.escapes.slice(escapesBefore),
+			"missing listing and model request stay on the world's external ports",
+		).toEqual([]);
+		expect(
+			world.provider.requests.slice(requestMark).map((request) => `${request.model.provider}/${request.model.id}`),
+			"an unchecked listing still reaches exactly the requested model and starts no guessed replacement",
+		).toEqual([`${ACCOUNT_PROVIDER}/worker-a`]);
+		expect(modelAfter, "no fetched listing leaves the session's selected model intact").toBe(
+			`${ACCOUNT_PROVIDER}/worker-a`,
+		);
+		expect(retries, "no listing starts no replacement retry").toEqual([]);
+		expect(
+			retryRecordsIn(world.io.peekFile(file) ?? ""),
+			"no replacement retry is persisted without an account listing",
+		).toEqual([]);
+		expect(disposal, "the missing-listing owner disposes normally").toBeUndefined();
+		if (refused) {
+			expect(
+				warnings,
+				"the no-listing branch reports missing evidence rather than claiming there are no other models",
+			).toEqual([
+				`${ACCOUNT_PROVIDER}/worker-a is not available on this account (refused by ${ACCOUNT_PROVIDER}: ${ACCOUNT_REFUSAL}), and no ${ACCOUNT_PROVIDER} account model listing is available to choose a replacement from.`,
+			]);
+			expect(
+				(world.io.peekFile(file) ?? "").includes(ACCOUNT_REFUSAL),
+				"the actual provider refusal is persisted without a continuation",
+			).toBe(true);
+		} else {
+			expect(
+				warnings,
+				"normal order: listing failure alone does not declare an otherwise usable model unavailable",
+			).toEqual([]);
+			expect(
+				(world.io.peekFile(file) ?? "").includes(controlReply),
+				"normal order: the unchecked model's answer is persisted",
+			).toBe(true);
+		}
+	}
+	expect(
+		listingRequests,
+		"both owners reach the unsuccessful account listing before their model request",
+	).toHaveLength(2);
+	expect(
+		listingRequests.map((request) => request.requestsBefore),
+		"each unsuccessful listing precedes its owner's sole request",
+	).toEqual([0, 1]);
+}
+
+/** The account-listing port holds a real submission in preflight; close aborts that wait before the extension/start/provider boundary. */
+async function verifyAccountPreflightAbort(world: HarnessWorld, agentDir: string): Promise<void> {
+	for (const closeFirst of [true, false]) {
+		const hold = createBarrier();
+		const listingReached = createBarrier();
+		const requests: AccountListingRequest[] = [];
+		const requestMark = world.provider.requests.length;
+		const warningMark = world.warnings.length;
+		let beforeStart = 0;
+		serveAccountListing(world, requests, requestMark, { hold, reached: listingReached });
+		const created = await world.createRootSession("root", {
+			agentDir,
+			sessionManager: world.createSessionManager(agentDir),
+			settings: { memorySystem: undefined },
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", () => {
+						beforeStart++;
+					});
+				},
+			],
+		});
+		const session = created.session;
+		await session.bindExtensions({ uiContext: world.humanInput.ui });
+		await session.setModel(accountModel(world, "worker-a"), { persistSettings: false });
+		const routingReached = createBarrier();
+		const routing: string[] = [];
+		session.subscribe((event) => {
+			if (event.type === "routing_start" || event.type === "routing_end") routing.push(event.type);
+			if (event.type === "routing_start") routingReached.release();
+		});
+		await withDeadline(
+			world.trace,
+			"account preflight: the listing request reaches its hold",
+			listingReached.promise,
+		);
+		const file = created.sessionManager.getSessionFile();
+		if (!file) throw new Error("Account preflight witness has no session file");
+		const reply = "The released account preflight reaches its provider.";
+		const accountWaitReached = createBarrier();
+		const readySignals: AbortSignal[] = [];
+		const realReady = AccountModelCatalog.prototype.ready;
+		const readySpy = vi.spyOn(AccountModelCatalog.prototype, "ready").mockImplementation(function (
+			this: AccountModelCatalog,
+			signal?: AbortSignal,
+		) {
+			const pending = realReady.call(this, signal);
+			if (signal) {
+				readySignals.push(signal);
+				accountWaitReached.release();
+			}
+			return pending;
+		});
+		if (!closeFirst) {
+			hold.release();
+			world.provider.enqueue("worker-a", text("account-preflight-control", reply));
+		}
+		const preflightResults: boolean[] = [];
+		const prompt = session
+			.prompt("Run the account preflight control.", {
+				preflightResult: (passed) => {
+					preflightResults.push(passed);
+				},
+			})
+			.then(
+				() => "resolved",
+				(error: unknown) => messageOf(error),
+			);
+		try {
+			await withDeadline(
+				world.trace,
+				"account preflight: routing started before any provider request",
+				routingReached.promise,
+			);
+			await withDeadline(
+				world.trace,
+				"account preflight: actual ready method installed the live submission abort listener",
+				accountWaitReached.promise,
+			);
+			expect(readySignals, "the actual account wait receives one live submission signal").toHaveLength(1);
+			expect(readySignals[0]?.aborted, "the submission remains live at the held account-ready boundary").toBe(false);
+			if (closeFirst) {
+				expect(world.provider.requests.length, "held account preflight has reached no model request").toBe(
+					requestMark,
+				);
+				await withDeadline(
+					world.trace,
+					"account preflight: close cancels the held account wait",
+					session.disposeAndWait(),
+					60_000,
+				);
+			}
+			expect(
+				await withDeadline(world.trace, "account preflight: submission settles", prompt),
+				"preflight interruption is a clean abort outcome",
+			).toBe("resolved");
+			hold.release();
+			expect(requests, "the actual account-listing boundary was reached exactly once").toHaveLength(1);
+			expect(
+				routing,
+				"closed preflight has removed its public event sink; release-first preflight publishes its end",
+			).toEqual(closeFirst ? ["routing_start"] : ["routing_start", "routing_end"]);
+			expect(readySignals[0]?.aborted, "only close-first preflight aborts the actual account-ready signal").toBe(
+				closeFirst,
+			);
+			expect(
+				preflightResults,
+				"the actual preflight callback distinguishes a quiet abort from successful admission",
+			).toEqual([!closeFirst]);
+			expect(
+				beforeStart,
+				"the interrupted preflight never reaches before_agent_start; the release-first control does",
+			).toBe(closeFirst ? 0 : 1);
+			expect(
+				world.provider.requests.slice(requestMark).map((request) => request.model.id),
+				"only release-first preflight reaches the scripted model",
+			).toEqual(closeFirst ? [] : ["worker-a"]);
+			expect(
+				(world.io.peekFile(file) ?? "").includes(reply),
+				"only release-first preflight persists an assistant reply",
+			).toBe(!closeFirst);
+			expect(
+				world.warnings.splice(warningMark),
+				"a preflight cancelled at its account wait manufactures no failure warning",
+			).toEqual([]);
+		} finally {
+			readySpy.mockRestore();
+			hold.release();
+			await world.disposeSessionInBody(session);
+		}
+	}
+}
+
+/** Print's actual raw-write callback is held at its final flush, after real runtime cleanup, on clean and failed-disposal paths. */
+async function verifyPrintOwner(world: HarnessWorld): Promise<void> {
+	for (const failDispose of [false, true]) {
+		const warningMark = world.warnings.length;
+		const liveWarning = "Print witness: live warning \u001b[2J";
+		const closingWarning = "Print witness: closing warning.";
+		const disposeFailure = new Error("Print witness: runtime disposal failed after cleanup");
+		const capture: { session?: AgentSession } = {};
+		const harness = await createInteractiveHarness(world, {
+			holdDispose: false,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_shutdown", () => {
+						capture.session?.emitHostWarning(closingWarning);
+					});
+				},
+			],
+		});
+		capture.session = harness.runtime.session;
+		configureHttpDispatcher();
+		const printPool = undici.getGlobalDispatcher();
+		const realPrintPoolClose = printPool.close.bind(printPool);
+		let printPoolSettled = false;
+		const poolCloseSpy = vi.spyOn(printPool, "close").mockImplementation(async () => {
+			await realPrintPoolClose();
+			printPoolSettled = true;
+		});
+		const stdout: string[] = [];
+		const stderr: string[] = [];
+		const consoleWarnings: string[] = [];
+		const warningSpy = vi.spyOn(console, "warn").mockImplementation((...values: unknown[]) => {
+			consoleWarnings.push(values.map(String).join(" "));
+		});
+		const flushed = createBarrier();
+		let finishFlush: (() => void) | undefined;
+		let cleaningUp = false;
+		const signalCounts = [process.listenerCount("SIGTERM"), process.listenerCount("SIGHUP")];
+		const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+			chunk: string | Uint8Array,
+			encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+			callback?: (error?: Error | null) => void,
+		) => {
+			const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+			const text = String(chunk);
+			stdout.push(text);
+			if (text === "") {
+				if (cleaningUp) done?.();
+				else finishFlush = () => done?.();
+				flushed.release();
+			} else done?.();
+			return true;
+		}) as typeof process.stdout.write);
+		const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(((
+			chunk: string | Uint8Array,
+			encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+			callback?: (error?: Error | null) => void,
+		) => {
+			stderr.push(String(chunk));
+			(typeof encodingOrCallback === "function" ? encodingOrCallback : callback)?.();
+			return true;
+		}) as typeof process.stderr.write);
+		const realDispose = harness.runtime.dispose.bind(harness.runtime);
+		let runtimeDisposed = false;
+		harness.runtime.dispose = async () => {
+			await realDispose();
+			runtimeDisposed = true;
+			if (failDispose) throw disposeFailure;
+		};
+		const reply = "The real print mode reply.";
+		world.provider.enqueue("root", {
+			...text("print-owner-control", reply),
+			check: () => {
+				harness.runtime.session.emitHostWarning(liveWarning);
+			},
+		});
+		let completed = false;
+		const run = runPrintMode(harness.runtime, { mode: "text", messages: ["Run the print witness."] }).then(
+			(value) => {
+				completed = true;
+				return value;
+			},
+			(error: unknown) => {
+				completed = true;
+				return error;
+			},
+		);
+		const failures: unknown[] = [];
+		try {
+			await withDeadline(world.trace, "print owner: real final flush callback is held", flushed.promise);
+			expect(runtimeDisposed, "print flush begins only after the real runtime cleanup completes").toBe(true);
+			expect(
+				printPoolSettled && poolCloseSpy.mock.calls.length === 1,
+				"print attempts and awaits its actual owned HTTP pool retirement even when runtime disposal fails",
+			).toBe(true);
+			expect(completed, "print cannot return before its actual final write callback settles").toBe(false);
+			expect(
+				harness.disposalWarnings,
+				"the world's still-live subscriber leaves no held closing warning for the runtime sink",
+			).toEqual([]);
+			expect(
+				world.warnings.splice(warningMark),
+				"live and closing warnings reach the existing world subscriber without loss",
+			).toEqual([liveWarning, closingWarning]);
+			expect(stdout, "print emits its actual reply then performs the final empty flush write").toEqual([
+				`${reply}\n`,
+				"",
+			]);
+			expect(
+				consoleWarnings,
+				"the live print warning reaches its real console boundary with controls escaped",
+			).toEqual(["Warning: Print witness: live warning \\x1b[2J"]);
+			expect(stderr, "the print owner emits no unclassified raw stderr line").toEqual([]);
+			finishFlush?.();
+			expect(
+				await withDeadline(world.trace, "print owner: completion joins the flush", run),
+				"print keeps a disposal failure after flushing and returns0 in normal order",
+			).toBe(failDispose ? disposeFailure : 0);
+			expect(
+				[process.listenerCount("SIGTERM"), process.listenerCount("SIGHUP")],
+				"print releases its real process signal listeners",
+			).toEqual(signalCounts);
+		} catch (error) {
+			failures.push(error);
+		} finally {
+			cleaningUp = true;
+			finishFlush?.();
+			try {
+				for (const cleanup of [
+					() => withDeadline(world.trace, "print owner: cleanup stops the real runtime", realDispose(), 60_000),
+					() => withDeadline(world.trace, "print owner: cleanup joins any late final flush", run, 60_000),
+					() => harness.mode.stop(),
+				]) {
+					try {
+						await cleanup();
+					} catch (error) {
+						failures.push(error);
+					}
+				}
+			} finally {
+				for (const spy of [stdoutSpy, stderrSpy, warningSpy, poolCloseSpy]) {
+					try {
+						spy.mockRestore();
+					} catch (error) {
+						failures.push(error);
+					}
+				}
+			}
+		}
+		if (failures.length > 0) throw new AggregateError(failures, "Print owner witness and cleanup failed");
+	}
+}
+
+/** A retryable transport error discriminates willRetry, real backoff cancellation/expiry, and full Unicode owner input at close. */
+async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<void> {
+	const suffix = " owner payload kept complete after the preview boundary.";
+	const queued = `${"x".repeat(198)}\u{1f600}${suffix}`;
+	expect(
+		queued.codePointAt(198),
+		"the actual queued string contains the astral code point at its preview boundary",
+	).toBe(0x1f600);
+	expect(
+		[queued.charCodeAt(198), queued.charCodeAt(199)],
+		"the actual payload contains both UTF-16 surrogate units",
+	).toEqual([0xd83d, 0xde00]);
+	expect(queued.slice(198, 200), "the two-unit payload slice is the complete astral character").toBe(
+		String.fromCodePoint(0x1f600),
+	);
+	expect(queued.length, "the queued payload counts the astral pair as two units before its complete suffix").toBe(
+		200 + suffix.length,
+	);
+	const failure = "network error: scripted connection interrupted";
+	for (const stopAt of ["message-end", "backoff", "control", "stranded-control"] as const) {
+		const created = await world.createRootSession("root", {
+			sessionManager: world.createSessionManager(),
+			settings: {
+				memorySystem: undefined,
+				retry: { enabled: true, maxRetries: 1, baseDelayMs: 5 },
+				autonomy: { maxStallTurns: stopAt === "message-end" || stopAt === "stranded-control" ? 1 : 2 },
+			},
+		});
+		const session = created.session;
+		await session.bindExtensions({ uiContext: world.humanInput.ui });
+		const file = created.sessionManager.getSessionFile();
+		if (!file) throw new Error("Retry/Unicode queue witness has no session file");
+		const hold = createBarrier();
+		const reached = createBarrier();
+		const requestMark = world.provider.requests.length;
+		const warningMark = world.warnings.length;
+		const retryFlags: boolean[] = [];
+		const retryEvents: Array<Record<string, unknown>> = [];
+		let close: Promise<string> | undefined;
+		let activeBackoffAtClose = false;
+		let closingNativeQueue = false;
+		session.subscribe((event) => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				event.message.stopReason === "error" &&
+				stopAt === "message-end"
+			) {
+				close ??= disposed(session);
+				closingNativeQueue =
+					session.agent.hasQueuedMessages() && session.getResourceSnapshot().foregroundRecovery.shutdown;
+			}
+			if (event.type === "agent_end") retryFlags.push(event.willRetry);
+			if (event.type === "auto_retry_start") {
+				retryEvents.push({ type: event.type, attempt: event.attempt, delayMs: event.delayMs });
+				if (stopAt === "backoff")
+					queueMicrotask(() => {
+						activeBackoffAtClose = session.getResourceSnapshot().foregroundRecovery.retrying;
+						close ??= disposed(session);
+					});
+			} else if (event.type === "auto_retry_end")
+				retryEvents.push({ type: event.type, success: event.success, finalError: event.finalError });
+		});
+		world.provider.enqueue("root", {
+			...fail(`retry-${stopAt}-failure`, failure),
+			check: () => reached.release(),
+			gate: hold.promise,
+		});
+		if (stopAt === "control" || stopAt === "stranded-control")
+			world.provider.enqueue("root", {
+				...text(`retry-${stopAt}`, "The retry delivers the complete Unicode input."),
+				check: (request) => {
+					expect(
+						request.context.messages.some(
+							(message) =>
+								message.role === "user" &&
+								(typeof message.content === "string"
+									? message.content === queued
+									: message.content.some((part) => part.type === "text" && part.text === queued)),
+						),
+						"live retry provider sees the complete queued Unicode payload",
+					).toBe(true);
+				},
+			});
+		const prompt = session.prompt("Run the retry boundary witness.").then(
+			() => "resolved",
+			(error: unknown) => messageOf(error),
+		);
+		try {
+			await withDeadline(world.trace, "retry witness: actual failing provider request is held", reached.promise);
+			if (world.systemOne.enabled)
+				world.systemOne.enterPhase(`mode-retry-${stopAt}-intake`, {
+					changes_model_pools: { kind: "noul", probability: 0.02 },
+					local_commits_only: { kind: "noul", probability: 0.02 },
+					lifts_delivery_block: { kind: "noul", probability: 0.02 },
+					full_handoff: { kind: "noul", probability: 0.02 },
+					optional_tool_0: { kind: "choice", choice: "request", confidence: 0.97 },
+				});
+			await withDeadline(
+				world.trace,
+				"retry witness: Unicode owner input is admitted to steering",
+				session.steer(queued),
+			);
+			expect(
+				session.getSteeringMessages(),
+				"the public queue owns the complete input before either failure or quit",
+			).toEqual([queued]);
+			hold.release();
+			expect(
+				await withDeadline(world.trace, "retry witness: run completes or cancels", prompt, 60_000),
+				"both closed and live retry submissions resolve cleanly",
+			).toBe("resolved");
+			if (close)
+				expect(
+					await withDeadline(world.trace, "retry witness: close completes", close, 60_000),
+					"the closing owner settles",
+				).toBe("disposed");
+			const warnings = world.warnings.splice(warningMark);
+			expect(
+				world.provider.requests.slice(requestMark).map((request) => request.model.id),
+				"only live backoff expiry starts the retry provider round",
+			).toEqual(stopAt === "control" || stopAt === "stranded-control" ? ["root", "root"] : ["root"]);
+			if (stopAt === "control" || stopAt === "stranded-control") {
+				expect(retryFlags, "a genuinely retryable live error advertises a retry, then success does not").toEqual([
+					true,
+					false,
+				]);
+				expect(
+					retryEvents,
+					"backoff expiry retries, while the stall-cap exit delivers stranded input without a recovery retry",
+				).toEqual(
+					stopAt === "stranded-control"
+						? []
+						: [
+								{ type: "auto_retry_start", attempt: 1, delayMs: 5 },
+								{ type: "auto_retry_end", success: true, finalError: undefined },
+							],
+				);
+				expect(warnings, "live delivery never holds the queued owner input").toEqual([]);
+				expect(session.pendingMessageCount, "the live retry consumes its complete admitted steering input").toBe(0);
+				expect(
+					(world.io.peekFile(file) ?? "").includes(queued),
+					"live delivery persists the complete payload",
+				).toBe(true);
+			} else {
+				expect(
+					warnings,
+					"closed delivery reports a surrogate-safe preview while retaining the full payload",
+				).toEqual([
+					`A queued message was not delivered because the session closed before it could be delivered. It is kept in full in the pending queue: ${"x".repeat(198)}…`,
+				]);
+				expect(
+					session.getSteeringMessages(),
+					"closing retains the full surrogate pair and every remaining payload byte",
+				).toEqual([queued]);
+				expect(
+					session.deliverablePendingMessageCount,
+					"held input remains visible but cannot be delivered by a later run",
+				).toBe(0);
+				expect(
+					(world.io.peekFile(file) ?? "").includes(queued),
+					"closed delivery persists the complete held Unicode payload",
+				).toBe(true);
+				expect(
+					(world.io.peekFile(file) ?? "").includes(failure),
+					"the closing run still durably records its actual retryable failure",
+				).toBe(true);
+				expect(
+					retryFlags,
+					"closure removes the external terminal sink; a later backoff close follows its earlier live retry flag",
+				).toEqual(stopAt === "message-end" ? [] : [true]);
+				if (stopAt === "message-end") {
+					expect(retryEvents, "closed retryable failure never announces a retry").toEqual([]);
+					expect(
+						closingNativeQueue,
+						"admitted native input and the actual closing gate coexist before stranded delivery",
+					).toBe(true);
+					expect(
+						session.runtimeUpdates.getState(),
+						"no runtime-update stop can replace this stall-cap/stranded-input route",
+					).toBeUndefined();
+					expect(
+						session.agent.hasQueuedMessages(),
+						"stranded closing delivery withdraws native input into the owner's held queue",
+					).toBe(false);
+				} else {
+					expect(
+						activeBackoffAtClose,
+						"close runs after the real backoff has installed its active controller",
+					).toBe(true);
+					expect(retryEvents, "backoff close removes its external sink after the already-published start").toEqual(
+						[{ type: "auto_retry_start", attempt: 1, delayMs: 5 }],
+					);
+					expect(
+						retryRecordsIn(world.io.peekFile(file) ?? "").at(-1),
+						"post-close cancellation remains durable although the session listener is already removed",
+					).toMatchObject({ phase: "end", success: false, finalError: "Retry cancelled" });
+				}
+			}
+		} finally {
+			hold.release();
+			await world.disposeSessionInBody(session);
+		}
+	}
+}
+
+/** An inert registered subscription supplies the real billing premise; metered quota still halts instead of spending elsewhere. */
+async function verifyBillingContinuation(world: HarnessWorld): Promise<void> {
+	const registry = world.modelRegistry.createReloadSnapshot();
+	const credential = world.authStorage.get(HARNESS_PROVIDER);
+	if (!credential) throw new Error("The scripted billing provider has no original virtual credential");
+	const authActions: string[] = [];
+	world.modelRegistry.registerProvider(HARNESS_PROVIDER, {
+		oauth: {
+			name: "Inert harness subscription",
+			isSubscription: true,
+			login: async () => {
+				authActions.push("login");
+				throw new Error("Harness subscription never logs in");
+			},
+			refreshToken: async () => {
+				authActions.push("refresh");
+				throw new Error("Harness subscription never refreshes");
+			},
+			getApiKey: (stored) => stored.access,
+		},
+	});
+	const failure = "quota exceeded";
+	try {
+		for (const variant of ["metered", "closing-subscription", "live-subscription"] as const) {
+			world.authStorage.set(
+				HARNESS_PROVIDER,
+				variant === "metered"
+					? credential
+					: {
+							type: "oauth",
+							access: "inert-harness-subscription-access",
+							refresh: "inert-harness-subscription-refresh",
+							expires: Date.now() + 86_400_000,
+						},
+			);
+			const agentDir = `${world.agentDir}-billing-${variant}`;
+			const created = await world.createRootSession("root", {
+				agentDir,
+				sessionManager: world.createSessionManager(agentDir),
+				settings: {
+					memorySystem: undefined,
+					failover: { subscriptionHop: true },
+					modelRouter: { enabled: false, selectionMode: "manual", expensiveModel: `${HARNESS_PROVIDER}/worker-a` },
+				},
+			});
+			const session = created.session;
+			await session.bindExtensions({ uiContext: world.humanInput.ui });
+			const file = created.sessionManager.getSessionFile();
+			if (!file) throw new Error("Billing continuation witness has no session file");
+			expect(
+				world.modelRegistry.isUsingSubscription(session.model!),
+				"billing uses actual registry subscription evidence rather than an invented failover result",
+			).toBe(variant !== "metered");
+			const requestsBefore = world.provider.requests.length;
+			const warningMark = world.warnings.length;
+			const events: Array<Record<string, unknown>> = [];
+			let close: Promise<string> | undefined;
+			let modelAtRetry: string | undefined;
+			session.subscribe((event) => {
+				if (event.type === "auto_retry_start") {
+					modelAtRetry = modelRef(session.model);
+					events.push({
+						type: event.type,
+						attempt: event.attempt,
+						delayMs: event.delayMs,
+						errorMessage: event.errorMessage,
+					});
+					if (variant === "closing-subscription") close ??= disposed(session);
+				} else if (event.type === "auto_retry_end")
+					events.push({ type: event.type, success: event.success, finalError: event.finalError });
+			});
+			world.provider.enqueue("root", fail(`billing-${variant}`, failure));
+			const reply = "The actual subscription failover continuation reply.";
+			if (variant === "live-subscription")
+				world.provider.enqueue("worker-a", text("billing-live-continuation", reply));
+			try {
+				await withDeadline(
+					world.trace,
+					"billing continuation: actual failed model and recovery settle",
+					session.prompt("Run the billing continuation witness."),
+					60_000,
+				);
+				if (close) expect(await close, "billing closing owner settles normally").toBe("disposed");
+				const warnings = world.warnings.splice(warningMark);
+				expect(
+					world.provider.requests.slice(requestsBefore).map((request) => request.model.id),
+					"metered/closed failover start no extra request while live subscription reaches its actual replacement",
+				).toEqual(variant === "live-subscription" ? ["root", "worker-a"] : ["root"]);
+				if (variant === "metered") {
+					expect(warnings, "a metered quota does not authorize spend on the configured alternative").toEqual([
+						`Provider quota/limit reached for ${HARNESS_PROVIDER}/root: switch models (/model), wait for the limit window, or re-send to retry`,
+					]);
+					expect(events, "metered halt advertises no continuation").toEqual([]);
+					expect(retryRecordsIn(world.io.peekFile(file) ?? ""), "metered halt persists no invented retry").toEqual(
+						[],
+					);
+				} else {
+					expect(modelAtRetry, "billing applied the actual replacement before announcing its continuation").toBe(
+						`${HARNESS_PROVIDER}/worker-a`,
+					);
+					expect(warnings, "subscription quota disclosure names the actual chosen replacement").toEqual([
+						`root quota reached — continuing on ${HARNESS_PROVIDER}/worker-a`,
+					]);
+					expect(
+						events,
+						"live billing publishes its terminal event while a closing owner has removed its external sink",
+					).toEqual([
+						{
+							type: "auto_retry_start",
+							attempt: 1,
+							delayMs: 0,
+							errorMessage: `${failure}. Continuing on ${HARNESS_PROVIDER}/worker-a.`,
+						},
+						...(variant === "live-subscription"
+							? [
+									{
+										type: "auto_retry_end",
+										success: true,
+										finalError: undefined,
+									},
+								]
+							: []),
+					]);
+					expect(
+						retryRecordsIn(world.io.peekFile(file) ?? "").at(-1),
+						"the durable billing retry records its real terminal outcome",
+					).toMatchObject({
+						phase: "end",
+						success: variant === "live-subscription",
+						...(variant === "closing-subscription" ? { finalError: "Submission cancelled" } : {}),
+					});
+					expect(
+						(world.io.peekFile(file) ?? "").includes(reply),
+						"only the live replacement commits its actual reply",
+					).toBe(variant === "live-subscription");
+				}
+			} finally {
+				await world.disposeSessionInBody(session);
+			}
+		}
+		expect(authActions, "the inert subscription fixture performs no login or token refresh").toEqual([]);
+	} finally {
+		world.modelRegistry.restoreReloadSnapshot(registry);
+		world.authStorage.set(HARNESS_PROVIDER, credential);
 	}
 }

@@ -4,6 +4,7 @@ import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { PassThrough } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
+import { createEmptyUsage } from "@caupulican/pi-ai";
 import { configFile } from "../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
 import {
@@ -12,10 +13,21 @@ import {
 	DEFAULT_DISCARD_SCAN_LIMITS,
 } from "../../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
+import {
+	collectToolCallResultPairs,
+	resolvePreserveRecentPairs,
+} from "../../../src/core/compaction/evidence-retention-projection.ts";
 import { createFileArtifactStore } from "../../../src/core/context/context-artifacts.ts";
 import { acquireContextStoreRetention, getContextStoreDir } from "../../../src/core/context/context-store-retention.ts";
+import { sessionSemanticUsageOf } from "../../../src/core/cost/semantic-usage-delivery.ts";
+import {
+	journalSlotOf,
+	readJournal,
+	SEMANTIC_USAGE_JOURNAL_MAX_RECORDS,
+} from "../../../src/core/cost/semantic-usage-journal.ts";
+import { createSessionManagerLedgerPort } from "../../../src/core/cost/session-ledger-port.ts";
 import { classifyCustomEntryPersisted } from "../../../src/core/cost/spawned-usage-receipt.ts";
-import { SEMANTIC_USAGE_CUSTOM_TYPE } from "../../../src/core/cost/usage-records.ts";
+import { SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf } from "../../../src/core/cost/usage-records.ts";
 import type { WorkerWriteReservationLease } from "../../../src/core/delegation/worker-write-reservation.ts";
 import type { ExecResult } from "../../../src/core/exec.ts";
 import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
@@ -23,6 +35,7 @@ import { isGoalExecutionActive } from "../../../src/core/goals/goal-state.ts";
 import { getResumableHumanInputSnapshot } from "../../../src/core/human-input.ts";
 import { type MemoryLifecycleDiagnostic, MemoryManager } from "../../../src/core/memory/memory-manager.ts";
 import type { TranscriptSummaryTimeSource } from "../../../src/core/memory/transcript-memory-contracts.ts";
+import { resolveTranscriptSummarizer } from "../../../src/core/memory/transcript-summarizer.ts";
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
 import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../../src/core/reflection-controller.ts";
@@ -37,7 +50,7 @@ import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import { TerminalWarnings } from "../../../src/core/terminal-warnings.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "../../../src/core/tool-applicability-gate.ts";
 import type { ToolDef } from "../../../src/core/tools/index.ts";
-import { SessionManager } from "../../../src/kernel/session/session-manager.ts";
+import { CURRENT_SESSION_VERSION, SessionManager } from "../../../src/kernel/session/session-manager.ts";
 import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
 import { type RpcModeIo, runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import type { TerminationSignalHandler } from "../../../src/modes/termination-signals.ts";
@@ -46,6 +59,7 @@ import {
 	getWorkRunDir,
 	hasActiveWorkRunLease,
 	pruneWorkTenant,
+	removeWorkRun,
 	WORK_RUN_MANIFEST_FILE,
 	type WorkRetentionOptions,
 	type WorkRunLease,
@@ -2539,6 +2553,7 @@ export class HarnessWorld {
 				await attemptAsync(() => session.waitForForegroundIdle());
 				await attemptAsync(() => session.disposeAndWait());
 			}
+			await attemptAsync(() => this.guard.retireHttpDispatchers());
 			for (const unsubscribe of this.warningSubscriptions) attempt(unsubscribe);
 			await attemptAsync(() => this.provider.dispose());
 			await attemptAsync(() => this.humanInput.dispose());
@@ -2703,6 +2718,9 @@ function compactionLifecycle(text: string): Array<{ readonly type: string; reado
  * the closing verification notice; `control` is the normal order, where the run completes before the compaction commits.
  */
 export interface CompactionBehindHeldRunWitness {
+	readonly subscriptionsAfterQuit: number;
+	readonly retentionEligiblePairs: number;
+	readonly planningRequestsAfterQuit: number;
 	readonly inFlightAtStart: boolean;
 	readonly quitWarnings: readonly string[];
 	readonly warningsAfterRelease: readonly string[];
@@ -2714,6 +2732,8 @@ export interface CompactionBehindHeldRunWitness {
 	readonly requestsAtQuit: number;
 	readonly requestsAfterRelease: number;
 	readonly control: {
+		readonly reconnectSubscriptions: number;
+		readonly retentionPlanningReached: boolean;
 		readonly disposal: unknown;
 		readonly summary: string;
 		readonly lifecycle: ReturnType<typeof compactionLifecycle>;
@@ -2733,14 +2753,25 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 	const hold = createBarrier();
 	const reached = createBarrier();
 	const held = await world.createRootSession("root", {
-		sessionManager: world.createSessionManager(),
+		sessionManager: seedCompactionRetentionHistory(world, "held"),
 		settings: { memorySystem: undefined },
 		extensionFactories: [holdAssistantMessageEnd(hold, reached, replyText)],
 	});
 	const heldSession = held.session;
+	let quitSettled = false;
+	let subscriptionsAfterQuit = 0;
+	const subscribeHeld = heldSession.agent.subscribe.bind(heldSession.agent);
+	heldSession.agent.subscribe = (...args: Parameters<typeof heldSession.agent.subscribe>) => {
+		if (quitSettled) subscriptionsAfterQuit++;
+		return subscribeHeld(...args);
+	};
 	await heldSession.bindExtensions({ uiContext: world.humanInput.ui });
 	const heldFile = held.sessionManager.getSessionFile();
 	if (heldFile === undefined) throw new Error("the held compaction owner has no file");
+	const retentionEligiblePairs =
+		collectToolCallResultPairs(held.sessionManager.getBranch()).length - resolvePreserveRecentPairs();
+	if (retentionEligiblePairs !== 1)
+		throw new Error("held compaction history did not reach one unpinned retention candidate");
 	// Compaction needs history, so the owner first completes one plain turn; only the second reply is held.
 	world.provider.enqueue(
 		"root",
@@ -2774,6 +2805,7 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 	let fileAtQuit = "";
 	let requestsAtQuit = 0;
 	let quitWarnings: string[] = [];
+	let planningMarkAtQuit = 0;
 	let heldOutcome: unknown = "unsettled";
 	let heldRunOutcome: unknown = "unsettled";
 	try {
@@ -2784,6 +2816,8 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 			60_000,
 		);
 		fileAtQuit = world.io.peekFile(heldFile) ?? "";
+		quitSettled = true;
+		planningMarkAtQuit = world.systemOne.decoded.length;
 		requestsAtQuit = world.provider.requests.length;
 		quitWarnings = world.warnings.slice(mark).filter((message) => message !== CLOSING_VERIFICATION_NOTICE);
 	} finally {
@@ -2794,12 +2828,18 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 	const fileAfterRelease = world.io.peekFile(heldFile) ?? "";
 	const requestsAfterRelease = world.provider.requests.length;
 	const warningsAfterRelease = world.warnings.slice(mark).filter((message) => message !== CLOSING_VERIFICATION_NOTICE);
+	const planningRequestsAfterQuit = world.systemOne.decoded
+		.slice(planningMarkAtQuit)
+		.filter((request) =>
+			Object.keys(request.questions).some((id) => id.startsWith("keep_call::") || id.startsWith("keep_result::")),
+		).length;
+	if (planningRequestsAfterQuit !== 0) throw new Error("closed compaction started paid evidence retention planning");
 
 	// Normal order: the run completes, then the compaction commits through the same handler and the owner disposes with nothing in flight.
 	const released = createBarrier();
 	released.release();
 	const control = await world.createRootSession("root", {
-		sessionManager: world.createSessionManager(),
+		sessionManager: seedCompactionRetentionHistory(world, "control"),
 		settings: { memorySystem: undefined },
 		extensionFactories: [holdCompactionSummary(released, createBarrier())],
 	});
@@ -2817,14 +2857,51 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 		controlSession.prompt("Seed the control compaction."),
 	);
 	const controlMark = world.warnings.length;
+	const controlPlanningMark = world.systemOne.decoded.length;
+	if (world.systemOne.enabled)
+		world.systemOne.enterPhase(
+			"pre-start-retention-control",
+			{},
+			{
+				families: {
+					"keep_call::": { kind: "noul", probability: 0.97 },
+					"keep_result::": { kind: "noul", probability: 0.97 },
+				},
+			},
+		);
+	let reconnectSubscriptions = 0;
+	const subscribeControl = controlSession.agent.subscribe.bind(controlSession.agent);
+	controlSession.agent.subscribe = (...args: Parameters<typeof controlSession.agent.subscribe>) => {
+		reconnectSubscriptions++;
+		return subscribeControl(...args);
+	};
 	const committed = await withDeadline(
 		trace,
 		"pre-start control: the compaction commits",
 		controlSession.compact("Compact the control history."),
 	);
+	const retentionPlanningReached = world.systemOne.decoded
+		.slice(controlPlanningMark)
+		.some(
+			(request) =>
+				"keep_call::pre-start-control-0" in request.questions &&
+				"keep_result::pre-start-control-0" in request.questions,
+		);
+	if (world.systemOne.enabled && !retentionPlanningReached)
+		throw new Error("live compaction control never reached eligible retention planning");
+	if (subscriptionsAfterQuit !== 0 || reconnectSubscriptions !== 1) {
+		throw new Error(
+			`compaction consumer subscription boundary disagrees: after quit ${subscriptionsAfterQuit}, live control ${reconnectSubscriptions}`,
+		);
+	}
+	heldSession.agent.subscribe = subscribeHeld;
+	controlSession.agent.subscribe = subscribeControl;
 	const disposal = await world.disposeSessionInBody(controlSession);
 	const controlText = world.io.peekFile(controlFile) ?? "";
 	return {
+		subscriptionsAfterQuit,
+		retentionEligiblePairs,
+		planningRequestsAfterQuit,
 		inFlightAtStart,
 		quitWarnings,
 		warningsAfterRelease,
@@ -2836,6 +2913,8 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 		requestsAtQuit,
 		requestsAfterRelease,
 		control: {
+			reconnectSubscriptions,
+			retentionPlanningReached,
 			disposal,
 			summary: committed.summary,
 			lifecycle: compactionLifecycle(controlText),
@@ -2843,6 +2922,41 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 			quitWarnings: world.warnings.slice(controlMark).filter((message) => message !== CLOSING_VERIFICATION_NOTICE),
 		},
 	};
+}
+
+/** Canonical archived tool history: thirteen successful unpinned pairs exceed the unchanged twelve-pair recency floor. */
+function seedCompactionRetentionHistory(world: HarnessWorld, lane: "held" | "control"): SessionManager {
+	const manager = world.createSessionManager();
+	const model = world.provider.model("root");
+	const calls = Array.from({ length: 13 }, (_, index) => ({
+		type: "toolCall" as const,
+		id: `pre-start-${lane}-${index}`,
+		name: "read",
+		arguments: { path: projectPath(`archived-${index}.txt`) },
+	}));
+	manager.appendMessage({
+		role: "assistant",
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		content: calls,
+		usage: createEmptyUsage(),
+		stopReason: "toolUse",
+		timestamp: Date.now(),
+	});
+	for (const call of calls)
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: call.id,
+			toolName: call.name,
+			content: [{ type: "text", text: `Archived read result ${call.id}.` }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+	const pairs = collectToolCallResultPairs(manager.getBranch());
+	if (pairs.length !== 13 || pairs.some((pair) => pair.hasError || pair.isProofObligation))
+		throw new Error("archived retention history is not thirteen complete eligible tool pairs");
+	return manager;
 }
 
 /**
@@ -3172,7 +3286,100 @@ export interface SdkConstructionFailureWitness {
 	readonly providerErrors: ProviderErrorWitness;
 	/** Work-directory retention, lease liveness and adoption through the production owners (see {@link workDirectoryWitness}). */
 	readonly workDirectory: WorkDirectoryWitness;
+	/** Optional memory reporting, ambiguous lifecycle reload and held warning overflow through real session owners. */
+	readonly sessionWarningRoutes: SessionWarningRoutesWitness;
+	readonly runLifecycle: {
+		readonly refusedEnd: {
+			readonly failure: SdkErrorDescription;
+			readonly firstEnds: number;
+			readonly secondEnds: number;
+			readonly fabricatedFailures: number;
+			readonly idle: boolean;
+		};
+		readonly failedRun: {
+			readonly failure: SdkErrorDescription;
+			readonly firstEnds: number;
+			readonly secondEnds: number;
+			readonly originalFailureMessages: number;
+			readonly idle: boolean;
+			readonly bashCleanup: {
+				readonly faultFired: boolean;
+				readonly published: readonly string[];
+				readonly persisted: readonly string[];
+				readonly pendingSuffix: boolean;
+				readonly retryRefused: boolean;
+				readonly retryDidNotDuplicate: boolean;
+				readonly canonicalPrefixConfirmed: boolean;
+				readonly repairedPublished: readonly string[];
+				readonly repairedPersisted: readonly string[];
+				readonly repairedPendingEmpty: boolean;
+			};
+		};
+		readonly control: {
+			readonly firstEnds: number;
+			readonly secondEnds: number;
+			readonly fabricatedFailures: number;
+			readonly idle: boolean;
+			readonly publishedBash: readonly string[];
+			readonly persistedBash: readonly string[];
+		};
+	};
+	readonly unwrittenFork: {
+		readonly absentAtRuntimeConstruction: boolean;
+		readonly copiedPaidRowsAtConstruction: number;
+		readonly firstReplyReached: boolean;
+		readonly candidateKept: boolean;
+		readonly paidCopyDisclosed: boolean;
+		readonly previousRestored: boolean;
+	};
+	readonly historyUsageBounds: {
+		readonly seededRecords: number;
+		readonly liveOverflowTokens: number;
+		readonly overflowReports: number;
+		readonly liveDelta: number;
+		readonly overflowWarning: boolean;
+		readonly lateProviderReached: boolean;
+		readonly disposedOwnerUncharged: boolean;
+		readonly lateJournalTokens: number;
+		readonly reopenedDelta: number;
+		readonly overflowAbsentOnReopen: boolean;
+		readonly lateWarning: boolean;
+		readonly allWarningsClassified: boolean;
+	};
 }
+
+export interface SessionWarningRoutesWitness {
+	readonly optionalProvider: {
+		readonly initializeCalls: number;
+		readonly failureWarnings: readonly string[];
+		readonly liveListenerWarnings: readonly string[];
+		readonly consoleLines: readonly string[];
+		readonly controlWarnings: readonly string[];
+		readonly disposal: unknown;
+	};
+	readonly lifecycle: {
+		readonly refusalReasons: readonly string[];
+		readonly heldWarnings: readonly string[];
+		readonly liveReloadWarnings: readonly string[];
+		readonly ambiguousEntryUnchanged: boolean;
+		readonly controlWarnings: readonly string[];
+		readonly disposal: unknown;
+	};
+	readonly overflow: {
+		readonly closingCalls: number;
+		readonly retainedCount: number;
+		readonly boundedEntriesExact: boolean;
+		readonly astralBoundaryExact: boolean;
+		readonly disclosure: string | undefined;
+		readonly emptyRepeatedDrain: boolean;
+		readonly cleanReentry: boolean;
+	};
+}
+
+const SESSION_LIFECYCLE_REFUSAL_WARNING =
+	"Session lifecycle repair refused: duplicate, mismatched, or out-of-order records require manual review.";
+const OPTIONAL_MEMORY_WARNING =
+	"Memory provider witness-session-optional initialize error: Error: optional init failed [REDACTED]";
 
 /** One prune of a witness tenant: the basenames it removed (in return order), the runs still on disk after it, and the scan refusals it met. */
 export interface WorkRetentionWitness {
@@ -3188,17 +3395,48 @@ export interface WorkRetentionWitness {
 export interface WorkRemovalRefusalWitness {
 	/** The prune while the removal is refused: the refused run is not reported removed, and its neighbour is removed as its age requires. */
 	readonly refusedPrune: WorkRetentionWitness;
-	/** The removal attempts the refusal met: the refused run's recursive removal, once. */
+	/** The removal attempts the refusal met: the refused run's non-recursive root removal, once. */
 	readonly refusedRemovals: number;
+	/** Actual content deletion and ownership-metadata loss at the refused root removal boundary. */
+	readonly partialDeletionReached: boolean;
 	/**
-	 * The refused run is still owned after the refused prune: its manifest remains (the removal deletes content first and the manifest last,
-	 * so a part-way failure never leaves an unowned remnant) and no cleanup marker is left in it.
+	 * The owner withdraws metadata after content deletion, then root removal is refused. Recovery restores the exact manifest and releases its fence.
 	 */
 	readonly ownedAfterRefusal: boolean;
 	/** The refused run is not blocked by a leftover cleanup marker after the refusal. */
 	readonly blockedAfterRefusal: boolean;
 	/** The identical prune with the refusal cleared: the refused run is removed. */
 	readonly retriedPrune: WorkRetentionWitness;
+	readonly recoveryRefusal: {
+		readonly failure: SdkErrorDescription;
+		readonly partialDeletionReached: boolean;
+		readonly fenceBlocksAdoption: boolean;
+		readonly manifestMissing: boolean;
+		readonly acquisitionLeaseRolledBack: boolean;
+		readonly retryRemoved: boolean;
+	};
+	readonly unreadableSnapshot: {
+		readonly faultFired: boolean;
+		readonly contentUnchanged: boolean;
+		readonly refused: boolean;
+		readonly oversizedRefused: boolean;
+		readonly retryRemoved: boolean;
+	};
+	readonly acquisitionRace: {
+		readonly metadataBoundaryReached: boolean;
+		readonly concurrentAcquisitionRefused: boolean;
+		readonly lateEntryPreserved: boolean;
+		readonly exactManifestRestored: boolean;
+		readonly normalLeaseActive: boolean;
+		readonly postLeaseOwnershipLossRefused: boolean;
+		readonly postLeaseRolledBack: boolean;
+		readonly staleLeaseSnapshotReached: boolean;
+		readonly newMarkerDeletedByCleanup: boolean;
+		readonly recoveredManifestMatches: boolean;
+		readonly deletedLeaseRefused: boolean;
+		readonly survivingMarkerControl: boolean;
+		readonly normalRetryRemoved: boolean;
+	};
 }
 
 /** One lease probe through the public owner: whether the run stays active, and how many marker files its lease directory keeps. */
@@ -3319,6 +3557,96 @@ const SDK_MEMORY_WARNING = "Memory subsystem init failed: Error: Scripted IO fau
 
 /** Each held-warning routing with the cause the SDK chained onto its failure, and the normal-order control (see {@link runSdkConstructionFailure}). */
 export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = {
+	historyUsageBounds: {
+		seededRecords: 512,
+		liveOverflowTokens: 18,
+		overflowReports: 1,
+		liveDelta: 18,
+		overflowWarning: true,
+		lateProviderReached: true,
+		disposedOwnerUncharged: true,
+		lateJournalTokens: 23,
+		reopenedDelta: 23,
+		overflowAbsentOnReopen: true,
+		lateWarning: true,
+		allWarningsClassified: true,
+	},
+	unwrittenFork: {
+		absentAtRuntimeConstruction: true,
+		copiedPaidRowsAtConstruction: 1,
+		firstReplyReached: true,
+		candidateKept: true,
+		paidCopyDisclosed: true,
+		previousRestored: true,
+	},
+	runLifecycle: {
+		refusedEnd: { failure: "run-end refusal", firstEnds: 1, secondEnds: 1, fabricatedFailures: 0, idle: true },
+		failedRun: {
+			failure: {
+				name: "AggregateError",
+				message: "failure-record refusal",
+				errors: [
+					{
+						name: "AggregateError",
+						message: "failure-record refusal",
+						errors: ["original run failure", "failure-record refusal", "failed-end refusal"],
+					},
+					"scripted IO fault bash-second-append-refused (EIO)",
+				],
+			},
+			firstEnds: 1,
+			secondEnds: 1,
+			originalFailureMessages: 1,
+			idle: true,
+			bashCleanup: {
+				faultFired: true,
+				published: ["printf first"],
+				persisted: ["printf first"],
+				pendingSuffix: true,
+				retryRefused: true,
+				retryDidNotDuplicate: true,
+				canonicalPrefixConfirmed: true,
+				repairedPublished: ["printf first", "printf second"],
+				repairedPersisted: ["printf first", "printf second"],
+				repairedPendingEmpty: true,
+			},
+		},
+		control: {
+			firstEnds: 1,
+			secondEnds: 1,
+			fabricatedFailures: 0,
+			idle: true,
+			publishedBash: ["printf first", "printf second"],
+			persistedBash: ["printf first", "printf second"],
+		},
+	},
+	sessionWarningRoutes: {
+		optionalProvider: {
+			initializeCalls: 2,
+			failureWarnings: [OPTIONAL_MEMORY_WARNING],
+			liveListenerWarnings: [OPTIONAL_MEMORY_WARNING],
+			consoleLines: [],
+			controlWarnings: [],
+			disposal: undefined,
+		},
+		lifecycle: {
+			refusalReasons: ["unmatched compaction ends"],
+			heldWarnings: [SESSION_LIFECYCLE_REFUSAL_WARNING],
+			liveReloadWarnings: [SESSION_LIFECYCLE_REFUSAL_WARNING],
+			ambiguousEntryUnchanged: true,
+			controlWarnings: [],
+			disposal: undefined,
+		},
+		overflow: {
+			closingCalls: 1,
+			retainedCount: 100,
+			boundedEntriesExact: true,
+			astralBoundaryExact: true,
+			disclosure: "1 warning(s) raised while no listener was attached were not held.",
+			emptyRepeatedDrain: true,
+			cleanReentry: true,
+		},
+	},
 	objective: {
 		failure: "objective_primary cannot start: missing required binding 'ObjectiveExecutionController'",
 		warnings: [],
@@ -3526,9 +3854,47 @@ export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = 
 		removalRefusal: {
 			refusedPrune: { removed: ["b-neighbour"], remaining: ["a-refused"], refusedScans: 0 },
 			refusedRemovals: 1,
+			partialDeletionReached: true,
 			ownedAfterRefusal: true,
 			blockedAfterRefusal: false,
 			retriedPrune: { removed: ["a-refused"], remaining: [], refusedScans: 0 },
+			recoveryRefusal: {
+				failure: {
+					name: "AggregateError",
+					message: "Work run removal recovery is incomplete: <RUN_DIR>",
+					errors: [
+						"scripted IO fault recovery-root-refused (EACCES)",
+						"scripted IO fault recovery-manifest-refused (EIO)",
+					],
+				},
+				partialDeletionReached: true,
+				fenceBlocksAdoption: true,
+				manifestMissing: true,
+				acquisitionLeaseRolledBack: true,
+				retryRemoved: true,
+			},
+			unreadableSnapshot: {
+				faultFired: true,
+				contentUnchanged: true,
+				refused: true,
+				oversizedRefused: true,
+				retryRemoved: true,
+			},
+			acquisitionRace: {
+				metadataBoundaryReached: true,
+				concurrentAcquisitionRefused: true,
+				lateEntryPreserved: true,
+				exactManifestRestored: true,
+				normalLeaseActive: true,
+				postLeaseOwnershipLossRefused: true,
+				postLeaseRolledBack: true,
+				staleLeaseSnapshotReached: true,
+				newMarkerDeletedByCleanup: true,
+				recoveredManifestMatches: true,
+				deletedLeaseRefused: true,
+				survivingMarkerControl: true,
+				normalRetryRemoved: true,
+			},
 		},
 		leaseProbes: {
 			alive: { active: true, markers: 1, probed: true },
@@ -3916,10 +4282,9 @@ function remainingWitnessRuns(world: HarnessWorld, tenant: string, runs: readonl
 }
 
 /**
- * A removal the filesystem refuses for one run: the run's recursive removal fails with EACCES, and the virtual filesystem refuses it before any entry
- * is deleted. The run keeps its directory and artifacts, and the cleanup marker the removal wrote is released, so the run is not left blocked. Its
- * neighbour is expired too, so the refusal does not stop the prune. The refusal holds for the first prune only and is cleared before the identical
- * retry, which removes the run.
+ * Content is deleted first, then the owner withdraws its manifest and fence before the root removal's EACCES. Recovery restores ownership and
+ * releases the fence, the expired neighbour is still removed, and the identical retry removes the recovered run. Separate branches refuse
+ * recovery and the initial ownership snapshot through the same owner.
  */
 function removalRefusalWitness(world: HarnessWorld, now: number): WorkRemovalRefusalWitness {
 	const tenant = "removal-refused";
@@ -3929,13 +4294,22 @@ function removalRefusalWitness(world: HarnessWorld, now: number): WorkRemovalRef
 	];
 	seedWorkTenant(world, tenant, runs, now);
 	const refusedDir = workWitnessRunDir(world, tenant, "a-refused");
+	const originalManifest = world.io.peekFile(join(refusedDir, WORK_RUN_MANIFEST_FILE));
+	let partialDeletionReached = false;
 	// Both runs are past the age bound at this clock, so the removal of each is what the prune attempts.
 	const pruneOptions = { ...WORK_WITNESS_BOUNDS, now: now + 2 * WORK_WITNESS_MAX_AGE_MS };
 	const refusal = world.io.denyUntilCleared({
 		name: `${tenant}-removal-refused`,
 		kind: "rm",
 		code: "EACCES",
-		matches: (operation) => operation.path === refusedDir,
+		matches: (operation) => {
+			if (operation.path !== refusedDir) return false;
+			partialDeletionReached =
+				!world.io.existsSync(join(refusedDir, "artifacts")) &&
+				!world.io.existsSync(join(refusedDir, WORK_RUN_MANIFEST_FILE)) &&
+				!world.io.existsSync(join(refusedDir, WORK_WITNESS_CLEANUP_MARKER));
+			return true;
+		},
 	});
 	const refusedRemoved = pruneWorkTenant(world.agentDir, WORK_WITNESS_CATEGORY, tenant, pruneOptions);
 	const refusedRemovals = refusal.clear();
@@ -3945,13 +4319,14 @@ function removalRefusalWitness(world: HarnessWorld, now: number): WorkRemovalRef
 		refusedScans: 0,
 	};
 	const ownedAfterRefusal =
-		world.io.existsSync(join(refusedDir, WORK_RUN_MANIFEST_FILE)) &&
+		world.io.peekFile(join(refusedDir, WORK_RUN_MANIFEST_FILE)) === originalManifest &&
 		!world.io.existsSync(join(refusedDir, WORK_WITNESS_CLEANUP_MARKER));
 	const blockedAfterRefusal = hasActiveWorkRunLease(refusedDir);
 	const retriedRemoved = pruneWorkTenant(world.agentDir, WORK_WITNESS_CATEGORY, tenant, pruneOptions);
 	return {
 		refusedPrune,
 		refusedRemovals,
+		partialDeletionReached,
 		ownedAfterRefusal,
 		blockedAfterRefusal,
 		retriedPrune: {
@@ -3959,6 +4334,259 @@ function removalRefusalWitness(world: HarnessWorld, now: number): WorkRemovalRef
 			remaining: remainingWitnessRuns(world, tenant, runs),
 			refusedScans: 0,
 		},
+		recoveryRefusal: workRemovalRecoveryRefusal(world),
+		unreadableSnapshot: workRemovalUnreadableSnapshot(world),
+		acquisitionRace: workRemovalAcquisitionRace(world),
+	};
+}
+
+/** Acquisition at the final metadata boundary refuses; a late entry makes non-recursive removal recover rather than consume it. */
+function workRemovalAcquisitionRace(world: HarnessWorld): WorkRemovalRefusalWitness["acquisitionRace"] {
+	const options = {
+		agentDir: world.agentDir,
+		category: WORK_WITNESS_CATEGORY,
+		tenant: "acquisition-race",
+		runId: "held",
+		retention: false as const,
+	};
+	const lease = acquireWorkRun(options);
+	const manifestPath = join(lease.path, WORK_RUN_MANIFEST_FILE);
+	const fencePath = join(lease.path, WORK_WITNESS_CLEANUP_MARKER);
+	const manifest = world.io.peekFile(manifestPath);
+	if (manifest === undefined) throw new Error("acquisition race witness has no manifest");
+	const latePath = join(lease.path, "late.txt");
+	let metadataBoundaryReached = false;
+	let concurrentAcquisitionRefused = false;
+	world.io.observeNext({
+		name: "acquire-at-final-metadata",
+		kind: "unlink",
+		phase: "after",
+		matches: (operation) => operation.path === fencePath,
+		onMatch: () => {
+			metadataBoundaryReached = !world.io.existsSync(manifestPath) && !world.io.existsSync(fencePath);
+			try {
+				acquireWorkRun(options);
+			} catch (error) {
+				concurrentAcquisitionRefused = error instanceof Error && error.message.includes("unowned");
+			}
+			// A concurrent writer's new entry is already present when the owner attempts the final directory syscall.
+			world.io.seed(latePath, "concurrent content");
+		},
+	});
+	if (removeWorkRun(lease)) throw new Error("root removal consumed the concurrent entry");
+	const lateEntryPreserved = world.io.peekFile(latePath) === "concurrent content";
+	const exactManifestRestored = world.io.peekFile(manifestPath) === manifest;
+	const normal = acquireWorkRun(options);
+	const normalLeaseActive = hasActiveWorkRunLease(normal.path);
+	normal.release();
+	let postLeaseOwnershipLossRefused = false;
+	world.io.observeNext({
+		name: "ownership-loss-after-new-lease",
+		kind: "write",
+		phase: "after",
+		matches: (operation) => operation.path.startsWith(`${join(lease.path, WORK_WITNESS_LEASES)}${sep}`),
+		onMatch: () => {
+			world.io.unlinkSync(manifestPath);
+		},
+	});
+	try {
+		acquireWorkRun(options);
+	} catch (error) {
+		postLeaseOwnershipLossRefused = (error as NodeJS.ErrnoException).code === "ENOENT";
+	}
+	const postLeaseRolledBack = world.io.captureTree(join(lease.path, WORK_WITNESS_LEASES)).files.size === 0;
+	world.io.writeFileSync(manifestPath, manifest);
+	let staleLeaseSnapshotReached = false;
+	let newMarkerDeletedByCleanup = false;
+	let recoveredManifestMatches = false;
+	let deletedLeaseRefused = false;
+	const leasesDir = join(lease.path, WORK_WITNESS_LEASES);
+	world.io.failNext({
+		name: "lease-race-root-refused",
+		kind: "rm",
+		code: "EACCES",
+		matches: (operation) => operation.path === lease.path,
+	});
+	world.io.observeNext({
+		name: "defer-new-marker-until-cleaner-snapshot",
+		kind: "write",
+		phase: "after",
+		matches: (operation) => operation.path.startsWith(`${leasesDir}${sep}`),
+		onMatch: (operation, data) => {
+			if (data === undefined) throw new Error("lease race boundary has no written marker bytes");
+			// Model the two OS syscalls' ordering: the acquirer's actual write is pending visibility when the cleaner captures
+			// its empty listing, then these exact bytes land before that captured listing returns. No domain result is supplied.
+			world.io.unlinkSync(operation.path);
+			world.io.observeNext({
+				name: "new-marker-lands-after-empty-lease-snapshot",
+				kind: "readdir",
+				phase: "after",
+				matches: (listing) => listing.path === leasesDir,
+				onMatch: () => {
+					staleLeaseSnapshotReached = world.io.captureTree(leasesDir).files.size === 0;
+					world.io.writeFileSync(operation.path, data);
+				},
+			});
+			if (removeWorkRun(lease)) throw new Error("lease race cleanup did not reach its refused root removal");
+			newMarkerDeletedByCleanup = !world.io.existsSync(operation.path);
+			recoveredManifestMatches = world.io.peekFile(manifestPath) === manifest && !world.io.existsSync(fencePath);
+		},
+	});
+	try {
+		acquireWorkRun(options);
+	} catch (error) {
+		deletedLeaseRefused = (error as NodeJS.ErrnoException).code === "ENOENT";
+	}
+	const markerControl = acquireWorkRun(options);
+	const survivingMarkerControl =
+		hasActiveWorkRunLease(markerControl.path) && world.io.captureTree(leasesDir).files.size === 1;
+	markerControl.release();
+	return {
+		metadataBoundaryReached,
+		concurrentAcquisitionRefused,
+		lateEntryPreserved,
+		exactManifestRestored,
+		normalLeaseActive,
+		postLeaseOwnershipLossRefused,
+		postLeaseRolledBack,
+		staleLeaseSnapshotReached,
+		newMarkerDeletedByCleanup,
+		recoveredManifestMatches,
+		deletedLeaseRefused,
+		survivingMarkerControl,
+		normalRetryRemoved: removeWorkRun(lease),
+	};
+}
+
+/** Root removal loses metadata and fails after content deletion; ownership restoration is also refused. */
+function workRemovalRecoveryRefusal(world: HarnessWorld): WorkRemovalRefusalWitness["recoveryRefusal"] {
+	const lease = acquireWorkRun({
+		agentDir: world.agentDir,
+		category: WORK_WITNESS_CATEGORY,
+		tenant: "recovery-refused",
+		retention: false,
+	});
+	const manifestPath = join(lease.path, WORK_RUN_MANIFEST_FILE);
+	const fencePath = join(lease.path, WORK_WITNESS_CLEANUP_MARKER);
+	const manifest = world.io.peekFile(manifestPath);
+	if (manifest === undefined) throw new Error("recovery witness has no manifest");
+	world.io.seed(join(lease.path, "payload.txt"), "owned content");
+	let partialDeletionReached = false;
+	world.io.failNext({
+		name: "recovery-root-refused",
+		kind: "rm",
+		code: "EACCES",
+		matches: (operation) => {
+			if (operation.path !== lease.path) return false;
+			partialDeletionReached =
+				!world.io.existsSync(join(lease.path, "payload.txt")) &&
+				!world.io.existsSync(manifestPath) &&
+				!world.io.existsSync(fencePath);
+			return true;
+		},
+	});
+	world.io.failNext({
+		name: "recovery-manifest-refused",
+		kind: "write",
+		code: "EIO",
+		matches: (operation) => operation.path === manifestPath,
+	});
+	let failure: unknown;
+	lease.release();
+	const candidatePath = workWitnessRunDir(world, lease.tenant, "new-candidate");
+	try {
+		acquireWorkRun({
+			agentDir: world.agentDir,
+			category: WORK_WITNESS_CATEGORY,
+			tenant: lease.tenant,
+			runId: "new-candidate",
+			retention: { maxRuns: 1 },
+		});
+	} catch (error) {
+		failure = error;
+	}
+	if (failure === undefined) throw new Error("incomplete recovery reported no failure");
+	const acquisitionLeaseRolledBack = world.io.captureTree(join(candidatePath, WORK_WITNESS_LEASES)).files.size === 0;
+	const manifestMissing = !world.io.existsSync(manifestPath);
+	// Exact owner repair permits a retry; before releasing its fence, even matching restored ownership cannot be adopted.
+	world.io.writeFileSync(manifestPath, manifest);
+	let adoptionRefused = false;
+	try {
+		acquireWorkRun({
+			agentDir: world.agentDir,
+			category: WORK_WITNESS_CATEGORY,
+			tenant: lease.tenant,
+			runId: lease.runId,
+			retention: false,
+		});
+	} catch (error) {
+		adoptionRefused = error instanceof Error && error.message.includes("being cleaned");
+	}
+	const fenceBlocksAdoption = hasActiveWorkRunLease(lease.path) && adoptionRefused;
+	world.io.unlinkSync(fencePath);
+	removeWorkRun(
+		acquireWorkRun({
+			agentDir: world.agentDir,
+			category: WORK_WITNESS_CATEGORY,
+			tenant: lease.tenant,
+			runId: "new-candidate",
+			retention: false,
+		}),
+	);
+	return {
+		failure: tokenizeRunDir(lease.path, describeErrorEntry(failure)),
+		partialDeletionReached,
+		fenceBlocksAdoption,
+		manifestMissing,
+		acquisitionLeaseRolledBack,
+		retryRemoved: removeWorkRun(lease),
+	};
+}
+
+/** An unreadable ownership snapshot refuses removal before the first content mutation; the same lease removes normally once readable. */
+function workRemovalUnreadableSnapshot(world: HarnessWorld): WorkRemovalRefusalWitness["unreadableSnapshot"] {
+	const lease = acquireWorkRun({
+		agentDir: world.agentDir,
+		category: WORK_WITNESS_CATEGORY,
+		tenant: "snapshot-unreadable",
+		retention: false,
+	});
+	const payload = join(lease.path, "payload.txt");
+	world.io.seed(payload, "owned content");
+	world.io.failNext({
+		name: "snapshot-read-refused",
+		kind: "read",
+		code: "EIO",
+		matches: (operation) => operation.path === join(lease.path, WORK_RUN_MANIFEST_FILE),
+	});
+	let refused = false;
+	try {
+		removeWorkRun(lease);
+	} catch (error) {
+		refused =
+			error instanceof Error && error.message.includes("snapshotted before removal") && error.cause instanceof Error;
+	}
+	const manifestPath = join(lease.path, WORK_RUN_MANIFEST_FILE);
+	const manifest = world.io.peekFile(manifestPath);
+	if (manifest === undefined) throw new Error("snapshot witness has no manifest");
+	// Still valid matching JSON, but beyond the ownership snapshot cap: refusal must precede content deletion.
+	world.io.writeFileSync(manifestPath, manifest.padEnd(4097));
+	let oversizedRefused = false;
+	try {
+		removeWorkRun(lease);
+	} catch (error) {
+		oversizedRefused =
+			error instanceof Error &&
+			error.cause instanceof Error &&
+			error.cause.message.includes("Invalid work metadata file");
+	}
+	world.io.writeFileSync(manifestPath, manifest);
+	return {
+		faultFired: world.io.consumedFaults.includes("snapshot-read-refused"),
+		contentUnchanged: world.io.peekFile(payload) === "owned content",
+		refused,
+		oversizedRefused,
+		retryRemoved: removeWorkRun(lease),
 	};
 }
 
@@ -4384,6 +5012,594 @@ function workDirectoryWitness(world: HarnessWorld): WorkDirectoryWitness {
 	};
 }
 
+/** Session-owned memory diagnostics stay live, ambiguous durable history warns again on reload, and closing drains stay bounded. */
+async function sessionWarningRoutesWitness(world: HarnessWorld): Promise<SessionWarningRoutesWitness> {
+	const closing: string[][] = [];
+	const optional = await world.createRootSession("root", {
+		systemOneEnabled: false,
+		settings: { memorySystem: "okf" },
+		closingSink: (warnings) => closing.push([...warnings]),
+	});
+	let initializeCalls = 0;
+	let failInitialize = true;
+	optional.session.registerMemoryProvider({
+		name: "witness-session-optional",
+		isAvailable: () => true,
+		getCapabilities: () => ({ surfaces: [] }),
+		initialize: async () => {
+			initializeCalls++;
+			if (failInitialize) throw new Error("optional init failed Bearer\topaque0123456789token");
+		},
+		shutdown: async () => {},
+	});
+	const liveListenerWarnings: string[] = [];
+	const unsubscribe = optional.session.subscribe((event) => {
+		if (event.type === "warning") liveListenerWarnings.push(event.message);
+	});
+	const consoleLines: string[] = [];
+	const logError = console.error;
+	console.error = (...data: unknown[]) => {
+		const line = data.map(String).join(" ");
+		if (line.startsWith("Memory provider witness-session-optional ")) consoleLines.push(line);
+		else logError(...data);
+	};
+	const failureMark = world.warnings.length;
+	let failureWarnings: string[];
+	let controlWarnings: string[];
+	try {
+		await optional.session.initializeMemory();
+		failureWarnings = world.warnings.splice(failureMark);
+		failInitialize = false;
+		const controlMark = world.warnings.length;
+		await optional.session.initializeMemory();
+		controlWarnings = world.warnings.splice(controlMark);
+	} finally {
+		console.error = logError;
+		unsubscribe();
+	}
+	const optionalDisposal = await world.disposeSessionInBody(optional.session);
+	const disposedSnapshot = optional.session.getResourceSnapshot();
+	for (let index = 0; index < 101; index++) {
+		optional.session.emitHostWarning(
+			index === 0 ? `${"a".repeat(499)}\u{1f9ed}tail` : `overflow-${index}: ${"x".repeat(600)}`,
+		);
+	}
+	await optional.session.disposeAndWait();
+	const retained = closing[0] ?? [];
+	const expectedRetained = Array.from({ length: 100 }, (_, index) => {
+		if (index === 0) return `${"a".repeat(499)}…`;
+		const prefix = `overflow-${index}: `;
+		return `${prefix}${"x".repeat(499 - prefix.length)}…`;
+	});
+	const emptyRepeatedDrain = optional.session.takeUndeliveredWarnings().length === 0;
+	await optional.session.disposeAndWait();
+	const cleanReentry =
+		closing.length === 1 && isDeepStrictEqual(disposedSnapshot, optional.session.getResourceSnapshot());
+
+	// A loaded end without its start is valid persisted syntax and ambiguous lifecycle evidence. Opening the crafted file
+	// establishes the inspector's actual in-memory branch; changing disk behind an already loaded manager would not do so.
+	const fixtureManager = world.createSessionManager();
+	const file = fixtureManager.getSessionFile();
+	if (file === undefined) throw new Error("lifecycle warning witness has no session path");
+	const timestamp = new Date().toISOString();
+	const ambiguous = {
+		type: "compaction_end",
+		id: "warning-end",
+		parentId: null,
+		timestamp,
+		compactionId: "warning-compaction",
+		outcome: "interrupted",
+	};
+	world.io.seed(
+		file,
+		`${JSON.stringify({ type: "session", version: CURRENT_SESSION_VERSION, id: fixtureManager.getSessionId(), timestamp, cwd: HARNESS_PROJECT_CWD })}\n${JSON.stringify(ambiguous)}\n`,
+	);
+	const reopened = world.openSessionManager(file);
+	const refusalReasons = reopened.inspectSessionLifecycle().refusalReasons;
+	const heldMark = world.warnings.length;
+	const lifecycleOwner = await world.createRootSession("root", {
+		sessionManager: reopened,
+		systemOneEnabled: false,
+		settings: { memorySystem: undefined },
+	});
+	const heldWarnings = world.warnings.splice(heldMark);
+	const reloadMark = world.warnings.length;
+	await lifecycleOwner.session.reload();
+	const liveReloadWarnings = world.warnings.splice(reloadMark);
+	const ambiguousEntries = reopened.getEntries().filter((entry) => entry.type === "compaction_end");
+	const ambiguousEntryUnchanged =
+		ambiguousEntries.length === 1 && JSON.stringify(ambiguousEntries[0]) === JSON.stringify(ambiguous);
+	const lifecycleDisposal = await world.disposeSessionInBody(lifecycleOwner.session);
+	const normalMark = world.warnings.length;
+	const normal = await world.createRootSession("root", {
+		systemOneEnabled: false,
+		settings: { memorySystem: undefined },
+	});
+	await normal.session.reload();
+	const normalWarnings = world.warnings.splice(normalMark);
+	await world.disposeSessionInBody(normal.session);
+	return {
+		optionalProvider: {
+			initializeCalls,
+			failureWarnings,
+			liveListenerWarnings,
+			consoleLines,
+			controlWarnings,
+			disposal: optionalDisposal,
+		},
+		lifecycle: {
+			refusalReasons,
+			heldWarnings,
+			liveReloadWarnings,
+			ambiguousEntryUnchanged,
+			controlWarnings: normalWarnings,
+			disposal: lifecycleDisposal,
+		},
+		overflow: {
+			closingCalls: closing.length,
+			retainedCount: Math.max(0, retained.length - 1),
+			boundedEntriesExact: isDeepStrictEqual(retained.slice(0, 100), expectedRetained),
+			astralBoundaryExact: retained[0] === `${"a".repeat(499)}…` && retained[0].length === 500,
+			disclosure: retained[100],
+			emptyRepeatedDrain,
+			cleanReentry,
+		},
+	};
+}
+
+/** Real SDK runs: end-listener refusal reaches all listeners without fabricating failure, and failed-run cleanup keeps its original cause. */
+async function runLifecycleWitness(world: HarnessWorld): Promise<SdkConstructionFailureWitness["runLifecycle"]> {
+	const results: {
+		-readonly [K in keyof SdkConstructionFailureWitness["runLifecycle"]]?: SdkConstructionFailureWitness["runLifecycle"][K];
+	} = {};
+	for (const variant of ["refusedEnd", "failedRun", "control"] as const) {
+		const owner = await world.createRootSession("root", {
+			systemOneEnabled: false,
+			sessionManager: world.createSessionManager(),
+			settings: { memorySystem: undefined },
+		});
+		let firstEnds = 0;
+		let secondEnds = 0;
+		const hold = createBarrier();
+		const reached = createBarrier();
+		const first = owner.session.agent.subscribe(async (event) => {
+			if (variant !== "refusedEnd" && event.type === "message_start" && event.message.role === "user") {
+				reached.release();
+				await hold.promise;
+				if (variant === "failedRun") throw new Error("original run failure");
+			}
+			if (
+				variant === "failedRun" &&
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				event.message.errorMessage === "original run failure"
+			)
+				throw new Error("failure-record refusal");
+			if (event.type !== "agent_end") return;
+			firstEnds++;
+			if (variant === "refusedEnd") throw new Error("run-end refusal");
+			if (variant === "failedRun") throw new Error("failed-end refusal");
+		});
+		const second = owner.session.agent.subscribe((event) => {
+			if (event.type === "agent_end") secondEnds++;
+		});
+		if (variant !== "failedRun")
+			world.provider.enqueue("root", {
+				name: `listener-${variant}`,
+				reply: { content: [{ type: "text", text: `Completed ${variant}.` }] },
+			});
+		const run = owner.session.prompt(`Run the ${variant} lifecycle boundary.`).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		if (variant !== "refusedEnd") {
+			try {
+				await withDeadline(
+					world.trace,
+					`listener ${variant}: owner run holds before provider work`,
+					reached.promise,
+				);
+				world.shell.enqueue(
+					...["first", "second"].map((name) => ({
+						name: `listener-${variant}-bash-${name}`,
+						command: `printf ${name}`,
+						output: name,
+						exitCode: 0,
+					})),
+				);
+				await owner.session.executeBash("printf first", undefined, { operations: world.shell });
+				await owner.session.executeBash("printf second", undefined, { operations: world.shell });
+				if (!owner.session.hasPendingBashMessages)
+					throw new Error(`${variant}: owner bash outputs were not deferred by the real streaming session`);
+				if (variant === "failedRun") {
+					const file = owner.sessionManager.getSessionFile();
+					world.io.failNext({
+						name: "bash-second-append-refused",
+						kind: "append",
+						code: "EIO",
+						matches: (operation, data) =>
+							operation.path === file && data?.includes('"command":"printf second"') === true,
+					});
+				}
+			} finally {
+				hold.release();
+			}
+		}
+		const failure = await withDeadline(world.trace, `listener ${variant}: run settles`, run);
+		if (variant === "control") {
+			if (failure !== undefined) throw failure;
+		} else {
+			if (failure === undefined) throw new Error(`${variant}: the refusing listener produced no caller failure`);
+			world.trace.claimRejection(failure, variant === "refusedEnd" ? "run-end refusal" : "failure-record refusal");
+		}
+		await owner.session.agent.waitForIdle();
+		const errors = owner.session.state.messages.filter(
+			(message) => message.role === "assistant" && message.stopReason === "error",
+		);
+		const idle = !owner.session.isStreaming;
+		const publishedBash = () =>
+			owner.session.state.messages
+				.filter((message) => message.role === "bashExecution")
+				.map((message) => (message.role === "bashExecution" ? message.command : ""));
+		const persistedBash = () =>
+			owner.sessionManager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "message" && entry.message.role === "bashExecution" ? [entry.message.command] : [],
+				);
+		if (variant === "failedRun") {
+			const published = publishedBash();
+			const persisted = owner.sessionManager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "message" && entry.message.role === "bashExecution" ? [entry.message.command] : [],
+				);
+			let retryRefused = false;
+			try {
+				await owner.session.prompt("Retry the failed owner flush before starting provider work.");
+			} catch (error) {
+				retryRefused = error instanceof Error && error.message.includes("persistence state is uncertain");
+				world.trace.claimRejection(error, /persistence state is uncertain/);
+			}
+			const retryDidNotDuplicate = isDeepStrictEqual(publishedBash(), published);
+			const pendingSuffix = owner.session.hasPendingBashMessages;
+			const file = owner.sessionManager.getSessionFile();
+			if (file === undefined) throw new Error("bash recovery has no persisted session file");
+			const canonical = world.io.peekFile(file) ?? "";
+			const canonicalPrefixConfirmed =
+				canonical.includes('"command":"printf first"') && !canonical.includes('"command":"printf second"');
+			if (!canonicalPrefixConfirmed)
+				throw new Error("pre-write bash refusal did not preserve the exact committed prefix");
+			first();
+			second();
+			// This is recovery from the witnessed pre-write refusal, not a claim about a write that may have physically completed.
+			owner.sessionManager.setSessionFile(file);
+			world.provider.enqueue("root", {
+				name: "listener-repaired-bash",
+				reply: { content: [{ type: "text", text: "Reopened owner resumes after its bash suffix commits." }] },
+			});
+			await owner.session.prompt("Resume after reopening the session's witnessed committed prefix.");
+			results.failedRun = {
+				failure: describeErrorEntry(failure),
+				firstEnds,
+				secondEnds,
+				originalFailureMessages: errors.filter(
+					(message) => message.role === "assistant" && message.errorMessage === "original run failure",
+				).length,
+				idle,
+				bashCleanup: {
+					faultFired: world.io.consumedFaults.includes("bash-second-append-refused"),
+					published,
+					persisted,
+					pendingSuffix,
+					retryRefused,
+					retryDidNotDuplicate,
+					canonicalPrefixConfirmed,
+					repairedPublished: publishedBash(),
+					repairedPersisted: persistedBash(),
+					repairedPendingEmpty: !owner.session.hasPendingBashMessages,
+				},
+			};
+		} else if (variant === "refusedEnd")
+			results.refusedEnd = {
+				failure: describeErrorEntry(failure),
+				firstEnds,
+				secondEnds,
+				fabricatedFailures: errors.length,
+				idle,
+			};
+		else
+			results.control = {
+				firstEnds,
+				secondEnds,
+				fabricatedFailures: errors.length,
+				idle,
+				publishedBash: publishedBash(),
+				persistedBash: persistedBash(),
+			};
+		first();
+		second();
+		await world.disposeSessionInBody(owner.session);
+	}
+	if (results.refusedEnd === undefined || results.failedRun === undefined || results.control === undefined)
+		throw new Error("run lifecycle variant did not execute");
+	return { refusedEnd: results.refusedEnd, failedRun: results.failedRun, control: results.control };
+}
+
+/** A persisted interrupted source has paid metadata but no reply: its real fork is unwritten when the runtime captures the copy baseline. */
+async function unwrittenForkWitness(world: HarnessWorld): Promise<SdkConstructionFailureWitness["unwrittenFork"]> {
+	const source = world.createSessionManager();
+	const sourceFile = source.getSessionFile();
+	if (sourceFile === undefined) throw new Error("unwritten fork source has no path");
+	const timestamp = new Date().toISOString();
+	const copiedUsage = createEmptyUsage();
+	copiedUsage.input = 19;
+	copiedUsage.totalTokens = 19;
+	const copied = {
+		type: "custom",
+		id: "unwritten-paid-copy",
+		parentId: null,
+		timestamp,
+		customType: SEMANTIC_USAGE_CUSTOM_TYPE,
+		data: semanticUsageReportOf({
+			receiptId: "unwritten-copy-usage",
+			provider: HARNESS_PROVIDER,
+			model: "root",
+			attempt: 1,
+			costStatus: "unpriced",
+			route: "history_summary",
+			usage: copiedUsage,
+		}),
+	};
+	world.io.seed(
+		sourceFile,
+		`${JSON.stringify({ type: "session", version: CURRENT_SESSION_VERSION, id: source.getSessionId(), timestamp, cwd: HARNESS_PROJECT_CWD })}\n${JSON.stringify(copied)}\n`,
+	);
+	const reopened = world.openSessionManager(sourceFile);
+	let candidateFile: string | undefined;
+	let absentAtRuntimeConstruction = false;
+	let copiedPaidRowsAtConstruction = 0;
+	const routed: string[] = [];
+	const runtime = await createAgentSessionRuntime(
+		async ({ cwd, agentDir, sessionManager }) => {
+			if (sessionManager.getSessionId() !== reopened.getSessionId()) {
+				candidateFile = sessionManager.getSessionFile();
+				absentAtRuntimeConstruction = candidateFile !== undefined && !world.io.existsSync(candidateFile);
+				copiedPaidRowsAtConstruction = sessionManager
+					.getEntries()
+					.filter((entry) => entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE).length;
+			}
+			const root = await world.createRootSession("root", {
+				agentDir,
+				sessionManager,
+				systemOneEnabled: false,
+				settings: { memorySystem: undefined },
+			});
+			return {
+				session: root.session,
+				sessionManager: root.sessionManager,
+				getExtensionRunner: root.getExtensionRunner,
+				extensionsResult: root.extensionsResult,
+				services: {
+					cwd,
+					agentDir,
+					authStorage: world.authStorage,
+					settingsManager: root.settingsManager,
+					modelRegistry: world.modelRegistry,
+					resourceLoader: root.session.resourceLoader,
+					diagnostics: [],
+				},
+				diagnostics: [],
+			};
+		},
+		{
+			cwd: HARNESS_PROJECT_CWD,
+			agentDir: world.agentDir,
+			sessionManager: reopened,
+			onTerminalWarnings: (warnings) => routed.push(...warnings),
+		},
+	);
+	let firstReplyReached = false;
+	runtime.setRebindSession(async (session) => {
+		if (session.sessionFile === sourceFile) return;
+		if (!absentAtRuntimeConstruction || copiedPaidRowsAtConstruction !== 1)
+			throw new Error("unwritten-fork baseline premise was not reached");
+		world.provider.enqueue("root", {
+			name: "unwritten-fork-first-reply",
+			reply: { content: [{ type: "text", text: "Candidate writes its first reply." }] },
+		});
+		await session.prompt("Write this candidate's first reply before its activation is refused.");
+		firstReplyReached =
+			world.provider.reached.includes("root:unwritten-fork-first-reply") &&
+			candidateFile !== undefined &&
+			world.io.existsSync(candidateFile);
+		throw new Error("unwritten candidate activation refused");
+	});
+	const warningMark = world.warnings.length;
+	let rejection: unknown;
+	try {
+		await runtime.fork(copied.id, { position: "at" });
+	} catch (error) {
+		rejection = error;
+	}
+	if (!(rejection instanceof Error) || !rejection.message.includes("unwritten candidate activation refused"))
+		throw new Error("unwritten fork activation did not preserve its refusal");
+	const warnings = [...world.warnings.splice(warningMark), ...runtime.session.takeUndeliveredWarnings(), ...routed];
+	const candidateKept = candidateFile !== undefined && world.io.existsSync(candidateFile);
+	const paidCopyDisclosed = warnings.some(
+		(warning) =>
+			warning.startsWith("Usage handoff: 1 paid usage row(s) are present in ") &&
+			warning.includes("rows copied from a source session may also be recorded there."),
+	);
+	const previousRestored = runtime.sessionManager.getSessionId() === reopened.getSessionId();
+	await runtime.dispose();
+	return {
+		absentAtRuntimeConstruction,
+		copiedPaidRowsAtConstruction,
+		firstReplyReached,
+		candidateKept,
+		paidCopyDisclosed,
+		previousRestored,
+	};
+}
+
+/** The unchanged history-share bound is reached by one bounded stored journal, then two real summary calls cover overflow and late delivery. */
+async function historyUsageBoundsWitness(
+	world: HarnessWorld,
+): Promise<SdkConstructionFailureWitness["historyUsageBounds"]> {
+	const manager = world.createSessionManager();
+	const slot = journalSlotOf(createSessionManagerLedgerPort(manager).identity());
+	if (slot === undefined) throw new Error("history usage bound witness has no journal slot");
+	const storedUsage = createEmptyUsage();
+	storedUsage.input = 1;
+	storedUsage.totalTokens = 1;
+	const createdAt = new Date().toISOString();
+	const records = Array.from({ length: SEMANTIC_USAGE_JOURNAL_MAX_RECORDS / 2 }, (_, index) => {
+		const reportId = `stored-history-${index}`;
+		return {
+			reportId,
+			payload: {
+				receiptId: reportId,
+				provider: HARNESS_PROVIDER,
+				model: "root",
+				attempt: 1,
+				route: "history_summary",
+				costStatus: "unpriced",
+				usage: storedUsage,
+			},
+			createdAt,
+		};
+	});
+	// Stored recovery input, not 512 provider requests: it remains within the journal's unchanged record/byte validator.
+	world.io.seed(
+		slot.path,
+		JSON.stringify({
+			version: 1,
+			kind: "semantic-usage-pending",
+			sessionId: slot.sessionId,
+			sessionFile: slot.sessionFile,
+			headerTimestamp: slot.headerTimestamp,
+			updatedAt: createdAt,
+			records,
+			conflicts: [],
+			droppedConflicts: 0,
+		}),
+	);
+	const validated = readJournal(slot);
+	if (validated?.records.length !== 512) throw new Error("history share bound journal premise did not validate");
+	const warningMark = world.warnings.length;
+	const closing: string[] = [];
+	const owner = await world.createRootSession("root", {
+		sessionManager: manager,
+		systemOneEnabled: false,
+		settings: { memorySystem: undefined },
+		closingSink: (warnings) => closing.push(...warnings),
+	});
+	const delivery = sessionSemanticUsageOf(manager);
+	if (delivery.snapshot().retained !== 512)
+		throw new Error("session usage owner did not adopt the history-share bound");
+	const baseline = owner.session.getCumulativeUsage().totalTokens;
+	const resolution = resolveTranscriptSummarizer(`${HARNESS_PROVIDER}/root`, {
+		resolveModel: () => world.provider.model("root"),
+		runIsolatedCompletion: (options) => owner.session.runIsolatedCompletion(options),
+		recordHistoryUsage: (usage, call) => delivery.recordHistoryUsage(usage, call),
+	});
+	if (!resolution.ok) throw new Error(resolution.reason);
+	const summarySignal = new AbortController().signal;
+	const paid = createEmptyUsage();
+	paid.input = 11;
+	paid.output = 7;
+	paid.totalTokens = 18;
+	world.provider.enqueue("root", {
+		name: "history-share-overflow",
+		reply: { content: [{ type: "text", text: "Bounded summary." }], usage: paid },
+	});
+	await resolution.summarizer.summarize(
+		{
+			system: "Summarize this archived conversation.",
+			prompt: "One bounded archived source.",
+			maxOutputBytes: 128,
+		},
+		summarySignal,
+	);
+	const overflow = delivery.pendingProjection().overflow;
+	const liveDelta = owner.session.getCumulativeUsage().totalTokens - baseline;
+	const hold = createBarrier();
+	const reached = createBarrier();
+	const latePaid = createEmptyUsage();
+	latePaid.input = 13;
+	latePaid.output = 10;
+	latePaid.totalTokens = 23;
+	world.provider.enqueue("root", {
+		name: "history-summary-after-disposal",
+		gate: hold.promise,
+		check: () => reached.release(),
+		reply: { content: [{ type: "text", text: "Late summary." }], usage: latePaid },
+	});
+	const late = resolution.summarizer.summarize(
+		{
+			system: "Summarize this archived conversation.",
+			prompt: "A second bounded archived source.",
+			maxOutputBytes: 128,
+		},
+		summarySignal,
+	);
+	let disposedUsage = 0;
+	try {
+		await withDeadline(world.trace, "history usage: the second real provider call is held", reached.promise);
+		const disposal = await world.disposeSessionInBody(owner.session);
+		if (disposal !== undefined) throw disposal.error;
+		disposedUsage = owner.session.getCumulativeUsage().totalTokens;
+	} finally {
+		hold.release();
+		await withDeadline(world.trace, "history usage: released late summary physically settles", late);
+	}
+	const disposedOwnerUncharged = owner.session.getCumulativeUsage().totalTokens === disposedUsage;
+	const lateJournalTokens =
+		readJournal(slot)?.records.find((record) => !record.reportId.startsWith("stored-history-"))?.payload.usage
+			.totalTokens ?? 0;
+	const reopened = await world.createRootSession("root", {
+		sessionManager: manager,
+		systemOneEnabled: false,
+		settings: { memorySystem: undefined },
+		closingSink: (warnings) => closing.push(...warnings),
+	});
+	const reopenedDelta = reopened.session.getCumulativeUsage().totalTokens - baseline;
+	const overflowAbsentOnReopen = sessionSemanticUsageOf(manager).pendingProjection().overflow === undefined;
+	const disposal = await world.disposeSessionInBody(reopened.session);
+	if (disposal !== undefined) throw disposal.error;
+	const warnings = [
+		...world.warnings.splice(warningMark),
+		...owner.session.takeUndeliveredWarnings(),
+		...reopened.session.takeUndeliveredWarnings(),
+		...closing,
+	];
+	const overflowText =
+		"A history summary usage report could not be retained (the usage journal has no room for it); its spend is counted in this session's live total only and is lost when the session is reopened.";
+	const lateText =
+		"A history summary usage report was kept in the session journal after its session ended; it is recorded when a session manager next opens the file.";
+	const allWarningsClassified = warnings.every(
+		(warning) =>
+			warning === overflowText ||
+			warning === lateText ||
+			(warning.startsWith("Usage handoff: ") && warning.includes("none is charged to another session.")),
+	);
+	return {
+		seededRecords: validated.records.length,
+		liveOverflowTokens: overflow?.usage.totalTokens ?? 0,
+		overflowReports: overflow?.reports ?? 0,
+		liveDelta,
+		overflowWarning: warnings.includes(overflowText),
+		lateProviderReached: world.provider.reached.includes("root:history-summary-after-disposal"),
+		disposedOwnerUncharged,
+		lateJournalTokens,
+		reopenedDelta,
+		overflowAbsentOnReopen,
+		lateWarning: warnings.includes(lateText),
+		allWarningsClassified,
+	};
+}
+
 /**
  * The SDK's construction failures: the objective-loop binding error, then the extension read after memory initialization with its held memory
  * warning routed three ways, and the normal-order control. Each creation consumes its own memory read fault. The disposal branches then fail
@@ -4401,6 +5617,10 @@ export async function runSdkConstructionFailure(world: HarnessWorld): Promise<Sd
 	const disposalControl = await disposalSdkCreation(world, "disposal-control", false);
 	const providerErrors = await providerErrorsWitness(world);
 	const workDirectory = workDirectoryWitness(world);
+	const sessionWarningRoutes = await sessionWarningRoutesWitness(world);
+	const runLifecycle = await runLifecycleWitness(world);
+	const unwrittenFork = await unwrittenForkWitness(world);
+	const historyUsageBounds = await historyUsageBoundsWitness(world);
 	return {
 		objective,
 		drained,
@@ -4411,6 +5631,10 @@ export async function runSdkConstructionFailure(world: HarnessWorld): Promise<Sd
 		disposalControl,
 		providerErrors,
 		workDirectory,
+		sessionWarningRoutes,
+		runLifecycle,
+		unwrittenFork,
+		historyUsageBounds,
 	};
 }
 

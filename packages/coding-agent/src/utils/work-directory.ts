@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import {
+	closeSync,
 	type Dir,
 	existsSync,
+	fstatSync,
 	lstatSync,
 	mkdirSync,
 	opendirSync,
-	readdirSync,
-	readFileSync,
+	openSync,
+	readSync,
 	rmdirSync,
 	rmSync,
 	unlinkSync,
@@ -14,7 +16,8 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { writeFileAtomicSync } from "../core/util/atomic-file.ts";
 import { probeProcessLiveness } from "../kernel/reliability/process-tree.ts";
 
 export const PI_WORK_ROOT_ENV = "PI_WORK_ROOT";
@@ -94,12 +97,14 @@ export function boundedWorkRetention(options: WorkRetentionOptions = {}): WorkRe
 			nonNegativeLimit(options.maxTotalBytes, DEFAULT_MAX_TOTAL_BYTES),
 			DEFAULT_MAX_TOTAL_BYTES,
 		),
+		// The scan limits only bound the work of a prune: at zero a prune would scan nothing and the documented cleanup would never run,
+		// so a caller can lower them to one but not switch the cleanup off.
 		maxScannedEntries: Math.min(
-			nonNegativeLimit(options.maxScannedEntries, DEFAULT_MAX_SCANNED_ENTRIES),
+			Math.max(1, nonNegativeLimit(options.maxScannedEntries, DEFAULT_MAX_SCANNED_ENTRIES)),
 			DEFAULT_MAX_SCANNED_ENTRIES,
 		),
 		maxScannedRuns: Math.min(
-			nonNegativeLimit(options.maxScannedRuns, DEFAULT_MAX_SCANNED_RUNS),
+			Math.max(1, nonNegativeLimit(options.maxScannedRuns, DEFAULT_MAX_SCANNED_RUNS)),
 			DEFAULT_MAX_SCANNED_RUNS,
 		),
 		now: options.now,
@@ -163,12 +168,38 @@ function ensureTenantDirectory(agentDir: string, category: string, tenant: strin
 	return tenantDir;
 }
 
-function readSmallJson(path: string): unknown {
+function readSmallMetadata(path: string): string {
 	const stats = lstatSync(path);
 	if (!stats.isFile() || stats.isSymbolicLink() || stats.size > MAX_METADATA_BYTES) {
 		throw new Error(`Invalid work metadata file: ${path}`);
 	}
-	return JSON.parse(readFileSync(path, "utf8")) as unknown;
+	const descriptor = openSync(path, "r");
+	try {
+		const opened = fstatSync(descriptor);
+		if (
+			!opened.isFile() ||
+			opened.size > MAX_METADATA_BYTES ||
+			opened.dev !== stats.dev ||
+			opened.ino !== stats.ino
+		) {
+			throw new Error(`Invalid work metadata file: ${path}`);
+		}
+		const buffer = Buffer.alloc(MAX_METADATA_BYTES + 1);
+		let length = 0;
+		while (length < buffer.length) {
+			const read = readSync(descriptor, buffer, length, buffer.length - length, length);
+			if (read === 0) break;
+			length += read;
+		}
+		if (length > MAX_METADATA_BYTES) throw new Error(`Invalid work metadata file: ${path}`);
+		return buffer.subarray(0, length).toString("utf8");
+	} finally {
+		closeSync(descriptor);
+	}
+}
+
+function readSmallJson(path: string): unknown {
+	return JSON.parse(readSmallMetadata(path)) as unknown;
 }
 
 function isManifest(value: unknown, category: string, tenant: string, runId: string): value is WorkRunManifest {
@@ -343,6 +374,36 @@ function createCleanupMarker(runDir: string, now: number): string | undefined {
 	}
 }
 
+/** Names removed per pass of a run's content: bounds what one pass holds, whatever a run has grown to. */
+const REMOVAL_BATCH = 256;
+/** Passes over a run's content before the removal reaches its fixed work limit. */
+const MAX_REMOVAL_PASSES = 1_024;
+
+/**
+ * Removes everything in a run except its manifest and the cleanup marker (the fence), in bounded batches read through the directory
+ * handle; the handle is closed before any removal.
+ */
+function removeRunContent(runPath: string): void {
+	for (let pass = 0; pass <= MAX_REMOVAL_PASSES; pass++) {
+		const names: string[] = [];
+		const handle = opendirSync(runPath);
+		try {
+			while (names.length < REMOVAL_BATCH) {
+				const entry = handle.readSync();
+				if (!entry) break;
+				if (entry.name === WORK_RUN_MANIFEST_FILE || entry.name === CLEANUP_MARKER_FILE) continue;
+				names.push(entry.name);
+			}
+		} finally {
+			handle.closeSync();
+		}
+		if (names.length === 0) return;
+		if (pass === MAX_REMOVAL_PASSES) break;
+		for (const name of names) rmSync(join(runPath, name), { recursive: true, force: true });
+	}
+	throw new Error(`Work run content removal exceeded its bounded entry limit: ${runPath}`);
+}
+
 function removeRunIfInactive(runPath: string, now: number): boolean {
 	const cleanupMarker = createCleanupMarker(runPath, now);
 	if (!cleanupMarker) return false;
@@ -350,18 +411,78 @@ function removeRunIfInactive(runPath: string, now: number): boolean {
 		removeFile(cleanupMarker);
 		return false;
 	}
+	const manifestPath = join(runPath, WORK_RUN_MANIFEST_FILE);
+	let manifestText: string;
 	try {
-		// The run's content goes first; its manifest and the cleanup marker (the fence) go last, with the directory. A removal that fails
-		// part-way therefore leaves the run owned (manifest present) and retryable, never an unowned remnant that retention skips and
-		// acquisition refuses.
-		for (const name of readdirSync(runPath)) {
-			if (name === WORK_RUN_MANIFEST_FILE || name === CLEANUP_MARKER_FILE) continue;
-			rmSync(join(runPath, name), { recursive: true, force: true });
+		manifestText = readSmallMetadata(manifestPath);
+		if (
+			!isManifest(
+				JSON.parse(manifestText),
+				basename(dirname(dirname(runPath))),
+				basename(dirname(runPath)),
+				basename(runPath),
+			)
+		) {
+			throw new Error(`Work directory manifest does not match its path: ${runPath}`);
 		}
-		rmSync(runPath, { recursive: true, force: true });
+	} catch (error) {
+		let cause = error;
+		try {
+			unlinkSync(cleanupMarker);
+		} catch (fenceError) {
+			if ((fenceError as NodeJS.ErrnoException).code !== "ENOENT") {
+				cause = new AggregateError(
+					[error, fenceError],
+					"Work run snapshot failed and its cleanup fence could not be released",
+				);
+			}
+		}
+		throw new Error(`Work run ownership could not be snapshotted before removal: ${runPath}`, { cause });
+	}
+	try {
+		// Withdraw ownership before the fence: an acquirer that reaches this gap cannot validate its lease. The non-recursive
+		// root removal refuses newly arrived entries instead of deleting a lease or content admitted concurrently.
+		removeRunContent(runPath);
+		unlinkSync(manifestPath);
+		unlinkSync(cleanupMarker);
+		rmdirSync(runPath);
 		return !existsSync(runPath);
-	} catch {
-		removeFile(cleanupMarker);
+	} catch (removalError) {
+		// The final removal can unlink the manifest before it fails on the directory itself: the run is put back under its owner.
+		const errors: unknown[] = [removalError];
+		if (!existsSync(runPath)) return true;
+		try {
+			if (!existsSync(manifestPath)) {
+				writeFileSync(manifestPath, manifestText, { encoding: "utf8", flag: "wx" });
+			}
+			if (readSmallMetadata(manifestPath) !== manifestText) {
+				throw new Error(`Work run ownership changed during removal recovery: ${runPath}`);
+			}
+		} catch (restorationError) {
+			errors.push(restorationError);
+			const recoveryFenceText = JSON.stringify({
+				version: 1,
+				recoveryIncomplete: true,
+				errors: errors.map((error) => (error instanceof Error ? error.message : String(error)).slice(0, 256)),
+			});
+			try {
+				// Invalid marker metadata remains fail-closed even after this process exits. Never release an incomplete recovery's fence.
+				writeFileAtomicSync(cleanupMarker, recoveryFenceText);
+			} catch (fenceError) {
+				errors.push(fenceError);
+			}
+			throw new AggregateError(errors, `Work run removal recovery is incomplete: ${runPath}`);
+		}
+		try {
+			unlinkSync(cleanupMarker);
+		} catch (fenceError) {
+			if ((fenceError as NodeJS.ErrnoException).code !== "ENOENT") {
+				throw new AggregateError(
+					[...errors, fenceError],
+					`Work run cleanup fence could not be released: ${runPath}`,
+				);
+			}
+		}
 		return false;
 	}
 }
@@ -528,19 +649,40 @@ export function acquireWorkRun(options: AcquireWorkRunOptions): WorkRunLease {
 	ensureDirectory(leasesDir);
 	const markerPath = join(leasesDir, `active-${process.pid}-${randomUUID()}.json`);
 	const marker: WorkMarker = { version: 1, hostname: hostname(), pid: process.pid, createdAt: now };
-	writeFileSync(markerPath, JSON.stringify(marker), { encoding: "utf8", flag: "wx" });
-	if (cleanupMarkerBlocksAcquisition(runDir)) {
-		removeFile(markerPath);
-		throw new Error(`Work run entered cleanup while it was being acquired: ${runDir}`);
-	}
+	const markerText = JSON.stringify(marker);
+	writeFileSync(markerPath, markerText, { encoding: "utf8", flag: "wx" });
 	try {
-		utimesSync(runDir, new Date(now), new Date(now));
-	} catch {}
-
-	if (options.retention !== false) {
+		if (cleanupMarkerBlocksAcquisition(runDir)) {
+			throw new Error(`Work run entered cleanup while it was being acquired: ${runDir}`);
+		}
+		// The initial manifest read can precede cleanup. Ownership must still match after the lease is on disk, including the
+		// interval after cleanup removed its manifest and fence but before the root directory was removed.
+		if (!isManifest(readSmallJson(manifestPath), options.category, options.tenant, runId)) {
+			throw new Error(`Work run ownership changed while it was being acquired: ${runDir}`);
+		}
+		// A cleaner that inspected leases before this marker arrived can remove it, then restore the matching manifest after
+		// a refused root removal. Matching ownership alone therefore cannot prove this particular lease survived cleanup.
+		if (readSmallMetadata(markerPath) !== markerText) {
+			throw new Error(`Work run lease changed while it was being acquired: ${runDir}`);
+		}
 		try {
-			pruneWorkTenant(options.agentDir, options.category, options.tenant, options.retention);
+			utimesSync(runDir, new Date(now), new Date(now));
 		} catch {}
+		if (options.retention !== false) {
+			pruneWorkTenant(options.agentDir, options.category, options.tenant, options.retention);
+		}
+	} catch (error) {
+		try {
+			unlinkSync(markerPath);
+		} catch (rollbackError) {
+			if ((rollbackError as NodeJS.ErrnoException).code !== "ENOENT") {
+				throw new AggregateError(
+					[error, rollbackError],
+					"Work run acquisition failed and its lease rollback failed",
+				);
+			}
+		}
+		throw error;
 	}
 
 	let released = false;

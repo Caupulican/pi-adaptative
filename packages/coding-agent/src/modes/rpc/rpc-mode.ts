@@ -20,6 +20,7 @@ import type {
 	ExtensionWidgetOptions,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import { disposeHttpDispatcher } from "../../core/http-dispatcher.ts";
 import type { HumanInputPresentationResult } from "../../core/human-input.ts";
 import {
 	flushRawStdout,
@@ -850,6 +851,11 @@ export async function runRpcMode(
 			await runtimeHost.dispose();
 		} catch (disposeError: unknown) {
 			failures.push(disposeError);
+		}
+		try {
+			await disposeHttpDispatcher();
+		} catch (httpError: unknown) {
+			failures.push(httpError);
 		}
 		try {
 			detachInput();
