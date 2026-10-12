@@ -67,6 +67,8 @@ const MAX_REJECTION_DETAIL = 2_000;
 export class SignalLifecycle {
 	private shuttingDown = false;
 	private cleanupHandlers: Array<() => void> = [];
+	/** The SIGTERM/SIGHUP listeners alone: the one group an orderly shutdown removes (see unregisterTerminationSignals). */
+	private signalListenerCleanup: Array<() => void> = [];
 	private readonly port: SignalLifecyclePort;
 	private readonly io: SignalLifecycleIo;
 
@@ -97,7 +99,10 @@ export class SignalLifecycle {
 	private async runShutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.shuttingDown) return;
 		this.shuttingDown = true;
-		this.unregisterSignalHandlers();
+		// Only the termination-signal listeners go: the dead-terminal, uncaught-exception and rejection guards stay armed while the
+		// cleanup steps run, because a terminal that dies during the drain or stop, or a stray rejection during the bounded dispose,
+		// must still reach them (the process ends at the exit below).
+		this.unregisterTerminationSignals();
 
 		// Both paths run the same cleanup steps, each attempted once. The first is the CLI's PowerShell warm-start disposal: the CLI
 		// warm-starts a host before the runtime graph loads, and a session that never runs a shell command never claims it, so
@@ -248,7 +253,9 @@ export class SignalLifecycle {
 				void this.shutdown({ fromSignal: true });
 			};
 			process.prependListener(signal, handler);
-			this.cleanupHandlers.push(() => process.off(signal, handler));
+			const remove = () => process.off(signal, handler);
+			this.cleanupHandlers.push(remove);
+			this.signalListenerCleanup.push(remove);
 		}
 
 		const terminalErrorHandler = (error: Error) => {
@@ -281,6 +288,15 @@ export class SignalLifecycle {
 			cleanup();
 		}
 		this.cleanupHandlers = [];
+		this.signalListenerCleanup = [];
+	}
+
+	/** Removes the SIGTERM/SIGHUP listeners only; the process-level guards stay registered. */
+	unregisterTerminationSignals(): void {
+		for (const cleanup of this.signalListenerCleanup) {
+			cleanup();
+		}
+		this.signalListenerCleanup = [];
 	}
 }
 

@@ -853,6 +853,26 @@ export class Agent {
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}
+		if (event.type === "agent_end") {
+			// Every listener hears the end of the run: one that fails does not hide it from the rest, and the first failure is thrown
+			// once all of them have run.
+			const failures: unknown[] = [];
+			for (const listener of [...this.listeners]) {
+				try {
+					await listener(event, signal);
+				} catch (error: unknown) {
+					failures.push(error);
+				}
+			}
+			if (failures.length === 1) throw failures[0];
+			if (failures.length > 1) {
+				throw new AggregateError(
+					failures,
+					failures[0] instanceof Error ? failures[0].message : "agent_end listeners failed",
+				);
+			}
+			return;
+		}
 		for (const listener of [...this.listeners]) {
 			await listener(event, signal);
 		}

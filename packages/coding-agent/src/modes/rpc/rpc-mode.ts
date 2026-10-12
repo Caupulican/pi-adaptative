@@ -823,7 +823,9 @@ export async function runRpcMode(
 
 	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<void> {
 		if (shuttingDown) {
-			io.exit(exitCode);
+			// A shutdown is already running: a second TERMINATION SIGNAL forces the exit (an impatient operator), but the input ending
+			// while the dispose is still running (the client closed its pipe after the signal) must not cut that shutdown short.
+			if (signal !== undefined) io.exit(exitCode);
 			return;
 		}
 		shuttingDown = true;

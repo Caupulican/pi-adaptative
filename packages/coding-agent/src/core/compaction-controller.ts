@@ -779,7 +779,7 @@ export class CompactionController {
 		// A compaction in flight has an open durable lifecycle: it is settled as cancelled NOW, before the session reports closed,
 		// so a result that resumes later (an extension's `session_before_compact` handler) writes nothing and the one terminal
 		// record is the evidence. The later cancellation path finds the lifecycle already ended and appends no duplicate.
-		this.finishCompactionLifecycle("cancelled");
+		this.finishCompactionLifecycle(this.activeCompactionLifecycle?.latestCompactionEntryId ? "success" : "cancelled");
 	}
 
 	checkContextWindowUsageWarning(): void {
@@ -2083,6 +2083,9 @@ export class CompactionController {
 			applied.coveredThroughEntryId,
 			applied.summarizedGapEntryIds,
 		);
+		// The entry is durable from here: the lifecycle names it at once, so a close that lands while the extensions' `session_compact`
+		// handlers are still awaited records this compaction as committed, not as cancelled.
+		this.recordAppliedCompaction(compactionEntryId);
 		this.deps.refreshAfterCompaction();
 		const sessionModel = this.deps.getModel();
 		if (sessionModel && applied.tokensBefore > 0) {

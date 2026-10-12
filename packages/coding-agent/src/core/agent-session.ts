@@ -320,6 +320,7 @@ import { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { buildProviderLoadView, type ProviderLoadView } from "./provider-admission/load-view.ts";
 import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
+import { truncateWithEllipsis } from "./provider-tool-text.ts";
 import { appendQueuedInputRecord, type RecordableQueuedInput, readQueuedInputRecord } from "./queued-input-record.ts";
 import { ReflectionController } from "./reflection-controller.ts";
 import { ReflectionTurnLifecycle } from "./reflection-turn-lifecycle.ts";
@@ -4889,7 +4890,15 @@ export class AgentSession {
 		safely(() => this._durableCustomMessageTurns.shutdown());
 		safely(() => this.abortRetry());
 		safely(() => this.abortCompaction());
-		safely(() => this._compaction.close());
+		try {
+			this._compaction.close();
+		} catch (error: unknown) {
+			// The durable end of a compaction that was running could not be written (a fenced or closed session file): disclosed at
+			// close, never dropped.
+			this._holdUnlistenedWarning(
+				`A compaction's durable end record could not be written at quit: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		safely(() => this.abortBranchSummary());
 		safely(() => this.abortBash());
 		safely(() => this._skillVault.unload());
@@ -6504,7 +6513,7 @@ export class AgentSession {
 
 	/** A held queued input is kept in full in the pending queue, never sent elsewhere. */
 	private _noteHeldQueuedInput(text: string, reason: PendingInputHoldReason): void {
-		const preview = text.length > 200 ? `${text.slice(0, 200)}...` : text;
+		const preview = truncateWithEllipsis(text, 200);
 		const why =
 			reason === "context_changed"
 				? "the session context changed before it was admitted"
