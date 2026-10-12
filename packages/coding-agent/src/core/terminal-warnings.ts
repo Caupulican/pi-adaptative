@@ -17,6 +17,15 @@ export function neutralizeControls(message: string): string {
 	return shown;
 }
 
+/** A thrown value as text: a value whose own conversion throws (no usable `toString`) is named by its type instead. */
+function plainText(value: unknown): string {
+	try {
+		return String(value);
+	} catch {
+		return Object.prototype.toString.call(value);
+	}
+}
+
 const CAUSE_MAX_DEPTH = 4;
 const CAUSE_MAX_LISTED = 8;
 const CAUSE_MAX_CHARS = 2_000;
@@ -28,7 +37,7 @@ const CAUSE_MAX_CHARS = 2_000;
  */
 export function describeCause(cause: unknown): string {
 	const describe = (value: unknown, depth: number): string => {
-		if (!(value instanceof AggregateError)) return value instanceof Error ? value.message : String(value);
+		if (!(value instanceof AggregateError)) return value instanceof Error ? value.message : plainText(value);
 		if (depth >= CAUSE_MAX_DEPTH) return `${value.message} (${value.errors.length} more causes)`;
 		const listed = value.errors.slice(0, CAUSE_MAX_LISTED).map((inner) => describe(inner, depth + 1));
 		const omitted = value.errors.length - listed.length;

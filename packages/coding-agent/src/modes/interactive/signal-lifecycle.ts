@@ -245,7 +245,7 @@ export class SignalLifecycle {
 	 * time one occurs.
 	 */
 	reportUnhandledRejection(reason: unknown): void {
-		const error = reason instanceof Error ? reason : new Error(String(reason));
+		const error = reason instanceof Error ? reason : new Error(describeCause(reason));
 		const detail = (error.stack ?? error.message).slice(0, MAX_REJECTION_DETAIL);
 		if (this.shuttingDown) {
 			// The UI is going away: the rejection is reported on stderr, escaped, and the shutdown keeps running.
@@ -268,7 +268,7 @@ export class SignalLifecycle {
 	 */
 	uncaughtCrash(thrown: unknown): void {
 		// Any value can reach uncaughtException (`throw "x"`, `throw null`), and the report reads a stack: a non-Error is wrapped first.
-		const error = thrown instanceof Error ? thrown : new Error(String(thrown));
+		const error = thrown instanceof Error ? thrown : new Error(describeCause(thrown));
 		if (this.shuttingDown) {
 			// A throw during an orderly shutdown is still a crash: report it (the orderly path is already unwinding), restore the
 			// terminal if it is not restored yet, and end the process.

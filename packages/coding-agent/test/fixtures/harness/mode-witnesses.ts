@@ -1,4 +1,4 @@
-import type { Terminal } from "@caupulican/pi-tui";
+import { getKeybindings, setKeybindings, type Terminal } from "@caupulican/pi-tui";
 import { expect, vi } from "vitest";
 import { AgentSession } from "../../../src/core/agent-session.ts";
 import { type AgentSessionRuntime, createAgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
@@ -9,7 +9,7 @@ import { FooterComponent } from "../../../src/modes/interactive/components/foote
 import { EditorOverlayHost } from "../../../src/modes/interactive/editor-overlay-host.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
-import { initTheme } from "../../../src/presentation/theme/theme.ts";
+import { initTheme, stopThemeWatcher } from "../../../src/presentation/theme/theme.ts";
 import { type Barrier, createBarrier } from "./scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "./session-fixture.ts";
 
@@ -34,8 +34,13 @@ const TEARDOWN_STEPS = [
 	"footerDataProvider.dispose",
 	"overlay.unmount",
 	"session.unsubscribe",
-	"extensions.unsubscribe",
 ];
+/**
+ * The extensions-changed subscription belongs to an attended mode only: an unattended `init()` returns after its rebind, and the
+ * rebind subscribes inside `if (this.hasHumanAudience)`. A mode without an audience owns no such subscription, so its stop has
+ * nothing to unsubscribe, and the stop must not report one. The attended teardown of that subscription stays unreached here.
+ */
+const ATTENDED_ONLY_TEARDOWN_STEP = "extensions.unsubscribe";
 
 function isSignalName(name: string): boolean {
 	return name.startsWith("SIG");
@@ -168,15 +173,16 @@ interface GuardRun {
 
 function guardRunOf(host: GuardHost): GuardRun {
 	const armed = armedNames(host.installs);
+	// Independent copies: a shutdown that completes after the run is read (the emergency runs) cannot mutate what was observed.
 	return {
-		guardsAtDispose: host.guardsAtDispose,
-		forcesAtDispose: host.forcesAtDispose,
+		guardsAtDispose: [...host.guardsAtDispose],
+		forcesAtDispose: [...host.forcesAtDispose],
 		guardsAtEnd: armed.filter((name) => !isSignalName(name)),
 		forcesAtEnd: armed.filter(isSignalName),
-		log: host.log,
-		warnings: host.warnings,
-		stderr: host.stderr,
-		exits: host.exits,
+		log: [...host.log],
+		warnings: [...host.warnings],
+		stderr: [...host.stderr],
+		exits: [...host.exits],
 	};
 }
 
@@ -207,10 +213,18 @@ async function runGuardRejection(): Promise<GuardRun> {
 async function runGuardCrash(thrown: unknown, options: { readonly stopFails: boolean }): Promise<GuardRun> {
 	const host = createGuardHost({ holdDispose: true, stopFails: options.stopFails });
 	host.lifecycle.registerSignalHandlers();
-	void host.lifecycle.shutdown({ fromSignal: true });
-	await host.reached.promise;
-	(armedListener(host.installs, "uncaughtException") as (value: unknown) => void)(thrown);
-	return guardRunOf(host);
+	const shutdown = host.lifecycle.shutdown({ fromSignal: true });
+	try {
+		await host.reached.promise;
+		(armedListener(host.installs, "uncaughtException") as (value: unknown) => void)(thrown);
+		return guardRunOf(host);
+	} finally {
+		// The injected exit returned, so the held shutdown is still unfinished: release it, join it and remove the listeners this
+		// fixture owns, after the observation above was copied.
+		host.hold.release();
+		await shutdown;
+		host.lifecycle.unregisterSignalHandlers();
+	}
 }
 
 /**
@@ -220,10 +234,16 @@ async function runGuardCrash(thrown: unknown, options: { readonly stopFails: boo
 async function runGuardSecondSignal(signal: NodeJS.Signals): Promise<GuardRun> {
 	const host = createGuardHost({ holdDispose: true, stopFails: false });
 	host.lifecycle.registerSignalHandlers();
-	void host.lifecycle.shutdown({ fromSignal: true });
-	await host.reached.promise;
-	(armedListener(host.installs, signal) as () => void)();
-	return guardRunOf(host);
+	const shutdown = host.lifecycle.shutdown({ fromSignal: true });
+	try {
+		await host.reached.promise;
+		(armedListener(host.installs, signal) as () => void)();
+		return guardRunOf(host);
+	} finally {
+		host.hold.release();
+		await shutdown;
+		host.lifecycle.unregisterSignalHandlers();
+	}
 }
 
 interface InteractiveHarness {
@@ -232,6 +252,8 @@ interface InteractiveHarness {
 	readonly terminalWarnings: TerminalWarnings;
 	readonly calls: string[];
 	readonly warnings: string[];
+	/** The runtime's own closing disclosures (its terminal sink), kept apart from the mode's warnings and asserted by each witness. */
+	readonly disposalWarnings: string[];
 	readonly stderr: string[];
 	readonly stdout: string[];
 	readonly exits: number[];
@@ -320,7 +342,7 @@ async function createInteractiveHarness(
 			cwd: HARNESS_PROJECT_CWD,
 			agentDir: world.agentDir,
 			sessionManager: world.createSessionManager(),
-			// The runtime's disposal warnings are not part of any witness; they are kept apart from the mode's.
+			// The runtime's disposal warnings are recorded apart from the mode's and every witness asserts them (none in normal order).
 			onTerminalWarnings: (released) => {
 				disposalWarnings.push(...released);
 			},
@@ -370,6 +392,7 @@ async function createInteractiveHarness(
 		terminalWarnings,
 		calls,
 		warnings,
+		disposalWarnings,
 		stderr,
 		stdout,
 		exits,
@@ -438,6 +461,7 @@ interface StopRun {
 	/** The messages of the failures stop rethrew: one, or each of an AggregateError's. */
 	readonly failures: readonly string[];
 	readonly aggregate: boolean;
+	readonly disposalWarnings: readonly string[];
 }
 
 /**
@@ -464,9 +488,9 @@ async function runInteractiveStop(world: HarnessWorld, progressFails: boolean): 
 	} finally {
 		restore();
 	}
-	const run = { calls: [...harness.calls], warnings: [...harness.warnings], failures, aggregate };
+	const stopped = { calls: [...harness.calls], warnings: [...harness.warnings], failures, aggregate };
 	await harness.runtime.dispose();
-	return run;
+	return { ...stopped, disposalWarnings: [...harness.disposalWarnings] };
 }
 
 /** A session-start extension that keeps the context the mode gives it, so the scenario can ask the mode to quit through it. */
@@ -483,6 +507,7 @@ interface QuitRun {
 	readonly stderr: readonly string[];
 	readonly stdout: readonly string[];
 	readonly exits: readonly number[];
+	readonly disposalWarnings: readonly string[];
 }
 
 /**
@@ -507,6 +532,7 @@ async function runQuitWithHeldDispose(world: HarnessWorld): Promise<QuitRun> {
 		stderr: harness.stderr,
 		stdout: harness.stdout,
 		exits: harness.exits,
+		disposalWarnings: [...harness.disposalWarnings],
 	};
 }
 
@@ -595,6 +621,18 @@ async function runClosingGateAtStart(world: HarnessWorld): Promise<ClosingGateSt
  * is read back from a run.
  */
 export async function verifyModeWitnesses(world: HarnessWorld): Promise<void> {
+	// The real InteractiveMode installs process-global keybindings and a theme (and may start a theme file watcher): the previous
+	// keybindings are restored and the watcher stopped when the witnesses end, so nothing leaks into the other journeys.
+	const previousKeybindings = getKeybindings();
+	try {
+		await verifyModeWitnessesBody(world);
+	} finally {
+		setKeybindings(previousKeybindings);
+		stopThemeWatcher();
+	}
+}
+
+async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	const signalsArmed = process.platform === "win32" ? ["SIGTERM"] : ["SIGTERM", "SIGHUP"];
 	const shutdownLog = ["dispose", "drain", "stop"];
 
@@ -666,13 +704,18 @@ export async function verifyModeWitnesses(world: HarnessWorld): Promise<void> {
 	expect(quit.removedGuardsAtDispose, "the quit leaves the process guards armed through the held dispose").toEqual([]);
 	expect(quit.stderr, "a rejection during the quit's held dispose is reported escaped").toEqual([REJECTION_LINE]);
 	expect(quit.exits, "the quit completes with exit 0 after the rejection").toEqual([0]);
+	expect(quit.disposalWarnings, "the quit's runtime disposal discloses nothing in normal order").toEqual([]);
 	// The resume line needs a real TTY and a session file on disk; the harness's session is virtual, so none is written here.
 	expect(quit.stdout, "the quit writes no resume line for a virtual session").toEqual([]);
 
 	const standard = await runInteractiveStop(world, false);
 	expect(standard.failures, "a stop with nothing failing rethrows nothing").toEqual([]);
 	expect(standard.warnings, "the held warning is released by the stop").toEqual([INTERACTIVE_STOP_WARNING]);
+	expect(standard.disposalWarnings, "normal order: the runtime's own disposal discloses nothing").toEqual([]);
 	expect(standard.calls, "every teardown step ran during the stop").toEqual(expect.arrayContaining(TEARDOWN_STEPS));
+	expect(standard.calls, "an unattended mode owns no extensions-changed subscription to unsubscribe").not.toContain(
+		ATTENDED_ONLY_TEARDOWN_STEP,
+	);
 	expect(standard.calls.slice(-2), "the terminal is restored, then the warnings are released").toEqual([
 		"terminal.stop",
 		"release",
@@ -698,6 +741,7 @@ export async function verifyModeWitnesses(world: HarnessWorld): Promise<void> {
 	expect(failing.warnings, "the held warning is released even though a teardown step failed").toEqual([
 		INTERACTIVE_STOP_WARNING,
 	]);
+	expect(failing.disposalWarnings, "a failing teardown step adds no runtime disposal disclosure").toEqual([]);
 
 	const gate = await runClosingGateAtStart(world);
 	expect(gate.requestsAddedByRelease, "a quit-cancelled start makes no provider request after the release").toBe(0);

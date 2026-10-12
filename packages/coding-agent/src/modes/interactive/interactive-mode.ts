@@ -425,7 +425,8 @@ export class InteractiveMode {
 			isStreaming: () => this.session.isStreaming,
 			isThinkingHidden: () => this.hideThinkingBlock,
 		});
-		this.keybindings = KeybindingsManager.create();
+		// The runtime's own agent directory (the process default in production): one source for every per-agent file.
+		this.keybindings = KeybindingsManager.create(this.runtimeHost.services.agentDir);
 		setKeybindings(this.keybindings);
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
 		const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();

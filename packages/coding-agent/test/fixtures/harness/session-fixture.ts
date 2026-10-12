@@ -3413,7 +3413,7 @@ export async function runRpcHost(
 		readonly flushNeverResolves?: boolean;
 		/**
 		 * With the SIGTERM trigger: the dispose's completion holds until the scenario releases it. While it holds, `input-end` ends the input,
-		 * and `output-failures` fails the output twice (two queued writes that inherit one failed tail).
+		 * and `output-failures` invokes the registered output-failure handler twice (handler lifetime and idempotence: the host stays registered, nothing exits and the cleanup is not restarted). It does NOT drive two real queued writes through the output guard, which the injected writer replaces.
 		 */
 		readonly holdDispose?: "input-end" | "output-failures";
 	},
