@@ -59,6 +59,7 @@ import { DecisionLedgerStore } from "../src/core/operator-projection/decision-le
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../src/core/orchestration/profile-store.ts";
 import { goalObjectiveId } from "../src/core/orchestration/work-state-projection.ts";
+import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../src/core/reflection-controller.ts";
 import { getInFlightWorkUnits } from "../src/core/reload-blockers.ts";
 import { isCredentialSecretKey, mockCredentialFields } from "../src/core/secrets/credential-content-mock.ts";
 import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../src/core/security/secret-text.ts";
@@ -2175,6 +2176,18 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					reply: { content: [{ type: "text", text: "The background check is reported." }] },
 				},
 			);
+			// Closing-reflection checkpoint: the start turn's own analysis is `none`, so its reflection at the tail can only come from a
+			// `due` cue with a worthy trigger carried in before it. The persisted cue is read through the controller's branch lookup.
+			expect.soft(session.getMemorySystem(), "the reflection gate is open: the memory system is okf").toBe("okf");
+			expect
+				.soft(
+					sessionManager?.getLatestCustomEntryOnBranch(CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE)?.data,
+					"the carried reflection cue before the background start turn is due, with a worthy trigger",
+				)
+				.toMatchObject({
+					status: "due",
+					triggers: expect.arrayContaining([expect.stringMatching(/^(complex|corrective|durable|session-end)$/)]),
+				});
 			await withDeadline(trace, "background start turn", session.prompt("Start the check in the background."));
 			trace.mark("root", "background.started");
 			await withDeadline(trace, "background reflection turn", backgroundReflected.promise, 60_000);
