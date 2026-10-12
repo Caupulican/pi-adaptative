@@ -2951,7 +2951,7 @@ export interface DiscardThroughRuntimeWitness {
 	readonly candidateFile: string | undefined;
 	/** The candidate's file after the rollback: kept, because its paid rows could not be counted. */
 	readonly candidateKept: boolean;
-	/** The restored session's held warnings: the rollback's disclosure, delivered once the previous session is live. */
+	/** The rollback's disclosure, delivered on the restored session once it is live. */
 	readonly restoredWarnings: readonly string[];
 	/** Warnings the runtime routed to its terminal; a restored rollback routes none. */
 	readonly routed: readonly string[];
@@ -3029,6 +3029,7 @@ export async function runDiscardThroughRuntime(world: HarnessWorld): Promise<Dis
 		});
 		throw new Error("the candidate's activation is refused");
 	});
+	const warningMark = world.warnings.length;
 	const outcome = await withDeadline(
 		trace,
 		"runtime discard: the fork is rejected",
@@ -3038,7 +3039,9 @@ export async function runDiscardThroughRuntime(world: HarnessWorld): Promise<Dis
 		() => "resolved",
 		(error: unknown) => error,
 	);
-	const restoredWarnings = runtime.session.takeUndeliveredWarnings();
+	// The rollback's disclosure is emitted on the live restored session, so the world's session listener already received it: the witness
+	// claims exactly that window (and anything the session still holds), leaving none of it for the unclassified-warning check.
+	const restoredWarnings = [...world.warnings.splice(warningMark), ...runtime.session.takeUndeliveredWarnings()];
 	const candidateKept = candidate.file !== undefined && world.io.peekFile(candidate.file) !== undefined;
 	await runtime.dispose();
 	return {
