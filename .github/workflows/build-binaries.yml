@@ -512,27 +512,27 @@ jobs:
         run: |
           BINARIES_DIR="packages/coding-agent/binaries"
           NOTES_FILE="${RUNNER_TEMP}/pi-adaptative/release/release-notes.md"
-          gh release create "${RELEASE_TAG}" \
-            --title "${RELEASE_TAG}" \
-            --notes-file "${NOTES_FILE}" \
-            "${BINARIES_DIR}/pi-darwin-arm64.tar.gz" \
-            "${BINARIES_DIR}/pi-darwin-x64.tar.gz" \
-            "${BINARIES_DIR}/pi-linux-x64.tar.gz" \
-            "${BINARIES_DIR}/pi-linux-arm64.tar.gz" \
-            "${BINARIES_DIR}/pi-windows-x64.zip" \
-            "${BINARIES_DIR}/pi-windows-arm64.zip" \
-            "${BINARIES_DIR}/install.sh" \
-            "${BINARIES_DIR}/install.ps1" \
-            "${BINARIES_DIR}/SHA256SUMS" \
-            2>/dev/null || \
-          gh release upload "${RELEASE_TAG}" \
-            "${BINARIES_DIR}/pi-darwin-arm64.tar.gz" \
-            "${BINARIES_DIR}/pi-darwin-x64.tar.gz" \
-            "${BINARIES_DIR}/pi-linux-x64.tar.gz" \
-            "${BINARIES_DIR}/pi-linux-arm64.tar.gz" \
-            "${BINARIES_DIR}/pi-windows-x64.zip" \
-            "${BINARIES_DIR}/pi-windows-arm64.zip" \
-            "${BINARIES_DIR}/install.sh" \
-            "${BINARIES_DIR}/install.ps1" \
-            "${BINARIES_DIR}/SHA256SUMS" \
-            --clobber
+          ASSETS=(
+            "${BINARIES_DIR}/pi-darwin-arm64.tar.gz"
+            "${BINARIES_DIR}/pi-darwin-x64.tar.gz"
+            "${BINARIES_DIR}/pi-linux-x64.tar.gz"
+            "${BINARIES_DIR}/pi-linux-arm64.tar.gz"
+            "${BINARIES_DIR}/pi-windows-x64.zip"
+            "${BINARIES_DIR}/pi-windows-arm64.zip"
+            "${BINARIES_DIR}/install.sh"
+            "${BINARIES_DIR}/install.ps1"
+            "${BINARIES_DIR}/SHA256SUMS"
+          )
+          # Only the reported "release not found" proves the release is missing. Any other lookup failure (auth, network,
+          # API) is not proof of absence, so publication stops here: nothing is created or uploaded.
+          if release_lookup="$(gh release view "${RELEASE_TAG}" --json tagName 2>&1)"; then
+            gh release upload "${RELEASE_TAG}" "${ASSETS[@]}" --clobber
+          elif [[ "${release_lookup}" == *"release not found"* ]]; then
+            gh release create "${RELEASE_TAG}" \
+              --title "${RELEASE_TAG}" \
+              --notes-file "${NOTES_FILE}" \
+              "${ASSETS[@]}"
+          else
+            echo "::error::Could not verify whether release ${RELEASE_TAG} exists; publication stopped: ${release_lookup}" >&2
+            exit 1
+          fi
