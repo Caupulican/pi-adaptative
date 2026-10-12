@@ -96,6 +96,8 @@ export class SignalLifecycle {
 	private signalListenerCleanup: Array<() => void> = [];
 	private readonly port: SignalLifecyclePort;
 	private readonly io: SignalLifecycleIo;
+	/** Set when the port's stop has been started, so a forced exit during the cleanup never runs it a second time. */
+	private stopStarted = false;
 
 	constructor(port: SignalLifecyclePort, io: Partial<SignalLifecycleIo> = {}) {
 		this.port = port;
@@ -149,7 +151,7 @@ export class SignalLifecycle {
 					() => disposeUnclaimedCliPowerShellWarmStart(),
 					() => this.port.runtimeHost.dispose(),
 					() => this.port.ui.terminal.drainInput(1000),
-					() => this.port.stop(),
+					() => this.stopOnce(),
 				]);
 			} finally {
 				for (const remove of forceRemovals) remove();
@@ -165,12 +167,17 @@ export class SignalLifecycle {
 		// Drain any in-flight Kitty key release events before stopping.
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
 		// A failing drain or stop must not skip the runtime dispose, and the resume command is written only when every step succeeded.
-		await this.runCleanupSteps([
-			() => disposeUnclaimedCliPowerShellWarmStart(),
-			() => this.port.ui.terminal.drainInput(1000),
-			() => this.port.stop(),
-			() => this.port.runtimeHost.dispose(),
-		]);
+		const forceRemovals = this.installForceListeners();
+		try {
+			await this.runCleanupSteps([
+				() => disposeUnclaimedCliPowerShellWarmStart(),
+				() => this.port.ui.terminal.drainInput(1000),
+				() => this.stopOnce(),
+				() => this.port.runtimeHost.dispose(),
+			]);
+		} finally {
+			for (const remove of forceRemovals) remove();
+		}
 
 		const resumeCommand = this.port.formatResumeCommand();
 		if (resumeCommand) {
@@ -178,6 +185,12 @@ export class SignalLifecycle {
 		}
 
 		this.io.exit(0);
+	}
+
+	private stopOnce(): void {
+		if (this.stopStarted) return;
+		this.stopStarted = true;
+		this.port.stop();
 	}
 
 	/**
@@ -201,7 +214,7 @@ export class SignalLifecycle {
 	}
 
 	/**
-	 * Listeners for a second termination signal while the signal path's cleanup runs. The first signal's listeners are already removed, so
+	 * Listeners for a second termination signal while either path's cleanup runs. The first signal's listeners are already removed, so
 	 * without these Node ends the process by default: the terminal stays raw, the held warnings go unwritten and the tracked children live
 	 * on. The forced exit kills the tracked children, restores the terminal and releases the warnings, then exits with the signal's status.
 	 */
@@ -210,7 +223,7 @@ export class SignalLifecycle {
 			this.io.prependListener(signal, () => {
 				killTrackedDetachedChildren();
 				try {
-					this.port.stop();
+					this.stopOnce();
 				} catch (stopError: unknown) {
 					this.io.stderr(
 						`${neutralizeControls(`Stop failed during forced shutdown: ${describeCause(stopError)}`)}\n`,
