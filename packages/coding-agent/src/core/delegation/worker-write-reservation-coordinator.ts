@@ -75,15 +75,15 @@ export interface WorkerWriteReservationCoordinatorOptions {
 	isProcessAlive?(pid: number): boolean;
 }
 
-/**
- * Owns one controller process's write-reservation lifecycle: admission, exact-fence release,
- * event-driven queue wakeup, and fail-closed recovery of positively dead owners.
- */
 /** A workspace as a message names it: its repository root once, and its execution root as well when it is another path. */
 function workspaceLabel(workspace: WorkerWriteReservationWorkspace): string {
 	return [...new Set([workspace.repositoryRoot, workspace.executionRoot])].join(" and ");
 }
 
+/**
+ * Owns one controller process's write-reservation lifecycle: admission, exact-fence release,
+ * event-driven queue wakeup, and fail-closed recovery of positively dead owners.
+ */
 export class WorkerWriteReservationCoordinator {
 	private readonly options: WorkerWriteReservationCoordinatorOptions;
 	private readonly store: WorkerWriteReservationStore;

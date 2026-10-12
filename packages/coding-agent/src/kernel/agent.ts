@@ -591,8 +591,8 @@ export class Agent {
 			this.sentPrefixCount,
 		);
 		this.loopContinuationState = continuationState;
-		try {
-			await this.runWithLifecycle(async (signal) => {
+		await this.runWithLifecycle(async (signal) => {
+			try {
 				await runAgentLoop(
 					messages,
 					this.createContextSnapshot(),
@@ -602,11 +602,12 @@ export class Agent {
 					this.streamFn,
 					continuationState,
 				);
-			});
-		} finally {
-			// Also when the failure lifecycle itself rethrows (a listener refused the failure record): the marks the loop advanced stay.
-			this.syncSanitizerPrefixHorizon(continuationState);
-		}
+			} finally {
+				// Inside the run, before it ends: `finishRun` wakes `waitForIdle()` callers, and one that starts the next prompt
+				// immediately must seed it from marks this run already advanced, not from the previous run's.
+				this.syncSanitizerPrefixHorizon(continuationState);
+			}
+		});
 	}
 
 	private async runContinuation(): Promise<void> {
@@ -614,8 +615,8 @@ export class Agent {
 			this.loopContinuationState ??
 			createAgentLoopContinuationState(this.sanitizerSentPrefixCount, this.sanitizerMemory, this.sentPrefixCount);
 		this.loopContinuationState = continuationState;
-		try {
-			await this.runWithLifecycle(async (signal) => {
+		await this.runWithLifecycle(async (signal) => {
+			try {
 				await runAgentLoopContinue(
 					this.createContextSnapshot(),
 					this.createLoopConfig(),
@@ -624,16 +625,16 @@ export class Agent {
 					this.streamFn,
 					continuationState,
 				);
-			});
-		} finally {
-			this.syncSanitizerPrefixHorizon(continuationState);
-		}
+			} finally {
+				this.syncSanitizerPrefixHorizon(continuationState);
+			}
+		});
 	}
 
 	/**
 	 * Copies the loop's own (possibly just-grown) sanitizer mark back onto this persistent field
 	 * after a run, whether that run finished normally, failed, or was aborted -
-	 * `runWithLifecycle` swallows run failures internally (it rethrows only a listener's refusal of the failure record), and the callers run this in a `finally`, so it always runs.
+	 * `runWithLifecycle` swallows run failures internally (it rethrows only a listener's refusal of the failure record), and the executors run this in a `finally` inside the run, before it ends, so it always runs and always precedes any idle waiter.
 	 * `continuationState.providerRequestPrefixState` is the SAME object the loop wrote through
 	 * during the run (see `createAgentLoopContinuationState`), so this only ever reads a value
 	 * already updated in place - it does not recompute anything.

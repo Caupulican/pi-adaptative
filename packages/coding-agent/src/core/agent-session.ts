@@ -490,8 +490,6 @@ class SubmissionPreflightAborted extends Error {
 	}
 }
 
-/** Most warnings a session holds while no listener is attached. Past it the count is disclosed instead (see takeUndeliveredWarnings). */
-const MAX_UNLISTENED_WARNINGS = 100;
 /**
  * How long a quitting session waits for its run to settle before the run's handlers are released. The same few seconds the worker's
  * physical settlement grace uses (worker-attempt-executor.ts). Past it, the run's final message may not be persisted, and that is disclosed.
@@ -536,10 +534,7 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _unsubscribeSettingsChanges?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
-	/** Warnings raised while no listener is attached: shown to the first subscriber, or taken by the terminal drain. */
-	private readonly _unlistenedWarnings: string[] = [];
 	private readonly _onClosingWarnings: (warnings: readonly string[]) => void;
-	private _unlistenedWarningsDropped = 0;
 	private _extensionsChangedListeners: Array<() => void> = [];
 
 	/** Steering/follow-up/extension-command queues (see pending-input-queue-controller.ts); assigned
@@ -652,6 +647,8 @@ export class AgentSession {
 	private readonly _skillVault: SkillVaultController;
 	private _skillCuratorInstance?: SkillCurator;
 	private _disposed = false;
+	/** Set when the closing sequence released the internal agent consumer; a handler that was already running must not continue past it. */
+	private _closingConsumerReleased = false;
 	private _disposeCompletion: Promise<void> | undefined;
 	private readonly _reflectionAbort = new AbortController();
 	private _optionalIntentAbort: AbortController | undefined;
@@ -4234,14 +4231,7 @@ export class AgentSession {
 	 * so its host takes them to deliver on the session that survives.
 	 */
 	takeUndeliveredWarnings(): string[] {
-		const warnings = [...this._foregroundLifecycle.drainWarnings(), ...this._unlistenedWarnings.splice(0)];
-		if (this._unlistenedWarningsDropped > 0) {
-			warnings.push(
-				`${this._unlistenedWarningsDropped} warning(s) raised while no listener was attached were not held.`,
-			);
-			this._unlistenedWarningsDropped = 0;
-		}
-		return warnings;
+		return this._foregroundLifecycle.drainWarnings();
 	}
 
 	/**
@@ -4522,9 +4512,7 @@ export class AgentSession {
 
 	/** Holds a warning no listener takes, bounded like `emitHostWarning` bounds its message. */
 	private _holdUnlistenedWarning(message: string): void {
-		if (this._unlistenedWarnings.length < MAX_UNLISTENED_WARNINGS)
-			this._unlistenedWarnings.push(message.slice(0, 500));
-		else this._unlistenedWarningsDropped += 1;
+		this._foregroundLifecycle.hold(message);
 	}
 
 	private _emitQueueUpdate(): void {
@@ -4575,8 +4563,12 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
-		await this._emitExtensionEvent(event);
+		// Emit to extensions first. Extension delivery ended with `session_shutdown` (their cleanup runs there and the runner is
+		// invalidated), so a closing session's remaining agent events are settled internally only: persistence and memory sync.
+		if (!this._disposed) await this._emitExtensionEvent(event);
+		// A handler that was already awaiting an extension when the closing sequence gave up on it (the bounded settle) resumes
+		// into owners that are being or have been closed: it stops here instead of writing to them. The loss was disclosed.
+		if (this._closingConsumerReleased) return;
 
 		const suppressRetryPromptEvent =
 			this._modelRouter.isRetryInFlight() &&
@@ -4792,7 +4784,6 @@ export class AgentSession {
 	subscribe(listener: AgentSessionEventListener): () => void {
 		this._eventListeners.push(listener);
 		this._foregroundLifecycle.emitPendingWarnings((message) => this._emit({ type: "warning", message }));
-		for (const message of this._unlistenedWarnings.splice(0)) this._emit({ type: "warning", message });
 
 		// Return unsubscribe function for this specific listener
 		return () => {
@@ -4933,6 +4924,7 @@ export class AgentSession {
 					}
 				} finally {
 					safely(() => this._disconnectFromAgent());
+					this._closingConsumerReleased = true;
 				}
 				// The reflection turn awaits its own prompt, which an abort-ignoring provider can hold open: it gets the same bound, so a
 				// stuck turn cannot keep the memory shutdown, the owner's dispose and the closing disclosure from ever running.
@@ -5034,6 +5026,15 @@ export class AgentSession {
 	}
 
 	private _noteSystemOneTaskDirectoryUnavailable(error: unknown): void {
+		// A verification that meets its task directory already released by a closing session is not a directory to repair: the session
+		// is ending and the verification is not run. Say that, and keep the repair advice for a live session.
+		if (this._disposed) {
+			this._emit({
+				type: "warning",
+				message: "System One verification was not run because the session was closing; no judgment was recorded.",
+			});
+			return;
+		}
 		const reason = (error instanceof Error ? error.message : String(error)).replace(/[\r\n\t]+/gu, " ").slice(0, 240);
 		this._emit({
 			type: "warning",

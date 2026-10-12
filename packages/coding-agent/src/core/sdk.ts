@@ -725,6 +725,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 	});
 	const semanticUsage = sessionSemanticUsageOf(sessionManager);
+	let constructed: AgentSession | undefined;
 	try {
 		if (!systemOneController && systemOneEnabled) {
 			const access = systemOneAccessFromSession(settingsManager, authStorage, options.systemOneProvider);
@@ -882,6 +883,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				adaptiveReadiness ??
 				(steeringPlane || systemOneController ? new AdaptiveRuntimeReadiness({ isUnbound: true }) : undefined),
 		});
+		constructed = session;
 		sessionRef.current = session;
 		// The AgentSession constructor builds the first runner; a reload swaps it through the same ref.
 		const getExtensionRunner = (): ExtensionRunner => {
@@ -1243,8 +1245,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			modelFallbackMessage,
 		};
 	} catch (error) {
-		// The owner was made for this session and no session took it: release its timers and listeners before rethrowing.
-		semanticUsage.dispose();
+		if (constructed === undefined) {
+			// The owner was made for this session and no session took it: release its timers and listeners before rethrowing.
+			semanticUsage.dispose();
+			throw error;
+		}
+		// A session that was constructed and then failed (memory initialization, extension discovery) is closed in full: its extensions,
+		// shell and usage owner, with its closing warnings going to the caller's sink. The original failure stays the cause.
+		try {
+			await constructed.disposeAndWait();
+		} catch (disposeError: unknown) {
+			throw new AggregateError(
+				[error, disposeError],
+				"Session creation failed and the session could not be closed cleanly.",
+			);
+		}
 		throw error;
 	}
 }

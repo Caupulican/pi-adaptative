@@ -205,7 +205,8 @@ const JOURNAL_REASON: Record<SemanticUsageJournalError["reason"], JournalFailure
 
 function boundedCause(text: string): string {
 	const trimmed = text.trim() || "unknown error";
-	return trimmed.length <= CAUSE_MAX_CHARS ? trimmed : trimmed.slice(0, CAUSE_MAX_CHARS);
+	// A cut cause says so: the last character of the bound is the elision mark, never a silent mid-word end.
+	return trimmed.length <= CAUSE_MAX_CHARS ? trimmed : `${trimmed.slice(0, CAUSE_MAX_CHARS - 1)}…`;
 }
 
 function causeOf(error: unknown): string {

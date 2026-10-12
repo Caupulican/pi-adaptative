@@ -829,10 +829,13 @@ async function runLoop(
 				return;
 			}
 
-			pendingMessages = (await config.getSteeringMessages?.()) || [];
+			// An aborted run starts nothing further, and it does not drain what is queued: the queued input stays queued for its owner
+			// (a provider that ignores the abort and completes normally must not pull the next round into a closing session).
+			pendingMessages = signal?.aborted ? [] : (await config.getSteeringMessages?.()) || [];
 		}
 
-		// Agent would stop here. Check for follow-up messages.
+		// Agent would stop here. Check for follow-up messages (never for an aborted run, see above).
+		if (signal?.aborted) break;
 		const followUpMessages =
 			(await config.getFollowUpMessages?.({ providerTurns: continuationState.providerTurns, providerTurnLimit })) ||
 			[];

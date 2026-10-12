@@ -18,6 +18,11 @@ import { ProviderCompatibilityWarnings } from "./provider-compatibility-warnings
  * persistence wiring around it: atomic router batches, canonical message ids, and warnings emitted
  * before the first session subscriber exists.
  */
+/** Most warnings held while no listener is attached. Past it the count is disclosed instead. */
+const MAX_HELD_WARNINGS = 100;
+/** Longest held warning; the same bound the host warning channel applies. */
+const MAX_HELD_WARNING_CHARS = 500;
+
 export class ForegroundLifecycleAdapter {
 	private readonly lifecycle: ForegroundLifecycleController;
 	private readonly sessionManager: SessionManager;
@@ -25,6 +30,7 @@ export class ForegroundLifecycleAdapter {
 	private readonly observeMessagePersisted: ((message: Message, entryId: string) => void) | undefined;
 	private readonly liveWarningSink: (() => ((message: string) => void) | undefined) | undefined;
 	private pendingWarnings: string[] = [];
+	private pendingWarningsDropped = 0;
 	private readonly compatibilityWarnings = new ProviderCompatibilityWarnings();
 
 	/**
@@ -138,7 +144,18 @@ export class ForegroundLifecycleAdapter {
 	 */
 	emitWarning(message: string, deliver: ((message: string) => void) | undefined): void {
 		if (deliver) deliver(message);
-		else this.pendingWarnings.push(message);
+		else this.hold(message);
+	}
+
+	/**
+	 * The one bounded queue of warnings raised while nobody listens (the lifecycle, memory, background lanes, workers, custom
+	 * messages all hold here): each message is cut at {@link MAX_HELD_WARNING_CHARS}, at most {@link MAX_HELD_WARNINGS} are kept,
+	 * and what is dropped past that is reported as a count by {@link drainWarnings}.
+	 */
+	hold(message: string): void {
+		if (this.pendingWarnings.length < MAX_HELD_WARNINGS)
+			this.pendingWarnings.push(message.slice(0, MAX_HELD_WARNING_CHARS));
+		else this.pendingWarningsDropped += 1;
 	}
 
 	/**
@@ -152,6 +169,12 @@ export class ForegroundLifecycleAdapter {
 	drainWarnings(): string[] {
 		const warnings = this.pendingWarnings;
 		this.pendingWarnings = [];
+		if (this.pendingWarningsDropped > 0) {
+			warnings.push(
+				`${this.pendingWarningsDropped} warning(s) raised while no listener was attached were not held.`,
+			);
+			this.pendingWarningsDropped = 0;
+		}
 		return warnings;
 	}
 

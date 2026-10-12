@@ -95,11 +95,15 @@ export class HarnessTrace {
 	/**
 	 * The body states that it received this exact rejection and judged it itself: it is no longer reported by {@link join}. Claimed by
 	 * identity, never by awaiting (a deadline race also awaits, and a rejection arriving after it fired must still be reported), and a
-	 * rejection that was never recorded is an error, so a claim cannot silently cover work this trace did not see.
+	 * rejection that was never recorded is an error, so a claim cannot silently cover work this trace did not see. The judgment names
+	 * the failure it covers: a recorded rejection whose message is not `expected` (exact text, or a RegExp) throws and stays unclaimed.
 	 */
-	claimRejection(error: unknown): void {
+	claimRejection(error: unknown, expected: string | RegExp): void {
 		const index = this.rejectedWork.indexOf(error);
 		if (index < 0) throw new Error("claimRejection: the trace recorded no such rejection");
+		const message = error instanceof Error ? error.message : String(error);
+		const matches = typeof expected === "string" ? message === expected : expected.test(message);
+		if (!matches) throw new Error(`claimRejection: the recorded rejection is not the judged failure: ${message}`);
 		this.rejectedWork.splice(index, 1);
 	}
 

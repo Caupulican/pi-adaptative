@@ -50,6 +50,9 @@ export type {
 	RpcSessionState,
 } from "./rpc-types.ts";
 
+/** How long a SIGTERM shutdown waits for the output flush before it exits regardless (a client that stopped reading). */
+const SIGTERM_FLUSH_MS = 1_000;
+
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -767,14 +770,41 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 		cleanupSignalHandlers();
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
-		await runtimeHost.dispose();
-		detachInput();
-		process.stdin.pause();
-		if (signal !== "SIGTERM") {
-			await flushRawStdout();
+		// Every step runs, and every cause is kept distinct: a failed dispose is the error the caller sees, a failed flush is
+		// reported only when the dispose succeeded, and the held warnings are always released at the end.
+		let failure: { readonly error: unknown } | undefined;
+		try {
+			await runtimeHost.dispose();
+		} catch (disposeError: unknown) {
+			failure = { error: disposeError };
 		}
-		// The stream is closed: any warning from here on goes to stderr.
-		terminalWarnings.release();
+		try {
+			detachInput();
+			process.stdin.pause();
+			// A client that stopped reading must not hold a SIGTERM exit forever, but the closing warnings the dispose queued still get
+			// a short window to reach it; a normal shutdown waits for the flush to finish.
+			if (signal === "SIGTERM") {
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				try {
+					await Promise.race([
+						flushRawStdout(),
+						new Promise<void>((resolve) => {
+							timer = setTimeout(resolve, SIGTERM_FLUSH_MS);
+						}),
+					]);
+				} finally {
+					clearTimeout(timer);
+				}
+			} else {
+				await flushRawStdout();
+			}
+		} catch (flushError: unknown) {
+			failure ??= { error: flushError };
+		} finally {
+			// The stream is closed: any warning from here on goes to stderr.
+			terminalWarnings.release();
+		}
+		if (failure) throw failure.error;
 		process.exit(exitCode);
 	}
 

@@ -1064,7 +1064,9 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				// depends on is already disposed. Each message exactly (the attempt id narrowed to its uuid form).
 				/^Worker inner completion cleanup failed: Worker worker-1 attempt attempt-[0-9a-f-]{36} physical settlement timed out after 5000ms with 2 inner call\(s\) still pending\.$/,
 				/^Worker shutdown failed: Shell execution session terminal release timed out after 5000ms before child close event$/,
-				/^System One verification was deferred because the active task directory is unavailable \(Task directory runtime disposed\)\. Repair it with task_directory; no judgment was recorded\.$/,
+				/^System One verification was not run because the session was closing; no judgment was recorded\.$/,
+				// The quit settle bound: a run held past its owner's quit is disclosed once, exactly (the quit-run-ignores-abort witness).
+				/^A run did not settle within 5s of quit; its final message may not have been persisted\.$/,
 				/^Worker worker-1 rejected: Worker worker-1 resource release failed\.$/,
 				/^Failed to dispose worker write reservations: Worker write reservation shutdown failed\.$/,
 				/^Worker shutdown failed: Worker worker-1 resource release failed\.$/,
@@ -7717,6 +7719,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 							.map((block) => (block.type === "text" ? (block.text ?? "") : ""))
 							.join(""),
 					}));
+			const qmMark = world.warnings.length;
 			const qmHold = createBarrier();
 			const qmStreaming = createBarrier();
 			const qmCreated = await world.createRootSession("root", {
@@ -7783,7 +7786,61 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			expect(qmAssistants(qmIdleFile), "the idle quit keeps its complete reply and no partial one").toEqual([
 				{ stopReason: "stop", text: "Noted." },
 			]);
+			expect(
+				world.warnings.slice(qmMark).filter((message) => message.includes("did not settle")),
+				"the mid-run quit whose abort settles inside the bound discloses no unsettled run",
+			).toEqual([]);
 			trace.mark("root", "quit.mid-run");
+			// Quit while a run ignores its abort: the provider request is held at its gate past the quit, so the owner's bounded wait
+			// expires. The disclosure is the only evidence of that; the gate opens only after it is observed, so the held producer
+			// never blocks the disposal that is being witnessed.
+			const tmReached = createBarrier();
+			const tmHold = createBarrier();
+			const tmCreated = await world.createRootSession("root", {
+				sessionManager: world.createSessionManager(),
+				settings: { memorySystem: undefined },
+			});
+			const tmSession = tmCreated.session;
+			const tmFile = tmCreated.sessionManager.getSessionFile();
+			if (tmFile === undefined) throw new Error("the settle-bound witness owner has no file");
+			world.provider.enqueue("root", {
+				name: "quit-run-ignores-abort",
+				check: () => tmReached.release(),
+				gate: tmHold.promise,
+				ignoresAbort: true,
+				reply: { content: [{ type: "text", text: "The late reply" }] },
+			});
+			const tmPrompt = tmSession.prompt("Start a reply that outlives quit.").catch((error: unknown) => error);
+			await withDeadline(trace, "quit settle bound: the request reaches its held gate", tmReached.promise);
+			const tmMark = world.warnings.length;
+			const tmRequests = world.provider.requests.length;
+			let tmOutcome: unknown = "unsettled";
+			try {
+				await withDeadline(
+					trace,
+					"quit settle bound: the owner disposes while its run is held",
+					tmSession.disposeAndWait(),
+					60_000,
+				);
+				expect(
+					world.warnings.slice(tmMark),
+					"the owner's bounded wait expires and the unsettled run is disclosed at close",
+				).toEqual(["A run did not settle within 5s of quit; its final message may not have been persisted."]);
+				expect(qmAssistants(tmFile), "the held run persisted no assistant message before the bound").toEqual([]);
+			} finally {
+				tmHold.release();
+				tmOutcome = await withDeadline(
+					trace,
+					"quit settle bound: the held run ends once its gate opens",
+					tmPrompt,
+					60_000,
+				);
+			}
+			expect(tmOutcome, "the held run ends without an error once its gate opens").toBeUndefined();
+			expect(world.provider.requests.length, "no provider round starts after the owner is disposed").toBe(
+				tmRequests,
+			);
+			trace.mark("root", "quit.settle-bound");
 		},
 	);
 }, 300_000);
@@ -16373,7 +16430,11 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						"the fenced turn ends on the refused tool result: the session's own persistence refusal",
 					).rejects.toThrow("Session persistence state is uncertain after a failed write");
 					// The body judged this exact rejection above; the trace must not report it a second time at close.
-					trace.claimRejection(uToolRefusal);
+					// The claim names the full refusal of the session's append guard (session-manager `_persistEntries`), so any other failure stays reported.
+					trace.claimRejection(
+						uToolRefusal,
+						"Session persistence state is uncertain after a failed write; reopen the session file or start a new session before appending.",
+					);
 					const uToolFile = uTool.sessionManager.getSessionFile();
 					if (uToolFile === undefined) throw new Error("U-usage: the fenced root-tool owner session has no file");
 					const uToolSidecar = uSidecarOf(uToolFile, uTool.sessionManager.getSessionId());

@@ -137,11 +137,11 @@ function countUniquePaidRows(created: CreatedSession): { readonly rows: number }
 		if (copyBaseline !== undefined && "unreadable" in copyBaseline)
 			return { unknown: causeText(copyBaseline.unreadable) };
 		const paidIds = new Set<string>();
-		const entries = sessionManager.getEntries();
-		// The traversal is over the entry index the manager already holds (one pointer array, no file content); a session larger
-		// than the bound is not walked at all and its file is kept.
-		if (entries.length > MAX_DISCARD_ENTRIES) return { unknown: `more than ${MAX_DISCARD_ENTRIES} entries` };
-		for (const entry of entries) {
+		// The count is read BEFORE the entries are copied: a session larger than the bound is not copied or walked at all, and its
+		// file is kept. The walk is over the entry index the manager already holds (one pointer array, no file content).
+		if (sessionManager.getEntryCount() > MAX_DISCARD_ENTRIES)
+			return { unknown: `more than ${MAX_DISCARD_ENTRIES} entries` };
+		for (const entry of sessionManager.getEntries()) {
 			if (entry.type !== "custom" || !PAID_ROW_TYPES.has(entry.customType)) continue;
 			if (paidIds.size === MAX_DISCARD_PAID_ROWS)
 				return { unknown: `more than ${MAX_DISCARD_PAID_ROWS} paid usage rows` };
