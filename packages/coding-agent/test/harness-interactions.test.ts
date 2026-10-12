@@ -33,6 +33,7 @@ import { readWorkerMailboxRecord, workerMailboxPath } from "../src/core/delegati
 import { parseLocalWorkerProcessOwnerId } from "../src/core/delegation/worker-process-owner.ts";
 import { WorkerRecoveryCoordinator } from "../src/core/delegation/worker-recovery-coordinator.ts";
 import { WORKER_TERMINAL_OUTPUT_INLINE_BYTES } from "../src/core/delegation/worker-terminal-output-artifact.ts";
+import type { ExtensionFactory } from "../src/core/extensions/types.ts";
 import { buildObjectiveRoutePrompt } from "../src/core/goals/goal-continuation-prompt.ts";
 import { getLatestGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import {
@@ -75,7 +76,14 @@ import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-exe
 import { isRecordObject } from "../src/core/util/value-guards.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
 import type { ScriptedReply, ScriptedRequest, ScriptStep } from "./fixtures/harness/scripted-provider.ts";
-import { calls, createBarrier, fail, HARNESS_PROVIDER, text } from "./fixtures/harness/scripted-provider.ts";
+import {
+	type Barrier,
+	calls,
+	createBarrier,
+	fail,
+	HARNESS_PROVIDER,
+	text,
+} from "./fixtures/harness/scripted-provider.ts";
 import {
 	HARNESS_PROJECT_CWD,
 	type HarnessWorld,
@@ -1065,6 +1073,9 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				/^Worker inner completion cleanup failed: Worker worker-1 attempt attempt-[0-9a-f-]{36} physical settlement timed out after 5000ms with 2 inner call\(s\) still pending\.$/,
 				/^Worker shutdown failed: Shell execution session terminal release timed out after 5000ms before child close event$/,
 				/^System One verification was not run because the session was closing; no judgment was recorded\.$/,
+				// The quit's bounded settle expires for a run that an extension holds past the abort (the message-end witness): exact text.
+				/^A run did not settle within 5s of quit; its final message may not have been persisted\.$/,
+				/^A compaction did not settle within 5s of quit; its result is discarded\.$/,
 				/^Worker worker-1 rejected: Worker worker-1 resource release failed\.$/,
 				/^Failed to dispose worker write reservations: Worker write reservation shutdown failed\.$/,
 				/^Worker shutdown failed: Worker worker-1 resource release failed\.$/,
@@ -7856,9 +7867,235 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				tmRequests,
 			);
 			trace.mark("root", "quit.abort-ignoring-producer");
+			// Compaction across the quit: the owner is disposed while an extension's `session_before_compact` handler still holds the summary it
+			// returns. Production refuses that late result at its one commit point (`applyResult`): the held compaction is rejected with its
+			// cancellation and no compaction entry is written after the quit. The live control releases the handler before the quit, and the
+			// same summary commits. Compaction needs history, so each owner first completes one plain turn.
+			const cpCompactions = (file: string) =>
+				(world.io.peekFile(file) ?? "")
+					.split("\n")
+					.filter((line) => line.length > 0)
+					.map((line) => JSON.parse(line) as { type?: string; summary?: string })
+					.filter((entry) => entry.type === "compaction")
+					.map((entry) => entry.summary);
+			const cpHold = createBarrier();
+			const cpReached = createBarrier();
+			const cpHeld = await world.createRootSession("root", {
+				sessionManager: world.createSessionManager(),
+				settings: { memorySystem: undefined },
+				extensionFactories: [holdCompactionSummary(cpHold, cpReached)],
+			});
+			const cpHeldSession = cpHeld.session;
+			await cpHeldSession.bindExtensions({ uiContext: world.humanInput.ui });
+			const cpHeldFile = cpHeld.sessionManager.getSessionFile();
+			if (cpHeldFile === undefined) throw new Error("the held compaction owner has no file");
+			world.provider.enqueue("root", {
+				name: "compaction-held-seed",
+				reply: { content: [{ type: "text", text: "Seeded before the held compaction." }] },
+			});
+			await withDeadline(
+				trace,
+				"held compaction: the seed turn completes",
+				cpHeldSession.prompt("Seed the held compaction."),
+			);
+			const cpHeldCompaction = cpHeldSession.compact("Compact the seeded history.").catch((error: unknown) => error);
+			await withDeadline(trace, "held compaction: the extension holds the summary", cpReached.promise);
+			const cpHeldRequests = world.provider.requests.length;
+			const cpHeldMark = world.warnings.length;
+			let cpHeldOutcome: unknown = "unsettled";
+			try {
+				await withDeadline(
+					trace,
+					"held compaction: the owner disposes while the summary is held",
+					cpHeldSession.disposeAndWait(),
+					60_000,
+				);
+				expect(cpCompactions(cpHeldFile), "the quit writes no compaction entry while the summary is held").toEqual(
+					[],
+				);
+				expect(
+					world.warnings.slice(cpHeldMark),
+					"the quit waits its bound for the held compaction and discloses it as unsettled",
+				).toEqual(["A compaction did not settle within 5s of quit; its result is discarded."]);
+			} finally {
+				cpHold.release();
+				cpHeldOutcome = await withDeadline(trace, "held compaction: the summary resumes", cpHeldCompaction, 60_000);
+			}
+			expect(cpHeldOutcome, "the resumed summary ends in a cancellation, not a commit").toBeInstanceOf(Error);
+			trace.claimRejection(cpHeldOutcome, "Compaction cancelled");
+			expect(cpCompactions(cpHeldFile), "the resumed summary writes no compaction entry after the quit").toEqual([]);
+			expect(world.provider.requests.length, "the held compaction makes no provider request").toBe(cpHeldRequests);
+			trace.mark("root", "compaction.held-quit");
+
+			const cpLiveHold = createBarrier();
+			const cpLiveReached = createBarrier();
+			const cpLive = await world.createRootSession("root", {
+				sessionManager: world.createSessionManager(),
+				settings: { memorySystem: undefined },
+				extensionFactories: [holdCompactionSummary(cpLiveHold, cpLiveReached)],
+			});
+			const cpLiveSession = cpLive.session;
+			await cpLiveSession.bindExtensions({ uiContext: world.humanInput.ui });
+			const cpLiveFile = cpLive.sessionManager.getSessionFile();
+			if (cpLiveFile === undefined) throw new Error("the live compaction control owner has no file");
+			world.provider.enqueue("root", {
+				name: "compaction-live-seed",
+				reply: { content: [{ type: "text", text: "Seeded before the live compaction." }] },
+			});
+			await withDeadline(
+				trace,
+				"live compaction: the seed turn completes",
+				cpLiveSession.prompt("Seed the live compaction."),
+			);
+			const cpLiveCompaction = cpLiveSession.compact("Compact the seeded history.");
+			await withDeadline(trace, "live compaction: the extension holds the summary", cpLiveReached.promise);
+			cpLiveHold.release();
+			const cpLiveResult = await withDeadline(trace, "live compaction: the summary commits", cpLiveCompaction);
+			expect(cpLiveResult.summary, "the live compaction returns the handler's summary").toBe("The held summary.");
+			expect(
+				await world.disposeSessionInBody(cpLiveSession),
+				"the live compaction owner disposes cleanly",
+			).toBeUndefined();
+			const cpLiveSummaries = cpCompactions(cpLiveFile);
+			expect(cpLiveSummaries, "the live quit keeps exactly one committed compaction entry").toHaveLength(1);
+			expect(cpLiveSummaries[0], "the committed entry carries the handler's summary").toContain("The held summary.");
+			trace.mark("root", "compaction.live-control");
+
+			// Quit while an extension holds the run at the assistant's message end, past the quit's bounded settle: the owner discloses the
+			// unsettled run, the held handler resumes into the closed owner, and the reply is never written. The live control releases the
+			// handler before the quit: the reply is kept and no run is disclosed as unsettled.
+			const meHold = createBarrier();
+			const meReached = createBarrier();
+			const meHeld = await world.createRootSession("root", {
+				sessionManager: world.createSessionManager(),
+				settings: { memorySystem: undefined },
+				extensionFactories: [holdAssistantMessageEnd(meHold, meReached)],
+			});
+			const meHeldSession = meHeld.session;
+			await meHeldSession.bindExtensions({ uiContext: world.humanInput.ui });
+			const meHeldFile = meHeld.sessionManager.getSessionFile();
+			if (meHeldFile === undefined) throw new Error("the held message owner has no file");
+			world.provider.enqueue("root", {
+				name: "message-end-held",
+				reply: { content: [{ type: "text", text: "The late reply" }] },
+			});
+			const mePrompt = meHeldSession
+				.prompt("Start a reply that its extension holds at message end.")
+				.catch((error: unknown) => error);
+			await withDeadline(trace, "message end: the extension holds the reply", meReached.promise);
+			const meMark = world.warnings.length;
+			const meRequests = world.provider.requests.length;
+			let meSnapshot: string | undefined;
+			let meOutcome: unknown = "unsettled";
+			try {
+				await withDeadline(
+					trace,
+					"message end: the owner disposes while the reply is held",
+					meHeldSession.disposeAndWait(),
+					60_000,
+				);
+				meSnapshot = world.io.peekFile(meHeldFile);
+				// The closing verification notice belongs to the session's System One work, not to this run: it is asserted by the quit
+				// witness above, so it is excluded here and the run's own disclosure is required exactly once.
+				expect(
+					world.warnings
+						.slice(meMark)
+						.filter(
+							(message) =>
+								message !==
+								"System One verification was not run because the session was closing; no judgment was recorded.",
+						),
+					"the quit discloses exactly the unsettled run, once",
+				).toEqual(["A run did not settle within 5s of quit; its final message may not have been persisted."]);
+				expect(qmAssistants(meHeldFile), "the held reply is not persisted while the quit waits").toEqual([]);
+			} finally {
+				meHold.release();
+				meOutcome = await withDeadline(
+					trace,
+					"message end: the held run ends once its handler resumes",
+					mePrompt,
+					60_000,
+				);
+			}
+			expect(meOutcome, "the held run ends without an error once its handler resumes").toBeUndefined();
+			expect(world.io.peekFile(meHeldFile), "the resumed handler writes nothing to the session file").toBe(
+				meSnapshot,
+			);
+			expect(qmAssistants(meHeldFile), "the held reply is never persisted").toEqual([]);
+			expect(world.provider.requests.length, "no provider round starts after the owner is disposed").toBe(
+				meRequests,
+			);
+			trace.mark("root", "message-end.held-quit");
+
+			const meLiveHold = createBarrier();
+			const meLiveReached = createBarrier();
+			const meLive = await world.createRootSession("root", {
+				sessionManager: world.createSessionManager(),
+				settings: { memorySystem: undefined },
+				extensionFactories: [holdAssistantMessageEnd(meLiveHold, meLiveReached)],
+			});
+			const meLiveSession = meLive.session;
+			await meLiveSession.bindExtensions({ uiContext: world.humanInput.ui });
+			const meLiveFile = meLive.sessionManager.getSessionFile();
+			if (meLiveFile === undefined) throw new Error("the live message control owner has no file");
+			world.provider.enqueue("root", {
+				name: "message-end-live-control",
+				reply: { content: [{ type: "text", text: "The late reply" }] },
+			});
+			const meLivePrompt = meLiveSession.prompt("Start a reply that its extension releases before quit.");
+			await withDeadline(trace, "live message end: the extension holds the reply", meLiveReached.promise);
+			meLiveHold.release();
+			await withDeadline(trace, "live message end: the reply completes before the quit", meLivePrompt);
+			const meLiveMark = world.warnings.length;
+			expect(
+				await world.disposeSessionInBody(meLiveSession),
+				"the live message control owner disposes cleanly",
+			).toBeUndefined();
+			expect(
+				world.warnings.slice(meLiveMark).filter((message) => message.includes("did not settle")),
+				"the released reply's quit discloses no unsettled run",
+			).toEqual([]);
+			expect(qmAssistants(meLiveFile), "the released reply is kept with its stop reason").toEqual([
+				{ stopReason: "stop", text: "The late reply" },
+			]);
+			trace.mark("root", "message-end.live-control");
 		},
 	);
 }, 300_000);
+
+/**
+ * An extension that holds the summary it returns from `session_before_compact` until `hold` is released. `reached` is released when the
+ * compaction reaches the handler, so the scenario can quit while the compaction is still in its handler.
+ */
+function holdCompactionSummary(hold: Barrier, reached: Barrier): ExtensionFactory {
+	return (pi) => {
+		pi.on("session_before_compact", async (event) => {
+			reached.release();
+			await hold.promise;
+			return {
+				compaction: {
+					summary: "The held summary.",
+					firstKeptEntryId: event.preparation.firstKeptEntryId,
+					tokensBefore: event.preparation.tokensBefore,
+				},
+			};
+		});
+	};
+}
+
+/**
+ * An extension that holds the run at the assistant's message end until `hold` is released. `reached` is released when the assistant's
+ * message reaches the handler; the user's own message end passes straight through.
+ */
+function holdAssistantMessageEnd(hold: Barrier, reached: Barrier): ExtensionFactory {
+	return (pi) => {
+		pi.on("message_end", async (event) => {
+			if (event.message.role !== "assistant") return;
+			reached.release();
+			await hold.promise;
+		});
+	};
+}
 
 /** Text of every `delegate` tool result the session recorded, in order (structured, not line-prefix matched). */
 function delegateResultTexts(session: AgentSession): string[] {

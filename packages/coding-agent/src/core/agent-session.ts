@@ -4958,6 +4958,13 @@ export class AgentSession {
 						`A reflection turn did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its work may not have been persisted.`,
 					);
 				}
+				// A compaction that was running at the quit (a manual one held by an extension's `session_before_compact` handler, or an
+				// automatic one) gets the same bound: it ends cancelled before the session reports closed, or the timeout is disclosed.
+				if (!(await runSettlesWithin(this._compaction.settled(), CLOSING_RUN_SETTLE_MS))) {
+					this._holdUnlistenedWarning(
+						`A compaction did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its result is discarded.`,
+					);
+				}
 				await this._memory.shutdown();
 			} finally {
 				// After memory: a history summary still in flight records its spend through this owner. The listeners are already

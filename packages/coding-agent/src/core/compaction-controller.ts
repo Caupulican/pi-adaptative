@@ -401,6 +401,8 @@ export class CompactionController {
 
 	/** Set by {@link close}: the session is closing and no new provider call starts from this owner. */
 	private closed = false;
+	/** Manual compactions in flight, so a closing session can wait for them (see {@link settled}). */
+	private readonly manualRuns = new Set<Promise<CompactionResult>>();
 
 	constructor(deps: CompactionControllerDeps = {} as CompactionControllerDeps) {
 		this.deps = deps;
@@ -800,6 +802,21 @@ export class CompactionController {
 	}
 
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		const run = this.runManual(customInstructions);
+		this.manualRuns.add(run);
+		try {
+			return await run;
+		} finally {
+			this.manualRuns.delete(run);
+		}
+	}
+
+	/** Resolves once every manual and automatic compaction that was running has ended, whatever its outcome. */
+	async settled(): Promise<void> {
+		await Promise.allSettled([...this.manualRuns, ...(this.autoRunPromise ? [this.autoRunPromise] : [])]);
+	}
+
+	private async runManual(customInstructions?: string): Promise<CompactionResult> {
 		if (this.closed) throw new Error("Compaction cancelled");
 		if (this.isRunning()) {
 			throw new Error("Compaction already in progress");
@@ -2032,6 +2049,9 @@ export class CompactionController {
 	}
 
 	private async applyResult(result: CompactionResult, fromExtension: boolean): Promise<string> {
+		// The one commit point of every compaction path: a result that arrives after the session closed (an extension's
+		// `session_before_compact` handler that was still running across the quit) is cancelled here and writes nothing.
+		if (this.closed) throw new Error("Compaction cancelled");
 		let applied: CompactionResult = { ...result };
 		if (this.deps.decorateCompactionDetails) {
 			applied = { ...applied, details: this.deps.decorateCompactionDetails(applied.details) };
