@@ -33,6 +33,7 @@ jobs:
     with:
       ref: ${{ github.event.inputs.tag || github.ref_name }}
       full_suite: true
+      release_verification: true
 
   build:
     runs-on: ubuntu-24.04

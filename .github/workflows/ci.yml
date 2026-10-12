@@ -1,7 +1,7 @@
 name: CI
 
-# Build, static checks and only the three existing harness journeys. The release verifier retains
-# its separately required evidence and therefore cannot certify a release under this test limit.
+# Normal CI runs builds, static checks and the three existing harness journeys only.
+# Explicitly authorized release calls additionally supply the unchanged release verifier's evidence.
 on:
   push:
     branches: [main]
@@ -15,7 +15,12 @@ on:
         required: false
         type: string
       full_suite:
-        description: Kept for callers; automatic tests remain limited to the three harness journeys
+        description: Kept for callers; normal CI tests remain limited to the three harness journeys
+        required: false
+        type: boolean
+        default: false
+      release_verification:
+        description: Additional remote release evidence; requires explicit owner authorization
         required: false
         type: boolean
         default: false
@@ -82,6 +87,18 @@ jobs:
 
       - name: Harness journeys
         run: npm run check:harness-journeys
+
+      - name: Provider regressions
+        if: inputs.release_verification == true
+        run: npm run check:provider-regressions
+
+      - name: Dependency hardening
+        if: inputs.release_verification == true && runner.os == 'Windows'
+        run: npm run check:dependency-forks
+
+      - name: Dependency fork installation
+        if: inputs.release_verification == true
+        run: npm run check:sandbox-fork-install
 
       # A contract test may change only alongside docs/doctrine.md (see contracts.json). The
       # pre-commit chain checks the staged tree; a push is checked over its commit range.
