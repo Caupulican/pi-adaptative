@@ -51,6 +51,7 @@ import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import { TerminalWarnings } from "../../../src/core/terminal-warnings.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "../../../src/core/tool-applicability-gate.ts";
 import type { ToolDef } from "../../../src/core/tools/index.ts";
+import { routeShellContract } from "../../../src/core/tools/shell-contract-router.ts";
 import { CURRENT_SESSION_VERSION, SessionManager } from "../../../src/kernel/session/session-manager.ts";
 import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
 import { type RpcModeIo, runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
@@ -3626,14 +3627,14 @@ export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = 
 			idle: true,
 			bashCleanup: {
 				faultFired: true,
-				published: ["printf first"],
-				persisted: ["printf first"],
+				published: ["echo -n first"],
+				persisted: ["echo -n first"],
 				pendingSuffix: true,
 				retryRefused: true,
 				retryDidNotDuplicate: true,
 				canonicalPrefixConfirmed: true,
-				repairedPublished: ["printf first", "printf second"],
-				repairedPersisted: ["printf first", "printf second"],
+				repairedPublished: ["echo -n first", "echo -n second"],
+				repairedPersisted: ["echo -n first", "echo -n second"],
 				repairedPendingEmpty: true,
 			},
 		},
@@ -3642,8 +3643,8 @@ export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = 
 			secondEnds: 1,
 			fabricatedFailures: 0,
 			idle: true,
-			publishedBash: ["printf first", "printf second"],
-			persistedBash: ["printf first", "printf second"],
+			publishedBash: ["echo -n first", "echo -n second"],
+			persistedBash: ["echo -n first", "echo -n second"],
 		},
 	},
 	sessionWarningRoutes: {
@@ -5251,15 +5252,22 @@ async function runLifecycleWitness(world: HarnessWorld): Promise<SdkConstruction
 					reached.promise,
 				);
 				world.shell.enqueue(
-					...["first", "second"].map((name) => ({
-						name: `listener-${variant}-bash-${name}`,
-						command: `printf ${name}`,
-						output: name,
-						exitCode: 0,
-					})),
+					...["first", "second"].map((name) => {
+						// The public command is portable. The scripted transport receives the real router's backend projection,
+						// including Windows' PowerShell floor when explicit operations disable the Python engine.
+						const route = routeShellContract(`echo -n ${name}`, process.platform, { pythonEngine: false });
+						if (route.kind !== "passthrough" && route.kind !== "powershell")
+							throw new Error("bash publication fixture command did not reach a supported shell route");
+						return {
+							name: `listener-${variant}-bash-${name}`,
+							command: route.command,
+							output: name,
+							exitCode: 0,
+						};
+					}),
 				);
-				await owner.session.executeBash("printf first", undefined, { operations: world.shell });
-				await owner.session.executeBash("printf second", undefined, { operations: world.shell });
+				await owner.session.executeBash("echo -n first", undefined, { operations: world.shell });
+				await owner.session.executeBash("echo -n second", undefined, { operations: world.shell });
 				if (!owner.session.hasPendingBashMessages)
 					throw new Error(`${variant}: owner bash outputs were not deferred by the real streaming session`);
 				if (variant === "failedRun") {
@@ -5269,7 +5277,7 @@ async function runLifecycleWitness(world: HarnessWorld): Promise<SdkConstruction
 						kind: "append",
 						code: "EIO",
 						matches: (operation, data) =>
-							operation.path === file && data?.includes('"command":"printf second"') === true,
+							operation.path === file && data?.includes('"command":"echo -n second"') === true,
 					});
 				}
 			} finally {
@@ -5318,7 +5326,7 @@ async function runLifecycleWitness(world: HarnessWorld): Promise<SdkConstruction
 			if (file === undefined) throw new Error("bash recovery has no persisted session file");
 			const canonical = world.io.peekFile(file) ?? "";
 			const canonicalPrefixConfirmed =
-				canonical.includes('"command":"printf first"') && !canonical.includes('"command":"printf second"');
+				canonical.includes('"command":"echo -n first"') && !canonical.includes('"command":"echo -n second"');
 			if (!canonicalPrefixConfirmed)
 				throw new Error("pre-write bash refusal did not preserve the exact committed prefix");
 			first();
