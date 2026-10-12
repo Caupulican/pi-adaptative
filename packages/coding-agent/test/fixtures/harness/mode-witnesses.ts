@@ -548,7 +548,8 @@ function holdBeforeAgentStart(hold: Barrier, reached: Barrier): ExtensionFactory
 
 interface ClosingGateStartRun {
 	readonly requestsAddedByRelease: number;
-	readonly fileUnchangedByRelease: boolean;
+	/** What the file gained after the release (empty when nothing was written), cut for evidence. */
+	readonly fileGrowthByRelease: string;
 	readonly startOutcome: string;
 	readonly controlCommitted: boolean;
 }
@@ -589,7 +590,10 @@ async function runClosingGateAtStart(world: HarnessWorld): Promise<ClosingGateSt
 	hold.release();
 	const startOutcome = await withDeadline(trace, "closing gate: the held start settles", start, 60_000);
 	const requestsAddedByRelease = world.provider.requests.length - requestsAtQuit;
-	const fileUnchangedByRelease = world.io.peekFile(heldFile) === fileAtQuit;
+	const fileAfterRelease = world.io.peekFile(heldFile) ?? "";
+	const fileGrowthByRelease = fileAfterRelease.startsWith(fileAtQuit)
+		? fileAfterRelease.slice(fileAtQuit.length).slice(0, 600)
+		: `<the file was rewritten> ${fileAfterRelease.slice(0, 300)}`;
 
 	// Normal order: the start is released before the quit, so the run reaches its provider and commits through the same owner.
 	const released = createBarrier();
@@ -610,7 +614,7 @@ async function runClosingGateAtStart(world: HarnessWorld): Promise<ClosingGateSt
 	await world.disposeSessionInBody(control.session);
 	return {
 		requestsAddedByRelease,
-		fileUnchangedByRelease,
+		fileGrowthByRelease,
 		startOutcome,
 		controlCommitted: (world.io.peekFile(controlFile) ?? "").includes(CLOSING_GATE_CONTROL_REPLY),
 	};
@@ -745,7 +749,7 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 
 	const gate = await runClosingGateAtStart(world);
 	expect(gate.requestsAddedByRelease, "a quit-cancelled start makes no provider request after the release").toBe(0);
-	expect(gate.fileUnchangedByRelease, "the file gains nothing after the release").toBe(true);
+	expect(gate.fileGrowthByRelease, "the file gains nothing after the release (any growth is printed here)").toBe("");
 	expect(gate.startOutcome, "the held prompt resolves after the release").toBe("resolved");
 	expect(gate.controlCommitted, "the control released before the quit commits its reply").toBe(true);
 }
