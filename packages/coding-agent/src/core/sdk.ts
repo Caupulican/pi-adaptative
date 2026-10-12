@@ -1266,7 +1266,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				try {
 					options.onClosingWarnings(closingWarnings);
 				} catch (sinkError: unknown) {
+					// The sink never accepted them and no session is returned to recover them: they ride the failure.
 					failures.push(sinkError);
+					carriedWarnings = closingWarnings.join(" ");
 				}
 			} else {
 				carriedWarnings = closingWarnings.join(" ");

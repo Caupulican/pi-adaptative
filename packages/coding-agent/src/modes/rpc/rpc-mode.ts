@@ -469,7 +469,14 @@ export async function runRpcMode(
 	// guard ending the process before the dispose and with the warnings lost.
 	let outputFailed = false;
 	const unregisterOutputFailure = io.onOutputFailure(() => {
-		if (shuttingDown) return;
+		if (shuttingDown) {
+			// A further failure while the shutdown runs (every queued write inherits the failed tail): the owner stays registered
+			// through the dispose and flush, so the output guard never ends the process mid-dispose. It is marked and re-routed;
+			// the cleanup already running is not restarted.
+			outputFailed = true;
+			terminalWarnings.release();
+			return;
+		}
 		outputFailed = true;
 		// The stream is gone: warnings from here on go to the terminal's own sink (stderr), not to the dead stream.
 		terminalWarnings.release();
@@ -834,7 +841,6 @@ export async function runRpcMode(
 		}
 		pendingExtensionRequests.clear();
 		cleanupSignalHandlers();
-		unregisterOutputFailure();
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		// Every step runs and every cause is kept: a failed dispose and a failed flush are both reported, and the held warnings are
@@ -872,6 +878,8 @@ export async function runRpcMode(
 		} finally {
 			// The stream is closed: any warning from here on goes to stderr.
 			terminalWarnings.release();
+			// The failure owner leaves only now, with the cleanup done: until here a failing queued write is routed, not fatal.
+			unregisterOutputFailure();
 		}
 		if (failures.length > 0) {
 			// Every cause is reported, and the process still exits: a throw here would leave an RPC host with its signal handlers already
