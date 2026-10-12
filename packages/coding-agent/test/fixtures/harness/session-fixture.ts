@@ -2682,9 +2682,17 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 		"pre-start: the seed turn completes",
 		heldSession.prompt("Seed the pre-start compaction."),
 	);
-	// The second submission settles the owner words the seed turn left (a turn that used no tool): one carries_0 screen, scripted here.
+	// The second submission settles the owner words the seed turn left (a turn that used no tool): the carries_0 screen and the full owner-policy classification that follows it, scripted here.
 	if (world.systemOne.enabled) {
-		world.systemOne.enterPhase("pre-start-backlog", { carries_0: { kind: "noul", probability: 0.02 } });
+		world.systemOne.enterPhase("pre-start-backlog", {
+			carries_0: { kind: "noul", probability: 0.02 },
+			changes_model_pools: { kind: "noul", probability: 0.02 },
+			capabilities_authorized: { kind: "noul", probability: 0.02 },
+			local_commits_only: { kind: "noul", probability: 0.02 },
+			lifts_delivery_block: { kind: "noul", probability: 0.02 },
+			full_handoff: { kind: "noul", probability: 0.02 },
+			optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+		});
 	}
 	const heldRun = heldSession
 		.prompt("Start a reply that its extension holds at message end.")
