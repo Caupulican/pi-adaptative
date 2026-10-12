@@ -1314,6 +1314,22 @@ export interface EffectPorts {
 	sqlite?: "memory";
 }
 
+/**
+ * Whether two own-property descriptors describe the same property, or both are absent. Only descriptor fields are compared: no
+ * property value is read, so a lazy global is not evaluated by the check.
+ */
+function sameOwnProperty(actual: PropertyDescriptor | undefined, expected: PropertyDescriptor | undefined): boolean {
+	if (actual === undefined || expected === undefined) return actual === expected;
+	return (
+		actual.value === expected.value &&
+		actual.get === expected.get &&
+		actual.set === expected.set &&
+		actual.writable === expected.writable &&
+		actual.enumerable === expected.enumerable &&
+		actual.configurable === expected.configurable
+	);
+}
+
 /** Installs at the external builtin boundary, before constructing any production session. */
 export class EffectGuard {
 	readonly escapes: string[] = [];
@@ -1321,6 +1337,10 @@ export class EffectGuard {
 	private readonly io: VirtualFileSystem;
 	private readonly ports: EffectPorts;
 	private readonly restore: Array<() => void> = [];
+	/** What each restore must leave behind, checked once the restores have run (see {@link dispose}). */
+	private readonly restored: Array<{ readonly label: string; readonly holds: () => boolean }> = [];
+	/** The pinned fetch property as installed: a redefinition that bypassed its setter no longer matches it at dispose. */
+	private pinnedFetch: PropertyDescriptor | undefined;
 	private readonly sqlite: VirtualSqlite;
 	private readonly workerThreads: VirtualWorkerThreads;
 	private installed = false;
@@ -1468,6 +1488,14 @@ export class EffectGuard {
 		} catch (error) {
 			failures.push(error);
 		}
+		// A replacement of the pinned fetch is recorded by its setter and never installed; a redefinition would have bypassed that, so the
+		// pin must still be the property the guard installed when the restores run.
+		if (
+			this.pinnedFetch !== undefined &&
+			!sameOwnProperty(Object.getOwnPropertyDescriptor(globalThis, "fetch"), this.pinnedFetch)
+		) {
+			failures.push(new Error("globalThis.fetch was redefined outside the effect guard"));
+		}
 		for (const restore of this.restore.reverse()) {
 			try {
 				restore();
@@ -1476,6 +1504,13 @@ export class EffectGuard {
 			}
 		}
 		this.restore.length = 0;
+		// Each restore is judged by the state captured at install, not by its return: a restore that returns but leaves the property changed is
+		// reported here, and the failed-body close carries it with the body's own failure.
+		for (const { label, holds } of this.restored) {
+			if (!holds()) failures.push(new Error(`Effect guard restore did not take: ${label}`));
+		}
+		this.restored.length = 0;
+		this.pinnedFetch = undefined;
 		try {
 			syncBuiltinESMExports();
 		} catch (error) {
@@ -1520,9 +1555,14 @@ export class EffectGuard {
 				this.effects.push({ kind: "globalThis.fetch", arguments: [replacement] });
 			},
 		});
+		this.pinnedFetch = Object.getOwnPropertyDescriptor(globalThis, "fetch");
 		this.restore.push(() => {
 			if (descriptor) Object.defineProperty(globalThis, "fetch", descriptor);
 			else Reflect.deleteProperty(globalThis, "fetch");
+		});
+		this.restored.push({
+			label: "globalThis.fetch",
+			holds: () => sameOwnProperty(Object.getOwnPropertyDescriptor(globalThis, "fetch"), descriptor),
 		});
 	}
 
@@ -1533,6 +1573,10 @@ export class EffectGuard {
 	private restoreUndiciInstallState(): void {
 		const dispatcher = undici.getGlobalDispatcher();
 		this.restore.push(() => undici.setGlobalDispatcher(dispatcher));
+		this.restored.push({
+			label: "undici global dispatcher",
+			holds: () => undici.getGlobalDispatcher() === dispatcher,
+		});
 		for (const name of [
 			"Headers",
 			"Request",
@@ -1548,6 +1592,10 @@ export class EffectGuard {
 			this.restore.push(() => {
 				if (descriptor) Object.defineProperty(globalThis, name, descriptor);
 				else Reflect.deleteProperty(globalThis, name);
+			});
+			this.restored.push({
+				label: `globalThis.${name}`,
+				holds: () => sameOwnProperty(Object.getOwnPropertyDescriptor(globalThis, name), descriptor),
 			});
 		}
 	}

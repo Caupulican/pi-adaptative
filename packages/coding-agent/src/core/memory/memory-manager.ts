@@ -17,6 +17,12 @@ export interface MemoryPrefetchOptions {
 export interface MemoryManagerOptions {
 	/** Maximum time a provider lifecycle call may keep the session waiting. */
 	lifecycleTimeoutMs?: number;
+	/**
+	 * Where the manager's own failure lines go (provider lifecycle failures and failing provider callbacks). The default is stderr; a host
+	 * that owns the terminal routes them into its warning channel. A lifecycle line carries its diagnostic, so the host can tell a provider
+	 * whose failure it reports itself.
+	 */
+	report?: (line: string, diagnostic?: MemoryLifecycleDiagnostic) => void;
 }
 
 export type MemoryLifecycleOperation =
@@ -93,7 +99,10 @@ export class MemoryManager {
 		"skill_open",
 	]);
 
+	private readonly report: (line: string, diagnostic?: MemoryLifecycleDiagnostic) => void;
+
 	constructor(options: MemoryManagerOptions = {}) {
+		this.report = options.report ?? ((line) => console.error(line));
 		const timeout = options.lifecycleTimeoutMs ?? DEFAULT_LIFECYCLE_TIMEOUT_MS;
 		if (!Number.isFinite(timeout) || timeout <= 0) {
 			throw new Error("Memory lifecycle timeout must be a finite positive number.");
@@ -116,8 +125,9 @@ export class MemoryManager {
 			this.lifecycleDiagnostics.shift();
 		}
 		this.lifecycleDiagnostics.push(diagnostic);
-		console.error(
+		this.report(
 			`Memory provider ${diagnostic.provider} ${diagnostic.operation} ${diagnostic.status}: ${diagnostic.message}`,
+			diagnostic,
 		);
 	}
 
@@ -255,7 +265,7 @@ export class MemoryManager {
 			} catch (err) {
 				// Same isolation as composition: one provider's failure never breaks the prompt. A failed token is
 				// its own key, so the block is composed again and the provider's block failure is logged there too.
-				console.error(
+				this.report(
 					`Memory provider ${p.name} failed to give its system prompt block key: ${describeProviderError(err)}`,
 				);
 				tokens.push(`${p.name}!`);
@@ -294,7 +304,7 @@ export class MemoryManager {
 			try {
 				p.onSystemPromptBlockFrozen(text);
 			} catch (err) {
-				console.error(
+				this.report(
 					`Memory provider ${p.name} failed to observe the frozen system prompt block: ${describeProviderError(err)}`,
 				);
 			}
@@ -324,7 +334,7 @@ export class MemoryManager {
 					blocks.push(block);
 				}
 			} catch (err) {
-				console.error(
+				this.report(
 					`Memory provider ${p.name} failed to generate system prompt block: ${describeProviderError(err)}`,
 				);
 			}
@@ -427,7 +437,7 @@ export class MemoryManager {
 			try {
 				tools.push(...p.getToolDefinitions());
 			} catch (err) {
-				console.error(`Failed to get tool definitions from provider ${p.name}: ${describeProviderError(err)}`);
+				this.report(`Failed to get tool definitions from provider ${p.name}: ${describeProviderError(err)}`);
 			}
 		}
 		return tools;
@@ -445,7 +455,7 @@ export class MemoryManager {
 					markers.add(m);
 				}
 			} catch (err) {
-				console.error(`Failed to get context markers from provider ${p.name}: ${describeProviderError(err)}`);
+				this.report(`Failed to get context markers from provider ${p.name}: ${describeProviderError(err)}`);
 			}
 		}
 		return [...markers];

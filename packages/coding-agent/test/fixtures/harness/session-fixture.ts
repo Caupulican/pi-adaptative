@@ -3178,10 +3178,27 @@ export interface SdkConstructionFailureWitness {
 export interface WorkRetentionWitness {
 	readonly removed: readonly string[];
 	readonly remaining: readonly string[];
-	/** Scan refusals armed for the prune, and how many the prune met: the measurement it reached for the refused run. */
+	/** Operation-specific readdir EIO faults armed for the prune, and how many the prune met: the listing it reached for the refused run. */
 	readonly refusedScans: number;
 	/** For a tenant with a leased run: that run's tree is byte-identical after the prune, so the prune left no marker in it. */
 	readonly leasedTreeUnchanged?: boolean;
+}
+
+/** A removal the filesystem refuses for one run, then the identical prune with the refusal cleared (see {@link removalRefusalWitness}). */
+export interface WorkRemovalRefusalWitness {
+	/** The prune while the removal is refused: the refused run is not reported removed, and its neighbour is removed as its age requires. */
+	readonly refusedPrune: WorkRetentionWitness;
+	/** The removal attempts the refusal met: the refused run's recursive removal, once. */
+	readonly refusedRemovals: number;
+	/**
+	 * The refused run is still owned after the refused prune: its manifest remains (the removal deletes content first and the manifest last,
+	 * so a part-way failure never leaves an unowned remnant) and no cleanup marker is left in it.
+	 */
+	readonly ownedAfterRefusal: boolean;
+	/** The refused run is not blocked by a leftover cleanup marker after the refusal. */
+	readonly blockedAfterRefusal: boolean;
+	/** The identical prune with the refusal cleared: the refused run is removed. */
+	readonly retriedPrune: WorkRetentionWitness;
 }
 
 /** One lease probe through the public owner: whether the run stays active, and how many marker files its lease directory keeps. */
@@ -3206,24 +3223,36 @@ export interface WorkAdoptionWitness {
 export interface WorkDirectoryWitness {
 	/** An expired leased run whose measurement exhausts the shared scan budget: its lease keeps it, and the unmeasured neighbours are kept. */
 	readonly leasedExhausted: WorkRetentionWitness;
-	/** An expired leased run whose artifact scan is refused: its lease keeps it, and its unmeasured size leaves the neighbours inside the budget. */
+	/** An expired leased run whose artifact listing is refused (operation-specific readdir EIO): its lease keeps it, and its counted bytes leave the neighbours inside the budget. */
 	readonly leasedUnmeasured: WorkRetentionWitness;
-	/** Normal order: the same tenant with the scan allowed. */
+	/** Normal order: the same tenant with the listing allowed. */
 	readonly leasedControl: WorkRetentionWitness;
-	/** An unleased run whose artifact scan is refused, inside every bound: an unmeasured run is never evicted for bytes, so it stays. */
+	/** An unleased run whose artifact listing is refused, inside every bound: its counted bytes are within the budget, so it stays. */
 	readonly unleasedUnmeasured: WorkRetentionWitness;
-	/** Normal order: the same tenant with the scan allowed. Every run is inside the budget, so none is removed. */
+	/** Normal order: the same tenant with the listing allowed. Every run is inside the budget, so none is removed. */
 	readonly unleasedControl: WorkRetentionWitness;
-	/** The same refused run over the count bound: it is evicted by count like any other run, and its neighbours stay. */
+	/**
+	 * The same refused run over the count bound: it is evicted by count like any other run, and its neighbours stay. The removal is not refused, so
+	 * this proves selection despite a failed measurement, not a removal under refusal (see {@link WorkDirectoryWitness.removalRefusal}).
+	 */
 	readonly countEviction: WorkRetentionWitness;
-	/** Normal order: the same count bound with the scan allowed. */
+	/** Normal order: the same count bound with the listing allowed. */
 	readonly countControl: WorkRetentionWitness;
 	/** A measured run over the byte budget is evicted first, oldest first, and the within-budget neighbours survive. */
 	readonly overBudgetEviction: WorkRetentionWitness;
-	/** An unleased run whose artifact scan is refused is evicted by age once it has expired. */
+	/**
+	 * A run whose scan is incomplete: its large payload is counted, then one sub-directory's listing is refused. Its counted bytes alone are over
+	 * the byte budget, so it is evicted for bytes, oldest first, and the counted neighbours stay within the budget.
+	 */
+	readonly partialByteEviction: WorkRetentionWitness;
+	/** Normal order: the same incomplete shape with the counted bytes under the budget, so nothing is evicted for bytes. */
+	readonly partialByteControl: WorkRetentionWitness;
+	/** An unleased run whose artifact listing is refused is evicted by age once it has expired; the removal itself is not refused. */
 	readonly ageEviction: WorkRetentionWitness;
 	/** Normal order: the same expired run with the scan allowed. */
 	readonly ageControl: WorkRetentionWitness;
+	/** A removal the filesystem refuses for one run, and the identical prune once the refusal is cleared (see {@link WorkRemovalRefusalWitness}). */
+	readonly removalRefusal: WorkRemovalRefusalWitness;
 	/** Lease probes by process state: alive, denied and unknown keep their run active (unknown fails closed); dead releases its run. */
 	readonly leaseProbes: {
 		readonly alive: WorkLeaseProbeWitness;
@@ -3474,6 +3503,16 @@ export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = 
 			remaining: ["b-neighbour", "c-neighbour"],
 			refusedScans: 0,
 		},
+		partialByteEviction: {
+			removed: ["a-partial"],
+			remaining: ["b-neighbour", "c-neighbour"],
+			refusedScans: 1,
+		},
+		partialByteControl: {
+			removed: [],
+			remaining: ["a-partial", "b-neighbour", "c-neighbour"],
+			refusedScans: 1,
+		},
 		ageEviction: {
 			removed: ["a-stale"],
 			remaining: [],
@@ -3483,6 +3522,13 @@ export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = 
 			removed: ["a-stale"],
 			remaining: [],
 			refusedScans: 0,
+		},
+		removalRefusal: {
+			refusedPrune: { removed: ["b-neighbour"], remaining: ["a-refused"], refusedScans: 0 },
+			refusedRemovals: 1,
+			ownedAfterRefusal: true,
+			blockedAfterRefusal: false,
+			retriedPrune: { removed: ["a-refused"], remaining: [], refusedScans: 0 },
 		},
 		leaseProbes: {
 			alive: { active: true, markers: 1, probed: true },
@@ -3737,6 +3783,8 @@ const WORK_WITNESS_BOUNDS: Omit<WorkRetentionOptions, "now"> = {
 const WORK_WITNESS_STALE_MS = 2 * WORK_WITNESS_MAX_AGE_MS;
 /** The lease directory a run keeps its markers in: the production layout. */
 const WORK_WITNESS_LEASES = ".leases";
+/** The cleanup marker a removal writes into the run it removes: the production name. */
+const WORK_WITNESS_CLEANUP_MARKER = ".cleanup.json";
 /** The provider every memory witness registers; each failing initialization builds its own manager, so the name is never a duplicate. */
 const MEMORY_WITNESS_PROVIDER = "witness-memory";
 
@@ -3747,6 +3795,8 @@ interface WorkWitnessRun {
 	readonly leased: boolean;
 	/** Artifact files under the run, each of `bytes` bytes; the default is one small file. */
 	readonly artifacts?: { readonly count: number; readonly bytes: number };
+	/** A sub-directory of the artifacts holding one small file, so a scenario can refuse its listing (see {@link WorkPruneScenario.refusedDirectory}). */
+	readonly nestedDirectory?: string;
 	/** A lease marker for `pid`, written after the run is released; the process table answers the pid with `state`. */
 	readonly marker?: { readonly pid: number; readonly state: VirtualProcessState };
 }
@@ -3759,8 +3809,10 @@ interface WorkPruneScenario {
 	readonly now: number;
 	/** The clock the prune reads; defaults to the witness clock. */
 	readonly pruneAt?: number;
-	/** The run whose artifact scan the virtual filesystem refuses for the whole prune; undefined is the normal-order control. */
+	/** The run whose artifact listing the virtual filesystem refuses for the whole prune; undefined is the normal-order control. */
 	readonly refusedRun?: string;
+	/** The directory of the refused run that is refused, relative to its run directory; defaults to its artifacts. */
+	readonly refusedDirectory?: string;
 	/** Bounds that replace the witness bounds for this prune. */
 	readonly bounds?: Omit<WorkRetentionOptions, "now">;
 }
@@ -3800,6 +3852,9 @@ function seedWorkTenant(
 		for (let index = 0; index < artifacts.count; index++) {
 			world.io.seed(join(lease.path, "artifacts", `payload-${index}.txt`), "x".repeat(artifacts.bytes));
 		}
+		if (run.nestedDirectory !== undefined) {
+			world.io.seed(join(lease.path, "artifacts", run.nestedDirectory, "nested.txt"), "x");
+		}
 		if (run.leased) held.push(lease);
 		else lease.release();
 		if (run.marker !== undefined) {
@@ -3815,43 +3870,95 @@ function seedWorkTenant(
 
 /**
  * Seeds one tenant, prunes it through the production owner under the witness bounds, and releases the leases the seeding holds. The leased run's
- * tree is compared before and after the prune. A refused scan is armed for the whole prune and counted once the prune has run.
+ * tree is compared before and after the prune. The refused listing is an operation-specific readdir EIO: armed for the whole prune, and counted
+ * once the prune has run.
  */
 function runWorkTenantPrune(world: HarnessWorld, scenario: WorkPruneScenario): WorkRetentionWitness {
-	const { tenant, runs, now, refusedRun } = scenario;
+	const { tenant, runs, now, refusedRun, refusedDirectory } = scenario;
 	const held = seedWorkTenant(world, tenant, runs, now);
 	const leasedRun = runs.find((run) => run.leased);
 	const leasedTree = leasedRun === undefined ? undefined : workWitnessRunDir(world, tenant, leasedRun.name);
 	const treeBefore = leasedTree === undefined ? undefined : world.io.captureTree(leasedTree);
-	const denial =
+	const refusal =
 		refusedRun === undefined
 			? undefined
 			: world.io.denyUntilCleared({
 					name: `${tenant}-scan-refused`,
 					kind: "readdir",
 					matches: (operation) =>
-						operation.path === join(workWitnessRunDir(world, tenant, refusedRun), "artifacts"),
+						operation.path ===
+						join(workWitnessRunDir(world, tenant, refusedRun), refusedDirectory ?? "artifacts"),
 				});
 	const removedPaths = pruneWorkTenant(world.agentDir, WORK_WITNESS_CATEGORY, tenant, {
 		...WORK_WITNESS_BOUNDS,
 		...scenario.bounds,
 		now: scenario.pruneAt ?? now,
 	});
-	const refusedScans = denial?.clear() ?? 0;
+	const refusedScans = refusal?.clear() ?? 0;
 	// Read before the release: the lease's own marker is part of the leased tree until then.
 	const leasedTreeUnchanged =
 		leasedTree === undefined || treeBefore === undefined
 			? undefined
 			: isDeepStrictEqual(treeBefore, world.io.captureTree(leasedTree));
-	const remaining = runs
-		.map((run) => run.name)
-		.filter((name) => world.io.existsSync(workWitnessRunDir(world, tenant, name)));
+	const remaining = remainingWitnessRuns(world, tenant, runs);
 	for (const lease of held) lease.release();
 	return {
 		removed: removedPaths.map((path) => basename(path)),
 		remaining,
 		refusedScans,
 		...(leasedTreeUnchanged === undefined ? {} : { leasedTreeUnchanged }),
+	};
+}
+
+/** The runs of a witness tenant still on disk, in the order given. */
+function remainingWitnessRuns(world: HarnessWorld, tenant: string, runs: readonly WorkWitnessRun[]): string[] {
+	return runs.map((run) => run.name).filter((name) => world.io.existsSync(workWitnessRunDir(world, tenant, name)));
+}
+
+/**
+ * A removal the filesystem refuses for one run: the run's recursive removal fails with EACCES, and the virtual filesystem refuses it before any entry
+ * is deleted. The run keeps its directory and artifacts, and the cleanup marker the removal wrote is released, so the run is not left blocked. Its
+ * neighbour is expired too, so the refusal does not stop the prune. The refusal holds for the first prune only and is cleared before the identical
+ * retry, which removes the run.
+ */
+function removalRefusalWitness(world: HarnessWorld, now: number): WorkRemovalRefusalWitness {
+	const tenant = "removal-refused";
+	const runs: readonly WorkWitnessRun[] = [
+		{ name: "a-refused", leased: false },
+		{ name: "b-neighbour", leased: false },
+	];
+	seedWorkTenant(world, tenant, runs, now);
+	const refusedDir = workWitnessRunDir(world, tenant, "a-refused");
+	// Both runs are past the age bound at this clock, so the removal of each is what the prune attempts.
+	const pruneOptions = { ...WORK_WITNESS_BOUNDS, now: now + 2 * WORK_WITNESS_MAX_AGE_MS };
+	const refusal = world.io.denyUntilCleared({
+		name: `${tenant}-removal-refused`,
+		kind: "rm",
+		code: "EACCES",
+		matches: (operation) => operation.path === refusedDir,
+	});
+	const refusedRemoved = pruneWorkTenant(world.agentDir, WORK_WITNESS_CATEGORY, tenant, pruneOptions);
+	const refusedRemovals = refusal.clear();
+	const refusedPrune: WorkRetentionWitness = {
+		removed: refusedRemoved.map((path) => basename(path)),
+		remaining: remainingWitnessRuns(world, tenant, runs),
+		refusedScans: 0,
+	};
+	const ownedAfterRefusal =
+		world.io.existsSync(join(refusedDir, WORK_RUN_MANIFEST_FILE)) &&
+		!world.io.existsSync(join(refusedDir, WORK_WITNESS_CLEANUP_MARKER));
+	const blockedAfterRefusal = hasActiveWorkRunLease(refusedDir);
+	const retriedRemoved = pruneWorkTenant(world.agentDir, WORK_WITNESS_CATEGORY, tenant, pruneOptions);
+	return {
+		refusedPrune,
+		refusedRemovals,
+		ownedAfterRefusal,
+		blockedAfterRefusal,
+		retriedPrune: {
+			removed: retriedRemoved.map((path) => basename(path)),
+			remaining: remainingWitnessRuns(world, tenant, runs),
+			refusedScans: 0,
+		},
 	};
 }
 
@@ -4179,6 +4286,12 @@ function workDirectoryWitness(world: HarnessWorld): WorkDirectoryWitness {
 		{ name: "b-neighbour", leased: false },
 		{ name: "c-neighbour", leased: false },
 	];
+	/** One run whose payload of `bytes` is counted, and whose sub-directory listing is refused: an incomplete measurement, beside two counted neighbours. */
+	const partialRuns = (bytes: number): readonly WorkWitnessRun[] => [
+		{ name: "a-partial", leased: false, artifacts: { count: 1, bytes }, nestedDirectory: "zz-nested" },
+		{ name: "b-neighbour", leased: false },
+		{ name: "c-neighbour", leased: false },
+	];
 	return {
 		leasedExhausted: runWorkTenantPrune(world, {
 			tenant: "leased-exhausted",
@@ -4214,6 +4327,24 @@ function workDirectoryWitness(world: HarnessWorld): WorkDirectoryWitness {
 			bounds: { maxRuns: 2 },
 		}),
 		overBudgetEviction: runWorkTenantPrune(world, { tenant: "over-budget", runs: heavyRuns, now }),
+		// The scan counts a-partial's payload, then refuses the listing of zz-nested, so the run is measured incomplete. Its counted bytes (the payload
+		// plus the manifest) are over the 1024-byte budget on their own. The former owner charged an incomplete run nothing (its bytes were undefined),
+		// so a-partial was never evicted for bytes and this case removed nothing.
+		partialByteEviction: runWorkTenantPrune(world, {
+			tenant: "partial-bytes",
+			runs: partialRuns(2000),
+			now,
+			refusedRun: "a-partial",
+			refusedDirectory: "artifacts/zz-nested",
+		}),
+		// Normal order: the same incomplete shape with about 300 counted bytes, well under the budget, so nothing is evicted for bytes.
+		partialByteControl: runWorkTenantPrune(world, {
+			tenant: "partial-control",
+			runs: partialRuns(300),
+			now,
+			refusedRun: "a-partial",
+			refusedDirectory: "artifacts/zz-nested",
+		}),
 		ageEviction: runWorkTenantPrune(world, {
 			tenant: "age-eviction",
 			runs: [{ name: "a-stale", leased: false }],
@@ -4227,6 +4358,7 @@ function workDirectoryWitness(world: HarnessWorld): WorkDirectoryWitness {
 			now,
 			pruneAt: now + 2 * WORK_WITNESS_MAX_AGE_MS,
 		}),
+		removalRefusal: removalRefusalWitness(world, now),
 		leaseProbes: leaseProbeWitness(world, now),
 		unknownProbePrune: runWorkTenantPrune(world, {
 			tenant: "unknown-probe",

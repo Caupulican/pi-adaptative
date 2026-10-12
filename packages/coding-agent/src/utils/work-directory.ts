@@ -5,6 +5,7 @@ import {
 	lstatSync,
 	mkdirSync,
 	opendirSync,
+	readdirSync,
 	readFileSync,
 	rmdirSync,
 	rmSync,
@@ -350,6 +351,13 @@ function removeRunIfInactive(runPath: string, now: number): boolean {
 		return false;
 	}
 	try {
+		// The run's content goes first; its manifest and the cleanup marker (the fence) go last, with the directory. A removal that fails
+		// part-way therefore leaves the run owned (manifest present) and retryable, never an unowned remnant that retention skips and
+		// acquisition refuses.
+		for (const name of readdirSync(runPath)) {
+			if (name === WORK_RUN_MANIFEST_FILE || name === CLEANUP_MARKER_FILE) continue;
+			rmSync(join(runPath, name), { recursive: true, force: true });
+		}
 		rmSync(runPath, { recursive: true, force: true });
 		return !existsSync(runPath);
 	} catch {
