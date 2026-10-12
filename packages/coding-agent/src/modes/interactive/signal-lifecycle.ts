@@ -28,16 +28,34 @@ function isDeadTerminalError(error: unknown): boolean {
 	return code !== undefined && DEAD_TERMINAL_ERROR_CODES.has(code);
 }
 
+/** The terminal UI members the signal lifecycle drives: the input drain on shutdown, and the stop/start/render pair Ctrl+Z uses. */
+export type SignalLifecycleUi = Pick<TUI, "start" | "stop" | "requestRender"> & {
+	readonly terminal: Pick<TUI["terminal"], "drainInput">;
+};
+
 /** What the signal lifecycle needs from the interactive host; everything else it owns itself. */
 export interface SignalLifecyclePort {
 	readonly runtimeHost: Pick<AgentSessionRuntime, "dispose">;
-	readonly ui: TUI;
+	readonly ui: SignalLifecycleUi;
 	isShutdownRequested(): boolean;
 	stop(): void;
 	formatResumeCommand(): string | undefined;
 	showStatus(message: string): void;
 	showError(message: string): void;
 }
+
+/** The process effects of a shutdown. The defaults are the process itself; a harness supplies its own. */
+export interface SignalLifecycleIo {
+	exit(code: number): void;
+	stderr(text: string): void;
+	stdout(text: string): void;
+}
+
+const PROCESS_IO: SignalLifecycleIo = {
+	exit: (code) => process.exit(code),
+	stderr: (text) => process.stderr.write(text),
+	stdout: (text) => process.stdout.write(text),
+};
 
 /** Longest rejection detail rendered into the transcript; enough for a stack, short of flooding it. */
 const MAX_REJECTION_DETAIL = 2_000;
@@ -50,9 +68,11 @@ export class SignalLifecycle {
 	private shuttingDown = false;
 	private cleanupHandlers: Array<() => void> = [];
 	private readonly port: SignalLifecyclePort;
+	private readonly io: SignalLifecycleIo;
 
-	constructor(port: SignalLifecyclePort) {
+	constructor(port: SignalLifecyclePort, io: SignalLifecycleIo = PROCESS_IO) {
 		this.port = port;
+		this.io = io;
 	}
 
 	get isShuttingDown(): boolean {
@@ -75,8 +95,8 @@ export class SignalLifecycle {
 					: error instanceof Error
 						? error.message
 						: String(error);
-			process.stderr.write(`${neutralizeControls(`Shutdown failed: ${cause}`)}\n`);
-			process.exit(1);
+			this.io.stderr(`${neutralizeControls(`Shutdown failed: ${cause}`)}\n`);
+			this.io.exit(1);
 		}
 	}
 
@@ -85,10 +105,9 @@ export class SignalLifecycle {
 		this.shuttingDown = true;
 		this.unregisterSignalHandlers();
 
-		// The CLI warm-starts a PowerShell host before the runtime graph loads. A session that never
-		// runs a shell command never claims it, and nothing else reaps it — without this it outlives pi.
-		await disposeUnclaimedCliPowerShellWarmStart();
-
+		// Both paths run the same cleanup steps, each attempted once. The first is the CLI's PowerShell warm-start disposal: the CLI
+		// warm-starts a host before the runtime graph loads, and a session that never runs a shell command never claims it, so
+		// nothing else reaps it. Without this it outlives pi.
 		if (options?.fromSignal) {
 			// Signal-triggered shutdown (SIGTERM/SIGHUP). Emit extension cleanup
 			// (session_shutdown) BEFORE touching the terminal. Extension teardown
@@ -98,17 +117,16 @@ export class SignalLifecycle {
 			// which the stdout/stderr error handler turns into emergencyTerminalExit;
 			// the render loop is already idle, so this cannot hot-spin (see #4144).
 			// A cleanup failure must not skip the terminal restore: stop() also releases the closing warnings the dispose collected, so
-			// skipping it would lose those disclosures and leave the terminal in raw mode. The failure itself still propagates.
-			try {
-				await this.port.runtimeHost.dispose();
-			} finally {
-				try {
-					await this.port.ui.terminal.drainInput(1000);
-				} finally {
-					this.port.stop();
-				}
-			}
-			process.exit(0);
+			// skipping it would lose those disclosures and leave the terminal in raw mode. Every step runs and every failure is reported.
+			await this.runCleanupSteps([
+				() => disposeUnclaimedCliPowerShellWarmStart(),
+				() => this.port.runtimeHost.dispose(),
+				() => this.port.ui.terminal.drainInput(1000),
+				() => this.port.stop(),
+			]);
+			this.io.exit(0);
+			// An injected exit returns: the interactive quit below must not run after a signal shutdown.
+			return;
 		}
 
 		// Interactive quit (Ctrl+D, Ctrl+C, /quit, extension shutdown()). Stop the
@@ -116,17 +134,40 @@ export class SignalLifecycle {
 		// the final frame while the process is exiting.
 		// Drain any in-flight Kitty key release events before stopping.
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
-		await this.port.ui.terminal.drainInput(1000);
-
-		this.port.stop();
-		await this.port.runtimeHost.dispose();
+		// A failing drain or stop must not skip the runtime dispose, and the resume command is written only when every step succeeded.
+		await this.runCleanupSteps([
+			() => disposeUnclaimedCliPowerShellWarmStart(),
+			() => this.port.ui.terminal.drainInput(1000),
+			() => this.port.stop(),
+			() => this.port.runtimeHost.dispose(),
+		]);
 
 		const resumeCommand = this.port.formatResumeCommand();
 		if (resumeCommand) {
-			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
+			this.io.stdout(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
 		}
 
-		process.exit(0);
+		this.io.exit(0);
+	}
+
+	/**
+	 * Runs each cleanup step once, in order, whatever the earlier steps did: a failing step never skips a later one. Every failure is
+	 * kept. One is rethrown as it is; several are thrown together so `shutdown` reports each cause.
+	 */
+	private async runCleanupSteps(steps: ReadonlyArray<() => unknown>): Promise<void> {
+		const failures: unknown[] = [];
+		for (const step of steps) {
+			try {
+				await step();
+			} catch (error: unknown) {
+				failures.push(error);
+			}
+		}
+		if (failures.length === 1) throw failures[0];
+		if (failures.length > 1) {
+			const [first] = failures;
+			throw new AggregateError(failures, first instanceof Error ? first.message : String(first));
+		}
 	}
 
 	emergencyTerminalExit(): never {

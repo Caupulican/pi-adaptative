@@ -773,6 +773,10 @@ export class CompactionController {
 		this.abort();
 		this.cancelIdlePreparation();
 		this.idleTimer.disarm();
+		// A compaction in flight has an open durable lifecycle: it is settled as cancelled NOW, before the session reports closed,
+		// so a result that resumes later (an extension's `session_before_compact` handler) writes nothing and the one terminal
+		// record is the evidence. The later cancellation path finds the lifecycle already ended and appends no duplicate.
+		this.finishCompactionLifecycle("cancelled");
 	}
 
 	checkContextWindowUsageWarning(): void {

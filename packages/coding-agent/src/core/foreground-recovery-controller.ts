@@ -352,6 +352,8 @@ export class ForegroundRecoveryController {
 		this.activeRuns++;
 		// Set once the submission reached its stranded-input delivery, which holds what stays queued; every other exit holds it below.
 		let deliveredStranded = false;
+		// Set when the failure path already ran `afterRun` (so the finally below does not run it twice).
+		let afterRunSettled = false;
 		try {
 			const maxGoalLoopRounds = this.deps.settingsManager.getAutonomySettings().maxStallTurns;
 			await this.deps.prepareRun();
@@ -412,6 +414,20 @@ export class ForegroundRecoveryController {
 			// agent's queue is the owner's and is never left behind it.
 			if (!stoppedForRuntimeUpdate) await this.deliverStrandedInput(signal);
 			deliveredStranded = true;
+		} catch (error: unknown) {
+			// The run failed. Its owned queued input is held first, then its cleanup runs HERE so that a failing cleanup is joined to
+			// the run's failure (both stay in the thrown graph) instead of replacing it from the finally below.
+			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
+			afterRunSettled = true;
+			try {
+				await this.deps.afterRun();
+			} catch (afterRunError: unknown) {
+				throw new AggregateError(
+					[error, afterRunError],
+					error instanceof Error ? error.message : "The run and its cleanup both failed.",
+				);
+			}
+			throw error;
 		} finally {
 			// Any exit that did not reach the stranded-input delivery (a closing exit, or a run whose prompt/continue/recovery threw)
 			// leaves the owner's admitted input in the agent's queue: hold it for its owner, visible and recoverable, so it cannot leak
@@ -419,7 +435,7 @@ export class ForegroundRecoveryController {
 			// system queued directly on the agent are not owner input; the kernel's queue delivers them at the next boundary.)
 			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
 			try {
-				await this.deps.afterRun();
+				if (!afterRunSettled) await this.deps.afterRun();
 			} finally {
 				this.activeRuns--;
 				if (releaseLease && lease && this.ownsSubmission(lease)) this.releaseSubmission(lease);

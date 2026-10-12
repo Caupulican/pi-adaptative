@@ -783,11 +783,11 @@ export class Agent {
 				refusals.push(refusal);
 			}
 		}
-		if (refusals.length === 1) throw refusals[0];
-		// Several refusals: none is hidden. The message stays the first refusal's, so callers that read it see the same text.
-		if (refusals.length > 1) {
+		// A refused failure lifecycle keeps the run's ORIGINAL error beside every refusal: none of them is hidden. The message stays
+		// the first refusal's, so callers that read it see the same text.
+		if (refusals.length > 0) {
 			throw new AggregateError(
-				refusals,
+				[error, ...refusals],
 				refusals[0] instanceof Error ? refusals[0].message : "The failure lifecycle was refused by its listeners.",
 			);
 		}

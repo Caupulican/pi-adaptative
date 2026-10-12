@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { createEmptyUsage } from "@caupulican/pi-ai";
@@ -67,6 +68,7 @@ import { getDirectoryResourceProfileInfo } from "../src/core/settings/settings-r
 import type { Settings } from "../src/core/settings/settings-schema.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../src/core/system-one/tool-names.ts";
 import type { ExecutionState } from "../src/core/system-one/types.ts";
+import { TerminalWarnings } from "../src/core/terminal-warnings.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, readOptionalToolIntent } from "../src/core/tool-applicability-gate.ts";
 import { createAskQuestionToolDefinition } from "../src/core/tools/ask-question.ts";
 import { createBashToolDefinition } from "../src/core/tools/bash.ts";
@@ -75,6 +77,9 @@ import { routeShellContract } from "../src/core/tools/shell-contract-router.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 import { isRecordObject } from "../src/core/util/value-guards.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
+import { SignalLifecycle } from "../src/modes/interactive/signal-lifecycle.ts";
+import { type RpcModeIo, runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import type { TerminationSignalHandler } from "../src/modes/termination-signals.ts";
 import type { ScriptedReply, ScriptedRequest, ScriptStep } from "./fixtures/harness/scripted-provider.ts";
 import {
 	type Barrier,
@@ -86,6 +91,7 @@ import {
 } from "./fixtures/harness/scripted-provider.ts";
 import {
 	HARNESS_PROJECT_CWD,
+	type HarnessTrace,
 	type HarnessWorld,
 	type HarnessWorldOptions,
 	harnessPath,
@@ -1076,6 +1082,8 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				// The quit's bounded settle expires for a run that an extension holds past the abort (the message-end witness): exact text.
 				/^A run did not settle within 5s of quit; its final message may not have been persisted\.$/,
 				/^A compaction did not settle within 5s of quit; its result is discarded\.$/,
+				// Owner input queued behind a run that the quit ends is held complete with its text (the queued-quit witness): exact text.
+				/^A queued message was not delivered because the session closed before it could be delivered\. It is kept in full in the pending queue: Owner input queued behind the quit\.$/,
 				/^Worker worker-1 rejected: Worker worker-1 resource release failed\.$/,
 				/^Failed to dispose worker write reservations: Worker write reservation shutdown failed\.$/,
 				/^Worker shutdown failed: Worker worker-1 resource release failed\.$/,
@@ -7878,6 +7886,31 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					.map((line) => JSON.parse(line) as { type?: string; summary?: string })
 					.filter((entry) => entry.type === "compaction")
 					.map((entry) => entry.summary);
+			// The compaction's durable lifecycle: a start written before its summary is requested, and one terminal end. Byte snapshots of the
+			// whole session file show that nothing is appended after the quit's own disposal.
+			const cpEntries = (file: string) =>
+				(world.io.peekFile(file) ?? "")
+					.split("\n")
+					.filter((line) => line.length > 0)
+					.map(
+						(line) =>
+							JSON.parse(line) as {
+								id?: string;
+								type?: string;
+								compactionId?: string;
+								outcome?: string;
+								compactionEntryId?: string;
+							},
+					);
+			const cpLifecycle = (file: string) =>
+				cpEntries(file)
+					.filter((entry) => entry.type === "compaction_start" || entry.type === "compaction_end")
+					.map((entry) => ({
+						type: entry.type,
+						compactionId: entry.compactionId,
+						outcome: entry.outcome,
+						compactionEntryId: entry.compactionEntryId,
+					}));
 			const cpHold = createBarrier();
 			const cpReached = createBarrier();
 			const cpHeld = await world.createRootSession("root", {
@@ -7903,6 +7936,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			const cpHeldRequests = world.provider.requests.length;
 			const cpHeldMark = world.warnings.length;
 			let cpHeldOutcome: unknown = "unsettled";
+			let cpHeldAtDispose = "";
 			try {
 				await withDeadline(
 					trace,
@@ -7910,6 +7944,25 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					cpHeldSession.disposeAndWait(),
 					60_000,
 				);
+				cpHeldAtDispose = world.io.peekFile(cpHeldFile) ?? "";
+				const [cpHeldStart] = cpLifecycle(cpHeldFile);
+				expect(
+					cpLifecycle(cpHeldFile),
+					"the quit settles the held compaction once, as cancelled, before the session reports closed",
+				).toEqual([
+					{
+						type: "compaction_start",
+						compactionId: cpHeldStart?.compactionId,
+						outcome: undefined,
+						compactionEntryId: undefined,
+					},
+					{
+						type: "compaction_end",
+						compactionId: cpHeldStart?.compactionId,
+						outcome: "cancelled",
+						compactionEntryId: undefined,
+					},
+				]);
 				expect(cpCompactions(cpHeldFile), "the quit writes no compaction entry while the summary is held").toEqual(
 					[],
 				);
@@ -7923,6 +7976,10 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			}
 			expect(cpHeldOutcome, "the resumed summary ends in a cancellation, not a commit").toBeInstanceOf(Error);
 			trace.claimRejection(cpHeldOutcome, "Compaction cancelled");
+			expect(
+				world.io.peekFile(cpHeldFile) ?? "",
+				"the resumed summary appends no byte after the quit: no duplicate terminal, no late write",
+			).toBe(cpHeldAtDispose);
 			expect(cpCompactions(cpHeldFile), "the resumed summary writes no compaction entry after the quit").toEqual([]);
 			expect(world.provider.requests.length, "the held compaction makes no provider request").toBe(cpHeldRequests);
 			trace.mark("root", "compaction.held-quit");
@@ -7957,6 +8014,25 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				"the live compaction owner disposes cleanly",
 			).toBeUndefined();
 			const cpLiveSummaries = cpCompactions(cpLiveFile);
+			const cpLiveCommitted = cpEntries(cpLiveFile).find((entry) => entry.type === "compaction");
+			const [cpLiveStart] = cpLifecycle(cpLiveFile);
+			expect(
+				cpLifecycle(cpLiveFile),
+				"the live compaction opens one lifecycle and settles it once as a success, with no cancelled end",
+			).toEqual([
+				{
+					type: "compaction_start",
+					compactionId: cpLiveStart?.compactionId,
+					outcome: undefined,
+					compactionEntryId: undefined,
+				},
+				{
+					type: "compaction_end",
+					compactionId: cpLiveStart?.compactionId,
+					outcome: "success",
+					compactionEntryId: cpLiveCommitted?.id,
+				},
+			]);
 			expect(cpLiveSummaries, "the live quit keeps exactly one committed compaction entry").toHaveLength(1);
 			expect(cpLiveSummaries[0], "the committed entry carries the handler's summary").toContain("The held summary.");
 			trace.mark("root", "compaction.live-control");
@@ -8059,6 +8135,335 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				{ stopReason: "stop", text: "The late reply" },
 			]);
 			trace.mark("root", "message-end.live-control");
+			// Shutdown cleanup (SIGTERM/SIGHUP and quit): every cleanup step runs once, in its path's order, and a failing step never skips a
+			// later one. The signal path runs dispose, drain, stop; the quit path runs drain, stop, dispose. Closing warnings stay held until
+			// stop() releases them. Every failure is reported on stderr with each cause and the exit status is 1; the resume line is written on
+			// the quit path only, after every step succeeded, and a clean shutdown exits 0.
+			const signalClean = await runSignalShutdown({ fromSignal: true, resumeCommand: SIGNAL_RESUME_COMMAND });
+			expect(signalClean.log, "a signal shutdown disposes, drains the input, then stops the terminal once").toEqual([
+				"dispose",
+				"drain",
+				"stop",
+			]);
+			expect(signalClean.writesBeforeStop, "the held closing warning reaches no sink before stop()").toBe(0);
+			expect(signalClean.warnings, "stop() releases the held warning exactly once").toEqual([
+				SIGNAL_CLOSING_WARNING,
+			]);
+			expect(signalClean.exits, "a clean signal shutdown exits 0").toEqual([0]);
+			expect(signalClean.stderr, "a clean signal shutdown writes no failure line").toEqual([]);
+			expect(signalClean.stdout, "the signal path writes no resume line").toEqual([]);
+			const quitClean = await runSignalShutdown({ fromSignal: false, resumeCommand: SIGNAL_RESUME_COMMAND });
+			expect(quitClean.log, "a quit drains, stops the terminal, then disposes, each once").toEqual([
+				"drain",
+				"stop",
+				"dispose",
+			]);
+			expect(quitClean.writesBeforeStop, "the quit path stops the terminal before any warning is written").toBe(0);
+			expect(quitClean.warnings, "the quit path's warning reaches the terminal once").toEqual([
+				SIGNAL_CLOSING_WARNING,
+			]);
+			expect(quitClean.exits, "a clean quit exits 0").toEqual([0]);
+			expect(quitClean.stderr, "a clean quit writes no failure line").toEqual([]);
+			expect(quitClean.stdout.join(""), "the quit path prints the resume line").toContain("To resume this session:");
+			expect(quitClean.stdout.join(""), "the quit path prints the resume command").toContain(SIGNAL_RESUME_COMMAND);
+			const signalAllFail = await runSignalShutdown({
+				fromSignal: true,
+				dispose: async () => {
+					throw new Error("dispose failed");
+				},
+				drainInput: async () => {
+					throw new Error("drain failed");
+				},
+				stop: () => {
+					throw new Error("stop failed");
+				},
+			});
+			expect(
+				signalAllFail.log,
+				"every signal step is attempted once, in order, after an earlier step fails",
+			).toEqual(["dispose", "drain", "stop"]);
+			expect(signalAllFail.warnings, "the held warning is released before the failing stop").toEqual([
+				SIGNAL_CLOSING_WARNING,
+			]);
+			expect(signalAllFail.stderr, "the signal path reports all three causes on stderr once").toEqual([
+				"Shutdown failed: dispose failed (dispose failed; drain failed; stop failed)\n",
+			]);
+			expect(signalAllFail.exits, "a failing signal shutdown exits 1").toEqual([1]);
+			expect(signalAllFail.stdout, "a failing signal shutdown writes no resume line").toEqual([]);
+			const signalDisposeFailure = await runSignalShutdown({
+				fromSignal: true,
+				dispose: async () => {
+					throw new AggregateError([new Error("cleanup a"), "cleanup b"], "dispose failed");
+				},
+			});
+			expect(signalDisposeFailure.log, "a failing dispose still drains and stops the terminal").toEqual([
+				"dispose",
+				"drain",
+				"stop",
+			]);
+			expect(signalDisposeFailure.writesBeforeStop, "the failing dispose's warning is still held until stop()").toBe(
+				0,
+			);
+			expect(signalDisposeFailure.warnings, "the failing dispose's closing warning is released, not lost").toEqual([
+				SIGNAL_CLOSING_WARNING,
+			]);
+			expect(signalDisposeFailure.stderr, "the failing dispose reports every cause on stderr once").toEqual([
+				"Shutdown failed: dispose failed (cleanup a; cleanup b)\n",
+			]);
+			expect(signalDisposeFailure.exits, "a failing dispose exits 1").toEqual([1]);
+			const signalDrainFailure = await runSignalShutdown({
+				fromSignal: true,
+				drainInput: async () => {
+					throw new Error("drain\u001b[2J broke");
+				},
+			});
+			expect(signalDrainFailure.log, "a failing drain still stops the terminal").toEqual([
+				"dispose",
+				"drain",
+				"stop",
+			]);
+			expect(signalDrainFailure.warnings, "a failing drain still releases the held warning").toEqual([
+				SIGNAL_CLOSING_WARNING,
+			]);
+			expect(
+				signalDrainFailure.stderr,
+				"control characters in the failure cause are escaped, not written raw",
+			).toEqual(["Shutdown failed: drain\\x1b[2J broke\n"]);
+			expect(signalDrainFailure.exits, "a failing drain exits 1").toEqual([1]);
+			const quitDrainFailure = await runSignalShutdown({
+				fromSignal: false,
+				resumeCommand: SIGNAL_RESUME_COMMAND,
+				drainInput: async () => {
+					throw new Error("drain failed");
+				},
+			});
+			expect(quitDrainFailure.log, "a failing quit drain still stops the terminal and disposes the runtime").toEqual(
+				["drain", "stop", "dispose"],
+			);
+			expect(quitDrainFailure.warnings, "the quit path delivers its warning despite the failed drain").toEqual([
+				SIGNAL_CLOSING_WARNING,
+			]);
+			expect(quitDrainFailure.stderr, "the quit path reports the drain failure on stderr").toEqual([
+				"Shutdown failed: drain failed\n",
+			]);
+			expect(quitDrainFailure.exits, "a failing quit exits 1").toEqual([1]);
+			expect(quitDrainFailure.stdout, "a failing quit writes no resume line").toEqual([]);
+			const quitAllFail = await runSignalShutdown({
+				fromSignal: false,
+				resumeCommand: SIGNAL_RESUME_COMMAND,
+				dispose: async () => {
+					throw new Error("dispose failed");
+				},
+				drainInput: async () => {
+					throw new Error("drain failed");
+				},
+				stop: () => {
+					throw new Error("stop failed");
+				},
+			});
+			expect(quitAllFail.log, "every quit step is attempted once, in order, after an earlier step fails").toEqual([
+				"drain",
+				"stop",
+				"dispose",
+			]);
+			expect(quitAllFail.stderr, "the quit path reports all three causes on stderr once").toEqual([
+				"Shutdown failed: drain failed (drain failed; stop failed; dispose failed)\n",
+			]);
+			expect(quitAllFail.exits, "a failing quit with three causes exits 1").toEqual([1]);
+			expect(quitAllFail.stdout, "a failing quit with three causes writes no resume line").toEqual([]);
+			trace.mark("root", "signal.shutdown");
+			// Owner input queued behind a run that the quit ends. The input is admitted to the agent's queue behind the held reply; the quit ends
+			// the run and no provider round starts for the input, so the closing session holds it complete with the held-queue warning. The live
+			// control lets the same queued input run as the turn after its reply completes, with no held warning.
+			const QUEUED_QUIT_WORDS = "Owner input queued behind the quit.";
+			const qhHold = createBarrier();
+			const qhReached = createBarrier();
+			const qhCreated = await world.createRootSession("root", {
+				sessionManager: world.createSessionManager(),
+				settings: { memorySystem: undefined },
+			});
+			const qhSession = qhCreated.session;
+			const qhFile = qhCreated.sessionManager.getSessionFile();
+			if (qhFile === undefined) throw new Error("the queued quit owner has no file");
+			world.provider.enqueue("root", {
+				name: "queued-quit-run",
+				check: () => qhReached.release(),
+				gate: qhHold.promise,
+				reply: { content: [{ type: "text", text: "The held reply" }] },
+			});
+			const qhPrompt = qhSession
+				.prompt("Start a reply that the owner queues input behind before the quit.")
+				.catch((error: unknown) => error);
+			await withDeadline(trace, "queued quit: the run reaches its held gate", qhReached.promise);
+			if (world.systemOne.enabled) {
+				world.systemOne.enterPhase("queued-quit-intake", {
+					changes_model_pools: { kind: "noul", probability: 0.02 },
+					local_commits_only: { kind: "noul", probability: 0.02 },
+					lifts_delivery_block: { kind: "noul", probability: 0.02 },
+					full_handoff: { kind: "noul", probability: 0.02 },
+					optional_tool_0: { kind: "choice", choice: "request", confidence: 0.97 },
+				});
+			}
+			await withDeadline(
+				trace,
+				"queued quit: the owner input is admitted behind the run",
+				qhSession.followUp(QUEUED_QUIT_WORDS),
+			);
+			const qhMark = world.warnings.length;
+			const qhRequests = world.provider.requests.length;
+			await withDeadline(
+				trace,
+				"queued quit: the owner disposes while the run and its queued input are pending",
+				qhSession.disposeAndWait(),
+				60_000,
+			);
+			expect(
+				world.warnings.slice(qhMark).filter((message) => message.includes("was not delivered")),
+				"the quit holds the queued owner input complete, once, with its text",
+			).toEqual([
+				"A queued message was not delivered because the session closed before it could be delivered. It is kept in full in the pending queue: Owner input queued behind the quit.",
+			]);
+			expect(world.provider.requests.length, "the closing session starts no provider round for the held input").toBe(
+				qhRequests,
+			);
+			expect(qmAssistants(qhFile), "the held run is kept as aborted with no reply").toEqual([
+				{ stopReason: "aborted", text: "" },
+			]);
+			const qhOutcome = await withDeadline(trace, "queued quit: the held run ends", qhPrompt, 60_000);
+			expect(qhOutcome, "the held run ends without an error").toBeUndefined();
+			trace.mark("root", "queued-quit.held");
+			// Live control: the same queued input behind a run that completes is delivered as that run's next turn, and nothing is held.
+			const QUEUED_CONTROL_WORDS = "Owner input queued behind a reply that completes.";
+			const qlHold = createBarrier();
+			const qlReached = createBarrier();
+			const qlCreated = await world.createRootSession("root", {
+				sessionManager: world.createSessionManager(),
+				settings: { memorySystem: undefined },
+			});
+			const qlSession = qlCreated.session;
+			const qlFile = qlCreated.sessionManager.getSessionFile();
+			if (qlFile === undefined) throw new Error("the queued quit live control owner has no file");
+			world.provider.enqueue("root", {
+				name: "queued-control-run",
+				check: () => qlReached.release(),
+				gate: qlHold.promise,
+				reply: { content: [{ type: "text", text: "The held reply" }] },
+			});
+			world.provider.enqueue("root", {
+				name: "queued-control-delivery",
+				reply: { content: [{ type: "text", text: "The queued reply" }] },
+			});
+			const qlPrompt = qlSession
+				.prompt("Start a reply that the owner queues input behind, then completes.")
+				.catch((error: unknown) => error);
+			await withDeadline(trace, "queued control: the run reaches its gate", qlReached.promise);
+			if (world.systemOne.enabled) {
+				world.systemOne.enterPhase("queued-control-intake", {
+					changes_model_pools: { kind: "noul", probability: 0.02 },
+					local_commits_only: { kind: "noul", probability: 0.02 },
+					lifts_delivery_block: { kind: "noul", probability: 0.02 },
+					full_handoff: { kind: "noul", probability: 0.02 },
+					optional_tool_0: { kind: "choice", choice: "request", confidence: 0.97 },
+				});
+			}
+			await withDeadline(
+				trace,
+				"queued control: the owner input is admitted behind the run",
+				qlSession.followUp(QUEUED_CONTROL_WORDS),
+			);
+			if (world.systemOne.enabled) {
+				world.systemOne.enterPhase("queued-control-delivery", {
+					carries_0: { kind: "noul", probability: 0.02 },
+				});
+			}
+			const qlMark = world.warnings.length;
+			qlHold.release();
+			const qlOutcome = await withDeadline(
+				trace,
+				"queued control: the run and its queued turn complete",
+				qlPrompt,
+				60_000,
+			);
+			expect(qlOutcome, "the live control run ends without an error").toBeUndefined();
+			expect(
+				world.warnings.slice(qlMark).filter((message) => message.includes("was not delivered")),
+				"a queued input that the run delivers is never held",
+			).toEqual([]);
+			expect(qmAssistants(qlFile), "the queued input runs as the turn after the completed reply").toEqual([
+				{ stopReason: "stop", text: "The held reply" },
+				{ stopReason: "stop", text: "The queued reply" },
+			]);
+			expect(await world.disposeSessionInBody(qlSession), "the live control owner disposes cleanly").toBeUndefined();
+			trace.mark("root", "queued-quit.live-control");
+
+			// RPC host shutdown: the host runs on a real runtime of the world with its process effects injected. A SIGTERM through its termination
+			// handler delivers the dispose's closing warning as a warning event on the open stream, and a warning written after the host released
+			// its stream reaches the terminal's sink. A failing dispose reports every cause on stderr and exits with the signal's status (143); the
+			// input-end path exits 0 when clean and 1 when the dispose fails. The flush after a SIGTERM is bounded at one second.
+			const rpcSigterm = await runRpcHost(world, trace, {
+				trigger: "sigterm",
+				disposeFails: false,
+				flushNeverResolves: false,
+			});
+			expect(rpcSigterm.startupErrors, "the RPC host starts without an error").toEqual([]);
+			expect(
+				rpcSigterm.lines.find((line) => line.id === "rpc-state"),
+				"the scripted command is answered by the host",
+			).toMatchObject({ type: "response", command: "get_state", success: true });
+			expect(
+				rpcSigterm.lines.filter((line) => line.message === RPC_CLOSING_WARNING).map((line) => line.type),
+				"the closing warning reaches the open stream once, as a warning event",
+			).toEqual(["warning"]);
+			expect(rpcSigterm.exits, "a clean SIGTERM shutdown exits with the signal's status").toEqual([143]);
+			expect(rpcSigterm.stderr, "a clean SIGTERM shutdown writes no failure line").toEqual([]);
+			expect(rpcSigterm.sinkWarnings, "the released stream hands a later warning to the terminal's sink").toEqual([
+				RPC_LATE_WARNING,
+			]);
+			expect(rpcSigterm.flushRequests, "the SIGTERM shutdown flushes the stream once").toBe(1);
+			const rpcSigtermFails = await runRpcHost(world, trace, {
+				trigger: "sigterm",
+				disposeFails: true,
+				flushNeverResolves: false,
+			});
+			expect(rpcSigtermFails.stderr, "a failing dispose reports every cause on stderr, once").toEqual([
+				"RPC shutdown failed: dispose failed (cleanup a; cleanup b)\n",
+			]);
+			expect(rpcSigtermFails.exits, "a failing SIGTERM shutdown exits with the signal's status").toEqual([143]);
+			expect(
+				rpcSigtermFails.lines.filter((line) => line.message === RPC_CLOSING_WARNING).map((line) => line.type),
+				"the failing dispose's closing warning still reaches the open stream",
+			).toEqual(["warning"]);
+			expect(rpcSigtermFails.sinkWarnings, "a failing dispose still releases the stream").toEqual([
+				RPC_LATE_WARNING,
+			]);
+			const rpcFlushBound = await runRpcHost(world, trace, {
+				trigger: "sigterm",
+				disposeFails: false,
+				flushNeverResolves: true,
+			});
+			expect(rpcFlushBound.exits, "a flush that never resolves does not hold a SIGTERM exit").toEqual([143]);
+			expect(rpcFlushBound.stderr, "a flush that is cut off by its bound is not a failure").toEqual([]);
+			expect(rpcFlushBound.elapsedMs, "the SIGTERM flush waits its one-second bound").toBeGreaterThanOrEqual(900);
+			expect(rpcFlushBound.elapsedMs, "the SIGTERM flush is not held to the wait deadline").toBeLessThan(10_000);
+			expect(rpcFlushBound.sinkWarnings, "the bounded flush still releases the stream").toEqual([RPC_LATE_WARNING]);
+			const rpcInputEnd = await runRpcHost(world, trace, {
+				trigger: "stdin-end",
+				disposeFails: false,
+				flushNeverResolves: false,
+			});
+			expect(rpcInputEnd.exits, "a clean shutdown when the input ends exits 0").toEqual([0]);
+			expect(rpcInputEnd.stderr, "a clean shutdown when the input ends writes no failure line").toEqual([]);
+			expect(rpcInputEnd.sinkWarnings, "the input-end shutdown releases the stream too").toEqual([RPC_LATE_WARNING]);
+			const rpcInputEndFails = await runRpcHost(world, trace, {
+				trigger: "stdin-end",
+				disposeFails: true,
+				flushNeverResolves: false,
+			});
+			expect(rpcInputEndFails.exits, "a failing shutdown when the input ends exits 1").toEqual([1]);
+			expect(rpcInputEndFails.stderr, "a failing shutdown when the input ends reports every cause").toEqual([
+				"RPC shutdown failed: dispose failed (cleanup a; cleanup b)\n",
+			]);
+			trace.mark("root", "rpc.shutdown");
 		},
 	);
 }, 300_000);
@@ -8095,6 +8500,236 @@ function holdAssistantMessageEnd(hold: Barrier, reached: Barrier): ExtensionFact
 			await hold.promise;
 		});
 	};
+}
+
+/** The closing warning the signal witness's dispose hands to the terminal. Plain text: no control characters. */
+const SIGNAL_CLOSING_WARNING = "Signal witness: a closing warning the held terminal keeps until stop.";
+/** The resume command the quit path prints once every cleanup step succeeded. */
+const SIGNAL_RESUME_COMMAND = "pi --session signal-witness";
+
+/**
+ * One shutdown of an interactive host with its process effects injected. The dispose hands one closing warning to a held
+ * `TerminalWarnings`, whose sink records what the terminal releases. `writesBeforeStop` counts the sink writes made before `stop()`
+ * releases the terminal, and `stop` (when given) fails after that release.
+ */
+async function runSignalShutdown(script: {
+	readonly fromSignal: boolean;
+	readonly dispose?: () => Promise<void>;
+	readonly drainInput?: () => Promise<void>;
+	readonly stop?: () => void;
+	readonly resumeCommand?: string;
+}): Promise<{
+	readonly log: readonly string[];
+	readonly writesBeforeStop: number;
+	readonly warnings: readonly string[];
+	readonly stdout: readonly string[];
+	readonly stderr: readonly string[];
+	readonly exits: readonly number[];
+}> {
+	const log: string[] = [];
+	const warnings: string[] = [];
+	const stdout: string[] = [];
+	const stderr: string[] = [];
+	const exits: number[] = [];
+	let sinkWrites = 0;
+	const terminal = new TerminalWarnings((released) => {
+		sinkWrites++;
+		warnings.push(...released);
+	});
+	terminal.hold();
+	let writesBeforeStop = -1;
+	const lifecycle = new SignalLifecycle(
+		{
+			runtimeHost: {
+				dispose: async () => {
+					log.push("dispose");
+					terminal.write([SIGNAL_CLOSING_WARNING]);
+					await script.dispose?.();
+				},
+			},
+			ui: {
+				start: () => {},
+				stop: () => {},
+				requestRender: () => {},
+				terminal: {
+					drainInput: async () => {
+						log.push("drain");
+						await script.drainInput?.();
+					},
+				},
+			},
+			isShutdownRequested: () => false,
+			stop: () => {
+				log.push("stop");
+				writesBeforeStop = sinkWrites;
+				terminal.release();
+				script.stop?.();
+			},
+			formatResumeCommand: () => script.resumeCommand,
+			showStatus: () => {},
+			showError: () => {},
+		},
+		{
+			exit: (code) => {
+				exits.push(code);
+			},
+			stderr: (text) => {
+				stderr.push(text);
+			},
+			stdout: (text) => {
+				stdout.push(text);
+			},
+		},
+	);
+	await lifecycle.shutdown({ fromSignal: script.fromSignal });
+	return { log, writesBeforeStop, warnings, stdout, stderr, exits };
+}
+
+/** Closing warning the RPC witness's dispose writes while the stream is open: it must reach the stream as a warning event. */
+const RPC_CLOSING_WARNING = "RPC witness: a closing warning the open stream delivers as a warning event.";
+/** A warning written after the host released its stream: it must reach the terminal's sink, not the stream. */
+const RPC_LATE_WARNING = "RPC witness: a warning after the stream was released.";
+
+/** What one RPC host run reported: its stream lines, its failure stream, its exit statuses and the terminal's sink after release. */
+interface RpcHostRun {
+	readonly lines: readonly Record<string, unknown>[];
+	readonly stderr: readonly string[];
+	readonly exits: readonly number[];
+	readonly sinkWarnings: readonly string[];
+	readonly flushRequests: number;
+	readonly elapsedMs: number;
+	readonly startupErrors: readonly unknown[];
+}
+
+/**
+ * One RPC host on a real runtime of the world, with its process effects injected. The host answers a scripted `get_state` command, then
+ * shuts down through its injected termination handler (SIGTERM) or by its input ending. The runtime's dispose is wrapped: the real dispose
+ * runs first, then the dispose writes one closing warning to the open stream and fails with two causes when `disposeFails` is set.
+ */
+async function runRpcHost(
+	world: HarnessWorld,
+	trace: HarnessTrace,
+	script: {
+		readonly trigger: "sigterm" | "stdin-end";
+		readonly disposeFails: boolean;
+		readonly flushNeverResolves: boolean;
+	},
+): Promise<RpcHostRun> {
+	const sinkWarnings: string[] = [];
+	const terminal = new TerminalWarnings((released) => {
+		sinkWarnings.push(...released);
+	});
+	const runtime = await createAgentSessionRuntime(
+		async ({ cwd, agentDir, sessionManager }) => {
+			const root = await world.createRootSession("root", {
+				agentDir,
+				sessionManager,
+				settings: { memorySystem: undefined },
+			});
+			return {
+				session: root.session,
+				sessionManager: root.sessionManager,
+				getExtensionRunner: root.getExtensionRunner,
+				extensionsResult: root.extensionsResult,
+				services: {
+					cwd,
+					agentDir,
+					authStorage: world.authStorage,
+					settingsManager: root.settingsManager,
+					modelRegistry: world.modelRegistry,
+					resourceLoader: root.session.resourceLoader,
+					diagnostics: [],
+				},
+				diagnostics: [],
+			};
+		},
+		{
+			cwd: HARNESS_PROJECT_CWD,
+			agentDir: world.agentDir,
+			sessionManager: world.createSessionManager(),
+			onTerminalWarnings: (warnings) => terminal.write(warnings),
+		},
+	);
+	const realDispose = runtime.dispose.bind(runtime);
+	runtime.dispose = async () => {
+		await realDispose();
+		terminal.write([RPC_CLOSING_WARNING]);
+		if (script.disposeFails) {
+			throw new AggregateError([new Error("cleanup a"), new Error("cleanup b")], "dispose failed");
+		}
+	};
+
+	const stdin = new PassThrough();
+	const lines: Record<string, unknown>[] = [];
+	const stderr: string[] = [];
+	const exits: number[] = [];
+	const startupErrors: unknown[] = [];
+	const signals: TerminationSignalHandler[] = [];
+	const exited = createBarrier();
+	let arrival = createBarrier();
+	let flushRequests = 0;
+	const io: RpcModeIo = {
+		stdin,
+		environment: {},
+		takeOverStdout: () => {},
+		writeStdout: (text) => {
+			for (const line of text.split("\n")) {
+				if (line.length > 0) lines.push(JSON.parse(line) as Record<string, unknown>);
+			}
+			const arrived = arrival;
+			arrival = createBarrier();
+			arrived.release();
+		},
+		flushStdout: () => {
+			flushRequests++;
+			return script.flushNeverResolves ? new Promise<void>(() => {}) : Promise.resolve();
+		},
+		waitForStdoutBackpressure: async () => {},
+		stderr: (text) => {
+			stderr.push(text);
+		},
+		exit: (code) => {
+			exits.push(code);
+			exited.release();
+		},
+		onTerminationSignal: (handler) => {
+			signals.push(handler);
+			return () => {};
+		},
+	};
+	// The host never resolves; a startup failure is recorded instead of surfacing as an unhandled rejection.
+	void runRpcMode(runtime, terminal, io).catch((error: unknown) => {
+		startupErrors.push(error);
+	});
+
+	// Waits for an output line that satisfies `match`, whether it was written before or after the call.
+	const awaitLine = async (match: (line: Record<string, unknown>) => boolean): Promise<Record<string, unknown>> => {
+		while (true) {
+			const found = lines.find(match);
+			if (found) return found;
+			await arrival.promise;
+		}
+	};
+	stdin.write(`${JSON.stringify({ id: "rpc-state", type: "get_state" })}\n`);
+	await withDeadline(
+		trace,
+		"rpc: the host answers the scripted get_state command",
+		awaitLine((line) => line.id === "rpc-state"),
+	);
+
+	const started = Date.now();
+	if (script.trigger === "sigterm") {
+		const onSignal = signals[0];
+		if (onSignal === undefined) throw new Error("the rpc host registered no termination handler");
+		onSignal(143, "SIGTERM");
+	} else {
+		stdin.end();
+	}
+	await withDeadline(trace, "rpc: the host exits after its shutdown", exited.promise);
+	const elapsedMs = Date.now() - started;
+	// Release: the stream is detached once the host has exited, so a later warning reaches the terminal's sink.
+	terminal.write([RPC_LATE_WARNING]);
+	return { lines, stderr, exits, sinkWarnings, flushRequests, elapsedMs, startupErrors };
 }
 
 /** Text of every `delegate` tool result the session recorded, in order (structured, not line-prefix matched). */

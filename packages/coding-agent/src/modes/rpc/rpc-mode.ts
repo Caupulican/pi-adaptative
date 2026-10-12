@@ -12,6 +12,7 @@
  */
 
 import * as crypto from "node:crypto";
+import type { Readable } from "node:stream";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type {
 	ExtensionUIContext,
@@ -29,7 +30,7 @@ import {
 import { neutralizeControls, type TerminalWarnings } from "../../core/terminal-warnings.ts";
 import { type Theme, theme } from "../../presentation/theme-model.ts";
 import { projectSessionEventForJson } from "../json-event-projection.ts";
-import { registerTerminationSignalHandlers } from "../termination-signals.ts";
+import { registerTerminationSignalHandlers, type TerminationSignalHandler } from "../termination-signals.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
 	RpcCommand,
@@ -53,20 +54,68 @@ export type {
 /** How long a SIGTERM shutdown waits for the output flush before it exits regardless (a client that stopped reading). */
 const SIGTERM_FLUSH_MS = 1_000;
 
+/** The process effects the RPC host reaches. The defaults are the process itself; a harness supplies its own. */
+export interface RpcModeIo {
+	readonly stdin: Readable;
+	readonly environment: NodeJS.ProcessEnv;
+	takeOverStdout(): void;
+	writeStdout(text: string): void;
+	flushStdout(): Promise<void>;
+	waitForStdoutBackpressure(): Promise<void>;
+	stderr(text: string): void;
+	exit(code: number): void;
+	onTerminationSignal(handler: TerminationSignalHandler): () => void;
+}
+
+/** The runtime members the RPC host uses; a real `AgentSessionRuntime` satisfies it. */
+export type RpcRuntimeHost = Pick<
+	AgentSessionRuntime,
+	| "session"
+	| "isReplacing"
+	| "services"
+	| "sessionManager"
+	| "extensionRunner"
+	| "setRebindSession"
+	| "newSession"
+	| "fork"
+	| "switchSession"
+	| "dispose"
+>;
+
+function processRpcIo(): RpcModeIo {
+	return {
+		stdin: process.stdin,
+		environment: process.env,
+		takeOverStdout,
+		writeStdout: writeRawStdout,
+		flushStdout: flushRawStdout,
+		waitForStdoutBackpressure: waitForRawStdoutBackpressure,
+		stderr: (text) => {
+			process.stderr.write(text);
+		},
+		exit: (code) => process.exit(code),
+		onTerminationSignal: (handler) => registerTerminationSignalHandlers(handler),
+	};
+}
+
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
-export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarnings: TerminalWarnings): Promise<never> {
-	takeOverStdout();
-	process.env.PI_CODING_AGENT = "true";
-	process.env.AI_AGENT = "pi";
+export async function runRpcMode(
+	runtimeHost: RpcRuntimeHost,
+	terminalWarnings: TerminalWarnings,
+	io: RpcModeIo = processRpcIo(),
+): Promise<never> {
+	io.takeOverStdout();
+	io.environment.PI_CODING_AGENT = "true";
+	io.environment.AI_AGENT = "pi";
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
 
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
-		writeRawStdout(serializeJsonLine(obj));
+		io.writeStdout(serializeJsonLine(obj));
 	};
 	// Closing warnings go to the client as the warning events it already receives, while the stream is open (until shutdown releases them).
 	terminalWarnings.attach((warnings) => {
@@ -403,13 +452,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 			output(projectSessionEventForJson(event));
 		});
 		unsubscribeBackpressure = session.agent.subscribe(async () => {
-			await waitForRawStdoutBackpressure();
+			await io.waitForStdoutBackpressure();
 		});
 		session.announceRestoredQueuedInput();
 	};
 
 	await rebindSession();
-	const cleanupSignalHandlers = registerTerminationSignalHandlers((exitCode, signal) => {
+	const cleanupSignalHandlers = io.onTerminationSignal((exitCode, signal) => {
 		void shutdown(exitCode, signal);
 	});
 
@@ -758,9 +807,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 	 */
 	let detachInput = () => {};
 
-	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<never> {
+	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<void> {
 		if (shuttingDown) {
-			process.exit(exitCode);
+			io.exit(exitCode);
+			return;
 		}
 		shuttingDown = true;
 		for (const pending of pendingExtensionRequests.values()) {
@@ -780,14 +830,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 		}
 		try {
 			detachInput();
-			process.stdin.pause();
+			io.stdin.pause();
 			// A client that stopped reading must not hold a SIGTERM exit forever, but the closing warnings the dispose queued still get
 			// a short window to reach it; a normal shutdown waits for the flush to finish.
 			if (signal === "SIGTERM") {
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				try {
 					await Promise.race([
-						flushRawStdout(),
+						io.flushStdout(),
 						new Promise<void>((resolve) => {
 							timer = setTimeout(resolve, SIGTERM_FLUSH_MS);
 						}),
@@ -796,7 +846,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 					clearTimeout(timer);
 				}
 			} else {
-				await flushRawStdout();
+				await io.flushStdout();
 			}
 		} catch (flushError: unknown) {
 			failures.push(flushError);
@@ -814,10 +864,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 						? cause.message
 						: String(cause);
 			const detail = failures.map(describe).join("; ");
-			process.stderr.write(`${neutralizeControls(`RPC shutdown failed: ${detail}`)}\n`);
-			process.exit(exitCode === 0 ? 1 : exitCode);
+			io.stderr(`${neutralizeControls(`RPC shutdown failed: ${detail}`)}\n`);
+			io.exit(exitCode === 0 ? 1 : exitCode);
+			return;
 		}
-		process.exit(exitCode);
+		io.exit(exitCode);
 	}
 
 	async function checkShutdownRequested(): Promise<void> {
@@ -837,24 +888,24 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 					`Failed to parse command: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
 				),
 			);
-			await waitForRawStdoutBackpressure();
+			await io.waitForStdoutBackpressure();
 			return;
 		}
 
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 			output(error(undefined, "invalid_command", "Invalid command: expected an object with a string type."));
-			await waitForRawStdoutBackpressure();
+			await io.waitForStdoutBackpressure();
 			return;
 		}
 		const parsedRecord = parsed as Record<string, unknown>;
 		if (typeof parsedRecord.type !== "string") {
 			output(error(undefined, "invalid_command", "Invalid command: expected an object with a string type."));
-			await waitForRawStdoutBackpressure();
+			await io.waitForStdoutBackpressure();
 			return;
 		}
 		if (parsedRecord.id !== undefined && typeof parsedRecord.id !== "string") {
 			output(error(undefined, "invalid_command", "Invalid command: id must be a string when provided."));
-			await waitForRawStdoutBackpressure();
+			await io.waitForStdoutBackpressure();
 			return;
 		}
 
@@ -869,13 +920,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 						"Invalid extension UI response.",
 					),
 				);
-				await waitForRawStdoutBackpressure();
+				await io.waitForStdoutBackpressure();
 				return;
 			}
 			const pending = pendingExtensionRequests.get(response.id);
 			if (!pending) {
 				output(error(response.id, "extension_ui_response", "Unknown or expired extension UI request id."));
-				await waitForRawStdoutBackpressure();
+				await io.waitForStdoutBackpressure();
 				return;
 			}
 			pending.resolve(response);
@@ -891,7 +942,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 					`Invalid ${parsedRecord.type} command payload.`,
 				),
 			);
-			await waitForRawStdoutBackpressure();
+			await io.waitForStdoutBackpressure();
 			return;
 		}
 		const commandId = command.id;
@@ -900,29 +951,29 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 			const response = await handleCommand(command);
 			if (response) {
 				output(response);
-				await waitForRawStdoutBackpressure();
+				await io.waitForStdoutBackpressure();
 			}
 			await checkShutdownRequested();
 		} catch (commandError: unknown) {
 			output(
 				error(commandId, commandType, commandError instanceof Error ? commandError.message : String(commandError)),
 			);
-			await waitForRawStdoutBackpressure();
+			await io.waitForStdoutBackpressure();
 		}
 	};
 
 	const onInputEnd = () => {
 		void shutdown();
 	};
-	process.stdin.on("end", onInputEnd);
+	io.stdin.on("end", onInputEnd);
 
 	detachInput = (() => {
-		const detachJsonl = attachJsonlLineReader(process.stdin, (line) => {
+		const detachJsonl = attachJsonlLineReader(io.stdin, (line) => {
 			void handleInputLine(line);
 		});
 		return () => {
 			detachJsonl();
-			process.stdin.off("end", onInputEnd);
+			io.stdin.off("end", onInputEnd);
 		};
 	})();
 	session.resumeSelfCompaction();

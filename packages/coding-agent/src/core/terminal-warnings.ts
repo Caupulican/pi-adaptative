@@ -25,11 +25,17 @@ export function writeTerminalWarnings(warnings: readonly string[]): void {
 export class TerminalWarnings {
 	private route: ((warnings: readonly string[]) => void) | undefined;
 	private held: string[] | undefined;
+	private readonly sink: (warnings: readonly string[]) => void;
+
+	/** Where warnings go when no stream is attached: process stderr by default (see writeTerminalWarnings). */
+	constructor(sink: (warnings: readonly string[]) => void = writeTerminalWarnings) {
+		this.sink = sink;
+	}
 
 	write(warnings: readonly string[]): void {
 		if (this.held) this.held.push(...warnings);
 		else if (this.route) this.route(warnings);
-		else writeTerminalWarnings(warnings);
+		else this.sink(warnings);
 	}
 
 	/** A host that owns the terminal holds the warnings until `release()`. */
@@ -50,6 +56,6 @@ export class TerminalWarnings {
 		this.route = undefined;
 		const held = this.held;
 		this.held = undefined;
-		if (held && held.length > 0) writeTerminalWarnings(held);
+		if (held && held.length > 0) this.sink(held);
 	}
 }
