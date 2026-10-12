@@ -24,7 +24,6 @@
 - The prompt memory block is part of the request plan: it is replanned when memory generation, content revision or headroom changes, its diagnostics are published only when the plan commits, later requests of a turn reuse the turn's retrieval, and its allowance accounts for the estimated system prompt, tools, messages and reply reserve with an explicit UTF-8 byte ceiling.
 - Delegated `memory_read` snapshots are sized against the receiving worker's own model window, last accepted request, reply reserve and remaining token allowance, and admitted as whole source-labelled records. When that capacity is unknown or exhausted, the worker gets a stated `Memory is constrained` reason instead of memory.
 - `contextPolicy.memory.history.retentionDays` ages out derived summaries only, never transcripts or exact history reads. A source's age is its entry's event time, else its session timestamp, else its first capture. Retention and forgetting revocations are permanent; only invalidation and an admission verdict of rejected or uncertain re-derive a summary.
-
 - A summary job identity found again after its failed job was pruned at the 20,000-record bound could start with a fresh attempt budget. Each admitted identity now reserves a durable terminal-proof record before any chargeable call; at the bound new identities are held with a durable `capacity` cause, a failed job is never pruned without its record, and a legacy ledger already at the bound sets a durable `possibly_lost_proof` hold for sessions started before it. Exact history reads are never held.
 - The results of history reads are no longer captured as history again, so the summary hierarchy never indexes or summarizes the system's own recall.
 - A history read that finds the index still loading now waits for it within its own deadline, whoever started the index, instead of returning `pending` at once; a read that is still not ready is admitted one unchanged retry.
@@ -52,6 +51,18 @@
 - Delegated `memory_read` no longer cuts worker memory at a fixed 8,000 characters mid-record. The snapshot is sized against the receiving worker's own room and admitted as whole records, with the omission stated.
 - Reflection's OKF snapshot and the pre-compression handoff no longer cut memory mid-document: a record is kept whole or left out, and the omission is stated.
 - The history recall worker reports a broken channel once, with its cause, and a malformed reply is reported instead of being dropped silently.
+- Interactive quit: a second termination signal, or Ctrl+C during the quit's dispose, stops the TUI, kills tracked child processes and exits with the signal's status code. Unhandled rejections with non-Error reasons are reported with a described cause.
+- RPC shutdown: an output failure keeps its handler registered through dispose and flush, so the output guard no longer ends the process mid-dispose. A SIGTERM shutdown waits a bounded time for output to flush. Input ending cannot cut a shutdown short, and the shutdown report keeps every cause.
+- Session close and compaction: a closing session starts no new compaction, a manual compaction arriving after close starts nothing, and a late compaction result commits nothing. A compaction already committed when close lands is recorded as committed, not cancelled.
+- Lifecycle warnings with no open host stream are held until a host attaches. A session that fails after construction drains its held closing warnings on every disposal outcome.
+- Interactive keybindings and the image store are read from the runtime's agent directory instead of the process default directory.
+- Memory secret checks use the shared secret text owner, which recognises Google and GitLab key shapes. A memory search whose query is secret-like is rejected with `secret_like_query` when query redaction is enabled.
+- Work-directory retention charges a run only with the bytes its scan counted, so an unmeasured remainder never causes eviction for bytes. A lease holder is treated as stale only when its process is proven absent.
+- System One usage receipts from an aborted evaluator call are recorded or returned to the owed queue, never dropped. Owed receipts are made durable before the jobs that no longer carry them are saved, and an unrecorded receipt is reported to its owner's callback.
+- Forgetting a session aborts running summary work of other sessions that was built on the forgotten summaries. A forgotten session keeps no job-derived budget evidence, and a coordinator-less forget waits once for a loading history index before deciding whether the session exists.
+- Transcript recall rescans for session files another writer created after the start scan, and checks the file prefix before it appends to its index.
+- A summary failure the caller reports as temporary, such as a store that could not be written, is retried with a bounded delay instead of ending the job. A retryable failure of a claim that made no provider call (it only reused a kept reply) gives back that claim's attempt, bounded per job.
+- A run keeps the prompt prefix marks it advanced when its failure lifecycle rethrows, for example when a listener refuses the failure record.
 
 ## [0.103.7] - 2026-10-09
 
