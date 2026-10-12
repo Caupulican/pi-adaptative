@@ -62,7 +62,7 @@ export class ForegroundLifecycleAdapter {
 			agent,
 			sessionManager,
 			modelRouter,
-			emitWarning: (message) => this.pendingWarnings.push(message),
+			emitWarning: (message) => this.warn(message),
 			observeProviderRequest,
 			...(prewarmToolCalls ? { prewarmToolCalls } : {}),
 			...(getMutationScope ? { getMutationScope } : {}),

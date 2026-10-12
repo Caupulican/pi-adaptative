@@ -219,11 +219,12 @@ export class SignalLifecycle {
 		if (this.shuttingDown) {
 			// A throw during an orderly shutdown is still a crash: report it (the orderly path is already unwinding), restore the
 			// terminal if it is not restored yet, and end the process.
+			// port.stop() restores the terminal AND releases the closing warnings held for it (ui.stop alone would drop them).
 			try {
-				this.port.ui.stop();
+				this.port.stop();
 			} catch {}
-			console.error("pi exiting due to uncaughtException during shutdown:");
-			console.error(error);
+			const detail = (error.stack ?? error.message).slice(0, MAX_REJECTION_DETAIL);
+			this.io.stderr(`${neutralizeControls(`pi exiting due to uncaughtException during shutdown: ${detail}`)}\n`);
 			process.exit(1);
 		}
 		this.shuttingDown = true;

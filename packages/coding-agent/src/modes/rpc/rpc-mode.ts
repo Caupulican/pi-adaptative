@@ -826,7 +826,6 @@ export async function runRpcMode(
 			// A shutdown is already running. The input ending while the dispose is still running (the client closed its pipe after the
 			// signal) must not cut that shutdown short. (A second termination signal never reaches here: the host's signal listeners are
 			// removed when the shutdown starts, so the process handles it by default.)
-			if (signal !== undefined) io.exit(exitCode);
 			return;
 		}
 		shuttingDown = true;

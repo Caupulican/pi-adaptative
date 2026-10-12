@@ -4997,7 +4997,6 @@ export class AgentSession {
 		this._disposeCompletion = finish();
 	}
 
-	/** Dispose synchronously-visible state, then await all session-owned asynchronous shutdowns. */
 	/**
 	 * Disposes the session and waits for its shutdown. The warnings it still holds then go to its closing sink, unless the owner
 	 * takes them itself: a runtime does, through takeUndeliveredWarnings, and passes `drainClosingWarnings: false`.

@@ -1252,12 +1252,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// A session that was constructed and then failed (memory initialization, extension discovery) is closed in full: its extensions,
 		// shell and usage owner, with its closing warnings going to the caller's sink. The original failure stays the cause.
 		try {
-			await constructed.disposeAndWait();
+			await constructed.disposeAndWait({ drainClosingWarnings: false });
 		} catch (disposeError: unknown) {
 			throw new AggregateError(
 				[error, disposeError],
 				"Session creation failed and the session could not be closed cleanly.",
 			);
+		}
+		// The warnings it held go to the caller's sink; with none, they ride the failure the caller shows, never stderr (the creating
+		// host may be running a terminal UI that stderr writes would land on).
+		const closingWarnings = constructed.takeUndeliveredWarnings();
+		if (closingWarnings.length > 0) {
+			if (options.onClosingWarnings) options.onClosingWarnings(closingWarnings);
+			else {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new Error(`${message} ${closingWarnings.join(" ")}`, { cause: error });
+			}
 		}
 		throw error;
 	}
