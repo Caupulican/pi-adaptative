@@ -767,6 +767,31 @@ async function runQuitCrashAfterStop(world: HarnessWorld): Promise<QuitCrashRun>
 	}
 }
 
+/** Undici's promise close calls this.close(callback): only the outer promise call may be held or decorated. */
+function observeDispatcherClose(
+	dispatcher: undici.Dispatcher,
+	wrap: (settleNative: () => Promise<void>) => Promise<void>,
+): Mock<undici.Dispatcher["close"]> {
+	const nativeClose = dispatcher.close.bind(dispatcher);
+	function close(callback: () => void): void;
+	function close(): Promise<void>;
+	function close(callback?: () => void): void | Promise<void> {
+		if (callback !== undefined) return nativeClose(callback);
+		return wrap(() => nativeClose());
+	}
+	return vi.spyOn(dispatcher, "close").mockImplementation(close);
+}
+
+/** Application retirement and Undici's internal callback delegation are distinct calls to the same overloaded public method. */
+function dispatcherCloseCount(
+	spy: Mock<undici.Dispatcher["close"]>,
+	overload: "promise" | "callback" = "promise",
+): number {
+	return spy.mock.calls.filter((args: readonly unknown[]) =>
+		overload === "promise" ? args.length === 0 : args.length === 1 && typeof args[0] === "function",
+	).length;
+}
+
 interface HttpInstallRun {
 	/** Production replaced the global fetch during the mode's init, and every replacement was undici's own fetch. */
 	readonly replacementsAreUndiciFetch: boolean;
@@ -787,6 +812,7 @@ interface HttpInstallRun {
 	readonly disposalTimeoutKeptLateCloseCause: boolean;
 	readonly invalidDisposalTimeoutKeepsOwnership: boolean;
 	readonly disposalTimeoutKeptRecordedCloseCause: boolean;
+	readonly nativeCallbackDelegationPreserved: boolean;
 }
 
 /**
@@ -816,10 +842,9 @@ async function runHttpInstall(world: HarnessWorld): Promise<HttpInstallRun> {
 			.slice(effectsBefore)
 			.filter((effect) => effect.kind === "globalThis.fetch");
 		const installed = undici.getGlobalDispatcher();
-		const realInstalledClose = installed.close.bind(installed);
-		const installedClose = vi.spyOn(installed, "close").mockImplementation(() => {
+		const installedClose = observeDispatcherClose(installed, (settleNative) => {
 			closeReached.release();
-			return holdClose.promise.then(() => realInstalledClose());
+			return holdClose.promise.then(settleNative);
 		});
 		closeSpies.push(installedClose);
 		configureHttpDispatcher();
@@ -832,8 +857,14 @@ async function runHttpInstall(world: HarnessWorld): Promise<HttpInstallRun> {
 		});
 		await withDeadline(world.trace, "http install: close reaches its held boundary", closeReached.promise);
 		const pendingRetirementKeepsSettingsSynchronous = current !== installed && !retirementSettled;
+		process.stderr.write(
+			`[http-close] release heapMiB=${Math.round(process.memoryUsage().heapUsed / (1024 * 1024))}\n`,
+		);
 		holdClose.release();
 		await withDeadline(world.trace, "http install: the superseded pool settles", retirement);
+		process.stderr.write(
+			`[http-close] settled heapMiB=${Math.round(process.memoryUsage().heapUsed / (1024 * 1024))}\n`,
+		);
 		const closeResult = installedClose.mock.results[0];
 		if (closeResult?.type !== "return" || !(closeResult.value instanceof Promise)) {
 			throw new Error("HTTP install witness: graceful retirement returned no settlement promise");
@@ -842,9 +873,8 @@ async function runHttpInstall(world: HarnessWorld): Promise<HttpInstallRun> {
 		const currentOpen = currentClose.mock.calls.length === 0;
 		currentClose.mockRestore();
 		const closeFailure = new Error("HTTP install witness: graceful close failed after settling the owned pool");
-		const realCurrentClose = current.close.bind(current);
-		const rejectingClose = vi.spyOn(current, "close").mockImplementation(async () => {
-			await realCurrentClose();
+		const rejectingClose = observeDispatcherClose(current, async (settleNative) => {
+			await settleNative();
 			throw closeFailure;
 		});
 		closeSpies.push(rejectingClose);
@@ -910,7 +940,10 @@ async function runHttpInstall(world: HarnessWorld): Promise<HttpInstallRun> {
 			awaitHttpDispatcherRetirements(),
 		);
 		const failedInstallPreservesOwnerAndRetiresNewPool =
-			installCauseKept && undici.getGlobalDispatcher() === finalOwned && failedPoolClose?.mock.calls.length === 1;
+			installCauseKept &&
+			undici.getGlobalDispatcher() === finalOwned &&
+			failedPoolClose !== undefined &&
+			dispatcherCloseCount(failedPoolClose) === 1;
 		const finalClose = vi.spyOn(finalOwned, "close");
 		closeSpies.push(finalClose);
 		await withDeadline(world.trace, "http install: final owned pool settles at shutdown", disposeHttpDispatcher());
@@ -923,7 +956,7 @@ async function runHttpInstall(world: HarnessWorld): Promise<HttpInstallRun> {
 			undici.getGlobalDispatcher() === takeover &&
 			takeoverClose.mock.calls.length === 0 &&
 			foreignClose.mock.calls.length === 0 &&
-			displacedClose.mock.calls.length === 1 &&
+			dispatcherCloseCount(displacedClose) === 1 &&
 			finalOwned !== displacedOwned &&
 			finalOwned !== takeover;
 		configureHttpDispatcher();
@@ -940,14 +973,13 @@ async function runHttpInstall(world: HarnessWorld): Promise<HttpInstallRun> {
 			undici.getGlobalDispatcher() === foreign && foreignClose.mock.calls.length === 0;
 		configureHttpDispatcher();
 		const failedBeforeTimeoutOwned = undici.getGlobalDispatcher();
-		const realRecordedFailureClose = failedBeforeTimeoutOwned.close.bind(failedBeforeTimeoutOwned);
 		const recordedCloseFailure = new Error(
 			"HTTP install witness: recorded close failure before another pool times out",
 		);
 		const recordedCloseReached = createBarrier();
-		const recordedFailureClose = vi.spyOn(failedBeforeTimeoutOwned, "close").mockImplementation(async () => {
+		const recordedFailureClose = observeDispatcherClose(failedBeforeTimeoutOwned, async (settleNative) => {
 			recordedCloseReached.release();
-			await realRecordedFailureClose();
+			await settleNative();
 			throw recordedCloseFailure;
 		});
 		closeSpies.push(recordedFailureClose);
@@ -966,11 +998,10 @@ async function runHttpInstall(world: HarnessWorld): Promise<HttpInstallRun> {
 			),
 		);
 		const timeoutOwned = undici.getGlobalDispatcher();
-		const realTimeoutClose = timeoutOwned.close.bind(timeoutOwned);
 		const lateCloseFailure = new Error("HTTP install witness: late close rejection after disposal timeout");
-		const timeoutClose = vi.spyOn(timeoutOwned, "close").mockImplementation(async () => {
+		const timeoutClose = observeDispatcherClose(timeoutOwned, async (settleNative) => {
 			await timeoutCloseHold.promise;
-			await realTimeoutClose();
+			await settleNative();
 			throw lateCloseFailure;
 		});
 		closeSpies.push(timeoutClose);
@@ -1022,19 +1053,24 @@ async function runHttpInstall(world: HarnessWorld): Promise<HttpInstallRun> {
 			replacements: replacements.length,
 			foreignDispatcherKept: foreignClose.mock.calls.length === 0 && installed !== foreign,
 			installedDispatcherIsNew: installed !== foreign && current !== installed,
-			supersededClosed: installedClose.mock.calls.length === 1,
+			supersededClosed: dispatcherCloseCount(installedClose) === 1,
 			currentOpen,
 			pendingRetirementKeepsSettingsSynchronous,
 			rejectedCloseCauseKept,
-			retirementFailureDrainedOnce: rejectingClose.mock.calls.length === 1,
-			finalOwnedCloseSettled: finalClose.mock.calls.length === 1 && externallyReplacedClose.mock.calls.length === 1,
+			retirementFailureDrainedOnce: dispatcherCloseCount(rejectingClose) === 1,
+			finalOwnedCloseSettled:
+				dispatcherCloseCount(finalClose) === 1 && dispatcherCloseCount(externallyReplacedClose) === 1,
 			callerReplacementKeptAtDispose,
 			failedInstallPreservesOwnerAndRetiresNewPool,
 			callerTakeoverRestoredAfterReconfigure,
-			disposalTimeoutKeptLateCloseCause: timeoutReported && lateCauseKept && timeoutClose.mock.calls.length === 1,
+			disposalTimeoutKeptLateCloseCause:
+				timeoutReported && lateCauseKept && dispatcherCloseCount(timeoutClose) === 1,
 			invalidDisposalTimeoutKeepsOwnership,
 			disposalTimeoutKeptRecordedCloseCause:
-				recordedFailureSettled && recordedCauseReported && recordedFailureClose.mock.calls.length === 1,
+				recordedFailureSettled && recordedCauseReported && dispatcherCloseCount(recordedFailureClose) === 1,
+			nativeCallbackDelegationPreserved: [installedClose, rejectingClose, recordedFailureClose, timeoutClose].every(
+				(spy) => dispatcherCloseCount(spy, "callback") === 1,
+			),
 		};
 	} catch (error) {
 		failures.push(error);
@@ -1525,6 +1561,10 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	expect(
 		httpInstall.disposalTimeoutKeptRecordedCloseCause,
 		"timeout reports an already recorded close cause once while retaining later failures for recovery",
+	).toBe(true);
+	expect(
+		httpInstall.nativeCallbackDelegationPreserved,
+		"each observed promise close reaches the real native callback overload exactly once",
 	).toBe(true);
 
 	const failing = await runInteractiveStop(world, true);
@@ -2187,10 +2227,9 @@ async function verifyPrintOwner(world: HarnessWorld): Promise<void> {
 		capture.session = harness.runtime.session;
 		configureHttpDispatcher();
 		const printPool = undici.getGlobalDispatcher();
-		const realPrintPoolClose = printPool.close.bind(printPool);
 		let printPoolSettled = false;
-		const poolCloseSpy = vi.spyOn(printPool, "close").mockImplementation(async () => {
-			await realPrintPoolClose();
+		const poolCloseSpy = observeDispatcherClose(printPool, async (settleNative) => {
+			await settleNative();
 			printPoolSettled = true;
 		});
 		const stdout: string[] = [];
@@ -2257,7 +2296,9 @@ async function verifyPrintOwner(world: HarnessWorld): Promise<void> {
 			await withDeadline(world.trace, "print owner: real final flush callback is held", flushed.promise);
 			expect(runtimeDisposed, "print flush begins only after the real runtime cleanup completes").toBe(true);
 			expect(
-				printPoolSettled && poolCloseSpy.mock.calls.length === 1,
+				printPoolSettled &&
+					dispatcherCloseCount(poolCloseSpy) === 1 &&
+					dispatcherCloseCount(poolCloseSpy, "callback") === 1,
 				"print attempts and awaits its actual owned HTTP pool retirement even when runtime disposal fails",
 			).toBe(true);
 			expect(completed, "print cannot return before its actual final write callback settles").toBe(false);
