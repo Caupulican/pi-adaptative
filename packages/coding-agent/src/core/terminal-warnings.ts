@@ -33,6 +33,15 @@ function plainText(value: unknown): string {
 	}
 }
 
+/** One failure's own text without its causes, never throwing: an Error's message, else the value's plain text. */
+export function causeHeadline(cause: unknown): string {
+	try {
+		return cause instanceof Error ? cause.message : plainText(cause);
+	} catch {
+		return plainText(cause);
+	}
+}
+
 const CAUSE_MAX_DEPTH = 4;
 const CAUSE_MAX_LISTED = 8;
 const CAUSE_MAX_CHARS = 2_000;

@@ -14,7 +14,7 @@
 import type { TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
-import { describeCause, neutralizeControls } from "../../core/terminal-warnings.ts";
+import { causeHeadline, describeCause, neutralizeControls } from "../../core/terminal-warnings.ts";
 import { disposeUnclaimedCliPowerShellWarmStart } from "../../core/tools/early-powershell-session.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 
@@ -215,8 +215,8 @@ export class SignalLifecycle {
 		}
 		if (failures.length === 1) throw failures[0];
 		if (failures.length > 1) {
-			// The message is the bounded cause projection: a first failure whose own conversion throws must not replace the collected causes.
-			throw new AggregateError(failures, describeCause(failures[0]));
+			// The message is the first failure's own text, converted safely: a first failure whose conversion throws must not replace the collected causes.
+			throw new AggregateError(failures, causeHeadline(failures[0]));
 		}
 	}
 
