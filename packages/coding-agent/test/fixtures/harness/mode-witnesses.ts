@@ -43,43 +43,46 @@ const CALIBRATION_BASELINE_REPLY = "The calibration baseline reply.";
 /** Neutral owner words: backlog settlement also screens and checks capabilities; steering classifies directly. */
 function enterNeutralModeIntake(world: HarnessWorld, phase: string, input: string, backlog: boolean): void {
 	if (!world.systemOne.enabled) return;
-	world.systemOne.enterPhase(
-		phase,
-		{
-			...(backlog
-				? {
-						carries_0: { kind: "noul" as const, probability: 0.02 },
-						capabilities_authorized: { kind: "noul" as const, probability: 0.02 },
-					}
-				: {}),
-			changes_model_pools: { kind: "noul", probability: 0.02 },
-			local_commits_only: { kind: "noul", probability: 0.02 },
-			lifts_delivery_block: { kind: "noul", probability: 0.02 },
-			full_handoff: { kind: "noul", probability: 0.02 },
-			optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
-		},
-		{
-			expect: ({ state, questions }) => {
-				if ("carries_0" in questions) {
-					expect(backlog, "only deferred owner words need screening").toBe(true);
-					expect(state, "the screen sees this helper's exact earlier submission").toEqual({
-						owner_messages: [input],
-					});
-					return;
+	const judgments = {
+		...(backlog
+			? {
+					carries_0: { kind: "noul" as const, probability: 0.02 },
+					capabilities_authorized: { kind: "noul" as const, probability: 0.02 },
 				}
-				const intake = state as Record<string, unknown>;
-				expect(intake.user_request, "the intake sees this helper's exact owner words").toBe(input);
-				expect(intake.pending_owner_requests, "no unrelated owner input enters this intake").toEqual([]);
-				expect(intake.previous_optional_tool_intent, "no earlier tool request is invented").toBeNull();
-				expect(intake.optional_tools, "the neutral judgment refers to the real built-in candidate").toMatchObject([
-					{ toolName: "secret_store", sourcePath: "<builtin:secret_store>" },
-				]);
-				expect("capabilities_authorized" in questions, "steering does not classify deferred capabilities").toBe(
-					backlog,
-				);
-			},
+			: {}),
+		changes_model_pools: { kind: "noul" as const, probability: 0.02 },
+		local_commits_only: { kind: "noul" as const, probability: 0.02 },
+		lifts_delivery_block: { kind: "noul" as const, probability: 0.02 },
+		full_handoff: { kind: "noul" as const, probability: 0.02 },
+		optional_tool_0: { kind: "choice" as const, choice: "unchanged", confidence: 0.97 },
+	};
+	world.systemOne.enterPhase(phase, judgments, {
+		expect: ({ state, questions }) => {
+			if ("carries_0" in questions) {
+				expect(backlog, "only deferred owner words need screening").toBe(true);
+				expect(Object.keys(questions), "the backlog screen has its own question schema").toEqual(["carries_0"]);
+				expect(state, "the screen sees this helper's exact earlier submission").toEqual({
+					owner_messages: [input],
+				});
+				return;
+			}
+			expect(Object.keys(questions).sort(), "only the declared intake schema reads intake state").toEqual(
+				Object.keys(judgments)
+					.filter((id) => id !== "carries_0")
+					.sort(),
+			);
+			const intake = state as Record<string, unknown>;
+			expect(intake.user_request, "the intake sees this helper's exact owner words").toBe(input);
+			expect(intake.pending_owner_requests, "no unrelated owner input enters this intake").toEqual([]);
+			expect(intake.previous_optional_tool_intent, "no earlier tool request is invented").toBeNull();
+			expect(intake.optional_tools, "the neutral judgment refers to the real built-in candidate").toMatchObject([
+				{ toolName: "secret_store", sourcePath: "<builtin:secret_store>" },
+			]);
+			expect("capabilities_authorized" in questions, "steering does not classify deferred capabilities").toBe(
+				backlog,
+			);
 		},
-	);
+	});
 }
 const REJECTION_STACK = "Error: late rejection \u001b[2J at guard witness";
 const REJECTION_LINE = "Unhandled promise rejection during shutdown. Error: late rejection \\x1b[2J at guard witness\n";
@@ -1804,6 +1807,7 @@ async function runAccountQuit(world: HarnessWorld, agentDir: string): Promise<Ac
 	if (heldFile === undefined) throw new Error("the account quit owner has no file");
 	// A normal turn persists a baseline first, so the file claims below have a nonempty persisted file to be measured against.
 	world.provider.enqueue("worker-a", text("account-quit-baseline", ACCOUNT_BASELINE_REPLY));
+	world.systemOne.enterPhase("mode-account-quit-baseline", {});
 	await withDeadline(trace, "account quit: the baseline turn completes", heldSession.prompt("Run the baseline turn."));
 	const baselinePersisted = (world.io.peekFile(heldFile) ?? "").includes(ACCOUNT_BASELINE_REPLY);
 	world.provider.enqueue("worker-a", fail("account-quit-refusal", ACCOUNT_REFUSAL));
@@ -1890,6 +1894,7 @@ async function runAccountControl(world: HarnessWorld, agentDir: string): Promise
 	const requestMark = world.provider.requests.length;
 	world.provider.enqueue("worker-a", fail("account-control-refusal", ACCOUNT_REFUSAL));
 	world.provider.enqueue("root", text("account-control-reply", ACCOUNT_ROOT_REPLY));
+	world.systemOne.enterPhase("mode-account-control", {});
 	await withDeadline(
 		trace,
 		"account control: the refused turn completes on root",
@@ -2062,6 +2067,7 @@ async function verifyMissingAccountListing(world: HarnessWorld, agentDir: string
 				? fail("account-no-listing-refusal", ACCOUNT_REFUSAL)
 				: text("account-no-listing-control", controlReply),
 		);
+		world.systemOne.enterPhase(`mode-account-no-listing-${refused ? "refused" : "control"}`, {});
 		await withDeadline(
 			world.trace,
 			"missing account listing: the actual model request completes",
@@ -2177,6 +2183,26 @@ async function verifyAccountPreflightAbort(world: HarnessWorld, agentDir: string
 			world.provider.enqueue("worker-a", text("account-preflight-control", reply));
 		}
 		const preflightResults: boolean[] = [];
+		const claimJudgments = {
+			states_tests_pass: { kind: "choice" as const, choice: "no_current_success", confidence: 0.97 },
+			states_committed: { kind: "noul" as const, probability: 0.02 },
+			states_pushed: { kind: "noul" as const, probability: 0.02 },
+			states_published: { kind: "noul" as const, probability: 0.02 },
+			states_files_changed: { kind: "noul" as const, probability: 0.02 },
+		};
+		const claimPhase = `mode-account-preflight-${closeFirst ? "closed" : "control"}`;
+		const claimRequestMark = world.systemOne.decoded.length;
+		world.systemOne.enterPhase(claimPhase, closeFirst ? {} : claimJudgments, {
+			expect: ({ state, questions }) => {
+				expect(closeFirst, "the closed preflight publishes no answer to judge").toBe(false);
+				expect(Object.keys(questions).sort(), "the live preflight reaches the real claim question pack").toEqual(
+					Object.keys(claimJudgments).sort(),
+				);
+				expect(state, "the claim check reads this control's actual final answer").toEqual({
+					final_answer: reply,
+				});
+			},
+		});
 		const prompt = session
 			.prompt("Run the account preflight control.", {
 				preflightResult: (passed) => {
@@ -2215,6 +2241,10 @@ async function verifyAccountPreflightAbort(world: HarnessWorld, agentDir: string
 				await withDeadline(world.trace, "account preflight: submission settles", prompt),
 				"preflight interruption is a clean abort outcome",
 			).toBe("resolved");
+			expect(
+				world.systemOne.decoded.slice(claimRequestMark).map((request) => request.phase),
+				"only the live ON control reaches and consumes the answer's claim judgment",
+			).toEqual(world.systemOne.enabled && !closeFirst ? [claimPhase] : []);
 			hold.release();
 			expect(requests, "the actual account-listing boundary was reached exactly once").toHaveLength(1);
 			expect(
@@ -2327,6 +2357,7 @@ async function verifyPrintOwner(world: HarnessWorld): Promise<void> {
 			},
 		});
 		let completed = false;
+		world.systemOne.enterPhase(`mode-print-${failDispose ? "failed-disposal" : "control"}`, {});
 		const run = runPrintMode(harness.runtime, { mode: "text", messages: ["Run the print witness."] }).then(
 			(value) => {
 				completed = true;
@@ -2489,6 +2520,7 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 					).toBe(true);
 				},
 			});
+		world.systemOne.enterPhase(`mode-retry-${stopAt}-start`, {});
 		const prompt = session.prompt("Run the retry boundary witness.").then(
 			() => "resolved",
 			(error: unknown) => messageOf(error),
@@ -2679,6 +2711,7 @@ async function verifyBillingContinuation(world: HarnessWorld): Promise<void> {
 			const reply = "The actual subscription failover continuation reply.";
 			if (variant === "live-subscription")
 				world.provider.enqueue("worker-a", text("billing-live-continuation", reply));
+			world.systemOne.enterPhase(`mode-billing-${variant}`, {});
 			try {
 				await withDeadline(
 					world.trace,
