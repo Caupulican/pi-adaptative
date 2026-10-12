@@ -28,7 +28,6 @@ function isDeadTerminalError(error: unknown): boolean {
 	return code !== undefined && DEAD_TERMINAL_ERROR_CODES.has(code);
 }
 
-/** The termination signals the lifecycle listens to. SIGHUP is not delivered on Windows. */
 /** The value as an Error for a report that reads a stack: a non-Error, or a value whose class check throws, is wrapped by its cause text. */
 function asError(value: unknown): Error {
 	try {
@@ -37,6 +36,7 @@ function asError(value: unknown): Error {
 	return new Error(describeCause(value));
 }
 
+/** The termination signals the lifecycle listens to. SIGHUP is not delivered on Windows. */
 function terminationSignals(): NodeJS.Signals[] {
 	return process.platform === "win32" ? ["SIGTERM"] : ["SIGTERM", "SIGHUP"];
 }

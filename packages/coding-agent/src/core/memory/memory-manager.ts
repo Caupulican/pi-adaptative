@@ -61,13 +61,8 @@ function describeProviderError(error: unknown): string {
 	} catch {
 		kind = typeof error;
 	}
-	let line: string;
-	try {
-		const headline = causeHeadline(error);
-		line = headline.length > 0 ? `${kind}: ${headline}` : kind;
-	} catch {
-		line = kind;
-	}
+	const headline = causeHeadline(error);
+	const line = headline.length > 0 ? `${kind}: ${headline}` : kind;
 	return neutralizeControls(boundedRedactedDiagnosticText(line) ?? typeof error);
 }
 
@@ -260,7 +255,9 @@ export class MemoryManager {
 			} catch (err) {
 				// Same isolation as composition: one provider's failure never breaks the prompt. A failed token is
 				// its own key, so the block is composed again and the provider's block failure is logged there too.
-				console.error(`Memory provider ${p.name} failed to give its system prompt block key:`, err);
+				console.error(
+					`Memory provider ${p.name} failed to give its system prompt block key: ${describeProviderError(err)}`,
+				);
 				tokens.push(`${p.name}!`);
 			}
 		}
@@ -297,7 +294,9 @@ export class MemoryManager {
 			try {
 				p.onSystemPromptBlockFrozen(text);
 			} catch (err) {
-				console.error(`Memory provider ${p.name} failed to observe the frozen system prompt block:`, err);
+				console.error(
+					`Memory provider ${p.name} failed to observe the frozen system prompt block: ${describeProviderError(err)}`,
+				);
 			}
 		}
 		return text;
@@ -325,7 +324,9 @@ export class MemoryManager {
 					blocks.push(block);
 				}
 			} catch (err) {
-				console.error(`Memory provider ${p.name} failed to generate system prompt block:`, err);
+				console.error(
+					`Memory provider ${p.name} failed to generate system prompt block: ${describeProviderError(err)}`,
+				);
 			}
 		}
 		return blocks.join("\n\n");
@@ -426,7 +427,7 @@ export class MemoryManager {
 			try {
 				tools.push(...p.getToolDefinitions());
 			} catch (err) {
-				console.error(`Failed to get tool definitions from provider ${p.name}:`, err);
+				console.error(`Failed to get tool definitions from provider ${p.name}: ${describeProviderError(err)}`);
 			}
 		}
 		return tools;
@@ -444,7 +445,7 @@ export class MemoryManager {
 					markers.add(m);
 				}
 			} catch (err) {
-				console.error(`Failed to get context markers from provider ${p.name}:`, err);
+				console.error(`Failed to get context markers from provider ${p.name}: ${describeProviderError(err)}`);
 			}
 		}
 		return [...markers];

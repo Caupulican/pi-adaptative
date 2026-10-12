@@ -125,7 +125,7 @@ export class RetryController {
 		this._attempt = nextAttempt;
 		// The provider's text and the host's continuation note are two sentences: a text without terminal punctuation gets a full stop.
 		const reason = (message.errorMessage || "Unknown error").trim();
-		const sentence = /[.!?:;)]$/.test(reason) ? reason : `${reason}.`;
+		const sentence = /[.!?]$/.test(reason) ? reason : `${reason}.`;
 		this.startAttempt(policy.maxAttempts, 0, `${sentence} ${detail}`.trim());
 		return true;
 	}

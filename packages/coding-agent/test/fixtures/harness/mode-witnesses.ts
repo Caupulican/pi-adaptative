@@ -1426,6 +1426,7 @@ async function runAccountControl(world: HarnessWorld, agentDir: string): Promise
  */
 async function verifyAccountListingRefusal(world: HarnessWorld): Promise<void> {
 	const requestBase = world.provider.requests.length;
+	const escapesBefore = world.guard.escapes.length;
 	const listingRequests: AccountListingRequest[] = [];
 	const registry = world.modelRegistry.createReloadSnapshot();
 	world.modelRegistry.registerProvider(ACCOUNT_PROVIDER, {
@@ -1441,6 +1442,11 @@ async function verifyAccountListingRefusal(world: HarnessWorld): Promise<void> {
 	const agentDir = `${world.agentDir}-account-listing`;
 	try {
 		const quit = await runAccountQuit(world, agentDir);
+		// A refused effect inside production's own catch never throws out of the run: it is named here, at the step that reached it.
+		expect(
+			world.guard.escapes.slice(escapesBefore),
+			"the account quit reaches no refused IO: its listing and requests stay on the guard's ports",
+		).toEqual([]);
 		expect(quit.baselinePersisted, "a nonempty persisted baseline exists before the refusal").toBe(true);
 		expect(
 			quit.requestModelsAtQuit,
@@ -1485,6 +1491,10 @@ async function verifyAccountListingRefusal(world: HarnessWorld): Promise<void> {
 		});
 
 		const control = await runAccountControl(world, agentDir);
+		expect(
+			world.guard.escapes.slice(escapesBefore),
+			"the account control reaches no refused IO: its listing and requests stay on the guard's ports",
+		).toEqual([]);
 		expect(control.requestModels, "the refusal is answered by worker-a, then the continuation by root").toEqual([
 			`${ACCOUNT_PROVIDER}/worker-a`,
 			`${ACCOUNT_PROVIDER}/root`,

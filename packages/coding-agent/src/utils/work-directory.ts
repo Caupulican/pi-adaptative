@@ -59,11 +59,11 @@ interface InspectedRun {
 	path: string;
 	mtimeMs: number;
 	/**
-	 * The run's measured size, or undefined when its scan was incomplete (unreadable, or the shared scan budget ran out). An unmeasured size is
-	 * not evidence of exceeding the byte limit: such a run counts nothing toward the byte total and is never evicted for bytes, only by age
-	 * or count like any other run.
+	 * The bytes the scan counted. A complete scan makes this the run's size; an incomplete one (unreadable, or the shared scan budget ran
+	 * out) makes it a lower bound, so a run is never charged for bytes that were not seen: an unmeasured remainder is not evidence of
+	 * exceeding the byte limit, while the bytes that were counted are.
 	 */
-	bytes: number | undefined;
+	bytes: number;
 }
 
 interface ScanBudget {
@@ -316,7 +316,7 @@ function inspectRun(
 		return {
 			path: runPath,
 			mtimeMs: stats.mtimeMs,
-			bytes: measured.complete ? measured.bytes : undefined,
+			bytes: measured.bytes,
 		};
 	} catch {
 		return undefined;
@@ -431,18 +431,18 @@ export function pruneWorkTenant(
 
 	const removed: string[] = [];
 	let retainedCount = runs.length + (truncated ? maxRuns + 1 : 0);
-	// Only measured runs make up the byte total, and only a measured run is evicted for bytes: an unmeasured run (unreadable, or past the
-	// shared scan budget) must not push the total over the budget, nor mark healthy neighbours as over it.
-	let retainedBytes = runs.reduce((sum, run) => sum + (run.bytes ?? 0), 0);
+	// The byte total is what the scans actually counted (lower bounds for incomplete scans): evicting for bytes needs counted excess, so an
+	// unmeasured remainder neither pushes the total over the budget nor marks healthy neighbours as over it.
+	let retainedBytes = runs.reduce((sum, run) => sum + run.bytes, 0);
 	for (const run of runs.sort((left, right) => left.mtimeMs - right.mtimeMs)) {
 		const expired = now - run.mtimeMs > maxAgeMs;
 		const overCount = retainedCount > maxRuns;
-		const overBytes = run.bytes !== undefined && retainedBytes > maxTotalBytes;
+		const overBytes = retainedBytes > maxTotalBytes;
 		if (!expired && !overCount && !overBytes) continue;
 		if (!removeRunIfInactive(run.path, now)) continue;
 		removed.push(run.path);
 		retainedCount--;
-		retainedBytes -= run.bytes ?? 0;
+		retainedBytes -= run.bytes;
 	}
 	return removed;
 }

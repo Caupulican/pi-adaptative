@@ -11,6 +11,7 @@ import { PassThrough, Writable } from "node:stream";
 import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import { getSystemErrorMap } from "node:util";
+import * as undici from "undici";
 import { builtinBoundary } from "./builtin-boundary.ts";
 import { type SqliteFaultOperation, VirtualSqlite } from "./sqlite-io.ts";
 import { VirtualWorkerThreads } from "./virtual-worker.ts";
@@ -1366,7 +1367,8 @@ export class EffectGuard {
 				};
 			// Keep module exports as stable dispatchers: a lazy importer must never capture a world closure.
 			// The shared boundary rejects every active-world export absent from these adapter tables.
-			this.replace(globalThis, "fetch", this.ports.fetch ?? reject("fetch"));
+			this.pinGlobalFetch(this.ports.fetch ?? reject("fetch"));
+			this.restoreUndiciInstallState();
 			const processExports: Record<string, unknown> = {};
 			for (const name of ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]) {
 				const implementation = (...arguments_: unknown[]) => {
@@ -1500,5 +1502,53 @@ export class EffectGuard {
 			if (descriptor) Object.defineProperty(target, name, descriptor);
 			else Reflect.deleteProperty(target, name);
 		});
+	}
+
+	/**
+	 * Production reinstalls the global fetch as undici's (configureHttpDispatcher's `undici.install()`, reached from InteractiveMode's
+	 * runtime settings). A plain value would let that replacement bypass the port and reach undici's sockets, so the world's fetch is an
+	 * accessor that stays the port until dispose; each replacement is recorded as an effect and never installed.
+	 */
+	private pinGlobalFetch(port: unknown): void {
+		const descriptor = Object.getOwnPropertyDescriptor(globalThis, "fetch");
+		if (descriptor && !descriptor.configurable) throw new Error("Cannot guard fetch");
+		Object.defineProperty(globalThis, "fetch", {
+			configurable: true,
+			enumerable: descriptor?.enumerable ?? true,
+			get: () => port,
+			set: (replacement: unknown) => {
+				this.effects.push({ kind: "globalThis.fetch", arguments: [replacement] });
+			},
+		});
+		this.restore.push(() => {
+			if (descriptor) Object.defineProperty(globalThis, "fetch", descriptor);
+			else Reflect.deleteProperty(globalThis, "fetch");
+		});
+	}
+
+	/**
+	 * The same production install (`undici.install()`) also replaces these globals and the process-wide undici dispatcher. Production may
+	 * do that during a world, so the world restores what it found at dispose and the next world starts from the same process state.
+	 */
+	private restoreUndiciInstallState(): void {
+		const dispatcher = undici.getGlobalDispatcher();
+		this.restore.push(() => undici.setGlobalDispatcher(dispatcher));
+		for (const name of [
+			"Headers",
+			"Request",
+			"Response",
+			"FormData",
+			"WebSocket",
+			"CloseEvent",
+			"ErrorEvent",
+			"MessageEvent",
+			"EventSource",
+		]) {
+			const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+			this.restore.push(() => {
+				if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+				else Reflect.deleteProperty(globalThis, name);
+			});
+		}
 	}
 }
