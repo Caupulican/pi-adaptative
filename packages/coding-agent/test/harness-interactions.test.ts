@@ -1065,8 +1065,6 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				/^Worker inner completion cleanup failed: Worker worker-1 attempt attempt-[0-9a-f-]{36} physical settlement timed out after 5000ms with 2 inner call\(s\) still pending\.$/,
 				/^Worker shutdown failed: Shell execution session terminal release timed out after 5000ms before child close event$/,
 				/^System One verification was not run because the session was closing; no judgment was recorded\.$/,
-				// The quit settle bound: a run held past its owner's quit is disclosed once, exactly (the quit-run-ignores-abort witness).
-				/^A run did not settle within 5s of quit; its final message may not have been persisted\.$/,
 				/^Worker worker-1 rejected: Worker worker-1 resource release failed\.$/,
 				/^Failed to dispose worker write reservations: Worker write reservation shutdown failed\.$/,
 				/^Worker shutdown failed: Worker worker-1 resource release failed\.$/,
@@ -7791,9 +7789,11 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				"the mid-run quit whose abort settles inside the bound discloses no unsettled run",
 			).toEqual([]);
 			trace.mark("root", "quit.mid-run");
-			// Quit while a run ignores its abort: the provider request is held at its gate past the quit, so the owner's bounded wait
-			// expires. The disclosure is the only evidence of that; the gate opens only after it is observed, so the held producer
-			// never blocks the disposal that is being witnessed.
+			// Quit while the provider's producer ignores the session's abort (it stays held at its gate): the transport ends the stream
+			// on the abort anyway, so the run settles inside the bound and the owner's bounded wait does NOT expire. The only closing
+			// disclosure is the verification notice of the run's last event; no round starts after the quit. The gate opens in the
+			// finally, so the held producer never blocks the disposal that is being witnessed. (The timeout disclosure needs a run held
+			// by something the abort cannot reach, which this fixture cannot script: it stays implemented-only.)
 			const tmReached = createBarrier();
 			const tmHold = createBarrier();
 			const tmCreated = await world.createRootSession("root", {
@@ -7824,9 +7824,15 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				);
 				expect(
 					world.warnings.slice(tmMark),
-					"the owner's bounded wait expires and the unsettled run is disclosed at close",
-				).toEqual(["A run did not settle within 5s of quit; its final message may not have been persisted."]);
-				expect(qmAssistants(tmFile), "the held run persisted no assistant message before the bound").toEqual([]);
+					"the run settles inside the bound and the closing verification notice is the only disclosure",
+				).toEqual(
+					world.systemOne.enabled
+						? ["System One verification was not run because the session was closing; no judgment was recorded."]
+						: [],
+				);
+				expect(qmAssistants(tmFile), "the held producer completed no reply before the quit ended the run").toEqual(
+					[],
+				);
 			} finally {
 				tmHold.release();
 				tmOutcome = await withDeadline(
@@ -7840,7 +7846,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			expect(world.provider.requests.length, "no provider round starts after the owner is disposed").toBe(
 				tmRequests,
 			);
-			trace.mark("root", "quit.settle-bound");
+			trace.mark("root", "quit.abort-ignoring-producer");
 		},
 	);
 }, 300_000);
