@@ -536,6 +536,49 @@ async function runQuitWithHeldDispose(world: HarnessWorld): Promise<QuitRun> {
 	};
 }
 
+interface QuitSecondSignalRun {
+	/** Signal listeners armed while the quit's runtime dispose is held. */
+	readonly armedSignalsAtDispose: readonly string[];
+	/** The exit codes the instant the second signal's forced listener has run. */
+	readonly exitsAtSecondSignal: readonly number[];
+	/** How many times the terminal was stopped before and after the second signal. */
+	readonly terminalStopsBefore: number;
+	readonly terminalStopsAfter: number;
+	readonly stderr: readonly string[];
+}
+
+/**
+ * A quit with the runtime dispose held, then a second SIGTERM: the forced listener must be armed on the quit path too, exit with
+ * 128 + 15 and not stop the terminal a second time (the quit's own stop already ran).
+ */
+async function runQuitSecondSignal(world: HarnessWorld): Promise<QuitSecondSignalRun> {
+	const capture: { shutdown?: () => void } = {};
+	const harness = await createInteractiveHarness(world, {
+		holdDispose: true,
+		extensionFactories: [captureShutdownContext(capture)],
+	});
+	await withDeadline(world.trace, "quit second signal: the interactive mode starts", harness.mode.init());
+	if (!capture.shutdown)
+		throw new Error("the quit second-signal witness: session_start never reached the extension context");
+	capture.shutdown();
+	try {
+		await withDeadline(world.trace, "quit second signal: the runtime dispose is held", harness.reached.promise);
+		const armedSignalsAtDispose = armedNames(harness.installs).filter(isSignalName);
+		const terminalStopsBefore = harness.calls.filter((call) => call === "terminal.stop").length;
+		(armedListener(harness.installs, "SIGTERM") as () => void)();
+		return {
+			armedSignalsAtDispose,
+			exitsAtSecondSignal: [...harness.exits],
+			terminalStopsBefore,
+			terminalStopsAfter: harness.calls.filter((call) => call === "terminal.stop").length,
+			stderr: [...harness.stderr],
+		};
+	} finally {
+		harness.hold.release();
+		await withDeadline(world.trace, "quit second signal: the quit finishes", harness.exited.promise, 60_000);
+	}
+}
+
 /** An extension that holds every run at `before_agent_start`: after the submission has its lease, before any provider request. */
 function holdBeforeAgentStart(hold: Barrier, reached: Barrier): ExtensionFactory {
 	return (pi) => {
@@ -711,6 +754,17 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	expect(quit.disposalWarnings, "the quit's runtime disposal discloses nothing in normal order").toEqual([]);
 	// The resume line needs a real TTY and a session file on disk; the harness's session is virtual, so none is written here.
 	expect(quit.stdout, "the quit writes no resume line for a virtual session").toEqual([]);
+
+	const secondSignal = await runQuitSecondSignal(world);
+	expect(
+		secondSignal.armedSignalsAtDispose,
+		"the quit's held dispose keeps the second-signal listeners armed",
+	).toEqual(signalsArmed);
+	expect(secondSignal.exitsAtSecondSignal, "a second SIGTERM during the quit exits with 128 + 15").toEqual([143]);
+	expect(secondSignal.terminalStopsAfter, "the forced exit does not stop the terminal a second time").toBe(
+		secondSignal.terminalStopsBefore,
+	);
+	expect(secondSignal.stderr, "a second SIGTERM during the quit writes nothing to stderr").toEqual([]);
 
 	const standard = await runInteractiveStop(world, false);
 	expect(standard.failures, "a stop with nothing failing rethrows nothing").toEqual([]);

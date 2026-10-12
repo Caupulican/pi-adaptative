@@ -101,7 +101,14 @@ export class SignalLifecycle {
 
 	constructor(port: SignalLifecyclePort, io: Partial<SignalLifecycleIo> = {}) {
 		this.port = port;
-		this.io = { ...PROCESS_IO, ...io };
+		// Each member resolves on its own: a member given as undefined keeps the process default instead of replacing it.
+		this.io = {
+			exit: io.exit ?? PROCESS_IO.exit,
+			stderr: io.stderr ?? PROCESS_IO.stderr,
+			stdout: io.stdout ?? PROCESS_IO.stdout,
+			prependListener: io.prependListener ?? PROCESS_IO.prependListener,
+			onStreamError: io.onStreamError ?? PROCESS_IO.onStreamError,
+		};
 	}
 
 	get isShuttingDown(): boolean {

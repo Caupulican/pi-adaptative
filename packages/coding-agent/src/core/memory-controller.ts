@@ -2246,7 +2246,10 @@ export class MemoryController {
 					this._activeMemorySystem = undefined;
 					this._initializationFailed = true;
 				}
-				console.error("Memory registry refresh failed:", error instanceof Error ? error.message : String(error));
+				// Same route as an init failure: a session warning, never a stderr write from construction.
+				this.deps.emitWarning(
+					`Memory registry refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
 			});
 		return this._lifecycleTail;
 	}
