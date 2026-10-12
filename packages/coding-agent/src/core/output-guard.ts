@@ -95,13 +95,28 @@ export function isStdoutTakenOver(): boolean {
 	return stdoutTakeoverState !== undefined;
 }
 
+let rawStdoutFailureHandler: ((error: unknown) => void) | undefined;
+
+/**
+ * Registers the owner of the raw stdout stream to be told when a queued write fails or its callback times out (a client that went
+ * away). With no owner registered the process exits at once with status 1, as it always did; an owner that registers takes over the
+ * shutdown (its own orderly dispose, then its own exit). Returns the unregistration.
+ */
+export function setRawStdoutFailureHandler(handler: (error: unknown) => void): () => void {
+	rawStdoutFailureHandler = handler;
+	return () => {
+		if (rawStdoutFailureHandler === handler) rawStdoutFailureHandler = undefined;
+	};
+}
+
 export function writeRawStdout(text: string): void {
 	if (text.length === 0) {
 		return;
 	}
 	rawStdoutWriteTail = rawStdoutWriteTail.then(() => writeRawStdoutChunk(text));
-	void rawStdoutWriteTail.catch(() => {
-		process.exit(1);
+	void rawStdoutWriteTail.catch((error: unknown) => {
+		if (rawStdoutFailureHandler) rawStdoutFailureHandler(error);
+		else process.exit(1);
 	});
 }
 

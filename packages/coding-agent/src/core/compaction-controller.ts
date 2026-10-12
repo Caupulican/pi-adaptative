@@ -568,6 +568,9 @@ export class CompactionController {
 	}
 
 	private beginCompactionLifecycle(preparation: CompactionPreparation): void {
+		// The one start of a durable lifecycle on the preparation paths: a compaction that reaches it after the session closed (it was
+		// held at `abortForeground`, evidence planning or an extension) starts nothing, so no start record can follow the close.
+		if (this.closed) throw new Error("Compaction cancelled");
 		if (this.activeCompactionLifecycle) return;
 		const compactionId = randomUUID();
 		this.deps.sessionManager.appendCompactionStart(
@@ -1885,6 +1888,8 @@ export class CompactionController {
 		};
 		this.deps.emit({ type: "compaction_start", reason: "threshold" });
 		const { result } = prepared;
+		// The idle-resume path starts its lifecycle here: it is fenced the same way as beginCompactionLifecycle.
+		if (this.closed) return false;
 		const compactionId = randomUUID();
 		this.deps.sessionManager.appendCompactionStart(compactionId, result.firstKeptEntryId, result.tokensBefore);
 		this.activeCompactionLifecycle = { compactionId, endAttempted: false };

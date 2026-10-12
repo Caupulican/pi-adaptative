@@ -4119,39 +4119,61 @@ export class InteractiveMode {
 	}
 
 	stop(): void {
-		this.subscriptionGeneration++;
-		this.unsubscribeHumanInputActivity?.();
-		this.unsubscribeHumanInputActivity = undefined;
-		this.layout.dispose();
-		this.unregisterSignalHandlers();
-		this.closeAgentsOverlay();
-		if (this.settingsManager.getShowTerminalProgress()) {
-			this.ui.terminal.setProgress(false);
+		// Each group runs whatever the earlier one did, and every failure is kept: the terminal restore (`ui.stop`) and the release of
+		// the warnings held for the TUI must not be skipped by a failing widget, overlay or footer teardown.
+		const failures: unknown[] = [];
+		try {
+			this.subscriptionGeneration++;
+			this.unsubscribeHumanInputActivity?.();
+			this.unsubscribeHumanInputActivity = undefined;
+			this.layout.dispose();
+			this.unregisterSignalHandlers();
+			this.closeAgentsOverlay();
+			if (this.settingsManager.getShowTerminalProgress()) {
+				this.ui.terminal.setProgress(false);
+			}
+			if (this.loadingAnimation) {
+				this.loadingAnimation.stop();
+				this.loadingAnimation = undefined;
+			}
+			this.authDialogs.cancelActiveDialog();
+			this.extensionUiHost.clearHostWidgets();
+			this.extensionUiHost.resetExtensionUI();
+			this.overlayHost.unmount();
+			this.activityLane?.dispose();
+			this.footer.dispose();
+			this.footerDataProvider.dispose();
+			this.unsubscribeForegroundActivity?.();
+			this.unsubscribeForegroundActivity = undefined;
+			if (this.unsubscribe) {
+				this.unsubscribe();
+			}
+			if (this.unsubscribeExtensionsChanged) {
+				this.unsubscribeExtensionsChanged();
+			}
+		} catch (error: unknown) {
+			failures.push(error);
 		}
-		if (this.loadingAnimation) {
-			this.loadingAnimation.stop();
-			this.loadingAnimation = undefined;
+		try {
+			if (this.isInitialized) {
+				this.ui.stop();
+				this.isInitialized = false;
+			}
+		} catch (error: unknown) {
+			failures.push(error);
 		}
-		this.authDialogs.cancelActiveDialog();
-		this.extensionUiHost.clearHostWidgets();
-		this.extensionUiHost.resetExtensionUI();
-		this.overlayHost.unmount();
-		this.activityLane?.dispose();
-		this.footer.dispose();
-		this.footerDataProvider.dispose();
-		this.unsubscribeForegroundActivity?.();
-		this.unsubscribeForegroundActivity = undefined;
-		if (this.unsubscribe) {
-			this.unsubscribe();
+		// The terminal is restored (or its restore failed and nothing more can be done for it): the held warnings are written now.
+		try {
+			this.options.terminalWarnings?.release();
+		} catch (error: unknown) {
+			failures.push(error);
 		}
-		if (this.unsubscribeExtensionsChanged) {
-			this.unsubscribeExtensionsChanged();
+		if (failures.length === 1) throw failures[0];
+		if (failures.length > 1) {
+			throw new AggregateError(
+				failures,
+				failures[0] instanceof Error ? failures[0].message : "The interactive stop failed.",
+			);
 		}
-		if (this.isInitialized) {
-			this.ui.stop();
-			this.isInitialized = false;
-		}
-		// The terminal is restored: the warnings held for the TUI can be written now.
-		this.options.terminalWarnings?.release();
 	}
 }

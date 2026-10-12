@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { createEmptyUsage } from "@caupulican/pi-ai";
@@ -34,7 +33,6 @@ import { readWorkerMailboxRecord, workerMailboxPath } from "../src/core/delegati
 import { parseLocalWorkerProcessOwnerId } from "../src/core/delegation/worker-process-owner.ts";
 import { WorkerRecoveryCoordinator } from "../src/core/delegation/worker-recovery-coordinator.ts";
 import { WORKER_TERMINAL_OUTPUT_INLINE_BYTES } from "../src/core/delegation/worker-terminal-output-artifact.ts";
-import type { ExtensionFactory } from "../src/core/extensions/types.ts";
 import { buildObjectiveRoutePrompt } from "../src/core/goals/goal-continuation-prompt.ts";
 import { getLatestGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import {
@@ -68,7 +66,6 @@ import { getDirectoryResourceProfileInfo } from "../src/core/settings/settings-r
 import type { Settings } from "../src/core/settings/settings-schema.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../src/core/system-one/tool-names.ts";
 import type { ExecutionState } from "../src/core/system-one/types.ts";
-import { TerminalWarnings } from "../src/core/terminal-warnings.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, readOptionalToolIntent } from "../src/core/tool-applicability-gate.ts";
 import { createAskQuestionToolDefinition } from "../src/core/tools/ask-question.ts";
 import { createBashToolDefinition } from "../src/core/tools/bash.ts";
@@ -77,26 +74,23 @@ import { routeShellContract } from "../src/core/tools/shell-contract-router.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 import { isRecordObject } from "../src/core/util/value-guards.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
-import { SignalLifecycle } from "../src/modes/interactive/signal-lifecycle.ts";
-import { type RpcModeIo, runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
-import type { TerminationSignalHandler } from "../src/modes/termination-signals.ts";
 import type { ScriptedReply, ScriptedRequest, ScriptStep } from "./fixtures/harness/scripted-provider.ts";
-import {
-	type Barrier,
-	calls,
-	createBarrier,
-	fail,
-	HARNESS_PROVIDER,
-	text,
-} from "./fixtures/harness/scripted-provider.ts";
+import { calls, createBarrier, fail, HARNESS_PROVIDER, text } from "./fixtures/harness/scripted-provider.ts";
 import {
 	HARNESS_PROJECT_CWD,
-	type HarnessTrace,
 	type HarnessWorld,
 	type HarnessWorldOptions,
 	harnessPath,
+	holdAssistantMessageEnd,
+	holdCompactionSummary,
 	projectPath,
+	RPC_CLOSING_WARNING,
+	RPC_LATE_WARNING,
 	runHarnessWorld,
+	runRpcHost,
+	runSignalShutdown,
+	SIGNAL_CLOSING_WARNING,
+	SIGNAL_RESUME_COMMAND,
 	type SystemOneDecodedRequest,
 	settlementState,
 	type WorkerProjectClaims,
@@ -8211,6 +8205,27 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				"Shutdown failed: dispose failed (cleanup a; cleanup b)\n",
 			]);
 			expect(signalDisposeFailure.exits, "a failing dispose exits 1").toEqual([1]);
+			// A disposal that fails with an aggregate AND another cleanup step failing: the report expands the nested aggregate too, so
+			// none of the inner causes is lost behind the outer message.
+			const signalNestedFailure = await runSignalShutdown({
+				fromSignal: true,
+				dispose: async () => {
+					throw new AggregateError([new Error("cleanup a"), "cleanup b"], "dispose failed");
+				},
+				drainInput: async () => {
+					throw new Error("drain failed");
+				},
+			});
+			expect(
+				signalNestedFailure.log,
+				"a failing nested disposal and a failing drain still stop the terminal",
+			).toEqual(["dispose", "drain", "stop"]);
+			expect(
+				signalNestedFailure.stderr,
+				"the report lists the nested disposal causes and the drain failure",
+			).toEqual(["Shutdown failed: dispose failed (dispose failed (cleanup a; cleanup b); drain failed)\n"]);
+			expect(signalNestedFailure.exits, "a nested failure exits 1").toEqual([1]);
+			expect(signalNestedFailure.stdout, "a nested failure writes no resume line").toEqual([]);
 			const signalDrainFailure = await runSignalShutdown({
 				fromSignal: true,
 				drainInput: async () => {
@@ -8371,11 +8386,6 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				"queued control: the owner input is admitted behind the run",
 				qlSession.followUp(QUEUED_CONTROL_WORDS),
 			);
-			if (world.systemOne.enabled) {
-				world.systemOne.enterPhase("queued-control-delivery", {
-					carries_0: { kind: "noul", probability: 0.02 },
-				});
-			}
 			const qlMark = world.warnings.length;
 			qlHold.release();
 			const qlOutcome = await withDeadline(
@@ -8463,274 +8473,37 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			expect(rpcInputEndFails.stderr, "a failing shutdown when the input ends reports every cause").toEqual([
 				"RPC shutdown failed: dispose failed (cleanup a; cleanup b)\n",
 			]);
+			// The output stream fails (a client that went away): the host disposes in order and exits 1, and the closing warning the dispose
+			// raises goes to the terminal's sink, not to the dead stream. Before this, the output guard ended the process at once.
+			const rpcOutputFailure = await runRpcHost(world, trace, {
+				trigger: "output-failure",
+				disposeFails: false,
+				flushNeverResolves: false,
+			});
+			expect(rpcOutputFailure.exits, "an output failure shuts the host down in order and exits 1").toEqual([1]);
+			expect(rpcOutputFailure.stderr, "a clean dispose after an output failure writes no failure line").toEqual([]);
+			expect(rpcOutputFailure.flushRequests, "a dead output stream is not flushed").toBe(0);
+			expect(
+				rpcOutputFailure.sinkWarnings,
+				"the closing warning reaches the terminal sink, then the late one",
+			).toEqual([RPC_CLOSING_WARNING, RPC_LATE_WARNING]);
+			expect(
+				rpcOutputFailure.lines.filter((line) => line.message === RPC_CLOSING_WARNING),
+				"the closing warning is not written to the dead stream",
+			).toEqual([]);
+			const rpcOutputFailureFails = await runRpcHost(world, trace, {
+				trigger: "output-failure",
+				disposeFails: true,
+				flushNeverResolves: false,
+			});
+			expect(rpcOutputFailureFails.exits, "an output failure with a failing dispose exits 1").toEqual([1]);
+			expect(rpcOutputFailureFails.stderr, "the failing dispose is reported after an output failure").toEqual([
+				"RPC shutdown failed: dispose failed (cleanup a; cleanup b)\n",
+			]);
 			trace.mark("root", "rpc.shutdown");
 		},
 	);
 }, 300_000);
-
-/**
- * An extension that holds the summary it returns from `session_before_compact` until `hold` is released. `reached` is released when the
- * compaction reaches the handler, so the scenario can quit while the compaction is still in its handler.
- */
-function holdCompactionSummary(hold: Barrier, reached: Barrier): ExtensionFactory {
-	return (pi) => {
-		pi.on("session_before_compact", async (event) => {
-			reached.release();
-			await hold.promise;
-			return {
-				compaction: {
-					summary: "The held summary.",
-					firstKeptEntryId: event.preparation.firstKeptEntryId,
-					tokensBefore: event.preparation.tokensBefore,
-				},
-			};
-		});
-	};
-}
-
-/**
- * An extension that holds the run at the assistant's message end until `hold` is released. `reached` is released when the assistant's
- * message reaches the handler; the user's own message end passes straight through.
- */
-function holdAssistantMessageEnd(hold: Barrier, reached: Barrier): ExtensionFactory {
-	return (pi) => {
-		pi.on("message_end", async (event) => {
-			if (event.message.role !== "assistant") return;
-			reached.release();
-			await hold.promise;
-		});
-	};
-}
-
-/** The closing warning the signal witness's dispose hands to the terminal. Plain text: no control characters. */
-const SIGNAL_CLOSING_WARNING = "Signal witness: a closing warning the held terminal keeps until stop.";
-/** The resume command the quit path prints once every cleanup step succeeded. */
-const SIGNAL_RESUME_COMMAND = "pi --session signal-witness";
-
-/**
- * One shutdown of an interactive host with its process effects injected. The dispose hands one closing warning to a held
- * `TerminalWarnings`, whose sink records what the terminal releases. `writesBeforeStop` counts the sink writes made before `stop()`
- * releases the terminal, and `stop` (when given) fails after that release.
- */
-async function runSignalShutdown(script: {
-	readonly fromSignal: boolean;
-	readonly dispose?: () => Promise<void>;
-	readonly drainInput?: () => Promise<void>;
-	readonly stop?: () => void;
-	readonly resumeCommand?: string;
-}): Promise<{
-	readonly log: readonly string[];
-	readonly writesBeforeStop: number;
-	readonly warnings: readonly string[];
-	readonly stdout: readonly string[];
-	readonly stderr: readonly string[];
-	readonly exits: readonly number[];
-}> {
-	const log: string[] = [];
-	const warnings: string[] = [];
-	const stdout: string[] = [];
-	const stderr: string[] = [];
-	const exits: number[] = [];
-	let sinkWrites = 0;
-	const terminal = new TerminalWarnings((released) => {
-		sinkWrites++;
-		warnings.push(...released);
-	});
-	terminal.hold();
-	let writesBeforeStop = -1;
-	const lifecycle = new SignalLifecycle(
-		{
-			runtimeHost: {
-				dispose: async () => {
-					log.push("dispose");
-					terminal.write([SIGNAL_CLOSING_WARNING]);
-					await script.dispose?.();
-				},
-			},
-			ui: {
-				start: () => {},
-				stop: () => {},
-				requestRender: () => {},
-				terminal: {
-					drainInput: async () => {
-						log.push("drain");
-						await script.drainInput?.();
-					},
-				},
-			},
-			isShutdownRequested: () => false,
-			stop: () => {
-				log.push("stop");
-				writesBeforeStop = sinkWrites;
-				terminal.release();
-				script.stop?.();
-			},
-			formatResumeCommand: () => script.resumeCommand,
-			showStatus: () => {},
-			showError: () => {},
-		},
-		{
-			exit: (code) => {
-				exits.push(code);
-			},
-			stderr: (text) => {
-				stderr.push(text);
-			},
-			stdout: (text) => {
-				stdout.push(text);
-			},
-		},
-	);
-	await lifecycle.shutdown({ fromSignal: script.fromSignal });
-	return { log, writesBeforeStop, warnings, stdout, stderr, exits };
-}
-
-/** Closing warning the RPC witness's dispose writes while the stream is open: it must reach the stream as a warning event. */
-const RPC_CLOSING_WARNING = "RPC witness: a closing warning the open stream delivers as a warning event.";
-/** A warning written after the host released its stream: it must reach the terminal's sink, not the stream. */
-const RPC_LATE_WARNING = "RPC witness: a warning after the stream was released.";
-
-/** What one RPC host run reported: its stream lines, its failure stream, its exit statuses and the terminal's sink after release. */
-interface RpcHostRun {
-	readonly lines: readonly Record<string, unknown>[];
-	readonly stderr: readonly string[];
-	readonly exits: readonly number[];
-	readonly sinkWarnings: readonly string[];
-	readonly flushRequests: number;
-	readonly elapsedMs: number;
-	readonly startupErrors: readonly unknown[];
-}
-
-/**
- * One RPC host on a real runtime of the world, with its process effects injected. The host answers a scripted `get_state` command, then
- * shuts down through its injected termination handler (SIGTERM) or by its input ending. The runtime's dispose is wrapped: the real dispose
- * runs first, then the dispose writes one closing warning to the open stream and fails with two causes when `disposeFails` is set.
- */
-async function runRpcHost(
-	world: HarnessWorld,
-	trace: HarnessTrace,
-	script: {
-		readonly trigger: "sigterm" | "stdin-end";
-		readonly disposeFails: boolean;
-		readonly flushNeverResolves: boolean;
-	},
-): Promise<RpcHostRun> {
-	const sinkWarnings: string[] = [];
-	const terminal = new TerminalWarnings((released) => {
-		sinkWarnings.push(...released);
-	});
-	const runtime = await createAgentSessionRuntime(
-		async ({ cwd, agentDir, sessionManager }) => {
-			const root = await world.createRootSession("root", {
-				agentDir,
-				sessionManager,
-				settings: { memorySystem: undefined },
-			});
-			return {
-				session: root.session,
-				sessionManager: root.sessionManager,
-				getExtensionRunner: root.getExtensionRunner,
-				extensionsResult: root.extensionsResult,
-				services: {
-					cwd,
-					agentDir,
-					authStorage: world.authStorage,
-					settingsManager: root.settingsManager,
-					modelRegistry: world.modelRegistry,
-					resourceLoader: root.session.resourceLoader,
-					diagnostics: [],
-				},
-				diagnostics: [],
-			};
-		},
-		{
-			cwd: HARNESS_PROJECT_CWD,
-			agentDir: world.agentDir,
-			sessionManager: world.createSessionManager(),
-			onTerminalWarnings: (warnings) => terminal.write(warnings),
-		},
-	);
-	const realDispose = runtime.dispose.bind(runtime);
-	runtime.dispose = async () => {
-		await realDispose();
-		terminal.write([RPC_CLOSING_WARNING]);
-		if (script.disposeFails) {
-			throw new AggregateError([new Error("cleanup a"), new Error("cleanup b")], "dispose failed");
-		}
-	};
-
-	const stdin = new PassThrough();
-	const lines: Record<string, unknown>[] = [];
-	const stderr: string[] = [];
-	const exits: number[] = [];
-	const startupErrors: unknown[] = [];
-	const signals: TerminationSignalHandler[] = [];
-	const exited = createBarrier();
-	let arrival = createBarrier();
-	let flushRequests = 0;
-	const io: RpcModeIo = {
-		stdin,
-		environment: {},
-		takeOverStdout: () => {},
-		writeStdout: (text) => {
-			for (const line of text.split("\n")) {
-				if (line.length > 0) lines.push(JSON.parse(line) as Record<string, unknown>);
-			}
-			const arrived = arrival;
-			arrival = createBarrier();
-			arrived.release();
-		},
-		flushStdout: () => {
-			flushRequests++;
-			return script.flushNeverResolves ? new Promise<void>(() => {}) : Promise.resolve();
-		},
-		waitForStdoutBackpressure: async () => {},
-		stderr: (text) => {
-			stderr.push(text);
-		},
-		exit: (code) => {
-			exits.push(code);
-			exited.release();
-		},
-		onTerminationSignal: (handler) => {
-			signals.push(handler);
-			return () => {};
-		},
-	};
-	// The host never resolves; a startup failure is recorded instead of surfacing as an unhandled rejection.
-	void runRpcMode(runtime, terminal, io).catch((error: unknown) => {
-		startupErrors.push(error);
-	});
-
-	// Waits for an output line that satisfies `match`, whether it was written before or after the call.
-	const awaitLine = async (match: (line: Record<string, unknown>) => boolean): Promise<Record<string, unknown>> => {
-		while (true) {
-			const found = lines.find(match);
-			if (found) return found;
-			await arrival.promise;
-		}
-	};
-	stdin.write(`${JSON.stringify({ id: "rpc-state", type: "get_state" })}\n`);
-	await withDeadline(
-		trace,
-		"rpc: the host answers the scripted get_state command",
-		awaitLine((line) => line.id === "rpc-state"),
-	);
-
-	const started = Date.now();
-	if (script.trigger === "sigterm") {
-		const onSignal = signals[0];
-		if (onSignal === undefined) throw new Error("the rpc host registered no termination handler");
-		onSignal(143, "SIGTERM");
-	} else {
-		stdin.end();
-	}
-	await withDeadline(trace, "rpc: the host exits after its shutdown", exited.promise);
-	const elapsedMs = Date.now() - started;
-	// Release: the stream is detached once the host has exited, so a later warning reaches the terminal's sink.
-	terminal.write([RPC_LATE_WARNING]);
-	return { lines, stderr, exits, sinkWarnings, flushRequests, elapsedMs, startupErrors };
-}
 
 /** Text of every `delegate` tool result the session recorded, in order (structured, not line-prefix matched). */
 function delegateResultTexts(session: AgentSession): string[] {

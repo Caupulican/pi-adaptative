@@ -17,6 +17,28 @@ export function neutralizeControls(message: string): string {
 	return shown;
 }
 
+const CAUSE_MAX_DEPTH = 4;
+const CAUSE_MAX_LISTED = 8;
+const CAUSE_MAX_CHARS = 2_000;
+
+/**
+ * One line naming a failure and every cause under it: an aggregate error lists its causes recursively (to {@link CAUSE_MAX_DEPTH}
+ * levels, {@link CAUSE_MAX_LISTED} per level, {@link CAUSE_MAX_CHARS} in all, with what is cut named by an elision mark and a
+ * count). Used where a host reports a shutdown that failed in several steps.
+ */
+export function describeCause(cause: unknown): string {
+	const describe = (value: unknown, depth: number): string => {
+		if (!(value instanceof AggregateError)) return value instanceof Error ? value.message : String(value);
+		if (depth >= CAUSE_MAX_DEPTH) return `${value.message} (${value.errors.length} more causes)`;
+		const listed = value.errors.slice(0, CAUSE_MAX_LISTED).map((inner) => describe(inner, depth + 1));
+		const omitted = value.errors.length - listed.length;
+		if (omitted > 0) listed.push(`${omitted} more causes`);
+		return `${value.message} (${listed.join("; ")})`;
+	};
+	const text = describe(cause, 0);
+	return text.length <= CAUSE_MAX_CHARS ? text : `${text.slice(0, CAUSE_MAX_CHARS - 1)}…`;
+}
+
 /** The default route: stderr, one line per warning, control characters escaped (see neutralizeControls). */
 export function writeTerminalWarnings(warnings: readonly string[]): void {
 	for (const message of warnings) process.stderr.write(`${neutralizeControls(message)}\n`);

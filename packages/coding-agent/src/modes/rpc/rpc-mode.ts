@@ -23,11 +23,12 @@ import type {
 import type { HumanInputPresentationResult } from "../../core/human-input.ts";
 import {
 	flushRawStdout,
+	setRawStdoutFailureHandler,
 	takeOverStdout,
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
-import { neutralizeControls, type TerminalWarnings } from "../../core/terminal-warnings.ts";
+import { describeCause, neutralizeControls, type TerminalWarnings } from "../../core/terminal-warnings.ts";
 import { type Theme, theme } from "../../presentation/theme-model.ts";
 import { projectSessionEventForJson } from "../json-event-projection.ts";
 import { registerTerminationSignalHandlers, type TerminationSignalHandler } from "../termination-signals.ts";
@@ -65,6 +66,8 @@ export interface RpcModeIo {
 	stderr(text: string): void;
 	exit(code: number): void;
 	onTerminationSignal(handler: TerminationSignalHandler): () => void;
+	/** Told when the output stream fails (a client that went away); returns the unregistration. */
+	onOutputFailure(handler: (error: unknown) => void): () => void;
 }
 
 /** The runtime members the RPC host uses; a real `AgentSessionRuntime` satisfies it. */
@@ -95,6 +98,7 @@ function processRpcIo(): RpcModeIo {
 		},
 		exit: (code) => process.exit(code),
 		onTerminationSignal: (handler) => registerTerminationSignalHandlers(handler),
+		onOutputFailure: (handler) => setRawStdoutFailureHandler(handler),
 	};
 }
 
@@ -461,6 +465,16 @@ export async function runRpcMode(
 	const cleanupSignalHandlers = io.onTerminationSignal((exitCode, signal) => {
 		void shutdown(exitCode, signal);
 	});
+	// A client that went away: the host shuts down in order (dispose, closing warnings to stderr) and exits 1, instead of the output
+	// guard ending the process before the dispose and with the warnings lost.
+	let outputFailed = false;
+	const unregisterOutputFailure = io.onOutputFailure(() => {
+		if (shuttingDown) return;
+		outputFailed = true;
+		// The stream is gone: warnings from here on go to the terminal's own sink (stderr), not to the dead stream.
+		terminalWarnings.release();
+		void shutdown(1);
+	});
 
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse | undefined> => {
@@ -818,6 +832,7 @@ export async function runRpcMode(
 		}
 		pendingExtensionRequests.clear();
 		cleanupSignalHandlers();
+		unregisterOutputFailure();
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		// Every step runs and every cause is kept: a failed dispose and a failed flush are both reported, and the held warnings are
@@ -833,7 +848,9 @@ export async function runRpcMode(
 			io.stdin.pause();
 			// A client that stopped reading must not hold a SIGTERM exit forever, but the closing warnings the dispose queued still get
 			// a short window to reach it; a normal shutdown waits for the flush to finish.
-			if (signal === "SIGTERM") {
+			if (outputFailed) {
+				// The output stream is dead: there is nothing to flush to, and the closing warnings go to stderr at the release below.
+			} else if (signal === "SIGTERM") {
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				try {
 					await Promise.race([
@@ -857,13 +874,7 @@ export async function runRpcMode(
 		if (failures.length > 0) {
 			// Every cause is reported, and the process still exits: a throw here would leave an RPC host with its signal handlers already
 			// removed and its stdin detached, or crash it with the wrong status.
-			const describe = (cause: unknown): string =>
-				cause instanceof AggregateError
-					? `${cause.message} (${cause.errors.map(describe).join("; ")})`
-					: cause instanceof Error
-						? cause.message
-						: String(cause);
-			const detail = failures.map(describe).join("; ");
+			const detail = failures.map(describeCause).join("; ");
 			io.stderr(`${neutralizeControls(`RPC shutdown failed: ${detail}`)}\n`);
 			io.exit(exitCode === 0 ? 1 : exitCode);
 			return;

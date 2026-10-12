@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { PassThrough } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
+import { createAgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import type { WorkerWriteReservationLease } from "../../../src/core/delegation/worker-write-reservation.ts";
 import type { ExecResult } from "../../../src/core/exec.ts";
@@ -16,11 +17,15 @@ import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
 import { type CreateAgentSessionResult, createAgentSession } from "../../../src/core/sdk.ts";
 import type { Settings } from "../../../src/core/settings/settings-schema.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
+import { TerminalWarnings } from "../../../src/core/terminal-warnings.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "../../../src/core/tool-applicability-gate.ts";
 import type { ToolDef } from "../../../src/core/tools/index.ts";
 import { SessionManager } from "../../../src/kernel/session/session-manager.ts";
+import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
+import { type RpcModeIo, runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
+import type { TerminationSignalHandler } from "../../../src/modes/termination-signals.ts";
 import { ScriptedHumanInput } from "./scripted-human-input.ts";
-import { HARNESS_API, HARNESS_PROVIDER, ScriptedProvider } from "./scripted-provider.ts";
+import { type Barrier, createBarrier, HARNESS_API, HARNESS_PROVIDER, ScriptedProvider } from "./scripted-provider.ts";
 import { ScriptedWindowsShellProcesses } from "./scripted-windows-shell.ts";
 import { EffectGuard, VirtualFileSystem } from "./virtual-io.ts";
 import { VirtualProcessTable } from "./virtual-process-table.ts";
@@ -2555,4 +2560,280 @@ export class HarnessWorld {
 		if (failures.length > 1)
 			throw new AggregateError(failures, "Harness journey failed and cleanup reported evidence");
 	}
+}
+
+/**
+ * An extension that holds the summary it returns from `session_before_compact` until `hold` is released. `reached` is released when the
+ * compaction reaches the handler, so the scenario can quit while the compaction is still in its handler.
+ */
+export function holdCompactionSummary(hold: Barrier, reached: Barrier): ExtensionFactory {
+	return (pi) => {
+		pi.on("session_before_compact", async (event) => {
+			reached.release();
+			await hold.promise;
+			return {
+				compaction: {
+					summary: "The held summary.",
+					firstKeptEntryId: event.preparation.firstKeptEntryId,
+					tokensBefore: event.preparation.tokensBefore,
+				},
+			};
+		});
+	};
+}
+
+/**
+ * An extension that holds the run at the assistant's message end until `hold` is released. `reached` is released when the assistant's
+ * message reaches the handler; the user's own message end passes straight through.
+ */
+export function holdAssistantMessageEnd(hold: Barrier, reached: Barrier): ExtensionFactory {
+	return (pi) => {
+		pi.on("message_end", async (event) => {
+			if (event.message.role !== "assistant") return;
+			reached.release();
+			await hold.promise;
+		});
+	};
+}
+
+/** The closing warning the signal witness's dispose hands to the terminal. Plain text: no control characters. */
+export const SIGNAL_CLOSING_WARNING = "Signal witness: a closing warning the held terminal keeps until stop.";
+/** The resume command the quit path prints once every cleanup step succeeded. */
+export const SIGNAL_RESUME_COMMAND = "pi --session signal-witness";
+
+/**
+ * One shutdown of an interactive host with its process effects injected. The dispose hands one closing warning to a held
+ * `TerminalWarnings`, whose sink records what the terminal releases. `writesBeforeStop` counts the sink writes made before `stop()`
+ * releases the terminal, and `stop` (when given) fails after that release.
+ */
+export async function runSignalShutdown(script: {
+	readonly fromSignal: boolean;
+	readonly dispose?: () => Promise<void>;
+	readonly drainInput?: () => Promise<void>;
+	readonly stop?: () => void;
+	readonly resumeCommand?: string;
+}): Promise<{
+	readonly log: readonly string[];
+	readonly writesBeforeStop: number;
+	readonly warnings: readonly string[];
+	readonly stdout: readonly string[];
+	readonly stderr: readonly string[];
+	readonly exits: readonly number[];
+}> {
+	const log: string[] = [];
+	const warnings: string[] = [];
+	const stdout: string[] = [];
+	const stderr: string[] = [];
+	const exits: number[] = [];
+	let sinkWrites = 0;
+	const terminal = new TerminalWarnings((released) => {
+		sinkWrites++;
+		warnings.push(...released);
+	});
+	terminal.hold();
+	let writesBeforeStop = -1;
+	const lifecycle = new SignalLifecycle(
+		{
+			runtimeHost: {
+				dispose: async () => {
+					log.push("dispose");
+					terminal.write([SIGNAL_CLOSING_WARNING]);
+					await script.dispose?.();
+				},
+			},
+			ui: {
+				start: () => {},
+				stop: () => {},
+				requestRender: () => {},
+				terminal: {
+					drainInput: async () => {
+						log.push("drain");
+						await script.drainInput?.();
+					},
+				},
+			},
+			isShutdownRequested: () => false,
+			stop: () => {
+				log.push("stop");
+				writesBeforeStop = sinkWrites;
+				terminal.release();
+				script.stop?.();
+			},
+			formatResumeCommand: () => script.resumeCommand,
+			showStatus: () => {},
+			showError: () => {},
+		},
+		{
+			exit: (code) => {
+				exits.push(code);
+			},
+			stderr: (text) => {
+				stderr.push(text);
+			},
+			stdout: (text) => {
+				stdout.push(text);
+			},
+		},
+	);
+	await lifecycle.shutdown({ fromSignal: script.fromSignal });
+	return { log, writesBeforeStop, warnings, stdout, stderr, exits };
+}
+
+/** Closing warning the RPC witness's dispose writes while the stream is open: it must reach the stream as a warning event. */
+export const RPC_CLOSING_WARNING = "RPC witness: a closing warning the open stream delivers as a warning event.";
+/** A warning written after the host released its stream: it must reach the terminal's sink, not the stream. */
+export const RPC_LATE_WARNING = "RPC witness: a warning after the stream was released.";
+
+/** What one RPC host run reported: its stream lines, its failure stream, its exit statuses and the terminal's sink after release. */
+interface RpcHostRun {
+	readonly lines: readonly Record<string, unknown>[];
+	readonly stderr: readonly string[];
+	readonly exits: readonly number[];
+	readonly sinkWarnings: readonly string[];
+	readonly flushRequests: number;
+	readonly elapsedMs: number;
+	readonly startupErrors: readonly unknown[];
+}
+
+/**
+ * One RPC host on a real runtime of the world, with its process effects injected. The host answers a scripted `get_state` command, then
+ * shuts down through its injected termination handler (SIGTERM) or by its input ending. The runtime's dispose is wrapped: the real dispose
+ * runs first, then the dispose writes one closing warning to the open stream and fails with two causes when `disposeFails` is set.
+ */
+export async function runRpcHost(
+	world: HarnessWorld,
+	trace: HarnessTrace,
+	script: {
+		readonly trigger: "sigterm" | "stdin-end" | "output-failure";
+		readonly disposeFails: boolean;
+		readonly flushNeverResolves: boolean;
+	},
+): Promise<RpcHostRun> {
+	const sinkWarnings: string[] = [];
+	const terminal = new TerminalWarnings((released) => {
+		sinkWarnings.push(...released);
+	});
+	const runtime = await createAgentSessionRuntime(
+		async ({ cwd, agentDir, sessionManager }) => {
+			const root = await world.createRootSession("root", {
+				agentDir,
+				sessionManager,
+				settings: { memorySystem: undefined },
+			});
+			return {
+				session: root.session,
+				sessionManager: root.sessionManager,
+				getExtensionRunner: root.getExtensionRunner,
+				extensionsResult: root.extensionsResult,
+				services: {
+					cwd,
+					agentDir,
+					authStorage: world.authStorage,
+					settingsManager: root.settingsManager,
+					modelRegistry: world.modelRegistry,
+					resourceLoader: root.session.resourceLoader,
+					diagnostics: [],
+				},
+				diagnostics: [],
+			};
+		},
+		{
+			cwd: HARNESS_PROJECT_CWD,
+			agentDir: world.agentDir,
+			sessionManager: world.createSessionManager(),
+			onTerminalWarnings: (warnings) => terminal.write(warnings),
+		},
+	);
+	const realDispose = runtime.dispose.bind(runtime);
+	runtime.dispose = async () => {
+		await realDispose();
+		terminal.write([RPC_CLOSING_WARNING]);
+		if (script.disposeFails) {
+			throw new AggregateError([new Error("cleanup a"), new Error("cleanup b")], "dispose failed");
+		}
+	};
+
+	const stdin = new PassThrough();
+	const lines: Record<string, unknown>[] = [];
+	const stderr: string[] = [];
+	const exits: number[] = [];
+	const startupErrors: unknown[] = [];
+	const signals: TerminationSignalHandler[] = [];
+	const outputFailureHandlers: Array<(error: unknown) => void> = [];
+	const exited = createBarrier();
+	let arrival = createBarrier();
+	let flushRequests = 0;
+	const io: RpcModeIo = {
+		stdin,
+		environment: {},
+		takeOverStdout: () => {},
+		writeStdout: (text) => {
+			for (const line of text.split("\n")) {
+				if (line.length > 0) lines.push(JSON.parse(line) as Record<string, unknown>);
+			}
+			const arrived = arrival;
+			arrival = createBarrier();
+			arrived.release();
+		},
+		flushStdout: () => {
+			flushRequests++;
+			return script.flushNeverResolves ? new Promise<void>(() => {}) : Promise.resolve();
+		},
+		waitForStdoutBackpressure: async () => {},
+		stderr: (text) => {
+			stderr.push(text);
+		},
+		exit: (code) => {
+			exits.push(code);
+			exited.release();
+		},
+		onTerminationSignal: (handler) => {
+			signals.push(handler);
+			return () => {};
+		},
+		onOutputFailure: (handler) => {
+			outputFailureHandlers.push(handler);
+			return () => {
+				const index = outputFailureHandlers.indexOf(handler);
+				if (index >= 0) outputFailureHandlers.splice(index, 1);
+			};
+		},
+	};
+	// The host never resolves; a startup failure is recorded instead of surfacing as an unhandled rejection.
+	void runRpcMode(runtime, terminal, io).catch((error: unknown) => {
+		startupErrors.push(error);
+	});
+
+	// Waits for an output line that satisfies `match`, whether it was written before or after the call.
+	const awaitLine = async (match: (line: Record<string, unknown>) => boolean): Promise<Record<string, unknown>> => {
+		while (true) {
+			const found = lines.find(match);
+			if (found) return found;
+			await arrival.promise;
+		}
+	};
+	stdin.write(`${JSON.stringify({ id: "rpc-state", type: "get_state" })}\n`);
+	await withDeadline(
+		trace,
+		"rpc: the host answers the scripted get_state command",
+		awaitLine((line) => line.id === "rpc-state"),
+	);
+
+	const started = Date.now();
+	if (script.trigger === "sigterm") {
+		const onSignal = signals[0];
+		if (onSignal === undefined) throw new Error("the rpc host registered no termination handler");
+		onSignal(143, "SIGTERM");
+	} else if (script.trigger === "output-failure") {
+		const onFailure = outputFailureHandlers[0];
+		if (onFailure === undefined) throw new Error("the rpc host registered no output failure handler");
+		onFailure(new Error("stdout write failed"));
+	} else {
+		stdin.end();
+	}
+	await withDeadline(trace, "rpc: the host exits after its shutdown", exited.promise);
+	const elapsedMs = Date.now() - started;
+	// Release: the stream is detached once the host has exited, so a later warning reaches the terminal's sink.
+	terminal.write([RPC_LATE_WARNING]);
+	return { lines, stderr, exits, sinkWarnings, flushRequests, elapsedMs, startupErrors };
 }

@@ -14,7 +14,7 @@
 import type { TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
-import { neutralizeControls } from "../../core/terminal-warnings.ts";
+import { describeCause, neutralizeControls } from "../../core/terminal-warnings.ts";
 import { disposeUnclaimedCliPowerShellWarmStart } from "../../core/tools/early-powershell-session.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 
@@ -89,13 +89,7 @@ export class SignalLifecycle {
 		try {
 			await this.runShutdown(options);
 		} catch (error: unknown) {
-			const cause =
-				error instanceof AggregateError
-					? `${error.message} (${error.errors.map((inner) => (inner instanceof Error ? inner.message : String(inner))).join("; ")})`
-					: error instanceof Error
-						? error.message
-						: String(error);
-			this.io.stderr(`${neutralizeControls(`Shutdown failed: ${cause}`)}\n`);
+			this.io.stderr(`${neutralizeControls(`Shutdown failed: ${describeCause(error)}`)}\n`);
 			this.io.exit(1);
 		}
 	}
