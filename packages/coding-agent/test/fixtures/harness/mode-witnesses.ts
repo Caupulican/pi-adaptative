@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { type Api, type Model, OPENAI_CODEX_CLIENT_VERSION } from "@caupulican/pi-ai";
 import { getKeybindings, setKeybindings, type Terminal } from "@caupulican/pi-tui";
 import * as undici from "undici";
@@ -837,6 +838,127 @@ function dispatcherCloseCount(
 	).length;
 }
 
+/** The pinned Bun compatibility port supplies descriptors, while the same production owner still retires real pools. */
+async function verifyNativeHttpDispatcherLifetime(world: HarnessWorld): Promise<void> {
+	await disposeHttpDispatcher();
+	const foreign = new undici.Agent();
+	const takeover = new undici.Agent();
+	const foreignClose = vi.spyOn(foreign, "close");
+	const takeoverClose = vi.spyOn(takeover, "close");
+	// Bun 1.4.2's DispatcherBase and EnvHttpProxyAgent add no members to EventEmitter.
+	const descriptor = () => new EventEmitter() as unknown as undici.EnvHttpProxyAgent;
+	let next = descriptor();
+	let current: undici.Dispatcher = foreign;
+	const constructorSpy = vi.spyOn(undici, "EnvHttpProxyAgent").mockImplementation(function (this: object) {
+		return next;
+	});
+	const readGlobal = vi.spyOn(undici, "getGlobalDispatcher").mockImplementation(() => current);
+	const writeGlobal = vi.spyOn(undici, "setGlobalDispatcher").mockImplementation((dispatcher) => {
+		current = dispatcher;
+	});
+	const install = vi.spyOn(undici, "install").mockImplementation(() => {});
+	const failures: unknown[] = [];
+	try {
+		const writesBefore = writeGlobal.mock.calls.length;
+		expect(() => configureHttpDispatcher(100, "node"), "Node refuses a dispatcher without a pool close").toThrow(
+			"HTTP dispatcher has no supported resource lifetime for this runtime",
+		);
+		expect(writeGlobal.mock.calls.length, "invalid Node lifetime reaches no global installation").toBe(writesBefore);
+		expect(current, "invalid Node lifetime preserves the caller").toBe(foreign);
+
+		configureHttpDispatcher(100, "bun");
+		const first = current;
+		expect(first, "the native compatibility constructor is actually installed").toBe(next);
+		expect(first.close, "the installed native descriptor has the compiled runtime's absent close").toBeUndefined();
+		next = descriptor();
+		configureHttpDispatcher(200, "bun");
+		expect(current, "native reconfiguration installs the next distinct descriptor").toBe(next);
+		expect(current, "native supersession replaces its previous descriptor").not.toBe(first);
+		await withDeadline(world.trace, "native descriptor supersession settles", awaitHttpDispatcherRetirements());
+		await withDeadline(world.trace, "native final disposal settles", disposeHttpDispatcher());
+		expect(current, "native final disposal restores the foreign predecessor").toBe(foreign);
+		expect(install.mock.calls, "native descriptors never install npm Undici's fetch").toHaveLength(0);
+
+		next = descriptor();
+		configureHttpDispatcher(100, "bun");
+		undici.setGlobalDispatcher(takeover);
+		await withDeadline(world.trace, "native caller takeover disposal settles", disposeHttpDispatcher());
+		expect(current, "native disposal preserves a later caller takeover").toBe(takeover);
+		expect(foreignClose.mock.calls, "native ownership never closes the foreign predecessor").toHaveLength(0);
+		expect(takeoverClose.mock.calls, "native ownership never closes the caller replacement").toHaveLength(0);
+
+		for (const [member, value] of [
+			["close", null],
+			["dispatch", () => {}],
+			["destroy", 1],
+		] as const) {
+			next = descriptor();
+			Object.defineProperty(next, member, { value, configurable: true });
+			const writes = writeGlobal.mock.calls.length;
+			expect(
+				() => configureHttpDispatcher(100, "bun"),
+				`Bun rejects a malformed or resource-capable ${member} member without a close contract`,
+			).toThrow("HTTP dispatcher has no supported resource lifetime for this runtime");
+			expect(writeGlobal.mock.calls.length, "unsupported native shapes never change the global owner").toBe(writes);
+			expect(current, "unsupported native shapes keep the caller's dispatcher").toBe(takeover);
+		}
+
+		let pooledCloses = 0;
+		next = descriptor();
+		Object.defineProperty(next, "close", {
+			value: async () => {
+				pooledCloses++;
+			},
+			configurable: true,
+		});
+		configureHttpDispatcher(100, "bun");
+		await withDeadline(world.trace, "Bun resource-capable close is mandatory", disposeHttpDispatcher());
+		expect(pooledCloses, "an available pool close is called even in the Bun runtime strategy").toBe(1);
+		expect(install.mock.calls, "the resource-capable strategy retains the install path").toHaveLength(1);
+
+		next = descriptor();
+		Object.defineProperty(next, "close", { value: async () => {}, configurable: true });
+		configureHttpDispatcher(100, "bun");
+		Reflect.deleteProperty(next, "close");
+		let lostClose: unknown;
+		try {
+			await disposeHttpDispatcher();
+		} catch (error) {
+			lostClose = error;
+		}
+		expect(lostClose, "a pooled dispatcher cannot be reclassified as native after losing close").toBeInstanceOf(
+			AggregateError,
+		);
+		expect(
+			lostClose instanceof AggregateError &&
+				lostClose.errors.length === 1 &&
+				lostClose.errors[0] instanceof TypeError,
+			"the original missing-close cause survives the final cleanup report",
+		).toBe(true);
+		await awaitHttpDispatcherRetirements();
+		expect(constructorSpy.mock.calls.length, "all native and negative-control constructors were reached").toBe(9);
+	} catch (error) {
+		failures.push(error);
+	} finally {
+		try {
+			await disposeHttpDispatcher();
+		} catch (error) {
+			failures.push(error);
+		} finally {
+			for (const spy of [constructorSpy, readGlobal, writeGlobal, install, foreignClose, takeoverClose])
+				spy.mockRestore();
+			for (const dispatcher of [foreign, takeover]) {
+				try {
+					await dispatcher.close();
+				} catch (error) {
+					failures.push(error);
+				}
+			}
+		}
+	}
+	if (failures.length > 0) throw new AggregateError(failures, "Native HTTP lifetime witness and cleanup failed");
+}
+
 interface HttpInstallRun {
 	/** Production replaced the global fetch during the mode's init, and every replacement was undici's own fetch. */
 	readonly replacementsAreUndiciFetch: boolean;
@@ -1614,6 +1736,7 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 		httpInstall.nativeCallbackDelegationPreserved,
 		"each observed promise close reaches the real native callback overload exactly once",
 	).toBe(true);
+	await verifyNativeHttpDispatcherLifetime(world);
 
 	const failing = await runInteractiveStop(world, true);
 	expect(failing.failures, "both failing teardown steps are rethrown together, in order").toEqual([

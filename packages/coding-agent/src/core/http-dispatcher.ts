@@ -1,4 +1,5 @@
 import * as undici from "undici";
+import { isBunRuntime } from "../config.ts";
 import { DEFAULT_STREAM_IDLE, type StreamIdleOptions } from "../kernel/reliability/index.ts";
 
 // The default stays strictly greater than the largest default stall-watchdog quiet bound (the
@@ -97,8 +98,15 @@ export function constrainStreamIdleToHttpTimeout(
 	};
 }
 
-/** The dispatcher this module last installed: the only one it closes when superseded. */
-let ownedDispatcher: undici.EnvHttpProxyAgent | undefined;
+export type HttpDispatcherRuntime = "node" | "bun";
+
+interface OwnedHttpDispatcher {
+	dispatcher: undici.EnvHttpProxyAgent;
+	lifetime: "pooled" | "bun-native";
+}
+
+/** The dispatcher this module last installed, with its transport lifetime captured before installation. */
+let ownedDispatcher: OwnedHttpDispatcher | undefined;
 let previousDispatcher: undici.Dispatcher | undefined;
 const retirements = new Set<Promise<void>>();
 const retirementFailures: unknown[] = [];
@@ -120,10 +128,10 @@ export const HTTP_INSTALL_GLOBAL_NAMES = [
 	"EventSource",
 ] as const;
 
-function retireHttpDispatcher(dispatcher: undici.EnvHttpProxyAgent): void {
+function retireHttpDispatcher(owner: OwnedHttpDispatcher): void {
 	// Handle rejection immediately, but retain the original cause for the host's cleanup boundary.
 	const retirement = Promise.resolve()
-		.then(() => dispatcher.close())
+		.then(() => (owner.lifetime === "pooled" ? owner.dispatcher.close() : undefined))
 		.then(
 			() => {
 				retirements.delete(retirement);
@@ -155,9 +163,10 @@ export async function disposeHttpDispatcher(timeoutMs: number = HTTP_DISPOSAL_GR
 			`HTTP disposal timeout must be positive and at most ${MAX_TIMER_DELAY_MS}ms: ${String(timeoutMs)}`,
 		);
 	}
-	const dispatcher = ownedDispatcher;
+	const owner = ownedDispatcher;
+	const dispatcher = owner?.dispatcher;
 	const failures: unknown[] = [];
-	if (dispatcher) {
+	if (owner && dispatcher) {
 		// A caller-installed replacement owns the global now; never replace or close it.
 		if (undici.getGlobalDispatcher() === dispatcher && previousDispatcher) {
 			try {
@@ -168,7 +177,7 @@ export async function disposeHttpDispatcher(timeoutMs: number = HTTP_DISPOSAL_GR
 		}
 		ownedDispatcher = undefined;
 		previousDispatcher = undefined;
-		retireHttpDispatcher(dispatcher);
+		retireHttpDispatcher(owner);
 	}
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
@@ -196,7 +205,10 @@ export async function disposeHttpDispatcher(timeoutMs: number = HTTP_DISPOSAL_GR
 	if (failures.length > 0) throw new AggregateError(failures, "HTTP dispatcher disposal failed");
 }
 
-export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TIMEOUT_MS): void {
+export function configureHttpDispatcher(
+	timeoutMs: number = DEFAULT_HTTP_IDLE_TIMEOUT_MS,
+	runtime: HttpDispatcherRuntime = isBunRuntime ? "bun" : "node",
+): void {
 	const normalizedTimeoutMs = parseHttpIdleTimeoutMs(timeoutMs);
 	if (normalizedTimeoutMs === undefined) {
 		throw new Error(`Invalid HTTP idle timeout: ${String(timeoutMs)}`);
@@ -209,6 +221,24 @@ export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TI
 		// every origin on a tunnel as before (hand-ported from upstream 23842b1e6, #8134).
 		proxyTunnel: true,
 	});
+	let lifetime: OwnedHttpDispatcher["lifetime"];
+	if (typeof dispatcher.close === "function") {
+		lifetime = "pooled";
+	} else if (
+		runtime === "bun" &&
+		dispatcher.close === undefined &&
+		dispatcher.dispatch === undefined &&
+		dispatcher.destroy === undefined
+	) {
+		// Bun 1.4.2's built-in undici EnvHttpProxyAgent/DispatcherBase only extend EventEmitter:
+		// src/js/thirdparty/undici.js has no pool, request dispatch or resource-close operation.
+		// Retiring that native descriptor drops configuration ownership; it does not close Bun.fetch's
+		// process transport or establish npm Undici timeout/proxy-option support on that transport.
+		lifetime = "bun-native";
+	} else {
+		throw new Error("HTTP dispatcher has no supported resource lifetime for this runtime");
+	}
+	const owner: OwnedHttpDispatcher = { dispatcher, lifetime };
 	const previousGlobal = undici.getGlobalDispatcher();
 	const previousGlobals = HTTP_INSTALL_GLOBAL_NAMES.map((name) => ({
 		name,
@@ -219,9 +249,9 @@ export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TI
 		// Keep fetch and the dispatcher on the same undici implementation. Node 26.0's
 		// bundled fetch can otherwise consume compressed responses through npm undici's
 		// dispatcher without decompressing them, causing response.json() failures.
-		undici.install?.();
+		if (lifetime === "pooled") undici.install?.();
 	} catch (error) {
-		retireHttpDispatcher(dispatcher);
+		retireHttpDispatcher(owner);
 		const failures: unknown[] = [error];
 		if (undici.getGlobalDispatcher() === dispatcher) {
 			try {
@@ -241,11 +271,11 @@ export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TI
 		if (failures.length > 1) throw new AggregateError(failures, "HTTP dispatcher installation and rollback failed");
 		throw error;
 	}
-	// Each call replaces the process dispatcher, so the one this module installed before it is closed once superseded: a graceful close
-	// lets its in-flight requests finish and releases its idle connections, instead of leaving one pool per settings application.
+	// Retire only this owner's previous binding: pooled transports finish requests and release idle
+	// connections, while native descriptors release their configuration ownership without inventing a pool.
 	const superseded = ownedDispatcher;
 	// A caller takeover starts a new ownership interval, even if our former pool still needs retirement.
-	if (previousGlobal !== superseded) previousDispatcher = previousGlobal;
-	ownedDispatcher = dispatcher;
+	if (previousGlobal !== superseded?.dispatcher) previousDispatcher = previousGlobal;
+	ownedDispatcher = owner;
 	if (superseded) retireHttpDispatcher(superseded);
 }
