@@ -36,7 +36,7 @@ function plainText(value: unknown): string {
 /** One failure's own text without its causes, never throwing: an Error's message, else the value's plain text. */
 export function causeHeadline(cause: unknown): string {
 	try {
-		return cause instanceof Error ? cause.message : plainText(cause);
+		return cause instanceof Error ? plainText(cause.message) : plainText(cause);
 	} catch {
 		return plainText(cause);
 	}
@@ -53,12 +53,13 @@ const CAUSE_MAX_CHARS = 2_000;
  */
 export function describeCause(cause: unknown): string {
 	const describeChecked = (value: unknown, depth: number): string => {
-		if (!(value instanceof AggregateError)) return value instanceof Error ? value.message : plainText(value);
-		if (depth >= CAUSE_MAX_DEPTH) return `${value.message} (${value.errors.length} more causes)`;
+		if (!(value instanceof AggregateError))
+			return value instanceof Error ? plainText(value.message) : plainText(value);
+		if (depth >= CAUSE_MAX_DEPTH) return `${plainText(value.message)} (${value.errors.length} more causes)`;
 		const listed = value.errors.slice(0, CAUSE_MAX_LISTED).map((inner) => describe(inner, depth + 1));
 		const omitted = value.errors.length - listed.length;
 		if (omitted > 0) listed.push(`${omitted} more causes`);
-		return `${value.message} (${listed.join("; ")})`;
+		return `${plainText(value.message)} (${listed.join("; ")})`;
 	};
 	// A value whose class check or message read throws (a hostile proxy or getter) is named by its plain text instead.
 	const describe = (value: unknown, depth: number): string => {

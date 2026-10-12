@@ -312,6 +312,8 @@ interface InteractiveHarness {
 	readonly hold: Barrier;
 	/** Released at the first exit. */
 	readonly exited: Barrier;
+	/** Released at the exit with status 0: a forced exit or a crash ran first, and the held quit then finished by itself. */
+	readonly quitFinished: Barrier;
 }
 
 /** A real InteractiveMode on a recording input-only terminal, its runtime from the world, and every listener it arms recorded. */
@@ -331,6 +333,7 @@ async function createInteractiveHarness(
 	const reached = createBarrier();
 	const hold = createBarrier();
 	const exited = createBarrier();
+	const quitFinished = createBarrier();
 	const terminal: Terminal = {
 		inputOnly: true,
 		columns: 80,
@@ -412,6 +415,7 @@ async function createInteractiveHarness(
 			exit: (code) => {
 				exits.push(code);
 				exited.release();
+				if (code === 0) quitFinished.release();
 			},
 			stderr: (text) => {
 				stderr.push(text);
@@ -448,6 +452,7 @@ async function createInteractiveHarness(
 		reached,
 		hold,
 		exited,
+		quitFinished,
 	};
 }
 
@@ -591,6 +596,8 @@ interface QuitSecondSignalRun {
 	readonly terminalStopsBefore: number;
 	readonly terminalStopsAfter: number;
 	readonly stderr: readonly string[];
+	/** The exit codes after a Ctrl+C (SIGINT) delivered to the same held quit. */
+	readonly exitsAtInterrupt: readonly number[];
 }
 
 /**
@@ -612,16 +619,19 @@ async function runQuitSecondSignal(world: HarnessWorld): Promise<QuitSecondSigna
 		const armedSignalsAtDispose = armedNames(harness.installs).filter(isSignalName);
 		const terminalStopsBefore = harness.calls.filter((call) => call === "terminal.stop").length;
 		(armedListener(harness.installs, "SIGTERM") as () => void)();
+		const exitsAtSecondSignal = [...harness.exits];
+		(armedListener(harness.installs, "SIGINT") as () => void)();
 		return {
 			armedSignalsAtDispose,
-			exitsAtSecondSignal: [...harness.exits],
+			exitsAtSecondSignal,
 			terminalStopsBefore,
 			terminalStopsAfter: harness.calls.filter((call) => call === "terminal.stop").length,
 			stderr: [...harness.stderr],
+			exitsAtInterrupt: [...harness.exits],
 		};
 	} finally {
 		harness.hold.release();
-		await withDeadline(world.trace, "quit second signal: the quit finishes", harness.exited.promise, 60_000);
+		await withDeadline(world.trace, "quit second signal: the quit finishes", harness.quitFinished.promise, 60_000);
 	}
 }
 
@@ -660,7 +670,7 @@ async function runQuitCrashAfterStop(world: HarnessWorld): Promise<QuitCrashRun>
 	} finally {
 		// The injected exit returned, so the held quit is still unfinished: release it and join it after the observation above was copied.
 		harness.hold.release();
-		await withDeadline(world.trace, "quit crash: the quit finishes", harness.exited.promise, 60_000);
+		await withDeadline(world.trace, "quit crash: the quit finishes", harness.quitFinished.promise, 60_000);
 	}
 }
 
@@ -998,11 +1008,14 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	expect(
 		secondSignal.armedSignalsAtDispose,
 		"the quit's held dispose keeps the second-signal listeners armed",
-	).toEqual(signalsArmed);
+	).toEqual([...signalsArmed, "SIGINT"]);
 	expect(secondSignal.exitsAtSecondSignal, "a second SIGTERM during the quit exits with 128 + 15").toEqual([143]);
 	expect(secondSignal.terminalStopsAfter, "the forced exit does not stop the terminal a second time").toBe(
 		secondSignal.terminalStopsBefore,
 	);
+	expect(secondSignal.exitsAtInterrupt, "Ctrl+C (SIGINT) during the quit's dispose exits with 128 + 2").toEqual([
+		143, 130,
+	]);
 	expect(secondSignal.stderr, "a second SIGTERM during the quit writes nothing to stderr").toEqual([]);
 
 	const crashAfterStop = await runQuitCrashAfterStop(world);

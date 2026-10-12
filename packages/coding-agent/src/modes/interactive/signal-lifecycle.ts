@@ -29,6 +29,14 @@ function isDeadTerminalError(error: unknown): boolean {
 }
 
 /** The termination signals the lifecycle listens to. SIGHUP is not delivered on Windows. */
+/** The value as an Error for a report that reads a stack: a non-Error, or a value whose class check throws, is wrapped by its cause text. */
+function asError(value: unknown): Error {
+	try {
+		if (value instanceof Error) return value;
+	} catch {}
+	return new Error(describeCause(value));
+}
+
 function terminationSignals(): NodeJS.Signals[] {
 	return process.platform === "win32" ? ["SIGTERM"] : ["SIGTERM", "SIGHUP"];
 }
@@ -174,7 +182,8 @@ export class SignalLifecycle {
 		// Drain any in-flight Kitty key release events before stopping.
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
 		// A failing drain or stop must not skip the runtime dispose, and the resume command is written only when every step succeeded.
-		const forceRemovals = this.installForceListeners();
+		// The terminal is restored before the dispose, so Ctrl+C there arrives as SIGINT: it is forced like the termination signals.
+		const forceRemovals = this.installForceListeners([...terminationSignals(), "SIGINT"]);
 		try {
 			await this.runCleanupSteps([
 				() => disposeUnclaimedCliPowerShellWarmStart(),
@@ -225,8 +234,8 @@ export class SignalLifecycle {
 	 * without these Node ends the process by default: the terminal stays raw, the held warnings go unwritten and the tracked children live
 	 * on. The forced exit kills the tracked children, restores the terminal and releases the warnings, then exits with the signal's status.
 	 */
-	private installForceListeners(): Array<() => void> {
-		return terminationSignals().map((signal) =>
+	private installForceListeners(signals: readonly NodeJS.Signals[] = terminationSignals()): Array<() => void> {
+		return signals.map((signal) =>
 			this.io.prependListener(signal, () => {
 				killTrackedDetachedChildren();
 				try {
@@ -236,7 +245,7 @@ export class SignalLifecycle {
 						`${neutralizeControls(`Stop failed during forced shutdown: ${describeCause(stopError)}`)}\n`,
 					);
 				}
-				this.io.exit(signal === "SIGHUP" ? 129 : 143);
+				this.io.exit(signal === "SIGHUP" ? 129 : signal === "SIGINT" ? 130 : 143);
 			}),
 		);
 	}
@@ -265,7 +274,7 @@ export class SignalLifecycle {
 	 * time one occurs.
 	 */
 	reportUnhandledRejection(reason: unknown): void {
-		const error = reason instanceof Error ? reason : new Error(describeCause(reason));
+		const error = asError(reason);
 		const detail = (error.stack ?? error.message).slice(0, MAX_REJECTION_DETAIL);
 		if (this.shuttingDown) {
 			// The UI is going away: the rejection is reported on stderr, escaped, and the shutdown keeps running.
@@ -288,7 +297,7 @@ export class SignalLifecycle {
 	 */
 	uncaughtCrash(thrown: unknown): void {
 		// Any value can reach uncaughtException (`throw "x"`, `throw null`), and the report reads a stack: a non-Error is wrapped first.
-		const error = thrown instanceof Error ? thrown : new Error(describeCause(thrown));
+		const error = asError(thrown);
 		if (this.shuttingDown) {
 			// A throw during an orderly shutdown is still a crash: report it (the orderly path is already unwinding), restore the
 			// terminal if it is not restored yet, and end the process.
@@ -299,6 +308,9 @@ export class SignalLifecycle {
 			} catch (stopError: unknown) {
 				this.io.stderr(`${neutralizeControls(`Stop failed during shutdown: ${describeCause(stopError)}`)}\n`);
 			}
+			try {
+				killTrackedDetachedChildren();
+			} catch {}
 			const detail = (error.stack ?? error.message).slice(0, MAX_REJECTION_DETAIL);
 			this.io.stderr(`${neutralizeControls(`pi exiting due to uncaughtException during shutdown: ${detail}`)}\n`);
 			this.io.exit(1);

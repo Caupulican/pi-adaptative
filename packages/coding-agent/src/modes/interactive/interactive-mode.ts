@@ -27,7 +27,7 @@ import {
 	Text,
 	TUI,
 } from "@caupulican/pi-tui";
-import { APP_NAME, APP_TITLE, getAgentDir, VERSION } from "../../config.ts";
+import { APP_NAME, APP_TITLE, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type { EdgeClass } from "../../core/autonomy/edge-policy.ts";
@@ -1249,7 +1249,7 @@ export class InteractiveMode {
 		this.clipboardImageStore =
 			this.sessionManager.isPersisted() || clipboardImageDirectory
 				? new SessionImageStore({
-						agentDir: getAgentDir(),
+						agentDir: this.runtimeHost.services.agentDir,
 						cwd: this.sessionManager.getCwd(),
 						sessionId: this.sessionManager.getSessionId(),
 						directory: clipboardImageDirectory,
