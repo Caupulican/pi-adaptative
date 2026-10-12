@@ -96,7 +96,7 @@ export class SignalLifecycle {
 	private signalListenerCleanup: Array<() => void> = [];
 	private readonly port: SignalLifecyclePort;
 	private readonly io: SignalLifecycleIo;
-	/** Set when the port's stop has been started, so a forced exit during the cleanup never runs it a second time. */
+	/** Set when the port's stop has been started, so no path (cleanup, forced exit, crash during shutdown) runs it a second time. */
 	private stopStarted = false;
 
 	constructor(port: SignalLifecyclePort, io: Partial<SignalLifecycleIo> = {}) {
@@ -215,8 +215,8 @@ export class SignalLifecycle {
 		}
 		if (failures.length === 1) throw failures[0];
 		if (failures.length > 1) {
-			const [first] = failures;
-			throw new AggregateError(failures, first instanceof Error ? first.message : String(first));
+			// The message is the bounded cause projection: a first failure whose own conversion throws must not replace the collected causes.
+			throw new AggregateError(failures, describeCause(failures[0]));
 		}
 	}
 
@@ -295,7 +295,7 @@ export class SignalLifecycle {
 			// port.stop() restores the terminal AND releases the closing warnings held for it (ui.stop alone would drop them).
 			// A stop failure is reported too: it is the only record of a teardown that did not finish.
 			try {
-				this.port.stop();
+				this.stopOnce();
 			} catch (stopError: unknown) {
 				this.io.stderr(`${neutralizeControls(`Stop failed during shutdown: ${describeCause(stopError)}`)}\n`);
 			}

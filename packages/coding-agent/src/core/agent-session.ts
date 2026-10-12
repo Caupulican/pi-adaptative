@@ -4874,13 +4874,20 @@ export class AgentSession {
 	dispose(): void {
 		if (this._disposed) return;
 		this._disposed = true;
-		this._compaction.cancelIdlePreparation();
+		const { safely, track, trackRequired, finish } = createSessionShutdownTracker();
+		// The first releases are required ones: a failure in any of them is kept for `disposeAndWait()` and never skips the releases below.
+		trackRequired(async () => {
+			this._compaction.cancelIdlePreparation();
+		});
 		// Queued input not yet handed to the agent belongs to this session and is never handed on after it.
-		this._pendingQueue.close();
+		trackRequired(async () => {
+			this._pendingQueue.close();
+		});
 		// Every in-flight admission entry this session still owns is released; a sibling process
 		// would otherwise count it until the heartbeat went stale.
-		this._providerAdmissionLedger.releaseAll();
-		const { safely, track, trackRequired, finish } = createSessionShutdownTracker();
+		trackRequired(async () => {
+			this._providerAdmissionLedger.releaseAll();
+		});
 
 		safely(() => this._backgroundLanes.clearGoalAutoContinueTimer());
 		safely(() => this._backgroundLanes.clearResearchLaneTimer());

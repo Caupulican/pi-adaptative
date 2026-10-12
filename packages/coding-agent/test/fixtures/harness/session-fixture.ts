@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { PassThrough } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
+import { configFile } from "../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
 import {
 	countUniquePaidRows,
@@ -2221,6 +2222,20 @@ export class HarnessWorld {
 			 * fire only once the scenario binds the session (`bindExtensions`), as production modes do.
 			 */
 			readonly extensionFactories?: readonly ExtensionFactory[];
+			/**
+			 * This creation's closing sink in place of the world's warnings. `null` passes none, so a creation that fails after construction carries
+			 * its held closing warnings on the failure.
+			 */
+			readonly closingSink?: ((warnings: readonly string[]) => void) | null;
+			/**
+			 * Makes this creation's extension read (`resourceLoader.getExtensions()`, the SDK's last step before it returns) throw once the IO fault
+			 * named `afterFault` has fired, and counts the loader's disposal into `probe`. The fixture builds the loader the SDK would build itself.
+			 */
+			readonly extensionReadFailure?: {
+				readonly afterFault: string;
+				readonly message: string;
+				readonly probe: { loaderDisposals: number };
+			};
 		} = {},
 	): Promise<{
 		session: AgentSession;
@@ -2253,20 +2268,37 @@ export class HarnessWorld {
 		// A supplied loader is not reloaded by createAgentSession, and only reload() runs the extension factories: load them here,
 		// as the SDK does for the loader it builds itself. The session still has to be bound (bindExtensions) to emit session_start.
 		let extensionLoader: DefaultResourceLoader | undefined;
-		if (options.extensionFactories !== undefined) {
+		if (options.extensionFactories !== undefined || options.extensionReadFailure !== undefined) {
 			extensionLoader = new DefaultResourceLoader({
 				cwd: HARNESS_PROJECT_CWD,
 				agentDir,
 				settingsManager,
-				extensionFactories: [...options.extensionFactories],
+				extensionFactories: [...(options.extensionFactories ?? [])],
 			});
 			await extensionLoader.reload();
+		}
+		if (extensionLoader !== undefined && options.extensionReadFailure !== undefined) {
+			const failure = options.extensionReadFailure;
+			const readExtensions = extensionLoader.getExtensions.bind(extensionLoader);
+			extensionLoader.getExtensions = () => {
+				if (this.io.consumedFaults.includes(failure.afterFault)) throw new Error(failure.message);
+				return readExtensions();
+			};
+			const disposeLoader = extensionLoader.dispose.bind(extensionLoader);
+			extensionLoader.dispose = () => {
+				failure.probe.loaderDisposals++;
+				return disposeLoader();
+			};
 		}
 		const { session, getExtensionRunner, extensionsResult } = await createAgentSession({
 			cwd: HARNESS_PROJECT_CWD,
 			agentDir,
-			// Closing warnings (a session's terminal disclosures) reach the world's warnings, not the process's stderr.
-			onClosingWarnings: (warnings) => this.warnings.push(...warnings),
+			// Closing warnings (a session's terminal disclosures) reach the world's warnings, not the process's stderr, unless the creation
+			// supplies its own sink (`null`: none).
+			onClosingWarnings:
+				options.closingSink === undefined
+					? (warnings) => this.warnings.push(...warnings)
+					: (options.closingSink ?? undefined),
 			authStorage: this.authStorage,
 			modelRegistry: this.modelRegistry,
 			settingsManager,
@@ -3053,28 +3085,198 @@ export async function runDiscardThroughRuntime(world: HarnessWorld): Promise<Dis
 	};
 }
 
-/** The outcome of a session creation that fails after construction, beside the same creation without the failure. */
-export interface SdkConstructionFailureWitness {
-	/** The creation's failure as the caller receives it, or `created`. */
-	readonly failure: string;
-	/** The normal-order control's outcome: `created` once it disposes cleanly. */
-	readonly control: string;
-	/** Closing warnings that reached the world's sink during the failing creation. */
-	readonly warnings: readonly string[];
+/** A creation's failure as the caller receives it: the message, and the cause the SDK chained onto it when there is one. */
+export interface SdkFailureDescription {
+	readonly message: string;
+	readonly cause?: { readonly name: string; readonly message: string; readonly errors?: readonly string[] };
 }
 
-/** The objective-loop creation failure, its normal-order control, and no closing warning (none is held at this failure). */
+/** One creation the SDK constructs and then fails in its extension read, with a memory warning held on the constructed session. */
+export interface SdkConstructionFailureOutcome {
+	readonly failure: SdkFailureDescription;
+	/** Every closing sink call the SDK made, in order. */
+	readonly sinkCalls: readonly (readonly string[])[];
+	/** Disposals of the creation's resource loader: the failed session's disposal reached its resource release. */
+	readonly loaderDisposals: number;
+	/** The memory read that holds the warning fired, so the warning comes from this creation's own memory initialization. */
+	readonly memoryFaultFired: boolean;
+	/** Warnings that reached the world's own list: none, since every warning goes to the sink or rides the failure. */
+	readonly worldWarnings: readonly string[];
+}
+
+/** The SDK's closing-warning routing on a failed construction, beside the objective-loop binding error and its normal-order control. */
+export interface SdkConstructionFailureWitness {
+	/** The objective-loop creation: the binding error, and no held warning (the rejection precedes memory initialization). */
+	readonly objective: { readonly failure: string; readonly warnings: readonly string[] };
+	/** The held warning reaches a sink that accepts it: the failure is the extension read's own error. */
+	readonly drained: SdkConstructionFailureOutcome;
+	/** The sink refuses the warning: it rides the failure, and the sink's error joins the cleanup errors. */
+	readonly sinkRefused: SdkConstructionFailureOutcome;
+	/** No sink: the warning rides the failure, which keeps the extension read's error as its cause. */
+	readonly noSink: SdkConstructionFailureOutcome;
+	/** Normal order, same memory fault, no extension failure: created, the first subscriber takes the warning, the sink is never called. */
+	readonly control: {
+		readonly disposed: boolean;
+		readonly subscriberWarnings: readonly string[];
+		readonly sinkCalls: readonly (readonly string[])[];
+		readonly memoryFaultFired: boolean;
+	};
+}
+
+/** The extension read that the failed creations hit once memory has initialized. */
+const SDK_EXTENSION_READ_FAILURE = "SDK construction witness: the extension read fails after memory initialized.";
+/** The closing sink's own refusal in the sink-refused case. */
+const SDK_SINK_FAILURE = "SDK construction witness: the closing sink refuses the warnings.";
+
+/** The held warning the failing memory read produces: the provider diagnostic carries the error's name (memory-manager.ts invokeProvider). */
+const SDK_MEMORY_WARNING = "Memory subsystem init failed: Error";
+
+/** Each held-warning routing with the cause the SDK chained onto its failure, and the normal-order control (see {@link runSdkConstructionFailure}). */
 export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = {
-	failure: "objective_primary cannot start: missing required binding 'ObjectiveExecutionController'",
-	control: "created",
-	warnings: [],
+	objective: {
+		failure: "objective_primary cannot start: missing required binding 'ObjectiveExecutionController'",
+		warnings: [],
+	},
+	drained: {
+		failure: { message: SDK_EXTENSION_READ_FAILURE },
+		sinkCalls: [[SDK_MEMORY_WARNING]],
+		loaderDisposals: 1,
+		memoryFaultFired: true,
+		worldWarnings: [],
+	},
+	sinkRefused: {
+		failure: {
+			message: `${SDK_EXTENSION_READ_FAILURE} ${SDK_MEMORY_WARNING}`,
+			cause: {
+				name: "AggregateError",
+				message: `${SDK_EXTENSION_READ_FAILURE} (its cleanup also failed)`,
+				errors: [SDK_EXTENSION_READ_FAILURE, SDK_SINK_FAILURE],
+			},
+		},
+		sinkCalls: [[SDK_MEMORY_WARNING]],
+		loaderDisposals: 1,
+		memoryFaultFired: true,
+		worldWarnings: [],
+	},
+	noSink: {
+		failure: {
+			message: `${SDK_EXTENSION_READ_FAILURE} ${SDK_MEMORY_WARNING}`,
+			cause: { name: "Error", message: SDK_EXTENSION_READ_FAILURE },
+		},
+		sinkCalls: [],
+		loaderDisposals: 1,
+		memoryFaultFired: true,
+		worldWarnings: [],
+	},
+	control: {
+		disposed: true,
+		subscriberWarnings: [SDK_MEMORY_WARNING],
+		sinkCalls: [],
+		memoryFaultFired: true,
+	},
 };
 
+function failureText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function describeSdkFailure(error: unknown): SdkFailureDescription {
+	const cause = error instanceof Error ? error.cause : undefined;
+	if (cause === undefined) return { message: failureText(error) };
+	if (cause instanceof AggregateError) {
+		return {
+			message: failureText(error),
+			cause: { name: cause.name, message: cause.message, errors: cause.errors.map(failureText) },
+		};
+	}
+	return {
+		message: failureText(error),
+		cause: { name: cause instanceof Error ? cause.name : typeof cause, message: failureText(cause) },
+	};
+}
+
 /**
- * A creation that the SDK constructs and then rejects: the loop the owner selects needs an objective controller that System One-off
- * sessions never bind. The SDK disposes the constructed session and rethrows the failure itself.
+ * Arms the file-store read of the managed MEMORY.md, the first read of a creation's memory initialization. A read of a missing file fails
+ * before the IO fault is consulted, so the file is seeded empty for the read to reach the fault.
  */
-export async function runSdkConstructionFailure(world: HarnessWorld): Promise<SdkConstructionFailureWitness> {
+function armSdkMemoryReadFault(world: HarnessWorld, name: string): void {
+	const memoryFile = resolve(configFile(world.agentDir, "MEMORY.md"));
+	if (world.io.peekFile(memoryFile) === undefined) world.io.seed(memoryFile, "");
+	world.io.failNext({ name, kind: "read", code: "EIO", matches: (operation) => operation.path === memoryFile });
+}
+
+/**
+ * A creation the SDK constructs, then rejects at its extension read after memory initialized. The SDK disposes the constructed session and
+ * routes its held warning to the sink: `accepts` records it, `refuses` records it and throws, `none` passes no sink.
+ */
+async function failedSdkCreation(
+	world: HarnessWorld,
+	label: string,
+	closing: "accepts" | "refuses" | "none",
+): Promise<SdkConstructionFailureOutcome> {
+	const faultName = `sdk-construction-memory-read-${label}`;
+	armSdkMemoryReadFault(world, faultName);
+	const sinkCalls: string[][] = [];
+	const probe = { loaderDisposals: 0 };
+	const mark = world.warnings.length;
+	const outcome = await world
+		.createRootSession("root", {
+			systemOneEnabled: false,
+			closingSink:
+				closing === "none"
+					? null
+					: (warnings) => {
+							sinkCalls.push([...warnings]);
+							if (closing === "refuses") throw new Error(SDK_SINK_FAILURE);
+						},
+			extensionReadFailure: { afterFault: faultName, message: SDK_EXTENSION_READ_FAILURE, probe },
+		})
+		.then(
+			() => "created" as const,
+			(error: unknown) => error,
+		);
+	if (outcome === "created") throw new Error(`${label}: the creation was not refused by its extension read`);
+	return {
+		failure: describeSdkFailure(outcome),
+		sinkCalls,
+		loaderDisposals: probe.loaderDisposals,
+		memoryFaultFired: world.io.consumedFaults.includes(faultName),
+		worldWarnings: world.warnings.splice(mark),
+	};
+}
+
+/**
+ * Normal order: the same memory fault with no extension failure. The creation completes, the first subscriber takes the held warning, and
+ * disposal hands the closing sink nothing.
+ */
+async function controlSdkCreation(world: HarnessWorld): Promise<SdkConstructionFailureWitness["control"]> {
+	const faultName = "sdk-construction-memory-read-control";
+	armSdkMemoryReadFault(world, faultName);
+	const sinkCalls: string[][] = [];
+	const mark = world.warnings.length;
+	// The fixture-built loader (no factories) is the failing creations' loader without the extension read failure.
+	const created = await world.createRootSession("root", {
+		systemOneEnabled: false,
+		extensionFactories: [],
+		closingSink: (warnings) => {
+			sinkCalls.push([...warnings]);
+		},
+	});
+	const subscriberWarnings = world.warnings.splice(mark);
+	const disposal = await world.disposeSessionInBody(created.session);
+	return {
+		disposed: disposal === undefined,
+		subscriberWarnings,
+		sinkCalls,
+		memoryFaultFired: world.io.consumedFaults.includes(faultName),
+	};
+}
+
+/**
+ * A creation that the SDK constructs and then rejects: the loop the owner selects needs an objective controller that System One-off sessions
+ * never bind. The SDK disposes the constructed session and rethrows the failure itself.
+ */
+async function objectiveSdkCreation(world: HarnessWorld): Promise<SdkConstructionFailureWitness["objective"]> {
 	const mark = world.warnings.length;
 	const failure = await world
 		.createRootSession("root", {
@@ -3084,15 +3286,22 @@ export async function runSdkConstructionFailure(world: HarnessWorld): Promise<Sd
 		})
 		.then(
 			() => "created",
-			(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			(error: unknown) => failureText(error),
 		);
-	const warnings = world.warnings.slice(mark);
-	const created = await world.createRootSession("root", {
-		systemOneEnabled: false,
-		settings: { memorySystem: undefined },
-	});
-	const disposal = await world.disposeSessionInBody(created.session);
-	return { failure, control: disposal === undefined ? "created" : "disposal failed", warnings };
+	return { failure, warnings: world.warnings.splice(mark) };
+}
+
+/**
+ * The SDK's construction failures: the objective-loop binding error, then the extension read after memory initialization with its held memory
+ * warning routed three ways, and the normal-order control. Each creation consumes its own memory read fault.
+ */
+export async function runSdkConstructionFailure(world: HarnessWorld): Promise<SdkConstructionFailureWitness> {
+	const objective = await objectiveSdkCreation(world);
+	const drained = await failedSdkCreation(world, "drained", "accepts");
+	const sinkRefused = await failedSdkCreation(world, "sink-refused", "refuses");
+	const noSink = await failedSdkCreation(world, "no-sink", "none");
+	const control = await controlSdkCreation(world);
+	return { objective, drained, sinkRefused, noSink, control };
 }
 
 /**

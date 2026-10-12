@@ -17,12 +17,19 @@ export function neutralizeControls(message: string): string {
 	return shown;
 }
 
-/** A thrown value as text: a value whose own conversion throws (no usable `toString`) is named by its type instead. */
+/**
+ * A thrown value as text, never throwing: a value whose own conversion throws (no usable `toString`) is named by its object tag, and
+ * one whose tag also throws (a throwing `Symbol.toStringTag`) by its type.
+ */
 function plainText(value: unknown): string {
 	try {
 		return String(value);
 	} catch {
-		return Object.prototype.toString.call(value);
+		try {
+			return Object.prototype.toString.call(value);
+		} catch {
+			return `[${typeof value}]`;
+		}
 	}
 }
 
@@ -36,13 +43,21 @@ const CAUSE_MAX_CHARS = 2_000;
  * count). Used where a host reports a shutdown that failed in several steps.
  */
 export function describeCause(cause: unknown): string {
-	const describe = (value: unknown, depth: number): string => {
+	const describeChecked = (value: unknown, depth: number): string => {
 		if (!(value instanceof AggregateError)) return value instanceof Error ? value.message : plainText(value);
 		if (depth >= CAUSE_MAX_DEPTH) return `${value.message} (${value.errors.length} more causes)`;
 		const listed = value.errors.slice(0, CAUSE_MAX_LISTED).map((inner) => describe(inner, depth + 1));
 		const omitted = value.errors.length - listed.length;
 		if (omitted > 0) listed.push(`${omitted} more causes`);
 		return `${value.message} (${listed.join("; ")})`;
+	};
+	// A value whose class check or message read throws (a hostile proxy or getter) is named by its plain text instead.
+	const describe = (value: unknown, depth: number): string => {
+		try {
+			return describeChecked(value, depth);
+		} catch {
+			return plainText(value);
+		}
 	};
 	const text = describe(cause, 0);
 	return text.length <= CAUSE_MAX_CHARS ? text : `${text.slice(0, CAUSE_MAX_CHARS - 1)}…`;

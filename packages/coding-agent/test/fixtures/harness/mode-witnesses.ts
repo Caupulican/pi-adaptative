@@ -4,21 +4,29 @@ import { AgentSession } from "../../../src/core/agent-session.ts";
 import { type AgentSessionRuntime, createAgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
 import { FooterDataProvider } from "../../../src/core/footer-data-provider.ts";
+import { ModelAdaptationStore } from "../../../src/core/models/adaptation-store.ts";
 import { TerminalWarnings } from "../../../src/core/terminal-warnings.ts";
 import { FooterComponent } from "../../../src/modes/interactive/components/footer.ts";
 import { EditorOverlayHost } from "../../../src/modes/interactive/editor-overlay-host.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
 import { initTheme, stopThemeWatcher } from "../../../src/presentation/theme/theme.ts";
-import { type Barrier, createBarrier } from "./scripted-provider.ts";
+import { type Barrier, createBarrier, HARNESS_PROVIDER } from "./scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "./session-fixture.ts";
 
 const GUARD_CLOSING_WARNING = "Guard witness: a closing warning the held terminal keeps until stop.";
 const GUARD_STOP_FAILURE = "Guard witness: stop failed after the release.";
+const GUARD_DRAIN_FAILURE = "Guard witness: the terminal input drain failed.";
+/** The cause text of a value whose `toString` and `Symbol.toStringTag` both throw: plainText falls back to its typeof. */
+const UNCONVERTIBLE_CAUSE_TEXT = "[object]";
 const INTERACTIVE_STOP_WARNING = "Interactive stop witness: a closing warning the held terminal keeps until stop.";
 const INTERACTIVE_STOP_FAILURE = "Interactive stop witness: the terminal progress teardown failed.";
 const FOOTER_DATA_PROVIDER_FAILURE = "Interactive stop witness: the footer data provider teardown failed.";
 const CLOSING_GATE_CONTROL_REPLY = "The closing gate control reply.";
+/** Warning a run's preparation emits for a `text-protocol` verdict with no calibration on record, before any provider request. */
+const CALIBRATION_WARNING = `Text tool protocol for ${HARNESS_PROVIDER}/root has no valid calibration on record; falling back to native tool calls this turn. Run /toolprobe ${HARNESS_PROVIDER}/root to calibrate.`;
+/** The owner prompt of both calibration runs: the same text, so both classify identically before preparation reaches the warning. */
+const CALIBRATION_RUN_PROMPT = "Run the control.";
 const REJECTION_STACK = "Error: late rejection \u001b[2J at guard witness";
 const REJECTION_LINE = "Unhandled promise rejection during shutdown. Error: late rejection \\x1b[2J at guard witness\n";
 const CRASH_STACK = "Error: guard crash at guard witness";
@@ -51,6 +59,18 @@ function fixedError(stack: string): Error {
 	const error = new Error("guard witness");
 	error.stack = stack;
 	return error;
+}
+
+/** A thrown value whose conversion and tag both throw: the cause report must still name it, and must not throw while doing so. */
+function unconvertibleCause(): object {
+	return {
+		toString: () => {
+			throw new Error("Guard witness: toString throws.");
+		},
+		get [Symbol.toStringTag](): string {
+			throw new Error("Guard witness: Symbol.toStringTag throws.");
+		},
+	};
 }
 
 function messageOf(error: unknown): string {
@@ -89,7 +109,15 @@ interface GuardHost {
 	readonly hold: Barrier;
 }
 
-function createGuardHost(options: { readonly holdDispose: boolean; readonly stopFails: boolean }): GuardHost {
+interface GuardHostOptions {
+	readonly holdDispose: boolean;
+	readonly stopFails: boolean;
+	/** The runtime dispose rejects with this value after it has written its closing warning. */
+	readonly disposeFails?: { readonly thrown: unknown };
+	readonly drainFails?: boolean;
+}
+
+function createGuardHost(options: GuardHostOptions): GuardHost {
 	const installs: Install[] = [];
 	const log: string[] = [];
 	const warnings: string[] = [];
@@ -122,6 +150,7 @@ function createGuardHost(options: { readonly holdDispose: boolean; readonly stop
 					terminal.write([GUARD_CLOSING_WARNING]);
 					reached.release();
 					await hold.promise;
+					if (options.disposeFails) throw options.disposeFails.thrown;
 				},
 			},
 			ui: {
@@ -131,6 +160,7 @@ function createGuardHost(options: { readonly holdDispose: boolean; readonly stop
 				terminal: {
 					drainInput: async () => {
 						log.push("drain");
+						if (options.drainFails) throw new Error(GUARD_DRAIN_FAILURE);
 					},
 				},
 			},
@@ -244,6 +274,22 @@ async function runGuardSecondSignal(signal: NodeJS.Signals): Promise<GuardRun> {
 		await shutdown;
 		host.lifecycle.unregisterSignalHandlers();
 	}
+}
+
+/**
+ * Two cleanup steps of a signal shutdown fail: the runtime dispose rejects with an unconvertible value, then the terminal input drain
+ * rejects with an Error. Every step still runs, the stop releases the held warning, and the one line reports both causes before exit 1.
+ */
+async function runGuardTwoCauses(): Promise<GuardRun> {
+	const host = createGuardHost({
+		holdDispose: false,
+		stopFails: false,
+		disposeFails: { thrown: unconvertibleCause() },
+		drainFails: true,
+	});
+	host.lifecycle.registerSignalHandlers();
+	await host.lifecycle.shutdown({ fromSignal: true });
+	return guardRunOf(host);
 }
 
 interface InteractiveHarness {
@@ -579,6 +625,45 @@ async function runQuitSecondSignal(world: HarnessWorld): Promise<QuitSecondSigna
 	}
 }
 
+interface QuitCrashRun {
+	/** The terminal stops before and after the uncaught exception that lands while the held dispose waits. */
+	readonly terminalStopsBefore: number;
+	readonly terminalStopsAfter: number;
+	/** The exit codes the instant the crash has been reported, before the held quit resumes. */
+	readonly exitsAtCrash: readonly number[];
+	readonly stderr: readonly string[];
+}
+
+/**
+ * A quit whose runtime dispose is held after its stop already ran (the interactive order stops the terminal, then disposes), then an
+ * uncaught exception. The crash branch reports, exits 1 and does not stop the terminal again: stop-once covers this branch too.
+ */
+async function runQuitCrashAfterStop(world: HarnessWorld): Promise<QuitCrashRun> {
+	const capture: { shutdown?: () => void } = {};
+	const harness = await createInteractiveHarness(world, {
+		holdDispose: true,
+		extensionFactories: [captureShutdownContext(capture)],
+	});
+	await withDeadline(world.trace, "quit crash: the interactive mode starts", harness.mode.init());
+	if (!capture.shutdown) throw new Error("the quit crash witness: session_start never reached the extension context");
+	capture.shutdown();
+	try {
+		await withDeadline(world.trace, "quit crash: the runtime dispose is held", harness.reached.promise);
+		const terminalStopsBefore = harness.calls.filter((call) => call === "terminal.stop").length;
+		(armedListener(harness.installs, "uncaughtException") as (value: unknown) => void)(fixedError(CRASH_STACK));
+		return {
+			terminalStopsBefore,
+			terminalStopsAfter: harness.calls.filter((call) => call === "terminal.stop").length,
+			exitsAtCrash: [...harness.exits],
+			stderr: [...harness.stderr],
+		};
+	} finally {
+		// The injected exit returned, so the held quit is still unfinished: release it and join it after the observation above was copied.
+		harness.hold.release();
+		await withDeadline(world.trace, "quit crash: the quit finishes", harness.exited.promise, 60_000);
+	}
+}
+
 /** An extension that holds every run at `before_agent_start`: after the submission has its lease, before any provider request. */
 function holdBeforeAgentStart(hold: Barrier, reached: Barrier): ExtensionFactory {
 	return (pi) => {
@@ -595,6 +680,13 @@ interface ClosingGateStartRun {
 	readonly fileGrowthByRelease: string;
 	readonly startOutcome: string;
 	readonly controlCommitted: boolean;
+}
+
+/** What the file gained between two reads (empty when nothing was written), cut for evidence; a rewrite is marked instead. */
+function fileGrowthSince(before: string, after: string): string {
+	return after.startsWith(before)
+		? after.slice(before.length).slice(0, 600)
+		: `<the file was rewritten> ${after.slice(0, 300)}`;
 }
 
 /**
@@ -634,9 +726,7 @@ async function runClosingGateAtStart(world: HarnessWorld): Promise<ClosingGateSt
 	const startOutcome = await withDeadline(trace, "closing gate: the held start settles", start, 60_000);
 	const requestsAddedByRelease = world.provider.requests.length - requestsAtQuit;
 	const fileAfterRelease = world.io.peekFile(heldFile) ?? "";
-	const fileGrowthByRelease = fileAfterRelease.startsWith(fileAtQuit)
-		? fileAfterRelease.slice(fileAtQuit.length).slice(0, 600)
-		: `<the file was rewritten> ${fileAfterRelease.slice(0, 300)}`;
+	const fileGrowthByRelease = fileGrowthSince(fileAtQuit, fileAfterRelease);
 
 	// Normal order: the start is released before the quit, so the run reaches its provider and commits through the same owner.
 	const released = createBarrier();
@@ -661,6 +751,144 @@ async function runClosingGateAtStart(world: HarnessWorld): Promise<ClosingGateSt
 		startOutcome,
 		controlCommitted: (world.io.peekFile(controlFile) ?? "").includes(CLOSING_GATE_CONTROL_REPLY),
 	};
+}
+
+interface CalibrationGateRun {
+	/** The quit ran inside the calibration warning, which preparation emits before the run's provider request. */
+	readonly quitReached: boolean;
+	/** The run the quit landed in was admitted (one active run), and its owner was not yet shut down. */
+	readonly activeRunsAtQuit: number;
+	readonly shutdownBeforeQuit: boolean;
+	readonly shutdownAfterQuit: boolean;
+	readonly requestsAddedByQuit: number;
+	readonly messagesAddedByQuit: number;
+	readonly fileGrowthByQuit: string;
+	/** The warnings the quit's run emitted, claimed here and removed from the world's allowance check. */
+	readonly quitWarnings: readonly string[];
+	readonly startOutcome: string;
+	readonly disposal: string;
+	readonly controlRequestModels: readonly string[];
+	readonly controlWarnings: readonly string[];
+	readonly controlCommitted: boolean;
+}
+
+/**
+ * Seeds the production model-adaptation store with a `text-protocol` tool verdict that has no calibration, so the first run's preparation
+ * (`ToolProtocolController.ensureActiveModelProtocol`) reports `probe_calibration_missing`. The fresh `probedAt` keeps auto-probing off.
+ */
+function seedCalibrationMissing(agentDir: string): void {
+	ModelAdaptationStore.forAgentDir(agentDir).save(`${HARNESS_PROVIDER}/root`, {
+		rules: [],
+		teachStats: {},
+		toolProbe: { version: 1, status: "text-protocol", probedAt: new Date().toISOString() },
+	});
+}
+
+/**
+ * Quit from inside a run's preparation. The calibration warning is emitted synchronously by `prepareRun()`, after the run was admitted and
+ * before `runAgentExecution`'s closing gate (foreground-recovery-controller.ts, the first check after `prepareRun()`). The listener disposes
+ * the session at that point, so the gate is the first check that sees the quit: it returns before `agent.prompt()`, so no provider request
+ * is made and no message enters the agent. The control is the same setup with no quit: the run passes the gate and answers.
+ */
+async function runClosingGateAtCalibration(world: HarnessWorld): Promise<CalibrationGateRun> {
+	const { trace } = world;
+	// Its own agent directory: the seeded verdict must not reach the journey's later turns on the same model.
+	const agentDir = `${world.agentDir}-calibration-gate`;
+	seedCalibrationMissing(agentDir);
+	const mark = world.warnings.length;
+	const held = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		settings: { memorySystem: undefined },
+	});
+	const heldSession = held.session;
+	await heldSession.bindExtensions({ uiContext: world.humanInput.ui });
+	const heldFile = held.sessionManager.getSessionFile();
+	if (heldFile === undefined) throw new Error("the calibration gate owner has no file");
+	let quitReached = false;
+	let activeRunsAtQuit = 0;
+	let shutdownBeforeQuit = false;
+	let shutdownAfterQuit = false;
+	let requestsAtQuit = 0;
+	let messagesAtQuit = 0;
+	let fileAtQuit = "";
+	let quit: Promise<string> | undefined;
+	heldSession.subscribe((event) => {
+		if (quitReached || event.type !== "warning" || event.message !== CALIBRATION_WARNING) return;
+		quitReached = true;
+		const before = heldSession.getResourceSnapshot().foregroundRecovery;
+		activeRunsAtQuit = before.activeRuns;
+		shutdownBeforeQuit = before.shutdown;
+		requestsAtQuit = world.provider.requests.length;
+		messagesAtQuit = heldSession.state.messages.length;
+		fileAtQuit = world.io.peekFile(heldFile) ?? "";
+		// `disposeAndWait()` runs its shutdown synchronously before its first await, so the closing state is read right after the call.
+		quit = disposed(heldSession);
+		shutdownAfterQuit = heldSession.getResourceSnapshot().foregroundRecovery.shutdown;
+	});
+	const start = heldSession.prompt(CALIBRATION_RUN_PROMPT).then(
+		() => "resolved",
+		(error: unknown) => messageOf(error),
+	);
+	const startOutcome = await withDeadline(trace, "calibration gate: the held start settles", start, 60_000);
+	const disposal = await withDeadline(
+		trace,
+		"calibration gate: the quit completes",
+		quit ?? disposed(heldSession),
+		60_000,
+	);
+	// Claimed after the quit completes, so the disclosures the dispose itself writes are part of what is claimed.
+	const quitWarnings = world.warnings.splice(mark);
+	const requestsAddedByQuit = world.provider.requests.length - requestsAtQuit;
+	const messagesAddedByQuit = heldSession.state.messages.length - messagesAtQuit;
+	const fileGrowthByQuit = fileGrowthSince(fileAtQuit, world.io.peekFile(heldFile) ?? "");
+
+	// Normal order: the same setup with no quit. The run passes the gate, makes its one provider request on the root track and commits.
+	const control = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		settings: { memorySystem: undefined },
+	});
+	await control.session.bindExtensions({ uiContext: world.humanInput.ui });
+	const controlFile = control.sessionManager.getSessionFile();
+	if (controlFile === undefined) throw new Error("the calibration gate control owner has no file");
+	const controlMark = world.warnings.length;
+	const controlRequestMark = world.provider.requests.length;
+	world.provider.enqueue("root", {
+		name: "calibration-gate-control",
+		reply: { content: [{ type: "text", text: CLOSING_GATE_CONTROL_REPLY }] },
+	});
+	await withDeadline(
+		trace,
+		"calibration gate control: the run completes",
+		control.session.prompt(CALIBRATION_RUN_PROMPT),
+	);
+	const controlWarnings = world.warnings.splice(controlMark);
+	const controlRequestModels = world.provider.requests.slice(controlRequestMark).map((request) => request.model.id);
+	await world.disposeSessionInBody(control.session);
+	return {
+		quitReached,
+		activeRunsAtQuit,
+		shutdownBeforeQuit,
+		shutdownAfterQuit,
+		requestsAddedByQuit,
+		messagesAddedByQuit,
+		fileGrowthByQuit,
+		quitWarnings,
+		startOutcome,
+		disposal,
+		controlRequestModels,
+		controlWarnings,
+		controlCommitted: (world.io.peekFile(controlFile) ?? "").includes(CLOSING_GATE_CONTROL_REPLY),
+	};
+}
+
+/** Disposes a session and reports how it settled, so a failed quit is an observed outcome instead of an unhandled rejection. */
+function disposed(session: AgentSession): Promise<string> {
+	return session.disposeAndWait().then(
+		() => "disposed",
+		(error: unknown) => messageOf(error),
+	);
 }
 
 /**
@@ -747,6 +975,17 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 		expect(sighup.exits, "a second SIGHUP exits with 128 + 1").toEqual([129]);
 	}
 
+	const twoCauses = await runGuardTwoCauses();
+	expect(twoCauses.log, "every cleanup step runs after the first step fails").toEqual(shutdownLog);
+	expect(twoCauses.warnings, "the held warning is released by the stop after both failures").toEqual([
+		GUARD_CLOSING_WARNING,
+	]);
+	expect(
+		twoCauses.stderr,
+		"both causes share one line: the unconvertible first cause by its plain text, then the drain failure",
+	).toEqual([`Shutdown failed: ${UNCONVERTIBLE_CAUSE_TEXT} (${UNCONVERTIBLE_CAUSE_TEXT}; ${GUARD_DRAIN_FAILURE})\n`]);
+	expect(twoCauses.exits, "a failed signal shutdown exits 1").toEqual([1]);
+
 	const quit = await runQuitWithHeldDispose(world);
 	expect(quit.removedGuardsAtDispose, "the quit leaves the process guards armed through the held dispose").toEqual([]);
 	expect(quit.stderr, "a rejection during the quit's held dispose is reported escaped").toEqual([REJECTION_LINE]);
@@ -765,6 +1004,19 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 		secondSignal.terminalStopsBefore,
 	);
 	expect(secondSignal.stderr, "a second SIGTERM during the quit writes nothing to stderr").toEqual([]);
+
+	const crashAfterStop = await runQuitCrashAfterStop(world);
+	expect(
+		crashAfterStop.terminalStopsBefore,
+		"the interactive quit stops the terminal before its held dispose",
+	).toBeGreaterThan(0);
+	expect(crashAfterStop.terminalStopsAfter, "a crash after the stop does not stop the terminal a second time").toBe(
+		crashAfterStop.terminalStopsBefore,
+	);
+	expect(crashAfterStop.exitsAtCrash, "a crash during the held quit exits 1").toEqual([1]);
+	expect(crashAfterStop.stderr, "the crash is reported with its stack, and nothing else is written").toEqual([
+		CRASH_LINE,
+	]);
 
 	const standard = await runInteractiveStop(world, false);
 	expect(standard.failures, "a stop with nothing failing rethrows nothing").toEqual([]);
@@ -806,4 +1058,33 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	expect(gate.fileGrowthByRelease, "the file gains nothing after the release (any growth is printed here)").toBe("");
 	expect(gate.startOutcome, "the held prompt resolves after the release").toBe("resolved");
 	expect(gate.controlCommitted, "the control released before the quit commits its reply").toBe(true);
+
+	const calibration = await runClosingGateAtCalibration(world);
+	expect(calibration.quitReached, "the held run's calibration warning is reached and the quit starts there").toBe(
+		true,
+	);
+	expect(calibration.activeRunsAtQuit, "the quit lands in an admitted run before any provider request").toBe(1);
+	expect(calibration.shutdownBeforeQuit, "the owner is still open when the calibration warning is emitted").toBe(
+		false,
+	);
+	expect(
+		calibration.shutdownAfterQuit,
+		"the quit shuts the owner down synchronously, inside the run's preparation",
+	).toBe(true);
+	expect(calibration.requestsAddedByQuit, "a quit inside the closing gate makes no provider request").toBe(0);
+	expect(calibration.messagesAddedByQuit, "a quit inside the closing gate admits no message to the agent").toBe(0);
+	expect(calibration.fileGrowthByQuit, "the file gains nothing after the quit (any growth is printed here)").toBe("");
+	expect(calibration.quitWarnings, "the quit's run discloses exactly the calibration warning").toEqual([
+		CALIBRATION_WARNING,
+	]);
+	expect(calibration.startOutcome, "the held prompt resolves after the quit").toBe("resolved");
+	expect(calibration.disposal, "the quit completes").toBe("disposed");
+	expect(
+		calibration.controlRequestModels,
+		"normal order: the run makes one provider request, on the root track",
+	).toEqual(["root"]);
+	expect(calibration.controlWarnings, "normal order: the run discloses exactly the calibration warning").toEqual([
+		CALIBRATION_WARNING,
+	]);
+	expect(calibration.controlCommitted, "normal order: the run's reply is committed").toBe(true);
 }
