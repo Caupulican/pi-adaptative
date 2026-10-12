@@ -144,7 +144,8 @@ export class ForegroundLifecycleAdapter {
 	 * "warned before anyone listened", shared by the lifecycle repair and the memory subsystem.
 	 */
 	emitWarning(message: string, deliver: ((message: string) => void) | undefined): void {
-		if (deliver) deliver(message);
+		// One bound for both routes: a warning is cut (with its elision mark) whether it is delivered live or held.
+		if (deliver) deliver(truncateWithEllipsis(message, MAX_HELD_WARNING_CHARS));
 		else this.hold(message);
 	}
 

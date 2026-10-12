@@ -81,7 +81,7 @@ export interface AgentSessionSwitchOptions {
  * appended after its copy (those stay as evidence). `copyBaseline` marks where the copied rows end in the file: only rows appended
  * after it are the candidate's. Undefined for a new session, which copied no rows.
  */
-interface CreatedSession {
+export interface CreatedSession {
 	readonly sessionManager: SessionManager;
 	readonly copyBaseline: CopyBaseline | undefined;
 }
@@ -90,7 +90,7 @@ interface CreatedSession {
  * The byte size of a replacement's file once its copied rows are on disk: a row located at or past it was appended by the
  * candidate. `unreadable` when the size cannot be read, so the caller keeps the file.
  */
-type CopyBaseline = { readonly bytes: number } | { readonly unreadable: unknown };
+export type CopyBaseline = { readonly bytes: number } | { readonly unreadable: unknown };
 
 /** A discard in progress: routed before the candidate is shut down, decided once it is shut down. */
 interface PendingDiscard {
@@ -113,12 +113,21 @@ function copyBaselineOf(path: string | undefined): CopyBaseline {
 	}
 }
 
-/** Most paid usage rows a discard counts. Past it the rows are unknown and the file is kept. */
-const MAX_DISCARD_PAID_ROWS = 10_000;
-/** Most session entries a discard walks. Past it the rows are unknown and the file is kept. */
-const MAX_DISCARD_ENTRIES = 1_000_000;
-/** Most bytes a discard scans past the copy baseline. Past it the rows are unknown and the file is kept. */
-const MAX_DISCARD_SCAN_BYTES = 64 * 1024 * 1024;
+/** The bounds a discard's paid-row count runs within. Past any one of them the rows are unknown and the file is kept. */
+export interface DiscardScanLimits {
+	/** Most paid usage rows a discard counts. */
+	readonly paidRows: number;
+	/** Most session entries a discard walks. */
+	readonly entries: number;
+	/** Most bytes a discard scans past the copy baseline. */
+	readonly scanBytes: number;
+}
+
+export const DEFAULT_DISCARD_SCAN_LIMITS: DiscardScanLimits = {
+	paidRows: 10_000,
+	entries: 1_000_000,
+	scanBytes: 64 * 1024 * 1024,
+};
 
 function causeText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -128,10 +137,13 @@ function causeText(error: unknown): string {
  * Paid usage rows the created session's file holds that no other session records: the paid rows located at or past the copy
  * baseline, which only the candidate appended. A copied row is located before the baseline, and a buffered row is not in the
  * file (its retained journal copy, if any, is the disclosure). Unknown when the baseline or the file cannot be read, or when the
- * session holds more than MAX_DISCARD_PAID_ROWS paid rows or more than MAX_DISCARD_SCAN_BYTES lie past the baseline: the caller
- * keeps the file.
+ * session holds more than `limits.entries` entries, more than `limits.paidRows` paid rows, or more than `limits.scanBytes` bytes
+ * lie past the baseline: the caller keeps the file.
  */
-function countUniquePaidRows(created: CreatedSession): { readonly rows: number } | { readonly unknown: string } {
+export function countUniquePaidRows(
+	created: CreatedSession,
+	limits: DiscardScanLimits = DEFAULT_DISCARD_SCAN_LIMITS,
+): { readonly rows: number } | { readonly unknown: string } {
 	const { copyBaseline, sessionManager } = created;
 	try {
 		if (copyBaseline !== undefined && "unreadable" in copyBaseline)
@@ -139,17 +151,14 @@ function countUniquePaidRows(created: CreatedSession): { readonly rows: number }
 		const paidIds = new Set<string>();
 		// The count is read BEFORE the entries are copied: a session larger than the bound is not copied or walked at all, and its
 		// file is kept. The walk is over the entry index the manager already holds (one pointer array, no file content).
-		if (sessionManager.getEntryCount() > MAX_DISCARD_ENTRIES)
-			return { unknown: `more than ${MAX_DISCARD_ENTRIES} entries` };
+		if (sessionManager.getEntryCount() > limits.entries) return { unknown: `more than ${limits.entries} entries` };
 		for (const entry of sessionManager.getEntries()) {
 			if (entry.type !== "custom" || !PAID_ROW_TYPES.has(entry.customType)) continue;
-			if (paidIds.size === MAX_DISCARD_PAID_ROWS)
-				return { unknown: `more than ${MAX_DISCARD_PAID_ROWS} paid usage rows` };
+			if (paidIds.size === limits.paidRows) return { unknown: `more than ${limits.paidRows} paid usage rows` };
 			paidIds.add(entry.id);
 		}
-		const located = sessionManager.entryFileOffsetsFrom(paidIds, copyBaseline?.bytes ?? 0, MAX_DISCARD_SCAN_BYTES);
-		if (located === undefined)
-			return { unknown: `more than ${MAX_DISCARD_SCAN_BYTES} bytes appended after the copy` };
+		const located = sessionManager.entryFileOffsetsFrom(paidIds, copyBaseline?.bytes ?? 0, limits.scanBytes);
+		if (located === undefined) return { unknown: `more than ${limits.scanBytes} bytes appended after the copy` };
 		return { rows: located.size };
 	} catch (error: unknown) {
 		return { unknown: causeText(error) };

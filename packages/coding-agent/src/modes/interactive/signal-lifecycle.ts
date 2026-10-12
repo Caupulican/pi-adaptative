@@ -28,6 +28,11 @@ function isDeadTerminalError(error: unknown): boolean {
 	return code !== undefined && DEAD_TERMINAL_ERROR_CODES.has(code);
 }
 
+/** The termination signals the lifecycle listens to. SIGHUP is not delivered on Windows. */
+function terminationSignals(): NodeJS.Signals[] {
+	return process.platform === "win32" ? ["SIGTERM"] : ["SIGTERM", "SIGHUP"];
+}
+
 /** The terminal UI members the signal lifecycle drives: the input drain on shutdown, and the stop/start/render pair Ctrl+Z uses. */
 export type SignalLifecycleUi = Pick<TUI, "start" | "stop" | "requestRender"> & {
 	readonly terminal: Pick<TUI["terminal"], "drainInput">;
@@ -44,17 +49,37 @@ export interface SignalLifecyclePort {
 	showError(message: string): void;
 }
 
+/** Node's listener type: the lifecycle's handlers each read only the arguments their own event passes. */
+type ProcessListener = Parameters<NodeJS.EventEmitter["on"]>[1];
+
 /** The process effects of a shutdown. The defaults are the process itself; a harness supplies its own. */
 export interface SignalLifecycleIo {
 	exit(code: number): void;
 	stderr(text: string): void;
 	stdout(text: string): void;
+	/** Adds a process listener at the front of its queue and returns the function that removes it. */
+	prependListener(
+		event: NodeJS.Signals | "uncaughtException" | "unhandledRejection",
+		handler: ProcessListener,
+	): () => void;
+	/** Adds an error listener to a standard stream and returns the function that removes it. */
+	onStreamError(stream: "stdout" | "stderr", handler: (error: Error) => void): () => void;
 }
 
 const PROCESS_IO: SignalLifecycleIo = {
 	exit: (code) => process.exit(code),
 	stderr: (text) => process.stderr.write(text),
 	stdout: (text) => process.stdout.write(text),
+	prependListener: (event, handler) => {
+		const events: Pick<NodeJS.EventEmitter, "off" | "prependListener"> = process;
+		events.prependListener(event, handler);
+		return () => events.off(event, handler);
+	},
+	onStreamError: (stream, handler) => {
+		const target = stream === "stdout" ? process.stdout : process.stderr;
+		target.on("error", handler);
+		return () => target.off("error", handler);
+	},
 };
 
 /** Longest rejection detail rendered into the transcript; enough for a stack, short of flooding it. */
@@ -72,9 +97,9 @@ export class SignalLifecycle {
 	private readonly port: SignalLifecyclePort;
 	private readonly io: SignalLifecycleIo;
 
-	constructor(port: SignalLifecyclePort, io: SignalLifecycleIo = PROCESS_IO) {
+	constructor(port: SignalLifecyclePort, io: Partial<SignalLifecycleIo> = {}) {
 		this.port = port;
-		this.io = io;
+		this.io = { ...PROCESS_IO, ...io };
 	}
 
 	get isShuttingDown(): boolean {
@@ -84,8 +109,8 @@ export class SignalLifecycle {
 	/**
 	 * Ends the session and the process. A failure inside the shutdown is reported and ends the process with status 1: every
 	 * caller fires it without awaiting a rejection, so a rejection would otherwise surface as an unhandled one. On the signal path
-	 * the process-level guards (dead terminal, uncaught exception, unhandled rejection) stay armed while the cleanup steps run;
-	 * on the interactive quit path `stop()` removes them together with the TUI, before the runtime disposes.
+	 * the process-level guards (dead terminal, uncaught exception, unhandled rejection) stay armed while the cleanup steps run, and on
+	 * both paths they stay armed until the process exits: `stop()` leaves them to a shutdown in progress.
 	 */
 	async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.shuttingDown) return;
@@ -118,12 +143,17 @@ export class SignalLifecycle {
 			// the render loop is already idle, so this cannot hot-spin (see #4144).
 			// A cleanup failure must not skip the terminal restore: stop() also releases the closing warnings the dispose collected, so
 			// skipping it would lose those disclosures and leave the terminal in raw mode. Every step runs and every failure is reported.
-			await this.runCleanupSteps([
-				() => disposeUnclaimedCliPowerShellWarmStart(),
-				() => this.port.runtimeHost.dispose(),
-				() => this.port.ui.terminal.drainInput(1000),
-				() => this.port.stop(),
-			]);
+			const forceRemovals = this.installForceListeners();
+			try {
+				await this.runCleanupSteps([
+					() => disposeUnclaimedCliPowerShellWarmStart(),
+					() => this.port.runtimeHost.dispose(),
+					() => this.port.ui.terminal.drainInput(1000),
+					() => this.port.stop(),
+				]);
+			} finally {
+				for (const remove of forceRemovals) remove();
+			}
 			this.io.exit(0);
 			// An injected exit returns: the interactive quit below must not run after a signal shutdown.
 			return;
@@ -168,6 +198,27 @@ export class SignalLifecycle {
 			const [first] = failures;
 			throw new AggregateError(failures, first instanceof Error ? first.message : String(first));
 		}
+	}
+
+	/**
+	 * Listeners for a second termination signal while the signal path's cleanup runs. The first signal's listeners are already removed, so
+	 * without these Node ends the process by default: the terminal stays raw, the held warnings go unwritten and the tracked children live
+	 * on. The forced exit kills the tracked children, restores the terminal and releases the warnings, then exits with the signal's status.
+	 */
+	private installForceListeners(): Array<() => void> {
+		return terminationSignals().map((signal) =>
+			this.io.prependListener(signal, () => {
+				killTrackedDetachedChildren();
+				try {
+					this.port.stop();
+				} catch (stopError: unknown) {
+					this.io.stderr(
+						`${neutralizeControls(`Stop failed during forced shutdown: ${describeCause(stopError)}`)}\n`,
+					);
+				}
+				this.io.exit(signal === "SIGHUP" ? 129 : 143);
+			}),
+		);
 	}
 
 	emergencyTerminalExit(): never {
@@ -215,17 +266,24 @@ export class SignalLifecycle {
 	 * call ui.stop() to restore cooked mode, the cursor, and disable bracketed
 	 * paste / Kitty / modifyOtherKeys sequences.
 	 */
-	uncaughtCrash(error: Error): never {
+	uncaughtCrash(thrown: unknown): void {
+		// Any value can reach uncaughtException (`throw "x"`, `throw null`), and the report reads a stack: a non-Error is wrapped first.
+		const error = thrown instanceof Error ? thrown : new Error(String(thrown));
 		if (this.shuttingDown) {
 			// A throw during an orderly shutdown is still a crash: report it (the orderly path is already unwinding), restore the
 			// terminal if it is not restored yet, and end the process.
 			// port.stop() restores the terminal AND releases the closing warnings held for it (ui.stop alone would drop them).
+			// A stop failure is reported too: it is the only record of a teardown that did not finish.
 			try {
 				this.port.stop();
-			} catch {}
+			} catch (stopError: unknown) {
+				this.io.stderr(`${neutralizeControls(`Stop failed during shutdown: ${describeCause(stopError)}`)}\n`);
+			}
 			const detail = (error.stack ?? error.message).slice(0, MAX_REJECTION_DETAIL);
 			this.io.stderr(`${neutralizeControls(`pi exiting due to uncaughtException during shutdown: ${detail}`)}\n`);
-			process.exit(1);
+			this.io.exit(1);
+			// An injected exit returns: the crash must not fall through to the non-shutdown path below.
+			return;
 		}
 		this.shuttingDown = true;
 		try {
@@ -251,12 +309,7 @@ export class SignalLifecycle {
 	registerSignalHandlers(): void {
 		this.unregisterSignalHandlers();
 
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
-		if (process.platform !== "win32") {
-			signals.push("SIGHUP");
-		}
-
-		for (const signal of signals) {
+		for (const signal of terminationSignals()) {
 			const handler = () => {
 				// SIGHUP no longer hard-exits: graceful shutdown emits session_shutdown
 				// first, then attempts terminal restore. A genuinely dead terminal
@@ -265,8 +318,7 @@ export class SignalLifecycle {
 				killTrackedDetachedChildren();
 				void this.shutdown({ fromSignal: true });
 			};
-			process.prependListener(signal, handler);
-			const remove = () => process.off(signal, handler);
+			const remove = this.io.prependListener(signal, handler);
 			this.cleanupHandlers.push(remove);
 			this.signalListenerCleanup.push(remove);
 		}
@@ -277,23 +329,19 @@ export class SignalLifecycle {
 			}
 			throw error;
 		};
-		process.stdout.on("error", terminalErrorHandler);
-		process.stderr.on("error", terminalErrorHandler);
-		this.cleanupHandlers.push(() => process.stdout.off("error", terminalErrorHandler));
-		this.cleanupHandlers.push(() => process.stderr.off("error", terminalErrorHandler));
+		this.cleanupHandlers.push(this.io.onStreamError("stdout", terminalErrorHandler));
+		this.cleanupHandlers.push(this.io.onStreamError("stderr", terminalErrorHandler));
 
 		// Restore the terminal before the process dies on any uncaught throw.
 		// Without this, an unhandled exception from extension code (or anywhere
 		// in pi) leaves the terminal in raw mode with no cursor.
-		const uncaughtExceptionHandler = (error: Error) => this.uncaughtCrash(error);
-		process.prependListener("uncaughtException", uncaughtExceptionHandler);
-		this.cleanupHandlers.push(() => process.off("uncaughtException", uncaughtExceptionHandler));
+		const uncaughtExceptionHandler = (error: unknown) => this.uncaughtCrash(error);
+		this.cleanupHandlers.push(this.io.prependListener("uncaughtException", uncaughtExceptionHandler));
 
 		// Registering this listener also STOPS Node from escalating a rejection into an
 		// uncaughtException, which is the point: an async failure must not end the session.
 		const unhandledRejectionHandler = (reason: unknown) => this.reportUnhandledRejection(reason);
-		process.prependListener("unhandledRejection", unhandledRejectionHandler);
-		this.cleanupHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
+		this.cleanupHandlers.push(this.io.prependListener("unhandledRejection", unhandledRejectionHandler));
 	}
 
 	unregisterSignalHandlers(): void {

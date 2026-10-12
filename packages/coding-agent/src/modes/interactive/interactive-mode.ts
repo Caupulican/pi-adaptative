@@ -6,7 +6,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AssistantMessage, ImageContent, Message, Model } from "@caupulican/pi-ai";
-import type { AutocompleteProvider, EditorComponent, Keybinding, MarkdownTheme, SelectItem } from "@caupulican/pi-tui";
+import type {
+	AutocompleteProvider,
+	EditorComponent,
+	Keybinding,
+	MarkdownTheme,
+	SelectItem,
+	Terminal,
+} from "@caupulican/pi-tui";
 import {
 	applyTerminalSettings,
 	type Component,
@@ -202,6 +209,10 @@ export interface InteractiveModeOptions {
 	verbose?: boolean;
 	/** Whether a human owns this terminal. False for unattended worker panes. */
 	hasHumanAudience?: boolean;
+	/** The terminal the TUI drives. Defaults to the process terminal (input-only without a human audience). */
+	terminal?: Terminal;
+	/** The process effects of the signal lifecycle. Defaults to the process itself. */
+	signalIo?: Partial<signalLifecycle.SignalLifecycleIo>;
 }
 
 export class InteractiveMode {
@@ -375,23 +386,27 @@ export class InteractiveMode {
 		// getCapabilities() and cache a settings-less result (P1g).
 		applyTerminalSettings(terminalCapabilityOverridesFromSettings(this.settingsManager));
 		this.ui = new TUI(
-			this.hasHumanAudience
-				? new ProcessTerminal({
-						workbench: true,
-						mouse: this.settingsManager.getWorkbenchSettings().mouse === "on",
-					})
-				: new InputOnlyTerminal(),
+			options.terminal ??
+				(this.hasHumanAudience
+					? new ProcessTerminal({
+							workbench: true,
+							mouse: this.settingsManager.getWorkbenchSettings().mouse === "on",
+						})
+					: new InputOnlyTerminal()),
 			this.settingsManager.getShowHardwareCursor(),
 		);
-		this.signals = new signalLifecycle.SignalLifecycle({
-			runtimeHost: this.runtimeHost,
-			ui: this.ui,
-			isShutdownRequested: () => this.shutdownRequested,
-			stop: () => this.stop(),
-			formatResumeCommand: () => formatResumeCommand(this.sessionManager),
-			showStatus: (message) => this.showStatus(message),
-			showError: (message) => this.showError(message),
-		});
+		this.signals = new signalLifecycle.SignalLifecycle(
+			{
+				runtimeHost: this.runtimeHost,
+				ui: this.ui,
+				isShutdownRequested: () => this.shutdownRequested,
+				stop: () => this.stop(),
+				formatResumeCommand: () => formatResumeCommand(this.sessionManager),
+				showStatus: (message) => this.showStatus(message),
+				showError: (message) => this.showError(message),
+			},
+			options.signalIo,
+		);
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.chatContainer = new Container();
@@ -2584,8 +2599,8 @@ export class InteractiveMode {
 		return this.signals.emergencyTerminalExit();
 	}
 
-	private uncaughtCrash(error: Error): never {
-		return this.signals.uncaughtCrash(error);
+	private uncaughtCrash(error: unknown): void {
+		this.signals.uncaughtCrash(error);
 	}
 
 	private checkShutdownRequested(): Promise<void> {
@@ -4119,41 +4134,42 @@ export class InteractiveMode {
 	}
 
 	stop(): void {
-		// Each group runs whatever the earlier one did, and every failure is kept: the terminal restore (`ui.stop`) and the release of
-		// the warnings held for the TUI must not be skipped by a failing widget, overlay or footer teardown.
+		// Each teardown step runs whatever the earlier ones did, and every failure is kept: a failing widget, overlay or footer must not skip
+		// the subscriptions and the terminal restore (`ui.stop`) and the release of the warnings held for the TUI must not be skipped either.
 		const failures: unknown[] = [];
-		try {
-			this.subscriptionGeneration++;
-			this.unsubscribeHumanInputActivity?.();
-			this.unsubscribeHumanInputActivity = undefined;
-			this.layout.dispose();
-			this.unregisterSignalHandlers();
-			this.closeAgentsOverlay();
-			if (this.settingsManager.getShowTerminalProgress()) {
-				this.ui.terminal.setProgress(false);
+		const attempt = (step: () => void): void => {
+			try {
+				step();
+			} catch (error: unknown) {
+				failures.push(error);
 			}
-			if (this.loadingAnimation) {
-				this.loadingAnimation.stop();
-				this.loadingAnimation = undefined;
-			}
-			this.authDialogs.cancelActiveDialog();
-			this.extensionUiHost.clearHostWidgets();
-			this.extensionUiHost.resetExtensionUI();
-			this.overlayHost.unmount();
-			this.activityLane?.dispose();
-			this.footer.dispose();
-			this.footerDataProvider.dispose();
-			this.unsubscribeForegroundActivity?.();
-			this.unsubscribeForegroundActivity = undefined;
-			if (this.unsubscribe) {
-				this.unsubscribe();
-			}
-			if (this.unsubscribeExtensionsChanged) {
-				this.unsubscribeExtensionsChanged();
-			}
-		} catch (error: unknown) {
-			failures.push(error);
-		}
+		};
+		this.subscriptionGeneration++;
+		attempt(() => this.unsubscribeHumanInputActivity?.());
+		this.unsubscribeHumanInputActivity = undefined;
+		attempt(() => this.layout.dispose());
+		attempt(() => {
+			// A quit keeps the process guards armed through its dispose: they go with the process (see SignalLifecycle.shutdown).
+			if (!this.signals.isShuttingDown) this.unregisterSignalHandlers();
+		});
+		attempt(() => this.closeAgentsOverlay());
+		attempt(() => {
+			if (this.settingsManager.getShowTerminalProgress()) this.ui.terminal.setProgress(false);
+		});
+		const loadingAnimation = this.loadingAnimation;
+		this.loadingAnimation = undefined;
+		attempt(() => loadingAnimation?.stop());
+		attempt(() => this.authDialogs.cancelActiveDialog());
+		attempt(() => this.extensionUiHost.clearHostWidgets());
+		attempt(() => this.extensionUiHost.resetExtensionUI());
+		attempt(() => this.overlayHost.unmount());
+		attempt(() => this.activityLane?.dispose());
+		attempt(() => this.footer.dispose());
+		attempt(() => this.footerDataProvider.dispose());
+		attempt(() => this.unsubscribeForegroundActivity?.());
+		this.unsubscribeForegroundActivity = undefined;
+		attempt(() => this.unsubscribe?.());
+		attempt(() => this.unsubscribeExtensionsChanged?.());
 		try {
 			if (this.isInitialized) {
 				this.ui.stop();

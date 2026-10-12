@@ -4,8 +4,14 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { PassThrough } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
-import { createAgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
+import {
+	countUniquePaidRows,
+	createAgentSessionRuntime,
+	DEFAULT_DISCARD_SCAN_LIMITS,
+} from "../../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
+import { classifyCustomEntryPersisted } from "../../../src/core/cost/spawned-usage-receipt.ts";
+import { SEMANTIC_USAGE_CUSTOM_TYPE } from "../../../src/core/cost/usage-records.ts";
 import type { WorkerWriteReservationLease } from "../../../src/core/delegation/worker-write-reservation.ts";
 import type { ExecResult } from "../../../src/core/exec.ts";
 import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
@@ -16,7 +22,11 @@ import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
 import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../../src/core/reflection-controller.ts";
 import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
-import { type CreateAgentSessionResult, createAgentSession } from "../../../src/core/sdk.ts";
+import {
+	type CreateAgentSessionOptions,
+	type CreateAgentSessionResult,
+	createAgentSession,
+} from "../../../src/core/sdk.ts";
 import type { Settings } from "../../../src/core/settings/settings-schema.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import { TerminalWarnings } from "../../../src/core/terminal-warnings.ts";
@@ -2197,6 +2207,8 @@ export class HarnessWorld {
 			 * omitted on win32 (the world's POSIX shell is not the platform shell there) and kept on POSIX hosts.
 			 */
 			readonly omitShellOperations?: boolean;
+			/** The loop the owner selects; undefined keeps the SDK's default for this session's System One mode. */
+			readonly executionLoopMode?: CreateAgentSessionOptions["executionLoopMode"];
 			/**
 			 * Settings of this session only, layered over the world's: the session gets its own manager, so a change it makes
 			 * (a memory-system switch, a policy override) never reaches another session. A key set to `undefined` is absent
@@ -2260,6 +2272,7 @@ export class HarnessWorld {
 			settingsManager,
 			sessionManager,
 			...(extensionLoader === undefined ? {} : { resourceLoader: extensionLoader }),
+			...(options.executionLoopMode === undefined ? {} : { executionLoopMode: options.executionLoopMode }),
 			...(options.orchestrationProfile === undefined
 				? { model: this.provider.model(modelId) }
 				: { orchestrationProfile: options.orchestrationProfile }),
@@ -2785,6 +2798,301 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 }
 
 /**
+ * What a refused `compaction_end` append leaves in the session file at the quit, and what the quit and the release each report. `quitWarnings`
+ * excludes the closing verification notice; `outcome` is the compaction's settled result after the release.
+ */
+export interface CompactionCloseRefusalWitness {
+	/** The session file's resolved path, the path the scripted IO fault names. */
+	readonly file: string;
+	readonly quitWarnings: readonly string[];
+	/** The compaction's rejection, claimed by the journey (its message is the check). */
+	readonly outcome: unknown;
+	readonly lifecycleAtQuit: ReturnType<typeof compactionLifecycle>;
+	/** The release appended no byte, disclosed nothing and made no provider request. */
+	readonly fileUnchanged: boolean;
+	readonly warningsUnchanged: boolean;
+	readonly requestsUnchanged: boolean;
+}
+
+/**
+ * Quit while a manual compaction waits in its held `session_before_compact` handler, with the durable `compaction_end` append refused. The
+ * close's terminal write fails before anything reaches the file: the dispose holds that failure as a closing disclosure, ahead of the bounded
+ * settle of the held compaction, and still resolves. The release resumes the compaction into the closed owner, which rejects it with no write.
+ */
+export async function runCompactionCloseAppendRefused(world: HarnessWorld): Promise<CompactionCloseRefusalWitness> {
+	const { trace } = world;
+	const hold = createBarrier();
+	const reached = createBarrier();
+	const owner = await world.createRootSession("root", {
+		sessionManager: world.createSessionManager(),
+		settings: { memorySystem: undefined },
+		extensionFactories: [holdCompactionSummary(hold, reached)],
+	});
+	const session = owner.session;
+	await session.bindExtensions({ uiContext: world.humanInput.ui });
+	const sessionFile = owner.sessionManager.getSessionFile();
+	if (sessionFile === undefined) throw new Error("the refused compaction owner has no file");
+	const file = resolve(sessionFile);
+	// Compaction needs history, so the owner first completes one plain turn.
+	world.provider.enqueue("root", {
+		name: "compaction-refusal-seed",
+		reply: { content: [{ type: "text", text: "Seeded before the refused compaction." }] },
+	});
+	await withDeadline(
+		trace,
+		"compaction refusal: the seed turn completes",
+		session.prompt("Seed the refused compaction."),
+	);
+	const compaction = session.compact("Compact the seeded history.").catch((error: unknown) => error);
+	await withDeadline(trace, "compaction refusal: the extension holds the summary", reached.promise);
+	// Only the terminal record is refused: the start record was appended before the handler, and the write is refused before any byte lands.
+	world.io.failNext({
+		name: "compaction-end-refused",
+		kind: "append",
+		code: "EIO",
+		matches: (operation, data) => operation.path === file && data?.includes('"type":"compaction_end"') === true,
+	});
+	const mark = world.warnings.length;
+	let fileAtQuit = "";
+	let requestsAtQuit = 0;
+	let quitWarnings: string[] = [];
+	let outcome: unknown = "unsettled";
+	try {
+		await withDeadline(
+			trace,
+			"compaction refusal: the owner disposes while the summary is held",
+			session.disposeAndWait(),
+			60_000,
+		);
+		fileAtQuit = world.io.peekFile(sessionFile) ?? "";
+		requestsAtQuit = world.provider.requests.length;
+		quitWarnings = warningsSince(world, mark);
+	} finally {
+		hold.release();
+		outcome = await withDeadline(trace, "compaction refusal: the held summary resumes", compaction, 60_000);
+	}
+	const fileAfterRelease = world.io.peekFile(sessionFile) ?? "";
+	return {
+		file,
+		quitWarnings,
+		outcome,
+		lifecycleAtQuit: compactionLifecycle(fileAtQuit),
+		fileUnchanged: fileAfterRelease === fileAtQuit,
+		warningsUnchanged: isDeepStrictEqual(warningsSince(world, mark), quitWarnings),
+		requestsUnchanged: world.provider.requests.length === requestsAtQuit,
+	};
+}
+
+/**
+ * The bounded paid-row count of a discarded replacement's file, on a real session file. Each bound alone refuses the count with its cause;
+ * the defaults count every paid row the file holds. Throws unless the appended rows are on disk.
+ */
+export interface DiscardScanBoundsWitness {
+	readonly entriesBound: unknown;
+	readonly paidRowsBound: unknown;
+	readonly scanBytesBound: unknown;
+	readonly defaults: unknown;
+	readonly disposal: unknown;
+}
+
+/**
+ * A session file of this world with three paid usage rows, read by the discard count as a replacement's file whose copied rows end at byte 0.
+ * The seed turn gives the file its first reply, so the rows that follow are written to disk rather than buffered.
+ */
+export async function runDiscardScanBounds(world: HarnessWorld): Promise<DiscardScanBoundsWitness> {
+	const { trace } = world;
+	const agentDir = `${world.agentDir}-discard-scan`;
+	const owner = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		settings: { memorySystem: undefined },
+	});
+	world.provider.enqueue("root", {
+		name: "discard-scan-seed",
+		reply: { content: [{ type: "text", text: "Seeded for the discard scan." }] },
+	});
+	await withDeadline(trace, "discard scan: the seed turn completes", owner.session.prompt("Seed the discard scan."));
+	const reports = [1, 2, 3].map((index) => ({ reportId: `discard-scan-row-${index}` }));
+	const ids = reports.map((report) => owner.sessionManager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, report));
+	const persisted = ids.map((id, index) =>
+		classifyCustomEntryPersisted(owner.sessionManager, id, SEMANTIC_USAGE_CUSTOM_TYPE, (data) =>
+			isDeepStrictEqual(data, reports[index]),
+		),
+	);
+	if (persisted.some((state) => state !== "persisted"))
+		throw new Error(`the discard scan rows are not on disk: ${persisted.join(", ")}`);
+	const disposal = await world.disposeSessionInBody(owner.session);
+	// The count runs after the owner shuts down, as a discard's does; the copied rows end at byte 0, so every paid row is the candidate's.
+	const created = { sessionManager: owner.sessionManager, copyBaseline: { bytes: 0 } };
+	const bounded = (limits: Partial<typeof DEFAULT_DISCARD_SCAN_LIMITS>) =>
+		countUniquePaidRows(created, { ...DEFAULT_DISCARD_SCAN_LIMITS, ...limits });
+	return {
+		entriesBound: bounded({ entries: 1 }),
+		paidRowsBound: bounded({ paidRows: 1 }),
+		scanBytesBound: bounded({ scanBytes: 1 }),
+		defaults: countUniquePaidRows(created),
+		disposal,
+	};
+}
+
+/** The exhaustion causes of a discard's count, each bound alone, and the defaults' count of the same three rows. */
+export const DISCARD_SCAN_BOUNDS_EXPECTED = {
+	entriesBound: { unknown: "more than 1 entries" },
+	paidRowsBound: { unknown: "more than 1 paid usage rows" },
+	scanBytesBound: { unknown: "more than 1 bytes appended after the copy" },
+	defaults: { rows: 3 },
+	disposal: undefined,
+};
+
+/** A replacement the runtime rejected at activation, and what its rollback kept and disclosed. */
+export interface DiscardThroughRuntimeWitness {
+	/** The rejection as the host reads it: the activation failure, and that the previous session was restored. */
+	readonly rejection: string;
+	readonly candidateFile: string | undefined;
+	/** The candidate's file after the rollback: kept, because its paid rows could not be counted. */
+	readonly candidateKept: boolean;
+	/** The restored session's held warnings: the rollback's disclosure, delivered once the previous session is live. */
+	readonly restoredWarnings: readonly string[];
+	/** Warnings the runtime routed to its terminal; a restored rollback routes none. */
+	readonly routed: readonly string[];
+}
+
+/**
+ * A fork of a session's paid rows, rejected at activation. The rollback shuts the candidate down, counts its paid rows with the real offset
+ * scan, and that scan's read of the candidate's file is refused: the file is kept, and the disclosure travels with the restored session.
+ */
+export async function runDiscardThroughRuntime(world: HarnessWorld): Promise<DiscardThroughRuntimeWitness> {
+	const { trace } = world;
+	const routed: string[] = [];
+	const runtime = await createAgentSessionRuntime(
+		async ({ cwd, agentDir, sessionManager }) => {
+			const root = await world.createRootSession("root", {
+				agentDir,
+				sessionManager,
+				settings: { memorySystem: undefined },
+			});
+			return {
+				session: root.session,
+				sessionManager: root.sessionManager,
+				getExtensionRunner: root.getExtensionRunner,
+				extensionsResult: root.extensionsResult,
+				services: {
+					cwd,
+					agentDir,
+					authStorage: world.authStorage,
+					settingsManager: root.settingsManager,
+					modelRegistry: world.modelRegistry,
+					resourceLoader: root.session.resourceLoader,
+					diagnostics: [],
+				},
+				diagnostics: [],
+			};
+		},
+		{
+			cwd: HARNESS_PROJECT_CWD,
+			agentDir: world.agentDir,
+			sessionManager: world.createSessionManager(),
+			onTerminalWarnings: (warnings) => {
+				routed.push(...warnings);
+			},
+		},
+	);
+	world.provider.enqueue("root", {
+		name: "runtime-discard-seed",
+		reply: { content: [{ type: "text", text: "Seeded for the runtime discard." }] },
+	});
+	await withDeadline(
+		trace,
+		"runtime discard: the seed turn completes",
+		runtime.session.prompt("Seed the runtime discard."),
+	);
+	const manager = runtime.sessionManager;
+	const originalFile = manager.getSessionFile();
+	if (originalFile === undefined) throw new Error("the runtime discard owner has no file");
+	const rows = [1, 2].map((index) =>
+		manager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, { reportId: `runtime-discard-row-${index}` }),
+	);
+	const forkAt = rows.at(-1);
+	if (forkAt === undefined) throw new Error("the runtime discard has no paid row to fork at");
+	// Only the candidate's activation is refused; the restored session (the original file) activates normally.
+	const candidate: { file?: string } = {};
+	runtime.setRebindSession(async (session) => {
+		const file = session.sessionFile;
+		if (file === undefined || file === originalFile) return;
+		candidate.file = file;
+		// The rollback's offset scan reads the candidate's file after the candidate is shut down: that read is the one refused.
+		world.io.failNext({
+			name: "runtime-discard-scan-read",
+			kind: "read",
+			code: "EIO",
+			matches: (operation) => operation.path === resolve(file),
+		});
+		throw new Error("the candidate's activation is refused");
+	});
+	const outcome = await withDeadline(
+		trace,
+		"runtime discard: the fork is rejected",
+		runtime.fork(forkAt, { position: "at" }),
+		60_000,
+	).then(
+		() => "resolved",
+		(error: unknown) => error,
+	);
+	const restoredWarnings = runtime.session.takeUndeliveredWarnings();
+	const candidateKept = candidate.file !== undefined && world.io.peekFile(candidate.file) !== undefined;
+	await runtime.dispose();
+	return {
+		rejection: outcome instanceof Error ? outcome.message : String(outcome),
+		candidateFile: candidate.file,
+		candidateKept,
+		restoredWarnings,
+		routed,
+	};
+}
+
+/** The outcome of a session creation that fails after construction, beside the same creation without the failure. */
+export interface SdkConstructionFailureWitness {
+	/** The creation's failure as the caller receives it, or `created`. */
+	readonly failure: string;
+	/** The normal-order control's outcome: `created` once it disposes cleanly. */
+	readonly control: string;
+	/** Closing warnings that reached the world's sink during the failing creation. */
+	readonly warnings: readonly string[];
+}
+
+/** The objective-loop creation failure, its normal-order control, and no closing warning (none is held at this failure). */
+export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = {
+	failure: "objective_primary cannot start: missing required binding 'ObjectiveExecutionController'",
+	control: "created",
+	warnings: [],
+};
+
+/**
+ * A creation that the SDK constructs and then rejects: the loop the owner selects needs an objective controller that System One-off
+ * sessions never bind. The SDK disposes the constructed session and rethrows the failure itself.
+ */
+export async function runSdkConstructionFailure(world: HarnessWorld): Promise<SdkConstructionFailureWitness> {
+	const mark = world.warnings.length;
+	const failure = await world
+		.createRootSession("root", {
+			systemOneEnabled: false,
+			executionLoopMode: "objective_primary",
+			settings: { memorySystem: undefined },
+		})
+		.then(
+			() => "created",
+			(error: unknown) => (error instanceof Error ? error.message : String(error)),
+		);
+	const warnings = world.warnings.slice(mark);
+	const created = await world.createRootSession("root", {
+		systemOneEnabled: false,
+		settings: { memorySystem: undefined },
+	});
+	const disposal = await world.disposeSessionInBody(created.session);
+	return { failure, control: disposal === undefined ? "created" : "disposal failed", warnings };
+}
+
+/**
  * Two native branch copies of a session at its current leaf. Each is a new session file with its own identity; the source manager is only
  * read, so the session it came from continues untouched.
  */
@@ -3073,6 +3381,18 @@ interface RpcHostRun {
 	readonly lines: readonly Record<string, unknown>[];
 	readonly stderr: readonly string[];
 	readonly exits: readonly number[];
+	/** What the host had done while its dispose was held, before the scenario released it (only with `holdDispose`). */
+	readonly whileHeld?: {
+		readonly exits: readonly number[];
+		readonly stderr: readonly string[];
+		readonly sinkWarnings: readonly string[];
+		readonly outputFailureHandlers: number;
+		readonly flushRequests: number;
+	};
+	/** The output-failure owners still registered once the host has exited. */
+	readonly outputFailureHandlersAfterExit: number;
+	/** The closing warnings the stream received as warning events. */
+	readonly closingWarningsOnStream: number;
 	readonly sinkWarnings: readonly string[];
 	readonly flushRequests: number;
 	readonly elapsedMs: number;
@@ -3089,8 +3409,13 @@ export async function runRpcHost(
 	trace: HarnessTrace,
 	script: {
 		readonly trigger: "sigterm" | "stdin-end" | "output-failure";
-		readonly disposeFails: boolean;
-		readonly flushNeverResolves: boolean;
+		readonly disposeFails?: boolean;
+		readonly flushNeverResolves?: boolean;
+		/**
+		 * With the SIGTERM trigger: the dispose's completion holds until the scenario releases it. While it holds, `input-end` ends the input,
+		 * and `output-failures` fails the output twice (two queued writes that inherit one failed tail).
+		 */
+		readonly holdDispose?: "input-end" | "output-failures";
 	},
 ): Promise<RpcHostRun> {
 	const sinkWarnings: string[] = [];
@@ -3129,8 +3454,16 @@ export async function runRpcHost(
 		},
 	);
 	const realDispose = runtime.dispose.bind(runtime);
+	const disposeReached = createBarrier();
+	const disposeHold = createBarrier();
 	runtime.dispose = async () => {
-		await realDispose();
+		// The real disposal is in flight while the scenario holds its completion: the shutdown waits on this wrapper, not on the real call.
+		const disposal = realDispose();
+		if (script.holdDispose !== undefined) {
+			disposeReached.release();
+			await disposeHold.promise;
+		}
+		await disposal;
 		terminal.write([RPC_CLOSING_WARNING]);
 		if (script.disposeFails) {
 			throw new AggregateError([new Error("cleanup a"), new Error("cleanup b")], "dispose failed");
@@ -3215,9 +3548,68 @@ export async function runRpcHost(
 	} else {
 		stdin.end();
 	}
+	let whileHeld: RpcHostRun["whileHeld"];
+	if (script.holdDispose !== undefined) {
+		await withDeadline(trace, "rpc: the dispose reaches its hold", disposeReached.promise);
+		if (script.holdDispose === "input-end") {
+			// The host's own input-end listener is registered before this one, so once this fires the host has handled the end.
+			const inputEnded = createBarrier();
+			stdin.once("end", () => inputEnded.release());
+			stdin.end();
+			await withDeadline(trace, "rpc: the input end is delivered during the dispose", inputEnded.promise);
+		} else {
+			const onFailure = outputFailureHandlers[0];
+			if (onFailure === undefined) throw new Error("the rpc host registered no output failure handler");
+			onFailure(new Error("stdout write failed"));
+			onFailure(new Error("stdout write failed"));
+		}
+		whileHeld = {
+			exits: [...exits],
+			stderr: [...stderr],
+			sinkWarnings: [...sinkWarnings],
+			outputFailureHandlers: outputFailureHandlers.length,
+			flushRequests,
+		};
+		disposeHold.release();
+	}
 	await withDeadline(trace, "rpc: the host exits after its shutdown", exited.promise);
 	const elapsedMs = Date.now() - started;
+	const outputFailureHandlersAfterExit = outputFailureHandlers.length;
 	// Release: the stream is detached once the host has exited, so a later warning reaches the terminal's sink.
 	terminal.write([RPC_LATE_WARNING]);
-	return { lines, stderr, exits, sinkWarnings, flushRequests, elapsedMs, startupErrors };
+	return {
+		lines,
+		stderr,
+		exits,
+		whileHeld,
+		outputFailureHandlersAfterExit,
+		closingWarningsOnStream: lines.filter((line) => line.message === RPC_CLOSING_WARNING).length,
+		sinkWarnings,
+		flushRequests,
+		elapsedMs,
+		startupErrors,
+	};
 }
+
+/** Input end during a held SIGTERM dispose: the host exits once, after the dispose, and the closing warning reaches the stream once. */
+export const RPC_INPUT_END_HELD_EXPECTED = {
+	whileHeld: { exits: [] },
+	exits: [143],
+	stderr: [],
+	closingWarningsOnStream: 1,
+	sinkWarnings: [RPC_LATE_WARNING],
+};
+
+/**
+ * Output failures during a held SIGTERM dispose: the owner stays registered, the flush is skipped, nothing reports, the closing warning
+ * goes to the sink, and the owner is gone once the host exits.
+ */
+export const RPC_OUTPUT_OWNER_EXPECTED = {
+	whileHeld: { exits: [], stderr: [], sinkWarnings: [], outputFailureHandlers: 1, flushRequests: 0 },
+	exits: [143],
+	stderr: [],
+	flushRequests: 0,
+	outputFailureHandlersAfterExit: 0,
+	closingWarningsOnStream: 0,
+	sinkWarnings: [RPC_CLOSING_WARNING, RPC_LATE_WARNING],
+};

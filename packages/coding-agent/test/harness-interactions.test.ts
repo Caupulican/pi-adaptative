@@ -75,10 +75,12 @@ import { routeShellContract } from "../src/core/tools/shell-contract-router.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 import { isRecordObject } from "../src/core/util/value-guards.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
+import { verifyModeWitnesses } from "./fixtures/harness/mode-witnesses.ts";
 import type { ScriptedReply, ScriptedRequest, ScriptStep } from "./fixtures/harness/scripted-provider.ts";
 import { calls, createBarrier, fail, HARNESS_PROVIDER, text } from "./fixtures/harness/scripted-provider.ts";
 import {
 	branchForClosingReflection,
+	DISCARD_SCAN_BOUNDS_EXPECTED,
 	HARNESS_PROJECT_CWD,
 	type HarnessWorld,
 	type HarnessWorldOptions,
@@ -87,12 +89,19 @@ import {
 	holdCompactionSummary,
 	projectPath,
 	RPC_CLOSING_WARNING,
+	RPC_INPUT_END_HELD_EXPECTED,
 	RPC_LATE_WARNING,
+	RPC_OUTPUT_OWNER_EXPECTED,
 	runClosingReflectionTimeout,
 	runCompactionBehindHeldRun,
+	runCompactionCloseAppendRefused,
+	runDiscardScanBounds,
+	runDiscardThroughRuntime,
 	runHarnessWorld,
 	runRpcHost,
+	runSdkConstructionFailure,
 	runSignalShutdown,
+	SDK_CONSTRUCTION_FAILURE_EXPECTED,
 	SIGNAL_CLOSING_WARNING,
 	SIGNAL_RESUME_COMMAND,
 	type SystemOneDecodedRequest,
@@ -1080,6 +1089,8 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				// The quit's bounded settle expires for a run that an extension holds past the abort (the message-end witness): exact text.
 				/^A run did not settle within 5s of quit; its final message may not have been persisted\.$/,
 				/^A compaction did not settle within 5s of quit; its result is discarded\.$/,
+				// The refused terminal write at quit: exact text, the session path narrowed.
+				/^Closing the running compaction failed at quit: Scripted IO fault compaction-end-refused: append '(?:\/harness\/agent-journey-1-system-one-(?:on|off)\/sessions\/[^'\n]+|[A-Z]:\\harness\\agent-journey-1-system-one-(?:on|off)\\sessions\\[^'\n]+)\.jsonl'$/,
 				// The closing reflection witness: its held reflection is disclosed at quit, exact text.
 				/^A reflection turn did not settle within 5s of quit; its work may not have been persisted\.$/,
 				// Owner input queued behind a run that the quit ends is held complete with its text (the queued-quit witness): exact text.
@@ -8016,6 +8027,18 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			expect(cpCompactions(cpHeldFile), "the resumed summary writes no compaction entry after the quit").toEqual([]);
 			expect(world.provider.requests.length, "the held compaction makes no provider request").toBe(cpHeldRequests);
 			trace.mark("root", "compaction.held-quit");
+			const cpRefused = await runCompactionCloseAppendRefused(world);
+			expect(cpRefused).toMatchObject({
+				quitWarnings: [
+					`Closing the running compaction failed at quit: Scripted IO fault compaction-end-refused: append '${cpRefused.file}'`,
+					"A compaction did not settle within 5s of quit; its result is discarded.",
+				],
+				lifecycleAtQuit: [{ type: "compaction_start" }],
+				fileUnchanged: true,
+				warningsUnchanged: true,
+				requestsUnchanged: true,
+			});
+			trace.claimRejection(cpRefused.outcome, "Compaction cancelled");
 
 			const cpLiveHold = createBarrier();
 			const cpLiveReached = createBarrier();
@@ -8354,6 +8377,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			expect(quitAllFail.exits, "a failing quit with three causes exits 1").toEqual([1]);
 			expect(quitAllFail.stdout, "a failing quit with three causes writes no resume line").toEqual([]);
 			trace.mark("root", "signal.shutdown");
+			await verifyModeWitnesses(world);
 			// Owner input queued behind a run that the quit ends. The input is admitted to the agent's queue behind the held reply; the quit ends
 			// the run and no provider round starts for the input, so the closing session holds it complete with the held-queue warning. The live
 			// control lets the same queued input run as the turn after its reply completes, with no held warning.
@@ -8497,6 +8521,11 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				RPC_LATE_WARNING,
 			]);
 			expect(rpcSigterm.flushRequests, "the SIGTERM shutdown flushes the stream once").toBe(1);
+			// Input end and output failures during a SIGTERM dispose: neither ends the shutdown early, and the exit waits for the dispose.
+			const rpcHeld = await runRpcHost(world, trace, { trigger: "sigterm", holdDispose: "input-end" });
+			expect(rpcHeld).toMatchObject(RPC_INPUT_END_HELD_EXPECTED);
+			const rpcOwner = await runRpcHost(world, trace, { trigger: "sigterm", holdDispose: "output-failures" });
+			expect(rpcOwner).toMatchObject(RPC_OUTPUT_OWNER_EXPECTED);
 			const rpcSigtermFails = await runRpcHost(world, trace, {
 				trigger: "sigterm",
 				disposeFails: true,
@@ -8568,6 +8597,18 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				"RPC shutdown failed: dispose failed (cleanup a; cleanup b)\n",
 			]);
 			trace.mark("root", "rpc.shutdown");
+			expect(await runDiscardScanBounds(world)).toEqual(DISCARD_SCAN_BOUNDS_EXPECTED);
+			const runtimeDiscard = await runDiscardThroughRuntime(world);
+			expect(runtimeDiscard).toMatchObject({
+				rejection:
+					"Session replacement activation failed; the previous session was restored: the candidate's activation is refused",
+				candidateKept: true,
+				restoredWarnings: [
+					`Usage handoff: the paid usage rows of ${runtimeDiscard.candidateFile} could not be counted (Scripted IO fault runtime-discard-scan-read: read '${runtimeDiscard.candidateFile}'), so this rejected replacement's session file is kept as recovery evidence.`,
+				],
+				routed: [],
+			});
+			expect(await runSdkConstructionFailure(world)).toEqual(SDK_CONSTRUCTION_FAILURE_EXPECTED);
 		},
 	);
 }, 300_000);

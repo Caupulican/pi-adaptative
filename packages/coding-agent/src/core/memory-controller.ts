@@ -2229,7 +2229,11 @@ export class MemoryController {
 						this._releaseTranscriptRecall();
 						this._initializationFailed = true;
 					}
-					console.error("Memory subsystem init failed:", error instanceof Error ? error.message : String(error));
+					// A session warning (live to a listener, else held for the first subscriber or the closing drain), never a stderr write
+					// from construction: the creating host may be running a terminal UI.
+					this.deps.emitWarning(
+						`Memory subsystem init failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
 				} finally {
 					if (generation === this._memoryGeneration) {
 						this._transitioning = false;
