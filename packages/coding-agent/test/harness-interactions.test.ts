@@ -78,6 +78,7 @@ import { SessionManager } from "../src/kernel/session/session-manager.ts";
 import type { ScriptedReply, ScriptedRequest, ScriptStep } from "./fixtures/harness/scripted-provider.ts";
 import { calls, createBarrier, fail, HARNESS_PROVIDER, text } from "./fixtures/harness/scripted-provider.ts";
 import {
+	branchForClosingReflection,
 	HARNESS_PROJECT_CWD,
 	type HarnessWorld,
 	type HarnessWorldOptions,
@@ -87,6 +88,7 @@ import {
 	projectPath,
 	RPC_CLOSING_WARNING,
 	RPC_LATE_WARNING,
+	runClosingReflectionTimeout,
 	runCompactionBehindHeldRun,
 	runHarnessWorld,
 	runRpcHost,
@@ -1078,6 +1080,8 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				// The quit's bounded settle expires for a run that an extension holds past the abort (the message-end witness): exact text.
 				/^A run did not settle within 5s of quit; its final message may not have been persisted\.$/,
 				/^A compaction did not settle within 5s of quit; its result is discarded\.$/,
+				// The closing reflection witness: its held reflection is disclosed at quit, exact text.
+				/^A reflection turn did not settle within 5s of quit; its work may not have been persisted\.$/,
 				// Owner input queued behind a run that the quit ends is held complete with its text (the queued-quit witness): exact text.
 				/^A queued message was not delivered because the session closed before it could be delivered\. It is kept in full in the pending queue: Owner input queued behind the quit\.$/,
 				/^Worker worker-1 rejected: Worker worker-1 resource release failed\.$/,
@@ -2188,6 +2192,8 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					status: "due",
 					triggers: expect.arrayContaining([expect.stringMatching(/^(complex|corrective|durable|session-end)$/)]),
 				});
+			// Two branch copies of this checkpoint, before the start turn: the closing reflection reopens them after the background flow.
+			const closingCopies = branchForClosingReflection(sessionManager);
 			await withDeadline(trace, "background start turn", session.prompt("Start the check in the background."));
 			trace.mark("root", "background.started");
 			await withDeadline(trace, "background reflection turn", backgroundReflected.promise, 60_000);
@@ -2198,6 +2204,25 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				world.shell.requests.filter((request) => request.command === "echo background-check"),
 				"the background command physically ran once",
 			).toHaveLength(1);
+
+			// Closing reflection timeout: the carried cue buys a reflection on each reopened copy. The held owner quits while that reflection waits
+			// at its input: one disclosure, no provider request after quit, and an unchanged file after release. The normal order discloses nothing.
+			const closingDisclosure =
+				"A reflection turn did not settle within 5s of quit; its work may not have been persisted.";
+			const closing = await runClosingReflectionTimeout(world, closingCopies, REFLECTION_CHECKPOINT_MARKER);
+			expect(
+				closing,
+				"the closing reflection is disclosed once at quit, writes nothing on release, and runs in normal order",
+			).toEqual({
+				heldCueStatus: "due",
+				quitWarnings: [closingDisclosure],
+				warningsAfterRelease: [closingDisclosure],
+				providerRequestsAfterQuit: 0,
+				fileUnchangedByRelease: true,
+				controlReflectionReached: true,
+				controlDisposal: undefined,
+				controlQuitWarnings: [],
+			});
 
 			// Old handoff against a newer owner turn: a background task started under owner turn A completes while owner turn B is
 			// held at its provider gate. B's current request suffix must not carry A's handoff; the handoff is delivered once, on its

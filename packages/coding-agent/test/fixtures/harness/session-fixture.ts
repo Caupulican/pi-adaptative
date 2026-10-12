@@ -9,10 +9,12 @@ import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import type { WorkerWriteReservationLease } from "../../../src/core/delegation/worker-write-reservation.ts";
 import type { ExecResult } from "../../../src/core/exec.ts";
 import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
+import { isGoalExecutionActive } from "../../../src/core/goals/goal-state.ts";
 import { getResumableHumanInputSnapshot } from "../../../src/core/human-input.ts";
 import type { TranscriptSummaryTimeSource } from "../../../src/core/memory/transcript-memory-contracts.ts";
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
+import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../../src/core/reflection-controller.ts";
 import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
 import { type CreateAgentSessionResult, createAgentSession } from "../../../src/core/sdk.ts";
 import type { Settings } from "../../../src/core/settings/settings-schema.ts";
@@ -25,7 +27,14 @@ import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle
 import { type RpcModeIo, runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import type { TerminationSignalHandler } from "../../../src/modes/termination-signals.ts";
 import { ScriptedHumanInput } from "./scripted-human-input.ts";
-import { type Barrier, createBarrier, HARNESS_API, HARNESS_PROVIDER, ScriptedProvider } from "./scripted-provider.ts";
+import {
+	type Barrier,
+	createBarrier,
+	HARNESS_API,
+	HARNESS_PROVIDER,
+	ScriptedProvider,
+	type ScriptedRequest,
+} from "./scripted-provider.ts";
 import { ScriptedWindowsShellProcesses } from "./scripted-windows-shell.ts";
 import { EffectGuard, VirtualFileSystem } from "./virtual-io.ts";
 import { VirtualProcessTable } from "./virtual-process-table.ts";
@@ -2772,6 +2781,202 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 			compactionEntries: sessionFileEntries(controlText).filter((entry) => entry.type === "compaction").length,
 			quitWarnings: world.warnings.slice(controlMark).filter((message) => message !== CLOSING_VERIFICATION_NOTICE),
 		},
+	};
+}
+
+/**
+ * Two native branch copies of a session at its current leaf. Each is a new session file with its own identity; the source manager is only
+ * read, so the session it came from continues untouched.
+ */
+export function branchForClosingReflection(manager: SessionManager | undefined): {
+	readonly held: SessionManager;
+	readonly control: SessionManager;
+} {
+	if (manager === undefined) throw new Error("the closing reflection has no owner session to branch");
+	const leafId = manager.getLeafId();
+	if (leafId === null) throw new Error("the closing reflection owner has no leaf to branch from");
+	return { held: manager.createBranchedSessionManager(leafId), control: manager.createBranchedSessionManager(leafId) };
+}
+
+/** The reflection's cue state as the reflection gate reads it on a branch. */
+interface ReflectionCueProbe {
+	readonly status?: string;
+	readonly triggers?: readonly string[];
+}
+
+/** The triggers that buy a reflection turn (`REFLECTION_TURN_WORTHY_TRIGGERS`, reflection-controller.ts; not exported). */
+const CLOSING_WORTHY_TRIGGERS: readonly string[] = ["complex", "corrective", "durable", "session-end"];
+
+function reflectionCueProbe(manager: SessionManager): ReflectionCueProbe | undefined {
+	return manager.getLatestCustomEntryOnBranch(CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE)?.data as
+		| ReflectionCueProbe
+		| undefined;
+}
+
+/**
+ * Throws, with the bounded gate state, unless a reopened copy reaches the closing reflection: okf memory, a due cue with a worthy trigger,
+ * and no goal or task step in progress. Without those the quit has no reflection to hold, so the witness cannot say anything.
+ */
+function requireClosingReflectionGate(session: AgentSession, manager: SessionManager): void {
+	const cue = reflectionCueProbe(manager);
+	const goal = session.getGoalStateSnapshot();
+	const steps = session.getTaskStepsStateSnapshot()?.steps ?? [];
+	const inProgress = steps.filter((step) => step.status === "in_progress").length;
+	const worthy = cue?.triggers?.some((trigger) => CLOSING_WORTHY_TRIGGERS.includes(trigger)) === true;
+	const open = (goal !== undefined && isGoalExecutionActive(goal.status)) || inProgress > 0;
+	if (session.getMemorySystem() === "okf" && cue?.status === "due" && worthy && !open) return;
+	const state = { memorySystem: session.getMemorySystem(), cue, goal: goal?.status, inProgressSteps: inProgress };
+	throw new Error(
+		`the reopened copy does not reach the closing reflection gate: ${JSON.stringify(state).slice(0, 600)}`,
+	);
+}
+
+/**
+ * Holds the reflection turn at its `input` event: `reached` is released when the reflection's own prompt arrives, and nothing reaches the
+ * provider until `hold` is released. Any other input passes straight through.
+ */
+function holdReflectionTurn(hold: Barrier, reached: Barrier, reflectionPrompt: string): ExtensionFactory {
+	return (pi) => {
+		pi.on("input", async (event) => {
+			if (event.text !== reflectionPrompt) return;
+			reached.release();
+			await hold.promise;
+		});
+	};
+}
+
+function carriesReflectionMarker(request: ScriptedRequest, marker: string): boolean {
+	return request.context.messages.some((message) => JSON.stringify(message).includes(marker));
+}
+
+/** Warnings since `mark`, without the closing verification notice that System One's own closing work emits. */
+function warningsSince(world: HarnessWorld, mark: number): string[] {
+	return world.warnings.slice(mark).filter((message) => message !== CLOSING_VERIFICATION_NOTICE);
+}
+
+/**
+ * What a closing reflection leaves behind. The held owner quits while its reflection waits at the input hold; `quitWarnings` and
+ * `warningsAfterRelease` are the disclosures, `fileUnchangedByRelease` the byte comparison, and the control is the normal order, where the
+ * reflection's provider step is consumed before the owner quits.
+ */
+export interface ClosingReflectionTimeoutWitness {
+	readonly heldCueStatus: string | undefined;
+	readonly quitWarnings: readonly string[];
+	readonly warningsAfterRelease: readonly string[];
+	readonly providerRequestsAfterQuit: number;
+	readonly fileUnchangedByRelease: boolean;
+	readonly controlReflectionReached: boolean;
+	readonly controlDisposal: unknown;
+	readonly controlQuitWarnings: readonly string[];
+}
+
+/**
+ * Reopens both branch copies in fresh owners and runs the closing reflection in each. The acknowledgement is small talk: its owner words wait
+ * in the owner-policy queue and the reflection's routing settles them, so the held owner asks System One nothing and the control asks only the
+ * `carries_0` screen. The copies carry the cue the start turn would have bought: `requireClosingReflectionGate` checks it before any turn runs.
+ */
+export async function runClosingReflectionTimeout(
+	world: HarnessWorld,
+	copies: { readonly held: SessionManager; readonly control: SessionManager },
+	reflectionPrompt: string,
+): Promise<ClosingReflectionTimeoutWitness> {
+	const { trace } = world;
+	const hold = createBarrier();
+	const reached = createBarrier();
+	const held = await world.createRootSession("root", {
+		sessionManager: copies.held,
+		extensionFactories: [holdReflectionTurn(hold, reached, reflectionPrompt)],
+	});
+	const heldSession = held.session;
+	await heldSession.bindExtensions({ uiContext: world.humanInput.ui });
+	requireClosingReflectionGate(heldSession, held.sessionManager);
+	const heldFile = held.sessionManager.getSessionFile();
+	if (heldFile === undefined) throw new Error("the held reflection owner has no file");
+	world.systemOne.enterPhase("closing-held", {});
+	world.provider.enqueue("root", {
+		name: "closing-held-ack",
+		reply: { content: [{ type: "text", text: "Acknowledged." }] },
+	});
+	await withDeadline(
+		trace,
+		"closing held: the acknowledgement completes",
+		heldSession.prompt("Acknowledge the closing check."),
+	);
+	await withDeadline(trace, "closing held: the reflection reaches its input hold", reached.promise);
+	const heldCueStatus = reflectionCueProbe(held.sessionManager)?.status;
+	const mark = world.warnings.length;
+	let fileAtQuit = "";
+	let requestsAtQuit = 0;
+	let quitWarnings: string[] = [];
+	try {
+		await withDeadline(
+			trace,
+			"closing held: the owner quits while the reflection is held",
+			heldSession.disposeAndWait(),
+			60_000,
+		);
+		fileAtQuit = world.io.peekFile(heldFile) ?? "";
+		requestsAtQuit = world.provider.requests.length;
+		quitWarnings = warningsSince(world, mark);
+	} finally {
+		hold.release();
+		await withDeadline(
+			trace,
+			"closing held: the released reflection settles",
+			heldSession.settleReflectionTurn(),
+			60_000,
+		);
+	}
+	const fileAfterRelease = world.io.peekFile(heldFile) ?? "";
+	const providerRequestsAfterQuit = world.provider.requests.length - requestsAtQuit;
+	const warningsAfterRelease = warningsSince(world, mark);
+
+	const released = createBarrier();
+	released.release();
+	const control = await world.createRootSession("root", {
+		sessionManager: copies.control,
+		extensionFactories: [holdReflectionTurn(released, createBarrier(), reflectionPrompt)],
+	});
+	const controlSession = control.session;
+	await controlSession.bindExtensions({ uiContext: world.humanInput.ui });
+	requireClosingReflectionGate(controlSession, control.sessionManager);
+	world.systemOne.enterPhase("closing-control", { carries_0: { kind: "noul", probability: 0.97 } });
+	world.provider.enqueue(
+		"root",
+		{ name: "closing-control-ack", reply: { content: [{ type: "text", text: "Acknowledged." }] } },
+		{
+			name: "closing-control-reflection",
+			check: (request) => {
+				if (!carriesReflectionMarker(request, reflectionPrompt)) {
+					throw new Error("the turn after the acknowledgement is not the reflection checkpoint");
+				}
+			},
+			reply: { content: [{ type: "text", text: "Nothing durable to record." }] },
+		},
+	);
+	await withDeadline(
+		trace,
+		"closing control: the acknowledgement completes",
+		controlSession.prompt("Acknowledge the closing check."),
+	);
+	await withDeadline(
+		trace,
+		"closing control: the reflection completes",
+		controlSession.settleReflectionTurn(),
+		60_000,
+	);
+	const controlReflectionReached = world.provider.reached.includes("root:closing-control-reflection");
+	const controlMark = world.warnings.length;
+	const controlDisposal = await world.disposeSessionInBody(controlSession);
+	return {
+		heldCueStatus,
+		quitWarnings,
+		warningsAfterRelease,
+		providerRequestsAfterQuit,
+		fileUnchangedByRelease: fileAfterRelease.length > 0 && fileAfterRelease === fileAtQuit,
+		controlReflectionReached,
+		controlDisposal,
+		controlQuitWarnings: warningsSince(world, controlMark),
 	};
 }
 
