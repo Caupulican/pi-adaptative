@@ -1250,25 +1250,32 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			throw error;
 		}
 		// A session that was constructed and then failed (memory initialization, extension discovery) is closed in full: its extensions,
-		// shell and usage owner, with its closing warnings going to the caller's sink. The original failure stays the cause.
+		// shell and usage owner. The creation failure, a failed disposal and a failing warning sink are all collected and none replaces
+		// another; the held closing warnings are drained on BOTH disposal outcomes (the caller never receives the session to recover
+		// them), and they never go to stderr (the creating host may be running a terminal UI).
+		const failures: unknown[] = [error];
 		try {
 			await constructed.disposeAndWait({ drainClosingWarnings: false });
 		} catch (disposeError: unknown) {
-			throw new AggregateError(
-				[error, disposeError],
-				"Session creation failed and the session could not be closed cleanly.",
-			);
+			failures.push(disposeError);
 		}
-		// The warnings it held go to the caller's sink; with none, they ride the failure the caller shows, never stderr (the creating
-		// host may be running a terminal UI that stderr writes would land on).
 		const closingWarnings = constructed.takeUndeliveredWarnings();
+		let carriedWarnings: string | undefined;
 		if (closingWarnings.length > 0) {
-			if (options.onClosingWarnings) options.onClosingWarnings(closingWarnings);
-			else {
-				const message = error instanceof Error ? error.message : String(error);
-				throw new Error(`${message} ${closingWarnings.join(" ")}`, { cause: error });
+			if (options.onClosingWarnings) {
+				try {
+					options.onClosingWarnings(closingWarnings);
+				} catch (sinkError: unknown) {
+					failures.push(sinkError);
+				}
+			} else {
+				carriedWarnings = closingWarnings.join(" ");
 			}
 		}
-		throw error;
+		const originalMessage = error instanceof Error ? error.message : String(error);
+		const failure: unknown =
+			failures.length === 1 ? error : new AggregateError(failures, `${originalMessage} (its cleanup also failed)`);
+		if (carriedWarnings === undefined) throw failure;
+		throw new Error(`${originalMessage} ${carriedWarnings}`, { cause: failure });
 	}
 }
