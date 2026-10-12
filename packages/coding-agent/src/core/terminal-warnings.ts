@@ -42,6 +42,25 @@ export function causeHeadline(cause: unknown): string {
 	}
 }
 
+/**
+ * The detail a process-level reporter prints for an Error, cut to `max` characters and never throwing: its stack when that reads as
+ * text, else its message as plain text (an Error may have no stack, a non-string message or a throwing stack getter).
+ */
+export function errorDetail(error: Error, max: number): string {
+	let text: string;
+	try {
+		const stack = error.stack;
+		text = typeof stack === "string" && stack.length > 0 ? stack : plainText(error.message);
+	} catch {
+		try {
+			text = plainText(error.message);
+		} catch {
+			text = "[error]";
+		}
+	}
+	return text.slice(0, max);
+}
+
 const CAUSE_MAX_DEPTH = 4;
 const CAUSE_MAX_LISTED = 8;
 const CAUSE_MAX_CHARS = 2_000;

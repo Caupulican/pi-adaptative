@@ -6,6 +6,7 @@ import {
 } from "../context/memory-provider-contract.ts";
 import type { MemoryProvider, ToolDefinition } from "../extensions/types.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
+import { causeHeadline, neutralizeControls } from "../terminal-warnings.ts";
 import type { MemoryLifecycleContext } from "./memory-provider.ts";
 
 export interface MemoryPrefetchOptions {
@@ -43,6 +44,24 @@ type ProviderOperationResult<T> =
 
 interface AbandonedProviderState {
 	pendingOperations: number;
+}
+
+/** Longest provider-error detail kept in a lifecycle diagnostic. */
+const MAX_DIAGNOSTIC_DETAIL = 300;
+
+/**
+ * A provider failure as a diagnostic message: its kind and its own text, control characters escaped and the text bounded. Never throws:
+ * a value whose class check or conversion throws is named by its type.
+ */
+function describeProviderError(error: unknown): string {
+	let kind: string;
+	try {
+		kind = error instanceof Error ? error.name : typeof error;
+	} catch {
+		kind = typeof error;
+	}
+	const detail = neutralizeControls(causeHeadline(error)).slice(0, MAX_DIAGNOSTIC_DETAIL);
+	return detail.length > 0 ? `${kind}: ${detail}` : kind;
 }
 
 export class MemoryManager {
@@ -150,7 +169,7 @@ export class MemoryManager {
 					provider: provider.name,
 					operation,
 					status: "error",
-					message: result.error instanceof Error ? result.error.name : typeof result.error,
+					message: describeProviderError(result.error),
 				});
 				return { status: "error", error: result.error };
 			}

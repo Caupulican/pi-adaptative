@@ -14,7 +14,7 @@
 import type { TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
-import { causeHeadline, describeCause, neutralizeControls } from "../../core/terminal-warnings.ts";
+import { causeHeadline, describeCause, errorDetail, neutralizeControls } from "../../core/terminal-warnings.ts";
 import { disposeUnclaimedCliPowerShellWarmStart } from "../../core/tools/early-powershell-session.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 
@@ -275,7 +275,7 @@ export class SignalLifecycle {
 	 */
 	reportUnhandledRejection(reason: unknown): void {
 		const error = asError(reason);
-		const detail = (error.stack ?? error.message).slice(0, MAX_REJECTION_DETAIL);
+		const detail = errorDetail(error, MAX_REJECTION_DETAIL);
 		if (this.shuttingDown) {
 			// The UI is going away: the rejection is reported on stderr, escaped, and the shutdown keeps running.
 			this.io.stderr(`${neutralizeControls(`Unhandled promise rejection during shutdown. ${detail}`)}\n`);
@@ -311,7 +311,7 @@ export class SignalLifecycle {
 			try {
 				killTrackedDetachedChildren();
 			} catch {}
-			const detail = (error.stack ?? error.message).slice(0, MAX_REJECTION_DETAIL);
+			const detail = errorDetail(error, MAX_REJECTION_DETAIL);
 			this.io.stderr(`${neutralizeControls(`pi exiting due to uncaughtException during shutdown: ${detail}`)}\n`);
 			this.io.exit(1);
 			// An injected exit returns: the crash must not fall through to the non-shutdown path below.

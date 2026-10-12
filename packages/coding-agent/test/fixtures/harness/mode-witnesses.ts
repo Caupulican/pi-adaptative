@@ -11,6 +11,7 @@ import { EditorOverlayHost } from "../../../src/modes/interactive/editor-overlay
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
 import { initTheme, stopThemeWatcher } from "../../../src/presentation/theme/theme.ts";
+import { trackDetachedChild, untrackDetachedChild } from "../../../src/utils/shell.ts";
 import { type Barrier, createBarrier, HARNESS_PROVIDER } from "./scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "./session-fixture.ts";
 
@@ -27,6 +28,7 @@ const CLOSING_GATE_CONTROL_REPLY = "The closing gate control reply.";
 const CALIBRATION_WARNING = `Text tool protocol for ${HARNESS_PROVIDER}/root has no valid calibration on record; falling back to native tool calls this turn. Run /toolprobe ${HARNESS_PROVIDER}/root to calibrate.`;
 /** The owner prompt of both calibration runs: the same text, so both classify identically before preparation reaches the warning. */
 const CALIBRATION_RUN_PROMPT = "Run the control.";
+const CALIBRATION_BASELINE_REPLY = "The calibration baseline reply.";
 const REJECTION_STACK = "Error: late rejection \u001b[2J at guard witness";
 const REJECTION_LINE = "Unhandled promise rejection during shutdown. Error: late rejection \\x1b[2J at guard witness\n";
 const CRASH_STACK = "Error: guard crash at guard witness";
@@ -62,6 +64,18 @@ function fixedError(stack: string): Error {
 }
 
 /** A thrown value whose conversion and tag both throw: the cause report must still name it, and must not throw while doing so. */
+/** An Error with no readable stack (the getter throws) and a non-string message: its report must still be written. */
+function stacklessError(): Error {
+	const error = new Error("guard witness");
+	Object.defineProperty(error, "stack", {
+		get: () => {
+			throw new Error("Guard witness: stack getter throws.");
+		},
+	});
+	Object.defineProperty(error, "message", { value: 42 });
+	return error;
+}
+
 function unconvertibleCause(): object {
 	return {
 		toString: () => {
@@ -225,12 +239,12 @@ async function runGuardControl(): Promise<GuardRun> {
 }
 
 /** A rejection arrives while the dispose is held: it is reported escaped on stderr and the shutdown keeps running to exit 0. */
-async function runGuardRejection(): Promise<GuardRun> {
+async function runGuardRejection(reason: unknown = fixedError(REJECTION_STACK)): Promise<GuardRun> {
 	const host = createGuardHost({ holdDispose: true, stopFails: false });
 	host.lifecycle.registerSignalHandlers();
 	const shutdown = host.lifecycle.shutdown({ fromSignal: true });
 	await host.reached.promise;
-	(armedListener(host.installs, "unhandledRejection") as (reason: unknown) => void)(fixedError(REJECTION_STACK));
+	(armedListener(host.installs, "unhandledRejection") as (reason: unknown) => void)(reason);
 	host.hold.release();
 	await shutdown;
 	return guardRunOf(host);
@@ -590,48 +604,79 @@ async function runQuitWithHeldDispose(world: HarnessWorld): Promise<QuitRun> {
 interface QuitSecondSignalRun {
 	/** Signal listeners armed while the quit's runtime dispose is held. */
 	readonly armedSignalsAtDispose: readonly string[];
-	/** The exit codes the instant the second signal's forced listener has run. */
-	readonly exitsAtSecondSignal: readonly number[];
-	/** How many times the terminal was stopped before and after the second signal. */
+	/** The exit codes the instant the forced listener has run. */
+	readonly exitsAtSignal: readonly number[];
+	/** How many times the terminal was stopped before and after the signal. */
 	readonly terminalStopsBefore: number;
 	readonly terminalStopsAfter: number;
 	readonly stderr: readonly string[];
-	/** The exit codes after a Ctrl+C (SIGINT) delivered to the same held quit. */
-	readonly exitsAtInterrupt: readonly number[];
+	/** The signals the owned tracked child and the owned untracked control child received, as the process table delivered them. */
+	readonly trackedChildSignals: readonly string[];
+	readonly untrackedChildSignals: readonly string[];
+}
+
+/** Two owned virtual children in the world's process table: one tracked like a detached shell child, one untracked as a control. */
+interface ChildProbe {
+	signalsOfTracked(): string[];
+	signalsOfUntracked(): string[];
+	/** The children's physical close and the lifecycle's untracking, kept apart from the signal delivery they follow. */
+	release(): void;
+}
+
+function probeChildren(world: HarnessWorld): ChildProbe {
+	const table = world.processTable;
+	const trackedPid = table.registerChild({ detached: true, deliver: () => {} });
+	const untrackedPid = table.registerChild({ detached: true, deliver: () => {} });
+	const handle = { pid: trackedPid, exitCode: null, signalCode: null };
+	trackDetachedChild(handle);
+	const signalsOf = (pid: number): string[] =>
+		table.delivered.filter((entry) => entry.pid === pid).map((entry) => entry.signal);
+	return {
+		signalsOfTracked: () => signalsOf(trackedPid),
+		signalsOfUntracked: () => signalsOf(untrackedPid),
+		release: () => {
+			untrackDetachedChild(handle);
+			table.releaseChild(trackedPid);
+			table.releaseChild(untrackedPid);
+		},
+	};
 }
 
 /**
- * A quit with the runtime dispose held, then a second SIGTERM: the forced listener must be armed on the quit path too, exit with
- * 128 + 15 and not stop the terminal a second time (the quit's own stop already ran).
+ * A quit with the runtime dispose held, then a second signal on its own live held quit: the forced listener must be armed on the quit
+ * path too, exit with the signal's status (128 + signal), kill the tracked child (SIGKILL; the untracked control child receives none)
+ * and not stop the terminal a second time (the quit's own stop already ran). Delivery is acceptance, not death: both children are
+ * released (physically closed) afterwards, and the held quit then finishes by itself.
  */
-async function runQuitSecondSignal(world: HarnessWorld): Promise<QuitSecondSignalRun> {
+async function runQuitSecondSignal(world: HarnessWorld, signal: "SIGTERM" | "SIGINT"): Promise<QuitSecondSignalRun> {
 	const capture: { shutdown?: () => void } = {};
 	const harness = await createInteractiveHarness(world, {
 		holdDispose: true,
 		extensionFactories: [captureShutdownContext(capture)],
 	});
-	await withDeadline(world.trace, "quit second signal: the interactive mode starts", harness.mode.init());
+	await withDeadline(world.trace, `quit ${signal}: the interactive mode starts`, harness.mode.init());
 	if (!capture.shutdown)
 		throw new Error("the quit second-signal witness: session_start never reached the extension context");
+	const children = probeChildren(world);
 	capture.shutdown();
 	try {
-		await withDeadline(world.trace, "quit second signal: the runtime dispose is held", harness.reached.promise);
+		await withDeadline(world.trace, `quit ${signal}: the runtime dispose is held`, harness.reached.promise);
 		const armedSignalsAtDispose = armedNames(harness.installs).filter(isSignalName);
 		const terminalStopsBefore = harness.calls.filter((call) => call === "terminal.stop").length;
-		(armedListener(harness.installs, "SIGTERM") as () => void)();
-		const exitsAtSecondSignal = [...harness.exits];
-		(armedListener(harness.installs, "SIGINT") as () => void)();
+		(armedListener(harness.installs, signal) as () => void)();
 		return {
 			armedSignalsAtDispose,
-			exitsAtSecondSignal,
+			exitsAtSignal: [...harness.exits],
 			terminalStopsBefore,
 			terminalStopsAfter: harness.calls.filter((call) => call === "terminal.stop").length,
 			stderr: [...harness.stderr],
-			exitsAtInterrupt: [...harness.exits],
+			trackedChildSignals: children.signalsOfTracked(),
+			untrackedChildSignals: children.signalsOfUntracked(),
 		};
 	} finally {
 		harness.hold.release();
-		await withDeadline(world.trace, "quit second signal: the quit finishes", harness.quitFinished.promise, 60_000);
+		await withDeadline(world.trace, `quit ${signal}: the quit finishes`, harness.quitFinished.promise, 60_000);
+		children.release();
 	}
 }
 
@@ -642,6 +687,9 @@ interface QuitCrashRun {
 	/** The exit codes the instant the crash has been reported, before the held quit resumes. */
 	readonly exitsAtCrash: readonly number[];
 	readonly stderr: readonly string[];
+	/** The signals the tracked child and the untracked control child received by the time the crash was reported. */
+	readonly trackedChildSignals: readonly string[];
+	readonly untrackedChildSignals: readonly string[];
 }
 
 /**
@@ -656,6 +704,7 @@ async function runQuitCrashAfterStop(world: HarnessWorld): Promise<QuitCrashRun>
 	});
 	await withDeadline(world.trace, "quit crash: the interactive mode starts", harness.mode.init());
 	if (!capture.shutdown) throw new Error("the quit crash witness: session_start never reached the extension context");
+	const children = probeChildren(world);
 	capture.shutdown();
 	try {
 		await withDeadline(world.trace, "quit crash: the runtime dispose is held", harness.reached.promise);
@@ -666,11 +715,14 @@ async function runQuitCrashAfterStop(world: HarnessWorld): Promise<QuitCrashRun>
 			terminalStopsAfter: harness.calls.filter((call) => call === "terminal.stop").length,
 			exitsAtCrash: [...harness.exits],
 			stderr: [...harness.stderr],
+			trackedChildSignals: children.signalsOfTracked(),
+			untrackedChildSignals: children.signalsOfUntracked(),
 		};
 	} finally {
 		// The injected exit returned, so the held quit is still unfinished: release it and join it after the observation above was copied.
 		harness.hold.release();
 		await withDeadline(world.trace, "quit crash: the quit finishes", harness.quitFinished.promise, 60_000);
+		children.release();
 	}
 }
 
@@ -764,6 +816,8 @@ async function runClosingGateAtStart(world: HarnessWorld): Promise<ClosingGateSt
 }
 
 interface CalibrationGateRun {
+	/** The baseline turn's reply is in the persisted file before the calibration boundary is armed. */
+	readonly baselinePersisted: boolean;
 	/** The quit ran inside the calibration warning, which preparation emits before the run's provider request. */
 	readonly quitReached: boolean;
 	/** The run the quit landed in was admitted (one active run), and its owner was not yet shut down. */
@@ -804,8 +858,6 @@ async function runClosingGateAtCalibration(world: HarnessWorld): Promise<Calibra
 	const { trace } = world;
 	// Its own agent directory: the seeded verdict must not reach the journey's later turns on the same model.
 	const agentDir = `${world.agentDir}-calibration-gate`;
-	seedCalibrationMissing(agentDir);
-	const mark = world.warnings.length;
 	const held = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
@@ -815,6 +867,20 @@ async function runClosingGateAtCalibration(world: HarnessWorld): Promise<Calibra
 	await heldSession.bindExtensions({ uiContext: world.humanInput.ui });
 	const heldFile = held.sessionManager.getSessionFile();
 	if (heldFile === undefined) throw new Error("the calibration gate owner has no file");
+	// A never-created file cannot prove preservation: a normal turn persists a baseline first, then the verdict is seeded so the NEXT
+	// run's preparation reports the missing calibration (preparation reads the store on every run).
+	world.provider.enqueue("root", {
+		name: "calibration-gate-baseline",
+		reply: { content: [{ type: "text", text: CALIBRATION_BASELINE_REPLY }] },
+	});
+	await withDeadline(
+		trace,
+		"calibration gate: the baseline turn completes",
+		heldSession.prompt(CALIBRATION_RUN_PROMPT),
+	);
+	const baselinePersisted = (world.io.peekFile(heldFile) ?? "").includes(CALIBRATION_BASELINE_REPLY);
+	seedCalibrationMissing(agentDir);
+	const mark = world.warnings.length;
 	let quitReached = false;
 	let activeRunsAtQuit = 0;
 	let shutdownBeforeQuit = false;
@@ -877,6 +943,7 @@ async function runClosingGateAtCalibration(world: HarnessWorld): Promise<Calibra
 	const controlRequestModels = world.provider.requests.slice(controlRequestMark).map((request) => request.model.id);
 	await world.disposeSessionInBody(control.session);
 	return {
+		baselinePersisted,
 		quitReached,
 		activeRunsAtQuit,
 		shutdownBeforeQuit,
@@ -964,6 +1031,18 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	);
 	expect(stringCrash.exits, "a string thrown during shutdown exits 1").toEqual([1]);
 
+	// An Error whose stack cannot be read and whose message is not text is reported by its message's plain text, and the exit still happens.
+	const stacklessCrash = await runGuardCrash(stacklessError(), { stopFails: false });
+	expect(stacklessCrash.stderr, "an Error without a readable stack is still reported during shutdown").toEqual([
+		"pi exiting due to uncaughtException during shutdown: 42\n",
+	]);
+	expect(stacklessCrash.exits, "an Error without a readable stack still exits 1").toEqual([1]);
+	const stacklessRejection = await runGuardRejection(stacklessError());
+	expect(stacklessRejection.stderr, "a rejection Error without a readable stack is still reported").toEqual([
+		"Unhandled promise rejection during shutdown. 42\n",
+	]);
+	expect(stacklessRejection.exits, "the shutdown still completes after that rejection").toEqual([0]);
+
 	const stopFailsCrash = await runGuardCrash(fixedError(CRASH_STACK), { stopFails: true });
 	expect(stopFailsCrash.stderr, "a stop failure during a crash is reported before the crash line").toEqual([
 		`Stop failed during shutdown: ${GUARD_STOP_FAILURE}\n`,
@@ -1004,19 +1083,26 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	// The resume line needs a real TTY and a session file on disk; the harness's session is virtual, so none is written here.
 	expect(quit.stdout, "the quit writes no resume line for a virtual session").toEqual([]);
 
-	const secondSignal = await runQuitSecondSignal(world);
-	expect(
-		secondSignal.armedSignalsAtDispose,
-		"the quit's held dispose keeps the second-signal listeners armed",
-	).toEqual([...signalsArmed, "SIGINT"]);
-	expect(secondSignal.exitsAtSecondSignal, "a second SIGTERM during the quit exits with 128 + 15").toEqual([143]);
-	expect(secondSignal.terminalStopsAfter, "the forced exit does not stop the terminal a second time").toBe(
-		secondSignal.terminalStopsBefore,
-	);
-	expect(secondSignal.exitsAtInterrupt, "Ctrl+C (SIGINT) during the quit's dispose exits with 128 + 2").toEqual([
-		143, 130,
-	]);
-	expect(secondSignal.stderr, "a second SIGTERM during the quit writes nothing to stderr").toEqual([]);
+	// Each signal reaches its own live held quit: one stop, the tracked child killed (the untracked control child untouched), exit 128 + n.
+	for (const [signal, code] of [
+		["SIGTERM", 143],
+		["SIGINT", 130],
+	] as const) {
+		const forced = await runQuitSecondSignal(world, signal);
+		expect(
+			forced.armedSignalsAtDispose,
+			`the quit's held dispose keeps the forced listeners armed (${signal})`,
+		).toEqual([...signalsArmed, "SIGINT"]);
+		expect(forced.exitsAtSignal, `a ${signal} during the quit exits with 128 + n`).toEqual([code]);
+		expect(forced.terminalStopsAfter, `the ${signal} forced exit does not stop the terminal a second time`).toBe(
+			forced.terminalStopsBefore,
+		);
+		expect(forced.stderr, `a ${signal} during the quit writes nothing to stderr`).toEqual([]);
+		expect(forced.trackedChildSignals, `the ${signal} forced exit kills the tracked child`).toContain("SIGKILL");
+		expect(forced.untrackedChildSignals, `the ${signal} forced exit leaves an untracked owned child alone`).toEqual(
+			[],
+		);
+	}
 
 	const crashAfterStop = await runQuitCrashAfterStop(world);
 	expect(
@@ -1030,6 +1116,11 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	expect(crashAfterStop.stderr, "the crash is reported with its stack, and nothing else is written").toEqual([
 		CRASH_LINE,
 	]);
+	expect(crashAfterStop.trackedChildSignals, "a crash during shutdown kills the tracked child").toContain("SIGKILL");
+	expect(
+		crashAfterStop.untrackedChildSignals,
+		"a crash during shutdown leaves an untracked owned child alone",
+	).toEqual([]);
 
 	const standard = await runInteractiveStop(world, false);
 	expect(standard.failures, "a stop with nothing failing rethrows nothing").toEqual([]);
@@ -1073,6 +1164,7 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	expect(gate.controlCommitted, "the control released before the quit commits its reply").toBe(true);
 
 	const calibration = await runClosingGateAtCalibration(world);
+	expect(calibration.baselinePersisted, "a nonempty persisted baseline exists before the quit is armed").toBe(true);
 	expect(calibration.quitReached, "the held run's calibration warning is reached and the quit starts there").toBe(
 		true,
 	);

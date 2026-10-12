@@ -11,6 +11,8 @@ import {
 	DEFAULT_DISCARD_SCAN_LIMITS,
 } from "../../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
+import { createFileArtifactStore } from "../../../src/core/context/context-artifacts.ts";
+import { acquireContextStoreRetention, getContextStoreDir } from "../../../src/core/context/context-store-retention.ts";
 import { classifyCustomEntryPersisted } from "../../../src/core/cost/spawned-usage-receipt.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE } from "../../../src/core/cost/usage-records.ts";
 import type { WorkerWriteReservationLease } from "../../../src/core/delegation/worker-write-reservation.ts";
@@ -3088,8 +3090,17 @@ export async function runDiscardThroughRuntime(world: HarnessWorld): Promise<Dis
 /** A creation's failure as the caller receives it: the message, and the cause the SDK chained onto it when there is one. */
 export interface SdkFailureDescription {
 	readonly message: string;
-	readonly cause?: { readonly name: string; readonly message: string; readonly errors?: readonly string[] };
+	readonly cause?: {
+		readonly name: string;
+		readonly message: string;
+		readonly errors?: readonly SdkErrorDescription[];
+	};
 }
+
+/** One error of a cause: its text, or the aggregate it wraps (the context-storage cleanup wraps the scripted IO fault). */
+export type SdkErrorDescription =
+	| string
+	| { readonly name: string; readonly message: string; readonly errors: readonly SdkErrorDescription[] };
 
 /** One creation the SDK constructs and then fails in its extension read, with a memory warning held on the constructed session. */
 export interface SdkConstructionFailureOutcome {
@@ -3102,6 +3113,21 @@ export interface SdkConstructionFailureOutcome {
 	readonly memoryFaultFired: boolean;
 	/** Warnings that reached the world's own list: none, since every warning goes to the sink or rides the failure. */
 	readonly worldWarnings: readonly string[];
+}
+
+/** One creation whose disposal also fails on the tool-artifact store cleanup, with the seeded artifact's files before and after the disposal. */
+export interface SdkDisposalFailureOutcome {
+	readonly failure: SdkFailureDescription;
+	/** Disposals of the creation's resource loader: the disposal still reaches the loader after the cleanup failed. */
+	readonly loaderDisposals: number;
+	/** The memory read that holds the warning fired, so the warning comes from this creation's own memory initialization. */
+	readonly memoryFaultFired: boolean;
+	/** Warnings that reached the world's own list: none, since the warning rides the failure (no sink). */
+	readonly worldWarnings: readonly string[];
+	/** Files under the session's artifact store: the seeded artifact, then what the disposal left there. */
+	readonly artifactFiles: { readonly seeded: number; readonly afterDisposal: number };
+	/** The scripted lease write fired: the cleanup failed before its scan. */
+	readonly cleanupFaultFired: boolean;
 }
 
 /** The SDK's closing-warning routing on a failed construction, beside the objective-loop binding error and its normal-order control. */
@@ -3121,15 +3147,25 @@ export interface SdkConstructionFailureWitness {
 		readonly sinkCalls: readonly (readonly string[])[];
 		readonly memoryFaultFired: boolean;
 	};
+	/** A disposal whose tool-artifact cleanup is refused before its scan: the cause keeps the extension read, the cleanup and the held warning. */
+	readonly disposalFailed: SdkDisposalFailureOutcome;
+	/** Normal order, same seeded artifact and held warning, no cleanup fault: the cleanup scans and removes the artifact. */
+	readonly disposalControl: SdkDisposalFailureOutcome;
 }
 
 /** The extension read that the failed creations hit once memory has initialized. */
 const SDK_EXTENSION_READ_FAILURE = "SDK construction witness: the extension read fails after memory initialized.";
 /** The closing sink's own refusal in the sink-refused case. */
 const SDK_SINK_FAILURE = "SDK construction witness: the closing sink refuses the warnings.";
+/** The aggregate the context pipeline throws when its tool-artifact cleanup fails (context-pipeline.ts, cleanupToolArtifactStoreOnDispose). */
+const SDK_CONTEXT_CLEANUP_FAILURE = "Context storage cleanup failed";
 
-/** The held warning the failing memory read produces: the provider diagnostic carries the error's name (memory-manager.ts invokeProvider). */
-const SDK_MEMORY_WARNING = "Memory subsystem init failed: Error";
+/**
+ * The held warning the failing memory read produces: the provider diagnostic carries the error's name and own text (memory-manager.ts
+ * describeProviderError). The fault's per-creation name and the platform's MEMORY.md path are replaced by tokens (see
+ * {@link tokenizeMemoryFault}) so one expected value serves every creation on every platform.
+ */
+const SDK_MEMORY_WARNING = "Memory subsystem init failed: Error: Scripted IO fault <memory-fault>: read '<MEMORY.md>'";
 
 /** Each held-warning routing with the cause the SDK chained onto its failure, and the normal-order control (see {@link runSdkConstructionFailure}). */
 export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = {
@@ -3174,10 +3210,54 @@ export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = 
 		sinkCalls: [],
 		memoryFaultFired: true,
 	},
+	disposalFailed: {
+		failure: {
+			message: `${SDK_EXTENSION_READ_FAILURE} ${SDK_MEMORY_WARNING}`,
+			cause: {
+				name: "AggregateError",
+				message: `${SDK_EXTENSION_READ_FAILURE} (its cleanup also failed)`,
+				errors: [
+					SDK_EXTENSION_READ_FAILURE,
+					{
+						name: "AggregateError",
+						message: SDK_CONTEXT_CLEANUP_FAILURE,
+						errors: ["scripted IO fault sdk-disposal-lease-write-disposal-failed (EIO)"],
+					},
+				],
+			},
+		},
+		loaderDisposals: 1,
+		memoryFaultFired: true,
+		worldWarnings: [],
+		artifactFiles: { seeded: 2, afterDisposal: 2 },
+		cleanupFaultFired: true,
+	},
+	disposalControl: {
+		failure: {
+			message: `${SDK_EXTENSION_READ_FAILURE} ${SDK_MEMORY_WARNING}`,
+			cause: { name: "Error", message: SDK_EXTENSION_READ_FAILURE },
+		},
+		loaderDisposals: 1,
+		memoryFaultFired: true,
+		worldWarnings: [],
+		artifactFiles: { seeded: 2, afterDisposal: 0 },
+		cleanupFaultFired: false,
+	},
 };
 
+/** A scripted IO fault is named by its fault and code: its message embeds the run's lease path, which is random per session. */
 function failureText(error: unknown): string {
+	if (error instanceof Error && "faultName" in error) {
+		return `scripted IO fault ${String(error.faultName)} (${String((error as NodeJS.ErrnoException).code)})`;
+	}
 	return error instanceof Error ? error.message : String(error);
+}
+
+function describeErrorEntry(error: unknown): SdkErrorDescription {
+	if (error instanceof AggregateError) {
+		return { name: error.name, message: error.message, errors: error.errors.map(describeErrorEntry) };
+	}
+	return failureText(error);
 }
 
 function describeSdkFailure(error: unknown): SdkFailureDescription {
@@ -3186,13 +3266,22 @@ function describeSdkFailure(error: unknown): SdkFailureDescription {
 	if (cause instanceof AggregateError) {
 		return {
 			message: failureText(error),
-			cause: { name: cause.name, message: cause.message, errors: cause.errors.map(failureText) },
+			cause: { name: cause.name, message: cause.message, errors: cause.errors.map(describeErrorEntry) },
 		};
 	}
 	return {
 		message: failureText(error),
 		cause: { name: cause instanceof Error ? cause.name : typeof cause, message: failureText(cause) },
 	};
+}
+
+/** The outcome with the memory read fault's name and the MEMORY.md path replaced by tokens, wherever they appear in its texts. */
+function tokenizeMemoryFault<T>(world: HarnessWorld, faultName: string, value: T): T {
+	const memoryFile = resolve(configFile(world.agentDir, "MEMORY.md"));
+	const text = JSON.stringify(value)
+		.replaceAll(JSON.stringify(memoryFile).slice(1, -1), "<MEMORY.md>")
+		.replaceAll(faultName, "<memory-fault>");
+	return JSON.parse(text) as T;
 }
 
 /**
@@ -3236,13 +3325,13 @@ async function failedSdkCreation(
 			(error: unknown) => error,
 		);
 	if (outcome === "created") throw new Error(`${label}: the creation was not refused by its extension read`);
-	return {
+	return tokenizeMemoryFault(world, faultName, {
 		failure: describeSdkFailure(outcome),
 		sinkCalls,
 		loaderDisposals: probe.loaderDisposals,
 		memoryFaultFired: world.io.consumedFaults.includes(faultName),
 		worldWarnings: world.warnings.splice(mark),
-	};
+	});
 }
 
 /**
@@ -3264,12 +3353,12 @@ async function controlSdkCreation(world: HarnessWorld): Promise<SdkConstructionF
 	});
 	const subscriberWarnings = world.warnings.splice(mark);
 	const disposal = await world.disposeSessionInBody(created.session);
-	return {
+	return tokenizeMemoryFault(world, faultName, {
 		disposed: disposal === undefined,
 		subscriberWarnings,
 		sinkCalls,
 		memoryFaultFired: world.io.consumedFaults.includes(faultName),
-	};
+	});
 }
 
 /**
@@ -3292,8 +3381,82 @@ async function objectiveSdkCreation(world: HarnessWorld): Promise<SdkConstructio
 }
 
 /**
+ * Seeds one valid, unreferenced tool artifact in the store a session with `sessionId` reads. The run is acquired through the production
+ * retention lease, so it carries the manifest that adoption requires, and the lease is released before the creation.
+ */
+function seedToolArtifactStore(world: HarnessWorld, sessionId: string): string {
+	const artifactsDir = getContextStoreDir(world.agentDir, "artifacts", sessionId);
+	const lease = acquireContextStoreRetention(world.agentDir, sessionId);
+	try {
+		createFileArtifactStore({ baseDir: artifactsDir }).write({
+			kind: "tool_output",
+			content: "SDK disposal witness: one unreferenced artifact.",
+			toolName: "grep",
+			createdAtTurn: 1,
+			reproducible: true,
+		});
+	} finally {
+		lease.release();
+	}
+	return artifactsDir;
+}
+
+/**
+ * A creation the SDK constructs over a session whose artifact store holds one seeded artifact, then rejects at its extension read after memory
+ * initialized. The held warning has no sink, so it rides the failure. `cleanupFault` refuses the disposal's lease write: the cleanup acquires its
+ * lease before it scans, so the refused write ends the cleanup before the scan and the artifact stays.
+ */
+async function disposalSdkCreation(
+	world: HarnessWorld,
+	label: string,
+	cleanupFault: boolean,
+): Promise<SdkDisposalFailureOutcome> {
+	const memoryFaultName = `sdk-disposal-memory-read-${label}`;
+	const leaseFaultName = `sdk-disposal-lease-write-${label}`;
+	const sessionManager = SessionManager.inMemory(HARNESS_PROJECT_CWD);
+	const artifactsDir = seedToolArtifactStore(world, sessionManager.getSessionId());
+	const seeded = world.io.captureTree(artifactsDir).files.size;
+	armSdkMemoryReadFault(world, memoryFaultName);
+	if (cleanupFault) {
+		// acquireWorkRun writes its lease marker before the retention prune, and the prune reads every run's artifact directory: a read fault
+		// would be spent (and swallowed) there, so the lease marker write is the boundary the cleanup itself reaches first.
+		const leasesDir = join(dirname(artifactsDir), ".leases");
+		world.io.failNext({
+			name: leaseFaultName,
+			kind: "write",
+			code: "EIO",
+			matches: (operation) =>
+				operation.path.startsWith(`${leasesDir}${sep}`) && world.io.consumedFaults.includes(memoryFaultName),
+		});
+	}
+	const probe = { loaderDisposals: 0 };
+	const mark = world.warnings.length;
+	const outcome = await world
+		.createRootSession("root", {
+			sessionManager,
+			systemOneEnabled: false,
+			closingSink: null,
+			extensionReadFailure: { afterFault: memoryFaultName, message: SDK_EXTENSION_READ_FAILURE, probe },
+		})
+		.then(
+			() => "created" as const,
+			(error: unknown) => error,
+		);
+	if (outcome === "created") throw new Error(`${label}: the creation was not refused by its extension read`);
+	return tokenizeMemoryFault(world, memoryFaultName, {
+		failure: describeSdkFailure(outcome),
+		loaderDisposals: probe.loaderDisposals,
+		memoryFaultFired: world.io.consumedFaults.includes(memoryFaultName),
+		worldWarnings: world.warnings.splice(mark),
+		artifactFiles: { seeded, afterDisposal: world.io.captureTree(artifactsDir).files.size },
+		cleanupFaultFired: world.io.consumedFaults.includes(leaseFaultName),
+	});
+}
+
+/**
  * The SDK's construction failures: the objective-loop binding error, then the extension read after memory initialization with its held memory
- * warning routed three ways, and the normal-order control. Each creation consumes its own memory read fault.
+ * warning routed three ways, and the normal-order control. Each creation consumes its own memory read fault. The disposal branches then fail
+ * the artifact cleanup of a disposal that follows the same extension read, with the normal-order control over the same seeded artifact.
  */
 export async function runSdkConstructionFailure(world: HarnessWorld): Promise<SdkConstructionFailureWitness> {
 	const objective = await objectiveSdkCreation(world);
@@ -3301,7 +3464,9 @@ export async function runSdkConstructionFailure(world: HarnessWorld): Promise<Sd
 	const sinkRefused = await failedSdkCreation(world, "sink-refused", "refuses");
 	const noSink = await failedSdkCreation(world, "no-sink", "none");
 	const control = await controlSdkCreation(world);
-	return { objective, drained, sinkRefused, noSink, control };
+	const disposalFailed = await disposalSdkCreation(world, "disposal-failed", true);
+	const disposalControl = await disposalSdkCreation(world, "disposal-control", false);
+	return { objective, drained, sinkRefused, noSink, control, disposalFailed, disposalControl };
 }
 
 /**
