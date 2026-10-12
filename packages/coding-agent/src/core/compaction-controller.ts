@@ -840,6 +840,9 @@ export class CompactionController {
 		try {
 			this.deps.disconnectAgent();
 			await this.deps.abortForeground();
+			// The foreground wait can outlive the session: a compaction that arrives here after the close plans nothing and starts
+			// nothing (retention planning included), before any lifecycle record.
+			if (this.closed) throw new Error("Compaction cancelled");
 			result = await this.runManualCompaction(customInstructions, abortController.signal);
 		} catch (error) {
 			primaryError = error;

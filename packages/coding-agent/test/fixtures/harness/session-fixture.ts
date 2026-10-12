@@ -2584,15 +2584,182 @@ export function holdCompactionSummary(hold: Barrier, reached: Barrier): Extensio
 
 /**
  * An extension that holds the run at the assistant's message end until `hold` is released. `reached` is released when the assistant's
- * message reaches the handler; the user's own message end passes straight through.
+ * message reaches the handler; the user's own message end passes straight through. With `replyText`, only the reply carrying that text
+ * is held, so an earlier seed turn in the same session passes through.
  */
-export function holdAssistantMessageEnd(hold: Barrier, reached: Barrier): ExtensionFactory {
+export function holdAssistantMessageEnd(hold: Barrier, reached: Barrier, replyText?: string): ExtensionFactory {
 	return (pi) => {
 		pi.on("message_end", async (event) => {
 			if (event.message.role !== "assistant") return;
+			if (
+				replyText !== undefined &&
+				!event.message.content.some((block) => block.type === "text" && block.text === replyText)
+			)
+				return;
 			reached.release();
 			await hold.promise;
 		});
+	};
+}
+
+/** The closing verification notice System One's own closing work emits; the compaction witnesses do not judge it. */
+const CLOSING_VERIFICATION_NOTICE =
+	"System One verification was not run because the session was closing; no judgment was recorded.";
+
+interface SessionFileEntry {
+	readonly type?: string;
+	readonly outcome?: string;
+}
+
+function sessionFileEntries(text: string): SessionFileEntry[] {
+	return text
+		.split("\n")
+		.filter((line) => line.length > 0)
+		.map((line) => JSON.parse(line) as SessionFileEntry);
+}
+
+/** The compaction lifecycle records of a session file, in file order. */
+function compactionLifecycle(text: string): Array<{ readonly type: string; readonly outcome: string | undefined }> {
+	const records: Array<{ readonly type: string; readonly outcome: string | undefined }> = [];
+	for (const entry of sessionFileEntries(text)) {
+		if (entry.type === "compaction_start" || entry.type === "compaction_end")
+			records.push({ type: entry.type, outcome: entry.outcome });
+	}
+	return records;
+}
+
+/**
+ * What a compaction behind a held run leaves in the session file, and what the quit and the release each report. `quitWarnings` excludes
+ * the closing verification notice; `control` is the normal order, where the run completes before the compaction commits.
+ */
+export interface CompactionBehindHeldRunWitness {
+	readonly inFlightAtStart: boolean;
+	readonly quitWarnings: readonly string[];
+	readonly warningsAfterRelease: readonly string[];
+	readonly heldOutcome: unknown;
+	readonly heldRunOutcome: unknown;
+	readonly fileAtQuit: string;
+	readonly fileAfterRelease: string;
+	readonly lifecycleAfterRelease: ReturnType<typeof compactionLifecycle>;
+	readonly requestsAtQuit: number;
+	readonly requestsAfterRelease: number;
+	readonly control: {
+		readonly disposal: unknown;
+		readonly summary: string;
+		readonly lifecycle: ReturnType<typeof compactionLifecycle>;
+		readonly compactionEntries: number;
+		readonly quitWarnings: readonly string[];
+	};
+}
+
+/**
+ * Quit while a compaction waits behind a run held at the assistant's message end. `compact()` awaits `abortForeground` (the run going
+ * idle), so it never reaches its durable lifecycle start: the quit settles the run and the compaction at their bounds, and the release
+ * resumes the compaction into the closed owner, which rejects it. The control releases nothing and commits once.
+ */
+export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<CompactionBehindHeldRunWitness> {
+	const { trace } = world;
+	const replyText = "The late reply";
+	const hold = createBarrier();
+	const reached = createBarrier();
+	const held = await world.createRootSession("root", {
+		sessionManager: world.createSessionManager(),
+		settings: { memorySystem: undefined },
+		extensionFactories: [holdAssistantMessageEnd(hold, reached, replyText)],
+	});
+	const heldSession = held.session;
+	await heldSession.bindExtensions({ uiContext: world.humanInput.ui });
+	const heldFile = held.sessionManager.getSessionFile();
+	if (heldFile === undefined) throw new Error("the held compaction owner has no file");
+	// Compaction needs history, so the owner first completes one plain turn; only the second reply is held.
+	world.provider.enqueue(
+		"root",
+		{ name: "pre-start-seed", reply: { content: [{ type: "text", text: "Seeded before the held run." }] } },
+		{ name: "pre-start-held", reply: { content: [{ type: "text", text: replyText }] } },
+	);
+	await withDeadline(
+		trace,
+		"pre-start: the seed turn completes",
+		heldSession.prompt("Seed the pre-start compaction."),
+	);
+	const heldRun = heldSession
+		.prompt("Start a reply that its extension holds at message end.")
+		.catch((error: unknown) => error);
+	await withDeadline(trace, "pre-start: the extension holds the reply", reached.promise);
+	const compaction = heldSession.compact("Compact the held history.").catch((error: unknown) => error);
+	const inFlightAtStart = heldSession.isCompacting;
+	const mark = world.warnings.length;
+	let fileAtQuit = "";
+	let requestsAtQuit = 0;
+	let quitWarnings: string[] = [];
+	let heldOutcome: unknown = "unsettled";
+	let heldRunOutcome: unknown = "unsettled";
+	try {
+		await withDeadline(
+			trace,
+			"pre-start: the owner disposes while the reply is held",
+			heldSession.disposeAndWait(),
+			60_000,
+		);
+		fileAtQuit = world.io.peekFile(heldFile) ?? "";
+		requestsAtQuit = world.provider.requests.length;
+		quitWarnings = world.warnings.slice(mark).filter((message) => message !== CLOSING_VERIFICATION_NOTICE);
+	} finally {
+		hold.release();
+		heldOutcome = await withDeadline(trace, "pre-start: the held compaction resumes", compaction, 60_000);
+		heldRunOutcome = await withDeadline(trace, "pre-start: the held run ends", heldRun, 60_000);
+	}
+	const fileAfterRelease = world.io.peekFile(heldFile) ?? "";
+	const requestsAfterRelease = world.provider.requests.length;
+	const warningsAfterRelease = world.warnings.slice(mark).filter((message) => message !== CLOSING_VERIFICATION_NOTICE);
+
+	// Normal order: the run completes, then the compaction commits through the same handler and the owner disposes with nothing in flight.
+	const released = createBarrier();
+	released.release();
+	const control = await world.createRootSession("root", {
+		sessionManager: world.createSessionManager(),
+		settings: { memorySystem: undefined },
+		extensionFactories: [holdCompactionSummary(released, createBarrier())],
+	});
+	const controlSession = control.session;
+	await controlSession.bindExtensions({ uiContext: world.humanInput.ui });
+	const controlFile = control.sessionManager.getSessionFile();
+	if (controlFile === undefined) throw new Error("the normal-order control owner has no file");
+	world.provider.enqueue("root", {
+		name: "pre-start-control-seed",
+		reply: { content: [{ type: "text", text: "Seeded before the control compaction." }] },
+	});
+	await withDeadline(
+		trace,
+		"pre-start control: the run completes first",
+		controlSession.prompt("Seed the control compaction."),
+	);
+	const controlMark = world.warnings.length;
+	const committed = await withDeadline(
+		trace,
+		"pre-start control: the compaction commits",
+		controlSession.compact("Compact the control history."),
+	);
+	const disposal = await world.disposeSessionInBody(controlSession);
+	const controlText = world.io.peekFile(controlFile) ?? "";
+	return {
+		inFlightAtStart,
+		quitWarnings,
+		warningsAfterRelease,
+		heldOutcome,
+		heldRunOutcome,
+		fileAtQuit,
+		fileAfterRelease,
+		lifecycleAfterRelease: compactionLifecycle(fileAfterRelease),
+		requestsAtQuit,
+		requestsAfterRelease,
+		control: {
+			disposal,
+			summary: committed.summary,
+			lifecycle: compactionLifecycle(controlText),
+			compactionEntries: sessionFileEntries(controlText).filter((entry) => entry.type === "compaction").length,
+			quitWarnings: world.warnings.slice(controlMark).filter((message) => message !== CLOSING_VERIFICATION_NOTICE),
+		},
 	};
 }
 

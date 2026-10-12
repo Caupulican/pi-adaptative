@@ -86,6 +86,7 @@ import {
 	projectPath,
 	RPC_CLOSING_WARNING,
 	RPC_LATE_WARNING,
+	runCompactionBehindHeldRun,
 	runHarnessWorld,
 	runRpcHost,
 	runSignalShutdown,
@@ -8129,6 +8130,34 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				{ stopReason: "stop", text: "The late reply" },
 			]);
 			trace.mark("root", "message-end.live-control");
+			// Compaction behind a held run: the compaction waits for the run to go idle, so it never starts its durable lifecycle. The quit
+			// discloses the held run and the held compaction, the release rejects the compaction into the closed owner, and the file keeps the
+			// bytes the quit left. The normal-order control commits once: one start, one success, no cancelled end.
+			const pre = await runCompactionBehindHeldRun(world);
+			expect(
+				pre.inFlightAtStart,
+				"the compaction is in flight, waiting for the held run, when the quit starts",
+			).toBe(true);
+			expect(pre.quitWarnings, "the quit discloses the held run, then the held compaction, once each").toEqual([
+				"A run did not settle within 5s of quit; its final message may not have been persisted.",
+				"A compaction did not settle within 5s of quit; its result is discarded.",
+			]);
+			expect(pre.heldOutcome, "the released compaction ends cancelled, not committed").toBeInstanceOf(Error);
+			trace.claimRejection(pre.heldOutcome, "Compaction cancelled");
+			expect(pre.heldRunOutcome, "the held run ends without an error once released").toBeUndefined();
+			expect(pre.warningsAfterRelease, "the release discloses nothing further").toEqual(pre.quitWarnings);
+			expect(pre.fileAfterRelease, "the release appends no byte after the quit").toBe(pre.fileAtQuit);
+			expect(pre.lifecycleAfterRelease, "no compaction lifecycle opens behind a closed session").toEqual([]);
+			expect(pre.requestsAfterRelease, "no provider request starts after the quit").toBe(pre.requestsAtQuit);
+			expect(pre.control.disposal, "the normal-order control disposes cleanly").toBeUndefined();
+			expect(pre.control.summary, "the control commits the handler's summary").toBe("The held summary.");
+			expect(pre.control.lifecycle, "the control settles one lifecycle once, as a success").toEqual([
+				{ type: "compaction_start", outcome: undefined },
+				{ type: "compaction_end", outcome: "success" },
+			]);
+			expect(pre.control.compactionEntries, "the control keeps exactly one committed compaction entry").toBe(1);
+			expect(pre.control.quitWarnings, "the control's quit discloses nothing").toEqual([]);
+			trace.mark("root", "compaction.pre-start-behind-held-run");
 			// Shutdown cleanup (SIGTERM/SIGHUP and quit): every cleanup step runs once, in its path's order, and a failing step never skips a
 			// later one. The signal path runs dispose, drain, stop; the quit path runs drain, stop, dispose. Closing warnings stay held until
 			// stop() releases them. Every failure is reported on stderr with each cause and the exit status is 1; the resume line is written on
