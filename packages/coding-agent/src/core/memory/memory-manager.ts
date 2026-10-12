@@ -5,6 +5,7 @@ import {
 	type MemoryEgressPolicy,
 } from "../context/memory-provider-contract.ts";
 import type { MemoryProvider, ToolDefinition } from "../extensions/types.ts";
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { causeHeadline, neutralizeControls } from "../terminal-warnings.ts";
 import type { MemoryLifecycleContext } from "./memory-provider.ts";
@@ -46,22 +47,28 @@ interface AbandonedProviderState {
 	pendingOperations: number;
 }
 
-/** Longest provider-error detail kept in a lifecycle diagnostic. */
-const MAX_DIAGNOSTIC_DETAIL = 300;
-
 /**
- * A provider failure as a diagnostic message: its kind and its own text, control characters escaped and the text bounded. Never throws:
- * a value whose class check or conversion throws is named by its type.
+ * A provider failure as a diagnostic message: its kind and its own text as one line, known secret shapes masked on the raw bounded text
+ * (the shared diagnostic owner scans, masks and cuts it) and only then control characters escaped for the terminal. The kind is part of
+ * that line, so it is masked and bounded with the rest. Never throws: a value whose class check, name or conversion throws is named by
+ * its type.
  */
 function describeProviderError(error: unknown): string {
 	let kind: string;
 	try {
-		kind = error instanceof Error ? error.name : typeof error;
+		const name: unknown = error instanceof Error ? error.name : undefined;
+		kind = typeof name === "string" && name.length > 0 ? name : typeof error;
 	} catch {
 		kind = typeof error;
 	}
-	const detail = neutralizeControls(causeHeadline(error)).slice(0, MAX_DIAGNOSTIC_DETAIL);
-	return detail.length > 0 ? `${kind}: ${detail}` : kind;
+	let line: string;
+	try {
+		const headline = causeHeadline(error);
+		line = headline.length > 0 ? `${kind}: ${headline}` : kind;
+	} catch {
+		line = kind;
+	}
+	return neutralizeControls(boundedRedactedDiagnosticText(line) ?? typeof error);
 }
 
 export class MemoryManager {

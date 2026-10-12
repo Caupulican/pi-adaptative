@@ -3311,9 +3311,12 @@ export class AgentSession {
 		const why = this._accountModels.unavailableReason(current) ?? "unavailable";
 		const replacement = this._accountModels.accountDefault(current.provider);
 		if (!replacement) {
+			// Only a fetched listing can say the account offers nothing else: without one, no alternative could be chosen at all.
 			this._emit({
 				type: "warning",
-				message: `${from} is not available on this account (${why}), and the account offers no other ${current.provider} model pi knows.`,
+				message: this._accountModels.hasListing(current.provider)
+					? `${from} is not available on this account (${why}), and the account offers no other ${current.provider} model pi knows.`
+					: `${from} is not available on this account (${why}), and no ${current.provider} account model listing is available to choose a replacement from.`,
 			});
 			return undefined;
 		}

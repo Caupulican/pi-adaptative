@@ -123,7 +123,10 @@ export class RetryController {
 		const nextAttempt = this._attempt + 1;
 		if (nextAttempt > policy.maxAttempts) return false;
 		this._attempt = nextAttempt;
-		this.startAttempt(policy.maxAttempts, 0, `${message.errorMessage || "Unknown error"} ${detail}`.trim());
+		// The provider's text and the host's continuation note are two sentences: a text without terminal punctuation gets a full stop.
+		const reason = (message.errorMessage || "Unknown error").trim();
+		const sentence = /[.!?:;)]$/.test(reason) ? reason : `${reason}.`;
+		this.startAttempt(policy.maxAttempts, 0, `${sentence} ${detail}`.trim());
 		return true;
 	}
 

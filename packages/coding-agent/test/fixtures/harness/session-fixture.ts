@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { PassThrough } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
@@ -20,6 +21,7 @@ import type { ExecResult } from "../../../src/core/exec.ts";
 import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
 import { isGoalExecutionActive } from "../../../src/core/goals/goal-state.ts";
 import { getResumableHumanInputSnapshot } from "../../../src/core/human-input.ts";
+import { type MemoryLifecycleDiagnostic, MemoryManager } from "../../../src/core/memory/memory-manager.ts";
 import type { TranscriptSummaryTimeSource } from "../../../src/core/memory/transcript-memory-contracts.ts";
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
@@ -39,6 +41,15 @@ import { SessionManager } from "../../../src/kernel/session/session-manager.ts";
 import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
 import { type RpcModeIo, runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import type { TerminationSignalHandler } from "../../../src/modes/termination-signals.ts";
+import {
+	acquireWorkRun,
+	getWorkRunDir,
+	hasActiveWorkRunLease,
+	pruneWorkTenant,
+	WORK_RUN_MANIFEST_FILE,
+	type WorkRetentionOptions,
+	type WorkRunLease,
+} from "../../../src/utils/work-directory.ts";
 import { ScriptedHumanInput } from "./scripted-human-input.ts";
 import {
 	type Barrier,
@@ -50,7 +61,7 @@ import {
 } from "./scripted-provider.ts";
 import { ScriptedWindowsShellProcesses } from "./scripted-windows-shell.ts";
 import { EffectGuard, VirtualFileSystem } from "./virtual-io.ts";
-import { VirtualProcessTable } from "./virtual-process-table.ts";
+import { type VirtualProcessState, VirtualProcessTable } from "./virtual-process-table.ts";
 import { VirtualShell } from "./virtual-shell.ts";
 
 /** Script tracks: the root session, each delegated worker, and the compaction summarizer share the root's track. */
@@ -2072,6 +2083,9 @@ export class HarnessWorld {
 	readonly processes: HarnessProcesses;
 	readonly windowsShell: ScriptedWindowsShellProcesses;
 	readonly guard: EffectGuard;
+	/** A witness-scoped answer to one fetch the guard receives; undefined passes it to System One's transport, as before. */
+	fetchResponder: ((input: RequestInfo | URL, init?: RequestInit) => Promise<Response> | undefined) | undefined =
+		undefined;
 	readonly provider: ScriptedProvider;
 	/** The scripted shell transport: bash runs through it for root and every worker lane. */
 	readonly shell = new VirtualShell();
@@ -2124,7 +2138,7 @@ export class HarnessWorld {
 			process: (operation, args) => this.processes.run(operation, args),
 			signal: (pid, signal) => this.processTable.signal(pid, signal),
 			pid: () => this.processTable.self,
-			fetch: this.systemOne.fetch,
+			fetch: (input, init) => this.fetchResponder?.(input, init) ?? this.systemOne.fetch(input, init),
 		});
 		this.guard.install();
 		// The installed managed uv and interpreter are provisioned once per world, after the guard, at their actual canonical paths.
@@ -3130,7 +3144,10 @@ export interface SdkDisposalFailureOutcome {
 	readonly cleanupFaultFired: boolean;
 }
 
-/** The SDK's closing-warning routing on a failed construction, beside the objective-loop binding error and its normal-order control. */
+/**
+ * The SDK's closing-warning routing on a failed construction, beside the objective-loop binding error and its normal-order control. The
+ * work-directory witnesses that follow the disposal branches share this chain so the journey's one assertion covers them.
+ */
 export interface SdkConstructionFailureWitness {
 	/** The objective-loop creation: the binding error, and no held warning (the rejection precedes memory initialization). */
 	readonly objective: { readonly failure: string; readonly warnings: readonly string[] };
@@ -3151,6 +3168,91 @@ export interface SdkConstructionFailureWitness {
 	readonly disposalFailed: SdkDisposalFailureOutcome;
 	/** Normal order, same seeded artifact and held warning, no cleanup fault: the cleanup scans and removes the artifact. */
 	readonly disposalControl: SdkDisposalFailureOutcome;
+	/** Provider errors at memory initialization, as the memory manager retains and writes them (see {@link providerErrorsWitness}). */
+	readonly providerErrors: ProviderErrorWitness;
+	/** Work-directory retention, lease liveness and adoption through the production owners (see {@link workDirectoryWitness}). */
+	readonly workDirectory: WorkDirectoryWitness;
+}
+
+/** One prune of a witness tenant: the basenames it removed (in return order), the runs still on disk after it, and the scan refusals it met. */
+export interface WorkRetentionWitness {
+	readonly removed: readonly string[];
+	readonly remaining: readonly string[];
+	/** Scan refusals armed for the prune, and how many the prune met: the measurement it reached for the refused run. */
+	readonly refusedScans: number;
+	/** For a tenant with a leased run: that run's tree is byte-identical after the prune, so the prune left no marker in it. */
+	readonly leasedTreeUnchanged?: boolean;
+}
+
+/** One lease probe through the public owner: whether the run stays active, and how many marker files its lease directory keeps. */
+export interface WorkLeaseProbeWitness {
+	readonly active: boolean;
+	readonly markers: number;
+	/** The guard route was reached: the process table recorded a signal-0 probe of this marker's pid. */
+	readonly probed: boolean;
+}
+
+/** Adoption of an existing run directory through the production owner. */
+export interface WorkAdoptionWitness {
+	/** The manifest read fails with a scripted EIO: the refusal keeps the read's cause, and the fault fired. */
+	readonly unreadable: { readonly failure: SdkFailureDescription; readonly faultFired: boolean };
+	/** Normal order, the same run with its manifest readable: the directory is adopted at its own path. */
+	readonly readable: { readonly adoptedPath: string };
+	/** A run directory with no manifest is unowned: refused, with no cause. */
+	readonly unowned: { readonly failure: SdkFailureDescription };
+}
+
+/** Work-directory retention, lease liveness and adoption through the production owners. */
+export interface WorkDirectoryWitness {
+	/** An expired leased run whose measurement exhausts the shared scan budget: its lease keeps it, and the unmeasured neighbours are kept. */
+	readonly leasedExhausted: WorkRetentionWitness;
+	/** An expired leased run whose artifact scan is refused: its lease keeps it, and its unmeasured size leaves the neighbours inside the budget. */
+	readonly leasedUnmeasured: WorkRetentionWitness;
+	/** Normal order: the same tenant with the scan allowed. */
+	readonly leasedControl: WorkRetentionWitness;
+	/** An unleased run whose artifact scan is refused, inside every bound: an unmeasured run is never evicted for bytes, so it stays. */
+	readonly unleasedUnmeasured: WorkRetentionWitness;
+	/** Normal order: the same tenant with the scan allowed. Every run is inside the budget, so none is removed. */
+	readonly unleasedControl: WorkRetentionWitness;
+	/** The same refused run over the count bound: it is evicted by count like any other run, and its neighbours stay. */
+	readonly countEviction: WorkRetentionWitness;
+	/** Normal order: the same count bound with the scan allowed. */
+	readonly countControl: WorkRetentionWitness;
+	/** A measured run over the byte budget is evicted first, oldest first, and the within-budget neighbours survive. */
+	readonly overBudgetEviction: WorkRetentionWitness;
+	/** An unleased run whose artifact scan is refused is evicted by age once it has expired. */
+	readonly ageEviction: WorkRetentionWitness;
+	/** Normal order: the same expired run with the scan allowed. */
+	readonly ageControl: WorkRetentionWitness;
+	/** Lease probes by process state: alive, denied and unknown keep their run active (unknown fails closed); dead releases its run. */
+	readonly leaseProbes: {
+		readonly alive: WorkLeaseProbeWitness;
+		readonly dead: WorkLeaseProbeWitness;
+		readonly unknown: WorkLeaseProbeWitness;
+		readonly denied: WorkLeaseProbeWitness;
+		readonly unmarked: WorkLeaseProbeWitness;
+	};
+	/** A count-over prune whose oldest run probes unknown: that run is kept, and the next run, probed dead, is removed. */
+	readonly unknownProbePrune: WorkRetentionWitness;
+	/** Normal order: the same prune with the oldest run probed dead: that run is removed. */
+	readonly deadProbePrune: WorkRetentionWitness;
+	readonly adoption: WorkAdoptionWitness;
+}
+
+/** A provider's initialization failure as the memory manager retains it: the diagnostics, the console lines it wrote, and the world's warnings. */
+export interface MemoryFailureWitness {
+	readonly diagnostics: readonly MemoryLifecycleDiagnostic[];
+	readonly console: readonly string[];
+	readonly worldWarnings: readonly string[];
+}
+
+/** Provider errors at memory initialization: a token behind a tab, three hostile errors, and a plain cause. */
+export interface ProviderErrorWitness {
+	readonly bearerTab: MemoryFailureWitness;
+	readonly nonStringName: MemoryFailureWitness;
+	readonly throwingName: MemoryFailureWitness;
+	readonly tokenName: MemoryFailureWitness;
+	readonly plainCause: MemoryFailureWitness;
 }
 
 /** The extension read that the failed creations hit once memory has initialized. */
@@ -3242,6 +3344,136 @@ export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = 
 		worldWarnings: [],
 		artifactFiles: { seeded: 2, afterDisposal: 0 },
 		cleanupFaultFired: false,
+	},
+	providerErrors: {
+		bearerTab: {
+			diagnostics: [
+				{
+					provider: "witness-memory",
+					operation: "initialize",
+					status: "error",
+					message: "Error: request failed [REDACTED]",
+				},
+			],
+			console: ["Memory provider witness-memory initialize error: Error: request failed [REDACTED]"],
+			worldWarnings: [],
+		},
+		nonStringName: {
+			diagnostics: [
+				{ provider: "witness-memory", operation: "initialize", status: "error", message: "object: disk full" },
+			],
+			console: ["Memory provider witness-memory initialize error: object: disk full"],
+			worldWarnings: [],
+		},
+		throwingName: {
+			diagnostics: [
+				{ provider: "witness-memory", operation: "initialize", status: "error", message: "object: disk full" },
+			],
+			console: ["Memory provider witness-memory initialize error: object: disk full"],
+			worldWarnings: [],
+		},
+		tokenName: {
+			diagnostics: [
+				{ provider: "witness-memory", operation: "initialize", status: "error", message: "[REDACTED]: disk full" },
+			],
+			console: ["Memory provider witness-memory initialize error: [REDACTED]: disk full"],
+			worldWarnings: [],
+		},
+		plainCause: {
+			diagnostics: [
+				{
+					provider: "witness-memory",
+					operation: "initialize",
+					status: "error",
+					message: "Error: disk quota exceeded",
+				},
+			],
+			console: ["Memory provider witness-memory initialize error: Error: disk quota exceeded"],
+			worldWarnings: [],
+		},
+	},
+	workDirectory: {
+		leasedExhausted: {
+			removed: [],
+			remaining: ["a-expensive", "b-neighbour", "c-neighbour"],
+			refusedScans: 0,
+			leasedTreeUnchanged: true,
+		},
+		leasedUnmeasured: {
+			removed: [],
+			remaining: ["a-leased", "b-neighbour", "c-neighbour"],
+			refusedScans: 1,
+			leasedTreeUnchanged: true,
+		},
+		leasedControl: {
+			removed: [],
+			remaining: ["a-leased", "b-neighbour", "c-neighbour"],
+			refusedScans: 0,
+			leasedTreeUnchanged: true,
+		},
+		unleasedUnmeasured: {
+			removed: [],
+			remaining: ["a-unleased", "b-neighbour", "c-neighbour"],
+			refusedScans: 1,
+		},
+		unleasedControl: {
+			removed: [],
+			remaining: ["a-unleased", "b-neighbour", "c-neighbour"],
+			refusedScans: 0,
+		},
+		countEviction: {
+			removed: ["a-unleased"],
+			remaining: ["b-neighbour", "c-neighbour"],
+			refusedScans: 1,
+		},
+		countControl: {
+			removed: ["a-unleased"],
+			remaining: ["b-neighbour", "c-neighbour"],
+			refusedScans: 0,
+		},
+		overBudgetEviction: {
+			removed: ["a-heavy"],
+			remaining: ["b-neighbour", "c-neighbour"],
+			refusedScans: 0,
+		},
+		ageEviction: {
+			removed: ["a-stale"],
+			remaining: [],
+			refusedScans: 1,
+		},
+		ageControl: {
+			removed: ["a-stale"],
+			remaining: [],
+			refusedScans: 0,
+		},
+		leaseProbes: {
+			alive: { active: true, markers: 1, probed: true },
+			dead: { active: false, markers: 0, probed: true },
+			unknown: { active: true, markers: 1, probed: true },
+			denied: { active: true, markers: 1, probed: true },
+			unmarked: { active: false, markers: 0, probed: false },
+		},
+		unknownProbePrune: {
+			removed: ["b-dead"],
+			remaining: ["a-probe", "c-neighbour"],
+			refusedScans: 0,
+		},
+		deadProbePrune: {
+			removed: ["a-probe"],
+			remaining: ["b-dead", "c-neighbour"],
+			refusedScans: 0,
+		},
+		adoption: {
+			unreadable: {
+				failure: {
+					message: "Work directory manifest could not be read: <RUN_DIR>",
+					cause: { name: "Error", message: "scripted IO fault work-manifest-read-eio (EIO)" },
+				},
+				faultFired: true,
+			},
+			readable: { adoptedPath: "<RUN_DIR>" },
+			unowned: { failure: { message: "Refusing to adopt unowned work directory: <RUN_DIR>" } },
+		},
 	},
 };
 
@@ -3453,10 +3685,412 @@ async function disposalSdkCreation(
 	});
 }
 
+/** The category of the work-directory witness tenants: its own directory, so no production retention reaches these runs. */
+const WORK_WITNESS_CATEGORY = "fixture-witness";
+/** The age bound every retention prune of the witness uses. */
+const WORK_WITNESS_MAX_AGE_MS = 60 * 60 * 1000;
+/** Explicit bounds: the neighbours fit the byte budget with room to spare, so an eviction in a witness is the one its scenario names. */
+const WORK_WITNESS_BOUNDS: Omit<WorkRetentionOptions, "now"> = {
+	maxAgeMs: WORK_WITNESS_MAX_AGE_MS,
+	maxRuns: 8,
+	maxTotalBytes: 1024,
+};
+/** How far before the witness clock a leased run is acquired: twice the age bound, so the prune reaches the run's lease check expired. */
+const WORK_WITNESS_STALE_MS = 2 * WORK_WITNESS_MAX_AGE_MS;
+/** The lease directory a run keeps its markers in: the production layout. */
+const WORK_WITNESS_LEASES = ".leases";
+/** The provider every memory witness registers; each failing initialization builds its own manager, so the name is never a duplicate. */
+const MEMORY_WITNESS_PROVIDER = "witness-memory";
+
+/** One run of a witness tenant. */
+interface WorkWitnessRun {
+	readonly name: string;
+	/** Holds the run's own lease until the witness releases it. */
+	readonly leased: boolean;
+	/** Artifact files under the run, each of `bytes` bytes; the default is one small file. */
+	readonly artifacts?: { readonly count: number; readonly bytes: number };
+	/** A lease marker for `pid`, written after the run is released; the process table answers the pid with `state`. */
+	readonly marker?: { readonly pid: number; readonly state: VirtualProcessState };
+}
+
+/** One prune of a witness tenant. */
+interface WorkPruneScenario {
+	readonly tenant: string;
+	readonly runs: readonly WorkWitnessRun[];
+	/** The witness clock: a leased run is acquired before it, and an unleased run is stamped at its release. */
+	readonly now: number;
+	/** The clock the prune reads; defaults to the witness clock. */
+	readonly pruneAt?: number;
+	/** The run whose artifact scan the virtual filesystem refuses for the whole prune; undefined is the normal-order control. */
+	readonly refusedRun?: string;
+	/** Bounds that replace the witness bounds for this prune. */
+	readonly bounds?: Omit<WorkRetentionOptions, "now">;
+}
+
+function workWitnessRunDir(world: HarnessWorld, tenant: string, runId: string): string {
+	return getWorkRunDir(world.agentDir, WORK_WITNESS_CATEGORY, tenant, runId);
+}
+
+/** A run directory's native path replaced by a token, wherever it appears in the value's texts (see {@link tokenizeMemoryFault}). */
+function tokenizeRunDir<T>(runDir: string, value: T): T {
+	const text = JSON.stringify(value).replaceAll(JSON.stringify(runDir).slice(1, -1), "<RUN_DIR>");
+	return JSON.parse(text) as T;
+}
+
+/**
+ * Creates a tenant's runs in order through the production acquisition, each with its artifact files and marker. A leased run keeps the stale stamp
+ * it was acquired with. An unleased run is released at once, which stamps it fresh, so the release order (ties broken by the name) is the prune's
+ * age order. Returns the leases the runs still hold.
+ */
+function seedWorkTenant(
+	world: HarnessWorld,
+	tenant: string,
+	runs: readonly WorkWitnessRun[],
+	now: number,
+): WorkRunLease[] {
+	const held: WorkRunLease[] = [];
+	for (const run of runs) {
+		const lease = acquireWorkRun({
+			agentDir: world.agentDir,
+			category: WORK_WITNESS_CATEGORY,
+			tenant,
+			runId: run.name,
+			retention: false,
+			now: now - WORK_WITNESS_STALE_MS,
+		});
+		const artifacts = run.artifacts ?? { count: 1, bytes: 12 };
+		for (let index = 0; index < artifacts.count; index++) {
+			world.io.seed(join(lease.path, "artifacts", `payload-${index}.txt`), "x".repeat(artifacts.bytes));
+		}
+		if (run.leased) held.push(lease);
+		else lease.release();
+		if (run.marker !== undefined) {
+			world.processTable.setState(run.marker.pid, run.marker.state);
+			world.io.seed(
+				join(lease.path, WORK_WITNESS_LEASES, `active-${run.marker.pid}-witness.json`),
+				JSON.stringify({ version: 1, hostname: hostname(), pid: run.marker.pid, createdAt: now }),
+			);
+		}
+	}
+	return held;
+}
+
+/**
+ * Seeds one tenant, prunes it through the production owner under the witness bounds, and releases the leases the seeding holds. The leased run's
+ * tree is compared before and after the prune. A refused scan is armed for the whole prune and counted once the prune has run.
+ */
+function runWorkTenantPrune(world: HarnessWorld, scenario: WorkPruneScenario): WorkRetentionWitness {
+	const { tenant, runs, now, refusedRun } = scenario;
+	const held = seedWorkTenant(world, tenant, runs, now);
+	const leasedRun = runs.find((run) => run.leased);
+	const leasedTree = leasedRun === undefined ? undefined : workWitnessRunDir(world, tenant, leasedRun.name);
+	const treeBefore = leasedTree === undefined ? undefined : world.io.captureTree(leasedTree);
+	const denial =
+		refusedRun === undefined
+			? undefined
+			: world.io.denyUntilCleared({
+					name: `${tenant}-scan-refused`,
+					kind: "readdir",
+					matches: (operation) =>
+						operation.path === join(workWitnessRunDir(world, tenant, refusedRun), "artifacts"),
+				});
+	const removedPaths = pruneWorkTenant(world.agentDir, WORK_WITNESS_CATEGORY, tenant, {
+		...WORK_WITNESS_BOUNDS,
+		...scenario.bounds,
+		now: scenario.pruneAt ?? now,
+	});
+	const refusedScans = denial?.clear() ?? 0;
+	// Read before the release: the lease's own marker is part of the leased tree until then.
+	const leasedTreeUnchanged =
+		leasedTree === undefined || treeBefore === undefined
+			? undefined
+			: isDeepStrictEqual(treeBefore, world.io.captureTree(leasedTree));
+	const remaining = runs
+		.map((run) => run.name)
+		.filter((name) => world.io.existsSync(workWitnessRunDir(world, tenant, name)));
+	for (const lease of held) lease.release();
+	return {
+		removed: removedPaths.map((path) => basename(path)),
+		remaining,
+		refusedScans,
+		...(leasedTreeUnchanged === undefined ? {} : { leasedTreeUnchanged }),
+	};
+}
+
+/**
+ * Lease liveness through the public owner: one run per process state, and an unmarked run. The states are the process table's own answers, so the
+ * production probe classifies them as it does a real pid; the marker files left in each run's lease directory are counted after the probe.
+ */
+function leaseProbeWitness(world: HarnessWorld, now: number): WorkDirectoryWitness["leaseProbes"] {
+	const tenant = "lease-probe";
+	seedWorkTenant(
+		world,
+		tenant,
+		[
+			{ name: "alive", leased: false, marker: { pid: 880101, state: "alive" } },
+			{ name: "dead", leased: false, marker: { pid: 880102, state: "dead" } },
+			{ name: "unknown", leased: false, marker: { pid: 880103, state: "unknown" } },
+			{ name: "denied", leased: false, marker: { pid: 880104, state: "denied" } },
+			{ name: "unmarked", leased: false },
+		],
+		now,
+	);
+	const probe = (name: string, pid?: number): WorkLeaseProbeWitness => {
+		const runDir = workWitnessRunDir(world, tenant, name);
+		const active = hasActiveWorkRunLease(runDir);
+		return {
+			active,
+			markers: world.io.captureTree(join(runDir, WORK_WITNESS_LEASES)).files.size,
+			probed: world.processTable.probes.some((entry) => entry.pid === pid && entry.signal === 0),
+		};
+	};
+	return {
+		alive: probe("alive", 880101),
+		dead: probe("dead", 880102),
+		unknown: probe("unknown", 880103),
+		denied: probe("denied", 880104),
+		unmarked: probe("unmarked"),
+	};
+}
+
+/** An Error whose name is replaced, so the witness reaches the kind the diagnostic reads from it. */
+function namedError(message: string, name: unknown): Error {
+	const error = new Error(message);
+	Object.assign(error, { name });
+	return error;
+}
+
+/** An Error whose name getter throws. */
+function throwingNameError(message: string): Error {
+	const error = new Error(message);
+	Object.defineProperty(error, "name", {
+		get: () => {
+			throw new Error("the name getter refused");
+		},
+	});
+	return error;
+}
+
+/**
+ * A provider whose initialization rejects with `failure`, run through the memory manager's own lifecycle: the diagnostics it retains, the console
+ * lines it writes for this provider, and any world warning. The console is captured for this initialization only and restored after it.
+ */
+async function providerFailureWitness(world: HarnessWorld, failure: unknown): Promise<MemoryFailureWitness> {
+	const manager = new MemoryManager();
+	manager.registerProvider({
+		name: MEMORY_WITNESS_PROVIDER,
+		isAvailable: () => true,
+		getCapabilities: () => ({ surfaces: [] }),
+		initialize: async () => {
+			throw failure;
+		},
+		shutdown: async () => {},
+	});
+	const lines: string[] = [];
+	const mark = world.warnings.length;
+	const logError = console.error;
+	console.error = (...data: unknown[]) => {
+		lines.push(data.map(String).join(" "));
+	};
+	try {
+		await manager.initializeAll("witness-session", {
+			agentDir: world.agentDir,
+			cwd: HARNESS_PROJECT_CWD,
+			isChildSession: false,
+		});
+	} finally {
+		console.error = logError;
+	}
+	return {
+		diagnostics: manager.getLifecycleDiagnostics(),
+		console: lines.filter((line) => line.startsWith(`Memory provider ${MEMORY_WITNESS_PROVIDER} `)),
+		worldWarnings: world.warnings.splice(mark),
+	};
+}
+
+/** The provider errors the memory manager reads into its diagnostic: a token behind a tab, three hostile errors, and a plain cause. */
+async function providerErrorsWitness(world: HarnessWorld): Promise<ProviderErrorWitness> {
+	return {
+		bearerTab: await providerFailureWitness(world, new Error("request failed Bearer\topaque0123456789token")),
+		nonStringName: await providerFailureWitness(world, namedError("disk full", 42)),
+		throwingName: await providerFailureWitness(world, throwingNameError("disk full")),
+		tokenName: await providerFailureWitness(world, namedError("disk full", "sk-abcdefghijklmnop")),
+		plainCause: await providerFailureWitness(world, new Error("disk quota exceeded")),
+	};
+}
+
+/** Adoption of an existing run directory: an unreadable manifest refuses with the read's cause, the same run with its manifest readable is
+ * adopted, and a directory with no manifest is refused as unowned. */
+function workAdoptionWitness(world: HarnessWorld): WorkAdoptionWitness {
+	const tenant = "adoption";
+	const held = workWitnessRunDir(world, tenant, "held-manifest");
+	const manifestPath = join(held, WORK_RUN_MANIFEST_FILE);
+	const faultName = "work-manifest-read-eio";
+	acquireWorkRun({
+		agentDir: world.agentDir,
+		category: WORK_WITNESS_CATEGORY,
+		tenant,
+		runId: "held-manifest",
+		retention: false,
+	}).release();
+	world.io.failNext({
+		name: faultName,
+		kind: "read",
+		code: "EIO",
+		matches: (operation) => operation.path === manifestPath,
+	});
+	let unreadableError: unknown;
+	try {
+		acquireWorkRun({
+			agentDir: world.agentDir,
+			category: WORK_WITNESS_CATEGORY,
+			tenant,
+			runId: "held-manifest",
+			retention: false,
+		});
+	} catch (error) {
+		unreadableError = error;
+	}
+	if (unreadableError === undefined) throw new Error("the manifest read fault did not refuse the adoption");
+	const adopted = acquireWorkRun({
+		agentDir: world.agentDir,
+		category: WORK_WITNESS_CATEGORY,
+		tenant,
+		runId: "held-manifest",
+		retention: false,
+	});
+	adopted.release();
+	const unownedDir = workWitnessRunDir(world, tenant, "unowned-dir");
+	world.io.mkdirSync(unownedDir, { recursive: true });
+	let unownedError: unknown;
+	try {
+		acquireWorkRun({
+			agentDir: world.agentDir,
+			category: WORK_WITNESS_CATEGORY,
+			tenant,
+			runId: "unowned-dir",
+			retention: false,
+		});
+	} catch (error) {
+		unownedError = error;
+	}
+	if (unownedError === undefined) throw new Error("the directory without a manifest was adopted");
+	return {
+		unreadable: {
+			failure: tokenizeRunDir(held, describeSdkFailure(unreadableError)),
+			faultFired: world.io.consumedFaults.includes(faultName),
+		},
+		readable: { adoptedPath: tokenizeRunDir(held, adopted.path) },
+		unowned: { failure: tokenizeRunDir(unownedDir, describeSdkFailure(unownedError)) },
+	};
+}
+
+/**
+ * Work-directory retention, lease liveness and adoption through the production owners over the virtual filesystem. A leased run is acquired stale,
+ * past the age bound, so the prune reaches its lease check; released neighbours are fresh. Tenants are separate directories, so no scenario sees
+ * another's runs.
+ */
+function workDirectoryWitness(world: HarnessWorld): WorkDirectoryWitness {
+	const now = Date.now();
+	const leasedRuns: readonly WorkWitnessRun[] = [
+		{ name: "a-leased", leased: true },
+		{ name: "b-neighbour", leased: false },
+		{ name: "c-neighbour", leased: false },
+	];
+	const exhaustingRuns: readonly WorkWitnessRun[] = [
+		{ name: "a-expensive", leased: true, artifacts: { count: 6, bytes: 1 } },
+		{ name: "b-neighbour", leased: false },
+		{ name: "c-neighbour", leased: false },
+	];
+	const unleasedRuns: readonly WorkWitnessRun[] = [
+		{ name: "a-unleased", leased: false },
+		{ name: "b-neighbour", leased: false },
+		{ name: "c-neighbour", leased: false },
+	];
+	const heavyRuns: readonly WorkWitnessRun[] = [
+		{ name: "a-heavy", leased: false, artifacts: { count: 1, bytes: 1000 } },
+		{ name: "b-neighbour", leased: false },
+		{ name: "c-neighbour", leased: false },
+	];
+	return {
+		leasedExhausted: runWorkTenantPrune(world, {
+			tenant: "leased-exhausted",
+			runs: exhaustingRuns,
+			now,
+			bounds: { maxScannedEntries: 3 },
+		}),
+		leasedUnmeasured: runWorkTenantPrune(world, {
+			tenant: "leased-unmeasured",
+			runs: leasedRuns,
+			now,
+			refusedRun: "a-leased",
+		}),
+		leasedControl: runWorkTenantPrune(world, { tenant: "leased-control", runs: leasedRuns, now }),
+		unleasedUnmeasured: runWorkTenantPrune(world, {
+			tenant: "unleased-unmeasured",
+			runs: unleasedRuns,
+			now,
+			refusedRun: "a-unleased",
+		}),
+		unleasedControl: runWorkTenantPrune(world, { tenant: "unleased-control", runs: unleasedRuns, now }),
+		countEviction: runWorkTenantPrune(world, {
+			tenant: "count-eviction",
+			runs: unleasedRuns,
+			now,
+			refusedRun: "a-unleased",
+			bounds: { maxRuns: 2 },
+		}),
+		countControl: runWorkTenantPrune(world, {
+			tenant: "count-control",
+			runs: unleasedRuns,
+			now,
+			bounds: { maxRuns: 2 },
+		}),
+		overBudgetEviction: runWorkTenantPrune(world, { tenant: "over-budget", runs: heavyRuns, now }),
+		ageEviction: runWorkTenantPrune(world, {
+			tenant: "age-eviction",
+			runs: [{ name: "a-stale", leased: false }],
+			now,
+			pruneAt: now + 2 * WORK_WITNESS_MAX_AGE_MS,
+			refusedRun: "a-stale",
+		}),
+		ageControl: runWorkTenantPrune(world, {
+			tenant: "age-control",
+			runs: [{ name: "a-stale", leased: false }],
+			now,
+			pruneAt: now + 2 * WORK_WITNESS_MAX_AGE_MS,
+		}),
+		leaseProbes: leaseProbeWitness(world, now),
+		unknownProbePrune: runWorkTenantPrune(world, {
+			tenant: "unknown-probe",
+			runs: [
+				{ name: "a-probe", leased: false, marker: { pid: 880201, state: "unknown" } },
+				{ name: "b-dead", leased: false, marker: { pid: 880202, state: "dead" } },
+				{ name: "c-neighbour", leased: false },
+			],
+			now,
+			bounds: { maxRuns: 2 },
+		}),
+		deadProbePrune: runWorkTenantPrune(world, {
+			tenant: "dead-probe",
+			runs: [
+				{ name: "a-probe", leased: false, marker: { pid: 880203, state: "dead" } },
+				{ name: "b-dead", leased: false, marker: { pid: 880202, state: "dead" } },
+				{ name: "c-neighbour", leased: false },
+			],
+			now,
+			bounds: { maxRuns: 2 },
+		}),
+		adoption: workAdoptionWitness(world),
+	};
+}
+
 /**
  * The SDK's construction failures: the objective-loop binding error, then the extension read after memory initialization with its held memory
  * warning routed three ways, and the normal-order control. Each creation consumes its own memory read fault. The disposal branches then fail
- * the artifact cleanup of a disposal that follows the same extension read, with the normal-order control over the same seeded artifact.
+ * the artifact cleanup of a disposal that follows the same extension read, with the normal-order control over the same seeded artifact. The
+ * provider-error witnesses (the memory manager's diagnostics for a failing initialization) and the work-directory witnesses (retention,
+ * lease liveness and adoption over the same virtual filesystem) run last.
  */
 export async function runSdkConstructionFailure(world: HarnessWorld): Promise<SdkConstructionFailureWitness> {
 	const objective = await objectiveSdkCreation(world);
@@ -3466,7 +4100,19 @@ export async function runSdkConstructionFailure(world: HarnessWorld): Promise<Sd
 	const control = await controlSdkCreation(world);
 	const disposalFailed = await disposalSdkCreation(world, "disposal-failed", true);
 	const disposalControl = await disposalSdkCreation(world, "disposal-control", false);
-	return { objective, drained, sinkRefused, noSink, control, disposalFailed, disposalControl };
+	const providerErrors = await providerErrorsWitness(world);
+	const workDirectory = workDirectoryWitness(world);
+	return {
+		objective,
+		drained,
+		sinkRefused,
+		noSink,
+		control,
+		disposalFailed,
+		disposalControl,
+		providerErrors,
+		workDirectory,
+	};
 }
 
 /**

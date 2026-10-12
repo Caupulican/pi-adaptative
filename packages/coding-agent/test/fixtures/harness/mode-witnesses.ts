@@ -1,9 +1,11 @@
+import type { Api, Model } from "@caupulican/pi-ai";
 import { getKeybindings, setKeybindings, type Terminal } from "@caupulican/pi-tui";
 import { expect, vi } from "vitest";
 import { AgentSession } from "../../../src/core/agent-session.ts";
 import { type AgentSessionRuntime, createAgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
 import { FooterDataProvider } from "../../../src/core/footer-data-provider.ts";
+import { PROVIDER_RETRY_CUSTOM_TYPE } from "../../../src/core/foreground-lifecycle-controller.ts";
 import { ModelAdaptationStore } from "../../../src/core/models/adaptation-store.ts";
 import { TerminalWarnings } from "../../../src/core/terminal-warnings.ts";
 import { FooterComponent } from "../../../src/modes/interactive/components/footer.ts";
@@ -12,7 +14,7 @@ import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode
 import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
 import { initTheme, stopThemeWatcher } from "../../../src/presentation/theme/theme.ts";
 import { trackDetachedChild, untrackDetachedChild } from "../../../src/utils/shell.ts";
-import { type Barrier, createBarrier, HARNESS_PROVIDER } from "./scripted-provider.ts";
+import { type Barrier, createBarrier, fail, HARNESS_API, HARNESS_PROVIDER, text } from "./scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "./session-fixture.ts";
 
 const GUARD_CLOSING_WARNING = "Guard witness: a closing warning the held terminal keeps until stop.";
@@ -1192,4 +1194,341 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 		CALIBRATION_WARNING,
 	]);
 	expect(calibration.controlCommitted, "normal order: the run's reply is committed").toBe(true);
+
+	await verifyAccountListingRefusal(world);
+}
+
+/** The account the listing describes: the synthetic token carries its claim, and nothing signs or verifies it. */
+const ACCOUNT_LISTING_ACCOUNT_ID = "acct-listing-witness";
+/** The provider whose account the catalog checks. Its models are the scripted tracks, registered for this witness only. */
+const ACCOUNT_PROVIDER = "openai-codex";
+const ACCOUNT_BASE_URL = "https://harness.invalid";
+/** The client release the models endpoint is asked with (openai-codex-account.ts, OPENAI_CODEX_CLIENT_VERSION). */
+const ACCOUNT_CLIENT_VERSION = "0.159.0";
+const ACCOUNT_REFUSAL = "model is not supported when using Codex with a ChatGPT account";
+const ACCOUNT_REFUSED_PROMPT = "Run the refused turn.";
+const ACCOUNT_BASELINE_REPLY = "The account baseline reply.";
+const ACCOUNT_ROOT_REPLY = "The account continuation reply.";
+/** The warning the session emits when the refusal moves it to the account default, which the listing offers after the refused model. */
+const ACCOUNT_SWITCH_WARNING = `${ACCOUNT_PROVIDER}/worker-a is not available on this account (refused by ${ACCOUNT_PROVIDER}: ${ACCOUNT_REFUSAL}); this session continues on ${ACCOUNT_PROVIDER}/root.`;
+/** The retry's announced text: the refusal, then the switch's detail (prepareModelSwitchRetry joins them with one space). */
+const ACCOUNT_RETRY_MESSAGE = `${ACCOUNT_REFUSAL}. Continuing on ${ACCOUNT_PROVIDER}/root.`;
+/** The models endpoint's wire listing: the fields the catalog parses, worker-a first by priority. */
+const ACCOUNT_LISTING = {
+	models: [
+		{ slug: "worker-a", display_name: "worker-a", visibility: "list", supported_in_api: true, priority: 0 },
+		{ slug: "root", display_name: "root", visibility: "list", supported_in_api: true, priority: 1 },
+	],
+};
+
+/** An unsigned ChatGPT-shaped access token: the Codex client reads the account claim from its payload and verifies nothing. */
+function syntheticChatGptToken(accountId: string): string {
+	const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+	const payload = Buffer.from(
+		JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } }),
+	).toString("base64url");
+	return `${header}.${payload}.harness`;
+}
+
+const ACCOUNT_LISTING_TOKEN = syntheticChatGptToken(ACCOUNT_LISTING_ACCOUNT_ID);
+
+/** One listing request as the fixture received it. */
+interface AccountListingRequest {
+	/** Provider requests the world had seen when this listing was answered, counted from the witness's start. */
+	readonly requestsBefore: number;
+	readonly clientVersion: string | null;
+	readonly authorization: string | null;
+	readonly accountId: string | null;
+}
+
+/** Answers the account catalog's models GET with the wire listing and records what it sent; every other fetch passes through. */
+function serveAccountListing(world: HarnessWorld, requests: AccountListingRequest[], requestBase: number): void {
+	world.fetchResponder = (input, init) => {
+		const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+		if (init?.method !== "GET" || `${url.origin}${url.pathname}` !== `${ACCOUNT_BASE_URL}/api/codex/models`) {
+			return undefined;
+		}
+		const headers = new Headers(init.headers);
+		requests.push({
+			requestsBefore: world.provider.requests.length - requestBase,
+			clientVersion: url.searchParams.get("client_version"),
+			authorization: headers.get("authorization"),
+			accountId: headers.get("chatgpt-account-id"),
+		});
+		return Promise.resolve(Response.json(ACCOUNT_LISTING));
+	};
+}
+
+/** The registered descriptor of an account model: the same object the public registry hands the catalog and the session. */
+function accountModel(world: HarnessWorld, id: string): Model<Api> {
+	const model = world.modelRegistry.find(ACCOUNT_PROVIDER, id);
+	if (model === undefined) throw new Error(`the account model ${ACCOUNT_PROVIDER}/${id} is not registered`);
+	return model;
+}
+
+function modelRef(model: Model<Api> | undefined): string | undefined {
+	return model === undefined ? undefined : `${model.provider}/${model.id}`;
+}
+
+/** The records of a session file's text, one JSON entry per line. */
+function entriesIn(fileText: string): Array<Record<string, unknown>> {
+	return fileText
+		.split("\n")
+		.filter((line) => line.length > 0)
+		.map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+function retryRecordsIn(fileText: string): Array<Record<string, unknown>> {
+	return entriesIn(fileText)
+		.filter((entry) => entry.type === "custom" && entry.customType === PROVIDER_RETRY_CUSTOM_TYPE)
+		.map((entry) => entry.data as Record<string, unknown>);
+}
+
+interface AccountQuitRun {
+	readonly baselinePersisted: boolean;
+	readonly fileAtQuit: string;
+	readonly fileAfterQuit: string;
+	readonly requestModelsAtQuit: readonly string[];
+	readonly modelAtRetryStart: string | undefined;
+	readonly retryStart:
+		| { readonly attempt: number; readonly delayMs: number; readonly errorMessage: string }
+		| undefined;
+	readonly requestsAddedByQuit: number;
+	readonly warnings: readonly string[];
+	readonly startOutcome: string;
+	readonly disposal: string;
+}
+
+/**
+ * The refusal on worker-a moves the session to the account's default. The listener disposes the session from the announced retry: that
+ * announcement comes after the switch and before the continuation, so the closing gate after the recovery (foreground-recovery-controller.ts)
+ * starts no provider request on root. The cancelled retry end is the one record the quit still persists.
+ */
+async function runAccountQuit(world: HarnessWorld, agentDir: string): Promise<AccountQuitRun> {
+	const { trace } = world;
+	const held = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		settings: { memorySystem: undefined },
+	});
+	const heldSession = held.session;
+	await heldSession.bindExtensions({ uiContext: world.humanInput.ui });
+	await heldSession.setModel(accountModel(world, "worker-a"), { persistSettings: false });
+	const heldFile = held.sessionManager.getSessionFile();
+	if (heldFile === undefined) throw new Error("the account quit owner has no file");
+	// A normal turn persists a baseline first, so the file claims below have a nonempty persisted file to be measured against.
+	world.provider.enqueue("worker-a", text("account-quit-baseline", ACCOUNT_BASELINE_REPLY));
+	await withDeadline(trace, "account quit: the baseline turn completes", heldSession.prompt("Run the baseline turn."));
+	const baselinePersisted = (world.io.peekFile(heldFile) ?? "").includes(ACCOUNT_BASELINE_REPLY);
+	world.provider.enqueue("worker-a", fail("account-quit-refusal", ACCOUNT_REFUSAL));
+	const mark = world.warnings.length;
+	const refusalMark = world.provider.requests.length;
+	let modelAtRetryStart: string | undefined;
+	let retryStart: AccountQuitRun["retryStart"];
+	let requestsAtQuit = 0;
+	let requestModelsAtQuit: readonly string[] = [];
+	let fileAtQuit = "";
+	let quit: Promise<string> | undefined;
+	heldSession.subscribe((event) => {
+		if (quit !== undefined || event.type !== "auto_retry_start") return;
+		modelAtRetryStart = modelRef(heldSession.model);
+		retryStart = { attempt: event.attempt, delayMs: event.delayMs, errorMessage: event.errorMessage };
+		requestsAtQuit = world.provider.requests.length;
+		requestModelsAtQuit = world.provider.requests
+			.slice(refusalMark)
+			.map((request) => `${request.model.provider}/${request.model.id}`);
+		fileAtQuit = world.io.peekFile(heldFile) ?? "";
+		// `disposeAndWait()` runs its shutdown synchronously before its first await, so the listener returns with the owner already closed.
+		quit = disposed(heldSession);
+	});
+	const start = heldSession.prompt(ACCOUNT_REFUSED_PROMPT).then(
+		() => "resolved",
+		(error: unknown) => messageOf(error),
+	);
+	const startOutcome = await withDeadline(trace, "account quit: the held refusal settles", start, 60_000);
+	const disposal = await withDeadline(
+		trace,
+		"account quit: the quit completes",
+		quit ?? disposed(heldSession),
+		60_000,
+	);
+	// Claimed after the quit completes, so the disclosures the dispose itself writes are part of what is claimed.
+	const warnings = world.warnings.splice(mark);
+	return {
+		baselinePersisted,
+		fileAtQuit,
+		fileAfterQuit: world.io.peekFile(heldFile) ?? "",
+		requestModelsAtQuit,
+		modelAtRetryStart,
+		retryStart,
+		requestsAddedByQuit: world.provider.requests.length - requestsAtQuit,
+		warnings,
+		startOutcome,
+		disposal,
+	};
+}
+
+interface AccountControlRun {
+	readonly requestMark: number;
+	readonly requestModels: readonly string[];
+	readonly modelAfter: string | undefined;
+	readonly retryEvents: ReadonlyArray<Record<string, unknown>>;
+	readonly warnings: readonly string[];
+	readonly fileText: string;
+	readonly disposal: { readonly error: unknown } | undefined;
+}
+
+/** The same listing and refusal with no quit: the retry continues on the account default, and that answer is the turn's reply. */
+async function runAccountControl(world: HarnessWorld, agentDir: string): Promise<AccountControlRun> {
+	const { trace } = world;
+	const control = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		settings: { memorySystem: undefined },
+	});
+	const controlSession = control.session;
+	await controlSession.bindExtensions({ uiContext: world.humanInput.ui });
+	await controlSession.setModel(accountModel(world, "worker-a"), { persistSettings: false });
+	const controlFile = control.sessionManager.getSessionFile();
+	if (controlFile === undefined) throw new Error("the account control owner has no file");
+	const retryEvents: Array<Record<string, unknown>> = [];
+	controlSession.subscribe((event) => {
+		if (event.type === "auto_retry_start") {
+			retryEvents.push({ type: event.type, attempt: event.attempt, errorMessage: event.errorMessage });
+		} else if (event.type === "auto_retry_end") {
+			retryEvents.push({ type: event.type, attempt: event.attempt, success: event.success });
+		}
+	});
+	const mark = world.warnings.length;
+	const requestMark = world.provider.requests.length;
+	world.provider.enqueue("worker-a", fail("account-control-refusal", ACCOUNT_REFUSAL));
+	world.provider.enqueue("root", text("account-control-reply", ACCOUNT_ROOT_REPLY));
+	await withDeadline(
+		trace,
+		"account control: the refused turn completes on root",
+		controlSession.prompt(ACCOUNT_REFUSED_PROMPT),
+	);
+	const warnings = world.warnings.splice(mark);
+	const requestModels = world.provider.requests
+		.slice(requestMark)
+		.map((request) => `${request.model.provider}/${request.model.id}`);
+	const fileText = world.io.peekFile(controlFile) ?? "";
+	const modelAfter = modelRef(controlSession.model);
+	const disposal = await world.disposeSessionInBody(controlSession);
+	return { requestMark, requestModels, modelAfter, retryEvents, warnings, fileText, disposal };
+}
+
+/**
+ * A refused account model moves the session to the account's own default, announced as a retry. The listing is fetched through the guard's
+ * fetch port and consumed before the first model request, because the first submission waits for the account check. The witness reaches
+ * the model-switch gates of foreground-recovery-controller.ts (the unsupported-model retry, then the post-recovery closing gate). The billing
+ * failover continuation (`billing.continuedOn`) is not reached here.
+ */
+async function verifyAccountListingRefusal(world: HarnessWorld): Promise<void> {
+	const requestBase = world.provider.requests.length;
+	const listingRequests: AccountListingRequest[] = [];
+	const registry = world.modelRegistry.createReloadSnapshot();
+	world.modelRegistry.registerProvider(ACCOUNT_PROVIDER, {
+		api: HARNESS_API,
+		baseUrl: ACCOUNT_BASE_URL,
+		apiKey: ACCOUNT_LISTING_TOKEN,
+		models: ["worker-a", "root"].map((id) => {
+			const { name, reasoning, input, cost, contextWindow, maxTokens } = world.provider.model(id);
+			return { id, name, reasoning, input, cost, contextWindow, maxTokens };
+		}),
+	});
+	serveAccountListing(world, listingRequests, requestBase);
+	const agentDir = `${world.agentDir}-account-listing`;
+	try {
+		const quit = await runAccountQuit(world, agentDir);
+		expect(quit.baselinePersisted, "a nonempty persisted baseline exists before the refusal").toBe(true);
+		expect(
+			quit.requestModelsAtQuit,
+			"the refusal reaches the provider on worker-a, the account's first model, before the switch",
+		).toEqual([`${ACCOUNT_PROVIDER}/worker-a`]);
+		expect(
+			quit.fileAtQuit.includes(ACCOUNT_REFUSAL),
+			"the refused assistant message is persisted on message end, before the retry is announced",
+		).toBe(true);
+		expect(
+			retryRecordsIn(quit.fileAtQuit)[0],
+			"the retry start is persisted before the quit: the record names the continuation",
+		).toMatchObject({ phase: "start", attempt: 1, delayMs: 0, errorMessage: ACCOUNT_RETRY_MESSAGE });
+		expect(quit.modelAtRetryStart, "the session stands on the account default when the retry is announced").toBe(
+			`${ACCOUNT_PROVIDER}/root`,
+		);
+		expect(quit.retryStart, "the announced retry is a model-switch continuation with no delay").toEqual({
+			attempt: 1,
+			delayMs: 0,
+			errorMessage: ACCOUNT_RETRY_MESSAGE,
+		});
+		expect(quit.warnings, "the switch discloses exactly the account warning").toEqual([ACCOUNT_SWITCH_WARNING]);
+		expect(quit.requestsAddedByQuit, "a quit from the announced retry makes no provider request after it").toBe(0);
+		expect(quit.startOutcome, "the held refusal turn resolves").toBe("resolved");
+		expect(quit.disposal, "the quit completes").toBe("disposed");
+		expect(
+			quit.fileAfterQuit.startsWith(quit.fileAtQuit),
+			"the file is appended to after the quit, never rewritten",
+		).toBe(true);
+		const growth = entriesIn(quit.fileAfterQuit.slice(quit.fileAtQuit.length));
+		expect(
+			growth.map((entry) => entry.customType ?? entry.type),
+			"after the quit the only persisted record is the cancelled retry end",
+		).toEqual([PROVIDER_RETRY_CUSTOM_TYPE]);
+		expect(growth[0]?.data, "the cancelled retry end names the refused model and the cancellation").toMatchObject({
+			phase: "end",
+			attempt: 1,
+			success: false,
+			finalError: "Submission cancelled",
+			provider: ACCOUNT_PROVIDER,
+			modelId: "worker-a",
+		});
+
+		const control = await runAccountControl(world, agentDir);
+		expect(control.requestModels, "the refusal is answered by worker-a, then the continuation by root").toEqual([
+			`${ACCOUNT_PROVIDER}/worker-a`,
+			`${ACCOUNT_PROVIDER}/root`,
+		]);
+		expect(control.warnings, "the control discloses exactly the account warning").toEqual([ACCOUNT_SWITCH_WARNING]);
+		expect(control.modelAfter, "the control session stands on the account default afterwards").toBe(
+			`${ACCOUNT_PROVIDER}/root`,
+		);
+		expect(control.retryEvents, "the retry is announced, then ends successfully on root").toEqual([
+			{ type: "auto_retry_start", attempt: 1, errorMessage: ACCOUNT_RETRY_MESSAGE },
+			{ type: "auto_retry_end", attempt: 1, success: true },
+		]);
+		expect(control.fileText.includes(ACCOUNT_ROOT_REPLY), "normal order: the root answer is persisted").toBe(true);
+		expect(
+			retryRecordsIn(control.fileText).at(-1),
+			"normal order: the persisted retry end is a success",
+		).toMatchObject({ phase: "end", attempt: 1, success: true });
+		expect(control.disposal, "the control disposes cleanly").toBeUndefined();
+
+		expect(listingRequests, "each session asks the models endpoint once, before its first submission").toHaveLength(
+			2,
+		);
+		expect(
+			listingRequests.map((request) => request.clientVersion),
+			"every listing is asked with the Codex client release",
+		).toEqual([ACCOUNT_CLIENT_VERSION, ACCOUNT_CLIENT_VERSION]);
+		expect(
+			listingRequests.map((request) => request.accountId),
+			"every listing carries the synthetic account header",
+		).toEqual([ACCOUNT_LISTING_ACCOUNT_ID, ACCOUNT_LISTING_ACCOUNT_ID]);
+		expect(
+			listingRequests.map((request) => request.authorization),
+			"every listing carries the synthetic bearer token",
+		).toEqual([`Bearer ${ACCOUNT_LISTING_TOKEN}`, `Bearer ${ACCOUNT_LISTING_TOKEN}`]);
+		expect(
+			listingRequests[0]?.requestsBefore,
+			"the quit owner's listing is answered before its first model request",
+		).toBe(0);
+		expect(
+			listingRequests[1]?.requestsBefore,
+			"the control's listing is answered before its first model request",
+		).toBeLessThanOrEqual(control.requestMark - requestBase);
+	} finally {
+		world.fetchResponder = undefined;
+		world.modelRegistry.restoreReloadSnapshot(registry);
+	}
 }

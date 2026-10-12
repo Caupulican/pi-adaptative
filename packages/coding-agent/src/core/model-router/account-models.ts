@@ -196,6 +196,11 @@ export class AccountModelCatalog {
 		this.refused.set(`${model.provider}/${model.id}`, bounded(providerMessage));
 	}
 
+	/** Whether this account's model listing for the provider was fetched, so an absent alternative is a fact about the listing. */
+	hasListing(provider: string): boolean {
+		return this.states.get(provider)?.kind === "listed";
+	}
+
 	/**
 	 * The provider's own default for this account: its first offered model (by the provider's
 	 * priority) that pi knows, has a credential for, and that was not refused.

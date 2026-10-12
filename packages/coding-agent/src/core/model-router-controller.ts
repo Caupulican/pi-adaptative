@@ -1,7 +1,8 @@
 /**
- * Model-router turn routing: the session's model-selection subsystem — the conversation stages (the
- * opening judged once into the talker, small messages on a brief side trip, exact toolkit hits run
- * with no model), the regex route resolver, the optional System One routing judge, the per-tier
+ * Model-router turn routing: the session's model-selection subsystem — the owner-message route (every
+ * owner message is answered by the session model: `talker` once one is chosen, else `direct`; the
+ * `opening`, `side_trip` and `toolkit` kinds are no longer produced by {@link routeOwnerMessage}, see
+ * its note), the regex route resolver, the optional System One routing judge, the per-tier
  * thinking/tool-surface swap around a routed turn, the cheap-turn session buffer with mutating-tool
  * escalation back to the talker, and the router status/diagnostics report.
  *
@@ -289,7 +290,10 @@ function formatFitnessVerdict(verdict: FitnessGateVerdict): string {
 /** Route reason of a small owner message's cheap-tier side trip (see `routeOwnerMessage`). */
 export const SIDE_TRIP_REASON_CODE = "side_trip";
 
-/** How an owner message is routed (see `ModelRouterController.routeOwnerMessage`). */
+/**
+ * How an owner message is routed (see `ModelRouterController.routeOwnerMessage`). Only `direct` and `talker` are produced today; the other
+ * kinds keep their downstream handling in `AgentSession` but have no producer.
+ */
 export type OwnerMessageRoute =
 	| { kind: "direct" }
 	| { kind: "talker" }
@@ -925,12 +929,10 @@ export class ModelRouterController {
 	}
 
 	/**
-	 * Stage routing for an owner message (conversation-continuity design, stages 0-1). A small message (the
-	 * deterministic classifier says the cheap tier; no System One call) takes one side trip on the cheap
-	 * tier with a small brief, when `sideTripApproves` prices it below the talker answering on its warm
-	 * cache. Otherwise the talker answers: with a talker chosen, no route is judged; before one, the
-	 * judged route runs once and its model becomes the talker (`opening`). An exact toolkit hit runs
-	 * with no model (`toolkit`). With the router off the session model answers (`direct`).
+	 * Routing for an owner message. The session model answers every owner message (root-first routing): with a talker already chosen the
+	 * route is `talker`, otherwise `direct`. No side trip, opening or toolkit route is produced, so no owner turn is a routed turn and the
+	 * routed-turn machinery (`runRoutedTurn`'s model path, refused-model replacement) has no owner-path producer; the return type keeps
+	 * those kinds for their downstream handlers.
 	 */
 	async routeOwnerMessage(
 		_prompt: string,

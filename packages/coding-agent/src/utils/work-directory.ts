@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { probeProcessLiveness } from "../kernel/reliability/process-tree.ts";
 
 export const PI_WORK_ROOT_ENV = "PI_WORK_ROOT";
 export const WORK_RUN_MANIFEST_FILE = ".pi-work-run.json";
@@ -57,7 +58,12 @@ interface WorkMarker {
 interface InspectedRun {
 	path: string;
 	mtimeMs: number;
-	bytes: number;
+	/**
+	 * The run's measured size, or undefined when its scan was incomplete (unreadable, or the shared scan budget ran out). An unmeasured size is
+	 * not evidence of exceeding the byte limit: such a run counts nothing toward the byte total and is never evicted for bytes, only by age
+	 * or count like any other run.
+	 */
+	bytes: number | undefined;
 }
 
 interface ScanBudget {
@@ -196,12 +202,9 @@ function markerState(path: string): "active" | "stale" | "unknown" {
 		const value = readSmallJson(path);
 		if (!isMarker(value)) return "unknown";
 		if (value.hostname !== hostname()) return "active";
-		try {
-			process.kill(value.pid, 0);
-			return "active";
-		} catch (error) {
-			return (error as NodeJS.ErrnoException).code === "EPERM" ? "active" : "stale";
-		}
+		// The canonical liveness owner: only a proven absence (ESRCH) is stale; a probe that could not tell stays unknown and fail-closed.
+		const liveness = probeProcessLiveness(value.pid);
+		return liveness === "alive" ? "active" : liveness === "dead" ? "stale" : "unknown";
 	} catch (error) {
 		return (error as NodeJS.ErrnoException).code === "ENOENT" ? "stale" : "unknown";
 	}
@@ -303,7 +306,6 @@ function inspectRun(
 	tenant: string,
 	runId: string,
 	budget: ScanBudget,
-	unknownBytes: number,
 ): InspectedRun | undefined {
 	try {
 		const stats = lstatSync(runPath);
@@ -314,7 +316,7 @@ function inspectRun(
 		return {
 			path: runPath,
 			mtimeMs: stats.mtimeMs,
-			bytes: measured.complete ? measured.bytes : unknownBytes,
+			bytes: measured.complete ? measured.bytes : undefined,
 		};
 	} catch {
 		return undefined;
@@ -400,7 +402,6 @@ export function pruneWorkTenant(
 	const budget: ScanBudget = {
 		remaining: nonNegativeLimit(options.maxScannedEntries, DEFAULT_MAX_SCANNED_ENTRIES),
 	};
-	const unknownBytes = Math.max(1, maxTotalBytes + 1);
 	const runs: InspectedRun[] = [];
 	let truncated = false;
 	let handle: Dir | undefined;
@@ -417,7 +418,7 @@ export function pruneWorkTenant(
 			scanned++;
 			if (entry.name.startsWith(".")) continue;
 			if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-			const inspected = inspectRun(join(tenantDir, entry.name), category, tenant, entry.name, budget, unknownBytes);
+			const inspected = inspectRun(join(tenantDir, entry.name), category, tenant, entry.name, budget);
 			if (inspected) runs.push(inspected);
 		}
 	} catch {
@@ -430,16 +431,18 @@ export function pruneWorkTenant(
 
 	const removed: string[] = [];
 	let retainedCount = runs.length + (truncated ? maxRuns + 1 : 0);
-	let retainedBytes = runs.reduce((sum, run) => sum + run.bytes, 0);
+	// Only measured runs make up the byte total, and only a measured run is evicted for bytes: an unmeasured run (unreadable, or past the
+	// shared scan budget) must not push the total over the budget, nor mark healthy neighbours as over it.
+	let retainedBytes = runs.reduce((sum, run) => sum + (run.bytes ?? 0), 0);
 	for (const run of runs.sort((left, right) => left.mtimeMs - right.mtimeMs)) {
 		const expired = now - run.mtimeMs > maxAgeMs;
 		const overCount = retainedCount > maxRuns;
-		const overBytes = retainedBytes > maxTotalBytes;
+		const overBytes = run.bytes !== undefined && retainedBytes > maxTotalBytes;
 		if (!expired && !overCount && !overBytes) continue;
 		if (!removeRunIfInactive(run.path, now)) continue;
 		removed.push(run.path);
 		retainedCount--;
-		retainedBytes -= run.bytes;
+		retainedBytes -= run.bytes ?? 0;
 	}
 	return removed;
 }
@@ -496,7 +499,13 @@ export function acquireWorkRun(options: AcquireWorkRunOptions): WorkRunLease {
 		let manifest: unknown;
 		try {
 			manifest = readSmallJson(manifestPath);
-		} catch {
+		} catch (error) {
+			// A missing or malformed manifest means an unowned directory; a read that failed for another reason (EIO, EACCES) says nothing
+			// about ownership and keeps its cause.
+			const code = (error as NodeJS.ErrnoException).code;
+			if (typeof code === "string" && code !== "ENOENT") {
+				throw new Error(`Work directory manifest could not be read: ${runDir}`, { cause: error });
+			}
 			throw new Error(`Refusing to adopt unowned work directory: ${runDir}`);
 		}
 		if (!isManifest(manifest, options.category, options.tenant, runId)) {
