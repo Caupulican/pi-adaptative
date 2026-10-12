@@ -1,7 +1,8 @@
 import { EventEmitter } from "node:events";
 import { type Api, type Model, OPENAI_CODEX_CLIENT_VERSION } from "@caupulican/pi-ai";
 import { getKeybindings, setKeybindings, type Terminal } from "@caupulican/pi-tui";
-import * as undici from "undici";
+import type * as Undici from "undici";
+import undiciDefault from "undici";
 import { expect, type Mock, vi } from "vitest";
 import { AgentSession } from "../../../src/core/agent-session.ts";
 import { type AgentSessionRuntime, createAgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
@@ -25,6 +26,9 @@ import { initTheme, stopThemeWatcher } from "../../../src/presentation/theme/the
 import { trackDetachedChild, untrackDetachedChild } from "../../../src/utils/shell.ts";
 import { type Barrier, createBarrier, fail, HARNESS_API, HARNESS_PROVIDER, text } from "./scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "./session-fixture.ts";
+
+// Match the production adapter's default object rather than an immutable ESM namespace.
+const undici = undiciDefault as typeof Undici;
 
 const GUARD_CLOSING_WARNING = "Guard witness: a closing warning the held terminal keeps until stop.";
 const GUARD_STOP_FAILURE = "Guard witness: stop failed after the release.";
@@ -815,9 +819,9 @@ async function runQuitCrashAfterStop(world: HarnessWorld): Promise<QuitCrashRun>
 
 /** Undici's promise close calls this.close(callback): only the outer promise call may be held or decorated. */
 function observeDispatcherClose(
-	dispatcher: undici.Dispatcher,
+	dispatcher: Undici.Dispatcher,
 	wrap: (settleNative: () => Promise<void>) => Promise<void>,
-): Mock<undici.Dispatcher["close"]> {
+): Mock<Undici.Dispatcher["close"]> {
 	const nativeClose = dispatcher.close.bind(dispatcher);
 	function close(callback: () => void): void;
 	function close(): Promise<void>;
@@ -830,7 +834,7 @@ function observeDispatcherClose(
 
 /** Application retirement and Undici's internal callback delegation are distinct calls to the same overloaded public method. */
 function dispatcherCloseCount(
-	spy: Mock<undici.Dispatcher["close"]>,
+	spy: Mock<Undici.Dispatcher["close"]>,
 	overload: "promise" | "callback" = "promise",
 ): number {
 	return spy.mock.calls.filter((args: readonly unknown[]) =>
@@ -841,24 +845,34 @@ function dispatcherCloseCount(
 /** The pinned Bun compatibility port supplies descriptors, while the same production owner still retires real pools. */
 async function verifyNativeHttpDispatcherLifetime(world: HarnessWorld): Promise<void> {
 	await disposeHttpDispatcher();
-	const foreign = new undici.Agent();
-	const takeover = new undici.Agent();
-	const foreignClose = vi.spyOn(foreign, "close");
-	const takeoverClose = vi.spyOn(takeover, "close");
-	// Bun 1.4.2's DispatcherBase and EnvHttpProxyAgent add no members to EventEmitter.
-	const descriptor = () => new EventEmitter() as unknown as undici.EnvHttpProxyAgent;
-	let next = descriptor();
-	let current: undici.Dispatcher = foreign;
-	const constructorSpy = vi.spyOn(undici, "EnvHttpProxyAgent").mockImplementation(function (this: object) {
-		return next;
-	});
-	const readGlobal = vi.spyOn(undici, "getGlobalDispatcher").mockImplementation(() => current);
-	const writeGlobal = vi.spyOn(undici, "setGlobalDispatcher").mockImplementation((dispatcher) => {
-		current = dispatcher;
-	});
-	const install = vi.spyOn(undici, "install").mockImplementation(() => {});
 	const failures: unknown[] = [];
+	const pools: Undici.Dispatcher[] = [];
+	const spies: { mockRestore(): void }[] = [];
+	const retainSpy = <T extends { mockRestore(): void }>(spy: T): T => {
+		spies.push(spy);
+		return spy;
+	};
 	try {
+		const foreign = new undici.Agent();
+		pools.push(foreign);
+		const takeover = new undici.Agent();
+		pools.push(takeover);
+		const foreignClose = retainSpy(vi.spyOn(foreign, "close"));
+		const takeoverClose = retainSpy(vi.spyOn(takeover, "close"));
+		// Bun 1.4.2's DispatcherBase and EnvHttpProxyAgent add no members to EventEmitter.
+		const descriptor = () => new EventEmitter() as unknown as Undici.EnvHttpProxyAgent;
+		let next = descriptor();
+		let current: Undici.Dispatcher = foreign;
+		const constructorSpy = retainSpy(vi.spyOn(undici, "EnvHttpProxyAgent")).mockImplementation(function (
+			this: object,
+		) {
+			return next;
+		});
+		retainSpy(vi.spyOn(undici, "getGlobalDispatcher")).mockImplementation(() => current);
+		const writeGlobal = retainSpy(vi.spyOn(undici, "setGlobalDispatcher")).mockImplementation((dispatcher) => {
+			current = dispatcher;
+		});
+		const install = retainSpy(vi.spyOn(undici, "install")).mockImplementation(() => {});
 		const writesBefore = writeGlobal.mock.calls.length;
 		expect(() => configureHttpDispatcher(100, "node"), "Node refuses a dispatcher without a pool close").toThrow(
 			"HTTP dispatcher has no supported resource lifetime for this runtime",
@@ -945,9 +959,14 @@ async function verifyNativeHttpDispatcherLifetime(world: HarnessWorld): Promise<
 		} catch (error) {
 			failures.push(error);
 		} finally {
-			for (const spy of [constructorSpy, readGlobal, writeGlobal, install, foreignClose, takeoverClose])
-				spy.mockRestore();
-			for (const dispatcher of [foreign, takeover]) {
+			for (const spy of spies) {
+				try {
+					spy.mockRestore();
+				} catch (error) {
+					failures.push(error);
+				}
+			}
+			for (const dispatcher of pools) {
 				try {
 					await dispatcher.close();
 				} catch (error) {
@@ -1080,7 +1099,7 @@ async function runHttpInstall(world: HarnessWorld): Promise<HttpInstallRun> {
 		await withDeadline(world.trace, "http install: displaced owned close settles", displacedCloseResult.value);
 		const headersDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Headers");
 		const installFailure = new Error("HTTP install witness: Headers installation refused");
-		let failedPoolClose: Mock<undici.Dispatcher["close"]> | undefined;
+		let failedPoolClose: Mock<Undici.Dispatcher["close"]> | undefined;
 		let installCauseKept = false;
 		try {
 			Object.defineProperty(globalThis, "Headers", {

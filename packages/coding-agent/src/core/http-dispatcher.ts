@@ -1,6 +1,11 @@
-import * as undici from "undici";
+import type * as Undici from "undici";
+import undiciDefault from "undici";
 import { isBunRuntime } from "../config.ts";
 import { DEFAULT_STREAM_IDLE, type StreamIdleOptions } from "../kernel/reliability/index.ts";
+
+// Both npm's CommonJS module and Bun's compatibility module expose this object as default.
+// Undici's default declaration omits EnvHttpProxyAgent, which its named declaration includes.
+const undici = undiciDefault as typeof Undici;
 
 // The default stays strictly greater than the largest default stall-watchdog quiet bound (the
 // local budget's 600s, pi-agent-core DEFAULT_STREAM_IDLE; the cloud budget's is 300s,
@@ -101,13 +106,13 @@ export function constrainStreamIdleToHttpTimeout(
 export type HttpDispatcherRuntime = "node" | "bun";
 
 interface OwnedHttpDispatcher {
-	dispatcher: undici.EnvHttpProxyAgent;
+	dispatcher: Undici.EnvHttpProxyAgent;
 	lifetime: "pooled" | "bun-native";
 }
 
 /** The dispatcher this module last installed, with its transport lifetime captured before installation. */
 let ownedDispatcher: OwnedHttpDispatcher | undefined;
-let previousDispatcher: undici.Dispatcher | undefined;
+let previousDispatcher: Undici.Dispatcher | undefined;
 const retirements = new Set<Promise<void>>();
 const retirementFailures: unknown[] = [];
 /** Final process/embedding cleanup grace; settings supersession continues to retire gracefully without a deadline. */
