@@ -591,18 +591,22 @@ export class Agent {
 			this.sentPrefixCount,
 		);
 		this.loopContinuationState = continuationState;
-		await this.runWithLifecycle(async (signal) => {
-			await runAgentLoop(
-				messages,
-				this.createContextSnapshot(),
-				this.createLoopConfig(options),
-				(event) => this.processEvents(event),
-				signal,
-				this.streamFn,
-				continuationState,
-			);
-		});
-		this.syncSanitizerPrefixHorizon(continuationState);
+		try {
+			await this.runWithLifecycle(async (signal) => {
+				await runAgentLoop(
+					messages,
+					this.createContextSnapshot(),
+					this.createLoopConfig(options),
+					(event) => this.processEvents(event),
+					signal,
+					this.streamFn,
+					continuationState,
+				);
+			});
+		} finally {
+			// Also when the failure lifecycle itself rethrows (a listener refused the failure record): the marks the loop advanced stay.
+			this.syncSanitizerPrefixHorizon(continuationState);
+		}
 	}
 
 	private async runContinuation(): Promise<void> {
@@ -610,23 +614,26 @@ export class Agent {
 			this.loopContinuationState ??
 			createAgentLoopContinuationState(this.sanitizerSentPrefixCount, this.sanitizerMemory, this.sentPrefixCount);
 		this.loopContinuationState = continuationState;
-		await this.runWithLifecycle(async (signal) => {
-			await runAgentLoopContinue(
-				this.createContextSnapshot(),
-				this.createLoopConfig(),
-				(event) => this.processEvents(event),
-				signal,
-				this.streamFn,
-				continuationState,
-			);
-		});
-		this.syncSanitizerPrefixHorizon(continuationState);
+		try {
+			await this.runWithLifecycle(async (signal) => {
+				await runAgentLoopContinue(
+					this.createContextSnapshot(),
+					this.createLoopConfig(),
+					(event) => this.processEvents(event),
+					signal,
+					this.streamFn,
+					continuationState,
+				);
+			});
+		} finally {
+			this.syncSanitizerPrefixHorizon(continuationState);
+		}
 	}
 
 	/**
 	 * Copies the loop's own (possibly just-grown) sanitizer mark back onto this persistent field
 	 * after a run, whether that run finished normally, failed, or was aborted -
-	 * `runWithLifecycle` swallows run failures internally and never rethrows, so this always runs.
+	 * `runWithLifecycle` swallows run failures internally (it rethrows only a listener's refusal of the failure record), and the callers run this in a `finally`, so it always runs.
 	 * `continuationState.providerRequestPrefixState` is the SAME object the loop wrote through
 	 * during the run (see `createAgentLoopContinuationState`), so this only ever reads a value
 	 * already updated in place - it does not recompute anything.
@@ -751,10 +758,23 @@ export class Agent {
 			errorMessage,
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
-		await this.processEvents({ type: "message_start", message: failureMessage, origin: "local" });
-		await this.processEvents({ type: "message_end", message: failureMessage, origin: "local" });
-		await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
-		await this.processEvents({ type: "agent_end", messages: [failureMessage] });
+		// The failure lifecycle always completes: a listener that refuses one of these events (a fenced session file refusing the
+		// failure message's own append) must not skip `turn_end`/`agent_end`, which the session's idle and memory handling depend
+		// on. The first refusal is thrown once every event has been delivered.
+		const refusals: unknown[] = [];
+		for (const event of [
+			{ type: "message_start", message: failureMessage, origin: "local" },
+			{ type: "message_end", message: failureMessage, origin: "local" },
+			{ type: "turn_end", message: failureMessage, toolResults: [] },
+			{ type: "agent_end", messages: [failureMessage] },
+		] satisfies AgentEvent[]) {
+			try {
+				await this.processEvents(event);
+			} catch (refusal: unknown) {
+				refusals.push(refusal);
+			}
+		}
+		if (refusals.length > 0) throw refusals[0];
 	}
 
 	private finishRun(): void {

@@ -92,7 +92,18 @@ export class HarnessTrace {
 		return work;
 	}
 
-	/** Waits until every tracked item settled; returns the rejections the body did not await itself. */
+	/**
+	 * The body states that it received this exact rejection and judged it itself: it is no longer reported by {@link join}. Claimed by
+	 * identity, never by awaiting (a deadline race also awaits, and a rejection arriving after it fired must still be reported), and a
+	 * rejection that was never recorded is an error, so a claim cannot silently cover work this trace did not see.
+	 */
+	claimRejection(error: unknown): void {
+		const index = this.rejectedWork.indexOf(error);
+		if (index < 0) throw new Error("claimRejection: the trace recorded no such rejection");
+		this.rejectedWork.splice(index, 1);
+	}
+
+	/** Waits until every tracked item settled; returns the rejections the body did not claim. */
 	async join(): Promise<unknown[]> {
 		while (this.liveWork.size > 0) await Promise.all([...this.liveWork]);
 		return this.rejectedWork.splice(0);

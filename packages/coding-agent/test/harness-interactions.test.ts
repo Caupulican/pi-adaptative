@@ -1053,12 +1053,12 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				/^Optional integrations stay available; owner intent for them was not classified: Jev System One unavailable for impact 'read_only': TypeSafe HTTP 503\.$/,
 				/^Optional integrations stay available; owner intent for them was not classified: the judgment was uncertain\.$/,
 				/^Failed to release worker write reservation [^:]+: Scripted IO fault e13-release-rename-fails\b/,
-				/^Worker write reservation watcher (?:\/harness\/project|[A-Z]:\\harness\\project) teardown failed: Scripted IO fault e13j-watch-close-fails: watch\.close '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations)'$/,
+				/^Worker write reservation watcher (?:\/harness\/project|[A-Z]:\\harness\\project) teardown failed: Scripted IO fault e13j-watch-close-fails: watch\.close '(?:\/harness\/agent-journey-1-system-one-(?:on|off)\/state\/orchestration\/worker-write-reservations|[A-Z]:\\harness\\agent-journey-1-system-one-(?:on|off)\\state\\orchestration\\worker-write-reservations)'$/,
 				// Terminal disclosures of the e13 worker shutdowns: each message exactly, the platform root narrowed to its POSIX or drive-letter form and
 				// the reservation name to its 64-hex digest. A fault-free owner discloses none (the e13 fresh owner's control).
-				/^Failed to release worker write reservation: Scripted IO fault e13-release-unlink-fails: unlink '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations\/|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations\\)[0-9a-f]{64}\.json'$/,
-				/^Failed to release worker write reservation: Scripted IO fault e13a-release-unlink-after: unlink '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations\/|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations\\)[0-9a-f]{64}\.json'$/,
-				/^Failed to release worker write reservation: Scripted IO fault e13j-release-unlink-fails: unlink '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations\/|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations\\)[0-9a-f]{64}\.json'$/,
+				/^Failed to release worker write reservation: Scripted IO fault e13-release-unlink-fails: unlink '(?:\/harness\/agent-journey-1-system-one-(?:on|off)\/state\/orchestration\/worker-write-reservations\/|[A-Z]:\\harness\\agent-journey-1-system-one-(?:on|off)\\state\\orchestration\\worker-write-reservations\\)[0-9a-f]{64}\.json'$/,
+				/^Failed to release worker write reservation: Scripted IO fault e13a-release-unlink-after: unlink '(?:\/harness\/agent-journey-1-system-one-(?:on|off)\/state\/orchestration\/worker-write-reservations\/|[A-Z]:\\harness\\agent-journey-1-system-one-(?:on|off)\\state\\orchestration\\worker-write-reservations\\)[0-9a-f]{64}\.json'$/,
+				/^Failed to release worker write reservation: Scripted IO fault e13j-release-unlink-fails: unlink '(?:\/harness\/agent-journey-1-system-one-(?:on|off)\/state\/orchestration\/worker-write-reservations\/|[A-Z]:\\harness\\agent-journey-1-system-one-(?:on|off)\\state\\orchestration\\worker-write-reservations\\)[0-9a-f]{64}\.json'$/,
 				// Terminal disclosures of an abort-ignoring worker at close: its physical settlement bound passes with its inner calls pending, the
 				// Windows shell session's terminal release bound passes before the child closes, and the task directory that System One verification
 				// depends on is already disposed. Each message exactly (the attempt id narrowed to its uuid form).
@@ -1071,7 +1071,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				/^Worker shutdown failed: Worker scheduler shutdown failed\.$/,
 				/^Worker shutdown failed: Worker write reservation shutdown failed\.$/,
 				/^Worker shutdown failed: Worker shutdown retained unresolved specialist execution resources\.$/,
-				/^Worker write reservation watcher (?:\/harness\/project|[A-Z]:\\harness\\project) teardown failed: Scripted IO fault e13w-watch-close-fails: watch\.close '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations)'$/,
+				/^Worker write reservation watcher (?:\/harness\/project|[A-Z]:\\harness\\project) teardown failed: Scripted IO fault e13w-watch-close-fails: watch\.close '(?:\/harness\/agent-journey-1-system-one-(?:on|off)\/state\/orchestration\/worker-write-reservations|[A-Z]:\\harness\\agent-journey-1-system-one-(?:on|off)\\state\\orchestration\\worker-write-reservations)'$/,
 				/^Worker worker-\d+ provider request failed \(server_error\); retrying in \d+s \(attempt [23]\/3\)\.$/,
 				/^Worker worker-\d+ failed \(server_error\); retrying from the persisted transcript in \d+s \(attempt 2\)\.$/,
 				/^A queued message was not delivered because the session context changed before it was admitted\. It is kept in full in the pending queue; restore it to the editor to send it again: Queued owner input while the summary is held\.$/,
@@ -16360,14 +16360,20 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 							(data?.toString("utf8").includes('"customType":"semantic_usage"') ?? false) &&
 							(data?.toString("utf8").includes('"route":"system_one_tool"') ?? false),
 					});
+					let uToolRefusal: unknown;
 					await expect(
 						withDeadline(
 							trace,
 							"U-usage fenced root tool turn",
-							uTool.session.prompt("Review the claim with the root tool."),
+							uTool.session.prompt("Review the claim with the root tool.").catch((error: unknown) => {
+								uToolRefusal = error;
+								throw error;
+							}),
 						),
 						"the fenced turn ends on the refused tool result: the session's own persistence refusal",
 					).rejects.toThrow("Session persistence state is uncertain after a failed write");
+					// The body judged this exact rejection above; the trace must not report it a second time at close.
+					trace.claimRejection(uToolRefusal);
 					const uToolFile = uTool.sessionManager.getSessionFile();
 					if (uToolFile === undefined) throw new Error("U-usage: the fenced root-tool owner session has no file");
 					const uToolSidecar = uSidecarOf(uToolFile, uTool.sessionManager.getSessionId());
