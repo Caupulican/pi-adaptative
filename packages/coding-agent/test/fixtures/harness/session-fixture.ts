@@ -414,6 +414,33 @@ export class ScriptedSystemOneTransport {
 		for (const prefix of this.families.keys()) this.declared.push(`${name}:${prefix}*`);
 	}
 
+	/** Adds explicitly required families for one operation without replacing the current phase's owner judgments or transport controls. */
+	async withQuestionFamilies<T>(
+		families: Readonly<Record<string, ScriptedJudgment>>,
+		operation: () => Promise<T>,
+	): Promise<T> {
+		if (!this.enabled) return operation();
+		const phase = this.phase;
+		const previous = this.families;
+		const prefixes = Object.keys(families);
+		for (const prefix of prefixes) {
+			if (previous.has(prefix) || this.consumed.has(`${phase}:${prefix}*`)) {
+				throw new Error(`Question family ${phase}:${prefix} is already owned or was already consumed`);
+			}
+		}
+		this.families = new Map([...previous, ...Object.entries(families)]);
+		for (const prefix of prefixes) this.declared.push(`${phase}:${prefix}*`);
+		try {
+			return await operation();
+		} finally {
+			for (const prefix of prefixes) {
+				if (!this.consumed.has(`${phase}:${prefix}*`)) this.unconsumed.push(`${phase}:${prefix}*`);
+			}
+			if (this.phase === phase) this.families = previous;
+			else this.unscripted.push(`Question-family scope for ${phase} crossed into phase ${this.phase}`);
+		}
+	}
+
 	private closePhase(): void {
 		for (const id of this.expected.keys()) {
 			const key = `${this.phase}:${id}`;
@@ -2858,27 +2885,20 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 	);
 	const controlMark = world.warnings.length;
 	const controlPlanningMark = world.systemOne.decoded.length;
-	if (world.systemOne.enabled)
-		world.systemOne.enterPhase(
-			"pre-start-retention-control",
-			{},
-			{
-				families: {
-					"keep_call::": { kind: "noul", probability: 0.97 },
-					"keep_result::": { kind: "noul", probability: 0.97 },
-				},
-			},
-		);
 	let reconnectSubscriptions = 0;
 	const subscribeControl = controlSession.agent.subscribe.bind(controlSession.agent);
 	controlSession.agent.subscribe = (...args: Parameters<typeof controlSession.agent.subscribe>) => {
 		reconnectSubscriptions++;
 		return subscribeControl(...args);
 	};
-	const committed = await withDeadline(
-		trace,
-		"pre-start control: the compaction commits",
-		controlSession.compact("Compact the control history."),
+	const committed = await world.systemOne.withQuestionFamilies(
+		{ "keep_call::": { kind: "noul", probability: 0.97 }, "keep_result::": { kind: "noul", probability: 0.97 } },
+		() =>
+			withDeadline(
+				trace,
+				"pre-start control: the compaction commits",
+				controlSession.compact("Compact the control history."),
+			),
 	);
 	const retentionPlanningReached = world.systemOne.decoded
 		.slice(controlPlanningMark)

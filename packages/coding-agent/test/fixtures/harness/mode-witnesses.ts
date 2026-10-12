@@ -39,6 +39,48 @@ const CALIBRATION_WARNING = `Text tool protocol for ${HARNESS_PROVIDER}/root has
 /** The owner prompt of both calibration runs: the same text, so both classify identically before preparation reaches the warning. */
 const CALIBRATION_RUN_PROMPT = "Run the control.";
 const CALIBRATION_BASELINE_REPLY = "The calibration baseline reply.";
+
+/** Neutral owner words: backlog settlement also screens and checks capabilities; steering classifies directly. */
+function enterNeutralModeIntake(world: HarnessWorld, phase: string, input: string, backlog: boolean): void {
+	if (!world.systemOne.enabled) return;
+	world.systemOne.enterPhase(
+		phase,
+		{
+			...(backlog
+				? {
+						carries_0: { kind: "noul" as const, probability: 0.02 },
+						capabilities_authorized: { kind: "noul" as const, probability: 0.02 },
+					}
+				: {}),
+			changes_model_pools: { kind: "noul", probability: 0.02 },
+			local_commits_only: { kind: "noul", probability: 0.02 },
+			lifts_delivery_block: { kind: "noul", probability: 0.02 },
+			full_handoff: { kind: "noul", probability: 0.02 },
+			optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+		},
+		{
+			expect: ({ state, questions }) => {
+				if ("carries_0" in questions) {
+					expect(backlog, "only deferred owner words need screening").toBe(true);
+					expect(state, "the screen sees this helper's exact earlier submission").toEqual({
+						owner_messages: [input],
+					});
+					return;
+				}
+				const intake = state as Record<string, unknown>;
+				expect(intake.user_request, "the intake sees this helper's exact owner words").toBe(input);
+				expect(intake.pending_owner_requests, "no unrelated owner input enters this intake").toEqual([]);
+				expect(intake.previous_optional_tool_intent, "no earlier tool request is invented").toBeNull();
+				expect(intake.optional_tools, "the neutral judgment refers to the real built-in candidate").toMatchObject([
+					{ toolName: "secret_store", sourcePath: "<builtin:secret_store>" },
+				]);
+				expect("capabilities_authorized" in questions, "steering does not classify deferred capabilities").toBe(
+					backlog,
+				);
+			},
+		},
+	);
+}
 const REJECTION_STACK = "Error: late rejection \u001b[2J at guard witness";
 const REJECTION_LINE = "Unhandled promise rejection during shutdown. Error: late rejection \\x1b[2J at guard witness\n";
 const CRASH_STACK = "Error: guard crash at guard witness";
@@ -1251,6 +1293,7 @@ async function runClosingGateAtCalibration(world: HarnessWorld): Promise<Calibra
 		name: "calibration-gate-baseline",
 		reply: { content: [{ type: "text", text: CALIBRATION_BASELINE_REPLY }] },
 	});
+	world.systemOne.enterPhase("mode-calibration-baseline", {});
 	await withDeadline(
 		trace,
 		"calibration gate: the baseline turn completes",
@@ -1280,6 +1323,7 @@ async function runClosingGateAtCalibration(world: HarnessWorld): Promise<Calibra
 		quit = disposed(heldSession);
 		shutdownAfterQuit = heldSession.getResourceSnapshot().foregroundRecovery.shutdown;
 	});
+	enterNeutralModeIntake(world, "mode-calibration-backlog", CALIBRATION_RUN_PROMPT, true);
 	const start = heldSession.prompt(CALIBRATION_RUN_PROMPT).then(
 		() => "resolved",
 		(error: unknown) => messageOf(error),
@@ -1312,6 +1356,7 @@ async function runClosingGateAtCalibration(world: HarnessWorld): Promise<Calibra
 		name: "calibration-gate-control",
 		reply: { content: [{ type: "text", text: CLOSING_GATE_CONTROL_REPLY }] },
 	});
+	world.systemOne.enterPhase("mode-calibration-control", {});
 	await withDeadline(
 		trace,
 		"calibration gate control: the run completes",
@@ -1782,6 +1827,7 @@ async function runAccountQuit(world: HarnessWorld, agentDir: string): Promise<Ac
 		// `disposeAndWait()` runs its shutdown synchronously before its first await, so the listener returns with the owner already closed.
 		quit = disposed(heldSession);
 	});
+	enterNeutralModeIntake(world, "mode-account-quit-backlog", "Run the baseline turn.", true);
 	const start = heldSession.prompt(ACCOUNT_REFUSED_PROMPT).then(
 		() => "resolved",
 		(error: unknown) => messageOf(error),
@@ -2449,14 +2495,7 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 		);
 		try {
 			await withDeadline(world.trace, "retry witness: actual failing provider request is held", reached.promise);
-			if (world.systemOne.enabled)
-				world.systemOne.enterPhase(`mode-retry-${stopAt}-intake`, {
-					changes_model_pools: { kind: "noul", probability: 0.02 },
-					local_commits_only: { kind: "noul", probability: 0.02 },
-					lifts_delivery_block: { kind: "noul", probability: 0.02 },
-					full_handoff: { kind: "noul", probability: 0.02 },
-					optional_tool_0: { kind: "choice", choice: "request", confidence: 0.97 },
-				});
+			enterNeutralModeIntake(world, `mode-retry-${stopAt}-intake`, queued, false);
 			await withDeadline(
 				world.trace,
 				"retry witness: Unicode owner input is admitted to steering",
