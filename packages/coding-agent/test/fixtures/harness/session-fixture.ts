@@ -39,6 +39,7 @@ import { resolveTranscriptSummarizer } from "../../../src/core/memory/transcript
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
 import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../../src/core/reflection-controller.ts";
+import { getInFlightWorkUnits } from "../../../src/core/reload-blockers.ts";
 import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
 import {
 	type CreateAgentSessionOptions,
@@ -3369,6 +3370,11 @@ export interface SdkConstructionFailureWitness {
 }
 
 export interface SessionWarningRoutesWitness {
+	readonly reloadScope: {
+		readonly sharedRetainedLanePresent: boolean;
+		readonly dedicatedScopeQuiescent: boolean;
+		readonly sharedRegistrationsUnchanged: boolean;
+	};
 	readonly optionalProvider: {
 		readonly initializeCalls: number;
 		readonly failureWarnings: readonly string[];
@@ -3641,6 +3647,11 @@ export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = 
 		},
 	},
 	sessionWarningRoutes: {
+		reloadScope: {
+			sharedRetainedLanePresent: true,
+			dedicatedScopeQuiescent: true,
+			sharedRegistrationsUnchanged: true,
+		},
 		optionalProvider: {
 			initializeCalls: 2,
 			failureWarnings: [OPTIONAL_MEMORY_WARNING],
@@ -5034,8 +5045,22 @@ function workDirectoryWitness(world: HarnessWorld): WorkDirectoryWitness {
 
 /** Session-owned memory diagnostics stay live, ambiguous durable history warns again on reload, and closing drains stay bounded. */
 async function sessionWarningRoutesWitness(world: HarnessWorld): Promise<SessionWarningRoutesWitness> {
+	// E13b intentionally retains a failed physical-join lane in the journey's shared agent directory. These independent
+	// SDK owners use their own agent directory; the real reload guard must continue to see the original retained lane.
+	const agentDir = `${world.agentDir}-session-warnings`;
+	const sharedBefore = getInFlightWorkUnits(world.agentDir).map((unit) => ({ ...unit }));
+	const sharedRetainedLanePresent = sharedBefore.some(
+		(unit) => unit.kind === "lane" && unit.label === "worker:worker-1",
+	);
+	let dedicatedScopeQuiescent = getInFlightWorkUnits(agentDir).length === 0;
+	if (!sharedRetainedLanePresent || !dedicatedScopeQuiescent)
+		throw new Error(
+			"warning reload scope premise is not the retained shared lane beside a quiescent independent SDK directory",
+		);
 	const closing: string[][] = [];
 	const optional = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
 		systemOneEnabled: false,
 		settings: { memorySystem: "okf" },
 		closingSink: (warnings) => closing.push([...warnings]),
@@ -5098,7 +5123,7 @@ async function sessionWarningRoutesWitness(world: HarnessWorld): Promise<Session
 
 	// A loaded end without its start is valid persisted syntax and ambiguous lifecycle evidence. Opening the crafted file
 	// establishes the inspector's actual in-memory branch; changing disk behind an already loaded manager would not do so.
-	const fixtureManager = world.createSessionManager();
+	const fixtureManager = world.createSessionManager(agentDir);
 	const file = fixtureManager.getSessionFile();
 	if (file === undefined) throw new Error("lifecycle warning witness has no session path");
 	const timestamp = new Date().toISOString();
@@ -5114,10 +5139,11 @@ async function sessionWarningRoutesWitness(world: HarnessWorld): Promise<Session
 		file,
 		`${JSON.stringify({ type: "session", version: CURRENT_SESSION_VERSION, id: fixtureManager.getSessionId(), timestamp, cwd: HARNESS_PROJECT_CWD })}\n${JSON.stringify(ambiguous)}\n`,
 	);
-	const reopened = world.openSessionManager(file);
+	const reopened = world.openSessionManager(file, agentDir);
 	const refusalReasons = reopened.inspectSessionLifecycle().refusalReasons;
 	const heldMark = world.warnings.length;
 	const lifecycleOwner = await world.createRootSession("root", {
+		agentDir,
 		sessionManager: reopened,
 		systemOneEnabled: false,
 		settings: { memorySystem: undefined },
@@ -5132,13 +5158,18 @@ async function sessionWarningRoutesWitness(world: HarnessWorld): Promise<Session
 	const lifecycleDisposal = await world.disposeSessionInBody(lifecycleOwner.session);
 	const normalMark = world.warnings.length;
 	const normal = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
 		systemOneEnabled: false,
 		settings: { memorySystem: undefined },
 	});
 	await normal.session.reload();
 	const normalWarnings = world.warnings.splice(normalMark);
 	await world.disposeSessionInBody(normal.session);
+	dedicatedScopeQuiescent = dedicatedScopeQuiescent && getInFlightWorkUnits(agentDir).length === 0;
+	const sharedRegistrationsUnchanged = isDeepStrictEqual(sharedBefore, getInFlightWorkUnits(world.agentDir));
 	return {
+		reloadScope: { sharedRetainedLanePresent, dedicatedScopeQuiescent, sharedRegistrationsUnchanged },
 		optionalProvider: {
 			initializeCalls,
 			failureWarnings,
