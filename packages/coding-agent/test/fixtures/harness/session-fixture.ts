@@ -3253,6 +3253,25 @@ export interface ProviderErrorWitness {
 	readonly throwingName: MemoryFailureWitness;
 	readonly tokenName: MemoryFailureWitness;
 	readonly plainCause: MemoryFailureWitness;
+	/** The callback routes after initialization and the registration refusal (see {@link memoryCallbackWitness}). */
+	readonly callbacks: MemoryCallbackWitness;
+}
+
+/** What the memory manager writes when a provider's later callbacks fail, how it refuses a registration, and the normal-order control. */
+export interface MemoryCallbackWitness {
+	/** The console lines of the failing callbacks, in call order: block key, block, block key, frozen observer, tool definitions, context markers. */
+	readonly failingLines: readonly string[];
+	/** The callbacks' own results: they stay isolated, so a failing provider yields empty results. */
+	readonly failingBlock: string;
+	readonly failingToolCount: number;
+	readonly failingMarkers: readonly string[];
+	/** The refusal text of a registration whose tool definitions throw a token-bearing Error, and one that throws a value no conversion can read. */
+	readonly registrationRefusal: string;
+	readonly hostileRefusal: string;
+	/** The same callbacks succeeding: no console line, the provider's block and markers delivered. */
+	readonly controlLines: readonly string[];
+	readonly controlBlockHasText: boolean;
+	readonly controlMarkers: readonly string[];
 }
 
 /** The extension read that the failed creations hit once memory has initialized. */
@@ -3390,6 +3409,25 @@ export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = 
 			],
 			console: ["Memory provider witness-memory initialize error: Error: disk quota exceeded"],
 			worldWarnings: [],
+		},
+		callbacks: {
+			failingLines: [
+				"Memory provider witness-memory-cb failed to give its system prompt block key: Error: callback failed [REDACTED]",
+				"Memory provider witness-memory-cb failed to generate system prompt block: Error: callback failed [REDACTED]",
+				"Memory provider witness-memory-cb failed to give its system prompt block key: Error: callback failed [REDACTED]",
+				"Memory provider witness-memory-cb failed to observe the frozen system prompt block: Error: callback failed [REDACTED]",
+				"Failed to get tool definitions from provider witness-memory-cb: Error: callback failed [REDACTED]",
+				"Failed to get context markers from provider witness-memory-cb: Error: callback failed [REDACTED]",
+			],
+			failingBlock: "",
+			failingToolCount: 0,
+			failingMarkers: [],
+			registrationRefusal:
+				"Failed to get tool definitions from provider witness-memory-refuse: Error: callback failed [REDACTED]",
+			hostileRefusal: "Failed to get tool definitions from provider witness-memory-hostile: object: [object]",
+			controlLines: [],
+			controlBlockHasText: true,
+			controlMarkers: ["witness-marker"],
 		},
 	},
 	workDirectory: {
@@ -3890,7 +3928,9 @@ async function providerFailureWitness(world: HarnessWorld, failure: unknown): Pr
 	const mark = world.warnings.length;
 	const logError = console.error;
 	console.error = (...data: unknown[]) => {
-		lines.push(data.map(String).join(" "));
+		const line = data.map(String).join(" ");
+		if (line.startsWith(`Memory provider ${MEMORY_WITNESS_PROVIDER} `)) lines.push(line);
+		else logError(...data);
 	};
 	try {
 		await manager.initializeAll("witness-session", {
@@ -3903,8 +3943,134 @@ async function providerFailureWitness(world: HarnessWorld, failure: unknown): Pr
 	}
 	return {
 		diagnostics: manager.getLifecycleDiagnostics(),
-		console: lines.filter((line) => line.startsWith(`Memory provider ${MEMORY_WITNESS_PROVIDER} `)),
+		console: lines,
 		worldWarnings: world.warnings.splice(mark),
+	};
+}
+
+/** Runs `body` with console.error captured; lines that are not this witness's own are forwarded to the real console untouched. */
+function captureMemoryConsole<T>(prefixes: readonly string[], body: () => T): { value: T; lines: string[] } {
+	const lines: string[] = [];
+	const logError = console.error;
+	console.error = (...data: unknown[]) => {
+		const line = data.map(String).join(" ");
+		if (prefixes.some((prefix) => line.startsWith(prefix))) lines.push(line);
+		else logError(...data);
+	};
+	try {
+		return { value: body(), lines };
+	} finally {
+		console.error = logError;
+	}
+}
+
+/** A registration the manager refuses: the message of the error `registerProvider` throws. */
+function registrationRefusal(name: string, failure: unknown): string {
+	const manager = new MemoryManager();
+	try {
+		manager.registerProvider({
+			name,
+			isAvailable: () => true,
+			getCapabilities: () => ({ surfaces: [] }),
+			initialize: async () => {},
+			shutdown: async () => {},
+			getToolDefinitions: () => {
+				throw failure;
+			},
+		});
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+	throw new Error(`${name}: the registration was not refused`);
+}
+
+/**
+ * The memory manager's callback routes after a provider initialized: a failing key, block, frozen observer, tool-definition and marker
+ * callback each write one masked line and leave the result empty, a registration whose tool definitions throw is refused with a masked cause
+ * (also for a value no conversion can read), and the same callbacks succeeding write nothing.
+ */
+async function memoryCallbackWitness(world: HarnessWorld): Promise<MemoryCallbackWitness> {
+	const failure = new Error("callback failed Bearer\topaque0123456789token");
+	const failing = new MemoryManager();
+	let toolCalls = 0;
+	failing.registerProvider({
+		name: "witness-memory-cb",
+		isAvailable: () => true,
+		getCapabilities: () => ({ surfaces: [] }),
+		initialize: async () => {},
+		shutdown: async () => {},
+		systemPromptBlockKey: () => {
+			throw failure;
+		},
+		systemPromptBlock: () => {
+			throw failure;
+		},
+		onSystemPromptBlockFrozen: () => {
+			throw failure;
+		},
+		// The registration reads the definitions once and must succeed; every later read fails.
+		getToolDefinitions: () => {
+			toolCalls++;
+			if (toolCalls > 1) throw failure;
+			return [];
+		},
+		getContextMarkers: () => {
+			throw failure;
+		},
+	});
+	const hostile = {
+		toString: () => {
+			throw new Error("the witness value refuses conversion");
+		},
+		get [Symbol.toStringTag](): string {
+			throw new Error("the witness value refuses its tag");
+		},
+	};
+	const refusal = registrationRefusal("witness-memory-refuse", failure);
+	const hostileRefusal = registrationRefusal("witness-memory-hostile", hostile);
+	await failing.initializeAll("witness-session", {
+		agentDir: world.agentDir,
+		cwd: HARNESS_PROJECT_CWD,
+		isChildSession: false,
+	});
+	const prefixes = ["Memory provider witness-memory-cb ", "Failed to get "];
+	const failed = captureMemoryConsole(prefixes, () => {
+		const block = failing.buildSystemPromptBlock();
+		failing.freezeSystemPromptBlock();
+		return { block, tools: failing.getToolDefinitions(), markers: failing.getContextMarkers() };
+	});
+	const ok = new MemoryManager();
+	ok.registerProvider({
+		name: "witness-memory-ok",
+		isAvailable: () => true,
+		getCapabilities: () => ({ surfaces: [] }),
+		initialize: async () => {},
+		shutdown: async () => {},
+		systemPromptBlockKey: () => "k1",
+		systemPromptBlock: () => "witness control block",
+		onSystemPromptBlockFrozen: () => {},
+		getToolDefinitions: () => [],
+		getContextMarkers: () => ["witness-marker"],
+	});
+	await ok.initializeAll("witness-session", {
+		agentDir: world.agentDir,
+		cwd: HARNESS_PROJECT_CWD,
+		isChildSession: false,
+	});
+	const control = captureMemoryConsole(["Memory provider witness-memory-ok ", "Failed to get "], () => ({
+		block: ok.buildSystemPromptBlock(),
+		markers: ok.getContextMarkers(),
+	}));
+	return {
+		failingLines: failed.lines,
+		failingBlock: failed.value.block,
+		failingToolCount: failed.value.tools.length,
+		failingMarkers: failed.value.markers,
+		registrationRefusal: refusal,
+		hostileRefusal,
+		controlLines: control.lines,
+		controlBlockHasText: control.value.block.includes("witness control block"),
+		controlMarkers: control.value.markers,
 	};
 }
 
@@ -3916,6 +4082,7 @@ async function providerErrorsWitness(world: HarnessWorld): Promise<ProviderError
 		throwingName: await providerFailureWitness(world, throwingNameError("disk full")),
 		tokenName: await providerFailureWitness(world, namedError("disk full", "sk-abcdefghijklmnop")),
 		plainCause: await providerFailureWitness(world, new Error("disk quota exceeded")),
+		callbacks: await memoryCallbackWitness(world),
 	};
 }
 

@@ -191,7 +191,7 @@ export class MemoryManager {
 			try {
 				tools = p.getToolDefinitions() ?? [];
 			} catch (err) {
-				throw new Error(`Failed to get tool definitions from provider ${p.name}: ${String(err)}`);
+				throw new Error(`Failed to get tool definitions from provider ${p.name}: ${describeProviderError(err)}`);
 			}
 
 			for (const tool of tools) {

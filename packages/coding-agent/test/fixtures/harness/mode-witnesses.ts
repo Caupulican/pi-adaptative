@@ -1,4 +1,4 @@
-import type { Api, Model } from "@caupulican/pi-ai";
+import { type Api, type Model, OPENAI_CODEX_CLIENT_VERSION } from "@caupulican/pi-ai";
 import { getKeybindings, setKeybindings, type Terminal } from "@caupulican/pi-tui";
 import { expect, vi } from "vitest";
 import { AgentSession } from "../../../src/core/agent-session.ts";
@@ -1203,8 +1203,6 @@ const ACCOUNT_LISTING_ACCOUNT_ID = "acct-listing-witness";
 /** The provider whose account the catalog checks. Its models are the scripted tracks, registered for this witness only. */
 const ACCOUNT_PROVIDER = "openai-codex";
 const ACCOUNT_BASE_URL = "https://harness.invalid";
-/** The client release the models endpoint is asked with (openai-codex-account.ts, OPENAI_CODEX_CLIENT_VERSION). */
-const ACCOUNT_CLIENT_VERSION = "0.159.0";
 const ACCOUNT_REFUSAL = "model is not supported when using Codex with a ChatGPT account";
 const ACCOUNT_REFUSED_PROMPT = "Run the refused turn.";
 const ACCOUNT_BASELINE_REPLY = "The account baseline reply.";
@@ -1520,7 +1518,7 @@ async function verifyAccountListingRefusal(world: HarnessWorld): Promise<void> {
 		expect(
 			listingRequests.map((request) => request.clientVersion),
 			"every listing is asked with the Codex client release",
-		).toEqual([ACCOUNT_CLIENT_VERSION, ACCOUNT_CLIENT_VERSION]);
+		).toEqual([OPENAI_CODEX_CLIENT_VERSION, OPENAI_CODEX_CLIENT_VERSION]);
 		expect(
 			listingRequests.map((request) => request.accountId),
 			"every listing carries the synthetic account header",
