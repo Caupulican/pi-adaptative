@@ -134,6 +134,9 @@ interface PendingRequestFrontier extends ThresholdFrontierSettings {
 interface ActiveCompactionLifecycle {
 	compactionId: string;
 	latestCompactionEntryId?: string;
+	/** How the committed compaction ends (a deterministic fallback keeps its outcome and cause), known once its entry is durable. */
+	committedOutcome?: "success" | "fallback";
+	committedCause?: string;
 	endAttempted: boolean;
 }
 
@@ -779,7 +782,12 @@ export class CompactionController {
 		// A compaction in flight has an open durable lifecycle: it is settled as cancelled NOW, before the session reports closed,
 		// so a result that resumes later (an extension's `session_before_compact` handler) writes nothing and the one terminal
 		// record is the evidence. The later cancellation path finds the lifecycle already ended and appends no duplicate.
-		this.finishCompactionLifecycle(this.activeCompactionLifecycle?.latestCompactionEntryId ? "success" : "cancelled");
+		const lifecycle = this.activeCompactionLifecycle;
+		if (lifecycle?.latestCompactionEntryId) {
+			this.finishCompactionLifecycle(lifecycle.committedOutcome ?? "success", lifecycle.committedCause);
+		} else {
+			this.finishCompactionLifecycle("cancelled");
+		}
 	}
 
 	checkContextWindowUsageWarning(): void {
@@ -2089,6 +2097,10 @@ export class CompactionController {
 		// The entry is durable from here: the lifecycle names it at once, so a close that lands while the extensions' `session_compact`
 		// handlers are still awaited records this compaction as committed, not as cancelled.
 		this.recordAppliedCompaction(compactionEntryId);
+		if (this.activeCompactionLifecycle) {
+			this.activeCompactionLifecycle.committedOutcome = applied.deterministic ? "fallback" : "success";
+			this.activeCompactionLifecycle.committedCause = applied.deterministic?.cause;
+		}
 		this.deps.refreshAfterCompaction();
 		const sessionModel = this.deps.getModel();
 		if (sessionModel && applied.tokensBefore > 0) {

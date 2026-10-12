@@ -4893,10 +4893,10 @@ export class AgentSession {
 		try {
 			this._compaction.close();
 		} catch (error: unknown) {
-			// The durable end of a compaction that was running could not be written (a fenced or closed session file): disclosed at
-			// close, never dropped.
+			// Closing the compaction owner failed (typically its durable end record could not be written to a fenced or closed session
+			// file): disclosed at close, never dropped.
 			this._holdUnlistenedWarning(
-				`A compaction's durable end record could not be written at quit: ${error instanceof Error ? error.message : String(error)}`,
+				`Closing the running compaction failed at quit: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 		safely(() => this.abortBranchSummary());

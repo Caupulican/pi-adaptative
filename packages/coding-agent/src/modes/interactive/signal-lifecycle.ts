@@ -83,8 +83,9 @@ export class SignalLifecycle {
 
 	/**
 	 * Ends the session and the process. A failure inside the shutdown is reported and ends the process with status 1: every
-	 * caller fires it without awaiting a rejection, and the process listeners (including the rejection handler) are already
-	 * removed by then, so a rejection would crash with a raw stack instead of an orderly report.
+	 * caller fires it without awaiting a rejection, so a rejection would otherwise surface as an unhandled one. On the signal path
+	 * the process-level guards (dead terminal, uncaught exception, unhandled rejection) stay armed while the cleanup steps run;
+	 * on the interactive quit path `stop()` removes them together with the TUI, before the runtime disposes.
 	 */
 	async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.shuttingDown) return;
@@ -193,9 +194,13 @@ export class SignalLifecycle {
 	 * time one occurs.
 	 */
 	reportUnhandledRejection(reason: unknown): void {
-		if (this.shuttingDown) return;
 		const error = reason instanceof Error ? reason : new Error(String(reason));
 		const detail = (error.stack ?? error.message).slice(0, MAX_REJECTION_DETAIL);
+		if (this.shuttingDown) {
+			// The UI is going away: the rejection is reported on stderr, escaped, and the shutdown keeps running.
+			this.io.stderr(`${neutralizeControls(`Unhandled promise rejection during shutdown. ${detail}`)}\n`);
+			return;
+		}
 		this.port.showError(`Unhandled promise rejection — session kept alive. ${detail}`);
 	}
 
@@ -212,6 +217,13 @@ export class SignalLifecycle {
 	 */
 	uncaughtCrash(error: Error): never {
 		if (this.shuttingDown) {
+			// A throw during an orderly shutdown is still a crash: report it (the orderly path is already unwinding), restore the
+			// terminal if it is not restored yet, and end the process.
+			try {
+				this.port.ui.stop();
+			} catch {}
+			console.error("pi exiting due to uncaughtException during shutdown:");
+			console.error(error);
 			process.exit(1);
 		}
 		this.shuttingDown = true;
