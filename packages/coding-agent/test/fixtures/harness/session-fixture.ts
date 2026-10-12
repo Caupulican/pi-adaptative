@@ -2682,6 +2682,10 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 		"pre-start: the seed turn completes",
 		heldSession.prompt("Seed the pre-start compaction."),
 	);
+	// The second submission settles the owner words the seed turn left (a turn that used no tool): one carries_0 screen, scripted here.
+	if (world.systemOne.enabled) {
+		world.systemOne.enterPhase("pre-start-backlog", { carries_0: { kind: "noul", probability: 0.02 } });
+	}
 	const heldRun = heldSession
 		.prompt("Start a reply that its extension holds at message end.")
 		.catch((error: unknown) => error);
