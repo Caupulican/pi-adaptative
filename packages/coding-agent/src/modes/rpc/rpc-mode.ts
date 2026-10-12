@@ -807,7 +807,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 		if (failures.length > 0) {
 			// Every cause is reported, and the process still exits: a throw here would leave an RPC host with its signal handlers already
 			// removed and its stdin detached, or crash it with the wrong status.
-			const detail = failures.map((cause) => (cause instanceof Error ? cause.message : String(cause))).join("; ");
+			const describe = (cause: unknown): string =>
+				cause instanceof AggregateError
+					? `${cause.message} (${cause.errors.map(describe).join("; ")})`
+					: cause instanceof Error
+						? cause.message
+						: String(cause);
+			const detail = failures.map(describe).join("; ");
 			process.stderr.write(`${neutralizeControls(`RPC shutdown failed: ${detail}`)}\n`);
 			process.exit(exitCode === 0 ? 1 : exitCode);
 		}

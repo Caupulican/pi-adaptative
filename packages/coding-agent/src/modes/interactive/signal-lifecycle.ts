@@ -14,6 +14,7 @@
 import type { TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import { neutralizeControls } from "../../core/terminal-warnings.ts";
 import { disposeUnclaimedCliPowerShellWarmStart } from "../../core/tools/early-powershell-session.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 
@@ -58,7 +59,28 @@ export class SignalLifecycle {
 		return this.shuttingDown;
 	}
 
+	/**
+	 * Ends the session and the process. A failure inside the shutdown is reported and ends the process with status 1: every
+	 * caller fires it without awaiting a rejection, and the process listeners (including the rejection handler) are already
+	 * removed by then, so a rejection would crash with a raw stack instead of an orderly report.
+	 */
 	async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
+		if (this.shuttingDown) return;
+		try {
+			await this.runShutdown(options);
+		} catch (error: unknown) {
+			const cause =
+				error instanceof AggregateError
+					? `${error.message} (${error.errors.map((inner) => (inner instanceof Error ? inner.message : String(inner))).join("; ")})`
+					: error instanceof Error
+						? error.message
+						: String(error);
+			process.stderr.write(`${neutralizeControls(`Shutdown failed: ${cause}`)}\n`);
+			process.exit(1);
+		}
+	}
+
+	private async runShutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.shuttingDown) return;
 		this.shuttingDown = true;
 		this.unregisterSignalHandlers();

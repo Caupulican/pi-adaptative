@@ -6051,10 +6051,17 @@ export class AgentSession {
 
 			// Words left from earlier turns that used no tool are read before this turn is routed, so a model
 			// pool change they make holds for this turn's allocation as it did when every turn classified.
-			await this._ownerPolicy.settle("backlog", submissionSignal);
+			// A submission cancelled while it waits here (an owner interrupt, or the session closing) ends as a cancelled preflight,
+			// not as the abort error of whatever it was waiting on.
+			try {
+				await this._ownerPolicy.settle("backlog", submissionSignal);
 
-			// Before anything is routed or sent: what the owner's accounts actually offer.
-			await this._accountModels.ready(submissionSignal);
+				// Before anything is routed or sent: what the owner's accounts actually offer.
+				await this._accountModels.ready(submissionSignal);
+			} catch (error: unknown) {
+				if (submissionSignal?.aborted) throw new SubmissionPreflightAborted();
+				throw error;
+			}
 			if (submissionSignal?.aborted) throw new SubmissionPreflightAborted();
 			await this._leaveUnavailableSessionModel();
 			// Facts a route cannot be chosen without: an image needs a model that reads images, and the
@@ -6501,10 +6508,16 @@ export class AgentSession {
 		const why =
 			reason === "context_changed"
 				? "the session context changed before it was admitted"
-				: "the run that held it ended before it could be delivered";
+				: this._disposed
+					? "the session closed before it could be delivered"
+					: "its turn ended before it could be delivered";
+		// A closing session has no editor left to restore it to: the text is the record.
+		const advice = this._disposed
+			? "It is kept in full in the pending queue"
+			: "It is kept in full in the pending queue; restore it to the editor to send it again";
 		this._emit({
 			type: "warning",
-			message: `A queued message was not delivered because ${why}. It is kept in full in the pending queue; restore it to the editor to send it again: ${preview}`,
+			message: `A queued message was not delivered because ${why}. ${advice}: ${preview}`,
 		});
 	}
 

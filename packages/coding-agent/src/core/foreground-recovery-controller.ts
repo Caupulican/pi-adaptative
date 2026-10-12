@@ -414,8 +414,9 @@ export class ForegroundRecoveryController {
 			deliveredStranded = true;
 		} finally {
 			// Any exit that did not reach the stranded-input delivery (a closing exit, or a run whose prompt/continue/recovery threw)
-			// leaves admitted input in the agent's queue: hold it for its owner, visible and recoverable, so it cannot leak into the
-			// next prompt's first boundary. Nothing is deleted and no refusal is swallowed.
+			// leaves the owner's admitted input in the agent's queue: hold it for its owner, visible and recoverable, so it cannot leak
+			// into the next prompt's first boundary. Nothing is deleted and no refusal is swallowed. (Messages an extension or the
+			// system queued directly on the agent are not owner input; the kernel's queue delivers them at the next boundary.)
 			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
 			try {
 				await this.deps.afterRun();
@@ -547,6 +548,8 @@ export class ForegroundRecoveryController {
 
 	willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
 		const settings = this.deps.settingsManager.getRetrySettings();
+		// The same answer handlePostAgentRun gives: a closing session starts no retry, so it must not advertise one.
+		if (this.shutdownReason) return false;
 		if (!settings.enabled || this.retry.attempt >= settings.maxRetries) return false;
 		for (let index = event.messages.length - 1; index >= 0; index--) {
 			const message = event.messages[index];

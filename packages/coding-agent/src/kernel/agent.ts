@@ -716,6 +716,9 @@ export class Agent {
 		};
 	}
 
+	/** Whether the current run already delivered its `agent_end` (see {@link runWithLifecycle}). */
+	private agentEndDelivered = false;
+
 	private async runWithLifecycle(executor: (signal: AbortSignal) => Promise<void>): Promise<void> {
 		if (this.activeRun) {
 			throw new AgentBusyError("Agent is already processing.");
@@ -731,10 +734,15 @@ export class Agent {
 		this._state.isStreaming = true;
 		this._state.streamingMessage = undefined;
 		this._state.errorMessage = undefined;
+		this.agentEndDelivered = false;
 
 		try {
 			await executor(abortController.signal);
 		} catch (error) {
+			// A run whose `agent_end` was already delivered has ended: a listener that failed on that very event is the caller's
+			// error, not a reason to fabricate a second, failed end of a run that completed (which would double every end-of-run
+			// cleanup and record a finished run as failed).
+			if (this.agentEndDelivered) throw error;
 			await this.handleRunFailure(error, abortController.signal.aborted);
 		} finally {
 			this.finishRun();
@@ -801,6 +809,7 @@ export class Agent {
 	 * and `finishRun()` clears runtime-owned state.
 	 */
 	private async processEvents(event: AgentEvent): Promise<void> {
+		if (event.type === "agent_end") this.agentEndDelivered = true;
 		switch (event.type) {
 			case "message_start":
 				this._state.streamingMessage = event.message;
