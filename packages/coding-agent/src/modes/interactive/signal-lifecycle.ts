@@ -75,9 +75,14 @@ export class SignalLifecycle {
 			// terminal. If the terminal is gone, the restore writes below emit EIO,
 			// which the stdout/stderr error handler turns into emergencyTerminalExit;
 			// the render loop is already idle, so this cannot hot-spin (see #4144).
-			await this.port.runtimeHost.dispose();
-			await this.port.ui.terminal.drainInput(1000);
-			this.port.stop();
+			// A cleanup failure must not skip the terminal restore: stop() also releases the closing warnings the dispose collected, so
+			// skipping it would lose those disclosures and leave the terminal in raw mode. The failure itself still propagates.
+			try {
+				await this.port.runtimeHost.dispose();
+			} finally {
+				await this.port.ui.terminal.drainInput(1000);
+				this.port.stop();
+			}
 			process.exit(0);
 		}
 

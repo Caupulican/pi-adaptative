@@ -498,12 +498,19 @@ const MAX_UNLISTENED_WARNINGS = 100;
  */
 const CLOSING_RUN_SETTLE_MS = 5_000;
 
-/** Resolves true once `run` settles, false when `ms` pass first. The timer is cleared either way. */
+/**
+ * Resolves true once `run` has ended, false when `ms` pass first. A run that ENDED IN FAILURE has still ended: its failure belongs to
+ * the caller that started it, and the closing sequence only needs to know the run is over (rejecting here would skip the rest of the
+ * ordered shutdown). The timer is cleared either way.
+ */
 async function runSettlesWithin(run: Promise<void>, ms: number): Promise<boolean> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
 		return await Promise.race([
-			run.then(() => true),
+			run.then(
+				() => true,
+				() => true,
+			),
 			new Promise<boolean>((resolve) => {
 				timer = setTimeout(() => resolve(false), ms);
 			}),
@@ -4927,7 +4934,13 @@ export class AgentSession {
 				} finally {
 					safely(() => this._disconnectFromAgent());
 				}
-				await this.settleReflectionTurn();
+				// The reflection turn awaits its own prompt, which an abort-ignoring provider can hold open: it gets the same bound, so a
+				// stuck turn cannot keep the memory shutdown, the owner's dispose and the closing disclosure from ever running.
+				if (!(await runSettlesWithin(this.settleReflectionTurn(), CLOSING_RUN_SETTLE_MS))) {
+					this._holdUnlistenedWarning(
+						`A reflection turn did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its work may not have been persisted.`,
+					);
+				}
 				await this._memory.shutdown();
 			} finally {
 				// After memory: a history summary still in flight records its spend through this owner. The listeners are already

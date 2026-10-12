@@ -1059,6 +1059,12 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 				/^Failed to release worker write reservation: Scripted IO fault e13-release-unlink-fails: unlink '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations\/|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations\\)[0-9a-f]{64}\.json'$/,
 				/^Failed to release worker write reservation: Scripted IO fault e13a-release-unlink-after: unlink '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations\/|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations\\)[0-9a-f]{64}\.json'$/,
 				/^Failed to release worker write reservation: Scripted IO fault e13j-release-unlink-fails: unlink '(?:\/harness\/agent-journey-1-system-one-on\/state\/orchestration\/worker-write-reservations\/|[A-Z]:\\harness\\agent-journey-1-system-one-on\\state\\orchestration\\worker-write-reservations\\)[0-9a-f]{64}\.json'$/,
+				// Terminal disclosures of an abort-ignoring worker at close: its physical settlement bound passes with its inner calls pending, the
+				// Windows shell session's terminal release bound passes before the child closes, and the task directory that System One verification
+				// depends on is already disposed. Each message exactly (the attempt id narrowed to its uuid form).
+				/^Worker inner completion cleanup failed: Worker worker-1 attempt attempt-[0-9a-f-]{36} physical settlement timed out after 5000ms with 2 inner call\(s\) still pending\.$/,
+				/^Worker shutdown failed: Shell execution session terminal release timed out after 5000ms before child close event$/,
+				/^System One verification was deferred because the active task directory is unavailable \(Task directory runtime disposed\)\. Repair it with task_directory; no judgment was recorded\.$/,
 				/^Worker worker-1 rejected: Worker worker-1 resource release failed\.$/,
 				/^Failed to dispose worker write reservations: Worker write reservation shutdown failed\.$/,
 				/^Worker shutdown failed: Worker worker-1 resource release failed\.$/,
@@ -16405,7 +16411,7 @@ it("orchestration: goal, three delegated agents, blocked report, follow-up reply
 						"the failed row append is the only usage warning, with its own cause",
 					).toEqual([
 						expect.stringMatching(
-							/^A System One usage receipt is pending, not yet in this session's usage record \(Scripted IO fault u-tool-row-append: append '[^\n]*'\); it is retained in the session journal and recorded when a new session manager reads the file\.$/,
+							/^A System One usage receipt is pending, not yet in this session's usage record \(Scripted IO fault u-tool-row-append: append '[^\n]*\); it is retained in the session journal and recorded when a new session manager reads the file\.$/,
 						),
 					]);
 					expect(

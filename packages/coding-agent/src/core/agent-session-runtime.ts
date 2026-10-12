@@ -115,6 +115,8 @@ function copyBaselineOf(path: string | undefined): CopyBaseline {
 
 /** Most paid usage rows a discard counts. Past it the rows are unknown and the file is kept. */
 const MAX_DISCARD_PAID_ROWS = 10_000;
+/** Most session entries a discard walks. Past it the rows are unknown and the file is kept. */
+const MAX_DISCARD_ENTRIES = 1_000_000;
 /** Most bytes a discard scans past the copy baseline. Past it the rows are unknown and the file is kept. */
 const MAX_DISCARD_SCAN_BYTES = 64 * 1024 * 1024;
 
@@ -135,7 +137,11 @@ function countUniquePaidRows(created: CreatedSession): { readonly rows: number }
 		if (copyBaseline !== undefined && "unreadable" in copyBaseline)
 			return { unknown: causeText(copyBaseline.unreadable) };
 		const paidIds = new Set<string>();
-		for (const entry of sessionManager.getEntries()) {
+		const entries = sessionManager.getEntries();
+		// The traversal is over the entry index the manager already holds (one pointer array, no file content); a session larger
+		// than the bound is not walked at all and its file is kept.
+		if (entries.length > MAX_DISCARD_ENTRIES) return { unknown: `more than ${MAX_DISCARD_ENTRIES} entries` };
+		for (const entry of entries) {
 			if (entry.type !== "custom" || !PAID_ROW_TYPES.has(entry.customType)) continue;
 			if (paidIds.size === MAX_DISCARD_PAID_ROWS)
 				return { unknown: `more than ${MAX_DISCARD_PAID_ROWS} paid usage rows` };

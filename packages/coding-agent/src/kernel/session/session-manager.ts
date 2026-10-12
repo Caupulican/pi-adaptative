@@ -926,6 +926,7 @@ function indexSessionEntryFileLocations(
 	startOffset: number,
 	locations: Map<string, SessionEntryFileLocation>,
 	retainedIds: ReadonlySet<string>,
+	limitOffset?: number,
 ): number {
 	const pendingIds = new Set<string>();
 	for (const id of retainedIds) {
@@ -957,7 +958,10 @@ function indexSessionEntryFileLocations(
 
 	try {
 		while (true) {
-			const bytesRead = readSync(fd, buffer, 0, buffer.length, position);
+			// A read budget ends the scan at `limitOffset` however far the file has grown: the bytes read are what is bounded.
+			const readLength = limitOffset === undefined ? buffer.length : Math.min(buffer.length, limitOffset - position);
+			if (readLength <= 0) break;
+			const bytesRead = readSync(fd, buffer, 0, readLength, position);
 			if (bytesRead === 0) break;
 			const chunkOffset = position;
 			position += bytesRead;
@@ -3048,7 +3052,8 @@ export class SessionManager {
 	 * The byte offsets of the given entries' canonical JSONL lines, for the lines the file holds at or past `fromOffset` (a line
 	 * boundary). One sequential scan from `fromOffset` to the end of the file, stopping early once every id is found; an id absent
 	 * from that range, including a buffered entry not yet written, is not in the result. The entry index is neither read nor
-	 * changed. Undefined when more than `maxBytes` lie past `fromOffset`: the scan is not run. A failed read throws.
+	 * changed. Undefined when more than `maxBytes` lie past `fromOffset` (the scan is not run), or when the file grew past that budget
+	 * while ids were still unfound (the scan stops at the budget). The bytes read never exceed `maxBytes`. A failed read throws.
 	 */
 	entryFileOffsetsFrom(
 		entryIds: ReadonlySet<string>,
@@ -3058,7 +3063,13 @@ export class SessionManager {
 		if (this.sessionFile === undefined || !existsSync(this.sessionFile)) return new Map();
 		if (statSync(this.sessionFile).size - fromOffset > maxBytes) return undefined;
 		const locations = new Map<string, SessionEntryFileLocation>();
-		indexSessionEntryFileLocations(this.sessionFile, fromOffset, locations, entryIds);
+		// The read budget is enforced by the scan itself, so a file that grows after the size check above cannot extend the work
+		// past `maxBytes`: when the budget ends the scan with ids still unfound and bytes left unread, the answer is unknown.
+		const limitOffset = fromOffset + maxBytes;
+		const scannedTo = indexSessionEntryFileLocations(this.sessionFile, fromOffset, locations, entryIds, limitOffset);
+		if (locations.size < entryIds.size && scannedTo >= limitOffset && statSync(this.sessionFile).size > scannedTo) {
+			return undefined;
+		}
 		return new Map([...locations].map(([id, location]) => [id, location.offset]));
 	}
 

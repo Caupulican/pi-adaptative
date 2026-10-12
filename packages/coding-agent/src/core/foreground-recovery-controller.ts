@@ -359,7 +359,7 @@ export class ForegroundRecoveryController {
 			// run this turn in full. Read HERE, with no await between the read and the run: both entry
 			// points install the run's own abort controller synchronously, so an abort that arrives
 			// after this read has a live run to reach, and one that arrived before it is caught by it.
-			if (signal?.aborted) return;
+			if (this.isClosing(signal)) return;
 			let goalLoopRounds = 1;
 			// The runtime-update owner asked this run to end so the runtime can be replaced: no further provider
 			// round starts on its behalf. Admitted input stays in the agent's queue for the next run.
@@ -400,7 +400,7 @@ export class ForegroundRecoveryController {
 				// next `continue()` would be a full provider turn on a cancelled submission. A retry the
 				// recovery just prepared is closed here as cancelled, not left counting towards a
 				// continuation that never comes. A shut-down recovery (the session is closing) starts no further round either.
-				if (signal?.aborted || this.shutdownReason) {
+				if (this.isClosing(signal)) {
 					this.finishRetry(false, "Submission cancelled");
 					return;
 				}
@@ -422,6 +422,16 @@ export class ForegroundRecoveryController {
 		}
 	}
 
+	/**
+	 * The one closing gate for every point where this submission could start a provider round: the submission was cancelled, or
+	 * the session is shutting down. `agent.abort()` reaches only a run that already exists and does not clear admitted queues, so
+	 * each start (the first prompt/continue after `prepareRun()`, every further round, and stranded-input delivery) asks here.
+	 * Admitted input is never deleted by this gate; whatever stays queued is held for the owner by `deliverStrandedInput`.
+	 */
+	private isClosing(signal?: AbortSignal): boolean {
+		return signal?.aborted === true || this.shutdownReason !== undefined;
+	}
+
 	/** Messages that entered the transcript as input (user or custom), the measure of queue delivery. */
 	private countInputMessages(): number {
 		let count = 0;
@@ -440,7 +450,7 @@ export class ForegroundRecoveryController {
 	 */
 	private async deliverStrandedInput(signal?: AbortSignal): Promise<void> {
 		try {
-			while (this.deps.agent.hasQueuedMessages() && !signal?.aborted) {
+			while (this.deps.agent.hasQueuedMessages() && !this.isClosing(signal)) {
 				const before = this.countInputMessages();
 				await this.deps.agent.continue();
 				if (this.countInputMessages() === before) break;
