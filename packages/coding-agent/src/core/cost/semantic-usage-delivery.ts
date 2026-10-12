@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { addUsage } from "../../kernel/usage.ts";
+import { truncateWithEllipsis } from "../provider-tool-text.ts";
 import {
 	SYSTEM_ONE_RESPONSES_PER_EVALUATION,
 	type SystemOneUsageLease,
@@ -205,8 +206,8 @@ const JOURNAL_REASON: Record<SemanticUsageJournalError["reason"], JournalFailure
 
 function boundedCause(text: string): string {
 	const trimmed = text.trim() || "unknown error";
-	// A cut cause says so: the last character of the bound is the elision mark, never a silent mid-word end.
-	return trimmed.length <= CAUSE_MAX_CHARS ? trimmed : `${trimmed.slice(0, CAUSE_MAX_CHARS - 1)}…`;
+	// A cut cause says so (elision mark, never a split surrogate pair), within the same bound.
+	return truncateWithEllipsis(trimmed, CAUSE_MAX_CHARS);
 }
 
 function causeOf(error: unknown): string {

@@ -7814,6 +7814,7 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 			await withDeadline(trace, "quit settle bound: the request reaches its held gate", tmReached.promise);
 			const tmMark = world.warnings.length;
 			const tmRequests = world.provider.requests.length;
+			const tmSystemOneRequests = world.systemOne.decoded.length;
 			let tmOutcome: unknown = "unsettled";
 			try {
 				await withDeadline(
@@ -7822,17 +7823,25 @@ it("standalone root conversation: greeting, task with tools and memory, compacti
 					tmSession.disposeAndWait(),
 					60_000,
 				);
+				// The quit cancels the submission itself: no paid System One work starts for a session that is closing, and the only
+				// disclosures are the closing notices (never an unsettled run: the transport ends the stream on the abort).
+				expect(world.systemOne.decoded.length, "no System One request starts after the owner quit").toBe(
+					tmSystemOneRequests,
+				);
 				expect(
-					world.warnings.slice(tmMark),
-					"the run settles inside the bound and the closing verification notice is the only disclosure",
-				).toEqual(
-					world.systemOne.enabled
-						? ["System One verification was not run because the session was closing; no judgment was recorded."]
-						: [],
-				);
-				expect(qmAssistants(tmFile), "the held producer completed no reply before the quit ended the run").toEqual(
-					[],
-				);
+					world.warnings
+						.slice(tmMark)
+						.filter(
+							(message) =>
+								message !==
+								"System One verification was not run because the session was closing; no judgment was recorded.",
+						),
+					"the run settles inside the bound: no disclosure other than the closing verification notice",
+				).toEqual([]);
+				expect(
+					qmAssistants(tmFile),
+					"the held producer completed no reply: the quit ended the run and only its aborted, empty message was persisted",
+				).toEqual([{ stopReason: "aborted", text: "" }]);
 			} finally {
 				tmHold.release();
 				tmOutcome = await withDeadline(

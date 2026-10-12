@@ -704,7 +704,7 @@ async function runLoop(
 			// A verification THIS run failed must end in a readable handoff, not a silent terminal
 			// batch; obligations inherited from earlier runs stay listed and block goal completion only.
 			const verificationBlocksCompletion = verificationObligations.getIdsOpenedThisRun().length > 0;
-			if (verificationBlocksCompletion) hasMoreToolCalls = true;
+			if (verificationBlocksCompletion && !signal?.aborted) hasMoreToolCalls = true;
 
 			await emit({ type: "turn_end", message, toolResults });
 

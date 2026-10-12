@@ -10,6 +10,7 @@ import { ForegroundLifecycleController, type ProviderRetryLifecycleEvent } from 
 import type { ModelRouterController } from "./model-router-controller.ts";
 import { type ProviderLimitStore, providerLimitFromFailure } from "./provider-admission/limit-state.ts";
 import { ProviderCompatibilityWarnings } from "./provider-compatibility-warnings.ts";
+import { truncateWithEllipsis } from "./provider-tool-text.ts";
 
 /**
  * Host-side adapter for the foreground lifecycle boundary.
@@ -153,9 +154,12 @@ export class ForegroundLifecycleAdapter {
 	 * and what is dropped past that is reported as a count by {@link drainWarnings}.
 	 */
 	hold(message: string): void {
-		if (this.pendingWarnings.length < MAX_HELD_WARNINGS)
-			this.pendingWarnings.push(message.slice(0, MAX_HELD_WARNING_CHARS));
-		else this.pendingWarningsDropped += 1;
+		if (this.pendingWarnings.length >= MAX_HELD_WARNINGS) {
+			this.pendingWarningsDropped += 1;
+			return;
+		}
+		// A cut warning says so (elision mark, never a split surrogate pair), within the same bound.
+		this.pendingWarnings.push(truncateWithEllipsis(message, MAX_HELD_WARNING_CHARS));
 	}
 
 	/**

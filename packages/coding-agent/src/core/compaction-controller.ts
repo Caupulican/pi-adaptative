@@ -399,6 +399,9 @@ export class CompactionController {
 	private lastAppliedRetentionAudit?: AppliedRetentionAudit;
 	private readonly deps: CompactionControllerDeps;
 
+	/** Set by {@link close}: the session is closing and no new provider call starts from this owner. */
+	private closed = false;
+
 	constructor(deps: CompactionControllerDeps = {} as CompactionControllerDeps) {
 		this.deps = deps;
 		if (deps?.retentionPlanner) {
@@ -759,6 +762,17 @@ export class CompactionController {
 		this.autoAbortController?.abort();
 	}
 
+	/**
+	 * The session is closing: nothing here starts a NEW provider call again (manual or automatic compaction, threshold checks, idle
+	 * preparation), and what is running is aborted. A call already submitted to a provider is a limit of its transport, not of this owner.
+	 */
+	close(): void {
+		this.closed = true;
+		this.abort();
+		this.cancelIdlePreparation();
+		this.idleTimer.disarm();
+	}
+
 	checkContextWindowUsageWarning(): void {
 		const model = this.deps.getModel();
 		if (!model) return;
@@ -786,6 +800,7 @@ export class CompactionController {
 	}
 
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		if (this.closed) throw new Error("Compaction cancelled");
 		if (this.isRunning()) {
 			throw new Error("Compaction already in progress");
 		}
@@ -996,7 +1011,7 @@ export class CompactionController {
 
 	async check(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
 		const settings = this.deps.getAdaptedSettings();
-		if (!settings.enabled || this.isRunning()) return false;
+		if (this.closed || !settings.enabled || this.isRunning()) return false;
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return false;
 
 		const model = this.deps.getModel();
@@ -1158,6 +1173,7 @@ export class CompactionController {
 	}
 
 	runAuto(reason: AutoCompactionReason, willRetry: boolean, options: AutoCompactionRunOptions = {}): Promise<boolean> {
+		if (this.closed) return Promise.resolve(false);
 		if (this.autoRunPromise) return this.autoRunPromise;
 		this.cancelIdlePreparation();
 		if (this.manualAbortController) return Promise.resolve(this.deps.agent.hasQueuedMessages());
@@ -1565,6 +1581,7 @@ export class CompactionController {
 	}
 
 	onLaneIdle(reply: AssistantMessage): void {
+		if (this.closed) return;
 		this.idleTimer.disarm();
 		this.idlePreparationSettingsKey = undefined;
 		// A resume outcome stays visible until a new preparation is planned.

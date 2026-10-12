@@ -26,7 +26,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
-import type { TerminalWarnings } from "../../core/terminal-warnings.ts";
+import { neutralizeControls, type TerminalWarnings } from "../../core/terminal-warnings.ts";
 import { type Theme, theme } from "../../presentation/theme-model.ts";
 import { projectSessionEventForJson } from "../json-event-projection.ts";
 import { registerTerminationSignalHandlers } from "../termination-signals.ts";
@@ -770,13 +770,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 		cleanupSignalHandlers();
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
-		// Every step runs, and every cause is kept distinct: a failed dispose is the error the caller sees, a failed flush is
-		// reported only when the dispose succeeded, and the held warnings are always released at the end.
-		let failure: { readonly error: unknown } | undefined;
+		// Every step runs and every cause is kept: a failed dispose and a failed flush are both reported, and the held warnings are
+		// always released at the end.
+		const failures: unknown[] = [];
 		try {
 			await runtimeHost.dispose();
 		} catch (disposeError: unknown) {
-			failure = { error: disposeError };
+			failures.push(disposeError);
 		}
 		try {
 			detachInput();
@@ -799,12 +799,18 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, terminalWarni
 				await flushRawStdout();
 			}
 		} catch (flushError: unknown) {
-			failure ??= { error: flushError };
+			failures.push(flushError);
 		} finally {
 			// The stream is closed: any warning from here on goes to stderr.
 			terminalWarnings.release();
 		}
-		if (failure) throw failure.error;
+		if (failures.length > 0) {
+			// Every cause is reported, and the process still exits: a throw here would leave an RPC host with its signal handlers already
+			// removed and its stdin detached, or crash it with the wrong status.
+			const detail = failures.map((cause) => (cause instanceof Error ? cause.message : String(cause))).join("; ");
+			process.stderr.write(`${neutralizeControls(`RPC shutdown failed: ${detail}`)}\n`);
+			process.exit(exitCode === 0 ? 1 : exitCode);
+		}
 		process.exit(exitCode);
 	}
 

@@ -1655,7 +1655,11 @@ export class AgentSession {
 			getExtensionRunner: () => this._extensionRunner,
 			isRawStream: () => isRawStreamSimpleFn(this.agent.streamFn),
 			disconnectAgent: () => this._disconnectFromAgent(),
-			reconnectAgent: () => this._reconnectToAgent(),
+			// A compaction that was running when the session closed must not re-attach the internal consumer the closing sequence
+			// is releasing (or has released): its own control flow stays live, only the reattachment is fenced at the lifetime.
+			reconnectAgent: () => {
+				if (!this._disposed) this._reconnectToAgent();
+			},
 			abortForeground: () => this.abort("compaction"),
 			emit: (event) => this._emit(event),
 			estimateCurrentContextTokens: (messages) => this._pipeline.estimateCurrentContextTokens(messages),
@@ -4644,22 +4648,39 @@ export class AgentSession {
 		}
 		if (event.type === "agent_end") {
 			const willRetry = this._willRetryAfterAgentEnd(event);
+			// The end-of-run cleanups are independent: one that fails (a fenced session file refusing a write) must not skip the
+			// others, which release leases and flush handoffs. Every step runs, and every cause is kept.
+			const failures: unknown[] = [];
+			const settle = (step: () => void): void => {
+				try {
+					step();
+				} catch (error: unknown) {
+					failures.push(error);
+				}
+			};
 			// Settle the exact cue-bearing run before completed-turn analysis can queue a later cue.
-			this._reflection.finishCurrentTurnCue(event.messages, { willRetry });
+			settle(() => this._reflection.finishCurrentTurnCue(event.messages, { willRetry }));
 			if (!willRetry) {
-				const reflectionTurn = this._reflection.analyzeCompletedTurn(event.messages);
-				// The shared projection excludes raw tool-result payloads and bounds both roles before any
-				// deterministic memory sync. No reflection provider request is scheduled at this boundary.
-				this._memory.scheduleTurnSync(reflectionTurn.userText, reflectionTurn.assistantText);
-				if (reflectionTurn.trigger !== "none") this._reflection.queueCurrentTurnCue(reflectionTurn.trigger);
-				this._goals.endQueuedOwnerChatGoalExecution();
+				settle(() => {
+					const reflectionTurn = this._reflection.analyzeCompletedTurn(event.messages);
+					// The shared projection excludes raw tool-result payloads and bounds both roles before any
+					// deterministic memory sync. No reflection provider request is scheduled at this boundary.
+					this._memory.scheduleTurnSync(reflectionTurn.userText, reflectionTurn.assistantText);
+					if (reflectionTurn.trigger !== "none") this._reflection.queueCurrentTurnCue(reflectionTurn.trigger);
+				});
+				settle(() => this._goals.endQueuedOwnerChatGoalExecution());
 			}
-		}
-		// Error/abort turns bypass the normal steering boundary, and a completion can arrive after the
-		// final normal poll. agent_end is the fallback before foreground recovery decides whether queued
-		// steering requires one continuation; turn_end is intentionally not a flush.
-		if (event.type === "agent_end") {
-			this._terminalHandoffs.flushProviderBoundary();
+			// Error/abort turns bypass the normal steering boundary, and a completion can arrive after the
+			// final normal poll. agent_end is the fallback before foreground recovery decides whether queued
+			// steering requires one continuation; turn_end is intentionally not a flush.
+			settle(() => this._terminalHandoffs.flushProviderBoundary());
+			if (failures.length === 1) throw failures[0];
+			if (failures.length > 1) {
+				throw new AggregateError(
+					failures,
+					failures[0] instanceof Error ? failures[0].message : "The end-of-run cleanup failed.",
+				);
+			}
 		}
 	};
 
@@ -4868,6 +4889,7 @@ export class AgentSession {
 		safely(() => this._durableCustomMessageTurns.shutdown());
 		safely(() => this.abortRetry());
 		safely(() => this.abortCompaction());
+		safely(() => this._compaction.close());
 		safely(() => this.abortBranchSummary());
 		safely(() => this.abortBash());
 		safely(() => this._skillVault.unload());
@@ -4876,6 +4898,9 @@ export class AgentSession {
 		trackRequired(() => disposeShellExecutionSessionAndWait(this._shellSessionKey));
 		safely(() => this._localPrefixWarm.cancel());
 		safely(() => this.agent.abort("session dispose"));
+		// A submission still preparing or finishing (owner-policy classification, postflight) has no run for the agent abort to reach:
+		// cancelling the submission itself keeps a closing session from starting paid System One work after the quit.
+		safely(() => this._submissionAbort?.abort("session dispose"));
 		track(() => this._gatewayRegistry.stop());
 		trackRequired(() => this._backgroundToolTasks.shutdown());
 		track(() => this._runtimeBuilder.dispose());

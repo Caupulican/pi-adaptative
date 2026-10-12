@@ -1215,7 +1215,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			});
 		}
 		if (executionLoopMode === "objective_primary" && !session.objectiveExecutionController) {
-			await session.disposeAndWait();
+			// The outer catch closes the constructed session; the binding error stays the cause.
 			throw new ObjectivePrimaryBindingError("ObjectiveExecutionController");
 		}
 		try {
@@ -1228,7 +1228,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		} catch (error) {
 			// Preserve the established non-fatal fallback for a genuinely unresolved profile model.
 			if (!modelFallbackMessage?.startsWith("Profile model resolution error:")) {
-				await session.disposeAndWait();
 				throw error;
 			}
 		}

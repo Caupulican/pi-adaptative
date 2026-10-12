@@ -10,7 +10,8 @@ export function oneLine(text: string): string {
 		.trim();
 }
 
-function truncateWithEllipsis(text: string, maxChars: number): string {
+/** `text` within `maxChars` UTF-16 units, ending in an elision mark when cut and never splitting a surrogate pair. */
+export function truncateWithEllipsis(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text;
 	if (maxChars <= 0) return "";
 	if (maxChars === 1) return "…";

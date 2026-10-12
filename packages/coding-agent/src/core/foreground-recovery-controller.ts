@@ -350,6 +350,8 @@ export class ForegroundRecoveryController {
 		}
 
 		this.activeRuns++;
+		// Set once the submission reached its stranded-input delivery, which holds what stays queued; every other exit holds it below.
+		let deliveredStranded = false;
 		try {
 			const maxGoalLoopRounds = this.deps.settingsManager.getAutonomySettings().maxStallTurns;
 			await this.deps.prepareRun();
@@ -409,7 +411,12 @@ export class ForegroundRecoveryController {
 			// Every `break` above is an exit with no further round of its own. Input admitted to the
 			// agent's queue is the owner's and is never left behind it.
 			if (!stoppedForRuntimeUpdate) await this.deliverStrandedInput(signal);
+			deliveredStranded = true;
 		} finally {
+			// Any exit that did not reach the stranded-input delivery (a closing exit, or a run whose prompt/continue/recovery threw)
+			// leaves admitted input in the agent's queue: hold it for its owner, visible and recoverable, so it cannot leak into the
+			// next prompt's first boundary. Nothing is deleted and no refusal is swallowed.
+			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
 			try {
 				await this.deps.afterRun();
 			} finally {
@@ -563,6 +570,9 @@ export class ForegroundRecoveryController {
 		const message = this.lastAssistantMessage;
 		this.lastAssistantMessage = undefined;
 		if (!message) return false;
+		// A closing session starts no recovery of its own: no retry, no model switch, no failover and no compaction (each of them is a
+		// paid provider call). The run's last message is already persisted; whatever remains queued is held by the caller.
+		if (this.shutdownReason) return false;
 
 		const classified = this.classifyAssistantError(message);
 		if (classified) {

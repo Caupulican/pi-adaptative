@@ -80,8 +80,11 @@ export class SignalLifecycle {
 			try {
 				await this.port.runtimeHost.dispose();
 			} finally {
-				await this.port.ui.terminal.drainInput(1000);
-				this.port.stop();
+				try {
+					await this.port.ui.terminal.drainInput(1000);
+				} finally {
+					this.port.stop();
+				}
 			}
 			process.exit(0);
 		}
