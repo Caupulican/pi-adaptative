@@ -173,7 +173,7 @@ export interface SystemOneControllerDeps {
 	/** Live goal/runtime/verification projection; called before every stage. */
 	truthSource?: () => CanonicalHydration | undefined;
 	/** The work under completion as the repository shows it; read once per completion check. */
-	workDiffSource?: () => WorkDiff | undefined;
+	workDiffSource?: (signal?: AbortSignal) => Promise<WorkDiff | undefined> | WorkDiff | undefined;
 }
 
 interface StageValidation {
@@ -226,7 +226,7 @@ export class SystemOneController {
 	readonly hookCoordinator?: IntegrityHookCoordinator;
 	private evaluationObserver?: SemanticEvaluationObserver;
 	private truthSource?: () => CanonicalHydration | undefined;
-	private workDiffSource?: () => WorkDiff | undefined;
+	private workDiffSource?: (signal?: AbortSignal) => Promise<WorkDiff | undefined> | WorkDiff | undefined;
 	private pendingDirective?: SystemOneControlDirective;
 	readonly verification: VerificationCoordinator;
 
@@ -281,7 +281,9 @@ export class SystemOneController {
 	}
 
 	/** Late-bound like the truth source. */
-	setWorkDiffSource(source: (() => WorkDiff | undefined) | undefined): void {
+	setWorkDiffSource(
+		source: ((signal?: AbortSignal) => Promise<WorkDiff | undefined> | WorkDiff | undefined) | undefined,
+	): void {
 		this.workDiffSource = source;
 	}
 
@@ -1347,9 +1349,9 @@ export class SystemOneController {
 	 * What every completion judgment reads: the cold completion projection (outcome evidence per
 	 * criterion; the repository diff only when the goal changed the repository) and whether it did.
 	 */
-	completionView(): { view: Record<string, unknown>; repositoryOutcome: boolean } {
+	async completionView(signal?: AbortSignal): Promise<{ view: Record<string, unknown>; repositoryOutcome: boolean }> {
 		this.syncCanonicalTruth();
-		const work = this.workDiffSource?.();
+		const work = await this.workDiffSource?.(signal);
 		const snapshot = this.store.snapshot();
 		return {
 			view: this.projector.completion(snapshot, work),
@@ -1414,7 +1416,7 @@ export class SystemOneController {
 
 		// 2. Cold primary completion pack (R-048, R-049). Code-only questions are asked only when the goal
 		// changed the repository; a machine, service or answer outcome is judged on its outcome evidence.
-		const work = this.workDiffSource?.();
+		const work = await this.workDiffSource?.(options?.signal);
 		if (work?.diagnostic) {
 			return {
 				verdict: "blocked_external",

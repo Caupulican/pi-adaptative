@@ -29,6 +29,7 @@ import type {
 	ProviderRequestAdmissionContext,
 	ProviderRequestAdmissionResult,
 	StreamFn,
+	ToolCallPreflightRejectionContext,
 	ToolCallStartHook,
 } from "./loop-config.ts";
 import { convertToLlm } from "./messages.ts";
@@ -146,6 +147,10 @@ export interface AgentOptions {
 	textToolCallProtocol?: SimpleStreamOptions["textToolCallProtocol"];
 	onTextToolProtocolParse?: SimpleStreamOptions["onTextToolProtocolParse"];
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
+	onToolCallPreflightRejected?: (
+		context: ToolCallPreflightRejectionContext,
+		signal?: AbortSignal,
+	) => void | Promise<void>;
 	onToolCallStart?: ToolCallStartHook;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	backgroundToolCallAfterMs?: AgentLoopConfig["backgroundToolCallAfterMs"];
@@ -268,6 +273,7 @@ export class Agent {
 		context: BeforeToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<BeforeToolCallResult | undefined>;
+	public onToolCallPreflightRejected?: AgentLoopConfig["onToolCallPreflightRejected"];
 	public onToolCallStart?: ToolCallStartHook;
 	public afterToolCall?: (
 		context: AfterToolCallContext,
@@ -349,6 +355,7 @@ export class Agent {
 		this.textToolCallProtocol = options.textToolCallProtocol;
 		this.onTextToolProtocolParse = options.onTextToolProtocolParse;
 		this.beforeToolCall = options.beforeToolCall;
+		this.onToolCallPreflightRejected = options.onToolCallPreflightRejected;
 		this.onToolCallStart = options.onToolCallStart;
 		this.afterToolCall = options.afterToolCall;
 		this.backgroundToolCallAfterMs = options.backgroundToolCallAfterMs;
@@ -684,6 +691,7 @@ export class Agent {
 			toolValidationEscalationThreshold: this.toolValidationEscalationThreshold,
 			onToolValidationEscalation: this.onToolValidationEscalation,
 			beforeToolCall: this.beforeToolCall,
+			onToolCallPreflightRejected: this.onToolCallPreflightRejected,
 			onToolCallStart: this.onToolCallStart,
 			afterToolCall: this.afterToolCall,
 			backgroundToolCallAfterMs: this.backgroundToolCallAfterMs,

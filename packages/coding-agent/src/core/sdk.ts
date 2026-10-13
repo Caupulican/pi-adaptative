@@ -1209,9 +1209,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				});
 			});
 			systemOneController.syncCanonicalTruth();
-			systemOneController.setWorkDiffSource(() => {
+			systemOneController.setWorkDiffSource(async (signal) => {
 				const goal = session.getGoalStateSnapshot();
-				return goal ? readGoalWorkDiff(session.getGoalWorkEvidence()) : undefined;
+				return goal
+					? readGoalWorkDiff(session.getGoalWorkEvidence(), {
+							...(signal ? { signal } : {}),
+							deadline: Date.now() + 60_000,
+						})
+					: undefined;
 			});
 		}
 		if (executionLoopMode === "objective_primary" && !session.objectiveExecutionController) {

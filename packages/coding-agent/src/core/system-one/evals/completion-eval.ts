@@ -505,10 +505,10 @@ function git(cwd: string, args: string[]): string {
 }
 
 /** A scratch repository whose base commit predates the goal, then the case's changes on top. */
-function scratchRepository(
+async function scratchRepository(
 	testCase: CompletionEvalCase,
 	goalStartedAt: string,
-): { root: string; baseline: WorkBaseline } {
+): Promise<{ root: string; baseline: WorkBaseline }> {
 	const root = mkdtempSync(join(tmpdir(), "pi-completion-eval-"));
 	const write = (files: Readonly<Record<string, string>> | undefined) => {
 		for (const [path, content] of Object.entries(files ?? {})) {
@@ -537,8 +537,7 @@ function scratchRepository(
 		],
 		{ cwd: root, env: { ...process.env, GIT_AUTHOR_DATE: baseDate, GIT_COMMITTER_DATE: baseDate } },
 	);
-	const baseline = captureWorkBaseline(root);
-	if (!baseline) throw new Error("Completion evaluation could not capture its repository baseline");
+	const baseline = await captureWorkBaseline(root);
 	write(testCase.repositoryChanges);
 	return { root, baseline };
 }
@@ -664,7 +663,7 @@ export async function evaluateCompletionOnce(
 		mkdirSync(dirname(join(machine, path)), { recursive: true });
 		writeFileSync(join(machine, path), content);
 	}
-	const { root: cwd, baseline } = scratchRepository(testCase, now);
+	const { root: cwd, baseline } = await scratchRepository(testCase, now);
 	try {
 		// The goal tool's completion order: rerun every requirement check first; a failed one refuses
 		// completion before System One is asked.

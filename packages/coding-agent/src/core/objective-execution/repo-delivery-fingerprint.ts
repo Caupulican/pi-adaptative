@@ -4,10 +4,11 @@
  */
 import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, lstatSync, openSync, readlinkSync, readSync } from "node:fs";
+import { lstat, open, readlink } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
-import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
+import { bindChildProcessAbort, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { withoutInheritedGitLocation } from "../exec.ts";
+import type { WorkEvidenceOperationOptions } from "../system-one/work-diff.ts";
 import { parseRepositoryHeadRecord } from "./repository-head-state.ts";
 
 export type RepoDeliveryFingerprint =
@@ -31,6 +32,14 @@ export interface FingerprintHooks {
 const GIT_TIMEOUT_MS = 20_000;
 const READ_CHUNK = 1024 * 1024;
 
+function remainingTimeout(options: WorkEvidenceOperationOptions, maximum = GIT_TIMEOUT_MS): number {
+	options.signal?.throwIfAborted();
+	if (options.deadline === undefined) return maximum;
+	const remaining = options.deadline - Date.now();
+	if (remaining <= 0) throw new Error("Repository fingerprint deadline expired");
+	return Math.min(maximum, remaining);
+}
+
 function gitEnv(): NodeJS.ProcessEnv {
 	return { ...withoutInheritedGitLocation(), GIT_TERMINAL_PROMPT: "0" };
 }
@@ -40,7 +49,9 @@ async function runGit(
 	args: readonly string[],
 	onData: (chunk: Buffer) => void,
 	hooks?: FingerprintHooks,
+	options: WorkEvidenceOperationOptions = {},
 ): Promise<boolean> {
+	const timeoutMs = remainingTimeout(options, hooks?.gitTimeoutMs ?? GIT_TIMEOUT_MS);
 	let child: ChildProcess;
 	try {
 		child = (hooks?.spawnGit ?? spawn)("git", [...args], {
@@ -53,17 +64,21 @@ async function runGit(
 	} catch {
 		return false;
 	}
+	if (options.signal) bindChildProcessAbort(child, options.signal);
 	child.stdout?.on("data", onData);
 	// Git diagnostics are not part of the fingerprint, but the pipe must remain drained or enough
 	// stderr can block the child before its terminal event and turn a deadline into a false hang.
 	child.stderr?.resume();
 	try {
 		const terminal = await waitForChildProcessWithTermination(child, {
-			timeoutMs: hooks?.gitTimeoutMs ?? GIT_TIMEOUT_MS,
+			timeoutMs,
 			killGraceMs: 1_000,
+			...(options.signal ? { signal: options.signal } : {}),
 		});
+		if (terminal.reason === "aborted") options.signal?.throwIfAborted();
 		return terminal.reason === "exited" && terminal.code === 0;
-	} catch {
+	} catch (error) {
+		if (options.signal?.aborted) throw error;
 		return false;
 	}
 }
@@ -72,6 +87,7 @@ async function gitText(
 	repoRoot: string,
 	args: readonly string[],
 	hooks?: FingerprintHooks,
+	options: WorkEvidenceOperationOptions = {},
 ): Promise<string | undefined> {
 	const chunks: Buffer[] = [];
 	const ok = await runGit(
@@ -81,15 +97,17 @@ async function gitText(
 			chunks.push(chunk);
 		},
 		hooks,
+		options,
 	);
 	if (!ok) return undefined;
 	return Buffer.concat(chunks).toString("utf8").trim();
 }
 
-function streamHashFile(absolute: string): string | undefined {
-	let stat: ReturnType<typeof lstatSync>;
+async function streamHashFile(absolute: string, options: WorkEvidenceOperationOptions): Promise<string | undefined> {
+	remainingTimeout(options);
+	let stat: Awaited<ReturnType<typeof lstat>>;
 	try {
-		stat = lstatSync(absolute);
+		stat = await lstat(absolute);
 	} catch (error) {
 		const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
 		if (code === "ENOENT") return "deleted";
@@ -98,7 +116,7 @@ function streamHashFile(absolute: string): string | undefined {
 	if (stat.isSymbolicLink()) {
 		try {
 			return createHash("sha256")
-				.update(`symlink ${readlinkSync(absolute)}`)
+				.update(`symlink ${await readlink(absolute)}`)
 				.digest("hex");
 		} catch {
 			return undefined;
@@ -109,21 +127,22 @@ function streamHashFile(absolute: string): string | undefined {
 	const hash = createHash("sha256");
 	hash.update(String(stat.mode & 0o777));
 	hash.update("\0");
-	let fd: number | undefined;
+	let handle: Awaited<ReturnType<typeof open>> | undefined;
 	try {
-		fd = openSync(absolute, "r");
+		handle = await open(absolute, "r");
 		const chunk = Buffer.alloc(READ_CHUNK);
 		while (true) {
-			const read = readSync(fd, chunk, 0, chunk.length, null);
-			if (read === 0) break;
-			hash.update(chunk.subarray(0, read));
+			remainingTimeout(options);
+			const result = await handle.read(chunk, 0, chunk.length, null);
+			if (result.bytesRead === 0) break;
+			hash.update(chunk.subarray(0, result.bytesRead));
 		}
 	} catch (error) {
 		const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
 		if (code === "ENOENT") return "deleted";
 		return undefined;
 	} finally {
-		if (fd !== undefined) closeSync(fd);
+		await handle?.close();
 	}
 	return hash.digest("hex");
 }
@@ -192,7 +211,11 @@ interface Fence {
 	readonly token: string;
 }
 
-async function readFence(repoRoot: string, hooks?: FingerprintHooks): Promise<Fence | undefined> {
+async function readFence(
+	repoRoot: string,
+	hooks?: FingerprintHooks,
+	options: WorkEvidenceOperationOptions = {},
+): Promise<Fence | undefined> {
 	const index = createHash("sha256");
 	const indexOk = await runGit(
 		repoRoot,
@@ -201,6 +224,7 @@ async function readFence(repoRoot: string, hooks?: FingerprintHooks): Promise<Fe
 			index.update(chunk);
 		},
 		hooks,
+		options,
 	);
 	if (!indexOk) return undefined;
 	const indexDigest = index.digest("hex");
@@ -218,6 +242,7 @@ async function readFence(repoRoot: string, hooks?: FingerprintHooks): Promise<Fe
 			pending = Buffer.from(taken.rest);
 		},
 		hooks,
+		options,
 	);
 	if (!statusOk || pending.length > 0 || headRecords.length !== 1) return undefined;
 	const head = parseRepositoryHeadRecord(headRecords[0]!);
@@ -240,6 +265,7 @@ async function digestFence(
 	repoRoot: string,
 	fence: Fence,
 	hooks?: FingerprintHooks,
+	options: WorkEvidenceOperationOptions = {},
 ): Promise<{ readonly digest: string; readonly entries: Map<string, string> } | undefined> {
 	const hash = createHash("sha256");
 	const entries = new Map<string, string>();
@@ -252,6 +278,7 @@ async function digestFence(
 	hash.update(fence.indexDigest);
 	hash.update("\0");
 	for (const record of fence.records) {
+		remainingTimeout(options);
 		hash.update(record.text);
 		hash.update("\0");
 		if (!record.path) continue;
@@ -259,9 +286,9 @@ async function digestFence(
 		if (!absolute) return undefined;
 		let mark: string | undefined;
 		if (record.submodule) {
-			const sub = await gitText(absolute, ["rev-parse", "HEAD"], hooks);
+			const sub = await gitText(absolute, ["rev-parse", "HEAD"], hooks, options);
 			mark = sub ? `submodule ${sub}` : "submodule";
-		} else mark = streamHashFile(absolute);
+		} else mark = await streamHashFile(absolute, options);
 		if (!mark) return undefined;
 		entries.set(record.path, mark);
 		hash.update(record.path);
@@ -279,22 +306,24 @@ async function digestFence(
 export async function captureRepoDeliveryFingerprint(
 	workingDirectory: string,
 	hooks?: FingerprintHooks,
+	options: WorkEvidenceOperationOptions = {},
 ): Promise<RepoDeliveryFingerprint> {
 	if (!workingDirectory) return { ok: false, reason: "repository_fingerprint_unavailable" };
-	const repoRoot = await gitText(workingDirectory, ["rev-parse", "--show-toplevel"], hooks);
+	const repoRoot = await gitText(workingDirectory, ["rev-parse", "--show-toplevel"], hooks, options);
 	if (!repoRoot) return { ok: false, reason: "repository_fingerprint_unavailable" };
 	const attempt = async (): Promise<RepoDeliveryFingerprint | "retry"> => {
 		try {
-			const before = await readFence(repoRoot, hooks);
+			const before = await readFence(repoRoot, hooks, options);
 			if (!before) return { ok: false, reason: "repository_fingerprint_unavailable" };
 			hooks?.afterFence?.();
-			const digested = await digestFence(repoRoot, before, hooks);
+			const digested = await digestFence(repoRoot, before, hooks, options);
 			if (!digested) return { ok: false, reason: "repository_fingerprint_unavailable" };
-			const after = await readFence(repoRoot, hooks);
+			const after = await readFence(repoRoot, hooks, options);
 			if (!after) return { ok: false, reason: "repository_fingerprint_unavailable" };
 			if (before.token !== after.token) return "retry";
 			return { ok: true, repositoryRoot: repoRoot, digest: digested.digest, entries: digested.entries };
-		} catch {
+		} catch (error) {
+			if (options.signal?.aborted) throw error;
 			return { ok: false, reason: "repository_fingerprint_unavailable" };
 		}
 	};
@@ -305,9 +334,13 @@ export async function captureRepoDeliveryFingerprint(
 	return second;
 }
 
-export async function sharesRepository(left: string, right: string): Promise<boolean> {
-	const leftDir = await gitText(left, ["rev-parse", "--absolute-git-dir"]);
-	const rightDir = await gitText(right, ["rev-parse", "--absolute-git-dir"]);
+export async function sharesRepository(
+	left: string,
+	right: string,
+	options: WorkEvidenceOperationOptions = {},
+): Promise<boolean> {
+	const leftDir = await gitText(left, ["rev-parse", "--absolute-git-dir"], undefined, options);
+	const rightDir = await gitText(right, ["rev-parse", "--absolute-git-dir"], undefined, options);
 	if (!leftDir || !rightDir) return true;
 	return leftDir === rightDir;
 }

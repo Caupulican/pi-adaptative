@@ -1,11 +1,16 @@
 ## [Unreleased]
 
+### Added
+
+- ICM continuous chat: one permanent per-project conversation log with a binary summary tree and a bounded view in every prompt. Summary lines target 512 bytes and may be at most 16 bytes over (528). Root sessions get `zoom` (a summary line, a paged message with all of its images, or a streamed agent chat log across project sessions) and `date` (a message's exact stored RFC 3339 occurrence time), which replace the history `memory` tool while the chat runs. A worker granted `zoom` and `date` holds them as read-only tools through its memory broker, by message id only; private worker logs stay root-readable. The view sizes (64,000/128,000 bytes for turns, 16,000/32,000 for compactions), the 8 concurrent compactions and the summary tree are intrinsic to ICM. The cheap model is `contextPolicy.memory.history.summaryModel`, validated against the model registry and its external egress, with the setting named in each refusal. Earlier sessions are imported once as `note` records through bounded streaming and source-key checkpoints; `migration.json` records final completion and intentional forgets, while unreadable or damaged sources block completion and retry. Attached ICM sessions are tracked in `sessions.json` so terminal worker reports (flushed to the session journal before acknowledgement) and ordinary entries from an interrupted session recover with canonical kinds even when a new session is started next. The legacy transcript-summary store is left in place.
+
 ### Fixed
 
 - Kept transcript-summary construction live past malformed model replies, rendered skipped ranges explicitly, preserved append-stable frontier prefixes, and bound persisted summary text to its manifest entry.
 - Made summary nodes and the read-only summary view scale with change instead of history: a parent summary no longer stores a copy of the source handles it covers, the read-only view follows the store by comparing page trees and reading only changed node files (no writer lock, no unchanged table read), retention ages are recomputed only for nodes whose sources or children changed, a summary that finishes before an earlier one is no longer left out of the frontier, and a missing forget file is no longer read as "nothing was forgotten" once a writer has held the store.
 - Removed whole-history work from ordinary transcript-summary publication: the catalog owns incremental ordered frontier and approval indexes, and the store keeps its metadata tables as bounded content-addressed treap pages switched by one atomic root (legacy full manifests are read and migrated under the writer lock; page cleanup is age-gated and amortized; accepted and dormant entries written before the text binding are revoked on the first start and derived again, exact copies at no cost and model summaries by paying and judging them again).
 - Bound Anthropic subscription usage polling to the stored OAuth credential instead of accepting a runtime API-key override for another account.
+- Prevent worker admission from blocking on repository evidence before credential failure, bound checkout capture asynchronously, and retain exact preflight failures across session recovery.
 
 ## [0.103.8] - 2026-10-12
 

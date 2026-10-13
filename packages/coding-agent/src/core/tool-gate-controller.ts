@@ -210,6 +210,7 @@ export class ToolGateController {
 		toolName: string,
 		args: unknown,
 		invocationCwd: string | undefined,
+		signal: AbortSignal | undefined,
 	): Promise<AdmittedRepositoryObservation | undefined> {
 		const observer = this.deps.repositoryObserver;
 		if (!observer) return undefined;
@@ -235,12 +236,15 @@ export class ToolGateController {
 		const observedRoots = new Set<string>();
 		try {
 			for (let index = 0; index < cwds.length; index++) {
-				const token = await observer.begin({
-					callId: cwds.length === 1 ? toolCallId : `${toolCallId}:repo:${index}`,
-					objectiveId: this.deps.getObjectiveId?.() ?? "",
-					cwd: cwds[index]!,
-					effect,
-				});
+				const token = await observer.begin(
+					{
+						callId: cwds.length === 1 ? toolCallId : `${toolCallId}:repo:${index}`,
+						objectiveId: this.deps.getObjectiveId?.() ?? "",
+						cwd: cwds[index]!,
+						effect,
+					},
+					signal,
+				);
 				const rootIdentity = token.repositoryRoot ?? token.cwd;
 				if (observedRoots.has(rootIdentity)) {
 					await observer.abort(token);
@@ -489,7 +493,7 @@ export class ToolGateController {
 			} catch {
 				// Advisory ranking/storage reads cannot deny an otherwise authorized operation.
 			}
-			observation = await this.beginObservation(invocation.id, toolCall.name, args, executionContext?.cwd);
+			observation = await this.beginObservation(invocation.id, toolCall.name, args, executionContext?.cwd, signal);
 			if (observation) {
 				observationHandedOff = true;
 				invocation.repositoryObservation = observation;

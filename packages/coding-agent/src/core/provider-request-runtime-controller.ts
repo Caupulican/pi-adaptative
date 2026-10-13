@@ -1,7 +1,7 @@
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import type { Agent } from "../kernel/agent.ts";
 import { createApplicableAssistantUsageFinder } from "../kernel/compaction/compaction.ts";
-import type { AgentContext, ProviderRequestAdmissionContext } from "../kernel/index.ts";
+import type { AgentContext, AgentContextPlanFn, ProviderRequestAdmissionContext } from "../kernel/index.ts";
 import { estimateProviderRequestTokens } from "../kernel/provider-request-estimator.ts";
 import { composeRequestSystemPrompt, narrowRequestMaxTokens } from "../kernel/provider-request-planner.ts";
 import type { CompactionController } from "./compaction-controller.ts";
@@ -48,6 +48,7 @@ export class ProviderRequestRuntimeController {
 	private installedShouldStopAfterTurn: Agent["shouldStopAfterTurn"];
 	private pendingSentEnvelope: RequestEnvelopeSnapshot | undefined;
 	private usageEnvelopeAnchor: UsageEnvelopeAnchor | undefined;
+	private planProjection: ((base: AgentContextPlanFn) => AgentContextPlanFn) | undefined;
 
 	constructor(deps: ProviderRequestRuntimeControllerDeps) {
 		this.deps = deps;
@@ -141,7 +142,7 @@ export class ProviderRequestRuntimeController {
 		// still reach the wrapped hook unchanged. A destructure-and-rebuild silently drops whatever
 		// wasn't named at the time it was written -- which is exactly how `sentPrefixCount` itself
 		// went missing here before this fix.
-		this.installedPlanContext = async (request, signal) => {
+		const sessionPlanContext: AgentContextPlanFn = async (request, signal) => {
 			const basePlan = previousPlanContext
 				? await previousPlanContext(request, signal)
 				: {
@@ -179,6 +180,8 @@ export class ProviderRequestRuntimeController {
 				},
 			};
 		};
+		this.installedPlanContext = (request, signal) =>
+			(this.planProjection ? this.planProjection(sessionPlanContext) : sessionPlanContext)(request, signal);
 		// `transformContext` carries no `attempt`/`sentPrefixCount` of its own -- it is a strictly
 		// narrower legacy hook (messages in, messages out) that this controller keeps wired only so
 		// a config built WITHOUT `planContext` still degrades to something reasonable. INVESTIGATED,
@@ -262,6 +265,14 @@ export class ProviderRequestRuntimeController {
 		agent.shouldStopAfterTurn = this.installedShouldStopAfterTurn;
 	}
 
+	/**
+	 * Projects the whole installed plan through a host's view of the conversation (the ICM turn projection). The
+	 * projection is read per request, so a host that starts after `install()` takes effect on its next request.
+	 */
+	setPlanProjection(projection: ((base: AgentContextPlanFn) => AgentContextPlanFn) | undefined): void {
+		this.planProjection = projection;
+	}
+
 	dispose(): void {
 		const agent = this.deps.agent;
 		if (agent.transformContext === this.installedTransformContext) {
@@ -274,6 +285,7 @@ export class ProviderRequestRuntimeController {
 		if (agent.shouldStopAfterTurn === this.installedShouldStopAfterTurn) {
 			agent.shouldStopAfterTurn = this.previousShouldStopAfterTurn;
 		}
+		this.planProjection = undefined;
 		this.installedTransformContext = undefined;
 		this.installedPlanContext = undefined;
 		this.installedAdmission = undefined;

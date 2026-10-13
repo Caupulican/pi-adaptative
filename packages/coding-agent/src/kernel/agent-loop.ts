@@ -1217,6 +1217,21 @@ async function prepareAndStartToolCall(
 				postprocessingFailures: [],
 			}),
 		};
+		if (preparation.phase === "preflight") {
+			await execCtx.config.onToolCallPreflightRejected?.(
+				{
+					requestId: execCtx.requestId,
+					assistantMessage: execCtx.assistantMessage,
+					toolCall,
+					result: finalized.result,
+					failureCode: preparation.failureCode,
+					correction: preparation.correction,
+					...(preparation.diagnostic ? { diagnostic: preparation.diagnostic } : {}),
+					...(preparation.executionScope ? { executionScope: preparation.executionScope } : {}),
+				},
+				execCtx.signal,
+			);
+		}
 		return {
 			kind: "finalized",
 			finalized,

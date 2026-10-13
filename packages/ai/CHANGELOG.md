@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Explicit `promptCacheMarkers` reservation (`systemPromptBlockIndices`, `toolsLast`, `messageIndices`) on `StreamOptions` and Anthropic request serialization, keeping total `cache_control` breakpoints within the four-marker provider ceiling.
+
 ### Changed
 
 - Updated Grok OAuth, inference, and account request identity to CLI 1.0.52 after native protocol review.

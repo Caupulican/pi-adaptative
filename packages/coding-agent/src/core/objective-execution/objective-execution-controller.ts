@@ -133,7 +133,7 @@ export interface ObjectiveExecutionControllerDeps {
 		adapter?: { provenance?: string };
 		snapshot?(): ExecutionState;
 		/** The completion projection every completion judgment reads (SystemOneController.completionView). */
-		completionView?(): { view: Record<string, unknown>; repositoryOutcome: boolean };
+		completionView?(signal?: AbortSignal): Promise<{ view: Record<string, unknown>; repositoryOutcome: boolean }>;
 		evaluateObjectiveRoute?(objectiveId: string, options?: { signal?: AbortSignal }): Promise<SemanticRouteJudgments>;
 		executeCompletionTransaction?(
 			isBugFix: boolean,
@@ -1679,7 +1679,7 @@ export class ObjectiveExecutionController {
 					if (evalResult.verdict === "complete") {
 						// JEV-025/JEV-026 read the same completion view the goal tool's completion judges: the
 						// outcome evidence per criterion, the diff only when the repository changed.
-						const completion = this.deps.systemOne?.completionView?.();
+						const completion = await this.deps.systemOne?.completionView?.(signal);
 						const completionEvidence = completion
 							? { ...completion.view, repository_outcome: completion.repositoryOutcome }
 							: {};

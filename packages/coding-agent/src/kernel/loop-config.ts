@@ -171,6 +171,18 @@ export interface BeforeToolCallContext {
 	context: AgentContext;
 }
 
+/** A call-specific preflight rejection persisted before its canonical tool result is emitted. */
+export interface ToolCallPreflightRejectionContext {
+	requestId: AgentRequestId;
+	assistantMessage: AssistantMessage;
+	toolCall: AgentToolCall;
+	result: AgentToolResult<any>;
+	failureCode: string;
+	correction: string;
+	diagnostic?: string;
+	executionScope?: string;
+}
+
 /** Context passed to `afterToolCall`. */
 export interface AfterToolCallContext {
 	/** The same binding used at admission, retained through detached completion. */
@@ -357,6 +369,12 @@ export interface AgentContextPlan {
 	transientMessages?: AgentMessage[];
 	/** Host-owned instructions appended to the system channel for this request only. */
 	transientSystemPrompt?: string;
+	/**
+	 * The messages the wire carries from durable history, when a host projects its own view of it (a turn view over
+	 * the messages from the turn start on). Transient records reconcile against these, not the whole durable history,
+	 * so a record the projection no longer carries reads as absent and is appended again.
+	 */
+	transientReconciliationBase?: readonly AgentMessage[];
 	/** Cheap freshness check immediately before admission/commit. */
 	isCurrent?: () => boolean;
 	/**
@@ -372,6 +390,9 @@ export interface AgentContextPlan {
 	/** Release request-local planning resources when a plan is not accepted. */
 	discard?: () => void;
 }
+
+/** A replay-safe planning hook as installed on an agent. */
+export type AgentContextPlanFn = NonNullable<AgentLoopConfig["planContext"]>;
 
 /**
  * Evidence that a host-owned `planContext`/`transformContext` result rewrote, reordered, or removed
@@ -808,6 +829,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * The hook receives the agent abort signal and is responsible for honoring it.
 	 */
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
+
+	/** Persist a preflight rejection before the normal tool-result event can be interrupted. */
+	onToolCallPreflightRejected?: (
+		context: ToolCallPreflightRejectionContext,
+		signal?: AbortSignal,
+	) => void | Promise<void>;
 
 	/** Reserve prepared tool calls before execution. See {@link ToolCallStartHook}. */
 	onToolCallStart?: ToolCallStartHook;

@@ -1190,8 +1190,9 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 								);
 							systemOne.noteCompletionAccount?.(parsed.account);
 						}
+						const completionView = await systemOne.completionView(signal);
 						const fingerprint = createHash("sha256")
-							.update(JSON.stringify(systemOne.completionView().view))
+							.update(JSON.stringify(completionView.view))
 							.digest("hex")
 							.slice(0, 16);
 						const completionDecision = await systemOne.executeCompletionTransaction(

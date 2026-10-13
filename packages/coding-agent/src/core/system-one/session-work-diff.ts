@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { SessionManager } from "../../kernel/node.ts";
 import type {
 	RepositoryWorkEvidenceJournal,
@@ -8,7 +9,7 @@ import { isPlainRecord } from "../util/value-guards.ts";
 import type { AddedSuppression } from "./suppression-scan.ts";
 import {
 	captureWorkBaseline,
-	discoverWorkRepository,
+	discoverWorkRepositoryAsync,
 	readWorkDiff,
 	retainWorkBaseline,
 	WORK_DIFF_PATCH_LIMIT,
@@ -16,6 +17,8 @@ import {
 	WORK_DIFF_UNTRACKED_LIMIT,
 	type WorkBaseline,
 	type WorkDiff,
+	type WorkEvidenceOperationOptions,
+	workEvidenceDiagnostic,
 } from "./work-diff.ts";
 
 export const WORK_EVIDENCE_CUSTOM_TYPE = "pi_repository_work_evidence";
@@ -70,6 +73,8 @@ function validRecord(value: unknown): value is WorkEvidenceRecord {
 
 /** Branch journal adapter; the mutation observer is the sole producer of scope and change evidence. */
 export function createSessionWorkEvidenceJournal(getManager: () => SessionManager): RepositoryWorkEvidenceJournal {
+	type BaselineResult = Awaited<ReturnType<RepositoryWorkEvidenceJournal["ensureBaseline"]>>;
+	const baselineCaptures = new Map<string, Promise<BaselineResult>>();
 	const anchor = (): string =>
 		JSON.stringify({ sessionId: getManager().getSessionId(), leafId: getManager().getLeafId() });
 	const isCurrentBranchAnchor = (branchAnchor: string | undefined): boolean => {
@@ -121,40 +126,103 @@ export function createSessionWorkEvidenceJournal(getManager: () => SessionManage
 	};
 	return {
 		isCurrentBranchAnchor,
-		async ensureBaseline(objectiveId, cwd) {
-			const repository = discoverWorkRepository(cwd);
-			if (repository.diagnostic)
-				throw new Error("Repository outcome repository discovery is unavailable; retry after Git recovers");
+		async ensureBaseline(objectiveId, cwd, options = {}) {
+			const branchAnchor = anchor();
+			const repository = await discoverWorkRepositoryAsync(cwd, options);
+			if (repository.diagnostic) {
+				assertCurrent(branchAnchor);
+				const existing = read(objectiveId).find((scope) => scope.repositoryRoot === cwd);
+				// A transient discovery failure cannot replace already-admitted mutation evidence.
+				if (!existing?.observedMutation && !existing?.pendingObservationIds?.length)
+					save(objectiveId, {
+						...(existing ?? { repositoryRoot: cwd, changedPaths: [] }),
+						diagnostic: repository.diagnostic,
+					});
+				throw new Error(`Repository outcome repository discovery is unavailable (${repository.diagnostic})`);
+			}
 			const repositoryRoot = repository.root;
 			if (!repositoryRoot)
-				return { repositoryRoot: cwd, created: false, baselineStatus: "unversioned", branchAnchor: anchor() };
-			const existing = read(objectiveId).find((scope) => scope.repositoryRoot === repositoryRoot);
-			if (existing?.baseline && !existing.diagnostic)
-				return { repositoryRoot, created: false, baselineStatus: "captured", branchAnchor: anchor() };
-			if (existing?.baseline && existing.observedMutation && canRecoverSnapshotDiagnostic(existing.diagnostic)) {
-				const recovered = readWorkDiff(repositoryRoot, existing.baseline);
-				if (!recovered.diagnostic) {
-					// The failed observation did not establish a complete path set. Recover the whole
-					// outcome against the original baseline; delivery ownership remains a separate gate.
-					const { diagnostic: _diagnostic, ...scope } = existing;
-					save(objectiveId, { ...scope, changedPaths: [], pathScope: "repository" });
-					return { repositoryRoot, created: false, baselineStatus: "captured", branchAnchor: anchor() };
+				return { repositoryRoot: cwd, created: false, baselineStatus: "unversioned", branchAnchor };
+			const captureKey = `${objectiveId}\0${repositoryRoot}`;
+			const pending = baselineCaptures.get(captureKey);
+			if (pending) return pending;
+			const capture = (async (): Promise<BaselineResult> => {
+				const existing = read(objectiveId).find((scope) => scope.repositoryRoot === repositoryRoot);
+				const assertFreshCaptureState = (): RepositoryWorkEvidenceScope | undefined => {
+					assertCurrent(branchAnchor);
+					const latest = read(objectiveId).find((scope) => scope.repositoryRoot === repositoryRoot);
+					if (!isDeepStrictEqual(latest, existing))
+						throw new Error("Repository evidence changed during baseline capture");
+					return latest;
+				};
+				if (existing?.baseline && !existing.diagnostic)
+					return { repositoryRoot, created: false, baselineStatus: "captured", branchAnchor };
+				if (existing?.pendingObservationIds?.length)
+					throw new Error("Complete or recover pending repository observations before baseline capture");
+				if (existing?.baseline && existing.observedMutation && canRecoverSnapshotDiagnostic(existing.diagnostic)) {
+					const recovered = await readWorkDiff(repositoryRoot, existing.baseline, undefined, options);
+					if (!recovered.diagnostic) {
+						// The failed observation did not establish a complete path set. Recover the whole
+						// outcome against the original baseline; delivery ownership remains a separate gate.
+						assertCurrent(branchAnchor);
+						const latest = read(objectiveId).find((scope) => scope.repositoryRoot === repositoryRoot);
+						if (
+							!latest?.baseline ||
+							latest.baseline.revision !== existing.baseline.revision ||
+							latest.baseline.tree !== existing.baseline.tree
+						)
+							throw new Error("Repository baseline changed during evidence recovery");
+						if (latest.diagnostic !== existing.diagnostic)
+							throw new Error("Repository evidence changed during recovery");
+						const { diagnostic: _diagnostic, ...withoutDiagnostic } = latest;
+						save(objectiveId, {
+							...withoutDiagnostic,
+							changedPaths: [],
+							pathScope: "repository",
+						});
+						return { repositoryRoot, created: false, baselineStatus: "captured", branchAnchor };
+					}
 				}
-			}
-			if (existing?.observedMutation)
-				throw new Error("Recover the original repository baseline before further mutation");
-			const baseline = captureWorkBaseline(repositoryRoot);
-			if (baseline) {
+				if (existing?.observedMutation)
+					throw new Error("Recover the original repository baseline before further mutation");
+				let baseline: WorkBaseline;
 				try {
-					retainWorkBaseline(baseline, `${getManager().getSessionId()}\0${objectiveId}\0${repositoryRoot}`);
-					save(objectiveId, { repositoryRoot, baseline, changedPaths: [] });
-					return { repositoryRoot, created: true, baselineStatus: "captured", branchAnchor: anchor() };
-				} catch {
-					// Failure to retain a baseline is missing infrastructure evidence, never an empty patch.
+					baseline = await captureWorkBaseline(repositoryRoot, options);
+				} catch (error) {
+					const diagnostic = workEvidenceDiagnostic(error);
+					const latest = assertFreshCaptureState();
+					save(objectiveId, {
+						...(latest ?? { repositoryRoot, changedPaths: [] }),
+						diagnostic,
+					});
+					throw new Error(`Repository baseline capture is unavailable (${diagnostic})`, { cause: error });
 				}
+				assertFreshCaptureState();
+				try {
+					await retainWorkBaseline(
+						baseline,
+						`${getManager().getSessionId()}\0${objectiveId}\0${repositoryRoot}`,
+						options,
+					);
+				} catch (error) {
+					const diagnostic = `repository_work_retain_failed:${workEvidenceDiagnostic(error)}`.slice(0, 512);
+					const latest = assertFreshCaptureState();
+					save(objectiveId, {
+						...(latest ?? { repositoryRoot, changedPaths: [] }),
+						diagnostic,
+					});
+					throw new Error(`Repository baseline retention is unavailable (${diagnostic})`, { cause: error });
+				}
+				assertFreshCaptureState();
+				save(objectiveId, { repositoryRoot, baseline, changedPaths: [] });
+				return { repositoryRoot, created: true, baselineStatus: "captured", branchAnchor };
+			})();
+			baselineCaptures.set(captureKey, capture);
+			try {
+				return await capture;
+			} finally {
+				if (baselineCaptures.get(captureKey) === capture) baselineCaptures.delete(captureKey);
 			}
-			save(objectiveId, { repositoryRoot, changedPaths: [], diagnostic: "repository_work_baseline_unavailable" });
-			throw new Error("Repository baseline capture is unavailable; retry after the host recovers");
 		},
 		async recordBaselineDiagnostic(objectiveId, repositoryRoot, diagnostic, branchAnchor) {
 			assertCurrent(branchAnchor);
@@ -200,20 +268,32 @@ export function createSessionWorkEvidenceJournal(getManager: () => SessionManage
 				...(input.diagnostic ? { diagnostic: input.diagnostic } : {}),
 			});
 		},
-		async recoverObservations(objectiveId, activeObservationIds) {
+		async recoverObservations(objectiveId, activeObservationIds, options = {}) {
 			const branchAnchor = anchor();
 			const active = new Set(activeObservationIds);
 			for (const scope of read(objectiveId)) {
 				const interrupted = scope.pendingObservationIds?.filter((id) => !active.has(id));
 				if (!interrupted?.length || !scope.baseline) continue;
-				const outcome = readWorkDiff(scope.repositoryRoot, scope.baseline);
+				const outcome = await readWorkDiff(scope.repositoryRoot, scope.baseline, undefined, options);
 				assertCurrent(branchAnchor);
 				if (outcome.diagnostic) continue;
-				const { diagnostic: _diagnostic, ...recovered } = scope;
+				const latest = read(objectiveId).find((item) => item.repositoryRoot === scope.repositoryRoot);
+				if (
+					!latest?.baseline ||
+					latest.baseline.revision !== scope.baseline.revision ||
+					latest.baseline.tree !== scope.baseline.tree
+				)
+					continue;
+				const interruptedSet = new Set(interrupted);
+				const recoverDiagnostic =
+					latest.diagnostic === scope.diagnostic && canRecoverSnapshotDiagnostic(latest.diagnostic);
+				const { diagnostic: _diagnostic, ...recovered } = latest;
 				save(objectiveId, {
-					...(canRecoverSnapshotDiagnostic(scope.diagnostic) ? recovered : scope),
-					pendingObservationIds: scope.pendingObservationIds!.filter((id) => active.has(id)),
-					...(scope.observedMutation || outcome.patch.length || outcome.untracked.length
+					...(recoverDiagnostic ? recovered : latest),
+					...(latest.pendingObservationIds
+						? { pendingObservationIds: latest.pendingObservationIds.filter((id) => !interruptedSet.has(id)) }
+						: {}),
+					...(latest.observedMutation || outcome.patch.length || outcome.untracked.length
 						? { observedMutation: true, pathScope: "repository" }
 						: {}),
 				});
@@ -235,7 +315,10 @@ export function createSessionWorkEvidenceJournal(getManager: () => SessionManage
 }
 
 /** Bounded completion evidence across every repository the objective actually mutated. */
-export function readGoalWorkDiff(scopes: readonly RepositoryWorkEvidenceScope[]): WorkDiff | undefined {
+export async function readGoalWorkDiff(
+	scopes: readonly RepositoryWorkEvidenceScope[],
+	options: WorkEvidenceOperationOptions = {},
+): Promise<WorkDiff | undefined> {
 	const changed = scopes.filter((scope) => scope.observedMutation);
 	if (!changed.length) return undefined;
 	const repositories = changed.map((scope) => ({
@@ -252,10 +335,11 @@ export function readGoalWorkDiff(scopes: readonly RepositoryWorkEvidenceScope[])
 			diagnostics.push(`${scope.repositoryRoot}: ${scope.diagnostic ?? "repository_work_baseline_unavailable"}`);
 			continue;
 		}
-		const work = readWorkDiff(
+		const work = await readWorkDiff(
 			scope.repositoryRoot,
 			scope.baseline,
 			scope.pathScope === "repository" ? undefined : scope.changedPaths,
+			options,
 		);
 		if (work.diagnostic) diagnostics.push(`${scope.repositoryRoot}: ${work.diagnostic}`);
 		const section = work.patch.length ? `Repository ${JSON.stringify(scope.repositoryRoot)}\n${work.patch}` : "";

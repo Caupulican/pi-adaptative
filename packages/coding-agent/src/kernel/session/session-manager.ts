@@ -1694,6 +1694,11 @@ export class SessionManager {
 		return this.persist;
 	}
 
+	/** Whether the entry is already written to the session file. Entries buffered before the first flush are not. */
+	isEntryPersisted(entryId: string): boolean {
+		return this.persist && this._getEntryFileLocation(entryId) !== undefined;
+	}
+
 	/** Whether a failed write left the file's state unknown: appends are refused until the file is reopened. */
 	isPersistenceStateUncertain(): boolean {
 		return this.persistenceStateUncertain;
@@ -1915,7 +1920,11 @@ export class SessionManager {
 		}
 
 		const hasReply = this.fileEntries.some(isReplyEntry) || entries.some(isReplyEntry);
-		const forceFlush = entries.some((entry) => isSessionLifecycleEntry(entry));
+		const forceFlush = entries.some(
+			(entry) =>
+				isSessionLifecycleEntry(entry) ||
+				(entry.type === "custom" && entry.customType === "continuous_chat_work_report"),
+		);
 		const shouldFlush = hasReply || forceFlush;
 		// Encoding can invoke extension-owned getters. Prepare the entire initial prefix
 		// before opening the file, then check cancellation at the last pre-write boundary.

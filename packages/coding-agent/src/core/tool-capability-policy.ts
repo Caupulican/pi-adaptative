@@ -2,6 +2,8 @@ import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import type { HarnessCapability } from "./capability-contract.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 import {
+	CONTINUOUS_CHAT_DATE_TOOL_NAME,
+	CONTINUOUS_CHAT_ZOOM_TOOL_NAME,
 	isRootMemoryReadAction,
 	ROOT_MEMORY_TOOL_NAME,
 	WORKER_MEMORY_READ_TOOL_NAME,
@@ -80,6 +82,8 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	[GOAL_LIFECYCLE_TOOL_NAMES[2], policy([["memory.mutate"]], "memory-broker")],
 	[ROOT_MEMORY_TOOL_NAME, policy([["memory.mutate", "memory.query"]], "memory-broker")],
 	[WORKER_MEMORY_READ_TOOL_NAME, policy([["memory.query"]], "memory-broker")],
+	[CONTINUOUS_CHAT_ZOOM_TOOL_NAME, policy([["memory.query"]], "memory-broker")],
+	[CONTINUOUS_CHAT_DATE_TOOL_NAME, policy([["memory.query"]], "memory-broker")],
 	["secret_store", policy([["credentials.use"]], ["service-proxy", "path-scope"])],
 	["delegate", DELEGATE_POLICY],
 	["model_fitness", policy([["research.execute"]], "control-plane")],

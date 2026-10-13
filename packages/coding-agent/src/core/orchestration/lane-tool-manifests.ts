@@ -1,6 +1,6 @@
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { mapToolNamesForPlatform } from "../default-tool-surface.ts";
-import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
+import { WORKER_MEMORY_BROKER_TOOL_NAMES } from "../memory/worker-memory-tools.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { getToolCapabilityPolicy, resolveProfileToolCapabilities } from "../tool-capability-policy.ts";
 import type { OrchestrationProfile, ToolCapabilityManifest } from "./contracts.ts";
@@ -14,7 +14,7 @@ export const CLASSIFIED_LANE_TOOL_NAMES = [
 	"repo_read",
 	"write",
 	"edit",
-	WORKER_MEMORY_READ_TOOL_NAME,
+	...WORKER_MEMORY_BROKER_TOOL_NAMES,
 	"python",
 	"run_process",
 	"bash",

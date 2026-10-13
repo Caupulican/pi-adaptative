@@ -19,7 +19,7 @@
  * accepted, so the request controller stays the single owner of the pass ordering and of commit.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { type AgentMessage, createCustomMessage, HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
@@ -73,7 +73,24 @@ import type { ExtensionRunner } from "./extensions/index.ts";
 import type { MemoryProvider } from "./extensions/types.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { ActiveBranchView } from "./memory/active-branch-probe.ts";
+import { ContinuousChatHost, type ContinuousChatHostPorts } from "./memory/continuous-chat-host.ts";
+import type { ContinuousChatLegacySource } from "./memory/continuous-chat-legacy-import.ts";
+import {
+	createContinuousChatLegacyForgetPredicate,
+	listContinuousChatLegacySessions,
+} from "./memory/continuous-chat-migration.ts";
+import {
+	CONTINUOUS_CHAT_LANE_IMAGE_MAX_BYTES,
+	CONTINUOUS_CHAT_LANE_PAGE_BYTES,
+} from "./memory/continuous-chat-navigation.ts";
+import {
+	createBlockedContinuousChatPlanWrapper,
+	createContinuousChatPlanWrapper,
+	renderContinuousChatTurnState,
+} from "./memory/continuous-chat-projection.ts";
+import { executeContinuousChatNavigation } from "./memory/continuous-chat-tools.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
+import { memoryFailure } from "./memory/history-tool.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import {
 	FILE_STORE_MEMORY_SYSTEM_NOTE,
@@ -102,6 +119,7 @@ import {
 	parseTranscriptSourceHandle,
 	TRANSCRIPT_FOREGROUND_READ_MS,
 	TRANSCRIPT_FRONTIER_CUSTOM_TYPE,
+	TRANSCRIPT_RECALL_RESULT_MARKER,
 	type TranscriptSourceReader,
 	utf8ByteLength,
 } from "./memory/transcript-memory-contracts.ts";
@@ -117,6 +135,7 @@ import {
 	type TranscriptSummaryLookup,
 	type TranscriptSummaryReference,
 } from "./memory/transcript-source-tools.ts";
+import { TranscriptSummaryStore } from "./memory/transcript-summary-store.ts";
 import type {
 	UserPreferenceAdmissionRequest,
 	UserPreferenceAdmissionResult,
@@ -127,6 +146,7 @@ import type {
 	WorkerMemoryBroker,
 	WorkerMemorySourceAnswer,
 } from "./memory/worker-memory-tools.ts";
+import type { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { getDirectoryResourceProfileInfo, isValidMemorySystem } from "./settings/settings-rules.ts";
 import type { MemorySystem, SettingsError, SettingsScope } from "./settings/settings-schema.ts";
@@ -347,6 +367,8 @@ const LANE_SOURCE_OVER_ROOM_TEXT =
 	"[Not attached: even a minimal page of this source does not fit this worker's remaining context room. Call memory_read with this ref again when the worker has more room.]";
 const LANE_EXPANSION_OVER_ROOM_TEXT =
 	"[Not attached: this summary's expansion does not fit this worker's remaining context room. Call memory_read with this ref again when the worker has more room.]";
+const LANE_CHAT_OVER_ROOM_TEXT =
+	"[Not attached: this chat page does not fit this worker's remaining context room. Call memory_read with this zoom again when the worker has more room.]";
 
 /**
  * History reads, zooms and summary lookups under disabled memory retrieval: a typed policy refusal, never an
@@ -448,6 +470,13 @@ export interface MemoryControllerDeps {
 	 */
 	subscribeEntriesPersisted?(listener: (event: SessionEntriesPersistedEvent) => void): () => void;
 	/**
+	 * ICM's project chat ports, supplied by the root session. An ICM root cannot start without them: the chat is its
+	 * memory, so a missing port fails activation instead of falling back to transcript history.
+	 */
+	continuousChat?: ContinuousChatHostPorts;
+	/** The provider request runtime the chat projects each turn onto. ICM cannot start without it. */
+	providerRequest?: Pick<ProviderRequestRuntimeController, "setPlanProjection">;
+	/**
 	 * What the summary hierarchy needs from the session: the model registry, the isolated-completion
 	 * boundary, the usage ledger and the foreground activity signal. Absent in narrow hosts: no hierarchy.
 	 */
@@ -487,6 +516,8 @@ export class LaneMemorySnapshotStaleError extends Error {
 }
 
 export class MemoryController {
+	/** Stable for this controller generation so an appended frontier preserves the provider-visible prompt prefix. */
+	private readonly _historyFrontierBoundaryNonce = randomBytes(16).toString("hex");
 	private _memoryOkfProvider: ContextMemoryProvider | undefined = undefined;
 	private _fileStoreMemoryProvider: ContextMemoryProvider | undefined = undefined;
 	private _localGraphProvider: ContextMemoryProvider | undefined = undefined;
@@ -513,6 +544,8 @@ export class MemoryController {
 	/** Active generation's transcript recall provider: the one backend for history search and source reads. */
 	private _transcriptRecall: TranscriptRecallProvider | undefined;
 	private _unsubscribeEntriesPersisted: (() => void) | undefined;
+	/** ICM's project chat for the active generation; undefined unless ICM is active in a root session. */
+	private _continuousChat: ContinuousChatHost | undefined;
 	/** Summary hierarchy host, attached to the root history backend in either memory system; absent in narrow hosts. */
 	private readonly _hierarchy: TranscriptHierarchyHost | undefined;
 	private readonly _activeBranch: ActiveBranchView | undefined;
@@ -565,17 +598,17 @@ export class MemoryController {
 	}
 
 	private _historySettings(): TranscriptHistorySettings {
-		return (
-			this.deps.getSettingsManager().getMemoryHistorySettings?.() ?? {
-				hierarchy: false,
-				summaryModel: undefined,
-				allowExternalSummaryEgress: false,
-				allowExternalAdmissionEgress: false,
-				maxConcurrentSummaries: 1,
-				frontierMaxBytes: 0,
-				retentionDays: undefined,
-			}
-		);
+		const settings: TranscriptHistorySettings = this.deps.getSettingsManager().getMemoryHistorySettings?.() ?? {
+			hierarchy: false,
+			summaryModel: undefined,
+			allowExternalSummaryEgress: false,
+			allowExternalAdmissionEgress: false,
+			maxConcurrentSummaries: 1,
+			frontierMaxBytes: 0,
+			retentionDays: undefined,
+		};
+		// ICM's continuous chat is the one summary tree of an ICM root: the transcript hierarchy never runs beside it.
+		return this.deps.getSettingsManager().getMemorySystem() === "icm" ? { ...settings, hierarchy: false } : settings;
 	}
 
 	/** Repair an unknown permanent forget state on the operator's explicit, loss-acknowledging command. */
@@ -767,12 +800,14 @@ export class MemoryController {
 			this._fileStoreWriter = undefined;
 			// The coordinator stops, and persists its terminal record, before the reader it uses is released.
 			const hierarchyStopped = this._hierarchy?.detach();
+			const continuousChatStopped = this._releaseContinuousChat();
 			this._unsubscribeSettingsChanges?.();
 			this._unsubscribeSettingsChanges = undefined;
 			this._releaseTranscriptRecall();
 			this._activeMemorySystem = undefined;
 			this._transitioning = true;
 			await hierarchyStopped;
+			await continuousChatStopped;
 			await this._lifecycleTail;
 			if (legacy) await this._memoryManager.onSessionEnd();
 			await this._memoryManager.shutdownAll();
@@ -1324,8 +1359,9 @@ export class MemoryController {
 			if (allowance <= 0 || allowanceLines <= 0) return cleared("no_room");
 			const preview = host.previewFrontier(allowance, allowanceLines, fenced.fence);
 			if (preview.state !== "shown") return cleared(preview.state);
-			const boundaryId = createHash("sha256").update(preview.text).digest("hex").slice(0, 32);
-			const wrapped = wrapUntrustedText(preview.text, "memory:history-frontier", { nonce: boundaryId });
+			const wrapped = wrapUntrustedText(preview.text, "memory:history-frontier", {
+				nonce: this._historyFrontierBoundaryNonce,
+			});
 			return {
 				records: [this._hostTransient(TRANSCRIPT_FRONTIER_CUSTOM_TYPE, wrapped, false)],
 				reserved: {
@@ -1803,6 +1839,38 @@ export class MemoryController {
 				}
 				return { ok: true, text: LANE_SOURCE_OVER_ROOM_TEXT };
 			},
+			navigate: async (tool, args, signal) => {
+				const laneDetails = { readOnly: true, [TRANSCRIPT_RECALL_RESULT_MARKER]: true };
+				if (!this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled) {
+					const reason = reasonSentence(MEMORY_RETRIEVAL_DISABLED_REASON);
+					return memoryFailure("memory_retrieval_disabled", reason, laneDetails);
+				}
+				const budget = laneBudget();
+				if (!budget.enabled) {
+					const constraint = laneConstraintText(budget.reason, capacity() !== undefined);
+					return { content: [{ type: "text", text: constraint }], details: laneDetails };
+				}
+				// The chat's view, messages and images, read with the lane's fixed page and image bounds. No agent logs: a
+				// worker's private log is the root's to read, so a name is refused as worker-log-unavailable.
+				const result = await executeContinuousChatNavigation(
+					() => {
+						const port = this.continuousChatHost()?.port;
+						return port && { navigation: port.navigation };
+					},
+					tool,
+					args,
+					signal,
+					CONTINUOUS_CHAT_LANE_PAGE_BYTES,
+					CONTINUOUS_CHAT_LANE_IMAGE_MAX_BYTES,
+				);
+				if (result.isError) return result;
+				const text = result.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+				// A page that does not fit the lane's room is a stated constraint, never cut (as with a source page).
+				if (!memoryTextFitsBudget(text, budget)) {
+					return { content: [{ type: "text", text: LANE_CHAT_OVER_ROOM_TEXT }], details: laneDetails };
+				}
+				return result;
+			},
 		};
 	}
 
@@ -1826,6 +1894,115 @@ export class MemoryController {
 		this._unsubscribeEntriesPersisted?.();
 		this._unsubscribeEntriesPersisted = undefined;
 		this._transcriptRecall = undefined;
+	}
+
+	/** The settled ICM generation's project chat; undefined in every other state, so no turn binds a stale one. */
+	continuousChatHost(): ContinuousChatHost | undefined {
+		return this._activeMemorySystem === "icm" && !this._transitioning ? this._continuousChat : undefined;
+	}
+
+	/**
+	 * Opens the project chat for an ICM root generation: validates the compaction model and takes the project's lease.
+	 * Nothing is imported or subscribed yet; `_activateContinuousChat` starts the chat once its block is installed.
+	 */
+	private async _openContinuousChat(generation: number): Promise<void> {
+		const ports = this.deps.continuousChat;
+		const subscribe = this.deps.subscribeEntriesPersisted;
+		const providerRequest = this.deps.providerRequest;
+		if (!ports || !subscribe || !providerRequest) {
+			throw new Error(
+				"ICM project chat is not wired to this session: its ports and the provider request runtime are required.",
+			);
+		}
+		const host = await ContinuousChatHost.open({
+			...ports,
+			agentDir: this.deps.getAgentDir(),
+			projectKey: this._projectId(),
+			sessionId: this.deps.getSessionId(),
+			sessionFile: this.deps.getSessionFile?.(),
+			legacy: this._continuousChatLegacySource(),
+			subscribeEntriesPersisted: subscribe,
+			warn: (message) => this.deps.emitWarning(message),
+		});
+		if (generation !== this._memoryGeneration) {
+			await host.dispose();
+			return;
+		}
+		this._continuousChat = host;
+		// Every provider request of an ICM root is planned through the running turn, or fails loudly; none sends history.
+		providerRequest.setPlanProjection(
+			createContinuousChatPlanWrapper({
+				current: () => {
+					const handle = host.turns.current();
+					return handle && { handle, stateText: renderContinuousChatTurnState(handle) };
+				},
+			}),
+		);
+		// A released host is no longer this generation's chat, so only a host that stops on its own reaches the handler.
+		void host.stopped.then(() => this._continuousChatStoppedOnItsOwn(generation, host));
+	}
+
+	/**
+	 * The chat's host stopped without its release. ICM remains fail-closed: provider requests are blocked until recovery
+	 * or an intentional memory-mode change, never silently projected from the old durable transcript.
+	 */
+	private async _continuousChatStoppedOnItsOwn(generation: number, host: ContinuousChatHost): Promise<void> {
+		if (generation !== this._memoryGeneration || this._continuousChat !== host) return;
+		this._continuousChat = undefined;
+		this.deps.providerRequest?.setPlanProjection(
+			createBlockedContinuousChatPlanWrapper(
+				"its runtime stopped; reload ICM after resolving the preceding warning",
+			),
+		);
+		this.deps.emitWarning(
+			"The ICM project chat stopped; ICM provider requests are blocked until the chat is recovered or memory mode changes.",
+		);
+		this.deps.refreshToolRegistry();
+		await host.dispose().catch((error: unknown) => {
+			this.deps.emitWarning(`The ICM project chat could not release its runtime: ${String(error)}`);
+		});
+	}
+
+	/**
+	 * Starts the opened chat after memory activation has installed its block. The refresh rebuilds the system prompt
+	 * through the memory block, so from here on the prefix a compaction repeats carries the chat block. Then the legacy
+	 * import runs, and dispatch starts last. A failure throws into the activation's own failure path.
+	 */
+	private async _activateContinuousChat(generation: number): Promise<void> {
+		const host = this._continuousChat;
+		if (host === undefined || generation !== this._memoryGeneration) return;
+		this._transitioning = false;
+		this.deps.refreshToolRegistry();
+		await host.start();
+	}
+
+	/**
+	 * The earlier sessions of this project for the ICM import, with their forget evidence. The forget state is read on the
+	 * first session that needs it, so an import that already completed never reads it; an unknown state rejects here.
+	 */
+	private _continuousChatLegacySource(): ContinuousChatLegacySource {
+		let forgets: Promise<(sessionId: string) => Promise<boolean>> | undefined;
+		return {
+			sessions: () =>
+				listContinuousChatLegacySessions({ cwd: this.deps.getCwd(), agentDir: this.deps.getAgentDir() }),
+			isForgotten: async (sessionId) => {
+				forgets ??= createContinuousChatLegacyForgetPredicate(
+					new TranscriptSummaryStore({ agentDir: this.deps.getAgentDir(), projectId: this._projectId() }),
+				);
+				return (await forgets)(sessionId);
+			},
+		};
+	}
+
+	/** Stops the project chat of a replaced or shut-down generation; its queued records finish first. */
+	private async _releaseContinuousChat(): Promise<void> {
+		const host = this._continuousChat;
+		this._continuousChat = undefined;
+		// The projection goes first: a request planned from here on must never read a chat that is stopping,
+		// and switching away from a failed ICM generation clears the fail-closed wrapper even when no host opened.
+		this.deps.providerRequest?.setPlanProjection(undefined);
+		if (host === undefined) return;
+		await host.dispose();
 	}
 
 	/** Whether a delegated read planned against `input` still describes the memory, policy and lane it will serve. */
@@ -2131,6 +2308,7 @@ export class MemoryController {
 		this._fileStoreWriter = undefined;
 		// The previous generation's coordinator stops (and records its terminal handoff) before its reader goes.
 		const hierarchyStopped = this._hierarchy?.detach();
+		const continuousChatStopped = this._releaseContinuousChat();
 		this._releaseTranscriptRecall();
 		this._transitioning = true;
 		this._initializationFailed = false;
@@ -2156,6 +2334,7 @@ export class MemoryController {
 			.then(async () => {
 				try {
 					await hierarchyStopped;
+					await continuousChatStopped;
 					await previous.shutdownAll();
 					if (generation !== this._memoryGeneration) return;
 					let writer: FileStoreProvider | undefined;
@@ -2180,6 +2359,7 @@ export class MemoryController {
 							new IcmProvider(
 								history,
 								() => this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
+								() => this.continuousChatHost()?.port,
 							),
 						);
 					} else {
@@ -2228,26 +2408,33 @@ export class MemoryController {
 					this._activeMemorySystem = system;
 					this._fileStoreWriter = writer;
 					this._transcriptRecall = transcriptRecall;
+					if (system === "icm" && !this.deps.isChildSession()) await this._openContinuousChat(generation);
 					if (transcriptRecall) {
 						// Started in the background: the store load must not hold up memory initialization. It is
 						// current only while this generation serves history, whatever transitions happen later.
 						void this._hierarchy?.attach(transcriptRecall, () => this._historyAvailable(generation));
 					}
 					if (writer) this._reportManagedNotices(writer);
+					// Last: the refresh installs the chat block; the import and dispatch run after it.
+					if (system === "icm") await this._activateContinuousChat(generation);
 				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
 					await manager.shutdownAll().catch(() => {});
 					if (generation === this._memoryGeneration) {
+						// A chat opened for this generation is released here, so its lease never outlives a failed activation.
+						await this._releaseContinuousChat();
 						this._memoryManager = new MemoryManager();
 						this._activeMemorySystem = undefined;
 						this._fileStoreWriter = undefined;
 						this._releaseTranscriptRecall();
 						this._initializationFailed = true;
+						if (system === "icm") {
+							this.deps.providerRequest?.setPlanProjection(createBlockedContinuousChatPlanWrapper(reason));
+						}
 					}
 					// A session warning (live to a listener, else held for the first subscriber or the closing drain), never a stderr write
 					// from construction: the creating host may be running a terminal UI.
-					this.deps.emitWarning(
-						`Memory subsystem init failed: ${error instanceof Error ? error.message : String(error)}`,
-					);
+					this.deps.emitWarning(`Memory subsystem init failed: ${reason}`);
 				} finally {
 					if (generation === this._memoryGeneration) {
 						this._transitioning = false;
@@ -2259,6 +2446,11 @@ export class MemoryController {
 				if (generation === this._memoryGeneration) {
 					this._activeMemorySystem = undefined;
 					this._initializationFailed = true;
+					if (system === "icm") {
+						this.deps.providerRequest?.setPlanProjection(
+							createBlockedContinuousChatPlanWrapper(error instanceof Error ? error.message : String(error)),
+						);
+					}
 				}
 				// Same route as an init failure: a session warning, never a stderr write from construction.
 				this.deps.emitWarning(

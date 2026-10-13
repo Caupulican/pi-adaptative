@@ -4,9 +4,13 @@ import type {
 	AgentMessage,
 	AgentMessageOrigin,
 	ProviderRequestSnapshotContext,
+	ToolCallPreflightRejectionContext,
 	ToolCallStartContext,
 	ToolCallStartReservation,
+	ToolFailureMemoryRecord,
+	ToolInvocationReceipt,
 } from "../kernel/index.ts";
+import { retainedToolFailureMemory, retainedToolInvocation, stampToolInvocation } from "../kernel/index.ts";
 import type { SessionLifecycleInspection, SessionManager } from "../kernel/session/session-manager.ts";
 import { sessionLifecycleToolIdentityKey } from "../kernel/session/session-manager.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
@@ -33,6 +37,8 @@ export const PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE = "provider_transport_tele
  * read by any runtime decision.
  */
 export const PROVIDER_RETRY_CUSTOM_TYPE = "provider_retry";
+/** Durable admission evidence used when a crash lands before the canonical error result. */
+export const TOOL_PREFLIGHT_REJECTION_CUSTOM_TYPE = "tool_preflight_rejection";
 
 /** The retry controller's two lifecycle events, as the recovery controller emits them. */
 export type ProviderRetryLifecycleEvent =
@@ -54,6 +60,7 @@ type AppendMessage = (message: Message) => string;
  */
 export interface ForegroundLifecycleAgentDependency {
 	onProviderRequestSnapshot?: Agent["onProviderRequestSnapshot"];
+	onToolCallPreflightRejected?: Agent["onToolCallPreflightRejected"];
 	onToolCallStart?: Agent["onToolCallStart"];
 	state: { messages: Agent["state"]["messages"] };
 	resetSanitizerPrefixHorizon: Agent["resetSanitizerPrefixHorizon"];
@@ -81,6 +88,51 @@ interface StartedToolIdentity {
 	assistantMessageEntryId: string;
 	callId: string;
 	toolName: string;
+}
+
+interface ToolPreflightRejectionRecord extends StartedToolIdentity {
+	version: 1;
+	message: string;
+	invocation: ToolInvocationReceipt;
+	failureMemory: ToolFailureMemoryRecord;
+}
+
+function boundedPreflightText(value: string): string {
+	return value
+		.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ")
+		.trim()
+		.slice(0, 4_000);
+}
+
+function preflightRecord(value: unknown): ToolPreflightRejectionRecord | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const record = value as Record<string, unknown>;
+	if (record.version !== 1) return undefined;
+	for (const key of ["requestId", "assistantMessageEntryId", "callId", "toolName", "message"]) {
+		if (typeof record[key] !== "string" || record[key].length === 0 || record[key].length > 4_000) return undefined;
+	}
+	const invocation = retainedToolInvocation({ piToolInvocation: record.invocation });
+	if (invocation?.execution !== "not_started" || invocation.requestId !== record.requestId) return undefined;
+	const failureMemory = retainedToolFailureMemory({
+		piToolInvocation: invocation,
+		piToolFailureMemory: record.failureMemory,
+	});
+	if (
+		failureMemory?.phase !== "preflight" ||
+		failureMemory.state !== "rejected" ||
+		failureMemory.tool !== record.toolName
+	)
+		return undefined;
+	return {
+		version: 1,
+		requestId: record.requestId as string,
+		assistantMessageEntryId: record.assistantMessageEntryId as string,
+		callId: record.callId as string,
+		toolName: record.toolName as string,
+		message: record.message as string,
+		invocation,
+		failureMemory,
+	};
 }
 
 function boundedWarning(message: string): string {
@@ -133,6 +185,8 @@ export class ForegroundLifecycleController {
 	/** Install the two agent-core callbacks at the host-owned durability boundary. */
 	install(): void {
 		this.deps.agent.onProviderRequestSnapshot = (context, signal) => this.onProviderRequestSnapshot(context, signal);
+		this.deps.agent.onToolCallPreflightRejected = (context, signal) =>
+			this.onToolCallPreflightRejected(context, signal);
 		this.deps.agent.onToolCallStart = (calls, signal) => this.onToolCallStart(calls, signal);
 	}
 
@@ -182,6 +236,46 @@ export class ForegroundLifecycleController {
 		this.notePersistedMessage(message, entryId);
 		return entryId;
 	};
+
+	private async onToolCallPreflightRejected(
+		context: ToolCallPreflightRejectionContext,
+		_signal?: AbortSignal,
+	): Promise<void> {
+		const flushed = this.deps.modelRouter.commitSessionBuffer();
+		for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
+		const assistantMessageEntryId = this.getPersistedMessageEntryId(context.assistantMessage);
+		if (!assistantMessageEntryId) {
+			throw new Error("Tool preflight rejection cannot be retained before the assistant message is persisted");
+		}
+		const message = boundedPreflightText(
+			context.result.content
+				.filter(
+					(block): block is Extract<(typeof context.result.content)[number], { type: "text" }> =>
+						block.type === "text",
+				)
+				.map((block) => block.text)
+				.join("\n"),
+		);
+		const invocation = retainedToolInvocation(context.result.details);
+		const failureMemory = retainedToolFailureMemory(context.result.details);
+		if (
+			invocation?.execution !== "not_started" ||
+			failureMemory?.phase !== "preflight" ||
+			failureMemory.state !== "rejected"
+		) {
+			throw new Error("Tool preflight rejection is missing its canonical failure receipt");
+		}
+		this.deps.sessionManager.appendCustomEntry(TOOL_PREFLIGHT_REJECTION_CUSTOM_TYPE, {
+			version: 1,
+			requestId: context.requestId,
+			assistantMessageEntryId,
+			callId: context.toolCall.id,
+			toolName: context.toolCall.name,
+			message: message || "Tool preflight failed before execution.",
+			invocation,
+			failureMemory,
+		} satisfies ToolPreflightRejectionRecord);
+	}
 
 	/**
 	 * Durably record this completed assistant message's `provider_transport` diagnostics (see
@@ -419,6 +513,12 @@ export class ForegroundLifecycleController {
 		}
 		const plan = this.deps.sessionManager.planSessionLifecycleRepair();
 		const index = this.deps.sessionManager.getSessionLifecycleIndex();
+		const preflightRejections = new Map<string, ToolPreflightRejectionRecord>();
+		for (const entry of this.deps.sessionManager.getBranch()) {
+			if (entry.type !== "custom" || entry.customType !== TOOL_PREFLIGHT_REJECTION_CUSTOM_TYPE) continue;
+			const rejection = preflightRecord(entry.data);
+			if (rejection) preflightRejections.set(this.toolKey(rejection), rejection);
+		}
 		const humanInput = getResumableHumanInputSnapshot(this.deps.sessionManager);
 		// Human request snapshots identify a call, not a provider generation. Reused ids cannot be
 		// assigned to a foreground start by guess, including a competing never-started call.
@@ -454,7 +554,15 @@ export class ForegroundLifecycleController {
 				});
 				continue;
 			}
-			const synthetic = this.appendRepairResult(closer.toolName, closer.callId, closer.code);
+			const rejection = preflightRejections.get(
+				this.toolKey({
+					requestId: closer.requestId ?? "",
+					assistantMessageEntryId: closer.assistantMessageEntryId,
+					callId: closer.callId,
+					toolName: closer.toolName,
+				}),
+			);
+			const synthetic = this.appendRepairResult(closer.toolName, closer.callId, closer.code, rejection);
 			if (closer.sourceEntryId && closer.requestId !== undefined) {
 				this.deps.sessionManager.appendForegroundToolTerminal(
 					closer.requestId,
@@ -500,7 +608,12 @@ export class ForegroundLifecycleController {
 		return warnings;
 	}
 
-	private appendRepairResult(toolName: string, callId: string, code: string): string {
+	private appendRepairResult(
+		toolName: string,
+		callId: string,
+		code: string,
+		rejection?: ToolPreflightRejectionRecord,
+	): string {
 		const message: ToolResultMessage = {
 			role: "toolResult",
 			toolCallId: callId,
@@ -509,11 +622,17 @@ export class ForegroundLifecycleController {
 				{
 					type: "text",
 					text:
-						code === "TOOL_NOT_STARTED"
+						rejection?.message ??
+						(code === "TOOL_NOT_STARTED"
 							? "The harness recorded that this tool call was never started. Treat it as not run and decide whether to retry."
-							: "The harness recorded that the tool outcome is unknown after interruption. Inspect the workspace before retrying or claiming completion.",
+							: "The harness recorded that the tool outcome is unknown after interruption. Inspect the workspace before retrying or claiming completion."),
 				},
 			],
+			...(rejection
+				? {
+						details: stampToolInvocation({ piToolFailureMemory: rejection.failureMemory }, rejection.invocation),
+					}
+				: {}),
 			isError: true,
 			errorKind: "tool_failure",
 			timestamp: Date.now(),

@@ -130,7 +130,11 @@ import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-se
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
 import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
-import { selectSanitizedContextFork } from "./sanitized-context-fork.ts";
+import {
+	type SanitizedContextForkMessage,
+	type SanitizedContextForkMode,
+	selectSanitizedContextFork,
+} from "./sanitized-context-fork.ts";
 import { getWorkerClaimSnapshotForAttempt } from "./session-worker-claim.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
 import {
@@ -470,11 +474,18 @@ export interface WorkerDelegationControllerDeps {
 	 * `WorkerNotificationCoordinator.noteLaneOwnerEpoch` -- see that method's doc comment. */
 	getCurrentSubmissionEpoch?(): number | undefined;
 	/**
+	 * The project chat's view a worker is born with, before its task: the delegating turn's pinned view, or the latest
+	 * turn's when none runs. Undefined while no ICM chat runs.
+	 */
+	getContinuousChatBirthView?(): { view: string; timestamp: number } | undefined;
+	/**
 	 * `options.cwd` is the directory the claim's relative `changedFiles` resolve against (the worker's own
 	 * execution directory); the parent-review marker is re-derived against it, so a worker in a task directory or a
 	 * worktree lane is judged against its own scope and not the process's.
 	 */
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest, options?: { cwd?: string }): string;
+	/** A terminal handoff the parent has taken: the project chat logs the attempt's claim once, as its `[name]` report. */
+	reportWorkerTerminal?(handoff: Readonly<WorkerTerminalHandoff>): void;
 	/**
 	 * A fresh read-only memory port for one lane; the handles it admits never reach another lane. Reads are
 	 * sized against `capacity`: the receiving lane's own request, never the root model's.
@@ -1924,6 +1935,7 @@ export class WorkerDelegationController {
 			);
 			return "retained";
 		}
+		this.deps.reportWorkerTerminal?.(handoff);
 		const notification = this.lifecycle.getTerminalNotification(handoff.record.laneId);
 		if (notification?.status === "pending") {
 			this.lifecycle.markNotificationsDelivered([notification.notificationId]);
@@ -2389,6 +2401,38 @@ export class WorkerDelegationController {
 		return { provider: parent.provider, model: parent.id };
 	}
 
+	/** A worker agent's durable chat, for the ICM worker log. Undefined when no such agent exists. */
+	openWorkerTranscript(agentId: string): WorkerConversation | undefined {
+		const agent = this.lifecycle.getAgent(agentId);
+		if (!agent) {
+			return this.conversations.findHistoricalWorkerConversation({
+				agentDir: this.deps.getAgentDir(),
+				name: agentId,
+				cwd: this.deps.getCwd(),
+			});
+		}
+		return this.conversations.open({
+			agentDir: this.deps.getAgentDir(),
+			resumeContext: agent.resumeContext,
+			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+		});
+	}
+
+	/**
+	 * The messages a worker is born with, before its task: the project chat's view while ICM runs, then the turns the
+	 * fork mode selects. The view is the root's own prompt text, not forked history, so `forkTurns` keeps its mode,
+	 * boundary and selection unchanged. A verifier is born with no chat view: it judges its subject independently.
+	 */
+	private workerBirthMessages(
+		request: WorkerDelegationRequest,
+		mode: SanitizedContextForkMode,
+	): SanitizedContextForkMessage[] {
+		const forked =
+			mode.kind === "none" ? [] : selectSanitizedContextFork(this.workerContextForkSource(request).messages, mode);
+		const chat = request.verificationOfTaskId ? undefined : this.deps.getContinuousChatBirthView?.();
+		return chat ? [{ role: "user", content: chat.view, timestamp: chat.timestamp }, ...forked] : forked;
+	}
+
 	private workerContextForkSource(request: WorkerDelegationRequest): WorkerContextForkSource {
 		const model = this.workerContextParentModel(request);
 		if (!request.parentAgentId) {
@@ -2732,8 +2776,7 @@ export class WorkerDelegationController {
 		}
 		const goal = this.deps.getGoalStateSnapshot();
 		const mode = this.workerContextForkMode(request, admission.executionContract);
-		const messages =
-			mode.kind === "none" ? [] : selectSanitizedContextFork(this.workerContextForkSource(request).messages, mode);
+		const messages = this.workerBirthMessages(request, mode);
 		const project = this.projectSelections.get(request);
 		const prepare = (birthContextForkReference: WorkerContextForkReference, laneId: string) => {
 			const allocation = project?.admission.kind === "allocated" ? project.admission.allocation : undefined;
@@ -3188,10 +3231,8 @@ export class WorkerDelegationController {
 			return { outcome: "unavailable", skipReason: "worker_parallel_intent_invalid" };
 		}
 		const forkMode = this.workerContextForkMode(request, admission.executionContract);
-		const requestedBirth =
-			forkMode.kind === "none"
-				? undefined
-				: selectSanitizedContextFork(this.workerContextForkSource(request).messages, forkMode);
+		// Matching compares the exact birth a worker would get, so it includes the chat view that birth carries.
+		const requestedBirth = forkMode.kind === "none" ? undefined : this.workerBirthMessages(request, forkMode);
 		const roots = new Set<string>(workerSpecializationWorkspaceRoots(this.lifecycle.getTaskRuntimeSnapshot()));
 		for (const profile of [admission.executionContract.worker, admission.executionContract.verifier]) {
 			const root = profile ? workerContractWorkspaceRoot(profile) : undefined;
@@ -4716,18 +4757,35 @@ export class WorkerDelegationController {
 				leaseHeartbeat.start();
 				// The lane's registration records which worker owns it (a no-op when the cwd is not a lane).
 				await this.laneIsolation?.bind(executionPlan.cwd, agentId);
+				// Resolve credentials before repository observation. A rejected or expired account must
+				// fail admission without paying for a checkout-wide snapshot first. The executor resolves
+				// again at the actual provider boundary so refreshed credentials are never pinned here.
+				if (!recoveredTerminal) {
+					const requestAuth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
+					if (!requestAuth.ok) throw new Error(requestAuth.error);
+					workerSignal.throwIfAborted();
+				}
 				const observer = this.deps.repositoryObserver;
 				const objectiveId = this.deps.getObjectiveId?.();
 				const sessionCwd = this.deps.getSessionCwd?.() ?? executionPlan.cwd;
-				const shared = observer && objectiveId ? await sharesRepository(executionPlan.cwd, sessionCwd) : false;
+				const shared =
+					observer && objectiveId
+						? await sharesRepository(executionPlan.cwd, sessionCwd, {
+								signal: workerSignal,
+								deadline: Date.now() + 20_000,
+							})
+						: false;
 				const workerToken =
 					observer && objectiveId && shared
-						? await observer.begin({
-								callId: `worker:${startedRecord.laneId}:${heartbeatAttemptId}`,
-								objectiveId,
-								cwd: executionPlan.cwd,
-								effect: "observe",
-							})
+						? await observer.begin(
+								{
+									callId: `worker:${startedRecord.laneId}:${heartbeatAttemptId}`,
+									objectiveId,
+									cwd: executionPlan.cwd,
+									effect: "observe",
+								},
+								workerSignal,
+							)
 						: undefined;
 				let executionResult: Awaited<ReturnType<typeof executor.run>>;
 				// This attempt's own transcript begins here: its report is checked against these results only.

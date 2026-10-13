@@ -332,6 +332,11 @@ export interface TextContent {
 	type: "text";
 	text: string;
 	textSignature?: string; // e.g., for OpenAI responses, message metadata (legacy id string or TextSignatureV1 JSON)
+	/**
+	 * Marks the last block of a cacheable prefix. A provider with block-level prompt caching places its cache
+	 * breakpoint on this block; providers without it ignore the flag.
+	 */
+	cacheBoundary?: true;
 }
 
 export interface ThinkingContent {

@@ -438,7 +438,10 @@ export async function startPlannedAgentProviderRequestWithId(
 							trailing: true,
 						},
 					];
-			const pendingTransientRecords = reconcileTransientRecords(sourceContext.messages, [
+			// A projected plan reconciles against the messages its wire carries, not the whole durable history: a record
+			// the projection no longer carries reads as absent and is appended again.
+			const reconcileBase = plan.transientReconciliationBase ?? sourceContext.messages;
+			const pendingTransientRecords = reconcileTransientRecords(reconcileBase, [
 				...hostTransients.slots,
 				...trailingSlots,
 			]);
@@ -556,6 +559,8 @@ export async function startPlannedAgentProviderRequestWithId(
 				pendingTransientRecords,
 				config.onTransientRecordsCommitted,
 			);
+			// Under a projected plan (`transientReconciliationBase`) these marks still index the durable array: they
+			// over-approximate what the wire carried and only freeze durable messages the wire never held.
 			// Everything in this accepted request is now bytes the provider has seen; later turns may
 			// no longer rewrite them. Monotone within one history; a replan that replaced history has
 			// already lowered both marks to the shared prefix (`lowerPrefixMarksToSharedPrefix`). Both marks

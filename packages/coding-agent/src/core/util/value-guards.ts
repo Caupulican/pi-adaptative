@@ -20,3 +20,8 @@ export function hasOnlyKeys(record: Record<string, unknown>, allowed: readonly s
 export function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
+
+/** A JSON number that can safely serve as a zero-based count, id or ordinal. */
+export function isNonNegativeSafeInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}

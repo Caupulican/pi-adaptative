@@ -152,6 +152,9 @@ import {
 import type { WorkerResponseObservation } from "./delegation/worker-attempt-executor.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { fanoutNoteForLane } from "./delegation/worker-fanout.ts";
+import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
+import { workerReportClaimText } from "./delegation/worker-report.ts";
+import type { WorkerTerminalHandoff } from "./delegation/worker-terminal-handoff-coordinator.ts";
 import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
 import type { ExpertSelectionService } from "./expert-routing/service.ts";
 import { ExtensionBindingController } from "./extension-binding-controller.ts";
@@ -215,6 +218,16 @@ import { type CurationProposals, SkillCurator } from "./learning/skill-curator.t
 import { LocalPrefixWarmController } from "./local-prefix-warm-controller.ts";
 import { LocalRuntimeController } from "./local-runtime-controller.ts";
 import { ActiveBranchProbe } from "./memory/active-branch-probe.ts";
+import {
+	ContinuousChatPrefixSource,
+	continuousChatPrefixOf,
+	createContinuousChatCompactionAdapter,
+} from "./memory/continuous-chat-compaction-adapter.ts";
+import {
+	CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
+	type ContinuousChatWorkReportEntry,
+} from "./memory/continuous-chat-ingest.ts";
+import { readContinuousChatSettings, validateContinuousChatSummaryModel } from "./memory/continuous-chat-settings.ts";
 import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "./memory/providers/file-store.ts";
 import { MemoryController } from "./memory-controller.ts";
 import {
@@ -605,6 +618,8 @@ export class AgentSession {
 	 * latest retrieval/prompt-inclusion reports, the reload-safe MemoryManager, the recall
 	 * effectiveness tracker, and the extension-contributed pending providers. */
 	private readonly _memory: MemoryController;
+	/** The foreground prefix ICM compactions repeat: the last accepted request's system prompt and tools. */
+	private readonly _continuousChatPrefix = new ContinuousChatPrefixSource();
 	private readonly _compactionSupport: CompactionSupport;
 	private readonly _compaction: CompactionController;
 	private readonly _selfCompaction: SelfCompactionController;
@@ -1429,15 +1444,22 @@ export class AgentSession {
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			emit: (event) => this._emit(event),
-			notifyWorkerTerminalHandoff: (records) => this._terminalHandoffs.notifyWorkers(records),
+			notifyWorkerTerminalHandoff: (records) => {
+				for (const record of records) {
+					if (record.observedAt === undefined) this.reportOutboxWorkerTerminal(record);
+				}
+				return this._terminalHandoffs.notifyWorkers(records);
+			},
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
+			getContinuousChatBirthView: () => this._memory.continuousChatHost()?.birthView(),
 			getGoalRuntimeSnapshot: (settings) => this.getGoalRuntimeSnapshot(settings),
 			markGoalToolUnavailable: () => this._goals.markToolUnavailable(),
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerClaimSnapshot: (claim, request, options) => this.saveWorkerClaimSnapshot(claim, request, options),
+			reportWorkerTerminal: (handoff) => this.reportWorkerTerminal(handoff),
 			recordUnsettledForOwner: (items) => this._deliverToOwner(items),
 			notifyWorktreeLane: (text) => this._steerSessionNotice("worktree-sync-notice", text),
 			notifyParentSession: (customType, text) => this._steerSessionNotice(customType, text),
@@ -1552,6 +1574,27 @@ export class AgentSession {
 			emitWarning: (message) => this._foregroundLifecycle.warn(message),
 			admitUserPreference: (request) => this._reflection.admitUserPreference(request),
 			subscribeEntriesPersisted: (listener) => this.sessionManager.onEntriesPersisted(listener),
+			// ICM's project chat: each turn projects onto the provider runtime, and its compactions repeat the accepted prefix.
+			providerRequest: {
+				setPlanProjection: (projection) => this._providerRequestRuntime.setPlanProjection(projection),
+			},
+			continuousChat: {
+				compaction: createContinuousChatCompactionAdapter({
+					complete: (options) => this._reflection.runIsolatedCompletion(options),
+					prefixHead: () => this._continuousChatPrefixHead(),
+					summary: () =>
+						validateContinuousChatSummaryModel(readContinuousChatSettings(this.settingsManager), {
+							resolveModel: (reference) => historyModels.resolveModel(reference),
+						}),
+					recordUsage: (usage, call) => this._semanticUsage.recordHistoryUsage(usage, call),
+				}),
+				prefixHead: () => this._continuousChatPrefixHead(),
+				resetCompactionPrefix: () => this._continuousChatPrefix.reset(),
+				resolveWorker: (name) => this._backgroundLanes.openWorkerTranscript(name),
+				readEntry: (entryId) => this.sessionManager.getEntry(entryId),
+				entryIds: () => this.sessionManager.getEntries().map((entry) => entry.id),
+				isEntryPersisted: (entryId) => this.sessionManager.isEntryPersisted(entryId),
+			},
 			hierarchy: {
 				// The configured summary model resolves through the one lane-model boundary: configured and
 				// authenticated models only, no second router and no credential client.
@@ -1853,6 +1896,7 @@ export class AgentSession {
 		});
 		this._foregroundRecovery = new ForegroundRecoveryController({
 			agent: this.agent,
+			chatTurns: () => this._memory.continuousChatHost()?.turns,
 			applyFailoverModel: (failed, hop) => {
 				// Same rule as an unsupported model: a routed turn's model stays inside that turn.
 				if (this._modelRouter.isRoutedTurnOn(failed))
@@ -2017,6 +2061,7 @@ export class AgentSession {
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
 			({ requestId, model, context, sourceContext }) => {
 				this._lastSentRequest = { model, context, sourceMessages: sourceContext.messages };
+				this._continuousChatPrefix.record({ systemPrompt: context.systemPrompt ?? "", tools: context.tools ?? [] });
 				// A surface the loop changed on purpose (a safety removal) is mandatory: sanctioned for this request.
 				if (sourceContext.surfaceChange) {
 					this._custody.sanction("safety_removal", sourceContext.surfaceChange, {
@@ -3124,7 +3169,7 @@ export class AgentSession {
 										return systemOneController.adapter;
 									},
 									snapshot: () => systemOneController.store.snapshot(),
-									completionView: () => systemOneController.completionView(),
+									completionView: (signal) => systemOneController.completionView(signal),
 									executeCompletionTransaction: (isBugFix, options) =>
 										this._runtimeBuilder.withTaskDirectoryContext(() =>
 											this._systemOneController!.executeCompletionTransaction(isBugFix, options),
@@ -7396,6 +7441,58 @@ export class AgentSession {
 	/** Copies of the bounded gate-outcome history, oldest first, latest last. */
 	getGateOutcomeHistory(): GateOutcomeHistoryEntry[] {
 		return this._autonomyTelemetry.getGateOutcomeHistory();
+	}
+
+	/**
+	 * A taken terminal handoff, as the project chat's `[name]` report. The text is the attempt's persisted claim; the chat
+	 * keys the report by that attempt, so a redelivered handoff logs nothing twice.
+	 */
+	private reportWorkerTerminal(handoff: Readonly<WorkerTerminalHandoff>): void {
+		this.persistWorkerTerminalReport(handoff.childAgentId, {
+			laneId: handoff.record.laneId,
+			attemptId: handoff.terminalAttemptId,
+			status: handoff.record.status,
+			...(handoff.record.completedAt ? { completedAt: handoff.record.completedAt } : {}),
+			...(handoff.record.reasonCode ? { reasonCode: handoff.record.reasonCode } : {}),
+		});
+	}
+
+	/** A managed or parentless terminal the outbox delivers, reported under the name its worker has. */
+	private reportOutboxWorkerTerminal(record: WorkerTerminalHandoffRecord): void {
+		this.persistWorkerTerminalReport(this._backgroundLanes.workerAgentIdForRecord(record), record);
+	}
+
+	/**
+	 * The one owner of the project chat's `[name]` worker reports. Every accepted terminal reaches it once: the parent
+	 * handoff, a managed (tmux) lane, and a terminal with no parent. The text is the attempt's persisted claim, or the
+	 * terminal status when no claim exists. A worker's private steps are never logged. The chat keys the report by its
+	 * attempt, or by the lane generation when no attempt is known, so a redelivered terminal logs nothing twice.
+	 */
+	private persistWorkerTerminalReport(
+		name: string,
+		terminal: { laneId: string; attemptId?: string; status: string; completedAt?: string; reasonCode?: string },
+	): void {
+		// Every entry, not the active branch: the attempt's terminal is this process's, whichever branch is active now.
+		const claim =
+			terminal.attemptId === undefined
+				? undefined
+				: getWorkerClaimSnapshots(this.sessionManager.getEntries()).find(
+						(candidate) => candidate.terminalAttemptId === terminal.attemptId,
+					);
+		const reason = terminal.reasonCode ? ` (${terminal.reasonCode})` : "";
+		const report: ContinuousChatWorkReportEntry = {
+			version: 1,
+			name,
+			claimId: terminal.attemptId ?? `lane:${terminal.laneId}:${terminal.completedAt ?? ""}:${terminal.status}`,
+			text: claim ? workerReportClaimText(claim) : `Terminal status ${terminal.status}${reason}.`,
+			timestamp: Date.now(),
+		};
+		this.sessionManager.appendCustomEntry(CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE, report);
+	}
+
+	/** The prefix a chat compaction repeats: the accepted request's, or the agent's current one before any request. */
+	private _continuousChatPrefixHead() {
+		return this._continuousChatPrefix.resolve(() => continuousChatPrefixOf(this.agent.state));
 	}
 
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest, options?: { cwd?: string }): string {

@@ -199,6 +199,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getWorkerController().previewWorkerModel();
 	}
 
+	/** A worker agent's durable chat, for the ICM worker log; undefined when no such agent exists. */
+	openWorkerTranscript(agentId: string) {
+		return this._getWorkerController().openWorkerTranscript(agentId);
+	}
+
 	private _getWorkerController(): WorkerDelegationController {
 		this._workers ??= new WorkerDelegationController(
 			this.deps,
@@ -283,7 +288,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._workerNotifications;
 	}
 
-	private _workerAgentIdForRecord(record: Pick<LaneRecord, "laneId">): string {
+	/** The agent a worker lane is addressed by: its attempt's agent, else the logical lane, else the lane id. */
+	workerAgentIdForRecord(record: Pick<LaneRecord, "laneId">): string {
 		const attempt =
 			this._workerLifecycle?.getActiveAttempt(record.laneId) ??
 			this._workerLifecycle?.getManagedAttempt(record.laneId);
@@ -296,7 +302,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const targets = new Set(agentIds);
 		this.observeWorkerTerminalRecords(
 			this.getLaneRecords().filter(
-				(record) => isLaneTerminalStatus(record.status) && targets.has(this._workerAgentIdForRecord(record)),
+				(record) => isLaneTerminalStatus(record.status) && targets.has(this.workerAgentIdForRecord(record)),
 			),
 		);
 	}

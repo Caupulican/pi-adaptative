@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, opendirSync, statSync } from "node:fs";
+import { existsSync, opendirSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AssistantMessageDiagnostic, Message, Usage } from "@caupulican/pi-ai";
@@ -1116,6 +1116,19 @@ export class WorkerConversation {
 			if (message && isWireNativeWorkerTranscriptMessage(message)) messages.push(structuredClone(message));
 		});
 		return messages;
+	}
+
+	/** Streams raw wire-native messages one durable entry at a time, without imposing a per-message byte ceiling. */
+	*streamRawTranscriptMessages(): Generator<Message> {
+		const entryCount = this.sessionManager.getEntryCount();
+		for (let cursor = 0; cursor < entryCount; cursor++) {
+			let message: Message | undefined;
+			this.sessionManager.visitEntries(cursor, 1, (entry) => {
+				const candidate = rawWorkerTranscriptMessage(entry);
+				if (candidate && isWireNativeWorkerTranscriptMessage(candidate)) message = structuredClone(candidate);
+			});
+			if (message !== undefined) yield message;
+		}
 	}
 
 	/**
@@ -2766,6 +2779,87 @@ export class WorkerConversationStore {
 			agentDir: options.agentDir,
 		});
 		return conversation;
+	}
+
+	findHistoricalWorkerConversation(options: {
+		agentDir: string;
+		name: string;
+		cwd: string;
+	}): WorkerConversation | undefined {
+		const root = orchestrationSessionsDir(options.agentDir);
+		if (!existsSync(root)) return undefined;
+
+		let best:
+			| {
+					metadata: WorkerConversationMetadata;
+					sessionFile: string;
+					mtime: number;
+			  }
+			| undefined;
+
+		let parentEntries: string[];
+		try {
+			parentEntries = readdirSync(root).sort();
+		} catch {
+			return undefined;
+		}
+
+		const resolvedTargetCwd = resolve(options.cwd);
+
+		for (const parentEntry of parentEntries) {
+			const dir = workerConversationSessionsDir(options.agentDir, parentEntry);
+			if (!existsSync(dir)) continue;
+			let files: string[];
+			try {
+				files = readdirSync(dir).sort();
+			} catch {
+				continue;
+			}
+
+			for (const file of files) {
+				if (!file.endsWith(".worker.json")) continue;
+				const metadataFilePath = join(dir, file);
+				let read: WorkerConversationMetadataRead;
+				try {
+					read = readWorkerConversationMetadata(metadataFilePath);
+				} catch {
+					continue;
+				}
+
+				const metadata = read.metadata;
+				if (resolve(metadata.resumeContext.cwd) !== resolvedTargetCwd) continue;
+				if (metadata.logicalAgentId !== options.name && metadata.resumeContext.sessionId !== options.name) {
+					continue;
+				}
+
+				const sessionFile = metadata.resumeContext.sessionFile;
+				if (!sessionFile || !existsSync(sessionFile)) continue;
+
+				let mtime: number;
+				try {
+					mtime = statSync(sessionFile).mtimeMs;
+				} catch {
+					continue;
+				}
+
+				if (!best || mtime > best.mtime || (mtime === best.mtime && sessionFile > best.sessionFile)) {
+					best = { metadata, sessionFile, mtime };
+				}
+			}
+		}
+
+		const chosen = best;
+		if (!chosen) return undefined;
+
+		try {
+			return this.open({
+				agentDir: options.agentDir,
+				resumeContext: chosen.metadata.resumeContext,
+				expectedLogicalAgentId: chosen.metadata.logicalAgentId,
+			});
+		} catch {
+			return undefined;
+		}
 	}
 }
 

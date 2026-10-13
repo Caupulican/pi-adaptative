@@ -5,7 +5,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { consumeProcessTreeUntracked } from "../../utils/process-group-wait.ts";
-import type { WorkBaseline } from "../system-one/work-diff.ts";
+import type { WorkBaseline, WorkEvidenceOperationOptions } from "../system-one/work-diff.ts";
 import { normalizeRepoRelativePath, type ObjectiveMutationLedger } from "./objective-mutation-ledger.ts";
 import {
 	captureRepoDeliveryFingerprint,
@@ -44,6 +44,7 @@ export interface RepositoryWorkEvidenceJournal {
 	ensureBaseline(
 		objectiveId: string,
 		cwd: string,
+		options?: WorkEvidenceOperationOptions,
 	): Promise<{
 		readonly repositoryRoot: string;
 		readonly created: boolean;
@@ -86,7 +87,11 @@ export interface RepositoryWorkEvidenceJournal {
 		},
 	): Promise<void>;
 	/** Recover terminally abandoned markers from the retained baseline; live siblings remain untouched. */
-	recoverObservations(objectiveId: string, activeObservationIds: readonly string[]): Promise<void>;
+	recoverObservations(
+		objectiveId: string,
+		activeObservationIds: readonly string[],
+		options?: WorkEvidenceOperationOptions,
+	): Promise<void>;
 	getWorkEvidence(objectiveId: string): readonly RepositoryWorkEvidenceScope[];
 }
 
@@ -94,9 +99,18 @@ export class RepositoryWorkEvidenceUnavailableError extends Error {
 	readonly reason: string;
 
 	constructor(reason: string, cause?: unknown) {
-		super(`Repository work evidence is unavailable; retry after the session journal recovers (${reason}).`, {
-			cause,
-		});
+		const causeDetail =
+			cause instanceof Error
+				? cause.message
+						.replace(/[\u0000-\u001F\u007F]/g, " ")
+						.replace(/\s+/g, " ")
+						.trim()
+						.slice(0, 512)
+				: "";
+		super(
+			`Repository work evidence is unavailable; retry after the session journal recovers (${reason}${causeDetail ? `: ${causeDetail}` : ""}).`,
+			{ cause },
+		);
 		this.name = "RepositoryWorkEvidenceUnavailableError";
 		this.reason = reason;
 	}
@@ -134,6 +148,15 @@ interface TypedObservationGroup {
 	readonly declaredPaths: Set<string>;
 	readonly observedPaths: Set<string>;
 	readonly successfulDeclaredPaths: Set<string>;
+}
+
+const REPOSITORY_OBSERVATION_TIMEOUT_MS = 60_000;
+
+function observationOptions(signal?: AbortSignal): WorkEvidenceOperationOptions {
+	return {
+		...(signal ? { signal } : {}),
+		deadline: Date.now() + REPOSITORY_OBSERVATION_TIMEOUT_MS,
+	};
 }
 
 export class RepositoryMutationObserver {
@@ -195,15 +218,19 @@ export class RepositoryMutationObserver {
 		return [...merged.values(), ...(journalUnavailable ? [journalUnavailable] : [])];
 	}
 
-	async begin(input: {
-		readonly callId: string;
-		readonly objectiveId: string;
-		readonly cwd: string;
-		readonly effect: RepositoryEffect;
-	}): Promise<RepositoryObservationToken> {
+	async begin(
+		input: {
+			readonly callId: string;
+			readonly objectiveId: string;
+			readonly cwd: string;
+			readonly effect: RepositoryEffect;
+		},
+		signal?: AbortSignal,
+	): Promise<RepositoryObservationToken> {
+		const options = observationOptions(signal);
 		const previous = this.inflight.get(input.callId);
 		if (previous) await this.abort(previous);
-		if (input.effect !== "none") await this.recoverWorkEvidence(input.objectiveId);
+		if (input.effect !== "none") await this.recoverWorkEvidence(input.objectiveId, options);
 		const token: RepositoryObservationToken = {
 			callId: input.callId,
 			observationId: randomUUID(),
@@ -214,13 +241,13 @@ export class RepositoryMutationObserver {
 		if (input.effect === "none") return token;
 		this.inflight.set(input.callId, token);
 		try {
-			token.before = await captureRepoDeliveryFingerprint(input.cwd, this.hooks);
+			token.before = await captureRepoDeliveryFingerprint(input.cwd, this.hooks, options);
 			if (token.before.ok) token.repositoryRoot = token.before.repositoryRoot;
 		} catch {
 			token.before = { ok: false, reason: "repository_fingerprint_unavailable" };
 		}
 		try {
-			await this.captureWorkBaseline(token);
+			await this.captureWorkBaseline(token, options);
 			if (token.workEvidenceStatus === "captured" && token.repositoryRoot && this.workEvidenceJournal) {
 				token.observationOpened = true;
 				await this.workEvidenceJournal.openObservation(
@@ -247,14 +274,17 @@ export class RepositoryMutationObserver {
 		return token;
 	}
 
-	private async captureWorkBaseline(token: RepositoryObservationToken): Promise<void> {
+	private async captureWorkBaseline(
+		token: RepositoryObservationToken,
+		options: WorkEvidenceOperationOptions,
+	): Promise<void> {
 		const journal = this.workEvidenceJournal;
 		if (!journal) return;
 		let repositoryRoot = token.repositoryRoot ?? token.cwd;
 		let baselineStatus: "captured" | "unversioned" | "unavailable";
 		let createdBaseline: boolean;
 		try {
-			const baseline = await journal.ensureBaseline(token.objectiveId, token.cwd);
+			const baseline = await journal.ensureBaseline(token.objectiveId, token.cwd, options);
 			repositoryRoot = baseline.repositoryRoot;
 			token.repositoryRoot = repositoryRoot;
 			token.branchAnchor = baseline.branchAnchor;
@@ -280,7 +310,7 @@ export class RepositoryMutationObserver {
 		if (!createdBaseline) return;
 		let after: RepoDeliveryFingerprint;
 		try {
-			after = await captureRepoDeliveryFingerprint(token.cwd, this.hooks);
+			after = await captureRepoDeliveryFingerprint(token.cwd, this.hooks, options);
 		} catch {
 			after = { ok: false, reason: "repository_fingerprint_unavailable" };
 		}
@@ -312,6 +342,7 @@ export class RepositoryMutationObserver {
 		readonly declaredOwnedPaths?: readonly string[];
 		readonly operationSucceeded: boolean;
 	}): Promise<void> {
+		const options = observationOptions();
 		const token = input.token;
 		const tracked = this.inflight.get(token.callId) === token;
 		if (!tracked || token.effect === "none") return;
@@ -322,7 +353,7 @@ export class RepositoryMutationObserver {
 			if (token.workEvidenceStatus === "unversioned") return;
 			let after: RepoDeliveryFingerprint;
 			try {
-				after = await captureRepoDeliveryFingerprint(token.cwd, this.hooks);
+				after = await captureRepoDeliveryFingerprint(token.cwd, this.hooks, options);
 			} catch {
 				after = { ok: false, reason: "repository_fingerprint_unavailable" };
 			}
@@ -601,14 +632,17 @@ export class RepositoryMutationObserver {
 		if (pending.size === 0) this.volatileEvidence.delete(objectiveId);
 	}
 
-	async recoverWorkEvidence(objectiveId: string): Promise<void> {
+	async recoverWorkEvidence(
+		objectiveId: string,
+		options: WorkEvidenceOperationOptions = observationOptions(),
+	): Promise<void> {
 		await this.replayPendingEvidence(objectiveId);
 		const journal = this.workEvidenceJournal;
 		if (!journal) return;
 		const activeObservationIds = [...this.inflight.values()]
 			.filter((token) => token.objectiveId === objectiveId && token.observationOpened)
 			.map((token) => token.observationId);
-		await journal.recoverObservations(objectiveId, activeObservationIds);
+		await journal.recoverObservations(objectiveId, activeObservationIds, options);
 	}
 
 	async abort(token: RepositoryObservationToken): Promise<void> {

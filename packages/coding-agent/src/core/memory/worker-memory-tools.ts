@@ -1,6 +1,23 @@
-/** Root memory owns mutation and lifecycle; workers may receive only the bounded query broker. */
+import type { AgentToolResult } from "../extensions/types.ts";
+
+/** Root memory owns mutation and lifecycle: the root `memory` tool is never a worker's. */
 export const ROOT_MEMORY_TOOL_NAME = "memory";
 export const WORKER_MEMORY_READ_TOOL_NAME = "memory_read";
+/** The continuous chat's read-only navigation: a worker holds it through the broker, never as a mutating tool. */
+export const CONTINUOUS_CHAT_ZOOM_TOOL_NAME = "zoom";
+export const CONTINUOUS_CHAT_DATE_TOOL_NAME = "date";
+export const CONTINUOUS_CHAT_NAVIGATION_TOOL_NAMES = [
+	CONTINUOUS_CHAT_ZOOM_TOOL_NAME,
+	CONTINUOUS_CHAT_DATE_TOOL_NAME,
+] as const;
+/** Every read tool a worker holds through the memory broker. None of them changes memory. */
+export const WORKER_MEMORY_BROKER_TOOL_NAMES = [
+	WORKER_MEMORY_READ_TOOL_NAME,
+	...CONTINUOUS_CHAT_NAVIGATION_TOOL_NAMES,
+] as const;
+export const WORKER_CHAT_NAVIGATION_TOOL_NAME_SET: ReadonlySet<string> = new Set(CONTINUOUS_CHAT_NAVIGATION_TOOL_NAMES);
+export const WORKER_MEMORY_BROKER_TOOL_NAME_SET: ReadonlySet<string> = new Set(WORKER_MEMORY_BROKER_TOOL_NAMES);
+/** Root-only memory tools: a worker never holds these, whatever its grant names. */
 export const WORKER_ROOT_MEMORY_TOOL_NAMES: ReadonlySet<string> = new Set([ROOT_MEMORY_TOOL_NAME]);
 
 /**
@@ -53,10 +70,17 @@ export type WorkerMemorySourceAnswer = { ok: true; text: string } | { ok: false;
 
 /**
  * One delegated lane's read-only memory port. `read` returns a source-labeled snapshot; `readSource`
- * opens one transcript source page and only for a handle an earlier `read` of this same broker issued. A typed
- * refusal is an answer, never empty text; a read made stale by a memory transition rejects instead.
+ * opens one transcript source page and only for a handle an earlier `read` of this same broker issued. `navigate`
+ * runs the continuous chat's `zoom` or `date` for this lane by message id only (private worker logs stay
+ * root-readable), and returns the tool result (content, or a typed refusal). A read made stale by a memory transition
+ * rejects instead.
  */
 export interface WorkerMemoryBroker {
 	read(query: string): Promise<string>;
 	readSource(ref: string, cursor?: number): Promise<WorkerMemorySourceAnswer>;
+	navigate(
+		tool: (typeof CONTINUOUS_CHAT_NAVIGATION_TOOL_NAMES)[number],
+		args: unknown,
+		signal?: AbortSignal,
+	): Promise<AgentToolResult<Record<string, unknown>>>;
 }

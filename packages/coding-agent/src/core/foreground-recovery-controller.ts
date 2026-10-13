@@ -12,6 +12,7 @@ import {
 import type { AgentEvent, AgentMessage } from "../kernel/types.ts";
 import { BillingFailoverController, ExhaustedProviderRegistry } from "./billing-failover-controller.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
+import type { IcmTurnCoordinator, IcmTurnHandle } from "./memory/continuous-chat-turn-coordinator.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { ModelRouterFailoverStatus } from "./model-router/status.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
@@ -40,6 +41,12 @@ export interface ForegroundSubmissionLease {
 	readonly epoch: number;
 }
 
+/** The message a chat turn starts from. `alreadyLogged`: the chat logged it before the turn, so it is never an arrival. */
+interface ChatTurnStart {
+	readonly message: AgentMessage;
+	readonly alreadyLogged: boolean;
+}
+
 export interface ForegroundRecoveryResourceSnapshot {
 	readonly shutdown: boolean;
 	readonly activeRuns: number;
@@ -51,6 +58,8 @@ export interface ForegroundRecoveryResourceSnapshot {
 
 export interface ForegroundRecoveryControllerDeps {
 	agent: Agent;
+	/** The ICM chat's turns, undefined while no chat runs. A provider run outside a turn begins one, as its own. */
+	chatTurns?(): Pick<IcmTurnCoordinator, "begin" | "current" | "end"> | undefined;
 	/** See `BillingFailoverControllerDeps.applyFailoverModel`. */
 	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): Model<Api> | undefined;
 	/** See `BillingFailoverControllerDeps.resolveFallbackModel`. */
@@ -327,6 +336,48 @@ export class ForegroundRecoveryController {
 		await this.runAgentExecution("continue", undefined, submissionLease, signal);
 	}
 
+	/**
+	 * Begins the chat turn a provider run is about to start, and returns its end. A turn already running is joined, so
+	 * nothing begins and nothing ends. Called only where the run reaches its first provider call: a run that ends before
+	 * it begins no turn. An abort ends the wait without a turn; the caller re-checks the closing gate after this await.
+	 */
+	private async beginChatTurn(
+		startOf: () => ChatTurnStart,
+		signal: AbortSignal | undefined,
+	): Promise<(() => void) | undefined> {
+		const turns = this.deps.chatTurns?.();
+		if (turns === undefined || turns.current() !== undefined) return undefined;
+		const start = startOf();
+		let turn: IcmTurnHandle;
+		try {
+			turn = await turns.begin(signal);
+		} catch (error) {
+			if (signal?.aborted) return undefined;
+			throw error;
+		}
+		turn.markStart(start.message, start.alreadyLogged);
+		return () => turns.end(turn);
+	}
+
+	/** The prompt's first message starts its turn: the message the run sends first, which the chat has not logged yet. */
+	private promptStartOf(messages: AgentMessage | AgentMessage[] | undefined): ChatTurnStart {
+		const start = Array.isArray(messages) ? messages[0] : messages;
+		if (start === undefined) throw new Error("A prompt with no message cannot start a chat turn.");
+		return { message: start, alreadyLogged: false };
+	}
+
+	/**
+	 * The last message of the agent's history starts a continuation's own turn. That is the message that triggered the
+	 * resume (a host handoff or a worker report), or a user, assistant or tool result the run continues from. The chat
+	 * logs those as they persist, so the turn's view already holds them and no arrival will release it.
+	 */
+	private continuationStartOf(): ChatTurnStart {
+		const last = this.deps.agent.state.messages.at(-1);
+		if (last === undefined) throw new Error("A continuation with no chat turn has no message to start one from.");
+		const alreadyLogged = last.role === "user" || last.role === "assistant" || last.role === "toolResult";
+		return { message: last, alreadyLogged };
+	}
+
 	private async runAgentExecution(
 		mode: "prompt" | "continue",
 		messages: AgentMessage | AgentMessage[] | undefined,
@@ -354,15 +405,24 @@ export class ForegroundRecoveryController {
 		let deliveredStranded = false;
 		// Set when the failure path already ran `afterRun` (so the finally below does not run it twice).
 		let afterRunSettled = false;
+		// Ends the chat turn this run began, if it began one; set at the run's first provider call.
+		let endChatTurn: (() => void) | undefined;
 		try {
 			const maxGoalLoopRounds = this.deps.settingsManager.getAutonomySettings().maxStallTurns;
 			await this.deps.prepareRun();
 			// The submission's closing cancellation gate. `agent.abort()` reaches only a run that already
 			// exists, and none exists until the `prompt()`/`continue()` below installs one, so an abort
 			// landing during `prepareRun()` -- or anywhere earlier in the submission -- would otherwise
-			// run this turn in full. Read HERE, with no await between the read and the run: both entry
+			// run this turn in full. Read here and again after the chat turn's await below, with no await between the last read and the run: both entry
 			// points install the run's own abort controller synchronously, so an abort that arrives
 			// after this read has a live run to reach, and one that arrived before it is caught by it.
+			if (this.isClosing(signal)) return;
+			// The chat turn begins where the run reaches its first provider call; a run closed before that begins none.
+			endChatTurn = await this.beginChatTurn(
+				() => (mode === "prompt" ? this.promptStartOf(messages) : this.continuationStartOf()),
+				signal,
+			);
+			// Re-checked after that await: no await separates this read from the run below.
 			if (this.isClosing(signal)) return;
 			let goalLoopRounds = 1;
 			// The runtime-update owner asked this run to end so the runtime can be replaced: no further provider
@@ -437,6 +497,8 @@ export class ForegroundRecoveryController {
 			try {
 				if (!afterRunSettled) await this.deps.afterRun();
 			} finally {
+				// After the run's cleanup, so the turn covers every provider round the run made.
+				endChatTurn?.();
 				this.activeRuns--;
 				if (releaseLease && lease && this.ownsSubmission(lease)) this.releaseSubmission(lease);
 				if (this.activeRuns === 0 && this.submissionLease === undefined) {

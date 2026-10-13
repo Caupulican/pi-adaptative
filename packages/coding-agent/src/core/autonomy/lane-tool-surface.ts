@@ -7,10 +7,15 @@ import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { settleIndependentLifecycle } from "../lifecycle-settlement.ts";
+import { createContinuousChatNavigationTools } from "../memory/continuous-chat-tools.ts";
 import { historyRefusalKind } from "../memory/history-tool.ts";
 import { TRANSCRIPT_RECALL_RESULT_MARKER } from "../memory/transcript-memory-contracts.ts";
 import { reasonSentence } from "../memory/transcript-source-tools.ts";
-import { WORKER_MEMORY_READ_TOOL_NAME, type WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
+import {
+	WORKER_MEMORY_BROKER_TOOL_NAMES,
+	WORKER_MEMORY_READ_TOOL_NAME,
+	type WorkerMemoryBroker,
+} from "../memory/worker-memory-tools.ts";
 import { readOnlyShellViolation } from "../model-router/tool-escalation.ts";
 import {
 	CapabilityGateway,
@@ -332,6 +337,12 @@ function createLaneTools(
 				};
 			},
 		}));
+		// The chat's read tools, through the same broker: the root's definitions, bounded for this lane.
+		const navigation = createContinuousChatNavigationTools(
+			(tool, args, signal) => memoryBroker.navigate(tool, args, signal),
+			{ agentLogs: false },
+		);
+		for (const definition of navigation) factories.set(definition.name, () => wrapToolDefinition(definition));
 	}
 	return names.flatMap((name) => {
 		const factory = factories.get(name);
@@ -397,7 +408,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	const builtInCandidateNames = [
 		...READ_ONLY_LANE_TOOL_NAMES,
 		...(schemaSearchCapable ? [TOOL_SCHEMA_SEARCH_NAME] : []),
-		...(options.memoryBroker ? [WORKER_MEMORY_READ_TOOL_NAME] : []),
+		...(options.memoryBroker ? WORKER_MEMORY_BROKER_TOOL_NAMES : []),
 		...(writeCapable ? WRITE_LANE_TOOL_NAMES : []),
 		...(pythonCapable ? [PYTHON_LANE_TOOL_NAME] : []),
 		...(options.executionPolicy ? [PROCESS_LANE_TOOL_NAME] : []),
@@ -470,7 +481,9 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		id: "isolated-lane-read-tools",
 		capabilities: [
 			"filesystem.read",
-			...(allowedToolSet.has(WORKER_MEMORY_READ_TOOL_NAME) ? (["memory.query"] as const) : []),
+			...(WORKER_MEMORY_BROKER_TOOL_NAMES.some((name) => allowedToolSet.has(name))
+				? (["memory.query"] as const)
+				: []),
 			...(allowedToolSet.has(PYTHON_LANE_TOOL_NAME) ||
 			allowedToolSet.has(PROCESS_LANE_TOOL_NAME) ||
 			allowedToolSet.has(STABLE_SHELL_TOOL_NAME)

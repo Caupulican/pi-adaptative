@@ -1043,6 +1043,11 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 	};
 }
 
+/** Strictly decode the canonical failure-memory receipt retained in tool-result details. */
+export function retainedToolFailureMemory(details: unknown): ToolFailureMemoryRecord | undefined {
+	return readFailureRecord(details);
+}
+
 function readFailureDirective(details: unknown): ToolFailureDirectiveDetails["piToolFailureDirective"] | undefined {
 	if (!isRecord(details) || !isRecord(details.piToolFailureDirective)) return undefined;
 	const candidate = details.piToolFailureDirective;

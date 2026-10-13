@@ -3,7 +3,7 @@ import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { HARNESS_CAPABILITIES } from "../capability-contract.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
-import { WORKER_MEMORY_READ_TOOL_NAME, WORKER_ROOT_MEMORY_TOOL_NAMES } from "../memory/worker-memory-tools.ts";
+import { WORKER_MEMORY_BROKER_TOOL_NAMES, WORKER_ROOT_MEMORY_TOOL_NAMES } from "../memory/worker-memory-tools.ts";
 import type {
 	ExecutionGrant,
 	HarnessCapability,
@@ -133,7 +133,7 @@ export function narrowWorkerExecutionPlan(
 				),
 			),
 		],
-		readMemory: grantedTools.has(WORKER_MEMORY_READ_TOOL_NAME),
+		readMemory: WORKER_MEMORY_BROKER_TOOL_NAMES.some((name) => grantedTools.has(name)),
 		writeEnabled,
 		processEnabled:
 			grantedTools.has("python") ||
@@ -194,7 +194,7 @@ export function buildWorkerExecutionPlan(args: {
 		: args.settings.writeEnabled && args.profile.capabilityCeiling.some(isWriteCapability);
 	const memoryEligible =
 		args.memoryEnabled &&
-		profileToolNames.has(WORKER_MEMORY_READ_TOOL_NAME) &&
+		WORKER_MEMORY_BROKER_TOOL_NAMES.some((name) => profileToolNames.has(name)) &&
 		args.profile.capabilityCeiling.includes("memory.query");
 	const processEligible =
 		args.yolo ||
@@ -215,7 +215,7 @@ export function buildWorkerExecutionPlan(args: {
 		...(grantsRead ? READ_TOOL_NAMES : []),
 		...(grantsRepoRead ? [REPO_READ_TOOL_NAME] : []),
 		...(writeEligible ? WRITE_TOOL_NAMES : []),
-		...(memoryEligible ? [WORKER_MEMORY_READ_TOOL_NAME] : []),
+		...(memoryEligible ? WORKER_MEMORY_BROKER_TOOL_NAMES.filter((name) => profileToolNames.has(name)) : []),
 		...enabledZeroAuthorityToolNames,
 		...enabledProcessToolNames,
 		...enabledAdapterToolNames,
@@ -262,7 +262,7 @@ export function buildWorkerExecutionPlan(args: {
 				),
 			),
 		],
-		readMemory: memoryEligible && grantedTools.has(WORKER_MEMORY_READ_TOOL_NAME),
+		readMemory: memoryEligible && WORKER_MEMORY_BROKER_TOOL_NAMES.some((name) => grantedTools.has(name)),
 		writeEnabled,
 		processEnabled,
 		readOnly,

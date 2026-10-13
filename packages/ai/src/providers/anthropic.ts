@@ -5,8 +5,10 @@ import type {
 	MessageCreateParamsStreaming,
 	MessageParam,
 	RawMessageStreamEvent,
+	TextBlockParam,
 	ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages.js";
+import { acquirePromptCacheWrite, type PromptCacheWriteReservation } from "../prompt-cache-reservation.ts";
 import {
 	isToolSchemaSearchDetails,
 	measureToolSchemaDisclosureRequest,
@@ -36,6 +38,7 @@ import type {
 } from "../types.ts";
 import { type AssistantMessageDiagnostic, appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { shortHash } from "../utils/hash.ts";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
 import { awaitAuthorizationInput } from "../utils/oauth/authorization-input.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
@@ -527,6 +530,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 		const usageAccumulator = new AnthropicUsageAccumulator(model, output.usage);
 		const disclosureStartedAt = Date.now();
 		let response: Response | undefined;
+		let cacheWriteReservation: PromptCacheWriteReservation | undefined;
 		let compatibility: Promise<AnthropicCompatibilitySnapshot> | undefined;
 
 		try {
@@ -596,11 +600,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				context.tools ?? [],
 				isOAuth ? { normalizeName: toClaudeCodeName } : undefined,
 			);
-			let params = await applyProviderPayloadHook(
-				buildParams(model, context, isOAuth, toolNameMap, toolDisclosure, options),
-				model,
-				options?.onPayload,
-			);
+			let built = buildParams(model, context, isOAuth, toolNameMap, toolDisclosure, options);
+			let params = await applyProviderPayloadHook(built.params, model, options?.onPayload);
 			const requestOptions = createRetryFreeRequestOptions(options);
 			const retryOptions = createProviderRetryOptions(options);
 
@@ -610,6 +611,11 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					retryOptions,
 				);
 
+			// Identical prefixes wait for the request that writes this cache entry to start.
+			let cachePrefixKey = cacheBoundaryPrefixKey(model, params, built.cacheBoundary, options);
+			if (cachePrefixKey !== undefined) {
+				cacheWriteReservation = await acquirePromptCacheWrite(cachePrefixKey, options?.signal);
+			}
 			response = await executeWithAuthRecovery(model.provider, options, async (replacementKey) => {
 				if (replacementKey) {
 					apiKey = replacementKey;
@@ -620,14 +626,19 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						context.tools ?? [],
 						isOAuth ? { normalizeName: toClaudeCodeName } : undefined,
 					);
-					params = await applyProviderPayloadHook(
-						buildParams(model, context, isOAuth, toolNameMap, toolDisclosure, options),
-						model,
-						options?.onPayload,
-					);
+					cacheWriteReservation?.release();
+					cacheWriteReservation = undefined;
+					built = buildParams(model, context, isOAuth, toolNameMap, toolDisclosure, options);
+					params = await applyProviderPayloadHook(built.params, model, options?.onPayload);
+					cachePrefixKey = cacheBoundaryPrefixKey(model, params, built.cacheBoundary, options);
+					if (cachePrefixKey !== undefined) {
+						cacheWriteReservation = await acquirePromptCacheWrite(cachePrefixKey, options?.signal);
+					}
 				}
 				return executeCreate(client, params);
 			});
+			cacheWriteReservation?.release();
+			cacheWriteReservation = undefined;
 			appendAnthropicSubscriptionRateLimitDiagnostics(output, response.headers);
 			await beginAssistantResponseStream(stream, output, response, model, options?.onResponse);
 
@@ -811,6 +822,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				scratchFields: ["index", "partialJson"],
 			});
 		} finally {
+			cacheWriteReservation?.release();
 			// Cover response-hook failures before the SSE iterator acquires a reader as well.
 			await response?.body?.cancel().catch(() => {});
 		}
@@ -1021,8 +1033,9 @@ function buildParams(
 	toolNameMap: ToolNameMap,
 	toolDisclosure: ToolSchemaDisclosurePlan,
 	options?: AnthropicOptions,
-): MessageCreateParamsStreaming {
+): AnthropicParamsBuild {
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
+	const cacheBoundaries = new Set<TextBlockParam>();
 	const compat = getAnthropicCompat(model);
 	const requestTools = toolDisclosure.enabled
 		? context.tools
@@ -1044,6 +1057,7 @@ function buildParams(
 			toolDisclosure,
 			cacheControl,
 			compat.allowEmptySignature,
+			cacheBoundaries,
 		),
 		max_tokens: options?.maxTokens ?? model.maxTokens,
 		stream: true,
@@ -1055,7 +1069,8 @@ function buildParams(
 			{
 				type: "text",
 				text: "You are Claude Code, Anthropic's official CLI for Claude.",
-				...(cacheControl ? { cache_control: cacheControl } : {}),
+				// When the caller has a system prompt, its following marker already caches this identity block.
+				...(cacheControl && !context.systemPrompt ? { cache_control: cacheControl } : {}),
 			},
 		];
 		if (context.systemPrompt) {
@@ -1140,7 +1155,88 @@ function buildParams(
 		}
 	}
 
-	return params;
+	return {
+		params,
+		cacheBoundary: placeCacheBoundaryMarkers(params, cacheBoundaries, cacheControl),
+	};
+}
+
+/** Anthropic accepts at most this many cache breakpoints per request, across system, tools and messages. */
+const ANTHROPIC_CACHE_BREAKPOINT_LIMIT = 4;
+
+interface AnthropicCacheBoundary {
+	messageIndex: number;
+	blockIndex: number;
+}
+
+interface AnthropicParamsBuild {
+	params: MessageCreateParamsStreaming;
+	cacheBoundary?: AnthropicCacheBoundary;
+}
+
+/**
+ * Cache-boundary blocks take the breakpoints the system, tool and last-message markers leave, newest first. The
+ * returned coordinate names the newest semantic boundary that was actually placed on the serialized request.
+ */
+function placeCacheBoundaryMarkers(
+	params: MessageCreateParamsStreaming,
+	boundaries: Set<TextBlockParam>,
+	cacheControl: CacheControlEphemeral | undefined,
+): AnthropicCacheBoundary | undefined {
+	if (boundaries.size === 0) return undefined;
+	const system = Array.isArray(params.system) ? params.system : [];
+	const messageBlocks = params.messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []));
+	const blocks = [...system, ...(params.tools ?? []), ...messageBlocks];
+	const existing = blocks.filter((block) => "cache_control" in block && block.cache_control).length;
+	let available = ANTHROPIC_CACHE_BREAKPOINT_LIMIT - existing;
+	let newestPlaced: AnthropicCacheBoundary | undefined;
+	for (const block of [...boundaries].reverse()) {
+		if (cacheControl && available > 0) {
+			block.cache_control = cacheControl;
+			available--;
+			newestPlaced ??= locateMessageBlock(params.messages, block);
+		}
+	}
+	return newestPlaced;
+}
+
+/**
+ * Position of a projected semantic boundary in the serialized messages. The reference identity comparison is safe
+ * because `convertMessages` installs the exact block objects before this lookup.
+ */
+function locateMessageBlock(messages: MessageParam[], target: TextBlockParam): AnthropicCacheBoundary | undefined {
+	for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+		const content = messages[messageIndex]?.content;
+		if (!Array.isArray(content)) continue;
+		const blockIndex = content.indexOf(target);
+		if (blockIndex !== -1) return { messageIndex, blockIndex };
+	}
+	return undefined;
+}
+
+/**
+ * Identity of the final serialized wire prefix through the semantic view boundary. Post-boundary live state and the
+ * current user message deliberately do not participate, so concurrent compactions over one view share one writer.
+ */
+function cacheBoundaryPrefixKey(
+	model: Model<"anthropic-messages">,
+	params: MessageCreateParamsStreaming,
+	boundary: AnthropicCacheBoundary | undefined,
+	options?: AnthropicOptions,
+): string | undefined {
+	if (boundary === undefined) return undefined;
+	const boundaryMessage = params.messages[boundary.messageIndex];
+	if (boundaryMessage === undefined || !Array.isArray(boundaryMessage.content)) return undefined;
+	const boundaryBlock = boundaryMessage.content[boundary.blockIndex];
+	if (boundaryBlock === undefined || !("cache_control" in boundaryBlock) || !boundaryBlock.cache_control) {
+		return undefined;
+	}
+	const messages = [
+		...params.messages.slice(0, boundary.messageIndex),
+		{ ...boundaryMessage, content: boundaryMessage.content.slice(0, boundary.blockIndex + 1) },
+	];
+	const prefix = JSON.stringify([params.system, params.tools, messages]);
+	return [model.provider, model.id, options?.providerAccountKey ?? "", shortHash(prefix)].join("|");
 }
 
 // Normalize tool call IDs to match Anthropic's required pattern and length
@@ -1155,6 +1251,7 @@ function convertMessages(
 	toolDisclosure: ToolSchemaDisclosurePlan,
 	cacheControl?: CacheControlEphemeral,
 	allowEmptySignature = false,
+	cacheBoundaries?: Set<TextBlockParam>,
 ): MessageParam[] {
 	const params: MessageParam[] = [];
 
@@ -1175,10 +1272,9 @@ function convertMessages(
 			} else {
 				const blocks: ContentBlockParam[] = msg.content.map((item) => {
 					if (item.type === "text") {
-						return {
-							type: "text",
-							text: sanitizeSurrogates(item.text),
-						};
+						const block: TextBlockParam = { type: "text", text: sanitizeSurrogates(item.text) };
+						if (item.cacheBoundary) cacheBoundaries?.add(block);
+						return block;
 					} else {
 						return {
 							type: "image",

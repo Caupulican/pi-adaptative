@@ -467,7 +467,7 @@ Use `/memory system` to inspect the selected system, `/memory system icm` to sel
 
 The legacy file-store and OKF stores, memory CRUD actions, automatic memory retrieval and prompt memory blocks, persona and automatic memory reflection are inactive in ICM mode. Existing legacy files are preserved unchanged; switching does not migrate or delete them. Switching back restores their availability. Historical generated legacy recall is excluded from the active ICM provider view without deleting the session transcript.
 
-History recall is available in both systems through one backend. In ICM the root `memory` tool offers only `history_search` (with approved summaries listed beside the hits), `history_source` and `history_expand`; the index starts on the first explicit history request, and a granted worker reads history through `memory_read`. Summary and admission egress keep their own settings below; switching the memory system changes neither. See [Memory and history recall](memory.md).
+History recall is available in both systems through one backend. In ICM, without the continuous chat, the root `memory` tool offers only `history_search` (with approved summaries listed beside the hits), `history_source` and `history_expand`; the index starts on the first explicit history request, and a granted worker reads history through `memory_read`. Summary and admission egress keep their own settings below; switching the memory system changes neither. While the continuous chat runs, the root navigates with `zoom` and `date` instead. See [Memory and history recall](memory.md).
 
 ### Context memory and history
 
@@ -479,8 +479,8 @@ History recall is available in both systems through one backend. In ICM the root
 | `contextPolicy.memory.includeInPrompt` | boolean | `true` | Include retrieved memory only when the active model budget permits it |
 | `contextPolicy.memory.maxResults` | number | `5` | Maximum retrieval results before tier/budget pruning; clamped to 1-20 |
 | `contextPolicy.memory.allowExternalEgress` | boolean | `false` | Explicitly allow eligible external memory providers to receive bounded, non-secret-like query text |
-| `contextPolicy.memory.history.hierarchy` | boolean | `false` | Opt in to durable summaries of captured history plus a bounded history frontier; exact local recall is not governed by this switch |
-| `contextPolicy.memory.history.summaryModel` | string | unset | Model ref (`provider/id` or bare id) that writes history summaries; required for the hierarchy to run |
+| `contextPolicy.memory.history.hierarchy` | boolean | `false` | Opt in to durable summaries of captured history plus a bounded history frontier; the ICM continuous chat does not read this switch; exact local recall is not governed by this switch |
+| `contextPolicy.memory.history.summaryModel` | string | unset | Model ref (`provider/id` or bare id) that writes history summaries; required for the hierarchy to run, and for the ICM continuous chat's compactions (see [Memory](memory.md#continuous-chat-icm)) |
 | `contextPolicy.memory.history.allowExternalSummaryEgress` | boolean | `false` | Allow captured history to be sent to a non-local summarizer (external egress) |
 | `contextPolicy.memory.history.allowExternalAdmissionEgress` | boolean | `false` | Allow captured history to be sent to the remote System One evaluator that admits model summaries (external egress, independent of the summarizer's; a local summary model does not make the evaluator local). Without it, model summaries are held and `/memory history` says why; exact copies and exact history recall are unaffected |
 | `contextPolicy.memory.history.maxConcurrentSummaries` | number | `2` | Concurrent summary jobs; clamped to 1-4 |

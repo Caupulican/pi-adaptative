@@ -7,8 +7,10 @@ import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "../context/tool-output-packer.ts";
 import { lendableToolSurface, mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import {
+	CONTINUOUS_CHAT_ZOOM_TOOL_NAME,
 	ROOT_MEMORY_TOOL_NAME,
-	WORKER_MEMORY_READ_TOOL_NAME,
+	WORKER_CHAT_NAVIGATION_TOOL_NAME_SET,
+	WORKER_MEMORY_BROKER_TOOL_NAME_SET,
 	WORKER_ROOT_MEMORY_TOOL_NAMES,
 } from "../memory/worker-memory-tools.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "../model-capability.ts";
@@ -422,7 +424,13 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 
 	const inheritedForegroundToolNames = mapToolNamesForPlatform(
 		input.foregroundToolNames ?? input.foregroundEnvelope?.allowedTools ?? DEFAULT_TOOL_NAMES,
-	).filter((toolName) => AVAILABLE_TOOL_NAMES.has(toolName) && !WORKER_ROOT_MEMORY_TOOL_NAMES.has(toolName));
+	).filter(
+		(toolName) =>
+			AVAILABLE_TOOL_NAMES.has(toolName) &&
+			!WORKER_ROOT_MEMORY_TOOL_NAMES.has(toolName) &&
+			// A chat read is granted by name, never inherited from the foreground.
+			!WORKER_CHAT_NAVIGATION_TOOL_NAME_SET.has(toolName),
+	);
 	const requestedForbiddenTool = input.authority?.toolNames?.find((toolName) =>
 		WORKER_ROOT_MEMORY_TOOL_NAMES.has(toolName),
 	);
@@ -481,15 +489,16 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	if (!input.yolo && input.authority?.toolNames !== undefined) {
 		const inheritedSurface = new Set(inheritedSurfaceNames);
 		const foregroundTools = input.foregroundToolNames ?? input.foregroundEnvelope?.allowedTools ?? DEFAULT_TOOL_NAMES;
+		// The bounded memory reads (memory_read, zoom, date) may be granted when the foreground reads memory itself.
 		const boundedMemoryReadInherited =
-			uniqueToolNames.includes(WORKER_MEMORY_READ_TOOL_NAME) &&
-			foregroundTools.includes(ROOT_MEMORY_TOOL_NAME) &&
+			(foregroundTools.includes(ROOT_MEMORY_TOOL_NAME) ||
+				foregroundTools.includes(CONTINUOUS_CHAT_ZOOM_TOOL_NAME)) &&
 			input.foregroundEnvelope?.capabilities.includes("memory.query") === true;
 		const uninheritedTools = uniqueToolNames.filter(
 			(toolName) =>
 				toolName !== STABLE_SHELL_TOOL_NAME &&
 				!inheritedSurface.has(toolName) &&
-				!(toolName === WORKER_MEMORY_READ_TOOL_NAME && boundedMemoryReadInherited),
+				!(WORKER_MEMORY_BROKER_TOOL_NAME_SET.has(toolName) && boundedMemoryReadInherited),
 		);
 		if (uninheritedTools.length > 0) {
 			return { ok: false, reason: `orchestration_tool_unavailable:${uninheritedTools.join(",")}` };
