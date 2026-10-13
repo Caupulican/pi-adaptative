@@ -80,6 +80,7 @@ import {
 	transcriptRetentionCutoff,
 } from "./transcript-summary-catalog.ts";
 import {
+	coveredSourceRefs,
 	exactCopyText,
 	groupLeafSpans,
 	isCurrentCaptureNode,
@@ -1660,11 +1661,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 					...(measured?.gap ? { gap: measured.gap } : {}),
 				};
 			});
-		let aged = 0;
-		for (const node of this.catalog.values()) {
-			const refs = [...node.sourceRefs, ...node.contextRefs];
-			if (refs.some((ref) => this.catalog.anchorAt(ref) !== undefined)) aged += 1;
-		}
+		const aged = this.catalog.agedNodeCount();
 		const anchored = this.catalog.anchorCounts();
 		const retentionDays = this.ports.settings().retentionDays;
 		const nextDeadlineAt = this.nextRetentionAt();
@@ -2954,7 +2951,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private async anchorUndatedNodes(epoch: number): Promise<void> {
 		const refs: { ref: TranscriptSourceRef }[] = [];
 		for (const node of this.catalog.values()) {
-			if (node.oldestDependencyAt !== undefined) continue;
+			// A parent's coverage is its leaves', which are visited here themselves.
+			if (node.oldestDependencyAt !== undefined || node.children) continue;
 			for (const ref of [...node.sourceRefs, ...node.contextRefs]) {
 				if (this.catalog.anchorAt(ref) === undefined) refs.push({ ref });
 			}
@@ -3016,19 +3014,18 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/**
 	 * The retention instant of a dormant node: its own dependencies (judged by the catalog) and, for a parent, every
-	 * child's, children looked up among accepted and dormant nodes. A parent's own fields cannot bound it alone: it
-	 * names its children's covered sources and their dated dependencies, never their context sources, so an undated
-	 * context source (aged by its anchor) is visible only through the child. A child that is neither accepted nor
-	 * dormant leaves the age unknown (undefined), which retention purges: the parent is only a cache.
+	 * child's, children looked up among accepted and dormant nodes. A parent has no coverage of its own: its age is
+	 * the oldest of its dated dependency and its children's, and an undated context source (aged by its anchor) is
+	 * visible only through the child. A child that is neither accepted nor dormant, or that has no age, leaves the
+	 * age unknown (undefined), which retention purges: the parent is only a cache.
 	 */
 	private dormantRetentionTime(node: TranscriptSummaryNode): number | undefined {
 		let oldest = this.catalog.nodeRetentionTime(node);
-		if (oldest === undefined) return undefined;
 		for (const childId of node.children ?? []) {
 			const child = this.catalog.get(childId) ?? this.dormant.get(childId);
 			const at = child === undefined ? undefined : this.dormantRetentionTime(child);
 			if (at === undefined) return undefined;
-			if (at < oldest) oldest = at;
+			if (oldest === undefined || at < oldest) oldest = at;
 		}
 		return oldest;
 	}
@@ -3036,16 +3033,13 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	// ---- frontier -----------------------------------------------------------------------------
 
 	private computeFrontier(sessionId: string, extra?: TranscriptSummaryNode) {
-		// Only approved summaries are described: a model summary without a current admission stays out (and so does
-		// every model parent built on it) until it is re-admitted. Its sources are still reachable by exact recall.
-		const members = [...(this.catalog.sessionNodes(sessionId)?.values() ?? [])].filter((node) =>
-			this.catalog.isApproved(node),
-		);
-		if (extra) members.push(extra);
+		// The catalog owns the approved ordered index. A not-yet-published candidate is a read-only overlay and cannot
+		// change the live index if persistence refuses the transaction.
+		const hasUnapproved = this.catalog.hasUnapproved(sessionId);
 		const total = this.runtime.get(sessionId)?.total;
 		return selectFrontier({
 			sessionId,
-			nodes: members,
+			index: this.catalog.frontierIndex(sessionId, extra),
 			allowanceBytes: this.ports.settings().frontierMaxBytes,
 			...(this.frontiers.get(sessionId)
 				? { previous: this.frontiers.get(sessionId) as TranscriptFrontierSelection }
@@ -3054,9 +3048,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				? {
 						tail: {
 							toIndexExclusive: total,
-							reason: [...(this.catalog.sessionNodes(sessionId)?.values() ?? [])].some(
-								(node) => !this.catalog.isApproved(node),
-							)
+							reason: hasUnapproved
 								? "summaries pending, awaiting admission, or not yet captured"
 								: "summaries pending or not yet captured",
 						},
@@ -3075,7 +3067,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			const nodes = this.catalog.sessionNodes(sessionId);
 			if (!nodes?.size) continue;
 			// Nothing approved is left to describe: the persisted frontier is removed rather than left naming withheld nodes.
-			if (![...nodes.values()].some((node) => this.catalog.isApproved(node))) {
+			if (!this.catalog.hasApproved(sessionId)) {
 				if (this.frontiers.has(sessionId)) removeFrontiers.push(sessionId);
 				continue;
 			}
@@ -3599,7 +3591,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (this.nodeDenied(left) || this.nodeDenied(right)) {
 			return { kind: "stale", reason: "a child summary belongs to a forgotten session" };
 		}
-		const sourceRefs = [...left.sourceRefs, ...right.sourceRefs];
 		const base = {
 			sessionId: job.sessionId,
 			lineageDigest: right.lineageDigest,
@@ -3617,7 +3608,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 						})
 					: undefined,
 			children,
-			sourceRefs,
+			// A parent's coverage is its children's, never copied into it (see TranscriptSummaryNode.sourceRefs).
+			sourceRefs: [] as TranscriptSourceRef[],
 			contextRefs: [] as TranscriptSourceRef[],
 			coveredFrom: left.coveredFrom,
 			coveredTo: right.coveredTo,
@@ -3651,11 +3643,25 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			"Merge the two adjacent SUMMARIES below, oldest first, into one summary of both. Keep every cited handle that still matters.\n\nSUMMARIES:\n",
 			{ untrusted: [left, right].map(describe).join("\n"), source: "memory:summary-source" },
 		]);
-		const reply = await this.summarizeChecked(job, token, summarizer, request, signal, sourceRefs, [], {
-			level: job.level,
-			target: [left, right].map(admissionBlockFromSummary),
-			context: [],
-		});
+		// The handles the merged text may cite: everything the two children cover, derived for this one check.
+		const lookup = (id: string) => this.catalog.get(id);
+		const leftCoverage = coveredSourceRefs(left, lookup);
+		const rightCoverage = coveredSourceRefs(right, lookup);
+		if (!leftCoverage || !rightCoverage) return { kind: "stale", reason: "a summary a child is built on is gone" };
+		const reply = await this.summarizeChecked(
+			job,
+			token,
+			summarizer,
+			request,
+			signal,
+			[...leftCoverage, ...rightCoverage],
+			[],
+			{
+				level: job.level,
+				target: [left, right].map(admissionBlockFromSummary),
+				context: [],
+			},
+		);
 		if ("outcome" in reply) return reply.outcome;
 		return {
 			kind: "node",
@@ -3670,8 +3676,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	}
 
 	/**
-	 * One summary call and its two admissions. First the deterministic checks (a rejected reply is a malformed
-	 * failure, never clipped), then the evidence-quality judgment of the exact input (model summaries only: an
+	 * One summary call and its two admissions. First the deterministic checks (an invalid reply is retried within
+	 * the job's existing attempt budget, never clipped), then the evidence-quality judgment of the exact input (model summaries only: an
 	 * exact copy never gets here). Only an accepted judgment returns text; every other disposition ends or
 	 * retries the job with its real cause and publishes nothing.
 	 *
@@ -3731,7 +3737,14 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			const check = validateSummaryText(reply.text, checks);
 			if (!check.ok) {
 				return {
-					outcome: { kind: "fail", failure: { kind: "malformed", message: `${check.reason}: ${check.detail}` } },
+					outcome: {
+						kind: "fail",
+						failure: {
+							kind: "transient",
+							reason: "summary_shape_invalid",
+							message: `${check.reason}: ${check.detail}`,
+						},
+					},
 				};
 			}
 			// Kept durably before the judgment starts when the save acknowledges it, so the paid reply survives whatever
@@ -4920,9 +4933,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** Accepted model summaries without a current admission, children before parents. */
 	private readmissionCandidates(): TranscriptSummaryNode[] {
-		const denied = forgottenNodeIds(this.catalog.values(), this.forgottenSessions);
-		return [...this.catalog.values()]
-			.filter((node) => needsReadmission(node) && !denied.has(node.id))
+		return this.catalog
+			.needingReadmission()
+			.filter((node) => !this.catalog.deniedByForget(node, this.forgottenSessions))
 			.sort((a, b) => a.level - b.level || a.ordinal - b.ordinal);
 	}
 

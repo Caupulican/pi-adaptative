@@ -62,7 +62,10 @@ export interface TranscriptSummaryNode {
 	 */
 	lineageDigest: string;
 	spanRange: TranscriptSummarySpanRange;
-	/** Leaf: the exact covered parts. Parent: the children's coverage, in order. */
+	/**
+	 * Leaf: the exact covered parts. Parent: always empty, because a parent covers exactly its two children and a copy
+	 * of their parts would grow with the history it covers; read a node's coverage through {@link coveredSourceRefs}.
+	 */
 	sourceRefs: TranscriptSourceRef[];
 	/** Parent only: exactly two adjacent siblings, left then right. */
 	children?: [string, string];
@@ -480,8 +483,11 @@ export function parseSummaryNode(value: unknown): TranscriptSummaryNodeParse {
 	const { header } = parsedHeader;
 	if (typeof value.lineageDigest !== "string" || value.lineageDigest.length === 0)
 		return fail("lineageDigest is missing");
-	const sourceRefs = parseSourceRefs(value.sourceRefs);
-	if (sourceRefs === undefined || sourceRefs.length === 0) return fail("sourceRefs is invalid");
+	const parsedSourceRefs = parseSourceRefs(value.sourceRefs);
+	if (parsedSourceRefs === undefined) return fail("sourceRefs is invalid");
+	if (header.level === 0 && parsedSourceRefs.length === 0) return fail("sourceRefs is invalid");
+	// A parent file written before coverage was derived from its children still carries the copy; it is not kept.
+	const sourceRefs = header.level === 0 ? parsedSourceRefs : [];
 	const contextRefs = parseSourceRefs(value.contextRefs);
 	if (contextRefs === undefined) return fail("contextRefs is invalid");
 	if (typeof value.text !== "string" || value.text.length === 0) return fail("text is empty");
@@ -562,7 +568,7 @@ export type TranscriptSummaryChildrenCheck = { ok: true } | { ok: false; reason:
 
 /**
  * A parent covers exactly its two children: adjacent aligned siblings of one session, one level below,
- * with coverage and range equal to the children's concatenation.
+ * with a range equal to the children's union (its coverage is theirs, see {@link coveredSourceRefs}).
  */
 export function validateParentChildren(
 	parent: TranscriptSummaryNode,
@@ -588,12 +594,32 @@ export function validateParentChildren(
 	) {
 		return fail("parent range is not the children's union");
 	}
-	const expected = [...left.sourceRefs, ...right.sourceRefs].map(sourceKey);
-	if (
-		expected.length !== parent.sourceRefs.length ||
-		expected.some((key, index) => key !== sourceKey(parent.sourceRefs[index] as TranscriptSourceRef))
-	) {
-		return fail("parent coverage is not the children's coverage in order");
-	}
 	return { ok: true };
+}
+
+/**
+ * The exact source parts a node covers, in order: a leaf's own, a parent's through its two children. Undefined when a
+ * summary it is built on is not known to `lookup`. With `limit`, only that many parts are produced.
+ */
+export function coveredSourceRefs<N extends Pick<TranscriptSummaryNode, "sourceRefs" | "children">>(
+	node: N,
+	lookup: (id: string) => N | undefined,
+	limit = Number.POSITIVE_INFINITY,
+): TranscriptSourceRef[] | undefined {
+	const refs: TranscriptSourceRef[] = [];
+	const pending: N[] = [node];
+	for (let current = pending.pop(); current !== undefined; current = pending.pop()) {
+		if (!current.children) {
+			for (const ref of current.sourceRefs) {
+				if (refs.length >= limit) return refs;
+				refs.push(ref);
+			}
+			continue;
+		}
+		const left = lookup(current.children[0]);
+		const right = lookup(current.children[1]);
+		if (!left || !right) return undefined;
+		pending.push(right, left);
+	}
+	return refs;
 }

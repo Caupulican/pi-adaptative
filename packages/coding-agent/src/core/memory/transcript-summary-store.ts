@@ -1,14 +1,15 @@
 /**
- * Derived persistence for the transcript summary hierarchy: immutable node files, one authoritative
- * manifest, and the bounded job list. Source bodies stay in canonical sessions; everything here can be
+ * Derived persistence for the transcript summary hierarchy: immutable node files, bounded immutable
+ * metadata pages behind one authoritative root, and the bounded job list. Source bodies stay in canonical sessions; everything here can be
  * rebuilt from them, and nothing here is a second conversation log.
  *
  * Layout under `<agentDir>/state/transcript-memory/<projectId>/`:
  *   nodes/<id>.json   immutable node content, written BEFORE anything references it (identity and text never change;
  *                     the only later rewrite is `annotateAdmission`, which adds the admission record of a model summary;
  *                     republishing a dormant node writes the same content again)
- *   manifest.json     schema, writer fence, revision, session cursors, accepted nodes, frontiers, tombstones,
- *                     dormant nodes (content of nodes revoked by a lineage change, kept only to be reused)
+ *   manifest.json     small atomic root: schema, writer fence, revision and the five metadata-table roots
+ *   metadata-pages/   content-addressed immutable treap pages for sessions, accepted nodes, frontiers,
+ *                     tombstones and dormant nodes; a legacy full manifest migrates on writer acquisition
  *   jobs.json         bounded scheduler state
  *   forgotten-sessions.json permanent forget state: its own schema, revision and digest, never derived and never evicted
  *                     (see `recordForget`); the manifest records only the revision it has applied
@@ -24,9 +25,11 @@
  * Writer model: one lease with a durable fencing token. `acquireWriter` increments `writerFence` under the
  * lock; every transaction re-reads the manifest under the same lock and refuses to publish when the fence
  * is no longer the caller's or the expected revision moved. A newer lease therefore supersedes an older
- * one without any shared in-memory state. Node acceptance, the session cursor and frontier references are
- * one manifest write, so a published frontier can never name a node that was not accepted and present. The
- * manifest `revision` advances with every write that changes what `load()` returns to a reader (accepted nodes,
+ * one without any shared in-memory state. Changed pages are written first and all table roots switch in one
+ * manifest-root write, so a published frontier can never name a node that was not accepted; every node a reference is
+ * newly published for is also read back and checked against its digest, while a node the same frontier already named
+ * is not re-read (damage after its own publication is reported by `load` and repaired by recovery). The
+ * root `revision` advances with every write that changes what `load()` returns to a reader (accepted nodes,
  * frontiers, tombstones, retention anchors, admission annotations), so a reader comparing it knows when to reload.
  *
  * Durability, stated plainly: `writeFileAtomic` (core/util/atomic-file.ts) writes a uniquely named temporary
@@ -34,10 +37,10 @@
  * gives atomic visibility: a reader, or a process restart after a process crash, sees the old file or the
  * new one, never a torn one. It does NOT give power-loss or kernel-crash durability: after one, a node
  * file or manifest can be missing or empty even though a rename returned. This store therefore treats
- * every file as untrusted on load (schema, identity and cross-references are verified) and reports damage
+ * every file as untrusted on load (schema, content address, tree invariants, identity and cross-references are verified) and reports damage
  * as an explicit recovery state; derived content is rebuilt from canonical sessions, never trusted blindly.
- * A crash between writing node files and the manifest leaves only unreferenced node files, and a crash between writing
- * a temporary file and its rename leaves only that temporary file; both are swept by age when the coordinator starts.
+ * A crash before the root replacement leaves only unreferenced node/page files, and a crash between writing a
+ * temporary file and its rename leaves only that temporary file; both are swept by age when the coordinator starts.
  */
 
 import { createHash } from "node:crypto";
@@ -58,6 +61,19 @@ import {
 	TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
 	type TranscriptSummaryAdmissionRecord,
 } from "./transcript-summary-admission.ts";
+import {
+	createTranscriptSummaryMetadataRoot,
+	parseTranscriptSummaryMetadataRoot,
+	serializeTranscriptSummaryMetadataRoot,
+	TRANSCRIPT_SUMMARY_METADATA_TABLES,
+	TranscriptSummaryMetadataPageError,
+	TranscriptSummaryMetadataPages,
+	type TranscriptSummaryMetadataRoot,
+	type TranscriptSummaryMetadataRootParse,
+	TranscriptSummaryMetadataStructureError,
+	type TranscriptSummaryMetadataTable,
+	type TranscriptSummaryMetadataTablePatch,
+} from "./transcript-summary-metadata.ts";
 import {
 	isNonNegativeInteger,
 	parseSummaryNode,
@@ -114,8 +130,14 @@ export const TRANSCRIPT_SUMMARY_MAX_CORRUPT_BACKUPS = 5;
 export const TRANSCRIPT_SUMMARY_MAX_OWED_RECEIPT_ENTRIES = TRANSCRIPT_SUMMARY_MAX_RELEASED_RECEIPTS;
 /** Corrupt-backup deletions that failed kept on the store for the status (the most recent; the total is counted). */
 const MAX_RECENT_BACKUP_PRUNE_FAILURES = 20;
+/** A follower that would need more than this many changed table keys reloads instead. */
+const MAX_FOLLOWED_CHANGES = 2048;
 /** Unreferenced node and temporary files younger than this are never swept: their writer may still publish. */
 export const TRANSCRIPT_SUMMARY_ORPHAN_MIN_AGE_MS = 10 * 60 * 1000;
+/** Reads of the root that follow a replaced root when a page it named was already cleaned up (see `readManifestAttempt`). */
+const MANIFEST_READ_ATTEMPTS = 4;
+/** Unreachable metadata pages accumulate to at least this many (and twice the live page count) before a commit sweeps them. */
+const METADATA_PAGE_SWEEP_MIN_WRITES = 4096;
 
 const NODE_ID_PATTERN = /^[a-f0-9]{64}$/;
 const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -154,6 +176,13 @@ export interface TranscriptSummaryAcceptedNode {
 	sessionId: string;
 	fromIndex: number;
 	toIndexExclusive: number;
+	/** Binds the content-independent node identity to the exact persisted summary bytes. Absent only on legacy state. */
+	textDigest?: string;
+	/**
+	 * Digest of the admission record the node file carries. Admitting a node rewrites its file but nothing else the table
+	 * names, so this is what lets a reader that follows the tables see that the node changed. Absent until admitted.
+	 */
+	admissionDigest?: string;
 	children?: [string, string];
 	/** Handles of the context sources the node consulted (coverage is derivable from the range). */
 	contextRefs: string[];
@@ -219,12 +248,25 @@ export interface TranscriptSummaryManifest {
 
 export interface TranscriptSummaryDormantEntry {
 	sessionId: string;
+	/** Preserves the accepted content binding while the reusable node is parked. Absent only on legacy state. */
+	textDigest?: string;
 	/** ISO instant it was parked; eviction takes the oldest first. */
 	parkedAt: string;
 }
 
+interface TranscriptSummaryManifestPatch {
+	writerFence?: number;
+	revision?: number;
+	forgetRevisionApplied?: number;
+	sessions?: TranscriptSummaryMetadataTablePatch;
+	acceptedNodes?: TranscriptSummaryMetadataTablePatch;
+	frontiers?: TranscriptSummaryMetadataTablePatch;
+	tombstones?: TranscriptSummaryMetadataTablePatch;
+	dormant?: TranscriptSummaryMetadataTablePatch;
+}
+
 /** The legacy `session:` markers of a manifest's tombstones, keyed by session id (the key prefix removed). */
-function legacyMarksOf(
+export function legacyMarksOf(
 	tombstones: Readonly<Record<string, TranscriptSummaryTombstone>>,
 ): Map<string, TranscriptSummaryTombstone> {
 	const marks = new Map<string, TranscriptSummaryTombstone>();
@@ -289,7 +331,7 @@ interface ManifestKnowledge {
 	damage?: string;
 	writerFence?: number;
 	applied?: number;
-	legacy: Map<string, TranscriptSummaryTombstone>;
+	legacy: ReadonlyMap<string, TranscriptSummaryTombstone>;
 	/** Legacy session ids whose marker is malformed: the forgotten-session file must hold each of them. */
 	legacyDamaged: string[];
 }
@@ -525,8 +567,10 @@ function rawForgetRevision(raw: string): number {
 type ForgetView =
 	| {
 			status: "ok";
-			/** The file's revision; 0 when there is no file (no forget was ever recorded). */
+			/** The file's revision; 0 when there is no file. */
 			revision: number;
+			/** True when no forgotten-session file exists. A writer creates it, so a file that later goes missing is unknown. */
+			fileMissing: boolean;
 			/** The marks the file itself holds. */
 			fileSessions: ReadonlyMap<string, string>;
 			/** The file's marks plus the legacy markers of a known manifest: the set every reader and publisher denies. */
@@ -553,6 +597,68 @@ function emptyManifest(writerFence: number): TranscriptSummaryManifest {
 		frontiers: {},
 		tombstones: {},
 		dormant: {},
+	};
+}
+
+/** The marker an accepted entry carries for a node's admission record, so a table follower sees the node change. */
+function admissionMarker(admission: TranscriptSummaryAdmissionRecord): string {
+	return summaryTextDigest(JSON.stringify(admission));
+}
+
+/** Whether a node file disagrees with the table entry that accepted it (identity, range, text or admission). */
+export function nodeDisagreesWithEntry(node: TranscriptSummaryNode, entry: TranscriptSummaryAcceptedNode): boolean {
+	return (
+		node.level !== entry.level ||
+		node.ordinal !== entry.ordinal ||
+		node.sessionId !== entry.sessionId ||
+		node.spanRange.fromIndex !== entry.fromIndex ||
+		node.spanRange.toIndexExclusive !== entry.toIndexExclusive ||
+		summaryTextDigest(node.text) !== entry.textDigest ||
+		(node.admission === undefined ? undefined : admissionMarker(node.admission)) !== entry.admissionDigest
+	);
+}
+
+/** One accepted-node table entry from an untrusted value: the entry, or why it is invalid. */
+function parseAcceptedEntry(id: string, raw: unknown): TranscriptSummaryAcceptedNode | string {
+	if (!NODE_ID_PATTERN.test(id)) return `accepted node id ${id} is invalid`;
+	if (
+		!isPlainRecord(raw) ||
+		!isNonNegativeInteger(raw.level) ||
+		!isNonNegativeInteger(raw.ordinal) ||
+		typeof raw.sessionId !== "string" ||
+		!isNonNegativeInteger(raw.fromIndex) ||
+		!isNonNegativeInteger(raw.toIndexExclusive) ||
+		(raw.textDigest !== undefined && (typeof raw.textDigest !== "string" || !DIGEST_PATTERN.test(raw.textDigest))) ||
+		(raw.admissionDigest !== undefined &&
+			(typeof raw.admissionDigest !== "string" || !DIGEST_PATTERN.test(raw.admissionDigest))) ||
+		!Array.isArray(raw.contextRefs) ||
+		raw.contextRefs.some((entry) => typeof entry !== "string")
+	) {
+		return `accepted node ${id} is invalid`;
+	}
+	let children: [string, string] | undefined;
+	if (raw.children !== undefined) {
+		if (
+			!Array.isArray(raw.children) ||
+			raw.children.length !== 2 ||
+			!NODE_ID_PATTERN.test(String(raw.children[0])) ||
+			!NODE_ID_PATTERN.test(String(raw.children[1]))
+		) {
+			return `accepted node ${id} has invalid children`;
+		}
+		children = [String(raw.children[0]), String(raw.children[1])];
+	}
+	return {
+		level: raw.level,
+		ordinal: raw.ordinal,
+		sessionId: raw.sessionId,
+		fromIndex: raw.fromIndex,
+		toIndexExclusive: raw.toIndexExclusive,
+		...(typeof raw.textDigest === "string" ? { textDigest: raw.textDigest } : {}),
+		...(typeof raw.admissionDigest === "string" ? { admissionDigest: raw.admissionDigest } : {}),
+		...(children ? { children } : {}),
+		contextRefs: raw.contextRefs as string[],
+		...(typeof raw.oldestDependencyAt === "string" ? { oldestDependencyAt: raw.oldestDependencyAt } : {}),
 	};
 }
 
@@ -601,47 +707,16 @@ function parseManifest(raw: string): ManifestParse {
 		};
 	}
 	for (const [id, raw] of Object.entries(value.acceptedNodes)) {
-		if (!NODE_ID_PATTERN.test(id)) return fail(`accepted node id ${id} is invalid`);
-		if (
-			!isPlainRecord(raw) ||
-			!isNonNegativeInteger(raw.level) ||
-			!isNonNegativeInteger(raw.ordinal) ||
-			typeof raw.sessionId !== "string" ||
-			!isNonNegativeInteger(raw.fromIndex) ||
-			!isNonNegativeInteger(raw.toIndexExclusive) ||
-			!Array.isArray(raw.contextRefs) ||
-			raw.contextRefs.some((entry) => typeof entry !== "string")
-		) {
-			return fail(`accepted node ${id} is invalid`);
-		}
-		let children: [string, string] | undefined;
-		if (raw.children !== undefined) {
-			if (
-				!Array.isArray(raw.children) ||
-				raw.children.length !== 2 ||
-				!NODE_ID_PATTERN.test(String(raw.children[0])) ||
-				!NODE_ID_PATTERN.test(String(raw.children[1]))
-			) {
-				return fail(`accepted node ${id} has invalid children`);
-			}
-			children = [String(raw.children[0]), String(raw.children[1])];
-		}
-		manifest.acceptedNodes[id] = {
-			level: raw.level,
-			ordinal: raw.ordinal,
-			sessionId: raw.sessionId,
-			fromIndex: raw.fromIndex,
-			toIndexExclusive: raw.toIndexExclusive,
-			...(children ? { children } : {}),
-			contextRefs: raw.contextRefs as string[],
-			...(typeof raw.oldestDependencyAt === "string" ? { oldestDependencyAt: raw.oldestDependencyAt } : {}),
-		};
+		const entry = parseAcceptedEntry(id, raw);
+		if (typeof entry === "string") return fail(entry);
+		manifest.acceptedNodes[id] = entry;
 	}
 	for (const [key, raw] of Object.entries(value.frontiers)) {
 		if (
 			!isPlainRecord(raw) ||
 			!isNonNegativeInteger(raw.coveredThroughIndex) ||
 			!isNonNegativeInteger(raw.omittedBeforeIndex) ||
+			(raw.originIndex !== undefined && !isNonNegativeInteger(raw.originIndex)) ||
 			!isNonNegativeInteger(raw.revision) ||
 			!isNonNegativeInteger(raw.allowanceBytes) ||
 			!isNonNegativeInteger(raw.recipeVersion) ||
@@ -653,6 +728,8 @@ function parseManifest(raw: string): ManifestParse {
 		manifest.frontiers[key] = {
 			nodeIds: raw.nodeIds as string[],
 			omittedBeforeIndex: raw.omittedBeforeIndex,
+			// A selection stored before the origin was recorded takes its omitted boundary: at worst one rebuild.
+			originIndex: raw.originIndex ?? raw.omittedBeforeIndex,
 			coveredThroughIndex: raw.coveredThroughIndex,
 			revision: raw.revision,
 			allowanceBytes: raw.allowanceBytes,
@@ -676,11 +753,17 @@ function parseManifest(raw: string): ManifestParse {
 			!NODE_ID_PATTERN.test(id) ||
 			!isPlainRecord(raw) ||
 			typeof raw.sessionId !== "string" ||
+			(raw.textDigest !== undefined &&
+				(typeof raw.textDigest !== "string" || !DIGEST_PATTERN.test(raw.textDigest))) ||
 			typeof raw.parkedAt !== "string"
 		) {
 			return fail(`dormant node ${id} is invalid`);
 		}
-		manifest.dormant[id] = { sessionId: raw.sessionId, parkedAt: raw.parkedAt };
+		manifest.dormant[id] = {
+			sessionId: raw.sessionId,
+			...(typeof raw.textDigest === "string" ? { textDigest: raw.textDigest } : {}),
+			parkedAt: raw.parkedAt,
+		};
 	}
 	return { ok: true, manifest };
 }
@@ -982,6 +1065,8 @@ export type TranscriptSummaryForgetAppliedResult =
 export interface TranscriptSummaryStoreState {
 	/** Undefined when no manifest exists yet, or when it is corrupt (an issue says which). */
 	manifest: TranscriptSummaryManifest | undefined;
+	/** The paged root the tables were read at; undefined for a legacy full manifest or no manifest. */
+	root: TranscriptSummaryMetadataRoot | undefined;
 	/** The permanent forget state. An unknown one is reported here and as an issue; it never fails the load. */
 	forgotten: ForgetStateRead;
 	/** Every accepted node that loaded and validated. */
@@ -998,6 +1083,20 @@ export interface TranscriptSummaryStoreState {
 	owedReceipts: TranscriptSummaryOwedReceipt[];
 	issues: TranscriptSummaryRecoveryIssue[];
 }
+
+/** The outcome of {@link TranscriptSummaryStore.follow}. */
+export type TranscriptSummaryFollow =
+	| { status: "reload"; reason: string }
+	| { status: "unchanged"; root: TranscriptSummaryMetadataRoot }
+	| {
+			status: "changed";
+			root: TranscriptSummaryMetadataRoot;
+			/** Each accepted node whose entry changed, to its new entry (undefined: no longer accepted). */
+			accepted: Map<string, TranscriptSummaryAcceptedNode | undefined>;
+			/** A legacy `session:` forget marker was added or removed: the follower's marker set is stale. */
+			legacyForgetChanged: boolean;
+	  }
+	| TranscriptSummaryStoreUnavailable;
 
 export type TranscriptSummaryWriterAcquisition =
 	| { status: "acquired"; writer: TranscriptSummaryWriter; corruptBackup?: TranscriptSummaryCorruptBackup }
@@ -1034,6 +1133,9 @@ export interface TranscriptSummaryStoreUnavailable {
 /** A bounded load that reached its deadline between file reads: it stops there, and its lock is released. */
 class StoreReadDeadlineError extends Error {}
 
+/** The root kept being replaced while a read walked the pages it named: nothing was learned about damage. */
+class StoreRootChangedError extends Error {}
+
 function pastDeadline(deadlineAt: number | undefined): void {
 	if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new StoreReadDeadlineError();
 }
@@ -1057,6 +1159,9 @@ export function storeUnavailable(what: string, error: unknown): TranscriptSummar
 	}
 	if (error instanceof StoreReadDeadlineError) {
 		return { status: "unavailable", reason: `${what} did not finish before the operation deadline` };
+	}
+	if (error instanceof StoreRootChangedError) {
+		return { status: "unavailable", reason: `${what} kept racing a newer summary root; retry` };
 	}
 	if (isStoreIoError(error)) return { status: "unavailable", reason: `${what} failed: ${withErrorCode(error)}` };
 	return undefined;
@@ -1090,8 +1195,19 @@ async function readBoundary<T>(what: string, read: () => Promise<T>): Promise<T 
 /** One whole read of the manifest file: absent, parsed and valid, or damaged (with its raw bytes). */
 export type ManifestRead =
 	| { status: "missing" }
-	| { status: "ok"; manifest: TranscriptSummaryManifest }
-	| { status: "corrupt"; detail: string; raw: string };
+	| {
+			status: "ok";
+			manifest: TranscriptSummaryManifest;
+			/** The paged root this manifest was materialized from; absent for a legacy full manifest. */
+			root?: TranscriptSummaryMetadataRoot;
+	  }
+	| {
+			status: "corrupt";
+			detail: string;
+			raw: string;
+			/** Referenced page bytes to keep before recovery replaces the root; absent for root/structural damage. */
+			damage?: { path: string; raw: string };
+	  };
 
 function sessionOfHandle(handle: string): string | undefined {
 	return handle.split(":")[1];
@@ -1201,6 +1317,7 @@ export class TranscriptSummaryStore {
 	readonly root: string;
 	private readonly nodesDir: string;
 	private readonly manifestPath: string;
+	private readonly metadataPages: TranscriptSummaryMetadataPages;
 	private readonly forgetPath: string;
 	private readonly jobsPath: string;
 	private readonly terminalsPath: string;
@@ -1212,6 +1329,10 @@ export class TranscriptSummaryStore {
 	/** Corrupt-backup deletions that failed in this process: the count, and the most recent ones (see {@link corruptBackupPruneFailures}). */
 	private backupPruneFailureTotal = 0;
 	private readonly recentBackupPruneFailures: TranscriptSummaryBackupPruneFailure[] = [];
+	/** Materialized once per observed root; ordinary fenced writes update it only through acknowledged keyed patches. */
+	private metadataCache: { root: TranscriptSummaryMetadataRoot; manifest: TranscriptSummaryManifest } | undefined;
+	private metadataSweepFailureTotal = 0;
+	private lastMetadataSweepFailure: string | undefined;
 
 	constructor(options: TranscriptSummaryStoreOptions) {
 		if (!PROJECT_ID_PATTERN.test(options.projectId)) {
@@ -1220,6 +1341,7 @@ export class TranscriptSummaryStore {
 		this.root = stateFile(options.agentDir, "transcript-memory", options.projectId);
 		this.nodesDir = join(this.root, "nodes");
 		this.manifestPath = join(this.root, "manifest.json");
+		this.metadataPages = new TranscriptSummaryMetadataPages(this.root);
 		this.forgetPath = join(this.root, FORGOTTEN_SESSIONS_FILE);
 		this.jobsPath = join(this.root, "jobs.json");
 		this.terminalsPath = join(this.root, "terminals.json");
@@ -1263,7 +1385,8 @@ export class TranscriptSummaryStore {
 		const read = await this.readManifestFile();
 		let manifest: TranscriptSummaryManifest | undefined;
 		if (read.status === "corrupt") issues.push({ kind: "manifest_corrupt", detail: read.detail });
-		if (read.status === "ok") manifest = read.manifest;
+		// The state handed to callers carries the scalars as of this read; the writer's mirror may move on under them.
+		if (read.status === "ok") manifest = { ...read.manifest };
 		// Read after the manifest, so its applied revision is never checked against an older file than the one it was written with.
 		pastDeadline(deadlineAt);
 		const forgetView = await this.forgetView(read);
@@ -1281,13 +1404,7 @@ export class TranscriptSummaryStore {
 					continue;
 				}
 				const node = result.node;
-				if (
-					node.level !== entry.level ||
-					node.ordinal !== entry.ordinal ||
-					node.sessionId !== entry.sessionId ||
-					node.spanRange.fromIndex !== entry.fromIndex ||
-					node.spanRange.toIndexExclusive !== entry.toIndexExclusive
-				) {
+				if (nodeDisagreesWithEntry(node, entry)) {
 					issues.push({
 						kind: "node_mismatch",
 						nodeId: id,
@@ -1326,7 +1443,8 @@ export class TranscriptSummaryStore {
 					? "file missing"
 					: result.status === "corrupt"
 						? result.reason
-						: result.node.sessionId !== entry.sessionId
+						: result.node.sessionId !== entry.sessionId ||
+								summaryTextDigest(result.node.text) !== entry.textDigest
 							? "file disagrees with its manifest entry"
 							: undefined;
 			if (detail !== undefined) issues.push({ kind: "dormant_damaged", nodeId: id, detail });
@@ -1346,6 +1464,7 @@ export class TranscriptSummaryStore {
 		const proof = { records: ledger.records, status: proofStatus(ledger) };
 		return {
 			manifest,
+			root: read.status === "ok" ? read.root : undefined,
 			nodes,
 			dormant,
 			jobs,
@@ -1421,31 +1540,116 @@ export class TranscriptSummaryStore {
 					fileRevision = view.revision + 1;
 				}
 			}
+			// From the first lease on the forget file always exists and the manifest always records an applied revision, so a
+			// file that later goes missing is told apart from "no forget was ever recorded" (see `forgetView`). A store that
+			// reached this point without either is the one-time start of that record, taken from the state just verified.
+			if (view.fileMissing && fileRevision === 0) {
+				const failed = await this.writeForgetFile(0, new Map());
+				if (failed) return failed;
+			}
 			let manifest: TranscriptSummaryManifest;
 			let corruptBackup: TranscriptSummaryCorruptBackup | undefined;
 			if (read.status === "missing") {
 				manifest = emptyManifest(1);
+				manifest.forgetRevisionApplied = fileRevision;
 			} else if (read.status === "ok") {
-				manifest = { ...read.manifest, writerFence: read.manifest.writerFence + 1 };
+				manifest = await this.patchManifest(read.manifest, {
+					writerFence: read.manifest.writerFence + 1,
+					...(read.manifest.forgetRevisionApplied === undefined ? { forgetRevisionApplied: 0 } : {}),
+				});
 			} else {
+				// The root is replaced below, so its bytes are kept too; a damaged page's bytes are kept beside that page.
 				corruptBackup = await this.writeCorruptBackup(this.manifestPath, read.raw);
+				if (read.damage) await this.writeCorruptBackup(read.damage.path, read.damage.raw);
 				// The replacement is a fresh derived state: no node, cursor or frontier survives it, so every forget the forget file
 				// holds is already applied to it. It records that revision, or a higher one the damaged bytes still prove (forgetView
 				// refused a file below that). The fence seed comes from the bytes, above any fence they held, never the domain clock.
 				const knowledge = manifestKnowledge(read);
 				manifest = emptyManifest(Math.max(1, Date.now(), (knowledge.writerFence ?? 0) + 1));
-				const applied = Math.max(fileRevision, knowledge.applied ?? 0);
-				if (applied > 0) manifest.forgetRevisionApplied = applied;
+				manifest.forgetRevisionApplied = Math.max(fileRevision, knowledge.applied ?? 0);
 				for (const [id, mark] of knowledge.legacy)
 					manifest.tombstones[`${SESSION_TOMBSTONE_KEY_PREFIX}${id}`] = mark;
 			}
-			await this.writeManifest(manifest);
+			if (read.status !== "ok") await this.writeManifest(manifest);
 			return {
 				status: "acquired" as const,
 				writer: new TranscriptSummaryWriter(this, manifest.writerFence),
 				...(corruptBackup ? { corruptBackup } : {}),
 			};
 		});
+	}
+
+	/**
+	 * What changed in the accepted-node and tombstone tables since a reader last looked, without the writer lock and
+	 * without reading an unchanged table: the changed keys come from comparing the two roots' page trees (equal page ids
+	 * prune whole subtrees). `reload` says a full {@link load} is the way to catch up: nothing to follow from, a legacy or
+	 * damaged root, pages the writer's cleanup already removed, or more changes than a reload would cost.
+	 */
+	async follow(since: TranscriptSummaryMetadataRoot | undefined): Promise<TranscriptSummaryFollow> {
+		return readBoundary("following the summary store", async () => {
+			const text = await this.readRootText();
+			if (text === undefined) return { status: "reload", reason: "the summary root does not exist" };
+			if (text.paged.status !== "ok") {
+				return { status: "reload", reason: "the summary root is not a readable paged root" };
+			}
+			const root = text.paged.root;
+			if (!since) return { status: "reload", reason: "nothing was loaded yet" };
+			if (since.digest === root.digest) return { status: "unchanged", root };
+			try {
+				const accepted = await this.metadataPages.diff(
+					"acceptedNodes",
+					since.tables.acceptedNodes,
+					root.tables.acceptedNodes,
+					MAX_FOLLOWED_CHANGES,
+				);
+				const tombstones = await this.metadataPages.diff(
+					"tombstones",
+					since.tables.tombstones,
+					root.tables.tombstones,
+					MAX_FOLLOWED_CHANGES,
+				);
+				if (!accepted || !tombstones) return { status: "reload", reason: "more changed than a reload would read" };
+				const entries = new Map<string, TranscriptSummaryAcceptedNode | undefined>();
+				for (const [id, change] of accepted) {
+					if (change.after === undefined) {
+						entries.set(id, undefined);
+						continue;
+					}
+					const entry = parseAcceptedEntry(id, change.after);
+					if (typeof entry === "string") return { status: "reload", reason: entry };
+					entries.set(id, entry);
+				}
+				const legacyForgetChanged = [...tombstones.keys()].some((key) =>
+					key.startsWith(SESSION_TOMBSTONE_KEY_PREFIX),
+				);
+				return { status: "changed", root, accepted: entries, legacyForgetChanged };
+			} catch (error) {
+				if (
+					error instanceof TranscriptSummaryMetadataPageError ||
+					error instanceof TranscriptSummaryMetadataStructureError
+				) {
+					return { status: "reload", reason: error.message };
+				}
+				throw error;
+			}
+		});
+	}
+
+	/** The permanent forget state at a root a follower already holds, given the legacy markers it tracks. */
+	async readForgottenSessionsAt(
+		root: TranscriptSummaryMetadataRoot,
+		legacy: ReadonlyMap<string, TranscriptSummaryTombstone>,
+	): Promise<ForgetStateRead> {
+		return readBoundary("reading the forgotten-session state", async () =>
+			publicForgetState(
+				await this.forgetViewOf({
+					writerFence: root.writerFence,
+					applied: root.forgetRevisionApplied,
+					legacy,
+					legacyDamaged: [],
+				}),
+			),
+		);
 	}
 
 	/**
@@ -1456,7 +1660,7 @@ export class TranscriptSummaryStore {
 	async readForgottenSessions(options: { deadlineAt?: number } = {}): Promise<ForgetStateRead> {
 		return readBoundary("reading the forgotten-session state", async () => {
 			pastDeadline(options.deadlineAt);
-			const read = await this.readManifestFile();
+			const read = this.snapshotRead(await this.readManifestFile());
 			pastDeadline(options.deadlineAt);
 			return publicForgetState(await this.forgetView(read));
 		});
@@ -1565,6 +1769,11 @@ export class TranscriptSummaryStore {
 	 * while they exist, so they stay effective until the file holds them. An I/O failure is the typed `unavailable`.
 	 */
 	async forgetView(read: ManifestRead): Promise<ForgetView> {
+		return this.forgetViewOf(manifestKnowledge(read));
+	}
+
+	/** {@link forgetView} from the manifest facts it rests on, for a reader that follows the tables without loading them. */
+	private async forgetViewOf(knowledge: ManifestKnowledge): Promise<ForgetView> {
 		let file: ForgetFileRead;
 		try {
 			file = await this.readForgetFile();
@@ -1576,7 +1785,6 @@ export class TranscriptSummaryStore {
 		if (file.status === "corrupt") {
 			return { status: "unknown", reason: `the forgotten-session file is damaged: ${file.detail}` };
 		}
-		const knowledge = manifestKnowledge(read);
 		const revision = file.status === "ok" ? file.file.revision : 0;
 		const fileSessions: ReadonlyMap<string, string> = file.status === "ok" ? file.file.sessions : new Map();
 		if (file.status === "missing" && knowledge.damage !== undefined) {
@@ -1606,7 +1814,14 @@ export class TranscriptSummaryStore {
 		}
 		const sessions = new Map(fileSessions);
 		for (const [id, mark] of knowledge.legacy) if (!sessions.has(id)) sessions.set(id, mark.revokedAt);
-		return { status: "ok", revision, fileSessions, sessions, legacy: knowledge.legacy };
+		return {
+			status: "ok",
+			revision,
+			fileMissing: file.status === "missing",
+			fileSessions,
+			sessions,
+			legacy: knowledge.legacy,
+		};
 	}
 
 	/** @internal Caller holds the lock. Writes the forget file atomically, then reads it back: the write counts only when its revision and digest verify. */
@@ -1664,8 +1879,8 @@ export class TranscriptSummaryStore {
 	/**
 	 * One whole read of the manifest, for readers: typed at the store's read boundary ({@link readBoundary}), and not
 	 * started once `deadlineAt` has passed. Correct without the lock: the manifest is only ever replaced by
-	 * `writeManifest`, an atomic temporary-file-then-rename (`writeFileAtomic`), so a reader sees the previous or the
-	 * next manifest, never a torn one, and a read-only owner may compare its revision unlocked. One started file read is
+	 * the root file, an atomic temporary-file-then-rename (`writeFileAtomic`), so a reader sees the previous or the
+	 * next root, never a torn one, and a read-only owner may compare its revision unlocked. One started file read is
 	 * not preemptible: it can settle after the deadline.
 	 */
 	async readManifest(
@@ -1673,7 +1888,7 @@ export class TranscriptSummaryStore {
 	): Promise<ManifestRead | TranscriptSummaryStoreUnavailable> {
 		return readBoundary("reading the summary manifest", async () => {
 			pastDeadline(options.deadlineAt);
-			return this.readManifestFile();
+			return this.snapshotRead(await this.readManifestFile());
 		});
 	}
 
@@ -1682,22 +1897,221 @@ export class TranscriptSummaryStore {
 	 * an I/O failure rejects there, where it ends the transaction.
 	 */
 	async readManifestFile(): Promise<ManifestRead> {
+		return this.readManifestAttempt(MANIFEST_READ_ATTEMPTS);
+	}
+
+	/** The root file's text and what the paged-root parser makes of it; undefined when the file does not exist. */
+	private async readRootText(): Promise<{ raw: string; paged: TranscriptSummaryMetadataRootParse } | undefined> {
 		let raw: string;
 		try {
 			raw = await fs.readFile(this.manifestPath, "utf8");
 		} catch (error) {
-			if (isMissingFileError(error)) return { status: "missing" };
+			if (isMissingFileError(error)) return undefined;
 			throw error;
 		}
-		const parsed = parseManifest(raw);
-		return parsed.ok
-			? { status: "ok", manifest: parsed.manifest }
-			: { status: "corrupt", detail: parsed.reason, raw };
+		return { raw, paged: parseTranscriptSummaryMetadataRoot(raw) };
 	}
 
-	/** @internal Caller holds the lock. */
+	private async readManifestAttempt(attemptsLeft: number): Promise<ManifestRead> {
+		const text = await this.readRootText();
+		if (text === undefined) return { status: "missing" };
+		const { raw, paged } = text;
+		if (paged.status === "corrupt") return { status: "corrupt", detail: paged.reason, raw };
+		if (paged.status === "ok") {
+			if (this.metadataCache?.root.digest === paged.root.digest) {
+				return { status: "ok", manifest: this.metadataCache.manifest, root: this.metadataCache.root };
+			}
+			try {
+				const tables: Record<TranscriptSummaryMetadataTable, Record<string, unknown>> = {
+					sessions: await this.metadataPages.load("sessions", paged.root.tables.sessions),
+					acceptedNodes: await this.metadataPages.load("acceptedNodes", paged.root.tables.acceptedNodes),
+					frontiers: await this.metadataPages.load("frontiers", paged.root.tables.frontiers),
+					tombstones: await this.metadataPages.load("tombstones", paged.root.tables.tombstones),
+					dormant: await this.metadataPages.load("dormant", paged.root.tables.dormant),
+				};
+				const parsed = parseManifest(
+					JSON.stringify({
+						schemaVersion: paged.root.schemaVersion,
+						writerFence: paged.root.writerFence,
+						revision: paged.root.revision,
+						...(paged.root.forgetRevisionApplied !== undefined
+							? { forgetRevisionApplied: paged.root.forgetRevisionApplied }
+							: {}),
+						...tables,
+					}),
+				);
+				if (!parsed.ok) return { status: "corrupt", detail: parsed.reason, raw };
+				// Only a root newer than the mirror's replaces it: an unlocked reader that started before a commit and finished
+				// after it must not displace the writer's mirror (its next patch would rebuild every table).
+				const mirror = this.metadataCache?.root;
+				if (
+					!mirror ||
+					paged.root.writerFence > mirror.writerFence ||
+					(paged.root.writerFence === mirror.writerFence && paged.root.revision > mirror.revision)
+				) {
+					this.metadataCache = { root: paged.root, manifest: parsed.manifest };
+				}
+				return { status: "ok", manifest: parsed.manifest, root: paged.root };
+			} catch (error) {
+				// A page the root named can be gone because a newer root replaced it and its cleanup ran while this read walked the
+				// older one. That is not damage: only a missing page under a root that is still current is.
+				if (error instanceof TranscriptSummaryMetadataPageError && error.missing) {
+					if ((await this.readRootText())?.raw !== raw) {
+						if (attemptsLeft > 1) return this.readManifestAttempt(attemptsLeft - 1);
+						throw new StoreRootChangedError("the summary root changed on every read attempt");
+					}
+				}
+				// Only what the pages themselves prove is damage. An I/O failure (EIO, EMFILE, EACCES) says nothing about the
+				// bytes and must never reach recovery, which replaces the derived state: it rejects into the store's boundary.
+				if (
+					!(error instanceof TranscriptSummaryMetadataPageError) &&
+					!(error instanceof TranscriptSummaryMetadataStructureError)
+				) {
+					throw error;
+				}
+				return {
+					status: "corrupt",
+					detail: error.message,
+					raw,
+					...(error instanceof TranscriptSummaryMetadataPageError && error.raw !== undefined
+						? { damage: { path: error.path, raw: error.raw } }
+						: {}),
+				};
+			}
+		}
+		const parsed = parseManifest(raw);
+		if (!parsed.ok) return { status: "corrupt", detail: parsed.reason, raw };
+		this.metadataCache = undefined;
+		return { status: "ok", manifest: parsed.manifest };
+	}
+
+	/**
+	 * A reader that does not hold the lock gets the scalars as of its read. The tables are shared with the writer's
+	 * materialized mirror, which only a fenced, acknowledged patch changes, so a reader holding this across an await never
+	 * sees a revision or applied-forget number that moved after it read the root.
+	 */
+	private snapshotRead(read: ManifestRead): ManifestRead {
+		return read.status === "ok" ? { ...read, manifest: { ...read.manifest } } : read;
+	}
+
+	private manifestTable(
+		manifest: TranscriptSummaryManifest,
+		table: TranscriptSummaryMetadataTable,
+	): Record<string, unknown> {
+		switch (table) {
+			case "sessions":
+				return manifest.sessions;
+			case "acceptedNodes":
+				return manifest.acceptedNodes;
+			case "frontiers":
+				return manifest.frontiers;
+			case "tombstones":
+				return manifest.tombstones;
+			case "dormant":
+				return manifest.dormant;
+		}
+	}
+
+	private async buildMetadataRoots(manifest: TranscriptSummaryManifest) {
+		const roots = createTranscriptSummaryMetadataRoot({
+			schemaVersion: manifest.schemaVersion,
+			writerFence: manifest.writerFence,
+			revision: manifest.revision,
+			...(manifest.forgetRevisionApplied !== undefined
+				? { forgetRevisionApplied: manifest.forgetRevisionApplied }
+				: {}),
+		}).tables;
+		for (const table of TRANSCRIPT_SUMMARY_METADATA_TABLES) {
+			roots[table] = await this.metadataPages.build(table, this.manifestTable(manifest, table));
+		}
+		return roots;
+	}
+
+	/** @internal Caller holds the lock. Full replacement is reserved for migration and explicit recovery. */
 	async writeManifest(manifest: TranscriptSummaryManifest): Promise<void> {
-		await writeFileAtomic(this.manifestPath, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
+		const root = createTranscriptSummaryMetadataRoot({
+			schemaVersion: manifest.schemaVersion,
+			writerFence: manifest.writerFence,
+			revision: manifest.revision,
+			...(manifest.forgetRevisionApplied !== undefined
+				? { forgetRevisionApplied: manifest.forgetRevisionApplied }
+				: {}),
+			tables: await this.buildMetadataRoots(manifest),
+		});
+		await writeFileAtomic(this.manifestPath, serializeTranscriptSummaryMetadataRoot(root), { mode: 0o600 });
+		this.metadataCache = { root, manifest };
+	}
+
+	/**
+	 * @internal Caller holds the lock and passes the exact manifest returned by the fenced read. Pages are written first;
+	 * the root replacement acknowledges the whole patch. The materialized mirror changes only after that acknowledgement.
+	 */
+	async patchManifest(
+		manifest: TranscriptSummaryManifest,
+		patch: TranscriptSummaryManifestPatch,
+	): Promise<TranscriptSummaryManifest> {
+		const roots =
+			this.metadataCache?.manifest === manifest
+				? { ...this.metadataCache.root.tables }
+				: await this.buildMetadataRoots(manifest);
+		const applied: { record: Record<string, unknown>; delete: readonly string[]; set: [string, unknown][] }[] = [];
+		for (const table of TRANSCRIPT_SUMMARY_METADATA_TABLES) {
+			const tablePatch = patch[table];
+			if (!tablePatch) continue;
+			roots[table] = await this.metadataPages.patch(table, roots[table], tablePatch);
+			// Detached from the caller's objects before the acknowledgement, so nothing after it can fail or alias the mirror.
+			applied.push({
+				record: this.manifestTable(manifest, table),
+				delete: tablePatch.delete ?? [],
+				set: Object.entries(tablePatch.set ?? {}).map(([key, value]): [string, unknown] => [
+					key,
+					structuredClone(value),
+				]),
+			});
+		}
+		const root = createTranscriptSummaryMetadataRoot({
+			schemaVersion: manifest.schemaVersion,
+			writerFence: patch.writerFence ?? manifest.writerFence,
+			revision: patch.revision ?? manifest.revision,
+			...((patch.forgetRevisionApplied ?? manifest.forgetRevisionApplied) !== undefined
+				? { forgetRevisionApplied: patch.forgetRevisionApplied ?? manifest.forgetRevisionApplied }
+				: {}),
+			tables: roots,
+		});
+		await writeFileAtomic(this.manifestPath, serializeTranscriptSummaryMetadataRoot(root), { mode: 0o600 });
+		// Acknowledged: from here the commit stands whatever happens to the mirror update or to cleanup.
+		for (const entry of applied) {
+			for (const key of entry.delete) delete entry.record[key];
+			for (const [key, value] of entry.set) entry.record[key] = value;
+		}
+		manifest.writerFence = root.writerFence;
+		manifest.revision = root.revision;
+		if (root.forgetRevisionApplied !== undefined) manifest.forgetRevisionApplied = root.forgetRevisionApplied;
+		this.metadataCache = { root, manifest };
+		await this.sweepMetadataPagesIfDue(root);
+		return manifest;
+	}
+
+	/**
+	 * Cleanup of pages no root names, amortized against the pages written: it runs only once the garbage written since the
+	 * last sweep is at least {@link METADATA_PAGE_SWEEP_MIN_WRITES} and twice the live pages that sweep traced, so its full
+	 * trace costs a constant per page written. Maintenance after an acknowledged commit: a failure is recorded
+	 * ({@link metadataSweepFailures}) and the commit stands; the next start's orphan sweep runs it again.
+	 */
+	private async sweepMetadataPagesIfDue(root: TranscriptSummaryMetadataRoot): Promise<void> {
+		const { written, live } = this.metadataPages.garbagePressure();
+		if (written < Math.max(METADATA_PAGE_SWEEP_MIN_WRITES, live * 2)) return;
+		try {
+			await this.metadataPages.sweep(root.tables, this.now() - TRANSCRIPT_SUMMARY_ORPHAN_MIN_AGE_MS);
+		} catch (error) {
+			this.metadataSweepFailureTotal += 1;
+			this.lastMetadataSweepFailure = error instanceof Error ? error.message : String(error);
+		}
+	}
+
+	/** Metadata-page cleanups that failed after an acknowledged commit in this process: the count and the latest cause. */
+	metadataSweepFailures(): { total: number; last: string | undefined } {
+		return { total: this.metadataSweepFailureTotal, last: this.lastMetadataSweepFailure };
 	}
 
 	/** @internal Caller holds the lock. */
@@ -2143,9 +2557,10 @@ export class TranscriptSummaryStore {
 
 	/**
 	 * @internal Caller holds the lock. Remove what nothing will read again once it is older than `minAgeMs`: files in
-	 * `nodes/` that `referenced` does not name (node content whose publication never reached the manifest) and staged
-	 * temporary files at the store root (`*.tmp`, left by a crash between writing and renaming; a write that fails removes
-	 * its own). Damaged-file backups (`*.corrupt.*`), the lock and the store's own files are never touched. A younger file
+	 * `nodes/` that `referenced` does not name (node content whose publication never reached the manifest), immutable
+	 * metadata pages unreachable from the current atomic root, and staged temporary files at the store root (`*.tmp`, left
+	 * by a crash between writing and renaming; a write that fails removes its own). Damaged-file backups (`*.corrupt.*`),
+	 * the lock and the store's own files are never touched. A younger file
 	 * is kept: its writer may still be publishing it. Returns the removed paths, relative to the store root.
 	 */
 	async sweep(referenced: ReadonlySet<string>, minAgeMs: number): Promise<string[]> {
@@ -2155,6 +2570,9 @@ export class TranscriptSummaryStore {
 			const id = name.endsWith(".json") ? name.slice(0, -".json".length) : undefined;
 			if (id !== undefined && referenced.has(id)) continue;
 			if (await this.removeOlderThan(join(this.nodesDir, name), cutoff)) removed.push(`nodes/${name}`);
+		}
+		if (this.metadataCache) {
+			removed.push(...(await this.metadataPages.sweep(this.metadataCache.root.tables, cutoff)));
 		}
 		for (const name of await this.listDirectory(this.root)) {
 			if (name.endsWith(".tmp") && (await this.removeOlderThan(join(this.root, name), cutoff))) removed.push(name);
@@ -2255,7 +2673,7 @@ export class TranscriptSummaryWriter {
 	 */
 	private async advanceRevision(manifest: TranscriptSummaryManifest): Promise<number> {
 		const revision = manifest.revision + 1;
-		await this.store.writeManifest({ ...manifest, revision });
+		await this.store.patchManifest(manifest, { revision });
 		return revision;
 	}
 
@@ -2355,15 +2773,19 @@ export class TranscriptSummaryWriter {
 				await this.store.writeNodeFile(node);
 			}
 
-			// Every referenced node must be accepted and readable before any reference is published.
-			const accepted = new Set([...Object.keys(manifest.acceptedNodes), ...incoming.map((node) => node.id)]);
-			const referenced = new Set<string>(incoming.map((node) => node.id));
-			for (const frontier of Object.values(transaction.frontiers ?? {})) {
+			// Every referenced node must be accepted, and every node a reference is newly published for must be readable and
+			// match its digest. A node the same frontier already named was verified when that reference was published, and
+			// node damage after it is reported by load and recovery like any other accepted node's; re-reading it here would
+			// cost the size of everything the frontier covers on every publication.
+			const incomingIds = new Set(incoming.map((node) => node.id));
+			const referenced = new Set<string>(incomingIds);
+			for (const [name, frontier] of Object.entries(transaction.frontiers ?? {})) {
+				const alreadyNamed = new Set(manifest.frontiers[name]?.nodeIds ?? []);
 				for (const nodeId of frontier.nodeIds) {
-					if (!accepted.has(nodeId)) {
+					if (manifest.acceptedNodes[nodeId] === undefined && !incomingIds.has(nodeId)) {
 						return { status: "invalid" as const, reason: `frontier references unaccepted node ${nodeId}` };
 					}
-					referenced.add(nodeId);
+					if (!alreadyNamed.has(nodeId)) referenced.add(nodeId);
 				}
 			}
 			for (const id of referenced) {
@@ -2374,33 +2796,43 @@ export class TranscriptSummaryWriter {
 						reason: `node ${id} is ${result.status === "missing" ? "missing" : `corrupt (${result.reason})`}`,
 					};
 				}
+				const acceptedEntry = manifest.acceptedNodes[id];
+				if (acceptedEntry && summaryTextDigest(result.node.text) !== acceptedEntry.textDigest) {
+					return { status: "invalid" as const, reason: `node ${id} content does not match its manifest digest` };
+				}
 			}
 
-			const next: TranscriptSummaryManifest = {
-				...manifest,
-				revision: manifest.revision + 1,
-				sessions: { ...manifest.sessions, ...(transaction.sessions ?? {}) },
-				acceptedNodes: { ...manifest.acceptedNodes },
-				frontiers: { ...manifest.frontiers, ...(transaction.frontiers ?? {}) },
-				dormant: { ...manifest.dormant },
-			};
-			for (const name of transaction.removeFrontiers ?? []) delete next.frontiers[name];
+			const acceptedNodes: Record<string, TranscriptSummaryAcceptedNode> = {};
 			for (const node of incoming) {
-				// Accepting a dormant identity unparks it in the same write (its file now holds the accepted content).
-				delete next.dormant[node.id];
-				next.acceptedNodes[node.id] = {
+				acceptedNodes[node.id] = {
 					level: node.level,
 					ordinal: node.ordinal,
 					sessionId: node.sessionId,
 					fromIndex: node.spanRange.fromIndex,
 					toIndexExclusive: node.spanRange.toIndexExclusive,
+					textDigest: summaryTextDigest(node.text),
+					...(node.admission ? { admissionDigest: admissionMarker(node.admission) } : {}),
 					...(node.children ? { children: node.children } : {}),
 					contextRefs: node.contextRefs.map(formatTranscriptSourceHandle),
 					...(node.oldestDependencyAt !== undefined ? { oldestDependencyAt: node.oldestDependencyAt } : {}),
 				};
 			}
-			await this.store.writeManifest(next);
-			return { status: "published" as const, revision: next.revision, accepted: incoming.map((node) => node.id) };
+			const revision = manifest.revision + 1;
+			await this.store.patchManifest(manifest, {
+				revision,
+				...(transaction.sessions ? { sessions: { set: transaction.sessions } } : {}),
+				...(Object.keys(acceptedNodes).length > 0 ? { acceptedNodes: { set: acceptedNodes } } : {}),
+				...(transaction.frontiers || transaction.removeFrontiers
+					? {
+							frontiers: {
+								...(transaction.frontiers ? { set: transaction.frontiers } : {}),
+								...(transaction.removeFrontiers ? { delete: transaction.removeFrontiers } : {}),
+							},
+						}
+					: {}),
+				...(incoming.length > 0 ? { dormant: { delete: incoming.map((node) => node.id) } } : {}),
+			});
+			return { status: "published" as const, revision, accepted: incoming.map((node) => node.id) };
 		});
 	}
 
@@ -2442,7 +2874,15 @@ export class TranscriptSummaryWriter {
 			}
 			await this.store.writeNodeFile(parsed.node);
 			// The annotation changes the node a reader loads (it becomes approved): the revision says so.
-			return { status: "annotated" as const, node: parsed.node, revision: await this.advanceRevision(manifest) };
+			// The entry names the admission too, so a reader that follows the tables learns this node changed.
+			const revision = manifest.revision + 1;
+			await this.store.patchManifest(manifest, {
+				revision,
+				acceptedNodes: {
+					set: { [nodeId]: { ...entry, admissionDigest: admissionMarker(admission) } },
+				},
+			});
+			return { status: "annotated" as const, node: parsed.node, revision };
 		});
 	}
 
@@ -2777,13 +3217,17 @@ export class TranscriptSummaryWriter {
 					delete anchors.sessions[sessionId];
 				}
 			}
-			const dormant = { ...manifest.dormant };
-			const purged = Object.keys(dormant).filter((id) => sessionIds.has(dormant[id]?.sessionId ?? ""));
-			for (const id of purged) delete dormant[id];
+			const purged = Object.keys(manifest.dormant).filter((id) =>
+				sessionIds.has(manifest.dormant[id]?.sessionId ?? ""),
+			);
 			let revision = manifest.revision;
 			if (droppedAnchors > 0) await this.store.writeAnchors(anchors);
 			if (droppedAnchors > 0 || purged.length > 0) {
-				revision = await this.advanceRevision({ ...manifest, dormant });
+				revision = manifest.revision + 1;
+				await this.store.patchManifest(manifest, {
+					revision,
+					...(purged.length > 0 ? { dormant: { delete: purged } } : {}),
+				});
 				// The manifest no longer references them; only now remove their content.
 				for (const id of purged) await this.store.unlinkNodeFile(id);
 			}
@@ -2833,15 +3277,16 @@ export class TranscriptSummaryWriter {
 					}
 				}
 				const applied = Math.max(manifest.forgetRevisionApplied ?? 0, revision);
-				const tombstones = { ...manifest.tombstones };
-				let droppedLegacy = false;
-				for (const key of Object.keys(tombstones)) {
+				const droppedLegacy: string[] = [];
+				for (const key of Object.keys(manifest.tombstones)) {
 					if (!key.startsWith(SESSION_TOMBSTONE_KEY_PREFIX)) continue;
-					delete tombstones[key];
-					droppedLegacy = true;
+					droppedLegacy.push(key);
 				}
-				if (applied !== manifest.forgetRevisionApplied || droppedLegacy) {
-					await this.store.writeManifest({ ...manifest, forgetRevisionApplied: applied, tombstones });
+				if (applied !== manifest.forgetRevisionApplied || droppedLegacy.length > 0) {
+					await this.store.patchManifest(manifest, {
+						forgetRevisionApplied: applied,
+						...(droppedLegacy.length > 0 ? { tombstones: { delete: droppedLegacy } } : {}),
+					});
 				}
 				return { status: "applied", forgetRevisionApplied: applied };
 			},
@@ -2897,7 +3342,6 @@ export class TranscriptSummaryWriter {
 				if (read.status !== "ok") throw new Error("Recovery needs a readable manifest.");
 				if (read.manifest.writerFence !== this.fence) throw new Error("Recovery writer was superseded.");
 				const manifest = read.manifest;
-				for (const name of frontiers) delete manifest.frontiers[name];
 				return this.applyRevocation(manifest, (id) => damaged.has(id), "recovery", {
 					alsoRemoveFrontiers: [...frontiers],
 					park: false,
@@ -3045,27 +3489,29 @@ export class TranscriptSummaryWriter {
 			}
 		}
 
-		const next: TranscriptSummaryManifest = {
-			...manifest,
-			revision: manifest.revision + 1,
-			sessions: { ...manifest.sessions },
-			acceptedNodes: { ...manifest.acceptedNodes },
-			frontiers: { ...manifest.frontiers },
-			tombstones: { ...manifest.tombstones },
-			dormant: { ...manifest.dormant },
-		};
 		const now = new Date(this.store.clock()).toISOString();
+		const dormantAfter = new Map(Object.entries(manifest.dormant));
+		const dormantSet: Record<string, TranscriptSummaryDormantEntry> = {};
+		const dormantDelete = new Set<string>();
+		const tombstoneAfter = new Map(Object.entries(manifest.tombstones));
+		const tombstoneSet: Record<string, TranscriptSummaryTombstone> = {};
+		const tombstoneDelete = new Set<string>();
 		// Dormant nodes of a forgotten or vanished session can never be reused; the others go only when asked.
 		const purged: string[] = [];
-		for (const [id, entry] of Object.entries(next.dormant)) {
+		for (const [id, entry] of dormantAfter) {
 			const purge =
 				entry.sessionId === tombstoneSession ||
 				entry.sessionId === dropSessionCursor ||
 				options.purgeDormant?.(id, entry) === true;
 			if (purge) {
-				delete next.dormant[id];
+				dormantAfter.delete(id);
+				dormantDelete.add(id);
 				purged.push(id);
-				if (reason === "retention") next.tombstones[id] = { revokedAt: now, reason };
+				if (reason === "retention") {
+					const mark = { revokedAt: now, reason } as const;
+					tombstoneAfter.set(id, mark);
+					tombstoneSet[id] = mark;
+				}
 			}
 		}
 		// Only a revoked LEAF moves a session cursor back: leaves are what the cursor counts. A revoked parent
@@ -3078,23 +3524,38 @@ export class TranscriptSummaryWriter {
 			if (entry.level === 0 && (earliest === undefined || entry.fromIndex < earliest.fromIndex)) {
 				earliestLeafBySession.set(entry.sessionId, { fromIndex: entry.fromIndex, ordinal: entry.ordinal });
 			}
-			delete next.acceptedNodes[id];
-			if (reason === "retention") next.tombstones[id] = { revokedAt: now, reason };
-			if (options.park) next.dormant[id] = { sessionId: entry.sessionId, parkedAt: now };
+			if (reason === "retention") {
+				const mark = { revokedAt: now, reason } as const;
+				tombstoneAfter.set(id, mark);
+				tombstoneSet[id] = mark;
+			}
+			if (options.park) {
+				const parked = {
+					sessionId: entry.sessionId,
+					...(entry.textDigest !== undefined ? { textDigest: entry.textDigest } : {}),
+					parkedAt: now,
+				};
+				dormantAfter.set(id, parked);
+				dormantSet[id] = parked;
+				dormantDelete.delete(id);
+			}
 		}
-		const dormantIds = Object.keys(next.dormant);
+		const dormantIds = [...dormantAfter.keys()];
 		if (dormantIds.length > TRANSCRIPT_SUMMARY_MAX_DORMANT_NODES) {
 			for (const id of dormantIds
-				.sort((a, b) => (next.dormant[a]?.parkedAt ?? "").localeCompare(next.dormant[b]?.parkedAt ?? ""))
+				.sort((a, b) => (dormantAfter.get(a)?.parkedAt ?? "").localeCompare(dormantAfter.get(b)?.parkedAt ?? ""))
 				.slice(0, dormantIds.length - TRANSCRIPT_SUMMARY_MAX_DORMANT_NODES)) {
-				delete next.dormant[id];
+				dormantAfter.delete(id);
+				delete dormantSet[id];
+				dormantDelete.add(id);
 				purged.push(id);
 			}
 		}
+		const sessionSet: Record<string, TranscriptSummarySessionCursor> = {};
 		for (const [sessionId, earliest] of earliestLeafBySession) {
-			const cursor = next.sessions[sessionId];
+			const cursor = manifest.sessions[sessionId];
 			if (cursor && cursor.coveredSpanCount > earliest.fromIndex) {
-				next.sessions[sessionId] = {
+				sessionSet[sessionId] = {
 					...cursor,
 					coveredSpanCount: earliest.fromIndex,
 					nextOrdinal: earliest.ordinal,
@@ -3102,38 +3563,71 @@ export class TranscriptSummaryWriter {
 			}
 		}
 		if (tombstoneSession !== undefined) {
-			next.tombstones[`${SESSION_TOMBSTONE_KEY_PREFIX}${tombstoneSession}`] = {
+			const key = `${SESSION_TOMBSTONE_KEY_PREFIX}${tombstoneSession}`;
+			const mark: TranscriptSummaryTombstone = {
 				revokedAt: now,
 				reason: "retention",
 			};
+			tombstoneAfter.set(key, mark);
+			tombstoneSet[key] = mark;
 		}
-		if (dropSessionCursor !== undefined) delete next.sessions[dropSessionCursor];
-		const removedFrontiers: string[] = [...(options.alsoRemoveFrontiers ?? [])];
-		for (const [name, frontier] of Object.entries(next.frontiers)) {
+		const removedFrontierSet = new Set(options.alsoRemoveFrontiers ?? []);
+		for (const [name, frontier] of Object.entries(manifest.frontiers)) {
 			if (frontier.nodeIds.some((nodeId) => revoked.has(nodeId))) {
-				delete next.frontiers[name];
-				removedFrontiers.push(name);
+				removedFrontierSet.add(name);
 			}
 		}
 		// The bound applies to per-node tombstones (a late result of a retention-revoked node must not republish). A
 		// forgotten session's permanent marker lives in the forget file (`recordForget`), never in this map, so no bound
 		// here can evict it; the legacy `session:` keys are excluded from the count and migrated out by `markForgetApplied`.
-		const tombstoneIds = Object.keys(next.tombstones).filter((id) => !id.startsWith(SESSION_TOMBSTONE_KEY_PREFIX));
+		const tombstoneIds = [...tombstoneAfter.keys()].filter((id) => !id.startsWith(SESSION_TOMBSTONE_KEY_PREFIX));
 		if (tombstoneIds.length > TRANSCRIPT_SUMMARY_MAX_TOMBSTONES) {
-			tombstoneIds
-				.sort((a, b) => (next.tombstones[a]?.revokedAt ?? "").localeCompare(next.tombstones[b]?.revokedAt ?? ""))
-				.slice(0, tombstoneIds.length - TRANSCRIPT_SUMMARY_MAX_TOMBSTONES)
-				.forEach((id) => {
-					delete next.tombstones[id];
-				});
+			for (const id of tombstoneIds
+				.sort((a, b) =>
+					(tombstoneAfter.get(a)?.revokedAt ?? "").localeCompare(tombstoneAfter.get(b)?.revokedAt ?? ""),
+				)
+				.slice(0, tombstoneIds.length - TRANSCRIPT_SUMMARY_MAX_TOMBSTONES)) {
+				tombstoneAfter.delete(id);
+				delete tombstoneSet[id];
+				tombstoneDelete.add(id);
+			}
 		}
-		await this.store.writeManifest(next);
+		const revision = manifest.revision + 1;
+		await this.store.patchManifest(manifest, {
+			revision,
+			...(Object.keys(sessionSet).length > 0 || dropSessionCursor !== undefined
+				? {
+						sessions: {
+							...(Object.keys(sessionSet).length > 0 ? { set: sessionSet } : {}),
+							...(dropSessionCursor !== undefined ? { delete: [dropSessionCursor] } : {}),
+						},
+					}
+				: {}),
+			...(revoked.size > 0 ? { acceptedNodes: { delete: [...revoked] } } : {}),
+			...(removedFrontierSet.size > 0 ? { frontiers: { delete: [...removedFrontierSet] } } : {}),
+			...(Object.keys(tombstoneSet).length > 0 || tombstoneDelete.size > 0
+				? {
+						tombstones: {
+							...(Object.keys(tombstoneSet).length > 0 ? { set: tombstoneSet } : {}),
+							...(tombstoneDelete.size > 0 ? { delete: [...tombstoneDelete] } : {}),
+						},
+					}
+				: {}),
+			...(Object.keys(dormantSet).length > 0 || dormantDelete.size > 0
+				? {
+						dormant: {
+							...(Object.keys(dormantSet).length > 0 ? { set: dormantSet } : {}),
+							...(dormantDelete.size > 0 ? { delete: [...dormantDelete] } : {}),
+						},
+					}
+				: {}),
+		});
 
 		// The manifest no longer references the nodes (accepted or dormant); only now remove their content. A parked
 		// node keeps its file: the dormant entry references it.
-		const parked = [...revoked].filter((id) => next.dormant[id] !== undefined);
+		const parked = [...revoked].filter((id) => dormantAfter.has(id));
 		const unlinkFailures: { id: string; error: string }[] = [];
-		for (const id of new Set([...[...revoked].filter((id) => next.dormant[id] === undefined), ...purged])) {
+		for (const id of new Set([...[...revoked].filter((id) => !dormantAfter.has(id)), ...purged])) {
 			try {
 				await this.store.unlinkNodeFile(id);
 			} catch (error) {
@@ -3142,9 +3636,9 @@ export class TranscriptSummaryWriter {
 		}
 		return {
 			status: "published",
-			revision: next.revision,
+			revision,
 			revoked: [...revoked],
-			removedFrontiers,
+			removedFrontiers: [...removedFrontierSet],
 			parked,
 			purged,
 			unlinkFailures,

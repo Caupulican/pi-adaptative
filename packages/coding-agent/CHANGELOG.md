@@ -2,6 +2,9 @@
 
 ### Fixed
 
+- Kept transcript-summary construction live past malformed model replies, rendered skipped ranges explicitly, preserved append-stable frontier prefixes, and bound persisted summary text to its manifest entry.
+- Made summary nodes and the read-only summary view scale with change instead of history: a parent summary no longer stores a copy of the source handles it covers, the read-only view follows the store by comparing page trees and reading only changed node files (no writer lock, no unchanged table read), retention ages are recomputed only for nodes whose sources or children changed, a summary that finishes before an earlier one is no longer left out of the frontier, and a missing forget file is no longer read as "nothing was forgotten" once a writer has held the store.
+- Removed whole-history work from ordinary transcript-summary publication: the catalog owns incremental ordered frontier and approval indexes, and the store keeps its metadata tables as bounded content-addressed treap pages switched by one atomic root (legacy full manifests are read and migrated under the writer lock; page cleanup is age-gated and amortized; accepted and dormant entries written before the text binding are revoked on the first start and derived again, exact copies at no cost and model summaries by paying and judging them again).
 - Bound Anthropic subscription usage polling to the stored OAuth credential instead of accepting a runtime API-key override for another account.
 
 ## [0.103.8] - 2026-10-12

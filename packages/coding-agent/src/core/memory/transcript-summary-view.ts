@@ -4,12 +4,15 @@
  * that already exist stay discoverable and expandable without building anything new.
  *
  * It never takes the writer lease, never applies recovery, never calls a model or the admission evaluator and
- * never writes the store. It loads the store once into one catalog and loads again only when the manifest
- * revision moved; every read still goes through the catalog's approval, retention and live-dependency checks.
- * Its delivery fence ({@link TranscriptSummaryReadContext.confirm}) is the same load, started after the read's
- * own lineage checks: one manifest read when nothing changed, and one full `store.load()` (every accepted node
- * file read locally) when the revision moved, since retention ages rest on anchors that live outside the
- * manifest. Loads go through {@link TranscriptBoundedRead}: at most one runs per view, with at most one more
+ * never writes the store. It loads the store once into one catalog and then follows it: when the store's root moved,
+ * it compares the old and new page trees of the accepted-node table (equal pages prune whole subtrees), reads only
+ * the node files of the keys that changed, and applies them to the same catalog, without the writer lock and without
+ * reading an unchanged table. Anything it cannot follow safely (a legacy or damaged root, pages already cleaned up,
+ * a changed forget state, damage in a node file it reads, more changes than a reload would read) takes the full load,
+ * which is also how it starts. Node files that did not change are not read again, so damage done to them outside
+ * the store's own writes is found at the next full load, as recovery's own start-up check finds it. Every read still goes through the catalog's approval, retention and live-dependency checks.
+ * Its delivery fence ({@link TranscriptSummaryReadContext.confirm}) is the same refresh, started after the read's
+ * own lineage checks: one root read when nothing changed. Loads go through {@link TranscriptBoundedRead}: at most one runs per view, with at most one more
  * queued for fences; the running one is shared and runs under no caller's deadline, and its wait for the store
  * lock ends after the lock's default retry window (`DEFAULT_FILE_LOCK_RETRY_WINDOW_MS`) as a typed busy status.
  * Each caller waits only until its own deadline (typed timeout); a file read already started is not cancelled.
@@ -35,15 +38,21 @@ import type {
 } from "./transcript-source-tools.ts";
 import { TranscriptBoundedRead } from "./transcript-summary-bounded-read.ts";
 import {
+	forgetDenies,
 	forgottenNodeIds,
 	TranscriptSummaryCatalog,
 	type TranscriptSummaryReadContext,
 } from "./transcript-summary-catalog.ts";
-import type { TranscriptSummaryNode } from "./transcript-summary-node.ts";
+import type { TranscriptSummaryMetadataRoot } from "./transcript-summary-metadata.ts";
+import { type TranscriptSummaryNode, validateParentChildren } from "./transcript-summary-node.ts";
 import {
-	SESSION_TOMBSTONE_KEY_PREFIX,
+	legacyMarksOf,
+	nodeDisagreesWithEntry,
+	storeUnavailable,
+	type TranscriptSummaryAcceptedNode,
 	type TranscriptSummaryRecoveryIssue,
 	type TranscriptSummaryStore,
+	type TranscriptSummaryTombstone,
 } from "./transcript-summary-store.ts";
 
 export interface TranscriptSummaryViewDeps {
@@ -61,10 +70,23 @@ function loadKey(manifestRevision: number, forgetRevision: number): string {
 	return `${manifestRevision}:${forgetRevision}`;
 }
 
-/** The store as loaded: its catalog, and the detail of damaged retention anchors when they were damaged. */
+/** What the view needs to follow the store from the state it loaded, instead of loading it again. */
+interface FollowCursor {
+	/** The root the catalog reflects. */
+	root: TranscriptSummaryMetadataRoot;
+	/** The permanent forget state's revision the catalog was filtered by. */
+	forgetRevision: number;
+	/** The legacy `session:` forget markers of the loaded manifest, which the forget state derives part of its answer from. */
+	legacy: ReadonlyMap<string, TranscriptSummaryTombstone>;
+	/** Accepted nodes the forget state denies: not in the catalog, but a summary built on one is denied through it. */
+	denied: Map<string, TranscriptSummaryNode>;
+}
+
+/** The store as loaded: its catalog, the detail of damaged retention anchors when they were damaged, and how to follow it. */
 interface LoadedSummaries {
 	catalog: TranscriptSummaryCatalog;
 	anchorsDamaged?: string;
+	cursor?: FollowCursor;
 }
 
 /** One load of the store: its summaries, or the typed reason it could not be read. */
@@ -142,22 +164,122 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 	}
 
 	/**
-	 * The catalog for the store as it is now. A reload builds a new catalog, so a read still running on the
-	 * previous one keeps a consistent mirror until its delivery fence re-resolves against the current one.
+	 * The catalog for the store as it is now. Following the store mutates the catalog it already holds; a reload builds a
+	 * new one, so a read still running on the previous one is judged again against the current one by its delivery fence.
 	 */
 	private async refresh(ticket: number): Promise<StoreLoad> {
+		const held = this.loaded?.summaries;
+		const cursor = held?.cursor;
+		const followed = await this.deps.store.follow(cursor?.root);
+		if (followed.status === "unavailable") return { status: "unavailable", reason: followed.reason };
+		if (held && cursor && (followed.status === "unchanged" || followed.status === "changed")) {
+			const forget = await this.deps.store.readForgottenSessionsAt(followed.root, cursor.legacy);
+			if (forget.status === "unavailable") return { status: "unavailable", reason: forget.reason };
+			if (forget.status === "unknown") return forgetUnknown(forget.reason);
+			if (forget.revision === cursor.forgetRevision) {
+				if (followed.status === "unchanged") return held;
+				if (!followed.legacyForgetChanged) {
+					try {
+						const next = await this.followChanges(
+							held,
+							cursor,
+							followed.root,
+							followed.accepted,
+							forget.sessions,
+						);
+						if (next) return this.remember(ticket, loadKey(followed.root.revision, forget.revision), next);
+					} catch (error) {
+						// An I/O failure while reading changed node files is the store being unavailable, as on any other read.
+						const unavailable = storeUnavailable("following the summary store", error);
+						if (unavailable) return { status: "unavailable", reason: unavailable.reason };
+						throw error;
+					}
+				}
+			}
+		}
+		return this.reload(ticket);
+	}
+
+	/**
+	 * Apply the accepted-node changes since the cursor to the held catalog, or undefined when they cannot be followed
+	 * safely (the caller reloads). Everything is read and checked before the catalog is touched, and the catalog then
+	 * changes in one synchronous step.
+	 */
+	private async followChanges(
+		held: LoadedSummaries,
+		cursor: FollowCursor,
+		root: TranscriptSummaryMetadataRoot,
+		changes: ReadonlyMap<string, TranscriptSummaryAcceptedNode | undefined>,
+		forgotten: ReadonlySet<string>,
+	): Promise<LoadedSummaries | undefined> {
+		const { store } = this.deps;
+		const { catalog } = held;
+		const fetched = new Map<string, TranscriptSummaryNode>();
+		for (const [id, entry] of changes) {
+			if (!entry) continue;
+			const read = await store.readNode(id);
+			if (read.status !== "ok" || nodeDisagreesWithEntry(read.node, entry)) return undefined;
+			fetched.set(id, read.node);
+		}
+		const lookup = (id: string): TranscriptSummaryNode | undefined =>
+			fetched.get(id) ?? (changes.has(id) ? undefined : (catalog.get(id) ?? cursor.denied.get(id)));
+		const ascending = [...fetched.values()].sort((left, right) => left.level - right.level);
+		const denied = new Set<string>();
+		for (const node of ascending) {
+			if (node.children) {
+				const left = lookup(node.children[0]);
+				const right = lookup(node.children[1]);
+				if (!left || !right || !validateParentChildren(node, left, right).ok) return undefined;
+			}
+			// A new summary with a parent already in the mirror is a state this cannot have come to by following.
+			if (!catalog.has(node.id) && !cursor.denied.has(node.id) && catalog.parentsOf(node.id).size > 0)
+				return undefined;
+			if (forgetDenies(node, forgotten, lookup)) denied.add(node.id);
+		}
+		// A summary leaving while one built on it stays is not something the writer does (it revokes ancestors with it).
+		for (const [id, entry] of changes) {
+			if (
+				!entry &&
+				[...catalog.parentsOf(id)].some((parent) => changes.get(parent) !== undefined || !changes.has(parent))
+			) {
+				return undefined;
+			}
+		}
+		const issues: TranscriptSummaryRecoveryIssue[] = [];
+		const anchors = await store.readAnchors(issues);
+		const nextDenied = new Map(cursor.denied);
+		for (const [id, entry] of changes) {
+			if (entry) continue;
+			catalog.unindex(id);
+			nextDenied.delete(id);
+		}
+		for (const node of ascending) {
+			if (denied.has(node.id)) {
+				catalog.unindex(node.id);
+				nextDenied.set(node.id, node);
+			} else {
+				nextDenied.delete(node.id);
+				catalog.index(node);
+			}
+		}
+		catalog.replaceAnchors(anchors);
+		const damaged = issues.find((issue) => issue.kind === "anchors_corrupt");
+		return {
+			catalog,
+			...(damaged ? { anchorsDamaged: damaged.detail } : {}),
+			cursor: { root, forgetRevision: cursor.forgetRevision, legacy: cursor.legacy, denied: nextDenied },
+		};
+	}
+
+	/** Load the whole store into a new catalog: how the view starts, and the way back from anything it cannot follow. */
+	private async reload(ticket: number): Promise<StoreLoad> {
 		const read = await this.deps.store.readManifest();
 		if (read.status === "unavailable") return { status: "unavailable", reason: read.reason };
 		if (read.status === "corrupt") return damaged(read.detail);
 		// The permanent forget state is part of what a load reflects: a session forgotten since is denied at once, and an
 		// unknown state serves no summaries (it never reads as "nothing was forgotten").
 		const forget = await this.deps.store.readForgottenSessions();
-		if (forget.status === "unknown") {
-			return {
-				status: "unavailable",
-				reason: `the permanent forget state is unknown (${forget.reason}); summaries stay unavailable and exact history recall is unaffected`,
-			};
-		}
+		if (forget.status === "unknown") return forgetUnknown(forget.reason);
 		if (forget.status === "unavailable") return { status: "unavailable", reason: forget.reason };
 		const revision = loadKey(read.status === "ok" ? read.manifest.revision : NO_MANIFEST, forget.revision);
 		if (this.loaded?.revision === revision) return this.loaded.summaries;
@@ -183,24 +305,32 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 				}
 			}
 		}
-		// Legacy markers still in the manifest deny exactly as the permanent state does until the store migrates them.
-		const forgotten = new Set(forget.sessions);
-		for (const key of Object.keys(state.manifest?.tombstones ?? {})) {
-			if (key.startsWith(SESSION_TOMBSTONE_KEY_PREFIX))
-				forgotten.add(key.slice(SESSION_TOMBSTONE_KEY_PREFIX.length));
-		}
 		// The one permanent-forget rule (shared with the coordinator's catalog): the nodes naming a forgotten session and every
-		// summary built on them.
-		const denied = forgottenNodeIds(state.nodes.values(), forgotten);
+		// summary built on them. The state the load itself read is the one the nodes are filtered by.
+		const forgottenNow = state.forgotten.status === "ok" ? state.forgotten : forget;
+		const denied = forgottenNodeIds(state.nodes.values(), forgottenNow.sessions);
 		catalog.replace(
 			[...state.nodes.values()].filter((node) => !left.has(node.id) && !denied.has(node.id)),
 			state.retentionAnchors,
 		);
 		const anchors = state.issues.find((issue) => issue.kind === "anchors_corrupt");
 		// The revision the nodes were loaded at, not the one read before: a publication in between reloads next time.
-		return this.remember(ticket, loadKey(state.manifest?.revision ?? NO_MANIFEST, forget.revision), {
+		const loadedAt = loadKey(state.manifest?.revision ?? NO_MANIFEST, forgottenNow.revision);
+		// Only an undamaged paged state can be followed; anything else reloads on every change, as it always did.
+		const followable = state.root !== undefined && left.size === 0 && state.forgotten.status === "ok";
+		return this.remember(ticket, loadedAt, {
 			catalog,
 			...(anchors ? { anchorsDamaged: anchors.detail } : {}),
+			...(followable
+				? {
+						cursor: {
+							root: state.root as TranscriptSummaryMetadataRoot,
+							forgetRevision: forgottenNow.revision,
+							legacy: legacyMarksOf(state.manifest?.tombstones ?? {}),
+							denied: new Map([...state.nodes].filter(([id]) => denied.has(id))),
+						},
+					}
+				: {}),
 		});
 	}
 
@@ -214,6 +344,13 @@ export class TranscriptSummaryView implements TranscriptNodeExpander, Transcript
 		if (this.loaded === undefined || ticket > this.loaded.ticket) this.loaded = { ticket, revision, summaries };
 		return summaries;
 	}
+}
+
+function forgetUnknown(reason: string): TranscriptReadUnavailable {
+	return {
+		status: "unavailable",
+		reason: `the permanent forget state is unknown (${reason}); summaries stay unavailable and exact history recall is unaffected`,
+	};
 }
 
 function damaged(detail: string): TranscriptReadUnavailable {

@@ -2,8 +2,9 @@
  * Frontier selection for one lineage: which accepted summary nodes stand for the history, in order, within
  * a byte allowance. Pure: no filesystem, timers or clocks.
  *
- * A frontier is an ordered, non-overlapping, gap-free partition of the covered interval
- * `[omittedBeforeIndex, coveredThroughIndex)` made only of accepted nodes. Spans before
+ * A frontier is an ordered, non-overlapping view of accepted nodes in the covered interval
+ * `[omittedBeforeIndex, coveredThroughIndex)`. Missing internal ranges are rendered as explicit gaps, so one
+ * failed summary cannot hide later accepted history. Spans before
  * `omittedBeforeIndex` are represented by one coarse pointer (an explicit statement that they are not
  * summarized here), and the uncovered tail (still pending or failed) is a separate gap record. Neither
  * ever counts as summarized coverage.
@@ -15,7 +16,8 @@
  * parent would be no smaller than its children. If merging cannot get under the allowance, the oldest
  * run is replaced by the coarse pointer until it reaches the low-water mark. A previous selection that
  * still validates is kept exactly as it is, extended only by newly available nodes: a restart never
- * re-ranks.
+ * re-ranks. A selection stored before it recorded its origin is checked against its omitted boundary instead, which
+ * can rebuild it once.
  */
 
 import { estimateLineCount } from "../context/context-item.ts";
@@ -26,7 +28,7 @@ import {
 	TRANSCRIPT_SUMMARY_RECIPE_VERSION,
 	utf8ByteLength,
 } from "./transcript-memory-contracts.ts";
-import { isNonNegativeInteger, type TranscriptSummaryNode } from "./transcript-summary-node.ts";
+import { coveredSourceRefs, isNonNegativeInteger, type TranscriptSummaryNode } from "./transcript-summary-node.ts";
 
 export const TRANSCRIPT_FRONTIER_RECIPE_VERSION = TRANSCRIPT_SUMMARY_RECIPE_VERSION;
 /** Reduction target as a fraction of the allowance. */
@@ -50,10 +52,16 @@ export type TranscriptFrontierNode = Pick<
 
 /** The persisted selection. Everything else (bytes, rendering, gap) is derived from it and the nodes. */
 export interface TranscriptFrontierSelection {
-	/** Chronological, adjacent, non-overlapping accepted nodes. */
+	/** Chronological, non-overlapping accepted nodes; absent intervals render as explicit gaps. */
 	nodeIds: string[];
 	/** Spans before this index are covered only by the coarse pointer. */
 	omittedBeforeIndex: number;
+	/**
+	 * The lineage position the selection was first built from (the earliest approved leaf then). Reduction moves
+	 * `omittedBeforeIndex` forward but never this, so an accepted leaf before it is history the build missed, not history
+	 * a reduction dropped.
+	 */
+	originIndex: number;
 	/** One past the last covered span; the next node to append starts here. */
 	coveredThroughIndex: number;
 	/** Bumped on every change of the selection; never on a no-op. */
@@ -76,15 +84,27 @@ export interface TranscriptFrontierTail {
 	reason: string;
 }
 
-export interface TranscriptFrontierInput {
+interface TranscriptFrontierInputBase {
 	sessionId: string;
-	/** Accepted nodes of this one lineage. */
-	nodes: readonly TranscriptFrontierNode[];
 	allowanceBytes: number;
 	previous?: TranscriptFrontierSelection;
 	/** The known end of the lineage, so an uncovered tail is reported as a gap. */
 	tail?: TranscriptFrontierTail;
 }
+
+export interface TranscriptFrontierNodeIndex {
+	get(id: string): TranscriptFrontierNode | undefined;
+	startingAt(fromIndex: number): TranscriptFrontierNode | undefined;
+	parentOf(leftId: string, rightId: string): TranscriptFrontierNode | undefined;
+	nextStart(fromIndex: number): number | undefined;
+	firstLeafStart(): number | undefined;
+}
+
+export type TranscriptFrontierInput = TranscriptFrontierInputBase &
+	(
+		| { /** Accepted nodes of this one lineage. */ nodes: readonly TranscriptFrontierNode[]; index?: never }
+		| { /** Incrementally maintained accepted-node index. */ index: TranscriptFrontierNodeIndex; nodes?: never }
+	);
 
 export interface TranscriptFrontierResult {
 	selection: TranscriptFrontierSelection;
@@ -97,7 +117,11 @@ export interface TranscriptFrontierResult {
 	recovery?: string;
 }
 
-export type TranscriptFrontierValidation = { ok: true; bytes: number } | { ok: false; reason: string };
+/**
+ * `keep` is set when the only fault is a gap that now has an accepted node: the first `keep` nodes are still a valid
+ * prefix, so selection resumes from the end of that prefix instead of rebuilding the whole frontier.
+ */
+export type TranscriptFrontierValidation = { ok: true; bytes: number } | { ok: false; reason: string; keep?: number };
 
 export interface TranscriptFrontierRendering {
 	/** Empty when not even the frame fits the allowance. */
@@ -138,6 +162,7 @@ function renderRecord(node: TranscriptFrontierNode): string {
 interface Frame {
 	open: string;
 	close: string;
+	status: string;
 	pointer?: string;
 	gap?: string;
 }
@@ -167,8 +192,11 @@ function buildFrame(
 	audience: FrontierAudience = "root",
 ): Frame {
 	const frame: Frame = {
-		open: `<transcript_history session="${sessionId}" revision="${revision}" covered="[${omittedBeforeIndex},${coveredThroughIndex})">`,
+		// Mutable coverage belongs after the records. Keeping the opening bytes stable lets an append preserve the
+		// provider-visible prefix through every retained record until a reduction actually replaces one.
+		open: `<transcript_history session="${sessionId}">`,
 		close: "</transcript_history>",
+		status: `[frontier revision ${revision}; covered spans [${omittedBeforeIndex},${coveredThroughIndex})]`,
 	};
 	if (omittedBeforeIndex > 0) {
 		frame.pointer = `[omitted spans 0..${omittedBeforeIndex}) are not summarized here; search or open their sources with ${searchOrOpenTools(audience)}]`;
@@ -184,18 +212,20 @@ function frameBytes(frame: Frame): number {
 		utf8ByteLength(frame.open) +
 		1 +
 		(frame.pointer ? utf8ByteLength(frame.pointer) + 1 : 0) +
+		utf8ByteLength(frame.status) +
+		1 +
 		(frame.gap ? utf8ByteLength(frame.gap) + 1 : 0) +
 		utf8ByteLength(frame.close)
 	);
 }
 
-/** Lines of the assembled frame alone: open, pointer and gap (each one line), close. */
+/** Lines of the assembled frame alone: open, pointer, status and gap (each one line), close. */
 function frameLines(frame: Frame): number {
-	return 2 + (frame.pointer ? 1 : 0) + (frame.gap ? 1 : 0);
+	return 3 + (frame.pointer ? 1 : 0) + (frame.gap ? 1 : 0);
 }
 
 function assemble(frame: Frame, records: readonly string[]): string {
-	return `${frame.open}\n${frame.pointer ? `${frame.pointer}\n` : ""}${records.map((record) => `${record}\n`).join("")}${frame.gap ? `${frame.gap}\n` : ""}${frame.close}`;
+	return `${frame.open}\n${frame.pointer ? `${frame.pointer}\n` : ""}${records.map((record) => `${record}\n`).join("")}${frame.status}\n${frame.gap ? `${frame.gap}\n` : ""}${frame.close}`;
 }
 
 function gapFor(
@@ -215,6 +245,26 @@ interface RenderableRecord {
 	nodeId?: string;
 }
 
+function internalGapRecord(fromIndex: number, toIndexExclusive: number): RenderableRecord {
+	return {
+		text: `[no summary for spans [${fromIndex},${toIndexExclusive}); a summary failed or is not yet available, and the exact sources stay readable]`,
+		fromIndex,
+		toIndexExclusive,
+	};
+}
+
+/** Insert an explicit record for every uncovered range, preserving chronology without claiming summary coverage. */
+function withInternalGaps(records: readonly RenderableRecord[], omittedBeforeIndex: number): RenderableRecord[] {
+	const rendered: RenderableRecord[] = [];
+	let cursor = omittedBeforeIndex;
+	for (const record of records) {
+		if (record.fromIndex > cursor) rendered.push(internalGapRecord(cursor, record.fromIndex));
+		rendered.push(record);
+		cursor = Math.max(cursor, record.toIndexExclusive);
+	}
+	return rendered;
+}
+
 /**
  * Frame, pointer and records measured in UTF-8 bytes, and in lines when a line allowance is given, with every
  * wrapper and status line charged. If the records no longer fit either allowance, the oldest whole records are
@@ -230,10 +280,11 @@ function renderRecords(
 		audience?: FrontierAudience;
 	},
 ): TranscriptFrontierRendering {
+	const complete = withInternalGaps(records, frame.omittedBeforeIndex);
 	let first = 0;
 	for (;;) {
 		const omitted =
-			first < records.length ? (records[first] as RenderableRecord).fromIndex : frame.coveredThroughIndex;
+			first < complete.length ? (complete[first] as RenderableRecord).fromIndex : frame.coveredThroughIndex;
 		const effectiveOmitted = first === 0 ? frame.omittedBeforeIndex : omitted;
 		const built = buildFrame(
 			frame.sessionId,
@@ -243,7 +294,7 @@ function renderRecords(
 			options.gap,
 			options.audience,
 		);
-		const included = records.slice(first);
+		const included = complete.slice(first);
 		const bytes = frameBytes(built) + included.reduce((sum, record) => sum + utf8ByteLength(record.text) + 1, 0);
 		const lines = frameLines(built) + included.reduce((sum, record) => sum + estimateLineCount(record.text), 0);
 		if (
@@ -260,7 +311,7 @@ function renderRecords(
 				omittedBeforeIndex: effectiveOmitted,
 			};
 		}
-		if (first >= records.length) {
+		if (first >= complete.length) {
 			return { text: "", bytes: 0, includedNodeIds: [], omittedBeforeIndex: frame.coveredThroughIndex };
 		}
 		first += 1;
@@ -307,12 +358,21 @@ export function renderFrontier(
 
 /**
  * Validate a persisted selection against the accepted nodes: known recipe, accepted nodes of this session,
- * chronological and adjacent from the omitted boundary to the covered-through cursor, and within its own
- * allowance. A failing selection is rebuilt, never trusted.
+ * chronological and non-overlapping from the omitted boundary to the covered-through cursor, with every gap
+ * explicit at rendering, and within its own allowance. A failing selection is rebuilt, never trusted.
  */
 export function validateFrontierSelection(
 	selection: TranscriptFrontierSelection,
 	nodes: ReadonlyMap<string, TranscriptFrontierNode>,
+	sessionId: string,
+): TranscriptFrontierValidation {
+	// Foreign-session nodes stay indexed: a selection that names one fails validation rather than throwing.
+	return validateFrontierSelectionWithIndex(selection, indexOf([...nodes.values()]), sessionId);
+}
+
+function validateFrontierSelectionWithIndex(
+	selection: TranscriptFrontierSelection,
+	index: TranscriptFrontierNodeIndex,
 	sessionId: string,
 ): TranscriptFrontierValidation {
 	const fail = (reason: string): TranscriptFrontierValidation => ({ ok: false, reason });
@@ -320,21 +380,41 @@ export function validateFrontierSelection(
 	if (!isNonNegativeInteger(selection.revision) || selection.revision < 1) return fail("revision is invalid");
 	if (!isNonNegativeInteger(selection.allowanceBytes) || selection.allowanceBytes < 1)
 		return fail("allowance is invalid");
-	if (!isNonNegativeInteger(selection.omittedBeforeIndex) || !isNonNegativeInteger(selection.coveredThroughIndex)) {
+	if (
+		!isNonNegativeInteger(selection.omittedBeforeIndex) ||
+		!isNonNegativeInteger(selection.coveredThroughIndex) ||
+		!isNonNegativeInteger(selection.originIndex) ||
+		selection.originIndex > selection.omittedBeforeIndex
+	) {
 		return fail("boundaries are invalid");
 	}
+	const earliestLeaf = index.firstLeafStart();
+	if (earliestLeaf !== undefined && earliestLeaf < selection.originIndex) {
+		return fail(`an accepted leaf at span ${earliestLeaf} precedes the frontier origin ${selection.originIndex}`);
+	}
 	let cursor = selection.omittedBeforeIndex;
-	const records: string[] = [];
+	const records: RenderableRecord[] = [];
 	const seen = new Set<string>();
-	for (const id of selection.nodeIds) {
+	for (const [position, id] of selection.nodeIds.entries()) {
 		if (seen.has(id)) return fail(`node ${id} is repeated`);
 		seen.add(id);
-		const node = nodes.get(id);
+		const node = index.get(id);
 		if (!node) return fail(`node ${id} is not accepted`);
 		if (node.sessionId !== sessionId) return fail(`node ${id} belongs to another session`);
-		if (node.spanRange.fromIndex !== cursor) return fail(`node ${id} does not continue at span ${cursor}`);
+		if (node.spanRange.fromIndex < cursor) return fail(`node ${id} overlaps coverage ending at span ${cursor}`);
+		if (node.spanRange.fromIndex > cursor) {
+			const nextStart = index.nextStart(cursor);
+			if (nextStart !== undefined && nextStart < node.spanRange.fromIndex) {
+				return { ok: false, reason: `the gap at span ${cursor} now has an accepted node`, keep: position };
+			}
+		}
 		cursor = node.spanRange.toIndexExclusive;
-		records.push(renderRecord(node));
+		records.push({
+			text: renderRecord(node),
+			fromIndex: node.spanRange.fromIndex,
+			toIndexExclusive: node.spanRange.toIndexExclusive,
+			nodeId: node.id,
+		});
 	}
 	if (cursor !== selection.coveredThroughIndex) return fail("covered-through cursor does not match the nodes");
 	const frame = buildFrame(
@@ -344,7 +424,12 @@ export function validateFrontierSelection(
 		selection.coveredThroughIndex,
 		undefined,
 	);
-	const bytes = frameBytes(frame) + records.reduce((sum, record) => sum + utf8ByteLength(record) + 1, 0);
+	const bytes =
+		frameBytes(frame) +
+		withInternalGaps(records, selection.omittedBeforeIndex).reduce(
+			(sum, record) => sum + utf8ByteLength(record.text) + 1,
+			0,
+		);
 	if (bytes > selection.allowanceBytes) return fail(`selection is ${bytes} bytes, over its allowance`);
 	return { ok: true, bytes };
 }
@@ -367,29 +452,165 @@ export function frontierMergeAge(
 	return { distance: coveredThroughIndex - pair.toIndexExclusive, spans: pair.toIndexExclusive - pair.fromIndex };
 }
 
-interface NodeIndex {
-	byId: Map<string, TranscriptFrontierNode>;
-	/** Lowest-level node starting at each span index. */
-	startingAt: Map<number, TranscriptFrontierNode>;
-	parentOf: Map<string, TranscriptFrontierNode>;
-	firstLeafStart: number | undefined;
-}
-
-function indexNodes(sessionId: string, nodes: readonly TranscriptFrontierNode[]): NodeIndex {
-	const index: NodeIndex = { byId: new Map(), startingAt: new Map(), parentOf: new Map(), firstLeafStart: undefined };
-	for (const node of nodes) {
-		if (node.sessionId !== sessionId) throw new RangeError("A frontier is built from the nodes of one lineage.");
-		index.byId.set(node.id, node);
-		const existing = index.startingAt.get(node.spanRange.fromIndex);
-		if (!existing || node.level < existing.level || (node.level === existing.level && node.id < existing.id)) {
-			index.startingAt.set(node.spanRange.fromIndex, node);
-		}
-		if (node.children) index.parentOf.set(`${node.children[0]}|${node.children[1]}`, node);
-		if (node.level === 0 && (index.firstLeafStart === undefined || node.spanRange.fromIndex < index.firstLeafStart)) {
-			index.firstLeafStart = node.spanRange.fromIndex;
-		}
+function indexOf(nodes: readonly TranscriptFrontierNode[]): FrontierNodeIndex {
+	const index = new FrontierNodeIndex();
+	// Ascending starts make every insertion an append.
+	for (const node of [...nodes].sort((left, right) => left.spanRange.fromIndex - right.spanRange.fromIndex)) {
+		index.index(node);
 	}
 	return index;
+}
+
+function indexNodes(sessionId: string, nodes: readonly TranscriptFrontierNode[]): FrontierNodeIndex {
+	if (nodes.some((node) => node.sessionId !== sessionId)) {
+		throw new RangeError("A frontier is built from the nodes of one lineage.");
+	}
+	return indexOf(nodes);
+}
+
+/** Index of the first start at or after `cursor` in an ascending list (its length when none is). */
+export function lowerBoundStart(starts: readonly number[], cursor: number): number {
+	let low = 0;
+	let high = starts.length;
+	while (low < high) {
+		const middle = low + Math.floor((high - low) / 2);
+		if ((starts[middle] as number) < cursor) low = middle + 1;
+		else high = middle;
+	}
+	return low;
+}
+
+/** The node a start position shows: the lowest level, then the lowest id. */
+export function preferredFrontierNode(
+	left: TranscriptFrontierNode | undefined,
+	right: TranscriptFrontierNode | undefined,
+): TranscriptFrontierNode | undefined {
+	if (!left) return right;
+	if (!right) return left;
+	return right.level < left.level || (right.level === left.level && right.id < left.id) ? right : left;
+}
+
+/** Incremental ordered read index of one lineage's approved nodes: insertion and removal keep every lookup current. */
+export class FrontierNodeIndex implements TranscriptFrontierNodeIndex {
+	private readonly byId = new Map<string, TranscriptFrontierNode>();
+	private readonly byStart = new Map<number, Map<string, TranscriptFrontierNode>>();
+	private readonly preferredByStart = new Map<number, TranscriptFrontierNode>();
+	private readonly parentsByPair = new Map<string, Map<string, TranscriptFrontierNode>>();
+	private readonly starts: number[] = [];
+	private readonly leafCounts = new Map<number, number>();
+	private firstLeaf: number | undefined;
+
+	get(id: string): TranscriptFrontierNode | undefined {
+		return this.byId.get(id);
+	}
+
+	startingAt(fromIndex: number): TranscriptFrontierNode | undefined {
+		return this.preferredByStart.get(fromIndex);
+	}
+
+	parentOf(leftId: string, rightId: string): TranscriptFrontierNode | undefined {
+		let preferred: TranscriptFrontierNode | undefined;
+		for (const node of this.parentsByPair.get(`${leftId}|${rightId}`)?.values() ?? []) {
+			preferred = preferredFrontierNode(preferred, node);
+		}
+		return preferred;
+	}
+
+	nextStart(fromIndex: number): number | undefined {
+		return this.starts[lowerBoundStart(this.starts, fromIndex)];
+	}
+
+	firstLeafStart(): number | undefined {
+		return this.firstLeaf;
+	}
+
+	index(node: TranscriptFrontierNode): void {
+		this.byId.set(node.id, node);
+		const start = node.spanRange.fromIndex;
+		let candidates = this.byStart.get(start);
+		if (!candidates) {
+			candidates = new Map();
+			this.byStart.set(start, candidates);
+			const at = lowerBoundStart(this.starts, start);
+			this.starts.splice(at, 0, start);
+		}
+		candidates.set(node.id, node);
+		this.reselectStart(start, candidates);
+		if (node.children) {
+			const pair = `${node.children[0]}|${node.children[1]}`;
+			const parents = this.parentsByPair.get(pair) ?? new Map<string, TranscriptFrontierNode>();
+			parents.set(node.id, node);
+			this.parentsByPair.set(pair, parents);
+		}
+		if (node.level === 0) {
+			this.leafCounts.set(start, (this.leafCounts.get(start) ?? 0) + 1);
+			if (this.firstLeaf === undefined || start < this.firstLeaf) this.firstLeaf = start;
+		}
+	}
+
+	unindex(node: TranscriptFrontierNode): void {
+		if (!this.byId.delete(node.id)) return;
+		const start = node.spanRange.fromIndex;
+		const candidates = this.byStart.get(start);
+		candidates?.delete(node.id);
+		if (candidates?.size) this.reselectStart(start, candidates);
+		else {
+			this.byStart.delete(start);
+			this.preferredByStart.delete(start);
+			const at = lowerBoundStart(this.starts, start);
+			if (this.starts[at] === start) this.starts.splice(at, 1);
+		}
+		if (node.children) {
+			const pair = `${node.children[0]}|${node.children[1]}`;
+			const parents = this.parentsByPair.get(pair);
+			parents?.delete(node.id);
+			if (parents?.size === 0) this.parentsByPair.delete(pair);
+		}
+		if (node.level === 0) {
+			const count = (this.leafCounts.get(start) ?? 1) - 1;
+			if (count > 0) this.leafCounts.set(start, count);
+			else {
+				this.leafCounts.delete(start);
+				if (this.firstLeaf === start) {
+					this.firstLeaf = this.starts.find((candidate) => (this.leafCounts.get(candidate) ?? 0) > 0);
+				}
+			}
+		}
+	}
+
+	view(extra?: TranscriptFrontierNode): TranscriptFrontierNodeIndex {
+		if (!extra) return this;
+		return {
+			get: (id) => (id === extra.id ? extra : this.get(id)),
+			startingAt: (fromIndex) =>
+				preferredFrontierNode(
+					this.startingAt(fromIndex),
+					extra.spanRange.fromIndex === fromIndex ? extra : undefined,
+				),
+			parentOf: (leftId, rightId) =>
+				preferredFrontierNode(
+					this.parentOf(leftId, rightId),
+					extra.children?.[0] === leftId && extra.children[1] === rightId ? extra : undefined,
+				),
+			nextStart: (fromIndex) => {
+				const known = this.nextStart(fromIndex);
+				const candidate = extra.spanRange.fromIndex >= fromIndex ? extra.spanRange.fromIndex : undefined;
+				return known === undefined || (candidate !== undefined && candidate < known) ? candidate : known;
+			},
+			firstLeafStart: () => {
+				const known = this.firstLeafStart();
+				return extra.level === 0 && (known === undefined || extra.spanRange.fromIndex < known)
+					? extra.spanRange.fromIndex
+					: known;
+			},
+		};
+	}
+
+	private reselectStart(start: number, candidates: ReadonlyMap<string, TranscriptFrontierNode>): void {
+		let preferred: TranscriptFrontierNode | undefined;
+		for (const node of candidates.values()) preferred = preferredFrontierNode(preferred, node);
+		if (preferred) this.preferredByStart.set(start, preferred);
+	}
 }
 
 class FrontierBuilder {
@@ -397,10 +618,11 @@ class FrontierBuilder {
 	omittedBeforeIndex: number;
 	coveredThroughIndex: number;
 	private readonly recordBytes = new Map<string, number>();
+	/** Node and internal-gap record bytes between `omittedBeforeIndex` and `coveredThroughIndex`. */
 	private recordSum = 0;
 	private readonly sessionId: string;
 	private readonly revision: number;
-	private readonly index: NodeIndex;
+	private readonly index: TranscriptFrontierNodeIndex;
 	private readonly allowanceBytes: number;
 	private readonly lowWaterBytes: number;
 	private readonly tail: TranscriptFrontierTail | undefined;
@@ -408,7 +630,7 @@ class FrontierBuilder {
 	constructor(
 		sessionId: string,
 		revision: number,
-		index: NodeIndex,
+		index: TranscriptFrontierNodeIndex,
 		allowanceBytes: number,
 		tail: TranscriptFrontierTail | undefined,
 		start: { nodes: TranscriptFrontierNode[]; omittedBeforeIndex: number; coveredThroughIndex: number },
@@ -420,8 +642,11 @@ class FrontierBuilder {
 		this.lowWaterBytes = Math.floor(allowanceBytes * TRANSCRIPT_FRONTIER_LOW_WATER_RATIO);
 		this.tail = tail;
 		this.omittedBeforeIndex = start.omittedBeforeIndex;
-		this.coveredThroughIndex = start.coveredThroughIndex;
+		this.coveredThroughIndex = start.omittedBeforeIndex;
 		for (const node of start.nodes) this.push(node);
+		if (this.coveredThroughIndex !== start.coveredThroughIndex) {
+			throw new Error("A restored frontier's node endpoint disagrees with its covered-through cursor.");
+		}
 	}
 
 	gap(): TranscriptFrontierGap | undefined {
@@ -446,6 +671,10 @@ class FrontierBuilder {
 	}
 
 	private push(node: TranscriptFrontierNode): void {
+		if (node.spanRange.fromIndex > this.coveredThroughIndex) {
+			this.recordSum +=
+				utf8ByteLength(internalGapRecord(this.coveredThroughIndex, node.spanRange.fromIndex).text) + 1;
+		}
 		this.nodes.push(node);
 		this.recordSum += this.sizeOf(node);
 		this.coveredThroughIndex = node.spanRange.toIndexExclusive;
@@ -455,7 +684,8 @@ class FrontierBuilder {
 	extend(): void {
 		this.reduceIfOver();
 		for (;;) {
-			const next = this.index.startingAt.get(this.coveredThroughIndex);
+			const start = this.index.nextStart(this.coveredThroughIndex);
+			const next = start === undefined ? undefined : this.index.startingAt(start);
 			if (!next || next.spanRange.toIndexExclusive <= this.coveredThroughIndex) break;
 			this.push(next);
 			this.reduceIfOver();
@@ -485,7 +715,7 @@ class FrontierBuilder {
 			const left = this.nodes[at] as TranscriptFrontierNode;
 			const right = this.nodes[at + 1] as TranscriptFrontierNode;
 			if (left.level !== right.level || left.ordinal % 2 !== 0 || right.ordinal !== left.ordinal + 1) continue;
-			const parent = this.index.parentOf.get(`${left.id}|${right.id}`);
+			const parent = this.index.parentOf(left.id, right.id);
 			if (!parent) continue;
 			if (
 				parent.spanRange.fromIndex !== left.spanRange.fromIndex ||
@@ -512,6 +742,15 @@ class FrontierBuilder {
 		while (this.nodes.length > 0 && this.bytes() > target) {
 			const dropped = this.nodes.shift() as TranscriptFrontierNode;
 			this.recordSum -= this.sizeOf(dropped);
+			if (dropped.spanRange.fromIndex > this.omittedBeforeIndex) {
+				this.recordSum -=
+					utf8ByteLength(internalGapRecord(this.omittedBeforeIndex, dropped.spanRange.fromIndex).text) + 1;
+			}
+			const next = this.nodes[0];
+			if (next && next.spanRange.fromIndex > dropped.spanRange.toIndexExclusive) {
+				this.recordSum -=
+					utf8ByteLength(internalGapRecord(dropped.spanRange.toIndexExclusive, next.spanRange.fromIndex).text) + 1;
+			}
 			this.omittedBeforeIndex = this.nodes[0]?.spanRange.fromIndex ?? this.coveredThroughIndex;
 		}
 	}
@@ -519,33 +758,47 @@ class FrontierBuilder {
 
 /**
  * Select the frontier for one lineage. Restores `previous` when it still validates (extending it by newly
- * available nodes and reducing only if it is over the allowance); otherwise rebuilds from the earliest
- * available leaf and reports why in `recovery`.
+ * available nodes and reducing only if it is over the allowance). When a summary landed in a gap the previous
+ * selection skipped, the nodes before that gap are kept as they were and the selection resumes from there;
+ * any other fault rebuilds from the earliest available leaf. Either way the cause is reported in `recovery`.
  */
 export function selectFrontier(input: TranscriptFrontierInput): TranscriptFrontierResult {
 	if (!Number.isSafeInteger(input.allowanceBytes) || input.allowanceBytes < 1) {
 		throw new RangeError("Frontier allowance must be a positive safe integer.");
 	}
-	const index = indexNodes(input.sessionId, input.nodes);
+	const index = input.index ?? indexNodes(input.sessionId, input.nodes ?? []);
 	const baseRevision = input.previous?.revision ?? 0;
 	let recovery: string | undefined;
 	let start: { nodes: TranscriptFrontierNode[]; omittedBeforeIndex: number; coveredThroughIndex: number } | undefined;
 	if (input.previous) {
-		const check = validateFrontierSelection(input.previous, index.byId, input.sessionId);
+		const check = validateFrontierSelectionWithIndex(input.previous, index, input.sessionId);
 		if (check.ok) {
 			start = {
-				nodes: input.previous.nodeIds.map((id) => index.byId.get(id) as TranscriptFrontierNode),
+				nodes: input.previous.nodeIds.map((id) => index.get(id) as TranscriptFrontierNode),
 				omittedBeforeIndex: input.previous.omittedBeforeIndex,
 				coveredThroughIndex: input.previous.coveredThroughIndex,
 			};
 		} else {
 			recovery = check.reason;
+			if (check.keep !== undefined) {
+				// A late summary filled a gap: the nodes before it stay byte-identical and the rest is extended from there.
+				const kept = input.previous.nodeIds
+					.slice(0, check.keep)
+					.map((id) => index.get(id) as TranscriptFrontierNode);
+				const last = kept[kept.length - 1];
+				start = {
+					nodes: kept,
+					omittedBeforeIndex: input.previous.omittedBeforeIndex,
+					coveredThroughIndex: last ? last.spanRange.toIndexExclusive : input.previous.omittedBeforeIndex,
+				};
+			}
 		}
 	}
-	const restored = start !== undefined;
+	const restored = start !== undefined && recovery === undefined;
+	let originIndex = start ? (input.previous?.originIndex ?? 0) : 0;
 	if (!start) {
-		const origin = index.firstLeafStart ?? 0;
-		start = { nodes: [], omittedBeforeIndex: origin, coveredThroughIndex: origin };
+		originIndex = index.firstLeafStart() ?? 0;
+		start = { nodes: [], omittedBeforeIndex: originIndex, coveredThroughIndex: originIndex };
 	}
 	const builder = new FrontierBuilder(
 		input.sessionId,
@@ -574,13 +827,27 @@ export function selectFrontier(input: TranscriptFrontierInput): TranscriptFronti
 			input.previous.coveredThroughIndex,
 			gap,
 		);
-		const members = input.previous.nodeIds.map((id) => index.byId.get(id) as TranscriptFrontierNode);
-		const bytes = frameBytes(frame) + members.reduce((sum, node) => sum + utf8ByteLength(renderRecord(node)) + 1, 0);
+		const records = input.previous.nodeIds.map((id): RenderableRecord => {
+			const node = index.get(id) as TranscriptFrontierNode;
+			return {
+				text: renderRecord(node),
+				fromIndex: node.spanRange.fromIndex,
+				toIndexExclusive: node.spanRange.toIndexExclusive,
+				nodeId: node.id,
+			};
+		});
+		const bytes =
+			frameBytes(frame) +
+			withInternalGaps(records, input.previous.omittedBeforeIndex).reduce(
+				(sum, record) => sum + utf8ByteLength(record.text) + 1,
+				0,
+			);
 		return { selection: input.previous, changed: false, bytes, ...(gap ? { gap } : {}) };
 	}
 	const selection: TranscriptFrontierSelection = {
 		nodeIds,
 		omittedBeforeIndex: builder.omittedBeforeIndex,
+		originIndex,
 		coveredThroughIndex: builder.coveredThroughIndex,
 		revision: baseRevision + 1,
 		allowanceBytes: input.allowanceBytes,
@@ -661,8 +928,14 @@ export function projectFrontierView(
 		let compacted = 0;
 		let visible = 0;
 		let off = 0;
-		const compactedRefs: typeof node.sourceRefs = [];
-		for (const ref of node.sourceRefs) {
+		// A parent's coverage is its children's: a summary it is built on that is not among the nodes ends the view.
+		const covered = coveredSourceRefs(node, (id) => nodes.get(id));
+		if (!covered) {
+			offBranch = true;
+			return;
+		}
+		const compactedRefs: typeof covered = [];
+		for (const ref of covered) {
 			const standing = standingOf(ref.entryId);
 			if (standing === "compacted") {
 				compacted += 1;

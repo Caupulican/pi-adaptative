@@ -692,18 +692,25 @@ export function summaryApproval(
 	node: TranscriptSummaryApprovalSubject,
 	resolveChild: (id: string) => TranscriptSummaryApprovalSubject | undefined,
 	depth = 0,
+	memo?: Map<string, TranscriptSummaryApproval>,
 ): TranscriptSummaryApproval {
-	if (node.quality === "exact_copy") return { approved: true, basis: "exact_copy" };
+	const known = memo?.get(node.id);
+	if (known) return known;
+	const remember = (approval: TranscriptSummaryApproval): TranscriptSummaryApproval => {
+		memo?.set(node.id, approval);
+		return approval;
+	};
+	if (node.quality === "exact_copy") return remember({ approved: true, basis: "exact_copy" });
 	const own = ownApproval(node);
-	if (!own.approved) return own;
-	if (node.children === undefined) return own;
-	if (depth >= MAX_APPROVAL_DEPTH) return { approved: false, reason: "child_not_approved" };
+	if (!own.approved) return remember(own);
+	if (node.children === undefined) return remember(own);
+	if (depth >= MAX_APPROVAL_DEPTH) return remember({ approved: false, reason: "child_not_approved" });
 	for (const childId of node.children) {
 		const child = resolveChild(childId);
-		if (!child || !summaryApproval(child, resolveChild, depth + 1).approved)
-			return { approved: false, reason: "child_not_approved" };
+		if (!child || !summaryApproval(child, resolveChild, depth + 1, memo).approved)
+			return remember({ approved: false, reason: "child_not_approved" });
 	}
-	return own;
+	return remember(own);
 }
 
 function ownApproval(node: TranscriptSummaryApprovalSubject): TranscriptSummaryApproval {

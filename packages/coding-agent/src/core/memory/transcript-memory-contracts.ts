@@ -61,7 +61,7 @@ export interface TranscriptSourceSpan {
 	textDigest: string;
 }
 
-const TRANSCRIPT_HANDLE_PREFIX = "tx";
+export const TRANSCRIPT_HANDLE_PREFIX = "tx";
 const SOURCE_ID_PATTERN = /^[A-Za-z0-9._-]{1,256}$/;
 const DIGEST_PATTERN = /^[a-f0-9]{16}$/;
 export const TRANSCRIPT_MAX_PARTS_PER_ENTRY = 4_096;
