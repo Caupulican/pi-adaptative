@@ -8,6 +8,7 @@ session module under `packages/coding-agent/src/core`. Regenerate after adding o
 | Module | Own test | What it owns |
 |---|---|---|
 | `agent-session-background-tasks.ts` | no | Construction of the session's background tool-task controller, extracted from the session coordinator (decomposition ratchet: the coordinator only wires, its line ceiling only moves down). |
+| `agent-session-composition.ts` | no | Factory builders for the session coordinator's operator projection, worker supervision, project rules, adaptive-runtime attachment, context-composition dashboard report, and toolkit execution. |
 | `agent-session-contracts.ts` | no | (no header comment) |
 | `agent-session-edge.ts` | no | The edge, bound to one session: grants live on the branch, the confirmation handler belongs to the interactive host, and a child session never asks. |
 | `agent-session-guards.ts` | no | Guard handlers the agent loop fires into the session: a runaway stop (a bounded harness guard ended a run) and a tool-validation escalation (repeated identical validation failures). |
@@ -35,13 +36,19 @@ session module under `packages/coding-agent/src/core`. Regenerate after adding o
 | `model-selection-controller.ts` | no | User-facing model + thinking-level selection. |
 | `pending-input-queue-controller.ts` | no | (no header comment) |
 | `profile-filter-controller.ts` | no | Resource-profile tool/extension gating + reload-time profile model re-application. |
+| `prompt-submission-controller.ts` | no | Foreground prompt submission, slash-command and template expansion, queued-submission serialization, routed-turn preflight/postflight, and post-turn recall scoring. |
 | `provider-request-context-controller.ts` | no | (no header comment) |
 | `provider-request-runtime-controller.ts` | no | (no header comment) |
+| `queued-input-persistence-controller.ts` | no | Queued owner-input admission, held-input warnings, durable session-entry persistence and image pinning for undelivered steering/follow-up messages, and resume-time restoration notices. |
 | `reflection-controller.ts` | no | Root-session reflection cue + explicit learning-write controller. |
 | `runtime-update-controller.ts` | no | (no header comment) |
 | `scout-controller.ts` | no | (no header comment) |
+| `session-cache-controller.ts` | no | Prompt-cache custody, survival observation recording, cold-moment transitions, worker early-compaction economics, and cache-priced objective executor selection for a session. |
+| `session-edge-intent-controller.ts` | no | Owner request classification, optional-tool intent checkpointing, rule-authority and local-commit delivery bindings, model-pool policy updates, and session edge grants. |
+| `session-semantic-plane-controller.ts` | no | Session semantic-plane health recorder, evaluation-recording decision-engine wrapper, and lazy SQLite decision-ledger lifecycle. |
+| `session-unsettled-ladder-controller.ts` | no | Post-turn answer claim verification, unsettled-item ladder escalation (System One and stronger-model consults), owner follow-up recording, and goal-completion owner decisions. |
 | `tool-gate-controller.ts` | no | Agent tool-call gate: model-router escalation, autonomy gating, extension tool hooks, and the untrusted-content output boundary. |
 | `tool-protocol-controller.ts` | no | (no header comment) |
 
-35 modules, 0 with a test file of the same name.
+42 modules, 0 with a test file of the same name.
 

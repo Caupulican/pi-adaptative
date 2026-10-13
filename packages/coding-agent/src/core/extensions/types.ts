@@ -1858,6 +1858,8 @@ export interface BuildSystemPromptOptions {
 	 * advances it only at a cold moment, so a day rollover never breaks a warm cache on its own.
 	 */
 	date?: string;
+	/** Omit the Current date line when turn state is carried outside the system prompt (ICM continuous chat). */
+	omitDate?: boolean;
 	/** ASD-STE100 explanation strictness, 0 (off) to 10; invalid or missing means the default 9. */
 	steStrictness?: number;
 }

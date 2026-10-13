@@ -70,6 +70,7 @@ import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-e
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface CompactionControllerSettingsSource {
 	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number };
+	getMemorySystem?(): string;
 }
 
 export type AutoCompactionReason = "overflow" | "provider_recovery" | "threshold";
@@ -198,6 +199,8 @@ export interface CompactionControllerDeps {
 	settingsManager: CompactionControllerSettingsSource;
 	getModel(): Model<Api> | undefined;
 	getAdaptedSettings(): CompactionSettings;
+	/** True when ICM continuous chat owns conversation history so legacy branch compaction stays disabled. */
+	isContinuousChatActive?(): boolean;
 	getCompactionModelSetting(): string;
 	getRequestAuth(model: Model<Api>): Promise<RequestAuth>;
 	resolveModelAndAuth(
@@ -491,7 +494,12 @@ export class CompactionController {
 		return [customInstructions?.trim(), memoryHandoff].filter(Boolean).join("\n\n");
 	}
 
+	private isContinuousChatActive(): boolean {
+		return this.deps.settingsManager.getMemorySystem?.() === "icm" || this.deps.isContinuousChatActive?.() === true;
+	}
+
 	hasCompactableHistory(): boolean {
+		if (this.isContinuousChatActive()) return false;
 		const settings = this.deps.getAdaptedSettings();
 		const key = `${this.deps.sessionManager.getLeafId() ?? ""}\u0000${JSON.stringify(settings)}\u0000${this.deps.getActiveTask?.() ?? ""}`;
 		if (this.compactableHistory?.key === key) return this.compactableHistory.value;
@@ -835,6 +843,9 @@ export class CompactionController {
 
 	private async runManual(customInstructions?: string): Promise<CompactionResult> {
 		if (this.closed) throw new Error("Compaction cancelled");
+		if (this.isContinuousChatActive()) {
+			throw new Error("Manual session compaction is unavailable while ICM continuous chat owns the conversation.");
+		}
 		if (this.isRunning()) {
 			throw new Error("Compaction already in progress");
 		}
@@ -1048,7 +1059,7 @@ export class CompactionController {
 
 	async check(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
 		const settings = this.deps.getAdaptedSettings();
-		if (this.closed || !settings.enabled || this.isRunning()) return false;
+		if (this.closed || this.isContinuousChatActive() || !settings.enabled || this.isRunning()) return false;
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return false;
 
 		const model = this.deps.getModel();
@@ -1210,7 +1221,7 @@ export class CompactionController {
 	}
 
 	runAuto(reason: AutoCompactionReason, willRetry: boolean, options: AutoCompactionRunOptions = {}): Promise<boolean> {
-		if (this.closed) return Promise.resolve(false);
+		if (this.closed || this.isContinuousChatActive()) return Promise.resolve(false);
 		if (this.autoRunPromise) return this.autoRunPromise;
 		this.cancelIdlePreparation();
 		if (this.manualAbortController) return Promise.resolve(this.deps.agent.hasQueuedMessages());
@@ -1618,7 +1629,7 @@ export class CompactionController {
 	}
 
 	onLaneIdle(reply: AssistantMessage): void {
-		if (this.closed) return;
+		if (this.closed || this.isContinuousChatActive()) return;
 		this.idleTimer.disarm();
 		this.idlePreparationSettingsKey = undefined;
 		// A resume outcome stays visible until a new preparation is planned.

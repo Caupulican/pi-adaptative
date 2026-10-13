@@ -156,6 +156,7 @@ export class SystemPromptBuilder {
 
 	/** Move the pinned date to today; true when it changed (the caller rebuilds the base prompt). */
 	advancePromptDate(now: Date = new Date()): boolean {
+		if (this.isIcmMode()) return false;
 		const today = promptDate(now);
 		if (this._promptDate === today) return false;
 		const changed = this._promptDate !== undefined;
@@ -386,7 +387,7 @@ export class SystemPromptBuilder {
 - ${DELEGATION_DECISION_RULE}
 - For useful delegation, start or reuse a suitable idle worker before doing its task yourself. Give scope, expected evidence, and write ownership; do not duplicate running or queued work.
 - Use targeted assignments for specific worker tasks; broadcast is for common coordination evidence only.
-- ${this.isIcmMode() ? "Worker memory access is read-only via the memory_read broker: past-conversation history only; ICM catalog files follow the worker's ordinary file grants." : "Worker memory access is read-only via the memory_read broker; root memory owns mutation and lifecycle."}
+- ${this.isIcmMode() ? "Worker memory access is read-only via the worker memory broker (zoom and date by message id; private worker logs stay root-only); ICM catalog files follow the worker's ordinary file grants." : "Worker memory access is read-only via the memory_read broker; root memory owns mutation and lifecycle."}
 - Respect explicit user restrictions and granted authority; do not ask for redundant permission. Never bypass admission or change settings to force a worker. If admission fails, use the reported reason to choose safe local progress or report a genuine blocker.
 - Continue parent work while workers run; wait only at a true dependency, then inspect status and handoffs event-driven.
 - Parent owns integration, verification, security and approval decisions, and writes unless authority explicitly grants worker writes.
@@ -457,6 +458,7 @@ export class SystemPromptBuilder {
 			promptGuidelines,
 			extensions: [...activeExtensions],
 			date: this._promptDate,
+			...(this.isIcmMode() ? { omitDate: true } : {}),
 			steStrictness: this.deps.getSettingsManager().getSteStrictness?.(),
 		};
 		// A memory allowance is part of the final prompt, not extra capacity on top of it.

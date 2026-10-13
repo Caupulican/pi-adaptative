@@ -169,6 +169,7 @@ function appendPromptResources(
 		fullPrompt: boolean;
 		hasRead: boolean;
 		date: string;
+		omitDate?: boolean;
 		promptCwd: string;
 		modelCapability: BuildSystemPromptOptions["modelCapability"];
 	},
@@ -184,7 +185,10 @@ function appendPromptResources(
 		result += formatExtensionsForPrompt(options.extensions, options.visibleTools);
 	}
 	// Day-granularity only; keep this tail stable across every call on the same calendar day.
-	result += `\nCurrent date: ${options.date}`;
+	// ICM continuous chat carries current time in its per-turn state message instead of the system prompt.
+	if (!options.omitDate) {
+		result += `\nCurrent date: ${options.date}`;
+	}
 	// Constrained prompt budgets must not depend on host path length. Chat has no filesystem
 	// tools. Lean's envelope is too tight for Windows/temp cwd variation; tools still
 	// receive cwd at runtime. Full and minimal keep the path.
@@ -277,6 +281,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			fullPrompt,
 			hasRead,
 			date,
+			omitDate: options.omitDate,
 			promptCwd,
 			modelCapability: options.modelCapability,
 		});
@@ -369,6 +374,7 @@ PI DOCS: root=${packageRoot}. Relevant work only; read needed README.md, \`docs/
 		fullPrompt,
 		hasRead,
 		date,
+		omitDate: options.omitDate,
 		promptCwd,
 		modelCapability: options.modelCapability,
 	});

@@ -64,10 +64,12 @@ export function createBlockedContinuousChatPlanWrapper(
 }
 
 /**
- * Projects the installed plan onto the running turn, as its last stage. The base plans over the whole durable history,
- * so its transient decisions still see the earlier records; the wire takes only the turn's own messages from the base
- * output, after the turn view and state. Throws rather than send durable history when no turn is running, the turn
- * start is missing from the request, or the planned history no longer ends with the turn.
+ * Projects the installed plan onto the running turn. The base planner receives only the running turn's
+ * messages (with `sentPrefixCount` shifted to the turn start) so context GC, path aliasing, prompt
+ * enforcement, and transient decisions never inspect or mutate pre-turn durable history that `<chat>`
+ * replaced; the wire carries the turn view and state followed by the planned turn messages. Throws
+ * rather than send durable history when no turn is running, the turn start is missing from the request,
+ * or the planned history contains messages outside the running turn.
  */
 export function createContinuousChatPlanWrapper(
 	source: ContinuousChatProjectionSource,
@@ -101,12 +103,14 @@ export function createContinuousChatPlanWrapper(
 		const startIndex = request.messages.indexOf(start);
 		if (startIndex === -1) throw new Error("Continuous-chat turn start is missing from the planned history.");
 		// The turn's messages, untransformed: the durable form transient records were committed in.
+		// Only the running turn is handed to the base planner so context GC, path aliasing, prompt
+		// enforcement, and transient-cleared checks never inspect or rewrite pre-turn durable history
+		// that `<chat>` already replaced.
 		const turnMessages = request.messages.slice(startIndex);
-		const plan = await base(request, signal);
-		// Context transforms may rewrite the turn's messages (path aliases) but keep their count and timestamps.
-		const turnStart = plan.messages.length - turnMessages.length;
-		const planned = turnStart >= 0 ? plan.messages[turnStart] : undefined;
-		if (planned?.role !== start.role || planned.timestamp !== start.timestamp) {
+		const sentPrefixCount = Math.max(0, request.sentPrefixCount - startIndex);
+		const plan = await base({ ...request, messages: turnMessages, sentPrefixCount }, signal);
+		const turnTimestamps = new Set(turnMessages.map((message) => message.timestamp));
+		if (plan.messages.some((message) => !turnTimestamps.has(message.timestamp))) {
 			throw new Error("Continuous-chat planned history does not end with the running turn.");
 		}
 		const isTurnCurrent = (): boolean => {
@@ -115,7 +119,7 @@ export function createContinuousChatPlanWrapper(
 		};
 		return {
 			...plan,
-			messages: [...frameFor(handle, stateText), ...plan.messages.slice(turnStart)],
+			messages: [...frameFor(handle, stateText), ...plan.messages],
 			transientReconciliationBase: turnMessages,
 			isCurrent: () => isTurnCurrent() && plan.isCurrent?.() !== false,
 			prepareCommit: () => isTurnCurrent() && plan.prepareCommit?.() !== false,

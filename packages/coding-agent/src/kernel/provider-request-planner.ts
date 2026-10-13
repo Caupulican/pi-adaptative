@@ -384,7 +384,7 @@ export async function startPlannedAgentProviderRequestWithId(
 		// Checked on every admission attempt, including one later discarded as stale, so a host sees
 		// the full extent of what its own planContext/transformContext did - not just what survived
 		// into an accepted request. Gated on the hook being registered: skipped entirely otherwise.
-		if (config.onSentPrefixDisturbance) {
+		if (config.onSentPrefixDisturbance && !plan.transientReconciliationBase) {
 			const disturbance = detectSentPrefixDisturbance(sanitized.messages, plan.messages, sentPrefixCount);
 			if (disturbance) config.onSentPrefixDisturbance(disturbance);
 		}

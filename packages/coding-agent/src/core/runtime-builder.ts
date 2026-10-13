@@ -1463,7 +1463,7 @@ export class RuntimeBuilder {
 				const definition = this.deps.getRuntimeUpdateTool?.();
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}
-			if (toolAccess.allows(SELF_COMPACT_TOOL_NAME)) {
+			if (toolAccess.allows(SELF_COMPACT_TOOL_NAME) && this.deps.getSettingsManager().getMemorySystem() !== "icm") {
 				const definition = this.deps.getSelfCompactTool?.();
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}

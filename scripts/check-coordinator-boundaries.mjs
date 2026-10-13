@@ -9,11 +9,19 @@ export const COORDINATOR_MAX_LINES = 8_000;
 export const boundaries = [
 	{
 		path: "packages/coding-agent/src/core/agent-session.ts",
+		maxLines: 6_000,
 		required: [
+			'from "./agent-session-composition.ts"',
 			'from "./agent-session-contracts.ts"',
+			'from "./extension-binding-controller.ts"',
 			'from "./goals/goal-session-controller.ts"',
 			'from "./human-input-controller.ts"',
-			'from "./extension-binding-controller.ts"',
+			'from "./prompt-submission-controller.ts"',
+			'from "./queued-input-persistence-controller.ts"',
+			'from "./session-cache-controller.ts"',
+			'from "./session-edge-intent-controller.ts"',
+			'from "./session-semantic-plane-controller.ts"',
+			'from "./session-unsettled-ladder-controller.ts"',
 		],
 		forbidden: [
 			"new GoalLoopController(",
@@ -24,6 +32,12 @@ export const boundaries = [
 			"private _bindExtensionCore(",
 			"private _applyExtensionBindings(",
 			"runner.bindCore(",
+			"new CacheObservationRecorder(",
+			"new SemanticPlaneHealthRecorder(",
+			"new AnswerClaimChecker(",
+			"new OwnerPolicyQueue(",
+			"class SubmissionPreflightAborted",
+			"private async _promptUnserialized(",
 		],
 	},
 	{
@@ -101,8 +115,9 @@ export function checkCoordinatorBoundaries(options = {}) {
 		const targetPath = resolve(baseRoot, boundary.path);
 		const source = readFileSync(targetPath, "utf8");
 		const lineCount = source.endsWith("\n") ? source.split(/\r?\n/).length - 1 : source.split(/\r?\n/).length;
-		if (lineCount > maxLines) {
-			failures.push(`${boundary.path}: ${lineCount} lines exceeds coordinator ceiling ${maxLines}`);
+		const ceiling = boundary.maxLines ?? maxLines;
+		if (lineCount > ceiling) {
+			failures.push(`${boundary.path}: ${lineCount} lines exceeds coordinator ceiling ${ceiling}`);
 		}
 		for (const marker of boundary.required ?? []) {
 			if (!source.includes(marker)) failures.push(`${boundary.path}: missing extracted-owner marker ${JSON.stringify(marker)}`);

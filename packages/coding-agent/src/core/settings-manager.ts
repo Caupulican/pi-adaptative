@@ -2245,7 +2245,9 @@ export class SettingsManager {
 		if (this.resolvedSelfCompaction?.key !== key) {
 			this.resolvedSelfCompaction = { key, value: resolveSelfCompactionSettings(raw) };
 		}
-		return this.resolvedSelfCompaction.value;
+		return this.getMemorySystem() === "icm"
+			? { ...this.resolvedSelfCompaction.value, enabled: false }
+			: this.resolvedSelfCompaction.value;
 	}
 
 	getCompactionSettings(): {
