@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Bound Anthropic subscription usage polling to the stored OAuth credential instead of accepting a runtime API-key override for another account.
+
 ## [0.103.8] - 2026-10-12
 
 ### Breaking Changes

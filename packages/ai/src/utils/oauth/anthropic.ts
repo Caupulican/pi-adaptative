@@ -13,6 +13,7 @@ import { isRecord } from "../value-guards.ts";
 import { awaitAuthorizationInput, parseAuthorizationInput, raceAuthorizationInput } from "./authorization-input.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
 import { generatePKCE } from "./pkce.ts";
+import { OAuthRefreshRejectedError, type OAuthRefreshRejection } from "./refresh-rejected-error.ts";
 import { createOAuthRequestSignal } from "./request-signal.ts";
 import { parseOAuthTokenCredentials } from "./token-credentials.ts";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface } from "./types.ts";
@@ -38,16 +39,51 @@ const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`;
 
 class AnthropicOAuthRequestError extends Error {
 	readonly invalidScope: boolean;
-	constructor(status: number, invalidScope: boolean, bodyTimedOut = false) {
+	readonly refreshRejection?: OAuthRefreshRejection;
+	constructor(status: number, invalidScope: boolean, refreshRejection?: OAuthRefreshRejection, bodyTimedOut = false) {
 		super(`Anthropic OAuth request failed (HTTP ${status})${bodyTimedOut ? "; response body timed out" : ""}`);
 		this.invalidScope = invalidScope;
+		this.refreshRejection = refreshRejection;
 	}
 }
 
-function parseAnthropicCredentials(data: unknown, previousRefresh?: string): OAuthCredentials {
+function isValidAnthropicAccountId(value: unknown): value is string {
+	return typeof value === "string" && value.length <= 256 && /^[\x21-\x7e]+$/.test(value);
+}
+
+function parseAnthropicCredentials(
+	data: unknown,
+	previousRefresh?: string,
+	previousAccountId?: string,
+): OAuthCredentials {
 	const credentials = parseOAuthTokenCredentials(data, "Anthropic", 5 * 60, previousRefresh);
-	const scope = (data as Record<string, unknown>).scope;
-	return { ...credentials, scopes: typeof scope === "string" ? scope.split(" ").filter(Boolean) : [] };
+	const response = data as Record<string, unknown>;
+	const scope = response.scope;
+	const account = response.account;
+	const responseAccountId = isRecord(account) ? account.uuid : undefined;
+	const accountId = isValidAnthropicAccountId(responseAccountId) ? responseAccountId : previousAccountId;
+	return {
+		...credentials,
+		scopes: typeof scope === "string" ? scope.split(" ").filter(Boolean) : [],
+		...(accountId ? { accountId } : {}),
+	};
+}
+
+function classifyAnthropicRefreshRejection(
+	status: number,
+	code: string | undefined,
+	description: string | undefined,
+): OAuthRefreshRejection | undefined {
+	if (
+		(status === 400 || status === 401 || status === 403) &&
+		(code === "invalid_grant" || code === "access_denied") &&
+		description === "account_on_hold"
+	)
+		return "rejected";
+	if ((status !== 400 && status !== 401) || code !== "invalid_grant") return undefined;
+	if (description === "Refresh token expired") return "expired";
+	if (description === "Refresh token not found or invalid") return "revoked";
+	return "rejected";
 }
 async function getNodeApis(): Promise<NodeApis> {
 	if (nodeApis) return nodeApis;
@@ -170,7 +206,7 @@ async function postJson(
 	url: string,
 	body: Record<string, string | number>,
 	signal?: AbortSignal,
-	inspectScopeError = false,
+	inspectRefreshError = false,
 ): Promise<unknown> {
 	const requestSignal = createOAuthRequestSignal(signal);
 	let response: Response;
@@ -192,20 +228,30 @@ async function postJson(
 	signal?.throwIfAborted();
 	if (!response.ok) {
 		let invalidScope = false;
+		let refreshRejection: OAuthRefreshRejection | undefined;
 		let bodyTimedOut = false;
-		if (inspectScopeError && response.status === 400) {
+		if (inspectRefreshError && (response.status === 400 || response.status === 401 || response.status === 403)) {
 			try {
 				const raw = await readBoundedResponseText(response, MAX_OAUTH_RESPONSE_BYTES);
 				const data: unknown = raw === undefined ? undefined : JSON.parse(raw);
 				if (isRecord(data)) {
 					const error = data.error;
-					invalidScope = error === "invalid_scope" || (isRecord(error) && error.type === "invalid_scope");
+					const code =
+						typeof error === "string"
+							? error
+							: isRecord(error) && typeof error.type === "string"
+								? error.type
+								: undefined;
+					const description = typeof data.error_description === "string" ? data.error_description : undefined;
+					invalidScope = response.status === 400 && code === "invalid_scope";
+					refreshRejection = classifyAnthropicRefreshRejection(response.status, code, description);
 				}
 			} catch {
-				// Unparseable response bodies never authorize the scope fallback.
+				// Unparseable response bodies never authorize scope fallback or terminal rejection caching.
 			}
 			if (requestSignal.aborted) {
 				invalidScope = false;
+				refreshRejection = undefined;
 				bodyTimedOut = true;
 			}
 		}
@@ -215,7 +261,7 @@ async function postJson(
 			// Cleanup must not replace the HTTP status with untrusted transport diagnostics.
 		}
 		signal?.throwIfAborted();
-		throw new AnthropicOAuthRequestError(response.status, invalidScope, bodyTimedOut);
+		throw new AnthropicOAuthRequestError(response.status, invalidScope, refreshRejection, bodyTimedOut);
 	}
 	let raw: string | undefined;
 	try {
@@ -390,6 +436,7 @@ export async function refreshAnthropicToken(
 	options: {
 		scopes?: unknown;
 		clientId?: unknown;
+		accountId?: unknown;
 		subscriptionType?: unknown;
 		signal?: AbortSignal;
 		onProgress?: (message: string) => void;
@@ -407,6 +454,9 @@ export async function refreshAnthropicToken(
 	}
 	if (options.clientId !== undefined && (typeof options.clientId !== "string" || !options.clientId.trim())) {
 		throw new Error("Anthropic stored OAuth client identity is invalid");
+	}
+	if (options.accountId !== undefined && !isValidAnthropicAccountId(options.accountId)) {
+		throw new Error("Anthropic stored OAuth account identity is invalid");
 	}
 	const compatibility = await awaitAuthorizationInput(resolveAnthropicCompatibility, options.signal);
 	if (compatibility.warning) options.onProgress?.(compatibility.warning);
@@ -439,21 +489,33 @@ export async function refreshAnthropicToken(
 	let data: unknown;
 	try {
 		try {
-			data = await postJson(protocol.tokenUrl, body, options.signal, migrate && hasInference);
+			data = await postJson(protocol.tokenUrl, body, options.signal, true);
 		} catch (error) {
 			if (!migrate || !hasInference || !(error instanceof AnthropicOAuthRequestError) || !error.invalidScope)
 				throw error;
-			data = await postJson(protocol.tokenUrl, { ...body, scope: originalScopes.join(" ") }, options.signal);
+			data = await postJson(protocol.tokenUrl, { ...body, scope: originalScopes.join(" ") }, options.signal, true);
 		}
 	} catch (error) {
 		options.signal?.throwIfAborted();
+		if (error instanceof AnthropicOAuthRequestError && error.refreshRejection) {
+			throw new OAuthRefreshRejectedError(
+				"anthropic",
+				error.refreshRejection,
+				`Anthropic token refresh was rejected. url=${protocol.tokenUrl}; details=${formatErrorDetails(error)}`,
+			);
+		}
 		throw new Error(
 			`Anthropic token refresh request failed. url=${protocol.tokenUrl}; details=${formatErrorDetails(error)}`,
+			{ cause: error },
 		);
 	}
 
 	return {
-		...parseAnthropicCredentials(data, refreshToken),
+		...parseAnthropicCredentials(
+			data,
+			refreshToken,
+			typeof options.accountId === "string" ? options.accountId : undefined,
+		),
 		...(clientId ? { clientId } : {}),
 		...(typeof options.subscriptionType === "string" ? { subscriptionType: options.subscriptionType } : {}),
 	};
@@ -479,6 +541,7 @@ export const anthropicOAuthProvider: OAuthProviderInterface = {
 		return refreshAnthropicToken(credentials.refresh, {
 			scopes: credentials.scopes,
 			clientId: credentials.clientId,
+			accountId: credentials.accountId,
 			subscriptionType: credentials.subscriptionType,
 		});
 	},

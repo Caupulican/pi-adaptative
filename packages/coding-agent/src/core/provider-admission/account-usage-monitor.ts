@@ -10,6 +10,7 @@ import {
 	OpenRouterAccountError,
 	XaiAccountError,
 } from "@caupulican/pi-ai";
+import type { OAuthCredential } from "../auth-storage.ts";
 import {
 	type AccountUsageAdapter,
 	type AccountUsageFetchState,
@@ -44,6 +45,18 @@ export class AccountCredentialsUnavailableError extends Error {
 
 function isSubscriptionLogin(account: AuthenticatedAccount): boolean {
 	return account.auth === "subscription" || account.auth === "oauth";
+}
+
+function storedOAuthCredentialForToken(
+	registry: UsageOverviewRegistry,
+	provider: string,
+	accessToken: string | undefined,
+): OAuthCredential {
+	const credential = registry.authStorage.get(provider);
+	if (!accessToken || credential?.type !== "oauth" || credential.access !== accessToken) {
+		throw new AccountCredentialsUnavailableError();
+	}
+	return credential;
 }
 
 export function createOpenAICodexUsageAdapter(fetchImpl?: typeof fetch): AccountUsageAdapter {
@@ -82,10 +95,14 @@ export function createAnthropicUsageAdapter(fetchImpl?: typeof fetch): AccountUs
 				account,
 				run: async (signal, isCurrent) => {
 					const accessToken = await registry.getApiKeyForProvider(ANTHROPIC_PROVIDER);
-					if (!accessToken) throw new AccountCredentialsUnavailableError();
 					if (!isCurrent()) return undefined;
+					const credential = storedOAuthCredentialForToken(registry, ANTHROPIC_PROVIDER, accessToken);
 					return anthropicUsageSnapshot(
-						await getAnthropicOAuthUsage({ accessToken, signal, ...(fetchImpl ? { fetch: fetchImpl } : {}) }),
+						await getAnthropicOAuthUsage({
+							accessToken: credential.access,
+							signal,
+							...(fetchImpl ? { fetch: fetchImpl } : {}),
+						}),
 					);
 				},
 			};
@@ -103,11 +120,13 @@ export function createAntigravityUsageAdapter(fetchImpl?: typeof fetch): Account
 				run: async (signal, isCurrent) => {
 					const accessToken = await registry.getApiKeyForProvider(ANTIGRAVITY_PROVIDER);
 					if (!isCurrent()) return undefined;
-					const credential = registry.authStorage.get(ANTIGRAVITY_PROVIDER);
-					if (!accessToken || credential?.type !== "oauth" || credential.access !== accessToken)
-						throw new AccountCredentialsUnavailableError();
+					const credential = storedOAuthCredentialForToken(registry, ANTIGRAVITY_PROVIDER, accessToken);
 					return antigravityUsageSnapshot(
-						await getAntigravityAccountUsage({ accessToken, signal, ...(fetchImpl ? { fetch: fetchImpl } : {}) }),
+						await getAntigravityAccountUsage({
+							accessToken: credential.access,
+							signal,
+							...(fetchImpl ? { fetch: fetchImpl } : {}),
+						}),
 					);
 				},
 			};
@@ -150,15 +169,12 @@ export function createXaiUsageAdapter(fetchImpl?: typeof fetch): AccountUsageAda
 				run: async (signal, isCurrent) => {
 					const accessToken = await registry.getApiKeyForProvider(XAI_PROVIDER);
 					if (!isCurrent()) return undefined;
-					const credential = registry.authStorage.get(XAI_PROVIDER);
 					// Resolution may refresh OAuth or yield a runtime API key. Bind identity to the resolved credential.
-					if (!accessToken || credential?.type !== "oauth" || credential.access !== accessToken) {
-						throw new AccountCredentialsUnavailableError();
-					}
+					const credential = storedOAuthCredentialForToken(registry, XAI_PROVIDER, accessToken);
 					const userId = typeof credential.userId === "string" ? credential.userId.trim() : undefined;
 					return xaiUsageSnapshot(
 						await getXaiAccountUsage({
-							accessToken,
+							accessToken: credential.access,
 							...(userId ? { userId } : {}),
 							signal,
 							...(fetchImpl ? { fetch: fetchImpl } : {}),

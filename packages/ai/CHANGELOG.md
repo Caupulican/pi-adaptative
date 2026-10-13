@@ -4,6 +4,10 @@
 
 - Updated Grok OAuth, inference, and account request identity to CLI 1.0.52 after native protocol review.
 
+### Fixed
+
+- Preserved Anthropic OAuth account identity across token rotation and stopped retrying refresh tokens rejected as expired, revoked, or otherwise terminal.
+
 ## [0.103.8] - 2026-10-12
 
 ### Changed
