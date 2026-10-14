@@ -1037,6 +1037,7 @@ export class VirtualFileSystem {
 				);
 			},
 			copyFile: async (from: unknown, to: unknown, flags?: number) => this.copyFileSync(from, to, flags),
+			truncate: async (path: unknown, length = 0) => this.truncateSync(path, Number(length)),
 			chmod: async (path: unknown) => {
 				this.realpathSync(path, "chmod", "chmod");
 			},
@@ -1071,6 +1072,8 @@ export class VirtualFileSystem {
 			rmdirSync: (path: unknown) => this.rmSync(path, undefined, "rmdir"),
 			renameSync: (from: unknown, to: unknown) => this.renameSync(from, to),
 			copyFileSync: (from: unknown, to: unknown, flags?: number) => this.copyFileSync(from, to, flags),
+			truncateSync: (path: unknown, length = 0) => this.truncateSync(path, Number(length)),
+			ftruncateSync: (fd: unknown, length = 0) => this.truncateSync(fd, Number(length)),
 			chmodSync: (path: unknown) => {
 				this.realpathSync(path, "chmod", "chmod");
 			},
@@ -1251,6 +1254,25 @@ export class VirtualFileSystem {
 		this.note("write", descriptor.path);
 		this.fault({ kind: "write", path: descriptor.path }, "after", data);
 		return data.length;
+	}
+
+	truncateSync(value: unknown, length = 0): void {
+		if (typeof value === "number") {
+			this.truncateDescriptor(value, length);
+			return;
+		}
+		const path = this.realpathSync(value, "truncate", "write");
+		const node = this.nodes.get(path);
+		if (!node) throw this.failure("write", "ENOENT", path, "truncate");
+		if (node.kind !== "file") throw this.failure("write", "EISDIR", path, "truncate");
+		if (!Number.isSafeInteger(length) || length < 0) throw this.failure("write", "EINVAL", path, "truncate");
+		const replacement = Buffer.alloc(length);
+		node.data.copy(replacement, 0, 0, length);
+		this.fault({ kind: "write", path }, "before", replacement);
+		node.data = replacement;
+		node.modified = this.stamp();
+		this.note("truncate", path);
+		this.fault({ kind: "write", path }, "after", replacement);
 	}
 
 	private truncateDescriptor(fd: number, length: number): void {

@@ -1165,11 +1165,15 @@ export class VirtualGit {
 			return { code: 0, stdout: `${this.blobOf(input)}\n`, stderr: "" };
 		}
 		const separator = args.indexOf("--");
-		const path = separator >= 0 ? args[separator + 1] : undefined;
-		if (path === undefined) throw new Error(`Unscripted hash-object: ${args.join(" ")}`);
-		const content = this.readWorking(worktree, relative(worktree.path, resolve(cwd, path)));
-		if (content === undefined) return { code: 128, stdout: "", stderr: `fatal: could not open '${path}'\n` };
-		return { code: 0, stdout: `${this.blobOf(content)}\n`, stderr: "" };
+		const paths = separator >= 0 ? args.slice(separator + 1) : [];
+		if (paths.length === 0) throw new Error(`Unscripted hash-object: ${args.join(" ")}`);
+		const hashes: string[] = [];
+		for (const path of paths) {
+			const content = this.readWorking(worktree, relative(worktree.path, resolve(cwd, path)));
+			if (content === undefined) return { code: 128, stdout: "", stderr: `fatal: could not open '${path}'\n` };
+			hashes.push(this.blobOf(content));
+		}
+		return { code: 0, stdout: hashes.map((hash) => `${hash}\n`).join(""), stderr: "" };
 	}
 
 	/** `read-tree --empty` or `read-tree <commit>` into the scratch index named by GIT_INDEX_FILE. */
@@ -1953,7 +1957,8 @@ export class HarnessProcesses {
 		const windowsResult = this.windows.tryRun(operation, args);
 		if (windowsResult?.handled) return windowsResult.value;
 		const [file, argv, options] = args;
-		if (operation === "spawn" && file === "git" && Array.isArray(argv)) {
+		const isGit = file === "git" || file === "git.exe";
+		if (operation === "spawn" && isGit && Array.isArray(argv)) {
 			// The state is read at spawn time, as git reads its repository when it starts.
 			const spawnOptions = (options ?? {}) as { cwd?: string; env?: Record<string, string | undefined> };
 			const outcome = this.git.run(argv as string[], spawnOptions.cwd ?? "", spawnOptions.env ?? {});
@@ -1988,7 +1993,7 @@ export class HarnessProcesses {
 			void settled.then(() => this.settling.delete(settled));
 			return child;
 		}
-		if (file === "git" && Array.isArray(argv)) {
+		if (isGit && Array.isArray(argv)) {
 			const cwd = (options as { cwd?: string } | undefined)?.cwd ?? "";
 			const env = (options as { env?: Record<string, string | undefined> } | undefined)?.env ?? {};
 			const stdin: unknown = (options as { input?: unknown } | undefined)?.input;
@@ -2212,17 +2217,7 @@ export class HarnessWorld {
 			this.modelRegistry = ModelRegistry.inMemory(this.authStorage);
 			// Every scripted track is a registered, authenticated model, so workers select among them through the
 			// production account catalog exactly as they would select real models.
-			this.modelRegistry.registerProvider(HARNESS_PROVIDER, {
-				api: HARNESS_API,
-				baseUrl: "https://harness.invalid",
-				apiKey: HARNESS_PROVIDER_FIXTURE_KEY,
-				// Registry descriptors come from the same provider.model() the scripted requests report, so a priced or
-				// window-configured track is priced identically in the catalog and on the wire.
-				models: SCRIPTED_TRACKS.map((id) => {
-					const { name, reasoning, input, cost, contextWindow, maxTokens } = this.provider.model(id);
-					return { id, name, reasoning, input, cost, contextWindow, maxTokens };
-				}),
-			});
+			this.syncRegisteredModels();
 			// The owner's model favorites: the router pool that delegation admits workers from is built from them.
 			this.baseSettings = {
 				modelFavorites: SCRIPTED_TRACKS.map((modelId) => ({ provider: HARNESS_PROVIDER, modelId })),
@@ -2248,6 +2243,40 @@ export class HarnessWorld {
 			if (failures.length === 1) throw error;
 			throw new AggregateError(failures, "Harness world construction failed and rollback reported evidence");
 		}
+	}
+
+	private syncRegisteredModels(): void {
+		this.modelRegistry.registerProvider(HARNESS_PROVIDER, {
+			api: HARNESS_API,
+			baseUrl: "https://harness.invalid",
+			apiKey: HARNESS_PROVIDER_FIXTURE_KEY,
+			// Registry descriptors come from the same provider.model() the scripted requests report, so a priced or
+			// window-configured track is priced identically in the catalog and on the wire.
+			models: SCRIPTED_TRACKS.map((id) => {
+				const { name, reasoning, defaultThinkingLevel, thinkingLevelMap, input, cost, contextWindow, maxTokens } =
+					this.provider.model(id);
+				return {
+					id,
+					name,
+					reasoning,
+					...(defaultThinkingLevel !== undefined ? { defaultThinkingLevel } : {}),
+					...(thinkingLevelMap !== undefined ? { thinkingLevelMap } : {}),
+					input,
+					cost,
+					contextWindow,
+					maxTokens,
+				};
+			}),
+		});
+	}
+
+	setModelReasoning(
+		id: string,
+		reasoning: boolean,
+		thinkingLevelMap?: ReturnType<ScriptedProvider["model"]>["thinkingLevelMap"],
+	): void {
+		this.provider.setModelReasoning(id, reasoning, thinkingLevelMap);
+		this.syncRegisteredModels();
 	}
 
 	/** Root session in normal user-facing mode, bound to the scripted root track `modelId`. */
@@ -2783,7 +2812,7 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 	const reached = createBarrier();
 	const held = await world.createRootSession("root", {
 		sessionManager: seedCompactionRetentionHistory(world, "held"),
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 		extensionFactories: [holdAssistantMessageEnd(hold, reached, replyText)],
 	});
 	const heldSession = held.session;
@@ -2869,7 +2898,7 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 	released.release();
 	const control = await world.createRootSession("root", {
 		sessionManager: seedCompactionRetentionHistory(world, "control"),
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 		extensionFactories: [holdCompactionSummary(released, createBarrier())],
 	});
 	const controlSession = control.session;
@@ -3009,7 +3038,7 @@ export async function runCompactionCloseAppendRefused(world: HarnessWorld): Prom
 	const reached = createBarrier();
 	const owner = await world.createRootSession("root", {
 		sessionManager: world.createSessionManager(),
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 		extensionFactories: [holdCompactionSummary(hold, reached)],
 	});
 	const session = owner.session;
@@ -3089,7 +3118,7 @@ export async function runDiscardScanBounds(world: HarnessWorld): Promise<Discard
 	const owner = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 	});
 	world.provider.enqueue("root", {
 		name: "discard-scan-seed",
@@ -3153,7 +3182,7 @@ export async function runDiscardThroughRuntime(world: HarnessWorld): Promise<Dis
 			const root = await world.createRootSession("root", {
 				agentDir,
 				sessionManager,
-				settings: { memorySystem: undefined },
+				settings: { memorySystem: "okf" },
 			});
 			return {
 				session: root.session,
@@ -4085,7 +4114,7 @@ async function objectiveSdkCreation(world: HarnessWorld): Promise<SdkConstructio
 		.createRootSession("root", {
 			systemOneEnabled: false,
 			executionLoopMode: "objective_primary",
-			settings: { memorySystem: undefined },
+			settings: { memorySystem: "okf" },
 		})
 		.then(
 			() => "created",
@@ -5147,7 +5176,7 @@ async function sessionWarningRoutesWitness(world: HarnessWorld): Promise<Session
 		agentDir,
 		sessionManager: reopened,
 		systemOneEnabled: false,
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 	});
 	const heldWarnings = world.warnings.splice(heldMark);
 	const reloadMark = world.warnings.length;
@@ -5162,7 +5191,7 @@ async function sessionWarningRoutesWitness(world: HarnessWorld): Promise<Session
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
 		systemOneEnabled: false,
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 	});
 	await normal.session.reload();
 	const normalWarnings = world.warnings.splice(normalMark);
@@ -5208,7 +5237,7 @@ async function runLifecycleWitness(world: HarnessWorld): Promise<SdkConstruction
 		const owner = await world.createRootSession("root", {
 			systemOneEnabled: false,
 			sessionManager: world.createSessionManager(),
-			settings: { memorySystem: undefined },
+			settings: { memorySystem: "okf" },
 		});
 		let firstEnds = 0;
 		let secondEnds = 0;
@@ -5432,7 +5461,7 @@ async function unwrittenForkWitness(world: HarnessWorld): Promise<SdkConstructio
 				agentDir,
 				sessionManager,
 				systemOneEnabled: false,
-				settings: { memorySystem: undefined },
+				settings: { memorySystem: "okf" },
 			});
 			return {
 				session: root.session,
@@ -5551,7 +5580,7 @@ async function historyUsageBoundsWitness(
 	const owner = await world.createRootSession("root", {
 		sessionManager: manager,
 		systemOneEnabled: false,
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 		closingSink: (warnings) => closing.push(...warnings),
 	});
 	const delivery = sessionSemanticUsageOf(manager);
@@ -5620,7 +5649,7 @@ async function historyUsageBoundsWitness(
 	const reopened = await world.createRootSession("root", {
 		sessionManager: manager,
 		systemOneEnabled: false,
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 		closingSink: (warnings) => closing.push(...warnings),
 	});
 	const reopenedDelta = reopened.session.getCumulativeUsage().totalTokens - baseline;
@@ -6032,7 +6061,7 @@ export async function runRpcHost(
 			const root = await world.createRootSession("root", {
 				agentDir,
 				sessionManager,
-				settings: { memorySystem: undefined },
+				settings: { memorySystem: "okf" },
 			});
 			return {
 				session: root.session,

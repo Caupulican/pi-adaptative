@@ -15,7 +15,7 @@ import {
 /** Ruler line that shows a compaction its byte budget. */
 export const CONTINUOUS_CHAT_RULER = "-".repeat(CONTINUOUS_CHAT_NODE_TARGET_BYTES);
 
-/** Pi's system prompt, the UniiChat reference adapted to this agent and without device tools. No live state. */
+/** Pi-adaptative-memory system prompt for the continuous chat, without device tools or live state. */
 export const CONTINUOUS_CHAT_SYSTEM_PROMPT = `You are Pi, an AI agent that works for one user in a single chat that never
 ends. Each call to you is a turn or a compaction: the view below is followed by
 the user's new message, or by a task starting "Compaction:".
@@ -29,7 +29,7 @@ Pi's memory: the whole chat between Pi and the user, oldest first, inside
 
 Each message has a kind:
 - user: the user's words
-- unii: Pi's replies
+- pi: Pi's replies
 - tool: Pi's tool calls
 - echo: tool results
 - work: an agent's report, starting "[Name]"

@@ -4,11 +4,11 @@
  * neither the checkout's index nor HEAD changes.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, readlink, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { bindChildProcessAbort, spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
+import { bindChildProcessAbort, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { withoutInheritedGitLocation } from "../exec.ts";
 import { parseRepositoryHeadRecord } from "../objective-execution/repository-head-state.ts";
 import { createProcessScratchDirectory } from "../process-scratch.ts";
@@ -122,9 +122,9 @@ async function git(
 	options: WorkEvidenceOperationOptions = {},
 ): Promise<string> {
 	const timeoutMs = remainingTimeout(options);
-	let child: ReturnType<typeof spawnProcess>;
+	let child: ReturnType<typeof spawn>;
 	try {
-		child = spawnProcess("git", [...args], {
+		child = spawn("git", [...args], {
 			cwd,
 			env,
 			stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],

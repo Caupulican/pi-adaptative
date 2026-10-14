@@ -472,7 +472,10 @@ async function createInteractiveHarness(
 			const root = await world.createRootSession("root", {
 				agentDir,
 				sessionManager,
-				settings: { memorySystem: undefined, terminal: { showTerminalProgress: true } },
+				settings: {
+					memorySystem: "okf",
+					terminal: { showTerminalProgress: true },
+				},
 				extensionFactories: options.extensionFactories ? [...options.extensionFactories] : undefined,
 			});
 			return {
@@ -1328,7 +1331,7 @@ async function runClosingGateAtStart(world: HarnessWorld): Promise<ClosingGateSt
 	const reached = createBarrier();
 	const held = await world.createRootSession("root", {
 		sessionManager: world.createSessionManager(),
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 		extensionFactories: [holdBeforeAgentStart(hold, reached)],
 	});
 	const heldSession = held.session;
@@ -1359,7 +1362,7 @@ async function runClosingGateAtStart(world: HarnessWorld): Promise<ClosingGateSt
 	released.release();
 	const control = await world.createRootSession("root", {
 		sessionManager: world.createSessionManager(),
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 		extensionFactories: [holdBeforeAgentStart(released, createBarrier())],
 	});
 	await control.session.bindExtensions({ uiContext: world.humanInput.ui });
@@ -1425,7 +1428,7 @@ async function runClosingGateAtCalibration(world: HarnessWorld): Promise<Calibra
 	const held = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 	});
 	const heldSession = held.session;
 	await heldSession.bindExtensions({ uiContext: world.humanInput.ui });
@@ -1489,7 +1492,7 @@ async function runClosingGateAtCalibration(world: HarnessWorld): Promise<Calibra
 	const control = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 	});
 	await control.session.bindExtensions({ uiContext: world.humanInput.ui });
 	const controlFile = control.sessionManager.getSessionFile();
@@ -1940,7 +1943,7 @@ async function runAccountQuit(world: HarnessWorld, agentDir: string): Promise<Ac
 	const held = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 	});
 	const heldSession = held.session;
 	await heldSession.bindExtensions({ uiContext: world.humanInput.ui });
@@ -2017,7 +2020,7 @@ async function runAccountControl(world: HarnessWorld, agentDir: string): Promise
 	const control = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
-		settings: { memorySystem: undefined },
+		settings: { memorySystem: "okf" },
 	});
 	const controlSession = control.session;
 	await controlSession.bindExtensions({ uiContext: world.humanInput.ui });
@@ -2192,7 +2195,7 @@ async function verifyMissingAccountListing(world: HarnessWorld, agentDir: string
 		const created = await world.createRootSession("root", {
 			agentDir,
 			sessionManager: world.createSessionManager(agentDir),
-			settings: { memorySystem: undefined },
+			settings: { memorySystem: "okf" },
 		});
 		const session = created.session;
 		await session.bindExtensions({ uiContext: world.humanInput.ui });
@@ -2280,7 +2283,7 @@ async function verifyAccountPreflightAbort(world: HarnessWorld, agentDir: string
 		const created = await world.createRootSession("root", {
 			agentDir,
 			sessionManager: world.createSessionManager(agentDir),
-			settings: { memorySystem: undefined },
+			settings: { memorySystem: "okf" },
 			extensionFactories: [
 				(pi) => {
 					pi.on("before_agent_start", () => {
@@ -2601,7 +2604,7 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 		const created = await world.createRootSession("root", {
 			sessionManager: world.createSessionManager(),
 			settings: {
-				memorySystem: undefined,
+				memorySystem: "okf",
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 5 },
 				autonomy: { maxStallTurns: stopAt === "message-end" || stopAt === "stranded-control" ? 1 : 2 },
 			},
@@ -2818,7 +2821,7 @@ async function verifyBillingContinuation(world: HarnessWorld): Promise<void> {
 				agentDir,
 				sessionManager: world.createSessionManager(agentDir),
 				settings: {
-					memorySystem: undefined,
+					memorySystem: "okf",
 					failover: { subscriptionHop: true },
 					modelRouter: { enabled: false, selectionMode: "manual", expensiveModel: `${HARNESS_PROVIDER}/worker-a` },
 				},

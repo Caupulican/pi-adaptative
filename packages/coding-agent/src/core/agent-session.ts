@@ -1132,7 +1132,7 @@ export class AgentSession {
 			emit: (event) => this._emit(event),
 			notifyWorkerTerminalHandoff: (records) => {
 				for (const record of records) {
-					if (record.observedAt === undefined) this.reportOutboxWorkerTerminal(record);
+					this.reportOutboxWorkerTerminal(record);
 				}
 				return this._terminalHandoffs.notifyWorkers(records);
 			},
@@ -5407,17 +5407,27 @@ export class AgentSession {
 		terminal: { laneId: string; attemptId?: string; status: string; completedAt?: string; reasonCode?: string },
 	): void {
 		// Every entry, not the active branch: the attempt's terminal is this process's, whichever branch is active now.
+		const entries = this.sessionManager.getEntries();
 		const claim =
 			terminal.attemptId === undefined
 				? undefined
-				: getWorkerClaimSnapshots(this.sessionManager.getEntries()).find(
-						(candidate) => candidate.terminalAttemptId === terminal.attemptId,
-					);
+				: getWorkerClaimSnapshots(entries).find((candidate) => candidate.terminalAttemptId === terminal.attemptId);
+		const claimId = terminal.attemptId ?? `lane:${terminal.laneId}:${terminal.completedAt ?? ""}:${terminal.status}`;
+		if (
+			entries.some(
+				(entry) =>
+					entry.type === "custom" &&
+					entry.customType === CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE &&
+					(entry.data as { claimId?: unknown } | undefined)?.claimId === claimId,
+			)
+		) {
+			return;
+		}
 		const reason = terminal.reasonCode ? ` (${terminal.reasonCode})` : "";
 		const report: ContinuousChatWorkReportEntry = {
 			version: 1,
 			name,
-			claimId: terminal.attemptId ?? `lane:${terminal.laneId}:${terminal.completedAt ?? ""}:${terminal.status}`,
+			claimId,
 			text: claim ? workerReportClaimText(claim) : `Terminal status ${terminal.status}${reason}.`,
 			timestamp: Date.now(),
 		};

@@ -115,7 +115,12 @@ export class ScriptedProvider {
 	private readonly scripts = new Map<string, ScriptTrack>();
 	private readonly modelOptions = new Map<
 		string,
-		Partial<Pick<Model<typeof HARNESS_API>, "cost" | "contextWindow" | "maxTokens" | "input">>
+		Partial<
+			Pick<
+				Model<typeof HARNESS_API>,
+				"cost" | "contextWindow" | "maxTokens" | "input" | "reasoning" | "defaultThinkingLevel" | "thinkingLevelMap"
+			>
+		>
 	>();
 	private readonly stepRequests = new Map<ScriptStep, number>();
 	private readonly active = new Set<AbortController>();
@@ -148,10 +153,33 @@ export class ScriptedProvider {
 
 	configureModel(
 		id: string,
-		options: Partial<Pick<Model<typeof HARNESS_API>, "cost" | "contextWindow" | "maxTokens" | "input">>,
+		options: Partial<
+			Pick<
+				Model<typeof HARNESS_API>,
+				"cost" | "contextWindow" | "maxTokens" | "input" | "reasoning" | "defaultThinkingLevel" | "thinkingLevelMap"
+			>
+		>,
 	): void {
 		if (this.requests.length || this.disposed) throw new Error("Configure model metadata before requests start");
 		this.modelOptions.set(id, structuredClone(options));
+	}
+
+	setModelReasoning(
+		id: string,
+		reasoning: boolean,
+		thinkingLevelMap?: Model<typeof HARNESS_API>["thinkingLevelMap"],
+	): void {
+		if (this.disposed) throw new Error("Cannot update model reasoning after provider disposal");
+		const existing = structuredClone(this.modelOptions.get(id) ?? {});
+		if (reasoning) {
+			existing.reasoning = true;
+			if (thinkingLevelMap !== undefined) existing.thinkingLevelMap = structuredClone(thinkingLevelMap);
+		} else {
+			delete existing.reasoning;
+			delete existing.thinkingLevelMap;
+			delete existing.defaultThinkingLevel;
+		}
+		this.modelOptions.set(id, existing);
 	}
 
 	enqueue(modelId: string, ...steps: ScriptStep[]): void {

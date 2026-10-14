@@ -74,7 +74,10 @@ export function spawnProcess(
 ): ChildProcessByStdio<null, Readable, Readable>;
 export function spawnProcess(command: string, args: string[], options: SpawnOptions): ChildProcess;
 export function spawnProcess(command: string, args: string[], options: SpawnOptions): ChildProcess {
-	return process.platform === "win32" ? crossSpawn(command, args, options) : nodeSpawn(command, args, options);
+	if (process.platform === "win32" && command !== "git" && command !== "git.exe") {
+		return crossSpawn(command, args, options);
+	}
+	return nodeSpawn(command, args, options);
 }
 
 export function spawnProcessSync(
@@ -82,9 +85,10 @@ export function spawnProcessSync(
 	args: string[],
 	options: SpawnSyncOptionsWithStringEncoding,
 ): SpawnSyncReturns<string> {
-	return process.platform === "win32"
-		? crossSpawn.sync(command, args, options)
-		: nodeSpawnSync(command, args, options);
+	if (process.platform === "win32" && command !== "git" && command !== "git.exe") {
+		return crossSpawn.sync(command, args, options);
+	}
+	return nodeSpawnSync(command, args, options);
 }
 
 type ForceChildProcessSettlement = (code?: number | null) => void;

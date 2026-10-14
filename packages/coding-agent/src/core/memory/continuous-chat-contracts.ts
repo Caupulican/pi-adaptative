@@ -14,7 +14,7 @@ export const CONTINUOUS_CHAT_MAX_TEXT_CHARACTERS = 30_000;
 export const CONTINUOUS_CHAT_MAX_SOURCE_KEY_CHARACTERS = 1_024;
 export const CONTINUOUS_CHAT_MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 
-export type ContinuousChatMessageKind = "user" | "unii" | "tool" | "echo" | "work" | "note";
+export type ContinuousChatMessageKind = "user" | "pi" | "tool" | "echo" | "work" | "note";
 
 export interface ContinuousChatSource {
 	sessionId: string;
@@ -91,7 +91,7 @@ const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 const MIME_TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/i;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-const MESSAGE_KINDS: ReadonlySet<string> = new Set(["user", "unii", "tool", "echo", "work", "note"]);
+const MESSAGE_KINDS: ReadonlySet<string> = new Set(["user", "pi", "tool", "echo", "work", "note"]);
 
 function requireTimestamp(value: string): void {
 	const match = TIMESTAMP_PATTERN.exec(value);

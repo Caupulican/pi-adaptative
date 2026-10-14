@@ -90,9 +90,10 @@ const DATE_PARAMETERS = Type.Object(
 
 /**
  * Runs one navigation call against the live chat. A refusal is a typed result the model reads; a source or port failure
- * propagates so the kernel records it as a tool failure. Every result is marked as recalled history, so ingestion and
- * history capture never log or index a navigation read as new conversation. A message's images are attached as image
- * content within `imageBytes` per result; an image past that budget is named in the text, not attached.
+ * propagates so the kernel records it as a tool failure. Every result carries `TRANSCRIPT_RECALL_RESULT_MARKER` so legacy
+ * OKF transcript-history capture skips recall output, while ICM continuous-chat ingestion still logs each tool result once
+ * as an `echo` under its own source key. A message's images are attached as image content within `imageBytes` per result;
+ * an image past that budget is named in the text, not attached.
  */
 export async function executeContinuousChatNavigation(
 	source: ContinuousChatNavigationPortSource,

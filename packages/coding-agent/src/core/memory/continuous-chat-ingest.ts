@@ -92,7 +92,7 @@ export function continuousChatMessageParts(message: AgentMessage): ContinuousCha
 			const parts: ContinuousChatMessagePart[] = [];
 			message.content.forEach((block, index) => {
 				if (block.type === "text" && block.text.length > 0) {
-					parts.push({ part: index, kind: "unii", text: block.text });
+					parts.push({ part: index, kind: "pi", text: block.text });
 				} else if (block.type === "toolCall") {
 					parts.push({ part: index, kind: "tool", text: `${block.name}\n${JSON.stringify(block.arguments)}` });
 				}
