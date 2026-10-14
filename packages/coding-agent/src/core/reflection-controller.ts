@@ -638,14 +638,16 @@ export class ReflectionController {
 				updatedAt: new Date().toISOString(),
 			});
 		} catch {
-			this.warnOnce(
-				"cue-dismiss-failed",
-				"Automatic reflection cue dismissal failed; its durable claim will expire safely.",
-			);
-			return;
+			if (current.versionChange) {
+				this.warnOnce(
+					"cue-dismiss-failed",
+					"Automatic reflection cue dismissal failed; its durable claim will expire safely.",
+				);
+			}
+		} finally {
+			this.activeRunToken = undefined;
+			if (current.versionChange) this.deps.getDurableLearningState?.()?.releaseClaim(current.versionChange.token);
 		}
-		this.activeRunToken = undefined;
-		if (current.versionChange) this.deps.getDurableLearningState?.()?.releaseClaim(current.versionChange.token);
 	}
 
 	private synchronizeCurrentTurnCueWithSettings(): void {

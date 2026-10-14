@@ -1898,7 +1898,7 @@ export class MemoryController {
 				if (result.isError) return result;
 				const text = result.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
 				// A page that does not fit the lane's room is a stated constraint, never cut (as with a source page).
-				if (!memoryTextFitsBudget(text, budget)) {
+				if (!memoryTextFitsBudget(text, { ...budget, maxLines: Number.MAX_SAFE_INTEGER })) {
 					return { content: [{ type: "text", text: LANE_CHAT_OVER_ROOM_TEXT }], details: laneDetails };
 				}
 				return result;

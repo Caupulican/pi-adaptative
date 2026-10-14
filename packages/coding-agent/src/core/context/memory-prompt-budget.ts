@@ -143,7 +143,9 @@ export function resolveMemoryPromptBudget(input: MemoryPromptBudgetInput): Memor
 	}
 
 	const percentCap = Math.max(200, Math.floor(contextWindow * 0.03));
-	const maxEstimatedTokens = Math.min(input.ceilingTokens ?? NORMAL_MAX_TOKENS, percentCap, availableTokens);
+	const effectiveCeiling =
+		input.ceilingTokens !== undefined ? input.ceilingTokens : Math.min(NORMAL_MAX_TOKENS, percentCap);
+	const maxEstimatedTokens = Math.min(effectiveCeiling, availableTokens);
 	if (maxEstimatedTokens < estimateTokensFromChars(MIN_MEMORY_LINE_CHARS)) {
 		return disabled("memory_block_cannot_fit_minimum_line", false);
 	}
