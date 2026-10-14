@@ -1,12 +1,13 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { type Static, Type } from "typebox";
 import { isPathWithinScope, safeRealpathSync } from "../autonomy/path-scope.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import { isMissingArtifactMarker } from "../context/context-artifacts.ts";
 import { type CredentialExposureBoundary, isProtectedCredentialPath } from "../secrets/credential-exposure-guard.ts";
+import { TYPESAFE_API_CREDENTIAL } from "./typesafe-contract.ts";
 
 export const MAX_TYPESAFE_EVIDENCE_SOURCE_BYTES = 512 * 1024;
 export const MAX_TYPESAFE_REFERENCED_EVIDENCE_BYTES = 1024 * 1024;
@@ -70,29 +71,22 @@ function digest(content: string): string {
 	return createHash("sha256").update(content).digest("hex");
 }
 
-function readBoundedFile(path: string): { content: string; sha256: string; bytes: number } {
+function readBoundedFile(path: string, limit: number): Buffer {
 	let descriptor: number | undefined;
 	try {
-		descriptor = openSync(path, "r");
+		descriptor = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
 		const stat = fstatSync(descriptor);
 		if (!stat.isFile()) throw new Error("System One evidence source is not a regular file");
-		if (stat.size > MAX_TYPESAFE_EVIDENCE_SOURCE_BYTES) throw new Error("System One evidence source exceeds 512 KiB");
-		const buffer = Buffer.allocUnsafe(MAX_TYPESAFE_EVIDENCE_SOURCE_BYTES + 1);
+		if (stat.size > limit) throw new Error("System One evidence source exceeds its byte limit");
+		const buffer = Buffer.allocUnsafe(limit + 1);
 		let offset = 0;
 		while (offset < buffer.length) {
 			const count = readSync(descriptor, buffer, offset, buffer.length - offset, null);
 			if (count === 0) break;
 			offset += count;
 		}
-		if (offset > MAX_TYPESAFE_EVIDENCE_SOURCE_BYTES) throw new Error("System One evidence source exceeds 512 KiB");
-		const snapshot = buffer.subarray(0, offset);
-		let content: string;
-		try {
-			content = new TextDecoder("utf-8", { fatal: true }).decode(snapshot);
-		} catch {
-			throw new Error("TypeSafe file evidence must be UTF-8 text");
-		}
-		return { content, sha256: createHash("sha256").update(snapshot).digest("hex"), bytes: offset };
+		if (offset > limit) throw new Error("System One evidence source exceeds its byte limit");
+		return buffer.subarray(0, offset);
 	} finally {
 		if (descriptor !== undefined) closeSync(descriptor);
 	}
@@ -143,6 +137,34 @@ export class TypeSafeEvidenceMaterializer {
 		this.deps = deps;
 	}
 
+	/** Snapshot the same host credential projection for text evidence and image provenance. */
+	async createTextRedactor(): Promise<(text: string) => string> {
+		const sensitiveValues = (await this.deps.credentialBoundary?.getSensitiveValues?.()) ?? [];
+		const redact =
+			this.deps.credentialBoundary?.createSensitiveTextRedactor?.(sensitiveValues) ??
+			((text: string) => this.deps.credentialBoundary?.redactSensitiveText(text, sensitiveValues) ?? text);
+		return (text) => redact(text).replace(new RegExp(TYPESAFE_API_CREDENTIAL.source, "g"), "[REDACTED]");
+	}
+
+	/** Binary acquisition uses exactly the text evidence owner's scope and credential-path boundary. */
+	readImage(path: string, maximumBytes: number, signal?: AbortSignal) {
+		signal?.throwIfAborted();
+		try {
+			const cwd = safeRealpathSync(this.deps.getCwd());
+			const canonicalPath = this.canonicalFile(path, cwd);
+			return {
+				bytes: readBoundedFile(canonicalPath, maximumBytes),
+				canonicalPath,
+				label: relative(cwd, canonicalPath).split(sep).join("/"),
+			};
+		} catch {
+			// OS diagnostics can echo private path segments; provenance is projected separately.
+			throw new Error(
+				"System One image cannot be read: require a regular file within task scope, outside protected credential paths, and within the byte limit",
+			);
+		}
+	}
+
 	private canonicalFile(rawPath: string, cwd: string): string {
 		const canonical = safeRealpathSync(resolve(cwd, rawPath));
 		if (!isPathWithinScope(canonical, cwd))
@@ -160,11 +182,19 @@ export class TypeSafeEvidenceMaterializer {
 		signal?.throwIfAborted();
 		if (reference.kind === "file") {
 			const canonicalPath = this.canonicalFile(reference.path, cwd);
-			const snapshot = readBoundedFile(canonicalPath);
+			const snapshot = readBoundedFile(canonicalPath, MAX_TYPESAFE_EVIDENCE_SOURCE_BYTES);
+			let content: string;
+			try {
+				content = new TextDecoder("utf-8", { fatal: true }).decode(snapshot);
+			} catch {
+				throw new Error("TypeSafe file evidence must be UTF-8 text");
+			}
 			return {
 				kind: reference.kind,
 				label: relative(cwd, canonicalPath).split(sep).join("/") || ".",
-				...snapshot,
+				content,
+				sha256: createHash("sha256").update(snapshot).digest("hex"),
+				bytes: snapshot.byteLength,
 				canonicalPath,
 			};
 		}
@@ -210,10 +240,7 @@ export class TypeSafeEvidenceMaterializer {
 		if (references.length === 0 || references.length > MAX_TYPESAFE_EVIDENCE_REFERENCES)
 			throw new Error(`System One evidence requires from 1 through ${MAX_TYPESAFE_EVIDENCE_REFERENCES} references`);
 		const cwd = safeRealpathSync(this.deps.getCwd());
-		const sensitiveValues = (await this.deps.credentialBoundary?.getSensitiveValues?.()) ?? [];
-		const redact =
-			this.deps.credentialBoundary?.createSensitiveTextRedactor?.(sensitiveValues) ??
-			((text: string) => this.deps.credentialBoundary?.redactSensitiveText(text, sensitiveValues) ?? text);
+		const redact = await this.createTextRedactor();
 		const sources: TypeSafeMaterializedSource[] = [];
 		const manifest: TypeSafeEvidenceManifestEntry[] = [];
 		let totalSourceBytes = 0;

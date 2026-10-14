@@ -2,6 +2,7 @@
 
 ### Added
 
+- Added the Jev 1.14 image-judgment catalog entry and image input metadata for direct TypeSafe models.
 - Explicit `promptCacheMarkers` reservation (`systemPromptBlockIndices`, `toolsLast`, `messageIndices`) on `StreamOptions` and Anthropic request serialization, keeping total `cache_control` breakpoints within the four-marker provider ceiling.
 
 ### Changed
@@ -10,6 +11,7 @@
 
 ### Fixed
 
+- Updated direct TypeSafe catalog pricing to the documented $0.042 per million input tokens with free output, including image usage.
 - Preserved Anthropic OAuth account identity across token rotation and stopped retrying refresh tokens rejected as expired, revoked, or otherwise terminal.
 - Preserved OpenAI Codex Responses WebSocket `previous_response_id` continuation across post-stream assistant `summary_text` redaction and omitted foreign-model `thinking` blocks when serializing OpenAI Responses input items.
 

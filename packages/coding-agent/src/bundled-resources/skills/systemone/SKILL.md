@@ -1,6 +1,6 @@
 ---
 name: systemone
-description: "Use System One judgments for applicable semantic tasks where uncertainty matters, including classification, routing, retrieval, planning, ambiguity and verification. Load when System One is available or when asked for a judgment, confidence check, second opinion, bug review or claim validation."
+description: "Use System One judgments for classification, routing, retrieval, planning, verification, image and screenshot review, visual comparison and target localization. Load when System One is available or when asked for a judgment, image review, confidence check, second opinion, bug review or claim validation."
 ---
 
 # System One
@@ -69,6 +69,38 @@ It must keep unsettled facts distinct from confirmed ones. A worker reports deci
 settle to its parent; the parent reviews the evidence before the root asks the owner. During a
 full handoff, reserved owner decisions go to the session's follow-up document. No answer means
 the decision remains open; silence is never approval or cancellation.
+
+### Inspect and compare images
+
+Use `action: "vision"` for both UI/screenshots and general image judgments. Check status's
+`capabilities.images` first. Vision uses TypeSafe's experimental image/Box capability on
+pinned Jev 1.14; text evaluation remains pinned separately. OpenRouter vision is refused
+explicitly, without switching provider. Results have `accepted: null` and remain advisory.
+
+Supply `vision: {state, questions, images}`. Each `images` entry maps a distinctive
+`<name>` placeholder to `{path, reason}` for an explicitly selected local PNG/JPEG inside
+the task directory. Put placeholders in state, instructions or criteria. For comparison,
+label the reference and current images in state and batch narrow Choice/Noul/Score
+questions about visible properties. Shared images belong in state once; repeating a
+placeholder repeats its image context and cost. No implicit screen capture or transcript
+image upload occurs. Pixels are not credential-redacted.
+
+For localization add a Box question and `boxes[questionId]` with `image` (the placeholder),
+`presenceQuestion`, `minimumPresence` and `minimumConfidence`. That companion must be a
+unique Noul with `instructions:null` and no criteria. Define the target only in the Box
+instructions; the host builds matching image/target questions. Always disambiguate repeated
+targets. Box has no absent result. Low presence, low or null confidence, and padding-only
+rectangles never produce a projected candidate.
+
+An optional integer `crop:{left,top,right,bottom}` uses EXIF-upright source pixels. The host
+orients, crops, shrinks and pads without changing source files, retaining hashes and transforms.
+Returned candidates use upright source pixels, never desktop input coordinates. Check
+current image/layout/focus before using a target. Image judgments never authorize a click
+or satisfy a completion gate; screenshot appearance cannot establish application behavior.
+
+See `docs/system-one-images.md` for complete comparison/localization examples, limits and
+retained evidence semantics. Sources are capped at16MiB/image,40million pixels and8 selections;
+large requests must be partitioned explicitly. Vision attempts are never retried automatically.
 
 ### Locate files by judgment
 
@@ -206,7 +238,7 @@ the available work before deciding which narrow claims can be judged.
 
 ## Known Gaps
 
-- Evaluation supports all three primitives; completion approval uses Choice
+- Text evaluation supports Choice/Noul/Score, vision also supports Box; completion approval uses Choice
   with an explicit expected verdict. Neither mode generates a prose review.
 - The harness cannot infer evidence the caller omitted or prove that an audit
   manifest is complete. Inspect source and coverage independently.

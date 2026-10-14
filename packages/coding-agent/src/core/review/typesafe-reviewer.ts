@@ -29,9 +29,11 @@ import {
 	type ReviewInput,
 	serializeEvaluation,
 	TYPESAFE_API_CREDENTIAL,
+	TypeSafeInputError,
 	validateEvaluationResponse,
 	validateTypeSafeInput,
 } from "./typesafe-contract.ts";
+import { encodeSystemOneImageRequest } from "./typesafe-image-transport.ts";
 import { priceTypeSafeUsage } from "./typesafe-usage.ts";
 
 export type { SystemOneReceipt, TypeSafeUsageReceipt } from "./system-one-review-port.ts";
@@ -46,7 +48,7 @@ function redactReviewText(text: string, key: string | undefined): string {
 }
 
 function preserveEvaluationKey(path: readonly (string | number)[], key: string): boolean {
-	if (path.length === 0) return key === "model" || key === "state" || key === "questions";
+	if (path.length === 0) return key === "model" || key === "state" || key === "questions" || key === "assets";
 	return path.length === 2 && path[0] === "questions" && ["type", "instructions", "criteria"].includes(key);
 }
 
@@ -56,7 +58,7 @@ function preserveResponseKey(path: readonly (string | number)[], key: string): b
 	return (
 		path.length === 2 &&
 		path[0] === "answers" &&
-		["type", "confidence", "choice", "score", "probabilities", "legend"].includes(key)
+		["type", "confidence", "choice", "score", "noul", "box", "probabilities", "legend"].includes(key)
 	);
 }
 
@@ -181,9 +183,16 @@ export class SystemOneReviewer {
 		const { driver, model, key, setup } = await this.connection();
 		const providerName = driver.displayName;
 		const enabled = Boolean(key?.trim());
+		const capabilities = {
+			images: Boolean(driver.visionModel),
+			boxes: Boolean(driver.visionModel),
+			...(driver.visionModel ? { visionModel: driver.visionModel } : {}),
+			experimentalVision: true,
+		};
 		if (!enabled || !key) {
 			return {
 				enabled: false,
+				capabilities,
 				model,
 				confidence: REVIEW_CONFIDENCE,
 				setup,
@@ -208,6 +217,7 @@ export class SystemOneReviewer {
 					this.verifiedKey = undefined;
 					return {
 						enabled: true,
+						capabilities,
 						model,
 						confidence: REVIEW_CONFIDENCE,
 						setup,
@@ -218,6 +228,7 @@ export class SystemOneReviewer {
 			} catch {
 				return {
 					enabled: true,
+					capabilities,
 					model,
 					confidence: REVIEW_CONFIDENCE,
 					setup,
@@ -232,6 +243,7 @@ export class SystemOneReviewer {
 		const authenticationVerified = this.verifiedKey === key;
 		return {
 			enabled: true,
+			capabilities,
 			model,
 			confidence: REVIEW_CONFIDENCE,
 			setup,
@@ -269,7 +281,8 @@ export class SystemOneReviewer {
 			Object.entries(snapshot.questions).map(([id, question], index) => {
 				const safeId = safeQuestionIds[index] ?? id;
 				const criteriaKeys = Object.keys(question.criteria);
-				const safeCriteriaKeys = Object.keys(result.request.questions[safeId]?.criteria ?? {});
+				const safeQuestion = result.request.questions[safeId];
+				const safeCriteriaKeys = safeQuestion?.type === "choice" ? Object.keys(safeQuestion.criteria) : [];
 				const expectedIndex = criteriaKeys.indexOf(question.expected);
 				return [safeId, safeCriteriaKeys[expectedIndex] ?? question.expected];
 			}),
@@ -292,16 +305,24 @@ export class SystemOneReviewer {
 		// Snapshot before any await. No omitted fields or context truncation are permitted.
 		const snapshot: EvaluationInput = JSON.parse(serializeEvaluation(input));
 		validateTypeSafeInput("evaluation", snapshot);
-		const { driver, model, key, setup } = await this.connection();
+		const { driver, model: scalarModel, key, setup } = await this.connection();
+		const vision =
+			snapshot.assets !== undefined || Object.values(snapshot.questions).some((question) => question.type === "box");
+		if (vision && !driver.visionModel)
+			throw new TypeSafeInputError(
+				`${driver.displayName} image evaluation is unsupported; configure TypeSafe explicitly for vision`,
+			);
+		const model = vision ? driver.visionModel! : scalarModel;
 		signal?.throwIfAborted();
 		const sensitiveValues = (await this.deps.credentialBoundary?.getSensitiveValues?.()) ?? [];
 		signal?.throwIfAborted();
 		const providerName = driver.displayName;
 		const endpoint = this.deps.endpoint ?? driver.decisionsEndpoint;
-		// One engine version for every path: a caller naming another version is refused, not rerouted.
-		if (this.deps.access && snapshot.model !== undefined && !driver.matchesModel(model, snapshot.model))
+		// Each capability pins its own engine: scalar1.13 and experimental vision1.14.
+		if ((vision || this.deps.access) && snapshot.model !== undefined && !driver.matchesModel(model, snapshot.model))
 			throw new Error(`System One runs ${model}; ${snapshot.model} was requested`);
-		const request = this.deps.access ? { ...snapshot, model } : { model: snapshot.model ?? model, ...snapshot };
+		const request =
+			this.deps.access || vision ? { ...snapshot, model } : { model: snapshot.model ?? model, ...snapshot };
 		const rawBody = JSON.stringify(request);
 		const serializedKey = key ? JSON.stringify(key).slice(1, -1) : undefined;
 		if (key && (rawBody.includes(key) || rawBody.includes(serializedKey!)))
@@ -312,15 +333,30 @@ export class SystemOneReviewer {
 		const redact = (text: string): string => {
 			return redactReviewText(redactSensitive(text), key);
 		};
-		const safeRequest = redactCredentialContent(request, redact, preserveEvaluationKey);
+		const safeRequest = redactCredentialContent(
+			request,
+			redact,
+			preserveEvaluationKey,
+			(path) => path.length === 1 && path[0] === "assets",
+		);
+		if (
+			vision &&
+			(Object.keys(request.questions).some((id, index) => Object.keys(safeRequest.questions)[index] !== id) ||
+				Object.keys(request.assets ?? {}).some((reference) => redact(reference) !== reference))
+		)
+			throw new TypeSafeInputError(
+				"System One image/question identities must not contain credentials; choose nonsensitive IDs",
+			);
 		validateTypeSafeInput("evaluation", safeRequest);
 		const body = JSON.stringify(safeRequest);
-		if (Buffer.byteLength(body) > MAX_REQUEST_BYTES)
+		if (!vision && Buffer.byteLength(body) > MAX_REQUEST_BYTES)
 			throw new Error(
 				`${providerName} request exceeds 2 MiB; partition with explicit coverage, never truncate evidence`,
 			);
 		if (!key) throw new Error(`${providerName} is not configured. Use ${setup}`);
 		if (TYPESAFE_API_CREDENTIAL.test(body)) throw new Error(`${providerName} evidence contains an API credential`);
+		const imageRequest = vision ? await encodeSystemOneImageRequest(safeRequest) : undefined;
+		signal?.throwIfAborted();
 		const requestSha256 = createHash("sha256").update(body).digest("hex");
 		const evaluationId = randomUUID();
 		const receipts: SystemOneReceipt[] = [];
@@ -365,8 +401,12 @@ export class SystemOneReviewer {
 					try {
 						response = await (this.deps.fetch ?? fetch)(endpoint, {
 							method: "POST",
-							headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-							body,
+							headers: {
+								Authorization: `Bearer ${key}`,
+								"Content-Type": imageRequest?.contentType ?? "application/json",
+								...(vision ? { "TypeSafe-Danger-Zone-Images": "true" } : {}),
+							},
+							body: imageRequest?.body ?? body,
 							redirect: "error",
 							signal: combined.signal,
 						});
@@ -445,11 +485,17 @@ export class SystemOneReviewer {
 					}
 					return raw;
 				},
-				{ maxRetries: SYSTEM_ONE_RESPONSES_PER_EVALUATION - 1, maxRetryDelayMs: 15_000, signal: combined.signal },
+				{
+					maxRetries: vision ? 0 : SYSTEM_ONE_RESPONSES_PER_EVALUATION - 1,
+					maxRetryDelayMs: 15_000,
+					signal: combined.signal,
+				},
 			);
 			combined.signal?.throwIfAborted();
 			try {
 				validateEvaluationResponse(raw, safeRequest);
+				if (vision && !driver.matchesModel(request.model, raw.model))
+					throw new Error("Invalid TypeSafe response: image model drift");
 			} catch (error) {
 				throw new SystemOneInvalidResponseError(
 					error instanceof Error ? error.message : String(error),

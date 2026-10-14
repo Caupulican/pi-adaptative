@@ -1,26 +1,22 @@
+import type * as PhotonModule from "@silvia-odwyer/photon-node";
 import type { PhotonImageType } from "./photon.ts";
 
-type Photon = typeof import("@silvia-odwyer/photon-node");
+type Photon = Pick<typeof PhotonModule, "PhotonImage" | "fliph" | "flipv">;
 
 function readOrientationFromTiff(bytes: Uint8Array, tiffStart: number): number {
 	if (tiffStart + 8 > bytes.length) return 1;
 
 	const byteOrder = (bytes[tiffStart] << 8) | bytes[tiffStart + 1];
+	if (byteOrder !== 0x4949 && byteOrder !== 0x4d4d) return 1;
 	const le = byteOrder === 0x4949;
-
-	const read16 = (pos: number): number => {
-		if (le) return bytes[pos] | (bytes[pos + 1] << 8);
-		return (bytes[pos] << 8) | bytes[pos + 1];
-	};
-
-	const read32 = (pos: number): number => {
-		if (le) return bytes[pos] | (bytes[pos + 1] << 8) | (bytes[pos + 2] << 16) | (bytes[pos + 3] << 24);
-		return ((bytes[pos] << 24) | (bytes[pos + 1] << 16) | (bytes[pos + 2] << 8) | bytes[pos + 3]) >>> 0;
-	};
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const read16 = (pos: number): number => view.getUint16(pos, le);
+	const read32 = (pos: number): number => view.getUint32(pos, le);
+	if (read16(tiffStart + 2) !== 42) return 1;
 
 	const ifdOffset = read32(tiffStart + 4);
 	const ifdStart = tiffStart + ifdOffset;
-	if (ifdStart + 2 > bytes.length) return 1;
+	if (ifdOffset < 8 || ifdStart + 2 > bytes.length) return 1;
 
 	const entryCount = read16(ifdStart);
 	for (let i = 0; i < entryCount; i++) {
@@ -28,6 +24,7 @@ function readOrientationFromTiff(bytes: Uint8Array, tiffStart: number): number {
 		if (entryPos + 12 > bytes.length) return 1;
 
 		if (read16(entryPos) === 0x0112) {
+			if (read16(entryPos + 2) !== 3 || read32(entryPos + 4) !== 1) return 1;
 			const value = read16(entryPos + 8);
 			return value >= 1 && value <= 8 ? value : 1;
 		}
@@ -36,52 +33,53 @@ function readOrientationFromTiff(bytes: Uint8Array, tiffStart: number): number {
 	return 1;
 }
 
-function findJpegTiffOffset(bytes: Uint8Array): number {
+function findJpegTiffData(bytes: Uint8Array): Uint8Array | undefined {
 	let offset = 2;
 	while (offset < bytes.length - 1) {
-		if (bytes[offset] !== 0xff) return -1;
+		if (bytes[offset] !== 0xff) return undefined;
 		const marker = bytes[offset + 1];
 		if (marker === 0xff) {
 			offset++;
 			continue;
 		}
 
-		if (marker === 0xe1) {
-			if (offset + 4 >= bytes.length) return -1;
-			const segmentStart = offset + 4;
-			if (segmentStart + 6 > bytes.length) return -1;
-			if (!hasExifHeader(bytes, segmentStart)) return -1;
-			return segmentStart + 6;
+		if (marker === 0xda || marker === 0xd9) return undefined;
+		if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
+			offset += 2;
+			continue;
 		}
-
-		if (offset + 4 > bytes.length) return -1;
+		if (offset + 4 > bytes.length) return undefined;
 		const length = (bytes[offset + 2] << 8) | bytes[offset + 3];
+		if (length < 2 || offset + 2 + length > bytes.length) return undefined;
+		const segmentStart = offset + 4;
+		if (marker === 0xe1 && length >= 8 && hasExifHeader(bytes, segmentStart))
+			return bytes.subarray(segmentStart + 6, offset + 2 + length);
 		offset += 2 + length;
 	}
 
-	return -1;
+	return undefined;
 }
 
-function findWebpTiffOffset(bytes: Uint8Array): number {
-	let offset = 12;
+/** PNG and WebP chunks use different length order/alignment, but share one bounded TIFF extraction path. */
+function findChunkTiffData(bytes: Uint8Array, format: "png" | "webp"): Uint8Array | undefined {
+	const png = format === "png";
+	let offset = png ? 8 : 12;
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	while (offset + 8 <= bytes.length) {
-		const chunkId = String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
-		const chunkSize =
-			bytes[offset + 4] | (bytes[offset + 5] << 8) | (bytes[offset + 6] << 16) | (bytes[offset + 7] << 24);
+		const typeStart = offset + (png ? 4 : 0);
+		const chunkId = String.fromCharCode(...bytes.subarray(typeStart, typeStart + 4));
+		const chunkSize = view.getUint32(offset + (png ? 0 : 4), !png);
 		const dataStart = offset + 8;
-
-		if (chunkId === "EXIF") {
-			if (dataStart + chunkSize > bytes.length) return -1;
+		const dataEnd = dataStart + chunkSize;
+		if (dataEnd + (png ? 4 : chunkSize % 2) > bytes.length) return undefined;
+		if (chunkId === (png ? "eXIf" : "EXIF")) {
 			// Some WebP files have "Exif\0\0" prefix before the TIFF header
-			const tiffStart = chunkSize >= 6 && hasExifHeader(bytes, dataStart) ? dataStart + 6 : dataStart;
-			return tiffStart;
+			const tiffStart = !png && chunkSize >= 6 && hasExifHeader(bytes, dataStart) ? dataStart + 6 : dataStart;
+			return bytes.subarray(tiffStart, dataEnd);
 		}
-
-		// RIFF chunks are padded to even size
-		offset = dataStart + chunkSize + (chunkSize % 2);
+		offset = dataEnd + (png ? 4 : chunkSize % 2);
 	}
-
-	return -1;
+	return undefined;
 }
 
 function hasExifHeader(bytes: Uint8Array, offset: number): boolean {
@@ -96,11 +94,13 @@ function hasExifHeader(bytes: Uint8Array, offset: number): boolean {
 }
 
 function getExifOrientation(bytes: Uint8Array): number {
-	let tiffOffset = -1;
+	let tiff: Uint8Array | undefined;
 
 	// JPEG: starts with FF D8
 	if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8) {
-		tiffOffset = findJpegTiffOffset(bytes);
+		tiff = findJpegTiffData(bytes);
+	} else if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+		tiff = findChunkTiffData(bytes, "png");
 	}
 	// WebP: starts with RIFF....WEBP
 	else if (
@@ -114,11 +114,10 @@ function getExifOrientation(bytes: Uint8Array): number {
 		bytes[10] === 0x42 &&
 		bytes[11] === 0x50
 	) {
-		tiffOffset = findWebpTiffOffset(bytes);
+		tiff = findChunkTiffData(bytes, "webp");
 	}
 
-	if (tiffOffset === -1) return 1;
-	return readOrientationFromTiff(bytes, tiffOffset);
+	return tiff ? readOrientationFromTiff(tiff, 0) : 1;
 }
 
 type DstIndexFn = (x: number, y: number, w: number, h: number) => number;

@@ -27,6 +27,12 @@ export interface SystemOneStatus {
 	readonly setup: string;
 	readonly authenticationVerified: boolean;
 	readonly message: string;
+	readonly capabilities?: {
+		readonly images: boolean;
+		readonly boxes: boolean;
+		readonly visionModel?: string;
+		readonly experimentalVision: boolean;
+	};
 }
 
 /**

@@ -246,6 +246,7 @@ const TYPESAFE_MODELS: Model<"openai-completions">[] = [
 	{ id: "jev-1.13.0", name: "Jev 1.13" },
 	{ id: "jev-latest", name: "Jev Latest" },
 	{ id: "jev-preview", name: "Jev Preview" },
+	{ id: "jev-1.14.0", name: "Jev 1.14" },
 ].map((identity) => ({
 	...identity,
 	api: "openai-completions",
@@ -253,8 +254,9 @@ const TYPESAFE_MODELS: Model<"openai-completions">[] = [
 	kind: "judge",
 	baseUrl: TYPESAFE_BASE_URL,
 	reasoning: false,
-	input: ["text"],
-	cost: { input: 0.25, output: 1.25, cacheRead: 0, cacheWrite: 0 },
+	input: ["text", "image"],
+	// https://docs.typesafe.ai/models: $0.042/M input tokens (images included), output free.
+	cost: { input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 32_000,
 	maxTokens: 4096,
 }));

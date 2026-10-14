@@ -16,7 +16,7 @@ function diagnosticPath(path: string): string {
 	return path.replace(new RegExp(TYPESAFE_API_CREDENTIAL.source, "g"), "[REDACTED]").slice(0, 160);
 }
 
-const contextSchema = Type.Union([
+export const contextSchema = Type.Union([
 	Type.String(),
 	Type.Record(Type.String(), Type.Unknown()),
 	Type.Array(Type.Unknown()),
@@ -26,7 +26,7 @@ const choiceCriteria = Type.Record(Type.String(), entrySchema, {
 	minProperties: 2,
 	maxProperties: 255,
 });
-const questionSchema = Type.Union([
+export const scalarQuestionSchema = Type.Union([
 	Type.Object(
 		{ type: Type.Literal("choice"), instructions: entrySchema, criteria: choiceCriteria },
 		{ additionalProperties: false },
@@ -55,11 +55,37 @@ const questionSchema = Type.Union([
 	),
 ]);
 
-export const evaluationInputSchema = Type.Object(
+export const questionSchema = Type.Union([
+	...scalarQuestionSchema.anyOf,
+	Type.Object({ type: Type.Literal("box"), instructions: contextSchema }, { additionalProperties: false }),
+]);
+
+export const textEvaluationInputSchema = Type.Object(
 	{
 		model: Type.Optional(Type.String({ minLength: 1 })),
 		state: contextSchema,
+		questions: Type.Record(Type.String(), scalarQuestionSchema, { minProperties: 1 }),
+	},
+	{ additionalProperties: false },
+);
+export const evaluationInputSchema = Type.Object(
+	{
+		...textEvaluationInputSchema.properties,
 		questions: Type.Record(Type.String(), questionSchema, { minProperties: 1 }),
+		assets: Type.Optional(
+			Type.Record(
+				Type.String(),
+				Type.Object(
+					{
+						type: Type.Literal("image"),
+						format: Type.Literal("png"),
+						data_base64: Type.String({ minLength: 1 }),
+					},
+					{ additionalProperties: false },
+				),
+				{ minProperties: 1, maxProperties: 8 },
+			),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -121,7 +147,7 @@ export function validateTypeSafeInput(kind: "review" | "evaluation", value: unkn
 			if (branch) addErrors(branch, question, path);
 			else
 				diagnostics.push(
-					`${diagnosticPath(path)}/type: expected choice, noul or score; received ${typeof question.type}`,
+					`${diagnosticPath(path)}/type: expected choice, noul, score or box; received ${typeof question.type}`,
 				);
 			if (diagnostics.length >= 6) break;
 		}
@@ -143,6 +169,11 @@ export function validateTypeSafeInput(kind: "review" | "evaluation", value: unkn
 const probability = Type.Number({ minimum: 0, maximum: 1 });
 const distribution = Type.Record(Type.String(), probability);
 const answerSchema = Type.Union([
+	Type.Object({
+		type: Type.Literal("box"),
+		box: Type.Object({ top: probability, bottom: probability, left: probability, right: probability }),
+		confidence: Type.Union([probability, Type.Null()]),
+	}),
 	Type.Object({
 		type: Type.Literal("choice"),
 		choice: Type.String(),
@@ -241,6 +272,12 @@ export function validateEvaluationResponse(
 		const answer = value.answers[id];
 		const question = input.questions[id];
 		if (answer.type !== question.type) throw new Error("Invalid TypeSafe response: answer type");
+		if (answer.type === "box") {
+			if (answer.box.left >= answer.box.right || answer.box.top >= answer.box.bottom)
+				throw new Error("Invalid TypeSafe response: unordered box edges");
+			continue;
+		}
+		if (question.type === "box") throw new Error("Invalid TypeSafe response: missing box");
 		if (question.type === "noul" || answer.type === "noul") continue;
 		const options =
 			question.type === "choice"

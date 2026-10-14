@@ -9,10 +9,10 @@ import {
 } from "../review/system-one-review-port.ts";
 import {
 	type EvaluationInput,
-	evaluationInputSchema,
 	getEvaluationUsage,
 	type ReviewInput,
 	reviewInputSchema,
+	textEvaluationInputSchema,
 	validateTypeSafeInput,
 } from "../review/typesafe-contract.ts";
 import {
@@ -23,6 +23,7 @@ import {
 } from "../review/typesafe-evidence-materializer.ts";
 import type { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import { type PricedTypeSafeUsage, priceTypeSafeUsage } from "../review/typesafe-usage.ts";
+import { evaluateSystemOneVision, type SystemOneImageManifest, visionInputSchema } from "../review/typesafe-vision.ts";
 import type { FileLocator } from "../system-one/locate.ts";
 import {
 	LocateInputError,
@@ -37,13 +38,23 @@ import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 
 const schema = Type.Object(
 	{
-		action: Type.Enum(["status", "evaluate", "review", "evidence", "uncertainties", "resolve_uncertainty", "locate"]),
+		action: Type.Enum([
+			"status",
+			"evaluate",
+			"review",
+			"vision",
+			"evidence",
+			"uncertainties",
+			"resolve_uncertainty",
+			"locate",
+		]),
 		id: Type.Optional(Type.String()),
 		offset: Type.Optional(Type.Integer({ minimum: 0 })),
 		evidenceRefs: Type.Optional(
 			Type.Array(typeSafeEvidenceReferenceSchema, { minItems: 1, maxItems: MAX_TYPESAFE_EVIDENCE_REFERENCES }),
 		),
-		evaluation: Type.Optional(evaluationInputSchema),
+		evaluation: Type.Optional(textEvaluationInputSchema),
+		vision: Type.Optional(visionInputSchema),
 		review: Type.Optional(reviewInputSchema),
 		locate: Type.Optional(
 			Type.Object(
@@ -132,7 +143,7 @@ export function createSystemOneToolDefinition(
 		name: SYSTEM_ONE_TOOL_NAME,
 		label: "System One",
 		readOnly: true,
-		description: `Use System One for semantic decisions and independent verification. Status checks setup. Evaluate batched Choice, Noul and Score questions. Review gates claims at high (0.95) or max (0.99) confidence. evidenceRefs snapshots scoped files, artifacts, or git diffs. Evidence reads retained records by id and offset. Locate ranks files by whether their code defines what a target describes. ${uncertainties ? "The session owner can list and disposition advisory uncertainties; this never proves verification or grants permission." : "Workers report unresolved task questions to their owner and recheck mandatory findings in their own lane."} Does not execute or authorize actions.`,
+		description: `Use System One for semantic decisions and independent verification. Status checks setup and image capability. Evaluate batched Choice, Noul and Score questions. Vision judges and compares explicitly selected PNG/JPEG files and localizes targets with Box plus presence; experimental TypeSafe-only, advisory results. Review gates claims at high (0.95) or max (0.99) confidence. evidenceRefs snapshots scoped files, artifacts, or git diffs. Evidence reads retained records by id and offset. Locate ranks files by whether their code defines what a target describes. ${uncertainties ? "The session owner can list and disposition advisory uncertainties; this never proves verification or grants permission." : "Workers report unresolved task questions to their owner and recheck mandatory findings in their own lane."} Does not execute or authorize actions.`,
 		promptSnippet: "System One: semantic judgments and high/max claim review.",
 		promptGuidelines: [
 			'For review, use an option map and a declared expected key, for example: {"action":"review","review":{"state":"relevant source and check results","questions":{"claim":{"instructions":"Does this evidence support the claim?","criteria":{"supports":"Supported","contradicts":"Contradicted","insufficient":"Missing evidence"},"expected":"supports"}}}}.',
@@ -141,6 +152,7 @@ export function createSystemOneToolDefinition(
 			"Batch independent narrow questions with complete relevant source, tests, prior findings and limitations; never hide adverse evidence. Reproduce bug candidates before fixing.",
 			"Approval requires every expected verdict and high/max confidence; fix findings or add missing evidence. Never reroll unchanged evidence for a better score. Use the configured provider login flow reported by systemone status; never put credentials in tool arguments.",
 			uncertaintyPrompt,
+			'For images use action:"vision", vision:{state,questions,images:{"<screen>":{path:"screenshot.png",reason:"Selected UI evidence"}},boxes?}. Reference <screen> in state/instructions/criteria. A Box binding names image, presenceQuestion, minimumPresence and minimumConfidence; its unique Noul must have instructions:null and no criteria. The host binds both to one target. Optional crop uses integer EXIF-upright source pixels. No screenshots are captured. Vision never approves completion or clicks.',
 			"An uncertain or unavailable System One result returns to the owning LLM. Workers report unresolved decisions to the parent; only the root asks the owner when authority or evidence is still missing. Silence grants nothing.",
 			SYSTEM_ONE_VALIDATION_RULE,
 		],
@@ -162,6 +174,7 @@ export function createSystemOneToolDefinition(
 			let errorKind: "operation_outcome" | undefined;
 			let transportAttempts: SystemOneTransportAttempt[] = [];
 			let sourceManifest: readonly TypeSafeEvidenceManifestEntry[] | undefined;
+			let imageManifest: readonly SystemOneImageManifest[] | undefined;
 			try {
 				signal?.throwIfAborted();
 				if (input.action === "uncertainties") {
@@ -249,31 +262,55 @@ export function createSystemOneToolDefinition(
 					const status = await reviewer.status(signal);
 					return { content: [{ type: "text" as const, text: JSON.stringify(status) }], details: status };
 				}
-				if (input.action === "evaluate" && !input.evaluation)
-					throw new Error("evaluation is required for the evaluate action");
-				if (input.action === "review" && !input.review) throw new Error("review is required for the review action");
-				validateTypeSafeInput(
-					input.action === "evaluate" ? "evaluation" : "review",
-					input.action === "evaluate" ? input.evaluation : input.review,
-				);
-				const prepared = await materializeReferencedEvidence(
-					input.action === "evaluate" ? input.evaluation! : input.review!,
-					input.evidenceRefs,
-					evidenceMaterializer,
-					signal,
-				);
-				sourceManifest = prepared.sourceManifest;
-				const result =
-					input.action === "evaluate"
-						? await reviewer.evaluate(prepared.request as EvaluationInput, signal, onResponse)
-						: await reviewer.review(prepared.request as ReviewInput, signal, onResponse);
-				record = {
-					...result,
-					...(sourceManifest ? { sourceManifest } : {}),
-					costStatus: usageProjection?.costStatus ?? "unpriced",
-					...(usageProjection?.costProvenance ? { costProvenance: usageProjection.costProvenance } : {}),
-				};
-				transportAttempts = result.transportAttempts;
+				if (input.action === "vision") {
+					if (!input.vision || !evidenceMaterializer)
+						throw new Error("vision input and scoped evidence materialization are required");
+					if (input.evidenceRefs)
+						throw new Error("For vision, put text evidence in vision.state; evidenceRefs is for text actions");
+					const result = await evaluateSystemOneVision(
+						input.vision,
+						evidenceMaterializer,
+						reviewer,
+						signal,
+						onResponse,
+						(manifest) => {
+							imageManifest = manifest;
+						},
+					);
+					record = {
+						...result,
+						costStatus: usageProjection?.costStatus ?? "unpriced",
+						...(usageProjection?.costProvenance ? { costProvenance: usageProjection.costProvenance } : {}),
+					};
+					transportAttempts = result.transportAttempts;
+				} else {
+					if (input.action === "evaluate" && !input.evaluation)
+						throw new Error("evaluation is required for the evaluate action");
+					if (input.action === "review" && !input.review)
+						throw new Error("review is required for the review action");
+					validateTypeSafeInput(
+						input.action === "evaluate" ? "evaluation" : "review",
+						input.action === "evaluate" ? input.evaluation : input.review,
+					);
+					const prepared = await materializeReferencedEvidence(
+						input.action === "evaluate" ? input.evaluation! : input.review!,
+						input.evidenceRefs,
+						evidenceMaterializer,
+						signal,
+					);
+					sourceManifest = prepared.sourceManifest;
+					const result =
+						input.action === "evaluate"
+							? await reviewer.evaluate(prepared.request as EvaluationInput, signal, onResponse)
+							: await reviewer.review(prepared.request as ReviewInput, signal, onResponse);
+					record = {
+						...result,
+						...(sourceManifest ? { sourceManifest } : {}),
+						costStatus: usageProjection?.costStatus ?? "unpriced",
+						...(usageProjection?.costProvenance ? { costProvenance: usageProjection.costProvenance } : {}),
+					};
+					transportAttempts = result.transportAttempts;
+				}
 			} catch (error) {
 				if (error instanceof LocateInputError) {
 					return {
@@ -293,10 +330,14 @@ export function createSystemOneToolDefinition(
 				if (error instanceof SystemOneReviewError) errorKind = "operation_outcome";
 				transportAttempts = error instanceof SystemOneReviewError ? error.transportAttempts : [];
 				record = {
-					accepted: false,
+					accepted: input.action === "vision" ? null : false,
+					...(input.action === "vision"
+						? { kind: "system_one_vision", advisoryOnly: true, experimental: true }
+						: {}),
 					costStatus: usageProjection?.costStatus ?? "unpriced",
 					...(usageProjection?.costProvenance ? { costProvenance: usageProjection.costProvenance } : {}),
 					error: message,
+					...(imageManifest ? { imageManifest } : {}),
 					...(sourceManifest ? { sourceManifest } : {}),
 					...(error instanceof SystemOneReviewError
 						? {
@@ -311,7 +352,10 @@ export function createSystemOneToolDefinition(
 			try {
 				const evidence = evidenceStore.save(toolCallId, record);
 				const { request: _request, transportAttempts: _attempts, ...summary } = record;
-				const holder: { details: unknown } = { details: { ...record, evidence } };
+				// Image bytes are retained once in evidence, never duplicated into transcript metadata.
+				const holder: { details: unknown } = {
+					details: { ...(input.action === "vision" ? summary : record), evidence },
+				};
 				compactRetainedDetails(holder);
 				if (
 					holder.details &&
@@ -337,10 +381,11 @@ export function createSystemOneToolDefinition(
 				return {
 					isError: true,
 					content: [
-						{ type: "text" as const, text: "System One evidence could not be retained; review is not accepted." },
+						{ type: "text" as const, text: "System One evidence could not be retained; no result is approved." },
 					],
 					details: {
-						accepted: false,
+						accepted: input.action === "vision" ? null : false,
+						...(input.action === "vision" ? { advisoryOnly: true, experimental: true } : {}),
 						costStatus: usageProjection?.costStatus ?? "unpriced",
 						...(usageProjection?.costProvenance ? { costProvenance: usageProjection.costProvenance } : {}),
 					},

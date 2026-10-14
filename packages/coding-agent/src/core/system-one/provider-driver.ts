@@ -7,8 +7,8 @@
  */
 
 /**
- * The Jev version System One runs, in every path and through either provider: one engine version for
- * all, so the same question never gets answers from two versions. 1.13 is the owner's pinned choice.
+ * The owner's pinned Jev version for scalar decisions through either provider.
+ * Experimental image evaluation has a separate explicit capability pin on its driver.
  */
 export const SYSTEM_ONE_JEV_VERSION = "1.13";
 
@@ -17,6 +17,8 @@ export interface SystemOneProviderDriver {
 	readonly displayName: string;
 	/** The pinned Jev version, in this provider's model naming. */
 	readonly model: string;
+	/** Explicit experimental image capability; absence refuses image requests before egress. */
+	readonly visionModel?: string;
 	readonly decisionsEndpoint: string;
 	readonly modelsEndpoint: string;
 	readonly apiKeyEnvVar: string;
@@ -29,6 +31,7 @@ export class TypeSafeSystemOneDriver implements SystemOneProviderDriver {
 	readonly id = "typesafe";
 	readonly displayName = "TypeSafe";
 	readonly model = `jev-${SYSTEM_ONE_JEV_VERSION}.0`;
+	readonly visionModel = "jev-1.14.0";
 	readonly decisionsEndpoint = "https://api.typesafe.ai/v1/systemone";
 	readonly modelsEndpoint = "https://api.typesafe.ai/v1/models";
 	readonly apiKeyEnvVar = "TYPESAFE_API_KEY";
