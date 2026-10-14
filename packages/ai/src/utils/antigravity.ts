@@ -1,5 +1,6 @@
 import { requestBoundedAccountJson } from "../providers/account-request.ts";
 import { ANTIGRAVITY_CLIENT_CONFIG } from "../providers/antigravity-client-config.generated.ts";
+import { gemini4ArgonThinkingMetadata, isGemini4ArgonModel } from "../providers/google-model-family.ts";
 import type { Model, ThinkingBudgets, ThinkingLevelMap } from "../types.ts";
 import { isRecord } from "./value-guards.ts";
 
@@ -50,11 +51,11 @@ export async function antigravityRequest(
 }
 
 /**
- * Catalog variants are fixed presets. Budget models (Gemini and GPT-OSS) send their own budget;
- * adaptive models send the catalog level (1=LOW, 2=MEDIUM, 3=HIGH), not a caller-selected scale.
+ * Catalog variants are fixed presets. Budget models send their own budget;
+ * level models send the catalog level (1=LOW, 2=MEDIUM, 3=HIGH), not a caller-selected scale.
  */
 function antigravityThinkingPreset(
-	preset: { kind: "budget"; value: number } | { kind: "adaptive"; value: 1 | 2 | 3 },
+	preset: { kind: "budget"; value: number } | { kind: "level"; value: 1 | 2 | 3 },
 	id: string,
 ): {
 	level: "low" | "medium" | "high";
@@ -70,7 +71,7 @@ function antigravityThinkingPreset(
 				? "high"
 				: undefined;
 	const level =
-		preset.kind === "adaptive"
+		preset.kind === "level"
 			? preset.value === 1
 				? "low"
 				: preset.value === 2
@@ -107,7 +108,12 @@ export function antigravityThinkingBudget(model: Model<"google-antigravity">): n
 export function antigravityThinkingLevel(model: Model<"google-antigravity">): 1 | 2 | 3 | undefined {
 	if (!model.reasoning || model.thinkingBudgets || !model.thinkingLevelMap) return undefined;
 	if (Object.values(model.thinkingLevelMap).filter((value) => value != null).length !== 1) return undefined;
-	switch (model.defaultThinkingLevel) {
+	return toAntigravityThinkingLevel(model.defaultThinkingLevel);
+}
+
+/** One native enum projection for catalog presets and caller-selected Google levels. */
+export function toAntigravityThinkingLevel(level: string | undefined): 1 | 2 | 3 | undefined {
+	switch (level?.toLowerCase()) {
 		case "low":
 			return 1;
 		case "medium":
@@ -138,16 +144,14 @@ export function parseAntigravityModels(raw: unknown): Model<"google-antigravity"
 				? (info.thinkingBudget as number)
 				: undefined;
 		const nativeLevel = info.thinkingLevel;
-		const adaptiveLevel =
-			reasoning &&
-			info.supportsAdaptiveThinking === true &&
-			(nativeLevel === 1 || nativeLevel === 2 || nativeLevel === 3)
-				? nativeLevel
-				: undefined;
+		// Gemini level presets (including Argon) do not advertise adaptive thinking.
+		// The catalog's level is authoritative even when a zero budget is also present.
+		const catalogLevel =
+			reasoning && (nativeLevel === 1 || nativeLevel === 2 || nativeLevel === 3) ? nativeLevel : undefined;
 		const preset =
-			adaptiveLevel !== undefined
-				? antigravityThinkingPreset({ kind: "adaptive", value: adaptiveLevel }, id)
-				: budget !== undefined
+			catalogLevel !== undefined
+				? antigravityThinkingPreset({ kind: "level", value: catalogLevel }, id)
+				: budget !== undefined && !isGemini4ArgonModel(id)
 					? antigravityThinkingPreset({ kind: "budget", value: budget }, id)
 					: undefined;
 		// The catalog names the backend; only Gemini reads the JSON-schema tool field.
@@ -165,7 +169,9 @@ export function parseAntigravityModels(raw: unknown): Model<"google-antigravity"
 						thinkingLevelMap: preset.thinkingLevelMap,
 						...(preset.thinkingBudgets ? { thinkingBudgets: preset.thinkingBudgets } : {}),
 					}
-				: {}),
+				: reasoning && isGemini4ArgonModel(id)
+					? gemini4ArgonThinkingMetadata(true)
+					: {}),
 			input: info.supportsImages === true ? ["text", "image"] : ["text"],
 			contextWindow,
 			maxTokens,
@@ -265,9 +271,10 @@ export function antigravityProjectId(account: Record<string, unknown>): string {
  * The shape of the model catalog this adapter stores. Raise it whenever discovery starts persisting a
  * field the adapter reads (thinking budgets and backends are version 2): a stored catalog of an older
  * version is refreshed instead of silently running models without what it lacks. Version 3 adds
- * adaptive thinking levels and the discovery client's version.
+ * adaptive thinking levels and the discovery client's version. Version 4 retains level-based
+ * Gemini presets independently of the adaptive-thinking flag.
  */
-export const ANTIGRAVITY_CATALOG_VERSION = 3;
+export const ANTIGRAVITY_CATALOG_VERSION = 4;
 
 export async function discoverAntigravityAccount(
 	token: string,
@@ -306,7 +313,7 @@ export async function discoverAntigravityAccount(
 					? { thinkingBudget: antigravityThinkingBudget(model) }
 					: {}),
 				...(antigravityThinkingLevel(model) !== undefined
-					? { thinkingLevel: antigravityThinkingLevel(model), supportsAdaptiveThinking: true }
+					? { thinkingLevel: antigravityThinkingLevel(model) }
 					: {}),
 				...(response.models && typeof antigravityObject(response.models)[model.id] === "object"
 					? antigravityBackend(antigravityObject(response.models)[model.id])

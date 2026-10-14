@@ -1,5 +1,5 @@
 import type { GenerateContentConfig, GenerateContentParameters, GenerateContentResponse } from "@google/genai";
-import { clampThinkingLevel } from "../model-capabilities.ts";
+import { resolveModelThinkingLevel } from "../model-capabilities.ts";
 import type {
 	Context,
 	Model,
@@ -15,6 +15,7 @@ import { formatProviderError, normalizeProviderError } from "../utils/error-body
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap } from "../utils/tool-names.ts";
+import { isGemini4ArgonModel } from "./google-model-family.ts";
 import type { GoogleApiType, GoogleThinkingEffort, GoogleThinkingLevel } from "./google-shared.ts";
 import {
 	convertMessages,
@@ -220,7 +221,7 @@ export function buildGoogleGenerateContentParameters<TApi extends GoogleApiType>
 	const contents = convertMessages(model, context, toolNameMap);
 
 	const generationConfig: GenerateContentConfig = {};
-	if (options.temperature !== undefined) {
+	if (options.temperature !== undefined && !isGemini4ArgonModel(model.id)) {
 		generationConfig.temperature = options.temperature;
 	}
 	if (options.maxTokens !== undefined) {
@@ -253,15 +254,30 @@ export function buildGoogleGenerateContentParameters<TApi extends GoogleApiType>
 	}
 
 	if (options.thinking?.enabled && model.reasoning) {
+		if (isGemini4ArgonModel(model.id) && options.thinking.budgetTokens !== undefined) {
+			throw new Error("Gemini 4 Argon requires a thinking level, not a token budget");
+		}
+		const level = options.thinking.level ?? (isGemini4ArgonModel(model.id) ? "MEDIUM" : undefined);
+		if (
+			isGemini4ArgonModel(model.id) &&
+			level !== undefined &&
+			level !== "LOW" &&
+			level !== "MEDIUM" &&
+			level !== "HIGH"
+		) {
+			throw new Error("Gemini 4 Argon supports LOW, MEDIUM and HIGH thinking levels");
+		}
 		config.thinkingConfig = toGoogleGenAiThinkingConfig(
 			{
-				...(options.thinking.level !== undefined ? { thinkingLevel: options.thinking.level } : {}),
+				...(level !== undefined ? { thinkingLevel: level } : {}),
 				...(options.thinking.budgetTokens !== undefined ? { thinkingBudget: options.thinking.budgetTokens } : {}),
 			},
 			true,
 		);
 	} else if (model.reasoning && options.thinking && !options.thinking.enabled) {
 		config.thinkingConfig = toGoogleGenAiThinkingConfig(resolveDisabledGoogleThinkingConfig(model.id));
+	} else if (model.reasoning && isGemini4ArgonModel(model.id)) {
+		config.thinkingConfig = toGoogleGenAiThinkingConfig(resolveGoogleThinkingConfig(model.id, "medium"), true);
 	}
 
 	if (options.signal) {
@@ -284,16 +300,16 @@ export function buildGoogleSimpleOptions<TApi extends GoogleApiType>(
 	apiKey: string | undefined,
 ): GoogleGenAiOptions {
 	const base = buildBaseOptions(model, options, apiKey);
-	if (!options?.reasoning || options.reasoning === "off") {
+	if (options?.reasoning === "off" || (!options?.reasoning && !model.defaultThinkingLevel)) {
 		return { ...base, thinking: { enabled: false } };
 	}
 
-	const clampedReasoning = clampThinkingLevel(model, options.reasoning);
+	const clampedReasoning = resolveModelThinkingLevel(model, options?.reasoning);
 	if (clampedReasoning === "off") {
 		return { ...base, thinking: { enabled: false } };
 	}
 	const effort = clampedReasoning as GoogleThinkingEffort;
-	const thinkingConfig = resolveGoogleThinkingConfig(model.id, effort, options.thinkingBudgets);
+	const thinkingConfig = resolveGoogleThinkingConfig(model.id, effort, options?.thinkingBudgets);
 
 	return {
 		...base,

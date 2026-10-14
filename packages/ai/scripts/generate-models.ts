@@ -12,6 +12,7 @@ import {
 } from "../src/providers/cloudflare.ts";
 import { detectOpenRouterCacheControlFormat } from "../src/providers/openrouter-cache.ts";
 import { isAnthropicHaiku55 } from "../src/providers/anthropic-model-family.ts";
+import { gemini4ArgonThinkingMetadata, isGemini3FlashModel, isGemini3ProModel, isGemini4ArgonModel, isGemma4Model } from "../src/providers/google-model-family.ts";
 import type {
 	AnthropicMessagesCompat,
 	Api,
@@ -513,18 +514,6 @@ function mergeAnthropicMessagesCompat(model: Model<Api>, compat: AnthropicMessag
 	model.compat = { ...(model.compat as AnthropicMessagesCompat | undefined), ...compat };
 }
 
-function isGemini3ProModel(modelId: string): boolean {
-	return /gemini-3(?:\.\d+)?-pro/.test(modelId.toLowerCase());
-}
-
-function isGemini3FlashModel(modelId: string): boolean {
-	return /gemini-3(?:\.\d+)?-flash/.test(modelId.toLowerCase());
-}
-
-function isGemma4Model(modelId: string): boolean {
-	return /gemma-?4/.test(modelId.toLowerCase());
-}
-
 function applyThinkingLevelMetadata(model: Model<any>, modelId = model.id): void {
 	if (
 		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
@@ -622,6 +611,11 @@ function applyThinkingLevelMetadata(model: Model<any>, modelId = model.id): void
 	}
 	if (isGoogleThinkingApi(model) && isGemma4Model(modelId)) {
 		mergeThinkingLevelMap(model, { off: null, minimal: "MINIMAL", low: null, medium: null, high: "HIGH" });
+	}
+	if (isGemini4ArgonModel(modelId)) {
+		const metadata = gemini4ArgonThinkingMetadata(isGoogleThinkingApi(model));
+		mergeThinkingLevelMap(model, metadata.thinkingLevelMap!);
+		model.defaultThinkingLevel = metadata.defaultThinkingLevel;
 	}
 	if (model.provider === "groq" && modelId === "qwen/qwen3.6-27b") {
 		mergeThinkingLevelMap(model, { minimal: null, low: null, medium: null, high: "default" });

@@ -7,6 +7,7 @@ import {
 	antigravityThinkingBudget,
 	antigravityThinkingLevel,
 	resolveAntigravityProjectOnce,
+	toAntigravityThinkingLevel,
 } from "../utils/antigravity.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import { readBoundedResponseText } from "./account-request.ts";
@@ -154,6 +155,7 @@ async function generateAntigravityContent(
 	headers.set("Accept", "text/event-stream");
 	const budget = model.reasoning ? antigravityThinkingBudget(model) : undefined;
 	const thinkingLevel = antigravityThinkingLevel(model);
+	const callerThinkingLevel = toAntigravityThinkingLevel(config?.thinkingConfig?.thinkingLevel);
 	// Thinking counts inside the output cap on every upstream (Anthropic rejects a cap at or below the
 	// budget): a fixed budget runs on top of the caller's cap for the answer, within the model's maximum.
 	const requestedOutput = config?.maxOutputTokens;
@@ -185,12 +187,19 @@ async function generateAntigravityContent(
 				generationConfig: {
 					temperature: config?.temperature,
 					maxOutputTokens,
-					// ProtoJSON accepts the native enum number. Never send a budget with an adaptive level.
+					// Catalog presets take precedence; unpreset models use the shared request's caller level.
 					...(thinkingLevel !== undefined
 						? { thinkingConfig: { thinkingLevel, includeThoughts: true } }
 						: budget !== undefined
 							? { thinkingConfig: { thinkingBudget: budget, includeThoughts: true } }
-							: {}),
+							: callerThinkingLevel !== undefined
+								? {
+										thinkingConfig: {
+											thinkingLevel: callerThinkingLevel,
+											includeThoughts: config?.thinkingConfig?.includeThoughts,
+										},
+									}
+								: {}),
 				},
 			},
 		}),
