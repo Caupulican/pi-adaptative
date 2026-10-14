@@ -17,6 +17,11 @@
 export interface CompactionEconomicsInput {
 	/** Context the next request would carry (P). */
 	readonly prefixTokens: number;
+	/**
+	 * Non-compactable request envelope (system prompt, tool schemas, active skills) that remains present
+	 * after compaction and cannot be compressed by `afterRatio`.
+	 */
+	readonly nonCompactableTokens?: number;
 	/** Expected context after compacting (P'), from learned compaction outcomes. */
 	readonly compactedTokens: number;
 	/** Expected tokens the summarizer generates, from learned compaction outcomes. */
@@ -144,7 +149,8 @@ function compactionCosts(
 	const output = input.outputUsdPerMillion;
 	if (read === undefined || cold === undefined || output === undefined) return undefined;
 	const prefix = Math.max(0, input.prefixTokens);
-	const compacted = Math.max(0, input.compactedTokens);
+	const nonCompactable = Math.min(prefix, Math.max(0, Math.round(input.nonCompactableTokens ?? 0)));
+	const compacted = Math.max(nonCompactable, Math.max(0, input.compactedTokens));
 	const further = Math.max(0, input.remainingRequests - 1);
 	const firstRead = (share: number) => usd(prefix, share * read + (1 - share) * cold);
 	return {
@@ -301,10 +307,16 @@ export function compactionPricingFor(input: {
 	readonly summarizer: Parameters<typeof resolveEffectiveModelPricing>[0];
 	readonly summarizerSharesLane: boolean;
 	readonly prefixTokens: number;
+	readonly nonCompactableTokens?: number;
 	readonly outcome: { readonly afterRatio: number; readonly outputRatio: number };
 	readonly remainingRequests: number;
 }): Omit<CompactionEconomicsInput, "retained"> {
-	const compactedTokens = Math.round(input.prefixTokens * input.outcome.afterRatio);
+	const nonCompactableTokens = Math.max(0, Math.min(input.prefixTokens, Math.round(input.nonCompactableTokens ?? 0)));
+	const compactableTokens = Math.max(0, input.prefixTokens - nonCompactableTokens);
+	const compactedTokens = Math.max(
+		nonCompactableTokens,
+		Math.min(input.prefixTokens, nonCompactableTokens + Math.round(compactableTokens * input.outcome.afterRatio)),
+	);
 	const pre = resolveEffectiveModelPricing(input.model, input.prefixTokens);
 	const post = resolveEffectiveModelPricing(input.model, compactedTokens);
 	const summarizerPricing = resolveEffectiveModelPricing(input.summarizer, input.prefixTokens);
@@ -312,6 +324,7 @@ export function compactionPricingFor(input: {
 		pricing ? (pricing.cacheWrite > 0 ? pricing.cacheWrite : pricing.input) : undefined;
 	return {
 		prefixTokens: input.prefixTokens,
+		...(input.nonCompactableTokens !== undefined ? { nonCompactableTokens } : {}),
 		compactedTokens,
 		summaryOutputTokens: Math.round(input.prefixTokens * input.outcome.outputRatio),
 		remainingRequests: input.remainingRequests,

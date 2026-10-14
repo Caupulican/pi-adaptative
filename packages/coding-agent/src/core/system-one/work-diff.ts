@@ -137,7 +137,11 @@ async function git(
 	if (options.signal) bindChildProcessAbort(child, options.signal);
 	let stdinError: unknown;
 	let stdinSettlement: Promise<void> = Promise.resolve();
-	if (input !== undefined && child.stdin) {
+	if (input !== undefined) {
+		if (!child.stdin) {
+			child.kill();
+			throw new WorkEvidenceError(stage, "command", "git stdin pipe is unavailable");
+		}
 		const stdin = child.stdin;
 		stdinSettlement = new Promise((resolve) => {
 			let settled = false;
@@ -342,8 +346,16 @@ export async function captureWorkBaseline(
 				.map((entry) => [entry.slice(entry.indexOf("\t") + 1), entry.slice(0, 6)] as const),
 		);
 		const fileMode =
-			(await git("file_mode", root, ["config", "--get", "core.filemode"], undefined, undefined, options)).trim() !==
-			"false";
+			(
+				await git(
+					"file_mode",
+					root,
+					["config", "--default", "true", "--get", "core.filemode"],
+					undefined,
+					undefined,
+					options,
+				)
+			).trim() !== "false";
 		const entries: string[] = [];
 		const regularFiles: { readonly path: string; readonly mode: string }[] = [];
 		for (const path of paths) {

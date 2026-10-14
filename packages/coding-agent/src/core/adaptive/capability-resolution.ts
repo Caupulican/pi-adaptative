@@ -41,6 +41,16 @@ export class CapabilityResolver {
 		this.steering = steering;
 	}
 
+	private normalizeNeed(need: CapabilityNeed) {
+		return {
+			requiredOutcome: need.requiredOutcome,
+			...(need.kind !== undefined ? { kind: need.kind } : {}),
+			...(need.requiredInputs !== undefined ? { requiredInputs: need.requiredInputs } : {}),
+			...(need.requiredOutputs !== undefined ? { requiredOutputs: need.requiredOutputs } : {}),
+			...(need.sideEffects !== undefined ? { sideEffects: need.sideEffects } : {}),
+		};
+	}
+
 	/**
 	 * Wide pass over compact roster.
 	 * S1A-061, S1A-062.
@@ -58,7 +68,7 @@ export class CapabilityResolver {
 		const cert = await this.steering.requireCertificate(
 			"JEV-007",
 			{
-				need,
+				need: this.normalizeNeed(need),
 				roster,
 			},
 			{
@@ -127,13 +137,13 @@ export class CapabilityResolver {
 		const cert = await this.steering.requireCertificate(
 			"JEV-008",
 			{
-				need,
+				need: this.normalizeNeed(need),
 				candidates: shortlistedCandidates.map((c) => ({
 					id: c.capabilityId,
 					kind: c.kind,
 					purpose: c.purpose,
-					inputShape: c.inputShape,
-					outputShape: c.outputShape,
+					...(c.inputShape !== undefined ? { inputShape: c.inputShape } : {}),
+					...(c.outputShape !== undefined ? { outputShape: c.outputShape } : {}),
 				})),
 			},
 			{

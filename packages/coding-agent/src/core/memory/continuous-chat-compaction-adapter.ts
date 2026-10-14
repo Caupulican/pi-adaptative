@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { Message, Tool, Usage } from "@caupulican/pi-ai";
+import type { Api, Message, Model, Tool, Usage } from "@caupulican/pi-ai";
 import type { AgentContext } from "../../kernel/loop-config.ts";
 import { projectToolsForProvider } from "../../kernel/provider-tool-projection.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
@@ -77,6 +77,8 @@ export interface ContinuousChatCompactionAdapterDeps {
 	summary(): ContinuousChatSummaryModelResolution;
 	/** Records one reply's paid spend in the history-usage owner. Must not throw. */
 	recordUsage(usage: Usage, call: { reportId: string; provider: string; model: string }): void;
+	/** Notifies the session when a summary model fails at runtime so `summary()` can self-heal onto a healthy model. */
+	onModelFailure?(model: Model<Api>, errorMessage: string | undefined): void;
 }
 
 export class ContinuousChatCompactionAdapter implements ContinuousChatCompactionAdapterPort {
@@ -101,6 +103,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		const tools = [...head.tools];
 		const summary = this.deps.summary();
 		if (!summary.ok) throw new Error(summary.reason);
+		let summaryModel = summary.model;
 		let history: Message[] = [
 			{ role: "user", content: renderContinuousChatViewBlocks(prefix.view), timestamp: Date.now() },
 		];
@@ -108,25 +111,40 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 			send: async (message, signal) => {
 				const task: Message = { role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() };
 				const request = [...history, task];
-				const result = await this.deps.complete({
-					systemPrompt,
-					messages: [],
-					requestContext: { systemPrompt, tools, messages: request },
-					model: summary.model,
-					thinkingLevel: CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL,
-					cacheRetention: "short",
-					laneKind: "continuous-chat",
-					signal,
-				});
-				const reply = result.messages?.at(-1);
-				const assistant = reply?.role === "assistant" ? reply : undefined;
-				// Every reply is paid: record it before any check below can throw, even one with no assistant message.
-				if (hasReportableUsage(result.usage)) {
-					this.deps.recordUsage(result.usage, {
-						reportId: `${CONTINUOUS_CHAT_USAGE_KIND}:${randomUUID()}`,
-						provider: assistant?.provider ?? summary.model.provider,
-						model: assistant?.model ?? summary.model.id,
+				const runTurn = async (model: Model<Api>) => {
+					const completion = await this.deps.complete({
+						systemPrompt,
+						messages: [],
+						requestContext: { systemPrompt, tools, messages: request },
+						model,
+						thinkingLevel: CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL,
+						cacheRetention: "short",
+						laneKind: "continuous-chat",
+						signal,
 					});
+					const reply = completion.messages?.at(-1);
+					const assistant = reply?.role === "assistant" ? reply : undefined;
+					// Every reply is paid: record it before any check below can throw, even one with no assistant message.
+					if (hasReportableUsage(completion.usage)) {
+						this.deps.recordUsage(completion.usage, {
+							reportId: `${CONTINUOUS_CHAT_USAGE_KIND}:${randomUUID()}`,
+							provider: assistant?.provider ?? model.provider,
+							model: assistant?.model ?? model.id,
+						});
+					}
+					return { completion, assistant };
+				};
+				let { completion: result, assistant } = await runTurn(summaryModel);
+				if (result.stopReason === "error") {
+					this.deps.onModelFailure?.(summaryModel, result.errorMessage);
+					const nextSummary = this.deps.summary();
+					if (
+						nextSummary.ok &&
+						(nextSummary.model.provider !== summaryModel.provider || nextSummary.model.id !== summaryModel.id)
+					) {
+						summaryModel = nextSummary.model;
+						({ completion: result, assistant } = await runTurn(summaryModel));
+					}
 				}
 				if (assistant === undefined) throw new Error("Continuous-chat compaction produced no assistant reply.");
 				if (result.stopReason !== "stop") {

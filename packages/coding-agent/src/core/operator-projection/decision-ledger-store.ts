@@ -851,8 +851,27 @@ export class DecisionLedgerStore {
 			);
 	}
 
+	/**
+	 * Rejects corrupted compaction outcome ratios caused by pre-F10 envelope-vs-message basis
+	 * mismatches (`tokensBefore` including the system+tools envelope while `tokensAfter` was
+	 * message-only < 200 tokens, or `tokensAfter` smaller than the generated `outputTokens` on a
+	 * large context) and pre-F9 1-turn micro-compactions (`tokensBefore < 1000 && outputTokens > tokensBefore`).
+	 */
+	private isCorruptedCompactionOutcome(row: {
+		tokensBefore: number;
+		tokensAfter: number;
+		outputTokens: number;
+	}): boolean {
+		if (row.tokensBefore <= 0 || row.tokensAfter < 0 || row.outputTokens < 0) return true;
+		if (row.tokensBefore > 5_000 && row.tokensAfter < 200) return true;
+		if (row.tokensBefore >= 10_000 && row.outputTokens > 0 && row.tokensAfter < row.outputTokens) return true;
+		if (row.tokensBefore < 1_000 && row.outputTokens > row.tokensBefore) return true;
+		return false;
+	}
+
 	/** Records one applied compaction's measured effect (see {@link CompactionOutcomeRow}). */
 	recordCompactionOutcome(row: CompactionOutcomeRow): void {
+		if (this.isCorruptedCompactionOutcome(row)) return;
 		this.attributeSession(row.sessionId);
 		this.database
 			.prepare(
@@ -908,6 +927,7 @@ export class DecisionLedgerStore {
 				outputTokens === undefined
 			)
 				continue;
+			if (this.isCorruptedCompactionOutcome({ tokensBefore, tokensAfter, outputTokens })) continue;
 			out.push({ sessionId, lane, observedAt, tokensBefore, tokensAfter, outputTokens });
 		}
 		return out;

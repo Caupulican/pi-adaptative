@@ -213,6 +213,7 @@ export function serializeEvaluation(value: unknown): string {
 			const descriptor = Object.getOwnPropertyDescriptor(item, key);
 			if (typeof key !== "string" || !descriptor?.enumerable || !("value" in descriptor))
 				throw new TypeSafeEvidenceError("System One evidence must be ordinary JSON data", `${path}.${String(key)}`);
+			if (!Array.isArray(item) && descriptor.value === undefined) continue;
 			visit(descriptor.value, depth + 1, Array.isArray(item) ? `${path}[${key}]` : `${path}.${key}`);
 		}
 		if (

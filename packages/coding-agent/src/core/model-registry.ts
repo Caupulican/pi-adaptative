@@ -246,6 +246,37 @@ export const clearApiKeyCache = clearConfigValueCache;
 let nextModelRegistryId = 1;
 
 /**
+ * Resolves a renamed `:free` catalog model ID when upstream changes a vendor family's free-tier
+ * variant suffix (e.g. `inclusionai/ling-3.0-flash-fin:free` -> `inclusionai/ling-3.0-flash-sante:free`).
+ * Only activates for `:free` references and only resolves to another `:free` model in the same family.
+ */
+export function findRenamedFreeTierModel(
+	models: readonly Model<Api>[],
+	provider: string | undefined,
+	modelId: string,
+): Model<Api> | undefined {
+	const normalizedId = modelId.trim().toLowerCase();
+	if (!normalizedId.endsWith(":free")) return undefined;
+	const baseId = normalizedId.slice(0, -":free".length);
+	if (!baseId) return undefined;
+	const lastSlashIndex = baseId.lastIndexOf("/");
+	const lastDashIndex = baseId.lastIndexOf("-");
+	if (lastDashIndex <= lastSlashIndex + 1) return undefined;
+	const familyPrefix = baseId.slice(0, lastDashIndex + 1);
+	const providerNorm = provider?.trim().toLowerCase();
+	const candidates = providerNorm
+		? models.filter((m) => m.kind !== "judge" && m.provider.toLowerCase() === providerNorm)
+		: models.filter((m) => m.kind !== "judge");
+	const siblingFree = candidates.filter((m) => {
+		const id = m.id.toLowerCase();
+		if (!id.startsWith(familyPrefix) || !id.endsWith(":free")) return false;
+		const variantSuffix = id.slice(familyPrefix.length, -":free".length);
+		return variantSuffix.length > 0 && !variantSuffix.includes("/");
+	});
+	return siblingFree.length === 1 ? siblingFree[0] : undefined;
+}
+
+/**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
 export class ModelRegistry implements ModelRegistryContract {
@@ -601,10 +632,12 @@ export class ModelRegistry implements ModelRegistryContract {
 	}
 
 	/**
-	 * Find a model by provider and ID.
+	 * Find a model by provider and ID, self-healing renamed `:free` catalog variants.
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
-		return this.models.find((m) => m.provider === provider && m.id === modelId);
+		const exact = this.models.find((m) => m.provider === provider && m.id === modelId);
+		if (exact) return exact;
+		return findRenamedFreeTierModel(this.models, provider, modelId);
 	}
 
 	/**

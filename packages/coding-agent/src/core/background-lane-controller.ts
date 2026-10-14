@@ -77,6 +77,7 @@ import type {
 	TaskProfileInspection,
 } from "./orchestration/task-profile-writer.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
+import { subscribeSessionSteerQueued, waitForSessionSteerAdmission } from "./pending-input-queue-controller.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
@@ -793,33 +794,77 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getWorkerController().getAgentControl().readWorkerAgentLastText?.(agentId, laneId, scope);
 	}
 
-	waitForWorkerAgent(
-		agentId: string,
-		timeoutMs?: number,
-		scope?: WorkerAgentControlScope,
-	): ReturnType<WorkerAgentControlPort["waitForWorkerAgent"]> {
+	private _createWorkerWaitSignal(
+		scope: WorkerAgentControlScope | undefined,
+		signal: AbortSignal | undefined,
+	): { readonly signal: AbortSignal | undefined; readonly finalize: () => Promise<void> } {
+		if (scope?.callerAgentId) {
+			return { signal, finalize: () => Promise.resolve() };
+		}
+		const sessionId = this.deps.getSessionManager().getSessionId();
+		const controller = new AbortController();
+		let steered = false;
+		const onAbort = () => controller.abort(signal?.reason);
+		if (signal?.aborted) {
+			controller.abort(signal.reason);
+		} else {
+			signal?.addEventListener("abort", onAbort, { once: true });
+		}
+		const unsubscribeSteer = subscribeSessionSteerQueued(sessionId, () => {
+			steered = true;
+			controller.abort();
+		});
+		return {
+			signal: controller.signal,
+			finalize: async () => {
+				unsubscribeSteer();
+				signal?.removeEventListener("abort", onAbort);
+				if (steered && !signal?.aborted) {
+					await waitForSessionSteerAdmission(sessionId, signal);
+				}
+			},
+		};
+	}
+
+	private async _withWorkerWait<T extends { terminalLaneIds?: readonly string[] }>(
+		scope: WorkerAgentControlScope | undefined,
+		signal: AbortSignal | undefined,
+		run: (control: WorkerAgentControlPort, waitSignal: AbortSignal | undefined) => Promise<T>,
+	): Promise<T> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
 		const control = this._getWorkerController().getAgentControl();
-		return control.waitForWorkerAgent(agentId, timeoutMs, scope).then((result) => {
+		const waitSignal = this._createWorkerWaitSignal(scope, signal);
+		try {
+			const result = await run(control, waitSignal.signal);
 			this.observeCapturedWorkerTerminals(result.terminalLaneIds);
 			return result;
-		});
+		} finally {
+			await waitSignal.finalize();
+		}
 	}
 
-	waitForWorkerAgents(
+	async waitForWorkerAgent(
+		agentId: string,
+		timeoutMs?: number,
+		scope?: WorkerAgentControlScope,
+		signal?: AbortSignal,
+	): ReturnType<WorkerAgentControlPort["waitForWorkerAgent"]> {
+		return this._withWorkerWait(scope, signal, (control, waitSignal) =>
+			control.waitForWorkerAgent(agentId, timeoutMs, scope, waitSignal),
+		);
+	}
+
+	async waitForWorkerAgents(
 		agentIds: readonly string[],
 		mode: WorkerAgentWaitMode,
 		timeoutMs?: number,
 		scope?: WorkerAgentControlScope,
+		signal?: AbortSignal,
 	): Promise<WorkerAgentWaitResult> {
-		if (!this.deps.isDelegateToolActive())
-			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		const control = this._getWorkerController().getAgentControl();
-		return control.waitForWorkerAgents(agentIds, mode, timeoutMs, scope).then((result) => {
-			this.observeCapturedWorkerTerminals(result.terminalLaneIds);
-			return result;
-		});
+		return this._withWorkerWait(scope, signal, (control, waitSignal) =>
+			control.waitForWorkerAgents(agentIds, mode, timeoutMs, scope, waitSignal),
+		);
 	}
 
 	/**

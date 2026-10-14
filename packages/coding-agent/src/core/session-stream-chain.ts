@@ -202,6 +202,10 @@ function failedRedactionStream(
 
 export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 	const { baseStreamFn, settingsManager, sessionManager, modelAdaptationStore, providerAdmissionLedger } = input;
+	const redactedMessageCache = new WeakMap<
+		Context["messages"][number],
+		{ fingerprint: string; message: Context["messages"][number] }
+	>();
 	const redactedBase: StreamFn = async (model, context, options) => {
 		let redactedContext = context;
 		let redactedOptions = options;
@@ -215,8 +219,40 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 			// Known values are exact; token shapes are the floor for keys the host has never seen. Both are
 			// unconditional: a session without a credential boundary still never sends a recognizable key.
 			const redact = (text: string) => redactTokenShapes(redactKnown(text));
-			const secretPolicy = createProviderRequestSecretPolicy(context, model, redact);
-			redactedContext = redactRequestContext(context, redact, secretPolicy);
+			const fingerprint = JSON.stringify([model.api, model.provider, model.id, additionalValues ?? []]);
+			const uncachedMessages: Context["messages"][number][] = [];
+			const uncachedIndices: number[] = [];
+			const resolvedMessages = context.messages.map((message, index) => {
+				const cached = redactedMessageCache.get(message);
+				if (cached && cached.fingerprint === fingerprint) {
+					return cached.message;
+				}
+				uncachedIndices.push(index);
+				uncachedMessages.push(message);
+				return message;
+			});
+			const uncachedContext: Context = { ...context, messages: uncachedMessages };
+			const uncachedPolicy = createProviderRequestSecretPolicy(uncachedContext, model, redact);
+			const redactedUncached = redactRequestContext(uncachedContext, redact, uncachedPolicy);
+			for (let i = 0; i < uncachedIndices.length; i++) {
+				const originalIndex = uncachedIndices[i]!;
+				const originalMessage = uncachedMessages[i]!;
+				const redactedMessage = redactedUncached.messages[i]!;
+				resolvedMessages[originalIndex] = redactedMessage;
+				redactedMessageCache.set(originalMessage, { fingerprint, message: redactedMessage });
+				redactedMessageCache.set(redactedMessage, { fingerprint, message: redactedMessage });
+			}
+			const messagesUnchanged = resolvedMessages.every((message, index) => message === context.messages[index]);
+			redactedContext =
+				messagesUnchanged &&
+				redactedUncached.systemPrompt === context.systemPrompt &&
+				redactedUncached.tools === context.tools
+					? context
+					: {
+							...redactedUncached,
+							messages: messagesUnchanged ? context.messages : resolvedMessages,
+						};
+			const secretPolicy = createProviderRequestSecretPolicy(redactedContext, model, redact);
 			const onPayload = options?.onPayload;
 			redactedOptions = onPayload
 				? {

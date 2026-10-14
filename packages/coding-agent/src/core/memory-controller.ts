@@ -590,10 +590,41 @@ export class MemoryController {
 				isRetrievalEnabled: () => deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
 				emitWarning: (message) => deps.emitWarning(message),
 			});
-			// Settings that shape the coordinator are applied on the change event, never by polling.
-			this._unsubscribeSettingsChanges = deps.getSettingsManager().subscribeChanges?.(() => {
-				void this._hierarchy?.settingsChanged();
-			});
+		}
+		// Settings that shape the coordinator or ICM continuous chat are applied on the change event, never by polling.
+		this._unsubscribeSettingsChanges = deps.getSettingsManager().subscribeChanges?.(() => {
+			this._settingsChanged();
+		});
+	}
+
+	private _settingsChanged(): void {
+		void this._hierarchy?.settingsChanged();
+		if (this.deps.isChildSession() || this._shutdownPromise !== undefined || this._transitioning) return;
+		if (this.deps.getSettingsManager().getMemorySystem() !== "icm") return;
+		const validate = this.deps.continuousChat?.compaction.validate;
+		if (!validate) return;
+		if (this._initializationFailed || (this._activeMemorySystem === "icm" && this._continuousChat === undefined)) {
+			try {
+				validate();
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				this.deps.providerRequest?.setPlanProjection(createBlockedContinuousChatPlanWrapper(reason));
+				return;
+			}
+			void this.initialize();
+			return;
+		}
+		if (this._activeMemorySystem === "icm" && this._continuousChat !== undefined) {
+			try {
+				validate();
+			} catch {
+				void this.initialize();
+				return;
+			}
+			void this._continuousChat.runtime
+				.reserveTurnBoundary()
+				.then((boundary) => boundary.release())
+				.catch(() => {});
 		}
 	}
 
@@ -652,6 +683,7 @@ export class MemoryController {
 		const settings = this.deps.getSettingsManager();
 		const previous = settings.getMemorySystem();
 		const activate = async (selected: MemorySystem) => {
+			this._transitioning = true;
 			settings.setMemorySystem(selected, "directoryProfile");
 			await this.initialize();
 			await settings.flush();

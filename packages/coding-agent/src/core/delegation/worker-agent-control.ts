@@ -505,12 +505,14 @@ export interface WorkerAgentControlPort {
 		agentId: string,
 		timeoutMs?: number,
 		scope?: WorkerAgentControlScope,
+		signal?: AbortSignal,
 	): Promise<WorkerAgentSingleWaitResult>;
 	waitForWorkerAgents(
 		agentIds: readonly string[],
 		mode: WorkerAgentWaitMode,
 		timeoutMs?: number,
 		scope?: WorkerAgentControlScope,
+		signal?: AbortSignal,
 	): Promise<WorkerAgentWaitResult>;
 }
 

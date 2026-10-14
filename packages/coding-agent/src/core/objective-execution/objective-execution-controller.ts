@@ -1215,7 +1215,9 @@ export class ObjectiveExecutionController {
 								{
 									objectiveId,
 									deniedAction: proposedAction.kind,
-									missingAuthority: charterDecision.missingAuthority,
+									...(charterDecision.missingAuthority !== undefined
+										? { missingAuthority: charterDecision.missingAuthority }
+										: {}),
 									action: "replan_alternative",
 								},
 								{ objectiveId, signal },
@@ -1781,7 +1783,7 @@ export class ObjectiveExecutionController {
 								packageArtifact = {
 									packageName: prepared.packageName,
 									version: prepared.version,
-									registry: prepared.registry,
+									...(prepared.registry !== undefined ? { registry: prepared.registry } : {}),
 									integrity: prepared.integrity,
 								};
 							} catch (error) {
@@ -1801,7 +1803,7 @@ export class ObjectiveExecutionController {
 										publishRequested: Boolean(activeCharter.release.package_publish),
 										deployTargets: activeCharter.release.deploy_targets,
 										releaseRules: activeCharter.release,
-										packageArtifact,
+										...(packageArtifact !== undefined ? { packageArtifact } : {}),
 									},
 									{
 										objectiveId,

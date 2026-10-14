@@ -190,7 +190,7 @@ export async function evaluateClarificationNeed(input: ClarificationNeedInput): 
 		clarifications: input.clarifications.map((clarification) => ({
 			question: clarification.question,
 			status: clarification.status,
-			answerSummary: clarification.answerSummary,
+			...(clarification.answerSummary !== undefined ? { answerSummary: clarification.answerSummary } : {}),
 		})),
 		proposedQuestion: proposed,
 		proposedQuestionCategory: input.category,

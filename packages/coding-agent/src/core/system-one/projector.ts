@@ -116,7 +116,9 @@ export class StateProjector {
 			repo: {
 				root: this.redactText(state.repo.root),
 				baseline_revision: this.redactText(state.repo.baseline_revision),
-				languages: state.repo.languages?.map((language) => this.redactText(language)),
+				...(state.repo.languages !== undefined
+					? { languages: state.repo.languages.map((language) => this.redactText(language)) }
+					: {}),
 			},
 		};
 	}
@@ -149,7 +151,13 @@ export class StateProjector {
 				id: h.id,
 				text: this.redactText(h.text),
 				status: h.status,
-				next_discriminator: h.next_discriminator ? this.redactText(h.next_discriminator) : h.next_discriminator,
+				...(h.next_discriminator !== undefined
+					? {
+							next_discriminator: h.next_discriminator
+								? this.redactText(h.next_discriminator)
+								: h.next_discriminator,
+						}
+					: {}),
 			}));
 
 		return {
@@ -320,7 +328,7 @@ export class StateProjector {
 			diff_view: changes.map((c) => ({
 				path: this.redactText(c.path),
 				kind: c.kind,
-				diff_hash: c.diff_hash,
+				...(c.diff_hash !== undefined ? { diff_hash: c.diff_hash } : {}),
 			})),
 			architecture_context: {
 				allowed_paths: state.repo.allowed_paths.map((filePath) => this.redactText(filePath)),
@@ -341,7 +349,7 @@ export class StateProjector {
 			required: ac.required,
 			status: ac.status,
 			evidence_ids: ac.evidence_ids,
-			waiver_id: ac.waiver_id,
+			...(ac.waiver_id !== undefined ? { waiver_id: ac.waiver_id } : {}),
 		}));
 
 		const claimMatrix = state.claims
@@ -358,8 +366,8 @@ export class StateProjector {
 			id: v.id,
 			kind: v.kind,
 			status: v.status,
-			command: v.command === null || v.command === undefined ? v.command : this.redactText(v.command),
-			covers_acceptance_ids: v.covers_acceptance_ids,
+			...(v.command !== undefined ? { command: v.command === null ? null : this.redactText(v.command) } : {}),
+			...(v.covers_acceptance_ids !== undefined ? { covers_acceptance_ids: v.covers_acceptance_ids } : {}),
 		}));
 
 		const changesManifest = state.changes.map((c) => ({
@@ -367,15 +375,15 @@ export class StateProjector {
 			path: this.redactText(c.path),
 			kind: c.kind,
 			ownership: c.ownership,
-			diff_hash: c.diff_hash,
+			...(c.diff_hash !== undefined ? { diff_hash: c.diff_hash } : {}),
 		}));
 
 		const hypotheses = state.hypotheses.map((h) => ({
 			id: h.id,
 			text: this.redactText(h.text),
 			status: h.status,
-			supporting_evidence: h.supporting_evidence,
-			contradicting_evidence: h.contradicting_evidence,
+			...(h.supporting_evidence !== undefined ? { supporting_evidence: h.supporting_evidence } : {}),
+			...(h.contradicting_evidence !== undefined ? { contradicting_evidence: h.contradicting_evidence } : {}),
 		}));
 
 		const openRisks = state.risks

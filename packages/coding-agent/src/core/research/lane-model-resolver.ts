@@ -1,7 +1,9 @@
 import type { Api, Model } from "@caupulican/pi-ai";
+import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { resolveCliModel } from "../model-resolver.ts";
+import { isLocalExecutionModel } from "../models/model-endpoint.ts";
 import type { NormalizedProfile, ProfileRegistry } from "../profile-registry.ts";
 import type { ModelCapabilitySettings } from "../settings/settings-schema.ts";
 
@@ -53,16 +55,49 @@ export class LaneModelResolver {
 
 	private resolveConfiguredModel(configuredPattern: string | undefined): Model<Api> | undefined {
 		if (configuredPattern) {
+			const registry = this.deps.getModelRegistry();
 			const resolved = resolveCliModel({
 				cliModel: configuredPattern,
-				modelRegistry: this.deps.getModelRegistry(),
+				modelRegistry: registry,
 			});
-			if (resolved.model && this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) {
-				return resolved.model;
+			if (resolved.model) {
+				if (registry.hasConfiguredAuth(resolved.model) && !this.deps.isModelExhausted(resolved.model)) {
+					return resolved.model;
+				}
+				// Self-heal when a real catalog model had a stored credential that became unusable at runtime
+				// (refused OAuth refresh or quota/account exhaustion): fail over to a healthy authenticated
+				// model that satisfies the same local/egress and xhigh capabilities.
+				const isCatalogModel = registry.find(resolved.model.provider, resolved.model.id) !== undefined;
+				const hadStoredCredential =
+					registry.authStorage.get(resolved.model.provider) !== undefined ||
+					registry.hasConfiguredAuth(resolved.model);
+				if (isCatalogModel && hadStoredCredential) {
+					return this.resolveHealthyFallback(resolved.model);
+				}
 			}
 			return undefined;
 		}
 		return this.deps.getModel() ?? undefined;
+	}
+
+	private resolveHealthyFallback(unusableModel: Model<Api>): Model<Api> | undefined {
+		const registry = this.deps.getModelRegistry();
+		const needsXhigh = getSupportedThinkingLevels(unusableModel).includes("xhigh");
+		const localOnly = isLocalExecutionModel(unusableModel);
+		const candidates: Array<Model<Api> | undefined> = [
+			this.deps.getModel(),
+			this.deps.allocateAllowedModel?.(),
+			...registry.getAvailable(),
+		];
+		for (const candidate of candidates) {
+			if (!candidate) continue;
+			if (candidate.provider === unusableModel.provider && candidate.id === unusableModel.id) continue;
+			if (!registry.hasConfiguredAuth(candidate) || this.deps.isModelExhausted(candidate)) continue;
+			if (localOnly && !isLocalExecutionModel(candidate)) continue;
+			if (needsXhigh && !getSupportedThinkingLevels(candidate).includes("xhigh")) continue;
+			return candidate;
+		}
+		return undefined;
 	}
 
 	resolveShipment(laneSettings: { model?: string; profile?: string }, missingModelReason: string): LaneShipment {

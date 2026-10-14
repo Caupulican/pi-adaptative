@@ -343,14 +343,36 @@ export class ModelAdaptationStore {
 		return this.mutateProfile(model, new Date(now), () => profile, now).entry!;
 	}
 
+	private findSiblingFreeEntry(
+		hostProfiles: Record<string, StoredModelAdaptation> | undefined,
+		model: string,
+	): StoredModelAdaptation | undefined {
+		const normalized = model.trim().toLowerCase();
+		if (!hostProfiles || !normalized.endsWith(":free")) return undefined;
+		const base = normalized.slice(0, -":free".length);
+		if (!base) return undefined;
+		const lastDash = base.lastIndexOf("-");
+		const lastSlash = base.lastIndexOf("/");
+		if (lastDash <= lastSlash + 1) return undefined;
+		const familyPrefix = base.slice(0, lastDash + 1);
+		const matches = Object.entries(hostProfiles).filter(([rawKey]) => {
+			const key = rawKey.toLowerCase();
+			if (!key.startsWith(familyPrefix) || !key.endsWith(":free")) return false;
+			const variantSuffix = key.slice(familyPrefix.length, -":free".length);
+			return variantSuffix.length > 0 && !variantSuffix.includes("/");
+		});
+		return matches.length === 1 ? matches[0]![1] : undefined;
+	}
+
 	/** Profile for a model on the current host; prunes retired rules before returning. */
 	get(model: string, now: Date = new Date()): ModelAdaptationProfile {
-		const entry = this.storage.getHost()?.[model];
+		const hostProfiles = this.storage.getHost();
+		const entry = hostProfiles?.[model] ?? this.findSiblingFreeEntry(hostProfiles, model);
 		if (!entry) return emptyProfile();
 		const profile = normalizeProfile(entry.profile);
 		const prunedRules = pruneRetiredRules(profile.rules, profile.teachStats, now);
 		if (prunedRules.length !== profile.rules.length) {
-			return this.mutateProfile(model, now, () => undefined).profile;
+			return this.mutateProfile(entry.model, now, () => undefined).profile;
 		}
 		return profile;
 	}

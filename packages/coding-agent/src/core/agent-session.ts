@@ -1273,6 +1273,9 @@ export class AgentSession {
 							resolveModel: (reference) => historyModels.resolveModel(reference),
 						}),
 					recordUsage: (usage, call) => this._semanticUsage.recordHistoryUsage(usage, call),
+					onModelFailure: (model) => {
+						this._foregroundRecovery.markModelExhausted(`${model.provider}/${model.id}`);
+					},
 				}),
 				prefixHead: () => this._continuousChatPrefixHead(),
 				resetCompactionPrefix: () => this._continuousChatPrefix.reset(),

@@ -277,7 +277,13 @@ export class SemanticProjectRuleController {
 		const deterministic = applicable.filter((r) => r.owner === "deterministic");
 		const semantic = applicable.filter((r) => r.owner === "jev");
 		const violations: RuleViolation[] = [];
-		const evidence = input.boundedDiffEvidence ?? input.evidence ?? input.artifacts;
+		const evidence =
+			input.boundedDiffEvidence ??
+			input.diffContent ??
+			input.evidence ??
+			input.artifacts ??
+			input.fileContents ??
+			null;
 
 		// 1. Deterministic Mechanical Evaluation
 		for (const rule of deterministic) {

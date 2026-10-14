@@ -113,6 +113,28 @@ export interface PendingInputContext {
  * AgentSession still owns eventing (`_emitQueueUpdate`/`_emit`) and calls back into this
  * controller for the underlying queue mechanics; this class has no event/emit dependency.
  */
+const activeControllers = new Set<PendingInputQueueController>();
+
+export function subscribeSessionSteerQueued(sessionId: string | undefined, listener: () => void): () => void {
+	const unsubscribes: Array<() => void> = [];
+	for (const controller of activeControllers) {
+		if (!sessionId || controller.matchesSessionId(sessionId)) {
+			unsubscribes.push(controller.onSteerQueued(listener));
+		}
+	}
+	return () => {
+		for (const unsubscribe of unsubscribes) unsubscribe();
+	};
+}
+
+export async function waitForSessionSteerAdmission(sessionId: string | undefined, signal?: AbortSignal): Promise<void> {
+	for (const controller of activeControllers) {
+		if (!sessionId || controller.matchesSessionId(sessionId)) {
+			await controller.waitForPendingSteerDecision(signal);
+		}
+	}
+}
+
 export class PendingInputQueueController {
 	/** Submission order per kind; an entry admits only after every earlier entry of its kind. */
 	private _steering: PendingEntry[] = [];
@@ -121,10 +143,68 @@ export class PendingInputQueueController {
 	private _nextEntryId = 1;
 	/** Set at disposal: nothing is handed to the agent afterwards. */
 	private _closed = false;
+	private readonly _steerListeners = new Set<() => void>();
+	private readonly _steerDecisionListeners = new Set<() => void>();
 	private readonly deps: PendingInputQueueDeps;
 
 	constructor(deps: PendingInputQueueDeps) {
 		this.deps = deps;
+		activeControllers.add(this);
+	}
+
+	matchesSessionId(sessionId: string): boolean {
+		const context = this.deps.getInputContext?.();
+		return !context || context.sessionId === sessionId;
+	}
+
+	onSteerQueued(listener: () => void): () => void {
+		if (this._closed) return () => undefined;
+		this._steerListeners.add(listener);
+		return () => {
+			this._steerListeners.delete(listener);
+		};
+	}
+
+	waitForPendingSteerDecision(signal?: AbortSignal): Promise<void> {
+		if (this._closed || !this._steering.some((entry) => !entry.admission && !entry.held)) {
+			return Promise.resolve();
+		}
+		return new Promise((resolve) => {
+			let settled = false;
+			const finish = () => {
+				if (settled) return;
+				settled = true;
+				this._steerDecisionListeners.delete(check);
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", finish);
+				resolve();
+			};
+			const check = () => {
+				if (this._closed || !this._steering.some((entry) => !entry.admission && !entry.held)) {
+					finish();
+				}
+			};
+			if (signal?.aborted) {
+				finish();
+				return;
+			}
+			const timer = setTimeout(finish, 50);
+			if (typeof timer === "object" && "unref" in timer) timer.unref();
+			this._steerDecisionListeners.add(check);
+			signal?.addEventListener("abort", finish, { once: true });
+		});
+	}
+
+	private _notifySteerQueued(): void {
+		for (const listener of [...this._steerListeners]) {
+			listener();
+		}
+	}
+
+	private _notifySteerDecision(): void {
+		for (const listener of [...this._steerDecisionListeners]) {
+			listener();
+		}
 	}
 
 	get count(): number {
@@ -298,6 +378,7 @@ export class PendingInputQueueController {
 		};
 		(kind === "steer" ? this._steering : this._followUp).push(entry);
 		this._changed();
+		if (kind === "steer") this._notifySteerQueued();
 		return { id: entry.id, signal: entry.abort.signal };
 	}
 
@@ -364,6 +445,7 @@ export class PendingInputQueueController {
 		if (!entry || entry.admission || entry.held || this._closed) return false;
 		entry.admission = admission;
 		this._admitInOrder();
+		if (entry.kind === "steer") this._notifySteerDecision();
 		return true;
 	}
 
@@ -377,11 +459,13 @@ export class PendingInputQueueController {
 		if (!entry || entry.admission || entry.held || this._closed) return false;
 		if (!this._contextCurrent(entry)) {
 			this._hold(entry, "context_changed");
+			if (entry.kind === "steer") this._notifySteerDecision();
 			return false;
 		}
 		this._removeEntry(entry);
 		this._admitInOrder();
 		this._changed();
+		if (entry.kind === "steer") this._notifySteerDecision();
 		return true;
 	}
 
@@ -390,6 +474,7 @@ export class PendingInputQueueController {
 		const entry = this._findEntry(handle.id);
 		if (entry && !entry.message && !entry.held) this._hold(entry, "context_changed");
 		this._admitInOrder();
+		if (entry?.kind === "steer") this._notifySteerDecision();
 	}
 
 	/** Drop a registered input that will not be admitted (cancelled, handled, or run as its own turn). A
@@ -401,6 +486,7 @@ export class PendingInputQueueController {
 		entry.abort.abort(PENDING_INPUT_WITHDRAWN);
 		this._admitInOrder();
 		this._changed();
+		if (entry.kind === "steer") this._notifySteerDecision();
 		return true;
 	}
 
@@ -414,7 +500,10 @@ export class PendingInputQueueController {
 			removed = true;
 		}
 		this._admitInOrder();
-		if (removed) this._changed();
+		if (removed) {
+			this._changed();
+			this._notifySteerDecision();
+		}
 	}
 
 	/**
@@ -423,6 +512,10 @@ export class PendingInputQueueController {
 	 */
 	close(): void {
 		this._closed = true;
+		activeControllers.delete(this);
+		this._steerListeners.clear();
+		this._notifySteerDecision();
+		this._steerDecisionListeners.clear();
 		for (const entry of [...this._steering, ...this._followUp]) {
 			if (entry.message) continue;
 			this._removeEntry(entry);
@@ -448,6 +541,7 @@ export class PendingInputQueueController {
 			this._hold(entry, "context_changed");
 		}
 		this._admitInOrder();
+		this._notifySteerDecision();
 	}
 
 	/**
@@ -494,7 +588,13 @@ export class PendingInputQueueController {
 	private _admitInOrder(): void {
 		if (this._closed) return;
 		for (const [entries, enqueue] of [
-			[this._steering, (message: AgentMessage) => this.deps.agent.steer(message)],
+			[
+				this._steering,
+				(message: AgentMessage) => {
+					this.deps.agent.steer(message);
+					this._notifySteerQueued();
+				},
+			],
 			[this._followUp, (message: AgentMessage) => this.deps.agent.followUp(message)],
 		] as const) {
 			for (const entry of entries) {

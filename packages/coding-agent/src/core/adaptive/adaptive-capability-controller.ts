@@ -643,8 +643,12 @@ export class AdaptiveCapabilityController {
 				spec,
 				candidateDigest: candidate.digest,
 				candidateKind: candidate.kind,
-				mechanicalVerification: verification,
-				testCount: verification.testCount,
+				mechanicalVerification: {
+					passed: verification.passed,
+					...(verification.testCount !== undefined ? { testCount: verification.testCount } : {}),
+					...(verification.failures !== undefined ? { failures: verification.failures } : {}),
+				},
+				...(verification.testCount !== undefined ? { testCount: verification.testCount } : {}),
 			},
 			{
 				objectiveId: input.objectiveId,
@@ -693,8 +697,12 @@ export class AdaptiveCapabilityController {
 			"JEV-015",
 			{
 				spec,
-				activation: activationRes.projection,
-				smokeVerification: activationRes.projection,
+				...(activationRes.projection !== undefined
+					? {
+							activation: activationRes.projection,
+							smokeVerification: activationRes.projection,
+						}
+					: {}),
 				ownerOperationId:
 					(activationRes.projection as Record<string, unknown>)?.operationId ?? `op-${spec.capability_id}`,
 				lookupResult: (activationRes.projection as Record<string, unknown>)?.lookupResult ?? "unknown",
@@ -760,11 +768,15 @@ export class AdaptiveCapabilityController {
 			record,
 			isExisting: false,
 			active: activationRes.active,
-			activationProof: activationRes.projection as Record<string, unknown> | undefined,
+			...(activationRes.projection !== undefined
+				? { activationProof: activationRes.projection as Record<string, unknown> }
+				: {}),
 			activation: {
 				active: activationRes.active,
 				method: kind === "runtime_patch" ? "runtime_adaptation_patch" : `${kind}_activation`,
-				projection: activationRes.projection as Record<string, unknown> | undefined,
+				...(activationRes.projection !== undefined
+					? { projection: activationRes.projection as Record<string, unknown> }
+					: {}),
 			},
 		};
 	}

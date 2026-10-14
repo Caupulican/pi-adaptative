@@ -2115,10 +2115,17 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 									input.mode,
 									input.timeoutMs,
 									workerScope,
+									signal,
 								)
-							: await deps.workerAgentControl.waitForWorkerAgents(agentIds, input.mode, input.timeoutMs, {
-									returnWhenForegroundHeld: true,
-								});
+							: await deps.workerAgentControl.waitForWorkerAgents(
+									agentIds,
+									input.mode,
+									input.timeoutMs,
+									{
+										returnWhenForegroundHeld: true,
+									},
+									signal,
+								);
 						return {
 							content: [
 								{
@@ -2228,10 +2235,15 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								skipReason: "worker_agent_control_unavailable",
 							});
 						const waited = workerScope
-							? await deps.workerAgentControl.waitForWorkerAgent(agentId, input.timeoutMs, workerScope)
-							: await deps.workerAgentControl.waitForWorkerAgent(agentId, input.timeoutMs, {
-									returnWhenForegroundHeld: true,
-								});
+							? await deps.workerAgentControl.waitForWorkerAgent(agentId, input.timeoutMs, workerScope, signal)
+							: await deps.workerAgentControl.waitForWorkerAgent(
+									agentId,
+									input.timeoutMs,
+									{
+										returnWhenForegroundHeld: true,
+									},
+									signal,
+								);
 						return {
 							content: [
 								{

@@ -226,7 +226,20 @@ export function convertResponsesMessages<TApi extends Api>(
 		return `${normalizedCallId}|${normalizedItemId}`;
 	};
 
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	const sanitizedInputMessages = context.messages.map((msg) => {
+		if (
+			msg.role === "assistant" &&
+			(msg.provider !== model.provider || msg.api !== model.api || msg.model !== model.id) &&
+			msg.content.some((block) => block.type === "thinking")
+		) {
+			return {
+				...msg,
+				content: msg.content.filter((block) => block.type !== "thinking"),
+			};
+		}
+		return msg;
+	});
+	const transformedMessages = transformMessages(sanitizedInputMessages, model, normalizeToolCallId);
 
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {

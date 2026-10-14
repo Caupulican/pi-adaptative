@@ -193,6 +193,7 @@ export class GoalSessionController {
 	private startAuthority: ExplicitGoalStartAuthority | undefined;
 	/** Root turns the primary loop submitted; a cycle that dispatched a worker or waited submits none. */
 	private primaryRootTurns = 0;
+	private lastPrimaryTurnOutcome?: GoalContinuationTurnOutcome["outcome"];
 	private executorsBoundTo?: ObjectiveExecutionController;
 	private readonly queuedOwnerChatGoals = new WeakMap<AgentMessage, QueuedOwnerChatGoal>();
 	private queuedOwnerChatExecutionLease: GoalExecutionLease | undefined;
@@ -826,6 +827,7 @@ export class GoalSessionController {
 				signal?.throwIfAborted();
 				const firstTurnEntryIndex = this.deps.getSessionManager().getEntryCount();
 				this.primaryRootTurns++;
+				this.lastPrimaryTurnOutcome = undefined;
 				await this.deps.prompt(buildObjectiveRoutePrompt(route).text, {
 					expandPromptTemplates: false,
 					processSlashCommands: false,
@@ -834,6 +836,7 @@ export class GoalSessionController {
 					goalExecutionId: this.getState()?.goalId,
 				});
 				const outcome = this.getContinuationTurnOutcome(firstTurnEntryIndex);
+				this.lastPrimaryTurnOutcome = outcome.outcome;
 				if (outcome.outcome === "interrupted") throw new ObjectiveRootTurnInterruptedError();
 				if (outcome.outcome === "rerouted") {
 					// The route ran until System One cancelled it; the next cycle routes on the ledger.
@@ -966,7 +969,7 @@ export class GoalSessionController {
 		const before = this.primaryRootTurns;
 		try {
 			return {
-				result: await this.continuePrimaryCycle(controller, state.goalId, before, snapshot),
+				result: await this.continuePrimaryCycle(controller, state, before, snapshot),
 				disposed: false,
 			};
 		} catch (error) {
@@ -981,30 +984,50 @@ export class GoalSessionController {
 
 	private async continuePrimaryCycle(
 		controller: ObjectiveExecutionController,
-		goalId: string,
+		beforeGoal: GoalState,
 		before: number,
 		snapshot: () => GoalRuntimeSnapshot,
 	): Promise<GoalContinuationOnceResult> {
+		const recordSubmittedTurn = (outcome: GoalContinuationTurnOutcome["outcome"]): void => {
+			this.recordContinuationPass({
+				turns: 1,
+				wallClockMs: 0,
+				goalId: beforeGoal.goalId,
+				progressRevision: beforeGoal.progressRevision ?? 0,
+				stallTurns: beforeGoal.stallTurns,
+				outcome,
+				...(outcome === "completed" ? { completionTurn: (beforeGoal.continuationTurnsUsed ?? 0) + 1 } : {}),
+			});
+		};
 		try {
-			const terminal = await controller.runCycles(goalObjectiveId(goalId), 1);
-			const continuationRestartScheduled = terminal ? await this.applyObjectiveTerminal(terminal) : false;
+			const terminal = await controller.runCycles(goalObjectiveId(beforeGoal.goalId), 1);
 			const submitted = this.primaryRootTurns > before;
+			const turnOutcome = this.lastPrimaryTurnOutcome ?? "completed";
+			if (submitted) {
+				recordSubmittedTurn(turnOutcome);
+			}
+			const continuationRestartScheduled = terminal ? await this.applyObjectiveTerminal(terminal) : false;
 			return {
 				submitted,
 				snapshot: snapshot(),
 				...(continuationRestartScheduled ? { continuationRestartScheduled: true } : {}),
-				...(submitted ? { turnOutcome: "completed" as const } : {}),
+				...(submitted ? { turnOutcome } : {}),
 			};
 		} catch (error) {
 			// The auto-continuation owner waits for the foreground lease and retries this admission race.
 			// Recording it here would block the goal before that retry can run.
 			if (error instanceof AgentBusyError || error instanceof ObjectiveExecutionInterruptedError) throw error;
 			if (error instanceof ObjectiveRootTurnInterruptedError) {
+				recordSubmittedTurn("interrupted");
 				return { submitted: true, snapshot: snapshot(), turnOutcome: "interrupted" };
 			}
 			if (error instanceof ObjectiveRootTurnErroredError) {
+				recordSubmittedTurn("errored");
 				this.recordContinuationFailure(error);
 				return { submitted: true, snapshot: snapshot(), turnOutcome: "errored", turnError: error.message };
+			}
+			if (this.primaryRootTurns > before) {
+				recordSubmittedTurn(this.lastPrimaryTurnOutcome ?? "errored");
 			}
 			this.recordContinuationFailure(error);
 			throw error;

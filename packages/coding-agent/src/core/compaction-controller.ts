@@ -11,6 +11,7 @@ import {
 	calculateContextTokens,
 	compact,
 	createDeterministicCompaction,
+	estimateCharacterTokens,
 	estimateContextTokens,
 	prepareCompaction,
 	shouldCompact,
@@ -571,10 +572,31 @@ export class CompactionController {
 				),
 		});
 		if (!preparation?.retention) return preparation;
-		// The branch passed above can omit lifecycle entries and retention-dropped tool pairs. The
-		// covered entry is the real session leaf, so those omitted entries stay out of the suffix and
-		// a message appended after this preparation stays in.
-		const coveredThroughEntryId = this.deps.sessionManager.getLeafEntry()?.id;
+		// The branch passed above can omit lifecycle entries and retention-dropped tool pairs. When
+		// prepareCompaction excluded a trailing unanswered user message, cover through that user
+		// entry's real-branch parent so omitted entries before it stay covered while the unanswered
+		// user message stays in the post-compaction gap; otherwise cover through the real session leaf.
+		const sourceBoundaryEnd =
+			options?.allowTrailingCompactionAsPrevious && sourceBranch[sourceBranch.length - 1]?.type === "compaction"
+				? sourceBranch.length - 1
+				: sourceBranch.length;
+		const lastSourceEntryId = sourceBranch[sourceBoundaryEnd - 1]?.id;
+		let coveredThroughEntryId: string | undefined;
+		if (preparation.coveredThroughEntryId && preparation.coveredThroughEntryId !== lastSourceEntryId) {
+			const coveredIdx = sourceBranch.findIndex((entry) => entry.id === preparation.coveredThroughEntryId);
+			const trailingUser =
+				coveredIdx >= 0
+					? sourceBranch
+							.slice(coveredIdx + 1, sourceBoundaryEnd)
+							.find((entry) => entry.type === "message" && entry.message.role === "user")
+					: undefined;
+			const realTrailingParentId = trailingUser
+				? (this.deps.sessionManager.getEntry(trailingUser.id)?.parentId ?? undefined)
+				: undefined;
+			coveredThroughEntryId = realTrailingParentId ?? preparation.coveredThroughEntryId;
+		} else {
+			coveredThroughEntryId = this.deps.sessionManager.getLeafEntry()?.id ?? preparation.coveredThroughEntryId;
+		}
 		return coveredThroughEntryId ? { ...preparation, coveredThroughEntryId } : preparation;
 	}
 
@@ -683,7 +705,12 @@ export class CompactionController {
 		if (
 			settings.enabled &&
 			input.attempt === 0 &&
-			(await this.admitPreparedCompaction(model, input.requestTokens, this.idlePreparationKey(settings)))
+			(await this.admitPreparedCompaction(
+				model,
+				input.requestTokens,
+				this.idlePreparationKey(settings),
+				input.nonCompactableTokens,
+			))
 		) {
 			return { action: "replan" };
 		}
@@ -1606,12 +1633,14 @@ export class CompactionController {
 		prefixTokens: number,
 		outcome: { readonly afterRatio: number; readonly outputRatio: number },
 		remainingRequests: number,
+		nonCompactableTokens?: number,
 	): Omit<CompactionEconomicsInput, "retained"> {
 		return compactionPricingFor({
 			model,
 			summarizer,
 			summarizerSharesLane: sameCacheLane(summarizer, model),
 			prefixTokens,
+			...(nonCompactableTokens !== undefined ? { nonCompactableTokens } : {}),
 			outcome,
 			remainingRequests,
 		});
@@ -1644,6 +1673,8 @@ export class CompactionController {
 			return;
 		const settings = this.deps.getAdaptedSettings();
 		if (!settings.enabled) return;
+		const compactableTokens = estimateCharacterTokens(this.deps.agent.state.messages);
+		if (compactableTokens <= settings.keepRecentTokens) return;
 		const now = Date.now();
 		const facts = this.deps.getCacheEconomics?.(model, now);
 		if (!facts?.outcome || !facts.retainedAt || !facts.returnGapsMs) return;
@@ -1651,6 +1682,7 @@ export class CompactionController {
 		const prefixTokens =
 			(usage?.input ?? 0) + (usage?.cacheRead ?? 0) + (usage?.cacheWrite ?? 0) + (usage?.output ?? 0);
 		if (prefixTokens <= 0) return;
+		const nonCompactableTokens = Math.max(0, prefixTokens - compactableTokens);
 		const holder = reply.stopReason === "toolUse" ? "tool" : "owner";
 		const plan = planIdlePreparation({
 			...this.compactionPricing(
@@ -1659,6 +1691,7 @@ export class CompactionController {
 				prefixTokens,
 				facts.outcome,
 				Math.max(1, facts.remainingRequests ?? 1),
+				nonCompactableTokens,
 			),
 			retainedAt: facts.retainedAt,
 			returnGapsMs: facts.returnGapsMs(holder),
@@ -1754,6 +1787,9 @@ export class CompactionController {
 	): Promise<PreparedCompactionRecord | undefined> {
 		const model = this.deps.getModel();
 		if (!model) return undefined;
+		if (estimateCharacterTokens(this.deps.agent.state.messages) <= settings.keepRecentTokens) {
+			return undefined;
+		}
 		const sessionId = this.deps.sessionManager.getSessionId();
 		const readLeafId = this.deps.sessionManager.getLeafEntry()?.id;
 		const preparation = this.prepareCompactionWithPackedHostRecords(this.getRawCompactionBranch(), settings);
@@ -1779,12 +1815,13 @@ export class CompactionController {
 			auth.model.provider,
 		);
 		// Record it only on the history it read: the same session, whose branch still leads from the entry
-		// the preparation read up to, with no request or compaction since.
+		// the preparation read up to, with no new conversational entry, request, or compaction since.
 		if (signal.aborted || this.deps.sessionManager.getSessionId() !== sessionId || !this.leadsFrom(readLeafId)) {
 			return undefined;
 		}
+		const coveredThroughEntryId = result.coveredThroughEntryId ?? preparation.coveredThroughEntryId ?? readLeafId;
 		const record: PreparedCompactionRecord = {
-			result,
+			result: coveredThroughEntryId ? { ...result, coveredThroughEntryId } : result,
 			lane: { provider: model.provider, id: model.id, api: model.api },
 			settingsKey,
 			preparedAt: Date.now(),
@@ -1794,7 +1831,7 @@ export class CompactionController {
 		return stored;
 	}
 
-	/** Whether the live branch still leads from `entryId` with no request or compaction after it. */
+	/** Whether the live branch still leads from `entryId` with no new conversational entry, request, or compaction after it. */
 	private leadsFrom(entryId: string): boolean {
 		const manager = this.deps.sessionManager;
 		for (
@@ -1803,7 +1840,7 @@ export class CompactionController {
 			entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined
 		) {
 			if (entry.id === entryId) return true;
-			if (entry.type === "request_snapshot" || entry.type === "compaction") return false;
+			if (entry.type !== "custom") return false;
 		}
 		return false;
 	}
@@ -1864,6 +1901,7 @@ export class CompactionController {
 		model: Model<Api>,
 		requestTokens: number,
 		settingsKey: string,
+		nonCompactableTokens?: number,
 	): Promise<boolean> {
 		if (this.isRunning() || this.activeCompactionLifecycle) return false;
 		const candidate = this.idlePreparation;
@@ -1872,6 +1910,13 @@ export class CompactionController {
 		if (this.idlePreparation && !inFlight) this.idlePreparation.abort.abort();
 		const recorded = this.findPreparedCompaction(model, settingsKey);
 		if (!recorded && !inFlight) return false;
+		const settings = this.deps.getAdaptedSettings();
+		const compactableTokens = estimateCharacterTokens(this.deps.agent.state.messages);
+		if (compactableTokens <= settings.keepRecentTokens) {
+			inFlight?.abort.abort();
+			this.idleView = undefined;
+			return false;
+		}
 		const now = Date.now();
 		const facts = this.deps.getCacheEconomics?.(model, now);
 		if (!facts?.outcome) {
@@ -1879,12 +1924,14 @@ export class CompactionController {
 			this.idleView = undefined;
 			return false;
 		}
+		const effectiveNonCompactable = nonCompactableTokens ?? Math.max(0, requestTokens - compactableTokens);
 		const pricing = this.compactionPricing(
 			model,
 			this.deps.resolveModel(model),
 			requestTokens,
 			facts.outcome,
 			Math.max(1, facts.remainingRequests ?? 1),
+			effectiveNonCompactable,
 		);
 		const verdict = priceCompaction({
 			...pricing,
@@ -1950,7 +1997,16 @@ export class CompactionController {
 				detail: "no compaction on record to learn a compaction's size and cost from",
 			};
 		} else {
-			const pricing = this.compactionPricing(model, summarizer, contextTokens, facts.outcome, remainingRequests);
+			const compactableTokens = estimateCharacterTokens(this.deps.agent.state.messages);
+			const nonCompactableTokens = Math.max(0, contextTokens - compactableTokens);
+			const pricing = this.compactionPricing(
+				model,
+				summarizer,
+				contextTokens,
+				facts.outcome,
+				remainingRequests,
+				nonCompactableTokens,
+			);
 			verdict = priceCompaction({ ...pricing, ...(facts.retained ? { retained: facts.retained } : {}) });
 			detail = {
 				...detail,
@@ -2114,21 +2170,28 @@ export class CompactionController {
 			this.activeCompactionLifecycle.committedOutcome = applied.deterministic ? "fallback" : "success";
 			this.activeCompactionLifecycle.committedCause = applied.deterministic?.cause;
 		}
+		const messageTokensBefore = estimateCharacterTokens(this.deps.agent.state.messages);
 		this.deps.refreshAfterCompaction();
+		const messageTokensAfter = estimateCharacterTokens(this.deps.agent.state.messages);
+		const liveTokensAfter = this.measureLiveContextTokens();
 		const sessionModel = this.deps.getModel();
 		if (sessionModel && applied.tokensBefore > 0) {
 			this.deps.recordCompactionOutcome?.({
 				model: sessionModel,
-				tokensBefore: applied.tokensBefore,
-				tokensAfter: this.measureLiveContextTokens(),
+				tokensBefore: messageTokensBefore > 0 ? messageTokensBefore : applied.tokensBefore,
+				tokensAfter: messageTokensBefore > 0 ? messageTokensAfter : liveTokensAfter,
 				outputTokens: applied.usage?.output ?? 0,
 			});
 		}
 		if (this.pendingEarlyCompactionPrediction) {
+			const nonCompactableFloor = Math.max(
+				0,
+				this.pendingEarlyCompactionPrediction.tokensBefore - messageTokensBefore,
+			);
 			this.earlyCompactionFeedback = {
 				predictedSavingsUsd: this.pendingEarlyCompactionPrediction.predictedSavingsUsd,
 				tokensBefore: this.pendingEarlyCompactionPrediction.tokensBefore,
-				tokensAfter: this.measureLiveContextTokens(),
+				tokensAfter: Math.max(liveTokensAfter, nonCompactableFloor + messageTokensAfter),
 				horizonTurns: this.pendingEarlyCompactionPrediction.horizonTurns,
 				observedTurns: 0,
 				totalObservedActualCostUsd: 0,

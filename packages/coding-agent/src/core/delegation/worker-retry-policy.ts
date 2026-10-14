@@ -53,7 +53,11 @@ export function evaluateWorkerRetry(args: {
 	// retry-after bounds the account it leaves, not the one it moves to. It is not a repeat of the same
 	// failure, so it does not spend the attempt ceiling: the chain is bounded by the contract's finite
 	// candidates, each marked exhausted as it is left.
-	const failover = classified.reason === "billing_or_quota" && args.failover === true;
+	const failover =
+		args.failover === true &&
+		(classified.reason === "billing_or_quota" ||
+			classified.reason === "model_unsupported" ||
+			classified.reason === "auth");
 	const attemptsAllowed = args.maxAttempts ?? DEFAULT_WORKER_TASK_ATTEMPTS;
 	if (!failover && args.retriesUsed + 1 >= attemptsAllowed) return { retry: false, reason: "attempts_exhausted" };
 	if (!classified.retryable && !failover) return { retry: false, reason: `not_retryable_${classified.reason}` };
@@ -66,5 +70,13 @@ export function evaluateWorkerRetry(args: {
 		if (error instanceof RetryDelayExceededError) return { retry: false, reason: "retry_delay_exceeds_max" };
 		throw error;
 	}
-	return { retry: true, reason: failover ? "billing_or_quota_failover" : classified.reason, delayMs };
+	return {
+		retry: true,
+		reason: failover
+			? classified.reason === "billing_or_quota"
+				? "billing_or_quota_failover"
+				: `${classified.reason}_failover`
+			: classified.reason,
+		delayMs,
+	};
 }

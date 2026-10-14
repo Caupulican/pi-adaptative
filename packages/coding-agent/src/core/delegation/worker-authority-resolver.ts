@@ -199,7 +199,21 @@ export function previewWorkerModel(input: {
  * first is where it runs, the rest are where it moves when that account runs out of quota.
  */
 export function routedWorkerModels(input: Parameters<typeof selectRoutedWorkerModel>[0]): Model<Api>[] {
-	return collectRoutedWorkerModels(input, Number.POSITIVE_INFINITY);
+	const routed = collectRoutedWorkerModels(input, Number.POSITIVE_INFINITY);
+	if (
+		routed.length > 0 &&
+		input.routing.account === "other" &&
+		input.modelRegistry.hasConfiguredAuth(input.foregroundModel) &&
+		!input.isModelExhausted(input.foregroundModel) &&
+		deriveModelCapabilityProfile({ contextWindow: input.foregroundModel.contextWindow }).backgroundLanesEnabled &&
+		!input.isModelLimited?.(input.foregroundModel) &&
+		!routed.some(
+			(entry) => entry.provider === input.foregroundModel.provider && entry.id === input.foregroundModel.id,
+		)
+	) {
+		routed.push(input.foregroundModel);
+	}
+	return routed;
 }
 
 /**
@@ -307,14 +321,17 @@ function selectModelBinding(
 			isModelLimited,
 		});
 		if (routed.length > 0) {
+			const explicitThinking = authority?.thinkingLevel;
 			const inherited = foregroundThinkingLevel ?? resolveModelThinkingLevel(foregroundModel, undefined);
 			const bind = (model: Model<Api>): OrchestrationModelBinding => ({
 				provider: model.provider,
 				modelId: model.id,
 				thinkingLevel:
-					foregroundThinkingPolicy === "inherit"
-						? resolveModelThinkingLevel(model, inherited)
-						: resolveModelThinkingLevel(model, stepDownThinkingLevel(inherited)),
+					explicitThinking !== undefined
+						? resolveModelThinkingLevel(model, explicitThinking)
+						: foregroundThinkingPolicy === "inherit"
+							? resolveModelThinkingLevel(model, inherited)
+							: resolveModelThinkingLevel(model, stepDownThinkingLevel(inherited)),
 			});
 			const [first, ...rest] = routed.map(bind);
 			return { binding: first!, fallbacks: rest };
@@ -330,7 +347,7 @@ function selectModelBinding(
 	// authority pin and a profile binding are authored choices and stay exactly as written.
 	const inheritedFromForeground = (): OrchestrationThinkingLevel => {
 		const level = foregroundThinkingLevel ?? resolveModelThinkingLevel(foregroundModel!, undefined);
-		if (foregroundThinkingPolicy === "inherit") return level;
+		if (foregroundThinkingPolicy === "inherit") return resolveModelThinkingLevel(foregroundModel!, level);
 		return resolveModelThinkingLevel(foregroundModel!, stepDownThinkingLevel(level));
 	};
 	const thinkingLevel =

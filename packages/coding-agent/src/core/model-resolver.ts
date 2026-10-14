@@ -8,6 +8,7 @@ import chalk from "chalk";
 import { minimatch } from "minimatch";
 import type { ThinkingLevel } from "../kernel/index.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+import { findRenamedFreeTierModel } from "./model-registry.ts";
 import type { ProfileRegistry } from "./profile-registry.ts";
 import { isValidThinkingLevel } from "./thinking-level.ts";
 
@@ -175,7 +176,20 @@ function tryMatchModel(modelPattern: string, availableModels: Model<Api>[]): Mod
 	);
 
 	if (matches.length === 0) {
-		return undefined;
+		const trimmed = modelPattern.trim();
+		const slashIndex = trimmed.indexOf("/");
+		if (slashIndex !== -1) {
+			const provider = trimmed.substring(0, slashIndex).trim();
+			const modelId = trimmed.substring(slashIndex + 1).trim();
+			if (provider && modelId) {
+				const renamedWithProvider = findRenamedFreeTierModel(availableModels, provider, modelId);
+				if (renamedWithProvider) return renamedWithProvider;
+				if (availableModels.some((model) => model.provider.toLowerCase() === provider.toLowerCase())) {
+					return undefined;
+				}
+			}
+		}
+		return findRenamedFreeTierModel(availableModels, undefined, trimmed);
 	}
 
 	// Separate into aliases and dated versions

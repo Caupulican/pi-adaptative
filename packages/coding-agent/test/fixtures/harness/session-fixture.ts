@@ -766,8 +766,14 @@ export class VirtualGit {
 			case "write-tree":
 				return this.writeTree(env);
 			case "config":
-				// git init writes core.filemode; any other unset key is exit status 1.
-				if (rest[0] === "--get" && rest[1] === "core.filemode") return { code: 0, stdout: "true\n", stderr: "" };
+				// git init writes core.filemode; any other unset key is exit status 1 unless --default is supplied.
+				if (
+					(rest[0] === "--get" && rest[1] === "core.filemode") ||
+					(rest[0] === "--default" && rest[2] === "--get" && rest[3] === "core.filemode")
+				)
+					return { code: 0, stdout: "true\n", stderr: "" };
+				if (rest[0] === "--default" && rest[2] === "--get" && rest[3] !== undefined)
+					return { code: 0, stdout: `${rest[1] ?? ""}\n`, stderr: "" };
 				if (rest[0] === "--get" && rest[1] !== undefined) return { code: 1, stdout: "", stderr: "" };
 				throw new Error(`Unscripted config: ${rest.join(" ")}`);
 			case "rev-parse":
@@ -1671,6 +1677,7 @@ export class VirtualGit {
  * caller has attached its listeners. Stream and event shape match what the production settlement waits on.
  */
 class VirtualGitChild extends EventEmitter {
+	readonly stdin = new PassThrough();
 	readonly stdout = new PassThrough();
 	readonly stderr = new PassThrough();
 	readonly pid: number | undefined = undefined;
@@ -1959,32 +1966,71 @@ export class HarnessProcesses {
 		const [file, argv, options] = args;
 		const isGit = file === "git" || file === "git.exe";
 		if (operation === "spawn" && isGit && Array.isArray(argv)) {
-			// The state is read at spawn time, as git reads its repository when it starts.
-			const spawnOptions = (options ?? {}) as { cwd?: string; env?: Record<string, string | undefined> };
-			const outcome = this.git.run(argv as string[], spawnOptions.cwd ?? "", spawnOptions.env ?? {});
+			const spawnOptions = (options ?? {}) as {
+				cwd?: string;
+				env?: Record<string, string | undefined>;
+				stdio?: unknown;
+			};
+			const stdinPipe = Array.isArray(spawnOptions.stdio) && spawnOptions.stdio[0] === "pipe";
 			const child = new VirtualGitChild();
 			// The stdio is consumed so both streams close; the child's close fires once both have closed, and the spawn is tracked until then.
 			child.stdout.on("data", () => undefined);
 			child.stderr.on("data", () => undefined);
+			let exitCode = 0;
 			const streamsClosed = Promise.all([
 				new Promise<void>((resolve) => child.stdout.once("close", () => resolve())),
 				new Promise<void>((resolve) => child.stderr.once("close", () => resolve())),
 			]).then(() => {
-				child.emit("close", outcome.code, null);
+				child.emit("close", exitCode, null);
 			});
-			const finished = new Promise<void>((resolve, reject) => {
-				setImmediate(() => {
-					try {
-						child.finish(outcome);
-						resolve();
-					} catch (error) {
-						// A failing finish still closes both streams, so the stdio joins and the child close are not skipped.
-						child.stdout.destroy();
-						child.stderr.destroy();
-						reject(error);
-					}
-				});
-			});
+			const finished = stdinPipe
+				? new Promise<void>((resolve, reject) => {
+						const chunks: Buffer[] = [];
+						let settledInput = false;
+						const completeWithInput = (inputText: string) => {
+							if (settledInput) return;
+							settledInput = true;
+							setImmediate(() => {
+								try {
+									const outcome = this.git.run(
+										argv as string[],
+										spawnOptions.cwd ?? "",
+										spawnOptions.env ?? {},
+										inputText,
+									);
+									exitCode = outcome.code;
+									child.finish(outcome);
+									resolve();
+								} catch (error) {
+									child.stdout.destroy();
+									child.stderr.destroy();
+									reject(error);
+								}
+							});
+						};
+						child.stdin.on("data", (chunk: Buffer | string) => {
+							chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8"));
+						});
+						child.stdin.once("end", () => completeWithInput(Buffer.concat(chunks).toString("utf8")));
+						child.stdin.once("close", () => completeWithInput(Buffer.concat(chunks).toString("utf8")));
+					})
+				: new Promise<void>((resolve, reject) => {
+						// The state is read at spawn time, as git reads its repository when it starts.
+						const outcome = this.git.run(argv as string[], spawnOptions.cwd ?? "", spawnOptions.env ?? {});
+						exitCode = outcome.code;
+						child.stdin.end();
+						setImmediate(() => {
+							try {
+								child.finish(outcome);
+								resolve();
+							} catch (error) {
+								// A failing finish still closes both streams, so the stdio joins and the child close are not skipped.
+								child.stdout.destroy();
+								child.stderr.destroy();
+								reject(error);
+							}
+						});
+					});
 			// Both joins run independently: neither a rejected finish nor a throwing close listener skips the other.
 			const settled = Promise.allSettled([finished, streamsClosed]).then((results) => {
 				for (const result of results) if (result.status === "rejected") this.causes.push(result.reason);

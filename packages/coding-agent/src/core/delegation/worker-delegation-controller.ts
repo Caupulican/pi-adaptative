@@ -1376,7 +1376,17 @@ export class WorkerDelegationController {
 	): boolean {
 		if (outcome.reasonCode !== "completion_error" || !outcome.reasonDetail) return false;
 		const classified = classifyFailure({ message: outcome.reasonDetail, provider: model.provider });
-		if (classified.reason !== "billing_or_quota") return false;
+		const oauthCredentialUnusable = /OAuth credential for .+ expired on .+ and could not be refreshed/i.test(
+			outcome.reasonDetail,
+		);
+		if (
+			classified.reason !== "billing_or_quota" &&
+			classified.reason !== "model_unsupported" &&
+			classified.reason !== "auth" &&
+			!oauthCredentialUnusable
+		) {
+			return false;
+		}
 		this.deps.markModelExhausted?.(model, classified.retryAfterMs);
 		const contract = this.getWorkerLifecycle().getActiveAttempt(laneId)?.dispatch.executionContract;
 		if (contract?.worker.profile.modelPolicy.mode !== "ordered-fallback") return false;
@@ -1384,7 +1394,9 @@ export class WorkerDelegationController {
 		const moved = next.ok && (next.resolved.model.provider !== model.provider || next.resolved.model.id !== model.id);
 		if (moved) {
 			this.safeWarn(
-				`Worker ${laneId} ran ${model.provider}/${model.id} out of quota; retrying on ${next.resolved.model.provider}/${next.resolved.model.id}.`,
+				classified.reason === "billing_or_quota"
+					? `Worker ${laneId} ran ${model.provider}/${model.id} out of quota; retrying on ${next.resolved.model.provider}/${next.resolved.model.id}.`
+					: `Worker ${laneId} model ${model.provider}/${model.id} unavailable (${oauthCredentialUnusable ? "auth" : classified.reason}); retrying on ${next.resolved.model.provider}/${next.resolved.model.id}.`,
 			);
 		}
 		return moved;
@@ -4202,20 +4214,23 @@ export class WorkerDelegationController {
 				: this.admitNewWorkerRequest(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
 		const { instructions, settings, verifierShipment } = admission;
-		const { model, modelBinding, profile: orchestrationProfile, soul } = admission.shipment;
+		let { model, modelBinding } = admission.shipment;
+		const { profile: orchestrationProfile, soul } = admission.shipment;
 		if (!this.hasWorkerCapacity(settings)) {
 			return { started: false, skipReason: "worker_delegation_already_running" };
 		}
-		const laneCapability = this.laneCapabilityProfile(model);
-		const retentionPolicy = workerConversationRetentionPolicy(
-			model,
-			this.deps.getSettingsManager(),
-			this.deps.admitWorkerEarlyCompaction
-				? (contextTokens, messages) =>
-						// Called at compaction time, once the attempt's agent is bound below.
-						this.deps.admitWorkerEarlyCompaction!({ agentId, model, contextTokens, messages })
-				: undefined,
-		);
+		let laneCapability = this.laneCapabilityProfile(model);
+		const buildRetentionPolicy = (activeModel: Model<Api>) =>
+			workerConversationRetentionPolicy(
+				activeModel,
+				this.deps.getSettingsManager(),
+				this.deps.admitWorkerEarlyCompaction
+					? (contextTokens, messages) =>
+							// Called at compaction time, once the attempt's agent is bound below.
+							this.deps.admitWorkerEarlyCompaction!({ agentId, model: activeModel, contextTokens, messages })
+					: undefined,
+			);
+		let retentionPolicy = buildRetentionPolicy(model);
 		const prepared = this.prepareWorkerAttempt(request, admission, existingRecord);
 		onPrepared(prepared.record);
 		const { executionPlan, lifecycle } = prepared;
@@ -4499,14 +4514,19 @@ export class WorkerDelegationController {
 		// The run-wide baseline is the state at the worker's start, not at its first command.
 		protectedPathWatch?.start();
 		const compactionSettings = this.deps.getSettingsManager().getCompactionSettings();
-		const laneMemoryCapacity = new LaneMemoryCapacityTracker({
-			model,
-			compactionReserveTokens: compactionSettings.enabled
-				? laneCompactionReserveTokens(Math.floor(model.contextWindow ?? 0), compactionSettings.reserveTokens)
-				: 0,
-			maxOutputTokens: resolveWorkerOutputTokenCeiling(model),
-			remainingTokenAllowance: () => toolSurface.gateway?.remainingTokenBudget(),
-		});
+		const buildLaneMemoryCapacity = (activeModel: Model<Api>) =>
+			new LaneMemoryCapacityTracker({
+				model: activeModel,
+				compactionReserveTokens: compactionSettings.enabled
+					? laneCompactionReserveTokens(
+							Math.floor(activeModel.contextWindow ?? 0),
+							compactionSettings.reserveTokens,
+						)
+					: 0,
+				maxOutputTokens: resolveWorkerOutputTokenCeiling(activeModel),
+				remainingTokenAllowance: () => toolSurface.gateway?.remainingTokenBudget(),
+			});
+		let laneMemoryCapacity = buildLaneMemoryCapacity(model);
 		const toolSurface = createLaneToolSurface({
 			workerLabel: agentId,
 			...(protectedPathWatch ? { protectedPathWatch } : {}),
@@ -4521,7 +4541,7 @@ export class WorkerDelegationController {
 			deniedPaths: executionPlan.deniedPaths,
 			writeProtectedPaths: getHarnessWriteProtectedPaths(executionPlan.cwd, this.deps.getAgentDir()),
 			memoryBroker: executionPlan.readMemory
-				? this.deps.createLaneMemoryBroker(laneMemoryCapacity.source)
+				? this.deps.createLaneMemoryBroker(() => laneMemoryCapacity.source())
 				: undefined,
 			writeEnabled: executionPlan.writeEnabled,
 			writePaths: executionPlan.writePaths,
@@ -4648,86 +4668,90 @@ export class WorkerDelegationController {
 			"lane",
 			`worker:${startedRecord.laneId}`,
 		);
-		const executor = createWorkerAttemptExecutor({
-			requirementIds: prepared.attempt.dispatch.requirementIds ?? [],
-			reportHandshake: this.deps.getSettingsManager().getWorkerDelegationSettings().reportHandshake,
-			request: workerRequest,
-			grant,
-			executionPlan,
-			toolSurface,
-			conversation,
-			lifecycle,
-			laneId: startedRecord.laneId,
-			agentId,
-			durableHandle,
-			parentSessionId: this.deps.getSessionId(),
-			agentDir: this.deps.getAgentDir(),
-			cwd: executionPlan.cwd,
-			model,
-			thinkingLevel: modelBinding.thinkingLevel,
-			laneCapability,
-			...(soul ? { soul } : {}),
-			workerResourceSystemPrompt,
-			workerContextFiles,
-			initialUsage,
-			hasPersistedUsageCheckpoint: checkpointUsage !== undefined,
-			usageReportId,
-			processCapable: executionPlan.processEnabled,
-			projectContextFiles: this.deps.getSettingsManager().getProjectContextFiles(),
-			...(() => {
-				const personaGuidance = this.deps.getHandoffPersonaGuidance?.();
-				return personaGuidance ? { personaGuidance } : {};
-			})(),
-			...(request.verificationOfTaskId ? { verificationSubjectTaskId: request.verificationOfTaskId } : {}),
-			...(recoveredTerminal ? { recoveredTerminal } : {}),
-			...(retentionPolicy ? { retentionPolicy } : {}),
-			signal: workerSignal,
-			runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
-			agentControl: this.agentControl,
-			applyActions: workerRequest.envelope.capabilities.includes("filesystem.write")
-				? (actions, actionJournal) =>
-						applyWorkerActions({
-							actions,
-							gateway: toolSurface.gateway!,
-							toolManifests: executionPlan.toolManifests,
-							cwd: executionPlan.cwd,
-							...(actionJournal ? { actionJournal } : {}),
-						})
-				: undefined,
-			warn: (message) => this.safeWarn(message),
-			...(this.deps.observeWorkerProgress ? { observeWorkerProgress: this.deps.observeWorkerProgress } : {}),
-			...(this.deps.observeWorkerRequest ? { observeWorkerRequest: this.deps.observeWorkerRequest } : {}),
-			onRequestAccepted: (context) => laneMemoryCapacity.noteRequestAccepted(context),
-			...(this.deps.observeWorkerResponse ? { observeWorkerResponse: this.deps.observeWorkerResponse } : {}),
-			...(this.deps.createWorkerToolSelection
-				? { toolSelection: this.deps.createWorkerToolSelection(model, toolSurface.tools) }
-				: {}),
-			...(this.deps.recordWorkerCompactionOutcome
-				? {
-						recordCompactionOutcome: (outcome: {
-							tokensBefore: number;
-							tokensAfter: number;
-							outputTokens: number;
-						}) => this.deps.recordWorkerCompactionOutcome?.({ agentId, model, ...outcome }),
-					}
-				: {}),
-			...(this.deps.planWorkerRequest
-				? {
-						planRequest: (messages: AgentMessage[], sentPrefixCount: number, signal?: AbortSignal) =>
-							this.deps.planWorkerRequest!({
-								agentId,
-								model,
-								compactionTriggerTokens: retentionPolicy?.maxContextTokens,
-								messages,
-								sentPrefixCount,
-								toolNames: toolSurface.tools.map((tool) => tool.name),
-								...(signal ? { signal } : {}),
-							}),
-					}
-				: {}),
-			...(this.deps.recordObjectiveMutation ? { recordObjectiveMutation: this.deps.recordObjectiveMutation } : {}),
-			...(this.deps.reviewNewCode ? { reviewNewCode: this.deps.reviewNewCode } : {}),
-		});
+		const buildExecutor = () =>
+			createWorkerAttemptExecutor({
+				requirementIds: prepared.attempt!.dispatch.requirementIds ?? [],
+				reportHandshake: this.deps.getSettingsManager().getWorkerDelegationSettings().reportHandshake,
+				request: workerRequest,
+				grant,
+				executionPlan,
+				toolSurface,
+				conversation,
+				lifecycle,
+				laneId: startedRecord.laneId,
+				agentId,
+				durableHandle,
+				parentSessionId: this.deps.getSessionId(),
+				agentDir: this.deps.getAgentDir(),
+				cwd: executionPlan.cwd,
+				model,
+				thinkingLevel: modelBinding.thinkingLevel,
+				laneCapability,
+				...(soul ? { soul } : {}),
+				workerResourceSystemPrompt,
+				workerContextFiles,
+				initialUsage,
+				hasPersistedUsageCheckpoint: checkpointUsage !== undefined,
+				usageReportId,
+				processCapable: executionPlan.processEnabled,
+				projectContextFiles: this.deps.getSettingsManager().getProjectContextFiles(),
+				...(() => {
+					const personaGuidance = this.deps.getHandoffPersonaGuidance?.();
+					return personaGuidance ? { personaGuidance } : {};
+				})(),
+				...(request.verificationOfTaskId ? { verificationSubjectTaskId: request.verificationOfTaskId } : {}),
+				...(recoveredTerminal ? { recoveredTerminal } : {}),
+				...(retentionPolicy ? { retentionPolicy } : {}),
+				signal: workerSignal,
+				runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
+				agentControl: this.agentControl,
+				applyActions: workerRequest.envelope.capabilities.includes("filesystem.write")
+					? (actions, actionJournal) =>
+							applyWorkerActions({
+								actions,
+								gateway: toolSurface.gateway!,
+								toolManifests: executionPlan.toolManifests,
+								cwd: executionPlan.cwd,
+								...(actionJournal ? { actionJournal } : {}),
+							})
+					: undefined,
+				warn: (message) => this.safeWarn(message),
+				...(this.deps.observeWorkerProgress ? { observeWorkerProgress: this.deps.observeWorkerProgress } : {}),
+				...(this.deps.observeWorkerRequest ? { observeWorkerRequest: this.deps.observeWorkerRequest } : {}),
+				onRequestAccepted: (context) => laneMemoryCapacity.noteRequestAccepted(context),
+				...(this.deps.observeWorkerResponse ? { observeWorkerResponse: this.deps.observeWorkerResponse } : {}),
+				...(this.deps.createWorkerToolSelection
+					? { toolSelection: this.deps.createWorkerToolSelection(model, toolSurface.tools) }
+					: {}),
+				...(this.deps.recordWorkerCompactionOutcome
+					? {
+							recordCompactionOutcome: (outcome: {
+								tokensBefore: number;
+								tokensAfter: number;
+								outputTokens: number;
+							}) => this.deps.recordWorkerCompactionOutcome?.({ agentId, model, ...outcome }),
+						}
+					: {}),
+				...(this.deps.planWorkerRequest
+					? {
+							planRequest: (messages: AgentMessage[], sentPrefixCount: number, signal?: AbortSignal) =>
+								this.deps.planWorkerRequest!({
+									agentId,
+									model,
+									compactionTriggerTokens: retentionPolicy?.maxContextTokens,
+									messages,
+									sentPrefixCount,
+									toolNames: toolSurface.tools.map((tool) => tool.name),
+									...(signal ? { signal } : {}),
+								}),
+						}
+					: {}),
+				...(this.deps.recordObjectiveMutation
+					? { recordObjectiveMutation: this.deps.recordObjectiveMutation }
+					: {}),
+				...(this.deps.reviewNewCode ? { reviewNewCode: this.deps.reviewNewCode } : {}),
+			});
+		let executor = buildExecutor();
 		// Held for this specialist across the whole execution and released only after the finally has
 		// awaited tool-surface disposal: a terminal record is not evidence that its resources are gone.
 		// Claimed as the last statement before the closure, so its matching finally always runs.
@@ -4742,18 +4766,21 @@ export class WorkerDelegationController {
 					cwd: executionPlan.cwd,
 					changedFiles: () => executor.ledger.changedFiles,
 				});
-				this.inFlightLedgers.set(startedRecord.laneId, {
-					changedFiles: executor.ledger.changedFiles,
-					getHostFindings: () => [
-						...this.writeOverlaps.findingsFor(startedRecord.laneId),
-						...(protectedPathWatch?.finishBlockers() ?? []),
-					],
-					sealChangedFiles: executor.ledger.sealChangedFiles,
-					getUsage: executor.ledger.getUsage,
-					request: workerRequest,
-					handle: durableHandle,
-					cwd: executionPlan.cwd,
-				});
+				const registerInFlightLedger = () => {
+					this.inFlightLedgers.set(startedRecord.laneId, {
+						changedFiles: executor.ledger.changedFiles,
+						getHostFindings: () => [
+							...this.writeOverlaps.findingsFor(startedRecord.laneId),
+							...(protectedPathWatch?.finishBlockers() ?? []),
+						],
+						sealChangedFiles: () => executor.ledger.sealChangedFiles(),
+						getUsage: () => executor.ledger.getUsage(),
+						request: workerRequest,
+						handle: durableHandle,
+						cwd: executionPlan.cwd,
+					});
+				};
+				registerInFlightLedger();
 				leaseHeartbeat.start();
 				// The lane's registration records which worker owns it (a no-op when the cwd is not a lane).
 				await this.laneIsolation?.bind(executionPlan.cwd, agentId);
@@ -4761,7 +4788,27 @@ export class WorkerDelegationController {
 				// fail admission without paying for a checkout-wide snapshot first. The executor resolves
 				// again at the actual provider boundary so refreshed credentials are never pinned here.
 				if (!recoveredTerminal) {
-					const requestAuth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
+					let requestAuth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
+					while (
+						!requestAuth.ok &&
+						this.failOverQuotaExhaustion(
+							startedRecord.laneId,
+							{ reasonCode: "completion_error", reasonDetail: requestAuth.error },
+							model,
+						)
+					) {
+						const resolvedNext = this.getWorkerProfileResolver().resolveContract(immutableWorker);
+						if (!resolvedNext.ok) break;
+						model = resolvedNext.resolved.model;
+						modelBinding = resolvedNext.resolved.modelBinding;
+						laneCapability = this.laneCapabilityProfile(model);
+						retentionPolicy = buildRetentionPolicy(model);
+						laneMemoryCapacity = buildLaneMemoryCapacity(model);
+						lifecycle.recordRunningModel(startedRecord.laneId, modelBinding);
+						executor = buildExecutor();
+						registerInFlightLedger();
+						requestAuth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
+					}
 					if (!requestAuth.ok) throw new Error(requestAuth.error);
 					workerSignal.throwIfAborted();
 				}
@@ -4819,6 +4866,13 @@ export class WorkerDelegationController {
 					!workerSignal.aborted
 				) {
 					const failover = this.failOverQuotaExhaustion(startedRecord.laneId, rawOutcome, model);
+					if (failover) {
+						const resolvedNext = this.getWorkerProfileResolver().resolveContract(immutableWorker);
+						if (resolvedNext.ok) {
+							model = resolvedNext.resolved.model;
+							modelBinding = resolvedNext.resolved.modelBinding;
+						}
+					}
 					const retry = this.recovery.scheduleAttemptRetry({
 						...(failover ? { failover } : {}),
 						laneId: startedRecord.laneId,

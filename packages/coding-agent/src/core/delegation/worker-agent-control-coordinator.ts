@@ -1555,8 +1555,9 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		agentId: string,
 		timeoutMs = WORKER_WAIT_DEFAULT_MS,
 		scope: WorkerAgentControlScope = {},
+		signal?: AbortSignal,
 	): ReturnType<WorkerAgentControlPort["waitForWorkerAgent"]> {
-		return this.waitForWorkerAgents([agentId], "all", timeoutMs, scope).then((result) => ({
+		return this.waitForWorkerAgents([agentId], "all", timeoutMs, scope, signal).then((result) => ({
 			status: result.statuses[0]?.status ?? "unknown",
 			timedOut: result.timedOut,
 			...(result.terminalLaneIds ? { terminalLaneIds: result.terminalLaneIds } : {}),
@@ -1570,6 +1571,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		mode: WorkerAgentWaitMode,
 		timeoutMs = WORKER_WAIT_DEFAULT_MS,
 		scope: WorkerAgentControlScope = {},
+		signal?: AbortSignal,
 	): ReturnType<WorkerAgentControlPort["waitForWorkerAgents"]> {
 		this.requireControl();
 		if (mode !== "any" && mode !== "all") throw new TypeError("Worker wait mode must be 'any' or 'all'.");
@@ -1637,6 +1639,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				);
 			}
 		}
+		if (signal?.aborted) return Promise.resolve(result(baselineStatuses, false, baselineSnapshot));
 		// A root wait on a worker the scheduler holds for the foreground turn can never be satisfied inside
 		// this turn: the hold lifts only when the turn ends, and a model waiting through it burns its own
 		// turn. Return at once and say so. Workers waiting on a sibling keep the ordinary wait.
@@ -1659,6 +1662,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return new Promise((resolve, reject) => {
 			let settled = false;
 			let completionTimedOut: boolean | undefined;
+			let abortedBySignal = false;
 			let failure: unknown;
 			let hasFailure = false;
 			let yieldInitialized = callerAgentId === undefined;
@@ -1672,9 +1676,16 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			let unsubscribeReservation = (): void => undefined;
 			let restoreDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
 			let restoreRetryDeadline: number | undefined;
+			const onSignalAbort = () => {
+				if (settled) return;
+				abortedBySignal = true;
+				if (completionTimedOut === undefined) completionTimedOut = false;
+				settle();
+			};
 			const cleanup = () => {
 				unsubscribeState();
 				unsubscribeReservation();
+				signal?.removeEventListener("abort", onSignalAbort);
 				if (timeout) clearTimeout(timeout);
 				if (restoreDeadlineTimer) clearTimeout(restoreDeadlineTimer);
 			};
@@ -1690,7 +1701,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				const snapshot = currentSnapshot();
 				const statuses = statusesFromSnapshot(snapshot);
 				recordUpdates(statuses);
-				if (!hasFailure && completionTimedOut === undefined) {
+				if (!hasFailure && completionTimedOut === undefined && !abortedBySignal) {
 					if (!waitSatisfied(statuses)) return;
 					completionTimedOut = false;
 					if (timeout) {
@@ -1729,6 +1740,12 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			unsubscribeState = this.subscribeStateChanges(settle);
 			if (this.options.subscribeReservationAvailability) {
 				unsubscribeReservation = this.options.subscribeReservationAvailability(settle);
+			}
+			if (signal?.aborted) {
+				abortedBySignal = true;
+				completionTimedOut = false;
+			} else {
+				signal?.addEventListener("abort", onSignalAbort, { once: true });
 			}
 			timeout = setTimeout(() => {
 				if (settled) return;

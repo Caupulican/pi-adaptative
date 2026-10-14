@@ -34,7 +34,7 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 	// - Second live root on the same continuous-chat profile is refused by runtime.lease.json until the first root disposes.
 	const wAgentDir = `${world.agentDir}-icm`;
 	const wStore = icmContinuousStore(wAgentDir);
-	world.setModelReasoning("worker-c", true);
+	world.setModelReasoning("worker-c", true, { xhigh: "xhigh" });
 
 	const W_ICM_READER_PROFILE: OrchestrationProfile = {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,

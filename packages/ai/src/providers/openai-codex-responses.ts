@@ -1946,6 +1946,40 @@ function appendCachedWebSocketInput(
 	return { previous, input, totalItems: (previous?.totalItems ?? 0) + input.length };
 }
 
+function responseItemsMatchAfterRedaction(actual: unknown, expected: unknown): boolean {
+	if (
+		!actual ||
+		!expected ||
+		typeof actual !== "object" ||
+		typeof expected !== "object" ||
+		Array.isArray(actual) ||
+		Array.isArray(expected)
+	) {
+		return false;
+	}
+	const actualRecord = actual as Record<string, unknown>;
+	const expectedRecord = expected as Record<string, unknown>;
+	if (
+		typeof actualRecord.type !== "string" ||
+		actualRecord.type !== expectedRecord.type ||
+		typeof actualRecord.id !== "string" ||
+		actualRecord.id.length === 0 ||
+		actualRecord.id !== expectedRecord.id
+	) {
+		return false;
+	}
+	if (actualRecord.type === "reasoning") {
+		return actualRecord.encrypted_content === expectedRecord.encrypted_content;
+	}
+	if (actualRecord.type === "message") {
+		return actualRecord.role === expectedRecord.role;
+	}
+	if (actualRecord.type === "function_call") {
+		return actualRecord.call_id === expectedRecord.call_id && actualRecord.name === expectedRecord.name;
+	}
+	return false;
+}
+
 function getCachedWebSocketInputDelta(
 	body: RequestBody,
 	continuation: CachedWebSocketContinuationState,
@@ -1963,7 +1997,10 @@ function getCachedWebSocketInputDelta(
 	let currentIndex = 0;
 	for (let partIndex = parts.length - 1; partIndex >= 0; partIndex--) {
 		for (const item of parts[partIndex]) {
-			if (!jsonValuesEqual(currentInput[currentIndex], item)) return undefined;
+			const candidate = currentInput[currentIndex];
+			if (!jsonValuesEqual(candidate, item) && !responseItemsMatchAfterRedaction(candidate, item)) {
+				return undefined;
+			}
 			currentIndex++;
 		}
 	}
@@ -2010,7 +2047,9 @@ function prepareFullWebSocketRequest(entry: CachedWebSocketConnection, body: Req
 function messagesPreserveCachedPrefix(context: Context, continuation: CachedWebSocketContinuationState): boolean {
 	if (context.messages.length < continuation.sourceMessageCount) return false;
 	for (let index = 0; index < continuation.sourceMessageCount; index++) {
-		if (context.messages[index] !== continuation.sourceMessages[index]) return false;
+		const current = context.messages[index];
+		const previous = continuation.sourceMessages[index];
+		if (current !== previous && !jsonValuesEqual(current, previous)) return false;
 	}
 	return true;
 }
@@ -2036,7 +2075,11 @@ function prepareIncrementalWebSocketRequest(
 	const tailInput = tailBody.input ?? [];
 	if (tailInput.length < continuation.responseItems.length) return undefined;
 	for (let index = 0; index < continuation.responseItems.length; index++) {
-		if (!jsonValuesEqual(tailInput[index], continuation.responseItems[index])) return undefined;
+		const candidate = tailInput[index];
+		const expected = continuation.responseItems[index];
+		if (!jsonValuesEqual(candidate, expected) && !responseItemsMatchAfterRedaction(candidate, expected)) {
+			return undefined;
+		}
 	}
 	const delta = tailInput.slice(continuation.responseItems.length);
 	return {

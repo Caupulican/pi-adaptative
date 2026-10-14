@@ -296,8 +296,10 @@ export class ExternalCapabilityAcquisitionGate {
 					"external_capability_acquisition",
 					{
 						objective_id: request.objectiveId,
-						capability_id: request.capabilityId,
+						...(request.capabilityId !== undefined ? { capability_id: request.capabilityId } : {}),
 						source: request.source,
+						...(request.revision !== undefined ? { revision: request.revision } : {}),
+						...(request.checksum !== undefined ? { checksum: request.checksum } : {}),
 						digest,
 						deterministic_findings: deterministicFindings,
 					},

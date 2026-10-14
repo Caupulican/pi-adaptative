@@ -423,7 +423,19 @@ export class AuthStorage {
 	 */
 	hasAuth(provider: string): boolean {
 		if (this.runtimeOverrides.has(provider)) return true;
-		if (this.data[provider]) return true;
+		const cred = this.get(provider);
+		if (cred !== undefined) {
+			if (cred.type === "oauth") {
+				if (
+					Date.now() < cred.expires ||
+					(Boolean(cred.refresh) && this.refusedRefreshTokens.get(provider) !== cred.refresh)
+				) {
+					return true;
+				}
+			} else {
+				return true;
+			}
+		}
 		if (getEnvAuthHeaders(provider)) return true;
 		if (getEnvApiKey(provider)) return true;
 		if (this.fallbackResolver?.(provider)) return true;

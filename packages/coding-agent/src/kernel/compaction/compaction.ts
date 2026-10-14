@@ -563,6 +563,19 @@ export function estimateTokens(message: AgentMessage): number {
 }
 
 /**
+ * Estimate pure character-based token count across a message list without provider usage metadata.
+ * Used when comparing pre- and post-compaction message volume on an identical basis or measuring
+ * compactable message tokens separately from the non-compactable request envelope.
+ */
+export function estimateCharacterTokens(messages: readonly AgentMessage[]): number {
+	let total = 0;
+	for (const message of messages) {
+		total += estimateTokens(message);
+	}
+	return total;
+}
+
+/**
  * Find valid cut points: indices of user, assistant, custom, or bashExecution messages.
  * Never cut at tool results (they must follow their tool call).
  * When we cut at an assistant message with tool calls, its tool results follow it
@@ -1444,20 +1457,52 @@ export function prepareCompaction(
 		);
 		if (!originalUserEntry?.id) return undefined;
 
-		const fileOps = extractFileOperations(liveMessages, pathEntries, prevCompactionIndex);
+		let lastSettledEntryIndex = -1;
+		for (let i = boundaryEnd - 1; i > prevCompactionIndex; i--) {
+			const entry = pathEntries[i];
+			if (entry.type === "message" && (entry.message.role === "assistant" || entry.message.role === "toolResult")) {
+				lastSettledEntryIndex = i;
+				break;
+			}
+		}
+		if (lastSettledEntryIndex < 0) return undefined;
+
+		let firstTrailingUserIndex = -1;
+		for (let i = lastSettledEntryIndex + 1; i < boundaryEnd; i++) {
+			const entry = pathEntries[i];
+			if (entry.type === "message" && entry.message.role === "user") {
+				firstTrailingUserIndex = i;
+				break;
+			}
+		}
+		let settledBoundaryEnd = firstTrailingUserIndex >= 0 ? firstTrailingUserIndex : boundaryEnd;
+		while (
+			settledBoundaryEnd > lastSettledEntryIndex + 1 &&
+			pathEntries[settledBoundaryEnd - 1]?.type === "compaction_start"
+		) {
+			settledBoundaryEnd--;
+		}
+		const settledPathEntries =
+			settledBoundaryEnd === pathEntries.length ? pathEntries : pathEntries.slice(0, settledBoundaryEnd);
+		const settledLiveMessages =
+			settledPathEntries === pathEntries ? liveMessages : buildSessionContext(settledPathEntries).messages;
+
+		const fileOps = extractFileOperations(settledLiveMessages, settledPathEntries, prevCompactionIndex);
 		const factStart = prevCompactionIndex >= 0 ? prevCompactionIndex + 1 : 0;
 		const facts = extractCheckpointFacts(
-			pathEntries,
+			settledPathEntries,
 			factStart,
-			boundaryEnd,
+			settledBoundaryEnd,
 			prevCompactionIndex,
 			previousUserFacts,
 			previousSummary,
 			options?.activeTask,
 		);
 
-		const messagesToSummarize = options?.packHostRecords ? options.packHostRecords(liveMessages) : liveMessages;
-		const coveredThroughEntryId = pathEntries[pathEntries.length - 1]?.id;
+		const messagesToSummarize = options?.packHostRecords
+			? options.packHostRecords(settledLiveMessages)
+			: settledLiveMessages;
+		const coveredThroughEntryId = settledPathEntries[settledPathEntries.length - 1]?.id;
 		return {
 			firstKeptEntryId: originalUserEntry.id,
 			messagesToSummarize,
@@ -1467,7 +1512,7 @@ export function prepareCompaction(
 			tokensBefore,
 			retention: { mode: "original-user", userEntryId: originalUserEntry.id },
 			...(coveredThroughEntryId ? { coveredThroughEntryId } : {}),
-			summarizedGapEntryIds: summarizedGapEntryIds(pathEntries),
+			summarizedGapEntryIds: summarizedGapEntryIds(settledPathEntries),
 			fileOps,
 			facts,
 			settings,

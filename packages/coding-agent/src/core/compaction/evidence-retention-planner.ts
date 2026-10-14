@@ -186,7 +186,7 @@ export async function applyConservativeRetentionPolicy(
 			disposition,
 			keepCallProbability: callProb,
 			keepResultProbability: resultProb,
-			artifactRef,
+			...(artifactRef !== undefined ? { artifactRef } : {}),
 		});
 	}
 
@@ -268,7 +268,20 @@ export class EvidenceRetentionPlanner {
 
 		try {
 			const program = buildRetentionProgram(eligiblePairsList);
-			const evaluation = await input.decisionEngine.evaluate(program, input.boundedState ?? {}, {
+			const evaluationState: Record<string, unknown> = {
+				...(input.boundedState ?? {}),
+				...(input.unresolvedProofObligations !== undefined
+					? { unresolvedProofObligations: input.unresolvedProofObligations }
+					: {}),
+				pairs: eligiblePairsList.map((pair) => ({
+					callId: pair.callId,
+					toolName: pair.toolName,
+					...(pair.hasError !== undefined ? { hasError: pair.hasError } : {}),
+					...(pair.isProofObligation !== undefined ? { isProofObligation: pair.isProofObligation } : {}),
+					...(pair.isRecent !== undefined ? { isRecent: pair.isRecent } : {}),
+				})),
+			};
+			const evaluation = await input.decisionEngine.evaluate(program, evaluationState, {
 				consequence: "medium",
 				signal: input.signal,
 			});
@@ -318,7 +331,7 @@ export class EvidenceRetentionPlanner {
 			pairsRemoved,
 			artifactRefsCreated: artifactRefsCount,
 			jevRequestCount: failureReason ? 0 : 1,
-			failureReason,
+			...(failureReason !== undefined ? { failureReason } : {}),
 		};
 		this.lastStats = stats;
 

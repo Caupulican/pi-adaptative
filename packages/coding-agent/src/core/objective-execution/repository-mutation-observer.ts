@@ -25,6 +25,7 @@ export interface RepositoryObservationToken {
 	workEvidenceStatus?: "captured" | "unversioned";
 	observationOpened?: boolean;
 	before?: RepoDeliveryFingerprint;
+	concurrentTypedEntries?: Map<string, string | undefined>;
 }
 
 export interface RepositoryWorkEvidenceScope {
@@ -142,11 +143,14 @@ interface TypedObservationReport {
 
 interface TypedObservationGroup {
 	readonly objectiveId: string;
-	readonly repositoryRoot: string;
-	readonly branchAnchor?: string;
+	repositoryRoot: string;
+	readonly cwd: string;
+	branchAnchor?: string;
+	before?: RepoDeliveryFingerprint;
 	readonly activeObservationIds: Set<string>;
 	readonly declaredPaths: Set<string>;
 	readonly observedPaths: Set<string>;
+	readonly observedByConcurrentShellPaths: Set<string>;
 	readonly successfulDeclaredPaths: Set<string>;
 }
 
@@ -240,12 +244,14 @@ export class RepositoryMutationObserver {
 		};
 		if (input.effect === "none") return token;
 		this.inflight.set(input.callId, token);
+		if (token.effect === "typed_owned_write") this.openTypedObservationGroup(token);
 		try {
 			token.before = await captureRepoDeliveryFingerprint(input.cwd, this.hooks, options);
 			if (token.before.ok) token.repositoryRoot = token.before.repositoryRoot;
 		} catch {
 			token.before = { ok: false, reason: "repository_fingerprint_unavailable" };
 		}
+		if (token.effect === "typed_owned_write") this.recordTypedGroupBaseline(token);
 		try {
 			await this.captureWorkBaseline(token, options);
 			if (token.workEvidenceStatus === "captured" && token.repositoryRoot && this.workEvidenceJournal) {
@@ -260,11 +266,12 @@ export class RepositoryMutationObserver {
 					},
 				);
 			}
-			if (token.effect === "typed_owned_write" && token.repositoryRoot) this.openTypedObservationGroup(token);
+			if (token.effect === "typed_owned_write") this.syncTypedObservationGroup(token);
 		} catch (error) {
 			if (token.observationOpened && token.repositoryRoot && this.workEvidenceJournal) {
 				await this.closeObservationToken(token);
 			}
+			if (token.effect === "typed_owned_write") this.completeTypedObservation(token, undefined);
 			if (this.inflight.get(token.callId) === token) this.inflight.delete(token.callId);
 			this.notify(input.objectiveId);
 			throw error instanceof RepositoryWorkEvidenceUnavailableError
@@ -297,6 +304,7 @@ export class RepositoryMutationObserver {
 			throw new RepositoryWorkEvidenceUnavailableError("repository_work_baseline_unavailable");
 		token.workEvidenceStatus = baselineStatus;
 		if (baselineStatus === "unversioned") return;
+		if (!createdBaseline) return;
 
 		if (!token.before?.ok) {
 			const reason = token.before?.reason ?? "baseline_fence_unavailable";
@@ -307,7 +315,6 @@ export class RepositoryMutationObserver {
 			}
 			throw new RepositoryWorkEvidenceUnavailableError(reason);
 		}
-		if (!createdBaseline) return;
 		let after: RepoDeliveryFingerprint;
 		try {
 			after = await captureRepoDeliveryFingerprint(token.cwd, this.hooks, options);
@@ -378,30 +385,44 @@ export class RepositoryMutationObserver {
 				return;
 			}
 			if (!this.isCurrentBranch(token)) return;
-			if (after.digest === token.before.digest) {
-				await this.closeObservationToken(token);
-				if (token.effect === "typed_owned_write") {
-					typedReport = {
-						changedPaths: [],
-						declaredPaths: this.normalizeDeclaredPaths(repositoryRoot, input.declaredOwnedPaths),
-						operationSucceeded: input.operationSucceeded,
-					};
-				}
-				return;
-			}
-			const changed = changedPaths(token.before.entries, after.entries);
 			if (token.effect === "typed_owned_write") {
+				const declaredPaths = this.normalizeDeclaredPaths(repositoryRoot, input.declaredOwnedPaths);
+				const changed =
+					after.digest === token.before.digest ? [] : changedPaths(token.before.entries, after.entries);
 				typedReport = {
 					changedPaths: changed,
-					declaredPaths: this.normalizeDeclaredPaths(repositoryRoot, input.declaredOwnedPaths),
+					declaredPaths,
 					operationSucceeded: input.operationSucceeded,
 				};
+				if (changed.length === 0) {
+					await this.closeObservationToken(token);
+					return;
+				}
+				if (input.operationSucceeded) {
+					this.advanceInflightObservationsForTypedWrite(token, repositoryRoot, declaredPaths, changed, after);
+				}
+				await this.recordObservedChange(token, repositoryRoot, changed, {
+					operationSucceeded: input.operationSucceeded,
+				});
+				return;
+			}
+			let changed = after.digest === token.before.digest ? [] : changedPaths(token.before.entries, after.entries);
+			if (changed.length > 0 && token.concurrentTypedEntries) {
+				changed = changed.filter(
+					(filePath) =>
+						!token.concurrentTypedEntries?.has(filePath) ||
+						after.entries.get(filePath) !== token.concurrentTypedEntries.get(filePath),
+				);
+			}
+			if (changed.length === 0) {
+				await this.closeObservationToken(token);
+				return;
 			}
 			await this.recordObservedChange(token, repositoryRoot, changed, {
 				operationSucceeded: input.operationSucceeded,
 			});
 			if (!this.isCurrentBranch(token)) return;
-			if (token.effect === "typed_owned_write") return;
+			if (this.recordConcurrentShellObservation(token.objectiveId, repositoryRoot, token.cwd, changed)) return;
 			this.mark(token.objectiveId, "shell_mutation_unattributed");
 		} finally {
 			if (tracked) {
@@ -422,11 +443,67 @@ export class RepositoryMutationObserver {
 		];
 	}
 
+	private advanceInflightObservationsForTypedWrite(
+		token: RepositoryObservationToken,
+		repositoryRoot: string,
+		declaredPaths: readonly string[],
+		changed: readonly string[],
+		after: Extract<RepoDeliveryFingerprint, { readonly ok: true }>,
+	): void {
+		const changedSet = new Set(changed);
+		const declaredChanged = declaredPaths.filter((filePath) => changedSet.has(filePath));
+		if (declaredChanged.length === 0) return;
+		for (const peer of this.inflight.values()) {
+			if (peer === token || peer.effect !== "observe" || peer.objectiveId !== token.objectiveId) continue;
+			const peerRoot = peer.repositoryRoot ?? peer.cwd;
+			if (peerRoot !== repositoryRoot && peer.cwd !== token.cwd) continue;
+			peer.concurrentTypedEntries ??= new Map<string, string | undefined>();
+			for (const filePath of declaredChanged) {
+				peer.concurrentTypedEntries.set(filePath, after.entries.get(filePath));
+			}
+		}
+	}
+
+	private findActiveTypedObservationGroup(
+		objectiveId: string,
+		repositoryRoot: string,
+		cwd: string,
+	): TypedObservationGroup | undefined {
+		const exact = this.typedObservationGroups.get(JSON.stringify([objectiveId, repositoryRoot]));
+		if (exact && this.isCurrentBranchAnchor(exact.branchAnchor)) return exact;
+		const byCwd = this.typedObservationGroups.get(JSON.stringify([objectiveId, cwd]));
+		if (byCwd && this.isCurrentBranchAnchor(byCwd.branchAnchor)) return byCwd;
+		for (const group of this.typedObservationGroups.values()) {
+			if (
+				group.objectiveId === objectiveId &&
+				(group.repositoryRoot === repositoryRoot || group.cwd === cwd || group.cwd === repositoryRoot) &&
+				this.isCurrentBranchAnchor(group.branchAnchor)
+			) {
+				return group;
+			}
+		}
+		return undefined;
+	}
+
+	private recordConcurrentShellObservation(
+		objectiveId: string,
+		repositoryRoot: string,
+		cwd: string,
+		changedPathsList: readonly string[],
+	): boolean {
+		const group = this.findActiveTypedObservationGroup(objectiveId, repositoryRoot, cwd);
+		if (!group || group.activeObservationIds.size === 0) return false;
+		for (const filePath of changedPathsList) {
+			group.observedByConcurrentShellPaths.add(filePath);
+		}
+		return true;
+	}
+
 	private openTypedObservationGroup(token: RepositoryObservationToken): void {
-		const repositoryRoot = token.repositoryRoot;
+		const repositoryRoot = token.repositoryRoot ?? token.cwd;
 		if (!repositoryRoot || !this.isCurrentBranch(token)) return;
-		const groupKey = JSON.stringify([token.objectiveId, repositoryRoot]);
-		let group = this.typedObservationGroups.get(groupKey);
+		let group = this.findActiveTypedObservationGroup(token.objectiveId, repositoryRoot, token.cwd);
+		const groupKey = JSON.stringify([token.objectiveId, group?.repositoryRoot ?? repositoryRoot]);
 		if (group && !this.isCurrentBranchAnchor(group.branchAnchor)) {
 			for (const observationId of group.activeObservationIds) {
 				if (this.typedObservationGroupById.get(observationId) === group)
@@ -439,16 +516,55 @@ export class RepositoryMutationObserver {
 			group = {
 				objectiveId: token.objectiveId,
 				repositoryRoot,
+				cwd: token.cwd,
 				...(token.branchAnchor ? { branchAnchor: token.branchAnchor } : {}),
 				activeObservationIds: new Set(),
 				declaredPaths: new Set(),
 				observedPaths: new Set(),
+				observedByConcurrentShellPaths: new Set(),
 				successfulDeclaredPaths: new Set(),
 			};
 			this.typedObservationGroups.set(groupKey, group);
 		}
 		group.activeObservationIds.add(token.observationId);
 		this.typedObservationGroupById.set(token.observationId, group);
+	}
+
+	private recordTypedGroupBaseline(token: RepositoryObservationToken): void {
+		const group = this.typedObservationGroupById.get(token.observationId);
+		if (!group) return;
+		if (!group.before?.ok && token.before?.ok) {
+			group.before = token.before;
+		}
+	}
+
+	private syncTypedObservationGroup(token: RepositoryObservationToken): void {
+		let group = this.typedObservationGroupById.get(token.observationId);
+		if (!group) return;
+		const repositoryRoot = token.repositoryRoot ?? group.repositoryRoot;
+		if (repositoryRoot !== group.repositoryRoot) {
+			const oldKey = JSON.stringify([group.objectiveId, group.repositoryRoot]);
+			const newKey = JSON.stringify([group.objectiveId, repositoryRoot]);
+			if (this.typedObservationGroups.get(oldKey) === group) this.typedObservationGroups.delete(oldKey);
+			const existing = this.typedObservationGroups.get(newKey);
+			if (existing && existing !== group && this.isCurrentBranchAnchor(existing.branchAnchor)) {
+				for (const observationId of group.activeObservationIds) {
+					existing.activeObservationIds.add(observationId);
+					this.typedObservationGroupById.set(observationId, existing);
+				}
+				if (!existing.before?.ok && group.before?.ok) existing.before = group.before;
+				group = existing;
+			} else {
+				group.repositoryRoot = repositoryRoot;
+				this.typedObservationGroups.set(newKey, group);
+			}
+		}
+		if (token.branchAnchor) group.branchAnchor = token.branchAnchor;
+		if (!group.before?.ok && token.before?.ok) {
+			group.before = token.before;
+		} else if (group.before?.ok) {
+			token.before = group.before;
+		}
 	}
 
 	private completeTypedObservation(
@@ -481,7 +597,10 @@ export class RepositoryMutationObserver {
 		if (group.activeObservationIds.size > 0) return;
 		const groupKey = JSON.stringify([group.objectiveId, group.repositoryRoot]);
 		if (this.typedObservationGroups.get(groupKey) === group) this.typedObservationGroups.delete(groupKey);
-		if ([...group.observedPaths].some((filePath) => !group.declaredPaths.has(filePath))) {
+		if (
+			[...group.observedPaths].some((filePath) => !group.declaredPaths.has(filePath)) ||
+			[...group.observedByConcurrentShellPaths].some((filePath) => !group.successfulDeclaredPaths.has(filePath))
+		) {
 			this.mark(group.objectiveId, "shell_mutation_unattributed");
 			return;
 		}

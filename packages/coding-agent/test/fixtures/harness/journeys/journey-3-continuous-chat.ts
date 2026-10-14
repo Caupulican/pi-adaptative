@@ -23,7 +23,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	// ICM migration, mode switching, crash recovery, and index reconciliation (Pi-adaptative-memory):
 	const mAgentDir = `${world.agentDir}-icm`;
 	const mStore = icmContinuousStore(mAgentDir);
-	world.setModelReasoning("worker-c", true);
+	world.setModelReasoning("worker-c", true, { xhigh: "xhigh" });
 
 	// M1 (one-time legacy session migration + forgotten-session skip):
 	// Create two OKF sessions first: one normal session and one forgotten session.

@@ -1,5 +1,6 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
+import { findRenamedFreeTierModel } from "../model-registry.ts";
 
 /**
  * Favorites define router eligibility. An explicit Models configuration, CLI/SDK scope or selector
@@ -53,9 +54,18 @@ export function resolveRouterCandidatePool(
 		});
 	};
 
-	const models = filterDisabled(registry.getAvailable()).filter(
+	const available = filterDisabled(registry.getAvailable());
+	const resolvedFavoriteKeys = new Set<string>();
+	for (const favorite of options.favorites) {
+		const exact = available.find((m) => m.provider === favorite.provider && m.id === favorite.modelId);
+		const target = exact ?? findRenamedFreeTierModel(available, favorite.provider, favorite.modelId);
+		if (target) {
+			resolvedFavoriteKeys.add(`${target.provider}\0${target.id}`);
+		}
+	}
+	const models = available.filter(
 		(model) =>
-			options.favorites.some((favorite) => favorite.provider === model.provider && favorite.modelId === model.id) &&
+			resolvedFavoriteKeys.has(`${model.provider}\0${model.id}`) &&
 			(!pool || pool.models.some((scoped) => modelsAreEqual(scoped, model))),
 	);
 	return { customized: pool !== undefined, source: pool?.source ?? "favorites", models };

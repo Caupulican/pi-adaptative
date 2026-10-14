@@ -26,7 +26,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 	// stable system prompt + <chat> view + Current time injection, and root zoom / date navigation.
 	const icmAgentDir = `${world.agentDir}-icm`;
 	const icmStore = icmContinuousStore(icmAgentDir);
-	world.setModelReasoning("worker-c", true);
+	world.setModelReasoning("worker-c", true, { xhigh: "xhigh" });
 
 	// I1 (fail-closed validation): missing summaryModel, disallowed external summary egress, and non-xhigh summaryModel each
 	// emit a session warning, leave continuous-chat storage untouched, and block provider turns via createBlockedContinuousChatPlanWrapper.

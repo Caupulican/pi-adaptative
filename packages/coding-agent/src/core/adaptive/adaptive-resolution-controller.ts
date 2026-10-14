@@ -73,9 +73,9 @@ export class AdaptiveResolutionController {
 			{
 				objectiveId: input.objectiveId,
 				taskId: input.taskId,
-				recentEvidence: input.recentEvidence,
-				recentFailures: input.recentFailures,
-				currentExpert: input.currentExpert,
+				...(input.recentEvidence !== undefined ? { recentEvidence: input.recentEvidence } : {}),
+				...(input.recentFailures !== undefined ? { recentFailures: input.recentFailures } : {}),
+				...(input.currentExpert !== undefined ? { currentExpert: input.currentExpert } : {}),
 				specialistCatalogRevision: this.specialistCatalog?.revision() ?? 1,
 				capabilityCatalogRevision: this.capabilityCatalog?.revision() ?? 1,
 				adaptationGraph: this.graph.summary(input.objectiveId),
@@ -233,14 +233,14 @@ export class AdaptiveResolutionController {
 
 		return {
 			dimension,
-			specialty: specialistNeed?.specialty,
+			...(specialistNeed?.specialty !== undefined ? { specialty: specialistNeed.specialty } : {}),
 			action: cert.directive,
 			certificateId: cert.certificate_id,
 			reasonCodes: [cert.directive, `dimension_${dimension}`],
 			node,
-			specialistNeed,
-			capabilityNeed,
-			runtimeNeed,
+			...(specialistNeed !== undefined ? { specialistNeed } : {}),
+			...(capabilityNeed !== undefined ? { capabilityNeed } : {}),
+			...(runtimeNeed !== undefined ? { runtimeNeed } : {}),
 		};
 	}
 }
