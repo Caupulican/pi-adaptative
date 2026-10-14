@@ -207,17 +207,17 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 			},
 		);
 		world.provider.enqueue("worker-c", {
-			name: "w-merge-4-4",
+			name: "w-merge-6-2",
 			check: (request) => {
-				if (!JSON.stringify(request.context.messages).includes("Compaction: merge lines 4+2 and 6+2")) {
-					throw new Error("worker-c did not receive the 4+2 and 6+2 parent merge task");
+				if (!JSON.stringify(request.context.messages).includes("Compaction: merge lines 6+1 and 7+1")) {
+					throw new Error("worker-c did not receive the 6+1 and 7+1 parent merge task");
 				}
 			},
 			reply: {
 				content: [
 					{
 						type: "text",
-						text: "user: Start the ICM reader worker.; tool: delegate start w-icm-reader -> worker-1; pi: The ICM reader is started.",
+						text: "echo: delegate started worker-1; pi: The ICM reader is started.",
 					},
 				],
 			},

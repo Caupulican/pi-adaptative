@@ -296,7 +296,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		);
 		world.systemOne.enterPhase("icm-turn-2", ICM_INTAKE_JUDGMENTS);
 		await withDeadline(trace, "ICM turn 2", icmRoot.session.prompt("Inspect the summary tree, raw echo, and date."));
-		await icmWaitForChatIdle(world, icmAgentDir, 12);
+		await icmWaitForChatIdle(world, icmAgentDir, 13);
 
 		const icmRecords = icmReadContinuousRecords(world, icmStore);
 		const icmIdxBytes = Buffer.byteLength(world.io.readFileSync(icmStore.messagesIdx));
@@ -327,8 +327,8 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			},
 			"Pi-adaptative-memory persists daily JSONL + 16B index, clips tool output at 30k chars, splits assistant output at 30k chars, and serves zoom/date",
 		).toEqual({
-			recordCount: 12,
-			indexBytes: 12 * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES,
+			recordCount: 13,
+			indexBytes: 13 * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES,
 			kindsFirstFive: ["user", "tool", "echo", "pi", "pi"],
 			echo2Clipped: true,
 			piSplitLengths: [30_000, splitPiReply.length - 30_000],
