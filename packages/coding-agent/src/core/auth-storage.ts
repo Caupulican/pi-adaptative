@@ -42,6 +42,7 @@ export type ApiKeyCredential = {
 
 export type OAuthCredential = {
 	type: "oauth";
+	refreshRefused?: boolean;
 } & OAuthCredentials;
 
 export type AuthCredential = ApiKeyCredential | OAuthCredential;
@@ -345,6 +346,12 @@ export class AuthStorage {
 				return { result: undefined };
 			});
 			this.data = this.parseStorageData(content);
+			this.refusedRefreshTokens.clear();
+			for (const [providerId, cred] of Object.entries(this.data)) {
+				if (cred?.type === "oauth" && cred.refreshRefused && cred.refresh) {
+					this.refusedRefreshTokens.set(providerId, cred.refresh);
+				}
+			}
 			this.reloadRevision = ++this.dataRevision;
 			this.providerRevisions.clear();
 			this.loadError = null;
@@ -389,6 +396,11 @@ export class AuthStorage {
 	 * retains the existing session-only behavior and records its error for the host.
 	 */
 	set(provider: string, credential: AuthCredential): boolean {
+		if (credential.type === "oauth" && credential.refreshRefused && credential.refresh) {
+			this.refusedRefreshTokens.set(provider, credential.refresh);
+		} else {
+			this.refusedRefreshTokens.delete(provider);
+		}
 		this.data[provider] = credential;
 		this.providerRevisions.set(provider, ++this.dataRevision);
 		return this.persistProviderChange(provider, credential);
@@ -398,6 +410,7 @@ export class AuthStorage {
 	 * Remove credential for a provider.
 	 */
 	remove(provider: string): void {
+		this.refusedRefreshTokens.delete(provider);
 		delete this.data[provider];
 		this.providerRevisions.set(provider, ++this.dataRevision);
 		this.persistProviderChange(provider, undefined);
@@ -428,7 +441,9 @@ export class AuthStorage {
 			if (cred.type === "oauth") {
 				if (
 					Date.now() < cred.expires ||
-					(Boolean(cred.refresh) && this.refusedRefreshTokens.get(provider) !== cred.refresh)
+					(Boolean(cred.refresh) &&
+						!cred.refreshRefused &&
+						this.refusedRefreshTokens.get(provider) !== cred.refresh)
 				) {
 					return true;
 				}
@@ -666,7 +681,7 @@ export class AuthStorage {
 			if (!this.needsOAuthRefresh(providerId, provider, cred)) {
 				return cred;
 			}
-			if (this.refusedRefreshTokens.get(providerId) === cred.refresh) {
+			if (cred.refreshRefused || this.refusedRefreshTokens.get(providerId) === cred.refresh) {
 				return Date.now() < cred.expires ? cred : undefined;
 			}
 			if (Date.now() < cred.expires) this.staleRefreshAttempted.add(providerId);
@@ -695,7 +710,8 @@ export class AuthStorage {
 			if (currentKey !== rejectedApiKey && Date.now() < credential.expires) {
 				return credential;
 			}
-			if (this.refusedRefreshTokens.get(providerId) === credential.refresh) return undefined;
+			if (credential.refreshRefused || this.refusedRefreshTokens.get(providerId) === credential.refresh)
+				return undefined;
 
 			try {
 				return await refreshOAuthToken(provider, credential);
@@ -753,12 +769,31 @@ export class AuthStorage {
 			try {
 				updated = await this.withOAuthStorageLock(
 					providerId,
-					async (current) => ({ result: current[providerId] ?? null }),
+					async (current) => {
+						const stored = current[providerId];
+						if (
+							stored?.type === "oauth" &&
+							this.refusedRefreshTokens.get(providerId) === stored.refresh &&
+							!stored.refreshRefused
+						) {
+							const marked: OAuthCredential = { ...stored, refreshRefused: true };
+							return { result: marked, nextData: { ...current, [providerId]: marked } };
+						}
+						return { result: stored ?? null };
+					},
 					revision,
 				);
 			} catch (recoveryError) {
-				this.recordError(recoveryError);
-				throw new OAuthCredentialUnusableError(providerId, cred.expires, redactRefreshFailureReason(error));
+				try {
+					updated = await this.withOAuthStorageLock(
+						providerId,
+						async (current) => ({ result: current[providerId] ?? null }),
+						revision,
+					);
+				} catch {
+					this.recordError(recoveryError);
+					throw new OAuthCredentialUnusableError(providerId, cred.expires, redactRefreshFailureReason(error));
+				}
 			}
 			// An explicit local intent or a removed stored OAuth credential wins over
 			// failure recovery too. Recovery must never replace the whole cache blindly.

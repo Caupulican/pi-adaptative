@@ -69,6 +69,7 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 	try {
 		const wRoot = await world.createRootSession("root", {
 			agentDir: wAgentDir,
+			sessionManager: world.createSessionManager(wAgentDir),
 			settings: icmContinuousSettings(),
 		});
 		world.provider.enqueue("worker-c", {

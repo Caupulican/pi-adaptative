@@ -201,11 +201,50 @@ function targetCoordinate(target: ContinuousChatCompactionTarget): ContinuousCha
 	return coordinate;
 }
 
-/** The node that needs no model call: the leaf when it fits as is, or the joined children when their join fits. */
+function isLegacyNoteNodeText(text: string): boolean {
+	const lines = text.split(/\r?\n/);
+	return lines.length > 0 && lines.every((line) => line.startsWith("note: "));
+}
+
+function clipUtf8SingleLine(text: string, maxBytes: number): string {
+	const singleLine = text.replaceAll(/\r?\n/g, " ");
+	if (Buffer.byteLength(singleLine, "utf8") <= maxBytes) return singleLine;
+	const suffix = " ...";
+	const suffixBytes = Buffer.byteLength(suffix, "utf8");
+	const budget = Math.max(0, maxBytes - suffixBytes);
+	let used = 0;
+	let out = "";
+	for (const char of singleLine) {
+		const charBytes = Buffer.byteLength(char, "utf8");
+		if (used + charBytes > budget) break;
+		out += char;
+		used += charBytes;
+	}
+	return `${out}${suffix}`;
+}
+
+/** The node that needs no model call: the leaf when it fits as is (or is a legacy note), or the joined children when their join fits (or both are legacy-note subtrees). */
 function noCallNode(target: ContinuousChatCompactionTarget): ContinuousChatTreeNode | undefined {
-	if (target.kind === "merge") return createContinuousChatParentWithoutCall(target.left, target.right);
-	const fits = Buffer.byteLength(renderContinuousChatLeaf(target.record), "utf8") <= CONTINUOUS_CHAT_NODE_TARGET_BYTES;
-	return fits ? createContinuousChatLeaf(target.record) : undefined;
+	if (target.kind === "merge") {
+		const exact = createContinuousChatParentWithoutCall(target.left, target.right);
+		if (exact !== undefined) return exact;
+		if (isLegacyNoteNodeText(target.left.text) && isLegacyNoteNodeText(target.right.text)) {
+			const halfBudget = Math.floor((CONTINUOUS_CHAT_NODE_TARGET_BYTES - 1) / 2);
+			const merged = `${clipUtf8SingleLine(target.left.text, halfBudget)}\n${clipUtf8SingleLine(target.right.text, halfBudget)}`;
+			return createContinuousChatParent(target.left, target.right, merged);
+		}
+		return undefined;
+	}
+	const source = renderContinuousChatLeaf(target.record);
+	if (target.record.kind === "note") {
+		const normalized = clipUtf8SingleLine(source, CONTINUOUS_CHAT_NODE_TARGET_BYTES);
+		return normalized === source
+			? createContinuousChatLeaf(target.record)
+			: createContinuousChatLeaf(target.record, normalized);
+	}
+	const fits = Buffer.byteLength(source, "utf8") <= CONTINUOUS_CHAT_NODE_TARGET_BYTES;
+	if (fits) return createContinuousChatLeaf(target.record);
+	return undefined;
 }
 
 function failure(

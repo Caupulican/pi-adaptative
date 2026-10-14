@@ -1797,23 +1797,32 @@ export class CompactionController {
 		const summarizer = this.deps.resolveModel(model);
 		const auth = await this.deps.resolveModelAndAuth(summarizer, model);
 		if (auth.failure) throw new Error(auth.failure);
-		const result = await this.deps.compactWithRetry(
-			() =>
-				compact(
-					preparation,
-					auth.model,
-					auth.apiKey,
-					auth.headers,
-					undefined,
-					signal,
-					this.deps.resolveThinkingLevel(auth.model, model),
-					this.streamWithFrozenAuth(auth.credentialHeaders, auth.providerAccountKey),
-					this.deps.buildPreDigest(),
-					this.buildExecutionOptions(preparation, auth.model, model, false),
-				),
-			signal,
-			auth.model.provider,
-		);
+		const runIdleCompact = (budgetScale?: number) =>
+			this.deps.compactWithRetry(
+				() =>
+					compact(
+						preparation,
+						auth.model,
+						auth.apiKey,
+						auth.headers,
+						undefined,
+						signal,
+						this.deps.resolveThinkingLevel(auth.model, model),
+						this.streamWithFrozenAuth(auth.credentialHeaders, auth.providerAccountKey),
+						this.deps.buildPreDigest(),
+						this.buildExecutionOptions(preparation, auth.model, model, false, budgetScale),
+					),
+				signal,
+				auth.model.provider,
+			);
+		let result: CompactionResult;
+		try {
+			result = await runIdleCompact();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (!message.includes("summary-length-stop") || signal.aborted) throw error;
+			result = await runIdleCompact(2);
+		}
 		// Record it only on the history it read: the same session, whose branch still leads from the entry
 		// the preparation read up to, with no new conversational entry, request, or compaction since.
 		if (signal.aborted || this.deps.sessionManager.getSessionId() !== sessionId || !this.leadsFrom(readLeafId)) {

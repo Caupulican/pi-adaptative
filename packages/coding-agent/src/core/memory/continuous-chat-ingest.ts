@@ -268,25 +268,31 @@ export class ContinuousChatIngestor {
 		entries: AsyncIterable<SessionEntry>,
 		canonical: boolean,
 	): Promise<void> {
+		const maxLegacyParts = 32;
 		let batch: ContinuousChatAppendInput[] = [];
 		for await (const entry of entries) {
 			for (const piece of continuousChatEntryParts(entry)) {
-				const keepCanonical = canonical || piece.kind === "work" || piece.sourceKey !== undefined;
+				if (!canonical && piece.kind === "echo") continue;
 				batch.push({
-					kind: keepCanonical ? piece.kind : "note",
-					date: keepCanonical ? (piece.date ?? entry.timestamp) : entry.timestamp,
-					text: keepCanonical ? piece.text : `${piece.kind}: ${piece.text}`,
+					kind: canonical ? piece.kind : "note",
+					date: canonical ? (piece.date ?? entry.timestamp) : entry.timestamp,
+					text: canonical ? piece.text : `${piece.kind}: ${piece.text}`,
 					...(piece.images ? { images: piece.images } : {}),
-					sourceKey: keepCanonical
+					sourceKey: canonical
 						? (piece.sourceKey ?? `${sessionId}:${entry.id}:${piece.part}`)
 						: `${sessionId}:${entry.id}:${piece.part}`,
 					source: { sessionId, entryId: entry.id },
 				});
-				if (batch.length === CONTINUOUS_CHAT_MAX_BULK_INPUTS) {
+				if (canonical && batch.length === CONTINUOUS_CHAT_MAX_BULK_INPUTS) {
 					await this.deps.appender.appendMany(batch);
 					batch = [];
+				} else if (!canonical && batch.length > maxLegacyParts * 2) {
+					batch = batch.slice(-maxLegacyParts);
 				}
 			}
+		}
+		if (!canonical && batch.length > maxLegacyParts) {
+			batch = batch.slice(-maxLegacyParts);
 		}
 		if (batch.length > 0) await this.deps.appender.appendMany(batch);
 	}

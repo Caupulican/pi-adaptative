@@ -25,11 +25,12 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	const mStore = icmContinuousStore(mAgentDir);
 	world.setModelReasoning("worker-c", true, { xhigh: "xhigh" });
 
-	// M1 (one-time legacy session migration + forgotten-session skip):
+	// M1 (one-time legacy session migration + forgotten-session skip + headless legacy file skip):
 	// Create two OKF sessions first: one normal session and one forgotten session.
+	const mLegacyKeptManager = world.createSessionManager(mAgentDir);
 	const mLegacyKept = await world.createRootSession("root", {
 		agentDir: mAgentDir,
-		sessionManager: world.createSessionManager(mAgentDir),
+		sessionManager: mLegacyKeptManager,
 		settings: { memorySystem: "okf" },
 	});
 	const mLegacyKeptId = mLegacyKept.session.sessionId;
@@ -40,6 +41,11 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	world.systemOne.enterPhase("m-legacy-kept", {});
 	await withDeadline(trace, "m-legacy kept turn", mLegacyKept.session.prompt("Seed kept legacy session."));
 	expect(await world.disposeSessionInBody(mLegacyKept.session)).toBeUndefined();
+	const mHeadlessFile = "2026-01-01T00-00-00-000Z_headless-legacy.jsonl";
+	world.io.writeFileSync(
+		`${mLegacyKeptManager.getSessionDir()}/${mHeadlessFile}`,
+		'{"type":"custom_message","id":"headless"}\n',
+	);
 
 	const mLegacyForgotten = await world.createRootSession("root", {
 		agentDir: mAgentDir,
@@ -90,13 +96,17 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 			forgottenSkipped: mMigrationAfterFirst.state.skipped.some(
 				(entry) => entry.sessionId === mLegacyForgottenId && entry.reason === "forgotten",
 			),
+			headlessSkipped: mMigrationAfterFirst.state.skipped.some(
+				(entry) => entry.sessionId === mHeadlessFile && entry.reason === "the first line is not a session header",
+			),
 			recordTexts: mImportedRecords.map((record) => `${record.kind}: ${record.text}`),
 		},
-		"one-time legacy import writes migration.json, imports kept session as note records, and skips forgotten session",
+		"one-time legacy import writes migration.json, imports kept session as note records, and skips forgotten and headless sessions",
 	).toEqual({
 		schemaVersion: 1,
 		importedSessions: 1,
 		forgottenSkipped: true,
+		headlessSkipped: true,
 		recordTexts: ["note: user: Seed kept legacy session.", "note: pi: Legacy kept reply: alpha-migration-token."],
 	});
 

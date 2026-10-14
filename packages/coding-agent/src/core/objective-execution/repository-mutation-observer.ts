@@ -406,15 +406,20 @@ export class RepositoryMutationObserver {
 				});
 				return;
 			}
-			let changed = after.digest === token.before.digest ? [] : changedPaths(token.before.entries, after.entries);
-			if (changed.length > 0 && token.concurrentTypedEntries) {
-				changed = changed.filter(
+			if (after.digest === token.before.digest) {
+				await this.closeObservationToken(token);
+				return;
+			}
+			const rawChanged = changedPaths(token.before.entries, after.entries);
+			let changed = rawChanged;
+			if (rawChanged.length > 0 && token.concurrentTypedEntries) {
+				changed = rawChanged.filter(
 					(filePath) =>
 						!token.concurrentTypedEntries?.has(filePath) ||
 						after.entries.get(filePath) !== token.concurrentTypedEntries.get(filePath),
 				);
 			}
-			if (changed.length === 0) {
+			if (rawChanged.length > 0 && changed.length === 0) {
 				await this.closeObservationToken(token);
 				return;
 			}

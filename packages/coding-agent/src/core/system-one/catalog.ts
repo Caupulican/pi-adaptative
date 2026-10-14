@@ -311,19 +311,35 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 		}),
 		states_committed: Object.freeze({
 			type: "boolean",
-			instructions: "Does `final_answer` state that changes were committed?",
+			instructions: "Does `final_answer` state that changes were committed during this work?",
+			criteria: Object.freeze({
+				true: "The answer directly claims that the agent created a new git commit during this work.",
+				false: "The answer only reports pre-existing commit history, says the tree is already committed or clean, says nothing was committed, or makes no current-work commit claim.",
+			}),
 		}),
 		states_pushed: Object.freeze({
 			type: "boolean",
-			instructions: "Does `final_answer` state that changes were pushed to a remote?",
+			instructions: "Does `final_answer` state that changes were pushed to a remote during this work?",
+			criteria: Object.freeze({
+				true: "The answer directly claims that the agent pushed commits or tags to a remote during this work.",
+				false: "The answer only reports that the branch was already pushed or up to date with the remote before this work, says nothing was pushed, or makes no current-work push claim.",
+			}),
 		}),
 		states_published: Object.freeze({
 			type: "boolean",
-			instructions: "Does `final_answer` state that a package or release was published?",
+			instructions: "Does `final_answer` state that a package or release was published during this work?",
+			criteria: Object.freeze({
+				true: "The answer directly claims that the agent published a package or release during this work.",
+				false: "The answer only references an existing published version, says nothing was published, or makes no current-work publish claim.",
+			}),
 		}),
 		states_files_changed: Object.freeze({
 			type: "boolean",
 			instructions: "Does `final_answer` state that files were created, edited or written during this work?",
+			criteria: Object.freeze({
+				true: "The answer directly claims that the agent created, edited, modified, or wrote workspace files during this work.",
+				false: "The answer only inspects existing files, reports pre-existing working-tree state, says no files were modified, or makes no current-work file-change claim.",
+			}),
 		}),
 	}),
 

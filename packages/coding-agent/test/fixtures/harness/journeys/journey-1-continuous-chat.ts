@@ -133,6 +133,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 	try {
 		const icmRoot = await world.createRootSession("root", {
 			agentDir: icmAgentDir,
+			sessionManager: world.createSessionManager(icmAgentDir),
 			settings: icmContinuousSettings(),
 		});
 		const splitPiReply = `SPLIT-START-Retry limit is seven per hour-${"p".repeat(29_998)}-SPLIT-END`;

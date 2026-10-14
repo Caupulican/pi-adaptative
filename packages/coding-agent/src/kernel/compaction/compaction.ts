@@ -779,16 +779,19 @@ function createSummarizationOptions(
 ): SimpleStreamOptions {
 	// Standalone summaries are isolated one-shot prompts. A session-replacement request deliberately
 	// reuses the live affinity so the provider can reuse and validate the exact structured prefix.
+	const modelMaxTokens = model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY;
+	const hasReasoning = Boolean(model.reasoning && thinkingLevel && thinkingLevel !== "off");
 	const options: SimpleStreamOptions = {
-		maxTokens,
+		maxTokens: hasReasoning ? Math.min(modelMaxTokens, maxTokens + 2048) : maxTokens,
 		signal,
 		apiKey,
 		headers,
 		cacheRetention: affinity?.cacheRetention ?? "none",
 		sessionId: affinity?.sessionId ?? uuidv7(),
 	};
-	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
-		options.reasoning = thinkingLevel;
+	if (hasReasoning && thinkingLevel) {
+		options.reasoning =
+			thinkingLevel === "xhigh" || thinkingLevel === "high" || thinkingLevel === "medium" ? "low" : thinkingLevel;
 	}
 	return options;
 }

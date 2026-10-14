@@ -69,20 +69,22 @@ function unsupportedReason(session: ContinuousChatLegacySession): string | undef
 	}
 }
 
+const CONTINUOUS_CHAT_MAX_IMPORTED_LEGACY_SESSIONS = 8;
+
 /**
- * Imports every eligible session once and then writes the marker. Nothing is written when the marker already exists.
- * The marker is written only after every queued note has settled, so an interrupted import is repeated, and its
- * duplicate keys make the repeat safe.
+ * Imports every eligible session once (up to the most recent bounded window) and then writes the marker. Nothing is
+ * written when the marker already exists. The marker is written only after every queued note has settled, so an
+ * interrupted import is repeated, and its duplicate keys make the repeat safe.
  */
 export async function importContinuousChatLegacyHistory(options: ContinuousChatLegacyImportOptions): Promise<void> {
 	if ((await options.marker.read()) !== undefined) return;
 	const listing = await options.source.sessions();
-	if (listing.blocked.length > 0) {
-		const causes = listing.blocked.map((entry) => `${entry.sessionId}: ${entry.reason}`).join("; ");
-		throw new Error(`Legacy memory import is incomplete and will retry: ${causes}`);
-	}
 	const skipped: ContinuousChatLegacySkip[] = [];
-	let importedSessions = 0;
+	for (const entry of listing.blocked) {
+		if (entry.sessionId === options.currentSessionId) continue;
+		skipped.push({ sessionId: entry.sessionId, reason: entry.reason });
+	}
+	const eligible: ContinuousChatLegacySession[] = [];
 	for (const session of listing.sessions) {
 		if (session.sessionId === options.currentSessionId) continue;
 		if (await options.source.isForgotten(session.sessionId)) {
@@ -94,8 +96,24 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 			skipped.push({ sessionId: session.sessionId, reason: unsupported });
 			continue;
 		}
-		await options.ingestor.importLegacySession(session.sessionId, session.entries());
-		importedSessions++;
+		eligible.push(session);
+	}
+	const cutoff = Math.max(0, eligible.length - CONTINUOUS_CHAT_MAX_IMPORTED_LEGACY_SESSIONS);
+	for (let index = 0; index < cutoff; index++) {
+		const session = eligible[index];
+		if (session) skipped.push({ sessionId: session.sessionId, reason: "superseded_by_recent_history" });
+	}
+	let importedSessions = 0;
+	for (const session of eligible.slice(cutoff)) {
+		try {
+			await options.ingestor.importLegacySession(session.sessionId, session.entries());
+			importedSessions++;
+		} catch (error) {
+			skipped.push({
+				sessionId: session.sessionId,
+				reason: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 	await options.ingestor.settled();
 	await options.marker.write({ version: 1, completedAt: options.now(), importedSessions, skipped });
