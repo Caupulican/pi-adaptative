@@ -11,6 +11,7 @@
 ### Fixed
 
 - Preserved Anthropic OAuth account identity across token rotation and stopped retrying refresh tokens rejected as expired, revoked, or otherwise terminal.
+- Preserved OpenAI Codex Responses WebSocket `previous_response_id` continuation across post-stream assistant `summary_text` redaction and omitted foreign-model `thinking` blocks when serializing OpenAI Responses input items.
 
 ## [0.103.8] - 2026-10-12
 
