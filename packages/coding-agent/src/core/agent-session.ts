@@ -4169,6 +4169,9 @@ export class AgentSession {
 		if (requested.includes("skill")) {
 			requested.push("skillify", "skill_audit");
 		}
+		if (!this._isChildSession && requested.includes("memory")) {
+			requested.push("zoom", "date");
+		}
 		const capabilityFiltered = filterToolNamesForCapability(requested, this.getModelCapabilityProfile(), this.model);
 
 		const tools: AgentTool[] = [];

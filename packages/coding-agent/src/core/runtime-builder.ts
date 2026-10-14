@@ -743,15 +743,20 @@ export class RuntimeBuilder {
 	 */
 	private _createToolAccessPolicy(): RuntimeToolAccessPolicy {
 		const role = getSessionRole();
+		const isRootSession = role !== "worker" && !this.deps.getOrchestrationProfile?.();
 		const grantedExtensionTools = this._workerExtensionToolNames;
-		const configuredAllowedToolNames = this.deps.getAllowedToolNames();
-		const allowedToolNames = configuredAllowedToolNames
-			? new Set(mapToolNamesForPlatform([...configuredAllowedToolNames]))
-			: undefined;
 		const configuredExcludedToolNames = this.deps.getExcludedToolNames();
 		const excludedToolNames = configuredExcludedToolNames
 			? new Set(mapToolNamesForPlatform([...configuredExcludedToolNames]))
 			: undefined;
+		const configuredAllowedToolNames = this.deps.getAllowedToolNames();
+		const allowedToolNames = configuredAllowedToolNames
+			? new Set(mapToolNamesForPlatform([...configuredAllowedToolNames]))
+			: undefined;
+		if (isRootSession && allowedToolNames?.has("memory") && !excludedToolNames?.has("memory")) {
+			if (!excludedToolNames?.has("zoom")) allowedToolNames.add("zoom");
+			if (!excludedToolNames?.has("date")) allowedToolNames.add("date");
+		}
 		const configuredToolProfileFilter = this.deps.getToolProfileFilter();
 		const toolProfileFilter = configuredToolProfileFilter
 			? {
@@ -766,13 +771,25 @@ export class RuntimeBuilder {
 				// Strict worker UAC ceiling wins over every explicit grant: a worker process holds only the
 				// allow-listed surface, so catalogue and extension tools are never inherited by default.
 				if (role === "worker" && !isWorkerProcessToolAllowed(name, grantedExtensionTools)) return false;
+				const isRootMemoryCompanion = isRootSession && (name === "zoom" || name === "date");
 				if (allowedToolNames && !allowedToolNames.has(name)) return false;
-				if (excludedToolNames?.has(name)) return false;
-				if (!toolProfileFilter) return true;
-				if (toolProfileFilter.allow.length > 0 && !matchesResourceProfilePattern(name, toolProfileFilter.allow)) {
+				if (excludedToolNames?.has(name) || (isRootMemoryCompanion && excludedToolNames?.has("memory"))) {
 					return false;
 				}
-				if (matchesResourceProfilePattern(name, toolProfileFilter.block)) return false;
+				if (!toolProfileFilter) return true;
+				if (
+					toolProfileFilter.allow.length > 0 &&
+					!matchesResourceProfilePattern(name, toolProfileFilter.allow) &&
+					!(isRootMemoryCompanion && matchesResourceProfilePattern("memory", toolProfileFilter.allow))
+				) {
+					return false;
+				}
+				if (
+					matchesResourceProfilePattern(name, toolProfileFilter.block) ||
+					(isRootMemoryCompanion && matchesResourceProfilePattern("memory", toolProfileFilter.block))
+				) {
+					return false;
+				}
 				return true;
 			},
 		};
@@ -1085,12 +1102,22 @@ export class RuntimeBuilder {
 		const explicitAllowPatterns = toolProfileFilter?.allow.filter((pattern) => pattern !== "*") ?? [];
 		if (explicitAllowPatterns.length > 0) {
 			const boundPatterns = new Set<string>();
+			const isRootSession = getSessionRole() !== "worker" && !this.deps.getOrchestrationProfile?.();
 			for (const toolName of this._toolRegistry.keys()) {
 				if (!isAllowedTool(toolName)) continue;
+				const isRootMemoryCompanion = isRootSession && (toolName === "zoom" || toolName === "date");
 				for (const pattern of explicitAllowPatterns) {
-					if (matchesResourceProfilePattern(toolName, [pattern])) boundPatterns.add(pattern);
+					if (
+						matchesResourceProfilePattern(toolName, [pattern]) ||
+						(isRootMemoryCompanion && matchesResourceProfilePattern("memory", [pattern]))
+					) {
+						boundPatterns.add(pattern);
+					}
 				}
-				if (matchesResourceProfilePattern(toolName, explicitAllowPatterns)) {
+				if (
+					matchesResourceProfilePattern(toolName, explicitAllowPatterns) ||
+					(isRootMemoryCompanion && matchesResourceProfilePattern("memory", explicitAllowPatterns))
+				) {
 					nextActiveToolNames.push(toolName);
 				}
 			}

@@ -64,7 +64,11 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 	}).save(W_ICM_READER_PROFILE, "global");
 
 	const wBigPath = projectPath("src", "w-big-echo.txt");
-	const wBigEcho = `WORKER-ECHO-START-${"w".repeat(6_000)}-WORKER-ECHO-END\n`;
+	const wBigEchoLines = Array.from(
+		{ length: 90 },
+		(_, idx) => `w-line-${String(idx).padStart(3, "0")}-${"w".repeat(64)}`,
+	);
+	const wBigEcho = `WORKER-ECHO-START-${wBigEchoLines.join("\n")}-WORKER-ECHO-END\n`;
 	world.io.writeFileSync(wBigPath, wBigEcho);
 	try {
 		const wRoot = await world.createRootSession("root", {

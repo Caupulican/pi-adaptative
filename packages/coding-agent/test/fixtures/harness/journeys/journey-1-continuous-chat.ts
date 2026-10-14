@@ -235,8 +235,21 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		// - Root calls zoom(0, 2) (tree children 0 and 1, <=512 B echo), zoom(2, 1, 0) (raw source of clipped record 2;
 		//   30,000 B fits on 1 root page of 32,768 B, and >512 B so worker-c compacts its echo leaf 8), and date(3) (timestamp of Pi's reply).
 		world.provider.enqueue("worker-c", {
-			name: "icm-leaf-8-zoom-raw",
-			reply: { content: [{ type: "text", text: "echo: zoom(2, 1) raw clipped source." }] },
+			name: "icm-turn-2-compactions",
+			maxRequests: 2,
+			reply: (request) => {
+				const text = JSON.stringify(request.context.messages);
+				return {
+					content: [
+						{
+							type: "text",
+							text: text.includes("merge lines 0+4 and 4+4")
+								? "0..7: retry limit seven per hour and zoom(0, 2) tree."
+								: "echo: zoom(2, 1) raw clipped source.",
+						},
+					],
+				};
+			},
 		});
 		const icmNavOutputs: Record<string, string> = {};
 		let turn2ChatView = "";
