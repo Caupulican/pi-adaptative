@@ -107,7 +107,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	});
 	expect(await world.disposeSessionInBody(mBlocked.session)).toBeUndefined();
 
-	// Repair mHeadlessFile into a valid header whose timestamp uses a 5-digit year ("10000-01-01T00:00:00.000Z", an intentional non-loggable day skip).
+	// Repair into a valid extended-year ISO timestamp that reaches the intentional non-loggable day skip.
 	const mUnsupportedSessionId = "headless-repaired-unsupported";
 	world.io.writeFileSync(
 		`${mLegacyKeptManager.getSessionDir()}/${mHeadlessFile}`,
@@ -115,13 +115,13 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 			type: "session",
 			version: 3,
 			id: mUnsupportedSessionId,
-			timestamp: "10000-01-01T00:00:00.000Z",
+			timestamp: "+010000-01-01T00:00:00.000Z",
 			cwd: "/harness/project",
 		})}\n`,
 	);
 
 	// Open ICM root after repair: retries and imports mLegacyKept (2 messages wrapped as "note" records) and skips mLegacyForgotten ("forgotten")
-	// and mUnsupportedSessionId ("unsupported session start time: 10000-01-01T00:00:00.000Z") in migration.json.
+	// and mUnsupportedSessionId ("unsupported session start time: +010000-01-01T00:00:00.000Z") in migration.json.
 	const mRoot = await world.createRootSession("root", {
 		agentDir: mAgentDir,
 		sessionManager: world.createSessionManager(mAgentDir),
@@ -145,7 +145,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 			unsupportedSkipped: mMigrationAfterFirst.state.skipped.some(
 				(entry) =>
 					entry.sessionId === mUnsupportedSessionId &&
-					entry.reason === "unsupported session start time: 10000-01-01T00:00:00.000Z",
+					entry.reason === "unsupported session start time: +010000-01-01T00:00:00.000Z",
 			),
 			recordTexts: mImportedRecords.map((record) => `${record.kind}: ${record.text}`),
 		},

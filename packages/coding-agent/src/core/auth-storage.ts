@@ -553,6 +553,21 @@ export class AuthStorage {
 		return { data: this.dataRevision, provider: this.providerRevisions.get(providerId) ?? this.reloadRevision };
 	}
 
+	/** Project refusal only onto the exact stored refresh token that the provider rejected. Callers hold the storage lock. */
+	private refusedOAuthCredential(
+		providerId: string,
+		credential: AuthCredential | undefined,
+	): OAuthCredential | undefined {
+		if (
+			credential?.type !== "oauth" ||
+			credential.refreshRefused ||
+			this.refusedRefreshTokens.get(providerId) !== credential.refresh
+		) {
+			return undefined;
+		}
+		return { ...credential, refreshRefused: true };
+	}
+
 	/** Publish a refresh or recovery snapshot only after the backend commits and releases its lock. */
 	private async withOAuthStorageLock<T>(
 		providerId: string,
@@ -618,8 +633,8 @@ export class AuthStorage {
 						refreshed = error.credentials;
 					}
 					if (!refreshed) {
-						if (this.refusedRefreshTokens.get(providerId) === credential.refresh && !credential.refreshRefused) {
-							const marked: OAuthCredential = { ...credential, refreshRefused: true };
+						const marked = this.refusedOAuthCredential(providerId, credential);
+						if (marked) {
 							rotation = { posted, received: marked };
 							return { result: undefined, nextData: { ...current, [providerId]: marked } };
 						}
@@ -781,12 +796,8 @@ export class AuthStorage {
 					providerId,
 					async (current) => {
 						const stored = current[providerId];
-						if (
-							stored?.type === "oauth" &&
-							this.refusedRefreshTokens.get(providerId) === stored.refresh &&
-							!stored.refreshRefused
-						) {
-							const marked: OAuthCredential = { ...stored, refreshRefused: true };
+						const marked = this.refusedOAuthCredential(providerId, stored);
+						if (marked) {
 							return { result: marked, nextData: { ...current, [providerId]: marked } };
 						}
 						return { result: stored ?? null };

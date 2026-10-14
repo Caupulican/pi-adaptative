@@ -176,18 +176,10 @@ export class ContinuousChatHost {
 			const ledgerBefore = await this.sessionLedger.read();
 			const activeIds = new Set(ledgerBefore.active.map((entry) => entry.sessionId));
 			await importContinuousChatLegacyHistory({
-				source: {
-					sessions: async () => {
-						const listing = await this.options.legacy.sessions();
-						return {
-							sessions: listing.sessions.filter((session) => !activeIds.has(session.sessionId)),
-							blocked: listing.blocked.filter((blocked) => !activeIds.has(blocked.sessionId)),
-						};
-					},
-					isForgotten: (sessionId) => this.options.legacy.isForgotten(sessionId),
-				},
+				source: this.options.legacy,
 				marker,
 				currentSessionId: this.options.sessionId,
+				activeSessionIds: activeIds,
 				ingestor: this.ingestor,
 				now: () => new Date().toISOString(),
 			});

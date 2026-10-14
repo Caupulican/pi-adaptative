@@ -14,10 +14,11 @@ import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { getDefaultSessionDirCandidates, readSessionHeaderResult } from "../../kernel/session/session-manager.ts";
 import { isMissingFileError, writeFileAtomic } from "../util/atomic-file.ts";
 import { isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
-import type {
-	ContinuousChatLegacyImportMarker,
-	ContinuousChatLegacyImportState,
-	ContinuousChatLegacySession,
+import {
+	CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS,
+	type ContinuousChatLegacyImportMarker,
+	type ContinuousChatLegacyImportState,
+	type ContinuousChatLegacySession,
 } from "./continuous-chat-legacy-import.ts";
 import type { TranscriptSummaryStore } from "./transcript-summary-store.ts";
 
@@ -379,7 +380,11 @@ async function readLegacySessionFile(path: string, file: string): Promise<Legacy
 		const metadata = statSync(path);
 		inspection = { file: metadata.isFile(), size: metadata.size };
 	} catch (error) {
-		return { kind: "blocked", sessionId: file, reason: `the file cannot be inspected: ${causeText(error)}` };
+		return {
+			kind: "blocked",
+			sessionId: file,
+			reason: `${CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.inspection} ${causeText(error)}`,
+		};
 	}
 	if (!inspection.file || inspection.size === 0) return { kind: "empty" };
 
@@ -387,10 +392,10 @@ async function readLegacySessionFile(path: string, file: string): Promise<Legacy
 	if (!header.ok) {
 		const reason =
 			header.reason === "unreadable"
-				? `the file cannot be read: ${causeText(header.cause)}`
+				? `${CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.read} ${causeText(header.cause)}`
 				: header.reason === "invalid_session_id"
-					? "the session header's id is not a valid session id"
-					: "the first line is not a session header";
+					? CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.id
+					: CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.header;
 		return { kind: "blocked", sessionId: file, reason };
 	}
 	const sessionId = header.header.id;
@@ -413,8 +418,8 @@ function compareLegacySessions(left: ContinuousChatLegacySession, right: Continu
 
 /**
  * The legacy sessions of one project, for the one-time import. The scope is the cwd's default session directories,
- * current encoding first, as the transcript index reads them. Every session that is not listed is named in `skipped`
- * with its real cause. A session id that another file already listed is skipped too, so no entry is imported twice.
+ * current encoding first, as the transcript index reads them. Unreadable sources block completion with their real
+ * cause. Valid copies of an already-selected session are deduplicated, preserving first-directory precedence.
  * The current session is not excluded here: the caller excludes it, because it is logged live.
  */
 export async function listContinuousChatLegacySessions(
@@ -432,10 +437,7 @@ export async function listContinuousChatLegacySessions(
 				continue;
 			}
 			const { sessionId } = reading.session;
-			if (listed.has(sessionId)) {
-				blocked.push({ sessionId, reason: "the same session id is already listed from another session file" });
-				continue;
-			}
+			if (listed.has(sessionId)) continue;
 			listed.add(sessionId);
 			sessions.push(reading.session);
 		}

@@ -785,7 +785,7 @@ export class VirtualGit {
 			case "branch":
 				return this.branchCommand(rest, cwd);
 			case "status":
-				return rest.includes("--porcelain=v2") ? this.statusHeader(cwd) : this.statusCommand(cwd);
+				return rest.includes("--porcelain=v2") ? this.statusV2(rest, cwd) : this.statusCommand(cwd);
 			case "add":
 				return this.addCommand(rest, cwd);
 			case "commit":
@@ -1134,13 +1134,43 @@ export class VirtualGit {
 		return { code: 0, stdout: `Deleted branch ${name} (was ${sha.slice(0, 7)}).\n`, stderr: "" };
 	}
 
-	/** The branch identity records `status --porcelain=v2 --branch` leads with; the capture reads only the head. */
-	private statusHeader(cwd: string): GitOutcome {
+	/** Porcelain v2 shares the status owner with v1; fingerprints also need every changed file, beyond branch identity. */
+	private statusV2(args: readonly string[], cwd: string): GitOutcome {
 		const worktree = this.worktreeFor(cwd);
 		if (!worktree) return { code: 128, stdout: "", stderr: NOT_A_REPOSITORY };
-		const head = this.headSha(worktree);
-		const name = worktree.head.kind === "branch" ? worktree.head.ref.replace("refs/heads/", "") : "(detached)";
-		return { code: 0, stdout: `# branch.oid ${head ?? "(initial)"}\0# branch.head ${name}\0`, stderr: "" };
+		if (!args.includes("-z")) throw new Error(`Unscripted non-NUL porcelain v2: ${args.join(" ")}`);
+		const records: string[] = [];
+		if (args.includes("--branch")) {
+			const head = this.headSha(worktree);
+			const name = worktree.head.kind === "branch" ? worktree.head.ref.replace("refs/heads/", "") : "(detached)";
+			records.push(`# branch.oid ${head ?? "(initial)"}`, `# branch.head ${name}`);
+		}
+		const headTree = this.treeOf(this.headSha(worktree));
+		for (const line of this.statusLines(worktree)) {
+			const path = line.slice(3);
+			if (line.startsWith("??")) {
+				if (!args.includes("--untracked-files=no")) records.push(`? ${path}`);
+				continue;
+			}
+			const working = this.readWorking(worktree, path);
+			const conflict = worktree.unmerged.get(path);
+			if (conflict !== undefined) {
+				const stages = [conflict.base, conflict.ours, conflict.theirs];
+				const modes = [...stages, working].map((content) => (content === undefined ? "000000" : "100644"));
+				const blobs = stages.map((content) => (content === undefined ? "0".repeat(40) : this.blobOf(content)));
+				records.push(`u UU N... ${modes.join(" ")} ${blobs.join(" ")} ${path}`);
+				continue;
+			}
+			const headed = headTree.get(path);
+			const indexed = worktree.index.get(path);
+			const modes = [headed, indexed, working].map((content) => (content === undefined ? "000000" : "100644"));
+			const blobs = [headed, indexed].map((content) =>
+				content === undefined ? "0".repeat(40) : this.blobOf(content),
+			);
+			const xy = line.slice(0, 2).replaceAll(" ", ".");
+			records.push(`1 ${xy} N... ${modes.join(" ")} ${blobs.join(" ")} ${path}`);
+		}
+		return { code: 0, stdout: records.map((record) => `${record}\0`).join(""), stderr: "" };
 	}
 
 	private blobOf(content: string): string {
