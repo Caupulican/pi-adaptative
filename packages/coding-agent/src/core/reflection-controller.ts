@@ -31,6 +31,7 @@ import {
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
+import { combineUsage } from "../kernel/usage.ts";
 import {
 	computeLaneAffinityKey,
 	DEFAULT_ISOLATED_LANE_KIND,
@@ -1651,30 +1652,7 @@ export class ReflectionController {
 					messages.push(finalizationPrompt, finalAssistant);
 				}
 
-				const usage = assistantMessages.reduce<Usage>(
-					(total, message) => ({
-						input: total.input + message.usage.input,
-						output: total.output + message.usage.output,
-						cacheRead: total.cacheRead + message.usage.cacheRead,
-						cacheWrite: total.cacheWrite + message.usage.cacheWrite,
-						totalTokens: total.totalTokens + message.usage.totalTokens,
-						cost: {
-							input: total.cost.input + message.usage.cost.input,
-							output: total.cost.output + message.usage.cost.output,
-							cacheRead: total.cost.cacheRead + message.usage.cost.cacheRead,
-							cacheWrite: total.cost.cacheWrite + message.usage.cost.cacheWrite,
-							total: total.cost.total + message.usage.cost.total,
-						},
-					}),
-					{
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-				);
+				const usage = combineUsage(...assistantMessages.map((message) => message.usage));
 				const text = finalAssistant.content
 					.filter((content): content is TextContent => content.type === "text")
 					.map((content) => content.text)

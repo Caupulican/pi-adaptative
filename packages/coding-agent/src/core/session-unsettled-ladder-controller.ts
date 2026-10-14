@@ -38,7 +38,7 @@ import {
 	toolResultEvidence,
 	UNSETTLED_ITEM_CONSULT_PROMPT,
 } from "./system-one/unsettled-ladder.ts";
-import { WORKER_RECEIPTS_CUSTOM_TYPE, workUnitWindow } from "./work-units.ts";
+import { turnCustomEntries, WORKER_RECEIPTS_CUSTOM_TYPE, workUnitWindow } from "./work-units.ts";
 
 export interface SessionUnsettledLadderControllerDeps {
 	getSessionManager(): SessionManager;
@@ -106,8 +106,14 @@ export class SessionUnsettledLadderController {
 		messages: readonly AgentMessage[];
 		workerReceipts: readonly ClaimReceipts[];
 	} {
-		const window = workUnitWindow(this.deps.getSessionManager(), WORKER_RECEIPTS_CUSTOM_TYPE);
-		if (!window) return { messages: turnMessages, workerReceipts: [] };
+		const manager = this.deps.getSessionManager();
+		const window = workUnitWindow(manager, WORKER_RECEIPTS_CUSTOM_TYPE);
+		if (!window) {
+			return {
+				messages: turnMessages,
+				workerReceipts: turnCustomEntries(manager, WORKER_RECEIPTS_CUSTOM_TYPE) as ClaimReceipts[],
+			};
+		}
 		return { messages: window.messages, workerReceipts: window.customs as ClaimReceipts[] };
 	}
 

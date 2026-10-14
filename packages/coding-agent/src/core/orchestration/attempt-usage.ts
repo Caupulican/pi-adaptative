@@ -34,12 +34,19 @@ export function projectAttemptUsage(
  * Provider totals are authoritative and therefore need not equal the detail field sum.
  */
 const PROVIDER_USAGE_FIELDS = ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const;
+const PROVIDER_USAGE_OPTIONAL_FIELDS = ["details"] as const;
 const PROVIDER_USAGE_COST_FIELDS = ["input", "output", "cacheRead", "cacheWrite", "total"] as const;
+const PROVIDER_USAGE_COST_OPTIONAL_FIELDS = ["estimate"] as const;
 
-function parseExactDataRecord(value: unknown, fields: readonly string[], label: string): Record<string, unknown> {
+function parseExactDataRecord(
+	value: unknown,
+	fields: readonly string[],
+	label: string,
+	optionalFields: readonly string[] = [],
+): Record<string, unknown> {
 	if (!isPlainRecord(value)) throw new TypeError(`${label} must be a plain object.`);
 	for (const key of Reflect.ownKeys(value)) {
-		if (typeof key !== "string" || !fields.includes(key))
+		if (typeof key !== "string" || (!fields.includes(key) && !optionalFields.includes(key)))
 			throw new TypeError(`${label} contains an unsupported field.`);
 	}
 	const parsed: Record<string, unknown> = {};
@@ -48,13 +55,30 @@ function parseExactDataRecord(value: unknown, fields: readonly string[], label: 
 		if (!descriptor || !("value" in descriptor)) throw new TypeError(`${label}.${field} must be a data field.`);
 		parsed[field] = descriptor.value;
 	}
+	for (const field of optionalFields) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, field);
+		if (!descriptor) continue;
+		if (!("value" in descriptor)) throw new TypeError(`${label}.${field} must be a data field.`);
+		parsed[field] = descriptor.value;
+	}
 	return parsed;
 }
 
 /** Parse an untrusted provider-neutral usage report into a closed, known-field value. */
 export function validateProviderUsage(value: unknown, label = "provider usage"): Usage {
-	const usage = parseExactDataRecord(value, PROVIDER_USAGE_FIELDS, label);
-	const cost = parseExactDataRecord(usage.cost, PROVIDER_USAGE_COST_FIELDS, `${label}.cost`);
+	const usage = parseExactDataRecord(value, PROVIDER_USAGE_FIELDS, label, PROVIDER_USAGE_OPTIONAL_FIELDS);
+	if (usage.details !== undefined && !isPlainRecord(usage.details)) {
+		throw new TypeError(`${label}.details must be a plain object.`);
+	}
+	const cost = parseExactDataRecord(
+		usage.cost,
+		PROVIDER_USAGE_COST_FIELDS,
+		`${label}.cost`,
+		PROVIDER_USAGE_COST_OPTIONAL_FIELDS,
+	);
+	if (cost.estimate !== undefined && cost.estimate !== "base-rates") {
+		throw new Error(`${label}.cost.estimate must be 'base-rates' when present.`);
+	}
 	const tokenFields: Array<[string, number]> = [
 		["input", usage.input as number],
 		["output", usage.output as number],
@@ -86,6 +110,7 @@ export function validateProviderUsage(value: unknown, label = "provider usage"):
 		cacheWrite: usage.cacheWrite as number,
 		totalTokens: usage.totalTokens as number,
 		cost: {
+			...(cost.estimate === "base-rates" ? { estimate: "base-rates" as const } : {}),
 			input: cost.input as number,
 			output: cost.output as number,
 			cacheRead: cost.cacheRead as number,

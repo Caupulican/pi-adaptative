@@ -95,3 +95,28 @@ export function workUnitWindow(
 	collected.customs.reverse();
 	return collected;
 }
+
+/**
+ * Custom entries of `customType` recorded on the branch since the latest owner (`user`) message.
+ * Used when no `work_unit` was opened (e.g. a read-only worker delegation turn) so accepted worker
+ * receipts recorded during the turn still back the root answer's claims.
+ */
+export function turnCustomEntries(
+	manager: Pick<SessionManager, "getLeafEntry" | "getEntry">,
+	customType: string,
+): unknown[] {
+	const customs: unknown[] = [];
+	for (
+		let entry = manager.getLeafEntry();
+		entry;
+		entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined
+	) {
+		if (entry.type === "custom" && entry.customType === customType) {
+			customs.push(entry.data);
+		} else if (entry.type === "message" && entry.message.role === "user") {
+			break;
+		}
+	}
+	customs.reverse();
+	return customs;
+}

@@ -289,7 +289,7 @@ import { skillsForSessionRole, workerEligibleSkills } from "./skills.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
 import { accountPassBindings } from "./system-one/account-pass-wiring.ts";
-import { collectClaimReceipts } from "./system-one/claim-delivery.ts";
+import { collectWorkerReportClaimReceipts } from "./system-one/claim-delivery.ts";
 import { formatClarificationQuestion } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
@@ -1186,7 +1186,10 @@ export class AgentSession {
 				const blockers = await this._unsettledLadder.answerClaims.workerReportBlockers(input);
 				// An accepted report's receipts back the root's claims for the rest of the work unit.
 				if (blockers.length === 0) {
-					this.sessionManager.appendCustomEntry(WORKER_RECEIPTS_CUSTOM_TYPE, collectClaimReceipts(input.messages));
+					this.sessionManager.appendCustomEntry(
+						WORKER_RECEIPTS_CUSTOM_TYPE,
+						collectWorkerReportClaimReceipts(input),
+					);
 				}
 				return blockers;
 			},

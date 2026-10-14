@@ -111,11 +111,11 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 			send: async (message, signal) => {
 				const task: Message = { role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() };
 				const request = [...history, task];
-				const runTurn = async (model: Model<Api>) => {
+				const runTurn = async (model: Model<Api>, activeTools: Tool[] = tools) => {
 					const completion = await this.deps.complete({
 						systemPrompt,
 						messages: [],
-						requestContext: { systemPrompt, tools, messages: request },
+						requestContext: { systemPrompt, tools: activeTools, messages: request },
 						model,
 						thinkingLevel: CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL,
 						cacheRetention: "short",
@@ -145,6 +145,12 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 						summaryModel = nextSummary.model;
 						({ completion: result, assistant } = await runTurn(summaryModel));
 					}
+				}
+				if (
+					tools.length > 0 &&
+					(result.stopReason === "toolUse" || assistant?.content.some((block) => block.type === "toolCall"))
+				) {
+					({ completion: result, assistant } = await runTurn(summaryModel, []));
 				}
 				if (assistant === undefined) throw new Error("Continuous-chat compaction produced no assistant reply.");
 				if (result.stopReason !== "stop") {

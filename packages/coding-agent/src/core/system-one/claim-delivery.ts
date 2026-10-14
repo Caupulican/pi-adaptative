@@ -116,6 +116,33 @@ export function collectClaimReceipts(turnMessages: readonly AgentMessage[]): Cla
 	return { tests, commits, pushes, publishes, filesChanged, toolCalls, succeededToolCalls };
 }
 
+function hostVerifiedCheckReceipts(
+	checks: { readonly passed: number; readonly failed: number } | undefined,
+): ClaimReceipts[] {
+	if (!checks || checks.passed + checks.failed <= 0) return [];
+	return [
+		{
+			tests: { passed: checks.passed, failed: checks.failed, lastPassed: checks.failed === 0 },
+			commits: { succeeded: 0, failed: 0 },
+			pushes: { succeeded: 0, failed: 0 },
+			publishes: { succeeded: 0, failed: 0 },
+			filesChanged: [],
+			toolCalls: 0,
+			succeededToolCalls: 0,
+		},
+	];
+}
+
+/** Receipts for an accepted worker report, combining its transcript receipts with host-verified check citations. */
+export function collectWorkerReportClaimReceipts(input: {
+	readonly messages: readonly AgentMessage[];
+	readonly hostVerifiedChecks?: { readonly passed: number; readonly failed: number };
+}): ClaimReceipts {
+	const base = collectClaimReceipts(input.messages);
+	const checkReceipts = hostVerifiedCheckReceipts(input.hostVerifiedChecks);
+	return checkReceipts.length > 0 ? mergeClaimReceipts([base, ...checkReceipts]) : base;
+}
+
 /** Receipts of several sources (the root's window and accepted workers) as one. */
 export function mergeClaimReceipts(receipts: readonly ClaimReceipts[]): ClaimReceipts {
 	const sum = (pick: (r: ClaimReceipts) => DeliveryReceipt) => ({
@@ -348,20 +375,7 @@ export class AnswerClaimChecker {
 		readonly hostVerifiedChecks?: { readonly passed: number; readonly failed: number };
 	}): Promise<string[]> {
 		const blockers: string[] = [];
-		const checks = input.hostVerifiedChecks;
-		const checkReceipts: ClaimReceipts[] = checks
-			? [
-					{
-						tests: { passed: checks.passed, failed: checks.failed, lastPassed: checks.failed === 0 },
-						commits: { succeeded: 0, failed: 0 },
-						pushes: { succeeded: 0, failed: 0 },
-						publishes: { succeeded: 0, failed: 0 },
-						filesChanged: [],
-						toolCalls: 0,
-						succeededToolCalls: 0,
-					},
-				]
-			: [];
+		const checkReceipts = hostVerifiedCheckReceipts(input.hostVerifiedChecks);
 		for (const finding of (await this.findings(input.summary, input.messages, checkReceipts)) ?? []) {
 			if (finding.verdict === "contradicted")
 				blockers.push(`claim contradicted by the worker's own tool results: ${finding.reason}`);
