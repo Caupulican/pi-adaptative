@@ -75,7 +75,53 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	expect(mForgetOutcome.ok, `forgetting ${mLegacyForgottenId} succeeds: ${mForgetOutcome.message}`).toBe(true);
 	expect(await world.disposeSessionInBody(mForgetMarker.session)).toBeUndefined();
 
-	// Open ICM root: imports mLegacyKept (2 messages wrapped as "note" records) and skips mLegacyForgotten ("forgotten") in migration.json.
+	// Open ICM root while mHeadlessFile is corrupted: migration blocks without writing migration.json, and provider requests fail closed.
+	const mBlocked = await world.createRootSession("root", {
+		agentDir: mAgentDir,
+		sessionManager: world.createSessionManager(mAgentDir),
+		settings: icmContinuousSettings(),
+	});
+	await withDeadline(
+		trace,
+		"m-legacy blocked import turn",
+		mBlocked.session.prompt("Attempt turn while a legacy session file has an invalid header."),
+	);
+	const mBlockedLast = mBlocked.session.messages.at(-1);
+	expect(
+		{
+			migrationFileWrittenWhileBlocked: world.io.existsSync(mStore.migrationFile),
+			blockedReply:
+				mBlockedLast?.role === "assistant"
+					? { stopReason: mBlockedLast.stopReason, error: mBlockedLast.errorMessage }
+					: undefined,
+		},
+		"an unreadable or headerless legacy session blocks migration without writing migration.json so repair + restart retries",
+	).toEqual({
+		migrationFileWrittenWhileBlocked: false,
+		blockedReply: {
+			stopReason: "error",
+			error: expect.stringContaining(
+				`ICM project chat is unavailable: Legacy memory import is incomplete and will retry: ${mHeadlessFile}: the first line is not a session header`,
+			),
+		},
+	});
+	expect(await world.disposeSessionInBody(mBlocked.session)).toBeUndefined();
+
+	// Repair mHeadlessFile into a valid header whose timestamp uses a 5-digit year ("10000-01-01T00:00:00.000Z", an intentional non-loggable day skip).
+	const mUnsupportedSessionId = "headless-repaired-unsupported";
+	world.io.writeFileSync(
+		`${mLegacyKeptManager.getSessionDir()}/${mHeadlessFile}`,
+		`${JSON.stringify({
+			type: "session",
+			version: 3,
+			id: mUnsupportedSessionId,
+			timestamp: "10000-01-01T00:00:00.000Z",
+			cwd: "/harness/project",
+		})}\n`,
+	);
+
+	// Open ICM root after repair: retries and imports mLegacyKept (2 messages wrapped as "note" records) and skips mLegacyForgotten ("forgotten")
+	// and mUnsupportedSessionId ("unsupported session start time: 10000-01-01T00:00:00.000Z") in migration.json.
 	const mRoot = await world.createRootSession("root", {
 		agentDir: mAgentDir,
 		sessionManager: world.createSessionManager(mAgentDir),
@@ -96,17 +142,19 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 			forgottenSkipped: mMigrationAfterFirst.state.skipped.some(
 				(entry) => entry.sessionId === mLegacyForgottenId && entry.reason === "forgotten",
 			),
-			headlessSkipped: mMigrationAfterFirst.state.skipped.some(
-				(entry) => entry.sessionId === mHeadlessFile && entry.reason === "the first line is not a session header",
+			unsupportedSkipped: mMigrationAfterFirst.state.skipped.some(
+				(entry) =>
+					entry.sessionId === mUnsupportedSessionId &&
+					entry.reason === "unsupported session start time: 10000-01-01T00:00:00.000Z",
 			),
 			recordTexts: mImportedRecords.map((record) => `${record.kind}: ${record.text}`),
 		},
-		"one-time legacy import writes migration.json, imports kept session as note records, and skips forgotten and headless sessions",
+		"after repairing the blocked session file, legacy import retries, writes migration.json, imports kept session as note records, and records intentional skips",
 	).toEqual({
 		schemaVersion: 1,
 		importedSessions: 1,
 		forgottenSkipped: true,
-		headlessSkipped: true,
+		unsupportedSkipped: true,
 		recordTexts: ["note: user: Seed kept legacy session.", "note: pi: Legacy kept reply: alpha-migration-token."],
 	});
 

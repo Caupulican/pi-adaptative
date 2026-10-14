@@ -79,11 +79,12 @@ const CONTINUOUS_CHAT_MAX_IMPORTED_LEGACY_SESSIONS = 8;
 export async function importContinuousChatLegacyHistory(options: ContinuousChatLegacyImportOptions): Promise<void> {
 	if ((await options.marker.read()) !== undefined) return;
 	const listing = await options.source.sessions();
-	const skipped: ContinuousChatLegacySkip[] = [];
-	for (const entry of listing.blocked) {
-		if (entry.sessionId === options.currentSessionId) continue;
-		skipped.push({ sessionId: entry.sessionId, reason: entry.reason });
+	const blocked = listing.blocked.filter((entry) => entry.sessionId !== options.currentSessionId);
+	if (blocked.length > 0) {
+		const causes = blocked.map((entry) => `${entry.sessionId}: ${entry.reason}`).join("; ");
+		throw new Error(`Legacy memory import is incomplete and will retry: ${causes}`);
 	}
+	const skipped: ContinuousChatLegacySkip[] = [];
 	const eligible: ContinuousChatLegacySession[] = [];
 	for (const session of listing.sessions) {
 		if (session.sessionId === options.currentSessionId) continue;
@@ -105,15 +106,8 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 	}
 	let importedSessions = 0;
 	for (const session of eligible.slice(cutoff)) {
-		try {
-			await options.ingestor.importLegacySession(session.sessionId, session.entries());
-			importedSessions++;
-		} catch (error) {
-			skipped.push({
-				sessionId: session.sessionId,
-				reason: error instanceof Error ? error.message : String(error),
-			});
-		}
+		await options.ingestor.importLegacySession(session.sessionId, session.entries());
+		importedSessions++;
 	}
 	await options.ingestor.settled();
 	await options.marker.write({ version: 1, completedAt: options.now(), importedSessions, skipped });

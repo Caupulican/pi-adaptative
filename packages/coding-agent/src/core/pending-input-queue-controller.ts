@@ -166,16 +166,17 @@ export class PendingInputQueueController {
 	}
 
 	waitForPendingSteerDecision(signal?: AbortSignal): Promise<void> {
-		if (this._closed || !this._steering.some((entry) => !entry.admission && !entry.held)) {
+		if (this._closed || signal?.aborted || !this._steering.some((entry) => !entry.admission && !entry.held)) {
 			return Promise.resolve();
 		}
 		return new Promise((resolve) => {
 			let settled = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
 			const finish = () => {
 				if (settled) return;
 				settled = true;
 				this._steerDecisionListeners.delete(check);
-				clearTimeout(timer);
+				if (timer !== undefined) clearTimeout(timer);
 				signal?.removeEventListener("abort", finish);
 				resolve();
 			};
@@ -184,11 +185,7 @@ export class PendingInputQueueController {
 					finish();
 				}
 			};
-			if (signal?.aborted) {
-				finish();
-				return;
-			}
-			const timer = setTimeout(finish, 50);
+			timer = setTimeout(finish, 50);
 			if (typeof timer === "object" && "unref" in timer) timer.unref();
 			this._steerDecisionListeners.add(check);
 			signal?.addEventListener("abort", finish, { once: true });

@@ -1,10 +1,13 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
+import { ObjectiveMutationLedger } from "../../../../src/core/objective-execution/objective-mutation-ledger.ts";
+import { RepositoryMutationObserver } from "../../../../src/core/objective-execution/repository-mutation-observer.ts";
 import {
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationProfile,
 } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
+import { createSessionWorkEvidenceJournal } from "../../../../src/core/system-one/session-work-diff.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 
@@ -198,9 +201,47 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 				},
 			},
 			{
-				name: "w-icm-worker-report",
+				name: "w-icm-worker-post-read-disabled",
 				check: (request) => {
 					workerNavResults.zoomName = icmLatestResult(request, "zoom");
+					const originalGetRetrieval = wRoot.settingsManager.getMemoryRetrievalSettings.bind(
+						wRoot.settingsManager,
+					);
+					let disableScheduled = false;
+					wRoot.settingsManager.getMemoryRetrievalSettings = () => {
+						const current = originalGetRetrieval();
+						if (!disableScheduled) {
+							disableScheduled = true;
+							queueMicrotask(() => {
+								wRoot.settingsManager.getMemoryRetrievalSettings = originalGetRetrieval;
+								wRoot.settingsManager.setMemoryRetrievalSettings({
+									...originalGetRetrieval(),
+									enabled: false,
+								});
+							});
+						}
+						return current;
+					};
+				},
+				reply: {
+					content: [
+						{
+							type: "thinking",
+							thinking: "Call date(0) while retrieval is disabled mid-read.",
+						},
+						{ type: "toolCall", id: "w-worker-date-disabled", name: "date", arguments: { id: 0 } },
+					],
+					stopReason: "toolUse",
+				},
+			},
+			{
+				name: "w-icm-worker-report",
+				check: (request) => {
+					workerNavResults.dateDisabledMidRead = icmLatestResult(request, "date");
+					wRoot.settingsManager.setMemoryRetrievalSettings({
+						...wRoot.settingsManager.getMemoryRetrievalSettings(),
+						enabled: true,
+					});
 					wWorkerDone.release();
 				},
 				reply: {
@@ -291,23 +332,79 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 				workerDate0Ok:
 					workerNavResults.date0?.isError === false && workerNavResults.date0.text === wRecords[0]!.date,
 				workerNameRefused: workerNavResults.zoomName?.isError === true,
+				workerPostReadFenceBlockedWhenDisabledMidRead:
+					workerNavResults.dateDisabledMidRead?.isError === true &&
+					/Memory retrieval is disabled/i.test(workerNavResults.dateDisabledMidRead.text),
 				workRecordCount: wWorkRecords.length,
 				workRecordPrefix: wWorkRecords[0]?.text === "[worker-1] Observed #2 and #0 in continuous chat.",
 				rootWorkerLogHasHeader: rootWorkerLogText.startsWith("agent worker-1 page 1"),
 				rootWorkerLogHasReply: rootWorkerLogText.includes("Observed #2 and #0 in continuous chat."),
 			},
-			"worker inherits pinned <chat> birth view, uses 4 KiB zoom + date, logs [worker-1] once, and root zooms worker-1",
+			"worker inherits pinned <chat> birth view, uses 4 KiB zoom + date, blocks delivery when retrieval is disabled mid-read, logs [worker-1] once, and root zooms worker-1",
 		).toEqual({
 			workerHasBirthView: true,
 			workerTools: ["date", "zoom"],
 			workerZoomIs4kPaged: true,
 			workerDate0Ok: true,
 			workerNameRefused: true,
+			workerPostReadFenceBlockedWhenDisabledMidRead: true,
 			workRecordCount: 1,
 			workRecordPrefix: true,
 			rootWorkerLogHasHeader: true,
 			rootWorkerLogHasReply: true,
 		});
+
+		const r4DeclaredPath = projectPath("r4-declared-write.txt");
+		const r4UndeclaredPath = projectPath("r4-undeclared-write.txt");
+		try {
+			const r4Ledger = new ObjectiveMutationLedger();
+			const r4Observer = new RepositoryMutationObserver(r4Ledger);
+			r4Observer.setWorkEvidenceJournal(createSessionWorkEvidenceJournal(() => wRoot.sessionManager));
+
+			const r4CleanToken = await r4Observer.begin({
+				callId: "r4-clean-call",
+				objectiveId: "r4-clean-objective",
+				cwd: HARNESS_PROJECT_CWD,
+				effect: "typed_owned_write",
+			});
+			world.io.writeFileSync(r4DeclaredPath, "declared content\n");
+			await r4Observer.finish({
+				token: r4CleanToken,
+				declaredOwnedPaths: [r4DeclaredPath],
+				operationSucceeded: true,
+			});
+
+			const r4UndeclaredToken = await r4Observer.begin({
+				callId: "r4-undeclared-call",
+				objectiveId: "r4-undeclared-objective",
+				cwd: HARNESS_PROJECT_CWD,
+				effect: "typed_owned_write",
+			});
+			world.io.writeFileSync(r4UndeclaredPath, "undeclared content\n");
+			await r4Observer.finish({
+				token: r4UndeclaredToken,
+				declaredOwnedPaths: [r4DeclaredPath],
+				operationSucceeded: true,
+			});
+
+			expect(
+				{
+					cleanBlockReason: r4Observer.deliveryBlockReason("r4-clean-objective"),
+					cleanProvenPaths: r4Ledger.provenOwnedPaths("r4-clean-objective"),
+					undeclaredBlockReason: r4Observer.deliveryBlockReason("r4-undeclared-objective"),
+					undeclaredProvenPaths: r4Ledger.provenOwnedPaths("r4-undeclared-objective"),
+				},
+				"TypedObservationGroup initializes with the production session work-evidence journal before branchAnchor exists and blocks undeclared mutations on completion",
+			).toEqual({
+				cleanBlockReason: undefined,
+				cleanProvenPaths: ["r4-declared-write.txt"],
+				undeclaredBlockReason: "shell_mutation_unattributed",
+				undeclaredProvenPaths: [],
+			});
+		} finally {
+			world.io.rmSync(r4DeclaredPath, { force: true });
+			world.io.rmSync(r4UndeclaredPath, { force: true });
+		}
 
 		// Second live root on the same continuous-chat profile is refused by runtime.lease.json while wRoot is open.
 		const wSecond = await world.createRootSession("root", {

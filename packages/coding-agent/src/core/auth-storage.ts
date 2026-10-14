@@ -617,7 +617,14 @@ export class AuthStorage {
 						discoveryFailure = error;
 						refreshed = error.credentials;
 					}
-					if (!refreshed) return { result: undefined };
+					if (!refreshed) {
+						if (this.refusedRefreshTokens.get(providerId) === credential.refresh && !credential.refreshRefused) {
+							const marked: OAuthCredential = { ...credential, refreshRefused: true };
+							rotation = { posted, received: marked };
+							return { result: undefined, nextData: { ...current, [providerId]: marked } };
+						}
+						return { result: undefined };
+					}
 					const received: OAuthCredential = { type: "oauth", ...refreshed };
 					if (isDeepStrictEqual(posted, received)) return { result: received };
 					rotation = { posted, received };
@@ -636,7 +643,10 @@ export class AuthStorage {
 					if (!isDeepStrictEqual(credential, posted)) {
 						return { result: Date.now() < credential.expires ? credential : undefined };
 					}
-					return { result: received, nextData: { ...current, [providerId]: received } };
+					return {
+						result: received.refreshRefused ? undefined : received,
+						nextData: { ...current, [providerId]: received },
+					};
 				},
 				revision,
 			);

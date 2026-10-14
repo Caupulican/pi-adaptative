@@ -145,7 +145,7 @@ export function createSessionWorkEvidenceJournal(getManager: () => SessionManage
 				return { repositoryRoot: cwd, created: false, baselineStatus: "unversioned", branchAnchor };
 			const captureKey = `${objectiveId}\0${repositoryRoot}`;
 			const pending = baselineCaptures.get(captureKey);
-			if (pending) return pending;
+			if (pending) return pending.then((result) => ({ ...result, created: false }));
 			const capture = (async (): Promise<BaselineResult> => {
 				const existing = read(objectiveId).find((scope) => scope.repositoryRoot === repositoryRoot);
 				const assertFreshCaptureState = (): RepositoryWorkEvidenceScope | undefined => {
@@ -180,7 +180,7 @@ export function createSessionWorkEvidenceJournal(getManager: () => SessionManage
 							changedPaths: [],
 							pathScope: "repository",
 						});
-						return { repositoryRoot, created: false, baselineStatus: "captured", branchAnchor };
+						return { repositoryRoot, created: false, baselineStatus: "captured", branchAnchor: anchor() };
 					}
 				}
 				if (existing?.observedMutation)
@@ -215,7 +215,7 @@ export function createSessionWorkEvidenceJournal(getManager: () => SessionManage
 				}
 				assertFreshCaptureState();
 				save(objectiveId, { repositoryRoot, baseline, changedPaths: [] });
-				return { repositoryRoot, created: true, baselineStatus: "captured", branchAnchor };
+				return { repositoryRoot, created: true, baselineStatus: "captured", branchAnchor: anchor() };
 			})();
 			baselineCaptures.set(captureKey, capture);
 			try {
@@ -227,7 +227,7 @@ export function createSessionWorkEvidenceJournal(getManager: () => SessionManage
 		async recordBaselineDiagnostic(objectiveId, repositoryRoot, diagnostic, branchAnchor) {
 			assertCurrent(branchAnchor);
 			const scope = read(objectiveId).find((item) => item.repositoryRoot === repositoryRoot);
-			if (!scope) return;
+			if (!scope || scope.observedMutation || scope.pendingObservationIds?.length) return;
 			save(objectiveId, { ...scope, diagnostic });
 		},
 		async openObservation(objectiveId, repositoryRoot, observationId, input) {

@@ -21,6 +21,7 @@ import {
 } from "../kernel/compaction/compaction.ts";
 import type { AgentContext } from "../kernel/index.ts";
 import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
+import { classifyFailure } from "../kernel/reliability/index.ts";
 import { compactToolResultDetailsForRetention } from "../kernel/session/message-retention.ts";
 import type { BranchSummaryEntry } from "../kernel/session/session-entries.ts";
 import type { SessionManager, SessionRequestSnapshotInput } from "../kernel/session/session-manager.ts";
@@ -1276,8 +1277,17 @@ export class AgentSession {
 							resolveModel: (reference) => historyModels.resolveModel(reference),
 						}),
 					recordUsage: (usage, call) => this._semanticUsage.recordHistoryUsage(usage, call),
-					onModelFailure: (model) => {
-						this._foregroundRecovery.markModelExhausted(`${model.provider}/${model.id}`);
+					onModelFailure: (model, errorMessage) => {
+						const message = errorMessage ?? "";
+						const classified = classifyFailure({ message, provider: model.provider });
+						if (classified.reason === "billing_or_quota") {
+							this._foregroundRecovery.markModelExhausted(
+								`${model.provider}/${model.id}`,
+								classified.retryAfterMs,
+							);
+						} else if (classified.reason === "model_unsupported") {
+							this._accountModels.markRefused(model, message || "model not supported");
+						}
 					},
 				}),
 				prefixHead: () => this._continuousChatPrefixHead(),

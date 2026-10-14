@@ -1,5 +1,7 @@
 import "../builtin-install.ts";
+import { OAuthRefreshRejectedError, registerOAuthProvider, unregisterOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { expect } from "vitest";
+import { AuthStorage } from "../../../../src/core/auth-storage.ts";
 import { CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES } from "../../../../src/core/memory/continuous-chat-index.ts";
 import { CONTINUOUS_CHAT_SYSTEM_PROMPT } from "../../../../src/core/memory/continuous-chat-prompt.ts";
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
@@ -234,10 +236,25 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		// I3 (<chat> view projection + root zoom & date navigation):
 		// - Root calls zoom(0, 2) (tree children 0 and 1, <=512 B echo), zoom(2, 1, 0) (raw source of clipped record 2;
 		//   30,000 B fits on 1 root page of 32,768 B, and >512 B so worker-c compacts its echo leaf 9), and date(3) (timestamp of Pi's reply).
-		world.provider.enqueue("worker-c", {
-			name: "icm-leaf-9-zoom-raw",
-			reply: { content: [{ type: "text", text: "echo: zoom(2, 1) raw clipped source." }] },
-		});
+		let leaf9RetriedOnWorkerC = false;
+		world.provider.enqueue(
+			"worker-c",
+			{
+				name: "icm-leaf-9-transient-503",
+				reply: {
+					stopReason: "error",
+					errorMessage: "HTTP 503 Service Unavailable: upstream overloaded",
+					content: [],
+				},
+			},
+			{
+				name: "icm-leaf-9-zoom-raw",
+				check: () => {
+					leaf9RetriedOnWorkerC = true;
+				},
+				reply: { content: [{ type: "text", text: "echo: zoom(2, 1) raw clipped source." }] },
+			},
+		);
 		const icmNavOutputs: Record<string, string> = {};
 		let turn2ChatView = "";
 		let turn2StateText = "";
@@ -324,8 +341,9 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 				zoomRawHasMarkers:
 					icmNavOutputs.raw2?.includes("HEAD-MARKER-") && icmNavOutputs.raw2?.includes("-TAIL-MARKER"),
 				date3MatchesRecord: icmNavOutputs.date3 === icmRecords[3]!.date,
+				leaf9RetriedOnWorkerC,
 			},
-			"Pi-adaptative-memory persists daily JSONL + 16B index, clips tool output at 30k chars, splits assistant output at 30k chars, and serves zoom/date",
+			"Pi-adaptative-memory persists daily JSONL + 16B index, clips tool output at 30k chars, splits assistant output at 30k chars, retries transient compaction errors without blacklisting the model, and serves zoom/date",
 		).toEqual({
 			recordCount: 13,
 			indexBytes: 13 * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES,
@@ -340,8 +358,56 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			zoomRawHasClipBanner: true,
 			zoomRawHasMarkers: true,
 			date3MatchesRecord: true,
+			leaf9RetriedOnWorkerC: true,
 		});
 		expect(await world.disposeSessionInBody(icmRoot.session), "the ICM root disposes cleanly").toBeUndefined();
+
+		const r5ProviderId = "r5-oauth-401";
+		const r5AuthPath = `${icmAgentDir}-r5-auth.json`;
+		let r5RefreshAttempts = 0;
+		registerOAuthProvider({
+			id: r5ProviderId,
+			name: "R5 OAuth 401 Recovery",
+			login: async () => {
+				throw new Error("unused");
+			},
+			refreshToken: async () => {
+				r5RefreshAttempts += 1;
+				throw new OAuthRefreshRejectedError(r5ProviderId, "revoked", "invalid_grant");
+			},
+			getApiKey: (cred) => cred.access,
+		});
+		try {
+			const r5AuthFirst = AuthStorage.create(r5AuthPath);
+			r5AuthFirst.set(r5ProviderId, {
+				type: "oauth",
+				access: "r5-rejected-access",
+				refresh: "r5-refused-refresh",
+				expires: Date.now() + 60_000,
+			});
+			const r5FirstRecovery = await r5AuthFirst.recoverRejectedOAuthApiKey(r5ProviderId, "r5-rejected-access");
+			const r5AuthReloaded = AuthStorage.create(r5AuthPath);
+			const r5PersistedCred = r5AuthReloaded.get(r5ProviderId);
+			const r5SecondRecovery = await r5AuthReloaded.recoverRejectedOAuthApiKey(r5ProviderId, "r5-rejected-access");
+			expect(
+				{
+					r5FirstRecovery,
+					r5SecondRecovery,
+					r5RefreshAttempts,
+					persistedRefreshRefused: r5PersistedCred?.type === "oauth" ? r5PersistedCred.refreshRefused : undefined,
+				},
+				"401 OAuth access-token recovery persists refreshRefused to disk so a restarted AuthStorage never retries the refused refresh token",
+			).toEqual({
+				r5FirstRecovery: undefined,
+				r5SecondRecovery: undefined,
+				r5RefreshAttempts: 1,
+				persistedRefreshRefused: true,
+			});
+		} finally {
+			unregisterOAuthProvider(r5ProviderId);
+			world.io.rmSync(r5AuthPath, { force: true });
+		}
+
 		trace.mark("root", "icm.continuous-chat-core");
 	} finally {
 		world.io.rmSync(icmLongPath, { force: true });

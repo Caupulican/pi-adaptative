@@ -138,10 +138,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 				if (result.stopReason === "error") {
 					this.deps.onModelFailure?.(summaryModel, result.errorMessage);
 					const nextSummary = this.deps.summary();
-					if (
-						nextSummary.ok &&
-						(nextSummary.model.provider !== summaryModel.provider || nextSummary.model.id !== summaryModel.id)
-					) {
+					if (nextSummary.ok) {
 						summaryModel = nextSummary.model;
 						({ completion: result, assistant } = await runTurn(summaryModel));
 					}

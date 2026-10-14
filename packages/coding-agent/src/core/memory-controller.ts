@@ -1873,10 +1873,15 @@ export class MemoryController {
 			},
 			navigate: async (tool, args, signal) => {
 				const laneDetails = { readOnly: true, [TRANSCRIPT_RECALL_RESULT_MARKER]: true };
+				const admission: Admission = {
+					generation: this._memoryGeneration,
+					policy: this._retrievalPolicyKey(),
+				};
 				if (!this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled) {
 					const reason = reasonSentence(MEMORY_RETRIEVAL_DISABLED_REASON);
 					return memoryFailure("memory_retrieval_disabled", reason, laneDetails);
 				}
+				if (!current(admission)) throw new LaneMemorySnapshotStaleError();
 				const budget = laneBudget();
 				if (!budget.enabled) {
 					const constraint = laneConstraintText(budget.reason, capacity() !== undefined);
@@ -1895,6 +1900,13 @@ export class MemoryController {
 					CONTINUOUS_CHAT_LANE_PAGE_BYTES,
 					CONTINUOUS_CHAT_LANE_IMAGE_MAX_BYTES,
 				);
+				if (!this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled) {
+					const reason = reasonSentence(MEMORY_RETRIEVAL_DISABLED_REASON);
+					return memoryFailure("memory_retrieval_disabled", reason, laneDetails);
+				}
+				if (!current(admission) || !isDeepStrictEqual(laneBudget(), budget)) {
+					throw new LaneMemorySnapshotStaleError();
+				}
 				if (result.isError) return result;
 				const text = result.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
 				// A page that does not fit the lane's room is a stated constraint, never cut (as with a source page).

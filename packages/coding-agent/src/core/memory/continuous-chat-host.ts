@@ -193,7 +193,9 @@ export class ContinuousChatHost {
 			});
 			if (this.closed) throw new Error("Continuous chat stopped before it started.");
 			await this.recoverPriorSessions(ledgerBefore, markerBefore === undefined);
+			if (this.closed) throw new Error("Continuous chat stopped before it started.");
 			await this.sessionLedger.recordAttached(this.options.sessionId, this.options.sessionFile);
+			if (this.closed) throw new Error("Continuous chat stopped before it started.");
 			// Subscribed before the replay, so no durable write falls between the two.
 			this.unsubscribe = this.options.subscribeEntriesPersisted((event) =>
 				this.ingestor.notifyEntriesPersisted(event),

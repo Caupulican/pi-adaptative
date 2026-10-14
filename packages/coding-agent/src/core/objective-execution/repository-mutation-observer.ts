@@ -469,20 +469,24 @@ export class RepositoryMutationObserver {
 		}
 	}
 
+	private isGroupBranchCurrent(group: TypedObservationGroup): boolean {
+		return group.branchAnchor === undefined ? true : this.isCurrentBranchAnchor(group.branchAnchor);
+	}
+
 	private findActiveTypedObservationGroup(
 		objectiveId: string,
 		repositoryRoot: string,
 		cwd: string,
 	): TypedObservationGroup | undefined {
 		const exact = this.typedObservationGroups.get(JSON.stringify([objectiveId, repositoryRoot]));
-		if (exact && this.isCurrentBranchAnchor(exact.branchAnchor)) return exact;
+		if (exact && this.isGroupBranchCurrent(exact)) return exact;
 		const byCwd = this.typedObservationGroups.get(JSON.stringify([objectiveId, cwd]));
-		if (byCwd && this.isCurrentBranchAnchor(byCwd.branchAnchor)) return byCwd;
+		if (byCwd && this.isGroupBranchCurrent(byCwd)) return byCwd;
 		for (const group of this.typedObservationGroups.values()) {
 			if (
 				group.objectiveId === objectiveId &&
 				(group.repositoryRoot === repositoryRoot || group.cwd === cwd || group.cwd === repositoryRoot) &&
-				this.isCurrentBranchAnchor(group.branchAnchor)
+				this.isGroupBranchCurrent(group)
 			) {
 				return group;
 			}
@@ -504,17 +508,22 @@ export class RepositoryMutationObserver {
 		return true;
 	}
 
+	private evictTypedObservationGroup(group: TypedObservationGroup): void {
+		for (const observationId of group.activeObservationIds) {
+			if (this.typedObservationGroupById.get(observationId) === group)
+				this.typedObservationGroupById.delete(observationId);
+		}
+		const groupKey = JSON.stringify([group.objectiveId, group.repositoryRoot]);
+		if (this.typedObservationGroups.get(groupKey) === group) this.typedObservationGroups.delete(groupKey);
+	}
+
 	private openTypedObservationGroup(token: RepositoryObservationToken): void {
 		const repositoryRoot = token.repositoryRoot ?? token.cwd;
-		if (!repositoryRoot || !this.isCurrentBranch(token)) return;
+		if (!repositoryRoot || (token.branchAnchor !== undefined && !this.isCurrentBranch(token))) return;
 		let group = this.findActiveTypedObservationGroup(token.objectiveId, repositoryRoot, token.cwd);
 		const groupKey = JSON.stringify([token.objectiveId, group?.repositoryRoot ?? repositoryRoot]);
-		if (group && !this.isCurrentBranchAnchor(group.branchAnchor)) {
-			for (const observationId of group.activeObservationIds) {
-				if (this.typedObservationGroupById.get(observationId) === group)
-					this.typedObservationGroupById.delete(observationId);
-			}
-			this.typedObservationGroups.delete(groupKey);
+		if (group && !this.isGroupBranchCurrent(group)) {
+			this.evictTypedObservationGroup(group);
 			group = undefined;
 		}
 		if (!group) {
@@ -540,29 +549,47 @@ export class RepositoryMutationObserver {
 		if (!group) return;
 		if (!group.before?.ok && token.before?.ok) {
 			group.before = token.before;
+		} else if (group.before?.ok) {
+			token.before = group.before;
 		}
 	}
 
 	private syncTypedObservationGroup(token: RepositoryObservationToken): void {
+		if (!this.isCurrentBranch(token)) {
+			this.completeTypedObservation(token, undefined);
+			return;
+		}
 		let group = this.typedObservationGroupById.get(token.observationId);
-		if (!group) return;
+		if (group && !this.isGroupBranchCurrent(group)) {
+			this.evictTypedObservationGroup(group);
+			group = undefined;
+		}
+		if (!group) {
+			this.openTypedObservationGroup(token);
+			group = this.typedObservationGroupById.get(token.observationId);
+			if (!group) return;
+		}
 		const repositoryRoot = token.repositoryRoot ?? group.repositoryRoot;
-		if (repositoryRoot !== group.repositoryRoot) {
-			const oldKey = JSON.stringify([group.objectiveId, group.repositoryRoot]);
-			const newKey = JSON.stringify([group.objectiveId, repositoryRoot]);
+		const oldKey = JSON.stringify([group.objectiveId, group.repositoryRoot]);
+		const newKey = JSON.stringify([group.objectiveId, repositoryRoot]);
+		const existing = this.typedObservationGroups.get(newKey);
+		if (existing && existing !== group && this.isGroupBranchCurrent(existing)) {
 			if (this.typedObservationGroups.get(oldKey) === group) this.typedObservationGroups.delete(oldKey);
-			const existing = this.typedObservationGroups.get(newKey);
-			if (existing && existing !== group && this.isCurrentBranchAnchor(existing.branchAnchor)) {
-				for (const observationId of group.activeObservationIds) {
-					existing.activeObservationIds.add(observationId);
-					this.typedObservationGroupById.set(observationId, existing);
-				}
-				if (!existing.before?.ok && group.before?.ok) existing.before = group.before;
-				group = existing;
-			} else {
-				group.repositoryRoot = repositoryRoot;
-				this.typedObservationGroups.set(newKey, group);
+			for (const observationId of group.activeObservationIds) {
+				existing.activeObservationIds.add(observationId);
+				this.typedObservationGroupById.set(observationId, existing);
 			}
+			for (const filePath of group.declaredPaths) existing.declaredPaths.add(filePath);
+			for (const filePath of group.observedPaths) existing.observedPaths.add(filePath);
+			for (const filePath of group.observedByConcurrentShellPaths)
+				existing.observedByConcurrentShellPaths.add(filePath);
+			for (const filePath of group.successfulDeclaredPaths) existing.successfulDeclaredPaths.add(filePath);
+			if (!existing.before?.ok && group.before?.ok) existing.before = group.before;
+			group = existing;
+		} else if (repositoryRoot !== group.repositoryRoot) {
+			if (this.typedObservationGroups.get(oldKey) === group) this.typedObservationGroups.delete(oldKey);
+			group.repositoryRoot = repositoryRoot;
+			this.typedObservationGroups.set(newKey, group);
 		}
 		if (token.branchAnchor) group.branchAnchor = token.branchAnchor;
 		if (!group.before?.ok && token.before?.ok) {
@@ -579,13 +606,8 @@ export class RepositoryMutationObserver {
 		const group = this.typedObservationGroupById.get(token.observationId);
 		if (!group) return;
 		this.typedObservationGroupById.delete(token.observationId);
-		if (!this.isCurrentBranch(token)) {
-			for (const observationId of group.activeObservationIds) {
-				if (this.typedObservationGroupById.get(observationId) === group)
-					this.typedObservationGroupById.delete(observationId);
-			}
-			const groupKey = JSON.stringify([group.objectiveId, group.repositoryRoot]);
-			if (this.typedObservationGroups.get(groupKey) === group) this.typedObservationGroups.delete(groupKey);
+		if ((token.branchAnchor !== undefined && !this.isCurrentBranch(token)) || !this.isGroupBranchCurrent(group)) {
+			this.evictTypedObservationGroup(group);
 			return;
 		}
 		group.activeObservationIds.delete(token.observationId);
