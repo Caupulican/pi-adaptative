@@ -52,7 +52,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	const qmStreaming = createBarrier();
 	const qmCreated = await world.createRootSession("root", {
 		sessionManager: world.createSessionManager(),
-		settings: { memorySystem: "okf" },
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 	});
 	const qmSession = qmCreated.session;
 	const qmFile = qmCreated.sessionManager.getSessionFile();
@@ -88,7 +88,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 
 	const qmIdleCreated = await world.createRootSession("root", {
 		sessionManager: world.createSessionManager(),
-		settings: { memorySystem: "okf" },
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 	});
 	const qmIdleFile = qmIdleCreated.sessionManager.getSessionFile();
 	if (qmIdleFile === undefined) throw new Error("the idle-quit control owner has no file");

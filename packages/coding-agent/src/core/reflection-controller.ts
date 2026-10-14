@@ -552,7 +552,7 @@ export class ReflectionController {
 	}
 
 	dispose(): void {
-		this.dismissCurrentTurnCue();
+		this.invalidateCurrentTurnCueStateCache({ releaseActiveClaim: true });
 		this.unsubscribeSettingsChanges();
 	}
 
@@ -602,7 +602,14 @@ export class ReflectionController {
 	/** Branch/session navigation invalidates the lazy latest-state index; ordinary appends do not. */
 	invalidateCurrentTurnCueStateCache(options: { releaseActiveClaim?: boolean } = {}): void {
 		if (options.releaseActiveClaim) {
-			const current = this.cueStateCacheInitialized ? this.cueStateCache : undefined;
+			let current = this.cueStateCacheInitialized ? this.cueStateCache : undefined;
+			if (!this.cueStateCacheInitialized) {
+				try {
+					current = this.getCurrentTurnCueState();
+				} catch {
+					current = undefined;
+				}
+			}
 			const isActive = this.ownsLiveClaim(current);
 			if (isActive && current?.versionChange) {
 				this.deps.getDurableLearningState?.()?.releaseClaim(current.versionChange.token);

@@ -2858,7 +2858,7 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 	const reached = createBarrier();
 	const held = await world.createRootSession("root", {
 		sessionManager: seedCompactionRetentionHistory(world, "held"),
-		settings: { memorySystem: "okf" },
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 		extensionFactories: [holdAssistantMessageEnd(hold, reached, replyText)],
 	});
 	const heldSession = held.session;
@@ -2944,7 +2944,7 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 	released.release();
 	const control = await world.createRootSession("root", {
 		sessionManager: seedCompactionRetentionHistory(world, "control"),
-		settings: { memorySystem: "okf" },
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 		extensionFactories: [holdCompactionSummary(released, createBarrier())],
 	});
 	const controlSession = control.session;
@@ -3084,7 +3084,7 @@ export async function runCompactionCloseAppendRefused(world: HarnessWorld): Prom
 	const reached = createBarrier();
 	const owner = await world.createRootSession("root", {
 		sessionManager: world.createSessionManager(),
-		settings: { memorySystem: "okf" },
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 		extensionFactories: [holdCompactionSummary(hold, reached)],
 	});
 	const session = owner.session;
@@ -3164,7 +3164,7 @@ export async function runDiscardScanBounds(world: HarnessWorld): Promise<Discard
 	const owner = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
-		settings: { memorySystem: "okf" },
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 	});
 	world.provider.enqueue("root", {
 		name: "discard-scan-seed",
@@ -3228,7 +3228,7 @@ export async function runDiscardThroughRuntime(world: HarnessWorld): Promise<Dis
 			const root = await world.createRootSession("root", {
 				agentDir,
 				sessionManager,
-				settings: { memorySystem: "okf" },
+				settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 			});
 			return {
 				session: root.session,
@@ -4160,7 +4160,7 @@ async function objectiveSdkCreation(world: HarnessWorld): Promise<SdkConstructio
 		.createRootSession("root", {
 			systemOneEnabled: false,
 			executionLoopMode: "objective_primary",
-			settings: { memorySystem: "okf" },
+			settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 		})
 		.then(
 			() => "created",
@@ -5138,7 +5138,7 @@ async function sessionWarningRoutesWitness(world: HarnessWorld): Promise<Session
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
 		systemOneEnabled: false,
-		settings: { memorySystem: "okf" },
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 		closingSink: (warnings) => closing.push([...warnings]),
 	});
 	let initializeCalls = 0;
@@ -5222,7 +5222,7 @@ async function sessionWarningRoutesWitness(world: HarnessWorld): Promise<Session
 		agentDir,
 		sessionManager: reopened,
 		systemOneEnabled: false,
-		settings: { memorySystem: "okf" },
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 	});
 	const heldWarnings = world.warnings.splice(heldMark);
 	const reloadMark = world.warnings.length;
@@ -5237,7 +5237,7 @@ async function sessionWarningRoutesWitness(world: HarnessWorld): Promise<Session
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
 		systemOneEnabled: false,
-		settings: { memorySystem: "okf" },
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 	});
 	await normal.session.reload();
 	const normalWarnings = world.warnings.splice(normalMark);
@@ -5283,7 +5283,7 @@ async function runLifecycleWitness(world: HarnessWorld): Promise<SdkConstruction
 		const owner = await world.createRootSession("root", {
 			systemOneEnabled: false,
 			sessionManager: world.createSessionManager(),
-			settings: { memorySystem: "okf" },
+			settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 		});
 		let firstEnds = 0;
 		let secondEnds = 0;
@@ -5507,7 +5507,7 @@ async function unwrittenForkWitness(world: HarnessWorld): Promise<SdkConstructio
 				agentDir,
 				sessionManager,
 				systemOneEnabled: false,
-				settings: { memorySystem: "okf" },
+				settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 			});
 			return {
 				session: root.session,
@@ -5626,7 +5626,7 @@ async function historyUsageBoundsWitness(
 	const owner = await world.createRootSession("root", {
 		sessionManager: manager,
 		systemOneEnabled: false,
-		settings: { memorySystem: "okf" },
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 		closingSink: (warnings) => closing.push(...warnings),
 	});
 	const delivery = sessionSemanticUsageOf(manager);
@@ -5695,7 +5695,7 @@ async function historyUsageBoundsWitness(
 	const reopened = await world.createRootSession("root", {
 		sessionManager: manager,
 		systemOneEnabled: false,
-		settings: { memorySystem: "okf" },
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 		closingSink: (warnings) => closing.push(...warnings),
 	});
 	const reopenedDelta = reopened.session.getCumulativeUsage().totalTokens - baseline;
@@ -6107,7 +6107,7 @@ export async function runRpcHost(
 			const root = await world.createRootSession("root", {
 				agentDir,
 				sessionManager,
-				settings: { memorySystem: "okf" },
+				settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 			});
 			return {
 				session: root.session,
