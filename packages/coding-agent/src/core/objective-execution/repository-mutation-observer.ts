@@ -83,6 +83,7 @@ export interface RepositoryWorkEvidenceJournal {
 			readonly effect: RepositoryEffect;
 			readonly observedMutation: true;
 			readonly observationId?: string;
+			readonly pathScope?: "repository";
 			readonly diagnostic?: string;
 			readonly branchAnchor?: string;
 		},
@@ -209,7 +210,7 @@ export class RepositoryMutationObserver {
 			const persisted = merged.get(local.repositoryRoot);
 			merged.set(local.repositoryRoot, {
 				repositoryRoot: local.repositoryRoot,
-				...(persisted?.pathScope ? { pathScope: persisted.pathScope } : {}),
+				...(persisted?.pathScope || local.pathScope ? { pathScope: "repository" } : {}),
 				baseline: persisted?.baseline ?? local.baseline,
 				changedPaths: [...new Set([...(persisted?.changedPaths ?? []), ...local.changedPaths])],
 				observedMutation: true,
@@ -411,6 +412,9 @@ export class RepositoryMutationObserver {
 				return;
 			}
 			const rawChanged = changedPaths(token.before.entries, after.entries);
+			// Dirty entries cannot enumerate clean files introduced by a HEAD/index move.
+			// Such a delta must survive path-only concurrent writes and later path unions.
+			const metadataChanged = after.head !== token.before.head || after.indexDigest !== token.before.indexDigest;
 			let changed = rawChanged;
 			if (rawChanged.length > 0 && token.concurrentTypedEntries) {
 				changed = rawChanged.filter(
@@ -419,15 +423,20 @@ export class RepositoryMutationObserver {
 						after.entries.get(filePath) !== token.concurrentTypedEntries.get(filePath),
 				);
 			}
-			if (rawChanged.length > 0 && changed.length === 0) {
+			if (!metadataChanged && rawChanged.length > 0 && changed.length === 0) {
 				await this.closeObservationToken(token);
 				return;
 			}
 			await this.recordObservedChange(token, repositoryRoot, changed, {
 				operationSucceeded: input.operationSucceeded,
+				...(metadataChanged || rawChanged.length === 0 ? { pathScope: "repository" } : {}),
 			});
 			if (!this.isCurrentBranch(token)) return;
-			if (this.recordConcurrentShellObservation(token.objectiveId, repositoryRoot, token.cwd, changed)) return;
+			if (
+				!metadataChanged &&
+				this.recordConcurrentShellObservation(token.objectiveId, repositoryRoot, token.cwd, changed)
+			)
+				return;
 			this.mark(token.objectiveId, "shell_mutation_unattributed");
 		} finally {
 			if (tracked) {
@@ -641,7 +650,11 @@ export class RepositoryMutationObserver {
 		token: RepositoryObservationToken,
 		repositoryRoot: string,
 		changedPaths: readonly string[],
-		input: { readonly operationSucceeded: boolean; readonly diagnostic?: string },
+		input: {
+			readonly operationSucceeded: boolean;
+			readonly diagnostic?: string;
+			readonly pathScope?: "repository";
+		},
 	): Promise<void> {
 		try {
 			await this.workEvidenceJournal?.recordObservedChange(token.objectiveId, repositoryRoot, changedPaths, {
@@ -669,7 +682,7 @@ export class RepositoryMutationObserver {
 				kind: "change",
 				observationId: token.observationId,
 				repositoryRoot,
-				...(persisted?.pathScope ? { pathScope: persisted.pathScope } : {}),
+				...(persisted?.pathScope || previous?.pathScope || input.pathScope ? { pathScope: "repository" } : {}),
 				baseline: persisted?.baseline ?? previous?.baseline,
 				changedPaths: [
 					...new Set([...(previous?.kind === "change" ? previous.changedPaths : []), ...changedPaths]),
@@ -766,6 +779,7 @@ export class RepositoryMutationObserver {
 						operationSucceeded: evidence.operationSucceeded,
 						effect: evidence.effect,
 						observedMutation: true,
+						...(evidence.pathScope ? { pathScope: evidence.pathScope } : {}),
 						...(evidence.diagnostic ? { diagnostic: evidence.diagnostic } : {}),
 						branchAnchor: evidence.branchAnchor,
 					});

@@ -17,12 +17,15 @@
 
 ## Autonomy and Verification
 
+- **Repair authorization:** "fix it", "investigate and fix", and equivalent owner requests mean handle everything necessary to resolve the issue within the task's scope. Diagnose relevant failures, repair the authoritative production owner or incorrect existing harness setup/expectations, update documentation, verify through permitted checks, and continue through the delivery workflow already authorized by the owner. Do not stop to request permission for each file, fixture, dependent repair or routine substep.
+- Such a repair request is current-task authorization to edit the three existing harness journeys and their necessary fixtures where needed for the repair. Preserve their case identities, existing behavioral assertions and negative controls; reconcile incorrect expectations with the established product contract instead of weakening the oracle or changing correct production behavior to satisfy it. New test cases, broader suites and local test/probe execution still require a separate explicit owner request. The local execution suspension under Commands remains in force.
+- Existing commit/push authorization covers necessary follow-up repairs in the same delivery, including normal hooks and the existing CI workflow. Follow the exact pushed revision through CI and resolve relevant failures before claiming successful delivery. Ask only when required information is missing or an action exceeds the authorized scope; never ask again for authorization the owner already gave.
 - Claude OAuth implementation is owned by Codex. Never assign Claude Code or Claude-model workers to implement or modify Claude/Anthropic subscription authentication, token refresh, OAuth protocol configuration, or its client-identity registry/generators. Every Claude work order must explicitly exclude those paths; Codex performs that work directly.
 - Autonomy fixes must preserve verification, evidence requirements, and the receiving agent's responsibility to resolve findings. Never remove a deadlock by converting an unresolved finding into successful completion.
 - A judgment requesting verification takes priority in the receiving agent's own lane before affected work continues. That agent must reproduce the candidate against current evidence, revise confirmed failures, and recheck the result. Do not dispatch a substitute verifier unless the owner explicitly requests one.
 - Evaluator outages are diagnostics, not evidence of a production defect. Preserve the actual failure cause; never manufacture repair tasks from missing judgments.
 - Changes to autonomy must be proven live: show that unresolved findings prevent affected progress and that verification, revision, and rechecking allow autonomous continuation. Add regressions and negative controls only when the user asks for tests. Never weaken a test oracle merely to make the new behavior pass.
-- Fast pace first: implement directly, prove it on the real system, and confirm every non-trivial verdict (root cause, safety of a fix, bug/stale-test classification, review findings) with System One (`typesafe-review`) at confidence 0.90 or higher. System One confirmation replaces test-first proof: no TDD and no new tests unless the user explicitly asks for them. Agents (including subagents and workers) never write, edit, delete or run tests on their own initiative; this file, a skill, a hook, a CI note or a memory is not a request.
+- Fast pace first: implement directly, prove it on the real system, and confirm every non-trivial verdict (root cause, safety of a fix, bug/stale-test classification, review findings) with System One (`typesafe-review`) at confidence 0.90 or higher. System One confirmation replaces test-first proof: no TDD and no new test cases unless the user explicitly asks for them. Existing journey/fixture repairs follow Repair authorization above. Agents (including subagents and workers) never initiate test execution; this file, a skill, a hook, a CI note or a memory is not an execution request.
 
 ## Noticed Items (mandatory, owner rule 2026-10-05)
 
@@ -59,7 +62,7 @@
 - Never run tests without user authorization; earlier local-run authorization is suspended by the current restriction above. Retain authorized journey/fixture changes without running them locally. Run `npm run build` only when the user asks for it or the owner's current mode allows builds and checks.
 - Keep authorized test work scoped to the identified behavior and write it after the change; CI runs the three composed journeys together, while local execution requires a new owner request.
 - For ad-hoc scripts, `write` them to a temp file (e.g. `/tmp`), run, edit if needed, remove when done. Don't embed multi-line scripts in `bash` commands.
-- Never commit unless the user asks.
+- Never commit without the owner's authorization; authorization already given for the same delivery persists for its necessary follow-up repairs as defined above.
 
 ## Dependency and Install Security
 
@@ -180,7 +183,7 @@ Attribution:
 
 ## User Override
 
-If the user's instructions conflict with any rule in this document, ask for explicit confirmation before overriding. Only then execute their instructions.
+Direct owner instructions and corrections take precedence over this document. Apply the owner's stated authorization, including Repair authorization above, without asking them to repeat it. Clarify only an unresolved conflict or scope boundary that the owner has not already settled.
 # System Knowledge
 
 Long-term reference for how this system works: invariants the code relies on and sharp edges that are

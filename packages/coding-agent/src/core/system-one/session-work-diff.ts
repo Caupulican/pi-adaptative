@@ -257,6 +257,7 @@ export function createSessionWorkEvidenceJournal(getManager: () => SessionManage
 			save(objectiveId, {
 				...scope,
 				changedPaths: [...new Set([...scope.changedPaths, ...changedPaths])],
+				...(input.pathScope ? { pathScope: input.pathScope } : {}),
 				observedMutation: true,
 				...(input.observationId
 					? {

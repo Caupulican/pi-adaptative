@@ -127,7 +127,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 		sessionManager: world.createSessionManager(mAgentDir),
 		settings: icmContinuousSettings(),
 	});
-	await icmWaitForChatIdle(world, mAgentDir, 2, (_records, nodes) =>
+	await icmWaitForChatIdle(world, mAgentDir, 3, (_records, nodes) =>
 		nodes.some((node) => node.level === 1 && node.ordinal === 0),
 	);
 	const mMigrationAfterFirst = JSON.parse(utf8Text(world.io.readFileSync(mStore.migrationFile, "utf8"))) as {
@@ -147,7 +147,9 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 					entry.sessionId === mUnsupportedSessionId &&
 					entry.reason === "unsupported session start time: +010000-01-01T00:00:00.000Z",
 			),
-			recordTexts: mImportedRecords.map((record) => `${record.kind}: ${record.text}`),
+			recordTexts: mImportedRecords
+				.filter((record) => record.kind === "note")
+				.map((record) => `${record.kind}: ${record.text}`),
 		},
 		"after repairing the blocked session file, legacy import retries, writes migration.json, imports kept session as note records, and records intentional skips",
 	).toEqual({
@@ -157,6 +159,22 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 		unsupportedSkipped: true,
 		recordTexts: ["note: user: Seed kept legacy session.", "note: pi: Legacy kept reply: alpha-migration-token."],
 	});
+	expect(
+		mImportedRecords.map((record) => ({ kind: record.kind, text: record.text, sourceKey: record.sourceKey })),
+		"failed activation remains attached and its persisted user prompt recovers canonically exactly once",
+	).toEqual([
+		{ kind: "note", text: "user: Seed kept legacy session.", sourceKey: expect.stringContaining(mLegacyKeptId) },
+		{
+			kind: "note",
+			text: "pi: Legacy kept reply: alpha-migration-token.",
+			sourceKey: expect.stringContaining(mLegacyKeptId),
+		},
+		{
+			kind: "user",
+			text: "Attempt turn while a legacy session file has an invalid header.",
+			sourceKey: expect.stringMatching(new RegExp(`^${mBlocked.session.sessionId}:`)),
+		},
+	]);
 
 	// M2 (mode switching ICM -> OKF -> ICM):
 	// Switching to OKF releases runtime.lease.json and restores the memory tool; switching back to ICM re-acquires the lease
@@ -184,19 +202,20 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	).toEqual({
 		hasMemory: true,
 		hasZoom: false,
-		recordCountDuringOkf: 2,
+		recordCountDuringOkf: 3,
 	});
 
 	const mBackToIcm = await mRoot.session.setMemorySystem("icm");
 	expect(mBackToIcm.ok, mBackToIcm.message).toBe(true);
 	expect(world.io.existsSync(mStore.leaseFile), "switching back to ICM re-acquires the lease").toBe(true);
-	await icmWaitForChatIdle(world, mAgentDir, 4);
+	await icmWaitForChatIdle(world, mAgentDir, 5);
 	expect(
 		icmReadContinuousRecords(world, mStore).map((record) => `${record.kind}: ${record.text}`),
 		"switching back to ICM replays the current session's OKF turn without re-importing settled legacy sessions",
 	).toEqual([
 		"note: user: Seed kept legacy session.",
 		"note: pi: Legacy kept reply: alpha-migration-token.",
+		"user: Attempt turn while a legacy session file has an invalid header.",
 		"user: Run one turn in OKF mode.",
 		"pi: OKF mode turn noted.",
 	]);
@@ -245,7 +264,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 		sessionManager: world.createSessionManager(mAgentDir),
 		settings: icmContinuousSettings(),
 	});
-	await icmWaitForChatIdle(world, mAgentDir, 6, (_records, nodes) =>
+	await icmWaitForChatIdle(world, mAgentDir, 7, (_records, nodes) =>
 		nodes.some((node) => node.level === 2 && node.ordinal === 0),
 	);
 	const mRecoveredRecords = icmReadContinuousRecords(world, mStore);
@@ -263,12 +282,13 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 		recordTexts: [
 			"note: user: Seed kept legacy session.",
 			"note: pi: Legacy kept reply: alpha-migration-token.",
+			"user: Attempt turn while a legacy session file has an invalid header.",
 			"user: Run one turn in OKF mode.",
 			"pi: OKF mode turn noted.",
 			"user: Crash session user message.",
 			"pi: Recovered crash session reply.",
 		],
-		idxRebuiltBytes: 6 * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES,
+		idxRebuiltBytes: 7 * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES,
 		keysIdxExists: true,
 		node0Plus4Children: [
 			{ level: 1, ordinal: 0 },

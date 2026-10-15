@@ -7,6 +7,7 @@
 
 ### Fixed
 
+- Preserved repository-wide completion evidence after HEAD/index mutations across later path-scoped writes and journal recovery, without attributing Git mutations to concurrent typed writes.
 - Recovered legacy continuous-chat imports incorrectly finalized as failures by older migration markers, preserving intentional exclusions, the original eight-session limit, source-key deduplication and completion time; valid duplicate session files no longer block migration.
 - Centralized matching-token OAuth refresh-refusal persistence across expired-token and 401 recovery without changing storage locking or rotation recovery.
 - Kept transcript-summary construction live past malformed model replies, rendered skipped ranges explicitly, preserved append-stable frontier prefixes, and bound persisted summary text to its manifest entry.

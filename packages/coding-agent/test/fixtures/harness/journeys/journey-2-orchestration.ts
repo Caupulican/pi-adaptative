@@ -1423,6 +1423,13 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	// Every judgment the checkpoint phase meets: the goal's own continuation cycles (objective-cycle routing, per-turn
 	// step routing, and the completion gate). No user prompt is submitted here, so no intake family is declared.
 	const checkpointJudgments = {
+		// The final account judges the actual change, its requirement link and the passing regression evidence.
+		shows_true_0: { kind: "noul", probability: 0.97 },
+		shows_false_0: { kind: "noul", probability: 0.02 },
+		shows_true_1: { kind: "noul", probability: 0.97 },
+		shows_false_1: { kind: "noul", probability: 0.02 },
+		shows_true_2: { kind: "noul", probability: 0.97 },
+		shows_false_2: { kind: "noul", probability: 0.02 },
 		step_relevant: { kind: "noul", probability: 0.97 },
 		evidence_sufficient_to_act: { kind: "noul", probability: 0.97 },
 		unsupported_assumption_present: { kind: "noul", probability: 0.02 },
@@ -1554,7 +1561,58 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			},
 		]),
 		calls("vitest-recheck", [{ id: "verify-pass-2", name: "bash", arguments: { command: VITEST_COMMAND } }]),
-		calls("complete-final", [{ id: "complete-2", name: "goal", arguments: { action: "complete" } }]),
+		calls("get-rechecked-goal", [{ id: "goal-get-recheck", name: "goal", arguments: { action: "get" } }]),
+		dynamicCalls(
+			"record-recheck-evidence",
+			(request) => [
+				{
+					id: "evidence-recheck",
+					name: "goal",
+					arguments: {
+						action: "add_evidence",
+						kind: "test",
+						uri: "verify-pass-2",
+						summary: "The current recheck passed: MAX_RETRIES is 5.",
+						requirementIds: [requirementFrom(request)],
+					},
+				},
+			],
+			(request) => assertBatchOk(request, "get-rechecked-goal"),
+		),
+		dynamicCalls(
+			"complete-final",
+			(request) => {
+				const requirement = requirementFrom(request);
+				const goal = session.getGoalStateSnapshot();
+				const evidence = goal?.evidence.find((item) => item.uri === "verify-pass-2");
+				const linkedRequirement = goal?.requirements.find((item) => item.id === requirement);
+				if (evidence?.verified !== true || !linkedRequirement?.evidenceIds.includes(evidence.id)) {
+					throw new Error("the completion account has no verified current recheck linked to its requirement");
+				}
+				return [
+					{
+						id: "complete-2",
+						name: "goal",
+						arguments: {
+							action: "complete",
+							account: {
+								changes: [
+									{
+										path: "src/limits.ts",
+										reason: "Raises MAX_RETRIES from 3 to 5.",
+										evidenceIds: [evidence.id],
+										serves: [requirement],
+									},
+								],
+								assumptions: [],
+								regressions: [{ path: "MAX_RETRIES equals 5", evidenceIds: [evidence.id] }],
+							},
+						},
+					},
+				];
+			},
+			(request) => assertBatchOk(request, "record-recheck-evidence"),
+		),
 		{
 			name: "completed",
 			check: (request) => {
@@ -1589,6 +1647,24 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		session.getGoalStateSnapshot()?.status,
 		`the host records the goal as completed; native settlement: ${JSON.stringify(settlement)}`,
 	).toBe("completed");
+	if (world.systemOne.enabled) {
+		const accountRequests = world.systemOne.decoded.filter(
+			(request) => request.phase === "verify-checkpoint" && "shows_true_2" in request.questions,
+		);
+		expect(accountRequests, "completion reaches the change account judgment after the matching recheck").toHaveLength(
+			1,
+		);
+		const accountState = accountRequests[0]?.state;
+		const currentEvidence = session.getGoalStateSnapshot()?.evidence.find((item) => item.uri === "verify-pass-2");
+		expect(accountState, "the account judges the real change and its linked passing recheck").toMatchObject({
+			s0: "Raises MAX_RETRIES from 3 to 5.",
+			e0: expect.stringContaining("src/limits.ts"),
+			s1: "This change helps achieve: MAX_RETRIES equals 5.",
+			e1: expect.stringContaining(`${currentEvidence?.id}: [verified]`),
+			s2: 'The behavior "MAX_RETRIES equals 5" is exercised by passing checks',
+			e2: expect.stringContaining(`${currentEvidence?.id}: [verified]`),
+		});
+	}
 	expect(
 		getLatestGoalStateSnapshot(created.sessionManager)?.status,
 		"the persisted goal snapshot agrees with the host",

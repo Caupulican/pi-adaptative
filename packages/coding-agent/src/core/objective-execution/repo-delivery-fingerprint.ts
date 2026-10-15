@@ -16,6 +16,8 @@ export type RepoDeliveryFingerprint =
 			readonly ok: true;
 			readonly repositoryRoot: string;
 			readonly digest: string;
+			readonly head: string;
+			readonly indexDigest: string;
 			readonly entries: ReadonlyMap<string, string>;
 	  }
 	| { readonly ok: false; readonly reason: "repository_fingerprint_unstable" | "repository_fingerprint_unavailable" };
@@ -321,7 +323,14 @@ export async function captureRepoDeliveryFingerprint(
 			const after = await readFence(repoRoot, hooks, options);
 			if (!after) return { ok: false, reason: "repository_fingerprint_unavailable" };
 			if (before.token !== after.token) return "retry";
-			return { ok: true, repositoryRoot: repoRoot, digest: digested.digest, entries: digested.entries };
+			return {
+				ok: true,
+				repositoryRoot: repoRoot,
+				digest: digested.digest,
+				head: before.head,
+				indexDigest: before.indexDigest,
+				entries: digested.entries,
+			};
 		} catch (error) {
 			if (options.signal?.aborted) throw error;
 			return { ok: false, reason: "repository_fingerprint_unavailable" };

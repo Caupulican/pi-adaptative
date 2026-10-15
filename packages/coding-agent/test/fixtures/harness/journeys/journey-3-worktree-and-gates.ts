@@ -2168,6 +2168,25 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 					"Change the stage one line of the notes file.",
 					"Re-read the notes file.",
 				)(request);
+				if ("shows_true_26" in request.questions) {
+					if (!isRecordObject(request.state)) throw new Error("the change account has no decoded state");
+					expect(
+						Object.keys(request.state).filter((key) => /^s\d+$/.test(key)),
+						"all twelve change accounts plus the assumption and regressions reach review",
+					).toHaveLength(27);
+					expect(request.state, "landed files survive later shared-checkout path observations").toMatchObject({
+						s2: "Exports the LATE flag from the late module.",
+						e2: expect.stringContaining("src/late.ts"),
+						s18: "Adds the module an external writer committed while the gate ran; the moved tip was refused, and this file landed with the unchanged tip.",
+						e18: expect.stringContaining("src/e12-late.ts"),
+					});
+					expect(request.state.e2, "the late account receives the actual landed patch").toContain(
+						"+export const LATE = true;",
+					);
+					expect(request.state.e18, "the external commit account receives its landed patch").toContain(
+						"+export const E12_LATE = 1;",
+					);
+				}
 				if (world.systemOne.enabled) {
 					const controller = session.systemOneController;
 					if (controller === undefined)
@@ -2380,6 +2399,12 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	);
 	trace.mark("root", "goal.completed");
 	if (world.systemOne.enabled) {
+		expect(
+			world.systemOne.decoded.filter(
+				(request) => request.phase === "complete" && "shows_true_26" in request.questions,
+			),
+			"the complete change account reaches the transport exactly once",
+		).toHaveLength(1);
 		const native = {
 			requirementText: COMPLETION_REQUIREMENT_TEXT,
 			evidenceIds: durableGoalEvidenceIds(created.sessionManager),
