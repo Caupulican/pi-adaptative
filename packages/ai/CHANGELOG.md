@@ -4,6 +4,7 @@
 
 - Added the Jev 1.14 image-judgment catalog entry and image input metadata for direct TypeSafe models.
 - Explicit `promptCacheMarkers` reservation (`systemPromptBlockIndices`, `toolsLast`, `messageIndices`) on `StreamOptions` and Anthropic request serialization, keeping total `cache_control` breakpoints within the four-marker provider ceiling.
+- Exported `resolveCacheRetention` so hosts can read the active prompt-cache retention.
 
 ### Changed
 

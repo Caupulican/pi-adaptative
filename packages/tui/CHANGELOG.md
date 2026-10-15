@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- `Editor` takes an optional `placeholder` shown while it is empty, with an optional `placeholderColor` in `EditorTheme`; `SettingsListTheme` takes an optional `selectedRow` so the selected row can carry a full-width surface.
+
+### Changed
+
+- `SelectList` pads the selected row to the full width so a selected-row surface reaches the edge.
+
+### Fixed
+
+- A space typed into an active `SettingsList` search is part of the query instead of toggling the selected setting.
+
 ## [0.103.8] - 2026-10-12
 
 ## [0.103.7] - 2026-10-09
