@@ -11,6 +11,8 @@ export class CustomEditor extends Editor {
 	// Special handlers that can be dynamically replaced
 	public onEscape?: () => void;
 	public onCtrlD?: () => void;
+	/** The shortcuts key on an empty editor; a `?` anywhere else is text. */
+	public onShortcuts?: () => void;
 	public onPasteImage?: () => void;
 	/** Return true only when an active foreground tool accepted the handoff. */
 	public onBackgroundTool?: () => boolean;
@@ -73,6 +75,12 @@ export class CustomEditor extends Editor {
 				return;
 			}
 			// Fall through to editor handling for delete-char-forward when not empty
+		}
+
+		// Shortcuts: only on an empty editor, where nothing is being typed that a `?` could belong to.
+		if (this.getText().length === 0 && this.onShortcuts && this.keybindings.matches(data, "app.shortcuts.show")) {
+			this.onShortcuts();
+			return;
 		}
 
 		// Check all other app actions

@@ -9,6 +9,11 @@ export const SELF_COMPACTION_REQUEST_CUSTOM_TYPE = "self_compaction_request";
 export const SELF_COMPACTION_HANDOFF_CUSTOM_TYPE = "self_compaction_handoff";
 export const SELF_COMPACTION_ABANDONED_CUSTOM_TYPE = "self_compaction_abandoned";
 export const SELF_COMPACTION_OWNER_REQUEST_CUSTOM_TYPE = "self_compaction_owner_request";
+/**
+ * Under ICM the end of the chat turn is the release: the next turn's request is rebuilt from the chat view, so no
+ * compaction runs. This entry records that the turn holding the saved note ended, which moves the note to delivery.
+ */
+export const SELF_COMPACTION_RELEASED_CUSTOM_TYPE = "self_compaction_released";
 export const SELF_COMPACTION_NOTE_MAX_CHARS = 24_000;
 export const SELF_COMPACTION_MAX_ATTEMPTS = 3;
 
@@ -203,7 +208,12 @@ export function selfCompactionGuidance(
 	thresholds: SelfCompactionThresholds,
 	prompts: SelfCompactionPrompts = {},
 	values?: SelfCompactionTemplateValues,
+	releasesAtTurnEnd = false,
+	blockedReason?: string,
 ): string | undefined {
+	if ((level === "warning" || level === "forced") && blockedReason !== undefined) {
+		return `[self-compaction · ${level}] Context ${level === "forced" ? "reached the forced line" : "passed the warning line"} (notice ${formatTokens(thresholds.noticeTokens)}, warning ${formatTokens(thresholds.warningTokens)}, forced ${formatTokens(thresholds.forcedTokens)} tokens of a ${formatTokens(thresholds.contextWindow)}-token window). A ${SELF_COMPACT_TOOL_NAME} note cannot free context now: ${blockedReason}. No tool is refused; keep working.`;
+	}
 	if ((level === "notice" || level === "warning") && prompts[level] !== undefined) {
 		return renderSelfCompactionTemplate(prompts[level], values ?? selfCompactionTemplateValues(thresholds, null, 0));
 	}
@@ -218,7 +228,7 @@ export function selfCompactionGuidance(
 		case "warning":
 			return `[self-compaction · warning] Context passed the warning line (${lines}). Finish only the current atomic step, then call ${SELF_COMPACT_TOOL_NAME} with note_to_self (${NOTE_CONTENTS}). At the forced line every tool except ${SELF_COMPACT_TOOL_NAME} is refused.`;
 		case "forced":
-			return `[self-compaction · forced] Context reached the forced line (${lines}). Every tool except ${SELF_COMPACT_TOOL_NAME} is refused until the context is compacted. Write note_to_self (${NOTE_CONTENTS}) and call ${SELF_COMPACT_TOOL_NAME} now.`;
+			return `[self-compaction · forced] Context reached the forced line (${lines}). Every tool except ${SELF_COMPACT_TOOL_NAME} is refused until ${releasesAtTurnEnd ? "your note releases this turn's context" : "the context is compacted"}. Write note_to_self (${NOTE_CONTENTS}) and call ${SELF_COMPACT_TOOL_NAME} now.`;
 		default:
 			return undefined;
 	}
@@ -319,7 +329,12 @@ export function applySelfCompactionEntry(state: SelfCompactionState, entry: Sess
 	}
 	switch (state.status) {
 		case "pending":
-			if (entry.type === "compaction" && compactionHandoffId(entry.details) === request.id) {
+			if (
+				(entry.type === "compaction" && compactionHandoffId(entry.details) === request.id) ||
+				(entry.type === "custom" &&
+					entry.customType === SELF_COMPACTION_RELEASED_CUSTOM_TYPE &&
+					handoffIdOf(entry.data) === request.id)
+			) {
 				return { ...state, status: "compacted", cycles: state.cycles + 1, lastError: undefined };
 			}
 			if (entry.type === "compaction_end" && (entry.outcome === "failure" || entry.outcome === "cancelled")) {

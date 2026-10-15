@@ -173,17 +173,28 @@ interface AssistantToolReference {
 }
 
 const synthesizedSessionContextMessages = new WeakSet<AgentMessage>();
+/**
+ * The custom_message entry each custom message object was persisted as or materialized from. A custom message is
+ * rebuilt from its entry's fields, so unlike a message entry its object identity is not the entry's: this map is
+ * the only link from the object back to its entry.
+ */
+const customMessageEntryIds = new WeakMap<object, string>();
 
-function retainSynthesizedSessionContextMessage<T extends AgentMessage>(message: T): T {
+function retainSynthesizedSessionContextMessage<T extends AgentMessage>(message: T, customEntryId?: string): T {
 	synthesizedSessionContextMessages.add(message);
+	if (customEntryId !== undefined) customMessageEntryIds.set(message, customEntryId);
 	return message;
 }
 
 function cloneSessionContext(context: SessionContext): SessionContext {
 	return {
-		messages: context.messages.map((message) =>
-			synthesizedSessionContextMessages.has(message) ? { ...message } : message,
-		),
+		messages: context.messages.map((message) => {
+			if (!synthesizedSessionContextMessages.has(message)) return message;
+			const copy = { ...message };
+			const customEntryId = customMessageEntryIds.get(message);
+			if (customEntryId !== undefined) customMessageEntryIds.set(copy, customEntryId);
+			return copy;
+		}),
 		thinkingLevel: context.thinkingLevel,
 		model: context.model ? { ...context.model } : null,
 	};
@@ -578,25 +589,59 @@ function branchPath(
 }
 
 /**
- * Entry ids of original-user gaps that `buildSessionContext` emits for this branch. Session-replacement
- * preparation stores them on the checkpoint so the next rebuild does not emit messages the summary included.
+ * Entry ids of original-user gaps that `buildSessionContext` emits for this branch, from every section of the
+ * rebuilt context. Session-replacement preparation stores them on the checkpoint so the next rebuild does not emit
+ * messages the summary included.
  */
 export function summarizedGapEntryIds(entries: SessionEntry[], leafId?: string | null): string[] {
 	const path = branchPath(entries, leafId);
 	if (!path) return [];
-	let latest: CompactionEntry | undefined;
-	for (const entry of path) {
-		if (entry.type === "compaction") latest = entry;
+	const ids: string[] = [];
+	for (const section of compactedContextSections(path)) {
+		if (section.kind === "compacted") for (const entry of section.selection.restoredGaps) ids.push(entry.id);
 	}
-	if (latest?.retention?.mode !== "original-user") return [];
-	return projectedGapEntries(path).map((entry) => entry.id);
+	return ids;
 }
 
-/** What a rebuilt context emits verbatim from before the compaction entry of a branch path. */
+/**
+ * Whether a checkpoint summarizes everything before it on this path: it is unscoped, or its scope starts at the
+ * path's first entry. A checkpoint scoped to a later entry replaced only that scope, so the entries before the scope
+ * are not covered by its summary and a new checkpoint of this path must read them itself.
+ */
+export function isWholePathCompaction(path: readonly SessionEntry[], compaction: CompactionEntry): boolean {
+	return compaction.scopeStartEntryId === undefined || compaction.scopeStartEntryId === path[0]?.id;
+}
+
+/**
+ * Where a checkpoint's scope starts on a branch path: 0 for an unscoped checkpoint, else the index of its scope
+ * start entry. A scope start that is not at or before the checkpoint on the path is a broken session, never guessed.
+ */
+function compactionScopeIndex(
+	path: readonly SessionEntry[],
+	compaction: CompactionEntry,
+	compactionIdx: number,
+): number {
+	if (compaction.scopeStartEntryId === undefined) return 0;
+	for (let i = compactionIdx; i >= 0; i--) {
+		if (path[i]?.id === compaction.scopeStartEntryId) return i;
+	}
+	throw new Error(
+		`Compaction ${compaction.id} is scoped to entry ${compaction.scopeStartEntryId}, which is not before it on this branch.`,
+	);
+}
+
+/** What a rebuilt context emits verbatim for one checkpoint's section `[scopeIdx, end)` of a branch path. */
 interface CompactedContextSelection {
+	/** Where the checkpoint's scope starts: the section's first entry. Entries before it belong to earlier sections. */
+	scopeIdx: number;
 	compactionIdx: number;
-	/** The retained original user message, in `original-user` mode. */
-	originalUserEntry: SessionMessageEntry | undefined;
+	/** Where the section ends: the path's end for the latest checkpoint, else the next section's scope start. */
+	end: number;
+	/**
+	 * The entry kept verbatim before the summary, in `original-user` mode: the original user message, or for a scoped
+	 * checkpoint its scope start, whatever that entry's message role.
+	 */
+	originalUserEntry: SessionEntry | undefined;
 	/** The original-user gap entries a rebuild restores; empty in the standard mode. */
 	restoredGaps: SessionEntry[];
 	/** Transient records carried forward from before the cut, in path order. */
@@ -608,23 +653,30 @@ interface CompactedContextSelection {
 /**
  * The one owner of which entries before a compaction stay in the context: `buildSessionContext` emits them
  * and {@link retainedEntryIdsBeforeCompaction} reports them, so no other module restates the retention rules.
+ * The selection covers the checkpoint's section `[scopeIdx, end)` only: a scoped checkpoint owns only the entries
+ * from its scope start onward, so nothing before that is retained, restored or carried by it. Without a scope the
+ * whole path before the checkpoint is its input, as always.
  */
-function selectCompactedContext(path: readonly SessionEntry[], compaction: CompactionEntry): CompactedContextSelection {
-	// Find compaction index in path
-	const compactionIdx = path.findIndex((e) => e.type === "compaction" && e.id === compaction.id);
+function selectCompactedContext(
+	path: readonly SessionEntry[],
+	compaction: CompactionEntry,
+	compactionIdx: number,
+	end: number,
+): CompactedContextSelection {
+	const scopeIdx = compactionScopeIndex(path, compaction, compactionIdx);
+	const scopedPath = scopeIdx === 0 && end === path.length ? path : path.slice(scopeIdx, end);
 	const originalUserEntry =
 		compaction.retention?.mode === "original-user"
 			? path
-					.slice(0, compactionIdx)
+					.slice(scopeIdx, compactionIdx)
 					.find(
-						(entry): entry is SessionMessageEntry =>
+						(entry) =>
 							entry.id === compaction.retention?.userEntryId &&
-							entry.type === "message" &&
-							entry.message.role === "user",
+							(entry.type === "message" || entry.type === "custom_message"),
 					)
 			: undefined;
 
-	const restoredGaps = compaction.retention?.mode === "original-user" ? projectedGapEntries(path) : [];
+	const restoredGaps = compaction.retention?.mode === "original-user" ? projectedGapEntries(scopedPath) : [];
 
 	// Transient records (append-on-change host and kernel records: skill context, goal context,
 	// legend deltas, failure ledger) that fell before the cut are carried forward: the last record
@@ -632,21 +684,21 @@ function selectCompactedContext(path: readonly SessionEntry[], compaction: Compa
 	// instance after compaction and re-appends every kind on the next request, re-sending the same
 	// content the compacted history already carried. Kinds with a record in the kept tail need none.
 	let firstKeptIdx = compactionIdx;
-	for (let i = 0; i < compactionIdx; i++) {
+	for (let i = scopeIdx; i < compactionIdx; i++) {
 		if (path[i].id === compaction.firstKeptEntryId) {
 			firstKeptIdx = i;
 			break;
 		}
 	}
 	const tailKinds = new Set<string>();
-	for (let i = firstKeptIdx; i < path.length; i++) {
+	for (let i = firstKeptIdx; i < end; i++) {
 		const entry = path[i];
 		if (entry.type === "custom_message" && classifyTransientRecord(entry.content, entry.details).transient) {
 			tailKinds.add(entry.customType);
 		}
 	}
 	const carriedByKind = new Map<string, SessionEntry[]>();
-	for (let i = 0; i < firstKeptIdx; i++) {
+	for (let i = scopeIdx; i < firstKeptIdx; i++) {
 		const entry = path[i];
 		if (entry.type !== "custom_message" || tailKinds.has(entry.customType)) continue;
 		const record = classifyTransientRecord(entry.content, entry.details);
@@ -660,26 +712,68 @@ function selectCompactedContext(path: readonly SessionEntry[], compaction: Compa
 	const carried = [...carriedByKind.values()].flat().sort((a, b) => path.indexOf(a) - path.indexOf(b));
 
 	const retained = compaction.retention ? restoredGaps : path.slice(firstKeptIdx, compactionIdx);
-	return { compactionIdx, originalUserEntry, restoredGaps, carried, retained };
+	return { scopeIdx, compactionIdx, end, originalUserEntry, restoredGaps, carried, retained };
+}
+
+/** One section of a rebuilt context: raw entries `[0, end)`, or one checkpoint's section. */
+type ContextSection =
+	| { kind: "raw"; end: number }
+	| { kind: "compacted"; compaction: CompactionEntry; selection: CompactedContextSelection };
+
+/**
+ * The sections a branch path rebuilds into, earliest first. The latest checkpoint owns the path from its scope start
+ * to the end. A scoped checkpoint replaced only its scope, so the entries before that scope are rebuilt exactly as the
+ * shorter branch ending there would be: by its own latest checkpoint, and so on, down to a raw section or an
+ * unscoped checkpoint. Each step scans backward from the previous section's start, so the whole path is read once.
+ */
+function compactedContextSections(path: readonly SessionEntry[]): ContextSection[] {
+	const sections: ContextSection[] = [];
+	let end = path.length;
+	while (end > 0) {
+		let compactionIdx = -1;
+		for (let i = end - 1; i >= 0; i--) {
+			if (path[i]?.type === "compaction") {
+				compactionIdx = i;
+				break;
+			}
+		}
+		if (compactionIdx < 0) {
+			sections.push({ kind: "raw", end });
+			break;
+		}
+		const compaction = path[compactionIdx] as CompactionEntry;
+		const selection = selectCompactedContext(path, compaction, compactionIdx, end);
+		sections.push({ kind: "compacted", compaction, selection });
+		end = selection.scopeIdx;
+	}
+	return sections.reverse();
 }
 
 /**
  * Ids of the entries positioned before the latest compaction of a branch path that the rebuilt context still
  * emits: the kept tail (or, in `original-user` mode, the retained user message and restored gaps) and the
- * carried-forward transient records. Everything else before that compaction was compacted away. Empty when
- * the path holds no compaction.
+ * carried-forward transient records, plus, for a scoped checkpoint, everything the sections before its scope emit
+ * (their checkpoint entries included). Everything else before that compaction was compacted away. Empty when the
+ * path holds no compaction.
  */
 export function retainedEntryIdsBeforeCompaction(path: readonly SessionEntry[]): ReadonlySet<string> {
-	let compaction: CompactionEntry | undefined;
-	for (const entry of path) {
-		if (entry.type === "compaction") compaction = entry;
-	}
 	const retained = new Set<string>();
-	if (!compaction) return retained;
-	const selection = selectCompactedContext(path, compaction);
-	if (selection.originalUserEntry) retained.add(selection.originalUserEntry.id);
-	for (const entry of selection.carried) retained.add(entry.id);
-	for (const entry of selection.retained) retained.add(entry.id);
+	const sections = compactedContextSections(path);
+	const latest = sections[sections.length - 1];
+	if (latest?.kind !== "compacted") return retained;
+	for (const section of sections) {
+		if (section.kind === "raw") {
+			for (let i = 0; i < section.end; i++) retained.add((path[i] as SessionEntry).id);
+			continue;
+		}
+		const { selection } = section;
+		if (selection.originalUserEntry) retained.add(selection.originalUserEntry.id);
+		for (const entry of selection.carried) retained.add(entry.id);
+		for (const entry of selection.retained) retained.add(entry.id);
+		if (section === latest) continue;
+		retained.add(section.compaction.id);
+		for (let i = selection.compactionIdx + 1; i < selection.end; i++) retained.add((path[i] as SessionEntry).id);
+	}
 	return retained;
 }
 
@@ -688,7 +782,9 @@ export function retainedEntryIdsBeforeCompaction(path: readonly SessionEntry[]):
  * If leafId is provided, walks from that entry to root.
  * Handles compaction and branch summaries along the path.
  *
- * The latest compaction is the checkpoint. Its own unsummarized suffix, and any earlier
+ * The latest compaction is the checkpoint. A checkpoint scoped to a later entry (a running ICM chat turn's start)
+ * replaced only its scope: the entries before the scope are rebuilt first, as the branch ending there would be.
+ * Its own unsummarized suffix, and any earlier
  * original-user gap that no later checkpoint recorded as part of its summary, are emitted
  * after that summary. A stored `coveredThroughEntryId` is never replaced by recovery.
  * The stored summary text is not rewritten. When a restored gap contains a user message, only the
@@ -706,43 +802,62 @@ export function buildSessionContext(
 		return { messages: [], thinkingLevel: "off", model: null };
 	}
 
-	// Extract settings and find compaction
+	// Extract settings
 	let thinkingLevel = "off";
 	let model: { provider: string; modelId: string } | null = null;
-	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel;
 		} else if (entry.type === "model_change") {
 			model = { provider: entry.provider, modelId: entry.modelId };
-		} else if (entry.type === "compaction") {
-			compaction = entry;
 		}
 	}
 
-	const messages: AgentMessage[] = [];
+	return { messages: sessionContextItems(path).map((item) => item.message), thinkingLevel, model };
+}
 
+/** One message of a rebuilt session context and the entry it came from (a compaction entry for its summary). */
+export interface SessionContextItem {
+	entry: SessionEntry;
+	message: AgentMessage;
+}
+
+function sessionContextMessage(entry: SessionEntry): AgentMessage | undefined {
+	if (entry.type === "message") return entry.message;
+	if (entry.type === "custom_message") {
+		return retainSynthesizedSessionContextMessage(
+			createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
+			entry.id,
+		);
+	}
+	if (entry.type === "branch_summary" && entry.summary) {
+		return retainSynthesizedSessionContextMessage(
+			createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp),
+		);
+	}
+	return undefined;
+}
+
+/**
+ * The messages {@link buildSessionContext} rebuilds for a branch path (root to leaf), in order, each with its source
+ * entry. The one owner of what a rebuilt context holds: anything that reports on the active context reads this.
+ */
+export function sessionContextItems(path: readonly SessionEntry[]): SessionContextItem[] {
+	const items: SessionContextItem[] = [];
 	const appendMessage = (entry: SessionEntry) => {
-		if (entry.type === "message") {
-			messages.push(entry.message);
-		} else if (entry.type === "custom_message") {
-			messages.push(
-				retainSynthesizedSessionContextMessage(
-					createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
-				),
-			);
-		} else if (entry.type === "branch_summary" && entry.summary) {
-			messages.push(
-				retainSynthesizedSessionContextMessage(
-					createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp),
-				),
-			);
-		}
+		const message = sessionContextMessage(entry);
+		if (message) items.push({ entry, message });
 	};
 
-	if (compaction) {
-		const selection = selectCompactedContext(path, compaction);
+	// Sections run earliest first: a scoped checkpoint follows the context of the entries before its scope.
+	for (const section of compactedContextSections(path)) {
+		if (section.kind === "raw") {
+			// No compaction before this point - emit all messages, handle branch summaries and custom messages
+			for (let i = 0; i < section.end; i++) appendMessage(path[i] as SessionEntry);
+			continue;
+		}
+		const { compaction, selection } = section;
 		const { compactionIdx, originalUserEntry, restoredGaps } = selection;
 		const unsummarizedTask = compaction.retention
 			? clampText(latestUserText(restoredGaps, compaction.retention.userEntryId), ACTIVE_TASK_SOURCE_MAX_CHARS)
@@ -752,33 +867,28 @@ export function buildSessionContext(
 			: compaction.summary;
 
 		if (originalUserEntry) appendMessage(originalUserEntry);
-		messages.push(
-			retainSynthesizedSessionContextMessage(
+		items.push({
+			entry: compaction,
+			message: retainSynthesizedSessionContextMessage(
 				createCompactionSummaryMessage(
 					providerSummary,
 					compaction.tokensBefore,
 					compaction.timestamp,
 					compaction.details,
+					compaction.id,
 				),
 			),
-		);
+		});
 
 		for (const entry of selection.carried) appendMessage(entry);
 		for (const entry of selection.retained) appendMessage(entry);
 
-		// Emit messages after compaction
-		for (let i = compactionIdx + 1; i < path.length; i++) {
-			const entry = path[i];
-			appendMessage(entry);
-		}
-	} else {
-		// No compaction - emit all messages, handle branch summaries and custom messages
-		for (const entry of path) {
-			appendMessage(entry);
+		// Emit messages after compaction, up to the section's end
+		for (let i = compactionIdx + 1; i < selection.end; i++) {
+			appendMessage(path[i] as SessionEntry);
 		}
 	}
-
-	return { messages, thinkingLevel, model };
+	return items;
 }
 
 /**
@@ -1865,13 +1975,18 @@ export class SessionManager {
 		let foundFirstKept = false;
 		const compactionParent = compactionParentId ? this.byId.get(compactionParentId) : undefined;
 		if (retention?.mode === "original-user") {
-			visitSessionAncestry(compactionParent, this.byId, (current) => {
-				if (current.id === retention.userEntryId && current.type === "message" && current.message.role === "user") {
-					keptEntryIds.add(current.id);
-					foundFirstKept = true;
-					return false;
-				}
-			});
+			// A checkpoint that keeps nothing before its summary has no anchor to find: every message before it is replaced.
+			const userEntryId = retention.userEntryId;
+			if (userEntryId === undefined) foundFirstKept = true;
+			else {
+				visitSessionAncestry(compactionParent, this.byId, (current) => {
+					if (current.id === userEntryId) {
+						keptEntryIds.add(current.id);
+						foundFirstKept = true;
+						return false;
+					}
+				});
+			}
 			const leaf = this.leafId ? this.byId.get(this.leafId) : undefined;
 			visitSessionAncestry(leaf, this.byId, (current) => {
 				if (current.id === compactionEntryId) return false;
@@ -2036,7 +2151,11 @@ export class SessionManager {
 		}
 	}
 
-	/** Entry id of the persisted entry holding exactly this message object, if any. */
+	/**
+	 * Entry id of the persisted entry holding exactly this message object, if any. A custom message is found by the
+	 * custom_message entry it was appended as (when the appender passed its object) or materialized from by a session
+	 * context rebuild; an id this session does not hold as a custom_message entry is never returned.
+	 */
 	getMessageEntryId(message: object): string | undefined {
 		if (this.messageEntryIndex?.byId !== this.byId) {
 			const ids = new WeakMap<object, string>();
@@ -2045,7 +2164,12 @@ export class SessionManager {
 			}
 			this.messageEntryIndex = { byId: this.byId, ids };
 		}
-		return this.messageEntryIndex.ids.get(message);
+		const messageEntryId = this.messageEntryIndex.ids.get(message);
+		if (messageEntryId !== undefined) return messageEntryId;
+		const customEntryId = customMessageEntryIds.get(message);
+		return customEntryId !== undefined && this.byId.get(customEntryId)?.type === "custom_message"
+			? customEntryId
+			: undefined;
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
@@ -2164,6 +2288,7 @@ export class SessionManager {
 				cached.context.messages.push(
 					retainSynthesizedSessionContextMessage(
 						createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
+						entry.id,
 					),
 				);
 				break;
@@ -2260,6 +2385,9 @@ export class SessionManager {
 		}
 		const encodedEntries = entries.map((entry) => encodeSessionEntry(entry));
 		this._appendEntries(entries, encodedEntries);
+		batch.forEach((item, index) => {
+			if (item.kind === "custom") customMessageEntryIds.set(item.message, entries[index]!.id);
+		});
 		return entries.map((entry) => entry.id);
 	}
 
@@ -2301,20 +2429,23 @@ export class SessionManager {
 		retention?: CompactionRetention,
 		coveredThroughEntryId?: string,
 		summarizedGapEntryIds?: readonly string[],
+		scopeStartEntryId?: string,
 	): string {
 		const compactionParentId = this.leafId;
-		if (coveredThroughEntryId !== undefined) {
-			let covered = false;
-			const leaf = compactionParentId ? this.byId.get(compactionParentId) : undefined;
+		const leaf = compactionParentId ? this.byId.get(compactionParentId) : undefined;
+		for (const [field, id] of [
+			["coveredThroughEntryId", coveredThroughEntryId],
+			["scopeStartEntryId", scopeStartEntryId],
+		] as const) {
+			if (id === undefined) continue;
+			let onBranch = false;
 			visitSessionAncestry(leaf, this.byId, (current) => {
-				if (current.id === coveredThroughEntryId) {
-					covered = true;
+				if (current.id === id) {
+					onBranch = true;
 					return false;
 				}
 			});
-			if (!covered) {
-				throw new Error(`Compaction coveredThroughEntryId is not on the active branch: ${coveredThroughEntryId}.`);
-			}
+			if (!onBranch) throw new Error(`Compaction ${field} is not on the active branch: ${id}.`);
 		}
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -2327,6 +2458,7 @@ export class SessionManager {
 			retention,
 			...(coveredThroughEntryId !== undefined ? { coveredThroughEntryId } : {}),
 			...(summarizedGapEntryIds !== undefined ? { summarizedGapEntryIds: [...summarizedGapEntryIds] } : {}),
+			...(scopeStartEntryId !== undefined ? { scopeStartEntryId } : {}),
 			details,
 			usage,
 			fromHook,
@@ -2708,6 +2840,7 @@ export class SessionManager {
 	 * @param content Message content (string or TextContent/ImageContent array)
 	 * @param display Whether to show in TUI (true = styled display, false = hidden)
 	 * @param details Optional extension-specific metadata (not sent to LLM)
+	 * @param source The live custom message object this entry persists, so {@link getMessageEntryId} finds the entry by it
 	 * @returns Entry id
 	 */
 	appendCustomMessageEntry<T = unknown>(
@@ -2715,6 +2848,7 @@ export class SessionManager {
 		content: string | (TextContent | ImageContent)[],
 		display: boolean,
 		details?: T,
+		source?: object,
 	): string {
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -2727,6 +2861,7 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 		};
 		this._appendEntry(entry);
+		if (source !== undefined) customMessageEntryIds.set(source, entry.id);
 		return entry.id;
 	}
 

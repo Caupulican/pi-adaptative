@@ -8,14 +8,20 @@
 
 import { createReadStream, readdirSync, statSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
-import { getDefaultSessionDirCandidates, readSessionHeaderResult } from "../../kernel/session/session-manager.ts";
+import {
+	getDefaultSessionDirCandidates,
+	isValidSessionId,
+	readSessionHeaderResult,
+} from "../../kernel/session/session-manager.ts";
 import { isMissingFileError, writeFileAtomic } from "../util/atomic-file.ts";
 import { isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
 import {
+	CONTINUOUS_CHAT_LEGACY_DUPLICATE_REASON,
 	CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS,
+	ContinuousChatLegacyContentError,
 	type ContinuousChatLegacyImportMarker,
 	type ContinuousChatLegacyImportState,
 	type ContinuousChatLegacySession,
@@ -304,15 +310,26 @@ export interface ContinuousChatLegacySessionSkip {
 }
 
 export interface ContinuousChatLegacySessionListing {
-	/** Readable sessions, by header timestamp then file name. Each one's entries keep their file order. */
+	/** Readable sessions, intact or repaired, by start time then file name. Each one's entries keep their file order. */
 	readonly sessions: ContinuousChatLegacySession[];
+	/** Sources that cannot be read now (inspection or read failures): transient, they block completion. */
 	readonly blocked: ContinuousChatLegacySessionSkip[];
+	/** Sources whose content can never be read as a session: permanent, recorded as skips with their cause. */
+	readonly invalid: ContinuousChatLegacySessionSkip[];
 }
 
-type LegacySessionReading =
+/** One session file as the legacy import reads it: a session, a transient failure, a permanent fault, or nothing. */
+export type ContinuousChatLegacySessionReading =
 	| { kind: "session"; session: ContinuousChatLegacySession }
 	| { kind: "blocked"; sessionId: string; reason: string }
+	| { kind: "invalid"; sessionId: string; reason: string }
 	| { kind: "empty" };
+
+/** The repair of a file that holds a session's body without its header line. The file itself is never rewritten. */
+export const CONTINUOUS_CHAT_LEGACY_HEADER_REPAIR = "session header reconstructed from the file name";
+
+/** The kernel's session file name: `<start time with ':' and '.' as '-'>_<session id>.jsonl`. */
+const SESSION_FILE_NAME = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z_(.+)\.jsonl$/;
 
 function causeText(cause: unknown): string {
 	return cause instanceof Error ? cause.message : String(cause);
@@ -340,13 +357,34 @@ function listSessionFileNames(directory: string): string[] {
 	}
 }
 
-/** Streams validated body entries. A malformed line blocks completion, so repairing the file is retried next start. */
-export async function* streamLegacySessionEntries(path: string): AsyncGenerator<SessionEntry> {
+type SessionBodyLine = { ok: true; entry: SessionEntry } | { ok: false; fault: string };
+
+/** One non-empty line read as a session body entry, or what keeps it from being one. */
+function parseSessionBodyLine(line: string): SessionBodyLine {
+	let value: unknown;
+	try {
+		value = JSON.parse(line);
+	} catch {
+		return { ok: false, fault: "is not JSON" };
+	}
+	if (!isSessionEntryShape(value) || value.type === "session") return { ok: false, fault: "is not one session entry" };
+	return { ok: true, entry: value as SessionEntry };
+}
+
+/**
+ * Streams validated body entries. `firstLine` says what the first non-empty line is: the session header, skipped here,
+ * or already a body entry, in a session whose header was reconstructed from its file name. A line that is not a
+ * session entry throws `ContinuousChatLegacyContentError` naming the file and the line; read failures throw as they are.
+ */
+export async function* streamLegacySessionEntries(
+	path: string,
+	firstLine: "header" | "entry" = "header",
+): AsyncGenerator<SessionEntry> {
 	const lines = createInterface({
 		input: createReadStream(path, { encoding: "utf8" }),
 		crlfDelay: Number.POSITIVE_INFINITY,
 	});
-	let header = true;
+	let header = firstLine === "header";
 	let lineNumber = 0;
 	for await (const line of lines) {
 		lineNumber++;
@@ -355,26 +393,89 @@ export async function* streamLegacySessionEntries(path: string): AsyncGenerator<
 			header = false;
 			continue;
 		}
-		let value: unknown;
-		try {
-			value = JSON.parse(line);
-		} catch {
-			throw new ContinuousChatMigrationBlockedError(`${path}:${lineNumber} is not JSON`);
+		const parsed = parseSessionBodyLine(line);
+		if (!parsed.ok) {
+			throw new ContinuousChatLegacyContentError(path, `${basename(path)}:${lineNumber} ${parsed.fault}`);
 		}
-		if (!isSessionEntryShape(value) || value.type === "session") {
-			throw new ContinuousChatMigrationBlockedError(`${path}:${lineNumber} is not one session entry`);
-		}
-		yield value as SessionEntry;
+		yield parsed.entry;
 	}
 }
 
+/** The session id and start time a kernel session file name carries, or undefined when it carries no usable pair. */
+function sessionFileNameIdentity(file: string): { sessionId: string; timestamp: string } | undefined {
+	const match = SESSION_FILE_NAME.exec(file);
+	if (match === null) return undefined;
+	const [, day, hours, minutes, seconds, milliseconds, sessionId] = match;
+	// The kernel's header reader admits only ids this rule accepts; a reconstructed header is held to the same rule.
+	if (sessionId === undefined || !isValidSessionId(sessionId)) return undefined;
+	const timestamp = `${day}T${hours}:${minutes}:${seconds}.${milliseconds}Z`;
+	const time = Date.parse(timestamp);
+	// The round trip refuses a time the pattern admits but the calendar does not, such as month 13.
+	if (Number.isNaN(time) || new Date(time).toISOString() !== timestamp) return undefined;
+	return { sessionId, timestamp };
+}
+
 /**
- * Reads one session file with the kernel's read-only loader. The file is skipped, with its cause, when its header is
- * not a usable session header, when it cannot be loaded, or when any non-empty line is not a session entry. The loader
- * drops unparseable lines silently, so they are counted here and never lost unrecorded. A zero-byte file holds no
- * session and is not listed.
+ * A file whose first line is not a session header is read as a session only when it holds a session's body without
+ * its header: every non-empty line, the first included, is a session entry, and the file name carries the session's id
+ * and start time. The header is then reconstructed in memory from the name; the file is never rewritten. Anything else
+ * is a permanent fault of the file, listed as invalid with its cause. The whole body is checked here, before listing,
+ * so a repaired session never fails midway through an import or a recovery.
  */
-async function readLegacySessionFile(path: string, file: string): Promise<LegacySessionReading> {
+async function readHeaderlessSessionFile(path: string, file: string): Promise<ContinuousChatLegacySessionReading> {
+	const headerFault = CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.header;
+	const identity = sessionFileNameIdentity(file);
+	if (identity === undefined) {
+		return {
+			kind: "invalid",
+			sessionId: file,
+			reason: `${headerFault}; the file name carries no valid session id and start time`,
+		};
+	}
+	let text: string;
+	try {
+		text = await readFile(path, "utf8");
+	} catch (error) {
+		return {
+			kind: "blocked",
+			sessionId: file,
+			reason: `${CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.read} ${causeText(error)}`,
+		};
+	}
+	let entries = 0;
+	let lineNumber = 0;
+	// The line breaks `streamLegacySessionEntries` reads through `readline`, so line numbers agree.
+	for (const line of text.split(/\r\n|\r|\n/)) {
+		lineNumber++;
+		if (line.trim() === "") continue;
+		const parsed = parseSessionBodyLine(line);
+		if (!parsed.ok) {
+			return { kind: "invalid", sessionId: file, reason: `${headerFault}; line ${lineNumber} ${parsed.fault}` };
+		}
+		entries++;
+	}
+	if (entries === 0) {
+		return { kind: "invalid", sessionId: file, reason: `${headerFault}; the file holds no session entry` };
+	}
+	return {
+		kind: "session",
+		session: {
+			...identity,
+			file,
+			repaired: CONTINUOUS_CHAT_LEGACY_HEADER_REPAIR,
+			entries: () => streamLegacySessionEntries(path, "entry"),
+		},
+	};
+}
+
+/**
+ * Reads one session file for the legacy import and ICM recovery. A file that cannot be inspected or read now is
+ * blocked: the failure is transient and retried. A file whose header id is not a valid session id, whose header time
+ * is not a time, or whose first line is not a session header and that cannot be repaired from its file name is invalid:
+ * the fault is in the content and permanent. A zero-byte file holds no session and is not listed.
+ */
+export async function readContinuousChatLegacySessionFile(path: string): Promise<ContinuousChatLegacySessionReading> {
+	const file = basename(path);
 	let inspection: { file: boolean; size: number };
 	try {
 		const metadata = statSync(path);
@@ -390,18 +491,23 @@ async function readLegacySessionFile(path: string, file: string): Promise<Legacy
 
 	const header = readSessionHeaderResult(path);
 	if (!header.ok) {
-		const reason =
-			header.reason === "unreadable"
-				? `${CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.read} ${causeText(header.cause)}`
-				: header.reason === "invalid_session_id"
-					? CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.id
-					: CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.header;
-		return { kind: "blocked", sessionId: file, reason };
+		if (header.reason === "unreadable") {
+			return {
+				kind: "blocked",
+				sessionId: file,
+				reason: `${CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.read} ${causeText(header.cause)}`,
+			};
+		}
+		// A header is present but names an invalid id: nothing may be derived from it, so it is not repaired.
+		if (header.reason === "invalid_session_id") {
+			return { kind: "invalid", sessionId: file, reason: CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.id };
+		}
+		return readHeaderlessSessionFile(path, file);
 	}
 	const sessionId = header.header.id;
 	const timestamp = header.header.timestamp;
 	if (Number.isNaN(Date.parse(timestamp))) {
-		return { kind: "blocked", sessionId, reason: "the session header's timestamp is not a valid time" };
+		return { kind: "invalid", sessionId, reason: "the session header's timestamp is not a valid time" };
 	}
 	return {
 		kind: "session",
@@ -418,30 +524,47 @@ function compareLegacySessions(left: ContinuousChatLegacySession, right: Continu
 
 /**
  * The legacy sessions of one project, for the one-time import. The scope is the cwd's default session directories,
- * current encoding first, as the transcript index reads them. Unreadable sources block completion with their real
- * cause. Valid copies of an already-selected session are deduplicated, preserving first-directory precedence.
- * The current session is not excluded here: the caller excludes it, because it is logged live.
+ * current encoding first, as the transcript index reads them. Sources that cannot be read now block completion with
+ * their real cause; sources whose content can never be a session are listed as invalid with theirs. Valid copies of an
+ * already-selected session are deduplicated, preserving first-directory precedence, except that an intact file always
+ * wins over a header reconstructed from a file name; a repaired copy left out is listed as invalid, so its file stays
+ * accounted for. The current session is not excluded here: the caller excludes it, because it is logged live.
  */
 export async function listContinuousChatLegacySessions(
 	scope: ContinuousChatLegacySessionScope,
 ): Promise<ContinuousChatLegacySessionListing> {
 	const sessions: ContinuousChatLegacySession[] = [];
 	const blocked: ContinuousChatLegacySessionSkip[] = [];
-	const listed = new Set<string>();
+	const invalid: ContinuousChatLegacySessionSkip[] = [];
+	const listedAt = new Map<string, number>();
 	for (const directory of getDefaultSessionDirCandidates(scope.cwd, scope.agentDir)) {
 		for (const file of listSessionFileNames(directory)) {
-			const reading = await readLegacySessionFile(join(directory, file), file);
+			const reading = await readContinuousChatLegacySessionFile(join(directory, file));
 			if (reading.kind === "empty") continue;
 			if (reading.kind === "blocked") {
 				blocked.push({ sessionId: reading.sessionId, reason: reading.reason });
 				continue;
 			}
-			const { sessionId } = reading.session;
-			if (listed.has(sessionId)) continue;
-			listed.add(sessionId);
-			sessions.push(reading.session);
+			if (reading.kind === "invalid") {
+				invalid.push({ sessionId: reading.sessionId, reason: reading.reason });
+				continue;
+			}
+			const { session } = reading;
+			const index = listedAt.get(session.sessionId);
+			if (index === undefined) {
+				listedAt.set(session.sessionId, sessions.length);
+				sessions.push(session);
+				continue;
+			}
+			const listed = sessions[index];
+			if (listed?.repaired !== undefined && session.repaired === undefined) {
+				sessions[index] = session;
+				invalid.push({ sessionId: listed.file, reason: CONTINUOUS_CHAT_LEGACY_DUPLICATE_REASON });
+			} else if (session.repaired !== undefined) {
+				invalid.push({ sessionId: session.file, reason: CONTINUOUS_CHAT_LEGACY_DUPLICATE_REASON });
+			}
 		}
 	}
 	sessions.sort(compareLegacySessions);
-	return { sessions, blocked };
+	return { sessions, blocked, invalid };
 }

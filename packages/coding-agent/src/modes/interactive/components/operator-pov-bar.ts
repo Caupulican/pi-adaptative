@@ -5,14 +5,11 @@ import type { SessionCostSummary } from "../../../core/cost/cost-summary.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
 import { isIdleProjection } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
+import { formatRouteValue } from "../../../core/route-text.ts";
 import type { SessionWorkState } from "../../../core/session-work-state.ts";
-import {
-	type SemanticPlaneHealth,
-	SYSTEM_ONE_BAR_LABEL,
-	semanticPlaneHealthValue,
-} from "../../../core/system-one/semantic-plane-health.ts";
+import { type SemanticPlaneHealth, semanticPlaneHealthValue } from "../../../core/system-one/semantic-plane-health.ts";
 import { theme } from "../../../presentation/theme-model.ts";
-import { selfCompactionGauge } from "./self-compaction-gauge.ts";
+import { SELF_COMPACTION_GAUGE_GLYPHS, selfCompactionGauge } from "./self-compaction-gauge.ts";
 
 /**
  * Everything the POV bar reads. Each getter is a live read of canonical runtime state — the
@@ -30,19 +27,21 @@ export interface OperatorPovSource {
 	getCiStatus?(): CiStatusView | undefined;
 	/** Mandatory peer findings, separate from advisory System One doubts. */
 	getPeerFindingCount?(): number;
+	/** Output tokens per second of the latest run that generated any; undefined before the first. */
+	getTokensPerSecond?(): number | undefined;
+	/** Milliseconds until the provider's prompt cache for the last request expires (0 once it has); undefined where no lifetime is known. */
+	getCacheRemainingMs?(): number | undefined;
 }
 
 export type OperatorPovSegmentId =
 	| "working"
-	| "control"
 	| "block"
 	| "next"
-	| "actor"
-	| "root"
-	| "active"
 	| "route"
 	| "system-one"
 	| "peer-findings"
+	| "tps"
+	| "cache"
 	| "cost"
 	| "proof"
 	| "ci"
@@ -59,39 +58,50 @@ export interface OperatorPovSegment {
 	/** Lower drops first; 0 is never dropped. */
 	readonly dropOrder: number;
 	readonly tone?: "accent" | "warning" | "error" | "success";
+	/** The value says what it is on its own (`$0.012`, `42%`, a symbol): the row draws it without its label. */
+	readonly bare?: boolean;
+	/** The value as drawn, with its own colors (a gauge, a status symbol). Plain mode and compact use `value`. */
+	readonly styled?: string;
 }
 
-export const OPERATOR_POV_SEPARATOR = " | ";
-
-/** The short model name an operator recognises: the id without its provider prefix. */
-export function shortModelName(ref: string | null | undefined): string {
-	if (!ref) return "none";
-	const slash = ref.indexOf("/");
-	return slash === -1 ? ref : ref.slice(slash + 1);
-}
+/** Facts are told apart by their quiet labels and the space between them, never by rules. */
+export const OPERATOR_POV_SEPARATOR = "   ";
 
 function formatCost(value: number): string {
 	return `$${value.toFixed(3)}`;
 }
 
-/** The ROUTE value: who chose the active model, in the operator's words, never claiming more. */
-export function formatRouteValue(route: ForegroundRouteSnapshot): string {
-	switch (route.source) {
-		case "direct":
-			return "direct";
-		case "manual":
-			return `manual:${shortModelName(route.activeModel)}`;
-		case "model_router_retry":
-			return `escalated→${shortModelName(route.activeModel)} via model-router`;
-		case "model_router_hmoe":
-			return `${route.tier ?? "routed"} via model-router/H-MoE`;
-		case "model_router_system_one":
-			return `${route.tier ?? "routed"} via model-router/System One`;
-		default: {
-			const tier = route.tier ?? "routed";
-			return route.risk === "read-only" ? `${tier}/read-only via model-router` : `${tier} via model-router`;
-		}
-	}
+const GAUGE_TONES: Readonly<Record<string, "accent" | "text" | "dim" | "muted" | "warning" | "error">> = {
+	[SELF_COMPACTION_GAUGE_GLYPHS.cached]: "accent",
+	[SELF_COMPACTION_GAUGE_GLYPHS.used]: "text",
+	[SELF_COMPACTION_GAUGE_GLYPHS.free]: "dim",
+	[SELF_COMPACTION_GAUGE_GLYPHS.notice]: "muted",
+	[SELF_COMPACTION_GAUGE_GLYPHS.warning]: "warning",
+	[SELF_COMPACTION_GAUGE_GLYPHS.forced]: "error",
+};
+
+/** The gauge's glyphs in their own tones: cached and used fill, free recedes, the trigger marks warn. */
+function paintGauge(bar: string): string {
+	return [...bar].map((glyph) => theme.fg(GAUGE_TONES[glyph] ?? "dim", glyph)).join("");
+}
+
+/**
+ * System One in words, only when it is doing or needing something: judging (accent), degraded with the reason, or
+ * holding uncertain judgments. A healthy or idle System One says nothing; an abbreviation and a dot at rest told
+ * the operator nothing they could act on.
+ */
+function systemOneStyled(health: SemanticPlaneHealth): string | undefined {
+	const doubts = health.unresolvedDoubts?.length ?? 0;
+	if (health.state === "evaluating")
+		return theme.fg("accent", `◆ System One judging${doubts ? ` · ${doubts} uncertain` : ""}`);
+	if (health.state === "degraded") return theme.fg("warning", `System One ${semanticPlaneHealthValue(health)}`);
+	if (doubts) return theme.fg("warning", `System One · ${doubts} uncertain`);
+	return undefined;
+}
+
+/** CI that needs attention, in words: a passing or unknown run says nothing and is not drawn. */
+function ciStyled(state: "running" | "red"): string {
+	return state === "red" ? theme.fg("error", "CI failed") : theme.fg("warning", "CI running");
 }
 
 /**
@@ -115,6 +125,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	let phaseLabel = "WORKING";
 	let phaseTone: "accent" | "warning" | "error" | "success" | undefined;
 	let phaseValue = projection.current_action;
+	let phaseBare = false;
 
 	if (livenessFault) {
 		phaseLabel = "LIVENESS FAULT";
@@ -135,6 +146,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	} else if (idle) {
 		phaseLabel = "READY";
 		phaseTone = undefined;
+		phaseBare = true;
 		phaseValue = projection.current_action || "Ready";
 	} else if (workState?.phase === "system_one_evaluating") {
 		phaseLabel = "S1 EVAL";
@@ -165,67 +177,75 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		value: phaseValue,
 		dropOrder: 0,
 		tone: phaseTone,
-	});
-
-	segments.push({
-		id: "control",
-		label: "CONTROL",
-		value: control.owner === "system_one" ? "S1" : control.owner === "user" ? "USER" : "ROOT",
-		dropOrder: 0,
-		tone: control.owner === "system_one" ? "accent" : control.owner === "user" ? "warning" : undefined,
+		...(phaseBare ? { bare: true } : {}),
 	});
 
 	if (projection.next_action) {
 		segments.push({ id: "next", label: "NEXT", value: projection.next_action, dropOrder: 40 });
 	}
 
-	const primaryActor = projection.active_actors[0];
-	const isRootActor = !primaryActor || primaryActor.kind === "root";
-	segments.push({
-		id: "actor",
-		label: "ACTOR",
-		value: isRootActor ? "root" : `${primaryActor.kind} ${primaryActor.label}`,
-		// A root actor is the default and is an early detail to go; a worker/specialist stays longer.
-		dropOrder: isRootActor ? 25 : 45,
-	});
-
-	if (route.switched) {
-		segments.push({ id: "root", label: "ROOT", value: shortModelName(route.rootModel), dropOrder: 20 });
+	// Only a turn someone other than the session's own choice is routing is worth a word; the default is silence.
+	if (route.source !== "direct") {
+		const routeValue = formatRouteValue(route);
 		segments.push({
-			id: "active",
-			label: "ACTIVE",
-			value: shortModelName(route.activeModel),
+			id: "route",
+			label: "ROUTE",
+			value: `⇢ ${routeValue}`,
+			compact: `⇢ ${routeValue.replace("via model-router", "via router")}`,
 			dropOrder: 0,
 			tone: "accent",
+			bare: true,
 		});
-	} else {
-		segments.push({ id: "active", label: "MODEL", value: shortModelName(route.activeModel), dropOrder: 0 });
 	}
 
-	const routeValue = formatRouteValue(route);
-	segments.push({
-		id: "route",
-		label: "ROUTE",
-		value: routeValue,
-		compact: routeValue.replace("via model-router", "via router"),
-		dropOrder: 0,
-	});
-
-	segments.push({
-		id: "system-one",
-		label: SYSTEM_ONE_BAR_LABEL,
-		value: semanticPlaneHealthValue(health),
-		dropOrder: 0,
-		tone: health.state === "degraded" ? "warning" : undefined,
-	});
-	const peerFindingCount = source.getPeerFindingCount?.();
-	if (peerFindingCount !== undefined) {
+	const peerFindingCount = source.getPeerFindingCount?.() ?? 0;
+	if (peerFindingCount > 0) {
 		segments.push({
 			id: "peer-findings",
 			label: "PEER",
-			value: `${peerFindingCount} active`,
-			compact: String(peerFindingCount),
-			dropOrder: 12,
+			value: `${peerFindingCount} peer ${peerFindingCount === 1 ? "finding" : "findings"}`,
+			compact: `⚑ ${peerFindingCount}`,
+			dropOrder: 30,
+			tone: "warning",
+			bare: true,
+		});
+	}
+
+	const systemOne = systemOneStyled(health);
+	if (systemOne) {
+		segments.push({
+			id: "system-one",
+			label: "S1",
+			value: semanticPlaneHealthValue(health),
+			dropOrder: 0,
+			bare: true,
+			styled: systemOne,
+		});
+	}
+
+	const ci = source.getCiStatus?.();
+	if (ci && (ci.state === "red" || ci.state === "running")) {
+		segments.push({
+			id: "ci",
+			label: "CI",
+			value: ci.state === "red" ? "CI failed" : "CI running",
+			// A red branch is the fact to keep in view; a running one yields width early.
+			dropOrder: ci.state === "red" ? 50 : 12,
+			bare: true,
+			styled: ciStyled(ci.state),
+		});
+	}
+
+	const tokensPerSecond = source.getTokensPerSecond?.();
+	if (tokensPerSecond !== undefined) {
+		const rate = `${tokensPerSecond.toFixed(tokensPerSecond < 10 ? 1 : 0)} tok/s`;
+		segments.push({
+			id: "tps",
+			label: "TPS",
+			value: rate,
+			dropOrder: 14,
+			bare: true,
+			styled: theme.fg("muted", rate),
 		});
 	}
 
@@ -237,6 +257,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 			? { extension: `(sub ${formatCost(cost.subagentCost)})` }
 			: {}),
 		dropOrder: 0,
+		bare: true,
 	});
 
 	if (control.blocker) {
@@ -252,24 +273,25 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		});
 	}
 
-	const ci = source.getCiStatus?.();
-	if (ci) {
+	const cacheRemainingMs = source.getCacheRemainingMs?.();
+	if (cacheRemainingMs !== undefined) {
+		const live = cacheRemainingMs > 0;
+		const seconds = Math.ceil(cacheRemainingMs / 1000);
+		const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+		const text = live ? `◷ ${clock}` : "◷ cold";
 		segments.push({
-			id: "ci",
-			label: "CI",
-			value: ci.state === "unknown" ? "?" : ci.state,
-			// A red branch is the fact to keep in view; a green or running one yields width early.
-			dropOrder: ci.state === "red" ? 50 : 12,
-			...(ci.state === "red"
-				? { tone: "error" as const }
-				: ci.state === "unknown"
-					? { tone: "warning" as const }
-					: {}),
+			id: "cache",
+			label: "CACHE",
+			value: text,
+			dropOrder: 16,
+			bare: true,
+			styled: theme.fg(!live ? "dim" : cacheRemainingMs < 60_000 ? "warning" : "muted", text),
 		});
 	}
 
 	const view = source.getSelfCompactionView?.();
 	const gauge = view ? selfCompactionGauge(view) : null;
+	const contextPercent = projection.context?.percent;
 	if (gauge) {
 		const reading = [gauge.percent, gauge.tag].filter(Boolean).join(" ");
 		segments.push({
@@ -277,18 +299,14 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 			label: "CTX",
 			value: `${gauge.bar} ${reading}`,
 			compact: reading,
+			styled: `${paintGauge(gauge.bar)} ${gauge.tone ? theme.fg(gauge.tone, reading) : reading}`,
 			...(gauge.cycle ? { extension: gauge.cycle } : {}),
-			...(gauge.tone ? { tone: gauge.tone } : {}),
 			dropOrder: gauge.tag ? 45 : 10,
+			bare: true,
 		});
 	} else if (projection.context) {
-		const percent = projection.context.percent;
-		segments.push({
-			id: "ctx",
-			label: "CTX",
-			value: percent === undefined ? (projection.context.compacted ? "?%" : "n/a") : `${percent.toFixed(1)}%`,
-			dropOrder: 10,
-		});
+		const reading = contextPercent === undefined ? "?%" : `${contextPercent.toFixed(1)}%`;
+		segments.push({ id: "ctx", label: "CTX", value: reading, dropOrder: 10, bare: true });
 	}
 
 	return segments;
@@ -296,17 +314,28 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 
 function renderSegment(segment: OperatorPovSegment, withExtension: boolean, plain: boolean, compact = false): string {
 	const base = compact && segment.compact ? segment.compact : segment.value;
-	const value = withExtension && segment.extension ? `${base} ${segment.extension}` : base;
-	if (plain) return `${segment.label} ${value}`;
-	const label = theme.fg("dim", segment.label);
-	const tone = segment.tone;
+	const extension = withExtension && segment.extension ? ` ${segment.extension}` : "";
+	if (plain) return `${segment.label} ${base}${extension}`;
+	// The phase leads the row: its state word carries the tone, or a dot when the word would repeat the value.
+	if (segment.id === "working") {
+		const styled = theme.fg(segment.tone ?? "text", `${base}${extension}`);
+		return segment.bare
+			? `${theme.fg("muted", "●")} ${styled}`
+			: `${theme.bold(theme.fg(segment.tone ?? "accent", segment.label))} ${styled}`;
+	}
 	const styled =
-		tone === "error" || tone === "warning" || tone === "success" || tone === "accent" ? theme.fg(tone, value) : value;
-	return `${label} ${styled}`;
+		segment.styled && !(compact && segment.compact)
+			? `${segment.styled}${extension ? theme.fg("muted", extension) : ""}`
+			: theme.fg(segment.tone ?? "text", `${base}${extension}`);
+	return segment.bare ? styled : `${theme.fg("dim", segment.label.toLowerCase())} ${styled}`;
 }
 
-/** The left block never shrinks below this many cells before a right segment is dropped instead. */
-const MIN_WORKING_WIDTH = 16;
+/**
+ * The left block never shrinks below this many cells before a right segment is dropped instead: what is
+ * happening is the first answer on the row, so it stays readable ("READY Ready for operator instructions")
+ * and the low-priority facts (PEER, CI, CTX) yield width to it.
+ */
+const MIN_WORKING_WIDTH = 40;
 
 /** Only the phase text stays on the left; every operator fact, BLOCK included, anchors right. */
 function isLeftSegment(segment: OperatorPovSegment): boolean {
@@ -373,7 +402,7 @@ export function layoutOperatorPovSegments(
 }
 
 /**
- * OperatorPovBarComponent: the one normal-mode operator status surface. A single `|`-separated row
+ * OperatorPovBarComponent: the one normal-mode operator status surface. A single row of label-and-value facts
  * answering who is working, on what, what comes next, which model is actually executing (and which
  * root model it will return to), who chose it, what System One is doing, and what the session has cost.
  */

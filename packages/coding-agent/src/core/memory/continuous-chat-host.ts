@@ -17,6 +17,7 @@ import {
 	type ContinuousChatSessionsState,
 	createContinuousChatLegacyImportMarker,
 	createContinuousChatSessionLedger,
+	readContinuousChatLegacySessionFile,
 	streamLegacySessionEntries,
 } from "./continuous-chat-migration.ts";
 import { type ContinuousChatCompactionPrefixHead, ContinuousChatRuntime } from "./continuous-chat-runtime.ts";
@@ -182,6 +183,7 @@ export class ContinuousChatHost {
 				activeSessionIds: activeIds,
 				ingestor: this.ingestor,
 				now: () => new Date().toISOString(),
+				note: (message) => this.options.warn(message),
 			});
 			if (this.closed) throw new Error("Continuous chat stopped before it started.");
 			await this.recoverPriorSessions(ledgerBefore, markerBefore === undefined);
@@ -219,12 +221,17 @@ export class ContinuousChatHost {
 
 		const toRecover = new Map<string, () => AsyncIterable<SessionEntry>>();
 
+		// An attached session holds live ICM entries that no legacy note replaces. Unlike the legacy import, which records
+		// a malformed source as a skip, recovery never drops such a session: a source that cannot be read now (blocked)
+		// or never can (invalid) stops the start with its cause. A repaired source recovers through its repaired reader.
 		for (const activeEntry of ledger.active) {
 			if (activeEntry.sessionId === this.options.sessionId) continue;
-			const blocked = listing.blocked.find((entry) => entry.sessionId === activeEntry.sessionId);
-			if (blocked) {
+			const unreadable =
+				listing.blocked.find((entry) => entry.sessionId === activeEntry.sessionId) ??
+				listing.invalid.find((entry) => entry.sessionId === activeEntry.sessionId);
+			if (unreadable) {
 				throw new ContinuousChatMigrationBlockedError(
-					`unsettled ICM session ${activeEntry.sessionId} is unreadable: ${blocked.reason}`,
+					`unsettled ICM session ${activeEntry.sessionId} is unreadable: ${unreadable.reason}`,
 				);
 			}
 			const candidate = listing.sessions.find((s) => s.sessionId === activeEntry.sessionId);
@@ -232,7 +239,16 @@ export class ContinuousChatHost {
 				toRecover.set(activeEntry.sessionId, () => candidate.entries());
 			} else if (activeEntry.sessionFile && existsSync(activeEntry.sessionFile)) {
 				const file = activeEntry.sessionFile;
-				toRecover.set(activeEntry.sessionId, () => streamLegacySessionEntries(file));
+				// Listed failures are keyed by file name, so the recorded file is classified here by the same reader.
+				const reading = await readContinuousChatLegacySessionFile(file);
+				if (reading.kind === "blocked" || reading.kind === "invalid") {
+					throw new ContinuousChatMigrationBlockedError(
+						`unsettled ICM session ${activeEntry.sessionId} is unreadable: ${reading.reason}`,
+					);
+				}
+				toRecover.set(activeEntry.sessionId, () =>
+					reading.kind === "session" ? reading.session.entries() : streamLegacySessionEntries(file),
+				);
 			} else {
 				await this.sessionLedger.markSettled([activeEntry.sessionId]);
 			}

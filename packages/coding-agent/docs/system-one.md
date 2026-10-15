@@ -507,6 +507,9 @@ After every turn the final answer's claims (tests pass, committed, pushed, publi
 are asked of System One one atomic question each, and each settled "the answer states X" is combined in code
 with the turn's receipts: test verification records, git commit/push and publish exit status, and
 successful edits. A contradicted claim buys one correction turn; an unbacked one is a warning.
+The turn is found from the message it opened with, so a compaction inside the turn does not shift it: when the
+compaction summarized that message, the turn is read from that checkpoint's summary on, without what the rebuild
+carried forward from before the turn.
 
 Worker reports get the same check, against the worker's own transcript, whether or not the report
 already needs parent review. A verifier's `accepted` is itself a claim: it is blocked when the

@@ -65,6 +65,8 @@ export interface CompactionSummaryMessage {
 	tokensBefore: number;
 	/** Trusted bounded compaction metadata retained for host-owned provider gates. */
 	details?: unknown;
+	/** Id of the compaction entry this summary was materialized from; never sent to the provider. */
+	compactionEntryId?: string;
 	timestamp: number;
 }
 
@@ -113,12 +115,14 @@ export function createCompactionSummaryMessage(
 	tokensBefore: number,
 	timestamp: string,
 	details?: unknown,
+	compactionEntryId?: string,
 ): CompactionSummaryMessage {
 	return {
 		role: "compactionSummary",
 		summary: summary,
 		tokensBefore,
 		details,
+		...(compactionEntryId !== undefined ? { compactionEntryId } : {}),
 		timestamp: new Date(timestamp).getTime(),
 	};
 }

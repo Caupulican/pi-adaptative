@@ -14,7 +14,12 @@ export interface ContinuousChatLegacySession {
 	timestamp: string;
 	/** The session file name: the tie-break after the time. */
 	file: string;
-	/** Opens this session's entries on demand. Only one session is resident/importing at a time. */
+	/** What was repaired, in memory only, to read the file as a session; absent for an intact file. */
+	repaired?: string;
+	/**
+	 * Opens this session's entries on demand. Only one session is resident/importing at a time. A line that is not a
+	 * session entry throws `ContinuousChatLegacyContentError`; any other failure is an I/O failure.
+	 */
 	entries(): AsyncIterable<SessionEntry>;
 }
 
@@ -31,11 +36,29 @@ export const CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS = {
 	header: "the first line is not a session header",
 } as const;
 
+/** A copy of a session already listed from another file. It is recorded once and never retried. */
+export const CONTINUOUS_CHAT_LEGACY_DUPLICATE_REASON =
+	"the same session id is already listed from another session file";
+
+/** A session file line that is not one session entry: a permanent fault of the file's content, never of reading it. */
+export class ContinuousChatLegacyContentError extends Error {
+	/** The fault as the import records it: the file name, the line number and what is wrong with the line. */
+	readonly reason: string;
+
+	constructor(path: string, reason: string) {
+		super(`Legacy session ${path} has malformed content: ${reason}`);
+		this.name = "ContinuousChatLegacyContentError";
+		this.reason = reason;
+	}
+}
+
 export interface ContinuousChatLegacyListing {
-	/** Readable sessions in import order. Each one's entries keep their file order. */
+	/** Readable sessions in import order, intact or repaired. Each one's entries keep their file order. */
 	readonly sessions: readonly ContinuousChatLegacySession[];
 	/** Sources that cannot currently be read. They block completion and are retried on the next activation. */
 	readonly blocked: readonly ContinuousChatLegacySkip[];
+	/** Sources whose content can never be read as a session. They are recorded as skips with their real reason. */
+	readonly invalid: readonly ContinuousChatLegacySkip[];
 }
 
 /** The durable record that the one-time import completed: what it imported, and what it skipped with the real reason. */
@@ -67,6 +90,8 @@ export interface ContinuousChatLegacyImportOptions {
 	activeSessionIds: ReadonlySet<string>;
 	ingestor: Pick<ContinuousChatIngestor, "importLegacySession" | "settled">;
 	now(): string;
+	/** Reports each repaired source and each skipped malformed source once, when the marker first records it. */
+	note?(message: string): void;
 }
 
 /** The reason a session cannot be ordered in the chat, or undefined when its start time is a loggable day. */
@@ -82,18 +107,44 @@ function unsupportedReason(session: ContinuousChatLegacySession): string | undef
 const CONTINUOUS_CHAT_MAX_IMPORTED_LEGACY_SESSIONS = 8;
 
 /**
+ * The content fault that keeps a session's entries from being imported, or undefined when every entry reads. Read
+ * failures rethrow: they are transient and keep the import incomplete.
+ */
+async function contentFault(session: ContinuousChatLegacySession): Promise<string | undefined> {
+	try {
+		for await (const entry of session.entries()) void entry;
+		return undefined;
+	} catch (error) {
+		if (error instanceof ContinuousChatLegacyContentError) return error.reason;
+		throw error;
+	}
+}
+
+function skipKey(entry: ContinuousChatLegacySkip): string {
+	return `${entry.sessionId}\u0000${entry.reason}`;
+}
+
+/**
  * Imports every eligible session once (up to the most recent bounded window) and then writes the marker. Nothing is
  * written for an already-complete marker. Older markers that incorrectly finalized failures retry only those recorded
  * sources, within the original eight-session allowance. Their completion time stays fixed for the host's later-session
- * recovery. The marker is written only after every queued note has settled; source keys make interrupted retries safe.
+ * recovery. A source whose content can never be read as a session is recorded as a skip with its real cause instead
+ * of blocking completion, and a session in the import window whose body holds such a line is skipped the same way
+ * before anything of it is imported, leaving its place to an older one. Repaired and malformed sources are reported
+ * through `note` once, when the marker first records them. The marker is written only after every queued note has
+ * settled; source keys make interrupted retries safe.
  */
 export async function importContinuousChatLegacyHistory(options: ContinuousChatLegacyImportOptions): Promise<void> {
 	const previous = await options.marker.read();
 	const retryEntries: ContinuousChatLegacySkip[] = [];
 	const skipped: ContinuousChatLegacySkip[] = [];
 	const intentional = new Set<string>();
+	/** Skips recorded with these exact reasons are already reported. */
+	const recorded = new Set((previous?.skipped ?? []).map(skipKey));
+	/** Skips whose source is malformed: each is reported when first recorded. */
+	const malformed = new Set<string>();
 	for (const entry of previous?.skipped ?? []) {
-		if (entry.reason === "the same session id is already listed from another session file") {
+		if (entry.reason === CONTINUOUS_CHAT_LEGACY_DUPLICATE_REASON) {
 			// An ignored duplicate copy is not an exclusion of the canonical session's failed import.
 			skipped.push(entry);
 		} else if (
@@ -146,8 +197,19 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 					skipped.push({ sessionId, reason: "forgotten" });
 					continue;
 				}
+				const unreadable = listing.blocked.find((source) => source.sessionId === entry.sessionId);
+				// Still malformed: a permanent fault, recorded again with its current cause instead of blocking.
+				const invalid =
+					unreadable === undefined
+						? listing.invalid.find((source) => source.sessionId === entry.sessionId)
+						: undefined;
+				if (invalid !== undefined) {
+					skipped.push(invalid);
+					malformed.add(skipKey(invalid));
+					continue;
+				}
 				blocked.push(
-					listing.blocked.find((source) => source.sessionId === entry.sessionId) ?? {
+					unreadable ?? {
 						sessionId: entry.sessionId,
 						reason: "the previously failed session source is no longer listed",
 					},
@@ -159,6 +221,11 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 		candidates = listing.sessions.filter((session) => retryIds.has(session.sessionId));
 	} else {
 		blocked.push(...listing.blocked.filter((entry) => !excluded.has(entry.sessionId)));
+		for (const entry of listing.invalid) {
+			if (excluded.has(entry.sessionId)) continue;
+			skipped.push(entry);
+			malformed.add(skipKey(entry));
+		}
 	}
 	if (blocked.length > 0) {
 		const causes = blocked.map((entry) => `${entry.sessionId}: ${entry.reason}`).join("; ");
@@ -180,13 +247,28 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 	}
 	const importedBefore = previous?.importedSessions ?? 0;
 	const allowance = Math.max(0, CONTINUOUS_CHAT_MAX_IMPORTED_LEGACY_SESSIONS - importedBefore);
-	const cutoff = Math.max(0, eligible.length - allowance);
+	// Newest first, every entry is read before any is imported, so a malformed body never fails the import midway.
+	const selected: ContinuousChatLegacySession[] = [];
+	let cutoff = eligible.length;
+	while (cutoff > 0 && selected.length < allowance) {
+		cutoff--;
+		const session = eligible[cutoff];
+		if (!session) continue;
+		const fault = await contentFault(session);
+		if (fault === undefined) {
+			selected.unshift(session);
+			continue;
+		}
+		const skip = { sessionId: session.sessionId, reason: fault };
+		skipped.push(skip);
+		malformed.add(skipKey(skip));
+	}
 	for (let index = 0; index < cutoff; index++) {
 		const session = eligible[index];
 		if (session) skipped.push({ sessionId: session.sessionId, reason: "superseded_by_recent_history" });
 	}
 	let importedSessions = importedBefore;
-	for (const session of eligible.slice(cutoff)) {
+	for (const session of selected) {
 		await options.ingestor.importLegacySession(session.sessionId, session.entries());
 		importedSessions++;
 	}
@@ -197,4 +279,27 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 		importedSessions,
 		skipped,
 	});
+	const repaired = new Map(
+		listing.sessions
+			.filter((session) => session.repaired !== undefined)
+			.map((session) => [session.sessionId, session]),
+	);
+	for (const session of selected) {
+		if (session.repaired === undefined) continue;
+		options.note?.(
+			`Legacy memory import repaired ${session.file}: ${session.repaired}; imported as session ${session.sessionId}.`,
+		);
+	}
+	for (const entry of skipped) {
+		const key = skipKey(entry);
+		if (recorded.has(key)) continue;
+		const session = repaired.get(entry.sessionId);
+		if (session !== undefined) {
+			options.note?.(
+				`Legacy memory import repaired ${session.file}: ${session.repaired}; session ${session.sessionId} was not imported: ${entry.reason}.`,
+			);
+		} else if (malformed.has(key)) {
+			options.note?.(`Legacy memory import skipped ${entry.sessionId}: ${entry.reason}.`);
+		}
+	}
 }

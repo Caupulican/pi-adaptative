@@ -84,6 +84,7 @@ import {
 	CONTINUOUS_CHAT_LANE_PAGE_BYTES,
 } from "./memory/continuous-chat-navigation.ts";
 import {
+	type ContinuousChatWire,
 	createBlockedContinuousChatPlanWrapper,
 	createContinuousChatPlanWrapper,
 	renderContinuousChatTurnState,
@@ -546,6 +547,8 @@ export class MemoryController {
 	private _unsubscribeEntriesPersisted: (() => void) | undefined;
 	/** ICM's project chat for the active generation; undefined unless ICM is active in a root session. */
 	private _continuousChat: ContinuousChatHost | undefined;
+	/** The ICM projection installed on the provider wire; written only by `_setContinuousChatWire`. */
+	private _continuousChatWire: ContinuousChatWire | undefined;
 	/** Summary hierarchy host, attached to the root history backend in either memory system; absent in narrow hosts. */
 	private readonly _hierarchy: TranscriptHierarchyHost | undefined;
 	private readonly _activeBranch: ActiveBranchView | undefined;
@@ -608,7 +611,7 @@ export class MemoryController {
 				validate();
 			} catch (error) {
 				const reason = error instanceof Error ? error.message : String(error);
-				this.deps.providerRequest?.setPlanProjection(createBlockedContinuousChatPlanWrapper(reason));
+				this._setContinuousChatWire({ kind: "blocked", reason });
 				return;
 			}
 			void this.initialize();
@@ -1946,14 +1949,55 @@ export class MemoryController {
 	}
 
 	/**
+	 * The ICM projection that owns the provider wire, whatever the generation's activation state: the chat from the moment
+	 * it is installed, the block while the chat is unavailable, undefined once neither is installed.
+	 */
+	continuousChatWire(): ContinuousChatWire | undefined {
+		return this._continuousChatWire;
+	}
+
+	/**
+	 * The one writer of the ICM provider projection: installs the chat's turn projection, the fail-closed block, or
+	 * nothing, and records which one it installed. A session without a provider request runtime records nothing.
+	 */
+	private _setContinuousChatWire(
+		wire: { kind: "chat"; host: ContinuousChatHost } | { kind: "blocked"; reason: string } | undefined,
+	): void {
+		const providerRequest = this.deps.providerRequest;
+		if (!providerRequest) {
+			this._continuousChatWire = undefined;
+			return;
+		}
+		if (wire === undefined) {
+			providerRequest.setPlanProjection(undefined);
+			this._continuousChatWire = undefined;
+			return;
+		}
+		if (wire.kind === "blocked") {
+			providerRequest.setPlanProjection(createBlockedContinuousChatPlanWrapper(wire.reason));
+			this._continuousChatWire = { kind: "blocked", reason: wire.reason };
+			return;
+		}
+		const host = wire.host;
+		providerRequest.setPlanProjection(
+			createContinuousChatPlanWrapper({
+				current: () => {
+					const handle = host.turns.current();
+					return handle && { handle, stateText: renderContinuousChatTurnState(handle) };
+				},
+			}),
+		);
+		this._continuousChatWire = { kind: "chat" };
+	}
+
+	/**
 	 * Opens the project chat for an ICM root generation: validates the compaction model and takes the project's lease.
 	 * Nothing is imported or subscribed yet; `_activateContinuousChat` starts the chat once its block is installed.
 	 */
 	private async _openContinuousChat(generation: number): Promise<void> {
 		const ports = this.deps.continuousChat;
 		const subscribe = this.deps.subscribeEntriesPersisted;
-		const providerRequest = this.deps.providerRequest;
-		if (!ports || !subscribe || !providerRequest) {
+		if (!ports || !subscribe || !this.deps.providerRequest) {
 			throw new Error(
 				"ICM project chat is not wired to this session: its ports and the provider request runtime are required.",
 			);
@@ -1974,14 +2018,7 @@ export class MemoryController {
 		}
 		this._continuousChat = host;
 		// Every provider request of an ICM root is planned through the running turn, or fails loudly; none sends history.
-		providerRequest.setPlanProjection(
-			createContinuousChatPlanWrapper({
-				current: () => {
-					const handle = host.turns.current();
-					return handle && { handle, stateText: renderContinuousChatTurnState(handle) };
-				},
-			}),
-		);
+		this._setContinuousChatWire({ kind: "chat", host });
 		// A released host is no longer this generation's chat, so only a host that stops on its own reaches the handler.
 		void host.stopped.then(() => this._continuousChatStoppedOnItsOwn(generation, host));
 	}
@@ -1993,11 +2030,10 @@ export class MemoryController {
 	private async _continuousChatStoppedOnItsOwn(generation: number, host: ContinuousChatHost): Promise<void> {
 		if (generation !== this._memoryGeneration || this._continuousChat !== host) return;
 		this._continuousChat = undefined;
-		this.deps.providerRequest?.setPlanProjection(
-			createBlockedContinuousChatPlanWrapper(
-				"its runtime stopped; reload ICM after resolving the preceding warning",
-			),
-		);
+		this._setContinuousChatWire({
+			kind: "blocked",
+			reason: "its runtime stopped; reload ICM after resolving the preceding warning",
+		});
 		this.deps.emitWarning(
 			"The ICM project chat stopped; ICM provider requests are blocked until the chat is recovered or memory mode changes.",
 		);
@@ -2044,7 +2080,7 @@ export class MemoryController {
 		this._continuousChat = undefined;
 		// The projection goes first: a request planned from here on must never read a chat that is stopping,
 		// and switching away from a failed ICM generation clears the fail-closed wrapper even when no host opened.
-		this.deps.providerRequest?.setPlanProjection(undefined);
+		this._setContinuousChatWire(undefined);
 		if (host === undefined) return;
 		await host.dispose();
 	}
@@ -2472,9 +2508,7 @@ export class MemoryController {
 						this._fileStoreWriter = undefined;
 						this._releaseTranscriptRecall();
 						this._initializationFailed = true;
-						if (system === "icm") {
-							this.deps.providerRequest?.setPlanProjection(createBlockedContinuousChatPlanWrapper(reason));
-						}
+						if (system === "icm") this._setContinuousChatWire({ kind: "blocked", reason });
 					}
 					// A session warning (live to a listener, else held for the first subscriber or the closing drain), never a stderr write
 					// from construction: the creating host may be running a terminal UI.
@@ -2491,9 +2525,10 @@ export class MemoryController {
 					this._activeMemorySystem = undefined;
 					this._initializationFailed = true;
 					if (system === "icm") {
-						this.deps.providerRequest?.setPlanProjection(
-							createBlockedContinuousChatPlanWrapper(error instanceof Error ? error.message : String(error)),
-						);
+						this._setContinuousChatWire({
+							kind: "blocked",
+							reason: error instanceof Error ? error.message : String(error),
+						});
 					}
 				}
 				// Same route as an init failure: a session warning, never a stderr write from construction.

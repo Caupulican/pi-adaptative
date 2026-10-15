@@ -90,7 +90,7 @@ import { deriveWorkerDispositionFacts } from "./delegation/worker-disposition.ts
 import { execCommand } from "./exec.ts";
 import { PeerReviewController } from "./expert-routing/peer-review.ts";
 import type { ExtensionImportAuthority } from "./extension-import-authority.ts";
-import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
+import { type ContinuousChatAudit, createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {
 	type ContextUsage,
 	type Extension,
@@ -442,6 +442,8 @@ export interface RuntimeBuilderDeps {
 		transcript: TranscriptMemoryDiagnostics;
 	};
 	getSelfCompactionView?(): SelfCompactionView;
+	/** Under ICM, what the provider wire carries instead of the rebuilt session context; undefined otherwise. */
+	getContinuousChatAudit?(): ContinuousChatAudit | undefined;
 	/** Drop extension-contributed pending memory providers before a reload re-registers them. */
 	clearPendingMemoryProviders(): void;
 	createMemoryReloadSnapshot(): MemoryControllerReloadSnapshot;
@@ -1490,7 +1492,7 @@ export class RuntimeBuilder {
 				const definition = this.deps.getRuntimeUpdateTool?.();
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}
-			if (toolAccess.allows(SELF_COMPACT_TOOL_NAME) && this.deps.getSettingsManager().getMemorySystem() !== "icm") {
+			if (toolAccess.allows(SELF_COMPACT_TOOL_NAME)) {
 				const definition = this.deps.getSelfCompactTool?.();
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}
@@ -1525,6 +1527,7 @@ export class RuntimeBuilder {
 					(messages) => this.deps.getContextGcReport(messages),
 					() => this.deps.getMemoryAuditDiagnostics(),
 					() => this.deps.getSelfCompactionView?.(),
+					() => this.deps.getContinuousChatAudit?.(),
 				)) {
 					this._baseToolDefinitions.set(definition.name, definition);
 				}

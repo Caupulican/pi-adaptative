@@ -12,10 +12,10 @@ import type { ForegroundRouteSnapshot } from "../../../core/model-router-control
 import type { DecisionStage, DecisionStageLogView } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { FlowEvent, FlowOutcome } from "../../../core/operator-projection/flow-trace.ts";
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
+import { formatRouteValue, shortModelName } from "../../../core/route-text.ts";
 import type { SemanticEvaluationRecord } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import type { SemanticPlaneHealth } from "../../../core/system-one/semantic-plane-health.ts";
 import { formatCompactDuration } from "../../../core/util/format-duration.ts";
-import { formatRouteValue, shortModelName } from "./operator-pov-bar.ts";
 
 export type DecisionPlanStepStatus = "done" | "active" | "pending" | "blocked" | "failed" | "cancelled";
 export type DecisionCheckStatus = "pending" | "satisfied" | "failed";
@@ -52,6 +52,10 @@ export interface DecisionGraphInput {
 	readonly nowMs: number;
 }
 
+/**
+ * One stage over the whole objective, in the order the stage was first entered. `totalMs`, `passes`
+ * and `events` aggregate every visit; `loop`, `reasonCode` and `note` describe the LATEST visit.
+ */
 export interface DecisionStageRow {
 	readonly stage: DecisionStage;
 	readonly totalMs: number;
@@ -71,7 +75,7 @@ export const MAX_STAGE_EVENTS = 6;
 
 export interface DecisionParticipant {
 	readonly id: string;
-	readonly kind: "root" | "specialist" | "worker" | "verifier" | "capability" | "tool";
+	readonly kind: "root" | "specialist" | "worker" | "capability" | "tool";
 	readonly label: string;
 	readonly model?: string;
 	/** Who chose the model, in the operator's words; absent when the choice was direct. */
@@ -105,7 +109,6 @@ export interface DecisionGraphModel {
 		/** What System One is doing with control right now, in one phrase. */
 		readonly doing: string;
 		readonly rootOwned: boolean;
-		readonly rootDoing?: string;
 	};
 	readonly stages: readonly DecisionStageRow[];
 	readonly current?: DecisionStageRow;
@@ -130,9 +133,33 @@ export interface DecisionGraphModel {
 	/** The flow trace, for the views drawn from it. */
 	readonly flow: readonly FlowEvent[];
 	readonly stageLogEmpty: boolean;
+	/** Set when the stage history's durable store failed: the rows shown are live, the stored history may be behind. */
+	readonly stageHistoryFailure?: string;
 	/** What the idle root lane's compaction preparation is doing, in one line; absent when none is planned. */
 	readonly idleText?: string;
 	readonly nowMs: number;
+}
+
+/** Whether the goal is closed, and what still holds it open. The one definition every view of the verdict uses. */
+export interface GoalClosure {
+	/** Unsatisfied checks, peer findings and unresolved doubts. */
+	readonly open: number;
+	/** The goal reached its delivered branch with nothing open. */
+	readonly delivered: boolean;
+	/** The loop is at its delivery step with nothing open. */
+	readonly delivering: boolean;
+}
+
+export function goalClosure(model: DecisionGraphModel): GoalClosure {
+	const open =
+		model.checks.filter((check) => check.status !== "satisfied").length +
+		model.peerFindings.length +
+		model.unresolvedDoubtCount;
+	return {
+		open,
+		delivered: model.goal.branch === "delivered" && open === 0,
+		delivering: (model.goal.branch === "deliver" || model.current?.stage === "deliver") && open === 0,
+	};
 }
 
 /** The idle preparation in the operator's words: when it prepares and what it expects, or how the lane resumed. */
@@ -196,43 +223,73 @@ function parseTime(value: string | undefined): number | undefined {
 	return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function normalizeText(value: string | null | undefined): string {
+	return (value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+interface TimedEvent {
+	readonly at: number;
+	readonly title: string;
+	readonly severity: string;
+}
+
+/** Parsed event times per events array: a frame handed the same array does no parsing. */
+const timedEventsCache = new WeakMap<readonly unknown[], readonly TimedEvent[]>();
+
+function timedEventsOf(events: DecisionGraphInput["events"]): readonly TimedEvent[] {
+	if (events === undefined) return [];
+	const cached = timedEventsCache.get(events);
+	if (cached) return cached;
+	const parsed = events.flatMap((event) => {
+		const at = Date.parse(event.timestamp);
+		return Number.isFinite(at) ? [{ at, title: event.title, severity: event.severity }] : [];
+	});
+	timedEventsCache.set(events, parsed);
+	return parsed;
+}
+
 export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGraphModel {
 	const { projection, stageLog, health, evaluations, route, lanes, nowMs } = input;
 	const open = stageLog.open;
 	const stages: DecisionStageRow[] = [];
-	const seen = new Set<DecisionStage>();
-	const timedEvents = (input.events ?? []).flatMap((event) => {
-		const at = Date.parse(event.timestamp);
-		return Number.isFinite(at) ? [{ at, title: event.title, severity: event.severity }] : [];
-	});
-	const eventsDuring = (stage: DecisionStage): DecisionStageRow["events"] => {
+	const timedEvents = timedEventsOf(input.events);
+	const eventsDuring = (stage: DecisionStage, stageNote: string | undefined): DecisionStageRow["events"] => {
 		const windows = stageLog.entries
 			.filter((entry) => entry.stage === stage)
 			.map((entry) => ({ from: entry.enteredAt, to: entry.endedAt ?? nowMs }));
-		return timedEvents
-			.filter((event) => windows.some((window) => event.at >= window.from && event.at < window.to))
-			.slice(-MAX_STAGE_EVENTS)
-			.map(({ title, severity }) => ({ title, severity }));
+		const stageNorm = normalizeText(stage);
+		const doingNorm = normalizeText(STAGE_DOING[stage]);
+		const noteNorm = normalizeText(stageNote);
+		const deduped = new Map<string, { readonly title: string; readonly severity: string }>();
+		for (const event of timedEvents) {
+			if (!windows.some((window) => event.at >= window.from && event.at < window.to)) continue;
+			const key = normalizeText(event.title);
+			if (!key || key === stageNorm || key === doingNorm || (noteNorm && key === noteNorm)) continue;
+			deduped.delete(key);
+			deduped.set(key, { title: event.title, severity: event.severity });
+		}
+		return [...deduped.values()].slice(-MAX_STAGE_EVENTS);
 	};
-	for (const entry of stageLog.entries) {
-		if (seen.has(entry.stage)) continue;
-		seen.add(entry.stage);
-		const totals = stageLog.totals[entry.stage];
-		const isCurrent = open?.stage === entry.stage;
+	for (const summary of stageLog.stages) {
+		const isCurrent = open?.stage === summary.stage;
+		const noteNorm = normalizeText(summary.note);
+		const note =
+			summary.note &&
+			noteNorm.length > 0 &&
+			noteNorm !== normalizeText(summary.stage) &&
+			noteNorm !== normalizeText(STAGE_DOING[summary.stage])
+				? summary.note
+				: undefined;
 		stages.push({
-			events: eventsDuring(entry.stage),
-			stage: entry.stage,
-			totalMs: totals.elapsedMs,
+			events: eventsDuring(summary.stage, note),
+			stage: summary.stage,
+			totalMs: summary.elapsedMs,
 			passMs: isCurrent && open ? Math.max(0, nowMs - open.enteredAt) : 0,
-			passes: totals.passes,
+			passes: summary.passes,
 			current: isCurrent,
-			loop: isCurrent && open ? open.loop : entry.loop,
-			...(isCurrent && open?.reasonCode
-				? { reasonCode: open.reasonCode }
-				: entry.reasonCode
-					? { reasonCode: entry.reasonCode }
-					: {}),
-			...(isCurrent && open?.note ? { note: open.note } : entry.note ? { note: entry.note } : {}),
+			loop: summary.loop,
+			...(summary.reasonCode ? { reasonCode: summary.reasonCode } : {}),
+			...(note ? { note } : {}),
 		});
 	}
 	const current = stages.find((row) => row.current);
@@ -260,21 +317,16 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		evaluations: evaluations.length,
 		doing: inFlight
 			? `judging ${inFlight.label}`
-			: rootOwned
-				? health.state === "unbound"
-					? "off"
-					: "standing by"
-				: current
-					? STAGE_DOING[current.stage]
-					: projection.phase === "done"
-						? "delivered"
-						: projection.control.owner === "system_one"
-							? "decides next"
-							: projection.control.owner === "user"
-								? "waiting for you"
-								: "standing by",
+			: health.state === "unbound"
+				? "off"
+				: projection.phase === "done"
+					? "delivered"
+					: projection.control.owner === "system_one"
+						? "decides next"
+						: projection.control.owner === "user"
+							? "waiting for you"
+							: "standing by",
 		rootOwned,
-		...(rootOwned && current ? { rootDoing: STAGE_DOING[current.stage] } : {}),
 	};
 
 	const routed = route.switched && route.activeModel !== route.rootModel;
@@ -305,29 +357,27 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		root: 0,
 		specialist: 1,
 		worker: 2,
-		verifier: 3,
-		capability: 4,
-		tool: 5,
+		capability: 3,
+		tool: 4,
 	};
 	const laneParticipants = lanes
 		.filter((lane) => lane.type === "research" || lane.type === "worker" || lane.type === "tmux-worker")
-		.map(
-			(lane): DecisionParticipant => ({
+		.map((lane): DecisionParticipant => {
+			const startedAt = lane.status === "running" ? parseTime(lane.startedAt) : undefined;
+			const routeText = workerRouteText(lane);
+			return {
 				id: lane.laneId,
 				kind: participantKind(lane),
 				label: lane.label ?? `worker ${lane.laneId.slice(0, 8)}`,
 				...(lane.modelRef ? { model: shortModelName(lane.modelRef) } : {}),
-				...(workerRouteText(lane) ? { routeText: workerRouteText(lane) } : {}),
-				...(lane.label ? { task: lane.label } : {}),
-				...(lane.status === "running" && parseTime(lane.startedAt) !== undefined
-					? { startedAt: parseTime(lane.startedAt) }
-					: {}),
+				...(routeText ? { routeText } : {}),
+				...(startedAt !== undefined ? { startedAt } : {}),
 				running: lane.status === "running",
 				queued: lane.status === "queued",
 				...(lane.status === "queued" && lane.waitReason ? { waitReason: lane.waitReason } : {}),
 				acted: true,
-			}),
-		)
+			};
+		})
 		.sort((a, b) => order[a.kind] - order[b.kind]);
 	participants.push(...laneParticipants);
 	if (projection.adaptation) {
@@ -364,9 +414,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 
 	const lastVerify = [...evaluations]
 		.reverse()
-		.find(
-			(record) => /^(verify|completion|objective route)/.test(record.label) || record.label.startsWith("completion"),
-		);
+		.find((record) => /^(verify|completion|objective route)/.test(record.label));
 	const currentStage = current?.stage;
 	const blocked = projection.phase === "blocked" && !waiting ? projection.why : undefined;
 	const branch: DecisionGoalBranch =
@@ -399,6 +447,16 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 			participants.some((p) => p.running && p.startedAt !== undefined),
 	);
 
+	const nextNorm = normalizeText(projection.next_action);
+	const nextDuplicates =
+		!nextNorm ||
+		(current !== undefined &&
+			(nextNorm === normalizeText(current.stage) ||
+				nextNorm === normalizeText(STAGE_DOING[current.stage]) ||
+				(current.note !== undefined && nextNorm === normalizeText(current.note)))) ||
+		(you.question !== undefined && nextNorm === normalizeText(you.question));
+	const next = projection.next_action && !nextDuplicates ? projection.next_action : undefined;
+
 	return {
 		objectiveId: projection.objective_id,
 		you,
@@ -406,7 +464,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		stages,
 		...(current ? { current } : {}),
 		loop: stageLog.loop,
-		...(projection.next_action ? { next: projection.next_action } : {}),
+		...(next ? { next } : {}),
 		plan: input.plan,
 		checks: input.checks,
 		peerFindings,
@@ -421,6 +479,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		...(lastTurnOutcome ? { lastTurnOutcome } : {}),
 		flow,
 		stageLogEmpty: stageLog.entries.length === 0,
+		...(stageLog.sinkFailure !== undefined ? { stageHistoryFailure: stageLog.sinkFailure } : {}),
 		...(idle ? { idleText: idlePreparationText(idle, nowMs) } : {}),
 		nowMs,
 	};

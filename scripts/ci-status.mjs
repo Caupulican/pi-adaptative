@@ -10,6 +10,7 @@
  *
  *   node scripts/ci-status.mjs pre-push <remote> <url>   (git pre-push hook; refs on stdin)
  *   node scripts/ci-status.mjs watch <sha> <branch>      (the detached watcher)
+ *   node scripts/ci-status.mjs reconcile <branch>        (correct a record a dead watcher left pending)
  *   node scripts/ci-status.mjs show [branch]             (print the recorded verdict)
  */
 import { execFileSync, spawn } from "node:child_process";
@@ -113,7 +114,8 @@ function sleep(ms) {
 
 export async function watch(sha, branch) {
 	const base = { sha, branch, workflow: WORKFLOW };
-	writeStatus(branch, { ...base, state: "pending", startedAt: new Date().toISOString() });
+	// The pid lets a reader tell a live watcher from one that died and left this record pending.
+	writeStatus(branch, { ...base, state: "pending", startedAt: new Date().toISOString(), pid: process.pid });
 	try {
 		const startedAt = Date.now();
 		for (;;) {
@@ -154,6 +156,46 @@ export async function watch(sha, branch) {
 	}
 }
 
+/** A pending record is stale when its watcher is gone: its recorded pid is dead, or (no pid) it outlived any CI run. */
+const PENDING_STALE_AFTER_MS = 15 * 60_000;
+
+function isStalePending(record) {
+	if (Number.isInteger(record.pid) && record.pid > 0) {
+		try {
+			process.kill(record.pid, 0);
+			return false;
+		} catch (error) {
+			return error?.code !== "EPERM";
+		}
+	}
+	const started = Date.parse(record.startedAt ?? "");
+	return Number.isFinite(started) && Date.now() - started > PENDING_STALE_AFTER_MS;
+}
+
+/**
+ * Corrects a record a dead watcher left `pending`: one look at what GitHub says about that exact commit, then the
+ * same completed record the watcher would have written. A run still going, or no run yet, leaves the record alone.
+ */
+export function reconcile(branch) {
+	const record = readCiStatus(branch);
+	if (record?.state !== "pending" || typeof record.sha !== "string" || !isStalePending(record)) return;
+	const decisive = pickDecisiveRun(listRuns(record.sha), record.sha);
+	if (!decisive || decisive.status !== "completed") return;
+	const jobs = JSON.parse(gh(["run", "view", String(decisive.databaseId), "--json", "jobs"])).jobs ?? [];
+	writeStatus(branch, {
+		sha: record.sha,
+		branch,
+		workflow: record.workflow ?? WORKFLOW,
+		state: "completed",
+		conclusion: decisive.conclusion,
+		runId: decisive.databaseId,
+		url: decisive.url,
+		failedJobs: jobs.filter((job) => job.conclusion === "failure").map((job) => job.name),
+		completedAt: new Date().toISOString(),
+		reconciledBy: "pi",
+	});
+}
+
 /** pre-push: `<local ref> <local sha> <remote ref> <remote sha>` per line on stdin. */
 export function prePushTargets(stdin) {
 	return stdin
@@ -192,6 +234,7 @@ export function describeStatus(status) {
 async function main(argv) {
 	const [command, ...rest] = argv;
 	if (command === "watch") return watch(rest[0], rest[1]);
+	if (command === "reconcile") return reconcile(rest[0]);
 	if (command === "show") {
 		const branch = rest[0] ?? git(["rev-parse", "--abbrev-ref", "HEAD"]);
 		process.stdout.write(`${describeStatus(readCiStatus(branch))}\n`);
@@ -208,7 +251,7 @@ async function main(argv) {
 		startWatchers(targets);
 		return;
 	}
-	throw new Error("usage: ci-status.mjs <pre-push|watch <sha> <branch>|show [branch]>");
+	throw new Error("usage: ci-status.mjs <pre-push|watch <sha> <branch>|reconcile <branch>|show [branch]>");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

@@ -375,6 +375,12 @@ export interface AgentContextPlan {
 	 * so a record the projection no longer carries reads as absent and is appended again.
 	 */
 	transientReconciliationBase?: readonly AgentMessage[];
+	/**
+	 * How many leading `messages` are a host envelope rather than history (a turn view and turn state): no compaction
+	 * can shrink them, so admission counts them as non-compactable. Absent, every planned message is compactable.
+	 * An integer from 0 to `messages.length`; anything else fails the request.
+	 */
+	nonCompactableHead?: number;
 	/** Cheap freshness check immediately before admission/commit. */
 	isCurrent?: () => boolean;
 	/**

@@ -41,12 +41,14 @@ import type {
 	Settings,
 	StreamStallBudgetSettings,
 	ThinkingLevel,
+	WorkbenchGraphView,
 	WorkbenchSettings,
 	WorkerAccountPolicy,
 	WorkerDelegationSettings,
 	WorkerThinkingPolicy,
 	WorktreeSyncPolicySetting,
 } from "./settings-schema.ts";
+import { WORKBENCH_GRAPH_VIEWS } from "./settings-schema.ts";
 
 /** Single owner of the non-finite check: NaN, ±Infinity, and non-number input are "no usable number". Callers choose the fallback. */
 export function finiteNumberOrUndefined(value: unknown): number | undefined {
@@ -374,9 +376,14 @@ export function normalizeBedrockScopeSettings(
 	};
 }
 
+/** The Decision graph's share of the conversation zone: the default and the bounds every writer clamps to. */
+export const DEFAULT_GRAPH_FRACTION = 0.32;
+export const MIN_GRAPH_FRACTION = 0.25;
+export const MAX_GRAPH_FRACTION = 0.5;
+
 export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> = Object.freeze({
 	mouse: "on",
-	rows: "half",
+	rows: "auto",
 	collapsed: false,
 	inspector: "shown",
 	executionMaximized: false,
@@ -385,9 +392,14 @@ export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> =
 	conversationFraction: 0.5,
 	previews: 24,
 	graph: "shown",
-	graphFraction: 0.32,
+	graphFraction: DEFAULT_GRAPH_FRACTION,
 	graphView: "diagram",
 });
+
+/** Narrowing guard for a stored or typed graph view: membership in the one view list. */
+export function isWorkbenchGraphView(value: unknown): value is WorkbenchGraphView {
+	return WORKBENCH_GRAPH_VIEWS.some((view) => view === value);
+}
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
 export function deepMergeSettings(base: Settings, overrides: Settings): Settings {

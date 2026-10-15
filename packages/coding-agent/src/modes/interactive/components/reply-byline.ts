@@ -1,6 +1,6 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
-import { formatRouteValue } from "./operator-pov-bar.ts";
+import { formatRouteValue } from "../../../core/route-text.ts";
 import { attributionText } from "./workbench-tool-preview.ts";
 
 export interface ReplyByline {
@@ -15,14 +15,18 @@ export function replyModelRef(message: Pick<AssistantMessage, "provider" | "mode
 }
 
 /**
- * Who wrote a reply, in the same `actor · model` grammar as the Execution preview titles. A reply the
- * session's own model wrote reads `root · <model>`; a routed one adds who chose it, in the POV bar's ROUTE
- * words (`routed · <model> · cheap via model-router`).
+ * Who wrote a reply, only when it was not the session's own model (that one is on the status line): a routed
+ * reply reads `routed · <model name> · <who chose it>`, in the POV bar's ROUTE words.
  */
-export function replyByline(modelRef: string, route: ForegroundRouteSnapshot | undefined): ReplyByline {
-	const routed = route?.switched === true;
-	const base = attributionText({ kind: "root", label: routed ? "routed" : "root", modelRef });
-	return { text: routed && route ? `${base} · ${formatRouteValue(route)}` : base, routed };
+export function replyByline(
+	modelRef: string,
+	route: ForegroundRouteSnapshot | undefined,
+	modelName?: string,
+): ReplyByline | undefined {
+	// The session's own model is on the status line; a reply says who wrote it only when a routed model did.
+	if (route?.switched !== true) return undefined;
+	const base = attributionText({ kind: "root", label: "routed", modelRef, ...(modelName ? { modelName } : {}) });
+	return { text: `${base} · ${formatRouteValue(route)}`, routed: true };
 }
 
 /**

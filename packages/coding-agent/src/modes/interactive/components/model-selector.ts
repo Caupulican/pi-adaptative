@@ -373,8 +373,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const providerBadge = theme.fg("muted", `[${item.provider}]`);
 			const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
 			const line = `${prefix}${favoriteMark}${modelText} ${providerBadge}${checkmark}`;
+			const rowText = isSelected && theme.hasBg("selectedBg") ? theme.bg("selectedBg", `${line} `) : line;
 
-			this.listContainer.addChild(new Text(line, 0, 0));
+			this.listContainer.addChild(new Text(rowText, 0, 0));
 		}
 
 		// Add scroll indicator if needed

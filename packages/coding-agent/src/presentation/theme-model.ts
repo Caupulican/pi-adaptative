@@ -320,7 +320,8 @@ export function getSelectionStyle(): string {
 export function getSelectListTheme(): SelectListTheme {
 	return {
 		selectedPrefix: (text: string) => theme.fg("accent", text),
-		selectedText: (text: string) => theme.fg("accent", text),
+		selectedText: (text: string) =>
+			theme.hasBg("selectedBg") ? theme.bg("selectedBg", theme.fg("accent", text)) : theme.fg("accent", text),
 		description: (text: string) => theme.fg("muted", text),
 		scrollInfo: (text: string) => theme.fg("muted", text),
 		noMatch: (text: string) => theme.fg("muted", text),
@@ -331,6 +332,7 @@ export function getEditorTheme(): EditorTheme {
 	return {
 		borderColor: (text: string) => theme.fg("borderMuted", text),
 		selectList: getSelectListTheme(),
+		placeholderColor: (text: string) => theme.fg("dim", text),
 		// The same highlighter, tokens and surface the transcript's code blocks use.
 		code: {
 			highlight: (code: string, lang?: string) => highlightCodeLines(code, lang, "themed"),
@@ -350,6 +352,7 @@ export function getSettingsListTheme(): SettingsListTheme {
 		description: (text: string) => theme.fg("dim", text),
 		cursor: theme.fg("accent", "→ "),
 		hint: (text: string) => theme.fg("dim", text),
+		selectedRow: (text: string) => (theme.hasBg("selectedBg") ? theme.bg("selectedBg", text) : text),
 	};
 }
 

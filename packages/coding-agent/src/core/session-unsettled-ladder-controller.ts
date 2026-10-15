@@ -38,6 +38,7 @@ import {
 	toolResultEvidence,
 	UNSETTLED_ITEM_CONSULT_PROMPT,
 } from "./system-one/unsettled-ladder.ts";
+import { resolveTurnMessages } from "./turn-window.ts";
 import { turnCustomEntries, WORKER_RECEIPTS_CUSTOM_TYPE, workUnitWindow } from "./work-units.ts";
 
 export interface SessionUnsettledLadderControllerDeps {
@@ -88,9 +89,16 @@ export class SessionUnsettledLadderController {
 		});
 	}
 
-	/** The correction the last answer's delivery claims call for, checked over the turn's claim window. */
-	claimCorrection(turnStart: number): Promise<string | undefined> {
-		const window = this.claimWindow(this.deps.getMessages().slice(turnStart));
+	/**
+	 * The correction the turn's answer's delivery claims call for, checked over the turn's claim window. The turn is
+	 * found from its opening message ({@link resolveTurnMessages}), so a compaction inside the turn neither hands the
+	 * check earlier conversation nor drops what survives of the turn. A turn whose opening never entered the
+	 * conversation (its run was closed before it started) has no answer of its own: nothing is checked.
+	 */
+	async claimCorrection(turnOpening: AgentMessage): Promise<string | undefined> {
+		const turnMessages = resolveTurnMessages(this.deps.getSessionManager(), turnOpening, this.deps.getMessages());
+		if (turnMessages === undefined) return undefined;
+		const window = this.claimWindow(turnMessages);
 		return this.answerClaims.check(
 			assistantAnswerText(this.deps.findLastAssistantMessage()),
 			window.messages,

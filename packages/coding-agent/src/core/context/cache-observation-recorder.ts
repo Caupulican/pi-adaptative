@@ -35,15 +35,14 @@ export function idleHolder(sincePreviousReply: readonly { role: string }[]): "ow
 }
 
 /**
- * The lineage a history belongs to: the compaction it follows, or `root` before the first one. A
- * compacted history carries its summary at index 0, or at 1 behind the original-user anchor that
- * session-replacement retention keeps (`buildSessionContext`), so only those two slots are read.
+ * The lineage a history belongs to: the latest compaction checkpoint it holds, or `root` before the first one. The
+ * history is read from its end: a checkpoint scoped to an ICM chat turn follows the rebuilt context of the history
+ * before that turn, which may hold checkpoints of its own (`buildSessionContext`), so the latest summary is not
+ * necessarily among the first messages.
  */
 export function historyLineage(messages: readonly { role: string; timestamp?: number }[]): string {
-	for (const message of messages.slice(0, 2)) {
-		if (message.role === "compactionSummary") return `compaction@${message.timestamp ?? "?"}`;
-	}
-	return "root";
+	const summary = messages.findLast((message) => message.role === "compactionSummary");
+	return summary === undefined ? "root" : `compaction@${summary.timestamp ?? "?"}`;
 }
 
 /** A session lane's last recorded response: when it ended and how large its prompt was. */

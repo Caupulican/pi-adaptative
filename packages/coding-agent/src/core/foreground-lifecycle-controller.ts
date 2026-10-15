@@ -210,13 +210,22 @@ export class ForegroundLifecycleController {
 		return this.persistedMessages.get(message);
 	}
 
+	/**
+	 * Persists a cheap routed turn's held-back prompt prefix (once per routed turn; later calls find nothing) and notes
+	 * the entries. Every provider request does it before its snapshot; request admission does it earlier, before a
+	 * compaction reads the persisted turn.
+	 */
+	commitRoutedPromptPrefix(): void {
+		const flushed = this.deps.modelRouter.commitSessionBufferPrefix();
+		for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
+	}
+
 	private async onProviderRequestSnapshot(
 		context: ProviderRequestSnapshotContext,
 		signal?: AbortSignal,
 	): Promise<void> {
 		signal?.throwIfAborted();
-		const flushed = this.deps.modelRouter.commitSessionBufferPrefix();
-		for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
+		this.commitRoutedPromptPrefix();
 		const requestId = context.requestId;
 		this.lastRequestId = requestId;
 		const provider = context.model.provider;

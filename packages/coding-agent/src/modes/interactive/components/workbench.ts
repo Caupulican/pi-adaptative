@@ -1,26 +1,31 @@
-import { type Component, Container, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import { type Component, Container, hyperlink, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
+import type { PullRequestView } from "../../../core/pull-request-view.ts";
+import {
+	DEFAULT_GRAPH_FRACTION,
+	MAX_GRAPH_FRACTION,
+	MIN_GRAPH_FRACTION,
+} from "../../../core/settings/settings-rules.ts";
+import { WORKBENCH_GRAPH_VIEWS, type WorkbenchGraphView } from "../../../core/settings/settings-schema.ts";
 import { keyText } from "../../../presentation/keybinding-hints.ts";
 import { getSelectionStyle, theme } from "../../../presentation/theme-model.ts";
 import { ActionTranscriptComponent } from "./action-transcript.ts";
 import { BashExecutionComponent } from "./bash-execution.ts";
 import { ConversationWindow } from "./conversation-window.ts";
 import type { DecisionGraphModel } from "./decision-graph-model.ts";
-import type { WorkbenchGraphView } from "./decision-graph-pane.ts";
-import { DecisionGraphPane, GRAPH_PANE_TITLE } from "./decision-graph-pane.ts";
+import { DecisionGraphPane } from "./decision-graph-pane.ts";
 import { FlowAnimator } from "./flow-animator.ts";
-import {
-	fitRow,
-	labelRow,
-	metaRow,
-	surfaceRow,
-	WorkbenchPane,
-	type WorkbenchPaneTitleButton,
-} from "./workbench-pane.ts";
+import { fitRow, labelRow, surfaceRow, WorkbenchPane, type WorkbenchPaneTitleButton } from "./workbench-pane.ts";
 
 /** The title strip names the work; the run state lives on the live row inside the conversation zone. */
 export interface WorkbenchHeadline {
 	title?: string;
+}
+
+/** The model on the status line; `thinking` is absent for a model that does not reason. */
+export interface WorkbenchModelStatus {
+	name: string;
+	thinking?: string;
 }
 
 /** One inspector block: a titled group of rows (plan steps, team members). */
@@ -28,6 +33,8 @@ export interface WorkbenchSection {
 	title: string;
 	meta?: string;
 	body: Component | string[];
+	/** Standing facts with no work in them (an idle team): listed beside real work, never a reason to open the panel. */
+	quiet?: boolean;
 }
 
 export interface WorkbenchOptions {
@@ -42,8 +49,12 @@ export interface WorkbenchOptions {
 	brand: string;
 	/** Fallback title when no plan or goal names the work. */
 	title?: () => string;
-	/** Where the work runs (path and branch), right-aligned on the title strip. */
-	cwd?: () => string;
+	/** The checked-out branch, shown at the left of the status line under the input. */
+	branch?: () => string | null;
+	/** The current branch's pull request, shown after the branch; absent when there is none. */
+	pullRequest?: () => PullRequestView | undefined;
+	/** The model answering and its thinking level, shown at the right of the status line. */
+	model?: () => WorkbenchModelStatus | undefined;
 	viewportRows: () => number;
 	/** Mounted for focus/lifecycle but not permanently reserved above the conversation. */
 	header?: Component;
@@ -57,6 +68,15 @@ export interface WorkbenchDividerJunction {
 	readonly glyph: "┴" | "┬" | "┼";
 }
 
+const GRAPH_VIEW_NAMES: Readonly<Record<WorkbenchGraphView, string>> = {
+	list: "List",
+	diagram: "Diagram",
+	lanes: "Lanes",
+};
+
+const THINKING_METER_LEVELS = ["minimal", "low", "medium", "high", "xhigh"];
+const THINKING_METER_CELLS = THINKING_METER_LEVELS.length;
+
 export const PLAN_SECTION = "Work plan";
 export const TEAM_SECTION = "Team";
 export const CHECKS_SECTION = "Checks";
@@ -69,8 +89,9 @@ export const MAX_INSPECTOR_FRACTION = 0.45;
 export const DEFAULT_CONVERSATION_FRACTION = 0.5;
 export const MIN_CONVERSATION_FRACTION = 0.3;
 export const MAX_CONVERSATION_FRACTION = 0.7;
-/** Until the operator resizes, evidence and conversation share the rows evenly. */
-export const DEFAULT_UPPER_ROWS: WorkAreaRows = "half";
+/** Until the operator resizes, the work area takes this share of the rows and the conversation keeps the rest. */
+export const AUTO_WORK_AREA_SHARE = 0.35;
+export const DEFAULT_UPPER_ROWS: WorkAreaRows = "auto";
 /** The conversation never drops below this many rows, whatever the operator gives the work area. */
 export const MIN_CONVERSATION_ROWS = 6;
 export const MAX_UPPER_ROWS = 60;
@@ -78,12 +99,9 @@ export const MAX_UPPER_ROWS = 60;
 export const MIN_GRAPH_WIDTH = 48;
 /** The chat never drops below this; the graph folds before the conversation becomes a column of stubs. */
 export const MIN_CHAT_WIDTH = 40;
-export const DEFAULT_GRAPH_FRACTION = 0.32;
-export const MIN_GRAPH_FRACTION = 0.25;
-export const MAX_GRAPH_FRACTION = 0.5;
 
-/** Explicit rows the operator chose, or "half": an even split that follows the terminal's height. */
-export type WorkAreaRows = number | "half";
+/** Explicit rows the operator chose, or "auto": a proportional split that follows the terminal's height. */
+export type WorkAreaRows = number | "auto";
 
 /** Everything the operator owns about the work area; persisted as-is across sessions. */
 export type WorkbenchHit =
@@ -124,9 +142,9 @@ export function clampUpperRows(rows: number): number {
 	return Math.max(2, Math.min(MAX_UPPER_ROWS, Math.floor(rows)));
 }
 
-/** The even split for a given budget: half of what is left after the divider and the header. */
-export function halfWorkAreaRows(available: number): number {
-	return Math.max(0, Math.floor((available - 2) / 2));
+/** The proportional split for a given budget: the work area's share of what is left after the divider and the header. */
+export function autoWorkAreaRows(available: number): number {
+	return Math.max(0, Math.floor((available - 2) * AUTO_WORK_AREA_SHARE));
 }
 
 /**
@@ -138,7 +156,7 @@ export function halfWorkAreaRows(available: number): number {
 export function workAreaRows(available: number, geometry: WorkbenchGeometry): number {
 	if (geometry.collapsed) return 0;
 	const cap = Math.max(0, available - 2 - MIN_CONVERSATION_ROWS);
-	const rows = geometry.rows === "half" ? halfWorkAreaRows(available) : geometry.rows;
+	const rows = geometry.rows === "auto" ? autoWorkAreaRows(available) : geometry.rows;
 	return geometry.executionMaximized ? cap : Math.min(rows, cap);
 }
 
@@ -165,7 +183,7 @@ export class WorkbenchComponent extends Container {
 	private executionEvidence?: Component;
 	private displayedShell?: BashExecutionComponent;
 	private upperLimit: WorkAreaRows = DEFAULT_UPPER_ROWS;
-	/** Row budget of the last frame; an even split resolves against it when the operator resizes. */
+	/** Row budget of the last frame; the automatic split resolves against it when the operator resizes. */
 	private lastAvailable = 0;
 	private collapsed = false;
 	private inspectorHidden = false;
@@ -195,7 +213,7 @@ export class WorkbenchComponent extends Container {
 	private workLeft = 0;
 	private workWidth = 0;
 	private dismissedShell?: BashExecutionComponent;
-	private headerButtons: { action: "latest" | "copyAll" | "layout"; start: number; end: number }[] = [];
+	private headerButtons: { action: "latest" | "layout" | "showGraph"; start: number; end: number }[] = [];
 	conversationTop = 0;
 	conversationLeft = 1;
 	conversationWidth = 0;
@@ -218,49 +236,6 @@ export class WorkbenchComponent extends Container {
 	/** Column of the Decision graph | chat rule; -1 while the graph is folded or hidden. */
 	private graphRuleColumn = -1;
 	/** Key labels resolve once; the keybinding manager is static after startup. */
-	private keyLabels?: {
-		toggle: string;
-		hint: string;
-		mouse: string;
-	};
-
-	/** Every key lives on the one hint row; the divider is a handle and pane titles carry chips only. */
-	private keys(): {
-		toggle: string;
-		hint: string;
-		mouse: string;
-	} {
-		if (this.keyLabels) return this.keyLabels;
-		const key = (binding: Parameters<typeof keyText>[0], text: string) => {
-			const keys = keyText(binding);
-			return keys ? `${keys} ${text}` : "";
-		};
-		const rows = [keyText("app.workbench.grow"), keyText("app.workbench.shrink")].filter(Boolean).join(" ");
-		this.keyLabels = {
-			toggle: keyText("app.execution.toggle"),
-			// Ordered by what survives a narrow terminal: the truncation cuts from the right.
-			hint: [
-				"/ commands",
-				key("app.interrupt", "interrupt"),
-				// Windows Terminal swallows alt+enter; the `>>` prefix is the follow-up gesture there.
-				process.env.WT_SESSION ? ">> follow-up" : key("app.message.followUp", "follow-up"),
-				key("app.execution.toggle", "work area"),
-				key("app.inspector.toggle", "plan"),
-				key("app.execution.maximize", "maximize"),
-				rows ? `${rows} rows` : "",
-				key("app.graph.toggle", "graph"),
-				key("app.graph.view", "graph view"),
-				key("app.workbench.layout", "columns"),
-				key("app.transcript.open", "transcript"),
-				key("app.conversation.copy", "copy conversation"),
-			]
-				.filter(Boolean)
-				.join(" · "),
-			mouse: keyText("app.mouse.toggle"),
-		};
-		return this.keyLabels;
-	}
-
 	setMouseMode(enabled: boolean): void {
 		this.mouseMode = enabled;
 	}
@@ -311,6 +286,10 @@ export class WorkbenchComponent extends Container {
 		this.frameRevision++;
 	}
 	setInspector(sections: WorkbenchSection[]): void {
+		// Work starting opens the plan even for an operator who hid it during earlier work; hiding holds until the next start.
+		if (!this.sections.some((section) => !section.quiet) && sections.some((section) => !section.quiet)) {
+			this.inspectorHidden = false;
+		}
 		this.sections = sections;
 		if (!sections.length) this.inspectorPane.reset();
 	}
@@ -334,6 +313,10 @@ export class WorkbenchComponent extends Container {
 		this.executionCompact = compact;
 		this.executionMeta = meta;
 	}
+	/** The Execution content row under a pointer, or undefined outside the pane's content. */
+	executionRowAt(column: number, row: number): number | undefined {
+		return this.executionPane.rowAt(column, row);
+	}
 	scrollUpper(column: number, row: number, delta: number): boolean {
 		return this.inspectorPane.scrollAt(column, row, delta) || this.executionPane.scrollAt(column, row, delta);
 	}
@@ -356,9 +339,11 @@ export class WorkbenchComponent extends Container {
 	disposeGraphMotion(): void {
 		this.graphAnimator?.dispose();
 	}
-	/** The graph was drawn in the last frame (shown, sourced, and wide enough). */
+	/** Whether the Decision graph is shown (drawn in the current/last frame, or active at the current zone width). */
 	get graphShown(): boolean {
-		return this.graphRuleColumn >= 0;
+		if (this.graphRuleColumn >= 0) return true;
+		const zoneWidth = this.zoneWidth > 0 ? this.zoneWidth : this.lastColumns > 0 ? this.lastColumns : 120;
+		return this.resolvedGraphWidth(zoneWidth) > 0;
 	}
 	scrollGraph(column: number, row: number, delta: number): boolean {
 		return this.graphPane.scrollAt(column, row, delta);
@@ -371,9 +356,6 @@ export class WorkbenchComponent extends Container {
 	toggleGraphStage(stage: DecisionStage): void {
 		this.graphPane.toggleStage(stage);
 		if (this.graphPane.getSelectedStage() !== undefined) this.graphView = "list";
-	}
-	getSelectedGraphStage(): DecisionStage | undefined {
-		return this.graphPane.getSelectedStage();
 	}
 	/** Pointer column on the graph | chat gutter: the graph's share of the conversation zone. */
 	resizeGraphFromPointer(column: number): void {
@@ -421,7 +403,7 @@ export class WorkbenchComponent extends Container {
 		};
 	}
 	applyGeometry(geometry: WorkbenchGeometry): void {
-		this.upperLimit = geometry.rows === "half" ? "half" : clampUpperRows(geometry.rows);
+		this.upperLimit = geometry.rows === "auto" ? "auto" : clampUpperRows(geometry.rows);
 		this.collapsed = geometry.collapsed;
 		this.inspectorHidden = geometry.inspector === "hidden";
 		this.executionMaximized = geometry.executionMaximized;
@@ -436,18 +418,13 @@ export class WorkbenchComponent extends Container {
 	toggleGraph(): void {
 		this.graphHidden = !this.graphHidden;
 	}
-	setGraphView(view: WorkbenchGraphView): void {
-		this.graphView = view;
-	}
 	cycleGraphView(): void {
-		// List → Diagram → Lanes → List.
-		this.graphView = this.graphView === "list" ? "diagram" : this.graphView === "diagram" ? "lanes" : "list";
+		// The view list's order, wrapping: List → Diagram → Lanes → List.
+		this.graphView =
+			WORKBENCH_GRAPH_VIEWS[(WORKBENCH_GRAPH_VIEWS.indexOf(this.graphView) + 1) % WORKBENCH_GRAPH_VIEWS.length]!;
 	}
 	followCurrentGraph(): void {
 		this.graphPane.unpin();
-	}
-	getGraphView(): WorkbenchGraphView {
-		return this.graphView;
 	}
 	resizeGraph(fraction: number): void {
 		this.graphFraction = Math.max(MIN_GRAPH_FRACTION, Math.min(MAX_GRAPH_FRACTION, fraction));
@@ -457,7 +434,7 @@ export class WorkbenchComponent extends Container {
 	}
 	/** The rows the work area has now: the operator's number, or the even split of the last frame. */
 	private currentUpperRows(): number {
-		return this.upperLimit === "half" ? halfWorkAreaRows(this.lastAvailable) : this.upperLimit;
+		return this.upperLimit === "auto" ? autoWorkAreaRows(this.lastAvailable) : this.upperLimit;
 	}
 	growUpper(): void {
 		this.resizeUpper(this.currentUpperRows() + 1);
@@ -527,35 +504,23 @@ export class WorkbenchComponent extends Container {
 		return buttons;
 	}
 	/**
-	 * The graph pane's title chips at `paneWidth`. Every view has a chip when they all fit; when they
-	 * do not, the views condense into one chip that names the current view and cycles on click (as
-	 * alt+l does), so switching views and hiding the pane never disappear at a narrow width.
+	 * The graph pane's title controls: a chevron that folds the pane, and one pill naming the current view
+	 * that steps List → Diagram → Lanes on click (as alt+l does). Only the active view is drawn.
 	 */
-	private graphTitleButtons(paneWidth: number): WorkbenchPaneTitleButton[] {
-		const views: WorkbenchPaneTitleButton[] = [
-			{ action: "graphList", label: "List", selected: this.graphView === "list" },
-			{ action: "graphDiagram", label: "Diagram", selected: this.graphView === "diagram" },
-			{ action: "graphLanes", label: "Lanes", selected: this.graphView === "lanes" },
-		];
-		const hide: WorkbenchPaneTitleButton = { action: "hideGraph", label: "Hide" };
-		// Title, one space, each chip padded by one cell a side, two cells between chips (WorkbenchPane).
-		const width = (buttons: readonly WorkbenchPaneTitleButton[]) =>
-			visibleWidth(GRAPH_PANE_TITLE) +
-			1 +
-			buttons.reduce((sum, button) => sum + visibleWidth(button.label) + 2, 0) +
-			Math.max(0, buttons.length - 1) * 2;
-		const inner = Math.max(1, paneWidth - 2);
-		const selected = views.find((view) => view.selected) ?? views[1]!;
-		const buttons =
-			width([...views, hide]) <= inner
-				? views
-				: [{ action: "graphCycle" as const, label: selected.label, selected: true }];
+	private graphTitleButtons(): WorkbenchPaneTitleButton[] {
+		// One fixed width for every view, so the pill never moves under the pointer as it steps.
+		const width = Math.max(...WORKBENCH_GRAPH_VIEWS.map((view) => GRAPH_VIEW_NAMES[view].length));
+		const name = GRAPH_VIEW_NAMES[this.graphView];
+		const left = Math.floor((width - name.length) / 2);
+		const label = `${" ".repeat(left)}${name}${" ".repeat(width - name.length - left)}`;
+		const buttons: WorkbenchPaneTitleButton[] = [{ action: "hideGraph", label: "▾", leading: true }];
 		if (this.graphPane.isPinned() || this.graphPane.hasNewerProgress()) {
 			buttons.push({ action: "followCurrent", label: "Follow current" });
 		}
-		return [...buttons, hide];
+		buttons.push({ action: "graphCycle", label, raised: true });
+		return buttons;
 	}
-	headerAction(column: number): "latest" | "copyAll" | "layout" | undefined {
+	headerAction(column: number): "latest" | "layout" | "showGraph" | undefined {
 		return this.headerButtons.find((button) => column >= button.start && column < button.end)?.action;
 	}
 
@@ -630,25 +595,15 @@ export class WorkbenchComponent extends Container {
 	}
 
 	/**
-	 * Identity and location: brand, the work's name, and where it runs. State belongs to the live row,
+	 * The work's name; the application and the location are on the terminal title and the status line. State belongs to the live row,
 	 * where the answer lands.
 	 */
 	private headline(columns: number): string {
 		const inner = Math.max(0, columns - 2);
 		const fallback = this.options.title?.() ?? "";
 		const title = this.headlineState.title || (fallback === this.options.brand ? "" : fallback);
-		let left = theme.bold(theme.fg("accent", this.options.brand));
-		let leftWidth = visibleWidth(this.options.brand);
-		if (title) {
-			const room = inner - leftWidth - 2;
-			if (room >= 4) {
-				const shown = truncateToWidth(title, room, "…");
-				left += `  ${theme.fg("muted", shown)}`;
-				leftWidth += 2 + visibleWidth(shown);
-			}
-		}
-		const where = this.options.cwd?.() ?? "";
-		return ` ${metaRow(left, where ? theme.fg("dim", where) : "", inner, leftWidth)} `;
+		// The application's own name is already on the terminal's title; the row names the work, or stays empty.
+		return title ? ` ${truncateToWidth(theme.bold(theme.fg("text", title)), inner, "…")} ` : "";
 	}
 
 	private conversationHeader(columns: number, originX = 0): string {
@@ -657,12 +612,13 @@ export class WorkbenchComponent extends Container {
 		const stateText = following ? " · Following latest" : " · Reading";
 		const heading = theme.bold(theme.fg("text", "Conversation")) + theme.fg("muted", stateText);
 		const headingWidth = "Conversation".length + stateText.length;
-		// Terminal-native selection already copies on release; only whole-conversation copy needs a target.
-		const buttons: { action: "latest" | "copyAll" | "layout"; label: string }[] = [
+		const canShowGraph = this.graphHidden && Boolean(this.graphSource) && this.zoneWidth >= SIDE_BY_SIDE_MIN_COLUMNS;
+		const buttons: { action: "latest" | "layout" | "showGraph"; label: string }[] = [
 			...(this.columns ? [{ action: "layout" as const, label: "Stacked" }] : []),
+			...(canShowGraph ? [{ action: "showGraph" as const, label: "Show graph" }] : []),
 			...(following ? [] : [{ action: "latest" as const, label: "Latest ↓" }]),
-			{ action: "copyAll", label: "Copy conversation" },
 		];
+		const chipTone = this.mouseMode ? "accent" : "muted";
 		for (let count = buttons.length; count >= 0; count--) {
 			const shown = buttons.slice(0, count);
 			const widths = shown.map((button) => visibleWidth(button.label) + 2);
@@ -672,7 +628,7 @@ export class WorkbenchComponent extends Container {
 			const parts: string[] = [];
 			shown.forEach((button, index) => {
 				this.headerButtons.push({ action: button.action, start: column, end: column + widths[index]! });
-				parts.push(theme.bg("workbenchSurface", theme.fg("accent", ` ${button.label} `)));
+				parts.push(theme.bg("workbenchSurface", theme.fg(chipTone, ` ${button.label} `)));
 				column += widths[index]! + 2;
 			});
 			return ` ${heading}${" ".repeat(inner - headingWidth - total)}${parts.join("  ")} `;
@@ -691,25 +647,21 @@ export class WorkbenchComponent extends Container {
 		];
 	}
 
-	/** Expanded: a drag handle and nothing else; every key lives on the hint row. Collapsed: the summary. */
+	/** What a collapsed work area holds: its section titles, and Execution only when it has evidence. Empty when it holds nothing. */
+	private collapsedSummary(columns: number): string {
+		const blocks = [
+			...this.sections.map((section) => (section.meta ? `${section.title} ${section.meta}` : section.title)),
+			this.hasExecutionEvidence(columns) ? "Execution" : "",
+		].filter(Boolean);
+		if (!blocks.length) return "";
+		const toggle = keyText("app.execution.toggle");
+		return [`▸ ${blocks.join(" · ")}`, toggle && `${toggle} expand`].filter(Boolean).join(" · ");
+	}
+
+	/** Expanded: a drag handle and nothing else; the hint row carries the keys. Collapsed: the summary, or a bare rule when there is nothing to name. */
 	private divider(columns: number, expanded: boolean, junctions: readonly WorkbenchDividerJunction[]): string {
-		const { toggle } = this.keys();
-		const summary = expanded
-			? "↕"
-			: [
-					`▸ ${[
-						...this.sections.map((section) =>
-							section.meta ? `${section.title} ${section.meta}` : section.title,
-						),
-						this.execution ? "Execution" : "",
-					]
-						.filter(Boolean)
-						.join(" · ")}`,
-					toggle && `${toggle} expand`,
-				]
-					.filter(Boolean)
-					.join(" · ");
-		const label = truncateToWidth(` ${summary} `, Math.max(0, columns - 2), "…");
+		const summary = expanded ? "↕" : this.collapsedSummary(columns);
+		const label = summary ? truncateToWidth(` ${summary} `, Math.max(0, columns - 2), "…") : "";
 		const labelWidth = visibleWidth(label);
 		const left = Math.max(1, Math.floor((columns - labelWidth) / 2));
 		const right = Math.max(0, columns - labelWidth - left);
@@ -722,13 +674,56 @@ export class WorkbenchComponent extends Container {
 			}
 			return theme.fg("borderMuted", cells.join(""));
 		};
-		return truncateToWidth(paint(0, left) + theme.fg("muted", label) + paint(left + labelWidth, right), columns, "");
+		const labelTone = expanded && !this.mouseMode ? "dim" : "muted";
+		return truncateToWidth(
+			paint(0, left) + theme.fg(labelTone, label) + paint(left + labelWidth, right),
+			columns,
+			"",
+		);
 	}
 
-	private hintRow(columns: number): string {
-		const { hint, mouse } = this.keys();
-		const owner = ` · ${mouse ? `${mouse} ` : ""}mouse: ${this.mouseMode ? "on" : "off"}`;
-		return truncateToWidth(` ${theme.fg("dim", hint + owner)}`, columns, "…");
+	/** The PR as `PR #123`, a link where the terminal supports links; the color says where the PR stands. */
+	private pullRequestLabel(view: PullRequestView): { text: string; width: number } {
+		const tone =
+			view.state === "open"
+				? "success"
+				: view.state === "merged"
+					? "syntaxType"
+					: view.state === "closed"
+						? "error"
+						: "dim";
+		const plain = `PR #${view.number}${view.state === "open" ? "" : ` ${view.state}`}`;
+		return { text: theme.fg(tone, hyperlink(plain, view.url)), width: visibleWidth(plain) };
+	}
+
+	/** The thinking level as a meter that fills and warms with the level, then its name; shift+tab steps it. */
+	private thinkingMeter(level: string): { text: string; width: number } {
+		const filled = Math.min(THINKING_METER_CELLS, THINKING_METER_LEVELS.indexOf(level) + 1 || THINKING_METER_CELLS);
+		const tone = theme.getThinkingBorderColor(level as Parameters<typeof theme.getThinkingBorderColor>[0]);
+		const pips = tone("▰".repeat(filled)) + theme.fg("dim", "▱".repeat(THINKING_METER_CELLS - filled));
+		return { text: `${pips} ${tone(level)}`, width: THINKING_METER_CELLS + 1 + visibleWidth(level) };
+	}
+
+	/** The status line under the input: the branch and its pull request at the left, the model and its thinking at the right. */
+	private statusLine(columns: number): string {
+		const inner = Math.max(0, columns - 2);
+		const model = this.options.model?.();
+		const meter = model?.thinking ? this.thinkingMeter(model.thinking) : undefined;
+		const right = model ? [theme.fg("text", model.name), meter?.text].filter(Boolean).join("  ") : "";
+		const rightWidth = model ? visibleWidth(model.name) + (meter ? 2 + meter.width : 0) : 0;
+		const branch = this.options.branch?.() ?? "";
+		const pr = this.options.pullRequest?.();
+		const pullRequest = pr ? this.pullRequestLabel(pr) : undefined;
+		const leftRoom = Math.max(0, inner - rightWidth - (rightWidth ? 3 : 0));
+		const prRoom = pullRequest ? pullRequest.width + 2 : 0;
+		// A narrow row cuts the branch name, not the PR number or the model.
+		const shownBranch = branch ? truncateToWidth(branch, Math.max(0, leftRoom - prRoom), "…") : "";
+		const left = [shownBranch && theme.fg("mdLink", shownBranch), leftRoom >= prRoom ? pullRequest?.text : undefined]
+			.filter(Boolean)
+			.join("  ");
+		const leftWidth =
+			visibleWidth(shownBranch) + (shownBranch && pullRequest ? 2 : 0) + (pullRequest ? pullRequest.width : 0);
+		return ` ${left}${" ".repeat(Math.max(0, inner - leftWidth - rightWidth))}${right}`;
 	}
 
 	private inspectorContent(width: number): { title: string; meta: string; lines: string[] } {
@@ -742,16 +737,31 @@ export class WorkbenchComponent extends Container {
 		const team = this.sections.find((section) => section.title === TEAM_SECTION);
 		const others = this.sections.filter((section) => section !== plan && section !== team);
 		const lines = [...body(plan, "No open steps")];
-		for (const section of [{ section: team, title: TEAM_SECTION, placeholder: "No agents" }]) {
-			lines.push(
-				"",
-				labelRow(section.title, section.section?.meta ?? "", width),
-				...body(section.section, section.placeholder),
-			);
+		if (team || !this.graphShown) {
+			lines.push("", labelRow(TEAM_SECTION, team?.meta ?? "", width), ...body(team, "No agents"));
 		}
 		for (const section of others)
 			lines.push("", labelRow(section.title, section.meta ?? "", width), ...body(section, ""));
 		return { title: PLAN_SECTION, meta: plan?.meta ?? "", lines };
+	}
+
+	/** The plan and team beside the evidence: shown when there is work to list, unless the operator hid them for this work or Execution is maximized. */
+	private showsInspector(): boolean {
+		return !this.inspectorHidden && !this.executionMaximized && this.sections.some((section) => !section.quiet);
+	}
+
+	/** A user shell on show, or a command or file effect that renders rows: what Execution would draw. */
+	private hasExecutionEvidence(columns: number): boolean {
+		const shell = this.options.conversation.children.findLast(
+			(child): child is BashExecutionComponent => child instanceof BashExecutionComponent,
+		);
+		if (shell && shell !== this.dismissedShell) return true;
+		return (this.execution?.render(Math.max(1, columns - 2)).length ?? 0) > 0;
+	}
+
+	/** Neither a command or file effect nor a plan to show: the work area takes no rows and has no divider. */
+	private workAreaIsEmpty(columns: number): boolean {
+		return !this.showsInspector() && !this.hasExecutionEvidence(columns);
 	}
 
 	private renderUpper(columns: number, height: number, top: number, originX = 0): string[] {
@@ -766,25 +776,40 @@ export class WorkbenchComponent extends Container {
 		if (visibleShell !== this.displayedShell) this.executionPane.reset();
 		this.displayedShell = visibleShell;
 		const executionSource = visibleShell ? visibleShell.getWorkbenchPreview() : this.execution;
-		const placeholder = `  ${theme.fg("dim", "No file effects or command outcomes yet")}`;
-		const executionLines = (width: number): string[] => {
-			const lines = executionSource?.render(width) ?? [];
-			return lines.length ? lines : [placeholder];
-		};
+		const executionLines = (width: number): string[] => executionSource?.render(width) ?? [];
 		const executionMeta = visibleShell ? "" : this.executionMeta;
 		// A user shell opens at its command; the cycle's evidence follows its newest rows instead.
 		const follow = !visibleShell;
-		if (this.inspectorHidden || this.executionMaximized) {
+		const fullWidthLines = executionLines(Math.max(1, columns - 2));
+		const hasExecution = fullWidthLines.length > 0;
+		if (!this.showsInspector()) {
 			return this.executionPane.render(
 				"Execution",
 				executionMeta,
-				executionLines(Math.max(1, columns - 2)),
+				fullWidthLines,
 				originX,
 				top,
 				columns,
 				height,
 				follow,
 				this.executionTitleButtons(),
+				this.mouseMode,
+			);
+		}
+		if (!hasExecution) {
+			// Nothing has run: the plan has the whole width instead of sitting beside an empty pane.
+			const inspector = this.inspectorContent(Math.max(1, columns - 2));
+			return this.inspectorPane.render(
+				inspector.title,
+				inspector.meta,
+				inspector.lines,
+				originX,
+				top,
+				columns,
+				height,
+				false,
+				this.inspectorTitleButtons(),
+				this.mouseMode,
 			);
 		}
 		if (columns >= SIDE_BY_SIDE_MIN_COLUMNS) {
@@ -804,6 +829,7 @@ export class WorkbenchComponent extends Container {
 				height,
 				false,
 				this.inspectorTitleButtons(),
+				this.mouseMode,
 			);
 			const right = this.executionPane.render(
 				"Execution",
@@ -815,6 +841,7 @@ export class WorkbenchComponent extends Container {
 				height,
 				follow,
 				this.executionTitleButtons(),
+				this.mouseMode,
 			);
 			// One-column rule between the panes, on every row including the titles; then one space.
 			this.paneRuleColumn = originX + leftWidth;
@@ -841,6 +868,7 @@ export class WorkbenchComponent extends Container {
 				height,
 				false,
 				this.executionTitleButtons(),
+				this.mouseMode,
 			);
 		}
 		const executionHeight = Math.ceil((height - 1) / 2);
@@ -856,6 +884,7 @@ export class WorkbenchComponent extends Container {
 				executionHeight,
 				follow,
 				this.executionTitleButtons(),
+				this.mouseMode,
 			),
 			"",
 			...this.inspectorPane.render(
@@ -868,6 +897,7 @@ export class WorkbenchComponent extends Container {
 				inspectorHeight,
 				false,
 				this.inspectorTitleButtons(),
+				this.mouseMode,
 			),
 		];
 	}
@@ -923,8 +953,9 @@ export class WorkbenchComponent extends Container {
 			top,
 			graphWidth,
 			height + 1,
-			this.graphTitleButtons(graphWidth),
+			this.graphTitleButtons(),
 			this.graphAnimator?.enabled ?? false,
+			this.mouseMode,
 		);
 		// The frame says whether it drew a carrier: the timer runs only while one is needed.
 		const motionUntil = this.graphPane.motionUntil;
@@ -1002,16 +1033,16 @@ export class WorkbenchComponent extends Container {
 		const below = (this.options.dockBelow ?? [])
 			.flatMap((component) => component.render(inner))
 			.slice(0, Math.max(0, dockBudget - above.length));
-		// The POV lane leads the status band; the editor draws its own two rules (they carry its scroll
-		// indicators and mode colour), so the bottom of the screen reads as separate lanes without a
-		// second rule stacked on each of them.
+		// The status band, the input and the status line are one panel on the surface tone, edge to edge and
+		// without gaps, so where the conversation ends is a change of tone and not a hole. The editor draws its
+		// own two rules (they carry its scroll indicators and mode colour).
 		const povRows = this.operatorStatus?.render(columns - 1) ?? [];
 		const dockRows = [
 			...povRows.map((line) => surfaceRow(line, columns)),
 			...above.map((line) => surfaceRow(gutter(line, inner), columns)),
-			...editor.map((line) => gutter(line, inner)),
-			...below.map((line) => gutter(line, inner)),
-			this.hintRow(columns),
+			...editor.map((line) => surfaceRow(gutter(line, inner), columns)),
+			...below.map((line) => surfaceRow(gutter(line, inner), columns)),
+			surfaceRow(this.statusLine(columns), columns),
 		];
 		// The live row is reserved even when idle so the geometry never jumps between turns.
 		const activity = this.options.activity?.render(inner).slice(0, 1) ?? [];
@@ -1023,6 +1054,13 @@ export class WorkbenchComponent extends Container {
 		this.workWidth = columns;
 		if (this.columns && columns >= SIDE_BY_SIDE_MIN_COLUMNS && !this.collapsed && available >= 2) {
 			return this.renderColumns(columns, available, head, liveRow, dockRows);
+		}
+		if (this.workAreaIsEmpty(columns)) {
+			this.upperTop = head.length;
+			this.upperHeight = 0;
+			this.dividerRow = -1;
+			const zone = this.renderZone(0, columns, head.length, Math.max(0, available - 1));
+			return [...head, ...zone, liveRow, ...dockRows];
 		}
 		const upperRows = workAreaRows(available, this.geometry());
 		const upper = upperRows >= 2 ? this.renderUpper(columns, upperRows, head.length) : [];

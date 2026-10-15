@@ -16,7 +16,7 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "../kernel/compaction/compaction.ts";
-import { runCompactionLoop } from "../kernel/compaction/loop.ts";
+import { NothingToCompactError, runCompactionLoop } from "../kernel/compaction/loop.ts";
 import type { ResolvedProviderRequestAuth, StreamFn } from "../kernel/index.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
 import { projectToolsForProvider } from "../kernel/provider-tool-projection.ts";
@@ -31,6 +31,7 @@ import type { CompactionEntry, SessionEntry } from "../kernel/session/session-en
 import {
 	getLatestCompactionEntry,
 	isSessionLifecycleEntry,
+	isWholePathCompaction,
 	type SessionManager,
 } from "../kernel/session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
@@ -64,6 +65,8 @@ import { estimateRequestEnvelopeTokens } from "./context/prompt-headroom.ts";
 import { packSupersededHostRecords } from "./context-gc.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
+import { type ContinuousChatWire, resolveContinuousChatTurnStart } from "./memory/continuous-chat-projection.ts";
+import type { IcmTurnHandle } from "./memory/continuous-chat-turn-coordinator.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-entry-index.ts";
@@ -71,7 +74,6 @@ import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-e
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface CompactionControllerSettingsSource {
 	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number };
-	getMemorySystem?(): string;
 }
 
 export type AutoCompactionReason = "overflow" | "provider_recovery" | "threshold";
@@ -84,12 +86,20 @@ export interface ProviderRequestCompactionInput {
 
 export type ProviderRequestCompactionDecision = { action: "send" } | { action: "replan" };
 
+/** The entries host compaction may read and replace (see `CompactionController.compactionScope`). */
+type CompactionScope =
+	| { kind: "session" }
+	| { kind: "none"; reason: string }
+	| { kind: "turn"; turn: IcmTurnHandle; startEntryId: string; entries: readonly SessionEntry[] };
+
 interface AutoCompactionRunOptions {
 	initialTokens?: number;
 	singlePass?: boolean;
 	allowTrailingCompactionAsPrevious?: boolean;
 	forceDeterministic?: boolean;
 	recordThresholdFrontier?: boolean;
+	/** Told why the run compacted nothing when it ends as a skip, so the caller can name that reason. */
+	onSkip?(reason: string): void;
 }
 
 export class ProviderRequestEnvelopeOverflowError extends Error {
@@ -200,8 +210,19 @@ export interface CompactionControllerDeps {
 	settingsManager: CompactionControllerSettingsSource;
 	getModel(): Model<Api> | undefined;
 	getAdaptedSettings(): CompactionSettings;
-	/** True when ICM continuous chat owns conversation history so legacy branch compaction stays disabled. */
-	isContinuousChatActive?(): boolean;
+	/**
+	 * The ICM projection that owns this session's provider wire (an ICM root session), undefined when none does. Under
+	 * the chat, history before the running chat turn is never sent, so host compaction is scoped to that turn's own
+	 * entries; under the block, no provider request is sent at all, so nothing is compactable.
+	 */
+	getContinuousChatWire?(): ContinuousChatWire | undefined;
+	/** The running ICM chat turn, if one is running. Read only while {@link getContinuousChatWire} is defined. */
+	getContinuousChatTurn?(): IcmTurnHandle | undefined;
+	/**
+	 * Persists the running turn's messages a host still holds back from the session (a cheap routed turn's prompt, which
+	 * is otherwise committed when its first request is sent), so a compaction that request needs can read them.
+	 */
+	commitPendingTurnMessages?(): void;
 	getCompactionModelSetting(): string;
 	getRequestAuth(model: Model<Api>): Promise<RequestAuth>;
 	resolveModelAndAuth(
@@ -395,6 +416,14 @@ export class CompactionController {
 	private idlePreparationSettingsKey: string | undefined;
 	private idleView: IdlePreparationView | undefined;
 	private compactableHistory: { key: string; value: boolean } | undefined;
+	/** The running ICM turn's entries from its start to the leaf, remembered with the leaf they were walked to. */
+	private turnBranchWalk:
+		| { turn: IcmTurnHandle; startEntryId: string; leafId: string; entries: readonly SessionEntry[] }
+		| undefined;
+	/** The non-compactable tokens of the latest request admitted in an ICM turn, with that turn. */
+	private turnRequestFloor: { turn: IcmTurnHandle; tokens: number } | undefined;
+	/** The running ICM turn's scope start entry, once resolved (see {@link turnScopeStartEntryId}). */
+	private turnScopeStart: { turn: IcmTurnHandle; entryId: string } | undefined;
 	private pendingEarlyCompactionPrediction?: {
 		predictedSavingsUsd: number;
 		tokensBefore: number;
@@ -495,14 +524,192 @@ export class CompactionController {
 		return [customInstructions?.trim(), memoryHandoff].filter(Boolean).join("\n\n");
 	}
 
+	/** Whether an ICM projection (the chat or its fail-closed block) owns the provider wire instead of the session history. */
 	private isContinuousChatActive(): boolean {
-		return this.deps.settingsManager.getMemorySystem?.() === "icm" || this.deps.isContinuousChatActive?.() === true;
+		return this.deps.getContinuousChatWire?.() !== undefined;
+	}
+
+	/**
+	 * What host compaction may read and replace. Outside ICM that is the whole active branch. Under ICM the provider
+	 * wire never carries history from before the running chat turn (the `<chat>` view replaced it), so compaction is
+	 * scoped to that turn's own entries, from its persisted start entry to the leaf. While the chat is blocked, with no
+	 * running turn, or with a turn whose start cannot be located on the branch, nothing is compactable and the reason
+	 * says why.
+	 */
+	private compactionScope(): CompactionScope {
+		const wire = this.deps.getContinuousChatWire?.();
+		if (wire === undefined) return { kind: "session" };
+		if (wire.kind === "blocked") {
+			return {
+				kind: "none",
+				reason: `the ICM project chat is unavailable (${wire.reason}); provider requests are blocked until it recovers`,
+			};
+		}
+		const currentTurn = this.deps.getContinuousChatTurn;
+		if (currentTurn === undefined) {
+			throw new Error("ICM continuous chat is active but the compaction controller has no chat-turn source.");
+		}
+		const turn = currentTurn();
+		if (turn === undefined) {
+			return {
+				kind: "none",
+				reason: "no ICM chat turn is running; the next turn is rebuilt from the chat view",
+			};
+		}
+		const start = this.turnScopeStartEntryId(turn);
+		if ("reason" in start) return { kind: "none", reason: start.reason };
+		const startEntryId = start.entryId;
+		const entries = this.turnBranchFrom(turn, startEntryId);
+		if (entries === undefined) {
+			return {
+				kind: "none",
+				reason: `the start entry ${startEntryId} of ICM chat turn ${turn.turnId} is not on the active branch`,
+			};
+		}
+		return { kind: "turn", turn, startEntryId, entries };
+	}
+
+	/**
+	 * Why `prepareCompaction` found nothing to replace on `branch`, the scope's own branch: the scope's reason when
+	 * nothing is in scope, the running ICM turn when its entries hold nothing compactable yet, otherwise a branch that
+	 * already ends in a checkpoint of all of it, or one too small to compact.
+	 */
+	private nothingToCompactReason(branch: ReturnType<SessionManager["getBranch"]>): string {
+		const scope = this.compactionScope();
+		if (scope.kind === "none") return scope.reason;
+		if (scope.kind === "turn") return `ICM chat turn ${scope.turn.turnId} has nothing compactable yet`;
+		const last = branch[branch.length - 1];
+		return last?.type === "compaction" && isWholePathCompaction(branch, last)
+			? "already compacted"
+			: "nothing to compact (session too small)";
+	}
+
+	/**
+	 * The entry a running turn's compaction scope starts at: the entry of its start message. A continuation that resumed
+	 * at a compaction summary did not apply that summary (it is pre-turn history), so its scope starts at the turn's first
+	 * message of its own. Resolved once per turn: the start entry never changes, while a rebuild after the turn's own
+	 * compaction re-materializes the messages it was found by.
+	 */
+	private turnScopeStartEntryId(turn: IcmTurnHandle): { entryId: string } | { reason: string } {
+		if (this.turnScopeStart?.turn === turn) return { entryId: this.turnScopeStart.entryId };
+		const start = turn.startMessage;
+		if (start === undefined) return { reason: `ICM chat turn ${turn.turnId} has no start message yet` };
+		let first: AgentMessage = start;
+		if (start.role === "compactionSummary") {
+			const messages = this.deps.agent.state.messages;
+			const resolved = resolveContinuousChatTurnStart(turn, messages);
+			if ("error" in resolved) return { reason: `ICM chat turn ${turn.turnId}: ${resolved.error}` };
+			const own = messages[resolved.index];
+			if (own === undefined) {
+				return {
+					reason: `ICM chat turn ${turn.turnId} resumed at a compaction summary and has no message of its own yet`,
+				};
+			}
+			first = own;
+		}
+		const entryId = this.deps.sessionManager.getMessageEntryId(first);
+		if (entryId === undefined) {
+			return { reason: `the start message of ICM chat turn ${turn.turnId} is not persisted in the session yet` };
+		}
+		this.turnScopeStart = { turn, entryId };
+		return { entryId };
+	}
+
+	/**
+	 * The active branch from `startEntryId` to the leaf, or undefined when the start is not on it. Parent pointers are
+	 * walked from the leaf only until they meet the start entry, or the leaf of the previous walk for the same turn and
+	 * start, whose entries then stand as they were (entries are immutable and that leaf is an ancestor). A request pays
+	 * for the entries appended since the previous one, never for the whole session.
+	 */
+	private turnBranchFrom(turn: IcmTurnHandle, startEntryId: string): readonly SessionEntry[] | undefined {
+		const manager = this.deps.sessionManager;
+		const leafId = manager.getLeafId();
+		if (leafId === null) return undefined;
+		const walk = this.turnBranchWalk;
+		const previous = walk?.turn === turn && walk.startEntryId === startEntryId ? walk : undefined;
+		if (previous?.leafId === leafId) return previous.entries;
+		const walked: SessionEntry[] = [];
+		let ancestors: readonly SessionEntry[] = [];
+		let remaining = manager.getEntryCount() + 1;
+		let id: string | null = leafId;
+		while (true) {
+			if (id === null) return undefined;
+			if (id === previous?.leafId) {
+				ancestors = previous.entries;
+				break;
+			}
+			if (remaining-- === 0) throw new Error(`Invalid session entry graph: parent cycle detected at entry "${id}".`);
+			const entry = manager.getEntry(id);
+			if (entry === undefined) return undefined;
+			walked.push(entry);
+			if (id === startEntryId) break;
+			id = entry.parentId;
+		}
+		walked.reverse();
+		const entries = ancestors.length === 0 ? walked : [...ancestors, ...walked];
+		this.turnBranchWalk = { turn, startEntryId, leafId, entries };
+		return entries;
+	}
+
+	/**
+	 * Under ICM, the non-compactable tokens (system, tools, chat view, turn state) of the running turn's latest admitted
+	 * request: what the turn's requests carry whatever happens to its own messages. Undefined outside ICM, between
+	 * turns, and before the running turn's first request is admitted.
+	 */
+	turnRequestFloorTokens(): number | undefined {
+		if (!this.isContinuousChatActive()) return undefined;
+		const floor = this.turnRequestFloor;
+		return floor !== undefined && floor.turn === this.deps.getContinuousChatTurn?.() ? floor.tokens : undefined;
+	}
+
+	/**
+	 * Whether a summarizer on the session's own lane reads the lane's last sent request as its cached prefix. Never
+	 * under ICM: every sent request opens with the chat view and turn state, which a checkpoint of the turn must not
+	 * restate, so the summarizer reads the turn's messages alone after the lane's system prompt and tools.
+	 */
+	private summarizerReadsSentPrefix(): boolean {
+		return !this.isContinuousChatActive();
+	}
+
+	/** What a summarizer reads, for capacity checks: the running turn's own messages under ICM, else the live context. */
+	estimateSummarizationInputTokens(): number {
+		if (!this.isContinuousChatActive()) return this.deps.estimateCurrentContextTokens(this.deps.agent.state.messages);
+		return estimateCharacterTokens(this.compactableMessages() ?? []);
+	}
+
+	/** The fixed part of every request, for overflow messages: under ICM the chat view and turn state ride in it. */
+	private envelopeDescription(): string {
+		return this.isContinuousChatActive()
+			? "system/tool/active-skill envelope and the ICM chat view"
+			: "system/tool/active-skill envelope";
+	}
+
+	/** What host compaction shrinks, for overflow messages. */
+	private historyDescription(): string {
+		return this.isContinuousChatActive()
+			? "the running chat turn (the chat view and turn state are fixed envelope)"
+			: "history";
+	}
+
+	/**
+	 * The live messages host compaction can shrink, for token estimates: every message outside ICM, the running turn's
+	 * own messages under ICM, undefined when nothing is compactable.
+	 */
+	private compactableMessages(): AgentMessage[] | undefined {
+		const scope = this.compactionScope();
+		if (scope.kind === "session") return this.deps.agent.state.messages;
+		if (scope.kind === "none") return undefined;
+		const messages = this.deps.agent.state.messages;
+		const start = resolveContinuousChatTurnStart(scope.turn, messages);
+		return "error" in start ? undefined : messages.slice(start.index);
 	}
 
 	hasCompactableHistory(): boolean {
-		if (this.isContinuousChatActive()) return false;
 		const settings = this.deps.getAdaptedSettings();
-		const key = `${this.deps.sessionManager.getLeafId() ?? ""}\u0000${JSON.stringify(settings)}\u0000${this.deps.getActiveTask?.() ?? ""}`;
+		const scope = this.compactionScope();
+		if (scope.kind === "none") return false;
+		const scopeKey = scope.kind === "turn" ? `turn:${scope.turn.turnId}:${scope.startEntryId}` : "session";
+		const key = `${this.deps.sessionManager.getLeafId() ?? ""}\u0000${JSON.stringify(settings)}\u0000${this.deps.getActiveTask?.() ?? ""}\u0000${scopeKey}`;
 		if (this.compactableHistory?.key === key) return this.compactableHistory.value;
 		const value = this.prepareCompactionWithPackedHostRecords(this.getRawCompactionBranch(), settings) !== undefined;
 		this.compactableHistory = { key, value };
@@ -531,7 +738,7 @@ export class CompactionController {
 			tools: projectToolsForProvider(this.deps.agent.state.tools),
 			messagesToSummarize: preparation.messagesToSummarize,
 			liveMessages: this.deps.agent.state.messages,
-			lastSent: this.deps.getLastSentRequest?.(),
+			lastSent: this.summarizerReadsSentPrefix() ? this.deps.getLastSentRequest?.() : undefined,
 			textToolCallProtocol: this.deps.agent.textToolCallProtocol,
 			sessionId: this.deps.sessionManager.getSessionId(),
 		});
@@ -563,8 +770,12 @@ export class CompactionController {
 		const activeTask = this.deps.getActiveTask?.();
 		const retentionDecisions = this.activeRetentionDecisions;
 		const sourceBranch = retentionDecisions ? this.getRawCompactionBranch() : branch;
+		// Under ICM a session-replacement checkpoint keeps the running turn's start before its summary, whatever its role:
+		// the turn's branch begins there, and a turn started by a host message has no user message of its own.
+		const scope = this.compactionScope();
 		const preparation = prepareCompaction(sourceBranch, settings, {
 			...options,
+			...(scope.kind === "turn" ? { retainedEntryId: scope.startEntryId } : {}),
 			...(activeTask ? { activeTask } : {}),
 			packHostRecords: (messages) =>
 				packSupersededHostRecords(
@@ -625,11 +836,16 @@ export class CompactionController {
 	 *
 	 * A plain filter breaks ancestry because retained children still point at removed lifecycle
 	 * parents. Reconnect the already-linear active branch while preserving every real entry id.
+	 * The branch is the compaction scope's: the running ICM turn's entries under ICM, empty when
+	 * nothing is compactable.
 	 */
 	private getRawCompactionBranch(): ReturnType<SessionManager["getBranch"]> {
+		const scope = this.compactionScope();
+		const source =
+			scope.kind === "session" ? this.deps.sessionManager.getBranch() : scope.kind === "turn" ? scope.entries : [];
 		const compactableBranch: ReturnType<SessionManager["getBranch"]> = [];
 		let retainedParentId: string | null = null;
-		for (const entry of this.deps.sessionManager.getBranch()) {
+		for (const entry of source) {
 			if (isSessionLifecycleEntry(entry)) continue;
 			compactableBranch.push(
 				entry.parentId === retainedParentId ? entry : ({ ...entry, parentId: retainedParentId } as typeof entry),
@@ -695,11 +911,18 @@ export class CompactionController {
 
 	async admitProviderRequest(input: ProviderRequestCompactionInput): Promise<ProviderRequestCompactionDecision> {
 		this.onLaneBusy();
+		if (this.isContinuousChatActive()) {
+			const turn = this.deps.getContinuousChatTurn?.();
+			this.turnRequestFloor = turn === undefined ? undefined : { turn, tokens: input.nonCompactableTokens };
+		}
 		const settings = this.deps.getAdaptedSettings();
 		if (!settings.enabled) this.cancelIdlePreparation();
 		const model = this.deps.getModel();
 		const contextWindow = model?.contextWindow ?? 0;
 		if (!model || contextWindow <= 0) return { action: "send" };
+		// Any compaction admitted below reads the persisted turn, and under ICM its scope starts at the turn's persisted
+		// start: what this request's send would commit (a cheap routed turn's prompt) is committed first.
+		if (settings.enabled) this.deps.commitPendingTurnMessages?.();
 		// Held tool results and owner messages alike reach the lane through here: a summary prepared
 		// while it idled is used or let go now, before any other compaction decision.
 		if (
@@ -717,7 +940,7 @@ export class CompactionController {
 
 		if (input.nonCompactableTokens >= contextWindow) {
 			throw new ProviderRequestEnvelopeOverflowError(
-				`The non-compactable request envelope needs about ${input.nonCompactableTokens} tokens, exceeding the ${contextWindow}-token model context. Mandatory context was not dropped. Reduce the system/tool/active-skill envelope or select a larger-context model.`,
+				`The non-compactable request envelope needs about ${input.nonCompactableTokens} tokens, exceeding the ${contextWindow}-token model context. Mandatory context was not dropped. Reduce the ${this.envelopeDescription()} or select a larger-context model.`,
 			);
 		}
 		const triggerTokens = model.autoCompactionTriggerTokens;
@@ -746,16 +969,23 @@ export class CompactionController {
 		}
 		if (envelopeNeed === "hard") {
 			throw new ProviderRequestEnvelopeOverflowError(
-				`The non-compactable request envelope needs about ${input.nonCompactableTokens} tokens, beyond the ${contextWindow}-token model's reserved request boundary. Mandatory context was not dropped. Reduce the system/tool/active-skill envelope or select a larger-context model.`,
+				`The non-compactable request envelope needs about ${input.nonCompactableTokens} tokens, beyond the ${contextWindow}-token model's reserved request boundary. Mandatory context was not dropped. Reduce the ${this.envelopeDescription()} or select a larger-context model.`,
 			);
 		}
 		if (requestNeed === "none") {
 			if (input.requestTokens >= contextWindow) {
 				throw new ProviderRequestEnvelopeOverflowError(
-					`The provider request needs about ${input.requestTokens} tokens, exceeding the ${contextWindow}-token model context while auto-compaction is disabled.`,
+					`The provider request needs about ${input.requestTokens} tokens, exceeding the ${contextWindow}-token model context while auto-compaction is turned off (compaction.enabled).`,
 				);
 			}
 			return { action: "send" };
+		}
+		const scope = this.compactionScope();
+		if (scope.kind === "none") {
+			if (requestNeed === "early") return { action: "send" };
+			throw new ProviderRequestEnvelopeOverflowError(
+				`Provider request needs about ${formatRequestTokenBreakdown(input)}, but no history can be compacted: ${scope.reason}.`,
+			);
 		}
 		// An optional cost trigger caused entirely by fixed context cannot be improved by history compaction.
 		if (requestNeed === "early" && envelopeNeed === "early") return { action: "send" };
@@ -777,17 +1007,22 @@ export class CompactionController {
 		if (input.attempt >= 2) {
 			if (requestNeed === "early") return { action: "send" };
 			throw new ProviderRequestEnvelopeOverflowError(
-				`Provider request still needs about ${formatRequestTokenBreakdown(input)} after bounded history compaction. Reduce retained history or select a larger-context model.`,
+				`Provider request still needs about ${formatRequestTokenBreakdown(input)} after bounded compaction of ${this.historyDescription()}. Reduce retained history or select a larger-context model.`,
 			);
 		}
 
 		const latestBefore = this.latestCompactionEntryOnBranch()?.id;
+		// Written by the run's skip callback; a holder, since a closure assignment does not widen a narrowed local.
+		const skipped: { reason?: string } = {};
 		await this.runAuto("threshold", false, {
 			initialTokens: input.requestTokens,
 			singlePass: true,
 			allowTrailingCompactionAsPrevious: input.attempt > 0,
 			forceDeterministic: input.attempt > 0,
 			recordThresholdFrontier: false,
+			onSkip: (reason) => {
+				skipped.reason = reason;
+			},
 		});
 		const latestAfter = this.latestCompactionEntryOnBranch()?.id;
 		if (latestAfter && latestAfter !== latestBefore) {
@@ -796,7 +1031,7 @@ export class CompactionController {
 		}
 		if (requestNeed === "early") return { action: "send" };
 		throw new ProviderRequestEnvelopeOverflowError(
-			`Provider request needs about ${formatRequestTokenBreakdown(input)}, but bounded history compaction made no progress. Reduce retained history or select a larger-context model.`,
+			`Provider request needs about ${formatRequestTokenBreakdown(input)}, but bounded compaction of ${this.historyDescription()} made no progress${skipped.reason === undefined ? "" : ` (${skipped.reason})`}. Reduce retained history or select a larger-context model.`,
 		);
 	}
 
@@ -870,8 +1105,21 @@ export class CompactionController {
 
 	private async runManual(customInstructions?: string): Promise<CompactionResult> {
 		if (this.closed) throw new Error("Compaction cancelled");
-		if (this.isContinuousChatActive()) {
-			throw new Error("Manual session compaction is unavailable while ICM continuous chat owns the conversation.");
+		const wire = this.deps.getContinuousChatWire?.();
+		if (wire?.kind === "blocked") {
+			throw new Error(
+				`Nothing to compact: the ICM project chat is unavailable (${wire.reason}), so no provider request is sent until it recovers.`,
+			);
+		}
+		if (wire !== undefined) {
+			if (this.deps.getContinuousChatTurn?.() !== undefined) {
+				throw new Error(
+					"Manual compaction is refused while an ICM chat turn runs: host compaction is scoped to the running turn and runs automatically when a request needs room.",
+				);
+			}
+			throw new Error(
+				"Nothing to compact: under ICM each turn is rebuilt from the chat view, so no earlier history reaches the model.",
+			);
 		}
 		if (this.isRunning()) {
 			throw new Error("Compaction already in progress");
@@ -952,7 +1200,9 @@ export class CompactionController {
 		const initialPreparation = this.prepareCompactionWithPackedHostRecords(initialBranch, settings);
 		if (!initialPreparation) {
 			const lastEntry = initialBranch[initialBranch.length - 1];
-			if (lastEntry?.type === "compaction") throw new Error("Already compacted");
+			if (lastEntry?.type === "compaction" && isWholePathCompaction(initialBranch, lastEntry)) {
+				throw new Error("Already compacted");
+			}
 			throw new Error("Nothing to compact (session too small)");
 		}
 		this.beginCompactionLifecycle(initialPreparation);
@@ -997,7 +1247,7 @@ export class CompactionController {
 					{ ...settings, keepRecentTokens: params.keepRecentTokens },
 					COMPACTION_RETRY_PREPARATION_OPTIONS,
 				);
-				if (!preparation) throw new Error("Nothing to compact (session too small)");
+				if (!preparation) throw new NothingToCompactError("Nothing to compact (session too small)");
 				const compactionThinkingLevel = this.deps.resolveThinkingLevel(model, sessionModel);
 				const result = await this.deps.compactWithRetry(
 					() =>
@@ -1030,7 +1280,7 @@ export class CompactionController {
 					{ ...settings, keepRecentTokens: params.keepRecentTokens },
 					COMPACTION_RETRY_PREPARATION_OPTIONS,
 				);
-				if (!preparation) throw new Error("Nothing to compact (session too small)");
+				if (!preparation) throw new NothingToCompactError("Nothing to compact (session too small)");
 				return { result: createDeterministicCompaction(preparation) };
 			},
 			apply: async (result) => {
@@ -1086,7 +1336,9 @@ export class CompactionController {
 
 	async check(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
 		const settings = this.deps.getAdaptedSettings();
-		if (this.closed || this.isContinuousChatActive() || !settings.enabled || this.isRunning()) return false;
+		if (this.closed || !settings.enabled || this.isRunning()) return false;
+		// Between ICM turns there is nothing to recover: the next turn's request is rebuilt from the chat view.
+		if (this.isContinuousChatActive() && this.deps.getContinuousChatTurn?.() === undefined) return false;
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return false;
 
 		const model = this.deps.getModel();
@@ -1109,6 +1361,7 @@ export class CompactionController {
 				});
 				return false;
 			}
+			if (this.declineUnscopedRecovery("overflow")) return this.deps.agent.hasQueuedMessages();
 			this.overflowRecoveryAttempted = true;
 			this.dropTrailingAssistantErrors();
 			return this.deps.runAutoCompaction("overflow", true);
@@ -1119,6 +1372,7 @@ export class CompactionController {
 				: undefined;
 		if (sameModel && classified?.shouldCompact) {
 			if (this.providerRecoveryAttempted) return false;
+			if (this.declineUnscopedRecovery("provider_recovery")) return this.deps.agent.hasQueuedMessages();
 			this.providerRecoveryAttempted = true;
 			this.dropTrailingAssistantErrors();
 			return this.deps.runAutoCompaction("provider_recovery", true);
@@ -1127,6 +1381,9 @@ export class CompactionController {
 		if (assistantMessage.stopReason !== "error") {
 			this.recordFeedbackTurn(assistantMessage);
 		}
+		// Under ICM the next turn is rebuilt from the chat view, so a threshold compaction after the run would pay for a
+		// summary no request sends. Within the turn, request admission compacts the turn when a request needs room.
+		if (this.isContinuousChatActive()) return false;
 
 		let contextTokens: number;
 		if (assistantMessage.stopReason === "error") {
@@ -1181,6 +1438,37 @@ export class CompactionController {
 			return this.deps.runAutoCompaction("threshold", false);
 		}
 		return false;
+	}
+
+	/**
+	 * Recovery drops the failed replies, then compacts and retries. When nothing is in compaction scope it cannot run, so
+	 * it is declined before anything changes: the failed reply stays exactly where the session (or a cheap routed turn's
+	 * buffer, which persists it later) has it. Returns whether it declined.
+	 */
+	private declineUnscopedRecovery(reason: "overflow" | "provider_recovery"): boolean {
+		const scope = this.compactionScope();
+		if (scope.kind !== "none") return false;
+		this.deps.emit({ type: "compaction_start", reason });
+		this.emitUnscopedEnd(reason, scope.reason);
+		return true;
+	}
+
+	/** The end of an automatic compaction that had nothing in scope: an error for a recovery, a skip otherwise. */
+	private emitUnscopedEnd(reason: AutoCompactionReason, scopeReason: string): void {
+		const unavailable =
+			reason === "overflow"
+				? "Context overflow recovery is unavailable"
+				: reason === "provider_recovery"
+					? "Provider failure recovery is unavailable"
+					: undefined;
+		this.deps.emit({
+			type: "compaction_end",
+			reason,
+			result: undefined,
+			aborted: false,
+			willRetry: false,
+			...(unavailable ? { errorMessage: `${unavailable}: ${scopeReason}.` } : { skipReason: scopeReason }),
+		});
 	}
 
 	measureLiveContextTokens(): number {
@@ -1248,7 +1536,7 @@ export class CompactionController {
 	}
 
 	runAuto(reason: AutoCompactionReason, willRetry: boolean, options: AutoCompactionRunOptions = {}): Promise<boolean> {
-		if (this.closed || this.isContinuousChatActive()) return Promise.resolve(false);
+		if (this.closed) return Promise.resolve(false);
 		if (this.autoRunPromise) return this.autoRunPromise;
 		this.cancelIdlePreparation();
 		if (this.manualAbortController) return Promise.resolve(this.deps.agent.hasQueuedMessages());
@@ -1283,6 +1571,11 @@ export class CompactionController {
 		let effectiveInstructions: string | undefined;
 		let effectiveInstructionsReady = false;
 		try {
+			const scope = this.compactionScope();
+			if (scope.kind === "none") {
+				this.emitUnscopedEnd(reason, scope.reason);
+				return hadQueuedMessages || this.deps.agent.hasQueuedMessages();
+			}
 			if (model) await this.planEvidenceRetention(signal);
 			if (!model) {
 				this.deps.emit({
@@ -1343,7 +1636,7 @@ export class CompactionController {
 						},
 						COMPACTION_RETRY_PREPARATION_OPTIONS,
 					);
-					if (!preparation) throw new Error("already compacted");
+					if (!preparation) throw new NothingToCompactError(this.nothingToCompactReason(branchEntries));
 					this.beginCompactionLifecycle(preparation);
 					// One event-driven handoff per compaction run; every retry reuses this bounded value.
 					if (!effectiveInstructionsReady) {
@@ -1391,12 +1684,13 @@ export class CompactionController {
 					return { result };
 				},
 				buildDeterministicCheckpoint: (params) => {
+					const branch = this.getCompactionBranch();
 					const preparation = this.prepareCompactionWithPackedHostRecords(
-						this.getCompactionBranch(),
+						branch,
 						{ ...settings, keepRecentTokens: params.keepRecentTokens },
 						COMPACTION_RETRY_PREPARATION_OPTIONS,
 					);
-					if (!preparation) throw new Error("already compacted");
+					if (!preparation) throw new NothingToCompactError(this.nothingToCompactReason(branch));
 					this.beginCompactionLifecycle(preparation);
 					fromExtension = false;
 					return { result: createDeterministicCompaction(preparation) };
@@ -1418,6 +1712,7 @@ export class CompactionController {
 			});
 
 			if (outcome.kind === "skip") {
+				options.onSkip?.(outcome.reason);
 				this.finishCompactionLifecycle("failure", outcome.reason);
 				this.deps.emit({
 					type: "compaction_end",
@@ -1638,7 +1933,7 @@ export class CompactionController {
 		return compactionPricingFor({
 			model,
 			summarizer,
-			summarizerSharesLane: sameCacheLane(summarizer, model),
+			summarizerSharesLane: sameCacheLane(summarizer, model) && this.summarizerReadsSentPrefix(),
 			prefixTokens,
 			...(nonCompactableTokens !== undefined ? { nonCompactableTokens } : {}),
 			outcome,
@@ -1658,7 +1953,7 @@ export class CompactionController {
 	}
 
 	onLaneIdle(reply: AssistantMessage): void {
-		if (this.closed || this.isContinuousChatActive()) return;
+		if (this.closed) return;
 		this.idleTimer.disarm();
 		this.idlePreparationSettingsKey = undefined;
 		// A resume outcome stays visible until a new preparation is planned.
@@ -1673,7 +1968,9 @@ export class CompactionController {
 			return;
 		const settings = this.deps.getAdaptedSettings();
 		if (!settings.enabled) return;
-		const compactableTokens = estimateCharacterTokens(this.deps.agent.state.messages);
+		const compactable = this.compactableMessages();
+		if (compactable === undefined) return;
+		const compactableTokens = estimateCharacterTokens(compactable);
 		if (compactableTokens <= settings.keepRecentTokens) return;
 		const now = Date.now();
 		const facts = this.deps.getCacheEconomics?.(model, now);
@@ -1787,9 +2084,12 @@ export class CompactionController {
 	): Promise<PreparedCompactionRecord | undefined> {
 		const model = this.deps.getModel();
 		if (!model) return undefined;
-		if (estimateCharacterTokens(this.deps.agent.state.messages) <= settings.keepRecentTokens) {
+		const compactable = this.compactableMessages();
+		if (compactable === undefined || estimateCharacterTokens(compactable) <= settings.keepRecentTokens) {
 			return undefined;
 		}
+		const scope = this.compactionScope();
+		const scopeStartEntryId = scope.kind === "turn" ? scope.startEntryId : undefined;
 		const sessionId = this.deps.sessionManager.getSessionId();
 		const readLeafId = this.deps.sessionManager.getLeafEntry()?.id;
 		const preparation = this.prepareCompactionWithPackedHostRecords(this.getRawCompactionBranch(), settings);
@@ -1830,7 +2130,11 @@ export class CompactionController {
 		}
 		const coveredThroughEntryId = result.coveredThroughEntryId ?? preparation.coveredThroughEntryId ?? readLeafId;
 		const record: PreparedCompactionRecord = {
-			result: coveredThroughEntryId ? { ...result, coveredThroughEntryId } : result,
+			result: {
+				...result,
+				...(coveredThroughEntryId ? { coveredThroughEntryId } : {}),
+				...(scopeStartEntryId !== undefined ? { scopeStartEntryId } : {}),
+			},
 			lane: { provider: model.provider, id: model.id, api: model.api },
 			settingsKey,
 			preparedAt: Date.now(),
@@ -1860,6 +2164,10 @@ export class CompactionController {
 	 * summary no longer describes what the lane caches, and a compaction replaced the history it read.
 	 */
 	private findPreparedCompaction(model: Model<Api>, settingsKey: string): PreparedCompactionRecord | undefined {
+		const scope = this.compactionScope();
+		if (scope.kind === "none") return undefined;
+		// A summary read over another scope (a different ICM turn, or the whole session) does not describe this one.
+		const scopeStartEntryId = scope.kind === "turn" ? scope.startEntryId : undefined;
 		const manager = this.deps.sessionManager;
 		for (
 			let entry = manager.getLeafEntry();
@@ -1873,6 +2181,7 @@ export class CompactionController {
 				if (
 					!lane ||
 					record.settingsKey !== settingsKey ||
+					record.result.scopeStartEntryId !== scopeStartEntryId ||
 					lane.provider !== model.provider ||
 					lane.id !== model.id ||
 					lane.api !== model.api
@@ -1920,8 +2229,9 @@ export class CompactionController {
 		const recorded = this.findPreparedCompaction(model, settingsKey);
 		if (!recorded && !inFlight) return false;
 		const settings = this.deps.getAdaptedSettings();
-		const compactableTokens = estimateCharacterTokens(this.deps.agent.state.messages);
-		if (compactableTokens <= settings.keepRecentTokens) {
+		const compactable = this.compactableMessages();
+		const compactableTokens = compactable === undefined ? 0 : estimateCharacterTokens(compactable);
+		if (compactable === undefined || compactableTokens <= settings.keepRecentTokens) {
 			inFlight?.abort.abort();
 			this.idleView = undefined;
 			return false;
@@ -1960,6 +2270,18 @@ export class CompactionController {
 		}
 		const prepared = recorded ?? (await inFlight?.done);
 		if (!prepared) return false;
+		// The idle-resume path starts its lifecycle here: it is fenced the same way as beginCompactionLifecycle, before
+		// anything announces a compaction.
+		if (this.closed) return false;
+		const { result } = prepared;
+		// An in-flight preparation was read over the scope current when it started; the turn may have changed since.
+		const scope = this.compactionScope();
+		if (
+			scope.kind === "none" ||
+			result.scopeStartEntryId !== (scope.kind === "turn" ? scope.startEntryId : undefined)
+		) {
+			return false;
+		}
 		this.idleView = {
 			state: "resumed",
 			fresh: true,
@@ -1967,16 +2289,42 @@ export class CompactionController {
 			at: now,
 		};
 		this.deps.emit({ type: "compaction_start", reason: "threshold" });
-		const { result } = prepared;
-		// The idle-resume path starts its lifecycle here: it is fenced the same way as beginCompactionLifecycle.
-		if (this.closed) return false;
 		const compactionId = randomUUID();
 		this.deps.sessionManager.appendCompactionStart(compactionId, result.firstKeptEntryId, result.tokensBefore);
-		this.activeCompactionLifecycle = { compactionId, endAttempted: false };
-		const compactionEntryId = await this.applyResult(result, false);
-		this.recordAppliedCompaction(compactionEntryId);
-		this.pendingRequestFrontier = this.pendingFrontier(compactionEntryId, model, this.deps.getAdaptedSettings());
-		this.finishCompactionLifecycle(result.deterministic ? "fallback" : "success", result.deterministic?.cause);
+		const lifecycle: ActiveCompactionLifecycle = { compactionId, endAttempted: false };
+		this.activeCompactionLifecycle = lifecycle;
+		try {
+			const compactionEntryId = await this.applyResult(result, false);
+			this.recordAppliedCompaction(compactionEntryId);
+			this.pendingRequestFrontier = this.pendingFrontier(compactionEntryId, model, this.deps.getAdaptedSettings());
+			this.finishCompactionLifecycle(result.deterministic ? "fallback" : "success", result.deterministic?.cause);
+		} catch (error) {
+			// Ended like an automatic run's failure: the lifecycle and the UI hear it. A checkpoint already committed
+			// stays applied and the request is replanned over it; otherwise admission decides as if nothing was prepared.
+			const committed = lifecycle.latestCompactionEntryId !== undefined;
+			const errorMessage = boundedCompactionLifecycleError(error);
+			this.finishCompactionLifecycle(
+				committed ? (lifecycle.committedOutcome ?? "success") : "failure",
+				committed ? lifecycle.committedCause : error,
+			);
+			this.deps.emit({
+				type: "session_compact_failed",
+				reason: "threshold",
+				errorMessage,
+				aborted: false,
+				willRetry: false,
+				fromExtension: false,
+			});
+			this.deps.emit({
+				type: "compaction_end",
+				reason: "threshold",
+				result: committed ? result : undefined,
+				aborted: false,
+				willRetry: false,
+				errorMessage: `Prepared compaction failed: ${errorMessage}`,
+			});
+			return committed;
+		}
 		this.deps.emit({ type: "compaction_end", reason: "threshold", result, aborted: false, willRetry: false });
 		return true;
 	}
@@ -2006,7 +2354,8 @@ export class CompactionController {
 				detail: "no compaction on record to learn a compaction's size and cost from",
 			};
 		} else {
-			const compactableTokens = estimateCharacterTokens(this.deps.agent.state.messages);
+			const compactable = this.compactableMessages();
+			const compactableTokens = compactable === undefined ? 0 : estimateCharacterTokens(compactable);
 			const nonCompactableTokens = Math.max(0, contextTokens - compactableTokens);
 			const pricing = this.compactionPricing(
 				model,
@@ -2150,6 +2499,15 @@ export class CompactionController {
 		// The one commit point of every compaction path: a result that arrives after the session closed (an extension's
 		// `session_before_compact` handler that was still running across the quit) is cancelled here and writes nothing.
 		if (this.closed) throw new Error("Compaction cancelled");
+		// A result is applied only over the scope it was read from: under ICM, the running turn's entries.
+		const scope = this.compactionScope();
+		if (scope.kind === "none") throw new Error(`Compaction cannot be applied: ${scope.reason}.`);
+		const scopeStartEntryId = scope.kind === "turn" ? scope.startEntryId : undefined;
+		if (result.scopeStartEntryId !== undefined && result.scopeStartEntryId !== scopeStartEntryId) {
+			throw new Error(
+				`Compaction cannot be applied: it was read from the scope starting at entry ${result.scopeStartEntryId}, but the current scope ${scopeStartEntryId === undefined ? "is the whole session" : `starts at entry ${scopeStartEntryId}`}.`,
+			);
+		}
 		let applied: CompactionResult = { ...result };
 		if (this.deps.decorateCompactionDetails) {
 			applied = { ...applied, details: this.deps.decorateCompactionDetails(applied.details) };
@@ -2171,6 +2529,7 @@ export class CompactionController {
 			applied.retention,
 			applied.coveredThroughEntryId,
 			applied.summarizedGapEntryIds,
+			scopeStartEntryId,
 		);
 		// The entry is durable from here: the lifecycle names it at once, so a close that lands while the extensions' `session_compact`
 		// handlers are still awaited records this compaction as committed, not as cancelled.
@@ -2179,10 +2538,32 @@ export class CompactionController {
 			this.activeCompactionLifecycle.committedOutcome = applied.deterministic ? "fallback" : "success";
 			this.activeCompactionLifecycle.committedCause = applied.deterministic?.cause;
 		}
-		const messageTokensBefore = estimateCharacterTokens(this.deps.agent.state.messages);
+		// Telemetry only: the messages compaction could shrink, before and after. A turn whose start no longer resolves
+		// measures as empty here; the chat projection refuses that turn's next request with the precise reason.
+		const messageTokensBefore = estimateCharacterTokens(this.compactableMessages() ?? []);
+		if (scope.kind === "turn") {
+			// The turn's wire now begins at this checkpoint: the chat projection re-finds the turn by it on the next plan,
+			// and by the entry the checkpoint kept before its summary (a rebuilt custom message is a new object).
+			const retainedEntryId =
+				applied.retention?.mode === "original-user" ? applied.retention.userEntryId : undefined;
+			const sessionManager = this.deps.sessionManager;
+			scope.turn.noteCompaction(
+				compactionEntryId,
+				retainedEntryId === undefined
+					? undefined
+					: {
+							entryId: retainedEntryId,
+							matches: (message) => sessionManager.getMessageEntryId(message) === retainedEntryId,
+						},
+			);
+		}
 		this.deps.refreshAfterCompaction();
-		const messageTokensAfter = estimateCharacterTokens(this.deps.agent.state.messages);
-		const liveTokensAfter = this.measureLiveContextTokens();
+		const messageTokensAfter = estimateCharacterTokens(this.compactableMessages() ?? []);
+		// Under ICM the live messages still hold the pre-turn history the wire never carries: the turn's next request is
+		// its non-compactable floor (recorded when the request that led here was admitted) plus the turn's messages.
+		const turnFloor = scope.kind === "turn" ? this.turnRequestFloorTokens() : undefined;
+		const liveTokensAfter =
+			turnFloor !== undefined ? turnFloor + messageTokensAfter : this.measureLiveContextTokens();
 		const sessionModel = this.deps.getModel();
 		if (sessionModel && applied.tokensBefore > 0) {
 			this.deps.recordCompactionOutcome?.({

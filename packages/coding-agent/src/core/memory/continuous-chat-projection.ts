@@ -53,6 +53,12 @@ export function renderContinuousChatViewBlocks(view: string): TextContent[] {
 	return blocks;
 }
 
+/**
+ * Which ICM projection owns the provider wire: the running chat, or the block installed while the chat is unavailable.
+ * Absent when no ICM projection is installed, so the session's own history rides the wire.
+ */
+export type ContinuousChatWire = { kind: "chat" } | { kind: "blocked"; reason: string };
+
 /** Blocks every provider request while ICM is selected but its required chat is unavailable. */
 export function createBlockedContinuousChatPlanWrapper(
 	reason: string,
@@ -64,12 +70,78 @@ export function createBlockedContinuousChatPlanWrapper(
 }
 
 /**
+ * The frame every request of a turn opens with: the turn view, then the turn's live state. Both carry the turn's start
+ * instant as their timestamp.
+ */
+export function continuousChatFrameMessages(
+	handle: Pick<IcmTurnHandle, "boundary" | "startedAt">,
+	stateText: string,
+): AgentMessage[] {
+	const timestamp = new Date(handle.startedAt).toISOString();
+	return [
+		createCustomMessage(
+			CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE,
+			renderContinuousChatViewBlocks(handle.boundary.view),
+			false,
+			undefined,
+			timestamp,
+		),
+		createCustomMessage(CONTINUOUS_CHAT_STATE_CUSTOM_TYPE, stateText, false, undefined, timestamp),
+	];
+}
+
+/**
+ * Where the running turn's own messages begin in the planned history. Before any compaction that is the turn's start
+ * message. A continuation that resumed at a compaction summary did not apply it: that summary is pre-turn history the
+ * view already carries, so the turn's own messages begin right after it (an index past the end while the turn has none
+ * yet). After a host compaction scoped to this turn, the start may be summarized away, so the turn begins at that
+ * checkpoint's summary, or at the start entry the checkpoint kept directly before it. Throws rather than guess.
+ */
+export function resolveContinuousChatTurnStart(
+	handle: IcmTurnHandle,
+	messages: readonly AgentMessage[],
+): { index: number } | { error: string } {
+	const latest = handle.latestCompaction;
+	if (latest === undefined) {
+		const start = handle.startMessage;
+		if (start === undefined) return { error: "Continuous-chat turn has no start message." };
+		// Searched from the end: the turn's own messages are the tail, so this costs the turn, not the whole session.
+		const startIndex = messages.lastIndexOf(start);
+		if (startIndex === -1) return { error: "Continuous-chat turn start is missing from the planned history." };
+		return { index: start.role === "compactionSummary" ? startIndex + 1 : startIndex };
+	}
+	const summaryIndex = messages.findLastIndex(
+		(message) => message.role === "compactionSummary" && message.compactionEntryId === latest.entryId,
+	);
+	if (summaryIndex === -1) {
+		return {
+			error: `Continuous-chat turn compaction ${latest.entryId} has no summary in the planned history; durable history must not be sent.`,
+		};
+	}
+	const retained = latest.retainedStart;
+	return {
+		index:
+			summaryIndex > 0 && retained !== undefined && retained.matches(messages[summaryIndex - 1])
+				? summaryIndex - 1
+				: summaryIndex,
+	};
+}
+
+function turnStartIndex(handle: IcmTurnHandle, messages: readonly AgentMessage[]): number {
+	const resolved = resolveContinuousChatTurnStart(handle, messages);
+	if ("error" in resolved) throw new Error(resolved.error);
+	return resolved.index;
+}
+
+/**
  * Projects the installed plan onto the running turn. The base planner receives only the running turn's
  * messages (with `sentPrefixCount` shifted to the turn start) so context GC, path aliasing, prompt
  * enforcement, and transient decisions never inspect or mutate pre-turn durable history that `<chat>`
- * replaced; the wire carries the turn view and state followed by the planned turn messages. Throws
- * rather than send durable history when no turn is running, the turn start is missing from the request,
- * or the planned history contains messages outside the running turn.
+ * replaced; the wire carries the turn view and state followed by the planned turn messages. The view and
+ * state lead the plan as its non-compactable head: compaction can only shrink the turn's own messages.
+ * Throws rather than send durable history when no turn is running, the turn start is missing from the
+ * request, a compaction summary in the turn is not one this turn applied, or the planned history contains
+ * messages outside the running turn.
  */
 export function createContinuousChatPlanWrapper(
 	source: ContinuousChatProjectionSource,
@@ -78,17 +150,7 @@ export function createContinuousChatPlanWrapper(
 	let frame: { handle: IcmTurnHandle; stateText: string; messages: AgentMessage[] } | undefined;
 	const frameFor = (handle: IcmTurnHandle, stateText: string): AgentMessage[] => {
 		if (frame?.handle === handle && frame.stateText === stateText) return frame.messages;
-		const timestamp = new Date(handle.startedAt).toISOString();
-		const messages = [
-			createCustomMessage(
-				CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE,
-				renderContinuousChatViewBlocks(handle.boundary.view),
-				false,
-				undefined,
-				timestamp,
-			),
-			createCustomMessage(CONTINUOUS_CHAT_STATE_CUSTOM_TYPE, stateText, false, undefined, timestamp),
-		];
+		const messages = continuousChatFrameMessages(handle, stateText);
 		frame = { handle, stateText, messages };
 		return messages;
 	};
@@ -98,15 +160,23 @@ export function createContinuousChatPlanWrapper(
 			throw new Error("Continuous-chat provider request has no running turn; durable history must not be sent.");
 		}
 		const { handle, stateText } = current;
-		const start = handle.startMessage;
-		if (start === undefined) throw new Error("Continuous-chat turn has no start message.");
-		const startIndex = request.messages.indexOf(start);
-		if (startIndex === -1) throw new Error("Continuous-chat turn start is missing from the planned history.");
+		const startIndex = turnStartIndex(handle, request.messages);
 		// The turn's messages, untransformed: the durable form transient records were committed in.
 		// Only the running turn is handed to the base planner so context GC, path aliasing, prompt
 		// enforcement, and transient-cleared checks never inspect or rewrite pre-turn durable history
 		// that `<chat>` already replaced.
 		const turnMessages = request.messages.slice(startIndex);
+		// A summary is pre-turn history unless this turn applied it: only the turn's own checkpoints may ride the wire.
+		const foreignSummary = turnMessages.find(
+			(message) =>
+				message.role === "compactionSummary" &&
+				(message.compactionEntryId === undefined || !handle.notedCompactions.has(message.compactionEntryId)),
+		);
+		if (foreignSummary !== undefined) {
+			throw new Error(
+				"Continuous-chat turn carries a compaction summary this turn did not apply; pre-turn history must not be sent.",
+			);
+		}
 		const sentPrefixCount = Math.max(0, request.sentPrefixCount - startIndex);
 		const plan = await base({ ...request, messages: turnMessages, sentPrefixCount }, signal);
 		const turnTimestamps = new Set(turnMessages.map((message) => message.timestamp));
@@ -117,9 +187,11 @@ export function createContinuousChatPlanWrapper(
 			const now = source.current();
 			return now?.handle === handle && now.stateText === stateText;
 		};
+		const frameMessages = frameFor(handle, stateText);
 		return {
 			...plan,
-			messages: [...frameFor(handle, stateText), ...plan.messages],
+			messages: [...frameMessages, ...plan.messages],
+			nonCompactableHead: frameMessages.length + (plan.nonCompactableHead ?? 0),
 			transientReconciliationBase: turnMessages,
 			isCurrent: () => isTurnCurrent() && plan.isCurrent?.() !== false,
 			prepareCommit: () => isTurnCurrent() && plan.prepareCommit?.() !== false,

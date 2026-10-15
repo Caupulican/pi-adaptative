@@ -15,7 +15,14 @@ import { decodePrintableKey, isLegacyMultilineNewline, matchesKey } from "../key
 import { KillRing } from "../kill-ring.ts";
 import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
-import { getGraphemeSegmenter, getWordSegmenter, isWhitespaceChar, sliceByColumn, visibleWidth } from "../utils.ts";
+import {
+	getGraphemeSegmenter,
+	getWordSegmenter,
+	isWhitespaceChar,
+	sliceByColumn,
+	truncateToWidth,
+	visibleWidth,
+} from "../utils.ts";
 import { findWordBackward, findWordForward } from "../word-navigation.ts";
 import {
 	CodeHighlightCache,
@@ -253,11 +260,15 @@ export interface EditorTheme {
 	selectList: SelectListTheme;
 	/** Optional colorization of fenced code blocks. Applied at render time only; the buffer is never changed. */
 	code?: EditorCodeTheme;
+	/** Optional color for empty-editor placeholder text. */
+	placeholderColor?: (str: string) => string;
 }
 
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
+	/** Optional placeholder text shown when the editor is empty. */
+	placeholder?: string;
 	/**
 	 * Keep visible owner-entered content out of autocomplete, prompt history, undo snapshots, and
 	 * the kill ring. Large pastes stay expanded and submit preserves surrounding whitespace.
@@ -359,6 +370,7 @@ export class Editor implements Component, Focusable {
 	// Undo support
 	private undoStack = new UndoStack<EditorSnapshot>();
 	private readonly privateContent: boolean;
+	private readonly placeholder?: string;
 
 	// Highlighted spans of fenced code blocks, keyed by exact text (render-time only).
 	private readonly codeCache = new CodeHighlightCache();
@@ -374,6 +386,7 @@ export class Editor implements Component, Focusable {
 		this.theme = theme;
 		this.borderColor = theme.borderColor;
 		this.privateContent = options.privateContent ?? false;
+		this.placeholder = options.placeholder;
 		const paddingX = options.paddingX ?? 0;
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
@@ -650,6 +663,15 @@ export class Editor implements Component, Focusable {
 					const cursor = `\x1b[7m${firstGrapheme}${cursorEnd}`;
 					displayText = before + marker + cursor + restAfter;
 					// lineVisibleWidth stays the same - we're replacing, not adding
+				} else if (this.placeholder && !this.privateContent && this.isEditorEmpty()) {
+					const hint = truncateToWidth(this.placeholder, Math.max(1, contentWidth), "");
+					const hintGraphemes = [...graphemeSegmenter.segment(hint)];
+					const firstGrapheme = hintGraphemes[0]?.segment || " ";
+					const restHint = hint.slice(firstGrapheme.length);
+					const formatPlaceholder = this.theme.placeholderColor ?? ((s: string) => `\x1b[2m${s}\x1b[22m`);
+					const cursor = `\x1b[7m${formatPlaceholder(firstGrapheme)}${cursorEnd}`;
+					displayText = before + marker + cursor + (restHint ? formatPlaceholder(restHint) : "");
+					lineVisibleWidth = visibleWidth(firstGrapheme) + visibleWidth(restHint);
 				} else {
 					// Cursor is at the end - add highlighted space
 					const cursor = `\x1b[7m ${cursorEnd}`;

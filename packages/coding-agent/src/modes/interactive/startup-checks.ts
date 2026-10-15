@@ -191,7 +191,7 @@ export function renderProjectTrustWarningIfNeeded(host: StartupChecksHost): void
 		new Text(
 			theme.fg(
 				"warning",
-				"This project is not trusted. Project instructions (AGENTS.md/CLAUDE.md/GEMINI.md), .pi resources, and project packages are ignored. Use /trust to save a trust decision, then restart pi.",
+				"This project is not trusted. Project instructions (AGENTS.md/CLAUDE.md/GEMINI.md), .pi resources, and project packages are ignored. Use /trust to trust it.",
 			),
 			1,
 			0,

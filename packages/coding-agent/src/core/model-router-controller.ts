@@ -111,6 +111,7 @@ import type {
 	ModelRouterPoolPreference,
 	ModelRouterSelectionMode,
 } from "./settings/settings-schema.ts";
+import { findMessageInHistory } from "./turn-window.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface ModelRouterControllerSettingsSource {
@@ -321,8 +322,12 @@ export class ModelRouterController {
 		rootModel: Model<Api> | undefined;
 		routedModel: Model<Api>;
 		decision: RouteDecision;
-		/** Where this turn's exchange starts in the agent's history (the side trip's brief keeps from here). */
-		exchangeStart: number;
+		/**
+		 * The owner message that opened this turn's exchange, the side trip's brief keeps from it; undefined for a
+		 * continuation, which opens with no message of its own. Carried by identity, never by a history index: a
+		 * compaction rebuilds the history, and under ICM the planner reads only the running turn's messages.
+		 */
+		exchangeOpening: AgentMessage | undefined;
 	};
 
 	private readonly deps: ModelRouterControllerDeps;
@@ -525,6 +530,28 @@ export class ModelRouterController {
 		return flushModelRouterSessionBufferPrefix(modelRouterBuffer, (batch) =>
 			this.deps.appendSessionMessageBatch(batch),
 		);
+	}
+
+	/**
+	 * The messages of `live` a cheap routed turn still holds back from the session, in order; empty when none. A history
+	 * rebuilt from the session (after a compaction) cannot see them, so its owner carries them after the rebuild.
+	 */
+	pendingSessionMessages(live: readonly AgentMessage[]): AgentMessage[] {
+		const modelRouterBuffer = this._modelRouterSessionBuffer;
+		if (!modelRouterBuffer || modelRouterBuffer.committed || modelRouterBuffer.messages.length === 0) return [];
+		const liveMessages = new Set(live);
+		return modelRouterBuffer.messages.map((entry) => entry.message).filter((message) => liveMessages.has(message));
+	}
+
+	/**
+	 * Removes from the live history exactly the messages the routed turn never persisted. Matched by identity, not by
+	 * the pre-turn length: a compaction inside the turn rebuilds the history, so positions no longer line up.
+	 */
+	private dropUnpersistedRoutedMessages(): void {
+		const agent = this.deps.getAgent();
+		const unpersisted = new Set(this.pendingSessionMessages(agent.state.messages));
+		if (unpersisted.size > 0)
+			agent.state.messages = agent.state.messages.filter((message) => !unpersisted.has(message));
 	}
 
 	/** Whether a cheap routed turn has crossed its durable tool-boundary commit. */
@@ -980,7 +1007,25 @@ export class ModelRouterController {
 	projectTurnContext(messages: AgentMessage[]): AgentMessage[] {
 		const active = this._activeRoutedTurn;
 		if (active?.decision.reasonCode !== SIDE_TRIP_REASON_CODE) return messages;
-		return sideTripBrief(messages, active.exchangeStart);
+		return sideTripBrief(messages, this._sideTripExchangeStart(active.exchangeOpening, messages));
+	}
+
+	/**
+	 * Where a side trip's exchange starts in `messages`: its opening message, found as the same object, or by the session
+	 * entry that holds it when a rebuild materialized it anew. Throws when it is gone rather than guess: a brief built
+	 * from any other index would send earlier conversation to the side-trip model, or drop the owner's message.
+	 */
+	private _sideTripExchangeStart(opening: AgentMessage | undefined, messages: readonly AgentMessage[]): number {
+		if (opening === undefined) {
+			throw new Error("Side trip has no opening owner message; its brief cannot be built.");
+		}
+		const index = findMessageInHistory(this.deps.getSessionManager(), opening, messages);
+		if (index === -1) {
+			throw new Error(
+				"Side trip's opening owner message is no longer in the history (a compaction summarized it); its brief cannot be built without sending earlier conversation.",
+			);
+		}
+		return index;
 	}
 
 	async resolveTurnRouteJudged(
@@ -1376,7 +1421,11 @@ export class ModelRouterController {
 		const previousModelRouterEscalationRequested = this._modelRouterEscalationRequested;
 		const previousActiveRoutedTurn = this._activeRoutedTurn;
 		const bufferRoutedTurn = routeDecision?.tier === "cheap";
-		const originalHistoryLength = agent.state.messages.length;
+		const exchangeOpening = continueFromCanonicalHistory
+			? undefined
+			: Array.isArray(messages)
+				? messages[0]
+				: messages;
 		let retryModel: Model<Api> | undefined;
 		let retryFromCanonicalHistory = false;
 		let completedDecision: ModelRouterDecisionStatus | undefined = routeDecision
@@ -1399,7 +1448,7 @@ export class ModelRouterController {
 					rootModel: previousModel,
 					routedModel,
 					decision: routeDecision,
-					exchangeStart: originalHistoryLength,
+					exchangeOpening,
 				};
 				this._lastModelRouterDecision = completedDecision;
 			}
@@ -1465,7 +1514,9 @@ export class ModelRouterController {
 				if (routeDecision?.reasonCode === SIDE_TRIP_REASON_CODE) {
 					agent.state.tools = [
 						...agent.state.tools,
-						sideTripHistoryTool(() => agent.state.messages.slice(0, originalHistoryLength)),
+						sideTripHistoryTool(() =>
+							agent.state.messages.slice(0, this._sideTripExchangeStart(exchangeOpening, agent.state.messages)),
+						),
 					];
 					swappedTools = agent.state.tools;
 				}
@@ -1485,12 +1536,7 @@ export class ModelRouterController {
 				const bufferCommitted = this._modelRouterSessionBuffer?.committed === true;
 				const prefixCommitted = this._modelRouterSessionBuffer?.prefixCommitted === true;
 				retryFromCanonicalHistory = bufferCommitted || prefixCommitted;
-				if (prefixCommitted && !bufferCommitted) {
-					const prefixMessageCount = this._modelRouterSessionBuffer?.prefixMessageCount ?? 0;
-					agent.state.messages.splice(originalHistoryLength + prefixMessageCount);
-				} else if (!bufferCommitted) {
-					agent.state.messages.splice(originalHistoryLength);
-				}
+				this.dropUnpersistedRoutedMessages();
 				// A side trip that reaches for a mutating tool reruns on the talker it stepped away from, whose
 				// cache holds the conversation; any other cheap turn escalates to the modify tier.
 				retryModel =
@@ -1512,18 +1558,11 @@ export class ModelRouterController {
 			}
 		} catch (error) {
 			thrownError = error;
-			// Mirror the escalation splice above (~:812): a buffered cheap-tier turn never flushes its
-			// live messages to the session on a genuine throw, so agent.state.messages must be rolled
-			// back to the pre-turn length here too — otherwise the never-persisted buffered messages
-			// permanently diverge from the persisted session (same shape as the W1.3 ghost-turn bug,
-			// but on the error path instead of the success/escalation paths).
-			if (bufferRoutedTurn && this._modelRouterSessionBuffer?.committed !== true) {
-				const prefixCommitted = this._modelRouterSessionBuffer?.prefixCommitted === true;
-				const prefixMessageCount = this._modelRouterSessionBuffer?.prefixMessageCount ?? 0;
-				agent.state.messages.splice(
-					prefixCommitted ? originalHistoryLength + prefixMessageCount : originalHistoryLength,
-				);
-			}
+			// Mirror the escalation path above: a buffered cheap-tier turn never flushes its live messages to the
+			// session on a genuine throw, so they must leave agent.state.messages here too — otherwise the
+			// never-persisted buffered messages permanently diverge from the persisted session (same shape as the
+			// W1.3 ghost-turn bug, but on the error path instead of the success/escalation paths).
+			if (bufferRoutedTurn) this.dropUnpersistedRoutedMessages();
 			if (completedDecision) {
 				completedDecision = { ...completedDecision, outcome: "failed" };
 				this._lastModelRouterDecision = completedDecision;

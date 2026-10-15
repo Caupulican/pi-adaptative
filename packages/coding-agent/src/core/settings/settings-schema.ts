@@ -537,12 +537,18 @@ export interface ToolRepairSettings {
 	logging?: boolean;
 }
 
+/** The Decision graph's views, in the order the view control steps through them. */
+export const WORKBENCH_GRAPH_VIEWS = ["list", "diagram", "lanes"] as const;
+
+/** How the Decision graph draws the loop. */
+export type WorkbenchGraphView = (typeof WORKBENCH_GRAPH_VIEWS)[number];
+
 /** Operator-owned Workbench geometry and input ownership; nothing here auto-sizes or auto-folds. */
 export interface WorkbenchSettings {
 	/** "on": the workbench owns the mouse (wheel scroll, chips, drag-select that copies on release, drag edges to resize, click titles to hide or maximize, right-click paste). "off": the terminal keeps it for its native gestures. */
 	mouse?: "off" | "on";
-	/** Work-area rows the operator chose (2..60), or "half" for an even split; the conversation keeps its minimum regardless. */
-	rows?: number | "half";
+	/** Work-area rows the operator chose (2..60), or "auto" for the default proportional split; the conversation keeps its minimum regardless. */
+	rows?: number | "auto";
 	/** Work area collapsed to its divider. */
 	collapsed?: boolean;
 	/** Work plan / Team inspector shown beside Execution, or hidden so Execution takes the width. */
@@ -561,8 +567,8 @@ export interface WorkbenchSettings {
 	graph?: "shown" | "hidden";
 	/** The graph's share of the conversation zone (0.25..0.5). */
 	graphFraction?: number;
-	/** How the graph draws the loop: the stage list with timers, or the diagram composed per task. */
-	graphView?: "list" | "diagram" | "lanes";
+	/** How the graph draws the loop: the stage list with timers, the diagram composed per task, or the lanes sequence of the flow trace. */
+	graphView?: WorkbenchGraphView;
 }
 
 export interface ReasoningSettings {
@@ -635,7 +641,7 @@ export interface Settings {
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	exposeSessionEnvironment?: boolean; // Default true: inject session identity env vars (PI_SESSION_ID, etc.) into shell processes
-	quietStartup?: boolean;
+	quietStartup?: boolean; // Hide the startup banner and the loaded-resources listing (default: true)
 	/**
 	 * How to treat repository AGENTS.md/CLAUDE.md/GEMINI.md files.
 	 * `"off"` (default): global `~/.pi/agent` files only; do not walk project files.
@@ -663,6 +669,8 @@ export interface Settings {
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
 	defaultTools?: string[]; // Default tool allowlist for main sessions (global-only)
+	/** Projects with no saved /trust decision load their own .pi settings, extensions and instructions ("trusted", the default) or are ignored ("untrusted"). Read from global settings only. */
+	projectTrust?: "trusted" | "untrusted";
 	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
 	workbench?: WorkbenchSettings;
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree

@@ -83,6 +83,7 @@ export interface SessionFlowCommandsSettingsSource {
 	getModelFavorites(): ModelFavorite[];
 	getTreeFilterMode(): "default" | "no-tools" | "user-only" | "labeled-only" | "all";
 	isProjectTrusted(): boolean;
+	setProjectTrusted(trusted: boolean): void;
 	setDefaultModelAndProvider(provider: string, modelId: string): void;
 	setDefaultThinkingLevel(level: ThinkingLevel): void;
 	setEnabledModels(patterns: string[] | undefined): void;
@@ -121,6 +122,8 @@ export interface SessionFlowHost {
 	checkDaxnutsEasterEgg(model: { provider: string; id: string }): void;
 	getModelCandidates(): Promise<Model<Api>[]>;
 	shutdown(options?: { fromSignal?: boolean }): Promise<void>;
+	/** Reloads settings, instructions and extensions; resolves false when a busy session declined. */
+	reload(): Promise<boolean>;
 }
 
 function finishSelectorCancellation(host: Pick<SessionFlowHost, "ui">, done: () => void): void {
@@ -459,9 +462,15 @@ export function showTrustSelector(host: SessionFlowHost): void {
 			onSelect: (trusted) => {
 				trustStore.set(cwd, trusted);
 				done();
-				host.showStatus(
-					`Saved trust decision: ${trusted ? "trusted" : "untrusted"}. Restart pi for this to take effect.`,
-				);
+				// The decision applies to this session now: project settings, instructions and extensions load or drop.
+				host.settingsManager.setProjectTrusted(trusted);
+				void host.reload().then((reloaded) => {
+					host.showStatus(
+						reloaded
+							? `Project ${trusted ? "trusted" : "untrusted"}; applied.`
+							: `Saved trust decision: ${trusted ? "trusted" : "untrusted"}. It applies after /reload.`,
+					);
+				});
 			},
 			onCancel: () => {
 				finishSelectorCancellation(host, done);

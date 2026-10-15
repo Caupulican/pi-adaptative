@@ -3,7 +3,7 @@ import { selectConfig } from "./cli/config-selector.ts";
 import { APP_NAME, getAgentDir, getStandaloneInstallerCommand, getStandaloneInstallInstruction } from "./config.ts";
 import { DefaultPackageManager } from "./core/package-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
-import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
+import { ProjectTrustStore, resolveProjectTrust } from "./core/trust-manager.ts";
 import { spawnProcess, waitForChildProcess } from "./utils/child-process.ts";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
@@ -328,7 +328,8 @@ function resolveProjectTrusted(cwd: string, agentDir: string, trustOverride: boo
 	if (trustOverride !== undefined) {
 		return trustOverride;
 	}
-	return !hasProjectTrustInputs(cwd) || new ProjectTrustStore(agentDir).get(cwd) === true;
+	const trustDefault = SettingsManager.create(cwd, agentDir, { projectTrusted: false }).getProjectTrustDefault();
+	return resolveProjectTrust(cwd, new ProjectTrustStore(agentDir), trustDefault);
 }
 
 export async function handleConfigCommand(args: string[]): Promise<boolean> {

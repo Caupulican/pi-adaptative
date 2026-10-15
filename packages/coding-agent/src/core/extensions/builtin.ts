@@ -1,11 +1,7 @@
 import { Type } from "typebox";
 import { estimateStringTokens, estimateTokens } from "../../kernel/compaction/compaction.ts";
-import {
-	createBranchSummaryMessage,
-	createCompactionSummaryMessage,
-	createCustomMessage,
-} from "../../kernel/messages.ts";
-import type { CompactionEntry, SessionEntry } from "../../kernel/session/session-entries.ts";
+import type { SessionEntry } from "../../kernel/session/session-entries.ts";
+import { sessionContextItems } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { SelfCompactionView } from "../compaction/self-compaction-controller.ts";
 import {
@@ -15,6 +11,10 @@ import {
 	type TranscriptMemoryDiagnostics,
 } from "../context/memory-diagnostics.ts";
 import type { ContextGcReport } from "../context-gc.ts";
+import {
+	CONTINUOUS_CHAT_STATE_CUSTOM_TYPE,
+	CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE,
+} from "../memory/continuous-chat-projection.ts";
 import { boundedTextPreview } from "../text-preview.ts";
 import type { ToolDefinition, ToolInfo } from "./types.ts";
 
@@ -88,10 +88,10 @@ function messageLabel(message: AgentMessage): string {
 	return message.role;
 }
 
-function addRow(rows: AuditRow[], entry: SessionEntry, message: AgentMessage, kindOverride?: string) {
+function addRow(rows: AuditRow[], entry: SessionEntry, message: AgentMessage) {
 	const preview = messagePreview(message);
 	rows.push({
-		kind: kindOverride || entry.type,
+		kind: entry.type,
 		role: message.role,
 		entryId: entry.id,
 		timestamp: entry.timestamp,
@@ -102,71 +102,73 @@ function addRow(rows: AuditRow[], entry: SessionEntry, message: AgentMessage, ki
 	});
 }
 
-function messageFromEntry(entry: SessionEntry): AgentMessage | undefined {
-	if (entry.type === "message") return entry.message;
-	if (entry.type === "custom_message") {
-		return createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp);
-	}
-	if (entry.type === "branch_summary" && entry.summary) {
-		return createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp);
-	}
-	return undefined;
-}
-
-function latestCompaction(entries: SessionEntry[]): CompactionEntry | undefined {
-	for (let index = entries.length - 1; index >= 0; index--) {
-		const entry = entries[index];
-		if (entry?.type === "compaction") return entry;
-	}
-	return undefined;
-}
-
 type ActiveContextAudit = {
 	messages: AgentMessage[];
 	rows: AuditRow[];
 };
 
-function addActiveContextEntry(
-	audit: ActiveContextAudit,
-	entry: SessionEntry,
-	message: AgentMessage,
-	kindOverride?: string,
-): void {
-	audit.messages.push(message);
-	addRow(audit.rows, entry, message, kindOverride);
+/**
+ * What an ICM root's provider wire carries instead of the rebuilt session context: nothing while the chat is
+ * unavailable (every request is blocked, for `blockedReason`), no turn between turns (the next turn's request is rebuilt
+ * from the chat view), else the running turn's frame (chat view, live state) and the session entry its own messages
+ * begin at, or why that entry is not known.
+ */
+export type ContinuousChatAudit =
+	| { turn: undefined; blockedReason?: string }
+	| { turn: { turnId: number; frame: AgentMessage[]; start: { entryId: string } | { unresolved: string } } };
+
+function frameRow(message: AgentMessage): AuditRow {
+	const preview = messagePreview(message);
+	const label =
+		message.role === "custom" && message.customType === CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE
+			? "ICM chat view (frame)"
+			: message.role === "custom" && message.customType === CONTINUOUS_CHAT_STATE_CUSTOM_TYPE
+				? "ICM turn state (frame)"
+				: messageLabel(message);
+	return {
+		kind: "icm_frame",
+		role: message.role,
+		timestamp: new Date(message.timestamp).toISOString(),
+		tokens: estimateTokens(message),
+		chars: preview.length,
+		label,
+		preview: boundedTextPreview(preview),
+	};
 }
 
-export function collectActiveContextAudit(entries: SessionEntry[]): ActiveContextAudit {
+/**
+ * The rows an ICM turn's requests carry: the frame, then the rebuilt context from the turn's start entry on (a
+ * compaction summary there is one this turn applied). `messages` holds the turn's own messages, which context GC packs.
+ */
+function collectContinuousChatTurnAudit(
+	context: ActiveContextAudit,
+	turn: NonNullable<ContinuousChatAudit["turn"]>,
+): ActiveContextAudit & { note: string | undefined } {
+	const frameRows = turn.frame.map(frameRow);
+	if ("unresolved" in turn.start) return { messages: [], rows: frameRows, note: turn.start.unresolved };
+	const { entryId } = turn.start;
+	const startIndex = context.rows.findIndex((row) => row.entryId === entryId);
+	if (startIndex === -1) {
+		return {
+			messages: [],
+			rows: frameRows,
+			note: `the turn's start entry ${entryId} is not in the rebuilt session context`,
+		};
+	}
+	const turnRows = context.rows
+		.slice(startIndex)
+		.map((row) =>
+			row.role === "compactionSummary" ? { ...row, label: "compaction summary (applied by this turn)" } : row,
+		);
+	return { messages: context.messages.slice(startIndex), rows: [...frameRows, ...turnRows], note: undefined };
+}
+
+/** The rows of the context a rebuild of `branch` (root to leaf) holds, read from the session's own rebuild. */
+export function collectActiveContextAudit(branch: readonly SessionEntry[]): ActiveContextAudit {
 	const audit: ActiveContextAudit = { messages: [], rows: [] };
-	const compaction = latestCompaction(entries);
-	if (!compaction) {
-		for (const entry of entries) {
-			const message = messageFromEntry(entry);
-			if (message) addActiveContextEntry(audit, entry, message);
-		}
-		return audit;
-	}
-
-	const compactionMessage = createCompactionSummaryMessage(
-		compaction.summary,
-		compaction.tokensBefore,
-		compaction.timestamp,
-	);
-	addActiveContextEntry(audit, compaction, compactionMessage, "compaction");
-
-	const compactionIndex = entries.findIndex((entry) => entry.id === compaction.id);
-	let foundFirstKept = false;
-	for (let index = 0; index < compactionIndex; index++) {
-		const entry = entries[index];
-		if (entry.id === compaction.firstKeptEntryId) foundFirstKept = true;
-		if (!foundFirstKept) continue;
-		const message = messageFromEntry(entry);
-		if (message) addActiveContextEntry(audit, entry, message);
-	}
-	for (let index = compactionIndex + 1; index < entries.length; index++) {
-		const entry = entries[index];
-		const message = messageFromEntry(entry);
-		if (message) addActiveContextEntry(audit, entry, message);
+	for (const { entry, message } of sessionContextItems(branch)) {
+		audit.messages.push(message);
+		addRow(audit.rows, entry, message);
 	}
 	return audit;
 }
@@ -222,13 +224,14 @@ export function createCoreDiagnosticsToolDefinitions(
 		transcript: TranscriptMemoryDiagnostics;
 	},
 	getSelfCompactionView?: () => SelfCompactionView | undefined,
+	getContinuousChatAudit?: () => ContinuousChatAudit | undefined,
 ): ToolDefinition[] {
 	return [
 		{
 			name: "context_audit",
 			label: "Context Audit",
 			description:
-				"Audit the current provider-visible context composition: model window usage, system prompt estimate, active tool schema estimate, active session message rows, and heaviest context contributors.",
+				"Audit the current provider-visible context composition: model window usage, system prompt estimate, active tool schema estimate, active session message rows (under ICM: the chat view and turn-state frame plus the running turn's own rows), and heaviest context contributors.",
 			promptSnippet: "Audit provider-visible context before context optimization.",
 			promptGuidelines: [
 				"Use context_audit for context consumers, high footer percentage, loaded messages/tools/system text.",
@@ -261,8 +264,28 @@ export function createCoreDiagnosticsToolDefinitions(
 				const query = params.query?.trim().toLowerCase();
 
 				const branch = ctx.sessionManager.getBranch();
-				const { rows, messages: activeMessages } = collectActiveContextAudit(branch);
-				const contextGcReport = getContextGcReport?.(activeMessages);
+				const sessionContext = collectActiveContextAudit(branch);
+				// Under ICM no request carries the rebuilt session context: a turn's requests carry its frame and its own
+				// messages, and between turns nothing is sent until the next turn rebuilds from the chat view.
+				const continuousChat = getContinuousChatAudit?.();
+				const turnAudit =
+					continuousChat?.turn === undefined
+						? undefined
+						: collectContinuousChatTurnAudit(sessionContext, continuousChat.turn);
+				const { rows, messages: activeMessages } =
+					continuousChat === undefined ? sessionContext : (turnAudit ?? { rows: [], messages: [] });
+				const contextGcReport =
+					continuousChat !== undefined && turnAudit === undefined
+						? undefined
+						: getContextGcReport?.(activeMessages);
+				const rowScopeLine =
+					continuousChat === undefined
+						? undefined
+						: continuousChat.turn === undefined
+							? continuousChat.blockedReason !== undefined
+								? `ICM: the project chat is unavailable (${continuousChat.blockedReason}); every provider request is blocked until it recovers, and none carries session history`
+								: "ICM: no chat turn is running; the next turn's requests carry the chat view, its live state and that turn's own messages, never earlier session history"
+							: `ICM chat turn ${continuousChat.turn.turnId}: rows are the request frame (${continuousChat.turn.frame.length}) and the turn's own messages (${rows.length - continuousChat.turn.frame.length})${turnAudit?.note ? `; no turn rows: ${turnAudit.note}` : ""}`;
 				const memoryDiagnostics = getMemoryDiagnostics?.();
 				const selfCompaction = getSelfCompactionView?.();
 				const contextUsage = ctx.getContextUsage();
@@ -311,7 +334,10 @@ export function createCoreDiagnosticsToolDefinitions(
 				const lines = [
 					"Context audit",
 					usageText,
-					`active branch rows: ${rows.length}; session row estimate: ${rowTokenSum} tokens`,
+					rowScopeLine,
+					continuousChat === undefined
+						? `active branch rows: ${rows.length}; session row estimate: ${rowTokenSum} tokens`
+						: `ICM request rows: ${rows.length}; row estimate: ${rowTokenSum} tokens`,
 					contextGcReport
 						? `Context GC estimate: ${contextGcReport.savedTokens} tokens saved by packing ${contextGcReport.packedCount} stale row(s); effective session row estimate: ${effectiveRowTokenSum} tokens`
 						: undefined,
@@ -351,6 +377,17 @@ export function createCoreDiagnosticsToolDefinitions(
 						rowTokenSum,
 						effectiveRowTokenSum,
 						contextGc: contextGcReport,
+						continuousChat:
+							continuousChat === undefined
+								? undefined
+								: continuousChat.turn === undefined
+									? { running: false }
+									: {
+											running: true,
+											turnId: continuousChat.turn.turnId,
+											start: continuousChat.turn.start,
+											frameRows: continuousChat.turn.frame.length,
+										},
 						rows,
 						memory: memoryDiagnostics,
 						selfCompaction,

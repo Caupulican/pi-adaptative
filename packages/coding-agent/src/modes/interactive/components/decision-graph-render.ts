@@ -1,47 +1,50 @@
 /**
- * The Decision graph's two views, rendered from the model into plain rows the pane fits and tones.
- * List: the stages this task went through with accumulated timers, the next action, routing,
- * participants, evidence, checks and the goal verdict. Diagram: the task's own workflow drawn on the
- * cell grid — levels derived from the task, siblings spaced across the width, connectors composed
- * from the sibling counts, the clock on the current node only. Pure: no clock, no state.
+ * What the Decision graph's two views share: the rows contract they return, the System One tone, the
+ * labels and texts both draw from the model, and the levels the Diagram draws (composeDecisionDiagram).
+ * decision-graph-list.ts lays out and paints the List; decision-graph-scene.ts lays out and paints the
+ * Diagram. Pure: no clock, no state.
  */
 
-import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
 import { evaluationResultText } from "../../../core/system-one/semantic-evaluation-ledger.ts";
-import { type ThemeColor, theme } from "../../../presentation/theme-model.ts";
-import type { DecisionGraphModel, DecisionParticipant } from "./decision-graph-model.ts";
-import { CARRIER_GLYPH, carrierActiveUntil, carrierIndex } from "./flow-carrier.ts";
+import { formatCompactDuration } from "../../../core/util/format-duration.ts";
+import type { ThemeColor } from "../../../presentation/theme-model.ts";
+import {
+	type DecisionGraphModel,
+	type DecisionParticipant,
+	type DecisionPlanStepStatus,
+	goalClosure,
+} from "./decision-graph-model.ts";
 
 export interface DecisionGraphRows {
 	readonly rows: readonly string[];
 	/** `stageAt[i]` is the stage a click on row `i` expands, or undefined for a non-stage row. */
 	readonly stageAt: readonly (DecisionStage | undefined)[];
+	/**
+	 * The stage under one content cell, for views that lay nodes side by side (a row alone cannot say which).
+	 * Column is relative to the content's left edge; absent for views that are row-granular.
+	 */
+	readonly stageAtCell?: (column: number, row: number) => DecisionStage | undefined;
+	/**
+	 * The first `pinnedRows` rows (a header) stay at the top of the pane while the rest scroll beneath them.
+	 * `currentRow`, `stageAt` and `stageAtCell` rows still index the whole `rows` array.
+	 */
+	readonly pinnedRows?: number;
 	/** The row a following pane keeps in view: the current stage (List) or the current node (Diagram). */
 	readonly currentRow: number;
 	/** Semantic focus identity; row number alone is not stable across a reflow. */
 	readonly focusKey: string;
-	/** When a carrier is drawn: the moment it is no longer needed (Infinity while in flight). Absent: no motion. */
+	/** When a carrier is drawn: the moment it is no longer needed (always finite). Absent: no motion. */
 	readonly motionUntil?: number;
 }
 
-/** The loop moved from one stage to another at `at`: one carrier travels the spine between them. */
-export interface StageTransition {
-	readonly from: DecisionStage;
-	readonly to: DecisionStage;
-	readonly at: number;
-}
-
-/** The decider's tone: the label tone marks System One everywhere in the Workbench. */
+/**
+ * The decider's tone: the label tone marks System One everywhere in the Workbench. Only System One things
+ * wear it (the decider, its evaluations, judgments and doubts); executors it did not choose do not.
+ */
 export const SYSTEM_ONE_TONE: ThemeColor = "customMessageLabel";
-const TITLE_TONE: ThemeColor = "customMessageLabel";
 
-import { formatCompactDuration } from "../../../core/util/format-duration.ts";
-
-/** The graph's clock text; one formatter for the pane, the previews and the Team rows. */
-export const formatGraphDuration = formatCompactDuration;
-
-const STAGE_LABEL: Readonly<Record<DecisionStage, string>> = {
+export const STAGE_LABEL: Readonly<Record<DecisionStage, string>> = {
 	understand: "understand",
 	plan: "plan",
 	build: "build",
@@ -54,7 +57,7 @@ const STAGE_LABEL: Readonly<Record<DecisionStage, string>> = {
 	done: "done",
 };
 
-const PLAN_GLYPH: Readonly<Record<string, [string, ThemeColor]>> = {
+const PLAN_GLYPH: Readonly<Record<DecisionPlanStepStatus, readonly [string, ThemeColor]>> = {
 	done: ["✓", "success"],
 	active: ["›", "accent"],
 	pending: ["·", "dim"],
@@ -63,17 +66,10 @@ const PLAN_GLYPH: Readonly<Record<string, [string, ThemeColor]>> = {
 	cancelled: ["×", "dim"],
 };
 
-/** Left text and right-aligned meta on one row of `width` cells; the right yields first. */
-function metaLine(left: string, right: string, width: number): string {
-	const leftWidth = visibleWidth(left);
-	const rightWidth = visibleWidth(right);
-	if (right && leftWidth + 2 + rightWidth <= width)
-		return `${left}${" ".repeat(width - leftWidth - rightWidth)}${right}`;
-	return truncateToWidth(left, width, "…");
-}
-
-function participantText(participant: DecisionParticipant): string {
-	const head = participant.kind === "root" ? "root" : `${participant.kind} ${participant.label}`;
+export function participantText(participant: DecisionParticipant): string {
+	// The session's own model is on the status line; the session itself is just the agent.
+	if (participant.kind === "root") return "agent";
+	const head = `${participant.kind} ${participant.label}`;
 	return participant.model ? `${head} · ${participant.model}` : head;
 }
 
@@ -81,7 +77,64 @@ function queuedText(participant: DecisionParticipant): string {
 	return `queued${participant.waitReason ? ` · ${participant.waitReason}` : ""}`;
 }
 
-function plainTurnStatus(model: DecisionGraphModel): [string, ThemeColor] {
+export function formatLastEvaluation(model: DecisionGraphModel): string | undefined {
+	const last = model.decider.last;
+	if (!last) return undefined;
+	const result = evaluationResultText(last) ?? last.verdict ?? last.outcome;
+	return `${last.label} → ${result}`;
+}
+
+function distinctTask(participant: DecisionParticipant): string | undefined {
+	const task = participant.task?.trim();
+	if (!task) return undefined;
+	return task.toLowerCase() !== participant.label.trim().toLowerCase() ? task : undefined;
+}
+
+/** What an executor is doing, in one line. Route text names who chose the model; it is never System One's tone. */
+export function participantSubText(
+	participant: DecisionParticipant,
+	model: DecisionGraphModel,
+): { readonly text: string; readonly tone: ThemeColor } | undefined {
+	if (participant.queued) return { text: queuedText(participant), tone: "warning" };
+	const task = distinctTask(participant);
+	if (participant.running) {
+		const text = [
+			task,
+			participant.routeText,
+			participant.startedAt !== undefined ? formatCompactDuration(model.nowMs - participant.startedAt) : "",
+		]
+			.filter(Boolean)
+			.join(" · ");
+		if (!text) return undefined;
+		return { text, tone: "muted" };
+	}
+	if (participant.kind === "root") {
+		if (model.you.waiting) return { text: "waiting for you", tone: "dim" };
+		if (model.decider.evaluating) return { text: "waiting for System One", tone: "dim" };
+		if (model.idleText) return { text: model.idleText, tone: "dim" };
+		if (participant.routeText) return { text: participant.routeText, tone: "muted" };
+		return undefined;
+	}
+	if (participant.routeText) return { text: participant.routeText, tone: "dim" };
+	if (task) return { text: task, tone: "dim" };
+	return undefined;
+}
+
+export function stageLabel(stage: DecisionStage, model: DecisionGraphModel): string {
+	return stage === "plan" && model.plan.length > 0
+		? `${STAGE_LABEL.plan} (${planProgress(model)})`
+		: STAGE_LABEL[stage];
+}
+
+export function shouldShowPlainTurnStatus(model: DecisionGraphModel): boolean {
+	return (
+		(!model.turnRunning && (model.lastTurnOutcome === "failed" || model.lastTurnOutcome === "cancelled")) ||
+		model.peerFindings.length > 0 ||
+		model.unresolvedDoubtCount > 0
+	);
+}
+
+export function plainTurnStatus(model: DecisionGraphModel): [string, ThemeColor] {
 	const open = [
 		model.peerFindings.length
 			? `${model.peerFindings.length} peer finding${model.peerFindings.length === 1 ? "" : "s"}`
@@ -94,241 +147,39 @@ function plainTurnStatus(model: DecisionGraphModel): [string, ThemeColor] {
 	if (model.turnRunning) return [`turn running${suffix}`, "accent"];
 	if (model.lastTurnOutcome === "failed") return [`turn failed${suffix}`, "error"];
 	if (model.lastTurnOutcome === "cancelled") return [`turn cancelled${suffix}`, "dim"];
-	return [`turn finished${suffix}`, open ? SYSTEM_ONE_TONE : "success"];
+	// Peer findings are reviewers' findings; only an unresolved doubt is System One's own.
+	return [
+		`turn finished${suffix}`,
+		model.peerFindings.length > 0 ? "warning" : model.unresolvedDoubtCount > 0 ? SYSTEM_ONE_TONE : "success",
+	];
 }
 
-function planProgress(model: DecisionGraphModel): string {
+export function planProgress(model: DecisionGraphModel): string {
 	const done = model.plan.filter((step) => step.status === "done").length;
 	const total = model.plan.filter((step) => step.status !== "cancelled").length;
 	return `${done}/${total}`;
 }
 
-function planItems(model: DecisionGraphModel) {
-	return model.plan.map((step) => {
-		const [glyph, glyphTone] = PLAN_GLYPH[step.status] ?? PLAN_GLYPH.pending!;
-		return {
-			text: step.title,
-			glyph,
-			glyphTone,
-			tone: (step.status === "active" ? undefined : step.status === "done" ? "muted" : "dim") as
-				| ThemeColor
-				| undefined,
-		};
+export interface PlanItem {
+	readonly text: string;
+	readonly glyph: string;
+	readonly glyphTone: ThemeColor;
+	readonly tone: ThemeColor | undefined;
+}
+
+export function planItems(model: DecisionGraphModel): PlanItem[] {
+	return model.plan.map((step): PlanItem => {
+		const [glyph, glyphTone] = PLAN_GLYPH[step.status];
+		const tone: ThemeColor | undefined =
+			step.status === "active" ? undefined : step.status === "done" ? "muted" : "dim";
+		return { text: step.title, glyph, glyphTone, tone };
 	});
 }
 
-const NO_RUN_YET = "no run yet · the graph composes when work starts";
-
-/* ============================================================ List view */
-export function renderDecisionList(
-	model: DecisionGraphModel,
-	width: number,
-	selected?: DecisionStage,
-): DecisionGraphRows {
-	const rows: string[] = [];
-	const stageAt: (DecisionStage | undefined)[] = [];
-	let currentRow = 0;
-	const push = (row: string, stage?: DecisionStage, isCurrent = false): void => {
-		if (isCurrent) currentRow = rows.length;
-		rows.push(truncateToWidth(row, width, "…"));
-		stageAt.push(stage);
-	};
-	const head = (title: string, right: string, tone: ThemeColor = TITLE_TONE): void =>
-		push(metaLine(theme.fg(tone, title), right, width));
-	const item = (
-		glyph: string,
-		glyphTone: ThemeColor,
-		text: string,
-		tone: ThemeColor | undefined,
-		right = "",
-		stage?: DecisionStage,
-		isCurrent = false,
-	): void =>
-		push(
-			metaLine(`  ${theme.fg(glyphTone, glyph)} ${tone ? theme.fg(tone, text) : text}`, right, width),
-			stage,
-			isCurrent,
-		);
-	const arrow = (label = ""): void => push(theme.fg("dim", `  ↓${label ? `  ${label}` : ""}`));
-	const appendPeerFindings = (): void => {
-		if (!model.peerFindings.length) return;
-		head("PEER FINDINGS", theme.fg("warning", `${model.peerFindings.length} active`), "warning");
-		for (const finding of model.peerFindings) item("!", "warning", `${finding.reason} · ${finding.scope}`, "warning");
-	};
-	const now = model.nowMs;
-
-	if (model.stageLogEmpty) {
-		if (!model.plan.length) {
-			push(theme.fg("dim", "No task yet · the graph composes when work starts"));
-			appendPeerFindings();
-			return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
-		}
-		head("PLAN", theme.fg("muted", planProgress(model)));
-		for (const step of planItems(model)) item(step.glyph, step.glyphTone, step.text, step.tone);
-		push(theme.fg("dim", NO_RUN_YET));
-		appendPeerFindings();
-		return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
-	}
-
-	if (model.you.present) {
-		head(
-			"YOU",
-			model.you.waiting
-				? theme.fg(
-						"warning",
-						`? waiting ${model.you.waitingSinceMs !== undefined ? formatGraphDuration(now - model.you.waitingSinceMs) : ""}`.trimEnd(),
-					)
-				: theme.fg("dim", `asked ${model.you.asked} · answered ${model.you.answered}`),
-			model.you.waiting ? "warning" : TITLE_TONE,
-		);
-		push(theme.fg("dim", "  ↑  only when needed"));
-	}
-
-	const evaluating = model.decider.evaluating;
-	head(
-		"SYSTEM ONE",
-		evaluating
-			? theme.fg(SYSTEM_ONE_TONE, `◆ evaluating  ${formatGraphDuration(now - evaluating.startedAt)}`)
-			: theme.fg("dim", model.decider.doing),
-	);
-	if (evaluating) push(theme.fg(SYSTEM_ONE_TONE, `  ◆ ${evaluating.label}`));
-	else if (model.decider.last)
-		push(
-			theme.fg(
-				"dim",
-				`  last verdict: ${model.decider.last.label} → ${model.decider.last.verdict ?? model.decider.last.outcome}`,
-			),
-		);
-	if (model.decider.rootOwned) head("ROOT", theme.fg("dim", model.decider.rootDoing ?? ""));
-	for (const stage of model.stages) {
-		const shown = formatGraphDuration(stage.current ? stage.passMs : stage.totalMs);
-		const right = [
-			stage.current ? shown : theme.fg("muted", shown),
-			stage.passes > 1 ? theme.fg("dim", ` ×${stage.passes}`) : "",
-			stage.current ? theme.fg("accent", "  ← now") : "",
-		].join("");
-		item(
-			stage.current ? "●" : "✓",
-			"success",
-			stage.current ? `${STAGE_LABEL[stage.stage]} · loop ${stage.loop}` : STAGE_LABEL[stage.stage],
-			stage.current ? undefined : "muted",
-			right,
-			stage.stage,
-			stage.current,
-		);
-		if (selected === stage.stage) {
-			if (stage.note) push(theme.fg("muted", `      ${stage.note}`), stage.stage);
-			if (stage.reasonCode) push(theme.fg("dim", `      reason: ${stage.reasonCode}`), stage.stage);
-			for (const event of stage.events) {
-				const tone: ThemeColor =
-					event.severity === "failure" ? "error" : event.severity === "warning" ? "warning" : "muted";
-				push(theme.fg(tone, `      · ${event.title}`), stage.stage);
-			}
-			if (stage.current && evaluating) push(theme.fg(SYSTEM_ONE_TONE, `      ◆ ${evaluating.label}`), stage.stage);
-		}
-	}
-	if (model.next && model.goal.branch !== "delivered") item("·", "dim", `next → ${model.next}`, "dim");
-	arrow();
-
-	head(
-		`ROUTER · H-MoE${model.participants.some((p) => p.kind === "capability") ? " · CAPABILITY" : ""}`,
-		model.routing.length ? "" : theme.fg("dim", "no routed choice"),
-	);
-	for (const choice of model.routing) push(theme.fg(choice.live ? SYSTEM_ONE_TONE : "dim", `  · ${choice.text}`));
-	for (const capability of model.participants.filter((p) => p.kind === "capability"))
-		push(
-			theme.fg(
-				capability.running ? SYSTEM_ONE_TONE : "muted",
-				`  ◇ capability ${capability.label} · ${capability.task ?? "active"}`,
-			),
-		);
-	arrow();
-
-	head("EXECUTORS", "");
-	for (const participant of model.participants.filter((p) => p.kind !== "capability")) {
-		const right = participant.running
-			? `${theme.fg("muted", participant.task ?? "")}${participant.startedAt !== undefined ? theme.fg("muted", ` ${formatGraphDuration(now - participant.startedAt)}`) : ""}`
-			: participant.queued
-				? theme.fg("warning", queuedText(participant))
-				: theme.fg(
-						"dim",
-						participant.kind === "root"
-							? model.you.waiting
-								? "waiting for you"
-								: evaluating
-									? "waiting for System One"
-									: (model.idleText ?? "")
-							: (participant.task ?? ""),
-					);
-		item(
-			participant.running ? "●" : participant.queued ? "◌" : "○",
-			participant.running ? "success" : participant.queued ? "warning" : "dim",
-			participantText(participant),
-			participant.running ? (participant.kind === "root" ? undefined : SYSTEM_ONE_TONE) : "muted",
-			right,
-		);
-	}
-	arrow();
-
-	head(
-		"EVIDENCE",
-		theme.fg(
-			model.evidence.failures ? "warning" : "muted",
-			model.evidence.actions
-				? `${model.evidence.actions} actions · ${model.evidence.fileEffects} file effects${model.evidence.failures ? ` · ${model.evidence.failures} failure` : ""}`
-				: "none yet",
-		),
-	);
-	if (model.checks.length) {
-		const ok = model.checks.filter((check) => check.status === "satisfied").length;
-		head("CHECKS", theme.fg(ok === model.checks.length ? "success" : "muted", `${ok}/${model.checks.length}`));
-		for (const check of model.checks) {
-			const [glyph, tone]: [string, ThemeColor] =
-				check.status === "satisfied" ? ["✓", "success"] : check.status === "failed" ? ["✗", "error"] : ["·", "dim"];
-			item(glyph, tone, check.text, check.status === "pending" ? "dim" : "muted");
-		}
-	}
-	appendPeerFindings();
-	if (!model.goal.present) {
-		arrow();
-		const [status, tone] = plainTurnStatus(model);
-		head(status, "", tone);
-		return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
-	}
-	arrow("back to System One");
-	const openChecks = model.checks.filter((check) => check.status !== "satisfied").length;
-	const doubts = model.unresolvedDoubtCount;
-	const openNote = [
-		openChecks > 0 ? `${openChecks} checks` : "",
-		model.peerFindings.length > 0
-			? `${model.peerFindings.length} mandatory peer finding${model.peerFindings.length === 1 ? "" : "s"}`
-			: "",
-		doubts > 0 ? `${doubts} ${doubts === 1 ? "doubt" : "doubts"}` : "",
-	]
-		.filter(Boolean)
-		.join(" · ");
-	// A doubt keeps the goal open exactly like an unmet check: neither is a failure, and neither is
-	// a yes. Only a clean run with nothing open and nothing unsettled reaches "yes".
-	const verdict: [string, ThemeColor] =
-		model.goal.branch === "delivered" && !openNote
-			? ["yes → delivered", "success"]
-			: model.goal.branch === "deliver" && !openNote
-				? ["yes → deliver", "success"]
-				: openNote
-					? [`not closed · ${openNote}`, doubts > 0 ? SYSTEM_ONE_TONE : "dim"]
-					: model.blocked
-						? [`blocked → replan`, "warning"]
-						: model.goal.branch === "repair"
-							? [`no → repair (loop ${model.loop})`, "warning"]
-							: model.goal.branch === "clarify"
-								? ["not yet → ask you", "warning"]
-								: ["not closed", "dim"];
-	head("goal satisfied?", theme.fg(verdict[1], verdict[0]));
-	return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
-}
+export const NO_RUN_YET = "no run yet · the graph composes when work starts";
 
 /* ============================================================ Diagram view */
-interface DiagramNode {
+export interface DiagramNode {
 	readonly text: string;
 	/** The running clock, kept whole while the label shortens. */
 	readonly clock?: string;
@@ -340,7 +191,7 @@ interface DiagramNode {
 	readonly stage?: DecisionStage;
 }
 
-type DiagramLevel =
+export type DiagramLevel =
 	| { readonly kind: "you"; readonly node: DiagramNode; readonly note: string; readonly noteTone: ThemeColor }
 	| {
 			readonly kind: "box";
@@ -371,32 +222,16 @@ type DiagramLevel =
 	  }
 	| { readonly kind: "next"; readonly text: string };
 
-function graphFocusKey(model: DecisionGraphModel): string {
-	const evaluating = model.decider.evaluating?.label ?? "";
-	const evalId = model.decider.last?.evaluationId ?? "";
-	const evalCount = model.decider.evaluations;
-	const open = model.checks.filter((check) => check.status !== "satisfied").length;
-	const peerFindings = model.peerFindings.map((finding) => finding.id).join(",");
-	const activeParticipants = model.participants
-		.filter((p) => p.running)
-		.map((p) => `${p.id}:${p.acted}`)
-		.join(",");
-	const proof = `${model.evidence.actions}:${model.evidence.fileEffects}:${model.evidence.failures}`;
-	return `obj:${model.objectiveId}/stage:${model.current?.stage ?? "idle"}/loop:${model.current?.loop ?? model.loop}/branch:${model.goal.branch}/eval:${evaluating}:${evalId}:${evalCount}/proof:${proof}/parts:${activeParticipants}/open:${open}/peer:${peerFindings}/doubts:${model.unresolvedDoubtCount}/next:${model.next ?? ""}`;
+/**
+ * The semantic focus of a view: the objective, the stage the loop is in, which loop, and the goal branch.
+ * A pane re-centres only when this changes; receipts, evaluations and participants moving do not.
+ */
+export function graphFocusKey(model: DecisionGraphModel): string {
+	return `obj:${model.objectiveId}/stage:${model.current?.stage ?? "idle"}/loop:${model.current?.loop ?? model.loop}/branch:${model.goal.branch}`;
 }
 
-function goalYesNode(
-	model: DecisionGraphModel,
-	currentStage: DecisionStage | undefined,
-): DiagramNode & { readonly lit: boolean } {
-	const pending = model.checks.filter((check) => check.status !== "satisfied").length;
-	const doubts = model.unresolvedDoubtCount;
-	const peerFindings = model.peerFindings.length;
-	// Deterministic checks, mandatory peer findings, and advisory doubts remain distinct in the view;
-	// each independently keeps the goal open until its owning lifecycle resolves it.
-	const open = pending + peerFindings + doubts;
-	const delivered = model.goal.branch === "delivered" && open === 0;
-	const delivering = (model.goal.branch === "deliver" || currentStage === "deliver") && open === 0;
+function goalYesNode(model: DecisionGraphModel): DiagramNode & { readonly lit: boolean } {
+	const { delivered, delivering } = goalClosure(model);
 	if (delivered || delivering) {
 		return {
 			text: delivered ? "delivered" : "DELIVER",
@@ -406,16 +241,9 @@ function goalYesNode(
 			lit: true,
 		};
 	}
-	const note = [
-		pending > 0 ? `${pending} checks` : "",
-		peerFindings > 0 ? `${peerFindings} peer findings` : "",
-		doubts > 0 ? `${doubts} unsure` : "",
-	]
-		.filter(Boolean)
-		.join(" · ");
 	return {
-		text: note ? `not closed · ${note}` : "not closed",
-		tone: doubts > 0 ? SYSTEM_ONE_TONE : "dim",
+		text: "not closed",
+		tone: model.unresolvedDoubtCount > 0 ? SYSTEM_ONE_TONE : "dim",
 		stage: "deliver",
 		lit: false,
 	};
@@ -429,7 +257,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	const evaluating = model.decider.evaluating;
 	const levels: DiagramLevel[] = [];
 	if (model.stageLogEmpty) {
-		const levels: DiagramLevel[] = model.plan.length
+		const quiet: DiagramLevel[] = model.plan.length
 			? [
 					{ kind: "tree", title: `plan ${planProgress(model)}`, items: planItems(model) },
 					{ kind: "level", nodes: [{ text: NO_RUN_YET, tone: "dim" }] },
@@ -447,8 +275,8 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			statuses.push({ text: `PEER FINDINGS ${model.peerFindings.length} active`, tone: "warning" });
 		if (model.unresolvedDoubtCount)
 			statuses.push({ text: `ADVISORY DOUBTS ${model.unresolvedDoubtCount}`, tone: SYSTEM_ONE_TONE });
-		if (statuses.length) levels.push({ kind: "level", nodes: statuses });
-		return levels;
+		if (statuses.length) quiet.push({ kind: "level", nodes: statuses });
+		return quiet;
 	}
 
 	if (model.you.present) {
@@ -459,6 +287,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 				text: "YOU",
 				tone: isCur ? "warning" : undefined,
 				bold: isCur,
+				current: isCur,
 				stage: "clarify",
 			},
 			note: isCur ? "waiting for your answer" : `asked ${model.you.asked} · answered ${model.you.answered}`,
@@ -468,20 +297,24 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	const s1Stages: readonly (DecisionStage | undefined)[] = ["understand", "plan", "observe"];
 	const rootOwned = model.decider.rootOwned;
 	const s1cur = !rootOwned && s1Stages.includes(currentStage) && !evaluating;
+	const lastEvaluation = formatLastEvaluation(model);
 	levels.push({
 		kind: "box",
 		node: {
 			text: "SYSTEM ONE",
 			tone: s1cur ? "accent" : rootOwned ? "dim" : undefined,
 			bold: s1cur,
+			current: s1cur || Boolean(evaluating),
 			stage: !rootOwned && currentStage && s1Stages.includes(currentStage) ? currentStage : undefined,
 		},
 		sub: evaluating
-			? `◆ ${evaluating.label}  ${formatGraphDuration(now - evaluating.startedAt)}`
-			: rootOwned
-				? `${model.decider.doing} · root decides`
-				: model.decider.doing,
-		subTone: evaluating ? SYSTEM_ONE_TONE : rootOwned ? "dim" : "muted",
+			? `◆ ${evaluating.label}  ${formatCompactDuration(now - evaluating.startedAt)}`
+			: lastEvaluation
+				? `◇ ${lastEvaluation}${model.decider.evaluations > 1 ? ` (${model.decider.evaluations})` : ""}`
+				: rootOwned
+					? `${model.decider.doing} · root decides`
+					: model.decider.doing,
+		subTone: evaluating ? SYSTEM_ONE_TONE : lastEvaluation ? "muted" : rootOwned ? "dim" : "muted",
 		boxTone: s1cur || evaluating ? SYSTEM_ONE_TONE : "muted",
 	});
 	if (model.stages.length) {
@@ -489,18 +322,18 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			kind: "tree",
 			title: `${model.loop > 1 ? "↺ " : ""}loop ${model.loop}`,
 			items: model.stages.map((stage) => ({
-				text: STAGE_LABEL[stage.stage],
+				text: stageLabel(stage.stage, model),
 				glyph: stage.current ? "●" : "✓",
 				glyphTone: stage.current ? "accent" : "success",
 				tone: stage.current ? undefined : "muted",
 				stage: stage.stage,
 				current: stage.current,
-				...(stage.current && stage.stage !== "done" ? { clock: `  ${formatGraphDuration(stage.passMs)}` } : {}),
+				...(stage.current && stage.stage !== "done" ? { clock: `  ${formatCompactDuration(stage.passMs)}` } : {}),
 			})),
 		});
 	}
-	if (model.plan.length) levels.push({ kind: "tree", title: `plan ${planProgress(model)}`, items: planItems(model) });
 	const executors: DiagramNode[] = model.participants.map((participant) => {
+		const sub = participantSubText(participant, model);
 		return {
 			text: participantText(participant),
 			tone: participant.running
@@ -511,30 +344,19 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 					? undefined
 					: "dim",
 			bold: participant.running,
+			current: participant.running,
 			stage: participant.kind === "root" ? "build" : participant.kind === "capability" ? undefined : "dispatch",
-			...(participant.queued
-				? { sub: queuedText(participant), subTone: "warning" as ThemeColor }
-				: participant.routeText
-					? { sub: participant.routeText, subTone: SYSTEM_ONE_TONE as ThemeColor }
-					: participant.running && participant.task
-						? {
-								sub: `${participant.task}${participant.startedAt !== undefined ? ` ${formatGraphDuration(now - participant.startedAt)}` : ""}`,
-								subTone: "muted" as ThemeColor,
-							}
-						: participant.kind === "root" && !participant.running && model.idleText
-							? { sub: model.idleText, subTone: "dim" as ThemeColor }
-							: {}),
+			...(sub ? { sub: sub.text, subTone: sub.tone } : {}),
 		};
 	});
 	levels.push({ kind: "level", nodes: executors });
-	const evidenceNodes: DiagramNode[] = [
-		{
-			text: model.evidence.actions
-				? `EVIDENCE ${model.evidence.actions} actions · ${model.evidence.fileEffects} effects`
-				: "EVIDENCE none yet",
-			tone: model.evidence.actions ? undefined : "dim",
-		},
-	];
+	const evidenceNodes: DiagramNode[] = [];
+	if (model.evidence.actions > 0 || model.evidence.fileEffects > 0 || model.evidence.failures > 0) {
+		evidenceNodes.push({
+			text: `EVIDENCE ${model.evidence.actions} actions · ${model.evidence.fileEffects} effects`,
+			tone: model.evidence.failures ? "warning" : undefined,
+		});
+	}
 	if (model.checks.length) {
 		const ok = model.checks.filter((check) => check.status === "satisfied").length;
 		const failing = model.checks.some((check) => check.status === "failed");
@@ -546,45 +368,39 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			stage: "verify",
 		});
 	}
-	if (model.peerFindings.length)
+	if (model.peerFindings.length) {
 		evidenceNodes.push({
 			text: `PEER FINDINGS ${model.peerFindings.length} active`,
 			tone: "warning",
 		});
-	levels.push({ kind: "level", nodes: evidenceNodes });
-	if (!evaluating && model.decider.evaluations) {
-		const last = model.decider.last;
-		levels.push({
-			kind: "level",
-			nodes: [
-				{
-					text: `◆ System One · ${model.decider.evaluations} evaluation${model.decider.evaluations > 1 ? "s" : ""}${
-						last
-							? ` · last ${last.label}${evaluationResultText(last) ? ` → ${evaluationResultText(last)}` : ""}`
-							: ""
-					}`,
-					tone: SYSTEM_ONE_TONE,
-				},
-			],
+	}
+	if (model.unresolvedDoubtCount > 0) {
+		evidenceNodes.push({
+			text: `DOUBTS ${model.unresolvedDoubtCount}`,
+			tone: SYSTEM_ONE_TONE,
 		});
 	}
+	if (evidenceNodes.length > 0) levels.push({ kind: "level", nodes: evidenceNodes });
 	if (model.blocked)
 		levels.push({ kind: "level", nodes: [{ text: `BLOCKED · ${model.blocked}`, tone: "warning", bold: true }] });
 	// A request without an objective has no goal to satisfy: it ends when its turn does.
 	if (!model.goal.present) {
-		const [text, tone] = plainTurnStatus(model);
-		levels.push({ kind: "level", nodes: [{ text, tone }] });
+		if (shouldShowPlainTurnStatus(model)) {
+			const [text, tone] = plainTurnStatus(model);
+			levels.push({ kind: "level", nodes: [{ text, tone }] });
+		}
 		return levels;
 	}
 	const repairTaken = model.stages.some((row) => row.stage === "repair");
 	const branch: DiagramLevel = {
 		kind: "branch",
 		question: {
-			text: `goal satisfied?${evaluating && /^(verify|completion)/.test(evaluating.label) ? `  ◆ ${formatGraphDuration(now - evaluating.startedAt)}` : ""}`,
+			text: "goal satisfied?",
 			tone: evaluating ? SYSTEM_ONE_TONE : model.decider.last ? undefined : "dim",
 			bold: Boolean(evaluating),
+			current: Boolean(evaluating),
 		},
-		yes: goalYesNode(model, currentStage),
+		yes: goalYesNode(model),
 		...(repairTaken || model.blocked
 			? {
 					no: {
@@ -592,7 +408,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 						tone: currentStage === "repair" ? "warning" : "muted",
 						bold: currentStage === "repair",
 						stage: "repair",
-						...(model.loop > 1 ? { loop: `↺ loop ${model.loop} → SYSTEM ONE` } : {}),
+						...(model.loop > 1 ? { loop: "↺ → SYSTEM ONE" } : {}),
 					},
 				}
 			: {}),
@@ -600,338 +416,4 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	levels.push(branch);
 	if (model.next && model.goal.branch !== "delivered") levels.push({ kind: "next", text: `next → ${model.next}` });
 	return levels;
-}
-
-interface Part {
-	readonly col: number;
-	readonly text: string;
-	readonly tone?: ThemeColor;
-	readonly bold?: boolean;
-}
-
-export function renderDecisionDiagram(
-	model: DecisionGraphModel,
-	width: number,
-	transition?: StageTransition,
-): DecisionGraphRows {
-	const levels = composeDecisionDiagram(model);
-	const rows: string[] = [];
-	const partsAt: Part[][] = [];
-	/** The stage rows of the spine, in order: where each stage's glyph sits, for the transition carrier. */
-	const spine: { readonly stage: DecisionStage; readonly row: number }[] = [];
-	const stageAt: (DecisionStage | undefined)[] = [];
-	let currentRow = 0;
-	const inner = Math.max(20, width - 2);
-	const pad = 1;
-	const C = pad + Math.floor(inner / 2);
-	const paint = (part: Part): string => {
-		let text = part.text;
-		if (part.tone) text = theme.fg(part.tone, text);
-		if (part.bold) text = theme.bold(text);
-		return text;
-	};
-	const place = (parts: Part[]): string => {
-		let out = "";
-		let pos = 0;
-		for (const part of [...parts].sort((a, b) => a.col - b.col)) {
-			if (part.col > pos) {
-				out += " ".repeat(part.col - pos);
-				pos = part.col;
-			}
-			const room = Math.max(0, width - pos);
-			const text = truncateToWidth(part.text, room, "…");
-			out += paint({ ...part, text });
-			pos += visibleWidth(text);
-		}
-		return out;
-	};
-	const push = (parts: Part[], stage?: DecisionStage, isCurrent = false): void => {
-		if (isCurrent) currentRow = rows.length;
-		partsAt.push(parts);
-		rows.push(place(parts));
-		stageAt.push(stage);
-	};
-	const centered = (text: string, col: number, maxWidth: number, tone?: ThemeColor, bold?: boolean): Part => {
-		const shown = truncateToWidth(text, maxWidth, "…");
-		return {
-			col: Math.max(pad, col - Math.floor(visibleWidth(shown) / 2)),
-			text: shown,
-			...(tone ? { tone } : {}),
-			...(bold ? { bold } : {}),
-		};
-	};
-	/** The node's label shortened to fit beside its clock; the clock is never cut. */
-	const nodeText = (node: DiagramNode, maxWidth: number): string => {
-		let clockText = node.clock ?? "";
-		// The time survives any width; the loop number is the first thing a narrow column gives up.
-		if (clockText && visibleWidth(clockText) + 2 > maxWidth) clockText = clockText.replace(/ · loop \d+$/, "");
-		const room = Math.max(1, maxWidth - visibleWidth(clockText));
-		return `${truncateToWidth(node.text, room, "…")}${clockText}`;
-	};
-	const centersFor = (count: number): number[] =>
-		Array.from({ length: count }, (_, index) => pad + Math.floor(((index + 0.5) * inner) / count));
-	const slot = (count: number): number => Math.floor(inner / count) - 2;
-	/** Below this slot width a label cannot sit beside its clock, so the level stacks instead. */
-	const MIN_SLOT = 10;
-	const connector = (fromCount: number, toCount: number): void => {
-		const tone: ThemeColor = "muted";
-		// Nothing above: the first level has no edge to draw.
-		if (fromCount === 0 && toCount <= 1) return;
-		if (fromCount <= 1 && toCount <= 1) {
-			push([{ col: C, text: "↓", tone }]);
-			return;
-		}
-		if (fromCount > 1) {
-			const centers = centersFor(fromCount);
-			const left = centers[0]!;
-			const right = centers[centers.length - 1]!;
-			const cells = Array.from({ length: right - left + 1 }, () => "─");
-			for (const center of centers) cells[center - left] = center === left ? "└" : center === right ? "┘" : "┴";
-			if (C > left && C < right) cells[C - left] = centers.includes(C) ? "┼" : "┬";
-			push([{ col: left, text: cells.join(""), tone }]);
-		}
-		if (toCount > 1) {
-			const centers = centersFor(toCount);
-			const left = centers[0]!;
-			const right = centers[centers.length - 1]!;
-			const cells = Array.from({ length: right - left + 1 }, () => "─");
-			for (const center of centers) cells[center - left] = center === left ? "┌" : center === right ? "┐" : "┬";
-			if (C > left && C < right) cells[C - left] = centers.includes(C) ? "┼" : "┴";
-			push([{ col: left, text: cells.join(""), tone }]);
-			push(centers.map((center) => ({ col: center, text: "↓", tone })));
-		} else push([{ col: C, text: "↓", tone }]);
-	};
-
-	let previousCount = 0;
-	for (const level of levels) {
-		switch (level.kind) {
-			case "you": {
-				push(
-					[centered(nodeText(level.node, inner), C, inner, level.node.tone, level.node.bold)],
-					level.node.stage,
-					level.node.current,
-				);
-				push([{ col: C, text: "↑", tone: level.node.current ? "warning" : "muted" }]);
-				push([centered(level.note, C, inner, level.noteTone)]);
-				push([{ col: C, text: "│", tone: "muted" }]);
-				previousCount = 1;
-				break;
-			}
-			case "box": {
-				const text = nodeText(level.node, inner - 4);
-				const boxWidth = Math.max(
-					visibleWidth(text) + 4,
-					visibleWidth(truncateToWidth(level.sub, inner - 4, "…")) + 4,
-				);
-				const left = Math.max(pad, C - Math.floor(boxWidth / 2));
-				const edge = (glyph: string): Part => ({ col: left, text: glyph, tone: level.boxTone });
-				push([{ col: left, text: `┌${"─".repeat(boxWidth - 2)}┐`, tone: level.boxTone }]);
-				push(
-					[
-						edge("│"),
-						centered(text, left + Math.floor(boxWidth / 2), boxWidth - 2, level.node.tone, level.node.bold),
-						{ col: left + boxWidth - 1, text: "│", tone: level.boxTone },
-					],
-					level.node.stage,
-					level.node.current,
-				);
-				push([
-					edge("│"),
-					centered(
-						level.sub,
-						left + Math.floor(boxWidth / 2),
-						boxWidth - 2,
-						level.subTone,
-						level.subTone === SYSTEM_ONE_TONE,
-					),
-					{ col: left + boxWidth - 1, text: "│", tone: level.boxTone },
-				]);
-				push([{ col: left, text: `└${"─".repeat(boxWidth - 2)}┘`, tone: level.boxTone }]);
-				previousCount = 1;
-				break;
-			}
-			case "tree": {
-				push([{ col: C, text: "│", tone: "muted" }]);
-				const leftCol = Math.max(pad, C - Math.min(12, Math.floor(inner / 4)));
-				push([
-					{ col: leftCol, text: truncateToWidth(level.title, Math.max(1, C - leftCol - 1), "…"), tone: "muted" },
-					{ col: C, text: "│", tone: "muted" },
-				]);
-				level.items.forEach((item, index) => {
-					const last = index === level.items.length - 1;
-					if (item.stage !== undefined) spine.push({ stage: item.stage, row: rows.length });
-					const clockText = item.clock ?? "";
-					const room = Math.max(1, pad + inner - (C + 5));
-					const label = `${truncateToWidth(item.text, Math.max(1, room - visibleWidth(clockText)), "…")}${clockText}`;
-					push(
-						[
-							{ col: C, text: last ? "└─ " : "├─ ", tone: "muted" },
-							{ col: C + 3, text: item.glyph, tone: item.glyphTone },
-							{
-								col: C + 5,
-								text: label,
-								...(item.tone ? { tone: item.tone } : {}),
-							},
-						],
-						item.stage,
-						Boolean(item.current),
-					);
-				});
-				previousCount = 1;
-				break;
-			}
-			case "level": {
-				const count = level.nodes.length;
-				const slotWidth = slot(count);
-				if (count > 1 && slotWidth < MIN_SLOT) {
-					// Too narrow for siblings side by side: the level reflows into a stack on the spine,
-					// one node per row, so labels stay readable and no edge is broken.
-					connector(previousCount, 1);
-					const textCol = C + 3;
-					const room = Math.max(1, pad + inner - textCol);
-					// The row the pane follows is the node carrying the clock, else the first current one.
-					const clockIndex = level.nodes.findIndex((node) => node.clock);
-					const currentIndex = clockIndex >= 0 ? clockIndex : level.nodes.findIndex((node) => node.current);
-					level.nodes.forEach((node, index) => {
-						const last = index === level.nodes.length - 1;
-						push(
-							[
-								{ col: C, text: last ? "└─ " : "├─ ", tone: "muted" },
-								{
-									col: textCol,
-									text: nodeText(node, room),
-									...(node.tone ? { tone: node.tone } : {}),
-									...(node.bold ? { bold: node.bold } : {}),
-								},
-							],
-							node.stage,
-							index === currentIndex,
-						);
-						if (node.sub)
-							push([
-								...(last ? [] : [{ col: C, text: "│", tone: "muted" as ThemeColor }]),
-								{
-									col: textCol + 2,
-									text: truncateToWidth(node.sub, Math.max(1, room - 2), "…"),
-									tone: node.subTone ?? "muted",
-								},
-							]);
-					});
-					previousCount = 1;
-					break;
-				}
-				connector(previousCount, count);
-				const centers = centersFor(count);
-				push(
-					level.nodes.map((node, index) =>
-						centered(nodeText(node, slotWidth), centers[index]!, slotWidth, node.tone, node.bold),
-					),
-					level.nodes.find((node) => node.current)?.stage,
-					level.nodes.some((node) => node.current),
-				);
-				if (level.nodes.some((node) => node.sub))
-					push(
-						level.nodes.flatMap((node, index) =>
-							node.sub ? [centered(node.sub, centers[index]!, slotWidth, node.subTone ?? "muted")] : [],
-						),
-					);
-				previousCount = count;
-				break;
-			}
-			case "branch": {
-				connector(previousCount, 1);
-				push(
-					[centered(nodeText(level.question, inner), C, inner, level.question.tone, level.question.bold)],
-					"verify",
-					level.question.current,
-				);
-				if (level.no === undefined) {
-					push([{ col: C, text: "↓", tone: level.yes.lit ? "muted" : "dim" }]);
-					push(
-						[centered(nodeText(level.yes, inner), C, inner, level.yes.tone, level.yes.bold)],
-						level.yes.stage,
-						false,
-					);
-					previousCount = 1;
-					break;
-				}
-				const hasNo = true;
-				const leftEnd = (text: string, tone?: ThemeColor, bold?: boolean): Part => ({
-					col: Math.max(pad, C - 4 - visibleWidth(text)),
-					text,
-					...(tone ? { tone } : {}),
-					...(bold ? { bold } : {}),
-				});
-				const rightStart = (text: string, tone?: ThemeColor, bold?: boolean): Part => ({
-					col: C + 4,
-					text: truncateToWidth(text, Math.max(1, pad + inner - (C + 4)), "…"),
-					...(tone ? { tone } : {}),
-					...(bold ? { bold } : {}),
-				});
-				push([
-					{ col: C - 6, text: "/", tone: level.yes.lit ? "muted" : "dim" },
-					...(hasNo ? [{ col: C + 6, text: "\\", tone: "muted" as ThemeColor }] : []),
-				]);
-				push([
-					leftEnd("yes", level.yes.lit ? "muted" : "dim"),
-					...(hasNo ? [rightStart("no", level.no?.current ? "warning" : "muted")] : []),
-				]);
-				push([leftEnd("↓", level.yes.lit ? "muted" : "dim"), ...(hasNo ? [rightStart("↓", "muted")] : [])]);
-				push(
-					[
-						leftEnd(nodeText(level.yes, Math.max(1, C - 4 - pad)), level.yes.tone, level.yes.bold),
-						...(hasNo && level.no
-							? [
-									rightStart(
-										nodeText(level.no, Math.max(1, pad + inner - (C + 4))),
-										level.no.tone,
-										level.no.bold,
-									),
-								]
-							: []),
-					],
-					level.no?.current ? "repair" : level.yes.current ? "deliver" : undefined,
-					Boolean(level.yes.current || level.no?.current),
-				);
-				if (level.no?.loop) push([rightStart(level.no.loop, level.no.current ? "warning" : "muted")]);
-				previousCount = 1;
-				break;
-			}
-			case "next": {
-				push([{ col: C, text: "╎", tone: "dim" }]);
-				push([centered(level.text, C, inner, "dim")]);
-				previousCount = 1;
-				break;
-			}
-		}
-	}
-	// One carrier travels the spine's stage glyphs from the stage the loop left to the one it entered.
-	let motionUntil: number | undefined;
-	if (transition) {
-		const from = spine.findIndex((entry) => entry.stage === transition.from);
-		const to = spine.findIndex((entry) => entry.stage === transition.to);
-		if (from !== -1 && to !== -1 && from !== to) {
-			const path = from < to ? spine.slice(from, to + 1) : spine.slice(to, from + 1).reverse();
-			const timing = { startedAt: transition.at, endedAt: transition.at };
-			const step = carrierIndex(path.length, timing, model.nowMs);
-			const hop = step === undefined ? undefined : path[step];
-			if (hop) {
-				rows[hop.row] = place(
-					partsAt[hop.row]!.map((part) =>
-						part.col === C + 3
-							? { ...part, text: CARRIER_GLYPH, tone: "accent" as ThemeColor, bold: true }
-							: part,
-					),
-				);
-			}
-			motionUntil = carrierActiveUntil(timing, model.nowMs);
-		}
-	}
-	return {
-		rows,
-		stageAt,
-		currentRow,
-		focusKey: graphFocusKey(model),
-		...(motionUntil !== undefined ? { motionUntil } : {}),
-	};
 }

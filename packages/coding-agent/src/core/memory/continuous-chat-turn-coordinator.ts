@@ -10,6 +10,21 @@ import type { ContinuousChatRuntime, ContinuousChatTurnBoundary } from "./contin
 
 export type IcmTurnPhase = "idle" | "awaitingPrefix" | "running" | "stopping";
 
+/**
+ * The entry a checkpoint kept verbatim directly before its summary: the turn's start. A rebuild re-materializes a custom
+ * message as a new object, so the planned message is recognized by the entry it came from, never by object identity.
+ */
+export interface IcmTurnRetainedStart {
+	readonly entryId: string;
+	matches(message: AgentMessage): boolean;
+}
+
+/** A host compaction this turn applied to its own messages, and the start entry that checkpoint kept before its summary. */
+export interface IcmTurnCompaction {
+	readonly entryId: string;
+	readonly retainedStart: IcmTurnRetainedStart | undefined;
+}
+
 export interface IcmTurnHandle {
 	readonly turnId: number;
 	readonly boundary: ContinuousChatTurnBoundary;
@@ -17,6 +32,15 @@ export interface IcmTurnHandle {
 	/** `alreadyLogged` documents whether the start already exists in the log. */
 	markStart(firstMessage: AgentMessage, alreadyLogged?: boolean): void;
 	readonly startMessage: AgentMessage | undefined;
+	/**
+	 * Records a host compaction scoped to this turn. From then on the turn's messages begin at that checkpoint's
+	 * summary (or the start entry it kept before the summary), not at the start message it summarized.
+	 */
+	noteCompaction(entryId: string, retainedStart: IcmTurnRetainedStart | undefined): void;
+	/** The latest compaction this turn applied, if any. */
+	readonly latestCompaction: IcmTurnCompaction | undefined;
+	/** Every compaction entry id this turn applied: the only summaries its wire may carry. */
+	readonly notedCompactions: ReadonlySet<string>;
 }
 
 class IcmTurn implements IcmTurnHandle {
@@ -24,6 +48,8 @@ class IcmTurn implements IcmTurnHandle {
 	readonly boundary: ContinuousChatTurnBoundary;
 	readonly startedAt: number;
 	private started: AgentMessage | undefined;
+	private latest: IcmTurnCompaction | undefined;
+	private readonly noted = new Set<string>();
 
 	constructor(turnId: number, boundary: ContinuousChatTurnBoundary, startedAt: number) {
 		this.turnId = turnId;
@@ -44,6 +70,23 @@ class IcmTurn implements IcmTurnHandle {
 		this.started = firstMessage;
 		void alreadyLogged;
 		this.boundary.release();
+	}
+
+	get latestCompaction(): IcmTurnCompaction | undefined {
+		return this.latest;
+	}
+
+	get notedCompactions(): ReadonlySet<string> {
+		return this.noted;
+	}
+
+	noteCompaction(entryId: string, retainedStart: IcmTurnRetainedStart | undefined): void {
+		if (this.started === undefined) {
+			throw new Error(`ICM turn ${this.turnId} cannot record a compaction before its start message.`);
+		}
+		if (this.noted.has(entryId)) throw new Error(`ICM turn ${this.turnId} already recorded compaction ${entryId}.`);
+		this.noted.add(entryId);
+		this.latest = { entryId, retainedStart };
 	}
 }
 

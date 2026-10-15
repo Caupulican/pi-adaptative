@@ -61,6 +61,8 @@ export interface SessionCacheControllerDeps {
 	getSessionId(): string;
 	getCwd(): string;
 	getMessages(): readonly AgentMessage[];
+	/** The lineage the foreground's requests are made on (see `historyLineage`; ICM turns are their own lineage). */
+	getForegroundLineage(): string;
 	setMessages(messages: AgentMessage[]): void;
 	getModel(): Model<Api> | undefined;
 	getContextUsage(): ContextUsage | undefined;
@@ -73,6 +75,8 @@ export interface SessionCacheControllerDeps {
 	executeObjectiveRootRoute(route: ObjectiveRoute, signal?: AbortSignal): Promise<unknown>;
 	runWorkerDelegationOnce(request: WorkerDelegationRequest): Promise<WorkerDelegationRunOutcome>;
 	sendNextTurnCustomMessage(message: { customType: string; content: string; display: boolean }): Promise<void>;
+	/** Reports a host failure the session keeps running through. */
+	warn(message: string): void;
 }
 
 export class SessionCacheController {
@@ -125,7 +129,7 @@ export class SessionCacheController {
 				...(requestOpenedAt !== undefined ? { requestOpenedAt } : {}),
 				...(matched?.prefixIntact !== undefined ? { prefixIntact: matched.prefixIntact } : {}),
 				...(matched?.firstDivergentKind ? { divergenceKind: matched.firstDivergentKind } : {}),
-				lineage: historyLineage(history),
+				lineage: conversation ? historyLineage(history) : this.deps.getForegroundLineage(),
 				holder: idleHolder(sincePreviousReply(history, message)),
 			});
 			if (row) {
@@ -288,10 +292,19 @@ export class SessionCacheController {
 		// new history read as already sent (no context-GC packing, no sanitizer dedup) until it regrew past
 		// that count. A compaction applied inside a run lowers the run's marks itself on `replan`.
 		this.deps.resetSanitizerPrefixHorizon();
+		// A failed release must not turn an applied compaction into a failure, but it is reported, never swallowed.
 		try {
 			cleanupSessionResources(this.deps.getSessionId());
-		} catch {
-			// Provider cache cleanup is best-effort and must not turn an applied compaction into a failure.
+		} catch (error) {
+			const detail =
+				error instanceof AggregateError
+					? `${error.message}: ${error.errors.map((inner) => (inner instanceof Error ? inner.message : String(inner))).join("; ")}`
+					: error instanceof Error
+						? error.message
+						: String(error);
+			this.deps.warn(
+				`Provider session resources were not released after compaction (the compaction stays applied): ${detail}`,
+			);
 		}
 	}
 

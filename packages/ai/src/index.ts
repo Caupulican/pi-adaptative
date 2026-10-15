@@ -29,6 +29,7 @@ export type {
 export type { OpenAICompletionsOptions } from "./providers/openai-completions.ts";
 export type { OpenAIResponsesOptions } from "./providers/openai-responses.ts";
 export * from "./providers/openrouter-account.ts";
+export { resolveCacheRetention } from "./providers/provider-runtime.ts";
 export * from "./providers/register-builtins.ts";
 export * from "./providers/xai-account.ts";
 export { resolveXaiBuildModelId } from "./providers/xai-responses-policy.ts";

@@ -4,109 +4,156 @@
  * something to another actor is an arrow between their lifelines; a running action is an in-flight
  * (dashed) message carrying a moving glyph, a settled one is solid and carries its outcome.
  *
- * The geometry lives in `sequence-layout.ts`, where the cell grid, glyph set and constraint code are
- * written down; where the carrier is lives in `flow-carrier.ts`. This module is the content and the
- * paint: one exhaustive table says how each kind of action looks, and one rule folds a run of finished
- * same-kind actions of one actor into a counted row with the average time. A new kind of action fails
- * the table's type until it is given a look; nothing else in the view knows any specific behavior.
+ * The geometry lives in `sequence-layout.ts` (lifelines, pitch, folds, bar runs, labels), where the
+ * glyph rules and constraint code are written down; where the carrier is lives in `flow-carrier.ts`.
+ * This module is the content and the paint: one exhaustive table says how each kind of action looks,
+ * and the geometry is drawn on a cell canvas the way the Diagram view is: lifelines are vertical lines,
+ * a hand-over is a horizontal line with an arrowhead, so a crossing or a join becomes `┼` `├` `┤` on its
+ * own, and activation bars and kind glyphs are set on their cells afterwards. A canvas cell is as many
+ * columns as the widest glyph it draws (two under PI_AMBIGUOUS_WIDTH=wide). The label column is a second
+ * canvas in plain columns, so text is never stretched to the cell width. The lifeline header comes first
+ * and is pinned; the legend of tagged lifelines follows and scrolls with the rows.
+ *
+ * Kind glyphs, one meaning each (the field glyphs are listed in `sequence-layout.ts`):
+ *
+ *   owner   prompt »   answer ↵
+ *   root    turn ■   reply «   tool ▸   background ▹   route ◇   delegate ›   question ?
+ *           notice ▲   compaction ≡   retry ↻   wait ○
+ *   System One   judgment ◆
+ *   worker  worker □   report ‹
+ *   carrier ● (no kind uses it)
+ *
+ * A new kind of action fails the table's type until it is given a look; nothing else in the view knows
+ * any specific behavior.
  */
 
-import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import { truncateToWidth } from "@caupulican/pi-tui";
 import type { FlowEvent, FlowKind } from "../../../core/operator-projection/flow-trace.ts";
-import { type ThemeColor, theme } from "../../../presentation/theme-model.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import type { DecisionGraphRows } from "./decision-graph-render.ts";
 import { arrowCarrierCell, CARRIER_GLYPH, carrierActiveUntil } from "./flow-carrier.ts";
+import { CellCanvas } from "./graph/canvas.ts";
+import { paintCells, style } from "./graph/cells.ts";
 import {
+	BAR_GLYPH,
 	buildSequenceLayout,
-	type FlowRow,
-	foldFlow,
-	type SequenceCell,
+	CLAIMED_GLYPH,
 	type SequenceKindLook,
 	type SequenceLayout,
-	type SequenceRow,
 } from "./sequence-layout.ts";
 
 /** How each kind of action looks. Exhaustive: a new kind does not compile until it has a look. */
 const KIND_LOOK: Readonly<Record<FlowKind, SequenceKindLook>> = {
-	prompt: { glyph: "›", folds: false, plural: "prompts" },
-	turn: { glyph: "●", folds: false, plural: "turns" },
-	reply: { glyph: "·", folds: false, plural: "replies" },
+	prompt: { glyph: "»", folds: false, plural: "prompts" },
+	turn: { glyph: "■", folds: true, plural: "turns" },
+	reply: { glyph: "«", folds: false, plural: "replies" },
 	tool: { glyph: "▸", folds: true, plural: "tools" },
-	background: { glyph: "▸", folds: false, plural: "background tools" },
+	background: { glyph: "▹", folds: false, plural: "background tools" },
 	route: { glyph: "◇", folds: true, plural: "routes" },
 	judgment: { glyph: "◆", folds: true, plural: "judgments" },
 	delegate: { glyph: "›", folds: false, plural: "delegations" },
-	worker: { glyph: "●", folds: false, plural: "workers" },
+	worker: { glyph: "□", folds: false, plural: "workers" },
 	report: { glyph: "‹", folds: false, plural: "reports" },
 	question: { glyph: "?", folds: false, plural: "questions" },
-	answer: { glyph: "›", folds: false, plural: "answers" },
-	notice: { glyph: "·", folds: true, plural: "notices" },
-	compaction: { glyph: "↺", folds: false, plural: "compactions" },
-	retry: { glyph: "↺", folds: true, plural: "retries" },
-	wait: { glyph: "○", folds: false, plural: "waits" },
+	answer: { glyph: "↵", folds: false, plural: "answers" },
+	notice: { glyph: "▲", folds: true, plural: "notices" },
+	compaction: { glyph: "≡", folds: true, plural: "compactions" },
+	retry: { glyph: "↻", folds: true, plural: "retries" },
+	wait: { glyph: "○", folds: true, plural: "waits" },
 };
 
-/** The trace as rows, oldest first: consecutive finished same-kind actions of one actor fold. */
-export function flowRows(flow: readonly FlowEvent[]): FlowRow[] {
-	return foldFlow(flow, KIND_LOOK).rows;
-}
-
-interface PaintCell {
-	readonly glyph: string;
-	readonly tone: ThemeColor | undefined;
-	readonly bold: boolean;
-}
-
-/** Cells to one string: runs of the same tone share one color escape; every glyph fills a whole cell. */
-function paintCells(cells: readonly PaintCell[], cellWidth: number): string {
-	let out = "";
-	let run = "";
-	let runTone: ThemeColor | undefined;
-	let runBold = false;
-	const flush = (): void => {
-		if (!run) return;
-		let text = runTone ? theme.fg(runTone, run) : run;
-		if (runBold) text = theme.bold(text);
-		out += text;
-		run = "";
-	};
-	for (const cell of cells) {
-		if (cell.tone !== runTone || cell.bold !== runBold) {
-			flush();
-			runTone = cell.tone;
-			runBold = cell.bold;
+/** The titles at their lifeline columns (the pinned header), then the legend for any title that did not fit. */
+function headRows(layout: SequenceLayout, width: number): string[] {
+	const hasHeader = layout.header.length > 0;
+	const canvas = new CellCanvas(width, (hasHeader ? 1 : 0) + layout.legend.length);
+	if (hasHeader) {
+		for (const part of layout.header) {
+			if (part.col >= width) break;
+			canvas.text(part.col, 0, part.text, style(part.tone, part.bold), {
+				maxWidth: width - part.col,
+				ellipsis: true,
+			});
 		}
-		run += cell.glyph + " ".repeat(Math.max(0, cellWidth - visibleWidth(cell.glyph)));
 	}
-	flush();
-	return out;
+	layout.legend.forEach((entry, at) => {
+		canvas.text(0, (hasHeader ? 1 : 0) + at, entry, style("dim"), { maxWidth: width, ellipsis: true });
+	});
+	return canvas.rows(paintCells(1));
 }
 
-/** The row's cells with the carrier on its arrow, when one is needed at `nowMs`. */
-function rowCells(row: SequenceRow, nowMs: number, motion: boolean): readonly PaintCell[] {
-	const cells: PaintCell[] = row.cells.map((cell: SequenceCell) => ({ ...cell, bold: false }));
-	if (!motion || !row.arrow) return cells;
-	const at = arrowCarrierCell(row.arrow, { startedAt: row.last.startedAt, endedAt: row.last.endedAt }, nowMs);
-	if (at !== undefined)
-		cells[at] = { glyph: CARRIER_GLYPH, tone: row.cells[row.arrow.from]?.tone ?? "accent", bold: true };
-	return cells;
-}
-
-/** Header titles at their lifeline columns, then the legend for any title that did not fit. */
-function headerRows(layout: SequenceLayout, width: number): string[] {
-	let line = "";
-	let pos = 0;
-	for (const part of layout.header) {
-		if (part.col > pos) {
-			line += " ".repeat(part.col - pos);
-			pos = part.col;
+/**
+ * The lifeline field, one canvas row per layout row: lifelines first, then the hand-over lines (which
+ * merge into junctions where they meet a lifeline), then bars and kind glyphs on cells no arrow runs
+ * through, then the carrier. Returns when the carrier next needs a frame, if it does.
+ */
+function fieldRows(layout: SequenceLayout, nowMs: number, motion: boolean): { rows: string[]; motionUntil?: number } {
+	const height = layout.rows.length;
+	const canvas = new CellCanvas(layout.fieldCells, height);
+	const lifelineCells = new Set(layout.lifelines.map((lifeline) => lifeline.cell));
+	// Past both ends of the rows, so the first and last row of a lifeline are crossings, not corners.
+	for (const cell of lifelineCells) {
+		canvas.line(
+			[
+				{ x: cell, y: -1 },
+				{ x: cell, y: height },
+			],
+			{ style: style("dim") },
+		);
+	}
+	layout.rows.forEach((row, y) => {
+		const arrow = row.arrow;
+		if (!arrow) return;
+		const direction = arrow.to > arrow.from ? 1 : -1;
+		const head = arrow.to - direction;
+		const edge = style(arrow.tone);
+		const dashed = arrow.state === "flight";
+		canvas.line(
+			[
+				{ x: arrow.from, y },
+				{ x: head, y },
+			],
+			{ style: edge, arrow: "end", dashed },
+		);
+		canvas.line(
+			[
+				{ x: head, y },
+				{ x: arrow.to, y },
+			],
+			{ style: edge, dashed },
+		);
+		if (arrow.state !== "claimed") return;
+		for (let cell = arrow.from + direction; cell !== head; cell += direction) {
+			if (!lifelineCells.has(cell)) canvas.putCell(cell, y, CLAIMED_GLYPH, edge);
 		}
-		const shown = truncateToWidth(part.text, Math.max(0, width - pos), "…");
-		const tinted = theme.fg(part.tone, shown);
-		line += part.bold ? theme.bold(tinted) : tinted;
-		pos += visibleWidth(shown);
+	});
+	for (const bar of layout.bars) {
+		for (let y = bar.fromRow; y <= bar.toRow; y++) {
+			const arrow = layout.rows[y]?.arrow;
+			if (arrow && bar.cell >= Math.min(arrow.from, arrow.to) && bar.cell <= Math.max(arrow.from, arrow.to))
+				continue;
+			canvas.putCell(bar.cell, y, BAR_GLYPH[bar.kind], style(bar.tone));
+		}
 	}
-	return [line, ...layout.legend.map((entry) => theme.fg("dim", truncateToWidth(entry, width, "…")))];
+	let motionUntil: number | undefined;
+	layout.rows.forEach((row, y) => {
+		if (row.mark) canvas.putCell(row.mark.cell, y, row.mark.glyph, style(row.mark.tone));
+		if (!motion || !row.arrow) return;
+		const timing = { startedAt: row.last.startedAt, endedAt: row.last.endedAt };
+		const at = arrowCarrierCell(row.arrow, timing, nowMs);
+		if (at !== undefined) canvas.putCell(at, y, CARRIER_GLYPH, style(row.arrow.tone, true));
+		const until = carrierActiveUntil(timing, nowMs);
+		if (until !== undefined && (motionUntil === undefined || until > motionUntil)) motionUntil = until;
+	});
+	return { rows: canvas.rows(paintCells(layout.cellWidth)), ...(motionUntil !== undefined ? { motionUntil } : {}) };
+}
+
+/** The label of every row, in plain columns, clipped to the label column. */
+function labelRows(layout: SequenceLayout): string[] {
+	const canvas = new CellCanvas(layout.labelWidth, layout.rows.length);
+	layout.rows.forEach((row, y) => {
+		canvas.text(0, y, row.label, style(row.labelTone), { maxWidth: layout.labelWidth, ellipsis: true });
+	});
+	return canvas.rows(paintCells(1));
 }
 
 export function renderFlowLanes(
@@ -116,33 +163,34 @@ export function renderFlowLanes(
 	motion = true,
 ): DecisionGraphRows {
 	const layout = buildSequenceLayout(flow, { width, nowMs, look: KIND_LOOK });
-	const rows = headerRows(layout, width);
+	const head = headRows(layout, width);
+	const pinnedRows = layout.header.length > 0 ? 1 : 0;
+	const pinned = pinnedRows > 0 ? { pinnedRows } : {};
 	if (layout.rows.length === 0) {
-		rows.push(theme.fg("dim", truncateToWidth("no activity yet · the lanes fill as work happens", width, "…")));
-		return { rows, stageAt: rows.map(() => undefined), currentRow: 0, focusKey: "flow:empty" };
+		const rows = [
+			...head,
+			theme.fg("dim", truncateToWidth("no activity yet · the lanes fill as work happens", width, "…")),
+		];
+		return { rows, stageAt: rows.map(() => undefined), currentRow: 0, focusKey: "flow:empty", ...pinned };
 	}
+	const labels = labelRows(layout);
+	let body: string[];
 	let motionUntil: number | undefined;
-	for (const row of layout.rows) {
-		const field = paintCells(rowCells(row, nowMs, motion), layout.cellWidth);
-		const label = row.label ? theme.fg(row.labelTone, row.label) : "";
-		rows.push(
-			truncateToWidth(
-				`${field}${" ".repeat(layout.labelCol - layout.fieldCells * layout.cellWidth)}${label}`,
-				width,
-				"",
-			),
-		);
-		if (motion && row.arrow) {
-			const until = carrierActiveUntil({ startedAt: row.last.startedAt, endedAt: row.last.endedAt }, nowMs);
-			if (until !== undefined && (motionUntil === undefined || until > motionUntil)) motionUntil = until;
-		}
+	if (layout.fieldCells === 0) body = labels;
+	else {
+		const field = fieldRows(layout, nowMs, motion);
+		const gap = " ".repeat(layout.labelCol - layout.fieldCells * layout.cellWidth);
+		body = field.rows.map((row, y) => `${row}${gap}${labels[y]}`);
+		motionUntil = field.motionUntil;
 	}
+	const rows = [...head, ...body];
 	const last = layout.rows.at(-1)!;
 	return {
 		rows,
 		stageAt: rows.map(() => undefined),
 		currentRow: rows.length - 1,
 		focusKey: `flow:${last.first.id}:${last.count}`,
+		...pinned,
 		...(motionUntil !== undefined ? { motionUntil } : {}),
 	};
 }

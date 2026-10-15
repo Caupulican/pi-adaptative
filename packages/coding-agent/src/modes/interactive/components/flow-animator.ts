@@ -1,6 +1,7 @@
 /**
  * The flow views' one animation timer. A frame that draws a carrier calls `request(until)` with the
- * moment the carrier stops being needed (Infinity while an edge is in flight); the animator starts its
+ * moment the carrier stops being needed (always finite: an open edge's start plus its flight time, a
+ * settled edge's end plus its settle time); the animator starts its
  * single interval on the first request and clears it as soon as that moment passes or a frame reports
  * `settled()`. There is never a second timer and never an idle tick: the existing 1 s activity-lane
  * clock is the only permanent one. Each tick only asks the host for a render; where a carrier is comes
@@ -39,11 +40,6 @@ export class FlowAnimator {
 	/** False under reduced motion: views draw no carriers, so they never request frames. */
 	get enabled(): boolean {
 		return !this.reducedMotion();
-	}
-
-	/** True while the interval exists. */
-	get running(): boolean {
-		return this.timer !== undefined;
 	}
 
 	/** A frame drew a carrier that is needed until `untilMs`. Starts the interval on first need. */

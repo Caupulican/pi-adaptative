@@ -92,6 +92,19 @@ export function hasProjectTrustInputs(cwd: string): boolean {
 	}
 }
 
+/**
+ * Whether a project's own settings, instructions and extensions load: a saved /trust decision wins, then the
+ * user's default (trusted). A folder with nothing project-owned in it has nothing to trust.
+ */
+export function resolveProjectTrust(
+	cwd: string,
+	store: ProjectTrustStore,
+	defaultMode: "trusted" | "untrusted",
+): boolean {
+	if (!hasProjectTrustInputs(cwd)) return true;
+	return store.get(cwd) ?? defaultMode === "trusted";
+}
+
 export class ProjectTrustStore {
 	private trustPath: string;
 	private readonly readOnly: boolean;

@@ -18,12 +18,10 @@ export type ModelRouterSessionBuffer = {
 	committed: boolean;
 	/** True after the prompt prefix was durably committed before provider transport. */
 	prefixCommitted: boolean;
-	/** Number of AgentMessages (including custom messages) in the committed prefix, retained for live-suffix repair. */
-	prefixMessageCount: number;
 };
 
 export function createModelRouterSessionBuffer(): ModelRouterSessionBuffer {
-	return { messages: [], committed: false, prefixCommitted: false, prefixMessageCount: 0 };
+	return { messages: [], committed: false, prefixCommitted: false };
 }
 
 export function bufferModelRouterSessionMessage(
@@ -63,7 +61,6 @@ export function flushModelRouterSessionBufferPrefix(
 	const entryIds = appendBufferedMessages(entries, appendBatch);
 	buffer.messages = [];
 	buffer.prefixCommitted = true;
-	buffer.prefixMessageCount = entries.length;
 	return entryIds;
 }
 

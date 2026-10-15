@@ -25,7 +25,7 @@ import {
 import { PrefixFold } from "../prefix-fold.ts";
 import { ESTIMATED_IMAGE_CHARS, estimateProviderRequestTokens } from "../provider-request-estimator.ts";
 import type { CompactionEntry, CompactionRetention, SessionEntry } from "../session/session-entries.ts";
-import { buildSessionContext, summarizedGapEntryIds } from "../session/session-manager.ts";
+import { buildSessionContext, isWholePathCompaction, summarizedGapEntryIds } from "../session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../types.ts";
 import { addUsage, createEmptyUsage } from "../usage.ts";
 import {
@@ -171,6 +171,8 @@ export interface CompactionResult<T = unknown> {
 	 * including an empty array when there were none. Absent on older results.
 	 */
 	summarizedGapEntryIds?: string[];
+	/** First entry of the scope the host compacted (a running ICM chat turn's start); absent for the whole branch. */
+	scopeStartEntryId?: string;
 	/** Provider usage spent generating this checkpoint, including chunk and verification retries. */
 	usage?: Usage;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
@@ -1383,6 +1385,13 @@ export interface PrepareCompactionOptions {
 	 * request already packs never reach it in full (see `packSupersededHostRecords` in the host).
 	 */
 	packHostRecords?: (messages: AgentMessage[]) => AgentMessage[];
+	/**
+	 * Entry a session-replacement checkpoint keeps verbatim before its summary, instead of the path's first user message:
+	 * the start of the scope the host compacts (a running ICM chat turn's start, whatever its role). It must be the
+	 * path's first entry. A start that is an assistant message calling tools is summarized with its results instead, and
+	 * nothing is kept before the summary. Absent, the first user message of the path is kept, as always.
+	 */
+	retainedEntryId?: string;
 }
 
 /**
@@ -1418,14 +1427,22 @@ export function prepareCompaction(
 	settings: CompactionSettings,
 	options?: PrepareCompactionOptions,
 ): CompactionPreparation | undefined {
+	// A checkpoint scoped to a later entry of this path (a running ICM chat turn's start) summarized only its scope, so
+	// it is neither the previous checkpoint nor a reason to stop: the raw entries it covered are still on the path and
+	// are summarized from the last whole-path checkpoint, which keeps the new checkpoint lossless.
 	const trailingEntry = pathEntries[pathEntries.length - 1];
-	if (trailingEntry?.type === "compaction" && !options?.allowTrailingCompactionAsPrevious) {
+	if (
+		trailingEntry?.type === "compaction" &&
+		isWholePathCompaction(pathEntries, trailingEntry) &&
+		!options?.allowTrailingCompactionAsPrevious
+	) {
 		return undefined;
 	}
 
 	let prevCompactionIndex = -1;
 	for (let i = pathEntries.length - 1; i >= 0; i--) {
-		if (pathEntries[i].type === "compaction") {
+		const entry = pathEntries[i];
+		if (entry?.type === "compaction" && isWholePathCompaction(pathEntries, entry)) {
 			prevCompactionIndex = i;
 			break;
 		}
@@ -1452,13 +1469,34 @@ export function prepareCompaction(
 	if (settings.strategy === "session-replacement") {
 		const previousRetention =
 			prevCompactionIndex >= 0 ? (pathEntries[prevCompactionIndex] as CompactionEntry).retention : undefined;
-		const originalUserEntry = pathEntries.find(
-			(entry) =>
-				entry.type === "message" &&
-				entry.message.role === "user" &&
-				(previousRetention?.mode !== "original-user" || entry.id === previousRetention.userEntryId),
-		);
-		if (!originalUserEntry?.id) return undefined;
+		// The entry kept verbatim before the summary: the host's scope start when it names one, else the path's
+		// original user message (the one an earlier checkpoint of this path already kept).
+		const retainedEntryId = options?.retainedEntryId;
+		if (retainedEntryId !== undefined && pathEntries[0]?.id !== retainedEntryId) {
+			throw new Error(
+				`Session-replacement compaction must keep entry ${retainedEntryId} as its scope start, but the path starts at ${pathEntries[0]?.id ?? "no entry"}.`,
+			);
+		}
+		// Nothing is kept before the summary when the scope starts with tool calls (every one of their results is settled
+		// and summarized, so a kept call would reach the provider without its result), or when the previous checkpoint
+		// of this path already kept nothing.
+		const scopeStart = retainedEntryId !== undefined ? pathEntries[0] : undefined;
+		const keepsNothing =
+			scopeStart !== undefined
+				? scopeStart.type === "message" &&
+					scopeStart.message.role === "assistant" &&
+					scopeStart.message.content.some((part) => part.type === "toolCall")
+				: previousRetention?.mode === "original-user" && previousRetention.userEntryId === undefined;
+		const originalUserEntry = keepsNothing
+			? undefined
+			: (scopeStart ??
+				pathEntries.find(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						(previousRetention?.mode !== "original-user" || entry.id === previousRetention.userEntryId),
+				));
+		if (!keepsNothing && !originalUserEntry?.id) return undefined;
 
 		let lastSettledEntryIndex = -1;
 		for (let i = boundaryEnd - 1; i > prevCompactionIndex; i--) {
@@ -1468,7 +1506,20 @@ export function prepareCompaction(
 				break;
 			}
 		}
-		if (lastSettledEntryIndex < 0) return undefined;
+		// Nothing settled beyond the scope start itself (a scope that starts at an assistant or tool result), or beyond
+		// the kept user message, leaves the summary nothing to replace.
+		if (
+			lastSettledEntryIndex < 0 ||
+			(scopeStart !== undefined
+				? lastSettledEntryIndex === 0
+				: pathEntries[lastSettledEntryIndex] === originalUserEntry)
+		) {
+			return undefined;
+		}
+		// The checkpoint's first kept entry: the entry kept before the summary, else the path's first entry, where the
+		// summary begins when nothing is kept (a durable entry the compaction's lifecycle record can name).
+		const firstKeptEntryId = originalUserEntry?.id ?? pathEntries[0]?.id;
+		if (!firstKeptEntryId) return undefined;
 
 		let firstTrailingUserIndex = -1;
 		for (let i = lastSettledEntryIndex + 1; i < boundaryEnd; i++) {
@@ -1507,13 +1558,15 @@ export function prepareCompaction(
 			: settledLiveMessages;
 		const coveredThroughEntryId = settledPathEntries[settledPathEntries.length - 1]?.id;
 		return {
-			firstKeptEntryId: originalUserEntry.id,
+			firstKeptEntryId,
 			messagesToSummarize,
 			turnPrefixMessages: [],
 			summarizerInputTokens: messagesToSummarize.reduce((sum, message) => sum + estimateTokens(message), 0),
 			isSplitTurn: false,
 			tokensBefore,
-			retention: { mode: "original-user", userEntryId: originalUserEntry.id },
+			retention: originalUserEntry
+				? { mode: "original-user", userEntryId: originalUserEntry.id }
+				: { mode: "original-user" },
 			...(coveredThroughEntryId ? { coveredThroughEntryId } : {}),
 			summarizedGapEntryIds: summarizedGapEntryIds(settledPathEntries),
 			fileOps,

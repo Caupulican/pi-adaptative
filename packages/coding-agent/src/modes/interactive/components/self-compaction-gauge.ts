@@ -47,13 +47,18 @@ function cellIndex(share: number, cells: number): number {
 	return Math.min(cells - 1, Math.max(0, Math.ceil(share * cells) - 1));
 }
 
+/**
+ * The context window as a bar: cached and used fill, free recedes, and the marks sit where compaction acts.
+ * With self-compaction on, notice, warning and forced all show; otherwise the one automatic-compaction
+ * trigger the session is configured with shows as the forced mark. No window known, no gauge.
+ */
 export function selfCompactionGauge(
 	view: SelfCompactionView,
 	cells = SELF_COMPACTION_GAUGE_CELLS,
 ): SelfCompactionGauge | null {
 	const thresholds = view.thresholds;
-	if (!thresholds || thresholds.contextWindow <= 0) return null;
-	const window = thresholds.contextWindow;
+	const window = thresholds?.contextWindow ?? view.contextWindow ?? 0;
+	if (window <= 0) return null;
 	const out: string[] = new Array(cells).fill(SELF_COMPACTION_GAUGE_GLYPHS.free);
 	if (view.usedTokens !== null) {
 		const used = Math.min(cells, Math.max(0, Math.ceil((view.usedTokens / window) * cells)));
@@ -62,9 +67,13 @@ export function selfCompactionGauge(
 			out[index] = index < cached ? SELF_COMPACTION_GAUGE_GLYPHS.cached : SELF_COMPACTION_GAUGE_GLYPHS.used;
 		}
 	}
-	out[cellIndex(thresholds.noticeTokens / window, cells)] = SELF_COMPACTION_GAUGE_GLYPHS.notice;
-	out[cellIndex(thresholds.warningTokens / window, cells)] = SELF_COMPACTION_GAUGE_GLYPHS.warning;
-	out[cellIndex(thresholds.forcedTokens / window, cells)] = SELF_COMPACTION_GAUGE_GLYPHS.forced;
+	if (thresholds) {
+		out[cellIndex(thresholds.noticeTokens / window, cells)] = SELF_COMPACTION_GAUGE_GLYPHS.notice;
+		out[cellIndex(thresholds.warningTokens / window, cells)] = SELF_COMPACTION_GAUGE_GLYPHS.warning;
+		out[cellIndex(thresholds.forcedTokens / window, cells)] = SELF_COMPACTION_GAUGE_GLYPHS.forced;
+	} else if (view.hardTriggerTokens !== null) {
+		out[cellIndex(view.hardTriggerTokens / window, cells)] = SELF_COMPACTION_GAUGE_GLYPHS.forced;
+	}
 	return {
 		bar: `[${out.join("")}]`,
 		percent: view.usedTokens === null ? "?%" : `${((view.usedTokens / window) * 100).toFixed(1)}%`,

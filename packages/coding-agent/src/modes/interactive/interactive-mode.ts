@@ -21,6 +21,7 @@ import {
 	InputOnlyTerminal,
 	type Loader,
 	type LoaderIndicatorOptions,
+	type OverlayHandle,
 	ProcessTerminal,
 	Spacer,
 	setKeybindings,
@@ -105,6 +106,7 @@ import { ExpandableText, isExpandable } from "./components/expandable-text.ts";
 import { FooterComponent, type FooterServices } from "./components/footer.ts";
 import type { MarkdownTransformFn } from "./components/markdown-transform.ts";
 import { ReplyBylineTracker, replyByline, replyModelRef } from "./components/reply-byline.ts";
+import { type ShortcutSection, ShortcutsWindow } from "./components/shortcuts-window.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { openTranscriptOverlay } from "./components/transcript-overlay.ts";
@@ -433,6 +435,7 @@ export class InteractiveMode {
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
+			placeholder: this.editorPlaceholder(),
 		});
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
@@ -566,6 +569,7 @@ export class InteractiveMode {
 			activityLane: this.activityLane,
 			runtimeStatus: this.runtimeStatus,
 			replyBylines: this.replyBylines,
+			findModelName: (modelRef) => this.findModelName(modelRef),
 			activeToolCalls: this.activeToolCalls,
 			transformMarkdownForDisplay: this.transformMarkdownForDisplay,
 			getSession: () => this.session,
@@ -615,6 +619,7 @@ export class InteractiveMode {
 			extensionUiHost: this.extensionUiHost,
 			activeToolCalls: this.activeToolCalls,
 			getSession: () => this.session,
+			findModelName: (modelRef) => this.findModelName(modelRef),
 			getSessionManager: () => this.sessionManager,
 			getEditor: () => this.editor,
 			getSettings: () => this.settingsManager,
@@ -1537,6 +1542,7 @@ export class InteractiveMode {
 	}
 
 	private setupEditorSubmitHandler(): void {
+		this.defaultEditor.onShortcuts = () => this.handleHotkeysCommand();
 		this.defaultEditor.onSubmit = async (text: string) => {
 			text = text.trim();
 			if (!text) {
@@ -2336,6 +2342,9 @@ export class InteractiveMode {
 			}
 			case "assistant": {
 				const modelRef = replyModelRef(message);
+				const byline = this.replyBylines.shouldShow(modelRef)
+					? replyByline(modelRef, this.replyRoutes?.get(message.timestamp), this.findModelName(modelRef))
+					: undefined;
 				const assistantComponent = new AssistantMessageComponent(
 					message,
 					this.hideThinkingBlock,
@@ -2344,9 +2353,7 @@ export class InteractiveMode {
 						isStreaming: false,
 						showCommentary: this.hasHumanAudience,
 						transformMarkdown: this.transformMarkdownForDisplay,
-						...(this.replyBylines.shouldShow(modelRef)
-							? { byline: replyByline(modelRef, this.replyRoutes?.get(message.timestamp)) }
-							: {}),
+						...(byline ? { byline } : {}),
 					},
 				);
 				this.chatContainer.addChild(assistantComponent);
@@ -3065,7 +3072,16 @@ export class InteractiveMode {
 			checkDaxnutsEasterEgg: (model) => this.checkDaxnutsEasterEgg(model),
 			getModelCandidates: () => this.getModelCandidates(),
 			shutdown: (options) => this.shutdown(options),
+			reload: () => this.handleReloadCommandWithResult(),
 		};
+	}
+
+	/** The display name of a `provider/model` ref, as the status line shows it. */
+	private findModelName(modelRef: string): string | undefined {
+		const slash = modelRef.indexOf("/");
+		if (slash <= 0) return undefined;
+		const model = this.modelRegistry.find(modelRef.slice(0, slash), modelRef.slice(slash + 1));
+		return model ? model.name || model.id : undefined;
 	}
 
 	private getAutoLearnModelOptions(): SelectItem[] {
@@ -3959,15 +3975,60 @@ export class InteractiveMode {
 		return keyDisplayText(action);
 	}
 
+	/** The input's own hints: what to type and the few keys that matter every turn; `?` lists the rest. */
+	private editorPlaceholder(): string {
+		const key = (binding: Parameters<typeof keyText>[0], text: string) => {
+			const keys = keyText(binding);
+			return keys ? `${keys} ${text}` : "";
+		};
+		return [
+			"Ask anything",
+			"/ commands",
+			"@ files",
+			"! bash",
+			key("app.interrupt", "interrupt"),
+			// Windows Terminal swallows alt+enter; the `>>` prefix is the follow-up gesture there.
+			process.env.WT_SESSION ? ">> follow-up" : key("app.message.followUp", "follow-up"),
+			key("app.execution.toggle", "work area"),
+			`${keyText("app.shortcuts.show")} shortcuts`,
+		]
+			.filter(Boolean)
+			.join(" · ");
+	}
+
 	private handleHotkeysCommand(): void {
 		reportCommands.handleHotkeysCommand({
 			extensionRunner: this.extensionRunner,
 			keybindings: this.keybindings,
 			chatContainer: this.chatContainer,
 			ui: this.ui,
-			getMarkdownThemeWithSettings: () => this.getMarkdownThemeWithSettings(),
+			showShortcuts: (sections) => this.showShortcutsWindow(sections),
 			getAppKeyDisplay: (action) => this.getAppKeyDisplay(action),
 			getEditorKeyDisplay: (action) => this.getEditorKeyDisplay(action),
+		});
+	}
+
+	private shortcutsHandle: OverlayHandle | undefined;
+
+	/** The shortcuts as a floating window over the conversation, closed by escape or the key that opened it. */
+	private showShortcutsWindow(sections: readonly ShortcutSection[]): void {
+		this.shortcutsHandle?.hide();
+		const window = new ShortcutsWindow({
+			sections,
+			viewportRows: () => this.ui.terminal.rows,
+			closeLabel: keyText("app.shortcuts.show"),
+			isCloseKey: (data) => this.keybindings.matches(data, "app.shortcuts.show"),
+			requestRender: () => this.ui.requestRender(),
+			onClose: () => this.shortcutsHandle?.hide(),
+		});
+		this.shortcutsHandle = this.ui.showOverlay(window, {
+			anchor: "center",
+			width: Math.min(92, Math.max(40, this.ui.terminal.columns - 8)),
+			minWidth: 40,
+			maxHeight: "85%",
+			onRemove: () => {
+				this.shortcutsHandle = undefined;
+			},
 		});
 	}
 

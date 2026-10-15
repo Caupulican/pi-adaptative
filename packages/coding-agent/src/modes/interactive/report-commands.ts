@@ -29,6 +29,7 @@ import { DaxnutsComponent } from "./components/daxnuts.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
 import { selfCompactionGauge } from "./components/self-compaction-gauge.ts";
+import type { ShortcutSection } from "./components/shortcuts-window.ts";
 
 export interface ReportRenderHost {
 	readonly chatContainer: Container;
@@ -49,7 +50,8 @@ export interface ChangelogReportHost extends ReportRenderHost {
 export interface HotkeysReportHost extends ReportRenderHost {
 	readonly extensionRunner: Pick<ExtensionRunner, "getShortcuts">;
 	readonly keybindings: KeybindingsManager;
-	getMarkdownThemeWithSettings(): MarkdownTheme;
+	/** Opens the shortcuts window over the conversation; nothing is written into it. */
+	showShortcuts(sections: readonly ShortcutSection[]): void;
 	getAppKeyDisplay(action: AppKeybinding): string;
 	getEditorKeyDisplay(action: Keybinding): string;
 }
@@ -308,76 +310,76 @@ export function handleHotkeysCommand(host: HotkeysReportHost): void {
 	const dequeue = host.getAppKeyDisplay("app.message.dequeue");
 	const pasteImage = host.getAppKeyDisplay("app.clipboard.pasteImage");
 
-	let hotkeys = `
-**Navigation**
-| Key | Action |
-|-----|--------|
-| \`${cursorUp}\` / \`${cursorDown}\` / \`${cursorLeft}\` / \`${cursorRight}\` | Move cursor / browse history (Up when empty) |
-| \`${cursorWordLeft}\` / \`${cursorWordRight}\` | Move by word |
-| \`${cursorLineStart}\` | Start of line |
-| \`${cursorLineEnd}\` | End of line |
-| \`${jumpForward}\` | Jump forward to character |
-| \`${jumpBackward}\` | Jump backward to character |
-| \`${pageUp}\` / \`${pageDown}\` | Scroll by page |
-
-**Editing**
-| Key | Action |
-|-----|--------|
-| \`${submit}\` | Send message |
-| \`${newLine}\` | New line${process.platform === "win32" ? " (Ctrl+Enter on Windows Terminal)" : ""} |
-| \`${deleteWordBackward}\` | Delete word backwards |
-| \`${deleteWordForward}\` | Delete word forwards |
-| \`${deleteToLineStart}\` | Delete to start of line |
-| \`${deleteToLineEnd}\` | Delete to end of line |
-| \`${yank}\` | Paste the most-recently-deleted text |
-| \`${yankPop}\` | Cycle through the deleted text after pasting |
-| \`${undo}\` | Undo |
-
-**Other**
-| Key | Action |
-|-----|--------|
-| \`${tab}\` | Path completion / accept autocomplete |
-| \`${interrupt}\` | Cancel autocomplete / abort streaming |
-| \`${clear}\` | Clear editor (first) / exit (second) |
-| \`${exit}\` | Exit (when editor is empty) |
-| \`${suspend}\` | Suspend to background |
-| \`${cycleThinkingLevel}\` | Cycle thinking level |
-| \`${cycleModelForward}\` / \`${cycleModelBackward}\` | Cycle models |
-| \`${selectModel}\` | Open model selector |
-| \`${expandTools}\` | Toggle tool output expansion |
-| \`${toggleThinking}\` | Toggle thinking block visibility |
-| \`${externalEditor}\` | Edit message in external editor |
-| \`${followUp}\` | Queue follow-up message |
-| \`${dequeue}\` | Restore queued messages |
-| \`${pasteImage}\` | Paste image from clipboard |
-| \`/\` | Slash commands |
-| \`!\` | Run bash command |
-| \`!!\` | Run bash command (excluded from context) |
-`;
+	const sections: ShortcutSection[] = [
+		{
+			title: "Navigation",
+			rows: [
+				{
+					keys: `${cursorUp} / ${cursorDown} / ${cursorLeft} / ${cursorRight}`,
+					action: "Move cursor / browse history (Up when empty)",
+				},
+				{ keys: `${cursorWordLeft} / ${cursorWordRight}`, action: "Move by word" },
+				{ keys: cursorLineStart, action: "Start of line" },
+				{ keys: cursorLineEnd, action: "End of line" },
+				{ keys: jumpForward, action: "Jump forward to character" },
+				{ keys: jumpBackward, action: "Jump backward to character" },
+				{ keys: `${pageUp} / ${pageDown}`, action: "Scroll by page" },
+			],
+		},
+		{
+			title: "Editing",
+			rows: [
+				{ keys: submit, action: "Send message" },
+				{
+					keys: newLine,
+					action: `New line${process.platform === "win32" ? " (Ctrl+Enter on Windows Terminal)" : ""}`,
+				},
+				{ keys: deleteWordBackward, action: "Delete word backwards" },
+				{ keys: deleteWordForward, action: "Delete word forwards" },
+				{ keys: deleteToLineStart, action: "Delete to start of line" },
+				{ keys: deleteToLineEnd, action: "Delete to end of line" },
+				{ keys: yank, action: "Paste the most-recently-deleted text" },
+				{ keys: yankPop, action: "Cycle through the deleted text after pasting" },
+				{ keys: undo, action: "Undo" },
+			],
+		},
+		{
+			title: "Other",
+			rows: [
+				{ keys: tab, action: "Path completion / accept autocomplete" },
+				{ keys: interrupt, action: "Cancel autocomplete / abort streaming" },
+				{ keys: clear, action: "Clear editor (first) / exit (second)" },
+				{ keys: exit, action: "Exit (when editor is empty)" },
+				{ keys: suspend, action: "Suspend to background" },
+				{ keys: cycleThinkingLevel, action: "Cycle thinking level" },
+				{ keys: `${cycleModelForward} / ${cycleModelBackward}`, action: "Cycle models" },
+				{ keys: selectModel, action: "Open model selector" },
+				{ keys: expandTools, action: "Toggle tool output expansion" },
+				{ keys: toggleThinking, action: "Toggle thinking block visibility" },
+				{ keys: externalEditor, action: "Edit message in external editor" },
+				{ keys: followUp, action: "Queue follow-up message" },
+				{ keys: dequeue, action: "Restore queued messages" },
+				{ keys: pasteImage, action: "Paste image from clipboard" },
+				{ keys: "/", action: "Slash commands" },
+				{ keys: "!", action: "Run bash command" },
+				{ keys: "!!", action: "Run bash command (excluded from context)" },
+			],
+		},
+	];
 
 	// Add extension-registered shortcuts
-	const extensionRunner = host.extensionRunner;
-	const shortcuts = extensionRunner.getShortcuts(host.keybindings.getEffectiveConfig());
+	const shortcuts = host.extensionRunner.getShortcuts(host.keybindings.getEffectiveConfig());
 	if (shortcuts.size > 0) {
-		hotkeys += `
-**Extensions**
-| Key | Action |
-|-----|--------|
-`;
-		for (const [key, shortcut] of shortcuts) {
-			const description = shortcut.description ?? shortcut.extensionPath;
-			const keyDisplay = formatKeyText(key, { capitalize: true });
-			hotkeys += `| \`${keyDisplay}\` | ${description} |\n`;
-		}
+		sections.push({
+			title: "Extensions",
+			rows: [...shortcuts].map(([key, shortcut]) => ({
+				keys: formatKeyText(key, { capitalize: true }),
+				action: shortcut.description ?? shortcut.extensionPath,
+			})),
+		});
 	}
 
-	host.chatContainer.addChild(new Spacer(1));
-	host.chatContainer.addChild(new DynamicBorder());
-	host.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Keyboard Shortcuts")), 1, 0));
-	host.chatContainer.addChild(new Spacer(1));
-	host.chatContainer.addChild(new Markdown(hotkeys.trim(), 1, 1, host.getMarkdownThemeWithSettings()));
-	host.chatContainer.addChild(new DynamicBorder());
-	host.ui.requestRender();
+	host.showShortcuts(sections);
 }
 
 export function handleDebugCommand(host: DebugReportHost): void {

@@ -62,7 +62,6 @@ export interface CompactionSupportSettingsSource {
 		hmoeWeights?: HmoeWeights;
 	};
 	hasExplicitCompactionTriggerPercent(): boolean;
-	getMemorySystem?(): string;
 }
 
 const XAI_SUBSCRIPTION_COMPACTION_TRIGGER_PERCENT = 0.8;
@@ -200,9 +199,8 @@ export class CompactionSupport {
 
 	getAdaptedSettings(): CompactionSettings {
 		const settingsManager = this.deps.getSettingsManager();
-		const baseSettings = settingsManager.getCompactionSettings();
-		const settings =
-			settingsManager.getMemorySystem?.() === "icm" ? { ...baseSettings, enabled: false } : baseSettings;
+		// Under ICM compaction follows `compaction.enabled` too: the compaction controller scopes it to the running turn.
+		const settings = settingsManager.getCompactionSettings();
 		const model = this.deps.getModel();
 		if (!model) return settings;
 		const contextWindow = model.contextWindow ?? 0;

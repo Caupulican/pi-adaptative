@@ -1,15 +1,18 @@
 /** Mounts the human Workbench or the deliberately unattended transcript, and owns the Workbench state; owns no session lifecycle. */
 import path from "node:path";
-import type { AssistantMessage } from "@caupulican/pi-ai";
+import { type AssistantMessage, resolveCacheRetention } from "@caupulican/pi-ai";
 import type { Container, EditorComponent, TUI } from "@caupulican/pi-tui";
 import { APP_NAME } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
-import { readCiStatusView } from "../../core/ci-status-view.ts";
+import { CacheClock } from "../../core/cache-clock.ts";
+import { onCiStatusChange, readCiStatusView } from "../../core/ci-status-view.ts";
 import { expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
 import type { ReadonlyFooterDataProvider } from "../../core/footer-data-contract.ts";
+import { GenerationRate } from "../../core/generation-rate.ts";
 import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { FlowTrace } from "../../core/operator-projection/flow-trace.ts";
+import { onPullRequestChange, readPullRequestView } from "../../core/pull-request-view.ts";
 import type { WorkbenchSettings } from "../../core/settings/settings-schema.ts";
 import type { TaskStepStatus } from "../../core/tasks/task-state.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
@@ -22,7 +25,7 @@ import {
 	type DecisionGraphModel,
 	type DecisionPlanStepStatus,
 } from "./components/decision-graph-model.ts";
-import { type FooterComponent, formatCwdForFooter } from "./components/footer.ts";
+import type { FooterComponent } from "./components/footer.ts";
 import { OperatorPovBarComponent } from "./components/operator-pov-bar.ts";
 import { isConversationMessage } from "./components/question-conversation.ts";
 import { WorkbenchComponent } from "./components/workbench.ts";
@@ -59,6 +62,8 @@ export interface InteractiveLayoutPort {
 	getEditor(): EditorComponent;
 	getSettings(): InteractiveLayoutSettingsSource;
 	getStreamingMessage(): AssistantMessage | undefined;
+	/** The display name of a `provider/model` ref, as the status line shows it; undefined for an unknown model. */
+	findModelName(modelRef: string): string | undefined;
 }
 
 /** Active obligations are unresolved open work, not a failed requirement branch. */
@@ -103,6 +108,11 @@ export class InteractiveLayout {
 	private workbenchInputCleanup: (() => void) | undefined;
 	/** Unsubscribes every session listener the layout holds; set when the layout mounts or rebinds. */
 	private disposeOperatorProjection: (() => void) | undefined;
+	/** Output tokens per second of the session's latest run; the POV bar shows it. */
+	private generationRate = new GenerationRate();
+	/** When the provider's prompt cache for the last request expires; the POV bar counts it down. */
+	private readonly cacheClock = new CacheClock(() => resolveCacheRetention());
+	private cacheTicker: ReturnType<typeof setInterval> | undefined;
 
 	constructor(port: InteractiveLayoutPort) {
 		this.port = port;
@@ -120,14 +130,14 @@ export class InteractiveLayout {
 	 */
 	private composeDecisionGraph(): DecisionGraphModel {
 		const session = this.port.getSession();
-		const humanInput = this.humanInputTally;
 		const now = Date.now();
 		const projection = session.operatorProjection.getProjection();
-		if (humanInput.objectiveId !== projection.objective_id) {
-			humanInput.objectiveId = projection.objective_id;
-			humanInput.asked = 0;
-			humanInput.answered = 0;
-		}
+		// The tally resets in the subscriber when a question arrives under a new objective; a frame only
+		// reads it, so counts from an earlier objective are not shown for this one.
+		const humanInput: HumanInputTally =
+			this.humanInputTally.objectiveId === projection.objective_id
+				? this.humanInputTally
+				: { asked: 0, answered: 0 };
 		const task = session.getTaskStepsStateSnapshot();
 		const goal = session.getGoalStateSnapshot();
 		const plan: DecisionGraphInput["plan"] = task
@@ -142,7 +152,7 @@ export class InteractiveLayout {
 								: "pending",
 				}));
 		const checks: DecisionGraphInput["checks"] = [
-			...(task && goal
+			...(goal
 				? goal.requirements.map((requirement) => ({
 						text: requirement.text,
 						status:
@@ -212,8 +222,17 @@ export class InteractiveLayout {
 		// The flow trace belongs to the session it records: a swapped session starts its own.
 		const flow = this.flowTrace;
 		flow.reset();
-		const unsubscribeFlow = session.subscribe((event) => flow.observe(event));
+		this.generationRate = new GenerationRate();
+		const rate = this.generationRate;
+		const unsubscribeFlow = session.subscribe((event) => {
+			flow.observe(event);
+			rate.observe(event);
+			this.cacheClock.observe(event);
+			this.syncCacheTicker();
+		});
 		flow.observeLanes(session.getLaneRecords());
+		const unsubscribePullRequest = onPullRequestChange(() => port.ui.requestRender());
+		const unsubscribeCiStatus = onCiStatusChange(() => port.ui.requestRender());
 		const unsubscribeLanes = session.onLaneRecordsChanged((records) => {
 			flow.observeLanes(records);
 			port.ui.requestRender();
@@ -228,6 +247,14 @@ export class InteractiveLayout {
 		const humanInput = this.humanInputTally;
 		const unsubscribeHumanInput = subscribeHumanInputActivity(port.getSessionManager(), (activity) => {
 			flow.observeQuestion(activity);
+			const objectiveId = session.operatorProjection.getProjection().objective_id;
+			if (humanInput.objectiveId !== objectiveId) {
+				humanInput.objectiveId = objectiveId;
+				humanInput.asked = 0;
+				humanInput.answered = 0;
+				humanInput.question = undefined;
+				humanInput.askedAt = undefined;
+			}
 			if (activity.phase === "waiting") {
 				humanInput.asked++;
 				humanInput.question = activity.request.questions[0]?.question;
@@ -246,9 +273,32 @@ export class InteractiveLayout {
 			unsubscribeHumanInput();
 			unsubscribeFlow();
 			unsubscribeLanes();
+			unsubscribePullRequest();
+			unsubscribeCiStatus();
+			this.stopCacheTicker();
 			port.activityLane?.setExternalClock("decision-graph", false);
 			this.disposeOperatorProjection = undefined;
 		};
+	}
+
+	/** One redraw a second while a cache clock is counting down, so the timer ticks; none once it has run out. */
+	private syncCacheTicker(): void {
+		const remaining = this.cacheClock.remainingMs();
+		if (remaining === undefined || remaining <= 0) {
+			this.stopCacheTicker();
+			return;
+		}
+		if (this.cacheTicker) return;
+		this.cacheTicker = setInterval(() => {
+			this.port.ui.requestRender();
+			if ((this.cacheClock.remainingMs() ?? 0) <= 0) this.stopCacheTicker();
+		}, 1000);
+		this.cacheTicker.unref();
+	}
+
+	private stopCacheTicker(): void {
+		if (this.cacheTicker) clearInterval(this.cacheTicker);
+		this.cacheTicker = undefined;
 	}
 
 	/** Rebinds the layout's session listeners to the host's current session; a layout that never mounted has none. */
@@ -285,6 +335,8 @@ export class InteractiveLayout {
 			getSessionWorkState: () => port.getSession().getSessionWorkState(),
 			getSelfCompactionView: () => port.getSession().getSelfCompactionView(),
 			getCiStatus: () => readCiStatusView(port.getSessionManager().getCwd()),
+			getTokensPerSecond: () => this.generationRate.tokensPerSecond,
+			getCacheRemainingMs: () => this.cacheClock.remainingMs(),
 			getPeerFindingCount: () => port.getSession().getSemanticVerificationObligations().length,
 		});
 		this.subscribe();
@@ -296,14 +348,14 @@ export class InteractiveLayout {
 			operatorStatus,
 			brand: APP_NAME,
 			title: () => port.getSessionManager().getSessionName() || path.basename(port.getSessionManager().getCwd()),
-			cwd: () => {
-				const location = formatCwdForFooter(
-					port.getSessionManager().getCwd(),
-					process.env.HOME || process.env.USERPROFILE,
-				);
-				const branch = port.footerDataProvider.getGitBranch();
-				return branch ? `${location} (${branch})` : location;
+			branch: () => port.footerDataProvider.getGitBranch(),
+			model: () => {
+				const { model, thinkingLevel } = port.getSession().state;
+				if (!model) return undefined;
+				return { name: model.name || model.id, ...(model.reasoning ? { thinking: thinkingLevel || "off" } : {}) };
 			},
+			pullRequest: () =>
+				readPullRequestView(port.getSessionManager().getCwd(), port.footerDataProvider.getGitBranch()),
 			dock: [port.pendingMessagesContainer, port.statusContainer, port.widgetContainerAbove, port.footer],
 			dockBelow: [port.widgetContainerBelow],
 			viewportRows: () => port.ui.terminal.rows,
@@ -361,9 +413,17 @@ export class InteractiveLayout {
 			graph: () => this.composeDecisionGraph(),
 			// A foreground receipt is the root's, on the model actually answering; the running worker
 			// (which may be `active_actors[0]`) never produces foreground receipts.
+			workingDirectory: () => port.getSessionManager().getCwd(),
 			attribution: () => {
 				const route = port.getSession().getForegroundRouteSnapshot();
-				return { kind: "root", label: "root", modelRef: route.activeModel ?? route.rootModel ?? undefined };
+				const modelRef = route.activeModel ?? route.rootModel ?? undefined;
+				const modelName = modelRef ? port.findModelName(modelRef) : undefined;
+				return {
+					kind: "root",
+					label: route.switched ? "routed" : "root",
+					modelRef,
+					...(modelName ? { modelName } : {}),
+				};
 			},
 			team: () => ({
 				projection: port.getSession().operatorProjection.getProjection(),

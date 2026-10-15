@@ -24,20 +24,6 @@ export type DecisionStage =
 	| "deliver"
 	| "done";
 
-/** Every stage, in loop order; renderers walk this array and nothing else fixes the order. */
-export const DECISION_STAGE_ORDER: readonly DecisionStage[] = [
-	"understand",
-	"plan",
-	"build",
-	"dispatch",
-	"observe",
-	"verify",
-	"clarify",
-	"repair",
-	"deliver",
-	"done",
-];
-
 export interface DecisionStageEntry {
 	readonly stage: DecisionStage;
 	/** Epoch ms. */
@@ -52,17 +38,34 @@ export interface DecisionStageEntry {
 	readonly note?: string;
 }
 
-export interface DecisionStageTotals {
-	readonly elapsedMs: number;
+/**
+ * One stage over the whole objective: totals sum every visit, the details come from the LATEST visit.
+ * Kept per stage by the log, independent of the in-memory entry bound, so a stage whose entries were
+ * all evicted still has its row.
+ */
+export interface DecisionStageSummary {
+	readonly stage: DecisionStage;
+	/** Visits so far, the open one included. */
 	readonly passes: number;
+	/** Time spent across every visit, the open one's elapsed time included. */
+	readonly elapsedMs: number;
+	/** Repair-pass number of the latest visit. */
+	readonly loop: number;
+	/** Reason code of the latest visit. */
+	readonly reasonCode?: string;
+	/** `current_action` at the latest visit's entry, bounded. */
+	readonly note?: string;
 }
 
 export interface DecisionStageLogView {
+	/** The newest entries, bounded; evicted entries still count in `stages`. */
 	readonly entries: readonly DecisionStageEntry[];
-	/** Complete for every stage, including entries the in-memory bound evicted. */
-	readonly totals: Readonly<Record<DecisionStage, DecisionStageTotals>>;
+	/** Every stage the objective has entered, in the order first entered. Complete past the entry bound. */
+	readonly stages: readonly DecisionStageSummary[];
 	readonly loop: number;
 	readonly open?: DecisionStageEntry;
+	/** Set when the durable sink threw; the in-memory history is still shown, the stored one may be behind. */
+	readonly sinkFailure?: string;
 }
 
 /** What the log hands its sink when a stage opens. */
@@ -157,41 +160,49 @@ function boundedNote(value: string): string {
 	return collapsed.length <= NOTE_LIMIT ? collapsed : `${collapsed.slice(0, NOTE_LIMIT - 1)}…`;
 }
 
-function emptyTotals(): Record<DecisionStage, { elapsedMs: number; passes: number }> {
-	const totals = {} as Record<DecisionStage, { elapsedMs: number; passes: number }>;
-	for (const stage of DECISION_STAGE_ORDER) totals[stage] = { elapsedMs: 0, passes: 0 };
-	return totals;
-}
-
 interface LiveEntry extends DecisionStageEntry {
 	readonly rowId?: number;
+}
+
+/** A stage's running aggregate: closed visits summed, details of the latest visit. */
+interface StageAggregate {
+	passes: number;
+	totalMs: number;
+	loop: number;
+	reasonCode: string | undefined;
+	note: string | undefined;
 }
 
 export interface DecisionStageLogOptions {
 	/** Durable sink; absent for a process-local log (tests, sessions without a ledger). */
 	readonly sink?: DecisionStageSink;
+	/**
+	 * When an open row is loaded from the sink, its clock restarts at this instant and the start is
+	 * persisted: the time the process was down is not work. Absent, the loaded row keeps its start.
+	 */
+	readonly resumeAt?: number;
 }
 
 /**
  * Records the projection's stage transitions and their timing. Every mutation goes through
- * `observe` or `reset`; every read goes through `view`.
+ * `observe` or `reset` (rehydration happens once, in the constructor); every read goes through
+ * `view`, which is pure: it never writes to the log or to the sink.
  */
 export class DecisionStageLog {
 	private entries: LiveEntry[] = [];
-	private totals = emptyTotals();
+	/** Per stage, in the order first entered. Not bounded by `MAX_STAGE_ENTRIES`: one row per stage at most. */
+	private aggregates = new Map<DecisionStage, StageAggregate>();
 	private loop = 1;
 	private objectiveId?: string;
 	private readonly sink?: DecisionStageSink;
 	private sinkFailure?: string;
-	/** An open row was loaded from the sink. Its clock restarts at the next read, so downtime is not counted. */
-	private resumeClock = false;
 
 	constructor(options: DecisionStageLogOptions = {}) {
 		this.sink = options.sink;
-		if (this.sink) this.rehydrate(this.sink);
+		if (this.sink) this.rehydrate(this.sink, options.resumeAt);
 	}
 
-	/** Set when the sink threw; the in-memory log keeps working and the pane can say so. */
+	/** Set when the sink threw; the in-memory log keeps working. The view carries it as `sinkFailure`. */
 	getSinkFailure(): string | undefined {
 		return this.sinkFailure;
 	}
@@ -203,7 +214,6 @@ export class DecisionStageLog {
 	 * loop is not running, so no stage is and no clock runs.
 	 */
 	observe(projection: OperatorProjection, now: number): boolean {
-		this.anchorResumedClock(now);
 		if (this.objectiveId !== undefined && this.objectiveId !== projection.objective_id)
 			this.reset(projection.objective_id, now);
 		this.objectiveId = projection.objective_id;
@@ -233,42 +243,73 @@ export class DecisionStageLog {
 		const open = this.entries.at(-1);
 		if (open !== undefined && open.endedAt === undefined) this.closeOpen(now);
 		this.entries = [];
-		this.totals = emptyTotals();
+		this.aggregates = new Map();
 		this.loop = 1;
 		this.objectiveId = objectiveId;
 	}
 
 	view(now: number): DecisionStageLogView {
-		this.anchorResumedClock(now);
 		const open = this.entries.at(-1);
 		const openEntry = open !== undefined && open.endedAt === undefined ? open : undefined;
-		const totals = {} as Record<DecisionStage, DecisionStageTotals>;
-		for (const stage of DECISION_STAGE_ORDER) {
-			const base = this.totals[stage];
-			const live = openEntry?.stage === stage ? Math.max(0, now - openEntry.enteredAt) : 0;
-			totals[stage] = {
-				elapsedMs: base.elapsedMs + live,
-				passes: base.passes + (openEntry?.stage === stage ? 1 : 0),
-			};
+		const stages: DecisionStageSummary[] = [];
+		for (const [stage, aggregate] of this.aggregates) {
+			const live =
+				openEntry !== undefined && openEntry.stage === stage ? Math.max(0, now - openEntry.enteredAt) : undefined;
+			stages.push({
+				stage,
+				passes: aggregate.passes + (live !== undefined ? 1 : 0),
+				elapsedMs: aggregate.totalMs + (live ?? 0),
+				loop: aggregate.loop,
+				...(aggregate.reasonCode ? { reasonCode: aggregate.reasonCode } : {}),
+				...(aggregate.note ? { note: aggregate.note } : {}),
+			});
 		}
-		return { entries: this.entries, totals, loop: this.loop, ...(openEntry ? { open: openEntry } : {}) };
+		return {
+			entries: this.entries,
+			stages,
+			loop: this.loop,
+			...(openEntry ? { open: openEntry } : {}),
+			...(this.sinkFailure !== undefined ? { sinkFailure: this.sinkFailure } : {}),
+		};
 	}
 
 	private closeOpen(now: number): void {
 		const open = this.entries.at(-1);
 		if (open === undefined || open.endedAt !== undefined) return;
 		this.entries[this.entries.length - 1] = { ...open, endedAt: now };
-		const total = this.totals[open.stage];
-		total.elapsedMs += Math.max(0, now - open.enteredAt);
-		total.passes += 1;
+		this.settle(open.stage, open.enteredAt, now);
 		if (open.rowId !== undefined) this.persistClose(open.rowId, now);
 	}
 
 	private pushEntry(entry: LiveEntry): void {
 		this.entries.push(entry);
-		// Evicted entries are already folded into `totals` when they closed, so the accumulated time
-		// the pane shows never loses history to the bound.
+		this.enter(entry);
+		// An evicted entry has already been folded into its stage's aggregate (on entry for the details,
+		// on close for the time), so the bound never removes a stage or its accumulated time.
 		while (this.entries.length > MAX_STAGE_ENTRIES) this.entries.shift();
+	}
+
+	/** A visit starts: the stage gains its row if new and takes this visit's details as the latest. */
+	private enter(entry: DecisionStageEntry): void {
+		const aggregate = this.aggregates.get(entry.stage) ?? {
+			passes: 0,
+			totalMs: 0,
+			loop: entry.loop,
+			reasonCode: undefined,
+			note: undefined,
+		};
+		aggregate.loop = entry.loop;
+		aggregate.reasonCode = entry.reasonCode;
+		aggregate.note = entry.note;
+		this.aggregates.set(entry.stage, aggregate);
+	}
+
+	/** A visit ends: its duration and pass join the stage's totals. */
+	private settle(stage: DecisionStage, enteredAt: number, endedAt: number): void {
+		const aggregate = this.aggregates.get(stage);
+		if (aggregate === undefined) return;
+		aggregate.totalMs += Math.max(0, endedAt - enteredAt);
+		aggregate.passes += 1;
 	}
 
 	private persistOpen(entry: DecisionStageSinkEntry): number | undefined {
@@ -290,17 +331,6 @@ export class DecisionStageLog {
 		}
 	}
 
-	/** Restarts a rehydrated open pass at `now` and persists that start. Closed passes stay. */
-	private anchorResumedClock(now: number): void {
-		if (!this.resumeClock) return;
-		this.resumeClock = false;
-		const index = this.entries.length - 1;
-		const open = this.entries[index];
-		if (open === undefined || open.endedAt !== undefined || open.enteredAt === now) return;
-		this.entries[index] = { ...open, enteredAt: now };
-		if (open.rowId !== undefined) this.persistReanchor(open.rowId, now);
-	}
-
 	private persistReanchor(rowId: number, enteredAt: number): void {
 		if (!this.sink?.reanchor) return;
 		try {
@@ -311,11 +341,12 @@ export class DecisionStageLog {
 	}
 
 	/**
-	 * Replays the session's durable entries. Closed passes keep their durations. An open pass does
-	 * not keep counting across the time the process was down: the next read restarts that clock.
-	 * Only the newest objective's entries are live; earlier objectives stay in the sink.
+	 * Replays the session's durable entries, every one of the newest objective's regardless of the
+	 * in-memory bound, so the per-stage aggregates are complete. Closed passes keep their durations.
+	 * An open pass does not keep counting across the time the process was down: it restarts at
+	 * `resumeAt` and that start is persisted. Earlier objectives stay in the sink.
 	 */
-	private rehydrate(sink: DecisionStageSink): void {
+	private rehydrate(sink: DecisionStageSink, resumeAt: number | undefined): void {
 		let stored: readonly DecisionStageStoredEntry[];
 		try {
 			stored = sink.load();
@@ -339,13 +370,13 @@ export class DecisionStageLog {
 				...(entry.note ? { note: entry.note } : {}),
 			};
 			this.pushEntry(live);
-			if (entry.endedAt !== undefined) {
-				const total = this.totals[entry.stage];
-				total.elapsedMs += Math.max(0, entry.endedAt - entry.enteredAt);
-				total.passes += 1;
-			}
+			if (entry.endedAt !== undefined) this.settle(entry.stage, entry.enteredAt, entry.endedAt);
 		}
-		const open = this.entries.at(-1);
-		this.resumeClock = open !== undefined && open.endedAt === undefined;
+		const index = this.entries.length - 1;
+		const open = this.entries[index];
+		if (resumeAt === undefined || open === undefined || open.endedAt !== undefined || open.enteredAt === resumeAt)
+			return;
+		this.entries[index] = { ...open, enteredAt: resumeAt };
+		if (open.rowId !== undefined) this.persistReanchor(open.rowId, resumeAt);
 	}
 }

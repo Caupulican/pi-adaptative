@@ -29,8 +29,15 @@ export interface ModelChangeEntry extends SessionEntryBase {
 /** Sparse history retained after a full session-replacement compaction. */
 export interface CompactionRetention {
 	mode: "original-user";
-	/** User-message entry that anchors the owner's original request on the active branch. */
-	userEntryId: string;
+	/**
+	 * Entry kept verbatim before the summary: the user message that anchors the owner's original request on the active
+	 * branch, or, for a checkpoint scoped to a running ICM chat turn, that turn's start entry (a message or custom
+	 * message of any role). Absent when nothing is kept before the summary: a turn that starts with an assistant
+	 * message calling tools, whose results the summary replaces, is summarized together with them (kept alone, its
+	 * calls would reach the provider without their results), and a later checkpoint of a path whose earlier one kept
+	 * nothing keeps nothing either.
+	 */
+	userEntryId?: string;
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
@@ -54,6 +61,12 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	 * is already in the summary and is not emitted again.
 	 */
 	summarizedGapEntryIds?: string[];
+	/**
+	 * First entry of the scope this checkpoint compacted: the entry that started a running ICM chat turn. When
+	 * set, a rebuild retains, restores and carries only entries from this one onward; earlier history belongs to
+	 * the chat log, not to this checkpoint. Absent, the checkpoint covers the whole branch as before.
+	 */
+	scopeStartEntryId?: string;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 	/** Usage from every LLM call that produced or verified this summary. */

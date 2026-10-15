@@ -485,9 +485,9 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/** Requested once at the live terminal event, never while replaying retained tool history. */
-	getWorkbenchPreview(by?: PreviewAttribution): Component | undefined {
+	getWorkbenchPreview(by?: PreviewAttribution, cwd?: string): Component | undefined {
 		if (!this.result || this.isPartial || this.deferResultUntilExpanded) return undefined;
-		return createWorkbenchToolPreview(this.toolName, this.args, this.result, by);
+		return createWorkbenchToolPreview(this.toolName, this.args, this.result, by, cwd);
 	}
 
 	getConversationComponent(): Component | undefined {

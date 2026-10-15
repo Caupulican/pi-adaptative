@@ -29,6 +29,8 @@ export async function superviseInteractiveRuntime(args: readonly string[]): Prom
 	const entries = source
 		? [
 				"node_modules",
+				// node_modules links the vendored dependency forks (source-map-js, magicast, braces) into vendor/.
+				"vendor",
 				"package.json",
 				"tsconfig.json",
 				"tsconfig.base.json",

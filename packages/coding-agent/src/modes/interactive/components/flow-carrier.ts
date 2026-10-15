@@ -6,24 +6,24 @@
  * only answers where the carrier is and until when one is needed.
  */
 
-/** The carrier glyph; the same one rides the sequence arrows and the diagram spine. */
+/** The carrier glyph; it rides the Lanes arrows and no flow kind, edge or bar is drawn with it. */
 export const CARRIER_GLYPH = "●";
 
 /** A transition travels its path once, in this long. */
-export const CARRIER_SETTLE_MS = 600;
+const CARRIER_SETTLE_MS = 600;
 
 /** An edge still in flight loops its carrier along the path with this period. */
-export const CARRIER_LOOP_MS = 1200;
+const CARRIER_LOOP_MS = 1200;
 
 /**
  * The fast loop runs for this long from the edge's start (its last transition). After it the edge
  * keeps its static in-flight form and the carrier steps one cell per second of wall clock, driven by
  * the lane's existing one-second clock: no animation timer is held for an open edge.
  */
-export const CARRIER_FLIGHT_MS = 4000;
+const CARRIER_FLIGHT_MS = 4000;
 
 /** The carrier's step cadence once the fast loop is over. */
-export const CARRIER_STEP_MS = 1000;
+const CARRIER_STEP_MS = 1000;
 
 export interface CarrierTiming {
 	readonly startedAt: number;

@@ -1,6 +1,7 @@
 /**
- * The flow trace: what actually happened in the session, as a bounded list of actor actions in the
- * order they began. It is recorded from the sources that do the work (the session's event stream,
+ * The flow trace: what actually happened in the session, as a bounded list of actor actions ordered
+ * by when they began (ties keep their recording order; an action recorded late with an earlier start,
+ * such as a settled judgment or a restored worker lane, lands where it began). It is recorded from the sources that do the work (the session's event stream,
  * settled System One evaluations, questions to the owner, worker lane records), never inferred from
  * phases afterwards, so a view drawn from it shows what is going on and nothing else.
  *
@@ -16,8 +17,6 @@ import { evaluationResultText, type SemanticEvaluationRecord } from "../system-o
 
 /** Who acts. Each actor is one lane of the flow; every worker shares the workers lane, named per event. */
 export type FlowActor = "owner" | "system_one" | "root" | "worker";
-
-export const FLOW_ACTORS: readonly FlowActor[] = ["owner", "system_one", "root", "worker"];
 
 /** What an action is. Closed: a view renders every kind, and a new kind fails its exhaustive table. */
 export type FlowKind =
@@ -48,8 +47,19 @@ export interface FlowEvent {
 	readonly label: string;
 	/** The actor the action is addressed to, when it hands something over. */
 	readonly to?: FlowActor;
-	/** The worker's name, for actions in the workers lane. */
+	/** The worker's display name, for actions that belong to a worker lane. Presentation only. */
 	readonly lane?: string;
+	/**
+	 * The identity of the worker lane: its untruncated, unmodified name. Set together with `lane` on
+	 * every delegation, wait, worker and report event; views group actions by this key, never by the
+	 * display text.
+	 */
+	readonly laneKey?: string;
+	/**
+	 * What the action reached, kept apart from its label: the verdict of a settled judgment, the
+	 * terminal status of a worker report.
+	 */
+	readonly result?: string;
 	readonly startedAt: number;
 	/** Absent while the action is running. An instant action ends when it starts. */
 	readonly endedAt?: number;
@@ -58,7 +68,7 @@ export interface FlowEvent {
 	readonly evidence?: string;
 }
 
-/** Oldest finished actions are dropped past this; running ones are always kept. */
+/** The oldest finished actions (by start) are dropped past this; running ones are always kept. */
 export const MAX_FLOW_EVENTS = 400;
 const LABEL_LIMIT = 80;
 
@@ -106,10 +116,25 @@ type EventHandlers = {
 	[K in AgentSessionEvent["type"]]: (event: Extract<AgentSessionEvent, { type: K }>) => void;
 };
 
+/**
+ * Records the flow of one session's work.
+ *
+ * History rule: the trace shows what happens while it is bound, never what a resumed session did before.
+ * `reset()` (which a bind performs) stamps `since`; a terminal worker lane first seen after that, or a
+ * settled System One evaluation, whose end lies before `since` is history and is ignored. Live work that
+ * began earlier but ends after `since` is flow and is kept.
+ *
+ * Identity rule: one evaluation is one judgment, however often its settlement is announced (the verdict
+ * note announces it again); a repeat updates the existing event in place.
+ *
+ * Outcome rule: an action carries an outcome only when its source reports one. A background task leaving
+ * the live list reports that it ended, not how, so its event ends without an outcome.
+ */
 export class FlowTrace {
 	private readonly events: FlowEvent[] = [];
 	private readonly open = new Map<string, number>();
-	private readonly listeners = new Set<() => void>();
+	/** Event id of the judgment recorded for each evaluation id. */
+	private readonly judgments = new Map<string, string>();
 	private readonly laneStatus = new Map<string, LaneStatus>();
 	private readonly backgroundOpen = new Set<string>();
 	private readonly now: () => number;
@@ -121,14 +146,9 @@ export class FlowTrace {
 		this.since = this.now();
 	}
 
-	/** Every recorded action, oldest first. */
+	/** Every recorded action, ordered by start (oldest first). A live array: callers must not mutate it. */
 	snapshot(): readonly FlowEvent[] {
 		return this.events;
-	}
-
-	subscribe(listener: () => void): () => void {
-		this.listeners.add(listener);
-		return () => this.listeners.delete(listener);
 	}
 
 	/** Forget everything: a new or resumed session has its own flow. */
@@ -137,8 +157,8 @@ export class FlowTrace {
 		this.open.clear();
 		this.laneStatus.clear();
 		this.backgroundOpen.clear();
+		this.judgments.clear();
 		this.since = this.now();
-		this.changed();
 	}
 
 	private readonly handlers: EventHandlers = {
@@ -212,22 +232,34 @@ export class FlowTrace {
 		(this.handlers[event.type] as (event: AgentSessionEvent) => void)(event);
 	}
 
-	/** A settled System One evaluation: a judgment handed to the root, with its own timing. */
+	/**
+	 * A settled System One evaluation: a judgment handed to the root, with its own timing. An evaluation
+	 * that ended before this trace was reset is history and is ignored; a repeat for an evaluation already
+	 * recorded replaces that judgment's timing, outcome and result in place.
+	 */
 	observeEvaluation(record: SemanticEvaluationRecord): void {
+		if (record.endedAt < this.since) return;
 		const result = evaluationResultText(record);
-		this.push(
-			{
-				actor: "system_one",
-				kind: "judgment",
-				label: short(result ? `${record.label} → ${result}` : record.label),
-				to: "root",
-				startedAt: record.startedAt,
-				endedAt: record.endedAt,
-				outcome: record.outcome === "ok" ? "ok" : record.outcome,
-				evidence: `#${record.evaluationId.slice(0, 4)}`,
-			},
-			`judgment:${record.evaluationId}`,
-		);
+		const judgment: Omit<FlowEvent, "id"> = {
+			actor: "system_one",
+			kind: "judgment",
+			label: short(record.label),
+			...(result ? { result: short(result) } : {}),
+			to: "root",
+			startedAt: record.startedAt,
+			endedAt: record.endedAt,
+			outcome: record.outcome,
+			evidence: `#${record.evaluationId.slice(0, 4)}`,
+		};
+		const known = this.judgments.get(record.evaluationId);
+		const index = known === undefined ? -1 : this.events.findIndex((event) => event.id === known);
+		if (known !== undefined && index !== -1) {
+			this.events[index] = { ...judgment, id: known };
+			return;
+		}
+		const id = `${this.push(judgment)}`;
+		// A judgment older than every kept action can be bounded away by its own push; remember only a kept one.
+		if (this.events.some((event) => event.id === id)) this.judgments.set(record.evaluationId, id);
 	}
 
 	/** A question to the owner opens; its settlement closes it and hands the answer back. */
@@ -251,6 +283,7 @@ export class FlowTrace {
 			if (previous === record.status) continue;
 			this.laneStatus.set(record.laneId, record.status);
 			const lane = record.label ?? record.laneId;
+			const laneFields = { lane: short(lane), laneKey: lane };
 			const key = `worker:${record.laneId}`;
 			const queueKey = `queue:${record.laneId}`;
 			const outcome = LANE_OUTCOME[record.status];
@@ -260,6 +293,7 @@ export class FlowTrace {
 					actor: "root",
 					kind: "delegate",
 					label: short(lane),
+					...laneFields,
 					to: "worker",
 					startedAt: delegatedAt,
 					endedAt: delegatedAt,
@@ -269,8 +303,9 @@ export class FlowTrace {
 					actor: "worker",
 					kind: "report",
 					label: short(`${lane}: ${record.status}`),
+					result: record.status,
 					to: "root",
-					lane,
+					...laneFields,
 					startedAt: endedAt,
 					endedAt,
 					outcome: reported,
@@ -279,12 +314,12 @@ export class FlowTrace {
 				const delegatedAt = timeOf(record.status === "queued" ? record.queuedAt : record.startedAt);
 				delegate(delegatedAt);
 				if (record.status === "queued")
-					this.begin(queueKey, { actor: "worker", kind: "wait", label: "queued", lane }, delegatedAt);
+					this.begin(queueKey, { actor: "worker", kind: "wait", label: "queued", ...laneFields }, delegatedAt);
 			}
 			if (record.status === "running") {
 				const startedAt = timeOf(record.startedAt);
 				this.finish(queueKey, "ok", startedAt);
-				this.begin(key, { actor: "worker", kind: "worker", label: short(lane), lane }, startedAt);
+				this.begin(key, { actor: "worker", kind: "worker", label: short(lane), ...laneFields }, startedAt);
 			}
 			if (outcome !== "open" && previous !== undefined && LANE_OUTCOME[previous] === "open") {
 				const endedAt = timeOf(record.completedAt);
@@ -308,42 +343,44 @@ export class FlowTrace {
 
 	private begin(key: string, event: Omit<FlowEvent, "id" | "startedAt">, startedAt = this.now()): void {
 		if (this.open.has(key)) this.finish(key, "cancelled");
-		this.open.set(key, this.push({ ...event, startedAt }, key));
+		this.open.set(key, this.push({ ...event, startedAt }));
 	}
 
-	private finish(key: string, outcome: FlowOutcome, endedAt = this.now()): void {
+	/** Ends an open action. `outcome` is undefined when the source says the action ended but not how. */
+	private finish(key: string, outcome: FlowOutcome | undefined, endedAt = this.now()): void {
 		const sequence = this.open.get(key);
 		if (sequence === undefined) return;
 		this.open.delete(key);
 		const index = this.events.findIndex((event) => event.id === `${sequence}`);
 		if (index === -1) return;
-		this.events[index] = { ...this.events[index]!, endedAt, outcome };
-		this.changed();
+		this.events[index] = { ...this.events[index]!, endedAt, ...(outcome !== undefined ? { outcome } : {}) };
 	}
 
-	private push(event: Omit<FlowEvent, "id">, _key?: string): number {
+	/**
+	 * The one write path. The list stays ordered by start: the new action goes after the last action
+	 * that began no later than it (ties keep recording order). The search runs from the end because
+	 * actions almost always arrive in start order.
+	 */
+	private push(event: Omit<FlowEvent, "id">): number {
 		const sequence = ++this.sequence;
-		this.events.push({ ...event, id: `${sequence}` });
+		let at = this.events.length;
+		while (at > 0 && this.events[at - 1]!.startedAt > event.startedAt) at--;
+		this.events.splice(at, 0, { ...event, id: `${sequence}` });
 		this.bound();
-		this.changed();
 		return sequence;
 	}
 
-	/** Drops the oldest finished actions past the bound; a running action is never dropped. */
+	/** Drops the oldest finished actions (by start) past the bound; a running action is never dropped. */
 	private bound(): void {
 		while (this.events.length > MAX_FLOW_EVENTS) {
 			const index = this.events.findIndex((event) => event.endedAt !== undefined);
 			if (index === -1) return;
-			this.events.splice(index, 1);
-		}
-	}
-
-	private changed(): void {
-		for (const listener of [...this.listeners]) {
-			try {
-				listener();
-			} catch {
-				// Projection observers cannot interrupt lifecycle bookkeeping or suppress sibling updates.
+			const [dropped] = this.events.splice(index, 1);
+			if (dropped?.kind !== "judgment") continue;
+			for (const [evaluationId, eventId] of this.judgments) {
+				if (eventId !== dropped.id) continue;
+				this.judgments.delete(evaluationId);
+				break;
 			}
 		}
 	}

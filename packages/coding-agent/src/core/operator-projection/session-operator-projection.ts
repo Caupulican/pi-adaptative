@@ -231,6 +231,7 @@ export class SessionOperatorProjection {
 
 	/** Recomputes the projection from live state and publishes it to subscribers. */
 	refresh(): OperatorProjection {
+		this.bindStageLog();
 		const goal = this.deps.getGoalState();
 		const allLanes = this.deps.getLanes();
 		const lanes = allLanes.filter((lane) => lane.status === "running" || lane.status === "queued");
@@ -271,7 +272,7 @@ export class SessionOperatorProjection {
 		const published = this.projectionController.updateProjection(patch);
 		// The stage log observes the projection's own transitions; it never decides one. Recorded at
 		// the single point a real change publishes, so it cannot drift from what subscribers saw.
-		if (this.currentStageLog().observe(published, Date.now())) {
+		if (this.stageLog.observe(published, Date.now())) {
 			for (const listener of [...this.stageListeners]) {
 				try {
 					listener();
@@ -283,20 +284,26 @@ export class SessionOperatorProjection {
 		return published;
 	}
 
-	/** The stage log bound to the current session's sink, reopened when the session changes. */
-	private currentStageLog(): DecisionStageLog {
+	/**
+	 * Opens the stage log on the current session's sink when the session changed (the sink's key
+	 * moved), rehydrating it and restarting a loaded open pass's clock at this instant. This is the
+	 * only place the log is rebuilt, so reading the log never rehydrates or writes.
+	 */
+	private bindStageLog(): void {
 		const bound = this.deps.getStageSink?.();
 		const key = bound?.key;
-		if (key !== this.stageLogPath) {
-			this.stageLogPath = key;
-			this.stageLog = new DecisionStageLog(bound ? { sink: bound.sink } : {});
-		}
-		return this.stageLog;
+		if (key === this.stageLogPath) return;
+		this.stageLogPath = key;
+		this.stageLog = new DecisionStageLog(bound ? { sink: bound.sink, resumeAt: Date.now() } : {});
 	}
 
-	/** The loop stage log derived from this projection's published transitions. */
+	/**
+	 * The loop stage log derived from this projection's published transitions, as the last `refresh`
+	 * bound it. A pure read: call `getProjection()` first (the Decision graph does) so a session
+	 * switch has already reopened the log.
+	 */
 	getStageLog(now: number = Date.now()): DecisionStageLogView {
-		return this.currentStageLog().view(now);
+		return this.stageLog.view(now);
 	}
 
 	/** Fires when a new stage entry opens; the TUI uses it to keep the stage clock ticking. */

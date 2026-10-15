@@ -48,6 +48,8 @@ export interface InteractiveEventPort {
 	/** Owns the working loader (`loadingAnimation`) and the working-visibility state this controller reads and drives. */
 	readonly runtimeStatus: RuntimeStatusController;
 	readonly replyBylines: ReplyBylineTracker;
+	/** The display name of a `provider/model` ref, as the status line shows it. */
+	findModelName(modelRef: string): string | undefined;
 	readonly activeToolCalls: ActiveToolCallRegistry;
 	getSession(): AgentSession;
 	getSessionManager(): SessionManager;
@@ -351,6 +353,13 @@ export class InteractiveEventController {
 					this.clearPendingStreamingUiUpdate();
 					this.lastStreamingUiUpdateAt = 0;
 					const modelRef = replyModelRef(event.message);
+					const byline = this.port.replyBylines.shouldShow(modelRef)
+						? replyByline(
+								modelRef,
+								this.port.getSession().getForegroundRouteSnapshot(),
+								this.port.findModelName(modelRef),
+							)
+						: undefined;
 					this.streamingComponent = new AssistantMessageComponent(
 						undefined,
 						this.port.isThinkingHidden(),
@@ -359,9 +368,7 @@ export class InteractiveEventController {
 							isStreaming: true,
 							showCommentary: this.port.hasHumanAudience,
 							transformMarkdown: this.port.transformMarkdownForDisplay,
-							...(this.port.replyBylines.shouldShow(modelRef)
-								? { byline: replyByline(modelRef, this.port.getSession().getForegroundRouteSnapshot()) }
-								: {}),
+							...(byline ? { byline } : {}),
 						},
 					);
 					this.streamingMessage = event.message;
@@ -489,7 +496,7 @@ export class InteractiveEventController {
 					this.port.refreshActivityLane();
 				}
 				const workbench = this.port.getWorkbench();
-				workbench?.record(component?.getWorkbenchPreview(workbench.attribution()), {
+				workbench?.record(component?.getWorkbenchPreview(workbench.attribution(), workbench.workingDirectory()), {
 					toolCallId: event.toolCallId,
 					isError: event.isError,
 					details: event.result.details,

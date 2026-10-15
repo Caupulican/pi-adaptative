@@ -3,35 +3,50 @@
  * the actors (you, System One, root, one per worker by name); a message is an arrow between two
  * lifelines; a span on one lifeline is an activation bar; the label of every row sits to the right of
  * the lifeline field so a head or a label never touches a lifeline. Pure: events, width and nowMs in,
- * rows of cells out. No timers, no theme, no ANSI: tones are theme tokens the painter resolves.
+ * geometry out (lifeline cells, bar runs, one mark and at most one arrow per row, label text). No
+ * timers, no theme, no ANSI, no glyph drawing beyond naming the glyphs: the painter (`flow-lanes-render.ts`)
+ * draws the geometry on a cell canvas, which merges lifeline crossings and joins into junction glyphs.
  *
  * Package (what the view carries, fixed before any glyph):
  *   - lifelines: owner, System One, root, each worker lane by name (the least recent fold into one
  *     overflow lifeline when the width cannot hold them);
  *   - message: an event with `to` is an arrow lifeline to lifeline; running = in flight, settled with an
- *     outcome = proven, a delegation to a still-queued worker = claimed;
+ *     outcome = proven, settled without one = unmarked (the source never said how it ended), a
+ *     delegation to a still-queued worker = claimed;
  *   - activation: an event without `to` that spans time is a bar on its own lifeline; the innermost
  *     (latest-started) span covering a row wins;
- *   - evidence: a settled System One judgment or route carries its result and ledger handle as `label (result) #a1b2`.
+ *   - evidence: a settled System One judgment carries its result and ledger handle as `label (result) #a1b2`.
+ *
+ * Input contract: `flow` is ordered by start time (the trace keeps it so); folds, turn absorption and
+ * activation-bar ends read it that way, in one pass each. A worker lifeline is the event's `laneKey`,
+ * never display text.
  *
  * Constraint code (the geometric language every cell obeys):
  *   - 1 unit = 1 cell; a cell is `cellWidth` terminal columns, the widest glyph of the glyph set, so
  *     the box-drawing and arrow glyphs (East Asian Ambiguous) hold when `PI_AMBIGUOUS_WIDTH=wide`
  *     doubles them; every width goes through `visibleWidth`, never a literal;
  *   - lifeline cells sit on a fixed pitch p (2..14 cells) derived from the width; the lifeline field
- *     takes at most 55% of it and the label column the rest;
+ *     takes at most 55% of it and the label column the rest, never less than MIN_LABEL_WIDTH columns:
+ *     lifelines merge into the `+N more` lifeline first, and when even the fixed lifelines (plus the
+ *     overflow lifeline, if workers exist) cannot fit, the view degrades to labels only: no header, no
+ *     field, each row is its kind glyph and its label across the whole width;
  *   - orthogonal only: horizontal arrows, vertical lifelines, square joins; no diagonals, no rounded
- *     corners; one stroke family (box drawing: light for edges and lifelines, heavy for activation);
- *   - edge state is a glyph, never only a hue: settled `─`, in flight `┄`, claimed `·`; the lifeline
- *     is `│`, a running activation `┆`, a finished one `┃`, a claimed one `·`; heads are `▶` `◀`;
+ *     corners; one stroke family (box drawing: light for edges and lifelines, heavy for finished
+ *     activation);
+ *   - one glyph per meaning, never only a hue. Field glyphs (the kind glyphs are in `flow-lanes-render.ts`):
+ *       lifeline `│`   running activation `┆`   finished activation `┃`   waiting activation `╎`
+ *       edge settled `─`   in flight `┄`   claimed body `·`   head `→` `←`   crossing `┼`   join `├` `┤`
+ *     label marks: done report `✓`, failed `✗`, cancelled `⊘`, needs review `!`; fold count `×`;
+ *     the carrier `●` appears nowhere else;
  *   - an arrow starts on the origin lifeline cell (the kind glyph), its head sits one cell before the
- *     target lifeline, and the target lifeline cell is the join `┤` `├`; a crossing is `┼`.
+ *     target lifeline, and the target lifeline cell is the join; a crossing is `┼`.
  */
 
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { FlowActor, FlowEvent, FlowKind, FlowOutcome } from "../../../core/operator-projection/flow-trace.ts";
+import { formatCompactDuration } from "../../../core/util/format-duration.ts";
 import type { ThemeColor } from "../../../presentation/theme-model.ts";
-import { formatGraphDuration, SYSTEM_ONE_TONE } from "./decision-graph-render.ts";
+import { SYSTEM_ONE_TONE } from "./decision-graph-render.ts";
 import { CARRIER_GLYPH } from "./flow-carrier.ts";
 
 export interface SequenceKindLook {
@@ -57,10 +72,14 @@ export interface FlowRow {
 
 export type EdgeState = "settled" | "flight" | "claimed";
 
-export interface SequenceCell {
-	/** One grapheme, padded to `cellWidth` columns when painted. */
+/** What a lifeline is doing over a run of rows: working, finished, or waiting. */
+export type BarKind = "live" | "done" | "wait";
+
+/** The kind glyph on the origin lifeline cell of a row. */
+export interface SequenceMark {
+	readonly cell: number;
 	readonly glyph: string;
-	readonly tone: ThemeColor | undefined;
+	readonly tone: ThemeColor;
 }
 
 export interface SequenceArrow {
@@ -68,17 +87,28 @@ export interface SequenceArrow {
 	readonly from: number;
 	readonly to: number;
 	readonly state: EdgeState;
+	readonly tone: ThemeColor;
 }
 
 export interface SequenceRow {
 	readonly first: FlowEvent;
 	readonly last: FlowEvent;
 	readonly count: number;
-	readonly cells: readonly SequenceCell[];
+	/** Absent in the labels-only layout, which has no field. */
+	readonly mark?: SequenceMark;
 	readonly arrow?: SequenceArrow;
 	/** Plain text already fitted to the label column. */
 	readonly label: string;
 	readonly labelTone: ThemeColor;
+}
+
+/** One activation span: rows `fromRow..toRow` (inclusive) of the lifeline at field cell `cell`. */
+export interface SequenceBar {
+	readonly cell: number;
+	readonly fromRow: number;
+	readonly toRow: number;
+	readonly kind: BarKind;
+	readonly tone: ThemeColor;
 }
 
 export interface SequenceLifeline {
@@ -106,31 +136,27 @@ export interface SequenceLayout {
 	readonly labelCol: number;
 	readonly labelWidth: number;
 	readonly lifelines: readonly SequenceLifeline[];
+	readonly bars: readonly SequenceBar[];
 	readonly header: readonly SequenceHeaderPart[];
 	readonly legend: readonly string[];
 	readonly rows: readonly SequenceRow[];
 }
 
-/** The glyph set of the field: one stroke family, one glyph per meaning. */
-export const SEQUENCE_GLYPH = {
-	blank: " ",
-	lifeline: "│",
-	active: "┃",
-	activeLive: "┆",
-	dotted: "·",
-	settled: "─",
-	flight: "┄",
-	cross: "┼",
-	joinLeft: "├",
-	joinRight: "┤",
-	headRight: "▶",
-	headLeft: "◀",
-} as const;
+/** The glyph a bar of each kind is drawn with on its lifeline. */
+export const BAR_GLYPH: Readonly<Record<BarKind, string>> = { live: "┆", done: "┃", wait: "╎" };
+
+/** The body of an edge to a worker that has not started: claimed, not proven. */
+export const CLAIMED_GLYPH = "·";
+
+/** Glyphs the cell canvas derives itself from lifeline and arrow masks; listed so the cell width counts them. */
+const CANVAS_GLYPHS = ["│", "─", "┄", "├", "┤", "┼", "→", "←"];
 
 const MIN_PITCH = 2;
 const MAX_PITCH = 14;
 /** The lifeline field takes at most this share of the width; the label column gets the rest. */
 const FIELD_SHARE = 0.55;
+/** The label column is never narrower than this; the lifeline field gives way first. */
+const MIN_LABEL_WIDTH = 12;
 /** Columns between the lifeline field and the label column. */
 const LABEL_GAP = 2;
 const FIXED_LIFELINES = 3;
@@ -146,7 +172,7 @@ const FIXED_KEYS: readonly Exclude<FlowActor, "worker">[] = ["owner", "system_on
 const OUTCOME_MARK: Readonly<Record<FlowOutcome, string>> = {
 	ok: "",
 	failed: "✗ ",
-	cancelled: "× ",
+	cancelled: "⊘ ",
 	attention: "! ",
 };
 
@@ -157,12 +183,17 @@ const OUTCOME_TONE: Readonly<Record<FlowOutcome, ThemeColor>> = {
 	attention: "warning",
 };
 
+/** An action that ended without an outcome claims none: it is drawn neutral, never as a success. */
+function outcomeTone(outcome: FlowOutcome | undefined): ThemeColor {
+	return outcome === undefined ? "muted" : OUTCOME_TONE[outcome];
+}
+
 function foldable(look: SequenceLook, row: FlowRow, event: FlowEvent): boolean {
 	return (
 		look[event.kind].folds &&
 		row.first.kind === event.kind &&
 		row.first.actor === event.actor &&
-		row.first.lane === event.lane &&
+		row.first.laneKey === event.laneKey &&
 		row.first.endedAt !== undefined &&
 		event.endedAt !== undefined &&
 		(row.outcome ?? "ok") === "ok" &&
@@ -170,14 +201,75 @@ function foldable(look: SequenceLook, row: FlowRow, event: FlowEvent): boolean {
 	);
 }
 
-/** The trace as rows, oldest first, and the row each event landed in (`rowOf[i]` for `flow[i]`). */
+function isNoOpSettledRoute(event: FlowEvent): boolean {
+	return (
+		event.kind === "route" &&
+		event.endedAt !== undefined &&
+		(event.outcome ?? "ok") === "ok" &&
+		!event.evidence &&
+		event.label === "route the turn"
+	);
+}
+
+function isSettledOkTurn(event: FlowEvent): boolean {
+	return event.kind === "turn" && event.endedAt !== undefined && (event.outcome ?? "ok") === "ok";
+}
+
+/**
+ * The trace as rows, oldest first, and the row each event landed in (`rowOf[i]` for `flow[i]`).
+ * Linear: suppression, turn absorption and row ownership are each one pass over precomputed neighbors,
+ * which is exact because `flow` is ordered by start (an action after a turn in the list never began
+ * before it, an action before it never began after it).
+ */
 export function foldFlow(
 	flow: readonly FlowEvent[],
 	look: SequenceLook,
 ): { readonly rows: FlowRow[]; readonly rowOf: number[] } {
+	const count = flow.length;
+	// A no-op route is suppressed when any later action is not one: a suffix flag from the back.
+	const suppressedRoute = new Array<boolean>(count).fill(false);
+	let realLater = false;
+	for (let index = count - 1; index >= 0; index--) {
+		const noOp = isNoOpSettledRoute(flow[index]!);
+		suppressedRoute[index] = noOp && realLater;
+		if (!noOp) realLater = true;
+	}
+	// The nearest action after each index that a turn may absorb: neither a suppressed route nor a turn.
+	const absorbableAfter = new Array<number | undefined>(count).fill(undefined);
+	let nearestAbsorbable: number | undefined;
+	for (let index = count - 1; index >= 0; index--) {
+		absorbableAfter[index] = nearestAbsorbable;
+		if (!suppressedRoute[index] && flow[index]!.kind !== "turn") nearestAbsorbable = index;
+	}
+	// A settled ok turn absorbs the first action that began inside it: the nearest absorbable one after it,
+	// else the first absorbable one before it that began at the same instant (an earlier start cannot lie inside).
+	const turnInnerTarget = new Array<number | undefined>(count).fill(undefined);
+	let tieStartedAt: number | undefined;
+	let tieFirst: number | undefined;
+	for (let index = 0; index < count; index++) {
+		const event = flow[index]!;
+		if (event.startedAt !== tieStartedAt) {
+			tieStartedAt = event.startedAt;
+			tieFirst = undefined;
+		}
+		if (isSettledOkTurn(event)) {
+			const endedAt = event.endedAt!;
+			const after = absorbableAfter[index];
+			if (after !== undefined && flow[after]!.startedAt >= event.startedAt && flow[after]!.startedAt <= endedAt) {
+				turnInnerTarget[index] = after;
+			} else if (tieFirst !== undefined && event.startedAt <= endedAt) {
+				turnInnerTarget[index] = tieFirst;
+			}
+		}
+		if (tieFirst === undefined && !suppressedRoute[index] && event.kind !== "turn" && event.kind !== "prompt") {
+			tieFirst = index;
+		}
+	}
 	const rows: FlowRow[] = [];
-	const rowOf: number[] = [];
-	for (const event of flow) {
+	const rowOf = Array.from({ length: count }, () => 0);
+	for (let index = 0; index < count; index++) {
+		if (suppressedRoute[index] || turnInnerTarget[index] !== undefined) continue;
+		const event = flow[index]!;
 		const duration = event.endedAt !== undefined ? Math.max(0, event.endedAt - event.startedAt) : 0;
 		const previous = rows.at(-1);
 		if (previous && foldable(look, previous, event)) {
@@ -188,7 +280,7 @@ export function foldFlow(
 				totalMs: previous.totalMs + duration,
 				labels: previous.labels.includes(event.label) ? previous.labels : [...previous.labels, event.label],
 			};
-			rowOf.push(rows.length - 1);
+			rowOf[index] = rows.length - 1;
 			continue;
 		}
 		rows.push({
@@ -199,14 +291,43 @@ export function foldFlow(
 			labels: [event.label],
 			...(event.outcome ? { outcome: event.outcome } : {}),
 		});
-		rowOf.push(rows.length - 1);
+		rowOf[index] = rows.length - 1;
+	}
+	// The nearest owner of a row on each side of every index, for the suppressed routes that own none.
+	const ownsRow = (index: number): boolean => !suppressedRoute[index] && turnInnerTarget[index] === undefined;
+	const ownerAfter = new Array<number | undefined>(count).fill(undefined);
+	let nearestOwner: number | undefined;
+	for (let index = count - 1; index >= 0; index--) {
+		ownerAfter[index] = nearestOwner;
+		if (ownsRow(index)) nearestOwner = index;
+	}
+	let ownerBefore: number | undefined;
+	for (let index = 0; index < count; index++) {
+		const target = turnInnerTarget[index];
+		if (target !== undefined) {
+			rowOf[index] = rowOf[target]!;
+		} else if (suppressedRoute[index]) {
+			const owner = ownerAfter[index] ?? ownerBefore;
+			// A suppressed route exists only because a later event is not one, and that event (or, for an
+			// absorbed turn, the event it absorbed) always owns a row, so a row is always found.
+			if (owner === undefined)
+				throw new Error(`flow event ${flow[index]!.id} is suppressed but no event owns a row`);
+			rowOf[index] = rowOf[owner]!;
+		}
+		if (ownsRow(index)) ownerBefore = index;
 	}
 	return { rows, rowOf };
 }
 
 /** Columns of one cell: the widest glyph of the glyph set, so a doubled ambiguous width keeps the grid. */
 export function sequenceCellWidth(look: SequenceLook): number {
-	const glyphs = [...Object.values(SEQUENCE_GLYPH), CARRIER_GLYPH, ...Object.values(look).map((entry) => entry.glyph)];
+	const glyphs = [
+		CARRIER_GLYPH,
+		CLAIMED_GLYPH,
+		...Object.values(BAR_GLYPH),
+		...CANVAS_GLYPHS,
+		...Object.values(look).map((entry) => entry.glyph),
+	];
 	return Math.max(1, ...glyphs.map((glyph) => visibleWidth(glyph)));
 }
 
@@ -217,7 +338,7 @@ function liveTone(actor: FlowActor): ThemeColor {
 function edgeTone(row: FlowRow, state: EdgeState): ThemeColor {
 	if (state === "flight") return liveTone(row.first.actor);
 	if (state === "claimed") return "dim";
-	return OUTCOME_TONE[row.outcome ?? "ok"];
+	return outcomeTone(row.outcome);
 }
 
 function labelTone(row: FlowRow): ThemeColor {
@@ -228,15 +349,13 @@ function labelTone(row: FlowRow): ThemeColor {
 }
 
 /**
- * The evidence a settled action carries, kept whole as the label's suffix: the result a System One
- * judgment or route reached, then the short ledger handle of the row behind it (`label (result) #a1b2`).
+ * The evidence a settled judgment carries, kept whole as the label's suffix: the result it reached,
+ * then the short ledger handle of the row behind it (`label (result) #a1b2`).
  */
-function splitEvidence(event: FlowEvent): { text: string; evidence: string } {
+function evidenceSuffix(event: FlowEvent): string {
 	const handle = event.evidence ? ` ${event.evidence}` : "";
-	const split = event.label.indexOf(" → ");
-	if ((event.actor !== "system_one" && event.kind !== "route") || split === -1 || event.endedAt === undefined)
-		return { text: event.label, evidence: handle };
-	return { text: event.label.slice(0, split), evidence: ` (${event.label.slice(split + 3)})${handle}` };
+	if (event.kind !== "judgment" || event.result === undefined || event.endedAt === undefined) return handle;
+	return ` (${event.result})${handle}`;
 }
 
 function fitLabel(text: string, suffix: string, width: number): string {
@@ -250,7 +369,7 @@ function fitLabel(text: string, suffix: string, width: number): string {
 	return truncateToWidth(whole, width, "…");
 }
 
-function rowLabel(row: FlowRow, look: SequenceLook, nowMs: number, width: number): string {
+function rowLabel(row: FlowRow, look: SequenceLook, nowMs: number, width: number, lifelineHasTag = false): string {
 	const event = row.first;
 	const kind = look[event.kind];
 	const mark =
@@ -262,18 +381,28 @@ function rowLabel(row: FlowRow, look: SequenceLook, nowMs: number, width: number
 	if (row.count > 1) {
 		const names = row.labels.slice(0, 3).join(", ");
 		return fitLabel(
-			`${mark}${kind.plural} ×${row.count} · avg ${formatGraphDuration(row.totalMs / row.count)} (${names})`,
+			`${mark}${kind.plural} ×${row.count} · avg ${formatCompactDuration(row.totalMs / row.count)} (${names})`,
 			"",
 			width,
 		);
 	}
-	const { text, evidence } = splitEvidence(event);
+	// A worker row's label is its lane name, which its lifeline already shows; a report names the lane
+	// only when its lifeline title is not in view (tagged, folded into overflow, or no field at all).
+	const text =
+		event.kind === "worker"
+			? event.endedAt === undefined
+				? "running"
+				: "work"
+			: event.kind === "report" && !lifelineHasTag && event.result !== undefined
+				? event.result
+				: event.label;
+	const evidence = evidenceSuffix(event);
 	const lane = event.actor === "worker" && event.lane && event.kind !== "worker" && event.kind !== "report";
 	const timed =
 		event.endedAt === undefined
-			? `  ${formatGraphDuration(nowMs - event.startedAt)}`
+			? `  ${formatCompactDuration(nowMs - event.startedAt)}`
 			: row.totalMs >= 1000
-				? `  ${formatGraphDuration(row.totalMs)}`
+				? `  ${formatCompactDuration(row.totalMs)}`
 				: "";
 	return fitLabel(`${mark}${lane ? `${event.lane}: ` : ""}${text}`, `${evidence}${timed}`, width);
 }
@@ -286,6 +415,35 @@ interface LifelineModel {
 	readonly fieldCells: number;
 }
 
+/**
+ * The degraded form for a width that cannot hold the lifelines at the minimum pitch beside a readable
+ * label: no header, no field, no legend. Each row is its kind glyph and its label across the width,
+ * with the lane named in the label because no lifeline shows it.
+ */
+function buildLabelsOnlyLayout(
+	folded: readonly FlowRow[],
+	options: { readonly width: number; readonly nowMs: number; readonly look: SequenceLook; readonly cellWidth: number },
+): SequenceLayout {
+	const { width, nowMs, look, cellWidth } = options;
+	const rows = folded.map((row): SequenceRow => {
+		const lead = `${look[row.first.kind].glyph} `;
+		const label = `${lead}${rowLabel(row, look, nowMs, Math.max(0, width - visibleWidth(lead)), true)}`;
+		return { first: row.first, last: row.last, count: row.count, label, labelTone: labelTone(row) };
+	});
+	return {
+		cellWidth,
+		pitch: 0,
+		fieldCells: 0,
+		labelCol: 0,
+		labelWidth: width,
+		lifelines: [],
+		bars: [],
+		header: [],
+		legend: [],
+		rows,
+	};
+}
+
 export function buildSequenceLayout(
 	flow: readonly FlowEvent[],
 	options: { readonly width: number; readonly nowMs: number; readonly look: SequenceLook },
@@ -294,39 +452,38 @@ export function buildSequenceLayout(
 	const cellWidth = sequenceCellWidth(look);
 	const { rows: folded, rowOf } = foldFlow(flow, look);
 
-	// Worker lifelines are named by lane; a delegation names its lane in the label.
-	const knownLanes = new Set(flow.flatMap((event) => (event.lane !== undefined ? [event.lane] : [])));
-	const resolveLane = (label: string): string => {
-		if (knownLanes.has(label)) return label;
-		if (label.endsWith("…")) {
-			const stem = label.slice(0, -1);
-			for (const name of knownLanes) if (name.startsWith(stem)) return name;
-		}
-		return label;
+	// A worker lifeline is the event's lane key, the identity the trace recorded; the display name is
+	// only what the lifeline's title shows.
+	const workerKey = (event: FlowEvent): string => {
+		if (event.laneKey === undefined)
+			throw new Error(`flow event ${event.id} (${event.kind}) addresses a worker lane but carries no laneKey`);
+		return `worker:${event.laneKey}`;
 	};
-	const sourceKey = (event: FlowEvent): string =>
-		event.actor === "worker" ? `worker:${event.lane ?? event.label}` : event.actor;
+	const sourceKey = (event: FlowEvent): string => (event.actor === "worker" ? workerKey(event) : event.actor);
 	const targetKey = (event: FlowEvent): string | undefined =>
-		event.to === undefined
-			? undefined
-			: event.to === "worker"
-				? `worker:${event.lane ?? resolveLane(event.label)}`
-				: event.to;
+		event.to === undefined ? undefined : event.to === "worker" ? workerKey(event) : event.to;
 
 	const lastSeen = new Map<string, number>();
 	const workerKeys: string[] = [];
+	const workerTitle = new Map<string, string>();
 	flow.forEach((event, index) => {
 		for (const key of [sourceKey(event), targetKey(event)]) {
 			if (key === undefined || !key.startsWith("worker:")) continue;
 			if (!lastSeen.has(key)) workerKeys.push(key);
 			lastSeen.set(key, index);
+			if (!workerTitle.has(key)) workerTitle.set(key, event.lane ?? event.laneKey!);
 		}
 	});
 
-	const fieldColumns = Math.floor(width * FIELD_SHARE);
-	const capCells = Math.max(1, Math.floor(fieldColumns / cellWidth));
+	// The label column never gets less than MIN_LABEL_WIDTH: the field shrinks first (workers merge into
+	// the overflow lifeline), and when the fixed lifelines (plus the overflow lifeline, if there are
+	// workers) do not fit at the minimum pitch there is no field at all.
+	const fieldColumns = Math.min(Math.floor(width * FIELD_SHARE), width - LABEL_GAP - MIN_LABEL_WIDTH);
+	const capCells = Math.floor(fieldColumns / cellWidth);
 	const maxLifelines = Math.floor((capCells - 1) / MIN_PITCH) + 1;
-	const workerSlots = Math.max(1, maxLifelines - FIXED_LIFELINES);
+	const fieldless = maxLifelines < FIXED_LIFELINES + (workerKeys.length > 0 ? 1 : 0);
+	if (fieldless) return buildLabelsOnlyLayout(folded, { width, nowMs, look, cellWidth });
+	const workerSlots = maxLifelines - FIXED_LIFELINES;
 	const overflowing = workerKeys.length > workerSlots;
 	// The most recently active workers keep their own lifeline, shown in the order they first appeared.
 	const visibleWorkers = overflowing
@@ -337,7 +494,8 @@ export function buildSequenceLayout(
 			)
 		: new Set(workerKeys);
 	const shownWorkers = workerKeys.filter((key) => visibleWorkers.has(key));
-	const hiddenCount = workerKeys.length - shownWorkers.length;
+	const hiddenKeys = new Set(workerKeys.filter((key) => !visibleWorkers.has(key)));
+	const hiddenCount = hiddenKeys.size;
 
 	const lifelineModel = ((): LifelineModel => {
 		const keys = [...FIXED_KEYS, ...shownWorkers, ...(hiddenCount > 0 ? ["overflow"] : [])];
@@ -351,19 +509,22 @@ export function buildSequenceLayout(
 				key === "overflow"
 					? `+${hiddenCount} more`
 					: key.startsWith("worker:")
-						? key.slice("worker:".length)
+						? workerTitle.get(key)!
 						: FIXED_TITLE[key as Exclude<FlowActor, "worker">];
-			const busy =
-				key === "overflow"
-					? [...busyKeys].some((busyKey) => !visibleWorkers.has(busyKey) && busyKey.startsWith("worker:"))
-					: busyKeys.has(key);
+			const busy = key === "overflow" ? [...busyKeys].some((busyKey) => hiddenKeys.has(busyKey)) : busyKeys.has(key);
 			const fits = visibleWidth(title) <= available;
 			return { key, title, ...(fits ? {} : { tag: TAGS[index] ?? "*" }), cell: index * pitch, busy };
 		});
 		const indexByKey = new Map(list.map((lifeline, index) => [lifeline.key, index]));
 		return {
 			list,
-			indexOf: (key) => indexByKey.get(key) ?? indexByKey.get("overflow") ?? 0,
+			// Every key comes from a flow event: a shown lifeline, or a hidden worker that the overflow
+			// lifeline stands for. Any other key is a broken invariant, not a lifeline to guess.
+			indexOf: (key) => {
+				const index = indexByKey.get(key) ?? (hiddenKeys.has(key) ? indexByKey.get("overflow") : undefined);
+				if (index === undefined) throw new Error(`flow key ${key} has no lifeline`);
+				return index;
+			},
 			pitch,
 			fieldCells: (count - 1) * pitch + 1,
 		};
@@ -374,87 +535,104 @@ export function buildSequenceLayout(
 
 	// Activation bars: a span of an action without a target covers the rows its lifeline stays busy.
 	interface Bar {
-		readonly glyph: string;
+		readonly kind: BarKind;
 		readonly tone: ThemeColor;
 		readonly order: number;
 	}
-	const bars: (Map<number, Bar> | undefined)[] = lifelines.map(() => undefined);
+	// Rows are ordered by start, so the last row an action's span reaches is a binary search.
+	const rowStartedAt = folded.map((row) => row.first.startedAt);
+	const lastRowStartedBy = (time: number): number => {
+		let low = 0;
+		let high = rowStartedAt.length;
+		while (low < high) {
+			const middle = (low + high) >> 1;
+			if (rowStartedAt[middle]! <= time) low = middle + 1;
+			else high = middle;
+		}
+		return low - 1;
+	};
+	const barRows: (Map<number, Bar> | undefined)[] = lifelines.map(() => undefined);
 	flow.forEach((event, index) => {
 		const target = targetKey(event);
 		if (target !== undefined && target !== sourceKey(event)) return;
 		const running = event.endedAt === undefined;
-		if (!running && (event.endedAt ?? 0) <= event.startedAt) return;
 		const start = rowOf[index]!;
-		let end = start;
-		if (running) end = folded.length - 1;
-		else
-			for (let row = start + 1; row < folded.length; row++)
-				if (folded[row]!.first.startedAt <= (event.endedAt ?? 0)) end = row;
-		if (end <= start) return;
+		const suppressed = folded[start]?.first.kind !== event.kind;
+		if (suppressed && event.kind !== "turn") return;
+		if (!running && !suppressed && (event.endedAt ?? 0) <= event.startedAt) return;
+		if (!running && suppressed && (event.endedAt ?? 0) < event.startedAt) return;
+		const end = running ? folded.length - 1 : Math.max(start, lastRowStartedBy(event.endedAt ?? 0));
+		const firstRow = suppressed ? start : start + 1;
+		if (end < firstRow) return;
 		const lifeline = indexOf(sourceKey(event));
-		// Waiting is claimed time, not work: dotted whether or not it is still open.
+		// Waiting is claimed time, not work: its own bar kind whether or not it is still open.
 		const bar: Bar =
 			event.kind === "wait"
-				? { glyph: SEQUENCE_GLYPH.dotted, tone: "dim", order: start }
+				? { kind: "wait", tone: "dim", order: start }
 				: running
-					? { glyph: SEQUENCE_GLYPH.activeLive, tone: liveTone(event.actor), order: start }
-					: { glyph: SEQUENCE_GLYPH.active, tone: OUTCOME_TONE[event.outcome ?? "ok"], order: start };
-		const column = bars[lifeline] ?? new Map<number, Bar>();
-		bars[lifeline] = column;
-		for (let row = start + 1; row <= end; row++) {
+					? { kind: "live", tone: liveTone(event.actor), order: start }
+					: { kind: "done", tone: outcomeTone(event.outcome), order: start };
+		const column = barRows[lifeline] ?? new Map<number, Bar>();
+		barRows[lifeline] = column;
+		for (let row = firstRow; row <= end; row++) {
 			const existing = column.get(row);
 			if (!existing || existing.order <= start) column.set(row, bar);
+		}
+	});
+	// Consecutive rows won by the same span become one run.
+	const bars: SequenceBar[] = [];
+	barRows.forEach((column, lifeline) => {
+		if (!column) return;
+		const covered = [...column.keys()].sort((x, y) => x - y);
+		for (let at = 0; at < covered.length; ) {
+			const fromRow = covered[at]!;
+			const bar = column.get(fromRow)!;
+			let toRow = fromRow;
+			at++;
+			while (at < covered.length && covered[at] === toRow + 1 && column.get(covered[at]!) === bar) {
+				toRow++;
+				at++;
+			}
+			bars.push({ cell: lifelines[lifeline]!.cell, fromRow, toRow, kind: bar.kind, tone: bar.tone });
 		}
 	});
 
 	// A delegation to a worker still waiting for a slot is claimed, not proven.
 	const queued = new Set(
 		flow
-			.filter((event) => event.kind === "wait" && event.lane !== undefined && event.endedAt === undefined)
-			.map((event) => `worker:${event.lane}`),
+			.filter((event) => event.kind === "wait" && event.laneKey !== undefined && event.endedAt === undefined)
+			.map((event) => workerKey(event)),
 	);
 
-	const idle: SequenceCell = { glyph: SEQUENCE_GLYPH.lifeline, tone: "dim" };
-	const blank: SequenceCell = { glyph: SEQUENCE_GLYPH.blank, tone: undefined };
-	const lifelineCells = new Set(lifelines.map((lifeline) => lifeline.cell));
-
-	const rows = folded.map((row, rowIndex): SequenceRow => {
-		const cells: SequenceCell[] = Array.from({ length: fieldCells }, () => blank);
-		lifelines.forEach((lifeline, index) => {
-			const bar = bars[index]?.get(rowIndex);
-			cells[lifeline.cell] = bar ? { glyph: bar.glyph, tone: bar.tone } : idle;
-		});
+	const rows = folded.map((row): SequenceRow => {
 		const event = row.first;
-		const from = lifelines[indexOf(sourceKey(event))]!.cell;
+		const originLifeline = lifelines[indexOf(sourceKey(event))]!;
+		const from = originLifeline.cell;
 		const target = targetKey(event);
 		const to = target === undefined ? from : lifelines[indexOf(target)]!.cell;
 		const glyph = look[event.kind].glyph;
-		const label = rowLabel(row, look, nowMs, labelWidth);
+		const lifelineHasTag = originLifeline.tag !== undefined || originLifeline.key === "overflow";
+		const label = rowLabel(row, look, nowMs, labelWidth, lifelineHasTag);
 		if (to === from) {
-			cells[from] = { glyph, tone: edgeTone(row, event.endedAt === undefined ? "flight" : "settled") };
-			return { first: event, last: row.last, count: row.count, cells, label, labelTone: labelTone(row) };
+			const tone = edgeTone(row, event.endedAt === undefined ? "flight" : "settled");
+			return {
+				first: event,
+				last: row.last,
+				count: row.count,
+				mark: { cell: from, glyph, tone },
+				label,
+				labelTone: labelTone(row),
+			};
 		}
 		const state: EdgeState =
 			event.endedAt === undefined ? "flight" : queued.has(target ?? "") ? "claimed" : "settled";
 		const tone = edgeTone(row, state);
-		const direction = to > from ? 1 : -1;
-		const body =
-			state === "flight"
-				? SEQUENCE_GLYPH.flight
-				: state === "claimed"
-					? SEQUENCE_GLYPH.dotted
-					: SEQUENCE_GLYPH.settled;
-		for (let cell = from + direction; cell !== to; cell += direction)
-			cells[cell] = { glyph: lifelineCells.has(cell) ? SEQUENCE_GLYPH.cross : body, tone };
-		cells[to - direction] = { glyph: direction > 0 ? SEQUENCE_GLYPH.headRight : SEQUENCE_GLYPH.headLeft, tone };
-		cells[to] = { glyph: direction > 0 ? SEQUENCE_GLYPH.joinRight : SEQUENCE_GLYPH.joinLeft, tone };
-		cells[from] = { glyph, tone };
 		return {
 			first: event,
 			last: row.last,
 			count: row.count,
-			cells,
-			arrow: { from, to, state },
+			mark: { cell: from, glyph, tone },
+			arrow: { from, to, state, tone },
 			label,
 			labelTone: labelTone(row),
 		};
@@ -480,5 +658,5 @@ export function buildSequenceLayout(
 	}
 	if (line) legend.push(line);
 
-	return { cellWidth, pitch, fieldCells, labelCol, labelWidth, lifelines, header, legend, rows };
+	return { cellWidth, pitch, fieldCells, labelCol, labelWidth, lifelines, bars, header, legend, rows };
 }

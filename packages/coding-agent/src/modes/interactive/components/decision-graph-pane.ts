@@ -6,47 +6,68 @@
  */
 
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
+import type { WorkbenchGraphView } from "../../../core/settings/settings-schema.ts";
+import { renderDecisionList } from "./decision-graph-list.ts";
 import type { DecisionGraphModel } from "./decision-graph-model.ts";
-import { renderDecisionDiagram, renderDecisionList, type StageTransition } from "./decision-graph-render.ts";
+import { STAGE_LABEL } from "./decision-graph-render.ts";
+import { renderDecisionScene } from "./decision-graph-scene.ts";
 import { renderFlowLanes } from "./flow-lanes-render.ts";
+import { SPRING_SNAPPY, SpringTable } from "./graph/spring.ts";
 import { WorkbenchPane, type WorkbenchPaneTitleButton } from "./workbench-pane.ts";
 
 export const GRAPH_PANE_TITLE = "Decision graph";
 
+/** The title's meta: the current stage by its label and, after a repair, the loop it is in (`build · loop 2`). */
+export function graphTitleMeta(model: DecisionGraphModel): string {
+	// Idle is the resting state and says nothing; only a finished goal or a running stage is worth a word.
+	if (!model.current) return model.goal.branch === "delivered" ? "delivered" : "";
+	const stage = STAGE_LABEL[model.current.stage];
+	return model.loop > 1 ? `${stage} · loop ${model.loop}` : stage;
+}
+
+/** A draw this long after the previous one means the pane was hidden in between; its springs start over. */
+const STALE_DRAW_GAP_MS = 2000;
+
 export class DecisionGraphPane extends WorkbenchPane {
 	private selectedStage?: DecisionStage;
 	private stageAt: readonly (DecisionStage | undefined)[] = [];
-	/** Where the loop was at the last frame; a change between frames is a stage transition. */
+	private stageAtCell?: (column: number, row: number) => DecisionStage | undefined;
 	private seenObjective?: string;
-	private seenStage?: DecisionStage;
-	private transition?: StageTransition;
-	/** The moment the last frame's carrier is no longer needed; undefined when it drew none. */
+	/** All of the diagram's motion state: the focus bar's springs. Cleared when the objective changes or the pane was away. */
+	private readonly springs = new SpringTable(SPRING_SNAPPY);
+	/** The model clock at the last draw; the workbench hides the pane without drawing, so a long gap means it was away. */
+	private lastDrawnAt?: number;
+	/** The moment the last frame's motion is no longer needed; undefined when nothing moved. */
 	private motion?: number;
 
-	/** When the last drawn frame needs its carrier until (Infinity while in flight); undefined: nothing moves. */
+	/**
+	 * When the last drawn frame needs motion until; always finite (a spring: a short lease each frame renews,
+	 * a carrier: its start plus the flight time or its end plus the settle time). Undefined: nothing moves.
+	 */
 	get motionUntil(): number | undefined {
 		return this.motion;
 	}
 
-	/** A frame that is not drawn (graph hidden or folded) needs no carrier. */
+	/** A frame that is not drawn (graph hidden or folded) needs no motion. */
 	override hide(): void {
 		this.motion = undefined;
 		super.hide();
 	}
 
-	/** The stage the loop entered since the last frame, as one transition; a new objective starts over. */
+	/**
+	 * A new objective starts over: no selection, no springs. So does a draw after the pane was away, so the
+	 * focus bar never slides in from where it was before the pane was hidden.
+	 */
 	private trackStage(model: DecisionGraphModel): void {
-		const stage = model.current?.stage;
+		const away = this.lastDrawnAt !== undefined && model.nowMs - this.lastDrawnAt > STALE_DRAW_GAP_MS;
+		this.lastDrawnAt = model.nowMs;
 		if (model.objectiveId !== this.seenObjective) {
 			this.seenObjective = model.objectiveId;
-			this.seenStage = stage;
-			this.transition = undefined;
+			this.selectedStage = undefined;
+			this.springs.clear();
 			return;
 		}
-		if (stage === undefined) return;
-		if (this.seenStage !== undefined && stage !== this.seenStage)
-			this.transition = { from: this.seenStage, to: stage, at: model.nowMs };
-		this.seenStage = stage;
+		if (away) this.springs.clear();
 	}
 
 	/** The stage whose detail is open in the List view. */
@@ -59,10 +80,11 @@ export class DecisionGraphPane extends WorkbenchPane {
 		this.selectedStage = this.selectedStage === stage ? undefined : stage;
 	}
 
-	/** The stage drawn on the content row under a pointer, or undefined off any stage row. */
+	/** The stage under a pointer: the exact node for the diagram, the row's stage for the row-granular views. */
 	stageAtPoint(column: number, row: number): DecisionStage | undefined {
 		const index = this.rowAt(column, row);
-		return index === undefined ? undefined : this.stageAt[index];
+		if (index === undefined) return undefined;
+		return this.stageAtCell ? this.stageAtCell(this.contentColumn(column), index) : this.stageAt[index];
 	}
 
 	/** One title row plus `height - 1` content rows, `width` cells each; the current stage stays in view. */
@@ -75,25 +97,26 @@ export class DecisionGraphPane extends WorkbenchPane {
 		height: number,
 		actions: readonly WorkbenchPaneTitleButton[],
 		motion = true,
+		interactive = true,
 	): string[] {
 		const inner = Math.max(1, width - 2);
 		this.trackStage(model);
+		// A stage that is no longer among the model's stages (evicted, or from another objective) shows no detail.
+		if (this.selectedStage !== undefined && !model.stages.some((row) => row.stage === this.selectedStage)) {
+			this.selectedStage = undefined;
+		}
 		const composed =
 			view === "list"
 				? renderDecisionList(model, inner, this.selectedStage)
 				: view === "lanes"
 					? renderFlowLanes(model.flow, inner, model.nowMs, motion)
-					: renderDecisionDiagram(model, inner, motion ? this.transition : undefined);
+					: renderDecisionScene(model, inner, this.springs, { motion });
 		this.stageAt = composed.stageAt;
+		this.stageAtCell = composed.stageAtCell;
 		this.motion = composed.motionUntil;
-		const meta = model.current
-			? `${model.current.stage}${model.loop > 1 ? ` · loop ${model.loop}` : ""}`
-			: model.goal.branch === "delivered"
-				? "delivered"
-				: "idle";
 		return this.render(
 			GRAPH_PANE_TITLE,
-			meta,
+			graphTitleMeta(model),
 			[...composed.rows],
 			x,
 			y,
@@ -101,9 +124,8 @@ export class DecisionGraphPane extends WorkbenchPane {
 			height,
 			{ row: composed.currentRow, key: composed.focusKey },
 			actions,
+			interactive,
+			composed.pinnedRows,
 		);
 	}
 }
-
-/** How the Decision graph draws the loop. */
-export type WorkbenchGraphView = "list" | "diagram" | "lanes";

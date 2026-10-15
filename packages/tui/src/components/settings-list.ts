@@ -26,6 +26,7 @@ export interface SettingsListTheme {
 	description: (text: string) => string;
 	cursor: string;
 	hint: (text: string) => string;
+	selectedRow?: (text: string) => string;
 }
 
 export interface SettingsListOptions {
@@ -153,8 +154,10 @@ export class SettingsList implements Component {
 			const valueMaxWidth = width - usedWidth - 2;
 
 			const valueText = this.theme.value(truncateToWidth(item.currentValue, valueMaxWidth, ""), isSelected);
-
-			lines.push(truncateToWidth(prefix + labelText + separator + valueText, width));
+			const row = truncateToWidth(prefix + labelText + separator + valueText, width);
+			const padded =
+				isSelected && this.theme.selectedRow ? row + " ".repeat(Math.max(0, width - visibleWidth(row))) : row;
+			lines.push(isSelected && this.theme.selectedRow ? this.theme.selectedRow(padded) : padded);
 		}
 
 		// Add scroll indicator if needed
@@ -190,18 +193,21 @@ export class SettingsList implements Component {
 		// Main list input handling
 		const kb = getKeybindings();
 		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
+		const hasActiveSearchQuery = Boolean(
+			this.searchEnabled && this.searchInput && this.searchInput.getValue().length > 0,
+		);
 		if (kb.matches(data, "tui.select.up")) {
 			if (displayItems.length === 0) return;
 			this.selectedIndex = this.selectedIndex === 0 ? displayItems.length - 1 : this.selectedIndex - 1;
 		} else if (kb.matches(data, "tui.select.down")) {
 			if (displayItems.length === 0) return;
 			this.selectedIndex = this.selectedIndex === displayItems.length - 1 ? 0 : this.selectedIndex + 1;
-		} else if (kb.matches(data, "tui.select.confirm") || data === " ") {
+		} else if (kb.matches(data, "tui.select.confirm") || (data === " " && !hasActiveSearchQuery)) {
 			this.activateItem();
 		} else if (kb.matches(data, "tui.select.cancel")) {
 			this.onCancel();
 		} else if (this.searchEnabled && this.searchInput) {
-			const sanitized = data.replace(/ /g, "");
+			const sanitized = hasActiveSearchQuery ? data : data.replace(/ /g, "");
 			if (!sanitized) {
 				return;
 			}

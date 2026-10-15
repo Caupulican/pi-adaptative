@@ -124,6 +124,7 @@ import { workerReportClaimText } from "./delegation/worker-report.ts";
 import type { WorkerTerminalHandoff } from "./delegation/worker-terminal-handoff-coordinator.ts";
 import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
 import { ExtensionBindingController } from "./extension-binding-controller.ts";
+import type { ContinuousChatAudit } from "./extensions/builtin.ts";
 import type {
 	CompactOptions,
 	ContextUsage,
@@ -182,6 +183,12 @@ import {
 	CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
 	type ContinuousChatWorkReportEntry,
 } from "./memory/continuous-chat-ingest.ts";
+import {
+	type ContinuousChatWire,
+	continuousChatFrameMessages,
+	renderContinuousChatTurnState,
+	resolveContinuousChatTurnStart,
+} from "./memory/continuous-chat-projection.ts";
 import { readContinuousChatSettings, validateContinuousChatSummaryModel } from "./memory/continuous-chat-settings.ts";
 import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "./memory/providers/file-store.ts";
 import { MemoryController } from "./memory-controller.ts";
@@ -613,6 +620,7 @@ export class AgentSession {
 			getSessionId: () => this.sessionId,
 			getCwd: () => this._cwd,
 			getMessages: () => this.agent.state.messages,
+			getForegroundLineage: () => this._foregroundLineage(),
 			setMessages: (messages) => {
 				this.agent.state.messages = messages;
 			},
@@ -627,6 +635,7 @@ export class AgentSession {
 			executeObjectiveRootRoute: (route, signal) => this._goals.objectiveRootExecutor().execute(route, signal),
 			runWorkerDelegationOnce: (request) => this.runWorkerDelegationOnce(request),
 			sendNextTurnCustomMessage: (message) => this.sendCustomMessage(message, { deliverAs: "nextTurn" }),
+			warn: (message) => this.emitHostWarning(message),
 		});
 		this._edgeIntent = new SessionEdgeIntentController({
 			getSessionManager: () => this.sessionManager,
@@ -1331,9 +1340,9 @@ export class AgentSession {
 				return model ? this._isModelUnusable(model) : this._foregroundRecovery.isModelExhausted(ref);
 			},
 			getStoredFitnessReport: (ref) => this.getStoredFitnessReports().find((entry) => entry.model === ref)?.report,
-			// Live context is an over-estimate of the span to summarize (includes the kept tail) —
-			// conservative in the safe direction for the summarizer capacity check.
-			estimateSummarizationInputTokens: () => this._pipeline.estimateCurrentContextTokens(this.agent.state.messages),
+			// Live context (under ICM, the running turn's own messages) is an over-estimate of the span to
+			// summarize (includes the kept tail) — conservative in the safe direction for the summarizer capacity check.
+			estimateSummarizationInputTokens: () => this._compaction.estimateSummarizationInputTokens(),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
 			// Route a managed-local summarizer through the same readiness/residency gate every
 			// other isolated consumer uses, so compact() never calls a local model that was never
@@ -1349,7 +1358,7 @@ export class AgentSession {
 			getModel: () => this.model,
 			getCompactionTriggerTokens: () => this._hardCompactionTriggerTokens(),
 			estimateLineageRemainingRequests: () =>
-				this._cache.knowledge.lineage(this.sessionId, historyLineage(this.agent.state.messages), Date.now()),
+				this._cache.knowledge.lineage(this.sessionId, this._foregroundLineage(), Date.now()),
 			recordCacheDecision: (decision) => this._recordCacheDecision(decision),
 			sanctionCacheBreak: (kind, reason, target) => {
 				const model = this.model;
@@ -1389,6 +1398,9 @@ export class AgentSession {
 			settingsManager: this.settingsManager,
 			getModel: () => this.model,
 			getAdaptedSettings: () => this._getAdaptedCompactionSettings(),
+			getContinuousChatWire: () => this._continuousChatWire(),
+			getContinuousChatTurn: () => this._memory.continuousChatHost()?.turns.current(),
+			commitPendingTurnMessages: () => this._foregroundLifecycle.commitRoutedPromptPrefix(),
 			getCompactionModelSetting: () => this.settingsManager.getCompactionModel(),
 			getRequestAuth: (model) => this._compactionSupport.getRequestAuth(model),
 			resolveModelAndAuth: (compactionModel, sessionModel) =>
@@ -1458,11 +1470,7 @@ export class AgentSession {
 					lastResponseAt === undefined
 						? undefined
 						: this._cache.knowledge.retainedAfter(lane, Math.max(0, now - lastResponseAt), now);
-				const lineage = this._cache.knowledge.lineage(
-					this.sessionId,
-					historyLineage(this.agent.state.messages),
-					now,
-				);
+				const lineage = this._cache.knowledge.lineage(this.sessionId, this._foregroundLineage(), now);
 				const outcome = this._cache.knowledge.compactionOutcome(lane, now);
 				return {
 					retainedAt: (gapMs) => this._cache.knowledge.retainedAfter(lane, gapMs, now),
@@ -1512,6 +1520,8 @@ export class AgentSession {
 			getHardTriggerTokens: () => this._hardCompactionTriggerTokens(),
 			getEarlyTriggerTokens: () => this._earlyCompactionTriggerTokens(),
 			hasCompactableHistory: () => this._compaction.hasCompactableHistory(),
+			releasesAtTurnEnd: () => this._isContinuousChatRoot(),
+			turnReleaseFloorTokens: () => this._compaction.turnRequestFloorTokens(),
 			compact: (customInstructions) => this.compact(customInstructions),
 			deliverNote: (message) => this.sendCustomMessage(message, { triggerTurn: true }),
 			askForHandoff: (message) => this.sendCustomMessage(message, { triggerTurn: true }),
@@ -1682,10 +1692,9 @@ export class AgentSession {
 			foreground: this._foregroundRecovery,
 			goals: this._goals,
 			enqueueSteeringMessage: (message) => this.agent.steer(message),
-			messageCount: () => this.agent.state.messages.length,
 			// Wake turns relay worker results: their answer's claims are checked like any other answer's.
-			afterTurn: async (turnStart, lease) => {
-				const correction = await this._claimCorrection(turnStart);
+			afterTurn: async (turnOpening, lease) => {
+				const correction = await this._claimCorrection(turnOpening);
 				if (correction)
 					await this._foregroundRecovery.runAgentPrompt(
 						createCustomMessage("claim_delivery", correction, true, undefined, new Date().toISOString()),
@@ -1930,6 +1939,7 @@ export class AgentSession {
 			getMemoryManager: () => this._memory.getMemoryManager(),
 			getMemoryAuditDiagnostics: () => this._memory.getMemoryAuditDiagnostics(),
 			getSelfCompactionView: () => this._selfCompaction.view(),
+			getContinuousChatAudit: () => this._continuousChatAudit(),
 			clearPendingMemoryProviders: () => this._memory.clearPendingProviders(),
 			createMemoryReloadSnapshot: () => this._memory.createReloadSnapshot(),
 			restoreMemoryReloadSnapshot: (snapshot) => this._memory.restoreReloadSnapshot(snapshot),
@@ -2072,6 +2082,13 @@ export class AgentSession {
 			getToolDefinition: (name) => this.getToolDefinition(name),
 			getToolRecoveryEventLogPath: () => this._toolRecoveryEventLogPath,
 			getAgentDir: () => this._agentDir,
+			getContinuousChatTurnStartIndex: (messages) => {
+				if (!this._isContinuousChatRoot()) return undefined;
+				const turn = this._memory.continuousChatHost()?.turns.current();
+				if (turn === undefined) return undefined;
+				const start = resolveContinuousChatTurnStart(turn, messages);
+				return "error" in start ? undefined : start.index;
+			},
 		});
 		const previousToolArgumentValidation = this.agent.onToolArgumentValidation;
 		this.agent.onToolArgumentValidation = (event) => {
@@ -2360,7 +2377,7 @@ export class AgentSession {
 				this._enableCapabilitiesAuthorizedByUser(userRequest, signal, trustedOwner, acceptedOrder),
 			announceOwnerFollowUpsWhenPresent: () => this._announceOwnerFollowUpsWhenPresent(),
 			runToolkitHit: (scriptName, messages, signal) => this._runToolkitHit(scriptName, messages, signal),
-			claimCorrection: (turnStart) => this._claimCorrection(turnStart),
+			claimCorrection: (turnOpening) => this._claimCorrection(turnOpening),
 			flushOwnerItems: (lease) => this._flushOwnerItems(lease),
 			scheduleIdleWork: (options, afterPrompt) => this._scheduleIdleWork(options, afterPrompt),
 			hasPendingIdleContinuation: () => this._backgroundLanes.hasPendingIdleContinuation(),
@@ -2919,7 +2936,7 @@ export class AgentSession {
 	 */
 	private _describeCompactionSummarizer(): string {
 		const reason = this._compactionSupport.getLastSelectionReason() ?? "unresolved";
-		const estimate = this._pipeline.estimateCurrentContextTokens(this.agent.state.messages);
+		const estimate = this._compaction.estimateSummarizationInputTokens();
 		return `summarizer: ${reason}, ~${Math.ceil(estimate / 1000)}k est input`;
 	}
 
@@ -3341,7 +3358,11 @@ export class AgentSession {
 	}
 
 	private _refreshAfterCompaction(): void {
+		// A cheap routed turn's buffered messages are live but not in the session yet: the rebuild cannot see them, and
+		// the compaction did not summarize them, so they follow the rebuilt history as the newest messages.
+		const pending = this._modelRouter.pendingSessionMessages(this.agent.state.messages);
 		this._cache.refreshAfterCompaction();
+		if (pending.length > 0) this.agent.state.messages = [...this.agent.state.messages, ...pending];
 	}
 
 	/**
@@ -3638,6 +3659,7 @@ export class AgentSession {
 					event.message.content,
 					event.message.display,
 					event.message.details,
+					event.message,
 				);
 				this._durableCustomMessageTurns.notePersisted(event.message);
 				messagePersisted = true;
@@ -4495,8 +4517,8 @@ export class AgentSession {
 		return this._cache.chooseObjectiveExecutor(route);
 	}
 
-	private _claimCorrection(turnStart: number): Promise<string | undefined> {
-		return this._unsettledLadder.claimCorrection(turnStart);
+	private _claimCorrection(turnOpening: AgentMessage): Promise<string | undefined> {
+		return this._unsettledLadder.claimCorrection(turnOpening);
 	}
 
 	private async _runToolkitHit(
@@ -4702,6 +4724,7 @@ export class AgentSession {
 				message.content,
 				message.display,
 				message.details,
+				appMessage,
 			);
 			this._emit({ type: "message_start", message: appMessage });
 			this._emit({ type: "message_end", message: appMessage });
@@ -5051,9 +5074,75 @@ export class AgentSession {
 		this.settingsManager.setCompactionEnabled(enabled);
 	}
 
-	/** Whether auto-compaction is enabled */
+	/** Whether auto-compaction is enabled: the effective setting compaction runs with, not only the stored flag. */
 	get autoCompactionEnabled(): boolean {
-		return this.settingsManager.getCompactionEnabled();
+		return this._getAdaptedCompactionSettings().enabled;
+	}
+
+	/**
+	 * The ICM projection that owns this session's provider wire: the chat, or the fail-closed block while the chat is
+	 * unavailable. Read from the projection memory installed, never from the selected setting, which leads it while a
+	 * memory-mode change applies. A child session has no project chat (an activation failure installs the block without
+	 * checking for one), so its wire is always its own history and its compaction stays session-wide.
+	 */
+	private _continuousChatWire(): ContinuousChatWire | undefined {
+		return this._isChildSession ? undefined : this._memory.continuousChatWire();
+	}
+
+	/** Whether an ICM projection, the chat or its block, owns this session's provider wire. */
+	private _isContinuousChatRoot(): boolean {
+		return this._continuousChatWire() !== undefined;
+	}
+
+	/**
+	 * The lineage the foreground's requests are made on. Under ICM a turn's requests carry only its frame and its own
+	 * messages, so a turn is its own lineage until it applies a compaction, then that checkpoint's (the latest the rebuilt
+	 * history holds). Between ICM turns no request is sent and the history's own lineage stands.
+	 */
+	private _foregroundLineage(): string {
+		const turn = this._isContinuousChatRoot() ? this._memory.continuousChatHost()?.turns.current() : undefined;
+		return turn === undefined || turn.latestCompaction !== undefined
+			? historyLineage(this.agent.state.messages)
+			: `icm-turn@${turn.startedAt}`;
+	}
+
+	/**
+	 * Under ICM, what the running turn's requests carry for the context audit: its frame (chat view, live state) and the
+	 * session entry its own messages begin at (the summary of a compaction it applied, or its first own message). While
+	 * the chat is unavailable, no request is sent at all, and the audit says why.
+	 */
+	private _continuousChatAudit(): ContinuousChatAudit | undefined {
+		const wire = this._continuousChatWire();
+		if (wire === undefined) return undefined;
+		if (wire.kind === "blocked") return { turn: undefined, blockedReason: wire.reason };
+		const turn = this._memory.continuousChatHost()?.turns.current();
+		if (turn === undefined) return { turn: undefined };
+		const frame = continuousChatFrameMessages(turn, renderContinuousChatTurnState(turn));
+		const messages = this.agent.state.messages;
+		const resolved = resolveContinuousChatTurnStart(turn, messages);
+		if ("error" in resolved) return { turn: { turnId: turn.turnId, frame, start: { unresolved: resolved.error } } };
+		const first = messages[resolved.index];
+		const entryId =
+			first === undefined
+				? undefined
+				: first.role === "compactionSummary"
+					? first.compactionEntryId
+					: this.sessionManager.getMessageEntryId(first);
+		return {
+			turn: {
+				turnId: turn.turnId,
+				frame,
+				start:
+					entryId !== undefined
+						? { entryId }
+						: {
+								unresolved:
+									first === undefined
+										? "the turn has no message of its own yet"
+										: "the turn's first message is not persisted in the session yet",
+							},
+			},
+		};
 	}
 
 	/** SDK startup and extension rebinding activate the selected provider generation. */

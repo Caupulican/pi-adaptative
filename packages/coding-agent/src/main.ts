@@ -89,7 +89,7 @@ import { SettingsManager } from "./core/settings-manager.ts";
 import { describeCause, neutralizeControls, TerminalWarnings } from "./core/terminal-warnings.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { startCliPowerShellWarmStart } from "./core/tools/early-powershell-session.ts";
-import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
+import { ProjectTrustStore, resolveProjectTrust } from "./core/trust-manager.ts";
 import { getBoundWorktreeLaneKey } from "./core/worktree-sync/lane-binding.ts";
 import { probeProcessLiveness } from "./kernel/reliability/process-tree.ts";
 import { assertValidSessionId, SessionManager } from "./kernel/session/session-manager.ts";
@@ -619,67 +619,28 @@ async function promptForMissingSessionCwd(
 	]);
 }
 
-interface ProjectTrustPromptResult {
-	trusted: boolean;
-	remember: boolean;
-}
-
-async function promptForProjectTrust(
-	cwd: string,
-	settingsManager: SettingsManager,
-): Promise<ProjectTrustPromptResult | undefined> {
-	return showStartupSelector(
-		settingsManager,
-		`Trust project folder?\n${cwd}\n\nThis allows pi to read project instructions (AGENTS.md/CLAUDE.md/GEMINI.md), load .pi settings and resources, install missing project packages, and execute project extensions.`,
-		[
-			{ label: "Trust", value: { trusted: true, remember: true } },
-			{ label: "Trust (this session only)", value: { trusted: true, remember: false } },
-			{ label: "Do not trust", value: { trusted: false, remember: true } },
-			{ label: "Do not trust (this session only)", value: { trusted: false, remember: false } },
-		],
-	);
-}
-
-async function resolveProjectTrusted(options: {
+function resolveProjectTrusted(options: {
 	cwd: string;
 	trustStore: ProjectTrustStore;
+	trustDefault: "trusted" | "untrusted";
 	trustOverride?: boolean;
 	appMode: AppMode;
-	settingsManagerForPrompt: SettingsManager;
 	/** Whether this invocation runs a session (not --help or --list-models), so an untrusted run is worth announcing. */
 	runsSession: boolean;
-}): Promise<boolean> {
+}): boolean {
 	if (options.trustOverride !== undefined) {
 		return options.trustOverride;
 	}
-	if (!hasProjectTrustInputs(options.cwd)) {
-		return true;
-	}
-
-	const decision = options.trustStore.get(options.cwd);
-	if (decision !== null) {
-		return decision;
-	}
-	if (options.appMode !== "interactive") {
-		// Nobody can be asked here, so the project runs untrusted; say so, since its own settings
-		// (toolkit scripts, models, extensions) silently not applying reads as them being broken.
-		if (options.runsSession)
-			console.error(
-				chalk.yellow(
-					`Project ${options.cwd} is not trusted, so its .pi settings, extensions and instructions are not loaded. Pass --approve (-a) to trust it for this run, or trust it once in the interactive app.`,
-				),
-			);
-		return false;
-	}
-
-	const selected = await promptForProjectTrust(options.cwd, options.settingsManagerForPrompt);
-	if (selected !== undefined) {
-		if (selected.remember) {
-			options.trustStore.set(options.cwd, selected.trusted);
-		}
-		return selected.trusted;
-	}
-	return false;
+	const trusted = resolveProjectTrust(options.cwd, options.trustStore, options.trustDefault);
+	// The interactive app announces it in the conversation; other modes would otherwise read project
+	// settings (toolkit scripts, models, extensions) silently not applying as them being broken.
+	if (!trusted && options.runsSession && options.appMode !== "interactive")
+		console.error(
+			chalk.yellow(
+				`Project ${options.cwd} is untrusted (a saved decision or the projectTrust setting), so its .pi settings, extensions and instructions are not loaded. Pass --approve (-a) to trust it for this run, or trust it with /trust in the interactive app.`,
+			),
+		);
+	return trusted;
 }
 
 export interface MainOptions {
@@ -802,8 +763,8 @@ export async function main(args: string[], options?: MainOptions) {
 	const cwd = process.cwd();
 	const agentDir = getAgentDir();
 	const trustStore = new ProjectTrustStore(agentDir);
-	const startupProjectTrusted =
-		parsed.projectTrustOverride ?? (!hasProjectTrustInputs(cwd) || trustStore.get(cwd) === true);
+	const trustDefault = SettingsManager.create(cwd, agentDir, { projectTrusted: false }).getProjectTrustDefault();
+	const startupProjectTrusted = parsed.projectTrustOverride ?? resolveProjectTrust(cwd, trustStore, trustDefault);
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: startupProjectTrusted });
 	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
 
@@ -842,12 +803,12 @@ export async function main(args: string[], options?: MainOptions) {
 	time("createSessionManager");
 
 	const trustPromptMode: AppMode = parsed.help || parsed.listModels !== undefined || !hasHumanUI ? "print" : appMode;
-	const projectTrustedForSession = await resolveProjectTrusted({
+	const projectTrustedForSession = resolveProjectTrusted({
 		cwd: sessionManager.getCwd(),
 		trustStore,
+		trustDefault,
 		trustOverride: parsed.projectTrustOverride,
 		appMode: trustPromptMode,
-		settingsManagerForPrompt: startupSettingsManager,
 		runsSession: !parsed.help && parsed.listModels === undefined,
 	});
 
@@ -865,7 +826,7 @@ export async function main(args: string[], options?: MainOptions) {
 		const projectTrusted =
 			cwd === sessionManager.getCwd()
 				? projectTrustedForSession
-				: (parsed.projectTrustOverride ?? (!hasProjectTrustInputs(cwd) || trustStore.get(cwd) === true));
+				: (parsed.projectTrustOverride ?? resolveProjectTrust(cwd, trustStore, trustDefault));
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
 		const orchestrationDiagnostics: AgentSessionRuntimeDiagnostic[] = [];
 		const orchestrationProfileId =

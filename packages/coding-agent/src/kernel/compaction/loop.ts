@@ -1,6 +1,7 @@
 import type { Model } from "@caupulican/pi-ai";
 import { classifyFailure } from "../reliability/classifier.ts";
 import type { SessionEntry } from "../session/session-entries.ts";
+import { isWholePathCompaction } from "../session/session-manager.ts";
 import { type CompactionResult, mergeCompactionVerificationReports } from "./compaction.ts";
 import { CompactionVerificationError, type VerificationReport } from "./verification.ts";
 
@@ -58,6 +59,32 @@ export type CompactionLoopOutcome =
 	| { kind: "skip"; reason: string }
 	| { kind: "failed"; reason: string; cycles: number };
 
+/**
+ * Thrown by `summarizeAndVerify` or `buildDeterministicCheckpoint` when the branch holds nothing the cycle could replace.
+ * Not a failure to retry: no cycle parameter makes room where nothing is compactable, so the run ends with the message
+ * as its reason instead of announcing another cycle.
+ */
+export class NothingToCompactError extends Error {
+	constructor(reason: string) {
+		super(reason);
+		this.name = "NothingToCompactError";
+	}
+}
+
+/**
+ * The run's end when a cycle finds nothing to compact: a skip when nothing was applied yet; after an applied checkpoint
+ * whose effect did not restore headroom, a failure naming that, since no further cycle can make room.
+ */
+function nothingToCompactOutcome(
+	error: NothingToCompactError,
+	appliedResult: CompactionResult | undefined,
+	cycle: number,
+): CompactionLoopOutcome {
+	return appliedResult === undefined
+		? { kind: "skip", reason: error.message }
+		: { kind: "failed", reason: `effect-not-restored (${error.message})`, cycles: cycle };
+}
+
 const MAX_CYCLES = 4;
 const MAX_LLM_CYCLES = 3;
 const DEFAULT_KEEP_RECENT = 20_000;
@@ -87,9 +114,14 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 		}
 
 		const branch = deps.getBranch();
+		// Only a checkpoint of this whole branch means it is already compacted; one scoped to a later entry is not.
 		const trailingEntry = branch[branch.length - 1];
-		if (branch.length > 0 && trailingEntry?.type === "compaction") {
-			if (appliedResult && trailingEntry.id === ownTrailingCompactionId) {
+		const trailingCheckpoint =
+			trailingEntry?.type === "compaction" && isWholePathCompaction(branch, trailingEntry)
+				? trailingEntry
+				: undefined;
+		if (trailingCheckpoint) {
+			if (appliedResult && trailingCheckpoint.id === ownTrailingCompactionId) {
 				if (!ownTrailingCompactionNeedsRetry) return { kind: "success", result: appliedResult, cycles: cycle - 1 };
 			} else if (!(cycle === 1 && deps.allowTrailingCompactionAsPrevious)) {
 				return { kind: "skip", reason: "already compacted" };
@@ -100,10 +132,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 		if (cycle === 1 && !deps.shouldCompact(observedTokens)) {
 			return {
 				kind: "skip",
-				reason:
-					branch.length > 0 && branch[branch.length - 1]?.type === "compaction"
-						? "already compacted"
-						: "within threshold",
+				reason: trailingCheckpoint ? "already compacted" : "within threshold",
 			};
 		}
 
@@ -131,6 +160,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 				await deps.apply(result);
 				return { kind: "success", result, cycles: cycle };
 			} catch (error) {
+				if (error instanceof NothingToCompactError) return nothingToCompactOutcome(error, appliedResult, cycle);
 				return { kind: "failed", reason: mapFailureCause(error).cause, cycles: cycle };
 			}
 		}
@@ -175,6 +205,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 			if (deps.signal?.aborted) {
 				return { kind: "failed", reason: "aborted", cycles: cycle };
 			}
+			if (error instanceof NothingToCompactError) return nothingToCompactOutcome(error, appliedResult, cycle);
 			if (error instanceof CompactionVerificationError) {
 				pendingVerificationReports.push(...error.reports);
 			}
@@ -197,6 +228,9 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 					await deps.apply(deterministicResult);
 					return { kind: "success", result: deterministicResult, cycles: cycle };
 				} catch (deterministicError) {
+					if (deterministicError instanceof NothingToCompactError) {
+						return nothingToCompactOutcome(deterministicError, appliedResult, cycle);
+					}
 					return { kind: "failed", reason: mapFailureCause(deterministicError).cause, cycles: cycle };
 				}
 			}

@@ -166,7 +166,8 @@ export interface PromptSubmissionControllerDeps {
 	): Promise<string | undefined>;
 	announceOwnerFollowUpsWhenPresent(): void;
 	runToolkitHit(scriptName: string, messages: readonly AgentMessage[], signal?: AbortSignal): Promise<void>;
-	claimCorrection(turnStart: number): Promise<string | undefined> | undefined;
+	/** The turn is found from its opening message: the first message its run sends. */
+	claimCorrection(turnOpening: AgentMessage): Promise<string | undefined> | undefined;
 	flushOwnerItems(lease?: ForegroundSubmissionLease): Promise<void>;
 	scheduleIdleWork(options: PromptOptions | undefined, afterPrompt: boolean): void;
 	hasPendingIdleContinuation(): boolean;
@@ -941,7 +942,9 @@ export class PromptSubmissionController {
 					)
 				: await executeSystemOnePreflight(undefined, this.deps.agent.state.messages.length);
 			if (preflight.proceed) {
-				const turnStart = this.deps.agent.state.messages.length;
+				// The run sends `messages[0]` first (it holds at least the prompt message); the claim check finds the turn
+				// by it, since a compaction inside the turn can rebuild the history so no length read here marks its start.
+				const turnOpening = messages[0];
 				await this.deps.modelRouter.runRoutedTurn(
 					messages,
 					routedTurnModel,
@@ -952,7 +955,7 @@ export class PromptSubmissionController {
 				);
 				// The answer's claims and the objective's postflight read different facts and write nothing
 				// the other reads, so they wait on System One together, not one after the other.
-				const claimCheck = submissionSignal?.aborted ? undefined : this.deps.claimCorrection(turnStart);
+				const claimCheck = submissionSignal?.aborted ? undefined : this.deps.claimCorrection(turnOpening);
 				// If the postflight below throws first, this check is abandoned: its own failure must not
 				// surface as an unhandled rejection. The await further down still sees it when it is used.
 				claimCheck?.catch(() => undefined);

@@ -2,7 +2,6 @@ import {
 	type Component,
 	isMouseSequence,
 	parseMouseSequence,
-	Text,
 	truncateToWidth,
 	wrapTextWithAnsi,
 } from "@caupulican/pi-tui";
@@ -11,12 +10,15 @@ import { backgroundToolInvocationObservations } from "../../core/background-tool
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import type { ForegroundRouteSnapshot } from "../../core/model-router-controller.ts";
 import type { OperatorProjection } from "../../core/operator-projection/types.ts";
+import { formatRouteValue, shortModelName } from "../../core/route-text.ts";
+import { DEFAULT_GRAPH_FRACTION } from "../../core/settings/settings-rules.ts";
 import {
 	evaluationResultText,
 	type SemanticEvaluationRecord,
 } from "../../core/system-one/semantic-evaluation-ledger.ts";
 import type { SemanticPlaneHealth } from "../../core/system-one/semantic-plane-health.ts";
 import { type OrchestrationPanelModel, renderOrchestrationPanelRows } from "../../core/tools/orchestration-panel.ts";
+import { formatCompactDuration } from "../../core/util/format-duration.ts";
 import { type AgentMessage, type ToolInvocationObservation, ToolInvocationReport } from "../../kernel/index.ts";
 import { sanitizeBinaryOutput } from "../../kernel/utils/shell-output.ts";
 import { theme } from "../../presentation/theme-model.ts";
@@ -30,23 +32,25 @@ import {
 	projectSpecialistLanes,
 } from "./components/agents-overlay.ts";
 import { type DecisionGraphModel, workerRouteText } from "./components/decision-graph-model.ts";
-import { formatGraphDuration } from "./components/decision-graph-render.ts";
-import { formatRouteValue, shortModelName } from "./components/operator-pov-bar.ts";
+import { SYSTEM_ONE_TONE } from "./components/decision-graph-render.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
 import {
 	CHECKS_SECTION,
-	DEFAULT_GRAPH_FRACTION,
 	PLAN_SECTION,
 	TEAM_SECTION,
 	type WorkbenchComponent,
 	type WorkbenchGeometry,
 	type WorkbenchSection,
 } from "./components/workbench.ts";
-import { metaRow } from "./components/workbench-pane.ts";
 import {
+	createExecutionPreview,
 	createSystemOneEvaluationPreview,
-	createSystemOneSummaryPreview,
+	type EntryView,
+	type ExecutionEntry,
+	type ExecutionPreview,
+	isExecutionPreview,
 	type PreviewAttribution,
+	type RowRole,
 } from "./components/workbench-tool-preview.ts";
 import { WorkspaceObservation } from "./workbench-workspace.ts";
 
@@ -77,6 +81,8 @@ interface WorkbenchPorts {
 	team?: () => WorkbenchTeamFacts;
 	/** Who a foreground receipt belongs to at the moment it is created: the root on its active model. */
 	attribution?: () => PreviewAttribution;
+	/** The folder the session works in: output paths are shown relative to it. */
+	workingDirectory?: () => string;
 }
 
 /** Live facts behind the Team hierarchy: the decider's state, the root's model and route, the lanes. */
@@ -102,10 +108,11 @@ export class WorkbenchController {
 	private previews: Component[] = [];
 	private readonly invocations = new ToolInvocationReport();
 	private fileEffects = 0;
-	/** System One previews by evaluation id: a later verdict note replaces the preview in place. */
-	/** This cycle's System One evaluations by id (a later verdict replaces its record, never recounts it). */
-	private readonly systemOneRecords = new Map<string, SemanticEvaluationRecord>();
-	private systemOneSummary: Component | undefined;
+	/** The operator's choice per entry (a click); entries without one follow the pane's own policy. */
+	private readonly entryViews = new Map<string, EntryView>();
+	/** What the Execution pane drew last: the entry and role of each content row, and each entry's view. */
+	private executionRows: ({ readonly id: string; readonly role: RowRole } | undefined)[] = [];
+	private readonly drawnViews = new Map<string, EntryView>();
 	/** A failed evaluation keeps its own row: it needs attention, unlike a routine judgment. */
 	private readonly systemOneFailures = new Map<string, Component>();
 	/** Evidence of the previous cycle stays on screen until the new cycle produces its own. */
@@ -210,15 +217,18 @@ export class WorkbenchController {
 		this.fileEffects = 0;
 	}
 
+	/** The folder the session works in, for showing output paths relative to it. */
+	workingDirectory(): string | undefined {
+		return this.ports.workingDirectory?.();
+	}
+
 	/** The attribution a receipt created now carries; absent when the host gives none. */
 	attribution(): PreviewAttribution | undefined {
 		return this.ports.attribution?.();
 	}
 
 	private resetSystemOneEvidence(): void {
-		this.systemOneRecords.clear();
 		this.systemOneFailures.clear();
-		this.systemOneSummary = undefined;
 	}
 
 	/** Replace `previous` with `next` where it stands, or append `next` when it is not shown. */
@@ -229,25 +239,17 @@ export class WorkbenchController {
 	}
 
 	/**
-	 * A settled System One evaluation is Execution evidence, collapsed: the cycle's evaluations are one
-	 * summary row (count, average time, last judgment, kinds), updated in place; a failed evaluation
-	 * also keeps its own row. The invocation report is never touched: System One is not a tool call.
+	 * A routine System One judgment is not Execution evidence: the Decision graph already shows the count, the
+	 * last verdict and the kinds. A FAILED evaluation needs attention, so it keeps its own row here.
 	 */
 	recordSystemOneEvaluation(record: SemanticEvaluationRecord): void {
-		if (this.disposed) return;
+		if (this.disposed || record.outcome !== "failed") return;
 		this.beginEvidence();
-		this.systemOneRecords.set(record.evaluationId, record);
-		const summary = createSystemOneSummaryPreview([...this.systemOneRecords.values()]);
-		this.placePreview(this.systemOneSummary, summary);
-		this.systemOneSummary = summary;
-		if (record.outcome === "failed") {
-			const failure = createSystemOneEvaluationPreview(record);
-			this.placePreview(this.systemOneFailures.get(record.evaluationId), failure);
-			this.systemOneFailures.set(record.evaluationId, failure);
-		}
+		const failure = createSystemOneEvaluationPreview(record);
+		this.placePreview(this.systemOneFailures.get(record.evaluationId), failure);
+		this.systemOneFailures.set(record.evaluationId, failure);
 		while (this.previews.length > this.previewLimit()) {
 			const dropped = this.previews.shift();
-			if (dropped === this.systemOneSummary) this.systemOneSummary = undefined;
 			for (const [id, candidate] of this.systemOneFailures)
 				if (candidate === dropped) this.systemOneFailures.delete(id);
 		}
@@ -275,35 +277,36 @@ export class WorkbenchController {
 		this.lastObservationNote = result.note;
 		if (!result.paths.length) return;
 		this.beginEvidence();
-		const paths = result.paths
-			.slice(0, 12)
-			.map((path) => sanitizeBinaryOutput(stripAnsi(path)))
-			.join("\n");
+		const shownPaths = result.paths.slice(0, 12).map((path) => sanitizeBinaryOutput(stripAnsi(path)));
 		const patch = sanitizeBinaryOutput(stripAnsi(result.patch.slice(0, 16_384))).split("\n", 60);
 		const count = result.paths.length;
 		this.fileEffects += count;
 		// Current workspace evidence, not an agent-only diff: it is attributed to the root plus whoever
 		// else was running in the tree at the time, with no model claimed for it.
 		const workers = (this.snapshot?.laneRecords ?? []).filter(isActiveWorkerLane).length;
-		const by = theme.fg("muted", workers ? `root + ${workers} ${workers === 1 ? "worker" : "workers"}` : "root");
-		const title = theme.fg("toolTitle", `Observed ${count} workspace changes`);
-		const titleWidth = `Observed ${count} workspace changes`.length;
-		let preview: Text | undefined;
-		this.previews.push({
-			render: (width) => {
-				preview ??= new Text(
-					`${paths}\n` +
-						theme.fg("dim", "Current diff; may include prior or concurrent edits") +
-						`\n${patch.map((line) => theme.fg(line.startsWith("+") ? "toolDiffAdded" : line.startsWith("-") ? "toolDiffRemoved" : "toolDiffContext", line)).join("\n")}`,
-					0,
-					0,
-				);
-				return [metaRow(title, by, width, titleWidth), ...preview.render(width)];
-			},
-			invalidate: () => {
-				preview = undefined;
-			},
-		});
+		const body = [
+			...shownPaths.map((path) => `${theme.fg("dim", "•")} ${theme.fg("text", path)}`),
+			...(result.paths.length > shownPaths.length
+				? [theme.fg("dim", `  +${result.paths.length - shownPaths.length} more`)]
+				: []),
+			"",
+			theme.fg("dim", "Current diff; may include earlier or concurrent edits"),
+			...patch.map((line) =>
+				theme.fg(
+					line.startsWith("+") ? "toolDiffAdded" : line.startsWith("-") ? "toolDiffRemoved" : "toolDiffContext",
+					line,
+				),
+			),
+		];
+		const entry: ExecutionEntry = {
+			state: "done",
+			name: "file changes",
+			subject: `${count} ${count === 1 ? "file" : "files"}`,
+			...(workers ? { by: `+ ${workers} ${workers === 1 ? "worker" : "workers"}` } : {}),
+			outputLabel: "files and diff",
+			body,
+		};
+		this.previews.push(createExecutionPreview(entry));
 		if (this.previews.length > this.previewLimit()) this.previews.shift();
 		this.refreshExecution();
 	}
@@ -336,38 +339,33 @@ export class WorkbenchController {
 			this.ports.requestRender();
 			return;
 		}
-		// The cycle's evidence stays in order, newest last; the pane follows it until the operator scrolls.
-		const details = [
-			...(current.notStarted ? [`${current.notStarted} not started`] : []),
-			...(current.running ? [`${current.running} running`] : []),
-			...(current.negative ? [`${current.negative} negative outcomes`] : []),
-			...(current.unknown ? [`${current.unknown} unknown effects`] : []),
+		// The title carries the counts once, in plain words; the body lists only what went wrong.
+		const problems = [
+			...(current.negative ? [`${current.negative} failed`] : []),
+			...(current.unknown ? [`${current.unknown} with unknown effects`] : []),
 			...(current.unclassified ? [`${current.unclassified} unclassified`] : []),
 			...(current.postprocessing ? [`${current.postprocessing} postprocessing faults`] : []),
 			...(current.conflicts ? [`${current.conflicts} conflicting receipts`] : []),
-			...(this.fileEffects ? [`${this.fileEffects} file effects`] : []),
-			...(retained.errorResults ? [`retained: ${retained.errorResults} error results`] : []),
-		].join(" · ");
-		const summary = details
-			? theme.fg(retained.errorResults || current.postprocessing || current.conflicts ? "warning" : "muted", details)
+			...(retained.errorResults ? [`${retained.errorResults} earlier error results kept`] : []),
+		];
+		const summary = problems.length
+			? theme.fg(
+					retained.errorResults || current.postprocessing || current.conflicts ? "warning" : "muted",
+					`! ${problems.join(" · ")}`,
+				)
 			: "";
 		const completed = current.succeeded + current.negative;
 		const accounting = [
-			...(partial ? ["Partial"] : []),
-			...(inFlight ? [`In flight: ${inFlight}`] : []),
-			`Completed: ${completed}`,
-			...(current.notStarted ? [`Not started: ${current.notStarted}`] : []),
-			...(background ? [`Background: ${background}`] : []),
-			...(current.unknown ? [`Unknown: ${current.unknown}`] : []),
-			...(current.unclassified ? [`Unclassified: ${current.unclassified}`] : []),
+			...(partial ? ["partial"] : []),
+			...(inFlight ? [`${inFlight} running`] : []),
+			...(completed || !inFlight ? [`${completed} done`] : []),
+			...(current.notStarted ? [`${current.notStarted} pending`] : []),
+			...(background ? [`${background} in background`] : []),
+			...(this.fileEffects ? [`${this.fileEffects} file ${this.fileEffects === 1 ? "change" : "changes"}`] : []),
 		].join(" · ");
 		this.view.setExecution(
 			{
-				render: (width) => [
-					...(this.staleEvidence && this.previews.length ? [theme.fg("dim", "Previous turn")] : []),
-					...this.previews.flatMap((preview, index) => [...(index ? [""] : []), ...preview.render(width)]),
-					...(summary ? [...(this.previews.length ? [""] : []), ...wrapTextWithAnsi(summary, width)] : []),
-				],
+				render: (width) => this.renderExecution(width, summary),
 				invalidate: () => {
 					for (const preview of this.previews) preview.invalidate();
 				},
@@ -379,9 +377,68 @@ export class WorkbenchController {
 		this.ports.requestRender();
 	}
 
+	/**
+	 * The pane manages its entries so a long run stays readable: the newest entry and any failed one are open,
+	 * older ones fold to their call bar (with their output's summary), and an operator's click overrides the policy
+	 * for that entry. Every row records which entry and what part of it it is, so a click can be answered.
+	 */
+	private renderExecution(width: number, summary: string): string[] {
+		const rows: string[] = [];
+		const targets: ({ readonly id: string; readonly role: RowRole } | undefined)[] = [];
+		const push = (row: string, target?: { readonly id: string; readonly role: RowRole }) => {
+			rows.push(row);
+			targets.push(target);
+		};
+		if (this.staleEvidence && this.previews.length) push(theme.fg("dim", "Previous turn"));
+		const live = new Set<string>();
+		this.previews.forEach((preview, index) => {
+			if (index) push("");
+			if (!isExecutionPreview(preview)) {
+				for (const row of preview.render(width)) push(row);
+				return;
+			}
+			live.add(preview.entryId);
+			const view =
+				this.entryViews.get(preview.entryId) ?? this.autoView(preview, index === this.previews.length - 1);
+			preview.setView(view);
+			this.drawnViews.set(preview.entryId, view);
+			const entryRows = preview.render(width);
+			const roles = preview.rowRoles();
+			for (let at = 0; at < entryRows.length; at++) {
+				push(entryRows[at] ?? "", { id: preview.entryId, role: roles[at] ?? "body" });
+			}
+		});
+		for (const id of [...this.entryViews.keys()]) if (!live.has(id)) this.entryViews.delete(id);
+		for (const id of [...this.drawnViews.keys()]) if (!live.has(id)) this.drawnViews.delete(id);
+		if (summary) {
+			if (this.previews.length) push("");
+			for (const row of wrapTextWithAnsi(summary, width)) push(row);
+		}
+		this.executionRows = targets;
+		return rows;
+	}
+
+	/** The pane's own policy: the newest entry and anything that failed are open, the rest are folded. */
+	private autoView(preview: ExecutionPreview, newest: boolean): EntryView {
+		return preview.failed || newest || !preview.collapsible ? "expanded" : "collapsed";
+	}
+
+	/** A click on an Execution row: a bar folds or unfolds its entry, the show-all row opens the whole output. */
+	toggleExecutionRow(row: number): boolean {
+		const target = this.executionRows[row];
+		if (!target || target.role === "body") return false;
+		const current = this.drawnViews.get(target.id) ?? "expanded";
+		this.entryViews.set(
+			target.id,
+			target.role === "more" ? "full" : current === "collapsed" ? "expanded" : "collapsed",
+		);
+		this.ports.requestRender();
+		return true;
+	}
+
 	refresh(snapshot: AgentsOverlaySnapshot): void {
 		this.snapshot = snapshot;
-		this.view.setInspector(buildWorkbenchSections(snapshot, Date.now(), this.ports.team));
+		this.view.setInspector(buildWorkbenchSections(snapshot, Date.now(), this.ports.team, () => this.view.graphShown));
 		this.workTitle = workTitle(snapshot.items);
 		this.publishHeadline();
 	}
@@ -478,8 +535,8 @@ export class WorkbenchController {
 			} else if (action === "down" && button === "left" && hit === "conversationHeader") {
 				const headerAction = this.view.headerAction(column);
 				if (headerAction === "latest") conversation.latest();
-				else if (headerAction === "copyAll") void this.copy(true);
 				else if (headerAction === "layout") this.changeGeometry(() => this.view.toggleLayout());
+				else if (headerAction === "showGraph") this.changeGeometry(() => this.view.toggleGraph());
 			} else if (action === "down" && button === "left" && hit === "divider") {
 				this.geometryDrag = {
 					kind: "rows",
@@ -514,10 +571,7 @@ export class WorkbenchController {
 				};
 			} else if (action === "down" && button === "left" && hit === "graphTitle") {
 				const titleAction = this.view.paneTitleAction(column, row);
-				if (titleAction === "graphList") this.changeGeometry(() => this.view.setGraphView("list"));
-				else if (titleAction === "graphDiagram") this.changeGeometry(() => this.view.setGraphView("diagram"));
-				else if (titleAction === "graphLanes") this.changeGeometry(() => this.view.setGraphView("lanes"));
-				else if (titleAction === "graphCycle") this.changeGeometry(() => this.view.cycleGraphView());
+				if (titleAction === "graphCycle") this.changeGeometry(() => this.view.cycleGraphView());
 				else if (titleAction === "followCurrent") this.changeGeometry(() => this.view.followCurrentGraph());
 				else if (titleAction === "hideGraph") this.changeGeometry(() => this.view.toggleGraph());
 			} else if (action === "down" && button === "left" && hit === "graph") {
@@ -539,6 +593,9 @@ export class WorkbenchController {
 						this.changeGeometry(() => this.view.toggleExecutionMaximized());
 					}
 				}
+			} else if (action === "down" && button === "left" && hit === "upper") {
+				const executionRow = this.view.executionRowAt(column, row);
+				if (executionRow !== undefined) this.toggleExecutionRow(executionRow);
 			} else if (action === "down" && button === "right") {
 				// The terminal cannot paste while the workbench owns the mouse, so the workbench does.
 				void this.ports.paste?.();
@@ -570,6 +627,11 @@ export class WorkbenchController {
 	/** Every operator change to the work area is applied to the view and persisted in one step. */
 	private changeGeometry(mutate: () => void): void {
 		mutate();
+		if (this.snapshot) {
+			this.view.setInspector(
+				buildWorkbenchSections(this.snapshot, Date.now(), this.ports.team, () => this.view.graphShown),
+			);
+		}
 		this.ports.geometry?.save(this.view.geometry());
 	}
 
@@ -619,12 +681,9 @@ export function workTitle(items: readonly ActivityLaneItem[]): string | undefine
 	return live("task") ?? live("goal");
 }
 
-const SYSTEM_ONE_TONE = "customMessageLabel";
-
 /**
  * The Decider group: System One, first in the Team. What it is doing comes from the semantic plane's
- * in-flight evaluation, its last judgment, and who holds control — never a literal. Each fact has its
- * own row, so a narrow Team column truncates nothing that matters.
+ * in-flight evaluation, its last judgment, and who holds control — never a literal.
  */
 export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): string[] {
 	const evaluating = facts.health.inFlightEvaluations?.at(-1);
@@ -632,7 +691,7 @@ export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): str
 	const name = theme.fg(SYSTEM_ONE_TONE, "System One");
 	const lastResult = facts.last && evaluationResultText(facts.last);
 	const state = evaluating
-		? theme.fg(SYSTEM_ONE_TONE, `judging ${evaluating.label} ${formatGraphDuration(nowMs - evaluating.startedAt)}`)
+		? theme.fg(SYSTEM_ONE_TONE, `judging ${evaluating.label} ${formatCompactDuration(nowMs - evaluating.startedAt)}`)
 		: facts.last
 			? theme.fg(
 					facts.last.outcome === "failed" ? "error" : "muted",
@@ -642,13 +701,14 @@ export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): str
 				)
 			: theme.fg("dim", facts.health.state === "unbound" ? "off" : "ready");
 	const glyph = evaluating ? theme.fg(SYSTEM_ONE_TONE, "◆") : theme.fg("muted", "◇");
+	// The session executing is the default and needs no word; only a handover is worth one.
 	const control =
 		owner === "system_one"
 			? theme.fg("accent", "decides next")
 			: owner === "user"
 				? theme.fg("warning", "waiting for you")
-				: theme.fg("dim", "root executes");
-	return [`  ${glyph} ${name}`, `    ${state}`, `    ${control}`];
+				: "";
+	return [`  ${glyph} ${name}${control ? ` ${theme.fg("dim", "·")} ${control}` : ""}`, `    ${state}`];
 }
 
 /** The root executor: the model actually answering, its route when routed, and its current action. */
@@ -661,7 +721,7 @@ function renderRootRow(facts: WorkbenchTeamFacts): string {
 	const model = shortModelName(route.activeModel ?? route.rootModel);
 	const glyph = running ? theme.fg("accent", "●") : theme.fg("muted", "○");
 	const task = running ? `  ${theme.fg("muted", projection.current_action)}` : "";
-	return `  ${glyph} ${theme.fg("text", "root")} · ${theme.fg(running ? "accent" : "muted", model)}${task}`;
+	return `  ${glyph} ${theme.fg(running ? "accent" : "text", model)}${task}`;
 }
 
 /** Routed choices that are live: who chose which model for whom, in the operator's words. */
@@ -689,6 +749,7 @@ export function buildWorkbenchSections(
 	snapshot: AgentsOverlaySnapshot,
 	nowMs: number,
 	team?: () => WorkbenchTeamFacts,
+	graphShown?: () => boolean,
 ): WorkbenchSection[] {
 	const model = buildWorkPanelModel(snapshot, nowMs);
 	const rows = model.rows ?? [];
@@ -757,14 +818,38 @@ export function buildWorkbenchSections(
 		];
 		const lanePanel = { ...panel, rows: shown.map((row) => ({ ...row, section: undefined })) };
 		if (!team) {
-			sections.push({ title: TEAM_SECTION, meta: executors, body: shown.length ? rowsComponent(lanePanel) : idle });
+			sections.push({
+				title: TEAM_SECTION,
+				meta: executors,
+				body: shown.length ? rowsComponent(lanePanel) : idle,
+				quiet: !shown.length && !specialists.length,
+			});
 			return sections;
 		}
 		const executorRows = (width: number): string[] =>
 			shown.length ? renderOrchestrationPanelRows(theme, lanePanel, width) : idle;
+		const hasSpecialists = shown.length > 0 || specialists.length > 0;
+		if (graphShown?.() === true) {
+			if (hasSpecialists) {
+				sections.push({
+					title: TEAM_SECTION,
+					meta: executors,
+					body: {
+						render: (width) => executorRows(width).map((line) => truncateToWidth(line, Math.max(1, width), "")),
+						invalidate() {},
+					},
+				});
+			}
+			return sections;
+		}
 		const group = (label: string) => `  ${theme.fg("dim", label)}`;
 		const body: Component = {
 			render: (width) => {
+				if (graphShown?.() === true) {
+					return (hasSpecialists ? executorRows(width) : []).map((line) =>
+						truncateToWidth(line, Math.max(1, width), ""),
+					);
+				}
 				const facts = team();
 				const routing = renderRoutingRows(facts);
 				return [
@@ -772,13 +857,13 @@ export function buildWorkbenchSections(
 					...renderDeciderRows(facts, Date.now()),
 					group("Executors"),
 					renderRootRow(facts),
-					...(shown.length || specialists.length ? executorRows(width) : []),
+					...(hasSpecialists ? executorRows(width) : []),
 					...(routing.length ? [group("Routing"), ...routing] : []),
 				].map((line) => truncateToWidth(line, Math.max(1, width), ""));
 			},
 			invalidate() {},
 		};
-		sections.push({ title: TEAM_SECTION, meta: `decider + ${executors}`, body });
+		sections.push({ title: TEAM_SECTION, meta: `decider + ${executors}`, body, quiet: !hasSpecialists });
 	}
 	return sections;
 }

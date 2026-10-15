@@ -97,7 +97,9 @@ import {
 	isResourceDisabledByTopLevelOverrides,
 	isThinkingLevel,
 	isValidMemorySystem,
+	isWorkbenchGraphView,
 	MAX_BACKGROUND_TOOL_CALL_AFTER_MS,
+	MAX_GRAPH_FRACTION,
 	MAX_PROVIDER_ADMISSION_LIMIT,
 	MAX_PROVIDER_ADMISSION_MAX_WAIT_MS,
 	MAX_RESEARCH_LANE_IDLE_DELAY_MS,
@@ -115,6 +117,7 @@ import {
 	MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_DEFAULT,
 	MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT,
 	MIN_BACKGROUND_TOOL_CALL_AFTER_MS,
+	MIN_GRAPH_FRACTION,
 	MIN_TOOL_EXECUTION_CONCURRENCY,
 	matchesResourceProfilePattern,
 	mergeResourceProfileFilters,
@@ -2245,9 +2248,7 @@ export class SettingsManager {
 		if (this.resolvedSelfCompaction?.key !== key) {
 			this.resolvedSelfCompaction = { key, value: resolveSelfCompactionSettings(raw) };
 		}
-		return this.getMemorySystem() === "icm"
-			? { ...this.resolvedSelfCompaction.value, enabled: false }
-			: this.resolvedSelfCompaction.value;
+		return this.resolvedSelfCompaction.value;
 	}
 
 	getCompactionSettings(): {
@@ -2663,7 +2664,7 @@ export class SettingsManager {
 	}
 
 	getQuietStartup(): boolean {
-		return this.settings.quietStartup ?? false;
+		return this.settings.quietStartup ?? true;
 	}
 
 	/** Repository instruction resources are off unless a settings layer opts in. Global resources always load. */
@@ -3082,7 +3083,7 @@ export class SettingsManager {
 		const rows = typeof stored.rows === "number" && Number.isFinite(stored.rows) ? stored.rows : undefined;
 		return {
 			mouse: stored.mouse ?? DEFAULT_WORKBENCH_SETTINGS.mouse,
-			rows: rows === undefined ? "half" : Math.max(2, Math.min(60, Math.floor(rows))),
+			rows: rows === undefined ? "auto" : Math.max(2, Math.min(60, Math.floor(rows))),
 			collapsed: stored.collapsed ?? DEFAULT_WORKBENCH_SETTINGS.collapsed,
 			inspector: stored.inspector ?? DEFAULT_WORKBENCH_SETTINGS.inspector,
 			executionMaximized: stored.executionMaximized ?? DEFAULT_WORKBENCH_SETTINGS.executionMaximized,
@@ -3104,13 +3105,10 @@ export class SettingsManager {
 			graphFraction: sanitizeNumberSetting(
 				stored.graphFraction,
 				DEFAULT_WORKBENCH_SETTINGS.graphFraction,
-				0.25,
-				0.5,
+				MIN_GRAPH_FRACTION,
+				MAX_GRAPH_FRACTION,
 			),
-			graphView:
-				stored.graphView === "list" || stored.graphView === "lanes"
-					? stored.graphView
-					: DEFAULT_WORKBENCH_SETTINGS.graphView,
+			graphView: isWorkbenchGraphView(stored.graphView) ? stored.graphView : DEFAULT_WORKBENCH_SETTINGS.graphView,
 		};
 	}
 
@@ -3126,6 +3124,11 @@ export class SettingsManager {
 			this.markModified("workbench", key);
 		}
 		this.save();
+	}
+
+	/** What a project with no saved trust decision gets. Global only: a project cannot decide its own trust. */
+	getProjectTrustDefault(): "trusted" | "untrusted" {
+		return this.globalSettings.projectTrust === "untrusted" ? "untrusted" : "trusted";
 	}
 
 	getDoubleEscapeAction(): "fork" | "tree" | "none" {

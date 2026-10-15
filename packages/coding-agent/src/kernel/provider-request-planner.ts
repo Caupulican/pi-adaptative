@@ -296,17 +296,21 @@ function detectSentPrefixDisturbance(
  * record newly minted THIS call, appended after `compactableMessages` was computed, is not. This
  * boundary was reasoned through explicitly for the append-on-change design, not left as the
  * pre-existing number and adjusted until tests passed - see the caller for the full argument.
+ *
+ * `headWireCount` leading wire messages of the planned history are a host envelope (`AgentContextPlan.nonCompactableHead`)
+ * that no compaction can shrink, so they stay in the non-compactable context too.
  */
 function nonCompactableProviderContext(
 	context: Context,
 	compactableMessageCount: number,
 	usesTextToolProtocol: boolean,
+	headWireCount: number,
 ): Context {
 	const protocolGuardCount = usesTextToolProtocol && context.messages.length > 0 ? 1 : 0;
 	return {
 		...context,
 		messages: [
-			...context.messages.slice(0, protocolGuardCount),
+			...context.messages.slice(0, protocolGuardCount + Math.min(headWireCount, compactableMessageCount)),
 			...context.messages.slice(protocolGuardCount + compactableMessageCount),
 		],
 	};
@@ -446,6 +450,21 @@ export async function startPlannedAgentProviderRequestWithId(
 				...trailingSlots,
 			]);
 			const compactableMessages = await config.convertToLlm(plan.messages);
+			const nonCompactableHead = plan.nonCompactableHead ?? 0;
+			if (
+				!Number.isInteger(nonCompactableHead) ||
+				nonCompactableHead < 0 ||
+				nonCompactableHead > plan.messages.length
+			) {
+				throw new TypeError(
+					`Context plan nonCompactableHead must be an integer from 0 to ${plan.messages.length}, got ${nonCompactableHead}.`,
+				);
+			}
+			// `convertToLlm` converts message by message, so the head's own conversion is the wire prefix it occupies.
+			const headWireCount =
+				nonCompactableHead === 0
+					? 0
+					: (await config.convertToLlm(plan.messages.slice(0, nonCompactableHead))).length;
 			// `pendingTransientRecords` (this turn's new-or-changed-or-displaced durable records - empty
 			// for informational slots most turns, but see the trailing-pair note above for why it is NOT
 			// typically empty overall) plus `hostTransients.passThrough` (any host transient this module
@@ -476,6 +495,7 @@ export async function startPlannedAgentProviderRequestWithId(
 				materialized.context,
 				compactableMessages.length,
 				materialized.usesTextToolProtocol,
+				headWireCount,
 			);
 
 			if (plan.isCurrent?.() === false) {

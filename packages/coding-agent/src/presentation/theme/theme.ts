@@ -106,24 +106,33 @@ const ThemeJsonSchema = Type.Object({
 
 type ThemeJson = Static<typeof ThemeJsonSchema>;
 
+const BUILTIN_THEME_NAMES = new Set(["dark", "light", "matrix-machine"]);
+
 const FALLBACK_DARK_THEME_JSON: ThemeJson = {
 	name: "dark",
 	vars: {
-		cyan: "#00d7ff",
+		cyan: "#5ccfe6",
 		blue: "#5f87ff",
 		green: "#b5bd68",
 		red: "#cc6666",
-		yellow: "#ffff00",
-		text: "#d4d4d4",
-		gray: "#808080",
-		dimGray: "#666666",
-		darkGray: "#505050",
+		yellow: "#e5c07b",
+		text: "#d4d4d8",
+		gray: "#828490",
+		dimGray: "#676975",
+		darkGray: "#4e505b",
 		accent: "#8abeb7",
-		selectedBg: "#3a3a4a",
+		selectedBg: "#323444",
+		selectWash: "#34506e",
+		surfaceBg: "#232329",
+		codeSurface: "#1a1b22",
+		codeSurfaceActive: "#20232d",
+		diffAddedBg: "#192720",
+		diffRemovedBg: "#2b1b1e",
 		userMsgBg: "#343541",
 		toolPendingBg: "#282832",
 		toolSuccessBg: "#283228",
 		toolErrorBg: "#3c2828",
+		workbenchSurface: "surfaceBg",
 		customMsgBg: "#2d2838",
 	},
 	colors: {
@@ -139,6 +148,7 @@ const FALLBACK_DARK_THEME_JSON: ThemeJson = {
 		text: "text",
 		thinkingText: "gray",
 		selectedBg: "selectedBg",
+		selectionBg: "selectWash",
 		userMessageBg: "userMsgBg",
 		userMessageText: "text",
 		customMessageBg: "customMsgBg",
@@ -147,6 +157,7 @@ const FALLBACK_DARK_THEME_JSON: ThemeJson = {
 		toolPendingBg: "toolPendingBg",
 		toolSuccessBg: "toolSuccessBg",
 		toolErrorBg: "toolErrorBg",
+		workbenchSurface: "workbenchSurface",
 		toolTitle: "text",
 		toolOutput: "gray",
 		mdHeading: "#f0c674",
@@ -162,6 +173,10 @@ const FALLBACK_DARK_THEME_JSON: ThemeJson = {
 		toolDiffAdded: "green",
 		toolDiffRemoved: "red",
 		toolDiffContext: "gray",
+		toolDiffAddedBg: "diffAddedBg",
+		toolDiffRemovedBg: "diffRemovedBg",
+		codeBlockBg: "codeSurface",
+		codeBlockActiveBg: "codeSurfaceActive",
 		syntaxComment: "#6A9955",
 		syntaxKeyword: "#569CD6",
 		syntaxFunction: "#DCDCAA",
@@ -172,7 +187,7 @@ const FALLBACK_DARK_THEME_JSON: ThemeJson = {
 		syntaxOperator: "#D4D4D4",
 		syntaxPunctuation: "#D4D4D4",
 		thinkingOff: "darkGray",
-		thinkingMinimal: "#6e6e6e",
+		thinkingMinimal: "#676975",
 		thinkingLow: "#5f87af",
 		thinkingMedium: "#81a2be",
 		thinkingHigh: "#b294bb",
@@ -226,12 +241,9 @@ let BUILTIN_THEMES: Record<string, ThemeJson> | undefined;
 function getBuiltinThemes(): Record<string, ThemeJson> {
 	if (!BUILTIN_THEMES) {
 		const themesDir = getThemesDir();
-		const darkPath = path.join(themesDir, "dark.json");
-		const lightPath = path.join(themesDir, "light.json");
-		const matrixMachinePath = path.join(themesDir, "matrix-machine.json");
-
 		const themes: Record<string, ThemeJson> = {};
-		const tryLoad = (name: string, filePath: string) => {
+		for (const name of BUILTIN_THEME_NAMES) {
+			const filePath = path.join(themesDir, `${name}.json`);
 			try {
 				if (fs.existsSync(filePath)) {
 					themes[name] = parseThemeJsonContent(filePath, fs.readFileSync(filePath, "utf-8"));
@@ -239,11 +251,7 @@ function getBuiltinThemes(): Record<string, ThemeJson> {
 			} catch (e) {
 				console.error(`Warning: Failed to load builtin theme ${name}:`, e);
 			}
-		};
-
-		tryLoad("dark", darkPath);
-		tryLoad("light", lightPath);
-		tryLoad("matrix-machine", matrixMachinePath);
+		}
 
 		if (!themes.dark) {
 			themes.dark = FALLBACK_DARK_THEME_JSON;
@@ -630,7 +638,7 @@ function startThemeWatcher(): void {
 	stopThemeWatcher();
 
 	// Only watch if it's a custom theme (not built-in)
-	if (!currentThemeName || currentThemeName === "dark" || currentThemeName === "light") {
+	if (!currentThemeName || BUILTIN_THEME_NAMES.has(currentThemeName)) {
 		return;
 	}
 
@@ -723,7 +731,7 @@ export function getResolvedThemeColors(themeName?: string): Record<string, strin
 	const resolved = resolveThemeColors(themeJson.colors, themeJson.vars);
 
 	// Default text color for empty values (terminal uses default fg color)
-	const defaultText = isLight ? "#000000" : "#e5e5e7";
+	const defaultText = isLight ? "#1f2328" : "#e5e5e7";
 
 	const cssColors: Record<string, string> = {};
 	for (const [key, value] of Object.entries(resolved)) {

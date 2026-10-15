@@ -102,6 +102,11 @@ export interface SessionAnalyticsDeps {
 	/** This session's real agent dir (may differ from the process-global default — see
 	 * `AgentSessionConfig.agentDir`); HTML export's path-alias table lives under it. */
 	getAgentDir(): string;
+	/**
+	 * Under ICM, where the running chat turn's own messages begin in `messages`; undefined outside ICM, between turns,
+	 * and when the turn start does not resolve.
+	 */
+	getContinuousChatTurnStartIndex?(messages: readonly AgentMessage[]): number | undefined;
 }
 
 export class SessionAnalytics {
@@ -583,7 +588,14 @@ export class SessionAnalytics {
 			return { tokens: null, contextWindow, percent: null };
 		}
 
-		const estimate = estimateContextTokens(this.deps.getMessages());
+		const messages = this.deps.getMessages();
+		const estimate = estimateContextTokens(messages);
+		// Under ICM a turn's requests carry only that turn after its chat view: usage recorded before the turn start
+		// measured an earlier turn's request, so until this turn's first response the size is unknown, as after compaction.
+		const turnStart = this.deps.getContinuousChatTurnStartIndex?.(messages);
+		if (turnStart !== undefined && (estimate.lastUsageIndex === null || estimate.lastUsageIndex < turnStart)) {
+			return { tokens: null, contextWindow, percent: null };
+		}
 		const percent = (estimate.tokens / contextWindow) * 100;
 
 		return {

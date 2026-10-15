@@ -23,6 +23,7 @@ import {
 	SELF_COMPACTION_OWNER_REQUEST_CUSTOM_TYPE,
 	SELF_COMPACTION_OWNER_REQUEST_TEXT,
 	SELF_COMPACTION_PROMPT_KINDS,
+	SELF_COMPACTION_RELEASED_CUSTOM_TYPE,
 	SELF_COMPACTION_REQUEST_CUSTOM_TYPE,
 	SELF_COMPACTION_SUMMARY_INSTRUCTIONS,
 	type SelfCompactionLevel,
@@ -47,6 +48,17 @@ export interface SelfCompactionControllerDeps {
 	getHardTriggerTokens(): number | undefined;
 	getEarlyTriggerTokens(): number | undefined;
 	hasCompactableHistory(): boolean;
+	/**
+	 * True when the end of the running turn releases its context by itself (ICM: the next turn is rebuilt from the chat
+	 * view). A saved note is then delivered after the turn ends, with no compaction.
+	 */
+	releasesAtTurnEnd(): boolean;
+	/**
+	 * When the turn's end releases its context: the tokens the running turn's requests carry whatever happens to its own
+	 * messages (system, tools, chat view, turn state), which a release cannot free. Undefined between turns and before
+	 * the running turn's first request.
+	 */
+	turnReleaseFloorTokens(): number | undefined;
 	compact(customInstructions: string): Promise<unknown>;
 	deliverNote(message: { customType: string; content: string; display: boolean; details: unknown }): Promise<void>;
 	askForHandoff(message: { customType: string; content: string; display: boolean }): Promise<void>;
@@ -80,6 +92,8 @@ export interface SelfCompactionView {
 	readonly usedPercent: number | null;
 	readonly contextWindow: number | null;
 	readonly thresholds: SelfCompactionThresholds | null;
+	/** Where automatic compaction triggers, set whether or not self-compaction is on; null while auto-compaction is off. */
+	readonly hardTriggerTokens: number | null;
 	readonly tokensUntilWarning: number | null;
 	readonly tokensUntilForced: number | null;
 	readonly toolsLocked: boolean;
@@ -155,10 +169,16 @@ export class SelfCompactionController {
 		const state = this.state();
 		if (isActiveSelfCompactionStatus(state.status)) return undefined;
 		const level = selfCompactionLevel(usage?.tokens, thresholds);
-		this.announce(level);
+		// From the warning line the agent is asked for a note. When a note cannot free context it is told why instead and
+		// the forced line refuses no tool (see `toolsLocked`), so no text asks for a call that would be refused.
+		const blocked = isSelfCompactionLevelAtLeast(level, "warning") ? this.releaseRefusal(thresholds) : undefined;
+		this.announce(level, blocked);
 		const prompts = this.deps.getSettings().prompts;
+		const releasesAtTurnEnd = this.deps.releasesAtTurnEnd();
 		const key = JSON.stringify([
 			level,
+			releasesAtTurnEnd,
+			blocked ?? null,
 			thresholds,
 			state.cycles,
 			level === "notice" || level === "warning" ? prompts[level] : null,
@@ -171,6 +191,8 @@ export class SelfCompactionController {
 					thresholds,
 					prompts,
 					selfCompactionTemplateValues(thresholds, usage?.tokens ?? null, state.cycles),
+					releasesAtTurnEnd,
+					blocked,
 				),
 			};
 		}
@@ -181,7 +203,7 @@ export class SelfCompactionController {
 		return SELF_COMPACTION_GUIDANCE_CLEARED_TEXT;
 	}
 
-	private announce(level: SelfCompactionLevel): void {
+	private announce(level: SelfCompactionLevel, blocked: string | undefined): void {
 		if (level === "unknown") return;
 		if (!isSelfCompactionLevelAtLeast(level, "warning")) {
 			if (level === "idle") this.announcedLevel = "idle";
@@ -193,15 +215,55 @@ export class SelfCompactionController {
 		const at =
 			usage?.tokens === null || usage?.tokens === undefined ? "unknown" : usage.tokens.toLocaleString("en-US");
 		this.deps.warn(
-			level === "forced"
-				? `self-compaction: context reached the forced line at ${at} tokens; every tool except ${SELF_COMPACT_TOOL_NAME} is refused until the agent compacts.`
-				: `self-compaction: context passed the warning line at ${at} tokens; the agent was asked to write its note and compact.`,
+			blocked !== undefined
+				? `self-compaction: context ${level === "forced" ? "reached the forced line" : "passed the warning line"} at ${at} tokens; no note is asked for and no tool is refused because ${blocked}.`
+				: level === "forced"
+					? `self-compaction: context reached the forced line at ${at} tokens; every tool except ${SELF_COMPACT_TOOL_NAME} is refused until ${this.deps.releasesAtTurnEnd() ? "the agent's note releases this turn's context" : "the agent compacts"}.`
+					: `self-compaction: context passed the warning line at ${at} tokens; the agent was asked to write its note and compact.`,
 		);
 	}
 
-	private toolsLocked(state: SelfCompactionState, level: SelfCompactionLevel): boolean {
+	private toolsLocked(
+		state: SelfCompactionState,
+		level: SelfCompactionLevel,
+		thresholds: SelfCompactionThresholds,
+	): boolean {
 		if (state.status === "pending") return true;
-		return level === "forced" && !isActiveSelfCompactionStatus(state.status) && this.deps.hasCompactableHistory();
+		return (
+			level === "forced" &&
+			!isActiveSelfCompactionStatus(state.status) &&
+			this.releaseRefusal(thresholds) === undefined
+		);
+	}
+
+	/**
+	 * Why a saved note could not free context now, or undefined when it can. Outside ICM a note frees context when there
+	 * is history to compact. When the turn's end releases its context, a note frees it only while a turn is running and
+	 * what that turn carries without its own messages is below the warning line: otherwise the release starts the next
+	 * turn at the warning line again (a note every turn) or at the forced line (a lock that refuses every tool turn
+	 * after turn).
+	 */
+	private releaseRefusal(thresholds: SelfCompactionThresholds): string | undefined {
+		if (!this.deps.releasesAtTurnEnd()) {
+			return this.deps.hasCompactableHistory()
+				? undefined
+				: "nothing to compact yet: the recent history the host always keeps covers the whole context";
+		}
+		const floor = this.deps.turnReleaseFloorTokens();
+		if (floor === undefined) {
+			return "no ICM chat turn is running with a sent request; the next turn starts from the chat view, so there is no turn context to release";
+		}
+		if (floor >= thresholds.warningTokens) {
+			return `releasing this turn would start the next turn at or above the warning line: the system prompt, tools, chat view and turn state alone carry about ${floor.toLocaleString("en-US")} tokens, and the warning line is ${thresholds.warningTokens.toLocaleString("en-US")} tokens`;
+		}
+		return undefined;
+	}
+
+	/** What happens to the context when the turn holding a saved note ends, for the texts the agent reads. */
+	private releaseText(): string {
+		return this.deps.releasesAtTurnEnd()
+			? "this turn's context is released when the turn ends (the next turn starts from the chat view)"
+			: "the context is compacted when this turn ends";
 	}
 
 	private phase(
@@ -226,7 +288,7 @@ export class SelfCompactionController {
 		const level = selfCompactionLevel(usage?.tokens, thresholds);
 		const state = this.state();
 		const tokens = usage?.tokens ?? null;
-		const toolsLocked = thresholds ? this.toolsLocked(state, level) : false;
+		const toolsLocked = thresholds ? this.toolsLocked(state, level, thresholds) : false;
 		return {
 			enabled: settings.enabled,
 			settingsError: settings.error ?? null,
@@ -238,6 +300,7 @@ export class SelfCompactionController {
 			usedPercent: usage?.percent === null || usage?.percent === undefined ? null : Number(usage.percent.toFixed(1)),
 			contextWindow: usage?.contextWindow ?? null,
 			thresholds: thresholds ?? null,
+			hardTriggerTokens: this.deps.getHardTriggerTokens() ?? null,
 			tokensUntilWarning: thresholds && tokens !== null ? Math.max(0, thresholds.warningTokens - tokens) : null,
 			tokensUntilForced: thresholds && tokens !== null ? Math.max(0, thresholds.forcedTokens - tokens) : null,
 			toolsLocked,
@@ -280,7 +343,8 @@ export class SelfCompactionController {
 	}
 
 	async compactNow(): Promise<SelfCompactionNowOutcome> {
-		if (!this.thresholds()) {
+		const thresholds = this.thresholds();
+		if (!thresholds) {
 			const error = this.deps.getSettings().error;
 			return {
 				kind: "refused",
@@ -299,12 +363,8 @@ export class SelfCompactionController {
 			}
 			return { kind: "resumed", noteChars: state.request.note.length };
 		}
-		if (!this.deps.hasCompactableHistory()) {
-			return {
-				kind: "refused",
-				reason: "nothing to compact yet: the recent history the host always keeps covers the whole context",
-			};
-		}
+		const releaseRefusal = this.releaseRefusal(thresholds);
+		if (releaseRefusal !== undefined) return { kind: "refused", reason: releaseRefusal };
 		await this.deps.askForHandoff({
 			customType: SELF_COMPACTION_OWNER_REQUEST_CUSTOM_TYPE,
 			content: SELF_COMPACTION_OWNER_REQUEST_TEXT,
@@ -342,9 +402,10 @@ export class SelfCompactionController {
 				reason: `Context is below the notice line${left === undefined ? "" : ` (${left.toLocaleString("en-US")} tokens left before it)`}; compacting now would pay for a summary the context does not need yet. Keep working. No note was saved and no tool is refused.`,
 			};
 		}
-		if (!this.deps.hasCompactableHistory()) {
+		const releaseRefusal = this.releaseRefusal(thresholds);
+		if (releaseRefusal !== undefined) {
 			return {
-				reason: `Nothing to compact yet: the recent history the host always keeps covers the whole context. No note was saved and no tool is refused. Keep working and call ${SELF_COMPACT_TOOL_NAME} later.`,
+				reason: `${releaseRefusal.charAt(0).toUpperCase()}${releaseRefusal.slice(1)}. No note was saved and no tool is refused. Keep working and call ${SELF_COMPACT_TOOL_NAME} later.`,
 			};
 		}
 		return { note: validation.note, level, state };
@@ -387,18 +448,23 @@ export class SelfCompactionController {
 		if (state.status === "pending") {
 			return {
 				block: true,
-				reason: `Tool "${toolName}" is refused: a ${SELF_COMPACT_TOOL_NAME} note is saved and the context is compacted when this turn ends. Stop here; the note comes back verbatim after compaction.`,
+				reason: `Tool "${toolName}" is refused: a ${SELF_COMPACT_TOOL_NAME} note is saved and ${this.releaseText()}. Stop here; the note comes back verbatim as the next message.`,
 				...terminate,
 			};
 		}
-		if (this.toolsLocked(state, level)) {
+		if (this.toolsLocked(state, level, thresholds)) {
 			return {
 				block: true,
-				reason: `Tool "${toolName}" is refused: context is at the forced self-compaction line (${thresholds.forcedTokens.toLocaleString("en-US")} tokens). Write note_to_self and call ${SELF_COMPACT_TOOL_NAME} now; every other tool is refused until the context is compacted.`,
+				reason: `Tool "${toolName}" is refused: context is at the forced self-compaction line (${thresholds.forcedTokens.toLocaleString("en-US")} tokens). Write note_to_self and call ${SELF_COMPACT_TOOL_NAME} now; every other tool is refused until ${this.deps.releasesAtTurnEnd() ? "this turn's context is released" : "the context is compacted"}.`,
 				...terminate,
 			};
 		}
 		return undefined;
+	}
+
+	/** The tool's confirmation text for a saved note. */
+	savedNoteText(noteChars: number, at: string, replaced: boolean): string {
+		return `Note saved (${noteChars.toLocaleString("en-US")} chars) at ${at}${replaced ? ", replacing the earlier saved note" : ""}. Stop now: ${this.releaseText()} and your note comes back verbatim.`;
 	}
 
 	hasPendingContinuation(): boolean {
@@ -455,6 +521,17 @@ export class SelfCompactionController {
 							`compaction did not succeed after ${state.attempts} attempts (${state.lastError ?? "unknown error"})`,
 						);
 						return settled;
+					}
+					if (this.deps.releasesAtTurnEnd()) {
+						// The turn's end is the release: wait until the turn holding the note has ended, then record it.
+						await this.deps.waitForForegroundIdle();
+						if (this.deps.isDisposed() || this.deps.isAwaitingOwner()) return settled;
+						const after = this.state();
+						if (after.status !== "pending" || after.request?.id !== request.id) continue;
+						this.deps
+							.getSessionManager()
+							.appendCustomEntry(SELF_COMPACTION_RELEASED_CUSTOM_TYPE, { handoffId: request.id });
+						continue;
 					}
 					if (!this.deps.hasCompactableHistory()) {
 						this.abandon(request, "there is nothing left to compact");
@@ -569,7 +646,7 @@ export function createSelfCompactToolDefinition(
 				content: [
 					{
 						type: "text" as const,
-						text: `Note saved (${outcome.record.note.length.toLocaleString("en-US")} chars) at ${at}${outcome.replaced ? ", replacing the earlier saved note" : ""}. Stop now: the context is compacted when this turn ends and your note comes back verbatim.`,
+						text: controller.savedNoteText(outcome.record.note.length, at, outcome.replaced),
 					},
 				],
 				details: { accepted: true, handoffId: outcome.record.id, noteChars: outcome.record.note.length },

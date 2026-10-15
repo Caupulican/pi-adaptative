@@ -92,6 +92,10 @@ export class ForegroundLifecycleAdapter {
 		this.lifecycle.resetForSessionReload();
 	}
 
+	commitRoutedPromptPrefix(): void {
+		this.lifecycle.commitRoutedPromptPrefix();
+	}
+
 	getPersistedMessageEntryId(message: Message): string | undefined {
 		return this.lifecycle.getPersistedMessageEntryId(message);
 	}

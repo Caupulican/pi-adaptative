@@ -158,7 +158,9 @@ export class SelectList implements Component {
 			if (remainingWidth > MIN_DESCRIPTION_WIDTH) {
 				const truncatedDesc = truncateToWidth(descriptionSingleLine, remainingWidth, "");
 				if (isSelected) {
-					return this.theme.selectedText(`${prefix}${truncatedValue}${spacing}${truncatedDesc}`);
+					const row = `${prefix}${truncatedValue}${spacing}${truncatedDesc}`;
+					const pad = " ".repeat(Math.max(0, width - visibleWidth(row)));
+					return this.theme.selectedText(`${row}${pad}`);
 				}
 
 				const descText = this.theme.description(spacing + truncatedDesc);
@@ -169,7 +171,9 @@ export class SelectList implements Component {
 		const maxWidth = width - prefixWidth - 2;
 		const truncatedValue = this.truncatePrimary(item, isSelected, maxWidth, maxWidth);
 		if (isSelected) {
-			return this.theme.selectedText(`${prefix}${truncatedValue}`);
+			const row = `${prefix}${truncatedValue}`;
+			const pad = " ".repeat(Math.max(0, width - visibleWidth(row)));
+			return this.theme.selectedText(`${row}${pad}`);
 		}
 
 		return prefix + truncatedValue;

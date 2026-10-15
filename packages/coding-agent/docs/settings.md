@@ -60,7 +60,8 @@ The inspected Codex catalog supplies tier availability, not Ultrafast dollar pri
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `theme` | string | `"dark"` | Theme name (`"dark"`, `"light"`, or custom) |
-| `quietStartup` | boolean | `false` | Hide startup header |
+| `quietStartup` | boolean | `true` | Hide the startup banner and the loaded-resources listing; `false` shows them |
+| `projectTrust` | string | `"trusted"` | Global only. What a project with no saved `/trust` decision gets: `"trusted"` loads its `.pi` settings, extensions and instructions, `"untrusted"` ignores them. A saved `/trust` decision wins, and `--approve` / `--no-approve` win for one run. `/trust` applies to the running session |
 | `collapseChangelog` | boolean | `false` | Show condensed changelog after updates |
 | `doubleEscapeAction` | string | `"tree"` | Action for double-escape: `"tree"`, `"fork"`, or `"none"` |
 | `treeFilterMode` | string | `"default"` | Default filter for `/tree`: `"default"`, `"no-tools"`, `"user-only"`, `"labeled-only"`, `"all"` |
@@ -379,12 +380,12 @@ The checkpoint owns user intent mechanically: `## Active Task` copies the latest
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `compaction.enabled` | boolean | `true` | Enable auto-compaction |
+| `compaction.enabled` | boolean | `true` | Enable auto-compaction. Under ICM it applies to the running chat turn only (see [Compaction](compaction.md#icm-and-host-compaction)) |
 | `compaction.model` | string | `"auto"` | Summarizer model pattern. `auto` follows router cheap when available, but always consults exhausted-provider state and the subtractive `digest` fitness surface before falling back visibly to the session model. |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
 | `compaction.triggerPercent` | number | `0.6` | Context-efficiency and latency trigger as a fraction of the model window; separate from the USD cost guard |
-| `compaction.selfMonitor.enabled` | boolean | `true` | Let the agent watch its context gauge and hand itself off with `self_compact` (see [Compaction](compaction.md#self-monitoring-compaction)) |
+| `compaction.selfMonitor.enabled` | boolean | `true` | Let the agent watch its context gauge and hand itself off with `self_compact` (see [Compaction](compaction.md#self-monitoring-compaction)). Under ICM the end of the turn releases the context instead of a compaction |
 | `compaction.selfMonitor.notice` | number | `0.7` | Notice line as a fraction of the first compaction trigger (the early trigger when it is below hard, else hard) |
 | `compaction.selfMonitor.warning` | number | `0.85` | Warning line as a fraction of the first compaction trigger; must not be below `notice` |
 | `compaction.selfMonitor.forced` | number | `0.95` | Forced line as a fraction of the hard trigger (never below the warning line) |

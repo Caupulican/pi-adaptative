@@ -198,6 +198,10 @@ export function applyRetentionDecisionsToMessages(
  * `drop_pair` removes the tool call and its result together, so no orphaned call or result can
  * reach the provider. `keep_call_truncate_result` keeps the call verbatim and replaces the result
  * body with a bounded reference. `keep_exact` and every unlisted entry are untouched.
+ *
+ * A removed entry can be the scope start (`scopeStartEntryId`) of a later compaction on the branch, such as an ICM
+ * turn that began at a tool result. The projected scope then starts where that entry stood: at the next retained
+ * entry, which the compaction is re-anchored to, so the projection never names an entry it does not contain.
  */
 export function applyRetentionDecisionsToBranch(
 	branch: readonly SessionEntry[],
@@ -209,6 +213,13 @@ export function applyRetentionDecisionsToBranch(
 	const projectMessages = createRetentionMessageProjector(decisions);
 	const projected: SessionEntry[] = [];
 	let retainedParentId: string | null = null;
+	const scopeStarts = new Set<string>();
+	for (const entry of branch) {
+		if (entry.type === "compaction" && entry.scopeStartEntryId !== undefined)
+			scopeStarts.add(entry.scopeStartEntryId);
+	}
+	const removedScopeStarts: string[] = [];
+	const scopeStartReplacements = new Map<string, string>();
 
 	for (const entry of branch) {
 		const message = entryMessage(entry);
@@ -216,10 +227,18 @@ export function applyRetentionDecisionsToBranch(
 
 		if (message) {
 			const projectedMessage = projectMessages.projectMessage(message);
-			if (!projectedMessage) continue;
+			if (!projectedMessage) {
+				if (scopeStarts.has(entry.id)) removedScopeStarts.push(entry.id);
+				continue;
+			}
 			if (projectedMessage !== message) {
 				nextEntry = { ...entry, message: projectedMessage } as SessionEntry;
 			}
+		}
+		for (const removed of removedScopeStarts.splice(0)) scopeStartReplacements.set(removed, nextEntry.id);
+		if (nextEntry.type === "compaction" && nextEntry.scopeStartEntryId !== undefined) {
+			const replacement = scopeStartReplacements.get(nextEntry.scopeStartEntryId);
+			if (replacement !== undefined) nextEntry = { ...nextEntry, scopeStartEntryId: replacement };
 		}
 
 		// Removing entries breaks ancestry for everything downstream; relink the linear branch while
