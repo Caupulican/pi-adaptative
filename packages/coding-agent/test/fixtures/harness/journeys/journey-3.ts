@@ -19,7 +19,7 @@ export async function runJourney3(): Promise<void> {
 			// dirty from the start, so lanes are created explicitly and the worker is started on its request-visible lane checkout.
 			settings: { defaultTools: [...DEFAULT_ACTIVE_TOOL_NAMES, "worktree_sync"] },
 			warningAllowances: [
-				/^Memory subsystem init failed: Legacy memory import is incomplete and will retry: 2026-01-01T00-00-00-000Z_headless-legacy\.jsonl: the first line is not a session header$/,
+				/^Memory subsystem init failed: Legacy memory import is incomplete and will retry: 2026-01-01T00-00-00-000Z_headless-legacy\.jsonl: the file cannot be read: .+$/,
 			],
 			files: {
 				[projectPath("src", "limits.ts")]: ORIGINAL_LIMITS,

@@ -75,7 +75,15 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	expect(mForgetOutcome.ok, `forgetting ${mLegacyForgottenId} succeeds: ${mForgetOutcome.message}`).toBe(true);
 	expect(await world.disposeSessionInBody(mForgetMarker.session)).toBeUndefined();
 
-	// Open ICM root while mHeadlessFile is corrupted: migration blocks without writing migration.json, and provider requests fail closed.
+	// Open ICM root while mHeadlessFile cannot be read (a persistent scripted EIO): a transient read failure is the one source
+	// fault that still blocks the import. Migration blocks without writing migration.json, and provider requests fail closed.
+	// (A readable headerless file is repaired from its name and imported, and malformed content is recorded as a skip.)
+	const mHeadlessUnreadable = world.io.denyUntilCleared({
+		name: "m-legacy-headless-read-eio",
+		kind: "read",
+		code: "EIO",
+		matches: (operation) => operation.path.endsWith(mHeadlessFile),
+	});
 	const mBlocked = await world.createRootSession("root", {
 		agentDir: mAgentDir,
 		sessionManager: world.createSessionManager(mAgentDir),
@@ -101,11 +109,12 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 		blockedReply: {
 			stopReason: "error",
 			error: expect.stringContaining(
-				`ICM project chat is unavailable: Legacy memory import is incomplete and will retry: ${mHeadlessFile}: the first line is not a session header`,
+				`ICM project chat is unavailable: Legacy memory import is incomplete and will retry: ${mHeadlessFile}: the file cannot be read:`,
 			),
 		},
 	});
 	expect(await world.disposeSessionInBody(mBlocked.session)).toBeUndefined();
+	expect(mHeadlessUnreadable.clear(), "the blocked import met the unreadable source").toBeGreaterThan(0);
 
 	// Repair into a valid extended-year ISO timestamp that reaches the intentional non-loggable day skip.
 	const mUnsupportedSessionId = "headless-repaired-unsupported";
