@@ -158,7 +158,9 @@ Attribution:
 
 3. **Standalone release verification**: the separately authorized tag workflow builds the Linux, Windows, and retained macOS archives, executes both repository installers against the just-built archives, and uploads `install.sh`, `install.ps1`, and `SHA256SUMS` to the GitHub release. Retained installer and binary regression procedures require separate owner authorization; they are not part of the static check. Do not substitute npm package or local registry smoke tests.
 
-4. **Run the release script** (it refuses to start unless `ci.yml` succeeded on the exact `main` commit being released; push and wait for green first): the flow is split into `prepare` (bump/changelog/commit/push, no tag) and `promote` (gate on destructive.yml, then tag/push). The `ci.yml` matrix gates main and runs again on the tag.
+4. **Release on GitHub, not locally** (owner preference): dispatch the Release workflow (`.github/workflows/release.yml`) from `main` with `gh workflow run release.yml --ref main -f target=patch` (or `minor`, `major`, `promote`, `repair`) and follow it with `gh run watch`. It runs `scripts/release.mjs` on a runner with the workflow token and then dispatches `build-binaries.yml` on the new tag, because a tag pushed with the workflow token does not start that workflow by itself. Do not run `npm run release:*` from a local checkout. Everything below describes what the script does and how to resume it; resume with the `promote` or `repair` target of the same workflow.
+
+   **Run the release script** (it refuses to start unless `ci.yml` succeeded on the exact `main` commit being released; push and wait for green first): the flow is split into `prepare` (bump/changelog/commit/push, no tag) and `promote` (gate on destructive.yml, then tag/push). The `ci.yml` matrix gates main and runs again on the tag.
    ```bash
    npm run release:patch    # fixes + additions: prepare, push, destructive gate, then tag
    npm run release:minor    # breaking changes: same flow

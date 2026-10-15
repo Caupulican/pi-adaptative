@@ -1,0 +1,107 @@
+name: Release
+
+# Runs scripts/release.mjs on GitHub instead of a local checkout. The script stays the one owner of the
+# release rules: a green ci.yml on the starting commit, the version bump and changelogs, `npm run check`,
+# the destructive.yml gate on the exact release commit, then the version tag. This workflow only supplies
+# the runner, the credentials and the hand-off to build-binaries.yml.
+#
+# Pushes made with the workflow token never trigger other workflows, so the tag this job creates does not
+# start build-binaries.yml by itself; the last step dispatches it on the tag. (destructive.yml is already
+# started by the script through workflow_dispatch, which the token is allowed to do.)
+#
+# Targets:
+#   patch | minor | major  prepare the next version from main, then promote it
+#   promote                resume a prepared release whose gate or tag step did not finish
+#   repair                 re-run a prepared, untagged release after a corrected gate failure
+# Never run patch/minor/major again for a version whose release commit is already pushed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Release target
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - promote
+          - repair
+        default: patch
+
+permissions:
+  contents: write # push the release commits, the dispatch branch and the version tag
+  actions: write # dispatch destructive.yml and build-binaries.yml
+
+# One release at a time; a running release is never cancelled halfway through its pushes.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release (${{ inputs.target }})
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TARGET: ${{ inputs.target }}
+    steps:
+      # The script reads origin/main, the tags and the release history, so it needs the whole of it.
+      - name: Checkout main
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set the release commit author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Install Linux system dependencies
+        run: ./scripts/install-linux-ci-deps.sh
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # Same hermetic build ci.yml runs before its static check: the committed model catalogs, no live refresh.
+      - name: Build
+        run: npm run build
+
+      - name: Run the release
+        run: node scripts/release.mjs "${RELEASE_TARGET}"
+
+      - name: Publish the release assets from the tag
+        run: |
+          VERSION="$(node -p "require('./packages/ai/package.json').version")"
+          TAG="v${VERSION}"
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null; then
+            echo "::error::${TAG} is not on origin; the release did not reach its tag, so there is nothing to publish." >&2
+            exit 1
+          fi
+          # A run already building or already succeeded for this tag is not started twice. A failed or cancelled
+          # one is replaced, which is how an asset failure is retried.
+          current="$(gh run list --workflow=build-binaries.yml --branch "${TAG}" --json status,conclusion \
+            --jq '[.[] | select(.status != "completed" or .conclusion == "success")] | length')"
+          if [ "${current}" != "0" ]; then
+            echo "build-binaries.yml already has a live or successful run for ${TAG}; not starting another."
+          else
+            gh workflow run build-binaries.yml --ref "${TAG}" -f tag="${TAG}"
+            echo "Dispatched build-binaries.yml on ${TAG}."
+          fi
+          {
+            echo "### ${TAG}"
+            echo
+            echo "Tagged. The standalone archives are built, verified and published by the Build Binaries workflow:"
+            echo "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/build-binaries.yml"
+          } >> "${GITHUB_STEP_SUMMARY}"
