@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- `pi update self` no longer runs the standalone installer for an installation it does not own (source checkout, dev link, wrapper): it reports that the installation is updated by whatever provides it instead of failing with `refusing to replace an unowned pi launcher`, and `pi update` skips the self step with a note.
+
 ## [0.103.9] - 2026-10-15
 
 ### Breaking Changes

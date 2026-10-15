@@ -1,6 +1,14 @@
 import chalk from "chalk";
 import { selectConfig } from "./cli/config-selector.ts";
-import { APP_NAME, getAgentDir, getStandaloneInstallerCommand, getStandaloneInstallInstruction } from "./config.ts";
+import {
+	APP_NAME,
+	detectInstallMethod,
+	getAgentDir,
+	getSelfUpdateUnavailableInstruction,
+	getStandaloneInstallerCommand,
+	getStandaloneInstallInstruction,
+	type InstallMethod,
+} from "./config.ts";
 import { DefaultPackageManager } from "./core/package-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { ProjectTrustStore, resolveProjectTrust } from "./core/trust-manager.ts";
@@ -29,6 +37,7 @@ export type PackageCommandInstallerRunner = (command: string, args: string[]) =>
 export interface PackageCommandDependencies {
 	runInstaller?: PackageCommandInstallerRunner;
 	platform?: NodeJS.Platform;
+	installMethod?: InstallMethod;
 }
 
 const runInstaller: PackageCommandInstallerRunner = async (command, args) => {
@@ -299,6 +308,14 @@ function updateTargetIncludesExtensions(target: UpdateTarget): boolean {
 	return target.type === "all" || target.type === "extensions";
 }
 
+/**
+ * The standalone installer owns only standalone installs (and migrates legacy package installs).
+ * An installation it did not create (source checkout, dev link, wrapper) is updated by whatever provides it.
+ */
+function isInstallerManaged(dependencies: PackageCommandDependencies): boolean {
+	return (dependencies.installMethod ?? detectInstallMethod()) !== "unknown";
+}
+
 async function runStandaloneInstaller(dependencies: PackageCommandDependencies): Promise<void> {
 	const platform = dependencies.platform ?? process.platform;
 	const installer = getStandaloneInstallerCommand(platform);
@@ -490,6 +507,14 @@ export async function handlePackageCommand(
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
+					if (!isInstallerManaged(dependencies)) {
+						const instruction = getSelfUpdateUnavailableInstruction(APP_NAME);
+						if (target.type === "self") {
+							throw new Error(instruction);
+						}
+						console.log(chalk.yellow(`Skipped ${APP_NAME} self-update: ${instruction}`));
+						return true;
+					}
 					await runStandaloneInstaller(dependencies);
 					console.log(chalk.green(`Updated ${APP_NAME}`));
 					return true;
