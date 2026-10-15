@@ -3981,8 +3981,11 @@ export class InteractiveMode {
 			const keys = keyText(binding);
 			return keys ? `${keys} ${text}` : "";
 		};
+		// Ordered by how much a first-timer needs each: the placeholder is cut from the tail on a narrow row, so the
+		// key that lists every other key leads.
 		return [
 			"Ask anything",
+			`${keyText("app.shortcuts.show")} shortcuts`,
 			"/ commands",
 			"@ files",
 			"! bash",
@@ -3990,7 +3993,6 @@ export class InteractiveMode {
 			// Windows Terminal swallows alt+enter; the `>>` prefix is the follow-up gesture there.
 			process.env.WT_SESSION ? ">> follow-up" : key("app.message.followUp", "follow-up"),
 			key("app.execution.toggle", "work area"),
-			`${keyText("app.shortcuts.show")} shortcuts`,
 		]
 			.filter(Boolean)
 			.join(" · ");

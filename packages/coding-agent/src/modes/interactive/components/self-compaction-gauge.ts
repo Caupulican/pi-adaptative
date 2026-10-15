@@ -3,9 +3,9 @@ import type { SelfCompactionPhase, SelfCompactionView } from "../../../core/comp
 export const SELF_COMPACTION_GAUGE_CELLS = 20;
 
 export const SELF_COMPACTION_GAUGE_GLYPHS = {
-	cached: "#",
-	used: "=",
-	free: ".",
+	cached: "█",
+	used: "▓",
+	free: "░",
 	notice: "+",
 	warning: "!",
 	forced: "|",

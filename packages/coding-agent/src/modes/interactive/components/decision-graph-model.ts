@@ -140,6 +140,23 @@ export interface DecisionGraphModel {
 	readonly nowMs: number;
 }
 
+/**
+ * Whether the graph has anything to draw: a stage ran, a plan or check is open, System One holds a question or doubt,
+ * a turn is in flight or the flow trace recorded an event. A graph with none of that earns no width, like the work area.
+ */
+export function graphHasContent(model: DecisionGraphModel): boolean {
+	return (
+		!model.stageLogEmpty ||
+		model.plan.length > 0 ||
+		model.checks.length > 0 ||
+		model.peerFindings.length > 0 ||
+		model.unresolvedDoubtCount > 0 ||
+		model.you.present ||
+		model.turnRunning ||
+		model.flow.length > 0
+	);
+}
+
 /** Whether the goal is closed, and what still holds it open. The one definition every view of the verdict uses. */
 export interface GoalClosure {
 	/** Unsatisfied checks, peer findings and unresolved doubts. */

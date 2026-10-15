@@ -635,7 +635,7 @@ export class WorkbenchController {
 		this.ports.geometry?.save(this.view.geometry());
 	}
 
-	/** Hand the mouse to the workbench or back to the terminal; the view's hint row shows the owner. */
+	/** Hand the mouse to the workbench or back to the terminal; the status line names the terminal as owner. */
 	toggleMouse(): void {
 		const mouse = this.ports.mouse;
 		if (!mouse) {

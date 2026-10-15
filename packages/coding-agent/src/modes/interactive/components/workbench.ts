@@ -12,7 +12,7 @@ import { getSelectionStyle, theme } from "../../../presentation/theme-model.ts";
 import { ActionTranscriptComponent } from "./action-transcript.ts";
 import { BashExecutionComponent } from "./bash-execution.ts";
 import { ConversationWindow } from "./conversation-window.ts";
-import type { DecisionGraphModel } from "./decision-graph-model.ts";
+import { type DecisionGraphModel, graphHasContent } from "./decision-graph-model.ts";
 import { DecisionGraphPane } from "./decision-graph-pane.ts";
 import { FlowAnimator } from "./flow-animator.ts";
 import { fitRow, labelRow, surfaceRow, WorkbenchPane, type WorkbenchPaneTitleButton } from "./workbench-pane.ts";
@@ -97,8 +97,8 @@ export const MIN_CONVERSATION_ROWS = 6;
 export const MAX_UPPER_ROWS = 60;
 /** The diagram's node block plus the pane's gutters; below this the drawing would clip, so the graph folds. */
 export const MIN_GRAPH_WIDTH = 48;
-/** The chat never drops below this; the graph folds before the conversation becomes a column of stubs. */
-export const MIN_CHAT_WIDTH = 40;
+/** The chat keeps a readable measure: the graph folds before the conversation is squeezed under this many columns. */
+export const MIN_CHAT_WIDTH = 60;
 
 /** Explicit rows the operator chose, or "auto": a proportional split that follows the terminal's height. */
 export type WorkAreaRows = number | "auto";
@@ -165,7 +165,7 @@ export function workAreaRows(available: number, geometry: WorkbenchGeometry): nu
  *
  * Rows, top to bottom: title strip, live activity, the work area (inspector left, execution right)
  * at a fixed height unless the operator collapses it, its divider, conversation header, conversation
- * rows, the status band, input, rows below the input and a key hint. Zones separate by surface tone
+ * rows, the status band, input, rows below the input and the status line. Zones separate by surface tone
  * and spacing, never by frames. Only the operator changes the work area's size or visibility.
  */
 export class WorkbenchComponent extends Container {
@@ -189,13 +189,15 @@ export class WorkbenchComponent extends Container {
 	private inspectorHidden = false;
 	private executionMaximized = false;
 	private executionCompact = false;
-	/** Who owns the mouse; the hint row reports it so a silent wheel is never a mystery. */
+	/** Who owns the mouse; the status line reports the terminal owning it so a silent wheel is never a mystery. */
 	private mouseMode = false;
 	private readonly inspectorPane = new WorkbenchPane();
 	private readonly executionPane = new WorkbenchPane();
 	private readonly graphPane = new DecisionGraphPane();
 	/** Composes the Decision graph's model per frame; unset, the zone is chat only. */
 	private graphSource?: () => DecisionGraphModel | undefined;
+	/** This frame's graph model: composed once, and only when the graph is wanted and has something to show. */
+	private frameGraphModel?: DecisionGraphModel;
 	/** Told after every frame whether the drawn graph carries a running clock (the lane's ticker). */
 	private graphClock?: (running: boolean) => void;
 	/** The one timer that moves the flow views' carriers; present while the graph has a render trigger. */
@@ -339,11 +341,11 @@ export class WorkbenchComponent extends Container {
 	disposeGraphMotion(): void {
 		this.graphAnimator?.dispose();
 	}
-	/** Whether the Decision graph is shown (drawn in the current/last frame, or active at the current zone width). */
+	/** Whether the Decision graph is shown (drawn in the current/last frame, or active at the current zone width with content). */
 	get graphShown(): boolean {
 		if (this.graphRuleColumn >= 0) return true;
 		const zoneWidth = this.zoneWidth > 0 ? this.zoneWidth : this.lastColumns > 0 ? this.lastColumns : 120;
-		return this.resolvedGraphWidth(zoneWidth) > 0;
+		return this.frameGraphModel !== undefined && this.resolvedGraphWidth(zoneWidth) > 0;
 	}
 	scrollGraph(column: number, row: number, delta: number): boolean {
 		return this.graphPane.scrollAt(column, row, delta);
@@ -658,7 +660,7 @@ export class WorkbenchComponent extends Container {
 		return [`▸ ${blocks.join(" · ")}`, toggle && `${toggle} expand`].filter(Boolean).join(" · ");
 	}
 
-	/** Expanded: a drag handle and nothing else; the hint row carries the keys. Collapsed: the summary, or a bare rule when there is nothing to name. */
+	/** Expanded: a drag handle and nothing else; the editor's placeholder and `?` carry the keys. Collapsed: the summary, or a bare rule when there is nothing to name. */
 	private divider(columns: number, expanded: boolean, junctions: readonly WorkbenchDividerJunction[]): string {
 		const summary = expanded ? "↕" : this.collapsedSummary(columns);
 		const label = summary ? truncateToWidth(` ${summary} `, Math.max(0, columns - 2), "…") : "";
@@ -700,7 +702,7 @@ export class WorkbenchComponent extends Container {
 	private thinkingMeter(level: string): { text: string; width: number } {
 		const filled = Math.min(THINKING_METER_CELLS, THINKING_METER_LEVELS.indexOf(level) + 1 || THINKING_METER_CELLS);
 		const tone = theme.getThinkingBorderColor(level as Parameters<typeof theme.getThinkingBorderColor>[0]);
-		const pips = tone("▰".repeat(filled)) + theme.fg("dim", "▱".repeat(THINKING_METER_CELLS - filled));
+		const pips = tone("█".repeat(filled)) + theme.fg("dim", "░".repeat(THINKING_METER_CELLS - filled));
 		return { text: `${pips} ${tone(level)}`, width: THINKING_METER_CELLS + 1 + visibleWidth(level) };
 	}
 
@@ -709,8 +711,15 @@ export class WorkbenchComponent extends Container {
 		const inner = Math.max(0, columns - 2);
 		const model = this.options.model?.();
 		const meter = model?.thinking ? this.thinkingMeter(model.thinking) : undefined;
-		const right = model ? [theme.fg("text", model.name), meter?.text].filter(Boolean).join("  ") : "";
-		const rightWidth = model ? visibleWidth(model.name) + (meter ? 2 + meter.width : 0) : 0;
+		// The terminal owning the mouse is a standing fact: a wheel that does nothing in the workbench needs its reason on screen.
+		const terminalMouse = "terminal mouse";
+		const parts: { text: string; width: number }[] = [
+			...(this.mouseMode ? [] : [{ text: theme.fg("muted", terminalMouse), width: terminalMouse.length }]),
+			...(model ? [{ text: theme.fg("text", model.name), width: visibleWidth(model.name) }] : []),
+			...(meter ? [meter] : []),
+		];
+		const right = parts.map((part) => part.text).join("  ");
+		const rightWidth = parts.reduce((sum, part) => sum + part.width, 0) + Math.max(0, parts.length - 1) * 2;
 		const branch = this.options.branch?.() ?? "";
 		const pr = this.options.pullRequest?.();
 		const pullRequest = pr ? this.pullRequestLabel(pr) : undefined;
@@ -928,7 +937,7 @@ export class WorkbenchComponent extends Container {
 		this.conversationTop = top + 1;
 		this.conversationHeight = height;
 		const graphWidth = this.resolvedGraphWidth(zoneWidth);
-		const model = graphWidth > 0 ? this.graphSource?.() : undefined;
+		const model = graphWidth > 0 ? this.frameGraphModel : undefined;
 		this.graphClock?.(model?.hasRunningClock === true);
 		if (!model) {
 			this.graphAnimator?.settled();
@@ -1008,6 +1017,7 @@ export class WorkbenchComponent extends Container {
 		this.columnSplitEnd = -1;
 		this.paneRuleColumn = -1;
 		this.graphRuleColumn = -1;
+		this.frameGraphModel = undefined;
 		this.headerButtons = [];
 		const columns = Math.max(1, width);
 		this.lastColumns = columns;
@@ -1025,6 +1035,12 @@ export class WorkbenchComponent extends Container {
 				? this.options.dock.flatMap((component) => component.render(columns)).slice(-remaining)
 				: [];
 			return [...Array.from({ length: remaining - dock.length }, () => ""), ...dock, ...nativeEditor];
+		}
+		// The graph is earned like the work area: wanted (not hidden, wide enough for two panes) and with
+		// something to draw. It is composed once per frame; the inspector and the zone both read it.
+		if (!this.graphHidden && this.graphSource && columns >= SIDE_BY_SIDE_MIN_COLUMNS) {
+			const model = this.graphSource();
+			if (model && graphHasContent(model)) this.frameGraphModel = model;
 		}
 		// Title strip, divider, conversation header, three conversation rows, the live row and the POV
 		// row stay; the editor's rendering already carries its own two rules.
