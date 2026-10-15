@@ -728,6 +728,14 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		if (!match) throw new Error(`no requirement id in the goal state: ${goal?.text ?? "no goal result"}`);
 		return match[0];
 	};
+	// The goal tool's get text lists ids only for open or unproven requirements; a requirement that already has trusted
+	// evidence (the rechecked goal's) is neither, so the host's goal state is the source of its id.
+	const goalRequirementId = (): string => {
+		const requirements = session.getGoalStateSnapshot()?.requirements ?? [];
+		if (requirements.length !== 1)
+			throw new Error(`expected the goal to hold one requirement, found ${requirements.length}`);
+		return requirements[0]!.id;
+	};
 	const refusedGoal = (request: ScriptedRequest, label: string, diagnostic: string): void => {
 		const refused = latestBatchResults(request).find((result) => result.toolName === "goal");
 		if (!refused?.isError || !refused.text.includes(diagnostic)) {
@@ -1564,7 +1572,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		calls("get-rechecked-goal", [{ id: "goal-get-recheck", name: "goal", arguments: { action: "get" } }]),
 		dynamicCalls(
 			"record-recheck-evidence",
-			(request) => [
+			() => [
 				{
 					id: "evidence-recheck",
 					name: "goal",
@@ -1573,7 +1581,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 						kind: "test",
 						uri: "verify-pass-2",
 						summary: "The current recheck passed: MAX_RETRIES is 5.",
-						requirementIds: [requirementFrom(request)],
+						requirementIds: [goalRequirementId()],
 					},
 				},
 			],
@@ -1581,8 +1589,8 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		),
 		dynamicCalls(
 			"complete-final",
-			(request) => {
-				const requirement = requirementFrom(request);
+			() => {
+				const requirement = goalRequirementId();
 				const goal = session.getGoalStateSnapshot();
 				const evidence = goal?.evidence.find((item) => item.uri === "verify-pass-2");
 				const linkedRequirement = goal?.requirements.find((item) => item.id === requirement);
