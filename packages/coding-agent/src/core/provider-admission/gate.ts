@@ -27,7 +27,12 @@ export interface ProviderAdmissionPolicy {
 	foregroundLimitWaitMs: number;
 }
 
-export type ProviderAdmissionWaitReason = "capacity" | "provider_limit" | "emergency_stop";
+export type ProviderAdmissionWaitReason = "capacity" | "provider_limit" | "emergency_stop" | "model_quota";
+
+/** A model whose quota is exhausted for this host: its recorded reset, or `undefined` when none was recorded. */
+export interface ModelExhaustion {
+	readonly until: number | undefined;
+}
 
 export interface ProviderAdmissionWaitRecord {
 	provider: string;
@@ -64,6 +69,8 @@ export interface ProviderAdmissionGateDeps {
 	getPolicy(): ProviderAdmissionPolicy;
 	/** Shared "provider limited until T" state; omitted disables limit checks and result observation. */
 	limits?: ProviderLimitStore;
+	/** The quota exhaustion holding for a `provider/model` ref, with its reset when one was recorded. */
+	modelExhaustion(modelRef: string): ModelExhaustion | undefined;
 	/** Machine-wide emergency stop; omitted means never engaged. */
 	isEmergencyStopEngaged?(): boolean;
 	/** Provider account key for `provider` (see account-key.ts); omitted keys on the bare provider id. */
@@ -88,6 +95,24 @@ export class EmergencyStopError extends Error {
 	}
 }
 
+/**
+ * A model that is out of quota past this request's wait budget, refused before anything is sent. Worded as
+ * quota, not rate limit: a rate-limit reading would record an account-wide limit that blocks every other model
+ * on the account. The retry delay is spelled as the classifier reads it, so the owner's failover records the
+ * model's reset rather than an open-ended exhaustion.
+ */
+export class ModelQuotaExhaustedError extends Error {
+	constructor(modelRef: string, until: number | undefined, nowMs: number) {
+		super(
+			until === undefined
+				? `Model ${modelRef} quota exceeded with no reset recorded; no request was sent.`
+				: `Model ${modelRef} quota exceeded until ${new Date(until).toISOString()}: ` +
+						`retry after ${Math.max(1, Math.ceil((until - nowMs) / 1000))} seconds; no request was sent.`,
+		);
+		this.name = "ModelQuotaExhaustedError";
+	}
+}
+
 function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
 	return new Promise((resolve, reject) => {
 		if (signal?.aborted) {
@@ -109,6 +134,8 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
 /**
  * Admit one provider request. In order:
  *
+ *  0. Model quota (worker and background lanes): a model with a recorded quota reset is waited out within the lane budget
+ *     (`maxWaitMs`), and otherwise refused with {@link ModelQuotaExhaustedError}. Runs ahead of the enabled switch.
  *  1. Emergency stop: worker and background lanes wait while it is engaged, then refuse after
  *     `maxWaitMs`; the foreground is never held by it.
  *  2. Recorded machine-wide limit: every lane waits for the recorded reset while it fits its
@@ -125,12 +152,12 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
  */
 export async function admitProviderRequest(
 	provider: string,
+	modelRef: string,
 	deps: ProviderAdmissionGateDeps,
 	signal?: AbortSignal,
 ): Promise<() => void> {
 	signal?.throwIfAborted();
 	const policy = deps.getPolicy();
-	if (!policy.enabled) return () => undefined;
 	const lane = (deps.getLane ?? currentProviderLane)();
 	const now = deps.now ?? Date.now;
 	const sleep = deps.sleep ?? sleepAbortable;
@@ -139,6 +166,59 @@ export async function admitProviderRequest(
 	const account = splitProviderAccountKey(key).account;
 	const inflightNow = (): number => deps.ledger.countInflight(key).total;
 	const base = { provider, ...(account ? { account } : {}), lane, limit } as const;
+
+	// A model out of quota is not sent to. A worker or background request waits for the model's recorded reset within
+	// the lane budget, as it waits out a recorded account limit, and is refused past that budget. This runs ahead of the
+	// enabled switch: the quota is a fact about the model, not contention policy.
+	if (lane !== "foreground") {
+		const quotaWaitStartedAt = now();
+		for (;;) {
+			signal?.throwIfAborted();
+			const exhaustion = deps.modelExhaustion(modelRef);
+			if (!exhaustion) break;
+			const startedAt = now();
+			const waitedMs = startedAt - quotaWaitStartedAt;
+			if (exhaustion.until === undefined || exhaustion.until - startedAt > policy.maxWaitMs - waitedMs) {
+				deps.record?.({
+					...base,
+					reason: "model_quota",
+					inflightAtStart: inflightNow(),
+					inflightAtAdmission: inflightNow(),
+					waitedMs,
+					timedOut: true,
+					limitedUntil: exhaustion.until,
+				});
+				throw new ModelQuotaExhaustedError(modelRef, exhaustion.until, startedAt);
+			}
+			const remainingMs = exhaustion.until - startedAt;
+			if (remainingMs > 0) {
+				const inflightAtStart = inflightNow();
+				deps.onWait?.({
+					...base,
+					phase: "start",
+					reason: "model_quota",
+					expectedMs: remainingMs,
+					limitedUntil: exhaustion.until,
+				});
+				try {
+					await sleep(remainingMs, signal);
+				} finally {
+					deps.onWait?.({ ...base, phase: "end", reason: "model_quota", waitedMs: now() - startedAt });
+				}
+				deps.record?.({
+					...base,
+					reason: "model_quota",
+					inflightAtStart,
+					inflightAtAdmission: inflightNow(),
+					waitedMs: now() - startedAt,
+					timedOut: false,
+					limitedUntil: exhaustion.until,
+				});
+				signal?.throwIfAborted();
+			}
+		}
+	}
+	if (!policy.enabled) return () => undefined;
 
 	if (lane !== "foreground" && deps.isEmergencyStopEngaged?.()) {
 		const startedAt = now();
@@ -295,6 +375,7 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 			options?.providerAccountKey ?? deps.getAccountKey?.(model.provider, options?.apiKey) ?? model.provider;
 		const release = await admitProviderRequest(
 			model.provider,
+			`${model.provider}/${model.id}`,
 			{ ...deps, getAccountKey: () => key },
 			options?.signal,
 		);

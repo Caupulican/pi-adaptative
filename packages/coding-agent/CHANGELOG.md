@@ -1,5 +1,23 @@
 ## [Unreleased]
 
+### Changed
+
+- Collaboration peers authenticate with a per-member credential file (mode 0600 in a 0700 job directory under the state directory) instead of an environment variable. Peer commands carry identifiers, and the agent directory only when it is overridden, so Codex, Claude and agy members can report even when their tool shells do not inherit the pane environment. Jobs admitted before this change keep authenticating through their original launch environment and are not reused.
+- Worker and pin model refusals now carry the exact cause: `model_not_found`, `model_out_of_scope`, `auth_missing`, `model_quota_exhausted`, `model_account_*`, `model_unusable` or `thinking_level_unsupported`. Reasons read `orchestration_model_unavailable:<causes>` and `worker_model_pin_unavailable:<role>:<causes>`.
+- A completed goal that lacks trusted requirement evidence is reopened active (new persisted event `reopen_unproven_completion`; older builds reject goal states containing it) with one warning instead of throwing on objective routes. An unproven objective completion keeps the goal active and continues gathering evidence, and the unproven requirement ids appear in the model-facing goal record. Completed and cancelled objectives are settled by goal sync instead of throwing.
+- Pinned, authored and fixed worker bindings on a quota-exhausted model are admitted and wait for the recorded reset within the provider-admission budget; ordered candidates skip it. Over-budget refusals classify as `billing_or_quota`. Background lanes also wait for a model's recorded reset.
+- Explicit-fork worker specialists are reused on the declared fork request instead of the live birth view. Worker birth snapshots carry an optional `declaration` (view flag and fork mode) and enforce the history cap exactly; existing snapshots still open.
+- The continuous-chat view that rides requests and worker birth collapses its oldest lagging pairs at render time above high-water; `zoom` descends through collapsed and unmerged nodes to raw messages.
+- Collaboration credential files are restricted and verified with `icacls` on Windows. Herdr pane ids from a different pane are ignored by nested pi runs, and unverifiable ones attach with a warning.
+
+### Fixed
+
+- Settings changes no longer recycle a live continuous-chat host, which ended the running turn and made the next provider request fail with "no running turn". Missing-chat recovery waits on an event when the system-switch lease clears.
+- Worker birth no longer fails when the continuous-chat view plus selected history exceeds the 51,200-byte history cap.
+- Automatic goal completion is no longer treated as an owner override, and compaction events carry the entry that was actually appended.
+- Credential redaction of tool details now copies data only, redacting keys and secret-keyed scalars, and no longer passes class instances through.
+- Failed and aborted turns are recorded as bounded failure facts in the continuous chat, and summary usage receipts name the job, node, reply and attempt.
+
 ## [0.103.10] - 2026-10-15
 
 ### Fixed

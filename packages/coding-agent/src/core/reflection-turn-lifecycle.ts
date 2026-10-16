@@ -9,6 +9,11 @@ export interface ReflectionTurnLifecycleDeps {
 	beginDueReflectionTurn(): string | undefined;
 	/** Release the claim taken by {@link beginDueReflectionTurn}. Always called, even on failure. */
 	endReflectionTurn(): void;
+	/**
+	 * The detached turn stopped holding the session. It runs after the foreground release it ends with, so a waiter that
+	 * was refused by it needs this signal: the release has already passed.
+	 */
+	onTurnSettled(): void;
 	/** Abort the agent's current run, which is what unwinds a detached reflection turn. */
 	abortAgent(): void;
 	/** Stop reason of the last assistant message, including aborted ones. */
@@ -128,7 +133,9 @@ export class ReflectionTurnLifecycle {
 		const turn: InFlightReflectionTurn = { promise: run, cancel };
 		this._inFlight = turn;
 		void run.then(() => {
-			if (this._inFlight === turn) this._inFlight = undefined;
+			if (this._inFlight !== turn) return;
+			this._inFlight = undefined;
+			this.deps.onTurnSettled();
 		});
 	}
 

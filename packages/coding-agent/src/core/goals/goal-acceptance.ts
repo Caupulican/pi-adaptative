@@ -1,5 +1,5 @@
 import type { GoalEvidenceRef, GoalState, Requirement } from "./goal-state.ts";
-import { isTrustedGoalEvidence } from "./goal-state.ts";
+import { applyGoalEvent, isTrustedGoalEvidence } from "./goal-state.ts";
 
 export function getTrustedRequirementEvidence(state: GoalState, requirement: Requirement): GoalEvidenceRef[] {
 	const evidenceIds = new Set(requirement.evidenceIds);
@@ -49,8 +49,7 @@ export function formatRequirementsLedgerLine(state: GoalState): string | undefin
 
 /**
  * Human/manual completion and the explicit evidence-gate opt-out are authoritative overrides.
- * Completion events written before the flag existed are treated as legacy owner decisions so an
- * already-completed persisted goal cannot strand durable work during resume.
+ * An omitted flag is not owner authorization, including on restored completion events.
  */
 export function hasGoalAcceptanceOverride(state: GoalState): boolean {
 	if (state.acceptanceOverride !== undefined) return state.acceptanceOverride;
@@ -59,6 +58,25 @@ export function hasGoalAcceptanceOverride(state: GoalState): boolean {
 		.find((event) => event.type === "complete_goal" || event.type === "complete_goal_manually");
 	return (
 		completion?.type === "complete_goal_manually" ||
-		(completion?.type === "complete_goal" && completion.acceptanceOverride !== false)
+		(completion?.type === "complete_goal" && completion.acceptanceOverride === true)
 	);
+}
+
+/**
+ * The reason a completed goal is not supported by its trusted evidence: no explicit override, and a requirement
+ * without trusted evidence. Undefined when the completion stands.
+ */
+export function getGoalCompletionRefusal(state: GoalState): string | undefined {
+	if (state.status !== "completed" || hasGoalAcceptanceOverride(state)) return undefined;
+	const unprovenIds = getUnprovenGoalRequirementIds(state);
+	if (unprovenIds.length === 0) return undefined;
+	return `completion not supported: requirement(s) ${unprovenIds.slice(0, MAX_LEDGER_IDS_PER_CLASS).join(", ")} lack trusted evidence`;
+}
+
+/**
+ * The completed goal reopened as active with its refusal reason. The goal is never left completed on unproven
+ * evidence, and never blocked by it: its unproven requirements keep the continuation working until evidence exists.
+ */
+export function reopenUnprovenGoalCompletion(state: GoalState, reason: string, now: string): GoalState {
+	return applyGoalEvent(state, { type: "reopen_unproven_completion", reason, now });
 }

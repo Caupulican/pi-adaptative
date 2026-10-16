@@ -42,9 +42,18 @@ export const collaborationPeerTokenHashSchema = digest;
 /** Tokens are bootstrap capabilities, never a sandbox against host-unrestricted native CLIs. */
 export function verifyCollaborationPeerToken(expected: string | undefined, token: string): void {
 	if (!expected || !/^[a-f0-9]{64}$/.test(token)) throw new Error("Invalid collaboration peer credential.");
-	const actual = createHash("sha256").update(token).digest();
-	if (!timingSafeEqual(Buffer.from(expected, "hex"), actual))
+	if (!timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(collaborationPeerTokenHash(token), "hex")))
 		throw new Error("Invalid collaboration peer credential.");
+}
+
+export function collaborationPeerTokenHash(token: string): string {
+	return createHash("sha256").update(token).digest("hex");
+}
+
+/** The member's invocation: the job's address prefix plus its identity. Identifiers only, never a credential. */
+export function collaborationPeerInvocation(peerCommand: string, agentId: string): string {
+	if (!Value.Check(collaborationIdentitySchema, agentId)) throw new Error("Invalid collaboration agent identity.");
+	return `${peerCommand} ${agentId}`;
 }
 
 export function validateCollaborationPeerMessage(input: CollaborationPeerMessage): string {

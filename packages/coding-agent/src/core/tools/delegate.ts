@@ -1315,11 +1315,12 @@ function delegateStartSkipText(reason: string): string {
 	if (reason === "orchestration_profile_not_found") {
 		return "delegate not started: CAVEMAN MODE - MANDATORY: orchestration_profile_not_found is expected routing policy, not harness failure. Retry once with profileId omitted to use adaptive authority, or use an exact listed profile; never invent profile IDs.";
 	}
-	if (reason === "orchestration_model_unavailable") {
-		return "delegate not started: CAVEMAN MODE - MANDATORY: orchestration_model_unavailable is expected routing policy, not harness failure. Retry once with model omitted to inherit, or select an available exact model; never invent model IDs.";
+	// The reason names each refusal cause, for example model_not_found or model_account_unlisted.
+	if (reason.startsWith("orchestration_model_unavailable:")) {
+		return `delegate not started: CAVEMAN MODE - MANDATORY: ${reason} is a routing refusal, not a harness failure. Retry once with model omitted to inherit, or select an exact listed model that has configured credentials, is available and supports the requested thinkingLevel. A thinking_level_unsupported(levels) refusal lists the levels that model accepts: retry with one of them or omit thinkingLevel. Never invent model IDs.`;
 	}
-	if (reason === "orchestration_profile_model_unavailable") {
-		return "delegate not started: CAVEMAN MODE - MANDATORY: orchestration_profile_model_unavailable is expected routing policy, not harness failure. Retry once with profileId omitted to use adaptive authority, or select a listed preset whose model is available.";
+	if (reason.startsWith("orchestration_profile_model_unavailable:")) {
+		return `delegate not started: CAVEMAN MODE - MANDATORY: ${reason} is a routing refusal, not a harness failure. Retry once with profileId omitted to use adaptive authority, or select a listed preset whose model has configured credentials and is available.`;
 	}
 	if (reason === "worker_agent_session_limit_reached") {
 		return "delegate not started: CAVEMAN MODE - MANDATORY: worker_agent_session_limit_reached is expected policy capacity, not harness instability. Reuse an idle worker returned by delegate list, or return the constraint to the user.";

@@ -214,7 +214,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
  * is the third time in one day a hand-rolled `role === "user" || "assistant" || "toolResult"`
  * allowlist has drifted out of date against a since-added AgentMessage kind (see
  * `defaultConvertToLlm`'s history in agent.ts, and the two test-fixture `identityConverter`s this
- * shape broke in packages/agent/test/{mandatory-tool-failure-recovery,runaway-loop}.test.ts) -
+ * shape broke in the removed kernel test suite, mandatory-tool-failure-recovery and runaway-loop) -
  * exported so a caller that genuinely only wants "is this already Message-shaped" (a pass-through
  * filter, not a full conversion) has one canonical, drift-proof answer instead of writing a fourth.
  *

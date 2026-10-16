@@ -13,10 +13,13 @@ import {
 } from "./continuous-chat-contracts.ts";
 import { truncateContinuousChatUtf8 } from "./continuous-chat-prompt.ts";
 import {
+	CONTINUOUS_CHAT_NOT_MERGED,
+	CONTINUOUS_CHAT_NOT_SUMMARIZED,
 	type ContinuousChatNodeCoordinate,
 	type ContinuousChatTreeNode,
 	continuousChatNodeLabel,
 	continuousChatParentCoordinate,
+	renderContinuousChatPendingLine,
 	renderContinuousChatViewLine,
 } from "./continuous-chat-tree.ts";
 
@@ -73,7 +76,6 @@ export type ContinuousChatNavigationRejection =
 	| "not-power-of-two"
 	| "misaligned"
 	| "out-of-range"
-	| "not-summarized"
 	| "incomplete"
 	| "not-found"
 	| "page-out-of-range"
@@ -311,7 +313,8 @@ export class ContinuousChatNavigator {
 			if (lastDate === undefined) {
 				return rejected("out-of-range", `Messages ${id} to ${id + n - 1} are not all logged.`);
 			}
-			return rejected("not-summarized", `Line ${label} is not summarized yet.`);
+			// Not merged yet: the line still opens into its two children, each a summary or a pending line.
+			return this.unmergedChildren(coordinate, id, n, signal);
 		}
 		if (page !== 0) return rejected("page-out-of-range", `Line ${label} has no pages; page must be 0.`);
 		const children = node.children;
@@ -335,6 +338,29 @@ export class ContinuousChatNavigator {
 			n,
 			lines: [renderContinuousChatViewLine(left), renderContinuousChatViewLine(right)],
 		};
+	}
+
+	/** A coordinate with no node opens into its two children: a child's summary, or its pending line while unmerged. */
+	private async unmergedChildren(
+		coordinate: ContinuousChatNodeCoordinate,
+		id: number,
+		n: number,
+		signal?: AbortSignal,
+	): Promise<ContinuousChatNavigationResult> {
+		const left = { level: coordinate.level - 1, ordinal: coordinate.ordinal * 2 };
+		const right = { level: coordinate.level - 1, ordinal: coordinate.ordinal * 2 + 1 };
+		const lines: [string, string] = [await this.childLine(left, signal), await this.childLine(right, signal)];
+		return { status: "children", id, n, lines };
+	}
+
+	private async childLine(child: ContinuousChatNodeCoordinate, signal?: AbortSignal): Promise<string> {
+		const node = await this.source.readNode(child);
+		signal?.throwIfAborted();
+		if (node !== undefined) return renderContinuousChatViewLine(node);
+		return renderContinuousChatPendingLine(
+			child,
+			child.level === 0 ? CONTINUOUS_CHAT_NOT_SUMMARIZED : CONTINUOUS_CHAT_NOT_MERGED,
+		);
 	}
 
 	private async zoomWorker(name: string, page: number, signal?: AbortSignal): Promise<ContinuousChatNavigationResult> {

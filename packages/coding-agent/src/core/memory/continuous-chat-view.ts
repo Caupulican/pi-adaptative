@@ -2,12 +2,15 @@
 
 import { isPlainRecord } from "../util/value-guards.ts";
 import {
+	CONTINUOUS_CHAT_NOT_MERGED,
+	CONTINUOUS_CHAT_NOT_SUMMARIZED,
 	type ContinuousChatNodeCoordinate,
 	type ContinuousChatTreeNode,
 	continuousChatNodeFirstMessage,
 	continuousChatNodeKey,
 	continuousChatNodeMessageCount,
 	continuousChatParentCoordinate,
+	renderContinuousChatPendingLine,
 	renderContinuousChatViewLine,
 } from "./continuous-chat-tree.ts";
 
@@ -70,7 +73,7 @@ function entryForCoordinate(
 ): ContinuousChatViewEntry {
 	const node = nodes.get(continuousChatNodeKey(coordinate));
 	if (node !== undefined) return entryForNode(node);
-	const pending = `${continuousChatNodeFirstMessage(coordinate)}+${continuousChatNodeMessageCount(coordinate.level)}|(not summarized yet: zoom it)\n`;
+	const pending = `${renderContinuousChatPendingLine(coordinate, CONTINUOUS_CHAT_NOT_SUMMARIZED)}\n`;
 	return { ...coordinate, size: Buffer.byteLength(pending, "utf8") };
 }
 
@@ -197,9 +200,79 @@ export function renderContinuousChatView(
 	const lines = state.entries.map((entry) => {
 		const node = nodes.get(continuousChatNodeKey(entry));
 		return node === undefined
-			? `${continuousChatNodeFirstMessage(entry)}+${continuousChatNodeMessageCount(entry.level)}|(not summarized yet: zoom it)`
+			? renderContinuousChatPendingLine(entry, CONTINUOUS_CHAT_NOT_SUMMARIZED)
 			: renderContinuousChatViewLine(node);
 	});
+	return `<chat>\n${lines.join("\n")}\n</chat>`;
+}
+
+/** One rendered line, measured as the view's entries are: the line and its newline. */
+interface RenderedLine extends ContinuousChatNodeCoordinate {
+	text: string;
+	bytes: number;
+}
+
+function renderedLine(coordinate: ContinuousChatNodeCoordinate, text: string): RenderedLine {
+	return { level: coordinate.level, ordinal: coordinate.ordinal, text, bytes: Buffer.byteLength(`${text}\n`, "utf8") };
+}
+
+/** A coordinate's line: its node's summary, or the pending line for the reason it has none. */
+function renderedLineFor(
+	coordinate: ContinuousChatNodeCoordinate,
+	nodes: ReadonlyMap<string, ContinuousChatTreeNode>,
+	reason: string,
+): RenderedLine {
+	const node = nodes.get(continuousChatNodeKey(coordinate));
+	return renderedLine(
+		coordinate,
+		node === undefined ? renderContinuousChatPendingLine(coordinate, reason) : renderContinuousChatViewLine(node),
+	);
+}
+
+/**
+ * The turn view's lines as the model reads them. The stored entries stand as they are while the view is within its
+ * high-water mark. Past it, the oldest adjacent sibling pairs collapse into their parent (its summary line when the node
+ * exists, otherwise a not-merged line) until the view is within its low-water mark. Every collapse removes one line, so the
+ * passes end, and a collapsed line opens back into its two lines through zoom. Nothing is stored: merges in the tree
+ * and the causal view are unchanged, and a pinned view stays bounded while merges lag.
+ */
+function turnViewRows(
+	state: ContinuousChatViewState,
+	nodes: ReadonlyMap<string, ContinuousChatTreeNode>,
+): RenderedLine[] {
+	let rows = state.entries.map((entry) => renderedLineFor(entry, nodes, CONTINUOUS_CHAT_NOT_SUMMARIZED));
+	let total = rows.reduce((sum, row) => sum + row.bytes, 0);
+	if (total <= state.highBytes) return rows;
+	let collapsed = true;
+	while (total > state.lowBytes && collapsed) {
+		collapsed = false;
+		const next: RenderedLine[] = [];
+		for (const row of rows) {
+			next.push(row);
+			while (total > state.lowBytes && next.length >= 2) {
+				const left = next[next.length - 2];
+				const right = next[next.length - 1];
+				if (left === undefined || right === undefined) break;
+				const parent = continuousChatParentCoordinate(left, right);
+				if (parent === undefined) break;
+				const merged = renderedLineFor(parent, nodes, CONTINUOUS_CHAT_NOT_MERGED);
+				next.splice(next.length - 2, 2, merged);
+				total += merged.bytes - left.bytes - right.bytes;
+				collapsed = true;
+			}
+		}
+		rows = next;
+	}
+	return rows;
+}
+
+/** The turn view as the model reads it: the stored entries, collapsed when past high water (see `turnViewRows`). */
+export function renderContinuousChatTurnView(
+	state: ContinuousChatViewState,
+	nodes: ReadonlyMap<string, ContinuousChatTreeNode>,
+): string {
+	validateCompletePartition(state);
+	const lines = turnViewRows(state, nodes).map((row) => row.text);
 	return `<chat>\n${lines.join("\n")}\n</chat>`;
 }
 

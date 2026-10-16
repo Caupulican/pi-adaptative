@@ -76,9 +76,11 @@ import {
 	type ContinuousChatViewEntry,
 	type ContinuousChatViewKind,
 	type ContinuousChatViewState,
+	continuousChatViewBytes,
 	createContinuousChatView,
 	parseContinuousChatView,
 	refreshContinuousChatView,
+	renderContinuousChatTurnView,
 	renderContinuousChatView,
 } from "./continuous-chat-view.ts";
 import {
@@ -1328,8 +1330,9 @@ export class ContinuousChatStore {
 	private async renderTurnLocked(revision: number, turn: ContinuousChatViewState): Promise<string> {
 		const rendered = this.rendered;
 		if (rendered !== undefined && rendered.revision === revision) return rendered.text;
-		const nodes = await this.presentNodes(turn.entries, false);
-		const text = renderContinuousChatView(turn, nodes);
+		// Past high water a collapsed line may name a parent node, so the entries' ancestors are read too.
+		const nodes = await this.presentNodes(turn.entries, continuousChatViewBytes(turn) > turn.highBytes);
+		const text = renderContinuousChatTurnView(turn, nodes);
 		this.rendered = { revision, text };
 		return text;
 	}

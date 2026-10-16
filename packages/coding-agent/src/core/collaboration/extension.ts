@@ -29,6 +29,7 @@ import { buildLaunchProfileFlags, deriveWorkerLaunchProfile } from "./launch-pro
 import { NativeProviderRegistry, nativeCollaborationLaunchArgs } from "./native-provider.ts";
 import { normalizeNativeProviderSelection } from "./native-selection.ts";
 import { reconcileCollaborationSessions } from "./session-recovery.ts";
+import { COLLABORATION_WORK_RUN } from "./state-directory.ts";
 import { launchCollaborationTurnProcess } from "./turn-process.ts";
 
 const text = Type.String({ maxLength: 4096 });
@@ -133,7 +134,8 @@ export interface CollaborationExtensionOptions {
 }
 
 export function getCollaborationDataRoot(): string {
-	return getProcessWorkRun(getAgentDir(), "background", "pi-collaboration", "state").path;
+	const { category, tenant, runId } = COLLABORATION_WORK_RUN;
+	return getProcessWorkRun(getAgentDir(), category, tenant, runId).path;
 }
 
 function templates(): Static<typeof templateSchema>[] {
@@ -352,13 +354,21 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 					task: "Review the scoped task for correctness, failure recovery, ownership and security. Do not edit files. Send evidence-backed findings to the builder.",
 				},
 			];
-		const caller = detectHerdrCallerContext();
+		const detection = await detectHerdrCallerContext();
+		const caller = detection.status === "owned" ? detection.caller : undefined;
 		const requestedPlacement = params.placement;
 		if (requestedPlacement === "current-pane" && !caller) {
 			throw new Error(
-				"Placement 'current-pane' requires a running Herdr environment (HERDR_ENV=1, valid pane, workspace, tab and socket).",
+				detection.status === "unverifiable"
+					? `Placement 'current-pane' requires this process's Herdr pane, but pane ${detection.paneId} could not be verified: ${detection.reason}.`
+					: "Placement 'current-pane' requires a running Herdr environment in which this process runs (HERDR_ENV=1, valid pane, workspace, tab and socket).",
 			);
 		}
+		if (detection.status === "unverifiable" && requestedPlacement === undefined)
+			ctx.ui.notify(
+				`Herdr pane ${detection.paneId} could not be verified (${detection.reason}); placement falls back to managed-workspace.`,
+				"warning",
+			);
 		const placement = requestedPlacement ?? (caller ? "current-pane" : "managed-workspace");
 		const isCurrentPane = placement === "current-pane";
 		if (isCurrentPane && !caller?.binPath) {

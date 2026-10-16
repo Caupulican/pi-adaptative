@@ -38,8 +38,10 @@ Each message has a kind:
 The summaries form a binary tree: each message is compressed into a line (a
 short message is its own line), then adjacent lines are merged in pairs, again
 and again. So recent lines cover one message each, and older lines cover more. A
-message not summarized yet shows as "(not summarized yet: zoom it)". A text too
-long for one message is split over several in a row.
+message not summarized yet shows as "(not summarized yet: zoom it)". Lines that
+are not merged yet show as "(not merged yet: zoom it)", and zoom opens each one
+into its two lines just as it does any other line. A text too long for one
+message is split over several in a row.
 
 Tools:
 - zoom(id, n) opens line id+n into the two lines it was made from;

@@ -87,6 +87,7 @@ export class ContinuousChatHost {
 	private readonly started: Settlement;
 	private readonly halt: Settlement;
 	private unsubscribe: (() => void) | undefined;
+	private starting: Promise<void> | undefined;
 	private closed = false;
 	private replayed = false;
 
@@ -168,9 +169,15 @@ export class ContinuousChatHost {
 	/**
 	 * Finishes the legacy import, subscribes the live announcements, replays every durable entry, then starts dispatch.
 	 * Turns wait for this, so none pins a history the import has not finished. Rejects with the failure; the owner then
-	 * disposes the host. Nothing is started after a dispose.
+	 * disposes the host. Nothing is started after a dispose. Idempotent: a generation that keeps a live chat activates it
+	 * again without importing, subscribing or dispatching twice.
 	 */
-	async start(): Promise<void> {
+	start(): Promise<void> {
+		this.starting ??= this.runStart();
+		return this.starting;
+	}
+
+	private async runStart(): Promise<void> {
 		try {
 			const marker = createContinuousChatLegacyImportMarker(this.runtime.store.rootDir);
 			const markerBefore = await marker.read();

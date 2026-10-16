@@ -103,7 +103,7 @@ export interface SessionSemanticUsageDelivery extends SystemOneUsageSink {
 	confirm(receipt: TypeSafeUsageReceipt): SemanticUsageOutcome;
 	pendingProjection(): SemanticUsageProjection;
 	/** Records a history summary model call's paid spend through the same retention and canonical row as a System One review. */
-	recordHistoryUsage(usage: Usage, call: { reportId: string; provider: string; model: string }): void;
+	recordHistoryUsage(usage: Usage, call: { reportId: string; provider: string; model: string; attempt: number }): void;
 	snapshot(): SemanticUsageSnapshot;
 	/** Binds the host's warning sink; warnings raised before the binding are delivered on it. */
 	bindDiagnostics(warn: (message: string) => void): void;
@@ -458,7 +458,10 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	 * bound, and history summary spend holds at most half of it, so System One always keeps the other half. Past either bound the
 	 * spend is kept in a bounded live aggregate: counted in this session's live total, warned once, not durable.
 	 */
-	recordHistoryUsage(usage: Usage, call: { reportId: string; provider: string; model: string }): void {
+	recordHistoryUsage(
+		usage: Usage,
+		call: { reportId: string; provider: string; model: string; attempt: number },
+	): void {
 		if (this.isDisposed) {
 			this.retainAfterEnd(this.historyReceipt(usage, call));
 			return;
@@ -477,21 +480,21 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			receiptId: call.reportId,
 			provider: call.provider,
 			model: call.model,
-			attempt: 1,
+			attempt: call.attempt,
 			route: "history_summary",
 		});
 	}
 
 	private historyReceipt(
 		usage: Usage,
-		call: { reportId: string; provider: string; model: string },
+		call: { reportId: string; provider: string; model: string; attempt: number },
 	): TypeSafeUsageReceipt {
 		return {
 			...priceCompletedUsage(call.provider, call.model, usage),
 			receiptId: call.reportId,
 			provider: call.provider,
 			model: call.model,
-			attempt: 1,
+			attempt: call.attempt,
 			route: "history_summary",
 		};
 	}

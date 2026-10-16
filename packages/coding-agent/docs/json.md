@@ -29,7 +29,7 @@ The `assistantMessageEvent` variant with `"type": "toolcall_start"` additionally
 {"type":"message_update","message":{...},"assistantMessageEvent":{"type":"toolcall_start","contentIndex":1,"id":"call_abc123","toolName":"bash"}}
 ```
 
-Base events from [`AgentEvent`](https://github.com/earendil-works/pi-mono/blob/main/packages/agent/src/types.ts#L179):
+Base events from [`AgentEvent`](https://github.com/Caupulican/pi-adaptative/blob/main/packages/coding-agent/src/kernel/types.ts#L477):
 
 ```typescript
 type AgentEvent =

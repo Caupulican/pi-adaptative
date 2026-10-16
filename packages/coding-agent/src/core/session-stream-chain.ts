@@ -19,6 +19,7 @@ import {
 import { resolveProviderAccountKey } from "./provider-admission/account-key.ts";
 import { isEmergencyStopEngaged } from "./provider-admission/emergency-stop.ts";
 import {
+	type ModelExhaustion,
 	PROVIDER_ADMISSION_CUSTOM_TYPE,
 	type ProviderAdmissionWaitEvent,
 	withProviderAdmission,
@@ -82,6 +83,8 @@ export interface SessionStreamChainInput {
 	modelAdaptationStore: ModelAdaptationStore;
 	providerAdmissionLedger: ProviderAdmissionLedger;
 	providerLimitStore: ProviderLimitStore;
+	/** The host's quota exhaustion for a `provider/model` ref, read at each request's admission. */
+	modelExhaustion: (modelRef: string) => ModelExhaustion | undefined;
 	/** The agent directory whose ESTOP sentinel pauses new worker and background requests. */
 	agentDir: string;
 	/** Credentials, so limits and in-flight counts key on provider plus account (see account-key.ts). */
@@ -359,6 +362,7 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 	const admitted = withProviderAdmission(watched, {
 		ledger: providerAdmissionLedger,
 		limits: input.providerLimitStore,
+		modelExhaustion: input.modelExhaustion,
 		isEmergencyStopEngaged: () => isEmergencyStopEngaged(input.agentDir),
 		getAccountKey: (provider, apiKey) => resolveProviderAccountKey(input.authStorage, provider, apiKey),
 		...(input.onWait ? { onWait: input.onWait } : {}),

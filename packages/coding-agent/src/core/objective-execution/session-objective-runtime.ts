@@ -12,6 +12,8 @@
 import { execFileSync } from "node:child_process";
 import type { VerificationObligationView } from "../../kernel/verification-obligations.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
+import { getGoalCompletionRefusal, reopenUnprovenGoalCompletion } from "../goals/goal-acceptance.ts";
+import { type GoalStateRevision, getGoalStateRevision } from "../goals/goal-lifecycle.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
@@ -25,6 +27,10 @@ export interface SessionObjectiveRuntimeDeps {
 	getGoalState(): GoalState | undefined;
 	/** Projects the goal into its durable objective (requirements, evidence, status). */
 	synchronizeGoalState(goal: GoalState): void;
+	/** Persists a goal the objective side reopened, such as a completion its trusted evidence does not support. */
+	saveGoalState(state: GoalState, expected: GoalStateRevision): void;
+	/** Operator-visible warning; it never changes the run by itself. */
+	emitWarning(message: string): void;
 	getArtifactStore?(): ArtifactStore | undefined;
 	getVerificationObligations?(): readonly VerificationObligationView[];
 	/** Operator-visible note of a repair or replan System One asked for. */
@@ -64,7 +70,22 @@ export class SessionObjectiveRuntime {
 	/** Fold the live goal into the durable objective, then hand back the snapshot the routes read. */
 	async reconcileObjective(objectiveId: string): Promise<TaskRuntimeProjection> {
 		const goal = this.goalFor(objectiveId);
-		if (goal) this.deps.synchronizeGoalState(goal);
+		if (goal) {
+			// A completed goal that its trusted evidence does not support is reopened as active, with one warning, so the
+			// objective keeps working toward that evidence. A settled objective (completed or cancelled) has nothing left
+			// to complete, so the goal is left as it is.
+			const objectiveStatus = this.deps.runtime.getSnapshot().objectives[objectiveId]?.objective.status;
+			const objectiveSettled = objectiveStatus === "completed" || objectiveStatus === "cancelled";
+			const refusal = objectiveSettled ? undefined : getGoalCompletionRefusal(goal);
+			if (refusal !== undefined) {
+				this.deps.saveGoalState(
+					reopenUnprovenGoalCompletion(goal, refusal, new Date().toISOString()),
+					getGoalStateRevision(goal),
+				);
+				this.deps.emitWarning(`Goal ${goal.goalId} ${refusal}; the goal stays active to gather it.`);
+			}
+			this.deps.synchronizeGoalState(this.goalFor(objectiveId) ?? goal);
+		}
 		return this.deps.runtime.getSnapshot();
 	}
 

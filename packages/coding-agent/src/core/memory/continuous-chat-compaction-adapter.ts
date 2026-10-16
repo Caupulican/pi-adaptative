@@ -20,6 +20,7 @@ import {
 	CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL,
 	type ContinuousChatSummaryModelResolution,
 } from "./continuous-chat-settings.ts";
+import type { ContinuousChatNodeCoordinate } from "./continuous-chat-tree.ts";
 
 /** Report-id prefix of a compaction reply's paid spend in the history-usage owner. */
 const CONTINUOUS_CHAT_USAGE_KIND = "memory-continuous-chat-compaction";
@@ -76,7 +77,7 @@ export interface ContinuousChatCompactionAdapterDeps {
 	/** The configured summary model, checked now: setting, registry, egress and thinking level. */
 	summary(): ContinuousChatSummaryModelResolution;
 	/** Records one reply's paid spend in the history-usage owner. Must not throw. */
-	recordUsage(usage: Usage, call: { reportId: string; provider: string; model: string }): void;
+	recordUsage(usage: Usage, call: { reportId: string; provider: string; model: string; attempt: number }): void;
 	/** Notifies the session when a summary model fails at runtime so `summary()` can self-heal onto a healthy model. */
 	onModelFailure?(model: Model<Api>, errorMessage: string | undefined): void;
 }
@@ -95,9 +96,16 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 
 	/**
 	 * The job's own system prompt and tools are not sent: the accepted request's snapshot is. The conversation's first
-	 * message carries the causal view; each send appends its task.
+	 * message carries the causal view; each send appends its task. Every paid call's report id names the job, the node it
+	 * builds, the reply and the attempt, so one ledger row maps to exactly one call.
 	 */
-	open(prefix: ContinuousChatCompactionPrefix): ContinuousChatCompactionConversation {
+	open(
+		prefix: ContinuousChatCompactionPrefix,
+		target: ContinuousChatNodeCoordinate,
+	): ContinuousChatCompactionConversation {
+		const jobId = randomUUID();
+		const node = `node-${target.level}-${target.ordinal}`;
+		let replyIndex = 0;
 		const head = this.deps.prefixHead();
 		const systemPrompt = head.systemPrompt;
 		const tools = [...head.tools];
@@ -109,9 +117,12 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		];
 		return {
 			send: async (message, signal) => {
+				const replyNumber = ++replyIndex;
+				let attempt = 0;
 				const task: Message = { role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() };
 				const request = [...history, task];
 				const runTurn = async (model: Model<Api>, activeTools: Tool[] = tools) => {
+					const attemptNumber = ++attempt;
 					const completion = await this.deps.complete({
 						systemPrompt,
 						messages: [],
@@ -127,9 +138,10 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 					// Every reply is paid: record it before any check below can throw, even one with no assistant message.
 					if (hasReportableUsage(completion.usage)) {
 						this.deps.recordUsage(completion.usage, {
-							reportId: `${CONTINUOUS_CHAT_USAGE_KIND}:${randomUUID()}`,
+							reportId: `${CONTINUOUS_CHAT_USAGE_KIND}:${jobId}:${node}:reply-${replyNumber}:attempt-${attemptNumber}`,
 							provider: assistant?.provider ?? model.provider,
 							model: assistant?.model ?? model.id,
+							attempt: attemptNumber,
 						});
 					}
 					return { completion, assistant };

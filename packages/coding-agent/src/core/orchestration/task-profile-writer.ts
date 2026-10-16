@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getSupportedThinkingLevels, resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
+import type { Api, Model } from "@caupulican/pi-ai/types";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "../context/tool-output-packer.ts";
 import { LEAF_WORKER_DELEGATION_LIMITS } from "../delegation/worker-fleet-limits.ts";
@@ -12,7 +13,11 @@ import type {
 	OrchestrationThinkingLevel,
 } from "./contracts.ts";
 import { MAX_ORCHESTRATION_DESCRIPTION_LENGTH } from "./contracts.ts";
-import { resolvePinnedOrchestrationModel } from "./model-binding.ts";
+import {
+	formatOrchestrationModelRefusals,
+	type OrchestrationModelUnusableCause,
+	resolvePinnedOrchestrationModelResolution,
+} from "./model-binding.ts";
 import { validateOrchestrationProfile } from "./profile-registry.ts";
 import { OrchestrationProfileStore } from "./profile-store.ts";
 import type { SessionTaskProfileStore } from "./session-task-profile-store.ts";
@@ -68,7 +73,7 @@ export interface TaskProfileWriterOptions {
 	store: SessionTaskProfileStore;
 	getSettingsManager(): TaskProfileWriterSettingsSource;
 	getModelRegistry(): ModelRegistry;
-	isModelExhausted(provider: string, modelId: string): boolean;
+	modelUnusableCause(model: Model<Api>): OrchestrationModelUnusableCause | undefined;
 	getActiveOrchestrationProfile(): OrchestrationProfile | undefined;
 	/** Host-compiled foreground inheritance used when no owner-authored base is selected. */
 	getInheritedBaseProfile(): OrchestrationProfile | undefined;
@@ -120,7 +125,7 @@ export class TaskProfileWriter implements TaskProfileWriterPort {
 		const models = this.options
 			.getModelRegistry()
 			.getAvailable()
-			.filter((model) => !this.options.isModelExhausted(model.provider, model.id))
+			.filter((model) => this.options.modelUnusableCause(model) === undefined)
 			.sort((left, right) => `${left.provider}/${left.id}`.localeCompare(`${right.provider}/${right.id}`))
 			.slice(0, MAX_INSPECTED_MODELS)
 			.map((model) => ({
@@ -179,12 +184,13 @@ export class TaskProfileWriter implements TaskProfileWriterPort {
 
 			let modelPolicy = structuredClone(base.modelPolicy);
 			if (input.model || input.thinkingLevel) {
+				// Every base carries at least one candidate: owner profiles are validated on load, and an inherited base is
+				// built from a bound shipment, so no empty-policy case reaches this read.
 				const baseBinding = base.modelPolicy.candidates[0];
-				if (!baseBinding) return { created: false, reason: "task_profile_model_unavailable" };
 				const provider = input.model?.provider ?? baseBinding.provider;
 				const modelId = input.model?.modelId ?? baseBinding.modelId;
 				const model = this.options.getModelRegistry().find(provider, modelId);
-				if (!model) return { created: false, reason: "task_profile_model_unavailable" };
+				if (!model) return { created: false, reason: "task_profile_model_unavailable:model_not_found" };
 				const sameModel = provider === baseBinding.provider && modelId === baseBinding.modelId;
 				const binding: OrchestrationModelBinding = {
 					provider,
@@ -193,10 +199,17 @@ export class TaskProfileWriter implements TaskProfileWriterPort {
 						input.thinkingLevel ??
 						(sameModel ? baseBinding.thinkingLevel : resolveModelThinkingLevel(model, undefined)),
 				};
-				const resolved = resolvePinnedOrchestrationModel(binding, this.options.getModelRegistry(), (candidate) =>
-					this.options.isModelExhausted(candidate.provider, candidate.id),
+				const outcome = resolvePinnedOrchestrationModelResolution(
+					binding,
+					this.options.getModelRegistry(),
+					(candidate) => this.options.modelUnusableCause(candidate),
 				);
-				if (!resolved) return { created: false, reason: "task_profile_model_unavailable" };
+				if (!outcome.ok) {
+					return {
+						created: false,
+						reason: `task_profile_model_unavailable:${formatOrchestrationModelRefusals(outcome.refusals)}`,
+					};
+				}
 				modelPolicy = { mode: "fixed", candidates: [binding] };
 			}
 

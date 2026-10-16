@@ -56,8 +56,16 @@ export class ExhaustedProviderRegistry {
 	}
 
 	isExhausted(ref: string): boolean {
+		return this.exhaustion(ref) !== undefined;
+	}
+
+	/** The exhaustion that holds for `ref` (its model entry, then its provider-wide entry), with its reset time when one was recorded. */
+	exhaustion(ref: string): { readonly until: number | undefined } | undefined {
 		const providerWide = `${ref.split("/")[0]}/*`;
-		return this.isExhaustedKey(ref) || (ref !== providerWide && this.isExhaustedKey(providerWide));
+		for (const key of ref === providerWide ? [ref] : [ref, providerWide]) {
+			if (this.isExhaustedKey(key)) return { until: this.exhausted.get(key) };
+		}
+		return undefined;
 	}
 
 	private isExhaustedKey(key: string): boolean {
@@ -165,6 +173,10 @@ export class BillingFailoverController {
 
 	isExhausted(ref: string): boolean {
 		return this.deps.exhausted.isExhausted(ref);
+	}
+
+	exhaustion(ref: string): { readonly until: number | undefined } | undefined {
+		return this.deps.exhausted.exhaustion(ref);
 	}
 
 	clearProviderExhaustion(provider: string): void {

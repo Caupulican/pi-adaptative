@@ -8,6 +8,7 @@ import {
 	readAgentToolExecutionError,
 } from "../../kernel/index.ts";
 import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
+import { redactKnownSecrets } from "../security/secret-text.ts";
 import { parseShellSearchInvocationScope, type ShellContentSearchTool } from "../tools/search-command-guard.ts";
 import { type ShellToken, tokenizeShellCommand } from "../tools/shell-command-parser.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
@@ -63,6 +64,20 @@ const PYTHON_SECRET_READ_RE = /\b(?:open|read_text|read_bytes)\s*\([^\n)]*(?:^|[
 const PYTHON_INSPECTION_RE = /\b(?:open|read_text|read_bytes)\b/;
 const MAX_REDACTED_DETAIL_DEPTH = 8;
 const MAX_REDACTED_DETAIL_NODES = 10_000;
+const NON_DATA_DETAIL_OMITTED = "[NON-DATA DETAIL OMITTED AT CREDENTIAL BOUNDARY]";
+const ACCESSOR_DETAIL_OMITTED = "[ACCESSOR DETAIL OMITTED AT CREDENTIAL BOUNDARY]";
+/** Built-ins whose state lives in internal slots, so their own keys do not carry their contents. */
+const NON_DATA_OBJECT_TAGS = new Set([
+	"[object Map]",
+	"[object Set]",
+	"[object WeakMap]",
+	"[object WeakSet]",
+	"[object Promise]",
+	"[object RegExp]",
+	"[object ArrayBuffer]",
+	"[object SharedArrayBuffer]",
+	"[object Error]",
+]);
 const JQ_OPTIONS_WITH_ONE_OPERAND = new Set(["-L", "--indent"]);
 const JQ_OPTIONS_WITH_TWO_OPERANDS = new Set(["--arg", "--argjson", "--rawfile", "--slurpfile"]);
 
@@ -747,44 +762,74 @@ function redactResult<T>(
 	additionalValues: readonly string[] = [],
 ): AgentToolResult<T> {
 	const redact = createOutputRedactor(boundary, mock, additionalValues);
+	// Keys are identifiers, not credential content: the whole-content mocks would replace every key, so keys
+	// get only known-value and secret-shape masking.
+	const redactKey = createOutputRedactor(boundary, redactKnownSecrets, additionalValues);
 	const budget = { nodes: 0 };
 	return {
 		...result,
 		content: result.content.map((block) => (block.type === "text" ? { ...block, text: redact(block.text) } : block)),
-		details: redactStructuredDetails(result.details, redact, budget) as T,
+		details: redactStructuredDetails(result.details, redact, redactKey, budget) as T,
 	};
 }
 
 function redactStructuredDetails(
 	value: unknown,
 	redact: (text: string) => string,
+	redactKey: (key: string) => string,
 	budget: { nodes: number },
 	depth = 0,
 ): unknown {
 	if (typeof value === "string") return redact(value);
+	if (typeof value === "bigint") return String(value);
+	if (typeof value === "function" || typeof value === "symbol") return NON_DATA_DETAIL_OMITTED;
 	if (value === null || typeof value !== "object") return value;
-	budget.nodes++;
-	if (depth >= MAX_REDACTED_DETAIL_DEPTH || budget.nodes > MAX_REDACTED_DETAIL_NODES) {
-		return "[DETAIL OMITTED AT CREDENTIAL BOUNDARY]";
-	}
-	if (Array.isArray(value)) {
-		return value.map((entry) => redactStructuredDetails(entry, redact, budget, depth + 1));
-	}
-	let prototype: object | null;
 	try {
-		prototype = Object.getPrototypeOf(value);
+		// Leaves hold no keys to walk: a wrapper yields its primitive and a date its time.
+		if (value instanceof String || value instanceof Number || value instanceof Boolean) {
+			return redactStructuredDetails(value.valueOf(), redact, redactKey, budget, depth);
+		}
+		if (value instanceof Date) return new Date(value.getTime());
+		budget.nodes++;
+		if (depth >= MAX_REDACTED_DETAIL_DEPTH || budget.nodes > MAX_REDACTED_DETAIL_NODES) {
+			return "[DETAIL OMITTED AT CREDENTIAL BOUNDARY]";
+		}
+		// Internal-slot objects keep their contents outside own properties: a key walk would drop them, or for
+		// buffers and strings redact one byte or character at a time. They are omitted, never passed through.
+		if (ArrayBuffer.isView(value) || NON_DATA_OBJECT_TAGS.has(Object.prototype.toString.call(value))) {
+			return NON_DATA_DETAIL_OMITTED;
+		}
+		// Copy own data, never the prototype: class instances and custom toJSON methods must not bypass
+		// redaction when a consumer serializes the result. Accessors are reported, never run.
+		const keys = Object.keys(value);
+		if (keys.length > MAX_REDACTED_DETAIL_NODES - budget.nodes) {
+			return "[DETAIL OMITTED AT CREDENTIAL BOUNDARY]";
+		}
+		const isArray = Array.isArray(value);
+		const result: Record<string, unknown> | unknown[] = isArray ? new Array(value.length) : {};
+		for (const key of keys) {
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			if (!descriptor?.enumerable) continue;
+			// Array indices are structure, not content: they keep their position and are never redacted.
+			const redactedKey = isArray ? key : redactKey(key);
+			let safeKey = redactedKey;
+			let collision = 0;
+			while (Object.hasOwn(result, safeKey)) safeKey = `${redactedKey} [${++collision}]`;
+			const entry: unknown = "value" in descriptor ? descriptor.value : ACCESSOR_DETAIL_OMITTED;
+			Object.defineProperty(result, safeKey, {
+				value:
+					isCredentialSecretKey(key) && ["string", "number", "bigint", "boolean"].includes(typeof entry)
+						? mockedValue(redactedKey)
+						: redactStructuredDetails(entry, redact, redactKey, budget, depth + 1),
+				enumerable: true,
+				configurable: true,
+				writable: true,
+			});
+		}
+		return result;
 	} catch {
 		return "[UNREADABLE DETAIL OMITTED AT CREDENTIAL BOUNDARY]";
 	}
-	if (prototype !== Object.prototype && prototype !== null) return value;
-	return Object.fromEntries(
-		Object.entries(value).map(([key, entry]) => [
-			key,
-			typeof entry === "string" && isCredentialSecretKey(key)
-				? mockedValue(key)
-				: redactStructuredDetails(entry, redact, budget, depth + 1),
-		]),
-	);
 }
 
 function createExposureMock(

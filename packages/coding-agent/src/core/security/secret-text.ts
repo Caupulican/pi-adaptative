@@ -53,7 +53,6 @@ export function redactTokenShapes(text: string): string {
 }
 
 export const MAX_RETAINED_DIAGNOSTIC_CHARS = 240;
-const MAX_DIAGNOSTIC_SCAN_CHARS = 4_096;
 
 export function hasSecretLikeText(text: string): boolean {
 	return SECRET_LIKE_PATTERNS.some((pattern) => pattern.test(text));
@@ -68,14 +67,16 @@ export function redactKnownSecrets(text: string): string {
 	return replaceAllMatches(text, SECRET_MASK_PATTERNS, "[REDACTED]");
 }
 
-/** Retain one redacted diagnostic line with bounded regex work and durable output size. */
+/**
+ * Retain one redacted diagnostic line. The whole first line is redacted before anything is retained: a secret that
+ * begins inside the retained prefix but ends past any scan cut would otherwise survive as its unmatched prefix.
+ * Only the redacted text is truncated, so a cut can never reveal a secret.
+ */
 export function boundedRedactedDiagnosticText(text: string): string | undefined {
-	const scanned = text.slice(0, MAX_DIAGNOSTIC_SCAN_CHARS);
-	const lineEnd = scanned.search(/[\r\n]/);
-	const scanTruncated = lineEnd === -1 && text.length > scanned.length;
-	const firstLine = (lineEnd === -1 ? scanned : scanned.slice(0, lineEnd)).trim();
+	const lineEnd = text.search(/[\r\n]/);
+	const firstLine = (lineEnd === -1 ? text : text.slice(0, lineEnd)).trim();
 	if (!firstLine) return undefined;
 	const redacted = redactKnownSecrets(firstLine);
-	if (!scanTruncated && redacted.length <= MAX_RETAINED_DIAGNOSTIC_CHARS) return redacted;
+	if (redacted.length <= MAX_RETAINED_DIAGNOSTIC_CHARS) return redacted;
 	return `${redacted.slice(0, MAX_RETAINED_DIAGNOSTIC_CHARS - 1)}…`;
 }

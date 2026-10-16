@@ -654,12 +654,16 @@ export class InteractiveEventController {
 					const where = event.account
 						? `${event.provider} (account ${event.account.slice(0, 8)})`
 						: event.provider;
+					const resetsIn =
+						event.expectedMs !== undefined ? `, resets in ${Math.ceil(event.expectedMs / 1000)}s` : "";
 					const why =
 						event.reason === "provider_limit"
-							? `rate-limited${event.expectedMs !== undefined ? `, resets in ${Math.ceil(event.expectedMs / 1000)}s` : ""}`
-							: event.reason === "emergency_stop"
-								? "emergency stop engaged"
-								: "at its in-flight limit";
+							? `rate-limited${resetsIn}`
+							: event.reason === "model_quota"
+								? `out of quota${resetsIn}`
+								: event.reason === "emergency_stop"
+									? "emergency stop engaged"
+									: "at its in-flight limit";
 					const label = `${event.lane} request waiting: ${where} ${why}`;
 					this.port.activityLane?.wait({ id, kind: "runtime", scope: event.lane, label });
 					if (event.lane === "foreground") this.loadingAnimation?.setMessage(label);

@@ -966,7 +966,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				store: taskProfileStore,
 				getSettingsManager: () => settingsManager,
 				getModelRegistry: () => modelRegistry,
-				isModelExhausted: () => false,
+				modelUnusableCause: () => undefined,
 				getActiveOrchestrationProfile: () => orchestrationProfile ?? foregroundBaseProfile,
 				getInheritedBaseProfile: () => orchestrationProfile ?? foregroundBaseProfile,
 			});
@@ -1113,6 +1113,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				cwd,
 				getGoalState: () => session.getGoalStateSnapshot(),
 				synchronizeGoalState: (goal) => session.backgroundLanes.synchronizeGoalState(goal),
+				saveGoalState: (state, expected) => session.saveGoalStateSnapshot(state, expected),
+				emitWarning: (message) => session.emitHostWarning(message),
 				getVerificationObligations: () => session.getVerificationObligations(),
 				noteDecision: (kind, detail) =>
 					session.operatorProjection.eventBridge.recordPlanMilestone(

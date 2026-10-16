@@ -232,11 +232,15 @@ import {
 	type RepositoryWorkEvidenceJournal,
 	type RepositoryWorkEvidenceScope,
 } from "./objective-execution/repository-mutation-observer.ts";
+import { IndependentObserverSet } from "./observer-dispatch.ts";
 import type { CacheDecisionRow, DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
 import type { DeliveryState, SessionOperatorProjection } from "./operator-projection/session-operator-projection.ts";
 import type { AdaptationProjection } from "./operator-projection/types.ts";
-import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
+import {
+	type OrchestrationModelUnusableCause,
+	resolveConfiguredOrchestrationModel,
+} from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import { PendingInputQueueController, type QueuedInput } from "./pending-input-queue-controller.ts";
 import { appendPipelineRunSnapshot, getLatestPipelineRunSnapshot, type PipelineRun } from "./pipelines/index.ts";
@@ -577,6 +581,9 @@ export class AgentSession {
 	private readonly _deliveryToolCalls = new Set<string>();
 	private _operatorBlocker?: string;
 	private _unsubscribeIdleOccupancy?: () => void;
+	/** Woken when a condition that refuses the system switch lease (running lanes, tool tasks, reflection) may have cleared. */
+	private readonly _systemSwitchAvailability = new IndependentObserverSet<() => void>();
+	private _systemSwitchAvailabilityQueued = false;
 
 	private readonly _agentDirForLedger: string;
 
@@ -784,6 +791,8 @@ export class AgentSession {
 			modelAdaptationStore,
 			providerAdmissionLedger,
 			providerLimitStore,
+			// Read lazily per request: the foreground recovery that owns the exhaustions is built after this chain.
+			modelExhaustion: (modelRef) => this._foregroundRecovery.modelExhaustion(modelRef),
 			agentDir,
 			authStorage: config.modelRegistry.authStorage,
 			redactSensitiveText: (text, additionalValues) =>
@@ -1018,6 +1027,7 @@ export class AgentSession {
 			getCredentialExposureBoundary: () => this._runtimeBuilder.credentialExposureBoundary,
 			// Workers pick only models that can take work: quota left and offered to the owner's account.
 			isModelExhausted: (model) => this._isModelUnusable(model),
+			modelUnusableCause: (model) => this._modelUnusableCause(model),
 			getModel: () => this.model ?? undefined,
 			getForegroundThinkingLevel: () => this.thinkingLevel,
 			getRouteChoiceJudge: () => this._systemOneController,
@@ -1230,14 +1240,16 @@ export class AgentSession {
 			isModelExhausted: (model) => this._isModelUnusable(model),
 		});
 		this._memory = new MemoryController({
-			acquireSystemSwitchLease: () => {
+			acquireSystemSwitchLease: (scope) => {
 				if (
 					this._disposed ||
 					this._isChildSession ||
 					this.isRetrying ||
 					this._reflectionTurnLifecycle.inFlight ||
 					!isSessionSettled(this, this._hasPendingIdleContinuation()) ||
-					this._pendingNextTurnMessages.length > 0 ||
+					// Queued next-turn messages wait for a prompt, and a prompt runs under the lease. Only a switch waits on
+					// them: a recovery holds the lease while it rebuilds, so no prompt can drain them mid-rebuild.
+					(scope === "switch" && this._pendingNextTurnMessages.length > 0) ||
 					this._backgroundLanes
 						.getLaneRecords()
 						.some((lane) => lane.status === "queued" || lane.status === "running") ||
@@ -1247,6 +1259,7 @@ export class AgentSession {
 				const lease = this._foregroundRecovery.tryAcquireSubmission();
 				return lease ? () => this._foregroundRecovery.releaseSubmission(lease) : undefined;
 			},
+			subscribeSystemSwitchLeaseAvailability: (listener) => this._subscribeSystemSwitchAvailability(listener),
 			getSettingsManager: () => this.settingsManager,
 			getTurnIndex: () => this._turnIndex,
 			getAgentDir: () => this._agentDir,
@@ -1386,6 +1399,7 @@ export class AgentSession {
 			getMutationAnnouncer: () => this._shellSessionKey,
 			notifyTerminal: (records, wakeParent) => this._terminalHandoffs.notifyTools(records, wakeParent),
 			emit: (event) => this._emit(event),
+			onRunningTasksChanged: () => this._notifySystemSwitchAvailability(),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 		});
 		const failureCorpusPath = stateFile(this._agentDir, "failure-corpus.jsonl");
@@ -1833,6 +1847,7 @@ export class AgentSession {
 			prompt: (text, options) => this.prompt(text, options),
 			beginDueReflectionTurn: () => this._reflection.beginDueReflectionTurn(),
 			endReflectionTurn: () => this._reflection.endReflectionTurn(),
+			onTurnSettled: () => this._notifySystemSwitchAvailability(),
 			abortAgent: () => this.agent.abort("reflection"),
 			getLastAssistantStopReason: () => this._findLastAssistantMessage()?.stopReason,
 			hasOpenWork: () => this._hasOpenWork(),
@@ -2822,12 +2837,14 @@ export class AgentSession {
 		return new Set(snapshot.map((skill) => skill.name).filter((name) => !eligible.has(name)));
 	}
 
-	/** A model that cannot take work now: its quota is exhausted, or the owner's account does not offer it. */
+	/** Why a model cannot take work now: its quota is exhausted, or the owner's account does not offer it. */
+	private _modelUnusableCause(model: Model<Api>): OrchestrationModelUnusableCause | undefined {
+		if (this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`)) return "model_quota_exhausted";
+		return this._accountModels.unavailableCause(model);
+	}
+
 	private _isModelUnusable(model: Model<Api>): boolean {
-		return (
-			this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`) ||
-			this._accountModels.availability(model) === "unavailable"
-		);
+		return this._modelUnusableCause(model) !== undefined;
 	}
 
 	/**
@@ -3181,6 +3198,39 @@ export class AgentSession {
 		return () => {
 			offLanes();
 			offHandoff();
+		};
+	}
+
+	/**
+	 * Wakes the waiters of a refused system switch lease. The conditions that refuse it and clear outside a foreground
+	 * submission (a running tool task, the detached reflection turn) report here. Coalesced to one pass after the change,
+	 * so the pass reads the state the change left behind.
+	 */
+	private _notifySystemSwitchAvailability(): void {
+		if (this._systemSwitchAvailabilityQueued) return;
+		this._systemSwitchAvailabilityQueued = true;
+		queueMicrotask(() => {
+			this._systemSwitchAvailabilityQueued = false;
+			this._systemSwitchAvailability.notify(
+				(listener) => listener(),
+				() => this._emit({ type: "warning", message: "System switch availability observer failed." }),
+			);
+		});
+	}
+
+	/**
+	 * The waiter's signal for a refused system switch lease. Foreground activity covers every submission and compaction
+	 * end, and the pending-input drain and the retry (both inside a submission) end before its release. Running lanes
+	 * are observed only while the waiter is subscribed, so an idle session pays nothing for them.
+	 */
+	private _subscribeSystemSwitchAvailability(listener: () => void): () => void {
+		const offForeground = this._foregroundRecovery.subscribeActivity(listener);
+		const offSignals = this._systemSwitchAvailability.subscribe(listener);
+		const offLanes = this._backgroundLanes.subscribeLaneRecords(() => listener());
+		return () => {
+			offForeground();
+			offSignals();
+			offLanes();
 		};
 	}
 

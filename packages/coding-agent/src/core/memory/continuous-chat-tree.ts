@@ -173,3 +173,12 @@ export function parseContinuousChatTreeNode(value: unknown): ContinuousChatTreeN
 export function renderContinuousChatViewLine(node: ContinuousChatTreeNode): string {
 	return `${continuousChatNodeLabel(node)}|${node.text.replaceAll(/\r?\n/g, " ")}`;
 }
+
+/** Why a coordinate has no line of its own: a message is not summarized yet, or a run of summaries is not merged yet. */
+export const CONTINUOUS_CHAT_NOT_SUMMARIZED = "not summarized yet";
+export const CONTINUOUS_CHAT_NOT_MERGED = "not merged yet";
+
+/** The line of a coordinate that has no node: the messages it covers, and how to open them (zoom). */
+export function renderContinuousChatPendingLine(coordinate: ContinuousChatNodeCoordinate, reason: string): string {
+	return `${continuousChatNodeLabel(coordinate)}|(${reason}: zoom it)`;
+}

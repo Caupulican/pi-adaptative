@@ -2589,18 +2589,15 @@ export class CompactionController {
 			};
 			this.pendingEarlyCompactionPrediction = undefined;
 		}
-		const savedEntry = this.deps.sessionManager
-			.getEntries()
-			.find((entry) => entry.type === "compaction" && entry.summary === applied.summary) as
-			| CompactionEntry
-			| undefined;
-		if (savedEntry) {
-			await this.deps.getExtensionRunner().emit({
-				type: "session_compact",
-				compactionEntry: savedEntry,
-				fromExtension,
-			});
+		const savedEntry = this.deps.sessionManager.getEntry(compactionEntryId);
+		if (savedEntry?.type !== "compaction") {
+			throw new Error(`Committed compaction ${compactionEntryId} is missing from the session.`);
 		}
+		await this.deps.getExtensionRunner().emit({
+			type: "session_compact",
+			compactionEntry: savedEntry,
+			fromExtension,
+		});
 		return compactionEntryId;
 	}
 }

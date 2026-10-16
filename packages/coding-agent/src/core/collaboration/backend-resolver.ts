@@ -3,8 +3,9 @@ import { Value } from "typebox/value";
 import { type CollaborationBackend, CollaborationBackendError } from "./backend.ts";
 import type { CollaborationCommandRunner } from "./command-runner.ts";
 import { HerdrBackend } from "./herdr-backend.ts";
-import type { HerdrEventChannel } from "./herdr-channel.ts";
+import { connectHerdrChannel, type HerdrEventChannel } from "./herdr-channel.ts";
 import { herdrHandle } from "./herdr-codec.ts";
+import { herdrPaneOwnership } from "./herdr-pane-ownership.ts";
 import { createHerdrBackend, type HerdrServerTerminal, probeHerdrSocket } from "./herdr-runtime.ts";
 import type { CollaborationJob } from "./job-record.ts";
 
@@ -16,7 +17,42 @@ export interface HerdrCallerContext {
 	binPath?: string;
 }
 
-export function detectHerdrCallerContext(env: NodeJS.ProcessEnv = process.env): HerdrCallerContext | undefined {
+/**
+ * What the environment's Herdr claim resolves to. Only `owned` is a caller pane. `foreign` is a stale or inherited
+ * id for a pane this process is not in and is never trusted. `unverifiable` is an observer failure: it degrades to
+ * the non-Herdr placement, and the reason is reported to the owner.
+ */
+export type HerdrCallerDetection =
+	| { status: "owned"; caller: HerdrCallerContext }
+	| { status: "absent" }
+	| { status: "foreign"; paneId: string }
+	| { status: "unverifiable"; paneId: string; reason: string };
+
+export async function detectHerdrCallerContext(
+	env: NodeJS.ProcessEnv = process.env,
+	connect: typeof connectHerdrChannel = connectHerdrChannel,
+): Promise<HerdrCallerDetection> {
+	const claim = herdrCallerClaim(env);
+	if (!claim) return { status: "absent" };
+	let channel: HerdrEventChannel;
+	try {
+		channel = await connect(claim.socketPath, AbortSignal.timeout(5000));
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		return { status: "unverifiable", paneId: claim.paneId, reason: `Herdr socket unavailable (${reason})` };
+	}
+	try {
+		const ownership = await herdrPaneOwnership(channel, claim.paneId);
+		if (ownership.status === "owned") return { status: "owned", caller: claim };
+		if (ownership.status === "foreign") return { status: "foreign", paneId: claim.paneId };
+		return { status: "unverifiable", paneId: claim.paneId, reason: ownership.reason };
+	} finally {
+		channel.close();
+	}
+}
+
+/** The environment's unverified claim about the caller pane. */
+function herdrCallerClaim(env: NodeJS.ProcessEnv): HerdrCallerContext | undefined {
 	if (env.HERDR_ENV !== "1") return undefined;
 	const paneId = env.HERDR_PANE_ID?.trim();
 	const workspaceId = env.HERDR_WORKSPACE_ID?.trim();

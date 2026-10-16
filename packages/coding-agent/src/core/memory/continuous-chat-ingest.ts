@@ -9,6 +9,7 @@ import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/index.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionEntriesPersistedEvent } from "../../kernel/session/session-manager.ts";
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type {
 	ContinuousChatAppendInput,
@@ -59,6 +60,22 @@ function workReportEntry(value: unknown): ContinuousChatWorkReportEntry | undefi
 
 type ContentBlock = TextContent | ImageContent;
 
+/** A failed/aborted turn is a recovery fact even when it has no model-authored text. */
+function assistantFailureParts(message: Extract<AgentMessage, { role: "assistant" }>): ContinuousChatMessagePart[] {
+	if (message.stopReason !== "error" && message.stopReason !== "aborted") return [];
+	const fallback =
+		message.stopReason === "aborted" ? "The turn was stopped before it finished." : "No failure detail was recorded.";
+	const reason = boundedRedactedDiagnosticText(message.errorMessage ?? "") ?? fallback;
+	return [
+		{
+			// After every content block: a block's own index can never name the failure part.
+			part: message.content.length,
+			kind: "pi",
+			text: `[Harness turn ${message.stopReason}] ${reason}`,
+		},
+	];
+}
+
 function blockText(blocks: readonly ContentBlock[]): string {
 	return blocks.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
 }
@@ -97,7 +114,7 @@ export function continuousChatMessageParts(message: AgentMessage): ContinuousCha
 					parts.push({ part: index, kind: "tool", text: `${block.name}\n${JSON.stringify(block.arguments)}` });
 				}
 			});
-			return parts;
+			return [...parts, ...assistantFailureParts(message)];
 		}
 		case "toolResult":
 			return wholeMessagePart("echo", message.content);
@@ -109,10 +126,13 @@ export function continuousChatMessageParts(message: AgentMessage): ContinuousCha
 
 /**
  * The chat parts of a session entry. Only the harness's own synthetic failure messages (origin `local`, written by the
- * agent loop and the agent when a run fails or aborts) are skipped. Every other message is logged, whatever it carries.
+ * agent loop and the agent) contribute only bounded failure facts; their synthetic content remains excluded.
  */
 export function continuousChatEntryParts(entry: SessionEntry): ContinuousChatMessagePart[] {
-	if (entry.type === "message") return entry.origin !== "local" ? continuousChatMessageParts(entry.message) : [];
+	if (entry.type === "message") {
+		if (entry.origin !== "local") return continuousChatMessageParts(entry.message);
+		return entry.message.role === "assistant" ? assistantFailureParts(entry.message) : [];
+	}
 	if (entry.type !== "custom" || entry.customType !== CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE) return [];
 	const report = workReportEntry(entry.data);
 	if (report === undefined) return [];

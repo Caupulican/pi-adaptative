@@ -46,7 +46,11 @@ export interface ContinuousChatCompactionConversation {
  * rather than execute a tool call, because a reply is plain text.
  */
 export interface ContinuousChatCompactionPort {
-	open(prefix: ContinuousChatCompactionPrefix): ContinuousChatCompactionConversation;
+	/** The node the conversation builds names its paid spend, so every reply's usage is attributable to it. */
+	open(
+		prefix: ContinuousChatCompactionPrefix,
+		target: ContinuousChatNodeCoordinate,
+	): ContinuousChatCompactionConversation;
 }
 
 /** The durable tree a compaction reads from and appends to. ContinuousChatStore satisfies it structurally. */
@@ -126,7 +130,7 @@ export class ContinuousChatCompactionCoordinator {
 		if (signal?.aborted) return { status: "cancelled", replies: 0 };
 		let conversation: ContinuousChatCompactionConversation;
 		try {
-			conversation = this.port.open(job.prefix);
+			conversation = this.port.open(job.prefix, targetCoordinate(target));
 		} catch (error) {
 			return portFailure(signal, 0, error);
 		}

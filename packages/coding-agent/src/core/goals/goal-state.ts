@@ -373,6 +373,7 @@ export type GoalEvent =
 	  }
 	| { type: "complete_goal"; acceptanceOverride?: boolean; now: string }
 	| { type: "complete_goal_manually"; now: string }
+	| { type: "reopen_unproven_completion"; reason: string; now: string }
 	| { type: "block_goal"; reason: string; now: string }
 	| { type: "pause_goal"; now: string }
 	| { type: "resume_goal"; source?: "owner" | "system"; now: string }
@@ -565,6 +566,7 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 		case "resume_goal":
 			return value.source === undefined || value.source === "owner" || value.source === "system";
 		case "block_goal":
+		case "reopen_unproven_completion":
 			return typeof value.reason === "string";
 		case "system_stop_goal":
 			return (
@@ -1048,7 +1050,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			if (!hasUnsatisfied) {
 				newState.status = "completed";
 				newState.blockedReason = undefined;
-				newState.acceptanceOverride = event.acceptanceOverride;
+				newState.acceptanceOverride = event.acceptanceOverride === true;
 			}
 			break;
 		}
@@ -1065,6 +1067,15 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 		case "block_goal": {
 			newState.status = "blocked";
 			newState.blockedReason = event.reason;
+			break;
+		}
+
+		case "reopen_unproven_completion": {
+			// A completion the trusted evidence does not support is never kept: the goal is active again, and its
+			// unproven requirements drive the continuation until evidence is produced.
+			newState.status = "active";
+			newState.blockedReason = undefined;
+			newState.acceptanceOverride = false;
 			break;
 		}
 

@@ -22,6 +22,15 @@ import type { RequestAuth } from "../request-auth.ts";
 
 export type AccountModelAvailability = "available" | "unavailable" | "unknown";
 
+/**
+ * Why the owner's account cannot use a model: the provider refused this model at request time, the
+ * provider rejected the account's key, or the account's listing does not offer the model.
+ */
+export type AccountModelUnavailableCause =
+	| "model_account_refused"
+	| "model_account_rejected"
+	| "model_account_unlisted";
+
 /** What a provider's account check found. */
 export type ProviderAccountState =
 	| { readonly kind: "listed"; readonly models: ReadonlyMap<string, OpenAICodexAccountModel> }
@@ -163,13 +172,29 @@ export class AccountModelCatalog {
 		}
 	}
 
-	availability(model: Model<Api>): AccountModelAvailability {
-		if (this.refused.has(`${model.provider}/${model.id}`)) return "unavailable";
+	/** The one classification of why the account cannot use a model: its cause, and the words status and skip text show. */
+	private unavailability(model: Model<Api>): { cause: AccountModelUnavailableCause; reason: string } | undefined {
+		const refusal = this.refused.get(`${model.provider}/${model.id}`);
+		if (refusal !== undefined) {
+			return { cause: "model_account_refused", reason: `refused by ${model.provider}: ${refusal}` };
+		}
 		const state = this.states.get(model.provider);
-		if (!state || state.kind === "unchecked") return "unknown";
-		if (state.kind === "rejected") return "unavailable";
-		if (state.kind === "key_valid") return "available";
-		return state.models.has(model.id) ? "available" : "unavailable";
+		if (state?.kind === "rejected") return { cause: "model_account_rejected", reason: state.reason };
+		if (state?.kind === "listed" && !state.models.has(model.id)) {
+			return { cause: "model_account_unlisted", reason: `not offered to this ${model.provider} account` };
+		}
+		return undefined;
+	}
+
+	/** Why the account cannot use this model; undefined when it can, or when the account has not been checked. */
+	unavailableCause(model: Model<Api>): AccountModelUnavailableCause | undefined {
+		return this.unavailability(model)?.cause;
+	}
+
+	availability(model: Model<Api>): AccountModelAvailability {
+		if (this.unavailableCause(model)) return "unavailable";
+		const state = this.states.get(model.provider);
+		return !state || state.kind === "unchecked" ? "unknown" : "available";
 	}
 
 	/** Account metadata overrides bundled tiers, including an explicit empty list. No request is made here. */
@@ -182,13 +207,7 @@ export class AccountModelCatalog {
 
 	/** Why a model is unavailable on this account, for status and skip reasons. */
 	unavailableReason(model: Model<Api>): string | undefined {
-		const refusal = this.refused.get(`${model.provider}/${model.id}`);
-		if (refusal) return `refused by ${model.provider}: ${refusal}`;
-		const state = this.states.get(model.provider);
-		if (state?.kind === "rejected") return state.reason;
-		if (state?.kind === "listed" && !state.models.has(model.id))
-			return `not offered to this ${model.provider} account`;
-		return undefined;
+		return this.unavailability(model)?.reason;
 	}
 
 	/** A provider refused this model for the account: never route to it again this session. */

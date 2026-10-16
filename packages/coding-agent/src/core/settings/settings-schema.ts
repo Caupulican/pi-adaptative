@@ -386,7 +386,7 @@ export interface BackgroundToolSettings {
 
 export type ResolvedBackgroundToolSettings = Required<BackgroundToolSettings>;
 
-/** Parallel tool execution (packages/agent's refill pool): how many tool bodies of one assistant message run at once. */
+/** Parallel tool execution (kernel refill-batch pool): how many tool bodies of one assistant message run at once. */
 export interface ToolExecutionSettings {
 	concurrency?: number; // default: DEFAULT_TOOL_EXECUTION_CONCURRENCY -- pool width for a parallel tool batch; sequential-mode tools still run alone
 }
@@ -690,7 +690,7 @@ export interface Settings {
 	processMatrix?: ProcessMatrixSettings; // Durable master/worker process-matrix supervision (core/process-matrix); on by default
 	windowsShell?: WindowsShellSettings; // Windows shell contract engine tier (core/tools/windows-shell-engine); on by default
 	backgroundTool?: BackgroundToolSettings; // Clock-based backgrounding of long foreground tool calls (core/background-tool-task-controller); off by default
-	toolExecution?: ToolExecutionSettings; // Parallel tool batch pool width (packages/agent refill pool); 8 by default
+	toolExecution?: ToolExecutionSettings; // Parallel tool batch pool width (kernel refill-batch pool); 8 by default
 	providerAdmission?: ProviderAdmissionSettings; // Machine-wide per-provider in-flight admission for worker/background lanes (core/provider-admission); on by default
 	fileEncodings?: FileEncodingsSettings; // Source charset per EditorConfig-style glob; overrides .editorconfig, loses to an explicit encoding argument
 	edge?: EdgeSettings; // Standing grants for the edge classes that would otherwise ask the operator (core/autonomy/edge-policy)

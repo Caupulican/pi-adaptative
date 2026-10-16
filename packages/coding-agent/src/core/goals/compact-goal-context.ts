@@ -1,11 +1,13 @@
 import type { TextContent } from "@caupulican/pi-ai";
 import { createCustomMessage } from "../../kernel/messages.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
+import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
 import { GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import { formatGoalClarificationLine, projectGoalRecord } from "./goal-record.ts";
 import { type GoalState, isGoalExecutionActive } from "./goal-state.ts";
 
 export const ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE = "active_goal_context";
+const MAX_UNPROVEN_REQUIREMENT_IDS_IN_CONTEXT = 20;
 const LEGACY_GOAL_CONTINUATION_PREFIX = "Goal continuation context\n=========================";
 /**
  * History: this file used to instruct the model to "hydrate" state itself, once per continuation,
@@ -123,6 +125,14 @@ export function formatCompactGoalContext(state: GoalState, continuationTurn: boo
 		compactRecord.budgetRemainingPct = String(budgetRemainingBucket(record.tokensRemaining ?? 0, record.tokenBudget));
 	}
 	if (record.blockedReason) compactRecord.blockedReason = record.blockedReason;
+	// Requirements the trusted evidence does not support yet. Their ids are model-supplied, so they ride inside the
+	// escaped record like the objective; the continuation needs them to know which evidence to produce.
+	const unprovenIds = getUnprovenGoalRequirementIds(state);
+	if (unprovenIds.length > 0) {
+		const shown = unprovenIds.slice(0, MAX_UNPROVEN_REQUIREMENT_IDS_IN_CONTEXT);
+		const omitted = unprovenIds.length - shown.length;
+		compactRecord.unprovenRequirementIds = `${shown.join(", ")}${omitted > 0 ? ` (+${omitted} more)` : ""}`;
+	}
 	// Owner-supplied text rides inside the same escaped JSON object as the objective, never as bare
 	// lines of a section the model is told to treat as host-owned and authoritative.
 	if (record.clarifications.length > 0) {

@@ -640,12 +640,17 @@ export class ModelRegistry implements ModelRegistryContract {
 		return findRenamedFreeTierModel(this.models, provider, modelId);
 	}
 
+	/** Whether the provider's verified model scope, when one is set, offers this model. */
+	isModelInProviderScope(model: Model<Api>): boolean {
+		const scope = this.providerModelScopes.get(model.provider);
+		return !scope || scope.has(model.id);
+	}
+
 	/**
 	 * Get API key for a model.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
-		const scope = this.providerModelScopes.get(model.provider);
-		if (scope && !scope.has(model.id)) return false;
+		if (!this.isModelInProviderScope(model)) return false;
 		if (model.provider === "llama-cpp") {
 			return true;
 		}

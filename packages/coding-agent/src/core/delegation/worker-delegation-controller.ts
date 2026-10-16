@@ -81,6 +81,7 @@ import {
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
+import type { OrchestrationModelUnusableCause } from "../orchestration/model-binding.ts";
 import { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
 import {
 	assertSpecialistContextClaim,
@@ -169,7 +170,11 @@ import {
 	normalizeWorkerClaimForHost,
 	validateWorkerClaim,
 } from "./worker-claim.ts";
-import { WorkerContextForkStore, WorkerContextForkStoreError } from "./worker-context-fork-store.ts";
+import {
+	type WorkerContextForkSnapshot,
+	WorkerContextForkStore,
+	WorkerContextForkStoreError,
+} from "./worker-context-fork-store.ts";
 import { resolveWorkerContextInheritanceMode } from "./worker-context-inheritance-policy.ts";
 import {
 	type WorkerConversation,
@@ -336,6 +341,11 @@ function reservationWait(
 	};
 }
 
+/** An owner pin that cannot run keeps the refusal causes its resolver reported: `...:<role>:<causes>`. */
+function pinnedModelSkipReason(role: string, refusal: string): string {
+	return `worker_model_pin_unavailable:${role}:${refusal.slice(refusal.indexOf(":") + 1)}`;
+}
+
 /** Root's compaction reserve on the worker's own window: never more than a quarter of it. */
 function laneCompactionReserveTokens(contextWindow: number, reserveTokens: number): number {
 	return Math.min(reserveTokens, Math.floor(contextWindow * 0.25));
@@ -409,7 +419,7 @@ export interface WorkerDelegationControllerDeps {
 	getResourceLoader(): ResourceLoader;
 	getActiveOrchestrationProfile?(): OrchestrationProfile | undefined;
 	getModelRegistry(): ModelRegistry;
-	isModelExhausted(model: Model<Api>): boolean;
+	modelUnusableCause(model: Model<Api>): OrchestrationModelUnusableCause | undefined;
 	getModel(): Model<Api> | undefined;
 	getForegroundThinkingLevel?(): OrchestrationThinkingLevel;
 	/** The session's existing System One owner; admission never creates a separate reviewer. */
@@ -1276,7 +1286,7 @@ export class WorkerDelegationController {
 			getSettingsManager: () => this.deps.getSettingsManager(),
 			getResourceLoader: () => this.deps.getResourceLoader(),
 			getModelRegistry: () => this.deps.getModelRegistry(),
-			isModelExhausted: (model) => this.deps.isModelExhausted(model),
+			modelUnusableCause: (model) => this.deps.modelUnusableCause(model),
 			getTaskProfileStore: () => this.getTaskProfileStore(),
 			onDiagnostic: (message) => this.safeWarn(message),
 		});
@@ -1295,10 +1305,7 @@ export class WorkerDelegationController {
 			store: this.getTaskProfileStore(),
 			getSettingsManager: () => this.deps.getSettingsManager(),
 			getModelRegistry: () => this.deps.getModelRegistry(),
-			isModelExhausted: (provider, modelId) => {
-				const model = this.deps.getModelRegistry().find(provider, modelId);
-				return !model || this.deps.isModelExhausted(model);
-			},
+			modelUnusableCause: (model) => this.deps.modelUnusableCause(model),
 			getActiveOrchestrationProfile: () => this.deps.getActiveOrchestrationProfile?.(),
 			getInheritedBaseProfile: () => {
 				const foregroundModel = this.deps.getModel();
@@ -1359,7 +1366,7 @@ export class WorkerDelegationController {
 			routing: this.deps.getSettingsManager().getWorkerAccountRouting(),
 			role,
 			modelRegistry: this.deps.getModelRegistry(),
-			isModelExhausted: (model) => this.deps.isModelExhausted(model),
+			isModelExhausted: (model) => this.deps.modelUnusableCause(model) !== undefined,
 			isModelLimited: (model) => this.isAccountLimited(model),
 		});
 	}
@@ -1408,7 +1415,7 @@ export class WorkerDelegationController {
 		| "cwd"
 		| "yolo"
 		| "modelRegistry"
-		| "isModelExhausted"
+		| "modelUnusableCause"
 		| "isModelAllowed"
 		| "allocateAllowedModel"
 		| "artifactRetrieveAvailable"
@@ -1420,7 +1427,7 @@ export class WorkerDelegationController {
 			artifactRetrieveAvailable: this.workerToolAdapterNames().includes("artifact_retrieve"),
 			workerToolAdapterNames: this.workerToolAdapterNames(),
 			modelRegistry: this.deps.getModelRegistry(),
-			isModelExhausted: (model) => this.deps.isModelExhausted(model),
+			modelUnusableCause: (model) => this.deps.modelUnusableCause(model),
 			...(this.deps.isModelAllowed
 				? { isModelAllowed: (model: Model<Api>) => this.deps.isModelAllowed!(model) }
 				: {}),
@@ -1510,7 +1517,7 @@ export class WorkerDelegationController {
 		const modelPin = resolveWorkerModelPin(modelPinPolicy, "verifier");
 		const resolved = this.getWorkerProfileResolver().bindPreset(preset.resolved, modelPin?.binding);
 		if (!resolved.ok) {
-			const reason = modelPin ? "worker_model_pin_unavailable:verifier" : resolved.reason;
+			const reason = modelPin ? pinnedModelSkipReason("verifier", resolved.reason) : resolved.reason;
 			return { ok: false, skipReason: `independent_verifier_unavailable:${reason}` };
 		}
 		// Fresh verifier profiles pass through the same shipment admission owner as fresh workers.
@@ -1693,7 +1700,7 @@ export class WorkerDelegationController {
 			if (!bound.ok) {
 				return {
 					ok: false,
-					skipReason: modelPin ? `worker_model_pin_unavailable:${effectiveRole}` : bound.reason,
+					skipReason: modelPin ? pinnedModelSkipReason(effectiveRole, bound.reason) : bound.reason,
 				};
 			}
 			baseShipment = bound.resolved;
@@ -1710,8 +1717,8 @@ export class WorkerDelegationController {
 			return {
 				ok: false,
 				skipReason:
-					modelPin && adaptive.reason === "orchestration_model_unavailable"
-						? `worker_model_pin_unavailable:${effectiveRole}`
+					modelPin && adaptive.reason.startsWith("orchestration_model_unavailable:")
+						? pinnedModelSkipReason(effectiveRole, adaptive.reason)
 						: adaptive.reason,
 			};
 		}
@@ -2434,15 +2441,18 @@ export class WorkerDelegationController {
 	 * The messages a worker is born with, before its task: the project chat's view while ICM runs, then the turns the
 	 * fork mode selects. The view is the root's own prompt text, not forked history, so `forkTurns` keeps its mode,
 	 * boundary and selection unchanged. A verifier is born with no chat view: it judges its subject independently.
+	 * `view` reports whether the leading message is that view, so the snapshot can declare it.
 	 */
-	private workerBirthMessages(
+	private workerBirth(
 		request: WorkerDelegationRequest,
 		mode: SanitizedContextForkMode,
-	): SanitizedContextForkMessage[] {
+	): { view: boolean; messages: SanitizedContextForkMessage[] } {
 		const forked =
 			mode.kind === "none" ? [] : selectSanitizedContextFork(this.workerContextForkSource(request).messages, mode);
 		const chat = request.verificationOfTaskId ? undefined : this.deps.getContinuousChatBirthView?.();
-		return chat ? [{ role: "user", content: chat.view, timestamp: chat.timestamp }, ...forked] : forked;
+		return chat
+			? { view: true, messages: [{ role: "user", content: chat.view, timestamp: chat.timestamp }, ...forked] }
+			: { view: false, messages: forked };
 	}
 
 	private workerContextForkSource(request: WorkerDelegationRequest): WorkerContextForkSource {
@@ -2788,7 +2798,7 @@ export class WorkerDelegationController {
 		}
 		const goal = this.deps.getGoalStateSnapshot();
 		const mode = this.workerContextForkMode(request, admission.executionContract);
-		const messages = this.workerBirthMessages(request, mode);
+		const birth = this.workerBirth(request, mode);
 		const project = this.projectSelections.get(request);
 		const prepare = (birthContextForkReference: WorkerContextForkReference, laneId: string) => {
 			const allocation = project?.admission.kind === "allocated" ? project.admission.allocation : undefined;
@@ -2856,7 +2866,9 @@ export class WorkerDelegationController {
 			try {
 				const captured = this.contextForks.captureAndPrepare({
 					logicalAgentId: laneId,
-					messages,
+					messages: birth.messages,
+					view: birth.view,
+					forkMode: mode,
 					readDurableReferences: () => this.durableWorkerContextForkReferences(),
 					isLogicalIdentityClaimed: () => {
 						const snapshot = lifecycle.getTaskRuntimeSnapshot();
@@ -3243,8 +3255,9 @@ export class WorkerDelegationController {
 			return { outcome: "unavailable", skipReason: "worker_parallel_intent_invalid" };
 		}
 		const forkMode = this.workerContextForkMode(request, admission.executionContract);
-		// Matching compares the exact birth a worker would get, so it includes the chat view that birth carries.
-		const requestedBirth = forkMode.kind === "none" ? undefined : this.workerBirthMessages(request, forkMode);
+		// An explicit fork is identified by the request it was admitted with. The live chat view and the selected history
+		// grow with the chat, so comparing them would retire every explicit-fork specialist as the chat grows.
+		const forkRequest = JSON.stringify(forkMode);
 		const roots = new Set<string>(workerSpecializationWorkspaceRoots(this.lifecycle.getTaskRuntimeSnapshot()));
 		for (const profile of [admission.executionContract.worker, admission.executionContract.verifier]) {
 			const root = profile ? workerContractWorkspaceRoot(profile) : undefined;
@@ -3314,9 +3327,10 @@ export class WorkerDelegationController {
 			...(request.reuseAgentId ? { agentId: request.reuseAgentId } : {}),
 			isInitializationCompatible: (agent, attempt) => {
 				if (agent && !isDeepStrictEqual(agent.resumeContext.contextPointers, materialized.pointers)) return false;
-				if (!requestedBirth) return true;
+				if (forkMode.kind === "none") return true;
 				const reference = attempt.dispatch.birthContextForkReference;
 				if (!reference) return false;
+				let birth: WorkerContextForkSnapshot;
 				try {
 					const forks = agent?.contextOrigin
 						? new WorkerContextForkStore({
@@ -3324,16 +3338,18 @@ export class WorkerDelegationController {
 								parentSessionId: agent.contextOrigin.parentSessionId,
 							})
 						: this.contextForks;
-					const birth = forks.open({
+					birth = forks.open({
 						logicalAgentId:
 							agent?.contextOrigin?.logicalAgentId ?? agent?.agentId ?? attempt.dispatch.logicalLaneId!,
 						reference,
 					});
-					return isDeepStrictEqual(birth.messages, requestedBirth);
 				} catch {
 					// Preserve the unreadable-context refusal instead of allocating a duplicate.
 					return true;
 				}
+				if (birth.declaration) return birth.declaration.forkMode === forkRequest;
+				// A legacy birth declares nothing: only the full birth it was captured with can prove identity.
+				return isDeepStrictEqual(birth.messages, this.workerBirth(request, forkMode).messages);
 			},
 			namespaceKeyOf,
 			// A specialist that was started in its own worktree lane is matched by everything but its directory,
@@ -3413,7 +3429,7 @@ export class WorkerDelegationController {
 							)
 								throw new Error("Worker project owner binding is unavailable.");
 						}
-						if (!requestedBirth) return true;
+						if (forkMode.kind === "none") return true;
 						const conversation = this.conversations.open({
 							agentDir: this.deps.getAgentDir(),
 							resumeContext: reference.resumeContext,
@@ -3425,7 +3441,9 @@ export class WorkerDelegationController {
 							agentDir: this.deps.getAgentDir(),
 							parentSessionId: reference.parentSessionId,
 						}).open({ logicalAgentId: reference.logicalAgentId, reference: birthReference });
-						return isDeepStrictEqual(birth.messages, requestedBirth);
+						if (birth.declaration) return birth.declaration.forkMode === forkRequest;
+						// A legacy birth declares nothing: only the full birth it was captured with can prove identity.
+						return isDeepStrictEqual(birth.messages, this.workerBirth(request, forkMode).messages);
 					},
 				});
 			} catch (error) {
@@ -3504,7 +3522,7 @@ export class WorkerDelegationController {
 	private isWorkerRouteModelAvailable(model: Model<Api> | undefined): model is Model<Api> {
 		return (
 			model !== undefined &&
-			!this.deps.isModelExhausted(model) &&
+			this.deps.modelUnusableCause(model) === undefined &&
 			!this.isAccountLimited(model) &&
 			this.deps.isModelAllowed?.(model) !== false
 		);

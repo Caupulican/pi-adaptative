@@ -34,6 +34,8 @@ export interface SessionBackgroundToolTaskDeps {
 	/** Owner of provider-local tool-call ids within the shared group lock. */
 	getMutationAnnouncer(): string;
 	emit(event: AgentSessionEvent): void;
+	/** The set of running backgrounded tool tasks changed; a system switch waiting on it may now be admissible. */
+	onRunningTasksChanged(): void;
 	addSpawnedUsage(usage: Usage, options: { label?: string; sourceSessionId?: string; reportId?: string }): void;
 }
 
@@ -62,7 +64,10 @@ export function createSessionBackgroundToolTasks(deps: SessionBackgroundToolTask
 			deps.getSessionManager().appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, record);
 		},
 		notifyTerminal: (records, options) => deps.notifyTerminal(records, options.wakeParent),
-		onLiveTasksChanged: (tasks) => deps.emit({ type: "background_tools", tasks }),
+		onLiveTasksChanged: (tasks) => {
+			deps.emit({ type: "background_tools", tasks });
+			deps.onRunningTasksChanged();
+		},
 		recordUsage: (taskId, usage) => {
 			const sessionId = deps.getSessionManager().getSessionId();
 			deps.addSpawnedUsage(usage, {

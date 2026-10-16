@@ -9,6 +9,10 @@ import {
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 } from "../orchestration/contracts.ts";
 import {
+	MAX_WORKER_BIRTH_SNAPSHOT_BYTES,
+	MAX_WORKER_BIRTH_SNAPSHOT_MESSAGES,
+	MAX_WORKER_BIRTH_SNAPSHOT_TEXT_BLOCKS,
+	MAX_WORKER_BIRTH_VIEW_MESSAGE_BYTES,
 	MAX_WORKER_CONTEXT_FORK_API_LENGTH,
 	MAX_WORKER_CONTEXT_FORK_BYTES,
 	MAX_WORKER_CONTEXT_FORK_MESSAGES,
@@ -20,11 +24,16 @@ import {
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { requireBoundedTrimmedText } from "../util/bounded-value.ts";
-import type { SanitizedContextForkMessage } from "./sanitized-context-fork.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
+import {
+	parseSanitizedContextForkMode,
+	type SanitizedContextForkMessage,
+	type SanitizedContextForkMode,
+} from "./sanitized-context-fork.ts";
 import { DEFAULT_WORKER_FLEET_LIMITS } from "./worker-fleet-limits.ts";
 
 const MAX_PATH_CHARS = 4096;
-const MAX_FILE_BYTES = MAX_WORKER_CONTEXT_FORK_BYTES + 16 * 1024;
+const MAX_FILE_BYTES = MAX_WORKER_BIRTH_SNAPSHOT_BYTES + 16 * 1024;
 const MAX_DIRECTORY_ENTRIES = DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession + 32;
 const SNAPSHOT_FILE_PATTERN = /^([a-f0-9]{64})-([a-f0-9]{64})\.json$/;
 
@@ -48,10 +57,21 @@ export class WorkerContextForkStoreError extends Error {
 	}
 }
 
+/**
+ * What a birth was admitted with: whether the ICM view leads its messages, and the fork request. The fork request is the
+ * JSON of the resolved mode, the same representation the admitted command records as its `controlForkMode`.
+ */
+export interface WorkerContextForkDeclaration {
+	view: boolean;
+	forkMode: string;
+}
+
 export interface WorkerContextForkSnapshot extends WorkerContextForkReference {
 	parentSessionId: string;
 	logicalAgentId: string;
 	messages: SanitizedContextForkMessage[];
+	/** Absent for a legacy snapshot captured before births declared themselves. */
+	declaration?: WorkerContextForkDeclaration;
 }
 
 export interface CaptureWorkerContextForkRequest {
@@ -60,7 +80,11 @@ export interface CaptureWorkerContextForkRequest {
 	 * reopen, never replace, this one birth snapshot.
 	 */
 	logicalAgentId: string;
+	/** The birth messages: the ICM view first when `view` is set, then the selected history. */
 	messages: readonly SanitizedContextForkMessage[];
+	view: boolean;
+	/** The fork request the birth was admitted with. */
+	forkMode: SanitizedContextForkMode;
 }
 
 export interface OpenWorkerContextForkRequest {
@@ -94,6 +118,7 @@ interface NormalizedMessages {
 interface PreparedWorkerContextForkCapture {
 	logicalAgentId: string;
 	normalized: NormalizedMessages;
+	declaration: WorkerContextForkDeclaration;
 	reference: WorkerContextForkReference;
 	targetFile: string;
 	targetName: string;
@@ -136,26 +161,43 @@ interface PersistedWorkerContextFork {
 	contentDigest: string;
 	messageCount: number;
 	messageBytes: number;
+	declaration?: WorkerContextForkDeclaration;
 	messages: SanitizedContextForkMessage[];
 }
 
+/** Text blocks counted against one ceiling. A declared birth counts its view and its history separately. */
 interface TextBlockCounter {
 	count: number;
+	maximum: number;
 }
 
-function exactObject(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
+function exactObject(
+	value: unknown,
+	keys: readonly string[],
+	label: string,
+	optionalKeys: readonly string[] = [],
+): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`${label} must be an object.`);
 	const record = value as Record<string, unknown>;
-	const actualKeys = Object.keys(record);
-	if (actualKeys.length !== keys.length || keys.some((key) => !Object.hasOwn(record, key))) {
+	const allowed = (key: string) => keys.includes(key) || optionalKeys.includes(key);
+	if (Object.keys(record).some((key) => !allowed(key)) || keys.some((key) => !Object.hasOwn(record, key))) {
 		throw new TypeError(`${label} has an unsupported shape.`);
 	}
 	return record;
 }
 
-function boundedString(value: unknown, maximum: number, label: string): string {
+/** Identifier-like fields: short protocol names bounded in characters. */
+function boundedCharacters(value: unknown, maximum: number, label: string): string {
 	if (typeof value !== "string" || !value.trim() || value.length > maximum) {
 		throw new TypeError(`${label} must be non-empty and no longer than ${maximum} characters.`);
+	}
+	return value;
+}
+
+/** Text bodies bounded in UTF-8 bytes, the unit every byte ceiling in this file measures. */
+function boundedText(value: unknown, maximumBytes: number, label: string): string {
+	if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf-8") > maximumBytes) {
+		throw new TypeError(`${label} must be non-empty and no longer than ${maximumBytes} UTF-8 bytes.`);
 	}
 	return value;
 }
@@ -199,15 +241,15 @@ function normalizeUsage(value: unknown): Usage {
 	};
 }
 
+function textBlockLimit(counter: TextBlockCounter): TypeError {
+	return new TypeError(`A worker birth snapshot may contain at most ${counter.maximum} text blocks.`);
+}
+
 function normalizeTextBlock(value: unknown, counter: TextBlockCounter): TextContent {
-	if (counter.count >= MAX_WORKER_CONTEXT_FORK_TEXT_BLOCKS) {
-		throw new TypeError(
-			`A worker context fork may contain at most ${MAX_WORKER_CONTEXT_FORK_TEXT_BLOCKS} text blocks.`,
-		);
-	}
+	if (counter.count >= counter.maximum) throw textBlockLimit(counter);
 	const block = exactObject(value, ["type", "text"], "Worker context fork text block");
 	if (block.type !== "text") throw new TypeError("Worker context forks may contain text blocks only.");
-	const text = boundedString(block.text, MAX_WORKER_CONTEXT_FORK_BYTES, "Worker context fork text");
+	const text = boundedText(block.text, MAX_WORKER_BIRTH_SNAPSHOT_BYTES, "Worker context fork text");
 	counter.count += 1;
 	return { type: "text", text };
 }
@@ -217,13 +259,9 @@ function normalizeUserMessage(value: unknown, counter: TextBlockCounter): UserMe
 	if (message.role !== "user") throw new TypeError("Worker context fork user role is invalid.");
 	let content: UserMessage["content"];
 	if (typeof message.content === "string") {
-		content = boundedString(message.content, MAX_WORKER_CONTEXT_FORK_BYTES, "Worker context fork user content");
+		content = boundedText(message.content, MAX_WORKER_BIRTH_SNAPSHOT_BYTES, "Worker context fork user content");
 		counter.count += 1;
-		if (counter.count > MAX_WORKER_CONTEXT_FORK_TEXT_BLOCKS) {
-			throw new TypeError(
-				`A worker context fork may contain at most ${MAX_WORKER_CONTEXT_FORK_TEXT_BLOCKS} text blocks.`,
-			);
-		}
+		if (counter.count > counter.maximum) throw textBlockLimit(counter);
 	} else {
 		if (!Array.isArray(message.content) || message.content.length === 0) {
 			throw new TypeError("Worker context fork user content must contain text.");
@@ -249,23 +287,23 @@ function normalizeAssistantMessage(value: unknown, counter: TextBlockCounter): A
 	return {
 		role: "assistant",
 		content: message.content.map((block) => normalizeTextBlock(block, counter)),
-		api: boundedString(message.api, MAX_WORKER_CONTEXT_FORK_API_LENGTH, "Assistant API"),
-		provider: boundedString(message.provider, MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH, "Assistant provider"),
-		model: boundedString(message.model, MAX_ORCHESTRATION_MODEL_ID_LENGTH, "Assistant model"),
+		api: boundedCharacters(message.api, MAX_WORKER_CONTEXT_FORK_API_LENGTH, "Assistant API"),
+		provider: boundedCharacters(message.provider, MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH, "Assistant provider"),
+		model: boundedCharacters(message.model, MAX_ORCHESTRATION_MODEL_ID_LENGTH, "Assistant model"),
 		usage: normalizeUsage(message.usage),
 		stopReason: "stop",
 		timestamp: safeTimestamp(message.timestamp, "Assistant timestamp"),
 	};
 }
 
-function normalizeMessages(value: unknown): NormalizedMessages {
-	if (!Array.isArray(value) || value.length > MAX_WORKER_CONTEXT_FORK_MESSAGES) {
-		throw new TypeError(`A worker context fork may contain at most ${MAX_WORKER_CONTEXT_FORK_MESSAGES} messages.`);
-	}
+/** One run of messages under one role rule: a run never leads with an assistant turn. */
+function normalizeMessageSequence(
+	candidates: readonly unknown[],
+	counter: TextBlockCounter,
+): SanitizedContextForkMessage[] {
 	const messages: SanitizedContextForkMessage[] = [];
-	const counter: TextBlockCounter = { count: 0 };
 	let hasUser = false;
-	for (const candidate of value as readonly unknown[]) {
+	for (const candidate of candidates) {
 		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
 			throw new TypeError("Worker context fork message must be an object.");
 		}
@@ -283,10 +321,100 @@ function normalizeMessages(value: unknown): NormalizedMessages {
 		}
 		throw new TypeError("Worker context forks may contain user and assistant messages only.");
 	}
+	return messages;
+}
+
+/** The declared ICM view: one user message of string content, capped by its own exact serialized size. */
+function normalizeViewMessage(value: unknown): UserMessage {
+	const message = normalizeUserMessage(value, { count: 0, maximum: 1 });
+	if (typeof message.content !== "string") throw new TypeError("A worker birth view must be string content.");
+	if (Buffer.byteLength(JSON.stringify(message), "utf-8") > MAX_WORKER_BIRTH_VIEW_MESSAGE_BYTES) {
+		throw new TypeError(
+			`A worker birth view may contain at most ${MAX_WORKER_BIRTH_VIEW_MESSAGE_BYTES} serialized bytes.`,
+		);
+	}
+	return message;
+}
+
+/**
+ * The fork request in its persisted form: the JSON of the mode the existing grammar parses it to. Anything that
+ * does not round-trip through that grammar is refused, so one fork request has one spelling.
+ */
+function canonicalForkMode(value: unknown): string {
+	if (typeof value !== "string") throw new TypeError("Worker birth fork request is invalid.");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(value);
+	} catch (error) {
+		throw new TypeError("Worker birth fork request is not JSON.", { cause: error });
+	}
+	if (!isPlainRecord(parsed) || typeof parsed.kind !== "string") {
+		throw new TypeError("Worker birth fork request is invalid.");
+	}
+	const wire =
+		parsed.kind === "last_user_turns" && typeof parsed.count === "number" ? String(parsed.count) : parsed.kind;
+	const canonical = JSON.stringify(parseSanitizedContextForkMode(wire));
+	if (canonical !== value) throw new TypeError("Worker birth fork request is not canonical.");
+	return canonical;
+}
+
+function normalizeDeclaration(value: unknown): WorkerContextForkDeclaration {
+	const declaration = exactObject(value, ["view", "forkMode"], "Worker birth declaration");
+	if (typeof declaration.view !== "boolean") throw new TypeError("Worker birth view flag is invalid.");
+	return { view: declaration.view, forkMode: canonicalForkMode(declaration.forkMode) };
+}
+
+/**
+ * Validates birth messages. A legacy snapshot (no declaration) is bounded by the whole birth ceiling. A declared birth is
+ * bounded part by part: the view by its own capacity, the selected history by the exact history ceiling that selection
+ * enforces, measured the same way (JSON of the history array, at most `MAX_WORKER_CONTEXT_FORK_MESSAGES` messages and
+ * `MAX_WORKER_CONTEXT_FORK_TEXT_BLOCKS` text blocks).
+ */
+function normalizeMessages(value: unknown, declaration?: WorkerContextForkDeclaration): NormalizedMessages {
+	if (!Array.isArray(value)) throw new TypeError("A worker birth snapshot must be a list of messages.");
+	const candidates = value as readonly unknown[];
+	let messages: SanitizedContextForkMessage[];
+	if (declaration === undefined) {
+		if (candidates.length > MAX_WORKER_BIRTH_SNAPSHOT_MESSAGES) {
+			throw new TypeError(
+				`A worker birth snapshot may contain at most ${MAX_WORKER_BIRTH_SNAPSHOT_MESSAGES} messages.`,
+			);
+		}
+		messages = normalizeMessageSequence(candidates, {
+			count: 0,
+			maximum: MAX_WORKER_BIRTH_SNAPSHOT_TEXT_BLOCKS,
+		});
+	} else {
+		const historyCandidates = declaration.view ? candidates.slice(1) : candidates;
+		if (declaration.view && candidates.length === 0) {
+			throw new TypeError("A declared worker birth view must be present.");
+		}
+		if (historyCandidates.length > MAX_WORKER_CONTEXT_FORK_MESSAGES) {
+			throw new TypeError(
+				`A worker birth history may contain at most ${MAX_WORKER_CONTEXT_FORK_MESSAGES} messages.`,
+			);
+		}
+		const history = normalizeMessageSequence(historyCandidates, {
+			count: 0,
+			maximum: MAX_WORKER_CONTEXT_FORK_TEXT_BLOCKS,
+		});
+		const historyBytes = Buffer.byteLength(JSON.stringify(history), "utf-8");
+		if (historyBytes > MAX_WORKER_CONTEXT_FORK_BYTES) {
+			throw new TypeError(
+				`A worker birth history may contain at most ${MAX_WORKER_CONTEXT_FORK_BYTES} serialized bytes.`,
+			);
+		}
+		if (history.length > 0 && JSON.stringify(parseSanitizedContextForkMode("none")) === declaration.forkMode) {
+			throw new TypeError("A worker birth declared with no fork may not carry history.");
+		}
+		messages = declaration.view ? [normalizeViewMessage(candidates[0]), ...history] : history;
+	}
 	const serialized = JSON.stringify(messages);
 	const byteLength = Buffer.byteLength(serialized, "utf-8");
-	if (byteLength > MAX_WORKER_CONTEXT_FORK_BYTES) {
-		throw new TypeError(`A worker context fork may contain at most ${MAX_WORKER_CONTEXT_FORK_BYTES} bytes.`);
+	if (byteLength > MAX_WORKER_BIRTH_SNAPSHOT_BYTES) {
+		throw new TypeError(
+			`A worker birth snapshot may contain at most ${MAX_WORKER_BIRTH_SNAPSHOT_BYTES} serialized bytes.`,
+		);
 	}
 	return { messages, serialized, byteLength };
 }
@@ -299,8 +427,13 @@ function identityDigest(parentSessionId: string, logicalAgentId: string): string
 	return sha256("pi-worker-context-fork-identity-v1", `${parentSessionId}\0${logicalAgentId}`);
 }
 
-function contentDigest(serializedMessages: string): string {
-	return sha256("pi-worker-context-fork-content-v1", serializedMessages);
+/** Declared births digest their declaration with their messages; legacy births keep the messages-only domain. */
+function contentDigest(serializedMessages: string, declaration?: WorkerContextForkDeclaration): string {
+	if (declaration === undefined) return sha256("pi-worker-context-fork-content-v1", serializedMessages);
+	return sha256(
+		"pi-worker-context-fork-content-v2",
+		JSON.stringify([declaration.view, declaration.forkMode, serializedMessages]),
+	);
 }
 
 function referenceKey(reference: WorkerContextForkReference): string {
@@ -318,6 +451,7 @@ function canonicalEnvelope(
 	logicalAgentId: string,
 	reference: WorkerContextForkReference,
 	messages: SanitizedContextForkMessage[],
+	declaration?: WorkerContextForkDeclaration,
 ): PersistedWorkerContextFork {
 	return {
 		schemaVersion: SCHEMA_VERSION,
@@ -327,6 +461,8 @@ function canonicalEnvelope(
 		contentDigest: reference.contentDigest,
 		messageCount: reference.messageCount,
 		messageBytes: reference.messageBytes,
+		// Legacy envelopes stay byte-identical: the declaration key exists only on declared births.
+		...(declaration ? { declaration: { view: declaration.view, forkMode: declaration.forkMode } } : {}),
 		messages,
 	};
 }
@@ -376,6 +512,7 @@ function parseEnvelope(
 				"messages",
 			],
 			"Worker context fork snapshot",
+			["declaration"],
 		);
 		if (envelope.schemaVersion !== SCHEMA_VERSION) {
 			throw new TypeError("Worker context fork snapshot schema is unsupported.");
@@ -388,11 +525,12 @@ function parseEnvelope(
 				"Worker context fork snapshot identity conflicts with the requested logical agent.",
 			);
 		}
-		const messages = normalizeMessages(envelope.messages);
+		const declaration = envelope.declaration === undefined ? undefined : normalizeDeclaration(envelope.declaration);
+		const messages = normalizeMessages(envelope.messages, declaration);
 		const actualReference: WorkerContextForkReference = {
 			schemaVersion: SCHEMA_VERSION,
 			identityDigest: identityDigest(parentSessionId, logicalAgentId),
-			contentDigest: contentDigest(messages.serialized),
+			contentDigest: contentDigest(messages.serialized, declaration),
 			messageCount: messages.messages.length,
 			messageBytes: messages.byteLength,
 		};
@@ -409,11 +547,23 @@ function parseEnvelope(
 		) {
 			throw new TypeError("Worker context fork snapshot digest or bounds metadata is invalid.");
 		}
-		const canonical = canonicalEnvelope(parentSessionId, logicalAgentId, actualReference, messages.messages);
+		const canonical = canonicalEnvelope(
+			parentSessionId,
+			logicalAgentId,
+			actualReference,
+			messages.messages,
+			declaration,
+		);
 		if (raw !== serializeEnvelope(canonical)) {
 			throw new TypeError("Worker context fork snapshot is not in canonical form.");
 		}
-		return { ...actualReference, parentSessionId, logicalAgentId, messages: messages.messages };
+		return {
+			...actualReference,
+			parentSessionId,
+			logicalAgentId,
+			messages: messages.messages,
+			...(declaration ? { declaration } : {}),
+		};
 	} catch (error) {
 		if (error instanceof WorkerContextForkStoreError) throw error;
 		throw new WorkerContextForkStoreError(
@@ -524,11 +674,15 @@ export class WorkerContextForkStore {
 			MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 			"Logical agent id",
 		);
-		const normalized = normalizeMessages(request.messages);
+		const declaration = normalizeDeclaration({
+			view: request.view,
+			forkMode: JSON.stringify(request.forkMode),
+		});
+		const normalized = normalizeMessages(request.messages, declaration);
 		const reference: WorkerContextForkReference = {
 			schemaVersion: SCHEMA_VERSION,
 			identityDigest: identityDigest(this.parentSessionId, logicalAgentId),
-			contentDigest: contentDigest(normalized.serialized),
+			contentDigest: contentDigest(normalized.serialized, declaration),
 			messageCount: normalized.messages.length,
 			messageBytes: normalized.byteLength,
 		};
@@ -540,9 +694,9 @@ export class WorkerContextForkStore {
 		);
 		const targetName = basename(targetFile);
 		const serialized = serializeEnvelope(
-			canonicalEnvelope(this.parentSessionId, logicalAgentId, reference, normalized.messages),
+			canonicalEnvelope(this.parentSessionId, logicalAgentId, reference, normalized.messages, declaration),
 		);
-		return { logicalAgentId, normalized, reference, targetFile, targetName, serialized };
+		return { logicalAgentId, normalized, declaration, reference, targetFile, targetName, serialized };
 	}
 
 	private captureLocked(
@@ -582,7 +736,10 @@ export class WorkerContextForkStore {
 				);
 			}
 			const existing = this.readSnapshot(prepared.targetFile, prepared.logicalAgentId, prepared.reference);
-			if (JSON.stringify(existing.messages) !== prepared.normalized.serialized) {
+			if (
+				JSON.stringify(existing.messages) !== prepared.normalized.serialized ||
+				JSON.stringify(existing.declaration) !== JSON.stringify(prepared.declaration)
+			) {
 				throw new WorkerContextForkStoreError(
 					"identity_conflict",
 					"Logical worker context identity is bound to different snapshot content.",

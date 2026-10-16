@@ -29,11 +29,11 @@ Existing sessions are automatically migrated to the current version (v4) when lo
 
 ## Source Files
 
-Source on GitHub ([pi-mono](https://github.com/earendil-works/pi-mono)):
-- [`packages/agent/src/session/session-manager.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/agent/src/session/session-manager.ts) - Session entry types and SessionManager
-- [`packages/coding-agent/src/core/messages.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/messages.ts) - Extended message types (BashExecutionMessage, CustomMessage, etc.)
-- [`packages/ai/src/types.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/types.ts) - Base message types (UserMessage, AssistantMessage, ToolResultMessage)
-- [`packages/agent/src/types.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/agent/src/types.ts) - AgentMessage union type
+Source on GitHub ([pi-adaptative](https://github.com/Caupulican/pi-adaptative)):
+- [`packages/coding-agent/src/kernel/session/session-manager.ts`](https://github.com/Caupulican/pi-adaptative/blob/main/packages/coding-agent/src/kernel/session/session-manager.ts) - Session entry types and SessionManager
+- [`packages/coding-agent/src/kernel/messages.ts`](https://github.com/Caupulican/pi-adaptative/blob/main/packages/coding-agent/src/kernel/messages.ts) - Extended message types (BashExecutionMessage, CustomMessage, etc.)
+- [`packages/ai/src/types.ts`](https://github.com/Caupulican/pi-adaptative/blob/main/packages/ai/src/types.ts) - Base message types (UserMessage, AssistantMessage, ToolResultMessage)
+- [`packages/coding-agent/src/kernel/types.ts`](https://github.com/Caupulican/pi-adaptative/blob/main/packages/coding-agent/src/kernel/types.ts) - AgentMessage union type
 
 For TypeScript definitions in your project, inspect `node_modules/@caupulican/pi-adaptative/dist/` and `node_modules/@caupulican/pi-ai/dist/`.
 

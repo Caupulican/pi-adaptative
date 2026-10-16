@@ -599,6 +599,11 @@ export class ForegroundRecoveryController {
 		return this.billingFailover.isExhausted(ref);
 	}
 
+	/** The quota exhaustion holding for `ref` and its reset time, when one was recorded. */
+	modelExhaustion(ref: string): { readonly until: number | undefined } | undefined {
+		return this.billingFailover.exhaustion(ref);
+	}
+
 	/** Record a quota exhaustion another lane met (see BillingFailoverController.markModelExhausted). */
 	markModelExhausted(ref: string, retryAfterMs?: number): void {
 		this.billingFailover.markModelExhausted(ref, retryAfterMs);

@@ -27,12 +27,13 @@ export interface TranscriptSummarizerDeps {
 	 * record's own owner-facing message when it cannot be. Must not throw: it runs in the call's `finally`, where a throw
 	 * would replace the reply or the error already in flight.
 	 */
-	recordHistoryUsage(usage: Usage, call: { reportId: string; provider: string; model: string }): void;
+	recordHistoryUsage(usage: Usage, call: { reportId: string; provider: string; model: string; attempt: number }): void;
 }
 
 /**
  * Charge one summary call's spend to the owning session. The report id is unique to the call and short: the journal bounds
- * every identity text it stores, so the session id is not part of it.
+ * every identity text it stores, so the session id is not part of it. A summarize call is one provider call: it has no retry
+ * of its own, so its attempt is the first.
  */
 function recordSummarySpend(deps: TranscriptSummarizerDeps, spent: Usage, model: Model<Api>): void {
 	if (!hasReportableUsage(spent)) return;
@@ -40,6 +41,7 @@ function recordSummarySpend(deps: TranscriptSummarizerDeps, spent: Usage, model:
 		reportId: `${SUMMARY_USAGE_KIND}:${randomUUID()}`,
 		provider: model.provider,
 		model: model.id,
+		attempt: 1,
 	});
 }
 

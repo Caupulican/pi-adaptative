@@ -208,7 +208,7 @@ A fixture replay of the 01a0a4cc error classes:
 
 ## Tests (fail first)
 
-- `packages/agent/test` duck-type execution error; missing errorKind rejected; operation_outcome not rewritten.
+- Kernel execution-error classification (`packages/coding-agent/src/kernel`): duck-type execution error; missing errorKind rejected; operation_outcome not rewritten. Kernel tests were removed 2026-10-04; rebuilt only on owner request.
 - `packages/ai` execution-repair unique/non-unique path, entity, rematch.
 - `packages/coding-agent/test` recovery-gate action matching after kind split; task_steps tombstone; goal live catalog; tool_task catch kind; skill/memory policy discard; biome coverage notice; gh origin pin at runtime (fake git/gh); pathUniqueNormalize on spaced `/home …`.
 - Negative controls in each file.

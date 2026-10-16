@@ -7,6 +7,7 @@ import { subscribeHumanInputActivity } from "../human-input-activity.ts";
 import type { HumanInputRequest } from "../human-input-request.ts";
 import { connectHerdrChannel, type HerdrEventChannel } from "./herdr-channel.ts";
 import { herdrTarget } from "./herdr-codec.ts";
+import { herdrPaneOwnership } from "./herdr-pane-ownership.ts";
 import { NATIVE_PI_SOURCE_PREFIX } from "./native-pi-protocol.ts";
 import { createNativePiQuestionReporter, type NativePiQuestionReporter } from "./native-pi-question.ts";
 
@@ -54,6 +55,21 @@ export async function attachNativePiActivity(
 	} finally {
 		clearTimeout(connectTimeout);
 	}
+	// The environment's pane id is a claim. A foreign pane is never trusted: its status would describe another session.
+	// An unverifiable claim still attaches, since a native member is a pane process by construction and refusing it
+	// would fail its readiness; the reason is reported.
+	const ownership = await herdrPaneOwnership(channel, paneId);
+	if (ownership.status === "foreign") {
+		channel.close();
+		options.onError?.(
+			new Error("Native Pi collaboration status is not attached: this Herdr pane is not this process's pane."),
+		);
+		return undefined;
+	}
+	if (ownership.status === "unverifiable")
+		options.onError?.(
+			new Error(`Native Pi collaboration status uses an unverified Herdr pane (${ownership.reason}).`),
+		);
 	const source = `${NATIVE_PI_SOURCE_PREFIX}${randomUUID()}`;
 	const questions = new Map<string, HumanInputRequest>();
 	let sequence = 0;

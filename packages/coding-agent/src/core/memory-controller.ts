@@ -73,6 +73,7 @@ import type { ExtensionRunner } from "./extensions/index.ts";
 import type { MemoryProvider } from "./extensions/types.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { ActiveBranchView } from "./memory/active-branch-probe.ts";
+import type { ContinuousChatCompactionAdapterPort } from "./memory/continuous-chat-compaction-adapter.ts";
 import { ContinuousChatHost, type ContinuousChatHostPorts } from "./memory/continuous-chat-host.ts";
 import type { ContinuousChatLegacySource } from "./memory/continuous-chat-legacy-import.ts";
 import {
@@ -426,6 +427,9 @@ function boundPreCompressMemory(insights: readonly string[]): string {
 	return composeCharBoundedMemoryRecords(candidates, MAX_PRE_COMPRESS_MEMORY_CHARS).text;
 }
 
+/** Which lease check a memory system change asks for: an operator's switch, or the recovery of a missing chat. */
+export type SystemSwitchScope = "switch" | "recovery";
+
 export interface MemoryControllerDeps {
 	/** Memory-retrieval + prompt-inclusion settings (default-on gates for retrieval and surfacing). */
 	getSettingsManager(): MemoryControllerSettingsSource;
@@ -446,8 +450,18 @@ export interface MemoryControllerDeps {
 	isChildSession(): boolean;
 	/** Re-derive the tool registry after (re)init so the newly-surfaced memory tools take effect. */
 	refreshToolRegistry(): void;
-	/** Acquire the existing foreground submission lease only when all session work is idle. */
-	acquireSystemSwitchLease?(): (() => void) | undefined;
+	/**
+	 * Acquire the existing foreground submission lease only when all session work is idle. `switch` is an operator's
+	 * memory change; `recovery` repairs a missing chat. The scopes differ only where a queued next-turn message would
+	 * make a switch wait (see the session's predicate).
+	 */
+	acquireSystemSwitchLease?(scope: SystemSwitchScope): (() => void) | undefined;
+	/**
+	 * Fires whenever a condition that refused the lease may have cleared: foreground activity, running lanes and tool
+	 * tasks, and the detached reflection turn. The listener re-checks, so a spurious call is harmless. Returns the
+	 * unsubscribe. Absent in narrow hosts: a missing chat then cannot recover.
+	 */
+	subscribeSystemSwitchLeaseAvailability?(listener: () => void): () => void;
 	/** Active model context window, used to cap prompt-visible memory. */
 	getContextWindow(): number | undefined;
 	/** Latest active goal state, used for short-term current-work memory. */
@@ -553,6 +567,8 @@ export class MemoryController {
 	private readonly _hierarchy: TranscriptHierarchyHost | undefined;
 	private readonly _activeBranch: ActiveBranchView | undefined;
 	private _unsubscribeSettingsChanges: (() => void) | undefined;
+	private _unsubscribeSettingsRecovery: (() => void) | undefined;
+	private _summarySettingsFailure: string | undefined;
 	/** R4: tracks whether injected recall is actually used, to adapt the recall gate. */
 	private readonly _effectivenessTracker = new EffectivenessTracker();
 	/** Memory providers registered by extensions via pi.registerMemoryProvider, applied on (re)init. */
@@ -602,33 +618,96 @@ export class MemoryController {
 
 	private _settingsChanged(): void {
 		void this._hierarchy?.settingsChanged();
+		this._reconcileContinuousChat();
+	}
+
+	/**
+	 * Brings the project chat in line with the settings. A missing chat recovers only when idle; a live chat is never
+	 * recycled here, since a settings change can arrive while its turn runs. The summary model is checked through the
+	 * port's own receiver: a detached `validate` throws on every call, which would read as a refused summary model.
+	 */
+	private _reconcileContinuousChat(): void {
 		if (this.deps.isChildSession() || this._shutdownPromise !== undefined || this._transitioning) return;
 		if (this.deps.getSettingsManager().getMemorySystem() !== "icm") return;
-		const validate = this.deps.continuousChat?.compaction.validate;
-		if (!validate) return;
+		const compaction = this.deps.continuousChat?.compaction;
+		if (!compaction) return;
 		if (this._initializationFailed || (this._activeMemorySystem === "icm" && this._continuousChat === undefined)) {
-			try {
-				validate();
-			} catch (error) {
-				const reason = error instanceof Error ? error.message : String(error);
-				this._setContinuousChatWire({ kind: "blocked", reason });
+			const refusal = this._summaryRefusal(compaction);
+			if (refusal !== undefined) {
+				this._setContinuousChatWire({ kind: "blocked", reason: refusal });
 				return;
 			}
-			void this.initialize();
+			this._recoverSettingsWhenIdle();
 			return;
 		}
-		if (this._activeMemorySystem === "icm" && this._continuousChat !== undefined) {
-			try {
-				validate();
-			} catch {
-				void this.initialize();
-				return;
-			}
+		this._reviewLiveChatSummary(compaction);
+	}
+
+	/**
+	 * Checks the summary model against the live chat. A refusal warns once per distinct reason and the chat keeps running;
+	 * a usable model after a refusal releases the work that refusal blocked. Used on every settings change and when an
+	 * activation ends, since a change made while the activation ran was not seen by the settings handler.
+	 */
+	private _reviewLiveChatSummary(compaction: ContinuousChatCompactionAdapterPort): void {
+		if (this._activeMemorySystem !== "icm" || this._continuousChat === undefined) return;
+		const refusal = this._summaryRefusal(compaction);
+		if (refusal !== undefined) {
+			this._reportSummaryRefusal(refusal);
+			return;
+		}
+		// An unchanged usable model has nothing to release.
+		const recovered = this._summarySettingsFailure !== undefined;
+		this._summarySettingsFailure = undefined;
+		if (recovered) {
 			void this._continuousChat.runtime
 				.reserveTurnBoundary()
 				.then((boundary) => boundary.release())
 				.catch(() => {});
 		}
+	}
+
+	/** The summary model's refusal to run the chat's compactions, or undefined when it can run them. */
+	private _summaryRefusal(compaction: ContinuousChatCompactionAdapterPort): string | undefined {
+		try {
+			compaction.validate();
+			return undefined;
+		} catch (error) {
+			return error instanceof Error ? error.message : String(error);
+		}
+	}
+
+	/**
+	 * Summary availability is not ownership of the foreground turn: a refused summary model warns once per distinct
+	 * reason and the live chat keeps running. Reinitializing here would dispose the chat while its next provider request
+	 * still uses its projection.
+	 */
+	private _reportSummaryRefusal(refusal: string): void {
+		if (refusal !== this._summarySettingsFailure) this.deps.emitWarning(refusal);
+		this._summarySettingsFailure = refusal;
+	}
+
+	/**
+	 * A missing host recovers under the idle lease a memory switch uses, with the recovery scope. While the lease is
+	 * refused, the recovery waits on the availability signal and re-checks when it fires, so it never polls. A session
+	 * without a lease has no submission to race, so its host is idle by construction and recovers directly.
+	 */
+	private _recoverSettingsWhenIdle(): void {
+		this._unsubscribeSettingsRecovery?.();
+		this._unsubscribeSettingsRecovery = undefined;
+		if (this.deps.acquireSystemSwitchLease === undefined) {
+			void this.initialize();
+			return;
+		}
+		const release = this.deps.acquireSystemSwitchLease("recovery");
+		if (!release) {
+			this._unsubscribeSettingsRecovery = this.deps.subscribeSystemSwitchLeaseAvailability?.(() => {
+				this._unsubscribeSettingsRecovery?.();
+				this._unsubscribeSettingsRecovery = undefined;
+				this._reconcileContinuousChat();
+			});
+			return;
+		}
+		void this.initialize().finally(release);
 	}
 
 	private _historySettings(): TranscriptHistorySettings {
@@ -681,7 +760,7 @@ export class MemoryController {
 	/** Operator switch: activation and persistence must both succeed under the session's lease. */
 	async setMemorySystem(system: MemorySystem): Promise<{ ok: boolean; message: string }> {
 		if (!isValidMemorySystem(system)) return { ok: false, message: "Memory system must be okf or icm." };
-		const release = this.deps.acquireSystemSwitchLease?.();
+		const release = this.deps.acquireSystemSwitchLease?.("switch");
 		if (!release) return { ok: false, message: "Memory system can only change while the session is fully idle." };
 		const settings = this.deps.getSettingsManager();
 		const previous = settings.getMemorySystem();
@@ -838,6 +917,8 @@ export class MemoryController {
 			const continuousChatStopped = this._releaseContinuousChat();
 			this._unsubscribeSettingsChanges?.();
 			this._unsubscribeSettingsChanges = undefined;
+			this._unsubscribeSettingsRecovery?.();
+			this._unsubscribeSettingsRecovery = undefined;
 			this._releaseTranscriptRecall();
 			this._activeMemorySystem = undefined;
 			this._transitioning = true;
@@ -2019,16 +2100,27 @@ export class MemoryController {
 		this._continuousChat = host;
 		// Every provider request of an ICM root is planned through the running turn, or fails loudly; none sends history.
 		this._setContinuousChatWire({ kind: "chat", host });
-		// A released host is no longer this generation's chat, so only a host that stops on its own reaches the handler.
-		void host.stopped.then(() => this._continuousChatStoppedOnItsOwn(generation, host));
+		// A released host is no longer the project's chat, so only a host that stops on its own reaches the handler.
+		void host.stopped.then(() => this._continuousChatStoppedOnItsOwn(host));
+	}
+
+	/**
+	 * A generation that keeps the live chat re-points it at itself: compactions forget the accepted prefix so they resolve
+	 * the one this generation installs, and the projection stays on the wire, carrying the running turn.
+	 */
+	private _keepContinuousChat(host: ContinuousChatHost): void {
+		const ports = this.deps.continuousChat;
+		if (ports === undefined) throw new Error("A live ICM project chat has no ports to re-point it with.");
+		ports.resetCompactionPrefix();
+		if (this._continuousChatWire?.kind !== "chat") this._setContinuousChatWire({ kind: "chat", host });
 	}
 
 	/**
 	 * The chat's host stopped without its release. ICM remains fail-closed: provider requests are blocked until recovery
 	 * or an intentional memory-mode change, never silently projected from the old durable transcript.
 	 */
-	private async _continuousChatStoppedOnItsOwn(generation: number, host: ContinuousChatHost): Promise<void> {
-		if (generation !== this._memoryGeneration || this._continuousChat !== host) return;
+	private async _continuousChatStoppedOnItsOwn(host: ContinuousChatHost): Promise<void> {
+		if (this._continuousChat !== host) return;
 		this._continuousChat = undefined;
 		this._setContinuousChatWire({
 			kind: "blocked",
@@ -2078,6 +2170,8 @@ export class MemoryController {
 	private async _releaseContinuousChat(): Promise<void> {
 		const host = this._continuousChat;
 		this._continuousChat = undefined;
+		// The refusal de-dup belongs to the chat it was observed on; the next chat warns afresh.
+		this._summarySettingsFailure = undefined;
 		// The projection goes first: a request planned from here on must never read a chat that is stopping,
 		// and switching away from a failed ICM generation clears the fail-closed wrapper even when no host opened.
 		this._setContinuousChatWire(undefined);
@@ -2386,9 +2480,16 @@ export class MemoryController {
 		this._memoryManager = manager;
 		this._activeMemorySystem = undefined;
 		this._fileStoreWriter = undefined;
-		// The previous generation's coordinator stops (and records its terminal handoff) before its reader goes.
+		// The previous generation's coordinator stops (and records its terminal handoff) before its reader goes. A live ICM
+		// chat outlives the generation: its runtime lease and any turn in flight belong to the chat, so an ICM generation
+		// keeps it. Only a switch away from ICM, or a failed activation, releases it.
+		const keptChat = system === "icm" ? this._continuousChat : undefined;
 		const hierarchyStopped = this._hierarchy?.detach();
-		const continuousChatStopped = this._releaseContinuousChat();
+		const continuousChatStopped = keptChat === undefined ? this._releaseContinuousChat() : undefined;
+		// Until this generation installs its own chat, provider requests fail closed rather than carrying durable history.
+		if (system === "icm" && keptChat === undefined && !this.deps.isChildSession()) {
+			this._setContinuousChatWire({ kind: "blocked", reason: "its activation is in progress" });
+		}
 		this._releaseTranscriptRecall();
 		this._transitioning = true;
 		this._initializationFailed = false;
@@ -2488,7 +2589,10 @@ export class MemoryController {
 					this._activeMemorySystem = system;
 					this._fileStoreWriter = writer;
 					this._transcriptRecall = transcriptRecall;
-					if (system === "icm" && !this.deps.isChildSession()) await this._openContinuousChat(generation);
+					if (system === "icm" && !this.deps.isChildSession()) {
+						if (keptChat !== undefined && this._continuousChat === keptChat) this._keepContinuousChat(keptChat);
+						else await this._openContinuousChat(generation);
+					}
 					if (transcriptRecall) {
 						// Started in the background: the store load must not hold up memory initialization. It is
 						// current only while this generation serves history, whatever transitions happen later.
@@ -2517,6 +2621,9 @@ export class MemoryController {
 					if (generation === this._memoryGeneration) {
 						this._transitioning = false;
 						this.deps.refreshToolRegistry();
+						// The settings handler ignores changes while an activation runs, so the summary model is checked now.
+						const compaction = this.deps.continuousChat?.compaction;
+						if (compaction) this._reviewLiveChatSummary(compaction);
 					}
 				}
 			})

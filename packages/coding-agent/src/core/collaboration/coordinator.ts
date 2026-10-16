@@ -504,6 +504,9 @@ export class CollaborationCoordinator {
 		try {
 			backend = await this.deps.backend(job, true);
 			this.assertActive(signal);
+			// Before any member can start: a member that cannot authenticate is never launched. A failed write
+			// is a launch failure and rolls back through the catch below.
+			store.writePeerCredentials(job.id, peers.credentials);
 			if (task) {
 				for (const agent of job.agents) {
 					this.dispatch(job, agent);

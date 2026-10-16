@@ -8,8 +8,10 @@ import type {
 	WorkerProfileExecutionContract,
 } from "../orchestration/contracts.ts";
 import {
-	resolveConfiguredOrchestrationModel,
-	resolvePinnedOrchestrationModel,
+	formatOrchestrationModelRefusals,
+	type OrchestrationModelUnusableCause,
+	resolveConfiguredOrchestrationModelResolution,
+	resolvePinnedOrchestrationModelResolution,
 } from "../orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "../orchestration/profile-store.ts";
 import type { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
@@ -47,7 +49,7 @@ export interface WorkerProfileResolverOptions {
 	getSettingsManager(): WorkerProfileResolverSettingsSource;
 	getResourceLoader(): WorkerResourceCatalogResourceLoader;
 	getModelRegistry(): ModelRegistry;
-	isModelExhausted(model: Model<Api>): boolean;
+	modelUnusableCause(model: Model<Api>): OrchestrationModelUnusableCause | undefined;
 	getTaskProfileStore(): SessionTaskProfileStore;
 	onDiagnostic(message: string): void;
 }
@@ -128,19 +130,18 @@ export class WorkerProfileResolver {
 		preset: ResolvedWorkerProfilePreset,
 		modelPin?: OrchestrationModelBinding,
 	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
-		const resolvedModel = modelPin
-			? resolvePinnedOrchestrationModel(modelPin, this.options.getModelRegistry(), (model) =>
-					this.options.isModelExhausted(model),
+		const outcome = modelPin
+			? resolvePinnedOrchestrationModelResolution(modelPin, this.options.getModelRegistry(), (model) =>
+					this.options.modelUnusableCause(model),
 				)
-			: resolveConfiguredOrchestrationModel(preset.profile, this.options.getModelRegistry(), (model) =>
-					this.options.isModelExhausted(model),
+			: resolveConfiguredOrchestrationModelResolution(preset.profile, this.options.getModelRegistry(), (model) =>
+					this.options.modelUnusableCause(model),
 				);
-		if (!resolvedModel) {
-			return {
-				ok: false,
-				reason: modelPin ? "orchestration_model_unavailable" : "orchestration_profile_model_unavailable",
-			};
+		if (!outcome.ok) {
+			const family = modelPin ? "orchestration_model_unavailable" : "orchestration_profile_model_unavailable";
+			return { ok: false, reason: `${family}:${formatOrchestrationModelRefusals(outcome.refusals)}` };
 		}
+		const resolvedModel = outcome.resolved;
 		return {
 			ok: true,
 			resolved: {
@@ -166,12 +167,28 @@ export class WorkerProfileResolver {
 		// A routed worker's contract carries its routing order as an ordered-fallback policy: the first
 		// candidate not exhausted is where it runs, so a quota failure moves it on retry. A fixed policy
 		// runs on the admitted binding or not at all.
-		const isUnavailable = (model: Model<Api>) => this.options.isModelExhausted(model);
-		const resolvedModel =
+		const unusableCause = (model: Model<Api>) => this.options.modelUnusableCause(model);
+		const outcome =
 			contract.profile.modelPolicy.mode === "ordered-fallback"
-				? resolveConfiguredOrchestrationModel(contract.profile, this.options.getModelRegistry(), isUnavailable)
-				: resolvePinnedOrchestrationModel(contract.modelBinding, this.options.getModelRegistry(), isUnavailable);
-		if (!resolvedModel) return { ok: false, reason: "orchestration_profile_model_unavailable" };
+				? resolveConfiguredOrchestrationModelResolution(
+						contract.profile,
+						this.options.getModelRegistry(),
+						unusableCause,
+					)
+				: resolvePinnedOrchestrationModelResolution(
+						contract.modelBinding,
+						this.options.getModelRegistry(),
+						unusableCause,
+					);
+		if (!outcome.ok) {
+			// A fixed contract runs on its admitted binding, so it reports the model family the start path reports.
+			const family =
+				contract.profile.modelPolicy.mode === "ordered-fallback"
+					? "orchestration_profile_model_unavailable"
+					: "orchestration_model_unavailable";
+			return { ok: false, reason: `${family}:${formatOrchestrationModelRefusals(outcome.refusals)}` };
+		}
+		const resolvedModel = outcome.resolved;
 		const profile = structuredClone(contract.profile);
 		profile.toolNames = filterToolNamesForCapability(
 			profile.toolNames,

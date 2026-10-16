@@ -27,6 +27,7 @@ import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import { systemOneAbortReason } from "../system-one/foreground-control.ts";
 import { openWorkUnit } from "../work-units.ts";
 import type { RoutedGoalContext } from "./compact-goal-context.ts";
+import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
 import type { GoalCompletionOwnerDecision } from "./goal-completion-owner-decision.ts";
 import { buildObjectiveRoutePrompt, GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import {
@@ -870,17 +871,21 @@ export class GoalSessionController {
 		const reasons = terminal.reasonCodes.join(", ");
 		switch (terminal.status) {
 			case "complete": {
-				const completed = applyGoalEvent(state, { type: "complete_goal", now });
-				if (completed.status === "completed") {
-					this.saveState(completed, getGoalStateRevision(state));
-					return false;
+				// Automatic completion is never an owner override, and it persists only once every requirement has
+				// trusted evidence. A judged completion the evidence does not support is not completed and does not stop
+				// the goal: it stays active and continues to gather the missing evidence. The objective's route stall
+				// guard turns a repeated completion route into a replan turn, so repeats are followed by work.
+				const unproven = getUnprovenGoalRequirementIds(state);
+				if (unproven.length > 0) {
+					this.deps.emitWarning(
+						`System One judged the objective complete (${reasons}) but requirements ${unproven.join(", ")} lack trusted evidence; the goal stays active to gather it.`,
+					);
+					this.deps.scheduleGoalAutoContinueFromIdle();
+					return true;
 				}
-				const open = state.requirements
-					.filter((requirement) => requirement.status !== "satisfied")
-					.map((r) => r.id);
-				this.stopActiveGoal(
-					"blocked",
-					`System One judged the objective complete (${reasons}) but requirements ${open.join(", ")} are not marked satisfied`,
+				this.saveState(
+					applyGoalEvent(state, { type: "complete_goal", acceptanceOverride: false, now }),
+					getGoalStateRevision(state),
 				);
 				return false;
 			}

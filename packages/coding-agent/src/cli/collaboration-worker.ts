@@ -7,6 +7,8 @@ import type { CollaborationBackend } from "../core/collaboration/backend.ts";
 import { resolveCollaborationBackend } from "../core/collaboration/backend-resolver.ts";
 import { stopCollaborationAgent } from "../core/collaboration/coordinator.ts";
 import { CollaborationJobStore } from "../core/collaboration/job-store.ts";
+import { memberPeerInvocation } from "../core/collaboration/peer-credential-store.ts";
+import { COLLABORATION_WORK_RUN } from "../core/collaboration/state-directory.ts";
 import { executeCollaborationTurn } from "../core/collaboration/turn-runner.ts";
 import { canonicalizeWatchDir } from "../utils/fs-watch.ts";
 import { acquireWorkRun } from "../utils/work-directory.ts";
@@ -52,12 +54,7 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 	if (!isAbsolute(directory)) throw new Error("Collaboration state directory must be absolute.");
 	const answer: unknown = JSON.parse(encodedAnswer);
 	if (!Value.Check(answerSchema, answer)) throw new Error("Invalid collaboration answer.");
-	const lease = acquireWorkRun({
-		agentDir: getAgentDir(),
-		category: "background",
-		tenant: "pi-collaboration",
-		runId: "state",
-	});
+	const lease = acquireWorkRun({ agentDir: getAgentDir(), ...COLLABORATION_WORK_RUN });
 	if (resolve(directory) !== join(lease.path, "jobs")) {
 		lease.release();
 		throw new Error("Collaboration state directory does not match this host's managed work root.");
@@ -104,7 +101,7 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 				target: agent.backendName,
 				terminalId: agent.terminalId,
 				turnId: agent.turnId,
-				reportCommand: job.peerCommand,
+				reportCommand: memberPeerInvocation(directory, job.id, job.peerCommand, agentId),
 				text: agent.prompt,
 				timeoutMs,
 			},

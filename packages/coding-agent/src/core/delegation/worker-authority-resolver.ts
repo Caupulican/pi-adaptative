@@ -25,7 +25,11 @@ import {
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
 import { CLASSIFIED_LANE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
-import { resolvePinnedOrchestrationModel } from "../orchestration/model-binding.ts";
+import {
+	formatOrchestrationModelRefusals,
+	type OrchestrationModelUnusableCause,
+	resolvePinnedOrchestrationModelResolution,
+} from "../orchestration/model-binding.ts";
 import { DEFAULT_WORKER_DELEGATION_ACCOUNT, DEFAULT_WORKER_DELEGATION_THINKING } from "../settings/settings-rules.ts";
 import type { WorkerAccountRouting, WorkerThinkingPolicy } from "../settings/settings-schema.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
@@ -46,6 +50,7 @@ export interface WorkerAuthorityResolverModelSource {
 	readonly authStorage: AuthStorage;
 	find(provider: string, modelId: string): Model<Api> | undefined;
 	getAvailable(): Model<Api>[];
+	isModelInProviderScope(model: Model<Api>): boolean;
 	hasConfiguredAuth(model: Model<Api>): boolean;
 }
 
@@ -110,7 +115,8 @@ export interface WorkerAuthorityResolutionInput {
 	/** Caller task cwd for explicit relative path intent; preset paths remain anchored to cwd. */
 	executionCwd?: string;
 	modelRegistry: WorkerAuthorityResolverModelSource;
-	isModelExhausted(model: Model<Api>): boolean;
+	/** Why the host reports the model unusable right now; undefined when it is usable. */
+	modelUnusableCause(model: Model<Api>): OrchestrationModelUnusableCause | undefined;
 	/** True while the model's account has a live machine-wide limit (see provider-admission/limit-state.ts). */
 	isModelLimited?(model: Model<Api>): boolean;
 	/** The owner's live model policy; a worker bound to a model it disallows is reallocated. */
@@ -386,6 +392,7 @@ function tokenBudgetFloorFailure(maxTokens: number | undefined): string | undefi
 
 /** Materialize free-form model choices as one immutable profile-shaped execution snapshot. */
 export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): WorkerAuthorityResolution {
+	const isModelExhausted = (model: Model<Api>) => input.modelUnusableCause(model) !== undefined;
 	const selected = selectModelBinding(
 		input.modelPin,
 		input.authority,
@@ -395,13 +402,21 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		input.foregroundThinkingPolicy ?? DEFAULT_WORKER_DELEGATION_THINKING,
 		input.modelRegistry,
 		input.accountRouting ?? { account: DEFAULT_WORKER_DELEGATION_ACCOUNT, routeProviders: [] },
-		input.isModelExhausted,
+		isModelExhausted,
 		input.isModelLimited,
 	);
 	if (!selected) return { ok: false, reason: "orchestration_model_required" };
 	const { binding } = selected;
-	const boundModel = resolvePinnedOrchestrationModel(binding, input.modelRegistry, input.isModelExhausted);
-	if (!boundModel) return { ok: false, reason: "orchestration_model_unavailable" };
+	const bound = resolvePinnedOrchestrationModelResolution(binding, input.modelRegistry, (model) =>
+		input.modelUnusableCause(model),
+	);
+	if (!bound.ok) {
+		return {
+			ok: false,
+			reason: `orchestration_model_unavailable:${formatOrchestrationModelRefusals(bound.refusals)}`,
+		};
+	}
+	const boundModel = bound.resolved;
 	// The owner's model policy outranks any binding, pins included: the work is reallocated to an
 	// allowed model instead of running on one the owner ruled out.
 	let resolvedModel = boundModel;

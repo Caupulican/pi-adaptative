@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { WorkerDelegationTaskContext } from "../delegation/worker-delegation-request.ts";
 import { deriveWorkerTaskLabel } from "../delegation/worker-task-label.ts";
-import { hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
+import { getGoalCompletionRefusal, hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { latestAgentAttemptByDurableOrder } from "./attempt-ordering.ts";
 import { projectAttemptUsage } from "./attempt-usage.ts";
@@ -533,11 +533,15 @@ export class DelegationOrchestrationLedger {
 			case "budget_limited":
 				if (status === "active") this.runtime.pauseObjective(objective.objectiveId, "kernel");
 				break;
+			// A settled objective (completed or cancelled) is terminal: the goal's move toward the other terminal status
+			// has nothing left to apply, so it is skipped rather than thrown.
 			case "cancelled":
-				if (status !== "cancelled") this.runtime.cancelObjective(objective.objectiveId);
+				if (status !== "cancelled" && status !== "completed") this.runtime.cancelObjective(objective.objectiveId);
 				break;
 			case "completed":
-				if (status !== "completed") {
+				// A completion the trusted evidence does not support is not applied here: the goal layer reopens the goal
+				// as active on the same predicate, and the objective stays open until the evidence exists.
+				if (status !== "completed" && status !== "cancelled" && getGoalCompletionRefusal(goal) === undefined) {
 					this.runtime.completeObjectiveFromOwner(objective.objectiveId, hasGoalAcceptanceOverride(goal));
 				}
 				break;
