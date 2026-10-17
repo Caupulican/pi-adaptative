@@ -265,10 +265,18 @@ export class WorkerWriteReservationCoordinator {
 	 * Release the lease of a lane whose run has physically stopped. The exact fence must match, and a
 	 * superseded fence still throws. A store failure moves the exact durable record from the lane to the
 	 * retained-release owner, which keeps it fencing other writers and retries it on its backoff alarm.
-	 * Returns that store failure, if any, so a strict shutdown can still report it.
+	 * Returns that store failure, if any, so a strict shutdown can still report it. While the owner shuts
+	 * down nothing retries after it, so a store failure keeps the exact lease on its lane and throws: the
+	 * lane's specialist hold and project claim stay with it, and the next owner reaps the dead owner's record.
 	 */
-	releaseRequired(laneId: string, expectedAttemptId: string, expectedFencingToken: number): unknown {
-		return this.releaseOwnedLease(laneId, expectedAttemptId, expectedFencingToken, "settled")?.failure;
+	releaseRequired(
+		laneId: string,
+		expectedAttemptId: string,
+		expectedFencingToken: number,
+		shuttingDown = false,
+	): unknown {
+		return this.releaseOwnedLease(laneId, expectedAttemptId, expectedFencingToken, shuttingDown ? "yield" : "settled")
+			?.failure;
 	}
 
 	/**

@@ -5269,7 +5269,8 @@ export class WorkerDelegationController {
 					// A child may still write while tool disposal waits for its physical close. Keep its
 					// fenced reservation until that release succeeds, including when shutdown fails. Once
 					// the run is physically settled, a failed durable release is owned and retried by the
-					// reservation coordinator, so it does not hold the specialist or its project claim.
+					// reservation coordinator, so it does not hold the specialist or its project claim. A release
+					// that fails while the owner shuts down is not retried by anyone: it keeps all three.
 					if (toolsReleased) {
 						this.runTeardownStep(
 							"release worker write reservation",
@@ -5278,6 +5279,7 @@ export class WorkerDelegationController {
 									startedRecord.laneId,
 									durableHandle.attemptId,
 									durableHandle.fencingToken,
+									this.deps.isDisposed() || this.workerAbort.signal.aborted,
 								),
 							cleanupErrors,
 						);
