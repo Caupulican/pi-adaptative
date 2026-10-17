@@ -429,9 +429,10 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			session.getFollowUpMessages(),
 			"both owner inputs remain admitted after the older evaluation returns",
 		).toEqual(expect.arrayContaining([OLDER_OWNER_WORDS, NEWER_OWNER_WORDS]));
-		// The queued follow-up was judged in full when it was queued (in the task phase): its own turn applies that judgment
-		// and never screens or judges its words again, so this delivery makes no System One request.
-		world.systemOne.enterPhase("queued-delivery", {});
+		// The reordered owner words are queued, not yet screened: their screen is the only request this delivery makes.
+		world.systemOne.enterPhase("queued-delivery", {
+			carries_0: { kind: "noul", probability: 0.02 },
+		});
 	} else {
 		await withDeadline(trace, "older owner input queued", trace.track(session.followUp(OLDER_OWNER_WORDS)));
 		await withDeadline(trace, "newer owner input queued", trace.track(session.followUp(NEWER_OWNER_WORDS)));
