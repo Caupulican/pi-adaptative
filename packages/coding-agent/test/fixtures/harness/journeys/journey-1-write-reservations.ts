@@ -995,16 +995,27 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		if (typeof e13rSecondAgentId !== "string" || typeof e13rSecondLaneId !== "string") {
 			throw new Error("the waiting writer's start result carries no agent or lane id");
 		}
-		const e13rSecondText = e13rSecondReceipt.message.content
-			.map((block) => (block.type === "text" ? block.text : ""))
-			.join("");
 		expect(e13rSecondDetails?.started, "the waiting writer's start is accepted").toBe(true);
-		expect(e13rSecondText, "the waiting writer is queued at its start").toContain("delegate started (queued)");
-		expect(e13rSecondText, "the waiting writer names the reservation it waits on").toContain(
-			"waiting: write_reservation: ",
-		);
-		expect(e13rSecondText, "the retained record is held by a worker of this session").toContain(
-			"held by a worker of this session",
+		// The wait is read from the lane record the start receipt's `waiting:` line is built from (the scheduler's wait state,
+		// projected by the controller's getRecords), never from the persisted receipt text. The blocker is the retained record:
+		// a local conflict (it is in this owner's retained releases), so its owner reads live and the holder is this session.
+		const e13rRetainedCreatedAt = (
+			JSON.parse(e13rStoreText(e13rStorePath)) as {
+				reservations: readonly { readonly reservationId: string; readonly createdAt: string }[];
+			}
+		).reservations.find((record) => record.reservationId === e13rLease.reservationId)?.createdAt;
+		if (e13rRetainedCreatedAt === undefined) throw new Error("the retained record carries no creation time");
+		const e13rSecondRecord = e13rSession.getLaneRecords().find((record) => record.laneId === e13rSecondLaneId);
+		expect(e13rSecondRecord?.status, "the waiting writer's lane is queued at its start").toBe("queued");
+		expect(
+			e13rSecondRecord?.waitReason?.startsWith("write_reservation: "),
+			"the waiting writer waits on a write reservation",
+		).toBe(true);
+		expect(
+			e13rSecondRecord?.waitReason,
+			"the blocker is the retained record, held by a worker of this session",
+		).toContain(
+			`held by a worker of this session (${e13rLease.ownerId}, owner live, since ${e13rRetainedCreatedAt}) (since `,
 		);
 		expect(
 			Object.values(e13rSession.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {})
