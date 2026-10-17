@@ -1353,31 +1353,54 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	world.systemOne.enterPhase("delivery-order-turn", {});
 	const orderTurn = session.prompt(DELIVERY_TURN_WORDS);
 	await withDeadline(trace, "delivery-order turn reached its provider gate", orderTurnReached.promise);
-	// Each queued input is judged in full before it is admitted, the older one first.
-	world.systemOne.enterPhase("delivery-order-older-limit", {
-		// These judgments also ask the task relation of the standing optional-tool intent.
-		optional_tool_task: { kind: "choice", choice: "continue", confidence: 0.97 },
-		capabilities_authorized: { kind: "noul", probability: 0.02 },
-		changes_model_pools: { kind: "noul", probability: 0.02 },
-		local_commits_only: { kind: "noul", probability: 0.97 },
-		lifts_delivery_block: { kind: "noul", probability: 0.02 },
-		full_handoff: { kind: "noul", probability: 0.02 },
-		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
-	});
+	// Each queued input is judged in full before it is admitted, the older one first. The turn's own words have reached no
+	// judgment yet (its provider request is held before any tool call), so the first judgment carries them as the owner's
+	// earlier words, read before its own: an optional tool the turn's words forbid is forbidden in the intent it writes. The
+	// standing intent is the classified one of the held-background turn, so nothing else is pending.
+	const pendingOwnerRequests = (state: unknown): unknown => (state as Record<string, unknown>).pending_owner_requests;
+	world.systemOne.enterPhase(
+		"delivery-order-older-limit",
+		{
+			// These judgments also ask the task relation of the standing optional-tool intent.
+			optional_tool_task: { kind: "choice", choice: "continue", confidence: 0.97 },
+			capabilities_authorized: { kind: "noul", probability: 0.02 },
+			changes_model_pools: { kind: "noul", probability: 0.02 },
+			local_commits_only: { kind: "noul", probability: 0.97 },
+			lifts_delivery_block: { kind: "noul", probability: 0.02 },
+			full_handoff: { kind: "noul", probability: 0.02 },
+			optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+		},
+		{
+			expect: ({ state }) =>
+				expect(
+					pendingOwnerRequests(state),
+					"the first queued judgment carries the held turn's own unjudged words",
+				).toEqual([DELIVERY_TURN_WORDS]),
+		},
+	);
 	await withDeadline(trace, "older limiting follow-up admitted", trace.track(session.followUp(DELIVERY_LIMIT_WORDS)));
-	world.systemOne.enterPhase("delivery-order-newer-lift", {
-		// These judgments also ask the task relation of the standing optional-tool intent.
-		optional_tool_task: { kind: "choice", choice: "continue", confidence: 0.97 },
-		capabilities_authorized: { kind: "noul", probability: 0.02 },
-		changes_model_pools: { kind: "noul", probability: 0.02 },
-		local_commits_only: { kind: "noul", probability: 0.02 },
-		lifts_delivery_block: { kind: "noul", probability: 0.97 },
-		full_handoff: { kind: "noul", probability: 0.02 },
-		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
-	});
+	world.systemOne.enterPhase(
+		"delivery-order-newer-lift",
+		{
+			// These judgments also ask the task relation of the standing optional-tool intent.
+			optional_tool_task: { kind: "choice", choice: "continue", confidence: 0.97 },
+			capabilities_authorized: { kind: "noul", probability: 0.02 },
+			changes_model_pools: { kind: "noul", probability: 0.02 },
+			local_commits_only: { kind: "noul", probability: 0.02 },
+			lifts_delivery_block: { kind: "noul", probability: 0.97 },
+			full_handoff: { kind: "noul", probability: 0.02 },
+			optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+		},
+		{
+			// The older follow-up's classified intent already read the turn's words: they are carried once, never again.
+			expect: ({ state }) =>
+				expect(pendingOwnerRequests(state), "the turn's words are carried by one judgment only").toEqual([]),
+		},
+	);
 	await withDeadline(trace, "newer lifting steer admitted", trace.track(session.steer(DELIVERY_LIFT_WORDS)));
-	// The turn's own words are older than both judged inputs, so where its first tool call settles them their owner policy is
-	// judged alone; the delivered pair carries its judgments and is applied as judged, asking nothing.
+	// The turn's own words are older than both judged inputs and the older one's optional-tool judgment already read them, so
+	// where its first tool call settles them their owner policy is judged alone; the delivered pair carries its judgments and
+	// is applied as judged, asking nothing.
 	world.systemOne.enterPhase("delivery-order-turn-policy", {
 		capabilities_authorized: { kind: "noul", probability: 0.02 },
 		changes_model_pools: { kind: "noul", probability: 0.02 },

@@ -47,9 +47,17 @@ const CALIBRATION_BASELINE_REPLY = "The calibration baseline reply.";
 
 /**
  * Neutral owner words: backlog settlement also screens them first; steering judges them in full when they are submitted.
- * Both are the full owner judgment, so both ask the capabilities a fresh session has not granted yet.
+ * Both are the full owner judgment, so both ask the capabilities a fresh session has not granted yet. `earlierOwnerWords`
+ * are the older owner words no judgment has read yet (a running turn's own words, before its first tool call): the
+ * judgment carries them, in owner order, as its pending owner requests.
  */
-function enterNeutralModeIntake(world: HarnessWorld, phase: string, input: string, backlog: boolean): void {
+function enterNeutralModeIntake(
+	world: HarnessWorld,
+	phase: string,
+	input: string,
+	backlog: boolean,
+	earlierOwnerWords: readonly string[] = [],
+): void {
 	if (!world.systemOne.enabled) return;
 	const judgments = {
 		...(backlog ? { carries_0: { kind: "noul" as const, probability: 0.02 } } : {}),
@@ -77,7 +85,10 @@ function enterNeutralModeIntake(world: HarnessWorld, phase: string, input: strin
 			);
 			const intake = state as Record<string, unknown>;
 			expect(intake.user_request, "the intake sees this helper's exact owner words").toBe(input);
-			expect(intake.pending_owner_requests, "no unrelated owner input enters this intake").toEqual([]);
+			expect(
+				intake.pending_owner_requests,
+				"the intake carries exactly the earlier owner words no judgment read, and no unrelated input",
+			).toEqual(earlierOwnerWords);
 			expect(intake.previous_optional_tool_intent, "no earlier tool request is invented").toBeNull();
 			expect(intake.optional_tools, "the neutral judgment refers to the real built-in candidate").toMatchObject([
 				{ toolName: "secret_store", sourcePath: "<builtin:secret_store>" },
@@ -2662,13 +2673,16 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 				},
 			});
 		world.systemOne.enterPhase(`mode-retry-${stopAt}-start`, {});
-		const prompt = session.prompt("Run the retry boundary witness.").then(
+		const turnWords = "Run the retry boundary witness.";
+		const prompt = session.prompt(turnWords).then(
 			() => "resolved",
 			(error: unknown) => messageOf(error),
 		);
 		try {
 			await withDeadline(world.trace, "retry witness: actual failing provider request is held", reached.promise);
-			enterNeutralModeIntake(world, `mode-retry-${stopAt}-intake`, queued, false);
+			// The turn is held at its first provider request, before any tool call reads its own words: the steer's judgment
+			// carries them.
+			enterNeutralModeIntake(world, `mode-retry-${stopAt}-intake`, queued, false, [turnWords]);
 			await withDeadline(
 				world.trace,
 				"retry witness: Unicode owner input is admitted to steering",

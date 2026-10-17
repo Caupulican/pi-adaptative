@@ -709,6 +709,7 @@ export class AgentSession {
 				this._edgeIntent.judgeOwnerRequest(text, signal, acceptedOrder),
 			enqueueOwnerWords: (text, acceptedOrder, judgment) =>
 				this._edgeIntent.enqueueOwnerWords(text, acceptedOrder, judgment),
+			releaseOwnerWords: (acceptedOrder) => this._edgeIntent.releaseOwnerWords(acceptedOrder),
 			emitQueueUpdate: () => this._emitQueueUpdate(),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
 		});
@@ -2371,6 +2372,8 @@ export class AgentSession {
 			ownerPolicy: this._edgeIntent.ownerPolicy,
 			enqueueOwnerWords: (text, acceptedOrder, judgment, signal) =>
 				this._edgeIntent.enqueueOwnerWords(text, acceptedOrder, judgment, signal),
+			registerOwnerWords: (acceptedOrder, text) => this._edgeIntent.registerOwnerWords(acceptedOrder, text),
+			releaseOwnerWords: (acceptedOrder) => this._edgeIntent.releaseOwnerWords(acceptedOrder),
 			accountModels: this._accountModels,
 			custody: this._cache.custody,
 			localRuntimeController: this._localRuntimeController,

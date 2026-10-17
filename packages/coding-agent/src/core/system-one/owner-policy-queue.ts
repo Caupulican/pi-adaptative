@@ -38,6 +38,8 @@ export interface OwnerPolicyQueueDeps<Judgment = never> {
 	 * settled again with the owner's next message; nothing waits on them meanwhile. Reported once per settle.
 	 */
 	reportFailure(error: unknown): void;
+	/** The screen confidently set these words aside: they carry no instruction and are not classified. */
+	setAside(words: OwnerWords<Judgment>): void;
 }
 
 /** How a settle treats the queue: `backlog` screens every queued message, `latest` classifies the newest in full. */
@@ -121,6 +123,7 @@ export class OwnerPolicyQueue<Judgment = never> {
 			for (const [index, words] of order.entries()) {
 				// An unavailable screen, or one that is not sure, classifies the message in full.
 				if (words !== latest && words.judgment === undefined && !(carries?.[screened.indexOf(words)] ?? true)) {
+					this.deps.setAside(words);
 					done = index + 1;
 					continue;
 				}

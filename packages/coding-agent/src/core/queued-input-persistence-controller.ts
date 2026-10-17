@@ -29,6 +29,8 @@ export interface QueuedInputPersistenceControllerDeps {
 		acceptedOrder: number | undefined,
 		judgment: OwnerRequestClassificationOutcome | undefined,
 	): void;
+	/** Words whose admission ended are never left for another judgment to carry (`SessionEdgeIntentController.releaseOwnerWords`). */
+	releaseOwnerWords(acceptedOrder: number): void;
 	emitQueueUpdate(): void;
 	emitWarning(message: string): void;
 }
@@ -76,6 +78,8 @@ export class QueuedInputPersistenceController {
 			});
 		} finally {
 			if (!admitted) pendingQueue.withdraw(pending);
+			// Its own judgment took its words; an admission that ended before that judgment started leaves none behind.
+			this.deps.releaseOwnerWords(acceptedOrder);
 			this.deps.emitQueueUpdate();
 		}
 	}

@@ -126,6 +126,14 @@ export class SessionEdgeIntentController {
 	/** The newest owner submission order whose optional-tool judgment started: an older one never writes the intent checkpoint. */
 	private newestJudgedOwnerOrder = 0;
 	/**
+	 * Owner words accepted and not yet carried by any optional-tool judgment, by submission order, with the session they were
+	 * accepted in. A turn's own words are judged where they are read (its first tool call), so a queued input judged before
+	 * them would otherwise own the optional-tool chain without ever having read them. The next judgment of newer words carries
+	 * them as `pending_owner_requests` (`carryUnjudgedOwnerWords`); words leave when they are carried, judged by their own
+	 * chain, set aside by the screen, or withdrawn before they become owner input (`releaseOwnerWords`).
+	 */
+	private readonly unjudgedOwnerWords = new Map<number, { readonly text: string; readonly sessionId: string }>();
+	/**
 	 * The owner submission order that last decided each owner-policy axis (handoff, delivery, rule authority, each model
 	 * pool). Owner words are applied where they are delivered, and a steer is delivered ahead of an older follow-up, so
 	 * older words can be applied after newer ones: they then decide only what no newer owner words decided.
@@ -167,6 +175,8 @@ export class SessionEdgeIntentController {
 				return outcome?.status === "screened" ? outcome.carriesInstruction : undefined;
 			},
 			reportFailure: (error) => this.noteOwnerPolicyFailure(error),
+			// The screen judged these words to carry no instruction: no optional-tool judgment carries them.
+			setAside: (words) => this.releaseOwnerWords(words.acceptedOrder),
 		});
 		this.modelPolicy = new OwnerModelPolicy(
 			{
@@ -352,6 +362,38 @@ export class SessionEdgeIntentController {
 	}
 
 	/**
+	 * Owner words accepted with this submission order: they wait here until an optional-tool judgment carries them. Called
+	 * where the order is assigned, before anything can await, so no judgment of newer words can start without seeing them.
+	 * With no evaluator nothing is ever judged, so nothing is recorded.
+	 */
+	registerOwnerWords(acceptedOrder: number, text: string): void {
+		if (!this.deps.getSystemOneController()) return;
+		this.unjudgedOwnerWords.set(acceptedOrder, { text, sessionId: this.deps.getSessionManager().getSessionId() });
+	}
+
+	/** These owner words never become owner input (withdrawn, cancelled, handled), or no judgment needs them: none carries them. */
+	releaseOwnerWords(acceptedOrder: number | undefined): void {
+		if (acceptedOrder !== undefined) this.unjudgedOwnerWords.delete(acceptedOrder);
+	}
+
+	/**
+	 * Takes the registered words older than `acceptedOrder` out of the registry, oldest first, for the judgment of those newer
+	 * words to carry. Words accepted in another session never join this session's judgment and are dropped.
+	 */
+	private carryUnjudgedOwnerWords(acceptedOrder: number): { readonly order: number; readonly text: string }[] {
+		const sessionId = this.deps.getSessionManager().getSessionId();
+		const carried: { order: number; text: string }[] = [];
+		for (const [order, words] of this.unjudgedOwnerWords) {
+			if (words.sessionId !== sessionId) this.unjudgedOwnerWords.delete(order);
+			else if (order < acceptedOrder) {
+				carried.push({ order, text: words.text });
+				this.unjudgedOwnerWords.delete(order);
+			}
+		}
+		return carried.sort((left, right) => left.order - right.order);
+	}
+
+	/**
 	 * The full classification of the owner's words (written rules and still-pending capabilities included), not yet
 	 * applied. A queued owner input is judged this way once, before it is admitted; the judgment it carries into the
 	 * owner-policy queue is applied there in owner order (`applyOwnerRequestOutcome`), never asked again. Words older than a
@@ -468,6 +510,8 @@ export class SessionEdgeIntentController {
 		signal?: AbortSignal,
 		acceptedOrder?: number,
 	) {
+		// These words are judged now, by their own chain or for their owner policy alone; a cancelled judgment withdraws them.
+		const ownWordsUnjudged = acceptedOrder !== undefined && this.unjudgedOwnerWords.delete(acceptedOrder);
 		if (signal?.aborted || this.deps.isDisposed())
 			return {
 				status: "unavailable" as const,
@@ -475,14 +519,16 @@ export class SessionEdgeIntentController {
 				contextChanged: false,
 				reason: "Owner intent classification was cancelled",
 			};
-		// An optional-tool judgment is as fresh as the submission it judges. One whose submission is older
-		// than a submission already being judged would overwrite the newer optional-tool intent if it applied,
-		// so the optional-tool chain is not asked for it: it neither runs nor cancels the newer judgment. The
-		// words are still the owner's, so their owner policy is judged alone.
+		// An optional-tool judgment is as fresh as the submission it judges. One whose submission is older than a
+		// submission already being judged would overwrite the newer optional-tool intent if it applied, so the
+		// optional-tool chain is not asked for it: it neither runs nor cancels the newer judgment. Its words already
+		// reached that chain: as the request of a judgment the newer one superseded, or carried as pending by the newer
+		// judgment from the registry. The words are still the owner's, so their owner policy is judged alone. Words still
+		// in the registry reached no chain (a cancelled judgment returned them), so they run their own.
 		if (acceptedOrder !== undefined) {
-			if (acceptedOrder < this.newestJudgedOwnerOrder)
+			if (acceptedOrder < this.newestJudgedOwnerOrder && !ownWordsUnjudged)
 				return this.judgeOwnerPolicy(request, rules, capabilitiesPending, signal);
-			this.newestJudgedOwnerOrder = acceptedOrder;
+			this.newestJudgedOwnerOrder = Math.max(this.newestJudgedOwnerOrder, acceptedOrder);
 		}
 		// Normal-off: no evaluator means no semantic intent is recorded, aborted, scanned or warned about.
 		const controller = this.deps.getSystemOneController();
@@ -507,14 +553,22 @@ export class SessionEdgeIntentController {
 			const aliases = optionalToolRequestAliases(tool.name, source);
 			return aliases ? [{ toolName: tool.name, sourcePath: source?.path ?? "", aliases }] : [];
 		});
-		const recoverable = request.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS && pendingRequests.length < 8;
+		// Older owner words no judgment has read yet (a turn's own words, judged only where its first tool call reads them)
+		// are read before these, in owner order: every registered word is newer than every word the checkpoint holds, since a
+		// judgment that starts carries every older registered word with it.
+		const carried = acceptedOrder !== undefined ? this.carryUnjudgedOwnerWords(acceptedOrder) : [];
+		const priorRequests = [...pendingRequests, ...carried.map((words) => words.text)];
+		const recoverable =
+			request.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS &&
+			priorRequests.length < 8 &&
+			carried.every((words) => words.text.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS);
 		const pendingIntent = {
 			version: 1 as const,
 			status: "paused" as const,
 			taskRequest: request.slice(0, MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS),
 			allowedTools: [],
 			...(recoverable
-				? { ...(previous ? { resumeIntent: previous } : {}), pendingRequests: [...pendingRequests, request] }
+				? { ...(previous ? { resumeIntent: previous } : {}), pendingRequests: [...priorRequests, request] }
 				: {}),
 		};
 		const pendingId = manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, pendingIntent);
@@ -523,7 +577,7 @@ export class SessionEdgeIntentController {
 			optionalTools: {
 				candidates,
 				previous: recoverable ? previous : undefined,
-				pendingRequests: recoverable ? pendingRequests : [],
+				pendingRequests: recoverable ? priorRequests : [],
 			},
 			signal,
 		});
@@ -550,15 +604,20 @@ export class SessionEdgeIntentController {
 			signal.aborted &&
 			manager.getSessionId() === sessionId &&
 			manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.id === pendingId
-		)
-			// A cancelled classification is no longer in flight and decided nothing: it must not keep
-			// blocking the integrations as if it were.
-			manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, {
-				version: 1,
-				status: "unresolved",
-				taskRequest: "",
-				allowedTools: [],
-			});
+		) {
+			// A cancelled classification is no longer in flight and decided nothing: the intent stands as it found it
+			// (words a superseded judgment left unclassified stay pending, unresolved, since nothing judges them now), and
+			// the older words it carried wait for the next judgment again. Its own words were withdrawn with it.
+			manager.appendCustomEntry(
+				OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
+				snapshot === undefined
+					? { version: 1, status: "unresolved", taskRequest: "", allowedTools: [] }
+					: snapshot.status === "classified"
+						? snapshot
+						: { ...snapshot, status: "unresolved" },
+			);
+			for (const words of carried) this.unjudgedOwnerWords.set(words.order, { text: words.text, sessionId });
+		}
 		if (
 			callerSignal?.aborted ||
 			this.deps.getReflectionAbortSignal().aborted ||
