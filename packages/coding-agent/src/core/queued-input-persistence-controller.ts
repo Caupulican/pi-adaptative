@@ -47,8 +47,9 @@ export class QueuedInputPersistenceController {
 	 * A queued owner input is pending from the moment it is submitted, in submission order, and is
 	 * judged in full once, before it is admitted -- the same judgment a prompt queued behind a running
 	 * turn receives. The judgment becomes policy when the run delivers the input, in owner order, never
-	 * when the input is taken back, cleared or held first. A newer request supersedes the judgment, never
-	 * the input; a cancellation (interrupt, take, clear, disposal, context change) withdraws it.
+	 * when the input is taken back, cleared or held first. A newer request supersedes only the judgment's
+	 * optional-tool chain, never the input or its owner policy, which the owner-policy queue then judges
+	 * alone; a cancellation (interrupt, take, clear, disposal, context change) withdraws it.
 	 */
 	async admitQueuedOwnerInput(
 		kind: "steer" | "followUp",

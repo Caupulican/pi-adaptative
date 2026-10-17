@@ -383,6 +383,14 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		});
 	const OLDER_OWNER_WORDS = "Check the secret store status before the compaction.";
 	const NEWER_OWNER_WORDS = "Stop using the secret store for the rest of this task.";
+	// The newer input's committed optional-tool intent, and every optional-tool intent entry once the older input settled.
+	let committedNewerIntentId: string | undefined;
+	let intentEntriesBeforeDelivery: Array<{ id: string; data: unknown }> = [];
+	const optionalIntentEntries = (): Array<{ id: string; data: unknown }> =>
+		created.sessionManager.getEntries().flatMap((entry) => {
+			if (entry.type !== "custom" || entry.customType !== OPTIONAL_TOOL_INTENT_CUSTOM_TYPE) return [];
+			return [{ id: entry.id, data: entry.data }];
+		});
 	if (world.systemOne.enabled) {
 		const olderReached = createBarrier();
 		const releaseOlder = createBarrier();
@@ -422,6 +430,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			"the newer input's revocation is the committed policy before the older evaluation returns",
 		).toEqual(["secret_store"]);
 		const committedId = committed?.id;
+		committedNewerIntentId = committedId;
 		releaseOlder.release();
 		await withDeadline(trace, "physical older evaluation joined", world.systemOne.joinInFlight(), 60_000);
 		await withDeadline(trace, "older owner input settled", olderInput, 60_000);
@@ -433,11 +442,50 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			session.getFollowUpMessages(),
 			"both owner inputs remain admitted after the older evaluation returns",
 		).toEqual(expect.arrayContaining([OLDER_OWNER_WORDS, NEWER_OWNER_WORDS]));
+		intentEntriesBeforeDelivery = optionalIntentEntries();
 		// Every owner input this delivery brings was judged when it was submitted: the newer input's judgment is classified, the
 		// older input's was superseded by it, and the tab-preference follow-up's is classified or, when the older input's
-		// judgment starts before it answers, superseded. Each is carried into the owner-policy queue as judged and applied
-		// there, never screened or judged again, so this delivery makes no System One request.
-		world.systemOne.enterPhase("queued-delivery", {});
+		// judgment starts before it answers, superseded. Each is carried into the owner-policy queue and never screened. A
+		// classified judgment is applied as judged; a superseded one lost only the optional-tool chain to the newer input, so
+		// where the queue settles those words their owner policy is judged alone: one request each, asking every policy
+		// question (no edge class is granted and no rule is written, so capabilities are asked and rule questions are not)
+		// and no optional tool, in owner order (the tab preference, when superseded, before the older input). The superseded
+		// words limit delivery to local commits, so the limit a superseded input states is witnessed as applied.
+		const policyOnlyQuestions = [
+			"capabilities_authorized",
+			"changes_model_pools",
+			"full_handoff",
+			"lifts_delivery_block",
+			"local_commits_only",
+		];
+		const optionalToolState = ["optional_tools", "previous_optional_tool_intent", "pending_owner_requests"];
+		world.systemOne.enterPhase(
+			"queued-delivery",
+			{
+				capabilities_authorized: { kind: "noul", probability: 0.02 },
+				changes_model_pools: { kind: "noul", probability: 0.02 },
+				local_commits_only: { kind: "noul", probability: 0.97 },
+				lifts_delivery_block: { kind: "noul", probability: 0.02 },
+				full_handoff: { kind: "noul", probability: 0.02 },
+			},
+			{
+				expect: ({ state, questions }) => {
+					expect(
+						Object.keys(questions).sort(),
+						"a superseded input's delivery asks its owner policy alone",
+					).toEqual(policyOnlyQuestions);
+					const intake = state as Record<string, unknown>;
+					expect(
+						[OLDER_OWNER_WORDS, FOLLOW_UP_REQUEST],
+						"only a superseded input's words are judged again, never the newer input's",
+					).toContain(intake.user_request);
+					expect(
+						optionalToolState.filter((key) => key in intake),
+						"the policy-only judgment carries no optional-tool state",
+					).toEqual([]);
+				},
+			},
+		);
 	} else {
 		await withDeadline(trace, "older owner input queued", trace.track(session.followUp(OLDER_OWNER_WORDS)));
 		await withDeadline(trace, "newer owner input queued", trace.track(session.followUp(NEWER_OWNER_WORDS)));
@@ -492,6 +540,28 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 
 	await withDeadline(trace, "continuation turn", session.prompt("Continue."));
 	trace.mark("root", "continuation.reply");
+	// The continuation's routing settles the delivered owner words, so every one of them has reached owner policy by now.
+	if (world.systemOne.enabled) {
+		const deliveryJudgments = world.systemOne.decoded
+			.filter((request) => request.phase === "queued-delivery")
+			.map((request) => (request.state as { user_request?: unknown }).user_request);
+		expect(
+			[[OLDER_OWNER_WORDS], [FOLLOW_UP_REQUEST, OLDER_OWNER_WORDS]],
+			"the superseded older input's owner policy is judged once at its delivery, in owner order",
+		).toContainEqual(deliveryJudgments);
+		expect(
+			optionalIntentEntries(),
+			"the policy-only judgments write no optional-tool intent: the newer input's revocation stays committed",
+		).toEqual(intentEntriesBeforeDelivery);
+		expect(classifiedEntries().at(-1)?.id, "the committed newer policy is still the latest classified intent").toBe(
+			committedNewerIntentId,
+		);
+		// The newer input's judgment, applied after them, neither blocks nor lifts delivery, so it keeps their limit.
+		expect(
+			session.localCommitBranch(),
+			"the delivery limit the superseded input states is owner policy once it is delivered",
+		).not.toBeUndefined();
+	}
 
 	expect(messageEnds).toContain("user");
 	expect(messageEnds).toContain("assistant");
@@ -516,13 +586,15 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		optional_tool_task: { kind: "choice", choice: "continue", confidence: 0.97 },
 		changes_model_pools: { kind: "noul", probability: 0.02 },
 		local_commits_only: { kind: "noul", probability: 0.02 },
-		lifts_delivery_block: { kind: "noul", probability: 0.02 },
+		// The newer owner words lift the delivery limit the superseded input set, before the turn's first tool call.
+		lifts_delivery_block: { kind: "noul", probability: 0.97 },
 		full_handoff: { kind: "noul", probability: 0.02 },
 		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
 		capabilities_authorized: { kind: "noul", probability: 0.02 },
 	});
 	await withDeadline(trace, "memory read-back turn", session.prompt("Read back the preference you saved."));
 	trace.mark("root", "memory.read-back");
+	expect(session.localCommitBranch(), "newer owner words that lift the delivery limit lift it").toBeUndefined();
 
 	// Long project path after compaction. The first read names the raw path; the minted alias then appears in the
 	// request-visible PATH ALIASES legend, and the model reads through that alias. The short limits.ts stays unaliased.

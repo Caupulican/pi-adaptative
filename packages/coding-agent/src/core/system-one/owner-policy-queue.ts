@@ -22,7 +22,8 @@ export interface OwnerWords<Judgment = never> {
 	readonly signal?: AbortSignal;
 	/**
 	 * The full classification these words already received when they were submitted (a queued owner input is judged
-	 * before it is admitted). Such words are applied as judged, in owner order, and never screened or judged again.
+	 * before it is admitted). Such words are never screened: `classify` applies the judgment, in owner order, or judges
+	 * the words' owner policy when the judgment holds none (a newer owner request superseded it).
 	 */
 	readonly judgment?: Judgment;
 }

@@ -31,6 +31,8 @@ import {
 	describePolicy,
 	latestPoolPolicy,
 	MODEL_POOL_POLICY_CUSTOM_TYPE,
+	MODEL_POOLS,
+	type ModelPoolChange,
 	type ModelPoolPolicy,
 	OwnerModelPolicy,
 } from "./model-router/owner-model-policy.ts";
@@ -68,9 +70,11 @@ import {
 import { shareTextBudget } from "./util/text-budget.ts";
 
 /**
- * Abort reason of an owner intent classification replaced by a newer owner request. It makes that
- * JUDGMENT stale; the request it was judging is still the owner's input and is still admitted. Any
- * other abort (the owner's interrupt, disposal, the caller's signal) cancels the submission itself.
+ * Abort reason of an owner intent classification replaced by a newer owner request. The newer request
+ * owns the optional-tool intent chain, so that JUDGMENT is stale; the request it was judging is still the
+ * owner's input, is still admitted, and its owner policy is still judged, alone, where the owner-policy
+ * queue settles it. Any other abort (the owner's interrupt, disposal, the caller's signal) cancels the
+ * submission itself.
  */
 export const OWNER_INTENT_SUPERSEDED = new Error(
 	"Owner intent classification was superseded by a newer owner request.",
@@ -119,7 +123,14 @@ export class SessionEdgeIntentController {
 	private operationGateInstance?: OperationGate;
 	private edgeConfirmation?: EdgeConfirmationHandler;
 	private optionalIntentAbort?: AbortController;
+	/** The newest owner submission order whose optional-tool judgment started: an older one never writes the intent checkpoint. */
 	private newestJudgedOwnerOrder = 0;
+	/**
+	 * The owner submission order that last decided each owner-policy axis (handoff, delivery, rule authority, each model
+	 * pool). Owner words are applied where they are delivered, and a steer is delivered ahead of an older follow-up, so
+	 * older words can be applied after newer ones: they then decide only what no newer owner words decided.
+	 */
+	private readonly ownerDecisionOrders = new Map<string, number>();
 	private lastOptionalIntentWarning?: string;
 	private localCommitBranchValue?: string;
 	private ruleAuthorityValue: "unset" | "ask" | "user" | "written" = "unset";
@@ -132,11 +143,15 @@ export class SessionEdgeIntentController {
 		this.deps = deps;
 		this.ownerPolicy = new OwnerPolicyQueue<OwnerRequestClassificationOutcome>({
 			classify: async (words) => {
-				const judgment = words.judgment;
+				// A superseded judgment judged none of these words' owner policy: the words are judged here, and an
+				// older submission than one already judged is judged for its owner policy alone (`classifyOwnerRequest`).
+				const carried = words.judgment;
+				const judgment =
+					carried !== undefined && !("superseded" in carried && carried.superseded) ? carried : undefined;
 				const note = await this.deps.withTaskDirectoryContext(
 					() =>
 						judgment !== undefined
-							? this.applyOwnerRequestOutcome(words.text, judgment)
+							? this.applyOwnerRequestOutcome(words.text, judgment, words.acceptedOrder)
 							: this.enableCapabilitiesAuthorizedByUser(words.text, words.signal, true, words.acceptedOrder),
 					words.signal,
 					(error) => {
@@ -314,11 +329,9 @@ export class SessionEdgeIntentController {
 	/**
 	 * The one way owner words join the owner-policy queue. Words judged when they were submitted (a queued steer, follow-up
 	 * or prompt) carry that judgment and are applied as judged, in owner order, where the queue settles; they are never
-	 * screened or judged again. A superseded judgment is carried too when its submission is older than one already judged:
-	 * judging those words again at the queue would be refused by the same staleness rule in `classifyOwnerRequest`, and the
-	 * newest judged order only grows, so a screen of them could decide nothing. Words superseded by a request that carried no
-	 * order are not stale, and are screened and classified at the queue like words with no judgment, or one the evaluator
-	 * could not give (an outage).
+	 * screened or judged again. A superseded judgment is carried too, so its words are not screened: the newer request took
+	 * only the optional-tool chain from it, and the queue judges these words' owner policy alone, once, where it settles them.
+	 * Words with no judgment, or one the evaluator could not give (an outage), are screened and classified at the queue.
 	 */
 	enqueueOwnerWords(
 		text: string,
@@ -327,10 +340,9 @@ export class SessionEdgeIntentController {
 		signal?: AbortSignal,
 	): void {
 		if (!this.deps.getSystemOneController()) return;
-		const stale = acceptedOrder !== undefined && acceptedOrder < this.newestJudgedOwnerOrder;
 		const carried =
 			judgment !== undefined &&
-			(judgment.status === "classified" || ("superseded" in judgment && judgment.superseded === true && stale));
+			(judgment.status === "classified" || ("superseded" in judgment && judgment.superseded === true));
 		this.ownerPolicy.enqueue({
 			text,
 			...(acceptedOrder !== undefined ? { acceptedOrder } : {}),
@@ -342,7 +354,8 @@ export class SessionEdgeIntentController {
 	/**
 	 * The full classification of the owner's words (written rules and still-pending capabilities included), not yet
 	 * applied. A queued owner input is judged this way once, before it is admitted; the judgment it carries into the
-	 * owner-policy queue is applied there in owner order (`applyOwnerRequestOutcome`), never asked again.
+	 * owner-policy queue is applied there in owner order (`applyOwnerRequestOutcome`), never asked again. Words older than a
+	 * submission already judged are judged for their owner policy alone (see `classifyOwnerRequest`).
 	 */
 	judgeOwnerRequest(request: string, signal?: AbortSignal, acceptedOrder?: number) {
 		return this.classifyOwnerRequest(
@@ -368,26 +381,40 @@ export class SessionEdgeIntentController {
 					capabilitiesPending: this.capabilitiesPending(),
 					...(signal ? { signal } : {}),
 				});
-		return this.applyOwnerRequestOutcome(request, outcome);
+		return this.applyOwnerRequestOutcome(request, outcome, acceptedOrder);
+	}
+
+	/**
+	 * Whether owner words of this submission order still decide `axis` where they are applied, recording them as its newest
+	 * decider when they do: older words applied after newer ones decide only what no newer owner words decided. Words with
+	 * no submission order (not the owner's) decide as they apply.
+	 */
+	private decidesOwnerAxis(axis: string, acceptedOrder: number | undefined): boolean {
+		if (acceptedOrder === undefined) return true;
+		if (acceptedOrder < (this.ownerDecisionOrders.get(axis) ?? 0)) return false;
+		this.ownerDecisionOrders.set(axis, acceptedOrder);
+		return true;
 	}
 
 	/**
 	 * Applies one classification of the owner's words: handoff, model pools, delivery binding, rule authority and the
-	 * capabilities it authorizes. Returns the one line the model should see, and nothing when there is nothing to say.
+	 * capabilities it authorizes, each only where no newer owner words already decided it (`decidesOwnerAxis`). Returns the
+	 * one line the model should see, and nothing when there is nothing to say.
 	 */
 	async applyOwnerRequestOutcome(
 		request: string,
 		outcome: OwnerRequestClassificationOutcome,
+		acceptedOrder?: number,
 	): Promise<string | undefined> {
 		const controller = this.deps.getSystemOneController();
 		if (!controller) return undefined;
 		if (outcome.status === "skipped") return undefined;
-		// A newer owner request owns the policy: this judgment is stale, not an evaluator outage. The
-		// request itself still runs; only its judgment is set aside.
+		// A superseded judgment holds no owner policy, and is not an evaluator outage: the owner-policy queue judges those
+		// words' policy itself (see its `classify`), so this judgment is never applied in its place.
 		if ("superseded" in outcome && outcome.superseded) return undefined;
 		if (outcome.status === "unavailable") {
 			// Unknown is not a handoff: an owner question goes to the owner.
-			this.handoffValue = false;
+			if (this.decidesOwnerAxis("handoff", acceptedOrder)) this.handoffValue = false;
 			// The binding is left exactly as it was -- but a silent "nothing changed" would read as a
 			// classified "the user imposed nothing", which is how a stated no-push limit gets lost.
 			// The model is told the limit was not registered so it honours the request itself. Once
@@ -401,14 +428,21 @@ export class SessionEdgeIntentController {
 		}
 		this.deliveryClassificationUnavailable = false;
 		const classified = outcome.classification;
-		this.handoffValue = classified.fullHandoff;
-		if (classified.mayChangeModelPools) await this.applyModelPoolChange(controller, request);
-		this.localCommitBranchValue = resolveDeliveryBinding(
-			this.localCommitBranchValue,
-			{ blocksPush: classified.localCommitsOnly, liftsPushBlock: classified.liftsDeliveryBlock },
-			readHeadBranch(this.deps.getCwd()),
-		);
-		this.ruleAuthorityValue = resolveRuleAuthority(classified);
+		if (this.decidesOwnerAxis("handoff", acceptedOrder)) this.handoffValue = classified.fullHandoff;
+		if (classified.mayChangeModelPools) await this.applyModelPoolChange(controller, request, acceptedOrder);
+		// Delivery is decided only by words that block or lift it; words that do neither keep the binding as it is.
+		if (
+			classified.localCommitsOnly !== classified.liftsDeliveryBlock &&
+			this.decidesOwnerAxis("delivery", acceptedOrder)
+		) {
+			this.localCommitBranchValue = resolveDeliveryBinding(
+				this.localCommitBranchValue,
+				{ blocksPush: classified.localCommitsOnly, liftsPushBlock: classified.liftsDeliveryBlock },
+				readHeadBranch(this.deps.getCwd()),
+			);
+		}
+		const decidesRules = this.decidesOwnerAxis("rule_authority", acceptedOrder);
+		if (decidesRules) this.ruleAuthorityValue = resolveRuleAuthority(classified);
 		if (classified.capabilitiesAuthorized) {
 			// Read where the outcome applies: a judgment applied later than it was made grants only what is still off.
 			const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
@@ -418,6 +452,8 @@ export class SessionEdgeIntentController {
 				this.grantEdge(edgeClass, "operator", { note: "explicit user request" });
 			}
 		}
+		// The rule notes speak for the words that decided rule authority; newer owner words already said theirs.
+		if (!decidesRules) return undefined;
 		if (this.ruleAuthorityValue === "ask") return RULE_CONFLICT_NOTE;
 		if (classified.fullHandoff && classified.rulesDiffer) {
 			return this.ruleAuthorityValue === "user" ? RULE_SETTLED_USER_NOTE : RULE_SETTLED_WRITTEN_NOTE;
@@ -439,16 +475,13 @@ export class SessionEdgeIntentController {
 				contextChanged: false,
 				reason: "Owner intent classification was cancelled",
 			};
-		// A judgment is as fresh as the submission it judges. One whose submission is older than a
-		// submission already being judged would overwrite newer owner policy if it applied, so it is
-		// stale before it starts: it neither runs nor cancels the newer judgment.
+		// An optional-tool judgment is as fresh as the submission it judges. One whose submission is older
+		// than a submission already being judged would overwrite the newer optional-tool intent if it applied,
+		// so the optional-tool chain is not asked for it: it neither runs nor cancels the newer judgment. The
+		// words are still the owner's, so their owner policy is judged alone.
 		if (acceptedOrder !== undefined) {
 			if (acceptedOrder < this.newestJudgedOwnerOrder)
-				return {
-					status: "unavailable" as const,
-					superseded: true,
-					reason: "Owner intent classification was superseded by a newer owner request",
-				};
+				return this.judgeOwnerPolicy(request, rules, capabilitiesPending, signal);
 			this.newestJudgedOwnerOrder = acceptedOrder;
 		}
 		// Normal-off: no evaluator means no semantic intent is recorded, aborted, scanned or warned about.
@@ -538,8 +571,8 @@ export class SessionEdgeIntentController {
 				contextChanged: false,
 				reason: "Owner intent classification was cancelled",
 			};
-		// A newer owner request owns the policy now: this stale judgment applies nothing, but its request
-		// remains owner input for the caller to admit.
+		// A newer owner request owns the optional-tool chain now: this stale judgment applies nothing, but its
+		// request remains owner input for the caller to admit, and its owner policy is judged at the queue.
 		if (intentAbort.signal.aborted)
 			return {
 				status: "unavailable" as const,
@@ -578,7 +611,38 @@ export class SessionEdgeIntentController {
 		return outcome;
 	}
 
-	async applyModelPoolChange(controller: SystemOneController, request: string): Promise<void> {
+	/**
+	 * The owner-policy judgment of owner words, without the optional-tool chain: no optional tool is asked, and nothing
+	 * of the optional-tool intent (its checkpoint, the in-flight judgment, the newest judged order) is read or written,
+	 * so a newer submission keeps that chain. A cancellation or a session switch while it runs is reported as
+	 * `classifyOwnerRequest` reports it.
+	 */
+	private async judgeOwnerPolicy(request: string, rules: string, capabilitiesPending: boolean, signal?: AbortSignal) {
+		const controller = this.deps.getSystemOneController();
+		if (!controller) return { status: "skipped" as const };
+		const sessionId = this.deps.getSessionManager().getSessionId();
+		const outcome = await controller.classifyUserRequest(request, rules, {
+			capabilitiesPending,
+			signal: AbortSignal.any([this.deps.getReflectionAbortSignal(), ...(signal ? [signal] : [])]),
+		});
+		if (signal?.aborted || this.deps.getReflectionAbortSignal().aborted || this.deps.isDisposed())
+			return {
+				status: "unavailable" as const,
+				cancelled: true,
+				contextChanged: false,
+				reason: "Owner intent classification was cancelled",
+			};
+		if (this.deps.getSessionManager().getSessionId() !== sessionId)
+			return {
+				status: "unavailable" as const,
+				cancelled: true,
+				contextChanged: true,
+				reason: "The session context changed while the owner request was classified",
+			};
+		return outcome;
+	}
+
+	async applyModelPoolChange(controller: SystemOneController, request: string, acceptedOrder?: number): Promise<void> {
 		let evaluated: Awaited<ReturnType<SystemOneController["evaluateModelPools"]>>;
 		try {
 			evaluated = await controller.evaluateModelPools(request);
@@ -593,7 +657,13 @@ export class SessionEdgeIntentController {
 		const runnable = this.deps
 			.getRouterCandidatePool()
 			.models.filter((model) => this.deps.getModelRegistry().hasConfiguredAuth(model));
-		const outcome = this.modelPolicy.apply(evaluated.change, runnable);
+		// A pool newer owner words already decided keeps their decision.
+		const change: ModelPoolChange = {};
+		for (const pool of MODEL_POOLS) {
+			const enable = evaluated.change[pool];
+			if (enable !== undefined && this.decidesOwnerAxis(`model_pool:${pool}`, acceptedOrder)) change[pool] = enable;
+		}
+		const outcome = this.modelPolicy.apply(change, runnable);
 		if (outcome.kind === "applied") this.deps.emitWarning(`Model policy: ${describePolicy(outcome.policy)}`);
 		else if (outcome.kind === "refused") this.deps.emitWarning(`Model policy not changed: ${outcome.reason}`);
 	}

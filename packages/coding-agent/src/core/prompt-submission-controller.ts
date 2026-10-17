@@ -991,7 +991,8 @@ export class PromptSubmissionController {
 				if (options?.source !== "extension") {
 					// The owner's words are classified where their outcome is read (see OwnerPolicyQueue): a
 					// turn that uses no tool never waits for, or pays for, the classification. A queued input
-					// that became this turn was judged before it ran: its judgment is applied, never asked again.
+					// that became this turn was judged before it ran: its judgment is applied, never asked again
+					// (one a newer request superseded has its owner policy judged alone where the queue settles).
 					if (ownerJudgment !== undefined || this.deps.getSystemOneController())
 						this.deps.enqueueOwnerWords(text, lifecycle?.acceptedOrder, ownerJudgment, submissionSignal);
 					else await this.deps.classifyOwnerRequest(text, "", false, submissionSignal, lifecycle?.acceptedOrder);
