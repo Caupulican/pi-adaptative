@@ -10,7 +10,10 @@
  * agent-session.ts (session-scoped under `<agentDir>/work/context/sessions/<sessionId>/artifacts/`).
  * References are registered at pack time and released when context-gc evicts the
  * corresponding grep/find tool result (opportunistic, conservative cleanup), with a
- * best-effort dispose-time sweep for zero-reference artifacts. Payloads are retrievable
+ * best-effort dispose-time sweep for zero-reference artifacts. A background tool task's
+ * output artifact is cited by its terminal record on the session branch, so its holder is
+ * never released while the session's store lives (the context-store retention sweep bounds it
+ * across sessions, not within a live, leased one). Payloads are retrievable
  * out of band via the artifact_retrieve tool (context/artifact-retrieval.ts).
  */
 

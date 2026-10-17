@@ -9,7 +9,7 @@ import {
 	pathScopesOverlap,
 	safeRealpathSync,
 } from "../autonomy/path-scope.ts";
-import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { type AtomicFileLockOptions, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { requireBoundedTrimmedText } from "../util/bounded-value.ts";
 import { parseLocalWorkerProcessOwnerId } from "./worker-process-owner.ts";
@@ -405,43 +405,61 @@ export class WorkerWriteReservationStore {
 		});
 	}
 
-	release(lease: WorkerWriteReservationLease): WorkerWriteReservationReleaseResult {
+	/**
+	 * `lockOptions` bounds the wait for a store lock held elsewhere. A caller that owns its own later
+	 * retry passes a single attempt, so contention fails fast instead of blocking the calling thread.
+	 */
+	release(
+		lease: WorkerWriteReservationLease,
+		lockOptions?: AtomicFileLockOptions,
+	): WorkerWriteReservationReleaseResult {
 		const repositoryRoot = requireBoundedTrimmedText(lease.repositoryRoot, MAX_PATH_CHARS, "Lease repository root");
 		const ownerId = localOwnerId(lease.ownerId);
 		const expectedFilePath = reservationFile(this.agentDir, repositoryRoot);
 		if (lease.filePath !== expectedFilePath)
 			throw new TypeError("Worker write reservation lease does not belong to this agent state.");
-		return withFileLockSync(expectedFilePath, () => {
-			const store = this.readLocked(expectedFilePath, repositoryRoot);
-			const index = store.reservations.findIndex((reservation) => reservation.reservationId === lease.reservationId);
-			if (index < 0) {
-				const supersedingReservation = store.reservations.some(
-					(reservation) =>
-						reservation.parentSessionId === lease.parentSessionId &&
-						reservation.ownerId === ownerId &&
-						reservation.taskId === lease.taskId &&
-						reservation.fencingToken > lease.fencingToken,
-				);
-				return { kind: supersedingReservation ? "stale_fence" : "not_found" };
-			}
-			const record = store.reservations[index];
-			if (
-				record.parentSessionId !== lease.parentSessionId ||
-				record.ownerId !== ownerId ||
-				record.taskId !== lease.taskId ||
-				record.attemptId !== lease.attemptId ||
-				record.fencingToken !== lease.fencingToken ||
-				record.executionIdentity !== lease.executionIdentity ||
-				record.isolatedWorktreeId !== lease.isolatedWorktreeId
-			) {
-				return { kind: "stale_fence" };
-			}
-			store.reservations.splice(index, 1);
-			if (store.reservations.length === 0) unlinkSync(expectedFilePath);
-			else writeStore(expectedFilePath, store);
-			notifyAvailability(expectedFilePath);
-			return { kind: "released" };
-		});
+		return withFileLockSync(
+			expectedFilePath,
+			() => this.releaseLocked(expectedFilePath, repositoryRoot, ownerId, lease),
+			lockOptions,
+		);
+	}
+
+	private releaseLocked(
+		filePath: string,
+		repositoryRoot: string,
+		ownerId: string,
+		lease: WorkerWriteReservationLease,
+	): WorkerWriteReservationReleaseResult {
+		const store = this.readLocked(filePath, repositoryRoot);
+		const index = store.reservations.findIndex((reservation) => reservation.reservationId === lease.reservationId);
+		if (index < 0) {
+			const supersedingReservation = store.reservations.some(
+				(reservation) =>
+					reservation.parentSessionId === lease.parentSessionId &&
+					reservation.ownerId === ownerId &&
+					reservation.taskId === lease.taskId &&
+					reservation.fencingToken > lease.fencingToken,
+			);
+			return { kind: supersedingReservation ? "stale_fence" : "not_found" };
+		}
+		const record = store.reservations[index];
+		if (
+			record.parentSessionId !== lease.parentSessionId ||
+			record.ownerId !== ownerId ||
+			record.taskId !== lease.taskId ||
+			record.attemptId !== lease.attemptId ||
+			record.fencingToken !== lease.fencingToken ||
+			record.executionIdentity !== lease.executionIdentity ||
+			record.isolatedWorktreeId !== lease.isolatedWorktreeId
+		) {
+			return { kind: "stale_fence" };
+		}
+		store.reservations.splice(index, 1);
+		if (store.reservations.length === 0) unlinkSync(filePath);
+		else writeStore(filePath, store);
+		notifyAvailability(filePath);
+		return { kind: "released" };
 	}
 
 	/** Event-driven cross-process wakeup for queued write admission; caller owns disposal. */

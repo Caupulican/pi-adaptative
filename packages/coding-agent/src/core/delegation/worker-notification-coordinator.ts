@@ -69,6 +69,11 @@ interface PendingWorkerNotification {
 	key: string;
 	record: WorkerTerminalHandoffRecord;
 	durableNotificationId?: string;
+	/**
+	 * Already counted in a status event. A failed delivery returns the notification to `pending` and
+	 * redelivers it, but its terminal is not new any more, so a later status event must not count it again.
+	 */
+	reportedInStatus?: boolean;
 }
 
 export interface WorkerNotificationCoordinatorOptions {
@@ -164,6 +169,8 @@ export class WorkerNotificationCoordinator {
 		// or any other sentinel; it is simply omitted, same as `goalId` is omitted when absent.
 		const ownerEpoch = this.laneOwnerEpochs.get(record.laneId);
 		this.laneOwnerEpochs.delete(record.laneId);
+		// Re-recording the same generation while it waits for redelivery replaces its payload, not its count.
+		const reportedInStatus = this.pending.get(key)?.reportedInStatus === true;
 		this.pending.set(key, {
 			key,
 			record: {
@@ -177,6 +184,7 @@ export class WorkerNotificationCoordinator {
 				...(ownerEpoch !== undefined ? { ownerEpoch } : {}),
 			},
 			...(durableNotificationId ? { durableNotificationId } : {}),
+			...(reportedInStatus ? { reportedInStatus } : {}),
 		});
 		this.schedule();
 	}
@@ -285,7 +293,11 @@ export class WorkerNotificationCoordinator {
 		}
 		const queued = workerRecords.filter((record) => record.status === "queued").length;
 		const running = workerRecords.filter((record) => record.status === "running").length;
-		const terminalSinceFlush = batch.map((notification) => notification.record);
+		// Delivery retries the whole batch; the status event reports only terminals no earlier event counted.
+		const batchRecords = batch.map((notification) => notification.record);
+		const terminalSinceFlush = batch
+			.filter((notification) => !notification.reportedInStatus)
+			.map((notification) => notification.record);
 		for (const notification of batch) {
 			if (notification.durableNotificationId) continue;
 			try {
@@ -315,6 +327,7 @@ export class WorkerNotificationCoordinator {
 				`Background worker status observer failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+		for (const notification of batch) notification.reportedInStatus = true;
 		if (batch.length === 0) return;
 		// Moved into `inFlight`, not merely captured by the closure below: if notify() never
 		// settles, this batch stays durably visible via getOutstandingRecords() instead of being
@@ -326,9 +339,9 @@ export class WorkerNotificationCoordinator {
 			// A foreground lease wait is an in-flight side effect, not a failed attempt. Re-dispatching it
 			// on a wall-clock timer creates concurrent consumers that later persist the same handoff.
 			// Explicit rejection remains retryable; process restart replays the durable pending record.
-			const watchdog = this.startHandoffWatchdog(terminalSinceFlush.map((record) => record.laneId));
+			const watchdog = this.startHandoffWatchdog(batchRecords.map((record) => record.laneId));
 			try {
-				await this.options.notify(terminalSinceFlush);
+				await this.options.notify(batchRecords);
 			} finally {
 				watchdog.clear();
 			}

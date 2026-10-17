@@ -82,6 +82,12 @@ const MAX_TERMINAL_HANDOFF_RECORDS = 8;
  * rest an exact `tool_task wait` to collect.
  */
 const MAX_TERMINAL_MESSAGE_BYTES = 24 * 1024;
+/**
+ * Consecutive rejected wake-up deliveries before the queue parks (about 21 s of the capped
+ * backoff). A rejection that outlives this is a session-lifetime condition, not a race; the
+ * batch stays queued and pending on the branch until a task event or a resume re-arms it.
+ */
+const MAX_CONSECUTIVE_NOTIFICATION_FAILURES = 10;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const TASK_ID_PATTERN = /^tool-task-([1-9]\d*)$/;
 const RECORD_KEYS = [
@@ -756,6 +762,10 @@ export class BackgroundToolTaskController {
 	private notificationRetryCompletion: Promise<void> | undefined;
 	private resolveNotificationRetry: (() => void) | undefined;
 	private notificationRetryCount = 0;
+	/** Set after `MAX_CONSECUTIVE_NOTIFICATION_FAILURES`; cleared by the next task start or terminal. */
+	private notificationsParked = false;
+	/** Cause last reported in the current failure streak; cleared by a delivery and by a re-arm. */
+	private lastReportedNotificationFailure: string | undefined;
 	private readonly waitTimeoutMs: number;
 	private readonly maxRuntimeMs: number;
 	private readonly cancelGraceMs: number;
@@ -830,6 +840,8 @@ export class BackgroundToolTaskController {
 			this.tasks.delete(taskId);
 			return undefined;
 		}
+		// The session accepted a new durable record, so a wake-up parked behind a rejecting session may now land.
+		this.resumeParkedNotifications();
 		this.armTerminalWatchdog(state, remainingRuntimeMs, () => {
 			this.requestCancellation(
 				state,
@@ -1009,6 +1021,8 @@ export class BackgroundToolTaskController {
 				continue;
 			}
 			if (this.queuedNotifications.length === 0) return;
+			// A parked queue has no timer and no drain to await: only a later task event re-arms it.
+			if (this.notificationsParked) return;
 			const retry = this.notificationRetryCompletion;
 			if (retry) {
 				await retry;
@@ -1316,10 +1330,21 @@ export class BackgroundToolTaskController {
 				: {}),
 		};
 		const persisted = this.persist(record);
+		if (!persisted && packed.artifactId) {
+			// No saved record cites this artifact, so nothing owns it: release the pack-time holder
+			// instead of leaving an unowned artifact behind an output that reports itself unavailable.
+			try {
+				const store = this.deps.getArtifactStore();
+				store?.removeReference(packed.artifactId, state.artifactHolderId);
+				store?.cleanup();
+			} catch (error) {
+				this.reportError(`Failed to release artifact for background tool task ${record.taskId}`, error);
+			}
+		}
 		const terminalRecord = persisted
 			? record
 			: (() => {
-					const { piVerification: _verification, ...unavailableRecord } = record;
+					const { piVerification: _verification, artifactId: _artifactId, ...unavailableRecord } = record;
 					return {
 						...unavailableRecord,
 						status: "failed" as const,
@@ -1364,6 +1389,7 @@ export class BackgroundToolTaskController {
 		};
 		this.activeNotificationRecords.add(notificationRecord);
 		this.queuedNotifications.push({ record: notificationRecord, wakeParent });
+		this.resumeParkedNotifications();
 		this.scheduleNotificationDrain();
 	}
 
@@ -1395,8 +1421,17 @@ export class BackgroundToolTaskController {
 		}
 	}
 
+	/** A parked queue waits for its re-arming event; it never retries on a timer or a drain's own exit. */
+	private resumeParkedNotifications(): void {
+		if (!this.notificationsParked) return;
+		this.notificationsParked = false;
+		this.notificationRetryCount = 0;
+		this.lastReportedNotificationFailure = undefined;
+		this.scheduleNotificationDrain();
+	}
+
 	private scheduleNotificationDrain(): void {
-		if (this.disposed || this.notificationDrain || this.notificationRetryTimer) return;
+		if (this.disposed || this.notificationsParked || this.notificationDrain || this.notificationRetryTimer) return;
 		this.notificationDrain = this.drainNotifications().finally(() => {
 			this.notificationDrain = undefined;
 			if (this.queuedNotifications.length > 0 && !this.notificationRetryTimer) this.scheduleNotificationDrain();
@@ -1444,20 +1479,37 @@ export class BackgroundToolTaskController {
 				receipt = typeof result === "object" ? result : undefined;
 			} catch (error) {
 				// A rejected handoff is not a delivery receipt. Put the exact records back ahead of
-				// newer completions and retry on an event-driven backoff; persistence already contains
-				// the terminal, so a transient notifier failure must not make it disappear.
+				// newer completions and retry on a bounded backoff; persistence already contains the
+				// terminal, so a transient notifier failure must not make it disappear.
 				this.queuedNotifications.unshift(...batch);
 				const includedIds = records.slice(0, MAX_TERMINAL_HANDOFF_RECORDS).map((record) => record.taskId);
 				const omitted = records.length - includedIds.length;
-				const suffix = omitted > 0 ? ` (+${omitted} more)` : "";
-				this.reportError(
-					`Failed to notify terminal background tool task batch ${includedIds.join(", ")}${suffix}`,
-					error,
-				);
+				const batchLabel = `${includedIds.join(", ")}${omitted > 0 ? ` (+${omitted} more)` : ""}`;
+				const consecutiveFailures = this.notificationRetryCount + 1;
+				if (consecutiveFailures >= MAX_CONSECUTIVE_NOTIFICATION_FAILURES) {
+					// Some rejections persist for the session's life (a session file fenced after a failed
+					// write rejects every later append, so the wake-up message can never be accepted).
+					// Park instead of retrying forever: the batch stays queued and pending on the branch,
+					// the next task start or terminal re-arms delivery, a resume redelivers it, and
+					// `tool_task wait` collects it now.
+					this.notificationsParked = true;
+					this.reportError(
+						`Background tool completion wake-up for ${batchLabel} is parked after ${consecutiveFailures} consecutive failed deliveries (still pending; retried when a background tool task next starts or ends, or on session resume; tool_task action=wait collects it now)`,
+						error,
+					);
+					return;
+				}
+				// A streak repeating one cause reports it once; a changed cause is always reported.
+				const cause = error instanceof Error ? error.message : String(error);
+				if (cause !== this.lastReportedNotificationFailure) {
+					this.lastReportedNotificationFailure = cause;
+					this.reportError(`Failed to notify terminal background tool task batch ${batchLabel} (retrying)`, error);
+				}
 				this.scheduleNotificationRetry();
 				return;
 			}
 			this.notificationRetryCount = 0;
+			this.lastReportedNotificationFailure = undefined;
 			for (const record of records) this.markNotificationDelivered(record);
 			// The wake-up carried these outputs in full, so this delivery IS the model-facing read --
 			// the same consumption a `tool_task wait` performs. The notifier reports what its delivered
@@ -1491,18 +1543,18 @@ export class BackgroundToolTaskController {
 		}
 	}
 
+	/**
+	 * Bounds the in-memory cache only. The artifact reference belongs to the terminal record saved
+	 * on the session branch, not to this cache entry: an evicted task stays collectable through
+	 * `wait` (`loadRetiredTerminalRecord`), and its saved output names the artifact. The holder
+	 * marker is durable in the session's artifact store, so the artifact lives as long as that store
+	 * does, never shorter than the record that cites it. The context-store retention sweep bounds it
+	 * across sessions; a live session's leased store is exempt, so it is not bounded within one.
+	 */
 	private pruneTerminalTasks(): void {
 		const terminal = [...this.tasks.values()].filter((state) => state.record.status !== "running");
 		for (const state of terminal.slice(0, Math.max(0, terminal.length - MAX_RETAINED_TERMINAL_TASKS))) {
 			this.tasks.delete(state.record.taskId);
-			if (!state.record.artifactId) continue;
-			try {
-				const store = this.deps.getArtifactStore();
-				store?.removeReference(state.record.artifactId, state.artifactHolderId);
-				store?.cleanup();
-			} catch (error) {
-				this.reportError(`Failed to prune artifact for background tool task ${state.record.taskId}`, error);
-			}
 		}
 	}
 

@@ -210,7 +210,7 @@ export class GoalSessionController {
 				return this.getContinuationTurnOutcome(firstTurnEntryIndex);
 			},
 			recordGoalContinuationPass: (pass) => this.recordContinuationPass(pass),
-			recordGoalContinuationFailure: (error) => this.recordContinuationFailure(error),
+			recordGoalContinuationFailure: (error, goalId) => this.recordContinuationFailure(error, goalId),
 			markGoalBudgetLimited: (reason) => this.markBudgetLimited(reason),
 			notifyContinuationEvaluated: async (snapshot) => {
 				await this.evaluateShadowRoute(snapshot.continuation.action);
@@ -1161,14 +1161,10 @@ export class GoalSessionController {
 		return false;
 	}
 
-	/**
-	 * `goalId` names the goal whose work failed. A failure never stops a goal that replaced it; callers
-	 * that cannot name one (the legacy loop's port) act on the current goal.
-	 */
-	private recordContinuationFailure(error: unknown, goalId?: string): void {
+	/** `goalId` names the goal whose work failed. A failure never stops a goal that replaced it. */
+	private recordContinuationFailure(error: unknown, goalId: string): void {
 		const state = this.getState();
-		if (!state || !isGoalExecutionActive(state.status)) return;
-		if (goalId !== undefined && state.goalId !== goalId) return;
+		if (!state || !isGoalExecutionActive(state.status) || state.goalId !== goalId) return;
 		const message = error instanceof Error ? error.message : String(error);
 		const classified = classifyFailure({ message, provider: this.deps.getModelProvider() });
 		const status = classified.reason === "billing_or_quota" ? "usage_limited" : "blocked";

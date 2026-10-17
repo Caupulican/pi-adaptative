@@ -18,6 +18,7 @@ export type GoalClarificationStatus = "pending" | "answered" | "cancelled";
 /** `check` is host-only: the result of the harness rerunning a requirement's check at completion. */
 export type GoalEvidenceKind = "file" | "test" | "tool" | "user" | "finding" | "worker" | "check";
 export type GoalEvidenceOutcome = "succeeded" | "failed" | "canceled";
+export type GoalBlockOrigin = "system" | "agent";
 
 export const MAX_GOAL_OBJECTIVE_LENGTH = 4_000;
 export const MAX_GOAL_EVENT_HISTORY = 128;
@@ -77,6 +78,13 @@ export interface GoalState {
 	lastProgressAt: string;
 	stallTurns: number;
 	blockedReason?: string;
+	/**
+	 * Who blocked the goal: `system` for a `system_stop_goal` block, `agent` for the goal tool's
+	 * `block_goal`. The reducer sets it on every block and drops it on every other status, so it is
+	 * durable across any number of later ledger events, which the bounded event history is not. Only a
+	 * blocked snapshot written before the field existed lacks it; readers fall back to the event scan.
+	 */
+	blockedBy?: GoalBlockOrigin;
 	/**
 	 * Cumulative continuation turns submitted for this goal across EVERY `continueGoalLoop`
 	 * invocation for its lifetime (idle-driven auto-continues and manual continues alike) —
@@ -147,11 +155,6 @@ export interface GoalCompletionRejection {
 	evidenceUnavailable?: string;
 	/** Refusals of this same fingerprint so far. */
 	count: number;
-	/**
-	 * When a `completion_rejected` event marked `ownerAsked` for this fingerprint. No completion path
-	 * marks one since the owner-question latch was removed; snapshots written before keep theirs.
-	 */
-	ownerAskedAt?: string;
 }
 
 export interface GoalCompletionFinding {
@@ -328,7 +331,7 @@ export type GoalEvent =
 			now: string;
 	  }
 	| { type: "progress"; now: string }
-	/** System One refused completion over the view with this fingerprint; `ownerAsked` marks owner routing. */
+	/** System One refused completion over the view with this fingerprint. */
 	| {
 			type: "completion_rejected";
 			fingerprint: string;
@@ -337,7 +340,6 @@ export type GoalEvent =
 			findingsOmitted?: number;
 			evidence?: GoalCompletionEvidence;
 			evidenceUnavailable?: string;
-			ownerAsked?: boolean;
 			now: string;
 	  }
 	| { type: "no_progress"; now: string }
@@ -577,7 +579,7 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 				typeof value.reason === "string"
 			);
 		case "completion_rejected":
-			return hasCompletionRejectionFields(value) && hasOptionalBoolean(value, "ownerAsked");
+			return hasCompletionRejectionFields(value);
 		case "record_continuation_budget":
 			return (
 				typeof value.turns === "number" &&
@@ -622,6 +624,7 @@ export function isGoalState(value: unknown): value is GoalState {
 		typeof value.stallTurns === "number" &&
 		Number.isFinite(value.stallTurns) &&
 		hasOptionalString(value, "blockedReason") &&
+		(value.blockedBy === undefined || value.blockedBy === "system" || value.blockedBy === "agent") &&
 		hasOptionalFiniteNumber(value, "continuationTurnsUsed") &&
 		hasOptionalFiniteNumber(value, "continuationWallClockMs") &&
 		hasOptionalFiniteNumber(value, "continuationSpendUsd") &&
@@ -655,8 +658,7 @@ function isGoalCompletionRejection(value: unknown): value is GoalCompletionRejec
 		isPlainRecord(value) &&
 		hasCompletionRejectionFields(value) &&
 		typeof value.count === "number" &&
-		Number.isSafeInteger(value.count) &&
-		hasOptionalString(value, "ownerAskedAt")
+		Number.isSafeInteger(value.count)
 	);
 }
 
@@ -1000,7 +1002,6 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 		case "completion_rejected": {
 			const previous = state.lastCompletionRejection;
 			const same = previous?.fingerprint === event.fingerprint;
-			const ownerAskedAt = event.ownerAsked ? event.now : same ? previous?.ownerAskedAt : undefined;
 			newState.lastCompletionRejection = {
 				fingerprint: event.fingerprint,
 				reasons: [...event.reasons],
@@ -1024,7 +1025,6 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 						? { evidence: { ...previous.evidence } }
 						: {}),
 				count: same && previous ? previous.count + 1 : 1,
-				...(ownerAskedAt ? { ownerAskedAt } : {}),
 			};
 			break;
 		}
@@ -1070,6 +1070,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 		case "block_goal": {
 			newState.status = "blocked";
 			newState.blockedReason = event.reason;
+			newState.blockedBy = "agent";
 			break;
 		}
 
@@ -1117,6 +1118,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			newState.status = event.status;
 			newState.blockedReason = event.reason;
 			if (event.status === "blocked") {
+				newState.blockedBy = "system";
 				const isNonProviderSystemStop =
 					event.reason.startsWith("goal_tool_unavailable:") ||
 					event.reason.startsWith("provider_turn_limit:") ||
@@ -1135,7 +1137,10 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 		}
 	}
 
-	return newState;
+	// The block origin lives exactly as long as the block: one rule for every transition out of it.
+	if (newState.status === "blocked" || newState.blockedBy === undefined) return newState;
+	const { blockedBy: _endedBlock, ...unblocked } = newState;
+	return unblocked;
 }
 
 export function shouldContinueGoalLoop(args: { state: GoalState; maxStallTurns: number; now: string }): boolean {

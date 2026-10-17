@@ -1,11 +1,13 @@
 import { canonicalPathScopeIdentity } from "../autonomy/path-scope.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
+import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
 import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
 import { isLocalProcessAlive, localWorkerProcessOwnerLiveness } from "./worker-process-owner.ts";
 import {
 	type WorkerWriteReservationConflict,
 	type WorkerWriteReservationLease,
+	type WorkerWriteReservationReleaseResult,
 	type WorkerWriteReservationRequest,
 	WorkerWriteReservationStore,
 	type WorkerWriteReservationWorkspace,
@@ -78,6 +80,11 @@ export interface WorkerWriteReservationCoordinatorOptions {
 /** Backoff bounds for retrying a durable release that failed (lock contention, store I/O). */
 const PENDING_RELEASE_RETRY_BASE_MS = 1_000;
 const PENDING_RELEASE_RETRY_MAX_MS = 30_000;
+/**
+ * A retained-release retry owns its own backoff, so it takes the store lock in one attempt: the sync
+ * lock's default contention budget blocks the event loop between attempts (seconds per record).
+ */
+const PENDING_RELEASE_LOCK_OPTIONS: Readonly<AtomicFileLockOptions> = Object.freeze({ retries: 0 });
 
 /** A workspace as a message names it: its repository root once, and its execution root as well when it is another path. */
 function workspaceLabel(workspace: WorkerWriteReservationWorkspace): string {
@@ -205,7 +212,7 @@ export class WorkerWriteReservationCoordinator {
 		expectedFencingToken: number,
 	): WorkerWriteReservationWaitYield | undefined {
 		if (!this.leases.has(laneId)) return undefined;
-		const held = this.releaseOwnedLease(laneId, expectedAttemptId, expectedFencingToken, true);
+		const held = this.releaseOwnedLease(laneId, expectedAttemptId, expectedFencingToken, "yield")?.held;
 		if (!held) return undefined;
 		return {
 			laneId,
@@ -251,51 +258,62 @@ export class WorkerWriteReservationCoordinator {
 	}
 
 	release(laneId: string, expectedAttemptId?: string, expectedFencingToken?: number): void {
-		this.releaseOwnedLease(laneId, expectedAttemptId, expectedFencingToken, false);
+		this.releaseOwnedLease(laneId, expectedAttemptId, expectedFencingToken, "best_effort");
 	}
 
-	/** Required physical cleanup keeps its exact lease until the durable release is proven. */
-	releaseRequired(laneId: string, expectedAttemptId: string, expectedFencingToken: number): void {
-		this.releaseOwnedLease(laneId, expectedAttemptId, expectedFencingToken, true);
+	/**
+	 * Release the lease of a lane whose run has physically stopped. The exact fence must match, and a
+	 * superseded fence still throws. A store failure moves the exact durable record from the lane to the
+	 * retained-release owner, which keeps it fencing other writers and retries it on its backoff alarm.
+	 * Returns that store failure, if any, so a strict shutdown can still report it.
+	 */
+	releaseRequired(laneId: string, expectedAttemptId: string, expectedFencingToken: number): unknown {
+		return this.releaseOwnedLease(laneId, expectedAttemptId, expectedFencingToken, "settled")?.failure;
 	}
 
+	/**
+	 * `yield` keeps the lease on the lane when the store fails: the lane is still live and resumes under
+	 * it. `best_effort` and `settled` lanes no longer hold it, so the exact record moves to the retained
+	 * release owner. Only `best_effort` ignores a fence mismatch or a `stale_fence` result.
+	 */
 	private releaseOwnedLease(
 		laneId: string,
 		expectedAttemptId: string | undefined,
 		expectedFencingToken: number | undefined,
-		required: boolean,
-	): WorkerWriteReservationLease | undefined {
+		mode: "best_effort" | "yield" | "settled",
+	): { held: WorkerWriteReservationLease; failure?: unknown } | undefined {
 		const held = this.leases.get(laneId);
 		if (!held) {
 			this.blockedByLocalLaneIds.delete(laneId);
 			return;
 		}
+		const strict = mode !== "best_effort";
 		if (
 			this.hasFenceMismatch(laneId, expectedAttemptId ?? held.attemptId, expectedFencingToken ?? held.fencingToken)
 		) {
-			if (required)
+			if (strict)
 				throw new Error(`Worker ${laneId} cannot release a write reservation owned by another attempt fence.`);
 			return;
 		}
-		let released = false;
+		let result: WorkerWriteReservationReleaseResult;
 		try {
-			const result = this.store.release(held);
-			if (required && result.kind !== "released" && result.kind !== "not_found") {
-				throw new Error(`Worker ${laneId} required write reservation release encountered ${result.kind}.`);
-			}
-			released = true;
+			result = this.store.release(held);
 		} catch (error) {
-			if (required) throw error;
+			if (mode === "yield") throw error;
 			this.warnBestEffort(
 				`Failed to release worker write reservation ${laneId}; retrying: ${error instanceof Error ? error.message : String(error)}`,
 			);
-		} finally {
-			if (released || !required) this.forgetLease(laneId, held);
 			// The lane no longer holds the lease, but its durable record still names this live process,
 			// which no reaper may release. Keep the exact record until a release is proven.
-			if (!released && !required) this.retainPendingRelease(held);
+			this.forgetLease(laneId, held);
+			this.retainPendingRelease(held);
+			return { held, failure: error };
 		}
-		return held;
+		if (strict && result.kind !== "released" && result.kind !== "not_found") {
+			throw new Error(`Worker ${laneId} required write reservation release encountered ${result.kind}.`);
+		}
+		this.forgetLease(laneId, held);
+		return { held };
 	}
 
 	/**
@@ -304,6 +322,9 @@ export class WorkerWriteReservationCoordinator {
 	 * record carries its own bounded backoff alarm beside the opportunistic retries on coordinator signals.
 	 */
 	private retainPendingRelease(lease: WorkerWriteReservationLease): void {
+		// A retained set that starts from empty starts its backoff from the base delay, however the
+		// previous set emptied (a full retry pass, a repository-scoped retry, or a re-adopting grant).
+		if (this.pendingReleases.size === 0) this.pendingReleaseFailures = 0;
 		this.pendingReleases.set(lease.reservationId, lease);
 		if (this.disposed) return;
 		try {
@@ -338,8 +359,10 @@ export class WorkerWriteReservationCoordinator {
 	/**
 	 * Retry every retained release once; a failure keeps its exact record and re-arms the backoff alarm.
 	 * Only the alarm warns: opportunistic retries on admission signals would repeat the same diagnostic.
+	 * Every retry with a later retry behind it takes the store lock in one attempt; only the final
+	 * shutdown pass (`lastChance`) waits out lock contention, since nothing retries after it.
 	 */
-	private retryPendingReleases(options: { warn: boolean; repositoryRoot?: string }): unknown[] {
+	private retryPendingReleases(options: { warn: boolean; repositoryRoot?: string; lastChance?: boolean }): unknown[] {
 		const errors: unknown[] = [];
 		if (this.pendingReleases.size === 0) return errors;
 		const repository =
@@ -350,7 +373,7 @@ export class WorkerWriteReservationCoordinator {
 			try {
 				// Any result settles the record: `released` removed it, `not_found` means it is gone, and
 				// `stale_fence` means a newer fence of the same task owns that scope now, not this record.
-				this.store.release(lease);
+				this.store.release(lease, options.lastChance ? undefined : PENDING_RELEASE_LOCK_OPTIONS);
 				this.pendingReleases.delete(reservationId);
 			} catch (error) {
 				failed = true;
@@ -415,7 +438,7 @@ export class WorkerWriteReservationCoordinator {
 			this.pendingReleaseTimer = undefined;
 		}
 		// Retained releases belong to no lane any more, so no physical hold can make them unreleasable.
-		const pendingErrors = this.retryPendingReleases({ warn: !required });
+		const pendingErrors = this.retryPendingReleases({ warn: !required, lastChance: true });
 		const errors: unknown[] = required ? pendingErrors : [];
 		const watchers = [...this.watchDisposes];
 		this.watchDisposes.clear();
@@ -436,8 +459,11 @@ export class WorkerWriteReservationCoordinator {
 		for (const [laneId, lease] of [...this.leases]) {
 			try {
 				if (canRelease && !canRelease(laneId)) continue;
-				if (required) this.releaseRequired(laneId, lease.attemptId, lease.fencingToken);
-				else this.release(laneId);
+				if (required) {
+					// A store failure retains the exact record (reported below); its cause is reported too.
+					const failure = this.releaseRequired(laneId, lease.attemptId, lease.fencingToken);
+					if (failure !== undefined) errors.push(failure);
+				} else this.release(laneId);
 			} catch (error) {
 				errors.push(error);
 			}
@@ -593,6 +619,9 @@ export class WorkerWriteReservationCoordinator {
 				return { kind: "blocked" };
 			}
 			this.blockedByLocalLaneIds.delete(laneId);
+			// The store grants a same-attempt, same-fence request the record it already holds. If that record
+			// was waiting for a retained release, the lane owns it again and the retry must not release it.
+			this.pendingReleases.delete(result.lease.reservationId);
 			this.leases.set(laneId, result.lease);
 			return { kind: "granted" };
 		} catch (error) {

@@ -21,6 +21,9 @@
 - Goal state: an owner's "Continue working" answer at the completion decision is recorded as an objective clarification, the worker-deadline wake is armed after every pass that ends waiting on a worker, a lease follows a goal started in the same turn, and failures and terminals stay with the goal whose work produced them.
 - Workers: a failed best-effort write-reservation release is retried with backoff instead of stalling the repository's queue, a failed orchestration read or enqueue at a retry timer rearms the timer, a lane cancel drops queue ownership only after the durable cancel commits, and legacy managed lanes are adopted one by one.
 - Background tool tasks: a task that was running when the process ended is delivered to its parent with a wake-up on resume and on shutdown, and `tool_task wait` can collect a task's saved record after it was evicted from memory.
+- Background tool task artifacts stay on disk when their task is evicted from the in-memory cache, so a saved record's artifact notice stays valid; a wake-up queue whose delivery fails ten times in a row parks with one warning and resumes on the next terminal instead of retrying forever.
+- Worker follow-ups: a failed required write-reservation release is retried with backoff in the same owner as the best-effort path, retry alarms make one lock attempt instead of blocking the event loop, and a retried notification batch is counted once in status events.
+- A blocked goal records who blocked it (`blockedBy`), so a system stop is recognized after the bounded event history rolled over, and a failed goal pass stops only the goal that produced the failure. The dead owner-question latch fields were removed from goal completion rejections.
 
 ## [0.103.10] - 2026-10-15
 

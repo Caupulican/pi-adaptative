@@ -47,14 +47,18 @@ export interface GoalCompletionOwnerDecisionDeps {
 const ACCEPT_COMPLETE = "Accept complete";
 const CONTINUE_WORKING = "Continue working";
 
-/** Route a repeated, unchanged semantic completion rejection to one durable owner decision. */
+/**
+ * Ask the owner to decide a completion System One could not settle (the objective-primary loop's
+ * ambiguous terminal). Under a handoff, without a panel, or past the deadline the question goes to
+ * the durable follow-up document and no override is granted.
+ */
 export async function resolveGoalCompletionOwnerDecision(
 	input: GoalCompletionOwnerDecisionInput,
 	deps: GoalCompletionOwnerDecisionDeps,
 	signal?: AbortSignal,
 ): Promise<GoalCompletionOwnerDecision> {
 	const reason = input.reasons.join("; ") || "System One could not verify completion.";
-	const question = `System One still cannot verify goal "${input.userGoal}" as complete: ${reason} What should Pi do?`;
+	const question = `System One cannot verify goal "${input.userGoal}" as complete: ${reason} What should Pi do?`;
 	const defer = (deferReason: string): GoalCompletionOwnerDecision => {
 		const followUpPath = deps.recordOwnerFollowUp?.({
 			question,
@@ -64,7 +68,9 @@ export async function resolveGoalCompletionOwnerDecision(
 		return { decision: "deferred", ...(followUpPath ? { followUpPath } : {}) };
 	};
 	if (deps.isHandoff) {
-		return defer("Goal completion remained semantically rejected after an unchanged retry under handoff.");
+		return defer(
+			"System One could not settle the goal's completion under handoff; no completion override was granted.",
+		);
 	}
 	if (!deps.ui) return defer("The completion decision panel was unavailable; no completion override was granted.");
 

@@ -209,7 +209,7 @@ export class SessionUnsettledLadderController {
 		);
 	}
 
-	/** One owner-completion boundary shared by the goal tool and objective-primary loop. */
+	/** The owner-completion boundary of the objective-primary loop: a completion System One could not settle. */
 	resolveGoalCompletionOwnerDecision(input: GoalCompletionOwnerDecisionInput, signal?: AbortSignal) {
 		const sessionManager = this.deps.getSessionManager();
 		return resolveGoalCompletionOwnerDecision(
@@ -247,13 +247,17 @@ export class SessionUnsettledLadderController {
 		if (this.pendingOwnerItems.length === 0) return;
 		// Whether the owner handed decisions off decides where these items go.
 		await this.deps.settleLatestOwnerPolicy();
-		if (this.deps.getGoalStateSnapshot()?.status === "paused") return;
 		const items = this.pendingOwnerItems;
+		// Under a handoff the items go to the durable follow-up document and ask no one, exactly as
+		// deliverToOwner writes them, so a paused goal has nothing to defer there.
 		if (this.deps.isHandoff()) {
 			this.recordUnsettledForOwner(items);
 			this.pendingOwnerItems = [];
 			return;
 		}
+		// A paused goal defers the owner's questions until its work resumes; the next flush after that
+		// posts them.
+		if (this.deps.getGoalStateSnapshot()?.status === "paused") return;
 		this.pendingOwnerItems = [];
 		const content = [
 			"Needs you: nothing the agents could check settled these. Answer before relying on them:",

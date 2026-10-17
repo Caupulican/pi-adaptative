@@ -73,9 +73,14 @@ const AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES = [
 	"goal_tool_unavailable:",
 ] as const;
 
-/** True when the latest lifecycle transition is a system-originated block, regardless of classification. */
+/**
+ * True when the goal is blocked by a system stop, regardless of classification. The reducer records
+ * the origin on every block; only a snapshot written before it did is read from the bounded event
+ * history.
+ */
 export function isSystemStoppedGoal(state: GoalState | undefined): boolean {
 	if (state?.status !== "blocked") return false;
+	if (state.blockedBy !== undefined) return state.blockedBy === "system";
 	for (let index = state.events.length - 1; index >= 0; index--) {
 		const event = state.events[index];
 		if (event?.type === "system_stop_goal") {

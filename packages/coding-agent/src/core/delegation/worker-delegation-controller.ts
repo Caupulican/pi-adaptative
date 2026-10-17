@@ -5267,7 +5267,9 @@ export class WorkerDelegationController {
 						);
 					}
 					// A child may still write while tool disposal waits for its physical close. Keep its
-					// fenced reservation until that release succeeds, including when shutdown fails.
+					// fenced reservation until that release succeeds, including when shutdown fails. Once
+					// the run is physically settled, a failed durable release is owned and retried by the
+					// reservation coordinator, so it does not hold the specialist or its project claim.
 					if (toolsReleased) {
 						this.runTeardownStep(
 							"release worker write reservation",

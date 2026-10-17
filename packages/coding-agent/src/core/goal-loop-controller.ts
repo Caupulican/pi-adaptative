@@ -75,8 +75,11 @@ export interface GoalLoopControllerDeps {
 		outcome?: GoalContinuationTurnOutcome["outcome"];
 		completionTurn?: number;
 	}): void;
-	/** Persist an exhausted/non-retryable continuation failure as a stopped goal state. */
-	recordGoalContinuationFailure(error: unknown): void;
+	/**
+	 * Persist an exhausted/non-retryable continuation failure as a stopped goal state. `goalId` is the
+	 * goal whose pass failed; a goal that replaced it during the pass is never stopped by it.
+	 */
+	recordGoalContinuationFailure(error: unknown, goalId: string): void;
 	/** Persist a reason-specific budget terminal state before returning control. */
 	markGoalBudgetLimited(reason: string): void;
 	/** Optional callback when a continuation decision is evaluated (used for shadow route evaluation). */
@@ -176,7 +179,7 @@ export class GoalLoopController {
 				}
 				turnsSubmitted++;
 				this.deps.recordGoalContinuationPass({ ...passAccounting, wallClockMs: now() - passStartedAt });
-				this.deps.recordGoalContinuationFailure(error);
+				this.deps.recordGoalContinuationFailure(error, passAccounting.goalId);
 				throw error;
 			}
 			if (result.submitted) {
@@ -207,7 +210,10 @@ export class GoalLoopController {
 				// The provider failed after the session's own retry ladder and nothing else stopped the
 				// goal. Leaving it `active` here meant a silent stop: nothing on screen, and an automatic
 				// resume on the next reopen. Record the failure so the state says blocked and names why.
-				this.deps.recordGoalContinuationFailure(new Error(result.turnError ?? "provider turn ended in error"));
+				this.deps.recordGoalContinuationFailure(
+					new Error(result.turnError ?? "provider turn ended in error"),
+					passAccounting.goalId,
+				);
 				return { turnsSubmitted, stopReason: "turn_errored", finalSnapshot: snapshot() };
 			}
 			if (result.turnOutcome === "interrupted") {
