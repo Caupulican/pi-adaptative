@@ -705,8 +705,10 @@ export class AgentSession {
 			getSessionImageStore: () => this._getSessionImageStore(),
 			isDisposed: () => this._disposed,
 			isStreaming: () => this.isStreaming,
-			classifyOwnerRequest: (text, rules, caps, sig, order) =>
-				this._edgeIntent.classifyOwnerRequest(text, rules, caps, sig, order),
+			judgeOwnerRequest: (text, signal, acceptedOrder) =>
+				this._edgeIntent.judgeOwnerRequest(text, signal, acceptedOrder),
+			enqueueOwnerWords: (text, acceptedOrder, judgment) =>
+				this._edgeIntent.enqueueOwnerWords(text, acceptedOrder, judgment),
 			emitQueueUpdate: () => this._emitQueueUpdate(),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
 		});
@@ -2367,6 +2369,8 @@ export class AgentSession {
 			reflection: this._reflection,
 			earlyDisplayedUserMessages: this._earlyDisplayedUserMessages,
 			ownerPolicy: this._edgeIntent.ownerPolicy,
+			enqueueOwnerWords: (text, acceptedOrder, judgment, signal) =>
+				this._edgeIntent.enqueueOwnerWords(text, acceptedOrder, judgment, signal),
 			accountModels: this._accountModels,
 			custody: this._cache.custody,
 			localRuntimeController: this._localRuntimeController,
@@ -4656,7 +4660,7 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async steer(text: string, images?: ImageContent[]): Promise<void> {
-		await this._admitQueuedOwnerInput("steer", text, images, this._promptSubmission.nextOwnerSubmissionOrder());
+		await this._admitQueuedOwnerInput("steer", text, images, this._promptSubmission.acceptQueuedOwnerWords(text));
 	}
 
 	/**
@@ -4667,7 +4671,7 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async followUp(text: string, images?: ImageContent[]): Promise<void> {
-		await this._admitQueuedOwnerInput("followUp", text, images, this._promptSubmission.nextOwnerSubmissionOrder());
+		await this._admitQueuedOwnerInput("followUp", text, images, this._promptSubmission.acceptQueuedOwnerWords(text));
 	}
 
 	/**

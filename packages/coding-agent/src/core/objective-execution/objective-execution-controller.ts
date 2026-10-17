@@ -206,8 +206,7 @@ export interface ObjectiveExecutionControllerDeps {
 	 * retrieval and non-independent verification); review and escalations stay with workers.
 	 */
 	rootExecutor?: {
-		// biome-ignore lint/suspicious/noConfusingVoidType: Executor callbacks may return no value; reroutes must report that they did not finish.
-		execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void | { readonly outcome: "rerouted" }>;
+		execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void>;
 	};
 	/**
 	 * Who executes a route the root may take: the root (the talker, on its warm cache) or a worker given
@@ -472,7 +471,6 @@ export class ObjectiveExecutionController {
 	private _lastBinding?: ExpertBinding;
 	private _lastRoute?: ObjectiveRoute;
 	private _lastExecutor?: string;
-	private rootExecutionRerouted = false;
 
 	/**
 	 * Record who executes a route the moment it is decided, before the route runs: how many requests a
@@ -1155,7 +1153,6 @@ export class ObjectiveExecutionController {
 					});
 					await this.deps.checkpoints?.recordRoute?.(waitRoute);
 					this._lastRoute = waitRoute;
-					this.rootExecutionRerouted = false;
 					await this._noteExecutor(waitRoute, waitRoute.route);
 					try {
 						await this.deps.waiter.wait({ inFlightAttempts: activeAttempts }, signal);
@@ -1170,7 +1167,6 @@ export class ObjectiveExecutionController {
 			const route = await this.evaluateRouteOnce(objectiveId, { signal });
 			this._lastRoute = route;
 			this._lastExecutor = undefined;
-			this.rootExecutionRerouted = false;
 			const verificationRecovery = route.reason_codes.includes(SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE);
 			const recoveryFingerprint = verificationRecovery
 				? this.verificationRecoveryFingerprint(objectiveId, await this.deps.runtime.reconcileObjective(objectiveId))
@@ -2028,8 +2024,7 @@ export class ObjectiveExecutionController {
 			await this.deps.systemOne?.validateObjectivePostflight?.(objectiveId);
 			// A returned root recovery, unlike a decided route or interrupted executor, spent this
 			// evidence's recovery allowance. New diagnostic/check evidence changes the fingerprint.
-			if (recoveryFingerprint && !this.rootExecutionRerouted)
-				this.completedVerificationRecoveries.set(objectiveId, recoveryFingerprint);
+			if (recoveryFingerprint) this.completedVerificationRecoveries.set(objectiveId, recoveryFingerprint);
 
 			// RCG-042: task postflight project rules. A blocking violation queues repair work and
 			// stops this cycle rather than letting the objective advance past it.
@@ -2100,8 +2095,7 @@ export class ObjectiveExecutionController {
 					(!this.deps.workerDispatcher?.dispatch || (this.deps.chooseExecutor?.(route) ?? "root") === "root")))
 		) {
 			await this._noteExecutor(route, "root");
-			const outcome = await this.deps.rootExecutor.execute(route, signal);
-			this.rootExecutionRerouted = outcome?.outcome === "rerouted";
+			await this.deps.rootExecutor.execute(route, signal);
 			return undefined;
 		}
 		await this._noteExecutor(route, escalated ? "worker:escalated" : "worker");

@@ -102,7 +102,14 @@ export interface PromptSubmissionControllerDeps {
 	readonly costGuard: Pick<CostGuardController, "beginForegroundTurn">;
 	readonly reflection: Pick<ReflectionController, "markOwnerInput" | "queueExternalRootTurnCue">;
 	readonly earlyDisplayedUserMessages: Set<AgentMessage>;
-	readonly ownerPolicy: Pick<OwnerPolicyQueue<OwnerRequestClassificationOutcome>, "settle" | "enqueue">;
+	readonly ownerPolicy: Pick<OwnerPolicyQueue<OwnerRequestClassificationOutcome>, "settle">;
+	/** Owner words join the owner-policy queue, with the judgment they received at submission if any (`SessionEdgeIntentController.enqueueOwnerWords`). */
+	enqueueOwnerWords(
+		text: string,
+		acceptedOrder: number | undefined,
+		judgment: OwnerRequestClassificationOutcome | undefined,
+		signal?: AbortSignal,
+	): void;
 	readonly accountModels: Pick<AccountModelCatalog, "ready">;
 	readonly custody: Pick<CacheCustody, "sanction" | "withdraw" | "request">;
 	readonly localRuntimeController: Pick<LocalRuntimeController, "ensureForegroundModelReady">;
@@ -215,8 +222,23 @@ export class PromptSubmissionController {
 		this.lastUserRequestValue = value;
 	}
 
-	nextOwnerSubmissionOrder(): number {
-		return ++this.ownerSubmissionOrder;
+	/**
+	 * The owner's words submitted through `steer()`/`followUp()`: they take the next owner submission order and are the
+	 * owner speaking, exactly as a prompt's words are (see `noteOwnerSpoke`). Returns the order their judgment carries.
+	 */
+	acceptQueuedOwnerWords(text: string): number {
+		const acceptedOrder = ++this.ownerSubmissionOrder;
+		this.noteOwnerSpoke(text);
+		return acceptedOrder;
+	}
+
+	/** Only the owner's own words are policy and answer a blocker: an extension's message or a host-authored turn is neither. */
+	private noteOwnerSpoke(text: string): void {
+		// An owner development directive is policy, not prompt text: it is captured durably here,
+		// before the turn that carried it can be compacted away.
+		this.deps.ownerRules.record(text);
+		// The owner spoke: an operator blocker waited for exactly that.
+		if (this.deps.getOperatorBlocker() !== undefined) this.deps.setOperatorBlocker(undefined);
 	}
 
 	abortSubmission(reason?: unknown): void {
@@ -266,15 +288,8 @@ export class PromptSubmissionController {
 		try {
 			// The owner spoke: a summary being prepared while the lane idled never makes them wait.
 			this.deps.compaction.cancelIdlePreparation();
-			// Only the owner's own words are policy and answer a blocker: an extension's message (a peer's)
-			// or a host-authored internal turn is neither (`acceptedOrder` is defined for owner input only).
-			if (acceptedOrder !== undefined) {
-				// An owner development directive is policy, not prompt text: it is captured durably here,
-				// before the turn that carried it can be compacted away.
-				this.deps.ownerRules.record(text);
-				// The owner spoke: an operator blocker waited for exactly that.
-				if (this.deps.getOperatorBlocker() !== undefined) this.deps.setOperatorBlocker(undefined);
-			}
+			// `acceptedOrder` is defined for owner input only: an extension's message (a peer's) is not the owner speaking.
+			if (acceptedOrder !== undefined) this.noteOwnerSpoke(text);
 			if (options?.autoContinueGoal !== false) {
 				this.deps.backgroundLanes.clearGoalAutoContinueTimer();
 			}
@@ -320,26 +335,6 @@ export class PromptSubmissionController {
 	withdrawQueuedOwnerInput(input: PendingInputHandle): void {
 		const changed = this.deps.pendingQueue.withdraw(input) || this.deps.pendingQueue.reclaim(input);
 		if (changed) this.deps.emitQueueUpdate();
-	}
-
-	/**
-	 * Owner words judged when they were queued join the owner-policy queue with that judgment, applied in owner order where
-	 * the queue settles. Only a classified judgment is carried: words the evaluator could not judge (or whose judgment a
-	 * newer request superseded) are classified again there, exactly like words that were never judged.
-	 */
-	private enqueueJudgedOwnerWords(
-		text: string,
-		acceptedOrder: number | undefined,
-		judgment: OwnerRequestClassificationOutcome,
-		signal?: AbortSignal,
-	): void {
-		if (!this.deps.getSystemOneController()) return;
-		this.deps.ownerPolicy.enqueue({
-			text,
-			...(acceptedOrder !== undefined ? { acceptedOrder } : {}),
-			...(signal ? { signal } : {}),
-			...(judgment.status === "classified" ? { judgment } : {}),
-		});
 	}
 
 	/**
@@ -625,7 +620,7 @@ export class PromptSubmissionController {
 							// The owner's admitted words become policy when the run delivers them, never when they are taken
 							// back, cleared or held first: their judgment is applied where it is read.
 							...(ownerOriginalText !== undefined && judged !== undefined
-								? { onDelivered: () => this.enqueueJudgedOwnerWords(ownerOriginalText, judgedOrder, judged) }
+								? { onDelivered: () => this.deps.enqueueOwnerWords(ownerOriginalText, judgedOrder, judged) }
 								: {}),
 						});
 					}
@@ -997,14 +992,8 @@ export class PromptSubmissionController {
 					// The owner's words are classified where their outcome is read (see OwnerPolicyQueue): a
 					// turn that uses no tool never waits for, or pays for, the classification. A queued input
 					// that became this turn was judged before it ran: its judgment is applied, never asked again.
-					if (ownerJudgment !== undefined)
-						this.enqueueJudgedOwnerWords(text, lifecycle?.acceptedOrder, ownerJudgment, submissionSignal);
-					else if (this.deps.getSystemOneController())
-						this.deps.ownerPolicy.enqueue({
-							text,
-							...(lifecycle?.acceptedOrder !== undefined ? { acceptedOrder: lifecycle.acceptedOrder } : {}),
-							...(submissionSignal ? { signal: submissionSignal } : {}),
-						});
+					if (ownerJudgment !== undefined || this.deps.getSystemOneController())
+						this.deps.enqueueOwnerWords(text, lifecycle?.acceptedOrder, ownerJudgment, submissionSignal);
 					else await this.deps.classifyOwnerRequest(text, "", false, submissionSignal, lifecycle?.acceptedOrder);
 				} else if (this.deps.getSystemOneController()) {
 					requestNote = await this.deps.runtimeBuilder.withTaskDirectoryContext(

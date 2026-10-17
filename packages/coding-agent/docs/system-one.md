@@ -307,7 +307,12 @@ left over from earlier tool-free turns are screened together in one request, one
 message ("only small talk or a request to understand something, with no instruction"). A message is set
 aside only on a hard pass of that question; an unsure answer or an outage classifies it in full, in the
 order the owner wrote it, because a delivery limit and its lifting are order dependent. The newest message
-is always classified in full. A failed classification keeps the messages it did not reach. Notes the
+is always classified in full. A queued owner input (`steer()`, `followUp()`, or a prompt queued behind a
+running turn) is classified in full once, when it is submitted, and joins the queue with that judgment
+when the run delivers it, never when it is taken back, cleared or held; it is not screened or classified
+again. A judgment superseded by a newer owner input is carried the same way, since classifying the older
+words again would be refused as stale. Only an input whose judgment System One could not give, or one
+superseded by words with no submission order, is screened and classified at the queue. A failed classification keeps the messages it did not reach. Notes the
 classification produces (a rule conflict, a settled rule) reach the model at the start of the next turn.
 
 Measured on 70 messages in ten languages (English, Portuguese, Spanish, French, German, Chinese, Japanese,

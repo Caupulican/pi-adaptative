@@ -45,16 +45,15 @@ const CALIBRATION_WARNING = `Text tool protocol for ${HARNESS_PROVIDER}/root has
 const CALIBRATION_RUN_PROMPT = "Run the control.";
 const CALIBRATION_BASELINE_REPLY = "The calibration baseline reply.";
 
-/** Neutral owner words: backlog settlement also screens and checks capabilities; steering classifies directly. */
+/**
+ * Neutral owner words: backlog settlement also screens them first; steering judges them in full when they are submitted.
+ * Both are the full owner judgment, so both ask the capabilities a fresh session has not granted yet.
+ */
 function enterNeutralModeIntake(world: HarnessWorld, phase: string, input: string, backlog: boolean): void {
 	if (!world.systemOne.enabled) return;
 	const judgments = {
-		...(backlog
-			? {
-					carries_0: { kind: "noul" as const, probability: 0.02 },
-					capabilities_authorized: { kind: "noul" as const, probability: 0.02 },
-				}
-			: {}),
+		...(backlog ? { carries_0: { kind: "noul" as const, probability: 0.02 } } : {}),
+		capabilities_authorized: { kind: "noul" as const, probability: 0.02 },
 		changes_model_pools: { kind: "noul" as const, probability: 0.02 },
 		local_commits_only: { kind: "noul" as const, probability: 0.02 },
 		lifts_delivery_block: { kind: "noul" as const, probability: 0.02 },
@@ -83,9 +82,10 @@ function enterNeutralModeIntake(world: HarnessWorld, phase: string, input: strin
 			expect(intake.optional_tools, "the neutral judgment refers to the real built-in candidate").toMatchObject([
 				{ toolName: "secret_store", sourcePath: "<builtin:secret_store>" },
 			]);
-			expect("capabilities_authorized" in questions, "steering does not classify deferred capabilities").toBe(
-				backlog,
-			);
+			expect(
+				"capabilities_authorized" in questions,
+				"steering and backlog settlement both classify the still-pending capabilities",
+			).toBe(true);
 		},
 	});
 }

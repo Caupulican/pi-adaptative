@@ -647,6 +647,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	await withDeadline(trace, "queued quit: the run reaches its held gate", qhReached.promise);
 	if (world.systemOne.enabled) {
 		world.systemOne.enterPhase("queued-quit-intake", {
+			capabilities_authorized: { kind: "noul", probability: 0.02 },
 			changes_model_pools: { kind: "noul", probability: 0.02 },
 			local_commits_only: { kind: "noul", probability: 0.02 },
 			lifts_delivery_block: { kind: "noul", probability: 0.02 },
@@ -709,6 +710,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	await withDeadline(trace, "queued control: the run reaches its gate", qlReached.promise);
 	if (world.systemOne.enabled) {
 		world.systemOne.enterPhase("queued-control-intake", {
+			capabilities_authorized: { kind: "noul", probability: 0.02 },
 			changes_model_pools: { kind: "noul", probability: 0.02 },
 			local_commits_only: { kind: "noul", probability: 0.02 },
 			lifts_delivery_block: { kind: "noul", probability: 0.02 },

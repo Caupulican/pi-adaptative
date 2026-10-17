@@ -8,6 +8,7 @@ import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { PendingInputHoldReason, PendingInputQueueController } from "./pending-input-queue-controller.ts";
 import { truncateWithEllipsis } from "./provider-tool-text.ts";
 import { appendQueuedInputRecord, type RecordableQueuedInput, readQueuedInputRecord } from "./queued-input-record.ts";
+import type { OwnerRequestClassificationOutcome } from "./session-edge-intent-controller.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 
 export interface QueuedInputPersistenceControllerDeps {
@@ -16,13 +17,18 @@ export interface QueuedInputPersistenceControllerDeps {
 	getSessionImageStore(): SessionImageStore | undefined;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
-	classifyOwnerRequest(
+	/** The full classification of the owner's words, once, before they are admitted (`SessionEdgeIntentController.judgeOwnerRequest`). */
+	judgeOwnerRequest(
 		text: string,
-		rules: string,
-		capabilitiesPending: boolean,
 		signal: AbortSignal | undefined,
 		acceptedOrder: number | undefined,
-	): Promise<{ status: string; cancelled?: boolean; contextChanged?: boolean }>;
+	): Promise<OwnerRequestClassificationOutcome>;
+	/** Delivered owner words join the owner-policy queue with that judgment (`SessionEdgeIntentController.enqueueOwnerWords`). */
+	enqueueOwnerWords(
+		text: string,
+		acceptedOrder: number | undefined,
+		judgment: OwnerRequestClassificationOutcome | undefined,
+	): void;
 	emitQueueUpdate(): void;
 	emitWarning(message: string): void;
 }
@@ -39,8 +45,10 @@ export class QueuedInputPersistenceController {
 
 	/**
 	 * A queued owner input is pending from the moment it is submitted, in submission order, and is
-	 * classified before it is admitted. A newer request supersedes the judgment, never the input; a
-	 * cancellation (interrupt, take, clear, disposal, context change) withdraws it.
+	 * judged in full once, before it is admitted -- the same judgment a prompt queued behind a running
+	 * turn receives. The judgment becomes policy when the run delivers the input, in owner order, never
+	 * when the input is taken back, cleared or held first. A newer request supersedes the judgment, never
+	 * the input; a cancellation (interrupt, take, clear, disposal, context change) withdraws it.
 	 */
 	async admitQueuedOwnerInput(
 		kind: "steer" | "followUp",
@@ -53,7 +61,7 @@ export class QueuedInputPersistenceController {
 		this.deps.emitQueueUpdate();
 		let admitted = false;
 		try {
-			const classified = await this.deps.classifyOwnerRequest(text, "", false, pending.signal, acceptedOrder);
+			const classified = await this.deps.judgeOwnerRequest(text, pending.signal, acceptedOrder);
 			if ("cancelled" in classified && classified.cancelled) {
 				if (classified.contextChanged) pendingQueue.hold(pending);
 				return;
@@ -63,6 +71,7 @@ export class QueuedInputPersistenceController {
 				text: pendingQueue.prepareQueuedMessageText(text),
 				images,
 				ownerOriginalText: text,
+				onDelivered: () => this.deps.enqueueOwnerWords(text, acceptedOrder, classified),
 			});
 		} finally {
 			if (!admitted) pendingQueue.withdraw(pending);

@@ -386,9 +386,12 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	if (world.systemOne.enabled) {
 		const olderReached = createBarrier();
 		const releaseOlder = createBarrier();
+		// A followUp() is judged in full before it is admitted, as a queued prompt is: no edge class is granted yet, so the
+		// still-pending capabilities are asked too.
 		world.systemOne.enterPhase(
 			"owner-older",
 			{
+				capabilities_authorized: { kind: "noul", probability: 0.02 },
 				changes_model_pools: { kind: "noul", probability: 0.02 },
 				local_commits_only: { kind: "noul", probability: 0.02 },
 				lifts_delivery_block: { kind: "noul", probability: 0.02 },
@@ -401,6 +404,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		await withDeadline(trace, "older owner evaluation reached System One", olderReached.promise);
 		trace.mark("root", "owner-older.held");
 		world.systemOne.enterPhase("owner-newer", {
+			capabilities_authorized: { kind: "noul", probability: 0.02 },
 			changes_model_pools: { kind: "noul", probability: 0.02 },
 			local_commits_only: { kind: "noul", probability: 0.02 },
 			lifts_delivery_block: { kind: "noul", probability: 0.02 },
@@ -429,10 +433,11 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			session.getFollowUpMessages(),
 			"both owner inputs remain admitted after the older evaluation returns",
 		).toEqual(expect.arrayContaining([OLDER_OWNER_WORDS, NEWER_OWNER_WORDS]));
-		// The reordered owner words are queued, not yet screened: their screen is the only request this delivery makes.
-		world.systemOne.enterPhase("queued-delivery", {
-			carries_0: { kind: "noul", probability: 0.02 },
-		});
+		// Every owner input this delivery brings was judged when it was submitted: the newer input's judgment is classified, the
+		// older input's was superseded by it, and the tab-preference follow-up's is classified or, when the older input's
+		// judgment starts before it answers, superseded. Each is carried into the owner-policy queue as judged and applied
+		// there, never screened or judged again, so this delivery makes no System One request.
+		world.systemOne.enterPhase("queued-delivery", {});
 	} else {
 		await withDeadline(trace, "older owner input queued", trace.track(session.followUp(OLDER_OWNER_WORDS)));
 		await withDeadline(trace, "newer owner input queued", trace.track(session.followUp(NEWER_OWNER_WORDS)));

@@ -312,6 +312,34 @@ export class SessionEdgeIntentController {
 	}
 
 	/**
+	 * The one way owner words join the owner-policy queue. Words judged when they were submitted (a queued steer, follow-up
+	 * or prompt) carry that judgment and are applied as judged, in owner order, where the queue settles; they are never
+	 * screened or judged again. A superseded judgment is carried too when its submission is older than one already judged:
+	 * judging those words again at the queue would be refused by the same staleness rule in `classifyOwnerRequest`, and the
+	 * newest judged order only grows, so a screen of them could decide nothing. Words superseded by a request that carried no
+	 * order are not stale, and are screened and classified at the queue like words with no judgment, or one the evaluator
+	 * could not give (an outage).
+	 */
+	enqueueOwnerWords(
+		text: string,
+		acceptedOrder: number | undefined,
+		judgment: OwnerRequestClassificationOutcome | undefined,
+		signal?: AbortSignal,
+	): void {
+		if (!this.deps.getSystemOneController()) return;
+		const stale = acceptedOrder !== undefined && acceptedOrder < this.newestJudgedOwnerOrder;
+		const carried =
+			judgment !== undefined &&
+			(judgment.status === "classified" || ("superseded" in judgment && judgment.superseded === true && stale));
+		this.ownerPolicy.enqueue({
+			text,
+			...(acceptedOrder !== undefined ? { acceptedOrder } : {}),
+			...(signal ? { signal } : {}),
+			...(carried ? { judgment } : {}),
+		});
+	}
+
+	/**
 	 * The full classification of the owner's words (written rules and still-pending capabilities included), not yet
 	 * applied. A queued owner input is judged this way once, before it is admitted; the judgment it carries into the
 	 * owner-policy queue is applied there in owner order (`applyOwnerRequestOutcome`), never asked again.
