@@ -18,6 +18,7 @@ import type { LaneRecord, LaneTerminalStatus } from "./autonomy/lane-tracker.ts"
 import type { BackgroundToolTaskLiveView } from "./background-tool-task-controller.ts";
 import type { AutoCompactionReason } from "./compaction-controller.ts";
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
+import type { WorkerWriteReservationTimers } from "./delegation/worker-write-reservation-coordinator.ts";
 import type {
 	ContextUsage,
 	ExtensionCommandContextActions,
@@ -173,6 +174,8 @@ export interface AgentSessionConfig {
 	systemOneController?: SystemOneController;
 	/** The time source of the history summary hierarchy; absent means the system clock and real timers. */
 	historyTimeSource?: TranscriptSummaryTimeSource;
+	/** Timers of the write-reservation retained-release backoff alarm; absent means the global timers, unreferenced. */
+	writeReservationTimers?: WorkerWriteReservationTimers;
 	/** What the owner's provider accounts offer, checked with the providers; absent skips the check. */
 	accountModels?: AccountModelCatalog;
 	/** Execution loop mode for objective execution ('legacy_goal', 'objective_shadow', 'objective_primary'). */

@@ -259,6 +259,7 @@ import {
 	formatWorkerWriteReservationBlock,
 	WorkerWriteReservationCoordinator,
 	type WorkerWriteReservationResourceSnapshot,
+	type WorkerWriteReservationTimers,
 	type WorkerWriteReservationWaitYield,
 } from "./worker-write-reservation-coordinator.ts";
 
@@ -469,6 +470,8 @@ export interface WorkerDelegationControllerDeps {
 	markModelExhausted?(model: Model<Api>, retryAfterMs?: number): void;
 	/** Root's tool mechanics (output reduction, encodings, shell engine, packing), shared with every lane. */
 	getSharedLaneToolOptions?(): SharedLaneToolOptions;
+	/** Timers of the write-reservation retained-release alarm; undefined means the global timers. */
+	getWriteReservationTimers?(): WorkerWriteReservationTimers | undefined;
 	/** Parent session's canonical credential source; worker evidence and reviewer calls share it. */
 	getCredentialExposureBoundary?(): CredentialExposureBoundary;
 	/** Each worker provider response, as a cache observation on the worker conversation's own history. */
@@ -912,6 +915,7 @@ export class WorkerDelegationController {
 				this.agentControl.signalStateChanged();
 			},
 			warn: (message) => this.safeWarn(message),
+			timers: this.deps.getWriteReservationTimers?.(),
 		});
 	}
 

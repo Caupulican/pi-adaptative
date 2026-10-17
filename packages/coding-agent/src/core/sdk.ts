@@ -40,6 +40,7 @@ import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { resolveEffectiveCompletionProfile } from "./decision/completion-profile.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
+import type { WorkerWriteReservationTimers } from "./delegation/worker-write-reservation-coordinator.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { resolveFastModeServiceTier } from "./fast-mode.ts";
 import { ObjectivePrimaryBindingError } from "./goals/goal-session-controller.ts";
@@ -185,6 +186,8 @@ export interface CreateAgentSessionOptions {
 	systemOneFetch?: typeof fetch;
 	/** The time source of the history summary hierarchy (retry waits, retention and orphan ages); default: the system clock. */
 	historyTimeSource?: TranscriptSummaryTimeSource;
+	/** Timers of the write-reservation retained-release backoff alarm; default: the global timers, unreferenced. */
+	writeReservationTimers?: WorkerWriteReservationTimers;
 
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
@@ -875,6 +878,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			sessionStartEvent: options.sessionStartEvent,
 			systemOneController,
 			...(options.historyTimeSource !== undefined ? { historyTimeSource: options.historyTimeSource } : {}),
+			...(options.writeReservationTimers !== undefined
+				? { writeReservationTimers: options.writeReservationTimers }
+				: {}),
 			accountModels,
 			executionLoopMode,
 			objectiveExecutionController,

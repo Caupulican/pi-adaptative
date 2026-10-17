@@ -67,6 +67,26 @@ export interface WorkerWriteReservationResourceSnapshot {
 	readonly availabilityDeliveryDepth: number;
 }
 
+/**
+ * The timers of the coordinator's retained-release backoff alarm. A timer it arms must never keep the process
+ * alive. The default is the global timer pair, unreferenced; a host may inject another so the alarm fires on an
+ * event of its own instead of on the wall clock.
+ */
+export interface WorkerWriteReservationTimers {
+	setTimeout(callback: () => void, delayMs: number): unknown;
+	clearTimeout(handle: unknown): void;
+}
+
+/** The default timers: the global pair, each timer unreferenced so a pending retry never holds the process open. */
+const SYSTEM_TIMERS: WorkerWriteReservationTimers = {
+	setTimeout: (callback, delayMs) => {
+		const timer = setTimeout(callback, delayMs);
+		timer.unref?.();
+		return timer;
+	},
+	clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
 export interface WorkerWriteReservationCoordinatorOptions {
 	agentDir: string;
 	getCwd(): string;
@@ -75,6 +95,8 @@ export interface WorkerWriteReservationCoordinatorOptions {
 	drainQueuedWorkers(): void;
 	warn(message: string): void;
 	isProcessAlive?(pid: number): boolean;
+	/** The retained-release alarm's timers; absent means {@link SYSTEM_TIMERS}. */
+	timers?: WorkerWriteReservationTimers;
 }
 
 /** Backoff bounds for retrying a durable release that failed (lock contention, store I/O). */
@@ -112,12 +134,15 @@ export class WorkerWriteReservationCoordinator {
 	 * reservation id. They still fence other writers, so they stay visible as held leases until released.
 	 */
 	private readonly pendingReleases = new Map<string, WorkerWriteReservationLease>();
-	private pendingReleaseTimer: ReturnType<typeof setTimeout> | undefined;
+	private readonly timers: WorkerWriteReservationTimers;
+	/** The armed alarm's handle, opaque to the coordinator: only `undefined` means no alarm is armed. */
+	private pendingReleaseTimer: unknown;
 	private pendingReleaseFailures = 0;
 	private disposed = false;
 
 	constructor(options: WorkerWriteReservationCoordinatorOptions) {
 		this.options = options;
+		this.timers = options.timers ?? SYSTEM_TIMERS;
 		this.store = new WorkerWriteReservationStore({ agentDir: options.agentDir });
 	}
 
@@ -351,17 +376,15 @@ export class WorkerWriteReservationCoordinator {
 	}
 
 	private armPendingReleaseRetry(): void {
-		if (this.disposed || this.pendingReleaseTimer || this.pendingReleases.size === 0) return;
+		if (this.disposed || this.pendingReleaseTimer !== undefined || this.pendingReleases.size === 0) return;
 		const delayMs = Math.min(
 			PENDING_RELEASE_RETRY_MAX_MS,
 			PENDING_RELEASE_RETRY_BASE_MS * 2 ** Math.min(this.pendingReleaseFailures, 16),
 		);
-		const timer = setTimeout(() => {
+		this.pendingReleaseTimer = this.timers.setTimeout(() => {
 			this.pendingReleaseTimer = undefined;
 			this.retryPendingReleases({ warn: true });
 		}, delayMs);
-		timer.unref?.();
-		this.pendingReleaseTimer = timer;
 	}
 
 	/**
@@ -396,8 +419,8 @@ export class WorkerWriteReservationCoordinator {
 		// Only a pass over every retained record says whether the backoff may reset.
 		if (failed) this.pendingReleaseFailures += 1;
 		else if (repository === undefined) this.pendingReleaseFailures = 0;
-		if (this.pendingReleases.size === 0 && this.pendingReleaseTimer) {
-			clearTimeout(this.pendingReleaseTimer);
+		if (this.pendingReleases.size === 0 && this.pendingReleaseTimer !== undefined) {
+			this.timers.clearTimeout(this.pendingReleaseTimer);
 			this.pendingReleaseTimer = undefined;
 		}
 		this.armPendingReleaseRetry();
@@ -441,8 +464,8 @@ export class WorkerWriteReservationCoordinator {
 
 	private disposeOwnedResources(required: boolean, canRelease?: (laneId: string) => boolean): void {
 		this.disposed = true;
-		if (this.pendingReleaseTimer) {
-			clearTimeout(this.pendingReleaseTimer);
+		if (this.pendingReleaseTimer !== undefined) {
+			this.timers.clearTimeout(this.pendingReleaseTimer);
 			this.pendingReleaseTimer = undefined;
 		}
 		// Retained releases belong to no lane any more, so no physical hold can make them unreleasable.

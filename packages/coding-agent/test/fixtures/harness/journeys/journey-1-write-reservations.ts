@@ -815,9 +815,12 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	// E13 live-session retained release (required release, live owner): a writer on its own scope finishes while the store refuses every
 	// release of its record. The physically settled lane hands that exact record to the coordinator's retained release: the specialist hold
 	// and the project claim are released, while the lease stays held and the record stays durable. A second writer on the same scope waits
-	// behind it and runs no request while the record is durable. Only a retry after the refusal is cleared releases the record and admits the
-	// waiter. That retry is the coordinator's real-time backoff alarm or a same-repository admission, so only its effect is asserted, never
-	// which retry ran. The second writer's own release, with no fault armed, is the normal-order control.
+	// behind it and runs no request while the record is durable. The record's backoff alarm runs on the world's virtual reservation timers,
+	// so it fires only when the journey advances them: while the refusal is armed each alarm retry is refused and the next is armed at
+	// min(30_000, 1_000 * 2^failures) ms (PENDING_RELEASE_RETRY_BASE_MS/MAX_MS; failures counts the failed retry passes since the retained set
+	// was empty), so 1_000, 2_000, 4_000, 8_000, 16_000, then the 30_000 cap, each firing exactly when its delay has elapsed. After the refusal
+	// is cleared, the armed alarm is the retry that releases the record, observed synchronously before anything else can run, and only then
+	// is the waiter admitted. The second writer's own release, with no fault armed, is the normal-order control.
 	const E13R_SCOPE = projectPath("e13r", "out");
 	const e13rAdmitted = createBarrier();
 	const e13rGate = createBarrier();
@@ -951,6 +954,43 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		).toEqual([
 			`Failed to release worker write reservation ${e13rLease.taskId}; retrying: Scripted IO fault e13r-release-denied: ${e13rRefusedOperation.kind} '${e13rRefusedOperation.path}'`,
 		]);
+		// The backoff while the refusal is armed: the retained set started empty, so its first alarm is armed at the base delay, and each
+		// refused alarm retry re-arms it doubled, up to the cap. Nothing runs between these synchronous steps, so no admission retry interleaves.
+		// Only acquire and release write the store, and nothing has been admitted since the settled release, so it is the only refusal yet:
+		// no retry pass has counted a failure before the first alarm.
+		expect(e13rDenial.hits, "the settled release is the only refused store operation before the first alarm").toBe(1);
+		const e13rBackoff = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
+		const e13rAlarmMark = world.warnings.length;
+		for (const delayMs of e13rBackoff) {
+			expect(
+				world.reservationTimers.armedDelays(),
+				`the retained record's next retry is armed at ${delayMs} ms`,
+			).toEqual([delayMs]);
+			expect(world.reservationTimers.advance(delayMs - 1), `no retry fires before ${delayMs} ms have elapsed`).toBe(
+				0,
+			);
+			const hitsBefore = e13rDenial.hits;
+			expect(world.reservationTimers.advance(1), `the retry fires once ${delayMs} ms have elapsed`).toBe(1);
+			expect(e13rDenial.hits, `the ${delayMs} ms alarm retry is refused exactly once`).toBe(hitsBefore + 1);
+		}
+		expect(world.reservationTimers.armedDelays(), "a refused retry at the cap re-arms at the cap").toEqual([30_000]);
+		const e13rAlarmWarnings = world.warnings.slice(e13rAlarmMark);
+		expect(
+			e13rAlarmWarnings,
+			"each refused alarm retry reports itself once, and nothing else is reported",
+		).toHaveLength(e13rBackoff.length);
+		for (const message of e13rAlarmWarnings) {
+			expect(
+				message.startsWith(
+					`Retained worker write reservation ${e13rLease.reservationId} release failed again: Scripted IO fault e13r-release-denied: ${e13rFaultKind} '`,
+				),
+				"the alarm retry names the retained record and its refused store operation",
+			).toBe(true);
+		}
+		expect(e13rHeldLeases(), "the refused alarm retries keep the exact lease held").toEqual(e13rLeases);
+		expect(e13rStoreText(e13rStorePath), "the refused alarm retries leave the record durable").toContain(
+			e13rLease.reservationId,
+		);
 		// Forbidden: a waiter on the same scope is queued behind the retained record and runs no request while the record is durable.
 		let e13rSecondFirstRequest: { readonly leases: typeof e13rLeases; readonly store: string } | undefined;
 		world.provider.enqueue("worker-a", {
@@ -1037,14 +1077,27 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		expect(e13rHeldLeases(), "the only held lease is still the retained record").toEqual(e13rLeases);
 		expect(e13rStoreText(e13rStorePath), "the retained record is still durable").toContain(e13rLease.reservationId);
 		expect(e13rSecondFirstRequest, "the waiting writer runs no request while the record is durable").toBeUndefined();
-		// The settled release, then the waiting writer's own admission, each retried the release first and were refused.
+		// The settled release, each alarm retry, then the waiting writer's own admission, each retried the release first and were refused.
 		expect(
 			e13rDenial.hits,
-			"the settled release and the waiting admission's retry are refused",
-		).toBeGreaterThanOrEqual(2);
+			"the settled release, the alarm retries and the waiting admission's retry are refused",
+		).toBeGreaterThanOrEqual(1 + e13rBackoff.length + 1);
+		// A refused admission retry counts as a failure but leaves the armed alarm as it was: it is still the one armed at the cap.
+		expect(world.reservationTimers.armedDelays(), "the admission retry leaves the capped alarm armed").toEqual([
+			30_000,
+		]);
 		e13rDenial.clear();
 		const e13rClearedMark = world.warnings.length;
-		await withDeadline(trace, "E13R waiting writer admitted after the retry", e13rSecondAdmitted.promise, 90_000);
+		// Synchronously after the clear, so no admission retry can run first: the alarm fires when its delay has elapsed and releases the
+		// record, and nothing is retained or re-armed after it, all before any queued waiter has been woken.
+		expect(world.reservationTimers.advance(29_999), "no retry fires before the capped delay has elapsed").toBe(0);
+		expect(world.reservationTimers.advance(1), "the capped alarm retry fires once its delay has elapsed").toBe(1);
+		expect(e13rStoreText(e13rStorePath), "the alarm retry removes the retained record from the store").not.toContain(
+			e13rLease.reservationId,
+		);
+		expect(e13rHeldLeases(), "the alarm retry releases the retained lease before the waiter is admitted").toEqual([]);
+		expect(world.reservationTimers.armedDelays(), "a successful retry arms no further alarm").toEqual([]);
+		await withDeadline(trace, "E13R waiting writer admitted after the retry", e13rSecondAdmitted.promise);
 		expect(
 			e13rSecondFirstRequest?.store,
 			"the retained record left the durable store before the waiting writer's first request",
@@ -1114,6 +1167,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		world.warnings.slice(e13rDisposeMark),
 		"the E13R owner, with nothing retained, discloses nothing at close",
 	).toEqual([]);
+	expect(world.reservationTimers.armedDelays(), "the disposed E13R owner leaves no retry alarm armed").toEqual([]);
 	trace.mark("root", "e13.retained-release");
 	// E13Q queued receipts of a reused specialist, one isolated owner, scope and refusal per entrance, so a failure names its entrance.
 	// Each block rebuilds the E13R precondition: a fresh writer finishes while the store refuses the release of its record, so the
@@ -1122,7 +1176,8 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	// follow_up (followUpSessionRootWorkerAgent), (c) start with agentId and its own model and write scope (validated reuse through the
 	// controller's specialist selection). Each lands on the specialist's own mailbox turn, which the scheduler queues behind the retained
 	// record during the same synchronous drain, so the receipt states the write_reservation wait. It is asserted in the durable result and
-	// in the next root request the model reads. Clearing the refusal lets the queued turn run, and the owner closes cleanly.
+	// in the next root request the model reads. Clearing the refusal and advancing the world's virtual reservation timers by the base
+	// delay fires the retained record's alarm, whose retry releases it; the queued turn then runs, and the owner closes cleanly.
 	const e13qQueuedReceipt = async (
 		tag: "start" | "follow-up" | "reuse",
 		dispatchArguments: (agentId: string, scope: string) => Record<string, unknown>,
@@ -1245,6 +1300,11 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 				leases,
 			);
 			expect(settled?.executingHolds, `the E13Q ${tag} specialist is settled`).toEqual([]);
+			// The retained set started empty, so its backoff alarm is armed at the base delay (E13R derives the whole backoff).
+			expect(
+				world.reservationTimers.armedDelays(),
+				`the E13Q ${tag} retained record's retry is armed at the base delay`,
+			).toEqual([1_000]);
 			// The specialist's queued turn: its first request is recorded and held until the owner reads its result.
 			let queuedFirstRequest: { readonly leases: typeof leases } | undefined;
 			world.provider.enqueue("worker-a", {
@@ -1324,9 +1384,25 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 				undefined,
 			);
 			expect(heldLeases(), `the E13Q ${tag} retained record is still the only held lease`).toEqual(leases);
-			// Clearing the refusal lets a retry release the record and admit the queued turn (E13R's tail).
+			// A refused admission retry counts as a failure but leaves the armed alarm as it was.
+			expect(
+				world.reservationTimers.armedDelays(),
+				`the E13Q ${tag} dispatch leaves the base-delay alarm armed`,
+			).toEqual([1_000]);
+			// Clearing the refusal, then the alarm once its delay has elapsed, releases the record synchronously; only then is the
+			// queued turn admitted (E13R's tail).
 			denial.clear();
-			await withDeadline(trace, `E13Q ${tag} queued turn admitted`, queuedAdmitted.promise, 90_000);
+			expect(world.reservationTimers.advance(999), `no E13Q ${tag} retry fires before the base delay`).toBe(0);
+			expect(world.reservationTimers.advance(1), `the E13Q ${tag} alarm retry fires at the base delay`).toBe(1);
+			expect(storeText(storePath), `the E13Q ${tag} alarm retry removes the retained record`).not.toContain(
+				lease.reservationId,
+			);
+			expect(heldLeases(), `the E13Q ${tag} alarm retry releases the retained lease`).toEqual([]);
+			expect(
+				world.reservationTimers.armedDelays(),
+				`the E13Q ${tag} successful retry arms no further alarm`,
+			).toEqual([]);
+			await withDeadline(trace, `E13Q ${tag} queued turn admitted`, queuedAdmitted.promise);
 			expect(
 				queuedFirstRequest?.leases.map((held) => held.taskId),
 				`at the E13Q ${tag} queued turn's first request the only held lease is its own`,
@@ -1373,6 +1449,10 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			queuedGate.release();
 		}
 		expect(await world.disposeSessionInBody(owner), `the E13Q ${tag} owner disposes cleanly`).toBeUndefined();
+		expect(
+			world.reservationTimers.armedDelays(),
+			`the disposed E13Q ${tag} owner leaves no retry alarm armed`,
+		).toEqual([]);
 		trace.mark("root", `e13q.${tag}-receipt`);
 	};
 	// (a) Explicit start with agentId: "durably accepted task message ... on its persistent context (lane <id>; ...; waiting: ...)".

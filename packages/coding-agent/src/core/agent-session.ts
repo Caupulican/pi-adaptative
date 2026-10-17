@@ -1030,6 +1030,7 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
 			getWorktreeSyncEnginePorts: () => this._worktreeSyncEnginePorts,
+			getWriteReservationTimers: () => config.writeReservationTimers,
 			getResourceLoader: () => this._resourceLoader,
 			getActiveOrchestrationProfile: () => config.orchestrationProfile,
 			getModelRegistry: () => this._modelRegistry,
