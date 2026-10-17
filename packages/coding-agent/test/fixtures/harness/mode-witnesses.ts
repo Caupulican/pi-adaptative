@@ -2700,10 +2700,10 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 				"only live backoff expiry starts the retry provider round",
 			).toEqual(stopAt === "control" || stopAt === "stranded-control" ? ["root", "root"] : ["root"]);
 			if (stopAt === "control" || stopAt === "stranded-control") {
-				expect(retryFlags, "a genuinely retryable live error advertises a retry, then success does not").toEqual([
-					true,
-					false,
-				]);
+				expect(
+					retryFlags,
+					"a genuinely retryable live error advertises a retry only when a recovery round follows; the stall-cap exit advertises none, and success never does",
+				).toEqual(stopAt === "stranded-control" ? [false, false] : [true, false]);
 				expect(
 					retryEvents,
 					"backoff expiry retries, while the stall-cap exit delivers stranded input without a recovery retry",
