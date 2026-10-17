@@ -17,7 +17,7 @@ import { getInFlightWorkUnits } from "../../../../src/core/reload-blockers.ts";
 import { createAskQuestionToolDefinition } from "../../../../src/core/tools/ask-question.ts";
 import { createBashToolDefinition } from "../../../../src/core/tools/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "../../../../src/core/tools/shell-execution-session.ts";
-import { calls, createBarrier } from "../scripted-provider.ts";
+import { calls, createBarrier, type ScriptedReply } from "../scripted-provider.ts";
 import {
 	HARNESS_PROJECT_CWD,
 	type HarnessWorld,
@@ -812,6 +812,287 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		// Failure-safe: an assertion that fails before the normal release must not leave the writer gated for the journey's cleanup.
 		e13wGate.release();
 	}
+	// E13 live-session retained release (required release, live owner): a writer on its own scope finishes while the store refuses every
+	// release of its record. The physically settled lane hands that exact record to the coordinator's retained release: the specialist hold
+	// and the project claim are released, while the lease stays held and the record stays durable. A second writer on the same scope waits
+	// behind it and runs no request while the record is durable. Only a retry after the refusal is cleared releases the record and admits the
+	// waiter. That retry is the coordinator's real-time backoff alarm or a same-repository admission, so only its effect is asserted, never
+	// which retry ran. The second writer's own release, with no fault armed, is the normal-order control.
+	const E13R_SCOPE = projectPath("e13r", "out");
+	const e13rAdmitted = createBarrier();
+	const e13rGate = createBarrier();
+	const e13rSecondAdmitted = createBarrier();
+	const e13rSecondGate = createBarrier();
+	let e13rDenial: ReturnType<typeof world.io.denyUntilCleared> | undefined;
+	const e13rCreated = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
+	const e13rSession = e13rCreated.session;
+	const e13rStart = (id: string, instructions: string) => ({
+		id,
+		name: "delegate",
+		arguments: {
+			action: "start",
+			model: { provider: "harness-script", modelId: "worker-a" },
+			writePaths: [E13R_SCOPE],
+			instructions,
+		},
+	});
+	const e13rReport = (id: string, summary: string): ScriptedReply => ({
+		content: [{ type: "toolCall", id, name: "submit_report", arguments: { status: "completed", summary } }],
+		stopReason: "toolUse",
+	});
+	const e13rStoreText = (storePath: string): string => world.io.fileEntries().get(storePath) ?? "";
+	const e13rHeldLeases = () => e13rSession.getResourceSnapshot().workers?.reservations.heldLeases ?? [];
+	world.provider.enqueue(
+		"root",
+		calls("e13r-start-first", [e13rStart("e13r-start-1", "E13R-WRITER holds its scope.")]),
+		{
+			name: "e13r-first-reply",
+			check: (request) => {
+				const started = latestBatchResults(request).find((result) => result.toolName === "delegate");
+				if (started?.isError || !started?.text.includes("delegate started (running)")) {
+					throw new Error(`the retained-release writer did not start: ${started?.text ?? "no result"}`);
+				}
+			},
+			reply: { content: [{ type: "text", text: "The retained-release writer is started." }] },
+		},
+	);
+	world.provider.enqueue("worker-a", {
+		name: "e13r-writer-hold",
+		check: () => e13rAdmitted.release(),
+		gate: e13rGate.promise,
+		reply: e13rReport("e13r-report-1", "E13R-WRITER finished its scope."),
+	});
+	world.systemOne.enterPhase("e13r-first", e4Judgments);
+	await withDeadline(trace, "E13R first writer started", e13rSession.prompt("Start the retained-release writer."));
+	await withDeadline(trace, "E13R writer admitted", e13rAdmitted.promise);
+	try {
+		const e13rPre = e13rSession.getResourceSnapshot().workers;
+		if (e13rPre === undefined) throw new Error("the E13R owner reports no worker snapshot before the refusal");
+		const e13rLeases = e13rPre.reservations.heldLeases;
+		expect(e13rLeases, "the E13R writer holds exactly one write lease before the refusal").toHaveLength(1);
+		expect(e13rPre.ownedProjectClaims, "the E13R writer owns one project claim before the refusal").toHaveLength(1);
+		const e13rAgentId = e13rPre.ownedProjectClaims[0]?.agents[0]?.agentId;
+		if (e13rAgentId === undefined) throw new Error("the E13R claim carries no agent");
+		const e13rLease = e13rLeases[0];
+		if (e13rLease === undefined) throw new Error("the E13R owner has no exact lease");
+		const e13rStorePath = [...world.io.fileEntries()].find(
+			([storePath, content]) =>
+				storePath.includes("worker-write-reservations") && content.includes(e13rLease.reservationId),
+		)?.[0];
+		if (e13rStorePath === undefined) throw new Error("the E13R lease is not in a durable reservation store");
+		// The store unlinks its file when it releases the last record, and otherwise rewrites it (a temporary write renamed onto the store).
+		// An earlier owner's retained record may share this repository's store, so the refused operation is read from the store's own records.
+		const e13rStoredRecords = (JSON.parse(e13rStoreText(e13rStorePath)) as { reservations: readonly unknown[] })
+			.reservations.length;
+		const e13rFaultKind: "unlink" | "rename" = e13rStoredRecords === 1 ? "unlink" : "rename";
+		const e13rRefusesStore = (operation: { readonly path: string; readonly destination?: string }): boolean =>
+			e13rFaultKind === "unlink" ? operation.path === e13rStorePath : operation.destination === e13rStorePath;
+		e13rDenial = world.io.denyUntilCleared({
+			name: "e13r-release-denied",
+			kind: e13rFaultKind,
+			code: "EIO",
+			matches: (operation) => e13rRefusesStore(operation),
+		});
+		const e13rRefused = world.io.waitForOperation(
+			(operation) => operation.kind === e13rFaultKind && operation.code === "EIO" && e13rRefusesStore(operation),
+		);
+		const e13rWarningMark = world.warnings.length;
+		world.provider.enqueue(
+			"root",
+			calls("e13r-terminal", [
+				{
+					id: "e13r-terminal-1",
+					name: "delegate",
+					arguments: { action: "wait", agentId: e13rAgentId, timeoutMs: 60_000 },
+				},
+			]),
+			{
+				name: "e13r-terminal-reply",
+				check: (request) => {
+					const waited = latestBatchResults(request).find((result) => result.toolName === "delegate");
+					if (waited?.isError) throw new Error(`the terminal wait on the E13R writer failed: ${waited.text}`);
+				},
+				reply: { content: [{ type: "text", text: "The retained-release writer finished." }] },
+			},
+		);
+		world.systemOne.enterPhase("e13r-terminal", e4Judgments);
+		e13rGate.release();
+		await withDeadline(
+			trace,
+			"E13R writer terminal observed",
+			e13rSession.prompt("Wait for the retained-release writer to finish."),
+		);
+		await withDeadline(trace, "E13R settled", e13rSession.waitForForegroundIdle());
+		const e13rRefusedOperation = await withDeadline(trace, "E13R settled release refused", e13rRefused);
+		const e13rIdle = await withDeadline(
+			trace,
+			"E13R writer idle",
+			e13rSession.backgroundLanes.waitForWorkerAgent(e13rAgentId, 60_000),
+			70_000,
+		);
+		expect(e13rIdle.timedOut, "the retained-release writer settles inside its wait").toBe(false);
+		expect(e13rIdle.status, "the retained-release writer is idle once its run settled").toBe("idle");
+		// Witness: the refused release moved the exact record to the retained release; the lane's hold and claim are released.
+		const e13rSettled = e13rSession.getResourceSnapshot().workers;
+		expect(
+			e13rSettled?.reservations.heldLeases,
+			"the refused release keeps the exact lease held by the retained release",
+		).toEqual(e13rLeases);
+		expect(e13rSettled?.executingHolds, "the settled lane releases its execution hold").toEqual([]);
+		expect(e13rSettled?.ownedProjectClaims, "the settled lane releases its project claim").toEqual([]);
+		expect(e13rStoreText(e13rStorePath), "the refused release leaves the record durable").toContain(
+			e13rLease.reservationId,
+		);
+		expect(
+			world.warnings
+				.slice(e13rWarningMark)
+				.filter((message) => message.startsWith("Failed to release worker write reservation")),
+			"the settled lane reports exactly its refused release, which it hands to the retry",
+		).toEqual([
+			`Failed to release worker write reservation ${e13rLease.taskId}; retrying: Scripted IO fault e13r-release-denied: ${e13rRefusedOperation.kind} '${e13rRefusedOperation.path}'`,
+		]);
+		// Forbidden: a waiter on the same scope is queued behind the retained record and runs no request while the record is durable.
+		let e13rSecondFirstRequest: { readonly leases: typeof e13rLeases; readonly store: string } | undefined;
+		world.provider.enqueue("worker-a", {
+			name: "e13r-second-hold",
+			check: () => {
+				e13rSecondFirstRequest = { leases: e13rHeldLeases(), store: e13rStoreText(e13rStorePath) };
+				e13rSecondAdmitted.release();
+			},
+			gate: e13rSecondGate.promise,
+			reply: e13rReport("e13r-report-2", "E13R-WRITER-2 finished its scope."),
+		});
+		world.provider.enqueue(
+			"root",
+			calls("e13r-start-second", [e13rStart("e13r-start-2", "E13R-WRITER-2 waits for the scope.")]),
+			{
+				name: "e13r-second-reply",
+				check: (request) => {
+					const started = latestBatchResults(request).find((result) => result.toolName === "delegate");
+					if (started?.isError) throw new Error(`the waiting writer's start failed: ${started.text}`);
+				},
+				reply: { content: [{ type: "text", text: "The waiting writer is accepted." }] },
+			},
+		);
+		world.systemOne.enterPhase("e13r-second", e4Judgments);
+		await withDeadline(trace, "E13R waiting writer started", e13rSession.prompt("Start the waiting writer."));
+		const e13rSecondReceipt = e13rCreated.sessionManager
+			.getBranch()
+			.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolCallId === "e13r-start-2",
+			);
+		if (e13rSecondReceipt?.type !== "message" || e13rSecondReceipt.message.role !== "toolResult") {
+			throw new Error("no durable start result for the waiting writer");
+		}
+		const e13rSecondDetails = e13rSecondReceipt.message.details as
+			| { started?: unknown; agentId?: unknown; laneId?: unknown }
+			| undefined;
+		const e13rSecondAgentId = e13rSecondDetails?.agentId;
+		const e13rSecondLaneId = e13rSecondDetails?.laneId;
+		if (typeof e13rSecondAgentId !== "string" || typeof e13rSecondLaneId !== "string") {
+			throw new Error("the waiting writer's start result carries no agent or lane id");
+		}
+		const e13rSecondText = e13rSecondReceipt.message.content
+			.map((block) => (block.type === "text" ? block.text : ""))
+			.join("");
+		expect(e13rSecondDetails?.started, "the waiting writer's start is accepted").toBe(true);
+		expect(e13rSecondText, "the waiting writer is queued at its start").toContain("delegate started (queued)");
+		expect(e13rSecondText, "the waiting writer names the reservation it waits on").toContain(
+			"waiting: write_reservation: ",
+		);
+		expect(e13rSecondText, "the retained record is held by a worker of this session").toContain(
+			"held by a worker of this session",
+		);
+		expect(
+			Object.values(e13rSession.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {})
+				.filter((attempt) => attempt.taskId === e13rSecondLaneId)
+				.at(-1)?.status,
+			"the waiting writer's attempt stays queued while the record is durable",
+		).toBe("queued");
+		expect(e13rHeldLeases(), "the only held lease is still the retained record").toEqual(e13rLeases);
+		expect(e13rStoreText(e13rStorePath), "the retained record is still durable").toContain(e13rLease.reservationId);
+		expect(e13rSecondFirstRequest, "the waiting writer runs no request while the record is durable").toBeUndefined();
+		// The settled release, then the waiting writer's own admission, each retried the release first and were refused.
+		expect(
+			e13rDenial.hits,
+			"the settled release and the waiting admission's retry are refused",
+		).toBeGreaterThanOrEqual(2);
+		e13rDenial.clear();
+		const e13rClearedMark = world.warnings.length;
+		await withDeadline(trace, "E13R waiting writer admitted after the retry", e13rSecondAdmitted.promise, 90_000);
+		expect(
+			e13rSecondFirstRequest?.store,
+			"the retained record left the durable store before the waiting writer's first request",
+		).not.toContain(e13rLease.reservationId);
+		expect(
+			e13rSecondFirstRequest?.leases.map((lease) => lease.taskId),
+			"at the waiting writer's first request the only held lease is its own",
+		).toEqual([e13rSecondLaneId]);
+		world.io.assertFaultsConsumed();
+		const e13rSecondReservationId = e13rSecondFirstRequest?.leases[0]?.reservationId;
+		if (e13rSecondReservationId === undefined) throw new Error("the waiting writer holds no exact lease");
+		// Control: the waiting writer finishes with no fault armed, and its release leaves nothing retained.
+		world.provider.enqueue(
+			"root",
+			calls("e13r-second-terminal", [
+				{
+					id: "e13r-second-terminal-1",
+					name: "delegate",
+					arguments: { action: "wait", agentId: e13rSecondAgentId, timeoutMs: 60_000 },
+				},
+			]),
+			{
+				name: "e13r-second-terminal-reply",
+				check: (request) => {
+					const waited = latestBatchResults(request).find((result) => result.toolName === "delegate");
+					if (waited?.isError) throw new Error(`the terminal wait on the waiting writer failed: ${waited.text}`);
+				},
+				reply: { content: [{ type: "text", text: "The waiting writer finished." }] },
+			},
+		);
+		world.systemOne.enterPhase("e13r-second-terminal", e4Judgments);
+		e13rSecondGate.release();
+		await withDeadline(
+			trace,
+			"E13R waiting writer terminal observed",
+			e13rSession.prompt("Wait for the waiting writer to finish."),
+		);
+		await withDeadline(trace, "E13R control settled", e13rSession.waitForForegroundIdle());
+		const e13rSecondIdle = await withDeadline(
+			trace,
+			"E13R waiting writer idle",
+			e13rSession.backgroundLanes.waitForWorkerAgent(e13rSecondAgentId, 60_000),
+			70_000,
+		);
+		expect(e13rSecondIdle.timedOut, "the waiting writer settles inside its wait").toBe(false);
+		expect(e13rSecondIdle.status, "the waiting writer is idle once its run settled").toBe("idle");
+		const e13rControl = e13rSession.getResourceSnapshot().workers;
+		expect(e13rControl?.reservations.heldLeases, "the unfaulted release retains no lease").toEqual([]);
+		expect(e13rControl?.executingHolds, "the unfaulted run releases its execution hold").toEqual([]);
+		expect(e13rControl?.ownedProjectClaims, "the unfaulted run releases its project claim").toEqual([]);
+		expect(e13rStoreText(e13rStorePath), "the unfaulted release removes its record from the store").not.toContain(
+			e13rSecondReservationId,
+		);
+		expect(
+			world.warnings.slice(e13rClearedMark).filter((message) => message.includes("write reservation")),
+			"no reservation diagnostic follows the cleared refusal",
+		).toEqual([]);
+	} finally {
+		// Failure-safe: an assertion that fails early must not leave the refusal armed or a writer gated for the journey's cleanup.
+		e13rDenial?.clear();
+		e13rGate.release();
+		e13rSecondGate.release();
+	}
+	const e13rDisposeMark = world.warnings.length;
+	expect(await world.disposeSessionInBody(e13rSession), "the E13R owner disposes cleanly").toBeUndefined();
+	expect(
+		world.warnings.slice(e13rDisposeMark),
+		"the E13R owner, with nothing retained, discloses nothing at close",
+	).toEqual([]);
+	trace.mark("root", "e13.retained-release");
 	// E13 failed inner join, recomposed: the writer's bash tool runs inside its isolated completion, and its shell call ignores abort. Owner
 	// cancellation leaves that public promise pending, so the physical join is the only settlement the owner can report. The public promise is
 	// observed pending before the shell gate is released, and the gate is released in a finally so the producer can join even when the teardown fails.

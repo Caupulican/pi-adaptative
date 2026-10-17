@@ -762,9 +762,9 @@ arguments, and relevance and scope are judged once per step in postflight. A pre
 recorded and does not skip the turn.
 A hard yes that the user authorized the work enables every edge capability that is still off, and
 the authority slot is the only text the model receives for that change. Relevance is judged only
-against a real step or goal, never against an empty objective. A
-System One cancel of the root's own turn inside the objective loop is a re-route, not a stop; only
-the operator's interruption stops the loop. A worker judged off the mission is redirected now, a
+against a real step or goal, never against an empty objective. Only
+the operator's interruption stops the objective loop; System One holds no cancel over the root's own
+turn. A worker judged off the mission is redirected now, a
 stalled one at its next turn, a repeated stall rerouted. The off-step cancel proof uses `echo status`.
 
 **The authority line says where a judgment may stop work** (`system-one/authority-line.ts`). Reversible
