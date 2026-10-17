@@ -19,6 +19,8 @@ export async function runJourney3(): Promise<void> {
 			// dirty from the start, so lanes are created explicitly and the worker is started on its request-visible lane checkout.
 			settings: { defaultTools: [...DEFAULT_ACTIVE_TOOL_NAMES, "worktree_sync"] },
 			warningAllowances: [
+				// The recovered session in the continuous-chat phase never writes its own file, so the summary call's usage report is kept as recovery evidence.
+				/^Usage handoff: \d+ usage report\(s\) cannot be recorded \(session file never written\); kept as unmatched recovery evidence at .+$/,
 				/^Memory subsystem init failed: Legacy memory import is incomplete and will retry: 2026-01-01T00-00-00-000Z_headless-legacy\.jsonl: the file cannot be read: .+$/,
 			],
 			files: {

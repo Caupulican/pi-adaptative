@@ -244,6 +244,10 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 
 	// M3 (crash recovery of active sessions + torn JSONL tail, torn messages.idx, and missing keys.idx reconciliation):
 	// 1. Seed a session file on disk and list it in sessions.json active[] as if a previous ICM process crashed before settling.
+	// Long enough that the 4+4 join (2:1) stays far below 512 B while the 0+8 join (3:0) clears it by a wide margin, so the
+	// scripted 0+8 summary merge below does not hinge on a few bytes of the failure record's wording.
+	const mCrashUserText =
+		`Crash session user message. ${"Recovered after a crash with a torn tail. ".repeat(5)}`.trim();
 	const mCrashManager = world.createSessionManager(mAgentDir);
 	const mCrashSession = await world.createRootSession("root", {
 		agentDir: mAgentDir,
@@ -258,7 +262,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 		reply: { content: [{ type: "text", text: "Recovered crash session reply." }] },
 	});
 	world.systemOne.enterPhase("m-crash-seed", {});
-	await withDeadline(trace, "m-crash seed turn", mCrashSession.session.prompt("Crash session user message."));
+	await withDeadline(trace, "m-crash seed turn", mCrashSession.session.prompt(mCrashUserText));
 	expect(await world.disposeSessionInBody(mCrashSession.session)).toBeUndefined();
 
 	world.io.writeFileSync(
@@ -281,8 +285,8 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	world.io.rmSync(mStore.keysIdx, { force: true });
 
 	// Recovery brings the chat to 8 records, so 0+8 becomes due. Every leaf, every level-1 join and both level-2 joins fit
-	// 512 B and need no call (0+4 joins to 427 B: the failure record's reason is bounded to 240 chars), but 0+4 and 4+4
-	// join to 553 B, so worker-c merges them in the one summary call of this phase.
+	// 512 B and need no call (0+4 joins to 427 B and 4+4 to about 330 B), but their join is about 757 B, so worker-c merges
+	// 0+4 and 4+4 in the one summary call of this phase.
 	const mMerge0Plus8 =
 		"Legacy notes seeded alpha-migration-token; a blocked legacy-import turn failed and will retry; an OKF mode turn was noted; a crash session's message and reply were recovered.";
 	world.provider.enqueue("worker-c", {
@@ -324,7 +328,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 			),
 			"user: Run one turn in OKF mode.",
 			"pi: OKF mode turn noted.",
-			"user: Crash session user message.",
+			`user: ${mCrashUserText}`,
 			"pi: Recovered crash session reply.",
 		],
 		idxRebuiltBytes: 8 * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES,

@@ -131,7 +131,8 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		kind: "unlink",
 		matches: (operation) => operation.path === e13StorePath,
 		code: "EIO",
-		times: 1,
+		// Teardown retries a failed required release once more before it gives up, so the fault must hold for both attempts.
+		times: 2,
 	});
 	const e13Teardown = await world.disposeSessionInBody(e13Session);
 	await world.provider.waitForProducers();
