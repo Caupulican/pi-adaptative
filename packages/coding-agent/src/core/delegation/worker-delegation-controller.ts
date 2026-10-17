@@ -2014,10 +2014,14 @@ export class WorkerDelegationController {
 		}
 		if (handoffs.length > 0) {
 			try {
-				this.terminalHandoffs.rehydrate(handoffs);
+				for (const rejection of this.terminalHandoffs.rehydrate(handoffs).rejected) {
+					this.safeWarn(
+						`Worker terminal handoff for ${rejection.laneId} (attempt ${rejection.terminalAttemptId}) was retained durably but not adopted: ${rejection.error instanceof Error ? rejection.error.message : String(rejection.error)}`,
+					);
+				}
 			} catch (error) {
 				this.safeWarn(
-					`Worker terminal handoff recovery batch was retained durably but not adopted: ${error instanceof Error ? error.message : String(error)}`,
+					`Worker terminal handoff recovery was retained durably but not adopted: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
 		}

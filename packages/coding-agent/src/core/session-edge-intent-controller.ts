@@ -113,7 +113,7 @@ export interface SessionEdgeIntentControllerDeps {
 
 export class SessionEdgeIntentController {
 	private readonly deps: SessionEdgeIntentControllerDeps;
-	readonly ownerPolicy: OwnerPolicyQueue;
+	readonly ownerPolicy: OwnerPolicyQueue<OwnerRequestClassificationOutcome>;
 	readonly modelPolicy: OwnerModelPolicy;
 	private poolPolicyRead?: { branchKey: string; policy: ModelPoolPolicy | undefined };
 	private operationGateInstance?: OperationGate;
@@ -124,30 +124,34 @@ export class SessionEdgeIntentController {
 	private localCommitBranchValue?: string;
 	private ruleAuthorityValue: "unset" | "ask" | "user" | "written" = "unset";
 	private deliveryClassificationUnavailable = false;
+	/** The last owner-policy settle failure reported, so a failure that persists is reported once until a settle succeeds. */
+	private lastOwnerPolicyFailure?: string;
 	private handoffValue = false;
 
 	constructor(deps: SessionEdgeIntentControllerDeps) {
 		this.deps = deps;
-		this.ownerPolicy = new OwnerPolicyQueue({
+		this.ownerPolicy = new OwnerPolicyQueue<OwnerRequestClassificationOutcome>({
 			classify: async (words) => {
+				const judgment = words.judgment;
 				const note = await this.deps.withTaskDirectoryContext(
-					() => this.enableCapabilitiesAuthorizedByUser(words.text, words.signal, true, words.acceptedOrder),
+					() =>
+						judgment !== undefined
+							? this.applyOwnerRequestOutcome(words.text, judgment)
+							: this.enableCapabilitiesAuthorizedByUser(words.text, words.signal, true, words.acceptedOrder),
 					words.signal,
 					(error) => {
 						this.deps.noteSystemOneTaskDirectoryUnavailable(error);
 						return undefined;
 					},
 				);
-				if (note) {
-					this.deps.pushPendingNextTurnMessage(
-						createCustomMessage("request_authority", note, false, undefined, new Date().toISOString()),
-					);
-				}
+				this.lastOwnerPolicyFailure = undefined;
+				if (note) this.pushRequestAuthorityNote(note);
 			},
 			screen: async (texts, signal) => {
 				const outcome = await this.deps.getSystemOneController()?.screenOwnerWords(texts, signal ? { signal } : {});
 				return outcome?.status === "screened" ? outcome.carriesInstruction : undefined;
 			},
+			reportFailure: (error) => this.noteOwnerPolicyFailure(error),
 		});
 		this.modelPolicy = new OwnerModelPolicy(
 			{
@@ -277,6 +281,51 @@ export class SessionEdgeIntentController {
 		return shareTextBudget(lines, USER_REQUEST_RULE_BUDGET).join("\n");
 	}
 
+	private pushRequestAuthorityNote(note: string): void {
+		this.deps.pushPendingNextTurnMessage(
+			createCustomMessage("request_authority", note, false, undefined, new Date().toISOString()),
+		);
+	}
+
+	/**
+	 * A settle of the owner's words failed. The words are kept by the queue and settled with the owner's next message, so
+	 * nothing blocks on them; until then their outcome is unknown, which is treated like an evaluator outage: no handoff,
+	 * and the model is told once per outage that a delivery limit the owner stated was not registered.
+	 */
+	private noteOwnerPolicyFailure(error: unknown): void {
+		const reason = error instanceof Error ? error.message : String(error);
+		this.handoffValue = false;
+		if (reason !== this.lastOwnerPolicyFailure) {
+			this.lastOwnerPolicyFailure = reason;
+			this.deps.emitWarning(
+				`The owner's words were not classified: ${reason}. They are kept and classified again with the owner's next message.`,
+			);
+		}
+		if (this.deliveryClassificationUnavailable) return;
+		this.deliveryClassificationUnavailable = true;
+		this.pushRequestAuthorityNote(deliveryClassificationUnavailableNote(reason, this.localCommitBranchValue));
+	}
+
+	private capabilitiesPending(): boolean {
+		const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
+		return EDGE_CLASSES.some((edgeClass) => !granted.has(edgeClass));
+	}
+
+	/**
+	 * The full classification of the owner's words (written rules and still-pending capabilities included), not yet
+	 * applied. A queued owner input is judged this way once, before it is admitted; the judgment it carries into the
+	 * owner-policy queue is applied there in owner order (`applyOwnerRequestOutcome`), never asked again.
+	 */
+	judgeOwnerRequest(request: string, signal?: AbortSignal, acceptedOrder?: number) {
+		return this.classifyOwnerRequest(
+			request,
+			this.writtenRuleText(),
+			this.capabilitiesPending(),
+			signal,
+			acceptedOrder,
+		);
+	}
+
 	async enableCapabilitiesAuthorizedByUser(
 		request: string,
 		signal?: AbortSignal,
@@ -285,14 +334,25 @@ export class SessionEdgeIntentController {
 	): Promise<string | undefined> {
 		const controller = this.deps.getSystemOneController();
 		if (!controller) return undefined;
-		const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
-		const capabilitiesPending = EDGE_CLASSES.some((edgeClass) => !granted.has(edgeClass));
 		const outcome = trustedOwner
-			? await this.classifyOwnerRequest(request, this.writtenRuleText(), capabilitiesPending, signal, acceptedOrder)
+			? await this.judgeOwnerRequest(request, signal, acceptedOrder)
 			: await controller.classifyUserRequest(request, this.writtenRuleText(), {
-					capabilitiesPending,
+					capabilitiesPending: this.capabilitiesPending(),
 					...(signal ? { signal } : {}),
 				});
+		return this.applyOwnerRequestOutcome(request, outcome);
+	}
+
+	/**
+	 * Applies one classification of the owner's words: handoff, model pools, delivery binding, rule authority and the
+	 * capabilities it authorizes. Returns the one line the model should see, and nothing when there is nothing to say.
+	 */
+	async applyOwnerRequestOutcome(
+		request: string,
+		outcome: OwnerRequestClassificationOutcome,
+	): Promise<string | undefined> {
+		const controller = this.deps.getSystemOneController();
+		if (!controller) return undefined;
 		if (outcome.status === "skipped") return undefined;
 		// A newer owner request owns the policy: this judgment is stale, not an evaluator outage. The
 		// request itself still runs; only its judgment is set aside.
@@ -322,6 +382,8 @@ export class SessionEdgeIntentController {
 		);
 		this.ruleAuthorityValue = resolveRuleAuthority(classified);
 		if (classified.capabilitiesAuthorized) {
+			// Read where the outcome applies: a judgment applied later than it was made grants only what is still off.
+			const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
 			for (const edgeClass of EDGE_CLASSES) {
 				if (edgeClass === "git.publish" && this.localCommitBranchValue !== undefined) continue;
 				if (granted.has(edgeClass)) continue;

@@ -38,15 +38,18 @@ export interface SessionTreeNavigatorDeps extends SpawnedUsageReporter {
 	getAgent(): Agent;
 	/** Invalidate branch-dependent host state before notifying asynchronous observers. */
 	onBranchChanged(): void;
-	/** No navigation rewrites the history any more: whatever waited for the foreground while it did may proceed. */
-	onNavigationSettled(): void;
+	/**
+	 * Take the history this navigation rewrites from the foreground owner, which keeps a navigation and a run mutually
+	 * exclusive: throws while a turn runs. Returns the release (idempotent). The rewrite lasts from the navigation's start
+	 * until its new branch is installed, or it ends; the later `session_tree` notification runs on the settled branch and
+	 * may start turns.
+	 */
+	beginHistoryRewrite(): () => void;
 }
 
 export class SessionTreeNavigator {
 	private readonly deps: SessionTreeNavigatorDeps;
 	private activeAbortController: AbortController | undefined;
-	/** The navigation still rewriting the history: from its start until the new branch is installed, or it ends. */
-	private historyRewriteOwner: AbortController | undefined;
 
 	constructor(deps: SessionTreeNavigatorDeps) {
 		this.deps = deps;
@@ -54,20 +57,6 @@ export class SessionTreeNavigator {
 
 	isRunning(): boolean {
 		return this.activeAbortController !== undefined;
-	}
-
-	/**
-	 * A navigation is between its start and the installation of the new branch. This is the window a turn must not
-	 * run in; the later `session_tree` notification runs on the settled branch and may start turns.
-	 */
-	isRewritingHistory(): boolean {
-		return this.historyRewriteOwner !== undefined;
-	}
-
-	private endHistoryRewrite(owner: AbortController): void {
-		if (this.historyRewriteOwner !== owner) return;
-		this.historyRewriteOwner = undefined;
-		this.deps.onNavigationSettled();
 	}
 
 	abort(): void {
@@ -148,9 +137,10 @@ export class SessionTreeNavigator {
 		let result:
 			| { editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }
 			| undefined;
+		// Refused while a turn runs, before this navigation supersedes any other: a refused one changes nothing.
+		const releaseHistory = this.deps.beginHistoryRewrite();
 		const previous = this.activeAbortController;
 		this.activeAbortController = branchSummaryAbort;
-		this.historyRewriteOwner = branchSummaryAbort;
 
 		const executeNavigation = async (): Promise<{
 			editorText?: string;
@@ -312,7 +302,7 @@ export class SessionTreeNavigator {
 			// Agent.resetSanitizerPrefixHorizon's doc comment).
 			agent.resetSanitizerPrefixHorizon();
 			this.deps.onBranchChanged();
-			this.endHistoryRewrite(branchSummaryAbort);
+			releaseHistory();
 
 			// The branch is already selected. Publish its model context before optional
 			// label persistence can fail; labels do not add model messages.
@@ -352,7 +342,7 @@ export class SessionTreeNavigator {
 			}
 			if (this.activeAbortController === branchSummaryAbort) this.activeAbortController = undefined;
 			// Cancelled, failed or superseded before installing a branch: the rewrite window ends here.
-			this.endHistoryRewrite(branchSummaryAbort);
+			releaseHistory();
 		}
 
 		if (navigationFailure && usageRecordingFailure) {

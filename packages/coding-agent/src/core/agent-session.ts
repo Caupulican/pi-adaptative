@@ -308,7 +308,6 @@ import { accountPassBindings } from "./system-one/account-pass-wiring.ts";
 import { collectWorkerReportClaimReceipts } from "./system-one/claim-delivery.ts";
 import { formatClarificationQuestion } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
-import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import { prewarmOperationGate } from "./system-one/operation-gate-wiring.ts";
 import {
 	appendOwnerFollowUp,
@@ -579,7 +578,6 @@ export class AgentSession {
 	private _executionCharter?: ExecutionCharter;
 	private _adaptationProjection?: AdaptationProjection;
 	private _deliveryState: DeliveryState = "none";
-	private _foregroundControl?: SystemOneForegroundControl;
 	private _workerControl?: SystemOneWorkerControl;
 	/** Admitted outward-facing tool calls still running; DELIVER ends when the last one ends. */
 	private readonly _deliveryToolCalls = new Set<string>();
@@ -989,7 +987,11 @@ export class AgentSession {
 			getLaneRecords: () => this._backgroundLanes.getLaneRecords(),
 			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
 			getBackgroundToolTasks: () => this._backgroundToolTasks.list(),
-			synchronizeGoalState: (state) => this._backgroundLanes.synchronizeGoalState(state),
+			synchronizeGoalState: (state) => {
+				// Owner items a paused goal held are posted when it leaves the pause; this never throws.
+				this._unsettledLadder.noteGoalState(state);
+				this._backgroundLanes.synchronizeGoalState(state);
+			},
 			scheduleGoalAutoContinueFromIdle: () => this._backgroundLanes.scheduleGoalAutoContinueFromIdle(),
 			prompt: (text, options) => this.prompt(text, options),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
@@ -1663,9 +1665,9 @@ export class AgentSession {
 				this._pendingQueue.holdUndelivered();
 				this._emitQueueUpdate();
 			},
-			// Compaction and a tree navigation (until its new branch is installed) both rewrite the history a turn runs on:
-			// both occupy the foreground. Its later `session_tree` notification runs on the settled branch and may start turns.
-			isCompacting: () => this._compaction.isRunning() || this._treeNavigator.isRewritingHistory(),
+			// Compaction rewrites the history a turn runs on, so it occupies the foreground. A tree navigation's rewrite is
+			// owned by the controller itself (`beginHistoryRewrite`), which also keeps it exclusive with a running turn.
+			isCompacting: () => this._compaction.isRunning(),
 			isExtendedBusy: () => {
 				return (
 					(this._systemOneController?.isEvaluating ?? false) ||
@@ -2151,8 +2153,8 @@ export class AgentSession {
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
 			getSettingsManager: () => this.settingsManager,
 			getAgent: () => this.agent,
-			// The navigation's history rewrite occupied the foreground; a submission or idle waiter parked behind it resumes now.
-			onNavigationSettled: () => this._foregroundRecovery.wakeIdleWaiters(),
+			// The navigation's history rewrite occupies the foreground and excludes a running turn, at the run owner.
+			beginHistoryRewrite: () => this._foregroundRecovery.beginHistoryRewrite(),
 			onBranchChanged: () => {
 				this._branchGeneration++;
 				// Owner input accepted on the old branch is held in full, never delivered on the new one.
@@ -2381,6 +2383,8 @@ export class AgentSession {
 			emitQueueUpdate: () => this._emitQueueUpdate(),
 			classifyOwnerRequest: (request, rules, capabilitiesPending, signal, acceptedOrder) =>
 				this._classifyOwnerRequest(request, rules, capabilitiesPending, signal, acceptedOrder),
+			judgeQueuedOwnerRequest: (request, signal, acceptedOrder) =>
+				this._edgeIntent.judgeOwnerRequest(request, signal, acceptedOrder),
 			getOperatorBlocker: () => this._operatorBlocker,
 			setOperatorBlocker: (blocker) => {
 				this._operatorBlocker = blocker;
@@ -2615,37 +2619,6 @@ export class AgentSession {
 	setOperatorBlocker(blocker: string | undefined): void {
 		this._operatorBlocker = blocker;
 		this._operatorProjection.refresh();
-	}
-
-	/** System One's cancel and steer levers over the foreground, built once, recorded as operator events. */
-	get systemOneForegroundControl(): SystemOneForegroundControl {
-		this._foregroundControl ??= createSessionForegroundControl({
-			abortTurn: (reason) => {
-				this.runtimeUpdates.cancel();
-				this.abortRetry();
-				this.agent.abort(reason);
-			},
-			isTurnRunning: () => this.isStreaming,
-			queueSteer: (text) => {
-				this._pendingQueue.queueSteer(
-					this._pendingQueue.prepareQueuedMessageText(text),
-					undefined,
-					undefined,
-					text,
-				);
-				this._emitQueueUpdate();
-			},
-			takeQueuedText: () => {
-				const { steering, followUp } = this.takeQueuedMessages();
-				this._emitQueueUpdate();
-				return [...steering, ...followUp].map((entry) => entry.text).join("\n\n");
-			},
-			waitForForegroundIdle: () => this.waitForForegroundIdle(),
-			prompt: (text) => this.prompt(text, { processSlashCommands: false, expandPromptTemplates: false }),
-			recordDirective: (directive) => this._operatorProjection.eventBridge.recordForegroundDirective(directive),
-			emitWarning: (message) => this._emit({ type: "warning", message }),
-		});
-		return this._foregroundControl;
 	}
 
 	/** System One's cancel and steer levers over workers, through the root's worker control surface. */

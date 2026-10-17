@@ -1,7 +1,8 @@
 /**
  * Dispatch and turn boundaries for the permanent chat. The store owns every durable transition. This runtime claims
  * work, runs compactions, maps their outcomes back to the store, and admits appends and turn snapshots in order.
- * Nothing here polls: every wait wakes on a change in the runtime's own state.
+ * Nothing here polls: every wait wakes on a change in the runtime's own state, or on the one alarm a waiting turn arms
+ * to retry its failed leaves.
  */
 
 import { safeErrorMessage } from "../../kernel/types.ts";
@@ -31,11 +32,20 @@ import {
 	type ContinuousChatWorkQueueState,
 	continuousChatBuiltLeafPrefix,
 	continuousChatFailedLeafCount,
+	continuousChatHasLeafWorkBelow,
 	continuousChatUnbuiltLeafCount,
 	continuousChatWorkItemKey,
 } from "./continuous-chat-work-queue.ts";
 
-/** Raised when a turn cannot see every logged message: nothing is ready or running, so waiting would never end. */
+/** Retries a waiting turn gives the failed leaves below its target before it fails. */
+export const CONTINUOUS_CHAT_TURN_RETRY_ROUNDS = 3;
+/** Delay before a waiting turn's first retry. Each later retry waits twice as long: 1 s, 2 s, 4 s. */
+export const CONTINUOUS_CHAT_TURN_RETRY_FIRST_DELAY_MS = 1_000;
+
+/**
+ * Raised when a turn cannot see every message logged before it: no leaf it needs is ready or running and its retries
+ * are spent, so waiting would never end.
+ */
 export class ContinuousChatPrefixUnavailableError extends Error {
 	readonly reasons: string[];
 
@@ -46,7 +56,10 @@ export class ContinuousChatPrefixUnavailableError extends Error {
 	}
 }
 
-/** How far a waiting turn's leaf build has come: `built` of `needed` leaves, `failed` of the rest awaiting a retry. */
+/**
+ * How far a waiting turn's leaf build has come: `built` of `needed` leaves, `failed` of the rest awaiting a retry.
+ * `needed` is fixed when the wait starts, since the turn's target is.
+ */
 export interface ContinuousChatPrefixWaitProgress {
 	readonly built: number;
 	readonly needed: number;
@@ -81,9 +94,10 @@ export interface ContinuousChatRuntimeOptions {
 	label?: string;
 }
 
+/** One look at the queue for a turn. `target` is the exclusive end of the messages whose leaves the turn waits for. */
 type TurnAttempt =
-	| { status: "reserved"; boundary: ContinuousChatTurnBoundary }
-	| { status: "waiting"; queue: ContinuousChatWorkQueueState; totalMessages: number };
+	| { status: "reserved"; queue: ContinuousChatWorkQueueState; target: number; boundary: ContinuousChatTurnBoundary }
+	| { status: "waiting"; queue: ContinuousChatWorkQueueState; target: number };
 
 type AppendAttempt = { status: "appended"; results: ContinuousChatAppendResult[] };
 
@@ -109,6 +123,8 @@ export class ContinuousChatRuntime {
 	/** Advances on every runtime change. A waiter that observed an older value must re-check instead of sleeping. */
 	private version = 0;
 	private waiters: Array<() => void> = [];
+	/** The target of every turn waiting in `reserveTurnBoundary`. Claims put the leaves below the highest one first. */
+	private readonly turnTargets = new Map<object, number>();
 	private started = false;
 	private stopping = false;
 	/** Set once the store reports its lease lost. Nothing is written after it; claimed work is left for recovery. */
@@ -181,43 +197,91 @@ export class ContinuousChatRuntime {
 		return logged.map((records) => ({ revision, records, deduplicated: true }));
 	}
 
-	/** Waits until every logged message has a built leaf, then snapshots the turn's view and boundary. Throws ContinuousChatPrefixUnavailableError when nothing is ready or running. */
+	/**
+	 * Waits until every message logged before the turn's first attempt has a built leaf, then snapshots the turn's view
+	 * and boundary. The target is fixed at that first attempt: a message logged while the turn waits never extends the
+	 * wait, and the snapshot's view shows it as its summary line when built and as a pending line otherwise. While the
+	 * turn waits, the leaves below its target are claimed before parents, and a failed leaf below it is retried up to
+	 * `CONTINUOUS_CHAT_TURN_RETRY_ROUNDS` times, after 1 s, 2 s and 4 s. Throws ContinuousChatPrefixUnavailableError
+	 * when no leaf below the target is ready or running and no retry remains.
+	 */
 	async reserveTurnBoundary(
 		signal?: AbortSignal,
 		onWaiting?: (progress: ContinuousChatPrefixWaitProgress) => void,
 	): Promise<ContinuousChatTurnBoundary> {
 		await this.store.noteArrival();
-		this.requestPump();
-		let first: { unbuilt: number; total: number } | undefined;
+		const waiter = {};
+		let target: number | undefined;
+		let needed: number | undefined;
 		let reported = "";
-		for (;;) {
-			this.assertRunning();
-			signal?.throwIfAborted();
-			const observed = this.version;
-			const attempt = await this.serial(() => this.tryReserve());
-			if (attempt.status === "reserved") return attempt.boundary;
-			const { queue } = attempt;
-			if (onWaiting !== undefined) {
-				const unbuilt = continuousChatUnbuiltLeafCount(queue);
-				first ??= { unbuilt, total: attempt.totalMessages };
-				// Messages that arrive while waiting join the target, so `built` never exceeds `needed`.
-				const needed = first.unbuilt + (attempt.totalMessages - first.total);
-				const progress = {
-					built: Math.max(0, needed - unbuilt),
-					needed,
-					failed: continuousChatFailedLeafCount(queue),
-				};
-				const key = `${progress.built}/${progress.needed}/${progress.failed}`;
-				if (key !== reported) {
-					reported = key;
-					onWaiting(progress);
+		let rounds = 0;
+		let alarm: ReturnType<typeof setTimeout> | undefined;
+		let retryDue = false;
+		try {
+			for (;;) {
+				this.assertRunning();
+				signal?.throwIfAborted();
+				if (retryDue) {
+					retryDue = false;
+					await this.store.noteArrival();
+					this.requestPump();
 				}
+				const observed = this.version;
+				const attempt = await this.serial(() => this.tryReserve(target));
+				if (target === undefined) {
+					target = attempt.target;
+					this.turnTargets.set(waiter, target);
+					this.requestPump();
+				}
+				const { queue } = attempt;
+				const failed = continuousChatFailedLeafCount(queue, target);
+				// The wait reports from its first waiting attempt to its reservation, which reports every leaf built.
+				if (onWaiting !== undefined && (attempt.status === "waiting" || needed !== undefined)) {
+					const unbuilt = continuousChatUnbuiltLeafCount(queue, target);
+					needed ??= unbuilt;
+					const progress = { built: Math.max(0, needed - unbuilt), needed, failed };
+					const key = `${progress.built}/${progress.needed}/${progress.failed}`;
+					if (key !== reported) {
+						reported = key;
+						onWaiting(progress);
+					}
+				}
+				if (attempt.status === "reserved") return attempt.boundary;
+				if (failed > 0 && alarm === undefined && !retryDue && rounds < CONTINUOUS_CHAT_TURN_RETRY_ROUNDS) {
+					const delay = CONTINUOUS_CHAT_TURN_RETRY_FIRST_DELAY_MS * 2 ** rounds;
+					rounds++;
+					// Not unref'd: the turn waits on it, and every way out of this wait clears it.
+					alarm = setTimeout(() => {
+						alarm = undefined;
+						retryDue = true;
+						this.notifyChange();
+					}, delay);
+				}
+				if (alarm === undefined && !retryDue && !continuousChatHasLeafWorkBelow(queue, target)) {
+					throw new ContinuousChatPrefixUnavailableError(this.failureReasons(queue));
+				}
+				await this.waitForChange(observed, signal);
 			}
-			if (queue.running.length === 0 && queue.readyLeaves.length === 0 && queue.readyParents.length === 0) {
-				throw new ContinuousChatPrefixUnavailableError(this.failureReasons(queue));
-			}
-			await this.waitForChange(observed, signal);
+		} finally {
+			if (alarm !== undefined) clearTimeout(alarm);
+			this.turnTargets.delete(waiter);
 		}
+	}
+
+	/**
+	 * Makes failed work retry-eligible and dispatches it, as an arrival with no turn: used when a refused summary model
+	 * becomes usable again. A stopped runtime has nothing to retry; a lost lease was already reported.
+	 */
+	async retryFailedWork(): Promise<void> {
+		if (this.stopping) return;
+		try {
+			await this.store.noteArrival();
+		} catch (error) {
+			if (this.leaseLost) return;
+			throw error;
+		}
+		this.requestPump();
+		this.notifyChange();
 	}
 
 	subscribe(listener: (event: ContinuousChatRuntimeEvent) => void): () => void {
@@ -298,13 +362,18 @@ export class ContinuousChatRuntime {
 		return { status: "appended", results };
 	}
 
-	private async tryReserve(): Promise<TurnAttempt> {
+	/**
+	 * One snapshot for a turn. Without a target, the turn waits for every message logged now. The boundary covers every
+	 * message the snapshot's view covers, including those logged after the target.
+	 */
+	private async tryReserve(target: number | undefined): Promise<TurnAttempt> {
 		const snapshot = await this.store.snapshotTurn();
-		if (continuousChatBuiltLeafPrefix(snapshot.queue) < snapshot.totalMessages) {
-			return { status: "waiting", queue: snapshot.queue, totalMessages: snapshot.totalMessages };
+		const end = target ?? snapshot.totalMessages;
+		if (continuousChatBuiltLeafPrefix(snapshot.queue) < end) {
+			return { status: "waiting", queue: snapshot.queue, target: end };
 		}
 		this.nextBoundaryId++;
-		return { status: "reserved", boundary: this.boundaryFor(snapshot) };
+		return { status: "reserved", queue: snapshot.queue, target: end, boundary: this.boundaryFor(snapshot) };
 	}
 
 	private boundaryFor(snapshot: ContinuousChatTurnSnapshot): ContinuousChatTurnBoundary {
@@ -400,7 +469,8 @@ export class ContinuousChatRuntime {
 
 	private async claimReady(): Promise<void> {
 		while (!this.stopping && this.jobs.size < CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS) {
-			const item = await this.store.claimWork();
+			const targets = [...this.turnTargets.values()];
+			const item = await this.store.claimWork(targets.length > 0 ? Math.max(...targets) : undefined);
 			if (item === undefined) {
 				if (this.jobs.size === 0) this.emit({ type: "idle" });
 				return;

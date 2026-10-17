@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
-import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { type AtomicFileLockOptions, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { type FaultableFs, nodeFs } from "../util/faultable-fs.ts";
 import {
@@ -132,6 +132,11 @@ export interface AppendOrchestrationEventOptions {
 	expectedLastOrdinal?: number;
 	/** Exact event admission under the append lock, before any durable file is written. */
 	validateBeforeCommit?: (event: OrchestrationEvent) => void;
+	/**
+	 * Bounds the wait for the store lock held elsewhere. A caller that owns its own later retry
+	 * passes a single attempt, so contention fails fast instead of blocking the calling thread.
+	 */
+	lockOptions?: Readonly<AtomicFileLockOptions>;
 }
 
 export class OrchestrationEventStoreError extends Error {
@@ -497,61 +502,65 @@ export class OrchestrationEventStore {
 		) {
 			throw new OrchestrationEventStoreError("Expected orchestration ordinal must be a non-negative safe integer.");
 		}
-		const committed = withFileLockSync(this.cursorPath, (): { event: OrchestrationEvent; appended: boolean } => {
-			const indexes = this.synchronizeIndexesUnlocked();
-			const actual = indexes.lastOrdinal;
-			if (normalizedInput.idempotencyKey) {
-				const existing = indexes.idempotencyEvents.get(normalizedInput.idempotencyKey);
-				if (existing) {
-					assertExactIdempotentReplay(existing, normalizedInput);
-					return { event: existing, appended: false };
+		const committed = withFileLockSync(
+			this.cursorPath,
+			(): { event: OrchestrationEvent; appended: boolean } => {
+				const indexes = this.synchronizeIndexesUnlocked();
+				const actual = indexes.lastOrdinal;
+				if (normalizedInput.idempotencyKey) {
+					const existing = indexes.idempotencyEvents.get(normalizedInput.idempotencyKey);
+					if (existing) {
+						assertExactIdempotentReplay(existing, normalizedInput);
+						return { event: existing, appended: false };
+					}
 				}
-			}
-			if (options.expectedLastOrdinal !== undefined) {
-				if (actual !== options.expectedLastOrdinal) {
-					throw new OrchestrationConcurrencyError(options.expectedLastOrdinal, actual);
+				if (options.expectedLastOrdinal !== undefined) {
+					if (actual !== options.expectedLastOrdinal) {
+						throw new OrchestrationConcurrencyError(options.expectedLastOrdinal, actual);
+					}
 				}
-			}
 
-			const ordinal = actual + 1;
-			const next: OrchestrationEvent = {
-				schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-				ordinal,
-				eventId: this.createEventId(),
-				type: normalizedInput.type,
-				aggregateId: normalizedInput.aggregateId,
-				actor: normalizedInput.actor,
-				occurredAt: this.now(),
-				...(normalizedInput.correlationId ? { correlationId: normalizedInput.correlationId } : {}),
-				...(normalizedInput.causationId ? { causationId: normalizedInput.causationId } : {}),
-				...(normalizedInput.idempotencyKey ? { idempotencyKey: normalizedInput.idempotencyKey } : {}),
-				payload: normalizedInput.payload,
-			};
-			assertCanonicalOrchestrationEvent(next);
-			const serializedEvent = serializeBounded(
-				next,
-				this.maxTailBytes,
-				"Orchestration event",
-				"Orchestration event exceeds its configured tail byte limit.",
-			);
-			options.validateBeforeCommit?.(next);
-			const nextTailBytes = indexes.tailBytes + Buffer.byteLength(serializedEvent);
-			const serializedCursor = serializeBounded(
-				{ version: 1, lastOrdinal: ordinal, tailBytes: nextTailBytes } satisfies EventCursor,
-				MAX_CURSOR_BYTES,
-				"Orchestration cursor",
-			);
-			writeFileAtomicSync(join(this.eventsDir, eventFileName(ordinal)), serializedEvent, { fs: this.fs });
-			indexes.lastOrdinal = ordinal;
-			indexes.tailBytes = nextTailBytes;
-			if (normalizedInput.idempotencyKey) indexes.idempotencyEvents.set(normalizedInput.idempotencyKey, next);
-			// The immutable event is authoritative. The cursor is only a corruption high-water mark,
-			// so a lock-protected direct overwrite avoids another tmp-file creation and rename on the
-			// Windows scanner-sensitive path; a torn cursor is safely rebuilt from the event tail.
-			this.fs.writeFileSync(this.cursorPath, serializedCursor, "utf-8");
-			this.cursorRead = undefined;
-			return { event: next, appended: true };
-		});
+				const ordinal = actual + 1;
+				const next: OrchestrationEvent = {
+					schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+					ordinal,
+					eventId: this.createEventId(),
+					type: normalizedInput.type,
+					aggregateId: normalizedInput.aggregateId,
+					actor: normalizedInput.actor,
+					occurredAt: this.now(),
+					...(normalizedInput.correlationId ? { correlationId: normalizedInput.correlationId } : {}),
+					...(normalizedInput.causationId ? { causationId: normalizedInput.causationId } : {}),
+					...(normalizedInput.idempotencyKey ? { idempotencyKey: normalizedInput.idempotencyKey } : {}),
+					payload: normalizedInput.payload,
+				};
+				assertCanonicalOrchestrationEvent(next);
+				const serializedEvent = serializeBounded(
+					next,
+					this.maxTailBytes,
+					"Orchestration event",
+					"Orchestration event exceeds its configured tail byte limit.",
+				);
+				options.validateBeforeCommit?.(next);
+				const nextTailBytes = indexes.tailBytes + Buffer.byteLength(serializedEvent);
+				const serializedCursor = serializeBounded(
+					{ version: 1, lastOrdinal: ordinal, tailBytes: nextTailBytes } satisfies EventCursor,
+					MAX_CURSOR_BYTES,
+					"Orchestration cursor",
+				);
+				writeFileAtomicSync(join(this.eventsDir, eventFileName(ordinal)), serializedEvent, { fs: this.fs });
+				indexes.lastOrdinal = ordinal;
+				indexes.tailBytes = nextTailBytes;
+				if (normalizedInput.idempotencyKey) indexes.idempotencyEvents.set(normalizedInput.idempotencyKey, next);
+				// The immutable event is authoritative. The cursor is only a corruption high-water mark,
+				// so a lock-protected direct overwrite avoids another tmp-file creation and rename on the
+				// Windows scanner-sensitive path; a torn cursor is safely rebuilt from the event tail.
+				this.fs.writeFileSync(this.cursorPath, serializedCursor, "utf-8");
+				this.cursorRead = undefined;
+				return { event: next, appended: true };
+			},
+			options.lockOptions,
+		);
 
 		if (committed.appended) {
 			for (const listener of [...this.listeners]) {
@@ -608,8 +617,15 @@ export class OrchestrationEventStore {
 			: undefined;
 	}
 
-	/** Replace a large replay prefix with one verified current-state snapshot and a bounded tail. */
-	compactIfNeeded(throughOrdinal: number, projection: () => JsonObject): boolean {
+	/**
+	 * Replace a large replay prefix with one verified current-state snapshot and a bounded tail.
+	 * `lockOptions` bounds the wait for the store lock, as in `append`.
+	 */
+	compactIfNeeded(
+		throughOrdinal: number,
+		projection: () => JsonObject,
+		lockOptions?: Readonly<AtomicFileLockOptions>,
+	): boolean {
 		const baselineBeforeLock = this.readBaselineUnlocked();
 		const baselineOrdinalBeforeLock = baselineBeforeLock?.throughOrdinal ?? 0;
 		const cachedIndexes = this.synchronizedIndexes;
@@ -632,80 +648,84 @@ export class OrchestrationEventStore {
 		) {
 			return false;
 		}
-		return withFileLockSync(this.cursorPath, () => {
-			const cursor = this.synchronizeIndexesUnlocked();
-			if (cursor.lastOrdinal !== throughOrdinal) return false;
-			const baselineOrdinal = this.readBaselineUnlocked()?.throughOrdinal ?? 0;
-			const tailNames = this.eventFileNamesUnlocked().filter(
-				(name) => Number(EVENT_FILE_PATTERN.exec(name)?.[1] ?? 0) > baselineOrdinal,
-			);
-			if (tailNames.length < this.maxTailEvents && cursor.tailBytes < this.maxTailBytes) return false;
+		return withFileLockSync(
+			this.cursorPath,
+			() => {
+				const cursor = this.synchronizeIndexesUnlocked();
+				if (cursor.lastOrdinal !== throughOrdinal) return false;
+				const baselineOrdinal = this.readBaselineUnlocked()?.throughOrdinal ?? 0;
+				const tailNames = this.eventFileNamesUnlocked().filter(
+					(name) => Number(EVENT_FILE_PATTERN.exec(name)?.[1] ?? 0) > baselineOrdinal,
+				);
+				if (tailNames.length < this.maxTailEvents && cursor.tailBytes < this.maxTailBytes) return false;
 
-			const retainedByKey = new Map<string, OrchestrationEvent>();
-			for (const event of this.readProjectionSnapshotUnlocked()?.idempotencyEvents ?? []) {
-				if (event.idempotencyKey) retainedByKey.set(event.idempotencyKey, event);
-			}
-			for (const name of tailNames) {
-				const event = this.readEventFileUnlocked(name);
-				if (event.ordinal <= throughOrdinal && event.idempotencyKey) {
-					retainedByKey.set(event.idempotencyKey, event);
+				const retainedByKey = new Map<string, OrchestrationEvent>();
+				for (const event of this.readProjectionSnapshotUnlocked()?.idempotencyEvents ?? []) {
+					if (event.idempotencyKey) retainedByKey.set(event.idempotencyKey, event);
 				}
-			}
-			const idempotencyEvents = boundedIdempotencyEvents([...retainedByKey.values()], this.maxIdempotencyEvents);
-			const canonicalProjection = canonicalJsonObject(projection(), "Orchestration projection snapshot");
-			const content: ProjectionSnapshotContent = {
-				version: 1,
-				schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-				throughOrdinal,
-				createdAt: canonicalIsoTimestamp(this.now(), "Orchestration projection snapshot creation time"),
-				projection: canonicalProjection,
-				idempotencyEvents,
-			};
-			const digest = snapshotDigest(content);
-			const snapshotFile = eventFileName(throughOrdinal);
-			const serializedSnapshot = serializeCompactBounded(
-				{ ...content, digest } satisfies ProjectionSnapshot,
-				MAX_ORCHESTRATION_PROJECTION_SNAPSHOT_BYTES,
-				"Orchestration projection snapshot",
-			);
-			const serializedBaseline = serializeBounded(
-				{ version: 1, throughOrdinal, digest, snapshotFile } satisfies SnapshotBaseline,
-				MAX_BASELINE_BYTES,
-				"Orchestration snapshot baseline",
-			);
-			const serializedCursor = serializeBounded(
-				{ version: 1, lastOrdinal: throughOrdinal, tailBytes: 0 } satisfies EventCursor,
-				MAX_CURSOR_BYTES,
-				"Orchestration cursor",
-			);
-			writeFileAtomicSync(join(this.snapshotsDir, snapshotFile), serializedSnapshot, { fs: this.fs });
-			writeFileAtomicSync(this.baselinePath, serializedBaseline, { fs: this.fs });
-			this.baselineRead = undefined;
+				for (const name of tailNames) {
+					const event = this.readEventFileUnlocked(name);
+					if (event.ordinal <= throughOrdinal && event.idempotencyKey) {
+						retainedByKey.set(event.idempotencyKey, event);
+					}
+				}
+				const idempotencyEvents = boundedIdempotencyEvents([...retainedByKey.values()], this.maxIdempotencyEvents);
+				const canonicalProjection = canonicalJsonObject(projection(), "Orchestration projection snapshot");
+				const content: ProjectionSnapshotContent = {
+					version: 1,
+					schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+					throughOrdinal,
+					createdAt: canonicalIsoTimestamp(this.now(), "Orchestration projection snapshot creation time"),
+					projection: canonicalProjection,
+					idempotencyEvents,
+				};
+				const digest = snapshotDigest(content);
+				const snapshotFile = eventFileName(throughOrdinal);
+				const serializedSnapshot = serializeCompactBounded(
+					{ ...content, digest } satisfies ProjectionSnapshot,
+					MAX_ORCHESTRATION_PROJECTION_SNAPSHOT_BYTES,
+					"Orchestration projection snapshot",
+				);
+				const serializedBaseline = serializeBounded(
+					{ version: 1, throughOrdinal, digest, snapshotFile } satisfies SnapshotBaseline,
+					MAX_BASELINE_BYTES,
+					"Orchestration snapshot baseline",
+				);
+				const serializedCursor = serializeBounded(
+					{ version: 1, lastOrdinal: throughOrdinal, tailBytes: 0 } satisfies EventCursor,
+					MAX_CURSOR_BYTES,
+					"Orchestration cursor",
+				);
+				writeFileAtomicSync(join(this.snapshotsDir, snapshotFile), serializedSnapshot, { fs: this.fs });
+				writeFileAtomicSync(this.baselinePath, serializedBaseline, { fs: this.fs });
+				this.baselineRead = undefined;
 
-			for (const name of this.idempotencyFileNamesUnlocked()) {
-				this.unlinkManagedFile(join(this.idempotencyDir, name));
-			}
-			for (const name of this.eventFileNamesUnlocked()) {
-				const ordinal = Number(EVENT_FILE_PATTERN.exec(name)?.[1] ?? 0);
-				if (ordinal <= throughOrdinal) this.unlinkManagedFile(join(this.eventsDir, name));
-			}
-			for (const name of this.snapshotFileNamesUnlocked()) {
-				if (name !== snapshotFile) this.unlinkManagedFile(join(this.snapshotsDir, name));
-			}
-			writeFileAtomicSync(this.cursorPath, serializedCursor, { fs: this.fs });
-			this.cursorRead = undefined;
-			this.verifiedSnapshotBaseline = undefined;
-			this.synchronizedIndexes = {
-				baselineOrdinal: throughOrdinal,
-				baselineDigest: digest,
-				lastOrdinal: throughOrdinal,
-				tailBytes: 0,
-				idempotencyEvents: new Map(
-					idempotencyEvents.map((event) => [event.idempotencyKey!, structuredClone(event)]),
-				),
-			};
-			return true;
-		});
+				for (const name of this.idempotencyFileNamesUnlocked()) {
+					this.unlinkManagedFile(join(this.idempotencyDir, name));
+				}
+				for (const name of this.eventFileNamesUnlocked()) {
+					const ordinal = Number(EVENT_FILE_PATTERN.exec(name)?.[1] ?? 0);
+					if (ordinal <= throughOrdinal) this.unlinkManagedFile(join(this.eventsDir, name));
+				}
+				for (const name of this.snapshotFileNamesUnlocked()) {
+					if (name !== snapshotFile) this.unlinkManagedFile(join(this.snapshotsDir, name));
+				}
+				writeFileAtomicSync(this.cursorPath, serializedCursor, { fs: this.fs });
+				this.cursorRead = undefined;
+				this.verifiedSnapshotBaseline = undefined;
+				this.synchronizedIndexes = {
+					baselineOrdinal: throughOrdinal,
+					baselineDigest: digest,
+					lastOrdinal: throughOrdinal,
+					tailBytes: 0,
+					idempotencyEvents: new Map(
+						idempotencyEvents.map((event) => [event.idempotencyKey!, structuredClone(event)]),
+					),
+				};
+				return true;
+			},
+			lockOptions,
+		);
 	}
 
 	subscribe(listener: (event: OrchestrationEvent) => void): () => void {

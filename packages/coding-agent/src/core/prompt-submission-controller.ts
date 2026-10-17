@@ -41,6 +41,7 @@ import type { ReflectionController } from "./reflection-controller.ts";
 import type { ReflectionTurnLifecycle } from "./reflection-turn-lifecycle.ts";
 import { CONVERSATION_TALKER_CUSTOM_TYPE } from "./reply-route.ts";
 import type { RuntimeBuilder } from "./runtime-builder.ts";
+import type { OwnerRequestClassificationOutcome } from "./session-edge-intent-controller.ts";
 import { isSessionSettled, type SessionSettlementState } from "./session-settlement.ts";
 import type { SessionWorkState } from "./session-work-state.ts";
 import type { MemorySystem } from "./settings/settings-schema.ts";
@@ -101,7 +102,7 @@ export interface PromptSubmissionControllerDeps {
 	readonly costGuard: Pick<CostGuardController, "beginForegroundTurn">;
 	readonly reflection: Pick<ReflectionController, "markOwnerInput" | "queueExternalRootTurnCue">;
 	readonly earlyDisplayedUserMessages: Set<AgentMessage>;
-	readonly ownerPolicy: Pick<OwnerPolicyQueue, "settle" | "enqueue">;
+	readonly ownerPolicy: Pick<OwnerPolicyQueue<OwnerRequestClassificationOutcome>, "settle" | "enqueue">;
 	readonly accountModels: Pick<AccountModelCatalog, "ready">;
 	readonly custody: Pick<CacheCustody, "sanction" | "withdraw" | "request">;
 	readonly localRuntimeController: Pick<LocalRuntimeController, "ensureForegroundModelReady">;
@@ -130,6 +131,15 @@ export interface PromptSubmissionControllerDeps {
 		signal?: AbortSignal,
 		acceptedOrder?: number,
 	): Promise<OwnerRequestClassificationResult>;
+	/**
+	 * The full classification of a queued owner input's words, once, before it is admitted; applied where the owner-policy
+	 * queue settles it (see `SessionEdgeIntentController.judgeOwnerRequest`).
+	 */
+	judgeQueuedOwnerRequest(
+		request: string,
+		signal: AbortSignal | undefined,
+		acceptedOrder: number | undefined,
+	): Promise<OwnerRequestClassificationOutcome>;
 	getOperatorBlocker(): string | undefined;
 	setOperatorBlocker(blocker: string | undefined): void;
 	/** Input admitted to the agent's queue that no live consumer is left to drain returns to the pending queue, held. */
@@ -242,12 +252,11 @@ export class PromptSubmissionController {
 				? this.deps.pendingQueue.register(options.streamingBehavior, text, options.images, options.origin)
 				: undefined;
 		if (queuedOwnerInput) this.deps.emitQueueUpdate();
+		// Judged in full once, here: the same judgment decides whether it is admitted and is applied where it is read.
 		const queuedOwnerClassification =
 			queuedOwnerInput && acceptedOrder !== undefined
-				? this.deps.classifyOwnerRequest(
+				? this.deps.judgeQueuedOwnerRequest(
 						text,
-						"",
-						false,
 						options?.signal
 							? AbortSignal.any([options.signal, queuedOwnerInput.signal])
 							: queuedOwnerInput.signal,
@@ -314,6 +323,26 @@ export class PromptSubmissionController {
 	}
 
 	/**
+	 * Owner words judged when they were queued join the owner-policy queue with that judgment, applied in owner order where
+	 * the queue settles. Only a classified judgment is carried: words the evaluator could not judge (or whose judgment a
+	 * newer request superseded) are classified again there, exactly like words that were never judged.
+	 */
+	private enqueueJudgedOwnerWords(
+		text: string,
+		acceptedOrder: number | undefined,
+		judgment: OwnerRequestClassificationOutcome,
+		signal?: AbortSignal,
+	): void {
+		if (!this.deps.getSystemOneController()) return;
+		this.deps.ownerPolicy.enqueue({
+			text,
+			...(acceptedOrder !== undefined ? { acceptedOrder } : {}),
+			...(signal ? { signal } : {}),
+			...(judgment.status === "classified" ? { judgment } : {}),
+		});
+	}
+
+	/**
 	 * Release the early-painted echo of a turn that never reached its run. An echo of a queued owner input is withdrawn
 	 * from the transcript, because that input is held in the pending queue instead and must not read as sent.
 	 */
@@ -341,7 +370,7 @@ export class PromptSubmissionController {
 		text: string,
 		options?: PromptOptions,
 		initialSubmissionLease?: ForegroundSubmissionLease,
-		queuedOwnerClassification?: Promise<OwnerRequestClassificationResult>,
+		queuedOwnerClassification?: Promise<OwnerRequestClassificationOutcome>,
 		queuedOwnerInput?: PendingInputHandle,
 		prepared?: () => void,
 		acceptedOrder?: number,
@@ -402,7 +431,7 @@ export class PromptSubmissionController {
 		text: string,
 		options: PromptOptions | undefined,
 		submission: { lease?: ForegroundSubmissionLease },
-		queuedOwnerClassification?: Promise<OwnerRequestClassificationResult>,
+		queuedOwnerClassification?: Promise<OwnerRequestClassificationOutcome>,
 		queuedOwnerInput?: PendingInputHandle,
 		lifecycle?: { acceptedOrder?: number; ownsForeground(): void },
 	): Promise<void> {
@@ -439,10 +468,13 @@ export class PromptSubmissionController {
 		let admittedGoalId = options?.goalExecutionId;
 		let goalToolStartAuthority: ExplicitGoalStartAuthority | undefined;
 		let userRequest = text;
+		// The judgment this queued owner input's words already received, if they did: they are never judged again.
+		let ownerJudgment: OwnerRequestClassificationOutcome | undefined;
 
 		try {
 			if (queuedOwnerClassification) {
 				const classified = await queuedOwnerClassification;
+				ownerJudgment = classified;
 				if ("cancelled" in classified && classified.cancelled && classified.contextChanged && queuedOwnerInput)
 					this.deps.pendingQueue.hold(queuedOwnerInput);
 				if (submissionSignal?.aborted || ("cancelled" in classified && classified.cancelled)) return;
@@ -554,13 +586,12 @@ export class PromptSubmissionController {
 				try {
 					if (ownerOriginalText !== undefined) {
 						const classified = await (queuedOwnerClassification ??
-							this.deps.classifyOwnerRequest(
+							this.deps.judgeQueuedOwnerRequest(
 								ownerOriginalText,
-								"",
-								false,
 								submissionSignal ? AbortSignal.any([submissionSignal, pending.signal]) : pending.signal,
 								lifecycle?.acceptedOrder,
 							));
+						ownerJudgment = classified;
 						if ("cancelled" in classified && classified.cancelled && classified.contextChanged)
 							this.deps.pendingQueue.hold(pending);
 						if (submissionSignal?.aborted || ("cancelled" in classified && classified.cancelled)) return;
@@ -584,11 +615,18 @@ export class PromptSubmissionController {
 						}
 					}
 					if (!ownTurn) {
+						const judged = ownerJudgment;
+						const judgedOrder = lifecycle?.acceptedOrder;
 						admitted = this.deps.pendingQueue.admit(pending, {
 							text: expandedText,
 							...(currentImages ? { images: currentImages } : {}),
 							...(goalToolStartAuthority ? { queuedGoalAuthority: goalToolStartAuthority } : {}),
 							...(ownerOriginalText !== undefined ? { ownerOriginalText } : {}),
+							// The owner's admitted words become policy when the run delivers them, never when they are taken
+							// back, cleared or held first: their judgment is applied where it is read.
+							...(ownerOriginalText !== undefined && judged !== undefined
+								? { onDelivered: () => this.enqueueJudgedOwnerWords(ownerOriginalText, judgedOrder, judged) }
+								: {}),
 						});
 					}
 				} finally {
@@ -957,8 +995,11 @@ export class PromptSubmissionController {
 				this.lastUserRequestValue = userRequest;
 				if (options?.source !== "extension") {
 					// The owner's words are classified where their outcome is read (see OwnerPolicyQueue): a
-					// turn that uses no tool never waits for, or pays for, the classification.
-					if (this.deps.getSystemOneController())
+					// turn that uses no tool never waits for, or pays for, the classification. A queued input
+					// that became this turn was judged before it ran: its judgment is applied, never asked again.
+					if (ownerJudgment !== undefined)
+						this.enqueueJudgedOwnerWords(text, lifecycle?.acceptedOrder, ownerJudgment, submissionSignal);
+					else if (this.deps.getSystemOneController())
 						this.deps.ownerPolicy.enqueue({
 							text,
 							...(lifecycle?.acceptedOrder !== undefined ? { acceptedOrder: lifecycle.acceptedOrder } : {}),

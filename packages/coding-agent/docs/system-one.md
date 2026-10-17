@@ -47,15 +47,13 @@ limit, or two cycles that executed nothing.
 
 ## Levers
 
-System One has the operator's two levers over every executor, and every directive is an operator
-event:
+System One has the operator's two levers over every worker, and every directive is an operator
+event. The root's own turn stays the operator's to cancel or steer:
 
-- **Cancel** fires immediately: the running turn aborts under `system_one:<reason>`, like Esc. A
-  worker's lane is cancelled.
-- **Steer** is either queued for the next model turn (a running worker takes it mid-run, an idle one
-  wakes on it) or delivered now: the root's turn is interrupted and the queue sent once the foreground
-  is idle; a worker's attempt is interrupted, the directive queued on its mailbox, and the attempt
-  resumed.
+- **Cancel** fires immediately: the worker's lane is cancelled.
+- **Steer** is either queued for the worker's next model turn (a running worker takes it mid-run, an
+  idle one wakes on it) or delivered now: the worker's attempt is interrupted, the directive queued
+  on its mailbox, and the attempt resumed.
 
 Ordinary tool admission asks System One about a call only when code cannot decide it: a shell or code call, or a
 write outside the task (see [The shell-command gate](#the-shell-command-gate)). Every admitted call is also
@@ -64,8 +62,8 @@ recorded with an intent built from its own arguments (`bash command=…`, `edit 
 over real events. Preflight and postflight System One packs run only with a live objective; the claim check and
 the duplicate review run in every session. After a turn, the answer's claim check and the objective's postflight
 wait on System One together.
-Inside the objective loop a System One cancel of the root's own turn is a re-route (the next cycle
-routes again); only the operator's interruption stops the loop. The worker supervisor redirects a
+Only the operator's interruption stops the objective loop; System One holds no cancel over the root's
+own turn. The worker supervisor redirects a
 worker judged off the mission now, steers a stalled one at its next turn, and reroutes a repeated
 stall. A delayed result must still name the observed objective, task and live attempt when applied;
 a terminal attempt cannot steer or cancel a newer task on the same persistent worker.

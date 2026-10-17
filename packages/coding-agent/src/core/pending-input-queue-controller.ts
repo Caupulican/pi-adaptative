@@ -31,6 +31,11 @@ export interface QueuedInputAdmission {
 	images?: ImageContent[];
 	queuedGoalAuthority?: ExplicitGoalStartAuthority;
 	ownerOriginalText?: string;
+	/**
+	 * Runs once, when the agent delivers the admitted input (its message starts). Never when the input is taken back,
+	 * cleared or held before that: what is not delivered decides nothing.
+	 */
+	onDelivered?: () => void;
 }
 
 /**
@@ -716,8 +721,9 @@ export class PendingInputQueueController {
 		] as const) {
 			const exact = message ? entries.findIndex((entry) => entry.message === message) : -1;
 			if (exact !== -1) {
-				entries.splice(exact, 1);
+				const [delivered] = entries.splice(exact, 1);
 				this._changed();
+				delivered?.admission?.onDelivered?.();
 				return queue;
 			}
 		}
@@ -727,8 +733,9 @@ export class PendingInputQueueController {
 		] as const) {
 			const index = entries.findIndex((entry) => entry.message !== undefined && entry.text === messageText);
 			if (index !== -1) {
-				entries.splice(index, 1);
+				const [delivered] = entries.splice(index, 1);
 				this._changed();
+				delivered?.admission?.onDelivered?.();
 				return queue;
 			}
 		}

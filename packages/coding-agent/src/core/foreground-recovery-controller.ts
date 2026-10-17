@@ -65,8 +65,8 @@ export interface ForegroundRecoveryResourceSnapshot {
 
 export interface ForegroundRecoveryControllerDeps {
 	agent: Agent;
-	/** The ICM chat's turns, undefined while no chat runs. A provider run outside a turn begins one, as its own. */
-	chatTurns?(): Pick<IcmTurnCoordinator, "begin" | "current" | "end"> | undefined;
+	/** The ICM chat's turns, undefined while no chat runs. Every provider run begins one, as its own, and ends it. */
+	chatTurns?(): Pick<IcmTurnCoordinator, "begin" | "end"> | undefined;
 	/** See `BillingFailoverControllerDeps.applyFailoverModel`. */
 	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): Model<Api> | undefined;
 	/** See `BillingFailoverControllerDeps.resolveFallbackModel`. */
@@ -110,6 +110,13 @@ export class ForegroundRecoveryController {
 	private consumingRun = false;
 	/** Whether the round now running is followed by a recovery classification: false at the stall cap and in stranded delivery. */
 	private recoveryRoundAvailable = false;
+	/**
+	 * Tree navigations rewriting the history, each from its start until its new branch is installed or it ends. A run
+	 * and a rewrite of the history it executes on exclude each other here: see `beginHistoryRewrite`.
+	 */
+	private readonly historyRewrites = new Set<symbol>();
+	/** Set while a run owns the history: from before its preparation through its last delivery round, not its cleanup. */
+	private runOwnsHistory = false;
 	private submissionLease: ForegroundSubmissionLease | undefined;
 	/** Next epoch to assign. Starts at 1 so the first successful `tryAcquireSubmission()` yields
 	 * epoch 1; only ever increases, including across releases -- it identifies a submission, not a
@@ -178,6 +185,7 @@ export class ForegroundRecoveryController {
 			this.isRunActive ||
 			this.deps.agent.state.isStreaming ||
 			this.isRetrying ||
+			this.historyRewrites.size > 0 ||
 			this.deps.isCompacting?.() === true ||
 			this.deps.isExtendedBusy?.() === true
 		);
@@ -323,6 +331,55 @@ export class ForegroundRecoveryController {
 		return undefined;
 	}
 
+	/**
+	 * A tree navigation takes the history it rewrites; the returned release (idempotent) gives it back. A navigation and a
+	 * run exclude each other at this one owner: while a run owns the history, from its preparation through its last
+	 * delivery round, the navigation is refused (the run's cleanup, which drains queued extension commands, owns it no
+	 * longer); while a navigation holds it, every run waits before it begins (`claimRunHistory`) and no submission is
+	 * admitted. Several navigations may hold it at once: the newest supersedes the older ones itself.
+	 */
+	beginHistoryRewrite(): () => void {
+		if (this.runOwnsHistory) {
+			throw new Error(
+				"Cannot navigate the session tree while a turn is running. Wait for the turn to finish or interrupt it first.",
+			);
+		}
+		const rewrite = Symbol("historyRewrite");
+		this.historyRewrites.add(rewrite);
+		return () => {
+			if (!this.historyRewrites.delete(rewrite)) return;
+			// The rewrite occupied the foreground: a submission, run or idle waiter parked behind it resumes now.
+			this.wakeIdleWaiters();
+		};
+	}
+
+	/**
+	 * The run takes the history once no navigation rewrites it, in the same synchronous step as the last check, so no
+	 * navigation starts between them. Woken by the rewrite's release, the submission's abort or shutdown, never polled.
+	 * False when the submission closes while it waits.
+	 */
+	private async claimRunHistory(signal?: AbortSignal): Promise<boolean> {
+		while (this.historyRewrites.size > 0) {
+			if (this.isClosing(signal)) return false;
+			await new Promise<void>((resolve) => {
+				const stop = (): void => {
+					unsubscribe();
+					this.idleWaiters.delete(stop);
+					signal?.removeEventListener("abort", stop);
+					resolve();
+				};
+				const unsubscribe = this.activityListeners.subscribe(stop);
+				this.idleWaiters.add(stop);
+				signal?.addEventListener("abort", stop, { once: true });
+				// Register first, then recheck, so a release landing before the registration is not lost.
+				if (this.isClosing(signal) || this.historyRewrites.size === 0) stop();
+			});
+		}
+		if (this.isClosing(signal)) return false;
+		this.runOwnsHistory = true;
+		return true;
+	}
+
 	ownsSubmission(lease: ForegroundSubmissionLease | undefined): boolean {
 		return lease !== undefined && lease === this.submissionLease;
 	}
@@ -358,16 +415,18 @@ export class ForegroundRecoveryController {
 	}
 
 	/**
-	 * Begins the chat turn a provider run is about to start, and returns its end. A turn already running is joined, so
-	 * nothing begins and nothing ends. Called only where the run reaches its first provider call: a run that ends before
-	 * it begins no turn. An abort ends the wait without a turn; the caller re-checks the closing gate after this await.
+	 * Begins the chat turn a provider run is about to start, and returns its end. No turn is running here: this is the
+	 * only caller of `turns.begin`, runs never overlap (`activeRuns`), and every run that began a turn ends it in its
+	 * finally (host disposal ends one too). Called only where the run reaches its first provider call: a run that ends
+	 * before it begins no turn. An abort ends the wait without a turn; the caller re-checks the closing gate after this
+	 * await.
 	 */
 	private async beginChatTurn(
 		startOf: () => ChatTurnStart,
 		signal: AbortSignal | undefined,
 	): Promise<(() => void) | undefined> {
 		const turns = this.deps.chatTurns?.();
-		if (turns === undefined || turns.current() !== undefined) return undefined;
+		if (turns === undefined) return undefined;
 		const start = startOf();
 		let turn: IcmTurnHandle;
 		let waitProgress: { built: number; needed: number; failed: number } | undefined;
@@ -444,6 +503,8 @@ export class ForegroundRecoveryController {
 		let endChatTurn: (() => void) | undefined;
 		try {
 			const maxGoalLoopRounds = this.deps.settingsManager.getAutonomySettings().maxStallTurns;
+			// A navigation rewriting the history this run would execute on finishes first; from here no navigation starts.
+			if (!(await this.claimRunHistory(signal))) return;
 			await this.deps.prepareRun();
 			// The submission's closing cancellation gate. `agent.abort()` reaches only a run that already
 			// exists, and none exists until the `prompt()`/`continue()` below installs one, so an abort
@@ -461,9 +522,13 @@ export class ForegroundRecoveryController {
 			if (this.isClosing(signal)) return;
 			let goalLoopRounds = 1;
 			const atRoundCap = (): boolean => maxGoalLoopRounds !== 0 && goalLoopRounds >= maxGoalLoopRounds;
-			// The runtime-update owner asked this run to end so the runtime can be replaced: no further provider
-			// round starts on its behalf. Admitted input stays in the agent's queue for the next run.
+			// The runtime-update owner asked this run to end so the runtime can be replaced: no further provider round
+			// starts on its behalf, stranded delivery included (a stop is "no automatic continuation"). Admitted input is
+			// held for its owner by the finally below, never left in the agent's queue for an unrelated next run.
 			let stoppedForRuntimeUpdate = false;
+			// The provider refused the run's model for its usage limit and the work did not move to another model: a
+			// stranded delivery round would go to the same exhausted model. Admitted input is held the same way.
+			let stoppedOnUsageLimit = false;
 			// From here the run delivers what the agent's queue holds, until its last round.
 			this.setConsumingRun(true);
 			this.recoveryRoundAvailable = !atRoundCap();
@@ -486,7 +551,9 @@ export class ForegroundRecoveryController {
 						await this.deps.settleRuntimeUpdate?.(signal);
 						break;
 					}
-					if (!(await this.handlePostAgentRun())) {
+					const recovery = await this.handlePostAgentRun();
+					if (recovery !== "recover") {
+						if (recovery === "usage_limit_stop") stoppedOnUsageLimit = true;
 						await this.deps.settleRuntimeUpdate?.(signal);
 						break;
 					}
@@ -499,7 +566,11 @@ export class ForegroundRecoveryController {
 					}
 					if (update !== "continue") {
 						if (atRoundCap()) break;
-						if (!(await this.handlePostAgentRun())) break;
+						const recovery = await this.handlePostAgentRun();
+						if (recovery !== "recover") {
+							if (recovery === "usage_limit_stop") stoppedOnUsageLimit = true;
+							break;
+						}
 						goalLoopRounds++;
 					}
 				}
@@ -520,13 +591,17 @@ export class ForegroundRecoveryController {
 			// stranded delivery round could read as the retry's recovery.
 			this.recoveryRoundAvailable = false;
 			if (this.retry.attempt > 0) this.finishRetry(false, "The run ended before the retry recovered.");
-			// Input admitted to the agent's queue is the owner's and is never left behind it.
-			if (!stoppedForRuntimeUpdate) await this.deliverStrandedInput(signal);
-			deliveredStranded = true;
+			// Input admitted to the agent's queue is the owner's and is never left behind it: delivered by stranded rounds
+			// when another round may run, otherwise held for its owner by the finally below.
+			if (!stoppedForRuntimeUpdate && !stoppedOnUsageLimit) {
+				await this.deliverStrandedInput(signal);
+				deliveredStranded = true;
+			}
 		} catch (error: unknown) {
 			// The run failed. Its owned queued input is held first, then its cleanup runs HERE so that a failing cleanup is joined to
 			// the run's failure (both stay in the thrown graph) instead of replacing it from the finally below.
 			this.setConsumingRun(false);
+			this.runOwnsHistory = false;
 			this.recoveryRoundAvailable = false;
 			if (this.retry.attempt > 0) this.finishRetry(false, error instanceof Error ? error.message : String(error));
 			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
@@ -541,12 +616,14 @@ export class ForegroundRecoveryController {
 			}
 			throw error;
 		} finally {
-			// Any exit that did not reach the stranded-input delivery (a closing exit, or a run whose prompt/continue/recovery threw)
-			// leaves the owner's admitted input in the agent's queue: hold it for its owner, visible and recoverable, so it cannot leak
-			// into the next prompt's first boundary. Nothing is deleted and no refusal is swallowed. (Messages an extension or the
-			// system queued directly on the agent are not owner input; the kernel's queue delivers them at the next boundary.)
-			// The run delivers nothing more: it stops being a consumer in the same step as that last queue check.
+			// Any exit that did not reach the stranded-input delivery (a closing exit, a runtime-update or usage-limit stop, or a run
+			// whose prompt/continue/recovery threw) leaves the owner's admitted input in the agent's queue: hold it for its owner,
+			// visible and recoverable, so it cannot leak into the next prompt's first boundary. Nothing is deleted and no refusal is
+			// swallowed. (Messages an extension or the system queued directly on the agent are not owner input; the kernel's queue
+			// delivers them at the next boundary.) The run delivers nothing more: it stops being a consumer in the same step as that
+			// last queue check, and its cleanup below no longer owns the history (a queued extension command may navigate).
 			this.setConsumingRun(false);
+			this.runOwnsHistory = false;
 			this.recoveryRoundAvailable = false;
 			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
 			try {
@@ -584,8 +661,9 @@ export class ForegroundRecoveryController {
 
 	/**
 	 * A run ended by an exit that has no round of its own left (no assistant message to classify, a
-	 * handled billing stop, a runtime-update stop, the stall cap) while the agent's queue still holds
-	 * admitted input. Each further round delivers what the agent's queue mode releases at a boundary
+	 * recovery that declined another round, the stall cap) while the agent's queue still holds admitted
+	 * input. A runtime-update stop and a usage-limit stop never come here: neither may start another
+	 * round, so their input is held. Each further round delivers what the agent's queue mode releases at a boundary
 	 * (all, or one per round) until the queue is empty. A round that delivers nothing, or an abort, ends
 	 * it, and whatever is still queued goes back to the pending queue, held, visible and recoverable.
 	 */
@@ -611,7 +689,12 @@ export class ForegroundRecoveryController {
 	async waitForIdle(): Promise<void> {
 		while (true) {
 			if (this.shutdownReason) return;
-			if (this.submissionLease !== undefined || this.activeRuns > 0 || this.deps.isCompacting?.() === true) {
+			if (
+				this.submissionLease !== undefined ||
+				this.activeRuns > 0 ||
+				this.historyRewrites.size > 0 ||
+				this.deps.isCompacting?.() === true
+			) {
 				await new Promise<void>((resolve) => this.idleWaiters.add(resolve));
 				continue;
 			}
@@ -711,13 +794,18 @@ export class ForegroundRecoveryController {
 		return false;
 	}
 
-	async handlePostAgentRun(): Promise<boolean> {
+	/**
+	 * Classifies the run's last assistant message: "recover" when a further round follows (retry, model switch, failover,
+	 * compaction, or queued input), "end" when none does, "usage_limit_stop" when the provider refused the model for its
+	 * usage limit and the work stays on that exhausted model, so no round of this run may go to it.
+	 */
+	private async handlePostAgentRun(): Promise<"recover" | "end" | "usage_limit_stop"> {
 		const message = this.lastAssistantMessage;
 		this.lastAssistantMessage = undefined;
-		if (!message) return false;
+		if (!message) return "end";
 		// A closing session starts no recovery of its own: no retry, no model switch, no failover and no compaction (each of them is a
 		// paid provider call). The run's last message is already persisted; whatever remains queued is held by the caller.
-		if (this.shutdownReason) return false;
+		if (this.shutdownReason) return "end";
 
 		const classified = this.classifyAssistantError(message);
 		if (classified) {
@@ -736,26 +824,29 @@ export class ForegroundRecoveryController {
 			compactionRetryKey !== undefined && compactionRetryKey === this.pendingCompactionRetryKey;
 		if (!repeatedCompactionFailure) this.pendingCompactionRetryKey = undefined;
 		if (repeatedCompactionFailure && (await this.deps.checkCompaction(message))) {
-			return true;
+			return "recover";
 		}
 		if (classified?.retryable && (await this.retry.prepareRetry(message))) {
 			this.pendingCompactionRetryKey = compactionRetryKey;
-			return true;
+			return "recover";
 		}
 		if (classified?.reason === "model_unsupported") {
 			const replacement = await this.deps.replaceUnsupportedModel?.(message);
-			if (replacement && this.retry.prepareModelSwitchRetry(message, `Continuing on ${replacement}.`)) return true;
+			if (replacement && this.retry.prepareModelSwitchRetry(message, `Continuing on ${replacement}.`))
+				return "recover";
 		}
 		if (classified?.reason === "billing_or_quota") this.deps.onUsageLimitReached?.(message);
 		const billing = await this.billingFailover.handleAssistantError(message, classified);
 		// A quota the work moved off continues at once on the model it moved to, like an unsupported model.
 		if (billing.continuedOn && this.retry.prepareModelSwitchRetry(message, `Continuing on ${billing.continuedOn}.`))
-			return true;
+			return "recover";
 		// No retry continues from here: the retry window ends with this failure, a handled billing stop included.
 		if (message.stopReason === "error") this.finishRetry(false, message.errorMessage);
-		if (billing.handled) return false;
-		if (await this.deps.checkCompaction(message)) return true;
-		return this.deps.agent.hasQueuedMessages();
+		// The foreground lane is never refused locally on an exhausted model (the owner's re-send must reach the provider),
+		// so a handled stop the work did not move off is what keeps this run's further rounds off that model.
+		if (billing.handled) return billing.continuedOn ? "end" : "usage_limit_stop";
+		if (await this.deps.checkCompaction(message)) return "recover";
+		return this.deps.agent.hasQueuedMessages() ? "recover" : "end";
 	}
 
 	private finishRetry(success: boolean, finalError?: string): void {

@@ -3,7 +3,6 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
 import { latestAgentAttemptByDurableOrder } from "../orchestration/attempt-ordering.ts";
-import type { GatewayUsageAccountingPort } from "../orchestration/capability-gateway.ts";
 import type {
 	AgentBindingContract,
 	AgentResumeContext,
@@ -42,6 +41,7 @@ import {
 	selectedWorkerAttempt,
 } from "./worker-lane-projection.ts";
 import { isLocalProcessAlive, isLocalWorkerProcessOwnerProvenDead } from "./worker-process-owner.ts";
+import type { WorkerUsageAccountingStoragePort } from "./worker-usage-accounting.ts";
 
 export type PendingVerificationRecovery =
 	| {
@@ -332,7 +332,7 @@ export class WorkerLifecycle {
 	beginUsageAccounting(
 		handle: Pick<StartedDelegationAttempt, "attemptId" | "leaseId" | "fencingToken">,
 		recoveryBaseline: AttemptUsageSnapshot,
-	): GatewayUsageAccountingPort {
+	): WorkerUsageAccountingStoragePort {
 		const identity = { attemptId: handle.attemptId, leaseId: handle.leaseId, fencingToken: handle.fencingToken };
 		const runtime = this.ledger.runtime;
 		const existing = runtime.getSnapshot().attempts[identity.attemptId]?.usageAccounting;
@@ -340,8 +340,8 @@ export class WorkerLifecycle {
 		return {
 			identity: Object.freeze({ leaseId: identity.leaseId, fencingToken: identity.fencingToken }),
 			baseline,
-			record: (usage) => {
-				runtime.recordAttemptUsage(identity, usage);
+			record: (usage, lockOptions) => {
+				runtime.recordAttemptUsage(identity, usage, lockOptions);
 			},
 			read: () => {
 				const accounting = runtime.getSnapshot().attempts[identity.attemptId]?.usageAccounting;

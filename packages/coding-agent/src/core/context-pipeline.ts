@@ -52,7 +52,11 @@ import {
 	preDigestConversationText,
 } from "./context/brain-curator.ts";
 import type { CustodyTarget } from "./context/cache-custody.ts";
-import { type ArtifactStore, createFileArtifactStore } from "./context/context-artifacts.ts";
+import {
+	type ArtifactStore,
+	createFileArtifactStore,
+	createLineageArtifactStore,
+} from "./context/context-artifacts.ts";
 import {
 	type ContextAuditMemo,
 	type ContextAuditOptions,
@@ -80,6 +84,7 @@ import {
 import { contextVisibilityExcerpt } from "./context/context-query-visibility.ts";
 import {
 	acquireContextStoreRetention,
+	acquireInheritedContextStoreRetention,
 	type ContextStoreRetentionLease,
 	getContextStoreDir,
 	migrateLegacyContextStores,
@@ -293,8 +298,12 @@ export class ContextPipeline {
 	private _lastCurationSkipReason: string | undefined = undefined;
 	private _lastPreDigestSkipReason: string | undefined = undefined;
 	private _toolArtifactStore: ArtifactStore | undefined = undefined;
+	/** `<artifactId>\0<toolCallId>` pairs whose pack-time holder context-gc already handed off or released. */
+	private readonly _settledGcArtifactHolders = new Set<string>();
 	private _pathAliasRuntime: PathAliasRuntime | undefined = undefined;
 	private _contextStoreRetentionLease: ContextStoreRetentionLease | undefined;
+	/** Leases on the ancestor sessions' context runs this forked session reads artifacts through. */
+	private _inheritedContextStoreLeases: Array<{ release(): void }> | undefined;
 	private _latestContextAuditReport: ContextAuditReport | undefined = undefined;
 	private _latestContextProjection: ContextProjection | undefined = undefined;
 	private _latestPromptPolicyReport: PromptPolicyShadowReport | undefined = undefined;
@@ -360,6 +369,28 @@ export class ContextPipeline {
 		return this._contextStoreRetentionLease;
 	}
 
+	/**
+	 * Lease every ancestor context run that still exists, once per pipeline, so the retention sweep
+	 * (which any session's store acquisition runs) cannot remove the artifacts this session's inherited
+	 * records cite while it reads them. A partial failure releases what it took before rethrowing, and
+	 * the next inherited lookup tries again.
+	 */
+	private _ensureInheritedContextStoreRetention(): void {
+		// A lookup already in flight after disposal must not take leases nothing will release.
+		if (this._inheritedContextStoreLeases || this.deps.isDisposed()) return;
+		const leases: Array<{ release(): void }> = [];
+		try {
+			for (const sessionId of this.deps.getSessionManager().getSessionLineageIds().slice(1)) {
+				const lease = acquireInheritedContextStoreRetention(this._contextStoreRoot(), sessionId);
+				if (lease) leases.push(lease);
+			}
+		} catch (error) {
+			for (const lease of leases) lease.release();
+			throw error;
+		}
+		this._inheritedContextStoreLeases = leases;
+	}
+
 	/** The session's context-GC store, where packed originals live (`artifact_retrieve context:<key>`). */
 	contextGcStorageDir(): string {
 		return this._contextGcStorageDir();
@@ -412,19 +443,41 @@ export class ContextPipeline {
 	 *
 	 * `packToolOutput()` registers a reference (the packing tool call's id) at pack time
 	 * and fails closed, so packed artifacts are never prematurely collected.
-	 * `_releaseGcPackedArtifactReferences()` (called from `applyContextGc()`) releases
-	 * that reference once context-gc packs the result out of live context, and
+	 * `_releaseGcPackedArtifactReferences()` (called from `applyContextGc()`) hands that
+	 * reference to the retained context original that still cites the artifact once context-gc
+	 * packs the result out of live context (or releases it when no original is kept), and
 	 * opportunistically reclaims now-unreferenced artifacts via `cleanup()`.
 	 * Cross-session retention is enforced when either payload store is first used. Active
 	 * sessions hold PID-marked leases; inactive stores are pruned by age, count, and bytes.
+	 *
+	 * A forked session inherits branch records (background tool task terminals) whose artifacts
+	 * live in its ancestors' stores, so lookups read through to each ancestor session's artifacts
+	 * directory, nearest first, on confirmed absence; every mutation stays on this session's store.
+	 * The first lookup that reaches the ancestors leases their runs until disposal, the same
+	 * first-use protection this session's own run gets; an ancestor's lease failure surfaces on that
+	 * inherited lookup, never on this session's own writes.
 	 */
 	getToolArtifactStore(): ArtifactStore {
-		this._toolArtifactStore ??= createFileArtifactStore({
-			baseDir: this._toolArtifactsDir(),
-			prepareBaseDir: () =>
-				migrateLegacyContextStores(this._contextStoreRoot(), this.deps.getSessionManager().getSessionId()),
-			acquireBaseDir: () => this._ensureContextStoreRetention().artifactsDir,
-		});
+		this._toolArtifactStore ??= createLineageArtifactStore(
+			createFileArtifactStore({
+				baseDir: this._toolArtifactsDir(),
+				prepareBaseDir: () =>
+					migrateLegacyContextStores(this._contextStoreRoot(), this.deps.getSessionManager().getSessionId()),
+				acquireBaseDir: () => this._ensureContextStoreRetention().artifactsDir,
+			}),
+			() => {
+				this._ensureInheritedContextStoreRetention();
+				return this.deps
+					.getSessionManager()
+					.getSessionLineageIds()
+					.slice(1)
+					.map((sessionId) =>
+						createFileArtifactStore({
+							baseDir: getContextStoreDir(this._contextStoreRoot(), "artifacts", sessionId),
+						}),
+					);
+			},
+		);
 		return this._toolArtifactStore;
 	}
 
@@ -435,6 +488,8 @@ export class ContextPipeline {
 	 */
 	cleanupToolArtifactStoreOnDispose(): void {
 		const failures: unknown[] = [];
+		const inheritedLeases = this._inheritedContextStoreLeases ?? [];
+		this._inheritedContextStoreLeases = undefined;
 		for (const release of [
 			() => this._toolArtifactStore?.cleanup(),
 			() => {
@@ -445,6 +500,7 @@ export class ContextPipeline {
 				this._contextStoreRetentionLease?.release();
 				this._contextStoreRetentionLease = undefined;
 			},
+			...inheritedLeases.map((lease) => () => lease.release()),
 			() => {
 				if (this._ephemeralContextRoot) removeProcessScratchDirectory(this._ephemeralContextRoot);
 				this._ephemeralContextRoot = undefined;
@@ -460,6 +516,7 @@ export class ContextPipeline {
 		// GC-eligible even if this ContextPipeline instance itself briefly lingers.
 		this._auditMemo.clear();
 		this._tokenMemo.clear();
+		this._settledGcArtifactHolders.clear();
 		this._auditMemoMessages = [];
 		this._tokenMemoMessages = [];
 		this._latestCompactionScan.reset();
@@ -1152,6 +1209,16 @@ export class ContextPipeline {
 	 * `record.toolCallId` (from context-gc's packed record) is exactly the holder id
 	 * `packToolOutput()` used when it called `addReference()` -- both trace back to the
 	 * same tool call's id -- so no separate bookkeeping is needed to find it.
+	 *
+	 * The packed message leaves live context, but its exact text is retained as the context
+	 * original `context:<key>`, and that text still names the artifact ("Full output: artifact
+	 * tool-output:<id>"). The artifact therefore lives as long as its last citing record: the
+	 * pack-time holder is handed to a `context-gc:<key>` holder (added first, released only once
+	 * the new holder is confirmed) that lives with the original in the same leased session run.
+	 * A planned original that is not stored yet (the write is retried on the next pass) keeps the
+	 * pack-time holder until it is; only a record with no original at all releases outright.
+	 * Each settled transfer or release is remembered for the process so a record that stays packed
+	 * costs nothing on later requests.
 	 */
 	private _releaseGcPackedArtifactReferences(messages: AgentMessage[], report: ContextGcReport): void {
 		const store = this._toolArtifactStore;
@@ -1162,7 +1229,21 @@ export class ContextPipeline {
 			if (!PACKED_TOOL_OUTPUT_TOOLS.has(record.toolName)) continue;
 			const artifactId = extractArtifactId(messages[record.messageIndex]);
 			if (!artifactId) continue;
+			const settledKey = `${artifactId}\0${record.toolCallId}`;
+			if (this._settledGcArtifactHolders.has(settledKey)) continue;
+			const citedByOriginal = record.storagePath !== undefined && record.key !== undefined;
+			if (citedByOriginal) {
+				// Not stored yet: the original that will cite the artifact is still coming.
+				if (!record.retrievalAvailable) continue;
+				// An unconfirmed hand-off keeps the pack-time holder: the artifact is never left unheld
+				// while a retained original cites it.
+				if (!store.addReference(artifactId, `context-gc:${record.key}`)) {
+					this._settledGcArtifactHolders.add(settledKey);
+					continue;
+				}
+			}
 			if (store.removeReference(artifactId, record.toolCallId)) releasedAny = true;
+			this._settledGcArtifactHolders.add(settledKey);
 		}
 		// Cleanup only runs immediately after a release actually happened in this pass, so
 		// a long session doesn't re-scan the artifact directory on every turn once nothing

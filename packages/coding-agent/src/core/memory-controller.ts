@@ -659,10 +659,11 @@ export class MemoryController {
 		const recovered = this._summarySettingsFailure !== undefined;
 		this._summarySettingsFailure = undefined;
 		if (recovered) {
-			void this._continuousChat.runtime
-				.reserveTurnBoundary()
-				.then((boundary) => boundary.release())
-				.catch(() => {});
+			void this._continuousChat.runtime.retryFailedWork().catch((error: unknown) => {
+				this.deps.emitWarning(
+					`Continuous-chat could not release the work the summary model refusal blocked: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			});
 		}
 	}
 

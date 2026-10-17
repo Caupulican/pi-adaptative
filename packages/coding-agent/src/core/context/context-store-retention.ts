@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import {
+	acquireExistingWorkRun,
 	acquireWorkRun,
 	getWorkRunDir,
 	getWorkTenantDir,
@@ -206,4 +207,22 @@ export function acquireContextStoreRetention(
 			lease.release();
 		},
 	};
+}
+
+/**
+ * Keep an ancestor session's context stores from retention while a forked session that reads through
+ * to them is active. The ancestor's run is never created, migrated or swept from here; undefined when
+ * it no longer exists or is already being removed.
+ */
+export function acquireInheritedContextStoreRetention(
+	agentDir: string,
+	sessionId: string,
+): { release(): void } | undefined {
+	return acquireExistingWorkRun({
+		agentDir,
+		category: "context",
+		tenant: CONTEXT_WORK_TENANT,
+		runId: sessionId,
+		retention: false,
+	});
 }

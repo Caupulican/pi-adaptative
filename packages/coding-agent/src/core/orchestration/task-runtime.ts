@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
+import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
 import { deepFreeze } from "../util/deep-freeze.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
 import { beginAttemptUsageGeneration, recordAttemptGenerationUsage } from "./attempt-usage-generations.ts";
@@ -779,12 +780,17 @@ export class DurableTaskRuntime {
 		);
 	}
 
-	/** A registered generation may report received charges after its execution authority ends. */
+	/**
+	 * A registered generation may report received charges after its execution authority ends.
+	 * `lockOptions` bounds every store-lock wait this report takes; a caller that owns its own later
+	 * retry passes a single attempt, so contention fails fast instead of blocking the calling thread.
+	 */
 	recordAttemptUsage(
 		handle: Pick<AttemptLease, "attemptId" | "leaseId" | "fencingToken">,
 		usage: AttemptUsageSnapshot,
+		lockOptions?: Readonly<AtomicFileLockOptions>,
 	): AttemptUsageSnapshot {
-		this.refresh();
+		this.refresh(lockOptions);
 		const attempt = this.requireAttempt(handle.attemptId);
 		if (!attempt.usageAccounting) throw new DurableTaskRuntimeError("Usage generation is not registered.");
 		const identity = usageGenerationIdentityFromValue(
@@ -795,13 +801,16 @@ export class DurableTaskRuntime {
 		const accounting = recordAttemptGenerationUsage(attempt.usageAccounting, identity, reported);
 		if (accounting !== attempt.usageAccounting) {
 			const digest = createHash("sha256").update(JSON.stringify(reported)).digest("hex");
-			this.commit({
-				type: "attempt.usage_recorded",
-				aggregateId: handle.attemptId,
-				actor: "runtime",
-				idempotencyKey: `attempt-usage-recorded:${handle.attemptId}:${identity.fencingToken}:${digest}`,
-				payload: toJsonObject({ attemptId: handle.attemptId, ...identity, usage: reported }),
-			});
+			this.commit(
+				{
+					type: "attempt.usage_recorded",
+					aggregateId: handle.attemptId,
+					actor: "runtime",
+					idempotencyKey: `attempt-usage-recorded:${handle.attemptId}:${identity.fencingToken}:${digest}`,
+					payload: toJsonObject({ attemptId: handle.attemptId, ...identity, usage: reported }),
+				},
+				lockOptions,
+			);
 		}
 		return structuredClone(this.state.attempts[handle.attemptId]!.usageAccounting!.total);
 	}
@@ -842,7 +851,7 @@ export class DurableTaskRuntime {
 			aggregateId: args.taskId,
 			actor: "runtime",
 			idempotencyKey: `task-verification-finished:${args.taskId}:${args.verifierAttemptId}`,
-			payload: toJsonObject({ ...args, reasonCode: args.reasonCode.trim() }),
+			payload: toJsonObject({ ...args, reasonCode: dispatchIdentifier(args.reasonCode.trim(), "reasonCode") }),
 		});
 		return structuredClone(this.state.tasks[args.taskId]!);
 	}
@@ -893,7 +902,7 @@ export class DurableTaskRuntime {
 			aggregateId: attemptId,
 			actor: "runtime",
 			idempotencyKey: `attempt-cancelled:${attemptId}`,
-			payload: toJsonObject({ attemptId, reasonCode: reasonCode.trim() }),
+			payload: toJsonObject({ attemptId, reasonCode: dispatchIdentifier(reasonCode.trim(), "reasonCode") }),
 		});
 		return structuredClone(this.state.attempts[attemptId]!);
 	}
@@ -940,7 +949,7 @@ export class DurableTaskRuntime {
 				attemptId: args.attemptId,
 				leaseId: args.leaseId,
 				fencingToken: args.fencingToken,
-				reasonCode: args.reasonCode.trim(),
+				reasonCode: dispatchIdentifier(args.reasonCode.trim(), "reasonCode"),
 				...(retry ? { retry } : {}),
 			}),
 		});
@@ -958,7 +967,7 @@ export class DurableTaskRuntime {
 			aggregateId: taskId,
 			actor: "runtime",
 			idempotencyKey: `task-failed:${taskId}:${reasonCode.trim()}`,
-			payload: toJsonObject({ taskId, reasonCode: reasonCode.trim() }),
+			payload: toJsonObject({ taskId, reasonCode: dispatchIdentifier(reasonCode.trim(), "reasonCode") }),
 		});
 		return structuredClone(this.state.tasks[taskId]!.task);
 	}
@@ -1361,7 +1370,7 @@ export class DurableTaskRuntime {
 		return attempt;
 	}
 
-	private refresh(): void {
+	private refresh(lockOptions?: Readonly<AtomicFileLockOptions>): void {
 		let events: OrchestrationEvent[];
 		try {
 			events = this.store.readAfter(this.state.lastOrdinal);
@@ -1377,11 +1386,11 @@ export class DurableTaskRuntime {
 		for (const event of events) {
 			this.state = deepFreeze(reduceOrchestrationEvent(this.state, event));
 		}
-		this.compactCurrentProjection();
+		this.compactCurrentProjection(lockOptions);
 	}
 
-	private commit(input: AppendOrchestrationEventInput): void {
-		this.compactCurrentProjection();
+	private commit(input: AppendOrchestrationEventInput, lockOptions?: Readonly<AtomicFileLockOptions>): void {
+		this.compactCurrentProjection(lockOptions);
 		let admittedProjection: TaskRuntimeProjection | undefined;
 		const event = this.store.append(input, {
 			expectedLastOrdinal: this.state.lastOrdinal,
@@ -1390,6 +1399,7 @@ export class DurableTaskRuntime {
 					admittedProjection = reduceOrchestrationEvent(this.state, candidate);
 				}
 			},
+			...(lockOptions ? { lockOptions } : {}),
 		});
 		if (admittedProjection) {
 			this.state = deepFreeze(admittedProjection);
@@ -1398,13 +1408,13 @@ export class DurableTaskRuntime {
 		// Exact idempotent replay can return an older event after another writer committed a
 		// contiguous suffix. Adopt through readAfter so no intervening ordinal is skipped. Test stores
 		// that do not execute append admission still fall back to reducing their returned next event.
-		if (event.ordinal > this.state.lastOrdinal) this.refresh();
+		if (event.ordinal > this.state.lastOrdinal) this.refresh(lockOptions);
 		if (event.ordinal > this.state.lastOrdinal) this.state = deepFreeze(reduceOrchestrationEvent(this.state, event));
 	}
 
-	private compactCurrentProjection(): void {
+	private compactCurrentProjection(lockOptions?: Readonly<AtomicFileLockOptions>): void {
 		if (this.state.lastOrdinal > 0) {
-			this.store.compactIfNeeded(this.state.lastOrdinal, () => toJsonObject(this.state));
+			this.store.compactIfNeeded(this.state.lastOrdinal, () => toJsonObject(this.state), lockOptions);
 		}
 	}
 

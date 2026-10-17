@@ -1,9 +1,20 @@
 import { attemptUsageIncrease, validateAttemptUsageSnapshot } from "../orchestration/attempt-usage.ts";
 import type { GatewayUsageAccountingPort } from "../orchestration/capability-gateway.ts";
 import type { AttemptUsageSnapshot } from "../orchestration/contracts.ts";
+import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
 
 const INITIAL_RETRY_DELAY_MS = 250;
 const MAX_RETRY_DELAY_MS = 30_000;
+/**
+ * The timer retry owns its own backoff, so it takes the store lock in a single attempt: contention
+ * fails fast into the next scheduled retry instead of blocking the event loop on the lock wait.
+ */
+const RETRY_LOCK_OPTIONS: Readonly<AtomicFileLockOptions> = Object.freeze({ retries: 0 });
+
+/** The durable receipt port this adapter retries through; `lockOptions` bounds its store-lock waits. */
+export interface WorkerUsageAccountingStoragePort extends GatewayUsageAccountingPort {
+	record(usage: AttemptUsageSnapshot, lockOptions?: Readonly<AtomicFileLockOptions>): void;
+}
 
 /**
  * Persistence lifetime for an already registered execution generation. This adapter owns only
@@ -14,7 +25,7 @@ const MAX_RETRY_DELAY_MS = 30_000;
 export class WorkerUsageAccounting implements GatewayUsageAccountingPort {
 	readonly identity: GatewayUsageAccountingPort["identity"];
 	readonly baseline: AttemptUsageSnapshot;
-	private readonly port: GatewayUsageAccountingPort;
+	private readonly port: WorkerUsageAccountingStoragePort;
 	private readonly warn: (message: string) => void;
 	private readonly label: string;
 	private readonly afterRecord: () => void;
@@ -25,7 +36,7 @@ export class WorkerUsageAccounting implements GatewayUsageAccountingPort {
 	private writing = false;
 
 	constructor(options: {
-		port: GatewayUsageAccountingPort;
+		port: WorkerUsageAccountingStoragePort;
 		warn(message: string): void;
 		label: string;
 		afterRecord(): void;
@@ -53,11 +64,11 @@ export class WorkerUsageAccounting implements GatewayUsageAccountingPort {
 		this.flush();
 	}
 
-	private flush(): void {
+	private flush(lockOptions?: Readonly<AtomicFileLockOptions>): void {
 		if (!this.pending) return;
 		this.writing = true;
 		try {
-			this.port.record(this.pending);
+			this.port.record(this.pending, lockOptions);
 			// Keep publication in the retained obligation, including when the first storage write
 			// succeeds but publication fails. Both direct calls and retries use the gateway owner.
 			this.afterRecord();
@@ -72,7 +83,7 @@ export class WorkerUsageAccounting implements GatewayUsageAccountingPort {
 				this.retryTimer = setTimeout(() => {
 					this.retryTimer = undefined;
 					try {
-						this.flush();
+						this.flush(RETRY_LOCK_OPTIONS);
 					} catch {
 						// flush retains the receipt, reports the failure and schedules its next write.
 					}

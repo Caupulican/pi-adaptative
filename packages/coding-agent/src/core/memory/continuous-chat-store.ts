@@ -579,11 +579,14 @@ export class ContinuousChatStore {
 		return this.withWriterLock(() => this.appendNodeLocked(node));
 	}
 
-	/** The next unclaimed work item, or undefined when nothing is ready or the running limit is reached. */
-	async claimWork(): Promise<ContinuousChatWorkItem | undefined> {
+	/**
+	 * The next unclaimed work item, or undefined when nothing is ready or the running limit is reached. `turnTarget` is a
+	 * waiting turn's: the leaves below it are claimed before parents (see `claimContinuousChatWork`).
+	 */
+	async claimWork(turnTarget?: number): Promise<ContinuousChatWorkItem | undefined> {
 		return this.withWriterLock(async () => {
 			const state = await this.reconcileLocked();
-			const claim = claimContinuousChatWork(state.queue);
+			const claim = claimContinuousChatWork(state.queue, turnTarget);
 			if (claim.state !== state.queue) await this.persistQueue(state.origin, claim.state);
 			return claim.item;
 		});
@@ -616,7 +619,10 @@ export class ContinuousChatStore {
 		});
 	}
 
-	/** An arrival that is not a permanent message: a user turn began. Failed work becomes retry-eligible. */
+	/**
+	 * An arrival that is not a permanent message: a user turn began, or a waiting turn retries its failed leaves. Failed
+	 * work becomes retry-eligible.
+	 */
 	async noteArrival(): Promise<void> {
 		await this.withWriterLock(async () => {
 			const state = await this.reconcileLocked();

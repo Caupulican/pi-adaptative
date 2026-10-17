@@ -293,12 +293,11 @@ function formatFindResults(
 		// MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES (message-retention.ts), which replaces
 		// the *entire* details object with a stub -- silently losing artifactId and every
 		// other field alongside it. This is load-bearing beyond just the retention budget:
-		// agent-session.ts's _releaseGcPackedArtifactReferences() reads artifactId back off
+		// context-pipeline.ts's _releaseGcPackedArtifactReferences() reads artifactId back off
 		// this same canonical message at eviction time (potentially many turns later), so
-		// keeping `details` small here is what keeps that release path working at all. If
-		// this field ever grows a large addition again, add a regression proving artifactId
-		// survives compactToolResultDetailsForRetention (see
-		// test/suite/agent-session-artifact-lifecycle.test.ts), not just a details-size check.
+		// keeping `details` small here is what keeps that holder hand-off/release path working at
+		// all. If this field ever grows a large addition again, verify that artifactId survives
+		// compactToolResultDetailsForRetention, not just the details size.
 		details.truncation = { ...packed.truncation, content: "" };
 	}
 	if (resultLimitReached || packed.truncation.truncated) {

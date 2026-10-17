@@ -1,6 +1,6 @@
 import { fanoutLabelTag, parseFanoutHeader } from "./worker-fanout-header.ts";
 
-const MAX_WORKER_TASK_LABEL_LENGTH = 120;
+export const MAX_WORKER_TASK_LABEL_LENGTH = 120;
 
 function boundedLabel(text: string, fallback: string, maxLength: number): string {
 	const normalized = text.trim().replace(/\s+/g, " ");

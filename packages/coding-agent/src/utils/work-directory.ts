@@ -595,22 +595,49 @@ export function getProcessWorkRun(agentDir: string, category: string, tenant: st
 }
 
 export function acquireWorkRun(options: AcquireWorkRunOptions): WorkRunLease {
+	const lease = leaseWorkRun(options, false);
+	if (!lease) throw new Error("Work run acquisition returned no lease.");
+	return lease;
+}
+
+/**
+ * Lease a run that already exists without creating it, so a reader that depends on another owner's run
+ * (a forked session reading its ancestors' stores) keeps it from retention while it is active.
+ * Undefined when the run does not exist or is already being removed: nothing is left to keep.
+ */
+export function acquireExistingWorkRun(options: AcquireWorkRunOptions & { runId: string }): WorkRunLease | undefined {
+	return leaseWorkRun(options, true);
+}
+
+function leaseWorkRun(options: AcquireWorkRunOptions, existingOnly: boolean): WorkRunLease | undefined {
 	const now = options.now ?? Date.now();
 	const runId = options.runId ?? createWorkRunId(now);
 	assertPortablePathSegment("Work category", options.category);
 	assertPortablePathSegment("Work tenant", options.tenant);
 	assertPortablePathSegment("Work run id", runId);
-	const tenantDir = ensureTenantDirectory(options.agentDir, options.category, options.tenant);
+	const tenantDir = existingOnly
+		? getWorkTenantDir(options.agentDir, options.category, options.tenant)
+		: ensureTenantDirectory(options.agentDir, options.category, options.tenant);
 	const runDir = join(tenantDir, runId);
 	let created = false;
-	try {
-		mkdirSync(runDir);
-		created = true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-		const stats = lstatSync(runDir);
+	if (existingOnly) {
+		const stats = lstatSync(runDir, { throwIfNoEntry: false });
+		if (!stats) return undefined;
 		if (!stats.isDirectory() || stats.isSymbolicLink()) {
 			throw new Error(`Work run path is not a real directory: ${runDir}`);
+		}
+		// A run under cleanup may already have lost its manifest; it is going away, not unowned.
+		if (cleanupMarkerBlocksAcquisition(runDir)) return undefined;
+	} else {
+		try {
+			mkdirSync(runDir);
+			created = true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			const stats = lstatSync(runDir);
+			if (!stats.isDirectory() || stats.isSymbolicLink()) {
+				throw new Error(`Work run path is not a real directory: ${runDir}`);
+			}
 		}
 	}
 

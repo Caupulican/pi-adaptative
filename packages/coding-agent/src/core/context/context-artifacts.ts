@@ -8,12 +8,14 @@
  *
  * `createFileArtifactStore` is wired into live grep/find tool construction in
  * agent-session.ts (session-scoped under `<agentDir>/work/context/sessions/<sessionId>/artifacts/`).
- * References are registered at pack time and released when context-gc evicts the
- * corresponding grep/find tool result (opportunistic, conservative cleanup), with a
+ * References are registered at pack time; when context-gc evicts the corresponding grep/find tool
+ * result, the reference passes to the retained context original that still cites the artifact, or is
+ * released when no original is kept (opportunistic, conservative cleanup), with a
  * best-effort dispose-time sweep for zero-reference artifacts. A background tool task's
  * output artifact is cited by its terminal record on the session branch, so its holder is
  * never released while the session's store lives (the context-store retention sweep bounds it
- * across sessions, not within a live, leased one). Payloads are retrievable
+ * across sessions, not within a live, leased one). A forked session reads the artifacts its
+ * inherited records cite through `createLineageArtifactStore`. Payloads are retrievable
  * out of band via the artifact_retrieve tool (context/artifact-retrieval.ts).
  */
 
@@ -523,5 +525,53 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 			}
 			return deleted;
 		},
+	};
+}
+
+/**
+ * A forked session's branch carries records its ancestors wrote, and those records cite artifacts
+ * that live in the ancestors' stores (a background tool task's terminal output, for example). This
+ * store answers lookups from `own` first and falls through to each ancestor store, nearest first, only
+ * when the previous answer is a confirmed absence (`not_found` or `cleaned_up`); an `unavailable`
+ * read keeps its failure instead of being masked by an ancestor. Every mutation -- writes, holder
+ * markers, cleanup -- stays on `own`: an ancestor's artifacts are read through, never adopted, so this
+ * session can neither collect nor pin them. Ancestor stores are resolved once, on the first miss.
+ */
+export function createLineageArtifactStore(
+	own: ArtifactStore,
+	resolveAncestors: () => readonly ArtifactStore[],
+): ArtifactStore {
+	let ancestors: readonly ArtifactStore[] | undefined;
+	const lineage = (): readonly ArtifactStore[] => {
+		ancestors ??= resolveAncestors();
+		return ancestors;
+	};
+	const confirmedAbsent = (value: ArtifactRecord | MissingArtifactMarker): boolean =>
+		isMissingArtifactMarker(value) && value.reason !== "unavailable";
+	return {
+		write: (request) => own.write(request),
+		read(id: string): ArtifactRecord | MissingArtifactMarker {
+			const owned = own.read(id);
+			if (!confirmedAbsent(owned)) return owned;
+			for (const ancestor of lineage()) {
+				const inherited = ancestor.read(id);
+				if (!confirmedAbsent(inherited)) return inherited;
+			}
+			return owned;
+		},
+		readRef(id: string): ContextArtifactRef | undefined {
+			const owned = own.readRef(id);
+			if (owned) return owned;
+			for (const ancestor of lineage()) {
+				const inherited = ancestor.readRef(id);
+				if (inherited) return inherited;
+			}
+			return undefined;
+		},
+		has: (id) => own.has(id) || lineage().some((ancestor) => ancestor.has(id)),
+		addReference: (id, holderId) => own.addReference(id, holderId),
+		removeReference: (id, holderId) => own.removeReference(id, holderId),
+		referenceCount: (id) => own.referenceCount(id),
+		cleanup: () => own.cleanup(),
 	};
 }

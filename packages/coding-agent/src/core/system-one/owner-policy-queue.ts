@@ -14,19 +14,29 @@
  * dependent. The newest message is always classified in full: it is the one the work serves.
  */
 
-export interface OwnerWords {
+export interface OwnerWords<Judgment = never> {
 	readonly text: string;
 	/** Submission order, so a stale judgment never overwrites newer owner policy. */
 	readonly acceptedOrder?: number;
 	/** The submission's own cancellation: its classification is cancelled with it. */
 	readonly signal?: AbortSignal;
+	/**
+	 * The full classification these words already received when they were submitted (a queued owner input is judged
+	 * before it is admitted). Such words are applied as judged, in owner order, and never screened or judged again.
+	 */
+	readonly judgment?: Judgment;
 }
 
-export interface OwnerPolicyQueueDeps {
-	/** Classify one message in full and apply its outcome. */
-	classify(words: OwnerWords): Promise<void>;
+export interface OwnerPolicyQueueDeps<Judgment = never> {
+	/** Classify one message in full (or apply the judgment it carries) and apply its outcome. */
+	classify(words: OwnerWords<Judgment>): Promise<void>;
 	/** Which of these messages may carry an instruction; undefined when the screen could not run. */
 	screen(texts: readonly string[], signal?: AbortSignal): Promise<readonly boolean[] | undefined>;
+	/**
+	 * A settle failed (the screen or a classification threw). The words it did not reach are kept, in order, and are
+	 * settled again with the owner's next message; nothing waits on them meanwhile. Reported once per settle.
+	 */
+	reportFailure(error: unknown): void;
 }
 
 /** How a settle treats the queue: `backlog` screens every queued message, `latest` classifies the newest in full. */
@@ -51,16 +61,23 @@ function settledOrAborted(promise: Promise<void>, signal: AbortSignal): Promise<
 	});
 }
 
-export class OwnerPolicyQueue {
-	private pending: OwnerWords[] = [];
+export class OwnerPolicyQueue<Judgment = never> {
+	private pending: OwnerWords<Judgment>[] = [];
+	/**
+	 * Words a failed settle did not reach, oldest first. They wait for the owner's next message instead of being
+	 * retried by every settle: a failure that persists would otherwise be paid for at every tool batch.
+	 */
+	private parked: OwnerWords<Judgment>[] = [];
 	private tail: Promise<void> = Promise.resolve();
-	private readonly deps: OwnerPolicyQueueDeps;
+	private readonly deps: OwnerPolicyQueueDeps<Judgment>;
 
-	constructor(deps: OwnerPolicyQueueDeps) {
+	constructor(deps: OwnerPolicyQueueDeps<Judgment>) {
 		this.deps = deps;
 	}
 
-	enqueue(words: OwnerWords): void {
+	enqueue(words: OwnerWords<Judgment>): void {
+		// The owner spoke again: words a failed settle kept are settled with these, ahead of them, in owner order.
+		if (this.parked.length > 0) this.pending.unshift(...this.parked.splice(0));
 		this.pending.push(words);
 	}
 
@@ -70,7 +87,8 @@ export class OwnerPolicyQueue {
 
 	/**
 	 * Settle what is queued. Concurrent callers wait their turn on one chain, so a second settle finds
-	 * the queue already drained and returns once the first one's classification has been applied.
+	 * the queue already drained and returns once the first one's classification has been applied. A
+	 * failed settle never rejects: its failure is reported and the words it did not reach are kept.
 	 */
 	settle(mode: OwnerPolicySettleMode = "latest", signal?: AbortSignal): Promise<void> {
 		let settled = this.tail;
@@ -88,18 +106,20 @@ export class OwnerPolicyQueue {
 		if (batch.length === 0) return;
 		const latest = mode === "latest" ? batch.pop() : undefined;
 		const order = latest ? [...batch, latest] : batch;
+		// Words judged at submission are applied as judged: screening them would judge them a second time.
+		const screened = batch.filter((words) => words.judgment === undefined);
 		let done = 0;
 		try {
 			const carries =
-				batch.length > 0
+				screened.length > 0
 					? await this.deps.screen(
-							batch.map((words) => words.text),
+							screened.map((words) => words.text),
 							signal,
 						)
 					: undefined;
 			for (const [index, words] of order.entries()) {
 				// An unavailable screen, or one that is not sure, classifies the message in full.
-				if (words !== latest && !(carries?.[index] ?? true)) {
+				if (words !== latest && words.judgment === undefined && !(carries?.[screened.indexOf(words)] ?? true)) {
 					done = index + 1;
 					continue;
 				}
@@ -107,9 +127,12 @@ export class OwnerPolicyQueue {
 				done = index + 1;
 			}
 		} catch (error) {
-			// A failed classification loses no instruction: what was not reached waits for the next settle.
-			this.pending.unshift(...order.slice(done));
-			throw error;
+			// A failed classification loses no instruction: what was not reached is kept, ahead of anything newer, and is
+			// settled with the owner's next message. Words that arrived during this settle are newer and settle as usual.
+			const unreached = order.slice(done);
+			if (this.pending.length > 0) this.pending.unshift(...unreached);
+			else this.parked.push(...unreached);
+			this.deps.reportFailure(error);
 		}
 	}
 }

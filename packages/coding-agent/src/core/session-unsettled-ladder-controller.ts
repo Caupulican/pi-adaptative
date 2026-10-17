@@ -70,6 +70,8 @@ export class SessionUnsettledLadderController {
 	readonly codeDuplicates: CodeDuplicateReviewer;
 	readonly answerClaims: AnswerClaimChecker;
 	private pendingOwnerItems: string[] = [];
+	/** Set while a paused goal holds items the owner was told about; its end posts them. */
+	private heldForPausedGoal = false;
 	private lastAnnouncedFollowUp?: { sessionId: string; bytes: number };
 	private followUpReadErrorSessionId?: string;
 
@@ -248,22 +250,47 @@ export class SessionUnsettledLadderController {
 		// Whether the owner handed decisions off decides where these items go.
 		await this.deps.settleLatestOwnerPolicy();
 		const items = this.pendingOwnerItems;
+		// A flush that ran during the wait already took them: there is nothing left to post.
+		if (items.length === 0) return;
 		// Under a handoff the items go to the durable follow-up document and ask no one, exactly as
 		// deliverToOwner writes them, so a paused goal has nothing to defer there.
 		if (this.deps.isHandoff()) {
 			this.recordUnsettledForOwner(items);
 			this.pendingOwnerItems = [];
+			this.heldForPausedGoal = false;
 			return;
 		}
-		// A paused goal defers the owner's questions until its work resumes; the next flush after that
-		// posts them.
-		if (this.deps.getGoalStateSnapshot()?.status === "paused") return;
+		// A paused goal defers the owner's questions until its work resumes. The owner is told once that
+		// they wait, and the goal leaving the pause posts them (noteGoalState).
+		if (this.deps.getGoalStateSnapshot()?.status === "paused") {
+			if (!this.heldForPausedGoal) {
+				this.heldForPausedGoal = true;
+				this.deps.emitWarning(
+					`${items.length} unsettled item(s) for you wait while the goal is paused; they are posted when it resumes or ends.`,
+				);
+			}
+			return;
+		}
 		this.pendingOwnerItems = [];
+		this.heldForPausedGoal = false;
 		const content = [
 			"Needs you: nothing the agents could check settled these. Answer before relying on them:",
 			...items.map((item) => `- ${item}`),
 		].join("\n");
 		await this.deps.sendOwnerItemsMessage(items, content, lease);
+	}
+
+	/**
+	 * Every persisted goal transition. A goal leaving the pause (resumed, blocked, finished or cleared) posts the
+	 * items it held: no turn has to end first for the owner to see them.
+	 */
+	noteGoalState(state: GoalState): void {
+		if (!this.heldForPausedGoal || state.status === "paused") return;
+		void this.flushOwnerItems(undefined).catch((error: unknown) =>
+			this.deps.emitWarning(
+				`Could not post the unsettled items the paused goal held: ${error instanceof Error ? error.message : String(error)}`,
+			),
+		);
 	}
 
 	/**
