@@ -1115,6 +1115,291 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		"the E13R owner, with nothing retained, discloses nothing at close",
 	).toEqual([]);
 	trace.mark("root", "e13.retained-release");
+	// E13Q queued receipts of a reused specialist, one isolated owner, scope and refusal per entrance, so a failure names its entrance.
+	// Each block rebuilds the E13R precondition: a fresh writer finishes while the store refuses the release of its record, so the
+	// retained record keeps the scope held while the specialist is idle and settled. One root turn then hands that specialist a task
+	// through the entrance under test: (a) start with agentId and no option (the control coordinator's startWorkerAgentTask), (b)
+	// follow_up (followUpSessionRootWorkerAgent), (c) start with agentId and its own model and write scope (validated reuse through the
+	// controller's specialist selection). Each lands on the specialist's own mailbox turn, which the scheduler queues behind the retained
+	// record during the same synchronous drain, so the receipt states the write_reservation wait. It is asserted in the durable result and
+	// in the next root request the model reads. Clearing the refusal lets the queued turn run, and the owner closes cleanly.
+	const e13qQueuedReceipt = async (
+		tag: "start" | "follow-up" | "reuse",
+		dispatchArguments: (agentId: string, scope: string) => Record<string, unknown>,
+		laneSegment: (agentId: string, laneId: string) => string,
+	): Promise<void> => {
+		const scope = projectPath(`e13q-${tag}`, "out");
+		const admitted = createBarrier();
+		const gate = createBarrier();
+		const queuedAdmitted = createBarrier();
+		const queuedGate = createBarrier();
+		let denial: ReturnType<typeof world.io.denyUntilCleared> | undefined;
+		const created = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
+		const owner = created.session;
+		const storeText = (storePath: string): string => world.io.fileEntries().get(storePath) ?? "";
+		const heldLeases = () => owner.getResourceSnapshot().workers?.reservations.heldLeases ?? [];
+		const report = (id: string, summary: string): ScriptedReply => ({
+			content: [{ type: "toolCall", id, name: "submit_report", arguments: { status: "completed", summary } }],
+			stopReason: "toolUse",
+		});
+		world.provider.enqueue(
+			"root",
+			calls(`e13q-${tag}-start`, [
+				{
+					id: `e13q-${tag}-start-1`,
+					name: "delegate",
+					arguments: {
+						action: "start",
+						model: { provider: "harness-script", modelId: "worker-a" },
+						writePaths: [scope],
+						instructions: `E13Q-${tag} writer holds its scope.`,
+					},
+				},
+			]),
+			{
+				name: `e13q-${tag}-start-reply`,
+				check: (request) => {
+					const started = latestBatchResults(request).find((result) => result.toolName === "delegate");
+					if (started?.isError || !started?.text.includes("delegate started (running)")) {
+						throw new Error(`the E13Q ${tag} writer did not start: ${started?.text ?? "no result"}`);
+					}
+				},
+				reply: { content: [{ type: "text", text: `The ${tag} receipt writer is started.` }] },
+			},
+		);
+		world.provider.enqueue("worker-a", {
+			name: `e13q-${tag}-writer-hold`,
+			check: () => admitted.release(),
+			gate: gate.promise,
+			reply: report(`e13q-${tag}-report-1`, `E13Q-${tag} writer finished its scope.`),
+		});
+		world.systemOne.enterPhase(`e13q-${tag}-first`, e4Judgments);
+		await withDeadline(trace, `E13Q ${tag} writer started`, owner.prompt(`Start the ${tag} receipt writer.`));
+		await withDeadline(trace, `E13Q ${tag} writer admitted`, admitted.promise);
+		try {
+			const pre = owner.getResourceSnapshot().workers;
+			if (pre === undefined) throw new Error(`the E13Q ${tag} owner reports no worker snapshot before the refusal`);
+			const leases = pre.reservations.heldLeases;
+			expect(leases, `the E13Q ${tag} writer holds exactly one write lease before the refusal`).toHaveLength(1);
+			const agentId = pre.ownedProjectClaims[0]?.agents[0]?.agentId;
+			if (agentId === undefined) throw new Error(`the E13Q ${tag} claim carries no agent`);
+			const lease = leases[0];
+			if (lease === undefined) throw new Error(`the E13Q ${tag} owner has no exact lease`);
+			const storePath = [...world.io.fileEntries()].find(
+				([path, content]) => path.includes("worker-write-reservations") && content.includes(lease.reservationId),
+			)?.[0];
+			if (storePath === undefined) throw new Error(`the E13Q ${tag} lease is not in a durable reservation store`);
+			// As in E13R: the store unlinks its file for its last record and otherwise renames a rewrite onto it.
+			const storedRecords = (JSON.parse(storeText(storePath)) as { reservations: readonly unknown[] }).reservations
+				.length;
+			const faultKind: "unlink" | "rename" = storedRecords === 1 ? "unlink" : "rename";
+			const refusesStore = (operation: { readonly path: string; readonly destination?: string }): boolean =>
+				faultKind === "unlink" ? operation.path === storePath : operation.destination === storePath;
+			denial = world.io.denyUntilCleared({
+				name: `e13q-${tag}-release-denied`,
+				kind: faultKind,
+				code: "EIO",
+				matches: (operation) => refusesStore(operation),
+			});
+			const refused = world.io.waitForOperation(
+				(operation) => operation.kind === faultKind && operation.code === "EIO" && refusesStore(operation),
+			);
+			world.provider.enqueue(
+				"root",
+				calls(`e13q-${tag}-terminal`, [
+					{
+						id: `e13q-${tag}-terminal-1`,
+						name: "delegate",
+						arguments: { action: "wait", agentId, timeoutMs: 60_000 },
+					},
+				]),
+				{
+					name: `e13q-${tag}-terminal-reply`,
+					check: (request) => {
+						const waited = latestBatchResults(request).find((result) => result.toolName === "delegate");
+						if (waited?.isError)
+							throw new Error(`the terminal wait on the E13Q ${tag} writer failed: ${waited.text}`);
+					},
+					reply: { content: [{ type: "text", text: `The ${tag} receipt writer finished.` }] },
+				},
+			);
+			world.systemOne.enterPhase(`e13q-${tag}-terminal`, e4Judgments);
+			gate.release();
+			await withDeadline(
+				trace,
+				`E13Q ${tag} writer terminal observed`,
+				owner.prompt(`Wait for the ${tag} receipt writer to finish.`),
+			);
+			await withDeadline(trace, `E13Q ${tag} settled`, owner.waitForForegroundIdle());
+			await withDeadline(trace, `E13Q ${tag} settled release refused`, refused);
+			const idle = await withDeadline(
+				trace,
+				`E13Q ${tag} writer idle`,
+				owner.backgroundLanes.waitForWorkerAgent(agentId, 60_000),
+				70_000,
+			);
+			expect(idle.status, `the E13Q ${tag} specialist is idle once its run settled`).toBe("idle");
+			// Precondition of the receipt: the retained record still holds the scope, and the specialist holds no execution.
+			const settled = owner.getResourceSnapshot().workers;
+			expect(settled?.reservations.heldLeases, `the E13Q ${tag} retained record keeps the scope held`).toEqual(
+				leases,
+			);
+			expect(settled?.executingHolds, `the E13Q ${tag} specialist is settled`).toEqual([]);
+			// The specialist's queued turn: its first request is recorded and held until the owner reads its result.
+			let queuedFirstRequest: { readonly leases: typeof leases } | undefined;
+			world.provider.enqueue("worker-a", {
+				name: `e13q-${tag}-queued-hold`,
+				check: () => {
+					queuedFirstRequest = { leases: heldLeases() };
+					queuedAdmitted.release();
+				},
+				gate: queuedGate.promise,
+				reply: report(`e13q-${tag}-report-2`, `E13Q-${tag} queued task finished.`),
+			});
+			const dispatchCallId = `e13q-${tag}-dispatch-1`;
+			// The delegate result exactly as the next root request carries it to the model.
+			let providerReceipt: string | undefined;
+			world.provider.enqueue(
+				"root",
+				calls(`e13q-${tag}-dispatch`, [
+					{ id: dispatchCallId, name: "delegate", arguments: dispatchArguments(agentId, scope) },
+				]),
+				{
+					name: `e13q-${tag}-dispatch-reply`,
+					check: (request) => {
+						const dispatched = latestBatchResults(request).find((result) => result.toolName === "delegate");
+						if (dispatched === undefined || dispatched.isError) {
+							throw new Error(`the E13Q ${tag} dispatch failed: ${dispatched?.text ?? "no result"}`);
+						}
+						providerReceipt = dispatched.text;
+					},
+					reply: { content: [{ type: "text", text: `The ${tag} task is accepted.` }] },
+				},
+			);
+			world.systemOne.enterPhase(`e13q-${tag}-dispatch`, e4Judgments);
+			await withDeadline(trace, `E13Q ${tag} dispatch`, owner.prompt(`Hand the ${tag} task to the idle writer.`));
+			const receipt = created.sessionManager
+				.getBranch()
+				.find(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolCallId === dispatchCallId,
+				);
+			if (receipt?.type !== "message" || receipt.message.role !== "toolResult") {
+				throw new Error(`no durable E13Q ${tag} dispatch result`);
+			}
+			const details = receipt.message.details as
+				| { agentId?: unknown; laneId?: unknown; status?: unknown }
+				| undefined;
+			const laneId = details?.laneId;
+			if (typeof laneId !== "string") throw new Error(`the E13Q ${tag} dispatch result carries no lane id`);
+			expect(details?.agentId, `the E13Q ${tag} receipt names the idle specialist`).toBe(agentId);
+			expect(details?.status, `the E13Q ${tag} turn is queued at its receipt`).toBe("queued");
+			expect(laneId.startsWith("mailbox-turn-"), `the E13Q ${tag} task runs as the specialist's mailbox turn`).toBe(
+				true,
+			);
+			const record = owner.getLaneRecords().find((candidate) => candidate.laneId === laneId);
+			expect(record?.status, `the E13Q ${tag} lane is queued`).toBe("queued");
+			expect(
+				record?.waitReason?.startsWith("write_reservation: "),
+				`the E13Q ${tag} lane waits on the retained write reservation`,
+			).toBe(true);
+			const durableReceipt = receipt.message.content
+				.map((block) => (block.type === "text" ? block.text : ""))
+				.join("");
+			expect(durableReceipt, `the E13Q ${tag} durable receipt carries its lane segment`).toContain(
+				laneSegment(agentId, laneId),
+			);
+			expect(durableReceipt, `the E13Q ${tag} durable receipt names the reservation wait`).toContain(
+				"waiting: write_reservation: ",
+			);
+			expect(providerReceipt, `the model reads the E13Q ${tag} lane segment`).toContain(
+				laneSegment(agentId, laneId),
+			);
+			expect(providerReceipt, `the model reads the E13Q ${tag} reservation wait`).toContain(
+				"waiting: write_reservation: ",
+			);
+			expect(queuedFirstRequest, `the E13Q ${tag} queued turn runs no request while the record is durable`).toBe(
+				undefined,
+			);
+			expect(heldLeases(), `the E13Q ${tag} retained record is still the only held lease`).toEqual(leases);
+			// Clearing the refusal lets a retry release the record and admit the queued turn (E13R's tail).
+			denial.clear();
+			await withDeadline(trace, `E13Q ${tag} queued turn admitted`, queuedAdmitted.promise, 90_000);
+			expect(
+				queuedFirstRequest?.leases.map((held) => held.taskId),
+				`at the E13Q ${tag} queued turn's first request the only held lease is its own`,
+			).toEqual([laneId]);
+			world.io.assertFaultsConsumed();
+			world.provider.enqueue(
+				"root",
+				calls(`e13q-${tag}-queued-terminal`, [
+					{
+						id: `e13q-${tag}-queued-terminal-1`,
+						name: "delegate",
+						arguments: { action: "wait", agentId, timeoutMs: 60_000 },
+					},
+				]),
+				{
+					name: `e13q-${tag}-queued-terminal-reply`,
+					check: (request) => {
+						const waited = latestBatchResults(request).find((result) => result.toolName === "delegate");
+						if (waited?.isError)
+							throw new Error(`the terminal wait on the E13Q ${tag} task failed: ${waited.text}`);
+					},
+					reply: { content: [{ type: "text", text: `The ${tag} task finished.` }] },
+				},
+			);
+			world.systemOne.enterPhase(`e13q-${tag}-queued-terminal`, e4Judgments);
+			queuedGate.release();
+			await withDeadline(
+				trace,
+				`E13Q ${tag} queued turn terminal observed`,
+				owner.prompt(`Wait for the ${tag} task to finish.`),
+			);
+			await withDeadline(trace, `E13Q ${tag} queued turn settled`, owner.waitForForegroundIdle());
+			const queuedIdle = await withDeadline(
+				trace,
+				`E13Q ${tag} specialist idle again`,
+				owner.backgroundLanes.waitForWorkerAgent(agentId, 60_000),
+				70_000,
+			);
+			expect(queuedIdle.status, `the E13Q ${tag} specialist is idle after its queued turn`).toBe("idle");
+		} finally {
+			// Failure-safe: an assertion that fails early must not leave the refusal armed or a writer gated for the journey's cleanup.
+			denial?.clear();
+			gate.release();
+			queuedGate.release();
+		}
+		expect(await world.disposeSessionInBody(owner), `the E13Q ${tag} owner disposes cleanly`).toBeUndefined();
+		trace.mark("root", `e13q.${tag}-receipt`);
+	};
+	// (a) Explicit start with agentId: "durably accepted task message ... on its persistent context (lane <id>; ...; waiting: ...)".
+	await e13qQueuedReceipt(
+		"start",
+		(agentId) => ({ action: "start", agentId, instructions: "E13Q-start queued task." }),
+		(_agentId, laneId) => `on its persistent context (lane ${laneId}; `,
+	);
+	// (b) follow_up: "follow_up <id> ... for <agent>; lane <id> (queued; waiting: ...)".
+	await e13qQueuedReceipt(
+		"follow-up",
+		(agentId) => ({ action: "follow_up", agentId, message: "E13Q-follow-up queued task." }),
+		(agentId, laneId) => `for ${agentId}; lane ${laneId} (queued; waiting: write_reservation: `,
+	);
+	// (c) Validated reuse: the named specialist's own model and write scope, "accepted this task with its own admitted binding".
+	await e13qQueuedReceipt(
+		"reuse",
+		(agentId, scope) => ({
+			action: "start",
+			agentId,
+			model: { provider: "harness-script", modelId: "worker-a" },
+			writePaths: [scope],
+			instructions: "E13Q-reuse queued task.",
+		}),
+		(agentId, laneId) =>
+			`worker ${agentId} accepted this task with its own admitted binding (lane ${laneId}; waiting: write_reservation: `,
+	);
 	// E13 failed inner join, recomposed: the writer's bash tool runs inside its isolated completion, and its shell call ignores abort. Owner
 	// cancellation leaves that public promise pending, so the physical join is the only settlement the owner can report. The public promise is
 	// observed pending before the shell gate is released, and the gate is released in a finally so the producer can join even when the teardown fails.
