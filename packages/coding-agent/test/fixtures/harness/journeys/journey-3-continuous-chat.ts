@@ -170,7 +170,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	});
 	expect(
 		mImportedRecords.map((record) => ({ kind: record.kind, text: record.text, sourceKey: record.sourceKey })),
-		"failed activation remains attached and its persisted user prompt recovers canonically exactly once",
+		"failed activation remains attached; its persisted user prompt and the failure record recover canonically exactly once",
 	).toEqual([
 		{ kind: "note", text: "user: Seed kept legacy session.", sourceKey: expect.stringContaining(mLegacyKeptId) },
 		{
@@ -181,6 +181,14 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 		{
 			kind: "user",
 			text: "Attempt turn while a legacy session file has an invalid header.",
+			sourceKey: expect.stringMatching(new RegExp(`^${mBlocked.session.sessionId}:`)),
+		},
+		{
+			// A failed turn is a recovery fact: the harness records its failure beside the prompt (continuous-chat-ingest.ts).
+			kind: "pi",
+			text: expect.stringMatching(
+				/^\[Harness turn error\] ICM project chat is unavailable: Legacy memory import is incomplete and will retry:/,
+			),
 			sourceKey: expect.stringMatching(new RegExp(`^${mBlocked.session.sessionId}:`)),
 		},
 	]);
