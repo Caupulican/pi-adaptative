@@ -48,8 +48,9 @@ export class QueuedInputPersistenceController {
 	/**
 	 * A queued owner input is pending from the moment it is submitted, in submission order, and is
 	 * judged in full once, before it is admitted -- the same judgment a prompt queued behind a running
-	 * turn receives. The judgment becomes policy when the run delivers the input, in owner order, never
-	 * when the input is taken back, cleared or held first. A newer request supersedes only the judgment's
+	 * turn receives. The judgment, its optional-tool intent included, becomes policy when the run delivers
+	 * the input, in owner order, never when the input is taken back, cleared or held first: until then the
+	 * intent is a staged candidate that writes nothing. A newer request supersedes only the judgment's
 	 * optional-tool chain, never the input or its owner policy, which the owner-policy queue then judges
 	 * alone; a cancellation (interrupt, take, clear, disposal, context change) withdraws it.
 	 */
@@ -75,11 +76,16 @@ export class QueuedInputPersistenceController {
 				images,
 				ownerOriginalText: text,
 				onDelivered: () => this.deps.enqueueOwnerWords(text, acceptedOrder, classified),
+				// Taken back, cleared or held before delivery: these words never become owner input.
+				onDropped: () => this.deps.releaseOwnerWords(acceptedOrder),
 			});
 		} finally {
-			if (!admitted) pendingQueue.withdraw(pending);
-			// Its own judgment took its words; an admission that ended before that judgment started leaves none behind.
-			this.deps.releaseOwnerWords(acceptedOrder);
+			// Words that are never admitted never become owner input; admitted words stay registered until they are
+			// delivered (and then until an optional-tool intent covers them) or dropped.
+			if (!admitted) {
+				pendingQueue.withdraw(pending);
+				this.deps.releaseOwnerWords(acceptedOrder);
+			}
 			this.deps.emitQueueUpdate();
 		}
 	}
