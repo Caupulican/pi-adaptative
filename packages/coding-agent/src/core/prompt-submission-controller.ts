@@ -508,8 +508,9 @@ export class PromptSubmissionController {
 			}
 			if (!submission.lease && options?.streamingBehavior && !this.deps.foregroundRecovery.hasLiveConsumer) {
 				// Busy, but with no run that would drain the agent's queue (compaction, an answer under
-				// evaluation): a message handed over now would wait for an unrelated later turn and could be
-				// delivered after a later submission. It waits for the foreground, still pending, and runs as
+				// evaluation, another submission still preparing or finishing its turn, an extension command):
+				// a message handed over now would wait for an unrelated later turn, or be held when that
+				// submission ends without a run. It waits for the foreground, still pending, and runs as
 				// its own turn; later submissions queue into that turn behind it. If a run that drains the
 				// queue starts while it waits, it queues behind that run instead of waiting the whole run out.
 				const cancelled = [submissionSignal, queuedOwnerInput?.signal].filter(
@@ -547,6 +548,9 @@ export class PromptSubmissionController {
 					queuedOwnerInput ??
 					this.deps.pendingQueue.register(options.streamingBehavior, text, options.images, options.origin);
 				let admitted = false;
+				// Set when the consumer this input was to join ended while it was being classified and the foreground came
+				// free: the input then runs as its own turn below instead of entering a queue that no run drains.
+				let ownTurn = false;
 				try {
 					if (ownerOriginalText !== undefined) {
 						const classified = await (queuedOwnerClassification ??
@@ -564,20 +568,40 @@ export class PromptSubmissionController {
 						return;
 					}
 					if (this.deps.isDisposed()) return;
-					admitted = this.deps.pendingQueue.admit(pending, {
-						text: expandedText,
-						...(currentImages ? { images: currentImages } : {}),
-						...(goalToolStartAuthority ? { queuedGoalAuthority: goalToolStartAuthority } : {}),
-						...(ownerOriginalText !== undefined ? { ownerOriginalText } : {}),
-					});
+					// The handover needs a consumer that is live now, not only when it was chosen: the classification above
+					// awaited, and that run may have delivered its last round meanwhile. Read with no await before `admit`.
+					while (!this.deps.foregroundRecovery.hasLiveConsumer) {
+						const acquired = await this.deps.foregroundRecovery.acquireSubmissionOrJoinLiveConsumer(
+							submissionSignal ? AbortSignal.any([submissionSignal, pending.signal]) : pending.signal,
+						);
+						if (acquired === undefined) return;
+						// Stored before any further exit, so `runPromptSubmission` releases it on every path.
+						if (acquired !== "live_consumer") submission.lease = acquired;
+						if (this.deps.isDisposed()) return;
+						if (submission.lease) {
+							ownTurn = true;
+							break;
+						}
+					}
+					if (!ownTurn) {
+						admitted = this.deps.pendingQueue.admit(pending, {
+							text: expandedText,
+							...(currentImages ? { images: currentImages } : {}),
+							...(goalToolStartAuthority ? { queuedGoalAuthority: goalToolStartAuthority } : {}),
+							...(ownerOriginalText !== undefined ? { ownerOriginalText } : {}),
+						});
+					}
 				} finally {
-					this.withdrawQueuedOwnerInput(pending);
+					// An input registered at submission that runs as its own turn stays pending: that turn takes it (`promote`).
+					if (!ownTurn || pending !== queuedOwnerInput) this.withdrawQueuedOwnerInput(pending);
 					this.deps.emitQueueUpdate();
 				}
-				// An owner submission was accepted when it was submitted; an extension's message is accepted
-				// only once the pending queue holds it, so its sender is never told of a message that is gone.
-				preflightResult?.(ownerOriginalText !== undefined || admitted);
-				return;
+				if (!ownTurn) {
+					// An owner submission was accepted when it was submitted; an extension's message is accepted
+					// only once the pending queue holds it, so its sender is never told of a message that is gone.
+					preflightResult?.(ownerOriginalText !== undefined || admitted);
+					return;
+				}
 			}
 			// This submission would run as its own turn now. Only an input still pending here may: one the
 			// owner took back, cleared or that changed context meanwhile never runs. Ownership moves to

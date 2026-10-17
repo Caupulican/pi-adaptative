@@ -1663,7 +1663,9 @@ export class AgentSession {
 				this._pendingQueue.holdUndelivered();
 				this._emitQueueUpdate();
 			},
-			isCompacting: () => this._compaction.isCompacting,
+			// Compaction and a tree navigation (until its new branch is installed) both rewrite the history a turn runs on:
+			// both occupy the foreground. Its later `session_tree` notification runs on the settled branch and may start turns.
+			isCompacting: () => this._compaction.isRunning() || this._treeNavigator.isRewritingHistory(),
 			isExtendedBusy: () => {
 				return (
 					(this._systemOneController?.isEvaluating ?? false) ||
@@ -2148,6 +2150,8 @@ export class AgentSession {
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
 			getSettingsManager: () => this.settingsManager,
 			getAgent: () => this.agent,
+			// The navigation's history rewrite occupied the foreground; a submission or idle waiter parked behind it resumes now.
+			onNavigationSettled: () => this._foregroundRecovery.wakeIdleWaiters(),
 			onBranchChanged: () => {
 				this._branchGeneration++;
 				// Owner input accepted on the old branch is held in full, never delivered on the new one.

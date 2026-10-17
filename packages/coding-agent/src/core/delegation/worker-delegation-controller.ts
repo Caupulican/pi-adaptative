@@ -830,6 +830,42 @@ export class WorkerDelegationController {
 			abortLane: (laneId, reasonCode) => this.laneAbortControllers.get(laneId)?.abort(reasonCode),
 			haltReportDeadlineMs: () => this.deps.getSettingsManager().getWorkerDelegationSettings().haltReportDeadlineMs,
 			cancelLane: (laneId, reasonCode) => {
+				// A worker that was running reports what it changed even though it never got to speak.
+				const inFlight = this.inFlightLedgers.get(laneId);
+				const attemptStatus = inFlight ? this.getWorkerLifecycle().getActiveAttempt(laneId)?.status : undefined;
+				let terminal: LaneRecord | undefined;
+				// The durable cancellation commits before the scheduler gives up the lane's queue entry: a
+				// failed write must not leave a lane durably queued that no scheduler entry owns any more.
+				try {
+					if (inFlight && (attemptStatus === "running" || attemptStatus === "leased")) {
+						try {
+							inFlight.sealChangedFiles();
+						} catch (error) {
+							this.safeWarn(
+								`Failed to seal worker mutation state ${laneId} on cancel: ${error instanceof Error ? error.message : String(error)}`,
+							);
+						}
+						terminal = this.persistCancelledClaim(
+							laneId,
+							inFlight,
+							`canceled by the parent (${reasonCode}); the worker did not report`,
+							reasonCode,
+						);
+						// Only a persisted claim retires the ledger; a failed persist keeps it for a retry or shutdown.
+						this.inFlightLedgers.delete(laneId);
+					} else {
+						terminal = this.getWorkerLifecycle().cancel(laneId, reasonCode);
+					}
+				} catch (error) {
+					// The lane is still owned and still durably live. A queued entry stays queued but can no
+					// longer dispatch; the scheduler retries this cancellation on its next signal.
+					if (this.scheduler.retainQueuedCancellation(laneId, reasonCode)) {
+						this.safeWarn(
+							`Worker ${laneId} cancellation failed; it stays queued and the cancellation is retried: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+					throw error;
+				}
 				this.scheduler.dropQueued(laneId);
 				// A running lane keeps its write reservation until its run has actually stopped: the
 				// abort is asynchronous, and an in-flight edit or shell command can still write. The
@@ -837,28 +873,6 @@ export class WorkerDelegationController {
 				// the same paths is woken by that release.
 				if (!this.workerAbort.signal.aborted && !this.hasExecutingWorkerResources(laneId))
 					this.writeReservations.release(laneId);
-				// A worker that was running reports what it changed even though it never got to speak.
-				const inFlight = this.inFlightLedgers.get(laneId);
-				const attemptStatus = inFlight ? this.getWorkerLifecycle().getActiveAttempt(laneId)?.status : undefined;
-				let terminal: LaneRecord | undefined;
-				if (inFlight && (attemptStatus === "running" || attemptStatus === "leased")) {
-					try {
-						inFlight.sealChangedFiles();
-					} catch (error) {
-						this.safeWarn(
-							`Failed to seal worker mutation state ${laneId} on cancel: ${error instanceof Error ? error.message : String(error)}`,
-						);
-					}
-					this.inFlightLedgers.delete(laneId);
-					terminal = this.persistCancelledClaim(
-						laneId,
-						inFlight,
-						`canceled by the parent (${reasonCode}); the worker did not report`,
-						reasonCode,
-					);
-				} else {
-					terminal = this.getWorkerLifecycle().cancel(laneId, reasonCode);
-				}
 				if (terminal) this.publishTerminalRecord(terminal);
 				if (terminal && !this.deps.isDisposed()) this.scheduler.drain();
 				return terminal;

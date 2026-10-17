@@ -1349,7 +1349,15 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					// The worker is inside something that outlived the deadline. Its state is retained; the
 					// parent hears about the cancellation through the same terminal handoff.
 					this.options.abortLane(laneId, "interrupt_report_deadline");
-					this.options.cancelLane(laneId, "interrupt_report_deadline");
+					try {
+						this.options.cancelLane(laneId, "interrupt_report_deadline");
+					} catch (error) {
+						// This runs on a timer, where a throw escapes as an uncaught exception that no owner can
+						// act on. The abort above was already signalled; report why the durable cancel did not commit.
+						this.options.warn?.(
+							`Worker ${laneId} halt deadline cancellation failed after its abort: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
 				},
 			);
 			if (!requested) return { interrupted: true, mode: "halt", reason: "halt_already_requested" };

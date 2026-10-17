@@ -923,7 +923,18 @@ export class BackgroundToolTaskController {
 			);
 		}
 		const state = this.tasks.get(taskId);
-		if (!state) return Promise.reject(new Error(`Unknown background tool task: ${taskId}`));
+		if (!state) {
+			let retired: BackgroundToolTaskRecord | undefined;
+			try {
+				retired = this.loadRetiredTerminalRecord(taskId);
+			} catch (error) {
+				return Promise.reject(error);
+			}
+			if (!retired) return Promise.reject(new Error(`Unknown background tool task: ${taskId}`));
+			// Eviction can precede delivery: the queued wake-up copy must not re-deliver what this read returns.
+			this.observeNotificationCopies(retired, this.now().toISOString());
+			return Promise.resolve(retired);
+		}
 		if (state.record.status !== "running") {
 			this.observeState(state);
 			return Promise.resolve({ ...state.record });
@@ -1022,14 +1033,11 @@ export class BackgroundToolTaskController {
 					this.retainExecutionFailure(error);
 					this.reportError(`Failed to cancel background tool task ${state.record.taskId}`, error);
 				}
+				// Persisted pending, not delivered: the disposed controller drains nothing, so the next
+				// resume of this branch delivers this terminal through the restored pending wake-up the
+				// handoff stub promised, instead of leaving the model waiting for one that never comes.
 				try {
-					this.finishState(
-						state,
-						"canceled",
-						"Session ended before the background tool completed.",
-						undefined,
-						false,
-					);
+					this.finishState(state, "canceled", "Session ended before the background tool completed.", undefined);
 				} catch (error) {
 					this.retainExecutionFailure(error);
 					this.reportError(`Failed to retain canceled background tool task ${state.record.taskId}`, error);
@@ -1105,7 +1113,6 @@ export class BackgroundToolTaskController {
 			status,
 			output,
 			completion.result.usage,
-			true,
 			retainedToolVerification(completion.result.details),
 			invocation,
 		);
@@ -1118,7 +1125,7 @@ export class BackgroundToolTaskController {
 		if (state.record.status !== "running") return;
 		const status = state.cancellationRequested ? "canceled" : "failed";
 		const output = error instanceof Error ? error.message : String(error);
-		this.finishState(state, status, output, undefined, true);
+		this.finishState(state, status, output, undefined);
 	}
 
 	private restorePersistedTasks(): void {
@@ -1131,9 +1138,7 @@ export class BackgroundToolTaskController {
 			this.reportError("Failed to load persisted background tool tasks", error);
 			return;
 		}
-		const sessionId = this.deps.getSessionId();
-		const sessionIds = new Set(this.deps.getSessionLineageIds?.() ?? [sessionId]);
-		sessionIds.add(sessionId);
+		const sessionIds = this.lineageSessionIds();
 		const seenTaskIds = new Set<string>();
 		const latestRecords: BackgroundToolTaskRecord[] = [];
 		let highestTaskNumber = 0;
@@ -1164,16 +1169,51 @@ export class BackgroundToolTaskController {
 				if (record.terminalDelivery === "pending") this.notify(record, true);
 				continue;
 			}
+			// The model holds a handoff stub promising that the completion wake-up carries this task's
+			// result. The owning process is gone, so this failure IS that terminal: it is delivered
+			// through the same pending wake-up as any other terminal, never recorded as delivered unsent.
 			this.finishState(
 				state,
 				"failed",
 				"The session resumed after the owning process ended; the original tool completion is unavailable.",
 				undefined,
-				false,
 			);
 		}
 		this.pruneTerminalTasks();
 		this.emitLiveTasks();
+	}
+
+	private lineageSessionIds(): Set<string> {
+		const sessionId = this.deps.getSessionId();
+		const sessionIds = new Set(this.deps.getSessionLineageIds?.() ?? [sessionId]);
+		sessionIds.add(sessionId);
+		return sessionIds;
+	}
+
+	/**
+	 * The latest durable terminal snapshot of a task no longer held in `tasks`. That map is a bounded
+	 * cache (`MAX_RETAINED_TERMINAL_TASKS`); the session branch owns every task's terminal record,
+	 * output included. A wake-up that omitted an output promised that `wait` collects it, so neither
+	 * eviction nor a resume past the cache bound may turn that task into an unknown one.
+	 */
+	private loadRetiredTerminalRecord(taskId: string): BackgroundToolTaskRecord | undefined {
+		const load = this.deps.loadPersistedRecordsNewestFirst;
+		if (!load || taskNumber(taskId) === undefined) return undefined;
+		const sessionIds = this.lineageSessionIds();
+		for (const value of load()) {
+			if (
+				!isPlainRecord(value) ||
+				value.taskId !== taskId ||
+				typeof value.sessionId !== "string" ||
+				!sessionIds.has(value.sessionId)
+			)
+				continue;
+			// Newest first: the first lineage match is the task's latest snapshot. A running snapshot
+			// here was never fenced by this controller, so it carries no terminal output to collect.
+			const record = decodeRecord(value, sessionIds);
+			return record && record.status !== "running" ? record : undefined;
+		}
+		return undefined;
 	}
 
 	private createState(record: BackgroundToolTaskRecord, cancel: () => void): BackgroundToolTaskState {
@@ -1206,7 +1246,7 @@ export class BackgroundToolTaskController {
 		this.emitLiveTasks();
 		this.armTerminalWatchdog(state, this.cancelGraceMs, () => {
 			if (state.record.status !== "running") return;
-			this.finishState(state, "canceled", unsettledOutput, undefined, true);
+			this.finishState(state, "canceled", unsettledOutput, undefined);
 		});
 	}
 
@@ -1224,7 +1264,6 @@ export class BackgroundToolTaskController {
 		status: Exclude<BackgroundToolTaskStatus, "running">,
 		rawOutput: string,
 		usage: Usage | undefined,
-		notify: boolean,
 		verification?: VerificationRecord,
 		invocation?: ToolInvocationReceipt,
 	): void {
@@ -1268,7 +1307,8 @@ export class BackgroundToolTaskController {
 			...(packed.artifactId ? { artifactId: packed.artifactId } : {}),
 			...(usage ? { usage } : {}),
 			...(state.cancellationRequested ? { cancellationRequested: true } : {}),
-			terminalDelivery: notify ? "pending" : "delivered",
+			// Every terminal is owed a wake-up; only the drained delivery's receipt records it delivered.
+			terminalDelivery: "pending",
 			...(terminalInvocation ? { piToolInvocation: terminalInvocation } : {}),
 			...(verification &&
 			(verification.status !== "passed" || permitsPassingBackgroundVerification(status, terminalInvocation))
@@ -1298,7 +1338,7 @@ export class BackgroundToolTaskController {
 		state.resolveTerminal(terminalRecord);
 		this.emitLiveTasks();
 		this.pruneTerminalTasks();
-		if (notify) this.notify(terminalRecord, state.waitingConsumers === 0);
+		this.notify(terminalRecord, state.waitingConsumers === 0);
 	}
 
 	private persist(record: BackgroundToolTaskRecord, kind: BackgroundToolTaskPersistenceKind = "snapshot"): boolean {
@@ -1315,6 +1355,9 @@ export class BackgroundToolTaskController {
 	}
 
 	private notify(record: BackgroundToolTaskRecord, wakeParent: boolean): void {
+		// A disposed controller never drains. The terminal is already persisted `pending`, and the next
+		// resume of the branch delivers it from there, so nothing is queued that could only leak.
+		if (this.disposed) return;
 		const notificationRecord = {
 			...record,
 			...(!wakeParent && !record.observedAt ? { observedAt: this.now().toISOString() } : {}),
@@ -1337,8 +1380,16 @@ export class BackgroundToolTaskController {
 		if (state.record.status === "running" || state.record.observedAt) return;
 		const observedAt = this.now().toISOString();
 		state.record = { ...state.record, observedAt };
+		this.observeNotificationCopies(state.record, observedAt);
+	}
+
+	/** A queued or in-flight wake-up must not re-deliver a terminal a read already consumed. */
+	private observeNotificationCopies(
+		terminal: Pick<BackgroundToolTaskRecord, "taskId" | "completedAt">,
+		observedAt: string,
+	): void {
 		for (const record of this.activeNotificationRecords) {
-			if (record.taskId === state.record.taskId && record.completedAt === state.record.completedAt) {
+			if (record.taskId === terminal.taskId && record.completedAt === terminal.completedAt) {
 				record.observedAt = observedAt;
 			}
 		}

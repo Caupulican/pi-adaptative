@@ -781,7 +781,20 @@ export class WorkerDispatchScheduler {
 		}
 	}
 
+	/**
+	 * A control-plane cancellation of a lane this scheduler queued failed durably. Keep the queue entry
+	 * (ownership is withdrawn only once the cancellation commits) and retain the cancellation: the lane
+	 * can no longer dispatch, and every later scheduler signal retries the same reason.
+	 */
+	retainQueuedCancellation(laneId: string, reasonCode: string): boolean {
+		if (!this.queued.has(laneId)) return false;
+		this.retainPendingCancellation(laneId, reasonCode, this.queuedDispatchTokens.get(laneId));
+		return true;
+	}
+
+	/** Callers drop a lane only after its durable terminal committed, which settles any retained cancellation. */
 	dropQueued(laneId: string): boolean {
+		this.removePendingCancellation(laneId);
 		// A cancel also withdraws a resume that was waiting for the previous run to settle.
 		const hadDeferred = this.deferred.delete(laneId);
 		if (hadDeferred) {

@@ -106,6 +106,8 @@ export class ManagedLaneController {
 	private readonly protectedPathWatches = new Map<string, ProtectedPathWatch>();
 	private readonly worktreeLaneSteps = new Map<string, Promise<void>>();
 	private hydrated = false;
+	/** Last adoption failure per legacy lane, so a retried failure is reported once, not on every read. */
+	private readonly legacyAdoptionFailures = new Map<string, string>();
 
 	constructor(
 		deps: ManagedLaneControllerDeps,
@@ -123,10 +125,31 @@ export class ManagedLaneController {
 		this.worktreeLanes = worktreeLanes;
 	}
 
+	/**
+	 * Adopt every legacy session-branch lane into the durable lifecycle, each independently. One lane
+	 * whose adoption fails must not cost the others theirs or skip reload-blocker registration; it stays
+	 * pending, and the next hydration retries only it. Hydration is complete once no lane is pending.
+	 */
 	ensureHydrated(): void {
 		if (this.hydrated) return;
+		// Reentrant hydration (a projection read from inside adoption) sees the pass already in progress.
 		this.hydrated = true;
+		// Pending until the pass proves otherwise: a throw outside one lane's adoption retries the pass.
+		let pending = true;
+		try {
+			pending = this.adoptLegacyLanes();
+		} finally {
+			if (pending) this.hydrated = false;
+			for (const record of this.lifecycle.getManagedRecords()) {
+				if (record.status === "queued" || record.status === "running") this.ensureRegistration(record.laneId);
+			}
+		}
+	}
+
+	/** True while at least one legacy lane could not be adopted yet. */
+	private adoptLegacyLanes(): boolean {
 		const durableIds = new Set(this.lifecycle.getManagedRecords().map((record) => record.laneId));
+		let pending = false;
 		for (const legacy of getLatestLaneRecordSnapshots(getActiveSessionBranchEntries(this.deps.getSessionManager()))) {
 			if (
 				legacy.type !== "tmux-worker" ||
@@ -135,34 +158,47 @@ export class ManagedLaneController {
 			) {
 				continue;
 			}
-			this.lifecycle.prepareManaged({
-				laneId: legacy.laneId,
-				dispatchSequence: 1,
-				instructions: legacy.label ?? `Resume externally managed lane ${legacy.laneId}`,
-				profileId: legacy.profileId ?? "legacy-managed-process",
-				provider: "legacy",
-				authorizationId: `legacy-session-lane:${legacy.laneId}`,
-				role: "implementer",
-				riskBudget: { maxAttempts: 1, maxWallClockMs: LEGACY_MANAGED_LEASE_TTL_MS },
-				leaseTtlMs: LEGACY_MANAGED_LEASE_TTL_MS,
-				compileGrant: (target) =>
-					this.compileGrant(target, legacy.laneId, {
-						sequence: 1,
-						instructions: legacy.label ?? `Resume externally managed lane ${legacy.laneId}`,
-						profileId: legacy.profileId ?? "legacy-managed-process",
-						provider: "legacy",
-						authorizationId: `legacy-session-lane:${legacy.laneId}`,
-						authorizationKind: "legacy-recovery",
-						allowedTools: LEGACY_MANAGED_READ_TOOLS,
-						writePaths: [],
-						leaseTtlMs: LEGACY_MANAGED_LEASE_TTL_MS,
-					}),
-				...(legacy.worktreeLaneKey ? { worktreeLaneKey: legacy.worktreeLaneKey } : {}),
-			});
+			try {
+				this.adoptLegacyLane(legacy);
+				this.legacyAdoptionFailures.delete(legacy.laneId);
+			} catch (error) {
+				pending = true;
+				const message = error instanceof Error ? error.message : String(error);
+				// Retried on every hydration until it succeeds; the same failure is reported once.
+				if (this.legacyAdoptionFailures.get(legacy.laneId) !== message) {
+					this.legacyAdoptionFailures.set(legacy.laneId, message);
+					this.warn(`Legacy managed worker ${legacy.laneId} could not be adopted; retrying: ${message}`);
+				}
+			}
 		}
-		for (const record of this.lifecycle.getManagedRecords()) {
-			if (record.status === "queued" || record.status === "running") this.ensureRegistration(record.laneId);
-		}
+		return pending;
+	}
+
+	private adoptLegacyLane(legacy: LaneRecord): void {
+		this.lifecycle.prepareManaged({
+			laneId: legacy.laneId,
+			dispatchSequence: 1,
+			instructions: legacy.label ?? `Resume externally managed lane ${legacy.laneId}`,
+			profileId: legacy.profileId ?? "legacy-managed-process",
+			provider: "legacy",
+			authorizationId: `legacy-session-lane:${legacy.laneId}`,
+			role: "implementer",
+			riskBudget: { maxAttempts: 1, maxWallClockMs: LEGACY_MANAGED_LEASE_TTL_MS },
+			leaseTtlMs: LEGACY_MANAGED_LEASE_TTL_MS,
+			compileGrant: (target) =>
+				this.compileGrant(target, legacy.laneId, {
+					sequence: 1,
+					instructions: legacy.label ?? `Resume externally managed lane ${legacy.laneId}`,
+					profileId: legacy.profileId ?? "legacy-managed-process",
+					provider: "legacy",
+					authorizationId: `legacy-session-lane:${legacy.laneId}`,
+					authorizationKind: "legacy-recovery",
+					allowedTools: LEGACY_MANAGED_READ_TOOLS,
+					writePaths: [],
+					leaseTtlMs: LEGACY_MANAGED_LEASE_TTL_MS,
+				}),
+			...(legacy.worktreeLaneKey ? { worktreeLaneKey: legacy.worktreeLaneKey } : {}),
+		});
 	}
 
 	resolve(callerLaneId: string): string | undefined {

@@ -75,6 +75,10 @@ export interface WorkerWriteReservationCoordinatorOptions {
 	isProcessAlive?(pid: number): boolean;
 }
 
+/** Backoff bounds for retrying a durable release that failed (lock contention, store I/O). */
+const PENDING_RELEASE_RETRY_BASE_MS = 1_000;
+const PENDING_RELEASE_RETRY_MAX_MS = 30_000;
+
 /** A workspace as a message names it: its repository root once, and its execution root as well when it is another path. */
 function workspaceLabel(workspace: WorkerWriteReservationWorkspace): string {
 	return [...new Set([workspace.repositoryRoot, workspace.executionRoot])].join(" and ");
@@ -96,16 +100,27 @@ export class WorkerWriteReservationCoordinator {
 		{ readonly workspace: WorkerWriteReservationWorkspace; readonly dispose: () => void }
 	>();
 	private availabilityDeliveryDepth = 0;
+	/**
+	 * Durable records this owner no longer holds for a lane but could not release yet, keyed by
+	 * reservation id. They still fence other writers, so they stay visible as held leases until released.
+	 */
+	private readonly pendingReleases = new Map<string, WorkerWriteReservationLease>();
+	private pendingReleaseTimer: ReturnType<typeof setTimeout> | undefined;
+	private pendingReleaseFailures = 0;
+	private disposed = false;
 
 	constructor(options: WorkerWriteReservationCoordinatorOptions) {
 		this.options = options;
 		this.store = new WorkerWriteReservationStore({ agentDir: options.agentDir });
 	}
 
-	/** Clone this owner's actual leases; never discover, acquire, release or attach a watcher. */
+	/** Clone this owner's actual leases, including retained releases; never discover, acquire, release or attach a watcher. */
 	getResourceSnapshot(): WorkerWriteReservationResourceSnapshot {
 		return {
-			heldLeases: [...this.leases.values()].map((lease) => ({ ...lease, writeScopes: [...lease.writeScopes] })),
+			heldLeases: [...this.leases.values(), ...this.pendingReleases.values()].map((lease) => ({
+				...lease,
+				writeScopes: [...lease.writeScopes],
+			})),
 			watchCount: this.watchDisposes.size,
 			availabilityListenerCount: this.availabilityListeners.size,
 			availabilityDeliveryDepth: this.availabilityDeliveryDepth,
@@ -272,15 +287,94 @@ export class WorkerWriteReservationCoordinator {
 		} catch (error) {
 			if (required) throw error;
 			this.warnBestEffort(
-				`Failed to release worker write reservation ${laneId}: ${error instanceof Error ? error.message : String(error)}`,
+				`Failed to release worker write reservation ${laneId}; retrying: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		} finally {
 			if (released || !required) this.forgetLease(laneId, held);
+			// The lane no longer holds the lease, but its durable record still names this live process,
+			// which no reaper may release. Keep the exact record until a release is proven.
+			if (!released && !required) this.retainPendingRelease(held);
 		}
 		return held;
 	}
 
+	/**
+	 * A failed best-effort release owns its retry. Waiters latched on that reservation are skipped by the
+	 * scheduler until an availability event, and only a successful release produces one, so the retained
+	 * record carries its own bounded backoff alarm beside the opportunistic retries on coordinator signals.
+	 */
+	private retainPendingRelease(lease: WorkerWriteReservationLease): void {
+		this.pendingReleases.set(lease.reservationId, lease);
+		if (this.disposed) return;
+		try {
+			// A successful retry wakes waiters through this workspace's availability listener.
+			this.ensureWatch({
+				repositoryRoot: lease.repositoryRoot,
+				executionRoot: lease.executionRoot,
+				...(lease.isolatedWorktreeId ? { isolatedWorktreeId: lease.isolatedWorktreeId } : {}),
+			});
+		} catch (error) {
+			this.warnBestEffort(
+				`Worker write reservation watch for retained release ${lease.reservationId} failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		this.armPendingReleaseRetry();
+	}
+
+	private armPendingReleaseRetry(): void {
+		if (this.disposed || this.pendingReleaseTimer || this.pendingReleases.size === 0) return;
+		const delayMs = Math.min(
+			PENDING_RELEASE_RETRY_MAX_MS,
+			PENDING_RELEASE_RETRY_BASE_MS * 2 ** Math.min(this.pendingReleaseFailures, 16),
+		);
+		const timer = setTimeout(() => {
+			this.pendingReleaseTimer = undefined;
+			this.retryPendingReleases({ warn: true });
+		}, delayMs);
+		timer.unref?.();
+		this.pendingReleaseTimer = timer;
+	}
+
+	/**
+	 * Retry every retained release once; a failure keeps its exact record and re-arms the backoff alarm.
+	 * Only the alarm warns: opportunistic retries on admission signals would repeat the same diagnostic.
+	 */
+	private retryPendingReleases(options: { warn: boolean; repositoryRoot?: string }): unknown[] {
+		const errors: unknown[] = [];
+		if (this.pendingReleases.size === 0) return errors;
+		const repository =
+			options.repositoryRoot === undefined ? undefined : canonicalPathScopeIdentity(options.repositoryRoot);
+		let failed = false;
+		for (const [reservationId, lease] of [...this.pendingReleases]) {
+			if (repository !== undefined && canonicalPathScopeIdentity(lease.repositoryRoot) !== repository) continue;
+			try {
+				// Any result settles the record: `released` removed it, `not_found` means it is gone, and
+				// `stale_fence` means a newer fence of the same task owns that scope now, not this record.
+				this.store.release(lease);
+				this.pendingReleases.delete(reservationId);
+			} catch (error) {
+				failed = true;
+				errors.push(error);
+				if (options.warn) {
+					this.warnBestEffort(
+						`Retained worker write reservation ${reservationId} release failed again: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}
+		}
+		// Only a pass over every retained record says whether the backoff may reset.
+		if (failed) this.pendingReleaseFailures += 1;
+		else if (repository === undefined) this.pendingReleaseFailures = 0;
+		if (this.pendingReleases.size === 0 && this.pendingReleaseTimer) {
+			clearTimeout(this.pendingReleaseTimer);
+			this.pendingReleaseTimer = undefined;
+		}
+		this.armPendingReleaseRetry();
+		return errors;
+	}
+
 	recoverProvenStale(): void {
+		this.retryPendingReleases({ warn: false });
 		for (const workspace of this.recoveryWorkspaces()) {
 			const discovered = this.store.recover({ workspace, evidence: [] });
 			const evidence = discovered.outcomes.map((outcome) => ({
@@ -315,7 +409,14 @@ export class WorkerWriteReservationCoordinator {
 	}
 
 	private disposeOwnedResources(required: boolean, canRelease?: (laneId: string) => boolean): void {
-		const errors: unknown[] = [];
+		this.disposed = true;
+		if (this.pendingReleaseTimer) {
+			clearTimeout(this.pendingReleaseTimer);
+			this.pendingReleaseTimer = undefined;
+		}
+		// Retained releases belong to no lane any more, so no physical hold can make them unreleasable.
+		const pendingErrors = this.retryPendingReleases({ warn: !required });
+		const errors: unknown[] = required ? pendingErrors : [];
 		const watchers = [...this.watchDisposes];
 		this.watchDisposes.clear();
 		this.availabilityListeners.clear();
@@ -342,8 +443,8 @@ export class WorkerWriteReservationCoordinator {
 			}
 		}
 		if (!required || this.leases.size === 0) this.blockedByLocalLaneIds.clear();
-		if (required && this.leases.size > 0) {
-			const retained = [...this.leases.values()].map(
+		if (required && (this.leases.size > 0 || this.pendingReleases.size > 0)) {
+			const retained = [...this.leases.values(), ...this.pendingReleases.values()].map(
 				(lease) => `${lease.taskId}:${lease.attemptId}:${lease.fencingToken}`,
 			);
 			errors.push(
@@ -406,7 +507,10 @@ export class WorkerWriteReservationCoordinator {
 	} {
 		const reaped: string[] = [];
 		const remaining: WorkerWriteReservationBlockDetail["conflicts"][number][] = [];
-		const localReservationIds = new Set([...this.leases.values()].map((lease) => lease.reservationId));
+		const localReservationIds = new Set([
+			...[...this.leases.values()].map((lease) => lease.reservationId),
+			...this.pendingReleases.keys(),
+		]);
 		for (const conflict of conflicts) {
 			const local = localReservationIds.has(conflict.lease.reservationId);
 			const ownerLiveness = local
@@ -450,6 +554,9 @@ export class WorkerWriteReservationCoordinator {
 		warningPrefix: string,
 		classifyScopeFailure: boolean,
 	): WorkerWriteReservationAdmission {
+		// A retained release on this repository may be the very record this admission would conflict with.
+		// The retry takes the same store lock this acquire takes; other repositories are left to the alarm.
+		this.retryPendingReleases({ warn: false, repositoryRoot: request.workspace.repositoryRoot });
 		try {
 			let result = this.store.acquire(request);
 			let reapedReservationIds: string[] = [];

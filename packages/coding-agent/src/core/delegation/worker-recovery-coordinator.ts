@@ -35,7 +35,13 @@ interface PendingRetryDispatch {
 	request: WorkerDelegationRequest;
 	priority: boolean;
 	timer?: ReturnType<typeof setTimeout>;
+	/** Consecutive failed reads or enqueues of this due retry, for its backoff alarm. */
+	failures?: number;
 }
+
+/** Backoff bounds for a due retry whose durable read or enqueue failed for a reason other than capacity. */
+const RETRY_ENQUEUE_FAILURE_BASE_MS = 1_000;
+const RETRY_ENQUEUE_FAILURE_MAX_MS = 30_000;
 
 export interface WorkerRecoveryCoordinatorOptions {
 	lifecycle: WorkerLifecycle;
@@ -363,8 +369,23 @@ export class WorkerRecoveryCoordinator {
 		this.tryEnqueueDueRetry(attemptId, entry);
 	}
 
-	private tryEnqueueDueRetry(attemptId: string, entry: PendingRetryDispatch): "enqueued" | "full" | "stale" {
-		const attempt = this.options.lifecycle.getActiveAttempt(entry.laneId);
+	/**
+	 * A retained retry always owns exactly one wake: its deadline timer, the queue-capacity event when
+	 * the queue is full, or a failure backoff timer when the durable read or enqueue itself failed.
+	 */
+	private tryEnqueueDueRetry(
+		attemptId: string,
+		entry: PendingRetryDispatch,
+	): "enqueued" | "full" | "stale" | "failed" {
+		let attempt: AttemptRuntimeState | undefined;
+		let record: LaneRecord | undefined;
+		try {
+			attempt = this.options.lifecycle.getActiveAttempt(entry.laneId);
+			record = attempt ? this.options.lifecycle.getRecord(entry.laneId) : undefined;
+		} catch (error) {
+			this.retainFailedRetry(attemptId, entry, "durable read", error);
+			return "failed";
+		}
 		if (
 			!attempt ||
 			attempt.attemptId !== attemptId ||
@@ -374,7 +395,6 @@ export class WorkerRecoveryCoordinator {
 			this.retryTimers.delete(attemptId);
 			return "stale";
 		}
-		const record = this.options.lifecycle.getRecord(entry.laneId);
 		if (!record) {
 			this.retryTimers.delete(attemptId);
 			return "stale";
@@ -390,14 +410,36 @@ export class WorkerRecoveryCoordinator {
 			this.options.scheduler.enqueue(record, entry.request, true, entry.priority);
 		} catch (error) {
 			if (error instanceof Error && error.message === "worker_dispatch_queue_full") return "full";
-			this.options.warn(
-				`Worker ${entry.laneId} retry enqueue failed; retaining the durable retry: ${error instanceof Error ? error.message : String(error)}`,
-			);
-			return "full";
+			this.retainFailedRetry(attemptId, entry, "enqueue", error);
+			return "failed";
 		}
 		this.retryTimers.delete(attemptId);
-		this.options.retryReady?.();
+		try {
+			this.options.retryReady?.();
+		} catch (error) {
+			// The lane is queued; the wake may run on a timer, where a throw would escape uncaught.
+			// The next scheduler signal drains it.
+			this.options.warn(
+				`Worker ${entry.laneId} retry was queued, but its scheduler wake failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		return "enqueued";
+	}
+
+	/** Keep the due retry and arm a bounded backoff alarm: no capacity event is coming for this failure. */
+	private retainFailedRetry(attemptId: string, entry: PendingRetryDispatch, step: string, error: unknown): void {
+		entry.failures = (entry.failures ?? 0) + 1;
+		const delayMs = Math.min(
+			RETRY_ENQUEUE_FAILURE_MAX_MS,
+			RETRY_ENQUEUE_FAILURE_BASE_MS * 2 ** Math.min(entry.failures - 1, 16),
+		);
+		this.options.warn(
+			`Worker ${entry.laneId} retry ${step} failed; retaining the durable retry and trying again in ${Math.ceil(delayMs / 1000)}s: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		if (entry.timer) clearTimeout(entry.timer);
+		const timer = setTimeout(() => this.onRetryTimer(attemptId), delayMs);
+		if (typeof timer === "object" && "unref" in timer) timer.unref();
+		entry.timer = timer;
 	}
 
 	private flushDueRetries(): void {

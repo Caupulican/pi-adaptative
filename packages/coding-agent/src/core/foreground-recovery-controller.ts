@@ -102,6 +102,14 @@ export class ForegroundRecoveryController {
 	private lastAssistantMessage: AssistantMessage | undefined;
 	private pendingCompactionRetryKey: string | undefined;
 	private activeRuns = 0;
+	/**
+	 * Set while a run is inside its delivery rounds: from its first provider round through its stranded-input delivery. Only
+	 * then does input handed to the agent's queue have a consumer; a run's preparation and its cleanup (`afterRun`) deliver
+	 * nothing. Cleared in the same synchronous step as the run's last queue check, so nothing is admitted behind it unseen.
+	 */
+	private consumingRun = false;
+	/** Whether the round now running is followed by a recovery classification: false at the stall cap and in stranded delivery. */
+	private recoveryRoundAvailable = false;
 	private submissionLease: ForegroundSubmissionLease | undefined;
 	/** Next epoch to assign. Starts at 1 so the first successful `tryAcquireSubmission()` yields
 	 * epoch 1; only ever increases, including across releases -- it identifies a submission, not a
@@ -268,14 +276,20 @@ export class ForegroundRecoveryController {
 	}
 
 	/**
-	 * Whether a submission, run, stream or retry is live. Only then does a message handed to the agent's
-	 * queue have a consumer: compaction, an answer under evaluation and an armed continuation make the
-	 * foreground busy without any run that would ever drain that queue.
+	 * Whether a run is inside its delivery rounds, streaming or retrying. Only then does a message handed to the agent's
+	 * queue have a consumer. A held submission lease alone is not one: the submission may still end without a run (an
+	 * extension command, handled input, a failed preflight) or be past its last round (postflight, cleanup). Compaction,
+	 * an answer under evaluation and an armed continuation are busy without any consumer either.
 	 */
 	get hasLiveConsumer(): boolean {
-		return (
-			this.submissionLease !== undefined || this.isRunActive || this.deps.agent.state.isStreaming || this.isRetrying
-		);
+		return this.consumingRun || this.deps.agent.state.isStreaming || this.isRetrying;
+	}
+
+	/** Every change of the consumer state is an activity change: a submission waiting to join a live run wakes on it. */
+	private setConsumingRun(consuming: boolean): void {
+		if (this.consumingRun === consuming) return;
+		this.consumingRun = consuming;
+		this.notifyActivity();
 	}
 
 	/**
@@ -446,9 +460,13 @@ export class ForegroundRecoveryController {
 			// Re-checked after that await: no await separates this read from the run below.
 			if (this.isClosing(signal)) return;
 			let goalLoopRounds = 1;
+			const atRoundCap = (): boolean => maxGoalLoopRounds !== 0 && goalLoopRounds >= maxGoalLoopRounds;
 			// The runtime-update owner asked this run to end so the runtime can be replaced: no further provider
 			// round starts on its behalf. Admitted input stays in the agent's queue for the next run.
 			let stoppedForRuntimeUpdate = false;
+			// From here the run delivers what the agent's queue holds, until its last round.
+			this.setConsumingRun(true);
+			this.recoveryRoundAvailable = !atRoundCap();
 			if (mode === "prompt") {
 				if (!messages) throw new Error("Foreground prompt execution requires messages.");
 				await this.deps.agent.prompt(messages);
@@ -460,10 +478,15 @@ export class ForegroundRecoveryController {
 				if (failed) {
 					// A transport error is not an agent decision to abandon repair. Keep its existing
 					// retry/compaction owner, then settle a terminal failure through the update owner.
-					if (
-						(maxGoalLoopRounds !== 0 && goalLoopRounds >= maxGoalLoopRounds) ||
-						!(await this.handlePostAgentRun())
-					) {
+					if (atRoundCap()) {
+						// The stall cap ends the run before any recovery classifies this failure: its retry window closes here.
+						const capped = this.lastAssistantMessage;
+						this.lastAssistantMessage = undefined;
+						this.finishRetry(false, capped?.errorMessage);
+						await this.deps.settleRuntimeUpdate?.(signal);
+						break;
+					}
+					if (!(await this.handlePostAgentRun())) {
 						await this.deps.settleRuntimeUpdate?.(signal);
 						break;
 					}
@@ -475,7 +498,7 @@ export class ForegroundRecoveryController {
 						break;
 					}
 					if (update !== "continue") {
-						if (maxGoalLoopRounds !== 0 && goalLoopRounds >= maxGoalLoopRounds) break;
+						if (atRoundCap()) break;
 						if (!(await this.handlePostAgentRun())) break;
 						goalLoopRounds++;
 					}
@@ -489,15 +512,23 @@ export class ForegroundRecoveryController {
 					this.finishRetry(false, "Submission cancelled");
 					return;
 				}
+				this.recoveryRoundAvailable = !atRoundCap();
 				await this.deps.agent.continue();
 			}
-			// Every `break` above is an exit with no further round of its own. Input admitted to the
-			// agent's queue is the owner's and is never left behind it.
+			// Every `break` above is an exit with no further recovery round: a retry window the loop left open
+			// (its last failure had no message to classify, or the session is closing) ends here, before any
+			// stranded delivery round could read as the retry's recovery.
+			this.recoveryRoundAvailable = false;
+			if (this.retry.attempt > 0) this.finishRetry(false, "The run ended before the retry recovered.");
+			// Input admitted to the agent's queue is the owner's and is never left behind it.
 			if (!stoppedForRuntimeUpdate) await this.deliverStrandedInput(signal);
 			deliveredStranded = true;
 		} catch (error: unknown) {
 			// The run failed. Its owned queued input is held first, then its cleanup runs HERE so that a failing cleanup is joined to
 			// the run's failure (both stay in the thrown graph) instead of replacing it from the finally below.
+			this.setConsumingRun(false);
+			this.recoveryRoundAvailable = false;
+			if (this.retry.attempt > 0) this.finishRetry(false, error instanceof Error ? error.message : String(error));
 			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
 			afterRunSettled = true;
 			try {
@@ -514,6 +545,9 @@ export class ForegroundRecoveryController {
 			// leaves the owner's admitted input in the agent's queue: hold it for its owner, visible and recoverable, so it cannot leak
 			// into the next prompt's first boundary. Nothing is deleted and no refusal is swallowed. (Messages an extension or the
 			// system queued directly on the agent are not owner input; the kernel's queue delivers them at the next boundary.)
+			// The run delivers nothing more: it stops being a consumer in the same step as that last queue check.
+			this.setConsumingRun(false);
+			this.recoveryRoundAvailable = false;
 			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
 			try {
 				if (!afterRunSettled) await this.deps.afterRun();
@@ -563,6 +597,8 @@ export class ForegroundRecoveryController {
 				if (this.countInputMessages() === before) break;
 			}
 		} finally {
+			// The run's last queue check: from here it consumes nothing, so later input waits for the next run instead.
+			this.setConsumingRun(false);
 			if (this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
 		}
 	}
@@ -654,6 +690,8 @@ export class ForegroundRecoveryController {
 		const settings = this.deps.settingsManager.getRetrySettings();
 		// The same answer handlePostAgentRun gives: a closing session starts no retry, so it must not advertise one.
 		if (this.shutdownReason) return false;
+		// Nor does a round no recovery follows: the stall cap's last round, stranded delivery, or a run outside the loop.
+		if (!this.recoveryRoundAvailable) return false;
 		if (!settings.enabled || this.retry.attempt >= settings.maxRetries) return false;
 		for (let index = event.messages.length - 1; index >= 0; index--) {
 			const message = event.messages[index];
@@ -713,18 +751,21 @@ export class ForegroundRecoveryController {
 		// A quota the work moved off continues at once on the model it moved to, like an unsupported model.
 		if (billing.continuedOn && this.retry.prepareModelSwitchRetry(message, `Continuing on ${billing.continuedOn}.`))
 			return true;
-		if (billing.handled) return false;
-
+		// No retry continues from here: the retry window ends with this failure, a handled billing stop included.
 		if (message.stopReason === "error") this.finishRetry(false, message.errorMessage);
+		if (billing.handled) return false;
 		if (await this.deps.checkCompaction(message)) return true;
 		return this.deps.agent.hasQueuedMessages();
 	}
 
 	private finishRetry(success: boolean, finalError?: string): void {
 		this.pendingCompactionRetryKey = undefined;
-		if (this.retry.attempt === 0) return;
-		this.deps.emit({ type: "auto_retry_end", success, attempt: this.retry.attempt, finalError });
+		const attempt = this.retry.attempt;
+		if (attempt === 0) return;
+		// Settle the counter before emitting: a listener (the session's retry record) may throw, and the
+		// retry window must still be closed when it does.
 		this.retry.reset();
+		this.deps.emit({ type: "auto_retry_end", success, attempt, finalError });
 	}
 
 	private classifyAssistantError(message: AssistantMessage): ClassifiedError | undefined {

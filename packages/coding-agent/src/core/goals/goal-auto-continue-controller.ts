@@ -34,7 +34,13 @@ type GoalAutoContinueScheduleSettings = Pick<
 	"goalAutoContinue" | "goalAutoContinueDelayMs" | "maxStallTurns"
 >;
 
-type GoalAutoContinueTimerPlan = { action: "clear" } | { action: "arm"; delayMs: number };
+/**
+ * `workerDeadline` is the never-hang wake owned by a goal waiting on a bound worker; `continuation`
+ * submits the next pass. Only the former is armed unconditionally when a pass ends.
+ */
+type GoalAutoContinueTimerPlan =
+	| { action: "clear" }
+	| { action: "arm"; delayMs: number; wake: "workerDeadline" | "continuation" };
 
 const INITIAL_SCHEDULED_FAILURE_RETRY_MS = 1_000;
 const MAX_SCHEDULED_FAILURE_RETRY_MS = 60_000;
@@ -54,6 +60,8 @@ export function isOwnIdleContinuationAdmission(): boolean {
 export class GoalAutoContinueController {
 	private _timer: ReturnType<typeof setTimeout> | undefined;
 	private _isContinuing = false;
+	/** Set when a wake was requested while a pass ran; consumed when that pass ends. */
+	private _replanAfterPass = false;
 	private _disposed = false;
 	private _scheduledFailureRetryMs = INITIAL_SCHEDULED_FAILURE_RETRY_MS;
 	private _schedulerSettings: GoalAutoContinueScheduleSettings | undefined;
@@ -86,8 +94,18 @@ export class GoalAutoContinueController {
 	}
 
 	scheduleFromIdle(options?: PromptOptions): void {
-		if (options?.autoContinueGoal === false || this._isContinuing || this._disposed || this.deps.isDisposed()) return;
+		if (options?.autoContinueGoal === false || this._disposed || this.deps.isDisposed()) return;
+		// A wake requested while a pass runs (an objective terminal's restart, a transient-failure
+		// resume) cannot arm now; the pass's end owns it instead of dropping the only event that
+		// continues the goal.
+		if (this._isContinuing) {
+			this._replanAfterPass = true;
+			return;
+		}
+		this.planAndArm("any");
+	}
 
+	private planAndArm(wakes: "any" | "workerDeadline"): void {
 		const settingsManager = this.deps.getSettingsManager();
 		const settings = settingsManager.getAutonomySettings();
 		this.ensureSettingsSubscription(settingsManager, settings);
@@ -100,8 +118,27 @@ export class GoalAutoContinueController {
 			this.clearTimer();
 			return;
 		}
+		if (wakes === "workerDeadline" && plan.wake !== "workerDeadline") return;
 		this._scheduledFailureRetryMs = INITIAL_SCHEDULED_FAILURE_RETRY_MS;
 		this.armTimer(plan.delayMs);
+	}
+
+	/**
+	 * Every pass, whichever entry point admitted it, ends here. A goal left waiting on a bound worker
+	 * always gets its never-hang deadline wake; a further pass is armed only when something asked for
+	 * one during the pass, so an explicit turn limit keeps its meaning.
+	 */
+	private armAfterPass(replanRequested: boolean): void {
+		if (this._disposed || this.deps.isDisposed()) return;
+		// The pass's own admission store ends with the pass: a timer armed here must not carry it into
+		// its callback, where busy and settled checks would no longer see the armed continuation.
+		ownIdleContinuationAdmission.exit(() => {
+			try {
+				this.planAndArm(replanRequested ? "any" : "workerDeadline");
+			} catch (error) {
+				this.handleScheduledFailure(error);
+			}
+		});
 	}
 
 	/** Reconcile a permanent live tool-surface transition with any admitted continuation. */
@@ -168,10 +205,9 @@ export class GoalAutoContinueController {
 		) {
 			return { action: "clear" };
 		}
-		return {
-			action: "arm",
-			delayMs: waitingForWorkerDeadline ? Math.max(0, resumeAtMs - Date.now()) : goalAutoContinueDelayMs,
-		};
+		return waitingForWorkerDeadline
+			? { action: "arm", delayMs: Math.max(0, resumeAtMs - Date.now()), wake: "workerDeadline" }
+			: { action: "arm", delayMs: goalAutoContinueDelayMs, wake: "continuation" };
 	}
 
 	private armTimer(delayMs: number, notify = true): void {
@@ -206,14 +242,19 @@ export class GoalAutoContinueController {
 
 	private async continueAdmitted(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
 		this._isContinuing = true;
+		this._replanAfterPass = false;
 		this.deps.onContinuationActivity?.();
+		// An owner interrupt ends autonomy until the owner acts again; nothing is armed after it.
+		let interrupted = false;
 		try {
 			while (true) {
 				if (this.deps.isForegroundBusy()) await this.deps.waitForForegroundIdle();
 				const postWaitGuard = this.unavailableResult(options);
 				if (postWaitGuard) return postWaitGuard;
 				try {
-					return await this.deps.continueGoalLoop(options);
+					const result = await this.deps.continueGoalLoop(options);
+					interrupted = result.stopReason === "turn_interrupted";
+					return result;
 				} catch (error) {
 					// A different foreground owner can acquire the Agent after the idle event but before
 					// prompt admission. Wait for that exact run and retry without terminalizing the goal.
@@ -222,6 +263,9 @@ export class GoalAutoContinueController {
 			}
 		} finally {
 			this._isContinuing = false;
+			const replanRequested = this._replanAfterPass;
+			this._replanAfterPass = false;
+			if (!interrupted) this.armAfterPass(replanRequested);
 			this.deps.onContinuationActivity?.();
 		}
 	}
@@ -348,6 +392,7 @@ export class GoalAutoContinueController {
 		}
 		if (this._isContinuing) {
 			this._schedulerSettings = next;
+			this._replanAfterPass = true;
 			return;
 		}
 

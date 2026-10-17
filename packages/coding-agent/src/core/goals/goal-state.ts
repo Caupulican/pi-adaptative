@@ -130,9 +130,9 @@ export interface GoalState {
 	clarifications?: readonly GoalClarification[];
 	/**
 	 * System One's last refusal of this goal's completion, keyed by a fingerprint of everything it read
-	 * (the completion view). The same view gets the same answer, so an unchanged repeat is refused
-	 * without asking again and handed to the owner once; any change to the outcome or its evidence
-	 * changes the fingerprint and completion is judged afresh.
+	 * (the completion view); `count` says how many refusals in a row read the same view. Every
+	 * completion request reruns current proof: a repeat is judged again and never latches an owner
+	 * question.
 	 */
 	lastCompletionRejection?: GoalCompletionRejection;
 }
@@ -147,7 +147,10 @@ export interface GoalCompletionRejection {
 	evidenceUnavailable?: string;
 	/** Refusals of this same fingerprint so far. */
 	count: number;
-	/** Set once the owner was asked to decide, so they are asked once per fingerprint. */
+	/**
+	 * When a `completion_rejected` event marked `ownerAsked` for this fingerprint. No completion path
+	 * marks one since the owner-question latch was removed; snapshots written before keep theirs.
+	 */
 	ownerAskedAt?: string;
 }
 

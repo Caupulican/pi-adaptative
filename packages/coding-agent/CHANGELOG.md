@@ -17,6 +17,10 @@
 - Automatic goal completion is no longer treated as an owner override, and compaction events carry the entry that was actually appended.
 - Credential redaction of tool details now copies data only, redacting keys and secret-keyed scalars, and no longer passes class instances through.
 - Failed and aborted turns are recorded as bounded failure facts in the continuous chat, and summary usage receipts name the job, node, reply and attempt.
+- A queued owner input that its own turn never delivers is held in the pending queue with a warning instead of being dropped, and `tool_task wait` and delegate waits end when the owner steers while the background task keeps running. The foreground consumer predicate counts only a run that is delivering, tree navigation that rewrites history counts as foreground occupancy, and a retry window that ends on a billing stop, stall cap or loop exit is closed with `auto_retry_end` and a reset counter.
+- Goal state: an owner's "Continue working" answer at the completion decision is recorded as an objective clarification, the worker-deadline wake is armed after every pass that ends waiting on a worker, a lease follows a goal started in the same turn, and failures and terminals stay with the goal whose work produced them.
+- Workers: a failed best-effort write-reservation release is retried with backoff instead of stalling the repository's queue, a failed orchestration read or enqueue at a retry timer rearms the timer, a lane cancel drops queue ownership only after the durable cancel commits, and legacy managed lanes are adopted one by one.
+- Background tool tasks: a task that was running when the process ended is delivered to its parent with a wake-up on resume and on shutdown, and `tool_task wait` can collect a task's saved record after it was evicted from memory.
 
 ## [0.103.10] - 2026-10-15
 

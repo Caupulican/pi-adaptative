@@ -5,9 +5,16 @@ import {
 	beginHumanInputRequest,
 	createHumanInputRequest,
 	DEFAULT_OWNER_WAIT_TIMEOUT_MS,
+	formatHumanInputAnswerText,
 	resolveHumanInput,
 } from "../human-input.ts";
 import type { SessionImageStore } from "../session-image-store.ts";
+import { formatClarificationQuestion } from "../system-one/clarification.ts";
+import {
+	clarificationAnsweredEvent,
+	clarificationRequestedEvent,
+	type GoalClarificationEvent,
+} from "./goal-clarification-log.ts";
 
 export interface GoalCompletionOwnerDecisionInput {
 	toolCallId: string;
@@ -16,9 +23,14 @@ export interface GoalCompletionOwnerDecisionInput {
 	reasons: readonly string[];
 }
 
+/**
+ * A settled owner decision carries the question and the owner's reply as the objective's two
+ * clarification events, in order, so the goal ledger records what the owner said: the next route and
+ * every continuation read the reply from there, never from this return value.
+ */
 export type GoalCompletionOwnerDecision =
-	| { decision: "accept_complete" }
-	| { decision: "continue"; answer?: string }
+	| { decision: "accept_complete"; clarification: readonly GoalClarificationEvent[] }
+	| { decision: "continue"; answer?: string; clarification: readonly GoalClarificationEvent[] }
 	| { decision: "deferred"; followUpPath?: string };
 
 export interface GoalCompletionOwnerDecisionDeps {
@@ -96,8 +108,24 @@ export async function resolveGoalCompletionOwnerDecision(
 		return defer("The owner did not answer the completion decision before its deadline.");
 	}
 
+	// Recorded only once settled: a question still open across a restart has no resume path here, and
+	// a pending ledger entry would tell every later continuation never to ask it again.
+	const clarification: readonly GoalClarificationEvent[] = [
+		clarificationRequestedEvent({
+			requestId: request.requestId,
+			category: "blocked_by_user_decision",
+			question: formatClarificationQuestion(request.questions),
+			now: request.createdAt,
+		}),
+		clarificationAnsweredEvent({
+			requestId: request.requestId,
+			answerText: formatHumanInputAnswerText(resolved.snapshot),
+			cancelled: resolved.snapshot.status === "cancelled",
+			now: resolved.snapshot.updatedAt,
+		}),
+	];
 	const answer = resolved.snapshot.answers[0];
-	if (answer?.selected.includes(ACCEPT_COMPLETE)) return { decision: "accept_complete" };
+	if (answer?.selected.includes(ACCEPT_COMPLETE)) return { decision: "accept_complete", clarification };
 	const answerText = answer?.custom?.trim() || answer?.selected.join(", ") || undefined;
-	return { decision: "continue", ...(answerText ? { answer: answerText } : {}) };
+	return { decision: "continue", ...(answerText ? { answer: answerText } : {}), clarification };
 }

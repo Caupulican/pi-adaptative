@@ -28,6 +28,7 @@ import { systemOneAbortReason } from "../system-one/foreground-control.ts";
 import { openWorkUnit } from "../work-units.ts";
 import type { RoutedGoalContext } from "./compact-goal-context.ts";
 import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
+import { recordObjectiveClarification } from "./goal-clarification-log.ts";
 import type { GoalCompletionOwnerDecision } from "./goal-completion-owner-decision.ts";
 import { buildObjectiveRoutePrompt, GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import {
@@ -280,6 +281,20 @@ export class GoalSessionController {
 		) {
 			// Ordinary work acquires ownership only at a new goal's durable creation boundary.
 			// Earlier responses and updates to an existing unrelated goal remain unattributed.
+			lease.goalId = state.goalId;
+			lease.lastAccountedAtMs = Date.now();
+		} else if (
+			lease !== undefined &&
+			lease.goalId !== undefined &&
+			current !== undefined &&
+			current.goalId === lease.goalId &&
+			!isGoalExecutionActive(current.status) &&
+			state.goalId !== current.goalId &&
+			isGoalExecutionActive(state.status)
+		) {
+			// The same boundary for a lease whose goal ended during this execution: the execution that
+			// finished its goal and started the next one is that goal's work from here on. Left bound to the
+			// finished goal, the lease's next admission would refuse the turn the new goal just started.
 			lease.goalId = state.goalId;
 			lease.lastAccountedAtMs = Date.now();
 		}
@@ -737,12 +752,13 @@ export class GoalSessionController {
 			if (lease.goalId === undefined) return;
 			// A lease that WAS bound to a real goal but can no longer resolve it is a genuine loss of
 			// buffered spend; fail loudly instead of silently discarding it (matches the cursor-based
-			// accounting this replaced, which stopped the goal on `goal_usage_cursor_lost`).
+			// accounting this replaced, which stopped the goal on `goal_usage_cursor_lost`). The stop is
+			// scoped to the lease's own goal: a goal that replaced it never inherits that failure.
 			if (hasPendingUsage) {
 				this.deps.emitWarning(
 					`Goal usage cursor is no longer resolvable for '${lease.goalId}'; ${lease.pendingTokens} pending tokens and $${lease.pendingSpendUsd.toFixed(6)} pending spend could not be attributed and were dropped.`,
 				);
-				this.recordContinuationFailure(new Error("goal_usage_cursor_lost"));
+				this.recordContinuationFailure(new Error("goal_usage_cursor_lost"), lease.goalId);
 			}
 			lease.pendingTokens = 0;
 			lease.pendingSpendUsd = 0;
@@ -863,10 +879,13 @@ export class GoalSessionController {
 		return controller;
 	}
 
-	/** The objective reached a terminal: the goal follows it, and says so when they disagree. */
-	private async applyObjectiveTerminal(terminal: ObjectiveTerminalResult): Promise<boolean> {
+	/**
+	 * The objective reached a terminal: the goal follows it, and says so when they disagree. A terminal
+	 * belongs to the goal whose objective ran the cycle; a goal that replaced it meanwhile is not moved.
+	 */
+	private async applyObjectiveTerminal(terminal: ObjectiveTerminalResult, goalId: string): Promise<boolean> {
 		const state = this.getState();
-		if (!state || !isGoalExecutionActive(state.status)) return false;
+		if (!state || state.goalId !== goalId || !isGoalExecutionActive(state.status)) return false;
 		const now = new Date().toISOString();
 		const reasons = terminal.reasonCodes.join(", ");
 		switch (terminal.status) {
@@ -909,9 +928,32 @@ export class GoalSessionController {
 						userGoal: state.userGoal,
 						reasons: [ambiguousCompletionQuestion(terminal.reasonCodes)],
 					});
+					// The owner's reply lands in the goal's clarification ledger, where the next route and every
+					// continuation read it; the goal may have moved on during the wait, so nothing below reuses
+					// the state read before it.
+					const port = {
+						getGoalState: () => this.getState(),
+						saveGoalState: (next: GoalState, expected?: GoalStateRevision) => {
+							this.saveState(next, expected);
+						},
+					};
+					for (const event of decision && decision.decision !== "deferred" ? decision.clarification : []) {
+						if (!recordObjectiveClarification(port, goalId, event)) {
+							this.deps.emitWarning(
+								`The owner's completion decision for goal '${goalId}' was not recorded: that goal is no longer the active goal.`,
+							);
+							return false;
+						}
+					}
+					const settled = this.getState();
+					if (!settled || settled.goalId !== goalId || !isGoalExecutionActive(settled.status)) return false;
 					if (decision?.decision === "accept_complete") {
-						const completed = completeGoalManually(state, now);
-						if (completed.ok) this.saveState(completed.state, getGoalStateRevision(state));
+						const completed = completeGoalManually(settled, new Date().toISOString());
+						if (!completed.ok) {
+							this.deps.emitWarning(`The owner's completion override could not be applied: ${completed.error}`);
+							return false;
+						}
+						this.saveState(completed.state, getGoalStateRevision(settled));
 						return false;
 					}
 					if (!decision) {
@@ -1011,7 +1053,9 @@ export class GoalSessionController {
 			if (submitted) {
 				recordSubmittedTurn(turnOutcome);
 			}
-			const continuationRestartScheduled = terminal ? await this.applyObjectiveTerminal(terminal) : false;
+			const continuationRestartScheduled = terminal
+				? await this.applyObjectiveTerminal(terminal, beforeGoal.goalId)
+				: false;
 			return {
 				submitted,
 				snapshot: snapshot(),
@@ -1028,13 +1072,13 @@ export class GoalSessionController {
 			}
 			if (error instanceof ObjectiveRootTurnErroredError) {
 				recordSubmittedTurn("errored");
-				this.recordContinuationFailure(error);
+				this.recordContinuationFailure(error, beforeGoal.goalId);
 				return { submitted: true, snapshot: snapshot(), turnOutcome: "errored", turnError: error.message };
 			}
 			if (this.primaryRootTurns > before) {
 				recordSubmittedTurn(this.lastPrimaryTurnOutcome ?? "errored");
 			}
-			this.recordContinuationFailure(error);
+			this.recordContinuationFailure(error, beforeGoal.goalId);
 			throw error;
 		}
 	}
@@ -1117,9 +1161,14 @@ export class GoalSessionController {
 		return false;
 	}
 
-	private recordContinuationFailure(error: unknown): void {
+	/**
+	 * `goalId` names the goal whose work failed. A failure never stops a goal that replaced it; callers
+	 * that cannot name one (the legacy loop's port) act on the current goal.
+	 */
+	private recordContinuationFailure(error: unknown, goalId?: string): void {
 		const state = this.getState();
 		if (!state || !isGoalExecutionActive(state.status)) return;
+		if (goalId !== undefined && state.goalId !== goalId) return;
 		const message = error instanceof Error ? error.message : String(error);
 		const classified = classifyFailure({ message, provider: this.deps.getModelProvider() });
 		const status = classified.reason === "billing_or_quota" ? "usage_limited" : "blocked";
@@ -1136,8 +1185,11 @@ export class GoalSessionController {
 
 		if (!this.stopActiveGoal("blocked", reason)) return;
 
-		// If independent background work is running for this goal, keep the goal active so background
-		// workers can finish and deliver their completion events.
+		// Background work running for this goal: a classified recoverable stop (a bounded guard or a
+		// transient provider failure within its streak allowance) resumes in place so those workers
+		// finish against an active goal. Any other reason (auth, unknown, unsupported model) stays
+		// blocked for the owner, whose next prompt resumes a system stop: unclassified failures never
+		// retry automatically.
 		if (hasInFlightWork) {
 			this.resumeSystemBlockedGoal();
 			return;
