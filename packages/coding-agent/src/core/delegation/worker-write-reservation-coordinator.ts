@@ -1,6 +1,7 @@
 import { canonicalPathScopeIdentity } from "../autonomy/path-scope.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
 import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
 import { isLocalProcessAlive, localWorkerProcessOwnerLiveness } from "./worker-process-owner.ts";
@@ -67,25 +68,7 @@ export interface WorkerWriteReservationResourceSnapshot {
 	readonly availabilityDeliveryDepth: number;
 }
 
-/**
- * The timers of the coordinator's retained-release backoff alarm. A timer it arms must never keep the process
- * alive. The default is the global timer pair, unreferenced; a host may inject another so the alarm fires on an
- * event of its own instead of on the wall clock.
- */
-export interface WorkerWriteReservationTimers {
-	setTimeout(callback: () => void, delayMs: number): unknown;
-	clearTimeout(handle: unknown): void;
-}
-
-/** The default timers: the global pair, each timer unreferenced so a pending retry never holds the process open. */
-const SYSTEM_TIMERS: WorkerWriteReservationTimers = {
-	setTimeout: (callback, delayMs) => {
-		const timer = setTimeout(callback, delayMs);
-		timer.unref?.();
-		return timer;
-	},
-	clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
+export type WorkerWriteReservationTimers = TimerPort;
 
 export interface WorkerWriteReservationCoordinatorOptions {
 	agentDir: string;
@@ -95,7 +78,7 @@ export interface WorkerWriteReservationCoordinatorOptions {
 	drainQueuedWorkers(): void;
 	warn(message: string): void;
 	isProcessAlive?(pid: number): boolean;
-	/** The retained-release alarm's timers; absent means {@link SYSTEM_TIMERS}. */
+	/** The retained-release alarm's timers; absent means {@link SYSTEM_TIMER_PORT}. */
 	timers?: WorkerWriteReservationTimers;
 }
 
@@ -142,7 +125,7 @@ export class WorkerWriteReservationCoordinator {
 
 	constructor(options: WorkerWriteReservationCoordinatorOptions) {
 		this.options = options;
-		this.timers = options.timers ?? SYSTEM_TIMERS;
+		this.timers = options.timers ?? SYSTEM_TIMER_PORT;
 		this.store = new WorkerWriteReservationStore({ agentDir: options.agentDir });
 	}
 
