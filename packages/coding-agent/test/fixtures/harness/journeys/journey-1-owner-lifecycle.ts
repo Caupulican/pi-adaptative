@@ -1101,30 +1101,6 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
 	} as const;
 
-	// Reflection setup for the background phase, made explicit here instead of inherited from turns far above. The background start
-	// turn's own analysis is `none`, so the reflection checkpoint it buys at its tail (`background-reflection`) needs a cue that is
-	// already `due` with a worthy trigger (beginDueReflectionTurn). This owner turn supplies one through the real owner interfaces:
-	// its start attaches the root cue as pending, its agent_end promotes it to due (finishCurrentTurnCue), and its words match the
-	// correction signal, so the completed-turn analysis adds `corrective` (queueCurrentTurnCue). The reflection this turn buys at its
-	// own tail is preempted by the background start prompt below, before it reaches the provider, and the cue stays due: a cue is
-	// consumed only when a request carrying it is accepted. The turn uses no tool and runs in the approval phase, like the
-	// current-input turn above, so it asks System One only what that phase already answers.
-	world.provider.enqueue("root", {
-		name: "reflection-setup-reply",
-		check: (request) => {
-			if (requestCarriesMarker(request, REFLECTION_CHECKPOINT_MARKER)) {
-				throw new Error("the reflection setup turn's request is a reflection checkpoint, not the owner turn");
-			}
-		},
-		reply: { content: [{ type: "text", text: "Noted for the next summary." }] },
-	});
-	await withDeadline(trace, "reflection setup turn", session.prompt("Next time, keep the check summary to one line."));
-	trace.mark("root", "reflection-setup.reply");
-	expect(
-		sessionManager?.getLatestCustomEntryOnBranch(CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE)?.data,
-		"the setup turn leaves the reflection cue due with its corrective trigger",
-	).toMatchObject({ status: "due", triggers: expect.arrayContaining(["corrective"]) });
-
 	// Background bash through the real task handoff. The start call is held at its shell gate; the explicit background request
 	// hands off at once with a task id, and the completion is matched to that id in the handoff, not to command text.
 	const backgroundGate = createBarrier();
@@ -1191,8 +1167,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		},
 	);
 	// Closing-reflection checkpoint: the start turn's own analysis is `none`, so its reflection at the tail can only come from a
-	// `due` cue with a worthy trigger carried in before it (the reflection setup turn above). The persisted cue is read through the
-	// controller's branch lookup.
+	// `due` cue with a worthy trigger carried in before it. The persisted cue is read through the controller's branch lookup.
 	expect.soft(session.getMemorySystem(), "the reflection gate is open: the memory system is okf").toBe("okf");
 	expect
 		.soft(
