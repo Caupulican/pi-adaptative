@@ -36,11 +36,6 @@ export interface QueuedInputAdmission {
 	 * cleared or held before that: what is not delivered decides nothing.
 	 */
 	onDelivered?: () => void;
-	/**
-	 * Runs once, when the admitted input leaves without being delivered: taken back, cleared, held or dropped with the
-	 * closing session. Never together with `onDelivered`.
-	 */
-	onDropped?: () => void;
 }
 
 /**
@@ -73,8 +68,6 @@ interface PendingEntry extends QueuedInput {
 	turnMessage?: AgentMessage;
 	/** Its context changed before it was handed on: kept in full for recovery, never handed on. */
 	held?: boolean;
-	/** Its admission's `onDropped` ran: it is never delivered from here. */
-	dropped?: boolean;
 }
 
 /** Abort reason of a pending input the operator took back, cleared or cancelled before admission. */
@@ -606,7 +599,6 @@ export class PendingInputQueueController {
 			if (entry.message) continue;
 			this._removeEntry(entry);
 			entry.abort.abort(PENDING_INPUT_WITHDRAWN);
-			this._dropAdmission(entry);
 		}
 	}
 
@@ -651,17 +643,9 @@ export class PendingInputQueueController {
 		return !entry.context || (this.deps.isInputContextCurrent?.(entry.context) ?? true);
 	}
 
-	/** An admitted input that leaves without delivery: what is not delivered decides nothing (`onDropped`). */
-	private _dropAdmission(entry: PendingEntry): void {
-		if (!entry.admission || entry.dropped) return;
-		entry.dropped = true;
-		entry.admission.onDropped?.();
-	}
-
 	private _hold(entry: PendingEntry, reason: PendingInputHoldReason): void {
 		entry.held = true;
 		entry.abort.abort(PENDING_INPUT_WITHDRAWN);
-		this._dropAdmission(entry);
 		this.deps.onInputHeld?.(
 			entry.origin
 				? { ...entry.original, text: ownerVisibleQueuedText(entry.origin.text, entry.origin) }
@@ -796,7 +780,6 @@ export class PendingInputQueueController {
 	private _takeEntries(entries: readonly PendingEntry[]): QueuedInput[] {
 		return entries.map((entry) => {
 			if (!entry.message) entry.abort.abort(PENDING_INPUT_WITHDRAWN);
-			this._dropAdmission(entry);
 			const input = entry.message ? { text: entry.text, images: entry.images } : { ...entry.original };
 			// A framed third-party message returns as what the owner saw, never as the extension's frame.
 			return entry.origin ? { ...input, text: this._ownerText(entry) } : input;

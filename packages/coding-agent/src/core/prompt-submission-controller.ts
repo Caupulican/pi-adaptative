@@ -63,11 +63,8 @@ export class SubmissionPreflightAborted extends Error {
 /** One submission's owner order and the points of its preparation the caller acts on. */
 interface SubmissionLifecycle {
 	readonly acceptedOrder?: number;
-	/**
-	 * Set when its turn hands its words to the owner-policy queue (they are owner input from then on), or when its words are
-	 * admitted to the pending queue, which then delivers them or releases them where they are dropped (`onDropped`).
-	 */
-	ownerWordsHandedOn: boolean;
+	/** Set when its turn hands its words to the owner-policy queue: they are owner input from then on. */
+	ownerWordsDelivered: boolean;
 	ownsForeground(): void;
 }
 
@@ -406,7 +403,7 @@ export class PromptSubmissionController {
 			: submissionAbort.signal;
 		const lifecycle: SubmissionLifecycle = {
 			acceptedOrder,
-			ownerWordsHandedOn: false,
+			ownerWordsDelivered: false,
 			ownsForeground: () => {
 				ownsForeground();
 				// Its preparation is complete: the next queued submission may prepare while this turn runs.
@@ -425,9 +422,8 @@ export class PromptSubmissionController {
 		} finally {
 			prepared?.();
 			// Words that never became owner input (cancelled, handled, a command, an error before its turn) are carried by no
-			// judgment. Words its turn delivered stay registered until an optional-tool intent covers them; words admitted to the
-			// pending queue stay registered until that queue delivers or drops them.
-			if (!lifecycle.ownerWordsHandedOn) this.deps.releaseOwnerWords(acceptedOrder);
+			// judgment. Words its turn delivered stay registered until a judgment carries or judges them.
+			if (!lifecycle.ownerWordsDelivered) this.deps.releaseOwnerWords(acceptedOrder);
 			// Every exit that did not admit it (cancelled, handled, a command, an error) gives it back: withdrawn while
 			// pending, held when its own turn took it and never delivered it.
 			if (queuedOwnerInput) this.withdrawQueuedOwnerInput(queuedOwnerInput);
@@ -646,15 +642,9 @@ export class PromptSubmissionController {
 							// The owner's admitted words become policy when the run delivers them, never when they are taken
 							// back, cleared or held first: their judgment is applied where it is read.
 							...(ownerOriginalText !== undefined && judged !== undefined
-								? {
-										onDelivered: () => this.deps.enqueueOwnerWords(ownerOriginalText, judgedOrder, judged),
-										onDropped: () => this.deps.releaseOwnerWords(judgedOrder),
-									}
+								? { onDelivered: () => this.deps.enqueueOwnerWords(ownerOriginalText, judgedOrder, judged) }
 								: {}),
 						});
-						// Admitted owner words are released where the pending queue drops them, not when this submission ends.
-						if (admitted && lifecycle && ownerOriginalText !== undefined && judged !== undefined)
-							lifecycle.ownerWordsHandedOn = true;
 					}
 				} finally {
 					// An input registered at submission that runs as its own turn stays pending: that turn takes it (`promote`).
@@ -1025,9 +1015,9 @@ export class PromptSubmissionController {
 					// turn that uses no tool never waits for, or pays for, the classification. A queued input
 					// that became this turn was judged before it ran: its judgment is applied, never asked again
 					// (one a newer request superseded has its owner policy judged alone where the queue settles).
-					// Delivered words stay registered until an optional-tool intent covers them: a queued input
-					// judged before this turn's first tool call reads them into its staged optional-tool judgment.
-					if (lifecycle) lifecycle.ownerWordsHandedOn = true;
+					// Unjudged words stay registered: a queued input judged before this turn's first tool call
+					// carries them into its optional-tool judgment.
+					if (lifecycle) lifecycle.ownerWordsDelivered = true;
 					if (ownerJudgment !== undefined || this.deps.getSystemOneController())
 						this.deps.enqueueOwnerWords(text, lifecycle?.acceptedOrder, ownerJudgment, submissionSignal);
 					else await this.deps.classifyOwnerRequest(text, "", false, submissionSignal, lifecycle?.acceptedOrder);

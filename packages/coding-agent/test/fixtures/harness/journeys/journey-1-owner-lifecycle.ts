@@ -9,7 +9,6 @@ import { DecisionLedgerStore } from "../../../../src/core/operator-projection/de
 import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../../../src/core/reflection-controller.ts";
 import { isCredentialSecretKey, mockCredentialFields } from "../../../../src/core/secrets/credential-content-mock.ts";
 import {
-	enforceExplicitOptionalToolRequest,
 	OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
 	readOptionalToolIntent,
 } from "../../../../src/core/tool-applicability-gate.ts";
@@ -353,16 +352,6 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	const compaction = session.compact("Keep the limits task.");
 	await withDeadline(trace, "compaction started", compactionStarted.promise);
 	trace.mark("root", "compaction.started");
-	const classifiedEntries = (): Array<{ id: string; data: unknown }> =>
-		created.sessionManager.getEntries().flatMap((entry) => {
-			if (entry.type !== "custom" || entry.customType !== OPTIONAL_TOOL_INTENT_CUSTOM_TYPE) return [];
-			return readOptionalToolIntent(entry.data)?.status === "classified" ? [{ id: entry.id, data: entry.data }] : [];
-		});
-	const optionalIntentEntries = (): Array<{ id: string; data: unknown }> =>
-		created.sessionManager.getEntries().flatMap((entry) => {
-			if (entry.type !== "custom" || entry.customType !== OPTIONAL_TOOL_INTENT_CUSTOM_TYPE) return [];
-			return [{ id: entry.id, data: entry.data }];
-		});
 	// The SDK owner edits queued input while compaction is held: wordless input is admitted and taken back,
 	// without replacing the standing intent or pretending that a semantic judgment was uncertain.
 	const intentBeforeWordlessInput = created.sessionManager
@@ -381,120 +370,28 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		"the owner takes the input back",
 	).toEqual([" \t "]);
 	expect(session.getFollowUpMessages(), "the withdrawn input leaves no queued work").toEqual([]);
-	// Taking a queued input back takes its optional-tool intent back with it. The input is judged in full before it is
-	// admitted (no edge class is granted yet, so the still-pending capabilities are asked too), and that judgment revokes
-	// the native optional tool. The standing intent is the task's, which names no optional tool, so the task relation is not
-	// asked and no earlier owner words are pending. Nothing of the judgment is committed before the run delivers the input:
-	// once the owner clears the queue, no revocation is in force and the tool stays callable.
-	const TAKEN_BACK_OWNER_WORDS = "Stop using the secret store for the rest of this task.";
-	world.systemOne.enterPhase(
-		"owner-taken-back",
-		{
-			capabilities_authorized: { kind: "noul", probability: 0.02 },
-			changes_model_pools: { kind: "noul", probability: 0.02 },
-			local_commits_only: { kind: "noul", probability: 0.02 },
-			lifts_delivery_block: { kind: "noul", probability: 0.02 },
-			full_handoff: { kind: "noul", probability: 0.02 },
-			optional_tool_0: { kind: "choice", choice: "revoke", confidence: 0.97 },
-		},
-		{
-			expect: expectOwnerWords({
-				sessionManager: () => created.sessionManager,
-				userRequests: [TAKEN_BACK_OWNER_WORDS],
-				optionalToolNames: ["secret_store"],
-			}),
-		},
-	);
-	const intentEntriesBeforeTakeBack = optionalIntentEntries();
-	await withDeadline(trace, "revoking follow-up admitted", trace.track(session.followUp(TAKEN_BACK_OWNER_WORDS)));
-	expect(session.getFollowUpMessages(), "the revoking owner input is admitted").toEqual([TAKEN_BACK_OWNER_WORDS]);
-	expect(
-		optionalIntentEntries(),
-		"an admitted input's judgment commits no optional-tool intent before its delivery",
-	).toEqual(intentEntriesBeforeTakeBack);
-	expect(session.clearQueue().followUp, "the owner takes the revoking input back").toEqual([TAKEN_BACK_OWNER_WORDS]);
-	expect(optionalIntentEntries(), "the taken back input leaves the optional-tool chain as it was").toEqual(
-		intentEntriesBeforeTakeBack,
-	);
-	if (world.systemOne.enabled) {
-		// The tool identity is the one production offered System One for the taken back words.
-		const takenBackTools = world.systemOne.decoded.find((request) => request.phase === "owner-taken-back")?.state as
-			| { optional_tools?: Array<{ toolName?: unknown; sourcePath?: unknown }> }
-			| undefined;
-		const secretStore = takenBackTools?.optional_tools?.[0];
-		expect(secretStore?.toolName, "the taken back words were judged against the native optional tool").toBe(
-			"secret_store",
-		);
-		const sourcePath = typeof secretStore?.sourcePath === "string" ? secretStore.sourcePath : "";
-		const standingIntent = readOptionalToolIntent(optionalIntentEntries().at(-1)?.data);
-		expect(
-			enforceExplicitOptionalToolRequest({
-				toolName: "secret_store",
-				sourcePath,
-				intent: standingIntent,
-				args: { action: "activate" },
-			}),
-			"no revocation of the taken back input is in force: the optional tool stays callable",
-		).toBeUndefined();
-		// Negative control: the same gate blocks the tool once a revocation of it is the standing intent.
-		expect(
-			enforceExplicitOptionalToolRequest({
-				toolName: "secret_store",
-				sourcePath,
-				intent: {
-					version: 1,
-					status: "classified",
-					taskRequest: TAKEN_BACK_OWNER_WORDS,
-					allowedTools: [],
-					revokedTools: [{ toolName: "secret_store", sourcePath }],
-				},
-				args: { action: "activate" },
-			})?.block,
-			"a committed revocation of the tool blocks it",
-		).toBe(true);
-	}
-	// The queued follow-up is judged before it is admitted: it continues the task's intent, and the taken back words are
-	// read by no later judgment.
-	const followUpOracle = expectOwnerWords({
-		sessionManager: () => created.sessionManager,
-		userRequests: [FOLLOW_UP_REQUEST],
-		optionalToolNames: ["secret_store"],
-	});
-	world.systemOne.enterPhase(
-		"tab-preference",
-		{
-			capabilities_authorized: { kind: "noul", probability: 0.02 },
-			changes_model_pools: { kind: "noul", probability: 0.02 },
-			local_commits_only: { kind: "noul", probability: 0.02 },
-			lifts_delivery_block: { kind: "noul", probability: 0.02 },
-			full_handoff: { kind: "noul", probability: 0.02 },
-			optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
-		},
-		{
-			expect: (request) => {
-				followUpOracle(request);
-				expect(
-					(request.state as Record<string, unknown>).pending_owner_requests,
-					"the taken back words are read by no later judgment",
-				).toEqual([]);
-			},
-		},
-	);
 	const queuedTurn = session.prompt("Also keep the tab preference in mind.", { streamingBehavior: "followUp" });
 	await withDeadline(trace, "follow-up admitted to the queue", followUpAdmitted.promise);
 	trace.mark("root", "queued-input.admitted");
 	// Held owner evaluation, reordered, inside the held compaction: an older input's evaluation is held at its gate, a
-	// newer contradictory input is classified and admitted first, and the older evaluation returns last. The admission
-	// boundary is the native followUp promise, which resolves after the input's classification and admission; the commit
-	// boundary is the input's delivery.
+	// newer contradictory input is classified and admitted first, and the older evaluation returns last. The commit
+	// boundary is the native followUp promise, which resolves after the input's classification and admission.
+	const classifiedEntries = (): Array<{ id: string; data: unknown }> =>
+		created.sessionManager.getEntries().flatMap((entry) => {
+			if (entry.type !== "custom" || entry.customType !== OPTIONAL_TOOL_INTENT_CUSTOM_TYPE) return [];
+			return readOptionalToolIntent(entry.data)?.status === "classified" ? [{ id: entry.id, data: entry.data }] : [];
+		});
 	const OLDER_OWNER_WORDS = "Check the secret store status before the compaction.";
 	const NEWER_OWNER_WORDS = "Stop using the secret store for the rest of this task.";
-	// The newer input's committed optional-tool intent, and every optional-tool intent entry once the queued inputs were
-	// delivered and before their words settle.
+	// The newer input's committed optional-tool intent, and every optional-tool intent entry once the older input settled.
 	let committedNewerIntentId: string | undefined;
-	let intentEntriesBeforeSettle: Array<{ id: string; data: unknown }> = [];
+	let intentEntriesBeforeDelivery: Array<{ id: string; data: unknown }> = [];
+	const optionalIntentEntries = (): Array<{ id: string; data: unknown }> =>
+		created.sessionManager.getEntries().flatMap((entry) => {
+			if (entry.type !== "custom" || entry.customType !== OPTIONAL_TOOL_INTENT_CUSTOM_TYPE) return [];
+			return [{ id: entry.id, data: entry.data }];
+		});
 	if (world.systemOne.enabled) {
-		const intentEntriesBeforeAdmissions = optionalIntentEntries();
 		const olderReached = createBarrier();
 		const releaseOlder = createBarrier();
 		// A followUp() is judged in full before it is admitted, as a queued prompt is: no edge class is granted yet, so the
@@ -527,31 +424,25 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			"newer owner input classified and admitted",
 			trace.track(session.followUp(NEWER_OWNER_WORDS)),
 		);
-		// Both admissions are judged and staged: neither input is delivered yet, so neither commits an optional-tool
-		// intent, and the newer input's revocation is not in force before its delivery.
+		const committed = classifiedEntries().at(-1);
 		expect(
-			optionalIntentEntries(),
-			"the admitted inputs' judgments commit no optional-tool intent before they are delivered",
-		).toEqual(intentEntriesBeforeAdmissions);
-		const standing = classifiedEntries().at(-1);
-		expect(
-			(readOptionalToolIntent(standing?.data)?.revokedTools ?? []).map((tool) => tool.toolName),
-			"the newer input's revocation is not committed before the input is delivered",
-		).not.toContain("secret_store");
-		const committedId = standing?.id;
+			readOptionalToolIntent(committed?.data)?.revokedTools?.map((tool) => tool.toolName),
+			"the newer input's revocation is the committed policy before the older evaluation returns",
+		).toEqual(["secret_store"]);
+		const committedId = committed?.id;
+		committedNewerIntentId = committedId;
 		releaseOlder.release();
 		await withDeadline(trace, "physical older evaluation joined", world.systemOne.joinInFlight(), 60_000);
 		await withDeadline(trace, "older owner input settled", olderInput, 60_000);
-		expect(classifiedEntries().at(-1)?.id, "the late older evaluation does not replace the standing policy").toBe(
-			committedId,
-		);
-		expect(optionalIntentEntries(), "the late older evaluation commits no optional-tool intent").toEqual(
-			intentEntriesBeforeAdmissions,
-		);
+		expect(
+			classifiedEntries().at(-1)?.id,
+			"the late older evaluation does not replace the committed newer policy",
+		).toBe(committedId);
 		expect(
 			session.getFollowUpMessages(),
 			"both owner inputs remain admitted after the older evaluation returns",
 		).toEqual(expect.arrayContaining([OLDER_OWNER_WORDS, NEWER_OWNER_WORDS]));
+		intentEntriesBeforeDelivery = optionalIntentEntries();
 		// Every owner input this delivery brings was judged when it was submitted: the newer input's judgment is classified, the
 		// older input's was superseded by it, and the tab-preference follow-up's is classified or, when the older input's
 		// judgment starts before it answers, superseded. Each is carried into the owner-policy queue and never screened. A
@@ -606,17 +497,6 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	// Every queued owner input is delivered as its own turn: the wait covers the older and newer turns as well.
 	await withDeadline(trace, "queued inputs settled", session.waitForForegroundIdle());
 	trace.mark("root", "queued-input.delivered");
-	if (world.systemOne.enabled) {
-		// Delivery commits the staged intents: the newer input's judgment already read the older input's words, so its
-		// revocation is the committed policy once both are delivered.
-		const committed = classifiedEntries().at(-1);
-		expect(
-			readOptionalToolIntent(committed?.data)?.revokedTools?.map((tool) => tool.toolName),
-			"the newer input's revocation is the committed policy once it is delivered",
-		).toEqual(["secret_store"]);
-		committedNewerIntentId = committed?.id;
-		intentEntriesBeforeSettle = optionalIntentEntries();
-	}
 	// Negative controls on the production payload the transport recorded: the oracle rejects the decoded task request when
 	// its previous intent is not the native ledger's, and when its owner words were never submitted. Both must be named.
 	// System One off sends no requests, so there is no payload to control.
@@ -672,7 +552,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		expect(
 			optionalIntentEntries(),
 			"the policy-only judgments write no optional-tool intent: the newer input's revocation stays committed",
-		).toEqual(intentEntriesBeforeSettle);
+		).toEqual(intentEntriesBeforeDelivery);
 		expect(classifiedEntries().at(-1)?.id, "the committed newer policy is still the latest classified intent").toBe(
 			committedNewerIntentId,
 		);
@@ -1475,7 +1355,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	await withDeadline(trace, "delivery-order turn reached its provider gate", orderTurnReached.promise);
 	// Each queued input is judged in full before it is admitted, the older one first. The turn's own words have reached no
 	// judgment yet (its provider request is held before any tool call), so the first judgment carries them as the owner's
-	// earlier words, read before its own: an optional tool the turn's words forbid is forbidden in the intent it stages. The
+	// earlier words, read before its own: an optional tool the turn's words forbid is forbidden in the intent it writes. The
 	// standing intent is the classified one of the held-background turn, so nothing else is pending.
 	const pendingOwnerRequests = (state: unknown): unknown => (state as Record<string, unknown>).pending_owner_requests;
 	world.systemOne.enterPhase(
@@ -1518,18 +1398,15 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		},
 	);
 	await withDeadline(trace, "newer lifting steer admitted", trace.track(session.steer(DELIVERY_LIFT_WORDS)));
-	// The queued pair's intents are staged, not committed, until both inputs are delivered, so where the turn's first tool
-	// call settles its own words they are judged into the committed chain in full: owner policy and optional tools, with
-	// the task relation of the standing intent. The delivered pair then commits the newer input's staged intent, which
-	// already read the turn's words and the older input's, carries its judgments and is applied as judged, asking nothing.
+	// The turn's own words are older than both judged inputs and the older one's optional-tool judgment already read them, so
+	// where its first tool call settles them their owner policy is judged alone; the delivered pair carries its judgments and
+	// is applied as judged, asking nothing.
 	world.systemOne.enterPhase("delivery-order-turn-policy", {
-		optional_tool_task: { kind: "choice", choice: "continue", confidence: 0.97 },
 		capabilities_authorized: { kind: "noul", probability: 0.02 },
 		changes_model_pools: { kind: "noul", probability: 0.02 },
 		local_commits_only: { kind: "noul", probability: 0.97 },
 		lifts_delivery_block: { kind: "noul", probability: 0.02 },
 		full_handoff: { kind: "noul", probability: 0.02 },
-		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
 	});
 	releaseOrderTurn.release();
 	await withDeadline(trace, "delivery-order turn", orderTurn);

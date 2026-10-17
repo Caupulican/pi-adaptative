@@ -382,9 +382,8 @@ export function expectOwnerWords(input: {
 					`user_request is not one of the phase's owner inputs: ${JSON.stringify(state.user_request)}`,
 				);
 			}
-			// A judgment into the committed chain appends a paused entry before it classifies, and a queued input's staged
-			// judgment appends nothing, so the expected previous intent is the newest entry that is classified: the native
-			// ledger the intake continues from.
+			// Production appends a paused entry for the request before it classifies, so the expected previous intent is the
+			// newest entry that is classified: the native ledger the intake continues from.
 			let classifiedTask: string | null = null;
 			for (const entry of input.sessionManager().getEntries()) {
 				if (entry.type !== "custom" || entry.customType !== OPTIONAL_TOOL_INTENT_CUSTOM_TYPE) continue;

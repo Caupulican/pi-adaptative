@@ -55,22 +55,15 @@ import {
 import type { SessionProjectRules } from "./project-rules/session-project-rules.ts";
 import type { RuntimeBuilder } from "./runtime-builder.ts";
 import type { SettingsManager } from "./settings-manager.ts";
-import {
-	normalizeUserRequest,
-	type SystemOneController,
-	USER_REQUEST_RULE_BUDGET,
-	type UserRequestClassificationOutcome,
-} from "./system-one/controller.ts";
+import { normalizeUserRequest, type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one/controller.ts";
 import { OperationGate } from "./system-one/operation-gate.ts";
 import { operationGateLedgerBindings } from "./system-one/operation-gate-wiring.ts";
-import { OwnerPolicyQueue, type OwnerWords } from "./system-one/owner-policy-queue.ts";
+import { OwnerPolicyQueue } from "./system-one/owner-policy-queue.ts";
 import { appendOwnerFollowUp, ownerFollowUpPath } from "./system-one/owner-question-routing.ts";
 import {
 	MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS,
 	OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
 	type OptionalToolCandidate,
-	type OptionalToolIntent,
-	type OptionalToolRequestContext,
 	optionalToolRequestAliases,
 	readOptionalToolIntent,
 } from "./tool-applicability-gate.ts";
@@ -87,88 +80,9 @@ export const OWNER_INTENT_SUPERSEDED = new Error(
 	"Owner intent classification was superseded by a newer owner request.",
 );
 
-export type OwnerRequestClassificationOutcome =
-	| UserRequestClassificationOutcome
-	| {
-			readonly status: "unavailable";
-			readonly cancelled: true;
-			readonly contextChanged: boolean;
-			readonly reason: string;
-	  }
-	| { readonly status: "unavailable"; readonly superseded: true; readonly reason: string };
-
-function cancelledOutcome(contextChanged: boolean): OwnerRequestClassificationOutcome {
-	return {
-		status: "unavailable",
-		cancelled: true,
-		contextChanged,
-		reason: contextChanged
-			? "The session context changed while the owner request was classified"
-			: "Owner intent classification was cancelled",
-	};
-}
-
-/** What a judgment continuing an intent entry reads from it: the intent it continues, and the owner words still pending in it. */
-function continuedIntent(intent: OptionalToolIntent | undefined): {
-	readonly previous: OptionalToolIntent | undefined;
-	readonly pending: readonly string[];
-} {
-	if (intent === undefined || intent.status === "classified") return { previous: intent, pending: [] };
-	return { previous: intent.resumeIntent, pending: intent.pendingRequests ?? [] };
-}
-
-/** Owner words accepted with a submission order: their text, the session that accepted them, and whether they were delivered. */
-interface RegisteredOwnerWords {
-	readonly text: string;
-	readonly sessionId: string;
-	delivered: boolean;
-}
-
-/**
- * How one optional-tool intent entry this controller appended continues the chain: the entry it was judged on, and the
- * owner words (by submission order) it read beyond that entry.
- */
-interface OptionalIntentLink {
-	readonly previousId: string | undefined;
-	/** The branch's latest entry when this one was appended: following it walks the branch back as it grew. */
-	readonly after: string | undefined;
-	readonly words: ReadonlyMap<number, string>;
-	/**
-	 * A restatement of `previousId` after a judgment that decided nothing: it holds the words that entry holds, and decides
-	 * none.
-	 */
-	readonly restates?: true;
-}
-
-/** One session's committed optional-tool chain as this controller appended it. */
-interface OptionalIntentChain {
-	readonly sessionId: string;
-	readonly links: Map<string, OptionalIntentLink>;
-	/**
-	 * Owner words an entry of the chain holds (decided, or pending in an unresolved entry), or that the screen found to carry
-	 * no instruction: no further optional-tool judgment reads them.
-	 */
-	readonly covered: Set<number>;
-}
-
-/**
- * A queued owner input's optional-tool intent, judged before the input is admitted and not in force: it is appended to the
- * chain only once the input is delivered and every word it read is delivered too, and only while the chain it was judged on
- * gained nothing but words it read (`stagedIsStale`). An input taken back, cleared, held or superseded never appends it.
- */
-interface StagedOptionalIntent {
-	readonly order: number;
-	readonly sessionId: string;
-	/** The committed entry the judgment continues, through any staged judgment it read. */
-	readonly baseId: string | undefined;
-	/** Every owner word the intent read, its own included. */
-	readonly words: ReadonlyMap<number, string>;
-	/** The words among `words` that `baseId` already holds pending (an unresolved base): the intent read them from it. */
-	readonly heldByBase: ReadonlyMap<number, string>;
-	/** Paused while it is judged; then the classified intent, or the unresolved one that keeps its words pending. */
-	record: OptionalToolIntent;
-	judging?: AbortController;
-}
+export type OwnerRequestClassificationOutcome = Awaited<
+	ReturnType<SessionEdgeIntentController["classifyOwnerRequest"]>
+>;
 
 export interface SessionEdgeIntentControllerDeps {
 	getSessionManager(): SessionManager;
@@ -208,19 +122,17 @@ export class SessionEdgeIntentController {
 	private poolPolicyRead?: { branchKey: string; policy: ModelPoolPolicy | undefined };
 	private operationGateInstance?: OperationGate;
 	private edgeConfirmation?: EdgeConfirmationHandler;
-	/** The committed optional-tool judgment in flight (one at a time: the owner-policy queue runs them); its paused entry heads the chain. */
-	private committedIntentAbort?: AbortController;
+	private optionalIntentAbort?: AbortController;
+	/** The newest owner submission order whose optional-tool judgment started: an older one never writes the intent checkpoint. */
+	private newestJudgedOwnerOrder = 0;
 	/**
-	 * Owner words accepted with a submission order and not yet held by the committed optional-tool chain. A turn's own words
-	 * are judged where they are read (its first tool call), so a queued input judged before them reads them as
-	 * `pending_owner_requests`; delivered words no committed entry holds are read by the next committed judgment. Words leave
-	 * when an entry covers them (`coverOwnerWords`) or when they never become owner input (`releaseOwnerWords`).
+	 * Owner words accepted and not yet carried by any optional-tool judgment, by submission order, with the session they were
+	 * accepted in. A turn's own words are judged where they are read (its first tool call), so a queued input judged before
+	 * them would otherwise own the optional-tool chain without ever having read them. The next judgment of newer words carries
+	 * them as `pending_owner_requests` (`carryUnjudgedOwnerWords`); words leave when they are carried, judged by their own
+	 * chain, set aside by the screen, or withdrawn before they become owner input (`releaseOwnerWords`).
 	 */
-	private readonly ownerWords = new Map<number, RegisteredOwnerWords>();
-	/** The committed chain of the current session; replaced when the session changes. */
-	private intentChain?: OptionalIntentChain;
-	/** Queued inputs' optional-tool intents, by submission order, waiting for their delivery (`promoteDeliveredIntents`). */
-	private readonly stagedIntents = new Map<number, StagedOptionalIntent>();
+	private readonly unjudgedOwnerWords = new Map<number, { readonly text: string; readonly sessionId: string }>();
 	/**
 	 * The owner submission order that last decided each owner-policy axis (handoff, delivery, rule authority, each model
 	 * pool). Owner words are applied where they are delivered, and a steer is delivered ahead of an older follow-up, so
@@ -239,8 +151,16 @@ export class SessionEdgeIntentController {
 		this.deps = deps;
 		this.ownerPolicy = new OwnerPolicyQueue<OwnerRequestClassificationOutcome>({
 			classify: async (words) => {
+				// A superseded judgment judged none of these words' owner policy: the words are judged here, and an
+				// older submission than one already judged is judged for its owner policy alone (`classifyOwnerRequest`).
+				const carried = words.judgment;
+				const judgment =
+					carried !== undefined && !("superseded" in carried && carried.superseded) ? carried : undefined;
 				const note = await this.deps.withTaskDirectoryContext(
-					() => this.settleOwnerWords(words),
+					() =>
+						judgment !== undefined
+							? this.applyOwnerRequestOutcome(words.text, judgment, words.acceptedOrder)
+							: this.enableCapabilitiesAuthorizedByUser(words.text, words.signal, true, words.acceptedOrder),
 					words.signal,
 					(error) => {
 						this.deps.noteSystemOneTaskDirectoryUnavailable(error);
@@ -255,11 +175,8 @@ export class SessionEdgeIntentController {
 				return outcome?.status === "screened" ? outcome.carriesInstruction : undefined;
 			},
 			reportFailure: (error) => this.noteOwnerPolicyFailure(error),
-			// The screen judged these words to carry no instruction: no optional-tool judgment needs to read them, and an intent
-			// that read them holds nothing they decide.
-			setAside: (words) => {
-				if (words.acceptedOrder !== undefined) this.coverOwnerWords([words.acceptedOrder]);
-			},
+			// The screen judged these words to carry no instruction: no optional-tool judgment carries them.
+			setAside: (words) => this.releaseOwnerWords(words.acceptedOrder),
 		});
 		this.modelPolicy = new OwnerModelPolicy(
 			{
@@ -420,13 +337,11 @@ export class SessionEdgeIntentController {
 	}
 
 	/**
-	 * The one way owner words join the owner-policy queue, where they are delivered. Words judged when they were submitted (a
-	 * queued steer, follow-up or prompt) carry that judgment and are applied as judged, in owner order, where the queue
-	 * settles; they are never screened or judged again. A superseded judgment is carried too, so its words are not screened:
-	 * the newer request took only the optional-tool chain from it, and the queue judges these words' owner policy alone, once,
-	 * where it settles them. Words with no judgment, or one the evaluator could not give (an outage), are screened and
-	 * classified at the queue. Delivered words are owner input: a staged optional-tool intent that waited for them is
-	 * appended to the chain now (`promoteDeliveredIntents`).
+	 * The one way owner words join the owner-policy queue. Words judged when they were submitted (a queued steer, follow-up
+	 * or prompt) carry that judgment and are applied as judged, in owner order, where the queue settles; they are never
+	 * screened or judged again. A superseded judgment is carried too, so its words are not screened: the newer request took
+	 * only the optional-tool chain from it, and the queue judges these words' owner policy alone, once, where it settles them.
+	 * Words with no judgment, or one the evaluator could not give (an outage), are screened and classified at the queue.
 	 */
 	enqueueOwnerWords(
 		text: string,
@@ -435,11 +350,6 @@ export class SessionEdgeIntentController {
 		signal?: AbortSignal,
 	): void {
 		if (!this.deps.getSystemOneController()) return;
-		if (acceptedOrder !== undefined) {
-			const registered = this.ownerWords.get(acceptedOrder);
-			if (registered) registered.delivered = true;
-			this.promoteDeliveredIntents();
-		}
 		const carried =
 			judgment !== undefined &&
 			(judgment.status === "classified" || ("superseded" in judgment && judgment.superseded === true));
@@ -452,333 +362,51 @@ export class SessionEdgeIntentController {
 	}
 
 	/**
-	 * Owner words accepted with this submission order: they wait here until a committed optional-tool entry holds them.
-	 * Called where the order is assigned, before anything can await, so no judgment of newer words can start without seeing
-	 * them. With no evaluator nothing is ever judged, so nothing is recorded; blank words decide nothing, so none reads them.
+	 * Owner words accepted with this submission order: they wait here until an optional-tool judgment carries them. Called
+	 * where the order is assigned, before anything can await, so no judgment of newer words can start without seeing them.
+	 * With no evaluator nothing is ever judged, so nothing is recorded.
 	 */
 	registerOwnerWords(acceptedOrder: number, text: string): void {
-		if (!this.deps.getSystemOneController() || normalizeUserRequest(text) === undefined) return;
-		this.ownerWords.set(acceptedOrder, {
-			text,
-			sessionId: this.deps.getSessionManager().getSessionId(),
-			delivered: false,
-		});
+		if (!this.deps.getSystemOneController()) return;
+		this.unjudgedOwnerWords.set(acceptedOrder, { text, sessionId: this.deps.getSessionManager().getSessionId() });
 	}
 
-	/**
-	 * These owner words never become owner input (withdrawn, cancelled, handled, or taken back, cleared or held before their
-	 * delivery): no judgment reads them, and the optional-tool intent judged for them is dropped with them.
-	 */
+	/** These owner words never become owner input (withdrawn, cancelled, handled), or no judgment needs them: none carries them. */
 	releaseOwnerWords(acceptedOrder: number | undefined): void {
-		if (acceptedOrder === undefined) return;
-		this.ownerWords.delete(acceptedOrder);
-		this.stagedIntents.delete(acceptedOrder);
+		if (acceptedOrder !== undefined) this.unjudgedOwnerWords.delete(acceptedOrder);
 	}
 
-	/** An optional-tool entry of the committed chain holds these words: no later judgment reads them again. */
-	private coverOwnerWords(orders: Iterable<number>): void {
-		const covered = this.chain().covered;
-		for (const order of orders) {
-			covered.add(order);
-			this.ownerWords.delete(order);
-		}
-	}
-
-	private chain(): OptionalIntentChain {
+	/**
+	 * Takes the registered words older than `acceptedOrder` out of the registry, oldest first, for the judgment of those newer
+	 * words to carry. Words accepted in another session never join this session's judgment and are dropped.
+	 */
+	private carryUnjudgedOwnerWords(acceptedOrder: number): { readonly order: number; readonly text: string }[] {
 		const sessionId = this.deps.getSessionManager().getSessionId();
-		if (this.intentChain?.sessionId !== sessionId) {
-			this.intentChain = { sessionId, links: new Map(), covered: new Set() };
-		}
-		return this.intentChain;
-	}
-
-	/**
-	 * Registered words of the current session older than `below`, that no committed entry holds and `exclude` does not name,
-	 * oldest first; `deliveredOnly` keeps the delivered ones. Words accepted in another session never join this session's
-	 * judgment and are dropped.
-	 */
-	private registeredWords(
-		below: number,
-		exclude: ReadonlyMap<number, string>,
-		deliveredOnly: boolean,
-	): Array<[number, string]> {
-		const sessionId = this.deps.getSessionManager().getSessionId();
-		const read: Array<[number, string]> = [];
-		for (const [order, words] of this.ownerWords) {
-			if (words.sessionId !== sessionId) this.ownerWords.delete(order);
-			else if (order < below && !exclude.has(order) && (words.delivered || !deliveredOnly))
-				read.push([order, words.text]);
-		}
-		return read.sort((left, right) => left[0] - right[0]);
-	}
-
-	/**
-	 * Whether the chain from `headId` back to `baseId` gained only entries that read nothing but `words`: an intent judged on
-	 * `baseId` that read those words then describes the head too. An entry this controller did not append (an earlier
-	 * process, another branch) is unknown, so no such intent describes the head.
-	 */
-	private chainReaches(
-		headId: string | undefined,
-		baseId: string | undefined,
-		words: ReadonlyMap<number, string>,
-	): boolean {
-		const links = this.chain().links;
-		let id = headId;
-		while (id !== baseId) {
-			const link = id === undefined ? undefined : links.get(id);
-			if (link === undefined) return false;
-			for (const order of link.words.keys()) if (!words.has(order)) return false;
-			id = link.previousId;
-		}
-		return true;
-	}
-
-	/**
-	 * Whether the branch's optional-tool entries from `fromId` up to `headId` are all entries this controller appended there,
-	 * one after another: the branch only grew. A switch to another branch or session finds an entry it did not append.
-	 */
-	private chainDescends(headId: string | undefined, fromId: string | undefined): boolean {
-		const links = this.chain().links;
-		let id = headId;
-		while (id !== fromId) {
-			const link = id === undefined ? undefined : links.get(id);
-			if (link === undefined) return false;
-			id = link.after;
-		}
-		return true;
-	}
-
-	/**
-	 * A staged intent is `stale` once it can never describe the chain: another session, a word it read never became owner
-	 * input, its own words are already held by the chain, or the chain gained an entry that read words it did not.
-	 */
-	private stagedIsStale(staged: StagedOptionalIntent, sessionId: string, headId: string | undefined): boolean {
-		const chain = this.chain();
-		return (
-			staged.sessionId !== sessionId ||
-			chain.covered.has(staged.order) ||
-			[...staged.words.keys()].some((order) => !chain.covered.has(order) && !this.ownerWords.has(order)) ||
-			!this.chainReaches(headId, staged.baseId, staged.words)
-		);
-	}
-
-	/**
-	 * Appends each staged optional-tool intent whose words are all delivered now, newest first, and drops the stale ones. An
-	 * intent appended this way already read every older word an older staged intent read, so that one is stale after it.
-	 * Never while a committed judgment is in flight: its paused entry heads the chain until it settles.
-	 */
-	private promoteDeliveredIntents(): void {
-		if (this.committedIntentAbort !== undefined || this.stagedIntents.size === 0) return;
-		const manager = this.deps.getSessionManager();
-		const sessionId = manager.getSessionId();
-		const chain = this.chain();
-		for (const staged of [...this.stagedIntents.values()].sort((left, right) => right.order - left.order)) {
-			if (this.stagedIntents.get(staged.order) !== staged) continue;
-			const headId = manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.id;
-			// A judgment still in flight keeps its place: its input is admitted on its outcome, and only delivery commits it.
-			if (staged.judging) continue;
-			if (this.stagedIsStale(staged, sessionId, headId)) {
-				this.stagedIntents.delete(staged.order);
-				continue;
+		const carried: { order: number; text: string }[] = [];
+		for (const [order, words] of this.unjudgedOwnerWords) {
+			if (words.sessionId !== sessionId) this.unjudgedOwnerWords.delete(order);
+			else if (order < acceptedOrder) {
+				carried.push({ order, text: words.text });
+				this.unjudgedOwnerWords.delete(order);
 			}
-			if (
-				![...staged.words.keys()].every(
-					(order) => chain.covered.has(order) || this.ownerWords.get(order)?.delivered,
-				)
-			)
-				continue;
-			const id = manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, staged.record);
-			const read = new Map([...staged.words].filter(([order]) => !staged.heldByBase.has(order)));
-			chain.links.set(id, { previousId: headId, after: headId, words: read });
-			this.coverOwnerWords(staged.words.keys());
-			this.stagedIntents.delete(staged.order);
 		}
-	}
-
-	private optionalToolCandidates(): OptionalToolCandidate[] {
-		return this.deps.getAllTools().flatMap((tool) => {
-			const source = this.deps.getToolSourceInfo(tool.name);
-			const aliases = optionalToolRequestAliases(tool.name, source);
-			return aliases ? [{ toolName: tool.name, sourcePath: source?.path ?? "", aliases }] : [];
-		});
-	}
-
-	/** One System One judgment of owner words, resolved as unavailable as soon as `signals` or the reflection lane abort. */
-	private async askOwnerIntent(
-		controller: SystemOneController,
-		request: string,
-		rules: string,
-		options: {
-			readonly capabilitiesPending: boolean;
-			readonly optionalTools: OptionalToolRequestContext;
-			readonly optionalToolsOnly?: boolean;
-		},
-		signals: ReadonlyArray<AbortSignal | undefined>,
-	): Promise<UserRequestClassificationOutcome> {
-		const signal = AbortSignal.any([
-			this.deps.getReflectionAbortSignal(),
-			...signals.filter((candidate): candidate is AbortSignal => candidate !== undefined),
-		]);
-		const classification = controller.classifyUserRequest(request, rules, { ...options, signal });
-		// An aborted judgment decides nothing, so its request does not wait for the evaluator to notice.
-		classification.catch(() => undefined);
-		let stopWatchingAbort = (): void => {};
-		try {
-			return await Promise.race([
-				classification,
-				new Promise<UserRequestClassificationOutcome>((resolve) => {
-					const settle = () =>
-						resolve({ status: "unavailable", reason: "Owner intent classification was aborted" });
-					if (signal.aborted) return settle();
-					signal.addEventListener("abort", settle, { once: true });
-					stopWatchingAbort = () => signal.removeEventListener("abort", settle);
-				}),
-			]);
-		} finally {
-			stopWatchingAbort();
-		}
-	}
-
-	/** The classified optional-tool intent of a judgment, or the warning that the integrations stay available without one. */
-	private classifiedIntentOf(
-		outcome: UserRequestClassificationOutcome,
-		candidates: readonly OptionalToolCandidate[],
-	): OptionalToolIntent | undefined {
-		const intent =
-			outcome.status === "classified" && outcome.classification.optionalToolIntent?.status === "classified"
-				? outcome.classification.optionalToolIntent
-				: undefined;
-		if (intent) {
-			this.lastOptionalIntentWarning = undefined;
-			return intent;
-		}
-		// No usable judgment is not an owner decision: the unclassified words stay pending for the next classification, and
-		// the integrations stay available.
-		const warning = `Optional integrations stay available; owner intent for them was not classified: ${outcome.status === "unavailable" ? outcome.reason : "the judgment was uncertain"}.`;
-		if (candidates.length && warning !== this.lastOptionalIntentWarning) {
-			this.lastOptionalIntentWarning = warning;
-			this.deps.emitWarning(warning);
-		}
-		return undefined;
+		return carried.sort((left, right) => left.order - right.order);
 	}
 
 	/**
-	 * The full classification of a queued owner input's words (written rules and still-pending capabilities included), once,
-	 * before it is admitted. Its owner policy is carried into the owner-policy queue and applied there in owner order
-	 * (`applyOwnerRequestOutcome`), never asked again. Its optional-tool intent is staged, never written: it continues the
-	 * newest staged intent of older words (superseding that one's judgment if it is still in flight), else the committed
-	 * chain, reads every older registered word neither holds, and is appended only when the input is delivered
-	 * (`promoteDeliveredIntents`). A taken back, cleared or held input appends nothing.
+	 * The full classification of the owner's words (written rules and still-pending capabilities included), not yet
+	 * applied. A queued owner input is judged this way once, before it is admitted; the judgment it carries into the
+	 * owner-policy queue is applied there in owner order (`applyOwnerRequestOutcome`), never asked again. Words older than a
+	 * submission already judged are judged for their owner policy alone (see `classifyOwnerRequest`).
 	 */
-	async judgeOwnerRequest(
-		request: string,
-		signal?: AbortSignal,
-		acceptedOrder?: number,
-	): Promise<OwnerRequestClassificationOutcome> {
-		const rules = this.writtenRuleText();
-		const capabilitiesPending = this.capabilitiesPending();
-		if (signal?.aborted || this.deps.isDisposed()) return cancelledOutcome(false);
-		// Without a submission order the words cannot be staged against the owner's other words: their optional-tool intent
-		// is judged where they are delivered (the owner-policy queue), and only their owner policy is judged now.
-		if (acceptedOrder === undefined) return this.judgeOwnerPolicy(request, rules, capabilitiesPending, signal);
-		// Normal-off: no evaluator means no semantic intent is staged, aborted, scanned or warned about.
-		const controller = this.deps.getSystemOneController();
-		if (!controller) return { status: "skipped" };
-		// A blank message carries no request to classify, so no intent is staged for it.
-		if (normalizeUserRequest(request) === undefined) return { status: "skipped" };
-		const manager = this.deps.getSessionManager();
-		const sessionId = manager.getSessionId();
-		const head = manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE);
-		let tip: StagedOptionalIntent | undefined;
-		for (const staged of this.stagedIntents.values()) {
-			if (staged.order >= acceptedOrder || (tip !== undefined && staged.order < tip.order)) continue;
-			if (!this.stagedIsStale(staged, sessionId, head?.id)) tip = staged;
-		}
-		// The newer words own the optional-tool chain from here: an older judgment still in flight is stale, and its words
-		// are read here from its paused record.
-		tip?.judging?.abort(OWNER_INTENT_SUPERSEDED);
-		this.stagedIntents.get(acceptedOrder)?.judging?.abort(OWNER_INTENT_SUPERSEDED);
-		const snapshot = tip ? tip.record : readOptionalToolIntent(head?.data);
-		const baseWords: ReadonlyMap<number, string> = tip
-			? tip.words
-			: snapshot !== undefined && snapshot.status !== "classified" && head !== undefined
-				? (this.chain().links.get(head.id)?.words ?? new Map())
-				: new Map();
-		const { previous, pending } = continuedIntent(snapshot);
-		// Older owner words no judgment has read yet (a turn's own words, judged only where its first tool call reads them,
-		// or an older queued input) are read before these, in owner order.
-		const carried = this.registeredWords(acceptedOrder, baseWords, false);
-		const priorRequests = [...pending, ...carried.map(([, text]) => text)];
-		const recoverable =
-			request.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS &&
-			priorRequests.length < 8 &&
-			carried.every(([, text]) => text.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS);
-		const pausedIntent: OptionalToolIntent = {
-			version: 1,
-			status: "paused",
-			taskRequest: request.slice(0, MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS),
-			allowedTools: [],
-			...(recoverable
-				? { ...(previous ? { resumeIntent: previous } : {}), pendingRequests: [...priorRequests, request] }
-				: {}),
-		};
-		const judging = new AbortController();
-		const staged: StagedOptionalIntent = {
-			order: acceptedOrder,
-			sessionId,
-			baseId: tip ? tip.baseId : head?.id,
-			words: new Map<number, string>([...baseWords, ...carried, [acceptedOrder, request]]),
-			heldByBase: tip ? tip.heldByBase : baseWords,
-			record: pausedIntent,
-			judging,
-		};
-		this.stagedIntents.set(acceptedOrder, staged);
-		const candidates = this.optionalToolCandidates();
-		const outcome = await this.askOwnerIntent(
-			controller,
+	judgeOwnerRequest(request: string, signal?: AbortSignal, acceptedOrder?: number) {
+		return this.classifyOwnerRequest(
 			request,
-			rules,
-			{
-				capabilitiesPending,
-				optionalTools: {
-					candidates,
-					previous: recoverable ? previous : undefined,
-					pendingRequests: recoverable ? priorRequests : [],
-				},
-			},
-			[judging.signal, signal],
+			this.writtenRuleText(),
+			this.capabilitiesPending(),
+			signal,
+			acceptedOrder,
 		);
-		staged.judging = undefined;
-		const current = this.stagedIntents.get(acceptedOrder) === staged;
-		if (
-			signal?.aborted ||
-			this.deps.getReflectionAbortSignal().aborted ||
-			(judging.signal.aborted && judging.signal.reason !== OWNER_INTENT_SUPERSEDED) ||
-			this.deps.isDisposed()
-		) {
-			if (current) this.stagedIntents.delete(acceptedOrder);
-			return cancelledOutcome(false);
-		}
-		// A newer owner request owns the optional-tool chain now: this stale judgment stages nothing, but its request
-		// remains owner input for the caller to admit, and its owner policy is judged at the queue.
-		if (judging.signal.aborted || !current) {
-			if (current) this.stagedIntents.delete(acceptedOrder);
-			return {
-				status: "unavailable",
-				superseded: true,
-				reason: "Owner intent classification was superseded by a newer owner request",
-			};
-		}
-		// The session or branch moved under the judgment: its request belongs to the old context, not the new one.
-		if (
-			manager.getSessionId() !== sessionId ||
-			!this.chainDescends(manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.id, head?.id)
-		) {
-			this.stagedIntents.delete(acceptedOrder);
-			return cancelledOutcome(true);
-		}
-		staged.record = this.classifiedIntentOf(outcome, candidates) ?? { ...pausedIntent, status: "unresolved" };
-		return outcome;
 	}
 
 	async enableCapabilitiesAuthorizedByUser(
@@ -789,53 +417,13 @@ export class SessionEdgeIntentController {
 	): Promise<string | undefined> {
 		const controller = this.deps.getSystemOneController();
 		if (!controller) return undefined;
-		// The owner's words are settled as delivered words are: their optional-tool intent is committed now.
-		if (trustedOwner) return this.settleOwnerWords({ text: request, acceptedOrder, ...(signal ? { signal } : {}) });
-		const outcome = await controller.classifyUserRequest(request, this.writtenRuleText(), {
-			capabilitiesPending: this.capabilitiesPending(),
-			...(signal ? { signal } : {}),
-		});
+		const outcome = trustedOwner
+			? await this.judgeOwnerRequest(request, signal, acceptedOrder)
+			: await controller.classifyUserRequest(request, this.writtenRuleText(), {
+					capabilitiesPending: this.capabilitiesPending(),
+					...(signal ? { signal } : {}),
+				});
 		return this.applyOwnerRequestOutcome(request, outcome, acceptedOrder);
-	}
-
-	/**
-	 * Settles delivered owner words where the owner-policy queue reaches them, in owner order. An optional-tool entry that
-	 * already holds them (their own staged intent, or a newer one that read them) leaves only their owner policy: the
-	 * judgment they carry, or one asked for it alone. Otherwise their optional-tool intent is judged into the committed chain
-	 * now, with their owner policy when they carry none (`judgeCommittedIntent`).
-	 */
-	private async settleOwnerWords(words: OwnerWords<OwnerRequestClassificationOutcome>): Promise<string | undefined> {
-		if (!this.deps.getSystemOneController()) return undefined;
-		this.promoteDeliveredIntents();
-		const carried = words.judgment;
-		// A superseded judgment judged none of these words' owner policy: it is judged here.
-		const judgment = carried !== undefined && !("superseded" in carried && carried.superseded) ? carried : undefined;
-		const order = words.acceptedOrder;
-		const rules = this.writtenRuleText();
-		const capabilitiesPending = this.capabilitiesPending();
-		if (order !== undefined && this.chain().covered.has(order)) {
-			return this.applyOwnerRequestOutcome(
-				words.text,
-				judgment ?? (await this.judgeOwnerPolicy(words.text, rules, capabilitiesPending, words.signal)),
-				order,
-			);
-		}
-		const committed = await this.judgeCommittedIntent(
-			words.text,
-			order,
-			judgment === undefined ? { rules, capabilitiesPending } : undefined,
-			words.signal,
-		);
-		if (committed.ownPolicy) return this.applyOwnerRequestOutcome(words.text, committed.outcome, order);
-		if (judgment !== undefined) return this.applyOwnerRequestOutcome(words.text, judgment, order);
-		// A cancelled judgment is reported as such; otherwise the words' owner policy is judged alone.
-		if ("cancelled" in committed.outcome && committed.outcome.cancelled)
-			return this.applyOwnerRequestOutcome(words.text, committed.outcome, order);
-		return this.applyOwnerRequestOutcome(
-			words.text,
-			await this.judgeOwnerPolicy(words.text, rules, capabilitiesPending, words.signal),
-			order,
-		);
 	}
 
 	/**
@@ -915,245 +503,201 @@ export class SessionEdgeIntentController {
 		return undefined;
 	}
 
-	/**
-	 * The full classification of owner words judged into the committed optional-tool chain now (see `judgeCommittedIntent`),
-	 * written rules and pending capabilities as the caller gives them.
-	 */
 	async classifyOwnerRequest(
 		request: string,
 		rules = "",
 		capabilitiesPending = false,
 		signal?: AbortSignal,
 		acceptedOrder?: number,
-	): Promise<OwnerRequestClassificationOutcome> {
-		return (await this.judgeCommittedIntent(request, acceptedOrder, { rules, capabilitiesPending }, signal)).outcome;
-	}
-
-	/**
-	 * Judges delivered owner words into the committed optional-tool chain, now. The judgment continues the chain's head and
-	 * reads, before these words and in owner order, every older delivered word no committed entry holds. Words older than an
-	 * entry already in the chain (a follow-up delivered after a newer steer) rebuild that part of the chain: the newest words
-	 * are judged again with every older word pending before them, so a late older word never replaces a newer decision, and
-	 * if that judgment fails the head is restated and the older words wait for the next one. `policy` asks the owner-policy
-	 * questions too; `ownPolicy` says whether the outcome answered them for these words (a rebuild judges the newest words'
-	 * optional tools only). A cancelled judgment withdraws its own words and restores the head it found.
-	 */
-	private async judgeCommittedIntent(
-		request: string,
-		acceptedOrder: number | undefined,
-		policy: { readonly rules: string; readonly capabilitiesPending: boolean } | undefined,
-		signal: AbortSignal | undefined,
-	): Promise<{ readonly outcome: OwnerRequestClassificationOutcome; readonly ownPolicy: boolean }> {
-		if (signal?.aborted || this.deps.isDisposed()) {
-			this.releaseOwnerWords(acceptedOrder);
-			return { outcome: cancelledOutcome(false), ownPolicy: false };
+	) {
+		// These words are judged now, by their own chain or for their owner policy alone; a cancelled judgment withdraws them.
+		const ownWordsUnjudged = acceptedOrder !== undefined && this.unjudgedOwnerWords.delete(acceptedOrder);
+		if (signal?.aborted || this.deps.isDisposed())
+			return {
+				status: "unavailable" as const,
+				cancelled: true,
+				contextChanged: false,
+				reason: "Owner intent classification was cancelled",
+			};
+		// An optional-tool judgment is as fresh as the submission it judges. One whose submission is older than a
+		// submission already being judged would overwrite the newer optional-tool intent if it applied, so the
+		// optional-tool chain is not asked for it: it neither runs nor cancels the newer judgment. Its words already
+		// reached that chain: as the request of a judgment the newer one superseded, or carried as pending by the newer
+		// judgment from the registry. The words are still the owner's, so their owner policy is judged alone. Words still
+		// in the registry reached no chain (a cancelled judgment returned them), so they run their own.
+		if (acceptedOrder !== undefined) {
+			if (acceptedOrder < this.newestJudgedOwnerOrder && !ownWordsUnjudged)
+				return this.judgeOwnerPolicy(request, rules, capabilitiesPending, signal);
+			this.newestJudgedOwnerOrder = Math.max(this.newestJudgedOwnerOrder, acceptedOrder);
 		}
 		// Normal-off: no evaluator means no semantic intent is recorded, aborted, scanned or warned about.
 		const controller = this.deps.getSystemOneController();
-		if (!controller) return { outcome: { status: "skipped" }, ownPolicy: policy !== undefined };
+		if (!controller) return { status: "skipped" as const };
 		// A blank message carries no request to classify, so no intent state is written for it.
-		if (normalizeUserRequest(request) === undefined) {
-			if (acceptedOrder !== undefined) this.coverOwnerWords([acceptedOrder]);
-			return { outcome: { status: "skipped" }, ownPolicy: policy !== undefined };
-		}
+		if (normalizeUserRequest(request) === undefined) return { status: "skipped" as const };
+		this.optionalIntentAbort?.abort(OWNER_INTENT_SUPERSEDED);
+		const intentAbort = new AbortController();
+		this.optionalIntentAbort = intentAbort;
+		const callerSignal = signal;
+		signal = AbortSignal.any([this.deps.getReflectionAbortSignal(), intentAbort.signal, ...(signal ? [signal] : [])]);
 		const manager = this.deps.getSessionManager();
 		const sessionId = manager.getSessionId();
-		const chain = this.chain();
-		const head = manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE);
-		const headIntent = readOptionalToolIntent(head?.data);
-		const rebuild = acceptedOrder !== undefined ? this.rebuildBase(head?.id, acceptedOrder) : undefined;
-		const rebuiltWords: ReadonlyMap<number, string> = rebuild?.words ?? new Map();
-		// Words an unresolved head holds pending are read from it, never a second time from the registry.
-		const headWords: ReadonlyMap<number, string> =
-			head !== undefined && headIntent !== undefined && headIntent.status !== "classified"
-				? (chain.links.get(head.id)?.words ?? new Map())
-				: new Map();
-		// Words without a submission order read no other owner words.
-		const carried =
-			acceptedOrder === undefined
-				? []
-				: this.registeredWords(
-						Math.max(acceptedOrder, ...rebuiltWords.keys()),
-						rebuild ? rebuiltWords : headWords,
-						true,
-					).filter(([order]) => order !== acceptedOrder);
-		const ordered = [
-			...rebuiltWords,
-			...carried,
-			...(acceptedOrder !== undefined ? [[acceptedOrder, request] as const] : []),
-		].sort((left, right) => left[0] - right[0]);
-		const words = new Map<number, string>(ordered);
-		const judged = ordered.at(-1)?.[1] ?? request;
-		const older = ordered.slice(0, -1).map(([, text]) => text);
-		const { previous, pending } = continuedIntent(rebuild ? this.intentAt(rebuild.baseId) : headIntent);
-		const priorRequests = [...pending, ...older];
+		const snapshot = readOptionalToolIntent(
+			manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.data,
+		);
+		const unsettled = snapshot !== undefined && snapshot.status !== "classified";
+		const pendingRequests = unsettled ? (snapshot.pendingRequests ?? []) : [];
+		const previous = unsettled ? snapshot.resumeIntent : snapshot;
+		const candidates: OptionalToolCandidate[] = this.deps.getAllTools().flatMap((tool) => {
+			const source = this.deps.getToolSourceInfo(tool.name);
+			const aliases = optionalToolRequestAliases(tool.name, source);
+			return aliases ? [{ toolName: tool.name, sourcePath: source?.path ?? "", aliases }] : [];
+		});
+		// Older owner words no judgment has read yet (a turn's own words, judged only where its first tool call reads them)
+		// are read before these, in owner order: every registered word is newer than every word the checkpoint holds, since a
+		// judgment that starts carries every older registered word with it.
+		const carried = acceptedOrder !== undefined ? this.carryUnjudgedOwnerWords(acceptedOrder) : [];
+		const priorRequests = [...pendingRequests, ...carried.map((words) => words.text)];
 		const recoverable =
-			judged.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS &&
+			request.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS &&
 			priorRequests.length < 8 &&
-			older.every((text) => text.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS);
-		// While the judgment runs, the intent in force at the head stays in force.
-		const inForce = continuedIntent(headIntent).previous;
-		const pausedIntent: OptionalToolIntent = {
-			version: 1,
-			status: "paused",
-			taskRequest: judged.slice(0, MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS),
+			carried.every((words) => words.text.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS);
+		const pendingIntent = {
+			version: 1 as const,
+			status: "paused" as const,
+			taskRequest: request.slice(0, MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS),
 			allowedTools: [],
 			...(recoverable
-				? { ...(inForce ? { resumeIntent: inForce } : {}), pendingRequests: [...priorRequests, judged] }
+				? { ...(previous ? { resumeIntent: previous } : {}), pendingRequests: [...priorRequests, request] }
 				: {}),
 		};
-		this.committedIntentAbort?.abort(OWNER_INTENT_SUPERSEDED);
-		const intentAbort = new AbortController();
-		this.committedIntentAbort = intentAbort;
-		const pausedId = manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, pausedIntent);
-		chain.links.set(pausedId, { previousId: head?.id, after: head?.id, words });
-		const candidates = this.optionalToolCandidates();
-		let outcome: UserRequestClassificationOutcome;
+		const pendingId = manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, pendingIntent);
+		const classification = controller.classifyUserRequest(request, rules, {
+			capabilitiesPending,
+			optionalTools: {
+				candidates,
+				previous: recoverable ? previous : undefined,
+				pendingRequests: recoverable ? priorRequests : [],
+			},
+			signal,
+		});
+		// An aborted judgment decides nothing, so its request does not wait for the evaluator to notice.
+		classification.catch(() => undefined);
+		const aborted = signal;
+		let stopWatchingAbort = (): void => {};
+		let outcome: Awaited<typeof classification>;
 		try {
-			outcome = await this.askOwnerIntent(
-				controller,
-				judged,
-				policy?.rules ?? this.writtenRuleText(),
-				{
-					capabilitiesPending: policy?.capabilitiesPending ?? this.capabilitiesPending(),
-					optionalTools: {
-						candidates,
-						previous: recoverable ? previous : undefined,
-						pendingRequests: recoverable ? priorRequests : [],
-					},
-					optionalToolsOnly: policy === undefined || rebuild !== undefined,
-				},
-				[intentAbort.signal, signal],
-			);
+			outcome = await Promise.race([
+				classification,
+				new Promise<{ status: "unavailable"; reason: string }>((resolve) => {
+					const settle = () =>
+						resolve({ status: "unavailable", reason: "Owner intent classification was aborted" });
+					if (aborted.aborted) return settle();
+					aborted.addEventListener("abort", settle, { once: true });
+					stopWatchingAbort = () => aborted.removeEventListener("abort", settle);
+				}),
+			]);
 		} finally {
-			if (this.committedIntentAbort === intentAbort) this.committedIntentAbort = undefined;
+			stopWatchingAbort();
 		}
-		// The head as the judgment found it, restated: words a judgment left pending stay pending, unresolved, since nothing
-		// judges them now.
-		const restateHead = (): void => {
-			const unsettled = headIntent !== undefined && headIntent.status !== "classified";
-			const restoredId = manager.appendCustomEntry(
-				OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
-				headIntent === undefined
-					? { version: 1, status: "unresolved", taskRequest: "", allowedTools: [] }
-					: unsettled
-						? { ...headIntent, status: "unresolved" }
-						: headIntent,
-			);
-			chain.links.set(restoredId, {
-				previousId: head?.id,
-				after: pausedId,
-				words: unsettled && head ? (chain.links.get(head.id)?.words ?? new Map()) : new Map(),
-				restates: true,
-			});
-		};
-		const latestIsPaused = () =>
+		if (
+			signal.aborted &&
 			manager.getSessionId() === sessionId &&
-			manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.id === pausedId;
-		const superseded = intentAbort.signal.aborted && intentAbort.signal.reason === OWNER_INTENT_SUPERSEDED;
-		// A cancelled classification is no longer in flight and decided nothing: the intent stands as it found it.
-		if (
-			(signal?.aborted || this.deps.getReflectionAbortSignal().aborted || intentAbort.signal.aborted) &&
-			latestIsPaused()
-		)
-			restateHead();
-		if (
-			signal?.aborted ||
-			this.deps.getReflectionAbortSignal().aborted ||
-			(intentAbort.signal.aborted && !superseded) ||
-			this.deps.isDisposed()
+			manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.id === pendingId
 		) {
-			// Its own words were withdrawn with it; the older words it read wait for the next judgment again.
-			this.releaseOwnerWords(acceptedOrder);
-			return { outcome: cancelledOutcome(false), ownPolicy: false };
-		}
-		// A newer judgment owns the chain and reads these words from the registry: their owner policy is judged alone.
-		if (superseded)
-			return {
-				outcome: {
-					status: "unavailable",
-					superseded: true,
-					reason: "Owner intent classification was superseded by a newer owner request",
-				},
-				ownPolicy: false,
-			};
-		// No newer judgment replaced this one, yet its paused entry is no longer the branch's latest: the session or branch
-		// moved under it. Its words belong to the old context, not the new one.
-		if (!latestIsPaused()) return { outcome: cancelledOutcome(true), ownPolicy: false };
-		const classifiedIntent = this.classifiedIntentOf(outcome, candidates);
-		if (rebuild !== undefined && classifiedIntent === undefined) {
-			// The newer decision stays in force; the older words stay uncovered for the next judgment to read.
-			restateHead();
-		} else {
-			const id = manager.appendCustomEntry(
+			// A cancelled classification is no longer in flight and decided nothing: the intent stands as it found it
+			// (words a superseded judgment left unclassified stay pending, unresolved, since nothing judges them now), and
+			// the older words it carried wait for the next judgment again. Its own words were withdrawn with it.
+			manager.appendCustomEntry(
 				OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
-				classifiedIntent ?? { ...pausedIntent, status: "unresolved" },
+				snapshot === undefined
+					? { version: 1, status: "unresolved", taskRequest: "", allowedTools: [] }
+					: snapshot.status === "classified"
+						? snapshot
+						: { ...snapshot, status: "unresolved" },
 			);
-			chain.links.set(id, { previousId: rebuild ? rebuild.baseId : pausedId, after: pausedId, words });
-			this.coverOwnerWords(words.keys());
+			for (const words of carried) this.unjudgedOwnerWords.set(words.order, { text: words.text, sessionId });
 		}
-		this.promoteDeliveredIntents();
-		return { outcome, ownPolicy: policy !== undefined && rebuild === undefined };
-	}
-
-	/**
-	 * Where a judgment of words with this submission order continues the chain: below every entry, from the head down,
-	 * that holds newer words, with the words those entries hold. Restatements are passed through; the first other entry
-	 * that holds no newer word (only older words, or none: a judgment of words without an order) ends the walk, so no
-	 * decision above it is discarded. Nothing when no entry holds newer words.
-	 */
-	private rebuildBase(
-		headId: string | undefined,
-		acceptedOrder: number,
-	): { readonly baseId: string | undefined; readonly words: ReadonlyMap<number, string> } | undefined {
-		const links = this.chain().links;
-		const words = new Map<number, string>();
-		let baseId: string | undefined;
-		let found = false;
-		let id = headId;
-		while (id !== undefined) {
-			const link = links.get(id);
-			if (link === undefined) break;
-			if (!link.restates) {
-				if (![...link.words.keys()].some((order) => order > acceptedOrder)) break;
-				for (const [order, text] of link.words) words.set(order, text);
-				found = true;
-				baseId = link.previousId;
+		if (
+			callerSignal?.aborted ||
+			this.deps.getReflectionAbortSignal().aborted ||
+			(intentAbort.signal.aborted && intentAbort.signal.reason !== OWNER_INTENT_SUPERSEDED) ||
+			this.deps.isDisposed()
+		)
+			return {
+				status: "unavailable" as const,
+				cancelled: true,
+				contextChanged: false,
+				reason: "Owner intent classification was cancelled",
+			};
+		// A newer owner request owns the optional-tool chain now: this stale judgment applies nothing, but its
+		// request remains owner input for the caller to admit, and its owner policy is judged at the queue.
+		if (intentAbort.signal.aborted)
+			return {
+				status: "unavailable" as const,
+				superseded: true,
+				reason: "Owner intent classification was superseded by a newer owner request",
+			};
+		// No newer request replaced this one, yet its checkpoint is no longer the branch's latest: the
+		// session or branch moved under it. Its request belongs to the old context, not the new one.
+		if (
+			manager.getSessionId() !== sessionId ||
+			manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.id !== pendingId
+		)
+			return {
+				status: "unavailable" as const,
+				cancelled: true,
+				contextChanged: true,
+				reason: "The session context changed while the owner request was classified",
+			};
+		const classifiedIntent =
+			outcome.status === "classified" && outcome.classification.optionalToolIntent?.status === "classified"
+				? outcome.classification.optionalToolIntent
+				: undefined;
+		if (classifiedIntent) {
+			manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, classifiedIntent);
+			this.lastOptionalIntentWarning = undefined;
+		} else {
+			// No usable judgment is not an owner decision: keep the unclassified words for the next
+			// classification, and leave the integrations available.
+			manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, { ...pendingIntent, status: "unresolved" });
+			const warning = `Optional integrations stay available; owner intent for them was not classified: ${outcome.status === "unavailable" ? outcome.reason : "the judgment was uncertain"}.`;
+			if (candidates.length && warning !== this.lastOptionalIntentWarning) {
+				this.lastOptionalIntentWarning = warning;
+				this.deps.emitWarning(warning);
 			}
-			id = link.previousId;
 		}
-		return found ? { baseId, words } : undefined;
-	}
-
-	private intentAt(id: string | undefined): OptionalToolIntent | undefined {
-		const entry = id === undefined ? undefined : this.deps.getSessionManager().getEntry(id);
-		return entry?.type === "custom" && entry.customType === OPTIONAL_TOOL_INTENT_CUSTOM_TYPE
-			? readOptionalToolIntent(entry.data)
-			: undefined;
+		return outcome;
 	}
 
 	/**
 	 * The owner-policy judgment of owner words, without the optional-tool chain: no optional tool is asked, and nothing
-	 * of the optional-tool intent (its entries, the staged and in-flight judgments, the registered words) is read or
-	 * written, so the chain stays as it is. A cancellation or a session switch while it runs is reported as
+	 * of the optional-tool intent (its checkpoint, the in-flight judgment, the newest judged order) is read or written,
+	 * so a newer submission keeps that chain. A cancellation or a session switch while it runs is reported as
 	 * `classifyOwnerRequest` reports it.
 	 */
-	private async judgeOwnerPolicy(
-		request: string,
-		rules: string,
-		capabilitiesPending: boolean,
-		signal?: AbortSignal,
-	): Promise<OwnerRequestClassificationOutcome> {
+	private async judgeOwnerPolicy(request: string, rules: string, capabilitiesPending: boolean, signal?: AbortSignal) {
 		const controller = this.deps.getSystemOneController();
-		if (!controller) return { status: "skipped" };
+		if (!controller) return { status: "skipped" as const };
 		const sessionId = this.deps.getSessionManager().getSessionId();
 		const outcome = await controller.classifyUserRequest(request, rules, {
 			capabilitiesPending,
 			signal: AbortSignal.any([this.deps.getReflectionAbortSignal(), ...(signal ? [signal] : [])]),
 		});
 		if (signal?.aborted || this.deps.getReflectionAbortSignal().aborted || this.deps.isDisposed())
-			return cancelledOutcome(false);
-		if (this.deps.getSessionManager().getSessionId() !== sessionId) return cancelledOutcome(true);
+			return {
+				status: "unavailable" as const,
+				cancelled: true,
+				contextChanged: false,
+				reason: "Owner intent classification was cancelled",
+			};
+		if (this.deps.getSessionManager().getSessionId() !== sessionId)
+			return {
+				status: "unavailable" as const,
+				cancelled: true,
+				contextChanged: true,
+				reason: "The session context changed while the owner request was classified",
+			};
 		return outcome;
 	}
 
@@ -1201,9 +745,7 @@ export class SessionEdgeIntentController {
 		return recordEdgeRevoke(this.edgeDeps(), edgeClass);
 	}
 
-	/** The owner's interrupt cancels every optional-tool judgment in flight, committed or staged. */
 	abortOptionalIntent(): void {
-		this.committedIntentAbort?.abort();
-		for (const staged of this.stagedIntents.values()) staged.judging?.abort();
+		this.optionalIntentAbort?.abort();
 	}
 }

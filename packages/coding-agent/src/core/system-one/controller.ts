@@ -481,27 +481,19 @@ export class SystemOneController {
 	 * A failure is reported as `unavailable`, never as "nothing was asked for". The caller must be
 	 * able to tell a classified "no restriction" from a classification that did not run.
 	 * Stage-pack intake below is kept for tests and hooks; production admission is SteeringPlane JEV-001..003.
-	 *
-	 * `optionalToolsOnly` asks the optional-tool questions alone, for words whose owner policy is already judged: the
-	 * policy fields of that outcome are unasked, so they are neutral and are never applied as owner policy.
 	 */
 	async classifyUserRequest(
 		request: string,
 		writtenRules = "",
 		/** `signal`: the owner's submission; an abort before the run starts cancels the classification too. */
-		options: {
-			capabilitiesPending?: boolean;
-			signal?: AbortSignal;
-			optionalTools?: OptionalToolRequestContext;
-			optionalToolsOnly?: boolean;
-		} = {},
+		options: { capabilitiesPending?: boolean; signal?: AbortSignal; optionalTools?: OptionalToolRequestContext } = {},
 	): Promise<UserRequestClassificationOutcome> {
 		const userRequest = normalizeUserRequest(request);
 		if (userRequest === undefined) return { status: "skipped" };
 		const rules = writtenRules.trim().slice(0, USER_REQUEST_RULE_BUDGET);
 		const askCapabilities = options.capabilitiesPending !== false;
 		const asked: QuestionPack = {};
-		for (const [id, question] of options.optionalToolsOnly ? [] : Object.entries(USER_AUTHORIZATION_QUESTIONS)) {
+		for (const [id, question] of Object.entries(USER_AUTHORIZATION_QUESTIONS)) {
 			if (id === "capabilities_authorized" && !askCapabilities) continue;
 			if (RULE_AUTHORITY_QUESTION_IDS.has(id) && !rules) continue;
 			asked[id] = question;
