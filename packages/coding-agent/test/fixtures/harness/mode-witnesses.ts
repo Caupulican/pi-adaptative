@@ -1047,14 +1047,8 @@ async function runHttpInstall(world: HarnessWorld): Promise<HttpInstallRun> {
 		});
 		await withDeadline(world.trace, "http install: close reaches its held boundary", closeReached.promise);
 		const pendingRetirementKeepsSettingsSynchronous = current !== installed && !retirementSettled;
-		process.stderr.write(
-			`[http-close] release heapMiB=${Math.round(process.memoryUsage().heapUsed / (1024 * 1024))}\n`,
-		);
 		holdClose.release();
 		await withDeadline(world.trace, "http install: the superseded pool settles", retirement);
-		process.stderr.write(
-			`[http-close] settled heapMiB=${Math.round(process.memoryUsage().heapUsed / (1024 * 1024))}\n`,
-		);
 		const closeResult = installedClose.mock.results[0];
 		if (closeResult?.type !== "return" || !(closeResult.value instanceof Promise)) {
 			throw new Error("HTTP install witness: graceful retirement returned no settlement promise");

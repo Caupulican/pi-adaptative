@@ -1287,6 +1287,123 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		"the held background command physically ran once",
 	).toHaveLength(1);
 
+	// Owner order across delivery order. A held turn's own words limit delivery; while it is held at its provider gate, an
+	// OLDER follow-up limits delivery too and a NEWER steer lifts it. The steer is delivered at the steering poll, ahead of
+	// the older follow-up delivered after the run, so the older limit is applied last: it decides only what no newer owner
+	// words decided, and the newer lift stands. The turn's own limit is witnessed as applied before the pair, so a pair that
+	// never reached owner policy leaves the limit standing. The in-order case above (the newer lift applied after the older
+	// limit) is the normal-order control.
+	const DELIVERY_TURN_WORDS = "Prepare the limits change; keep it as local commits only for now.";
+	const DELIVERY_LIMIT_WORDS = "Keep the commits on this branch local for now; no push.";
+	const DELIVERY_LIFT_WORDS = "Pushing the commits is fine again; publish when the work is done.";
+	const orderTurnReached = createBarrier();
+	const releaseOrderTurn = createBarrier();
+	world.provider.enqueue(
+		"root",
+		{
+			// The turn's first tool call settles its own words: the limit they state binds delivery.
+			name: "delivery-order-held",
+			check: () => orderTurnReached.release(),
+			gate: releaseOrderTurn.promise,
+			reply: {
+				content: [
+					{ type: "toolCall", id: "delivery-order-read-1", name: "read", arguments: { path: LIMITS_PATH } },
+				],
+				stopReason: "toolUse",
+			},
+		},
+		{
+			// The steer is delivered at the steering poll after that batch: the request carries the newer lift and not yet
+			// the older limit, and the turn's own limit is the binding until the delivered words settle.
+			name: "delivery-order-steer-reply",
+			check: (request) => {
+				assertBatchOk(request, "delivery-order-held");
+				if (!requestCarriesMarker(request, DELIVERY_LIFT_WORDS))
+					throw new Error("the newer steer was not delivered");
+				if (requestCarriesMarker(request, DELIVERY_LIMIT_WORDS)) {
+					throw new Error("the older follow-up was delivered before the newer steer");
+				}
+				if (world.systemOne.enabled && session.localCommitBranch() === undefined) {
+					throw new Error("the turn's own delivery limit was not applied before the reordered pair");
+				}
+			},
+			reply: { content: [{ type: "text", text: "Pushing is allowed again." }] },
+		},
+		{
+			// The older follow-up is delivered after the run; its tool call settles the delivered pair, the steer first.
+			name: "delivery-order-followup-read",
+			check: (request) => {
+				if (!requestCarriesMarker(request, DELIVERY_LIMIT_WORDS))
+					throw new Error("the older follow-up was not delivered");
+			},
+			reply: {
+				content: [
+					{ type: "toolCall", id: "delivery-order-read-2", name: "read", arguments: { path: LIMITS_PATH } },
+				],
+				stopReason: "toolUse",
+			},
+		},
+		{
+			name: "delivery-order-reported",
+			check: (request) => assertBatchOk(request, "delivery-order-followup-read"),
+			reply: { content: [{ type: "text", text: "The older words are noted." }] },
+		},
+	);
+	// The turn's own words ask nothing before its provider request: they are classified where its first tool call settles them.
+	world.systemOne.enterPhase("delivery-order-turn", {});
+	const orderTurn = session.prompt(DELIVERY_TURN_WORDS);
+	await withDeadline(trace, "delivery-order turn reached its provider gate", orderTurnReached.promise);
+	// Each queued input is judged in full before it is admitted, the older one first.
+	world.systemOne.enterPhase("delivery-order-older-limit", {
+		// These judgments also ask the task relation of the standing optional-tool intent.
+		optional_tool_task: { kind: "choice", choice: "continue", confidence: 0.97 },
+		capabilities_authorized: { kind: "noul", probability: 0.02 },
+		changes_model_pools: { kind: "noul", probability: 0.02 },
+		local_commits_only: { kind: "noul", probability: 0.97 },
+		lifts_delivery_block: { kind: "noul", probability: 0.02 },
+		full_handoff: { kind: "noul", probability: 0.02 },
+		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+	});
+	await withDeadline(trace, "older limiting follow-up admitted", trace.track(session.followUp(DELIVERY_LIMIT_WORDS)));
+	world.systemOne.enterPhase("delivery-order-newer-lift", {
+		// These judgments also ask the task relation of the standing optional-tool intent.
+		optional_tool_task: { kind: "choice", choice: "continue", confidence: 0.97 },
+		capabilities_authorized: { kind: "noul", probability: 0.02 },
+		changes_model_pools: { kind: "noul", probability: 0.02 },
+		local_commits_only: { kind: "noul", probability: 0.02 },
+		lifts_delivery_block: { kind: "noul", probability: 0.97 },
+		full_handoff: { kind: "noul", probability: 0.02 },
+		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+	});
+	await withDeadline(trace, "newer lifting steer admitted", trace.track(session.steer(DELIVERY_LIFT_WORDS)));
+	// The turn's own words are older than both judged inputs, so where its first tool call settles them their owner policy is
+	// judged alone; the delivered pair carries its judgments and is applied as judged, asking nothing.
+	world.systemOne.enterPhase("delivery-order-turn-policy", {
+		capabilities_authorized: { kind: "noul", probability: 0.02 },
+		changes_model_pools: { kind: "noul", probability: 0.02 },
+		local_commits_only: { kind: "noul", probability: 0.97 },
+		lifts_delivery_block: { kind: "noul", probability: 0.02 },
+		full_handoff: { kind: "noul", probability: 0.02 },
+	});
+	releaseOrderTurn.release();
+	await withDeadline(trace, "delivery-order turn", orderTurn);
+	await withDeadline(trace, "delivery-order queued inputs settled", session.waitForForegroundIdle());
+	trace.mark("root", "delivery-order.settled");
+	const ownerTurnIndex = (words: string): number =>
+		session.messages.findIndex(
+			(message) => message.role === "user" && JSON.stringify(message.content).includes(words),
+		);
+	const liftIndex = ownerTurnIndex(DELIVERY_LIFT_WORDS);
+	const limitIndex = ownerTurnIndex(DELIVERY_LIMIT_WORDS);
+	expect(
+		{ liftDelivered: liftIndex >= 0, limitDelivered: limitIndex >= 0, liftFirst: liftIndex < limitIndex },
+		"the newer steer is delivered ahead of the older follow-up",
+	).toEqual({ liftDelivered: true, limitDelivered: true, liftFirst: true });
+	expect(
+		session.localCommitBranch(),
+		"an older delivery limit applied after a newer lift does not override the newer owner words",
+	).toBeUndefined();
+
 	// Cleanup fault through the real preparation owner: the scoped background call registers a cleanup that throws, and its
 	// start is gated so the explicit background handoff wins the race against completion. The operation still runs once, its
 	// cleanup failure is retained, and shutdown rejects with that failure. The original hook is called unchanged.
