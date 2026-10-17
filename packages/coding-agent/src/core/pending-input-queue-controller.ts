@@ -244,9 +244,7 @@ export class PendingInputQueueController {
 		}
 	}
 
-	/** Nothing is pending once the queue is closed: what `close()` leaves in the lists is the agent's or the durable record's. */
 	get count(): number {
-		if (this._closed) return 0;
 		return this._steering.length + this._followUp.length + this._queuedExtensionCommands.length;
 	}
 
@@ -256,7 +254,6 @@ export class PendingInputQueueController {
 	 * never keeps the session from settling.
 	 */
 	get deliverableCount(): number {
-		if (this._closed) return 0;
 		return (
 			[...this._steering, ...this._followUp].filter((entry) => !entry.held).length +
 			this._queuedExtensionCommands.length
@@ -269,11 +266,11 @@ export class PendingInputQueueController {
 	}
 
 	getSteering(): readonly string[] {
-		return this._closed ? [] : this._steering.map((entry) => this._ownerText(entry));
+		return this._steering.map((entry) => this._ownerText(entry));
 	}
 
 	getFollowUp(): readonly string[] {
-		return this._closed ? [] : this._followUp.map((entry) => this._ownerText(entry));
+		return this._followUp.map((entry) => this._ownerText(entry));
 	}
 
 	getCommands(): readonly string[] {
