@@ -963,17 +963,22 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		const e13rAlarmMark = world.warnings.length;
 		for (const delayMs of e13rBackoff) {
 			expect(
-				world.reservationTimers.armedDelays(),
+				world.timers.armedDelays("write-reservation"),
 				`the retained record's next retry is armed at ${delayMs} ms`,
 			).toEqual([delayMs]);
-			expect(world.reservationTimers.advance(delayMs - 1), `no retry fires before ${delayMs} ms have elapsed`).toBe(
-				0,
-			);
+			expect(
+				world.timers.advance("write-reservation", delayMs - 1),
+				`no retry fires before ${delayMs} ms have elapsed`,
+			).toBe(0);
 			const hitsBefore = e13rDenial.hits;
-			expect(world.reservationTimers.advance(1), `the retry fires once ${delayMs} ms have elapsed`).toBe(1);
+			expect(world.timers.advance("write-reservation", 1), `the retry fires once ${delayMs} ms have elapsed`).toBe(
+				1,
+			);
 			expect(e13rDenial.hits, `the ${delayMs} ms alarm retry is refused exactly once`).toBe(hitsBefore + 1);
 		}
-		expect(world.reservationTimers.armedDelays(), "a refused retry at the cap re-arms at the cap").toEqual([30_000]);
+		expect(world.timers.armedDelays("write-reservation"), "a refused retry at the cap re-arms at the cap").toEqual([
+			30_000,
+		]);
 		const e13rAlarmWarnings = world.warnings.slice(e13rAlarmMark);
 		expect(
 			e13rAlarmWarnings,
@@ -1083,20 +1088,27 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			"the settled release, the alarm retries and the waiting admission's retry are refused",
 		).toBeGreaterThanOrEqual(1 + e13rBackoff.length + 1);
 		// A refused admission retry counts as a failure but leaves the armed alarm as it was: it is still the one armed at the cap.
-		expect(world.reservationTimers.armedDelays(), "the admission retry leaves the capped alarm armed").toEqual([
-			30_000,
-		]);
+		expect(
+			world.timers.armedDelays("write-reservation"),
+			"the admission retry leaves the capped alarm armed",
+		).toEqual([30_000]);
 		e13rDenial.clear();
 		const e13rClearedMark = world.warnings.length;
 		// Synchronously after the clear, so no admission retry can run first: the alarm fires when its delay has elapsed and releases the
 		// record, and nothing is retained or re-armed after it, all before any queued waiter has been woken.
-		expect(world.reservationTimers.advance(29_999), "no retry fires before the capped delay has elapsed").toBe(0);
-		expect(world.reservationTimers.advance(1), "the capped alarm retry fires once its delay has elapsed").toBe(1);
+		expect(
+			world.timers.advance("write-reservation", 29_999),
+			"no retry fires before the capped delay has elapsed",
+		).toBe(0);
+		expect(
+			world.timers.advance("write-reservation", 1),
+			"the capped alarm retry fires once its delay has elapsed",
+		).toBe(1);
 		expect(e13rStoreText(e13rStorePath), "the alarm retry removes the retained record from the store").not.toContain(
 			e13rLease.reservationId,
 		);
 		expect(e13rHeldLeases(), "the alarm retry releases the retained lease before the waiter is admitted").toEqual([]);
-		expect(world.reservationTimers.armedDelays(), "a successful retry arms no further alarm").toEqual([]);
+		expect(world.timers.armedDelays("write-reservation"), "a successful retry arms no further alarm").toEqual([]);
 		await withDeadline(trace, "E13R waiting writer admitted after the retry", e13rSecondAdmitted.promise);
 		expect(
 			e13rSecondFirstRequest?.store,
@@ -1167,7 +1179,9 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		world.warnings.slice(e13rDisposeMark),
 		"the E13R owner, with nothing retained, discloses nothing at close",
 	).toEqual([]);
-	expect(world.reservationTimers.armedDelays(), "the disposed E13R owner leaves no retry alarm armed").toEqual([]);
+	expect(world.timers.armedDelays("write-reservation"), "the disposed E13R owner leaves no retry alarm armed").toEqual(
+		[],
+	);
 	trace.mark("root", "e13.retained-release");
 	// E13Q queued receipts of a reused specialist, one isolated owner, scope and refusal per entrance, so a failure names its entrance.
 	// Each block rebuilds the E13R precondition: a fresh writer finishes while the store refuses the release of its record, so the
@@ -1302,7 +1316,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			expect(settled?.executingHolds, `the E13Q ${tag} specialist is settled`).toEqual([]);
 			// The retained set started empty, so its backoff alarm is armed at the base delay (E13R derives the whole backoff).
 			expect(
-				world.reservationTimers.armedDelays(),
+				world.timers.armedDelays("write-reservation"),
 				`the E13Q ${tag} retained record's retry is armed at the base delay`,
 			).toEqual([1_000]);
 			// The specialist's queued turn: its first request is recorded and held until the owner reads its result.
@@ -1386,20 +1400,26 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			expect(heldLeases(), `the E13Q ${tag} retained record is still the only held lease`).toEqual(leases);
 			// A refused admission retry counts as a failure but leaves the armed alarm as it was.
 			expect(
-				world.reservationTimers.armedDelays(),
+				world.timers.armedDelays("write-reservation"),
 				`the E13Q ${tag} dispatch leaves the base-delay alarm armed`,
 			).toEqual([1_000]);
 			// Clearing the refusal, then the alarm once its delay has elapsed, releases the record synchronously; only then is the
 			// queued turn admitted (E13R's tail).
 			denial.clear();
-			expect(world.reservationTimers.advance(999), `no E13Q ${tag} retry fires before the base delay`).toBe(0);
-			expect(world.reservationTimers.advance(1), `the E13Q ${tag} alarm retry fires at the base delay`).toBe(1);
+			expect(
+				world.timers.advance("write-reservation", 999),
+				`no E13Q ${tag} retry fires before the base delay`,
+			).toBe(0);
+			expect(
+				world.timers.advance("write-reservation", 1),
+				`the E13Q ${tag} alarm retry fires at the base delay`,
+			).toBe(1);
 			expect(storeText(storePath), `the E13Q ${tag} alarm retry removes the retained record`).not.toContain(
 				lease.reservationId,
 			);
 			expect(heldLeases(), `the E13Q ${tag} alarm retry releases the retained lease`).toEqual([]);
 			expect(
-				world.reservationTimers.armedDelays(),
+				world.timers.armedDelays("write-reservation"),
 				`the E13Q ${tag} successful retry arms no further alarm`,
 			).toEqual([]);
 			await withDeadline(trace, `E13Q ${tag} queued turn admitted`, queuedAdmitted.promise);
@@ -1450,7 +1470,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		}
 		expect(await world.disposeSessionInBody(owner), `the E13Q ${tag} owner disposes cleanly`).toBeUndefined();
 		expect(
-			world.reservationTimers.armedDelays(),
+			world.timers.armedDelays("write-reservation"),
 			`the disposed E13Q ${tag} owner leaves no retry alarm armed`,
 		).toEqual([]);
 		trace.mark("root", `e13q.${tag}-receipt`);
@@ -1480,6 +1500,395 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		(agentId, laneId) =>
 			`worker ${agentId} accepted this task with its own admitted binding (lane ${laneId}; waiting: write_reservation: `,
 	);
+	// E13H retained execution release (live owner): a writer finishes while its specialist's project release is refused, that is, the
+	// rename of the conversation metadata rewrite that marks its claim idle. Its write reservation releases normally. The execution
+	// teardown hands the specialist hold and the exact claim to the controller's retained releases instead of stranding them; the
+	// completion still settles and its terminal handoff wakes the root. Every start entrance is refused while the hold is retained, names
+	// the retained release, its cause and the next action in the refusal the model reads verbatim, and starts nothing. The retry alarm runs on the world's virtual
+	// write-reservation timers (the controller arms it on the reservation coordinator's port): the retained set started empty, so it is
+	// armed at the 1_000 ms base delay, and the refused retry re-arms it at 2_000 ms. A follow_up to the specialist is accepted and stays
+	// pending (its reason names the retained release) while the hold is
+	// retained; it is an open mailbox obligation, so the next retry releases the hold and keeps the claim for that queued turn (a project
+	// release runs only on a quiescent mailbox), and its wake re-admits the turn. The queued turn's own release, with no fault armed, is the
+	// normal-order control.
+	const E13H_SCOPE = projectPath("e13h", "out");
+	const e13hAdmitted = createBarrier();
+	const e13hGate = createBarrier();
+	const e13hWake = createBarrier();
+	const e13hQueuedAdmitted = createBarrier();
+	const e13hQueuedGate = createBarrier();
+	let e13hDenial: ReturnType<typeof world.io.denyUntilCleared> | undefined;
+	const e13hCreated = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
+	const e13hOwner = e13hCreated.session;
+	const e13hStart = (id: string, instructions: string) => ({
+		id,
+		name: "delegate",
+		arguments: {
+			action: "start",
+			model: { provider: "harness-script", modelId: "worker-a" },
+			writePaths: [E13H_SCOPE],
+			instructions,
+		},
+	});
+	const e13hReport = (id: string, summary: string): ScriptedReply => ({
+		content: [{ type: "toolCall", id, name: "submit_report", arguments: { status: "completed", summary } }],
+		stopReason: "toolUse",
+	});
+	const e13hWorkers = () => e13hOwner.getResourceSnapshot().workers;
+	const e13hRuntime = () => e13hOwner.backgroundLanes.getTaskRuntimeSnapshot();
+	world.provider.enqueue(
+		"root",
+		calls("e13h-start-first", [e13hStart("e13h-start-1", "E13H-WRITER holds its scope.")]),
+		{
+			name: "e13h-first-reply",
+			check: (request) => {
+				const started = latestBatchResults(request).find((result) => result.toolName === "delegate");
+				if (started?.isError || !started?.text.includes("delegate started (running)")) {
+					throw new Error(`the retained-execution writer did not start: ${started?.text ?? "no result"}`);
+				}
+			},
+			reply: { content: [{ type: "text", text: "The retained-execution writer is started." }] },
+		},
+	);
+	world.provider.enqueue("worker-a", {
+		name: "e13h-writer-hold",
+		check: () => e13hAdmitted.release(),
+		gate: e13hGate.promise,
+		reply: e13hReport("e13h-report-1", "E13H-WRITER finished its scope."),
+	});
+	world.systemOne.enterPhase("e13h-first", e4Judgments);
+	await withDeadline(trace, "E13H writer started", e13hOwner.prompt("Start the retained-execution writer."));
+	await withDeadline(trace, "E13H writer admitted", e13hAdmitted.promise);
+	try {
+		const e13hPre = e13hWorkers();
+		if (e13hPre === undefined) throw new Error("the E13H owner reports no worker snapshot before the refusal");
+		const e13hLease = e13hPre.reservations.heldLeases[0];
+		expect(e13hPre.reservations.heldLeases, "the E13H writer holds exactly one write lease").toHaveLength(1);
+		expect(e13hPre.ownedProjectClaims, "the E13H writer owns exactly one project claim").toHaveLength(1);
+		const e13hClaim = e13hPre.ownedProjectClaims[0];
+		const e13hAgentId = e13hClaim?.agents[0]?.agentId;
+		if (e13hLease === undefined || e13hClaim === undefined || e13hAgentId === undefined)
+			throw new Error("the E13H writer carries no exact lease, claim or agent");
+		expect(e13hPre.retainedReleases.retained, "the E13H owner retains no release before the refusal").toEqual([]);
+		// The project release rewrites `<session>.jsonl.worker.json` atomically (a temporary write renamed onto it) with the claim's
+		// ownership marked idle; only that rename is refused. The claim's admission wrote the same file while busy, before the denial.
+		const e13hMetadata = `${e13hClaim.sessionId}.jsonl.worker.json`;
+		e13hDenial = world.io.denyUntilCleared({
+			name: "e13h-release-denied",
+			kind: "rename",
+			code: "EIO",
+			matches: (operation) =>
+				operation.destination?.endsWith(e13hMetadata) === true &&
+				(world.io.peekFile(operation.path) ?? "").includes('"state":"idle"'),
+		});
+		const e13hRefusedRename = () =>
+			world.io.waitForOperation(
+				(operation) =>
+					operation.kind === "rename" &&
+					operation.code === "EIO" &&
+					operation.destination?.endsWith(e13hMetadata) === true,
+			);
+		const e13hFirstRefusal = e13hRefusedRename();
+		const e13hWarningMark = world.warnings.length;
+		world.provider.enqueue("root", {
+			name: "e13h-wake",
+			maxRequests: 8,
+			until: (request) => {
+				const done = JSON.stringify(request.context.messages).includes(`- ${e13hLease.taskId}: succeeded`);
+				if (done) e13hWake.release();
+				return done;
+			},
+			reply: { content: [{ type: "text", text: "The retained-execution writer finished." }] },
+		});
+		world.systemOne.enterPhase("e13h-terminal", e4Judgments);
+		e13hGate.release();
+		const e13hFirstOperation = await withDeadline(trace, "E13H project release refused", e13hFirstRefusal);
+		await withDeadline(trace, "E13H terminal handoff woke the root", e13hWake.promise, 90_000);
+		await withDeadline(trace, "E13H root idle after the handoff", e13hOwner.waitForForegroundIdle());
+		const e13hCause = `Scripted IO fault e13h-release-denied: rename '${e13hFirstOperation.path}'`;
+		// Witness: the refused project release retains the execution (its hold and its exact claim) under the controller's retry; the
+		// write reservation released normally, and the completion settled (its handoff woke the root above).
+		const e13hRetained = e13hWorkers();
+		expect(e13hRetained?.reservations.heldLeases, "the E13H write reservation releases normally").toEqual([]);
+		expect(e13hRetained?.executingHolds, "the retained execution keeps its one specialist hold").toEqual([
+			{ agentId: e13hAgentId, count: 1 },
+		]);
+		expect(
+			e13hRetained?.ownedProjectClaims.map((claim) => claim.sessionId),
+			"the retained execution keeps its exact project claim",
+		).toEqual([e13hClaim.sessionId]);
+		expect(
+			e13hRetained?.retainedReleases,
+			"the retained execution is the controller's only retained release",
+		).toEqual({
+			retryOwner: "worker delegation controller",
+			retained: [{ key: `execution:${e13hLease.attemptId}`, cause: e13hCause, failures: 1 }],
+			armedDelayMs: 1_000,
+		});
+		expect(
+			world.warnings.slice(e13hWarningMark).filter((message) => message.includes("resource release")),
+			"the settled lane reports its refused release once, as handed to the retry",
+		).toEqual([`Worker ${e13hAgentId} resource release failed; retrying: ${e13hCause}`]);
+		expect(e13hDenial.hits, "the settled project release is the only refused rename before the first alarm").toBe(1);
+		expect(
+			world.timers.armedDelays("write-reservation"),
+			"the retained execution's retry is armed at the base delay",
+		).toEqual([1_000]);
+		// Forbidden: while the hold is retained, every start entrance is refused and starts nothing -- a fresh start on the same
+		// specialization (the reuse selection), a start naming the specialist (its mailbox admission) and a start naming it with its own
+		// model and write scope (the validated reuse). Each refusal names the retained release, its cause and the next action.
+		const e13hAgentsBefore = Object.keys(e13hRuntime()?.agents ?? {}).sort();
+		const e13hAttemptsBefore = Object.keys(e13hRuntime()?.attempts ?? {}).length;
+		const e13hRefusedIds = ["e13h-start-2", "e13h-start-named", "e13h-start-validated"];
+		const e13hRequestTexts = new Map<string, string>();
+		world.provider.enqueue(
+			"root",
+			calls("e13h-start-refused", [
+				e13hStart("e13h-start-2", "E13H-WRITER-2 wants the scope."),
+				{
+					id: "e13h-start-named",
+					name: "delegate",
+					arguments: { action: "start", agentId: e13hAgentId, instructions: "E13H named start." },
+				},
+				{
+					id: "e13h-start-validated",
+					name: "delegate",
+					arguments: {
+						...e13hStart("e13h-start-validated", "E13H validated start.").arguments,
+						agentId: e13hAgentId,
+					},
+				},
+			]),
+			{
+				name: "e13h-refused-reply",
+				check: (request) => {
+					for (const message of request.context.messages) {
+						if (message.role !== "toolResult" || !e13hRefusedIds.includes(message.toolCallId)) continue;
+						e13hRequestTexts.set(
+							message.toolCallId,
+							message.content.map((block) => (block.type === "text" ? block.text : block.type)).join("\n"),
+						);
+					}
+				},
+				reply: { content: [{ type: "text", text: "The starts are refused." }] },
+			},
+		);
+		world.systemOne.enterPhase("e13h-refused", e4Judgments);
+		await withDeadline(trace, "E13H starts refused", e13hOwner.prompt("Start the second scope writer three ways."));
+		// The refusal names the retained release with the retained entry's cause as one line of at most 240 characters
+		// (worker-delegation-controller.ts boundedReleaseCause: 237 characters and "..."); the path holds no whitespace.
+		const e13hBoundedCause = e13hCause.length > 240 ? `${e13hCause.slice(0, 237)}...` : e13hCause;
+		const e13hHoldReason = `worker_specialist_release_retained:${e13hAgentId}:${e13hBoundedCause}`;
+		const e13hRefusalText = `delegate not started: ${e13hAgentId} finished its run but its resource release failed; the host retries it. Cause: ${e13hBoundedCause}. Next: follow_up to ${e13hAgentId} (queued until released) or parallelWork { independentOf: [${e13hAgentId}], justification }.`;
+		for (const id of e13hRefusedIds) {
+			const entry = e13hCreated.sessionManager
+				.getBranch()
+				.find(
+					(candidate) =>
+						candidate.type === "message" &&
+						candidate.message.role === "toolResult" &&
+						candidate.message.toolCallId === id,
+				);
+			if (entry?.type !== "message" || entry.message.role !== "toolResult")
+				throw new Error(`no durable ${id} result`);
+			const details = entry.message.details as { skipReason?: unknown; piToolFailureMemory?: unknown } | undefined;
+			expect(
+				{ isError: entry.message.isError, skipReason: details?.skipReason },
+				`the ${id} refusal is refused with the retained release as its reason`,
+			).toEqual({ isError: true, skipReason: e13hHoldReason });
+			// Forbidden: the specialist's state, not the call, refused the start, so it is an operation outcome and never a failure record
+			// whose execution-error classifier would read the embedded cause as the call's own error and cut the text.
+			expect(details?.piToolFailureMemory, `the ${id} refusal records no tool failure`).toBeUndefined();
+			const requestText = e13hRequestTexts.get(id) ?? "";
+			expect(requestText.startsWith("[harness]"), `the ${id} refusal reaches the model as the tool wrote it`).toBe(
+				false,
+			);
+			expect(requestText, `the model reads the ${id} refusal's fact, cause and next action`).toContain(
+				e13hRefusalText,
+			);
+		}
+		expect(Object.keys(e13hRuntime()?.agents ?? {}).sort(), "the refused starts register no agent").toEqual(
+			e13hAgentsBefore,
+		);
+		expect(Object.keys(e13hRuntime()?.attempts ?? {}).length, "the refused starts create no attempt").toBe(
+			e13hAttemptsBefore,
+		);
+		expect(e13hWorkers()?.executingHolds, "the refused starts leave the retained hold as it was").toEqual([
+			{ agentId: e13hAgentId, count: 1 },
+		]);
+		// The base-delay alarm retries the release while the refusal is armed: it is refused again, reported, and re-armed doubled.
+		expect(world.timers.advance("write-reservation", 999), "no E13H retry fires before the base delay").toBe(0);
+		const e13hSecondRefusal = e13hRefusedRename();
+		const e13hAlarmMark = world.warnings.length;
+		expect(world.timers.advance("write-reservation", 1), "the E13H alarm retry fires at the base delay").toBe(1);
+		const e13hSecondOperation = await withDeadline(trace, "E13H alarm retry refused", e13hSecondRefusal);
+		const e13hSecondCause = `Scripted IO fault e13h-release-denied: rename '${e13hSecondOperation.path}'`;
+		expect(e13hDenial.hits, "the alarm retry is refused exactly once").toBe(2);
+		expect(
+			world.warnings.slice(e13hAlarmMark),
+			"the refused alarm retry reports itself once, and nothing else is reported",
+		).toEqual([`Retained worker ${e13hAgentId} resource release failed again: ${e13hSecondCause}`]);
+		expect(
+			world.timers.armedDelays("write-reservation"),
+			"the refused retry re-arms the alarm at twice the base delay",
+		).toEqual([2_000]);
+		expect(e13hWorkers()?.retainedReleases.retained, "the refused retry keeps the execution retained").toEqual([
+			{ key: `execution:${e13hLease.attemptId}`, cause: e13hSecondCause, failures: 2 },
+		]);
+		expect(e13hWorkers()?.executingHolds, "the refused retry keeps the specialist hold").toEqual([
+			{ agentId: e13hAgentId, count: 1 },
+		]);
+		// A follow_up is accepted and stays pending behind the retained hold; its turn runs no request yet.
+		let e13hQueuedFirstRequest:
+			| {
+					readonly holds: readonly { readonly agentId: string; readonly count: number }[];
+					readonly claims: readonly string[];
+					readonly retained: number;
+			  }
+			| undefined;
+		world.provider.enqueue("worker-a", {
+			name: "e13h-queued-hold",
+			check: () => {
+				const workers = e13hWorkers();
+				e13hQueuedFirstRequest = {
+					holds: workers?.executingHolds ?? [],
+					claims: workers?.ownedProjectClaims.map((claim) => claim.sessionId) ?? [],
+					retained: workers?.retainedReleases.retained.length ?? -1,
+				};
+				e13hQueuedAdmitted.release();
+			},
+			gate: e13hQueuedGate.promise,
+			reply: e13hReport("e13h-report-2", "E13H queued task finished."),
+		});
+		world.provider.enqueue(
+			"root",
+			calls("e13h-follow-up", [
+				{
+					id: "e13h-follow-up-1",
+					name: "delegate",
+					arguments: { action: "follow_up", agentId: e13hAgentId, message: "E13H queued task." },
+				},
+			]),
+			{
+				name: "e13h-follow-up-reply",
+				check: (request) => {
+					const followed = latestBatchResults(request).find((result) => result.toolName === "delegate");
+					if (followed === undefined || followed.isError) {
+						throw new Error(`the E13H follow_up failed: ${followed?.text ?? "no result"}`);
+					}
+				},
+				reply: { content: [{ type: "text", text: "The queued task is accepted." }] },
+			},
+		);
+		world.systemOne.enterPhase("e13h-follow-up", e4Judgments);
+		await withDeadline(trace, "E13H follow_up accepted", e13hOwner.prompt("Hand the queued task to the writer."));
+		const e13hReceipt = e13hCreated.sessionManager
+			.getBranch()
+			.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolCallId === "e13h-follow-up-1",
+			);
+		if (e13hReceipt?.type !== "message" || e13hReceipt.message.role !== "toolResult") {
+			throw new Error("no durable E13H follow_up result");
+		}
+		const e13hReceiptDetails = e13hReceipt.message.details as
+			| { started?: unknown; messageId?: unknown; skipReason?: unknown }
+			| undefined;
+		const e13hMessageId = e13hReceiptDetails?.messageId;
+		if (typeof e13hMessageId !== "string" || e13hMessageId.length === 0)
+			throw new Error("the E13H follow_up result carries no message id");
+		// The pending turn's reason names the retained release and its current cause (the refused alarm retry's), bounded as above.
+		const e13hFollowUpReason = `worker_specialist_release_retained:${e13hAgentId}:${
+			e13hSecondCause.length > 240 ? `${e13hSecondCause.slice(0, 237)}...` : e13hSecondCause
+		}`;
+		expect(
+			{ started: e13hReceiptDetails?.started, skipReason: e13hReceiptDetails?.skipReason },
+			"the follow_up is accepted and waits for the retained release",
+		).toEqual({ started: false, skipReason: e13hFollowUpReason });
+		expect(
+			e13hReceipt.message.content.map((block) => (block.type === "text" ? block.text : "")).join(""),
+			"the follow_up receipt says the turn is queued and runs when the host's retry releases the worker",
+		).toContain(
+			`follow_up ${e13hMessageId} queued, not started for ${e13hAgentId}; reason ${e13hFollowUpReason}. It runs when the host's retry releases ${e13hAgentId}'s resources.`,
+		);
+		expect(e13hQueuedFirstRequest, "the queued turn runs no request while the hold is retained").toBeUndefined();
+		expect(world.timers.armedDelays("write-reservation"), "the follow_up leaves the doubled alarm armed").toEqual([
+			2_000,
+		]);
+		// The refusal is cleared. The next alarm's retry finds the queued turn's open mailbox obligation, so it releases the hold and
+		// keeps the claim for that turn; it settles the retained execution, arms nothing further, and its wake re-admits the turn.
+		e13hDenial.clear();
+		expect(world.timers.advance("write-reservation", 1_999), "no E13H retry fires before the doubled delay").toBe(0);
+		expect(world.timers.advance("write-reservation", 1), "the E13H alarm retry fires at the doubled delay").toBe(1);
+		expect(e13hWorkers()?.retainedReleases.retained, "the successful retry settles the retained execution").toEqual(
+			[],
+		);
+		expect(world.timers.armedDelays("write-reservation"), "a successful E13H retry arms no further alarm").toEqual(
+			[],
+		);
+		await withDeadline(trace, "E13H queued turn re-admitted after the retry", e13hQueuedAdmitted.promise);
+		expect(
+			e13hQueuedFirstRequest,
+			"at the queued turn's first request it holds its own execution and the kept claim",
+		).toEqual({ holds: [{ agentId: e13hAgentId, count: 1 }], claims: [e13hClaim.sessionId], retained: 0 });
+		world.io.assertFaultsConsumed();
+		// Control: the queued turn finishes with no fault armed, and its release retains nothing.
+		const e13hClearedMark = world.warnings.length;
+		world.provider.enqueue(
+			"root",
+			calls("e13h-queued-terminal", [
+				{
+					id: "e13h-queued-terminal-1",
+					name: "delegate",
+					arguments: { action: "wait", agentId: e13hAgentId, timeoutMs: 60_000 },
+				},
+			]),
+			{
+				name: "e13h-queued-terminal-reply",
+				check: (request) => {
+					const waited = latestBatchResults(request).find((result) => result.toolName === "delegate");
+					if (waited?.isError) throw new Error(`the terminal wait on the E13H queued turn failed: ${waited.text}`);
+				},
+				reply: { content: [{ type: "text", text: "The queued task finished." }] },
+			},
+		);
+		world.systemOne.enterPhase("e13h-queued-terminal", e4Judgments);
+		e13hQueuedGate.release();
+		await withDeadline(trace, "E13H queued turn terminal observed", e13hOwner.prompt("Wait for the queued task."));
+		await withDeadline(trace, "E13H control settled", e13hOwner.waitForForegroundIdle());
+		const e13hIdle = await withDeadline(
+			trace,
+			"E13H specialist idle again",
+			e13hOwner.backgroundLanes.waitForWorkerAgent(e13hAgentId, 60_000),
+			70_000,
+		);
+		expect(e13hIdle.status, "the E13H specialist is idle after its queued turn").toBe("idle");
+		const e13hControl = e13hWorkers();
+		expect(e13hControl?.executingHolds, "the unfaulted queued turn releases its hold").toEqual([]);
+		expect(e13hControl?.retainedReleases.retained, "the unfaulted queued turn retains no release").toEqual([]);
+		expect(world.timers.armedDelays("write-reservation"), "the unfaulted queued turn arms no retry").toEqual([]);
+		expect(
+			world.warnings.slice(e13hClearedMark).filter((message) => message.includes("resource release")),
+			"no release diagnostic follows the cleared refusal",
+		).toEqual([]);
+	} finally {
+		// Failure-safe: an assertion that fails early must not leave the refusal armed or a writer gated for the journey's cleanup.
+		e13hDenial?.clear();
+		e13hGate.release();
+		e13hQueuedGate.release();
+	}
+	const e13hDisposeMark = world.warnings.length;
+	expect(await world.disposeSessionInBody(e13hOwner), "the E13H owner disposes cleanly").toBeUndefined();
+	expect(
+		world.warnings.slice(e13hDisposeMark),
+		"the E13H owner, with nothing retained, discloses nothing at close",
+	).toEqual([]);
+	expect(world.timers.armedDelays("write-reservation"), "the disposed E13H owner leaves no retry alarm armed").toEqual(
+		[],
+	);
+	trace.mark("root", "e13h.retained-execution-release");
 	// E13 failed inner join, recomposed: the writer's bash tool runs inside its isolated completion, and its shell call ignores abort. Owner
 	// cancellation leaves that public promise pending, so the physical join is the only settlement the owner can report. The public promise is
 	// observed pending before the shell gate is released, and the gate is released in a finally so the producer can join even when the teardown fails.

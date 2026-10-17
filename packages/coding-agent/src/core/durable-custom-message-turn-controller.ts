@@ -1,6 +1,7 @@
 import type { CustomMessage } from "../kernel/index.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import type { GoalExecutionLease, GoalSessionController } from "./goals/goal-session-controller.ts";
+import { runReleaseSteps } from "./util/resource-release.ts";
 
 interface DurableCustomMessageTurnControllerDeps {
 	foreground: ForegroundRecoveryController;
@@ -100,13 +101,21 @@ export class DurableCustomMessageTurnController {
 	async continue(prepare: () => Promise<void>, goalId?: string): Promise<void> {
 		const submission = await this.deps.foreground.acquireSubmission();
 		let goalLease: GoalExecutionLease | undefined;
+		let continuationFailure: { readonly error: unknown } | undefined;
 		try {
 			goalLease = this.deps.goals.beginExecution(goalId);
 			await prepare();
 			await this.deps.foreground.runAgentContinuation(submission);
+		} catch (error) {
+			continuationFailure = { error };
+			throw error;
 		} finally {
-			this.deps.goals.endExecution(goalLease);
-			this.deps.foreground.releaseSubmission(submission);
+			// The submission is released even when ending the goal lease throws; both failures surface together.
+			runReleaseSteps(
+				[() => this.deps.goals.endExecution(goalLease), () => this.deps.foreground.releaseSubmission(submission)],
+				"Custom-message continuation release failed.",
+				continuationFailure,
+			);
 		}
 	}
 

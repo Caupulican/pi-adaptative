@@ -130,6 +130,14 @@ import { executeToolkitScript } from "../toolkit/script-runner.ts";
 import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
 import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
+import {
+	AsyncRetainedReleases,
+	type ReleaseAttemptResult,
+	type RetainedReleaseSnapshot,
+	RetainedReleases,
+	releaseFailureCause,
+} from "../util/resource-release.ts";
+import type { TimerSource } from "../util/timer-port.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
 import {
 	type SanitizedContextForkMessage,
@@ -259,7 +267,6 @@ import {
 	formatWorkerWriteReservationBlock,
 	WorkerWriteReservationCoordinator,
 	type WorkerWriteReservationResourceSnapshot,
-	type WorkerWriteReservationTimers,
 	type WorkerWriteReservationWaitYield,
 } from "./worker-write-reservation-coordinator.ts";
 
@@ -470,8 +477,8 @@ export interface WorkerDelegationControllerDeps {
 	markModelExhausted?(model: Model<Api>, retryAfterMs?: number): void;
 	/** Root's tool mechanics (output reduction, encodings, shell engine, packing), shared with every lane. */
 	getSharedLaneToolOptions?(): SharedLaneToolOptions;
-	/** Timers of the write-reservation retained-release alarm; undefined means the global timers. */
-	getWriteReservationTimers?(): WorkerWriteReservationTimers | undefined;
+	/** The session's timer source: the write-reservation release backoff and the worker retry ladder arm their alarms on its ports. */
+	getTimers(): TimerSource;
 	/** Parent session's canonical credential source; worker evidence and reviewer calls share it. */
 	getCredentialExposureBoundary?(): CredentialExposureBoundary;
 	/** Each worker provider response, as a cache observation on the worker conversation's own history. */
@@ -669,6 +676,8 @@ export interface WorkerDelegationResourceSnapshot {
 	readonly pendingTerminalHandoffCount: number;
 	readonly scheduler: WorkerDispatchResourceSnapshot;
 	readonly reservations: WorkerWriteReservationResourceSnapshot;
+	/** Execution teardowns and project releases that failed and are retried on the release backoff. */
+	readonly retainedReleases: RetainedReleaseSnapshot;
 	readonly control: WorkerAgentControlResourceSnapshot;
 	readonly ownedProjectClaims: readonly {
 		readonly sessionId: string;
@@ -683,6 +692,35 @@ export interface WorkerDelegationResourceSnapshot {
 			readonly mailbox: WorkerAgentMailboxResourceSnapshot | undefined;
 		}[];
 	}[];
+}
+
+/**
+ * A worker resource release this controller retains for retry.
+ * - `execution`: a physically settled run whose bookkeeping or project release failed. It still holds its specialist
+ *   execution hold and project claim; the retry resumes from the failed steps, then releases the claim and the hold.
+ * - `project`: a project claim released outside an execution (a cancelled child, a settled admission) whose release
+ *   failed. Retained so the claim is not left to the next owner while this process still owns it.
+ */
+type RetainedWorkerRelease =
+	| {
+			readonly kind: "execution";
+			readonly agentId: string;
+			readonly conversation: WorkerConversation;
+			/** Bookkeeping steps that failed, by label, retried in order before the project release. */
+			readonly failedSteps: Map<string, () => void>;
+			readonly releaseSpecialist: () => void;
+	  }
+	| { readonly kind: "project"; readonly agentId: string };
+
+/** The longest release cause a refused start quotes. */
+const MAX_RETAINED_RELEASE_CAUSE_CHARS = 240;
+
+/** A release cause as a refusal quotes it: one line, bounded. */
+function boundedReleaseCause(cause: string): string {
+	const line = cause.replace(/\s+/g, " ").trim();
+	return line.length > MAX_RETAINED_RELEASE_CAUSE_CHARS
+		? `${line.slice(0, MAX_RETAINED_RELEASE_CAUSE_CHARS - 3)}...`
+		: line;
 }
 
 export class WorkerDelegationController {
@@ -721,6 +759,25 @@ export class WorkerDelegationController {
 	 * explicit control, mailbox reconciliation) consults this one set; it schedules nothing.
 	 */
 	private readonly executingSpecialistIds = new Map<string, number>();
+	/**
+	 * Releases that failed while this owner is live, keyed `execution:<attemptId>` or `project:<agentId>`. Their retry
+	 * backs off on the write-reservation release timers; a success wakes the mailbox turns, waits and queued starts
+	 * that were waiting for the specialist. Shutdown gives them one last pass.
+	 */
+	private readonly retainedReleases: RetainedReleases<RetainedWorkerRelease>;
+	/**
+	 * Specialists whose physically settled run kept its hold because a release no retry can repeat failed (the tool
+	 * surface's disposal, a fenced reservation release). Their hold stays until shutdown; a refused start names this cause.
+	 */
+	private readonly abandonedReleaseCauses = new Map<string, string>();
+	/** Retired workers' worktree lane releases in flight; shutdown joins them before their retained retries' last pass. */
+	private readonly laneReleaseTasks = new Set<Promise<void>>();
+	/** Retired workers' worktree lane releases that failed and may pass on a retry, keyed by agent id. */
+	private readonly laneReleases: AsyncRetainedReleases<{
+		readonly isolation: WorkerLaneIsolation;
+		readonly cwd: string;
+		readonly agentId: string;
+	}>;
 	private readonly yieldedCapacityAttemptIds = new Map<string, number>();
 	private readonly yieldedWriteReservations = new Map<string, WorkerWriteReservationWaitYield>();
 	private readonly conversations = new WorkerConversationStore();
@@ -778,6 +835,7 @@ export class WorkerDelegationController {
 			warn: (message) => this.safeWarn(message),
 		});
 		this.recovery = new WorkerRecoveryCoordinator({
+			timers: this.deps.getTimers().port("orchestration"),
 			lifecycle: this.lifecycle,
 			scheduler: this.scheduler,
 			recoverWriteReservations: () => this.writeReservations.recoverProvenStale(),
@@ -881,6 +939,7 @@ export class WorkerDelegationController {
 				return terminal;
 			},
 			isSpecialistSettled: (agentId) => this.isSpecialistSettled(agentId),
+			specialistReleaseHold: (agentId) => this.specialistReleaseHold(agentId),
 			taskStartHeadroomSkipReason: (agent) => {
 				const contract = this.lifecycle.getLatestAgentAttempt(agent.agentId)?.dispatch.executionContract;
 				return contract
@@ -915,8 +974,68 @@ export class WorkerDelegationController {
 				this.agentControl.signalStateChanged();
 			},
 			warn: (message) => this.safeWarn(message),
-			timers: this.deps.getWriteReservationTimers?.(),
+			timers: this.deps.getTimers().port("write-reservation"),
 		});
+		this.retainedReleases = new RetainedReleases<RetainedWorkerRelease>({
+			retryOwner: "worker delegation controller",
+			timers: this.writeReservations.releaseTimers,
+			release: (release) => this.retryRetainedRelease(release),
+			reportFailure: (entry, error) =>
+				this.safeWarn(
+					`Retained worker ${entry.value.agentId} resource release failed again: ${releaseFailureCause(error)}`,
+				),
+			reportListenerFailure: (error) =>
+				this.safeWarn(`Worker resource release wake failed: ${releaseFailureCause(error)}`),
+		});
+		this.laneReleases = new AsyncRetainedReleases({
+			retryOwner: "worker delegation controller lane release",
+			timers: this.writeReservations.releaseTimers,
+			release: async ({ isolation, cwd, agentId }) => {
+				const outcome = await isolation.release(cwd, agentId);
+				if (outcome.kind === "superseded") return { superseded: outcome.detail };
+				if (outcome.kind === "abandoned") return { abandoned: outcome.cause, reaper: outcome.reaper };
+				return "released";
+			},
+			reportFailure: (entry, error) =>
+				this.safeWarn(
+					`Retired worker ${entry.value.agentId}'s worktree lane release failed again: ${releaseFailureCause(error)}`,
+				),
+		});
+		// A released hold or claim is what a refused start, a queued mailbox turn and a worker wait were waiting for.
+		this.retainedReleases.subscribe(() => {
+			this.agentControl.signalStateChanged();
+			if (!this.deps.isDisposed() && !this.workerAbort.signal.aborted) this.scheduler.drain(true);
+		});
+	}
+
+	/**
+	 * One retry of a retained release. An execution resumes from its failed bookkeeping steps, then releases its
+	 * project claim and finally its hold; a step that throws keeps the rest for the next retry. A project release
+	 * that an execution or a newer attempt owns now is superseded.
+	 */
+	private retryRetainedRelease(release: RetainedWorkerRelease): ReleaseAttemptResult {
+		if (release.kind === "project")
+			return this.releaseSettledProjectContextOrThrow(release.agentId, undefined, false);
+		for (const [label, step] of [...release.failedSteps]) {
+			step();
+			release.failedSteps.delete(label);
+		}
+		this.releaseSettledProjectContext(release.agentId, release.conversation, true);
+		release.releaseSpecialist();
+		return "released";
+	}
+
+	/**
+	 * Why a settled specialist still holds its execution resources, when a release failure is the reason; the cause is
+	 * one bounded line, as every refusal and receipt that names it reports it.
+	 */
+	private specialistReleaseHold(agentId: string): { kind: "retained" | "abandoned"; cause: string } | undefined {
+		const retained = this.retainedReleases
+			.entriesSnapshot()
+			.find((entry) => entry.value.kind === "execution" && entry.value.agentId === agentId);
+		if (retained) return { kind: "retained", cause: boundedReleaseCause(retained.cause) };
+		const abandoned = this.abandonedReleaseCauses.get(agentId);
+		return abandoned === undefined ? undefined : { kind: "abandoned", cause: boundedReleaseCause(abandoned) };
 	}
 
 	/** Has every resource of this specialist's last execution been released? */
@@ -1024,6 +1143,7 @@ export class WorkerDelegationController {
 			pendingTerminalHandoffCount: this.terminalHandoffs.retainedCount,
 			scheduler: this.scheduler.getResourceSnapshot(),
 			reservations: this.writeReservations.getResourceSnapshot(),
+			retainedReleases: this.retainedReleases.snapshot(),
 			control,
 			ownedProjectClaims: [...this.projectClaims].map(([sessionId, claim]) => ({
 				sessionId,
@@ -1123,6 +1243,9 @@ export class WorkerDelegationController {
 		this.shutdownCompletion = shutdown.promise;
 		void shutdown.promise.catch(() => undefined);
 		this.scheduler.closeAdmission();
+		// Retained releases get one last pass after every execution joined; no alarm fires for them from here on.
+		this.retainedReleases.close();
+		this.laneReleases.close();
 		this.runTeardownStep("abort worker execution", () => this.workerAbort.abort());
 		// Abort makes further tool admission impossible. Seal every already-admitted mutation before
 		// restart suspension snapshots the conversation; the bounded executor may not resume in time.
@@ -1224,10 +1347,25 @@ export class WorkerDelegationController {
 			...shellShutdowns,
 			this.joinWorkerCompletions(),
 			this.scheduler.waitForShutdown(),
+			this.settleLaneReleases(),
 		]).then((results) => {
 			for (const result of results) {
 				if (result.status === "rejected") this.shutdownErrors.add(result.reason);
 			}
+			// Every execution has joined: a retained hold or claim is released now or reported with its cause, and a
+			// hold that stays keeps its lane's reservation for the dead-owner reaper.
+			this.runTeardownStep("release retained worker resources", () => {
+				const failures = this.retainedReleases.retry({ report: false, lastChance: true });
+				if (failures.length === 0) return;
+				const retained = this.retainedReleases.entriesSnapshot();
+				throw new AggregateError(
+					failures,
+					`Worker shutdown retained ${retained.length} worker resource release(s): ${retained
+						.slice(0, 8)
+						.map((entry) => `${entry.key} (${boundedReleaseCause(entry.cause)})`)
+						.join(", ")}.`,
+				);
+			});
 			// A reservation and transcript remain owned until every admitted continuation physically ends.
 			this.runTeardownStep("dispose worker write reservations", () =>
 				this.writeReservations.disposeRequired((laneId) => !this.hasExecutingWorkerResources(laneId)),
@@ -3091,18 +3229,49 @@ export class WorkerDelegationController {
 		}
 	}
 
+	/**
+	 * Release a settled specialist's project claim (and a cancelled allocation). A completed execution's release
+	 * throws, since its caller keeps the hold and claim until it succeeds. Any other release that fails is retained
+	 * and retried on the release backoff: the claim stays owned by this live process, never dropped.
+	 */
 	private releaseSettledProjectContext(
 		agentId: string,
 		conversation?: WorkerConversation,
 		completedExecution = false,
 	): void {
+		try {
+			this.releaseSettledProjectContextOrThrow(agentId, conversation, completedExecution);
+		} catch (error) {
+			if (completedExecution) throw error;
+			// Nothing retries after shutdown: the claim stays durable under this process's identity, as before.
+			if (this.retainedReleases.closed) {
+				this.safeWarn(`Worker project release failed: ${releaseFailureCause(error)}`);
+				return;
+			}
+			this.retainedReleases.retain(`project:${agentId}`, { kind: "project", agentId }, error);
+			this.safeWarn(`Worker ${agentId} project release failed; retrying: ${releaseFailureCause(error)}`);
+		}
+	}
+
+	/**
+	 * Release a settled specialist's cancelled allocation and project claim, or say why the release is not this
+	 * caller's: another execution holds the specialist, or a newer attempt owns the claim. A failed allocation settle
+	 * still lets the claim release run, and both failures are thrown together.
+	 */
+	private releaseSettledProjectContextOrThrow(
+		agentId: string,
+		conversation: WorkerConversation | undefined,
+		completedExecution: boolean,
+	): ReleaseAttemptResult {
 		const agent = this.lifecycle.getAgent(agentId);
 		// Required execution cleanup calls only after physical disposal and still owns its one hold.
 		// Do not drop that hold before an attempted project release succeeds, or steal another run's hold.
 		if (!this.isSpecialistSettled(agentId) && (!completedExecution || this.executingSpecialistIds.get(agentId) !== 1))
-			return;
+			return { superseded: `worker ${agentId} is executing` };
 		const latest = agent ? this.lifecycle.getLatestAgentAttempt(agentId) : this.lifecycle.getActiveAttempt(agentId);
-		if (latest && NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(latest.status)) return;
+		if (latest && NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(latest.status))
+			return { superseded: `worker ${agentId} attempt ${latest.attemptId} is ${latest.status}` };
+		const failures: unknown[] = [];
 		if (!agent && latest?.status === "cancelled" && !latest.lease) {
 			const selection = this.projectAgents.get(agentId)?.admission;
 			if (selection?.kind === "allocated") {
@@ -3114,41 +3283,50 @@ export class WorkerDelegationController {
 					this.projectAgents.delete(agentId);
 				} catch (error) {
 					if (completedExecution) throw error;
-					this.safeWarn(
-						`Worker allocation release failed: ${error instanceof Error ? error.message : String(error)}`,
-					);
+					failures.push(error);
 				}
 			}
 		}
-		if (agent?.status !== "registered" && agent?.status !== "retired") return;
-		const claim = this.projectClaims.get(agent.resumeContext.sessionId);
-		if (!claim) return;
-		try {
-			const current =
-				conversation ??
-				this.conversations.open({
-					agentDir: this.deps.getAgentDir(),
-					resumeContext: agent.resumeContext,
-					expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
-					projectClaim: claim,
+		const claim =
+			agent?.status === "registered" || agent?.status === "retired"
+				? this.projectClaims.get(agent.resumeContext.sessionId)
+				: undefined;
+		if (agent && claim) {
+			try {
+				const current =
+					conversation ??
+					this.conversations.open({
+						agentDir: this.deps.getAgentDir(),
+						resumeContext: agent.resumeContext,
+						expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+						projectClaim: claim,
+					});
+				const released = this.agentControl.releaseQuiescentContext(agentId, () => {
+					this.conversations.releaseProjectContext(current);
+					if (completedExecution && this.projectClaims.get(agent.resumeContext.sessionId) !== claim)
+						throw new Error(`Worker ${agentId} project release lost its exact owned claim.`);
+					this.projectClaims.delete(agent.resumeContext.sessionId);
 				});
-			const released = this.agentControl.releaseQuiescentContext(agentId, () => {
-				this.conversations.releaseProjectContext(current);
-				if (completedExecution && this.projectClaims.get(agent.resumeContext.sessionId) !== claim)
-					throw new Error(`Worker ${agentId} project release lost its exact owned claim.`);
-				this.projectClaims.delete(agent.resumeContext.sessionId);
-			});
-			if (completedExecution && released && this.projectClaims.has(agent.resumeContext.sessionId))
-				throw new Error(`Worker ${agentId} project release retained its completed claim.`);
-		} catch (error) {
-			if (completedExecution) throw error;
-			this.safeWarn(`Worker project release failed: ${error instanceof Error ? error.message : String(error)}`);
+				if (completedExecution && released && this.projectClaims.has(agent.resumeContext.sessionId))
+					throw new Error(`Worker ${agentId} project release retained its completed claim.`);
+			} catch (error) {
+				if (completedExecution) throw error;
+				failures.push(error);
+			}
 		}
+		if (failures.length === 1) throw failures[0];
+		if (failures.length > 1)
+			throw new AggregateError(failures, `Worker ${agentId} allocation and project release failed.`);
+		return "released";
 	}
 
 	private claimAgentProjectContext(agent: AgentBindingContract): SpecialistContextClaim | undefined {
 		const retained = this.projectClaims.get(agent.resumeContext.sessionId);
-		if (retained) return retained;
+		if (retained) {
+			// Re-adopted: a retained release of this claim must not release it under its new admission.
+			this.retainedReleases.delete(`project:${agent.agentId}`);
+			return retained;
+		}
 		const options = {
 			agentDir: this.deps.getAgentDir(),
 			resumeContext: agent.resumeContext,
@@ -3383,6 +3561,7 @@ export class WorkerDelegationController {
 					laneRepositories.specialists.get(specialistId) === laneRepositories.candidate &&
 					sameWorkerSpecialization(specialization, this.withAdmittedLaneDirectory(specialization, specialist))),
 			isSettled: (agentId) => this.isSpecialistSettled(agentId),
+			releaseHold: (agentId) => this.specialistReleaseHold(agentId),
 			isContextReadable: (agent) => this.isSpecialistContextReadable(agent),
 			...(independentParallelIntent ? { independentParallelIntent: true } : {}),
 		});
@@ -5254,18 +5433,22 @@ export class WorkerDelegationController {
 				if (physicalSettled) {
 					this.yieldedCapacityAttemptIds.delete(durableHandle.attemptId);
 					this.yieldedWriteReservations.delete(durableHandle.attemptId);
-					this.runTeardownStep(
-						"end worker write overlap",
-						() => this.writeOverlaps.end(startedRecord.laneId),
-						cleanupErrors,
-					);
+					// Bookkeeping steps a retry can repeat: a live owner retains their failure with the hold.
+					const retryable = new Set<unknown>();
+					const failedSteps = new Map<string, () => void>();
+					const runRetryableStep = (label: string, step: () => void): void => {
+						const before = new Set(cleanupErrors);
+						this.runTeardownStep(label, step, cleanupErrors);
+						for (const error of cleanupErrors) {
+							if (before.has(error)) continue;
+							retryable.add(error);
+							failedSteps.set(label, step);
+						}
+					};
+					runRetryableStep("end worker write overlap", () => this.writeOverlaps.end(startedRecord.laneId));
 					this.inFlightLedgers.delete(startedRecord.laneId);
 					this.laneAbortControllers.delete(startedRecord.laneId);
-					this.runTeardownStep(
-						"clear worker lane halt",
-						() => this.agentControl.clearLaneHalt(startedRecord.laneId),
-						cleanupErrors,
-					);
+					runRetryableStep("clear worker lane halt", () => this.agentControl.clearLaneHalt(startedRecord.laneId));
 					let toolsReleased = false;
 					try {
 						await toolSurface.dispose();
@@ -5276,6 +5459,7 @@ export class WorkerDelegationController {
 							`Worker mutation payload cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
 						);
 					}
+					const shuttingDown = this.deps.isDisposed() || this.workerAbort.signal.aborted;
 					// A child may still write while tool disposal waits for its physical close. Keep its
 					// fenced reservation until that release succeeds, including when shutdown fails. Once
 					// the run is physically settled, a failed durable release is owned and retried by the
@@ -5289,7 +5473,7 @@ export class WorkerDelegationController {
 									startedRecord.laneId,
 									durableHandle.attemptId,
 									durableHandle.fencingToken,
-									this.deps.isDisposed() || this.workerAbort.signal.aborted,
+									shuttingDown,
 								),
 							cleanupErrors,
 						);
@@ -5297,12 +5481,35 @@ export class WorkerDelegationController {
 					// Failed cleanup leaves resource ownership unresolved. Keep both the local execution
 					// hold and the durable project claim until that ownership can be resolved.
 					if (cleanupErrors.size === 0) {
-						this.runTeardownStep(
-							"release worker project context",
-							() => this.releaseSettledProjectContext(agentId, conversation, true),
-							cleanupErrors,
-						);
+						try {
+							this.releaseSettledProjectContext(agentId, conversation, true);
+						} catch (error) {
+							cleanupErrors.add(error);
+							retryable.add(error);
+							// A live owner reports the retained release below; shutdown reports the failure itself.
+							if (shuttingDown)
+								this.safeWarn(`Failed to release worker project context: ${releaseFailureCause(error)}`);
+						}
 						if (cleanupErrors.size === 0) releaseSpecialist();
+					}
+					if (cleanupErrors.size > 0 && !shuttingDown) {
+						const failures = [...cleanupErrors];
+						const cause = failures.map(releaseFailureCause).join("; ");
+						if (failures.every((error) => retryable.has(error)) && !this.retainedReleases.closed) {
+							// Live and repeatable: the hold and the claim are retained, not stranded. The retry owner
+							// resumes from the failed steps and wakes everything waiting on this specialist when it succeeds.
+							this.retainedReleases.retain(
+								`execution:${durableHandle.attemptId}`,
+								{ kind: "execution", agentId, conversation, failedSteps, releaseSpecialist },
+								failures.length === 1 ? failures[0] : new AggregateError(failures, cause),
+							);
+							this.safeWarn(`Worker ${agentId} resource release failed; retrying: ${cause}`);
+							cleanupErrors.clear();
+						} else {
+							// Nothing can repeat this release (the tool surface's disposal, a fenced reservation): the
+							// hold stays until shutdown, and a refused start names the cause instead of a running worker.
+							this.abandonedReleaseCauses.set(agentId, cause);
+						}
 					}
 				}
 				this.runTeardownStep("signal worker cleanup", () => this.agentControl.signalStateChanged(), cleanupErrors);
@@ -5344,7 +5551,38 @@ export class WorkerDelegationController {
 		const isolation = this.laneIsolation;
 		const cwd = this.lifecycle.getLatestAgentAttempt(agentId)?.dispatch.executionContract?.worker.authority.cwd;
 		if (!isolation || !cwd) return;
-		void isolation.release(cwd, agentId);
+		// Owned, never fire-and-forget: a release that may pass later is retained, and shutdown joins every one.
+		const task = (async () => {
+			try {
+				await isolation.release(cwd, agentId);
+			} catch (error) {
+				if (this.laneReleases.closed) {
+					this.safeWarn(`Worker lane release failed: ${releaseFailureCause(error)}`);
+					return;
+				}
+				this.laneReleases.retain(`lane:${agentId}`, { isolation, cwd, agentId }, error);
+				this.safeWarn(
+					`Retired worker ${agentId}'s worktree lane release failed; retrying: ${releaseFailureCause(error)}`,
+				);
+			}
+		})();
+		this.laneReleaseTasks.add(task);
+		void task.finally(() => this.laneReleaseTasks.delete(task));
+	}
+
+	/**
+	 * Join every lane release in flight, then give the retained ones a last pass. A lane still unreleased stays
+	 * registered, kept for the parent's `worktree_sync release_lane`, and is disclosed as such.
+	 */
+	private async settleLaneReleases(): Promise<void> {
+		while (this.laneReleaseTasks.size > 0) await Promise.allSettled([...this.laneReleaseTasks]);
+		const failures = await this.laneReleases.retry({ report: false, lastChance: true });
+		if (failures.length === 0) return;
+		for (const entry of this.laneReleases.entriesSnapshot()) {
+			this.safeWarn(
+				`Retired worker ${entry.value.agentId}'s worktree lane was not released before shutdown (${boundedReleaseCause(entry.cause)}); it stays registered for worktree_sync release_lane.`,
+			);
+		}
 	}
 
 	/** Start every capacity-eligible queued worker at the owner session's foreground-idle boundary. */

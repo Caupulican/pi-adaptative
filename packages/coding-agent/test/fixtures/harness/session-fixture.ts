@@ -29,13 +29,11 @@ import { createSessionManagerLedgerPort } from "../../../src/core/cost/session-l
 import { classifyCustomEntryPersisted } from "../../../src/core/cost/spawned-usage-receipt.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf } from "../../../src/core/cost/usage-records.ts";
 import type { WorkerWriteReservationLease } from "../../../src/core/delegation/worker-write-reservation.ts";
-import type { WorkerWriteReservationTimers } from "../../../src/core/delegation/worker-write-reservation-coordinator.ts";
 import type { ExecResult } from "../../../src/core/exec.ts";
 import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
 import { isGoalExecutionActive } from "../../../src/core/goals/goal-state.ts";
 import { getResumableHumanInputSnapshot } from "../../../src/core/human-input.ts";
 import { type MemoryLifecycleDiagnostic, MemoryManager } from "../../../src/core/memory/memory-manager.ts";
-import type { TranscriptSummaryTimeSource } from "../../../src/core/memory/transcript-memory-contracts.ts";
 import { resolveTranscriptSummarizer } from "../../../src/core/memory/transcript-summarizer.ts";
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
@@ -53,6 +51,7 @@ import { TerminalWarnings } from "../../../src/core/terminal-warnings.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "../../../src/core/tool-applicability-gate.ts";
 import type { ToolDef } from "../../../src/core/tools/index.ts";
 import { routeShellContract } from "../../../src/core/tools/shell-contract-router.ts";
+import type { TimerOwner, TimerPort, TimerSource } from "../../../src/core/util/timer-port.ts";
 import { CURRENT_SESSION_VERSION, SessionManager } from "../../../src/kernel/session/session-manager.ts";
 import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
 import { type RpcModeIo, runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
@@ -2141,78 +2140,27 @@ export async function runHarnessWorld(
  * production SDK session built on top of them. Disposal settles every resource it opened.
  */
 /**
- * The summary hierarchy's time source in a journey: the wall clock plus an offset the scenario advances, with real
- * timers. Until `advance` is called it behaves exactly like the system clock, so a journey that never advances it is
- * unchanged. `advance` moves domain time forward and fires, once and in due order, every timer that is then due, so a
- * long wait (an orphan age, a retry backoff) is reached by an event instead of by waiting. I/O deadlines stay real.
+ * One owner's timers in a journey: purely virtual, with no real timer behind them. `now()` is the wall clock plus the
+ * time the scenario advanced this owner, so the timestamps the owner persists keep moving forward; an alarm is due on the
+ * advanced time alone, so it fires only when the scenario advances this owner, and its exact delay is observable.
  */
-export class HarnessHistoryClock implements TranscriptSummaryTimeSource {
-	private offsetMs = 0;
-	private nextHandle = 1;
-	private readonly pending = new Map<
-		number,
-		{ readonly callback: () => void; readonly dueAt: number; readonly timer: ReturnType<typeof setTimeout> }
-	>();
-
-	now(): number {
-		return Date.now() + this.offsetMs;
-	}
-
-	setTimer(callback: () => void, delayMs: number): number {
-		const handle = this.nextHandle++;
-		const timer = setTimeout(() => {
-			this.pending.delete(handle);
-			callback();
-		}, delayMs);
-		timer.unref();
-		this.pending.set(handle, { callback, dueAt: this.now() + delayMs, timer });
-		return handle;
-	}
-
-	clearTimer(handle: unknown): void {
-		if (typeof handle !== "number") return;
-		const entry = this.pending.get(handle);
-		if (!entry) return;
-		clearTimeout(entry.timer);
-		this.pending.delete(handle);
-	}
-
-	/** Timers armed and not yet fired or cleared. */
-	get armedTimers(): number {
-		return this.pending.size;
-	}
-
-	/** Moves domain time forward by `ms` and fires every timer that is then due; returns how many fired. */
-	advance(ms: number): number {
-		this.offsetMs += ms;
-		const due = [...this.pending.entries()]
-			.filter(([, entry]) => entry.dueAt <= this.now())
-			.sort((left, right) => left[1].dueAt - right[1].dueAt);
-		for (const [handle, entry] of due) {
-			clearTimeout(entry.timer);
-			this.pending.delete(handle);
-			entry.callback();
-		}
-		return due.length;
-	}
-}
-
-/**
- * The write-reservation retained-release alarm's timers in a journey: purely virtual, on a domain clock of their own,
- * with no real timer behind them. An armed retry fires only when the scenario advances this clock, so a backoff is
- * reached by an event and its exact delay is observable; nothing waits on, or races, the wall clock.
- */
-export class HarnessReservationTimers implements WorkerWriteReservationTimers {
-	private nowMs = 0;
+class HarnessOwnerTimers implements TimerPort {
+	private advancedMs = 0;
 	private nextHandle = 1;
 	private readonly pending = new Map<
 		number,
 		{ readonly callback: () => void; readonly delayMs: number; readonly dueAt: number }
 	>();
+	private readonly armWaiters: Array<(delayMs: number) => void> = [];
+
+	now(): number {
+		return Date.now() + this.advancedMs;
+	}
 
 	setTimeout(callback: () => void, delayMs: number): number {
 		const handle = this.nextHandle++;
-		this.pending.set(handle, { callback, delayMs, dueAt: this.nowMs + delayMs });
+		this.pending.set(handle, { callback, delayMs, dueAt: this.advancedMs + delayMs });
+		for (const resolve of this.armWaiters.splice(0)) resolve(delayMs);
 		return handle;
 	}
 
@@ -2220,19 +2168,14 @@ export class HarnessReservationTimers implements WorkerWriteReservationTimers {
 		if (typeof handle === "number") this.pending.delete(handle);
 	}
 
-	/** The delay each timer still armed was armed with, in arm order. */
 	armedDelays(): number[] {
 		return [...this.pending.values()].map((entry) => entry.delayMs);
 	}
 
-	/**
-	 * Moves this clock forward by `ms` and fires, once and in due order, every timer then due (a timer an earlier callback
-	 * cleared is skipped; one a callback arms is due no earlier than its delay after the new time). Returns how many fired.
-	 */
 	advance(ms: number): number {
-		this.nowMs += ms;
+		this.advancedMs += ms;
 		const due = [...this.pending.entries()]
-			.filter(([, entry]) => entry.dueAt <= this.nowMs)
+			.filter(([, entry]) => entry.dueAt <= this.advancedMs)
 			.sort((left, right) => left[1].dueAt - right[1].dueAt);
 		let fired = 0;
 		for (const [handle, entry] of due) {
@@ -2242,16 +2185,63 @@ export class HarnessReservationTimers implements WorkerWriteReservationTimers {
 		}
 		return fired;
 	}
+
+	whenArmed(): Promise<number> {
+		const first = this.pending.values().next();
+		if (!first.done) return Promise.resolve(first.value.delayMs);
+		return new Promise((resolve) => {
+			this.armWaiters.push(resolve);
+		});
+	}
+}
+
+/**
+ * The session timers of a journey (see `TimerOwner`): one virtual clock per owner, so a scenario that drives one owner's
+ * alarms never moves another owner's time, and no owner's alarm races the wall clock. A long wait (a release backoff, a
+ * retry ladder deadline) is reached by advancing its owner; I/O deadlines stay real.
+ */
+export class HarnessTimers implements TimerSource {
+	private readonly owners = new Map<TimerOwner, HarnessOwnerTimers>();
+
+	port(owner: TimerOwner): TimerPort {
+		return this.ownerTimers(owner);
+	}
+
+	/** The delay each alarm of `owner` still armed was armed with, in arm order. */
+	armedDelays(owner: TimerOwner): number[] {
+		return this.ownerTimers(owner).armedDelays();
+	}
+
+	/**
+	 * Moves `owner`'s clock forward by `ms` and fires, once and in due order, every alarm of that owner then due (an alarm
+	 * an earlier callback cleared is skipped; one a callback arms is due no earlier than its delay after the new time).
+	 * Returns how many fired.
+	 */
+	advance(owner: TimerOwner, ms: number): number {
+		return this.ownerTimers(owner).advance(ms);
+	}
+
+	/** The delay of `owner`'s earliest-armed alarm still pending, or else of the next alarm it arms: resolved by the arm itself. */
+	whenArmed(owner: TimerOwner): Promise<number> {
+		return this.ownerTimers(owner).whenArmed();
+	}
+
+	private ownerTimers(owner: TimerOwner): HarnessOwnerTimers {
+		let timers = this.owners.get(owner);
+		if (timers === undefined) {
+			timers = new HarnessOwnerTimers();
+			this.owners.set(owner, timers);
+		}
+		return timers;
+	}
 }
 
 export class HarnessWorld {
 	readonly trace = new HarnessTrace();
 	readonly io = new VirtualFileSystem(HARNESS_PROJECT_CWD);
 	readonly systemOne: ScriptedSystemOneTransport;
-	/** The history hierarchy's time source for every root session of this world (see {@link HarnessHistoryClock}). */
-	readonly historyClock = new HarnessHistoryClock();
-	/** The write-reservation retry alarm's timers for every root session of this world (see {@link HarnessReservationTimers}). */
-	readonly reservationTimers = new HarnessReservationTimers();
+	/** The session timers of every root session of this world (see {@link HarnessTimers}). */
+	readonly timers = new HarnessTimers();
 	readonly git: VirtualGit;
 	readonly processTable = new VirtualProcessTable();
 	readonly processes: HarnessProcesses;
@@ -2528,8 +2518,7 @@ export class HarnessWorld {
 				models: SCRIPTED_TRACKS.map((id) => ({ model: this.provider.model(id) })),
 			},
 			systemOneFetch: this.systemOne.fetch,
-			historyTimeSource: this.historyClock,
-			writeReservationTimers: this.reservationTimers,
+			timers: this.timers,
 			systemOneEnabled,
 			...(omitShellOperations ? {} : { shellOperations: this.shell }),
 			customTools: options.customTools,

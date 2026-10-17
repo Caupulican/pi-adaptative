@@ -123,7 +123,11 @@ export class ContinuousChatHost {
 		options.compaction.validate();
 		// Before the runtime opens: no compaction can resolve the pre-activation prefix a reloaded session accepted.
 		options.resetCompactionPrefix();
-		const store = new ContinuousChatStore({ agentDir: options.agentDir, projectKey: options.projectKey });
+		const store = new ContinuousChatStore({
+			agentDir: options.agentDir,
+			projectKey: options.projectKey,
+			warn: options.warn,
+		});
 		// Takes the project's lease. A live owner refuses it once (`ContinuousChatLeaseHeldError`), before anything opens.
 		const runtime = await ContinuousChatRuntime.open({
 			store,

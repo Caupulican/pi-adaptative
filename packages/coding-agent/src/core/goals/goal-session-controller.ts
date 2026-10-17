@@ -198,6 +198,11 @@ export class GoalSessionController {
 	private executorsBoundTo?: ObjectiveExecutionController;
 	private readonly queuedOwnerChatGoals = new WeakMap<AgentMessage, QueuedOwnerChatGoal>();
 	private queuedOwnerChatExecutionLease: GoalExecutionLease | undefined;
+	/**
+	 * Usage an ended execution lease could not save (a revision race, a refused write), by goal id. The lease itself
+	 * is gone; this usage is retained and charged with the goal's next save, so it is never silently dropped.
+	 */
+	private readonly unsavedUsage = new Map<string, { tokens: number; spendUsd: number; wallClockMs: number }>();
 
 	constructor(deps: GoalSessionControllerDeps) {
 		this.deps = deps;
@@ -540,11 +545,46 @@ export class GoalSessionController {
 		return lease;
 	}
 
+	/**
+	 * End the execution lease. The lease ends even when its final usage cannot be saved: that usage is retained and
+	 * charged with the goal's next save (see {@link unsavedUsage}), and the failure is reported, never thrown, so no
+	 * caller's later release is skipped.
+	 */
 	endExecution(lease: GoalExecutionLease | undefined): void {
 		if (!lease) return;
-		if (this.executionLease !== lease) throw new Error("Cannot end goal execution attribution owned by another run");
-		this.flushPendingExecutionUsage(this.executionLease, true);
-		this.executionLease = undefined;
+		const owned = this.executionLease;
+		if (owned !== lease) throw new Error("Cannot end goal execution attribution owned by another run");
+		// Read before the save: a save that succeeded moves the lease's accounted time to or past it.
+		const endedAtMs = Date.now();
+		try {
+			this.flushPendingExecutionUsage(owned, true);
+		} catch (error) {
+			this.retainUnsavedUsage(owned, error, endedAtMs);
+		} finally {
+			this.executionLease = undefined;
+		}
+	}
+
+	/** Keep what an ending lease could not save; a lease bound to no goal has nothing to charge it to. */
+	private retainUnsavedUsage(lease: MutableGoalExecutionLease, error: unknown, endedAtMs: number): void {
+		const cause = error instanceof Error ? error.message : String(error);
+		const goalId = lease.goalId;
+		const wallClockMs = lease.lastAccountedAtMs === undefined ? 0 : Math.max(0, endedAtMs - lease.lastAccountedAtMs);
+		// The usage itself may already be saved (a budget stop after the save failed): then nothing is retained.
+		if (goalId === undefined || (lease.pendingTokens === 0 && lease.pendingSpendUsd === 0 && wallClockMs === 0)) {
+			this.deps.emitWarning(`Goal execution could not end cleanly: ${cause}`);
+			return;
+		}
+		const carried = this.unsavedUsage.get(goalId);
+		const usage = {
+			tokens: (carried?.tokens ?? 0) + lease.pendingTokens,
+			spendUsd: (carried?.spendUsd ?? 0) + lease.pendingSpendUsd,
+			wallClockMs: (carried?.wallClockMs ?? 0) + wallClockMs,
+		};
+		this.unsavedUsage.set(goalId, usage);
+		this.deps.emitWarning(
+			`Goal usage for '${goalId}' could not be saved (${cause}); ${usage.tokens} tokens, $${usage.spendUsd.toFixed(6)} spend and ${usage.wallClockMs} ms are retained and charged with the goal's next save.`,
+		);
 	}
 
 	/** Stable identity of the current routed instruction; no history replay or goal adoption. */
@@ -611,15 +651,19 @@ export class GoalSessionController {
 	): void {
 		const observedAtMs = Date.now();
 		const accountedAtMs = Math.max(lease.lastAccountedAtMs ?? observedAtMs, observedAtMs);
+		this.dropUnchargeableUsage(state.goalId);
+		// An earlier lease's retained usage rides on this save: both are charged together or neither is.
+		const carried = this.unsavedUsage.get(state.goalId);
 		const updated = applyGoalEvent(state, {
 			type: "record_continuation_budget",
 			turns: 0,
-			wallClockMs: accountedAtMs - (lease.lastAccountedAtMs ?? accountedAtMs),
-			tokens,
-			spendUsd,
+			wallClockMs: accountedAtMs - (lease.lastAccountedAtMs ?? accountedAtMs) + (carried?.wallClockMs ?? 0),
+			tokens: tokens + (carried?.tokens ?? 0),
+			spendUsd: spendUsd + (carried?.spendUsd ?? 0),
 			now: new Date().toISOString(),
 		});
 		this.saveState(updated, getGoalStateRevision(state));
+		this.unsavedUsage.delete(state.goalId);
 		lease.lastAccountedAtMs = accountedAtMs;
 		lease.pendingTokens = 0;
 		lease.pendingSpendUsd = 0;
@@ -630,6 +674,17 @@ export class GoalSessionController {
 		) {
 			this.markBudgetLimited(
 				`token budget exhausted (${updated.tokensUsed ?? 0}/${updated.tokenBudget}) during goal execution`,
+			);
+		}
+	}
+
+	/** Retained usage of a goal that is no longer the session's goal can never be charged: report it as dropped. */
+	private dropUnchargeableUsage(currentGoalId: string): void {
+		for (const [goalId, usage] of [...this.unsavedUsage]) {
+			if (goalId === currentGoalId) continue;
+			this.unsavedUsage.delete(goalId);
+			this.deps.emitWarning(
+				`Goal usage retained for '${goalId}' was dropped: the goal is no longer the session's goal; ${usage.tokens} tokens, $${usage.spendUsd.toFixed(6)} spend and ${usage.wallClockMs} ms were never charged.`,
 			);
 		}
 	}

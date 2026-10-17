@@ -1,6 +1,7 @@
 import { type Static, Type } from "typebox";
-import type { BackgroundToolTaskRecord } from "../background-tool-task-controller.ts";
+import type { BackgroundToolTaskRecord, BackgroundToolTaskWait } from "../background-tool-task-controller.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { WaitEndKind, WaitEndReason } from "../util/wait.ts";
 
 const MAX_TASK_ID_CHARS = 128;
 const MAX_LISTED_TASKS = 32;
@@ -33,7 +34,8 @@ type Input = Static<typeof schema>;
 
 export interface ToolTaskDependencies {
 	list(): BackgroundToolTaskRecord[];
-	wait(taskId: string, signal?: AbortSignal, timeoutMs?: number): Promise<BackgroundToolTaskRecord>;
+	/** The caller's signal and bound; the session decides whether an owner steer ends the wait. */
+	wait(taskId: string, signal?: AbortSignal, timeoutMs?: number): Promise<BackgroundToolTaskWait>;
 	cancel(taskId: string): boolean;
 }
 
@@ -44,6 +46,8 @@ export interface ToolTaskDetails {
 	status?: BackgroundToolTaskRecord["status"];
 	artifactId?: string;
 	reason?: string;
+	/** `wait` only: why the wait returned. A running task's wait ends `steered`, `aborted` or `timed_out`. */
+	waitEnd?: WaitEndKind;
 	piVerification?: NonNullable<BackgroundToolTaskRecord["piVerification"]>;
 }
 
@@ -54,16 +58,24 @@ function validTaskId(value: string | undefined): string | undefined {
 }
 
 /**
- * What is actually known about a task that is still running when the wait watchdog elapses.
+ * The answer for a wait that returned while its task still runs. Each end reads differently: a steer means the wait
+ * returned early for the owner's input, never that the bound expired; an abort means the wait itself was cancelled.
  *
  * Telling the model to "continue independent work" is not an answer when the waited task is the only
  * thing in flight — it has no independent work, so it spends a turn saying so. Elapsed time is real
- * information: it distinguishes a task that is progressing from one worth cancelling.
+ * information: it distinguishes a task that is progressing from one worth cancelling. It is measured by the
+ * controller, on the clock that stamped the task's start.
  */
-function runningProgress(record: BackgroundToolTaskRecord): string {
-	const startedAt = Date.parse(record.startedAt);
-	const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : record.elapsedBeforeHandoffMs;
-	return `Still running after ${Math.round(elapsedMs / 1000)}s.`;
+function runningWaitText(record: BackgroundToolTaskRecord, end: WaitEndReason, runningMs: number): string {
+	const seconds = Math.round(runningMs / 1000);
+	const handoff = "the terminal handoff wakes the session.";
+	if (end.kind === "steered") {
+		return `${record.summary}\nWait steered: the owner sent input while this wait ran, so the wait returned early to let it through. The task keeps running (${seconds}s so far); ${handoff}`;
+	}
+	if (end.kind === "aborted") {
+		return `${record.summary}\nWait aborted after the task ran ${seconds}s; the task keeps running and ${handoff}`;
+	}
+	return `${record.summary}\nStill running after ${seconds}s. Wait again when its result is your next dependency; otherwise continue other work, ${handoff}`;
 }
 
 /**
@@ -141,7 +153,7 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 			}
 
 			try {
-				const record = await deps.wait(taskId, signal, input.timeoutMs);
+				const { record, end, runningMs } = await deps.wait(taskId, signal, input.timeoutMs);
 				const isError = record.status === "failed" || record.status === "canceled";
 				// A pending terminal's first waiter is the authoritative model-facing delivery when the
 				// controller suppresses its wake. Delivered records are historical state: replaying a
@@ -153,15 +165,14 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 						? record.piVerification
 						: undefined;
 				const text =
-					record.status === "running"
-						? `${record.summary}\n${runningProgress(record)} Wait again when its result is your next dependency; otherwise continue other work, the terminal handoff wakes the session.`
-						: record.output || record.summary;
+					record.status === "running" ? runningWaitText(record, end, runningMs) : record.output || record.summary;
 				return {
 					content: [{ type: "text" as const, text }],
 					details: {
 						kind: "wait" as const,
 						taskId,
 						status: record.status,
+						waitEnd: end.kind,
 						...(record.artifactId ? { artifactId: record.artifactId } : {}),
 						...(verification ? { piVerification: { ...verification } } : {}),
 					},

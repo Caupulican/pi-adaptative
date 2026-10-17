@@ -14,6 +14,7 @@ import {
 } from "../orchestration/contracts.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import { withFileLockSync } from "../util/atomic-file.ts";
+import type { SteerDecision } from "../util/wait.ts";
 import { createReplaySafeMailboxBounder } from "./replay-safe-mailbox-bounds.ts";
 import type {
 	SessionRootReply,
@@ -342,6 +343,8 @@ export interface WorkerAgentWaitResult {
 	 * returned at once because nothing can satisfy it inside this turn; they start on the turn's release.
 	 */
 	foregroundHeldAgentIds?: string[];
+	/** Set when the owner's input ended the wait (the root caller only): how that input's admission settled. */
+	steered?: SteerDecision;
 }
 
 export interface WorkerAgentSingleWaitResult {
@@ -351,6 +354,8 @@ export interface WorkerAgentSingleWaitResult {
 	foregroundHeld?: boolean;
 	/** Exact terminal generation included in this wait result; absent means no observation receipt. */
 	terminalLaneIds?: string[];
+	/** Set when the owner's input ended the wait (the root caller only): how that input's admission settled. */
+	steered?: SteerDecision;
 }
 
 export type WorkerAgentBroadcastTargetResult =

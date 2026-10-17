@@ -379,16 +379,30 @@ async function startMasterBranch(
 			stopped = true;
 			lifetime.abort();
 			clearInterval(heartbeatTimer);
-			process.off("exit", closeOnExit);
 			await heartbeatTask;
+			const failures: unknown[] = [];
 			if (ownsEntry) {
-				const closed = markClosed(entry, nowIso(now));
-				if (await store.writeEntryIfUnchanged(config.agentDir, entry.entryId, entry, closed)) entry = closed;
+				try {
+					const closed = markClosed(entry, nowIso(now));
+					if (await store.writeEntryIfUnchanged(config.agentDir, entry.entryId, entry, closed)) entry = closed;
+					process.off("exit", closeOnExit);
+				} catch (error) {
+					// The entry still reads `running`: the exit hook stays registered as its last-chance close, and
+					// dead-pid reconciliation covers a process that is killed instead.
+					failures.push(error);
+				}
+			} else process.off("exit", closeOnExit);
+			// After the entry is closed: a worker woken by this disconnect must read `closed`, not `running`. Every
+			// later release runs even when the close failed; the failures surface together.
+			for (const release of [() => presence.stop(), () => maintenance, () => ownerDecisions]) {
+				try {
+					await release();
+				} catch (error) {
+					failures.push(error);
+				}
 			}
-			// After the entry is closed: a worker woken by this disconnect must read `closed`, not `running`.
-			await presence.stop();
-			await maintenance;
-			await ownerDecisions;
+			if (failures.length === 1) throw failures[0];
+			if (failures.length > 1) throw new AggregateError(failures, "Process-matrix master stop failed.");
 		},
 	};
 }

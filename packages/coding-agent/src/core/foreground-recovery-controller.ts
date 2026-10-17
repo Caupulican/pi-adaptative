@@ -17,6 +17,15 @@ import type { ModelRegistry } from "./model-registry.ts";
 import type { ModelRouterFailoverStatus } from "./model-router/status.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
 import type { AutonomySettings, FailoverSettings } from "./settings/settings-schema.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "./util/timer-port.ts";
+import { createWaitStatus, type WaitEndReason, type WaitEndReport, type WaitStatusEvent } from "./util/wait.ts";
+
+/**
+ * How long a wait for the foreground (submission, live-run join, history claim, idle) runs before its status reports it
+ * overdue, naming what holds the foreground, and again each time this elapses. It never ends such a wait: giving up
+ * would let two owners run the foreground at once or strand the waiter's work.
+ */
+export const FOREGROUND_WAIT_OVERDUE_MS = 60_000;
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface ForegroundRecoveryControllerSettingsSource {
@@ -36,7 +45,9 @@ type ForegroundRecoveryEvent =
 			built: number;
 			needed: number;
 			failed: number;
-	  };
+			end?: WaitEndReport;
+	  }
+	| WaitStatusEvent;
 
 const foregroundSubmissionLeaseMarker: unique symbol = Symbol("foregroundSubmissionLease");
 
@@ -65,6 +76,8 @@ export interface ForegroundRecoveryResourceSnapshot {
 
 export interface ForegroundRecoveryControllerDeps {
 	agent: Agent;
+	/** The `foreground` port: the overdue watchdog of the foreground waits. Defaults to the system timers. */
+	timers?: TimerPort;
 	/** The ICM chat's turns, undefined while no chat runs. Every provider run begins one, as its own, and ends it. */
 	chatTurns?(): Pick<IcmTurnCoordinator, "begin" | "end"> | undefined;
 	/** See `BillingFailoverControllerDeps.applyFailoverModel`. */
@@ -253,33 +266,116 @@ export class ForegroundRecoveryController {
 		);
 	}
 
+	/** What holds the foreground right now, as an overdue foreground wait reports it. */
+	private foregroundHolder(): string {
+		const holders = [
+			this.submissionLease ? `submission #${this.submissionLease.epoch}` : undefined,
+			this.activeRuns > 0 ? "a run" : undefined,
+			this.deps.agent.state.isStreaming ? "a streaming response" : undefined,
+			this.isRetrying ? "a provider retry" : undefined,
+			this.historyRewrites.size > 0 ? `${this.historyRewrites.size} history rewrite(s)` : undefined,
+			this.deps.isCompacting?.() === true ? "compaction" : undefined,
+			this.deps.isExtendedBusy?.() === true ? "extended foreground work" : undefined,
+			this.deps.hasPendingIdleContinuation?.() === true ? "an armed continuation" : undefined,
+		].filter((holder) => holder !== undefined);
+		return holders.length > 0 ? holders.join(", ") : "nothing (the waiter is waking)";
+	}
+
+	/**
+	 * The status stream of one wait for the foreground: `start` when the wait first blocks, `overdue` naming the
+	 * holder every `FOREGROUND_WAIT_OVERDUE_MS` while it stays blocked, and one `end`. A wait that never blocks
+	 * reports nothing. The owner steer never ends these waits (`steerExemption` says why); nor does time.
+	 */
+	private watchForegroundWait(
+		id: string,
+		wake: readonly string[],
+		steerExemption: string,
+	): { blocked(): void; end(end: WaitEndReason): void } {
+		const clock = this.deps.timers ?? SYSTEM_TIMER_PORT;
+		const holder = (): string => this.foregroundHolder();
+		const status = createWaitStatus({
+			id,
+			wake,
+			steer: { mode: "exempt", reason: steerExemption },
+			bound: { kind: "watchdog", overdueMs: FOREGROUND_WAIT_OVERDUE_MS, holder },
+			report: (event) => this.deps.emit(event),
+			now: () => clock.now(),
+		});
+		let started = false;
+		let timer: unknown;
+		const arm = (): void => {
+			timer = clock.setTimeout(() => {
+				status.overdue(holder());
+				arm();
+			}, FOREGROUND_WAIT_OVERDUE_MS);
+		};
+		return {
+			blocked: () => {
+				if (started) return;
+				started = true;
+				status.start();
+				arm();
+			},
+			end: (end) => {
+				if (timer !== undefined) clock.clearTimeout(timer);
+				timer = undefined;
+				status.end(end);
+			},
+		};
+	}
+
+	/** How a foreground wait that threw ended: the session shut down, or what it waited on failed. */
+	private foregroundWaitFailure(error: unknown): WaitEndReason {
+		if (this.shutdownReason !== undefined) return { kind: "disposed" };
+		return { kind: "unavailable", cause: error instanceof Error ? error.message : String(error) };
+	}
+
 	/** Wait until foreground ownership can be acquired without a check-then-act gap. */
 	async acquireSubmission(): Promise<ForegroundSubmissionLease> {
-		while (true) {
-			if (this.shutdownReason) throw this.shutdownReason;
-			const lease = this.tryAcquireSubmission();
-			if (lease) return lease;
-			// Streaming owns the Agent's native idle signal. Future continuation settlement does
-			// not own submission authority, so the remaining wait uses the admission predicate.
-			await this.deps.agent.waitForIdle();
-			await new Promise<void>((resolve) => {
-				const stop = (): void => {
-					unsubscribe();
-					this.idleWaiters.delete(stop);
-					resolve();
-				};
-				const unsubscribe = this.activityListeners.subscribe(stop);
-				this.idleWaiters.add(stop);
-				try {
-					// Register before rechecking. A newly started stream returns to the native idle
-					// wait above instead of depending on a host activity notification for its end.
-					if (this.shutdownReason || !this.hasForegroundOccupancy() || this.deps.agent.state.isStreaming) stop();
-				} catch (error) {
-					unsubscribe();
-					this.idleWaiters.delete(stop);
-					throw error;
+		const watch = this.watchForegroundWait(
+			"foreground.acquire",
+			["agent.idle", "foreground.activity"],
+			"the waiter is itself a submission: owner input queues to the run holding the foreground, which reads it",
+		);
+		let end: WaitEndReason = { kind: "disposed" };
+		try {
+			while (true) {
+				if (this.shutdownReason) throw this.shutdownReason;
+				const lease = this.tryAcquireSubmission();
+				if (lease) {
+					end = { kind: "satisfied", by: "foreground.activity" };
+					return lease;
 				}
-			});
+				watch.blocked();
+				// Streaming owns the Agent's native idle signal. Future continuation settlement does
+				// not own submission authority, so the remaining wait uses the admission predicate.
+				await this.deps.agent.waitForIdle();
+				await new Promise<void>((resolve) => {
+					const stop = (): void => {
+						unsubscribe();
+						this.idleWaiters.delete(stop);
+						resolve();
+					};
+					const unsubscribe = this.activityListeners.subscribe(stop);
+					this.idleWaiters.add(stop);
+					try {
+						// Register before rechecking. A newly started stream returns to the native idle
+						// wait above instead of depending on a host activity notification for its end.
+						if (this.shutdownReason || !this.hasForegroundOccupancy() || this.deps.agent.state.isStreaming) {
+							stop();
+						}
+					} catch (error) {
+						unsubscribe();
+						this.idleWaiters.delete(stop);
+						throw error;
+					}
+				});
+			}
+		} catch (error) {
+			end = this.foregroundWaitFailure(error);
+			throw error;
+		} finally {
+			watch.end(end);
 		}
 	}
 
@@ -309,26 +405,47 @@ export class ForegroundRecoveryController {
 	async acquireSubmissionOrJoinLiveConsumer(
 		signal: AbortSignal,
 	): Promise<ForegroundSubmissionLease | "live_consumer" | undefined> {
-		while (!signal.aborted) {
-			if (this.shutdownReason) throw this.shutdownReason;
-			const lease = this.tryAcquireSubmission();
-			if (lease) return lease;
-			if (this.hasLiveConsumer) return "live_consumer";
-			await new Promise<void>((resolve) => {
-				const stop = (): void => {
-					unsubscribe();
-					this.idleWaiters.delete(stop);
-					signal.removeEventListener("abort", stop);
-					resolve();
-				};
-				const unsubscribe = this.activityListeners.subscribe(stop);
-				this.idleWaiters.add(stop);
-				signal.addEventListener("abort", stop, { once: true });
-				// Register first, then recheck, so a change landing before the registration is not lost.
-				if (signal.aborted || this.shutdownReason || !this.isBusy || this.hasLiveConsumer) stop();
-			});
+		const watch = this.watchForegroundWait(
+			"foreground.acquire_or_join",
+			["foreground.activity"],
+			"the waiter is itself a submission: owner input queues to the run holding the foreground, which reads it",
+		);
+		let end: WaitEndReason = { kind: "aborted", reason: signal.reason };
+		try {
+			while (!signal.aborted) {
+				if (this.shutdownReason) throw this.shutdownReason;
+				const lease = this.tryAcquireSubmission();
+				if (lease) {
+					end = { kind: "satisfied", by: "foreground.activity" };
+					return lease;
+				}
+				if (this.hasLiveConsumer) {
+					end = { kind: "satisfied", by: "foreground.live_consumer" };
+					return "live_consumer";
+				}
+				watch.blocked();
+				await new Promise<void>((resolve) => {
+					const stop = (): void => {
+						unsubscribe();
+						this.idleWaiters.delete(stop);
+						signal.removeEventListener("abort", stop);
+						resolve();
+					};
+					const unsubscribe = this.activityListeners.subscribe(stop);
+					this.idleWaiters.add(stop);
+					signal.addEventListener("abort", stop, { once: true });
+					// Register first, then recheck, so a change landing before the registration is not lost.
+					if (signal.aborted || this.shutdownReason || !this.isBusy || this.hasLiveConsumer) stop();
+				});
+			}
+			end = { kind: "aborted", reason: signal.reason };
+			return undefined;
+		} catch (error) {
+			end = this.foregroundWaitFailure(error);
+			throw error;
+		} finally {
+			watch.end(end);
 		}
-		return undefined;
 	}
 
 	/**
@@ -359,25 +476,44 @@ export class ForegroundRecoveryController {
 	 * False when the submission closes while it waits.
 	 */
 	private async claimRunHistory(signal?: AbortSignal): Promise<boolean> {
-		while (this.historyRewrites.size > 0) {
-			if (this.isClosing(signal)) return false;
-			await new Promise<void>((resolve) => {
-				const stop = (): void => {
-					unsubscribe();
-					this.idleWaiters.delete(stop);
-					signal?.removeEventListener("abort", stop);
-					resolve();
-				};
-				const unsubscribe = this.activityListeners.subscribe(stop);
-				this.idleWaiters.add(stop);
-				signal?.addEventListener("abort", stop, { once: true });
-				// Register first, then recheck, so a release landing before the registration is not lost.
-				if (this.isClosing(signal) || this.historyRewrites.size === 0) stop();
-			});
+		const watch = this.watchForegroundWait(
+			"foreground.history_claim",
+			["history.release"],
+			"the waiting run reads owner input once it owns the history; ending this wait would end the run instead",
+		);
+		const closed = (): WaitEndReason =>
+			this.shutdownReason !== undefined ? { kind: "disposed" } : { kind: "aborted", reason: signal?.reason };
+		let end: WaitEndReason = { kind: "satisfied", by: "history.release" };
+		try {
+			while (this.historyRewrites.size > 0) {
+				if (this.isClosing(signal)) {
+					end = closed();
+					return false;
+				}
+				watch.blocked();
+				await new Promise<void>((resolve) => {
+					const stop = (): void => {
+						unsubscribe();
+						this.idleWaiters.delete(stop);
+						signal?.removeEventListener("abort", stop);
+						resolve();
+					};
+					const unsubscribe = this.activityListeners.subscribe(stop);
+					this.idleWaiters.add(stop);
+					signal?.addEventListener("abort", stop, { once: true });
+					// Register first, then recheck, so a release landing before the registration is not lost.
+					if (this.isClosing(signal) || this.historyRewrites.size === 0) stop();
+				});
+			}
+			if (this.isClosing(signal)) {
+				end = closed();
+				return false;
+			}
+			this.runOwnsHistory = true;
+			return true;
+		} finally {
+			watch.end(end);
 		}
-		if (this.isClosing(signal)) return false;
-		this.runOwnsHistory = true;
-		return true;
 	}
 
 	ownsSubmission(lease: ForegroundSubmissionLease | undefined): boolean {
@@ -431,6 +567,8 @@ export class ForegroundRecoveryController {
 		let turn: IcmTurnHandle;
 		let waitProgress: { built: number; needed: number; failed: number } | undefined;
 		let waitStarted = false;
+		// How the wait ended, carried by its one `end` (the typed reason of util/wait.ts).
+		let end: WaitEndReport = { kind: "satisfied", by: "icm.prefix" };
 		try {
 			turn = await turns.begin(signal, (progress) => {
 				waitProgress = progress;
@@ -442,12 +580,14 @@ export class ForegroundRecoveryController {
 				waitStarted = true;
 			});
 		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			end = signal?.aborted ? { kind: "aborted", reason: message } : { kind: "unavailable", cause: message };
 			if (signal?.aborted) return undefined;
 			throw error;
 		} finally {
 			// One end for every start, whichever way the wait ends: reserved, aborted, unavailable or stopped.
 			if (waitStarted && waitProgress)
-				this.deps.emit({ type: "continuous_chat_prefix_wait", phase: "end", ...waitProgress });
+				this.deps.emit({ type: "continuous_chat_prefix_wait", phase: "end", ...waitProgress, end });
 		}
 		turn.markStart(start.message, start.alreadyLogged);
 		return () => turns.end(turn);
@@ -687,34 +827,53 @@ export class ForegroundRecoveryController {
 	}
 
 	async waitForIdle(): Promise<void> {
-		while (true) {
-			if (this.shutdownReason) return;
-			if (
-				this.submissionLease !== undefined ||
-				this.activeRuns > 0 ||
-				this.historyRewrites.size > 0 ||
-				this.deps.isCompacting?.() === true
-			) {
-				await new Promise<void>((resolve) => this.idleWaiters.add(resolve));
-				continue;
+		const watch = this.watchForegroundWait(
+			"foreground.idle",
+			["agent.idle", "foreground.activity"],
+			"an idle wait reads no input: the run holding the foreground delivers owner input itself",
+		);
+		let end: WaitEndReason = { kind: "satisfied", by: "foreground.activity" };
+		try {
+			while (true) {
+				if (this.shutdownReason) {
+					end = { kind: "disposed" };
+					return;
+				}
+				if (
+					this.submissionLease !== undefined ||
+					this.activeRuns > 0 ||
+					this.historyRewrites.size > 0 ||
+					this.deps.isCompacting?.() === true
+				) {
+					watch.blocked();
+					await new Promise<void>((resolve) => this.idleWaiters.add(resolve));
+					continue;
+				}
+				if (this.deps.agent.state.isStreaming) watch.blocked();
+				await this.deps.agent.waitForIdle();
+				if (!this.isBusy) return;
+				watch.blocked();
+				// Evaluation, semantic health, or an armed continuation is still occupancy.
+				// Those owners wake this waiter when they clear. Register first, then recheck,
+				// so a clear that lands between the check and the registration is not lost.
+				await new Promise<void>((resolve) => {
+					let settled = false;
+					const finish = (): void => {
+						if (settled) return;
+						settled = true;
+						this.idleWaiters.delete(waiter);
+						resolve();
+					};
+					const waiter = (): void => finish();
+					this.idleWaiters.add(waiter);
+					if (this.shutdownReason || !this.isBusy) finish();
+				});
 			}
-			await this.deps.agent.waitForIdle();
-			if (!this.isBusy) return;
-			// Evaluation, semantic health, or an armed continuation is still occupancy.
-			// Those owners wake this waiter when they clear. Register first, then recheck,
-			// so a clear that lands between the check and the registration is not lost.
-			await new Promise<void>((resolve) => {
-				let settled = false;
-				const finish = (): void => {
-					if (settled) return;
-					settled = true;
-					this.idleWaiters.delete(waiter);
-					resolve();
-				};
-				const waiter = (): void => finish();
-				this.idleWaiters.add(waiter);
-				if (this.shutdownReason || !this.isBusy) finish();
-			});
+		} catch (error) {
+			end = this.foregroundWaitFailure(error);
+			throw error;
+		} finally {
+			watch.end(end);
 		}
 	}
 

@@ -10,12 +10,15 @@
  * - release: when the worker's persistent identity is retired (event-driven, never polled), the lane is
  *   released if, and only if, it is landed and clean. A lane holding work is kept and the parent is told.
  *
- * Every step is best-effort and never fails the worker or the transition that triggered it.
+ * Every step but release is best-effort and never fails the worker or the transition that triggered it. Release
+ * returns its outcome and throws only when the lane may still be released by a retry (a git failure, an unavailable
+ * checkout); its caller owns that retry.
  */
 
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative } from "node:path";
 import { HOST_FINDING_PREFIX } from "../autonomy/host-finding-prefixes.ts";
+import type { ReleaseOutcome } from "../util/resource-release.ts";
 import type { WorktreeSyncEngineDeps } from "../worktree-sync/git-engine.ts";
 import {
 	bindWorkerLaneByPath,
@@ -43,6 +46,13 @@ const EXPECTED_SHARED_REASONS: ReadonlySet<string> = new Set([
 	"not_on_main",
 	"checkout_dirty",
 	"dependencies_installed_in_checkout",
+]);
+
+/** Lane release refusals a later retry may not meet. */
+const RETRYABLE_LANE_RELEASE_CODES: ReadonlySet<string> = new Set([
+	"git_error",
+	"default_branch_unresolved",
+	"repository_checkout_unavailable",
 ]);
 
 export class WorkerLaneIsolation {
@@ -167,24 +177,37 @@ export class WorkerLaneIsolation {
 		}
 	}
 
-	/** The worker `agentId` was retired: release the lane at `cwd` if (and only if) nothing would be lost. */
-	async release(cwd: string, agentId: string): Promise<void> {
+	/**
+	 * The worker `agentId` was retired: release the lane at `cwd` if (and only if) nothing would be lost. A lane that
+	 * is gone (or none) is released. A lane holding work is kept for the parent, who is told (abandoned to its
+	 * `release_lane`). A lane bound to another worker or owner is superseded and warned. Anything else (a git error, an
+	 * unavailable checkout, a throw) rejects, so the caller retains and retries the release.
+	 */
+	async release(cwd: string, agentId: string): Promise<ReleaseOutcome> {
 		const engine = this.deps.engineDeps(cwd);
-		if (!engine || !isUnderLaneRoot(engine, cwd)) return;
-		try {
-			const released = await releaseWorkerLane(engine, cwd, agentId);
-			if (!released || released.code === "released") return;
-			if (released.code === "lane_unlanded_work") {
-				this.deps.notifyParent(
-					`Worker ${agentId} was retired and its worktree lane '${released.laneKey}' was kept: ${released.message ?? "it holds work"}`,
-				);
-				return;
-			}
-			this.deps.warn(
-				`Retired worker ${agentId}'s worktree lane '${released.laneKey}' was not released: [${released.code}]${released.message ? ` ${released.message}` : ""}`,
+		if (!engine || !isUnderLaneRoot(engine, cwd)) return { kind: "released" };
+		const released = await releaseWorkerLane(engine, cwd, agentId);
+		if (!released || released.code === "released" || released.code === "lane_not_found") return { kind: "released" };
+		if (released.code === "lane_unlanded_work") {
+			const cause = released.message ?? "it holds work";
+			this.deps.notifyParent(
+				`Worker ${agentId} was retired and its worktree lane '${released.laneKey}' was kept: ${cause}`,
 			);
-		} catch (error) {
-			this.deps.warn(`Worker lane release failed: ${error instanceof Error ? error.message : String(error)}`);
+			return {
+				kind: "abandoned",
+				cause,
+				reaper: `the parent's worktree_sync release_lane laneKey=${released.laneKey}`,
+			};
 		}
+		const detail = `Retired worker ${agentId}'s worktree lane '${released.laneKey}' was not released: [${released.code}]${released.message ? ` ${released.message}` : ""}`;
+		if (released.code === "lane_bound_elsewhere" || released.code === "lane_owner_conflict") {
+			this.deps.warn(detail);
+			return { kind: "superseded", detail };
+		}
+		// A git failure, an unresolved default branch or an unavailable checkout may pass: the caller retries.
+		if (RETRYABLE_LANE_RELEASE_CODES.has(released.code)) throw new Error(detail);
+		// Anything else (the lane's repository is no longer one) no retry can change: the lane registry's reconcile owns it.
+		this.deps.warn(detail);
+		return { kind: "abandoned", cause: detail, reaper: "worktree_sync reconcile" };
 	}
 }

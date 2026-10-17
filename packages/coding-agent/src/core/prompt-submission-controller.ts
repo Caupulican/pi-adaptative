@@ -51,6 +51,7 @@ import type { OwnerPolicyQueue } from "./system-one/owner-policy-queue.ts";
 import type { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
 import type { ToolProtocolController } from "./tool-protocol-controller.ts";
+import { runReleaseSteps } from "./util/resource-release.ts";
 
 /** An owner interrupt arrived while a submission was still preparing its turn (see `prompt`). */
 export class SubmissionPreflightAborted extends Error {
@@ -1009,6 +1010,7 @@ export class PromptSubmissionController {
 					: undefined,
 		});
 		this.deps.goals.setStartAuthority(goalToolStartAuthority);
+		let submissionFailure: { readonly error: unknown } | undefined;
 		try {
 			this.deps.toolProtocol.resetTurnState();
 			let taskDirectoryUnavailableNoted = false;
@@ -1125,15 +1127,29 @@ export class PromptSubmissionController {
 			// message is the PREVIOUS turn's and scoring it here would count that turn twice; cancelled
 			// mid-run, the response is a fragment that is nobody's verdict on the protocol.
 			if (!submissionSignal?.aborted) this.deps.toolProtocol.recordParseOutcomeFromLastAssistant();
+		} catch (error) {
+			submissionFailure = { error };
+			throw error;
 		} finally {
-			releaseSubmissionSignal?.();
-			this.deps.goals.endQueuedOwnerChatGoalExecution();
-			this.deps.goals.setStartAuthority(undefined);
-			this.deps.goals.endExecution(goalExecutionLease);
-			// Normally consumed by the authoritative message_start. If execution failed before that
-			// event, do not retain the early-painted message identity indefinitely.
-			if (userMessage) this.deps.earlyDisplayedUserMessages.delete(userMessage);
-			if (queuedOwnerInput && userMessage) this.settleOrRetractOwnedEcho(userMessage);
+			// Every release runs whatever an earlier one threw; their failures surface together, with the turn's own.
+			runReleaseSteps(
+				[
+					() => releaseSubmissionSignal?.(),
+					() => this.deps.goals.endQueuedOwnerChatGoalExecution(),
+					() => this.deps.goals.setStartAuthority(undefined),
+					() => this.deps.goals.endExecution(goalExecutionLease),
+					// Normally consumed by the authoritative message_start. If execution failed before that
+					// event, do not retain the early-painted message identity indefinitely.
+					() => {
+						if (userMessage) this.deps.earlyDisplayedUserMessages.delete(userMessage);
+					},
+					() => {
+						if (queuedOwnerInput && userMessage) this.settleOrRetractOwnedEcho(userMessage);
+					},
+				],
+				"Prompt submission release failed.",
+				submissionFailure,
+			);
 		}
 
 		// Score whether the agent actually used the recalled context, so the recall gate can adapt.

@@ -1,4 +1,5 @@
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 
 const FAILED_TERMINAL_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["failed", "timeout", "budget_exhausted"]);
 /**
@@ -77,6 +78,8 @@ interface PendingWorkerNotification {
 }
 
 export interface WorkerNotificationCoordinatorOptions {
+	/** The session's `worker-notification` port: the delivery retry backoff and the handoff observation watchdog. */
+	timers: TimerPort;
 	getWorkerRecords(): readonly LaneRecord[];
 	/** Bind a transient terminal to its durable notification before attempting delivery. */
 	ensureDurableNotification?(record: WorkerTerminalHandoffRecord): string | undefined;
@@ -127,8 +130,8 @@ export class WorkerNotificationCoordinator {
 	private scheduled = false;
 	private disposed = false;
 	private deliveryTail = Promise.resolve();
-	private retryTimer: ReturnType<typeof setTimeout> | undefined;
-	private readonly handoffWatchdogs = new Set<ReturnType<typeof setTimeout>>();
+	private retryTimer: unknown;
+	private readonly handoffWatchdogs = new Set<unknown>();
 	private retryCount = 0;
 
 	constructor(options: WorkerNotificationCoordinatorOptions) {
@@ -220,9 +223,9 @@ export class WorkerNotificationCoordinator {
 	dispose(): void {
 		this.disposed = true;
 		this.scheduled = false;
-		if (this.retryTimer) clearTimeout(this.retryTimer);
+		if (this.retryTimer !== undefined) this.options.timers.clearTimeout(this.retryTimer);
 		this.retryTimer = undefined;
-		for (const watchdog of this.handoffWatchdogs) clearTimeout(watchdog);
+		for (const watchdog of this.handoffWatchdogs) this.options.timers.clearTimeout(watchdog);
 		this.handoffWatchdogs.clear();
 		this.pending.clear();
 		this.inFlight.clear();
@@ -231,21 +234,20 @@ export class WorkerNotificationCoordinator {
 
 	private schedule(): void {
 		if (this.disposed || this.scheduled) return;
-		if (this.retryTimer) clearTimeout(this.retryTimer);
+		if (this.retryTimer !== undefined) this.options.timers.clearTimeout(this.retryTimer);
 		this.retryTimer = undefined;
 		this.scheduled = true;
 		queueMicrotask(() => this.flush());
 	}
 
 	private scheduleRetry(): void {
-		if (this.disposed || this.scheduled || this.retryTimer) return;
+		if (this.disposed || this.scheduled || this.retryTimer !== undefined) return;
 		const delayMs = Math.min(100 * 2 ** Math.min(this.retryCount, 5), 5_000);
 		this.retryCount++;
-		this.retryTimer = setTimeout(() => {
+		this.retryTimer = this.options.timers.setTimeout(() => {
 			this.retryTimer = undefined;
 			this.schedule();
 		}, delayMs);
-		if (typeof this.retryTimer === "object" && "unref" in this.retryTimer) this.retryTimer.unref();
 	}
 
 	private warnBestEffort(message: string): void {
@@ -262,17 +264,16 @@ export class WorkerNotificationCoordinator {
 	 * callers must clear() it once the awaited notify() settles, success or failure.
 	 */
 	private startHandoffWatchdog(laneIds: readonly string[]): { clear(): void } {
-		const timer = setTimeout(() => {
+		const timer: unknown = this.options.timers.setTimeout(() => {
 			this.handoffWatchdogs.delete(timer);
 			this.warnBestEffort(
 				`Background worker handoff has not settled after ${HANDOFF_WATCHDOG_MS}ms for lane(s): ${laneIds.join(", ")}. Observation only; no redispatch will occur.`,
 			);
 		}, HANDOFF_WATCHDOG_MS);
 		this.handoffWatchdogs.add(timer);
-		if (typeof timer === "object" && "unref" in timer) timer.unref();
 		return {
 			clear: () => {
-				clearTimeout(timer);
+				this.options.timers.clearTimeout(timer);
 				this.handoffWatchdogs.delete(timer);
 			},
 		};

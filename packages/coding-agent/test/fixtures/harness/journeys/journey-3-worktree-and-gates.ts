@@ -871,6 +871,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		sessionId: created.sessionManager.getSessionId(),
 	});
 	const readerCoordinator = new WorkerRecoveryCoordinator({
+		timers: world.timers.port("orchestration"),
 		lifecycle: readerLifecycle,
 		scheduler: { enqueue: unusedPort("scheduler.enqueue") },
 		recoverWriteReservations: unusedPort("recoverWriteReservations"),

@@ -242,11 +242,7 @@ import {
 	resolveConfiguredOrchestrationModel,
 } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
-import {
-	createSteerAwareWait,
-	PendingInputQueueController,
-	type QueuedInput,
-} from "./pending-input-queue-controller.ts";
+import { ownerSteerWake, PendingInputQueueController, type QueuedInput } from "./pending-input-queue-controller.ts";
 import { appendPipelineRunSnapshot, getLatestPipelineRunSnapshot, type PipelineRun } from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { DurableOwnerRuleStore, type OwnerRulePolicy } from "./project-rules/durable-owner-rules.ts";
@@ -342,6 +338,7 @@ import { formatToolSelectionReport, ToolSelectionController } from "./tool-selec
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
+import type { WaitStatusEvent } from "./util/wait.ts";
 import { currentWorkUnit, openWorkUnit, WORKER_RECEIPTS_CUSTOM_TYPE } from "./work-units.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
@@ -1030,7 +1027,7 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
 			getWorktreeSyncEnginePorts: () => this._worktreeSyncEnginePorts,
-			getWriteReservationTimers: () => config.writeReservationTimers,
+			getTimers: () => config.timers,
 			getResourceLoader: () => this._resourceLoader,
 			getActiveOrchestrationProfile: () => config.orchestrationProfile,
 			getModelRegistry: () => this._modelRegistry,
@@ -1346,7 +1343,7 @@ export class AgentSession {
 					const outcome = this._semanticUsage.confirm(receipt);
 					if (outcome.kind !== "physically_recorded") throw new Error(outcome.cause);
 				},
-				...(config.historyTimeSource !== undefined ? { time: config.historyTimeSource } : {}),
+				time: config.timers.port("history"),
 				isForegroundBusy: () => this._foregroundRecovery.isBusy,
 				subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
 			},
@@ -1400,6 +1397,7 @@ export class AgentSession {
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 		});
 		this._backgroundToolTasks = createSessionBackgroundToolTasks({
+			timers: config.timers.port("background-tool-task"),
 			getSessionManager: () => this.sessionManager,
 			getGoalId: () => this._goals.getOwnershipGoalId(),
 			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
@@ -1632,6 +1630,7 @@ export class AgentSession {
 		});
 		this._foregroundRecovery = new ForegroundRecoveryController({
 			agent: this.agent,
+			timers: config.timers.port("foreground"),
 			chatTurns: () => this._memory.continuousChatHost()?.turns,
 			applyFailoverModel: (failed, hop) => {
 				// Same rule as an unsupported model: a routed turn's model stays inside that turn.
@@ -1966,13 +1965,10 @@ export class AgentSession {
 				list: () => this._backgroundToolTasks.list(),
 				cancel: (taskId) => this._backgroundToolTasks.cancel(taskId),
 				// An owner steer ends the wait so the model reads it at once instead of after the bound.
-				wait: async (taskId, signal, timeoutMs) => {
-					const steerAware = createSteerAwareWait(this.sessionManager.getSessionId(), signal);
-					try {
-						return await this._backgroundToolTasks.wait(taskId, steerAware.signal, timeoutMs);
-					} finally {
-						await steerAware.finalize();
-					}
+				wait: (taskId, signal, timeoutMs) => {
+					const report = (event: WaitStatusEvent) => this._emit(event);
+					const steer = { mode: "end", wake: ownerSteerWake(this.sessionManager.getSessionId(), report) } as const;
+					return this._backgroundToolTasks.wait(taskId, { signal, timeoutMs, steer, report });
 				},
 			}),
 			getSessionImageStore: () => this._getSessionImageStore(),
@@ -4917,16 +4913,16 @@ export class AgentSession {
 		await this.agent.waitForIdle();
 	}
 
-	/**
-	 * Resolve once no foreground submission holds the lease: the agent run has ended AND the prompt
-	 * that owned it has finished its tail. `abort()` alone returns at the first of those; a caller
-	 * that wants to submit a new root prompt right after an abort waits for the second.
-	 */
 	/** What the session lane's idle compaction preparation is doing, for the Decision graph. */
 	getIdlePreparationView(): IdlePreparationView | undefined {
 		return this._compaction.getIdlePreparationView();
 	}
 
+	/**
+	 * Resolve once no foreground submission holds the lease: the agent run has ended AND the prompt
+	 * that owned it has finished its tail. `abort()` alone returns at the first of those; a caller
+	 * that wants to submit a new root prompt right after an abort waits for the second.
+	 */
 	waitForForegroundIdle(): Promise<void> {
 		return this._foregroundRecovery.waitForIdle();
 	}

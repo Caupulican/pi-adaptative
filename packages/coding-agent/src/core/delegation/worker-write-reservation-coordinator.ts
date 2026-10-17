@@ -1,6 +1,7 @@
 import { canonicalPathScopeIdentity } from "../autonomy/path-scope.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
 import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
+import { RetainedReleases, releaseFailureCause } from "../util/resource-release.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
@@ -68,8 +69,6 @@ export interface WorkerWriteReservationResourceSnapshot {
 	readonly availabilityDeliveryDepth: number;
 }
 
-export type WorkerWriteReservationTimers = TimerPort;
-
 export interface WorkerWriteReservationCoordinatorOptions {
 	agentDir: string;
 	getCwd(): string;
@@ -78,13 +77,10 @@ export interface WorkerWriteReservationCoordinatorOptions {
 	drainQueuedWorkers(): void;
 	warn(message: string): void;
 	isProcessAlive?(pid: number): boolean;
-	/** The retained-release alarm's timers; absent means {@link SYSTEM_TIMER_PORT}. */
-	timers?: WorkerWriteReservationTimers;
+	/** The retained-release alarm's timers (the session's `write-reservation` port); absent means {@link SYSTEM_TIMER_PORT}. */
+	timers?: TimerPort;
 }
 
-/** Backoff bounds for retrying a durable release that failed (lock contention, store I/O). */
-const PENDING_RELEASE_RETRY_BASE_MS = 1_000;
-const PENDING_RELEASE_RETRY_MAX_MS = 30_000;
 /**
  * A retained-release retry owns its own backoff, so it takes the store lock in one attempt: the sync
  * lock's default contention budget blocks the event loop between attempts (seconds per record).
@@ -115,18 +111,33 @@ export class WorkerWriteReservationCoordinator {
 	/**
 	 * Durable records this owner no longer holds for a lane but could not release yet, keyed by
 	 * reservation id. They still fence other writers, so they stay visible as held leases until released.
+	 * Their retry owner backs off from 1 s to 30 s; only its alarm warns, since opportunistic retries on
+	 * admission signals would repeat the same diagnostic.
 	 */
-	private readonly pendingReleases = new Map<string, WorkerWriteReservationLease>();
-	private readonly timers: WorkerWriteReservationTimers;
-	/** The armed alarm's handle, opaque to the coordinator: only `undefined` means no alarm is armed. */
-	private pendingReleaseTimer: unknown;
-	private pendingReleaseFailures = 0;
-	private disposed = false;
+	private readonly pendingReleases: RetainedReleases<WorkerWriteReservationLease>;
+	/** The retained-release alarm's timers; owners of this coordinator's lanes back off on the same port. */
+	readonly releaseTimers: TimerPort;
 
 	constructor(options: WorkerWriteReservationCoordinatorOptions) {
 		this.options = options;
-		this.timers = options.timers ?? SYSTEM_TIMER_PORT;
+		this.releaseTimers = options.timers ?? SYSTEM_TIMER_PORT;
 		this.store = new WorkerWriteReservationStore({ agentDir: options.agentDir });
+		this.pendingReleases = new RetainedReleases({
+			retryOwner: "worker write reservation coordinator",
+			timers: this.releaseTimers,
+			// Any result settles the record: `released` removed it, `not_found` means it is gone, and
+			// `stale_fence` means a newer fence of the same task owns that scope now, not this record.
+			// Every retry with a later retry behind it takes the store lock in one attempt; only the final
+			// shutdown pass (`lastChance`) waits out lock contention, since nothing retries after it.
+			release: (lease, { lastChance }) => {
+				this.store.release(lease, lastChance ? undefined : PENDING_RELEASE_LOCK_OPTIONS);
+				return "released";
+			},
+			reportFailure: (entry, error) =>
+				this.warnBestEffort(
+					`Retained worker write reservation ${entry.key} release failed again: ${releaseFailureCause(error)}`,
+				),
+		});
 	}
 
 	/** Clone this owner's actual leases, including retained releases; never discover, acquire, release or attach a watcher. */
@@ -317,12 +328,12 @@ export class WorkerWriteReservationCoordinator {
 		} catch (error) {
 			if (mode === "yield") throw error;
 			this.warnBestEffort(
-				`Failed to release worker write reservation ${laneId}; retrying: ${error instanceof Error ? error.message : String(error)}`,
+				`Failed to release worker write reservation ${laneId}; retrying: ${releaseFailureCause(error)}`,
 			);
 			// The lane no longer holds the lease, but its durable record still names this live process,
 			// which no reaper may release. Keep the exact record until a release is proven.
 			this.forgetLease(laneId, held);
-			this.retainPendingRelease(held);
+			this.retainPendingRelease(held, error);
 			return { held, failure: error };
 		}
 		if (strict && result.kind !== "released" && result.kind !== "not_found") {
@@ -337,12 +348,9 @@ export class WorkerWriteReservationCoordinator {
 	 * scheduler until an availability event, and only a successful release produces one, so the retained
 	 * record carries its own bounded backoff alarm beside the opportunistic retries on coordinator signals.
 	 */
-	private retainPendingRelease(lease: WorkerWriteReservationLease): void {
-		// A retained set that starts from empty starts its backoff from the base delay, however the
-		// previous set emptied (a full retry pass, a repository-scoped retry, or a re-adopting grant).
-		if (this.pendingReleases.size === 0) this.pendingReleaseFailures = 0;
-		this.pendingReleases.set(lease.reservationId, lease);
-		if (this.disposed) return;
+	private retainPendingRelease(lease: WorkerWriteReservationLease, error: unknown): void {
+		this.pendingReleases.retain(lease.reservationId, lease, error);
+		if (this.pendingReleases.closed) return;
 		try {
 			// A successful retry wakes waiters through this workspace's availability listener.
 			this.ensureWatch({
@@ -350,64 +358,27 @@ export class WorkerWriteReservationCoordinator {
 				executionRoot: lease.executionRoot,
 				...(lease.isolatedWorktreeId ? { isolatedWorktreeId: lease.isolatedWorktreeId } : {}),
 			});
-		} catch (error) {
+		} catch (watchError) {
 			this.warnBestEffort(
-				`Worker write reservation watch for retained release ${lease.reservationId} failed: ${error instanceof Error ? error.message : String(error)}`,
+				`Worker write reservation watch for retained release ${lease.reservationId} failed: ${releaseFailureCause(watchError)}`,
 			);
 		}
-		this.armPendingReleaseRetry();
 	}
 
-	private armPendingReleaseRetry(): void {
-		if (this.disposed || this.pendingReleaseTimer !== undefined || this.pendingReleases.size === 0) return;
-		const delayMs = Math.min(
-			PENDING_RELEASE_RETRY_MAX_MS,
-			PENDING_RELEASE_RETRY_BASE_MS * 2 ** Math.min(this.pendingReleaseFailures, 16),
-		);
-		this.pendingReleaseTimer = this.timers.setTimeout(() => {
-			this.pendingReleaseTimer = undefined;
-			this.retryPendingReleases({ warn: true });
-		}, delayMs);
-	}
-
-	/**
-	 * Retry every retained release once; a failure keeps its exact record and re-arms the backoff alarm.
-	 * Only the alarm warns: opportunistic retries on admission signals would repeat the same diagnostic.
-	 * Every retry with a later retry behind it takes the store lock in one attempt; only the final
-	 * shutdown pass (`lastChance`) waits out lock contention, since nothing retries after it.
-	 */
+	/** Retry the retained releases of one repository, or of all; a failure keeps its exact record and its alarm. */
 	private retryPendingReleases(options: { warn: boolean; repositoryRoot?: string; lastChance?: boolean }): unknown[] {
-		const errors: unknown[] = [];
-		if (this.pendingReleases.size === 0) return errors;
 		const repository =
 			options.repositoryRoot === undefined ? undefined : canonicalPathScopeIdentity(options.repositoryRoot);
-		let failed = false;
-		for (const [reservationId, lease] of [...this.pendingReleases]) {
-			if (repository !== undefined && canonicalPathScopeIdentity(lease.repositoryRoot) !== repository) continue;
-			try {
-				// Any result settles the record: `released` removed it, `not_found` means it is gone, and
-				// `stale_fence` means a newer fence of the same task owns that scope now, not this record.
-				this.store.release(lease, options.lastChance ? undefined : PENDING_RELEASE_LOCK_OPTIONS);
-				this.pendingReleases.delete(reservationId);
-			} catch (error) {
-				failed = true;
-				errors.push(error);
-				if (options.warn) {
-					this.warnBestEffort(
-						`Retained worker write reservation ${reservationId} release failed again: ${error instanceof Error ? error.message : String(error)}`,
-					);
-				}
-			}
-		}
-		// Only a pass over every retained record says whether the backoff may reset.
-		if (failed) this.pendingReleaseFailures += 1;
-		else if (repository === undefined) this.pendingReleaseFailures = 0;
-		if (this.pendingReleases.size === 0 && this.pendingReleaseTimer !== undefined) {
-			this.timers.clearTimeout(this.pendingReleaseTimer);
-			this.pendingReleaseTimer = undefined;
-		}
-		this.armPendingReleaseRetry();
-		return errors;
+		return this.pendingReleases.retry({
+			report: options.warn,
+			...(repository === undefined
+				? {}
+				: {
+						filter: (lease: WorkerWriteReservationLease) =>
+							canonicalPathScopeIdentity(lease.repositoryRoot) === repository,
+					}),
+			...(options.lastChance === true ? { lastChance: true } : {}),
+		});
 	}
 
 	recoverProvenStale(): void {
@@ -446,11 +417,7 @@ export class WorkerWriteReservationCoordinator {
 	}
 
 	private disposeOwnedResources(required: boolean, canRelease?: (laneId: string) => boolean): void {
-		this.disposed = true;
-		if (this.pendingReleaseTimer !== undefined) {
-			this.timers.clearTimeout(this.pendingReleaseTimer);
-			this.pendingReleaseTimer = undefined;
-		}
+		this.pendingReleases.close();
 		// Retained releases belong to no lane any more, so no physical hold can make them unreleasable.
 		const pendingErrors = this.retryPendingReleases({ warn: !required, lastChance: true });
 		const errors: unknown[] = required ? pendingErrors : [];

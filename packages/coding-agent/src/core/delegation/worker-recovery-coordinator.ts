@@ -8,6 +8,7 @@ import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { reconcileAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant, ResourcePointer, RiskBudget } from "../orchestration/contracts.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import type { RecoveredWorkerTerminalCompletion } from "./worker-attempt-executor.ts";
 import type { WorkerConversation } from "./worker-conversation-store.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
@@ -34,7 +35,7 @@ interface PendingRetryDispatch {
 	notBefore: string;
 	request: WorkerDelegationRequest;
 	priority: boolean;
-	timer?: ReturnType<typeof setTimeout>;
+	timer?: unknown;
 	/** Consecutive failed reads or enqueues of this due retry, for its backoff alarm. */
 	failures?: number;
 }
@@ -44,6 +45,12 @@ const RETRY_ENQUEUE_FAILURE_BASE_MS = 1_000;
 const RETRY_ENQUEUE_FAILURE_MAX_MS = 30_000;
 
 export interface WorkerRecoveryCoordinatorOptions {
+	/**
+	 * The session's `orchestration` port: the retry deadline is computed and rechecked on its clock and every retry
+	 * alarm is armed on its timers. The lifecycle's task runtime reads the same clock when it checks the deadline again
+	 * at resume.
+	 */
+	timers: TimerPort;
 	lifecycle: WorkerLifecycle;
 	scheduler: Pick<WorkerDispatchScheduler, "enqueue"> &
 		Partial<Pick<WorkerDispatchScheduler, "onQueueCapacityAvailable">>;
@@ -67,7 +74,6 @@ export interface WorkerRecoveryCoordinatorOptions {
 		delayMs: number;
 		detail?: string;
 	}): void;
-	now?(): number;
 	warn(message: string): void;
 }
 
@@ -289,7 +295,7 @@ export class WorkerRecoveryCoordinator {
 		if (this.disposed) return;
 		this.disposed = true;
 		for (const entry of this.retryTimers.values()) {
-			if (entry.timer) clearTimeout(entry.timer);
+			if (entry.timer !== undefined) this.options.timers.clearTimeout(entry.timer);
 		}
 		this.retryTimers.clear();
 		try {
@@ -308,7 +314,7 @@ export class WorkerRecoveryCoordinator {
 	clearScheduledRetry(laneId: string): void {
 		for (const [attemptId, entry] of this.retryTimers) {
 			if (entry.laneId !== laneId) continue;
-			if (entry.timer) clearTimeout(entry.timer);
+			if (entry.timer !== undefined) this.options.timers.clearTimeout(entry.timer);
 			this.retryTimers.delete(attemptId);
 		}
 	}
@@ -342,7 +348,7 @@ export class WorkerRecoveryCoordinator {
 		}
 		const existing = this.retryTimers.get(attempt.attemptId);
 		if (existing?.notBefore === retry.notBefore) return true;
-		if (existing?.timer) clearTimeout(existing.timer);
+		if (existing?.timer !== undefined) this.options.timers.clearTimeout(existing.timer);
 		const entry: PendingRetryDispatch = {
 			laneId: record.laneId,
 			notBefore: retry.notBefore,
@@ -355,9 +361,10 @@ export class WorkerRecoveryCoordinator {
 			this.tryEnqueueDueRetry(attempt.attemptId, entry);
 			return true;
 		}
-		const timer = setTimeout(() => this.onRetryTimer(attempt.attemptId), Math.min(remainingMs, 2_147_000_000));
-		if (typeof timer === "object" && "unref" in timer) timer.unref();
-		entry.timer = timer;
+		entry.timer = this.options.timers.setTimeout(
+			() => this.onRetryTimer(attempt.attemptId),
+			Math.min(remainingMs, 2_147_000_000),
+		);
 		return true;
 	}
 
@@ -401,9 +408,10 @@ export class WorkerRecoveryCoordinator {
 		}
 		const remainingMs = Date.parse(entry.notBefore) - this.now();
 		if (remainingMs > 0) {
-			const timer = setTimeout(() => this.onRetryTimer(attemptId), Math.min(remainingMs, 2_147_000_000));
-			if (typeof timer === "object" && "unref" in timer) timer.unref();
-			entry.timer = timer;
+			entry.timer = this.options.timers.setTimeout(
+				() => this.onRetryTimer(attemptId),
+				Math.min(remainingMs, 2_147_000_000),
+			);
 			return "stale";
 		}
 		try {
@@ -436,22 +444,20 @@ export class WorkerRecoveryCoordinator {
 		this.options.warn(
 			`Worker ${entry.laneId} retry ${step} failed; retaining the durable retry and trying again in ${Math.ceil(delayMs / 1000)}s: ${error instanceof Error ? error.message : String(error)}`,
 		);
-		if (entry.timer) clearTimeout(entry.timer);
-		const timer = setTimeout(() => this.onRetryTimer(attemptId), delayMs);
-		if (typeof timer === "object" && "unref" in timer) timer.unref();
-		entry.timer = timer;
+		if (entry.timer !== undefined) this.options.timers.clearTimeout(entry.timer);
+		entry.timer = this.options.timers.setTimeout(() => this.onRetryTimer(attemptId), delayMs);
 	}
 
 	private flushDueRetries(): void {
 		if (this.disposed) return;
 		for (const [attemptId, entry] of this.retryTimers) {
-			if (entry.timer || Date.parse(entry.notBefore) > this.now()) continue;
+			if (entry.timer !== undefined || Date.parse(entry.notBefore) > this.now()) continue;
 			if (this.tryEnqueueDueRetry(attemptId, entry) === "full") break;
 		}
 	}
 
 	private now(): number {
-		return this.options.now?.() ?? Date.now();
+		return this.options.timers.now();
 	}
 
 	/** Rebuild task metadata from its durable dispatch; no current profile/model selection is consulted. */

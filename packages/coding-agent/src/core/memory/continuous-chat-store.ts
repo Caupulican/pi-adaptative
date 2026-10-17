@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { safeErrorMessage } from "../../kernel/types.ts";
 import { stateFile } from "../agent-paths.ts";
 import { isMissingFileError, withFileLock } from "../util/atomic-file.ts";
+import { AsyncRetainedReleases, type ReleaseOutcome, releaseFailureCause } from "../util/resource-release.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import { hasOnlyKeys, isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
 import {
 	CONTINUOUS_CHAT_SCHEMA_VERSION,
@@ -140,6 +142,10 @@ export interface ContinuousChatCausalPrefix {
 export interface ContinuousChatStoreOptions {
 	agentDir: string;
 	projectKey: string;
+	/** The retained runtime-lease release's backoff timers; absent means the global, unreferenced timers. */
+	timers?: TimerPort;
+	/** Reports a retained runtime-lease release that failed again on its backoff alarm. */
+	warn?: (message: string) => void;
 }
 
 export interface ContinuousChatRuntimeLeaseOptions {
@@ -148,6 +154,9 @@ export interface ContinuousChatRuntimeLeaseOptions {
 	/** Called once, when this store finds its lease taken or removed. Nothing is written after it. */
 	onLost: () => void;
 }
+
+/** The key of the store's one retained runtime-lease release. */
+const RUNTIME_LEASE_RELEASE_KEY = "runtime-lease";
 
 /** The lease this store holds. `releaseAtExit` is the registered best-effort release for process exit. */
 interface HeldRuntimeLease {
@@ -490,6 +499,11 @@ export class ContinuousChatStore {
 	private readonly nodeCache = new Map<string, ContinuousChatTreeNode>();
 	/** The runtime lease this store holds. Undefined before acquisition, after release, and after a loss. */
 	private lease: HeldRuntimeLease | undefined;
+	/**
+	 * A released lease whose file could not be removed yet. Nothing writes under it (the fence finds no lease), but its
+	 * file still names this process, so its exit hook stays registered and the removal is retried on a backoff.
+	 */
+	private readonly leaseRelease: AsyncRetainedReleases<HeldRuntimeLease>;
 	/** Root revision the index files were last reconciled against. Undefined after a failed locked step. */
 	private indexedRevision: number | undefined;
 	/** Views caught up to the root revision they name. Undefined after a failed locked step. */
@@ -512,6 +526,18 @@ export class ContinuousChatStore {
 		this.keysIndexFile = join(this.rootDir, KEYS_INDEX_FILE);
 		this.nodeIndexDir = join(this.rootDir, NODE_INDEX_DIR);
 		this.leaseFile = join(this.rootDir, RUNTIME_LEASE_FILE);
+		const warn = options.warn;
+		this.leaseRelease = new AsyncRetainedReleases<HeldRuntimeLease>({
+			retryOwner: "continuous-chat store",
+			...(options.timers !== undefined ? { timers: options.timers } : {}),
+			release: (lease) => this.removeLeaseFile(lease),
+			...(warn !== undefined
+				? {
+						reportFailure: (_entry, error) =>
+							warn(`Continuous-chat lease release failed again: ${releaseFailureCause(error)}`),
+					}
+				: {}),
+		});
 	}
 
 	/**
@@ -539,16 +565,40 @@ export class ContinuousChatStore {
 		process.on("exit", releaseAtExit);
 	}
 
-	/** Gives the lease up. Releasing a lease that was never taken, or was lost, removes nothing. */
-	async releaseRuntimeLease(): Promise<void> {
+	/**
+	 * Gives the lease up. Nothing is written under it from the first call on. Releasing a lease that was never taken,
+	 * or was lost, removes nothing. A lease file that cannot be removed is retained: its exit hook stays, its removal
+	 * is retried on a backoff, and a later call retries it at once. Never rejects; the outcome says which happened.
+	 */
+	async releaseRuntimeLease(): Promise<ReleaseOutcome> {
 		const lease = this.lease;
-		if (lease === undefined) return;
+		if (lease === undefined) {
+			if (this.leaseRelease.size === 0) return { kind: "released" };
+			await this.leaseRelease.retry({ report: false });
+			const retained = this.leaseRelease.get(RUNTIME_LEASE_RELEASE_KEY);
+			return retained === undefined
+				? { kind: "released" }
+				: { kind: "retained", cause: retained.cause, retryOwner: this.leaseRelease.retryOwner };
+		}
 		this.lease = undefined;
-		process.off("exit", lease.releaseAtExit);
-		await this.withProjectLock(async () => {
+		try {
+			const result = await this.removeLeaseFile(lease);
+			return result === "released" ? { kind: "released" } : { kind: "superseded", detail: result.superseded };
+		} catch (error) {
+			return this.leaseRelease.retain(RUNTIME_LEASE_RELEASE_KEY, lease, error);
+		}
+	}
+
+	/** Removes the lease file when it still names `lease`; the exit hook goes only once the file is not this lease's. */
+	private async removeLeaseFile(lease: HeldRuntimeLease): Promise<"released" | { superseded: string }> {
+		const removed = await this.withProjectLock(async () => {
 			const current = await readContinuousChatLease(this.leaseFile);
-			if (current?.token === lease.token) await unlink(this.leaseFile);
+			if (current?.token !== lease.token) return false;
+			await unlink(this.leaseFile);
+			return true;
 		});
+		process.off("exit", lease.releaseAtExit);
+		return removed ? "released" : { superseded: "the lease file no longer names this store's token" };
 	}
 
 	/** Startup recovery under the writer lock: reconciles everything, then requeues work claimed by a dead process. */

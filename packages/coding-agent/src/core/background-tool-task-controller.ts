@@ -24,7 +24,9 @@ import { formatArtifactNotice, packToolOutput } from "./context/tool-output-pack
 import { oneLine } from "./provider-tool-text.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
 import { releaseExclusiveHold } from "./tools/file-mutation-queue.ts";
+import type { TimerPort } from "./util/timer-port.ts";
 import { hasOnlyKeys, isPlainRecord, isRecordObject } from "./util/value-guards.ts";
+import { type WaitEndReason, type WaitStatusEvent, type WaitSteer, type WakeSource, waitFor } from "./util/wait.ts";
 
 /**
  * Clock-based handoff of foreground tool calls; `0` means off, which is the default. Configurable
@@ -124,6 +126,26 @@ type BackgroundToolVerification = VerificationRecord & {
 };
 
 export type BackgroundToolTaskRef = Pick<BackgroundToolTaskRecord, "taskId" | "toolCallId" | "goalId" | "status">;
+
+/** The wake source of a task wait: the task's terminal. */
+const TASK_TERMINAL_WAKE = "task.terminal";
+
+export interface BackgroundToolTaskWaitOptions {
+	readonly signal?: AbortSignal;
+	/** The wait's deadline; the controller's configured wait bound when omitted. */
+	readonly timeoutMs?: number;
+	/** Whether input the waiter must read ends the wait (the root's owner steer), or why it does not. */
+	readonly steer: WaitSteer;
+	readonly report?: (event: WaitStatusEvent) => void;
+}
+
+/** A task wait's result: the task as it stands, and why the wait ended. */
+export interface BackgroundToolTaskWait {
+	readonly record: BackgroundToolTaskRecord;
+	readonly end: WaitEndReason;
+	/** How long the task has run since its handoff, on the clock its `startedAt` was stamped from. */
+	readonly runningMs: number;
+}
 
 /** Read-only physical ownership diagnostics; durable terminal status is not execution settlement. */
 export interface BackgroundToolTaskResourceSnapshot {
@@ -277,7 +299,11 @@ export interface BackgroundToolTaskControllerDeps {
 	recordUsage?(taskId: string, usage: Usage): void;
 	/** Best-effort diagnostic observer. Its own failures cannot interrupt task ownership. */
 	onError?(message: string, error: unknown): void;
-	now?(): Date;
+	/**
+	 * The session's `background-tool-task` port: record timestamps, the wait bound, the terminal and shutdown
+	 * watchdogs and the wake-up delivery retry.
+	 */
+	timers: TimerPort;
 	/** Event-wait watchdog; completion still arrives through the terminal handoff after this bound. */
 	waitTimeoutMs?: number;
 	/** Absolute managed lifetime including foreground time before handoff. */
@@ -303,7 +329,7 @@ interface BackgroundToolTaskState {
 	terminal: Promise<BackgroundToolTaskRecord>;
 	resolveTerminal: (record: BackgroundToolTaskRecord) => void;
 	artifactHolderId: string;
-	terminalWatchdog?: ReturnType<typeof setTimeout>;
+	terminalWatchdog?: unknown;
 }
 
 /**
@@ -758,7 +784,7 @@ export class BackgroundToolTaskController {
 	private readonly queuedNotifications: Array<{ record: BackgroundToolTaskRecord; wakeParent: boolean }> = [];
 	private readonly activeNotificationRecords = new Set<BackgroundToolTaskRecord>();
 	private notificationDrain: Promise<void> | undefined;
-	private notificationRetryTimer: ReturnType<typeof setTimeout> | undefined;
+	private notificationRetryTimer: unknown;
 	private notificationRetryCompletion: Promise<void> | undefined;
 	private resolveNotificationRetry: (() => void) | undefined;
 	private notificationRetryCount = 0;
@@ -927,13 +953,18 @@ export class BackgroundToolTaskController {
 		return states.map((state) => ({ ...state.record }));
 	}
 
-	wait(taskId: string, signal?: AbortSignal, timeoutMs?: number): Promise<BackgroundToolTaskRecord> {
-		const waitBoundMs = timeoutMs ?? this.waitTimeoutMs;
+	/**
+	 * Waits for a running task's terminal, its own bound, the waiter's abort, or (with `steer`) input the waiter must
+	 * read first. The returned `end` says which: a steered or aborted wait is never reported as an expired bound.
+	 */
+	wait(taskId: string, options: BackgroundToolTaskWaitOptions): Promise<BackgroundToolTaskWait> {
+		const waitBoundMs = options.timeoutMs ?? this.waitTimeoutMs;
 		if (!Number.isSafeInteger(waitBoundMs) || waitBoundMs < 1 || waitBoundMs > MAX_TIMER_DELAY_MS) {
 			return Promise.reject(
 				new TypeError("Background tool task wait timeout must be a positive integer in the supported timer range."),
 			);
 		}
+		const settledEnd: WaitEndReason = { kind: "satisfied", by: TASK_TERMINAL_WAKE };
 		const state = this.tasks.get(taskId);
 		if (!state) {
 			let retired: BackgroundToolTaskRecord | undefined;
@@ -945,39 +976,58 @@ export class BackgroundToolTaskController {
 			if (!retired) return Promise.reject(new Error(`Unknown background tool task: ${taskId}`));
 			// Eviction can precede delivery: the queued wake-up copy must not re-deliver what this read returns.
 			this.observeNotificationCopies(retired, this.now().toISOString());
-			return Promise.resolve(retired);
+			return Promise.resolve({ record: retired, end: settledEnd, runningMs: this.runningMs(retired) });
 		}
 		if (state.record.status !== "running") {
 			this.observeState(state);
-			return Promise.resolve({ ...state.record });
+			const record = { ...state.record };
+			return Promise.resolve({ record, end: settledEnd, runningMs: this.runningMs(record) });
 		}
-		if (signal?.aborted) return Promise.resolve({ ...state.record });
+		// Counted until the wait returns: a terminal landing while it waits is delivered by this waiter, not a wake.
 		state.waitingConsumers++;
-		let waiting = true;
-		const releaseWaiter = (): void => {
-			if (!waiting) return;
-			waiting = false;
-			state.waitingConsumers--;
+		const terminal: WakeSource<BackgroundToolTaskRecord> = {
+			id: TASK_TERMINAL_WAKE,
+			subscribe: (onWake) => {
+				let live = true;
+				void state.terminal.then(() => {
+					if (live) onWake();
+				});
+				return () => {
+					live = false;
+				};
+			},
+			check: () => (state.record.status !== "running" ? { kind: "satisfied", value: state.record } : undefined),
 		};
-		return new Promise<BackgroundToolTaskRecord>((resolve) => {
-			let settled = false;
-			const finishWait = (record: BackgroundToolTaskRecord): void => {
-				if (settled) return;
-				settled = true;
-				clearTimeout(watchdog);
-				signal?.removeEventListener("abort", onAbort);
-				releaseWaiter();
-				if (record.status !== "running") this.observeState(state);
-				resolve({ ...state.record });
-			};
-			const onAbort = (): void => {
-				finishWait(state.record);
-			};
-			const watchdog = setTimeout(() => finishWait(state.record), waitBoundMs);
-			watchdog.unref?.();
-			signal?.addEventListener("abort", onAbort, { once: true });
-			state.terminal.then(finishWait);
+		const waited = waitFor({
+			id: "tool_task.wait",
+			wake: [terminal],
+			signal: options.signal,
+			steer: options.steer,
+			bound: { kind: "deadline", ms: waitBoundMs },
+			clock: this.deps.timers,
+			...(options.report ? { report: options.report } : {}),
 		});
+		const releaseWaiter = (): void => {
+			state.waitingConsumers--;
+			if (state.record.status !== "running") this.observeState(state);
+		};
+		return waited.then(
+			(outcome) => {
+				releaseWaiter();
+				return { record: { ...state.record }, end: outcome.end, runningMs: this.runningMs(state.record) };
+			},
+			(error: unknown) => {
+				releaseWaiter();
+				throw error;
+			},
+		);
+	}
+
+	/** How long `record` has run since its handoff, on this controller's clock (the one that stamped `startedAt`). */
+	private runningMs(record: BackgroundToolTaskRecord): number {
+		const startedAt = Date.parse(record.startedAt);
+		if (!Number.isFinite(startedAt)) return record.elapsedBeforeHandoffMs;
+		return Math.max(0, this.deps.timers.now() - startedAt);
 	}
 
 	cancel(taskId: string): boolean {
@@ -1058,7 +1108,7 @@ export class BackgroundToolTaskController {
 				}
 			}
 		}
-		let watchdog: ReturnType<typeof setTimeout> | undefined;
+		let watchdog: unknown;
 		const failures: unknown[] = [];
 		try {
 			// Preserve bounded cancellation while refusing to report successful release for an
@@ -1066,7 +1116,7 @@ export class BackgroundToolTaskController {
 			await Promise.race([
 				Promise.allSettled([...this.executions.values()]),
 				new Promise<never>((_resolve, reject) => {
-					watchdog = setTimeout(
+					watchdog = this.deps.timers.setTimeout(
 						() =>
 							reject(
 								new Error(
@@ -1080,7 +1130,7 @@ export class BackgroundToolTaskController {
 		} catch (error) {
 			failures.push(error);
 		} finally {
-			clearTimeout(watchdog);
+			if (watchdog !== undefined) this.deps.timers.clearTimeout(watchdog);
 		}
 		try {
 			await this.waitForNotifications();
@@ -1265,12 +1315,11 @@ export class BackgroundToolTaskController {
 	}
 
 	private armTerminalWatchdog(state: BackgroundToolTaskState, delayMs: number, onElapsed: () => void): void {
-		if (state.terminalWatchdog) clearTimeout(state.terminalWatchdog);
-		state.terminalWatchdog = setTimeout(() => {
+		if (state.terminalWatchdog !== undefined) this.deps.timers.clearTimeout(state.terminalWatchdog);
+		state.terminalWatchdog = this.deps.timers.setTimeout(() => {
 			state.terminalWatchdog = undefined;
 			onElapsed();
 		}, delayMs);
-		state.terminalWatchdog.unref?.();
 	}
 
 	private finishState(
@@ -1281,7 +1330,7 @@ export class BackgroundToolTaskController {
 		verification?: VerificationRecord,
 		invocation?: ToolInvocationReceipt,
 	): void {
-		if (state.terminalWatchdog) clearTimeout(state.terminalWatchdog);
+		if (state.terminalWatchdog !== undefined) this.deps.timers.clearTimeout(state.terminalWatchdog);
 		state.terminalWatchdog = undefined;
 		const admitted = state.record.piToolInvocation;
 		const terminalInvocation = admitted
@@ -1431,21 +1480,28 @@ export class BackgroundToolTaskController {
 	}
 
 	private scheduleNotificationDrain(): void {
-		if (this.disposed || this.notificationsParked || this.notificationDrain || this.notificationRetryTimer) return;
+		if (
+			this.disposed ||
+			this.notificationsParked ||
+			this.notificationDrain ||
+			this.notificationRetryTimer !== undefined
+		)
+			return;
 		this.notificationDrain = this.drainNotifications().finally(() => {
 			this.notificationDrain = undefined;
-			if (this.queuedNotifications.length > 0 && !this.notificationRetryTimer) this.scheduleNotificationDrain();
+			if (this.queuedNotifications.length > 0 && this.notificationRetryTimer === undefined)
+				this.scheduleNotificationDrain();
 		});
 	}
 
 	private scheduleNotificationRetry(): void {
-		if (this.disposed || this.notificationRetryTimer) return;
+		if (this.disposed || this.notificationRetryTimer !== undefined) return;
 		const delayMs = Math.min(100 * 2 ** Math.min(this.notificationRetryCount, 5), 5_000);
 		this.notificationRetryCount++;
 		this.notificationRetryCompletion = new Promise<void>((resolve) => {
 			this.resolveNotificationRetry = resolve;
 		});
-		this.notificationRetryTimer = setTimeout(() => {
+		this.notificationRetryTimer = this.deps.timers.setTimeout(() => {
 			this.notificationRetryTimer = undefined;
 			const resolve = this.resolveNotificationRetry;
 			this.resolveNotificationRetry = undefined;
@@ -1453,11 +1509,10 @@ export class BackgroundToolTaskController {
 			resolve?.();
 			this.scheduleNotificationDrain();
 		}, delayMs);
-		this.notificationRetryTimer.unref?.();
 	}
 
 	private cancelNotificationRetry(): void {
-		if (this.notificationRetryTimer) clearTimeout(this.notificationRetryTimer);
+		if (this.notificationRetryTimer !== undefined) this.deps.timers.clearTimeout(this.notificationRetryTimer);
 		this.notificationRetryTimer = undefined;
 		const resolve = this.resolveNotificationRetry;
 		this.resolveNotificationRetry = undefined;
@@ -1590,6 +1645,6 @@ export class BackgroundToolTaskController {
 	}
 
 	private now(): Date {
-		return this.deps.now?.() ?? new Date();
+		return new Date(this.deps.timers.now());
 	}
 }

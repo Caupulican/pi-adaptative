@@ -14,6 +14,7 @@ import type { AgentSessionEvent } from "../agent-session-contracts.ts";
 import type { LaneRecord, LaneStatus } from "../autonomy/lane-tracker.ts";
 import type { HumanInputActivity } from "../human-input-activity.ts";
 import { evaluationResultText, type SemanticEvaluationRecord } from "../system-one/semantic-evaluation-ledger.ts";
+import type { WaitEndKind } from "../util/wait.ts";
 
 /** Who acts. Each actor is one lane of the flow; every worker shares the workers lane, named per event. */
 export type FlowActor = "owner" | "system_one" | "root" | "worker";
@@ -98,6 +99,19 @@ function stopOutcome(message: AgentMessage | undefined): FlowOutcome {
 	const stop = (message as { stopReason?: unknown } | undefined)?.stopReason;
 	return stop === "aborted" ? "cancelled" : stop === "error" ? "failed" : "ok";
 }
+
+/**
+ * How a wait ended, as a flow outcome. A steer or an expired bound is a deliberate end of the wait, not of the work it
+ * waited for, so it reads as `attention`; an abort or a disposed owner cancels it, and only a lost target fails it.
+ */
+const WAIT_END_OUTCOME: Readonly<Record<WaitEndKind, FlowOutcome>> = {
+	satisfied: "ok",
+	steered: "attention",
+	timed_out: "attention",
+	aborted: "cancelled",
+	disposed: "cancelled",
+	unavailable: "failed",
+};
 
 /** Every lane state: still open, or how it ended. Exhaustive, so a new lane state must be placed. */
 const LANE_OUTCOME: Readonly<Record<LaneStatus, FlowOutcome | "open">> = {
@@ -223,7 +237,23 @@ export class FlowTrace {
 		continuous_chat_prefix_wait: (event) => {
 			if (event.phase === "start")
 				this.begin("memory-wait", { actor: "root", kind: "wait", label: "wait for memory summaries" });
-			else if (event.phase === "end") this.finish("memory-wait", "ok");
+			else if (event.phase === "end") this.finish("memory-wait", WAIT_END_OUTCOME[event.end?.kind ?? "satisfied"]);
+		},
+		// A deadline wait is a span. A watchdog wait (the foreground's own admission and idle waits) is routine and
+		// short; only its overdue report, naming the holder, reaches the trace.
+		wait: (event) => {
+			const key = `wait:${event.id}#${event.seq}`;
+			if (event.phase === "overdue") {
+				const overdueS = Math.round(event.elapsedMs / 1000);
+				const label = short(`wait ${event.id} overdue after ${overdueS}s: ${event.holder ?? ""}`);
+				this.instant({ actor: "root", kind: "notice", label, to: "owner" });
+			} else if (event.bound.kind === "watchdog") {
+				return;
+			} else if (event.phase === "start") {
+				this.begin(key, { actor: "root", kind: "wait", label: short(`wait ${event.id}`) });
+			} else if (event.phase === "end") {
+				this.finish(key, WAIT_END_OUTCOME[event.end?.kind ?? "satisfied"]);
+			}
 		},
 		// Worker lanes are read from their records (observeLanes); this summary carries no dispatches.
 		delegate_workers: () => {},

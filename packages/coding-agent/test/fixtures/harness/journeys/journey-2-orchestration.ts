@@ -19,6 +19,7 @@ import {
 } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
+import type { WaitEndReport } from "../../../../src/core/util/wait.ts";
 import type { ScriptedRequest } from "../scripted-provider.ts";
 import { calls, createBarrier, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
@@ -1717,6 +1718,21 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		},
 	);
 	let eBgTaskId: string | undefined;
+	// The steer witness: the owner's steer ends a long tool_task wait on the running pass, and a short wait
+	// with no steer ends on its own bound. The waits' bounds run on the `background-tool-task` timers, which
+	// no journey advances elsewhere: the long bound never expires here, the short one only when advanced.
+	const E_STEER_WORDS = "Note the background check's start time in your reply.";
+	const E_STEERED_WAIT_MS = 300_000;
+	const E_TIMED_WAIT_MS = 1_000;
+	const eSteerSeen: {
+		steered?: string;
+		steeredDetails?: unknown;
+		steerRead?: boolean;
+		shellRequests?: number;
+		timedOut?: string;
+		timedOutDetails?: unknown;
+		shellRequestsAfterTimeout?: number;
+	} = {};
 	world.provider.enqueue(
 		"root",
 		calls("e-fail", [{ id: "e-fail-1", name: "bash", arguments: { command: VITEST_COMMAND } }]),
@@ -1736,6 +1752,39 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 				eBgTaskId = backgroundTaskIdOf(request);
 			},
 			reply: { content: [{ type: "text", text: "The background check is running." }] },
+		},
+		// The steer witness's turn (see below): a wait the steer ends, then a wait its own bound ends.
+		dynamicCalls("e-steer-wait", () => [
+			{
+				id: "e-steer-wait-1",
+				name: "tool_task",
+				arguments: { action: "wait", taskId: eBgTaskId, timeoutMs: E_STEERED_WAIT_MS },
+			},
+		]),
+		dynamicCalls(
+			"e-steer-read",
+			() => [
+				{
+					id: "e-timeout-wait-1",
+					name: "tool_task",
+					arguments: { action: "wait", taskId: eBgTaskId, timeoutMs: E_TIMED_WAIT_MS },
+				},
+			],
+			(request) => {
+				eSteerSeen.steered = latestBatchResults(request).find((result) => result.toolName === "tool_task")?.text;
+				eSteerSeen.steeredDetails = lastToolResultDetails(eSession, "tool_task");
+				eSteerSeen.steerRead = requestTexts(request).some((value) => value.includes(E_STEER_WORDS));
+				eSteerSeen.shellRequests = world.shell.requests.length;
+			},
+		),
+		{
+			name: "e-timeout-read",
+			check: (request) => {
+				eSteerSeen.timedOut = latestBatchResults(request).find((result) => result.toolName === "tool_task")?.text;
+				eSteerSeen.timedOutDetails = lastToolResultDetails(eSession, "tool_task");
+				eSteerSeen.shellRequestsAfterTimeout = world.shell.requests.length;
+			},
+			reply: { content: [{ type: "text", text: "The background check keeps running." }] },
 		},
 		{
 			name: "e-wake",
@@ -1757,6 +1806,67 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	expect(
 		eSession.getVerificationObligations().map((obligation) => obligation.id),
 		"the held background pass leaves the failure's obligation open",
+	).toEqual(eFailIds);
+	// The steer witness, still in the "e-bg" phase: the steer and this turn ask only judgments it declares.
+	// The steer is queued from the first wait's start event, so it lands while that wait runs; the short
+	// bound is advanced from the second wait's start event, after the wait armed it. The pass stays held.
+	expect(eBgTaskId, "the background pass reported its task id").toBeDefined();
+	const eShellBefore = world.shell.requests.length;
+	const eWaitEnds: WaitEndReport[] = [];
+	let eWaitStarts = 0;
+	let eSteerAdmitted: Promise<void> | undefined;
+	let eTimeoutFired: number | undefined;
+	let eArmedBeforeAdvance: number[] = [];
+	const unsubscribeEWaits = eSession.subscribe((event) => {
+		if (event.type !== "wait" || event.id !== "tool_task.wait") return;
+		if (event.phase === "end" && event.end !== undefined) eWaitEnds.push(event.end);
+		if (event.phase !== "start") return;
+		eWaitStarts++;
+		if (eWaitStarts === 1) {
+			queueMicrotask(() => {
+				eSteerAdmitted = trace.track(eSession.steer(E_STEER_WORDS));
+			});
+		} else if (eWaitStarts === 2) {
+			queueMicrotask(() => {
+				eArmedBeforeAdvance = world.timers.armedDelays("background-tool-task");
+				eTimeoutFired = world.timers.advance("background-tool-task", E_TIMED_WAIT_MS);
+			});
+		}
+	});
+	try {
+		await withDeadline(trace, "E aux steered wait turn", eSession.prompt("Wait for the background check."));
+	} finally {
+		unsubscribeEWaits();
+	}
+	expect(eSteerAdmitted, "the first wait's start queued the steer").toBeDefined();
+	await withDeadline(trace, "E aux steer admitted", eSteerAdmitted ?? Promise.resolve());
+	const waitDetail = (details: unknown, key: "waitEnd" | "status"): unknown =>
+		isRecordObject(details) ? details[key] : undefined;
+	expect(eSteerSeen.steered, "the steered wait says it was steered").toContain("Wait steered");
+	expect(eSteerSeen.steered, "a steered wait never reads as an expired bound").not.toContain("Still running after");
+	expect(waitDetail(eSteerSeen.steeredDetails, "waitEnd"), "the steered wait's typed end").toBe("steered");
+	expect(waitDetail(eSteerSeen.steeredDetails, "status"), "the task keeps running past the steer").toBe("running");
+	expect(eSteerSeen.steerRead, "the steer is read at the next provider boundary").toBe(true);
+	expect(eSteerSeen.shellRequests, "the steer re-runs nothing").toBe(eShellBefore);
+	// Control: the same wait with no steer ends on its own bound and says so. Nothing advanced this owner before, so an
+	// armed delay is its due time: the short bound is the only alarm the advance can reach.
+	expect(
+		eArmedBeforeAdvance.filter((delayMs) => delayMs <= E_TIMED_WAIT_MS),
+		"the short bound is the only alarm due within the advance",
+	).toEqual([E_TIMED_WAIT_MS]);
+	expect(eTimeoutFired, "advancing the short bound fires exactly that bound").toBe(1);
+	expect(eSteerSeen.timedOut, "the unsteered wait reports its expired bound").toContain("Still running after");
+	expect(eSteerSeen.timedOut, "an expired bound never reads as a steer").not.toContain("Wait steered");
+	expect(waitDetail(eSteerSeen.timedOutDetails, "waitEnd"), "the unsteered wait's typed end").toBe("timed_out");
+	expect(waitDetail(eSteerSeen.timedOutDetails, "status"), "the task still runs after the bound").toBe("running");
+	expect(eSteerSeen.shellRequestsAfterTimeout, "the expired bound re-runs nothing").toBe(eShellBefore);
+	expect(eWaitEnds, "one typed end per wait on the status stream, in order").toEqual([
+		{ kind: "steered", by: "owner.steer", decision: "decided" },
+		{ kind: "timed_out", boundMs: E_TIMED_WAIT_MS },
+	]);
+	expect(
+		eSession.getVerificationObligations().map((obligation) => obligation.id),
+		"the waits leave the failure's obligation open while the pass is held",
 	).toEqual(eFailIds);
 	eBgGate.release();
 	await withDeadline(trace, "E aux handoff reached the idle root", eWake.promise, 120_000);

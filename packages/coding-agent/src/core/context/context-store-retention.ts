@@ -203,8 +203,9 @@ export function acquireContextStoreRetention(
 		indexDir: join(lease.path, "index"),
 		release(): void {
 			if (released) return;
-			released = true;
+			// Marked released only once the release succeeded: a release that throws can be retried by its caller.
 			lease.release();
+			released = true;
 		},
 	};
 }

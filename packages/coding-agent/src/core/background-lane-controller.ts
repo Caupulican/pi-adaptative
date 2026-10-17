@@ -77,13 +77,14 @@ import type {
 	TaskProfileInspection,
 } from "./orchestration/task-profile-writer.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
-import { createSteerAwareWait } from "./pending-input-queue-controller.ts";
+import { createSteerAwareWait, ownerSteerWake } from "./pending-input-queue-controller.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import type { SettingsManager } from "./settings-manager.ts";
+import { type SteerDecision, type WaitStatusEvent, type WakeSource, waitFor } from "./util/wait.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
 import { buildWorktreeSyncEngineDeps, type WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
@@ -242,10 +243,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		if (this._workerLifecycle) return this._workerLifecycle;
 		const parentSessionId = this.deps.getSessionId();
 		const store = new OrchestrationEventStore({ agentDir: this.deps.getAgentDir(), sessionId: parentSessionId });
+		// The retry ladder persists its deadline on the orchestration clock; the runtime rechecks it on the same clock.
+		const orchestrationClock = this.deps.getTimers().port("orchestration");
 		const lifecycle = new WorkerLifecycle({
 			agentDir: this.deps.getAgentDir(),
 			sessionId: parentSessionId,
 			store,
+			now: () => orchestrationClock.now(),
 		});
 		this._workerLifecycle = lifecycle;
 		this._orchestrationStore = store;
@@ -269,6 +273,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		// Terminal observation is driven by exact lane IDs in the wait result, never by the presence
 		// of a live waiter at terminal-record time.
 		this._workerNotifications ??= new WorkerNotificationCoordinator({
+			timers: this.deps.getTimers().port("worker-notification"),
 			getWorkerRecords: () => this._workerLifecycle?.getAllRecords() ?? [],
 			ensureDurableNotification: (record) => this._ensureDurableNotification(record),
 			emitStatus: (status) => {
@@ -715,7 +720,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	waitForSessionRootReplies(options?: SessionRootReplyWaitOptions): Promise<SessionRootReplyWaitResult> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().waitForSessionRootReplies(options);
+		// An owner steer ends the wait so the root reads it at once instead of after the bound.
+		const report = (event: WaitStatusEvent) => this.deps.emit(event);
+		const wake = ownerSteerWake(this.deps.getSessionManager().getSessionId(), report);
+		const steer = { mode: "end", wake } as const;
+		const control = this._getWorkerController().getAgentControl();
+		return control.waitForSessionRootReplies({ ...options, steer, report });
 	}
 
 	acknowledgeSessionRootReply(messageId: string, ackToken: string): boolean {
@@ -794,17 +804,22 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getWorkerController().getAgentControl().readWorkerAgentLastText?.(agentId, laneId, scope);
 	}
 
+	/**
+	 * The root's wait signal: an owner steer aborts it, and `finalize` returns that steer's admission decision. A worker
+	 * caller has no owner steer (only the session root reads the owner's queue), so its wait passes its signal through.
+	 */
 	private _createWorkerWaitSignal(
 		scope: WorkerAgentControlScope | undefined,
 		signal: AbortSignal | undefined,
-	): { readonly signal: AbortSignal | undefined; readonly finalize: () => Promise<void> } {
+	): { readonly signal: AbortSignal | undefined; readonly finalize: () => Promise<SteerDecision | undefined> } {
 		if (scope?.callerAgentId) {
-			return { signal, finalize: () => Promise.resolve() };
+			return { signal, finalize: () => Promise.resolve(undefined) };
 		}
-		return createSteerAwareWait(this.deps.getSessionManager().getSessionId(), signal);
+		const report = (event: WaitStatusEvent) => this.deps.emit(event);
+		return createSteerAwareWait(this.deps.getSessionManager().getSessionId(), signal, report);
 	}
 
-	private async _withWorkerWait<T extends { terminalLaneIds?: readonly string[] }>(
+	private async _withWorkerWait<T extends { terminalLaneIds?: readonly string[]; steered?: SteerDecision }>(
 		scope: WorkerAgentControlScope | undefined,
 		signal: AbortSignal | undefined,
 		run: (control: WorkerAgentControlPort, waitSignal: AbortSignal | undefined) => Promise<T>,
@@ -813,13 +828,17 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
 		const control = this._getWorkerController().getAgentControl();
 		const waitSignal = this._createWorkerWaitSignal(scope, signal);
+		let result: T;
 		try {
-			const result = await run(control, waitSignal.signal);
+			result = await run(control, waitSignal.signal);
 			this.observeCapturedWorkerTerminals(result.terminalLaneIds);
-			return result;
-		} finally {
+		} catch (error) {
 			await waitSignal.finalize();
+			throw error;
 		}
+		// A steer ended the wait: the result says so, so it never reads as a wait that simply returned.
+		const steered = await waitSignal.finalize();
+		return steered === undefined ? result : { ...result, steered };
 	}
 
 	async waitForWorkerAgent(
@@ -851,74 +870,70 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * events. A captured attempt missing from the runtime is an error, never completion. An abort rejects
 	 * with the signal's reason; the bound and session disposal settle without observing anything.
 	 */
-	waitForRunningAttempts(
+	async waitForRunningAttempts(
 		attemptIds: readonly string[],
 		options: { readonly timeoutMs: number; readonly signal?: AbortSignal },
 	): Promise<RunningAttemptWaitOutcome> {
 		const { signal } = options;
-		if (signal?.aborted) return Promise.reject(signal.reason);
+		if (signal?.aborted) throw signal.reason;
 		const captured = [...new Set(attemptIds)];
-		if (captured.length === 0) return Promise.reject(new Error("A running-attempt wait needs at least one attempt."));
-		if (this.deps.isDisposed()) return Promise.resolve({ kind: "disposed" });
+		if (captured.length === 0) throw new Error("A running-attempt wait needs at least one attempt.");
+		if (this.deps.isDisposed()) return { kind: "disposed" };
 		const lifecycle = this._workerLifecycle;
 		const store = this._orchestrationStore;
 		if (!lifecycle || !store) {
-			return Promise.reject(
-				new Error(`Running attempts ${captured.join(", ")} are unknown: this session has no worker runtime.`),
-			);
+			throw new Error(`Running attempts ${captured.join(", ")} are unknown: this session has no worker runtime.`);
 		}
-		return new Promise((resolve, reject) => {
-			let settled = false;
-			let checkQueued = false;
-			let unsubscribe = (): void => {};
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const finish = (settle: () => void): void => {
-				if (settled) return;
-				settled = true;
-				unsubscribe();
-				signal?.removeEventListener("abort", onAbort);
-				if (timer !== undefined) clearTimeout(timer);
-				this._runningAttemptWaits.delete(onDispose);
-				settle();
-			};
-			const onAbort = (): void => finish(() => reject(signal?.reason));
-			const onDispose = (): void => finish(() => resolve({ kind: "disposed" }));
-			const check = (): void => {
-				checkQueued = false;
-				if (settled) return;
-				let snapshot: TaskRuntimeProjection;
-				try {
-					snapshot = lifecycle.getTaskRuntimeSnapshot();
-				} catch (error) {
-					finish(() => reject(error));
-					return;
-				}
+		const terminal: WakeSource<{ readonly snapshot: TaskRuntimeProjection; readonly changed: string[] }> = {
+			id: "attempt.terminal",
+			// A commit notifies before the runtime adopts it: read the projection after the commit returns.
+			subscribe: (onWake) => {
+				let queued = false;
+				return store.subscribe(() => {
+					if (queued) return;
+					queued = true;
+					queueMicrotask(() => {
+						queued = false;
+						onWake();
+					});
+				});
+			},
+			check: () => {
+				const snapshot = lifecycle.getTaskRuntimeSnapshot();
 				const missing = captured.filter((attemptId) => !snapshot.attempts[attemptId]);
 				if (missing.length > 0) {
-					finish(() => reject(new Error(`Running attempts ${missing.join(", ")} are not in the task runtime.`)));
-					return;
+					throw new Error(`Running attempts ${missing.join(", ")} are not in the task runtime.`);
 				}
 				const changed = captured.filter((attemptId) => snapshot.attempts[attemptId]?.status !== "running");
-				if (changed.length === 0) return;
-				finish(() => {
-					this._observeExactAttemptTerminals(snapshot, changed);
-					resolve({ kind: "changed", attemptIds: changed });
-				});
-			};
-			// A commit notifies before the runtime adopts it: read the projection after the commit returns.
-			unsubscribe = store.subscribe(() => {
-				if (settled || checkQueued) return;
-				checkQueued = true;
-				queueMicrotask(check);
-			});
-			signal?.addEventListener("abort", onAbort, { once: true });
-			this._runningAttemptWaits.add(onDispose);
-			timer = setTimeout(
-				() => finish(() => resolve({ kind: "timed_out" })),
-				boundWorkerWaitTimeoutMs(options.timeoutMs),
-			);
-			check();
+				return changed.length > 0 ? { kind: "satisfied", value: { snapshot, changed } } : undefined;
+			},
+		};
+		const { end, value } = await waitFor({
+			id: "objective.running_attempts",
+			wake: [terminal],
+			signal,
+			steer: {
+				mode: "exempt",
+				reason: "the objective loop holds no foreground lease while it waits, so owner input runs its own turn",
+			},
+			bound: { kind: "deadline", ms: boundWorkerWaitTimeoutMs(options.timeoutMs) },
+			disposed: {
+				isDisposed: () => this.deps.isDisposed(),
+				subscribe: (onDispose) => {
+					this._runningAttemptWaits.add(onDispose);
+					return () => this._runningAttemptWaits.delete(onDispose);
+				},
+			},
+			report: (event) => this.deps.emit(event),
 		});
+		if (end.kind === "satisfied" && value) {
+			this._observeExactAttemptTerminals(value.snapshot, value.changed);
+			return { kind: "changed", attemptIds: value.changed };
+		}
+		if (end.kind === "timed_out") return { kind: "timed_out" };
+		if (end.kind === "disposed") return { kind: "disposed" };
+		if (end.kind === "aborted") throw signal?.reason;
+		throw new Error(`The running-attempt wait ended ${end.kind}.`);
 	}
 
 	/** Observe terminals of exactly these attempts, never a newer generation of the same lane. */

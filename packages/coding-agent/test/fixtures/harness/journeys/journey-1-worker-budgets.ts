@@ -163,7 +163,8 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 
 	// E8 (transient provider failures): a worker's provider request that fails transiently is retried inside the attempt, three attempts
 	// at most with the worker's 2 s base; when those are spent the durable ladder (two attempts, 5 s base) starts one more attempt. Request
-	// admission times are recorded to check the gaps against those bases, with jitter bounds.
+	// admission times are recorded to check the inner gaps against their base, with jitter bounds. The ladder's alarm runs on the
+	// session's orchestration timers, so its retry is reached by advancing that clock, never by waiting out the wall clock.
 	const E8_TRANSIENT_PROFILE: OrchestrationProfile = {
 		...E8_BUDGET_PROFILE,
 		profileId: "e8-transient",
@@ -236,6 +237,27 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	);
 	world.systemOne.enterPhase("e8t-start", e4Judgments);
 	await withDeadline(trace, "E8 transient start turn", e8tSession.prompt("Start the transient reader."));
+	// The first ladder delay is round(5 000 + 0.2 * 5 000 * random), at most 6 000 ms; the alarm is armed with the persisted deadline
+	// less the orchestration clock's time at arming, so it is positive and no longer than that delay.
+	const e8tArmedMs = await withDeadline(
+		trace,
+		"E8 transient ladder alarm armed",
+		world.timers.whenArmed("orchestration"),
+		120_000,
+	);
+	expect(world.timers.armedDelays("orchestration"), "the ladder arms exactly one alarm").toEqual([e8tArmedMs]);
+	expect(e8tArmedMs, "the ladder alarm is armed with a positive delay").toBeGreaterThan(0);
+	expect(e8tArmedMs, "the ladder alarm is due within the policy's first-retry ceiling").toBeLessThanOrEqual(6_000);
+	expect(
+		Object.values(e8tSession.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).map((attempt) => [
+			attempt.status,
+			attempt.retry?.retriesUsed,
+		]),
+		"the armed retry belongs to the lane's one attempt, durably suspended on its first ladder retry",
+	).toEqual([["suspended", 1]]);
+	expect(world.timers.advance("orchestration", e8tArmedMs - 1), "no ladder retry fires before its delay").toBe(0);
+	expect(world.timers.advance("orchestration", 1), "the ladder retry fires once its delay has elapsed").toBe(1);
+	expect(world.timers.armedDelays("orchestration"), "the fired ladder alarm leaves no alarm armed").toEqual([]);
 	await withDeadline(trace, "E8 transient handoff woke the root", e8tWake.promise, 120_000);
 	await withDeadline(trace, "E8 transient root idle", e8tSession.waitForForegroundIdle());
 	expect(
@@ -249,11 +271,23 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 		),
 		"the retries announce two inner waits and one ladder wait, and nothing else",
 	).toHaveLength(3);
+	// The ladder announces Math.ceil(delayMs / 1000) seconds; its first delay is in [5 000, 6 000], so 5 or 6, and the armed alarm
+	// is no longer than that delay.
+	const e8tLadderWarnings = world.warnings.filter((message) =>
+		message.includes("retrying from the persisted transcript"),
+	);
+	expect(e8tLadderWarnings, "one ladder wait is announced").toHaveLength(1);
+	expect(e8tLadderWarnings[0], "the ladder announces its first delay in whole seconds").toMatch(
+		/ in [56]s \(attempt 2\)\.$/,
+	);
+	const e8tLadderSeconds = Number(/ in ([56])s \(attempt 2\)\.$/.exec(e8tLadderWarnings[0] ?? "")?.[1]);
+	expect(e8tArmedMs, "the armed ladder alarm is no longer than the announced delay").toBeLessThanOrEqual(
+		e8tLadderSeconds * 1_000,
+	);
 	const e8tGaps = e8tAdmitted.slice(1).map((time, index) => time - (e8tAdmitted[index] ?? time));
 	expect(e8tGaps.length, "four admissions give three gaps").toBe(3);
 	expect(e8tGaps[0] ?? 0, "the first inner retry waits about the 2 s base").toBeGreaterThanOrEqual(1_500);
 	expect(e8tGaps[1] ?? 0, "the second inner retry waits about twice the base").toBeGreaterThanOrEqual(3_000);
-	expect(e8tGaps[2] ?? 0, "the durable ladder waits about its 5 s base").toBeGreaterThanOrEqual(4_000);
 	expect(await world.disposeSessionInBody(e8tSession), "the E8 transient owner disposes cleanly").toBeUndefined();
 	trace.mark("root", "e8.transient");
 
@@ -338,6 +372,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	).toEqual(["failed"]);
 	expect(e8oAttempts[0]?.result?.reasonCode, "the failed attempt names its completion error").toBe("completion_error");
 	expect(e8oAttempts[0]?.retry, "the attempt never entered the durable retry ladder").toBeUndefined();
+	expect(world.timers.armedDelays("orchestration"), "the one-attempt owner arms no ladder alarm").toEqual([]);
 	const e8oGaps = e8oAdmitted.slice(1).map((time, index) => time - (e8oAdmitted[index] ?? time));
 	expect(e8oGaps.length, "three admissions give two gaps").toBe(2);
 	expect(e8oGaps[0] ?? 0, "the first inner retry waits about the 2 s base").toBeGreaterThanOrEqual(1_500);
@@ -408,6 +443,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	expect(e8uAttempts[0]?.result?.reasonCode, "the opaque failure terminalizes as a completion error").toBe(
 		"completion_error",
 	);
+	expect(world.timers.armedDelays("orchestration"), "the opaque failure arms no ladder alarm").toEqual([]);
 	// The failure is retained on the worker's own persisted transcript: masked, bounded, and without the raw key.
 	const e8uAgentId = e8uAttempts[0]?.agentId;
 	const e8uBinding =

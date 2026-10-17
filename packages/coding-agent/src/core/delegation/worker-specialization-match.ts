@@ -193,6 +193,11 @@ export interface WorkerSpecialistReuseInput {
 	freshAllocationInFlight?: boolean;
 	/** True while this specialist's own execution has not fully released its resources. */
 	isSettled(agentId: string): boolean;
+	/**
+	 * Why an unsettled specialist whose run ended still holds its resources, when a failed release is the reason:
+	 * `retained` is retried by the host, `abandoned` stays until the session ends.
+	 */
+	releaseHold?(agentId: string): { readonly kind: "retained" | "abandoned"; readonly cause: string } | undefined;
 	/** False when the specialist's durable context cannot be read; reuse then fails bounded. */
 	isContextReadable(agent: AgentBindingContract, attempt: AttemptRuntimeState): boolean;
 	/** Explicit, justified intent to run an independent copy beside the existing specialists. */
@@ -226,6 +231,14 @@ function attemptSpecialization(
 }
 
 /**
+ * The skip reason of a specialist whose run ended but whose failed release still holds it: the kind (`retained` is
+ * retried by the host, `abandoned` is not), the specialist, then the bounded cause. The delegate tool parses it back.
+ */
+export function specialistReleaseSkipReason(kind: "retained" | "abandoned", agentId: string, cause: string): string {
+	return `worker_specialist_release_${kind}:${agentId}:${cause}`;
+}
+
+/**
  * Reuse is mandatory for a compatible, eligible context; it is never inferred from provider, model
  * or project alone. A retired, suspended or resuming binding is out of scope entirely: those
  * contexts are only re-entered by an explicit resume.
@@ -235,6 +248,8 @@ export function selectReusableWorkerSpecialist(input: WorkerSpecialistReuseInput
 	const idle: string[] = [];
 	let busy = input.freshAllocationInFlight ? 1 : 0;
 	let unreadable = 0;
+	/** Specialists whose run ended but whose resources a failed release still holds. */
+	const releaseHeld: { agentId: string; kind: "retained" | "abandoned"; cause: string }[] = [];
 	// Specialists are derived from durable work, not only from registered bindings: a dispatched turn
 	// that has not reached execution yet owns its specialization already, and duplicating it while it
 	// waits would be exactly the duplicate this decision exists to prevent.
@@ -255,12 +270,14 @@ export function selectReusableWorkerSpecialist(input: WorkerSpecialistReuseInput
 		const matches = input.matches ?? sameWorkerSpecialization;
 		if (!matches(specialization, input.candidate, specialistId)) continue;
 		if (!input.isInitializationCompatible(agent, attempt)) continue;
-		if (
-			agent?.status === "active" ||
-			NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status) ||
-			!input.isSettled(specialistId)
-		) {
+		if (agent?.status === "active" || NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)) {
 			busy += 1;
+			continue;
+		}
+		if (!input.isSettled(specialistId)) {
+			const hold = agent ? input.releaseHold?.(specialistId) : undefined;
+			if (hold) releaseHeld.push({ agentId: specialistId, ...hold });
+			else busy += 1;
 			continue;
 		}
 		// Only a registered binding can take a new turn: an unbound durable lane has no resumable
@@ -280,5 +297,10 @@ export function selectReusableWorkerSpecialist(input: WorkerSpecialistReuseInput
 	}
 	if (unreadable > 0) return { outcome: "unavailable", skipReason: "worker_specialist_context_unavailable" };
 	if (busy > 0) return { outcome: "unavailable", skipReason: "worker_specialist_busy" };
+	// Not running and not reusable yet: the refusal names the specialist and the release that holds it, so the
+	// caller is never told to wait for a completion event that already happened.
+	const held = releaseHeld.sort((left, right) => left.agentId.localeCompare(right.agentId))[0];
+	if (held)
+		return { outcome: "unavailable", skipReason: specialistReleaseSkipReason(held.kind, held.agentId, held.cause) };
 	return { outcome: "fresh" };
 }

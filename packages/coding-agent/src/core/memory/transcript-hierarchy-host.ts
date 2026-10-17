@@ -14,6 +14,7 @@
 import type { TranscriptHierarchyStatus } from "../context/memory-diagnostics.ts";
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import type { TypeSafeUsageReceipt } from "../review/system-one-review-port.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import type { ActiveBranchEntryStanding } from "./active-branch-probe.ts";
 import { type FrontierAudience, projectFrontierView, renderFrontierView } from "./transcript-frontier.ts";
 import {
@@ -27,7 +28,6 @@ import {
 	TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT,
 	type TranscriptLineageReader,
 	type TranscriptReadUnavailable,
-	type TranscriptSummaryTimeSource,
 	truncateUtf8,
 	utf8ByteLength,
 } from "./transcript-memory-contracts.ts";
@@ -73,8 +73,12 @@ export interface TranscriptHierarchyHostDeps {
 	getAdmissionEngine(): SemanticDecisionEngine | undefined;
 	/** Writes a semantic usage receipt to the session's usage record (idempotent by receipt id); throws when it cannot. */
 	recordUsage(receipt: TypeSafeUsageReceipt): void;
-	/** Domain time and its timers; absent means the system clock and real (unref'd) timers. */
-	time?: TranscriptSummaryTimeSource;
+	/**
+	 * The one time source of the summary hierarchy's domain decisions (retry backoff, retention age, orphan age, store
+	 * timestamps) and of the timers that wake them: the session's `history` timer port. I/O deadlines and lock waits are
+	 * not domain time and stay on the wall clock. Absent means {@link SYSTEM_TIMER_PORT}.
+	 */
+	time?: TimerPort;
 	/** True while the foreground owns the provider; background summaries wait for it to end. */
 	isForegroundBusy(): boolean;
 	/** Foreground activity changes (a submission starts or ends). No polling. */
@@ -169,16 +173,6 @@ function describeHold(
 
 const NOT_ATTACHED_REASON = "No history index is attached.";
 
-/** The default time source: the system clock and real timers that never keep the process alive. */
-const SYSTEM_TIME: TranscriptSummaryTimeSource = {
-	now: () => Date.now(),
-	setTimer: (callback, delayMs) => {
-		const timer = setTimeout(callback, delayMs);
-		timer.unref();
-		return timer;
-	},
-	clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
 /** How long a coordinator-less forget waits, once, for a loading history index to say whether the session exists. */
 const FORGET_PROBE_WAIT_MS = 10_000;
 const HIERARCHY_OFF_REASON = "The summary hierarchy is off.";
@@ -209,11 +203,11 @@ export class TranscriptHierarchyHost {
 	private chain: Promise<void> = Promise.resolve();
 	private lastError: string | undefined;
 	private frontierState: TranscriptFrontierState | undefined;
-	private readonly time: TranscriptSummaryTimeSource;
+	private readonly time: TimerPort;
 
 	constructor(deps: TranscriptHierarchyHostDeps) {
 		this.deps = deps;
-		this.time = deps.time ?? SYSTEM_TIME;
+		this.time = deps.time ?? SYSTEM_TIMER_PORT;
 		this.admission = createSemanticSummaryAdmission({
 			getEngine: () => deps.getAdmissionEngine(),
 			recordUsage: (receipt) => deps.recordUsage(receipt),
@@ -562,8 +556,8 @@ export class TranscriptHierarchyHost {
 				}),
 			isCurrent: () => this.isCurrent() && this.deps.isRetrievalEnabled(),
 			now: () => this.time.now(),
-			setTimer: (callback, delayMs) => this.time.setTimer(callback, delayMs),
-			clearTimer: (handle) => this.time.clearTimer(handle),
+			setTimer: (callback, delayMs) => this.time.setTimeout(callback, delayMs),
+			clearTimer: (handle) => this.time.clearTimeout(handle),
 			onTerminal: (event) => this.reportTerminal(event),
 			onFrontierChanged: () => {},
 		});

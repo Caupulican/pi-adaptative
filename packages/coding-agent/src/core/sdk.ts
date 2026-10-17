@@ -40,12 +40,10 @@ import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { resolveEffectiveCompletionProfile } from "./decision/completion-profile.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
-import type { WorkerWriteReservationTimers } from "./delegation/worker-write-reservation-coordinator.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { resolveFastModeServiceTier } from "./fast-mode.ts";
 import { ObjectivePrimaryBindingError } from "./goals/goal-session-controller.ts";
 import type { IntegrityExtension } from "./hooks/index.ts";
-import type { TranscriptSummaryTimeSource } from "./memory/transcript-memory-contracts.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import { AccountModelCatalog } from "./model-router/account-models.ts";
@@ -104,6 +102,7 @@ import {
 	withFileMutationQueue,
 } from "./tools/index.ts";
 import type { BashOperations } from "./tools/schemas/bash.ts";
+import { SYSTEM_TIMER_SOURCE, type TimerSource } from "./util/timer-port.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 export interface CreateAgentSessionOptions {
@@ -184,10 +183,11 @@ export interface CreateAgentSessionOptions {
 	worktreeSyncEnginePorts?: WorktreeSyncEnginePorts;
 	/** HTTP transport for System One's decision endpoint; omitted means the global fetch. */
 	systemOneFetch?: typeof fetch;
-	/** The time source of the history summary hierarchy (retry waits, retention and orphan ages); default: the system clock. */
-	historyTimeSource?: TranscriptSummaryTimeSource;
-	/** Timers of the write-reservation retained-release backoff alarm; default: the global timers, unreferenced. */
-	writeReservationTimers?: WorkerWriteReservationTimers;
+	/**
+	 * The one timer source of the session's recovery, retry and watchdog alarms and of the clocks they are due on (one port per
+	 * `TimerOwner` of `util/timer-port.ts`); default: the system clock and the global timers, unreferenced.
+	 */
+	timers?: TimerSource;
 
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
@@ -848,6 +848,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// before anything is routed.
 		void accountModels.refresh();
 
+		const timers = options.timers ?? SYSTEM_TIMER_SOURCE;
 		const session = new AgentSession({
 			agent,
 			onClosingWarnings: options.onClosingWarnings,
@@ -877,10 +878,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			orchestrationProfile,
 			sessionStartEvent: options.sessionStartEvent,
 			systemOneController,
-			...(options.historyTimeSource !== undefined ? { historyTimeSource: options.historyTimeSource } : {}),
-			...(options.writeReservationTimers !== undefined
-				? { writeReservationTimers: options.writeReservationTimers }
-				: {}),
+			timers,
 			accountModels,
 			executionLoopMode,
 			objectiveExecutionController,
@@ -919,8 +917,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				agentDir,
 				sessionId: sessionManager.getSessionId(),
 			});
+			const orchestrationClock = timers.port("orchestration");
 			const durableTaskRuntime = new DurableTaskRuntime({
 				store: orchestrationStore,
+				// The worker lifecycle's runtime records into this same store on this same clock (see TimerOwner).
+				now: () => orchestrationClock.now(),
 			});
 			const taskProfileStore = new SessionTaskProfileStore(sessionManager);
 			const foregroundBaseProfile =

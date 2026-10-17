@@ -708,6 +708,8 @@ export interface DelegateDispatchToolDetails {
 	broadcastResults?: readonly WorkerAgentBroadcastTargetResult[];
 	broadcastResultsOmitted?: number;
 	timedOut?: boolean;
+	/** A wait the owner's input ended: the waited work is still in flight, and that input is read next. */
+	steered?: boolean;
 	/** A fan-out start: the group and, per declared member, the lane it started or why it did not. */
 	fanout?: {
 		groupId: string;
@@ -1141,7 +1143,7 @@ function boundedWaitManyDetails(statuses: readonly { agentId: string }[], timedO
 	return buildDetails(selected);
 }
 
-function sessionRootReplyJson(replies: readonly SessionRootReply[], timedOut?: boolean): string {
+function sessionRootReplyJson(replies: readonly SessionRootReply[], timedOut?: boolean, steered = false): string {
 	return boundedDelegateControlCollectionJson(replies, (selected, omittedCount) => ({
 		...(timedOut === undefined ? {} : { timedOut }),
 		...(timedOut
@@ -1150,6 +1152,7 @@ function sessionRootReplyJson(replies: readonly SessionRootReply[], timedOut?: b
 					"Use delegate wait/wait_many for worker completion. Never interrupt solely because this bounded inbox wait timed out.",
 				)
 			: {}),
+		...(steered && selected.length === 0 ? waitSteeredProjection("explicit_replies_only", "replies") : {}),
 		replies: selected,
 		omittedCount,
 	}));
@@ -1163,6 +1166,21 @@ function boundedWaitTimeoutProjection(observes: string, nextAction: string) {
 		reasonCode: "bounded_wait_elapsed" as const,
 		nextAction,
 		cavemanDirective: CAVEMAN_WAIT_TIMEOUT_DIRECTIVE,
+	};
+}
+
+/**
+ * A wait the owner's input ended before what it waited for arrived. It is neither a timeout nor a stall: the wait
+ * returned so the input is not held behind it, and the waited work keeps going.
+ */
+function waitSteeredProjection(observes: string, awaited: string) {
+	return {
+		steered: true as const,
+		waitState: "nonterminal" as const,
+		observes,
+		workerStallProven: false,
+		reasonCode: "wait_steered" as const,
+		nextAction: `Wait steered: the owner sent input while this wait ran, so the wait returned early to let it through. The awaited ${awaited} still arrive; never interrupt because of this wait.`,
 	};
 }
 
@@ -1182,7 +1200,12 @@ function workerWaitTimeoutProjection(statuses: readonly WorkerAgentActivity[]) {
 	);
 }
 
-function workerWaitProjection(statuses: readonly WorkerAgentActivity[], timedOut: boolean, foregroundHeld = false) {
+function workerWaitProjection(
+	statuses: readonly WorkerAgentActivity[],
+	timedOut: boolean,
+	foregroundHeld = false,
+	steered = false,
+) {
 	if (foregroundHeld) {
 		return {
 			waitState: "nonterminal" as const,
@@ -1210,6 +1233,7 @@ function workerWaitProjection(statuses: readonly WorkerAgentActivity[], timedOut
 			cavemanDirective: CAVEMAN_WORKER_IDLE_DIRECTIVE,
 		};
 	}
+	if (steered) return waitSteeredProjection("worker_activity", "worker terminals");
 	if (!statuses.includes("suspended")) return {};
 	return {
 		waitState: "nonterminal" as const,
@@ -1304,6 +1328,44 @@ function buildDelegateStartRequest(input: {
 	};
 }
 
+interface SpecialistReleaseHold {
+	readonly retained: boolean;
+	readonly agentId: string;
+	readonly cause: string;
+}
+
+/** The failed release that holds a specialist, read back from its `specialistReleaseSkipReason`. */
+function parseSpecialistReleaseHold(reason: string | undefined): SpecialistReleaseHold | undefined {
+	const kind = reason?.match(/^worker_specialist_release_(retained|abandoned):/)?.[1];
+	if (reason === undefined || kind === undefined) return undefined;
+	const rest = reason.slice(`worker_specialist_release_${kind}:`.length);
+	const separator = rest.indexOf(":");
+	return {
+		retained: kind === "retained",
+		agentId: separator < 0 ? rest : rest.slice(0, separator),
+		cause: separator < 0 ? "" : rest.slice(separator + 1),
+	};
+}
+
+/**
+ * The specialist's own state refused the start: it is still running, or a failed release holds it. The call was right
+ * and the host decided it, so the refusal is an operation outcome the model reads verbatim -- not a failure record,
+ * whose execution-error classifier would read a release cause embedded in the text (an ETIMEDOUT, an ENOENT) as the
+ * call's own error, cut the text to its bounded diagnostic and attach that error's guidance.
+ */
+function isSpecialistStateRefusal(reason: string | undefined): boolean {
+	return reason === "worker_specialist_busy" || parseSpecialistReleaseHold(reason) !== undefined;
+}
+
+/** A start refused because a failed release holds the specialist: the fact, the cause, then the next action. */
+function specialistReleaseHoldText(hold: SpecialistReleaseHold): string {
+	const { agentId } = hold;
+	const cause = hold.cause ? ` Cause: ${hold.cause}.` : "";
+	return hold.retained
+		? `delegate not started: ${agentId} finished its run but its resource release failed; the host retries it.${cause} Next: follow_up to ${agentId} (queued until released) or parallelWork { independentOf: [${agentId}], justification }.`
+		: `delegate not started: ${agentId} finished its run but its resource release failed; nothing retries it this session.${cause} Next: parallelWork { independentOf: [${agentId}], justification } if independent, or report it to the user.`;
+}
+
 function delegateStartSkipText(reason: string): string {
 	if (reason.startsWith("worker_duplicate_of:")) {
 		const laneId = reason.slice("worker_duplicate_of:".length);
@@ -1334,6 +1396,8 @@ function delegateStartSkipText(reason: string): string {
 	if (reason === "worker_specialist_busy") {
 		return "delegate not started: a compatible worker is still running this kind of work, and a second copy would duplicate it. Wait for its completion event or use status on it. If this task is independent of the running work, retry with parallelWork { independentOf: [<running worker id>], justification } to start a separate worker.";
 	}
+	const releaseHold = parseSpecialistReleaseHold(reason);
+	if (releaseHold) return specialistReleaseHoldText(releaseHold);
 	if (reason.startsWith("worker_specialist_choice_required")) {
 		const candidates = reason.slice("worker_specialist_choice_required".length).replace(/^:/, "");
 		return `delegate not started: more than one idle worker fits this task${candidates ? ` (${candidates.split(",").join(", ")})` : ""}. You are the orchestrator: choose the recipient. Retry with agentId set to one of them (delegate list shows each one's recent work), or pass parallelWork { independentOf, justification } to start a separate worker.`;
@@ -1576,6 +1640,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			content: Array<{ type: "text"; text: string }>;
 			details: DelegateToolDetails;
 			isError?: boolean;
+			errorKind?: "operation_outcome";
 		}> {
 			const requestedAction = originalInput.action ?? "start";
 			const invalid = (message: string, actionDetails: DelegateToolDetails) => ({
@@ -2037,8 +2102,18 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						...(signal ? { signal } : {}),
 					});
 					return {
-						content: [{ type: "text" as const, text: sessionRootReplyJson(waited.replies, waited.timedOut) }],
-						details: { started: true, action, timedOut: waited.timedOut },
+						content: [
+							{
+								type: "text" as const,
+								text: sessionRootReplyJson(waited.replies, waited.timedOut, waited.steered !== undefined),
+							},
+						],
+						details: {
+							started: true,
+							action,
+							timedOut: waited.timedOut,
+							...(waited.steered !== undefined ? { steered: true } : {}),
+						},
 					};
 				}
 				if (action === "reply") {
@@ -2149,6 +2224,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 												waited.statuses.map(({ status }) => status),
 												waited.timedOut,
 												waited.foregroundHeldAgentIds !== undefined,
+												waited.steered !== undefined,
 											),
 											...(waited.foregroundHeldAgentIds
 												? { foregroundHeldAgentIds: waited.foregroundHeldAgentIds }
@@ -2158,7 +2234,10 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 									}),
 								},
 							],
-							details: boundedWaitManyDetails(waited.statuses, waited.timedOut),
+							details: {
+								...boundedWaitManyDetails(waited.statuses, waited.timedOut),
+								...(waited.steered !== undefined ? { steered: true } : {}),
+							},
 						};
 					}
 					const message = input.message?.trim();
@@ -2259,11 +2338,22 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 										agentId,
 										status: waited.status,
 										timedOut: waited.timedOut,
-										...workerWaitProjection([waited.status], waited.timedOut, waited.foregroundHeld === true),
+										...workerWaitProjection(
+											[waited.status],
+											waited.timedOut,
+											waited.foregroundHeld === true,
+											waited.steered !== undefined,
+										),
 									}),
 								},
 							],
-							details: { started: true, action, agentId, timedOut: waited.timedOut },
+							details: {
+								started: true,
+								action,
+								agentId,
+								timedOut: waited.timedOut,
+								...(waited.steered !== undefined ? { steered: true } : {}),
+							},
 						};
 					}
 					if (action === "send" || action === "follow_up") {
@@ -2345,13 +2435,16 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							);
 						}
 						// An accepted message waits in the mailbox while its worker is suspended, running or still
-						// releasing resources; the host starts it when the worker is idle again.
+						// releasing resources; the host starts it when the worker is idle again. A failed release
+						// names what the turn waits for instead: the host's retry, or nothing in this session.
+						const releaseHold = parseSpecialistReleaseHold(outcome.skipReason);
 						const waitsForIdle =
 							!outcome.started &&
 							!outcome.steering &&
 							(outcome.skipReason === "worker_suspended" ||
 								outcome.skipReason === "worker_active" ||
-								outcome.skipReason === "worker_cleanup_pending");
+								outcome.skipReason === "worker_cleanup_pending" ||
+								releaseHold !== undefined);
 						const state = outcome.started
 							? "started"
 							: outcome.steering
@@ -2359,7 +2452,13 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								: waitsForIdle
 									? "queued, not started"
 									: "not started";
-						const idleNote = waitsForIdle ? ` It runs when ${agentId} returns to idle.` : "";
+						const idleNote = !waitsForIdle
+							? ""
+							: releaseHold === undefined
+								? ` It runs when ${agentId} returns to idle.`
+								: releaseHold.retained
+									? ` It runs when the host's retry releases ${agentId}'s resources.`
+									: ` It stays queued: nothing retries ${agentId}'s failed release in this session.`;
 						const followUpWaiting = queuedWaitLine(outcome.record);
 						const lane = outcome.record
 							? `; lane ${outcome.record.laneId} (${outcome.record.status}${followUpWaiting ? `; ${followUpWaiting}` : ""})`
@@ -2567,18 +2666,27 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							? await deps.startWorkerDelegation(validatedRequest, signal)
 							: await deps.runWorkerDelegation(validatedRequest);
 						if (!validated.started) {
+							const refusedDetails: DelegateToolDetails = {
+								started: false,
+								action,
+								agentId: reuseAgentId,
+								skipReason: validated.skipReason ?? "worker_reuse_overrides_incompatible",
+							};
+							// Options that match the worker, refused by its own state (still running, or held by a failed
+							// release), are not different work: the refusal says what it waits for.
+							if (validated.skipReason && isSpecialistStateRefusal(validated.skipReason)) {
+								return {
+									...invalid(delegateStartSkipText(validated.skipReason), refusedDetails),
+									errorKind: "operation_outcome" as const,
+								};
+							}
 							return invalid(
 								`delegate start could not apply those options to worker ${reuseAgentId}: ${validated.skipReason ?? "not_started"}. They describe different work; start without agentId to run it as its own worker.${
 									reuseOverrideFields.includes("writePaths")
 										? " A reused worker keeps the write scope it was created with and cannot be widened: start a new worker with `writePaths`."
 										: ""
 								}`,
-								{
-									started: false,
-									action,
-									agentId: reuseAgentId,
-									skipReason: validated.skipReason ?? "worker_reuse_overrides_incompatible",
-								},
+								refusedDetails,
 							);
 						}
 						const validatedRecord = "record" in validated ? validated.record : undefined;
@@ -2615,6 +2723,18 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					});
 					if (!followed.started && !followed.messageId) {
 						const skipReason = followed.skipReason ?? "not_started";
+						const followedReleaseHold = parseSpecialistReleaseHold(skipReason);
+						if (followedReleaseHold) {
+							return {
+								...invalid(specialistReleaseHoldText(followedReleaseHold), {
+									started: false,
+									action,
+									agentId: reuseAgentId,
+									skipReason,
+								}),
+								errorKind: "operation_outcome" as const,
+							};
+						}
 						return invalid(
 							skipReason === "unknown_agent"
 								? `CAVEMAN MODE - MANDATORY: unknown_agent means no reusable worker was found for ${reuseAgentId} in this caller's control scope. This is expected API correction, not lost worker state or harness failure. No worker started; nothing was dropped. If this is fresh work, no worker identity exists yet. Retry once now without agentId; keep instructions unchanged and put any intended overrides/profileId only on that fresh start. If this is reuse, use an exact returned agentId; never invent one.`
@@ -2734,6 +2854,9 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								...(profileId ? { profileId } : {}),
 							},
 							isError: true,
+							...(isSpecialistStateRefusal(started.skipReason)
+								? { errorKind: "operation_outcome" as const }
+								: {}),
 						};
 					}
 					const startedAgentId = started.record.agentId ?? started.record.laneId;
@@ -2786,6 +2909,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							...(profileId ? { profileId } : {}),
 						},
 						isError: true,
+						...(isSpecialistStateRefusal(reason) ? { errorKind: "operation_outcome" as const } : {}),
 					};
 				}
 

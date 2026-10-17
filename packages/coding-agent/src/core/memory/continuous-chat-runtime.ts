@@ -6,6 +6,8 @@
  */
 
 import { safeErrorMessage } from "../../kernel/types.ts";
+import { AsyncRetainedReleases, type ReleaseOutcome, releaseFailureCause } from "../util/resource-release.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import {
 	ContinuousChatCompactionCoordinator,
 	type ContinuousChatCompactionOutcome,
@@ -92,7 +94,12 @@ export interface ContinuousChatRuntimeOptions {
 	warn: (message: string) => void;
 	/** Names this session in the project lease, so a refused session can see which session holds the chat. */
 	label?: string;
+	/** The retained work-claim releases' backoff timers; absent means the global, unreferenced timers. */
+	releaseTimers?: TimerPort;
 }
+
+/** What a claim that ended without a published node must record: given back to the queue, or failed with its reason. */
+type WorkAbandonment = { readonly kind: "release" } | { readonly kind: "fail"; readonly reason: string };
 
 /** One look at the queue for a turn. `target` is the exclusive end of the messages whose leaves the turn waits for. */
 type TurnAttempt =
@@ -132,6 +139,15 @@ export class ContinuousChatRuntime {
 	private pumping = false;
 	private pumpRequested = false;
 	private pumpTask: Promise<void> = Promise.resolve();
+	/**
+	 * Claims whose release or failure record could not be written. The queue still counts each one as running, so a
+	 * leaked claim would hold a compaction slot for good: each is retried on a backoff and on every dispatch pass, and
+	 * a success wakes dispatch and waiting turns.
+	 */
+	private readonly workReleases: AsyncRetainedReleases<{
+		readonly item: ContinuousChatWorkItem;
+		readonly abandonment: WorkAbandonment;
+	}>;
 
 	private constructor(options: ContinuousChatRuntimeOptions) {
 		this.store = options.store;
@@ -140,6 +156,28 @@ export class ContinuousChatRuntime {
 		this.warn = options.warn;
 		this.stopped = new Promise<void>((resolve) => {
 			this.resolveStopped = () => resolve();
+		});
+		this.workReleases = new AsyncRetainedReleases({
+			retryOwner: "continuous-chat runtime",
+			...(options.releaseTimers !== undefined ? { timers: options.releaseTimers } : {}),
+			release: async ({ item, abandonment }) => {
+				// After a lost lease the store refuses every write: the next owner's startup recovery requeues the claim.
+				if (this.leaseLost)
+					return { abandoned: "the runtime lease was lost", reaper: "the next owner's startup recovery" };
+				await this.recordAbandonment(item, abandonment);
+				return "released";
+			},
+			reportFailure: (entry, error) =>
+				this.warn(
+					`Continuous-chat work ${continuousChatNodeLabel(entry.value.item)} could not be recorded again: ${releaseFailureCause(error)}`,
+				),
+			reportListenerFailure: (error) =>
+				this.warn(`Continuous-chat work release wake failed: ${safeErrorMessage(error, "unknown error")}`),
+		});
+		// A recorded claim frees its slot (dispatch) and may complete or fail a leaf a turn waits for.
+		this.workReleases.subscribe(() => {
+			this.notifyChange();
+			this.requestPump();
 		});
 	}
 
@@ -155,9 +193,7 @@ export class ContinuousChatRuntime {
 		try {
 			await options.store.recover();
 		} catch (error) {
-			await options.store.releaseRuntimeLease().catch((releaseError: unknown) => {
-				options.warn(`Continuous-chat lease could not be released: ${safeErrorMessage(releaseError)}`);
-			});
+			runtime.reportLeaseRelease(await options.store.releaseRuntimeLease(), "after a failed recovery");
 			throw error;
 		}
 		return runtime;
@@ -311,7 +347,29 @@ export class ContinuousChatRuntime {
 		this.notifyChange();
 		await this.pumpTask;
 		await Promise.all([...this.jobs.values()]);
-		await this.store.releaseRuntimeLease();
+		// Last pass for claims that could not be recorded; one still unrecorded stays claimed for the next owner's recovery.
+		this.workReleases.close();
+		const unrecorded = await this.workReleases.retry({ report: false, lastChance: true });
+		if (unrecorded.length > 0) {
+			this.warn(
+				`Continuous-chat stopped with ${this.workReleases.size} claimed work item(s) it could not record (${this.workReleases
+					.entriesSnapshot()
+					.map((entry) => `${continuousChatNodeLabel(entry.value.item)}: ${entry.cause}`)
+					.join("; ")}); the next owner's startup recovery requeues them.`,
+			);
+		}
+		this.reportLeaseRelease(await this.store.releaseRuntimeLease(), "at stop");
+	}
+
+	/** A lease release that did not complete is retained by the store (its exit hook stays); say so once. */
+	private reportLeaseRelease(outcome: ReleaseOutcome, when: string): void {
+		if (outcome.kind === "retained") {
+			this.warn(
+				`Continuous-chat lease could not be released ${when} (${outcome.cause}); its removal is retried, and it is removed at process exit.`,
+			);
+		} else if (outcome.kind === "superseded") {
+			this.warn(`Continuous-chat lease was not released ${when}: ${outcome.detail}.`);
+		}
 	}
 
 	/**
@@ -459,15 +517,13 @@ export class ContinuousChatRuntime {
 		}
 		if (fatal !== undefined) {
 			await Promise.all([...this.jobs.values()]);
-			await this.store.releaseRuntimeLease().catch((releaseError: unknown) => {
-				this.warn(
-					`Continuous-chat lease could not be released after dispatch failure: ${safeErrorMessage(releaseError)}`,
-				);
-			});
+			this.reportLeaseRelease(await this.store.releaseRuntimeLease(), "after dispatch failure");
 		}
 	}
 
 	private async claimReady(): Promise<void> {
+		// A claim that could not be recorded still holds its slot: every dispatch pass retries it first.
+		if (this.workReleases.size > 0) await this.workReleases.retry({ report: false });
 		while (!this.stopping && this.jobs.size < CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS) {
 			const targets = [...this.turnTargets.values()];
 			const item = await this.store.claimWork(targets.length > 0 ? Math.max(...targets) : undefined);
@@ -477,7 +533,7 @@ export class ContinuousChatRuntime {
 			}
 			if (this.stopping) {
 				// After a lost lease the claim stays persisted for the next owner's recovery to requeue.
-				if (!this.leaseLost) await this.store.releaseWork(item);
+				if (!this.leaseLost) await this.recordOrRetain(item, { kind: "release" });
 				return;
 			}
 			this.startJob(item);
@@ -499,11 +555,39 @@ export class ContinuousChatRuntime {
 		try {
 			await this.settle(item, await this.compact(item));
 		} catch (error) {
-			await this.abandon(item, error).catch((secondary: unknown) => {
-				const label = continuousChatNodeLabel(item);
-				this.warn(`Continuous-chat work ${label} could not be recorded: ${safeErrorMessage(secondary)}`);
-			});
+			// After a lost lease the store refuses every write: the claim is left for recovery.
+			if (this.leaseLost) return;
+			await this.recordOrRetain(
+				item,
+				this.abort.signal.aborted
+					? { kind: "release" }
+					: { kind: "fail", reason: safeErrorMessage(error, "Continuous-chat compaction failed.") },
+			);
 		}
+	}
+
+	/** Records how a claim ended; a record that cannot be written is retained, so the claim never leaks its slot. */
+	private async recordOrRetain(item: ContinuousChatWorkItem, abandonment: WorkAbandonment): Promise<void> {
+		try {
+			await this.recordAbandonment(item, abandonment);
+		} catch (error) {
+			const key = continuousChatWorkItemKey(item);
+			if (this.workReleases.closed) {
+				this.warn(
+					`Continuous-chat work ${continuousChatNodeLabel(item)} could not be recorded: ${safeErrorMessage(error)}; the next owner's startup recovery requeues it.`,
+				);
+				return;
+			}
+			this.workReleases.retain(key, { item, abandonment }, error);
+			this.warn(
+				`Continuous-chat work ${continuousChatNodeLabel(item)} could not be recorded; retrying: ${safeErrorMessage(error)}`,
+			);
+		}
+	}
+
+	private async recordAbandonment(item: ContinuousChatWorkItem, abandonment: WorkAbandonment): Promise<void> {
+		if (abandonment.kind === "release") await this.store.releaseWork(item);
+		else await this.fail(item, abandonment.reason);
 	}
 
 	private async compact(item: ContinuousChatWorkItem): Promise<ContinuousChatCompactionOutcome> {
@@ -560,14 +644,5 @@ export class ContinuousChatRuntime {
 		await this.store.failWork(item, reason);
 		this.warn(`Continuous-chat compaction ${continuousChatNodeLabel(item)} failed: ${reason}`);
 		this.emit({ type: "failed", item, reason });
-	}
-
-	private async abandon(item: ContinuousChatWorkItem, error: unknown): Promise<void> {
-		if (this.leaseLost) return;
-		if (this.abort.signal.aborted) {
-			await this.store.releaseWork(item);
-			return;
-		}
-		await this.fail(item, safeErrorMessage(error, "Continuous-chat compaction failed."));
 	}
 }

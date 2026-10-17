@@ -17,8 +17,11 @@ import {
 	type BackgroundToolTerminalDeliveryResult,
 	loadBackgroundToolTaskRecordsNewestFirst,
 } from "./background-tool-task-controller.ts";
+import type { TimerPort } from "./util/timer-port.ts";
 
 export interface SessionBackgroundToolTaskDeps {
+	/** The session's `background-tool-task` timer port: the clock and alarms of the task watchdogs and wake-up retries. */
+	timers: TimerPort;
 	getSessionManager(): SessionManager;
 	getGoalId(): string | undefined;
 	getCurrentSubmissionEpoch(): number | undefined;
@@ -41,6 +44,7 @@ export interface SessionBackgroundToolTaskDeps {
 
 export function createSessionBackgroundToolTasks(deps: SessionBackgroundToolTaskDeps): BackgroundToolTaskController {
 	return new BackgroundToolTaskController({
+		timers: deps.timers,
 		getSessionId: () => deps.getSessionManager().getSessionId(),
 		getGoalId: () => deps.getGoalId(),
 		getCurrentSubmissionEpoch: () => deps.getCurrentSubmissionEpoch(),

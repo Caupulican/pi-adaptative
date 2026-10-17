@@ -895,6 +895,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | `compaction_end` | Compaction completes |
 | `auto_retry_start` | Auto-retry begins (after transient error) |
 | `auto_retry_end` | Auto-retry completes (success or final failure) |
+| `wait` | A session wait started, made progress, is overdue, or ended (with its typed end) |
 | `extension_error` | Extension threw an error |
 
 ### agent_start
@@ -1109,6 +1110,28 @@ On final failure (max retries exceeded):
   "finalError": "529 overloaded_error: Overloaded"
 }
 ```
+
+### wait
+
+The status stream of a session wait: a `tool_task` wait, a delegate `inbox_wait`, a steer's admission decision (a delegate `wait`/`wait_many` the steer ends reports only that decision), the objective loop's wait for its workers, or a wait for the foreground (submission, history claim, idle). Every `start` is followed by exactly one `end`; `progress` and `overdue` come only between them, and a wait that never blocks emits nothing. `seq` tells concurrent waits with the same `id` apart.
+
+`bound.kind` is `deadline` (the wait ends `timed_out` at `bound.ms`) or `watchdog` (it never ends on time; every `bound.ms` it emits `overdue` with `holder`, naming what holds the awaited thing). `steer` is the input source that ends the wait (`owner.steer`) or `exempt: <reason>`.
+
+```json
+{
+  "type": "wait",
+  "phase": "end",
+  "id": "tool_task.wait",
+  "seq": 12,
+  "wake": ["task.terminal"],
+  "steer": "owner.steer",
+  "bound": { "kind": "deadline", "ms": 300000 },
+  "elapsedMs": 4210,
+  "end": { "kind": "steered", "by": "owner.steer", "decision": "decided" }
+}
+```
+
+`end.kind` is one of `satisfied` (with `by`, the wake source), `timed_out` (with `boundMs`), `aborted` (with `reason`), `steered` (with `by` and `decision`: how the steer's admission settled, `decided`, `timed_out`, `aborted` or `none`), `disposed`, or `unavailable` (with `cause`).
 
 ### extension_error
 

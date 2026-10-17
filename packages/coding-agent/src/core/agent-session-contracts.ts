@@ -18,7 +18,6 @@ import type { LaneRecord, LaneTerminalStatus } from "./autonomy/lane-tracker.ts"
 import type { BackgroundToolTaskLiveView } from "./background-tool-task-controller.ts";
 import type { AutoCompactionReason } from "./compaction-controller.ts";
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
-import type { WorkerWriteReservationTimers } from "./delegation/worker-write-reservation-coordinator.ts";
 import type {
 	ContextUsage,
 	ExtensionCommandContextActions,
@@ -34,7 +33,6 @@ import type {
 } from "./extensions/index.ts";
 import type { GoalContinuationPrompt } from "./goals/goal-continuation-prompt.ts";
 import type { GoalRuntimeSnapshot } from "./goals/goal-runtime-snapshot.ts";
-import type { TranscriptSummaryTimeSource } from "./memory/transcript-memory-contracts.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { AccountModelCatalog } from "./model-router/account-models.ts";
 import type { LocalRuntimeDeps } from "./models/local-runtime.ts";
@@ -50,6 +48,8 @@ import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plan
 import type { SystemOneController } from "./system-one/controller.ts";
 import type { ToolArgumentValidationStats } from "./tool-recovery-stats.ts";
 import type { BashOperations } from "./tools/schemas/bash.ts";
+import type { TimerSource } from "./util/timer-port.ts";
+import type { WaitEndReport, WaitStatusEvent } from "./util/wait.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 export { type ParsedSkillBlock, parseSkillBlock } from "./skill-block.mjs";
@@ -96,7 +96,11 @@ export type AgentSessionEvent =
 			built: number;
 			needed: number;
 			failed: number;
+			/** `end` only: how the wait ended (reserved, aborted, unavailable). */
+			end?: WaitEndReport;
 	  }
+	/** One wait's status (see util/wait.ts): every `start` is followed by exactly one `end`, carrying its typed reason. */
+	| WaitStatusEvent
 	/** UI-only bracket around foreground routing/preparation. Always paired with `routing_end`. */
 	| { type: "routing_start" }
 	| { type: "routing_end" }
@@ -172,10 +176,8 @@ export interface AgentSessionConfig {
 	localRuntimeDeps?: LocalRuntimeDeps;
 	/** System One semantic control plane controller for Jev semantic validation. */
 	systemOneController?: SystemOneController;
-	/** The time source of the history summary hierarchy; absent means the system clock and real timers. */
-	historyTimeSource?: TranscriptSummaryTimeSource;
-	/** Timers of the write-reservation retained-release backoff alarm; absent means the global timers, unreferenced. */
-	writeReservationTimers?: WorkerWriteReservationTimers;
+	/** The one timer source of the session's recovery, retry and watchdog alarms and of the clocks they are due on. */
+	timers: TimerSource;
 	/** What the owner's provider accounts offer, checked with the providers; absent skips the check. */
 	accountModels?: AccountModelCatalog;
 	/** Execution loop mode for objective execution ('legacy_goal', 'objective_shadow', 'objective_primary'). */

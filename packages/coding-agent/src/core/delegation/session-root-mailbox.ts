@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { sessionRootMailboxFile } from "../agent-paths.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedTextFileSync } from "../util/bounded-file.ts";
+import { type SteerDecision, type WaitStatusEvent, type WaitSteer, type WakeSource, waitFor } from "../util/wait.ts";
 import { createReplaySafeMailboxBounder } from "./replay-safe-mailbox-bounds.ts";
 
 const MAX_MANDATORY_REPLIES = 64;
@@ -112,12 +113,23 @@ export interface SessionRootReplyQuery {
 export interface SessionRootReplyWaitOptions extends SessionRootReplyQuery {
 	timeoutMs?: number;
 	signal?: AbortSignal;
+	/** Whether input the session root must read first (its owner's steer) ends the wait. */
+	steer?: WaitSteer;
+	report?: (event: WaitStatusEvent) => void;
 }
 
 export interface SessionRootReplyWaitResult {
 	replies: SessionRootReply[];
 	timedOut: boolean;
+	/** Set when the owner's input ended the wait before a reply arrived: how that input's admission settled. */
+	steered?: SteerDecision;
 }
+
+/** A reply wait whose caller names no steer source ends only on a reply, its deadline or its abort. */
+const NO_STEER_SOURCE: WaitSteer = {
+	mode: "exempt",
+	reason: "the caller names no steer source; its deadline and abort bound the wait",
+};
 
 function requiredIdentity(value: unknown, label: string): string {
 	if (typeof value !== "string") throw new TypeError(`Session root reply ${label} is invalid.`);
@@ -742,74 +754,30 @@ export class SessionRootMailbox {
 		if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_WAIT_TIMEOUT_MS) {
 			throw new TypeError(`Session root reply wait timeout must be from 0 through ${MAX_WAIT_TIMEOUT_MS}.`);
 		}
-		if (options.signal?.aborted) throw abortReason(options.signal);
-		const currentReplies = () => this.pendingReplies(query);
-		const immediate = currentReplies();
-		if (immediate.length > 0) return { replies: immediate, timedOut: false };
-		return new Promise<SessionRootReplyWaitResult>((resolve, reject) => {
-			let settled = false;
-			let unsubscribe = (): void => undefined;
-			let timeout: ReturnType<typeof setTimeout> | undefined;
-			const signal = options.signal;
-			const cleanup = () => {
-				unsubscribe();
-				if (timeout) clearTimeout(timeout);
-				if (signal) signal.removeEventListener("abort", onAbort);
-			};
-			const settleFromPredicate = () => {
-				if (settled) return;
-				let replies: SessionRootReply[];
-				try {
-					replies = currentReplies();
-				} catch (error) {
-					settled = true;
-					cleanup();
-					reject(error);
-					return;
-				}
-				if (replies.length === 0) return;
-				settled = true;
-				cleanup();
-				resolve({ replies, timedOut: false });
-			};
-			const onAbort = () => {
-				if (settled) return;
-				settled = true;
-				cleanup();
-				reject(abortReason(signal!));
-			};
-			unsubscribe = this.subscribe(settleFromPredicate);
-			if (settled) {
-				unsubscribe();
-				return;
-			}
-			if (signal) {
-				signal.addEventListener("abort", onAbort, { once: true });
-				if (signal.aborted) {
-					onAbort();
-					return;
-				}
-			}
-			timeout = setTimeout(() => {
-				if (settled) return;
-				settled = true;
-				cleanup();
-				let finalReplies: SessionRootReply[];
-				try {
-					finalReplies = currentReplies();
-				} catch (error) {
-					reject(error);
-					return;
-				}
-				if (finalReplies.length > 0) {
-					resolve({ replies: finalReplies, timedOut: false });
-				} else {
-					resolve({ replies: finalReplies, timedOut: true });
-				}
-			}, timeoutMs);
-			if (typeof timeout === "object" && timeout && "unref" in timeout) timeout.unref();
-			settleFromPredicate();
+		const signal = options.signal;
+		if (signal?.aborted) throw abortReason(signal);
+		// Process-local: a reply another process writes is read at the deadline's final check, never as a wake.
+		const reply: WakeSource<SessionRootReply[]> = {
+			id: "mailbox.reply",
+			subscribe: (onWake) => this.subscribe(onWake),
+			check: () => {
+				const replies = this.pendingReplies(query);
+				return replies.length > 0 ? { kind: "satisfied", value: replies } : undefined;
+			},
+		};
+		const { end, value } = await waitFor({
+			id: "delegate.inbox_wait",
+			wake: [reply],
+			signal,
+			steer: options.steer ?? NO_STEER_SOURCE,
+			bound: { kind: "deadline", ms: timeoutMs },
+			...(options.report ? { report: options.report } : {}),
 		});
+		if (end.kind === "satisfied") return { replies: value ?? [], timedOut: false };
+		if (end.kind === "timed_out") return { replies: [], timedOut: true };
+		if (end.kind === "steered") return { replies: [], timedOut: false, steered: end.decision };
+		if (end.kind === "aborted" && signal) throw abortReason(signal);
+		throw new Error(`Session root reply wait ended ${end.kind} without a reply.`);
 	}
 
 	/**

@@ -79,6 +79,7 @@ import { normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
 import { attemptVerification } from "./worker-lane-projection.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { isWorkerTaskPrompt } from "./worker-runner.ts";
+import { specialistReleaseSkipReason } from "./worker-specialization-match.ts";
 import { projectWorkerTaskSessionView } from "./worker-task-view.ts";
 import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "./worker-terminal-handoff-coordinator.ts";
 import { workerTerminalOutputArtifact } from "./worker-terminal-output-artifact.ts";
@@ -114,6 +115,13 @@ export interface WorkerAgentControlCoordinatorOptions {
 	 * consults this owner before admitting new work onto the same context.
 	 */
 	isSpecialistSettled?(agentId: string): boolean;
+	/**
+	 * Why an unsettled specialist whose run ended still holds its resources, when a failed release is the reason:
+	 * `retained` is retried by the host, `abandoned` stays until the session ends. The cause is one bounded line.
+	 */
+	specialistReleaseHold?(
+		agentId: string,
+	): { readonly kind: "retained" | "abandoned"; readonly cause: string } | undefined;
 	waitBlockedByCaller?(callerAgentId: string, targetAgentIds: readonly string[]): readonly string[];
 	/** Yield caller-owned scheduler and mutation resources until the returned restorer succeeds. */
 	yieldCallerForWait?(callerAgentId: string): (() => boolean | undefined) | undefined;
@@ -637,7 +645,12 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		}
 		// Durable idleness is not release: the previous execution may still be disposing its tools.
 		if (this.options.isSpecialistSettled?.(agent.agentId) === false) {
-			return { started: false, steering: false, messageId: "", skipReason: "worker_cleanup_pending" };
+			return {
+				started: false,
+				steering: false,
+				messageId: "",
+				skipReason: this.cleanupPendingSkipReason(agent.agentId),
+			};
 		}
 		return this.startIdleAgentTask(
 			agent,
@@ -647,6 +660,15 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			newTask,
 			options.newTask?.goal,
 		);
+	}
+
+	/**
+	 * The reason an idle, unsettled specialist takes no turn yet: the failed release that holds it, named with its
+	 * cause, or plain disposal still in progress.
+	 */
+	private cleanupPendingSkipReason(agentId: string): string {
+		const hold = this.options.specialistReleaseHold?.(agentId);
+		return hold ? specialistReleaseSkipReason(hold.kind, agentId, hold.cause) : "worker_cleanup_pending";
 	}
 
 	private replayWorkerAgentTask(
@@ -2111,7 +2133,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				if (this.options.isSpecialistSettled?.(agent.agentId) === false) {
 					// The pending turn stays pending: reconciliation runs again when the execution that
 					// still owns this context signals its state change after disposal.
-					return { started: false, skipReason: "worker_cleanup_pending" };
+					return { started: false, skipReason: this.cleanupPendingSkipReason(agent.agentId) };
 				}
 				if (agent.status !== "registered") {
 					const settled = this.settleTerminalTaskBearingMessage(

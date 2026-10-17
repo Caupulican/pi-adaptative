@@ -12,6 +12,7 @@ import {
 	type RecordableQueuedInput,
 } from "./queued-input-record.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
+import { type SteerDecision, type SteerWake, type WaitStatusEvent, waitFor } from "./util/wait.ts";
 
 export interface PendingQueueSnapshot {
 	steering: string[];
@@ -129,35 +130,64 @@ export interface PendingInputContext {
  */
 const activeControllers = new Set<PendingInputQueueController>();
 
+function sessionControllers(sessionId: string | undefined): PendingInputQueueController[] {
+	return [...activeControllers].filter((controller) => !sessionId || controller.matchesSessionId(sessionId));
+}
+
 export function subscribeSessionSteerQueued(sessionId: string | undefined, listener: () => void): () => void {
-	const unsubscribes: Array<() => void> = [];
-	for (const controller of activeControllers) {
-		if (!sessionId || controller.matchesSessionId(sessionId)) {
-			unsubscribes.push(controller.onSteerQueued(listener));
-		}
-	}
+	const unsubscribes = sessionControllers(sessionId).map((controller) => controller.onSteerQueued(listener));
 	return () => {
 		for (const unsubscribe of unsubscribes) unsubscribe();
 	};
 }
 
-export async function waitForSessionSteerAdmission(sessionId: string | undefined, signal?: AbortSignal): Promise<void> {
-	for (const controller of activeControllers) {
-		if (!sessionId || controller.matchesSessionId(sessionId)) {
-			await controller.waitForPendingSteerDecision(signal);
-		}
+/**
+ * Lets every undecided steer of the session reach its admission decision, and says how that ended: `timed_out` when
+ * any decision outlived its reported deadline, `aborted` when `signal` ended it, else `decided`.
+ */
+export async function waitForSessionSteerAdmission(
+	sessionId: string | undefined,
+	signal?: AbortSignal,
+	report?: (event: WaitStatusEvent) => void,
+): Promise<SteerDecision> {
+	let decision: SteerDecision = "decided";
+	for (const controller of sessionControllers(sessionId)) {
+		const settled = await controller.waitForPendingSteerDecision(signal, report);
+		if (settled === "aborted") return "aborted";
+		if (settled === "timed_out") decision = "timed_out";
 	}
+	return decision;
+}
+
+/** Abort reason of a wait the owner's queued steer ended: never an abort of the waiter itself. */
+export const OWNER_STEER_QUEUED = new Error("The owner queued input while the wait ran.");
+
+/**
+ * The owner's steer as a wait's built-in wake (`owner.steer`): a steer queued while the wait runs ends it, a steer
+ * already queued and not yet read by the session's model ends it at once, and `settle` lets that steer's admission
+ * settle so the waiter's next steering poll already reads it.
+ */
+export function ownerSteerWake(sessionId: string | undefined, report?: (event: WaitStatusEvent) => void): SteerWake {
+	return {
+		id: "owner.steer",
+		subscribe: (onSteer) => subscribeSessionSteerQueued(sessionId, onSteer),
+		pending: () => sessionControllers(sessionId).some((controller) => controller.hasUnreadSteer()),
+		settle: (signal) => waitForSessionSteerAdmission(sessionId, signal, report),
+	};
 }
 
 /**
- * A blocking wait that yields to the owner: a steer queued while it runs aborts the returned signal, and
- * `finalize` then lets that steer's admission settle so the caller's next steering poll already sees it.
- * An abort of `signal` itself is passed through unchanged and is never treated as a steer.
+ * The owner-steer wake for a wait that ends on an abort signal: a steer aborts the returned signal (with
+ * `OWNER_STEER_QUEUED`), and `finalize` then settles that steer's admission and returns its decision. An abort of
+ * `signal` itself is passed through unchanged and is never a steer: `finalize` returns `undefined` then, as it does
+ * when no steer arrived.
  */
 export function createSteerAwareWait(
 	sessionId: string | undefined,
 	signal: AbortSignal | undefined,
-): { readonly signal: AbortSignal; readonly finalize: () => Promise<void> } {
+	report?: (event: WaitStatusEvent) => void,
+): { readonly signal: AbortSignal; readonly finalize: () => Promise<SteerDecision | undefined> } {
+	const wake = ownerSteerWake(sessionId, report);
 	const controller = new AbortController();
 	let steered = false;
 	const onAbort = () => controller.abort(signal?.reason);
@@ -166,21 +196,31 @@ export function createSteerAwareWait(
 	} else {
 		signal?.addEventListener("abort", onAbort, { once: true });
 	}
-	const unsubscribeSteer = subscribeSessionSteerQueued(sessionId, () => {
+	const onSteer = (): void => {
+		if (controller.signal.aborted) return;
 		steered = true;
-		controller.abort();
-	});
+		controller.abort(OWNER_STEER_QUEUED);
+	};
+	const unsubscribeSteer = wake.subscribe(onSteer);
+	if (wake.pending()) onSteer();
 	return {
 		signal: controller.signal,
 		finalize: async () => {
 			unsubscribeSteer();
 			signal?.removeEventListener("abort", onAbort);
-			if (steered && !signal?.aborted) {
-				await waitForSessionSteerAdmission(sessionId, signal);
-			}
+			if (!steered || signal?.aborted) return undefined;
+			return wake.settle ? wake.settle(signal) : "none";
 		},
 	};
 }
+
+/**
+ * How long a wait a steer ended lets that steer's admission decide before it returns anyway, reported as `timed_out`.
+ * Twice the System One stage deadline (5 s, system-one/controller.ts), so one judgment lands with margin. A decision
+ * that takes longer (inputs queued ahead of it are judged first, in order) still ends the wait at this bound; the
+ * steer is then read at the first steering poll after its admission, as it would be with no wait at all.
+ */
+export const STEER_DECISION_DEADLINE_MS = 10_000;
 
 export class PendingInputQueueController {
 	/** Submission order per kind; an entry admits only after every earlier entry of its kind. */
@@ -217,31 +257,43 @@ export class PendingInputQueueController {
 		};
 	}
 
-	waitForPendingSteerDecision(signal?: AbortSignal): Promise<void> {
-		if (this._closed || signal?.aborted || !this._steering.some((entry) => !entry.admission && !entry.held)) {
-			return Promise.resolve();
-		}
-		return new Promise((resolve) => {
-			let settled = false;
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const finish = () => {
-				if (settled) return;
-				settled = true;
-				this._steerDecisionListeners.delete(check);
-				if (timer !== undefined) clearTimeout(timer);
-				signal?.removeEventListener("abort", finish);
-				resolve();
-			};
-			const check = () => {
-				if (this._closed || !this._steering.some((entry) => !entry.admission && !entry.held)) {
-					finish();
-				}
-			};
-			timer = setTimeout(finish, 50);
-			if (typeof timer === "object" && "unref" in timer) timer.unref();
-			this._steerDecisionListeners.add(check);
-			signal?.addEventListener("abort", finish, { once: true });
+	/** A steer the session's model has not read yet: still deciding, or admitted and waiting for the steering poll. */
+	hasUnreadSteer(): boolean {
+		return !this._closed && this._steering.some((entry) => !entry.held);
+	}
+
+	/**
+	 * Waits until no steer awaits its admission decision (admitted, promoted, held, withdrawn, or the queue closed),
+	 * on the decision events, bounded by the reported `STEER_DECISION_DEADLINE_MS`.
+	 */
+	async waitForPendingSteerDecision(
+		signal?: AbortSignal,
+		report?: (event: WaitStatusEvent) => void,
+	): Promise<SteerDecision> {
+		const { end } = await waitFor<true>({
+			id: "owner.steer.decision",
+			wake: [
+				{
+					id: "steer.decision",
+					subscribe: (onWake) => {
+						if (this._closed) return () => undefined;
+						this._steerDecisionListeners.add(onWake);
+						return () => {
+							this._steerDecisionListeners.delete(onWake);
+						};
+					},
+					check: () =>
+						this._closed || !this._steering.some((entry) => !entry.admission && !entry.held)
+							? { kind: "satisfied", value: true }
+							: undefined,
+				},
+			],
+			signal,
+			steer: { mode: "exempt", reason: "this wait is a steer's own admission decision" },
+			bound: { kind: "deadline", ms: STEER_DECISION_DEADLINE_MS },
+			...(report ? { report } : {}),
 		});
+		return end.kind === "satisfied" ? "decided" : end.kind === "timed_out" ? "timed_out" : "aborted";
 	}
 
 	private _notifySteerQueued(): void {
