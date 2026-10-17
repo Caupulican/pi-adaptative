@@ -436,6 +436,16 @@ export function recoverContinuousChatWorkQueue(state: ContinuousChatWorkQueueSta
 	};
 }
 
+/** Leaves still to build for the turn: admitted-unbuilt ones plus messages not yet admitted to the leaf window. */
+export function continuousChatUnbuiltLeafCount(state: ContinuousChatWorkQueueState): number {
+	return unbuiltLeaves(state).length + (state.totalMessages - state.nextLeaf);
+}
+
+/** Admitted leaves whose build failed and waits for the next arrival to be retried. */
+export function continuousChatFailedLeafCount(state: ContinuousChatWorkQueueState): number {
+	return state.blocked.filter((entry) => entry.item.level === 0).length;
+}
+
 /** Message ids below the returned id are all built. The causal view stops here, so no call sees an unbuilt line. */
 export function continuousChatBuiltLeafPrefix(state: ContinuousChatWorkQueueState): number {
 	return unbuiltLeaves(state).reduce((prefix, item) => Math.min(prefix, item.ordinal), state.nextLeaf);

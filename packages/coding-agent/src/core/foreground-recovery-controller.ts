@@ -29,7 +29,14 @@ export interface ForegroundRecoveryControllerSettingsSource {
 type ForegroundRecoveryEvent =
 	| { type: "warning"; message: string }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
+	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| {
+			type: "continuous_chat_prefix_wait";
+			phase: "start" | "progress" | "end";
+			built: number;
+			needed: number;
+			failed: number;
+	  };
 
 const foregroundSubmissionLeaseMarker: unique symbol = Symbol("foregroundSubmissionLease");
 
@@ -349,11 +356,25 @@ export class ForegroundRecoveryController {
 		if (turns === undefined || turns.current() !== undefined) return undefined;
 		const start = startOf();
 		let turn: IcmTurnHandle;
+		let waitProgress: { built: number; needed: number; failed: number } | undefined;
+		let waitStarted = false;
 		try {
-			turn = await turns.begin(signal);
+			turn = await turns.begin(signal, (progress) => {
+				waitProgress = progress;
+				this.deps.emit({
+					type: "continuous_chat_prefix_wait",
+					phase: waitStarted ? "progress" : "start",
+					...progress,
+				});
+				waitStarted = true;
+			});
 		} catch (error) {
 			if (signal?.aborted) return undefined;
 			throw error;
+		} finally {
+			// One end for every start, whichever way the wait ends: reserved, aborted, unavailable or stopped.
+			if (waitStarted && waitProgress)
+				this.deps.emit({ type: "continuous_chat_prefix_wait", phase: "end", ...waitProgress });
 		}
 		turn.markStart(start.message, start.alreadyLogged);
 		return () => turns.end(turn);

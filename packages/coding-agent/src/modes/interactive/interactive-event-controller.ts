@@ -686,6 +686,22 @@ export class InteractiveEventController {
 				this.port.ui.requestRender();
 				break;
 			}
+			case "continuous_chat_prefix_wait": {
+				const id = "runtime:memory-summaries";
+				const label = `waiting for memory summaries (${event.built} of ${event.needed} leaves built${event.failed > 0 ? `, ${event.failed} failed` : ""})`;
+				if (event.phase === "start") {
+					this.port.activityLane?.wait({ id, kind: "runtime", scope: "foreground", label });
+					this.loadingAnimation?.setMessage(label);
+				} else if (event.phase === "progress") {
+					this.port.activityLane?.update(id, label);
+					this.loadingAnimation?.setMessage(label);
+				} else {
+					this.port.activityLane?.remove(id);
+					this.loadingAnimation?.setMessage(this.port.runtimeStatus.getWorkingLoaderMessage());
+				}
+				this.port.ui.requestRender();
+				break;
+			}
 			case "auto_retry_end":
 				this.clearRetryControls();
 				this.loadingAnimation?.setMessage(this.port.runtimeStatus.getWorkingLoaderMessage());

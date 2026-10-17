@@ -220,6 +220,11 @@ export class FlowTrace {
 				this.begin("wait", { actor: "root", kind: "wait", label: `waiting on ${event.provider}: ${event.reason}` });
 			else this.finish("wait", "ok");
 		},
+		continuous_chat_prefix_wait: (event) => {
+			if (event.phase === "start")
+				this.begin("memory-wait", { actor: "root", kind: "wait", label: "wait for memory summaries" });
+			else if (event.phase === "end") this.finish("memory-wait", "ok");
+		},
 		// Worker lanes are read from their records (observeLanes); this summary carries no dispatches.
 		delegate_workers: () => {},
 		// Session state, not actions. A withdrawn echo's input is held, and that hold is the warning the trace records.

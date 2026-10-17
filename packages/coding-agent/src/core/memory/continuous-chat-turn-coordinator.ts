@@ -6,7 +6,11 @@
 
 import type { AgentMessage } from "../../kernel/index.ts";
 import type { ContinuousChatIngestor } from "./continuous-chat-ingest.ts";
-import type { ContinuousChatRuntime, ContinuousChatTurnBoundary } from "./continuous-chat-runtime.ts";
+import type {
+	ContinuousChatPrefixWaitProgress,
+	ContinuousChatRuntime,
+	ContinuousChatTurnBoundary,
+} from "./continuous-chat-runtime.ts";
 
 export type IcmTurnPhase = "idle" | "awaitingPrefix" | "running" | "stopping";
 
@@ -136,7 +140,10 @@ export class IcmTurnCoordinator {
 	 * Starts a fresh user turn. Every announced entry is logged first: a failed log rejects here and the turn does not
 	 * start, so it never proceeds with earlier messages missing. Then the boundary is pinned. Rejects on abort.
 	 */
-	async begin(signal?: AbortSignal): Promise<IcmTurnHandle> {
+	async begin(
+		signal?: AbortSignal,
+		onWaiting?: (progress: ContinuousChatPrefixWaitProgress) => void,
+	): Promise<IcmTurnHandle> {
 		if (this.currentPhase !== "idle")
 			throw new Error(`ICM turn cannot begin while the turn is ${this.currentPhase}.`);
 		this.setPhase("awaitingPrefix");
@@ -146,7 +153,7 @@ export class IcmTurnCoordinator {
 			await untilAborted(this.deps.ingestor.flush(), signal);
 			await untilAborted(this.deps.ingestor.settled(), signal);
 			signal?.throwIfAborted();
-			boundary = await this.deps.runtime.reserveTurnBoundary(signal);
+			boundary = await this.deps.runtime.reserveTurnBoundary(signal, onWaiting);
 		} catch (error) {
 			this.setPhase("idle");
 			throw error;

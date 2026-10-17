@@ -88,6 +88,14 @@ export type AgentSessionEvent =
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	/** A provider request is waiting (or stopped waiting) at machine-wide admission: a recorded limit, the in-flight cap, or the emergency stop. */
 	| ({ type: "provider_admission_wait" } & ProviderAdmissionWaitEvent)
+	/** UI-only: a foreground turn is waiting for the continuous chat to build its leaf summaries. Every `start` is followed by exactly one `end`; `progress` repeats only when the counts change. */
+	| {
+			type: "continuous_chat_prefix_wait";
+			phase: "start" | "progress" | "end";
+			built: number;
+			needed: number;
+			failed: number;
+	  }
 	/** UI-only bracket around foreground routing/preparation. Always paired with `routing_end`. */
 	| { type: "routing_start" }
 	| { type: "routing_end" }

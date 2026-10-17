@@ -30,6 +30,8 @@ import {
 	type ContinuousChatWorkItem,
 	type ContinuousChatWorkQueueState,
 	continuousChatBuiltLeafPrefix,
+	continuousChatFailedLeafCount,
+	continuousChatUnbuiltLeafCount,
 	continuousChatWorkItemKey,
 } from "./continuous-chat-work-queue.ts";
 
@@ -42,6 +44,13 @@ export class ContinuousChatPrefixUnavailableError extends Error {
 		this.name = "ContinuousChatPrefixUnavailableError";
 		this.reasons = reasons;
 	}
+}
+
+/** How far a waiting turn's leaf build has come: `built` of `needed` leaves, `failed` of the rest awaiting a retry. */
+export interface ContinuousChatPrefixWaitProgress {
+	readonly built: number;
+	readonly needed: number;
+	readonly failed: number;
 }
 
 export interface ContinuousChatTurnBoundary {
@@ -74,7 +83,7 @@ export interface ContinuousChatRuntimeOptions {
 
 type TurnAttempt =
 	| { status: "reserved"; boundary: ContinuousChatTurnBoundary }
-	| { status: "waiting"; queue: ContinuousChatWorkQueueState };
+	| { status: "waiting"; queue: ContinuousChatWorkQueueState; totalMessages: number };
 
 type AppendAttempt = { status: "appended"; results: ContinuousChatAppendResult[] };
 
@@ -173,9 +182,14 @@ export class ContinuousChatRuntime {
 	}
 
 	/** Waits until every logged message has a built leaf, then snapshots the turn's view and boundary. Throws ContinuousChatPrefixUnavailableError when nothing is ready or running. */
-	async reserveTurnBoundary(signal?: AbortSignal): Promise<ContinuousChatTurnBoundary> {
+	async reserveTurnBoundary(
+		signal?: AbortSignal,
+		onWaiting?: (progress: ContinuousChatPrefixWaitProgress) => void,
+	): Promise<ContinuousChatTurnBoundary> {
 		await this.store.noteArrival();
 		this.requestPump();
+		let first: { unbuilt: number; total: number } | undefined;
+		let reported = "";
 		for (;;) {
 			this.assertRunning();
 			signal?.throwIfAborted();
@@ -183,6 +197,22 @@ export class ContinuousChatRuntime {
 			const attempt = await this.serial(() => this.tryReserve());
 			if (attempt.status === "reserved") return attempt.boundary;
 			const { queue } = attempt;
+			if (onWaiting !== undefined) {
+				const unbuilt = continuousChatUnbuiltLeafCount(queue);
+				first ??= { unbuilt, total: attempt.totalMessages };
+				// Messages that arrive while waiting join the target, so `built` never exceeds `needed`.
+				const needed = first.unbuilt + (attempt.totalMessages - first.total);
+				const progress = {
+					built: Math.max(0, needed - unbuilt),
+					needed,
+					failed: continuousChatFailedLeafCount(queue),
+				};
+				const key = `${progress.built}/${progress.needed}/${progress.failed}`;
+				if (key !== reported) {
+					reported = key;
+					onWaiting(progress);
+				}
+			}
 			if (queue.running.length === 0 && queue.readyLeaves.length === 0 && queue.readyParents.length === 0) {
 				throw new ContinuousChatPrefixUnavailableError(this.failureReasons(queue));
 			}
@@ -271,7 +301,7 @@ export class ContinuousChatRuntime {
 	private async tryReserve(): Promise<TurnAttempt> {
 		const snapshot = await this.store.snapshotTurn();
 		if (continuousChatBuiltLeafPrefix(snapshot.queue) < snapshot.totalMessages) {
-			return { status: "waiting", queue: snapshot.queue };
+			return { status: "waiting", queue: snapshot.queue, totalMessages: snapshot.totalMessages };
 		}
 		this.nextBoundaryId++;
 		return { status: "reserved", boundary: this.boundaryFor(snapshot) };
