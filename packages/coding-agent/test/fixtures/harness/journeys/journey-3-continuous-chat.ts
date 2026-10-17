@@ -136,7 +136,8 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 		sessionManager: world.createSessionManager(mAgentDir),
 		settings: icmContinuousSettings(),
 	});
-	await icmWaitForChatIdle(world, mAgentDir, 3, (_records, nodes) =>
+	// 4 records: the 2 imported notes, then the blocked session's prompt and its failure record.
+	await icmWaitForChatIdle(world, mAgentDir, 4, (_records, nodes) =>
 		nodes.some((node) => node.level === 1 && node.ordinal === 0),
 	);
 	const mMigrationAfterFirst = JSON.parse(utf8Text(world.io.readFileSync(mStore.migrationFile, "utf8"))) as {
@@ -279,6 +280,20 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	world.io.writeFileSync(mStore.messagesIdx, Buffer.concat([mCleanIdx, Buffer.alloc(7, 0xff)]));
 	world.io.rmSync(mStore.keysIdx, { force: true });
 
+	// Recovery brings the chat to 8 records, so 0+8 becomes due. Every leaf, every level-1 join and both level-2 joins fit
+	// 512 B and need no call (0+4 joins to 427 B: the failure record's reason is bounded to 240 chars), but 0+4 and 4+4
+	// join to 553 B, so worker-c merges them in the one summary call of this phase.
+	const mMerge0Plus8 =
+		"Legacy notes seeded alpha-migration-token; a blocked legacy-import turn failed and will retry; an OKF mode turn was noted; a crash session's message and reply were recovered.";
+	world.provider.enqueue("worker-c", {
+		name: "m-merge-0-8",
+		check: (request) => {
+			if (!JSON.stringify(request.context.messages).includes("Compaction: merge lines 0+4 and 4+4")) {
+				throw new Error("worker-c did not receive the 0+4 and 4+4 parent merge task");
+			}
+		},
+		reply: { content: [{ type: "text", text: mMerge0Plus8 }] },
+	});
 	const mRecovered = await world.createRootSession("root", {
 		agentDir: mAgentDir,
 		sessionManager: world.createSessionManager(mAgentDir),
@@ -288,16 +303,17 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 		nodes.some((node) => node.level === 2 && node.ordinal === 0),
 	);
 	const mRecoveredRecords = icmReadContinuousRecords(world, mStore);
+	const mRecoveredNodes = icmReadContinuousNodes(world, mStore);
+	const mNode0Plus8 = mRecoveredNodes.find((node) => node.level === 3 && node.ordinal === 0);
 	expect(
 		{
 			recordTexts: mRecoveredRecords.map((record) => `${record.kind}: ${record.text}`),
 			idxRebuiltBytes: Buffer.byteLength(world.io.readFileSync(mStore.messagesIdx)),
 			keysIdxExists: world.io.existsSync(mStore.keysIdx),
-			node0Plus4Children: icmReadContinuousNodes(world, mStore).find(
-				(node) => node.level === 2 && node.ordinal === 0,
-			)?.children,
+			node0Plus4Children: mRecoveredNodes.find((node) => node.level === 2 && node.ordinal === 0)?.children,
+			node0Plus8: { text: mNode0Plus8?.text, children: mNode0Plus8?.children },
 		},
-		"startup truncates the torn JSONL tail and torn messages.idx bytes, rebuilds keys.idx, and recovers the active session",
+		"startup truncates the torn JSONL tail and torn messages.idx bytes, rebuilds keys.idx, recovers the active session, and merges 0+8 through the summary model",
 	).toEqual({
 		recordTexts: [
 			"note: user: Seed kept legacy session.",
@@ -317,6 +333,13 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 			{ level: 1, ordinal: 0 },
 			{ level: 1, ordinal: 1 },
 		],
+		node0Plus8: {
+			text: mMerge0Plus8,
+			children: [
+				{ level: 2, ordinal: 0 },
+				{ level: 2, ordinal: 1 },
+			],
+		},
 	});
 	expect(await world.disposeSessionInBody(mRecovered.session)).toBeUndefined();
 	trace.mark("root", "icm.migration-and-recovery");
