@@ -626,7 +626,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				};
 			}
 			const replay = this.replayWorkerAgentTask(agent, message, options.idempotencyKey, dependsOnTaskIds, newTask);
-			if (replay) return replay;
+			if (replay) return replay.record ? { ...replay, record: this.withQueuedWaitReason(replay.record) } : replay;
 		}
 		const activity = this.activityForAgent(agent);
 		if (activity !== "idle") {
@@ -799,9 +799,19 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			started: reconciliation.started,
 			steering: false,
 			messageId: queued.messageId,
-			...(reconciliation.record ? { record: reconciliation.record } : {}),
+			...(reconciliation.record ? { record: this.withQueuedWaitReason(reconciliation.record) } : {}),
 			...(reconciliation.skipReason ? { skipReason: reconciliation.skipReason } : {}),
 		};
+	}
+
+	/**
+	 * The durable record never carries the scheduler's process-local wait state; a record handed back for a
+	 * turn the scheduler still queues says why it has not started, as a fresh lane's record does.
+	 */
+	private withQueuedWaitReason(record: LaneRecord): LaneRecord {
+		if (record.status !== "queued" && record.status !== "running") return record;
+		const waitState = this.options.scheduler.getWaitState?.(record.laneId);
+		return waitState ? { ...record, waitReason: formatWorkerDispatchWait(waitState) } : record;
 	}
 
 	/**

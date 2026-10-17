@@ -996,9 +996,10 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			throw new Error("the waiting writer's start result carries no agent or lane id");
 		}
 		expect(e13rSecondDetails?.started, "the waiting writer's start is accepted").toBe(true);
-		// The wait is read from the lane record the start receipt's `waiting:` line is built from (the scheduler's wait state,
-		// projected by the controller's getRecords), never from the persisted receipt text. The blocker is the retained record:
-		// a local conflict (it is in this owner's retained releases), so its owner reads live and the holder is this session.
+		// The blocker is the retained record: a local conflict (it is in this owner's retained releases), so its owner reads
+		// live and the holder is this session. The start lands on the idle specialist, so the parent model learns the wait
+		// from this reused turn's receipt; the lane record (the scheduler's wait state, projected by getRecords) is the same
+		// wait read back from the controller.
 		const e13rRetainedCreatedAt = (
 			JSON.parse(e13rStoreText(e13rStorePath)) as {
 				reservations: readonly { readonly reservationId: string; readonly createdAt: string }[];
@@ -1015,6 +1016,16 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			e13rSecondRecord?.waitReason,
 			"the blocker is the retained record, held by a worker of this session",
 		).toContain(
+			`held by a worker of this session (${e13rLease.ownerId}, owner live, since ${e13rRetainedCreatedAt}) (since `,
+		);
+		const e13rSecondText = e13rSecondReceipt.message.content
+			.map((block) => (block.type === "text" ? block.text : ""))
+			.join("");
+		expect(e13rSecondText, "the waiting writer is queued at its start").toContain("delegate started (queued)");
+		expect(e13rSecondText, "the waiting writer's receipt names the reservation it waits on").toContain(
+			"waiting: write_reservation: ",
+		);
+		expect(e13rSecondText, "the receipt names the retained record, held by a worker of this session").toContain(
 			`held by a worker of this session (${e13rLease.ownerId}, owner live, since ${e13rRetainedCreatedAt}) (since `,
 		);
 		expect(

@@ -3918,7 +3918,9 @@ export class WorkerDelegationController {
 		}
 		const selected = await this.admitWorkerStart(capturedRequest, signal);
 		if (selected.kind === "refused") return { started: false, skipReason: selected.skipReason };
-		if (selected.kind === "existing") return { started: true, record: selected.record };
+		// A reused specialist's turn or a replayed start can be queued too: its record says why, like a fresh lane's.
+		if (selected.kind === "existing")
+			return { started: true, record: this.withWaitReasons([selected.record])[0] ?? selected.record };
 		const similar =
 			capturedRequest.verificationOfTaskId || this.independentParallelIntent(capturedRequest)
 				? []

@@ -785,6 +785,11 @@ export interface DelegateToolDependencies {
 	warn?: (message: string) => void;
 }
 
+/** Why a queued lane has not started, as every start receipt states it (the scheduler's wait state on the record). */
+function queuedWaitLine(record: LaneRecord | undefined): string | undefined {
+	return record?.status === "queued" && record.waitReason ? `waiting: ${record.waitReason}` : undefined;
+}
+
 /**
  * First line of a start result. The model chose the worker's tools, model, and path; this is the
  * host's answer to what it actually compiled, plus why a queued lane is not running yet.
@@ -805,7 +810,8 @@ function describeStartedWorker(
 			`budget: wall clock ${grant.budget?.maxWallClockMs ? formatWallClockCap(grant.budget.maxWallClockMs) : "unbounded"}, usd ${grant.budget?.maxCostUsd ? grant.budget.maxCostUsd.toFixed(2) : "unbounded"}`,
 		);
 	}
-	if (record.status === "queued" && record.waitReason) parts.push(`waiting: ${record.waitReason}`);
+	const waiting = queuedWaitLine(record);
+	if (waiting) parts.push(waiting);
 	if (similarLaneIds?.length) {
 		parts.push(
 			`similar active lane${similarLaneIds.length === 1 ? "" : "s"}: ${similarLaneIds.join(", ")} — if this duplicates one, cancel the copy`,
@@ -2354,7 +2360,10 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 									? "queued, not started"
 									: "not started";
 						const idleNote = waitsForIdle ? ` It runs when ${agentId} returns to idle.` : "";
-						const lane = outcome.record ? `; lane ${outcome.record.laneId} (${outcome.record.status})` : "";
+						const followUpWaiting = queuedWaitLine(outcome.record);
+						const lane = outcome.record
+							? `; lane ${outcome.record.laneId} (${outcome.record.status}${followUpWaiting ? `; ${followUpWaiting}` : ""})`
+							: "";
 						return {
 							content: [
 								{
@@ -2573,11 +2582,12 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							);
 						}
 						const validatedRecord = "record" in validated ? validated.record : undefined;
+						const validatedWaiting = queuedWaitLine(validatedRecord);
 						return {
 							content: [
 								{
 									type: "text" as const,
-									text: `worker ${reuseAgentId} accepted this task with its own admitted binding (lane ${validatedRecord?.laneId ?? "queued"})`,
+									text: `worker ${reuseAgentId} accepted this task with its own admitted binding (lane ${validatedRecord?.laneId ?? "queued"}${validatedWaiting ? `; ${validatedWaiting}` : ""})${validatedRecord?.status === "queued" ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
 								},
 							],
 							details: {
@@ -2625,11 +2635,12 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					const effectiveBinding = followed.record?.modelRef
 						? `; effective model ${followed.record.modelRef}, thinking ${followed.record.thinkingLevel ?? "unknown"}`
 						: "";
+					const followedWaiting = queuedWaitLine(followed.record);
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: `worker ${reuseAgentId} durably accepted task message ${followed.messageId} on its persistent context (lane ${followed.record?.laneId ?? "queued"}; ${acceptanceState}${effectiveBinding})${followed.record?.status === "queued" || followed.record === undefined ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
+								text: `worker ${reuseAgentId} durably accepted task message ${followed.messageId} on its persistent context (lane ${followed.record?.laneId ?? "queued"}; ${acceptanceState}${effectiveBinding}${followedWaiting ? `; ${followedWaiting}` : ""})${followed.record?.status === "queued" || followed.record === undefined ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
 							},
 						],
 						details: {
