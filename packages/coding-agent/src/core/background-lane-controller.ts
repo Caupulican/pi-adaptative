@@ -242,9 +242,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _getWorkerLifecycle(): WorkerLifecycle {
 		if (this._workerLifecycle) return this._workerLifecycle;
 		const parentSessionId = this.deps.getSessionId();
-		const store = new OrchestrationEventStore({ agentDir: this.deps.getAgentDir(), sessionId: parentSessionId });
-		// The retry ladder persists its deadline on the orchestration clock; the runtime rechecks it on the same clock.
+		// The retry ladder persists its deadline on the orchestration clock; the runtime rechecks it on the same clock, and the
+		// store stamps every event on it too, because the reducer compares a start's event time with that deadline.
 		const orchestrationClock = this.deps.getTimers().port("orchestration");
+		const store = new OrchestrationEventStore({
+			agentDir: this.deps.getAgentDir(),
+			sessionId: parentSessionId,
+			now: () => new Date(orchestrationClock.now()).toISOString(),
+		});
 		const lifecycle = new WorkerLifecycle({
 			agentDir: this.deps.getAgentDir(),
 			sessionId: parentSessionId,

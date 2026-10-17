@@ -152,7 +152,12 @@ export class DelegationOrchestrationLedger {
 		this.sessionId = options.sessionId;
 		this.runtime = new DurableTaskRuntime({
 			store:
-				options.store ?? new OrchestrationEventStore({ agentDir: options.agentDir, sessionId: options.sessionId }),
+				options.store ??
+				new OrchestrationEventStore({
+					agentDir: options.agentDir,
+					sessionId: options.sessionId,
+					...(options.now ? { now: () => new Date(options.now?.() ?? Date.now()).toISOString() } : {}),
+				}),
 			now: options.now,
 		});
 	}

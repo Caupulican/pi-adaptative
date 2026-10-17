@@ -913,11 +913,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 			const fitnessStore = FitnessStore.forAgentDir(agentDir);
 			const adaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
+			const orchestrationClock = timers.port("orchestration");
 			const orchestrationStore = new OrchestrationEventStore({
 				agentDir,
 				sessionId: sessionManager.getSessionId(),
+				now: () => new Date(orchestrationClock.now()).toISOString(),
 			});
-			const orchestrationClock = timers.port("orchestration");
 			const durableTaskRuntime = new DurableTaskRuntime({
 				store: orchestrationStore,
 				// The worker lifecycle's runtime records into this same store on this same clock (see TimerOwner).
