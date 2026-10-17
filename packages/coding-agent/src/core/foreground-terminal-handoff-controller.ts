@@ -121,6 +121,8 @@ interface ForegroundTerminalHandoffControllerDeps {
 		options: { triggerTurn: false; deliverAs: "followUp" },
 		lease: ForegroundSubmissionLease,
 	): Promise<void>;
+	/** Owner items buffered while no foreground turn ran; a handoff that wakes no turn flushes them under its lease. */
+	flushOwnerItems(lease: ForegroundSubmissionLease): Promise<void>;
 	warn(message: string): void;
 }
 
@@ -465,6 +467,14 @@ export class ForegroundTerminalHandoffController {
 				return;
 			}
 			await this.deps.sendCustomMessage(plan.message, { triggerTurn: false, deliverAs: "followUp" }, lease);
+			// No turn follows this handoff, so no turn end will flush the owner items its workers buffered.
+			try {
+				await this.deps.flushOwnerItems(lease);
+			} catch (error) {
+				this.deps.warn(
+					`Owner items could not be delivered after a background handoff: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		} finally {
 			if (releaseLease) this.deps.foreground.releaseSubmission(lease);
 		}

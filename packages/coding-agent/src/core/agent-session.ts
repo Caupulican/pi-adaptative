@@ -1743,6 +1743,7 @@ export class AgentSession {
 			startCustomMessageTurn: (message, lease, goalId) =>
 				this._durableCustomMessageTurns.start(message, lease, goalId),
 			enqueueCustomMessageTurn: (message) => this._durableCustomMessageTurns.enqueue(message),
+			flushOwnerItems: (lease) => this._flushOwnerItems(lease),
 			sendCustomMessage: (message, options, lease) => this._sendCustomMessage(message, options, lease),
 			warn: (message) => this._emit({ type: "warning", message }),
 		});
