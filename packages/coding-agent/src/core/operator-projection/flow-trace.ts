@@ -222,8 +222,9 @@ export class FlowTrace {
 		},
 		// Worker lanes are read from their records (observeLanes); this summary carries no dispatches.
 		delegate_workers: () => {},
-		// Session state, not actions.
+		// Session state, not actions. A withdrawn echo's input is held, and that hold is the warning the trace records.
 		queue_update: () => {},
+		user_message_withdrawn: () => {},
 		session_info_changed: () => {},
 		thinking_level_changed: () => {},
 	};

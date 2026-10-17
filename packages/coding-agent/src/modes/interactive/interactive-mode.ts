@@ -221,6 +221,8 @@ export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
 	private ui: TUI;
 	private chatContainer: Container;
+	/** The transcript components each owner message added, keyed by its message object. */
+	private readonly userEchoComponents = new WeakMap<AgentMessage, Component[]>();
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
 	private defaultEditor: CustomEditor;
@@ -586,6 +588,7 @@ export class InteractiveMode {
 			updateEditorBorderColor: () => this.updateEditorBorderColor(),
 			showError: (message) => this.showError(message),
 			addMessageToChat: (message) => this.addMessageToChat(message),
+			removeUserMessageFromChat: (message) => this.removeUserMessageFromChat(message),
 			getMarkdownThemeWithSettings: () => this.getMarkdownThemeWithSettings(),
 			trimLiveTuiHistory: () => this.trimLiveTuiHistory(),
 			attachToolExecutionComponent: (toolName, toolCallId, args, repair) =>
@@ -2257,6 +2260,13 @@ export class InteractiveMode {
 		this.appendStatusToChat(message);
 	}
 
+	/** Takes an owner echo back out of the transcript: its input was never delivered and is held in the pending queue. */
+	private removeUserMessageFromChat(rawMessage: AgentMessage): void {
+		const components = this.userEchoComponents.get(rawMessage) ?? [];
+		this.userEchoComponents.delete(rawMessage);
+		for (const component of components) this.chatContainer.removeChild(component);
+	}
+
 	private addMessageToChat(rawMessage: AgentMessage, options?: { populateHistory?: boolean }): void {
 		// Aliases are a wire-format token optimization; the operator reads their own paths.
 		const message = expandMessageForDisplay(this.session.peekPathAliasTable(), rawMessage);
@@ -2303,6 +2313,7 @@ export class InteractiveMode {
 			}
 			case "user": {
 				this.replyBylines.ownerMessage();
+				const echoStart = this.chatContainer.children.length;
 				const textContent = this.getUserMessageText(message);
 				if (textContent) {
 					if (this.chatContainer.children.length > 0) {
@@ -2338,6 +2349,8 @@ export class InteractiveMode {
 						this.editor.addToHistory?.(textContent);
 					}
 				}
+				// The components this message added, so a withdrawn echo can be taken back out (see removeUserMessageFromChat).
+				this.userEchoComponents.set(rawMessage, this.chatContainer.children.slice(echoStart));
 				break;
 			}
 			case "assistant": {

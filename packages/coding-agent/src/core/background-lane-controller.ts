@@ -77,7 +77,7 @@ import type {
 	TaskProfileInspection,
 } from "./orchestration/task-profile-writer.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
-import { subscribeSessionSteerQueued, waitForSessionSteerAdmission } from "./pending-input-queue-controller.ts";
+import { createSteerAwareWait } from "./pending-input-queue-controller.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
@@ -801,29 +801,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		if (scope?.callerAgentId) {
 			return { signal, finalize: () => Promise.resolve() };
 		}
-		const sessionId = this.deps.getSessionManager().getSessionId();
-		const controller = new AbortController();
-		let steered = false;
-		const onAbort = () => controller.abort(signal?.reason);
-		if (signal?.aborted) {
-			controller.abort(signal.reason);
-		} else {
-			signal?.addEventListener("abort", onAbort, { once: true });
-		}
-		const unsubscribeSteer = subscribeSessionSteerQueued(sessionId, () => {
-			steered = true;
-			controller.abort();
-		});
-		return {
-			signal: controller.signal,
-			finalize: async () => {
-				unsubscribeSteer();
-				signal?.removeEventListener("abort", onAbort);
-				if (steered && !signal?.aborted) {
-					await waitForSessionSteerAdmission(sessionId, signal);
-				}
-			},
-		};
+		return createSteerAwareWait(this.deps.getSessionManager().getSessionId(), signal);
 	}
 
 	private async _withWorkerWait<T extends { terminalLaneIds?: readonly string[] }>(

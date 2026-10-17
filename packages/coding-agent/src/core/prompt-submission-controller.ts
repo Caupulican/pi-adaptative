@@ -70,7 +70,7 @@ export interface OwnerRequestClassificationResult {
 
 export interface PromptSubmissionControllerDeps {
 	readonly agent: Agent;
-	readonly sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch">;
+	readonly sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch" | "getMessageEntryId">;
 	readonly pendingQueue: PendingInputQueueController;
 	readonly compaction: Pick<CompactionController, "cancelIdlePreparation">;
 	readonly ownerRules: Pick<DurableOwnerRuleStore, "record">;
@@ -132,6 +132,8 @@ export interface PromptSubmissionControllerDeps {
 	): Promise<OwnerRequestClassificationResult>;
 	getOperatorBlocker(): string | undefined;
 	setOperatorBlocker(blocker: string | undefined): void;
+	/** Input admitted to the agent's queue that no live consumer is left to drain returns to the pending queue, held. */
+	holdUndeliveredQueue(): void;
 	isStreaming(): boolean;
 	getPromptTemplates(): readonly PromptTemplate[];
 	isDisposed(): boolean;
@@ -302,9 +304,37 @@ export class PromptSubmissionController {
 		);
 	}
 
-	/** Withdraw a queued owner input that will not be admitted; a no-op once it is decided or taken. */
+	/**
+	 * Give back a queued owner input whose submission ends without admitting it: withdrawn while still pending, or held
+	 * when its own turn took it and never delivered it. A no-op once it is admitted, or delivered by its turn.
+	 */
 	withdrawQueuedOwnerInput(input: PendingInputHandle): void {
-		if (this.deps.pendingQueue.withdraw(input)) this.deps.emitQueueUpdate();
+		const changed = this.deps.pendingQueue.withdraw(input) || this.deps.pendingQueue.reclaim(input);
+		if (changed) this.deps.emitQueueUpdate();
+	}
+
+	/**
+	 * Release the early-painted echo of a turn that never reached its run. An echo of a queued owner input is withdrawn
+	 * from the transcript, because that input is held in the pending queue instead and must not read as sent.
+	 */
+	private releaseEarlyDisplayedUserMessage(
+		message: AgentMessage | undefined,
+		queuedOwnerInput: PendingInputHandle | undefined,
+	): void {
+		if (message === undefined || !this.deps.earlyDisplayedUserMessages.delete(message)) return;
+		if (queuedOwnerInput !== undefined) this.deps.emit({ type: "user_message_withdrawn", message });
+	}
+
+	/**
+	 * A queued owner input's own turn ended. Its message in the transcript delivers the input; a message that never
+	 * reached it (a buffered cheap-route turn that failed, say) is retracted from the echo, and its input is held.
+	 */
+	private settleOrRetractOwnedEcho(message: AgentMessage): void {
+		if (this.deps.sessionManager.getMessageEntryId(message) !== undefined) {
+			this.deps.pendingQueue.settleOwnedMessage(message);
+		} else {
+			this.deps.emit({ type: "user_message_withdrawn", message });
+		}
 	}
 
 	private async runPromptSubmission(
@@ -348,12 +378,18 @@ export class PromptSubmissionController {
 			);
 		} finally {
 			prepared?.();
-			// Every exit that did not admit it (cancelled, handled, a command, an error) withdraws it.
+			// Every exit that did not admit it (cancelled, handled, a command, an error) gives it back: withdrawn while
+			// pending, held when its own turn took it and never delivered it.
 			if (queuedOwnerInput) this.withdrawQueuedOwnerInput(queuedOwnerInput);
 			if (this.submissionAbort === submissionAbort) this.submissionAbort = undefined;
 			if (submission.lease) {
 				if (this.foregroundPromptLeaseValue === submission.lease) this.foregroundPromptLeaseValue = undefined;
 				this.deps.foregroundRecovery.releaseSubmission(submission.lease);
+			}
+			// Input admitted to the agent's queue waits for a run to drain it. When this submission leaves no live
+			// consumer behind (its preparation ended without a run), that input is held rather than stranded.
+			if (!this.deps.foregroundRecovery.hasLiveConsumer && this.deps.agent.hasQueuedMessages()) {
+				this.deps.holdUndeliveredQueue();
 			}
 		}
 		// Started after the lease is released, never before: the reflection turn is an ordinary
@@ -601,6 +637,8 @@ export class PromptSubmissionController {
 				};
 				if (options?.source !== "extension") this.deps.reflection.markOwnerInput(userMessage, text);
 				promptMessage = userMessage;
+				// A queued input its own turn took is delivered by this message's persistence, not by the turn's end.
+				if (queuedOwnerInput) this.deps.pendingQueue.bindOwnedMessage(queuedOwnerInput, userMessage);
 				this.deps.earlyDisplayedUserMessages.add(userMessage);
 				this.deps.emit({ type: "message_start", message: userMessage });
 			}
@@ -821,9 +859,7 @@ export class PromptSubmissionController {
 			// The turn never reached the foreground run, so the authoritative message_start that would
 			// normally consume this entry (see _handleAgentEvent) never fires — un-register it here
 			// instead of leaking the reference.
-			if (userMessage) {
-				this.deps.earlyDisplayedUserMessages.delete(userMessage);
-			}
+			this.releaseEarlyDisplayedUserMessage(userMessage, queuedOwnerInput);
 			// The routing/prep phase (routing_start above) failed before ever reaching the turn — end
 			// it here, or the UI's "working" indicator for it spins forever with nothing behind it.
 			if (routingStarted) this.deps.emit({ type: "routing_end" });
@@ -858,7 +894,7 @@ export class PromptSubmissionController {
 				releaseSubmissionSignal();
 				// Same unwind as the preflight-failure path above: the turn never reached the run, so the
 				// authoritative message_start that would normally consume this entry never fires.
-				if (userMessage) this.deps.earlyDisplayedUserMessages.delete(userMessage);
+				this.releaseEarlyDisplayedUserMessage(userMessage, queuedOwnerInput);
 				preflightResult?.(false);
 				return;
 			}
@@ -1007,6 +1043,7 @@ export class PromptSubmissionController {
 			// Normally consumed by the authoritative message_start. If execution failed before that
 			// event, do not retain the early-painted message identity indefinitely.
 			if (userMessage) this.deps.earlyDisplayedUserMessages.delete(userMessage);
+			if (queuedOwnerInput && userMessage) this.settleOrRetractOwnedEcho(userMessage);
 		}
 
 		// Score whether the agent actually used the recalled context, so the recall gate can adapt.

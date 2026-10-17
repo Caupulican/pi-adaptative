@@ -32,6 +32,25 @@ export interface OwnerPolicyQueueDeps {
 /** How a settle treats the queue: `backlog` screens every queued message, `latest` classifies the newest in full. */
 export type OwnerPolicySettleMode = "backlog" | "latest";
 
+/** Settles like `promise`, or as soon as `signal` aborts; a rejection of `promise` still rejects. */
+function settledOrAborted(promise: Promise<void>, signal: AbortSignal): Promise<void> {
+	if (signal.aborted) return Promise.resolve();
+	return new Promise<void>((resolve, reject) => {
+		const onAbort = (): void => resolve();
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			() => {
+				signal.removeEventListener("abort", onAbort);
+				resolve();
+			},
+			(error: unknown) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(error);
+			},
+		);
+	});
+}
+
 export class OwnerPolicyQueue {
 	private pending: OwnerWords[] = [];
 	private tail: Promise<void> = Promise.resolve();
@@ -54,10 +73,14 @@ export class OwnerPolicyQueue {
 	 * the queue already drained and returns once the first one's classification has been applied.
 	 */
 	settle(mode: OwnerPolicySettleMode = "latest", signal?: AbortSignal): Promise<void> {
-		if (this.pending.length === 0 && mode === "latest") return this.tail;
-		const run = this.tail.then(() => this.drain(mode, signal));
-		this.tail = run.catch(() => undefined);
-		return run;
+		let settled = this.tail;
+		if (this.pending.length > 0 || mode === "backlog") {
+			const run = this.tail.then(() => this.drain(mode, signal));
+			this.tail = run.catch(() => undefined);
+			settled = run;
+		}
+		// The chain ahead may be a classification that outlives this caller's interrupt; the caller stops waiting for it.
+		return signal ? settledOrAborted(settled, signal) : settled;
 	}
 
 	private async drain(mode: OwnerPolicySettleMode, signal?: AbortSignal): Promise<void> {

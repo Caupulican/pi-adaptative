@@ -63,6 +63,11 @@ export type AgentSessionEvent =
 			followUp: readonly string[];
 			commands: readonly string[];
 	  }
+	/**
+	 * The echo of a queued owner input painted for its own turn is withdrawn: that turn never reached its run, so the
+	 * message is not in the transcript and its input is held in the pending queue instead.
+	 */
+	| { type: "user_message_withdrawn"; message: AgentMessage }
 	| { type: "compaction_start"; reason: "manual" | AutoCompactionReason }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }

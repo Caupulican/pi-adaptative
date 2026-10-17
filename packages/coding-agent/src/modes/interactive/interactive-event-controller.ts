@@ -65,6 +65,8 @@ export interface InteractiveEventPort {
 	updateEditorBorderColor(): void;
 	showError(message: string): void;
 	addMessageToChat(message: AgentMessage): void;
+	/** Take back the transcript echo of an owner message that was never delivered (see `user_message_withdrawn`). */
+	removeUserMessageFromChat(message: AgentMessage): void;
 	getMarkdownThemeWithSettings(): MarkdownTheme;
 	transformMarkdownForDisplay: MarkdownTransformFn;
 	trimLiveTuiHistory(): void;
@@ -287,6 +289,11 @@ export class InteractiveEventController {
 
 			case "queue_update":
 				this.port.updatePendingMessagesDisplay();
+				this.port.ui.requestRender();
+				break;
+
+			case "user_message_withdrawn":
+				this.port.removeUserMessageFromChat(event.message);
 				this.port.ui.requestRender();
 				break;
 

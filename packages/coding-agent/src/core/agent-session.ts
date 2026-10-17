@@ -242,7 +242,11 @@ import {
 	resolveConfiguredOrchestrationModel,
 } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
-import { PendingInputQueueController, type QueuedInput } from "./pending-input-queue-controller.ts";
+import {
+	createSteerAwareWait,
+	PendingInputQueueController,
+	type QueuedInput,
+} from "./pending-input-queue-controller.ts";
 import { appendPipelineRunSnapshot, getLatestPipelineRunSnapshot, type PipelineRun } from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { DurableOwnerRuleStore, type OwnerRulePolicy } from "./project-rules/durable-owner-rules.ts";
@@ -1949,7 +1953,19 @@ export class AgentSession {
 			getToolArtifactStore: () => this._getToolArtifactStore(),
 			getContextGcStoreDir: () => this._pipeline.contextGcStorageDir(),
 			getDecisionLedger: () => this.getDecisionLedger(),
-			getToolTaskDependencies: () => this._backgroundToolTasks,
+			getToolTaskDependencies: () => ({
+				list: () => this._backgroundToolTasks.list(),
+				cancel: (taskId) => this._backgroundToolTasks.cancel(taskId),
+				// An owner steer ends the wait so the model reads it at once instead of after the bound.
+				wait: async (taskId, signal, timeoutMs) => {
+					const steerAware = createSteerAwareWait(this.sessionManager.getSessionId(), signal);
+					try {
+						return await this._backgroundToolTasks.wait(taskId, steerAware.signal, timeoutMs);
+					} finally {
+						await steerAware.finalize();
+					}
+				},
+			}),
 			getSessionImageStore: () => this._getSessionImageStore(),
 			getMemoryManager: () => this._memory.getMemoryManager(),
 			getMemoryAuditDiagnostics: () => this._memory.getMemoryAuditDiagnostics(),
@@ -2363,6 +2379,10 @@ export class AgentSession {
 			getOperatorBlocker: () => this._operatorBlocker,
 			setOperatorBlocker: (blocker) => {
 				this._operatorBlocker = blocker;
+			},
+			holdUndeliveredQueue: () => {
+				this._pendingQueue.holdUndelivered();
+				this._emitQueueUpdate();
 			},
 			isStreaming: () => this.isStreaming,
 			getPromptTemplates: () => this.promptTemplates,
@@ -3719,6 +3739,8 @@ export class AgentSession {
 				event.message.role === "toolResult"
 			) {
 				this._foregroundLifecycle.appendMessage(event.message, event.origin);
+				// A queued owner input its own turn took is delivered once its message is in the transcript.
+				if (event.message.role === "user") this._pendingQueue.settleOwnedMessage(event.message);
 				messagePersisted = true;
 			}
 			// Track the response for ordered retry/failover/compaction handling after agent_end.

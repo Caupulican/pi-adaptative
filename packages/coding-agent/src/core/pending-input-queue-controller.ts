@@ -59,6 +59,8 @@ interface PendingEntry extends QueuedInput {
 	admission?: QueuedInputAdmission;
 	/** Set when handed to the agent: from here it is the agent's queued message. */
 	message?: AgentMessage;
+	/** The message its own turn built for it (see `bindOwnedMessage`): persisting it delivers the input. */
+	turnMessage?: AgentMessage;
 	/** Its context changed before it was handed on: kept in full for recovery, never handed on. */
 	held?: boolean;
 }
@@ -135,10 +137,48 @@ export async function waitForSessionSteerAdmission(sessionId: string | undefined
 	}
 }
 
+/**
+ * A blocking wait that yields to the owner: a steer queued while it runs aborts the returned signal, and
+ * `finalize` then lets that steer's admission settle so the caller's next steering poll already sees it.
+ * An abort of `signal` itself is passed through unchanged and is never treated as a steer.
+ */
+export function createSteerAwareWait(
+	sessionId: string | undefined,
+	signal: AbortSignal | undefined,
+): { readonly signal: AbortSignal; readonly finalize: () => Promise<void> } {
+	const controller = new AbortController();
+	let steered = false;
+	const onAbort = () => controller.abort(signal?.reason);
+	if (signal?.aborted) {
+		controller.abort(signal.reason);
+	} else {
+		signal?.addEventListener("abort", onAbort, { once: true });
+	}
+	const unsubscribeSteer = subscribeSessionSteerQueued(sessionId, () => {
+		steered = true;
+		controller.abort();
+	});
+	return {
+		signal: controller.signal,
+		finalize: async () => {
+			unsubscribeSteer();
+			signal?.removeEventListener("abort", onAbort);
+			if (steered && !signal?.aborted) {
+				await waitForSessionSteerAdmission(sessionId, signal);
+			}
+		},
+	};
+}
+
 export class PendingInputQueueController {
 	/** Submission order per kind; an entry admits only after every earlier entry of its kind. */
 	private _steering: PendingEntry[] = [];
 	private _followUp: PendingEntry[] = [];
+	/**
+	 * Inputs their own turn took (see `promote`). Not admitted, displayed or takeable: the turn owns them until its
+	 * message is persisted (`settleOwnedMessage`) or the turn gives them back (`reclaim`). Still part of the durable record.
+	 */
+	private _owned: PendingEntry[] = [];
 	private _queuedExtensionCommands: string[] = [];
 	private _nextEntryId = 1;
 	/** Set at disposal: nothing is handed to the agent afterwards. */
@@ -411,10 +451,10 @@ export class PendingInputQueueController {
 		}
 	}
 
-	/** Report the complete queue, as submitted and in submission order, to the durable record. */
+	/** Report the complete undelivered queue, as submitted and in submission order, to the durable record. */
 	private _changed(): void {
 		if (!this.deps.onQueueChanged) return;
-		const entries = [...this._steering, ...this._followUp].sort((left, right) => left.id - right.id);
+		const entries = [...this._steering, ...this._followUp, ...this._owned].sort((left, right) => left.id - right.id);
 		this.deps.onQueueChanged(
 			entries.map((entry) => ({
 				kind: entry.kind,
@@ -449,7 +489,8 @@ export class PendingInputQueueController {
 	/**
 	 * The input runs as its own turn instead of joining the queue: ownership moves to that turn. Its
 	 * signal is NOT aborted -- the turn is valid. False when the input is no longer pending here (taken,
-	 * cleared, withdrawn, held, or the queue closed); the caller must not run it then.
+	 * cleared, withdrawn, held, or the queue closed); the caller must not run it then. Until its message is
+	 * persisted the input stays owned in the durable record, so a turn that never delivers it can give it back.
 	 */
 	promote(handle: PendingInputHandle): boolean {
 		const entry = this._findEntry(handle.id);
@@ -460,7 +501,43 @@ export class PendingInputQueueController {
 			return false;
 		}
 		this._removeEntry(entry);
+		this._owned.push(entry);
 		this._admitInOrder();
+		this._changed();
+		if (entry.kind === "steer") this._notifySteerDecision();
+		return true;
+	}
+
+	/** The message the owning turn built for this input. Persisting that message delivers the input. */
+	bindOwnedMessage(handle: PendingInputHandle, message: AgentMessage): void {
+		const entry = this._owned.find((candidate) => candidate.id === handle.id);
+		if (entry) entry.turnMessage = message;
+	}
+
+	/** The owning turn's message was persisted: the input is delivered and leaves the durable record. */
+	settleOwnedMessage(message: AgentMessage): void {
+		const index = this._owned.findIndex((entry) => entry.turnMessage === message);
+		if (index === -1) return;
+		this._owned.splice(index, 1);
+		this._changed();
+	}
+
+	/**
+	 * The turn that took this input ended without delivering it (cancelled, closed, failed before its run): the
+	 * input returns to the pending queue as held input, complete and visible, at its submission position. False
+	 * when no turn owns it, which includes an input that was delivered.
+	 */
+	reclaim(handle: PendingInputHandle): boolean {
+		const index = this._owned.findIndex((entry) => entry.id === handle.id);
+		if (index === -1) return false;
+		const [entry] = this._owned.splice(index, 1);
+		entry.turnMessage = undefined;
+		if (!this._closed) {
+			const entries = entry.kind === "steer" ? this._steering : this._followUp;
+			entries.push(entry);
+			entries.sort((left, right) => left.id - right.id);
+		}
+		this._hold(entry, "undelivered");
 		this._changed();
 		if (entry.kind === "steer") this._notifySteerDecision();
 		return true;

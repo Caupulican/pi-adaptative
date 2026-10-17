@@ -97,20 +97,18 @@ export interface IcmTurnCoordinatorDeps {
 	started: Promise<void>;
 }
 
-/** The start of the chat, or the abort that ends a turn's wait for it. */
-function startedOrAborted(started: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
-	if (signal === undefined) return started;
-	return new Promise<void>((resolve, reject) => {
-		if (signal.aborted) {
-			reject(signal.reason);
-			return;
-		}
+/** The awaited step's result, or the abort that ends a turn's wait for it. */
+function untilAborted<T>(step: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (signal === undefined) return step;
+	return new Promise<T>((resolve, reject) => {
 		const onAbort = (): void => reject(signal.reason);
-		signal.addEventListener("abort", onAbort, { once: true });
-		started.then(
-			() => {
+		// `step` is always observed, even when the abort already happened: a later failure of it stays handled.
+		if (signal.aborted) onAbort();
+		else signal.addEventListener("abort", onAbort, { once: true });
+		step.then(
+			(value) => {
 				signal.removeEventListener("abort", onAbort);
-				resolve();
+				resolve(value);
 			},
 			(error: unknown) => {
 				signal.removeEventListener("abort", onAbort);
@@ -144,9 +142,9 @@ export class IcmTurnCoordinator {
 		this.setPhase("awaitingPrefix");
 		let boundary: ContinuousChatTurnBoundary;
 		try {
-			await startedOrAborted(this.deps.started, signal);
-			await this.deps.ingestor.flush();
-			await this.deps.ingestor.settled();
+			await untilAborted(this.deps.started, signal);
+			await untilAborted(this.deps.ingestor.flush(), signal);
+			await untilAborted(this.deps.ingestor.settled(), signal);
 			signal?.throwIfAborted();
 			boundary = await this.deps.runtime.reserveTurnBoundary(signal);
 		} catch (error) {
