@@ -215,6 +215,10 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		);
 	}
 
+	keepsOwnTurnInput(inputId: OwnerInputId): boolean {
+		return recordedIds(this.ownTurnRecord.key).has(inputId);
+	}
+
 	/** One write of `record`: the record it wrote is kept, its bound reported once when first reached, a failure every time. */
 	private writeRecord(
 		record: "queued" | "ownTurn",

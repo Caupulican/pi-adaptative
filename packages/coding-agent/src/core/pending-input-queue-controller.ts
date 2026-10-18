@@ -141,6 +141,8 @@ export interface PendingInputRecord {
 	recordQueuedInput(inputs: readonly RecordableQueuedInput[]): void;
 	/** The set of prompts whose own turn is being prepared changed (`PendingInputQueueController.trackOwnTurn`). */
 	recordOwnTurnInput(inputs: readonly RecordableQueuedInput[]): void;
+	/** Whether the own-turn record as last written names `inputId`: a restart restores that prompt held. */
+	keepsOwnTurnInput(inputId: OwnerInputId): boolean;
 }
 
 /** Why an input was held instead of being handed on: its context changed, no run delivered it, or the session closed first. */
@@ -566,6 +568,18 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		this._ownTurnChanged();
 	}
 
+	/**
+	 * The submission of a prompt being prepared ended without delivering it after the queue closed. The own-turn record is
+	 * not rewritten once the session is disposed, so a prompt it names is restored held by the next session, and it ends held
+	 * here too. Called from the submission's own end, after its run returned, so no run of this session can still deliver it.
+	 * False when the queue is open, the prompt is not being prepared, or the record does not name it: its submission ends it.
+	 */
+	holdClosedPreparing(inputId: OwnerInputId): boolean {
+		if (!this._closed || !this._preparing.some((entry) => entry.inputId === inputId)) return false;
+		if (this.deps.record?.keepsOwnTurnInput(inputId) !== true) return false;
+		return this.deps.ownerInputs.end(inputId, { state: "held", reason: "closed" });
+	}
+
 	/** A prompt being prepared leaves the own-turn record; false when it is not there. */
 	private _leavePreparing(inputId: OwnerInputId): boolean {
 		const index = this._preparing.findIndex((entry) => entry.inputId === inputId);
@@ -835,7 +849,8 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	/**
 	 * The session is disposed: every input not yet handed to the agent is held (whatever still decides its admission is
 	 * cancelled), complete and visible, and nothing is handed on afterwards. The durable record is not rewritten, so a
-	 * resumed session restores them held. Input the agent already holds is held by the run that ends with the session.
+	 * resumed session restores them held. Input the agent already holds is held by the run that ends with the session, and a
+	 * prompt being prepared by its submission's end (`holdClosedPreparing`), once nothing can deliver it.
 	 */
 	close(): void {
 		this._closed = true;

@@ -7,6 +7,7 @@ import type { TextContent } from "@caupulican/pi-ai";
 import type { AgentContextPlanFn } from "../../kernel/loop-config.ts";
 import { createCustomMessage } from "../../kernel/messages.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
+import type { ContinuousChatAudit } from "../extensions/builtin.ts";
 import type { IcmTurnHandle } from "./continuous-chat-turn-coordinator.ts";
 
 export const CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE = "continuous_chat_view";
@@ -124,6 +125,40 @@ export function resolveContinuousChatTurnStart(
 			summaryIndex > 0 && retained !== undefined && retained.matches(messages[summaryIndex - 1])
 				? summaryIndex - 1
 				: summaryIndex,
+	};
+}
+
+/**
+ * The running turn as the context audit shows it: its frame, and the session entry its own messages begin at in `messages`
+ * (`getEntryId` reads a persisted message's entry), or why that entry is not known.
+ */
+export function continuousChatTurnAudit(
+	turn: IcmTurnHandle,
+	messages: readonly AgentMessage[],
+	getEntryId: (message: AgentMessage) => string | undefined,
+): NonNullable<ContinuousChatAudit["turn"]> {
+	const frame = continuousChatFrameMessages(turn, renderContinuousChatTurnState(turn));
+	const resolved = resolveContinuousChatTurnStart(turn, messages);
+	if ("error" in resolved) return { turnId: turn.turnId, frame, start: { unresolved: resolved.error } };
+	const first = messages[resolved.index];
+	const entryId =
+		first === undefined
+			? undefined
+			: first.role === "compactionSummary"
+				? first.compactionEntryId
+				: getEntryId(first);
+	return {
+		turnId: turn.turnId,
+		frame,
+		start:
+			entryId !== undefined
+				? { entryId }
+				: {
+						unresolved:
+							first === undefined
+								? "the turn has no message of its own yet"
+								: "the turn's first message is not persisted in the session yet",
+					},
 	};
 }
 

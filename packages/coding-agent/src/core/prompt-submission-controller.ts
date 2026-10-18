@@ -303,8 +303,9 @@ export class PromptSubmissionController {
 
 	/**
 	 * The submission ended: an input it still holds ends as `end`. Its queued entry is withdrawn while still pending, or held
-	 * when its own turn took it and never delivered it; an input it never queued ends unless it was delivered. An input
-	 * admitted to the pending queue is that queue's, and one already held or delivered has ended.
+	 * when its own turn took it and never delivered it; an input it never queued ends unless it was delivered, held when the
+	 * session closed while the own-turn record kept it (`PendingInputQueueController.holdClosedPreparing`), as the next
+	 * session restores it. An input admitted to the pending queue is that queue's, and one already held or delivered has ended.
 	 */
 	private endSubmissionInput(lifecycle: SubmissionLifecycle, end: OwnerInputEnd): void {
 		const queued = lifecycle.queued;
@@ -313,7 +314,10 @@ export class PromptSubmissionController {
 		const input = lifecycle.input;
 		if (input === undefined) return;
 		const state = this.deps.ownerInputs.stateOf(input.inputId);
-		if (state === "accepted" || state === "judged" || state === "own_turn")
+		if (
+			(state === "accepted" || state === "judged" || state === "own_turn") &&
+			!this.deps.pendingQueue.holdClosedPreparing(input.inputId)
+		)
 			this.deps.ownerInputs.end(input.inputId, end);
 	}
 

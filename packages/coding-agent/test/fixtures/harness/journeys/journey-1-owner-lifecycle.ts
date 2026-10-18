@@ -7,7 +7,10 @@ import type { AgentSession, AgentSessionEvent } from "../../../../src/core/agent
 import { getResumableHumanInputSnapshot } from "../../../../src/core/human-input.ts";
 import { DecisionLedgerStore } from "../../../../src/core/operator-projection/decision-ledger-store.ts";
 import { QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/core/queued-input-record.ts";
-import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../../../src/core/reflection-controller.ts";
+import {
+	CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
+	type ReflectionController,
+} from "../../../../src/core/reflection-controller.ts";
 import { isCredentialSecretKey, mockCredentialFields } from "../../../../src/core/secrets/credential-content-mock.ts";
 import {
 	enforceExplicitOptionalToolRequest,
@@ -59,6 +62,11 @@ import {
 	TASK_REQUEST,
 	toolOutcomes,
 } from "./shared.ts";
+
+/** The owner of the session's reflection cue state: `AgentSession`'s private reflection controller. */
+interface ReflectionCueOwner {
+	readonly _reflection: Pick<ReflectionController, "queueCurrentTurnCue">;
+}
 
 export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -1313,17 +1321,23 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		},
 	);
 	// Closing-reflection checkpoint: the start turn's own analysis is `none`, so its reflection at the tail can only come from a
-	// `due` cue with a worthy trigger carried in before it. The persisted cue is read through the controller's branch lookup.
+	// `due` cue with a worthy trigger carried in before it. That cue is set up here, at its owner, not inherited: it used to come
+	// silently from the memory-read turn's `durable` evidence far above (a cue is consumed only by an accepted request carrying
+	// it, and each reflection a later turn bought was cancelled by the next prompt first). A setup turn cannot supply it, since
+	// its own tail buys a reflection that reaches the provider. This is the completed-work call `agent_end` makes: it marks the
+	// cue due with `durable` and persists it on the branch, so the closing copies below carry it. It changes nothing while a
+	// reflection bought at the last turn's tail is still in flight; that turn was bought only by a due cue with a worthy trigger.
+	(session as unknown as ReflectionCueOwner)._reflection.queueCurrentTurnCue("durable");
+	// The persisted cue is read through the controller's branch lookup. Without it the start turn's tail buys no reflection
+	// and the phase below can only time out, so it is required here.
 	expect.soft(session.getMemorySystem(), "the reflection gate is open: the memory system is okf").toBe("okf");
-	expect
-		.soft(
-			sessionManager?.getLatestCustomEntryOnBranch(CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE)?.data,
-			"the carried reflection cue before the background start turn is due, with a worthy trigger",
-		)
-		.toMatchObject({
-			status: "due",
-			triggers: expect.arrayContaining([expect.stringMatching(/^(complex|corrective|durable|session-end)$/)]),
-		});
+	expect(
+		sessionManager?.getLatestCustomEntryOnBranch(CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE)?.data,
+		"the carried reflection cue before the background start turn is due, with a worthy trigger",
+	).toMatchObject({
+		status: "due",
+		triggers: expect.arrayContaining([expect.stringMatching(/^(complex|corrective|durable|session-end)$/)]),
+	});
 	// Two branch copies of this checkpoint, before the start turn: the closing reflection reopens them after the background flow.
 	const closingCopies = branchForClosingReflection(sessionManager);
 	await withDeadline(trace, "background start turn", session.prompt("Start the check in the background."));

@@ -32,11 +32,13 @@ import {
 	getApplicableAssistantUsageInfo,
 } from "../kernel/compaction/compaction.ts";
 import { TokenBudget } from "../kernel/compaction/token-budget.ts";
+import type { AgentContextPlan } from "../kernel/index.ts";
 import type { CompactionEntry, SessionEntry } from "../kernel/session/session-entries.ts";
 import { getLatestCompactionEntry, type SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { addUsage, createEmptyUsage } from "../kernel/usage.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session-contracts.ts";
+import type { EdgeGrantView } from "./autonomy/edge-policy.ts";
 import {
 	priceSentPrefixRewrite,
 	resolveEffectiveModelPricing,
@@ -52,6 +54,7 @@ import {
 	preDigestConversationText,
 } from "./context/brain-curator.ts";
 import type { CustodyTarget } from "./context/cache-custody.ts";
+import { cacheLaneKey } from "./context/cache-observation-recorder.ts";
 import {
 	type ArtifactStore,
 	createFileArtifactStore,
@@ -109,6 +112,7 @@ import { FitnessStore } from "./models/fitness-store.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { CacheDecisionRow } from "./operator-projection/decision-ledger-store.ts";
 import { createProcessScratchDirectory, removeProcessScratchDirectory } from "./process-scratch.ts";
+import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-entry-index.ts";
 import { isWorkerSession } from "./session-role.ts";
 import { reportSpawnedUsage } from "./spawned-usage.ts";
@@ -322,6 +326,8 @@ export class ContextPipeline {
 	 * contract. Rebuilt fresh (stale entries dropped) by `runContextAudit` every pass. */
 	private readonly _auditMemo: ContextAuditMemo = new Map();
 	private readonly _contextProjectionLaneStates = new WeakMap<ContextPolicyLane, ContextProjectionLaneState>();
+	/** Each worker conversation's own context-policy lane (`planWorkerRequest`), by its agent id. */
+	private readonly _workerContextPolicyLanes = new Map<string, ContextPolicyLane>();
 	/**
 	 * The messages each memo above was last filled for, one lineage per memo: the audit and the
 	 * estimate are fed different projections of the history, and a shared lineage made each call
@@ -629,6 +635,58 @@ export class ContextPipeline {
 			this._contextProjectionLaneStates.set(lane, state);
 		}
 		return state;
+	}
+
+	/**
+	 * A worker conversation's request plan, made with root's own request-context controller on the worker's lane: the
+	 * mechanics every agent needs, none of the head-only steps. Each worker keeps its own context-policy lane.
+	 */
+	planWorkerRequest(
+		input: {
+			agentId: string;
+			model: Model<Api>;
+			compactionTriggerTokens: number | undefined;
+			messages: AgentMessage[];
+			sentPrefixCount: number;
+			toolNames: readonly string[];
+			signal?: AbortSignal;
+		},
+		getEdgeGrants: () => readonly EdgeGrantView[],
+	): Promise<AgentContextPlan> {
+		const { agentId, model, compactionTriggerTokens, messages, sentPrefixCount, toolNames, signal } = input;
+		const lane = {
+			model,
+			compactionTriggerTokens,
+			custody: {
+				conversation: `${this.deps.getSessionManager().getSessionId()}/worker:${agentId}`,
+				lane: cacheLaneKey(model.api, model.provider, model.id),
+			},
+			conversation: `worker:${agentId}`,
+		};
+		let policyLane = this._workerContextPolicyLanes.get(agentId);
+		if (!policyLane) {
+			policyLane = { memo: new Map(), memoMessages: [], toolNames };
+			this._workerContextPolicyLanes.set(agentId, policyLane);
+		}
+		policyLane.toolNames = toolNames;
+		const contextPolicy = policyLane;
+		return new ProviderRequestContextController({
+			runContextAudit: (history) => this.runContextAudit(history, contextPolicy),
+			runPromptPolicyPlanning: (report) => this.runPromptPolicyPlanning(report, contextPolicy),
+			previewContextProjection: (history) => this.previewContextProjection(history, contextPolicy),
+			commitContextProjection: (projection) => this.commitContextProjection(projection, contextPolicy),
+			runPromptEnforcement: (history, report, sourceMessages, frozenBelow, gcReport) =>
+				this.runPromptEnforcement(history, report, contextPolicy, { sourceMessages, frozenBelow, gcReport }),
+			applyContextGc: (history, writePayloads, frozenBelow) =>
+				this.applyContextGc(history, writePayloads, frozenBelow, lane),
+			applyPathAliases: (history) => this.applyPathAliases(history),
+			getEdgeGrants,
+		}).plan(messages, sentPrefixCount, signal);
+	}
+
+	/** The session is disposed: no worker conversation plans again, so their context-policy lanes go. */
+	clearWorkerContextPolicyLanes(): void {
+		this._workerContextPolicyLanes.clear();
 	}
 
 	/** Build a speculative provider-request projection. Publishing is a separate accepted-plan step. */

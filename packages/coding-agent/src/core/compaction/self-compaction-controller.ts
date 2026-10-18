@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { AgentBusyError } from "../../kernel/agent.ts";
 import type { BeforeToolCallResult } from "../../kernel/index.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
+import type { AgentMessage } from "../../kernel/types.ts";
 import type { ContextUsage, ToolDefinition } from "../extensions/types.ts";
 import { IndependentObserverSet } from "../observer-dispatch.ts";
 import { resolveSessionEntryIndex } from "../session-entry-index.ts";
@@ -122,6 +123,22 @@ export type SelfCompactionNowOutcome =
 export type SelfCompactionRequestOutcome =
 	| { readonly accepted: true; readonly record: SelfCompactionRequestRecord; readonly replaced: boolean }
 	| { readonly accepted: false; readonly reason: string };
+
+/** The cache-read tokens of the latest assistant reply in `messages` that has usage and did not fail; null without one. */
+export function latestCachedReadTokens(messages: readonly AgentMessage[]): number | null {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index]!;
+		if (
+			message.role === "assistant" &&
+			message.usage &&
+			message.stopReason !== "error" &&
+			message.stopReason !== "aborted"
+		) {
+			return message.usage.cacheRead;
+		}
+	}
+	return null;
+}
 
 export class SelfCompactionController {
 	private readonly deps: SelfCompactionControllerDeps;

@@ -81,6 +81,7 @@ import { RETENTION_AUDIT_CUSTOM_TYPE } from "./compaction/evidence-retention-pro
 import type { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import {
 	createSelfCompactToolDefinition,
+	latestCachedReadTokens,
 	SelfCompactionController,
 	type SelfCompactionInfo,
 	type SelfCompactionNowOutcome,
@@ -104,7 +105,7 @@ import { wrapToolWithPathAliasExpansion } from "./context/path-alias-tool-wrap.t
 import { estimatePromptHeadroom } from "./context/prompt-headroom.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
 import type { ContextGcReport, ContextGcResult } from "./context-gc.ts";
-import { ContextPipeline, type ContextPolicyLane } from "./context-pipeline.ts";
+import { ContextPipeline } from "./context-pipeline.ts";
 import type { SessionCostSummary } from "./cost/cost-summary.ts";
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import type { CostGuardDecision, CostGuardSettings } from "./cost-guard.ts";
@@ -184,8 +185,7 @@ import {
 } from "./memory/continuous-chat-ingest.ts";
 import {
 	type ContinuousChatWire,
-	continuousChatFrameMessages,
-	renderContinuousChatTurnState,
+	continuousChatTurnAudit,
 	resolveContinuousChatTurnStart,
 } from "./memory/continuous-chat-projection.ts";
 import { readContinuousChatSettings, validateContinuousChatSummaryModel } from "./memory/continuous-chat-settings.ts";
@@ -338,9 +338,12 @@ import { ToolGateController } from "./tool-gate-controller.ts";
 import { type ToolProbeReport, type ToolProbeResult, ToolProtocolController } from "./tool-protocol-controller.ts";
 import { TOOL_RECOVERY_EVENT_LOG_FILE } from "./tool-recovery-log-records.ts";
 import { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
-import { formatToolSelectionHints } from "./tool-selection/promotion.ts";
 import { ToolPerformanceStore } from "./tool-selection/tool-performance-store.ts";
-import { formatToolSelectionReport, ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
+import {
+	createWorkerToolSelection,
+	formatToolSelectionReport,
+	ToolSelectionController,
+} from "./tool-selection/tool-selection-controller.ts";
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
@@ -567,8 +570,6 @@ export class AgentSession {
 	private _executionLoopMode?: ExecutionLoopMode;
 	private _objectiveExecutionController?: ObjectiveExecutionController;
 	private _steeringPlane?: SystemOneSteeringPlane;
-	/** Each worker conversation's own context-policy state (audit memo, tool facts), by agent id. */
-	private readonly _workerContextPolicyLanes = new Map<string, ContextPolicyLane>();
 	private _adaptiveReadiness?: AdaptiveRuntimeReadiness;
 	/** Durable owner development rules, restored from disk so they outlive compaction and restart. */
 	private readonly _ownerRules: DurableOwnerRuleStore;
@@ -1059,111 +1060,22 @@ export class AgentSession {
 			// the root's existing worker-agent control surface.
 			observeWorkerProgress: (observation, signal) => this._workerSupervision.observe(observation, signal),
 			// Worker lanes pass the same cache guard; each worker conversation is its own lane.
-			observeWorkerRequest: (agentId, snapshot, prefixTokens) => {
-				this._cache.guardSurface(snapshot, `${this.sessionId}/worker:${agentId}`);
-				if (prefixTokens === undefined) return;
-				try {
-					this.getDecisionLedger()?.recordWorkerPrefix({
-						sessionId: `${this.sessionId}/worker:${agentId}`,
-						lane: cacheLaneKey(snapshot.api, snapshot.provider, snapshot.modelId),
-						observedAt: Date.now(),
-						prefixTokens,
-					});
-				} catch {
-					// Telemetry only.
-				}
-			},
+			observeWorkerRequest: (agentId, snapshot, prefixTokens) =>
+				this._cache.observeWorkerRequest(agentId, snapshot, prefixTokens),
 			observeWorkerResponse: (message, observation) => this._cache.recordObservation(message, observation),
 			getSharedLaneToolOptions: () => this._runtimeBuilder.getSharedLaneToolOptions(),
 			admitWorkerEarlyCompaction: ({ agentId, model, contextTokens, messages }) =>
 				this._cache.admitWorkerEarlyCompaction(agentId, model, contextTokens, messages),
-			recordWorkerCompactionOutcome: ({ agentId, model, tokensBefore, tokensAfter, outputTokens }) => {
-				// A compaction replaced the worker's history: its next request's break is sanctioned, as root's is.
-				this._cache.custody.sanction("compaction", "a worker compaction replaced its history", {
-					conversation: `${this.sessionId}/worker:${agentId}`,
-				});
-				try {
-					this.getDecisionLedger()?.recordCompactionOutcome({
-						sessionId: `${this.sessionId}/worker:${agentId}`,
-						lane: cacheLaneKey(model.api, model.provider, model.id),
-						observedAt: Date.now(),
-						tokensBefore,
-						tokensAfter,
-						outputTokens,
-					});
-				} catch {
-					// Telemetry only.
-				}
-			},
+			recordWorkerCompactionOutcome: ({ agentId, ...outcome }) =>
+				this._cache.recordCompactionOutcome(outcome, agentId),
 			// A worker learns tool choice on its own model into the same evidence store root learns in.
-			createWorkerToolSelection: (model, tools) => {
-				const modelRef = formatModelRouterModel(model);
-				const selection = new ToolSelectionController({
-					store: this._toolPerformanceStore,
-					getModelRef: () => modelRef,
-					getActiveTools: () =>
-						tools.map((tool) => ({
-							name: tool.name,
-							description: tool.description,
-							parameters: tool.parameters,
-						})),
-				});
-				return {
-					hints: () => formatToolSelectionHints(selection.getActiveHints()),
-					begin: (toolCallId, toolName, args) => {
-						selection.begin(toolCallId, toolName, args, { modelRef });
-					},
-					complete: (toolCallId, succeeded, content) => selection.complete(toolCallId, succeeded, content),
-					discard: (toolCallId) => selection.discard(toolCallId),
-				};
-			},
+			createWorkerToolSelection: (model, tools) =>
+				createWorkerToolSelection(this._toolPerformanceStore, formatModelRouterModel(model), tools),
 			markModelExhausted: (model, retryAfterMs) =>
 				this._foregroundRecovery.markModelExhausted(`${model.provider}/${model.id}`, retryAfterMs),
 			// Worker conversations plan with root's own request-context controller, on their own lane: the
 			// mechanics every agent needs, none of the head-only steps.
-			planWorkerRequest: ({
-				agentId,
-				model,
-				compactionTriggerTokens,
-				messages,
-				sentPrefixCount,
-				toolNames,
-				signal,
-			}) => {
-				const lane = {
-					model,
-					compactionTriggerTokens,
-					custody: {
-						conversation: `${this.sessionId}/worker:${agentId}`,
-						lane: cacheLaneKey(model.api, model.provider, model.id),
-					},
-					conversation: `worker:${agentId}`,
-				};
-				let policyLane = this._workerContextPolicyLanes.get(agentId);
-				if (!policyLane) {
-					policyLane = { memo: new Map(), memoMessages: [], toolNames };
-					this._workerContextPolicyLanes.set(agentId, policyLane);
-				}
-				policyLane.toolNames = toolNames;
-				const contextPolicy = policyLane;
-				return new ProviderRequestContextController({
-					runContextAudit: (history) => this._pipeline.runContextAudit(history, contextPolicy),
-					runPromptPolicyPlanning: (report) => this._pipeline.runPromptPolicyPlanning(report, contextPolicy),
-					previewContextProjection: (history) => this._pipeline.previewContextProjection(history, contextPolicy),
-					commitContextProjection: (projection) =>
-						this._pipeline.commitContextProjection(projection, contextPolicy),
-					runPromptEnforcement: (history, report, sourceMessages, frozenBelow, gcReport) =>
-						this._pipeline.runPromptEnforcement(history, report, contextPolicy, {
-							sourceMessages,
-							frozenBelow,
-							gcReport,
-						}),
-					applyContextGc: (history, writePayloads, frozenBelow) =>
-						this._pipeline.applyContextGc(history, writePayloads, frozenBelow, lane),
-					applyPathAliases: (history) => this._pipeline.applyPathAliases(history),
-					getEdgeGrants: () => this.getEdgeGrants(),
-				}).plan(messages, sentPrefixCount, signal);
-			},
+			planWorkerRequest: (input) => this._pipeline.planWorkerRequest(input, () => this.getEdgeGrants()),
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			getEdgeGrants: () => this.getEdgeGrants(),
 			settleOwnerPolicy: () => this._edgeIntent.ownerPolicy.settle("latest"),
@@ -1500,60 +1412,15 @@ export class AgentSession {
 				this._operatorProjection.eventBridge.recordCompactionResult(audit.summaryEvent);
 			},
 			getLastSentRequest: () => this._cache.lastSentRequest,
-			getCacheEconomics: (model, now) => {
-				const lane = cacheLaneKey(model.api, model.provider, model.id);
-				const lastResponseAt = this._cache.knowledge.lastResponseAt(this.sessionId, lane);
-				const retained =
-					lastResponseAt === undefined
-						? undefined
-						: this._cache.knowledge.retainedAfter(lane, Math.max(0, now - lastResponseAt), now);
-				const lineage = this._cache.knowledge.lineage(this.sessionId, this._foregroundLineage(), now);
-				const outcome = this._cache.knowledge.compactionOutcome(lane, now);
-				return {
-					retainedAt: (gapMs) => this._cache.knowledge.retainedAfter(lane, gapMs, now),
-					returnGapsMs: (holder) => this._cache.knowledge.returnGaps(holder, now),
-					gapResolutionMs: this._cache.knowledge.gapResolution(lane, now),
-					...(retained ? { retained } : {}),
-					// Without a lineage that long on record, the lineage's own elapsed requests stand in.
-					...(lineage ? { remainingRequests: lineage.remaining ?? lineage.elapsed } : {}),
-					...(outcome ? { outcome } : {}),
-				};
-			},
+			getCacheEconomics: (model, now) => this._cache.compactionEconomics(model, now),
 			recordCacheDecision: (decision) => this._recordCacheDecision(decision),
-			recordCompactionOutcome: ({ model, tokensBefore, tokensAfter, outputTokens }) => {
-				try {
-					this.getDecisionLedger()?.recordCompactionOutcome({
-						sessionId: this.sessionId,
-						lane: cacheLaneKey(model.api, model.provider, model.id),
-						observedAt: Date.now(),
-						tokensBefore,
-						tokensAfter,
-						outputTokens,
-					});
-				} catch {
-					// Telemetry only.
-				}
-			},
+			recordCompactionOutcome: (outcome) => this._cache.recordCompactionOutcome(outcome),
 		});
 		this._selfCompaction = new SelfCompactionController({
 			getSessionManager: () => this.sessionManager,
 			getSettings: () => this.settingsManager.getSelfCompactionSettings(),
 			getContextUsage: () => this.getContextUsage(),
-			getCachedTokens: () => {
-				const messages = this.agent.state.messages;
-				for (let index = messages.length - 1; index >= 0; index--) {
-					const message = messages[index]!;
-					if (
-						message.role === "assistant" &&
-						message.usage &&
-						message.stopReason !== "error" &&
-						message.stopReason !== "aborted"
-					) {
-						return message.usage.cacheRead;
-					}
-				}
-				return null;
-			},
+			getCachedTokens: () => latestCachedReadTokens(this.agent.state.messages),
 			getHardTriggerTokens: () => this._hardCompactionTriggerTokens(),
 			getEarlyTriggerTokens: () => this._earlyCompactionTriggerTokens(),
 			hasCompactableHistory: () => this._compaction.hasCompactableHistory(),
@@ -4110,7 +3977,7 @@ export class AgentSession {
 		trackRequired(async () => {
 			this._pipeline.cleanupToolArtifactStoreOnDispose();
 		});
-		this._workerContextPolicyLanes.clear();
+		this._pipeline.clearWorkerContextPolicyLanes();
 		this._disposeCompletion = finish();
 	}
 
@@ -5167,31 +5034,9 @@ export class AgentSession {
 		if (wire.kind === "blocked") return { turn: undefined, blockedReason: wire.reason };
 		const turn = this._memory.continuousChatHost()?.turns.current();
 		if (turn === undefined) return { turn: undefined };
-		const frame = continuousChatFrameMessages(turn, renderContinuousChatTurnState(turn));
 		const messages = this.agent.state.messages;
-		const resolved = resolveContinuousChatTurnStart(turn, messages);
-		if ("error" in resolved) return { turn: { turnId: turn.turnId, frame, start: { unresolved: resolved.error } } };
-		const first = messages[resolved.index];
-		const entryId =
-			first === undefined
-				? undefined
-				: first.role === "compactionSummary"
-					? first.compactionEntryId
-					: this.sessionManager.getMessageEntryId(first);
 		return {
-			turn: {
-				turnId: turn.turnId,
-				frame,
-				start:
-					entryId !== undefined
-						? { entryId }
-						: {
-								unresolved:
-									first === undefined
-										? "the turn has no message of its own yet"
-										: "the turn's first message is not persisted in the session yet",
-							},
-			},
+			turn: continuousChatTurnAudit(turn, messages, (message) => this.sessionManager.getMessageEntryId(message)),
 		};
 	}
 

@@ -1,10 +1,16 @@
 import { performance } from "node:perf_hooks";
+import type { WorkerToolSelection } from "../delegation/worker-attempt-executor.ts";
 import {
 	decideExpectedUtility,
 	type ExpectedUtilityCandidate,
 	type ToolSelectionDecision,
 } from "./expected-utility.ts";
-import { evaluateToolPromotion, renderedToolSelectionHintIntents, type ToolSelectionHint } from "./promotion.ts";
+import {
+	evaluateToolPromotion,
+	formatToolSelectionHints,
+	renderedToolSelectionHintIntents,
+	type ToolSelectionHint,
+} from "./promotion.ts";
 import type {
 	ToolExecutionObservation,
 	ToolPerformanceKey,
@@ -514,6 +520,28 @@ export function formatToolSelectionReport(entries: readonly ToolSelectionReportE
 		}
 	}
 	return lines.join("\n");
+}
+
+/** A worker conversation learns tool choice on its own model (`modelRef`) into the same evidence store root learns in. */
+export function createWorkerToolSelection(
+	store: ToolPerformanceStore,
+	modelRef: string,
+	tools: readonly ToolSelectionTool[],
+): WorkerToolSelection {
+	const selection = new ToolSelectionController({
+		store,
+		getModelRef: () => modelRef,
+		getActiveTools: () =>
+			tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters })),
+	});
+	return {
+		hints: () => formatToolSelectionHints(selection.getActiveHints()),
+		begin: (toolCallId, toolName, args) => {
+			selection.begin(toolCallId, toolName, args, { modelRef });
+		},
+		complete: (toolCallId, succeeded, content) => selection.complete(toolCallId, succeeded, content),
+		discard: (toolCallId) => selection.discard(toolCallId),
+	};
 }
 
 export { classifyToolIntent, estimateContentTokens, estimateTokens };

@@ -19,6 +19,7 @@ import {
 	switchCostUsd,
 	usd,
 } from "./compaction/early-compaction-economics.ts";
+import type { CompactionCacheFacts } from "./compaction-controller.ts";
 import type { LastSentRequest } from "./compaction-support.ts";
 import { CacheCustody } from "./context/cache-custody.ts";
 import { CacheKnowledge } from "./context/cache-knowledge.ts";
@@ -257,6 +258,75 @@ export class SessionCacheController {
 			);
 		}
 		return verdict.proceed;
+	}
+
+	/** Worker lanes pass the same cache guard, each worker conversation as its own lane; the prefix it sent is recorded. */
+	observeWorkerRequest(
+		agentId: string,
+		snapshot: SessionRequestSnapshotInput,
+		prefixTokens: number | undefined,
+	): void {
+		const conversation = `${this.deps.getSessionId()}/worker:${agentId}`;
+		this.guardSurface(snapshot, conversation);
+		if (prefixTokens === undefined) return;
+		try {
+			this.deps.getDecisionLedger()?.recordWorkerPrefix({
+				sessionId: conversation,
+				lane: cacheLaneKey(snapshot.api, snapshot.provider, snapshot.modelId),
+				observedAt: Date.now(),
+				prefixTokens,
+			});
+		} catch {
+			// Telemetry only.
+		}
+	}
+
+	/**
+	 * A compaction's measured effect on its lane: the session's own, or with `agentId` a worker conversation's. A worker
+	 * compaction replaced that worker's history, so its next request's break is sanctioned, as root's is.
+	 */
+	recordCompactionOutcome(
+		outcome: { readonly model: Model<Api>; tokensBefore: number; tokensAfter: number; outputTokens: number },
+		agentId?: string,
+	): void {
+		const { model, tokensBefore, tokensAfter, outputTokens } = outcome;
+		const sessionId =
+			agentId === undefined ? this.deps.getSessionId() : `${this.deps.getSessionId()}/worker:${agentId}`;
+		if (agentId !== undefined)
+			this.custody.sanction("compaction", "a worker compaction replaced its history", { conversation: sessionId });
+		try {
+			this.deps.getDecisionLedger()?.recordCompactionOutcome({
+				sessionId,
+				lane: cacheLaneKey(model.api, model.provider, model.id),
+				observedAt: Date.now(),
+				tokensBefore,
+				tokensAfter,
+				outputTokens,
+			});
+		} catch {
+			// Telemetry only.
+		}
+	}
+
+	/** The learned cache facts an early compaction of the session's own lane on `model` is priced with, at `now`. */
+	compactionEconomics(model: Model<Api>, now: number): CompactionCacheFacts {
+		const lane = cacheLaneKey(model.api, model.provider, model.id);
+		const lastResponseAt = this.knowledge.lastResponseAt(this.deps.getSessionId(), lane);
+		const retained =
+			lastResponseAt === undefined
+				? undefined
+				: this.knowledge.retainedAfter(lane, Math.max(0, now - lastResponseAt), now);
+		const lineage = this.knowledge.lineage(this.deps.getSessionId(), this.deps.getForegroundLineage(), now);
+		const outcome = this.knowledge.compactionOutcome(lane, now);
+		return {
+			retainedAt: (gapMs) => this.knowledge.retainedAfter(lane, gapMs, now),
+			returnGapsMs: (holder) => this.knowledge.returnGaps(holder, now),
+			gapResolutionMs: this.knowledge.gapResolution(lane, now),
+			...(retained ? { retained } : {}),
+			// Without a lineage that long on record, the lineage's own elapsed requests stand in.
+			...(lineage ? { remainingRequests: lineage.remaining ?? lineage.elapsed } : {}),
+			...(outcome ? { outcome } : {}),
+		};
 	}
 
 	/** Whether the lane's cache is expected gone at the real idle gap: a surface change there costs nothing. */
