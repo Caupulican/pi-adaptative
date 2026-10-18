@@ -352,7 +352,9 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 				retainedArtifact: detailField(r40eSeen.retained, "artifactId") === r40eArtifacts.second,
 				listMentionsRetained: r40eSeen.list?.includes(r40eIds.second ?? "no-second-id"),
 				listMentionsEvicted: r40eSeen.list?.includes(r40eIds.first ?? "no-first-id"),
-				artifactTail: r40eArtifacts.retrieved?.includes("R40E-FIRST-TAIL"),
+				artifactTail: r40eArtifacts.retrieved?.includes("R40E-FIRST-TAIL")
+					? "the tail marker"
+					: `no tail marker in: ${r40eArtifacts.retrieved?.slice(0, 400)}`,
 			},
 			"the evicted task is no longer in the cache, yet its wait returns its saved record and its artifact reads back whole",
 		).toEqual({
@@ -364,7 +366,7 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			retainedArtifact: true,
 			listMentionsRetained: true,
 			listMentionsEvicted: false,
-			artifactTail: true,
+			artifactTail: "the tail marker",
 		});
 		world.faultMatrix.witness("R40e", { control: false });
 		world.faultMatrix.witness("R40e", { control: true });
