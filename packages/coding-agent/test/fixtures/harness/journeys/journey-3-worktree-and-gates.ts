@@ -2851,6 +2851,10 @@ async function runJourney3UnprovenLoopPhase(world: HarnessWorld): Promise<void> 
 		evidence_sufficient_to_act: { kind: "noul", probability: 0.97 },
 		unsupported_assumption_present: { kind: "noul", probability: 0.02 },
 		route: { kind: "choice", choice: "inspect", confidence: 0.97 },
+		// The reopened goal's implement-route turn is judged as journey 2's implement cycle judges its worker claim and patch.
+		claim_supported: { kind: "noul", probability: 0.97 },
+		patch_matches_requirements: { kind: "noul", probability: 0.97 },
+		side_effects_acceptable: { kind: "noul", probability: 0.97 },
 		action_accomplished_step: { kind: "noul", probability: 0.02 },
 		conclusions_supported: { kind: "noul", probability: 0.97 },
 		scope_violation: { kind: "noul", probability: 0.02 },
