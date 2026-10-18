@@ -15,6 +15,7 @@ import { checkPathScope } from "../autonomy/path-scope.ts";
 import { INCONCLUSIVE_LINE_PREFIX } from "../extensions/managed-lane-records.ts";
 import { normalizeEvidenceBundleForStorage } from "../research/evidence-bundle.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
+import { boundedText } from "../util/bounded-line.ts";
 import { utf8PrefixByBytes } from "../util/bounded-value.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
@@ -178,17 +179,58 @@ export function inconclusiveLinesIn(text: string | undefined): string[] {
 
 /**
  * One nonce-fenced untrusted block holding worker-supplied values, one per line, each bounded by the
- * caller's `sanitize`. A deliverer whose content is replayed against a durable record passes a fixed
- * `nonce` so the replayed text is byte-identical.
+ * caller's `sanitize`; `path` tells it every value is one path. A deliverer whose content is replayed
+ * against a durable record passes a fixed `nonce` so the replayed text is byte-identical.
  */
 export function fenceWorkerClaimValues(
 	values: readonly string[],
-	sanitize: (value: string) => string,
+	sanitize: WorkerClaimValueBound,
 	source: string,
 	nonce?: string,
+	path = false,
 ): string {
-	return wrapUntrustedText(values.map(sanitize).join("\n"), source, nonce ? { nonce } : undefined);
+	return fenceBoundedWorkerClaimValues(
+		values.map((value) => sanitize(value, path)),
+		source,
+		nonce,
+	);
 }
+
+function fenceBoundedWorkerClaimValues(values: readonly string[], source: string, nonce: string | undefined): string {
+	return wrapUntrustedText(values.join("\n"), source, nonce ? { nonce } : undefined);
+}
+
+/** Bounds one worker-supplied value before it is fenced; `path` is set when the value is one path. */
+export type WorkerClaimValueBound = (value: string, path: boolean) => string;
+
+/** A terminal handoff's one-line claim fields (the success summary): a single line, head and tail kept. */
+export const MAX_HANDOFF_CLAIM_LINE_CHARS = 120;
+/**
+ * A terminal handoff's bound on each fenced claim value. Its head budget, `ceil((240 - 1) / 2) = 120`, keeps a host
+ * lane finding's opening clause through its quoted lane key (`worker_lane: ... lane '<key>'`) whole, so the parent reads
+ * which lane holds the work.
+ */
+export const MAX_HANDOFF_CLAIM_VALUE_CHARS = 240;
+
+/** One line of at most {@link MAX_HANDOFF_CLAIM_LINE_CHARS}: line breaks become spaces, other spacing is kept. */
+export function handoffClaimLine(value: string): string {
+	return boundedText(value.replace(/[\r\n]+/g, " "), MAX_HANDOFF_CLAIM_LINE_CHARS);
+}
+
+/**
+ * A lane reason code as a handoff header line carries it: identifier characters only, at most
+ * {@link MAX_HANDOFF_CLAIM_LINE_CHARS}, cut at its end. It names no path, and an elision mark would read as `_`.
+ */
+export function handoffReasonCode(value: string): string {
+	return value
+		.replace(/[\r\n]+/g, " ")
+		.slice(0, MAX_HANDOFF_CLAIM_LINE_CHARS)
+		.replace(/[^\w.:,-]/g, "_");
+}
+
+/** One fenced value of at most {@link MAX_HANDOFF_CLAIM_VALUE_CHARS}: line breaks become spaces; a path keeps no head. */
+export const handoffClaimValue: WorkerClaimValueBound = (value, path) =>
+	boundedText(value.replace(/[\r\n]+/g, " "), MAX_HANDOFF_CLAIM_VALUE_CHARS, { path });
 
 /**
  * What the parent is told about a worker's unsettled findings: what System One settled, and what is
@@ -198,7 +240,7 @@ export function fenceWorkerClaimValues(
  */
 export function workerClaimSettlementLines(
 	claim: Pick<WorkerClaim, "inconclusive" | "systemOneSettled" | "ownerFollowUp">,
-	sanitize: (value: string) => string = (value) => value,
+	sanitize: WorkerClaimValueBound = (value) => value,
 	source = "worker-claim",
 	nonce?: string,
 ): string[] {
@@ -207,9 +249,10 @@ export function workerClaimSettlementLines(
 	if (claim.systemOneSettled && claim.systemOneSettled.length > 0)
 		lines.push(`System One settled (untrusted worker evidence):\n${fenced(claim.systemOneSettled)}`);
 	if (claim.inconclusive && claim.inconclusive.length > 0) {
+		// The follow-up is one path (the owner's follow-up document); the items are findings.
 		lines.push(
 			claim.ownerFollowUp
-				? `Inconclusive, recorded for the owner (follow-up path first, then the items). Continue with what does not depend on it and list it in your final answer (untrusted worker evidence):\n${fenced([claim.ownerFollowUp, ...claim.inconclusive])}`
+				? `Inconclusive, recorded for the owner (follow-up path first, then the items). Continue with what does not depend on it and list it in your final answer (untrusted worker evidence):\n${fenceBoundedWorkerClaimValues([sanitize(claim.ownerFollowUp, true), ...claim.inconclusive.map((item) => sanitize(item, false))], source, nonce)}`
 				: `Inconclusive, never treat as confirmed. Ask the owner (ask_question) before relying on it (untrusted worker evidence):\n${fenced(claim.inconclusive)}`,
 		);
 	}

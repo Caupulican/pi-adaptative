@@ -7,7 +7,13 @@ import {
 	projectBackgroundToolTerminalDelivery,
 } from "./background-tool-task-controller.ts";
 import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
-import { fenceWorkerClaimValues, workerClaimSettlementLines } from "./delegation/worker-claim.ts";
+import {
+	fenceWorkerClaimValues,
+	handoffClaimLine,
+	handoffClaimValue,
+	handoffReasonCode,
+	workerClaimSettlementLines,
+} from "./delegation/worker-claim.ts";
 import {
 	deriveWorkerDispositionFromProjections,
 	describeWorkerDisposition,
@@ -27,7 +33,7 @@ import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import type { ArtifactContract, WorkerResultContract } from "./orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime-state.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
-import { utf8PrefixByBytes } from "./util/bounded-value.ts";
+import { boundedUtf8Text } from "./util/bounded-line.ts";
 
 export type BackgroundActivitySummaryKind = "agent" | "task";
 export type BackgroundActivitySummaryStatus = "success" | "attention" | "failed" | "canceled";
@@ -214,13 +220,12 @@ export function buildForegroundWorkerTerminalHandoffContent(
 	const included = records.slice(0, 8);
 	const omitted = Math.max(0, (options?.totalCount ?? records.length) - included.length);
 	const wakeParent = options?.wakeParent ?? true;
-	const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
 	return [
 		"Background worker terminal handoff:",
 		...included.flatMap((record) => {
 			// A verifier's reason codes ride in the lane reason, so only identifier characters pass: the header
 			// line cannot carry free text a worker chose.
-			const reason = record.reasonCode ? ` reason=${sanitize(record.reasonCode).replace(/[^\w.:,-]/g, "_")}` : "";
+			const reason = record.reasonCode ? ` reason=${handoffReasonCode(record.reasonCode)}` : "";
 			const lines = [`- ${record.laneId}: ${record.status}${reason}`];
 			if (record.fanout) lines.push(`  Fan-out: ${record.fanout.replace(/[\r\n]+/g, " ").slice(0, 600)}`);
 			if (record.outputArtifact) {
@@ -230,20 +235,19 @@ export function buildForegroundWorkerTerminalHandoffContent(
 			}
 			if (record.claim?.summary) {
 				lines.push(`  Claim Status: ${record.claim.status || record.status}`);
+				const source = `worker-claim:${record.laneId}`;
 				// A verifier's rejection is the finding the receiving agent must reproduce: it is carried
 				// as fully as a blocked or partial claim, never cut to the one-line success form.
 				const summary =
 					ATTENTION_CLAIM_STATUSES.has(record.status) || record.claim.verification?.verdict === "rejected"
-						? utf8PrefixByBytes(record.claim.summary, MAX_ATTENTION_CLAIM_SUMMARY_BYTES)
-						: sanitize(record.claim.summary);
-				lines.push(
-					`  Claim Summary (untrusted worker evidence):\n${wrapUntrustedText(summary, `worker-claim:${record.laneId}`)}`,
-				);
+						? boundedUtf8Text(record.claim.summary, MAX_ATTENTION_CLAIM_SUMMARY_BYTES)
+						: handoffClaimLine(record.claim.summary);
+				lines.push(`  Claim Summary (untrusted worker evidence):\n${wrapUntrustedText(summary, source)}`);
 				// Every worker-supplied value is data: each list sits in its own nonce fence, bounded per value.
-				const fence = (values: readonly string[]): string =>
-					fenceWorkerClaimValues(values, sanitize, `worker-claim:${record.laneId}`);
+				const fence = (values: readonly string[], path = false): string =>
+					fenceWorkerClaimValues(values, handoffClaimValue, source, undefined, path);
 				if (record.claim.changedFiles && record.claim.changedFiles.length > 0) {
-					lines.push(`  Changed Files (untrusted worker evidence):\n${fence(record.claim.changedFiles)}`);
+					lines.push(`  Changed Files (untrusted worker evidence):\n${fence(record.claim.changedFiles, true)}`);
 				}
 				if (record.claim.blockers && record.claim.blockers.length > 0) {
 					lines.push(`  Blockers (untrusted worker evidence):\n${fence(record.claim.blockers)}`);
@@ -254,7 +258,7 @@ export function buildForegroundWorkerTerminalHandoffContent(
 						`  Verification verdict: ${verdict} (subject and reason codes, untrusted worker evidence):\n${fence([subjectTaskId, ...reasonCodes])}`,
 					);
 				}
-				for (const line of workerClaimSettlementLines(record.claim, sanitize, `worker-claim:${record.laneId}`))
+				for (const line of workerClaimSettlementLines(record.claim, handoffClaimValue, source))
 					lines.push(`  ${line}`);
 			}
 			if (record.hostVerdict) lines.push(`  ${describeWorkerHostVerdict(record.hostVerdict)}`);
@@ -513,7 +517,7 @@ export class ForegroundTerminalHandoffController {
 					? {
 							claim: {
 								status: claim.status,
-								summary: utf8PrefixByBytes(
+								summary: boundedUtf8Text(
 									claim.summary,
 									ATTENTION_CLAIM_STATUSES.has(record.status) || claim.verification?.verdict === "rejected"
 										? MAX_ATTENTION_CLAIM_SUMMARY_BYTES

@@ -786,7 +786,9 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 				}
 				// Two facts, asserted separately. The typed report is accepted by the host (Claim Status completed, Host verdict accepted).
 				// The overall line is partial because the lane holds this worker's uncommitted change (host finding, intentional).
-				// The handoff cuts each blocker value at 120 characters, so the visible integration note is the lane's opening clause.
+				// The handoff bounds each blocker value to 240 characters, keeping its head and tail around one elision (worker-claim.ts
+				// handoffClaimValue, bounded-line.ts boundedText). The head budget is ceil((240 - 1) / 2) = 120 and the lane finding's
+				// opening clause through the quoted lane key ends at character 63, so the visible integration note keeps it whole.
 				const identity = `- ${lateRepairTaskId}: partial reason=worker_host_findings`;
 				if (
 					lateRepairTaskId === undefined ||

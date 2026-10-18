@@ -23,6 +23,7 @@ import type {
 	WorkerReportRequirementStatus,
 	WorkerSubmittedReport,
 } from "../autonomy/contracts.ts";
+import { boundedText } from "../util/bounded-line.ts";
 import {
 	MAX_WORKER_CLAIM_BLOCKER_CHARS,
 	MAX_WORKER_CLAIM_BLOCKERS,
@@ -147,7 +148,7 @@ function clipped(values: readonly string[] | undefined, maximumCount: number, ma
 		const value = raw.trim();
 		if (!value || seen.has(value)) continue;
 		seen.add(value);
-		result.push(value.length <= maximumChars ? value : `${value.slice(0, maximumChars - 1)}…`);
+		result.push(boundedText(value, maximumChars));
 		if (result.length >= maximumCount) break;
 	}
 	return result;
@@ -157,13 +158,13 @@ function clipped(values: readonly string[] | undefined, maximumCount: number, ma
 export function submittedReportFromArguments(args: SubmitReportArguments): SubmittedWorkerReport {
 	const text = (value: string | undefined): string | undefined => {
 		const trimmed = value?.trim();
-		return trimmed ? trimmed.slice(0, MAX_WORKER_REPORT_TEXT_CHARS) : undefined;
+		return trimmed ? boundedText(trimmed, MAX_WORKER_REPORT_TEXT_CHARS) : undefined;
 	};
 	const refs = (values: readonly string[] | undefined) =>
 		clipped(values, MAX_WORKER_REPORT_REFS, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS);
 	return {
 		status: args.status,
-		summary: args.summary.trim().slice(0, MAX_WORKER_REPORT_TEXT_CHARS * 4),
+		summary: boundedText(args.summary.trim(), MAX_WORKER_REPORT_TEXT_CHARS * 4),
 		blockers: clipped(args.blockers, MAX_WORKER_CLAIM_BLOCKERS, MAX_WORKER_CLAIM_BLOCKER_CHARS),
 		inconclusive: clipped(args.inconclusive, MAX_WORKER_CLAIM_BLOCKERS, MAX_WORKER_CLAIM_BLOCKER_CHARS),
 		findings: (args.findings ?? []).slice(0, MAX_WORKER_REPORT_ENTRIES).flatMap((finding) => {
@@ -192,7 +193,7 @@ export function submittedReportFromArguments(args: SubmitReportArguments): Submi
 				];
 			}),
 			checks: (args.checks ?? []).slice(0, MAX_WORKER_REPORT_ENTRIES).flatMap((check) => {
-				const command = check.command.trim().slice(0, MAX_WORKER_CLAIM_COMMAND_CHARS);
+				const command = boundedText(check.command.trim(), MAX_WORKER_CLAIM_COMMAND_CHARS);
 				if (!command) return [];
 				const receiptId = check.receiptId?.trim();
 				const note = text(check.note);
@@ -206,7 +207,7 @@ export function submittedReportFromArguments(args: SubmitReportArguments): Submi
 				];
 			}),
 			changes: (args.changes ?? []).slice(0, MAX_WORKER_REPORT_ENTRIES).flatMap((change) => {
-				const file = change.file.trim().slice(0, MAX_WORKER_CLAIM_CHANGED_FILE_CHARS);
+				const file = boundedText(change.file.trim(), MAX_WORKER_CLAIM_CHANGED_FILE_CHARS, { path: true });
 				const what = text(change.what);
 				if (!file || !what) return [];
 				return [{ file, what, ...(change.serves?.length ? { serves: refs(change.serves) } : {}) }];
@@ -501,5 +502,5 @@ export function workerReportClaimText(claim: {
 	for (const check of report.checks) {
 		if (check.note) lines.push(`Check "${check.command}" ${check.result.replace("_", " ")}: ${check.note}`);
 	}
-	return lines.join("\n").slice(0, 16_000);
+	return boundedText(lines.join("\n"), 16_000);
 }

@@ -56,7 +56,13 @@ import {
 	workerAgentBroadcastTargetIdempotencyKey,
 	workerAgentMessageId,
 } from "./worker-agent-control.ts";
-import { fenceWorkerClaimValues, workerClaimSettlementLines } from "./worker-claim.ts";
+import {
+	fenceWorkerClaimValues,
+	handoffClaimLine,
+	handoffClaimValue,
+	handoffReasonCode,
+	workerClaimSettlementLines,
+} from "./worker-claim.ts";
 import {
 	MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES,
 	type WorkerConversation,
@@ -192,7 +198,6 @@ export function buildWorkerTerminalHandoffContent(args: {
 	/** Advice for the receiving agent; the root decides. */
 	recommendedDisposition?: WorkerDispositionAdvice;
 }): string {
-	const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
 	// This content is stored and replayed against a durable mailbox record, so the fence nonce is fixed per
 	// child and lane rather than random. A literal nonce inside worker text is still neutralized.
 	const source = `worker-claim:${args.record.laneId}`;
@@ -200,27 +205,32 @@ export function buildWorkerTerminalHandoffContent(args: {
 		.update(`worker-terminal-handoff\0${args.childAgentId}\0${args.record.laneId}`)
 		.digest("hex")
 		.slice(0, 32);
-	const fence = (values: readonly string[]): string => fenceWorkerClaimValues(values, sanitize, source, nonce);
+	const fence = (values: readonly string[], path = false): string =>
+		fenceWorkerClaimValues(values, handoffClaimValue, source, nonce, path);
 	return [
 		"Worker terminal handoff",
 		`childAgentId=${args.childAgentId}`,
 		`laneId=${args.record.laneId}`,
 		`status=${args.record.status}`,
-		...(args.record.reasonCode ? [`reasonCode=${sanitize(args.record.reasonCode).replace(/[^\w.:,-]/g, "_")}`] : []),
+		...(args.record.reasonCode ? [`reasonCode=${handoffReasonCode(args.record.reasonCode)}`] : []),
 		...(args.outputArtifact
 			? [
 					`fullOutput=${args.outputArtifact.uri}${args.outputArtifact.sizeBytes === undefined ? "" : ` (${args.outputArtifact.sizeBytes} bytes)`}`,
 				]
 			: []),
 		...(args.claim?.summary ? [`claimStatus=${args.claim.status || args.record.status}`] : []),
-		...(args.claim?.summary ? [`claimSummary (untrusted worker evidence):\n${fence([args.claim.summary])}`] : []),
+		...(args.claim?.summary
+			? [
+					`claimSummary (untrusted worker evidence):\n${fenceWorkerClaimValues([args.claim.summary], handoffClaimLine, source, nonce)}`,
+				]
+			: []),
 		...(args.claim?.changedFiles && args.claim.changedFiles.length > 0
-			? [`changedFiles (untrusted worker evidence):\n${fence(args.claim.changedFiles)}`]
+			? [`changedFiles (untrusted worker evidence):\n${fence(args.claim.changedFiles, true)}`]
 			: []),
 		...(args.claim?.blockers && args.claim.blockers.length > 0
 			? [`blockers (untrusted worker evidence):\n${fence(args.claim.blockers)}`]
 			: []),
-		...(args.claim ? workerClaimSettlementLines(args.claim, sanitize, source, nonce) : []),
+		...(args.claim ? workerClaimSettlementLines(args.claim, handoffClaimValue, source, nonce) : []),
 		...(args.hostVerdict ? [describeWorkerHostVerdict(args.hostVerdict)] : []),
 		...(args.recommendedDisposition
 			? [

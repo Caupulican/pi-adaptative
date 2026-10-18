@@ -21,6 +21,7 @@ import { lstatSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { hostWroteDuring } from "../../utils/host-write-window.ts";
 import { AGENT_ROOT_DIRECTORY_NAMES, AGENT_ROOT_FILE_NAMES } from "../agent-paths.ts";
+import { boundedText } from "../util/bounded-line.ts";
 import { HOST_FINDING_PREFIX } from "./host-finding-prefixes.ts";
 import { getHarnessWriteProtectedPaths } from "./lane-private-paths.ts";
 
@@ -85,7 +86,7 @@ type Fingerprints = Map<string, string>;
 const MAX_BLOCKER_CHARS = 960;
 
 function clipBlocker(line: string): string {
-	return line.length > MAX_BLOCKER_CHARS ? `${line.slice(0, MAX_BLOCKER_CHARS - 1)}\u2026` : line;
+	return boundedText(line, MAX_BLOCKER_CHARS);
 }
 
 function fingerprintOf(target: string): string {

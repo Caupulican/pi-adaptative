@@ -223,7 +223,7 @@ const MAX_VERDICT_ITEM_CHARS = 120;
 function verdictList(values: readonly string[]): string {
 	const shown = values
 		.slice(0, MAX_VERDICT_LIST_ITEMS)
-		.map((value) => value.replace(/[\r\n]+/g, " ").slice(0, MAX_VERDICT_ITEM_CHARS));
+		.map((value) => boundedText(value.replace(/[\r\n]+/g, " "), MAX_VERDICT_ITEM_CHARS));
 	const more = values.length - shown.length;
 	return `${shown.join(", ")}${more > 0 ? `, +${more} more` : ""}`;
 }
@@ -276,6 +276,6 @@ export function workerHostVerdictView(hostVerdict: WorkerHostVerdict): WorkerHos
 		covered: hostVerdict.coveredRequirementIds.slice(0, MAX_VERDICT_LIST_ITEMS),
 		missing: hostVerdict.missing
 			.slice(0, MAX_VERDICT_LIST_ITEMS)
-			.map((value) => value.slice(0, MAX_VERDICT_ITEM_CHARS)),
+			.map((value) => boundedText(value, MAX_VERDICT_ITEM_CHARS)),
 	};
 }

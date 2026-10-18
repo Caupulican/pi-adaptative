@@ -24,10 +24,13 @@ import {
 	MAX_EVIDENCE_SOURCE_ID_CHARS,
 	MAX_EVIDENCE_TEXT_CHARS,
 } from "../research/evidence-bundle.ts";
+import { boundedUtf8Text } from "../util/bounded-line.ts";
 import { utf8PrefixByBytes } from "../util/bounded-value.ts";
 import type { OrchestrationPanelModel, OrchestrationPanelRow } from "./orchestration-panel.ts";
 
 const MAX_WORKER_CONTROL_ID_CHARS = 512;
+/** UTF-8 bytes kept of each settled, inconclusive or follow-up value in a status record (head and tail). */
+const MAX_SETTLEMENT_ITEM_BYTES = 120;
 
 export const MAX_DELEGATE_STATUS_OUTPUT_BYTES = 16 * 1024;
 
@@ -308,7 +311,7 @@ function formatRecord(
 	if (!claim && lastWorkerText) {
 		headerLines.push(
 			`no completion claim; the worker's last words before it ended (UNTRUSTED, possibly unfinished):`,
-			utf8PrefixByBytes(lastWorkerText, Math.min(MAX_CLAIMLESS_OUTPUT_BYTES, maxRecordBytes)),
+			boundedUtf8Text(lastWorkerText, Math.min(MAX_CLAIMLESS_OUTPUT_BYTES, maxRecordBytes)),
 		);
 	}
 	if (!claim) {
@@ -324,7 +327,7 @@ function formatRecord(
 	// The fenced block must stay whole, so each item is bounded before it is fenced rather than the line after.
 	for (const line of workerClaimSettlementLines(
 		claim,
-		(item) => utf8PrefixByBytes(item, 120),
+		(item, path) => boundedUtf8Text(item, MAX_SETTLEMENT_ITEM_BYTES, { path }),
 		`worker-claim:${boundedLaneId}`,
 	))
 		headerLines.push(line);
@@ -387,13 +390,14 @@ function formatRecord(
 		const reserve = (findings.length > 0 ? 128 : 0) + (claim.changedFiles && claim.changedFiles.length > 0 ? 128 : 0);
 		const maxSummaryBytes = Math.min(4_096, Math.max(0, builder.remainingBytes - reserve - 1));
 		if (maxSummaryBytes > 16) {
-			let summarySlice = utf8PrefixByBytes(claim.summary.trim(), maxSummaryBytes);
-			while (summarySlice.length > 0 && !builder.canFit([summarySlice])) {
-				summarySlice = summarySlice.slice(0, -10);
+			// The summary keeps its head and tail; a tighter fit shrinks the byte bound, never cuts the end.
+			let summaryBytes = maxSummaryBytes;
+			let summarySlice = boundedUtf8Text(claim.summary.trim(), summaryBytes);
+			while (summaryBytes > 16 && !builder.canFit([summarySlice])) {
+				summaryBytes -= 10;
+				summarySlice = boundedUtf8Text(claim.summary.trim(), summaryBytes);
 			}
-			if (summarySlice.length > 0) {
-				builder.tryAppend([summarySlice]);
-			}
+			builder.tryAppend([summarySlice]);
 		}
 	}
 
