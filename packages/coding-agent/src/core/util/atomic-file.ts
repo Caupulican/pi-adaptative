@@ -93,6 +93,15 @@ export interface AtomicFileLockOptions {
 	 *   the existing execution model rather than introducing a new one.
 	 */
 	retries?: number;
+	/**
+	 * The sync lock's wait between acquisition attempts (`withFileLockSync`/`acquireFileLockSync` only): called once per
+	 * gap with that gap's delay, and must return only when the gap is over. Defaults to {@link blockingSleepMs}, which
+	 * blocks the calling thread. Like that default, a replacement cannot take an abort (the caller is fully synchronous,
+	 * so nothing can run to deliver one); the wait is bounded by the gap schedule over the retry count instead, and the
+	 * total of the gaps it was asked for is reported on the final `ELOCKED`. A host that drives time itself passes one
+	 * that records the gaps instead of blocking.
+	 */
+	sleepSync?: (delayMs: number) => void;
 	/** Initial delay between sync/async acquisition attempts; defaults to 25ms. */
 	minRetryDelayMs?: number;
 	/** Maximum delay between sync/async acquisition attempts; defaults to 500ms. */
@@ -203,10 +212,11 @@ function isLockedError(err: unknown): boolean {
 }
 
 /**
- * Block the calling thread for `ms` without spinning the CPU (Atomics.wait on a private buffer). It cannot take an abort:
- * the whole thread is blocked, so no signal, timer or event can run until it returns. It is bounded instead: its only
- * caller, {@link acquireFileLockSync}, passes one capped retry gap per attempt, so its total is the gap schedule over
- * the retry count, and that total is reported on the final `ELOCKED`.
+ * Block the calling thread for `ms` without spinning the CPU (Atomics.wait on a private buffer): the default
+ * {@link AtomicFileLockOptions.sleepSync}. It cannot take an abort: the whole thread is blocked, so no signal, timer or
+ * event can run until it returns. It is bounded instead: its only caller, {@link acquireFileLockSync}, passes one
+ * capped retry gap per attempt, so its total is the gap schedule over the retry count, and that total is reported on
+ * the final `ELOCKED`.
  */
 function blockingSleepMs(ms: number): void {
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -320,6 +330,7 @@ export function acquireFileLockSync(filePath: string, options: AtomicFileLockOpt
 		realpath: options.realpath ?? DEFAULT_REALPATH,
 		stale: options.stale,
 	};
+	const sleepSync = options.sleepSync ?? blockingSleepMs;
 	let blockedMs = 0;
 	for (let attempt = 1; attempt <= attempts; attempt++) {
 		try {
@@ -334,7 +345,7 @@ export function acquireFileLockSync(filePath: string, options: AtomicFileLockOpt
 				throw err;
 			}
 			const gapMs = retryDelayMs(options, attempt);
-			blockingSleepMs(gapMs);
+			sleepSync(gapMs);
 			blockedMs += gapMs;
 		}
 	}

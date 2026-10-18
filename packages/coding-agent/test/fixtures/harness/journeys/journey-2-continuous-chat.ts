@@ -428,9 +428,38 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 				/ICM project chat is unavailable: The ICM chat for this project is owned by pid \d+ on .+ still running\./,
 			),
 		});
+		world.faultMatrix.witness("R27", { control: true });
+		// R27: the live owner's lease is captured while it holds the chat, since its disposal removes the file.
+		const readLease = (holder: string): { readonly text: string; readonly pid: number; readonly token: string } => {
+			const text = world.io.peekFile(wStore.leaseFile);
+			if (text === undefined) throw new Error(`the ${holder} holds no runtime.lease.json`);
+			return { text, ...(JSON.parse(text) as { readonly pid: number; readonly token: string }) };
+		};
+		const wLiveOwner = readLease("live ICM owner");
+		expect(wLiveOwner.pid, "the live ICM lease names this process").toBe(world.processTable.self);
 		expect(await world.disposeSessionInBody(wSecond.session)).toBeUndefined();
 		expect(await world.disposeSessionInBody(wRoot.session)).toBeUndefined();
 		expect(world.io.existsSync(wStore.leaseFile), "disposing the owner releases runtime.lease.json").toBe(false);
+		// The owner process dies with its lease on disk: the captured lease is written back and the process advances, so the
+		// recorded owner answers ESRCH. A fresh root on the same store replaces it during its memory activation.
+		world.io.writeFileSync(wStore.leaseFile, wLiveOwner.text);
+		expect(world.processTable.advanceProcess().previousPid, "the dead process is the recorded lease owner").toBe(
+			wLiveOwner.pid,
+		);
+		const wTakeover = await world.createRootSession("root", {
+			agentDir: wAgentDir,
+			settings: icmContinuousSettings(),
+		});
+		const wTakenOwner = readLease("fresh ICM root");
+		expect(
+			{ pid: wTakenOwner.pid, replaced: wTakenOwner.token !== wLiveOwner.token },
+			"a fresh root takes over the runtime lease its dead owner left",
+		).toEqual({ pid: world.processTable.self, replaced: true });
+		world.faultMatrix.witness("R27", { control: false });
+		expect(await world.disposeSessionInBody(wTakeover.session)).toBeUndefined();
+		expect(world.io.existsSync(wStore.leaseFile), "disposing the takeover owner releases runtime.lease.json").toBe(
+			false,
+		);
 		trace.mark("root", "icm.worker-and-lease");
 	} finally {
 		world.io.rmSync(wBigPath, { force: true });

@@ -23,6 +23,7 @@ import {
 } from "../reliability/index.ts";
 import type { SessionEntry } from "../session/session-entries.ts";
 import type { ReadonlySessionManager } from "../session/session-manager.ts";
+import type { TimerPort } from "../timer-port.ts";
 import type { AgentMessage } from "../types.ts";
 import { addUsage, combineUsage, createEmptyUsage } from "../usage.ts";
 import { estimateTokens } from "./compaction.ts";
@@ -94,6 +95,11 @@ export interface GenerateBranchSummaryOptions {
 	streamFn?: StreamFn;
 	/** Cumulative received usage snapshot, published before retry work can throw. */
 	onUsage?: (usage: Usage) => void;
+	/**
+	 * The timers the backoff between attempts waits on (a host passes its `branch-summary-retry` owner); defaults to
+	 * the system timers. An abort of `signal` still ends the backoff at once.
+	 */
+	timers?: TimerPort;
 }
 
 // ============================================================================
@@ -311,6 +317,7 @@ export async function generateBranchSummary(
 		reserveTokens = 16384,
 		streamFn,
 		onUsage,
+		timers,
 	} = options;
 
 	// Token budget = context window minus reserved space for prompt + response
@@ -367,7 +374,7 @@ export async function generateBranchSummary(
 			const delayMs = computeRetryDelayMs(DEFAULT_RETRY_POLICY, attempt, {
 				retryAfterMs: classified.retryAfterMs,
 			});
-			await sleepAbortable(delayMs, signal);
+			await sleepAbortable(delayMs, signal, timers);
 		} catch (error) {
 			if (signal.aborted) return { aborted: true, usage };
 			if (error instanceof RetryDelayExceededError) {

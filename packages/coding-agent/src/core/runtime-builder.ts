@@ -227,6 +227,7 @@ import { wrapToolExecution } from "./tools/tool-execution-wrapper.ts";
 import { createToolTaskToolDefinition, type ToolTaskDependencies } from "./tools/tool-task.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
 import { countFileLinesSync } from "./util/bounded-file.ts";
+import type { TimerPort } from "./util/timer-port.ts";
 import { readWorkerExtensionToolGrants, registerWorkerExtensionToolPolicies } from "./worker-extension-grants.ts";
 import { isWorkerProcessToolAllowed } from "./worker-tool-ceiling.ts";
 import { createLane, releaseLane } from "./worktree-sync/git-engine.ts";
@@ -454,6 +455,11 @@ export interface RuntimeBuilderDeps {
 	/** Goal-tool state accessors. */
 	getGoalStateSnapshot(): GoalState | undefined;
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string;
+	/**
+	 * The `goal-continuation` port: the goal tool stamps its events on its clock, so a dispatched worker's `boundAt` and
+	 * the deadline the runtime snapshot decides from it share one time domain. Absent, the system clock.
+	 */
+	goalClock?: TimerPort;
 	/** Trusted active verification identities reconstructed by the session owner. */
 	getActiveVerificationIds?(): readonly string[];
 	/** Queue items the owner must decide (the session's owner items message). */
@@ -1552,8 +1558,10 @@ export class RuntimeBuilder {
 			const shouldBuildGoalExecutor =
 				toolAccess.allows(LEGACY_GOAL_TOOL_NAME) || GOAL_LIFECYCLE_TOOL_NAMES.some(toolAccess.allows);
 			if (shouldBuildGoalExecutor) {
+				const goalClock = this.deps.goalClock;
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
+					...(goalClock ? { now: () => new Date(goalClock.now()).toISOString() } : {}),
 					...(systemOneEvidenceStore
 						? {
 								retainCompletionEvidence: (toolCallId, decision) =>

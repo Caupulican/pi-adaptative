@@ -24,6 +24,7 @@ import type { ObjectiveTerminalResult } from "../objective-execution/objective-r
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import { openWorkUnit } from "../work-units.ts";
 import type { RoutedGoalContext } from "./compact-goal-context.ts";
 import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
@@ -70,6 +71,12 @@ import {
 
 export interface GoalSessionControllerDeps {
 	getSessionManager(): SessionManager;
+	/**
+	 * The `goal-continuation` port: the runtime snapshot's `now` reads its clock, so a bound worker's never-hang deadline
+	 * is decided on the clock the goal tool stamped that worker's `boundAt` on and the wake is armed on. This controller's
+	 * own event stamps and the lease's wall-clock accounting stay on the system clock. Absent, the system clock.
+	 */
+	clock?: TimerPort;
 	getModelProvider(): string | undefined;
 	getLaneRecords(): readonly LaneRecord[];
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined;
@@ -929,9 +936,11 @@ export class GoalSessionController {
 	}
 
 	getRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot {
+		const clock = this.deps.clock;
 		return buildGoalRuntimeSnapshot({
 			sessionManager: this.deps.getSessionManager(),
 			settings,
+			...(clock ? { now: () => new Date(clock.now()).toISOString() } : {}),
 			laneRecords: this.deps.getLaneRecords(),
 			taskRuntime: this.deps.getTaskRuntimeSnapshot(),
 			backgroundToolTasks: this.deps.getBackgroundToolTasks(),

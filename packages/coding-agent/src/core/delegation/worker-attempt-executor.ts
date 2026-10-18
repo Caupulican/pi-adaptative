@@ -29,6 +29,7 @@ import type { ArtifactContract, AttemptUsageSnapshot, ExecutionGrant } from "../
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import { WorkerActionJournal } from "./worker-action-journal.ts";
 import type { AppliedActionsReport, WorkerAction } from "./worker-actions.ts";
 import type { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
@@ -116,6 +117,8 @@ export async function runProviderCompletionWithBackoff(args: {
 	laneId: string;
 	warn: (message: string) => void;
 	signal?: AbortSignal;
+	/** The `worker-provider-retry` port the backoff waits on; defaults to the system timers. */
+	timers?: TimerPort;
 }): Promise<IsolatedCompletionResult> {
 	for (let attempt = 1; ; attempt++) {
 		try {
@@ -152,7 +155,7 @@ export async function runProviderCompletionWithBackoff(args: {
 			args.warn(
 				`Worker ${args.laneId} provider request failed (${classified.reason}); retrying in ${Math.ceil(delayMs / 1000)}s (attempt ${attempt + 1}/${WORKER_PROVIDER_RETRY_POLICY.maxAttempts}).`,
 			);
-			await sleepAbortable(delayMs, args.signal);
+			await sleepAbortable(delayMs, args.signal, args.timers);
 		}
 	}
 }
@@ -229,6 +232,8 @@ export interface WorkerAttemptExecutorOptions {
 	>;
 	applyActions?(actions: readonly WorkerAction[], actionJournal?: WorkerActionJournal): AppliedActionsReport;
 	warn(message: string): void;
+	/** The `worker-provider-retry` port a transiently failed provider request backs off on; default: system timers. */
+	providerRetryTimers?: TimerPort;
 	/**
 	 * Live worker supervision. Called once per executed tool call with what actually happened on this
 	 * attempt. Supervision is advisory: it never blocks the call it observes, and a failure inside it
@@ -1399,6 +1404,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								laneId: options.laneId,
 								warn: options.warn,
 								...(signal ? { signal } : {}),
+								...(options.providerRetryTimers ? { timers: options.providerRetryTimers } : {}),
 							});
 						} finally {
 							closeActiveProviderTurn();

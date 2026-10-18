@@ -70,6 +70,7 @@ import type { IcmTurnHandle } from "./memory/continuous-chat-turn-coordinator.ts
 import type { RequestAuth } from "./request-auth.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-entry-index.ts";
+import type { TimerPort } from "./util/timer-port.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface CompactionControllerSettingsSource {
@@ -256,6 +257,8 @@ export interface CompactionControllerDeps {
 		provider?: string,
 	): Promise<CompactionResult>;
 	onCompactionSettled?(): void;
+	/** The `compaction-retry` port {@link compactWithRetry} backs off on; defaults to the system timers. */
+	retryTimers?: TimerPort;
 	retentionPlanner?: EvidenceRetentionPlanner;
 	/**
 	 * Live evidence-retention wiring. Absent parts degrade to deterministic pinning only: without a
@@ -363,6 +366,8 @@ export async function runCompactionWithRetry<T>(options: {
 	provider?: string;
 	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number };
 	recordFailure(record: Parameters<FailureCorpusRecorder["record"]>[0]): void;
+	/** The `compaction-retry` port the backoff between attempts waits on; defaults to the system timers. */
+	timers?: TimerPort;
 }): Promise<T> {
 	const retrySettings = options.getRetrySettings();
 	const maxAttempts = retrySettings.enabled ? Math.max(1, retrySettings.maxRetries + 1) : 1;
@@ -384,6 +389,7 @@ export async function runCompactionWithRetry<T>(options: {
 			await sleepAbortable(
 				computeRetryDelayMs(policy, attempt, { retryAfterMs: classified.retryAfterMs }),
 				options.signal,
+				options.timers,
 			);
 		}
 	}
@@ -2427,6 +2433,7 @@ export class CompactionController {
 			provider,
 			getRetrySettings: () => this.deps.settingsManager.getRetrySettings(),
 			recordFailure: (record) => this.deps.getFailureCorpus().record(record),
+			...(this.deps.retryTimers ? { timers: this.deps.retryTimers } : {}),
 		});
 	}
 

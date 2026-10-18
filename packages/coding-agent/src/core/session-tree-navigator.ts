@@ -17,6 +17,7 @@ import { combineUsage } from "../kernel/usage.ts";
 import type { ExtensionRunner, TreePreparation } from "./extensions/index.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import { reportSpawnedUsage, type SpawnedUsageReporter } from "./spawned-usage.ts";
+import type { TimerPort } from "./util/timer-port.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface SessionTreeNavigatorSettingsSource {
@@ -45,6 +46,8 @@ export interface SessionTreeNavigatorDeps extends SpawnedUsageReporter {
 	 * may start turns.
 	 */
 	beginHistoryRewrite(): () => void;
+	/** The `branch-summary-retry` port the summarizer's backoff waits on; defaults to the system timers. */
+	summaryRetryTimers?: TimerPort;
 }
 
 export class SessionTreeNavigator {
@@ -224,6 +227,7 @@ export class SessionTreeNavigator {
 						// throw. Replace its previous contribution; retain extension charges once.
 						summaryUsage = combineUsage(extensionUsage, usage);
 					},
+					...(this.deps.summaryRetryTimers ? { timers: this.deps.summaryRetryTimers } : {}),
 				});
 				if (result.aborted || branchSummaryAbort.signal.aborted) {
 					return { cancelled: true, aborted: true };

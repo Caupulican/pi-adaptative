@@ -27,9 +27,15 @@ export {
  *   the gate waits out.
  * - `worker-lease`: the heartbeat that renews a running worker attempt's lease. It is its own owner so a host that
  *   drives `orchestration` past a lease deadline expires the lease instead of firing the renewal first.
- * - `goal-continuation`: the goal auto-continue wake (the continuation delay, a persisted worker-deadline resume and the
- *   scheduled-failure retry).
+ * - `goal-continuation`: the goal auto-continue wake and the clock of a bound worker's never-hang deadline. The goal
+ *   tool stamps its events (a dispatched worker's `boundAt` among them), the runtime snapshot decides the deadline, and
+ *   the wake (the continuation delay, a persisted worker-deadline resume and the scheduled-failure retry) is armed for
+ *   what is left of it, all on this port. The goal session's own stamps (pause, resume, system stops, accounting) and
+ *   the goal's wall-clock budget stay on the system clock.
  * - `worker-wait`: the bound of a delegate wait and the watchdog of its blocked write-reservation restore.
+ * - `compaction-retry`: the backoff between attempts of a compaction whose summarizer request failed transiently.
+ * - `worker-provider-retry`: the backoff between a worker's transiently failed provider request and its retry.
+ * - `branch-summary-retry`: the backoff between attempts of a tree navigation's branch summary request.
  */
 export type TimerOwner =
 	| "write-reservation"
@@ -42,7 +48,10 @@ export type TimerOwner =
 	| "provider-admission"
 	| "worker-lease"
 	| "goal-continuation"
-	| "worker-wait";
+	| "worker-wait"
+	| "compaction-retry"
+	| "worker-provider-retry"
+	| "branch-summary-retry";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */
 export interface TimerSource {

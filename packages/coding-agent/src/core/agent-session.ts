@@ -990,6 +990,7 @@ export class AgentSession {
 		});
 		this._goals = new GoalSessionController({
 			getSessionManager: () => this.sessionManager,
+			clock: config.timers.port("goal-continuation"),
 			getModelProvider: () => this.model?.provider,
 			getLaneRecords: () => this._backgroundLanes.getLaneRecords(),
 			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
@@ -1382,6 +1383,7 @@ export class AgentSession {
 			measureLiveContextTokens: () => this._measureLiveContextTokensForCompaction(),
 			runAutoCompaction: (reason, willRetry) => this._runAutoCompaction(reason, willRetry),
 			compactWithRetry: (run, signal, provider) => this._compactWithRetry(run, signal, provider),
+			retryTimers: config.timers.port("compaction-retry"),
 			onCompactionSettled: () => {
 				this._foregroundRecovery?.wakeIdleWaiters();
 				if (this._selfCompaction?.state().status === "compacted") this._selfCompaction.schedule();
@@ -1877,6 +1879,7 @@ export class AgentSession {
 			initializeMemory: () => this._memory.initialize(),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			saveGoalStateSnapshot: (state, expected) => this.saveGoalStateSnapshot(state, expected),
+			goalClock: config.timers.port("goal-continuation"),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
 			deliverToOwner: (items) => {
 				this._deliverToOwner(items);
@@ -2050,6 +2053,7 @@ export class AgentSession {
 			getAgent: () => this.agent,
 			// The navigation's history rewrite occupies the foreground and excludes a running turn, at the run owner.
 			beginHistoryRewrite: () => this._foregroundRecovery.beginHistoryRewrite(),
+			summaryRetryTimers: config.timers.port("branch-summary-retry"),
 			onBranchChanged: () => {
 				this._branchGeneration++;
 				// Owner input accepted on the old branch is held in full, never delivered on the new one.

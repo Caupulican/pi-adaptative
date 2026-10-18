@@ -645,11 +645,11 @@ const rows: readonly FaultMatrixRow[] = [
 		journey: 2,
 		phase: "continuous-chat",
 		fault: "the ICM runtime lease owner is dead",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 4,
-		status: "open",
-		needs: [{ kind: "extension", extension: "X2", detail: "a process advance plus reopen of the ICM runtime" }],
+		witness: "a fresh root takes over the runtime lease its dead owner left",
+		control: "runtime.lease.json blocks a second live root on the same continuous-chat store",
+		estSeconds: 1,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R28",
@@ -681,10 +681,9 @@ const rows: readonly FaultMatrixRow[] = [
 		status: "open",
 		needs: [
 			{
-				kind: "extension",
-				extension: "X1",
+				kind: "witness",
 				detail:
-					"the wake is the goal-continuation owner, but the worker deadline is stamped and decided on the system clock the goal runtime snapshot reads; advancing the port only re-plans, so the timeout needs that snapshot clock on a port",
+					"the goal tool's boundAt stamp, the runtime snapshot's now and the wake all read the goal-continuation port, so advancing it by the armed delay fires the wake at a deadline the snapshot decides as worker_wait_timeout; no journey dispatches a worker through goal dispatch_worker and holds it in flight, and the deadline is the fixed DEFAULT_GOAL_WORKER_WAIT_MS (one hour, no setting), while the port is one clock for every root of the world, so the advance must run in an auxiliary root while no other live goal holds a bound in-flight requirement",
 			},
 		],
 	},
@@ -972,7 +971,7 @@ const rows: readonly FaultMatrixRow[] = [
 				kind: "extension",
 				extension: "X1",
 				detail:
-					"the win32 rename retry backoff is still a raw setTimeout in a module-level util that takes no timer port, and the async rename calls fs/promises directly; the lock waits stay on system time by design (a cross-process lock whose holder, staleness and deadline are real time), the sync one bounded and reported on its final ELOCKED; rename and write faults reach them only indirectly (R8, R44)",
+					"the sync lock's backoff takes an injectable sleepSync (default the blocking Atomics.wait, which cannot take an abort) and reports the gap total on its final ELOCKED, but no caller passes one yet: a host recording sleep needs a session-scoped port threaded from createAgentSession into a sync-lock owner a journey reaches (the worker conversation or write-reservation store), and a held lock needs a fresh lock directory seeded in virtual IO; the win32 rename retry backoff is still a raw setTimeout in a module-level util that takes no timer port, and the async lock waits stay on system time by design (a cross-process lock whose holder, staleness and deadline are real time); rename and write faults reach them only indirectly (R8, R44)",
 			},
 		],
 	},
@@ -1011,18 +1010,14 @@ const rows: readonly FaultMatrixRow[] = [
 		owner: "core/operator-projection/decision-ledger-store.ts",
 		journey: 1,
 		phase: "owner-lifecycle SQLite",
-		fault: "a crash cut with SQLite state rewound to its durable point",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 4,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"world.restart({ rewindSqlite: world.guard.snapshotSqlite() }) now cuts the owner and rewinds every SQLite backing to the snapshot, but no editable phase holds a ledger write between a snapshot and a cut whose reopened state a journey asserts: it needs a production ledger write with a source-derived row that the reopened owner does not write again on construction, read back after the cut (for example `DecisionLedgerStore.semanticEvaluations`), at a point where no SQLite handle of the world is open, since the rewind of a live backing throws",
-			},
-		],
+		// The SQLite half of a crash cut, on the real store with every handle closed; the session-owner cut through
+		// `world.restart({ rewindSqlite })` is the restart primitive's own path and is not what this row asserts.
+		fault: "the SQLite state of a crash cut rewound to its durable point (decision-ledger store, every handle closed)",
+		witness: "the decision written after the durable point is gone after the rewind",
+		control: "the decision written before the durable point is read back unchanged",
+		estSeconds: 0.1,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R50",

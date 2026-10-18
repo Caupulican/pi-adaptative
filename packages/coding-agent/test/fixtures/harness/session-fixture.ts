@@ -2154,7 +2154,8 @@ export async function runHarnessWorld(
  * The owners whose alarms also run on the wall clock in a journey, each because a journey (or a mode witness) already
  * relies on its real delay and none drives it yet: the foreground retry backoff (the retry witness's live 5 ms backoff
  * expiry), the provider admission ledger heartbeat and pauses, the worker lease heartbeat, the goal continuation wake and
- * the delegate wait bound (the 1000 ms waits of journey 1). Each is still advanceable and observable like any owner.
+ * the delegate wait bound (the 1000 ms waits of journey 1), the worker provider retry backoff (journey 1's E8o waits it
+ * out), and the compaction and branch summary retry backoffs. Each is still advanceable and observable like any owner.
  */
 const WALL_CLOCK_OWNERS: ReadonlySet<TimerOwner> = new Set<TimerOwner>([
 	"foreground-retry",
@@ -2162,6 +2163,9 @@ const WALL_CLOCK_OWNERS: ReadonlySet<TimerOwner> = new Set<TimerOwner>([
 	"worker-lease",
 	"goal-continuation",
 	"worker-wait",
+	"compaction-retry",
+	"worker-provider-retry",
+	"branch-summary-retry",
 ]);
 
 /**

@@ -1815,6 +1815,50 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	expect(await world.disposeSessionInBody(control), "a release without a fault must complete").toBeUndefined();
 	world.guard.assertNoOpenSqliteHandles();
 	world.faultMatrix.witness("R12a", { control: true });
+	// The SQLite half of a crash cut through the real decision ledger: a row written before the durable point survives the
+	// rewind, a row written after it is gone from the reopened store. The block has no await, so no other owner writes
+	// between the snapshot and the rewind, and every store handle is closed before the rewind.
+	const rewindLedgerPath = decisionLedgerFile(`${world.agentDir}-rewind-ledger`);
+	const REWIND_SESSION = "r49-rewind-session";
+	const durableDecision = {
+		sessionId: REWIND_SESSION,
+		cwd: HARNESS_PROJECT_CWD,
+		kind: "durable",
+		decidedAt: 1,
+		admit: true,
+		reason: "written before the durable point",
+	};
+	const lateDecision = { ...durableDecision, kind: "late", decidedAt: 2, reason: "written after the durable point" };
+	const writeDecision = (decision: typeof durableDecision): void => {
+		const store = new DecisionLedgerStore({ databasePath: rewindLedgerPath });
+		try {
+			store.recordCacheDecision(decision);
+		} finally {
+			store.close();
+		}
+	};
+	const readDecisions = (): unknown[] => {
+		const store = new DecisionLedgerStore({ databasePath: rewindLedgerPath });
+		try {
+			return store.cacheDecisions(REWIND_SESSION);
+		} finally {
+			store.close();
+		}
+	};
+	writeDecision(durableDecision);
+	const durablePoint = world.guard.snapshotSqlite();
+	writeDecision(lateDecision);
+	expect(readDecisions(), "both decisions are in the ledger before the cut").toEqual([durableDecision, lateDecision]);
+	world.guard.assertNoOpenSqliteHandles();
+	world.guard.rewindSqlite(durablePoint);
+	const rewound = readDecisions();
+	world.guard.assertNoOpenSqliteHandles();
+	expect(rewound, "the decision written after the durable point is gone after the rewind").not.toContainEqual(
+		lateDecision,
+	);
+	world.faultMatrix.witness("R49", { control: false });
+	expect(rewound, "the decision written before the durable point is read back unchanged").toEqual([durableDecision]);
+	world.faultMatrix.witness("R49", { control: true });
 	// Logical durable cut of a pending native question. The ask is captured at its UI presentation, the live owner is
 	// cancelled and settled, and a fresh owner restores only the captured bytes. This qualifies logical restoration of the
 	// captured cut: it is not crash, dead-owner or fsync durability.

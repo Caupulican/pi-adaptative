@@ -30,7 +30,8 @@ export interface GoalAutoContinueControllerDeps {
 	onContinuationActivity?(): void;
 	/**
 	 * The `goal-continuation` port the wake is armed on (the continuation delay, a worker-deadline resume, the
-	 * scheduled-failure retry). Defaults to the system timers.
+	 * scheduled-failure retry) and whose clock measures what is left of a worker deadline. It must be the clock the goal
+	 * runtime snapshot reads. Defaults to the system timers.
 	 */
 	timers?: TimerPort;
 }
@@ -211,11 +212,14 @@ export class GoalAutoContinueController {
 		) {
 			return { action: "clear" };
 		}
-		// The worker deadline is stamped and decided on the goal state's clock (the system clock the runtime snapshot reads),
-		// so its remaining delay is measured on that clock too. An alarm that fires before it (a host driving this port, a
-		// clock correction) only re-plans: `runScheduled` arms the wake again for what is left.
+		// The worker deadline is stamped (the goal tool's `boundAt`) and decided (the runtime snapshot's `now`) on the goal
+		// state's clock, which is this port's: the session hands the same `goal-continuation` port to all three. Its
+		// remaining delay is measured on that clock too, so a host that advances the port by the delay fires the wake
+		// at the deadline the snapshot then decides as timed out. An alarm that fires before it (a clock correction)
+		// only re-plans: `runScheduled` arms the wake again for what is left.
+		const timers = this.deps.timers ?? SYSTEM_TIMER_PORT;
 		return waitingForWorkerDeadline
-			? { action: "arm", delayMs: Math.max(0, resumeAtMs - Date.now()), wake: "workerDeadline" }
+			? { action: "arm", delayMs: Math.max(0, resumeAtMs - timers.now()), wake: "workerDeadline" }
 			: { action: "arm", delayMs: goalAutoContinueDelayMs, wake: "continuation" };
 	}
 
