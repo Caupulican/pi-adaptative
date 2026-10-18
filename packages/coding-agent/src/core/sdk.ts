@@ -42,6 +42,7 @@ import { resolveEffectiveCompletionProfile } from "./decision/completion-profile
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { resolveFastModeServiceTier } from "./fast-mode.ts";
+import type { WorkerTerminalDeliveryInterposer } from "./foreground-terminal-handoff-controller.ts";
 import { ObjectivePrimaryBindingError } from "./goals/goal-session-controller.ts";
 import type { IntegrityExtension } from "./hooks/index.ts";
 import { ModelRegistry } from "./model-registry.ts";
@@ -176,6 +177,11 @@ export interface CreateAgentSessionOptions {
 	customTools?: ToolDefinition[];
 	/** Shell backend for bash, shared by root and every worker lane; the native host shell is used when unset. */
 	shellOperations?: BashOperations;
+	/**
+	 * Runs around each worker terminal delivery to this session's foreground (for example to observe or delay it): `deliver`
+	 * performs the delivery, and a rejection is a failed handoff the notification outbox retries. Unset delivers directly.
+	 */
+	workerTerminalDelivery?: WorkerTerminalDeliveryInterposer;
 	/**
 	 * Process and file-probe ports for the worktree-sync engine (for example an embedder's own git
 	 * executor). Members left out use the production defaults.
@@ -868,6 +874,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			allowedToolNames,
 			excludedToolNames,
 			shellOperations: options.shellOperations,
+			workerTerminalDelivery: options.workerTerminalDelivery,
 			worktreeSyncEnginePorts: options.worktreeSyncEnginePorts,
 			extensionRunnerRef,
 			toolProfileFilter,

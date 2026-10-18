@@ -22,21 +22,15 @@ import { randomUUID } from "node:crypto";
 import { promises as fsPromises, mkdirSync, unlinkSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import lockfile from "proper-lockfile";
+import type { TimerPort } from "../../kernel/timer-port.ts";
 import { type FaultableFs, nodeFs } from "./faultable-fs.ts";
-import {
-	isTransientWin32FsError as isTransientRenameErrorOnWin32,
-	WIN32_TRANSIENT_RETRY_ATTEMPTS as RENAME_RETRY_ATTEMPTS,
-	WIN32_TRANSIENT_RETRY_MAX_MS as RENAME_RETRY_MAX_TIMEOUT_MS,
-	WIN32_TRANSIENT_RETRY_MIN_MS as RENAME_RETRY_MIN_TIMEOUT_MS,
-	retryTransientWin32,
-	retryTransientWin32Sync,
-} from "./win32-transient-fs.ts";
+import { retryTransientWin32, retryTransientWin32Sync } from "./win32-transient-fs.ts";
 
 /**
  * Bounded rename retry budget for the win32-only transient-rename handling below (see
- * {@link isTransientRenameErrorOnWin32}). Backoff doubles each attempt starting at
- * {@link RENAME_RETRY_MIN_TIMEOUT_MS} and capped at {@link RENAME_RETRY_MAX_TIMEOUT_MS}, mirroring
- * the doubling-backoff shape used for lock acquisition above. With {@link RENAME_RETRY_ATTEMPTS}
+ * `isTransientWin32FsError` in `win32-transient-fs.ts`). Backoff doubles each attempt starting at
+ * `WIN32_TRANSIENT_RETRY_MIN_MS` and capped at `WIN32_TRANSIENT_RETRY_MAX_MS`, mirroring
+ * the doubling-backoff shape used for lock acquisition above. With `WIN32_TRANSIENT_RETRY_ATTEMPTS`
  * extra attempts (10, 20, 40, 80, ... capped at 200) the worst-case total wait is ~1.03s
  * (10+20+40+80+160+200+200+200+200 ~= 1110ms across 9 gaps), which comfortably covers the
  * millisecond-scale window Defender/the Windows Search indexer hold a freshly-written file open
@@ -58,19 +52,12 @@ function renameSyncWithRetry(tmpPath: string, filePath: string, fs: FaultableFs,
 	}, beforeCommit);
 }
 
-/** Async counterpart of the rename-retry policy; see {@link isTransientRenameErrorOnWin32}. */
-async function renameWithRetry(tmpPath: string, filePath: string, beforeCommit?: () => void): Promise<void> {
-	for (let attempt = 0; attempt <= RENAME_RETRY_ATTEMPTS; attempt++) {
-		beforeCommit?.();
-		try {
-			await fsPromises.rename(tmpPath, filePath);
-			return;
-		} catch (err) {
-			if (!isTransientRenameErrorOnWin32(err) || attempt === RENAME_RETRY_ATTEMPTS) throw err;
-			const backoffMs = Math.min(RENAME_RETRY_MIN_TIMEOUT_MS * 2 ** attempt, RENAME_RETRY_MAX_TIMEOUT_MS);
-			await new Promise((resolve) => setTimeout(resolve, backoffMs));
-		}
-	}
+/** Async counterpart of the rename-retry policy; its backoff waits on `options.timers`. */
+async function renameWithRetry(tmpPath: string, filePath: string, options?: AtomicFileWriteOptions): Promise<void> {
+	await retryTransientWin32(() => fsPromises.rename(tmpPath, filePath), {
+		...(options?.beforeCommit ? { beforeAttempt: options.beforeCommit } : {}),
+		...(options?.timers ? { timers: options.timers } : {}),
+	});
 }
 
 export interface AtomicFileLockOptions {
@@ -155,6 +142,11 @@ export interface AtomicFileWriteOptions {
 	 * Only the destructive-testing harness passes a fault-injecting implementation.
 	 */
 	fs?: FaultableFs;
+	/**
+	 * The clock the async variant's win32 rename-retry backoff waits on (`writeFileAtomic` only; the sync variant blocks
+	 * the thread between attempts). Defaults to the system timer port; a host that drives time itself passes its own.
+	 */
+	timers?: TimerPort;
 }
 
 /** Narrow an unknown Node filesystem failure without unsafe casts at every storage owner. */
@@ -539,7 +531,7 @@ export async function writeFileAtomic(
 		try {
 			// `wx` makes a nonce collision harmless: never truncate another writer's temporary file.
 			await fsPromises.writeFile(tmpPath, content, { encoding: "utf-8", flag: "wx", mode: options?.mode });
-			await renameWithRetry(tmpPath, filePath, options?.beforeCommit);
+			await renameWithRetry(tmpPath, filePath, options);
 			renamed = true;
 		} finally {
 			if (!renamed) await removeTemporaryPath(tmpPath);

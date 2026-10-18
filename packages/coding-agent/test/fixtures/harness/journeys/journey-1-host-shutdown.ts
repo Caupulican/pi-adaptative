@@ -5,8 +5,12 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import type { ExtensionFactory } from "../../../../src/core/extensions/types.ts";
 import { DecisionLedgerStore } from "../../../../src/core/operator-projection/decision-ledger-store.ts";
 import { ownTurnInputRecordPath, QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/core/queued-input-record.ts";
+import {
+	OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
+	readOptionalToolIntent,
+} from "../../../../src/core/tool-applicability-gate.ts";
 import { verifyModeWitnesses } from "../mode-witnesses.ts";
-import { createBarrier } from "../scripted-provider.ts";
+import { calls, createBarrier, text } from "../scripted-provider.ts";
 import {
 	DISCARD_SCAN_BOUNDS_EXPECTED,
 	type HarnessWorld,
@@ -28,7 +32,7 @@ import {
 	SIGNAL_RESUME_COMMAND,
 	withDeadline,
 } from "../session-fixture.ts";
-import { crashCutChecks } from "./shared.ts";
+import { crashCutChecks, expectOwnerWords, LIMITS_PATH } from "./shared.ts";
 
 export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -663,6 +667,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	world.faultMatrix.witness("R42", { control: false });
 	trace.mark("root", "signal.shutdown");
 	await verifyModeWitnesses(world);
+	await verifyRuntimeUpdateStopHoldsQueuedInput(world);
 	// Owner input queued behind a run that the quit ends. The input is admitted to the agent's queue behind the held reply; the quit ends
 	// the run and no provider round starts for the input, so the closing session holds it complete with the held-queue warning. The live
 	// control lets the same queued input run as the turn after its reply completes, with no held warning.
@@ -821,6 +826,114 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		records: qhRecords,
 	});
 	world.faultMatrix.witness("R15r", { control: false });
+	if (world.systemOne.enabled) {
+		// R14r. Before the quit, the queued input was judged against the native optional tool and its intent staged; the quit held
+		// the input before its delivery, so its staged intent was released with it and nothing reached the chain: the next session
+		// restores the input held, with no optional-tool entry. Control: the owner resends the restored input in the next session
+		// behind a held run. It is judged afresh with the question set the first process asked (no older intent and no backlog
+		// exists in a fresh process), and its classified intent is committed once, where the run delivers it.
+		const intentRecords = () =>
+			qhNext.sessionManager
+				.getBranch()
+				.flatMap((entry) =>
+					entry.type === "custom" && entry.customType === OPTIONAL_TOOL_INTENT_CUSTOM_TYPE
+						? [readOptionalToolIntent(entry.data)]
+						: [],
+				);
+		const intakeOf = (phase: string) => {
+			const request = world.systemOne.decoded.find((decoded) => decoded.phase === phase);
+			const state = request?.state as
+				| { user_request?: unknown; optional_tools?: Array<{ toolName?: unknown; sourcePath?: unknown }> }
+				| undefined;
+			return {
+				questions: Object.keys(request?.questions ?? {}).sort(),
+				request: state?.user_request,
+				tools: state?.optional_tools?.map((tool) => tool.toolName),
+				sourcePath: state?.optional_tools?.[0]?.sourcePath,
+			};
+		};
+		const quitIntake = intakeOf("queued-quit-intake");
+		expect(
+			{ request: quitIntake.request, tools: quitIntake.tools },
+			"before the quit, the queued input was judged against the native optional tool",
+		).toEqual({ request: QUEUED_QUIT_WORDS, tools: ["secret_store"] });
+		expect(intentRecords(), "the quit commits no optional-tool intent: the held input is restored with none").toEqual(
+			[],
+		);
+		world.faultMatrix.witness("R14r", { control: false });
+		expect(qhNext.session.clearQueue().followUp, "the owner takes the restored input back to resend it").toEqual([
+			QUEUED_QUIT_WORDS,
+		]);
+		const qrHold = createBarrier();
+		const qrReached = createBarrier();
+		world.provider.enqueue(
+			"root",
+			{
+				name: "queued-resend-run",
+				check: () => qrReached.release(),
+				gate: qrHold.promise,
+				reply: { content: [{ type: "text", text: "The held reply" }] },
+			},
+			{ name: "queued-resend-delivery", reply: { content: [{ type: "text", text: "The resent reply" }] } },
+		);
+		const qrPrompt = qhNext.session
+			.prompt("Start a reply that the owner resends the restored input behind.")
+			.catch((error: unknown) => error);
+		await withDeadline(trace, "queued resend: the run reaches its gate", qrReached.promise);
+		world.systemOne.enterPhase(
+			"queued-resend-intake",
+			{
+				capabilities_authorized: { kind: "noul", probability: 0.02 },
+				changes_model_pools: { kind: "noul", probability: 0.02 },
+				local_commits_only: { kind: "noul", probability: 0.02 },
+				lifts_delivery_block: { kind: "noul", probability: 0.02 },
+				full_handoff: { kind: "noul", probability: 0.02 },
+				optional_tool_0: { kind: "choice", choice: "request", confidence: 0.97 },
+			},
+			{
+				expect: expectOwnerWords({
+					sessionManager: () => qhNext.sessionManager,
+					userRequests: [QUEUED_QUIT_WORDS],
+					optionalToolNames: ["secret_store"],
+				}),
+			},
+		);
+		await withDeadline(
+			trace,
+			"queued resend: the restored input is admitted behind the run",
+			qhNext.session.followUp(QUEUED_QUIT_WORDS),
+		);
+		expect(intentRecords(), "the resent input's judgment commits no intent before its delivery").toEqual([]);
+		qrHold.release();
+		expect(
+			await withDeadline(trace, "queued resend: the run and its queued turn complete", qrPrompt, 60_000),
+			"the resending run ends without an error",
+		).toBeUndefined();
+		expect(qmAssistants(qhFile), "the resent input runs as the turn after the held reply").toEqual([
+			{ stopReason: "aborted", text: "" },
+			{ stopReason: "stop", text: "The held reply" },
+			{ stopReason: "stop", text: "The resent reply" },
+		]);
+		const resendIntake = intakeOf("queued-resend-intake");
+		expect(
+			resendIntake.questions,
+			"the next session asks the resent words the question set the first process asked for them",
+		).toEqual(quitIntake.questions);
+		expect(intentRecords(), "the resent input commits its classified intent once, at its delivery").toEqual([
+			{
+				version: 1,
+				status: "classified",
+				taskRequest: QUEUED_QUIT_WORDS,
+				allowedTools: [
+					{
+						toolName: "secret_store",
+						sourcePath: typeof resendIntake.sourcePath === "string" ? resendIntake.sourcePath : "",
+					},
+				],
+			},
+		]);
+		world.faultMatrix.witness("R14r", { control: true });
+	}
 	expect(await world.disposeSessionInBody(qhNext.session), "the restoring owner disposes cleanly").toBeUndefined();
 	const qlNext = await world.createRootSession("root", {
 		sessionManager: world.openSessionManager(qlFile),
@@ -1358,5 +1471,142 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	for (const id of ["R40", "R41", "R42"]) {
 		world.faultMatrix.witness(id, { control: false });
 		world.faultMatrix.witness(id, { control: true });
+	}
+}
+
+/**
+ * R45: a runtime-update stop with owner input queued. A fresh root reloads its runtime through runtime_update, verifies the
+ * reload with read, and is held at its next provider request while the owner steers. Fault: the agent stops the update. The
+ * stop ends the run at that tool batch, before the loop polls steering, so no round is opened for the steer: the run holds
+ * it, complete, in the pending queue with its turn-ended notice. Control: the same update completed instead leaves no active
+ * update, so the loop delivers the queued steer as its next turn. Each owner runs System One off in its own binding.
+ */
+async function verifyRuntimeUpdateStopHoldsQueuedInput(world: HarnessWorld): Promise<void> {
+	const words = "Owner steer queued behind the runtime update.";
+	const loadedNotice =
+		"Runtime update loaded. Priority: verify the change using read, then call runtime_update complete before resuming the original task. Import success alone is not task verification. Existing history is preserved.";
+	for (const action of ["stop", "complete"] as const) {
+		const stop = action === "stop";
+		const label = `runtime-update-${action}`;
+		const agentDir = `${world.agentDir}-${label}`;
+		const sessionManager = world.createSessionManager(agentDir);
+		const session = (
+			await world.createRootSession("root", {
+				agentDir,
+				sessionManager,
+				systemOneEnabled: false,
+				settings: { memorySystem: "okf", autoLearn: { enabled: false } },
+			})
+		).session;
+		world.systemOne.enterPhase(label, {});
+		const hold = createBarrier();
+		const reached = createBarrier();
+		const requestMark = world.provider.requests.length;
+		const warningMark = world.warnings.length;
+		const steeredTurns = () =>
+			sessionManager
+				.getBranch()
+				.filter(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						JSON.stringify(entry.message.content).includes(words),
+				).length;
+		let disposal: Promise<{ readonly error: unknown } | undefined> | undefined;
+		try {
+			expect(
+				session
+					.getActiveToolNames()
+					.filter((name) => name === "read" || name === "runtime_update")
+					.sort(),
+				`${label}: the root holds runtime_update and its verification tool`,
+			).toEqual(["read", "runtime_update"]);
+			const readBefore = session.getToolDefinition("read");
+			world.provider.enqueue(
+				"root",
+				calls(`${label}-reload`, [
+					{
+						id: `${label}-reload-1`,
+						name: "runtime_update",
+						arguments: { action: "reload", verificationTool: "read" },
+					},
+				]),
+				calls(`${label}-verify`, [{ id: `${label}-verify-1`, name: "read", arguments: { path: LIMITS_PATH } }]),
+				{
+					...calls(`${label}-${action}`, [
+						{ id: `${label}-${action}-1`, name: "runtime_update", arguments: { action } },
+					]),
+					check: () => reached.release(),
+					gate: hold.promise,
+				},
+				...(stop ? [] : [text(`${label}-steered`, "The steered turn.")]),
+			);
+			const run = session.prompt("Reload the runtime, verify it, then decide on the update.").then(
+				() => "resolved",
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			);
+			await withDeadline(world.trace, `${label}: the decision request is held`, reached.promise);
+			await withDeadline(world.trace, `${label}: the owner steers behind the update`, session.steer(words));
+			expect(session.getSteeringMessages(), `${label}: the steer waits behind the held decision`).toEqual([words]);
+			hold.release();
+			expect(
+				await withDeadline(world.trace, `${label}: the run ends`, run, 60_000),
+				`${label}: the run resolves`,
+			).toBe("resolved");
+			expect(
+				world.provider.requests.slice(requestMark).map((request) => request.model.id),
+				stop
+					? "the reload, its verification and the stop each reach the provider once, and no round follows the stop"
+					: "the reload, its verification, the completion and the steered turn each reach the provider once",
+			).toEqual(stop ? ["root", "root", "root"] : ["root", "root", "root", "root"]);
+			const state = session.runtimeUpdates.getState();
+			expect(state, `${label}: the reload loaded and was verified before the agent's decision`).toMatchObject({
+				status: stop ? "stopped" : "complete",
+				mode: "reload",
+				verificationTool: "read",
+				attempts: 1,
+				turns: 2,
+				verificationAfter: expect.any(String),
+				...(stop ? { error: "Stopped by the agent; original task remains unfinished." } : {}),
+			});
+			if (!stop) expect(state?.error, "the completed update records no error").toBeUndefined();
+			expect(session.getToolDefinition("read"), `${label}: the reload rebound the native tools`).not.toBe(
+				readBefore,
+			);
+			expect(
+				session.messages.flatMap((message) =>
+					message.role === "custom" && message.customType === "runtime-update-notice" ? [message.content] : [],
+				),
+				`${label}: the update announced its loaded runtime once, and nothing else`,
+			).toEqual([loadedNotice]);
+			const warnings = world.warnings.splice(warningMark);
+			if (stop) {
+				expect(warnings, "the stop holds the queued steer its run no longer delivers").toEqual([
+					`A queued message was not delivered because its turn ended before it could be delivered. It is kept in full in the pending queue; restore it to the editor to send it again: ${words}`,
+				]);
+				expect(steeredTurns(), "the stopped run delivered no turn for the steer").toBe(0);
+				expect(session.getSteeringMessages(), "the stop keeps the complete steer in the pending queue").toEqual([
+					words,
+				]);
+				expect(session.deliverablePendingMessageCount, "the held steer cannot be delivered by a later run").toBe(0);
+				expect(session.agent.hasQueuedMessages(), "the agent queue holds no copy of the held steer").toBe(false);
+				expect(
+					session.takeAllQueuedInput().steering.map((input) => input.text),
+					"the owner restores the complete held steer",
+				).toEqual([words]);
+				expect(session.pendingMessageCount, "the restored steer leaves the pending queue").toBe(0);
+			} else {
+				expect(warnings, "the completed update holds nothing").toEqual([]);
+				expect(steeredTurns(), "the completed update delivers the queued steer once").toBe(1);
+				expect(session.pendingMessageCount, "the delivered steer leaves the pending queue").toBe(0);
+			}
+			disposal = world.disposeSessionInBody(session);
+			expect(await disposal, `${label}: the owner is disposed cleanly`).toBeUndefined();
+			expect(world.warnings.splice(warningMark), `${label}: disposal discloses nothing`).toEqual([]);
+			world.faultMatrix.witness("R45", { control: !stop });
+		} finally {
+			hold.release();
+			if (disposal === undefined) await world.disposeSessionInBody(session);
+		}
 	}
 }

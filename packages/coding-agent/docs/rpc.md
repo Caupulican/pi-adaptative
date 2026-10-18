@@ -911,6 +911,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | `auto_retry_start` | Auto-retry begins (after transient error) |
 | `auto_retry_end` | Auto-retry completes (success or final failure) |
 | `wait` | A session wait started, made progress, is overdue, or ended (with its typed end) |
+| `memory_activation` | A memory activation started or ended (with its outcome) |
 | `extension_error` | Extension threw an error |
 
 ### agent_start
@@ -1147,6 +1148,21 @@ The status stream of a session wait: a `tool_task` wait, a delegate `inbox_wait`
 ```
 
 `end.kind` is one of `satisfied` (with `by`, the wake source), `timed_out` (with `boundMs`), `aborted` (with `reason`), `steered` (with `by` and `decision`: how the steer's admission settled, `decided`, `timed_out`, `aborted` or `none`), `disposed`, or `unavailable` (with `cause`).
+
+### memory_activation
+
+One memory activation: the session's own (re)initialization (`cause: "load"`), an operator's memory switch (`"switch"`), or the recovery of a missing ICM project chat (`"recovery"`). A recovery starts on its own: a settings change that finds the chat missing waits until the session is idle, so this event is how a client learns that the chat came back. Every `start` is followed by exactly one `end` with the same `generation`. `outcome` is `activated` (the selected `system` serves the session), `failed` (it does not; its `Memory subsystem init failed` warning names the same cause), or `superseded` (a later activation replaced it). `error` is present whenever the activation threw.
+
+```json
+{
+  "type": "memory_activation",
+  "phase": "end",
+  "generation": 2,
+  "system": "icm",
+  "cause": "recovery",
+  "outcome": "activated"
+}
+```
 
 ### extension_error
 

@@ -430,6 +430,26 @@ function boundPreCompressMemory(insights: readonly string[]): string {
 /** Which lease check a memory system change asks for: an operator's switch, or the recovery of a missing chat. */
 export type SystemSwitchScope = "switch" | "recovery";
 
+/** What started a memory activation: the session's own (re)initialization, an operator's switch, or a chat recovery. */
+export type MemoryActivationCause = "load" | SystemSwitchScope;
+
+/**
+ * One memory activation (`initialize()`): every `start` is followed by exactly one `end` with the same `generation`. `end`
+ * says how it settled: `activated` (the selected system serves this session), `failed` (the selected system does not), or
+ * `superseded` (a later activation replaced it before it settled). `error` is present whenever the activation threw: the
+ * cause its `Memory subsystem init failed` or `Memory registry refresh failed` warning names.
+ */
+export type MemoryActivationEvent =
+	| { phase: "start"; generation: number; system: MemorySystem; cause: MemoryActivationCause }
+	| {
+			phase: "end";
+			generation: number;
+			system: MemorySystem;
+			cause: MemoryActivationCause;
+			outcome: "activated" | "failed" | "superseded";
+			error?: string;
+	  };
+
 export interface MemoryControllerDeps {
 	/** Memory-retrieval + prompt-inclusion settings (default-on gates for retrieval and surfacing). */
 	getSettingsManager(): MemoryControllerSettingsSource;
@@ -473,6 +493,8 @@ export interface MemoryControllerDeps {
 	getPromptHeadroom?(messages: readonly AgentMessage[]): PromptHeadroom | undefined;
 	/** The session's operator-facing warning path; managed-memory notices are reported through it. */
 	emitWarning(message: string): void;
+	/** Observes each memory activation's start and end (see {@link MemoryActivationEvent}). Absent in narrow hosts. */
+	onActivation?(event: MemoryActivationEvent): void;
 	/**
 	 * Admission owner for USER.md preference writes (the reflection controller: owner evidence,
 	 * gate, audit). Absent only in narrow hosts; the file-store then labels writes unverified.
@@ -696,7 +718,7 @@ export class MemoryController {
 		this._unsubscribeSettingsRecovery?.();
 		this._unsubscribeSettingsRecovery = undefined;
 		if (this.deps.acquireSystemSwitchLease === undefined) {
-			void this.initialize();
+			void this.initialize("recovery");
 			return;
 		}
 		const release = this.deps.acquireSystemSwitchLease("recovery");
@@ -708,7 +730,7 @@ export class MemoryController {
 			});
 			return;
 		}
-		void this.initialize().finally(release);
+		void this.initialize("recovery").finally(release);
 	}
 
 	private _historySettings(): TranscriptHistorySettings {
@@ -768,7 +790,7 @@ export class MemoryController {
 		const activate = async (selected: MemorySystem) => {
 			this._transitioning = true;
 			settings.setMemorySystem(selected, "directoryProfile");
-			await this.initialize();
+			await this.initialize("switch");
 			await settings.flush();
 			const errors = settings.drainErrors();
 			if (errors.length) throw new Error(errors.map(({ error }) => error.message).join("; "));
@@ -2456,11 +2478,30 @@ export class MemoryController {
 	/**
 	 * (Re)build the memory subsystem: a fresh MemoryManager (reload-safe), register the bundled
 	 * file-store + any extension-contributed providers, initialize, then surface the memory tools and
-	 * the frozen system-prompt block. Best-effort: never throws into the session lifecycle.
+	 * the frozen system-prompt block. Best-effort: never throws into the session lifecycle. Its start and its one end
+	 * reach `onActivation`, so a host observes an activation it did not await (a recovery).
 	 */
-	initialize(): Promise<void> {
+	initialize(cause: MemoryActivationCause = "load"): Promise<void> {
 		const generation = ++this._memoryGeneration;
 		const system = this.deps.getSettingsManager().getMemorySystem();
+		this.deps.onActivation?.({ phase: "start", generation, system, cause });
+		let ended = false;
+		const end = (error: string | undefined): void => {
+			if (ended) return;
+			ended = true;
+			let outcome: "activated" | "failed" | "superseded" = "activated";
+			if (generation !== this._memoryGeneration) outcome = "superseded";
+			else if (error !== undefined) outcome = "failed";
+			this.deps.onActivation?.({
+				phase: "end",
+				generation,
+				system,
+				cause,
+				outcome,
+				...(error === undefined ? {} : { error }),
+			});
+		};
+		let failure: string | undefined;
 		const previousSystem = this._activeMemorySystem;
 		const previous = this._memoryManager;
 		// The manager's failure lines are session warnings, never stderr writes from a host that owns the terminal. The required provider's
@@ -2604,6 +2645,7 @@ export class MemoryController {
 					if (system === "icm") await this._activateContinuousChat(generation);
 				} catch (error) {
 					const reason = error instanceof Error ? error.message : String(error);
+					failure = reason;
 					await manager.shutdownAll().catch(() => {});
 					if (generation === this._memoryGeneration) {
 						// A chat opened for this generation is released here, so its lease never outlives a failed activation.
@@ -2626,6 +2668,7 @@ export class MemoryController {
 						const compaction = this.deps.continuousChat?.compaction;
 						if (compaction) this._reviewLiveChatSummary(compaction);
 					}
+					end(failure);
 				}
 			})
 			.catch((error) => {
@@ -2640,9 +2683,9 @@ export class MemoryController {
 					}
 				}
 				// Same route as an init failure: a session warning, never a stderr write from construction.
-				this.deps.emitWarning(
-					`Memory registry refresh failed: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				const reason = error instanceof Error ? error.message : String(error);
+				this.deps.emitWarning(`Memory registry refresh failed: ${reason}`);
+				end(failure ?? reason);
 			});
 		return this._lifecycleTail;
 	}

@@ -1219,6 +1219,7 @@ export class AgentSession {
 				}),
 			getGoalState: () => this.getGoalStateSnapshot(),
 			emitWarning: (message) => this._foregroundLifecycle.warn(message),
+			onActivation: (event) => this._emit({ type: "memory_activation", ...event }),
 			admitUserPreference: (request) => this._reflection.admitUserPreference(request),
 			subscribeEntriesPersisted: (listener) => this.sessionManager.onEntriesPersisted(listener),
 			// ICM's project chat: each turn projects onto the provider runtime, and its compactions repeat the accepted prefix.
@@ -1641,6 +1642,7 @@ export class AgentSession {
 			flushOwnerItems: (lease) => this._flushOwnerItems(lease),
 			sendCustomMessage: (message, options, lease) => this._sendCustomMessage(message, options, lease),
 			warn: (message) => this._emit({ type: "warning", message }),
+			interposeWorkerDelivery: config.workerTerminalDelivery,
 		});
 		this._modelRouter = new ModelRouterController({
 			getAgent: () => this.agent,

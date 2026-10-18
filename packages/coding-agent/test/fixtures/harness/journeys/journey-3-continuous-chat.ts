@@ -2,6 +2,7 @@ import "../builtin-install.ts";
 import { expect } from "vitest";
 import { CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES } from "../../../../src/core/memory/continuous-chat-index.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { runJourney3UnprovenCompletionPhase } from "./journey-3-worktree-and-gates.ts";
 
 /**
  * The real proper-lockfile runs its exclusion and lease logic; only its filesystem is redirected to the
@@ -349,4 +350,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	});
 	expect(await world.disposeSessionInBody(mRecovered.session)).toBeUndefined();
 	trace.mark("root", "icm.migration-and-recovery");
+
+	// R38 runs last in the journey: its System One phase stays open to the end, so no later session is created under it.
+	await runJourney3UnprovenCompletionPhase(world);
 }

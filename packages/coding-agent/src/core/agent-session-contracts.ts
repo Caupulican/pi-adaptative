@@ -31,8 +31,10 @@ import type {
 	ShutdownHandler,
 	ToolDefinition,
 } from "./extensions/index.ts";
+import type { WorkerTerminalDeliveryInterposer } from "./foreground-terminal-handoff-controller.ts";
 import type { GoalContinuationPrompt } from "./goals/goal-continuation-prompt.ts";
 import type { GoalRuntimeSnapshot } from "./goals/goal-runtime-snapshot.ts";
+import type { MemoryActivationEvent } from "./memory-controller.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { AccountModelCatalog } from "./model-router/account-models.ts";
 import type { LocalRuntimeDeps } from "./models/local-runtime.ts";
@@ -103,6 +105,8 @@ export type AgentSessionEvent =
 	  }
 	/** One wait's status (see util/wait.ts): every `start` is followed by exactly one `end`, carrying its typed reason. */
 	| WaitStatusEvent
+	/** One memory activation (see memory-controller.ts): every `start` is followed by exactly one `end`, with its outcome. */
+	| ({ type: "memory_activation" } & MemoryActivationEvent)
 	/** UI-only bracket around foreground routing/preparation. Always paired with `routing_end`. */
 	| { type: "routing_start" }
 	| { type: "routing_end" }
@@ -194,6 +198,8 @@ export interface AgentSessionConfig {
 	worktreeSyncEnginePorts?: WorktreeSyncEnginePorts;
 	/** Shell backend for bash, shared by root and every worker lane (see CreateAgentSessionOptions). */
 	shellOperations?: BashOperations;
+	/** Interposition on each worker terminal delivery to this session (see CreateAgentSessionOptions). */
+	workerTerminalDelivery?: WorkerTerminalDeliveryInterposer;
 }
 
 export interface ExtensionBindings {

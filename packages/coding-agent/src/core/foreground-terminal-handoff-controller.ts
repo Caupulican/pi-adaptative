@@ -130,7 +130,18 @@ interface ForegroundTerminalHandoffControllerDeps {
 	/** Owner items buffered while no foreground turn ran; a handoff that wakes no turn flushes them under its lease. */
 	flushOwnerItems(lease: ForegroundSubmissionLease): Promise<void>;
 	warn(message: string): void;
+	/** The embedder's interposition on each worker terminal delivery; absent delivers directly. */
+	interposeWorkerDelivery?: WorkerTerminalDeliveryInterposer;
 }
+
+/**
+ * Runs around one worker terminal delivery: `deliver` performs it and settles once the parent has it. Rejecting without
+ * calling `deliver` is a failed handoff; the worker notification outbox keeps the records and retries them on its backoff.
+ */
+export type WorkerTerminalDeliveryInterposer = (
+	records: readonly WorkerTerminalHandoffRecord[],
+	deliver: () => Promise<void>,
+) => Promise<void>;
 
 type TerminalCustomMessage = Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">;
 
@@ -313,11 +324,14 @@ export class ForegroundTerminalHandoffController {
 	async notifyWorkers(records: readonly WorkerTerminalHandoffRecord[]): Promise<void> {
 		if (records.every((record) => record.observedAt !== undefined)) return;
 		this.assertLive("worker terminal handoff was persisted");
-		await this.scheduleUnique(
-			records,
-			(record) => ["worker", workerTerminalGenerationIdentity(record)].join("\0"),
-			(uniqueRecords) => this.prepareWorkerDelivery(uniqueRecords),
-		);
+		const deliver = async (): Promise<void> => {
+			await this.scheduleUnique(
+				records,
+				(record) => ["worker", workerTerminalGenerationIdentity(record)].join("\0"),
+				(uniqueRecords) => this.prepareWorkerDelivery(uniqueRecords),
+			);
+		};
+		await (this.deps.interposeWorkerDelivery ? this.deps.interposeWorkerDelivery(records, deliver) : deliver());
 	}
 
 	/**

@@ -302,21 +302,19 @@ const rows: readonly FaultMatrixRow[] = [
 	},
 	{
 		id: "R14r",
-		owner: "core/tool-applicability-gate.ts",
-		journey: 2,
-		phase: "queued-recovery",
-		fault: "a staged optional-tool intent across a restart",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 4,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"world.restart now takes live captures (journey 1's promoted cut, R7), but a staged optional-tool intent exists only with System One on and off mode creates none: the cut needs the on-mode intake judgment set of a queued owner submission staged in a fresh process (the `optional_tool_N` choices plus the `carries_N` screen the backlog-mode `ownerPolicy.settle` runs for words delivered earlier), which no reading of a journey phase derives",
-			},
-		],
+		owner: "core/session-edge-intent-controller.ts",
+		journey: 1,
+		phase: "host-shutdown queued quit restart",
+		fault: "a staged optional-tool intent across a quit and restart (the next session on the quit's file)",
+		witness:
+			"the quit holds the input its staged intent was judged for and commits no optional-tool entry, so the next session restores the input held with none",
+		control:
+			"the restored input, resent in the next session behind a held run, is judged afresh with the first process's question set and commits its classified intent once, at its delivery",
+		// One extra gated run and its delivered turn on the restoring owner.
+		estSeconds: 1,
+		status: "covered",
+		// A staged optional-tool intent exists only with System One on: off, nothing is judged or staged.
+		modes: ["on"],
 	},
 	{
 		id: "tab-preference",
@@ -591,39 +589,28 @@ const rows: readonly FaultMatrixRow[] = [
 	},
 	{
 		id: "R25",
-		owner: "core/foreground-recovery-controller.ts",
+		owner: "core/provider-admission/gate.ts",
 		journey: 2,
-		phase: "queued-recovery",
-		fault: "a usage-limit wait with owner input queued",
-		witness: NONE,
-		control: NONE,
+		phase: "orchestration E aux",
+		fault: "a worker request meets a model quota exhaustion recorded with a reset (the foreground has no usage-limit wait: a foreground quota refusal stops its run and holds queued input, R45u)",
+		witness: "the passed reset ends the wait, satisfied by the reset alarm",
+		control: "the worker request before the record (the handoff reader, on worker-c) passed admission with no wait",
 		estSeconds: 2,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"the foreground has no usage-limit wait: a foreground quota refusal stops its run and holds queued input (R45u). The reset wait is the non-foreground model_quota admission wait (provider-admission/gate.ts): no journey sends a worker or background request to a model whose quota exhaustion was recorded with a reset, and asserts the wait and the request after the reset",
-			},
-		],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R26",
-		owner: "core/memory/continuous-chat-runtime.ts",
+		owner: "core/memory-controller.ts",
 		journey: 2,
 		phase: "continuous-chat",
 		fault: "ICM recovery waits on a lease event; a settings change does not recycle the host",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"the settings change made while the turn held the foreground recovers the chat once, after the turn released it",
+		control: "a settings change on a live ICM host does not recycle it",
 		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"only lease contention is asserted (R27). The recovery is reachable in the continuous-chat phase: wSecond's activation fails on the live owner's runtime lease, which sets _initializationFailed, and a settings change then calls _recoverSettingsWhenIdle; with acquireSystemSwitchLease refused (an unsettled session) it subscribes to foreground activity, which releaseSubmission notifies, and re-reconciles on the wake. A live chat is only reviewed (_reviewLiveChatSummary), never re-initialized. A witness needs wRoot disposed before wSecond (the phase disposes wSecond first), a settings change made while wSecond's submission holds its foreground (its blocked wire fails provider requests in context planning, so a scripted provider gate never holds it: a session-event listener or a running lane must hold it), and an event-driven observable of the recovered activation: the wire change and the activation's end emit nothing and initialize() is not awaitable from the session, so asserting it needs a production observable seam rather than polling runtime.lease.json. The control is a settings change on a live ICM host (wTakeover) that leaves its runtime.lease.json token unchanged",
-			},
-		],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R27",
@@ -689,19 +676,13 @@ const rows: readonly FaultMatrixRow[] = [
 		id: "R31",
 		owner: "core/delegation/worker-notification-coordinator.ts",
 		journey: 2,
-		phase: "orchestration",
-		fault: "a worker notification write fails and retries",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 0.5,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"the retry (`scheduleRetry`, min(100 * 2^n, 5 000) ms on the `worker-notification` port) runs only when `notify()` rejects, and the only rejection a scenario can force today is a refused session append in the wake turn's start, which fences the session file: every retry then fails the same way until the session is reopened, so the control needs a world.restart that reopens it (the tool-task analogue is R18/R19, System One off); a non-fencing fault would need a read only the delivery's prepare makes, but the claim comes from the in-memory session branch and the attempt result is read through the task runtime snapshot, whose cursor read the coordinator's own flush projection (`getWorkerRecords`) makes first",
-			},
-		],
+		phase: "orchestration E aux",
+		fault: "a worker terminal handoff's notify() rejects once without fencing the session (the SDK's workerTerminalDelivery interposition refuses one delivery undelivered)",
+		witness: "the refused delivery arms the outbox's first retry backoff",
+		control: "the idle root reads the retried terminal exactly once",
+		estSeconds: 1,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R32",
@@ -741,7 +722,7 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "witness",
 				detail:
-					"world.restart now takes live captures (R21's background cut), but a pending handoff (`ForegroundTerminalHandoffController.pending`) waits for the foreground lease, and the restart's interrupt frees that lease before the disposal: whether the waiting delivery starts its wake turn on the dying owner (`deliverWhenIdle` acquires before `isDisposed()`) or meets the disposed check and reports a notification failure is decided by settlement order, not by reading; the cut needs that order observed once, then a scripted old-owner wake step or an allowance for the exact failure text",
+					"world.restart now takes live captures (R21's background cut), but a pending handoff (`ForegroundTerminalHandoffController.pending`) waits for the foreground lease, and the restart's interrupt frees that lease before the disposal: whether the waiting delivery starts its wake turn on the dying owner (`deliverWhenIdle` acquires before `isDisposed()`) or meets the disposed check and reports a notification failure is decided by settlement order, not by reading; the cut needs that order observed once, then a scripted old-owner wake step or an allowance for the exact failure text. The failure branch has a third, silent outcome: the outbox's rejection handler returns without a warning or a retry once the outbox is disposed (`WorkerNotificationCoordinator.flush`, `if (this.disposed) return`), leaving only the durable receipt for the next owner, so a witness of exactly one of wake or warning would not hold; besides the wake it must accept silence and a `Background worker handoff failed: ` warning whose cause is an `assertLive` text (`Session disposed before <action>`, from more than one call site) or the lease acquisition's own disposal rejection, each text read from the run once observed, and assert that the next session delivers the terminal once",
 			},
 		],
 	},
@@ -792,20 +773,16 @@ const rows: readonly FaultMatrixRow[] = [
 	{
 		id: "R38",
 		owner: "core/objective-execution/session-objective-runtime.ts",
-		journey: 2,
-		phase: "orchestration",
+		journey: 3,
+		phase: "continuous-chat unproven completion",
 		fault: "a completed goal whose requirements lack trusted evidence reopens to active",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"the default loop's continuation over a persisted completed goal with an unproven requirement and no acceptance override reopens it to active with one warning and runs no turn",
+		control:
+			"the same continuation over a completed goal with trusted evidence keeps it completed, evaluates no route and runs no turn",
 		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"the reopen runs only in SessionObjectiveRuntime.reconcileObjective, the first step of every ObjectiveExecutionController route evaluation (evaluateRouteOnce), which is bound only with System One (objective_primary). The objective-cycle phase of journey-2-orchestration.ts already reaches that evaluation on-mode with a declared judgment set, but its live goal is active. A witness needs, at that evaluation, a live completed goal with an unproven requirement and no acceptance override (a goal the completion gate never writes, so a persisted state), the judgment set System One asks for that state, and the allowance for the warning 'Goal <id> completion not supported: requirement(s) <ids> lack trusted evidence; the goal stays active to gather it.'; the control is a completed goal whose requirements have trusted evidence, left completed. Off mode has no route evaluation",
-			},
-		],
+		status: "covered",
+		modes: ["on"],
 	},
 	{
 		id: "R39",
@@ -900,20 +877,17 @@ const rows: readonly FaultMatrixRow[] = [
 	{
 		id: "R45",
 		owner: "core/runtime-update-controller.ts",
-		journey: 2,
-		phase: "queued-recovery",
+		journey: 1,
+		phase: "host-shutdown runtime-update stop",
 		fault: "a runtime-update stop with owner input queued (the usage-limit stop is R45u)",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 2,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"no journey drives runtime_update: it needs a scripted root turn that calls runtime_update (reload with its verification tool) and then its stop while a steer is queued, with the tool active in the harness root, and an assertion of where the queued input is held",
-			},
-		],
+		witness:
+			"stop: after a verified reload the agent stops the update while a steer is queued; the run ends with no round for it and holds it, complete, in the pending queue with its turn-ended notice",
+		control: "complete: the same update completed instead delivers the queued steer as the next turn",
+		// Two fresh owners, three and four scripted provider turns, one in-process runtime reload each.
+		estSeconds: 1,
+		status: "covered",
+		// The owners run System One off in their own binding (the steer is admitted unjudged), so both world modes run them.
+		modes: BOTH,
 	},
 	{
 		id: "R45u",
@@ -979,7 +953,7 @@ const rows: readonly FaultMatrixRow[] = [
 				kind: "extension",
 				extension: "X1",
 				detail:
-					"the win32 rename retry backoff is still a raw setTimeout in a module-level util that takes no timer port, and it runs only on win32 (a transient EPERM/EACCES/EBUSY rename); the async lock waits stay on system time by design (a cross-process lock whose holder, staleness and deadline are real time); rename and write faults reach them only indirectly (R8, R44)",
+					"the win32 rename retry backoff now waits on a timer port (retryTransientWin32's `timers`, AtomicFileWriteOptions.timers, SYSTEM_TIMER_PORT by default), but the fault cannot be forced off win32: isTransientWin32FsError returns false unless process.platform is win32, and writeFileAtomic renames through node:fs promises directly (FaultableFs reaches only the sync variant), so a Linux journey can neither raise a transient EPERM/EACCES/EBUSY rename nor reach the backoff. A witness needs a platform-independent transient-rename classifier input or an async FaultableFs on writeFileAtomic, plus an owner that passes the world's timer port; the async lock waits stay on system time by design (a cross-process lock whose holder, staleness and deadline are real time); rename and write faults reach them only indirectly (R8, R44)",
 			},
 		],
 	},

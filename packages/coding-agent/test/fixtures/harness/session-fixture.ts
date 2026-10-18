@@ -2533,6 +2533,8 @@ export class HarnessWorld {
 				readonly message: string;
 				readonly probe: { loaderDisposals: number };
 			};
+			/** This session's interposition on each worker terminal delivery (the SDK option); unset delivers directly. */
+			readonly workerTerminalDelivery?: CreateAgentSessionOptions["workerTerminalDelivery"];
 		} = {},
 	): Promise<{
 		session: AgentSession;
@@ -2602,6 +2604,9 @@ export class HarnessWorld {
 			sessionManager,
 			...(extensionLoader === undefined ? {} : { resourceLoader: extensionLoader }),
 			...(options.executionLoopMode === undefined ? {} : { executionLoopMode: options.executionLoopMode }),
+			...(options.workerTerminalDelivery === undefined
+				? {}
+				: { workerTerminalDelivery: options.workerTerminalDelivery }),
 			...(options.orchestrationProfile === undefined
 				? { model: this.provider.model(modelId) }
 				: { orchestrationProfile: options.orchestrationProfile }),

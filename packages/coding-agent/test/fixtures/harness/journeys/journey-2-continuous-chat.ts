@@ -1,5 +1,6 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
+import type { AgentSessionEvent } from "../../../../src/core/agent-session.ts";
 import { ObjectiveMutationLedger } from "../../../../src/core/objective-execution/objective-mutation-ledger.ts";
 import { RepositoryMutationObserver } from "../../../../src/core/objective-execution/repository-mutation-observer.ts";
 import {
@@ -456,8 +457,89 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 			"a fresh root takes over the runtime lease its dead owner left",
 		).toEqual({ pid: world.processTable.self, replaced: true });
 		world.faultMatrix.witness("R27", { control: false });
+		// R26: a root whose activation fails on the takeover owner's lease, as wSecond's did on wRoot's.
+		const wRecovering = await world.createRootSession("root", {
+			agentDir: wAgentDir,
+			settings: icmContinuousSettings(),
+		});
 		expect(await world.disposeSessionInBody(wTakeover.session)).toBeUndefined();
 		expect(world.io.existsSync(wStore.leaseFile), "disposing the takeover owner releases runtime.lease.json").toBe(
+			false,
+		);
+		// The lease is free now, but nothing re-activates the failed chat until a settings change lands. One lands while the
+		// root's own turn holds the foreground, so it cannot take the idle lease: the recovery waits for the foreground's
+		// release, then activates the chat once, reported by the session's memory_activation events.
+		const wRecoveryLog: Extract<AgentSessionEvent, { type: "agent_end" | "memory_activation" }>[] = [];
+		const wRecovered = createBarrier();
+		let wActivationsAtChange: number | undefined;
+		const flipThinkingDisplay = (): void =>
+			wRecovering.settingsManager.setHideThinkingBlock(!wRecovering.settingsManager.getHideThinkingBlock());
+		const offRecovery = wRecovering.session.subscribe((event) => {
+			if (event.type === "agent_start" && wActivationsAtChange === undefined) {
+				wActivationsAtChange = wRecoveryLog.filter((entry) => entry.type === "memory_activation").length;
+				flipThinkingDisplay();
+			} else if (event.type === "agent_end" || event.type === "memory_activation") {
+				wRecoveryLog.push(event);
+				if (event.type === "memory_activation" && event.phase === "end") wRecovered.release();
+			}
+		});
+		try {
+			await withDeadline(
+				trace,
+				"R26 turn of the root whose chat is missing",
+				wRecovering.session.prompt("Attempt a root turn while the ICM chat is missing."),
+			);
+			const wRecoveringLast = wRecovering.session.messages.at(-1);
+			expect(
+				wRecoveringLast?.role === "assistant" ? wRecoveringLast.errorMessage : undefined,
+				"the turn of the root whose activation failed is refused by its blocked chat",
+			).toMatch(
+				/ICM project chat is unavailable: The ICM chat for this project is owned by pid \d+ on .+ still running\./,
+			);
+			await withDeadline(trace, "R26 recovered activation", wRecovered.promise);
+			await withDeadline(trace, "R26 recovery releases the foreground", wRecovering.session.waitForForegroundIdle());
+			const wRecoveryOrder = wRecoveryLog.map((entry) =>
+				entry.type === "agent_end"
+					? "turn end"
+					: `${entry.phase} ${entry.cause} ${entry.system}${entry.phase === "end" ? ` ${entry.outcome}` : ""}`,
+			);
+			const wRecoveryGenerations = new Set(
+				wRecoveryLog.flatMap((entry) => (entry.type === "memory_activation" ? [entry.generation] : [])),
+			);
+			const wRecoveredOwner = readLease("recovered ICM root");
+			expect(
+				{
+					activationsAtChange: wActivationsAtChange,
+					activations: wRecoveryOrder.filter((entry) => entry !== "turn end"),
+					oneActivation: wRecoveryGenerations.size,
+					afterTurn:
+						wRecoveryOrder.lastIndexOf("turn end") >= 0 &&
+						wRecoveryOrder.indexOf("start recovery icm") > wRecoveryOrder.lastIndexOf("turn end"),
+					lease: { pid: wRecoveredOwner.pid, replaced: wRecoveredOwner.token !== wTakenOwner.token },
+				},
+				"the settings change made while the turn held the foreground recovers the chat once, after the turn released it",
+			).toEqual({
+				activationsAtChange: 0,
+				activations: ["start recovery icm", "end recovery icm activated"],
+				oneActivation: 1,
+				afterTurn: true,
+				lease: { pid: world.processTable.self, replaced: true },
+			});
+			world.faultMatrix.witness("R26", { control: false });
+			// Control: a settings change on the live chat only reviews it; no activation runs and the runtime lease stays.
+			const wLogBeforeControl = wRecoveryLog.length;
+			flipThinkingDisplay();
+			await withDeadline(trace, "R26 control settles", wRecovering.session.waitForForegroundIdle());
+			expect(
+				{ events: wRecoveryLog.length - wLogBeforeControl, token: readLease("live recovered ICM root").token },
+				"a settings change on a live ICM host does not recycle it",
+			).toEqual({ events: 0, token: wRecoveredOwner.token });
+			world.faultMatrix.witness("R26", { control: true });
+		} finally {
+			offRecovery();
+		}
+		expect(await world.disposeSessionInBody(wRecovering.session)).toBeUndefined();
+		expect(world.io.existsSync(wStore.leaseFile), "disposing the recovered owner releases runtime.lease.json").toBe(
 			false,
 		);
 		trace.mark("root", "icm.worker-and-lease");

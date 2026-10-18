@@ -11,15 +11,19 @@ import {
 	type BackgroundToolTaskRecord,
 	loadBackgroundToolTaskRecordsNewestFirst,
 } from "../../../../src/core/background-tool-task-controller.ts";
+import { ExhaustedProviderRegistry } from "../../../../src/core/billing-failover-controller.ts";
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "../../../../src/core/delegation/worker-mailbox-record.ts";
 import { WORKER_TERMINAL_OUTPUT_INLINE_BYTES } from "../../../../src/core/delegation/worker-terminal-output-artifact.ts";
+import type { WorkerTerminalDeliveryInterposer } from "../../../../src/core/foreground-terminal-handoff-controller.ts";
 import { getLatestGoalStateSnapshot } from "../../../../src/core/goals/session-goal-state.ts";
 import {
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationProfile,
 } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
+import type { ProviderAdmissionWaitEvent } from "../../../../src/core/provider-admission/gate.ts";
+import { providerAdmissionDir } from "../../../../src/core/provider-admission/ledger.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import type { WaitEndReport } from "../../../../src/core/util/wait.ts";
 import type { ScriptedRequest } from "../scripted-provider.ts";
@@ -1696,7 +1700,12 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	// terminal hands off to the idle root, which consumes it; the obligation the failure opened clears on that handoff.
 	const eBgGate = createBarrier();
 	const eWake = createBarrier();
-	const eAux = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
+	// The auxiliary root's worker terminal deliveries pass through an interposition that refuses one only when R31 arms it.
+	const eDeliveries = createWorkerDeliveryRefusals();
+	const eAux = await world.createRootSession("root", {
+		sessionManager: world.createSessionManager(),
+		workerTerminalDelivery: eDeliveries.interpose,
+	});
 	const eSession = eAux.session;
 	const eJudgments = {
 		capabilities_authorized: { kind: "noul", probability: 0.02 },
@@ -2653,7 +2662,18 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	await heldOrchestrationStoreLock(world, eSession, eAux.sessionManager.getSessionId());
 	const r30AgentId = await retainedRetryReadFault(world, eSession, eAux.sessionManager.getSessionId());
 	const r32Agents = await failedQueuedCancel(world, eSession);
-	await retireWitnessSpecialists(world, eSession, [r30AgentId, r32Agents.held, r32Agents.queued]);
+	// Every provider admission wait of the auxiliary root from here: R31's worker request passes with none, R25's waits once.
+	const eAdmissionWaits = recordAdmissionWaits(eSession);
+	const r31AgentId = await refusedWorkerHandoff(world, eSession, eDeliveries);
+	const r25AgentId = await quotaResetAdmissionWait(world, eSession, eAdmissionWaits);
+	eAdmissionWaits.stop();
+	await retireWitnessSpecialists(world, eSession, [
+		r30AgentId,
+		r32Agents.held,
+		r32Agents.queued,
+		r31AgentId,
+		r25AgentId,
+	]);
 	expect(await world.disposeSessionInBody(eSession), "the auxiliary stale-pass root disposes cleanly").toBeUndefined();
 	trace.mark("root", "e-stale-pass");
 }
@@ -3189,6 +3209,355 @@ async function failedQueuedCancel(
 	if (started.held === undefined || started.queued === undefined)
 		throw new Error("the R32 starts carried no agent ids");
 	return { held: started.held.agentId, queued: started.queued.agentId };
+}
+
+/** The auxiliary root's interposition on its worker terminal deliveries, and what it refused and delivered per lane. */
+interface WorkerDeliveryRefusals {
+	readonly interpose: WorkerTerminalDeliveryInterposer;
+	/** The first delivery that carries `laneId` from now is held until `refuse`, then rejected with `message` undelivered. */
+	arm(laneId: string, message: string): { readonly held: Promise<void>; refuse(): void };
+	deliveredFor(laneId: string): number;
+	refusedFor(laneId: string): number;
+}
+
+/** Every delivery goes through unchanged unless a witness armed a refusal for one of its lanes. */
+function createWorkerDeliveryRefusals(): WorkerDeliveryRefusals {
+	let armed:
+		| {
+				readonly laneId: string;
+				readonly message: string;
+				readonly held: () => void;
+				readonly refused: Promise<void>;
+		  }
+		| undefined;
+	const delivered: string[] = [];
+	const refused: string[] = [];
+	return {
+		interpose: async (records, deliver) => {
+			const refusal = armed;
+			if (refusal !== undefined && records.some((record) => record.laneId === refusal.laneId)) {
+				armed = undefined;
+				refusal.held();
+				await refusal.refused;
+				refused.push(...records.map((record) => record.laneId));
+				throw new Error(refusal.message);
+			}
+			await deliver();
+			delivered.push(...records.map((record) => record.laneId));
+		},
+		arm: (laneId, message) => {
+			const held = createBarrier();
+			const refuse = createBarrier();
+			armed = { laneId, message, held: held.release, refused: refuse.promise };
+			return { held: held.promise, refuse: refuse.release };
+		},
+		deliveredFor: (laneId) => delivered.filter((candidate) => candidate === laneId).length,
+		refusedFor: (laneId) => refused.filter((candidate) => candidate === laneId).length,
+	};
+}
+
+/** The provider admission waits a session announces, in order, and the next one to arrive. */
+function recordAdmissionWaits(session: AgentSession): {
+	readonly waits: readonly ProviderAdmissionWaitEvent[];
+	next(): Promise<ProviderAdmissionWaitEvent>;
+	stop(): void;
+} {
+	const waits: ProviderAdmissionWaitEvent[] = [];
+	const waiters: Array<(wait: ProviderAdmissionWaitEvent) => void> = [];
+	const stop = session.subscribe((event) => {
+		if (event.type !== "provider_admission_wait") return;
+		waits.push(event);
+		for (const resolve of waiters.splice(0)) resolve(event);
+	});
+	return {
+		waits,
+		next: () =>
+			new Promise((resolve) => {
+				waiters.push(resolve);
+			}),
+		stop,
+	};
+}
+
+/**
+ * R31 (a worker terminal handoff is refused once, without fencing the session): the auxiliary root interposes on its
+ * worker terminal deliveries (the SDK's `workerTerminalDelivery`). A held worker is started and its lane's first delivery
+ * is armed to be refused. Once that delivery is in flight it is rejected undelivered: the outbox keeps the terminal,
+ * announces the failure once and arms its first retry backoff on the `worker-notification` port,
+ * min(100 * 2^0, 5 000) = 100 ms (the count resets on every delivery, and every earlier delivery of this root went
+ * through). No harness worker wait runs before the retry: a wait result observes the terminal it captures, and an
+ * observed terminal is never delivered. Control: the backoff does not fire before its delay; when it fires the retried
+ * delivery goes through, the terminal reaches the idle root exactly once, and nothing is armed again.
+ */
+async function refusedWorkerHandoff(
+	world: HarnessWorld,
+	session: AgentSession,
+	deliveries: WorkerDeliveryRefusals,
+): Promise<string> {
+	const trace = world.trace;
+	const R31_REPORT = "The handoff reader report is ready.";
+	const R31_REFUSAL = "r31 scripted handoff refusal";
+	const R31_BACKOFF_MS = 100;
+	const workerRelease = createBarrier();
+	const wake = createBarrier();
+	const handoffFailures = (): string[] =>
+		world.warnings.filter((message) => message.startsWith("Background worker handoff failed:"));
+	const handoffsOf = (request: ScriptedRequest, laneId: string): number =>
+		request.context.messages.filter((message) => {
+			const text = JSON.stringify(message);
+			return text.includes("Background worker terminal handoff") && text.includes(`- ${laneId}:`);
+		}).length;
+	const started: { agentId?: string; laneId?: string; refusal?: { readonly held: Promise<void>; refuse(): void } } =
+		{};
+	let wakeHandoffs: number | undefined;
+	expect(world.provider.getPendingStepNames("worker-c"), "no earlier worker-c step is left pending").toEqual([]);
+	expect(handoffFailures(), "no worker handoff has failed before the refusal").toEqual([]);
+	const armedBefore = world.timers.armedDelays("worker-notification");
+	world.provider.enqueue("worker-c", {
+		name: "r31-report",
+		gate: workerRelease.promise,
+		reply: {
+			content: [
+				{
+					type: "toolCall",
+					id: "r31-report-1",
+					name: "submit_report",
+					arguments: { status: "completed", summary: R31_REPORT },
+				},
+			],
+			stopReason: "toolUse",
+		},
+	});
+	world.provider.enqueue(
+		"root",
+		calls("r31-start", [
+			{
+				id: "r31-start-1",
+				name: "delegate",
+				arguments: {
+					action: "start",
+					model: { provider: "harness-script", modelId: "worker-c" },
+					instructions: "Report once you are released.",
+				},
+			},
+		]),
+		{
+			name: "r31-started",
+			check: (request) => {
+				assertBatchOk(request, "the handoff reader start");
+				const details = lastToolResultDetails(session, "delegate");
+				const agentId = isRecordObject(details) ? details.agentId : undefined;
+				const laneId = isRecordObject(details) ? details.laneId : undefined;
+				if (typeof agentId !== "string" || typeof laneId !== "string") {
+					throw new Error("the handoff reader start carries no agent or lane id");
+				}
+				started.agentId = agentId;
+				started.laneId = laneId;
+				// Armed while the worker is still held at its gate: its terminal does not exist yet.
+				started.refusal = deliveries.arm(laneId, R31_REFUSAL);
+			},
+			reply: { content: [{ type: "text", text: "The handoff reader is started." }] },
+		},
+	);
+	await withDeadline(trace, "R31 handoff reader start turn", session.prompt("Start the handoff reader."), 90_000);
+	const { agentId, laneId, refusal } = started;
+	if (agentId === undefined || laneId === undefined || refusal === undefined) {
+		throw new Error("the R31 start carried no agent or lane id");
+	}
+	workerRelease.release();
+	await withDeadline(trace, "R31 terminal delivery reached the interposition", refusal.held, 90_000);
+	// Registered once the delivery is in flight (its observation watchdog is already armed): the retry backoff is the
+	// next alarm the port arms.
+	const retryArmed = world.timers.nextArmed("worker-notification");
+	refusal.refuse();
+	const retryMs = await withDeadline(trace, "R31 retry backoff armed", retryArmed, 30_000);
+	expect(retryMs, "the refused delivery arms the outbox's first retry backoff").toBe(R31_BACKOFF_MS);
+	expect(handoffFailures(), "the refusal is announced once, with its cause").toEqual([
+		`Background worker handoff failed: ${R31_REFUSAL}`,
+	]);
+	expect(world.timers.armedDelays("worker-notification"), "the retry is the one alarm the refusal added").toEqual([
+		...armedBefore,
+		R31_BACKOFF_MS,
+	]);
+	expect(
+		{ refused: deliveries.refusedFor(laneId), delivered: deliveries.deliveredFor(laneId) },
+		"the refused terminal is not delivered",
+	).toEqual({ refused: 1, delivered: 0 });
+	world.faultMatrix.witness("R31", { control: false });
+	world.provider.enqueue("root", {
+		name: "r31-wake",
+		maxRequests: 8,
+		until: (request) => {
+			const handoffs = handoffsOf(request, laneId);
+			if (handoffs === 0) return false;
+			wakeHandoffs = handoffs;
+			wake.release();
+			return true;
+		},
+		reply: { content: [{ type: "text", text: "The handoff reader is still settling." }] },
+	});
+	expect(
+		world.timers.advance("worker-notification", R31_BACKOFF_MS - 1),
+		"the backoff does not fire before its delay",
+	).toBe(0);
+	expect(deliveries.deliveredFor(laneId), "nothing is delivered before the backoff fires").toBe(0);
+	expect(world.timers.advance("worker-notification", 1), "the backoff fires once its delay has elapsed").toBe(1);
+	await withDeadline(trace, "R31 retried terminal reached the idle root", wake.promise, 90_000);
+	await withDeadline(trace, "R31 settled", session.waitForForegroundIdle(), 90_000);
+	expect(wakeHandoffs, "the idle root reads the retried terminal exactly once").toBe(1);
+	expect(
+		{ refused: deliveries.refusedFor(laneId), delivered: deliveries.deliveredFor(laneId) },
+		"the retry delivers the terminal once",
+	).toEqual({ refused: 1, delivered: 1 });
+	expect(handoffFailures(), "the retried delivery adds no failure").toHaveLength(1);
+	expect(world.timers.armedDelays("worker-notification"), "the delivered retry arms nothing again").toEqual(
+		armedBefore,
+	);
+	world.faultMatrix.witness("R31", { control: true });
+	// The readiness gate of a later worker-c start (see R30): idle only once the specialist's resources are released.
+	const ready = await withDeadline(
+		trace,
+		"R31 handoff reader idle after its delivery",
+		session.backgroundLanes.waitForWorkerAgent(agentId, 60_000),
+		70_000,
+	);
+	expect(
+		{ timedOut: ready.timedOut, status: ready.status },
+		"the handoff reader is idle once its resources are released",
+	).toEqual({ timedOut: false, status: "idle" });
+	return agentId;
+}
+
+/**
+ * R25 (a worker request on a model out of quota waits out the recorded reset): the shared exhaustion store
+ * (`state/provider-admission/exhausted`) records worker-c out of quota until a reset R25_RESET_MS ahead on the
+ * provider-admission clock, as another pi process on the account would; the session's registry re-reads that store on
+ * every check. A worker started on worker-c is admitted (a fixed binding out of quota is not refused), and its provider
+ * request waits at the admission gate: one model_quota start on the worker lane whose limitedUntil is the recorded reset
+ * and whose expected wait is the reset alarm's delay. Advanced on the provider-admission owner by that delay, the alarm
+ * ends the wait satisfied by `model_quota.reset`, the passed reset removes the shared record, and only then is the
+ * request sent. Control: the worker request before the record (R31's handoff reader, on the same model) passed
+ * admission with no wait.
+ */
+async function quotaResetAdmissionWait(
+	world: HarnessWorld,
+	session: AgentSession,
+	admission: ReturnType<typeof recordAdmissionWaits>,
+): Promise<string> {
+	const trace = world.trace;
+	const R25_REPORT = "The quota reader report is ready.";
+	const R25_RESET_MS = 30_000;
+	const R25_MODEL_REF = "harness-script/worker-c";
+	const clock = world.timers.port("provider-admission");
+	const storeDir = join(providerAdmissionDir(world.agentDir), "exhausted");
+	const recordPath = join(storeDir, "harness-script_worker-c.json");
+	const wake = createBarrier();
+	let agentId: string | undefined;
+	let endedBeforeRequest: boolean | undefined;
+	const waitShape = (wait: ProviderAdmissionWaitEvent) => [wait.lane, wait.reason, wait.phase];
+	expect(world.provider.getPendingStepNames("worker-c"), "no earlier worker-c step is left pending").toEqual([]);
+	expect(
+		admission.waits.map(waitShape),
+		"the worker request before the record (the handoff reader, on worker-c) passed admission with no wait",
+	).toEqual([]);
+	world.faultMatrix.witness("R25", { control: true });
+	const until = clock.now() + R25_RESET_MS;
+	new ExhaustedProviderRegistry(storeDir, () => clock.now()).markExhausted(R25_MODEL_REF, until);
+	expect(
+		JSON.parse(String(world.io.readFileSync(recordPath, "utf8"))),
+		"the shared store holds worker-c's recorded reset",
+	).toMatchObject({ ref: R25_MODEL_REF, until });
+	const waitStart = admission.next();
+	world.provider.enqueue("worker-c", {
+		name: "r25-report",
+		check: () => {
+			endedBeforeRequest = admission.waits.some((wait) => wait.reason === "model_quota" && wait.phase === "end");
+		},
+		reply: {
+			content: [
+				{
+					type: "toolCall",
+					id: "r25-report-1",
+					name: "submit_report",
+					arguments: { status: "completed", summary: R25_REPORT },
+				},
+			],
+			stopReason: "toolUse",
+		},
+	});
+	world.provider.enqueue(
+		"root",
+		calls("r25-start", [
+			{
+				id: "r25-start-1",
+				name: "delegate",
+				arguments: {
+					action: "start",
+					model: { provider: "harness-script", modelId: "worker-c" },
+					instructions: "Report once your model answers.",
+				},
+			},
+		]),
+		{
+			name: "r25-started",
+			check: (request) => {
+				assertBatchOk(request, "the quota reader start");
+				const details = lastToolResultDetails(session, "delegate");
+				const started = isRecordObject(details) ? details.agentId : undefined;
+				if (typeof started !== "string") throw new Error("the quota reader start carries no agent id");
+				agentId = started;
+			},
+			reply: { content: [{ type: "text", text: "The quota reader is started." }] },
+		},
+		{
+			name: "r25-wake",
+			maxRequests: 8,
+			until: (request) => {
+				const done = JSON.stringify(request.context.messages).includes(R25_REPORT);
+				if (done) wake.release();
+				return done;
+			},
+			reply: { content: [{ type: "text", text: "The quota reader is still settling." }] },
+		},
+	);
+	await withDeadline(trace, "R25 quota reader start turn", session.prompt("Start the quota reader."), 90_000);
+	const start = await withDeadline(trace, "R25 admission wait started", waitStart, 60_000);
+	const expectedMs = start.expectedMs ?? 0;
+	expect(
+		{ shape: waitShape(start), provider: start.provider, limitedUntil: start.limitedUntil },
+		"the worker request waits for worker-c's recorded reset",
+	).toEqual({ shape: ["worker", "model_quota", "start"], provider: "harness-script", limitedUntil: until });
+	expect(expectedMs > 0 && expectedMs <= R25_RESET_MS, "the expected wait is what is left of the recorded reset").toBe(
+		true,
+	);
+	expect(
+		world.timers.armedDelays("provider-admission"),
+		"the wait's reset alarm is armed at its expected wait",
+	).toContain(expectedMs);
+	expect(world.provider.reached, "the request is not sent while the wait holds").not.toContain("worker-c:r25-report");
+	const waitEnd = admission.next();
+	expect(
+		world.timers.advance("provider-admission", expectedMs),
+		"the reset alarm fires once its delay has elapsed",
+	).toBeGreaterThanOrEqual(1);
+	const end = await withDeadline(trace, "R25 admission wait ended", waitEnd, 30_000);
+	expect(
+		{ shape: waitShape(end), end: end.end },
+		"the passed reset ends the wait, satisfied by the reset alarm",
+	).toEqual({ shape: ["worker", "model_quota", "end"], end: { kind: "satisfied", by: "model_quota.reset" } });
+	expect((end.waitedMs ?? 0) >= expectedMs, "the wait lasted at least to the recorded reset").toBe(true);
+	await withDeadline(trace, "R25 report reached the idle root", wake.promise, 90_000);
+	await withDeadline(trace, "R25 settled", session.waitForForegroundIdle(), 90_000);
+	expect(endedBeforeRequest, "the request is sent only after the wait ended").toBe(true);
+	expect(world.provider.reached, "the waited request ran once").toContain("worker-c:r25-report");
+	expect(admission.waits.map(waitShape), "the request waited once, and only for the quota").toEqual([
+		["worker", "model_quota", "start"],
+		["worker", "model_quota", "end"],
+	]);
+	expect(world.io.existsSync(recordPath), "the passed reset removed the shared record").toBe(false);
+	world.faultMatrix.witness("R25", { control: false });
+	if (agentId === undefined) throw new Error("the R25 start carried no agent id");
+	return agentId;
 }
 
 /**

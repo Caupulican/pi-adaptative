@@ -843,7 +843,8 @@ export class WorkerDelegationController {
 				const store = this.providerLimitStore;
 				const key = resolveProviderAccountKey(this.deps.getModelRegistry().authStorage, input.provider);
 				store.record(key, {
-					limitedUntil: Date.now() + input.delayMs,
+					// The admission gate reads this record on the provider-admission clock: record on the same one.
+					limitedUntil: this.deps.getTimers().port("provider-admission").now() + input.delayMs,
 					reason: input.reason,
 					...(input.detail ? { detail: input.detail } : {}),
 				});

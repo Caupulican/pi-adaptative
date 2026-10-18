@@ -27,7 +27,7 @@ import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { openWorkUnit } from "../work-units.ts";
 import type { RoutedGoalContext } from "./compact-goal-context.ts";
-import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
+import { getGoalCompletionRefusal, getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
 import { recordObjectiveClarification } from "./goal-clarification-log.ts";
 import type { GoalCompletionOwnerDecision } from "./goal-completion-owner-decision.ts";
 import { buildObjectiveRoutePrompt, GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
@@ -1137,6 +1137,13 @@ export class GoalSessionController {
 	): Promise<{ result: GoalContinuationOnceResult; disposed: boolean }> {
 		const state = this.getState();
 		const snapshot = () => this.getRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
+		if (state && getGoalCompletionRefusal(state) !== undefined) {
+			// A completion its trusted evidence does not support (a persisted state the completion gate never writes) is
+			// reopened by the reconcile every route evaluation starts with, as in shadow mode. The cycle ends there: the
+			// reopened goal's work runs from the next cycle, on the goal as it now stands.
+			await controller.evaluateRouteOnce(goalObjectiveId(state.goalId));
+			return { result: { submitted: false, snapshot: snapshot() }, disposed: false };
+		}
 		if (!state || !isGoalExecutionActive(state.status)) {
 			return { result: { submitted: false, snapshot: snapshot() }, disposed: false };
 		}
@@ -1240,7 +1247,10 @@ export class GoalSessionController {
 			if (maxWallClockMs !== undefined && now() - startedAt >= maxWallClockMs)
 				return stop("wall_clock_budget_reached");
 			const state = this.getState();
-			if (!state || !isGoalExecutionActive(state.status)) return stop("continuation_not_allowed");
+			// An unsupported completion is not a settled goal: the cycle below reopens it first.
+			if (!state || (!isGoalExecutionActive(state.status) && getGoalCompletionRefusal(state) === undefined)) {
+				return stop("continuation_not_allowed");
+			}
 			const revisionBefore = this.deps.getTaskRuntimeSnapshot()?.lastOrdinal;
 			const { result: once, disposed } = await this.runPrimaryCycle(controller, options);
 			if (disposed) return stop("session_disposed");

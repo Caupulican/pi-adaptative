@@ -18,10 +18,11 @@ type AgentSessionEvent =
   | { type: "compaction_end"; reason: "manual" | "threshold" | "overflow" | "provider_recovery"; result: CompactionResult | undefined; aborted: boolean; willRetry: boolean; errorMessage?: string }
   | { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
   | { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-  | { type: "wait"; phase: "start" | "progress" | "overdue" | "end"; id: string; seq: number; wake: readonly string[]; steer: string; bound: { kind: "deadline" | "watchdog"; ms: number }; elapsedMs: number; holder?: string; progress?: string; end?: WaitEndReport };
+  | { type: "wait"; phase: "start" | "progress" | "overdue" | "end"; id: string; seq: number; wake: readonly string[]; steer: string; bound: { kind: "deadline" | "watchdog"; ms: number }; elapsedMs: number; holder?: string; progress?: string; end?: WaitEndReport }
+  | { type: "memory_activation"; phase: "start" | "end"; generation: number; system: "okf" | "icm"; cause: "load" | "switch" | "recovery"; outcome?: "activated" | "failed" | "superseded"; error?: string };
 ```
 
-`queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover manual, threshold, overflow-recovery, and provider-recovery compaction. `wait` is the status stream of a session wait (a `tool_task` wait, a delegate `inbox_wait`, a steer's admission decision, the objective loop's worker wait, a wait for the foreground); see [RPC mode](rpc.md#wait) for its fields and typed ends.
+`queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover manual, threshold, overflow-recovery, and provider-recovery compaction. `wait` is the status stream of a session wait (a `tool_task` wait, a delegate `inbox_wait`, a steer's admission decision, the objective loop's worker wait, a wait for the foreground); see [RPC mode](rpc.md#wait) for its fields and typed ends. `memory_activation` brackets one memory (re)activation, including a recovery the session starts on its own once it is idle; see [RPC mode](rpc.md#memory_activation).
 
 On the JSON wire, `message_update` is delta-only: `message.content` is `[]`, accumulated `partial`/block-end payloads are omitted, and `accumulatedContentOmitted` is `true`. Reconstruct streaming content from `text_delta`, `thinking_delta`, and `toolcall_delta`; the later `message_end` is the authoritative complete message. An unusually large single delta is capped so the JSONL record remains below 50 KiB and includes `deltaTruncated: true` plus its original `deltaBytes`; the complete value remains available in `message_end`.
 

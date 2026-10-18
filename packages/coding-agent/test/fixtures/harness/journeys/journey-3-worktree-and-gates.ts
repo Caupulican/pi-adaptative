@@ -6,8 +6,10 @@ import { canonicalPathScopeIdentity } from "../../../../src/core/autonomy/path-s
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { WorkerLifecycle } from "../../../../src/core/delegation/worker-lifecycle.ts";
 import { WorkerRecoveryCoordinator } from "../../../../src/core/delegation/worker-recovery-coordinator.ts";
-import { getLatestGoalStateSnapshot } from "../../../../src/core/goals/session-goal-state.ts";
+import { applyGoalEvent, createGoalState, type GoalEvent } from "../../../../src/core/goals/goal-state.ts";
+import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../../../../src/core/goals/session-goal-state.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
+import { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import type { ScriptedRequest, ScriptStep } from "../scripted-provider.ts";
 import { calls, createBarrier, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, harnessPath, projectPath, withDeadline } from "../session-fixture.ts";
@@ -2667,4 +2669,103 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		await world.disposeSessionInBody(restarted),
 		"the restored root disposes before the ICM parts",
 	).toBeUndefined();
+}
+
+/** The one requirement of an R38 goal, its evidence (trusted only when `verified`), and the goal completed over it. */
+function completedGoalOver(goalId: string, verified: boolean) {
+	const now = "2026-01-01T00:00:00.000Z";
+	const events: GoalEvent[] = [
+		{ type: "add_requirement", id: "req-limit", text: "MAX_RETRIES is 5.", now },
+		{ type: "add_evidence", id: "ev-limit", kind: "file", summary: "src/limits.ts holds 5.", verified, now },
+		{ type: "satisfy_requirement", id: "req-limit", evidenceIds: ["ev-limit"], now },
+		// No acceptance override: the completion stands only on trusted evidence.
+		{ type: "complete_goal", now },
+	];
+	let state = createGoalState({ goalId, userGoal: "Raise MAX_RETRIES to 5.", now });
+	for (const event of events) state = applyGoalEvent(state, event);
+	return state;
+}
+
+/**
+ * R38, System One on. A completed goal whose requirement lacks trusted evidence, with no acceptance override, is a
+ * persisted state the completion gate never writes (an earlier version's file). The default loop's continuation
+ * reopens it to active with one warning, through the reconcile its route evaluation starts with; that cycle runs no
+ * turn. The control is the same continuation over the same goal with trusted evidence: it stays completed and
+ * evaluates no route. Off mode binds no objective route evaluation, so it has nothing to run.
+ */
+export async function runJourney3UnprovenCompletionPhase(world: HarnessWorld): Promise<void> {
+	if (!world.systemOne.enabled) return;
+	const trace = world.trace;
+	const phase = "r38-unproven-completion";
+	// The route evaluation asks JEV-004 once, for the reopened goal only.
+	world.systemOne.enterPhase(phase, {
+		work_remaining: { kind: "noul", probability: 0.97 },
+		missing_work_class: { kind: "choice", choice: "implement", confidence: 0.97 },
+		evidence_sufficient: { kind: "noul", probability: 0.02 },
+		semantic_progress: { kind: "score", level: 1, confidence: 0.97 },
+		strategy_repetition: { kind: "noul", probability: 0.02 },
+		context_stale: { kind: "noul", probability: 0.02 },
+		independent_worker_required: { kind: "noul", probability: 0.02 },
+		capability_escalation_required: { kind: "noul", probability: 0.02 },
+		capability_gap_suspected: { kind: "noul", probability: 0.02 },
+		completion_plausible: { kind: "noul", probability: 0.02 },
+	});
+	const askedInPhase = () => world.systemOne.decoded.filter((request) => request.phase === phase).length;
+	// A route evaluation is the phase's one JEV-004 request; a turn is any provider request, scripted or not.
+	const routeAsked = () =>
+		world.systemOne.decoded.some((request) => request.phase === phase && "completion_plausible" in request.questions);
+	const providerRequests = () => world.provider.requests.length;
+	const reopenWarnings = (from: number) =>
+		world.warnings.slice(from).filter((message) => message.includes("lack trusted evidence"));
+
+	const unprovenManager = SessionManager.inMemory(HARNESS_PROJECT_CWD);
+	appendGoalStateSnapshot(unprovenManager, completedGoalOver("r38-unproven", false));
+	const unproven = (await world.createRootSession("root", { sessionManager: unprovenManager })).session;
+	expect(unproven.executionLoopMode, "the witness runs the default System One loop").toBe("objective_primary");
+	expect(unproven.getGoalStateSnapshot()?.status, "the persisted goal starts completed").toBe("completed");
+	const unprovenWarnings = world.warnings.length;
+	const unprovenRequests = providerRequests();
+	const reopened = await withDeadline(trace, "R38 reopen", unproven.continueGoalOnce({ maxStallTurns: 3 }));
+	expect(
+		{
+			submitted: reopened.submitted,
+			status: unproven.getGoalStateSnapshot()?.status,
+			warnings: reopenWarnings(unprovenWarnings),
+			routeEvaluated: routeAsked(),
+			turns: providerRequests() - unprovenRequests,
+		},
+		"the unproven completion reopens to active with one warning, through one route evaluation, and runs no turn",
+	).toEqual({
+		submitted: false,
+		status: "active",
+		warnings: [
+			"Goal r38-unproven completion not supported: requirement(s) req-limit lack trusted evidence; the goal stays active to gather it.",
+		],
+		routeEvaluated: true,
+		turns: 0,
+	});
+	world.faultMatrix.witness("R38", { control: false });
+
+	const provenManager = SessionManager.inMemory(HARNESS_PROJECT_CWD);
+	appendGoalStateSnapshot(provenManager, completedGoalOver("r38-proven", true));
+	const proven = (await world.createRootSession("root", { sessionManager: provenManager })).session;
+	const provenWarnings = world.warnings.length;
+	const provenAsked = askedInPhase();
+	const provenRequests = providerRequests();
+	const kept = await withDeadline(trace, "R38 kept", proven.continueGoalOnce({ maxStallTurns: 3 }));
+	expect(
+		{
+			submitted: kept.submitted,
+			status: proven.getGoalStateSnapshot()?.status,
+			warnings: reopenWarnings(provenWarnings),
+			asked: askedInPhase() - provenAsked,
+			turns: providerRequests() - provenRequests,
+		},
+		"a completion its trusted evidence supports stays completed, evaluates no route and runs no turn",
+	).toEqual({ submitted: false, status: "completed", warnings: [], asked: 0, turns: 0 });
+	world.faultMatrix.witness("R38", { control: true });
+
+	expect(await world.disposeSessionInBody(unproven), "the reopened goal's session disposes").toBeUndefined();
+	expect(await world.disposeSessionInBody(proven), "the completed goal's session disposes").toBeUndefined();
+	trace.mark("root", "r38.unproven-completion");
 }

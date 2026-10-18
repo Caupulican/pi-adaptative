@@ -33,6 +33,8 @@ export async function runJourney2(): Promise<void> {
 				/^Worker worker-\d+ provider request failed \(server_error\); retrying in \d+s \(attempt [23]\/3\)\.$/,
 				/^Worker worker-\d+ failed \(server_error\); retrying from the persisted transcript in \d+s \(attempt 2\)\.$/,
 				/^Worker worker-\d+ retry durable read failed; retaining the durable retry and trying again in 1s: Scripted IO fault r30-durable-read: stat '(?:\/harness\/agent-journey-2-system-one-(?:on|off)\/state\/orchestration\/sessions\/[^'/\\\n]+\/events\/cursor\.json|[A-Z]:\\harness\\agent-journey-2-system-one-(?:on|off)\\state\\orchestration\\sessions\\[^'/\\\n]+\\events\\cursor\.json)'$/,
+				// R31: the auxiliary root's one refused worker terminal delivery, retried on the outbox backoff: exact text.
+				/^Background worker handoff failed: r31 scripted handoff refusal$/,
 				// R32: the queued worker's one refused cancellation event write (the auxiliary root's store), retained: exact text.
 				/^Worker worker-\d+ cancellation failed; it stays queued and the cancellation is retried: Scripted IO fault r32-cancel-write: write '(?:\/harness\/agent-journey-2-system-one-(?:on|off)\/state\/orchestration\/sessions\/[^'/\\\n]+\/events\/events\/\d{16}\.json\.\d+\.[0-9a-f-]{36}\.tmp|[A-Z]:\\harness\\agent-journey-2-system-one-(?:on|off)\\state\\orchestration\\sessions\\[^'/\\\n]+\\events\\events\\\d{16}\.json\.\d+\.[0-9a-f-]{36}\.tmp)'$/,
 			],
