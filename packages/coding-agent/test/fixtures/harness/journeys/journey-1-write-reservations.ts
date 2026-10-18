@@ -193,6 +193,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		e13StoreContent().some((content) => content.includes(e13OldLease.reservationId)),
 		"the recovery entrance releases the exact old reservation from the durable store",
 	).toBe(false);
+	world.faultMatrix.witness("R2", { control: false });
 	let e13SecondTaskId: string | undefined;
 	world.provider.enqueue(
 		"root",
@@ -405,6 +406,26 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			},
 		],
 	}));
+	// Live-owner control of the dead-owner reap: a second owner's recovery entrance probes the live E13A writer's owner pid with signal 0, finds
+	// it alive, and keeps the exact reservation durable byte for byte. The probe owner holds nothing and closes with nothing to disclose.
+	const e13aOwnerPid = parseLocalWorkerProcessOwnerId(e13aLease.ownerId)?.pid;
+	expect(e13aOwnerPid, "the live lease names this live process").toBe(world.processTable.self);
+	const e13aLiveStoreBytes = world.io.fileEntries().get(e13aStorePath);
+	const e13aProbeBase = world.processTable.probes.length;
+	const e13aProbeMark = world.warnings.length;
+	const e13aProbe = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
+	e13aProbe.session.getLaneRecords();
+	expect(
+		world.processTable.probes.slice(e13aProbeBase).some((probe) => probe.pid === e13aOwnerPid && probe.signal === 0),
+		"the second owner's recovery entrance probes the live owner pid with signal 0",
+	).toBe(true);
+	expect(
+		world.io.fileEntries().get(e13aStorePath),
+		"the recovery entrance keeps the live owner's exact reservation durable",
+	).toBe(e13aLiveStoreBytes);
+	expect(await world.disposeSessionInBody(e13aProbe.session), "the probe owner disposes cleanly").toBeUndefined();
+	expect(world.warnings.slice(e13aProbeMark), "the probe owner discloses nothing").toEqual([]);
+	world.faultMatrix.witness("R2", { control: true });
 	world.io.failNext({
 		name: "e13a-release-unlink-after",
 		kind: "unlink",
@@ -780,6 +801,12 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			e13wObservers.every((watcher) => watcher.listenerCount === 1),
 			"each registered observer carries exactly its native change callback",
 		).toBe(true);
+		// The availability subscription registers one observer per host workspace key: the cwd and its filesystem root are two distinct
+		// keys, so at least one observer besides the faulted first one closes in the same teardown with no fault armed.
+		expect(
+			e13wObservers.length,
+			"the cwd and its filesystem root each registered an observer on the store directory",
+		).toBeGreaterThan(1);
 		world.io.failNext({
 			name: "e13w-watch-close-fails",
 			kind: "watch.close",
@@ -810,9 +837,11 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 				.map((watcher) => ({ id: watcher.id, listenerCount: watcher.listenerCount })),
 			"the disposed owner retains only the first observer, with its native callback, and the other one closed",
 		).toEqual([{ id: e13wWatch.id, listenerCount: 1 }]);
+		world.faultMatrix.witness("R4", { control: true });
 		// External transport cutoff of the one observer the native teardown retained, only after the native proof above.
 		world.io.cutoffRetainedWatcher({ id: e13wWatch.id, path: e13wWatch.path });
 		world.certifyDisposedOwner(e13wSession, [], { leases: [], executingHolds: [], watchCount: 1 });
+		world.faultMatrix.witness("R4", { control: false });
 	} finally {
 		// Failure-safe: an assertion that fails before the normal release must not leave the writer gated for the journey's cleanup.
 		e13wGate.release();
@@ -2826,6 +2855,10 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			reply: { content: [{ type: "text", text: "The preference was looked up." }] },
 		},
 	);
+	// The owner's transcript recall worker starts eagerly (OKF, retrieval enabled); its ready answer is witnessed so every
+	// history read below is admitted against a ready index, never one still loading.
+	const recallThreads = world.guard.threads;
+	const recallReady = recallThreads.onResponse("r50-recall-ready", "ready", () => true);
 	const memoryOwner = await world.createRootSession("root", {
 		sessionManager: world.createSessionManager(),
 		systemOneEnabled: false,
@@ -2862,6 +2895,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	});
 	await memoryOwner.session.bindExtensions({ uiContext: world.humanInput.ui });
 	const memorySession = memoryOwner.session;
+	await withDeadline(trace, "memory transcript recall ready", recallReady);
 	await withDeadline(trace, "memory secret turn", memorySession.prompt(memorySecretQuery));
 	trace.mark("root", "memory.secret");
 	expect(world.provider.reached, "the secret turn reached the root boundary").toContain("root:memory-secret-reply");
@@ -2885,6 +2919,117 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		memorySession.getMemoryRetrievalReport().providerReports.find((report) => report.providerId === memoryProviderId),
 		"the normal query is reported as queried with no rejection",
 	).toMatchObject({ status: "queried", rejectionReasons: [], resultCount: 0 });
+	// R50, transcript recall worker faults on the same owner. Control: the normal turn's unheld history read was answered.
+	expect(
+		memorySession
+			.getMemoryRetrievalReport()
+			.providerReports.find((report) => report.providerId === TRANSCRIPT_MEMORY_PROVIDER_ID)?.status,
+		"the unheld history read of the normal turn is answered and reported as queried",
+	).toBe("queried");
+	world.faultMatrix.witness("R50", { control: true });
+	// Hang: the worker's answer to the next history read is held at its port, so the parent's foreground bound
+	// (TRANSCRIPT_FOREGROUND_READ_MS, 1000 ms) expires first. The worker stays up; the late answer settles nothing.
+	const recallHangQuery = "Recall the deploy window chosen for this project.";
+	// Crash: the worker's answer to the read after it cannot be cloned onto the port. A send that throws is transport loss: the
+	// processor ends the thread through its uncaught-error path (error, then exit 1), as a real port's DataCloneError does.
+	const recallCrashQuery = "Recall the release owner named for this project.";
+	const recallQuery = (request: unknown): unknown =>
+		typeof request === "object" && request !== null ? Reflect.get(request, "query") : undefined;
+	const recallRequestId = (message: unknown): unknown =>
+		typeof message === "object" && message !== null ? Reflect.get(message, "requestId") : undefined;
+	const transcriptReport = () =>
+		memorySession
+			.getMemoryRetrievalReport()
+			.providerReports.find((report) => report.providerId === TRANSCRIPT_MEMORY_PROVIDER_ID);
+	const extensionReport = () =>
+		memorySession.getMemoryRetrievalReport().providerReports.find((report) => report.providerId === memoryProviderId);
+	world.provider.enqueue(
+		"root",
+		{
+			name: "memory-recall-hang-reply",
+			check: (request) => {
+				if (!requestTexts(request).some((entry) => entry.includes(recallHangQuery)))
+					throw new Error("the third root request is not the held-recall turn");
+			},
+			reply: { content: [{ type: "text", text: "The history read gave up on its bound." }] },
+		},
+		{
+			name: "memory-recall-crash-reply",
+			check: (request) => {
+				if (!requestTexts(request).some((entry) => entry.includes(recallCrashQuery)))
+					throw new Error("the fourth root request is not the lost-transport turn");
+			},
+			reply: { content: [{ type: "text", text: "The history worker stopped." }] },
+		},
+	);
+	const recallWarningMark = world.warnings.length;
+	const recallHang = recallThreads.holdNextResponse(
+		"r50-hang",
+		"result",
+		(_response, request) => recallQuery(request) === recallHangQuery,
+	);
+	await withDeadline(trace, "memory held-recall turn", memorySession.prompt(recallHangQuery));
+	const recallHeld = await withDeadline(trace, "memory held recall answer reached", recallHang.reached);
+	const hangStatus = memorySession.getTranscriptHistoryStatus();
+	expect(transcriptReport(), "the held history read fails the turn's transcript slot with its bound").toMatchObject({
+		status: "failed",
+		resultCount: 0,
+		error: "unavailable: Transcript read request timed out after 1000 ms.",
+	});
+	expect(hangStatus.latestRetrieval?.error, "the operator status carries the same timeout cause").toBe(
+		transcriptReport()?.error,
+	);
+	expect(hangStatus.transport?.readTimeouts?.count, "the held read is the one read that timed out").toBe(1);
+	expect(hangStatus.transport?.stoppedAt, "a timed-out read does not stop the worker").toBeUndefined();
+	expect(hangStatus.availability, "the worker that is slow on one read stays the active index").toBe("active");
+	expect(extensionReport()?.status, "the held history read does not fail the other provider of the turn").toBe(
+		"queried",
+	);
+	const recallLate = recallThreads.onResponse(
+		"r50-late",
+		"result",
+		(response) => recallRequestId(response) === recallRequestId(recallHeld),
+	);
+	recallHang.release();
+	await withDeadline(trace, "memory late recall answer delivered", recallLate);
+	const lateStatus = memorySession.getTranscriptHistoryStatus();
+	expect(lateStatus.transport?.readTimeouts?.count, "the late answer settles no read and adds no timeout").toBe(1);
+	expect(lateStatus.transport?.stoppedAt, "the late answer does not stop the worker").toBeUndefined();
+	expect(lateStatus.availability, "the index stays active after the late answer").toBe("active");
+	recallThreads.replaceNextResult(
+		"r50-crash",
+		"result",
+		(_response, request) => recallQuery(request) === recallCrashQuery,
+		Symbol("r50-uncloneable"),
+	);
+	await withDeadline(trace, "memory lost-transport turn", memorySession.prompt(recallCrashQuery));
+	const crashStatus = memorySession.getTranscriptHistoryStatus();
+	expect(crashStatus.availability, "the worker whose transport was lost is no longer an index").toBe("unavailable");
+	expect(
+		crashStatus.unavailableReason?.startsWith(
+			"Transcript recall worker error: transcript recall worker could not deliver a 'result' response: ",
+		),
+		"the stopped worker's cause names the undeliverable answer, not a timeout",
+	).toBe(true);
+	expect(transcriptReport(), "the lost-transport read settles the turn's transcript slot as failed").toMatchObject({
+		status: "failed",
+		resultCount: 0,
+	});
+	expect(transcriptReport()?.error, "the read settles once, with the stopped worker's real cause").toBe(
+		`unavailable: ${crashStatus.unavailableReason}`,
+	);
+	expect(crashStatus.transport?.stoppedAt, "the stopped worker records when it stopped").toEqual(expect.any(String));
+	expect(crashStatus.transport?.readTimeouts?.count, "the lost-transport read did not time out").toBe(1);
+	expect(extensionReport()?.status, "the stopped worker does not fail the other provider of the turn").toBe("queried");
+	expect(memorySearches, "each recall turn reached the extension provider exactly once").toEqual([
+		memoryNormalQuery,
+		recallHangQuery,
+		recallCrashQuery,
+	]);
+	expect(world.warnings.slice(recallWarningMark), "the worker faults disclose nothing on the warning path").toEqual(
+		[],
+	);
+	world.faultMatrix.witness("R50", { control: false });
 	expect(await world.disposeSessionInBody(memorySession), "the memory gate owner disposes cleanly").toBeUndefined();
 	trace.mark("root", "memory.gate");
 }

@@ -76,19 +76,14 @@ const rows: readonly FaultMatrixRow[] = [
 		id: "R2",
 		owner: "core/delegation/worker-write-reservation-coordinator.ts",
 		journey: 1,
-		phase: "write-reservations E13",
+		phase: "write-reservations E13/E13A",
 		fault: "the owner process dies holding its exact lease",
 		witness: "the recovery entrance releases the exact old reservation from the durable store",
-		control: NONE,
+		control:
+			"a second owner's recovery entrance probes the live E13A owner pid with signal 0 and keeps its exact reservation durable",
 		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "control",
-				detail:
-					"no journey asserts that a live owner's lease probed with signal 0 is kept; E13R's live owner is a local conflict",
-			},
-		],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R3",
@@ -110,16 +105,12 @@ const rows: readonly FaultMatrixRow[] = [
 		fault: "the reservation observer close fails at teardown",
 		witness:
 			"the failed observer close keeps its native registration; the retained observer is cut off after the proof",
-		control: NONE,
+		// E13W now asserts more than one observer: the cwd and its filesystem root are distinct host workspaces, each watched.
+		control:
+			"the second host-workspace observer of the E13W teardown closes with no fault; only the faulted first remains",
 		estSeconds: 0.5,
-		status: "open",
-		needs: [
-			{
-				kind: "control",
-				detail:
-					"E13W asserts at least one observer, so a second observer that closes cleanly is not certain to exist",
-			},
-		],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R5",
@@ -221,21 +212,15 @@ const rows: readonly FaultMatrixRow[] = [
 	},
 	{
 		id: "R10s",
-		owner: "core/memory/continuous-chat-work-queue.ts",
+		owner: "core/memory/continuous-chat-runtime.ts",
 		journey: 1,
-		phase: "continuous-chat I3",
+		phase: "continuous-chat turn retry spacing",
 		fault: "the leaf retry backoff spacing",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 0.3,
-		status: "open",
-		needs: [
-			{
-				kind: "extension",
-				extension: "X1",
-				detail: "the census files the leaf retry spacing under X1; its delay is not asserted on virtual time",
-			},
-		],
+		witness: "the waiting turn retries its failed leaf after 1 s, then 2 s, and its third attempt opens the turn",
+		control: "a leaf that fails with no turn waiting arms no retry alarm",
+		estSeconds: 1,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R11",
@@ -421,20 +406,18 @@ const rows: readonly FaultMatrixRow[] = [
 	{
 		id: "owner-input-kept-submit",
 		owner: "core/prompt-submission-controller.ts",
-		journey: 1,
-		phase: "owner-lifecycle compaction queue",
+		journey: 2,
+		phase: "queued-recovery kept input",
 		fault: "a kept input submitted after compaction, and a submission that became queued while its preemption awaited",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"each kept input runs as its own turn once, and the late-queued follow-up is delivered once after the leading turn",
+		control:
+			"a kept input taken back submits nothing, and a follow-up submitted while the turn is in flight is pending from its submission",
+		// One fresh owner, five plain turns.
 		estSeconds: 2,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"no journey submits a kept input (`heldInput`: resubmit, takeKept, taken back first) or reaches the late-queued registration before the tail wait",
-			},
-		],
+		status: "covered",
+		// The owner runs System One off in its own binding, so both world modes run the witness and the control.
+		modes: BOTH,
 	},
 	{
 		id: "goal-execution-submission-release",
@@ -467,15 +450,16 @@ const rows: readonly FaultMatrixRow[] = [
 	},
 	{
 		id: "R17",
-		owner: "core/reload-blockers.ts",
+		owner: "core/foreground-recovery-controller.ts",
 		journey: 1,
-		phase: "intent-and-branching",
+		phase: "intent-and-branching E4",
 		fault: "navigation while a run is active",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"a navigation while the run owns the history is refused with the exact text, and the leaf and entries are unchanged",
+		control: "the idle navigation moves the tree to the owner parent",
 		estSeconds: 1,
-		status: "open",
-		needs: [{ kind: "extension", extension: "X6", detail: "a run-active navigation probe" }],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R18",
@@ -628,19 +612,13 @@ const rows: readonly FaultMatrixRow[] = [
 		id: "R28",
 		owner: "core/delegation/worker-lease-heartbeat.ts",
 		journey: 2,
-		phase: "continuous-chat",
+		phase: "background-and-stall lease renewal",
 		fault: "the lease renewal fails while running",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 0.5,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"the renewal is the worker-lease owner and the lease deadline is checked on orchestration: advancing orchestration past the TTL, then worker-lease by its interval, fails the renewal; no journey does it and asserts the lane abort",
-			},
-		],
+		witness: "the failed renewal aborts the lane, cancelled as worker_delegation_error, and wakes the root once",
+		control: "a heartbeat inside the lease renews it, re-arms, warns nothing and keeps the worker running",
+		estSeconds: 2,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R29",
@@ -695,14 +673,16 @@ const rows: readonly FaultMatrixRow[] = [
 	{
 		id: "R33",
 		owner: "core/delegation/managed-lane-controller.ts",
-		journey: 2,
-		phase: "orchestration",
+		journey: 1,
+		// The owner runs System One off in its own binding and its own agent directory, so both world modes run both marks.
+		phase: "worker-budgets R33",
 		fault: "a legacy managed lane is adopted",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 1,
-		status: "open",
-		needs: [{ kind: "extension", extension: "X8", detail: "a legacy managed-lane fixture" }],
+		witness:
+			"the first lane read adopts the running legacy tmux-worker snapshot as one running managed lane with its own reload blocker",
+		control: "the terminal legacy snapshot of the same branch is not adopted",
+		estSeconds: 0.5,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R34",
@@ -804,19 +784,13 @@ const rows: readonly FaultMatrixRow[] = [
 		id: "R39",
 		owner: "core/goals/goal-auto-continue-controller.ts",
 		journey: 2,
-		phase: "orchestration",
+		phase: "background-and-stall goal auto-continue",
 		fault: "the goal auto-continue timer fires",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 0.5,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"the continuation delay is the goal-continuation owner and advancing it fires the wake; no journey arms a continuation and asserts the pass it starts",
-			},
-		],
+		witness: "the fired wake runs one pass on the active goal, whose charge stops the goal with nothing armed",
+		control: "the wake does not fire before its delay and no pass is submitted",
+		estSeconds: 1,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R40",
@@ -840,7 +814,14 @@ const rows: readonly FaultMatrixRow[] = [
 		control: NONE,
 		estSeconds: 1,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X9", detail: "eviction-driven retention" }],
+		needs: [
+			{
+				kind: "extension",
+				extension: "X9",
+				detail:
+					"eviction needs 65 terminal tool tasks in one session (MAX_RETAINED_TERMINAL_TASKS = 64 in background-tool-task-controller.ts, pruneTerminalTasks): an optional maxRetainedTerminalTasks on BackgroundToolTaskControllerDeps (default 64), threaded through createSessionBackgroundToolTasks, the AgentSession config and CreateAgentSessionOptions and set to 1 by the world; then one owner hands off two tool tasks whose output exceeds MAX_INLINE_OUTPUT_BYTES and asserts tool_task wait on the evicted first returns its saved record (loadRetiredTerminalRecord) whose artifact reads back, with the retained second's wait answered from the cache as control",
+			},
+		],
 	},
 	{
 		id: "R41",
@@ -984,19 +965,17 @@ const rows: readonly FaultMatrixRow[] = [
 		id: "R48s",
 		owner: "core/session-semantic-plane-controller.ts",
 		journey: 1,
-		phase: "owner-lifecycle SQLite",
-		fault: "a decision ledger that fails to open inside a live session stays unavailable for the session",
-		witness: NONE,
-		control: NONE,
+		phase: "owner-lifecycle ledger owners",
+		fault: "a decision ledger whose open meets a busy database inside a live session",
+		witness:
+			"each use of the ledger while the database is busy retries the open; the first use after the database clears opens the ledger",
+		control:
+			"the permanently failed ledger is not opened again while the database is busy; the permanently failed ledger stays unavailable for its session after the database clears",
+		// Two fresh owners, no turn: the faults are armed across their creation while no other session is live.
 		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"getDecisionLedger caches decisionLedgerFailure and never constructs again, so a busy or locked open (after the 5 s busy_timeout) is as permanent as a missing driver; no journey fails the ledger open inside a live session and asserts a later ledger use",
-			},
-		],
+		status: "covered",
+		// The owners run System One off in their own binding, so both world modes run the witness and the control.
+		modes: BOTH,
 	},
 	{
 		id: "R49",
@@ -1015,14 +994,34 @@ const rows: readonly FaultMatrixRow[] = [
 	{
 		id: "R50",
 		owner: "core/memory/providers/transcript-recall.ts",
-		journey: 3,
-		phase: "continuous-chat",
-		fault: "a worker thread crashes or hangs (transcript recall, tool recovery log)",
+		journey: 1,
+		// The memory gate owner runs System One off in its own binding, so both world modes run the witness and the control.
+		phase: "write-reservations memory gate",
+		fault: "the transcript recall worker hangs on a read, then loses its transport while answering one",
+		witness:
+			"the held read times out at its 1000 ms bound with the worker still active and the late answer settles nothing; the undeliverable answer stops the worker and its read settles once with that cause",
+		control: "the normal turn's unheld history read is answered and reported as queried",
+		estSeconds: 1.5,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "R50l",
+		owner: "core/tool-recovery-logger.ts",
+		journey: 1,
+		phase: "write-reservations memory gate",
+		fault: "the tool recovery log worker crashes or hangs on a batch",
 		witness: NONE,
 		control: NONE,
 		estSeconds: 1,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X7", detail: "use of the dormant worker-thread fault hooks" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"the world's worker hooks can hold or make uncloneable the worker's 'ack' (holdNextResponse/replaceNextResult), but no journey runs a root tool failure whose record reaches the logger and then asserts its stats (formatToolRepairHealthReport: crashes, dropped, respawns, workerStarts) after the crash, the respawned worker's acknowledged batch as control, or the bounded flush at disposal past a held ack",
+			},
+		],
 	},
 	{
 		id: "E13R",

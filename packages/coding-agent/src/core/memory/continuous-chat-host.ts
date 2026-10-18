@@ -8,6 +8,7 @@
 import { existsSync } from "node:fs";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionEntriesPersistedEvent } from "../../kernel/session/session-manager.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import type { ContinuousChatCompactionAdapterPort } from "./continuous-chat-compaction-adapter.ts";
 import { ContinuousChatIngestor } from "./continuous-chat-ingest.ts";
 import { type ContinuousChatLegacySource, importContinuousChatLegacyHistory } from "./continuous-chat-legacy-import.ts";
@@ -39,6 +40,8 @@ export interface ContinuousChatHostPorts {
 	/** The session's entry ids in order, and whether each one is durably written to the session file. */
 	entryIds(): readonly string[];
 	isEntryPersisted(entryId: string): boolean;
+	/** The runtime's timers: a waiting turn's retry alarm and the work-claim release backoff. Absent: the system's. */
+	timers?: TimerPort;
 }
 
 export interface ContinuousChatHostOptions extends ContinuousChatHostPorts {
@@ -135,6 +138,7 @@ export class ContinuousChatHost {
 			prefixHead: () => options.prefixHead(),
 			warn: options.warn,
 			label: options.sessionId,
+			...(options.timers !== undefined ? { timers: options.timers } : {}),
 		});
 		try {
 			const sessionLedger = createContinuousChatSessionLedger(runtime.store.rootDir);

@@ -4,6 +4,7 @@ import { expect } from "vitest";
 import { AuthStorage } from "../../../../src/core/auth-storage.ts";
 import { CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES } from "../../../../src/core/memory/continuous-chat-index.ts";
 import { CONTINUOUS_CHAT_SYSTEM_PROMPT } from "../../../../src/core/memory/continuous-chat-prompt.ts";
+import { fail, type ScriptedRequest, type ScriptStep } from "../scripted-provider.ts";
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 
 /**
@@ -363,6 +364,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		});
 		world.faultMatrix.witness("R10", { control: false });
 		expect(await world.disposeSessionInBody(icmRoot.session), "the ICM root disposes cleanly").toBeUndefined();
+		await verifyTurnRetrySpacing(world, `${icmAgentDir}-r10s`);
 
 		const r5ProviderId = "r5-oauth-401";
 		const r5AuthPath = `${icmAgentDir}-r5-auth.json`;
@@ -414,4 +416,151 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 	} finally {
 		world.io.rmSync(icmLongPath, { force: true });
 	}
+}
+
+/** The scripted outage every failed attempt of the R10s leaf meets. */
+const R10S_UNAVAILABLE = "HTTP 503 Service Unavailable: upstream overloaded";
+/** How the adapter fails the leaf once both of an attempt's requests met the outage. */
+const R10S_STOPPED = `Continuous-chat compaction stopped (error): ${R10S_UNAVAILABLE}`;
+
+/**
+ * R10s: a turn waiting on a failed leaf retries it on its own alarm, 1 s then 2 s, on a fresh chat whose only leaf
+ * that needs the summary model is message 1. Each attempt of that leaf costs two worker-c requests: the adapter sends
+ * once more at once after an error reply. The control: the same failure with no waiting turn arms nothing. Each alarm
+ * is also advanced to 1 ms before its delay first, where it must not fire.
+ */
+async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Promise<void> {
+	const trace = world.trace;
+	const label = "r10s";
+	const failedLine = `Continuous-chat compaction 1+1 failed: ${R10S_STOPPED}`;
+	const longReply = `R10S-SPACING-${"s".repeat(600)}`;
+	const leafTask = (request: ScriptedRequest): void => {
+		if (!JSON.stringify(request.context.messages).includes("R10S-SPACING-")) {
+			throw new Error("worker-c did not receive the R10s leaf task");
+		}
+	};
+	const unavailable = (name: string): ScriptStep => ({
+		...fail(`${label}-${name}`, R10S_UNAVAILABLE),
+		check: leafTask,
+	});
+	const workerSteps = (mark: number): string[] =>
+		world.provider.reached.slice(mark).filter((step) => step.startsWith("worker-c:"));
+	const root = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		settings: icmContinuousSettings(),
+	});
+	const store = icmContinuousStore(agentDir);
+
+	// Turn A logs message 0 (an exact leaf) and message 1, whose leaf fails with no turn waiting on it.
+	const warningMark = world.warnings.length;
+	const reachedMark = world.provider.reached.length;
+	world.provider.enqueue("worker-c", unavailable("idle-a"), unavailable("idle-b"));
+	world.provider.enqueue("root", {
+		name: `${label}-turn-a`,
+		reply: { content: [{ type: "text", text: longReply }] },
+	});
+	world.systemOne.enterPhase(`${label}-turn-a`, ICM_INTAKE_JUDGMENTS);
+	await withDeadline(trace, "R10s turn A", root.session.prompt("Record the R10s spacing reply."));
+	await withDeadline(
+		trace,
+		"R10s leaf 1 blocked",
+		world.io.waitForMutation(() => {
+			const raw = world.io.peekFile(store.queueFile);
+			if (raw === undefined) return false;
+			const { queue } = JSON.parse(raw) as {
+				readonly queue: {
+					readonly running: readonly unknown[];
+					readonly readyLeaves: readonly unknown[];
+					readonly blocked: readonly unknown[];
+				};
+			};
+			return queue.running.length === 0 && queue.readyLeaves.length === 0 && queue.blocked.length === 1;
+		}),
+		60_000,
+	);
+	expect(
+		{
+			armed: world.timers.armedDelays("continuous-chat"),
+			steps: workerSteps(reachedMark),
+			warnings: world.warnings.slice(warningMark),
+		},
+		"a leaf that fails with no turn waiting arms no retry alarm",
+	).toEqual({
+		armed: [],
+		steps: [`worker-c:${label}-idle-a`, `worker-c:${label}-idle-b`],
+		warnings: [failedLine],
+	});
+	world.faultMatrix.witness("R10s", { control: true });
+
+	// Turn B waits on leaf 1: its arrival retries the leaf, then each failure arms the next alarm until one succeeds.
+	const turnMark = world.provider.reached.length;
+	world.provider.enqueue(
+		"worker-c",
+		unavailable("arrival-a"),
+		unavailable("arrival-b"),
+		unavailable("first-alarm-a"),
+		unavailable("first-alarm-b"),
+		{
+			name: `${label}-second-alarm`,
+			check: leafTask,
+			reply: { content: [{ type: "text", text: "pi: R10s spacing reply." }] },
+		},
+	);
+	world.provider.enqueue("root", { name: `${label}-turn-b`, reply: { content: [{ type: "text", text: "Done." }] } });
+	const waits: string[] = [];
+	const unsubscribe = root.session.subscribe((event) => {
+		if (event.type === "continuous_chat_prefix_wait") {
+			waits.push(`${event.phase} ${event.built}/${event.needed}/${event.failed}`);
+		}
+	});
+	let settled = false;
+	world.systemOne.enterPhase(`${label}-turn-b`, ICM_INTAKE_JUDGMENTS);
+	const turnB = root.session.prompt("Answer after the R10s retries.").finally(() => {
+		settled = true;
+	});
+	const firstDelay = await withDeadline(trace, "R10s first alarm", world.timers.whenArmed("continuous-chat"));
+	const firstEarly = world.timers.advance("continuous-chat", firstDelay - 1);
+	const secondArm = world.timers.nextArmed("continuous-chat");
+	const firstFired = world.timers.advance("continuous-chat", 1);
+	const secondDelay = await withDeadline(trace, "R10s second alarm", secondArm);
+	const secondEarly = world.timers.advance("continuous-chat", secondDelay - 1);
+	const settledBeforeLastAlarm = settled;
+	const secondFired = world.timers.advance("continuous-chat", 1);
+	await withDeadline(trace, "R10s turn B", turnB);
+	unsubscribe();
+	await icmWaitForChatIdle(world, agentDir, 4);
+	expect(
+		{
+			delays: [firstDelay, secondDelay],
+			fired: [firstEarly, firstFired, secondEarly, secondFired],
+			settledBeforeLastAlarm,
+			armed: world.timers.armedDelays("continuous-chat"),
+			firstWait: waits[0],
+			lastWait: waits.at(-1),
+			ends: waits.filter((wait) => wait.startsWith("end ")).length,
+			steps: workerSteps(turnMark),
+			warnings: world.warnings.slice(warningMark),
+		},
+		"the waiting turn retries its failed leaf after 1 s, then 2 s, and its third attempt opens the turn",
+	).toEqual({
+		delays: [1_000, 2_000],
+		fired: [0, 1, 0, 1],
+		settledBeforeLastAlarm: false,
+		armed: [],
+		firstWait: "start 0/1/0",
+		lastWait: "end 1/1/0",
+		ends: 1,
+		steps: [
+			`worker-c:${label}-arrival-a`,
+			`worker-c:${label}-arrival-b`,
+			`worker-c:${label}-first-alarm-a`,
+			`worker-c:${label}-first-alarm-b`,
+			`worker-c:${label}-second-alarm`,
+		],
+		warnings: [failedLine, failedLine, failedLine],
+	});
+	world.faultMatrix.witness("R10s", { control: false });
+	expect(await world.disposeSessionInBody(root.session), "the R10s root disposes cleanly").toBeUndefined();
+	trace.mark("root", "icm.r10s-turn-retry-spacing");
 }

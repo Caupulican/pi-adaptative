@@ -2228,4 +2228,64 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		"an execution that honours its cancellation settles inside the shutdown grace",
 	).toEqual({ armedDelay: 5000, fired: 0, failures: [], disposed: true, runningTaskIds: [] });
 	world.faultMatrix.witness("R22", { control: true });
+
+	// R48s, a decision ledger whose open meets a busy database inside a live session. Two fresh owners (System One off in their
+	// own binding, so they ask no judgment) are the only live sessions, so only their ledger opens meet the scripted faults armed
+	// across their creation. A non-busy open failure is permanent for its session: its owner reports it and never opens again, even
+	// while the busy denial is armed (the normal-order control). While the database is busy, each use of the other owner's ledger
+	// retries the open and reports node:sqlite's busy text; once it clears, the next use opens the ledger with one handle.
+	const LEDGER_SCHEMA = "CREATE TABLE IF NOT EXISTS ledger_meta";
+	const PERMANENT_LEDGER_FAILURE = `Scripted SQLite exec failure: ${LEDGER_SCHEMA}`;
+	expect(world.sessions.length, "no other owner is live to meet the ledger faults").toBe(0);
+	world.guard.failNextSqliteOperation("exec", LEDGER_SCHEMA);
+	const permanentOwner = (
+		await world.createRootSession("root", { agentDir: `${world.agentDir}-ledger-permanent`, systemOneEnabled: false })
+	).session;
+	expect(
+		{ opened: permanentOwner.getDecisionLedger() !== undefined, failure: permanentOwner.getDecisionLedgerFailure() },
+		"the non-busy open failure is the scripted one",
+	).toEqual({ opened: false, failure: PERMANENT_LEDGER_FAILURE });
+	const ledgerBusy = world.guard.denySqliteUntilCleared({
+		name: "r48s-ledger-busy",
+		operation: "exec",
+		sql: LEDGER_SCHEMA,
+		result: "busy",
+	});
+	const busyOwner = (
+		await world.createRootSession("root", { agentDir: `${world.agentDir}-ledger-busy`, systemOneEnabled: false })
+	).session;
+	// Synchronous from here to the clear: each use is judged by the busy opens it adds.
+	const ledgerUse = (owner: typeof busyOwner) => {
+		const hitsBefore = ledgerBusy.hits;
+		const opened = owner.getDecisionLedger() !== undefined;
+		return { opened, failure: owner.getDecisionLedgerFailure(), busyOpens: ledgerBusy.hits - hitsBefore };
+	};
+	const handlesWhileBusy = world.guard.openSqliteHandles();
+	expect(
+		ledgerUse(permanentOwner),
+		"the permanently failed ledger is not opened again while the database is busy",
+	).toEqual({ opened: false, failure: PERMANENT_LEDGER_FAILURE, busyOpens: 0 });
+	expect(
+		[ledgerUse(busyOwner), ledgerUse(busyOwner)],
+		"each use of the ledger while the database is busy retries the open",
+	).toEqual([
+		{ opened: false, failure: "database is locked", busyOpens: 1 },
+		{ opened: false, failure: "database is locked", busyOpens: 1 },
+	]);
+	expect(world.guard.openSqliteHandles(), "no busy open leaves a handle").toEqual(handlesWhileBusy);
+	ledgerBusy.clear();
+	expect(
+		{ ...ledgerUse(busyOwner), handlesAdded: world.guard.openSqliteHandles().length - handlesWhileBusy.length },
+		"the first use after the database clears opens the ledger",
+	).toEqual({ opened: true, failure: undefined, busyOpens: 0, handlesAdded: 1 });
+	world.faultMatrix.witness("R48s", { control: false });
+	expect(
+		ledgerUse(permanentOwner),
+		"the permanently failed ledger stays unavailable for its session after the database clears",
+	).toEqual({ opened: false, failure: PERMANENT_LEDGER_FAILURE, busyOpens: 0 });
+	world.faultMatrix.witness("R48s", { control: true });
+	expect(
+		[await world.disposeSessionInBody(permanentOwner), await world.disposeSessionInBody(busyOwner)],
+		"both ledger owners dispose cleanly",
+	).toEqual([undefined, undefined]);
 }

@@ -30,6 +30,7 @@ import {
 	backgroundTaskIdOf,
 	bundleEntries,
 	crashCutChecks,
+	currentRequestCarries,
 	expectOwnerWords,
 	handoffFor,
 	LIMITS_PATH,
@@ -820,6 +821,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		"the queued-context guard refuses A's busy lease",
 	).toBe(true);
 	expect(await world.disposeSessionInBody(e7Fresh.session), "the recovered owner disposes cleanly").toBeUndefined();
+	await keptAndLateQueuedSubmissions(world);
 	// R21, System One off (the background start and the wake turn ask on-mode questions no reading of this phase derives): a crash
 	// cut while a background task is running. An auxiliary root starts a held echo in the background and goes idle, and its session
 	// file, which records the task running, is captured. The disposal cancels the running task and records it canceled, its wake-up
@@ -931,6 +933,166 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		expect(await world.disposeSessionInBody(r21Fresh.session), "the R21 next root disposes cleanly").toBeUndefined();
 		await workerHandoffAcrossRestart(world);
 	}
+}
+
+/**
+ * owner-input-kept-submit, on a fresh owner with System One off in its own binding (no judgment is asked in either world mode).
+ * The owner keeps input the way the interactive queue keeps what the owner submits while compaction runs, and submits it after, as
+ * that queue's flush does (`prompt` with `heldInput`). A kept follow-up submitted with its mode on an idle owner leaves its kept
+ * entry, is pending again as the submission (resubmit) and runs as its own turn once; a kept input submitted with no mode (the
+ * extension-command path) leaves the queue at submission (takeKept) and runs as its own turn once. A follow-up submitted in the
+ * same tick as a prompt on the idle owner is not busy at its submission, so it is not queued there; the prompt takes the
+ * foreground while the follow-up's preemption is awaited, and the follow-up is pending from then (the late-queued registration)
+ * and is delivered once after the prompt's turn. Controls: a kept input the owner took back before its submission submits
+ * nothing and is withdrawn, and a follow-up submitted while a turn holds its provider gate is pending from its submission.
+ */
+async function keptAndLateQueuedSubmissions(world: HarnessWorld): Promise<void> {
+	const trace = world.trace;
+	expect(world.provider.getPendingStepNames("root"), "no earlier root step is left pending").toEqual([]);
+	const owner = (
+		await world.createRootSession("root", { agentDir: `${world.agentDir}-kept-submit`, systemOneEnabled: false })
+	).session;
+	const KEPT_FOLLOW_UP = "Kept follow-up submitted after compaction.";
+	const KEPT_PLAIN = "Kept input submitted with no queue mode.";
+	const TAKEN_BACK = "Kept input the owner took back.";
+	const LEADING_PROMPT = "Prompt that takes the foreground first.";
+	const LATE_FOLLOW_UP = "Follow-up queued while its preemption was awaited.";
+	const HELD_PROMPT = "Prompt whose turn holds its provider gate.";
+	const BUSY_FOLLOW_UP = "Follow-up submitted while the turn is in flight.";
+	const verdicts: Array<{ words: string; accepted: boolean; state: string | undefined }> = [];
+	const verdictFor = (words: string) => (accepted: boolean, ended?: { readonly state: string }) => {
+		verdicts.push({ words, accepted, state: ended?.state });
+	};
+	// How many user messages of the transcript carry the words: one per delivery.
+	const deliveries = (words: string): number => {
+		const users = owner.messages.flatMap((message) => (message.role === "user" ? [message.content] : []));
+		return users.filter((content) => JSON.stringify(content).includes(words)).length;
+	};
+	const turnOf = (name: string, words: string, check?: () => void) => ({
+		name,
+		check: (request: ScriptedRequest) => {
+			if (!currentRequestCarries(request, words)) throw new Error(`${name}: the request does not carry ${words}`);
+			check?.();
+		},
+		reply: { content: [{ type: "text" as const, text: `${name} done.` }] },
+	});
+
+	// A kept follow-up, submitted with its mode once the owner is idle.
+	const keptFollowUp = owner.keepQueuedInput("followUp", KEPT_FOLLOW_UP);
+	expect(
+		{ followUp: owner.getFollowUpMessages(), deliverable: owner.deliverablePendingMessageCount },
+		"the kept follow-up is pending and held",
+	).toEqual({ followUp: [KEPT_FOLLOW_UP], deliverable: 0 });
+	world.provider.enqueue("root", turnOf("kept-follow-up-turn", KEPT_FOLLOW_UP));
+	const keptFollowUpTurn = owner.prompt(KEPT_FOLLOW_UP, {
+		streamingBehavior: "followUp",
+		heldInput: keptFollowUp,
+		preflightResult: verdictFor(KEPT_FOLLOW_UP),
+	});
+	expect(
+		{ followUp: owner.getFollowUpMessages(), deliverable: owner.deliverablePendingMessageCount },
+		"the resubmitted follow-up is pending again as its submission",
+	).toEqual({ followUp: [KEPT_FOLLOW_UP], deliverable: 1 });
+	await withDeadline(trace, "kept follow-up turn", keptFollowUpTurn);
+	await withDeadline(trace, "kept follow-up settled", owner.waitForForegroundIdle());
+	// A kept input submitted with no queue mode.
+	const keptPlain = owner.keepQueuedInput("followUp", KEPT_PLAIN);
+	world.provider.enqueue("root", turnOf("kept-plain-turn", KEPT_PLAIN));
+	const keptPlainTurn = owner.prompt(KEPT_PLAIN, { heldInput: keptPlain, preflightResult: verdictFor(KEPT_PLAIN) });
+	expect(owner.getFollowUpMessages(), "the kept input leaves the queue at its submission").toEqual([]);
+	await withDeadline(trace, "kept plain turn", keptPlainTurn);
+	await withDeadline(trace, "kept plain settled", owner.waitForForegroundIdle());
+	// The late-queued registration: the follow-up is submitted in the same tick as the prompt, before it holds the foreground.
+	world.provider.enqueue(
+		"root",
+		turnOf("leading-turn", LEADING_PROMPT, () => {
+			if (!owner.getFollowUpMessages().includes(LATE_FOLLOW_UP)) {
+				throw new Error("the late follow-up is not pending during the leading turn");
+			}
+		}),
+		turnOf("late-follow-up-turn", LATE_FOLLOW_UP),
+	);
+	const leadingTurn = owner.prompt(LEADING_PROMPT);
+	const lateTurn = owner.prompt(LATE_FOLLOW_UP, {
+		streamingBehavior: "followUp",
+		preflightResult: verdictFor(LATE_FOLLOW_UP),
+	});
+	expect(owner.getFollowUpMessages(), "the same-tick follow-up is not queued at its submission").toEqual([]);
+	await withDeadline(trace, "leading and late turns", Promise.all([leadingTurn, lateTurn]));
+	await withDeadline(trace, "late follow-up settled", owner.waitForForegroundIdle());
+	expect(
+		{
+			verdicts,
+			deliveries: [KEPT_FOLLOW_UP, KEPT_PLAIN, LEADING_PROMPT, LATE_FOLLOW_UP].map(deliveries),
+			pending: owner.pendingMessageCount,
+			reached: world.provider.reached.slice(-4),
+		},
+		"each kept input runs as its own turn once, and the late-queued follow-up is delivered once after the leading turn",
+	).toEqual({
+		verdicts: [
+			{ words: KEPT_FOLLOW_UP, accepted: true, state: undefined },
+			{ words: KEPT_PLAIN, accepted: true, state: undefined },
+			{ words: LATE_FOLLOW_UP, accepted: true, state: undefined },
+		],
+		deliveries: [1, 1, 1, 1],
+		pending: 0,
+		reached: ["root:kept-follow-up-turn", "root:kept-plain-turn", "root:leading-turn", "root:late-follow-up-turn"],
+	});
+	world.faultMatrix.witness("owner-input-kept-submit", { control: false });
+
+	// Control: a kept input taken back before its submission submits nothing.
+	const takenBack = owner.keepQueuedInput("followUp", TAKEN_BACK);
+	expect(owner.takeAllQueuedInput().followUp, "the owner takes the kept input back").toEqual([{ text: TAKEN_BACK }]);
+	const reachedBeforeTakenBack = world.provider.reached.length;
+	await withDeadline(
+		trace,
+		"taken-back submission",
+		owner.prompt(TAKEN_BACK, {
+			streamingBehavior: "followUp",
+			heldInput: takenBack,
+			preflightResult: verdictFor(TAKEN_BACK),
+		}),
+	);
+	// Control: a follow-up submitted while a turn holds its provider gate is pending from its submission.
+	const heldGate = createBarrier();
+	const heldReached = createBarrier();
+	world.provider.enqueue(
+		"root",
+		{ ...turnOf("held-turn", HELD_PROMPT, () => heldReached.release()), gate: heldGate.promise },
+		turnOf("busy-follow-up-turn", BUSY_FOLLOW_UP),
+	);
+	const heldTurn = owner.prompt(HELD_PROMPT);
+	await withDeadline(trace, "held turn at its provider gate", heldReached.promise);
+	const busyTurn = owner.prompt(BUSY_FOLLOW_UP, {
+		streamingBehavior: "followUp",
+		preflightResult: verdictFor(BUSY_FOLLOW_UP),
+	});
+	const queuedAtSubmission = owner.getFollowUpMessages();
+	heldGate.release();
+	await withDeadline(trace, "held and busy turns", Promise.all([heldTurn, busyTurn]));
+	await withDeadline(trace, "busy follow-up settled", owner.waitForForegroundIdle());
+	expect(
+		{
+			takenBack: verdicts.find((verdict) => verdict.words === TAKEN_BACK),
+			takenBackDeliveries: deliveries(TAKEN_BACK),
+			reachedAfterTakenBack: world.provider.reached.slice(reachedBeforeTakenBack),
+			queuedAtSubmission,
+			busyVerdict: verdicts.find((verdict) => verdict.words === BUSY_FOLLOW_UP),
+			deliveries: [HELD_PROMPT, BUSY_FOLLOW_UP].map(deliveries),
+			pending: owner.pendingMessageCount,
+		},
+		"a kept input taken back submits nothing, and a follow-up submitted while the turn is in flight is pending from its submission",
+	).toEqual({
+		takenBack: { words: TAKEN_BACK, accepted: false, state: "withdrawn" },
+		takenBackDeliveries: 0,
+		reachedAfterTakenBack: ["root:held-turn", "root:busy-follow-up-turn"],
+		queuedAtSubmission: [BUSY_FOLLOW_UP],
+		busyVerdict: { words: BUSY_FOLLOW_UP, accepted: true, state: undefined },
+		deliveries: [1, 1],
+		pending: 0,
+	});
+	world.faultMatrix.witness("owner-input-kept-submit", { control: true });
+	expect(await world.disposeSessionInBody(owner), "the kept-input owner disposes cleanly").toBeUndefined();
 }
 
 /** The branch's worker terminal handoff posts that name `laneId`. */

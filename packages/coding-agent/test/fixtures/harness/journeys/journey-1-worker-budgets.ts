@@ -1,12 +1,14 @@
 import "../builtin-install.ts";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
+import { appendLaneRecordSnapshot } from "../../../../src/core/autonomy/session-lane-record.ts";
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import {
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationProfile,
 } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
+import { getInFlightWorkUnits } from "../../../../src/core/reload-blockers.ts";
 import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../../../../src/core/security/secret-text.ts";
 import { calls, createBarrier, fail } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
@@ -676,4 +678,63 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	);
 	expect(await world.disposeSessionInBody(hbSession), "the held bash owner disposes cleanly").toBeUndefined();
 	trace.mark("root", "e4.held-bash-reload");
+
+	// R33 (legacy managed lane adoption): a session branch written before managed lanes had a durable lifecycle carries tmux-worker lane
+	// snapshots and no orchestration record. The first lane read of its owner adopts each queued or running one into the durable lifecycle
+	// (provider "legacy", profile "legacy-managed-process") and registers its reload blocker; a terminal snapshot is history and is not
+	// adopted. The owner runs in its own agent directory, so the adopted lane's durable record and blocker never reach the shared scope.
+	const legacyAgentDir = `${world.agentDir}-legacy-lanes`;
+	const legacyManager = world.createSessionManager(legacyAgentDir);
+	appendLaneRecordSnapshot(legacyManager, {
+		laneId: "legacy-tmux-running",
+		type: "tmux-worker",
+		status: "running",
+		label: "Legacy external lane",
+	});
+	appendLaneRecordSnapshot(legacyManager, {
+		laneId: "legacy-tmux-done",
+		type: "tmux-worker",
+		status: "succeeded",
+		label: "Legacy finished lane",
+	});
+	expect(
+		getInFlightWorkUnits(legacyAgentDir),
+		"the legacy owner's agent directory starts with no in-flight work",
+	).toEqual([]);
+	const legacyMark = world.warnings.length;
+	const legacyOwner = (
+		await world.createRootSession("root", {
+			agentDir: legacyAgentDir,
+			sessionManager: legacyManager,
+			systemOneEnabled: false,
+		})
+	).session;
+	const legacyLanes = legacyOwner.getLaneRecords().filter((record) => record.type === "tmux-worker");
+	expect(
+		legacyLanes.map(({ laneId, status, profileId }) => ({ laneId, status, profileId })),
+		"the running legacy lane is adopted into the durable lifecycle as a running managed lane",
+	).toEqual([{ laneId: "legacy-tmux-running", status: "running", profileId: "legacy-managed-process" }]);
+	expect(
+		getInFlightWorkUnits(legacyAgentDir)
+			.filter((unit) => unit.kind === "lane")
+			.map((unit) => unit.label),
+		"the adopted lane registers exactly its own reload blocker",
+	).toEqual(["tmux:legacy-tmux-running"]);
+	world.faultMatrix.witness("R33", { control: false });
+	expect(
+		legacyLanes.some((record) => record.laneId === "legacy-tmux-done"),
+		"the terminal legacy snapshot is history: it is not adopted",
+	).toBe(false);
+	world.faultMatrix.witness("R33", { control: true });
+	expect(
+		legacyOwner
+			.getLaneRecords()
+			.filter((record) => record.type === "tmux-worker")
+			.map((record) => record.attemptId),
+		"a later lane read adopts nothing again: the same single durable attempt",
+	).toEqual(legacyLanes.map((record) => record.attemptId));
+	expect(await world.disposeSessionInBody(legacyOwner), "the legacy lane owner disposes cleanly").toBeUndefined();
+	expect(getInFlightWorkUnits(legacyAgentDir), "disposal releases the adopted lane's reload blocker").toEqual([]);
+	expect(world.warnings.slice(legacyMark), "the adoption discloses nothing").toEqual([]);
+	trace.mark("root", "r33.legacy-lane-adoption");
 }

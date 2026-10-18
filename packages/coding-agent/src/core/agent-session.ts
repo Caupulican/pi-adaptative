@@ -1254,6 +1254,7 @@ export class AgentSession {
 				readEntry: (entryId) => this.sessionManager.getEntry(entryId),
 				entryIds: () => this.sessionManager.getEntries().map((entry) => entry.id),
 				isEntryPersisted: (entryId) => this.sessionManager.isEntryPersisted(entryId),
+				timers: config.timers.port("continuous-chat"),
 			},
 			hierarchy: {
 				// The configured summary model resolves through the one lane-model boundary: configured and

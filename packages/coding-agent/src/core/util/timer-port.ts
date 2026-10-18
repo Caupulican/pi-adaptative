@@ -39,6 +39,8 @@ export {
  * - `branch-summary-retry`: the backoff between attempts of a tree navigation's branch summary request.
  * - `worktree-sync`: the backoff between rename attempts of a worktree store record replacement (epoch, landing
  *   transaction, lane registration) whose rename failed transiently.
+ * - `continuous-chat`: the alarm a turn waiting on failed chat leaves arms before each retry, and the backoff of the
+ *   chat's retained work-claim releases.
  */
 export type TimerOwner =
 	| "write-reservation"
@@ -55,7 +57,8 @@ export type TimerOwner =
 	| "compaction-retry"
 	| "worker-provider-retry"
 	| "branch-summary-retry"
-	| "worktree-sync";
+	| "worktree-sync"
+	| "continuous-chat";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */
 export interface TimerSource {

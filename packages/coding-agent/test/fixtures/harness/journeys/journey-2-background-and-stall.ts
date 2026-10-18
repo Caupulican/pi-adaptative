@@ -20,7 +20,7 @@ import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
  * The library's CJS export object is the one production's default import receives, so its functions
  * are rebound in place rather than through an ESM module mock.
  */
-import { assertBatchOk, backgroundTaskIdOf, handoffFor, requestTexts } from "./shared.ts";
+import { assertBatchOk, backgroundTaskIdOf, handoffFor, lastToolResultDetails, requestTexts } from "./shared.ts";
 
 export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -505,6 +505,273 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 		trace.mark("root", "e9-stall-objective");
 	}
 	await verifyGoalWorkerDeadlineAndQuietHandoff(world);
+	await verifyGoalAutoContinueWake(world);
+	await verifyWorkerLeaseRenewalFailure(world);
+}
+
+/**
+ * R39, both modes. An auxiliary root with System One off and the owner's continuation delay at its 60 s maximum starts a goal with
+ * no requirement and goes idle: the goal is active, so the idle scheduler arms its one continuation wake on the `goal-continuation`
+ * port at that delay, and the port's wall timer is far beyond the witness. Advancing the port by one millisecond less than the
+ * delay fires nothing and submits nothing (the control). The owner's budget leaves room for exactly one turn; advancing the last
+ * millisecond fires the wake, its pass reads the active goal, and its one turn's charge stops the goal as budget_limited with
+ * nothing armed and no warning (the fault).
+ */
+async function verifyGoalAutoContinueWake(world: HarnessWorld): Promise<void> {
+	const trace = world.trace;
+	const label = "r39-goal-auto-continue";
+	const WAKE_OWNER = "goal-continuation";
+	const GOAL = "Keep the retry limit documented.";
+	const DELAY_MS = 60_000;
+	const PASS_TOKENS = 2_000;
+	const agentDir = `${world.agentDir}-${label}`;
+	const created = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		systemOneEnabled: false,
+		settings: { memorySystem: "okf", autoLearn: { enabled: false }, autonomy: { goalAutoContinueDelayMs: DELAY_MS } },
+	});
+	const session = created.session;
+	world.systemOne.enterPhase(label, {});
+	const maxStallTurns = created.settingsManager.getAutonomySettings().maxStallTurns;
+	expect(
+		world.timers.armedDelays(WAKE_OWNER),
+		`${label}: no goal-continuation alarm is armed before the goal starts`,
+	).toEqual([]);
+	world.provider.enqueue(
+		"root",
+		calls(`${label}-start`, [
+			{ id: `${label}-goal-1`, name: "goal", arguments: { action: "start", goalId: "r39-goal", userGoal: GOAL } },
+		]),
+		{
+			name: `${label}-started`,
+			check: (request) => assertBatchOk(request, `${label}: the goal start`),
+			reply: { content: [{ type: "text", text: "The goal is started." }] },
+		},
+	);
+	const warningMark = world.warnings.length;
+	await withDeadline(trace, `${label} start turn`, session.prompt("Start the retry limit goal."), 90_000);
+	await withDeadline(trace, `${label} start settled`, session.waitForForegroundIdle(), 90_000);
+	// The owner's budget leaves room for exactly one continuation turn: the pass stops at its own charge.
+	const tokensUsed = session.getGoalStateSnapshot()?.tokensUsed ?? 0;
+	const edited = editPersistedGoal(session, { userGoal: GOAL, tokenBudget: tokensUsed + PASS_TOKENS });
+	expect(edited.ok, `${label}: the owner's budget edit is applied`).toBe(true);
+	expect(
+		{
+			continuation: session.getGoalRuntimeSnapshot({ maxStallTurns }).continuation.action,
+			armed: world.timers.armedDelays(WAKE_OWNER),
+		},
+		`${label}: the idle root holds one continuation wake at the owner's delay`,
+	).toEqual({ continuation: "continue", armed: [DELAY_MS] });
+	const passReached = createBarrier();
+	const seen: { action?: string; reasonCode?: string } = {};
+	world.provider.enqueue("root", {
+		name: `${label}-pass`,
+		check: () => {
+			const decision = session.getGoalRuntimeSnapshot({ maxStallTurns }).continuation;
+			seen.action = decision.action;
+			seen.reasonCode = decision.reasonCode;
+			passReached.release();
+		},
+		reply: {
+			content: [{ type: "text", text: "The retry limit stays documented." }],
+			usage: { ...createEmptyUsage(), output: PASS_TOKENS, totalTokens: PASS_TOKENS },
+		},
+	});
+	const passes = () => world.provider.reached.filter((name) => name === `root:${label}-pass`).length;
+	expect(
+		{ fired: world.timers.advance(WAKE_OWNER, DELAY_MS - 1), passes: passes() },
+		`${label}: the wake does not fire before its delay and no pass is submitted`,
+	).toEqual({ fired: 0, passes: 0 });
+	world.faultMatrix.witness("R39", { control: true });
+	expect(world.timers.advance(WAKE_OWNER, 1), `${label}: the last millisecond of the delay fires the wake`).toBe(1);
+	await withDeadline(trace, `${label} pass reached`, passReached.promise, 90_000);
+	await withDeadline(trace, `${label} pass settled`, session.waitForForegroundIdle(), 90_000);
+	expect(
+		{
+			seen,
+			passes: passes(),
+			status: session.getGoalStateSnapshot()?.status,
+			armed: world.timers.armedDelays(WAKE_OWNER),
+			warnings: world.warnings.slice(warningMark),
+		},
+		`${label}: the fired wake runs one pass on the active goal, whose charge stops the goal with nothing armed`,
+	).toEqual({
+		seen: { action: "continue", reasonCode: "goal_active" },
+		passes: 1,
+		status: "budget_limited",
+		armed: [],
+		warnings: [],
+	});
+	world.faultMatrix.witness("R39", { control: false });
+	expect(await world.disposeSessionInBody(session), `${label}: the auxiliary root disposes cleanly`).toBeUndefined();
+	trace.mark("root", label);
+}
+
+/**
+ * R28, both modes. An auxiliary root with System One off starts one read-only worker and holds it at its first provider
+ * request. Its lease heartbeat is the only alarm on the `worker-lease` port, at a third of the lease TTL, and nothing is armed
+ * on `orchestration`, the clock the lease deadline is checked on. Advancing worker-lease by the interval renews the lease,
+ * warns nothing and keeps the worker running (the control). Advancing orchestration past the renewed deadline, then
+ * worker-lease by the interval, fails the renewal: the heartbeat warns and aborts the lane, the expired lease refuses the
+ * attempt's final usage checkpoint and its failure record, and the lane is cancelled as worker_delegation_error. Its terminal
+ * handoff wakes the idle root once, with nothing left armed on either port, and the worker is idle again (the fault).
+ */
+async function verifyWorkerLeaseRenewalFailure(world: HarnessWorld): Promise<void> {
+	const trace = world.trace;
+	const label = "r28-lease-renewal";
+	const LEASE_OWNER = "worker-lease";
+	const CLOCK_OWNER = "orchestration";
+	const agentDir = `${world.agentDir}-${label}`;
+	const created = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		systemOneEnabled: false,
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
+	});
+	const session = created.session;
+	world.systemOne.enterPhase(label, {});
+	expect(
+		{ root: world.provider.getPendingStepNames("root"), worker: world.provider.getPendingStepNames("worker-c") },
+		`${label}: no earlier root or worker-c step is left pending`,
+	).toEqual({ root: [], worker: [] });
+	const workerHeld = createBarrier();
+	const workerGate = createBarrier();
+	world.provider.enqueue("worker-c", {
+		name: `${label}-held-request`,
+		check: () => workerHeld.release(),
+		gate: workerGate.promise,
+		reply: { content: [{ type: "text", text: "The held request is never answered." }] },
+	});
+	const started: { agentId?: string; laneId?: string } = {};
+	world.provider.enqueue(
+		"root",
+		calls(`${label}-start`, [
+			{
+				id: `${label}-start-1`,
+				name: "delegate",
+				arguments: {
+					action: "start",
+					model: { provider: HARNESS_PROVIDER, modelId: "worker-c" },
+					instructions: "Read the retry limit and report.",
+					readOnly: true,
+				},
+			},
+		]),
+		{
+			name: `${label}-started`,
+			check: (request) => {
+				assertBatchOk(request, `${label}: the worker start`);
+				const details = lastToolResultDetails(session, "delegate");
+				if (isRecordObject(details) && typeof details.agentId === "string") started.agentId = details.agentId;
+				if (isRecordObject(details) && typeof details.laneId === "string") started.laneId = details.laneId;
+			},
+			reply: { content: [{ type: "text", text: "The reader is started." }] },
+		},
+	);
+	await withDeadline(trace, `${label} start turn`, session.prompt("Start the retry limit reader."), 90_000);
+	await withDeadline(trace, `${label} worker held`, workerHeld.promise, 90_000);
+	const { agentId, laneId } = started;
+	if (agentId === undefined || laneId === undefined) throw new Error(`${label}: no agent or lane id`);
+	const runningAttempts = () =>
+		Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).filter(
+			(attempt) => attempt.taskId === laneId && attempt.status === "running",
+		);
+	const heldAttempt = runningAttempts()[0];
+	const leaseTtlMs = heldAttempt?.dispatch.executionContract?.worker.profile.leaseTtlMs;
+	const issuedExpiresAt = heldAttempt?.lease?.expiresAt;
+	if (heldAttempt === undefined || leaseTtlMs === undefined || issuedExpiresAt === undefined) {
+		throw new Error(`${label}: the held worker has no running attempt with a lease TTL and a lease`);
+	}
+	const attemptId = heldAttempt.attemptId;
+	const leaseExpiresAt = () =>
+		session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts[attemptId]?.lease?.expiresAt ?? issuedExpiresAt;
+	const laneRecord = () => session.getLaneRecords().find((record) => record.laneId === laneId);
+	const heartbeatMs = Math.floor(leaseTtlMs / 3);
+	expect(
+		{ heartbeats: world.timers.armedDelays(LEASE_OWNER), clock: world.timers.armedDelays(CLOCK_OWNER) },
+		`${label}: the held worker's heartbeat is the only worker-lease alarm and nothing is armed on orchestration`,
+	).toEqual({ heartbeats: [heartbeatMs], clock: [] });
+	const warningMark = world.warnings.length;
+	expect(
+		world.timers.advance(LEASE_OWNER, heartbeatMs),
+		`${label}: advancing worker-lease by its interval fires the heartbeat`,
+	).toBe(1);
+	const renewedExpiresAt = leaseExpiresAt();
+	expect(
+		{
+			renewed: Date.parse(renewedExpiresAt) > Date.parse(issuedExpiresAt),
+			heartbeats: world.timers.armedDelays(LEASE_OWNER),
+			lane: laneRecord()?.status,
+			running: runningAttempts().length,
+			warnings: world.warnings.slice(warningMark),
+		},
+		`${label}: a heartbeat inside the lease renews it, re-arms, warns nothing and keeps the worker running`,
+	).toEqual({ renewed: true, heartbeats: [heartbeatMs], lane: "running", running: 1, warnings: [] });
+	world.faultMatrix.witness("R28", { control: true });
+	const wakeReached = createBarrier();
+	const wake: { tailIsUser?: boolean; carried?: boolean; status?: string; reasonCode?: string } = {};
+	world.provider.enqueue("root", {
+		name: `${label}-wake`,
+		check: (request) => {
+			const tail = request.context.messages.at(-1);
+			const record = laneRecord();
+			wake.tailIsUser = tail?.role === "user";
+			wake.status = record?.status;
+			wake.reasonCode = record?.reasonCode;
+			wake.carried = JSON.stringify(tail ?? null).includes(
+				`- ${laneId}: ${record?.status} reason=${record?.reasonCode}`,
+			);
+			wakeReached.release();
+		},
+		reply: { content: [{ type: "text", text: "The reader's lease ended its run." }] },
+	});
+	// The lease deadline is read on the orchestration clock: moving it one millisecond past the renewed deadline expires the lease.
+	const clockShiftMs = Date.parse(renewedExpiresAt) - world.timers.port(CLOCK_OWNER).now() + 1;
+	expect(world.timers.advance(CLOCK_OWNER, clockShiftMs), `${label}: the orchestration shift fires nothing`).toBe(0);
+	expect(
+		world.timers.advance(LEASE_OWNER, heartbeatMs),
+		`${label}: the next interval fires the heartbeat on the expired lease`,
+	).toBe(1);
+	await withDeadline(trace, `${label} wake reached`, wakeReached.promise, 90_000);
+	await withDeadline(trace, `${label} wake settled`, session.waitForForegroundIdle(), 90_000);
+	const expired = `Attempt '${attemptId}' lease expired.`;
+	expect(
+		{
+			wake,
+			wakes: world.provider.reached.filter((name) => name === `root:${label}-wake`).length,
+			running: runningAttempts().length,
+			heartbeats: world.timers.armedDelays(LEASE_OWNER),
+			clock: world.timers.armedDelays(CLOCK_OWNER),
+			warnings: world.warnings.slice(warningMark),
+		},
+		`${label}: the failed renewal aborts the lane, cancelled as worker_delegation_error, and wakes the root once`,
+	).toEqual({
+		wake: { tailIsUser: true, carried: true, status: "canceled", reasonCode: "worker_delegation_error" },
+		wakes: 1,
+		running: 0,
+		heartbeats: [],
+		clock: [],
+		warnings: [
+			`Worker ${laneId} lease renewal failed: ${expired}`,
+			`Failed to persist durable worker failure ${laneId}: ${expired}`,
+			`Worker delegation failed: ${expired}`,
+		],
+	});
+	world.faultMatrix.witness("R28", { control: false });
+	workerGate.release();
+	const ready = await withDeadline(
+		trace,
+		`${label} worker idle after its cancellation`,
+		session.backgroundLanes.waitForWorkerAgent(agentId, 60_000),
+		70_000,
+	);
+	expect(
+		{ timedOut: ready.timedOut, status: ready.status },
+		`${label}: the worker is idle once its resources are released`,
+	).toEqual({ timedOut: false, status: "idle" });
+	expect(await world.disposeSessionInBody(session), `${label}: the auxiliary root disposes cleanly`).toBeUndefined();
+	trace.mark("root", label);
 }
 
 /**

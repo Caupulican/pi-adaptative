@@ -71,6 +71,8 @@ export async function runJourney1(): Promise<void> {
 				/^Memory subsystem init failed: The ICM chat needs a cheap model for its compactions, and contextPolicy\.memory\.history\.summaryModel is not set: set it to a configured model, for example "<provider>\/<model>"\. If that model is not local, also set contextPolicy\.memory\.history\.allowExternalSummaryEgress to true\.$/,
 				/^Memory subsystem init failed: The ICM chat's summary model harness-script\/worker-c is not local, and external summary egress is not allowed: set contextPolicy\.memory\.history\.allowExternalSummaryEgress to true to allow it\.$/,
 				/^Memory subsystem init failed: The ICM chat's summary model harness-script\/worker-b does not support xhigh thinking, which its compactions require: set contextPolicy\.memory\.history\.summaryModel to a reasoning model that supports xhigh, for example "<provider>\/<model>"\.$/,
+				// R10s: each failed attempt of the fresh chat's leaf 1 (both requests met the scripted 503): exact text.
+				/^Continuous-chat compaction 1\+1 failed: Continuous-chat compaction stopped \(error\): HTTP 503 Service Unavailable: upstream overloaded$/,
 				// An owner that disposes with paid usage still unconfirmed keeps it in its journal. The pending form is for a file that exists
 				// with unconfirmed reports; the evidence form is only for a never-replied session whose file was never written.
 				/^Usage handoff: \d+ usage report\(s\) pending in the session journal, 0 not retained, 0 confirmed row\(s\) with a journal copy left, 0 unmatched journal\(s\); none is charged to another session\.$/,

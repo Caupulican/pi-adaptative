@@ -7,7 +7,7 @@
 
 import { safeErrorMessage } from "../../kernel/types.ts";
 import { AsyncRetainedReleases, type ReleaseOutcome, releaseFailureCause } from "../util/resource-release.ts";
-import type { TimerPort } from "../util/timer-port.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import {
 	ContinuousChatCompactionCoordinator,
 	type ContinuousChatCompactionOutcome,
@@ -94,8 +94,8 @@ export interface ContinuousChatRuntimeOptions {
 	warn: (message: string) => void;
 	/** Names this session in the project lease, so a refused session can see which session holds the chat. */
 	label?: string;
-	/** The retained work-claim releases' backoff timers; absent means the global, unreferenced timers. */
-	releaseTimers?: TimerPort;
+	/** A waiting turn's retry alarm and the retained work-claim releases' backoff; absent means `SYSTEM_TIMER_PORT`. */
+	timers?: TimerPort;
 }
 
 /** What a claim that ended without a published node must record: given back to the queue, or failed with its reason. */
@@ -119,6 +119,7 @@ export class ContinuousChatRuntime {
 	private readonly coordinator: ContinuousChatCompactionCoordinator;
 	private readonly prefixHead: () => ContinuousChatCompactionPrefixHead;
 	private readonly warn: (message: string) => void;
+	private readonly timers: TimerPort;
 	/** Resolves once, when this runtime stops accepting work: at `stop()`, or when its lease is lost. Never rejects. */
 	readonly stopped: Promise<void>;
 	private resolveStopped: () => void = () => undefined;
@@ -154,12 +155,13 @@ export class ContinuousChatRuntime {
 		this.coordinator = new ContinuousChatCompactionCoordinator(options.port, options.store);
 		this.prefixHead = options.prefixHead;
 		this.warn = options.warn;
+		this.timers = options.timers ?? SYSTEM_TIMER_PORT;
 		this.stopped = new Promise<void>((resolve) => {
 			this.resolveStopped = () => resolve();
 		});
 		this.workReleases = new AsyncRetainedReleases({
 			retryOwner: "continuous-chat runtime",
-			...(options.releaseTimers !== undefined ? { timers: options.releaseTimers } : {}),
+			timers: this.timers,
 			release: async ({ item, abandonment }) => {
 				// After a lost lease the store refuses every write: the next owner's startup recovery requeues the claim.
 				if (this.leaseLost)
@@ -251,7 +253,7 @@ export class ContinuousChatRuntime {
 		let needed: number | undefined;
 		let reported = "";
 		let rounds = 0;
-		let alarm: ReturnType<typeof setTimeout> | undefined;
+		let alarm: unknown;
 		let retryDue = false;
 		try {
 			for (;;) {
@@ -286,12 +288,16 @@ export class ContinuousChatRuntime {
 				if (failed > 0 && alarm === undefined && !retryDue && rounds < CONTINUOUS_CHAT_TURN_RETRY_ROUNDS) {
 					const delay = CONTINUOUS_CHAT_TURN_RETRY_FIRST_DELAY_MS * 2 ** rounds;
 					rounds++;
-					// Not unref'd: the turn waits on it, and every way out of this wait clears it.
-					alarm = setTimeout(() => {
-						alarm = undefined;
-						retryDue = true;
-						this.notifyChange();
-					}, delay);
+					// Keeps the process alive: the turn waits on it, and every way out of this wait clears it.
+					alarm = this.timers.setTimeout(
+						() => {
+							alarm = undefined;
+							retryDue = true;
+							this.notifyChange();
+						},
+						delay,
+						{ keepAlive: true },
+					);
 				}
 				if (alarm === undefined && !retryDue && !continuousChatHasLeafWorkBelow(queue, target)) {
 					throw new ContinuousChatPrefixUnavailableError(this.failureReasons(queue));
@@ -299,7 +305,7 @@ export class ContinuousChatRuntime {
 				await this.waitForChange(observed, signal);
 			}
 		} finally {
-			if (alarm !== undefined) clearTimeout(alarm);
+			if (alarm !== undefined) this.timers.clearTimeout(alarm);
 			this.turnTargets.delete(waiter);
 		}
 	}

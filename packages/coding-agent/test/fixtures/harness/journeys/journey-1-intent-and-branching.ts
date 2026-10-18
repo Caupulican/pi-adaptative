@@ -758,18 +758,65 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 			),
 		"the save sits on an abandoned branch after the move",
 	).toBe(false);
-	// The new branch lists the user memory once: the memory is not branch-scoped.
+	world.faultMatrix.witness("R17", { control: true });
+	// The new branch lists the user memory once: the memory is not branch-scoped. Its first request is held: while the run owns the history, a
+	// navigation to an existing entry that is not the leaf (the abandoned save's result) is refused and changes nothing; the run then finishes.
+	const e4ListHeld = createBarrier();
+	const e4ListGate = createBarrier();
 	world.systemOne.enterPhase("e4-branch", e4Judgments);
 	world.provider.enqueue(
 		"root",
-		calls("e4-list", [{ id: "e4-list-1", name: "memory", arguments: { action: "list", target: "user" } }]),
+		{
+			...calls("e4-list", [{ id: "e4-list-1", name: "memory", arguments: { action: "list", target: "user" } }]),
+			check: () => e4ListHeld.release(),
+			gate: e4ListGate.promise,
+		},
 		{
 			name: "e4-list-reply",
 			check: e4ListCheck("the new branch"),
 			reply: { content: [{ type: "text", text: "The saved preference is listed once." }] },
 		},
 	);
-	await withDeadline(trace, "E4 branch turn", e4Session.prompt("List the saved preferences from this branch."));
+	const e4BranchTurn = e4Session.prompt("List the saved preferences from this branch.");
+	const e4BranchFailures: unknown[] = [];
+	try {
+		await withDeadline(trace, "E4 branch turn holds its first request", e4ListHeld.promise);
+		const e4Abandoned = e4Manager
+			.getEntries()
+			.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolCallId === "e4-memory-1",
+			);
+		if (e4Abandoned === undefined) throw new Error("E4 has no abandoned save result to navigate to");
+		const e4LeafBefore = e4Manager.getLeafId();
+		const e4EntriesBefore = e4Manager.getEntries().length;
+		expect(e4Abandoned.id, "the refused navigation targets an entry that is not the leaf").not.toBe(e4LeafBefore);
+		const e4Refusal = await e4Session.navigateTree(e4Abandoned.id).then(
+			() => "navigated",
+			(error: unknown) => (error instanceof Error ? error.message : String(error)),
+		);
+		expect(e4Refusal, "a navigation while the run owns the history is refused").toBe(
+			"Cannot navigate the session tree while a turn is running. Wait for the turn to finish or interrupt it first.",
+		);
+		expect(e4Manager.getLeafId(), "the refused navigation leaves the leaf where the run has it").toBe(e4LeafBefore);
+		expect(e4Manager.getEntries().length, "the refused navigation writes no entry").toBe(e4EntriesBefore);
+		world.faultMatrix.witness("R17", { control: false });
+	} catch (error) {
+		e4BranchFailures.push(error);
+	} finally {
+		e4ListGate.release();
+	}
+	try {
+		await withDeadline(trace, "E4 branch turn", e4BranchTurn);
+	} catch (error) {
+		e4BranchFailures.push(error);
+	}
+	if (e4BranchFailures.length === 1) throw e4BranchFailures[0];
+	if (e4BranchFailures.length > 1) {
+		throw new AggregateError(e4BranchFailures, "the E4 branch turn failed before and after its join");
+	}
 	// A reload of the same session file restores the same leaf and lists the same single entry.
 	const e4File = e4Manager.getSessionFile();
 	if (e4File === undefined) throw new Error("the E4 session has no file");

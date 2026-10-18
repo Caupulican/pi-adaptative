@@ -43,6 +43,11 @@ export async function runJourney2(): Promise<void> {
 				/^Worker worker-\d+ could not settle: Whether another module reads the retry limit was not checked \(missing: System One is not bound\)$/,
 				// R32: the queued worker's one refused cancellation event write (the auxiliary root's store), retained: exact text.
 				/^Worker worker-\d+ cancellation failed; it stays queued and the cancellation is retried: Scripted IO fault r32-cancel-write: write '(?:\/harness\/agent-journey-2-system-one-(?:on|off)\/state\/orchestration\/sessions\/[^'/\\\n]+\/events\/events\/\d{16}\.json\.\d+\.[0-9a-f-]{36}\.tmp|[A-Z]:\\harness\\agent-journey-2-system-one-(?:on|off)\\state\\orchestration\\sessions\\[^'/\\\n]+\\events\\events\\\d{16}\.json\.\d+\.[0-9a-f-]{36}\.tmp)'$/,
+				// R28: the auxiliary root's worker whose lease expired on the orchestration clock: its failed renewal, its refused
+				// failure record and its delegation failure, each naming the expired attempt: exact text.
+				/^Worker worker-\d+ lease renewal failed: Attempt '[^'\n]+' lease expired\.$/,
+				/^Failed to persist durable worker failure worker-\d+: Attempt '[^'\n]+' lease expired\.$/,
+				/^Worker delegation failed: Attempt '[^'\n]+' lease expired\.$/,
 			],
 			files: { [LIMITS_PATH]: "export const MAX_RETRIES = 3;\n" },
 			// A clean checkout on main: a fresh writer worker gets its own worktree lane (dirty checkouts fall back to shared).
