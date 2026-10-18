@@ -1716,96 +1716,6 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		expect.stringMatching(/Background tool cleanup failed/),
 	]);
 
-	// R22, the background shutdown grace. A fresh owner (System One off in its own binding, so it asks no judgment in either world
-	// mode) hands a background command off, and is disposed while the command is still held at its shell gate. The shutdown cancels
-	// it and arms its grace watchdog on the background-tool-task clock, which no wall timer drives. A command that ignores the
-	// cancellation keeps its execution past the grace: advancing that clock by the armed delay expires the watchdog, and the shutdown
-	// rejects with it. The same command that honours the cancellation (the normal-order control) settles inside the grace and the
-	// shutdown completes. The rejection is read flattened, so the watchdog is counted among any other release failure of the session.
-	const GRACE_WATCHDOG = "Background tool execution did not settle within 5000ms during shutdown";
-	const leafFailures = (error: unknown): string[] =>
-		error instanceof AggregateError
-			? error.errors.flatMap(leafFailures)
-			: [error instanceof Error ? error.message : String(error)];
-	const runGraceShutdown = async (label: string, ignoresAbort: boolean, ran: { release(): void }) => {
-		const graceSession = (
-			await world.createRootSession("root", { agentDir: `${world.agentDir}-${label}`, systemOneEnabled: false })
-		).session;
-		const command = `echo ${label}`;
-		const gate = createBarrier();
-		const admitted = createBarrier();
-		let taskId: string | undefined;
-		world.shell.enqueue({
-			name: label,
-			command,
-			cwd: HARNESS_PROJECT_CWD,
-			output: `${label}\n`,
-			exitCode: 0,
-			gate: gate.promise,
-			...(ignoresAbort ? { ignoresAbort: true } : {}),
-			check: () => admitted.release(),
-			effect: () => ran.release(),
-		});
-		world.systemOne.enterPhase(label, {});
-		world.provider.enqueue(
-			"root",
-			calls(`${label}-start`, [{ id: `${label}-start-1`, name: "bash", arguments: { command, background: true } }]),
-			{
-				name: `${label}-started`,
-				check: (request) => {
-					taskId = backgroundTaskIdOf(request);
-				},
-				reply: { content: [{ type: "text", text: "The check runs in the background." }] },
-			},
-		);
-		await withDeadline(trace, `${label} start turn`, graceSession.prompt("Start the check in the background."));
-		await withDeadline(trace, `${label} foreground settled`, graceSession.waitForForegroundIdle(), 60_000);
-		await withDeadline(trace, `${label} command admitted at its gate`, admitted.promise, 60_000);
-		expect(
-			graceSession.getResourceSnapshot().backgroundToolTasks.runningTaskIds,
-			`the ${label} command runs in the background at the disposal`,
-		).toEqual([taskId]);
-		// The disposal's first background-tool-task alarm is the shutdown watchdog: the cancelled task's own runtime watchdog is
-		// cleared by its terminal before it, and a disposed controller arms no wake-up retry.
-		const watchdogArmed = world.timers.nextArmed("background-tool-task");
-		const disposal = world.disposeSessionInBody(graceSession);
-		try {
-			const armedDelay = await withDeadline(trace, `${label} shutdown watchdog armed`, watchdogArmed, 60_000);
-			const fired = ignoresAbort ? world.timers.advance("background-tool-task", armedDelay) : 0;
-			const outcome = await withDeadline(trace, `${label} shutdown`, disposal, 60_000);
-			const snapshot = graceSession.getResourceSnapshot().backgroundToolTasks;
-			return {
-				armedDelay,
-				fired,
-				failures: outcome === undefined ? [] : leafFailures(outcome.error),
-				disposed: snapshot.disposed,
-				runningTaskIds: snapshot.runningTaskIds,
-			};
-		} finally {
-			// Released even when the shutdown fails: the held command then runs to its end and its producer joins.
-			gate.release();
-		}
-	};
-	const graceRan = createBarrier();
-	const graceHeld = await runGraceShutdown("grace-held", true, graceRan);
-	expect(
-		{
-			armedDelay: graceHeld.armedDelay,
-			watchdogFired: graceHeld.fired >= 1,
-			watchdogFailures: graceHeld.failures.filter((message) => message === GRACE_WATCHDOG).length,
-			disposed: graceHeld.disposed,
-			runningTaskIds: graceHeld.runningTaskIds,
-		},
-		"the background shutdown grace watchdog expires for an execution that ignores its cancellation",
-	).toEqual({ armedDelay: 5000, watchdogFired: true, watchdogFailures: 1, disposed: true, runningTaskIds: [] });
-	await withDeadline(trace, "the held command ran to its end after the shutdown", graceRan.promise, 60_000);
-	world.faultMatrix.witness("R22", { control: false });
-	expect(
-		await runGraceShutdown("grace-control", false, { release: () => undefined }),
-		"an execution that honours its cancellation settles inside the shutdown grace",
-	).toEqual({ armedDelay: 5000, fired: 0, failures: [], disposed: true, runningTaskIds: [] });
-	world.faultMatrix.witness("R22", { control: true });
-
 	world.provider.enqueue(
 		"root",
 		{
@@ -2225,4 +2135,97 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		await world.disposeSessionInBody(unavailableOwner.session),
 		"the unavailable owner disposes cleanly",
 	).toBeUndefined();
+
+	// R22, the background shutdown grace. A fresh owner (System One off in its own binding, so it asks no judgment in either world
+	// mode) hands a background command off, and is disposed while the command is still held at its shell gate. The shutdown cancels
+	// it and arms its grace watchdog on the background-tool-task clock, which no wall timer drives. A command that ignores the
+	// cancellation keeps its execution past the grace: advancing that clock by the armed delay expires the watchdog, and the shutdown
+	// rejects with it. The same command that honours the cancellation (the normal-order control) settles inside the grace and the
+	// shutdown completes. The rejection is read flattened, so the watchdog is counted among any other release failure of the session.
+	// The System One transport holds one open phase at a time and entering a phase closes the current one, so this witness
+	// sits at a phase boundary, after the last request of the cleanup phase's span, and its own empty phases then prove that
+	// the grace sessions ask nothing.
+	const GRACE_WATCHDOG = "Background tool execution did not settle within 5000ms during shutdown";
+	const leafFailures = (error: unknown): string[] =>
+		error instanceof AggregateError
+			? error.errors.flatMap(leafFailures)
+			: [error instanceof Error ? error.message : String(error)];
+	const runGraceShutdown = async (label: string, ignoresAbort: boolean, ran: { release(): void }) => {
+		const graceSession = (
+			await world.createRootSession("root", { agentDir: `${world.agentDir}-${label}`, systemOneEnabled: false })
+		).session;
+		const command = `echo ${label}`;
+		const gate = createBarrier();
+		const admitted = createBarrier();
+		let taskId: string | undefined;
+		world.shell.enqueue({
+			name: label,
+			command,
+			cwd: HARNESS_PROJECT_CWD,
+			output: `${label}\n`,
+			exitCode: 0,
+			gate: gate.promise,
+			...(ignoresAbort ? { ignoresAbort: true } : {}),
+			check: () => admitted.release(),
+			effect: () => ran.release(),
+		});
+		world.systemOne.enterPhase(label, {});
+		world.provider.enqueue(
+			"root",
+			calls(`${label}-start`, [{ id: `${label}-start-1`, name: "bash", arguments: { command, background: true } }]),
+			{
+				name: `${label}-started`,
+				check: (request) => {
+					taskId = backgroundTaskIdOf(request);
+				},
+				reply: { content: [{ type: "text", text: "The check runs in the background." }] },
+			},
+		);
+		await withDeadline(trace, `${label} start turn`, graceSession.prompt("Start the check in the background."));
+		await withDeadline(trace, `${label} foreground settled`, graceSession.waitForForegroundIdle(), 60_000);
+		await withDeadline(trace, `${label} command admitted at its gate`, admitted.promise, 60_000);
+		expect(
+			graceSession.getResourceSnapshot().backgroundToolTasks.runningTaskIds,
+			`the ${label} command runs in the background at the disposal`,
+		).toEqual([taskId]);
+		// The disposal's first background-tool-task alarm is the shutdown watchdog: the cancelled task's own runtime watchdog is
+		// cleared by its terminal before it, and a disposed controller arms no wake-up retry.
+		const watchdogArmed = world.timers.nextArmed("background-tool-task");
+		const disposal = world.disposeSessionInBody(graceSession);
+		try {
+			const armedDelay = await withDeadline(trace, `${label} shutdown watchdog armed`, watchdogArmed, 60_000);
+			const fired = ignoresAbort ? world.timers.advance("background-tool-task", armedDelay) : 0;
+			const outcome = await withDeadline(trace, `${label} shutdown`, disposal, 60_000);
+			const snapshot = graceSession.getResourceSnapshot().backgroundToolTasks;
+			return {
+				armedDelay,
+				fired,
+				failures: outcome === undefined ? [] : leafFailures(outcome.error),
+				disposed: snapshot.disposed,
+				runningTaskIds: snapshot.runningTaskIds,
+			};
+		} finally {
+			// Released even when the shutdown fails: the held command then runs to its end and its producer joins.
+			gate.release();
+		}
+	};
+	const graceRan = createBarrier();
+	const graceHeld = await runGraceShutdown("grace-held", true, graceRan);
+	expect(
+		{
+			armedDelay: graceHeld.armedDelay,
+			watchdogFired: graceHeld.fired >= 1,
+			watchdogFailures: graceHeld.failures.filter((message) => message === GRACE_WATCHDOG).length,
+			disposed: graceHeld.disposed,
+			runningTaskIds: graceHeld.runningTaskIds,
+		},
+		"the background shutdown grace watchdog expires for an execution that ignores its cancellation",
+	).toEqual({ armedDelay: 5000, watchdogFired: true, watchdogFailures: 1, disposed: true, runningTaskIds: [] });
+	await withDeadline(trace, "the held command ran to its end after the shutdown", graceRan.promise, 60_000);
+	world.faultMatrix.witness("R22", { control: false });
+	expect(
+		await runGraceShutdown("grace-control", false, { release: () => undefined }),
+		"an execution that honours its cancellation settles inside the shutdown grace",
+	).toEqual({ armedDelay: 5000, fired: 0, failures: [], disposed: true, runningTaskIds: [] });
+	world.faultMatrix.witness("R22", { control: true });
 }

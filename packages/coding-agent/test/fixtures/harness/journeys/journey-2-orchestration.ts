@@ -2886,6 +2886,7 @@ async function retainedRetryReadFault(world: HarnessWorld, session: AgentSession
 	const wake = createBarrier();
 	const retryFailures = (): string[] =>
 		world.warnings.filter((message) => message.includes("retry durable read failed"));
+	let flakyAgentId: string | undefined;
 	expect(world.provider.getPendingStepNames("worker-c"), "no earlier worker-c step is left pending").toEqual([]);
 	world.provider.enqueue(
 		"worker-c",
@@ -2922,7 +2923,13 @@ async function retainedRetryReadFault(world: HarnessWorld, session: AgentSession
 		]),
 		{
 			name: "r30-started",
-			check: (request) => assertBatchOk(request, "the flaky worker start"),
+			check: (request) => {
+				assertBatchOk(request, "the flaky worker start");
+				const details = lastToolResultDetails(session, "delegate");
+				const agentId = isRecordObject(details) ? details.agentId : undefined;
+				if (typeof agentId !== "string") throw new Error("the flaky worker start carries no agent id");
+				flakyAgentId = agentId;
+			},
 			reply: { content: [{ type: "text", text: "The flaky worker is started." }] },
 		},
 		{
@@ -2983,14 +2990,26 @@ async function retainedRetryReadFault(world: HarnessWorld, session: AgentSession
 	).toEqual(["worker-c:r30-fail-1", "worker-c:r30-fail-2", "worker-c:r30-fail-3", "worker-c:r30-report"]);
 	expect(retryFailures(), "the clear backoff read adds no failure").toHaveLength(1);
 	world.faultMatrix.witness("R30", { control: true });
+	// The report reaching the idle root precedes the worker's physical teardown (tool surface, reservation, project context);
+	// its specialist stays busy for a later worker-c start until that release. The public wait is the readiness gate: idle
+	// only once the specialist is settled.
+	const flakyReady = await withDeadline(
+		trace,
+		"R30 flaky worker idle after its report",
+		session.backgroundLanes.waitForWorkerAgent(flakyAgentId ?? "", 60_000),
+		70_000,
+	);
+	expect(flakyReady.timedOut, "the flaky worker settles inside its wait").toBe(false);
+	expect(flakyReady.status, "the flaky worker is idle once its resources are released").toBe("idle");
 }
 
 /**
  * R32 (a durable cancel of a queued lane fails): with workers capped at one, a held worker runs and a second one queues behind
  * it. The root cancels the queued one while the store refuses that cancellation's event write: the cancel reports the
- * failure, and the lane stays durably queued with its cancellation retained by the scheduler. Control: a later scheduler
- * drain (at the latest the one the held worker's end runs) retries the retained cancellation before any queued dispatch;
- * it commits with the owner's reason and the queued worker never runs. Both terminals then reach the idle root.
+ * failure, and the lane stays durably queued with its cancellation retained by the scheduler, as read at the root's next
+ * provider request, before any scheduler signal. Control: the next scheduler drain (the end of that same turn, at the
+ * latest the one the held worker's end runs) retries the retained cancellation before any queued dispatch; it commits
+ * with the owner's reason and the queued worker never runs. Both terminals then reach the idle root.
  */
 async function failedQueuedCancel(world: HarnessWorld, session: AgentSession): Promise<void> {
 	const trace = world.trace;
@@ -3027,6 +3046,7 @@ async function failedQueuedCancel(world: HarnessWorld, session: AgentSession): P
 	const queuedReachedBefore = world.provider.reached.filter((name) => name.startsWith("worker-b:")).length;
 	let faultPath: string | undefined;
 	let cancelResult: { isError: boolean; text: string } | undefined;
+	let queuedStatusAfterCancel: string | undefined;
 	expect(world.provider.getPendingStepNames("worker-c"), "no earlier worker-c step is left pending").toEqual([]);
 	world.provider.enqueue("worker-c", {
 		name: "r32-held-report",
@@ -3112,6 +3132,9 @@ async function failedQueuedCancel(world: HarnessWorld, session: AgentSession): P
 			check: (request) => {
 				const result = latestBatchResults(request).find((candidate) => candidate.toolName === "delegate");
 				cancelResult = result ? { isError: result.isError, text: result.text } : undefined;
+				// Read before any scheduler signal: the run is still streaming, so no idle drain has retried the
+				// retained cancellation yet (the turn's own end is the first one, and the one-shot fault is spent).
+				queuedStatusAfterCancel = attemptOf(started.queued?.laneId)?.status;
 			},
 			reply: { content: [{ type: "text", text: "The queued reader's cancellation is retried." }] },
 		},
@@ -3140,9 +3163,7 @@ async function failedQueuedCancel(world: HarnessWorld, session: AgentSession): P
 	expect(cancelFailures(), "the failed cancel is announced once, as retained").toEqual([
 		`Worker ${started.queued?.laneId} cancellation failed; it stays queued and the cancellation is retried: Scripted IO fault r32-cancel-write: write '${faultPath}'`,
 	]);
-	expect(attemptOf(started.queued?.laneId)?.status, "the failed cancel leaves the queued lane durably queued").toBe(
-		"queued",
-	);
+	expect(queuedStatusAfterCancel, "the failed cancel leaves the queued lane durably queued").toBe("queued");
 	world.faultMatrix.witness("R32", { control: false });
 	heldRelease.release();
 	await withDeadline(trace, "R32 both terminals reached the idle root", wake.promise, 90_000);
