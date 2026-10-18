@@ -3208,6 +3208,18 @@ async function failedQueuedCancel(
 	world.settingsManager.setWorkerDelegationSettings(previousDelegation);
 	if (started.held === undefined || started.queued === undefined)
 		throw new Error("the R32 starts carried no agent ids");
+	// The readiness gate of the next worker-c start, R31's (see R30): both terminals reaching the idle root precede the
+	// held worker's physical teardown, and until that release its specialist counts as busy for the same specialization.
+	const heldReady = await withDeadline(
+		trace,
+		"R32 held reader idle after its report",
+		session.backgroundLanes.waitForWorkerAgent(started.held.agentId, 60_000),
+		70_000,
+	);
+	expect(
+		{ timedOut: heldReady.timedOut, status: heldReady.status },
+		"the capped held reader is idle once its resources are released",
+	).toEqual({ timedOut: false, status: "idle" });
 	return { held: started.held.agentId, queued: started.queued.agentId };
 }
 
