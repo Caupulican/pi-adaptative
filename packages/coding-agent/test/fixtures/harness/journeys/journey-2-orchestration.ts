@@ -2651,8 +2651,9 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	// Still in the "e11" phase: the prompts and the steer below are owner words, judged by its six owner-policy keys only.
 	await steeredDelegateWait(world, eSession);
 	await heldOrchestrationStoreLock(world, eSession, eAux.sessionManager.getSessionId());
-	await retainedRetryReadFault(world, eSession, eAux.sessionManager.getSessionId());
-	await failedQueuedCancel(world, eSession);
+	const r30AgentId = await retainedRetryReadFault(world, eSession, eAux.sessionManager.getSessionId());
+	const r32Agents = await failedQueuedCancel(world, eSession);
+	await retireWitnessSpecialists(world, eSession, [r30AgentId, r32Agents.held, r32Agents.queued]);
 	expect(await world.disposeSessionInBody(eSession), "the auxiliary stale-pass root disposes cleanly").toBeUndefined();
 	trace.mark("root", "e-stale-pass");
 }
@@ -2877,7 +2878,7 @@ async function heldOrchestrationStoreLock(
  * RETRY_ENQUEUE_FAILURE_BASE_MS * 2^0 = 1 000 ms is armed in its place. Control: that backoff fires with the read clear, the
  * retry is enqueued, and the ladder attempt reports.
  */
-async function retainedRetryReadFault(world: HarnessWorld, session: AgentSession, sessionId: string): Promise<void> {
+async function retainedRetryReadFault(world: HarnessWorld, session: AgentSession, sessionId: string): Promise<string> {
 	const trace = world.trace;
 	const R30_REPORT = "The flaky worker report is ready.";
 	const R30_TRANSIENT = "503 service unavailable (scripted transient)";
@@ -3001,6 +3002,8 @@ async function retainedRetryReadFault(world: HarnessWorld, session: AgentSession
 	);
 	expect(flakyReady.timedOut, "the flaky worker settles inside its wait").toBe(false);
 	expect(flakyReady.status, "the flaky worker is idle once its resources are released").toBe("idle");
+	if (flakyAgentId === undefined) throw new Error("the flaky worker start carried no agent id");
+	return flakyAgentId;
 }
 
 /**
@@ -3011,7 +3014,10 @@ async function retainedRetryReadFault(world: HarnessWorld, session: AgentSession
  * latest the one the held worker's end runs) retries the retained cancellation before any queued dispatch; it commits
  * with the owner's reason and the queued worker never runs. Both terminals then reach the idle root.
  */
-async function failedQueuedCancel(world: HarnessWorld, session: AgentSession): Promise<void> {
+async function failedQueuedCancel(
+	world: HarnessWorld,
+	session: AgentSession,
+): Promise<{ held: string; queued: string }> {
 	const trace = world.trace;
 	const R32_REPORT = "The capped reader report is ready.";
 	const previousDelegation = world.settingsManager.getGlobalSettings().workerDelegation ?? {};
@@ -3180,4 +3186,65 @@ async function failedQueuedCancel(world: HarnessWorld, session: AgentSession): P
 	expect(cancelFailures(), "the retried cancellation adds no failure").toHaveLength(1);
 	world.faultMatrix.witness("R32", { control: true });
 	world.settingsManager.setWorkerDelegationSettings(previousDelegation);
+	if (started.held === undefined || started.queued === undefined)
+		throw new Error("the R32 starts carried no agent ids");
+	return { held: started.held.agentId, queued: started.queued.agentId };
+}
+
+/**
+ * The witnesses above leave their specialists as they found the world: retired. A persistent specialist outlives its
+ * task, and an idle one is claimed through the project directory by any later fresh start of the same specialization
+ * in this agent directory, from any root (instructions are not part of it). R32's cancelled queued worker is `worker-b`
+ * with the default authority, the specialization of E7's queued B: left idle, B would be born onto its context instead
+ * of fresh. Each worker is first waited idle with its resources released (the readiness gate the reuse decision
+ * reads), then all are retired in one root batch, and each durable binding reads retired.
+ */
+async function retireWitnessSpecialists(
+	world: HarnessWorld,
+	session: AgentSession,
+	agentIds: readonly string[],
+): Promise<void> {
+	const trace = world.trace;
+	const specialists = [...new Set(agentIds)];
+	for (const agentId of specialists) {
+		const ready = await withDeadline(
+			trace,
+			`witness specialist ${agentId} idle`,
+			session.backgroundLanes.waitForWorkerAgent(agentId, 60_000),
+			70_000,
+		);
+		expect(
+			{ timedOut: ready.timedOut, status: ready.status },
+			`the witness specialist ${agentId} is idle before its retirement`,
+		).toEqual({ timedOut: false, status: "idle" });
+	}
+	world.provider.enqueue(
+		"root",
+		calls(
+			"witness-retire",
+			specialists.map((agentId, index) => ({
+				id: `witness-retire-${index + 1}`,
+				name: "delegate",
+				arguments: { action: "retire", agentId },
+			})),
+		),
+		{
+			name: "witness-retired",
+			check: (request) => {
+				const retirements = latestBatchResults(request).filter((result) => result.toolName === "delegate");
+				if (
+					retirements.length !== specialists.length ||
+					retirements.some((result) => result.isError || !result.text.includes("retired"))
+				)
+					throw new Error(`the witness specialists were not all retired: ${JSON.stringify(retirements)}`);
+			},
+			reply: { content: [{ type: "text", text: "The witness workers are retired." }] },
+		},
+	);
+	await withDeadline(trace, "witness specialists retired", session.prompt("Retire the finished workers."), 90_000);
+	const agents = session.backgroundLanes.getTaskRuntimeSnapshot()?.agents ?? {};
+	expect(
+		specialists.map((agentId) => agents[agentId]?.status),
+		"every witness specialist's durable binding is retired",
+	).toEqual(specialists.map(() => "retired"));
 }
