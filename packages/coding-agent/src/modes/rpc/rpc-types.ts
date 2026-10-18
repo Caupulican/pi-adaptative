@@ -9,6 +9,7 @@ import type { ImageContent, Model } from "@caupulican/pi-ai";
 import type { SessionStats, ToolProbeReport } from "../../core/agent-session.ts";
 import type { SelfCompactionInfo, SelfCompactionNowOutcome } from "../../core/compaction/self-compaction-controller.ts";
 import type { HumanInputAnswer, HumanInputPresentationRequest } from "../../core/human-input.ts";
+import type { OwnerInputEnd } from "../../core/owner-input-ledger.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import type { BashResult } from "../../core/tools/schemas/bash.ts";
 import type { AgentMessage, ThinkingLevel } from "../../kernel/index.ts";
@@ -351,8 +352,9 @@ export type RpcResponse =
 			data: { commands: RpcSlashCommand[] };
 	  }
 
-	// Error response (any command can fail)
-	| { id?: string; type: "response"; command: string; success: false; error: string };
+	// Error response (any command can fail). `inputEnd` is set when a submitted input (prompt, steer, follow_up) ended
+	// without being delivered: withdrawn, held, cancelled or refused, and why.
+	| { id?: string; type: "response"; command: string; success: false; error: string; inputEnd?: OwnerInputEnd };
 
 // ============================================================================
 // Extension UI Events (stdout)

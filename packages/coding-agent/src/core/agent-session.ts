@@ -241,7 +241,7 @@ import {
 	resolveConfiguredOrchestrationModel,
 } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
-import { OwnerInputLedger } from "./owner-input-ledger.ts";
+import { OwnerInputLedger, type OwnerInputOutcome } from "./owner-input-ledger.ts";
 import { ownerSteerWake, PendingInputQueueController, type QueuedInput } from "./pending-input-queue-controller.ts";
 import { appendPipelineRunSnapshot, getLatestPipelineRunSnapshot, type PipelineRun } from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
@@ -708,7 +708,7 @@ export class AgentSession {
 				this._edgeIntent.judgeOwnerRequest(text, signal, acceptedOrder),
 			enqueueOwnerWords: (text, acceptedOrder, judgment) =>
 				this._edgeIntent.enqueueOwnerWords(text, acceptedOrder, judgment),
-			releaseOwnerWords: (acceptedOrder) => this._edgeIntent.releaseOwnerWords(acceptedOrder),
+			ownerInputs: this._ownerInputs,
 			emitQueueUpdate: () => this._emitQueueUpdate(),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
 		});
@@ -1017,10 +1017,16 @@ export class AgentSession {
 				context.sessionId === this.sessionManager.getSessionId() &&
 				context.branchGeneration === this._branchGeneration,
 			onInputHeld: (input, reason) => this._queuedInputPersistence.noteHeldQueuedInput(input.text, reason),
+			onInputCancelled: (input) => this._queuedInputPersistence.noteCancelledQueuedInput(input.text),
 			onQueueChanged: (inputs) => this._queuedInputPersistence.recordQueuedInput(inputs),
 			ownerInputs: this._ownerInputs,
 			onUndeliveredEchoWithdrawn: (message) => this._emit({ type: "user_message_withdrawn", message }),
 		});
+		// A queued message that asked for a goal starts it when it is delivered (its user entry persisted), never when a run
+		// only read it: a message a routed turn dropped unpersisted starts nothing.
+		this._ownerInputs.onDelivered(({ message }) =>
+			this._goals.activateQueuedOwnerChatGoal(message, this.agent.state.messages),
+		);
 		this._queuedInputPersistence.restoreRecordedQueuedInput();
 		this._backgroundLanes = new BackgroundLaneController({
 			isDisposed: () => this._disposed,
@@ -1803,7 +1809,7 @@ export class AgentSession {
 			// Every persisted message, single or batched (a routed turn's flush included), passes here: the one Delivered point.
 			(message, entryId) => {
 				this._reflection.noteOwnerInputPersisted(message, entryId);
-				this._ownerInputs.notePersisted(message);
+				this._ownerInputs.notePersisted(message, entryId);
 			},
 			() =>
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
@@ -2397,8 +2403,6 @@ export class AgentSession {
 			getBaseSystemPrompt: () => this._baseSystemPrompt,
 			getSessionWorkState: () => this.getSessionWorkState(),
 			emitQueueUpdate: () => this._emitQueueUpdate(),
-			classifyOwnerRequest: (request, rules, capabilitiesPending, signal, acceptedOrder) =>
-				this._classifyOwnerRequest(request, rules, capabilitiesPending, signal, acceptedOrder),
 			judgeQueuedOwnerRequest: (request, signal, acceptedOrder) =>
 				this._edgeIntent.judgeOwnerRequest(request, signal, acceptedOrder),
 			getOperatorBlocker: () => this._operatorBlocker,
@@ -3152,17 +3156,6 @@ export class AgentSession {
 		return this._edgeIntent.enableCapabilitiesAuthorizedByUser(request, signal, trustedOwner, acceptedOrder);
 	}
 
-	/** Same user-request classification owner for ordinary submissions and trusted queued input. */
-	private async _classifyOwnerRequest(
-		request: string,
-		rules = "",
-		capabilitiesPending = false,
-		signal?: AbortSignal,
-		acceptedOrder?: number,
-	) {
-		return this._edgeIntent.classifyOwnerRequest(request, rules, capabilitiesPending, signal, acceptedOrder);
-	}
-
 	/** The owner's current model pool policy. */
 	getModelPolicy(): ModelPoolPolicy {
 		return this._edgeIntent.getModelPolicy();
@@ -3662,7 +3655,7 @@ export class AgentSession {
 		if (event.type === "message_start" && event.message.role === "user") {
 			this._compaction.resetOverflowRecovery();
 			if (this._pendingQueue.noteRead(event.message)) this._emitQueueUpdate();
-			this._goals.activateQueuedOwnerChatGoal(event.message, this.agent.state.messages);
+			this._goals.noteUserMessageRead();
 		}
 		if (event.type === "turn_end" || event.type === "tool_execution_start" || event.type === "tool_execution_end") {
 			this._skillVault.noteActivity();
@@ -4658,8 +4651,8 @@ export class AgentSession {
 	 * @param images Optional image attachments to include with the message
 	 * @throws Error if text is an extension command
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
-		await this._admitQueuedOwnerInput("steer", text, images, this._promptSubmission.acceptQueuedOwnerWords(text));
+	async steer(text: string, images?: ImageContent[]): Promise<OwnerInputOutcome> {
+		return this._admitQueuedOwnerInput("steer", text, images);
 	}
 
 	/**
@@ -4669,22 +4662,27 @@ export class AgentSession {
 	 * @param images Optional image attachments to include with the message
 	 * @throws Error if text is an extension command
 	 */
-	async followUp(text: string, images?: ImageContent[]): Promise<void> {
-		await this._admitQueuedOwnerInput("followUp", text, images, this._promptSubmission.acceptQueuedOwnerWords(text));
+	async followUp(text: string, images?: ImageContent[]): Promise<OwnerInputOutcome> {
+		return this._admitQueuedOwnerInput("followUp", text, images);
 	}
 
 	/**
-	 * A queued owner input is pending from the moment it is submitted, in submission order, and is
-	 * classified before it is admitted. A newer request supersedes the judgment, never the input; a
-	 * cancellation (interrupt, take, clear, disposal, context change) withdraws it.
+	 * A queued owner input is accepted and pending from the moment it is submitted, in submission order, and is
+	 * classified before it is admitted. A newer request supersedes the judgment, never the input; a cancellation
+	 * (interrupt, take, clear, disposal, context change) ends it. Resolves with the input queued for delivery, or with how
+	 * it ended without delivery.
 	 */
 	private async _admitQueuedOwnerInput(
 		kind: "steer" | "followUp",
 		text: string,
 		images: ImageContent[] | undefined,
-		acceptedOrder: number,
-	): Promise<void> {
-		return this._queuedInputPersistence.admitQueuedOwnerInput(kind, text, images, acceptedOrder);
+	): Promise<OwnerInputOutcome> {
+		return this._queuedInputPersistence.admitQueuedOwnerInput(
+			kind,
+			text,
+			images,
+			this._promptSubmission.acceptQueuedOwnerWords(kind, text),
+		);
 	}
 
 	/**

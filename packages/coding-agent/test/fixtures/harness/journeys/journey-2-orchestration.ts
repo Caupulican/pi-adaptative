@@ -1814,7 +1814,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	const eShellBefore = world.shell.requests.length;
 	const eWaitEnds: WaitEndReport[] = [];
 	let eWaitStarts = 0;
-	let eSteerAdmitted: Promise<void> | undefined;
+	let eSteerAdmitted: Promise<unknown> | undefined;
 	let eTimeoutFired: number | undefined;
 	let eArmedBeforeAdvance: number[] = [];
 	const unsubscribeEWaits = eSession.subscribe((event) => {

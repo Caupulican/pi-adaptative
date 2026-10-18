@@ -38,6 +38,7 @@ import type { AccountModelCatalog } from "./model-router/account-models.ts";
 import type { LocalRuntimeDeps } from "./models/local-runtime.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
+import type { OwnerInputEnd } from "./owner-input-ledger.ts";
 import type { ProviderAdmissionWaitEvent } from "./provider-admission/gate.ts";
 import type { ResearchRunResult } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
@@ -214,8 +215,12 @@ export interface PromptOptions {
 	source?: InputSource;
 	/** Owner-visible form of an extension's framed third-party message (a peer message); see {@link SendUserMessageOrigin}. */
 	origin?: SendUserMessageOrigin;
-	/** Observe whether prompt preflight accepted the request. */
-	preflightResult?: (success: boolean) => void;
+	/**
+	 * Observe, exactly once, whether the submission was accepted: queued for delivery, or its own turn about to run. A
+	 * submission not accepted reports how its input ended without delivery (`ended`: withdrawn, held, cancelled or refused,
+	 * with the reason); a hidden internal turn carries no input and reports none.
+	 */
+	preflightResult?: (success: boolean, ended?: OwnerInputEnd) => void;
 	/** Permit idle goal continuation after this prompt settles. Defaults to true. */
 	autoContinueGoal?: boolean;
 	/** Hidden internal turn persisted as a typed context marker. */

@@ -854,7 +854,12 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 		s4Refusal instanceof Error ? s4Refusal.message : undefined,
 		"a reload while the branch summary is active is refused",
 	).toContain("branch summarization is active");
-	const s4QueuedPrompt = s4Session.prompt(s4Queued, { streamingBehavior: "followUp" });
+	// The queued prompt's submitter hears exactly one verdict, observed through the production preflight callback.
+	const s4Verdicts: Array<{ accepted: boolean; ended: unknown }> = [];
+	const s4QueuedPrompt = s4Session.prompt(s4Queued, {
+		streamingBehavior: "followUp",
+		preflightResult: (accepted, ended) => s4Verdicts.push({ accepted, ended }),
+	});
 	expect(s4Session.getFollowUpMessages(), "owner input waits while the summary is held").toEqual([s4Queued]);
 	// A newer navigation supersedes the held summary: the superseded one is cancelled and its summary never applies.
 	const s4Second = s4Session.navigateTree(s4TurnA, { summarize: false });
@@ -885,6 +890,9 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 		"the held input is reported once, as context-changed",
 	).toEqual([expect.stringContaining("the session context changed before it was admitted")]);
 	await withDeadline(trace, "S4 held prompt settled", s4QueuedPrompt);
+	expect(s4Verdicts, "the held queued prompt is not accepted, and says it was held for its changed context").toEqual([
+		{ accepted: false, ended: { state: "held", reason: "context_changed" } },
+	]);
 	expect(
 		s4Manager
 			.getBranch()

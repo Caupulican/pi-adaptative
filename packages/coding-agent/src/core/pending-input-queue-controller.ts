@@ -4,7 +4,13 @@ import type { AgentMessage } from "../kernel/types.ts";
 import type { ExtensionRunner, SendUserMessageOrigin } from "./extensions/index.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { ExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
-import { type OwnerInputId, type OwnerInputLedger, ownerInputIdOf, stampOwnerInput } from "./owner-input-ledger.ts";
+import {
+	type OwnerInputEnd,
+	type OwnerInputId,
+	type OwnerInputLedger,
+	ownerInputIdOf,
+	stampOwnerInput,
+} from "./owner-input-ledger.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import {
 	ownerVisibleQueuedText,
@@ -27,23 +33,15 @@ export interface QueuedInput {
 	images?: ImageContent[];
 }
 
-/** The admitted form of a queued input: the text, images and owner evidence the agent receives. */
+/**
+ * The admitted form of a queued input: the text, images and owner evidence the agent receives. What its delivery decides is
+ * registered with the owner-input ledger against the input's identity (`whenDelivered`), never here.
+ */
 export interface QueuedInputAdmission {
 	text: string;
 	images?: ImageContent[];
 	queuedGoalAuthority?: ExplicitGoalStartAuthority;
 	ownerOriginalText?: string;
-	/**
-	 * Runs once, when the admitted input is delivered: its user entry is persisted (the ledger's delivered event). Never
-	 * when the input is taken back, cleared or held before that, nor when a run read it without persisting it: what is not
-	 * delivered decides nothing.
-	 */
-	onDelivered?: () => void;
-	/**
-	 * Runs once, when the admitted input leaves without being delivered: taken back, cleared, held or dropped with the
-	 * closing session. Never together with `onDelivered`.
-	 */
-	onDropped?: () => void;
 }
 
 /**
@@ -53,6 +51,8 @@ export interface QueuedInputAdmission {
  */
 export interface PendingInputHandle {
 	readonly id: number;
+	/** The input's identity in the owner-input ledger. */
+	readonly inputId: OwnerInputId;
 	/** Aborted when the input is taken, cleared or cancelled before admission. */
 	readonly signal: AbortSignal;
 }
@@ -78,8 +78,6 @@ interface PendingEntry extends QueuedInput {
 	displayed?: boolean;
 	/** Its context changed before it was handed on: kept in full for recovery, never handed on. */
 	held?: boolean;
-	/** Its admission's `onDropped` ran: it is never delivered from here. */
-	dropped?: boolean;
 }
 
 /** Abort reason of a pending input the operator took back, cleared or cancelled before admission. */
@@ -89,7 +87,7 @@ export interface PendingInputQueueDeps {
 	readonly agent: Agent;
 	readonly skillVault: SkillVaultController;
 	readonly goals: GoalSessionController;
-	/** Mints each queued input's identity at acceptance, and tells this queue when an input is delivered. */
+	/** Mints each queued input's identity at acceptance, owns its state, and tells this queue when an input is delivered. */
 	readonly ownerInputs: OwnerInputLedger;
 	/** `_extensionRunner` is assigned after construction (definite-assignment field on AgentSession),
 	 * so it must be read through a thunk rather than captured by value. */
@@ -106,6 +104,8 @@ export interface PendingInputQueueDeps {
 	isInputContextCurrent?(context: PendingInputContext): boolean;
 	/** An input that was not handed on is held, complete and recoverable: its context changed, or no run delivered it. */
 	onInputHeld?(input: QueuedInput, reason: PendingInputHoldReason): void;
+	/** An owner interrupt cancelled an input whose admission was still undecided: it is gone, and this is its one notice. */
+	onInputCancelled?(input: QueuedInput): void;
 	/**
 	 * A run read this input's message (the transcript shows it) but never persisted it, and the input now leaves without
 	 * being delivered (held or taken back): that transcript echo is taken back.
@@ -118,8 +118,8 @@ export interface PendingInputQueueDeps {
 	onQueueChanged?(inputs: readonly RecordableQueuedInput[]): void;
 }
 
-/** Why an input was held instead of being handed on. */
-export type PendingInputHoldReason = "context_changed" | "undelivered";
+/** Why an input was held instead of being handed on: its context changed, no run delivered it, or the session closed first. */
+export type PendingInputHoldReason = "context_changed" | "undelivered" | "closed";
 
 /** Where an input was accepted: its session and that session's branch generation. */
 export interface PendingInputContext {
@@ -260,7 +260,7 @@ export class PendingInputQueueController {
 	constructor(deps: PendingInputQueueDeps) {
 		this.deps = deps;
 		activeControllers.add(this);
-		deps.ownerInputs.onDelivered((inputId) => this._delivered(inputId));
+		deps.ownerInputs.onDelivered(({ id }) => this._delivered(id));
 	}
 
 	matchesSessionId(sessionId: string): boolean {
@@ -504,7 +504,7 @@ export class PendingInputQueueController {
 		(kind === "steer" ? this._steering : this._followUp).push(entry);
 		this._changed();
 		if (kind === "steer") this._notifySteerQueued();
-		return { id: entry.id, signal: entry.abort.signal };
+		return { id: entry.id, inputId: entry.inputId, signal: entry.abort.signal };
 	}
 
 	/**
@@ -526,8 +526,8 @@ export class PendingInputQueueController {
 			abort.abort(PENDING_INPUT_WITHDRAWN);
 			const entry: PendingEntry = {
 				id: this._nextEntryId++,
-				// A restored input is accepted again in this process; re-sending it later is a new input.
-				inputId: this.deps.ownerInputs.accept(input.origin ? "extension" : input.kind),
+				// A restored input is accepted again in this process, held; re-sending it later is a new input.
+				inputId: this.deps.ownerInputs.accept(input.origin ? "extension" : input.kind, "held"),
 				kind: input.kind,
 				text: input.text,
 				images: input.images,
@@ -577,6 +577,7 @@ export class PendingInputQueueController {
 		const entry = this._findEntry(handle.id);
 		if (!entry || entry.admission || entry.held || this._closed) return false;
 		entry.admission = admission;
+		this.deps.ownerInputs.move(entry.inputId, "pending");
 		this._admitInOrder();
 		if (entry.kind === "steer") this._notifySteerDecision();
 		return true;
@@ -598,6 +599,7 @@ export class PendingInputQueueController {
 		}
 		this._removeEntry(entry);
 		this._owned.push(entry);
+		this.deps.ownerInputs.move(entry.inputId, "own_turn");
 		this._admitInOrder();
 		this._changed();
 		if (entry.kind === "steer") this._notifySteerDecision();
@@ -606,15 +608,14 @@ export class PendingInputQueueController {
 
 	/**
 	 * The delivered event (the ledger's): the user entry of this input is persisted. A run read it, or its own turn sent it;
-	 * either way it leaves the durable record now, and its admission's `onDelivered` runs once. No other point delivers.
+	 * either way it leaves the durable record now. What its delivery decides runs in the ledger. No other point delivers.
 	 */
 	private _delivered(inputId: OwnerInputId): void {
 		for (const entries of [this._awaitingPersistence, this._owned]) {
 			const index = entries.findIndex((entry) => entry.inputId === inputId);
 			if (index === -1) continue;
-			const [delivered] = entries.splice(index, 1);
+			entries.splice(index, 1);
 			this._changed();
-			delivered?.admission?.onDelivered?.();
 			return;
 		}
 	}
@@ -625,18 +626,23 @@ export class PendingInputQueueController {
 	 * when no turn owns it, which includes an input that was delivered.
 	 */
 	reclaim(handle: PendingInputHandle): boolean {
-		const index = this._owned.findIndex((entry) => entry.id === handle.id);
-		if (index === -1) return false;
-		const [entry] = this._owned.splice(index, 1);
+		const entry = this._owned.find((candidate) => candidate.id === handle.id);
+		if (entry === undefined) return false;
+		this._returnOwned(entry, "undelivered");
+		return true;
+	}
+
+	/** An input its own turn took returns to the pending queue at its submission position, held for `reason`. */
+	private _returnOwned(entry: PendingEntry, reason: PendingInputHoldReason): void {
+		this._owned = this._owned.filter((candidate) => candidate !== entry);
 		if (!this._closed) {
 			const entries = entry.kind === "steer" ? this._steering : this._followUp;
 			entries.push(entry);
 			entries.sort((left, right) => left.id - right.id);
 		}
-		this._hold(entry, "undelivered");
+		this._hold(entry, reason);
 		this._changed();
 		if (entry.kind === "steer") this._notifySteerDecision();
-		return true;
 	}
 
 	/** Keep an input whose context changed: complete, pending and recoverable, never handed on. */
@@ -647,26 +653,32 @@ export class PendingInputQueueController {
 		if (entry?.kind === "steer") this._notifySteerDecision();
 	}
 
-	/** Drop a registered input that will not be admitted (cancelled, handled, or run as its own turn). A
+	/** Drop a registered input that will not be admitted (cancelled, handled, refused), ending it as `end` says. A
 	 * decided or held input is never withdrawn: it keeps its place in the queue. */
-	withdraw(handle: PendingInputHandle): boolean {
+	withdraw(handle: PendingInputHandle, end: OwnerInputEnd): boolean {
 		const entry = this._findEntry(handle.id);
 		if (!entry || entry.admission || entry.held) return false;
 		this._removeEntry(entry);
 		entry.abort.abort(PENDING_INPUT_WITHDRAWN);
+		this.deps.ownerInputs.end(entry.inputId, end);
 		this._admitInOrder();
 		this._changed();
 		if (entry.kind === "steer") this._notifySteerDecision();
 		return true;
 	}
 
-	/** Cancel every input whose admission is still undecided; decided and held inputs keep their place. */
+	/**
+	 * An owner interrupt: every input whose admission is still undecided is cancelled, each with its one notice carrying its
+	 * full text (nothing keeps it after this). Decided and held inputs keep their place.
+	 */
 	cancelAwaiting(): void {
 		let removed = false;
 		for (const entry of [...this._steering, ...this._followUp]) {
 			if (entry.admission || entry.held) continue;
 			this._removeEntry(entry);
 			entry.abort.abort(PENDING_INPUT_WITHDRAWN);
+			this.deps.ownerInputs.end(entry.inputId, { state: "cancelled", reason: "interrupted" });
+			this.deps.onInputCancelled?.(this._ownerVisibleOriginal(entry));
 			removed = true;
 		}
 		this._admitInOrder();
@@ -677,8 +689,9 @@ export class PendingInputQueueController {
 	}
 
 	/**
-	 * The session is disposed: every input not yet handed to the agent is cancelled and dropped, and
-	 * nothing is handed on afterwards. Input the agent already holds is the agent's to discard.
+	 * The session is disposed: every input not yet handed to the agent is held (whatever still decides its admission is
+	 * cancelled), complete and visible, and nothing is handed on afterwards. The durable record is not rewritten, so a
+	 * resumed session restores them held. Input the agent already holds is held by the run that ends with the session.
 	 */
 	close(): void {
 		this._closed = true;
@@ -687,10 +700,7 @@ export class PendingInputQueueController {
 		this._notifySteerDecision();
 		this._steerDecisionListeners.clear();
 		for (const entry of [...this._steering, ...this._followUp]) {
-			if (entry.message) continue;
-			this._removeEntry(entry);
-			entry.abort.abort(PENDING_INPUT_WITHDRAWN);
-			this._dropAdmission(entry);
+			if (!entry.message && !entry.held) this._hold(entry, "closed");
 		}
 	}
 
@@ -705,6 +715,11 @@ export class PendingInputQueueController {
 			if (entry.held || this._contextCurrent(entry)) continue;
 			if (entry.message && !this._takeBackFromAgent(entry)) continue;
 			this._hold(entry, "context_changed");
+		}
+		// An input its own turn took and has not delivered is held too: that turn is still preparing (a run that owns the
+		// history refuses the navigation), and its submission ends on the held input's aborted signal before any run starts.
+		for (const entry of [...this._owned]) {
+			if (!this._contextCurrent(entry)) this._returnOwned(entry, "context_changed");
 		}
 		this._admitInOrder();
 		this._notifySteerDecision();
@@ -743,23 +758,19 @@ export class PendingInputQueueController {
 		this.deps.onUndeliveredEchoWithdrawn?.(entry.message);
 	}
 
-	/** An admitted input that leaves without delivery: what is not delivered decides nothing (`onDropped`). */
-	private _dropAdmission(entry: PendingEntry): void {
-		if (!entry.admission || entry.dropped) return;
-		entry.dropped = true;
-		entry.admission.onDropped?.();
+	/** The input as submitted, a framed third-party message shown as the owner sees it. */
+	private _ownerVisibleOriginal(entry: PendingEntry): QueuedInput {
+		return entry.origin
+			? { ...entry.original, text: ownerVisibleQueuedText(entry.origin.text, entry.origin) }
+			: { ...entry.original };
 	}
 
+	/** Keep the input for its owner: what decides its admission is cancelled, it ends held in the ledger, and its one notice is given. */
 	private _hold(entry: PendingEntry, reason: PendingInputHoldReason): void {
 		entry.held = true;
 		entry.abort.abort(PENDING_INPUT_WITHDRAWN);
-		this._dropAdmission(entry);
-		this.deps.onInputHeld?.(
-			entry.origin
-				? { ...entry.original, text: ownerVisibleQueuedText(entry.origin.text, entry.origin) }
-				: { ...entry.original },
-			reason,
-		);
+		this.deps.ownerInputs.end(entry.inputId, { state: "held", reason });
+		this.deps.onInputHeld?.(this._ownerVisibleOriginal(entry), reason);
 	}
 
 	private _findEntry(id: number): PendingEntry | undefined {
@@ -802,6 +813,7 @@ export class PendingInputQueueController {
 					admission.queuedGoalAuthority,
 					admission.ownerOriginalText,
 				);
+				this.deps.ownerInputs.move(entry.inputId, "handed");
 				enqueue(entry.message);
 			}
 		}
@@ -870,14 +882,14 @@ export class PendingInputQueueController {
 
 	/**
 	 * Take every queued steering and follow-up message, images included, out of both this
-	 * controller and the agent's mirrored queues. Extension commands stay queued: they execute
-	 * against the session, not as prompt text.
+	 * controller and the agent's queue, by identity: a host turn queued on the agent is not an input and keeps its place.
+	 * Extension commands stay queued: they execute against the session, not as prompt text.
 	 */
 	takeMessages(): { steering: QueuedInput[]; followUp: QueuedInput[] } {
-		const taken = { steering: this._takeEntries(this._steering), followUp: this._takeEntries(this._followUp) };
-		this._steering = [];
-		this._followUp = [];
-		this.deps.agent.clearAllQueues();
+		const taken = {
+			steering: this._takeEntries("steer", "taken back"),
+			followUp: this._takeEntries("followUp", "taken back"),
+		};
 		this._changed();
 		return taken;
 	}
@@ -889,28 +901,35 @@ export class PendingInputQueueController {
 		return { ...this.takeMessages(), commands };
 	}
 
-	/** Clear all three queues (including the agent's own mirrored queues) and return what was cleared. */
+	/** Clear all three queues (each input's exact message withdrawn from the agent's queue) and return what was cleared. */
 	clear(): PendingQueueSnapshot {
-		const result = this.snapshot();
-		this._takeEntries(this._steering);
-		this._takeEntries(this._followUp);
-		this._steering = [];
-		this._followUp = [];
+		const result = {
+			steering: this._takeEntries("steer", "cleared").map((input) => input.text),
+			followUp: this._takeEntries("followUp", "cleared").map((input) => input.text),
+			commands: [...this.getCommands()],
+		};
 		this._queuedExtensionCommands = [];
-		this.deps.agent.clearAllQueues();
 		this._changed();
 		return result;
 	}
 
-	/** The inputs as submitted; anything still deciding an input's admission is cancelled. */
-	private _takeEntries(entries: readonly PendingEntry[]): QueuedInput[] {
-		return entries.map((entry) => {
-			if (!entry.message) entry.abort.abort(PENDING_INPUT_WITHDRAWN);
-			this._retractEcho(entry);
-			this._dropAdmission(entry);
-			const input = entry.message ? { text: entry.text, images: entry.images } : { ...entry.original };
+	/**
+	 * Take one kind's inputs back as the owner sees them (an admitted one in its delivered form), each withdrawn by identity:
+	 * anything still deciding its admission is cancelled, and a handed input's exact message leaves the agent's queue. A
+	 * handed input the agent no longer holds is a run's already and stays to be delivered: it is not taken.
+	 */
+	private _takeEntries(kind: "steer" | "followUp", reason: string): QueuedInput[] {
+		const taken: QueuedInput[] = [];
+		for (const entry of kind === "steer" ? [...this._steering] : [...this._followUp]) {
+			const delivered = entry.message ? { text: entry.text, images: entry.images } : { ...entry.original };
 			// A framed third-party message returns as what the owner saw, never as the extension's frame.
-			return entry.origin ? { ...input, text: this._ownerText(entry) } : input;
-		});
+			const input = entry.origin ? { ...delivered, text: this._ownerText(entry) } : delivered;
+			if (entry.message && !this._takeBackFromAgent(entry)) continue;
+			entry.abort.abort(PENDING_INPUT_WITHDRAWN);
+			this._removeEntry(entry);
+			this.deps.ownerInputs.end(entry.inputId, { state: "withdrawn", reason });
+			taken.push(input);
+		}
+		return taken;
 	}
 }

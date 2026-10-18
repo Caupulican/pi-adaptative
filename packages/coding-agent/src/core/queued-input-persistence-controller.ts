@@ -5,6 +5,7 @@
 
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
+import type { OwnerInputEnd, OwnerInputId, OwnerInputLedger, OwnerInputOutcome } from "./owner-input-ledger.ts";
 import type { PendingInputHoldReason, PendingInputQueueController } from "./pending-input-queue-controller.ts";
 import { truncateWithEllipsis } from "./provider-tool-text.ts";
 import { appendQueuedInputRecord, type RecordableQueuedInput, readQueuedInputRecord } from "./queued-input-record.ts";
@@ -14,6 +15,8 @@ import type { SessionImageStore } from "./session-image-store.ts";
 export interface QueuedInputPersistenceControllerDeps {
 	getSessionManager(): SessionManager;
 	getPendingQueue(): PendingInputQueueController;
+	/** Each queued input's state and the effects its delivery has. */
+	readonly ownerInputs: Pick<OwnerInputLedger, "move" | "whenDelivered" | "whenUndelivered">;
 	getSessionImageStore(): SessionImageStore | undefined;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
@@ -29,8 +32,6 @@ export interface QueuedInputPersistenceControllerDeps {
 		acceptedOrder: number | undefined,
 		judgment: OwnerRequestClassificationOutcome | undefined,
 	): void;
-	/** Words whose admission ended are never left for another judgment to carry (`SessionEdgeIntentController.releaseOwnerWords`). */
-	releaseOwnerWords(acceptedOrder: number): void;
 	emitQueueUpdate(): void;
 	emitWarning(message: string): void;
 }
@@ -52,48 +53,69 @@ export class QueuedInputPersistenceController {
 	 * the input, in owner order, never when the input is taken back, cleared or held first: until then the
 	 * intent is a staged candidate that writes nothing. A newer request supersedes only the judgment's
 	 * optional-tool chain, never the input or its owner policy, which the owner-policy queue then judges
-	 * alone; a cancellation (interrupt, take, clear, disposal, context change) withdraws it.
+	 * alone; a cancellation (interrupt, take, clear, disposal, context change) ends it. `accepted` is the identity and
+	 * owner order its words were accepted under (`PromptSubmissionController.acceptQueuedOwnerWords`), whose release when
+	 * the input ends undelivered is already registered. Resolves with the input queued for delivery, or with how it ended.
 	 */
 	async admitQueuedOwnerInput(
 		kind: "steer" | "followUp",
 		text: string,
 		images: ImageContent[] | undefined,
-		acceptedOrder: number,
-	): Promise<void> {
+		accepted: { readonly inputId: OwnerInputId; readonly acceptedOrder: number },
+	): Promise<OwnerInputOutcome> {
+		const { inputId, acceptedOrder } = accepted;
+		const outcome: { inputId: OwnerInputId; ended?: OwnerInputEnd } = { inputId };
+		this.deps.ownerInputs.whenUndelivered(inputId, (end) => {
+			outcome.ended = end;
+		});
 		const pendingQueue = this.deps.getPendingQueue();
-		const pending = pendingQueue.register(kind, text, images);
+		const pending = pendingQueue.register(kind, text, images, undefined, inputId);
 		this.deps.emitQueueUpdate();
 		let admitted = false;
+		let failure: { readonly error: unknown } | undefined;
 		try {
 			const classified = await this.deps.judgeOwnerRequest(text, pending.signal, acceptedOrder);
 			if ("cancelled" in classified && classified.cancelled) {
 				if (classified.contextChanged) pendingQueue.hold(pending);
-				return;
+				return outcome;
 			}
-			if (this.deps.isDisposed()) return;
+			// Taken back, held or cancelled while its judgment returned: it ended already.
+			if (this.deps.isDisposed() || pending.signal.aborted) return outcome;
+			this.deps.ownerInputs.move(inputId, "judged");
+			// The owner's admitted words become policy when the run delivers them, never when they are taken back first.
+			this.deps.ownerInputs.whenDelivered(inputId, () =>
+				this.deps.enqueueOwnerWords(text, acceptedOrder, classified),
+			);
 			admitted = pendingQueue.admit(pending, {
 				text: pendingQueue.prepareQueuedMessageText(text),
 				images,
 				ownerOriginalText: text,
-				onDelivered: () => this.deps.enqueueOwnerWords(text, acceptedOrder, classified),
-				// Taken back, cleared or held before delivery: these words never become owner input.
-				onDropped: () => this.deps.releaseOwnerWords(acceptedOrder),
 			});
+		} catch (error) {
+			failure = { error };
+			throw error;
 		} finally {
-			// Words that are never admitted never become owner input; admitted words stay registered until they are
-			// delivered (and then until an optional-tool intent covers them) or dropped.
+			// An input that is never admitted ends here unless something already ended it (an interrupt, a take, a hold): its
+			// judgment or its preparation failed, the session closed while it was judged, or its judgment was cancelled.
 			if (!admitted) {
-				pendingQueue.withdraw(pending);
-				this.deps.releaseOwnerWords(acceptedOrder);
+				const reason = failure
+					? failure.error instanceof Error
+						? failure.error.message
+						: String(failure.error)
+					: this.deps.isDisposed()
+						? "the session closed"
+						: "its judgment was cancelled";
+				pendingQueue.withdraw(pending, { state: failure ? "refused" : "cancelled", reason });
 			}
 			this.deps.emitQueueUpdate();
 		}
+		return outcome;
 	}
 
 	/** A held queued input is kept in full in the pending queue, never sent elsewhere. */
 	noteHeldQueuedInput(text: string, reason: PendingInputHoldReason): void {
 		const preview = truncateWithEllipsis(text, 200);
-		const disposed = this.deps.isDisposed();
+		const disposed = reason === "closed" || this.deps.isDisposed();
 		const why =
 			reason === "context_changed"
 				? "the session context changed before it was admitted"
@@ -105,6 +127,11 @@ export class QueuedInputPersistenceController {
 			? "It is kept in full in the pending queue"
 			: "It is kept in full in the pending queue; restore it to the editor to send it again";
 		this.deps.emitWarning(`A queued message was not delivered because ${why}. ${advice}: ${preview}`);
+	}
+
+	/** An interrupt cancelled a queued input before its admission was decided: nothing keeps it, so its full text is the notice. */
+	noteCancelledQueuedInput(text: string): void {
+		this.deps.emitWarning(`An interrupt cancelled a queued message before it was admitted; it was not sent: ${text}`);
 	}
 
 	/**

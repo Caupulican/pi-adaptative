@@ -12,6 +12,7 @@
 
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { AgentSession } from "../../core/agent-session.ts";
+import type { OwnerInputEnd } from "../../core/owner-input-ledger.ts";
 
 export type CompactionQueuedMessage = {
 	text: string;
@@ -39,9 +40,11 @@ async function submitQueuedMessage(
 	message: CompactionQueuedMessage,
 	accepted: (message: CompactionQueuedMessage) => void,
 ): Promise<void> {
-	// The session reports acceptance (queued, or its own turn starting) before the turn it starts ends.
-	const preflightResult = (success: boolean) => {
-		if (success) accepted(message);
+	// The session reports acceptance (queued, or its own turn starting) before the turn it starts ends. An input the session
+	// ended itself, visibly (held in its queue, taken back by the owner, or cancelled by an interrupt with its full text
+	// shown), is the session's too: returning it here would show it twice. Only a refused input was never the session's.
+	const preflightResult = (success: boolean, ended?: OwnerInputEnd) => {
+		if (success || (ended !== undefined && ended.state !== "refused")) accepted(message);
 	};
 	if (host.isExtensionCommand(message.text)) {
 		await host.session.prompt(message.text, { preflightResult });

@@ -916,20 +916,6 @@ export class SessionEdgeIntentController {
 	}
 
 	/**
-	 * The full classification of owner words judged into the committed optional-tool chain now (see `judgeCommittedIntent`),
-	 * written rules and pending capabilities as the caller gives them.
-	 */
-	async classifyOwnerRequest(
-		request: string,
-		rules = "",
-		capabilitiesPending = false,
-		signal?: AbortSignal,
-		acceptedOrder?: number,
-	): Promise<OwnerRequestClassificationOutcome> {
-		return (await this.judgeCommittedIntent(request, acceptedOrder, { rules, capabilitiesPending }, signal)).outcome;
-	}
-
-	/**
 	 * Judges delivered owner words into the committed optional-tool chain, now. The judgment continues the chain's head and
 	 * reads, before these words and in owner order, every older delivered word no committed entry holds. Words older than an
 	 * entry already in the chain (a follow-up delivered after a newer steer) rebuild that part of the chain: the newest words
@@ -1136,7 +1122,7 @@ export class SessionEdgeIntentController {
 	 * The owner-policy judgment of owner words, without the optional-tool chain: no optional tool is asked, and nothing
 	 * of the optional-tool intent (its entries, the staged and in-flight judgments, the registered words) is read or
 	 * written, so the chain stays as it is. A cancellation or a session switch while it runs is reported as
-	 * `classifyOwnerRequest` reports it.
+	 * `judgeCommittedIntent` reports it.
 	 */
 	private async judgeOwnerPolicy(
 		request: string,

@@ -3,6 +3,7 @@
 ### Breaking Changes
 
 - `createAgentSession` takes one `timers` option (a `TimerSource` that gives each timer owner a `TimerPort` with `now()`, `setTimeout` and `clearTimeout`) in place of `historyTimeSource` and `writeReservationTimers`. The worker retry ladder and its task runtime clock, the worker handoff retry and watchdog, background tool task watchdogs, wait bound and wake-up retry, the write-reservation release backoff and the summary hierarchy arm their alarms on it. `TranscriptSummaryTimeSource` and `WorkerWriteReservationTimers` were removed.
+- `AgentSession.steer()` and `followUp()` resolve with an `OwnerInputOutcome` (`{ inputId, ended? }`): `ended` says how the message ended without delivery (`withdrawn`, `held`, `cancelled` or `refused`, with a reason). `PromptOptions.preflightResult` is called exactly once and receives that end as its second argument when the prompt was not accepted. `RpcClient.prompt()`, `steer()` and `followUp()` throw when the response is `success: false`.
 
 ### Added
 
@@ -20,6 +21,10 @@
 
 ### Fixed
 
+- An owner input's effects happen when its user entry is persisted, never before: its owner rule (recorded with that entry id), the operator-blocker answer, its owner-policy words and a queued goal start. An input taken back, held, cancelled or refused first decides nothing and starts no goal.
+- Every queued input that ends without delivery is visible: an interrupt that cancels an undecided queued message emits a warning with its full text, an RPC `steer`/`follow_up` that ended returns `success: false` with `inputEnd` instead of success, and a queued RPC `prompt` that is held, withdrawn or cancelled now gets its one response (`success: false` with `inputEnd`) instead of none. Closing the session holds undecided queued input with a warning.
+- Taking back or clearing the queue withdraws each input's own message from the agent's queue and no longer drops host-queued turns, and an input its own turn took is held when a branch navigation changes its context while that turn prepares.
+- A refused delegate start, follow_up receipt, shutdown error or lane warning that quotes a long release cause, and a stopped-worker-process notice that quotes a long process entry, now keep both the head and the tail (with the file name) around an elided middle (`…`). The head is never cut inside a path. Before, cutting the head left a truncated path that the path-alias legend could resolve to a different, real file (the worker transcript instead of the refused temporary file).
 - Settings changes no longer recycle a live continuous-chat host, which ended the running turn and made the next provider request fail with "no running turn". Missing-chat recovery waits on an event when the system-switch lease clears.
 - Worker birth no longer fails when the continuous-chat view plus selected history exceeds the 51,200-byte history cap.
 - Automatic goal completion is no longer treated as an owner override, and compaction events carry the entry that was actually appended.

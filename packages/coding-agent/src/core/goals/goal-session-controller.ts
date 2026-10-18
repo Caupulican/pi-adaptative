@@ -403,8 +403,16 @@ export class GoalSessionController {
 		this.queuedOwnerChatGoals.set(message, { text, authority });
 	}
 
-	activateQueuedOwnerChatGoal(message: AgentMessage, messages: readonly { role: string; content?: unknown }[]): void {
+	/** A run read a user message: the routed instruction it ran under is no longer the newest instruction. */
+	noteUserMessageRead(): void {
 		if (this.executionLease) this.executionLease.routedContext = undefined;
+	}
+
+	/**
+	 * A queued message was delivered (its user entry persisted): the goal it asked for starts now. A message that is never
+	 * delivered starts nothing; its queued request is dropped with the message.
+	 */
+	activateQueuedOwnerChatGoal(message: AgentMessage, messages: readonly { role: string; content?: unknown }[]): void {
 		const queued = this.queuedOwnerChatGoals.get(message);
 		if (!queued) return;
 		this.queuedOwnerChatGoals.delete(message);

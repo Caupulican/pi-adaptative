@@ -188,25 +188,28 @@ export class RpcClient {
 
 	/**
 	 * Send a prompt to the agent.
-	 * Returns immediately after sending; use onEvent() to receive streaming events.
+	 * Resolves once the prompt is accepted; use onEvent() to receive streaming events.
 	 * Use waitForIdle() to wait for completion.
+	 * @throws Error when the prompt was not accepted, including an input that ended without delivery.
 	 */
 	async prompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.send({ type: "prompt", message, images });
+		this.requireSuccess(await this.send({ type: "prompt", message, images }));
 	}
 
 	/**
 	 * Queue a steering message to interrupt the agent mid-run.
+	 * @throws Error when the message ended without delivery (withdrawn, held, cancelled or refused).
 	 */
 	async steer(message: string, images?: ImageContent[]): Promise<void> {
-		await this.send({ type: "steer", message, images });
+		this.requireSuccess(await this.send({ type: "steer", message, images }));
 	}
 
 	/**
 	 * Queue a follow-up message to be processed after the agent finishes.
+	 * @throws Error when the message ended without delivery (withdrawn, held, cancelled or refused).
 	 */
 	async followUp(message: string, images?: ImageContent[]): Promise<void> {
-		await this.send({ type: "follow_up", message, images });
+		this.requireSuccess(await this.send({ type: "follow_up", message, images }));
 	}
 
 	/**
@@ -592,11 +595,12 @@ export class RpcClient {
 		});
 	}
 
+	private requireSuccess(response: RpcResponse): void {
+		if (!response.success) throw new Error((response as Extract<RpcResponse, { success: false }>).error);
+	}
+
 	private getData<T>(response: RpcResponse): T {
-		if (!response.success) {
-			const errorResponse = response as Extract<RpcResponse, { success: false }>;
-			throw new Error(errorResponse.error);
-		}
+		this.requireSuccess(response);
 		// Type assertion: we trust response.data matches T based on the command sent.
 		// This is safe because each public method specifies the correct T for its command.
 		const successResponse = response as Extract<RpcResponse, { success: true; data: unknown }>;

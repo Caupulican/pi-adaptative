@@ -73,7 +73,18 @@ Response:
 {"id": "req-1", "type": "response", "command": "prompt", "success": true}
 ```
 
-`success: true` means the prompt was accepted, queued, or handled immediately. `success: false` means the prompt was rejected before acceptance. Failures after acceptance are reported through the normal event and message stream, not as a second `response` for the same request id.
+`success: true` means the prompt was accepted, queued, or handled immediately. `success: false` means the prompt was not accepted, and every prompt gets exactly one response. When the prompt's input ended without being delivered, the error response carries `inputEnd`, `{"state": "withdrawn" | "held" | "cancelled" | "refused", "reason": "..."}`:
+
+- `withdrawn`: taken back or cleared from the queue before delivery (the taker received its text).
+- `held`: kept in full in the pending queue (its context changed, its turn ended before delivering it, or the session closed). A `warning` event names it.
+- `cancelled`: an interrupt or the session's close ended it before it was admitted. An interrupt also emits a `warning` event with its full text.
+- `refused`: its preparation failed or an extension handled it; `error` is the reason.
+
+```json
+{"id": "req-1", "type": "response", "command": "prompt", "success": false, "error": "The input was held (context_changed).", "inputEnd": {"state": "held", "reason": "context_changed"}}
+```
+
+Failures after acceptance are reported through the normal event and message stream, not as a second `response` for the same request id.
 
 The `images` field is optional. Each image uses `ImageContent` format: `{"type": "image", "data": "base64-encoded-data", "mimeType": "image/png"}`.
 
@@ -97,6 +108,8 @@ Response:
 {"type": "response", "command": "steer", "success": true}
 ```
 
+`success: true` means the message is queued for delivery. When it ended before that (taken back, held, cancelled by an interrupt, or refused), the response is `success: false` with `inputEnd`, as for [prompt](#prompt).
+
 See [set_steering_mode](#set_steering_mode) for controlling how steering messages are processed.
 
 #### follow_up
@@ -118,6 +131,8 @@ Response:
 ```json
 {"type": "response", "command": "follow_up", "success": true}
 ```
+
+`success: true` means the message is queued for delivery. When it ended before that, the response is `success: false` with `inputEnd`, as for [prompt](#prompt).
 
 See [set_follow_up_mode](#set_follow_up_mode) for controlling how follow-up messages are processed.
 

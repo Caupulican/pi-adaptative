@@ -29,6 +29,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
+import type { OwnerInputEnd } from "../../core/owner-input-ledger.ts";
 import { describeCause, neutralizeControls, type TerminalWarnings } from "../../core/terminal-warnings.ts";
 import { type Theme, theme } from "../../presentation/theme-model.ts";
 import { projectSessionEventForJson } from "../json-event-projection.ts";
@@ -141,6 +142,16 @@ export async function runRpcMode(
 	const error = (id: string | undefined, command: string, message: string): RpcResponse => {
 		return { id, type: "response", command, success: false, error: message };
 	};
+
+	// A submitted input the session ended without delivering it: the typed error its submitter receives.
+	const inputEnded = (id: string | undefined, command: string, ended: OwnerInputEnd): RpcResponse => ({
+		id,
+		type: "response",
+		command,
+		success: false,
+		error: ended.state === "refused" ? ended.reason : `The input was ${ended.state} (${ended.reason}).`,
+		inputEnd: ended,
+	});
 
 	// Pending extension UI requests waiting for response
 	const pendingExtensionRequests = new Map<
@@ -497,27 +508,31 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
-				// Start prompt handling immediately, but emit the authoritative response only after
-				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
-				let preflightSucceeded = false;
+				// Start prompt handling immediately, and emit the one authoritative response at the session's verdict:
+				// success once the prompt is accepted (queued, handled, or its own turn about to run), or the typed error
+				// saying how its input ended without delivery (withdrawn, held, cancelled or refused).
+				let responded = false;
+				const respond = (response: RpcResponse): void => {
+					if (responded) return;
+					responded = true;
+					output(response);
+				};
 				const promptRun = session.prompt(command.message, {
 					images: command.images,
 					streamingBehavior: command.streamingBehavior,
 					source: "rpc",
-					preflightResult: (didSucceed) => {
-						if (didSucceed) {
-							preflightSucceeded = true;
-							output(success(id, "prompt"));
-						}
-					},
+					preflightResult: (accepted, ended) =>
+						respond(
+							accepted
+								? success(id, "prompt")
+								: ended
+									? inputEnded(id, "prompt", ended)
+									: error(id, "prompt", "The prompt was not accepted."),
+						),
 				});
 				activePromptRuns.add(promptRun);
 				void promptRun
-					.catch((e) => {
-						if (!preflightSucceeded) {
-							output(error(id, "prompt", e.message));
-						}
-					})
+					.catch((e: unknown) => respond(error(id, "prompt", e instanceof Error ? e.message : String(e))))
 					.finally(() => {
 						activePromptRuns.delete(promptRun);
 					});
@@ -525,13 +540,13 @@ export async function runRpcMode(
 			}
 
 			case "steer": {
-				await session.steer(command.message, command.images);
-				return success(id, "steer");
+				const { ended } = await session.steer(command.message, command.images);
+				return ended ? inputEnded(id, "steer", ended) : success(id, "steer");
 			}
 
 			case "follow_up": {
-				await session.followUp(command.message, command.images);
-				return success(id, "follow_up");
+				const { ended } = await session.followUp(command.message, command.images);
+				return ended ? inputEnded(id, "follow_up", ended) : success(id, "follow_up");
 			}
 
 			case "clear_queue": {
