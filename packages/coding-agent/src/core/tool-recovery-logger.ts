@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
 import type { ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../kernel/timer-port.ts";
 import { readToolFailureTelemetry } from "../kernel/tool-failure-memory.ts";
 import { isWorkerSession } from "./session-role.ts";
 import type { ToolRecoveryLogAckMessage, ToolRecoveryLogWorkerMessage } from "./tool-recovery-log-processor.ts";
@@ -40,6 +41,8 @@ export interface ToolRecoveryLoggerOptions {
 	now?: () => Date;
 	debug?: (message: string) => void;
 	workerSpecifier?: string | URL;
+	/** The clock and alarms of the bounded flush; default: the system timers. */
+	timers?: TimerPort;
 }
 
 const DEFAULT_MAX_QUEUE = 1000;
@@ -79,6 +82,7 @@ export class ToolRecoveryLogger {
 	private readonly now: () => Date;
 	private readonly debug: (message: string) => void;
 	private readonly workerSpecifier: string | URL;
+	private readonly timers: TimerPort;
 	private readonly queue: ToolRecoveryLogWorkerRecord[] = [];
 	private readonly flushWaiters: Array<() => void> = [];
 	private worker: Worker | undefined;
@@ -108,6 +112,7 @@ export class ToolRecoveryLogger {
 		this.now = options.now ?? (() => new Date());
 		this.debug = options.debug ?? (() => {});
 		this.workerSpecifier = options.workerSpecifier ?? createDefaultWorkerSpecifier();
+		this.timers = options.timers ?? SYSTEM_TIMER_PORT;
 	}
 
 	recordToolArgumentValidation(
@@ -181,21 +186,26 @@ export class ToolRecoveryLogger {
 				return;
 			}
 			let settled = false;
-			let timeout: NodeJS.Timeout;
+			let timeout: unknown;
 			const finish = (): void => {
 				if (settled) return;
 				settled = true;
 				resolve();
 			};
 			const waiter = (): void => {
-				clearTimeout(timeout);
+				this.timers.clearTimeout(timeout);
 				finish();
 			};
-			timeout = setTimeout(() => {
-				const index = this.flushWaiters.indexOf(waiter);
-				if (index !== -1) this.flushWaiters.splice(index, 1);
-				finish();
-			}, timeoutMs);
+			// A closing session's result waits on this bound, so it keeps the process alive.
+			timeout = this.timers.setTimeout(
+				() => {
+					const index = this.flushWaiters.indexOf(waiter);
+					if (index !== -1) this.flushWaiters.splice(index, 1);
+					finish();
+				},
+				timeoutMs,
+				{ keepAlive: true },
+			);
 			this.flushWaiters.push(waiter);
 			this.resolveFlushWaitersIfIdle();
 		});

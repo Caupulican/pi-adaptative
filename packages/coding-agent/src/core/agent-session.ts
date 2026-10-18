@@ -1514,6 +1514,7 @@ export class AgentSession {
 			sessionId: this.sessionManager.getSessionId(),
 			eventLogPath: this._toolRecoveryEventLogPath,
 			failureCorpusPath,
+			timers: config.timers.port("tool-recovery-log"),
 		});
 		this._foregroundRecovery = new ForegroundRecoveryController({
 			agent: this.agent,

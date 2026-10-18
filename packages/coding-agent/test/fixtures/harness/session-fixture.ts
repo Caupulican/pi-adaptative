@@ -2167,7 +2167,8 @@ export async function runHarnessWorld(
  * relies on its real delay and none drives it yet: the foreground retry backoff (the retry witness's live 5 ms backoff
  * expiry), the provider admission ledger heartbeat and pauses, the worker lease heartbeat, the goal continuation wake and
  * the delegate wait bound (the 1000 ms waits of journey 1), the worker provider retry backoff (journey 1's E8o waits it
- * out), and the compaction and branch summary retry backoffs. Each is still advanceable and observable like any owner.
+ * out), the compaction and branch summary retry backoffs, and the tool recovery log flush bound (a closing session's real
+ * 200 ms wait, which the log witness advances). Each is still advanceable and observable like any owner.
  */
 const WALL_CLOCK_OWNERS: ReadonlySet<TimerOwner> = new Set<TimerOwner>([
 	"foreground-retry",
@@ -2178,6 +2179,7 @@ const WALL_CLOCK_OWNERS: ReadonlySet<TimerOwner> = new Set<TimerOwner>([
 	"compaction-retry",
 	"worker-provider-retry",
 	"branch-summary-retry",
+	"tool-recovery-log",
 ]);
 
 /**

@@ -368,6 +368,79 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 		expect(await world.disposeSessionInBody(r40eSession), "the R40e root disposes cleanly").toBeUndefined();
 		trace.mark("root", "r40e-retired-task");
 	}
+	// R50l, System One off: the tool recovery log worker loses its transport while it acknowledges a batch, then a respawned worker
+	// acknowledges the next one, and a closing session's flush is bounded past an acknowledgement that never arrives. Each turn is one
+	// failed tool call, so one record reaches the logger; the stats the health report prints are read after each step.
+	if (!world.systemOne.enabled) {
+		const LOG_OWNER = "tool-recovery-log";
+		const logAux = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
+		const logSession = logAux.session;
+		const logThreads = world.guard.threads;
+		const loggerLine = (): string | undefined =>
+			logSession
+				.formatToolRepairHealthReport()
+				.split("\n")
+				.find((line) => line.startsWith("recovery logging:"));
+		const failureTurn = (name: string, taskId: string): void => {
+			world.provider.enqueue(
+				"root",
+				calls(`${name}-call`, [{ id: `${name}-1`, name: "tool_task", arguments: { action: "wait", taskId } }]),
+				text(`${name}-reply`, "The wait failed."),
+			);
+		};
+		world.systemOne.enterPhase("r50l", {});
+		// The first batch is acknowledged by the first worker: the control.
+		failureTurn("r50l-ok", "tool-task-901");
+		await withDeadline(
+			trace,
+			"R50l acknowledged failure turn",
+			logSession.prompt("Wait on a task that does not exist."),
+		);
+		await withDeadline(trace, "R50l acknowledged batch", logSession.flushToolRecoveryLogsForTests());
+		expect(loggerLine(), "an acknowledged batch leaves one worker, no crash and nothing dropped").toBe(
+			"recovery logging: enabled queued=0 inFlight=0 dropped=0 failures=0 workerStarts=1 crashes=0 respawns=0",
+		);
+		world.faultMatrix.witness("R50l", { control: true });
+		// The second batch's acknowledgement cannot be delivered: the worker ends, the batch is dropped, the logger respawns.
+		logThreads.replaceNextResult("r50l-lost-ack", "ack", () => true, Symbol("r50l-uncloneable"));
+		failureTurn("r50l-lost", "tool-task-902");
+		await withDeadline(trace, "R50l lost-ack failure turn", logSession.prompt("Wait on another missing task."));
+		await withDeadline(trace, "R50l lost-ack settled", logSession.flushToolRecoveryLogsForTests());
+		expect(loggerLine(), "the lost acknowledgement is one crash that drops its batch and allows one respawn").toBe(
+			"recovery logging: enabled queued=0 inFlight=0 dropped=1 failures=1 workerStarts=1 crashes=1 respawns=1",
+		);
+		world.faultMatrix.witness("R50l", { control: false });
+		// The next record starts the respawned worker, whose acknowledgement lands.
+		failureTurn("r50l-respawn", "tool-task-903");
+		await withDeadline(trace, "R50l respawn failure turn", logSession.prompt("Wait on a third missing task."));
+		await withDeadline(trace, "R50l respawned batch", logSession.flushToolRecoveryLogsForTests());
+		expect(loggerLine(), "the respawned worker acknowledges the next batch").toBe(
+			"recovery logging: enabled queued=0 inFlight=0 dropped=1 failures=1 workerStarts=2 crashes=1 respawns=1",
+		);
+		expect(
+			logSession.formatToolRepairHealthReport().includes("execution failures: total=3"),
+			"all three failed calls were counted, whatever happened to their batches",
+		).toBe(true);
+		// A held acknowledgement at the close: the flush waits its 200 ms bound, then the session closes without it.
+		const heldAck = logThreads.holdNextResponse("r50l-held-ack", "ack");
+		failureTurn("r50l-held", "tool-task-904");
+		await withDeadline(trace, "R50l held-ack failure turn", logSession.prompt("Wait on a fourth missing task."));
+		await withDeadline(trace, "R50l acknowledgement held", heldAck.reached);
+		let closed = false;
+		const closing = world.disposeSessionInBody(logSession).finally(() => {
+			closed = true;
+		});
+		const flushDelay = await withDeadline(trace, "R50l close flush armed", world.timers.whenArmed(LOG_OWNER));
+		expect(closed, "the close waits for the held acknowledgement inside its bound").toBe(false);
+		expect(world.timers.advance(LOG_OWNER, flushDelay), "the bound fires once").toBe(1);
+		expect(
+			await withDeadline(trace, "R50l close past the bound", closing),
+			"the close ends past the bound",
+		).toBeUndefined();
+		expect(flushDelay, "the close flush is bounded at 200 ms").toBe(200);
+		heldAck.release();
+		trace.mark("root", "r50l-recovery-log");
+	}
 	// E9 stall threshold, legacy goal mode: an auxiliary root holds an open requirement and its initial turn is held after admission.
 	// The goal loop waits for that turn to settle, then twenty-one text-only continuation turns each record an implicit no_progress.
 	if (!world.systemOne.enabled) {

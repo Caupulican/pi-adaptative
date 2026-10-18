@@ -57,7 +57,6 @@ export interface OpenFaultMatrixRow extends FaultMatrixRowFields {
 export type FaultMatrixRow = CoveredFaultMatrixRow | OpenFaultMatrixRow;
 
 const BOTH: readonly SystemOneMode[] = ["on", "off"];
-const NONE = "none";
 
 const rows: readonly FaultMatrixRow[] = [
 	{
@@ -1003,20 +1002,17 @@ const rows: readonly FaultMatrixRow[] = [
 	{
 		id: "R50l",
 		owner: "core/tool-recovery-logger.ts",
-		journey: 1,
-		phase: "write-reservations memory gate",
-		fault: "the tool recovery log worker crashes or hangs on a batch",
-		witness: NONE,
-		control: NONE,
+		journey: 2,
+		phase: "background-and-stall",
+		fault: "the tool recovery log worker loses its transport on a batch's acknowledgement, and a later acknowledgement never arrives at the close",
+		witness:
+			"the lost acknowledgement is one crash that drops its batch and allows one respawn; the close flush ends at its 200 ms bound past a held acknowledgement",
+		control:
+			"an acknowledged batch leaves one worker with nothing dropped, and the respawned worker acknowledges the next batch",
 		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"the world's worker hooks can hold or make uncloneable the worker's 'ack' (holdNextResponse/replaceNextResult), but no journey runs a root tool failure whose record reaches the logger and then asserts its stats (formatToolRepairHealthReport: crashes, dropped, respawns, workerStarts) after the crash, the respawned worker's acknowledged batch as control, or the bounded flush at disposal past a held ack",
-			},
-		],
+		status: "covered",
+		// The failed tool calls ask judgments with System One on that no reading derives, as for R18.
+		modes: ["off"],
 	},
 	{
 		id: "E13R",
