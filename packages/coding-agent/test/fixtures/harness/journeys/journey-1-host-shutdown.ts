@@ -336,6 +336,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		warningsUnchanged: true,
 		requestsUnchanged: true,
 	});
+	expect(cpRefused.disposal, "the quit owner leaves the world cleanly once its compaction settled").toBeUndefined();
 	trace.claimRejection(cpRefused.outcome, "Compaction cancelled");
 	world.faultMatrix.witness("R11", { control: false });
 
@@ -505,6 +506,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	expect(pre.fileAfterRelease, "the release appends no byte after the quit").toBe(pre.fileAtQuit);
 	expect(pre.lifecycleAfterRelease, "no compaction lifecycle opens behind a closed session").toEqual([]);
 	expect(pre.requestsAfterRelease, "no provider request starts after the quit").toBe(pre.requestsAtQuit);
+	expect(pre.heldDisposal, "the quit held owner leaves the world cleanly once its work settled").toBeUndefined();
 	expect(pre.control.disposal, "the normal-order control disposes cleanly").toBeUndefined();
 	expect(pre.control.summary, "the control commits the handler's summary").toBe("The held summary.");
 	expect(pre.control.lifecycle, "the control settles one lifecycle once, as a success").toEqual([

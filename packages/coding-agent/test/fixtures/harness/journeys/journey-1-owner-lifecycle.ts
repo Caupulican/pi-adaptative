@@ -1373,6 +1373,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		warningsAfterRelease: [closingDisclosure],
 		providerRequestsAfterQuit: 0,
 		fileUnchangedByRelease: true,
+		heldDisposal: undefined,
 		controlReflectionReached: true,
 		controlDisposal: undefined,
 		controlQuitWarnings: [],

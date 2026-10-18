@@ -512,8 +512,9 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 /**
  * R39, both modes. An auxiliary root with System One off and the owner's continuation delay at its 60 s maximum starts a goal with
  * no requirement and goes idle: the goal is active, so the idle scheduler arms its one continuation wake on the `goal-continuation`
- * port at that delay, and the port's wall timer is far beyond the witness. Advancing the port by one millisecond less than the
- * delay fires nothing and submits nothing (the control). The owner's budget leaves room for exactly one turn; advancing the last
+ * port at that delay, and the port's wall timer is far beyond the witness. The armed wake is foreground occupancy, so the witness
+ * waits for the arm, never for foreground idle, until the wake has fired and its pass has run. Advancing the port by one
+ * millisecond less than the delay fires nothing and submits nothing (the control). The owner's budget leaves room for exactly one turn; advancing the last
  * millisecond fires the wake, its pass reads the active goal, and its one turn's charge stops the goal as budget_limited with
  * nothing armed and no warning (the fault).
  */
@@ -551,7 +552,10 @@ async function verifyGoalAutoContinueWake(world: HarnessWorld): Promise<void> {
 	);
 	const warningMark = world.warnings.length;
 	await withDeadline(trace, `${label} start turn`, session.prompt("Start the retry limit goal."), 90_000);
-	await withDeadline(trace, `${label} start settled`, session.waitForForegroundIdle(), 90_000);
+	// The prompt's own tail arms the wake (its idle scheduling runs before prompt() resolves). A foreground-idle wait here
+	// would block on that armed continuation, which is foreground occupancy, until the port's wall timer fired it with no
+	// pass scripted: the witness waits for the arm itself.
+	await withDeadline(trace, `${label} wake armed`, world.timers.whenArmed(WAKE_OWNER), 90_000);
 	// The owner's budget leaves room for exactly one continuation turn: the pass stops at its own charge.
 	const tokensUsed = session.getGoalStateSnapshot()?.tokensUsed ?? 0;
 	const edited = editPersistedGoal(session, { userGoal: GOAL, tokenBudget: tokensUsed + PASS_TOKENS });

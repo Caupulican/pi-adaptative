@@ -3059,6 +3059,8 @@ export interface CompactionBehindHeldRunWitness {
 	readonly lifecycleAfterRelease: ReturnType<typeof compactionLifecycle>;
 	readonly requestsAtQuit: number;
 	readonly requestsAfterRelease: number;
+	/** The held owner's release from the world after every witness read: undefined when it completed. */
+	readonly heldDisposal: unknown;
 	readonly control: {
 		readonly reconnectSubscriptions: number;
 		readonly retentionPlanningReached: boolean;
@@ -3219,7 +3221,7 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 	controlSession.agent.subscribe = subscribeControl;
 	const disposal = await world.disposeSessionInBody(controlSession);
 	const controlText = world.io.peekFile(controlFile) ?? "";
-	return {
+	const witness = {
 		subscriptionsAfterQuit,
 		retentionEligiblePairs,
 		planningRequestsAfterQuit,
@@ -3243,6 +3245,10 @@ export async function runCompactionBehindHeldRun(world: HarnessWorld): Promise<C
 			quitWarnings: world.warnings.slice(controlMark).filter((message) => message !== CLOSING_VERIFICATION_NOTICE),
 		},
 	};
+	// Every witness read is taken and the held run and compaction have settled: the held owner, already quit, leaves the world's ownership
+	// through the steps the world's close would run on it, so no later witness counts it as a live owner.
+	const heldDisposal = await world.disposeSessionInBody(heldSession);
+	return { ...witness, heldDisposal };
 }
 
 /** Canonical archived tool history: thirteen successful unpinned pairs exceed the unchanged twelve-pair recency floor. */
@@ -3295,6 +3301,8 @@ export interface CompactionCloseRefusalWitness {
 	readonly fileUnchanged: boolean;
 	readonly warningsUnchanged: boolean;
 	readonly requestsUnchanged: boolean;
+	/** The owner's release from the world after every witness read: undefined when it completed. */
+	readonly disposal: unknown;
 }
 
 /**
@@ -3355,7 +3363,7 @@ export async function runCompactionCloseAppendRefused(world: HarnessWorld): Prom
 		outcome = await withDeadline(trace, "compaction refusal: the held summary resumes", compaction, 60_000);
 	}
 	const fileAfterRelease = world.io.peekFile(sessionFile) ?? "";
-	return {
+	const witness = {
 		file,
 		quitWarnings,
 		outcome,
@@ -3364,6 +3372,10 @@ export async function runCompactionCloseAppendRefused(world: HarnessWorld): Prom
 		warningsUnchanged: isDeepStrictEqual(warningsSince(world, mark), quitWarnings),
 		requestsUnchanged: world.provider.requests.length === requestsAtQuit,
 	};
+	// Every witness read is taken and the held compaction has settled: the owner, already quit, leaves the world's ownership through the
+	// steps the world's close would run on it, so no later witness counts it as a live owner.
+	const disposal = await world.disposeSessionInBody(session);
+	return { ...witness, disposal };
 }
 
 /**
@@ -6077,6 +6089,8 @@ export interface ClosingReflectionTimeoutWitness {
 	readonly warningsAfterRelease: readonly string[];
 	readonly providerRequestsAfterQuit: number;
 	readonly fileUnchangedByRelease: boolean;
+	/** The held owner's release from the world once its quit and its reflection settled: undefined when it completed. */
+	readonly heldDisposal: unknown;
 	readonly controlReflectionReached: boolean;
 	readonly controlDisposal: unknown;
 	readonly controlQuitWarnings: readonly string[];
@@ -6142,6 +6156,9 @@ export async function runClosingReflectionTimeout(
 	const fileAfterRelease = world.io.peekFile(heldFile) ?? "";
 	const providerRequestsAfterQuit = world.provider.requests.length - requestsAtQuit;
 	const warningsAfterRelease = warningsSince(world, mark);
+	// The quit and the released reflection have both settled: the held owner leaves the world's ownership through the steps the world's
+	// close would run on it, so no later witness counts this disposed owner as a live one.
+	const heldDisposal = await world.disposeSessionInBody(heldSession);
 
 	const released = createBarrier();
 	released.release();
@@ -6186,6 +6203,7 @@ export async function runClosingReflectionTimeout(
 		warningsAfterRelease,
 		providerRequestsAfterQuit,
 		fileUnchangedByRelease: fileAfterRelease.length > 0 && fileAfterRelease === fileAtQuit,
+		heldDisposal,
 		controlReflectionReached,
 		controlDisposal,
 		controlQuitWarnings: warningsSince(world, controlMark),
