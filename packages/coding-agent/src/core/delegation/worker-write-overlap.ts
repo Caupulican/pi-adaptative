@@ -14,7 +14,7 @@
 
 import path from "node:path";
 import { HOST_FINDING_PREFIX } from "../autonomy/host-finding-prefixes.ts";
-import { boundedText } from "../util/bounded-line.ts";
+import { boundedText, quotedSpan } from "../util/bounded-line.ts";
 
 const MAX_FINISHED_SPANS = 128;
 const MAX_FINDINGS = 12;
@@ -108,7 +108,7 @@ export class WorkerWriteOverlapTracker {
 					continue;
 				}
 				findings.push(
-					`${HOST_FINDING_PREFIX.overlap} ${boundedText(file, MAX_PATH_CHARS)} was changed by both worker ${laneId} (agent ${mine.agentId}) and worker ${other.laneId} (agent ${other.agentId}) while their runs overlapped, with no write reservation between them. Neither was blocked; compare both changes before accepting either.`,
+					`${HOST_FINDING_PREFIX.overlap} ${quotedSpan(boundedText(file, MAX_PATH_CHARS, { path: true }))} was changed by both worker ${laneId} (agent ${mine.agentId}) and worker ${other.laneId} (agent ${other.agentId}) while their runs overlapped, with no write reservation between them. Neither was blocked; compare both changes before accepting either.`,
 				);
 			}
 		}

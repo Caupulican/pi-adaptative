@@ -23,6 +23,7 @@ import { PI_PARENT_PID_ENV } from "../process-identity.ts";
 import { createProcessScratchDirectory, removeProcessScratchDirectory } from "../process-scratch.ts";
 import { PI_SESSION_ROLE_ENV } from "../session-role.ts";
 import type { BashSpawnHook } from "../tools/bash.ts";
+import { boundedText, quotedSpan } from "../util/bounded-line.ts";
 import { sanitizeWorkerLabel, WORKER_LABEL_ENV, workerCommitterEnvironment } from "./worker-git-identity.ts";
 
 /** Per-run ownership marker exported to every command a worker runs. */
@@ -115,11 +116,19 @@ function reapMarkedProcesses(marker: string): string[] {
 	return reaped;
 }
 
-/** `pid: command line` (bounded) for a process about to be ended, so the owner can see what a worker left running. */
+/**
+ * `pid: command line` (bounded) for a process about to be ended, so the owner can see what a worker left running. An
+ * argument with whitespace is one quoted span and the line keeps its head and tail, so a cut never leaves a shorter
+ * path that reads as a real one.
+ */
 function describeProcess(pid: number): string {
 	try {
-		const command = readFileSync(`/proc/${pid}/cmdline`, "latin1").split("\0").join(" ").trim();
-		return `${pid}: ${command.slice(0, 120) || "(no command line)"}`;
+		const command = readFileSync(`/proc/${pid}/cmdline`, "latin1")
+			.split("\0")
+			.map((argument) => (/\s/.test(argument) ? quotedSpan(argument) : argument))
+			.join(" ")
+			.trim();
+		return `${pid}: ${command ? boundedText(command, 120) : "(no command line)"}`;
 	} catch {
 		return `${pid}: (exited)`;
 	}

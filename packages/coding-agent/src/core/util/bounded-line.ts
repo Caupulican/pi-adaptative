@@ -1,7 +1,23 @@
 /** Stands for the elided middle of a long line: no path character, and no boundary a path or alias starts at. */
 const BOUNDED_LINE_ELISION = "…";
+/**
+ * The quotes a bounded line keeps a span of whole, in the order {@link quotedSpan} prefers them: `'` and `` ` `` pass
+ * through JSON unescaped, `"` does not. All three are boundaries the path-alias extractor and rewriter start a path at.
+ */
+const SPAN_QUOTES = ["'", "`", '"'] as const;
 /** One unit of a bounded line: a non-space run with every quoted span inside it whole, a space, or an unpaired quote. */
 const BOUNDED_LINE_UNIT_RE = /(?:[^\s'"`]|'[^']*'|"[^"]*"|`[^`]*`)+|\s|['"`]/g;
+
+/**
+ * A value a host sentence embeds (a path, a list item, a command) as one quoted span, in the first quote of
+ * {@link SPAN_QUOTES} the value does not contain, so {@link boundedText} never ends a head inside it: an unquoted path
+ * with spaces is several units, and a head of its first units would read, to the path-alias extractor, as the real
+ * shorter path it spells. A value that contains all three quotes cannot be one span and is returned as it is.
+ */
+export function quotedSpan(value: string): string {
+	const quote = SPAN_QUOTES.find((candidate) => !value.includes(candidate));
+	return quote === undefined ? value : `${quote}${value}${quote}`;
+}
 
 export interface BoundedTextOptions {
 	/**

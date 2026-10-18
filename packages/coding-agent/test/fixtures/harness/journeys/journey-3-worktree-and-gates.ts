@@ -603,7 +603,9 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		next_status: { kind: "choice", choice: "continue", confidence: 0.97 },
 	} as const;
 	// Each correction is bound to the current host request (the suffix after the newest assistant turn), not the whole history.
-	const reviewLine = "changed files with no explanation: src/late.ts";
+	// The review quotes each unexplained file as one span (worker-report.ts judgeSubmittedReport, bounded-line.ts quotedSpan):
+	// `src/late.ts` holds no `'`, so it is `'src/late.ts'`, which the request's JSON leaves unescaped.
+	const reviewLine = "changed files with no explanation: 'src/late.ts'";
 	const recordedLine = "Files the host recorded as changed: src/late.ts";
 	world.systemOne.enterPhase(
 		"late-attempt",

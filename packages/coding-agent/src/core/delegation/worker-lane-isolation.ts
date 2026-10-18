@@ -18,7 +18,7 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative } from "node:path";
 import { HOST_FINDING_PREFIX } from "../autonomy/host-finding-prefixes.ts";
-import { boundedText } from "../util/bounded-line.ts";
+import { boundedText, quotedSpan } from "../util/bounded-line.ts";
 import type { ReleaseOutcome } from "../util/resource-release.ts";
 import type { WorktreeSyncEngineDeps } from "../worktree-sync/git-engine.ts";
 import {
@@ -173,8 +173,9 @@ export class WorkerLaneIsolation {
 				...(state.facts.dirty ? ["uncommitted changes"] : []),
 				...(state.facts.aheadOfMain > 0 ? [`${state.facts.aheadOfMain} commit(s) ahead of main`] : []),
 			].join(" and ");
-			const line = `${HOST_FINDING_PREFIX.lane} this worker worked in its own worktree lane '${state.laneKey}' (${state.worktreePath}, branch ${state.branch}), not the shared checkout; its changes are there: ${holds}. Review with worktree_sync git_diff laneKey=${state.laneKey}; integrate with git_add and git_commit (laneKey), sync, then land; release_lane when done.`;
-			// Never cut inside the quoted lane key; the kept tail starts at a path separator when one is in reach.
+			const line = `${HOST_FINDING_PREFIX.lane} this worker worked in its own worktree lane '${state.laneKey}' (${quotedSpan(state.worktreePath)}, branch ${state.branch}), not the shared checkout; its changes are there: ${holds}. Review with worktree_sync git_diff laneKey=${state.laneKey}; integrate with git_add and git_commit (laneKey), sync, then land; release_lane when done.`;
+			// Never cut inside the quoted lane key or the quoted lane path; the kept tail starts at a path separator when one
+			// is in reach.
 			return boundedText(line, MAX_LANE_FINDING_CHARS);
 		} catch (error) {
 			this.deps.warn(`Worker lane report failed: ${error instanceof Error ? error.message : String(error)}`);

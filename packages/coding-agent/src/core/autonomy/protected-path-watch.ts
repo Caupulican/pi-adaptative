@@ -21,7 +21,7 @@ import { lstatSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { hostWroteDuring } from "../../utils/host-write-window.ts";
 import { AGENT_ROOT_DIRECTORY_NAMES, AGENT_ROOT_FILE_NAMES } from "../agent-paths.ts";
-import { boundedText } from "../util/bounded-line.ts";
+import { boundedText, quotedSpan } from "../util/bounded-line.ts";
 import { HOST_FINDING_PREFIX } from "./host-finding-prefixes.ts";
 import { getHarnessWriteProtectedPaths } from "./lane-private-paths.ts";
 
@@ -253,7 +253,7 @@ export class ProtectedPathWatch {
 	blockers(): string[] {
 		const lines = this.recorded.map((finding) =>
 			clipBlocker(
-				`${HOST_FINDING_PREFIX.protectedPath} ${finding.path} (${finding.before} -> ${finding.after}) changed while worker ${finding.workerId}'s ${finding.scope === "command" ? "command was running" : "run was in progress"}. A process tool can write harness files the structural write tool refuses: review it and revert it if unintended. Not proof of authorship; the root or another worker may also have written.`,
+				`${HOST_FINDING_PREFIX.protectedPath} ${quotedSpan(finding.path)} (${finding.before} -> ${finding.after}) changed while worker ${finding.workerId}'s ${finding.scope === "command" ? "command was running" : "run was in progress"}. A process tool can write harness files the structural write tool refuses: review it and revert it if unintended. Not proof of authorship; the root or another worker may also have written.`,
 			),
 		);
 		if (this.omitted > 0) {

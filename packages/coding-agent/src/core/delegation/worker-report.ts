@@ -23,7 +23,7 @@ import type {
 	WorkerReportRequirementStatus,
 	WorkerSubmittedReport,
 } from "../autonomy/contracts.ts";
-import { boundedText } from "../util/bounded-line.ts";
+import { boundedText, quotedSpan } from "../util/bounded-line.ts";
 import {
 	MAX_WORKER_CLAIM_BLOCKER_CHARS,
 	MAX_WORKER_CLAIM_BLOCKERS,
@@ -354,7 +354,11 @@ function verdict(
 	return {
 		verdict: kind,
 		coveredRequirementIds: [...(parts.covered ?? [])],
-		missing: [...(parts.missing ?? [])].slice(0, MAX_WORKER_REPORT_ENTRIES),
+		// A claim keeps a missing line of at most MAX_WORKER_REPORT_TEXT_CHARS and rejects a longer one, so each is bounded
+		// here: a line quotes a path, a list of paths or a worker's note, any of which can reach that bound alone.
+		missing: [...(parts.missing ?? [])]
+			.slice(0, MAX_WORKER_REPORT_ENTRIES)
+			.map((line) => boundedText(line, MAX_WORKER_REPORT_TEXT_CHARS)),
 		reasonCodes: [...new Set(parts.reasonCodes)].slice(0, MAX_WORKER_CLAIM_REASON_CODES),
 		judgedBy: "code",
 		at: now(),
@@ -391,21 +395,23 @@ export function judgeSubmittedReport(input: {
 		const receipt = check.receiptId ? receipts.get(check.receiptId) : undefined;
 		if (check.result !== "passed") continue;
 		if (!check.receiptId) {
-			missing.push(`check "${check.command}" is reported passed with no receipt id`);
+			missing.push(`check ${quotedSpan(check.command)} is reported passed with no receipt id`);
 			reasons.push("check_without_receipt");
 		} else if (!receipt) {
-			missing.push(`check "${check.command}" cites receipt ${check.receiptId}, which the host has no record of`);
+			missing.push(
+				`check ${quotedSpan(check.command)} cites receipt ${check.receiptId}, which the host has no record of`,
+			);
 			reasons.push("check_unknown_receipt");
 		} else if (receipt.isError || (receipt.exitCode !== undefined && receipt.exitCode !== 0)) {
 			contradicted.push(
-				`check "${check.command}" is reported passed but receipt ${receipt.id} shows ${receipt.exitCode !== undefined ? `exit ${receipt.exitCode}` : "an error"}`,
+				`check ${quotedSpan(check.command)} is reported passed but receipt ${receipt.id} shows ${receipt.exitCode !== undefined ? `exit ${receipt.exitCode}` : "an error"}`,
 			);
 			reasons.push("check_contradicted_by_receipt");
 		}
 	}
 	for (const change of submitted.report.changes) {
 		if (!changed.has(spelled(change.file))) {
-			contradicted.push(`change to ${change.file} is reported but the host recorded no change to it`);
+			contradicted.push(`change to ${quotedSpan(change.file)} is reported but the host recorded no change to it`);
 			reasons.push("change_not_recorded");
 		}
 	}
@@ -413,7 +419,7 @@ export function judgeSubmittedReport(input: {
 		const reported = new Set(submitted.report.changes.map((change) => spelled(change.file)));
 		const unreported = input.changedFiles.filter((file) => !reported.has(spelled(file)));
 		if (unreported.length > 0) {
-			missing.push(`changed files with no explanation: ${unreported.slice(0, 12).join(", ")}`);
+			missing.push(`changed files with no explanation: ${unreported.slice(0, 12).map(quotedSpan).join(", ")}`);
 			reasons.push("unreported_changes");
 		}
 	}
@@ -433,7 +439,7 @@ export function judgeSubmittedReport(input: {
 				reasons.push("requirement_without_evidence");
 			} else if (unknown.length === entry.evidence.length) {
 				missing.push(
-					`requirement ${id} cites evidence the host has no record of: ${unknown.slice(0, 6).join(", ")}`,
+					`requirement ${id} cites evidence the host has no record of: ${unknown.slice(0, 6).map(quotedSpan).join(", ")}`,
 				);
 				reasons.push("requirement_unknown_evidence");
 			} else covered.push(id);
@@ -498,9 +504,9 @@ export function workerReportClaimText(claim: {
 			`Requirement ${requirement.id} is ${requirement.status.replace("_", " ")}${requirement.note ? `: ${requirement.note}` : "."}`,
 		);
 	}
-	for (const change of report.changes) lines.push(`Changed ${change.file}: ${change.what}`);
+	for (const change of report.changes) lines.push(`Changed ${quotedSpan(change.file)}: ${change.what}`);
 	for (const check of report.checks) {
-		if (check.note) lines.push(`Check "${check.command}" ${check.result.replace("_", " ")}: ${check.note}`);
+		if (check.note) lines.push(`Check ${quotedSpan(check.command)} ${check.result.replace("_", " ")}: ${check.note}`);
 	}
 	return boundedText(lines.join("\n"), 16_000);
 }
