@@ -1,4 +1,4 @@
-import { constants, type DatabaseSync } from "node:sqlite";
+import { constants, type DatabaseSync, type SQLOutputValue } from "node:sqlite";
 
 interface SqliteFiles {
 	path(value: unknown): string;
@@ -22,6 +22,131 @@ interface Handle {
 }
 
 export type SqliteFaultOperation = "exec" | "prepare" | "run";
+
+/**
+ * The native result a scripted SQLite fault reports. Absent, the failure is a plain scripted error naming its operation and SQL.
+ * `busy` and `locked` throw what node:sqlite throws for SQLITE_BUSY (5) and SQLITE_LOCKED (6): `code` ERR_SQLITE_ERROR, the
+ * result code in `errcode`, and SQLite's own text as `errstr` and message. The RAM backing never contends, so this is the only
+ * way a journey reaches a busy or locked database.
+ */
+export type SqliteFaultResult = "busy" | "locked";
+
+const NATIVE_RESULTS: Readonly<Record<SqliteFaultResult, { readonly errcode: number; readonly errstr: string }>> = {
+	busy: { errcode: 5, errstr: "database is locked" },
+	locked: { errcode: 6, errstr: "database table is locked" },
+};
+
+interface SqliteFault {
+	readonly operation: SqliteFaultOperation;
+	readonly sql: string;
+	readonly result?: SqliteFaultResult;
+	/** Present on a persistent fault: it stays armed until cleared and counts what it refused. */
+	readonly denial?: { readonly name: string; hits: number; cleared: boolean };
+}
+
+/** A persistent SQLite fault: every matching operation fails until the scenario clears it. Close fails if it is never cleared or never hit. */
+export interface SqliteDenial {
+	readonly name: string;
+	/** Operations refused so far. */
+	readonly hits: number;
+	/** Restores the operation; returns the number of refused operations. */
+	clear(): number;
+}
+
+/** One backing's committed schema and rows: what {@link VirtualSqlite.rewind} restores. */
+interface BackingImage {
+	readonly userVersion: number;
+	/** Every schema object with SQL of its own, in creation order (internal `sqlite_` objects and automatic indexes excluded). */
+	readonly objects: readonly { readonly type: string; readonly name: string; readonly sql: string }[];
+	/** Each table's rows, `sqlite_sequence` included when present; integers are read as bigints, so every value is exact. */
+	readonly rows: ReadonlyMap<string, readonly Record<string, SQLOutputValue>[]>;
+}
+
+/** The committed state of every RAM backing at one point, by file identity: the durable point a crash cut rewinds SQLite to. */
+export interface VirtualSqliteSnapshot {
+	readonly images: ReadonlyMap<number | bigint, BackingImage>;
+}
+
+function quoted(identifier: string): string {
+	return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+function scriptedFailure(fault: SqliteFault): Error {
+	if (fault.result === undefined) return new Error(`Scripted SQLite ${fault.operation} failure: ${fault.sql}`);
+	const native = NATIVE_RESULTS[fault.result];
+	return Object.assign(new Error(native.errstr), { code: "ERR_SQLITE_ERROR", ...native });
+}
+
+function imageOf(database: DatabaseSync): BackingImage {
+	const userVersion = Number(database.prepare("PRAGMA user_version").get()?.user_version ?? 0);
+	const objects = database
+		.prepare(
+			"SELECT type, name, sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY rowid",
+		)
+		.all()
+		.map((row) => ({ type: String(row.type), name: String(row.name), sql: String(row.sql) }));
+	const tables = objects.filter((object) => object.type === "table").map((object) => object.name);
+	if (database.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'sqlite_sequence'").get() !== undefined)
+		tables.push("sqlite_sequence");
+	const rows = new Map<string, readonly Record<string, SQLOutputValue>[]>();
+	for (const table of tables) {
+		const statement = database.prepare(`SELECT * FROM ${quoted(table)}`);
+		statement.setReadBigInts(true);
+		rows.set(table, statement.all());
+	}
+	return { userVersion, objects, rows };
+}
+
+function insertRows(database: DatabaseSync, table: string, rows: readonly Record<string, SQLOutputValue>[]): void {
+	const first = rows[0];
+	if (first === undefined) return;
+	const columns = Object.keys(first);
+	const insert = database.prepare(
+		`INSERT INTO ${quoted(table)} (${columns.map(quoted).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+	);
+	for (const row of rows) insert.run(...columns.map((column) => row[column] ?? null));
+}
+
+/**
+ * Replaces every schema object and row of `database` with `image` in one transaction: what the database holds is exactly what it
+ * held when the image was taken. Foreign keys are off while the tables are rebuilt and restored afterwards.
+ */
+function restoreImage(database: DatabaseSync, image: BackingImage): void {
+	const foreignKeys = Number(database.prepare("PRAGMA foreign_keys").get()?.foreign_keys ?? 0);
+	database.exec("PRAGMA foreign_keys = OFF");
+	try {
+		database.exec("BEGIN");
+		try {
+			const current = database
+				.prepare("SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'")
+				.all()
+				.map((row) => ({ type: String(row.type), name: String(row.name) }));
+			for (const type of ["view", "trigger", "index", "table"]) {
+				for (const object of current.filter((candidate) => candidate.type === type))
+					database.exec(`DROP ${type.toUpperCase()} IF EXISTS ${quoted(object.name)}`);
+			}
+			const tables = image.objects.filter((object) => object.type === "table");
+			for (const object of tables) database.exec(object.sql);
+			for (const object of tables) insertRows(database, object.name, image.rows.get(object.name) ?? []);
+			// Explicit ids advance the sequence of each AUTOINCREMENT table; the image's own counters replace them.
+			if (database.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'sqlite_sequence'").get() !== undefined) {
+				database.exec("DELETE FROM sqlite_sequence");
+				insertRows(database, "sqlite_sequence", image.rows.get("sqlite_sequence") ?? []);
+			}
+			for (const object of image.objects.filter((candidate) => candidate.type !== "table"))
+				database.exec(object.sql);
+			database.exec(`PRAGMA user_version = ${image.userVersion}`);
+			database.exec("COMMIT");
+		} catch (error) {
+			if (database.isTransaction) database.exec("ROLLBACK");
+			throw error;
+		}
+	} finally {
+		database.exec(`PRAGMA foreign_keys = ${foreignKeys === 0 ? "OFF" : "ON"}`);
+	}
+}
+
+const EMPTY_IMAGE: BackingImage = { userVersion: 0, objects: [], rows: new Map() };
 
 const WRITE_ACTIONS = new Set(
 	Object.entries(constants)
@@ -49,7 +174,9 @@ export class VirtualSqlite {
 	private readonly backings = new Map<number | bigint, Backing>();
 	private readonly databases = new Set<DatabaseSync>();
 	private readonly handles = new Set<Handle>();
-	private readonly faults: Array<{ operation: SqliteFaultOperation; sql: string }> = [];
+	private readonly faults: SqliteFault[] = [];
+	/** Persistent faults by name, kept after clearing so the close can check each was hit. */
+	private readonly denials = new Map<string, NonNullable<SqliteFault["denial"]>>();
 	private active = true;
 
 	constructor(files: SqliteFiles, reject: (kind: string) => never) {
@@ -151,9 +278,11 @@ export class VirtualSqlite {
 			const faultIndex = this.faults.findIndex(
 				(fault) => fault.operation === key && typeof sql === "string" && sql.includes(fault.sql),
 			);
-			if (faultIndex >= 0) {
-				const fault = this.faults.splice(faultIndex, 1)[0];
-				throw new Error(`Scripted SQLite ${fault.operation} failure: ${fault.sql}`);
+			const fault = this.faults[faultIndex];
+			if (fault !== undefined) {
+				if (fault.denial === undefined) this.faults.splice(faultIndex, 1);
+				else fault.denial.hits++;
+				throw scriptedFailure(fault);
 			}
 			const method: unknown = Reflect.get(target, key, target);
 			if (typeof method !== "function") throw new TypeError(`SQLite ${String(key)} is not callable`);
@@ -225,13 +354,82 @@ export class VirtualSqlite {
 		return [...this.handles].filter((handle) => handle.open).map((handle) => handle.path);
 	}
 
-	failNext(operation: SqliteFaultOperation, sql: string): void {
+	failNext(operation: SqliteFaultOperation, sql: string, result?: SqliteFaultResult): void {
 		if (!sql.trim()) throw new Error("SQLite failure requires a specific SQL witness");
-		this.faults.push({ operation, sql });
+		this.faults.push({ operation, sql, ...(result === undefined ? {} : { result }) });
+	}
+
+	/** Fails every matching operation until `clear()`; see {@link SqliteDenial}. */
+	denyUntilCleared(fault: {
+		readonly name: string;
+		readonly operation: SqliteFaultOperation;
+		readonly sql: string;
+		readonly result?: SqliteFaultResult;
+	}): SqliteDenial {
+		if (!fault.sql.trim()) throw new Error("SQLite denial requires a specific SQL witness");
+		if (this.denials.has(fault.name)) throw new Error(`SQLite denial ${fault.name} is already declared`);
+		const denial = { name: fault.name, hits: 0, cleared: false };
+		this.denials.set(fault.name, denial);
+		const entry: SqliteFault = {
+			operation: fault.operation,
+			sql: fault.sql,
+			...(fault.result === undefined ? {} : { result: fault.result }),
+			denial,
+		};
+		this.faults.push(entry);
+		return {
+			name: fault.name,
+			get hits() {
+				return denial.hits;
+			},
+			clear: () => {
+				const index = this.faults.indexOf(entry);
+				if (index >= 0) this.faults.splice(index, 1);
+				denial.cleared = true;
+				return denial.hits;
+			},
+		};
 	}
 
 	assertFaultsConsumed(): void {
-		if (this.faults.length) throw new Error(`Unused SQLite faults: ${JSON.stringify(this.faults)}`);
+		const pending = this.faults.filter((fault) => fault.denial === undefined);
+		const problems = pending.length ? [`Unused SQLite faults: ${JSON.stringify(pending)}`] : [];
+		for (const [name, denial] of this.denials) {
+			if (!denial.cleared) problems.push(`SQLite denial ${name} was never cleared`);
+			else if (denial.hits === 0) problems.push(`SQLite denial ${name} refused no operation`);
+		}
+		if (problems.length) throw new Error(problems.join("; "));
+	}
+
+	/**
+	 * The committed state of every backing now. A backing inside a transaction has no durable point to take, so the snapshot
+	 * refuses it rather than record uncommitted rows the shared connection can see.
+	 */
+	snapshot(): VirtualSqliteSnapshot {
+		if (!this.active) return this.reject("sqlite.after_dispose");
+		const images = new Map<number | bigint, BackingImage>();
+		for (const [identity, backing] of this.backings) {
+			if (backing.database.isTransaction)
+				throw new Error(`SQLite snapshot during an open transaction: ${[...backing.handles][0]?.path ?? identity}`);
+			images.set(identity, imageOf(backing.database));
+		}
+		return { images };
+	}
+
+	/**
+	 * Rewinds every backing to `snapshot`, as a crash returns each database file to its last durable point: a backing the snapshot
+	 * holds is restored to it, one created after it is emptied. Only a cut owner can be rewound: an open application handle on a
+	 * backing, or an open transaction, refuses the rewind before anything changes.
+	 */
+	rewind(snapshot: VirtualSqliteSnapshot): void {
+		if (!this.active) this.reject("sqlite.after_dispose");
+		for (const backing of this.backings.values()) {
+			const open = [...backing.handles].filter((handle) => handle.open);
+			if (open.length > 0 || backing.database.isTransaction)
+				throw new Error(`SQLite rewind of a live backing: ${open.map((handle) => handle.path).join(", ")}`);
+		}
+		for (const [identity, backing] of this.backings)
+			restoreImage(backing.database, snapshot.images.get(identity) ?? EMPTY_IMAGE);
 	}
 
 	dispose(): void {

@@ -2729,6 +2729,7 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 					(world.io.peekFile(file) ?? "").includes(queued),
 					"live delivery persists the complete payload",
 				).toBe(true);
+				if (stopAt === "control") world.faultMatrix.witness("R23", { control: true });
 			} else {
 				expect(
 					warnings,
@@ -2782,6 +2783,7 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 						retryRecordsIn(world.io.peekFile(file) ?? "").at(-1),
 						"post-close cancellation remains durable although the session listener is already removed",
 					).toMatchObject({ phase: "end", success: false, finalError: "Retry cancelled" });
+					world.faultMatrix.witness("R23", { control: false });
 				}
 			}
 		} finally {

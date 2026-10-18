@@ -81,6 +81,25 @@ interface PendingEntry extends QueuedInput {
 	held?: boolean;
 }
 
+/** An entry as its durable record holds it: as submitted, a framed third party's words under their origin. */
+function recordableInput(entry: PendingEntry): RecordableQueuedInput {
+	return {
+		id: entry.inputId,
+		kind: entry.kind,
+		text: entry.origin ? entry.origin.text : entry.original.text,
+		...(entry.original.images ? { images: entry.original.images } : {}),
+		...(entry.origin
+			? {
+					origin: {
+						channel: entry.origin.channel,
+						sender: entry.origin.sender,
+						verified: entry.origin.verified,
+					},
+				}
+			: {}),
+	};
+}
+
 /** Abort reason of a pending input the operator took back, cleared or cancelled before admission. */
 export const PENDING_INPUT_WITHDRAWN = new Error("The pending input was withdrawn before admission.");
 
@@ -112,11 +131,16 @@ export interface PendingInputQueueDeps {
 	 * being delivered (held or taken back): that transcript echo is taken back.
 	 */
 	onUndeliveredEchoWithdrawn?(message: AgentMessage): void;
-	/**
-	 * The set of queued inputs changed (an input arrived, was delivered, taken back or withdrawn). Each
-	 * call carries the complete queue in submission order, as submitted: the durable record's content.
-	 */
-	onQueueChanged?(inputs: readonly RecordableQueuedInput[]): void;
+	/** The durable records of the undelivered input (`QueuedInputPersistenceController`). */
+	readonly record?: PendingInputRecord;
+}
+
+/** Where the undelivered input is recorded for a restart. Each call carries its complete set, in submission order, as submitted. */
+export interface PendingInputRecord {
+	/** The set of queued inputs changed (an input arrived, was delivered, taken back or withdrawn). */
+	recordQueuedInput(inputs: readonly RecordableQueuedInput[]): void;
+	/** The set of prompts whose own turn is being prepared changed (`PendingInputQueueController.trackOwnTurn`). */
+	recordOwnTurnInput(inputs: readonly RecordableQueuedInput[]): void;
 }
 
 /** Why an input was held instead of being handed on: its context changed, no run delivered it, or the session closed first. */
@@ -250,6 +274,13 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 * they are delivered (`_delivered`) or when a routed turn drops them unpersisted (`returnUnpersisted`).
 	 */
 	private _awaitingPersistence: PendingEntry[] = [];
+	/**
+	 * Prompts whose own turn is being prepared (`trackOwnTurn`): accepted without queuing, their user entry not persisted yet.
+	 * Not displayed, counted or takeable: their submission has them. They are in the own-turn record, so a crash or restart
+	 * before their delivery restores them held; they leave when delivered (`_delivered`), ended any other way, or queued after
+	 * all (`register`).
+	 */
+	private _preparing: PendingEntry[] = [];
 	private _queuedExtensionCommands: string[] = [];
 	private _nextEntryId = 1;
 	/** Set at disposal: nothing is handed to the agent afterwards. */
@@ -512,8 +543,41 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		);
 		(kind === "steer" ? this._steering : this._followUp).push(entry);
 		this._changed();
+		// A prompt being prepared that queues instead is the queued record's from here, named there before it leaves its own.
+		if (inputId !== undefined) this._leavePreparing(inputId);
 		if (kind === "steer") this._notifySteerQueued();
 		return { id: entry.id, inputId: entry.inputId, signal: entry.abort.signal };
+	}
+
+	/**
+	 * A prompt accepted under `inputId` that runs as its own turn instead of queuing is recorded, as submitted, from now until
+	 * it is delivered, ends any other way, or queues after all (`_preparing`). Nothing is tracked once the queue closed.
+	 */
+	trackOwnTurn(
+		inputId: OwnerInputId,
+		kind: QueuedInputKind,
+		text: string,
+		images: ImageContent[] | undefined,
+		origin: SendUserMessageOrigin | undefined,
+	): void {
+		if (this._closed) return;
+		this._preparing.push(this._newEntry(inputId, kind, { text, images }, origin, new AbortController()));
+		this.deps.ownerInputs.whenUndelivered(inputId, () => this._leavePreparing(inputId));
+		this._ownTurnChanged();
+	}
+
+	/** A prompt being prepared leaves the own-turn record; false when it is not there. */
+	private _leavePreparing(inputId: OwnerInputId): boolean {
+		const index = this._preparing.findIndex((entry) => entry.inputId === inputId);
+		if (index === -1) return false;
+		this._preparing.splice(index, 1);
+		this._ownTurnChanged();
+		return true;
+	}
+
+	/** Report the prompts being prepared, as submitted and in submission order, to the own-turn record. */
+	private _ownTurnChanged(): void {
+		this.deps.record?.recordOwnTurnInput(this._preparing.map(recordableInput));
 	}
 
 	/**
@@ -641,27 +705,11 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 * yet is still named.
 	 */
 	private _changed(): void {
-		if (!this.deps.onQueueChanged) return;
+		if (!this.deps.record) return;
 		const entries = [...this._steering, ...this._followUp, ...this._owned, ...this._awaitingPersistence].sort(
 			(left, right) => left.id - right.id,
 		);
-		this.deps.onQueueChanged(
-			entries.map((entry) => ({
-				id: entry.inputId,
-				kind: entry.kind,
-				text: entry.origin ? entry.origin.text : entry.original.text,
-				...(entry.original.images ? { images: entry.original.images } : {}),
-				...(entry.origin
-					? {
-							origin: {
-								channel: entry.origin.channel,
-								sender: entry.origin.sender,
-								verified: entry.origin.verified,
-							},
-						}
-					: {}),
-			})),
-		);
+		this.deps.record.recordQueuedInput(entries.map(recordableInput));
 	}
 
 	/**
@@ -706,6 +754,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 * either way it leaves the durable record now. What its delivery decides runs in the ledger. No other point delivers.
 	 */
 	private _delivered(inputId: OwnerInputId): void {
+		this._leavePreparing(inputId);
 		for (const entries of [this._awaitingPersistence, this._owned]) {
 			const index = entries.findIndex((entry) => entry.inputId === inputId);
 			if (index === -1) continue;
@@ -936,11 +985,6 @@ export class PendingInputQueueController implements ForegroundInputPort {
 				enqueue(entry.message);
 			}
 		}
-	}
-
-	/** The delivery run the foreground owner started for waiting input ended: a goal one of its inputs started ends with it. */
-	deliveryRunEnded(): void {
-		this.deps.goals.endQueuedOwnerChatGoalExecution();
 	}
 
 	/** Queue an extension command to execute after the current agent run. */

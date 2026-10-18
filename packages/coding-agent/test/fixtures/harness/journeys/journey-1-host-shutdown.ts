@@ -1,6 +1,8 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
+import { decisionLedgerFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { DecisionLedgerStore } from "../../../../src/core/operator-projection/decision-ledger-store.ts";
 import { QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/core/queued-input-record.ts";
 import { verifyModeWitnesses } from "../mode-witnesses.ts";
 import { createBarrier } from "../scripted-provider.ts";
@@ -28,6 +30,37 @@ import {
 
 export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
+	// SQLite busy through the real decision ledger store: while its schema exec answers SQLITE_BUSY, every construction throws
+	// node:sqlite's own busy error and disposes the connection it opened, so no attempt leaves a handle. Once the database is free
+	// again, a normal construction works and closes. Synchronous from denial to clear, so no other owner's exec can meet it.
+	const busyLedgerPath = decisionLedgerFile(`${world.agentDir}-busy-ledger`);
+	const busyHandles = world.guard.openSqliteHandles();
+	const busy = world.guard.denySqliteUntilCleared({
+		name: "r48-ledger-busy",
+		operation: "exec",
+		sql: "CREATE TABLE IF NOT EXISTS ledger_meta",
+		result: "busy",
+	});
+	const busyAttempts = [0, 1].map(() => {
+		try {
+			new DecisionLedgerStore({ databasePath: busyLedgerPath });
+			return undefined;
+		} catch (error) {
+			return error;
+		}
+	});
+	expect(busyAttempts, "each construction against the busy database throws node:sqlite's busy error").toEqual([
+		expect.objectContaining({ message: "database is locked", code: "ERR_SQLITE_ERROR", errcode: 5 }),
+		expect.objectContaining({ message: "database is locked", code: "ERR_SQLITE_ERROR", errcode: 5 }),
+	]);
+	expect(busy.clear(), "the busy database refused both schema execs").toBe(2);
+	expect(world.guard.openSqliteHandles(), "no busy construction leaves a handle").toEqual(busyHandles);
+	world.faultMatrix.witness("R48", { control: false });
+	new DecisionLedgerStore({ databasePath: busyLedgerPath }).close();
+	expect(world.guard.openSqliteHandles(), "the construction after the busy window closes its handle").toEqual(
+		busyHandles,
+	);
+	world.faultMatrix.witness("R48", { control: true });
 	// Quit mid-run: the owner is disposed while its scripted reply is still streaming, with no abort first. The disposal aborts the run
 	// and waits for it to end, so the partial assistant message is kept in the session file with its stop reason. The idle-quit control
 	// disposes after its turn completed: its complete message is kept and no partial one is.

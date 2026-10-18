@@ -85,7 +85,7 @@ const MAX_TERMINAL_HANDOFF_RECORDS = 8;
  */
 const MAX_TERMINAL_MESSAGE_BYTES = 24 * 1024;
 /**
- * Consecutive rejected wake-up deliveries before the queue parks (about 21 s of the capped
+ * Consecutive rejected wake-up deliveries before the queue parks (about 16 s of the capped
  * backoff). A rejection that outlives this is a session-lifetime condition, not a race; the
  * batch stays queued and pending on the branch until a task event or a resume re-arms it.
  */

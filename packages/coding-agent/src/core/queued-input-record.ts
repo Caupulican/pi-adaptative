@@ -1,7 +1,9 @@
+import { readFileSync, unlinkSync } from "node:fs";
 import type { ImageContent } from "@caupulican/pi-ai";
-import type { SessionManager } from "../kernel/node.ts";
+import type { SessionEntry, SessionManager } from "../kernel/node.ts";
 import type { SendUserMessageOrigin } from "./extensions/types.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
+import { isMissingFileError, writeFileAtomicSync } from "./util/atomic-file.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
 
 /**
@@ -9,6 +11,11 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * session custom entry exactly like the human-input snapshots: each write is the complete queue as it
  * stands, and the latest entry on the active branch is the truth. A message leaves the record when it is
  * delivered, taken back to the editor or withdrawn, so a resumed session restores each exactly once.
+ *
+ * The prompts whose own turn is being prepared (accepted, their user entry not persisted yet) have the same record in a
+ * file beside the session file (`ownTurnInputRecordPath`), never in the session: an entry written before a turn's user
+ * entry would become that entry's parent and change the branch. A resumed session restores them held, and from then on
+ * the session record holds them like any held queued input.
  */
 export const QUEUED_INPUT_CUSTOM_TYPE = "queued_owner_input";
 
@@ -83,16 +90,63 @@ export interface QueuedInputRecordResult {
 	readonly omitted: number;
 }
 
+type RecordImageStore = Pick<SessionImageStore, "retainContent" | "pin" | "unpinExcept">;
+
 /**
  * Append the whole current queue as the latest record on the active branch, bounded in count and bytes
  * (the first inputs in submission order are kept). Returns undefined, writing nothing, when `previousKey`
- * already is the record that would be written.
+ * already is the record that would be written. `alsoHeld` are the image sequences the own-turn record names: their
+ * pins are its own, never released here.
  */
 export function appendQueuedInputRecord(
 	sessionManager: Pick<SessionManager, "appendCustomEntry">,
-	imageStore: Pick<SessionImageStore, "retainContent" | "pin" | "unpinExcept"> | undefined,
+	imageStore: RecordImageStore | undefined,
 	inputs: readonly RecordableQueuedInput[],
 	previousKey: string | undefined,
+	alsoHeld: readonly number[] = [],
+): QueuedInputRecordResult | undefined {
+	return writeRecord(imageStore, inputs, previousKey, alsoHeld, (payload) =>
+		sessionManager.appendCustomEntry(QUEUED_INPUT_CUSTOM_TYPE, payload),
+	);
+}
+
+/** The own-turn input record of the session stored in `sessionFile`: a file beside it, never listed as a session. */
+export function ownTurnInputRecordPath(sessionFile: string): string {
+	return `${sessionFile}.own-turn-input.json`;
+}
+
+/**
+ * Write the prompts whose own turn is being prepared as the own-turn record at `path`, replacing it atomically, or remove
+ * the file once none is left; bounded, returned and pinned exactly as the queued record (`appendQueuedInputRecord`), with
+ * `alsoHeld` the image sequences the session's queued record names.
+ */
+export function writeOwnTurnInputRecord(
+	path: string,
+	imageStore: RecordImageStore | undefined,
+	inputs: readonly RecordableQueuedInput[],
+	previousKey: string | undefined,
+	alsoHeld: readonly number[],
+): QueuedInputRecordResult | undefined {
+	return writeRecord(imageStore, inputs, previousKey, alsoHeld, (payload, key) => {
+		if (payload.inputs.length > 0) {
+			writeFileAtomicSync(path, key);
+			return;
+		}
+		try {
+			unlinkSync(path);
+		} catch (error) {
+			if (!isMissingFileError(error)) throw error;
+		}
+	});
+}
+
+/** One bounded record write, through `write`; undefined, writing nothing, when it would not change `previousKey`. */
+function writeRecord(
+	imageStore: RecordImageStore | undefined,
+	inputs: readonly RecordableQueuedInput[],
+	previousKey: string | undefined,
+	alsoHeld: readonly number[],
+	write: (payload: QueuedInputPayload, key: string) => void,
 ): QueuedInputRecordResult | undefined {
 	const recorded: RecordedInput[] = [];
 	let textBytes = 0;
@@ -135,19 +189,29 @@ export function appendQueuedInputRecord(
 		if (!imageStore) throw new Error("Queued input carries an image but the session has no image store");
 		imageStore.pin(held);
 	}
-	sessionManager.appendCustomEntry(QUEUED_INPUT_CUSTOM_TYPE, payload);
+	write(payload, key);
 	if (imageStore && recordedSequences(previousKey).some((sequence) => !held.includes(sequence))) {
-		imageStore.unpinExcept(held);
+		imageStore.unpinExcept([...held, ...alsoHeld]);
 	}
 	return { key, omitted: inputs.length - recorded.length };
 }
 
-/** The image sequences a serialized record names. */
-function recordedSequences(key: string | undefined): number[] {
+/** The inputs a serialized record names. */
+function recordedInputs(key: string | undefined): RecordedInput[] {
 	if (key === undefined) return [];
 	const parsed: unknown = JSON.parse(key);
 	if (!isPlainRecord(parsed) || !Array.isArray(parsed.inputs)) return [];
-	return (parsed.inputs as RecordedInput[]).flatMap((input) => input.images?.map((image) => image.sequence) ?? []);
+	return parsed.inputs as RecordedInput[];
+}
+
+/** The image sequences a serialized record names. */
+export function recordedSequences(key: string | undefined): number[] {
+	return recordedInputs(key).flatMap((input) => input.images?.map((image) => image.sequence) ?? []);
+}
+
+/** The input identities a serialized record names. */
+export function recordedIds(key: string | undefined): Set<string> {
+	return new Set(recordedInputs(key).flatMap((input) => (input.id === undefined ? [] : [input.id])));
 }
 
 function isRecordedInput(value: unknown): value is RecordedInput {
@@ -184,8 +248,9 @@ export interface RestoredQueuedInputs {
 		origin?: QueuedInputOrigin;
 	}>;
 	/**
-	 * Inputs the record names whose user entry is on the branch: delivered, by a process that stopped after persisting
-	 * that entry and before rewriting the record. They are not among `inputs`; their images are neither read nor held.
+	 * Inputs the record names whose user entry is on the branch (in the session, for the own-turn record): delivered, by a
+	 * process that stopped after persisting that entry and before rewriting the record. They are not among `inputs`; their
+	 * images are neither read nor held.
 	 */
 	delivered: number;
 	/** Images the restored inputs name that the image store no longer holds. */
@@ -205,22 +270,62 @@ export function readQueuedInputRecord(
 	sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch" | "getBranch">,
 	imageStore: Pick<SessionImageStore, "read" | "pin"> | undefined,
 ): RestoredQueuedInputs | undefined {
-	const data = sessionManager.getLatestCustomEntryOnBranch(QUEUED_INPUT_CUSTOM_TYPE)?.data;
-	if (
-		!isPlainRecord(data) ||
-		data.version !== 1 ||
-		!Array.isArray(data.inputs) ||
-		!data.inputs.every(isRecordedInput)
-	) {
-		return undefined;
+	const recorded = recordedInputsOf(sessionManager.getLatestCustomEntryOnBranch(QUEUED_INPUT_CUSTOM_TYPE)?.data);
+	if (recorded === undefined || recorded.length === 0) return undefined;
+	return restoreRecordedInputs(recorded, recorded, deliveredInputIds(sessionManager.getBranch()), imageStore);
+}
+
+/**
+ * The own-turn record at `path` (`writeOwnTurnInputRecord`): the prompts it names that are not delivered, in submission
+ * order; undefined when there is no such file. The file is no branch's content, so a prompt is delivered when any entry of
+ * the session names its identity. A prompt in `namedElsewhere` (the identities the session's queued record names) is
+ * restored from that record, never from here as well. A file that is not a record throws.
+ */
+export function readOwnTurnInputRecord(
+	path: string,
+	sessionManager: Pick<SessionManager, "getEntries">,
+	imageStore: Pick<SessionImageStore, "read" | "pin"> | undefined,
+	namedElsewhere: ReadonlySet<string>,
+): RestoredQueuedInputs | undefined {
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch (error) {
+		if (isMissingFileError(error)) return undefined;
+		throw error;
 	}
-	const recorded = data.inputs as RecordedInput[];
-	if (recorded.length === 0) return undefined;
+	const recorded = recordedInputsOf(JSON.parse(text));
+	if (recorded === undefined) throw new Error(`${path} is not an own-turn input record`);
+	const restorable = recorded.filter((input) => input.id === undefined || !namedElsewhere.has(input.id));
+	return restoreRecordedInputs(recorded, restorable, deliveredInputIds(sessionManager.getEntries()), imageStore);
+}
+
+/** The inputs of a record's payload; undefined when `data` is no record. */
+function recordedInputsOf(data: unknown): RecordedInput[] | undefined {
+	if (!isPlainRecord(data) || data.version !== 1 || !Array.isArray(data.inputs)) return undefined;
+	return data.inputs.every(isRecordedInput) ? data.inputs : undefined;
+}
+
+/** The input identities the user entries among `entries` deliver (`SessionMessageEntry.ownerInputId`). */
+function deliveredInputIds(entries: readonly SessionEntry[]): Set<string> {
 	const deliveredIds = new Set<string>();
-	for (const entry of sessionManager.getBranch()) {
+	for (const entry of entries) {
 		if (entry.type === "message" && entry.ownerInputId !== undefined) deliveredIds.add(entry.ownerInputId);
 	}
-	const undelivered = recorded.filter((input) => input.id === undefined || !deliveredIds.has(input.id));
+	return deliveredIds;
+}
+
+/**
+ * The `restorable` inputs of the record `recorded` that `deliveredIds` does not deliver, their images read back and pinned
+ * again; the key is the whole record as written.
+ */
+function restoreRecordedInputs(
+	recorded: readonly RecordedInput[],
+	restorable: readonly RecordedInput[],
+	deliveredIds: ReadonlySet<string>,
+	imageStore: Pick<SessionImageStore, "read" | "pin"> | undefined,
+): RestoredQueuedInputs {
+	const undelivered = restorable.filter((input) => input.id === undefined || !deliveredIds.has(input.id));
 	let missingImages = 0;
 	const inputs = undelivered.map((input) => {
 		const images: ImageContent[] = [];
@@ -259,7 +364,7 @@ export function readQueuedInputRecord(
 	}
 	return {
 		inputs,
-		delivered: recorded.length - undelivered.length,
+		delivered: restorable.length - undelivered.length,
 		missingImages,
 		...(pinError ? { pinError } : {}),
 		key: JSON.stringify({ version: 1, inputs: recorded }),

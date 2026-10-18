@@ -14,7 +14,13 @@ import { getSystemErrorMap } from "node:util";
 import * as undici from "undici";
 import { disposeHttpDispatcher, HTTP_INSTALL_GLOBAL_NAMES } from "../../../src/core/http-dispatcher.ts";
 import { builtinBoundary } from "./builtin-boundary.ts";
-import { type SqliteFaultOperation, VirtualSqlite } from "./sqlite-io.ts";
+import {
+	type SqliteDenial,
+	type SqliteFaultOperation,
+	type SqliteFaultResult,
+	VirtualSqlite,
+	type VirtualSqliteSnapshot,
+} from "./sqlite-io.ts";
 import { VirtualWorkerThreads } from "./virtual-worker.ts";
 
 interface VirtualNode {
@@ -1492,13 +1498,33 @@ export class EffectGuard {
 		return this.workerThreads;
 	}
 
+	/** The paths of the application SQLite handles open now, in open order. */
+	openSqliteHandles(): readonly string[] {
+		return this.sqlite.openHandles();
+	}
+
 	assertNoOpenSqliteHandles(): void {
 		const handles = this.sqlite.openHandles();
 		if (handles.length) throw new Error(`Application SQLite handles leaked: ${handles.join(", ")}`);
 	}
 
-	failNextSqliteOperation(operation: SqliteFaultOperation, sql: string): void {
-		this.sqlite.failNext(operation, sql);
+	failNextSqliteOperation(operation: SqliteFaultOperation, sql: string, result?: SqliteFaultResult): void {
+		this.sqlite.failNext(operation, sql, result);
+	}
+
+	/** A persistent SQLite fault (see {@link VirtualSqlite.denyUntilCleared}); the close checks it was hit and cleared. */
+	denySqliteUntilCleared(fault: Parameters<VirtualSqlite["denyUntilCleared"]>[0]): SqliteDenial {
+		return this.sqlite.denyUntilCleared(fault);
+	}
+
+	/** The committed state of every RAM SQLite backing now: a durable point a crash cut can rewind to. */
+	snapshotSqlite(): VirtualSqliteSnapshot {
+		return this.sqlite.snapshot();
+	}
+
+	/** Rewinds every RAM SQLite backing to `snapshot`; refused while an application handle is open on any backing. */
+	rewindSqlite(snapshot: VirtualSqliteSnapshot): void {
+		this.sqlite.rewind(snapshot);
 	}
 
 	assertSqliteFaultsConsumed(): void {

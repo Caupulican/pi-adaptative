@@ -56,6 +56,11 @@ export interface ScriptStep {
 	until?(request: ScriptedRequest): boolean;
 	/** Bound repeated production requests; defaults to 32. Exhaustion is a script failure. */
 	maxRequests?: number;
+	/**
+	 * The transport failed before the response began (a refused connection, an HTTP error status): as a real provider does, the
+	 * stream emits no `start` event, only the error terminal. Requires an error reply without frames.
+	 */
+	beforeStart?: boolean;
 	/** Reply callbacks are synchronous; controlled asynchronous ordering belongs in the cancellable gate. */
 	reply: ScriptedReply | ((request: ScriptedRequest) => ScriptedReply);
 }
@@ -98,6 +103,50 @@ export function calls(
 
 export function fail(name: string, errorMessage: string): ScriptStep {
 	return { name, reply: { content: [], stopReason: "error", errorMessage } };
+}
+
+/**
+ * A connection the transport could not open: no `start` event, an error terminal with no content. The default message is the
+ * default of the pinned OpenAI SDK's `APIConnectionError`; it matches the classifier's generic `connection.?error` network pattern
+ * and none of the patterns tested before it, so it is filed as a retryable network error.
+ */
+export function connectError(name: string, errorMessage = "Connection error."): ScriptStep {
+	return { ...fail(name, errorMessage), beforeStart: true };
+}
+
+/**
+ * A quota refusal: the HTTP error arrives before the response begins and carries the provider's retry-after the way the
+ * transport preserves it through string-only boundaries (the suffix and seconds format of pi-ai's `appendProviderRetryDirective`).
+ * The usage-limit text matches the quota pattern, which the classifier tests before its rate-limit and network patterns, so it is
+ * filed as `billing_or_quota`, not retryable, with the directive's delay as `retryAfterMs`.
+ */
+export function quota(name: string, retryAfterMs: number): ScriptStep {
+	if (!Number.isSafeInteger(retryAfterMs) || retryAfterMs < 1)
+		throw new RangeError("quota requires a positive retry-after");
+	const seconds = retryAfterMs / 1000;
+	const retryAfter = Number.isInteger(seconds) ? String(seconds) : String(Number(seconds.toFixed(3)));
+	return connectError(
+		name,
+		`429 Usage limit reached for this account.\nProvider retry directive: retry after ${retryAfter}s.`,
+	);
+}
+
+/**
+ * A stream that fails after it has streamed `frames`: the error terminal keeps the partial content the last frame carried, as a
+ * real transport's error termination does.
+ */
+export function errorAfterFrames(
+	name: string,
+	frames: readonly ScriptedPartialFrame[],
+	errorMessage: string,
+): ScriptStep {
+	const last = frames.at(-1);
+	if (last === undefined) throw new Error(`Step ${name} requires at least one frame before its error`);
+	return {
+		name,
+		frames,
+		reply: { content: structuredClone(last.partialContent), stopReason: "error", errorMessage },
+	};
 }
 
 /** Script only the provider boundary: the session and every child still run their production loop. */
@@ -217,6 +266,14 @@ export class ScriptedProvider {
 			}
 			if (step.maxRequests !== undefined && (!Number.isSafeInteger(step.maxRequests) || step.maxRequests < 1)) {
 				throw new RangeError(`Step ${step.name} requires a positive bounded maxRequests`);
+			}
+			if (
+				step.beforeStart &&
+				(step.frames !== undefined || typeof step.reply === "function" || step.reply.stopReason !== "error")
+			) {
+				throw new Error(
+					`Step ${step.name} fails before its response begins: it requires a static error reply and no frames`,
+				);
 			}
 		}
 		const script = this.scripts.get(trackId);
@@ -361,9 +418,15 @@ export class ScriptedProvider {
 			stopReason: "stop",
 			timestamp: this.lastTimestamp,
 		};
-		stream.push({ type: "start", partial: structuredClone(message) });
 		let step: ScriptStep | undefined;
 		let cancellation = signal;
+		// The response begins once the step is known, before anything is awaited, unless the step's transport failed before it.
+		let started = false;
+		const begin = (): void => {
+			if (started || step?.beforeStart) return;
+			started = true;
+			stream.push({ type: "start", partial: structuredClone(message) });
+		};
 		try {
 			const matches = [...this.scripts].filter(
 				([, track]) =>
@@ -378,6 +441,7 @@ export class ScriptedProvider {
 			const [trackId, track] = matches[0]!;
 			const steps = track.steps;
 			step = steps?.[0];
+			begin();
 			if (step?.ignoresAbort) cancellation = this.lifetimeAbort.signal;
 			if (step?.ignoresLifetimeAbort) cancellation = new AbortController().signal;
 			if (cancellation.aborted) throw cancellation.reason;
@@ -456,6 +520,8 @@ export class ScriptedProvider {
 				stream.push({ type: "done", reason: message.stopReason, message });
 			}
 		} catch (error) {
+			// A failure before the step was known still follows the `start` event it failed after.
+			begin();
 			const cancelled = cancellation.aborted && error === cancellation.reason;
 			message.stopReason = cancelled ? "aborted" : "error";
 			message.errorMessage = error instanceof Error ? error.message : String(error);

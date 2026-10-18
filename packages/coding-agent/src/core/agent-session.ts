@@ -1000,6 +1000,7 @@ export class AgentSession {
 			},
 			scheduleGoalAutoContinueFromIdle: () => this._backgroundLanes.scheduleGoalAutoContinueFromIdle(),
 			prompt: (text, options) => this.prompt(text, options),
+			getForegroundSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
 			resolveCompletionRejection: (input) => this._resolveGoalCompletionOwnerDecision(input),
 			getExecutionLoopMode: () => this._executionLoopMode,
@@ -1022,7 +1023,7 @@ export class AgentSession {
 				context.branchGeneration === this._branchGeneration,
 			onInputHeld: (input, reason) => this._queuedInputPersistence.noteHeldQueuedInput(input.text, reason),
 			onInputCancelled: (input) => this._queuedInputPersistence.noteCancelledQueuedInput(input.text),
-			onQueueChanged: (inputs) => this._queuedInputPersistence.recordQueuedInput(inputs),
+			record: this._queuedInputPersistence,
 			ownerInputs: this._ownerInputs,
 			onUndeliveredEchoWithdrawn: (message) => this._emit({ type: "user_message_withdrawn", message }),
 		});
@@ -1682,6 +1683,7 @@ export class AgentSession {
 				this._pendingQueue.holdUndelivered();
 				this._emitQueueUpdate();
 			},
+			onSubmissionReleased: (lease) => this._goals.endSubmissionExecution(lease.epoch),
 			// Compaction rewrites the history a turn runs on, so it occupies the foreground. A tree navigation's rewrite is
 			// owned by the controller itself (`beginHistoryRewrite`), which also keeps it exclusive with a running turn.
 			isCompacting: () => this._compaction.isRunning(),
@@ -3781,7 +3783,7 @@ export class AgentSession {
 			};
 			// Settle the exact cue-bearing run before completed-turn analysis can queue a later cue.
 			settle(() => this._reflection.finishCurrentTurnCue(event.messages, { willRetry }));
-			if (!willRetry) {
+			if (!willRetry)
 				settle(() => {
 					const reflectionTurn = this._reflection.analyzeCompletedTurn(event.messages);
 					// The shared projection excludes raw tool-result payloads and bounds both roles before any
@@ -3789,8 +3791,6 @@ export class AgentSession {
 					this._memory.scheduleTurnSync(reflectionTurn.userText, reflectionTurn.assistantText);
 					if (reflectionTurn.trigger !== "none") this._reflection.queueCurrentTurnCue(reflectionTurn.trigger);
 				});
-				settle(() => this._goals.endQueuedOwnerChatGoalExecution());
-			}
 			// Error/abort turns bypass the normal steering boundary, and a completion can arrive after the
 			// final normal poll. agent_end is the fallback before foreground recovery decides whether queued
 			// steering requires one continuation; turn_end is intentionally not a flush.

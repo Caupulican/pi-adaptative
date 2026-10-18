@@ -405,6 +405,24 @@ const rows: readonly FaultMatrixRow[] = [
 		modes: BOTH,
 	},
 	{
+		id: "owner-input-preflight-restart",
+		owner: "core/pending-input-queue-controller.ts",
+		journey: 1,
+		phase: "host-shutdown queued quit restart",
+		fault: "a crash or a quit while a prompt's own turn is prepared (accepted, its user entry not persisted yet)",
+		witness: NONE,
+		control: NONE,
+		estSeconds: 2,
+		status: "open",
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"no journey ends an owner with an own-turn prompt still in preparation, in a session whose file is written, and reopens that file: `disposeSessionInBody` and `restart` abort first, and the queued quit (`disposeAndWait`) comes after its prompt was delivered, so the own-turn record is empty when the next owner opens",
+			},
+		],
+	},
+	{
 		id: "owner-input-kept-submit",
 		owner: "core/prompt-submission-controller.ts",
 		journey: 1,
@@ -419,6 +437,24 @@ const rows: readonly FaultMatrixRow[] = [
 				kind: "witness",
 				detail:
 					"no journey submits a kept input (`heldInput`: resubmit, takeKept, taken back first) or reaches the late-queued registration before the tail wait",
+			},
+		],
+	},
+	{
+		id: "goal-execution-submission-release",
+		owner: "core/goals/goal-session-controller.ts",
+		journey: 1,
+		phase: "owner-lifecycle queued goal",
+		fault: "a run that delivered a queued chat-goal input ends with an abandoned retry before the next prompt",
+		witness: NONE,
+		control: NONE,
+		estSeconds: 1,
+		status: "open",
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"no journey queues an explicit chat goal or cancels a retry backoff in the run that delivered one, so the goal execution ending at its submission's release is not asserted",
 			},
 		],
 	},
@@ -456,7 +492,13 @@ const rows: readonly FaultMatrixRow[] = [
 		control: "terminalDelivery is delivered (happy path only)",
 		estSeconds: 2,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X5", detail: "a persistent append denial on the delivery" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"the persistent append denial exists (EffectGuard.denyUntilCleared with kind append), but one refused append to the session file fences that SessionManager (persistenceStateUncertain) until setSessionFile reopens it: every later append throws the fence error, so clearing the denial alone does not re-arm delivery in the same owner; no journey asserts the refused delivery and its warnings",
+			},
+		],
 	},
 	{
 		id: "R19",
@@ -468,7 +510,13 @@ const rows: readonly FaultMatrixRow[] = [
 		control: NONE,
 		estSeconds: 2,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X5", detail: "a persistent append denial driving the backoff to park" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"the append denial exists, and the wake-up backoff runs on the virtual background-tool-task port: min(100 * 2^min(n, 5), 5000) ms after failures 1..9, and the tenth parks the queue (100+200+400+800+1600+3200*4 = 15,900 ms over 9 advances); after the first refused append the session-file fence refuses every retry until the file is reopened, but no journey drives the nine advances and asserts the park and its warnings",
+			},
+		],
 	},
 	{
 		id: "R20",
@@ -480,7 +528,13 @@ const rows: readonly FaultMatrixRow[] = [
 		control: NONE,
 		estSeconds: 1,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X5", detail: "depends on R19's parked queue" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"depends on R19's parked queue; a parked queue is re-armed by the next background task start or terminal, or redelivered on session resume, and no journey asserts either",
+			},
+		],
 	},
 	{
 		id: "R21",
@@ -515,14 +569,33 @@ const rows: readonly FaultMatrixRow[] = [
 	{
 		id: "R23",
 		owner: "core/foreground-recovery-controller.ts",
-		journey: 2,
-		phase: "background-and-stall",
-		fault: "a retryable foreground provider error and the retry-window close",
+		journey: 1,
+		phase: "host-shutdown mode witnesses retry",
+		fault: "a retryable foreground provider error (network error) and the retry-window close during its backoff",
+		witness:
+			"the backoff close: post-close cancellation remains durable although the session listener is already removed (Retry cancelled)",
+		control: "the live retry: backoff expiry retries and live delivery persists the complete payload",
+		estSeconds: 1,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "R23c",
+		owner: "core/foreground-recovery-controller.ts",
+		journey: 1,
+		phase: "host-shutdown mode witnesses retry",
+		fault: "a retryable provider error before the response starts (connect error), and one after partial frames",
 		witness: NONE,
 		control: NONE,
-		estSeconds: 2,
+		estSeconds: 1,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X4", detail: "provider connect-error and error-after-frames shapes" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"the shapes exist (scripted-provider connectError and errorAfterFrames), but no journey enqueues either; R23 rides the mid-stream fail() shape, whose stream emits start before its error and carries no partial content",
+			},
+		],
 	},
 	{
 		id: "R24",
@@ -534,7 +607,13 @@ const rows: readonly FaultMatrixRow[] = [
 		control: NONE,
 		estSeconds: 1,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X4", detail: "depends on R23's retryable error shapes" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"the X4 shapes exist (connectError, errorAfterFrames, quota in scripted-provider.ts) and R23's retry witness is covered, but no journey parks a foreground recovery and asserts its resume",
+			},
+		],
 	},
 	{
 		id: "R25",
@@ -546,7 +625,13 @@ const rows: readonly FaultMatrixRow[] = [
 		control: NONE,
 		estSeconds: 2,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X4", detail: "a provider quota reply shape" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"the quota reply shape exists (scripted-provider quota(name, retryAfterMs): a pre-start 429 usage-limit error with a provider retry directive), but no queued-recovery step queues owner input behind it and asserts the wait and the delivery",
+			},
+		],
 	},
 	{
 		id: "R26",
@@ -826,7 +911,13 @@ const rows: readonly FaultMatrixRow[] = [
 		control: NONE,
 		estSeconds: 2,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X4", detail: "a provider quota reply shape" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"the quota reply shape exists (scripted-provider quota), but no queued-recovery step queues owner input behind the stop and asserts where it is held",
+			},
+		],
 	},
 	{
 		id: "R46",
@@ -875,13 +966,31 @@ const rows: readonly FaultMatrixRow[] = [
 		id: "R48",
 		owner: "core/operator-projection/decision-ledger-store.ts",
 		journey: 1,
+		phase: "host-shutdown SQLite busy",
+		fault: "the ledger's schema exec answers SQLITE_BUSY until cleared, across two constructions",
+		witness: "no busy construction leaves a handle",
+		control: "the construction after the busy window closes its handle",
+		estSeconds: 0.1,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "R48s",
+		owner: "core/session-semantic-plane-controller.ts",
+		journey: 1,
 		phase: "owner-lifecycle SQLite",
-		fault: "SQLite busy or locked, or a persistent ledger failure",
+		fault: "a decision ledger that fails to open inside a live session stays unavailable for the session",
 		witness: NONE,
 		control: NONE,
 		estSeconds: 1,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X3", detail: "a persistent or BUSY SQLite fault" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"getDecisionLedger caches decisionLedgerFailure and never constructs again, so a busy or locked open (after the 5 s busy_timeout) is as permanent as a missing driver; no journey fails the ledger open inside a live session and asserts a later ledger use",
+			},
+		],
 	},
 	{
 		id: "R49",
@@ -894,8 +1003,11 @@ const rows: readonly FaultMatrixRow[] = [
 		estSeconds: 4,
 		status: "open",
 		needs: [
-			{ kind: "extension", extension: "X2", detail: "a restart cut" },
-			{ kind: "extension", extension: "X3", detail: "a SQLite snapshot and rewind" },
+			{
+				kind: "witness",
+				detail:
+					"world.restart({ rewindSqlite: world.guard.snapshotSqlite() }) now cuts the owner and rewinds every SQLite backing to the snapshot, but no editable phase holds a ledger write between a snapshot and a cut whose reopened state a journey asserts",
+			},
 		],
 	},
 	{

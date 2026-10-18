@@ -116,12 +116,7 @@ export interface PromptSubmissionControllerDeps {
 	readonly localPrefixWarm: Pick<LocalPrefixWarmController, "cancel">;
 	readonly goals: Pick<
 		GoalSessionController,
-		| "previewOwnerPromptGoal"
-		| "applyDeliveredOwnerPrompt"
-		| "beginExecution"
-		| "setStartAuthority"
-		| "endQueuedOwnerChatGoalExecution"
-		| "endExecution"
+		"previewOwnerPromptGoal" | "applyDeliveredOwnerPrompt" | "beginExecution" | "setStartAuthority"
 	>;
 	readonly costGuard: Pick<CostGuardController, "beginForegroundTurn">;
 	readonly reflection: Pick<ReflectionController, "markOwnerInput" | "queueExternalRootTurnCue">;
@@ -376,6 +371,17 @@ export class PromptSubmissionController {
 					? this.deps.pendingQueue.resubmit(kept, queuedBehavior, text, options?.images, options?.origin, inputId)
 					: this.deps.pendingQueue.register(queuedBehavior, text, options?.images, options?.origin, inputId)
 				: undefined;
+		// An input that does not queue here runs as its own turn: it is recorded from now until it is delivered or ends, so a
+		// crash or a restart while its turn is prepared restores it held. One that queues later is the queued record's then.
+		// It is recorded before a kept input it replaces leaves the queued record, so no cut between the two loses its words.
+		if (input && !queuedOwnerInput)
+			this.deps.pendingQueue.trackOwnTurn(
+				input.inputId,
+				queuedBehavior ?? "followUp",
+				text,
+				options?.images,
+				options?.origin,
+			);
 		const keptTaken = kept !== undefined && !queuedBehavior && this.deps.pendingQueue.takeKept(kept);
 		if (queuedOwnerInput || kept) this.deps.emitQueueUpdate();
 		if (kept && !queuedOwnerInput && !keptTaken) {
@@ -1112,7 +1118,9 @@ export class PromptSubmissionController {
 		this.deps.pendingNextTurnMessages.splice(0, pendingNextTurnCount);
 
 		preflightResult?.(true);
-		const goalExecutionLease = this.deps.goals.beginExecution(admittedGoalId, {
+		// The turn's goal execution and start authority belong to this submission: both end when it releases the
+		// foreground (`runPromptSubmission`), whatever the run's outcome, retries and stranded rounds included.
+		this.deps.goals.beginExecution(admittedGoalId, {
 			adoptNewGoal: goalToolStartAuthority !== undefined,
 			provisionalTokenBudget: goalToolStartAuthority?.tokenBudget,
 			routedPrompt:
@@ -1252,9 +1260,6 @@ export class PromptSubmissionController {
 			runReleaseSteps(
 				[
 					() => releaseSubmissionSignal?.(),
-					() => this.deps.goals.endQueuedOwnerChatGoalExecution(),
-					() => this.deps.goals.setStartAuthority(undefined),
-					() => this.deps.goals.endExecution(goalExecutionLease),
 					// Normally consumed by the authoritative message_start. If execution failed before that
 					// event, do not retain the early-painted message identity indefinitely.
 					() => {

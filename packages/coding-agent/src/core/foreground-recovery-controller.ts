@@ -90,8 +90,6 @@ export interface ForegroundInputPort {
 	hasHandableInput(): boolean;
 	/** Hands every such input to the agent's queue, in submission order. */
 	handOff(): void;
-	/** A delivery run this owner started for waiting input ended. */
-	deliveryRunEnded(): void;
 }
 
 export interface ForegroundRecoveryResourceSnapshot {
@@ -135,6 +133,11 @@ export interface ForegroundRecoveryControllerDeps {
 	settleRuntimeUpdate?(signal?: AbortSignal): Promise<"continue" | "stop" | undefined>;
 	/** Input admitted to the agent's queue that no round could deliver returns to the pending queue, held. */
 	holdUndeliveredQueue?(): void;
+	/**
+	 * The submission holding `lease` is releasing the foreground, whatever its run's outcome (a retry window closed or
+	 * abandoned, an abort, an error, no run at all): what it owned ends here, before the foreground is free for another.
+	 */
+	onSubmissionReleased?(lease: ForegroundSubmissionLease): void;
 	isCompacting?: () => boolean;
 	isExtendedBusy?: () => boolean;
 	hasPendingIdleContinuation?: () => boolean;
@@ -585,14 +588,14 @@ export class ForegroundRecoveryController {
 				this.releaseSubmission(lease);
 				return;
 			}
-			void this.deliverWaitingInput(lease, input);
+			void this.deliverWaitingInput(lease);
 		} finally {
 			this.servicingInput = false;
 		}
 	}
 
 	/** The delivery run: it continues the history with the handed input, as a host handoff resumes it, then releases the foreground. */
-	private async deliverWaitingInput(lease: ForegroundSubmissionLease, input: ForegroundInputPort): Promise<void> {
+	private async deliverWaitingInput(lease: ForegroundSubmissionLease): Promise<void> {
 		try {
 			await this.runAgentContinuation(lease);
 		} catch (error) {
@@ -602,10 +605,14 @@ export class ForegroundRecoveryController {
 				message: `Queued input could not be delivered: ${error instanceof Error ? error.message : String(error)}`,
 			});
 		} finally {
+			// Called with `void`: a failing release must be reported here, not become an unhandled rejection.
 			try {
-				input.deliveryRunEnded();
-			} finally {
 				this.releaseSubmission(lease);
+			} catch (error) {
+				this.deps.emit({
+					type: "warning",
+					message: `Queued input delivery could not release the foreground: ${error instanceof Error ? error.message : String(error)}`,
+				});
 			}
 		}
 	}
@@ -701,11 +708,17 @@ export class ForegroundRecoveryController {
 		if (!this.ownsSubmission(lease)) {
 			throw new Error("Cannot release foreground submission authority owned by another caller");
 		}
-		if (this.preparingTurn === lease) this.preparingTurn = undefined;
-		this.submissionLease = undefined;
-		this.notifyActivity();
-		if (this.activeRuns === 0) {
-			this.resolveIdleWaiters();
+		try {
+			// What the submission owned ends with it, while it still holds the foreground: no waiter this release wakes
+			// starts another submission beside it.
+			this.deps.onSubmissionReleased?.(lease);
+		} finally {
+			if (this.preparingTurn === lease) this.preparingTurn = undefined;
+			this.submissionLease = undefined;
+			this.notifyActivity();
+			if (this.activeRuns === 0) {
+				this.resolveIdleWaiters();
+			}
 		}
 	}
 

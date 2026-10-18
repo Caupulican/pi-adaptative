@@ -77,6 +77,7 @@ import {
 	type ScriptedRequest,
 } from "./scripted-provider.ts";
 import { ScriptedWindowsShellProcesses } from "./scripted-windows-shell.ts";
+import type { VirtualSqliteSnapshot } from "./sqlite-io.ts";
 import { EffectGuard, VirtualFileSystem } from "./virtual-io.ts";
 import { type VirtualProcessState, VirtualProcessTable } from "./virtual-process-table.ts";
 import { VirtualShell } from "./virtual-shell.ts";
@@ -2717,8 +2718,10 @@ export class HarnessWorld {
 	 * registrations and pending scripts stay for the fresh owner), it is certified from itself before any byte is restored,
 	 * every owned file `cut.manifest` names is cut back to `cut.capture` byte for byte (post-cut extras removed, each parent
 	 * recreated first: the owner's disposal may have removed a lease directory), the process advances, and a fresh root owner
-	 * opens `sessionFile`. SQLite is not rewound (`rewindSqlite: false`): the virtual store keeps no snapshot (R49). `check`
-	 * receives each step's result where that step happens, so the caller's assertions keep their order.
+	 * opens `sessionFile`. `rewindSqlite` is the SQLite durable point: `false` keeps every RAM backing as the disposed owner left
+	 * it; a snapshot (`guard.snapshotSqlite()`, taken with the capture) rewinds every backing to it after the files are cut back,
+	 * and a backing created after it is emptied. `check` receives each step's result where that step happens, so the caller's
+	 * assertions keep their order.
 	 */
 	async restart(input: {
 		readonly owner: AgentSession;
@@ -2727,7 +2730,7 @@ export class HarnessWorld {
 			readonly manifest: () => ReadonlyMap<string, string>;
 			readonly capture: ReadonlyMap<string, string>;
 		};
-		readonly rewindSqlite: false;
+		readonly rewindSqlite: false | VirtualSqliteSnapshot;
 		readonly retainedClaims: WorkerProjectClaims;
 		readonly check: HarnessRestartChecks;
 	}) {
@@ -2744,6 +2747,7 @@ export class HarnessWorld {
 			this.io.writeFileSync(path, content);
 		}
 		check.restored(cut.manifest(), cut.capture);
+		if (input.rewindSqlite !== false) this.guard.rewindSqlite(input.rewindSqlite);
 		this.processTable.advanceProcess();
 		return this.createRootSession("root", { sessionManager: this.openSessionManager(input.sessionFile) });
 	}

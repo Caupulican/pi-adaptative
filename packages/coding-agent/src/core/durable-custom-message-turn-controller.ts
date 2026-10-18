@@ -1,12 +1,12 @@
 import type { CustomMessage } from "../kernel/index.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
-import type { GoalExecutionLease, GoalSessionController } from "./goals/goal-session-controller.ts";
+import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { runReleaseSteps } from "./util/resource-release.ts";
 
 interface DurableCustomMessageTurnControllerDeps {
 	foreground: ForegroundRecoveryController;
-	/** A turn joins a lease a run already holds instead of opening a second one; it ends only the lease it began. */
-	goals: Pick<GoalSessionController, "joinExecution" | "endExecution">;
+	/** A turn's goal execution belongs to its submission and ends when that submission releases the foreground. */
+	goals: Pick<GoalSessionController, "beginExecution">;
 	enqueueSteeringMessage(message: CustomMessage<unknown>): void;
 	/**
 	 * Runs after the turn's model run and before its lease is released, with that lease and the turn's opening
@@ -57,30 +57,23 @@ export class DurableCustomMessageTurnController {
 		await acceptedPromise;
 	}
 
+	/**
+	 * The turn's goal execution begins under `submissionLease` and ends when the caller releases it, after `completion`
+	 * (the run and `afterTurn`) settles: the claim correction runs while the execution is still held.
+	 */
 	async start<T>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		submissionLease: ForegroundSubmissionLease,
 		goalId?: string,
 	): Promise<{ completion: Promise<void> }> {
 		const { appMessage, acceptedPromise, rejectAccepted } = this.prepare(message);
-		let goalExecutionLease: GoalExecutionLease | undefined;
-		try {
-			goalExecutionLease = this.deps.goals.joinExecution(goalId);
-		} catch (error) {
-			this.pending.delete(appMessage);
-			throw error;
-		}
 		let completion: Promise<void>;
 		try {
+			this.deps.goals.beginExecution(goalId);
 			completion = this.deps.foreground
 				.runAgentPrompt(appMessage, submissionLease)
-				.then(() => this.deps.afterTurn?.(appMessage, submissionLease))
-				.finally(() => this.deps.goals.endExecution(goalExecutionLease));
+				.then(() => this.deps.afterTurn?.(appMessage, submissionLease));
 		} catch (error) {
-			// runAgentPrompt is expected to report failure through its returned promise, but if it
-			// throws SYNCHRONOUSLY instead, the .finally() above never attaches and the goal
-			// execution lease acquired above leaks forever. Every exit path must release it.
-			this.deps.goals.endExecution(goalExecutionLease);
 			this.pending.delete(appMessage);
 			throw error;
 		}
@@ -98,22 +91,21 @@ export class DurableCustomMessageTurnController {
 		return { completion };
 	}
 
-	/** Resume canonical history after a host handoff, retaining the ordinary goal budget lease. */
+	/** Resume canonical history after a host handoff; the goal execution ends when the submission is released. */
 	async continue(prepare: () => Promise<void>, goalId?: string): Promise<void> {
 		const submission = await this.deps.foreground.acquireSubmission();
-		let goalLease: GoalExecutionLease | undefined;
 		let continuationFailure: { readonly error: unknown } | undefined;
 		try {
-			goalLease = this.deps.goals.joinExecution(goalId);
+			this.deps.goals.beginExecution(goalId);
 			await prepare();
 			await this.deps.foreground.runAgentContinuation(submission);
 		} catch (error) {
 			continuationFailure = { error };
 			throw error;
 		} finally {
-			// The submission is released even when ending the goal lease throws; both failures surface together.
+			// A failing release surfaces with the continuation's own failure, never in place of it.
 			runReleaseSteps(
-				[() => this.deps.goals.endExecution(goalLease), () => this.deps.foreground.releaseSubmission(submission)],
+				[() => this.deps.foreground.releaseSubmission(submission)],
 				"Custom-message continuation release failed.",
 				continuationFailure,
 			);

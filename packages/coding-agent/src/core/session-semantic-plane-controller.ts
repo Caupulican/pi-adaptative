@@ -25,6 +25,13 @@ export interface SessionSemanticPlaneControllerDeps {
 	getSteeringPlane(): SystemOneSteeringPlane | undefined;
 }
 
+/** node:sqlite reports a locked (5) or busy (6) database as ERR_SQLITE_ERROR with that errcode. */
+function isSqliteBusy(error: unknown): boolean {
+	if (typeof error !== "object" || error === null) return false;
+	const { code, errcode } = error as { code?: unknown; errcode?: unknown };
+	return code === "ERR_SQLITE_ERROR" && (errcode === 5 || errcode === 6);
+}
+
 export class SessionSemanticPlaneController {
 	private readonly deps: SessionSemanticPlaneControllerDeps;
 	readonly health = new SemanticPlaneHealthRecorder();
@@ -32,6 +39,8 @@ export class SessionSemanticPlaneController {
 	private recordedEngine?: SemanticDecisionEngine;
 	private decisionLedger?: DecisionLedgerStore;
 	private decisionLedgerFailure?: string;
+	/** The cached failure is a locked or busy database: it clears by itself, so the next use tries again. */
+	private decisionLedgerBusy = false;
 	private stageSink?: { readonly key: string; readonly sink: DecisionStageSink };
 
 	constructor(deps: SessionSemanticPlaneControllerDeps) {
@@ -102,13 +111,20 @@ export class SessionSemanticPlaneController {
 	 */
 	getDecisionLedger(): DecisionLedgerStore | undefined {
 		if (this.deps.isDisposed()) return undefined;
-		if (this.decisionLedger || this.decisionLedgerFailure !== undefined) return this.decisionLedger;
+		if (this.decisionLedger || (this.decisionLedgerFailure !== undefined && !this.decisionLedgerBusy)) {
+			return this.decisionLedger;
+		}
 		try {
 			this.decisionLedger = new DecisionLedgerStore({
 				databasePath: decisionLedgerFile(this.deps.agentDirForLedger),
 			});
+			this.decisionLedgerFailure = undefined;
+			this.decisionLedgerBusy = false;
 		} catch (error) {
 			this.decisionLedgerFailure = error instanceof Error ? error.message : String(error);
+			// A locked or busy database clears by itself: the next use tries again. Any other failure (no driver,
+			// read-only state directory) is permanent for the session.
+			this.decisionLedgerBusy = isSqliteBusy(error);
 		}
 		return this.decisionLedger;
 	}

@@ -77,6 +77,8 @@ export interface GoalSessionControllerDeps {
 	synchronizeGoalState(state: GoalState): void;
 	scheduleGoalAutoContinueFromIdle(): void;
 	prompt(text: string, options?: PromptOptions): Promise<void>;
+	/** The epoch of the foreground submission holding the foreground, undefined while none does. */
+	getForegroundSubmissionEpoch(): number | undefined;
 	emitWarning(message: string): void;
 	/** Route an unresolved completion to the native panel or the durable handoff ledger. */
 	resolveCompletionRejection?(input: {
@@ -127,6 +129,8 @@ export interface GoalExecutionLease {
 }
 
 interface MutableGoalExecutionLease extends GoalExecutionLease {
+	/** The foreground submission that began this execution: the execution ends when it releases the foreground. */
+	readonly ownerEpoch: number;
 	goalId?: string;
 	routedContext?: RoutedGoalContext;
 	adoptNewGoal: boolean;
@@ -197,7 +201,6 @@ export class GoalSessionController {
 	private lastPrimaryTurnOutcome?: GoalContinuationTurnOutcome["outcome"];
 	private executorsBoundTo?: ObjectiveExecutionController;
 	private readonly queuedOwnerChatGoals = new WeakMap<AgentMessage, QueuedOwnerChatGoal>();
-	private queuedOwnerChatExecutionLease: GoalExecutionLease | undefined;
 	/**
 	 * Usage an ended execution lease could not save (a revision race, a refused write), by goal id. The lease itself
 	 * is gone; this usage is retained and charged with the goal's next save, so it is never silently dropped.
@@ -426,19 +429,17 @@ export class GoalSessionController {
 		const goalId = this.startOwnerChatGoal(queued.text, messages);
 		if (!goalId) return;
 		this.setStartAuthority(queued.authority);
-		// The run that delivered the message may hold a foreground lease: that lease works on the goal from here, and its
-		// caller still ends it. A queued message never opens a second lease beside it, nor closes it.
+		// The submission running the delivery may hold an execution already: it works on the goal from here. Otherwise
+		// the goal's execution begins under that submission. Either way it ends when that submission releases the
+		// foreground.
 		const held = this.executionLease;
 		if (held) {
 			this.bindExecution(held, goalId);
 			return;
 		}
-		const lease = this.beginExecution(goalId);
-		if (!lease) {
+		// A delivery no submission runs has no run to attribute, and its start authority has no turn to authorize.
+		if (this.deps.getForegroundSubmissionEpoch() === undefined || !this.beginExecution(goalId))
 			this.setStartAuthority(undefined);
-			return;
-		}
-		this.queuedOwnerChatExecutionLease = lease;
 	}
 
 	/**
@@ -483,14 +484,6 @@ export class GoalSessionController {
 		}
 		lease.lastAccountedAtMs ??= Date.now();
 		lease.goalId = goalId;
-	}
-
-	endQueuedOwnerChatGoalExecution(): void {
-		const lease = this.queuedOwnerChatExecutionLease;
-		if (!lease) return;
-		this.queuedOwnerChatExecutionLease = undefined;
-		this.setStartAuthority(undefined);
-		this.endExecution(lease);
 	}
 
 	admitExplicitChatGoal(text: string, now?: string, priorUserText?: string): ChatGoalAdmission {
@@ -587,7 +580,11 @@ export class GoalSessionController {
 		this.saveState(updated, getGoalStateRevision(state));
 	}
 
-	/** Begin one foreground execution, binding immediately or when it creates a new goal. */
+	/**
+	 * Begin one foreground execution for the submission holding the foreground, binding immediately or when it creates a
+	 * new goal. The execution belongs to that submission and ends exactly when it releases the foreground
+	 * ({@link endSubmissionExecution}), whatever its run's outcome; no caller ends it.
+	 */
 	beginExecution(
 		goalId: string | undefined,
 		options: {
@@ -597,9 +594,12 @@ export class GoalSessionController {
 		} = {},
 	): GoalExecutionLease | undefined {
 		if (this.executionLease) throw new Error("Goal execution attribution is already active");
+		const ownerEpoch = this.deps.getForegroundSubmissionEpoch();
+		if (ownerEpoch === undefined) throw new Error("Goal execution attribution needs a foreground submission");
 		const state = this.getState();
 		if (goalId && (!state || state.goalId !== goalId || !isGoalExecutionActive(state.status))) return undefined;
 		const lease: MutableGoalExecutionLease = {
+			ownerEpoch,
 			...(goalId ? { goalId } : {}),
 			...(goalId && options.routedPrompt
 				? { routedContext: Object.freeze({ goalId, ...options.routedPrompt }) }
@@ -620,32 +620,21 @@ export class GoalSessionController {
 	}
 
 	/**
-	 * Begin one execution for `goalId`, or join the lease a run already holds (a queued owner goal's lease outlives the
-	 * run that delivered it): that lease works on `goalId` from here, as {@link bindExecution} binds it, and its owner
-	 * still ends it, so none is returned.
+	 * The foreground submission `epoch` is releasing the foreground: the execution it began ends, and the start
+	 * authority it ran under ends with it. The execution ends even when its final usage cannot be saved: that usage is
+	 * retained and charged with the goal's next save (see {@link unsavedUsage}), and the failure is reported, never
+	 * thrown.
 	 */
-	joinExecution(goalId: string | undefined): GoalExecutionLease | undefined {
-		const held = this.executionLease;
-		if (!held) return this.beginExecution(goalId);
-		if (goalId !== undefined) this.bindExecution(held, goalId);
-		return undefined;
-	}
-
-	/**
-	 * End the execution lease. The lease ends even when its final usage cannot be saved: that usage is retained and
-	 * charged with the goal's next save (see {@link unsavedUsage}), and the failure is reported, never thrown, so no
-	 * caller's later release is skipped.
-	 */
-	endExecution(lease: GoalExecutionLease | undefined): void {
-		if (!lease) return;
-		const owned = this.executionLease;
-		if (owned !== lease) throw new Error("Cannot end goal execution attribution owned by another run");
+	endSubmissionExecution(epoch: number): void {
+		this.startAuthority = undefined;
+		const lease = this.executionLease;
+		if (lease?.ownerEpoch !== epoch) return;
 		// Read before the save: a save that succeeded moves the lease's accounted time to or past it.
 		const endedAtMs = Date.now();
 		try {
-			this.flushPendingExecutionUsage(owned, true);
+			this.flushPendingExecutionUsage(lease, true);
 		} catch (error) {
-			this.retainUnsavedUsage(owned, error, endedAtMs);
+			this.retainUnsavedUsage(lease, error, endedAtMs);
 		} finally {
 			this.executionLease = undefined;
 		}

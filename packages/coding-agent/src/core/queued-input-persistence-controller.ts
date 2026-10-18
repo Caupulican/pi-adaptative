@@ -3,6 +3,7 @@
  * pinning for undelivered steering/follow-up messages, and resume-time restoration notices.
  */
 
+import { existsSync } from "node:fs";
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { OwnerInputEnd, OwnerInputId, OwnerInputLedger, OwnerInputOutcome } from "./owner-input-ledger.ts";
@@ -10,9 +11,21 @@ import type {
 	PendingInputHandle,
 	PendingInputHoldReason,
 	PendingInputQueueController,
+	PendingInputRecord,
 } from "./pending-input-queue-controller.ts";
 import { truncateWithEllipsis } from "./provider-tool-text.ts";
-import { appendQueuedInputRecord, type RecordableQueuedInput, readQueuedInputRecord } from "./queued-input-record.ts";
+import {
+	appendQueuedInputRecord,
+	ownTurnInputRecordPath,
+	type QueuedInputRecordResult,
+	type RecordableQueuedInput,
+	type RestoredQueuedInputs,
+	readOwnTurnInputRecord,
+	readQueuedInputRecord,
+	recordedIds,
+	recordedSequences,
+	writeOwnTurnInputRecord,
+} from "./queued-input-record.ts";
 import type { OwnerRequestClassificationOutcome } from "./session-edge-intent-controller.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 
@@ -45,11 +58,27 @@ export interface QueuedInputPersistenceControllerDeps {
 	emitWarning(message: string): void;
 }
 
-export class QueuedInputPersistenceController {
+/** A durable record as this process last wrote or restored it, and how many inputs its bound left out. */
+interface RecordState {
+	readonly key: string | undefined;
+	readonly omitted: number;
+}
+
+/** How each record's warnings read: what could not be recorded, and what its bound leaves out. */
+const RECORD_TEXT = {
+	queued: { subject: "Queued input", one: "queued message", many: "queued messages" },
+	ownTurn: { subject: "A prompt being prepared", one: "prompt being prepared", many: "prompts being prepared" },
+} as const;
+
+export class QueuedInputPersistenceController implements PendingInputRecord {
 	private readonly deps: QueuedInputPersistenceControllerDeps;
-	private queuedInputRecordKey: string | undefined;
-	private queuedInputOmitted = 0;
+	/** The session's queued record (`appendQueuedInputRecord`). */
+	private queuedRecord: RecordState = { key: undefined, omitted: 0 };
+	/** The own-turn record beside the session file (`writeOwnTurnInputRecord`). */
+	private ownTurnRecord: RecordState = { key: undefined, omitted: 0 };
 	private restoredQueuedInputNotice: { head: string; tail: string } | undefined;
+	/** Why the own-turn record could not be restored on resume; reported with the restore notice. */
+	private ownTurnRestoreFailure: string | undefined;
 
 	constructor(deps: QueuedInputPersistenceControllerDeps) {
 		this.deps = deps;
@@ -162,24 +191,53 @@ export class QueuedInputPersistenceController {
 	recordQueuedInput(inputs: readonly RecordableQueuedInput[]): void {
 		const sessionManager = this.deps.getSessionManager();
 		if (this.deps.isDisposed() || !sessionManager.isPersisted()) return;
+		const alsoHeld = this.ownTurnRecord.key;
+		this.writeRecord("queued", (previousKey, imageStore) =>
+			appendQueuedInputRecord(sessionManager, imageStore, inputs, previousKey, recordedSequences(alsoHeld)),
+		);
+	}
+
+	/**
+	 * Keep the prompts whose own turn is being prepared (accepted, their user entry not persisted yet) in the own-turn record
+	 * beside the session file, so a crash or a restart before their delivery restores them held. A session whose file is not
+	 * written yet (no reply so far) is no session a restart resumes: nothing is recorded for it. A failed write is reported,
+	 * never swallowed: the prompts themselves are unaffected.
+	 */
+	recordOwnTurnInput(inputs: readonly RecordableQueuedInput[]): void {
+		const sessionManager = this.deps.getSessionManager();
+		const sessionFile = sessionManager.getSessionFile();
+		if (this.deps.isDisposed() || !sessionManager.isPersisted() || sessionFile === undefined) return;
+		if (!existsSync(sessionFile)) return;
+		const path = ownTurnInputRecordPath(sessionFile);
+		const alsoHeld = this.queuedRecord.key;
+		this.writeRecord("ownTurn", (previousKey, imageStore) =>
+			writeOwnTurnInputRecord(path, imageStore, inputs, previousKey, recordedSequences(alsoHeld)),
+		);
+	}
+
+	/** One write of `record`: the record it wrote is kept, its bound reported once when first reached, a failure every time. */
+	private writeRecord(
+		record: "queued" | "ownTurn",
+		write: (
+			previousKey: string | undefined,
+			imageStore: SessionImageStore | undefined,
+		) => QueuedInputRecordResult | undefined,
+	): void {
+		const state = record === "queued" ? this.queuedRecord : this.ownTurnRecord;
+		const { subject, one, many } = RECORD_TEXT[record];
 		try {
-			const written = appendQueuedInputRecord(
-				sessionManager,
-				this.deps.getSessionImageStore(),
-				inputs,
-				this.queuedInputRecordKey,
-			);
+			const written = write(state.key, this.deps.getSessionImageStore());
 			if (!written) return;
-			this.queuedInputRecordKey = written.key;
-			if (written.omitted > 0 && this.queuedInputOmitted === 0) {
+			if (written.omitted > 0 && state.omitted === 0) {
 				this.deps.emitWarning(
-					`${written.omitted} queued message${written.omitted > 1 ? "s" : ""} beyond the durable record's bound will not survive a restart.`,
+					`${written.omitted} ${written.omitted > 1 ? many : one} beyond the durable record's bound will not survive a restart.`,
 				);
 			}
-			this.queuedInputOmitted = written.omitted;
+			if (record === "queued") this.queuedRecord = { key: written.key, omitted: written.omitted };
+			else this.ownTurnRecord = { key: written.key, omitted: written.omitted };
 		} catch (error) {
 			this.deps.emitWarning(
-				`Queued input could not be recorded for restart recovery: ${error instanceof Error ? error.message : String(error)}`,
+				`${subject} could not be recorded for restart recovery: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 	}
@@ -189,26 +247,58 @@ export class QueuedInputPersistenceController {
 	 * queue display and takeable into the editor, never delivered on its own. An input the record names that was
 	 * delivered (`RestoredQueuedInputs.delivered`) is not restored, and the record is rewritten once without it.
 	 * Otherwise the record already holds exactly these inputs, and nothing is written until the queue next changes.
+	 * The prompts the own-turn record names that were not delivered are restored the same way, after the queue: the queued
+	 * record is rewritten once to name them, and the own-turn record is removed once it does.
 	 */
 	restoreRecordedQueuedInput(): void {
 		const sessionManager = this.deps.getSessionManager();
 		if (!sessionManager.isPersisted()) return;
-		const restored = readQueuedInputRecord(sessionManager, this.deps.getSessionImageStore());
-		if (!restored) return;
-		const { inputs } = restored;
-		// The record as written is what a rewrite replaces: change detection starts from it.
-		this.queuedInputRecordKey = restored.key;
-		this.deps.getPendingQueue().restore(inputs, restored.delivered > 0);
+		const imageStore = this.deps.getSessionImageStore();
+		const queued = readQueuedInputRecord(sessionManager, imageStore);
+		const ownTurn = this.readOwnTurnRecord(recordedIds(queued?.key));
+		if (!queued && !ownTurn) return;
+		// The records as written are what a rewrite replaces: change detection starts from them.
+		this.queuedRecord = { key: queued?.key, omitted: 0 };
+		this.ownTurnRecord = { key: ownTurn?.key, omitted: 0 };
+		const inputs = [...(queued?.inputs ?? []), ...(ownTurn?.inputs ?? [])];
+		this.deps.getPendingQueue().restore(inputs, (queued?.delivered ?? 0) > 0 || ownTurn !== undefined);
+		if (ownTurn) {
+			const named = recordedIds(this.queuedRecord.key);
+			if (ownTurn.inputs.every((input) => input.id !== undefined && named.has(input.id)))
+				this.recordOwnTurnInput([]);
+		}
 		if (inputs.length === 0) return;
 		const fromPeers = inputs.filter((input) => input.origin).length;
+		const missingImages = (queued?.missingImages ?? 0) + (ownTurn?.missingImages ?? 0);
+		const pinError = [queued?.pinError, ownTurn?.pinError].filter((error) => error !== undefined).join("; ");
+		const queuedCount = queued?.inputs.length ?? 0;
+		const preparing = ownTurn?.inputs.length ?? 0;
+		const restored = [
+			...(queuedCount > 0 ? [`${queuedCount} queued message${queuedCount > 1 ? "s" : ""}`] : []),
+			...(preparing > 0 ? [`${preparing} prompt${preparing > 1 ? "s that were" : " that was"} being prepared`] : []),
+		].join(" and ");
 		this.restoredQueuedInputNotice = {
 			head:
-				`Restored ${inputs.length} queued message${inputs.length > 1 ? "s" : ""} from the previous run` +
+				`Restored ${restored} from the previous run` +
 				`${fromPeers > 0 ? ` (${fromPeers} from other senders, shown under who sent them)` : ""}`,
 			tail:
-				`${restored.missingImages > 0 ? ` (${restored.missingImages} attached image${restored.missingImages > 1 ? "s were" : " was"} no longer available)` : ""}` +
-				`${restored.pinError ? `; its images could not be held against pruning: ${restored.pinError}` : ""}.`,
+				`${missingImages > 0 ? ` (${missingImages} attached image${missingImages > 1 ? "s were" : " was"} no longer available)` : ""}` +
+				`${pinError ? `; its images could not be held against pruning: ${pinError}` : ""}.`,
 		};
+	}
+
+	/** The own-turn record of the resumed session; a record that cannot be read is reported with the restore notice. */
+	private readOwnTurnRecord(namedElsewhere: ReadonlySet<string>): RestoredQueuedInputs | undefined {
+		const sessionManager = this.deps.getSessionManager();
+		const sessionFile = sessionManager.getSessionFile();
+		if (sessionFile === undefined) return undefined;
+		const path = ownTurnInputRecordPath(sessionFile);
+		try {
+			return readOwnTurnInputRecord(path, sessionManager, this.deps.getSessionImageStore(), namedElsewhere);
+		} catch (error) {
+			this.ownTurnRestoreFailure = `The prompts the previous run was preparing could not be restored from ${path}: ${error instanceof Error ? error.message : String(error)}.`;
+			return undefined;
+		}
 	}
 
 	/**
@@ -217,11 +307,15 @@ export class QueuedInputPersistenceController {
 	 */
 	takeRestoredQueuedInputNotice(surface: "editor" | "headless" = "editor"): string | undefined {
 		const notice = this.restoredQueuedInputNotice;
+		const failure = this.ownTurnRestoreFailure;
 		this.restoredQueuedInputNotice = undefined;
-		if (!notice) return undefined;
-		return surface === "editor"
-			? `${notice.head}; take them back into the editor to send them again${notice.tail}`
-			: `${notice.head}; they are held, not delivered, and stay held for the next interactive session on this session (RPC: pendingMessageCount in get_state counts them, clear_queue drops them)${notice.tail}`;
+		this.ownTurnRestoreFailure = undefined;
+		if (!notice) return failure;
+		const restored =
+			surface === "editor"
+				? `${notice.head}; take them back into the editor to send them again${notice.tail}`
+				: `${notice.head}; they are held, not delivered, and stay held for the next interactive session on this session (RPC: pendingMessageCount in get_state counts them, clear_queue drops them)${notice.tail}`;
+		return failure ? `${restored} ${failure}` : restored;
 	}
 
 	/** Surface held restored input as a session warning for hosts with no editor (print, JSON, RPC), so it is never silent. */
