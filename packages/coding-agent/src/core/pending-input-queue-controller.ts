@@ -4,6 +4,7 @@ import type { AgentMessage } from "../kernel/types.ts";
 import type { ExtensionRunner, SendUserMessageOrigin } from "./extensions/index.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { ExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
+import { type OwnerInputId, type OwnerInputLedger, ownerInputIdOf, stampOwnerInput } from "./owner-input-ledger.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import {
 	ownerVisibleQueuedText,
@@ -33,8 +34,9 @@ export interface QueuedInputAdmission {
 	queuedGoalAuthority?: ExplicitGoalStartAuthority;
 	ownerOriginalText?: string;
 	/**
-	 * Runs once, when the agent delivers the admitted input (its message starts). Never when the input is taken back,
-	 * cleared or held before that: what is not delivered decides nothing.
+	 * Runs once, when the admitted input is delivered: its user entry is persisted (the ledger's delivered event). Never
+	 * when the input is taken back, cleared or held before that, nor when a run read it without persisting it: what is not
+	 * delivered decides nothing.
 	 */
 	onDelivered?: () => void;
 	/**
@@ -57,6 +59,8 @@ export interface PendingInputHandle {
 
 interface PendingEntry extends QueuedInput {
 	readonly id: number;
+	/** Its identity, minted at acceptance and stamped on the message it becomes: what delivery matches, never its text. */
+	readonly inputId: OwnerInputId;
 	readonly kind: QueuedInputKind;
 	/** The input exactly as submitted: what recovery returns, whatever its delivered form became. */
 	readonly original: QueuedInput;
@@ -70,8 +74,8 @@ interface PendingEntry extends QueuedInput {
 	admission?: QueuedInputAdmission;
 	/** Set when handed to the agent: from here it is the agent's queued message. */
 	message?: AgentMessage;
-	/** The message its own turn built for it (see `bindOwnedMessage`): persisting it delivers the input. */
-	turnMessage?: AgentMessage;
+	/** A run read its message (the message started), so the transcript shows it; cleared once that echo is taken back. */
+	displayed?: boolean;
 	/** Its context changed before it was handed on: kept in full for recovery, never handed on. */
 	held?: boolean;
 	/** Its admission's `onDropped` ran: it is never delivered from here. */
@@ -85,6 +89,8 @@ export interface PendingInputQueueDeps {
 	readonly agent: Agent;
 	readonly skillVault: SkillVaultController;
 	readonly goals: GoalSessionController;
+	/** Mints each queued input's identity at acceptance, and tells this queue when an input is delivered. */
+	readonly ownerInputs: OwnerInputLedger;
 	/** `_extensionRunner` is assigned after construction (definite-assignment field on AgentSession),
 	 * so it must be read through a thunk rather than captured by value. */
 	getExtensionRunner(): ExtensionRunner;
@@ -100,6 +106,11 @@ export interface PendingInputQueueDeps {
 	isInputContextCurrent?(context: PendingInputContext): boolean;
 	/** An input that was not handed on is held, complete and recoverable: its context changed, or no run delivered it. */
 	onInputHeld?(input: QueuedInput, reason: PendingInputHoldReason): void;
+	/**
+	 * A run read this input's message (the transcript shows it) but never persisted it, and the input now leaves without
+	 * being delivered (held or taken back): that transcript echo is taken back.
+	 */
+	onUndeliveredEchoWithdrawn?(message: AgentMessage): void;
 	/**
 	 * The set of queued inputs changed (an input arrived, was delivered, taken back or withdrawn). Each
 	 * call carries the complete queue in submission order, as submitted: the durable record's content.
@@ -227,10 +238,17 @@ export class PendingInputQueueController {
 	private _steering: PendingEntry[] = [];
 	private _followUp: PendingEntry[] = [];
 	/**
-	 * Inputs their own turn took (see `promote`). Not admitted, displayed or takeable: the turn owns them until its
-	 * message is persisted (`settleOwnedMessage`) or the turn gives them back (`reclaim`). Still part of the durable record.
+	 * Inputs their own turn took (see `promote`). Not admitted, displayed or takeable: the turn owns them until the message
+	 * stamped with their identity is persisted (`_delivered`) or the turn gives them back (`reclaim`). Still part of the
+	 * durable record.
 	 */
 	private _owned: PendingEntry[] = [];
+	/**
+	 * Admitted inputs a run read (their message started) whose user entry is not persisted yet. Not displayed, takeable or
+	 * held: the run has them. Still part of the durable record, so a crash before persistence loses none. They leave when
+	 * they are delivered (`_delivered`) or when a routed turn drops them unpersisted (`returnUnpersisted`).
+	 */
+	private _awaitingPersistence: PendingEntry[] = [];
 	private _queuedExtensionCommands: string[] = [];
 	private _nextEntryId = 1;
 	/** Set at disposal: nothing is handed to the agent afterwards. */
@@ -242,6 +260,7 @@ export class PendingInputQueueController {
 	constructor(deps: PendingInputQueueDeps) {
 		this.deps = deps;
 		activeControllers.add(this);
+		deps.ownerInputs.onDelivered((inputId) => this._delivered(inputId));
 	}
 
 	matchesSessionId(sessionId: string): boolean {
@@ -424,6 +443,7 @@ export class PendingInputQueueController {
 	}
 
 	private _createQueuedUserMessage(
+		inputId: OwnerInputId,
 		text: string,
 		images: ImageContent[] | undefined,
 		queuedGoalAuthority: ExplicitGoalStartAuthority | undefined,
@@ -431,6 +451,7 @@ export class PendingInputQueueController {
 	): AgentMessage {
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }, ...(images ?? [])];
 		const message: AgentMessage = { role: "user", content, timestamp: Date.now() };
+		stampOwnerInput(message, inputId);
 		if (queuedGoalAuthority) this.deps.goals.queueOwnerChatGoal(message, text, queuedGoalAuthority);
 		if (ownerOriginalText !== undefined) this.deps.noteOwnerAuthoredMessage?.(message, ownerOriginalText);
 		return message;
@@ -459,16 +480,19 @@ export class PendingInputQueueController {
 	/**
 	 * Accept a queued input now, as submitted, before anything decides its admission. It is pending
 	 * from here: counted, projected, takeable and clearable. Its place in its kind's order is fixed.
+	 * `inputId` is the identity its submission was accepted under; a queued input accepted here is minted one now.
 	 */
 	register(
 		kind: "steer" | "followUp",
 		text: string,
 		images?: ImageContent[],
 		origin?: SendUserMessageOrigin,
+		inputId?: OwnerInputId,
 	): PendingInputHandle {
 		const context = this.deps.getInputContext?.();
 		const entry: PendingEntry = {
 			id: this._nextEntryId++,
+			inputId: inputId ?? this.deps.ownerInputs.accept(origin ? "extension" : kind),
 			kind,
 			text,
 			images,
@@ -502,6 +526,8 @@ export class PendingInputQueueController {
 			abort.abort(PENDING_INPUT_WITHDRAWN);
 			const entry: PendingEntry = {
 				id: this._nextEntryId++,
+				// A restored input is accepted again in this process; re-sending it later is a new input.
+				inputId: this.deps.ownerInputs.accept(input.origin ? "extension" : input.kind),
 				kind: input.kind,
 				text: input.text,
 				images: input.images,
@@ -515,10 +541,16 @@ export class PendingInputQueueController {
 		}
 	}
 
-	/** Report the complete undelivered queue, as submitted and in submission order, to the durable record. */
+	/**
+	 * Report the complete undelivered queue, as submitted and in submission order, to the durable record. An input leaves
+	 * it only when it is delivered (its user entry persisted), taken back or withdrawn: one a run read but did not persist
+	 * yet is still named.
+	 */
 	private _changed(): void {
 		if (!this.deps.onQueueChanged) return;
-		const entries = [...this._steering, ...this._followUp, ...this._owned].sort((left, right) => left.id - right.id);
+		const entries = [...this._steering, ...this._followUp, ...this._owned, ...this._awaitingPersistence].sort(
+			(left, right) => left.id - right.id,
+		);
 		this.deps.onQueueChanged(
 			entries.map((entry) => ({
 				kind: entry.kind,
@@ -572,18 +604,19 @@ export class PendingInputQueueController {
 		return true;
 	}
 
-	/** The message the owning turn built for this input. Persisting that message delivers the input. */
-	bindOwnedMessage(handle: PendingInputHandle, message: AgentMessage): void {
-		const entry = this._owned.find((candidate) => candidate.id === handle.id);
-		if (entry) entry.turnMessage = message;
-	}
-
-	/** The owning turn's message was persisted: the input is delivered and leaves the durable record. */
-	settleOwnedMessage(message: AgentMessage): void {
-		const index = this._owned.findIndex((entry) => entry.turnMessage === message);
-		if (index === -1) return;
-		this._owned.splice(index, 1);
-		this._changed();
+	/**
+	 * The delivered event (the ledger's): the user entry of this input is persisted. A run read it, or its own turn sent it;
+	 * either way it leaves the durable record now, and its admission's `onDelivered` runs once. No other point delivers.
+	 */
+	private _delivered(inputId: OwnerInputId): void {
+		for (const entries of [this._awaitingPersistence, this._owned]) {
+			const index = entries.findIndex((entry) => entry.inputId === inputId);
+			if (index === -1) continue;
+			const [delivered] = entries.splice(index, 1);
+			this._changed();
+			delivered?.admission?.onDelivered?.();
+			return;
+		}
 	}
 
 	/**
@@ -595,7 +628,6 @@ export class PendingInputQueueController {
 		const index = this._owned.findIndex((entry) => entry.id === handle.id);
 		if (index === -1) return false;
 		const [entry] = this._owned.splice(index, 1);
-		entry.turnMessage = undefined;
 		if (!this._closed) {
 			const entries = entry.kind === "steer" ? this._steering : this._followUp;
 			entries.push(entry);
@@ -673,6 +705,7 @@ export class PendingInputQueueController {
 			if (entry.held || this._contextCurrent(entry)) continue;
 			if (entry.message) {
 				if (!this.deps.agent.withdrawQueuedMessage(entry.message)) continue;
+				this._retractEcho(entry);
 				entry.message = undefined;
 				entry.text = entry.original.text;
 				entry.images = entry.original.images;
@@ -692,6 +725,7 @@ export class PendingInputQueueController {
 		for (const entry of [...this._steering, ...this._followUp]) {
 			if (entry.held || !entry.message) continue;
 			if (!this.deps.agent.withdrawQueuedMessage(entry.message)) continue;
+			this._retractEcho(entry);
 			entry.message = undefined;
 			entry.text = entry.original.text;
 			entry.images = entry.original.images;
@@ -701,6 +735,13 @@ export class PendingInputQueueController {
 
 	private _contextCurrent(entry: PendingEntry): boolean {
 		return !entry.context || (this.deps.isInputContextCurrent?.(entry.context) ?? true);
+	}
+
+	/** An input whose message the transcript shows (a run read it, then dropped it unpersisted) leaves undelivered. */
+	private _retractEcho(entry: PendingEntry): void {
+		if (!entry.displayed || !entry.message) return;
+		entry.displayed = false;
+		this.deps.onUndeliveredEchoWithdrawn?.(entry.message);
 	}
 
 	/** An admitted input that leaves without delivery: what is not delivered decides nothing (`onDropped`). */
@@ -756,6 +797,7 @@ export class PendingInputQueueController {
 				entry.text = admission.text;
 				entry.images = admission.images;
 				entry.message = this._createQueuedUserMessage(
+					entry.inputId,
 					admission.text,
 					admission.images,
 					admission.queuedGoalAuthority,
@@ -777,37 +819,54 @@ export class PendingInputQueueController {
 	}
 
 	/**
-	 * Remove a delivered message from whichever queue currently holds it (steering checked first,
-	 * matching prior behavior). Returns which queue it was removed from, or undefined if it was not
-	 * queued -- callers use that to decide whether a queue_update event is warranted.
+	 * A user message started: a run read it. The admitted input whose identity it carries (its stamp, never its text: a
+	 * same-text prompt or a host halt message reads no queued input) leaves the pending queue, so it is no longer displayed,
+	 * taken back or held, and waits for its user entry to be persisted, which delivers it. It stays in the durable record
+	 * until then; the record's content is unchanged by this move, so nothing is written. Returns whether the queue changed.
 	 */
-	removeIfPending(messageText: string, message?: AgentMessage): "steering" | "followUp" | undefined {
-		// Only an admitted input can be delivered; the exact queued message wins over equal text.
-		for (const [entries, queue] of [
-			[this._steering, "steering"],
-			[this._followUp, "followUp"],
-		] as const) {
-			const exact = message ? entries.findIndex((entry) => entry.message === message) : -1;
-			if (exact !== -1) {
-				const [delivered] = entries.splice(exact, 1);
-				this._changed();
-				delivered?.admission?.onDelivered?.();
-				return queue;
+	noteRead(message: AgentMessage): boolean {
+		const inputId = ownerInputIdOf(message);
+		if (inputId === undefined) return false;
+		// Only an input handed to the agent can be read; its identity is the whole match.
+		const entry = [...this._steering, ...this._followUp].find(
+			(candidate) => candidate.inputId === inputId && candidate.message !== undefined,
+		);
+		if (!entry) return false;
+		this._removeEntry(entry);
+		entry.displayed = true;
+		this._awaitingPersistence.push(entry);
+		return true;
+	}
+
+	/**
+	 * A routed turn dropped messages it never persisted (an escalation or a throw). Each input among them that a run read
+	 * returns to its queue at its submission position, still admitted, and to the agent's queue in submission order ahead of
+	 * every later input of its kind, so the next run (the escalation's retry) reads it again; with no run left it is held as
+	 * undelivered, like any input no round delivered. Returns whether the queue changed.
+	 */
+	returnUnpersisted(messages: readonly AgentMessage[]): boolean {
+		if (this._closed) return false;
+		const dropped = new Set(messages.flatMap((message) => ownerInputIdOf(message) ?? []));
+		const returned = this._awaitingPersistence.filter((entry) => dropped.has(entry.inputId));
+		if (returned.length === 0) return false;
+		this._awaitingPersistence = this._awaitingPersistence.filter((entry) => !dropped.has(entry.inputId));
+		for (const kind of ["steer", "followUp"] as const) {
+			const back = returned.filter((entry) => entry.kind === kind);
+			if (back.length === 0) continue;
+			const entries = kind === "steer" ? this._steering : this._followUp;
+			entries.push(...back);
+			entries.sort((left, right) => left.id - right.id);
+			// The agent's queue is rebuilt for this kind in submission order: every later input still queued there is taken out
+			// and handed back after the returned ones. Messages that are not pending input (host turns) keep their place.
+			const handed = entries.flatMap((entry) => (entry.message !== undefined && !entry.held ? [entry.message] : []));
+			for (const message of handed) this.deps.agent.withdrawQueuedMessage(message);
+			for (const message of handed) {
+				if (kind === "steer") this.deps.agent.steer(message);
+				else this.deps.agent.followUp(message);
 			}
+			if (kind === "steer") this._notifySteerQueued();
 		}
-		for (const [entries, queue] of [
-			[this._steering, "steering"],
-			[this._followUp, "followUp"],
-		] as const) {
-			const index = entries.findIndex((entry) => entry.message !== undefined && entry.text === messageText);
-			if (index !== -1) {
-				const [delivered] = entries.splice(index, 1);
-				this._changed();
-				delivered?.admission?.onDelivered?.();
-				return queue;
-			}
-		}
-		return undefined;
+		return true;
 	}
 
 	/**
@@ -848,6 +907,7 @@ export class PendingInputQueueController {
 	private _takeEntries(entries: readonly PendingEntry[]): QueuedInput[] {
 		return entries.map((entry) => {
 			if (!entry.message) entry.abort.abort(PENDING_INPUT_WITHDRAWN);
+			this._retractEcho(entry);
 			this._dropAdmission(entry);
 			const input = entry.message ? { text: entry.text, images: entry.images } : { ...entry.original };
 			// A framed third-party message returns as what the owner saw, never as the extension's frame.

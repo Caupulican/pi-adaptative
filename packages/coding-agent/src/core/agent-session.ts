@@ -4,7 +4,6 @@ import type {
 	Api,
 	AssistantMessage,
 	ImageContent,
-	Message,
 	Model,
 	ModelServiceTier,
 	TextContent,
@@ -242,6 +241,7 @@ import {
 	resolveConfiguredOrchestrationModel,
 } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
+import { OwnerInputLedger } from "./owner-input-ledger.ts";
 import { ownerSteerWake, PendingInputQueueController, type QueuedInput } from "./pending-input-queue-controller.ts";
 import { appendPipelineRunSnapshot, getLatestPipelineRunSnapshot, type PipelineRun } from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
@@ -402,6 +402,8 @@ export class AgentSession {
 	/** Steering/follow-up/extension-command queues (see pending-input-queue-controller.ts); assigned
 	 * in the constructor body since it depends on `_skillVault` and `_goals` being ready. */
 	private readonly _pendingQueue: PendingInputQueueController;
+	/** Owner-input identities (minted at acceptance) and the one Delivered point: the input's user entry persisted. */
+	private readonly _ownerInputs = new OwnerInputLedger();
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/**
 	 * The last tool set requested via setActiveToolsByName BEFORE model-capability filtering, so
@@ -1016,6 +1018,8 @@ export class AgentSession {
 				context.branchGeneration === this._branchGeneration,
 			onInputHeld: (input, reason) => this._queuedInputPersistence.noteHeldQueuedInput(input.text, reason),
 			onQueueChanged: (inputs) => this._queuedInputPersistence.recordQueuedInput(inputs),
+			ownerInputs: this._ownerInputs,
+			onUndeliveredEchoWithdrawn: (message) => this._emit({ type: "user_message_withdrawn", message }),
 		});
 		this._queuedInputPersistence.restoreRecordedQueuedInput();
 		this._backgroundLanes = new BackgroundLaneController({
@@ -1758,6 +1762,9 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getSessionManager: () => this.sessionManager,
 			appendSessionMessageBatch: (batch) => this._foregroundLifecycle.appendMessageBatch(batch),
+			returnUnpersistedInput: (messages) => {
+				if (this._pendingQueue.returnUnpersisted(messages)) this._emitQueueUpdate();
+			},
 			getModelRegistry: () => this._modelRegistry,
 			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
 			getFailoverStatus: () => this._foregroundRecovery.getFailoverStatus(),
@@ -1793,7 +1800,11 @@ export class AgentSession {
 			() => this.mutationScope,
 			() => this._shellSessionKey,
 			this._providerLimitStore,
-			(message, entryId) => this._reflection.noteOwnerInputPersisted(message, entryId),
+			// Every persisted message, single or batched (a routed turn's flush included), passes here: the one Delivered point.
+			(message, entryId) => {
+				this._reflection.noteOwnerInputPersisted(message, entryId);
+				this._ownerInputs.notePersisted(message);
+			},
 			() =>
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
 			({ requestId, model, context, sourceContext }) => {
@@ -2355,6 +2366,7 @@ export class AgentSession {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			pendingQueue: this._pendingQueue,
+			ownerInputs: this._ownerInputs,
 			compaction: this._compaction,
 			ownerRules: this._ownerRules,
 			backgroundLanes: this._backgroundLanes,
@@ -3645,14 +3657,11 @@ export class AgentSession {
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
 		if (event.type === "agent_end") this.runtimeUpdates.noteRunEnd(this.agent.signal);
-		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
-		// This ensures the UI sees the updated queue state
+		// A run read a queued input: it leaves the visible queue BEFORE listeners see the message (the UI sees the updated
+		// queue), matched by the identity the message carries. It is delivered when its user entry is persisted, not here.
 		if (event.type === "message_start" && event.message.role === "user") {
 			this._compaction.resetOverflowRecovery();
-			const messageText = this._getUserMessageText(event.message);
-			if (messageText && this._pendingQueue.removeIfPending(messageText, event.message) !== undefined) {
-				this._emitQueueUpdate();
-			}
+			if (this._pendingQueue.noteRead(event.message)) this._emitQueueUpdate();
 			this._goals.activateQueuedOwnerChatGoal(event.message, this.agent.state.messages);
 		}
 		if (event.type === "turn_end" || event.type === "tool_execution_start" || event.type === "tool_execution_end") {
@@ -3720,9 +3729,8 @@ export class AgentSession {
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
+				// The append is the Delivered point of an owner input this message carries (the ledger hears it there).
 				this._foregroundLifecycle.appendMessage(event.message, event.origin);
-				// A queued owner input its own turn took is delivered once its message is in the transcript.
-				if (event.message.role === "user") this._pendingQueue.settleOwnedMessage(event.message);
 				messagePersisted = true;
 			}
 			// Track the response for ordered retry/failover/compaction handling after agent_end.
@@ -3797,15 +3805,6 @@ export class AgentSession {
 
 	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
 		return this._foregroundRecovery.willRetryAfterAgentEnd(event);
-	}
-
-	/** Extract text content from a message */
-	private _getUserMessageText(message: Message): string {
-		if (message.role !== "user") return "";
-		const content = message.content;
-		if (typeof content === "string") return content;
-		const textBlocks = content.filter((c) => c.type === "text");
-		return textBlocks.map((c) => (c as TextContent).text).join("");
 	}
 
 	/** Find the last assistant message in agent state (including aborted ones) */
@@ -4583,7 +4582,7 @@ export class AgentSession {
 		return runToolkitHit(
 			{
 				agent: this.agent,
-				sessionManager: this.sessionManager,
+				persistMessage: (message) => this._foregroundLifecycle.appendMessage(message),
 				bash: this._bash,
 				emit: (event) => this._emit(event),
 			},

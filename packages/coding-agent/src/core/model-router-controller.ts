@@ -209,6 +209,8 @@ export interface ModelRouterControllerDeps {
 	getSessionManager(): SessionManager;
 	/** Canonical host-owned mixed message batch persistence; one validated publication for lifecycle linking. */
 	appendSessionMessageBatch(batch: readonly SessionMessageBatchEntry[]): string[];
+	/** Messages a routed turn read but never persisted (escalated or thrown): the owner input among them is undelivered. */
+	returnUnpersistedInput?(messages: readonly AgentMessage[]): void;
 	/** Resolves configured route/judge/executor model patterns against configured auth. */
 	getModelRegistry(): ModelRouterControllerModelSource;
 	/** Session-scoped provider/model quota exhaustion guard. */
@@ -552,6 +554,12 @@ export class ModelRouterController {
 		const unpersisted = new Set(this.pendingSessionMessages(agent.state.messages));
 		if (unpersisted.size > 0)
 			agent.state.messages = agent.state.messages.filter((message) => !unpersisted.has(message));
+		// Owner input the turn read is not delivered until it is persisted: what the turn drops goes back to its owner,
+		// so the escalation's retry reads it again (or, with no retry, it is held), never lost with the cheap turn.
+		const buffer = this._modelRouterSessionBuffer;
+		if (buffer && !buffer.committed && buffer.messages.length > 0) {
+			this.deps.returnUnpersistedInput?.(buffer.messages.map((entry) => entry.message));
+		}
 	}
 
 	/** Whether a cheap routed turn has crossed its durable tool-boundary commit. */

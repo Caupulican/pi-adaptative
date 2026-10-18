@@ -33,6 +33,7 @@ import type { MemoryController } from "./memory-controller.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { AccountModelCatalog } from "./model-router/account-models.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
+import { type OwnerInputId, type OwnerInputLedger, stampOwnerInput } from "./owner-input-ledger.ts";
 import type { PendingInputHandle, PendingInputQueueController } from "./pending-input-queue-controller.ts";
 import { createActivePipelineContextMessage, type PipelineRun } from "./pipelines/index.ts";
 import type { DurableOwnerRuleStore } from "./project-rules/durable-owner-rules.ts";
@@ -64,6 +65,8 @@ export class SubmissionPreflightAborted extends Error {
 /** One submission's owner order and the points of its preparation the caller acts on. */
 interface SubmissionLifecycle {
 	readonly acceptedOrder?: number;
+	/** The identity minted when the submission was accepted; the message it becomes carries it. */
+	readonly inputId?: OwnerInputId;
 	/**
 	 * Set when its turn hands its words to the owner-policy queue (they are owner input from then on), or when its words are
 	 * admitted to the pending queue, which then delivers them or releases them where they are dropped (`onDropped`).
@@ -85,6 +88,8 @@ export interface PromptSubmissionControllerDeps {
 	readonly agent: Agent;
 	readonly sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch" | "getMessageEntryId">;
 	readonly pendingQueue: PendingInputQueueController;
+	/** Mints each accepted submission's owner-input identity. */
+	readonly ownerInputs: Pick<OwnerInputLedger, "accept">;
 	readonly compaction: Pick<CompactionController, "cancelIdlePreparation">;
 	readonly ownerRules: Pick<DurableOwnerRuleStore, "record">;
 	readonly backgroundLanes: Pick<BackgroundLaneController, "clearGoalAutoContinueTimer">;
@@ -286,12 +291,17 @@ export class PromptSubmissionController {
 		// Its words are judged only where their outcome is read (a fresh turn's at its first tool call), so a queued input
 		// judged before then carries them; until something judges, carries or withdraws them, they wait here.
 		if (acceptedOrder !== undefined) this.deps.registerOwnerWords(acceptedOrder, text);
+		// Its identity, minted at acceptance for every source (an extension's message on its untrusted path): the message it
+		// becomes carries it, and its persistence delivers it. A hidden internal turn is no one's input and has none.
+		const inputId = options?.internalContextType
+			? undefined
+			: this.deps.ownerInputs.accept(options?.source === "extension" ? "extension" : "prompt");
 		// A queued submission (the owner's, or an extension's such as a peer message) is pending from this
 		// moment, in submission order, before anything below can await: it is visible, takeable, and
 		// cancelled with the pending queue. Only the owner's words are classified as owner intent.
 		const queuedOwnerInput =
 			this.deps.getSessionWorkState().busy && options?.streamingBehavior && !options.internalContextType
-				? this.deps.pendingQueue.register(options.streamingBehavior, text, options.images, options.origin)
+				? this.deps.pendingQueue.register(options.streamingBehavior, text, options.images, options.origin, inputId)
 				: undefined;
 		if (queuedOwnerInput) this.deps.emitQueueUpdate();
 		// Judged in full once, here: the same judgment decides whether it is admitted and is applied where it is read.
@@ -333,6 +343,7 @@ export class PromptSubmissionController {
 					queuedOwnerInput,
 					prepared,
 					acceptedOrder,
+					inputId,
 				);
 			const run = this.streamingPromptSubmissionTail.then(start, start);
 			this.streamingPromptSubmissionTail = preparedGate;
@@ -346,6 +357,7 @@ export class PromptSubmissionController {
 			queuedOwnerInput,
 			undefined,
 			acceptedOrder,
+			inputId,
 		);
 	}
 
@@ -371,13 +383,12 @@ export class PromptSubmissionController {
 	}
 
 	/**
-	 * A queued owner input's own turn ended. Its message in the transcript delivers the input; a message that never
-	 * reached it (a buffered cheap-route turn that failed, say) is retracted from the echo, and its input is held.
+	 * A queued owner input's own turn ended. Its persisted message already delivered the input (the ledger's Delivered
+	 * point); a message that never reached the transcript (a buffered cheap-route turn that failed, say) is retracted from
+	 * the echo, and its input is held.
 	 */
-	private settleOrRetractOwnedEcho(message: AgentMessage): void {
-		if (this.deps.sessionManager.getMessageEntryId(message) !== undefined) {
-			this.deps.pendingQueue.settleOwnedMessage(message);
-		} else {
+	private retractUnpersistedOwnedEcho(message: AgentMessage): void {
+		if (this.deps.sessionManager.getMessageEntryId(message) === undefined) {
 			this.deps.emit({ type: "user_message_withdrawn", message });
 		}
 	}
@@ -390,6 +401,7 @@ export class PromptSubmissionController {
 		queuedOwnerInput?: PendingInputHandle,
 		prepared?: () => void,
 		acceptedOrder?: number,
+		inputId?: OwnerInputId,
 	): Promise<void> {
 		const submission = { lease: initialSubmissionLease };
 		if (submission.lease) this.foregroundPromptLeaseValue = submission.lease;
@@ -407,6 +419,7 @@ export class PromptSubmissionController {
 			: submissionAbort.signal;
 		const lifecycle: SubmissionLifecycle = {
 			acceptedOrder,
+			...(inputId !== undefined ? { inputId } : {}),
 			ownerWordsHandedOn: false,
 			ownsForeground: () => {
 				ownsForeground();
@@ -600,7 +613,13 @@ export class PromptSubmissionController {
 				// here; one registered at submission keeps its original place.
 				const pending =
 					queuedOwnerInput ??
-					this.deps.pendingQueue.register(options.streamingBehavior, text, options.images, options.origin);
+					this.deps.pendingQueue.register(
+						options.streamingBehavior,
+						text,
+						options.images,
+						options.origin,
+						lifecycle?.inputId,
+					);
 				let admitted = false;
 				// Set when the consumer this input was to join ended while it was being classified and the foreground came
 				// free: the input then runs as its own turn below instead of entering a queue that no run drains.
@@ -727,8 +746,9 @@ export class PromptSubmissionController {
 				};
 				if (options?.source !== "extension") this.deps.reflection.markOwnerInput(userMessage, text);
 				promptMessage = userMessage;
-				// A queued input its own turn took is delivered by this message's persistence, not by the turn's end.
-				if (queuedOwnerInput) this.deps.pendingQueue.bindOwnedMessage(queuedOwnerInput, userMessage);
+				// The message carries the input it is: its persistence delivers that input (a queued input its own turn took
+				// included), matched by this identity, never by the turn's end or the message's text.
+				if (lifecycle?.inputId !== undefined) stampOwnerInput(userMessage, lifecycle.inputId);
 				this.deps.earlyDisplayedUserMessages.add(userMessage);
 				this.deps.emit({ type: "message_start", message: userMessage });
 			}
@@ -1144,7 +1164,7 @@ export class PromptSubmissionController {
 						if (userMessage) this.deps.earlyDisplayedUserMessages.delete(userMessage);
 					},
 					() => {
-						if (queuedOwnerInput && userMessage) this.settleOrRetractOwnedEcho(userMessage);
+						if (queuedOwnerInput && userMessage) this.retractUnpersistedOwnedEcho(userMessage);
 					},
 				],
 				"Prompt submission release failed.",

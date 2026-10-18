@@ -5,7 +5,13 @@
 
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import { type Api, type AssistantMessage, listOpenAICodexRateLimitResetCredits, type Model } from "@caupulican/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	listOpenAICodexRateLimitResetCredits,
+	type Message,
+	type Model,
+} from "@caupulican/pi-ai";
 import type { Agent } from "../kernel/agent.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
@@ -689,7 +695,8 @@ export function buildSessionContextCompositionReport(deps: SessionContextComposi
 
 export interface SessionToolkitHitDeps {
 	readonly agent: Agent;
-	readonly sessionManager: Pick<SessionManager, "appendMessage">;
+	/** The session's message persistence (the foreground lifecycle's): a persisted owner message is delivered there. */
+	persistMessage(message: Message): void;
 	readonly bash: Pick<BashExecutionController, "recordBashResult">;
 	emit(event: AgentSessionEvent): void;
 }
@@ -705,7 +712,7 @@ export async function runToolkitHit(
 	for (const message of turnMessages) {
 		if (message.role !== "user") continue;
 		deps.agent.state.messages.push(message);
-		deps.sessionManager.appendMessage(message);
+		deps.persistMessage(message);
 		deps.emit({ type: "message_end", message });
 	}
 	const command = `run_toolkit_script ${scriptName}`;

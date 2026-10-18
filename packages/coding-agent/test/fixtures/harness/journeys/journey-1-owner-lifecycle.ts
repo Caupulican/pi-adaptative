@@ -6,6 +6,7 @@ import { decisionLedgerFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession, AgentSessionEvent } from "../../../../src/core/agent-session.ts";
 import { getResumableHumanInputSnapshot } from "../../../../src/core/human-input.ts";
 import { DecisionLedgerStore } from "../../../../src/core/operator-projection/decision-ledger-store.ts";
+import { QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/core/queued-input-record.ts";
 import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../../../src/core/reflection-controller.ts";
 import { isCredentialSecretKey, mockCredentialFields } from "../../../../src/core/secrets/credential-content-mock.ts";
 import {
@@ -1570,6 +1571,45 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		{ liftDelivered: liftIndex >= 0, limitDelivered: limitIndex >= 0, liftFirst: liftIndex < limitIndex },
 		"the newer steer is delivered ahead of the older follow-up",
 	).toEqual({ liftDelivered: true, limitDelivered: true, liftFirst: true });
+	// Crash cut: the durable queued-input record keeps the steer until its user entry is persisted. At every cut of the
+	// session file between the record that first names it and its user entry, the latest record still names it, so a
+	// restart there restores it instead of losing it; the record written at its delivery drops it and keeps the older
+	// follow-up, which is still undelivered.
+	const deliveryEntries = created.sessionManager.getEntries();
+	const recordedTexts = (data: unknown): string[] =>
+		((data as { inputs?: Array<{ text?: unknown }> } | undefined)?.inputs ?? []).flatMap((input) =>
+			typeof input.text === "string" ? [input.text] : [],
+		);
+	const queuedRecords = deliveryEntries.flatMap((entry, index) =>
+		entry.type === "custom" && entry.customType === QUEUED_INPUT_CUSTOM_TYPE
+			? [{ index, texts: recordedTexts(entry.data) }]
+			: [],
+	);
+	const liftRecorded = queuedRecords.find((record) => record.texts.includes(DELIVERY_LIFT_WORDS))?.index ?? -1;
+	const liftEntry = deliveryEntries.findIndex(
+		(entry, index) =>
+			index > liftRecorded &&
+			entry.type === "message" &&
+			entry.message.role === "user" &&
+			JSON.stringify(entry.message.content).includes(DELIVERY_LIFT_WORDS),
+	);
+	const recordAtDelivery = queuedRecords.find((record) => record.index > liftEntry);
+	expect(
+		{
+			recordedBeforeDelivery: liftRecorded >= 0 && liftEntry > liftRecorded,
+			keptUntilPersisted: queuedRecords
+				.filter((record) => record.index > liftRecorded && record.index < liftEntry)
+				.every((record) => record.texts.includes(DELIVERY_LIFT_WORDS)),
+			droppedAtDelivery: recordAtDelivery !== undefined && !recordAtDelivery.texts.includes(DELIVERY_LIFT_WORDS),
+			olderFollowUpKept: recordAtDelivery?.texts.includes(DELIVERY_LIMIT_WORDS) === true,
+		},
+		"a delivered steer leaves the durable record only once its user entry is persisted",
+	).toEqual({
+		recordedBeforeDelivery: true,
+		keptUntilPersisted: true,
+		droppedAtDelivery: true,
+		olderFollowUpKept: true,
+	});
 	expect(
 		session.localCommitBranch(),
 		"an older delivery limit applied after a newer lift does not override the newer owner words",
