@@ -16,6 +16,7 @@ export async function runJourney2(): Promise<void> {
 	await runJourney(
 		{
 			name: "journey-2",
+			journey: 2,
 			// The planned two large reports and their chunked artifact read need more than the default 32k root window. The window is
 			// set once for the provider and the registry, so manual compaction and its keep budget still see one model.
 			modelOptions: { root: { contextWindow: 131_072 } },

@@ -66,6 +66,7 @@ import {
 	type WorkRetentionOptions,
 	type WorkRunLease,
 } from "../../../src/utils/work-directory.ts";
+import { type FaultMatrixJourney, FaultMatrixMarks } from "./fault-matrix.ts";
 import { ScriptedHumanInput } from "./scripted-human-input.ts";
 import {
 	type Barrier,
@@ -2103,6 +2104,8 @@ export class HarnessProcesses {
 
 export interface HarnessWorldOptions {
 	readonly name: string;
+	/** The journey this world runs: its fault matrix rows must all be marked at close (see {@link FaultMatrixMarks}). */
+	readonly journey: FaultMatrixJourney;
 	readonly systemOneEnabled: boolean;
 	/**
 	 * Priced or window-configured scripted tracks. Applied to the provider before the registry is built, so the catalog,
@@ -2240,6 +2243,8 @@ export class HarnessWorld {
 	readonly trace = new HarnessTrace();
 	readonly io = new VirtualFileSystem(HARNESS_PROJECT_CWD);
 	readonly systemOne: ScriptedSystemOneTransport;
+	/** The fault and control marks of this world's journey and System One mode; close requires both for every covered row. */
+	readonly faultMatrix: FaultMatrixMarks;
 	/** The session timers of every root session of this world (see {@link HarnessTimers}). */
 	readonly timers = new HarnessTimers();
 	readonly git: VirtualGit;
@@ -2292,6 +2297,7 @@ export class HarnessWorld {
 
 	constructor(options: HarnessWorldOptions) {
 		this.systemOne = new ScriptedSystemOneTransport(options.systemOneEnabled);
+		this.faultMatrix = new FaultMatrixMarks(options.journey, options.systemOneEnabled ? "on" : "off");
 		this.agentDir = harnessPath(`agent-${options.name}`);
 		this.warningAllowances = options.warningAllowances ?? [];
 		this.git = new VirtualGit(this.io, HARNESS_PROJECT_CWD);
@@ -2758,6 +2764,10 @@ export class HarnessWorld {
 				},
 				() => this.systemOne.assertConsumed(),
 				() => this.systemOne.assertInFlightSettled(),
+				// A failed body never reached its later witnesses: their absent marks are not separate evidence.
+				() => {
+					if (body === undefined) this.faultMatrix.assertCovered();
+				},
 				() => {
 					if (this.git.unscripted.length)
 						throw new Error(`Unscripted git commands: ${this.git.unscripted.join("; ")}`);

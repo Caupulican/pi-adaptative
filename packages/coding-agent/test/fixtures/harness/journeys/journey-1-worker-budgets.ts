@@ -258,6 +258,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	expect(world.timers.advance("orchestration", e8tArmedMs - 1), "no ladder retry fires before its delay").toBe(0);
 	expect(world.timers.advance("orchestration", 1), "the ladder retry fires once its delay has elapsed").toBe(1);
 	expect(world.timers.armedDelays("orchestration"), "the fired ladder alarm leaves no alarm armed").toEqual([]);
+	world.faultMatrix.witness("e8t", { control: false });
 	await withDeadline(trace, "E8 transient handoff woke the root", e8tWake.promise, 120_000);
 	await withDeadline(trace, "E8 transient root idle", e8tSession.waitForForegroundIdle());
 	expect(
@@ -288,6 +289,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	expect(e8tGaps.length, "four admissions give three gaps").toBe(3);
 	expect(e8tGaps[0] ?? 0, "the first inner retry waits about the 2 s base").toBeGreaterThanOrEqual(1_500);
 	expect(e8tGaps[1] ?? 0, "the second inner retry waits about twice the base").toBeGreaterThanOrEqual(3_000);
+	world.faultMatrix.witness("R9", { control: false });
 	expect(await world.disposeSessionInBody(e8tSession), "the E8 transient owner disposes cleanly").toBeUndefined();
 	trace.mark("root", "e8.transient");
 
@@ -373,6 +375,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	expect(e8oAttempts[0]?.result?.reasonCode, "the failed attempt names its completion error").toBe("completion_error");
 	expect(e8oAttempts[0]?.retry, "the attempt never entered the durable retry ladder").toBeUndefined();
 	expect(world.timers.armedDelays("orchestration"), "the one-attempt owner arms no ladder alarm").toEqual([]);
+	world.faultMatrix.witness("e8t", { control: true });
 	const e8oGaps = e8oAdmitted.slice(1).map((time, index) => time - (e8oAdmitted[index] ?? time));
 	expect(e8oGaps.length, "three admissions give two gaps").toBe(2);
 	expect(e8oGaps[0] ?? 0, "the first inner retry waits about the 2 s base").toBeGreaterThanOrEqual(1_500);
@@ -435,6 +438,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 		),
 		"the opaque failure announces no inner or ladder retry",
 	).toHaveLength(0);
+	world.faultMatrix.witness("R9", { control: true });
 	const e8uAttempts = Object.values(e8uSession.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {});
 	expect(
 		e8uAttempts.map((attempt) => attempt.status),

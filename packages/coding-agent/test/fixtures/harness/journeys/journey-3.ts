@@ -15,6 +15,7 @@ export async function runJourney3(): Promise<void> {
 	await runJourney(
 		{
 			name: "journey-3",
+			journey: 3,
 			// worktree_sync is opt-in: the owner's default-tools setting names it alongside the default surface. The owner's draft is
 			// dirty from the start, so lanes are created explicitly and the worker is started on its request-visible lane checkout.
 			settings: { defaultTools: [...DEFAULT_ACTIVE_TOOL_NAMES, "worktree_sync"] },

@@ -158,6 +158,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	);
 	expect(e13Post?.reservations.watchCount, "the owner's reservation watch is closed by teardown").toBe(0);
 	world.certifyDisposedOwner(e13Session, e13ExpectedClaims, { leases: e13Leases, executingHolds: e13Holds });
+	world.faultMatrix.witness("R5", { control: false });
 	// The dead owner's exact lease is reaped at the native boundary: its pid is parsed from the exact lease and probed with signal 0 by the fresh
 	// owner, the exact old reservation is absent from the durable store at the fresh admission, and the fresh admitted lease is a different
 	// owner, attempt and fence on the same scope. No start receipt text is used as the oracle.
@@ -308,6 +309,8 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 				world.warnings.slice(e13FreshMark),
 				"the E13 fresh owner, with no fault armed, discloses nothing at close",
 			).toEqual([]);
+			world.faultMatrix.witness("R5", { control: true });
+			world.faultMatrix.witness("R3", { control: true });
 		} catch (error) {
 			e13Failures.push(error);
 		}
@@ -434,6 +437,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	);
 	expect(e13aPost?.reservations.watchCount, "this writer registered no observer").toBe(0);
 	world.certifyDisposedOwner(e13aSession, e13aExpectedClaims, { leases: e13aLeases, executingHolds: e13aHolds });
+	world.faultMatrix.witness("R3", { control: false });
 
 	// E13 joined teardown (required release): one owner holds a live writer while its reservation observer close and its store unlink fail
 	// in the same teardown. Both exact causes are joined into the disposal error, the native observer stays registered with its listeners,
@@ -536,7 +540,6 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	// One observer per host workspace key may share the store directory. Watchers close in registration order, so the
 	// first registered observer is the one the single scripted close fault meets; it is the one the teardown retains.
 	const e13jWatch = e13jWatchPre[0];
-	if (e13jWatch === undefined) throw new Error("the E13J store directory carries no observer");
 	if (e13jWatch === undefined) throw new Error("the E13J store directory carries no observer");
 	const e13jExpectedClaims: WorkerProjectClaims = e13jPreClaims.map((claim) => ({
 		...claim,
@@ -1083,6 +1086,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		expect(e13rHeldLeases(), "the only held lease is still the retained record").toEqual(e13rLeases);
 		expect(e13rStoreText(e13rStorePath), "the retained record is still durable").toContain(e13rLease.reservationId);
 		expect(e13rSecondFirstRequest, "the waiting writer runs no request while the record is durable").toBeUndefined();
+		world.faultMatrix.witness("E13R", { control: false });
 		// The settled release, each alarm retry, then the waiting writer's own admission, each retried the release first and were refused.
 		expect(
 			e13rDenial.hits,
@@ -1110,6 +1114,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		);
 		expect(e13rHeldLeases(), "the alarm retry releases the retained lease before the waiter is admitted").toEqual([]);
 		expect(world.timers.armedDelays("write-reservation"), "a successful retry arms no further alarm").toEqual([]);
+		world.faultMatrix.witness("R1", { control: false });
 		await withDeadline(trace, "E13R waiting writer admitted after the retry", e13rSecondAdmitted.promise);
 		expect(
 			e13rSecondFirstRequest?.store,
@@ -1168,6 +1173,8 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			world.warnings.slice(e13rClearedMark).filter((message) => message.includes("write reservation")),
 			"no reservation diagnostic follows the cleared refusal",
 		).toEqual([]);
+		world.faultMatrix.witness("R1", { control: true });
+		world.faultMatrix.witness("E13R", { control: true });
 	} finally {
 		// Failure-safe: an assertion that fails early must not leave the refusal armed or a writer gated for the journey's cleanup.
 		e13rDenial?.clear();
@@ -1233,6 +1240,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 					if (started?.isError || !started?.text.includes("delegate started (running)")) {
 						throw new Error(`the E13Q ${tag} writer did not start: ${started?.text ?? "no result"}`);
 					}
+					world.faultMatrix.witness("R37", { control: true });
 				},
 				reply: { content: [{ type: "text", text: `The ${tag} receipt writer is started.` }] },
 			},
@@ -1395,6 +1403,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			expect(providerReceipt, `the model reads the E13Q ${tag} reservation wait`).toContain(
 				"waiting: write_reservation: ",
 			);
+			world.faultMatrix.witness("R37", { control: false });
 			expect(queuedFirstRequest, `the E13Q ${tag} queued turn runs no request while the record is durable`).toBe(
 				undefined,
 			);
@@ -1428,6 +1437,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 				queuedFirstRequest?.leases.map((held) => held.taskId),
 				`at the E13Q ${tag} queued turn's first request the only held lease is its own`,
 			).toEqual([laneId]);
+			world.faultMatrix.witness("E13Q", { control: false });
 			world.io.assertFaultsConsumed();
 			world.provider.enqueue(
 				"root",
@@ -1474,6 +1484,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			world.timers.armedDelays("write-reservation"),
 			`the disposed E13Q ${tag} owner leaves no retry alarm armed`,
 		).toEqual([]);
+		world.faultMatrix.witness("E13Q", { control: true });
 		trace.mark("root", `e13q.${tag}-receipt`);
 	};
 	// (a) Explicit start with agentId: "durably accepted task message ... on its persistent context (lane <id>; ...; waiting: ...)".
@@ -1901,6 +1912,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			e13hQueuedFirstRequest,
 			"at the queued turn's first request it holds its own execution and the kept claim",
 		).toEqual({ holds: [{ agentId: e13hAgentId, count: 1 }], claims: [e13hClaim.sessionId], retained: 0 });
+		world.faultMatrix.witness("E13H", { control: false });
 		world.io.assertFaultsConsumed();
 		// Control: the queued turn finishes with no fault armed, and its release retains nothing.
 		const e13hClearedMark = world.warnings.length;
@@ -1941,6 +1953,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			world.warnings.slice(e13hClearedMark).filter((message) => message.includes("resource release")),
 			"no release diagnostic follows the cleared refusal",
 		).toEqual([]);
+		world.faultMatrix.witness("E13H", { control: true });
 	} finally {
 		// Failure-safe: an assertion that fails early must not leave the refusal armed or a writer gated for the journey's cleanup.
 		e13hDenial?.clear();
@@ -2478,6 +2491,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	);
 	const vuFinal = vuDone?.attempts[vuAttempt.attemptId];
 	expect(vuFinal?.grant, "the verifier keeps its original grant to the end").toEqual(vuPreGrant);
+	world.faultMatrix.witness("R6", { control: false });
 
 	// Repeated settled recovery: the entrance again repeats nothing: no provider request, no repair, no output.
 	const vuProvidersBefore = world.provider.reached.filter((name) => name.startsWith("worker-b:")).length;
@@ -2493,6 +2507,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			.filter((message) => message.role === "toolResult" && message.toolCallId === "vu-bash-1"),
 		"the settled recovery repeats no repair",
 	).toHaveLength(1);
+	world.faultMatrix.witness("R6", { control: true });
 	expect(await world.disposeSessionInBody(vuFresh.session), "the recovered VU owner disposes cleanly").toBeUndefined();
 	// Windows shell contract (Node contract, not a Windows host): the platform bash definition for win32, with its own session key, runs through the
 	// released Windows engine adapter. The process platform stays POSIX; this proves the native Windows wiring, not Python, Windows or CI.

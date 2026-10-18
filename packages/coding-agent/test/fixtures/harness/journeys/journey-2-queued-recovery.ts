@@ -646,6 +646,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 			world.io.fileEntries().get(e7RootMailbox),
 			"the failed target leaves the root mailbox bytes unchanged",
 		).toBe(e7RootBefore);
+		world.faultMatrix.witness("R8", { control: false });
 		// The held boundary after both faults, before any listing: the faulted reply already committed its native receipt to the source.
 		// That raw receipt is the pre-repair baseline; the test reads it and computes no digest of its own.
 		e7ReceiptBeforeRepair = rawReplyReceiptOf(readWorkerMailboxRecord(e7SourceMailbox).mailbox, e7FollowUp.messageId);
@@ -790,6 +791,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		rawReplyReceiptOf(readWorkerMailboxRecord(e7SourceMailbox).mailbox, e7FollowUp.messageId),
 		"the reply receipt is unchanged across the tail and the reply replay",
 	).toEqual(e7ReceiptBeforeRepair);
+	world.faultMatrix.witness("R8", { control: true });
 	// A repeated recovery after B's terminal repeats no provider step of B and publishes no new session entry.
 	const e7EntriesBefore = e7Fresh.sessionManager.getEntries().length;
 	const e7BStepsBefore = world.provider.reached.filter((name) => name.includes("e7-b-")).length;
@@ -801,12 +803,14 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		world.provider.reached.filter((name) => name.includes("e7-b-")).length,
 		"a repeated recovery repeats no B provider step",
 	).toBe(e7BStepsBefore);
+	world.faultMatrix.witness("E7", { control: true });
 	expect(
 		Object.values(e7Settled.attempts)
 			.filter((attempt) => attempt.taskId === e7StartB.laneId)
 			.at(-1)?.status,
 		"B resumes from its queued state and completes",
 	).toBe("completed");
+	world.faultMatrix.witness("E7", { control: false });
 	expect(
 		world.warnings.some((warning) => warning.includes("no proof of never-started")),
 		"the queued-context guard refuses A's busy lease",

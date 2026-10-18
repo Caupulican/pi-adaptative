@@ -296,6 +296,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		requestsUnchanged: true,
 	});
 	trace.claimRejection(cpRefused.outcome, "Compaction cancelled");
+	world.faultMatrix.witness("R11", { control: false });
 
 	const cpLiveHold = createBarrier();
 	const cpLiveReached = createBarrier();
@@ -348,6 +349,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	]);
 	expect(cpLiveSummaries, "the live quit keeps exactly one committed compaction entry").toHaveLength(1);
 	expect(cpLiveSummaries[0], "the committed entry carries the handler's summary").toContain("The held summary.");
+	world.faultMatrix.witness("R11", { control: true });
 	trace.mark("root", "compaction.live-control");
 
 	// Quit while an extension holds the run at the assistant's message end, past the quit's bounded settle: the owner discloses the
@@ -498,6 +500,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	expect(quitClean.stderr, "a clean quit writes no failure line").toEqual([]);
 	expect(quitClean.stdout.join(""), "the quit path prints the resume line").toContain("To resume this session:");
 	expect(quitClean.stdout.join(""), "the quit path prints the resume command").toContain(SIGNAL_RESUME_COMMAND);
+	world.faultMatrix.witness("R42", { control: true });
 	const signalAllFail = await runSignalShutdown({
 		fromSignal: true,
 		dispose: async () => {
@@ -620,6 +623,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	]);
 	expect(quitAllFail.exits, "a failing quit with three causes exits 1").toEqual([1]);
 	expect(quitAllFail.stdout, "a failing quit with three causes writes no resume line").toEqual([]);
+	world.faultMatrix.witness("R42", { control: false });
 	trace.mark("root", "signal.shutdown");
 	await verifyModeWitnesses(world);
 	// Owner input queued behind a run that the quit ends. The input is admitted to the agent's queue behind the held reply; the quit ends
@@ -682,6 +686,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	]);
 	const qhOutcome = await withDeadline(trace, "queued quit: the held run ends", qhPrompt, 60_000);
 	expect(qhOutcome, "the held run ends without an error").toBeUndefined();
+	world.faultMatrix.witness("R15", { control: false });
 	trace.mark("root", "queued-quit.held");
 	// Live control: the same queued input behind a run that completes is delivered as that run's next turn, and nothing is held.
 	const QUEUED_CONTROL_WORDS = "Owner input queued behind a reply that completes.";
@@ -740,6 +745,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		{ stopReason: "stop", text: "The held reply" },
 		{ stopReason: "stop", text: "The queued reply" },
 	]);
+	world.faultMatrix.witness("R15", { control: true });
 	expect(await world.disposeSessionInBody(qlSession), "the live control owner disposes cleanly").toBeUndefined();
 	trace.mark("root", "queued-quit.live-control");
 
@@ -767,6 +773,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		RPC_LATE_WARNING,
 	]);
 	expect(rpcSigterm.flushRequests, "the SIGTERM shutdown flushes the stream once").toBe(1);
+	world.faultMatrix.witness("R42", { control: true });
 	// Input end and output failures during a SIGTERM dispose: neither ends the shutdown early, and the exit waits for the dispose.
 	const rpcHeld = await runRpcHost(world, trace, { trigger: "sigterm", holdDispose: "input-end" });
 	expect(rpcHeld).toMatchObject(RPC_INPUT_END_HELD_EXPECTED);
@@ -786,6 +793,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		"the failing dispose's closing warning still reaches the open stream",
 	).toEqual(["warning"]);
 	expect(rpcSigtermFails.sinkWarnings, "a failing dispose still releases the stream").toEqual([RPC_LATE_WARNING]);
+	world.faultMatrix.witness("R42", { control: false });
 	const rpcFlushBound = await runRpcHost(world, trace, {
 		trigger: "sigterm",
 		disposeFails: false,
@@ -853,4 +861,9 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		routed: [],
 	});
 	expect(await runSdkConstructionFailure(world)).toEqual(SDK_CONSTRUCTION_FAILURE_EXPECTED);
+	// The expected witness holds each fault outcome next to its control (control, disposalControl, workDirectory's controls).
+	for (const id of ["R40", "R41", "R42"]) {
+		world.faultMatrix.witness(id, { control: false });
+		world.faultMatrix.witness(id, { control: true });
+	}
 }

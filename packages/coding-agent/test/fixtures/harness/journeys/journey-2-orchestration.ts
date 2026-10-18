@@ -1848,6 +1848,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	expect(waitDetail(eSteerSeen.steeredDetails, "status"), "the task keeps running past the steer").toBe("running");
 	expect(eSteerSeen.steerRead, "the steer is read at the next provider boundary").toBe(true);
 	expect(eSteerSeen.shellRequests, "the steer re-runs nothing").toBe(eShellBefore);
+	world.faultMatrix.witness("steer-ended-tool-task-wait", { control: false });
 	// Control: the same wait with no steer ends on its own bound and says so. Nothing advanced this owner before, so an
 	// armed delay is its due time: the short bound is the only alarm the advance can reach.
 	expect(
@@ -1864,6 +1865,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		{ kind: "steered", by: "owner.steer", decision: "decided" },
 		{ kind: "timed_out", boundMs: E_TIMED_WAIT_MS },
 	]);
+	world.faultMatrix.witness("steer-ended-tool-task-wait", { control: true });
 	expect(
 		eSession.getVerificationObligations().map((obligation) => obligation.id),
 		"the waits leave the failure's obligation open while the pass is held",

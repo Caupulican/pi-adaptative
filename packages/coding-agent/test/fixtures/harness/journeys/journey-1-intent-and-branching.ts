@@ -904,6 +904,7 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 			),
 		"the held input is never admitted to the branch",
 	).toBe(false);
+	world.faultMatrix.witness("R16", { control: false });
 	expect(s4Session.clearQueue().followUp, "restoring the held input returns it from the queue").toEqual([s4Queued]);
 	// Idle reload: the same control now succeeds and rebuilds the context of the current branch.
 	expect(s4Session.getFollowUpMessages(), "no owner input is left queued").toEqual([]);
@@ -918,6 +919,7 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 	expect(s4Session.messages.length, "the idle reload rebuilds the current branch context").toBe(
 		s4Manager.buildSessionContext().messages.length,
 	);
+	world.faultMatrix.witness("R16", { control: true });
 	// Reopen is a separate control: dispose, then reopen the file, and restore the same tip.
 	expect(await world.disposeSessionInBody(s4Session), "the S4 owner disposes cleanly").toBeUndefined();
 	const s4Tip = s4Manager.getLeafId();

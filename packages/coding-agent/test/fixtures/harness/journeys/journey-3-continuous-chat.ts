@@ -115,6 +115,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	});
 	expect(await world.disposeSessionInBody(mBlocked.session)).toBeUndefined();
 	expect(mHeadlessUnreadable.clear(), "the blocked import met the unreadable source").toBeGreaterThan(0);
+	world.faultMatrix.witness("R43", { control: false });
 
 	// Repair into a valid extended-year ISO timestamp that reaches the intentional non-loggable day skip.
 	const mUnsupportedSessionId = "headless-repaired-unsupported";
@@ -169,6 +170,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 		unsupportedSkipped: true,
 		recordTexts: ["note: user: Seed kept legacy session.", "note: pi: Legacy kept reply: alpha-migration-token."],
 	});
+	world.faultMatrix.witness("R43", { control: true });
 	expect(
 		mImportedRecords.map((record) => ({ kind: record.kind, text: record.text, sourceKey: record.sourceKey })),
 		"failed activation remains attached; its persisted user prompt and the failure record recover canonically exactly once",

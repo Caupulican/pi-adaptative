@@ -2036,6 +2036,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		e12EpochEvents(firstCheckpoint.events) - e12EpochEvents(eventsBeforeFirst),
 		"the first reconcile appends exactly one epoch_reconciled audit event",
 	).toBe(1);
+	world.faultMatrix.witness("R44", { control: false });
 	// Second reconcile, checked against the first checkpoint's raw bytes: nothing persisted changes.
 	await withDeadline(trace, "E12 second reconcile", session.prompt("Reconcile the landing record again."), 120_000);
 	const secondCheckpoint = {
@@ -2048,6 +2049,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		secondCheckpoint,
 		"the second reconcile leaves the persisted epoch, transaction and audit log unchanged",
 	).toEqual(firstCheckpoint);
+	world.faultMatrix.witness("R44", { control: true });
 	expect(e12PreSecond, "the second provider check saw the first reconcile's settled state").toEqual(firstCheckpoint);
 	expect(
 		secondCheckpoint,

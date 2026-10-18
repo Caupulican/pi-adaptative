@@ -174,6 +174,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 					if (!JSON.stringify(request.context.messages).includes("SPLIT-START-Retry limit is seven per hour")) {
 						throw new Error("worker-c did not receive the 30,000-char first chunk of the split assistant reply");
 					}
+					world.faultMatrix.witness("R10", { control: true });
 				},
 				reply: { content: [{ type: "text", text: "pi: Retry limit is seven per hour (part 1)." }] },
 			},
@@ -360,6 +361,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			date3MatchesRecord: true,
 			leaf9RetriedOnWorkerC: true,
 		});
+		world.faultMatrix.witness("R10", { control: false });
 		expect(await world.disposeSessionInBody(icmRoot.session), "the ICM root disposes cleanly").toBeUndefined();
 
 		const r5ProviderId = "r5-oauth-401";

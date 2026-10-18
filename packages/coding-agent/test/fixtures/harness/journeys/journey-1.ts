@@ -18,6 +18,7 @@ export async function runJourney1(): Promise<void> {
 	await runJourney(
 		{
 			name: "journey-1",
+			journey: 1,
 			// The E2 control's uncertain task relation emits one native warning, counted in its own block (not a broad allowance).
 			// The long-path turn meets an unavailable evaluator on purpose: its owner intent stays unresolved, and only that
 			// classified-as-unavailable warning is allowed.
