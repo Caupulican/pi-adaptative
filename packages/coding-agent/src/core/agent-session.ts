@@ -242,7 +242,12 @@ import {
 } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import { OwnerInputLedger, type OwnerInputOutcome } from "./owner-input-ledger.ts";
-import { ownerSteerWake, PendingInputQueueController, type QueuedInput } from "./pending-input-queue-controller.ts";
+import {
+	ownerSteerWake,
+	type PendingInputHandle,
+	PendingInputQueueController,
+	type QueuedInput,
+} from "./pending-input-queue-controller.ts";
 import { appendPipelineRunSnapshot, getLatestPipelineRunSnapshot, type PipelineRun } from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { DurableOwnerRuleStore, type OwnerRulePolicy } from "./project-rules/durable-owner-rules.ts";
@@ -252,8 +257,9 @@ import { PromptSubmissionController } from "./prompt-submission-controller.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { resolveProviderAccountKey } from "./provider-admission/account-key.ts";
 import { engageEmergencyStop, liftEmergencyStop } from "./provider-admission/emergency-stop.ts";
-import { ProviderAdmissionLedger, providerAdmissionDir } from "./provider-admission/ledger.ts";
-import { ProviderLimitStore } from "./provider-admission/limit-state.ts";
+import { openProviderAdmission } from "./provider-admission/gate.ts";
+import { type ProviderAdmissionLedger, providerAdmissionDir } from "./provider-admission/ledger.ts";
+import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { buildProviderLoadView, type ProviderLoadView } from "./provider-admission/load-view.ts";
 import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
@@ -709,6 +715,7 @@ export class AgentSession {
 			enqueueOwnerWords: (text, acceptedOrder, judgment) =>
 				this._edgeIntent.enqueueOwnerWords(text, acceptedOrder, judgment),
 			ownerInputs: this._ownerInputs,
+			acceptQueuedOwnerWords: (kind, text) => this._promptSubmission.acceptQueuedOwnerWords(kind, text),
 			emitQueueUpdate: () => this._emitQueueUpdate(),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
 		});
@@ -782,19 +789,16 @@ export class AgentSession {
 		// `this.settingsManager` is assigned below; the chain closes over the config reference because
 		// it must be installed before that assignment runs. See session-stream-chain.ts for the order
 		// of the wrappers and why admission sits outside the watchdog.
-		const providerAdmissionLedger = new ProviderAdmissionLedger(agentDir, {
-			sessionId: config.sessionManager.getSessionId(),
-		});
-		this._providerAdmissionLedger = providerAdmissionLedger;
-		const providerLimitStore = new ProviderLimitStore(agentDir, { sessionId: config.sessionManager.getSessionId() });
-		this._providerLimitStore = providerLimitStore;
+		const providerAdmission = openProviderAdmission(agentDir, config.sessionManager.getSessionId(), config.timers);
+		this._providerAdmissionLedger = providerAdmission.ledger;
+		this._providerLimitStore = providerAdmission.limits;
 		this.agent.streamFn = buildSessionStreamFn({
 			baseStreamFn: this.agent.streamFn,
 			settingsManager: config.settingsManager,
 			sessionManager: config.sessionManager,
 			modelAdaptationStore,
-			providerAdmissionLedger,
-			providerLimitStore,
+			providerAdmissionLedger: providerAdmission.ledger,
+			providerLimitStore: providerAdmission.limits,
 			// Read lazily per request: the foreground recovery that owns the exhaustions is built after this chain.
 			modelExhaustion: (modelRef) => this._foregroundRecovery.modelExhaustion(modelRef),
 			agentDir,
@@ -1640,7 +1644,7 @@ export class AgentSession {
 		});
 		this._foregroundRecovery = new ForegroundRecoveryController({
 			agent: this.agent,
-			timers: config.timers.port("foreground"),
+			timers: config.timers,
 			chatTurns: () => this._memory.continuousChatHost()?.turns,
 			applyFailoverModel: (failed, hop) => {
 				// Same rule as an unsupported model: a routed turn's model stays inside that turn.
@@ -4657,7 +4661,7 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async steer(text: string, images?: ImageContent[]): Promise<OwnerInputOutcome> {
-		return this._admitQueuedOwnerInput("steer", text, images);
+		return this._queuedInputPersistence.admitQueuedOwnerInput("steer", text, images);
 	}
 
 	/**
@@ -4668,26 +4672,16 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async followUp(text: string, images?: ImageContent[]): Promise<OwnerInputOutcome> {
-		return this._admitQueuedOwnerInput("followUp", text, images);
+		return this._queuedInputPersistence.admitQueuedOwnerInput("followUp", text, images);
 	}
 
 	/**
-	 * A queued owner input is accepted and pending from the moment it is submitted, in submission order, and is
-	 * classified before it is admitted. A newer request supersedes the judgment, never the input; a cancellation
-	 * (interrupt, take, clear, disposal, context change) ends it. Resolves with the input queued for delivery, or with how
-	 * it ended without delivery.
+	 * Keep owner input that cannot be submitted yet (the interactive queue while compaction runs) as held pending input:
+	 * shown, takeable and recorded, so a restart restores it held. `prompt()` with `heldInput` sends it; `existing` is
+	 * returned while it is still kept.
 	 */
-	private async _admitQueuedOwnerInput(
-		kind: "steer" | "followUp",
-		text: string,
-		images: ImageContent[] | undefined,
-	): Promise<OwnerInputOutcome> {
-		return this._queuedInputPersistence.admitQueuedOwnerInput(
-			kind,
-			text,
-			images,
-			this._promptSubmission.acceptQueuedOwnerWords(kind, text),
-		);
+	keepQueuedInput(kind: "steer" | "followUp", text: string, images?: ImageContent[], existing?: PendingInputHandle) {
+		return this._queuedInputPersistence.keepQueuedInput(kind, text, images, existing);
 	}
 
 	/**

@@ -17,7 +17,7 @@ import {
 	withModelPerfProfile,
 } from "./models/perf-profile.ts";
 import { resolveProviderAccountKey } from "./provider-admission/account-key.ts";
-import { isEmergencyStopEngaged } from "./provider-admission/emergency-stop.ts";
+import { isEmergencyStopEngaged, subscribeEmergencyStop } from "./provider-admission/emergency-stop.ts";
 import {
 	type ModelExhaustion,
 	PROVIDER_ADMISSION_CUSTOM_TYPE,
@@ -364,6 +364,7 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 		limits: input.providerLimitStore,
 		modelExhaustion: input.modelExhaustion,
 		isEmergencyStopEngaged: () => isEmergencyStopEngaged(input.agentDir),
+		subscribeEmergencyStop: (onChange) => subscribeEmergencyStop(input.agentDir, onChange),
 		getAccountKey: (provider, apiKey) => resolveProviderAccountKey(input.authStorage, provider, apiKey),
 		...(input.onWait ? { onWait: input.onWait } : {}),
 		getPolicy: () => settingsManager.getProviderAdmissionSettings(),

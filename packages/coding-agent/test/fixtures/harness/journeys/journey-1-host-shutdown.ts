@@ -1,5 +1,7 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
+import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/core/queued-input-record.ts";
 import { verifyModeWitnesses } from "../mode-witnesses.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import {
@@ -748,6 +750,104 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	world.faultMatrix.witness("R15", { control: true });
 	expect(await world.disposeSessionInBody(qlSession), "the live control owner disposes cleanly").toBeUndefined();
 	trace.mark("root", "queued-quit.live-control");
+	// Restart restore: the next session opened on the quit's file restores its held follow-up, held: counted and shown in the
+	// queue, never delivered on its own, with its one restore notice, and without rewriting the record that names it. Control:
+	// the next session opened on the live control's file restores nothing, because its queued input was delivered.
+	const queuedRecordCount = (file: string): number =>
+		(world.io.peekFile(file) ?? "")
+			.split("\n")
+			.filter((line) => line.length > 0)
+			.map((line) => JSON.parse(line) as { type?: string; customType?: string })
+			.filter((entry) => entry.type === "custom" && entry.customType === QUEUED_INPUT_CUSTOM_TYPE).length;
+	// The one restore notice for one held input on a host with no editor (`takeRestoredQueuedInputNotice("headless")`).
+	const RESTORED_ONE_HEADLESS =
+		"Restored 1 queued message from the previous run; they are held, not delivered, and stay held for the next interactive session on this session (RPC: pendingMessageCount in get_state counts them, clear_queue drops them).";
+	const qhRecords = queuedRecordCount(qhFile);
+	const qhNext = await world.createRootSession("root", {
+		sessionManager: world.openSessionManager(qhFile),
+		settings: { memorySystem: "okf" },
+	});
+	expect(
+		{
+			steering: qhNext.session.getSteeringMessages(),
+			followUp: qhNext.session.getFollowUpMessages(),
+			pending: qhNext.session.pendingMessageCount,
+			deliverable: qhNext.session.deliverablePendingMessageCount,
+			notice: qhNext.session.takeRestoredQueuedInputNotice("headless"),
+			records: queuedRecordCount(qhFile),
+		},
+		"the next session restores the held follow-up, held, as its record names it",
+	).toEqual({
+		steering: [],
+		followUp: [QUEUED_QUIT_WORDS],
+		pending: 1,
+		deliverable: 0,
+		notice: RESTORED_ONE_HEADLESS,
+		records: qhRecords,
+	});
+	world.faultMatrix.witness("R15r", { control: false });
+	expect(await world.disposeSessionInBody(qhNext.session), "the restoring owner disposes cleanly").toBeUndefined();
+	const qlNext = await world.createRootSession("root", {
+		sessionManager: world.openSessionManager(qlFile),
+		settings: { memorySystem: "okf" },
+	});
+	expect(
+		{
+			steering: qlNext.session.getSteeringMessages(),
+			followUp: qlNext.session.getFollowUpMessages(),
+			pending: qlNext.session.pendingMessageCount,
+			notice: qlNext.session.takeRestoredQueuedInputNotice("headless"),
+		},
+		"the next session restores no queued input that was delivered",
+	).toEqual({ steering: [], followUp: [], pending: 0, notice: undefined });
+	world.faultMatrix.witness("R15r", { control: true });
+	// Kept input (how the interactive queue keeps what the owner submits while compaction runs): the session keeps it held in
+	// its durable record, so the next session restores it held. Control: kept input the owner took back is not restored.
+	const KEPT_WORDS = "Owner input kept until compaction ends.";
+	qlNext.session.keepQueuedInput("followUp", KEPT_WORDS);
+	expect(
+		await world.disposeSessionInBody(qlNext.session),
+		"the control's next owner disposes cleanly",
+	).toBeUndefined();
+	const reopenQl = () =>
+		world.createRootSession("root", {
+			sessionManager: world.openSessionManager(qlFile),
+			settings: { memorySystem: "okf" },
+		});
+	const restoredView = (session: AgentSession) => ({
+		followUp: session.getFollowUpMessages(),
+		pending: session.pendingMessageCount,
+		deliverable: session.deliverablePendingMessageCount,
+		notice: session.takeRestoredQueuedInputNotice("headless"),
+	});
+	const qkNext = await reopenQl();
+	expect(restoredView(qkNext.session), "the next session restores the kept input, held").toEqual({
+		followUp: [KEPT_WORDS],
+		pending: 1,
+		deliverable: 0,
+		notice: RESTORED_ONE_HEADLESS,
+	});
+	world.faultMatrix.witness("R15k", { control: false });
+	expect(qkNext.session.takeAllQueuedInput().followUp, "the owner takes the kept input back").toEqual([
+		{ text: KEPT_WORDS },
+	]);
+	expect(
+		await world.disposeSessionInBody(qkNext.session),
+		"the kept input's next owner disposes cleanly",
+	).toBeUndefined();
+	const qtNext = await reopenQl();
+	expect(restoredView(qtNext.session), "the next session restores no kept input the owner took back").toEqual({
+		followUp: [],
+		pending: 0,
+		deliverable: 0,
+		notice: undefined,
+	});
+	world.faultMatrix.witness("R15k", { control: true });
+	expect(
+		await world.disposeSessionInBody(qtNext.session),
+		"the take-back's next owner disposes cleanly",
+	).toBeUndefined();
+	trace.mark("root", "queued-quit.restart-restore");
 
 	// RPC host shutdown: the host runs on a real runtime of the world with its process effects injected. A SIGTERM through its termination
 	// handler delivers the dispose's closing warning as a warning event on the open stream, and a warning written after the host released

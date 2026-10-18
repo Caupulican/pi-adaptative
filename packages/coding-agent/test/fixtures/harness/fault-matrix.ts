@@ -158,10 +158,9 @@ const rows: readonly FaultMatrixRow[] = [
 		status: "open",
 		needs: [
 			{
-				kind: "extension",
-				extension: "X2",
+				kind: "witness",
 				detail:
-					"the E7 cut recovers a queued worker, not a promoted owner input; a restart with a promoted input in flight is needed",
+					"world.restart cuts E7 and VU, which recover workers, not a promoted owner input; no journey restarts with one in flight",
 			},
 		],
 	},
@@ -384,14 +383,44 @@ const rows: readonly FaultMatrixRow[] = [
 	{
 		id: "R15r",
 		owner: "core/queued-input-persistence-controller.ts",
-		journey: 2,
-		phase: "queued-recovery",
+		journey: 1,
+		phase: "host-shutdown queued quit restart",
 		fault: "the held input is restored by the next session",
+		witness: "the next session restores the held follow-up, held, as its record names it",
+		control: "the next session restores no queued input that was delivered",
+		estSeconds: 2,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "R15k",
+		owner: "core/pending-input-queue-controller.ts",
+		journey: 1,
+		phase: "host-shutdown queued quit restart",
+		fault: "owner input kept while it cannot be submitted (the interactive compaction queue) outlives its process",
+		witness: "the next session restores the kept input, held",
+		control: "the next session restores no kept input the owner took back",
+		estSeconds: 2,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "owner-input-kept-submit",
+		owner: "core/prompt-submission-controller.ts",
+		journey: 1,
+		phase: "owner-lifecycle compaction queue",
+		fault: "a kept input submitted after compaction, and a submission that became queued while its preemption awaited",
 		witness: NONE,
 		control: NONE,
-		estSeconds: 4,
+		estSeconds: 2,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X2", detail: "a restart that reopens the held queue" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"no journey submits a kept input (`heldInput`: resubmit, takeKept, taken back first) or reaches the late-queued registration before the tail wait",
+			},
+		],
 	},
 	{
 		id: "R16",
@@ -560,9 +589,9 @@ const rows: readonly FaultMatrixRow[] = [
 		status: "open",
 		needs: [
 			{
-				kind: "extension",
-				extension: "X1",
-				detail: "the heartbeat runs on a raw setInterval, not a TimerPort owner",
+				kind: "witness",
+				detail:
+					"the renewal is the worker-lease owner and the lease deadline is checked on orchestration: advancing orchestration past the TTL, then worker-lease by its interval, fails the renewal; no journey does it and asserts the lane abort",
 			},
 		],
 	},
@@ -580,7 +609,8 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "extension",
 				extension: "X1",
-				detail: "the auto-continue wake is a raw setTimeout, not a TimerPort owner",
+				detail:
+					"the wake is the goal-continuation owner, but the worker deadline is stamped and decided on the system clock the goal runtime snapshot reads; advancing the port only re-plans, so the timeout needs that snapshot clock on a port",
 			},
 		],
 	},
@@ -706,7 +736,13 @@ const rows: readonly FaultMatrixRow[] = [
 		control: NONE,
 		estSeconds: 0.5,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X1", detail: "the timer is a raw setTimeout, not a TimerPort owner" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"the continuation delay is the goal-continuation owner and advancing it fires the wake; no journey arms a continuation and asserts the pass it starts",
+			},
+		],
 	},
 	{
 		id: "R40",
@@ -830,7 +866,8 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "extension",
 				extension: "X1",
-				detail: "the retry delay is a raw setTimeout; rename and write faults reach it only indirectly (R8, R44)",
+				detail:
+					"the win32 rename retry backoff is still a raw setTimeout in a module-level util that takes no timer port, and the async rename calls fs/promises directly; the lock waits stay on system time by design (a cross-process lock whose holder, staleness and deadline are real time), the sync one bounded and reported on its final ELOCKED; rename and write faults reach them only indirectly (R8, R44)",
 			},
 		],
 	},

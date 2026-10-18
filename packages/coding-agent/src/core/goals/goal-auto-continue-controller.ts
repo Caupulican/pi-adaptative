@@ -7,6 +7,7 @@ import type {
 	PromptOptions,
 } from "../agent-session.ts";
 import type { AutonomySettings } from "../settings/settings-schema.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goal-runtime-snapshot.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
@@ -27,6 +28,11 @@ export interface GoalAutoContinueControllerDeps {
 	markGoalToolUnavailable(): void;
 	emit(event: AgentSessionEvent): void;
 	onContinuationActivity?(): void;
+	/**
+	 * The `goal-continuation` port the wake is armed on (the continuation delay, a worker-deadline resume, the
+	 * scheduled-failure retry). Defaults to the system timers.
+	 */
+	timers?: TimerPort;
 }
 
 type GoalAutoContinueScheduleSettings = Pick<
@@ -58,7 +64,7 @@ export function isOwnIdleContinuationAdmission(): boolean {
 
 /** Owns the single-flight goal continuation loop and its foreground-idle timer. */
 export class GoalAutoContinueController {
-	private _timer: ReturnType<typeof setTimeout> | undefined;
+	private _timer: unknown;
 	private _isContinuing = false;
 	/** Set when a wake was requested while a pass ran; consumed when that pass ends. */
 	private _replanAfterPass = false;
@@ -205,6 +211,9 @@ export class GoalAutoContinueController {
 		) {
 			return { action: "clear" };
 		}
+		// The worker deadline is stamped and decided on the goal state's clock (the system clock the runtime snapshot reads),
+		// so its remaining delay is measured on that clock too. An alarm that fires before it (a host driving this port, a
+		// clock correction) only re-plans: `runScheduled` arms the wake again for what is left.
 		return waitingForWorkerDeadline
 			? { action: "arm", delayMs: Math.max(0, resumeAtMs - Date.now()), wake: "workerDeadline" }
 			: { action: "arm", delayMs: goalAutoContinueDelayMs, wake: "continuation" };
@@ -213,7 +222,9 @@ export class GoalAutoContinueController {
 	private armTimer(delayMs: number, notify = true): void {
 		// Acquire the replacement before releasing the last valid timer. Planning or allocation
 		// failure therefore cannot erase the only event that owns future goal progress.
-		const timer = setTimeout(() => {
+		// The port's alarms never hold the process open: an armed continuation is not work a run waits behind.
+		const timers = this.deps.timers ?? SYSTEM_TIMER_PORT;
+		const timer = timers.setTimeout(() => {
 			if (this._timer !== timer) return;
 			this._timer = undefined;
 			void this.runScheduled()
@@ -225,12 +236,8 @@ export class GoalAutoContinueController {
 		}, delayMs);
 		const previous = this._timer;
 		this._timer = timer;
-		if (previous !== undefined) clearTimeout(previous);
+		if (previous !== undefined) timers.clearTimeout(previous);
 		if (notify) this.deps.onContinuationActivity?.();
-		if (typeof timer === "object" && timer && "unref" in timer) {
-			const { unref } = timer as { unref?: () => void };
-			unref?.call(timer);
-		}
 	}
 
 	async continueExclusive(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
@@ -351,7 +358,7 @@ export class GoalAutoContinueController {
 
 	private cancelTimer(notify: boolean): boolean {
 		if (this._timer === undefined) return false;
-		clearTimeout(this._timer);
+		(this.deps.timers ?? SYSTEM_TIMER_PORT).clearTimeout(this._timer);
 		this._timer = undefined;
 		if (notify) this.deps.onContinuationActivity?.();
 		return true;

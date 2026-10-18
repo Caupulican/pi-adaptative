@@ -33,6 +33,7 @@ import { isAgentIdentity } from "../orchestration/agent-resume.ts";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import { getParentPid, getParentSessionId, getProcessTaskRef } from "../process-identity.ts";
 import type { ResolvedProcessMatrixSettings } from "../settings/settings-schema.ts";
+import { type RepeatingAlarm, repeatEvery, SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { getBoundWorktreeLaneKey } from "../worktree-sync/lane-binding.ts";
 import type {
 	OrphanCleanupRequest,
@@ -118,7 +119,12 @@ export interface ProcessMatrixRuntimeConfig {
 	agent: AgentIdentityContract;
 	settings: ResolvedProcessMatrixSettings;
 	observeProcess: (pid: number) => ProcessObservation;
-	now?: () => number;
+	/**
+	 * The clock every entry is stamped on, the master heartbeat and a worker's watch poll: one port, so the heartbeat's
+	 * clock-jump measurement and the watch's grace deadline read the clock their own ticks are due on. Defaults to the
+	 * system timers.
+	 */
+	timers?: TimerPort;
 	/** Structural notice injection into the running session (host `sendCustomMessage` seam). */
 	notify: (text: string) => void | Promise<void>;
 	/** Diagnostics sink (never throws into the session). */
@@ -260,7 +266,8 @@ export async function startProcessMatrixRuntime(
 	config: ProcessMatrixRuntimeConfig,
 ): Promise<ProcessMatrixRuntimeHandle> {
 	if (!config.settings.enabled) return NOOP_HANDLE;
-	const now = config.now ?? Date.now;
+	const timers = config.timers ?? SYSTEM_TIMER_PORT;
+	const now = (): number => timers.now();
 	const parentPid = getParentPid();
 
 	try {
@@ -306,7 +313,7 @@ async function startMasterBranch(
 	// where a suspended host becomes visible. The gap is measured before anything can skip the tick:
 	// entry ownership and a still-running store write say nothing about what the clock did.
 	let previousTickMs = now();
-	const heartbeatTimer = setInterval(() => {
+	const heartbeat = repeatEvery(config.timers ?? SYSTEM_TIMER_PORT, config.settings.heartbeatMs, () => {
 		const tickMs = now();
 		const clockJump = detectClockJump(previousTickMs, tickMs, config.settings.heartbeatMs);
 		previousTickMs = tickMs;
@@ -329,7 +336,7 @@ async function startMasterBranch(
 				}
 				ownsEntry = false;
 				lifetime.abort();
-				clearInterval(heartbeatTimer);
+				heartbeat.stop();
 				process.off("exit", closeOnExit);
 				config.onDiagnostic?.("process-matrix: master entry ownership moved to a newer process generation");
 			})
@@ -339,8 +346,7 @@ async function startMasterBranch(
 			.finally(() => {
 				heartbeatTask = undefined;
 			});
-	}, config.settings.heartbeatMs);
-	heartbeatTimer.unref?.();
+	});
 
 	// Best-effort close on process exit. A SIGKILLed master leaving "running" is fine -- reconcile's
 	// own dead-pid detection covers it; this only makes the common clean-exit case tidy.
@@ -378,7 +384,7 @@ async function startMasterBranch(
 			if (stopped) return;
 			stopped = true;
 			lifetime.abort();
-			clearInterval(heartbeatTimer);
+			heartbeat.stop();
 			await heartbeatTask;
 			const failures: unknown[] = [];
 			if (ownsEntry) {
@@ -886,7 +892,9 @@ async function startWorkerBranch(
 	let currentParentPid = initialParentPid;
 	let currentParentSessionId = parentSessionId;
 	let stopped = false;
-	let timer: NodeJS.Timeout | undefined;
+	// The watch poll runs on the same port as `now`, so the grace deadline it checks reads the clock its ticks are due on.
+	const timers = config.timers ?? SYSTEM_TIMER_PORT;
+	let timer: RepeatingAlarm | undefined;
 	let watchTask: Promise<void> | undefined;
 	let preserveResumableOnExit = false;
 	let stopTask: Promise<void> | undefined;
@@ -940,7 +948,7 @@ async function startWorkerBranch(
 		stopped = true;
 		stopOwnershipObserver();
 		detachPresence();
-		if (timer) clearInterval(timer);
+		timer?.stop();
 		timer = undefined;
 		if (!preserveResumableOnExit) {
 			// Normal runtime shutdown can await the lock and Windows rename retry policy. Keep the
@@ -1013,7 +1021,7 @@ async function startWorkerBranch(
 		stopped = true;
 		stopOwnershipObserver();
 		detachPresence();
-		if (timer) clearInterval(timer);
+		timer?.stop();
 		timer = undefined;
 		process.off("exit", closeOnExit);
 		config.onDiagnostic?.("process-matrix: worker entry ownership moved to a newer process generation");
@@ -1108,8 +1116,7 @@ async function startWorkerBranch(
 
 	const startHealthyWatch = (): void => {
 		if (stopped) return;
-		timer = setInterval(() => runWatchTick(healthyTick), config.settings.watcherPollMs);
-		timer.unref?.();
+		timer = repeatEvery(timers, config.settings.watcherPollMs, () => runWatchTick(healthyTick));
 		attachPresence();
 	};
 
@@ -1223,7 +1230,7 @@ async function startWorkerBranch(
 			attachPresence();
 			if (preserveResumableOnExit) {
 				preserveResumableOnExit = false;
-				if (timer) clearInterval(timer);
+				timer?.stop();
 				timer = undefined;
 				startHealthyWatch();
 			}
@@ -1282,7 +1289,7 @@ async function startWorkerBranch(
 		if (expected.taskSummary !== undefined) resumable.taskSummary = expected.taskSummary;
 		const woundDown = markResumable(beginWindDown(expected, "parent_lost", windDownAt), resumable, windDownAt);
 		if (!(await persist(expected, woundDown, "failed to write worker wind-down"))) return;
-		if (timer) clearInterval(timer);
+		timer?.stop();
 		timer = undefined;
 		preserveResumableOnExit = true;
 		detachPresence();
@@ -1296,8 +1303,7 @@ async function startWorkerBranch(
 	const startGraceWatch = (): void => {
 		if (stopped) return;
 		const graceDeadline = now() + config.settings.adoptionGraceMs;
-		timer = setInterval(() => runWatchTick(() => graceTick(graceDeadline)), config.settings.watcherPollMs);
-		timer.unref?.();
+		timer = repeatEvery(timers, config.settings.watcherPollMs, () => runWatchTick(() => graceTick(graceDeadline)));
 	};
 
 	const graceTick = async (graceDeadline: number): Promise<void> => {
@@ -1330,10 +1336,8 @@ async function startWorkerBranch(
 				currentParentPid = directive.parentPid;
 				currentParentSessionId = owned.parentSessionId;
 				preserveResumableOnExit = false;
-				if (timer) {
-					clearInterval(timer);
-					timer = undefined;
-				}
+				timer?.stop();
+				timer = undefined;
 				startHealthyWatch();
 				emitRuntimeNotice(
 					config,
@@ -1362,10 +1366,8 @@ async function startWorkerBranch(
 				)
 					return;
 				preserveResumableOnExit = false;
-				if (timer) {
-					clearInterval(timer);
-					timer = undefined;
-				}
+				timer?.stop();
+				timer = undefined;
 				startHealthyWatch();
 				emitRuntimeNotice(
 					config,

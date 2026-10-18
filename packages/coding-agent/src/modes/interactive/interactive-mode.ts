@@ -153,12 +153,6 @@ type UserInputSubmission = {
 	images?: ImageContent[];
 };
 
-type CompactionQueuedMessage = {
-	text: string;
-	mode: "steer" | "followUp";
-	images?: ImageContent[];
-};
-
 const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
 	"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
 
@@ -308,7 +302,7 @@ export class InteractiveMode {
 	private pendingBashComponents: BashExecutionComponent[] = [];
 
 	// Messages queued while compaction is running
-	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
+	private compactionQueuedMessages: compactionQueue.CompactionQueuedMessage[] = [];
 
 	// Shutdown state
 	private shutdownRequested = false;
@@ -2832,31 +2826,23 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Get all queued messages (read-only).
-	 * Combines session queue and compaction queue.
+	 * Get all queued messages (read-only): the session's queue, which holds the messages queued for after compaction too
+	 * (kept there from the moment they are queued).
 	 */
 	private getAllQueuedMessages(): { steering: string[]; followUp: string[]; commands: string[] } {
 		return {
-			steering: [
-				...this.session.getSteeringMessages(),
-				...this.compactionQueuedMessages.filter((msg) => msg.mode === "steer").map((msg) => msg.text),
-			],
-			followUp: [
-				...this.session.getFollowUpMessages(),
-				...this.compactionQueuedMessages.filter((msg) => msg.mode === "followUp").map((msg) => msg.text),
-			],
+			steering: [...this.session.getSteeringMessages()],
+			followUp: [...this.session.getFollowUpMessages()],
 			commands: [...this.session.getQueuedExtensionCommands()],
 		};
 	}
 
 	/**
-	 * Clear all queued messages and return their contents.
-	 * Clears both session queue and compaction queue.
+	 * Clear all queued messages and return their contents. Taking the session's queue takes the messages kept for after
+	 * compaction with it, so nothing is left for that queue to send.
 	 */
 	private clearAllQueues(): { steering: string[]; followUp: string[] } {
 		const { steering, followUp, commands } = this.session.takeAllQueuedInput();
-		const compactionSteering = this.compactionQueuedMessages.filter((msg) => msg.mode === "steer");
-		const compactionFollowUp = this.compactionQueuedMessages.filter((msg) => msg.mode === "followUp");
 		this.compactionQueuedMessages = [];
 		// The text returns to the editor and the images to the pending clipboard queue, so a resubmit
 		// sends the complete input again.
@@ -2865,20 +2851,12 @@ export class InteractiveMode {
 				clipboardInput.bindClipboardQueue(this.clipboardQueue, { clipboardImageStore: this.clipboardImageStore }),
 				inputs,
 			);
-		return {
-			steering: restore([...steering, ...compactionSteering]),
-			followUp: [...restore(followUp), ...commands, ...restore(compactionFollowUp)],
-		};
+		return { steering: restore(steering), followUp: [...restore(followUp), ...commands] };
 	}
 
 	/** Steering and follow-up messages waiting on the running turn; queued extension commands do not count. */
 	private hasQueuedMessages(): boolean {
-		return (
-			this.session.getSteeringMessages().length +
-				this.session.getFollowUpMessages().length +
-				this.compactionQueuedMessages.length >
-			0
-		);
+		return this.session.getSteeringMessages().length + this.session.getFollowUpMessages().length > 0;
 	}
 
 	/**
@@ -2890,14 +2868,10 @@ export class InteractiveMode {
 			this.showStatus("Compaction in progress; queued messages are sent when it ends");
 			return;
 		}
+		// The session's queue holds what was queued for after compaction too: taking it leaves that queue nothing to send.
 		const { steering, followUp } = this.session.takeQueuedMessages();
-		const compaction = this.compactionQueuedMessages.splice(0);
-		const entries = [
-			...steering,
-			...compaction.filter((message) => message.mode === "steer"),
-			...followUp,
-			...compaction.filter((message) => message.mode === "followUp"),
-		];
+		this.compactionQueuedMessages = [];
+		const entries = [...steering, ...followUp];
 		if (entries.length === 0) return;
 		this.updatePendingMessagesDisplay();
 		const text = entries.map((entry) => entry.text).join("\n\n");
@@ -2982,7 +2956,9 @@ export class InteractiveMode {
 	}
 
 	private queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void {
-		this.compactionQueuedMessages.push({ text, mode, images });
+		// Kept by the session from now: shown in its queue, takeable, and restored held after a restart.
+		const input = this.session.keepQueuedInput(mode, text, images);
+		this.compactionQueuedMessages.push({ text, mode, images, input });
 		this.editor.addToHistory?.(text);
 		this.editor.setText("");
 		this.updatePendingMessagesDisplay();

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isMissingFileError } from "../util/atomic-file.ts";
+import { KeyedSignal } from "../util/keyed-signal.ts";
 
 /**
  * Machine-wide emergency stop: a sentinel file at `<agentDir>/ESTOP` pauses NEW worker and
@@ -23,6 +24,17 @@ export interface EmergencyStopState {
 
 export function emergencyStopPath(agentDir: string): string {
 	return join(agentDir, "ESTOP");
+}
+
+/** A stop engaged or lifted in this process, keyed by the sentinel path. */
+const emergencyStopChanges = new KeyedSignal();
+
+/**
+ * Calls `onChange` whenever this process engages or lifts the stop of `agentDir`. A stop another process engages or
+ * lifts (or an operator's `touch`/`rm` of the sentinel) is seen only by checking again.
+ */
+export function subscribeEmergencyStop(agentDir: string, onChange: () => void): () => void {
+	return emergencyStopChanges.subscribe(emergencyStopPath(agentDir), onChange);
 }
 
 export function isEmergencyStopEngaged(agentDir: string): boolean {
@@ -54,6 +66,7 @@ export function engageEmergencyStop(
 	const path = emergencyStopPath(agentDir);
 	const engagedAt = new Date(now()).toISOString();
 	writeFileSync(path, `${JSON.stringify({ ...(reason ? { reason } : {}), engagedAt })}\n`, { mode: 0o600 });
+	emergencyStopChanges.notify(path);
 	return { engaged: true, path, engagedAt, ...(reason ? { reason } : {}) };
 }
 
@@ -66,5 +79,6 @@ export function liftEmergencyStop(agentDir: string): boolean {
 	} catch (error) {
 		if (!isMissingFileError(error)) throw error;
 	}
+	emergencyStopChanges.notify(path);
 	return true;
 }

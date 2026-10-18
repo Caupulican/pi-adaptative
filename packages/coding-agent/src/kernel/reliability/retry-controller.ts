@@ -45,6 +45,22 @@ export interface RetryEvents {
 /** Runtime retry policy: the backoff shape plus the on/off switch the host resolves per call. */
 export type RetryControllerPolicy = RetryPolicy & { enabled: boolean };
 
+/** How one backoff ended: its delay `elapsed`, or the retry's signal `aborted` it first. */
+export type RetryBackoffEnd = "elapsed" | "aborted";
+
+/**
+ * Waits out one backoff of `delayMs`, ending `aborted` as soon as `signal` aborts. The host injects its own so the
+ * backoff runs on its clock and reports its status; a rejection is a defect of the wait and propagates.
+ */
+export type RetryBackoff = (delayMs: number, signal: AbortSignal) => Promise<RetryBackoffEnd>;
+
+/** The default backoff: an abortable sleep on the system timers. */
+const sleepBackoff: RetryBackoff = (delayMs, signal) =>
+	sleepAbortable(delayMs, signal).then(
+		(): RetryBackoffEnd => "elapsed",
+		(): RetryBackoffEnd => "aborted",
+	);
+
 function hasMeaningfulAssistantProgress(message: AssistantMessage): boolean {
 	return message.content.some((block) => {
 		if (block.type === "text") return block.text.trim().length > 0;
@@ -78,17 +94,20 @@ export class RetryController {
 	private readonly getPolicy: () => RetryControllerPolicy;
 	private readonly events: RetryEvents;
 	private readonly getContextWindow: () => number;
+	private readonly backoff: RetryBackoff;
 
 	constructor(
 		agent: RetryAgent,
 		getPolicy: () => RetryControllerPolicy,
 		events: RetryEvents,
 		getContextWindow: () => number,
+		backoff: RetryBackoff = sleepBackoff,
 	) {
 		this.agent = agent;
 		this.getPolicy = getPolicy;
 		this.events = events;
 		this.getContextWindow = getContextWindow;
+		this.backoff = backoff;
 	}
 
 	/** Completed retry attempts for the current run (0 when not retrying). */
@@ -184,18 +203,19 @@ export class RetryController {
 
 		this.startAttempt(maxAttempts, delayMs, message.errorMessage || "Unknown error");
 
+		let end: RetryBackoffEnd;
 		try {
-			await sleepAbortable(delayMs, this._abortController.signal);
-		} catch {
+			end = await this.backoff(delayMs, this._abortController.signal);
+		} finally {
+			this._abortController = undefined;
+		}
+		if (end === "aborted") {
 			// Aborted mid-backoff: report the cancellation and reset so the next turn starts clean.
 			const attempt = this._attempt;
 			this._attempt = 0;
 			this.events.onRetryEnd({ success: false, attempt, finalError: "Retry cancelled" });
 			return false;
-		} finally {
-			this._abortController = undefined;
 		}
-
 		return true;
 	}
 }

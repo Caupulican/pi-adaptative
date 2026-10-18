@@ -362,17 +362,31 @@ export class PromptSubmissionController {
 			? undefined
 			: this.acceptInput(options?.source === "extension" ? "extension" : "prompt", text, acceptedOrder);
 		const inputId = input?.inputId;
+		const busyAtSubmission = this.deps.getSessionWorkState().busy;
+		const queuedBehavior = options?.internalContextType ? undefined : options?.streamingBehavior;
 		// A queued submission (the owner's, or an extension's such as a peer message) is pending from this
 		// moment, in submission order, before anything below can await: it is visible, takeable, and
-		// cancelled with the pending queue. Only the owner's words are classified as owner intent.
+		// cancelled with the pending queue. Only the owner's words are classified as owner intent. Input kept
+		// for later (`PendingInputQueueController.keep`) is this submission's: pending again as this input when
+		// the submission queues, gone from the queue when it does not; one taken back meanwhile submits nothing.
+		const kept = options?.heldInput;
 		const queuedOwnerInput =
-			this.deps.getSessionWorkState().busy && options?.streamingBehavior && !options.internalContextType
-				? this.deps.pendingQueue.register(options.streamingBehavior, text, options.images, options.origin, inputId)
+			queuedBehavior && (kept !== undefined || busyAtSubmission)
+				? kept
+					? this.deps.pendingQueue.resubmit(kept, queuedBehavior, text, options?.images, options?.origin, inputId)
+					: this.deps.pendingQueue.register(queuedBehavior, text, options?.images, options?.origin, inputId)
 				: undefined;
-		if (queuedOwnerInput) this.deps.emitQueueUpdate();
+		const keptTaken = kept !== undefined && !queuedBehavior && this.deps.pendingQueue.takeKept(kept);
+		if (queuedOwnerInput || kept) this.deps.emitQueueUpdate();
+		if (kept && !queuedOwnerInput && !keptTaken) {
+			if (input)
+				this.deps.ownerInputs.end(input.inputId, { state: "withdrawn", reason: "taken back before it was sent" });
+			options?.preflightResult?.(false, input?.ended);
+			return;
+		}
 		// Judged in full once, here: the same judgment decides whether it is admitted and is applied where it is read.
 		const queuedOwnerClassification =
-			queuedOwnerInput && acceptedOrder !== undefined
+			queuedOwnerInput && busyAtSubmission && acceptedOrder !== undefined
 				? this.deps.judgeQueuedOwnerRequest(
 						text,
 						options?.signal
@@ -403,6 +417,14 @@ export class PromptSubmissionController {
 		if (!submissionLease && this.deps.getSessionWorkState().busy && options?.streamingBehavior) {
 			// Queued submissions prepare one at a time, in submission order, but the next one waits only
 			// for this one's PREPARATION (queued, withdrawn, or its own turn started), never its whole turn.
+			// An input that became queued while the preemption above awaited is pending from here, before that
+			// wait: visible, takeable and recorded in submission order, as one queued at submission is.
+			const lateQueuedInput =
+				queuedOwnerInput ??
+				(input && queuedBehavior
+					? this.deps.pendingQueue.register(queuedBehavior, text, options.images, options.origin, inputId)
+					: undefined);
+			if (lateQueuedInput !== queuedOwnerInput) this.deps.emitQueueUpdate();
 			const { promise: preparedGate, resolve: prepared } = Promise.withResolvers<void>();
 			const start = () =>
 				this.runPromptSubmission(
@@ -410,7 +432,7 @@ export class PromptSubmissionController {
 					options,
 					undefined,
 					queuedOwnerClassification,
-					queuedOwnerInput,
+					lateQueuedInput,
 					prepared,
 					input,
 				);

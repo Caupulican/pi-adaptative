@@ -1,5 +1,5 @@
 import "../builtin-install.ts";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import { expect } from "vitest";
 import { orchestrationSessionDir } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
@@ -37,6 +37,7 @@ import {
 import {
 	agentIdForTrack,
 	bundleEntries,
+	crashCutChecks,
 	failureText,
 	ICM_INTAKE_JUDGMENTS,
 	latestBatchResults,
@@ -2420,26 +2421,16 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	const vuCapture = vuManifest();
 
 	// The old owner ends: its shell check is cancelled by the abort, the transport producers join, and the disposed owner certifies
-	// before any byte is restored.
-	expect(
-		await world.disposeSessionInBody(vuOwner),
-		"the VU owner disposes cleanly after the cut point",
-	).toBeUndefined();
-	await world.provider.waitForProducers();
-	expect(world.provider.failures, "no transport callback failed during the old owner's life").toEqual([]);
-	world.certifyDisposedOwner(vuOwner, []);
-	for (const [path] of vuManifest()) {
-		if (!vuCapture.has(path)) world.io.unlinkSync(path);
-	}
-	for (const [path, content] of vuCapture) {
-		world.io.mkdirSync(resolve(path, ".."), { recursive: true });
-		world.io.writeFileSync(path, content);
-	}
-	expect(vuManifest(), "the cut restores exactly the captured owned files").toEqual(vuCapture);
-	world.processTable.advanceProcess();
-
-	// A fresh owner recovers twice through the native entrance, and the suspended verifier resumes on its own.
-	const vuFresh = await world.createRootSession("root", { sessionManager: world.openSessionManager(vuAuxFile) });
+	// before any byte is restored. A fresh owner then recovers twice through the native entrance, and the suspended verifier
+	// resumes on its own.
+	const vuFresh = await world.restart({
+		owner: vuOwner,
+		sessionFile: vuAuxFile,
+		cut: { manifest: vuManifest, capture: vuCapture },
+		rewindSqlite: false,
+		retainedClaims: [],
+		check: crashCutChecks("the VU owner disposes cleanly after the cut point"),
+	});
 	vuFresh.session.getLaneRecords();
 	vuFresh.session.getLaneRecords();
 	world.systemOne.enterPhase("vu-continue", vuJudgments);

@@ -944,6 +944,7 @@ export class WorkerDelegationController {
 				this.waitTargetsBlockedByCaller(callerAgentId, targetAgentIds),
 			yieldCallerForWait: (callerAgentId) => this.yieldWorkerForWait(callerAgentId),
 			subscribeReservationAvailability: (listener) => this.writeReservations.subscribeAvailability(listener),
+			timers: this.deps.getTimers().port("worker-wait"),
 			warn: (message) => this.safeWarn(message),
 			getCurrentSubmissionEpoch: () => this.deps.getCurrentSubmissionEpoch?.(),
 			noteLaneOwnerEpoch: (laneId, ownerEpoch) => this.notifications.noteLaneOwnerEpoch(laneId, ownerEpoch),
@@ -4860,6 +4861,7 @@ export class WorkerDelegationController {
 		const heartbeatFencingToken = durableHandle.fencingToken;
 		const leaseHeartbeat = new WorkerLeaseHeartbeat({
 			leaseTtlMs: immutableProfile.leaseTtlMs,
+			timers: this.deps.getTimers().port("worker-lease"),
 			renew: () => {
 				lifecycle.ledger.runtime.renewAttemptLease(
 					heartbeatAttemptId,

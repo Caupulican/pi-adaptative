@@ -193,6 +193,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			markGoalToolUnavailable: deps.markGoalToolUnavailable,
 			emit: deps.emit,
 			onContinuationActivity: () => this._notifyContinuationActivity(),
+			timers: deps.getTimers().port("goal-continuation"),
 		});
 	}
 

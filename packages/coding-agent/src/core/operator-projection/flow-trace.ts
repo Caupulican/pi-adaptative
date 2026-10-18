@@ -232,7 +232,7 @@ export class FlowTrace {
 		provider_admission_wait: (event) => {
 			if (event.phase === "start")
 				this.begin("wait", { actor: "root", kind: "wait", label: `waiting on ${event.provider}: ${event.reason}` });
-			else this.finish("wait", "ok");
+			else this.finish("wait", WAIT_END_OUTCOME[event.end?.kind ?? "satisfied"]);
 		},
 		continuous_chat_prefix_wait: (event) => {
 			if (event.phase === "start")

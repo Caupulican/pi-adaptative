@@ -17,6 +17,7 @@ import type { ScriptedRequest, ScriptStep } from "../scripted-provider.ts";
 import { HARNESS_PROVIDER } from "../scripted-provider.ts";
 import {
 	HARNESS_PROJECT_CWD,
+	type HarnessRestartChecks,
 	type HarnessWorld,
 	type HarnessWorldOptions,
 	projectPath,
@@ -179,6 +180,15 @@ export function bundleEntries(entries: ReadonlyMap<string, string>, bundleDir: s
 export function failureText(error: unknown): string {
 	if (error instanceof AggregateError) return error.errors.map(failureText).join(" | ");
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** A crash cut's assertions (`HarnessWorld.restart`), in step order; `disposed` names the old owner's clean disposal. */
+export function crashCutChecks(disposed: string): HarnessRestartChecks {
+	return {
+		disposed: (result) => expect(result, disposed).toBeUndefined(),
+		transport: (failures) => expect(failures, "no transport callback failed during the old owner's life").toEqual([]),
+		restored: (files, capture) => expect(files, "the cut restores exactly the captured owned files").toEqual(capture),
+	};
 }
 
 /** Counters of the E0 stages a bound request actually carried, read by the journey after its integrate turn. */

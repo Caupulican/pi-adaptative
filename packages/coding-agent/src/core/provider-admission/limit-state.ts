@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { type AssistantMessage, getProviderRetryDirective } from "@caupulican/pi-ai";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { KeyedSignal } from "../util/keyed-signal.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
 import { providerAdmissionDir, safeSegment } from "./ledger.ts";
@@ -62,6 +63,7 @@ function readCredits(value: unknown): ProviderCredits | undefined {
 }
 
 export interface ProviderLimitStoreOptions {
+	/** The clock a limit is recorded and judged expired on: the `provider-admission` port's, beside the gate that waits on it. */
 	now?: () => number;
 	pid?: number;
 	sessionId?: string;
@@ -120,6 +122,9 @@ export class ProviderLimitedError extends Error {
 	}
 }
 
+/** A limit recorded or cleared by any store of this process, keyed by the limit file. */
+const changedLimits = new KeyedSignal();
+
 export class ProviderLimitStore {
 	private readonly limitsDir: string;
 	private readonly usageDir: string;
@@ -166,8 +171,17 @@ export class ProviderLimitStore {
 				...(input.detail ? { detail: input.detail.slice(0, MAX_DETAIL_LENGTH) } : {}),
 			};
 			writeFileAtomicSync(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+			changedLimits.notify(path);
 			return record;
 		});
+	}
+
+	/**
+	 * Calls `onChange` whenever this process records or clears the limit of `provider`, through any store on this agent
+	 * directory. A change another process makes is seen only by reading again.
+	 */
+	subscribe(provider: string, onChange: () => void): () => void {
+		return changedLimits.subscribe(this.limitPath(provider), onChange);
 	}
 
 	/** The live limit for `provider`, or undefined (an expired record is removed on read). */
@@ -200,6 +214,7 @@ export class ProviderLimitStore {
 			if (existing.recordedAt >= recordedBefore) return false;
 			if (reasons && !reasons.includes(existing.reason)) return false;
 			rmSync(path, { force: true });
+			changedLimits.notify(path);
 			return true;
 		});
 	}

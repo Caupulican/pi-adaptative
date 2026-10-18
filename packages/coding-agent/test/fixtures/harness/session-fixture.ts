@@ -87,6 +87,13 @@ export type WorkerProjectClaims = NonNullable<
 	ReturnType<AgentSession["getResourceSnapshot"]>["workers"]
 >["ownedProjectClaims"];
 
+/** Where a restart's caller asserts each step of `HarnessWorld.restart`, in step order. */
+export interface HarnessRestartChecks {
+	disposed(result: { readonly error: unknown } | undefined): void;
+	transport(failures: readonly string[]): void;
+	restored(files: ReadonlyMap<string, string>, capture: ReadonlyMap<string, string>): void;
+}
+
 export const SCRIPTED_TRACKS = ["root", "worker-a", "worker-b", "worker-c"] as const;
 const HARNESS_ROOT = resolve("/harness");
 
@@ -2143,18 +2150,44 @@ export async function runHarnessWorld(
  * production SDK session built on top of them. Disposal settles every resource it opened.
  */
 /**
- * One owner's timers in a journey: purely virtual, with no real timer behind them. `now()` is the wall clock plus the
- * time the scenario advanced this owner, so the timestamps the owner persists keep moving forward; an alarm is due on the
- * advanced time alone, so it fires only when the scenario advances this owner, and its exact delay is observable.
+ * The owners whose alarms also run on the wall clock in a journey, each because a journey (or a mode witness) already
+ * relies on its real delay and none drives it yet: the foreground retry backoff (the retry witness's live 5 ms backoff
+ * expiry), the provider admission ledger heartbeat and pauses, the worker lease heartbeat, the goal continuation wake and
+ * the delegate wait bound (the 1000 ms waits of journey 1). Each is still advanceable and observable like any owner.
+ */
+const WALL_CLOCK_OWNERS: ReadonlySet<TimerOwner> = new Set<TimerOwner>([
+	"foreground-retry",
+	"provider-admission",
+	"worker-lease",
+	"goal-continuation",
+	"worker-wait",
+]);
+
+/**
+ * One owner's timers in a journey. `now()` is the wall clock plus the time the scenario advanced this owner, so the
+ * timestamps the owner persists keep moving forward; an alarm is due on the advanced time, so advancing this owner fires
+ * it and its exact delay is observable. A purely virtual owner has no real timer behind it: its alarms fire only when the
+ * scenario advances it. A wall owner (`WALL_CLOCK_OWNERS`) also fires each alarm on a real, unreferenced timer at its
+ * delay, whichever comes first.
  */
 class HarnessOwnerTimers implements TimerPort {
 	private advancedMs = 0;
 	private nextHandle = 1;
+	private readonly wall: boolean;
 	private readonly pending = new Map<
 		number,
-		{ readonly callback: () => void; readonly delayMs: number; readonly dueAt: number }
+		{
+			readonly callback: () => void;
+			readonly delayMs: number;
+			readonly dueAt: number;
+			readonly real: ReturnType<typeof setTimeout> | undefined;
+		}
 	>();
 	private readonly armWaiters: Array<(delayMs: number) => void> = [];
+
+	constructor(wall: boolean) {
+		this.wall = wall;
+	}
 
 	now(): number {
 		return Date.now() + this.advancedMs;
@@ -2162,13 +2195,27 @@ class HarnessOwnerTimers implements TimerPort {
 
 	setTimeout(callback: () => void, delayMs: number): number {
 		const handle = this.nextHandle++;
-		this.pending.set(handle, { callback, delayMs, dueAt: this.advancedMs + delayMs });
+		// The journey's own run holds the process open; a wall alarm never does.
+		const real = this.wall ? setTimeout(() => this.fire(handle), delayMs).unref() : undefined;
+		this.pending.set(handle, { callback, delayMs, dueAt: this.advancedMs + delayMs, real });
 		for (const resolve of this.armWaiters.splice(0)) resolve(delayMs);
 		return handle;
 	}
 
 	clearTimeout(handle: unknown): void {
-		if (typeof handle === "number") this.pending.delete(handle);
+		if (typeof handle !== "number") return;
+		clearTimeout(this.pending.get(handle)?.real);
+		this.pending.delete(handle);
+	}
+
+	/** Fires one pending alarm once: false when it already fired or was cleared. */
+	private fire(handle: number): boolean {
+		const entry = this.pending.get(handle);
+		if (entry === undefined) return false;
+		this.pending.delete(handle);
+		clearTimeout(entry.real);
+		entry.callback();
+		return true;
 	}
 
 	armedDelays(): number[] {
@@ -2181,11 +2228,7 @@ class HarnessOwnerTimers implements TimerPort {
 			.filter(([, entry]) => entry.dueAt <= this.advancedMs)
 			.sort((left, right) => left[1].dueAt - right[1].dueAt);
 		let fired = 0;
-		for (const [handle, entry] of due) {
-			if (!this.pending.delete(handle)) continue;
-			fired++;
-			entry.callback();
-		}
+		for (const [handle] of due) if (this.fire(handle)) fired++;
 		return fired;
 	}
 
@@ -2200,8 +2243,8 @@ class HarnessOwnerTimers implements TimerPort {
 
 /**
  * The session timers of a journey (see `TimerOwner`): one virtual clock per owner, so a scenario that drives one owner's
- * alarms never moves another owner's time, and no owner's alarm races the wall clock. A long wait (a release backoff, a
- * retry ladder deadline) is reached by advancing its owner; I/O deadlines stay real.
+ * alarms never moves another owner's time, and no virtual owner's alarm races the wall clock. A long wait (a release
+ * backoff, a retry ladder deadline) is reached by advancing its owner; I/O deadlines and `WALL_CLOCK_OWNERS` stay real.
  */
 export class HarnessTimers implements TimerSource {
 	private readonly owners = new Map<TimerOwner, HarnessOwnerTimers>();
@@ -2232,7 +2275,7 @@ export class HarnessTimers implements TimerSource {
 	private ownerTimers(owner: TimerOwner): HarnessOwnerTimers {
 		let timers = this.owners.get(owner);
 		if (timers === undefined) {
-			timers = new HarnessOwnerTimers();
+			timers = new HarnessOwnerTimers(WALL_CLOCK_OWNERS.has(owner));
 			this.owners.set(owner, timers);
 		}
 		return timers;
@@ -2667,6 +2710,42 @@ export class HarnessWorld {
 			snapshot: structuredClone(snapshot),
 			expectation: structuredClone(expectation),
 		});
+	}
+
+	/**
+	 * The restart primitive (X2), a crash cut: the owner is disposed, the transport producers it started join (their
+	 * registrations and pending scripts stay for the fresh owner), it is certified from itself before any byte is restored,
+	 * every owned file `cut.manifest` names is cut back to `cut.capture` byte for byte (post-cut extras removed, each parent
+	 * recreated first: the owner's disposal may have removed a lease directory), the process advances, and a fresh root owner
+	 * opens `sessionFile`. SQLite is not rewound (`rewindSqlite: false`): the virtual store keeps no snapshot (R49). `check`
+	 * receives each step's result where that step happens, so the caller's assertions keep their order.
+	 */
+	async restart(input: {
+		readonly owner: AgentSession;
+		readonly sessionFile: string;
+		readonly cut: {
+			readonly manifest: () => ReadonlyMap<string, string>;
+			readonly capture: ReadonlyMap<string, string>;
+		};
+		readonly rewindSqlite: false;
+		readonly retainedClaims: WorkerProjectClaims;
+		readonly check: HarnessRestartChecks;
+	}) {
+		const { cut, check } = input;
+		check.disposed(await this.disposeSessionInBody(input.owner));
+		await this.provider.waitForProducers();
+		check.transport(this.provider.failures);
+		this.certifyDisposedOwner(input.owner, input.retainedClaims);
+		for (const [path] of cut.manifest()) {
+			if (!cut.capture.has(path)) this.io.unlinkSync(path);
+		}
+		for (const [path, content] of cut.capture) {
+			this.io.mkdirSync(resolve(path, ".."), { recursive: true });
+			this.io.writeFileSync(path, content);
+		}
+		check.restored(cut.manifest(), cut.capture);
+		this.processTable.advanceProcess();
+		return this.createRootSession("root", { sessionManager: this.openSessionManager(input.sessionFile) });
 	}
 
 	/** Ends a manager's open System One window. An off window keeps the intent entries it began with, byte for byte, and adds none. */

@@ -1,3 +1,5 @@
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../timer-port.ts";
+
 /** Retry backoff policy. jitterRatio 0 reproduces legacy fixed 2s/4s/8s behavior. */
 export interface RetryPolicy {
 	maxAttempts: number;
@@ -60,19 +62,26 @@ export function computeRetryDelayMs(policy: RetryPolicy, attempt: number, opts?:
 	return Math.round(exponential + policy.jitterRatio * exponential * random());
 }
 
-/** Abortable sleep: resolves after ms, rejects with the abort reason if the signal fires. */
-export function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+/**
+ * Abortable sleep on `timers`: resolves after ms, rejects with the abort reason if the signal fires. The pending sleep
+ * keeps the process alive (a one-shot run must not exit in the middle of a backoff it is waiting out).
+ */
+export function sleepAbortable(ms: number, signal?: AbortSignal, timers: TimerPort = SYSTEM_TIMER_PORT): Promise<void> {
 	return new Promise((resolve, reject) => {
 		if (signal?.aborted) {
 			reject(signal.reason instanceof Error ? signal.reason : new Error("Aborted"));
 			return;
 		}
-		const timer = setTimeout(() => {
-			signal?.removeEventListener("abort", onAbort);
-			resolve();
-		}, ms);
+		const timer = timers.setTimeout(
+			() => {
+				signal?.removeEventListener("abort", onAbort);
+				resolve();
+			},
+			ms,
+			{ keepAlive: true },
+		);
 		const onAbort = () => {
-			clearTimeout(timer);
+			timers.clearTimeout(timer);
 			reject(signal?.reason instanceof Error ? signal.reason : new Error("Aborted"));
 		};
 		signal?.addEventListener("abort", onAbort, { once: true });

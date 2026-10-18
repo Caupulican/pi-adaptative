@@ -5,7 +5,8 @@ import { runReleaseSteps } from "./util/resource-release.ts";
 
 interface DurableCustomMessageTurnControllerDeps {
 	foreground: ForegroundRecoveryController;
-	goals: Pick<GoalSessionController, "beginExecution" | "endExecution">;
+	/** A turn joins a lease a run already holds instead of opening a second one; it ends only the lease it began. */
+	goals: Pick<GoalSessionController, "joinExecution" | "endExecution">;
 	enqueueSteeringMessage(message: CustomMessage<unknown>): void;
 	/**
 	 * Runs after the turn's model run and before its lease is released, with that lease and the turn's opening
@@ -64,7 +65,7 @@ export class DurableCustomMessageTurnController {
 		const { appMessage, acceptedPromise, rejectAccepted } = this.prepare(message);
 		let goalExecutionLease: GoalExecutionLease | undefined;
 		try {
-			goalExecutionLease = this.deps.goals.beginExecution(goalId);
+			goalExecutionLease = this.deps.goals.joinExecution(goalId);
 		} catch (error) {
 			this.pending.delete(appMessage);
 			throw error;
@@ -103,7 +104,7 @@ export class DurableCustomMessageTurnController {
 		let goalLease: GoalExecutionLease | undefined;
 		let continuationFailure: { readonly error: unknown } | undefined;
 		try {
-			goalLease = this.deps.goals.beginExecution(goalId);
+			goalLease = this.deps.goals.joinExecution(goalId);
 			await prepare();
 			await this.deps.foreground.runAgentContinuation(submission);
 		} catch (error) {

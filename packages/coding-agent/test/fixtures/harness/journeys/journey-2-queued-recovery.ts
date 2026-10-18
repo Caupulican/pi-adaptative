@@ -1,5 +1,4 @@
 import "../builtin-install.ts";
-import { resolve } from "node:path";
 import { expect } from "vitest";
 import {
 	orchestrationSessionDir,
@@ -22,6 +21,7 @@ import { type HarnessWorld, type WorkerProjectClaims, withDeadline } from "../se
  */
 import {
 	bundleEntries,
+	crashCutChecks,
 	expectOwnerWords,
 	LIMITS_PATH,
 	latestBatchResults,
@@ -334,24 +334,16 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 			],
 		},
 	];
-	expect(await world.disposeSessionInBody(e7Owner.session), "the auxiliary owner disposes cleanly").toBeUndefined();
-	// Physical join of the transport producers the disposed owner started: registrations and pending scripts stay for the fresh owner.
-	await world.provider.waitForProducers();
-	expect(world.provider.failures, "no transport callback failed during the old owner's life").toEqual([]);
-	// Certified from the disposed owner itself, before any prefix is restored: the receipt names exactly A's predeclared claim.
-	world.certifyDisposedOwner(e7Owner.session, e7ARetainedClaims);
-	// Cut back to the capture: restore every captured owned file byte for byte and remove post-cut extras; SQLite is not rewound.
-	for (const [path] of e7Manifest()) {
-		if (!e7Capture.has(path)) world.io.unlinkSync(path);
-	}
-	// Directories are not captured as files: the original owner's disposal may have removed a lease directory, so each parent is recreated first.
-	for (const [path, content] of e7Capture) {
-		world.io.mkdirSync(resolve(path, ".."), { recursive: true });
-		world.io.writeFileSync(path, content);
-	}
-	expect(e7Manifest(), "the cut restores exactly the captured owned files").toEqual(e7Capture);
-	world.processTable.advanceProcess();
-	const e7Fresh = await world.createRootSession("root", { sessionManager: world.openSessionManager(e7AuxFile) });
+	// The crash cut: certified from the disposed owner itself, before any prefix is restored, the receipt names exactly A's
+	// predeclared claim; the owned files are cut back to the capture; SQLite is not rewound.
+	const e7Fresh = await world.restart({
+		owner: e7Owner.session,
+		sessionFile: e7AuxFile,
+		cut: { manifest: e7Manifest, capture: e7Capture },
+		rewindSqlite: false,
+		retainedClaims: e7ARetainedClaims,
+		check: crashCutChecks("the auxiliary owner disposes cleanly"),
+	});
 	expect(
 		world.settingsManager.getWorkerDelegationSettings().maxConcurrent,
 		"the recovered owner keeps the scenario cap",

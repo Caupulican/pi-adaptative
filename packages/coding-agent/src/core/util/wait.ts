@@ -124,7 +124,8 @@ export interface WaitStatus {
 /** The next wait's `seq`. */
 let nextWaitSeq = 1;
 
-function reportEnd(end: WaitEndReason): WaitEndReport {
+/** A wait end as the status stream carries it (see `WaitEndReport`). */
+export function waitEndReport(end: WaitEndReason): WaitEndReport {
 	if (end.kind !== "aborted") return end;
 	const reason = end.reason instanceof Error ? end.reason.message : end.reason === undefined ? "" : String(end.reason);
 	return { kind: "aborted", reason };
@@ -166,7 +167,7 @@ export function createWaitStatus(spec: WaitStatusSpec): WaitStatus {
 		progress: (detail) => emit("progress", { progress: detail }),
 		overdue: (holder) => emit("overdue", { holder }),
 		end: (end) => {
-			emit("end", { end: reportEnd(end) });
+			emit("end", { end: waitEndReport(end) });
 			ended = true;
 		},
 	};

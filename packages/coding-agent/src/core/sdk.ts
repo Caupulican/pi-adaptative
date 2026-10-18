@@ -185,7 +185,8 @@ export interface CreateAgentSessionOptions {
 	systemOneFetch?: typeof fetch;
 	/**
 	 * The one timer source of the session's recovery, retry and watchdog alarms and of the clocks they are due on (one port per
-	 * `TimerOwner` of `util/timer-port.ts`); default: the system clock and the global timers, unreferenced.
+	 * `TimerOwner` of `util/timer-port.ts`); default: the system clock and the global timers, unreferenced unless the wait
+	 * asks to keep the process alive (`TimerOptions.keepAlive`).
 	 */
 	timers?: TimerSource;
 

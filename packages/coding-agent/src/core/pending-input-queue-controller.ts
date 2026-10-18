@@ -503,22 +503,103 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		origin?: SendUserMessageOrigin,
 		inputId?: OwnerInputId,
 	): PendingInputHandle {
+		const entry = this._newEntry(
+			inputId ?? this.deps.ownerInputs.accept(origin ? "extension" : kind),
+			kind,
+			{ text, images },
+			origin,
+			new AbortController(),
+		);
+		(kind === "steer" ? this._steering : this._followUp).push(entry);
+		this._changed();
+		if (kind === "steer") this._notifySteerQueued();
+		return { id: entry.id, inputId: entry.inputId, signal: entry.abort.signal };
+	}
+
+	/**
+	 * Keep owner input that cannot be submitted yet (the interactive queue while compaction runs): it is pending, held from
+	 * its acceptance and in the durable record, so it is shown, takeable and restored held after a restart, and nothing
+	 * hands it on by itself; `resubmit` or `takeKept` submits it. `existing` is returned while it is still kept, so input
+	 * returned to that queue keeps its identity and place.
+	 */
+	keep(
+		kind: "steer" | "followUp",
+		text: string,
+		images?: ImageContent[],
+		existing?: PendingInputHandle,
+	): PendingInputHandle {
+		if (existing && this._keptEntry(existing)) return existing;
+		const inputId = this.deps.ownerInputs.accept(kind);
+		this.deps.ownerInputs.end(inputId, { state: "held", reason: "kept until it can be submitted" });
+		const abort = new AbortController();
+		abort.abort(PENDING_INPUT_WITHDRAWN);
+		const entry = this._newEntry(inputId, kind, { text, images }, undefined, abort, true);
+		(kind === "steer" ? this._steering : this._followUp).push(entry);
+		this._changed();
+		return { id: entry.id, inputId, signal: abort.signal };
+	}
+
+	/**
+	 * A kept input (`keep`) is submitted as a queued input: it leaves the queue, taken back, and its words are pending again
+	 * as the submission accepted under `inputId` (`register`), in one change of the durable record. Undefined, with nothing
+	 * changed, when it is no longer kept (taken back or cleared meanwhile): nothing is submitted.
+	 */
+	resubmit(
+		kept: PendingInputHandle,
+		kind: "steer" | "followUp",
+		text: string,
+		images: ImageContent[] | undefined,
+		origin: SendUserMessageOrigin | undefined,
+		inputId: OwnerInputId | undefined,
+	): PendingInputHandle | undefined {
+		return this._dropKept(kept) ? this.register(kind, text, images, origin, inputId) : undefined;
+	}
+
+	/** A kept input (`keep`) is submitted as something that does not queue (an extension command): it leaves the queue. */
+	takeKept(kept: PendingInputHandle): boolean {
+		if (!this._dropKept(kept)) return false;
+		this._changed();
+		return true;
+	}
+
+	/** Remove a kept input from the queue as taken back by its submission, leaving the record's rewrite to the caller. */
+	private _dropKept(kept: PendingInputHandle): boolean {
+		const entry = this._keptEntry(kept);
+		if (!entry) return false;
+		this._removeEntry(entry);
+		this.deps.ownerInputs.end(entry.inputId, { state: "withdrawn", reason: "submitted" });
+		return true;
+	}
+
+	/** The entry `handle` names while it is a held input nothing handed on, matched by its identity as well as its number. */
+	private _keptEntry(handle: PendingInputHandle): PendingEntry | undefined {
+		const entry = this._findEntry(handle.id);
+		return entry?.inputId === handle.inputId && entry.held && !entry.message ? entry : undefined;
+	}
+
+	/** A pending entry as submitted, in the context it is accepted in now, with the next submission number. */
+	private _newEntry(
+		inputId: OwnerInputId,
+		kind: QueuedInputKind,
+		submitted: QueuedInput,
+		origin: SendUserMessageOrigin | undefined,
+		abort: AbortController,
+		held?: true,
+	): PendingEntry {
 		const context = this.deps.getInputContext?.();
-		const entry: PendingEntry = {
+		const { text, images } = submitted;
+		return {
 			id: this._nextEntryId++,
-			inputId: inputId ?? this.deps.ownerInputs.accept(origin ? "extension" : kind),
+			inputId,
 			kind,
 			text,
 			images,
 			original: { text, ...(images ? { images } : {}) },
 			...(origin ? { origin } : {}),
-			abort: new AbortController(),
+			abort,
+			...(held ? { held } : {}),
 			...(context ? { context } : {}),
 		};
-		(kind === "steer" ? this._steering : this._followUp).push(entry);
-		this._changed();
-		if (kind === "steer") this._notifySteerQueued();
-		return { id: entry.id, inputId: entry.inputId, signal: entry.abort.signal };
 	}
 
 	/**
@@ -537,23 +618,18 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		}>,
 		recordChanged = false,
 	): void {
-		const context = this.deps.getInputContext?.();
 		for (const input of inputs) {
 			const abort = new AbortController();
 			abort.abort(PENDING_INPUT_WITHDRAWN);
-			const entry: PendingEntry = {
-				id: this._nextEntryId++,
+			const entry = this._newEntry(
 				// Open again, held, under the identity it was accepted with; re-sending it later is a new input.
-				inputId: this.deps.ownerInputs.restoreHeld(input.origin ? "extension" : input.kind, input.id),
-				kind: input.kind,
-				text: input.text,
-				images: input.images,
-				original: { text: input.text, ...(input.images ? { images: input.images } : {}) },
-				...(input.origin ? { origin: { ...input.origin, text: input.text } } : {}),
+				this.deps.ownerInputs.restoreHeld(input.origin ? "extension" : input.kind, input.id),
+				input.kind,
+				{ text: input.text, images: input.images },
+				input.origin ? { ...input.origin, text: input.text } : undefined,
 				abort,
-				held: true,
-				...(context ? { context } : {}),
-			};
+				true,
+			);
 			(input.kind === "steer" ? this._steering : this._followUp).push(entry);
 		}
 		if (recordChanged) this._changed();

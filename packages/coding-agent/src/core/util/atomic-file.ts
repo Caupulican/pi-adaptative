@@ -202,7 +202,12 @@ function isLockedError(err: unknown): boolean {
 	return false;
 }
 
-/** Block the calling thread for `ms` without spinning the CPU (Atomics.wait on a private buffer). */
+/**
+ * Block the calling thread for `ms` without spinning the CPU (Atomics.wait on a private buffer). It cannot take an abort:
+ * the whole thread is blocked, so no signal, timer or event can run until it returns. It is bounded instead: its only
+ * caller, {@link acquireFileLockSync}, passes one capped retry gap per attempt, so its total is the gap schedule over
+ * the retry count, and that total is reported on the final `ELOCKED`.
+ */
 function blockingSleepMs(ms: number): void {
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -315,12 +320,22 @@ export function acquireFileLockSync(filePath: string, options: AtomicFileLockOpt
 		realpath: options.realpath ?? DEFAULT_REALPATH,
 		stale: options.stale,
 	};
+	let blockedMs = 0;
 	for (let attempt = 1; attempt <= attempts; attempt++) {
 		try {
 			return lockfile.lockSync(filePath, lockOptions);
 		} catch (err) {
-			if (!isLockedError(err) || attempt === attempts) throw err;
-			blockingSleepMs(retryDelayMs(options, attempt));
+			if (!isLockedError(err)) throw err;
+			if (attempt === attempts) {
+				// The lock stayed held through every attempt: say how long this thread was blocked waiting for it.
+				if (err instanceof Error && blockedMs > 0) {
+					err.message = `${err.message} (blocked this thread ${blockedMs} ms over ${attempts} attempts)`;
+				}
+				throw err;
+			}
+			const gapMs = retryDelayMs(options, attempt);
+			blockingSleepMs(gapMs);
+			blockedMs += gapMs;
 		}
 	}
 	// Unreachable (the loop always returns or throws), but keeps the function's return type honest.
@@ -416,7 +431,9 @@ function throwIfPastDeadline(filePath: string, deadlineAt: number, waitingFor: s
 /**
  * Take a lock held elsewhere one attempt at a time (proper-lockfile `retries: 0`), backing off as configured. Every
  * attempt, the first and each one after a backoff, starts only while `deadlineAt` allows; past it,
- * {@link FileLockDeadlineError}. Any failure other than "held" (`ELOCKED`) propagates.
+ * {@link FileLockDeadlineError}. Any failure other than "held" (`ELOCKED`) propagates. Its waits stay on the system
+ * clock, as {@link settlesBy} does: the lock is shared across processes, so its holder, its staleness and the caller's
+ * `deadlineAt` are all real time, and a session timer port could not move them.
  */
 async function lockByDeadline(
 	filePath: string,

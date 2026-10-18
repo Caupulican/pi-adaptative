@@ -18,6 +18,7 @@ import type { SpecialistContextClaim } from "../orchestration/specialist-context
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { terminalAttemptStatus } from "../orchestration/task-runtime-state.ts";
 import { DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS } from "../settings/settings-rules.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { recordDiscardedObligations } from "./obligation-ledger.ts";
 import {
 	SessionRootMailbox,
@@ -136,6 +137,11 @@ export interface WorkerAgentControlCoordinatorOptions {
 	 * is a separate subsystem from subscribeStateChanges; this is that subsystem's event, not a poll.
 	 */
 	subscribeReservationAvailability?(listener: () => void): () => void;
+	/**
+	 * The `worker-wait` port: the bound of a delegate wait and the watchdog of its blocked reservation restore, with the
+	 * clock that restore deadline is measured on. Defaults to the system timers.
+	 */
+	timers?: TimerPort;
 	warn?(message: string): void;
 	/** Current foreground submission epoch, or undefined when none is held. Read once, at genuine
 	 * mailbox-turn creation (gated on `prepareAgentTurn`'s own `created` signal), to stamp the new
@@ -1718,13 +1724,14 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			let yieldInitialized = callerAgentId === undefined;
 			let restoreYield: (() => boolean | undefined) | undefined;
 			let unsubscribeState = (): void => undefined;
-			let timeout: ReturnType<typeof setTimeout> | undefined;
+			const timers = this.options.timers ?? SYSTEM_TIMER_PORT;
+			let timeout: unknown;
 			// A blocked restore (another lane still holds the caller's write reservation) is a
 			// live-lock, not a terminal failure or success. subscribeStateChanges is not that
 			// wakeup — reservation release is. subscribeReservationAvailability is the event;
 			// restoreDeadlineTimer is only the watchdog if that event never arrives.
 			let unsubscribeReservation = (): void => undefined;
-			let restoreDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+			let restoreDeadlineTimer: unknown;
 			let restoreRetryDeadline: number | undefined;
 			const onSignalAbort = () => {
 				if (settled) return;
@@ -1736,8 +1743,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				unsubscribeState();
 				unsubscribeReservation();
 				signal?.removeEventListener("abort", onSignalAbort);
-				if (timeout) clearTimeout(timeout);
-				if (restoreDeadlineTimer) clearTimeout(restoreDeadlineTimer);
+				if (timeout !== undefined) timers.clearTimeout(timeout);
+				if (restoreDeadlineTimer !== undefined) timers.clearTimeout(restoreDeadlineTimer);
 			};
 			const restoreCaller = (): boolean => {
 				if (!restoreYield) return true;
@@ -1754,27 +1761,22 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				if (!hasFailure && completionTimedOut === undefined && !abortedBySignal) {
 					if (!waitSatisfied(statuses)) return;
 					completionTimedOut = false;
-					if (timeout) {
-						clearTimeout(timeout);
+					if (timeout !== undefined) {
+						timers.clearTimeout(timeout);
 						timeout = undefined;
 					}
 				}
 				try {
 					if (!restoreCaller()) {
-						restoreRetryDeadline ??= Date.now() + WORKER_WAIT_RESTORE_MAX_MS;
-						const remainingMs = restoreRetryDeadline - Date.now();
+						restoreRetryDeadline ??= timers.now() + WORKER_WAIT_RESTORE_MAX_MS;
+						const remainingMs = restoreRetryDeadline - timers.now();
 						if (remainingMs <= 0) {
 							failure = new Error(
 								"Worker wait completed but could not restore the caller's write reservation within the retry bound; another lane continues to hold it.",
 							);
 							hasFailure = true;
 						} else {
-							if (!restoreDeadlineTimer) {
-								restoreDeadlineTimer = setTimeout(settle, remainingMs);
-								if (typeof restoreDeadlineTimer === "object" && "unref" in restoreDeadlineTimer) {
-									restoreDeadlineTimer.unref();
-								}
-							}
+							restoreDeadlineTimer ??= timers.setTimeout(settle, remainingMs);
 							return;
 						}
 					}
@@ -1797,13 +1799,12 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			} else {
 				signal?.addEventListener("abort", onSignalAbort, { once: true });
 			}
-			timeout = setTimeout(() => {
+			timeout = timers.setTimeout(() => {
 				if (settled) return;
 				timeout = undefined;
 				if (completionTimedOut === undefined) completionTimedOut = true;
 				settle();
 			}, boundedTimeoutMs);
-			if (typeof timeout === "object" && "unref" in timeout) timeout.unref();
 			try {
 				let yielded = false;
 				if (callerAgentId && this.options.yieldCallerForWait) {

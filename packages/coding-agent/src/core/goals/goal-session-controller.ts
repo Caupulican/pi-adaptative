@@ -620,6 +620,18 @@ export class GoalSessionController {
 	}
 
 	/**
+	 * Begin one execution for `goalId`, or join the lease a run already holds (a queued owner goal's lease outlives the
+	 * run that delivered it): that lease works on `goalId` from here, as {@link bindExecution} binds it, and its owner
+	 * still ends it, so none is returned.
+	 */
+	joinExecution(goalId: string | undefined): GoalExecutionLease | undefined {
+		const held = this.executionLease;
+		if (!held) return this.beginExecution(goalId);
+		if (goalId !== undefined) this.bindExecution(held, goalId);
+		return undefined;
+	}
+
+	/**
 	 * End the execution lease. The lease ends even when its final usage cannot be saved: that usage is retained and
 	 * charged with the goal's next save (see {@link unsavedUsage}), and the failure is reported, never thrown, so no
 	 * caller's later release is skipped.

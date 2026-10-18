@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { stateFile } from "../agent-paths.ts";
 import { isProcessAlive } from "../process-liveness.ts";
 import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { KeyedSignal } from "../util/keyed-signal.ts";
+import { repeatEvery, SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { splitProviderAccountKey } from "./account-key.ts";
 import type { ProviderRequestLane } from "./lane-context.ts";
@@ -45,7 +47,11 @@ export interface ProviderInflightCount {
 }
 
 export interface ProviderAdmissionLedgerOptions {
-	now?: () => number;
+	/**
+	 * The `provider-admission` port: the clock entries are stamped and judged stale on, the hold heartbeat, and the
+	 * admission gate's pauses. Defaults to the system timers.
+	 */
+	timers?: TimerPort;
 	isProcessAlive?: (pid: number) => boolean;
 	pid?: number;
 	sessionId?: string;
@@ -60,6 +66,9 @@ export const PROVIDER_ADMISSION_STALE_MS = 45_000;
 const ENTRY_SUFFIX = ".json";
 const LOCK_FILE = "admission.lock";
 const LANES: readonly ProviderRequestLane[] = ["foreground", "worker", "background"];
+
+/** A hold released by any ledger of this process, keyed by the ledger directory. */
+const releasedHolds = new KeyedSignal();
 
 export function providerAdmissionDir(agentDir: string): string {
 	return stateFile(agentDir, "provider-admission");
@@ -90,9 +99,10 @@ function isEntry(value: unknown): value is ProviderAdmissionEntry {
 }
 
 export class ProviderAdmissionLedger {
+	/** See `ProviderAdmissionLedgerOptions.timers`. */
+	readonly timers: TimerPort;
 	private readonly dir: string;
 	private readonly lockPath: string;
-	private readonly now: () => number;
 	private readonly isAlive: (pid: number) => boolean;
 	private readonly pid: number;
 	private readonly sessionId: string | undefined;
@@ -104,7 +114,7 @@ export class ProviderAdmissionLedger {
 	constructor(agentDir: string, options: ProviderAdmissionLedgerOptions = {}) {
 		this.dir = providerAdmissionDir(agentDir);
 		this.lockPath = join(this.dir, LOCK_FILE);
-		this.now = options.now ?? Date.now;
+		this.timers = options.timers ?? SYSTEM_TIMER_PORT;
 		this.isAlive = options.isProcessAlive ?? ((pid) => isProcessAlive(pid));
 		this.pid = options.pid ?? process.pid;
 		this.sessionId = options.sessionId;
@@ -151,6 +161,14 @@ export class ProviderAdmissionLedger {
 		return this.withLock(() => this.collectLocked());
 	}
 
+	/**
+	 * Calls `onRelease` whenever a hold under this ledger's directory is released in this process, by any ledger. A hold
+	 * another process releases is seen only by counting again.
+	 */
+	subscribeRelease(onRelease: () => void): () => void {
+		return releasedHolds.subscribe(this.dir, onRelease);
+	}
+
 	/** Release every hold this ledger still owns (session disposal). */
 	releaseAll(): void {
 		for (const release of [...this.holds.values()]) {
@@ -162,6 +180,10 @@ export class ProviderAdmissionLedger {
 				// abort the rest of session teardown.
 			}
 		}
+	}
+
+	private now(): number {
+		return this.timers.now();
 	}
 
 	private ensureDir(): void {
@@ -190,7 +212,7 @@ export class ProviderAdmissionLedger {
 		};
 		writeFileAtomicSync(path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
 		let released = false;
-		const heartbeat = setInterval(() => {
+		const heartbeat = repeatEvery(this.timers, this.heartbeatMs, () => {
 			if (released) return;
 			try {
 				writeFileAtomicSync(
@@ -201,18 +223,18 @@ export class ProviderAdmissionLedger {
 			} catch {
 				// A missed heartbeat only shortens how long a crashed owner's entry survives.
 			}
-		}, this.heartbeatMs);
-		heartbeat.unref?.();
+		});
 		const release = (): void => {
 			if (released) return;
 			released = true;
-			clearInterval(heartbeat);
+			heartbeat.stop();
 			this.holds.delete(id);
 			try {
 				rmSync(path, { force: true });
 			} catch (error) {
 				if (!isMissingFileError(error)) throw error;
 			}
+			releasedHolds.notify(this.dir);
 		};
 		this.holds.set(id, release);
 		return { id, release };

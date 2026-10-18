@@ -6,7 +6,11 @@
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { OwnerInputEnd, OwnerInputId, OwnerInputLedger, OwnerInputOutcome } from "./owner-input-ledger.ts";
-import type { PendingInputHoldReason, PendingInputQueueController } from "./pending-input-queue-controller.ts";
+import type {
+	PendingInputHandle,
+	PendingInputHoldReason,
+	PendingInputQueueController,
+} from "./pending-input-queue-controller.ts";
 import { truncateWithEllipsis } from "./provider-tool-text.ts";
 import { appendQueuedInputRecord, type RecordableQueuedInput, readQueuedInputRecord } from "./queued-input-record.ts";
 import type { OwnerRequestClassificationOutcome } from "./session-edge-intent-controller.ts";
@@ -32,6 +36,11 @@ export interface QueuedInputPersistenceControllerDeps {
 		acceptedOrder: number | undefined,
 		judgment: OwnerRequestClassificationOutcome | undefined,
 	): void;
+	/** Accept the owner's queued words, as a prompt's are, under the next owner submission order (`PromptSubmissionController`). */
+	acceptQueuedOwnerWords(
+		kind: "steer" | "followUp",
+		text: string,
+	): { readonly inputId: OwnerInputId; readonly acceptedOrder: number };
 	emitQueueUpdate(): void;
 	emitWarning(message: string): void;
 }
@@ -46,6 +55,18 @@ export class QueuedInputPersistenceController {
 		this.deps = deps;
 	}
 
+	/** Keep owner input that cannot be submitted yet as held, recorded pending input (`PendingInputQueueController.keep`). */
+	keepQueuedInput(
+		kind: "steer" | "followUp",
+		text: string,
+		images: ImageContent[] | undefined,
+		existing: PendingInputHandle | undefined,
+	): PendingInputHandle {
+		const kept = this.deps.getPendingQueue().keep(kind, text, images, existing);
+		this.deps.emitQueueUpdate();
+		return kept;
+	}
+
 	/**
 	 * A queued owner input is pending from the moment it is submitted, in submission order, and is
 	 * judged in full once, before it is admitted -- the same judgment a prompt queued behind a running
@@ -53,17 +74,16 @@ export class QueuedInputPersistenceController {
 	 * the input, in owner order, never when the input is taken back, cleared or held first: until then the
 	 * intent is a staged candidate that writes nothing. A newer request supersedes only the judgment's
 	 * optional-tool chain, never the input or its owner policy, which the owner-policy queue then judges
-	 * alone; a cancellation (interrupt, take, clear, disposal, context change) ends it. `accepted` is the identity and
-	 * owner order its words were accepted under (`PromptSubmissionController.acceptQueuedOwnerWords`), whose release when
-	 * the input ends undelivered is already registered. Resolves with the input queued for delivery, or with how it ended.
+	 * alone; a cancellation (interrupt, take, clear, disposal, context change) ends it. Its words are accepted first
+	 * (`acceptQueuedOwnerWords`), with their release when the input ends undelivered registered. Resolves with the input
+	 * queued for delivery, or with how it ended.
 	 */
 	async admitQueuedOwnerInput(
 		kind: "steer" | "followUp",
 		text: string,
 		images: ImageContent[] | undefined,
-		accepted: { readonly inputId: OwnerInputId; readonly acceptedOrder: number },
 	): Promise<OwnerInputOutcome> {
-		const { inputId, acceptedOrder } = accepted;
+		const { inputId, acceptedOrder } = this.deps.acceptQueuedOwnerWords(kind, text);
 		const outcome: { inputId: OwnerInputId; ended?: OwnerInputEnd } = { inputId };
 		this.deps.ownerInputs.whenUndelivered(inputId, (end) => {
 			outcome.ended = end;

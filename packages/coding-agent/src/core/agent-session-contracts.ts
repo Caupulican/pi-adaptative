@@ -39,6 +39,7 @@ import type { LocalRuntimeDeps } from "./models/local-runtime.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
 import type { OwnerInputEnd } from "./owner-input-ledger.ts";
+import type { PendingInputHandle } from "./pending-input-queue-controller.ts";
 import type { ProviderAdmissionWaitEvent } from "./provider-admission/gate.ts";
 import type { ResearchRunResult } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
@@ -238,6 +239,11 @@ export interface PromptOptions {
 	signal?: AbortSignal;
 	/** Active goal whose autonomous foreground execution owns this internal turn's provider usage. */
 	goalExecutionId?: string;
+	/**
+	 * The kept input (`AgentSession.keepQueuedInput`) this submission sends: it leaves the pending queue as this submission
+	 * takes it, and a submission whose kept input was taken back or cleared meanwhile sends nothing (ended `withdrawn`).
+	 */
+	heldInput?: PendingInputHandle;
 }
 
 export interface ModelCycleResult {

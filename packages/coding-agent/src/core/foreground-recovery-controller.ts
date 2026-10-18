@@ -6,6 +6,7 @@ import {
 	classifyFailure,
 	computeRetryDelayMs,
 	DEFAULT_RETRY_POLICY,
+	type RetryBackoffEnd,
 	RetryController,
 	RetryDelayExceededError,
 } from "../kernel/reliability/index.ts";
@@ -17,8 +18,14 @@ import type { ModelRegistry } from "./model-registry.ts";
 import type { ModelRouterFailoverStatus } from "./model-router/status.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
 import type { AutonomySettings, FailoverSettings } from "./settings/settings-schema.ts";
-import { SYSTEM_TIMER_PORT, type TimerPort } from "./util/timer-port.ts";
-import { createWaitStatus, type WaitEndReason, type WaitEndReport, type WaitStatusEvent } from "./util/wait.ts";
+import { SYSTEM_TIMER_SOURCE, type TimerSource } from "./util/timer-port.ts";
+import {
+	createWaitStatus,
+	type WaitEndReason,
+	type WaitEndReport,
+	type WaitStatusEvent,
+	waitFor,
+} from "./util/wait.ts";
 
 /**
  * How long a wait for the foreground (submission, live-run join, history claim, idle) runs before its status reports it
@@ -26,6 +33,14 @@ import { createWaitStatus, type WaitEndReason, type WaitEndReport, type WaitStat
  * would let two owners run the foreground at once or strand the waiter's work.
  */
 export const FOREGROUND_WAIT_OVERDUE_MS = 60_000;
+
+/**
+ * Why the owner steer never ends a retry backoff: the retry continuation is the live consumer that delivers input queued
+ * while it waits (the retry window queues every prompt as steering), and ending the backoff early only re-sends into the
+ * rate limit or transient failure the delay waits out.
+ */
+const RETRY_BACKOFF_STEER_EXEMPTION =
+	"the retry continuation delivers the steer; ending the backoff early only re-sends into the limit or failure it waits out";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface ForegroundRecoveryControllerSettingsSource {
@@ -90,8 +105,11 @@ export interface ForegroundRecoveryResourceSnapshot {
 
 export interface ForegroundRecoveryControllerDeps {
 	agent: Agent;
-	/** The `foreground` port: the overdue watchdog of the foreground waits. Defaults to the system timers. */
-	timers?: TimerPort;
+	/**
+	 * The session timers: the `foreground` port runs the overdue watchdog of the foreground waits, the `foreground-retry`
+	 * port the auto-retry backoff. Defaults to the system timers.
+	 */
+	timers?: TimerSource;
 	/** The ICM chat's turns, undefined while no chat runs. Every provider run begins one, as its own, and ends it. */
 	chatTurns?(): Pick<IcmTurnCoordinator, "begin" | "end"> | undefined;
 	/** See `BillingFailoverControllerDeps.applyFailoverModel`. */
@@ -176,6 +194,7 @@ export class ForegroundRecoveryController {
 				onRetryEnd: (info) => deps.emit({ type: "auto_retry_end", ...info }),
 			},
 			deps.getContextWindow,
+			(delayMs, signal) => this.waitRetryBackoff(delayMs, signal),
 		);
 		this.billingFailover = new BillingFailoverController({
 			agent: deps.agent,
@@ -317,7 +336,7 @@ export class ForegroundRecoveryController {
 		wake: readonly string[],
 		steerExemption: string,
 	): { blocked(): void; end(end: WaitEndReason): void } {
-		const clock = this.deps.timers ?? SYSTEM_TIMER_PORT;
+		const clock = (this.deps.timers ?? SYSTEM_TIMER_SOURCE).port("foreground");
 		const holder = (): string => this.foregroundHolder();
 		const status = createWaitStatus({
 			id,
@@ -354,6 +373,50 @@ export class ForegroundRecoveryController {
 	private foregroundWaitFailure(error: unknown): WaitEndReason {
 		if (this.shutdownReason !== undefined) return { kind: "disposed" };
 		return { kind: "unavailable", cause: error instanceof Error ? error.message : String(error) };
+	}
+
+	/**
+	 * One auto-retry backoff (`retry.backoff`) on the `foreground-retry` port: its one wake is the backoff's own alarm, which
+	 * holds the process open (a one-shot run waits behind it); the retry's abort ends it `aborted`. Its watchdog reports it
+	 * overdue, naming the attempt, once the delay plus `FOREGROUND_WAIT_OVERDUE_MS` passed with no alarm, and never ends it.
+	 * The owner steer never ends it either (`RETRY_BACKOFF_STEER_EXEMPTION`).
+	 */
+	private async waitRetryBackoff(delayMs: number, signal: AbortSignal): Promise<RetryBackoffEnd> {
+		const clock = (this.deps.timers ?? SYSTEM_TIMER_SOURCE).port("foreground-retry");
+		let elapsed = false;
+		const outcome = await waitFor<true>({
+			id: "retry.backoff",
+			wake: [
+				{
+					id: "retry.backoff_elapsed",
+					subscribe: (onWake) => {
+						const timer = clock.setTimeout(
+							() => {
+								elapsed = true;
+								onWake();
+							},
+							delayMs,
+							{ keepAlive: true },
+						);
+						return () => clock.clearTimeout(timer);
+					},
+					check: () => (elapsed ? { kind: "satisfied", value: true } : undefined),
+				},
+			],
+			signal,
+			steer: { mode: "exempt", reason: RETRY_BACKOFF_STEER_EXEMPTION },
+			bound: {
+				kind: "watchdog",
+				overdueMs: delayMs + FOREGROUND_WAIT_OVERDUE_MS,
+				holder: () => `the backoff of retry attempt ${this.retry.attempt} (${delayMs} ms)`,
+			},
+			clock,
+			report: (event) => this.deps.emit(event),
+		});
+		if (outcome.end.kind === "satisfied") return "elapsed";
+		if (outcome.end.kind === "aborted") return "aborted";
+		// A watchdog wait with an exempt steer and no dispose source ends only satisfied or aborted.
+		throw new Error(`Retry backoff ended ${outcome.end.kind}.`);
 	}
 
 	/** Wait until foreground ownership can be acquired without a check-then-act gap. */
