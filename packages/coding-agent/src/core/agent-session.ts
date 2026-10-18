@@ -4159,8 +4159,10 @@ export class AgentSession {
 		for (const name of capabilityFiltered) {
 			addIfRegistered(name);
 		}
+		// A background tool task packs any tool's oversized terminal output (bash included) and names the artifact in its result.
 		if (
 			validToolNames.some((name) => PACKED_TOOL_OUTPUT_TOOLS.has(name)) ||
+			validToolNames.includes("tool_task") ||
 			validToolNames.includes("ask_question")
 		) {
 			addIfRegistered("artifact_retrieve");
