@@ -19,7 +19,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { promises as fsPromises, realpathSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { withFileLock, writeFileAtomic } from "../util/atomic-file.ts";
+import { type AtomicFileWriteOptions, withFileLock, writeFileAtomic } from "../util/atomic-file.ts";
 import { appendBoundedJsonLine, type BoundedJsonlLimits } from "../util/bounded-jsonl.ts";
 import type {
 	IntegrationLockAcquisition,
@@ -40,6 +40,12 @@ export interface SyncStorePaths {
 	lifecycleLockFile: string;
 	eventsFile: string;
 }
+
+/**
+ * The clock and transient-failure classifier the store's atomic replacements retry their rename on (epoch, landing
+ * transaction, lane registration). Omitted members keep `writeFileAtomic`'s defaults: system time and the win32 gate.
+ */
+export type SyncStoreWriteOptions = Pick<AtomicFileWriteOptions, "timers" | "isTransientError">;
 
 /** Grace window after which an ownerless lock dir (crash between mkdir and owner write) counts as
  * dead and may be taken over. Fresh ownerless dirs are conservatively treated as held. */
@@ -107,8 +113,21 @@ export async function readEpoch(paths: SyncStorePaths): Promise<WorktreeSyncEpoc
 	return readJsonFile<WorktreeSyncEpoch>(paths.epochFile);
 }
 
-export async function writeEpoch(paths: SyncStorePaths, epoch: WorktreeSyncEpoch): Promise<void> {
-	await writeFileAtomic(paths.epochFile, `${JSON.stringify(epoch, null, "\t")}\n`);
+/** The one tab-indented JSON replacement every store record is written with. */
+async function writeJsonFile(
+	filePath: string,
+	value: unknown,
+	write: SyncStoreWriteOptions | undefined,
+): Promise<void> {
+	await writeFileAtomic(filePath, `${JSON.stringify(value, null, "\t")}\n`, write);
+}
+
+export async function writeEpoch(
+	paths: SyncStorePaths,
+	epoch: WorktreeSyncEpoch,
+	write?: SyncStoreWriteOptions,
+): Promise<void> {
+	await writeJsonFile(paths.epochFile, epoch, write);
 }
 
 export async function readLandingTransaction(paths: SyncStorePaths): Promise<LandingTransaction | undefined> {
@@ -134,8 +153,12 @@ export async function readLandingTransaction(paths: SyncStorePaths): Promise<Lan
 	return record as unknown as LandingTransaction;
 }
 
-export async function writeLandingTransaction(paths: SyncStorePaths, transaction: LandingTransaction): Promise<void> {
-	await writeFileAtomic(paths.landingTransactionFile, `${JSON.stringify(transaction, null, "\t")}\n`);
+export async function writeLandingTransaction(
+	paths: SyncStorePaths,
+	transaction: LandingTransaction,
+	write?: SyncStoreWriteOptions,
+): Promise<void> {
+	await writeJsonFile(paths.landingTransactionFile, transaction, write);
 }
 
 export async function clearLandingTransaction(paths: SyncStorePaths): Promise<void> {
@@ -154,8 +177,12 @@ export async function readLane(paths: SyncStorePaths, laneKey: string): Promise<
 	return readJsonFile<LaneRegistration>(laneFile(paths, laneKey));
 }
 
-export async function writeLane(paths: SyncStorePaths, lane: LaneRegistration): Promise<void> {
-	await writeFileAtomic(laneFile(paths, lane.laneKey), `${JSON.stringify(lane, null, "\t")}\n`);
+export async function writeLane(
+	paths: SyncStorePaths,
+	lane: LaneRegistration,
+	write?: SyncStoreWriteOptions,
+): Promise<void> {
+	await writeJsonFile(laneFile(paths, lane.laneKey), lane, write);
 }
 
 export async function listLanes(paths: SyncStorePaths): Promise<LaneRegistration[]> {

@@ -74,9 +74,22 @@ export function getGoalCompletionRefusal(state: GoalState): string | undefined {
 }
 
 /**
- * The completed goal reopened as active with its refusal reason. The goal is never left completed on unproven
+ * The reopen every continuation entry gives a completion its trusted evidence does not support: the goal reopened as
+ * active with its refusal reason, and the one warning that says so. The goal is never left completed on unproven
  * evidence, and never blocked by it: its unproven requirements keep the continuation working until evidence exists.
+ * Undefined when the completion stands, or when the goal's durable objective (`objectiveStatus`) is already settled
+ * (completed or cancelled), so nothing is left to complete.
  */
-export function reopenUnprovenGoalCompletion(state: GoalState, reason: string, now: string): GoalState {
-	return applyGoalEvent(state, { type: "reopen_unproven_completion", reason, now });
+export function reopenUnsupportedGoalCompletion(
+	state: GoalState,
+	objectiveStatus: string | undefined,
+	now: string,
+): { readonly state: GoalState; readonly warning: string } | undefined {
+	if (objectiveStatus === "completed" || objectiveStatus === "cancelled") return undefined;
+	const reason = getGoalCompletionRefusal(state);
+	if (reason === undefined) return undefined;
+	return {
+		state: applyGoalEvent(state, { type: "reopen_unproven_completion", reason, now }),
+		warning: `Goal ${state.goalId} ${reason}; the goal stays active to gather it.`,
+	};
 }

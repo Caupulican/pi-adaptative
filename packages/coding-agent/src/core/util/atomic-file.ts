@@ -57,6 +57,7 @@ async function renameWithRetry(tmpPath: string, filePath: string, options?: Atom
 	await retryTransientWin32(() => fsPromises.rename(tmpPath, filePath), {
 		...(options?.beforeCommit ? { beforeAttempt: options.beforeCommit } : {}),
 		...(options?.timers ? { timers: options.timers } : {}),
+		...(options?.isTransientError ? { isTransientError: options.isTransientError } : {}),
 	});
 }
 
@@ -147,6 +148,12 @@ export interface AtomicFileWriteOptions {
 	 * the thread between attempts). Defaults to the system timer port; a host that drives time itself passes its own.
 	 */
 	timers?: TimerPort;
+	/**
+	 * Which rename failures the async variant retries (`writeFileAtomic` only). Defaults to the win32 share-mode
+	 * classifier (`isTransientWin32FsError`); a host that raises those codes itself on another platform passes
+	 * `isTransientFsShareError`.
+	 */
+	isTransientError?: (err: unknown) => boolean;
 }
 
 /** Narrow an unknown Node filesystem failure without unsafe casts at every storage owner. */

@@ -52,6 +52,7 @@ import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "../../../src/core/tool-applica
 import type { ToolDef } from "../../../src/core/tools/index.ts";
 import { routeShellContract } from "../../../src/core/tools/shell-contract-router.ts";
 import type { TimerOwner, TimerPort, TimerSource } from "../../../src/core/util/timer-port.ts";
+import { isTransientFsShareError } from "../../../src/core/util/win32-transient-fs.ts";
 import { CURRENT_SESSION_VERSION, SessionManager } from "../../../src/kernel/session/session-manager.ts";
 import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
 import { type RpcModeIo, runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
@@ -2629,6 +2630,8 @@ export class HarnessWorld {
 						: this.shell.execEngine(command, args, options),
 				isPidAlive: (pid) => this.processTable.isAlive(pid),
 				pid: this.processTable.self,
+				// A share-mode rename failure the virtual IO raises retries on every platform, on the session clock.
+				atomicWrite: { isTransientError: isTransientFsShareError },
 			},
 		});
 		// Caller observation of production operations only: each native method runs unchanged, and its promise (preflight and tail

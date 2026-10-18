@@ -53,6 +53,7 @@ import {
 	releaseIntegrationLock,
 	repoSlug,
 	type SyncStorePaths,
+	type SyncStoreWriteOptions,
 	syncStorePaths,
 	writeEpoch,
 	writeLandingTransaction,
@@ -90,6 +91,8 @@ export interface WorktreeSyncEngineDeps {
 	readFile?: (path: string) => string | undefined;
 	/** Injectable same-host pid liveness for deterministic tests. */
 	isPidAlive?: (pid: number) => boolean;
+	/** Clock and transient classifier of the store's record replacements. Default: system time, win32-only retry. */
+	atomicWrite?: SyncStoreWriteOptions;
 }
 
 export interface RepoContext {
@@ -98,6 +101,8 @@ export interface RepoContext {
 	mainBranch: string;
 	mainSha: string;
 	paths: SyncStorePaths;
+	/** The engine's {@link WorktreeSyncEngineDeps.atomicWrite}, carried to every store record write it makes. */
+	write: SyncStoreWriteOptions;
 	slug: string;
 	/** Checkout where the main branch is checked out (the hub); undefined when main is not checked out. */
 	hubPath?: string;
@@ -238,6 +243,7 @@ export async function resolveRepoContext(
 		mainBranch,
 		mainSha,
 		paths: syncStorePaths(gitCommonDir),
+		write: deps.atomicWrite ?? {},
 		slug: repoSlug(topLevel, gitCommonDir),
 		hubPath: hub?.path,
 	};
@@ -413,7 +419,7 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 			ownerPid: deps.pid ?? process.pid,
 			...(deps.sessionId !== undefined ? { ownerSessionId: deps.sessionId } : {}),
 		};
-		await writeLane(ctx.paths, lane);
+		await writeLane(ctx.paths, lane, ctx.write);
 		await appendAuditEvent(ctx.paths, { event: "lane_created", laneKey, branch, baseSha: ctx.mainSha }, at);
 		return { code: "ok", lane };
 	});
@@ -459,7 +465,7 @@ export async function bindLaneWorker(
 		}
 		const updated = { ...lane, boundLaneId: args.laneId, updatedAt: nowIso(deps) };
 		try {
-			await writeLane(ctx.paths, updated);
+			await writeLane(ctx.paths, updated, ctx.write);
 			await appendAuditEvent(
 				ctx.paths,
 				{ event: "lane_worker_bound", laneKey: args.laneKey, laneId: args.laneId },
@@ -537,7 +543,7 @@ export async function releaseLane(deps: WorktreeSyncEngineDeps, args: ReleaseLan
 		await runGit(deps, ctx.topLevel, ["worktree", "prune"]);
 
 		const at = nowIso(deps);
-		await writeLane(ctx.paths, { ...lane, status: "released", updatedAt: at });
+		await writeLane(ctx.paths, { ...lane, status: "released", updatedAt: at }, ctx.write);
 		await appendAuditEvent(
 			ctx.paths,
 			{ event: "lane_released", laneKey: lane.laneKey, ...(unlandedWork ? { discarded: true } : {}) },
@@ -590,17 +596,21 @@ async function reconcileLandingTransaction(
 	const at = nowIso(deps);
 	if (previous?.mainSha !== transaction.testedTipSha) {
 		epoch++;
-		await writeEpoch(ctx.paths, {
-			epoch,
-			mainSha: transaction.testedTipSha,
-			previousMainSha: transaction.priorMainSha,
-			landedLaneKey: transaction.laneKey,
-			landedAt: at,
-			changedPaths: transaction.changedPaths,
-			changedPathsTruncated: transaction.changedPathsTruncated,
-		});
+		await writeEpoch(
+			ctx.paths,
+			{
+				epoch,
+				mainSha: transaction.testedTipSha,
+				previousMainSha: transaction.priorMainSha,
+				landedLaneKey: transaction.laneKey,
+				landedAt: at,
+				changedPaths: transaction.changedPaths,
+				changedPathsTruncated: transaction.changedPathsTruncated,
+			},
+			ctx.write,
+		);
 		transaction = { ...transaction, stage: "epoch_written" };
-		await writeLandingTransaction(ctx.paths, transaction);
+		await writeLandingTransaction(ctx.paths, transaction, ctx.write);
 	}
 	if (transaction.stage !== "audit_logged") {
 		await appendAuditEvent(
@@ -614,7 +624,7 @@ async function reconcileLandingTransaction(
 			},
 			at,
 		);
-		await writeLandingTransaction(ctx.paths, { ...transaction, stage: "audit_logged" });
+		await writeLandingTransaction(ctx.paths, { ...transaction, stage: "audit_logged" }, ctx.write);
 	}
 	await clearLandingTransaction(ctx.paths);
 	return undefined;
@@ -704,19 +714,23 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 			ownerClearedLaneKeys.push(lane.laneKey);
 		}
 
-		if (next !== lane) await writeLane(ctx.paths, next);
+		if (next !== lane) await writeLane(ctx.paths, next, ctx.write);
 	}
 
 	// Lane worktrees git knows but the registry does not: rebuild identity from git facts.
 	for (const { laneKey, path } of unregisteredWorktrees) {
-		await writeLane(ctx.paths, {
-			laneKey,
-			branch: `${LANE_BRANCH_PREFIX}${laneKey}`,
-			worktreePath: path,
-			status: "active",
-			createdAt: at,
-			updatedAt: at,
-		});
+		await writeLane(
+			ctx.paths,
+			{
+				laneKey,
+				branch: `${LANE_BRANCH_PREFIX}${laneKey}`,
+				worktreePath: path,
+				status: "active",
+				createdAt: at,
+				updatedAt: at,
+			},
+			ctx.write,
+		);
 		reRegisteredLaneKeys.push(laneKey);
 		await appendAuditEvent(ctx.paths, { event: "lane_reregistered", laneKey }, at);
 	}
@@ -1286,7 +1300,7 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 				gate: args.gate === "on" ? "passed" : "off",
 				stage: "ready_to_merge",
 			};
-			await writeLandingTransaction(ctx.paths, landingTransaction);
+			await writeLandingTransaction(ctx.paths, landingTransaction, ctx.write);
 			// Move the named main ref with a compare-and-swap instead of `git merge` in whichever
 			// branch happens to be checked out in the hub. A concurrent branch switch cannot redirect
 			// this land to another branch, and a changed main ref makes update-ref fail without mutation.
@@ -1319,20 +1333,24 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 			if (refresh.code !== 0)
 				return gitError(`could not refresh hub checkout after landing '${lane.laneKey}'`, refresh);
 
-			await writeLandingTransaction(ctx.paths, { ...landingTransaction, stage: "main_moved" });
+			await writeLandingTransaction(ctx.paths, { ...landingTransaction, stage: "main_moved" }, ctx.write);
 			const previous = await readEpoch(ctx.paths);
 			const epochNumber = (previous?.epoch ?? 0) + 1;
 			const at = nowIso(deps);
-			await writeEpoch(ctx.paths, {
-				epoch: epochNumber,
-				mainSha: tipSha,
-				previousMainSha: mainShaNow,
-				landedLaneKey: lane.laneKey,
-				landedAt: at,
-				changedPaths: changed.slice(0, EPOCH_CHANGED_PATHS_CAP),
-				changedPathsTruncated: changed.length > EPOCH_CHANGED_PATHS_CAP,
-			});
-			await writeLandingTransaction(ctx.paths, { ...landingTransaction, stage: "epoch_written" });
+			await writeEpoch(
+				ctx.paths,
+				{
+					epoch: epochNumber,
+					mainSha: tipSha,
+					previousMainSha: mainShaNow,
+					landedLaneKey: lane.laneKey,
+					landedAt: at,
+					changedPaths: changed.slice(0, EPOCH_CHANGED_PATHS_CAP),
+					changedPathsTruncated: changed.length > EPOCH_CHANGED_PATHS_CAP,
+				},
+				ctx.write,
+			);
+			await writeLandingTransaction(ctx.paths, { ...landingTransaction, stage: "epoch_written" }, ctx.write);
 			await appendAuditEvent(
 				ctx.paths,
 				{
@@ -1346,7 +1364,7 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 				},
 				at,
 			);
-			await writeLandingTransaction(ctx.paths, { ...landingTransaction, stage: "audit_logged" });
+			await writeLandingTransaction(ctx.paths, { ...landingTransaction, stage: "audit_logged" }, ctx.write);
 			await clearLandingTransaction(ctx.paths);
 			return {
 				code: "ok",

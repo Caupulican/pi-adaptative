@@ -27,7 +27,11 @@ import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { openWorkUnit } from "../work-units.ts";
 import type { RoutedGoalContext } from "./compact-goal-context.ts";
-import { getGoalCompletionRefusal, getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
+import {
+	getGoalCompletionRefusal,
+	getUnprovenGoalRequirementIds,
+	reopenUnsupportedGoalCompletion,
+} from "./goal-acceptance.ts";
 import { recordObjectiveClarification } from "./goal-clarification-log.ts";
 import type { GoalCompletionOwnerDecision } from "./goal-completion-owner-decision.ts";
 import { buildObjectiveRoutePrompt, GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
@@ -1109,11 +1113,41 @@ export class GoalSessionController {
 		return run(controller);
 	}
 
+	/**
+	 * The legacy loop's entry reopen: a completed goal its trusted evidence does not support (a persisted state the
+	 * completion gate never writes) is reopened as active with one warning, by the rule the objective reconcile applies
+	 * in primary mode. Returns whether it reopened.
+	 */
+	private reopenUnsupportedCompletion(): boolean {
+		const state = this.getState();
+		if (!state) return false;
+		const reopened = reopenUnsupportedGoalCompletion(
+			state,
+			this.deps.getTaskRuntimeSnapshot()?.objectives[goalObjectiveId(state.goalId)]?.objective.status,
+			new Date().toISOString(),
+		);
+		if (reopened === undefined) return false;
+		this.saveState(reopened.state, getGoalStateRevision(state));
+		this.deps.emitWarning(reopened.warning);
+		return true;
+	}
+
 	continueOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
 		return this.withPrimaryOrLegacy(
 			(controller) => this.continuePrimaryOnce(controller, options),
-			() => this.loop.continueGoalOnce(options),
+			() => this.continueLegacyOnce(options),
 		);
+	}
+
+	/**
+	 * As in primary mode, the pass that reopens ends there: the reopened goal's work runs from the next one. Shadow mode
+	 * still evaluates its route for the snapshot the pass reports, as every legacy pass does.
+	 */
+	private async continueLegacyOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
+		if (!this.reopenUnsupportedCompletion()) return this.loop.continueGoalOnce(options);
+		const snapshot = this.getRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
+		await this.evaluateShadowRoute(snapshot.continuation.action);
+		return { submitted: false, snapshot };
 	}
 
 	/**
@@ -1220,7 +1254,10 @@ export class GoalSessionController {
 	continueLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
 		return this.withPrimaryOrLegacy(
 			(controller) => this.continuePrimaryLoop(controller, options),
-			() => this.loop.continueGoalLoop(options),
+			() => {
+				this.reopenUnsupportedCompletion();
+				return this.loop.continueGoalLoop(options);
+			},
 		);
 	}
 

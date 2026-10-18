@@ -646,19 +646,15 @@ const rows: readonly FaultMatrixRow[] = [
 		id: "R29",
 		owner: "core/goals/goal-auto-continue-controller.ts",
 		journey: 2,
-		phase: "orchestration",
+		phase: "background-and-stall aux",
 		fault: "the workerDeadline wake of a goal waiting on a bound worker fires",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 0.5,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"the goal tool's boundAt stamp, the runtime snapshot's now and the wake all read the goal-continuation port, so advancing it by the armed delay fires the wake at a deadline the snapshot decides as worker_wait_timeout; no journey dispatches a worker through goal dispatch_worker and holds it in flight, and the deadline is the fixed DEFAULT_GOAL_WORKER_WAIT_MS (one hour, no setting), while the port is one clock for every root of the world, so the advance must run in an auxiliary root while no other live goal holds a bound in-flight requirement. The in-process dispatch reaches the session's own starter (goal dispatch_worker calls the tool's startWorkerDelegation, which runtime-builder wires to the session's, and BackgroundLaneController.startWorkerDelegation makes no delegate-tool check, unlike its worker controls); still unasserted are the dispatched worker's own admission in that root, the continuation pass the timeout starts and its warnings, and the cleanup of the held worker",
-			},
-		],
+		witness:
+			"advancing goal-continuation by DEFAULT_GOAL_WORKER_WAIT_MS fires the wake once; its pass runs on worker_wait_timeout, and its one turn spends the owner's budget, leaving the goal budget_limited with nothing armed and no warning",
+		control:
+			"the idle root waits on the bound worker until boundAt plus the maximum wait, and its only goal-continuation alarm is that deadline",
+		estSeconds: 1,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R30",
@@ -724,25 +720,25 @@ const rows: readonly FaultMatrixRow[] = [
 				detail:
 					"world.restart now takes live captures (R21's background cut), but a pending handoff (`ForegroundTerminalHandoffController.pending`) waits for the foreground lease, and the restart's interrupt frees that lease before the disposal: whether the waiting delivery starts its wake turn on the dying owner (`deliverWhenIdle` acquires before `isDisposed()`) or meets the disposed check and reports a notification failure is decided by settlement order, not by reading; the cut needs that order observed once, then a scripted old-owner wake step or an allowance for the exact failure text. The failure branch has a third, silent outcome: the outbox's rejection handler returns without a warning or a retry once the outbox is disposed (`WorkerNotificationCoordinator.flush`, `if (this.disposed) return`), leaving only the durable receipt for the next owner, so a witness of exactly one of wake or warning would not hold; besides the wake it must accept silence and a `Background worker handoff failed: ` warning whose cause is an `assertLive` text (`Session disposed before <action>`, from more than one call site) or the lease acquisition's own disposal rejection, each text read from the run once observed, and assert that the next session delivers the terminal once",
 			},
+			{
+				kind: "witness",
+				detail:
+					"the wake outcome needs a zero-or-one root step: a scripted step leaves its track only when a request consumes it (`until` absent or true), `assertDrained` throws on any step left, and a request with no step that is not already aborted throws `Unexpected provider request`, which the stream records in `provider.failures`, the list `world.restart` hands to `check.transport`, so neither a scripted nor an unscripted old-owner wake fits every legal outcome; scripted-provider.ts needs a step the restart retires unconsumed. The receipt the next owner replays is the orchestration runtime's pending `worker-terminal:<attemptId>` notification (`WorkerLifecycle.getPendingTerminalNotifications`, marked through `markNotificationsDelivered`), not a session-file entry, so the cut's `rewindSqlite` decides whether the next session sees it pending; the coordinator's `observedTerminals` is cleared at disposal",
+			},
 		],
 	},
 	{
 		id: "R35",
 		owner: "core/foreground-terminal-handoff-controller.ts",
 		journey: 2,
-		phase: "orchestration",
+		phase: "background-and-stall aux",
 		fault: "a handoff that wakes no turn with buffered owner items",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"the terminal of a worker whose goal stopped as budget_limited posts its not-woken follow-up, then flushes the ladder's buffered unsettled item as the owner items message, with no root request",
+		control: "nothing reached the owner before that worker ended",
 		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"the no-wake route (`deliverWithLease`: a follow-up custom message, then `flushOwnerItems`) runs only when `resolveWake` finds no record without a goalId and none whose goal is the active executing goal, so the worker must be started under a goal that stops executing before its terminal; the owner items it flushes are the unsettled ladder's pending items (`SessionUnsettledLadderController.deliverToOwner` outside a handoff, then `flushOwnerItems`), so a scenario must also buffer one before that handoff (for example a worker claim's inconclusive item the ladder leaves unsettled); no journey composes the two",
-			},
-		],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R36",
@@ -783,6 +779,34 @@ const rows: readonly FaultMatrixRow[] = [
 		estSeconds: 1,
 		status: "covered",
 		modes: ["on"],
+	},
+	{
+		id: "R38e",
+		owner: "core/goals/goal-session-controller.ts",
+		journey: 3,
+		phase: "continuous-chat unproven completion",
+		fault: "a completed goal whose requirements lack trusted evidence reaches the legacy continuation entry",
+		witness:
+			"the legacy loop's continuation over a persisted completed goal with an unproven requirement and no acceptance override reopens it to active with one warning, asks System One nothing and runs no turn",
+		control:
+			"the same continuation over a completed goal with trusted evidence keeps it completed, asks System One nothing and runs no turn",
+		estSeconds: 1,
+		status: "covered",
+		modes: ["off"],
+	},
+	{
+		id: "R38l",
+		owner: "core/goals/goal-session-controller.ts",
+		journey: 3,
+		phase: "continuous-chat unproven completion loop",
+		fault: "the continuation loop starts over a completed goal whose requirements lack trusted evidence",
+		witness:
+			"the loop reopens it to active with one warning and runs the reopened goal's one root turn (on: the primary guard lets it through, one cycle reopens, the next admits, routes and runs the turn; off: the legacy entry reopens and the native loop runs it)",
+		control:
+			"the loop over a completed goal with trusted evidence stops at once with continuation_not_allowed, completed, asking System One nothing and running no turn",
+		estSeconds: 2,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R39",
@@ -941,21 +965,16 @@ const rows: readonly FaultMatrixRow[] = [
 	{
 		id: "R47w",
 		owner: "core/util/atomic-file.ts",
-		journey: 2,
-		phase: "queued-recovery",
-		fault: "an atomic-file write's rename retries",
-		witness: NONE,
-		control: NONE,
+		journey: 3,
+		phase: "worktree-and-gates E12",
+		fault: "an atomic-file write's rename fails twice with a share-mode EPERM",
+		witness:
+			"the first reconcile's epoch replacement arms the first two backoffs of the doubling ladder on the session's worktree-sync clock, and the third rename lands the record",
+		control:
+			"a rename failure outside the share-mode codes (the second landing's EIO epoch rename) arms no backoff: the landing returns on the unadvanced virtual clock and nothing is left armed",
 		estSeconds: 0.5,
-		status: "open",
-		needs: [
-			{
-				kind: "extension",
-				extension: "X1",
-				detail:
-					"the win32 rename retry backoff now waits on a timer port (retryTransientWin32's `timers`, AtomicFileWriteOptions.timers, SYSTEM_TIMER_PORT by default), but the fault cannot be forced off win32: isTransientWin32FsError returns false unless process.platform is win32, and writeFileAtomic renames through node:fs promises directly (FaultableFs reaches only the sync variant), so a Linux journey can neither raise a transient EPERM/EACCES/EBUSY rename nor reach the backoff. A witness needs a platform-independent transient-rename classifier input or an async FaultableFs on writeFileAtomic, plus an owner that passes the world's timer port; the async lock waits stay on system time by design (a cross-process lock whose holder, staleness and deadline are real time); rename and write faults reach them only indirectly (R8, R44)",
-			},
-		],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R48",

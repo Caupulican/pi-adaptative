@@ -351,6 +351,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	expect(await world.disposeSessionInBody(mRecovered.session)).toBeUndefined();
 	trace.mark("root", "icm.migration-and-recovery");
 
-	// R38 runs last in the journey: its System One phase stays open to the end, so no later session is created under it.
+	// R38 and R38l run last in the journey: the R38l System One phase stays open to the end, so no later session is made
+	// under it.
 	await runJourney3UnprovenCompletionPhase(world);
 }

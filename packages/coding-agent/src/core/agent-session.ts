@@ -1785,7 +1785,11 @@ export class AgentSession {
 		this._isExplicitModel = config.isExplicitModel ?? false;
 		this._isExplicitThinking = config.isExplicitThinking ?? false;
 		this._baseToolsOverride = config.baseToolsOverride;
-		this._worktreeSyncEnginePorts = config.worktreeSyncEnginePorts;
+		// The store's record-write retry waits on the session's own worktree-sync clock unless the host supplies one.
+		this._worktreeSyncEnginePorts = {
+			...config.worktreeSyncEnginePorts,
+			atomicWrite: { timers: config.timers.port("worktree-sync"), ...config.worktreeSyncEnginePorts?.atomicWrite },
+		};
 		this._shellOperations = config.shellOperations;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._runtimeBuilder = new RuntimeBuilder({

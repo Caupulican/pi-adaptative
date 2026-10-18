@@ -35,6 +35,9 @@ export async function runJourney2(): Promise<void> {
 				/^Worker worker-\d+ retry durable read failed; retaining the durable retry and trying again in 1s: Scripted IO fault r30-durable-read: stat '(?:\/harness\/agent-journey-2-system-one-(?:on|off)\/state\/orchestration\/sessions\/[^'/\\\n]+\/events\/cursor\.json|[A-Z]:\\harness\\agent-journey-2-system-one-(?:on|off)\\state\\orchestration\\sessions\\[^'/\\\n]+\\events\\cursor\.json)'$/,
 				// R31: the auxiliary root's one refused worker terminal delivery, retried on the outbox backoff: exact text.
 				/^Background worker handoff failed: r31 scripted handoff refusal$/,
+				// R35: the goal-deadline auxiliary root's worker reports one inconclusive item its judge-less ladder leaves
+				// unsettled for the owner: exact text.
+				/^Worker worker-\d+ could not settle: Whether another module reads the retry limit was not checked \(missing: System One is not bound\)$/,
 				// R32: the queued worker's one refused cancellation event write (the auxiliary root's store), retained: exact text.
 				/^Worker worker-\d+ cancellation failed; it stays queued and the cancellation is retried: Scripted IO fault r32-cancel-write: write '(?:\/harness\/agent-journey-2-system-one-(?:on|off)\/state\/orchestration\/sessions\/[^'/\\\n]+\/events\/events\/\d{16}\.json\.\d+\.[0-9a-f-]{36}\.tmp|[A-Z]:\\harness\\agent-journey-2-system-one-(?:on|off)\\state\\orchestration\\sessions\\[^'/\\\n]+\\events\\events\\\d{16}\.json\.\d+\.[0-9a-f-]{36}\.tmp)'$/,
 			],

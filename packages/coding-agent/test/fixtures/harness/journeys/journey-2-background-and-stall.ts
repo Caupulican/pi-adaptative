@@ -1,14 +1,17 @@
 import "../builtin-install.ts";
+import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import {
 	type BackgroundToolTaskRecord,
 	loadBackgroundToolTaskRecordsNewestFirst,
 } from "../../../../src/core/background-tool-task-controller.ts";
+import { DEFAULT_GOAL_WORKER_WAIT_MS } from "../../../../src/core/goals/goal-continuation-defaults.ts";
 import { buildObjectiveRoutePrompt } from "../../../../src/core/goals/goal-continuation-prompt.ts";
+import { editPersistedGoal } from "../../../../src/core/goals/goal-lifecycle.ts";
 import type { ObjectiveRoute } from "../../../../src/core/objective-execution/objective-route.ts";
 import { goalObjectiveId } from "../../../../src/core/orchestration/work-state-projection.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
-import { calls, createBarrier, text } from "../scripted-provider.ts";
+import { calls, createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 
 /**
@@ -17,7 +20,7 @@ import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
  * The library's CJS export object is the one production's default import receives, so its functions
  * are rebound in place rather than through an ESM module mock.
  */
-import { backgroundTaskIdOf, handoffFor, requestTexts } from "./shared.ts";
+import { assertBatchOk, backgroundTaskIdOf, handoffFor, requestTexts } from "./shared.ts";
 
 export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -501,4 +504,255 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 		).toBeUndefined();
 		trace.mark("root", "e9-stall-objective");
 	}
+	await verifyGoalWorkerDeadlineAndQuietHandoff(world);
+}
+
+/**
+ * R29 + R35, both modes. An auxiliary root with System One off (its unsettled ladder has no judge) and the default worker pinned to
+ * worker-c starts a goal, adds one requirement and binds it to a worker through goal dispatch_worker; the worker is held at its
+ * first provider request. The goal tool stamps `boundAt`, the runtime snapshot decides on, and the auto-continue wake is armed on
+ * the one `goal-continuation` port, so the idle root's only alarm on it is the bound worker's deadline (R29 control). Advancing the
+ * port by DEFAULT_GOAL_WORKER_WAIT_MS fires that wake: the continuation pass reads `worker_wait_timeout`, and its one turn spends
+ * the token budget the owner set (`editPersistedGoal`), so the goal stops as budget_limited with nothing armed and no warning
+ * (R29 fault). The worker then reports with one inconclusive item: the ladder leaves it unsettled and buffers it for the owner.
+ * The goal no longer executes, so the terminal handoff wakes no turn: it posts its follow-up and then flushes the buffered item
+ * as the owner items message, with no root request (R35 fault); nothing reached the owner before the worker ended (R35 control).
+ */
+async function verifyGoalWorkerDeadlineAndQuietHandoff(world: HarnessWorld): Promise<void> {
+	const trace = world.trace;
+	const label = "r29-goal-worker-deadline";
+	const WAKE_OWNER = "goal-continuation";
+	const GOAL = "Keep the retry limit at 5.";
+	const REQUIREMENT_ID = "r29-limit-req";
+	const ITEM = "Whether another module reads the retry limit was not checked";
+	const UNSETTLED = `${ITEM} (missing: System One is not bound)`;
+	const TIMEOUT_TURN_TOKENS = 2_000;
+	const agentDir = `${world.agentDir}-${label}`;
+	const sessionManager = world.createSessionManager(agentDir);
+	const created = await world.createRootSession("root", {
+		agentDir,
+		sessionManager,
+		systemOneEnabled: false,
+		settings: {
+			memorySystem: "okf",
+			autoLearn: { enabled: false },
+			workerDelegation: {
+				modelPins: { default: { provider: HARNESS_PROVIDER, modelId: "worker-c", thinkingLevel: "off" } },
+			},
+		},
+	});
+	const session = created.session;
+	world.systemOne.enterPhase(label, {});
+	const maxStallTurns = created.settingsManager.getAutonomySettings().maxStallTurns;
+	expect(
+		world.timers.armedDelays(WAKE_OWNER),
+		`${label}: no goal-continuation alarm is armed before the dispatch`,
+	).toEqual([]);
+	expect(world.provider.getPendingStepNames("worker-c"), `${label}: no earlier worker-c step is left pending`).toEqual(
+		[],
+	);
+	const workerHeld = createBarrier();
+	const workerRelease = createBarrier();
+	world.provider.enqueue("worker-c", {
+		name: `${label}-held-report`,
+		check: () => workerHeld.release(),
+		gate: workerRelease.promise,
+		reply: {
+			content: [
+				{
+					type: "toolCall",
+					id: `${label}-report-1`,
+					name: "submit_report",
+					arguments: {
+						status: "completed",
+						summary: "The retry limit needs no change from this worker.",
+						requirements: [{ id: REQUIREMENT_ID, status: "not_applicable", note: "Nothing to change." }],
+						inconclusive: [ITEM],
+					},
+				},
+			],
+			stopReason: "toolUse",
+		},
+	});
+	world.provider.enqueue(
+		"root",
+		calls(`${label}-start`, [
+			{ id: `${label}-goal-1`, name: "goal", arguments: { action: "start", goalId: "r29-goal", userGoal: GOAL } },
+		]),
+		{
+			...calls(`${label}-requirement`, [
+				{
+					id: `${label}-goal-2`,
+					name: "goal",
+					arguments: { action: "add_requirement", requirementId: REQUIREMENT_ID, text: "MAX_RETRIES equals 5" },
+				},
+			]),
+			check: (request) => assertBatchOk(request, `${label}: the goal start`),
+		},
+		{
+			...calls(`${label}-dispatch`, [
+				{
+					id: `${label}-goal-3`,
+					name: "goal",
+					arguments: {
+						action: "dispatch_worker",
+						requirementId: REQUIREMENT_ID,
+						instructions: "Check the retry limit and report.",
+					},
+				},
+			]),
+			check: (request) => assertBatchOk(request, `${label}: the requirement`),
+		},
+		{
+			name: `${label}-dispatched`,
+			check: (request) => assertBatchOk(request, `${label}: the goal dispatch`),
+			reply: { content: [{ type: "text", text: "The worker is checking the limit." }] },
+		},
+	);
+	const warningMark = world.warnings.length;
+	await withDeadline(
+		trace,
+		`${label} dispatch turn`,
+		session.prompt("Set up the retry limit goal and dispatch its worker."),
+		90_000,
+	);
+	await withDeadline(trace, `${label} worker held`, workerHeld.promise, 90_000);
+	// R29 control: the idle root waits on the bound worker, and its one goal-continuation alarm is that worker's deadline.
+	const waiting = session.getGoalRuntimeSnapshot({ maxStallTurns });
+	const requirement = waiting.goalState?.requirements.find((entry) => entry.id === REQUIREMENT_ID);
+	const laneId = requirement?.boundLaneId;
+	const boundAt = requirement?.boundAt;
+	if (laneId === undefined || boundAt === undefined) {
+		throw new Error(`${label}: the dispatch bound no worker lane: ${JSON.stringify(requirement)}`);
+	}
+	const deadlineMs = Date.parse(boundAt) + DEFAULT_GOAL_WORKER_WAIT_MS;
+	expect(
+		{
+			action: waiting.continuation.action,
+			reasonCode: waiting.continuation.reasonCode,
+			resumeAt: waiting.continuation.resumeAt,
+		},
+		`${label}: the goal waits on its bound worker until boundAt plus the maximum wait`,
+	).toEqual({ action: "waiting", reasonCode: "worker_in_flight", resumeAt: new Date(deadlineMs).toISOString() });
+	const laneRecord = () => session.getLaneRecords().find((record) => record.laneId === laneId);
+	expect(
+		{ status: laneRecord()?.status, goalId: laneRecord()?.goalId },
+		`${label}: the bound lane runs for the goal`,
+	).toEqual({ status: "running", goalId: "r29-goal" });
+	const armed = world.timers.armedDelays(WAKE_OWNER);
+	const readAtMs = world.timers.port(WAKE_OWNER).now();
+	expect(armed.length, `${label}: the idle root holds exactly one goal-continuation alarm`).toBe(1);
+	expect(armed[0], `${label}: the alarm was armed after boundAt, at most the maximum wait`).toBeLessThanOrEqual(
+		DEFAULT_GOAL_WORKER_WAIT_MS,
+	);
+	expect(armed[0], `${label}: the alarm reaches the deadline`).toBeGreaterThanOrEqual(deadlineMs - readAtMs);
+	world.faultMatrix.witness("R29", { control: true });
+	// The owner's budget leaves room for exactly one timeout turn: the pass that turn belongs to stops at its own charge.
+	const tokensUsed = session.getGoalStateSnapshot()?.tokensUsed ?? 0;
+	const edited = editPersistedGoal(session, { userGoal: GOAL, tokenBudget: tokensUsed + TIMEOUT_TURN_TOKENS });
+	expect(edited.ok, `${label}: the owner's budget edit is applied`).toBe(true);
+	expect(
+		world.timers.armedDelays(WAKE_OWNER),
+		`${label}: the budget edit leaves the deadline alarm as it was`,
+	).toEqual(armed);
+	const timeoutRead = createBarrier();
+	const seen: { action?: string; reasonCode?: string } = {};
+	world.provider.enqueue("root", {
+		name: `${label}-timeout-pass`,
+		check: () => {
+			const decision = session.getGoalRuntimeSnapshot({ maxStallTurns }).continuation;
+			seen.action = decision.action;
+			seen.reasonCode = decision.reasonCode;
+			timeoutRead.release();
+		},
+		reply: {
+			content: [{ type: "text", text: "The worker is past its wait." }],
+			usage: { ...createEmptyUsage(), output: TIMEOUT_TURN_TOKENS, totalTokens: TIMEOUT_TURN_TOKENS },
+		},
+	});
+	const passMark = world.warnings.length;
+	expect(
+		world.timers.advance(WAKE_OWNER, DEFAULT_GOAL_WORKER_WAIT_MS),
+		`${label}: advancing the port by the maximum wait fires the deadline wake`,
+	).toBe(1);
+	await withDeadline(trace, `${label} timeout pass reached`, timeoutRead.promise, 90_000);
+	await withDeadline(trace, `${label} timeout pass settled`, session.waitForForegroundIdle(), 90_000);
+	expect(seen, `${label}: the woken pass runs on the worker wait timeout`).toEqual({
+		action: "continue",
+		reasonCode: "worker_wait_timeout",
+	});
+	expect(
+		world.provider.reached.filter((name) => name.startsWith(`root:${label}-timeout`)),
+		`${label}: the timeout pass submits one turn`,
+	).toEqual([`root:${label}-timeout-pass`]);
+	expect(session.getGoalStateSnapshot()?.status, `${label}: the turn's charge stops the goal`).toBe("budget_limited");
+	expect(world.timers.armedDelays(WAKE_OWNER), `${label}: the stopped goal arms nothing`).toEqual([]);
+	expect(world.warnings.slice(passMark), `${label}: the timeout pass warns nothing`).toEqual([]);
+	expect(laneRecord()?.status, `${label}: the held worker still runs after the goal stopped`).toBe("running");
+	world.faultMatrix.witness("R29", { control: false });
+	// R35: the worker ends under a goal that no longer executes.
+	const ownerPosts = () =>
+		sessionManager.getBranch().flatMap((entry) =>
+			entry.type === "custom_message" &&
+			(entry.customType === "background-worker-completion" || entry.customType === "owner_items")
+				? [
+						{
+							customType: entry.customType,
+							content: typeof entry.content === "string" ? entry.content : JSON.stringify(entry.content),
+						},
+					]
+				: [],
+		);
+	expect(ownerPosts(), `${label}: nothing reached the owner before the worker ended`).toEqual([]);
+	world.faultMatrix.witness("R35", { control: true });
+	const ownerItemsPosted = createBarrier();
+	const unsubscribe = session.subscribe((event) => {
+		if (
+			event.type === "message_end" &&
+			event.message.role === "custom" &&
+			event.message.customType === "owner_items"
+		) {
+			ownerItemsPosted.release();
+		}
+	});
+	const rootRequests = () => world.provider.requests.filter((request) => request.model.id === "root").length;
+	const rootRequestsBefore = rootRequests();
+	try {
+		workerRelease.release();
+		await withDeadline(trace, `${label} owner items posted`, ownerItemsPosted.promise, 90_000);
+	} finally {
+		unsubscribe();
+	}
+	const posted = ownerPosts();
+	expect(
+		posted.map((entry) => entry.customType),
+		`${label}: the handoff's follow-up comes first, then its flush posts the owner items`,
+	).toEqual(["background-worker-completion", "owner_items"]);
+	expect(posted[0]?.content, `${label}: the handoff wakes no turn`).toContain(
+		"Parent was not woken. Wait for explicit user input before reading a lane or starting more work.",
+	);
+	expect(posted[1]?.content, `${label}: the buffered unsettled item is posted to the owner`).toBe(
+		`Needs you: nothing the agents could check settled these. Answer before relying on them:\n- ${UNSETTLED}`,
+	);
+	expect(rootRequests(), `${label}: no root request follows the quiet handoff`).toBe(rootRequestsBefore);
+	const agentId = laneRecord()?.agentId;
+	if (agentId === undefined) throw new Error(`${label}: the bound lane carries no worker agent`);
+	expect(world.warnings.slice(warningMark), `${label}: the ladder's one unsettled item is the only warning`).toEqual([
+		`Worker ${agentId} could not settle: ${UNSETTLED}`,
+	]);
+	world.faultMatrix.witness("R35", { control: false });
+	const ready = await withDeadline(
+		trace,
+		`${label} worker idle after its report`,
+		session.backgroundLanes.waitForWorkerAgent(agentId, 60_000),
+		70_000,
+	);
+	expect(ready.timedOut, `${label}: the worker settles inside its wait`).toBe(false);
+	expect(ready.status, `${label}: the worker is idle once its resources are released`).toBe("idle");
+	expect(
+		world.timers.armedDelays(WAKE_OWNER),
+		`${label}: nothing is left armed on the goal-continuation port`,
+	).toEqual([]);
+	expect(await world.disposeSessionInBody(session), `${label}: the auxiliary root disposes cleanly`).toBeUndefined();
+	trace.mark("root", label);
 }

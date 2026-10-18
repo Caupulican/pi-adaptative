@@ -6,9 +6,18 @@ import { canonicalPathScopeIdentity } from "../../../../src/core/autonomy/path-s
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { WorkerLifecycle } from "../../../../src/core/delegation/worker-lifecycle.ts";
 import { WorkerRecoveryCoordinator } from "../../../../src/core/delegation/worker-recovery-coordinator.ts";
-import { applyGoalEvent, createGoalState, type GoalEvent } from "../../../../src/core/goals/goal-state.ts";
+import {
+	applyGoalEvent,
+	createGoalState,
+	type GoalEvent,
+	type GoalState,
+} from "../../../../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../../../../src/core/goals/session-goal-state.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
+import {
+	WIN32_TRANSIENT_RETRY_MAX_MS,
+	WIN32_TRANSIENT_RETRY_MIN_MS,
+} from "../../../../src/core/util/win32-transient-fs.ts";
 import { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import type { ScriptedRequest, ScriptStep } from "../scripted-provider.ts";
 import { calls, createBarrier, text } from "../scripted-provider.ts";
@@ -2023,8 +2032,30 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	});
 	expect(e12EpochRecord()?.epoch, "the epoch record was not written").toBe(epochBeforePersist);
 	const eventsBeforeFirst = e12EventLog();
+	// R47w: the first reconcile's epoch rename fails twice with a share-mode EPERM. Each failure arms one backoff on the
+	// session's worktree-sync clock, advanced as it is armed; the second arm is awaited before the first backoff fires.
+	world.io.failNext({
+		name: "e12-epoch-rename-transient",
+		kind: "rename",
+		matches: (operation) => operation.destination?.endsWith("epoch.json") === true,
+		code: "EPERM",
+		times: 2,
+	});
+	const e12Backoffs = world.timers.nextArmed("worktree-sync").then((firstMs) => {
+		const second = world.timers.nextArmed("worktree-sync");
+		world.timers.advance("worktree-sync", firstMs);
+		return second.then((secondMs) => {
+			world.timers.advance("worktree-sync", secondMs);
+			return [firstMs, secondMs];
+		});
+	});
 	// First reconcile, checked on its own against the raw persisted bytes.
 	await withDeadline(trace, "E12 first reconcile", session.prompt("Reconcile the landing record."), 120_000);
+	expect(
+		await withDeadline(trace, "E12 epoch rename backoffs", e12Backoffs, 5_000),
+		"the two transient renames armed the first two backoffs of the doubling ladder",
+	).toEqual([WIN32_TRANSIENT_RETRY_MIN_MS, Math.min(WIN32_TRANSIENT_RETRY_MIN_MS * 2, WIN32_TRANSIENT_RETRY_MAX_MS)]);
+	expect(world.timers.armedDelays("worktree-sync"), "the third rename landed, no backoff is left").toEqual([]);
 	const firstCheckpoint = {
 		epoch: e12Record("epoch.json"),
 		transaction: e12Record("landing-transaction.json"),
@@ -2042,6 +2073,8 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		e12EpochEvents(firstCheckpoint.events) - e12EpochEvents(eventsBeforeFirst),
 		"the first reconcile appends exactly one epoch_reconciled audit event",
 	).toBe(1);
+	// The epoch bytes checked above are the record the third rename attempt replaced after the two backoffs.
+	world.faultMatrix.witness("R47w", { control: false });
 	world.faultMatrix.witness("R44", { control: false });
 	// Second reconcile, checked against the first checkpoint's raw bytes: nothing persisted changes.
 	await withDeadline(trace, "E12 second reconcile", session.prompt("Reconcile the landing record again."), 120_000);
@@ -2079,6 +2112,11 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	});
 	expect(world.git.refSha("refs/heads/main"), "the second landing moved main").toBe(ambiguousTip);
 	expect(e12Transaction()?.stage, "the second transaction stays at main_moved").toBe("main_moved");
+	// A rename failure outside the share-mode codes (the EIO epoch fault) fails at once. Only the R47w witness advances
+	// the virtual worktree-sync clock, so a backoff armed here would have held the landing until its deadline: the
+	// landing returning is the evidence, and nothing is left armed.
+	expect(world.timers.armedDelays("worktree-sync"), "the second EIO epoch rename armed no backoff").toEqual([]);
+	world.faultMatrix.witness("R47w", { control: true });
 	expect(
 		world.git.run(["update-ref", "refs/heads/main", e12MainBefore ?? ""], HARNESS_PROJECT_CWD, {}).code,
 		"the external ref move succeeds",
@@ -2686,16 +2724,32 @@ function completedGoalOver(goalId: string, verified: boolean) {
 	return state;
 }
 
+/** The reopen warnings `world` holds after `from`. */
+function reopenWarnings(world: HarnessWorld, from: number): string[] {
+	return world.warnings.slice(from).filter((message) => message.includes("lack trusted evidence"));
+}
+
+/** A fresh root session over `goal`, persisted as its only goal state. */
+async function sessionOverGoal(world: HarnessWorld, goal: GoalState): Promise<AgentSession> {
+	const manager = SessionManager.inMemory(HARNESS_PROJECT_CWD);
+	appendGoalStateSnapshot(manager, goal);
+	const session = (await world.createRootSession("root", { sessionManager: manager })).session;
+	expect(session.getGoalStateSnapshot()?.status, "the persisted goal starts completed").toBe("completed");
+	return session;
+}
+
 /**
- * R38, System One on. A completed goal whose requirement lacks trusted evidence, with no acceptance override, is a
- * persisted state the completion gate never writes (an earlier version's file). The default loop's continuation
- * reopens it to active with one warning, through the reconcile its route evaluation starts with; that cycle runs no
- * turn. The control is the same continuation over the same goal with trusted evidence: it stays completed and
- * evaluates no route. Off mode binds no objective route evaluation, so it has nothing to run.
+ * R38 (System One on) and R38e (off). A completed goal whose requirement lacks trusted evidence, with no acceptance
+ * override, is a persisted state the completion gate never writes (an earlier version's file). One continuation pass
+ * reopens it to active with one warning and runs no turn: on, through the reconcile its route evaluation starts with;
+ * off, at the legacy continuation entry, with no System One request. The control is the same pass over the same goal
+ * with trusted evidence: it stays completed, asks System One nothing and runs no turn. R38l follows at the next phase
+ * boundary.
  */
 export async function runJourney3UnprovenCompletionPhase(world: HarnessWorld): Promise<void> {
-	if (!world.systemOne.enabled) return;
 	const trace = world.trace;
+	const on = world.systemOne.enabled;
+	const row = on ? "R38" : "R38e";
 	const phase = "r38-unproven-completion";
 	// The route evaluation asks JEV-004 once, for the reopened goal only.
 	world.systemOne.enterPhase(phase, {
@@ -2715,14 +2769,11 @@ export async function runJourney3UnprovenCompletionPhase(world: HarnessWorld): P
 	const routeAsked = () =>
 		world.systemOne.decoded.some((request) => request.phase === phase && "completion_plausible" in request.questions);
 	const providerRequests = () => world.provider.requests.length;
-	const reopenWarnings = (from: number) =>
-		world.warnings.slice(from).filter((message) => message.includes("lack trusted evidence"));
 
-	const unprovenManager = SessionManager.inMemory(HARNESS_PROJECT_CWD);
-	appendGoalStateSnapshot(unprovenManager, completedGoalOver("r38-unproven", false));
-	const unproven = (await world.createRootSession("root", { sessionManager: unprovenManager })).session;
-	expect(unproven.executionLoopMode, "the witness runs the default System One loop").toBe("objective_primary");
-	expect(unproven.getGoalStateSnapshot()?.status, "the persisted goal starts completed").toBe("completed");
+	const unproven = await sessionOverGoal(world, completedGoalOver("r38-unproven", false));
+	expect(unproven.executionLoopMode, "the witness runs the mode's default loop").toBe(
+		on ? "objective_primary" : "legacy_goal",
+	);
 	const unprovenWarnings = world.warnings.length;
 	const unprovenRequests = providerRequests();
 	const reopened = await withDeadline(trace, "R38 reopen", unproven.continueGoalOnce({ maxStallTurns: 3 }));
@@ -2730,25 +2781,23 @@ export async function runJourney3UnprovenCompletionPhase(world: HarnessWorld): P
 		{
 			submitted: reopened.submitted,
 			status: unproven.getGoalStateSnapshot()?.status,
-			warnings: reopenWarnings(unprovenWarnings),
+			warnings: reopenWarnings(world, unprovenWarnings),
 			routeEvaluated: routeAsked(),
 			turns: providerRequests() - unprovenRequests,
 		},
-		"the unproven completion reopens to active with one warning, through one route evaluation, and runs no turn",
+		"the unproven completion reopens to active with one warning, evaluating a route only on, and runs no turn",
 	).toEqual({
 		submitted: false,
 		status: "active",
 		warnings: [
 			"Goal r38-unproven completion not supported: requirement(s) req-limit lack trusted evidence; the goal stays active to gather it.",
 		],
-		routeEvaluated: true,
+		routeEvaluated: on,
 		turns: 0,
 	});
-	world.faultMatrix.witness("R38", { control: false });
+	world.faultMatrix.witness(row, { control: false });
 
-	const provenManager = SessionManager.inMemory(HARNESS_PROJECT_CWD);
-	appendGoalStateSnapshot(provenManager, completedGoalOver("r38-proven", true));
-	const proven = (await world.createRootSession("root", { sessionManager: provenManager })).session;
+	const proven = await sessionOverGoal(world, completedGoalOver("r38-proven", true));
 	const provenWarnings = world.warnings.length;
 	const provenAsked = askedInPhase();
 	const provenRequests = providerRequests();
@@ -2757,15 +2806,121 @@ export async function runJourney3UnprovenCompletionPhase(world: HarnessWorld): P
 		{
 			submitted: kept.submitted,
 			status: proven.getGoalStateSnapshot()?.status,
-			warnings: reopenWarnings(provenWarnings),
+			warnings: reopenWarnings(world, provenWarnings),
 			asked: askedInPhase() - provenAsked,
 			turns: providerRequests() - provenRequests,
 		},
 		"a completion its trusted evidence supports stays completed, evaluates no route and runs no turn",
 	).toEqual({ submitted: false, status: "completed", warnings: [], asked: 0, turns: 0 });
-	world.faultMatrix.witness("R38", { control: true });
+	world.faultMatrix.witness(row, { control: true });
 
 	expect(await world.disposeSessionInBody(unproven), "the reopened goal's session disposes").toBeUndefined();
 	expect(await world.disposeSessionInBody(proven), "the completed goal's session disposes").toBeUndefined();
 	trace.mark("root", "r38.unproven-completion");
+	await runJourney3UnprovenLoopPhase(world);
+}
+
+/**
+ * R38l, both modes. The continuation loop over the same unsupported completion (`/goal-continue`) does not stop at the
+ * completed status: it reopens the goal with one warning and runs the reopened goal's work, one root turn. On, the
+ * primary loop's guard lets the goal through, the first cycle reopens it and the next one admits the objective (JEV-001
+ * to JEV-003), routes it and runs that turn, judged as the journey 2 objective cycle; off, the legacy entry reopens it
+ * and the native loop runs the turn. The control is the loop over a completion its trusted evidence supports: it stops
+ * at once, completed, with no System One request and no turn.
+ */
+async function runJourney3UnprovenLoopPhase(world: HarnessWorld): Promise<void> {
+	const trace = world.trace;
+	const phase = "r38-loop-reopen";
+	world.systemOne.enterPhase(phase, {
+		objective_coherent: { kind: "noul", probability: 0.97 },
+		ambiguity_severity: { kind: "score", level: 0, confidence: 1 },
+		missing_information: { kind: "noul", probability: 0.02 },
+		acceptance_complete: { kind: "noul", probability: 0.97 },
+		grounding_sufficient: { kind: "noul", probability: 0.97 },
+		work_remaining: { kind: "noul", probability: 0.97 },
+		missing_work_class: { kind: "choice", choice: "implement", confidence: 0.97 },
+		evidence_sufficient: { kind: "noul", probability: 0.02 },
+		semantic_progress: { kind: "score", level: 1, confidence: 0.97 },
+		strategy_repetition: { kind: "noul", probability: 0.02 },
+		context_stale: { kind: "noul", probability: 0.02 },
+		independent_worker_required: { kind: "noul", probability: 0.02 },
+		capability_escalation_required: { kind: "noul", probability: 0.02 },
+		capability_gap_suspected: { kind: "noul", probability: 0.02 },
+		completion_plausible: { kind: "noul", probability: 0.02 },
+		step_relevant: { kind: "noul", probability: 0.97 },
+		evidence_sufficient_to_act: { kind: "noul", probability: 0.97 },
+		unsupported_assumption_present: { kind: "noul", probability: 0.02 },
+		route: { kind: "choice", choice: "inspect", confidence: 0.97 },
+		action_accomplished_step: { kind: "noul", probability: 0.02 },
+		conclusions_supported: { kind: "noul", probability: 0.97 },
+		scope_violation: { kind: "noul", probability: 0.02 },
+		unrelated_behavior_change: { kind: "noul", probability: 0.02 },
+		replan_required: { kind: "noul", probability: 0.02 },
+		next_status: { kind: "choice", choice: "continue", confidence: 0.97 },
+	});
+	const askedInPhase = () => world.systemOne.decoded.filter((request) => request.phase === phase).length;
+
+	const unproven = await sessionOverGoal(world, completedGoalOver("r38-loop", false));
+	const unprovenWarnings = world.warnings.length;
+	const unprovenReached = world.provider.reached.length;
+	world.provider.enqueue("root", text("r38-loop-root", "The reopened goal gathers its evidence."));
+	const reopened = await withDeadline(
+		trace,
+		"R38l reopen loop",
+		unproven.continueGoalLoop({ maxStallTurns: 3, maxTurns: 1 }),
+		120_000,
+	);
+	expect(
+		{
+			stopReason: reopened.stopReason,
+			turnsSubmitted: reopened.turnsSubmitted,
+			status: unproven.getGoalStateSnapshot()?.status,
+			warnings: reopenWarnings(world, unprovenWarnings),
+			reached: world.provider.reached.slice(unprovenReached),
+		},
+		"the loop reopens the unproven completion with one warning and runs the reopened goal's one root turn",
+	).toEqual({
+		stopReason: "max_turns_reached",
+		turnsSubmitted: 1,
+		status: "active",
+		warnings: [
+			"Goal r38-loop completion not supported: requirement(s) req-limit lack trusted evidence; the goal stays active to gather it.",
+		],
+		reached: ["root:r38-loop-root"],
+	});
+	world.faultMatrix.witness("R38l", { control: false });
+
+	const proven = await sessionOverGoal(world, completedGoalOver("r38-loop-proven", true));
+	const provenWarnings = world.warnings.length;
+	const provenAsked = askedInPhase();
+	const provenRequests = world.provider.requests.length;
+	const kept = await withDeadline(
+		trace,
+		"R38l kept loop",
+		proven.continueGoalLoop({ maxStallTurns: 3, maxTurns: 1 }),
+		120_000,
+	);
+	expect(
+		{
+			stopReason: kept.stopReason,
+			turnsSubmitted: kept.turnsSubmitted,
+			status: proven.getGoalStateSnapshot()?.status,
+			warnings: reopenWarnings(world, provenWarnings),
+			asked: askedInPhase() - provenAsked,
+			turns: world.provider.requests.length - provenRequests,
+		},
+		"the loop over a completion its trusted evidence supports stops at once, completed, asking nothing",
+	).toEqual({
+		stopReason: "continuation_not_allowed",
+		turnsSubmitted: 0,
+		status: "completed",
+		warnings: [],
+		asked: 0,
+		turns: 0,
+	});
+	world.faultMatrix.witness("R38l", { control: true });
+
+	expect(await world.disposeSessionInBody(unproven), "the reopened loop's session disposes").toBeUndefined();
+	expect(await world.disposeSessionInBody(proven), "the completed loop's session disposes").toBeUndefined();
+	trace.mark("root", "r38.loop-reopen");
 }

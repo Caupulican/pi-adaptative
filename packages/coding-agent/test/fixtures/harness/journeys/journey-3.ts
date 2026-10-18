@@ -23,8 +23,10 @@ export async function runJourney3(): Promise<void> {
 				// The recovered session in the continuous-chat phase never writes its own file, so the summary call's usage report is kept as recovery evidence.
 				/^Usage handoff: \d+ usage report\(s\) cannot be recorded \(session file never written\); kept as unmatched recovery evidence at .+$/,
 				/^Memory subsystem init failed: Legacy memory import is incomplete and will retry: 2026-01-01T00-00-00-000Z_headless-legacy\.jsonl: the file cannot be read: .+$/,
-				// R38 (System One on): the persisted unproven completion's one reopen warning, exact text.
+				// R38 (on) and R38e (off): the persisted unproven completion's one reopen warning, exact text.
 				/^Goal r38-unproven completion not supported: requirement\(s\) req-limit lack trusted evidence; the goal stays active to gather it\.$/,
+				// R38l (both modes): the continuation loop's one reopen warning, exact text.
+				/^Goal r38-loop completion not supported: requirement\(s\) req-limit lack trusted evidence; the goal stays active to gather it\.$/,
 			],
 			files: {
 				[projectPath("src", "limits.ts")]: ORIGINAL_LIMITS,

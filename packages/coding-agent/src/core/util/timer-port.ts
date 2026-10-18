@@ -37,6 +37,8 @@ export {
  * - `compaction-retry`: the backoff between attempts of a compaction whose summarizer request failed transiently.
  * - `worker-provider-retry`: the backoff between a worker's transiently failed provider request and its retry.
  * - `branch-summary-retry`: the backoff between attempts of a tree navigation's branch summary request.
+ * - `worktree-sync`: the backoff between rename attempts of a worktree store record replacement (epoch, landing
+ *   transaction, lane registration) whose rename failed transiently.
  */
 export type TimerOwner =
 	| "write-reservation"
@@ -52,7 +54,8 @@ export type TimerOwner =
 	| "worker-wait"
 	| "compaction-retry"
 	| "worker-provider-retry"
-	| "branch-summary-retry";
+	| "branch-summary-retry"
+	| "worktree-sync";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */
 export interface TimerSource {
