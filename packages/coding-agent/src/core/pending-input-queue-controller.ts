@@ -703,13 +703,7 @@ export class PendingInputQueueController {
 	reconcileContext(): void {
 		for (const entry of [...this._steering, ...this._followUp]) {
 			if (entry.held || this._contextCurrent(entry)) continue;
-			if (entry.message) {
-				if (!this.deps.agent.withdrawQueuedMessage(entry.message)) continue;
-				this._retractEcho(entry);
-				entry.message = undefined;
-				entry.text = entry.original.text;
-				entry.images = entry.original.images;
-			}
+			if (entry.message && !this._takeBackFromAgent(entry)) continue;
 			this._hold(entry, "context_changed");
 		}
 		this._admitInOrder();
@@ -723,14 +717,19 @@ export class PendingInputQueueController {
 	 */
 	holdUndelivered(): void {
 		for (const entry of [...this._steering, ...this._followUp]) {
-			if (entry.held || !entry.message) continue;
-			if (!this.deps.agent.withdrawQueuedMessage(entry.message)) continue;
-			this._retractEcho(entry);
-			entry.message = undefined;
-			entry.text = entry.original.text;
-			entry.images = entry.original.images;
+			if (entry.held || !entry.message || !this._takeBackFromAgent(entry)) continue;
 			this._hold(entry, "undelivered");
 		}
+	}
+
+	/** Withdraws the entry's exact message from the agent's queue and returns the input to its submitted form; false when the agent no longer holds it. */
+	private _takeBackFromAgent(entry: PendingEntry): boolean {
+		if (!entry.message || !this.deps.agent.withdrawQueuedMessage(entry.message)) return false;
+		this._retractEcho(entry);
+		entry.message = undefined;
+		entry.text = entry.original.text;
+		entry.images = entry.original.images;
+		return true;
 	}
 
 	private _contextCurrent(entry: PendingEntry): boolean {
