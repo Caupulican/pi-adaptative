@@ -1333,7 +1333,10 @@ export class AgentSession {
 			getGoalId: () => this._goals.getOwnershipGoalId(),
 			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
 			isForegroundWait: (tool, args) => this.getToolDefinition(tool)?.foregroundWait?.(args as never) === true,
-			getArtifactStore: () => this._getToolArtifactStore(),
+			// An artifact handle in a task result is a promise that artifact_retrieve can resolve it: no store, no handle, while that
+			// tool is outside the session's allowed surface (the same rule as grep, find and webfetch).
+			getArtifactStore: () =>
+				this._runtimeBuilder.getRegisteredTool("artifact_retrieve") ? this._getToolArtifactStore() : undefined,
 			getMutationScope: () => this.mutationScope,
 			getMutationAnnouncer: () => this._shellSessionKey,
 			notifyTerminal: (records, wakeParent) => this._terminalHandoffs.notifyTools(records, wakeParent),

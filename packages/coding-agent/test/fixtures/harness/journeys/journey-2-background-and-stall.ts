@@ -5,6 +5,7 @@ import {
 	type BackgroundToolTaskRecord,
 	loadBackgroundToolTaskRecordsNewestFirst,
 } from "../../../../src/core/background-tool-task-controller.ts";
+import { DEFAULT_ACTIVE_TOOL_NAMES } from "../../../../src/core/default-tool-surface.ts";
 import { DEFAULT_GOAL_WORKER_WAIT_MS } from "../../../../src/core/goals/goal-continuation-defaults.ts";
 import { buildObjectiveRoutePrompt } from "../../../../src/core/goals/goal-continuation-prompt.ts";
 import { editPersistedGoal } from "../../../../src/core/goals/goal-lifecycle.ts";
@@ -229,6 +230,8 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 	if (!world.systemOne.enabled) {
 		const r40e = await world.createRootSession("root", {
 			sessionManager: world.createSessionManager(),
+			// The world's allow-list leaves artifact_retrieve out, and a task result names no artifact its model cannot read.
+			settings: { defaultTools: [...DEFAULT_ACTIVE_TOOL_NAMES, "worktree_sync", "artifact_retrieve"] },
 			maxRetainedTerminalTasks: 1,
 		});
 		const r40eSession = r40e.session;
