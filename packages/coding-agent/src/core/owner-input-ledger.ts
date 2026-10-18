@@ -1,7 +1,7 @@
 import { type OwnerInputId, ownerInputIdOf } from "../kernel/owner-input-stamp.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { uuidv7 } from "../kernel/uuid.ts";
-import { runReleaseSteps } from "./util/resource-release.ts";
+import { releaseFailureCause } from "./util/resource-release.ts";
 
 export { type OwnerInputId, ownerInputIdOf, stampOwnerInput } from "../kernel/owner-input-stamp.ts";
 
@@ -84,6 +84,16 @@ export class OwnerInputLedger {
 	/** Every input that has not reached a terminal; a held input stays until the owner takes it back. */
 	private readonly records = new Map<OwnerInputId, InputRecord>();
 	private readonly deliveredListeners = new Set<(delivery: OwnerInputDelivery) => void>();
+	private readonly reportFailure: (message: string) => void;
+
+	/**
+	 * `reportFailure` receives, as one warning, the effects that failed after an input reached its end or its Delivered commit.
+	 * That commit is already made (the user entry is persisted, or the input has ended), so a failed effect never unwinds the
+	 * caller that made it: not the session write, and not the release steps that follow an end.
+	 */
+	constructor(reportFailure: (message: string) => void) {
+		this.reportFailure = reportFailure;
+	}
 
 	/**
 	 * A new input was accepted from `source`: its identity, minted now. It is unique across processes, because it
@@ -131,11 +141,10 @@ export class OwnerInputLedger {
 		const firstEnd = record.state !== "held";
 		this.transition(id, record, end.state);
 		record.onDelivered.length = 0;
-		// Every effect runs whatever an earlier one threw; their failures surface together.
 		if (firstEnd)
-			runReleaseSteps(
+			this.runEffects(
 				record.onUndelivered.splice(0).map((effect) => () => effect(end)),
-				`Owner input ${id} ended ${end.state}; some of its effects failed.`,
+				`Owner input ${id} ended ${end.state}`,
 			);
 		return true;
 	}
@@ -173,11 +182,26 @@ export class OwnerInputLedger {
 		this.transition(id, record, "delivered");
 		record.onUndelivered.length = 0;
 		const delivery: OwnerInputDelivery = { id, message, entryId };
-		// Every effect and listener runs whatever an earlier one threw; their failures surface together, after the commit.
-		runReleaseSteps(
+		this.runEffects(
 			[...record.onDelivered.splice(0), ...this.deliveredListeners].map((effect) => () => effect(delivery)),
-			`Owner input ${id} was delivered; some of its effects failed.`,
+			`Owner input ${id} was delivered`,
 		);
+	}
+
+	/** Every effect runs whatever an earlier one threw; their failures are reported together, never thrown. */
+	private runEffects(effects: readonly (() => void)[], committed: string): void {
+		const failures: string[] = [];
+		for (const effect of effects) {
+			try {
+				effect();
+			} catch (error) {
+				failures.push(releaseFailureCause(error));
+			}
+		}
+		if (failures.length > 0)
+			this.reportFailure(
+				`${committed}, but ${failures.length} of its ${effects.length} effects failed: ${failures.join("; ")}`,
+			);
 	}
 
 	private openRecord(id: OwnerInputId): InputRecord {

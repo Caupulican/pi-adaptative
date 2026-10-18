@@ -116,8 +116,8 @@ export interface PromptSubmissionControllerDeps {
 	readonly localPrefixWarm: Pick<LocalPrefixWarmController, "cancel">;
 	readonly goals: Pick<
 		GoalSessionController,
-		| "resumeSystemBlockedGoal"
-		| "startOwnerChatGoal"
+		| "previewOwnerPromptGoal"
+		| "applyDeliveredOwnerPrompt"
 		| "beginExecution"
 		| "setStartAuthority"
 		| "endQueuedOwnerChatGoalExecution"
@@ -568,7 +568,9 @@ export class PromptSubmissionController {
 		// from what the prompt memory block admitted (see `takeAdmittedRecall`), not from this page.
 		let injectedRecall = "";
 		let recallQuery = "";
-		let admittedGoalId = options?.goalExecutionId;
+		// The goal this execution is admitted to from its start (a continuation's); the owner's own prompt binds its goal when
+		// it is delivered.
+		const admittedGoalId = options?.goalExecutionId;
 		let goalToolStartAuthority: ExplicitGoalStartAuthority | undefined;
 		let userRequest = text;
 		// The judgment this queued owner input's words already received, if they did: they are never judged again.
@@ -772,13 +774,15 @@ export class PromptSubmissionController {
 			}
 			this.foregroundPromptLeaseValue = submission.lease;
 
-			if (!options?.internalContextType) {
-				// The owner's own prompt: a system-blocked goal always resumes here and its automatic
-				// recovery allowance restarts (goal-state.ts `resume_goal` without source "system").
-				const recoveredGoalId = this.deps.goals.resumeSystemBlockedGoal(undefined, "owner");
-				const startedGoalId = this.deps.goals.startOwnerChatGoal(expandedText, this.deps.agent.state.messages);
-				admittedGoalId = startedGoalId ?? recoveredGoalId ?? admittedGoalId;
-				if (admittedGoalId && this.deps.getAdaptiveReadiness()) {
+			if (lifecycle.input) {
+				// The owner's own prompt resumes a system-stopped goal or starts an explicit chat goal when it is delivered (its
+				// user entry persisted), never before: a prompt that ends undelivered changes no goal, and its run works on that
+				// goal only from its delivery. The goal it would own is read now, for the readiness that goal work needs.
+				const ownerGoalId = this.deps.goals.previewOwnerPromptGoal(expandedText, this.deps.agent.state.messages);
+				this.deps.ownerInputs.whenDelivered(lifecycle.input.inputId, () =>
+					this.deps.goals.applyDeliveredOwnerPrompt(expandedText, this.deps.agent.state.messages),
+				);
+				if ((ownerGoalId ?? admittedGoalId) && this.deps.getAdaptiveReadiness()) {
 					this.deps.getAdaptiveReadiness()!.assertReady({ adaptiveEnabled: true });
 				}
 			}

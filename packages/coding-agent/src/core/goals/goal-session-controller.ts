@@ -348,11 +348,23 @@ export class GoalSessionController {
 		requiredPrefix?: string,
 	): string | undefined {
 		const current = this.getState();
-		if (
-			!current ||
-			!(source === "owner" ? isSystemStoppedGoal(current) : isSystemBlockedGoal(current)) ||
-			!current.blockedReason
-		)
+		const resumed = current && this.planSystemResume(current, now, source, requiredPrefix);
+		if (!current || !resumed) return undefined;
+		this.saveState(resumed, getGoalStateRevision(current));
+		if (source === "owner") {
+			this.deps.getObjectiveExecutionController?.()?.resetVerificationRecovery(goalObjectiveId(current.goalId));
+		}
+		return resumed.goalId;
+	}
+
+	/** The state `current` resumes to from its system stop, read without saving; undefined when no such resume applies. */
+	private planSystemResume(
+		current: GoalState,
+		now: string,
+		source: "system" | "owner",
+		requiredPrefix?: string,
+	): GoalState | undefined {
+		if (!(source === "owner" ? isSystemStoppedGoal(current) : isSystemBlockedGoal(current)) || !current.blockedReason)
 			return undefined;
 
 		const prefix = getAutoResumableReasonPrefix(current.blockedReason);
@@ -361,12 +373,7 @@ export class GoalSessionController {
 		if (source === "system" && (!prefix || !this.isAutomaticRecoveryAllowed(current, prefix))) return undefined;
 
 		const resumed = resumeGoal(current, now, source);
-		if (!resumed.ok) return undefined;
-		this.saveState(resumed.state, getGoalStateRevision(current));
-		if (source === "owner") {
-			this.deps.getObjectiveExecutionController?.()?.resetVerificationRecovery(goalObjectiveId(current.goalId));
-		}
-		return resumed.state.goalId;
+		return resumed.ok ? resumed.state : undefined;
 	}
 
 	private isAutomaticRecoveryAllowed(current: GoalState, prefix: string): boolean {
@@ -419,15 +426,63 @@ export class GoalSessionController {
 		const goalId = this.startOwnerChatGoal(queued.text, messages);
 		if (!goalId) return;
 		this.setStartAuthority(queued.authority);
-		// A foreground lease may already own the goal just persisted above. Its caller retains
-		// responsibility for ending it; a queued message must not create or close a second lease.
-		if (this.getExecutionGoalId() === goalId) return;
+		// The run that delivered the message may hold a foreground lease: that lease works on the goal from here, and its
+		// caller still ends it. A queued message never opens a second lease beside it, nor closes it.
+		const held = this.executionLease;
+		if (held) {
+			this.bindExecution(held, goalId);
+			return;
+		}
 		const lease = this.beginExecution(goalId);
 		if (!lease) {
 			this.setStartAuthority(undefined);
 			return;
 		}
 		this.queuedOwnerChatExecutionLease = lease;
+	}
+
+	/**
+	 * The goal the owner's own prompt would resume (a system-stopped goal) or start (an explicit chat goal) if it were
+	 * delivered now, read without saving anything: the prompt changes the goal only when it is delivered (see
+	 * {@link applyDeliveredOwnerPrompt}). A token-budget phrase that cannot be parsed throws here, before the prompt runs.
+	 */
+	previewOwnerPromptGoal(text: string, messages: readonly { role: string; content?: unknown }[]): string | undefined {
+		const now = new Date().toISOString();
+		const current = this.getState();
+		const resumed = current && this.planSystemResume(current, now, "owner");
+		const admission = this.planExplicitChatGoal(resumed ?? current, text, now, priorUserPromptText(messages, text));
+		return resumed?.goalId ?? (admission.status === "started" ? admission.state.goalId : undefined);
+	}
+
+	/**
+	 * The owner's own prompt was delivered (its user entry persisted): a system-stopped goal resumes, and its automatic
+	 * recovery allowance restarts (goal-state.ts `resume_goal` without source "system"), or an explicit chat goal starts,
+	 * each against the goal state as it is now. The run that delivered the prompt works on that goal from here.
+	 */
+	applyDeliveredOwnerPrompt(text: string, messages: readonly { role: string; content?: unknown }[]): void {
+		const recoveredGoalId = this.resumeSystemBlockedGoal(undefined, "owner");
+		const goalId = this.startOwnerChatGoal(text, messages) ?? recoveredGoalId;
+		const lease = this.executionLease;
+		if (goalId !== undefined && lease) this.bindExecution(lease, goalId);
+	}
+
+	/**
+	 * The run holding `lease` works on `goalId` from here, when it is the session's active goal. A lease that owns it already
+	 * is left as it is (an adopting lease adopts it here). Any other lease owns no goal or a goal that is no longer the
+	 * session's: what it buffered for that lost goal is settled first, under the rules that goal's usage follows, and it is
+	 * bound to `goalId`. A lease that owned no goal keeps the active time it already accounts from.
+	 */
+	private bindExecution(lease: MutableGoalExecutionLease, goalId: string): void {
+		const state = this.getState();
+		if (state?.goalId !== goalId || !isGoalExecutionActive(state.status)) return;
+		this.resolveExecutionState(lease);
+		if (lease.goalId === goalId) return;
+		if (lease.goalId !== undefined) {
+			this.flushPendingExecutionUsage(lease);
+			lease.lastAccountedAtMs = undefined;
+		}
+		lease.lastAccountedAtMs ??= Date.now();
+		lease.goalId = goalId;
 	}
 
 	endQueuedOwnerChatGoalExecution(): void {
@@ -439,10 +494,22 @@ export class GoalSessionController {
 	}
 
 	admitExplicitChatGoal(text: string, now?: string, priorUserText?: string): ChatGoalAdmission {
-		const admittedAt = now ?? new Date().toISOString();
+		const current = this.getState();
+		const admission = this.planExplicitChatGoal(current, text, now ?? new Date().toISOString(), priorUserText);
+		if (admission.status === "started")
+			this.saveState(admission.state, current ? getGoalStateRevision(current) : undefined);
+		return admission;
+	}
+
+	/** What `text` does as an explicit chat goal against `current`, read without saving anything. */
+	private planExplicitChatGoal(
+		current: GoalState | undefined,
+		text: string,
+		admittedAt: string,
+		priorUserText: string | undefined,
+	): ChatGoalAdmission {
 		const parsed = parseExplicitChatGoal(text, priorUserText);
 		if (!parsed) return { status: "not_explicit" };
-		const current = this.getState();
 		if (current && isGoalUnfinishedStatus(current.status)) {
 			return { status: "unfinished_goal_exists", state: current };
 		}
@@ -461,7 +528,6 @@ export class GoalSessionController {
 			admittedAt,
 		);
 		if (!result.ok) throw new Error(result.error);
-		this.saveState(result.state, current ? getGoalStateRevision(current) : undefined);
 		return { status: "started", state: result.state };
 	}
 

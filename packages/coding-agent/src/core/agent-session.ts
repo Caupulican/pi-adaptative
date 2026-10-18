@@ -403,7 +403,7 @@ export class AgentSession {
 	 * in the constructor body since it depends on `_skillVault` and `_goals` being ready. */
 	private readonly _pendingQueue: PendingInputQueueController;
 	/** Owner-input identities (minted at acceptance) and the one Delivered point: the input's user entry persisted. */
-	private readonly _ownerInputs = new OwnerInputLedger();
+	private readonly _ownerInputs = new OwnerInputLedger((message) => this._foregroundLifecycle.warn(message));
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/**
 	 * The last tool set requested via setActiveToolsByName BEFORE model-capability filtering, so

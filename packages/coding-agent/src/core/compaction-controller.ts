@@ -911,6 +911,10 @@ export class CompactionController {
 
 	async admitProviderRequest(input: ProviderRequestCompactionInput): Promise<ProviderRequestCompactionDecision> {
 		this.onLaneBusy();
+		// What this request's send would commit (a cheap routed turn's prompt) is committed first, whatever the compaction
+		// settings: every admission below and after this one (the goal budget's, which reads the goal a delivered owner
+		// prompt resumed) sees the prompt delivered, and under ICM a compaction's scope starts at the turn's persisted start.
+		this.deps.commitPendingTurnMessages?.();
 		if (this.isContinuousChatActive()) {
 			const turn = this.deps.getContinuousChatTurn?.();
 			this.turnRequestFloor = turn === undefined ? undefined : { turn, tokens: input.nonCompactableTokens };
@@ -920,9 +924,6 @@ export class CompactionController {
 		const model = this.deps.getModel();
 		const contextWindow = model?.contextWindow ?? 0;
 		if (!model || contextWindow <= 0) return { action: "send" };
-		// Any compaction admitted below reads the persisted turn, and under ICM its scope starts at the turn's persisted
-		// start: what this request's send would commit (a cheap routed turn's prompt) is committed first.
-		if (settings.enabled) this.deps.commitPendingTurnMessages?.();
 		// Held tool results and owner messages alike reach the lane through here: a summary prepared
 		// while it idled is used or let go now, before any other compaction decision.
 		if (
