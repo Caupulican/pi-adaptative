@@ -460,7 +460,8 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		name: `${label}-turn-a`,
 		reply: { content: [{ type: "text", text: longReply }] },
 	});
-	world.systemOne.enterPhase(`${label}-turn-a`, ICM_INTAKE_JUDGMENTS);
+	// Turn A uses no tool, so its owner words are settled by the next submission: the carries_0 screen and the owner-policy classification are scripted on turn B.
+	world.systemOne.enterPhase(`${label}-turn-a`, {});
 	await withDeadline(trace, "R10s turn A", root.session.prompt("Record the R10s spacing reply."));
 	await withDeadline(
 		trace,
@@ -515,7 +516,10 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		}
 	});
 	let settled = false;
-	world.systemOne.enterPhase(`${label}-turn-b`, ICM_INTAKE_JUDGMENTS);
+	world.systemOne.enterPhase(`${label}-turn-b`, {
+		...ICM_INTAKE_JUDGMENTS,
+		carries_0: { kind: "noul", probability: 0.02 },
+	});
 	const turnB = root.session.prompt("Answer after the R10s retries.").finally(() => {
 		settled = true;
 	});
