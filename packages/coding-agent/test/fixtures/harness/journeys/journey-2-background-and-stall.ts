@@ -232,8 +232,11 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			maxRetainedTerminalTasks: 1,
 		});
 		const r40eSession = r40e.session;
+		// 1,300 distinct lines of 30 bytes: over the controller's inline caps (32 KiB, 400 lines) and under the bash tool's own
+		// (50 KiB, 2,000 lines), so the controller sees the whole output and no reducer finds a repeat to collapse.
+		const hex = (value: number): string => ((value * 2654435761) >>> 0).toString(16).padStart(8, "0");
 		const bigOutput = (marker: string): string =>
-			`${marker}-HEAD\n${"r40e filler line of the oversized output\n".repeat(1_200)}${marker}-TAIL\n`;
+			`${marker}-HEAD\n${Array.from({ length: 1_300 }, (_, line) => `${String(line).padStart(4, "0")} ${hex(line)}${hex(line + 7)}${hex(line + 13)}\n`).join("")}${marker}-TAIL\n`;
 		const r40eIds: { first?: string; second?: string } = {};
 		const r40eArtifacts: { first?: string; second?: string; retrieved?: string } = {};
 		const r40eSeen: { evictedWait?: string; evictedDetails?: unknown; list?: string; retained?: unknown } = {};
