@@ -2,6 +2,7 @@ import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import type { Agent } from "../kernel/agent.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import type { ExtensionRunner, SendUserMessageOrigin } from "./extensions/index.ts";
+import type { ForegroundInputPort, ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { ExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
 import {
@@ -233,7 +234,7 @@ export function createSteerAwareWait(
  */
 export const STEER_DECISION_DEADLINE_MS = 10_000;
 
-export class PendingInputQueueController {
+export class PendingInputQueueController implements ForegroundInputPort {
 	/** Submission order per kind; an entry admits only after every earlier entry of its kind. */
 	private _steering: PendingEntry[] = [];
 	private _followUp: PendingEntry[] = [];
@@ -253,6 +254,11 @@ export class PendingInputQueueController {
 	private _nextEntryId = 1;
 	/** Set at disposal: nothing is handed to the agent afterwards. */
 	private _closed = false;
+	/**
+	 * The foreground owner (`bindForeground`): decided input is handed to the agent's queue only while it reports a run that
+	 * consumes that queue, and is otherwise left admitted for it to hand to the next run, or to deliver itself.
+	 */
+	private _foreground?: Pick<ForegroundRecoveryController, "hasLiveConsumer" | "noteInputWaiting">;
 	private readonly _steerListeners = new Set<() => void>();
 	private readonly _steerDecisionListeners = new Set<() => void>();
 	private readonly deps: PendingInputQueueDeps;
@@ -261,6 +267,14 @@ export class PendingInputQueueController {
 		this.deps = deps;
 		activeControllers.add(this);
 		deps.ownerInputs.onDelivered(({ id }) => this._delivered(id));
+	}
+
+	/** The foreground owner hands this queue's admitted input to runs from here on (`ForegroundRecoveryController.bindInput`). */
+	bindForeground(
+		foreground: Pick<ForegroundRecoveryController, "hasLiveConsumer" | "noteInputWaiting" | "bindInput">,
+	): void {
+		this._foreground = foreground;
+		foreground.bindInput(this);
 	}
 
 	matchesSessionId(sessionId: string): boolean {
@@ -508,17 +522,20 @@ export class PendingInputQueueController {
 	}
 
 	/**
-	 * Re-create inputs recorded by an earlier process as held pending inputs, in their recorded order:
-	 * visible, takeable and editable, never handed to the agent on their own. No change is reported; the
-	 * record they came from is already the durable truth.
+	 * Re-create inputs recorded by an earlier process as held pending inputs, in their recorded order and under their
+	 * recorded identities: visible, takeable and editable, never handed to the agent on their own. The record they came
+	 * from is the durable truth, so no change is reported unless `recordChanged`: the caller left out inputs the record
+	 * still named, and the record is written once, now, without them.
 	 */
 	restore(
 		inputs: ReadonlyArray<{
+			id?: string;
 			kind: QueuedInputKind;
 			text: string;
 			images?: ImageContent[];
 			origin?: QueuedInputOrigin;
 		}>,
+		recordChanged = false,
 	): void {
 		const context = this.deps.getInputContext?.();
 		for (const input of inputs) {
@@ -526,8 +543,8 @@ export class PendingInputQueueController {
 			abort.abort(PENDING_INPUT_WITHDRAWN);
 			const entry: PendingEntry = {
 				id: this._nextEntryId++,
-				// A restored input is accepted again in this process, held; re-sending it later is a new input.
-				inputId: this.deps.ownerInputs.accept(input.origin ? "extension" : input.kind, "held"),
+				// Open again, held, under the identity it was accepted with; re-sending it later is a new input.
+				inputId: this.deps.ownerInputs.restoreHeld(input.origin ? "extension" : input.kind, input.id),
 				kind: input.kind,
 				text: input.text,
 				images: input.images,
@@ -539,6 +556,7 @@ export class PendingInputQueueController {
 			};
 			(input.kind === "steer" ? this._steering : this._followUp).push(entry);
 		}
+		if (recordChanged) this._changed();
 	}
 
 	/**
@@ -553,6 +571,7 @@ export class PendingInputQueueController {
 		);
 		this.deps.onQueueChanged(
 			entries.map((entry) => ({
+				id: entry.inputId,
 				kind: entry.kind,
 				text: entry.origin ? entry.origin.text : entry.original.text,
 				...(entry.original.images ? { images: entry.original.images } : {}),
@@ -716,8 +735,8 @@ export class PendingInputQueueController {
 			if (entry.message && !this._takeBackFromAgent(entry)) continue;
 			this._hold(entry, "context_changed");
 		}
-		// An input its own turn took and has not delivered is held too: that turn is still preparing (a run that owns the
-		// history refuses the navigation), and its submission ends on the held input's aborted signal before any run starts.
+		// An input its own turn took and has not delivered is held too. Its turn's preparation and its run refuse a navigation
+		// (`ForegroundRecoveryController.beginHistoryRewrite`), so this is a turn past its run that never persisted it.
 		for (const entry of [...this._owned]) {
 			if (!this._contextCurrent(entry)) this._returnOwned(entry, "context_changed");
 		}
@@ -782,8 +801,32 @@ export class PendingInputQueueController {
 		this._followUp = this._followUp.filter((candidate) => candidate !== entry);
 	}
 
-	/** Enqueue each kind's decided inputs up to the first one still awaiting its decision. */
+	/**
+	 * Each kind's decided inputs, up to the first one still awaiting its decision, go to the agent's queue while a run
+	 * consumes it. With none, they wait admitted, and the foreground owner hands them to the next run that consumes, or
+	 * starts a delivery run for them once the foreground is idle: no admitted input waits on a queue no run reads.
+	 */
 	private _admitInOrder(): void {
+		if (this._closed) return;
+		if (this._foreground && !this._foreground.hasLiveConsumer) {
+			this._foreground.noteInputWaiting();
+			return;
+		}
+		this.handOff();
+	}
+
+	/** Whether a decided input waits to be handed: the next input of its kind, every earlier one handed or held. */
+	hasHandableInput(): boolean {
+		if (this._closed) return false;
+		for (const entries of [this._steering, this._followUp]) {
+			const next = entries.find((entry) => !entry.message && !entry.held);
+			if (next?.admission) return true;
+		}
+		return false;
+	}
+
+	/** Enqueue each kind's decided inputs up to the first one still awaiting its decision: a run consumes the agent's queue. */
+	handOff(): void {
 		if (this._closed) return;
 		for (const [entries, enqueue] of [
 			[
@@ -817,6 +860,11 @@ export class PendingInputQueueController {
 				enqueue(entry.message);
 			}
 		}
+	}
+
+	/** The delivery run the foreground owner started for waiting input ended: a goal one of its inputs started ends with it. */
+	deliveryRunEnded(): void {
+		this.deps.goals.endQueuedOwnerChatGoalExecution();
 	}
 
 	/** Queue an extension command to execute after the current agent run. */
@@ -891,6 +939,8 @@ export class PendingInputQueueController {
 			followUp: this._takeEntries("followUp", "taken back"),
 		};
 		this._changed();
+		// A steer taken back while its admission was undecided ends that decision: its waiter wakes now, not at the deadline.
+		this._notifySteerDecision();
 		return taken;
 	}
 
@@ -910,6 +960,7 @@ export class PendingInputQueueController {
 		};
 		this._queuedExtensionCommands = [];
 		this._changed();
+		this._notifySteerDecision();
 		return result;
 	}
 

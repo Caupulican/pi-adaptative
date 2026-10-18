@@ -1702,8 +1702,13 @@ export class AgentSession {
 				await this._drainQueuedExtensionCommands();
 			},
 		});
+		this._pendingQueue.bindForeground(this._foregroundRecovery);
 		const wakeIdleOccupancy = (): void => this._foregroundRecovery.wakeIdleWaiters();
-		const unsubscribeSemantic = this._semanticPlane.health.subscribe(() => wakeIdleOccupancy());
+		const unsubscribeSemantic = this._semanticPlane.health.subscribe((record) => {
+			// The evaluator answered: owner words a failed settle kept are read again at the next settle.
+			if (record.outcome === "ok") this._edgeIntent.ownerPolicy.wake();
+			wakeIdleOccupancy();
+		});
 		const unsubscribeContinuation = this._subscribeIdleContinuationActivity(wakeIdleOccupancy);
 		const unsubscribeOwnerAnswers = subscribeHumanInputActivity(this.sessionManager, (activity) => {
 			if (activity.phase === "settled") this._selfCompaction.schedule();

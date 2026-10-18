@@ -27,6 +27,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
+import { ownerInputIdOf } from "../owner-input-stamp.ts";
 import { classifyTransientRecord } from "../transient-records.ts";
 import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
@@ -837,6 +838,12 @@ function sessionContextMessage(entry: SessionEntry): AgentMessage | undefined {
 		);
 	}
 	return undefined;
+}
+
+/** The owner input a persisted user message delivers, as its entry names it; nothing for any other message. */
+function deliveredOwnerInput(message: AgentMessage): { ownerInputId?: string } {
+	const id = message.role === "user" ? ownerInputIdOf(message) : undefined;
+	return id === undefined ? {} : { ownerInputId: id };
 }
 
 /**
@@ -2325,6 +2332,7 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			message,
 			...(origin === undefined ? {} : { origin }),
+			...deliveredOwnerInput(message),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -2361,6 +2369,7 @@ export class SessionManager {
 					timestamp: new Date().toISOString(),
 					message: item.message,
 					...(item.origin === undefined ? {} : { origin: item.origin }),
+					...deliveredOwnerInput(item.message),
 				};
 			} else if (item.kind === "custom") {
 				if (!item.message || typeof item.message !== "object") {

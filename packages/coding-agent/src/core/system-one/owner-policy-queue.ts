@@ -35,7 +35,8 @@ export interface OwnerPolicyQueueDeps<Judgment = never> {
 	screen(texts: readonly string[], signal?: AbortSignal): Promise<readonly boolean[] | undefined>;
 	/**
 	 * A settle failed (the screen or a classification threw). The words it did not reach are kept, in order, and are
-	 * settled again with the owner's next message; nothing waits on them meanwhile. Reported once per settle.
+	 * settled again once the cause can have cleared (`wake`: the owner's next message, or the evaluator's next success);
+	 * nothing waits on them meanwhile. Reported once per settle.
 	 */
 	reportFailure(error: unknown): void;
 	/** The screen confidently set these words aside: they carry no instruction and are not classified. */
@@ -67,8 +68,8 @@ function settledOrAborted(promise: Promise<void>, signal: AbortSignal): Promise<
 export class OwnerPolicyQueue<Judgment = never> {
 	private pending: OwnerWords<Judgment>[] = [];
 	/**
-	 * Words a failed settle did not reach, oldest first. They wait for the owner's next message instead of being
-	 * retried by every settle: a failure that persists would otherwise be paid for at every tool batch.
+	 * Words a failed settle did not reach, oldest first. They wait for an event that can have cleared the failure (`wake`)
+	 * instead of being retried by every settle: a failure that persists would otherwise be paid for at every tool batch.
 	 */
 	private parked: OwnerWords<Judgment>[] = [];
 	private tail: Promise<void> = Promise.resolve();
@@ -80,8 +81,17 @@ export class OwnerPolicyQueue<Judgment = never> {
 
 	enqueue(words: OwnerWords<Judgment>): void {
 		// The owner spoke again: words a failed settle kept are settled with these, ahead of them, in owner order.
-		if (this.parked.length > 0) this.pending.unshift(...this.parked.splice(0));
+		this.wake();
 		this.pending.push(words);
+	}
+
+	/**
+	 * What failed a settle can have cleared (the owner spoke again, or the evaluator answered a request): the words that
+	 * settle kept are queued again, ahead of anything newer, and the next settle reads them where their outcome is read.
+	 * Words are parked only when nothing newer was pending, so they are always the oldest.
+	 */
+	wake(): void {
+		if (this.parked.length > 0) this.pending.unshift(...this.parked.splice(0));
 	}
 
 	get size(): number {
@@ -132,7 +142,7 @@ export class OwnerPolicyQueue<Judgment = never> {
 			}
 		} catch (error) {
 			// A failed classification loses no instruction: what was not reached is kept, ahead of anything newer, and is
-			// settled with the owner's next message. Words that arrived during this settle are newer and settle as usual.
+			// settled again after its `wake`. Words that arrived during this settle are newer and settle as usual.
 			const unreached = order.slice(done);
 			if (this.pending.length > 0) this.pending.unshift(...unreached);
 			else this.parked.push(...unreached);

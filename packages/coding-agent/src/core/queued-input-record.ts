@@ -28,10 +28,12 @@ export type QueuedInputKind = "steer" | "followUp";
 export type QueuedInputOrigin = Omit<SendUserMessageOrigin, "text">;
 
 /**
- * One queued input as submitted: its kind, text and images. A message an extension framed around a third
- * party's words carries its origin, and `text` is then the third party's words as received, not the frame.
+ * One queued input as submitted: its identity, kind, text and images. A message an extension framed around a third
+ * party's words carries its origin, and `text` is then the third party's words as received, not the frame. `id` is the
+ * input's ledger identity: the user entry that delivers the input names it too (`SessionMessageEntry.ownerInputId`).
  */
 export interface RecordableQueuedInput {
+	id: string;
 	kind: QueuedInputKind;
 	text: string;
 	images?: readonly ImageContent[];
@@ -44,6 +46,8 @@ interface RecordedImage {
 }
 
 interface RecordedInput {
+	/** Absent only in a record written before inputs carried their identity. */
+	id?: string;
 	kind: QueuedInputKind;
 	text: string;
 	images?: RecordedImage[];
@@ -112,6 +116,7 @@ export function appendQueuedInputRecord(
 			images.push({ sequence, mimeType });
 		}
 		recorded.push({
+			id: input.id,
 			kind: input.kind,
 			text: input.text,
 			...(images.length > 0 ? { images } : {}),
@@ -148,6 +153,7 @@ function recordedSequences(key: string | undefined): number[] {
 function isRecordedInput(value: unknown): value is RecordedInput {
 	if (!isPlainRecord(value)) return false;
 	if ((value.kind !== "steer" && value.kind !== "followUp") || typeof value.text !== "string") return false;
+	if (value.id !== undefined && typeof value.id !== "string") return false;
 	if (
 		value.origin !== undefined &&
 		!(
@@ -170,8 +176,19 @@ function isRecordedInput(value: unknown): value is RecordedInput {
 }
 
 export interface RestoredQueuedInputs {
-	inputs: Array<{ kind: QueuedInputKind; text: string; images?: ImageContent[]; origin?: QueuedInputOrigin }>;
-	/** Images the record names that the image store no longer holds. */
+	inputs: Array<{
+		id?: string;
+		kind: QueuedInputKind;
+		text: string;
+		images?: ImageContent[];
+		origin?: QueuedInputOrigin;
+	}>;
+	/**
+	 * Inputs the record names whose user entry is on the branch: delivered, by a process that stopped after persisting
+	 * that entry and before rewriting the record. They are not among `inputs`; their images are neither read nor held.
+	 */
+	delivered: number;
+	/** Images the restored inputs name that the image store no longer holds. */
 	missingImages: number;
 	/** Why the restored images could not be pinned in the image store again; undefined when they were. */
 	pinError?: string;
@@ -179,9 +196,13 @@ export interface RestoredQueuedInputs {
 	key: string;
 }
 
-/** The queued input recorded on the active branch, in submission order; undefined when none is recorded. */
+/**
+ * The queued input recorded on the active branch and not yet delivered on it, in submission order; undefined when none
+ * is recorded. An input is delivered on the branch when a user entry there names its identity
+ * (`SessionMessageEntry.ownerInputId`).
+ */
 export function readQueuedInputRecord(
-	sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch">,
+	sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch" | "getBranch">,
 	imageStore: Pick<SessionImageStore, "read" | "pin"> | undefined,
 ): RestoredQueuedInputs | undefined {
 	const data = sessionManager.getLatestCustomEntryOnBranch(QUEUED_INPUT_CUSTOM_TYPE)?.data;
@@ -195,8 +216,13 @@ export function readQueuedInputRecord(
 	}
 	const recorded = data.inputs as RecordedInput[];
 	if (recorded.length === 0) return undefined;
+	const deliveredIds = new Set<string>();
+	for (const entry of sessionManager.getBranch()) {
+		if (entry.type === "message" && entry.ownerInputId !== undefined) deliveredIds.add(entry.ownerInputId);
+	}
+	const undelivered = recorded.filter((input) => input.id === undefined || !deliveredIds.has(input.id));
 	let missingImages = 0;
-	const inputs = recorded.map((input) => {
+	const inputs = undelivered.map((input) => {
 		const images: ImageContent[] = [];
 		for (const image of input.images ?? []) {
 			const stored = imageStore?.read(image.sequence);
@@ -213,6 +239,7 @@ export function readQueuedInputRecord(
 			images.push(content);
 		}
 		return {
+			...(input.id === undefined ? {} : { id: input.id }),
 			kind: input.kind,
 			text: input.text,
 			...(images.length > 0 ? { images } : {}),
@@ -222,7 +249,7 @@ export function readQueuedInputRecord(
 	// The record is live again in this process: refresh the pins it holds (and establish them for a record
 	// written before images were pinned) so the images outlive the restored queue's time before delivery.
 	let pinError: string | undefined;
-	const held = recorded.flatMap((input) => input.images?.map((image) => image.sequence) ?? []);
+	const held = undelivered.flatMap((input) => input.images?.map((image) => image.sequence) ?? []);
 	if (imageStore && held.length > 0) {
 		try {
 			imageStore.pin(held);
@@ -232,6 +259,7 @@ export function readQueuedInputRecord(
 	}
 	return {
 		inputs,
+		delivered: recorded.length - undelivered.length,
 		missingImages,
 		...(pinError ? { pinError } : {}),
 		key: JSON.stringify({ version: 1, inputs: recorded }),

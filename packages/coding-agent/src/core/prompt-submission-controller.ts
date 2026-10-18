@@ -107,6 +107,7 @@ export interface PromptSubmissionControllerDeps {
 		| "hasLiveConsumer"
 		| "acquireSubmissionOrJoinLiveConsumer"
 		| "bindSubmissionSignal"
+		| "beginTurnPreparation"
 	>;
 	readonly toolProtocol: Pick<
 		ToolProtocolController,
@@ -764,7 +765,11 @@ export class PromptSubmissionController {
 				if (!promoted) return;
 			}
 			lifecycle.ownsForeground();
-			if (lifecycle.input) this.deps.ownerInputs.move(lifecycle.input.inputId, "own_turn");
+			if (lifecycle.input) {
+				this.deps.ownerInputs.move(lifecycle.input.inputId, "own_turn");
+				// The input was accepted in this history: no navigation rewrites it while its turn is prepared.
+				if (submission.lease) this.deps.foregroundRecovery.beginTurnPreparation(submission.lease);
+			}
 			this.foregroundPromptLeaseValue = submission.lease;
 
 			if (!options?.internalContextType) {

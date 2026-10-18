@@ -396,9 +396,10 @@ export class SessionEdgeIntentController {
 	}
 
 	/**
-	 * A settle of the owner's words failed. The words are kept by the queue and settled with the owner's next message, so
-	 * nothing blocks on them; until then their outcome is unknown, which is treated like an evaluator outage: no handoff,
-	 * and the model is told once per outage that a delivery limit the owner stated was not registered.
+	 * A settle of the owner's words failed. The words are kept by the queue and settled again after the owner's next message
+	 * or the evaluator's next successful answer (`OwnerPolicyQueue.wake`), so nothing blocks on them; until then their outcome
+	 * is unknown, which is treated like an evaluator outage: no handoff, and the model is told once per outage that a
+	 * delivery limit the owner stated was not registered.
 	 */
 	private noteOwnerPolicyFailure(error: unknown): void {
 		const reason = error instanceof Error ? error.message : String(error);
@@ -406,7 +407,7 @@ export class SessionEdgeIntentController {
 		if (reason !== this.lastOwnerPolicyFailure) {
 			this.lastOwnerPolicyFailure = reason;
 			this.deps.emitWarning(
-				`The owner's words were not classified: ${reason}. They are kept and classified again with the owner's next message.`,
+				`The owner's words were not classified: ${reason}. They are kept and classified again after the owner's next message or System One's next successful answer.`,
 			);
 		}
 		if (this.deliveryClassificationUnavailable) return;

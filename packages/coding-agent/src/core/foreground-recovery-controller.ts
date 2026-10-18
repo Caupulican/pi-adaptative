@@ -65,6 +65,20 @@ interface ChatTurnStart {
 	readonly alreadyLogged: boolean;
 }
 
+/**
+ * The owner's admitted input as this owner hands it to runs (`PendingInputQueueController`). Admitted input goes to the
+ * agent's queue only while a run consumes that queue (`hasLiveConsumer`); otherwise it waits here, and the next run that
+ * consumes takes it, or this owner starts a delivery run for it once the foreground is idle (`serviceWaitingInput`).
+ */
+export interface ForegroundInputPort {
+	/** Whether admitted input waits to be handed: the next input of a kind, in submission order, is decided and not handed. */
+	hasHandableInput(): boolean;
+	/** Hands every such input to the agent's queue, in submission order. */
+	handOff(): void;
+	/** A delivery run this owner started for waiting input ended. */
+	deliveryRunEnded(): void;
+}
+
 export interface ForegroundRecoveryResourceSnapshot {
 	readonly shutdown: boolean;
 	readonly activeRuns: number;
@@ -130,12 +144,24 @@ export class ForegroundRecoveryController {
 	private readonly historyRewrites = new Set<symbol>();
 	/** Set while a run owns the history: from before its preparation through its last delivery round, not its cleanup. */
 	private runOwnsHistory = false;
+	/**
+	 * The submission preparing a turn for an input it carries: from the moment it takes that turn (`beginTurnPreparation`)
+	 * until a run of it owns the history (`claimRunHistory`) or it releases the foreground. Its input was accepted in the
+	 * history it prepares on, so a navigation is refused meanwhile, exactly as while a run owns the history.
+	 */
+	private preparingTurn: ForegroundSubmissionLease | undefined;
 	private submissionLease: ForegroundSubmissionLease | undefined;
 	/** Next epoch to assign. Starts at 1 so the first successful `tryAcquireSubmission()` yields
 	 * epoch 1; only ever increases, including across releases -- it identifies a submission, not a
 	 * count of currently-held leases. */
 	private nextSubmissionEpoch = 1;
 	private shutdownReason: Error | undefined;
+	/** The admitted input this owner hands to runs (`bindInput`). */
+	private input: ForegroundInputPort | undefined;
+	/** Submissions waiting for the foreground (`acquireSubmission`, `acquireSubmissionOrJoinLiveConsumer`): the first run is theirs. */
+	private submissionWaiters = 0;
+	/** Set while `serviceWaitingInput` runs: the activity it causes itself is already being serviced. */
+	private servicingInput = false;
 	private readonly idleWaiters = new Set<() => void>();
 	private readonly activityListeners = new IndependentObserverSet<() => void>();
 	private readonly deps: ForegroundRecoveryControllerDeps;
@@ -338,6 +364,7 @@ export class ForegroundRecoveryController {
 			"the waiter is itself a submission: owner input queues to the run holding the foreground, which reads it",
 		);
 		let end: WaitEndReason = { kind: "disposed" };
+		this.submissionWaiters++;
 		try {
 			while (true) {
 				if (this.shutdownReason) throw this.shutdownReason;
@@ -375,8 +402,15 @@ export class ForegroundRecoveryController {
 			end = this.foregroundWaitFailure(error);
 			throw error;
 		} finally {
+			this.endSubmissionWait();
 			watch.end(end);
 		}
+	}
+
+	/** A submission stopped waiting for the foreground: input waiting for the first run is delivered if no other waits. */
+	private endSubmissionWait(): void {
+		this.submissionWaiters--;
+		this.serviceWaitingInput();
 	}
 
 	/**
@@ -411,6 +445,7 @@ export class ForegroundRecoveryController {
 			"the waiter is itself a submission: owner input queues to the run holding the foreground, which reads it",
 		);
 		let end: WaitEndReason = { kind: "aborted", reason: signal.reason };
+		this.submissionWaiters++;
 		try {
 			while (!signal.aborted) {
 				if (this.shutdownReason) throw this.shutdownReason;
@@ -444,19 +479,85 @@ export class ForegroundRecoveryController {
 			end = this.foregroundWaitFailure(error);
 			throw error;
 		} finally {
+			this.endSubmissionWait();
 			watch.end(end);
+		}
+	}
+
+	/**
+	 * Binds the owner's admitted input: from here every foreground activity change hands it to a live consumer, or starts
+	 * a delivery run for it when the foreground is idle (`serviceWaitingInput`).
+	 */
+	bindInput(input: ForegroundInputPort): void {
+		this.input = input;
+		this.activityListeners.subscribe(() => this.serviceWaitingInput());
+	}
+
+	/** Input was admitted, or became next in order, while no run consumes the agent's queue. */
+	noteInputWaiting(): void {
+		this.serviceWaitingInput();
+	}
+
+	/**
+	 * The one owner of admitted input that no run holds yet, run on every foreground activity change and on every admission:
+	 * a run that consumes the agent's queue takes it now; with none, an idle foreground starts a delivery run for it, unless a
+	 * submission waits for the foreground (its run takes the input instead). A delivery run starts only for input it was
+	 * handed, so every run it starts ends that input delivered or held.
+	 */
+	private serviceWaitingInput(): void {
+		const input = this.input;
+		if (input === undefined || this.shutdownReason || this.servicingInput || !input.hasHandableInput()) return;
+		this.servicingInput = true;
+		try {
+			if (this.hasLiveConsumer) {
+				input.handOff();
+				return;
+			}
+			if (this.submissionWaiters > 0) return;
+			const lease = this.tryAcquireSubmission();
+			if (lease === undefined) return;
+			input.handOff();
+			// Every handed input was held for its changed context: there is nothing to deliver.
+			if (!this.deps.agent.hasQueuedMessages()) {
+				this.releaseSubmission(lease);
+				return;
+			}
+			void this.deliverWaitingInput(lease, input);
+		} finally {
+			this.servicingInput = false;
+		}
+	}
+
+	/** The delivery run: it continues the history with the handed input, as a host handoff resumes it, then releases the foreground. */
+	private async deliverWaitingInput(lease: ForegroundSubmissionLease, input: ForegroundInputPort): Promise<void> {
+		try {
+			await this.runAgentContinuation(lease);
+		} catch (error) {
+			// The run already held what it did not deliver; its failure is reported, once.
+			this.deps.emit({
+				type: "warning",
+				message: `Queued input could not be delivered: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		} finally {
+			try {
+				input.deliveryRunEnded();
+			} finally {
+				this.releaseSubmission(lease);
+			}
 		}
 	}
 
 	/**
 	 * A tree navigation takes the history it rewrites; the returned release (idempotent) gives it back. A navigation and a
 	 * run exclude each other at this one owner: while a run owns the history, from its preparation through its last
-	 * delivery round, the navigation is refused (the run's cleanup, which drains queued extension commands, owns it no
-	 * longer); while a navigation holds it, every run waits before it begins (`claimRunHistory`) and no submission is
-	 * admitted. Several navigations may hold it at once: the newest supersedes the older ones itself.
+	 * delivery round, or a submission prepares the turn of the input it carries (`beginTurnPreparation`), the navigation is
+	 * refused (the run's cleanup, which drains queued extension commands, owns it no longer, nor does a submission's own
+	 * extension command, which runs before its turn is taken); while a navigation holds it, every run waits before it
+	 * begins (`claimRunHistory`) and no submission is admitted. Several navigations may hold it at once: the newest
+	 * supersedes the older ones itself.
 	 */
 	beginHistoryRewrite(): () => void {
-		if (this.runOwnsHistory) {
+		if (this.runOwnsHistory || this.preparingTurn !== undefined) {
 			throw new Error(
 				"Cannot navigate the session tree while a turn is running. Wait for the turn to finish or interrupt it first.",
 			);
@@ -510,6 +611,8 @@ export class ForegroundRecoveryController {
 				return false;
 			}
 			this.runOwnsHistory = true;
+			// From here the run owns the history: the turn it prepared for is no longer only being prepared.
+			this.preparingTurn = undefined;
 			return true;
 		} finally {
 			watch.end(end);
@@ -520,10 +623,22 @@ export class ForegroundRecoveryController {
 		return lease !== undefined && lease === this.submissionLease;
 	}
 
+	/**
+	 * The submission holding `lease` takes the turn of the input it carries: until a run of it owns the history, or it
+	 * releases the foreground, no navigation rewrites the history that input was accepted in (`beginHistoryRewrite`).
+	 */
+	beginTurnPreparation(lease: ForegroundSubmissionLease): void {
+		if (!this.ownsSubmission(lease)) {
+			throw new AgentBusyError("Foreground submission authority is no longer active.");
+		}
+		this.preparingTurn = lease;
+	}
+
 	releaseSubmission(lease: ForegroundSubmissionLease): void {
 		if (!this.ownsSubmission(lease)) {
 			throw new Error("Cannot release foreground submission authority owned by another caller");
 		}
+		if (this.preparingTurn === lease) this.preparingTurn = undefined;
 		this.submissionLease = undefined;
 		this.notifyActivity();
 		if (this.activeRuns === 0) {
@@ -602,11 +717,15 @@ export class ForegroundRecoveryController {
 
 	/**
 	 * The last message of the agent's history starts a continuation's own turn. That is the message that triggered the
-	 * resume (a host handoff or a worker report), or a user, assistant or tool result the run continues from. The chat
-	 * logs those as they persist, so the turn's view already holds them and no arrival will release it.
+	 * resume (a host handoff or a worker report), or a user or tool result the run continues from. The chat logs those as
+	 * they persist, so the turn's view already holds them and no arrival will release it. A history that ends in an
+	 * answer, or holds none, continues from the agent's queue instead (`Agent.continue`): the queued message the run sends
+	 * first starts the turn, and the chat has not logged it yet.
 	 */
 	private continuationStartOf(): ChatTurnStart {
 		const last = this.deps.agent.state.messages.at(-1);
+		const queued = last === undefined || last.role === "assistant" ? this.deps.agent.peekQueuedStart() : undefined;
+		if (queued !== undefined) return { message: queued, alreadyLogged: false };
 		if (last === undefined) throw new Error("A continuation with no chat turn has no message to start one from.");
 		const alreadyLogged = last.role === "user" || last.role === "assistant" || last.role === "toolResult";
 		return { message: last, alreadyLogged };

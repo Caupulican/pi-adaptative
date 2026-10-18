@@ -197,6 +197,11 @@ class PendingMessageQueue {
 		return this.messages.length > 0;
 	}
 
+	/** The message the next `drain()` returns first, left queued. */
+	peek(): AgentMessage | undefined {
+		return this.messages[0];
+	}
+
 	drain(): AgentMessage[] {
 		if (this.mode === "all") {
 			const drained = this.messages.slice();
@@ -465,6 +470,14 @@ export class Agent {
 		return this.steeringQueue.hasItems() || this.followUpQueue.hasItems();
 	}
 
+	/**
+	 * The message a `continue()` from a transcript that ends in an assistant message, or holds none, starts its run from:
+	 * the first queued steering message, else the first queued follow-up; undefined when none is queued.
+	 */
+	peekQueuedStart(): AgentMessage | undefined {
+		return this.steeringQueue.peek() ?? this.followUpQueue.peek();
+	}
+
 	/** Active abort signal for the current run, if any. */
 	get signal(): AbortSignal | undefined {
 		return this.activeRun?.abortController.signal;
@@ -536,18 +549,18 @@ export class Agent {
 		await this.runPromptMessages(messages);
 	}
 
-	/** Continue from the current transcript. The last message must be a user or tool-result message. */
+	/**
+	 * Continue from the current transcript. A transcript that ends in a user, tool-result or custom message continues
+	 * from it; one that ends in an assistant message, or holds none yet, starts from the queued messages (steering
+	 * first, else follow-ups), and with none queued there is nothing to continue.
+	 */
 	async continue(): Promise<void> {
 		if (this.activeRun) {
 			throw new AgentBusyError("Agent is already processing. Wait for completion before continuing.");
 		}
 
 		const lastMessage = this._state.messages[this._state.messages.length - 1];
-		if (!lastMessage) {
-			throw new Error("No messages to continue from");
-		}
-
-		if (lastMessage.role === "assistant") {
+		if (lastMessage === undefined || lastMessage.role === "assistant") {
 			const queuedSteering = this.steeringQueue.drain();
 			if (queuedSteering.length > 0) {
 				await this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
@@ -560,7 +573,9 @@ export class Agent {
 				return;
 			}
 
-			throw new Error("Cannot continue from message role: assistant");
+			throw new Error(
+				lastMessage === undefined ? "No messages to continue from" : "Cannot continue from message role: assistant",
+			);
 		}
 
 		await this.runContinuation();

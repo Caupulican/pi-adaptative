@@ -13,6 +13,11 @@ export interface SessionMessageEntry extends SessionEntryBase {
 	message: AgentMessage;
 	/** Provenance for host-synthesized messages; absent means provider/conversation-native. */
 	origin?: AgentMessageOrigin;
+	/**
+	 * The owner input this user message delivered (`ownerInputIdOf`), written from the same message the Delivered commit
+	 * reads: an input named here was delivered on this entry's branch, so a restart never restores it again.
+	 */
+	ownerInputId?: string;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {

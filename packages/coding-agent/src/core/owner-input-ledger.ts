@@ -1,5 +1,9 @@
+import { type OwnerInputId, ownerInputIdOf } from "../kernel/owner-input-stamp.ts";
 import type { AgentMessage } from "../kernel/types.ts";
+import { uuidv7 } from "../kernel/uuid.ts";
 import { runReleaseSteps } from "./util/resource-release.ts";
+
+export { type OwnerInputId, ownerInputIdOf, stampOwnerInput } from "../kernel/owner-input-stamp.ts";
 
 /**
  * The owner-input ledger: the identity and the one state of every accepted input, from acceptance to its terminal. An
@@ -8,9 +12,6 @@ import { runReleaseSteps } from "./util/resource-release.ts";
  * here against its identity and fires at its commit point: on Delivered (its user entry is persisted), or once when it
  * ends without being delivered (Withdrawn, Held, Cancelled, Refused).
  */
-
-/** The identity of one accepted input: minted at acceptance, never reused, carried by the message the input becomes. */
-export type OwnerInputId = string & { readonly __ownerInputId: true };
 
 /** Where an input was accepted. An extension's message (a peer's, say) is accepted on its untrusted path. */
 export type OwnerInputSource = "prompt" | "steer" | "followUp" | "extension";
@@ -79,42 +80,30 @@ interface InputRecord {
 	readonly onUndelivered: Array<(end: OwnerInputEnd) => void>;
 }
 
-const OWNER_INPUT_ID = Symbol("pi.ownerInputId");
-
-/**
- * Stamps `message` with the input it carries. The stamp is a non-enumerable symbol property of the object itself: it travels
- * wherever the object goes (the agent's queues, the run, the routed-turn buffer, the session append) and never reaches a
- * serialized form, a provider request or an equality check. A copy of the message does not carry it.
- */
-export function stampOwnerInput(message: AgentMessage, id: OwnerInputId): void {
-	const current = ownerInputIdOf(message);
-	if (current === id) return;
-	if (current !== undefined)
-		throw new Error(`A message already carries owner input ${current}; it cannot carry ${id}.`);
-	Object.defineProperty(message, OWNER_INPUT_ID, {
-		value: id,
-		enumerable: false,
-		writable: false,
-		configurable: false,
-	});
-}
-
-/** The input `message` carries, if it carries one. */
-export function ownerInputIdOf(message: AgentMessage): OwnerInputId | undefined {
-	const id: unknown = Reflect.get(message, OWNER_INPUT_ID);
-	return typeof id === "string" ? (id as OwnerInputId) : undefined;
-}
-
 export class OwnerInputLedger {
-	private nextOrdinal = 1;
 	/** Every input that has not reached a terminal; a held input stays until the owner takes it back. */
 	private readonly records = new Map<OwnerInputId, InputRecord>();
 	private readonly deliveredListeners = new Set<(delivery: OwnerInputDelivery) => void>();
 
-	/** A new input was accepted from `source`: its identity, minted now. A restored input is accepted already held. */
-	accept(source: OwnerInputSource, initial: "accepted" | "held" = "accepted"): OwnerInputId {
-		const id = `${source}:${this.nextOrdinal++}` as OwnerInputId;
-		this.records.set(id, { source, state: initial, onDelivered: [], onUndelivered: [] });
+	/**
+	 * A new input was accepted from `source`: its identity, minted now. It is unique across processes, because it
+	 * outlives this one: the durable queued-input record and the user entry that delivers the input both carry it.
+	 */
+	accept(source: OwnerInputSource): OwnerInputId {
+		const id = `${source}:${uuidv7()}` as OwnerInputId;
+		this.records.set(id, { source, state: "accepted", onDelivered: [], onUndelivered: [] });
+		return id;
+	}
+
+	/**
+	 * An input an earlier process recorded as undelivered is open again here, held, under the identity it was accepted
+	 * with (`recorded`), or a new one for a record written before inputs carried theirs. An identity already open here
+	 * is a lifecycle defect and throws.
+	 */
+	restoreHeld(source: OwnerInputSource, recorded: string | undefined): OwnerInputId {
+		const id = (recorded ?? `${source}:${uuidv7()}`) as OwnerInputId;
+		if (this.records.has(id)) throw new Error(`Owner input ${id} is already open; it cannot be restored.`);
+		this.records.set(id, { source, state: "held", onDelivered: [], onUndelivered: [] });
 		return id;
 	}
 

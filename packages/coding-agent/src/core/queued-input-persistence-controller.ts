@@ -166,20 +166,24 @@ export class QueuedInputPersistenceController {
 
 	/**
 	 * A resumed session restores the queue its predecessor still held, as held pending input: visible in the
-	 * queue display and takeable into the editor, never delivered on its own. The record already holds exactly
-	 * these inputs, so nothing is written until the queue next changes.
+	 * queue display and takeable into the editor, never delivered on its own. An input the record names that was
+	 * delivered (`RestoredQueuedInputs.delivered`) is not restored, and the record is rewritten once without it.
+	 * Otherwise the record already holds exactly these inputs, and nothing is written until the queue next changes.
 	 */
 	restoreRecordedQueuedInput(): void {
 		const sessionManager = this.deps.getSessionManager();
 		if (!sessionManager.isPersisted()) return;
 		const restored = readQueuedInputRecord(sessionManager, this.deps.getSessionImageStore());
 		if (!restored) return;
-		this.deps.getPendingQueue().restore(restored.inputs);
+		const { inputs } = restored;
+		// The record as written is what a rewrite replaces: change detection starts from it.
 		this.queuedInputRecordKey = restored.key;
-		const fromPeers = restored.inputs.filter((input) => input.origin).length;
+		this.deps.getPendingQueue().restore(inputs, restored.delivered > 0);
+		if (inputs.length === 0) return;
+		const fromPeers = inputs.filter((input) => input.origin).length;
 		this.restoredQueuedInputNotice = {
 			head:
-				`Restored ${restored.inputs.length} queued message${restored.inputs.length > 1 ? "s" : ""} from the previous run` +
+				`Restored ${inputs.length} queued message${inputs.length > 1 ? "s" : ""} from the previous run` +
 				`${fromPeers > 0 ? ` (${fromPeers} from other senders, shown under who sent them)` : ""}`,
 			tail:
 				`${restored.missingImages > 0 ? ` (${restored.missingImages} attached image${restored.missingImages > 1 ? "s were" : " was"} no longer available)` : ""}` +
