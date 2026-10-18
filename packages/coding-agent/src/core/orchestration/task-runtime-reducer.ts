@@ -535,7 +535,7 @@ function applyAttemptQueued(state: TaskRuntimeProjection, payload: JsonObject, o
 	tasks[taskId] = nextTask;
 }
 
-export function requireActiveObjectiveForAttemptInProjection(
+function objectiveForAttemptInProjection(
 	state: TaskRuntimeProjection,
 	attempt: AttemptRuntimeState,
 ): ObjectiveContract {
@@ -543,10 +543,35 @@ export function requireActiveObjectiveForAttemptInProjection(
 	if (!task) throw new DurableTaskRuntimeError(`Unknown task '${attempt.taskId}'.`);
 	const objective = state.objectives[task.task.objectiveId]?.objective;
 	if (!objective) throw new DurableTaskRuntimeError(`Unknown objective '${task.task.objectiveId}'.`);
+	return objective;
+}
+
+/** Admission authority: a lease, start, resume or resume request needs an active objective. */
+export function requireActiveObjectiveForAttemptInProjection(
+	state: TaskRuntimeProjection,
+	attempt: AttemptRuntimeState,
+): ObjectiveContract {
+	const objective = objectiveForAttemptInProjection(state, attempt);
 	if (objective.status !== "active") {
 		throw new DurableTaskRuntimeError(`Objective '${objective.objectiveId}' is not active.`);
 	}
 	return objective;
+}
+
+/**
+ * Renewal keeps admitted work alive; it admits nothing. A running attempt was started under an active objective, so a pause of
+ * that objective (its goal stopped: paused, blocked, usage_limited or budget_limited) leaves its lease renewable: the attempt
+ * finishes, checkpoints and reports as before, or its parent cancels it explicitly, instead of being killed at its next
+ * heartbeat by a lease failure. A leased attempt that has not started still needs an active objective, as every new lease,
+ * start and resume does; a completed or cancelled objective has already cancelled its open attempts.
+ */
+function requireRenewableObjectiveForAttemptInProjection(
+	state: TaskRuntimeProjection,
+	attempt: AttemptRuntimeState,
+): ObjectiveContract {
+	const objective = objectiveForAttemptInProjection(state, attempt);
+	if (objective.status === "paused" && attempt.status === "running") return objective;
+	return requireActiveObjectiveForAttemptInProjection(state, attempt);
 }
 
 export function assertRetryBackoffElapsedAt(attempt: AttemptRuntimeState, atMs: number): void {
@@ -817,7 +842,7 @@ export function assertAttemptLeaseRenewalTransition(
 	if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.parse(attempt.lease!.expiresAt)) {
 		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' renewed lease must extend its expiration.`);
 	}
-	requireActiveObjectiveForAttemptInProjection(state, attempt);
+	requireRenewableObjectiveForAttemptInProjection(state, attempt);
 	return attempt;
 }
 

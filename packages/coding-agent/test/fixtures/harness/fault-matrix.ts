@@ -710,22 +710,14 @@ const rows: readonly FaultMatrixRow[] = [
 		journey: 2,
 		phase: "queued-recovery",
 		fault: "terminal handoffs pending across a restart",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"cut back to the session file and orchestration bundle captured while the ended reader's handoff waits for the held foreground, the next owner replays the pending worker-terminal receipt and delivers it once: its first root request carries the handoff, the receipt reads delivered and its branch holds one handoff post; the dying owner's optional wake is consumed or retired",
+		control:
+			"while another submission holds the foreground, the ended reader's terminal waits in the lease wait with its durable receipt pending and nothing posted",
 		estSeconds: 4,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"world.restart now takes live captures (R21's background cut), but a pending handoff (`ForegroundTerminalHandoffController.pending`) waits for the foreground lease, and the restart's interrupt frees that lease before the disposal: whether the waiting delivery starts its wake turn on the dying owner (`deliverWhenIdle` acquires before `isDisposed()`) or meets the disposed check and reports a notification failure is decided by settlement order, not by reading; the cut needs that order observed once, then a scripted old-owner wake step or an allowance for the exact failure text. The failure branch has a third, silent outcome: the outbox's rejection handler returns without a warning or a retry once the outbox is disposed (`WorkerNotificationCoordinator.flush`, `if (this.disposed) return`), leaving only the durable receipt for the next owner, so a witness of exactly one of wake or warning would not hold; besides the wake it must accept silence and a `Background worker handoff failed: ` warning whose cause is an `assertLive` text (`Session disposed before <action>`, from more than one call site) or the lease acquisition's own disposal rejection, each text read from the run once observed, and assert that the next session delivers the terminal once",
-			},
-			{
-				kind: "witness",
-				detail:
-					"the wake outcome needs a zero-or-one root step: a scripted step leaves its track only when a request consumes it (`until` absent or true), `assertDrained` throws on any step left, and a request with no step that is not already aborted throws `Unexpected provider request`, which the stream records in `provider.failures`, the list `world.restart` hands to `check.transport`, so neither a scripted nor an unscripted old-owner wake fits every legal outcome; scripted-provider.ts needs a step the restart retires unconsumed. The receipt the next owner replays is the orchestration runtime's pending `worker-terminal:<attemptId>` notification (`WorkerLifecycle.getPendingTerminalNotifications`, marked through `markNotificationsDelivered`), not a session-file entry, so the cut's `rewindSqlite` decides whether the next session sees it pending; the coordinator's `observedTerminals` is cleared at disposal",
-			},
-		],
+		status: "covered",
+		// The on-mode System One judgment set of a dying-owner wake turn that may or may not run cannot be declared.
+		modes: ["off"],
 	},
 	{
 		id: "R35",

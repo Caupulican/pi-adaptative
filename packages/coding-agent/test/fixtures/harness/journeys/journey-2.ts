@@ -35,6 +35,9 @@ export async function runJourney2(): Promise<void> {
 				/^Worker worker-\d+ retry durable read failed; retaining the durable retry and trying again in 1s: Scripted IO fault r30-durable-read: stat '(?:\/harness\/agent-journey-2-system-one-(?:on|off)\/state\/orchestration\/sessions\/[^'/\\\n]+\/events\/cursor\.json|[A-Z]:\\harness\\agent-journey-2-system-one-(?:on|off)\\state\\orchestration\\sessions\\[^'/\\\n]+\\events\\cursor\.json)'$/,
 				// R31: the auxiliary root's one refused worker terminal delivery, retried on the outbox backoff: exact text.
 				/^Background worker handoff failed: r31 scripted handoff refusal$/,
+				// R34 (System One off): the restart's disposal of a root whose worker handoff waits for the foreground lease may reject that
+				// delivery; reported at most once, its cause is one of the exact disposal texts of the handoff path.
+				/^Background worker handoff failed: Session disposed before (?:worker terminal handoff was persisted|terminal handoff was waiting for foreground admission|terminal handoff reached a provider boundary|foreground submission authority was acquired|a custom message was persisted)$/,
 				// R35: the goal-deadline auxiliary root's worker reports one inconclusive item its judge-less ladder leaves
 				// unsettled for the owner: exact text.
 				/^Worker worker-\d+ could not settle: Whether another module reads the retry limit was not checked \(missing: System One is not bound\)$/,

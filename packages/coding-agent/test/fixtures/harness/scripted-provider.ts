@@ -61,6 +61,16 @@ export interface ScriptStep {
 	 * stream emits no `start` event, only the error terminal. Requires an error reply without frames.
 	 */
 	beforeStart?: boolean;
+	/**
+	 * Zero-or-one: a request may consume this step like any other, and the scenario may also end with it unconsumed, for a
+	 * request whose occurrence production settlement order decides. It is the tail of its track: nothing is enqueued behind it
+	 * until a request consumes it or `retireOptional` retires it, so it never answers a request meant for a later step, and no
+	 * later step waits behind it. The one request that consumes it is answered at once: no gate, frame gate, abort override,
+	 * `until` or `maxRequests`. `assertDrained` does not count it. `cancelPending` and `rollbackRegistration` leave it in place,
+	 * so a request already streaming when the cutoff aborts it still matches it and ends canceled rather than unscripted; a request
+	 * begun after the cutoff is the cutoff's own failure. A request with no step left is still a script failure.
+	 */
+	optional?: boolean;
 	/** Reply callbacks are synchronous; controlled asynchronous ordering belongs in the cancellable gate. */
 	reply: ScriptedReply | ((request: ScriptedRequest) => ScriptedReply);
 }
@@ -275,18 +285,52 @@ export class ScriptedProvider {
 					`Step ${step.name} fails before its response begins: it requires a static error reply and no frames`,
 				);
 			}
+			if (
+				step.optional &&
+				(step.until !== undefined ||
+					step.maxRequests !== undefined ||
+					step.gate !== undefined ||
+					step.ignoresAbort ||
+					step.ignoresLifetimeAbort ||
+					step.frames?.some((frame) => frame.gate !== undefined))
+			) {
+				throw new Error(
+					`Optional step ${step.name} is answered at once by the one request that consumes it: no until, maxRequests, gate or abort override`,
+				);
+			}
 		}
 		const script = this.scripts.get(trackId);
 		if (script && (script.modelId !== modelId || script.matches !== matches))
 			throw new Error(`Track ${trackId} identity changed`);
+		const optionalTail = script?.steps.at(-1);
+		if (optionalTail?.optional && steps.length > 0) {
+			throw new Error(
+				`Track ${trackId} ends in optional step ${optionalTail.name}: a request consumes it or retireOptional retires it before anything is enqueued behind it`,
+			);
+		}
+		const misplaced = steps.slice(0, -1).find((step) => step.optional);
+		if (misplaced) throw new Error(`Optional step ${misplaced.name} must be the last step of track ${trackId}`);
 		const track = script ?? { modelId, matches, steps: [] };
 		track.steps.push(...steps);
 		this.scripts.set(trackId, track);
 	}
 
-	/** Scenario phase boundary by track identity (the model id for default tracks), not physical settlement. */
+	/** Scenario phase boundary by track identity (the model id for default tracks), not physical settlement; an optional tail counts. */
 	getPendingStepNames(trackId: string): readonly string[] {
 		return (this.scripts.get(trackId)?.steps ?? []).map((step) => step.name);
+	}
+
+	/**
+	 * Retire the optional step still at the tail of `trackId`, unconsumed, once every actor that could send its request has
+	 * stopped and every producer has joined (`waitForProducers`). Returns the names retired: empty when a request consumed it.
+	 * Required steps are never retired.
+	 */
+	retireOptional(trackId: string): readonly string[] {
+		if (this.active.size || this.producers.size)
+			throw new Error("An optional step retires only after every producer has joined");
+		const steps = this.scripts.get(trackId)?.steps;
+		if (!steps?.at(-1)?.optional) return [];
+		return [steps.pop()!.name];
 	}
 
 	register(): void {
@@ -306,7 +350,7 @@ export class ScriptedProvider {
 
 	assertDrained(): void {
 		const remaining = [...this.scripts].flatMap(([trackId, track]) =>
-			track.steps.map((step) => `${trackId}:${step.name}`),
+			track.steps.filter((step) => !step.optional).map((step) => `${trackId}:${step.name}`),
 		);
 		if (remaining.length || this.active.size || this.producers.size || this.failures.length) {
 			throw new Error(

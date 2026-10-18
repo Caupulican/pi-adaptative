@@ -14,6 +14,7 @@ import { sessionRootAddress, sessionRootReplyMessageId } from "../../../../src/c
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "../../../../src/core/delegation/worker-mailbox-record.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
+import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import type { ScriptedRequest } from "../scripted-provider.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, type WorkerProjectClaims, withDeadline } from "../session-fixture.ts";
@@ -25,16 +26,26 @@ import { type HarnessWorld, type WorkerProjectClaims, withDeadline } from "../se
  * are rebound in place rather than through an ESM module mock.
  */
 import {
+	assertBatchOk,
 	backgroundTaskIdOf,
 	bundleEntries,
 	crashCutChecks,
 	expectOwnerWords,
 	handoffFor,
 	LIMITS_PATH,
+	lastToolResultDetails,
 	latestBatchResults,
 	rawReplyAcknowledgements,
 	rawReplyReceiptOf,
 } from "./shared.ts";
+
+/** Whether the request's current tail, the only message that may answer a wake, is the worker handoff naming `laneId` with `status`. */
+function tailIsWorkerHandoff(request: ScriptedRequest, laneId: string, status: string): boolean {
+	const tail = request.context.messages.at(-1);
+	if (tail?.role !== "user") return false;
+	const text = JSON.stringify(tail);
+	return text.includes("Background worker terminal handoff") && text.includes(`- ${laneId}: ${status}`);
+}
 
 export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -363,12 +374,6 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		const text = JSON.stringify(tail);
 		return text.includes("Background worker terminal handoff") && lanes.some((lane) => text.includes(`- ${lane}:`));
 	};
-	const e7WorkerHandoff = (request: ScriptedRequest, laneId: string, status: string): boolean => {
-		const tail = request.context.messages.at(-1);
-		if (tail?.role !== "user") return false;
-		const text = JSON.stringify(tail);
-		return text.includes("Background worker terminal handoff") && text.includes(`- ${laneId}: ${status}`);
-	};
 	// B's birth is a real admitted read and a truthful submitted report of the bytes it read.
 	world.provider.enqueue(
 		"worker-b",
@@ -405,7 +410,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 			}
 		},
 		until: (request) => {
-			const done = e7WorkerHandoff(request, e7StartB.laneId, "succeeded");
+			const done = tailIsWorkerHandoff(request, e7StartB.laneId, "succeeded");
 			if (done) e7WakeReached.release();
 			return done;
 		},
@@ -531,7 +536,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 			}
 		},
 		until: (request) => {
-			const done = e7WorkerHandoff(request, e7FollowUpLane, "succeeded");
+			const done = tailIsWorkerHandoff(request, e7FollowUpLane, "succeeded");
 			if (done) e7FollowUpWake.release();
 			return done;
 		},
@@ -924,5 +929,253 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		world.faultMatrix.witness("R21", { control: false });
 		r21Gate.release();
 		expect(await world.disposeSessionInBody(r21Fresh.session), "the R21 next root disposes cleanly").toBeUndefined();
+		await workerHandoffAcrossRestart(world);
 	}
+}
+
+/** The branch's worker terminal handoff posts that name `laneId`. */
+function workerHandoffPosts(sessionManager: SessionManager, laneId: string): number {
+	return sessionManager
+		.getBranch()
+		.filter(
+			(entry) =>
+				entry.type === "custom_message" &&
+				entry.customType === "background-worker-completion" &&
+				JSON.stringify(entry.content).includes(`- ${laneId}: `),
+		).length;
+}
+
+/**
+ * R34, System One off with R21 (the dying owner's wake turn may or may not run, and an on-mode turn's judgments cannot be both
+ * declared and optional): a crash cut while a worker terminal handoff waits for the foreground lease. An auxiliary root starts a
+ * held reader on a fresh birth, a second prompt holds the foreground at its provider gate, and the reader ends: its terminal
+ * belongs to the earlier submission, so it never folds into the held one and waits in the handoff controller's lease wait, its
+ * durable `worker-terminal:<attemptId>` receipt pending and nothing posted to the root (the control). The session file and the
+ * orchestration bundle are captured there. The restart's interrupt frees the lease before the disposal, so settlement order
+ * decides what the dying owner does with the waiting delivery: it starts its wake turn (the optional step answers it), the
+ * disposal rejects it and the disposed outbox drops the rejection silently, or a disposal text is reported once. Whichever
+ * happens, the cut restores the pending receipt, and the next owner replays it and delivers the terminal exactly once: its
+ * first root request is the wake that carries the handoff, the receipt reads delivered, and one handoff post is on its branch.
+ */
+async function workerHandoffAcrossRestart(world: HarnessWorld): Promise<void> {
+	const trace = world.trace;
+	const readerHeld = createBarrier();
+	const readerRelease = createBarrier();
+	const foregroundHeld = createBarrier();
+	const foregroundRelease = createBarrier();
+	const deliveryWaiting = createBarrier();
+	const nextWake = createBarrier();
+	const started: { agentId?: string; laneId?: string } = {};
+	const nextWakeHandoffs: number[] = [];
+	const handoffFailures = (): string[] =>
+		world.warnings.filter((message) => message.startsWith("Background worker handoff failed:"));
+	const failuresBefore = handoffFailures().length;
+	expect(
+		{ root: world.provider.getPendingStepNames("root"), reader: world.provider.getPendingStepNames("worker-c") },
+		"no earlier root or worker-c step is left pending",
+	).toEqual({ root: [], reader: [] });
+	const aux = await world.createRootSession("root", {
+		sessionManager: world.createSessionManager(),
+		// Observation only: the delivery runs at once and its own promise is returned. `deliver()` adds the delivery to the
+		// handoff controller's pending set before it returns, so the barrier opens with the delivery already waiting.
+		workerTerminalDelivery: (records, deliver) => {
+			const delivery = deliver();
+			if (records.some((record) => record.laneId === started.laneId)) deliveryWaiting.release();
+			return delivery;
+		},
+	});
+	world.systemOne.enterPhase("r34-handoff-cut", {});
+	world.provider.enqueue("worker-c", {
+		...calls("r34-report", [
+			{
+				id: "r34-report-1",
+				name: "submit_report",
+				arguments: { status: "completed", summary: "The restart reader report is ready." },
+			},
+		]),
+		check: () => readerHeld.release(),
+		gate: readerRelease.promise,
+	});
+	world.provider.enqueue(
+		"root",
+		calls("r34-start", [
+			{
+				id: "r34-start-1",
+				name: "delegate",
+				arguments: {
+					action: "start",
+					model: { provider: "harness-script", modelId: "worker-c" },
+					instructions: "Report once you are released.",
+					readOnly: true,
+				},
+			},
+		]),
+		{
+			name: "r34-started",
+			check: (request) => {
+				assertBatchOk(request, "the restart reader start");
+				const details = lastToolResultDetails(aux.session, "delegate");
+				const agentId = isRecordObject(details) ? details.agentId : undefined;
+				const laneId = isRecordObject(details) ? details.laneId : undefined;
+				if (typeof agentId !== "string" || typeof laneId !== "string") {
+					throw new Error("the restart reader start carries no agent or lane id");
+				}
+				started.agentId = agentId;
+				started.laneId = laneId;
+			},
+			reply: { content: [{ type: "text", text: "The restart reader is started." }] },
+		},
+	);
+	await withDeadline(trace, "R34 reader start turn", aux.session.prompt("Start the restart reader."), 90_000);
+	const { agentId, laneId } = started;
+	if (agentId === undefined || laneId === undefined) throw new Error("the R34 start carried no agent or lane id");
+	await withDeadline(trace, "R34 reader held at its request", readerHeld.promise, 90_000);
+	expect(
+		aux.session.backgroundLanes.getTaskRuntimeSnapshot()?.agents[agentId]?.contextOrigin,
+		"the reader is a fresh birth, not an idle specialist's context",
+	).toBeUndefined();
+	// A later submission holds the foreground at its provider gate; it does not ignore abort, so the restart's interrupt ends it.
+	world.provider.enqueue("root", {
+		name: "r34-foreground-held",
+		check: () => foregroundHeld.release(),
+		gate: foregroundRelease.promise,
+		reply: { content: [{ type: "text", text: "The foreground hold ends." }] },
+	});
+	const heldPrompt = aux.session.prompt("Hold the foreground while the reader ends.").catch((error: unknown) => error);
+	await withDeadline(trace, "R34 foreground held at its provider gate", foregroundHeld.promise, 90_000);
+	readerRelease.release();
+	await withDeadline(trace, "R34 reader terminal waits for the foreground lease", deliveryWaiting.promise, 90_000);
+	const runtime = aux.session.backgroundLanes.getTaskRuntimeSnapshot();
+	const attempt = Object.values(runtime?.attempts ?? {})
+		.filter((candidate) => candidate.taskId === laneId)
+		.at(-1);
+	if (attempt === undefined) throw new Error("the R34 reader has no attempt");
+	const notificationId = `worker-terminal:${attempt.attemptId}`;
+	expect(
+		{
+			attempt: attempt.status,
+			receipt: runtime?.notifications[notificationId]?.status,
+			waiting: aux.session.getResourceSnapshot().terminalHandoffs.pendingDeliveries,
+			posts: workerHandoffPosts(aux.sessionManager, laneId),
+		},
+		"the ended reader's handoff waits for the held foreground, its durable receipt pending and nothing posted",
+	).toEqual({ attempt: "completed", receipt: "pending", waiting: 1, posts: 0 });
+	world.faultMatrix.witness("R34", { control: true });
+	const auxFile = aux.sessionManager.getSessionFile();
+	if (auxFile === undefined) throw new Error("the R34 root has no session file");
+	const orchestrationDir = orchestrationSessionDir(world.agentDir, aux.sessionManager.getSessionId());
+	const ownedFiles = (): Map<string, string> => {
+		const entries = world.io.fileEntries();
+		const files = new Map(bundleEntries(entries, orchestrationDir));
+		const content = entries.get(auxFile);
+		if (content !== undefined) files.set(auxFile, content);
+		return files;
+	};
+	const capture = ownedFiles();
+	expect(capture.has(auxFile), "the R34 capture holds the session file").toBe(true);
+	// The dying owner's wake, if settlement order starts one: zero or one request, answered at once.
+	world.provider.enqueue("root", {
+		name: "r34-dying-owner-wake",
+		optional: true,
+		check: (request) => {
+			if (!tailIsWorkerHandoff(request, laneId, "succeeded"))
+				throw new Error("the dying owner's root request is not the reader's handoff");
+		},
+		reply: { content: [{ type: "text", text: "The reader ended while the owner closed." }] },
+	});
+	const checks = crashCutChecks("the R34 root disposes cleanly");
+	let dyingWake: { readonly consumed: boolean; readonly retired: readonly string[] } | undefined;
+	const fresh = await withDeadline(
+		trace,
+		"R34 restart",
+		world.restart({
+			owner: aux.session,
+			sessionFile: auxFile,
+			cut: { manifest: ownedFiles, capture },
+			rewindSqlite: false,
+			retainedClaims: [],
+			check: {
+				...checks,
+				transport: (failures) => {
+					checks.transport(failures);
+					// The dying owner has stopped and every producer has joined: no request can consume its optional wake any more.
+					dyingWake = {
+						consumed: world.provider.reached.includes("root:r34-dying-owner-wake"),
+						retired: world.provider.retireOptional("root"),
+					};
+					// Queued before the next owner exists, which may replay the receipt as it opens.
+					world.provider.enqueue("root", {
+						name: "r34-next-owner-wake",
+						check: (request) => {
+							if (!tailIsWorkerHandoff(request, laneId, "succeeded"))
+								throw new Error("the next owner's first root request is not the reader's replayed handoff");
+							nextWakeHandoffs.push(
+								request.context.messages.filter((message) => {
+									const text = JSON.stringify(message);
+									return text.includes("Background worker terminal handoff") && text.includes(`- ${laneId}: `);
+								}).length,
+							);
+							nextWake.release();
+						},
+						reply: { content: [{ type: "text", text: "The restart reader's report is noted." }] },
+					});
+				},
+			},
+		}),
+		60_000,
+	);
+	foregroundRelease.release();
+	await withDeadline(trace, "R34 held prompt settled", heldPrompt);
+	if (dyingWake === undefined) throw new Error("the R34 restart reached no transport check");
+	expect(
+		dyingWake.retired,
+		"the dying owner either consumed its optional wake or left it to be retired, never both",
+	).toEqual(dyingWake.consumed ? [] : ["r34-dying-owner-wake"]);
+	expect(
+		handoffFailures().length - failuresBefore,
+		"the dying owner reports at most one handoff failure, and none once its wake ran",
+	).toBeLessThanOrEqual(dyingWake.consumed ? 0 : 1);
+	// Recovery is entered explicitly: the next owner replays the pending receipt it finds in the restored bundle.
+	fresh.session.getLaneRecords();
+	await withDeadline(trace, "R34 next owner's wake", nextWake.promise, 90_000);
+	await withDeadline(trace, "R34 next owner's wake settled", fresh.session.waitForForegroundIdle(), 90_000);
+	expect(
+		{
+			handoffs: nextWakeHandoffs,
+			receipt: fresh.session.backgroundLanes.getTaskRuntimeSnapshot()?.notifications[notificationId]?.status,
+			posts: workerHandoffPosts(fresh.sessionManager, laneId),
+		},
+		"the next owner delivers the restored terminal exactly once and marks its receipt delivered",
+	).toEqual({ handoffs: [1], receipt: "delivered", posts: 1 });
+	world.faultMatrix.witness("R34", { control: false });
+	// The reader leaves the world as it found it: idle once delivered, then retired.
+	const ready = await withDeadline(
+		trace,
+		"R34 reader idle in the next owner",
+		fresh.session.backgroundLanes.waitForWorkerAgent(agentId, 60_000),
+		70_000,
+	);
+	expect(
+		{ timedOut: ready.timedOut, status: ready.status },
+		"the reader is idle in the next owner before its retirement",
+	).toEqual({ timedOut: false, status: "idle" });
+	world.provider.enqueue(
+		"root",
+		calls("r34-retire", [{ id: "r34-retire-1", name: "delegate", arguments: { action: "retire", agentId } }]),
+		{
+			name: "r34-retired",
+			check: (request) => {
+				const [retirement] = latestBatchResults(request);
+				if (retirement?.isError !== false || !retirement.text.includes("retired"))
+					throw new Error(`the restart reader was not retired: ${JSON.stringify(retirement)}`);
+			},
+			reply: { content: [{ type: "text", text: "The restart reader is retired." }] },
+		},
+	);
+	await withDeadline(trace, "R34 reader retired", fresh.session.prompt("Retire the restart reader."), 90_000);
+	expect(
+		fresh.session.backgroundLanes.getTaskRuntimeSnapshot()?.agents[agentId]?.status,
+		"the reader's durable binding is retired",
+	).toBe("retired");
+	expect(await world.disposeSessionInBody(fresh.session), "the R34 next root disposes cleanly").toBeUndefined();
 }

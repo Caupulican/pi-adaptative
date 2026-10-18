@@ -690,6 +690,58 @@ async function verifyGoalWorkerDeadlineAndQuietHandoff(world: HarnessWorld): Pro
 	expect(world.warnings.slice(passMark), `${label}: the timeout pass warns nothing`).toEqual([]);
 	expect(laneRecord()?.status, `${label}: the held worker still runs after the goal stopped`).toBe("running");
 	world.faultMatrix.witness("R29", { control: false });
+	// The stop paused the goal's objective; the running worker's next lease heartbeat still renews its lease, so it keeps running
+	// and later finishes instead of being aborted by a lease renewal failure.
+	const runningAttempts = Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).filter(
+		(attempt) => attempt.taskId === laneId && attempt.status === "running",
+	);
+	expect(runningAttempts.length, `${label}: the bound lane holds one running attempt`).toBe(1);
+	const heldAttempt = runningAttempts[0];
+	const runtimeAttempt = () =>
+		heldAttempt === undefined
+			? undefined
+			: session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts[heldAttempt.attemptId];
+	const heldObjectiveId = session.backgroundLanes.getTaskRuntimeSnapshot()?.tasks[laneId]?.task.objectiveId;
+	expect(
+		{
+			attempt: heldAttempt?.status,
+			objectiveId: heldObjectiveId,
+			objective:
+				heldObjectiveId === undefined
+					? undefined
+					: session.backgroundLanes.getTaskRuntimeSnapshot()?.objectives[heldObjectiveId]?.objective.status,
+		},
+		`${label}: the held attempt runs under the goal's paused objective`,
+	).toEqual({ attempt: "running", objectiveId: goalObjectiveId("r29-goal"), objective: "paused" });
+	const leaseTtlMs = heldAttempt?.dispatch.executionContract?.worker.profile.leaseTtlMs;
+	const leaseExpiresAt = heldAttempt?.lease?.expiresAt;
+	if (leaseTtlMs === undefined || leaseExpiresAt === undefined) {
+		throw new Error(`${label}: the held attempt carries no lease TTL or lease: ${JSON.stringify(heldAttempt)}`);
+	}
+	const heartbeatMs = Math.floor(leaseTtlMs / 3);
+	const heartbeatsArmed = world.timers.armedDelays("worker-lease").sort((left, right) => left - right);
+	expect(heartbeatsArmed, `${label}: the held worker's lease heartbeat is armed at a third of its TTL`).toContain(
+		heartbeatMs,
+	);
+	const heartbeatMark = world.warnings.length;
+	expect(
+		world.timers.advance("worker-lease", heartbeatMs),
+		`${label}: advancing worker-lease by its interval fires the heartbeat`,
+	).toBeGreaterThanOrEqual(1);
+	const renewedExpiresAt = runtimeAttempt()?.lease?.expiresAt;
+	expect(
+		renewedExpiresAt !== undefined && Date.parse(renewedExpiresAt) > Date.parse(leaseExpiresAt),
+		`${label}: the heartbeat renews the running attempt's lease under the paused objective`,
+	).toBe(true);
+	expect(
+		world.timers.armedDelays("worker-lease").sort((left, right) => left - right),
+		`${label}: every heartbeat re-arms at its interval, the held worker's included`,
+	).toEqual(heartbeatsArmed);
+	expect(
+		{ lane: laneRecord()?.status, attempt: runtimeAttempt()?.status },
+		`${label}: the worker keeps running after the heartbeat`,
+	).toEqual({ lane: "running", attempt: "running" });
+	expect(world.warnings.slice(heartbeatMark), `${label}: the heartbeat warns nothing`).toEqual([]);
 	// R35: the worker ends under a goal that no longer executes.
 	const ownerPosts = () =>
 		sessionManager.getBranch().flatMap((entry) =>
