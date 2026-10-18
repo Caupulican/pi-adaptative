@@ -57,7 +57,6 @@ export interface OpenFaultMatrixRow extends FaultMatrixRowFields {
 export type FaultMatrixRow = CoveredFaultMatrixRow | OpenFaultMatrixRow;
 
 const BOTH: readonly SystemOneMode[] = ["on", "off"];
-const OWNER_LIFECYCLE = "journeys/journey-1-owner-lifecycle.ts";
 const NONE = "none";
 
 const rows: readonly FaultMatrixRow[] = [
@@ -160,7 +159,7 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "witness",
 				detail:
-					"world.restart cuts E7 and VU, which recover workers, not a promoted owner input; no journey restarts with one in flight",
+					"world.restart cuts E7 and VU, which recover workers, not a promoted owner input; no journey restarts with one in flight: the cut needs a capture taken while a queued input promoted to its own turn (`PendingInputQueueController.promote`) is prepared, before its user entry, plus that queued submission's on-mode intake judgments",
 			},
 		],
 	},
@@ -259,21 +258,25 @@ const rows: readonly FaultMatrixRow[] = [
 		owner: "core/operator-projection/decision-ledger-store.ts",
 		journey: 1,
 		phase: "owner-lifecycle SQLite",
-		fault: "one-shot SQLite exec, prepare and run failures",
-		witness: "the schema exec failure is the scripted one; a failed required SQL write must reject disposeAndWait",
+		fault: "a one-shot SQLite exec failure of the ledger schema at construction",
+		witness: "the schema exec failure is the scripted one; the failed construction leaves no handle",
+		control: "the normal construction closes its handle",
+		estSeconds: 0.1,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "R12a",
+		owner: "core/context/sqlite-runtime-index.ts",
+		journey: 1,
+		phase: "owner-lifecycle SQLite",
+		fault: "one-shot SQLite prepare (store factory) and run (release write) failures of the path-alias store",
+		witness:
+			"the prepare failure surfaces as the turn error and does not block disposal; a failed required SQL write must reject disposeAndWait",
 		control: "a release without a fault must complete",
 		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "mark",
-				file: OWNER_LIFECYCLE,
-				anchors: [
-					"a failed required SQL write must reject disposeAndWait",
-					"a release without a fault must complete",
-				],
-			},
-		],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R13",
@@ -281,11 +284,12 @@ const rows: readonly FaultMatrixRow[] = [
 		journey: 1,
 		phase: "owner-lifecycle ask",
 		fault: "a durable cut while an ask is presented",
-		witness: "the ask recovered after the cut",
-		control: "the ask presentation of the live owner",
+		witness:
+			"the restored owner resumes the pending question; the terminal closes the canonical original start captured from the cut",
+		control: "nothing is pending after the answer; the second resume appends no result and no terminal",
 		estSeconds: 2,
-		status: "open",
-		needs: [{ kind: "mark", file: OWNER_LIFECYCLE, anchors: ["ask.presented"] }],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R14",
@@ -294,19 +298,11 @@ const rows: readonly FaultMatrixRow[] = [
 		phase: "owner-lifecycle take-back",
 		fault: "an admitted input is taken back before delivery",
 		witness: "the taken back input leaves the optional-tool chain as it was",
-		control: "a committed revocation of the tool blocks it (System One on only)",
+		control: "a committed revocation of the tool blocks it",
 		estSeconds: 0.5,
-		status: "open",
-		needs: [
-			{
-				kind: "mark",
-				file: OWNER_LIFECYCLE,
-				anchors: [
-					"the taken back input leaves the optional-tool chain as it was",
-					"a committed revocation of the tool blocks it",
-				],
-			},
-		],
+		status: "covered",
+		// The control's gate judgment exists only with System One on.
+		modes: ["on"],
 	},
 	{
 		id: "R14r",
@@ -318,19 +314,26 @@ const rows: readonly FaultMatrixRow[] = [
 		control: NONE,
 		estSeconds: 4,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X2", detail: "a restart with a staged intent in flight" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"world.restart exists, but it aborts and disposes the owner first: the cut needs a capture taken while a staged intent is in flight, and no journey takes one",
+			},
+		],
 	},
 	{
 		id: "tab-preference",
 		owner: "core/tool-applicability-gate.ts",
 		journey: 1,
 		phase: "owner-lifecycle tab preference",
-		fault: "a follow-up judged while an older input is held",
-		witness: "tab-preference.held",
-		control: NONE,
+		fault: "a queued follow-up's judgment is held at its gate until a later input's judgment supersedes it",
+		witness: "the superseded inputs' owner policy is judged once each at their delivery, in owner order",
+		control: "the newer input's revocation is the committed policy once it is delivered",
 		estSeconds: 1,
-		status: "open",
-		needs: [{ kind: "mark", file: OWNER_LIFECYCLE, anchors: ["tab-preference.held"] }],
+		status: "covered",
+		// Judgments are held and superseded only with System One on.
+		modes: ["on"],
 	},
 	{
 		id: "delivery-order",
@@ -338,17 +341,13 @@ const rows: readonly FaultMatrixRow[] = [
 		journey: 1,
 		phase: "owner-lifecycle delivery order",
 		fault: "a newer steer queued behind an older follow-up",
-		witness: "the newer steer is delivered ahead of the older follow-up",
-		control: NONE,
+		witness:
+			"the newer steer is delivered ahead of the older follow-up; an older delivery limit applied after a newer lift does not override the newer owner words",
+		control: "newer owner words that lift the delivery limit lift it (the in-order memory-read turn)",
 		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "mark",
-				file: OWNER_LIFECYCLE,
-				anchors: ["the newer steer is delivered ahead of the older follow-up"],
-			},
-		],
+		status: "covered",
+		// The journey applies a delivery limit only with System One on: off, neither the limit nor the lift is exercised.
+		modes: ["on"],
 	},
 	{
 		id: "owner-input-crash-cut",
@@ -357,16 +356,10 @@ const rows: readonly FaultMatrixRow[] = [
 		phase: "owner-lifecycle delivery order",
 		fault: "a cut of the session file between the queued record and the user entry",
 		witness: "a delivered steer leaves the durable record only once its user entry is persisted",
-		control: NONE,
-		estSeconds: 0.5,
-		status: "open",
-		needs: [
-			{
-				kind: "mark",
-				file: OWNER_LIFECYCLE,
-				anchors: ["a delivered steer leaves the durable record only once its user entry is persisted"],
-			},
-		],
+		control: "the reopened session restores no queued input that was delivered",
+		estSeconds: 0.1,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R15",
@@ -409,16 +402,29 @@ const rows: readonly FaultMatrixRow[] = [
 		owner: "core/pending-input-queue-controller.ts",
 		journey: 1,
 		phase: "host-shutdown queued quit restart",
-		fault: "a crash or a quit while a prompt's own turn is prepared (accepted, its user entry not persisted yet)",
+		fault: "a quit while a prompt's own turn is prepared (accepted, its user entry not persisted yet)",
+		witness:
+			"the prompt the quit cut is not accepted, and ends held because the session closed; the next session restores the prompt the quit cut, held, and not the interrupted one",
+		control: "the interrupted prompt is not accepted, and ends cancelled by the interrupt",
+		estSeconds: 1,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "owner-input-preflight-crash",
+		owner: "core/queued-input-persistence-controller.ts",
+		journey: 1,
+		phase: "host-shutdown queued quit restart",
+		fault: "a crash while a prompt's own turn is prepared (accepted, its user entry not persisted yet)",
 		witness: NONE,
 		control: NONE,
-		estSeconds: 2,
+		estSeconds: 4,
 		status: "open",
 		needs: [
 			{
 				kind: "witness",
 				detail:
-					"no journey ends an owner with an own-turn prompt still in preparation, in a session whose file is written, and reopens that file: `disposeSessionInBody` and `restart` abort first, and the queued quit (`disposeAndWait`) comes after its prompt was delivered, so the own-turn record is empty when the next owner opens",
+					"no journey cuts with the own-turn record live: it needs a capture of the session file and its own-turn record taken while the prompt waits in its input hook, then world.restart with that capture (its abort ends the prompt cancelled and removes the record; the cut writes it back), and the reopen asserted restored held; a restart cut costs 3 to 5 s, over this phase's 3 s per-witness budget",
 			},
 		],
 	},
@@ -454,7 +460,7 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "witness",
 				detail:
-					"no journey queues an explicit chat goal or cancels a retry backoff in the run that delivered one, so the goal execution ending at its submission's release is not asserted",
+					"no journey queues an explicit chat goal or cancels a retry backoff in the run that delivered one. Derivable today: the retry's abort controller exists before auto_retry_start is emitted, so abortRetry() from that event aborts the signal the backoff waits on, and an owner with autonomy.goalAutoContinue false arms no continuation (planTimer clears). Not derivable by reading: the System One questions a queued `Goal:` prompt and its goal turn ask with System One on (objective_primary), and the warnings a run that ends in a cancelled retry right after starting a chat goal, and the disposal of an owner whose goal is still active, emit (journey 1 allows none)",
 			},
 		],
 	},
@@ -486,55 +492,43 @@ const rows: readonly FaultMatrixRow[] = [
 		id: "R18",
 		owner: "core/background-tool-task-controller.ts",
 		journey: 2,
-		phase: "orchestration",
+		phase: "background-and-stall",
 		fault: "the background terminal delivery to the idle root is refused",
-		witness: NONE,
-		control: "terminalDelivery is delivered (happy path only)",
-		estSeconds: 2,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"the persistent append denial exists (EffectGuard.denyUntilCleared with kind append), but one refused append to the session file fences that SessionManager (persistenceStateUncertain) until setSessionFile reopens it: every later append throws the fence error, so clearing the denial alone does not re-arm delivery in the same owner; no journey asserts the refused delivery and its warnings",
-			},
-		],
+		witness:
+			"the denied wake-up append leaves the completed terminal pending with no wake-up entry and one retrying warning whose cause is the session-file fence",
+		control: "orchestration E aux: the same idle-root terminal with an accepting session file is recorded delivered",
+		estSeconds: 1,
+		status: "covered",
+		// The on-mode System One judgment set for these idle-root wake-up turns is not derivable by reading.
+		modes: ["off"],
 	},
 	{
 		id: "R19",
 		owner: "core/background-tool-task-controller.ts",
 		journey: 2,
-		phase: "orchestration",
+		phase: "background-and-stall",
 		fault: "the wake-up delivery is rejected until the queue parks",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 2,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"the append denial exists, and the wake-up backoff runs on the virtual background-tool-task port: min(100 * 2^min(n, 5), 5000) ms after failures 1..9, and the tenth parks the queue (100+200+400+800+1600+3200*4 = 15,900 ms over 9 advances); after the first refused append the session-file fence refuses every retry until the file is reopened, but no journey drives the nine advances and asserts the park and its warnings",
-			},
-		],
+		witness:
+			"nine single-alarm retries at 100, 200, 400, 800, 1600 and 4 x 3200 ms, then the park warning; no alarm is armed after the park and one denied append in all",
+		control: "after the reopen, deliveries accepted at their first attempt arm no retry and add no warning",
+		estSeconds: 0.5,
+		status: "covered",
+		// The on-mode System One judgment set for these idle-root wake-up turns is not derivable by reading.
+		modes: ["off"],
 	},
 	{
 		id: "R20",
 		owner: "core/background-tool-task-controller.ts",
 		journey: 2,
-		phase: "orchestration",
+		phase: "background-and-stall",
 		fault: "a parked queue re-armed by a task event or resume",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"after the session file is reopened, the next background task start re-arms the parked wake-up: it is delivered to the idle root and recorded delivered",
+		control: "the re-arming task's own terminal is delivered after it, in order",
 		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"depends on R19's parked queue; a parked queue is re-armed by the next background task start or terminal, or redelivered on session resume, and no journey asserts either",
-			},
-		],
+		status: "covered",
+		// The on-mode System One judgment set for these idle-root wake-up turns is not derivable by reading.
+		modes: ["off"],
 	},
 	{
 		id: "R21",
@@ -546,7 +540,13 @@ const rows: readonly FaultMatrixRow[] = [
 		control: NONE,
 		estSeconds: 4,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X2", detail: "a restart cut with a live background execution" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"world.restart exists, but it aborts and disposes the owner first: the cut needs a capture taken while a background execution is live, and no journey takes one",
+			},
+		],
 	},
 	{
 		id: "R22",
@@ -585,35 +585,24 @@ const rows: readonly FaultMatrixRow[] = [
 		journey: 1,
 		phase: "host-shutdown mode witnesses retry",
 		fault: "a retryable provider error before the response starts (connect error), and one after partial frames",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"connect-control and partial-control: the failed response starts with its error only when the transport failed before the response began; the failed stream delivered its partial frames before its error",
+		control: "the live retry (mid-stream fail() shape): the same retry, delivery and response-start assertions",
 		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"the shapes exist (scripted-provider connectError and errorAfterFrames), but no journey enqueues either; R23 rides the mid-stream fail() shape, whose stream emits start before its error and carries no partial content",
-			},
-		],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R24",
 		owner: "core/foreground-recovery-controller.ts",
-		journey: 2,
-		phase: "background-and-stall",
-		fault: "a parked foreground resumes",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"the X4 shapes exist (connectError, errorAfterFrames, quota in scripted-provider.ts) and R23's retry witness is covered, but no journey parks a foreground recovery and asserts its resume",
-			},
-		],
+		journey: 1,
+		phase: "intent-and-branching S4",
+		fault: "a foreground idle waiter parked behind a history rewrite (a held summarized navigation) resumes when the rewrite settles",
+		witness: "the parked idle waiter resumes once the navigations settle, on the foreground activity it waited for",
+		control: "an idle waiter on an idle foreground starts no wait when called",
+		estSeconds: 0.1,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R25",
@@ -629,7 +618,7 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "witness",
 				detail:
-					"the quota reply shape exists (scripted-provider quota(name, retryAfterMs): a pre-start 429 usage-limit error with a provider retry directive), but no queued-recovery step queues owner input behind it and asserts the wait and the delivery",
+					"the foreground has no usage-limit wait: a foreground quota refusal stops its run and holds queued input (R45u). The reset wait is the non-foreground model_quota admission wait (provider-admission/gate.ts): no journey sends a worker or background request to a model whose quota exhaustion was recorded with a reset, and asserts the wait and the request after the reset",
 			},
 		],
 	},
@@ -761,7 +750,13 @@ const rows: readonly FaultMatrixRow[] = [
 		control: NONE,
 		estSeconds: 4,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X2", detail: "a restart with pending terminal handoffs" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"world.restart exists, but it aborts and disposes the owner first: the cut needs a capture taken while terminal handoffs are pending, and no journey takes one",
+			},
+		],
 	},
 	{
 		id: "R35",
@@ -785,7 +780,13 @@ const rows: readonly FaultMatrixRow[] = [
 		control: NONE,
 		estSeconds: 4,
 		status: "open",
-		needs: [{ kind: "extension", extension: "X2", detail: "a restart between acceptance and delivery" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"world.restart exists, but it aborts and disposes the owner first: the cut needs a capture taken between the acceptance and the delivery of judged owner words, and no journey takes one",
+			},
+		],
 	},
 	{
 		id: "R37",
@@ -906,7 +907,7 @@ const rows: readonly FaultMatrixRow[] = [
 		owner: "core/runtime-update-controller.ts",
 		journey: 2,
 		phase: "queued-recovery",
-		fault: "a runtime-update or usage-limit stop with owner input queued",
+		fault: "a runtime-update stop with owner input queued (the usage-limit stop is R45u)",
 		witness: NONE,
 		control: NONE,
 		estSeconds: 2,
@@ -915,9 +916,22 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "witness",
 				detail:
-					"the quota reply shape exists (scripted-provider quota), but no queued-recovery step queues owner input behind the stop and asserts where it is held",
+					"no journey drives runtime_update: it needs a scripted root turn that calls runtime_update (reload with its verification tool) and then its stop while a steer is queued, with the tool active in the harness root, and an assertion of where the queued input is held",
 			},
 		],
+	},
+	{
+		id: "R45u",
+		owner: "core/foreground-recovery-controller.ts",
+		journey: 1,
+		phase: "host-shutdown mode witnesses retry",
+		fault: "a metered usage-limit (quota) refusal stops the run with owner input queued",
+		witness:
+			"usage-limit: the metered usage-limit stop gives its halt notice, then holds the queued input its run no longer delivers",
+		control: "stranded-control: a failed run that is not stopped on a usage limit delivers its queued input",
+		estSeconds: 0.5,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R46",
@@ -1006,7 +1020,7 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "witness",
 				detail:
-					"world.restart({ rewindSqlite: world.guard.snapshotSqlite() }) now cuts the owner and rewinds every SQLite backing to the snapshot, but no editable phase holds a ledger write between a snapshot and a cut whose reopened state a journey asserts",
+					"world.restart({ rewindSqlite: world.guard.snapshotSqlite() }) now cuts the owner and rewinds every SQLite backing to the snapshot, but no editable phase holds a ledger write between a snapshot and a cut whose reopened state a journey asserts: it needs a production ledger write with a source-derived row that the reopened owner does not write again on construction, read back after the cut (for example `DecisionLedgerStore.semanticEvaluations`), at a point where no SQLite handle of the world is open, since the rewind of a live backing throws",
 			},
 		],
 	},

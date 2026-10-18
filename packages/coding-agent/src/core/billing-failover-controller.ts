@@ -29,13 +29,19 @@ export type ExhaustionScope = "model" | "provider";
  * also file-backed under `state/provider-admission/exhausted/`, so every pi process on the machine
  * shares what one of them learned instead of each rediscovering it against the same account. An
  * entry without an expiry lasts for the process that recorded it and is not shared.
+ *
+ * Every expiry is read and computed on `now`: the clock of the provider admission gate, which waits out a recorded
+ * reset on its own alarms. Two clocks would let the gate's alarm fire at a reset this registry still holds.
  */
 export class ExhaustedProviderRegistry {
 	private readonly exhausted = new Map<string, number | undefined>();
 	private readonly storeDir: string | undefined;
+	/** Epoch milliseconds on the clock every expiry here is due on. */
+	readonly now: () => number;
 
-	constructor(storeDir?: string) {
+	constructor(storeDir?: string, now: () => number = Date.now) {
 		this.storeDir = storeDir;
+		this.now = now;
 	}
 
 	markExhausted(ref: string, until?: number, scope: ExhaustionScope = "model"): void {
@@ -46,7 +52,7 @@ export class ExhaustedProviderRegistry {
 				mkdirSync(this.storeDir, { recursive: true });
 				writeFileAtomicSync(
 					this.storePath(key),
-					`${JSON.stringify({ ref: key, until, pid: process.pid, recordedAt: Date.now() })}\n`,
+					`${JSON.stringify({ ref: key, until, pid: process.pid, recordedAt: this.now() })}\n`,
 					{ mode: 0o600 },
 				);
 			} catch {
@@ -71,12 +77,12 @@ export class ExhaustedProviderRegistry {
 	private isExhaustedKey(key: string): boolean {
 		if (this.exhausted.has(key)) {
 			const until = this.exhausted.get(key);
-			if (until === undefined || Date.now() < until) return true;
+			if (until === undefined || this.now() < until) return true;
 			this.exhausted.delete(key);
 		}
 		const shared = this.readShared(key);
 		if (shared === undefined) return false;
-		if (Date.now() < shared) {
+		if (this.now() < shared) {
 			this.exhausted.set(key, shared);
 			return true;
 		}
@@ -185,7 +191,7 @@ export class BillingFailoverController {
 
 	/** A lane other than the foreground (a worker) ran the model out of quota: nothing routes to it again. */
 	markModelExhausted(ref: string, retryAfterMs?: number): void {
-		this.deps.exhausted.markExhausted(ref, expiryFromRetryAfter(retryAfterMs));
+		this.deps.exhausted.markExhausted(ref, expiryFromRetryAfter(retryAfterMs, this.deps.exhausted.now()));
 	}
 
 	snapshotExhausted(): string[] {
@@ -209,7 +215,10 @@ export class BillingFailoverController {
 		if (classified.reason !== "billing_or_quota") return { handled: false };
 		const failedModel = this.deps.modelRegistry.find(message.provider, message.model) ?? this.deps.agent.state.model;
 		const failedRef = `${failedModel.provider}/${failedModel.id}`;
-		this.deps.exhausted.markExhausted(failedRef, expiryFromRetryAfter(classified.retryAfterMs));
+		this.deps.exhausted.markExhausted(
+			failedRef,
+			expiryFromRetryAfter(classified.retryAfterMs, this.deps.exhausted.now()),
+		);
 
 		const defaultModelId = DEFAULT_MODEL_PER_PROVIDER[failedModel.provider];
 		const hop = defaultModelId ? this.deps.modelRegistry.find(failedModel.provider, defaultModelId) : undefined;
@@ -242,6 +251,6 @@ export class BillingFailoverController {
 	}
 }
 
-function expiryFromRetryAfter(retryAfterMs: number | undefined): number | undefined {
-	return retryAfterMs === undefined ? undefined : Date.now() + retryAfterMs;
+function expiryFromRetryAfter(retryAfterMs: number | undefined, nowMs: number): number | undefined {
+	return retryAfterMs === undefined ? undefined : nowMs + retryAfterMs;
 }

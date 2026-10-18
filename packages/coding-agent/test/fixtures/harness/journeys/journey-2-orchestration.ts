@@ -1883,6 +1883,8 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	expect(eRecord?.toolCallId, "the canonical background record names the held pass call").toBe("e-bg-1");
 	expect(eRecord?.status, "the canonical background record is the completed terminal").toBe("completed");
 	expect(eRecord?.terminalDelivery, "the terminal was delivered to the idle root").toBe("delivered");
+	// R18 control: the same idle-root wake-up with the session file accepting its append is delivered at once.
+	if (!world.systemOne.enabled) world.faultMatrix.witness("R18", { control: true });
 	expect(eRecord?.piVerification?.status, "the canonical record carries the passing verification receipt").toBe(
 		"passed",
 	);

@@ -24,7 +24,17 @@ import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle
 import { runPrintMode } from "../../../src/modes/print-mode.ts";
 import { initTheme, stopThemeWatcher } from "../../../src/presentation/theme/theme.ts";
 import { trackDetachedChild, untrackDetachedChild } from "../../../src/utils/shell.ts";
-import { type Barrier, createBarrier, fail, HARNESS_API, HARNESS_PROVIDER, text } from "./scripted-provider.ts";
+import {
+	type Barrier,
+	connectError,
+	createBarrier,
+	errorAfterFrames,
+	fail,
+	HARNESS_API,
+	HARNESS_PROVIDER,
+	quota,
+	text,
+} from "./scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "./session-fixture.ts";
 
 // Match the production adapter's default object rather than an immutable ESM namespace.
@@ -2606,9 +2616,27 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 		200 + suffix.length,
 	);
 	const failure = "network error: scripted connection interrupted";
-	for (const stopAt of ["message-end", "backoff", "control", "stranded-control"] as const) {
+	const partial = "Partial reply words the failed stream carried before its error.";
+	// connect-control fails before its response starts and partial-control after partial frames; both retry like control. usage-limit is a
+	// pre-start quota refusal: no retry, and the run stops on it. Its exhaustion record lands in its own agent directory.
+	for (const stopAt of [
+		"message-end",
+		"backoff",
+		"control",
+		"stranded-control",
+		"connect-control",
+		"partial-control",
+		"usage-limit",
+	] as const) {
+		const live =
+			stopAt === "control" ||
+			stopAt === "stranded-control" ||
+			stopAt === "connect-control" ||
+			stopAt === "partial-control";
+		const agentDir = stopAt === "usage-limit" ? `${world.agentDir}-retry-usage-limit` : world.agentDir;
 		const created = await world.createRootSession("root", {
-			sessionManager: world.createSessionManager(),
+			agentDir,
+			sessionManager: world.createSessionManager(agentDir),
 			settings: {
 				memorySystem: "okf",
 				autoLearn: { enabled: false },
@@ -2626,10 +2654,20 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 		const warningMark = world.warnings.length;
 		const retryFlags: boolean[] = [];
 		const retryEvents: Array<Record<string, unknown>> = [];
+		const assistantStarts: string[] = [];
+		let partialStreamed = false;
 		let close: Promise<string> | undefined;
 		let activeBackoffAtClose = false;
 		let closingNativeQueue = false;
 		session.subscribe((event) => {
+			if (event.type === "message_start" && event.message.role === "assistant")
+				assistantStarts.push(event.message.stopReason);
+			if (
+				event.type === "message_update" &&
+				event.message.role === "assistant" &&
+				event.message.content.some((part) => part.type === "text" && part.text === partial)
+			)
+				partialStreamed = true;
 			if (
 				event.type === "message_end" &&
 				event.message.role === "assistant" &&
@@ -2651,15 +2689,40 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 			} else if (event.type === "auto_retry_end")
 				retryEvents.push({ type: event.type, success: event.success, finalError: event.finalError });
 		});
+		const failureName = `retry-${stopAt}-failure`;
 		world.provider.enqueue("root", {
-			...fail(`retry-${stopAt}-failure`, failure),
+			...(stopAt === "connect-control"
+				? connectError(failureName)
+				: stopAt === "partial-control"
+					? errorAfterFrames(
+							failureName,
+							[
+								{
+									partialContent: [{ type: "text", text: "" }],
+									event: { type: "text_start", contentIndex: 0 },
+								},
+								{
+									partialContent: [{ type: "text", text: partial }],
+									event: { type: "text_delta", contentIndex: 0, delta: partial },
+								},
+							],
+							failure,
+						)
+					: stopAt === "usage-limit"
+						? quota(failureName, 60_000)
+						: fail(failureName, failure)),
 			check: () => reached.release(),
 			gate: hold.promise,
 		});
-		if (stopAt === "control" || stopAt === "stranded-control")
+		if (live)
 			world.provider.enqueue("root", {
 				...text(`retry-${stopAt}`, "The retry delivers the complete Unicode input."),
 				check: (request) => {
+					if (stopAt === "partial-control")
+						expect(
+							JSON.stringify(request.context.messages).includes(partial),
+							"the retry re-sends the request without the failed stream's partial reply",
+						).toBe(false);
 					expect(
 						request.context.messages.some(
 							(message) =>
@@ -2706,8 +2769,8 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 			expect(
 				world.provider.requests.slice(requestMark).map((request) => request.model.id),
 				"only live backoff expiry starts the retry provider round",
-			).toEqual(stopAt === "control" || stopAt === "stranded-control" ? ["root", "root"] : ["root"]);
-			if (stopAt === "control" || stopAt === "stranded-control") {
+			).toEqual(live ? ["root", "root"] : ["root"]);
+			if (live) {
 				expect(
 					retryFlags,
 					"a genuinely retryable live error advertises a retry only when a recovery round follows; the stall-cap exit advertises none, and success never does",
@@ -2729,7 +2792,48 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 					(world.io.peekFile(file) ?? "").includes(queued),
 					"live delivery persists the complete payload",
 				).toBe(true);
-				if (stopAt === "control") world.faultMatrix.witness("R23", { control: true });
+				// A pre-start failure has no `start` event: its error is the message that starts. Every other response starts as a reply.
+				expect(
+					assistantStarts,
+					"the failed response starts with its error only when the transport failed before the response began",
+				).toEqual(stopAt === "connect-control" ? ["error", "stop"] : ["stop", "stop"]);
+				if (stopAt === "partial-control")
+					expect(partialStreamed, "the failed stream delivered its partial frames before its error").toBe(true);
+				if (stopAt === "control") {
+					world.faultMatrix.witness("R23", { control: true });
+					world.faultMatrix.witness("R23c", { control: true });
+				}
+				if (stopAt === "connect-control" || stopAt === "partial-control")
+					world.faultMatrix.witness("R23c", { control: false });
+				// A failed run that is not stopped on a usage limit delivers its queued input instead of holding it.
+				if (stopAt === "stranded-control") world.faultMatrix.witness("R45u", { control: true });
+			} else if (stopAt === "usage-limit") {
+				expect(retryFlags, "a usage-limit refusal advertises no retry").toEqual([false]);
+				expect(retryEvents, "a usage-limit refusal announces no retry").toEqual([]);
+				expect(
+					warnings,
+					"the metered usage-limit stop gives its halt notice, then holds the queued input its run no longer delivers",
+				).toEqual([
+					`Provider quota/limit reached for ${HARNESS_PROVIDER}/root: switch models (/model), wait for the limit window, or re-send to retry`,
+					`A queued message was not delivered because its turn ended before it could be delivered. It is kept in full in the pending queue; restore it to the editor to send it again: ${"x".repeat(198)}…`,
+				]);
+				expect(
+					session.getSteeringMessages(),
+					"the usage-limit stop keeps the complete queued input in the pending queue",
+				).toEqual([queued]);
+				expect(
+					session.deliverablePendingMessageCount,
+					"held input remains visible but cannot be delivered by a later run",
+				).toBe(0);
+				expect(
+					retryRecordsIn(world.io.peekFile(file) ?? ""),
+					"the usage-limit stop persists no retry record",
+				).toEqual([]);
+				expect(
+					(world.io.peekFile(file) ?? "").includes("429 Usage limit reached for this account."),
+					"the stopped run durably records its actual usage-limit refusal",
+				).toBe(true);
+				world.faultMatrix.witness("R45u", { control: false });
 			} else {
 				expect(
 					warnings,

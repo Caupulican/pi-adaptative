@@ -6,6 +6,8 @@ import type { AgentSessionEvent } from "../../core/agent-session-contracts.ts";
 import { expandArgumentsForDisplay, expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
 import type { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import { latestAssistantCommentaryLabel } from "../../core/message-phase.ts";
+import type { ProviderAdmissionWaitEvent } from "../../core/provider-admission/gate.ts";
+import type { WaitEndReport } from "../../core/util/wait.ts";
 import { getToolCallRepairInfo } from "../../kernel/agent-loop.ts";
 import { type AgentMessage, retainedToolInvocation, type ToolCallRepairInfo } from "../../kernel/index.ts";
 import type { SessionManager } from "../../kernel/node.ts";
@@ -29,6 +31,39 @@ import type { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { type MisalignmentBlock, misalignmentBlock } from "./misalignment-continuation.ts";
 import type { RuntimeStatusController } from "./runtime-status-controller.ts";
 import type { WorkbenchController } from "./workbench-controller.ts";
+
+/** A provider admission wait's end as the activity lane shows it. */
+interface AdmissionWaitEndLine {
+	readonly label: string;
+	readonly status: "failure" | "neutral";
+}
+
+/**
+ * How a provider admission wait's end reads in the activity lane, from its typed end: a wait that was refused,
+ * cancelled or let through only by its spent budget never reads as admitted.
+ */
+function admissionWaitEnd(event: ProviderAdmissionWaitEvent): AdmissionWaitEndLine {
+	const after = `after ${Math.ceil((event.waitedMs ?? 0) / 1000)}s`;
+	const end: WaitEndReport = event.end ?? { kind: "satisfied", by: "provider_admission" };
+	switch (end.kind) {
+		case "satisfied":
+			return { label: `${event.provider} admitted ${after}`, status: "neutral" };
+		case "timed_out":
+			// At its budget a capacity wait goes anyway and an emergency stop refuses; a reset wait reads the limit again.
+			if (event.reason === "capacity")
+				return { label: `${event.provider} admitted at its wait budget ${after}`, status: "neutral" };
+			if (event.reason === "emergency_stop")
+				return { label: `${event.provider} refused: emergency stop still engaged ${after}`, status: "failure" };
+			return { label: `${event.provider} wait budget spent ${after}`, status: "neutral" };
+		case "aborted":
+			return { label: `${event.provider} wait cancelled ${after}`, status: "neutral" };
+		case "unavailable":
+			return { label: `${event.provider} not admitted ${after}: ${end.cause}`, status: "failure" };
+		case "steered":
+		case "disposed":
+			return { label: `${event.provider} wait ended ${end.kind} ${after}`, status: "neutral" };
+	}
+}
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface InteractiveEventControllerSettingsSource {
@@ -675,11 +710,8 @@ export class InteractiveEventController {
 					this.port.activityLane?.wait({ id, kind: "runtime", scope: event.lane, label });
 					if (event.lane === "foreground") this.loadingAnimation?.setMessage(label);
 				} else {
-					this.port.activityLane?.finish(id, "neutral", {
-						id,
-						kind: "runtime",
-						label: `${event.provider} admitted after ${Math.ceil((event.waitedMs ?? 0) / 1000)}s`,
-					});
+					const ended = admissionWaitEnd(event);
+					this.port.activityLane?.finish(id, ended.status, { id, kind: "runtime", label: ended.label });
 					if (event.lane === "foreground")
 						this.loadingAnimation?.setMessage(this.port.runtimeStatus.getWorkingLoaderMessage());
 				}

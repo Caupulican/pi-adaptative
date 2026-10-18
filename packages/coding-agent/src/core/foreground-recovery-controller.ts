@@ -105,7 +105,8 @@ export interface ForegroundRecoveryControllerDeps {
 	agent: Agent;
 	/**
 	 * The session timers: the `foreground` port runs the overdue watchdog of the foreground waits, the `foreground-retry`
-	 * port the auto-retry backoff. Defaults to the system timers.
+	 * port the auto-retry backoff, and the `provider-admission` port's clock the model exhaustions' resets. Defaults to the
+	 * system timers.
 	 */
 	timers?: TimerSource;
 	/** The ICM chat's turns, undefined while no chat runs. Every provider run begins one, as its own, and ends it. */
@@ -189,6 +190,7 @@ export class ForegroundRecoveryController {
 
 	constructor(deps: ForegroundRecoveryControllerDeps) {
 		this.deps = deps;
+		const admissionClock = (deps.timers ?? SYSTEM_TIMER_SOURCE).port("provider-admission");
 		this.retry = new RetryController(
 			deps.agent,
 			() => this.getRetryPolicy(),
@@ -204,7 +206,8 @@ export class ForegroundRecoveryController {
 			applyFailoverModel: (failed, hop) => deps.applyFailoverModel(failed, hop),
 			resolveFallbackModel: (failed) => deps.resolveFallbackModel?.(failed),
 			modelRegistry: deps.modelRegistry,
-			exhausted: new ExhaustedProviderRegistry(deps.exhaustedStoreDir),
+			// On the admission gate's clock: the gate waits out a model's recorded reset on that port's alarms.
+			exhausted: new ExhaustedProviderRegistry(deps.exhaustedStoreDir, () => admissionClock.now()),
 			subscriptionHop: deps.settingsManager.getFailoverSettings().subscriptionHop,
 			emit: (event) => deps.emit(event),
 			recordFailure: (record) => deps.failureCorpus.record(record),

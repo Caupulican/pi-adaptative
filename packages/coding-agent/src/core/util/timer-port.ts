@@ -23,7 +23,8 @@ export {
  * - `foreground`: the overdue watchdog of the waits for the foreground (submission, history claim, idle).
  * - `foreground-retry`: the foreground auto-retry backoff and its overdue watchdog.
  * - `provider-admission`: the provider admission gate's pauses (model quota, provider limit, capacity, emergency stop)
- *   and the admission ledger's hold heartbeat and staleness clock.
+ *   and the admission ledger's hold heartbeat and staleness clock, and the clock of the model exhaustions whose resets
+ *   the gate waits out.
  * - `worker-lease`: the heartbeat that renews a running worker attempt's lease. It is its own owner so a host that
  *   drives `orchestration` past a lease deadline expires the lease instead of firing the renewal first.
  * - `goal-continuation`: the goal auto-continue wake (the continuation delay, a persisted worker-deadline resume and the

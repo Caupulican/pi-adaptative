@@ -846,6 +846,16 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 	world.systemOne.enterPhase("s4-held", {});
 	const s4Summary = s4Session.navigateTree(s4FirstUser.id, { summarize: true });
 	await withDeadline(trace, "S4 summary held", s4SummaryAdmitted.promise);
+	// An idle waiter parks behind the held navigation's history rewrite: its wait starts before the call returns. It resumes once the
+	// navigations settle, and its one end reports the foreground activity it waited on.
+	const s4IdleWaits: Array<{ seq: number; phase: string; end?: unknown }> = [];
+	const s4UnsubscribeIdle = s4Session.subscribe((event) => {
+		if (event.type === "wait" && event.id === "foreground.idle")
+			s4IdleWaits.push({ seq: event.seq, phase: event.phase, end: event.end });
+	});
+	const s4IdleParked = s4Session.waitForForegroundIdle();
+	const s4IdleStarts = s4IdleWaits.filter((wait) => wait.phase === "start");
+	expect(s4IdleStarts.length, "an idle waiter parks behind the held navigation's history rewrite").toBe(1);
 	const s4Refusal = await s4Session.reload().then(
 		() => undefined,
 		(error: unknown) => error,
@@ -893,6 +903,20 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 	expect(s4Verdicts, "the held queued prompt is not accepted, and says it was held for its changed context").toEqual([
 		{ accepted: false, ended: { state: "held", reason: "context_changed" } },
 	]);
+	await withDeadline(trace, "S4 parked idle waiter resumed", s4IdleParked);
+	const s4IdleSeq = s4IdleStarts[0]?.seq;
+	expect(
+		s4IdleWaits.filter((wait) => wait.seq === s4IdleSeq && wait.phase === "end").map((wait) => wait.end),
+		"the parked idle waiter resumes once the navigations settle, on the foreground activity it waited for",
+	).toEqual([{ kind: "satisfied", by: "foreground.activity" }]);
+	world.faultMatrix.witness("R24", { control: false });
+	// Normal order: on an idle foreground the waiter does not park behind any occupancy, so the call starts no wait.
+	const s4IdleMark = s4IdleWaits.length;
+	const s4IdleFree = s4Session.waitForForegroundIdle();
+	expect(s4IdleWaits.slice(s4IdleMark), "an idle waiter on an idle foreground starts no wait when called").toEqual([]);
+	await withDeadline(trace, "S4 idle waiter on an idle foreground", s4IdleFree);
+	s4UnsubscribeIdle();
+	world.faultMatrix.witness("R24", { control: true });
 	expect(
 		s4Manager
 			.getBranch()

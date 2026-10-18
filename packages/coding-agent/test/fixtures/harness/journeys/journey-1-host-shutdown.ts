@@ -2,8 +2,9 @@ import "../builtin-install.ts";
 import { expect } from "vitest";
 import { decisionLedgerFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import type { ExtensionFactory } from "../../../../src/core/extensions/types.ts";
 import { DecisionLedgerStore } from "../../../../src/core/operator-projection/decision-ledger-store.ts";
-import { QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/core/queued-input-record.ts";
+import { ownTurnInputRecordPath, QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/core/queued-input-record.ts";
 import { verifyModeWitnesses } from "../mode-witnesses.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import {
@@ -842,10 +843,11 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		await world.disposeSessionInBody(qlNext.session),
 		"the control's next owner disposes cleanly",
 	).toBeUndefined();
-	const reopenQl = () =>
+	const reopenQl = (extensionFactories?: readonly ExtensionFactory[]) =>
 		world.createRootSession("root", {
 			sessionManager: world.openSessionManager(qlFile),
 			settings: { memorySystem: "okf" },
+			...(extensionFactories ? { extensionFactories } : {}),
 		});
 	const restoredView = (session: AgentSession) => ({
 		followUp: session.getFollowUpMessages(),
@@ -880,6 +882,99 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		await world.disposeSessionInBody(qtNext.session),
 		"the take-back's next owner disposes cleanly",
 	).toBeUndefined();
+	// A quit while a prompt's own turn is prepared: an extension's input hook holds the prompt, so it is accepted and named in the
+	// own-turn record beside the written session file, and its user entry is not persisted. The quit closes the queue and never
+	// rewrites that record, so the submission ends the prompt held (closed) and the next session restores it held, with its one
+	// restore notice. Control, first in the same owner: the same held prompt the owner interrupts (its caller's signal) before the
+	// quit ends cancelled and leaves the record, so the next session does not restore it.
+	const ownTurnPath = ownTurnInputRecordPath(qlFile);
+	// The prompts the own-turn record names, as submitted; undefined when there is no record.
+	const ownTurnTexts = (): string[] | undefined => {
+		const record = world.io.peekFile(ownTurnPath);
+		return record === undefined
+			? undefined
+			: (JSON.parse(record) as { inputs: { text: string }[] }).inputs.map((input) => input.text);
+	};
+	const PREPARING_CONTROL_WORDS = "Owner prompt in preparation that the owner interrupts.";
+	const PREPARING_WORDS = "Owner prompt still in preparation at the quit.";
+	// The one restore notice for one restored prompt that was being prepared, on a host with no editor.
+	const RESTORED_PREPARING_HEADLESS =
+		"Restored 1 prompt that was being prepared from the previous run; they are held, not delivered, and stay held for the next interactive session on this session (RPC: pendingMessageCount in get_state counts them, clear_queue drops them).";
+	const prepControl = { hold: createBarrier(), reached: createBarrier() };
+	const prepQuit = { hold: createBarrier(), reached: createBarrier() };
+	const prepHolds = new Map([
+		[PREPARING_CONTROL_WORDS, prepControl],
+		[PREPARING_WORDS, prepQuit],
+	]);
+	const prepOwner = await reopenQl([
+		(pi) => {
+			pi.on("input", async (event) => {
+				const held = prepHolds.get(event.text);
+				if (held === undefined) return;
+				held.reached.release();
+				await held.hold.promise;
+			});
+		},
+	]);
+	const prepSession = prepOwner.session;
+	await prepSession.bindExtensions({ uiContext: world.humanInput.ui });
+	const prepControlVerdicts: Array<{ accepted: boolean; ended: unknown }> = [];
+	const prepInterrupt = new AbortController();
+	const prepControlPrompt = prepSession.prompt(PREPARING_CONTROL_WORDS, {
+		signal: prepInterrupt.signal,
+		preflightResult: (accepted, ended) => prepControlVerdicts.push({ accepted, ended }),
+	});
+	await withDeadline(trace, "preparing control: the prompt waits in its input hook", prepControl.reached.promise);
+	expect(ownTurnTexts(), "the own-turn record names the prompt being prepared").toEqual([PREPARING_CONTROL_WORDS]);
+	prepInterrupt.abort();
+	prepControl.hold.release();
+	expect(
+		await withDeadline(trace, "preparing control: the interrupted prompt ends", prepControlPrompt),
+		"the interrupted prompt ends without an error",
+	).toBeUndefined();
+	expect(prepControlVerdicts, "the interrupted prompt is not accepted, and ends cancelled by the interrupt").toEqual([
+		{ accepted: false, ended: { state: "cancelled", reason: "interrupted" } },
+	]);
+	expect(ownTurnTexts(), "the interrupted prompt leaves the own-turn record").toBeUndefined();
+	const prepQuitVerdicts: Array<{ accepted: boolean; ended: unknown }> = [];
+	const prepQuitPrompt = prepSession.prompt(PREPARING_WORDS, {
+		preflightResult: (accepted, ended) => prepQuitVerdicts.push({ accepted, ended }),
+	});
+	await withDeadline(trace, "preparing quit: the prompt waits in its input hook", prepQuit.reached.promise);
+	expect(ownTurnTexts(), "the own-turn record names the prompt the quit cuts").toEqual([PREPARING_WORDS]);
+	// The quit closes the queue and cancels the submission before disposeAndWait first awaits; the hook returns after that.
+	const prepClosing = prepSession.disposeAndWait();
+	prepQuit.hold.release();
+	expect(
+		await withDeadline(
+			trace,
+			"preparing quit: the held prompt ends and the owner disposes",
+			Promise.all([prepQuitPrompt, prepClosing]),
+			60_000,
+		),
+		"the prompt the quit cut ends without an error, and the owner disposes cleanly",
+	).toEqual([undefined, undefined]);
+	expect(
+		prepQuitVerdicts,
+		"the prompt the quit cut is not accepted, and ends held because the session closed",
+	).toEqual([{ accepted: false, ended: { state: "held", reason: "closed" } }]);
+	expect(ownTurnTexts(), "the closed session leaves the own-turn record naming the prompt").toEqual([PREPARING_WORDS]);
+	const prepNext = await reopenQl();
+	expect(
+		restoredView(prepNext.session),
+		"the next session restores the prompt the quit cut, held, and not the interrupted one",
+	).toEqual({
+		followUp: [PREPARING_WORDS],
+		pending: 1,
+		deliverable: 0,
+		notice: RESTORED_PREPARING_HEADLESS,
+	});
+	world.faultMatrix.witness("owner-input-preflight-restart", { control: false });
+	world.faultMatrix.witness("owner-input-preflight-restart", { control: true });
+	expect(prepNext.session.takeAllQueuedInput().followUp, "the owner takes the restored prompt back").toEqual([
+		{ text: PREPARING_WORDS },
+	]);
+	expect(await world.disposeSessionInBody(prepNext.session), "the restoring owner disposes cleanly").toBeUndefined();
 	trace.mark("root", "queued-quit.restart-restore");
 
 	// RPC host shutdown: the host runs on a real runtime of the world with its process effects injected. A SIGTERM through its termination

@@ -1,5 +1,9 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
+import {
+	type BackgroundToolTaskRecord,
+	loadBackgroundToolTaskRecordsNewestFirst,
+} from "../../../../src/core/background-tool-task-controller.ts";
 import { buildObjectiveRoutePrompt } from "../../../../src/core/goals/goal-continuation-prompt.ts";
 import type { ObjectiveRoute } from "../../../../src/core/objective-execution/objective-route.ts";
 import { goalObjectiveId } from "../../../../src/core/orchestration/work-state-projection.ts";
@@ -13,10 +17,202 @@ import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
  * The library's CJS export object is the one production's default import receives, so its functions
  * are rebound in place rather than through an ESM module mock.
  */
-import { requestTexts } from "./shared.ts";
+import { backgroundTaskIdOf, handoffFor, requestTexts } from "./shared.ts";
 
 export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
+	// R18-R20, System One off: a background terminal whose wake-up the session file refuses. An auxiliary root with no goal starts a
+	// held echo in the background; once it ends while the root is idle, the wake-up message's append is denied, and that one refused
+	// write fences the SessionManager, so every later attempt is refused by the fence before any write. The retries run on the
+	// virtual background-tool-task timers until the queue parks; reopening the canonical file clears the fence, and the next
+	// background task start re-arms the parked wake-up. With System One on these turns ask questions no reading derives, so the
+	// rows declare off only.
+	if (!world.systemOne.enabled) {
+		const WAKE_OWNER = "background-tool-task";
+		const FENCE =
+			"Session persistence state is uncertain after a failed write; reopen the session file or start a new session before appending.";
+		const LADDER = [100, 200, 400, 800, 1_600, 3_200, 3_200, 3_200, 3_200];
+		const parkAux = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
+		const parkSession = parkAux.session;
+		const taskRecord = (taskId: string | undefined): BackgroundToolTaskRecord | undefined =>
+			loadBackgroundToolTaskRecordsNewestFirst(parkAux.sessionManager).find(
+				(record): record is BackgroundToolTaskRecord => isRecordObject(record) && record.taskId === taskId,
+			);
+		// The task ids of every wake-up message the session file holds, in order: a refused append never enters it.
+		const wakeTaskIds = (): unknown[][] =>
+			parkAux.sessionManager.getEntries().flatMap((entry) => {
+				if (entry.type !== "custom_message" || entry.customType !== "background-tool-completion") return [];
+				const records = isRecordObject(entry.details) ? entry.details.records : undefined;
+				return [
+					Array.isArray(records)
+						? records.map((record: unknown) => (isRecordObject(record) ? record.taskId : undefined))
+						: [],
+				];
+			});
+		const firstGate = createBarrier();
+		const secondGate = createBarrier();
+		const rearmedWake = createBarrier();
+		const secondWake = createBarrier();
+		const firstRefusal = createBarrier();
+		const parked = createBarrier();
+		const ids: { first?: string; second?: string } = {};
+		world.systemOne.enterPhase("r18-wake-park", {});
+		expect(
+			world.timers.armedDelays(WAKE_OWNER),
+			"no background-tool-task alarm is armed when the R18 root opens",
+		).toEqual([]);
+		world.shell.enqueue({
+			name: "r18-first",
+			command: "echo r18-first",
+			output: "r18-first\n",
+			exitCode: 0,
+			gate: firstGate.promise,
+		});
+		world.provider.enqueue(
+			"root",
+			calls("r18-start", [
+				{ id: "r18-bg-1", name: "bash", arguments: { command: "echo r18-first", background: true } },
+			]),
+			{
+				name: "r18-started",
+				check: (request) => {
+					ids.first = backgroundTaskIdOf(request);
+				},
+				reply: { content: [{ type: "text", text: "The first check runs in the background." }] },
+			},
+		);
+		await withDeadline(trace, "R18 background start", parkSession.prompt("Start the first check in the background."));
+		await withDeadline(trace, "R18 start settled", parkSession.waitForForegroundIdle());
+		const parkFile = parkAux.sessionManager.getSessionFile();
+		if (parkFile === undefined) throw new Error("the R18 root has no session file");
+		if (ids.first === undefined) throw new Error("the R18 start result carried no task id");
+		const retrying = `Failed to notify terminal background tool task batch ${ids.first} (retrying): ${FENCE}`;
+		const parkedText = `Background tool completion wake-up for ${ids.first} is parked after 10 consecutive failed deliveries (still pending; retried when a background tool task next starts or ends, or on session resume; tool_task action=wait collects it now): ${FENCE}`;
+		// Every warning this root emits from here on, in order.
+		const parkWarnings: string[] = [];
+		const unsubscribeParkWarnings = parkSession.subscribe((event) => {
+			if (event.type !== "warning") return;
+			parkWarnings.push(event.message);
+			if (event.message.startsWith("Failed to notify terminal background tool task batch ")) firstRefusal.release();
+			if (event.message.startsWith("Background tool completion wake-up for ")) parked.release();
+		});
+		try {
+			// Only the wake-up message's own append is denied: the terminal record before it is persisted pending.
+			const denial = world.io.denyUntilCleared({
+				name: "r18-wake-append-refused",
+				kind: "append",
+				code: "EIO",
+				matches: (operation, data) =>
+					operation.path === parkFile && data?.includes('"customType":"background-tool-completion"') === true,
+			});
+			firstGate.release();
+			await withDeadline(trace, "R18 first wake-up refused", firstRefusal.promise);
+			expect(parkWarnings, "the first refused wake-up reports the fence as its cause").toEqual([retrying]);
+			expect(denial.hits, "the denial refused the wake-up's own append once").toBe(1);
+			expect(taskRecord(ids.first)?.status, "the held echo's terminal record is completed").toBe("completed");
+			expect(taskRecord(ids.first)?.terminalDelivery, "the refused terminal stays pending on the branch").toBe(
+				"pending",
+			);
+			expect(wakeTaskIds(), "no wake-up message reached the session file").toEqual([]);
+			world.faultMatrix.witness("R18", { control: false });
+			// The ladder: nine retries at the capped doubling delays, each the only alarm of its owner; the tenth failure parks.
+			const delays: number[] = [];
+			const fired: number[] = [];
+			for (const [index, expected] of LADDER.entries()) {
+				delays.push(await withDeadline(trace, `R19 retry ${index + 1} armed`, world.timers.whenArmed(WAKE_OWNER)));
+				expect(world.timers.armedDelays(WAKE_OWNER), `retry ${index + 1} is the only armed alarm`).toEqual([
+					expected,
+				]);
+				fired.push(world.timers.advance(WAKE_OWNER, expected));
+			}
+			await withDeadline(trace, "R19 wake-up parked", parked.promise);
+			expect(delays, "the retries climb 100, 200, 400, 800, 1600 ms and hold at 3200 ms").toEqual(LADDER);
+			expect(fired, "each advance fires exactly its retry").toEqual(LADDER.map(() => 1));
+			expect(parkWarnings, "one retrying report for the repeated cause, then the park").toEqual([
+				retrying,
+				parkedText,
+			]);
+			expect(world.timers.armedDelays(WAKE_OWNER), "a parked queue arms no retry").toEqual([]);
+			expect(world.timers.advance(WAKE_OWNER, 5_000), "past the capped delay, a parked queue fires nothing").toBe(0);
+			expect(denial.hits, "every retry was refused by the fence before any write").toBe(1);
+			expect(taskRecord(ids.first)?.terminalDelivery, "the parked terminal is still pending").toBe("pending");
+			world.faultMatrix.witness("R19", { control: false });
+			expect(denial.clear(), "the denial refused one append in all").toBe(1);
+			// The fence's own recovery: the refused write never reached the file, so its canonical prefix ends at a record boundary.
+			parkAux.sessionManager.setSessionFile(parkFile);
+			world.shell.enqueue({
+				name: "r20-second",
+				command: "echo r20-second",
+				output: "r20-second\n",
+				exitCode: 0,
+				gate: secondGate.promise,
+			});
+			world.provider.enqueue(
+				"root",
+				calls("r20-start", [
+					{ id: "r20-bg-1", name: "bash", arguments: { command: "echo r20-second", background: true } },
+				]),
+				{
+					name: "r20-started",
+					check: (request) => {
+						ids.second = backgroundTaskIdOf(request);
+					},
+					reply: { content: [{ type: "text", text: "The second check runs in the background." }] },
+				},
+				{
+					name: "r20-rearmed-wake",
+					check: (request) => {
+						if (ids.first === undefined || !handoffFor(request, ids.first))
+							throw new Error("the re-armed wake-up does not reach the idle root");
+						rearmedWake.release();
+					},
+					reply: { content: [{ type: "text", text: "The first check handed off." }] },
+				},
+				{
+					name: "r20-second-wake",
+					check: (request) => {
+						if (ids.second === undefined || !handoffFor(request, ids.second))
+							throw new Error("the second terminal does not reach the idle root");
+						secondWake.release();
+					},
+					reply: { content: [{ type: "text", text: "The second check handed off." }] },
+				},
+			);
+			// The second task's start is the re-arming event; its own terminal stays held until the parked one is delivered.
+			await withDeadline(
+				trace,
+				"R20 re-arming start",
+				parkSession.prompt("Start the second check in the background."),
+			);
+			await withDeadline(trace, "R20 parked wake-up delivered", rearmedWake.promise);
+			await withDeadline(trace, "R20 parked wake-up settled", parkSession.waitForForegroundIdle());
+			expect(ids.second, "the re-arming start reported its own task id").toBeDefined();
+			expect(taskRecord(ids.first)?.terminalDelivery, "the re-armed terminal is recorded delivered").toBe(
+				"delivered",
+			);
+			expect(wakeTaskIds(), "the session file holds exactly the re-armed wake-up, for the parked task").toEqual([
+				[ids.first],
+			]);
+			world.faultMatrix.witness("R20", { control: false });
+			secondGate.release();
+			await withDeadline(trace, "R20 second terminal delivered", secondWake.promise);
+			await withDeadline(trace, "R20 second terminal settled", parkSession.waitForForegroundIdle());
+			expect(taskRecord(ids.second)?.terminalDelivery, "the re-arming task's own terminal is delivered").toBe(
+				"delivered",
+			);
+			expect(wakeTaskIds(), "its wake-up follows the re-armed one").toEqual([[ids.first], [ids.second]]);
+			world.faultMatrix.witness("R20", { control: true });
+			expect(world.timers.armedDelays(WAKE_OWNER), "a delivery accepted at its first attempt arms no retry").toEqual(
+				[],
+			);
+			expect(parkWarnings, "no refusal follows the reopened file").toEqual([retrying, parkedText]);
+			world.faultMatrix.witness("R19", { control: true });
+		} finally {
+			unsubscribeParkWarnings();
+		}
+		expect(await world.disposeSessionInBody(parkSession), "the R18 auxiliary root disposes cleanly").toBeUndefined();
+		trace.mark("root", "r18-wake-park");
+	}
 	// E9 stall threshold, legacy goal mode: an auxiliary root holds an open requirement and its initial turn is held after admission.
 	// The goal loop waits for that turn to settle, then twenty-one text-only continuation turns each record an implicit no_progress.
 	if (!world.systemOne.enabled) {

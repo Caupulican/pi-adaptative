@@ -426,6 +426,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		intentEntriesBeforeTakeBack,
 	);
 	if (world.systemOne.enabled) {
+		world.faultMatrix.witness("R14", { control: false });
 		// The tool identity is the one production offered System One for the taken back words.
 		const takenBackTools = world.systemOne.decoded.find((request) => request.phase === "owner-taken-back")?.state as
 			| { optional_tools?: Array<{ toolName?: unknown; sourcePath?: unknown }> }
@@ -461,6 +462,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			})?.block,
 			"a committed revocation of the tool blocks it",
 		).toBe(true);
+		world.faultMatrix.witness("R14", { control: true });
 	}
 	// The queued follow-up is judged before it is admitted: it continues the task's intent, and the taken back words are
 	// read by no later judgment. Its judgment is held at its gate until the older input below supersedes it, so the
@@ -648,6 +650,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			readOptionalToolIntent(committed?.data)?.revokedTools?.map((tool) => tool.toolName),
 			"the newer input's revocation is the committed policy once it is delivered",
 		).toEqual(["secret_store"]);
+		world.faultMatrix.witness("tab-preference", { control: true });
 		committedNewerIntentId = committed?.id;
 		intentEntriesBeforeSettle = optionalIntentEntries();
 	}
@@ -703,6 +706,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			deliveryJudgments,
 			"the superseded inputs' owner policy is judged once each at their delivery, in owner order",
 		).toEqual([FOLLOW_UP_REQUEST, OLDER_OWNER_WORDS]);
+		world.faultMatrix.witness("tab-preference", { control: false });
 		expect(
 			optionalIntentEntries(),
 			"the policy-only judgments write no optional-tool intent: the newer input's revocation stays committed",
@@ -749,6 +753,8 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	await withDeadline(trace, "memory read-back turn", session.prompt("Read back the preference you saved."));
 	trace.mark("root", "memory.read-back");
 	expect(session.localCommitBranch(), "newer owner words that lift the delivery limit lift it").toBeUndefined();
+	// The journey applies a delivery limit only with System One on: only then does this in-order control prove the lift.
+	if (world.systemOne.enabled) world.faultMatrix.witness("delivery-order", { control: true });
 
 	// Long project path after compaction. The first read names the raw path; the minted alias then appears in the
 	// request-visible PATH ALIASES legend, and the model reads through that alias. The short limits.ts stays unaliased.
@@ -1187,10 +1193,12 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	).toBe("Scripted SQLite exec failure: CREATE TABLE IF NOT EXISTS ledger_meta");
 	world.guard.assertSqliteFaultsConsumed();
 	expect(openSqliteHandles(), "the failed construction leaves no handle").toEqual(handlesBeforeFailure);
+	world.faultMatrix.witness("R12", { control: false });
 	const handlesBeforeNormal = openSqliteHandles();
 	const normalLedger = new DecisionLedgerStore({ databasePath: ledgerPath });
 	normalLedger.close();
 	expect(openSqliteHandles(), "the normal construction closes its handle").toEqual(handlesBeforeNormal);
+	world.faultMatrix.witness("R12", { control: true });
 
 	// Credential content through the real field mock: the lane key that routes a worktree stays readable, secret-keyed values
 	// are masked, and a token-shaped value is masked wherever it sits.
@@ -1624,10 +1632,12 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		droppedAtDelivery: true,
 		olderFollowUpKept: true,
 	});
+	world.faultMatrix.witness("owner-input-crash-cut", { control: false });
 	expect(
 		session.localCommitBranch(),
 		"an older delivery limit applied after a newer lift does not override the newer owner words",
 	).toBeUndefined();
+	if (world.systemOne.enabled) world.faultMatrix.witness("delivery-order", { control: false });
 
 	// Cleanup fault through the real preparation owner: the scoped background call registers a cleanup that throws, and its
 	// start is gated so the explicit background handoff wins the race against completion. The operation still runs once, its
@@ -1753,6 +1763,17 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	expect(JSON.stringify(reopened.messages), "the reopened history carries the continuation").toContain(
 		"Still on track.",
 	);
+	// Crash-cut control: the cut after every queued input's user entry is persisted (the whole file) restores none.
+	expect(
+		{
+			steering: reopened.getSteeringMessages(),
+			followUp: reopened.getFollowUpMessages(),
+			pending: reopened.pendingMessageCount,
+			notice: reopened.takeRestoredQueuedInputNotice("headless"),
+		},
+		"the reopened session restores no queued input that was delivered",
+	).toEqual({ steering: [], followUp: [], pending: 0, notice: undefined });
+	world.faultMatrix.witness("owner-input-crash-cut", { control: true });
 	await withDeadline(trace, "reopened turn", reopened.prompt("Continue after the reopen."));
 	await withDeadline(trace, "restored alias turn", reopened.prompt("Read the retry configuration by its alias."));
 	expect(await world.disposeSessionInBody(reopened), "the reopened session must dispose cleanly").toBeUndefined();
@@ -1786,12 +1807,14 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	expect(failureText(rejection?.error)).toContain("Scripted SQLite run failure: INSERT INTO path_alias_scanned");
 	world.guard.assertSqliteFaultsConsumed();
 	world.guard.assertNoOpenSqliteHandles();
+	world.faultMatrix.witness("R12a", { control: false });
 	// Negative control: the same release with no fault injected completes cleanly.
 	const control = (await world.createRootSession()).session;
 	await withDeadline(trace, "control probe one", control.prompt("Control one."));
 	await withDeadline(trace, "control probe two", control.prompt("Control two."));
 	expect(await world.disposeSessionInBody(control), "a release without a fault must complete").toBeUndefined();
 	world.guard.assertNoOpenSqliteHandles();
+	world.faultMatrix.witness("R12a", { control: true });
 	// Logical durable cut of a pending native question. The ask is captured at its UI presentation, the live owner is
 	// cancelled and settled, and a fresh owner restores only the captured bytes. This qualifies logical restoration of the
 	// captured cut: it is not crash, dead-owner or fsync durability.
@@ -1995,11 +2018,13 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		restored.sessionManager.inspectSessionLifecycle().balanced,
 		"every lifecycle prefix is balanced after the answer",
 	).toBe(true);
+	world.faultMatrix.witness("R13", { control: false });
 	expect(
 		await withDeadline(trace, "second resume", restored.session.resumePendingHumanInput()),
 		"nothing is pending after the answer",
 	).toBe(false);
 	expect(askEntriesNow(), "the second resume appends no result and no terminal").toEqual(askAfterAnswer);
+	world.faultMatrix.witness("R13", { control: true });
 	expect(await world.disposeSessionInBody(restored.session), "the restored owner disposes cleanly").toBeUndefined();
 	// Companion: the same captured prefix, copied unchanged to a fresh path, reopened by a fresh owner with no UI bound. Without
 	// a UI there is no presentation, so the resume records the question as unanswered (owner_unavailable): no answer and no

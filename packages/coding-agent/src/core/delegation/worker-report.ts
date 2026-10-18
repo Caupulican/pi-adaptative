@@ -269,7 +269,7 @@ function receiptIndex(receipts: readonly WorkerCommandReceipt[]): Map<string, Wo
 function receiptLine(receipt: WorkerCommandReceipt, position: number): string {
 	const outcome =
 		receipt.exitCode !== undefined ? `exit ${receipt.exitCode}` : receipt.isError ? "error" : "completed";
-	return `- ${receiptAlias(position)} ${receipt.tool}: ${receipt.command} -> ${outcome}`;
+	return `- ${receiptAlias(position)} ${receipt.tool}: ${quotedSpan(receipt.command)} -> ${outcome}`;
 }
 
 /** The request the worker receives when it declares itself done: what to report and how to prove it. */
@@ -302,7 +302,7 @@ export function buildReportRequest(input: {
 	}
 	if (changedFiles.length > 0) {
 		lines.push(
-			`Files the host recorded as changed: ${changedFiles.slice(0, 40).join(", ")}${changedFiles.length > 40 ? ", ..." : ""}. List each under changes with what changed and which requirement it serves.`,
+			`Files the host recorded as changed: ${changedFiles.slice(0, 40).map(quotedSpan).join(", ")}${changedFiles.length > 40 ? ", ..." : ""}. List each under changes with what changed and which requirement it serves.`,
 		);
 	}
 	lines.push(

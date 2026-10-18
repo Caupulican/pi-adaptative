@@ -606,7 +606,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	// The review quotes each unexplained file as one span (worker-report.ts judgeSubmittedReport, bounded-line.ts quotedSpan):
 	// `src/late.ts` holds no `'`, so it is `'src/late.ts'`, which the request's JSON leaves unescaped.
 	const reviewLine = "changed files with no explanation: 'src/late.ts'";
-	const recordedLine = "Files the host recorded as changed: src/late.ts";
+	const recordedLine = "Files the host recorded as changed: 'src/late.ts'";
 	world.systemOne.enterPhase(
 		"late-attempt",
 		{ ...lateJudgments, ...lateClaimJudgments },
