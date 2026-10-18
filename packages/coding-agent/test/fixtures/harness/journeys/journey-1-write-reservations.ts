@@ -4,6 +4,7 @@ import { expect } from "vitest";
 import { orchestrationSessionDir } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { canonicalPathScopeIdentity } from "../../../../src/core/autonomy/path-scope.ts";
+import { type PathAliasTable, rewriteText } from "../../../../src/core/context/path-alias-table.ts";
 import { TRANSCRIPT_MEMORY_PROVIDER_ID } from "../../../../src/core/context/transcript-memory-provider.ts";
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { parseLocalWorkerProcessOwnerId } from "../../../../src/core/delegation/worker-process-owner.ts";
@@ -1600,7 +1601,10 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			},
 			reply: { content: [{ type: "text", text: "The retained-execution writer finished." }] },
 		});
-		world.systemOne.enterPhase("e13h-terminal", e4Judgments);
+		// The terminal handoff wakes the root with its completion message (ForegroundTerminalHandoffController.deliverWithLease ->
+		// DurableCustomMessageTurnController.start -> runAgentPrompt), not through an owner prompt, so no owner words reach
+		// System One intake. The wake window is its own phase with no judgment: any System One request in it is unscripted.
+		world.systemOne.enterPhase("e13h-terminal", {});
 		e13hGate.release();
 		const e13hFirstOperation = await withDeadline(trace, "E13H project release refused", e13hFirstRefusal);
 		await withDeadline(trace, "E13H terminal handoff woke the root", e13hWake.promise, 90_000);
@@ -1641,6 +1645,8 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		const e13hAttemptsBefore = Object.keys(e13hRuntime()?.attempts ?? {}).length;
 		const e13hRefusedIds = ["e13h-start-2", "e13h-start-named", "e13h-start-validated"];
 		const e13hRequestTexts = new Map<string, string>();
+		// The path-alias table that rendered the refusals' request (captured at that request; a sent span keeps its spelling).
+		const e13hRequestAliases: { table?: PathAliasTable } = {};
 		world.provider.enqueue(
 			"root",
 			calls("e13h-start-refused", [
@@ -1662,6 +1668,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			{
 				name: "e13h-refused-reply",
 				check: (request) => {
+					e13hRequestAliases.table = e13hOwner.peekPathAliasTable();
 					for (const message of request.context.messages) {
 						if (message.role !== "toolResult" || !e13hRefusedIds.includes(message.toolCallId)) continue;
 						e13hRequestTexts.set(
@@ -1680,6 +1687,21 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		const e13hBoundedCause = e13hCause.length > 240 ? `${e13hCause.slice(0, 237)}...` : e13hCause;
 		const e13hHoldReason = `worker_specialist_release_retained:${e13hAgentId}:${e13hBoundedCause}`;
 		const e13hRefusalText = `delegate not started: ${e13hAgentId} finished its run but its resource release failed; the host retries it. Cause: ${e13hBoundedCause}. Next: follow_up to ${e13hAgentId} (queued until released) or parallelWork { independentOf: [${e13hAgentId}], justification }.`;
+		// The model reads that text in the session's path-alias spelling (path-alias-session.ts renderFrozen: a fresh span is
+		// spelled rewriteText(table, text)). The 237-character cut lands inside the quoted path at a platform- and mode-dependent
+		// point; where the cut prefix names an existing file (the worker transcript `<id>.jsonl`), that prefix is minted and sent
+		// as its alias. Nothing outside the quoted path is respelled: the fact, the fault identity and the next action stay verbatim.
+		if (e13hRequestAliases.table === undefined) throw new Error("the E13H refusals' request was never sent");
+		const e13hModelRefusalText = rewriteText(e13hRequestAliases.table, e13hRefusalText);
+		const e13hStableHead = `delegate not started: ${e13hAgentId} finished its run but its resource release failed; the host retries it. Cause: Scripted IO fault e13h-release-denied: rename '`;
+		const e13hStableTail = `. Next: follow_up to ${e13hAgentId} (queued until released) or parallelWork { independentOf: [${e13hAgentId}], justification }.`;
+		expect(
+			{
+				head: e13hModelRefusalText.startsWith(e13hStableHead),
+				tail: e13hModelRefusalText.endsWith(e13hStableTail),
+			},
+			"the alias spelling respells only the cause's quoted path",
+		).toEqual({ head: true, tail: true });
 		for (const id of e13hRefusedIds) {
 			const entry = e13hCreated.sessionManager
 				.getBranch()
@@ -1699,12 +1721,17 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			// Forbidden: the specialist's state, not the call, refused the start, so it is an operation outcome and never a failure record
 			// whose execution-error classifier would read the embedded cause as the call's own error and cut the text.
 			expect(details?.piToolFailureMemory, `the ${id} refusal records no tool failure`).toBeUndefined();
+			// Aliasing is a request projection: the durable result keeps the tool's text with the cause verbatim.
+			expect(
+				entry.message.content.map((block) => (block.type === "text" ? block.text : block.type)).join("\n"),
+				`the durable ${id} refusal keeps the retained cause verbatim`,
+			).toContain(e13hRefusalText);
 			const requestText = e13hRequestTexts.get(id) ?? "";
 			expect(requestText.startsWith("[harness]"), `the ${id} refusal reaches the model as the tool wrote it`).toBe(
 				false,
 			);
 			expect(requestText, `the model reads the ${id} refusal's fact, cause and next action`).toContain(
-				e13hRefusalText,
+				e13hModelRefusalText,
 			);
 		}
 		expect(Object.keys(e13hRuntime()?.agents ?? {}).sort(), "the refused starts register no agent").toEqual(
