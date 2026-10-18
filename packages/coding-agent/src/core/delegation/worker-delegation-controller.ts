@@ -407,11 +407,7 @@ const REAPED_PROCESS_NOTICE_MAX_ENTRY_CHARS = 160;
 function describeReapedWorkerProcesses(laneId: string, processes: readonly string[]): string {
 	const listed = processes
 		.slice(0, REAPED_PROCESS_NOTICE_MAX_LISTED)
-		.map((entry) =>
-			entry.length > REAPED_PROCESS_NOTICE_MAX_ENTRY_CHARS
-				? `${entry.slice(0, REAPED_PROCESS_NOTICE_MAX_ENTRY_CHARS)}...`
-				: entry,
-		);
+		.map((entry) => boundedLine(entry, REAPED_PROCESS_NOTICE_MAX_ENTRY_CHARS));
 	const omitted = processes.length - listed.length;
 	const detail = `${listed.join("; ")}${omitted > 0 ? `; and ${omitted} more` : ""}`;
 	return `Worker ${laneId} ended with ${processes.length} process(es) still running; they were stopped (${detail}). A worker leaves nothing behind: start a durable long-running process from the root (bash with background: true; tool_task inspects it), or have the worker report that it needs one.`;
@@ -714,13 +710,52 @@ type RetainedWorkerRelease =
 
 /** The longest release cause a refused start quotes. */
 const MAX_RETAINED_RELEASE_CAUSE_CHARS = 240;
+/** Stands for the elided middle of a long line: no path character, and no boundary a path or alias starts at. */
+const BOUNDED_LINE_ELISION = "…";
+/** One unit of a bounded line: a non-space run with every quoted span inside it whole, a space, or an unpaired quote. */
+const BOUNDED_LINE_UNIT_RE = /(?:[^\s'"`]|'[^']*'|"[^"]*"|`[^`]*`)+|\s|['"`]/g;
 
 /** A release cause as a refusal quotes it: one line, bounded. */
 function boundedReleaseCause(cause: string): string {
-	const line = cause.replace(/\s+/g, " ").trim();
-	return line.length > MAX_RETAINED_RELEASE_CAUSE_CHARS
-		? `${line.slice(0, MAX_RETAINED_RELEASE_CAUSE_CHARS - 3)}...`
-		: line;
+	return boundedLine(cause, MAX_RETAINED_RELEASE_CAUSE_CHARS);
+}
+
+/**
+ * Text a notice quotes to a model, as one line of at most `maxChars` characters. A longer line keeps its head and its
+ * tail around one elided middle, glued to both:
+ * - the head ends between whole units, or just after the opening quote of the quoted span the bound falls in, so it never
+ *   ends inside a path: a cut path would read, to the path-alias extractor, as the real shorter path it spells;
+ * - the tail starts at the first path separator its budget reaches, so a path keeps whole components and the file name
+ *   the text names; a unit with no separator left (a word, a file name longer than the budget) is cut where the budget
+ *   allows, never inside a surrogate pair. Behind the elision no path or alias match can start.
+ */
+function boundedLine(text: string, maxChars: number): string {
+	const line = text.replace(/\s+/g, " ").trim();
+	if (line.length <= maxChars) return line;
+	const kept = maxChars - BOUNDED_LINE_ELISION.length;
+	const headBudget = Math.ceil(kept / 2);
+	const units = [...line.matchAll(BOUNDED_LINE_UNIT_RE)].map((unit) => ({
+		start: unit.index,
+		end: unit.index + unit[0].length,
+	}));
+	let headEnd = 0;
+	for (const unit of units) {
+		if (unit.end > headBudget) {
+			if (unit.start < headBudget && /['"`]/.test(line.charAt(unit.start))) headEnd = unit.start + 1;
+			break;
+		}
+		headEnd = unit.end;
+	}
+	// The head's unused budget goes to the tail.
+	let tailStart = line.length - (kept - headEnd);
+	const tailUnit = units.find((unit) => unit.end > tailStart);
+	if (tailUnit !== undefined && tailUnit.start < tailStart) {
+		const separator = line.slice(tailStart, tailUnit.end).search(/[\\/]/);
+		const code = line.charCodeAt(tailStart);
+		if (separator >= 0) tailStart += separator;
+		else if (code >= 0xdc00 && code <= 0xdfff) tailStart += 1;
+	} else if (line.charAt(tailStart) === " ") tailStart += 1;
+	return `${line.slice(0, headEnd)}${BOUNDED_LINE_ELISION}${line.slice(tailStart)}`;
 }
 
 export class WorkerDelegationController {

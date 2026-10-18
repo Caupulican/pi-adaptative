@@ -1683,26 +1683,52 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		world.systemOne.enterPhase("e13h-refused", e4Judgments);
 		await withDeadline(trace, "E13H starts refused", e13hOwner.prompt("Start the second scope writer three ways."));
 		// The refusal names the retained release with the retained entry's cause as one line of at most 240 characters
-		// (worker-delegation-controller.ts boundedReleaseCause: 237 characters and "..."); the path holds no whitespace.
-		const e13hBoundedCause = e13hCause.length > 240 ? `${e13hCause.slice(0, 237)}...` : e13hCause;
-		const e13hHoldReason = `worker_specialist_release_retained:${e13hAgentId}:${e13hBoundedCause}`;
-		const e13hRefusalText = `delegate not started: ${e13hAgentId} finished its run but its resource release failed; the host retries it. Cause: ${e13hBoundedCause}. Next: follow_up to ${e13hAgentId} (queued until released) or parallelWork { independentOf: [${e13hAgentId}], justification }.`;
-		// The model reads that text in the session's path-alias spelling (path-alias-session.ts renderFrozen: a fresh span is
-		// spelled rewriteText(table, text)). The 237-character cut lands inside the quoted path at a platform- and mode-dependent
-		// point; where the cut prefix names an existing file (the worker transcript `<id>.jsonl`), that prefix is minted and sent
-		// as its alias. Nothing outside the quoted path is respelled: the fact, the fault identity and the next action stay verbatim.
-		if (e13hRequestAliases.table === undefined) throw new Error("the E13H refusals' request was never sent");
-		const e13hModelRefusalText = rewriteText(e13hRequestAliases.table, e13hRefusalText);
-		const e13hStableHead = `delegate not started: ${e13hAgentId} finished its run but its resource release failed; the host retries it. Cause: Scripted IO fault e13h-release-denied: rename '`;
-		const e13hStableTail = `. Next: follow_up to ${e13hAgentId} (queued until released) or parallelWork { independentOf: [${e13hAgentId}], justification }.`;
-		expect(
-			{
-				head: e13hModelRefusalText.startsWith(e13hStableHead),
-				tail: e13hModelRefusalText.endsWith(e13hStableTail),
-			},
-			"the alias spelling respells only the cause's quoted path",
-		).toEqual({ head: true, tail: true });
-		for (const id of e13hRefusedIds) {
+		// (worker-delegation-controller.ts boundedReleaseCause). The cause is `<lead><path>'`: the 47-character lead
+		// `Scripted IO fault e13h-release-denied: rename '` (virtual-io.ts scripted fault message) and the refused temporary rewrite
+		// `<root>/agent-journey-1-system-one-<on|off>/state/orchestration/sessions/<key>/worker-conversations/worker-<32 hex>.jsonl
+		// .worker.json.<pid>.<uuid>.tmp` (session-fixture.ts harnessPath and shared.ts world name, agent-paths.ts
+		// workerConversationSessionsDir, worker-conversation-store.ts stableWorkerSessionId, atomic-file.ts temporaryPath). With
+		// `/harness` as the root (a drive letter more on Windows) and a session key of at least 18 characters (a readable prefix, `-`,
+		// 16 hex), the path is at least 208 characters and every cause is over the bound, on both platforms and in both System One
+		// modes. Its units before the path end within the 120-character head budget and the quoted path runs past it, so the head is
+		// exactly the lead through the opening quote; the ellipsis follows; the other 192 characters are the tail, from the first path
+		// separator they reach, so it keeps whole directories and the refused file's name. How many directories fit depends on the
+		// session key and the pid; the structure does not. The bounded cause is read back from the durable reason and held to it.
+		const e13hCauseLead = "Scripted IO fault e13h-release-denied: rename '";
+		const e13hReasonPrefix = `worker_specialist_release_retained:${e13hAgentId}:`;
+		const e13hBoundedCauseOf = (reason: unknown, operationPath: string): string => {
+			const bounded =
+				typeof reason === "string" && reason.startsWith(e13hReasonPrefix)
+					? reason.slice(e13hReasonPrefix.length)
+					: "";
+			const quotedPath = `${operationPath}'`;
+			const tail = bounded.slice(e13hCauseLead.length + 1);
+			const elided = quotedPath.slice(0, quotedPath.length - tail.length);
+			// The directory the tail would reach next: adding it back would break the bound.
+			const nextDirectory = elided.length - Math.max(elided.lastIndexOf("/"), elided.lastIndexOf("\\"));
+			expect(
+				{
+					lead: bounded.startsWith(`${e13hCauseLead}…`),
+					elisions: bounded.split("…").length - 1,
+					bounded: bounded.length <= 240,
+					pathTail: quotedPath.endsWith(tail),
+					wholeDirectories: /^[\\/]/.test(tail),
+					fileName: tail.endsWith(`${operationPath.split(/[\\/]/).at(-1)}'`),
+					longestTail: bounded.length + nextDirectory > 240,
+				},
+				`the bounded cause keeps the lead and the longest whole-directory tail of ${operationPath}`,
+			).toEqual({
+				lead: true,
+				elisions: 1,
+				bounded: true,
+				pathTail: true,
+				wholeDirectories: true,
+				fileName: true,
+				longestTail: true,
+			});
+			return bounded;
+		};
+		const e13hDurableRefusal = (id: string) => {
 			const entry = e13hCreated.sessionManager
 				.getBranch()
 				.find(
@@ -1713,9 +1739,26 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 				);
 			if (entry?.type !== "message" || entry.message.role !== "toolResult")
 				throw new Error(`no durable ${id} result`);
-			const details = entry.message.details as { skipReason?: unknown; piToolFailureMemory?: unknown } | undefined;
+			return entry.message;
+		};
+		const e13hBoundedCause = e13hBoundedCauseOf(
+			(e13hDurableRefusal("e13h-start-2").details as { skipReason?: unknown } | undefined)?.skipReason,
+			e13hFirstOperation.path,
+		);
+		const e13hHoldReason = `${e13hReasonPrefix}${e13hBoundedCause}`;
+		const e13hRefusalText = `delegate not started: ${e13hAgentId} finished its run but its resource release failed; the host retries it. Cause: ${e13hBoundedCause}. Next: follow_up to ${e13hAgentId} (queued until released) or parallelWork { independentOf: [${e13hAgentId}], justification }.`;
+		// The model reads that text in the session's path-alias spelling (path-alias-session.ts renderFrozen: a fresh span is
+		// spelled rewriteText(table, text)). The head ends at the quote, before the path, and nothing behind the ellipsis is a
+		// boundary a path or alias form starts at (path-alias-table.ts LEFT_BOUNDARY_CLASS), so no cut path prefix is minted or
+		// respelled: the model reads the fact, the fault identity, the refused file's name and the next action verbatim.
+		if (e13hRequestAliases.table === undefined) throw new Error("the E13H refusals' request was never sent");
+		const e13hModelRefusalText = rewriteText(e13hRequestAliases.table, e13hRefusalText);
+		expect(e13hModelRefusalText, "the alias spelling respells nothing in the bounded refusal").toBe(e13hRefusalText);
+		for (const id of e13hRefusedIds) {
+			const refusal = e13hDurableRefusal(id);
+			const details = refusal.details as { skipReason?: unknown; piToolFailureMemory?: unknown } | undefined;
 			expect(
-				{ isError: entry.message.isError, skipReason: details?.skipReason },
+				{ isError: refusal.isError, skipReason: details?.skipReason },
 				`the ${id} refusal is refused with the retained release as its reason`,
 			).toEqual({ isError: true, skipReason: e13hHoldReason });
 			// Forbidden: the specialist's state, not the call, refused the start, so it is an operation outcome and never a failure record
@@ -1723,7 +1766,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 			expect(details?.piToolFailureMemory, `the ${id} refusal records no tool failure`).toBeUndefined();
 			// Aliasing is a request projection: the durable result keeps the tool's text with the cause verbatim.
 			expect(
-				entry.message.content.map((block) => (block.type === "text" ? block.text : block.type)).join("\n"),
+				refusal.content.map((block) => (block.type === "text" ? block.text : block.type)).join("\n"),
 				`the durable ${id} refusal keeps the retained cause verbatim`,
 			).toContain(e13hRefusalText);
 			const requestText = e13hRequestTexts.get(id) ?? "";
@@ -1827,9 +1870,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		if (typeof e13hMessageId !== "string" || e13hMessageId.length === 0)
 			throw new Error("the E13H follow_up result carries no message id");
 		// The pending turn's reason names the retained release and its current cause (the refused alarm retry's), bounded as above.
-		const e13hFollowUpReason = `worker_specialist_release_retained:${e13hAgentId}:${
-			e13hSecondCause.length > 240 ? `${e13hSecondCause.slice(0, 237)}...` : e13hSecondCause
-		}`;
+		const e13hFollowUpReason = `${e13hReasonPrefix}${e13hBoundedCauseOf(e13hReceiptDetails?.skipReason, e13hSecondOperation.path)}`;
 		expect(
 			{ started: e13hReceiptDetails?.started, skipReason: e13hReceiptDetails?.skipReason },
 			"the follow_up is accepted and waits for the retained release",
