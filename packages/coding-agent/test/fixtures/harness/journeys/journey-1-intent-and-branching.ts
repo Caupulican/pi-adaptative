@@ -793,13 +793,17 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 		const e4LeafBefore = e4Manager.getLeafId();
 		const e4EntriesBefore = e4Manager.getEntries().length;
 		expect(e4Abandoned.id, "the refused navigation targets an entry that is not the leaf").not.toBe(e4LeafBefore);
+		const e4RefusalText =
+			"Cannot navigate the session tree while a turn is running. Wait for the turn to finish or interrupt it first.";
 		const e4Refusal = await e4Session.navigateTree(e4Abandoned.id).then(
 			() => "navigated",
-			(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			(error: unknown) => {
+				// The trace recorded this rejection when the navigation started; the body judges it here, so close does not report it again.
+				trace.claimRejection(error, e4RefusalText);
+				return error instanceof Error ? error.message : String(error);
+			},
 		);
-		expect(e4Refusal, "a navigation while the run owns the history is refused").toBe(
-			"Cannot navigate the session tree while a turn is running. Wait for the turn to finish or interrupt it first.",
-		);
+		expect(e4Refusal, "a navigation while the run owns the history is refused").toBe(e4RefusalText);
 		expect(e4Manager.getLeafId(), "the refused navigation leaves the leaf where the run has it").toBe(e4LeafBefore);
 		expect(e4Manager.getEntries().length, "the refused navigation writes no entry").toBe(e4EntriesBefore);
 		world.faultMatrix.witness("R17", { control: false });
