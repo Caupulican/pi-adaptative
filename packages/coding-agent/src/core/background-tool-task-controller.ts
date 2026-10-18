@@ -272,6 +272,8 @@ export interface BackgroundToolTerminalMessage {
 
 export interface BackgroundToolTaskControllerDeps {
 	getSessionId(): string;
+	/** How many terminal tasks stay in the in-memory cache before the oldest are evicted (their records stay on the session branch); default {@link MAX_RETAINED_TERMINAL_TASKS}. */
+	maxRetainedTerminalTasks?: number;
 	/** Authoritative goal execution attribution at the tool handoff boundary. */
 	getGoalId?(): string | undefined;
 	/** Current foreground submission epoch, or undefined when no submission is held. Read once at
@@ -1615,7 +1617,10 @@ export class BackgroundToolTaskController {
 	 */
 	private pruneTerminalTasks(): void {
 		const terminal = [...this.tasks.values()].filter((state) => state.record.status !== "running");
-		for (const state of terminal.slice(0, Math.max(0, terminal.length - MAX_RETAINED_TERMINAL_TASKS))) {
+		for (const state of terminal.slice(
+			0,
+			Math.max(0, terminal.length - (this.deps.maxRetainedTerminalTasks ?? MAX_RETAINED_TERMINAL_TASKS)),
+		)) {
 			this.tasks.delete(state.record.taskId);
 		}
 	}

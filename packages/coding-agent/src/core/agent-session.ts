@@ -1328,6 +1328,7 @@ export class AgentSession {
 		});
 		this._backgroundToolTasks = createSessionBackgroundToolTasks({
 			timers: config.timers.port("background-tool-task"),
+			maxRetainedTerminalTasks: config.maxRetainedTerminalTasks,
 			getSessionManager: () => this.sessionManager,
 			getGoalId: () => this._goals.getOwnershipGoalId(),
 			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
@@ -4793,9 +4794,11 @@ export class AgentSession {
 	}
 
 	/**
-	 * Resolve once no foreground submission holds the lease: the agent run has ended AND the prompt
-	 * that owned it has finished its tail. `abort()` alone returns at the first of those; a caller
-	 * that wants to submit a new root prompt right after an abort waits for the second.
+	 * Resolve once the foreground is idle: no submission holds the lease (the agent run has ended AND the
+	 * prompt that owned it has finished its tail), no retry, compaction or history rewrite is active, no
+	 * System One or semantic evaluation is running, and no idle continuation is armed. `abort()` alone
+	 * returns at the first of those; a caller that wants to submit a new root prompt right after an abort
+	 * waits for the rest. An armed goal wake counts as busy: wait for its arm, not for idle, to observe it.
 	 */
 	waitForForegroundIdle(): Promise<void> {
 		return this._foregroundRecovery.waitForIdle();

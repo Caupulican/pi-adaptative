@@ -2536,6 +2536,8 @@ export class HarnessWorld {
 			};
 			/** This session's interposition on each worker terminal delivery (the SDK option); unset delivers directly. */
 			readonly workerTerminalDelivery?: CreateAgentSessionOptions["workerTerminalDelivery"];
+			/** How many terminal background tool tasks this session keeps in memory before the oldest are evicted; unset keeps the SDK default. */
+			readonly maxRetainedTerminalTasks?: number;
 		} = {},
 	): Promise<{
 		session: AgentSession;
@@ -2605,6 +2607,9 @@ export class HarnessWorld {
 			sessionManager,
 			...(extensionLoader === undefined ? {} : { resourceLoader: extensionLoader }),
 			...(options.executionLoopMode === undefined ? {} : { executionLoopMode: options.executionLoopMode }),
+			...(options.maxRetainedTerminalTasks === undefined
+				? {}
+				: { maxRetainedTerminalTasks: options.maxRetainedTerminalTasks }),
 			...(options.workerTerminalDelivery === undefined
 				? {}
 				: { workerTerminalDelivery: options.workerTerminalDelivery }),

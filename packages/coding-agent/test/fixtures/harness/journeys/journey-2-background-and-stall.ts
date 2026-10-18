@@ -11,7 +11,7 @@ import { editPersistedGoal } from "../../../../src/core/goals/goal-lifecycle.ts"
 import type { ObjectiveRoute } from "../../../../src/core/objective-execution/objective-route.ts";
 import { goalObjectiveId } from "../../../../src/core/orchestration/work-state-projection.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
-import { calls, createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
+import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 
 /**
@@ -20,7 +20,14 @@ import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
  * The library's CJS export object is the one production's default import receives, so its functions
  * are rebound in place rather than through an ESM module mock.
  */
-import { assertBatchOk, backgroundTaskIdOf, handoffFor, lastToolResultDetails, requestTexts } from "./shared.ts";
+import {
+	assertBatchOk,
+	backgroundTaskIdOf,
+	dynamicCalls,
+	handoffFor,
+	lastToolResultDetails,
+	requestTexts,
+} from "./shared.ts";
 
 export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -215,6 +222,151 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 		}
 		expect(await world.disposeSessionInBody(parkSession), "the R18 auxiliary root disposes cleanly").toBeUndefined();
 		trace.mark("root", "r18-wake-park");
+	}
+	// R40e, System One off: a root whose terminal-task cache holds one task hands off two tool tasks whose output exceeds the inline
+	// bound. The second terminal evicts the first from the cache; a wait on the evicted task still returns its saved record, and the
+	// artifact that record cites reads back whole. The retained second task's wait, answered from the cache, is the control.
+	if (!world.systemOne.enabled) {
+		const r40e = await world.createRootSession("root", {
+			sessionManager: world.createSessionManager(),
+			maxRetainedTerminalTasks: 1,
+		});
+		const r40eSession = r40e.session;
+		const bigOutput = (marker: string): string =>
+			`${marker}-HEAD\n${"r40e filler line of the oversized output\n".repeat(1_200)}${marker}-TAIL\n`;
+		const r40eIds: { first?: string; second?: string } = {};
+		const r40eArtifacts: { first?: string; second?: string; retrieved?: string } = {};
+		const r40eSeen: { evictedWait?: string; evictedDetails?: unknown; list?: string; retained?: unknown } = {};
+		const batchDetails = (request: ScriptedRequest): Array<{ toolName: string; text: string; details: unknown }> => {
+			const messages = request.context.messages;
+			let start = messages.length;
+			while (start > 0 && messages[start - 1]?.role !== "assistant") start--;
+			return messages.slice(start).flatMap((message) =>
+				message.role === "toolResult"
+					? [
+							{
+								toolName: message.toolName,
+								text: message.content
+									.map((block) => (block.type === "text" ? block.text : block.type))
+									.join("\n"),
+								details: message.details,
+							},
+						]
+					: [],
+			);
+		};
+		const detailField = (details: unknown, key: string): string | undefined =>
+			isRecordObject(details) && typeof details[key] === "string" ? details[key] : undefined;
+		world.shell.enqueue(
+			{ name: "r40e-first", command: "echo r40e-first", output: bigOutput("R40E-FIRST"), exitCode: 0 },
+			{ name: "r40e-second", command: "echo r40e-second", output: bigOutput("R40E-SECOND"), exitCode: 0 },
+		);
+		world.provider.enqueue(
+			"root",
+			calls("r40e-start", [
+				{ id: "r40e-bg-1", name: "bash", arguments: { command: "echo r40e-first", background: true } },
+				{ id: "r40e-bg-2", name: "bash", arguments: { command: "echo r40e-second", background: true } },
+			]),
+			dynamicCalls(
+				"r40e-wait-both",
+				(request) => {
+					const [first, second] = batchDetails(request).map((result) => detailField(result.details, "taskId"));
+					r40eIds.first = first;
+					r40eIds.second = second;
+					return [
+						{
+							id: "r40e-wait-1",
+							name: "tool_task",
+							arguments: { action: "wait", taskId: first, timeoutMs: 60_000 },
+						},
+						{
+							id: "r40e-wait-2",
+							name: "tool_task",
+							arguments: { action: "wait", taskId: second, timeoutMs: 60_000 },
+						},
+					];
+				},
+				undefined,
+			),
+			dynamicCalls(
+				"r40e-wait-evicted",
+				(request) => {
+					const [first, second] = batchDetails(request);
+					r40eArtifacts.first = detailField(first?.details, "artifactId");
+					r40eArtifacts.second = detailField(second?.details, "artifactId");
+					return [
+						{
+							id: "r40e-wait-3",
+							name: "tool_task",
+							arguments: { action: "wait", taskId: r40eIds.first, timeoutMs: 60_000 },
+						},
+						{
+							id: "r40e-wait-4",
+							name: "tool_task",
+							arguments: { action: "wait", taskId: r40eIds.second, timeoutMs: 60_000 },
+						},
+						{ id: "r40e-list-1", name: "tool_task", arguments: { action: "list" } },
+					];
+				},
+				undefined,
+			),
+			dynamicCalls("r40e-retrieve", (request) => {
+				const [evicted, retained, list] = batchDetails(request);
+				r40eSeen.evictedWait = evicted?.text;
+				r40eSeen.evictedDetails = evicted?.details;
+				r40eSeen.retained = retained?.details;
+				r40eSeen.list = list?.text;
+				return [
+					{
+						id: "r40e-retrieve-1",
+						name: "artifact_retrieve",
+						arguments: { artifactId: r40eArtifacts.first, mode: "tail", maxLines: 3 },
+					},
+				];
+			}),
+			{
+				name: "r40e-done",
+				check: (request) => {
+					r40eArtifacts.retrieved = batchDetails(request)[0]?.text;
+				},
+				reply: { content: [{ type: "text", text: "The evicted task's output reads back." }] },
+			},
+		);
+		world.systemOne.enterPhase("r40e", {});
+		await withDeadline(
+			trace,
+			"R40e hands off two oversized tool tasks",
+			r40eSession.prompt("Hand off two oversized checks and read the first back after the cache evicts it."),
+		);
+		await withDeadline(trace, "R40e settled", r40eSession.waitForForegroundIdle());
+		expect(
+			{
+				firstArtifactSet: r40eArtifacts.first !== undefined,
+				artifactsDiffer: r40eArtifacts.first !== r40eArtifacts.second,
+				evictedStatus: detailField(r40eSeen.evictedDetails, "status"),
+				evictedArtifact: detailField(r40eSeen.evictedDetails, "artifactId") === r40eArtifacts.first,
+				evictedNamesArtifact: r40eSeen.evictedWait?.includes(`artifact tool-output:${r40eArtifacts.first}`),
+				retainedArtifact: detailField(r40eSeen.retained, "artifactId") === r40eArtifacts.second,
+				listMentionsRetained: r40eSeen.list?.includes(r40eIds.second ?? "no-second-id"),
+				listMentionsEvicted: r40eSeen.list?.includes(r40eIds.first ?? "no-first-id"),
+				artifactTail: r40eArtifacts.retrieved?.includes("R40E-FIRST-TAIL"),
+			},
+			"the evicted task is no longer in the cache, yet its wait returns its saved record and its artifact reads back whole",
+		).toEqual({
+			firstArtifactSet: true,
+			artifactsDiffer: true,
+			evictedStatus: "completed",
+			evictedArtifact: true,
+			evictedNamesArtifact: true,
+			retainedArtifact: true,
+			listMentionsRetained: true,
+			listMentionsEvicted: false,
+			artifactTail: true,
+		});
+		world.faultMatrix.witness("R40e", { control: false });
+		world.faultMatrix.witness("R40e", { control: true });
+		expect(await world.disposeSessionInBody(r40eSession), "the R40e root disposes cleanly").toBeUndefined();
+		trace.mark("root", "r40e-retired-task");
 	}
 	// E9 stall threshold, legacy goal mode: an auxiliary root holds an open requirement and its initial turn is held after admission.
 	// The goal loop waits for that turn to settle, then twenty-one text-only continuation turns each record an implicit no_progress.

@@ -806,22 +806,17 @@ const rows: readonly FaultMatrixRow[] = [
 	},
 	{
 		id: "R40e",
-		owner: "core/context/context-store-retention.ts",
+		owner: "core/background-tool-task-controller.ts",
 		journey: 2,
-		phase: "orchestration",
-		fault: "artifacts kept across task-record eviction",
-		witness: NONE,
-		control: NONE,
+		phase: "background-and-stall",
+		fault: "the terminal-task cache evicts a finished task whose output is an artifact",
+		witness:
+			"a wait on the evicted first task returns its saved completed record naming the same artifact, the task list no longer shows it, and the artifact's tail reads back through artifact_retrieve",
+		control: "the retained second task's wait is answered from the cache with its own artifact",
 		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "extension",
-				extension: "X9",
-				detail:
-					"eviction needs 65 terminal tool tasks in one session (MAX_RETAINED_TERMINAL_TASKS = 64 in background-tool-task-controller.ts, pruneTerminalTasks): an optional maxRetainedTerminalTasks on BackgroundToolTaskControllerDeps (default 64), threaded through createSessionBackgroundToolTasks, the AgentSession config and CreateAgentSessionOptions and set to 1 by the world; then one owner hands off two tool tasks whose output exceeds MAX_INLINE_OUTPUT_BYTES and asserts tool_task wait on the evicted first returns its saved record (loadRetiredTerminalRecord) whose artifact reads back, with the retained second's wait answered from the cache as control",
-			},
-		],
+		status: "covered",
+		// With System One on the idle root turns ask judgments no reading derives, as for R18.
+		modes: ["off"],
 	},
 	{
 		id: "R41",

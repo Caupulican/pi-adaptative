@@ -195,6 +195,8 @@ export interface CreateAgentSessionOptions {
 	 * asks to keep the process alive (`TimerOptions.keepAlive`).
 	 */
 	timers?: TimerSource;
+	/** Bound of the background tool-task terminal cache; default: the controller's own (64). */
+	maxRetainedTerminalTasks?: number;
 
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
@@ -887,6 +889,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			sessionStartEvent: options.sessionStartEvent,
 			systemOneController,
 			timers,
+			maxRetainedTerminalTasks: options.maxRetainedTerminalTasks,
 			accountModels,
 			executionLoopMode,
 			objectiveExecutionController,

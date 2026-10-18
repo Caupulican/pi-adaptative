@@ -184,6 +184,8 @@ export interface AgentSessionConfig {
 	systemOneController?: SystemOneController;
 	/** The one timer source of the session's recovery, retry and watchdog alarms and of the clocks they are due on. */
 	timers: TimerSource;
+	/** Bound of the background tool-task terminal cache; absent keeps the controller default. */
+	maxRetainedTerminalTasks?: number;
 	/** What the owner's provider accounts offer, checked with the providers; absent skips the check. */
 	accountModels?: AccountModelCatalog;
 	/** Execution loop mode for objective execution ('legacy_goal', 'objective_shadow', 'objective_primary'). */
