@@ -1,4 +1,5 @@
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../../kernel/timer-port.ts";
+import { blockingSleepMs } from "./atomic-file.ts";
 
 /** The port is the kernel's (its retry backoff runs on it); every session owner below takes one. */
 export {
@@ -56,7 +57,13 @@ export type TimerOwner =
 /** The one timer source a session is built with: the port each owner arms its alarms on. */
 export interface TimerSource {
 	port(owner: TimerOwner): TimerPort;
+	/**
+	 * The wait between a sync file lock's acquisition attempts (`AtomicFileLockOptions.sleepSync`) of the session stores
+	 * that take it: the orchestration event store. Called once per gap with that gap's delay; it returns only when the gap
+	 * is over and cannot take an abort, as the lock's caller is fully synchronous.
+	 */
+	sleepSync(delayMs: number): void;
 }
 
-/** Every owner on the system clock and the global timers. */
-export const SYSTEM_TIMER_SOURCE: TimerSource = { port: () => SYSTEM_TIMER_PORT };
+/** Every owner on the system clock and the global timers; the sync lock gaps block the calling thread. */
+export const SYSTEM_TIMER_SOURCE: TimerSource = { port: () => SYSTEM_TIMER_PORT, sleepSync: blockingSleepMs };

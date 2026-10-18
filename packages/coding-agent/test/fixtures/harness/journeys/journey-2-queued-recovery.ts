@@ -6,9 +6,14 @@ import {
 	workerContextForkFile,
 	workerProjectSpecializationFile,
 } from "../../../../src/core/agent-paths.ts";
+import {
+	type BackgroundToolTaskRecord,
+	loadBackgroundToolTaskRecordsNewestFirst,
+} from "../../../../src/core/background-tool-task-controller.ts";
 import { sessionRootAddress, sessionRootReplyMessageId } from "../../../../src/core/delegation/session-root-mailbox.ts";
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "../../../../src/core/delegation/worker-mailbox-record.ts";
+import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import type { ScriptedRequest } from "../scripted-provider.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, type WorkerProjectClaims, withDeadline } from "../session-fixture.ts";
@@ -20,9 +25,11 @@ import { type HarnessWorld, type WorkerProjectClaims, withDeadline } from "../se
  * are rebound in place rather than through an ESM module mock.
  */
 import {
+	backgroundTaskIdOf,
 	bundleEntries,
 	crashCutChecks,
 	expectOwnerWords,
+	handoffFor,
 	LIMITS_PATH,
 	latestBatchResults,
 	rawReplyAcknowledgements,
@@ -808,4 +815,114 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		"the queued-context guard refuses A's busy lease",
 	).toBe(true);
 	expect(await world.disposeSessionInBody(e7Fresh.session), "the recovered owner disposes cleanly").toBeUndefined();
+	// R21, System One off (the background start and the wake turn ask on-mode questions no reading of this phase derives): a crash
+	// cut while a background task is running. An auxiliary root starts a held echo in the background and goes idle, and its session
+	// file, which records the task running, is captured. The disposal cancels the running task and records it canceled, its wake-up
+	// owed to the next session: the control, that is what the next session would deliver without the cut. The cut writes the running
+	// record back, so the next session finds a running task whose owning process is gone: it records the task failed and delivers
+	// that terminal to the idle root as a wake turn.
+	if (!world.systemOne.enabled) {
+		const r21Gate = createBarrier();
+		const r21Admitted = createBarrier();
+		const r21Wake = createBarrier();
+		const r21Started: { taskId?: string } = {};
+		const r21Aux = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
+		world.systemOne.enterPhase("r21-background-cut", {});
+		// Admitted at its gate before the cut, so the disposal's cancellation reaches a command that is running, not one never started.
+		world.shell.enqueue({
+			name: "r21-running",
+			command: "echo r21-running",
+			output: "r21-running\n",
+			exitCode: 0,
+			gate: r21Gate.promise,
+			check: () => r21Admitted.release(),
+		});
+		world.provider.enqueue(
+			"root",
+			calls("r21-start", [
+				{ id: "r21-bg-1", name: "bash", arguments: { command: "echo r21-running", background: true } },
+			]),
+			{
+				name: "r21-started",
+				check: (request) => {
+					r21Started.taskId = backgroundTaskIdOf(request);
+				},
+				reply: { content: [{ type: "text", text: "The check runs in the background." }] },
+			},
+		);
+		await withDeadline(trace, "R21 background start", r21Aux.session.prompt("Start the check in the background."));
+		await withDeadline(trace, "R21 start settled", r21Aux.session.waitForForegroundIdle());
+		await withDeadline(trace, "R21 command admitted at its gate", r21Admitted.promise, 60_000);
+		const r21File = r21Aux.sessionManager.getSessionFile();
+		if (r21File === undefined) throw new Error("the R21 root has no session file");
+		const r21TaskId = r21Started.taskId;
+		if (r21TaskId === undefined) throw new Error("the R21 start result carried no task id");
+		// The task's latest durable record on `manager`'s branch.
+		const r21Record = (manager: Parameters<typeof loadBackgroundToolTaskRecordsNewestFirst>[0]) =>
+			loadBackgroundToolTaskRecordsNewestFirst(manager).find(
+				(record): record is BackgroundToolTaskRecord => isRecordObject(record) && record.taskId === r21TaskId,
+			);
+		expect(r21Record(r21Aux.sessionManager)?.status, "the held echo is recorded running").toBe("running");
+		const r21Files = (): Map<string, string> => {
+			const files = new Map<string, string>();
+			const content = world.io.peekFile(r21File);
+			if (content !== undefined) files.set(r21File, content);
+			return files;
+		};
+		const r21Capture = r21Files();
+		expect([...r21Capture.keys()], "the R21 capture holds the session file").toEqual([r21File]);
+		// The next session's wake turn: its context carries the handoff of the restored task.
+		world.provider.enqueue("root", {
+			name: "r21-wake",
+			check: (request) => {
+				if (!handoffFor(request, r21TaskId)) throw new Error("the restored terminal does not reach the fresh root");
+				r21Wake.release();
+			},
+			reply: { content: [{ type: "text", text: "The check ended with its process." }] },
+		});
+		const r21Fresh = await withDeadline(
+			trace,
+			"R21 restart",
+			world.restart({
+				owner: r21Aux.session,
+				sessionFile: r21File,
+				cut: { manifest: r21Files, capture: r21Capture },
+				rewindSqlite: false,
+				retainedClaims: [],
+				check: {
+					...crashCutChecks("the R21 root disposes cleanly"),
+					disposed: (result) => {
+						expect(result, "the R21 root disposes cleanly").toBeUndefined();
+						const canceled = r21Record(r21Aux.sessionManager);
+						expect(
+							{
+								status: canceled?.status,
+								delivery: canceled?.terminalDelivery,
+								ended: canceled?.output.includes("Session ended before the background tool completed."),
+							},
+							"the disposal records the running task canceled, its wake-up owed to the next session",
+						).toEqual({ status: "canceled", delivery: "pending", ended: true });
+						world.faultMatrix.witness("R21", { control: true });
+					},
+				},
+			}),
+			60_000,
+		);
+		await withDeadline(trace, "R21 restored terminal delivered", r21Wake.promise);
+		await withDeadline(trace, "R21 wake settled", r21Fresh.session.waitForForegroundIdle());
+		const r21Failed = r21Record(r21Fresh.sessionManager);
+		expect(
+			{
+				status: r21Failed?.status,
+				delivery: r21Failed?.terminalDelivery,
+				resumed: r21Failed?.output.includes(
+					"The session resumed after the owning process ended; the original tool completion is unavailable.",
+				),
+			},
+			"the next session records the cut running task failed with its process gone, and delivers that terminal",
+		).toEqual({ status: "failed", delivery: "delivered", resumed: true });
+		world.faultMatrix.witness("R21", { control: false });
+		r21Gate.release();
+		expect(await world.disposeSessionInBody(r21Fresh.session), "the R21 next root disposes cleanly").toBeUndefined();
+	}
 }

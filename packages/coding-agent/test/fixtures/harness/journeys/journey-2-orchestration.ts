@@ -1,9 +1,11 @@
 import "../builtin-install.ts";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
+import { orchestrationEventStoreDir } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import {
 	type BackgroundToolTaskRecord,
@@ -21,7 +23,7 @@ import { OrchestrationProfileStore } from "../../../../src/core/orchestration/pr
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import type { WaitEndReport } from "../../../../src/core/util/wait.ts";
 import type { ScriptedRequest } from "../scripted-provider.ts";
-import { calls, createBarrier, text } from "../scripted-provider.ts";
+import { calls, createBarrier, fail, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 
 /**
@@ -2646,6 +2648,515 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			"the host reads the same bytes from the artifact file",
 		).toBe(largeSha);
 	}
+	// Still in the "e11" phase: the prompts and the steer below are owner words, judged by its six owner-policy keys only.
+	await steeredDelegateWait(world, eSession);
+	await heldOrchestrationStoreLock(world, eSession, eAux.sessionManager.getSessionId());
+	await retainedRetryReadFault(world, eSession, eAux.sessionManager.getSessionId());
+	await failedQueuedCancel(world, eSession);
 	expect(await world.disposeSessionInBody(eSession), "the auxiliary stale-pass root disposes cleanly").toBeUndefined();
 	trace.mark("root", "e-stale-pass");
+}
+
+/**
+ * R46 (a steer during a delegate wait, the background-lane worker wait): a worker is held in its provider turn, and the
+ * root's delegate wait on it is armed with the longest bound. The owner's steer, queued once that bound is armed, ends the
+ * wait early as `wait_steered` while the worker keeps running; the steer is read at the next provider boundary. Control:
+ * the same wait with no steer ends on its own bound, advanced on the `worker-wait` owner, as `bounded_wait_elapsed`.
+ */
+async function steeredDelegateWait(world: HarnessWorld, session: AgentSession): Promise<void> {
+	const trace = world.trace;
+	const R46_STEER_WORDS = "Mention the held worker's model in your reply.";
+	const R46_REPORT = "The held worker report is ready.";
+	const R46_WAIT_MS = 300_000;
+	const workerHeld = createBarrier();
+	const workerRelease = createBarrier();
+	const wake = createBarrier();
+	const seen: {
+		steeredText?: string;
+		steeredDetails?: unknown;
+		steerRead?: boolean;
+		timedOutText?: string;
+		timedOutDetails?: unknown;
+	} = {};
+	expect(world.provider.getPendingStepNames("worker-c"), "no earlier worker-c step is left pending").toEqual([]);
+	world.provider.enqueue("worker-c", {
+		name: "r46-held-report",
+		check: () => {
+			workerHeld.release();
+		},
+		gate: workerRelease.promise,
+		reply: {
+			content: [
+				{
+					type: "toolCall",
+					id: "r46-report-1",
+					name: "submit_report",
+					arguments: { status: "completed", summary: R46_REPORT },
+				},
+			],
+			stopReason: "toolUse",
+		},
+	});
+	const waitCall = (id: string) => (request: ScriptedRequest) => [
+		{
+			id,
+			name: "delegate",
+			arguments: { action: "wait", agentId: latestAgentIdForTrack(request, "worker-c"), timeoutMs: R46_WAIT_MS },
+		},
+	];
+	const delegateWaitText = (request: ScriptedRequest): string | undefined =>
+		latestBatchResults(request).find((result) => result.toolName === "delegate")?.text;
+	let armedBeforeAdvance: number[] = [];
+	let boundFired: number | undefined;
+	world.provider.enqueue(
+		"root",
+		calls("r46-start", [
+			{
+				id: "r46-start-1",
+				name: "delegate",
+				arguments: {
+					action: "start",
+					model: { provider: "harness-script", modelId: "worker-c" },
+					instructions: "Report once you are released.",
+				},
+			},
+		]),
+		dynamicCalls("r46-wait", waitCall("r46-wait-1"), (request) => assertBatchOk(request, "the held worker start")),
+		dynamicCalls("r46-steer-read", waitCall("r46-timeout-wait-1"), (request) => {
+			seen.steeredText = delegateWaitText(request);
+			seen.steeredDetails = lastToolResultDetails(session, "delegate");
+			seen.steerRead = requestTexts(request).some((value) => value.includes(R46_STEER_WORDS));
+			// The control wait arms its bound after this request: advancing the owner by that bound fires it.
+			void world.timers.nextArmed("worker-wait").then(() => {
+				armedBeforeAdvance = world.timers.armedDelays("worker-wait");
+				boundFired = world.timers.advance("worker-wait", R46_WAIT_MS);
+			});
+		}),
+		{
+			name: "r46-timeout-read",
+			check: (request) => {
+				seen.timedOutText = delegateWaitText(request);
+				seen.timedOutDetails = lastToolResultDetails(session, "delegate");
+			},
+			reply: { content: [{ type: "text", text: "The held worker keeps running." }] },
+		},
+		{
+			name: "r46-wake",
+			check: (request) => {
+				if (!JSON.stringify(request.context.messages).includes(R46_REPORT)) {
+					throw new Error("the held worker's report did not reach the idle root");
+				}
+				wake.release();
+			},
+			reply: { content: [{ type: "text", text: "The held worker reported." }] },
+		},
+	);
+	// Nothing else holds a worker-wait alarm here, so the next arm is the steered wait's own bound.
+	expect(world.timers.armedDelays("worker-wait"), "no worker wait is armed before the steered wait").toEqual([]);
+	let steerAdmitted: Promise<unknown> | undefined;
+	const steeredBoundArmed = world.timers.nextArmed("worker-wait").then((delayMs) => {
+		steerAdmitted = trace.track(session.steer(R46_STEER_WORDS));
+		return delayMs;
+	});
+	await withDeadline(
+		trace,
+		"R46 steered delegate wait turn",
+		session.prompt("Start the held worker and wait for it."),
+		90_000,
+	);
+	await withDeadline(trace, "R46 worker held", workerHeld.promise);
+	expect(await steeredBoundArmed, "the steered wait armed its own bound").toBe(R46_WAIT_MS);
+	expect(steerAdmitted, "the armed bound queued the steer").toBeDefined();
+	await withDeadline(trace, "R46 steer admitted", steerAdmitted ?? Promise.resolve());
+	const detail = (details: unknown, key: "action" | "timedOut" | "steered"): unknown =>
+		isRecordObject(details) ? details[key] : undefined;
+	expect(seen.steeredText, "the steered wait says it was steered").toContain("Wait steered:");
+	expect(seen.steeredText, "the steered wait carries its typed reason").toContain("wait_steered");
+	expect(seen.steeredText, "a steered wait never reads as an elapsed bound").not.toContain("bounded_wait_elapsed");
+	expect(
+		{
+			action: detail(seen.steeredDetails, "action"),
+			timedOut: detail(seen.steeredDetails, "timedOut"),
+			steered: detail(seen.steeredDetails, "steered"),
+		},
+		"the steered wait's details: not timed out, steered",
+	).toEqual({ action: "wait", timedOut: false, steered: true });
+	expect(seen.steerRead, "the steer is read at the next provider boundary").toBe(true);
+	world.faultMatrix.witness("R46", { control: false });
+	expect(armedBeforeAdvance, "the control wait's bound is the only worker-wait alarm").toEqual([R46_WAIT_MS]);
+	expect(boundFired, "advancing the bound fires exactly that bound").toBe(1);
+	expect(seen.timedOutText, "the unsteered wait reports its elapsed bound").toContain("bounded_wait_elapsed");
+	expect(seen.timedOutText, "an elapsed bound never reads as a steer").not.toContain("Wait steered");
+	expect(
+		{
+			action: detail(seen.timedOutDetails, "action"),
+			timedOut: detail(seen.timedOutDetails, "timedOut"),
+			steered: detail(seen.timedOutDetails, "steered"),
+		},
+		"the unsteered wait's details: timed out, not steered",
+	).toEqual({ action: "wait", timedOut: true, steered: undefined });
+	world.faultMatrix.witness("R46", { control: true });
+	workerRelease.release();
+	await withDeadline(trace, "R46 report reached the idle root", wake.promise, 90_000);
+	await withDeadline(trace, "R46 settled", session.waitForForegroundIdle(), 90_000);
+}
+
+/**
+ * R47 (a sync file lock held elsewhere backs off on the session's sleep port): the orchestration event store takes its
+ * sync lock with the session timer source's `sleepSync`. A fresh lock directory seeded on the store's cursor holds the
+ * lock; the recording sleep releases it inside the third gap, so the next attempt wins and the retire it guards
+ * commits. The gaps are the lock's default schedule, min(25 * 2^(n-1), 500) ms for attempt n: 25, 50, 100. Control:
+ * every store lock this journey took before was free, so no gap was asked for.
+ */
+async function heldOrchestrationStoreLock(
+	world: HarnessWorld,
+	session: AgentSession,
+	sessionId: string,
+): Promise<void> {
+	const trace = world.trace;
+	const HELD_GAPS = 3;
+	const cursorPath = join(orchestrationEventStoreDir(world.agentDir, sessionId), "cursor.json");
+	const lockDir = `${cursorPath}.lock`;
+	expect(world.io.existsSync(cursorPath), "the auxiliary root's orchestration store has committed events").toBe(true);
+	expect(world.timers.sleptGaps(), "every earlier store lock was free: no gap was asked for").toEqual([]);
+	world.faultMatrix.witness("R47", { control: true });
+	expect(world.io.existsSync(lockDir), "no lock is held on the store before the seed").toBe(false);
+	let retiredAgentId: string | undefined;
+	let seeded = false;
+	world.provider.enqueue(
+		"root",
+		dynamicCalls(
+			"r47-retire",
+			(request) => {
+				retiredAgentId = latestAgentIdForTrack(request, "worker-c");
+				return [{ id: "r47-retire-1", name: "delegate", arguments: { action: "retire", agentId: retiredAgentId } }];
+			},
+			() => {
+				// A fresh lock directory is a lock another process holds: its mtime is inside the lock's staleness window
+				// (2 s at least), seeded at the request that asks for the retire, so the retire's own commit meets it.
+				world.io.mkdirSync(lockDir);
+				seeded = true;
+			},
+		),
+		{
+			name: "r47-retired",
+			check: (request) => assertBatchOk(request, "the retire behind the held store lock"),
+			reply: { content: [{ type: "text", text: "The held worker is retired." }] },
+		},
+	);
+	world.timers.onSleepSync(() => {
+		if (world.timers.sleptGaps().length === HELD_GAPS) world.io.rmSync(lockDir, { recursive: true });
+	});
+	try {
+		await withDeadline(
+			trace,
+			"R47 retire behind the held store lock",
+			session.prompt("Retire the held worker."),
+			90_000,
+		);
+	} finally {
+		world.timers.onSleepSync(undefined);
+	}
+	expect(seeded, "the held lock was seeded at the retire's request").toBe(true);
+	expect(world.timers.sleptGaps(), "the held lock backed off by its default schedule on the session's sleep").toEqual([
+		25, 50, 100,
+	]);
+	expect(world.io.existsSync(lockDir), "the winning attempt released the store lock").toBe(false);
+	expect(retiredAgentId, "the retire named the held worker").toBeDefined();
+	expect(
+		session.backgroundLanes.getTaskRuntimeSnapshot()?.agents[retiredAgentId ?? ""]?.status,
+		"the retire behind the held lock committed",
+	).toBe("retired");
+	world.faultMatrix.witness("R47", { control: false });
+}
+
+/**
+ * R30 (a durable read fault when a retained retry comes due): a worker fails three transient provider requests, so its attempt
+ * is suspended on the retry ladder and the ladder's alarm is armed on the `orchestration` owner. The alarm fires with the
+ * store's cursor refusing its stat, so the due retry cannot read its attempt: the retry is kept and a backoff alarm of
+ * RETRY_ENQUEUE_FAILURE_BASE_MS * 2^0 = 1 000 ms is armed in its place. Control: that backoff fires with the read clear, the
+ * retry is enqueued, and the ladder attempt reports.
+ */
+async function retainedRetryReadFault(world: HarnessWorld, session: AgentSession, sessionId: string): Promise<void> {
+	const trace = world.trace;
+	const R30_REPORT = "The flaky worker report is ready.";
+	const R30_TRANSIENT = "503 service unavailable (scripted transient)";
+	const R30_BACKOFF_MS = 1_000;
+	const cursorPath = join(orchestrationEventStoreDir(world.agentDir, sessionId), "cursor.json");
+	const wake = createBarrier();
+	const retryFailures = (): string[] =>
+		world.warnings.filter((message) => message.includes("retry durable read failed"));
+	expect(world.provider.getPendingStepNames("worker-c"), "no earlier worker-c step is left pending").toEqual([]);
+	world.provider.enqueue(
+		"worker-c",
+		fail("r30-fail-1", R30_TRANSIENT),
+		fail("r30-fail-2", R30_TRANSIENT),
+		fail("r30-fail-3", R30_TRANSIENT),
+		{
+			name: "r30-report",
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: "r30-report-1",
+						name: "submit_report",
+						arguments: { status: "completed", summary: R30_REPORT },
+					},
+				],
+				stopReason: "toolUse",
+			},
+		},
+	);
+	world.provider.enqueue(
+		"root",
+		calls("r30-start", [
+			{
+				id: "r30-start-1",
+				name: "delegate",
+				arguments: {
+					action: "start",
+					model: { provider: "harness-script", modelId: "worker-c" },
+					instructions: "Report once your provider answers.",
+				},
+			},
+		]),
+		{
+			name: "r30-started",
+			check: (request) => assertBatchOk(request, "the flaky worker start"),
+			reply: { content: [{ type: "text", text: "The flaky worker is started." }] },
+		},
+		{
+			name: "r30-wake",
+			maxRequests: 8,
+			until: (request) => {
+				const done = JSON.stringify(request.context.messages).includes(R30_REPORT);
+				if (done) wake.release();
+				return done;
+			},
+			reply: { content: [{ type: "text", text: "The flaky worker is still settling." }] },
+		},
+	);
+	await withDeadline(trace, "R30 flaky worker start turn", session.prompt("Start the flaky worker."), 90_000);
+	// Two inner provider retries run on the wall-clock `worker-provider-retry` owner; the third failure ends the attempt, and
+	// the ladder suspends it and arms one alarm, its first delay round(5 000 + 0.2 * 5 000 * random) ms at most.
+	const ladderMs = await withDeadline(
+		trace,
+		"R30 ladder alarm armed",
+		world.timers.whenArmed("orchestration"),
+		120_000,
+	);
+	expect(world.timers.armedDelays("orchestration"), "the ladder arms exactly one alarm").toEqual([ladderMs]);
+	expect(ladderMs, "the ladder alarm is due within the policy's first-retry ceiling").toBeLessThanOrEqual(6_000);
+	expect(retryFailures(), "no retained retry has failed before the fault").toEqual([]);
+	world.io.failNext({ name: "r30-durable-read", kind: "stat", matches: (operation) => operation.path === cursorPath });
+	expect(world.timers.advance("orchestration", ladderMs), "the ladder alarm fires once its delay has elapsed").toBe(1);
+	expect(world.io.consumedFaults, "the due retry's durable read met the refused cursor stat").toContain(
+		"r30-durable-read",
+	);
+	// The lane id is the only part not fixed here; the backoff is announced in whole seconds and the cause is the refused stat.
+	expect(
+		retryFailures().map((message) => message.replace(/^Worker worker-\d+ /, "Worker <lane> ")),
+		"the failed read is announced once, with its backoff and its cause",
+	).toEqual([
+		`Worker <lane> retry durable read failed; retaining the durable retry and trying again in 1s: Scripted IO fault r30-durable-read: stat '${cursorPath}'`,
+	]);
+	expect(world.timers.armedDelays("orchestration"), "the failed read re-arms the retry on its first backoff").toEqual([
+		R30_BACKOFF_MS,
+	]);
+	expect(
+		Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {})
+			.filter((attempt) => attempt.status === "suspended")
+			.map((attempt) => attempt.retry?.retriesUsed),
+		"the retained retry is still the one durably suspended attempt, on its first ladder retry",
+	).toEqual([1]);
+	world.faultMatrix.witness("R30", { control: false });
+	expect(world.timers.advance("orchestration", R30_BACKOFF_MS - 1), "the backoff does not fire before its delay").toBe(
+		0,
+	);
+	expect(world.timers.advance("orchestration", 1), "the backoff fires once its delay has elapsed").toBe(1);
+	expect(world.timers.armedDelays("orchestration"), "the clear read enqueues the retry and arms nothing").toEqual([]);
+	await withDeadline(trace, "R30 ladder report reached the idle root", wake.promise, 90_000);
+	await withDeadline(trace, "R30 settled", session.waitForForegroundIdle(), 90_000);
+	expect(
+		world.provider.reached.filter((name) => name.startsWith("worker-c:r30-")),
+		"the retained retry runs the ladder attempt once, after the three transient failures",
+	).toEqual(["worker-c:r30-fail-1", "worker-c:r30-fail-2", "worker-c:r30-fail-3", "worker-c:r30-report"]);
+	expect(retryFailures(), "the clear backoff read adds no failure").toHaveLength(1);
+	world.faultMatrix.witness("R30", { control: true });
+}
+
+/**
+ * R32 (a durable cancel of a queued lane fails): with workers capped at one, a held worker runs and a second one queues behind
+ * it. The root cancels the queued one while the store refuses that cancellation's event write: the cancel reports the
+ * failure, and the lane stays durably queued with its cancellation retained by the scheduler. Control: a later scheduler
+ * drain (at the latest the one the held worker's end runs) retries the retained cancellation before any queued dispatch;
+ * it commits with the owner's reason and the queued worker never runs. Both terminals then reach the idle root.
+ */
+async function failedQueuedCancel(world: HarnessWorld, session: AgentSession): Promise<void> {
+	const trace = world.trace;
+	const R32_REPORT = "The capped reader report is ready.";
+	const previousDelegation = world.settingsManager.getGlobalSettings().workerDelegation ?? {};
+	world.settingsManager.setWorkerDelegationSettings({ ...previousDelegation, maxConcurrent: 1 });
+	expect(world.settingsManager.getWorkerDelegationSettings().maxConcurrent, "the scenario caps workers at one").toBe(
+		1,
+	);
+	const heldReached = createBarrier();
+	const heldRelease = createBarrier();
+	const wake = createBarrier();
+	const started: { held?: { agentId: string; laneId: string }; queued?: { agentId: string; laneId: string } } = {};
+	const startedFrom = (label: string): { agentId: string; laneId: string } => {
+		const details = lastToolResultDetails(session, "delegate");
+		const agentId = isRecordObject(details) ? details.agentId : undefined;
+		const laneId = isRecordObject(details) ? details.laneId : undefined;
+		if (typeof agentId !== "string" || typeof laneId !== "string") {
+			throw new Error(`the ${label} start carries no agent or lane id`);
+		}
+		return { agentId, laneId };
+	};
+	const attemptOf = (laneId: string | undefined) =>
+		Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {})
+			.filter((attempt) => attempt.taskId === laneId)
+			.at(-1);
+	const handedOff = (request: ScriptedRequest, laneId: string | undefined): boolean =>
+		laneId !== undefined &&
+		request.context.messages.some((message) => {
+			const text = JSON.stringify(message);
+			return text.includes("Background worker terminal handoff") && text.includes(`- ${laneId}:`);
+		});
+	const cancelFailures = (): string[] => world.warnings.filter((message) => message.includes("cancellation failed"));
+	const queuedReachedBefore = world.provider.reached.filter((name) => name.startsWith("worker-b:")).length;
+	let faultPath: string | undefined;
+	let cancelResult: { isError: boolean; text: string } | undefined;
+	expect(world.provider.getPendingStepNames("worker-c"), "no earlier worker-c step is left pending").toEqual([]);
+	world.provider.enqueue("worker-c", {
+		name: "r32-held-report",
+		check: () => {
+			heldReached.release();
+		},
+		gate: heldRelease.promise,
+		reply: {
+			content: [
+				{
+					type: "toolCall",
+					id: "r32-report-1",
+					name: "submit_report",
+					arguments: { status: "completed", summary: R32_REPORT },
+				},
+			],
+			stopReason: "toolUse",
+		},
+	});
+	world.provider.enqueue(
+		"root",
+		calls("r32-start-held", [
+			{
+				id: "r32-start-held-1",
+				name: "delegate",
+				arguments: {
+					action: "start",
+					model: { provider: "harness-script", modelId: "worker-c" },
+					instructions: "Report once you are released.",
+				},
+			},
+		]),
+		{
+			name: "r32-held-started",
+			check: (request) => {
+				assertBatchOk(request, "the capped held worker start");
+				started.held = startedFrom("held");
+			},
+			reply: { content: [{ type: "text", text: "The capped reader is started." }] },
+		},
+	);
+	await withDeadline(trace, "R32 held worker start turn", session.prompt("Start the capped reader."), 90_000);
+	// The queued start comes only once the held worker is physically in its provider turn, so its running lease is counted.
+	await withDeadline(trace, "R32 worker held", heldReached.promise, 90_000);
+	world.provider.enqueue(
+		"root",
+		calls("r32-start-queued", [
+			{
+				id: "r32-start-queued-1",
+				name: "delegate",
+				arguments: {
+					action: "start",
+					model: { provider: "harness-script", modelId: "worker-b" },
+					instructions: "Report the current limits value.",
+				},
+			},
+		]),
+		dynamicCalls(
+			"r32-cancel",
+			() => [
+				{ id: "r32-cancel-1", name: "delegate", arguments: { action: "cancel", agentId: started.queued?.agentId } },
+			],
+			(request) => {
+				assertBatchOk(request, "the queued worker start");
+				const queued = startedFrom("queued");
+				started.queued = queued;
+				const attemptId = attemptOf(queued.laneId)?.attemptId;
+				if (attemptId === undefined) throw new Error("the queued worker has no attempt to cancel");
+				// Only this attempt's cancellation event is refused: its idempotency key names the attempt.
+				world.io.failNext({
+					name: "r32-cancel-write",
+					kind: "write",
+					matches: (operation, data) => {
+						const refused = data?.toString("utf8").includes(`"attempt-cancelled:${attemptId}"`) === true;
+						if (refused) faultPath = operation.path;
+						return refused;
+					},
+				});
+			},
+		),
+		{
+			name: "r32-cancel-read",
+			check: (request) => {
+				const result = latestBatchResults(request).find((candidate) => candidate.toolName === "delegate");
+				cancelResult = result ? { isError: result.isError, text: result.text } : undefined;
+			},
+			reply: { content: [{ type: "text", text: "The queued reader's cancellation is retried." }] },
+		},
+		{
+			name: "r32-wake",
+			maxRequests: 8,
+			until: (request) => {
+				const done = handedOff(request, started.held?.laneId) && handedOff(request, started.queued?.laneId);
+				if (done) wake.release();
+				return done;
+			},
+			reply: { content: [{ type: "text", text: "The capped workers are still settling." }] },
+		},
+	);
+	await withDeadline(
+		trace,
+		"R32 queued cancel turn",
+		session.prompt("Queue a second reader behind it, then cancel the queued one."),
+		90_000,
+	);
+	expect(faultPath, "the cancellation's event write was refused").toBeDefined();
+	expect(cancelResult?.isError, "the failed durable cancel is reported to the root as an error").toBe(true);
+	expect(cancelResult?.text, "the cancel's error names the refused write").toContain(
+		"Scripted IO fault r32-cancel-write",
+	);
+	expect(cancelFailures(), "the failed cancel is announced once, as retained").toEqual([
+		`Worker ${started.queued?.laneId} cancellation failed; it stays queued and the cancellation is retried: Scripted IO fault r32-cancel-write: write '${faultPath}'`,
+	]);
+	expect(attemptOf(started.queued?.laneId)?.status, "the failed cancel leaves the queued lane durably queued").toBe(
+		"queued",
+	);
+	world.faultMatrix.witness("R32", { control: false });
+	heldRelease.release();
+	await withDeadline(trace, "R32 both terminals reached the idle root", wake.promise, 90_000);
+	await withDeadline(trace, "R32 settled", session.waitForForegroundIdle(), 90_000);
+	const cancelled = attemptOf(started.queued?.laneId);
+	expect(
+		{ status: cancelled?.status, reasonCode: cancelled?.reasonCode },
+		"the retained cancellation commits with the owner's reason on the next scheduler signal",
+	).toEqual({ status: "cancelled", reasonCode: "agent_cancelled" });
+	expect(
+		world.provider.reached.filter((name) => name.startsWith("worker-b:")).length,
+		"the cancelled queued worker never ran",
+	).toBe(queuedReachedBefore);
+	expect(cancelFailures(), "the retried cancellation adds no failure").toHaveLength(1);
+	world.faultMatrix.witness("R32", { control: true });
+	world.settingsManager.setWorkerDelegationSettings(previousDelegation);
 }

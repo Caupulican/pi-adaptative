@@ -65,6 +65,8 @@ export async function runJourney1(): Promise<void> {
 				/^Worker worker-\d+ provider request failed \(server_error\); retrying in \d+s \(attempt [23]\/3\)\.$/,
 				/^Worker worker-\d+ failed \(server_error\); retrying from the persisted transcript in \d+s \(attempt 2\)\.$/,
 				/^A queued message was not delivered because the session context changed before it was admitted\. It is kept in full in the pending queue; restore it to the editor to send it again: Queued owner input while the summary is held\.$/,
+				// The promoted directive the restart interrupts while its own turn is prepared returns to the queue held (R7): exact text.
+				/^A queued message was not delivered because its turn ended before it could be delivered\. It is kept in full in the pending queue; restore it to the editor to send it again: Owner directive promoted before the cut: skip the full test suite\.$/,
 				// ICM continuous-chat fail-closed admission checks (missing summaryModel, missing egress opt-in, and missing xhigh thinking).
 				/^Memory subsystem init failed: The ICM chat needs a cheap model for its compactions, and contextPolicy\.memory\.history\.summaryModel is not set: set it to a configured model, for example "<provider>\/<model>"\. If that model is not local, also set contextPolicy\.memory\.history\.allowExternalSummaryEgress to true\.$/,
 				/^Memory subsystem init failed: The ICM chat's summary model harness-script\/worker-c is not local, and external summary egress is not allowed: set contextPolicy\.memory\.history\.allowExternalSummaryEgress to true to allow it\.$/,

@@ -28,6 +28,13 @@ export async function runJourney2(): Promise<void> {
 				// session-file fence the one denied append raised.
 				/^Failed to notify terminal background tool task batch tool-task-\d+ \(retrying\): Session persistence state is uncertain after a failed write; reopen the session file or start a new session before appending\.$/,
 				/^Background tool completion wake-up for tool-task-\d+ is parked after 10 consecutive failed deliveries \(still pending; the session file refused a write and accepts no append until the session is reopened; delivery resumes then; tool_task action=wait collects it now\): Session persistence state is uncertain after a failed write; reopen the session file or start a new session before appending\.$/,
+				// R30: the flaky worker's two inner provider retries, its one ladder retry, and the due retry's one refused cursor
+				// stat (the orchestration event store of the auxiliary root): exact text.
+				/^Worker worker-\d+ provider request failed \(server_error\); retrying in \d+s \(attempt [23]\/3\)\.$/,
+				/^Worker worker-\d+ failed \(server_error\); retrying from the persisted transcript in \d+s \(attempt 2\)\.$/,
+				/^Worker worker-\d+ retry durable read failed; retaining the durable retry and trying again in 1s: Scripted IO fault r30-durable-read: stat '(?:\/harness\/agent-journey-2-system-one-(?:on|off)\/state\/orchestration\/sessions\/[^'/\\\n]+\/events\/cursor\.json|[A-Z]:\\harness\\agent-journey-2-system-one-(?:on|off)\\state\\orchestration\\sessions\\[^'/\\\n]+\\events\\cursor\.json)'$/,
+				// R32: the queued worker's one refused cancellation event write (the auxiliary root's store), retained: exact text.
+				/^Worker worker-\d+ cancellation failed; it stays queued and the cancellation is retried: Scripted IO fault r32-cancel-write: write '(?:\/harness\/agent-journey-2-system-one-(?:on|off)\/state\/orchestration\/sessions\/[^'/\\\n]+\/events\/events\/\d{16}\.json\.\d+\.[0-9a-f-]{36}\.tmp|[A-Z]:\\harness\\agent-journey-2-system-one-(?:on|off)\\state\\orchestration\\sessions\\[^'/\\\n]+\\events\\events\\\d{16}\.json\.\d+\.[0-9a-f-]{36}\.tmp)'$/,
 			],
 			files: { [LIMITS_PATH]: "export const MAX_RETRIES = 3;\n" },
 			// A clean checkout on main: a fresh writer worker gets its own worktree lane (dirty checkouts fall back to shared).

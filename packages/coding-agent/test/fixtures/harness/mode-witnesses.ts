@@ -1836,6 +1836,7 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 
 	await verifyAccountListingRefusal(world);
 	await verifyRetryClosingAndUnicodeQueue(world);
+	await verifyQueuedGoalRetryRelease(world);
 	await verifyBillingContinuation(world);
 	await verifyPrintOwner(world);
 }
@@ -2893,6 +2894,120 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 		} finally {
 			hold.release();
 			await world.disposeSessionInBody(session);
+		}
+	}
+}
+
+/**
+ * goal-execution-submission-release. A chat goal queued behind a held run starts when that run delivers it, and the run's
+ * submission works on it from there; the goal's execution ends when that submission releases the foreground, whatever its
+ * run's outcome. Here the delivered turn fails retryably and the owner abandons the retry from its start announcement: the
+ * backoff already waits on the retry's abort controller, so the retry is cancelled and the run ends on its failure. The next
+ * prompt begins its own execution, which refuses to begin while an earlier one is still held. The control recovers the same
+ * failure through its retry. Each owner runs System One off in its own binding (both world modes) and never continues the goal
+ * on its own.
+ */
+async function verifyQueuedGoalRetryRelease(world: HarnessWorld): Promise<void> {
+	const failure = "network error: scripted connection interrupted";
+	const objective = "keep the release notes current";
+	const goalWords = `Set a goal: ${objective}`;
+	for (const abandon of [true, false] as const) {
+		const label = abandon ? "queued-goal-abandoned-retry" : "queued-goal-recovered-retry";
+		const agentDir = `${world.agentDir}-${label}`;
+		const session = (
+			await world.createRootSession("root", {
+				agentDir,
+				sessionManager: world.createSessionManager(agentDir),
+				systemOneEnabled: false,
+				settings: {
+					memorySystem: "okf",
+					autoLearn: { enabled: false },
+					retry: { enabled: true, maxRetries: 1, baseDelayMs: 5 },
+					autonomy: { maxStallTurns: 2, goalAutoContinue: false },
+				},
+			})
+		).session;
+		world.systemOne.enterPhase(label, {});
+		const hold = createBarrier();
+		const reached = createBarrier();
+		const requestMark = world.provider.requests.length;
+		const warningMark = world.warnings.length;
+		const retryEvents: Array<Record<string, unknown>> = [];
+		session.subscribe((event) => {
+			if (event.type === "auto_retry_start") {
+				retryEvents.push({ type: event.type, attempt: event.attempt, delayMs: event.delayMs });
+				if (abandon) session.abortRetry();
+			} else if (event.type === "auto_retry_end")
+				retryEvents.push({ type: event.type, success: event.success, finalError: event.finalError });
+		});
+		world.provider.enqueue(
+			"root",
+			{ ...text(`${label}-first`, "The first answer."), check: () => reached.release(), gate: hold.promise },
+			fail(`${label}-failure`, failure),
+			...(abandon ? [] : [text(`${label}-recovered`, "The goal turn recovered on its retry.")]),
+			text(`${label}-next`, "The next answer."),
+		);
+		let disposal: Promise<{ readonly error: unknown } | undefined> | undefined;
+		try {
+			const delivering = session.prompt("Answer the first question.").then(
+				() => "resolved",
+				(error: unknown) => messageOf(error),
+			);
+			await withDeadline(world.trace, `${label}: the first request is held`, reached.promise);
+			await withDeadline(
+				world.trace,
+				`${label}: the chat goal is queued`,
+				session.prompt(goalWords, { streamingBehavior: "followUp" }),
+			);
+			expect(session.getFollowUpMessages(), `${label}: the chat goal waits behind the held run`).toEqual([
+				goalWords,
+			]);
+			hold.release();
+			expect(
+				await withDeadline(world.trace, `${label}: the delivering run ends`, delivering, 60_000),
+				`${label}: the run that delivered the chat goal resolves`,
+			).toBe("resolved");
+			const goal = session.getGoalStateSnapshot();
+			expect(
+				{ userGoal: goal?.userGoal, chatGoal: goal?.goalId.startsWith("chat-") === true },
+				`${label}: the delivered follow-up started its chat goal`,
+			).toEqual({ userGoal: objective, chatGoal: true });
+			expect(
+				retryEvents,
+				abandon
+					? "the retry abandoned from its start announcement is cancelled"
+					: "the retry of the goal turn recovers",
+			).toEqual([
+				{ type: "auto_retry_start", attempt: 1, delayMs: 5 },
+				abandon
+					? { type: "auto_retry_end", success: false, finalError: "Retry cancelled" }
+					: { type: "auto_retry_end", success: true, finalError: undefined },
+			]);
+			expect(
+				await withDeadline(
+					world.trace,
+					`${label}: the next prompt`,
+					session.prompt("Answer the next question.").then(
+						() => "resolved",
+						(error: unknown) => messageOf(error),
+					),
+					60_000,
+				),
+				abandon
+					? "the next prompt begins its own goal execution after a run that ended with an abandoned retry"
+					: "the next prompt begins its own goal execution after a run whose retry recovered",
+			).toBe("resolved");
+			expect(
+				world.provider.requests.slice(requestMark).map((request) => request.model.id),
+				`${label}: the first turn, the goal turn${abandon ? "" : ", its retry"} and the next turn each reach the provider once`,
+			).toEqual(abandon ? ["root", "root", "root"] : ["root", "root", "root", "root"]);
+			disposal = world.disposeSessionInBody(session);
+			expect(await disposal, `${label}: the owner with its active chat goal is disposed cleanly`).toBeUndefined();
+			expect(world.warnings.splice(warningMark), `${label}: the owner discloses nothing`).toEqual([]);
+			world.faultMatrix.witness("goal-execution-submission-release", { control: !abandon });
+		} finally {
+			hold.release();
+			if (disposal === undefined) await world.disposeSessionInBody(session);
 		}
 	}
 }

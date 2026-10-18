@@ -919,6 +919,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				agentDir,
 				sessionId: sessionManager.getSessionId(),
 				now: () => new Date(orchestrationClock.now()).toISOString(),
+				sleepSync: (delayMs) => timers.sleepSync(delayMs),
 			});
 			const durableTaskRuntime = new DurableTaskRuntime({
 				store: orchestrationStore,

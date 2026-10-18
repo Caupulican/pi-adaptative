@@ -28,6 +28,7 @@ import {
 	SIGNAL_RESUME_COMMAND,
 	withDeadline,
 } from "../session-fixture.ts";
+import { crashCutChecks } from "./shared.ts";
 
 export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -975,6 +976,270 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		{ text: PREPARING_WORDS },
 	]);
 	expect(await world.disposeSessionInBody(prepNext.session), "the restoring owner disposes cleanly").toBeUndefined();
+	// The files a crash cut names, as they stand now: one that does not exist is absent.
+	const presentFiles = (paths: readonly string[]): Map<string, string> => {
+		const files = new Map<string, string>();
+		for (const path of paths) {
+			const content = world.io.peekFile(path);
+			if (content !== undefined) files.set(path, content);
+		}
+		return files;
+	};
+	// A crash while a prompt's own turn is prepared: the session file and the own-turn record are captured while the prompt waits in
+	// its input hook, and the restart cuts back to that capture. The restart's interrupt cancels the submission before its first
+	// await (the hook returns after that), so the prompt ends cancelled and its record is removed: the control, nothing would be
+	// restored without the cut. The cut writes the record back, so the next session restores the prompt held, with its one notice.
+	const PREPARING_CRASH_WORDS = "Owner prompt still in preparation at the crash.";
+	const prepCrash = { hold: createBarrier(), reached: createBarrier() };
+	const crashOwner = await reopenQl([
+		(pi) => {
+			pi.on("input", async (event) => {
+				if (event.text !== PREPARING_CRASH_WORDS) return;
+				prepCrash.reached.release();
+				await prepCrash.hold.promise;
+			});
+		},
+	]);
+	await crashOwner.session.bindExtensions({ uiContext: world.humanInput.ui });
+	expect(restoredView(crashOwner.session), "the crash owner opens with nothing restored").toEqual({
+		followUp: [],
+		pending: 0,
+		deliverable: 0,
+		notice: undefined,
+	});
+	const crashVerdicts: Array<{ accepted: boolean; state: string | undefined }> = [];
+	const crashPrompt = crashOwner.session.prompt(PREPARING_CRASH_WORDS, {
+		preflightResult: (accepted, ended) => crashVerdicts.push({ accepted, state: ended?.state }),
+	});
+	await withDeadline(trace, "preparing crash: the prompt waits in its input hook", prepCrash.reached.promise);
+	expect(ownTurnTexts(), "the own-turn record names the prompt the crash cuts").toEqual([PREPARING_CRASH_WORDS]);
+	const crashCapture = presentFiles([qlFile, ownTurnPath]);
+	expect([...crashCapture.keys()], "the crash capture holds the session file and the own-turn record").toEqual([
+		qlFile,
+		ownTurnPath,
+	]);
+	const crashRestart = world.restart({
+		owner: crashOwner.session,
+		sessionFile: qlFile,
+		cut: { manifest: () => presentFiles([qlFile, ownTurnPath]), capture: crashCapture },
+		rewindSqlite: false,
+		retainedClaims: [],
+		reopen: { settings: { memorySystem: "okf" } },
+		check: {
+			...crashCutChecks("the crash owner disposes cleanly"),
+			disposed: (result) => {
+				expect(result, "the crash owner disposes cleanly").toBeUndefined();
+				expect(crashVerdicts, "the prompt the restart interrupted is not accepted, and ends cancelled").toEqual([
+					{ accepted: false, state: "cancelled" },
+				]);
+				expect(ownTurnTexts(), "the interrupted prompt leaves the own-turn record before the cut").toBeUndefined();
+				world.faultMatrix.witness("owner-input-preflight-crash", { control: true });
+			},
+		},
+	});
+	prepCrash.hold.release();
+	const crashNext = await withDeadline(trace, "preparing crash: the restart reopens the file", crashRestart, 60_000);
+	expect(
+		await withDeadline(trace, "preparing crash: the cut prompt ends", crashPrompt),
+		"the prompt the crash cut ends without an error",
+	).toBeUndefined();
+	expect(restoredView(crashNext.session), "the next session restores the prompt the crash cut, held").toEqual({
+		followUp: [PREPARING_CRASH_WORDS],
+		pending: 1,
+		deliverable: 0,
+		notice: RESTORED_PREPARING_HEADLESS,
+	});
+	world.faultMatrix.witness("owner-input-preflight-crash", { control: false });
+	expect(crashNext.session.takeAllQueuedInput().followUp, "the owner takes the restored prompt back").toEqual([
+		{ text: PREPARING_CRASH_WORDS },
+	]);
+	expect(
+		await world.disposeSessionInBody(crashNext.session),
+		"the crash's next owner disposes cleanly",
+	).toBeUndefined();
+	// R7 and R36, System One off (the queued directives' on-mode intake asks questions no reading of this phase derives): a queued
+	// owner directive promoted to its own turn, then crash-cut while that turn is prepared. A held prompt owns the foreground in its
+	// input hook while the directive is queued behind it; the owner interrupts the held prompt, so the directive takes the
+	// foreground as its own turn (`PendingInputQueueController.promote`), keeping its queued record. The control directive's turn
+	// runs and delivers it, so it becomes the owner's rule; the cut directive is held at `before_agent_start`, before its user entry,
+	// and the capture is taken there. The restart's interrupt returns it to the queue held, and the cut writes back the record that
+	// names it: the next session restores it held, once, and not the delivered one, and only the delivered directive is a rule.
+	// The rules are project-scoped per agent directory, so this owner has its own.
+	if (!world.systemOne.enabled) {
+		const promotedDir = `${world.agentDir}-promoted`;
+		const PROMOTED_CONTROL_HOLD = "Owner prompt held while the delivered directive waits.";
+		const PROMOTED_CONTROL_WORDS = "Owner directive delivered after promotion: no TDD in this project.";
+		const PROMOTED_HOLD = "Owner prompt held while the cut directive waits.";
+		const PROMOTED_WORDS = "Owner directive promoted before the cut: skip the full test suite.";
+		const promotedControlHold = { hold: createBarrier(), reached: createBarrier() };
+		const promotedCutHold = { hold: createBarrier(), reached: createBarrier() };
+		const promotedHolds = new Map([
+			[PROMOTED_CONTROL_HOLD, promotedControlHold],
+			[PROMOTED_HOLD, promotedCutHold],
+		]);
+		const promotedStart = { hold: createBarrier(), reached: createBarrier() };
+		const promoted = await world.createRootSession("root", {
+			sessionManager: world.createSessionManager(promotedDir),
+			agentDir: promotedDir,
+			settings: { memorySystem: "okf" },
+			extensionFactories: [
+				(pi) => {
+					pi.on("input", async (event) => {
+						const held = promotedHolds.get(event.text);
+						if (held === undefined) return;
+						held.reached.release();
+						await held.hold.promise;
+					});
+					pi.on("before_agent_start", async (event) => {
+						if (event.prompt !== PROMOTED_WORDS) return;
+						promotedStart.reached.release();
+						await promotedStart.hold.promise;
+					});
+				},
+			],
+		});
+		const promotedSession = promoted.session;
+		await promotedSession.bindExtensions({ uiContext: world.humanInput.ui });
+		const promotedFile = promoted.sessionManager.getSessionFile();
+		if (promotedFile === undefined) throw new Error("the promoted directives' owner has no file");
+		const promotedOwnTurn = ownTurnInputRecordPath(promotedFile);
+		const ruleForbids = (session: AgentSession) => session.getOwnerRulePolicies().map((policy) => policy.forbid);
+		// The texts the latest queued record of `file` names, in order.
+		const latestQueuedTexts = (file: string): string[] | undefined =>
+			(world.io.peekFile(file) ?? "")
+				.split("\n")
+				.filter((line) => line.length > 0)
+				.map(
+					(line) =>
+						JSON.parse(line) as { type?: string; customType?: string; data?: { inputs?: { text: string }[] } },
+				)
+				.filter((entry) => entry.type === "custom" && entry.customType === QUEUED_INPUT_CUSTOM_TYPE)
+				.at(-1)
+				?.data?.inputs?.map((input) => input.text);
+		world.provider.enqueue(
+			"root",
+			{ name: "promoted-open", reply: { content: [{ type: "text", text: "The session is open." }] } },
+			{
+				name: "promoted-control-delivery",
+				reply: { content: [{ type: "text", text: "The delivered directive ran." }] },
+			},
+		);
+		await withDeadline(
+			trace,
+			"promoted: the opening turn writes the session file",
+			promotedSession.prompt("Open the session the promoted directives run in."),
+		);
+		// One promotion: `words` is queued behind a prompt held in its input hook, and the owner interrupts that prompt.
+		const promote = async (held: typeof promotedControlHold, holdWords: string, words: string, label: string) => {
+			const interrupt = new AbortController();
+			const holding = promotedSession.prompt(holdWords, { signal: interrupt.signal });
+			await withDeadline(trace, `${label}: the held prompt waits in its input hook`, held.reached.promise);
+			const verdicts: Array<{ accepted: boolean; state: string | undefined }> = [];
+			const queued = promotedSession.prompt(words, {
+				streamingBehavior: "followUp",
+				preflightResult: (accepted, ended) => verdicts.push({ accepted, state: ended?.state }),
+			});
+			interrupt.abort();
+			held.hold.release();
+			expect(
+				await withDeadline(trace, `${label}: the interrupted prompt ends`, holding),
+				"the interrupted prompt ends without an error",
+			).toBeUndefined();
+			return { queued, verdicts };
+		};
+		const promotedControl = await promote(
+			promotedControlHold,
+			PROMOTED_CONTROL_HOLD,
+			PROMOTED_CONTROL_WORDS,
+			"promoted control",
+		);
+		expect(
+			await withDeadline(
+				trace,
+				"promoted control: the directive's own turn completes",
+				promotedControl.queued,
+				60_000,
+			),
+			"the promoted control directive's turn ends without an error",
+		).toBeUndefined();
+		expect(
+			{
+				verdicts: promotedControl.verdicts,
+				reply: qmAssistants(promotedFile).at(-1),
+				rules: ruleForbids(promotedSession),
+			},
+			"the promoted directive is accepted as its own turn, runs, and its delivery makes it the owner's rule",
+		).toEqual({
+			verdicts: [{ accepted: true, state: undefined }],
+			reply: { stopReason: "stop", text: "The delivered directive ran." },
+			rules: [["tdd_workflow"]],
+		});
+		const promotedCut = await promote(promotedCutHold, PROMOTED_HOLD, PROMOTED_WORDS, "promoted cut");
+		await withDeadline(trace, "promoted cut: the directive's own turn is prepared", promotedStart.reached.promise);
+		const promotedCapture = presentFiles([promotedFile, promotedOwnTurn]);
+		expect(
+			{
+				files: [...promotedCapture.keys()],
+				queued: latestQueuedTexts(promotedFile),
+				rules: ruleForbids(promotedSession),
+			},
+			"the cut is taken while the promoted directive is named by the queued record only, and is not yet a rule",
+		).toEqual({ files: [promotedFile], queued: [PROMOTED_WORDS], rules: [["tdd_workflow"]] });
+		const promotedMark = world.warnings.length;
+		const promotedRestart = world.restart({
+			owner: promotedSession,
+			sessionFile: promotedFile,
+			cut: { manifest: () => presentFiles([promotedFile, promotedOwnTurn]), capture: promotedCapture },
+			rewindSqlite: false,
+			retainedClaims: [],
+			reopen: { agentDir: promotedDir, settings: { memorySystem: "okf" } },
+			check: crashCutChecks("the promoted directives' owner disposes cleanly"),
+		});
+		promotedStart.hold.release();
+		const promotedNext = await withDeadline(
+			trace,
+			"promoted cut: the restart reopens the file",
+			promotedRestart,
+			60_000,
+		);
+		expect(
+			await withDeadline(trace, "promoted cut: the directive's submission ends", promotedCut.queued),
+			"the cut directive's submission ends without an error",
+		).toBeUndefined();
+		expect(
+			{
+				verdicts: promotedCut.verdicts,
+				held: world.warnings.slice(promotedMark).filter((message) => message.includes("was not delivered")),
+			},
+			"the interrupted turn returns the promoted directive to the queue held, once, with its text",
+		).toEqual({
+			verdicts: [{ accepted: false, state: "held" }],
+			held: [
+				`A queued message was not delivered because its turn ended before it could be delivered. It is kept in full in the pending queue; restore it to the editor to send it again: ${PROMOTED_WORDS}`,
+			],
+		});
+		expect(
+			{ ...restoredView(promotedNext.session), rules: ruleForbids(promotedNext.session) },
+			"the next session restores the cut directive held, once, and not the delivered one; only the delivered directive is a rule",
+		).toEqual({
+			followUp: [PROMOTED_WORDS],
+			pending: 1,
+			deliverable: 0,
+			notice: RESTORED_ONE_HEADLESS,
+			rules: [["tdd_workflow"]],
+		});
+		world.faultMatrix.witness("R7", { control: false });
+		world.faultMatrix.witness("R7", { control: true });
+		world.faultMatrix.witness("R36", { control: false });
+		world.faultMatrix.witness("R36", { control: true });
+		expect(promotedNext.session.takeAllQueuedInput().followUp, "the owner takes the restored directive back").toEqual(
+			[{ text: PROMOTED_WORDS }],
+		);
+		expect(
+			await world.disposeSessionInBody(promotedNext.session),
+			"the promoted directives' next owner disposes cleanly",
+		).toBeUndefined();
+	}
 	trace.mark("root", "queued-quit.restart-restore");
 
 	// RPC host shutdown: the host runs on a real runtime of the world with its process effects injected. A SIGTERM through its termination

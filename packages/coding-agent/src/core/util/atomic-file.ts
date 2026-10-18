@@ -213,12 +213,12 @@ function isLockedError(err: unknown): boolean {
 
 /**
  * Block the calling thread for `ms` without spinning the CPU (Atomics.wait on a private buffer): the default
- * {@link AtomicFileLockOptions.sleepSync}. It cannot take an abort: the whole thread is blocked, so no signal, timer or
- * event can run until it returns. It is bounded instead: its only caller, {@link acquireFileLockSync}, passes one
- * capped retry gap per attempt, so its total is the gap schedule over the retry count, and that total is reported on
- * the final `ELOCKED`.
+ * {@link AtomicFileLockOptions.sleepSync}, and the system timer source's `sleepSync` (`util/timer-port.ts`). It cannot
+ * take an abort: the whole thread is blocked, so no signal, timer or event can run until it returns. It is bounded
+ * instead: {@link acquireFileLockSync} asks for one capped retry gap per attempt, so its total is the gap schedule over
+ * the retry count, and that total is reported on the final `ELOCKED`.
  */
-function blockingSleepMs(ms: number): void {
+export function blockingSleepMs(ms: number): void {
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 

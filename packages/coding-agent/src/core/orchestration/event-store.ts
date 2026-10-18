@@ -126,6 +126,11 @@ export interface OrchestrationEventStoreOptions {
 	 * fault-injecting implementation (see `src/core/util/faultable-fs.ts`).
 	 */
 	fs?: FaultableFs;
+	/**
+	 * The wait between attempts of this store's sync lock (`AtomicFileLockOptions.sleepSync`): a session passes its timer
+	 * source's `sleepSync`. Omitted, the lock's own blocking default applies.
+	 */
+	sleepSync?: (delayMs: number) => void;
 }
 
 export interface AppendOrchestrationEventOptions {
@@ -458,6 +463,7 @@ export class OrchestrationEventStore {
 	private readonly maxTailBytes: number;
 	private readonly maxIdempotencyEvents: number;
 	private readonly fs: FaultableFs;
+	private readonly sleepSync: ((delayMs: number) => void) | undefined;
 	private readonly listeners = new Set<(event: OrchestrationEvent) => void>();
 	private verifiedSnapshotBaseline: VerifiedSnapshotBaseline | undefined;
 	private synchronizedIndexes: SynchronizedIndexes | undefined;
@@ -474,6 +480,7 @@ export class OrchestrationEventStore {
 		this.now = options.now ?? (() => new Date().toISOString());
 		this.createEventId = options.createEventId ?? randomUUID;
 		this.fs = options.fs ?? nodeFs;
+		this.sleepSync = options.sleepSync;
 		this.maxTailEvents = positiveSafeInteger(
 			options.maxTailEvents,
 			DEFAULT_MAX_TAIL_EVENTS,
@@ -559,7 +566,7 @@ export class OrchestrationEventStore {
 				this.cursorRead = undefined;
 				return { event: next, appended: true };
 			},
-			options.lockOptions,
+			this.withLockSleep(options.lockOptions),
 		);
 
 		if (committed.appended) {
@@ -724,13 +731,20 @@ export class OrchestrationEventStore {
 				};
 				return true;
 			},
-			lockOptions,
+			this.withLockSleep(lockOptions),
 		);
 	}
 
 	subscribe(listener: (event: OrchestrationEvent) => void): () => void {
 		this.listeners.add(listener);
 		return () => this.listeners.delete(listener);
+	}
+
+	/** A lock call's options with this store's lock sleep; a caller's own option still wins. */
+	private withLockSleep(
+		lockOptions: Readonly<AtomicFileLockOptions> | undefined,
+	): Readonly<AtomicFileLockOptions> | undefined {
+		return this.sleepSync === undefined ? lockOptions : { sleepSync: this.sleepSync, ...lockOptions };
 	}
 
 	private readAllUnlocked(): OrchestrationEvent[] {

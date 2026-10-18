@@ -148,20 +148,16 @@ const rows: readonly FaultMatrixRow[] = [
 	{
 		id: "R7",
 		owner: "core/queued-input-persistence-controller.ts",
-		journey: 2,
-		phase: "queued-recovery",
+		journey: 1,
+		phase: "host-shutdown queued quit restart",
 		fault: "a crash cut after a queued owner input was promoted",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"cut while the promoted directive's own turn is held at before_agent_start (named by the queued record only), the restart's interrupt returns it to the queue held with one warning, and the next session restores it held, once",
+		control: "the promoted directive whose turn ran and delivered it is not restored",
 		estSeconds: 4,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"world.restart cuts E7 and VU, which recover workers, not a promoted owner input; no journey restarts with one in flight: the cut needs a capture taken while a queued input promoted to its own turn (`PendingInputQueueController.promote`) is prepared, before its user entry, plus that queued submission's on-mode intake judgments",
-			},
-		],
+		status: "covered",
+		// The on-mode System One intake judgment set of the queued directives is not derivable by reading.
+		modes: ["off"],
 	},
 	{
 		id: "E7",
@@ -318,7 +314,7 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "witness",
 				detail:
-					"world.restart exists, but it aborts and disposes the owner first: the cut needs a capture taken while a staged intent is in flight, and no journey takes one",
+					"world.restart now takes live captures (journey 1's promoted cut, R7), but a staged optional-tool intent exists only with System One on and off mode creates none: the cut needs the on-mode intake judgment set of a queued owner submission staged in a fresh process (the `optional_tool_N` choices plus the `carries_N` screen the backlog-mode `ownerPolicy.settle` runs for words delivered earlier), which no reading of a journey phase derives",
 			},
 		],
 	},
@@ -416,17 +412,13 @@ const rows: readonly FaultMatrixRow[] = [
 		journey: 1,
 		phase: "host-shutdown queued quit restart",
 		fault: "a crash while a prompt's own turn is prepared (accepted, its user entry not persisted yet)",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"cut back to the session file and own-turn record captured while the prompt waits in its input hook, the next session restores the prompt held with its one notice",
+		control:
+			"the restart's interrupt ends the prompt cancelled, not accepted, and removes its own-turn record before the cut",
 		estSeconds: 4,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"no journey cuts with the own-turn record live: it needs a capture of the session file and its own-turn record taken while the prompt waits in its input hook, then world.restart with that capture (its abort ends the prompt cancelled and removes the record; the cut writes it back), and the reopen asserted restored held; a restart cut costs 3 to 5 s, over this phase's 3 s per-witness budget",
-			},
-		],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "owner-input-kept-submit",
@@ -450,19 +442,18 @@ const rows: readonly FaultMatrixRow[] = [
 		id: "goal-execution-submission-release",
 		owner: "core/goals/goal-session-controller.ts",
 		journey: 1,
-		phase: "owner-lifecycle queued goal",
+		phase: "host-shutdown mode witnesses retry",
 		fault: "a run that delivered a queued chat-goal input ends with an abandoned retry before the next prompt",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"the retry abandoned from its start announcement is cancelled; the next prompt begins its own goal execution after a run that ended with an abandoned retry",
+		control:
+			"the retry of the goal turn recovers; the next prompt begins its own goal execution after a run whose retry recovered",
+		// Two fresh owners, each with three or four scripted provider turns and a 5 ms retry backoff.
 		estSeconds: 1,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"no journey queues an explicit chat goal or cancels a retry backoff in the run that delivered one. Derivable today: the retry's abort controller exists before auto_retry_start is emitted, so abortRetry() from that event aborts the signal the backoff waits on, and an owner with autonomy.goalAutoContinue false arms no continuation (planTimer clears). Not derivable by reading: the System One questions a queued `Goal:` prompt and its goal turn ask with System One on (objective_primary), and the warnings a run that ends in a cancelled retry right after starting a chat goal, and the disposal of an owner whose goal is still active, emit (journey 1 allows none)",
-			},
-		],
+		status: "covered",
+		// The owners run System One off in their own binding (the queued goal's authority is parsed, never judged), so both world
+		// modes run the witness and the control.
+		modes: BOTH,
 	},
 	{
 		id: "R16",
@@ -536,35 +527,29 @@ const rows: readonly FaultMatrixRow[] = [
 		journey: 2,
 		phase: "queued-recovery",
 		fault: "a cut while a background task is running",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"cut back to the session file captured while the held echo runs, the next session records the task failed with its owning process gone and delivers that terminal to the idle root as a wake turn",
+		control: "without the cut, the disposal records the running task canceled with its wake-up pending",
 		estSeconds: 4,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"world.restart exists, but it aborts and disposes the owner first: the cut needs a capture taken while a background execution is live, and no journey takes one",
-			},
-		],
+		status: "covered",
+		// The on-mode System One judgment set for the background start and the idle-root wake-up turn is not derivable by reading.
+		modes: ["off"],
 	},
 	{
 		id: "R22",
 		owner: "core/background-tool-task-controller.ts",
 		journey: 1,
 		phase: "owner-lifecycle cleanup",
-		fault: "the background shutdown grace watchdog expires",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 0.5,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"shutdown rejects with the retained cleanup failure, but the watchdog expiry itself is not asserted",
-			},
-		],
+		fault: "the background shutdown grace watchdog expires for a background command that ignores its cancellation",
+		witness:
+			"the background shutdown grace watchdog expires for an execution that ignores its cancellation; the held command ran to its end after the shutdown",
+		control: "an execution that honours its cancellation settles inside the shutdown grace",
+		// Two fresh owners with one background turn each. A background command runs detached (no session lane), so the
+		// session's shell release does not wait on it on either platform; the grace runs on the virtual clock.
+		estSeconds: 2,
+		status: "covered",
+		// The owners run System One off in their own binding, so both world modes run the witness and the control.
+		modes: BOTH,
 	},
 	{
 		id: "R23",
@@ -635,7 +620,8 @@ const rows: readonly FaultMatrixRow[] = [
 		needs: [
 			{
 				kind: "witness",
-				detail: "only lease contention is asserted, not the lease-event wake or the settings change",
+				detail:
+					"only lease contention is asserted (R27). The recovery is reachable in the continuous-chat phase: wSecond's activation fails on the live owner's runtime lease, which sets _initializationFailed, and a settings change then calls _recoverSettingsWhenIdle; with acquireSystemSwitchLease refused (an unsettled session) it subscribes to foreground activity, which releaseSubmission notifies, and re-reconciles on the wake. A live chat is only reviewed (_reviewLiveChatSummary), never re-initialized. A witness needs wRoot disposed before wSecond (the phase disposes wSecond first), a settings change made while wSecond's submission holds its foreground (its blocked wire fails provider requests in context planning, so a scripted provider gate never holds it: a session-event listener or a running lane must hold it), and an event-driven observable of the recovered activation: the wire change and the activation's end emit nothing and initialize() is not awaitable from the session, so asserting it needs a production observable seam rather than polling runtime.lease.json. The control is a settings change on a live ICM host (wTakeover) that leaves its runtime.lease.json token unchanged",
 			},
 		],
 	},
@@ -683,7 +669,7 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "witness",
 				detail:
-					"the goal tool's boundAt stamp, the runtime snapshot's now and the wake all read the goal-continuation port, so advancing it by the armed delay fires the wake at a deadline the snapshot decides as worker_wait_timeout; no journey dispatches a worker through goal dispatch_worker and holds it in flight, and the deadline is the fixed DEFAULT_GOAL_WORKER_WAIT_MS (one hour, no setting), while the port is one clock for every root of the world, so the advance must run in an auxiliary root while no other live goal holds a bound in-flight requirement",
+					"the goal tool's boundAt stamp, the runtime snapshot's now and the wake all read the goal-continuation port, so advancing it by the armed delay fires the wake at a deadline the snapshot decides as worker_wait_timeout; no journey dispatches a worker through goal dispatch_worker and holds it in flight, and the deadline is the fixed DEFAULT_GOAL_WORKER_WAIT_MS (one hour, no setting), while the port is one clock for every root of the world, so the advance must run in an auxiliary root while no other live goal holds a bound in-flight requirement. The in-process dispatch reaches the session's own starter (goal dispatch_worker calls the tool's startWorkerDelegation, which runtime-builder wires to the session's, and BackgroundLaneController.startWorkerDelegation makes no delegate-tool check, unlike its worker controls); still unasserted are the dispatched worker's own admission in that root, the continuation pass the timeout starts and its warnings, and the cleanup of the held worker",
 			},
 		],
 	},
@@ -691,15 +677,13 @@ const rows: readonly FaultMatrixRow[] = [
 		id: "R30",
 		owner: "core/delegation/worker-recovery-coordinator.ts",
 		journey: 2,
-		phase: "queued-recovery",
-		fault: "a read or enqueue fault during worker recovery re-arms its retry timer",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 0.5,
-		status: "open",
-		needs: [
-			{ kind: "witness", detail: "the timer is a TimerPort owner, but no journey forces the recovery read fault" },
-		],
+		phase: "orchestration E aux",
+		fault: "a durable read fault when a retained worker retry comes due re-arms its retry timer (an enqueue fault takes the same retainFailedRetry backoff)",
+		witness: "the failed read re-arms the retry on its first backoff",
+		control: "the clear read enqueues the retry and arms nothing",
+		estSeconds: 7,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R31",
@@ -712,20 +696,24 @@ const rows: readonly FaultMatrixRow[] = [
 		estSeconds: 0.5,
 		status: "open",
 		needs: [
-			{ kind: "witness", detail: "the timer is a TimerPort owner, but no journey forces the notification fault" },
+			{
+				kind: "witness",
+				detail:
+					"the retry (`scheduleRetry`, min(100 * 2^n, 5 000) ms on the `worker-notification` port) runs only when `notify()` rejects, and the only rejection a scenario can force today is a refused session append in the wake turn's start, which fences the session file: every retry then fails the same way until the session is reopened, so the control needs a world.restart that reopens it (the tool-task analogue is R18/R19, System One off); a non-fencing fault would need a read only the delivery's prepare makes, but the claim comes from the in-memory session branch and the attempt result is read through the task runtime snapshot, whose cursor read the coordinator's own flush projection (`getWorkerRecords`) makes first",
+			},
 		],
 	},
 	{
 		id: "R32",
 		owner: "core/delegation/worker-agent-control-coordinator.ts",
 		journey: 2,
-		phase: "orchestration",
-		fault: "a durable lane cancel fails",
-		witness: NONE,
-		control: NONE,
-		estSeconds: 1,
-		status: "open",
-		needs: [{ kind: "witness", detail: "no journey forces the durable cancel failure" }],
+		phase: "orchestration E aux",
+		fault: "a durable cancel of a queued lane fails: the store refuses its cancellation event write",
+		witness: "the failed cancel leaves the queued lane durably queued",
+		control: "the retained cancellation commits with the owner's reason on the next scheduler signal",
+		estSeconds: 2,
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "R33",
@@ -753,7 +741,7 @@ const rows: readonly FaultMatrixRow[] = [
 			{
 				kind: "witness",
 				detail:
-					"world.restart exists, but it aborts and disposes the owner first: the cut needs a capture taken while terminal handoffs are pending, and no journey takes one",
+					"world.restart now takes live captures (R21's background cut), but a pending handoff (`ForegroundTerminalHandoffController.pending`) waits for the foreground lease, and the restart's interrupt frees that lease before the disposal: whether the waiting delivery starts its wake turn on the dying owner (`deliverWhenIdle` acquires before `isDisposed()`) or meets the disposed check and reports a notification failure is decided by settlement order, not by reading; the cut needs that order observed once, then a scripted old-owner wake step or an allowance for the exact failure text",
 			},
 		],
 	},
@@ -767,25 +755,27 @@ const rows: readonly FaultMatrixRow[] = [
 		control: NONE,
 		estSeconds: 1,
 		status: "open",
-		needs: [{ kind: "witness", detail: "no journey asserts the flush of buffered owner items" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"the no-wake route (`deliverWithLease`: a follow-up custom message, then `flushOwnerItems`) runs only when `resolveWake` finds no record without a goalId and none whose goal is the active executing goal, so the worker must be started under a goal that stops executing before its terminal; the owner items it flushes are the unsettled ladder's pending items (`SessionUnsettledLadderController.deliverToOwner` outside a handoff, then `flushOwnerItems`), so a scenario must also buffer one before that handoff (for example a worker claim's inconclusive item the ladder leaves unsettled); no journey composes the two",
+			},
+		],
 	},
 	{
 		id: "R36",
 		owner: "core/owner-input-ledger.ts",
 		journey: 1,
-		phase: "owner-lifecycle",
+		phase: "host-shutdown queued quit restart",
 		fault: "owner words judged at acceptance survive a reopen",
-		witness: NONE,
-		control: NONE,
+		witness:
+			"a directive judged at acceptance and cut before its delivery is restored held by the next session, and its delivered-only effect (the owner rule) never ran",
+		control: "the directive delivered before the cut is the owner's rule, and that rule survives the reopen",
 		estSeconds: 4,
-		status: "open",
-		needs: [
-			{
-				kind: "witness",
-				detail:
-					"world.restart exists, but it aborts and disposes the owner first: the cut needs a capture taken between the acceptance and the delivery of judged owner words, and no journey takes one",
-			},
-		],
+		status: "covered",
+		// Off mode judges the queued words as skipped (the ledger still moves them to judged); the on-mode intake set is not derivable.
+		modes: ["off"],
 	},
 	{
 		id: "R37",
@@ -801,15 +791,21 @@ const rows: readonly FaultMatrixRow[] = [
 	},
 	{
 		id: "R38",
-		owner: "core/goals/goal-state.ts",
+		owner: "core/objective-execution/session-objective-runtime.ts",
 		journey: 2,
 		phase: "orchestration",
-		fault: "a goal blocked by an unproven completion reopens",
+		fault: "a completed goal whose requirements lack trusted evidence reopens to active",
 		witness: NONE,
 		control: NONE,
 		estSeconds: 1,
 		status: "open",
-		needs: [{ kind: "witness", detail: "no journey asserts blockedBy" }],
+		needs: [
+			{
+				kind: "witness",
+				detail:
+					"the reopen runs only in SessionObjectiveRuntime.reconcileObjective, the first step of every ObjectiveExecutionController route evaluation (evaluateRouteOnce), which is bound only with System One (objective_primary). The objective-cycle phase of journey-2-orchestration.ts already reaches that evaluation on-mode with a declared judgment set, but its live goal is active. A witness needs, at that evaluation, a live completed goal with an unproven requirement and no acceptance override (a goal the completion gate never writes, so a persisted state), the judgment set System One asks for that state, and the allowance for the warning 'Goal <id> completion not supported: requirement(s) <ids> lack trusted evidence; the goal stays active to gather it.'; the control is a completed goal whose requirements have trusted evidence, left completed. Off mode has no route evaluation",
+			},
+		],
 	},
 	{
 		id: "R39",
@@ -936,13 +932,13 @@ const rows: readonly FaultMatrixRow[] = [
 		id: "R46",
 		owner: "core/pending-input-queue-controller.ts",
 		journey: 2,
-		phase: "orchestration",
-		fault: "a steer during the delegate and background-lane waits",
-		witness: NONE,
-		control: NONE,
+		phase: "orchestration E aux",
+		fault: "an owner steer arrives during a delegate wait on a held worker (the background-lane worker wait)",
+		witness: "the steered wait's details: not timed out, steered",
+		control: "the unsteered wait's details: timed out, not steered",
 		estSeconds: 1,
-		status: "open",
-		needs: [{ kind: "witness", detail: "only the tool_task wait is steered (row steer-ended-tool-task-wait)" }],
+		status: "covered",
+		modes: BOTH,
 	},
 	{
 		id: "steer-ended-tool-task-wait",
@@ -960,8 +956,20 @@ const rows: readonly FaultMatrixRow[] = [
 		id: "R47",
 		owner: "core/util/atomic-file.ts",
 		journey: 2,
+		phase: "orchestration E aux",
+		fault: "the orchestration event store's sync lock is held elsewhere: its attempts back off on the session timer source's sleepSync",
+		witness: "the held lock backed off by its default schedule on the session's sleep",
+		control: "every earlier store lock was free: no gap was asked for",
+		estSeconds: 0.5,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "R47w",
+		owner: "core/util/atomic-file.ts",
+		journey: 2,
 		phase: "queued-recovery",
-		fault: "an atomic-file write retries",
+		fault: "an atomic-file write's rename retries",
 		witness: NONE,
 		control: NONE,
 		estSeconds: 0.5,
@@ -971,7 +979,7 @@ const rows: readonly FaultMatrixRow[] = [
 				kind: "extension",
 				extension: "X1",
 				detail:
-					"the sync lock's backoff takes an injectable sleepSync (default the blocking Atomics.wait, which cannot take an abort) and reports the gap total on its final ELOCKED, but no caller passes one yet: a host recording sleep needs a session-scoped port threaded from createAgentSession into a sync-lock owner a journey reaches (the worker conversation or write-reservation store), and a held lock needs a fresh lock directory seeded in virtual IO; the win32 rename retry backoff is still a raw setTimeout in a module-level util that takes no timer port, and the async lock waits stay on system time by design (a cross-process lock whose holder, staleness and deadline are real time); rename and write faults reach them only indirectly (R8, R44)",
+					"the win32 rename retry backoff is still a raw setTimeout in a module-level util that takes no timer port, and it runs only on win32 (a transient EPERM/EACCES/EBUSY rename); the async lock waits stay on system time by design (a cross-process lock whose holder, staleness and deadline are real time); rename and write faults reach them only indirectly (R8, R44)",
 			},
 		],
 	},

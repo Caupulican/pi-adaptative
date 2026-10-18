@@ -1859,7 +1859,18 @@ function assertCertifiedOwnerRetention(
 	label: string,
 ): void {
 	const workers = snapshot.workers;
-	if (workers === undefined) throw new Error(`${label} carries no worker snapshot`);
+	if (workers === undefined) {
+		// An owner that never loaded a worker controller owns no worker resource, so its receipt may predeclare none.
+		const retainsNothing =
+			expected.claims.length === 0 &&
+			expected.leases.length === 0 &&
+			expected.executingHolds.length === 0 &&
+			expected.watchCount === 0 &&
+			expected.laneAbortControllers === 0;
+		if (!retainsNothing) throw new Error(`${label} predeclares worker retention but carries no worker snapshot`);
+		assertResourcesSettled(snapshot, label);
+		return;
+	}
 	if (!isDeepStrictEqual(workers.ownedProjectClaims, expected.claims)) {
 		throw new Error(`${label} retains claims other than the predeclared ones`);
 	}
@@ -2240,6 +2251,10 @@ class HarnessOwnerTimers implements TimerPort {
 	whenArmed(): Promise<number> {
 		const first = this.pending.values().next();
 		if (!first.done) return Promise.resolve(first.value.delayMs);
+		return this.nextArmed();
+	}
+
+	nextArmed(): Promise<number> {
 		return new Promise((resolve) => {
 			this.armWaiters.push(resolve);
 		});
@@ -2275,6 +2290,30 @@ export class HarnessTimers implements TimerSource {
 	/** The delay of `owner`'s earliest-armed alarm still pending, or else of the next alarm it arms: resolved by the arm itself. */
 	whenArmed(owner: TimerOwner): Promise<number> {
 		return this.ownerTimers(owner).whenArmed();
+	}
+
+	/** The delay of the next alarm `owner` arms after this call, whatever it already holds pending: resolved by that arm itself. */
+	nextArmed(owner: TimerOwner): Promise<number> {
+		return this.ownerTimers(owner).nextArmed();
+	}
+
+	private readonly sleptMs: number[] = [];
+	private sleepListener: ((delayMs: number) => void) | undefined;
+
+	/** One sync lock gap (`TimerSource.sleepSync`): recorded and over at once, never blocking; the listener runs inside it. */
+	sleepSync(delayMs: number): void {
+		this.sleptMs.push(delayMs);
+		this.sleepListener?.(delayMs);
+	}
+
+	/** Every sync lock gap asked for so far, in order. */
+	sleptGaps(): number[] {
+		return [...this.sleptMs];
+	}
+
+	/** Runs `listener` inside each later sync lock gap (a scenario releases a held lock from there); undefined removes it. */
+	onSleepSync(listener: ((delayMs: number) => void) | undefined): void {
+		this.sleepListener = listener;
 	}
 
 	private ownerTimers(owner: TimerOwner): HarnessOwnerTimers {
@@ -2686,7 +2725,8 @@ export class HarnessWorld {
 
 	/**
 	 * Certify an owner this world disposed, at the boundary before any cutback. The receipt is read here from the owner itself: it
-	 * must already have left the active list, carry a worker snapshot, keep exactly the predeclared claims, and leave every other
+	 * must already have left the active list, carry a worker snapshot (or, having never loaded a worker controller, predeclare no
+	 * worker retention), keep exactly the predeclared claims, and leave every other
 	 * resource settled. Close checks the stored receipt and never reads the disposed owner again.
 	 */
 	certifyDisposedOwner(
@@ -2725,7 +2765,8 @@ export class HarnessWorld {
 	 * opens `sessionFile`. `rewindSqlite` is the SQLite durable point: `false` keeps every RAM backing as the disposed owner left
 	 * it; a snapshot (`guard.snapshotSqlite()`, taken with the capture) rewinds every backing to it after the files are cut back,
 	 * and a backing created after it is emptied. `check` receives each step's result where that step happens, so the caller's
-	 * assertions keep their order.
+	 * assertions keep their order. `reopen` is how the fresh owner is created, as the disposed one was: its agent directory
+	 * (the session file is opened under it), its own settings and its extension factories; omitted, the world's.
 	 */
 	async restart(input: {
 		readonly owner: AgentSession;
@@ -2737,8 +2778,13 @@ export class HarnessWorld {
 		readonly rewindSqlite: false | VirtualSqliteSnapshot;
 		readonly retainedClaims: WorkerProjectClaims;
 		readonly check: HarnessRestartChecks;
+		readonly reopen?: {
+			readonly agentDir?: string;
+			readonly settings?: Partial<Settings>;
+			readonly extensionFactories?: readonly ExtensionFactory[];
+		};
 	}) {
-		const { cut, check } = input;
+		const { cut, check, reopen = {} } = input;
 		check.disposed(await this.disposeSessionInBody(input.owner));
 		await this.provider.waitForProducers();
 		check.transport(this.provider.failures);
@@ -2753,7 +2799,10 @@ export class HarnessWorld {
 		check.restored(cut.manifest(), cut.capture);
 		if (input.rewindSqlite !== false) this.guard.rewindSqlite(input.rewindSqlite);
 		this.processTable.advanceProcess();
-		return this.createRootSession("root", { sessionManager: this.openSessionManager(input.sessionFile) });
+		return this.createRootSession("root", {
+			...reopen,
+			sessionManager: this.openSessionManager(input.sessionFile, reopen.agentDir),
+		});
 	}
 
 	/** Ends a manager's open System One window. An off window keeps the intent entries it began with, byte for byte, and adds none. */
