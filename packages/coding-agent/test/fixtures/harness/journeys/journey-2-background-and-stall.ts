@@ -87,7 +87,7 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 		if (parkFile === undefined) throw new Error("the R18 root has no session file");
 		if (ids.first === undefined) throw new Error("the R18 start result carried no task id");
 		const retrying = `Failed to notify terminal background tool task batch ${ids.first} (retrying): ${FENCE}`;
-		const parkedText = `Background tool completion wake-up for ${ids.first} is parked after 10 consecutive failed deliveries (still pending; retried when a background tool task next starts or ends, or on session resume; tool_task action=wait collects it now): ${FENCE}`;
+		const parkedText = `Background tool completion wake-up for ${ids.first} is parked after 10 consecutive failed deliveries (still pending; the session file refused a write and accepts no append until the session is reopened; delivery resumes then; tool_task action=wait collects it now): ${FENCE}`;
 		// Every warning this root emits from here on, in order.
 		const parkWarnings: string[] = [];
 		const unsubscribeParkWarnings = parkSession.subscribe((event) => {

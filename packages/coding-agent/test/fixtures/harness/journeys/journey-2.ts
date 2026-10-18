@@ -27,7 +27,7 @@ export async function runJourney2(): Promise<void> {
 				// R18/R19 (System One off): the refused idle-root wake-up's one retrying report and its park, both caused by the
 				// session-file fence the one denied append raised.
 				/^Failed to notify terminal background tool task batch tool-task-\d+ \(retrying\): Session persistence state is uncertain after a failed write; reopen the session file or start a new session before appending\.$/,
-				/^Background tool completion wake-up for tool-task-\d+ is parked after 10 consecutive failed deliveries \(still pending; retried when a background tool task next starts or ends, or on session resume; tool_task action=wait collects it now\): Session persistence state is uncertain after a failed write; reopen the session file or start a new session before appending\.$/,
+				/^Background tool completion wake-up for tool-task-\d+ is parked after 10 consecutive failed deliveries \(still pending; the session file refused a write and accepts no append until the session is reopened; delivery resumes then; tool_task action=wait collects it now\): Session persistence state is uncertain after a failed write; reopen the session file or start a new session before appending\.$/,
 			],
 			files: { [LIMITS_PATH]: "export const MAX_RETRIES = 3;\n" },
 			// A clean checkout on main: a fresh writer worker gets its own worktree lane (dirty checkouts fall back to shared).

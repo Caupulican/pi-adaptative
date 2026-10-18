@@ -48,6 +48,7 @@ export function createSessionBackgroundToolTasks(deps: SessionBackgroundToolTask
 		getSessionId: () => deps.getSessionManager().getSessionId(),
 		getGoalId: () => deps.getGoalId(),
 		getCurrentSubmissionEpoch: () => deps.getCurrentSubmissionEpoch(),
+		isPersistenceFenced: () => deps.getSessionManager().isPersistenceStateUncertain(),
 		getSessionLineageIds: () => deps.getSessionManager().getSessionLineageIds(),
 		isForegroundWait: (tool, args) => deps.isForegroundWait(tool, args),
 		getMutationScope: () => deps.getMutationScope(),

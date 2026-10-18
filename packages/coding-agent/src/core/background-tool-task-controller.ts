@@ -278,6 +278,8 @@ export interface BackgroundToolTaskControllerDeps {
 	 * task start to stamp `ownerEpoch` -- never read again later, so a task always remembers who
 	 * owned it when it began, not whoever happens to be current by the time it finishes. */
 	getCurrentSubmissionEpoch?(): number | undefined;
+	/** The session file refused a write and accepts no append until it is reopened: no delivery can succeed before that. */
+	isPersistenceFenced?(): boolean;
 	/** Current session followed by the authoritative fork ancestry whose branch records remain visible. */
 	getSessionLineageIds?(): readonly string[];
 	getArtifactStore(): ArtifactStore | undefined;
@@ -1548,8 +1550,13 @@ export class BackgroundToolTaskController {
 					// the next task start or terminal re-arms delivery, a resume redelivers it, and
 					// `tool_task wait` collects it now.
 					this.notificationsParked = true;
+					// A fenced session file refuses every append, including the next task's own record, so nothing
+					// re-arms the delivery until the session is reopened: say that, not a re-arm that cannot happen.
+					const retryClause = this.deps.isPersistenceFenced?.()
+						? "the session file refused a write and accepts no append until the session is reopened; delivery resumes then"
+						: "retried when a background tool task next starts or ends, or on session resume";
 					this.reportError(
-						`Background tool completion wake-up for ${batchLabel} is parked after ${consecutiveFailures} consecutive failed deliveries (still pending; retried when a background tool task next starts or ends, or on session resume; tool_task action=wait collects it now)`,
+						`Background tool completion wake-up for ${batchLabel} is parked after ${consecutiveFailures} consecutive failed deliveries (still pending; ${retryClause}; tool_task action=wait collects it now)`,
 						error,
 					);
 					return;
