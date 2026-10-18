@@ -1,6 +1,7 @@
 import type { WorkerClaim, WorkerHostVerdict } from "../autonomy/contracts.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import { boundedText } from "../util/bounded-line.ts";
 
 /**
  * What the host recommends the root do with a worker whose task ended. It is advice printed for the
@@ -49,15 +50,8 @@ export interface WorkerDispositionInput extends WorkerDispositionFacts {
 	readonly profileId?: string;
 }
 
-function bounded(reason: string): string {
-	const line = reason.replace(/[\r\n]+/g, " ");
-	return line.length <= MAX_WORKER_DISPOSITION_REASON_CHARS
-		? line
-		: `${line.slice(0, MAX_WORKER_DISPOSITION_REASON_CHARS - 3)}...`;
-}
-
 function advice(disposition: WorkerDisposition, reason: string): WorkerDispositionAdvice {
-	return { disposition, reason: bounded(reason) };
+	return { disposition, reason: boundedText(reason.replace(/[\r\n]+/g, " "), MAX_WORKER_DISPOSITION_REASON_CHARS) };
 }
 
 /**

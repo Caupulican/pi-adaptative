@@ -1,4 +1,5 @@
 import type { AgentHaltRequest } from "../../kernel/index.ts";
+import { boundedText } from "../util/bounded-line.ts";
 
 /** Longest parent reason carried into the worker's transcript and the claim. */
 export const MAX_WORKER_HALT_REASON_CHARS = 1_000;
@@ -10,12 +11,11 @@ const HALT_CLOSING_PROMPT = [
 	"Do not claim unperformed work. Do not emit a tool call or tool-call markup.",
 ].join("\n");
 
+/** The parent's reason, trimmed; a longer one keeps its head and tail and is never cut inside a path. */
 export function normalizeWorkerHaltReason(reason: string | undefined): string | undefined {
 	const trimmed = reason?.trim();
 	if (!trimmed) return undefined;
-	return trimmed.length > MAX_WORKER_HALT_REASON_CHARS
-		? `${trimmed.slice(0, MAX_WORKER_HALT_REASON_CHARS)}…`
-		: trimmed;
+	return boundedText(trimmed, MAX_WORKER_HALT_REASON_CHARS);
 }
 
 /** What the worker is told, and the closing instruction its one tool-free request runs under. */

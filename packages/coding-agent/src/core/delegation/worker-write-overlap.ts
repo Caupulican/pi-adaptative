@@ -14,10 +14,14 @@
 
 import path from "node:path";
 import { HOST_FINDING_PREFIX } from "../autonomy/host-finding-prefixes.ts";
+import { boundedText } from "../util/bounded-line.ts";
 
 const MAX_FINISHED_SPANS = 128;
 const MAX_FINDINGS = 12;
-/** A claim blocker longer than 1000 characters is dropped whole, so a finding is kept well inside it. */
+/**
+ * A claim blocker longer than 1000 characters is dropped whole, so a finding is kept well inside it. A longer path
+ * puts its leading directories behind an elision and keeps the trailing components that fit, file name included.
+ */
 const MAX_PATH_CHARS = 300;
 
 export interface WorkerWriteSpanInput {
@@ -45,10 +49,6 @@ function absoluteFiles(cwd: string, files: Iterable<string>): Set<string> {
 	const resolved = new Set<string>();
 	for (const file of files) resolved.add(path.resolve(cwd, file));
 	return resolved;
-}
-
-function clip(value: string): string {
-	return value.length > MAX_PATH_CHARS ? `${value.slice(0, MAX_PATH_CHARS - 1)}…` : value;
 }
 
 const MAX_CLAIM_HOST_FINDINGS = 8;
@@ -108,7 +108,7 @@ export class WorkerWriteOverlapTracker {
 					continue;
 				}
 				findings.push(
-					`${HOST_FINDING_PREFIX.overlap} ${clip(file)} was changed by both worker ${laneId} (agent ${mine.agentId}) and worker ${other.laneId} (agent ${other.agentId}) while their runs overlapped, with no write reservation between them. Neither was blocked; compare both changes before accepting either.`,
+					`${HOST_FINDING_PREFIX.overlap} ${boundedText(file, MAX_PATH_CHARS)} was changed by both worker ${laneId} (agent ${mine.agentId}) and worker ${other.laneId} (agent ${other.agentId}) while their runs overlapped, with no write reservation between them. Neither was blocked; compare both changes before accepting either.`,
 				);
 			}
 		}

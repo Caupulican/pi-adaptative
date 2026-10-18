@@ -6,6 +6,7 @@
 
 import type { WorkerCommandReceipt } from "../autonomy/contracts.ts";
 import { containsCredential } from "../system-one/projector.ts";
+import { boundedText } from "../util/bounded-line.ts";
 import { MAX_WORKER_CLAIM_COMMAND_CHARS, MAX_WORKER_CLAIM_COMMAND_RECEIPTS } from "./worker-claim.ts";
 
 /** Tools that run a command the worker can later claim a result for. */
@@ -76,11 +77,7 @@ export function commandReceiptFor(input: {
 	return {
 		id: input.toolCallId,
 		tool: input.toolName,
-		command: containsCredential(flat)
-			? REDACTED_COMMAND
-			: flat.length <= MAX_WORKER_CLAIM_COMMAND_CHARS
-				? flat
-				: `${flat.slice(0, MAX_WORKER_CLAIM_COMMAND_CHARS - 1)}…`,
+		command: containsCredential(flat) ? REDACTED_COMMAND : boundedText(flat, MAX_WORKER_CLAIM_COMMAND_CHARS),
 		isError: input.isError,
 		...(exitCode !== undefined ? { exitCode } : {}),
 		...(durationMs !== undefined ? { durationMs } : {}),

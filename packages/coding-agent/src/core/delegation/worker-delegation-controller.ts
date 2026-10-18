@@ -130,6 +130,7 @@ import { executeToolkitScript } from "../toolkit/script-runner.ts";
 import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
 import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
+import { boundedLine, boundedText } from "../util/bounded-line.ts";
 import {
 	AsyncRetainedReleases,
 	type ReleaseAttemptResult,
@@ -710,52 +711,10 @@ type RetainedWorkerRelease =
 
 /** The longest release cause a refused start quotes. */
 const MAX_RETAINED_RELEASE_CAUSE_CHARS = 240;
-/** Stands for the elided middle of a long line: no path character, and no boundary a path or alias starts at. */
-const BOUNDED_LINE_ELISION = "…";
-/** One unit of a bounded line: a non-space run with every quoted span inside it whole, a space, or an unpaired quote. */
-const BOUNDED_LINE_UNIT_RE = /(?:[^\s'"`]|'[^']*'|"[^"]*"|`[^`]*`)+|\s|['"`]/g;
 
-/** A release cause as a refusal quotes it: one line, bounded. */
+/** A release cause as a refusal quotes it: one line, bounded (head and tail kept, never cut inside a path). */
 function boundedReleaseCause(cause: string): string {
 	return boundedLine(cause, MAX_RETAINED_RELEASE_CAUSE_CHARS);
-}
-
-/**
- * Text a notice quotes to a model, as one line of at most `maxChars` characters. A longer line keeps its head and its
- * tail around one elided middle, glued to both:
- * - the head ends between whole units, or just after the opening quote of the quoted span the bound falls in, so it never
- *   ends inside a path: a cut path would read, to the path-alias extractor, as the real shorter path it spells;
- * - the tail starts at the first path separator its budget reaches, so a path keeps whole components and the file name
- *   the text names; a unit with no separator left (a word, a file name longer than the budget) is cut where the budget
- *   allows, never inside a surrogate pair. Behind the elision no path or alias match can start.
- */
-function boundedLine(text: string, maxChars: number): string {
-	const line = text.replace(/\s+/g, " ").trim();
-	if (line.length <= maxChars) return line;
-	const kept = maxChars - BOUNDED_LINE_ELISION.length;
-	const headBudget = Math.ceil(kept / 2);
-	const units = [...line.matchAll(BOUNDED_LINE_UNIT_RE)].map((unit) => ({
-		start: unit.index,
-		end: unit.index + unit[0].length,
-	}));
-	let headEnd = 0;
-	for (const unit of units) {
-		if (unit.end > headBudget) {
-			if (unit.start < headBudget && /['"`]/.test(line.charAt(unit.start))) headEnd = unit.start + 1;
-			break;
-		}
-		headEnd = unit.end;
-	}
-	// The head's unused budget goes to the tail.
-	let tailStart = line.length - (kept - headEnd);
-	const tailUnit = units.find((unit) => unit.end > tailStart);
-	if (tailUnit !== undefined && tailUnit.start < tailStart) {
-		const separator = line.slice(tailStart, tailUnit.end).search(/[\\/]/);
-		const code = line.charCodeAt(tailStart);
-		if (separator >= 0) tailStart += separator;
-		else if (code >= 0xdc00 && code <= 0xdfff) tailStart += 1;
-	} else if (line.charAt(tailStart) === " ") tailStart += 1;
-	return `${line.slice(0, headEnd)}${BOUNDED_LINE_ELISION}${line.slice(tailStart)}`;
 }
 
 export class WorkerDelegationController {
@@ -5257,7 +5216,7 @@ export class WorkerDelegationController {
 												outcome: "ask-user" as const,
 												gate: "worker_host_findings",
 												reasonCode: "worker_host_findings",
-												message: hostFindings.join("; ").slice(0, MAX_WORKER_CLAIM_BLOCKER_CHARS),
+												message: boundedText(hostFindings.join("; "), MAX_WORKER_CLAIM_BLOCKER_CHARS),
 											},
 										}
 									: {}),
