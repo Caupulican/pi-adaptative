@@ -16,6 +16,7 @@
  * PREPARE (major|minor|patch|x.y.z) - a pure function of the committed tree, no tag:
  * 1. Preflight: on main, clean tree, local main is behind-or-equal origin/main and fast-forwards to it,
  *    prospective tag unused, and the base commit's own ci.yml has not already concluded red.
+ *    Nothing waits for a green ci.yml here: the tag's quality-gate is the single full CI of the release commit.
  * 2. Run local checks below; GitHub Actions on the exact tag is the platform/provider and
  *    artifact-acceptance authority.
  * 3. Bump version via npm run version:xxx or set an explicit version.
@@ -35,12 +36,12 @@
  *
  * PROMOTE (automatic after prepare, or standalone via `promote` to resume later):
  * 8. Locate the "Release vX.Y.Z" commit.
- * 9. Wait for destructive.yml and for the full ci.yml matrix on that exact SHA. If a run is missing,
- *     push `release-vX.Y.Z` at that SHA and dispatch workflow_dispatch on that branch (GitHub
- *     rejects a raw SHA ref).
- * 10. Only on both successes: create and push the vX.Y.Z tag, which triggers
- *     build-binaries.yml. That workflow runs the complete ci.yml matrix as quality-gate
- *     and publishes assets only after that matrix and provenance succeed.
+ * 9. Poll destructive.yml on that exact SHA. If none exists, push `release-vX.Y.Z` at that
+ *     SHA and dispatch workflow_dispatch on that branch (GitHub rejects a raw SHA ref).
+ * 10. Only on destructive success: create and push the vX.Y.Z tag, which triggers
+ *     build-binaries.yml. That workflow runs the complete ci.yml matrix as quality-gate, in
+ *     parallel with the binary build, and publishes assets only after that matrix and
+ *     provenance succeed. The release commit is not given a second ci.yml run before the tag.
  * If the tag workflow fails, rerun that tag workflow or delete the tag, fix, then
  * `npm run release:repair`. Never rerun prepare (release:patch/minor/major) for the same
  * version once its release commit has been pushed.
@@ -329,8 +330,8 @@ function preflight(prospectiveVersion, recoveredPaths = new Set()) {
 
 /**
  * Fail fast when the base commit's own ci.yml already concluded red: nothing a release adds can fix it.
- * A run still in progress or not yet registered does not block; the release commit gets its own full
- * ci.yml run before it is tagged (see promoteRelease), which is the gate that decides.
+ * A run still in progress or not yet registered does not block: the tag's quality-gate runs the full
+ * ci.yml on the release commit itself, in parallel with the binary build, and that run decides.
  */
 function rejectRedMainCi(sha) {
 	const listing = run(
@@ -590,20 +591,6 @@ async function promoteRelease(versionArg) {
 		throw new Error(
 			`destructive.yml workflow gate did not succeed for release commit ${releaseSha} (conclusion: ${destructive}). ` +
 				"No tag was created. Fix or rerun destructive.yml, then run \"npm run release:promote\" to resume.",
-		);
-	}
-
-	// The release commit differs from its parent by metadata only, but the tag's quality gate and provenance
-	// require a full green ci.yml on this exact commit, so it is proven before the tag exists rather than
-	// discovered red after it.
-	const ci = await waitForWorkflow(releaseSha, MAIN_CI_WORKFLOW, {
-		dispatchIfMissing: true,
-		dispatchRef: `release-v${version}`,
-	});
-	if (ci !== "success") {
-		throw new Error(
-			`${MAIN_CI_WORKFLOW} did not succeed for release commit ${releaseSha} (conclusion: ${ci}). ` +
-				"No tag was created. Push the fix to main, then run \"npm run release:repair\" to re-release the corrected tip.",
 		);
 	}
 

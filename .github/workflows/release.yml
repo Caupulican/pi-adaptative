@@ -1,8 +1,8 @@
 name: Release
 
 # Runs scripts/release.mjs on GitHub instead of a local checkout. The script stays the one owner of the
-# release rules: the version bump and changelogs, `npm run check`, a green ci.yml and destructive.yml on the
-# exact release commit, then the version tag. This workflow only supplies the runner, the credentials, the
+# release rules: the version bump and changelogs, `npm run check`, a green destructive.yml on the exact
+# release commit, then the version tag; the tag's quality-gate is the one full ci.yml run of that commit. This workflow only supplies the runner, the credentials, the
 # restart after a lost push race and the hand-off to build-binaries.yml.
 #
 # One dispatch is the whole release and needs no attendance. It does not freeze main: commits pushed while it
@@ -10,8 +10,8 @@ name: Release
 # published the assets, so a red run here always means the release is not out.
 #
 # Pushes made with the workflow token never trigger other workflows, so the tag this job creates does not
-# start build-binaries.yml by itself, and neither does the release commit start ci.yml; the script dispatches
-# ci.yml and destructive.yml on the release commit and this job dispatches build-binaries.yml on the tag.
+# start build-binaries.yml by itself; the script dispatches destructive.yml on the release commit and this job
+# dispatches build-binaries.yml on the tag.
 #
 # Targets:
 #   patch | minor | major  prepare the next version from main, then promote it
