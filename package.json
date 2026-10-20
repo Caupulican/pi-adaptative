@@ -61,7 +61,6 @@
 		"release:repair": "node scripts/release.mjs repair",
 		"release:adopt": "node scripts/release.mjs adopt",
 		"release:status": "node scripts/release.mjs status",
-		"release:prune": "node scripts/release.mjs prune",
 		"prepare": "husky"
 	},
 	"devDependencies": {

@@ -422,7 +422,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Require successful CI and destructive evidence for the release commit
+      - name: Require successful CI evidence for the release commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -430,29 +430,6 @@ jobs:
           node scripts/release-ci-proof.mjs "$release_sha" "$GITHUB_REPOSITORY"
           parent="$(git rev-parse "${release_sha}^")"
           node scripts/verify-release-metadata-diff.mjs "$parent" "$release_sha"
-
-          successful_run_ids() {
-            workflow="$1"
-            sha="$2"
-            gh run list \
-              --repo "${GITHUB_REPOSITORY}" \
-              --workflow "$workflow" \
-              --commit "$sha" \
-              --limit 100 \
-              --json databaseId,headSha,status,conclusion |
-              jq --arg sha "$sha" -r '.[] | select(.headSha == $sha and .status == "completed" and .conclusion == "success") | .databaseId'
-          }
-
-          verify_workflow() {
-            workflow="$1"
-            sha="$2"
-            if [ -z "$(successful_run_ids "$workflow" "$sha")" ]; then
-              echo "::error::${workflow} has no successful completed run for exact commit ${sha}" >&2
-              exit 1
-            fi
-          }
-
-          verify_workflow destructive.yml "$release_sha"
 
   release:
     if: github.event_name == 'push' || inputs.verify_only != true

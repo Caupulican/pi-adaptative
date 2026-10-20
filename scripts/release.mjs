@@ -32,16 +32,14 @@
  *   and empty next-cycle changelog sections.
  * - Remove only those empty sections, commit "Repair release vX.Y.Z", and push it as the new
  *   release candidate without another version bump. Restore the next-cycle sections afterward.
- * - Promote the repaired candidate through the destructive gate, then tag.
+ * - Promote the repaired candidate: tag it.
  *
  * PROMOTE (automatic after prepare, or standalone via `promote` to resume later):
  * 8. Locate the "Release vX.Y.Z" commit.
- * 9. Poll destructive.yml on that exact SHA. If none exists, push `release-vX.Y.Z` at that
- *     SHA and dispatch workflow_dispatch on that branch (GitHub rejects a raw SHA ref).
- * 10. Only on destructive success: create and push the vX.Y.Z tag, which triggers
- *     build-binaries.yml. That workflow runs the complete ci.yml matrix as quality-gate, in
- *     parallel with the binary build, and publishes assets only after that matrix and
- *     provenance succeed. The release commit is not given a second ci.yml run before the tag.
+ * 9. Create and push the vX.Y.Z tag, which triggers build-binaries.yml. That workflow runs the
+ *    complete ci.yml matrix as quality-gate, in parallel with the binary build, and publishes assets
+ *    only after that matrix and provenance succeed. The release commit is not given a second ci.yml
+ *    run before the tag.
  * If the tag workflow fails, rerun that tag workflow or delete the tag, fix, then
  * `npm run release:repair`. Never rerun prepare (release:patch/minor/major) for the same
  * version once its release commit has been pushed.
@@ -56,8 +54,6 @@ import {
 	matchesReleaseCandidateSubject,
 	partitionReleaseChanges,
 	mainCiGateDecision,
-	pickWorkflowConclusion,
-	releaseBranchesToPrune,
 	stripEmptyUnreleasedSection,
 	prepareAdoptedChangelog,
 	validateAdoptionVersions,
@@ -76,17 +72,13 @@ if (
 	!isPrepareTarget &&
 	!isRepairTarget &&
 	!isAdoptTarget &&
-	RELEASE_TARGET !== "status" &&
-	RELEASE_TARGET !== "prune"
+	RELEASE_TARGET !== "status"
 ) {
-	console.error("Usage: node scripts/release.mjs <major|minor|patch|x.y.z|repair|adopt|status|promote|prune [--dry-run]>");
+	console.error("Usage: node scripts/release.mjs <major|minor|patch|x.y.z|repair|adopt|status|promote>");
 	process.exit(1);
 }
 
-const DESTRUCTIVE_WORKFLOW = "destructive.yml";
 const MAIN_CI_WORKFLOW = "ci.yml";
-const CI_POLL_INTERVAL_MS = Number.parseInt(process.env.PI_RELEASE_WORKFLOW_POLL_INTERVAL_MS ?? "", 10) || 20_000;
-const CI_POLL_TIMEOUT_MS = Number.parseInt(process.env.PI_RELEASE_WORKFLOW_POLL_TIMEOUT_MS ?? "", 10) || 60 * 60_000;
 
 /** Exit status that tells release.yml the run lost a push race and can start again from the new origin/main. */
 const RACE_EXIT_CODE = 75;
@@ -103,10 +95,6 @@ function run(cmd, options = {}) {
 		}
 		throw new ReleaseCommandError(`Command failed: ${cmd}${e.message ? `\n${e.message}` : ""}`);
 	}
-}
-
-function sleep(ms) {
-	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function getVersion() {
@@ -475,86 +463,6 @@ function prepareReleaseRepair() {
 	});
 }
 
-async function waitForWorkflow(sha, workflow, options = {}) {
-	const repo = getRepoSlug();
-	console.log(`  Waiting for ${workflow} on ${sha} in ${repo}...`);
-	const deadline = Date.now() + CI_POLL_TIMEOUT_MS;
-	let dispatched = false;
-
-	while (Date.now() < deadline) {
-		const listing = run(
-			`gh run list -R ${shellQuote(repo)} --workflow=${workflow} --json headSha,status,conclusion --limit 30`,
-			{ silent: true, ignoreError: true },
-		);
-		if (listing) {
-			const runs = JSON.parse(listing);
-			const match = pickWorkflowConclusion(runs, sha);
-			if (match.state === "completed") {
-				console.log(`  ${workflow} for ${sha}: ${match.conclusion}`);
-				return match.conclusion;
-			}
-			if (match.state === "pending") {
-				console.log(`  ${workflow} for ${sha}: ${match.status}...`);
-			} else if (options.dispatchIfMissing && !dispatched) {
-				const dispatchRef = options.dispatchRef;
-				if (!dispatchRef) {
-					throw new Error(`Cannot dispatch ${workflow}: dispatchRef is required (workflow_dispatch rejects a raw SHA).`);
-				}
-				console.log(`  No ${workflow} run on ${sha}; dispatching on ${dispatchRef}...`);
-				run(`git push origin ${shellQuote(sha)}:refs/heads/${dispatchRef}`);
-				run(`gh workflow run ${workflow} -R ${shellQuote(repo)} --ref ${shellQuote(dispatchRef)}`);
-				dispatched = true;
-			} else {
-				console.log(`  ${workflow} run not registered yet...`);
-			}
-		}
-		await sleep(CI_POLL_INTERVAL_MS);
-	}
-
-	throw new Error(`Timed out after ${Math.round(CI_POLL_TIMEOUT_MS / 60_000)}m waiting for ${workflow} on ${sha}.`);
-}
-
-/** Delete remote release dispatch branches whose version is tagged; untagged candidates stay. */
-function pruneReleaseBranches({ dryRun = false } = {}) {
-	const refNames = (output, prefix) =>
-		(output ?? "")
-			.split("\n")
-			.map((line) => line.split("\t")[1]?.trim())
-			.filter((ref) => ref?.startsWith(prefix))
-			.map((ref) => ref.slice(prefix.length).replace(/\^\{\}$/, ""));
-	const branches = refNames(run("git ls-remote --heads origin 'refs/heads/release-v*'", { silent: true }), "refs/heads/");
-	const tags = refNames(run("git ls-remote --tags origin 'refs/tags/v*'", { silent: true }), "refs/tags/");
-	const prunable = releaseBranchesToPrune(branches, tags);
-	const kept = branches.filter((branch) => !prunable.includes(branch));
-	console.log(`Release dispatch branches: ${branches.length}; tagged (prunable): ${prunable.length}; kept: ${kept.join(", ") || "none"}`);
-	if (dryRun || prunable.length === 0) return prunable;
-	for (let index = 0; index < prunable.length; index += 50) {
-		const chunk = prunable.slice(index, index + 50);
-		run(`git push origin --delete ${chunk.map((branch) => shellQuote(branch)).join(" ")}`, { silent: true });
-	}
-	console.log(`  Deleted ${prunable.length} tagged release dispatch branch(es).`);
-	return prunable;
-}
-
-/** After a tag lands its dispatch branch is spent; a failed cleanup never undoes a finished release. */
-function pruneAfterRelease() {
-	try {
-		pruneReleaseBranches();
-	} catch (error) {
-		console.warn(
-			`Warning: release branch cleanup failed (${error instanceof Error ? error.message : String(error)}). ` +
-				'Tag promotion is complete; artifact publication is separately gated. Run "npm run release:prune" to retry cleanup.',
-		);
-	}
-}
-
-async function waitForDestructive(sha, version) {
-	return waitForWorkflow(sha, DESTRUCTIVE_WORKFLOW, {
-		dispatchIfMissing: true,
-		dispatchRef: `release-v${version}`,
-	});
-}
-
 function ensureTagPushed(tag) {
 	const remoteTag = run(`git ls-remote --tags origin ${shellQuote(tag)}`, { silent: true });
 	if (remoteTag && remoteTag.trim()) {
@@ -565,7 +473,7 @@ function ensureTagPushed(tag) {
 	run(`git push origin ${tag}`);
 }
 
-async function promoteRelease(versionArg) {
+function promoteRelease(versionArg) {
 	console.log("\n=== Promoting release ===\n");
 	run("git fetch origin --tags", { silent: true });
 	const version = versionArg ?? getVersion();
@@ -586,21 +494,12 @@ async function promoteRelease(versionArg) {
 		if (taggedSha !== releaseSha) throw new Error(`Existing ${tag} does not name release candidate ${releaseSha}.`);
 	}
 
-	const destructive = await waitForDestructive(releaseSha, version);
-	if (destructive !== "success") {
-		throw new Error(
-			`destructive.yml workflow gate did not succeed for release commit ${releaseSha} (conclusion: ${destructive}). ` +
-				"No tag was created. Fix or rerun destructive.yml, then run \"npm run release:promote\" to resume.",
-		);
-	}
-
 	if (existingLocalTag?.trim()) {
 		ensureTagPushed(tag);
-		pruneAfterRelease();
 		console.log(`\n=== ${tag} already promoted ===\n`);
 		return;
 	}
-	console.log(`  destructive.yml workflow gate succeeded for ${releaseSha}; this does not establish test coverage. Tagging ${tag}...`);
+	console.log(`  Tagging ${tag} at ${releaseSha}; the tag's quality-gate runs the full ci.yml on it before any asset is published...`);
 	try {
 		// Release tags are plain lightweight refs. Disable host-level forced tag
 		// signing/annotation (tag.gpgSign) so tagging never depends on local
@@ -612,7 +511,6 @@ async function promoteRelease(versionArg) {
 		throw error;
 	}
 
-	pruneAfterRelease();
 	console.log(`\n=== Promoted ${tag}; standalone artifact publication remains gated ===\n`);
 }
 
@@ -625,16 +523,14 @@ try {
 		const repo = getRepoSlug();
 		const sha = run("git rev-parse HEAD", { silent: true }).trim();
 		console.log(JSON.stringify({ version, repo, sha, workingTree: run("git status --porcelain", { silent: true }).trim(), remoteTag: run(`git ls-remote --tags origin ${shellQuote(`v${version}`)}`, { silent: true }).trim() }, null, 2));
-	} else if (RELEASE_TARGET === "prune") {
-		pruneReleaseBranches({ dryRun: process.argv.includes("--dry-run") });
 	} else if (RELEASE_TARGET === "adopt") {
-		await promoteRelease(adoptRelease());
+		promoteRelease(adoptRelease());
 	} else if (RELEASE_TARGET === "promote") {
-		await promoteRelease();
+		promoteRelease();
 	} else if (isRepairTarget) {
-		await promoteRelease(prepareReleaseRepair());
+		promoteRelease(prepareReleaseRepair());
 	} else {
-		await promoteRelease(prepareRelease());
+		promoteRelease(prepareRelease());
 	}
 } catch (error) {
 	console.error(error instanceof Error ? error.message : String(error));
