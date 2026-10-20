@@ -62,7 +62,9 @@ jobs:
         run: ./scripts/build-binaries.sh
 
       - name: Verify pinned native toolchain
-        run: npm ls vite@8.2.2 vitest@5.0.1 --depth=0
+        run: |
+          npm ls vite@8.2.2 vitest@5.0.1 typescript@7.0.2 tsrs@0.18.0-ts7.1.0-dev.20260929 --depth=0
+          node scripts/run-tsc.mjs --version
 
       - name: Verify compiled Bun WebFetch transport
         timeout-minutes: 2

@@ -73,6 +73,13 @@ jobs:
           node node_modules/vitest/vitest.mjs --version
           node node_modules/vite/bin/vite.js --version
 
+      # tsrs ships no Windows binary, so scripts/run-tsc.mjs runs tsrs on Linux and the pinned typescript
+      # compiler on Windows; both are installed everywhere and the selected one reports its version here.
+      - name: Verify TypeScript compiler selection
+        run: |
+          npm ls typescript@7.0.2 tsrs@0.18.0-ts7.1.0-dev.20260929 --depth=0
+          node scripts/run-tsc.mjs --version
+
       # Deterministic CI: builds are hermetic by default (see
       # packages/ai/scripts/model-catalog-generation-policy.ts) and use the COMMITTED model
       # catalogs instead of refetching live pricing that can drift between the release commit
