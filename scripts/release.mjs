@@ -28,10 +28,10 @@
  * Any other failure during steps 3-6 retains files, index and commits for state-aware recovery.
  *
  * REPAIR - recover an untagged prepared version after a gate exposed a required fix:
- * - Require the original Release commit in current main's ancestry, a free version tag,
- *   and empty next-cycle changelog sections.
- * - Remove only those empty sections, commit "Repair release vX.Y.Z", and push it as the new
- *   release candidate without another version bump. Restore the next-cycle sections afterward.
+ * - Require the original Release commit in current main's ancestry and a free version tag.
+ * - Fold the notes added to the next-cycle [Unreleased] sections since then into the version
+ *   section, commit "Repair release vX.Y.Z", and push it as the new release candidate without
+ *   another version bump. Restore the next-cycle sections afterward.
  * - Promote the repaired candidate: tag it.
  *
  * PROMOTE (automatic after prepare, or standalone via `promote` to resume later):
@@ -54,7 +54,6 @@ import {
 	matchesReleaseCandidateSubject,
 	partitionReleaseChanges,
 	mainCiGateDecision,
-	stripEmptyUnreleasedSection,
 	prepareAdoptedChangelog,
 	validateAdoptionVersions,
 	collectChangedPaths,
@@ -232,21 +231,27 @@ function addUnreleasedSection() {
 	}
 }
 
-function removeEmptyUnreleasedSections(version) {
+/**
+ * Fold the notes added to each next-cycle [Unreleased] section since the release commit into the prepared
+ * version's section, or drop the marker when it is empty. Commits pushed after the release commit are part of
+ * the repaired candidate, so their notes ship with it; requiring empty markers would leave no repair path
+ * while main keeps moving.
+ */
+function foldUnreleasedIntoPreparedVersion(version) {
 	const updates = getChangelogs().map((changelog) => {
 		const content = readFileSync(changelog, "utf-8");
 		if (!content.includes(`## [${version}]`)) {
 			throw new Error(`${changelog} has no section for prepared version ${version}.`);
 		}
 		try {
-			return { changelog, content: stripEmptyUnreleasedSection(content) };
+			return { changelog, content: prepareAdoptedChangelog(content, version) };
 		} catch (error) {
 			throw new Error(`${changelog} ${error instanceof Error ? error.message : String(error)}; refusing release repair.`);
 		}
 	});
 	for (const update of updates) {
 		writeFileSync(update.changelog, update.content);
-		console.log(`  Removed empty [Unreleased] from ${update.changelog}`);
+		console.log(`  Folded [Unreleased] into [${version}] in ${update.changelog}`);
 	}
 }
 
@@ -454,7 +459,7 @@ function prepareReleaseRepair() {
 
 	return executeReleaseMutation({ phase: "repair", sha: preflightSha }, getReleaseSource, () => {
 		console.log(`Repairing prepared version ${version} without another version bump...`);
-		removeEmptyUnreleasedSections(version);
+		foldUnreleasedIntoPreparedVersion(version);
 		console.log();
 
 		finishPreparedRelease(`Repair release v${version}`, preflightSha);

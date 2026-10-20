@@ -26,19 +26,24 @@ function packageDirectory(specifier, from = requireFromScript) {
 
 /**
  * tsrs (the Rust port of the TypeScript 7 compiler) ships its native binary in one per-platform
- * optional dependency, and npm installs only the one matching the host. A host that has none of
- * them (tsrs publishes no Windows or darwin-x64 binary) cannot run tsrs; the pinned `typescript`
- * compiler is the same TypeScript 7 front end and produces the same declarations and emit there.
+ * optional dependency, and npm installs the one matching the host. A host with none for its own
+ * os and cpu (tsrs publishes no Windows or darwin-x64 binary) cannot run tsrs; the pinned
+ * `typescript` compiler is the same TypeScript 7 front end and produces the same JavaScript emit
+ * there. A binary package installed for another platform (`npm install --force` skips the
+ * platform filter) does not count: only one whose own `os` and `cpu` match this host does.
  */
 function resolveTsrsEntrypoint() {
 	const tsrsDirectory = packageDirectory("tsrs");
 	if (!tsrsDirectory) return undefined;
 	const manifest = JSON.parse(readFileSync(join(tsrsDirectory, "package.json"), "utf8"));
 	const requireFromTsrs = createRequire(join(tsrsDirectory, "package.json"));
-	const hasPlatformBinary = Object.keys(manifest.optionalDependencies ?? {}).some(
-		(name) => packageDirectory(name, requireFromTsrs) !== undefined,
-	);
-	return hasPlatformBinary ? join(tsrsDirectory, "bin", "tsrs") : undefined;
+	const hasHostBinary = Object.keys(manifest.optionalDependencies ?? {}).some((name) => {
+		const platformDirectory = packageDirectory(name, requireFromTsrs);
+		if (!platformDirectory) return false;
+		const platform = JSON.parse(readFileSync(join(platformDirectory, "package.json"), "utf8"));
+		return platform.os?.includes(process.platform) === true && platform.cpu?.includes(process.arch) === true;
+	});
+	return hasHostBinary ? join(tsrsDirectory, "bin", "tsrs") : undefined;
 }
 
 let compilerName = "tsrs";
