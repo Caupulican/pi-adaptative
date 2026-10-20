@@ -10,19 +10,21 @@
  *   node scripts/release.mjs adopt
  *   node scripts/release.mjs status
  *
- * The release flow is split into two gated phases. The ci.yml matrix gates main
- * and runs again on the version tag through build-binaries.yml quality-gate.
+ * The release flow is split into two gated phases. Neither phase needs main to stand still: pushes that
+ * land while a release waits or runs are simply part of the next release.
  *
  * PREPARE (major|minor|patch|x.y.z) - a pure function of the committed tree, no tag:
- * 1. Preflight: on main, clean tree, origin/main is an ancestor of HEAD, prospective tag unused.
+ * 1. Preflight: on main, clean tree, local main is behind-or-equal origin/main and fast-forwards to it,
+ *    prospective tag unused, and the base commit's own ci.yml has not already concluded red.
  * 2. Run local checks below; GitHub Actions on the exact tag is the platform/provider and
  *    artifact-acceptance authority.
  * 3. Bump version via npm run version:xxx or set an explicit version.
  * 4. Update CHANGELOG.md files: [Unreleased] -> [version] - date.
  * 5. Run checks.
- * 6. Commit "Release vX.Y.Z" and push main.
- * 7. Add new [Unreleased] sections to changelogs, commit, and push main again.
- * Any failure during steps 3-7 retains files, index and commits for state-aware recovery.
+ * 6. Commit "Release vX.Y.Z", add the next-cycle [Unreleased] sections, commit them, and publish both
+ *    with one push. A push refused because origin/main moved is a lost race: nothing remote changed, the
+ *    script exits 75 and release.yml restarts it from the new tip (never the bump on top of a pushed one).
+ * Any other failure during steps 3-6 retains files, index and commits for state-aware recovery.
  *
  * REPAIR - recover an untagged prepared version after a gate exposed a required fix:
  * - Require the original Release commit in current main's ancestry, a free version tag,
@@ -33,9 +35,10 @@
  *
  * PROMOTE (automatic after prepare, or standalone via `promote` to resume later):
  * 8. Locate the "Release vX.Y.Z" commit.
- * 9. Poll destructive.yml on that exact SHA. If none exists, push `release-vX.Y.Z` at that
- *     SHA and dispatch workflow_dispatch on that branch (GitHub rejects a raw SHA ref).
- * 10. Only on destructive success: create and push the vX.Y.Z tag, which triggers
+ * 9. Wait for destructive.yml and for the full ci.yml matrix on that exact SHA. If a run is missing,
+ *     push `release-vX.Y.Z` at that SHA and dispatch workflow_dispatch on that branch (GitHub
+ *     rejects a raw SHA ref).
+ * 10. Only on both successes: create and push the vX.Y.Z tag, which triggers
  *     build-binaries.yml. That workflow runs the complete ci.yml matrix as quality-gate
  *     and publishes assets only after that matrix and provenance succeed.
  * If the tag workflow fails, rerun that tag workflow or delete the tag, fix, then
@@ -47,7 +50,7 @@ import { execSync } from "child_process";
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
 import { parseGithubOriginSlug } from "./github-origin.mjs";
-import { assertReleaseSourceIdentity, executeReleaseMutation } from "./release-recovery.mjs";
+import { executeReleaseMutation, ReleaseRaceError } from "./release-recovery.mjs";
 import {
 	matchesReleaseCandidateSubject,
 	partitionReleaseChanges,
@@ -81,10 +84,11 @@ if (
 
 const DESTRUCTIVE_WORKFLOW = "destructive.yml";
 const MAIN_CI_WORKFLOW = "ci.yml";
-/** A just-pushed commit's ci.yml run takes a moment to register; after this, "missing" is final. */
-const MAIN_CI_REGISTRATION_GRACE_MS = 3 * 60_000;
 const CI_POLL_INTERVAL_MS = Number.parseInt(process.env.PI_RELEASE_WORKFLOW_POLL_INTERVAL_MS ?? "", 10) || 20_000;
 const CI_POLL_TIMEOUT_MS = Number.parseInt(process.env.PI_RELEASE_WORKFLOW_POLL_TIMEOUT_MS ?? "", 10) || 60 * 60_000;
+
+/** Exit status that tells release.yml the run lost a push race and can start again from the new origin/main. */
+const RACE_EXIT_CODE = 75;
 
 class ReleaseCommandError extends Error {}
 
@@ -284,7 +288,7 @@ function assertTagIsFree(version) {
 }
 
 // All preflight checks are read-only (no local or remote mutation), so failures exit directly.
-function preflight(prospectiveVersion, validatedSha, recoveredPaths = new Set()) {
+function preflight(prospectiveVersion, recoveredPaths = new Set()) {
 	console.log("Running preflight checks...");
 
 	const branch = run("git rev-parse --abbrev-ref HEAD", { silent: true }).trim();
@@ -304,27 +308,52 @@ function preflight(prospectiveVersion, validatedSha, recoveredPaths = new Set())
 	console.log("  Fetching origin...");
 	run("git fetch origin --tags", { silent: true });
 
-	const isAncestor = run("git merge-base --is-ancestor origin/main HEAD", { silent: true, ignoreError: true });
-	if (isAncestor === null) {
-		console.error(
-			"Error: local main has diverged from origin/main (origin/main is not an ancestor of HEAD). Pull/rebase before releasing.",
-		);
+	// origin/main is the release base. Commits pushed while this run waited or queued are part of it, so a
+	// behind checkout fast-forwards instead of aborting; only local commits origin/main lacks are an error.
+	const isBehindOrEqual = run("git merge-base --is-ancestor HEAD origin/main", { silent: true, ignoreError: true });
+	if (isBehindOrEqual === null) {
+		console.error("Error: local main has commits origin/main lacks (ahead or diverged). Push or rebase before releasing.");
 		process.exit(1);
+	}
+	if (run("git rev-parse HEAD", { silent: true }).trim() !== run("git rev-parse origin/main", { silent: true }).trim()) {
+		run("git merge --ff-only origin/main");
 	}
 
 	assertTagIsFree(prospectiveVersion);
 
 	const source = getReleaseSource();
-	assertReleaseSourceIdentity(validatedSha, source);
-	const preflightSha = source.sha;
-	console.log(`  Preflight OK at ${preflightSha} (prospective version ${prospectiveVersion})\n`);
-	return preflightSha;
+	rejectRedMainCi(source.sha);
+	console.log(`  Preflight OK at ${source.sha} (prospective version ${prospectiveVersion})\n`);
+	return source.sha;
 }
 
-function prepareRelease(validatedSha) {
+/**
+ * Fail fast when the base commit's own ci.yml already concluded red: nothing a release adds can fix it.
+ * A run still in progress or not yet registered does not block; the release commit gets its own full
+ * ci.yml run before it is tagged (see promoteRelease), which is the gate that decides.
+ */
+function rejectRedMainCi(sha) {
+	const listing = run(
+		`gh run list -R ${shellQuote(getRepoSlug())} --workflow=${MAIN_CI_WORKFLOW} --commit ${shellQuote(sha)} --json headSha,status,conclusion,url --limit 20`,
+		{ silent: true, ignoreError: true },
+	);
+	const runs = listing ? JSON.parse(listing) : [];
+	const decision = mainCiGateDecision(runs, sha);
+	if (decision.verdict === "red") {
+		const urls = runs.filter((entry) => entry.headSha === sha).map((entry) => entry.url).join("\n  ");
+		console.error(
+			`${MAIN_CI_WORKFLOW} on ${sha} concluded "${decision.conclusion}"; main is not releasable.\n  ${urls}\n` +
+				"Fix the failures on main, then release again.",
+		);
+		process.exit(1);
+	}
+	console.log(`  ${MAIN_CI_WORKFLOW} on ${sha}: ${decision.verdict === "green" ? "success" : decision.verdict === "wait" ? decision.status : "not registered yet"}`);
+}
+
+function prepareRelease() {
 	console.log("\n=== Preparing release ===\n");
 	const prospectiveVersion = computeProspectiveVersion();
-	const preflightSha = preflight(prospectiveVersion, validatedSha);
+	const preflightSha = preflight(prospectiveVersion);
 
 	return executeReleaseMutation({ phase: "prepare", sha: preflightSha }, getReleaseSource, () => {
 		// 2. Local checks do not replace exact-tag platform/provider and artifact gates.
@@ -339,7 +368,7 @@ function prepareRelease(validatedSha) {
 		updateChangelogsForRelease(version);
 		console.log();
 
-		finishPreparedRelease(`Release v${version}`);
+		finishPreparedRelease(`Release v${version}`, preflightSha);
 
 		return version;
 	});
@@ -359,7 +388,7 @@ function findReleaseCandidateSha(version, includeRepairs = true) {
 	return undefined;
 }
 
-function adoptRelease(validatedSha) {
+function adoptRelease() {
 	const version = getVersion();
 	// Recover only bytes this deterministic transformation would have written from HEAD.
 	// An unrelated edit, including another session's changelog note, still fails preflight.
@@ -369,7 +398,7 @@ function adoptRelease(validatedSha) {
 		const expected = prepareAdoptedChangelog(original, version);
 		if (readFileSync(path, "utf8") === expected) recoveredPaths.add(path);
 	}
-	const preflightSha = preflight(version, validatedSha, recoveredPaths);
+	const preflightSha = preflight(version, recoveredPaths);
 	if (findReleaseCandidateSha(version)) throw new Error("A canonical candidate already exists; use release:repair or release:promote.");
 	validateAdoptionVersions(".", version);
 	const updates = getChangelogs().map((path) => ({ path, content: prepareAdoptedChangelog(readFileSync(path, "utf8"), version) }));
@@ -377,27 +406,51 @@ function adoptRelease(validatedSha) {
 	return executeReleaseMutation({ phase: "adopt", sha: preflightSha }, getReleaseSource, () => {
 		console.log(`Adopting prepared version ${version} without another version bump...`);
 		for (const update of updates) writeFileSync(update.path, update.content);
-		finishPreparedRelease(`Release v${version}`);
+		finishPreparedRelease(`Release v${version}`, preflightSha);
 		return version;
 	});
 }
 
-function finishPreparedRelease(subject) {
+/**
+ * Both release commits are committed locally and published by one push, so there is no state in which the
+ * release commit is on origin/main without its next-cycle markers, and a concurrent push can only reject the
+ * whole publication.
+ */
+function finishPreparedRelease(subject, baseSha) {
 	console.log("Running checks...");
 	run("npm run check");
 	stageChangedFiles();
 	run(`git commit -m ${shellQuote(subject)}`);
-	run("git push origin main");
 	addUnreleasedSection();
 	stageChangedFiles();
 	run('git commit -m "Add [Unreleased] section for next cycle"');
-	run("git push origin main");
+	publishPreparedRelease(baseSha);
 }
 
-function prepareReleaseRepair(validatedSha) {
+/**
+ * A refused push of commits built on `baseSha` is a lost race when origin/main has since moved and does not
+ * contain them: nothing remote changed and the run can start again from the new tip. A push whose outcome is
+ * unknown but whose commits are on origin/main already succeeded, and is never repeated (that would bump twice).
+ */
+function publishPreparedRelease(baseSha) {
+	try {
+		run("git push origin main");
+	} catch (error) {
+		run("git fetch origin", { silent: true });
+		const published = run("git merge-base --is-ancestor HEAD origin/main", { silent: true, ignoreError: true });
+		if (published !== null) return;
+		const tip = run("git rev-parse origin/main", { silent: true }).trim();
+		if (tip !== baseSha) {
+			throw new ReleaseRaceError(`origin/main moved from ${baseSha} to ${tip} while the release was prepared; nothing was pushed.`);
+		}
+		throw error;
+	}
+}
+
+function prepareReleaseRepair() {
 	console.log("\n=== Repairing untagged release ===\n");
 	const version = getVersion();
-	const preflightSha = preflight(version, validatedSha);
+	const preflightSha = preflight(version);
 	const originalReleaseSha = findReleaseCandidateSha(version, false);
 	if (!originalReleaseSha) {
 		throw new Error(`Could not find the original "Release v${version}" commit; refusing release repair.`);
@@ -415,7 +468,7 @@ function prepareReleaseRepair(validatedSha) {
 		removeEmptyUnreleasedSections(version);
 		console.log();
 
-		finishPreparedRelease(`Repair release v${version}`);
+		finishPreparedRelease(`Repair release v${version}`, preflightSha);
 
 		return version;
 	});
@@ -458,46 +511,6 @@ async function waitForWorkflow(sha, workflow, options = {}) {
 	}
 
 	throw new Error(`Timed out after ${Math.round(CI_POLL_TIMEOUT_MS / 60_000)}m waiting for ${workflow} on ${sha}.`);
-}
-
-/**
- * Refuse to prepare a release from a commit whose own main CI is not green. Waits for a run still
- * in progress; a red, cancelled or missing run stops the release with the reason and the fix.
- */
-async function requireGreenMainCi() {
-	run("git fetch origin", { silent: true });
-	const sha = run("git rev-parse HEAD", { silent: true }).trim();
-	if (run(`git merge-base --is-ancestor ${shellQuote(sha)} origin/main`, { silent: true, ignoreError: true }) === null) {
-		throw new Error(`HEAD ${sha} is not on origin/main. Push main and let ${MAIN_CI_WORKFLOW} finish before releasing.`);
-	}
-	const repo = getRepoSlug();
-	console.log(`Requiring a green ${MAIN_CI_WORKFLOW} on ${sha} before any release change...`);
-	const startedAt = Date.now();
-	while (Date.now() - startedAt < CI_POLL_TIMEOUT_MS) {
-		const listing = run(
-			`gh run list -R ${shellQuote(repo)} --workflow=${MAIN_CI_WORKFLOW} --commit ${shellQuote(sha)} --json headSha,status,conclusion,url --limit 20`,
-			{ silent: true, ignoreError: true },
-		);
-		const runs = listing ? JSON.parse(listing) : [];
-		const decision = mainCiGateDecision(runs, sha);
-		if (decision.verdict === "green") {
-			console.log(`  ${MAIN_CI_WORKFLOW} succeeded on ${sha}\n`);
-			return sha;
-		}
-		if (decision.verdict === "red") {
-			const urls = runs.filter((entry) => entry.headSha === sha).map((entry) => entry.url).join("\n  ");
-			throw new Error(
-				`${MAIN_CI_WORKFLOW} on ${sha} concluded "${decision.conclusion}"; main is not releasable.\n  ${urls}\n` +
-					"Fix the failures on main (or rerun a cancelled run), wait for a green run, then release again.",
-			);
-		}
-		if (decision.verdict === "missing" && Date.now() - startedAt > MAIN_CI_REGISTRATION_GRACE_MS) {
-			throw new Error(`No ${MAIN_CI_WORKFLOW} run exists for ${sha}. Push main (or dispatch ${MAIN_CI_WORKFLOW}) first.`);
-		}
-		console.log(`  ${MAIN_CI_WORKFLOW} on ${sha}: ${decision.verdict === "wait" ? decision.status : "not registered yet"}...`);
-		await sleep(CI_POLL_INTERVAL_MS);
-	}
-	throw new Error(`Timed out after ${Math.round(CI_POLL_TIMEOUT_MS / 60_000)}m waiting for ${MAIN_CI_WORKFLOW} on ${sha}.`);
 }
 
 /** Delete remote release dispatch branches whose version is tagged; untagged candidates stay. */
@@ -580,6 +593,20 @@ async function promoteRelease(versionArg) {
 		);
 	}
 
+	// The release commit differs from its parent by metadata only, but the tag's quality gate and provenance
+	// require a full green ci.yml on this exact commit, so it is proven before the tag exists rather than
+	// discovered red after it.
+	const ci = await waitForWorkflow(releaseSha, MAIN_CI_WORKFLOW, {
+		dispatchIfMissing: true,
+		dispatchRef: `release-v${version}`,
+	});
+	if (ci !== "success") {
+		throw new Error(
+			`${MAIN_CI_WORKFLOW} did not succeed for release commit ${releaseSha} (conclusion: ${ci}). ` +
+				"No tag was created. Push the fix to main, then run \"npm run release:repair\" to re-release the corrected tip.",
+		);
+	}
+
 	if (existingLocalTag?.trim()) {
 		ensureTagPushed(tag);
 		pruneAfterRelease();
@@ -614,20 +641,16 @@ try {
 	} else if (RELEASE_TARGET === "prune") {
 		pruneReleaseBranches({ dryRun: process.argv.includes("--dry-run") });
 	} else if (RELEASE_TARGET === "adopt") {
-		const validatedSha = await requireGreenMainCi();
-		await promoteRelease(adoptRelease(validatedSha));
+		await promoteRelease(adoptRelease());
 	} else if (RELEASE_TARGET === "promote") {
 		await promoteRelease();
 	} else if (isRepairTarget) {
-		const validatedSha = await requireGreenMainCi();
-		const version = prepareReleaseRepair(validatedSha);
-		await promoteRelease(version);
+		await promoteRelease(prepareReleaseRepair());
 	} else {
-		const validatedSha = await requireGreenMainCi();
-		const version = prepareRelease(validatedSha);
-		await promoteRelease(version);
+		await promoteRelease(prepareRelease());
 	}
 } catch (error) {
 	console.error(error instanceof Error ? error.message : String(error));
-	process.exit(1);
+	// 75 (EX_TEMPFAIL): the push lost a race and nothing remote changed; release.yml starts over from the new tip.
+	process.exit(error instanceof ReleaseRaceError ? RACE_EXIT_CODE : 1);
 }

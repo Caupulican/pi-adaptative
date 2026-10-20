@@ -6,12 +6,26 @@ export function assertReleaseSourceIdentity(expectedSha, current) {
 	}
 }
 
+/**
+ * `origin/main` moved after the release read it, so the push that would have published the release commits
+ * was refused and nothing remote changed. The release is a pure function of the tree it started from; the
+ * caller discards the unpushed local commits and starts again from the new tip.
+ */
+export class ReleaseRaceError extends Error {
+	constructor(message) {
+		super(message);
+		this.name = "ReleaseRaceError";
+		this.retryable = true;
+	}
+}
+
 /** Execute one synchronous, revision-fenced mutation phase without compensating over a shared worktree. */
 export function executeReleaseMutation(checkpoint, readSource, mutate) {
 	try {
 		assertReleaseSourceIdentity(checkpoint.sha, readSource());
 		return mutate();
 	} catch (error) {
+		if (error instanceof ReleaseRaceError) throw error;
 		try {
 			console.error(`Release ${checkpoint.phase} failed after preflight ${checkpoint.sha}.`);
 			console.error("Files, index and commits are retained; no rollback was attempted.");
