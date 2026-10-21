@@ -1,9 +1,9 @@
 import { expect } from "vitest";
-import { replaceGoal } from "../../../../src/core/goals/goal-lifecycle.ts";
+import { editPersistedGoal, replaceGoal } from "../../../../src/core/goals/goal-lifecycle.ts";
 import { createGoalState } from "../../../../src/core/goals/goal-state.ts";
 import { ObjectiveExecutionInterruptedError } from "../../../../src/core/objective-execution/current-objective-execution.ts";
 import { goalObjectiveId } from "../../../../src/core/orchestration/work-state-projection.ts";
-import { calls, createBarrier, text } from "../scripted-provider.ts";
+import { calls, createBarrier, type ScriptedRequest, text } from "../scripted-provider.ts";
 import { type HarnessWorld, projectPath, type ScriptedJudgment, withDeadline } from "../session-fixture.ts";
 import { latestBatchResults } from "./shared.ts";
 
@@ -23,11 +23,16 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 			"accepted-a",
 			"late-a",
 			"late-a-same-words",
+			...(stage === "preflight" ? (["fresh-edit", "accepted-a-edit", "late-a-edit"] as const) : []),
 			...(stage === "postflight" ? (["before-stage-a", "before-stage-a-same-words"] as const) : []),
 		] as const;
 		for (const ordering of orderings) {
+			const sameIdEdit = ordering === "fresh-edit" || ordering === "accepted-a-edit" || ordering === "late-a-edit";
+			const fresh = ordering === "fresh-b" || ordering === "fresh-edit";
+			const accepted = ordering === "accepted-a" || ordering === "accepted-a-edit";
+			const lateEdit = ordering === "late-a-edit";
 			const providerHeld = ordering === "before-stage-a" || ordering === "before-stage-a-same-words";
-			const late = ordering === "late-a" || ordering === "late-a-same-words" || providerHeld;
+			const late = ordering === "late-a" || ordering === "late-a-same-words" || providerHeld || lateEdit;
 			const label = `${stage === "preflight" ? "goal-stage" : "goal-postflight-stage"}-${ordering}`;
 			const aWords = `Inspect the original ${label} source boundary.`;
 			const bWords =
@@ -97,9 +102,8 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 							observedGoalId = session.getGoalStateSnapshot()?.goalId;
 							expect(observedGoalId).toBe(`${label}-${ordering === "fresh-b" ? "b" : "a"}`);
 							if (stage === "preflight") {
-								expect(projection).toContain(ordering === "fresh-b" ? bWords : aWords);
-								if (aWords !== bWords)
-									expect(projection).not.toContain(ordering === "fresh-b" ? aWords : bWords);
+								expect(projection).toContain(fresh ? bWords : aWords);
+								if (aWords !== bWords) expect(projection).not.toContain(fresh ? aWords : bWords);
 							} else {
 								expect(request.state).toMatchObject({
 									last_action: {
@@ -167,20 +171,24 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 						.submitted,
 				).toBe(true);
 				await withDeadline(world.trace, `${label}: baseline released`, session.waitForForegroundIdle());
-				const replace = (): void => {
-					const result = replaceGoal(
-						{ goalId: `${label}-b`, userGoal: bWords, tokenBudget: 100_000 },
-						new Date().toISOString(),
-					);
+				const changeGoal = (): void => {
+					const result = sameIdEdit
+						? editPersistedGoal(session, { userGoal: bWords })
+						: replaceGoal(
+								{ goalId: `${label}-b`, userGoal: bWords, tokenBudget: 100_000 },
+								new Date().toISOString(),
+							);
 					if (!result.ok) throw new Error(result.error);
-					session.saveGoalStateSnapshot(result.state);
+					if (!sameIdEdit) session.saveGoalStateSnapshot(result.state);
 				};
-				if (ordering === "fresh-b") replace();
+				if (fresh) changeGoal();
 				world.systemOne.enterPhase(`${label}-before-stage`, {});
 				armed = true;
 				const nextAnswer = `The current ${label} boundary remains under inspection.`;
 				const stageAnswer =
-					stage === "preflight" && late ? nextAnswer : `The observed ${label} boundary remains under inspection.`;
+					stage === "preflight" && late && !lateEdit
+						? nextAnswer
+						: `The observed ${label} boundary remains under inspection.`;
 				const requestsBeforeStage = world.provider.requests.length;
 				const warningsBeforeStage = world.warnings.length;
 				if (stage === "postflight")
@@ -188,10 +196,10 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 						"root",
 						calls(`${label}-read`, [{ id: `${label}-read`, name: "read", arguments: { path: readPath } }]),
 					);
-				world.provider.enqueue("root", {
+				const stageReply = {
 					...text(`${label}-stage-answer`, stageAnswer),
 					...(providerHeld ? { gate: release.promise } : {}),
-					check: (request) => {
+					check: (request: ScriptedRequest) => {
 						if (stage === "postflight") {
 							const read = latestBatchResults(request).find((result) => result.toolName === "read");
 							expect(read?.isError, `${label}: real source read succeeds before final reply`).toBe(false);
@@ -209,10 +217,16 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 								world.systemOne.enterPhase(`${label}-held-final-response`, {});
 								reached.release();
 							} else holdStage();
-						} else if (!stageSettled && !late)
+						} else if (!stageSettled && (!late || lateEdit))
 							world.systemOne.enterPhase(`${label}-stage-postflight`, postflight);
 					},
-				});
+				};
+				if (lateEdit)
+					world.provider.enqueueTrack(`${label}-original-response`, "root", () => !stageSettled, {
+						...stageReply,
+						optional: true,
+					});
+				else world.provider.enqueue("root", stageReply);
 				pending = session.prompt(`Inspect the ${label} boundary.`, {
 					internalContextType: "stage-replacement-control",
 					goalExecutionId: session.getGoalStateSnapshot()?.goalId,
@@ -236,10 +250,11 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 					).toHaveLength(providerHeld ? 0 : 1);
 				}
 				const entriesAtHeld = manager.getBranch().length;
-				if (late) replace();
+				const goalBeforeChange = session.getGoalStateSnapshot();
+				if (late) changeGoal();
 				const goalAtRelease = session.getGoalStateSnapshot();
-				// A superseded stage interrupts before any later provider round. Ordinary preflight controls
-				// install postflight from their provider callback; postflight's original answer already persisted.
+				// Distinct-goal supersession interrupts before later provider work. A same-goal edit may
+				// retain its admitted response; that response installs its normal postflight only when reached.
 				if (!providerHeld) world.systemOne.enterPhase(`${label}-released-stage`, {});
 				release.release();
 				const stageOutcome = await withDeadline(world.trace, `${label}: held stage settles`, pending).then(
@@ -251,6 +266,14 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 				);
 				stageSettled = true;
 				await withDeadline(world.trace, `${label}: stage released`, session.waitForForegroundIdle());
+				if (lateEdit) {
+					await withDeadline(
+						world.trace,
+						`${label}: original response producer joins`,
+						world.provider.waitForProducers(),
+					);
+					world.provider.retireOptional(`${label}-original-response`);
+				}
 				const goalAfterStage = session.getGoalStateSnapshot();
 				const stageProviderRequests = world.provider.requests.length - requestsAtHeld;
 				const stageMessages = manager
@@ -267,12 +290,24 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 				if (providerHeld)
 					for (let index = world.warnings.length - 1; index >= warningsBeforeStage; index--)
 						if (world.warnings[index] === unmatchedUsageWarning) world.warnings.splice(index, 1);
-				if (ordering === "accepted-a") replace();
+				if (accepted) changeGoal();
 				const beforeNext = world.provider.requests.length;
 				world.systemOne.enterPhase(
 					`${label}-next-route`,
 					late
-						? judgments.replacement
+						? Object.fromEntries(
+								Object.entries(judgments.replacement).filter(
+									([id]) =>
+										!sameIdEdit ||
+										![
+											"objective_coherent",
+											"ambiguity_severity",
+											"missing_information",
+											"acceptance_complete",
+											"grounding_sufficient",
+										].includes(id),
+								),
+							)
 						: {
 								...judgments.route,
 								...Object.fromEntries(
@@ -284,15 +319,23 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 												"missing_information",
 												"acceptance_complete",
 												"grounding_sufficient",
-											].includes(id) && ordering !== "same-a",
+											].includes(id) &&
+											ordering !== "same-a" &&
+											!sameIdEdit,
 									),
 								),
 							},
 				);
 				// A preflight refusal leaves the potential answer queued for B. Postflight already consumed
 				// its distinct original answer, so B receives its own response after the held judgment settles.
-				if (late && (stage === "postflight" || stageProviderRequests > 0))
-					world.provider.enqueue("root", text(`${label}-next-answer`, nextAnswer));
+				// A same-ID edit retires its independent optional original response before this required one.
+				if (late && (stage === "postflight" || stageProviderRequests > 0 || lateEdit))
+					world.provider.enqueue("root", {
+						...text(`${label}-next-answer`, nextAnswer),
+						check: (request) => {
+							if (lateEdit) expect(JSON.stringify(request.context)).toContain(bWords);
+						},
+					});
 				const next = await withDeadline(
 					world.trace,
 					`${label}: next actual objective route`,
@@ -305,6 +348,7 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 					projection,
 					projectionAtHeld,
 					observedGoalId,
+					goalBeforeChange,
 					goalAtRelease,
 					goalAfterStage,
 					stageOutcome,
@@ -332,12 +376,12 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 					]);
 					expect(unmatchedUsageWarnings, observations).toEqual([unmatchedUsageWarning]);
 				}
-				// Already accepted guidance remains valid. The diagnostic isolates an answer admitted only after its observed goal was replaced.
+				// Already accepted guidance remains valid. Pending guidance must still match the objective it observed.
 				expect(session.objectiveExecutionController?.getLastRoute()?.route, observations).toBe(
 					late ? "implement" : "blocked_external",
 				);
 				expect(session.objectiveExecutionController?.getLastRoute()?.objective_id, observations).toBe(
-					goalObjectiveId(`${label}-${ordering === "same-a" ? "a" : "b"}`),
+					goalObjectiveId(`${label}-${ordering === "same-a" || sameIdEdit ? "a" : "b"}`),
 				);
 				const reasons = session.objectiveExecutionController?.getLastRoute()?.reason_codes ?? [];
 				const blockedReason =
@@ -346,12 +390,38 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 				else expect(reasons, observations).toContain(blockedReason);
 				expect(next.submitted, observations).toBe(late);
 				expect(world.provider.requests.length - beforeNext, observations).toBe(late ? 1 : 0);
-				if (late) {
+				if (late && !lateEdit) {
 					expect(stageError, observations).toBeInstanceOf(ObjectiveExecutionInterruptedError);
 					if (stageError instanceof ObjectiveExecutionInterruptedError)
 						expect(stageError.reason, observations).toBe("goal_replaced");
 					expect(stageProviderRequests, observations).toBe(0);
 					expect(goalAfterStage, observations).toEqual(goalAtRelease);
+					expect(durableReplies(nextAnswer), observations).toHaveLength(1);
+				}
+				if (sameIdEdit) {
+					expect(session.getGoalStateSnapshot(), observations).toMatchObject({
+						goalId: `${label}-a`,
+						userGoal: bWords,
+					});
+				}
+				if (lateEdit) {
+					expect(goalAtRelease?.goalId, observations).toBe(goalBeforeChange?.goalId);
+					expect(goalAtRelease?.userGoal, observations).toBe(bWords);
+					expect(goalBeforeChange?.userGoal, observations).toBe(aWords);
+					expect(goalAtRelease?.progressRevision, observations).toBe(
+						(goalBeforeChange?.progressRevision ?? 0) + 1,
+					);
+					expect([0, 1], observations).toContain(stageProviderRequests);
+					expect(durableReplies(stageAnswer), observations).toHaveLength(stageProviderRequests);
+					if (stageError !== undefined)
+						expect(stageError, observations).toBeInstanceOf(ObjectiveExecutionInterruptedError);
+					expect(goalAfterStage, observations).toMatchObject({
+						goalId: `${label}-a`,
+						userGoal: bWords,
+						status: "active",
+						progressRevision: goalAtRelease?.progressRevision,
+						tokensUsed: (goalAtRelease?.tokensUsed ?? 0) + stageProviderRequests * 24,
+					});
 					expect(durableReplies(nextAnswer), observations).toHaveLength(1);
 				}
 				expect(errors, observations).toEqual([]);
