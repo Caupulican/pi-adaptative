@@ -1346,6 +1346,16 @@ function ordinaryAdmissionEncodedBytes(state: WorkerAgentMailboxState): number {
 	});
 }
 
+function isPendingOrdinaryTask(message: WorkerAgentMessage): boolean {
+	return (
+		message.task?.kind === "agent_turn" &&
+		message.replyToMessageId === undefined &&
+		message.expectReply !== true &&
+		message.deliveredAt === undefined &&
+		message.failedAt === undefined
+	);
+}
+
 /**
  * Bounded durable inbox for a single logical worker agent.
  *
@@ -1579,6 +1589,11 @@ export class WorkerAgentMailbox {
 		return this.pending().filter((message) => message.task !== undefined);
 	}
 
+	/** Cancellation eligibility shared with the durable ordinary-task transition. */
+	pendingOrdinarySteers(): WorkerAgentMessage[] {
+		return this.pending("steer").filter(isPendingOrdinaryTask);
+	}
+
 	acknowledgeDelivered(messageId: string): void {
 		this.markTimestamp(messageId, "deliveredAt");
 	}
@@ -1780,14 +1795,7 @@ export class WorkerAgentMailbox {
 		this.update((state) => {
 			changed = false;
 			const messages = state.messages.map((message) => {
-				if (
-					message.messageId !== normalized ||
-					message.task?.kind !== "agent_turn" ||
-					message.replyToMessageId !== undefined ||
-					message.expectReply === true ||
-					message.deliveredAt !== undefined ||
-					message.failedAt !== undefined
-				) {
+				if (message.messageId !== normalized || !isPendingOrdinaryTask(message)) {
 					return message;
 				}
 				changed = true;

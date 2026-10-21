@@ -28,6 +28,7 @@
 - System One discards a stage judgment when the goal's objective text changes, even if the goal ID stays the same.
 - A clean session shutdown hands settled unfinished worker contexts back to the same parent for resumption.
 - Background tool tasks retain the goal of the execution that started them when the active goal changes.
+- Goal cancellation settles its workers' undelivered ordinary steer messages before terminal publication while preserving reply-bearing messages.
 - A worker's report request quotes each changed file and each command the host recorded as one span. The activity lane now says how a provider admission wait ended (admitted, admitted at its wait budget, refused by the emergency stop, cancelled, not admitted) instead of always "admitted". Model quota exhaustions read the provider admission gate's clock, so the gate's wait for a model's reset ends when the exhaustion expires.
 - A prompt being prepared is written to a side file beside the session file and restored as held after a restart, a goal execution ends exactly when its foreground submission releases, a locked or busy decision-ledger database is retried on the next use instead of failing for the whole session, and the harness gained persistent SQLite faults with snapshot rewind and scripted connection, quota and partial-stream provider replies.
 - Retry, provider-admission and lease-heartbeat waits run on the shared timer port, provider admission reports how each wait ended, and the synchronous lock's final ELOCKED message says how long the thread was blocked.

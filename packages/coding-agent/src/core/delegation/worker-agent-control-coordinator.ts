@@ -84,7 +84,7 @@ import {
 } from "./worker-disposition.ts";
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import { normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
-import { attemptVerification } from "./worker-lane-projection.ts";
+import { attemptVerification, selectedWorkerAttempt } from "./worker-lane-projection.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { isWorkerTaskPrompt } from "./worker-runner.ts";
 import { specialistReleaseSkipReason } from "./worker-specialization-match.ts";
@@ -1497,14 +1497,61 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	/**
+	 * A terminal task can outlive its reusable agent's assignment. Settle only the cancelled
+	 * attempt still selected by both owners, including when terminal publication is replayed.
+	 */
+	settleCancelledWorkerSteers(record: LaneRecord): void {
+		if (record.type !== "worker" || record.status !== "canceled" || !record.attemptId) return;
+		const attemptId = record.attemptId;
+		const currentAgent = (): AgentBindingContract | undefined => {
+			const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
+			const attempt = snapshot.attempts[attemptId];
+			if (
+				attempt?.status !== "cancelled" ||
+				attempt.taskId !== record.laneId ||
+				selectedWorkerAttempt(snapshot, record.laneId)?.attemptId !== attempt.attemptId
+			)
+				return undefined;
+			const agentId = attempt.agentId ?? attempt.dispatch.logicalLaneId;
+			const agent = agentId ? snapshot.agents[agentId] : undefined;
+			if (
+				!agent ||
+				(record.agentId !== undefined && record.agentId !== agent.agentId) ||
+				this.latestAttemptsByAgent(snapshot).get(agent.agentId)?.attemptId !== attempt.attemptId
+			)
+				return undefined;
+			return agent;
+		};
+		const agent = currentAgent();
+		if (!agent || this.getMailbox(agent.agentId).pendingOrdinarySteers().length === 0) return;
+		const settle = () => {
+			const current = currentAgent();
+			if (current)
+				this.deadLetterUndeliveredSteers(
+					current,
+					record.reasonCode ?? "worker_cancelled",
+					() => currentAgent() !== undefined,
+				);
+		};
+		if (this.options.withConversationAdmission) this.options.withConversationAdmission(agent, settle);
+		else settle();
+	}
+
+	/**
 	 * Fail every ordinary steer the cancelled task never received. A steer that carries a reply
 	 * obligation is kept: its reply is owed regardless of the task it was addressed to.
 	 */
-	private deadLetterUndeliveredSteers(agent: AgentBindingContract, reasonCode: string): void {
+	private deadLetterUndeliveredSteers(
+		agent: AgentBindingContract,
+		reasonCode: string,
+		isCurrent?: () => boolean,
+	): void {
 		const mailbox = this.getMailbox(agent.agentId);
 		for (const message of mailbox.pendingTaskBearing()) {
+			if (isCurrent && !isCurrent()) return;
 			if (message.kind !== "steer") continue;
 			if (this.reconcileTaskBearingTranscriptDelivery(agent, message)) continue;
+			if (isCurrent && !isCurrent()) return;
 			mailbox.deadLetterOrdinaryTask(
 				message.messageId,
 				`worker_task_cancelled:${reasonCode}`.slice(0, MAX_BROADCAST_ERROR_CHARS),

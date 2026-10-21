@@ -230,7 +230,11 @@ import {
 	resolveWorkerFleetLimits,
 } from "./worker-fleet-limits.ts";
 import type { WorkerLaneIsolation } from "./worker-lane-isolation.ts";
-import { attemptVerification, NONTERMINAL_WORKER_ATTEMPT_STATUSES } from "./worker-lane-projection.ts";
+import {
+	attemptVerification,
+	NONTERMINAL_WORKER_ATTEMPT_STATUSES,
+	projectWorkerAttemptLaneRecord,
+} from "./worker-lane-projection.ts";
 import { WorkerLeaseHeartbeat } from "./worker-lease-heartbeat.ts";
 import { type PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
 import type { WorkerNotificationCoordinator, WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
@@ -2239,6 +2243,7 @@ export class WorkerDelegationController {
 		const handoffs: WorkerTerminalHandoff[] = [];
 		const directRecords: LaneRecord[] = [];
 		for (const record of records) {
+			this.agentControl.settleCancelledWorkerSteers(record);
 			this.recovery.clearScheduledRetry(record.laneId);
 			const attempt = this.lifecycle.getActiveAttempt(record.laneId);
 			if (attempt && this.publishedTerminalAttemptIds.has(attempt.attemptId)) continue;
@@ -2401,6 +2406,7 @@ export class WorkerDelegationController {
 
 	private publishTerminalRecord(record: LaneRecord): void {
 		if (!isLaneTerminalStatus(record.status)) return;
+		this.agentControl.settleCancelledWorkerSteers(record);
 		this.settleVerifiedSubjectClaim(record);
 		this.retryRaceCancels();
 		this.settleFanoutRace(record);
@@ -5615,6 +5621,15 @@ export class WorkerDelegationController {
 							cleanupErrors,
 						);
 					}
+					// A failed synchronous cancellation publication must remain required cleanup even
+					// when shutdown has already stopped the terminal recovery owner.
+					runRetryableStep("settle cancelled worker steers", () => {
+						const terminal = projectWorkerAttemptLaneRecord(
+							lifecycle.getTaskRuntimeSnapshot(),
+							durableHandle.attemptId,
+						);
+						if (terminal) this.agentControl.settleCancelledWorkerSteers(terminal);
+					});
 					// Failed cleanup leaves resource ownership unresolved. Keep both the local execution
 					// hold and the durable project claim until that ownership can be resolved.
 					if (cleanupErrors.size === 0) {
