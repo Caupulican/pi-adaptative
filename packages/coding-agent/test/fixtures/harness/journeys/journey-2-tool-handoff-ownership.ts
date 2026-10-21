@@ -295,15 +295,16 @@ export async function verifyToolHandoffOwnership(
 			});
 			let explicitBSubmitted: boolean | undefined;
 			if (variant === "replace-b") {
+				// A's terminal is durable evidence; only explicit input may begin work charged to B.
+				expect(automaticRequests, report()).toBe(0);
+				expect(terminalProviderPayloads).toBe(0);
+				expect(diagnostic.terminalAssistantCount).toBe(0);
+				expect(counters(goalAfterTerminal)).toEqual(counters(goalBeforeTerminal));
 				world.systemOne.enterPhase(`${label}-explicit-b`, {
 					...turnJudgments,
 					route: { kind: "choice", choice: "reason", confidence: 0.97 },
 				});
-				if (automaticRequests > 0)
-					world.provider.enqueue(
-						"root",
-						text(`${label}-explicit-b`, "The replacement boundary remains under inspection."),
-					);
+				const beforeExplicitRequests = world.provider.requests.length;
 				explicitBSubmitted = (
 					await withDeadline(
 						world.trace,
@@ -312,6 +313,13 @@ export async function verifyToolHandoffOwnership(
 					)
 				).submitted;
 				await withDeadline(world.trace, `${label}: explicit B idle`, session.waitForForegroundIdle());
+				Object.assign(diagnostic, {
+					explicitBRequests: world.provider.requests.length - beforeExplicitRequests,
+					goalAfterExplicitB: counters(session.getGoalStateSnapshot()),
+				});
+				expect(diagnostic.explicitBRequests).toBe(1);
+				expect(session.getGoalStateSnapshot()?.goalId).toBe(`${label}-b`);
+				expect((session.getGoalStateSnapshot()?.tokensUsed ?? 0) - (goalAfterTerminal?.tokensUsed ?? 0)).toBe(24);
 			}
 			const terminalRecord = record();
 			const resources = session.getResourceSnapshot();
@@ -344,18 +352,24 @@ export async function verifyToolHandoffOwnership(
 					.map(({ sequence, command, cwd, detached }) => ({ sequence, command, cwd, detached })),
 				errors,
 			});
-			// The replacement result is intentionally observed, not classified by a B-tag-only policy.
 			const observations = report();
+			const expectedTaskGoal = `${label}-${variant === "adopt-b" ? "b" : "a"}`;
 			expect(handoffEpoch, observations).toBe(startEpoch);
 			expect(activityBeforeTerminal.busy, observations).toBe(false);
 			expect(originalCalls, observations).toHaveLength(1);
 			expect(handoffStubs, observations).toHaveLength(1);
-			expect(runningRecord, observations).toMatchObject({ taskId, toolCallId: callId, status: "running" });
+			expect(runningRecord, observations).toMatchObject({
+				taskId,
+				toolCallId: callId,
+				status: "running",
+				goalId: expectedTaskGoal,
+			});
 			expect(terminalRecord, observations).toMatchObject({
 				taskId,
 				toolCallId: callId,
 				status: "completed",
 				terminalDelivery: "delivered",
+				goalId: expectedTaskGoal,
 			});
 			expect(terminalRecord?.output, observations).toContain(marker);
 			expect(terminalRecord?.piToolInvocation?.requestId, observations).toBe(
@@ -365,6 +379,9 @@ export async function verifyToolHandoffOwnership(
 			expect(terminalContent, observations).toContain(marker);
 			expect(terminalCount, observations).toBe(1);
 			expect(terminalProviderPayloads, observations).toBe(1);
+			expect(potentialProviderGoal, observations).toBe(
+				`${label}-${variant === "adopt-b" || variant === "replace-b" ? "b" : "a"}`,
+			);
 			expect(diagnostic.terminalMessageCount, observations).toBe(1);
 			expect(resources.backgroundToolTasks.physicalExecutions, observations).toBe(0);
 			expect(world.shell.requests.slice(beforeShell), observations).toHaveLength(1);
@@ -373,7 +390,7 @@ export async function verifyToolHandoffOwnership(
 			else {
 				expect(originalOutcome, observations).toBe("resolved");
 				expect(automaticRequests, observations).toBe(1);
-				expect(terminalRecord?.goalId, observations).toBe(`${label}-${variant === "adopt-b" ? "b" : "a"}`);
+				expect(diagnostic.terminalAssistantCount, observations).toBe(1);
 				expect((goalAfterTerminal?.tokensUsed ?? 0) - (goalBeforeTerminal?.tokensUsed ?? 0), observations).toBe(24);
 			}
 		} catch (error) {

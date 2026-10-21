@@ -21,11 +21,14 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 	const freshGate = createBarrier();
 	const terminalReached = createBarrier();
 	const resumeRefused = createBarrier();
+	const foreignGate = createBarrier();
 	const owner = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: world.createSessionManager(agentDir),
 	});
 	let fresh: Awaited<ReturnType<HarnessWorld["createRootSession"]>> | undefined;
+	let foreign: Awaited<ReturnType<HarnessWorld["createRootSession"]>> | undefined;
+	let foreignClosed = false;
 	let ownerClosed = false;
 	let agentId: string | undefined;
 	let laneId: string | undefined;
@@ -70,18 +73,20 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 		expect(bytes, output).toBeLessThanOrEqual(8_192);
 		return output;
 	};
-	const assertRead = (request: ScriptedRequest): void => {
+	const assertRead = (request: ScriptedRequest, expectedReadId = readId): void => {
 		expect(
 			requestTexts(request).some((value) => value.includes(instructions)),
 			`${label}: original instructions survive`,
 		).toBe(true);
 		const readCalls = request.context.messages.flatMap((message) =>
 			message.role === "assistant"
-				? message.content.filter((part) => part.type === "toolCall" && part.id === readId && part.name === "read")
+				? message.content.filter(
+						(part) => part.type === "toolCall" && part.id === expectedReadId && part.name === "read",
+					)
 				: [],
 		);
 		const readResults = request.context.messages.filter(
-			(message) => message.role === "toolResult" && message.toolCallId === readId,
+			(message) => message.role === "toolResult" && message.toolCallId === expectedReadId,
 		);
 		expect(readCalls, `${label}: original read call survives once`).toHaveLength(1);
 		expect(readResults, `${label}: original read result survives once`).toHaveLength(1);
@@ -143,14 +148,15 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 			},
 		},
 	);
-	world.systemOne.enterPhase(`${label}-start`, {
+	const ownerJudgments = {
 		capabilities_authorized: { kind: "noul", probability: 0.02 },
 		changes_model_pools: { kind: "noul", probability: 0.02 },
 		local_commits_only: { kind: "noul", probability: 0.02 },
 		lifts_delivery_block: { kind: "noul", probability: 0.02 },
 		full_handoff: { kind: "noul", probability: 0.02 },
 		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
-	});
+	} as const;
+	world.systemOne.enterPhase(`${label}-start`, ownerJudgments);
 	try {
 		await withDeadline(
 			world.trace,
@@ -255,6 +261,176 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 			expect(native.mailbox, `${label}: close preserves the exact undelivered intent and acknowledgements`).toEqual(
 				pendingMailbox,
 			);
+			// A different parent may allocate its own matching specialist, never consume this reserved one.
+			const foreignReadId = `${label}-foreign-read`;
+			const foreignReached = createBarrier();
+			const foreignTerminalReached = createBarrier();
+			let foreignAgentId: string | undefined;
+			let foreignLaneId: string | undefined;
+			let foreignReports = 0;
+			let foreignTerminals = 0;
+			foreign = await world.createRootSession("root", {
+				agentDir,
+				sessionManager: world.createSessionManager(agentDir),
+			});
+			const foreignOwner = foreign;
+			world.provider.enqueue(
+				"worker-c",
+				calls(foreignReadId, [{ id: foreignReadId, name: "read", arguments: { path: LIMITS_PATH } }]),
+				{
+					...calls(`${label}-foreign-report`, [
+						{
+							id: `${label}-foreign-report`,
+							name: "submit_report",
+							arguments: { status: "completed", summary: `Observed source: ${sourceBytes.trim()}` },
+						},
+					]),
+					check: (request) => {
+						const contents = JSON.stringify(request.context.messages);
+						observations.foreignRequest = {
+							pendingWordsPresent: contents.includes(pendingWords),
+							pendingControlPresent: contents.includes(`[Worker control ${pendingMessageId}`),
+							readResultCount: request.context.messages.filter(
+								(message) => message.role === "toolResult" && message.toolCallId === foreignReadId,
+							).length,
+						};
+						assertRead(request, foreignReadId);
+						expect(contents, `${label}: foreign context excludes original pending words`).not.toContain(
+							pendingWords,
+						);
+						expect(contents, `${label}: foreign context excludes original control identity`).not.toContain(
+							`[Worker control ${pendingMessageId}`,
+						);
+						foreignReports++;
+						foreignReached.release();
+					},
+					gate: foreignGate.promise,
+				},
+			);
+			world.provider.enqueue(
+				"root",
+				calls(`${label}-foreign-start`, [
+					{
+						id: `${label}-foreign-start`,
+						name: "delegate",
+						arguments: {
+							action: "start",
+							model: { provider: HARNESS_PROVIDER, modelId: "worker-c" },
+							instructions,
+							readOnly: true,
+						},
+					},
+				]),
+				{
+					...text(`${label}-foreign-started`, "The separate source inspection is waiting."),
+					check: (request) => {
+						assertBatchOk(request, `${label}: foreign dispatch`);
+						const details = lastToolResultDetails(foreignOwner.session, "delegate");
+						if (
+							!isPlainRecord(details) ||
+							typeof details.agentId !== "string" ||
+							typeof details.laneId !== "string"
+						)
+							throw new Error(`${label}: missing actual foreign worker identity`);
+						foreignAgentId = details.agentId;
+						foreignLaneId = details.laneId;
+					},
+				},
+			);
+			world.systemOne.enterPhase(`${label}-foreign-start`, ownerJudgments);
+			await withDeadline(
+				world.trace,
+				`${label}: foreign dispatch`,
+				foreignOwner.session.prompt("Start the source inspection."),
+			);
+			await withDeadline(world.trace, `${label}: foreign actual read`, foreignReached.promise);
+			await withDeadline(
+				world.trace,
+				`${label}: foreign dispatch settles`,
+				foreignOwner.session.waitForForegroundIdle(),
+			);
+			if (!foreignAgentId || !foreignLaneId) throw new Error(`${label}: no admitted foreign worker`);
+			const foreignAgent = foreignOwner.session.backgroundLanes.getTaskRuntimeSnapshot()?.agents[foreignAgentId];
+			if (!foreignAgent) throw new Error(`${label}: missing foreign runtime binding`);
+			const foreignBinding = new WorkerConversationStore().getProjectContextBinding({
+				agentDir,
+				resumeContext: foreignAgent.resumeContext,
+				expectedLogicalAgentId: foreignAgent.contextOrigin?.logicalAgentId ?? foreignAgentId,
+			});
+			observations.foreign = {
+				parentSessionId: foreignOwner.sessionManager.getSessionId(),
+				agentId: foreignAgentId,
+				laneId: foreignLaneId,
+				workerSessionId: foreignAgent.resumeContext.sessionId,
+				specializationKey: foreignBinding?.specializationKey,
+				ownership: foreignBinding?.ownership,
+			};
+			expect(foreignOwner.sessionManager.getSessionId()).not.toBe(owner.sessionManager.getSessionId());
+			expect(
+				foreignBinding?.specializationKey,
+				`${label}: foreign dispatch actually matches the specialization`,
+			).toBe(binding.specializationKey);
+			expect(foreignAgent.resumeContext.sessionId).not.toBe(agent.resumeContext.sessionId);
+			expect(foreignBinding?.ownership.state).toBe("busy");
+			expect(foreignBinding?.ownership.claim.generation).toBe(1);
+			expect(foreignBinding?.ownership.claim.parentSessionId).toBe(foreignOwner.sessionManager.getSessionId());
+			world.provider.enqueue("root", {
+				...text(`${label}-foreign-terminal`, "The separate source report is noted."),
+				check: (request) => {
+					expect(
+						requestTexts(request).some(
+							(value) =>
+								value.includes("Background worker terminal handoff") &&
+								value.includes(`- ${foreignLaneId}: succeeded`),
+						),
+					).toBe(true);
+					foreignTerminals++;
+					foreignTerminalReached.release();
+				},
+			});
+			world.systemOne.enterPhase(`${label}-foreign-terminal`, {});
+			foreignGate.release();
+			await withDeadline(world.trace, `${label}: foreign terminal`, foreignTerminalReached.promise);
+			await withDeadline(
+				world.trace,
+				`${label}: foreign parent settles`,
+				foreignOwner.session.waitForForegroundIdle(),
+			);
+			const foreignReady = await withDeadline(
+				world.trace,
+				`${label}: foreign worker cleanup`,
+				foreignOwner.session.backgroundLanes.waitForWorkerAgent(foreignAgentId, 60_000),
+			);
+			expect(foreignReady).toMatchObject({ timedOut: false, status: "idle" });
+			const foreignDisposal = await world.disposeSessionInBody(foreignOwner.session);
+			foreignClosed = true;
+			observations.foreignCleanup = {
+				foreignReports,
+				foreignTerminals,
+				disposal: foreignDisposal && String(foreignDisposal.error),
+			};
+			expect(foreignDisposal).toBeUndefined();
+			expect({ foreignReports, foreignTerminals }).toEqual({ foreignReports: 1, foreignTerminals: 1 });
+			expect(foreignOwner.session.getResourceSnapshot().workers?.ownedProjectClaims).toEqual([]);
+			expect(
+				foreignOwner.sessionManager
+					.getBranch()
+					.filter(
+						(entry) =>
+							entry.type === "custom_message" &&
+							entry.customType === "background-worker-completion" &&
+							JSON.stringify(entry.content).includes(`- ${foreignLaneId}: succeeded`),
+					),
+			).toHaveLength(1);
+			const reserved = new WorkerConversationStore().getProjectContextBinding({
+				agentDir,
+				resumeContext: agent.resumeContext,
+				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agentId,
+			});
+			expect(reserved).toEqual(handoff);
+			expect(
+				readWorkerMailboxRecord(workerMailboxPath(agentDir, owner.sessionManager.getSessionId(), agentId)).mailbox,
+			).toEqual(pendingMailbox);
 		}
 		world.systemOne.enterPhase(`${label}-resume`, {});
 		// Reopening can itself recover; enroll both real response tracks before constructing its SDK owner.
@@ -436,6 +612,11 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 			failures.push(reportError);
 		}
 	} finally {
+		foreignGate.release();
+		if (foreign && !foreignClosed) {
+			const disposal = await world.disposeSessionInBody(foreign.session);
+			if (disposal) failures.push(disposal.error);
+		}
 		freshGate.release();
 		if (!ownerClosed) {
 			const disposal = await world.disposeSessionInBody(owner.session);
