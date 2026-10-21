@@ -5,9 +5,9 @@ import { getDirectoryResourceProfileInfo } from "../../../../src/core/settings/s
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import { createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
-import { icmContinuousSettings, icmWaitForChatIdle, requestTexts } from "./shared.ts";
+import { requestTexts } from "./shared.ts";
 
-/** Journey 3's real ICM history hierarchy, background admission, and foreground input overlap. */
+/** Journey 3's opt-in OKF history hierarchy, background admission, and foreground input overlap. */
 export async function runJourney3SummaryAdmissionPhase(world: HarnessWorld): Promise<void> {
 	const label = "h5-summary-admission";
 	const requestsBefore = world.provider.requests.length;
@@ -18,7 +18,17 @@ export async function runJourney3SummaryAdmissionPhase(world: HarnessWorld): Pro
 		sessionManager: manager,
 		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
 	});
-	world.systemOne.enterPhase(`${label}-seed`, {});
+	// These are the backlog questions reached by the real tool-free seed turns. No capability
+	// authorization is pending, so that separate question must remain undeclared.
+	const intakeJudgments = {
+		carries_0: { kind: "noul", probability: 0.02 },
+		changes_model_pools: { kind: "noul", probability: 0.02 },
+		local_commits_only: { kind: "noul", probability: 0.02 },
+		lifts_delivery_block: { kind: "noul", probability: 0.02 },
+		full_handoff: { kind: "noul", probability: 0.02 },
+		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+	} as const;
+	world.systemOne.enterPhase(`${label}-seed`, intakeJudgments);
 	// Eight real conversation captures exceed the exact-copy ceiling. A ninth capture seals the
 	// first eight at the production leaf limit; no coordinator state or admission owner is mocked.
 	for (let index = 1; index <= 4; index++) {
@@ -32,21 +42,13 @@ export async function runJourney3SummaryAdmissionPhase(world: HarnessWorld): Pro
 	expect(await world.disposeSessionInBody(seed.session)).toBeUndefined();
 
 	const summaryText = "The owner repeatedly asked to keep alpha unchanged. Pi acknowledged each request.";
-	// The continuous-chat merge and history hierarchy have separate production provider requests.
-	// This track serves the chat's 0+8 merge; it is never evidence that history admission ran.
-	world.provider.enqueueTrack(
-		`${label}-continuous-chat`,
-		"worker-c",
-		(request) => JSON.stringify(request.context.messages).includes("Compaction: merge"),
-		{
-			...text(`${label}-continuous-chat`, summaryText),
-			check: (request) => expect(JSON.stringify(request.context.messages)).toContain("Compaction: merge"),
-		},
-	);
 	const created = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: manager,
-		settings: icmContinuousSettings("worker-c", {
+		// ICM intentionally owns only its ContinuousChat tree. This separate history hierarchy
+		// belongs to OKF; the existing enclosing journey keeps its independent ICM coverage.
+		settings: {
+			memorySystem: "okf",
 			autoLearn: { enabled: false },
 			contextPolicy: {
 				memory: {
@@ -61,7 +63,7 @@ export async function runJourney3SummaryAdmissionPhase(world: HarnessWorld): Pro
 					},
 				},
 			},
-		}),
+		},
 	});
 	const session = created.session;
 	const projectId = getDirectoryResourceProfileInfo(HARNESS_PROJECT_CWD, agentDir).hash.toLowerCase();
@@ -72,8 +74,12 @@ export async function runJourney3SummaryAdmissionPhase(world: HarnessWorld): Pro
 	const summaryReached = createBarrier();
 	let hierarchyCalls = 0;
 	try {
-		await icmWaitForChatIdle(world, agentDir, 8);
-		expect(session.getMemorySystem()).toBe("icm");
+		await withDeadline(
+			world.trace,
+			`${label}: opt-in history hierarchy starts`,
+			world.io.waitForMutation(() => session.getTranscriptHistoryStatus().hierarchy?.state === "running"),
+		);
+		expect(session.getMemorySystem()).toBe("okf");
 		expect(session.getTranscriptHistoryStatus().hierarchy?.state).toBe("running");
 		if (world.systemOne.enabled) {
 			world.provider.enqueueTrack(
@@ -90,28 +96,36 @@ export async function runJourney3SummaryAdmissionPhase(world: HarnessWorld): Pro
 					},
 				},
 			);
-			world.systemOne.enterPhase(
-				`${label}-history-judge`,
-				{
-					summary_supported: { kind: "noul", probability: 0.97 },
-					owner_constraints_preserved: { kind: "noul", probability: 0.97 },
-				},
-				{
-					gate: judgeMayAnswer.promise,
-					onAdmit: () => judgeReached.release(),
-					expect: (request) => {
-						expect(request.state).toMatchObject({ level: 0, candidate_summary: summaryText });
-						if (!isRecordObject(request.state) || !Array.isArray(request.state.target)) {
-							throw new Error(`${label}: admission omitted actual captured source`);
-						}
-						expect(request.state.target).toHaveLength(8);
-					},
-				},
-			);
-		} else {
-			world.systemOne.enterPhase(`${label}-history-unbound`, {});
 		}
-		world.provider.enqueue("root", text(`${label}-seal-history`, "Ready to continue."));
+		world.provider.enqueue("root", {
+			...text(`${label}-seal-history`, "Ready to continue."),
+			check: () => {
+				// Prior owner words settle before this real provider request; hold only the subsequent
+				// background summary judgment, never a foreground intake classification.
+				if (world.systemOne.enabled) {
+					world.systemOne.enterPhase(
+						`${label}-history-judge`,
+						{
+							summary_supported: { kind: "noul", probability: 0.97 },
+							owner_constraints_preserved: { kind: "noul", probability: 0.97 },
+						},
+						{
+							gate: judgeMayAnswer.promise,
+							onAdmit: () => judgeReached.release(),
+							expect: (request) => {
+								expect(request.state).toMatchObject({ level: 0, candidate_summary: summaryText });
+								if (!isRecordObject(request.state) || !Array.isArray(request.state.target)) {
+									throw new Error(`${label}: admission omitted actual captured source`);
+								}
+								expect(request.state.target).toHaveLength(8);
+							},
+						},
+					);
+				} else {
+					world.systemOne.enterPhase(`${label}-history-unbound`, {});
+				}
+			},
+		});
 		await withDeadline(world.trace, `${label}: seal history through owner turn`, session.prompt("Continue."));
 		await withDeadline(world.trace, `${label}: sealing turn idle`, session.waitForForegroundIdle());
 		if (world.systemOne.enabled) {
@@ -144,7 +158,7 @@ export async function runJourney3SummaryAdmissionPhase(world: HarnessWorld): Pro
 
 		const ownerInput = "Acknowledge this input while history summary admission is pending.";
 		const ownerReply = "Your input is acknowledged while history admission remains pending.";
-		world.systemOne.enterPhase(`${label}-owner-response`, {});
+		world.systemOne.enterPhase(`${label}-owner-response`, intakeJudgments);
 		world.provider.enqueue("root", {
 			...text(`${label}-owner-response`, ownerReply),
 			check: (request) => expect(requestTexts(request).some((value) => value.includes(ownerInput))).toBe(true),
@@ -209,7 +223,6 @@ export async function runJourney3SummaryAdmissionPhase(world: HarnessWorld): Pro
 			expect(world.systemOne.requests).toEqual([]);
 			expect(session.getTranscriptHistoryStatus().hierarchy?.admission?.judgments.accepted).toBe(0);
 		}
-		await icmWaitForChatIdle(world, agentDir, 12);
 	} finally {
 		judgeMayAnswer.release();
 	}
