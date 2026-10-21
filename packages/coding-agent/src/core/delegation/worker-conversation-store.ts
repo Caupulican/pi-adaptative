@@ -44,6 +44,7 @@ import {
 	acquireSpecialistContext,
 	assertSpecialistContextClaim,
 	createSpecialistContextOwnership,
+	handoffSpecialistContext,
 	normalizeSpecialistContextOwnership,
 	releaseSpecialistContext,
 	type SpecialistContextClaim,
@@ -76,6 +77,7 @@ import {
 } from "./worker-conversation-revision.ts";
 import {
 	bindWorkerMailboxRecord,
+	readWorkerMailboxRecord,
 	type WorkerMailboxContextReference,
 	workerMailboxPath,
 } from "./worker-mailbox-record.ts";
@@ -2182,7 +2184,11 @@ export class WorkerConversationStore {
 						const deletable = withFileLockSync(sessionFile, () => {
 							const { metadata } = readWorkerConversationMetadata(metadataFile);
 							if (metadata.parentSessionId !== parentSessionId) return false;
-							if (metadata.projectContext?.ownership.state === "busy") return false;
+							if (
+								metadata.projectContext?.ownership.state === "busy" ||
+								metadata.projectContext?.ownership.state === "handoff"
+							)
+								return false;
 							if (!existsSync(sessionFile)) return !metadata.projectContext;
 							inspectedBytes += statSync(sessionFile).size;
 							if (inspectedBytes > 32 * 1024 * 1024) return false;
@@ -2279,6 +2285,60 @@ export class WorkerConversationStore {
 					);
 				}),
 			),
+		);
+	}
+
+	/**
+	 * Reserve a closed owner's unfinished context without settling or rewriting its mailbox obligations.
+	 * The controller supplies physical-settlement proof; this adapter owns mailbox/transcript serialization.
+	 */
+	handoffProjectContext(
+		options: OpenWorkerConversationOptions & {
+			parentSessionId: string;
+			agentId: string;
+			assertSettled(): void;
+		},
+	): void {
+		const context = options.resumeContext;
+		const claim = options.projectClaim;
+		if (!context.sessionFile || !claim || claim.parentSessionId !== options.parentSessionId)
+			throw new Error("Worker handoff claim is missing or foreign.");
+		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
+		const mailbox = workerMailboxPath(options.agentDir, options.parentSessionId, options.agentId);
+		withFileLockSync(mailbox, () =>
+			withFileLockSync(sessionFile, () => {
+				const file = workerConversationMetadataFile(sessionFile);
+				const metadata = assertExactConversationMetadata(file, context, options.expectedLogicalAgentId);
+				const record = readWorkerMailboxRecord(mailbox);
+				if (
+					!metadata.projectContext ||
+					!isDeepStrictEqual(record.reference, {
+						parentSessionId: metadata.parentSessionId,
+						logicalAgentId: metadata.logicalAgentId,
+						sessionId: context.sessionId,
+						sessionFile,
+					}) ||
+					!isPlainRecord(record.mailbox) ||
+					record.mailbox.parentSessionId !== options.parentSessionId ||
+					record.mailbox.agentId !== options.agentId
+				)
+					throw new Error("Worker handoff mailbox context is missing or changed.");
+				const conversation = this.openExisting(options, { recoverBirthContextPrefix: false });
+				if (conversation.hasActiveTranscriptCommit()) throw new Error("Worker transcript commit is still active.");
+				assertProjectConversationAccess(
+					metadata,
+					SessionManager.open(sessionFile, options.agentDir, dirname(sessionFile)),
+					claim,
+				);
+				options.assertSettled();
+				writeWorkerConversationMetadata(file, {
+					...metadata,
+					projectContext: {
+						...metadata.projectContext,
+						ownership: handoffSpecialistContext(metadata.projectContext.ownership, claim),
+					},
+				});
+			}),
 		);
 	}
 

@@ -13,7 +13,7 @@ export interface SpecialistContextClaim extends SpecialistContextOwner {
 /** Provider-neutral ownership of a retained context, independent of individual task leases. */
 export interface SpecialistContextOwnership {
 	schemaVersion: 1;
-	state: "busy" | "idle" | "retired";
+	state: "busy" | "idle" | "handoff" | "retired";
 	claim: SpecialistContextClaim;
 }
 
@@ -33,7 +33,7 @@ export function normalizeSpecialistContextOwnership(value: unknown): SpecialistC
 		!isPlainRecord(value) ||
 		Object.keys(value).length !== 3 ||
 		value.schemaVersion !== 1 ||
-		!["busy", "idle", "retired"].includes(String(value.state)) ||
+		!["busy", "idle", "handoff", "retired"].includes(String(value.state)) ||
 		!isPlainRecord(value.claim) ||
 		Object.keys(value.claim).length !== 3 ||
 		typeof value.claim.generation !== "number" ||
@@ -67,13 +67,17 @@ export function assertSpecialistContextClaim(
 		throw new Error("Specialist context claim is stale or unavailable.");
 }
 
-/** A time limit or an unresponsive owner never proves cleanup. Only explicit idle state transfers. */
+/** A timeout never proves cleanup. Transfer requires idle availability or this parent's clean handoff. */
 export function acquireSpecialistContext(
 	ownership: SpecialistContextOwnership,
 	owner: SpecialistContextOwner,
 ): SpecialistContextOwnership {
 	const current = normalizeSpecialistContextOwnership(ownership);
-	if (current.state !== "idle") throw new Error(`Specialist context is ${current.state}.`);
+	if (
+		current.state !== "idle" &&
+		!(current.state === "handoff" && current.claim.parentSessionId === owner.parentSessionId)
+	)
+		throw new Error(`Specialist context is ${current.state}.`);
 	if (current.claim.generation === Number.MAX_SAFE_INTEGER)
 		throw new Error("Specialist context generation is exhausted.");
 	return {
@@ -90,6 +94,15 @@ export function releaseSpecialistContext(
 ): SpecialistContextOwnership {
 	assertSpecialistContextClaim(ownership, claim);
 	return { ...normalizeSpecialistContextOwnership(ownership), state: "idle" };
+}
+
+/** A physically settled owner reserves unfinished work and its obligations for the same parent. */
+export function handoffSpecialistContext(
+	ownership: SpecialistContextOwnership,
+	claim: SpecialistContextClaim,
+): SpecialistContextOwnership {
+	assertSpecialistContextClaim(ownership, claim);
+	return { ...normalizeSpecialistContextOwnership(ownership), state: "handoff" };
 }
 
 export function retireSpecialistContext(

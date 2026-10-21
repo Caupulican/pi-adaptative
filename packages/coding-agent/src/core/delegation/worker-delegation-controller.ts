@@ -1374,10 +1374,62 @@ export class WorkerDelegationController {
 			this.runTeardownStep("dispose worker write reservations", () =>
 				this.writeReservations.disposeRequired((laneId) => !this.hasExecutingWorkerResources(laneId)),
 			);
-			this.runTeardownStep("clear worker conversation cache", () => this.conversations.clearCache());
 			if (this.executingSpecialistIds.size > 0) {
 				this.shutdownErrors.add(new Error("Worker shutdown retained unresolved specialist execution resources."));
 			}
+			// Admission is closed and every owned continuation has joined. Only a successful physical
+			// shutdown may reserve unfinished contexts for this parent; failed cleanup keeps the busy claim.
+			// Retired worktree releases are separate retained artifacts, not suspended execution resources.
+			if (this.shutdownErrors.size === 0 && this.retainedReleases.size === 0) {
+				this.runTeardownStep("handoff suspended worker contexts", () => {
+					const agents = Object.values(this.lifecycle.getTaskRuntimeSnapshot().agents);
+					for (const [sessionId, claim] of [...this.projectClaims]) {
+						if (
+							claim.parentSessionId !== this.deps.getSessionId() ||
+							claim.incarnation !== this.agentControl.getProcessOwnerId()
+						)
+							continue;
+						const bindings = agents.filter((agent) => agent.resumeContext.sessionId === sessionId);
+						const agent = bindings.length === 1 ? bindings[0] : undefined;
+						if (agent?.status !== "suspended") continue;
+						const attempt = this.lifecycle.getLatestAgentAttempt(agent.agentId);
+						const lease = attempt?.lease;
+						if (
+							attempt?.status !== "suspended" ||
+							attempt.agentId !== agent.agentId ||
+							agent.activeAttemptId !== attempt.attemptId ||
+							lease?.ownerId !== claim.incarnation
+						)
+							continue;
+						this.runTeardownStep(`handoff suspended worker ${agent.agentId} context`, () => {
+							this.conversations.handoffProjectContext({
+								agentDir: this.deps.getAgentDir(),
+								resumeContext: agent.resumeContext,
+								expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+								projectClaim: claim,
+								parentSessionId: claim.parentSessionId,
+								agentId: agent.agentId,
+								assertSettled: () => {
+									const current = this.lifecycle.getLatestAgentAttempt(agent.agentId);
+									if (
+										this.projectClaims.get(sessionId) !== claim ||
+										!this.isSpecialistSettled(agent.agentId) ||
+										!isDeepStrictEqual(this.lifecycle.getAgent(agent.agentId), agent) ||
+										current?.attemptId !== attempt.attemptId ||
+										current.status !== "suspended" ||
+										current.lease?.ownerId !== lease.ownerId ||
+										current.lease.leaseId !== lease.leaseId ||
+										current.lease.fencingToken !== lease.fencingToken
+									)
+										throw new Error(`Worker ${agent.agentId} shutdown handoff ownership changed.`);
+								},
+							});
+							this.projectClaims.delete(sessionId);
+						});
+					}
+				});
+			}
+			this.runTeardownStep("clear worker conversation cache", () => this.conversations.clearCache());
 			for (const error of this.shutdownErrors) {
 				this.safeWarn(`Worker shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
