@@ -1,6 +1,8 @@
 import { expect } from "vitest";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { runManagedReloadRecoveryInteraction } from "./journey-1-managed-reload.ts";
+import { runQueuedReloadInteraction } from "./journey-1-queued-reload.ts";
 import { runRuntimeCallbackLifetimeInteraction } from "./journey-1-runtime-callbacks.ts";
 import { ICM_INTAKE_JUDGMENTS } from "./shared.ts";
 
@@ -250,4 +252,6 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 		world.trace.mark("root", `${label}.owner-delivered`);
 	}
 	await runRuntimeCallbackLifetimeInteraction(world);
+	await runQueuedReloadInteraction(world);
+	await runManagedReloadRecoveryInteraction(world);
 }
