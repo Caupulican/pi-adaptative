@@ -1593,6 +1593,8 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	const E12_GATE = "npm run check";
 	const e12Reached = createBarrier();
 	const e12Release = createBarrier();
+	const e12OwnerReached = createBarrier();
+	const e12OwnerRelease = createBarrier();
 	let e12LanePath: string | undefined;
 	const e12ToolText = (toolCallId: string): string => {
 		const entry = created.sessionManager
@@ -1625,32 +1627,13 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			},
 			gate: e12Release.promise,
 		},
-		{ name: "e12-gate-passes", command: E12_GATE, output: "check passed", exitCode: 0 },
 		{
-			name: "e12-persist-gate-first",
+			name: "e12-gate-passes",
 			command: E12_GATE,
 			output: "check passed",
 			exitCode: 0,
-			check: (request) => {
-				e12PersistGates.push({
-					cwd: request.cwd,
-					command: request.command,
-					tip: world.git.refSha("refs/heads/pi/wt/e12"),
-				});
-			},
-		},
-		{
-			name: "e12-persist-gate-second",
-			command: E12_GATE,
-			output: "check passed",
-			exitCode: 0,
-			check: (request) => {
-				e12PersistGates.push({
-					cwd: request.cwd,
-					command: request.command,
-					tip: world.git.refSha("refs/heads/pi/wt/e12"),
-				});
-			},
+			check: () => e12OwnerReached.release(),
+			gate: e12OwnerRelease.promise,
 		},
 	);
 	const integrateVitest = "vitest run test/limits.test.ts";
@@ -1658,25 +1641,6 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		| { readonly mainSha: string | undefined; readonly limits: string; readonly late: string }
 		| undefined;
 	const integrationVitestOutput = ["Test Files  1 passed (1)\n", "Tests  1 passed (1)\n"];
-	world.shell.enqueue({
-		name: "vitest-pass-integration",
-		command: integrateVitest,
-		output: integrationVitestOutput,
-		exitCode: 0,
-		check: () => {
-			integrationAdmission = {
-				mainSha: world.git.refSha("refs/heads/main"),
-				limits: String(world.io.readFileSync(LIMITS_PATH, "utf8")),
-				late: String(world.io.readFileSync(projectPath("src", "late.ts"), "utf8")),
-			};
-			if (world.io.readFileSync(LIMITS_PATH, "utf8") !== "export const MAX_RETRIES = 5;\n") {
-				throw new Error("the run saw a limits value other than 5");
-			}
-			if (world.io.readFileSync(projectPath("src", "late.ts"), "utf8") !== "export const LATE = true;\n") {
-				throw new Error("the run saw no landed late module");
-			}
-		},
-	});
 	const e0Counters: E0Counters = zeroE0Counters();
 	world.systemOne.enterPhase(
 		"integrate",
@@ -1846,13 +1810,116 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		"changed during the gate",
 	);
 	expect(world.git.refSha("refs/heads/main"), "the moved tip leaves main unchanged").toBe(e12MainBefore);
-	// The unchanged tip, gated and passing, lands: main moves to exactly the tip that was tested.
-	await withDeadline(trace, "E12 passing landing", session.prompt("Land the e12 lane once its gate passes."), 120_000);
-	expect(e12ToolText("e12-land-3"), "the passing gate lands the unchanged tip").toContain("LANDED");
+	// The unchanged tip's gate is held while the owner stages an unrelated tracked file in the hub. G6 allows unrelated
+	// hub changes; refreshing the landed checkout must preserve both their bytes and their staged index identity.
+	const ownerNotesBefore = String(world.io.readFileSync(notesPath, "utf8"));
+	const ownerNotesStaged = "E12 owner notes staged during the land gate.\n";
+	const ownerNotesIndex = () => {
+		const status = world.git.run(["status", "--porcelain=v2", "-z"], HARNESS_PROJECT_CWD, {});
+		if (status.code !== 0) throw new Error(`cannot read the owner's index: ${status.stderr}`);
+		return status.stdout.split("\0").find((row) => row.endsWith(" src/notes.md"));
+	};
+	const passingLanding = session.prompt("Land the e12 lane once its gate passes.");
+	let stagedIndex: string | undefined;
+	try {
+		await withDeadline(trace, "E12 passing gate reached before owner staging", e12OwnerReached.promise, 90_000);
+		expect(world.git.refSha("refs/heads/main"), "the held gate has not moved main").toBe(e12MainBefore);
+		world.io.writeFileSync(notesPath, ownerNotesStaged);
+		const staged = world.git.run(["add", "--", "src/notes.md"], HARNESS_PROJECT_CWD, {});
+		if (staged.code !== 0) throw new Error(`the owner's stage failed: ${staged.stderr}`);
+		stagedIndex = ownerNotesIndex();
+		expect(stagedIndex, "the actual hub index records the staged owner edit before gate release").toMatch(/^1 M\./);
+	} finally {
+		e12OwnerRelease.release();
+	}
+	await withDeadline(trace, "E12 passing landing", passingLanding, 120_000);
+	const ownerAfterLand = {
+		bytes: String(world.io.readFileSync(notesPath, "utf8")),
+		index: ownerNotesIndex(),
+		main: world.git.refSha("refs/heads/main"),
+		lane: world.git.refSha("refs/heads/pi/wt/e12"),
+		result: e12ToolText("e12-land-3"),
+	};
+	// Restore only this fixture's controlled owner edit after capturing the physical result, so later notes controls keep
+	// their original baseline. Assertions below use the captured bytes/index, never the restored state.
+	world.io.writeFileSync(notesPath, ownerNotesBefore);
+	const restoredNotes = world.git.run(["add", "--", "src/notes.md"], HARNESS_PROJECT_CWD, {});
+	if (restoredNotes.code !== 0) throw new Error(`the fixture notes restoration failed: ${restoredNotes.stderr}`);
+	expect(
+		ownerAfterLand.bytes,
+		`E12 unrelated staged owner bytes survive land: ${JSON.stringify(ownerAfterLand)}`,
+	).toBe(ownerNotesStaged);
+	expect(ownerAfterLand.index, "the unrelated owner edit keeps its exact staged index identity").toBe(stagedIndex);
+	let successfulLand = ownerAfterLand.result;
+	if (!successfulLand.includes("LANDED")) {
+		expect(ownerAfterLand.main, "a refused owner-edit overlap does not advance main").toBe(e12MainBefore);
+		// Once the controlled owner edit is restored, the ordinary unchanged-tip retry must still land through its gate.
+		world.shell.enqueue({ name: "e12-gate-retry", command: E12_GATE, output: "check passed", exitCode: 0 });
+		world.provider.enqueue(
+			"root",
+			calls("e12-land-retry", [e12LandCall("e12-land-retry-1")]),
+			text("e12-retry-read", "The unchanged tip landed."),
+		);
+		await withDeadline(
+			trace,
+			"E12 ordinary passing retry after owner edit restoration",
+			session.prompt("Land the e12 lane once its gate passes."),
+			120_000,
+		);
+		successfulLand = e12ToolText("e12-land-retry-1");
+	}
+	expect(successfulLand, "the passing gate lands the unchanged tip").toContain("LANDED");
 	expect(world.git.refSha("refs/heads/main"), "main moves to the tested lane tip").toBe(
 		world.git.refSha("refs/heads/pi/wt/e12"),
 	);
 	trace.mark("root", "e12.landed");
+	world.shell.enqueue(
+		{
+			name: "e12-persist-gate-first",
+			command: E12_GATE,
+			output: "check passed",
+			exitCode: 0,
+			check: (request) => {
+				e12PersistGates.push({
+					cwd: request.cwd,
+					command: request.command,
+					tip: world.git.refSha("refs/heads/pi/wt/e12"),
+				});
+			},
+		},
+		{
+			name: "e12-persist-gate-second",
+			command: E12_GATE,
+			output: "check passed",
+			exitCode: 0,
+			check: (request) => {
+				e12PersistGates.push({
+					cwd: request.cwd,
+					command: request.command,
+					tip: world.git.refSha("refs/heads/pi/wt/e12"),
+				});
+			},
+		},
+	);
+	world.shell.enqueue({
+		name: "vitest-pass-integration",
+		command: integrateVitest,
+		output: integrationVitestOutput,
+		exitCode: 0,
+		check: () => {
+			integrationAdmission = {
+				mainSha: world.git.refSha("refs/heads/main"),
+				limits: String(world.io.readFileSync(LIMITS_PATH, "utf8")),
+				late: String(world.io.readFileSync(projectPath("src", "late.ts"), "utf8")),
+			};
+			if (world.io.readFileSync(LIMITS_PATH, "utf8") !== "export const MAX_RETRIES = 5;\n") {
+				throw new Error("the run saw a limits value other than 5");
+			}
+			if (world.io.readFileSync(projectPath("src", "late.ts"), "utf8") !== "export const LATE = true;\n") {
+				throw new Error("the run saw no landed late module");
+			}
+		},
+	});
 	// E12 persistence (post-CAS): the epoch record fails after main has moved, with the gate ON for both landings. The landing
 	// transaction is the only durable record. Each reconcile is checked against the raw persisted epoch, transaction and event
 	// log: the first on its own, the second against the first's bytes. No session getter stands in for persisted state here.

@@ -4,6 +4,7 @@ import { runJourney1ContinuousChatPhase } from "./journey-1-continuous-chat.ts";
 import { runJourney1HostShutdownPhase } from "./journey-1-host-shutdown.ts";
 import { runJourney1IntentAndBranchingPhase } from "./journey-1-intent-and-branching.ts";
 import { runJourney1OwnerLifecyclePhase } from "./journey-1-owner-lifecycle.ts";
+import { verifySessionReplacementTerminalIdentity } from "./journey-1-session-replacement.ts";
 import { runJourney1WorkerBudgetsPhase } from "./journey-1-worker-budgets.ts";
 import { runJourney1WriteReservationsPhase } from "./journey-1-write-reservations.ts";
 /**
@@ -92,6 +93,7 @@ export async function runJourney1(): Promise<void> {
 			await runJourney1WorkerBudgetsPhase(world);
 			await runJourney1WriteReservationsPhase(world);
 			await runJourney1HostShutdownPhase(world);
+			await verifySessionReplacementTerminalIdentity(world);
 		},
 	);
 }

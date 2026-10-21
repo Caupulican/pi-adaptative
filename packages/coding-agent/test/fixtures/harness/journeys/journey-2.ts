@@ -2,6 +2,7 @@ import "../builtin-install.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../../../../src/core/default-tool-surface.ts";
 import { runJourney2BackgroundAndStallPhase } from "./journey-2-background-and-stall.ts";
 import { runJourney2ContinuousChatPhase } from "./journey-2-continuous-chat.ts";
+import { verifyGoalReplacementDuringRoute } from "./journey-2-goal-replacement.ts";
 import { runJourney2OrchestrationPhase } from "./journey-2-orchestration.ts";
 import { runJourney2QueuedRecoveryPhase } from "./journey-2-queued-recovery.ts";
 /**
@@ -63,6 +64,7 @@ export async function runJourney2(): Promise<void> {
 		},
 		async (world) => {
 			await runJourney2OrchestrationPhase(world);
+			await verifyGoalReplacementDuringRoute(world);
 			await runJourney2BackgroundAndStallPhase(world);
 			await runJourney2QueuedRecoveryPhase(world);
 			await runJourney2ContinuousChatPhase(world);
