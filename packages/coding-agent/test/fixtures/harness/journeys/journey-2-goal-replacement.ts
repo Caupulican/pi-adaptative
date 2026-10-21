@@ -6,6 +6,7 @@ import { applyGoalAction } from "../../../../src/core/goals/goal-tool-core.ts";
 import { appendGoalStateSnapshot } from "../../../../src/core/goals/session-goal-state.ts";
 import { createBarrier, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { verifyGoalCancellation } from "./journey-2-goal-cancellation.ts";
 import { verifyGoalRetrievalReplacement } from "./journey-2-goal-retrieval-replacement.ts";
 import { verifyStageReplacement } from "./journey-2-stage-replacement.ts";
 
@@ -76,6 +77,7 @@ export async function verifyGoalReplacementDuringRoute(world: HarnessWorld): Pro
 		replacement: TURN_JUDGMENTS,
 		route: ROUTE_JUDGMENTS,
 	});
+	await verifyGoalCancellation(world, { active: TURN_JUDGMENTS, replacement: REPLACEMENT_TURN_JUDGMENTS });
 }
 
 async function verifyReplacementVariant(
