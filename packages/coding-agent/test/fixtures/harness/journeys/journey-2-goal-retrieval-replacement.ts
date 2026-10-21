@@ -11,6 +11,7 @@ import { type HarnessWorld, SCRIPTED_TRACKS, type ScriptedJudgment, withDeadline
 import { LIMITS_PATH, latestBatchResults } from "./shared.ts";
 
 interface RetrievalJudgments {
+	bootstrap: Readonly<Record<string, ScriptedJudgment>>;
 	first: Readonly<Record<string, ScriptedJudgment>>;
 	later: Readonly<Record<string, ScriptedJudgment>>;
 	route: Readonly<Record<string, ScriptedJudgment>>;
@@ -103,11 +104,25 @@ export async function verifyGoalRetrievalReplacement(
 			content: "source-boundary-context ".repeat(4000),
 			display: false,
 		});
+		// An actual root preflight creates the retrieve directive; the route checkpoint's
+		// missing_work_class catalog does not offer retrieve as a semantic choice.
+		world.systemOne.enterPhase(`${label}-root-bootstrap`, judgments.bootstrap);
+		const bootstrapRequests = world.provider.requests.length;
+		world.provider.enqueue(
+			"root",
+			accountedText(`${label}-root-bootstrap`, "The source boundary remains under inspection."),
+		);
+		const bootstrap = await withDeadline(
+			world.trace,
+			`${label}: real root preflight seeds retrieval`,
+			session.continueGoalOnce({ maxStallTurns: 20 }),
+		);
+		expect(bootstrap.submitted, `${label}: bootstrap reaches the real root`).toBe(true);
+		await withDeadline(world.trace, `${label}: bootstrap root released`, session.waitForForegroundIdle());
+		expect(session.objectiveExecutionController?.getLastRoute()?.route).toBe("implement");
+		expect(world.provider.requests.slice(bootstrapRequests).map((request) => request.model.id)).toEqual(["root"]);
 		for (let index = 0; index < 2; index++) {
-			world.systemOne.enterPhase(`${label}-root-learning-${index}`, {
-				...(index === 0 ? judgments.first : judgments.later),
-				missing_work_class: { kind: "choice", choice: "retrieve", confidence: 0.97 },
-			});
+			world.systemOne.enterPhase(`${label}-root-learning-${index}`, judgments.later);
 			world.provider.enqueue(
 				"root",
 				accountedText(`${label}-root-learning-${index}`, "The source boundary remains under inspection."),
@@ -119,6 +134,10 @@ export async function verifyGoalRetrievalReplacement(
 			);
 			expect(result.submitted, `${label}: unknown worker prefix keeps retrieval on root`).toBe(true);
 			await withDeadline(world.trace, `${label}: learning root released`, session.waitForForegroundIdle());
+			expect(session.objectiveExecutionController?.getLastRoute()).toMatchObject({
+				route: "retrieve",
+				reason_codes: expect.arrayContaining(["system_one_preflight_retrieve"]),
+			});
 		}
 		const ledger = session.getDecisionLedger();
 		expect(
@@ -154,10 +173,7 @@ export async function verifyGoalRetrievalReplacement(
 			`${label}: actual worker request records its fixed prefix`,
 		).toBeGreaterThan(0);
 		const beforeRequests = world.provider.requests.length;
-		world.systemOne.enterPhase(`${label}-held-minion`, {
-			...judgments.route,
-			missing_work_class: { kind: "choice", choice: "retrieve", confidence: 0.97 },
-		});
+		world.systemOne.enterPhase(`${label}-held-minion`, judgments.route);
 		world.provider.enqueue(
 			"worker-a",
 			{
@@ -170,7 +186,10 @@ export async function verifyGoalRetrievalReplacement(
 		pass = session.continueGoalOnce({ maxStallTurns: 20 });
 		await withDeadline(world.trace, `${label}: actual priced minion provider request`, held.promise);
 		const controller = session.objectiveExecutionController;
-		expect(controller?.getLastRoute()?.route).toBe("retrieve");
+		expect(controller?.getLastRoute()).toMatchObject({
+			route: "retrieve",
+			reason_codes: expect.arrayContaining(["system_one_preflight_retrieve"]),
+		});
 		const lastDecision = ledger?.recentRoutes(manager.getSessionId(), goalObjectiveId(a.goalId), 1).at(-1);
 		expect(lastDecision?.executor, `${label}: production price owner selects worker`).toBe("worker");
 		expect(world.provider.requests.slice(beforeRequests).map((request) => request.model.id)).toEqual(["worker-a"]);
@@ -224,10 +243,7 @@ export async function verifyGoalRetrievalReplacement(
 			route: _preflightRoute,
 			...workerRetrievalJudgments
 		} = judgments.first;
-		world.systemOne.enterPhase(`${label}-b-retrieval`, {
-			...workerRetrievalJudgments,
-			missing_work_class: { kind: "choice", choice: "retrieve", confidence: 0.97 },
-		});
+		world.systemOne.enterPhase(`${label}-b-retrieval`, workerRetrievalJudgments);
 		world.provider.enqueue(
 			"worker-a",
 			calls(`${label}-b-read`, [{ id: `${label}-b-read`, name: "read", arguments: { path: LIMITS_PATH } }]),
@@ -243,6 +259,14 @@ export async function verifyGoalRetrievalReplacement(
 			session.continueGoalOnce({ maxStallTurns: 20 }),
 		);
 		expect(bControl.submitted, `${label}: normal retrieval gathers through a worker`).toBe(false);
+		expect(controller?.getLastRoute()).toMatchObject({
+			route: "retrieve",
+			reason_codes: expect.arrayContaining(["system_one_preflight_retrieve"]),
+		});
+		expect(
+			ledger?.recentRoutes(manager.getSessionId(), goalObjectiveId(replacement.state.goalId), 1).at(-1)?.executor,
+			`${label}: current B uses the real worker executor`,
+		).toBe("worker");
 		await withDeadline(world.trace, `${label}: B parent notified`, bParentReached.promise);
 		await withDeadline(world.trace, `${label}: B parent idle`, session.waitForForegroundIdle());
 		world.systemOne.enterPhase(

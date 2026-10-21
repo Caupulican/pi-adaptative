@@ -65,6 +65,7 @@ export async function verifyGoalReplacementDuringRoute(world: HarnessWorld): Pro
 	for (const directReplacement of [false, true]) await verifyReplacementVariant(world, directReplacement);
 	await verifyReplacementVariant(world, true, true);
 	await verifyGoalRetrievalReplacement(world, {
+		bootstrap: TURN_JUDGMENTS,
 		first: REPLACEMENT_TURN_JUDGMENTS,
 		later: CONTINUATION_TURN_JUDGMENTS,
 		route: ROUTE_JUDGMENTS,
