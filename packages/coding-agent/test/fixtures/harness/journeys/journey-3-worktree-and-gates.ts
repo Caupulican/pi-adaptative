@@ -1991,12 +1991,16 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			() => [e12LandCall("e12-checkout-land-1")],
 			(request) => {
 				assertBatchOk(request, "E12 checkout commit");
-				const changed = world.git.run(
-					["diff", "--name-only", "refs/heads/main..refs/heads/pi/wt/e12"],
-					HARNESS_PROJECT_CWD,
-					{},
-				);
-				expect(changed.code, "the committed candidate diff is readable before land").toBe(0);
+				const mainSha = world.git.refSha("refs/heads/main");
+				const laneSha = world.git.refSha("refs/heads/pi/wt/e12");
+				if (mainSha === undefined || laneSha === undefined) {
+					throw new Error(`E12 committed candidate refs are missing: ${JSON.stringify({ mainSha, laneSha })}`);
+				}
+				const changed = world.git.run(["diff", "--name-only", `${mainSha}..${laneSha}`], HARNESS_PROJECT_CWD, {});
+				expect(
+					changed.code,
+					`the committed candidate diff is readable before land: ${JSON.stringify({ mainSha, laneSha, stderr: changed.stderr })}`,
+				).toBe(0);
 				expect(
 					changed.stdout.trim().split(/\r?\n/),
 					"the actual candidate contains the module2 change before gate/refresh",

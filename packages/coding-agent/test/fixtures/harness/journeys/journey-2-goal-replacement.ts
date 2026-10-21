@@ -6,6 +6,7 @@ import { applyGoalAction } from "../../../../src/core/goals/goal-tool-core.ts";
 import { appendGoalStateSnapshot } from "../../../../src/core/goals/session-goal-state.ts";
 import { createBarrier, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { verifyGoalRetrievalReplacement } from "./journey-2-goal-retrieval-replacement.ts";
 
 const ROUTE_JUDGMENTS = {
 	work_remaining: { kind: "noul", probability: 0.97 },
@@ -50,10 +51,24 @@ const {
 	...REPLACEMENT_TURN_JUDGMENTS
 } = TURN_JUDGMENTS;
 
+const {
+	objective_coherent: _objectiveCoherent,
+	ambiguity_severity: _ambiguitySeverity,
+	missing_information: _missingInformation,
+	acceptance_complete: _acceptanceComplete,
+	grounding_sufficient: _groundingSufficient,
+	...CONTINUATION_TURN_JUDGMENTS
+} = REPLACEMENT_TURN_JUDGMENTS;
+
 /** Extend journey 2's goal orchestration across a late route judgment and a real goal replacement. */
 export async function verifyGoalReplacementDuringRoute(world: HarnessWorld): Promise<void> {
 	for (const directReplacement of [false, true]) await verifyReplacementVariant(world, directReplacement);
 	await verifyReplacementVariant(world, true, true);
+	await verifyGoalRetrievalReplacement(world, {
+		first: REPLACEMENT_TURN_JUDGMENTS,
+		later: CONTINUATION_TURN_JUDGMENTS,
+		route: ROUTE_JUDGMENTS,
+	});
 }
 
 async function verifyReplacementVariant(
