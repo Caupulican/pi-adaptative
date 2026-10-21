@@ -2,6 +2,7 @@ import "../builtin-install.ts";
 import { expect } from "vitest";
 import { CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES } from "../../../../src/core/memory/continuous-chat-index.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { runJourney3SummaryAdmissionPhase } from "./journey-3-summary-admission.ts";
 import { runJourney3UnprovenCompletionPhase } from "./journey-3-worktree-and-gates.ts";
 
 /**
@@ -350,6 +351,7 @@ export async function runJourney3ContinuousChatPhase(world: HarnessWorld): Promi
 	});
 	expect(await world.disposeSessionInBody(mRecovered.session)).toBeUndefined();
 	trace.mark("root", "icm.migration-and-recovery");
+	await runJourney3SummaryAdmissionPhase(world);
 
 	// R38 and R38l run last in the journey: the R38l System One phase stays open to the end, so no later session is made
 	// under it.
