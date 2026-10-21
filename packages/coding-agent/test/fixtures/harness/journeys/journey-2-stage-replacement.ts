@@ -95,7 +95,7 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 							);
 							projection = JSON.stringify(request.state);
 							observedGoalId = session.getGoalStateSnapshot()?.goalId;
-							expect(observedGoalId).toBe(`${label}-${ordering === "fresh-b" || providerHeld ? "b" : "a"}`);
+							expect(observedGoalId).toBe(`${label}-${ordering === "fresh-b" ? "b" : "a"}`);
 							if (stage === "preflight") {
 								expect(projection).toContain(ordering === "fresh-b" ? bWords : aWords);
 								if (aWords !== bWords)
@@ -203,8 +203,12 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 									session.getGoalStateSnapshot()?.goalId,
 									`${label}: A owns the admitted final response`,
 								).toBe(`${label}-a`);
-							holdStage();
-							if (providerHeld) reached.release();
+							if (providerHeld) {
+								// The bound A execution now refuses postflight before its transport starts.
+								// Keep the response held without declaring an unreachable postflight pack.
+								world.systemOne.enterPhase(`${label}-held-final-response`, {});
+								reached.release();
+							} else holdStage();
 						} else if (!stageSettled && !late)
 							world.systemOne.enterPhase(`${label}-stage-postflight`, postflight);
 					},
@@ -321,6 +325,8 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 				if (stage === "postflight") expect(durableReplies(stageAnswer), observations).toHaveLength(1);
 				if (providerHeld) {
 					expect(projectionAtHeld, observations).toBe("");
+					expect(projection, observations).toBe("");
+					expect(observedGoalId, observations).toBeUndefined();
 					expect(durableReplies(stageAnswer), observations).toMatchObject([
 						{ message: { usage: { totalTokens: 24 } } },
 					]);
@@ -341,11 +347,9 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 				expect(next.submitted, observations).toBe(late);
 				expect(world.provider.requests.length - beforeNext, observations).toBe(late ? 1 : 0);
 				if (late) {
-					if (!providerHeld) {
-						expect(stageError, observations).toBeInstanceOf(ObjectiveExecutionInterruptedError);
-						if (stageError instanceof ObjectiveExecutionInterruptedError)
-							expect(stageError.reason, observations).toBe("goal_replaced");
-					}
+					expect(stageError, observations).toBeInstanceOf(ObjectiveExecutionInterruptedError);
+					if (stageError instanceof ObjectiveExecutionInterruptedError)
+						expect(stageError.reason, observations).toBe("goal_replaced");
 					expect(stageProviderRequests, observations).toBe(0);
 					expect(goalAfterStage, observations).toEqual(goalAtRelease);
 					expect(durableReplies(nextAnswer), observations).toHaveLength(1);

@@ -711,6 +711,12 @@ export class GoalSessionController {
 		return lease.goalId;
 	}
 
+	/** Post-turn judgments belong to the held execution, including any goal it legitimately adopted. */
+	assertExecutionGoalCurrent(): void {
+		const goalId = this.getExecutionGoalId();
+		if (goalId !== undefined) assertCurrentGoalObjective(goalObjectiveId(goalId), this.getState());
+	}
+
 	/** Charge one observed assistant response exactly once, including routed responses buffered from persistence. */
 	recordExecutionUsage(message: AssistantMessage): void {
 		const lease = this.executionLease;

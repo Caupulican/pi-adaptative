@@ -33,6 +33,7 @@ import type { MemoryController } from "./memory-controller.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { AccountModelCatalog } from "./model-router/account-models.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
+import { ObjectiveExecutionInterruptedError } from "./objective-execution/current-objective-execution.ts";
 import {
 	type OwnerInputEnd,
 	type OwnerInputId,
@@ -59,6 +60,7 @@ import type { OwnerPolicyQueue } from "./system-one/owner-policy-queue.ts";
 import type { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
 import type { ToolProtocolController } from "./tool-protocol-controller.ts";
+import { boundedLine } from "./util/bounded-line.ts";
 import { runReleaseSteps } from "./util/resource-release.ts";
 
 /** An owner interrupt arrived while a submission was still preparing its turn (see `prompt`). */
@@ -118,7 +120,11 @@ export interface PromptSubmissionControllerDeps {
 	readonly localPrefixWarm: Pick<LocalPrefixWarmController, "cancel">;
 	readonly goals: Pick<
 		GoalSessionController,
-		"previewOwnerPromptGoal" | "applyDeliveredOwnerPrompt" | "beginExecution" | "setStartAuthority"
+		| "previewOwnerPromptGoal"
+		| "applyDeliveredOwnerPrompt"
+		| "beginExecution"
+		| "setStartAuthority"
+		| "assertExecutionGoalCurrent"
 	>;
 	readonly costGuard: Pick<CostGuardController, "beginForegroundTurn">;
 	readonly reflection: Pick<ReflectionController, "markOwnerInput" | "queueExternalRootTurnCue">;
@@ -1232,32 +1238,64 @@ export class PromptSubmissionController {
 				// The answer's claims and the objective's postflight read different facts and write nothing
 				// the other reads, so they wait on System One together, not one after the other.
 				const claimCheck = submissionSignal?.aborted ? undefined : this.deps.claimCorrection(turnOpening);
-				// If the postflight below throws first, this check is abandoned: its own failure must not
-				// surface as an unhandled rejection. The await further down still sees it when it is used.
-				claimCheck?.catch(() => undefined);
-				if (this.deps.getSystemOneController() && !submissionSignal?.aborted) {
-					await this.deps.runtimeBuilder.withTaskDirectoryContext(
-						() =>
-							executeSystemOnePostflight(
-								this.deps.getSystemOneController(),
-								this.deps.agent.state.messages.length,
-								submissionSignal?.aborted,
-							),
-						submissionSignal,
-						(error) => {
-							noteTaskDirectoryUnavailable(error);
-						},
-					);
-				} else {
-					await executeSystemOnePostflight(
-						undefined,
-						this.deps.agent.state.messages.length,
-						submissionSignal?.aborted,
-					);
+				// Observe immediately and join before releasing the submission even if postflight is interrupted.
+				const claimSettlement = Promise.allSettled([claimCheck]);
+				let postflightFailure: { readonly error: unknown } | undefined;
+				try {
+					if (this.deps.getSystemOneController() && !submissionSignal?.aborted) {
+						await this.deps.runtimeBuilder.withTaskDirectoryContext(
+							() => {
+								this.deps.goals.assertExecutionGoalCurrent();
+								return executeSystemOnePostflight(
+									this.deps.getSystemOneController(),
+									this.deps.agent.state.messages.length,
+									submissionSignal?.aborted,
+								);
+							},
+							submissionSignal,
+							(error) => {
+								noteTaskDirectoryUnavailable(error);
+							},
+						);
+					} else {
+						await executeSystemOnePostflight(
+							undefined,
+							this.deps.agent.state.messages.length,
+							submissionSignal?.aborted,
+						);
+					}
+				} catch (error) {
+					postflightFailure = { error };
 				}
+				const [claimResult] = await claimSettlement;
+				if (postflightFailure) {
+					const error = postflightFailure.error;
+					if (claimResult.status === "rejected") {
+						if (error instanceof ObjectiveExecutionInterruptedError) {
+							const failures: unknown[] = [claimResult.reason];
+							try {
+								this.deps.emit({
+									type: "warning",
+									message: boundedLine(
+										`Claim verification failed while postflight was interrupted: ${claimResult.reason instanceof Error ? claimResult.reason.message : String(claimResult.reason)}`,
+										1_000,
+									),
+								});
+							} catch (warningError) {
+								failures.push(warningError);
+							}
+							error.cause = new AggregateError(
+								[...(error.cause === undefined ? [] : [error.cause]), ...failures],
+								"Claim verification failed while postflight was interrupted.",
+							);
+						} else throw new AggregateError([error, claimResult.reason], "Post-turn verification failed.");
+					}
+					throw error;
+				}
+				if (claimResult.status === "rejected" && !submissionSignal?.aborted) throw claimResult.reason;
 				// Claims against deliveries: a contradicted claim buys one correction turn, never a loop.
-				if (claimCheck && !submissionSignal?.aborted) {
-					const correction = await claimCheck;
+				if (claimCheck && claimResult.status === "fulfilled" && !submissionSignal?.aborted) {
+					const correction = claimResult.value;
 					if (correction && !submissionSignal?.aborted) {
 						await this.deps.modelRouter.runRoutedTurn(
 							[createCustomMessage("claim_delivery", correction, true, undefined, new Date().toISOString())],

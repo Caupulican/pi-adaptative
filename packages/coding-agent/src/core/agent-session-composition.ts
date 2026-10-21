@@ -45,6 +45,7 @@ import { proveRequirementChecks } from "./goals/prove-requirement-checks.ts";
 import { runRequirementCheck } from "./goals/requirement-checks.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
+import { assertCurrentGoalObjective } from "./objective-execution/current-objective-execution.ts";
 import { createRepoGitDelivery } from "./objective-execution/delivery-proof.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import { LedgerRouteCheckpoints } from "./objective-execution/ledger-route-checkpoints.ts";
@@ -487,9 +488,10 @@ export function attachSessionAdaptiveRuntime(
 										deps.getSystemOneController()!.commitTerminalCompletion(input, options),
 									),
 								validateObjectivePostflight: (objectiveId) =>
-									deps.runtimeBuilder.withTaskDirectoryContext(() =>
-										deps.getSystemOneController()!.validateObjectivePostflight(objectiveId),
-									),
+									deps.runtimeBuilder.withTaskDirectoryContext(() => {
+										assertCurrentGoalObjective(objectiveId, deps.getGoalStateSnapshot());
+										return deps.getSystemOneController()!.validateObjectivePostflight(objectiveId);
+									}),
 								peekControlDirective: () => deps.getSystemOneController()!.peekControlDirective(),
 								consumeControlDirective: (directive) =>
 									deps.getSystemOneController()!.consumeControlDirective(directive),
