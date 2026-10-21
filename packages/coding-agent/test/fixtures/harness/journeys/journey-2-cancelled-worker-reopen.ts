@@ -3,9 +3,11 @@ import { expect } from "vitest";
 import type { WorkerAgentControlPort } from "../../../../src/core/delegation/worker-agent-control.ts";
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "../../../../src/core/delegation/worker-mailbox-record.ts";
+import { isWorkerTaskPrompt } from "../../../../src/core/delegation/worker-runner.ts";
 import { cancelPersistedGoal } from "../../../../src/core/goals/goal-lifecycle.ts";
 import { createGoalState } from "../../../../src/core/goals/goal-state.ts";
 import { applyGoalAction } from "../../../../src/core/goals/goal-tool-core.ts";
+import { sameAgentResumeIdentity } from "../../../../src/core/orchestration/agent-resume.ts";
 import { goalObjectiveId } from "../../../../src/core/orchestration/work-state-projection.ts";
 import { isPlainRecord } from "../../../../src/core/util/value-guards.ts";
 import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
@@ -45,6 +47,7 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 	let resumedWorkerFile: string | undefined;
 	let oldLaneId: string | undefined;
 	let oldTerminalPostsAfterCleanup: number | undefined;
+	let ownerClassificationObserved = false;
 	const failures: unknown[] = [];
 	const observations: Record<string, unknown> = {
 		systemOneEnabled: world.systemOne.enabled,
@@ -61,7 +64,7 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 		const bytes = Buffer.byteLength(serialized, "utf8");
 		const cancelled = isPlainRecord(observations.cancelled) ? observations.cancelled : undefined;
 		const reopened = isPlainRecord(observations.fresh) ? observations.fresh : undefined;
-		const output =
+		let output =
 			bytes <= 8_192
 				? serialized
 				: JSON.stringify({
@@ -81,13 +84,24 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 							disposition: reopened?.disposition,
 							originalAttempt: reopened?.originalAttempt,
 							goalId: reopened?.goalId,
+							originalResumeContext: reopened?.originalResumeContext,
+							freshResumeContext: reopened?.freshResumeContext,
 						},
 						bStartError: observations.bStartError,
+						workerRequest: observations.workerRequest,
+						bCheckpoint: observations.bCheckpoint,
 						oldReports,
 						workerRequestsBeforeB,
 						bProviderRequests,
 						terminalRequests,
 					});
+		if (Buffer.byteLength(output, "utf8") > 8_192) {
+			output = JSON.stringify({
+				reportBytes: bytes,
+				fallbackTruncated: true,
+				fallbackPrefixBase64: Buffer.from(output, "utf8").subarray(0, 2_048).toString("base64"),
+			});
+		}
 		console.info(`CANCELLED_WORKER_REOPEN ${output}`);
 		expect(bytes, output).toBeLessThanOrEqual(8_192);
 		return output;
@@ -113,7 +127,28 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 				results[0].content.some((part) => part.type === "text" && part.text.includes(sourceBytes.trim())),
 		).toBe(true);
 	};
-	world.systemOne.enterPhase(`${label}-start`, {});
+	// The first worker read awaits the parent's delivered Hello classification. Keep one phase
+	// through that real tool boundary instead of replacing its still-pending catalog answers.
+	world.systemOne.enterPhase(
+		`${label}-start`,
+		{
+			changes_model_pools: { kind: "noul", probability: 0.02 },
+			capabilities_authorized: { kind: "noul", probability: 0.02 },
+			local_commits_only: { kind: "noul", probability: 0.02 },
+			lifts_delivery_block: { kind: "noul", probability: 0.02 },
+			full_handoff: { kind: "noul", probability: 0.02 },
+			optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+		},
+		{
+			expect: (request) => {
+				if (!isPlainRecord(request.state) || request.state.user_request !== "Hello.")
+					throw new Error(`${label}: classification did not observe the actual warm owner words`);
+			},
+			onAdmit: () => {
+				ownerClassificationObserved = true;
+			},
+		},
+	);
 	world.provider.enqueue(
 		"worker-c",
 		calls(`${label}-read`, [{ id: `${label}-read`, name: "read", arguments: { path: LIMITS_PATH } }]),
@@ -138,7 +173,6 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 		// Establish this parent's durable identity through its public conversation before relying on reopen.
 		const warmReply = "The limits boundary remains under inspection.";
 		const warmRequestsBefore = world.provider.requests.length;
-		world.systemOne.enterPhase(`${label}-persist-parent`, {});
 		world.provider.enqueue("root", text(`${label}-persist-parent`, warmReply));
 		await withDeadline(world.trace, `${label}: real parent reply`, owner.session.prompt("Hello."));
 		await withDeadline(world.trace, `${label}: parent reply settles`, owner.session.waitForForegroundIdle());
@@ -162,7 +196,6 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 		expect(persistedParent.getSessionId(), report()).toBe(owner.sessionManager.getSessionId());
 		expect(persistedReplies).toHaveLength(1);
 		expect(world.provider.requests.length - warmRequestsBefore).toBe(1);
-		world.systemOne.enterPhase(`${label}-start`, {});
 		const a = createGoalState({
 			goalId: `${label}-a`,
 			userGoal: "Inspect the first limits boundary.",
@@ -177,6 +210,8 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 		if (!started.started) throw new Error(`${label}: initial worker admission refused: ${started.skipReason}`);
 		oldLaneId = started.record.laneId;
 		await withDeadline(world.trace, `${label}: actual read before old report`, oldReached.promise);
+		observations.ownerClassificationObserved = ownerClassificationObserved;
+		expect(ownerClassificationObserved).toBe(world.systemOne.enabled);
 		const runtime = owner.session.backgroundLanes.getTaskRuntimeSnapshot();
 		const attempt = Object.values(runtime?.attempts ?? {}).find((item) => item.taskId === started.record.laneId);
 		const agent = Object.values(runtime?.agents ?? {}).find((item) => item.activeAttemptId === attempt?.attemptId);
@@ -270,6 +305,16 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 						`[Worker control ${queued.messageId}`,
 					),
 					bWordsCount: requestTexts(request).filter((value) => value.includes(bWords)).length,
+					bMessageId,
+					bFrameRoles: request.context.messages
+						.filter((message) => JSON.stringify(message).includes(bWords))
+						.map((message) => message.role),
+					bFrames: requestTexts(request)
+						.filter((value) => value.includes(bWords))
+						.map((value) => ({
+							kind: isWorkerTaskPrompt(value) ? "task" : "control",
+							content: value,
+						})),
 				};
 				freshReached.release();
 			},
@@ -353,6 +398,16 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 			60_000,
 		);
 		const freshRuntime = fresh.session.backgroundLanes.getTaskRuntimeSnapshot();
+		const freshContext = freshRuntime?.agents[agent.agentId]?.resumeContext;
+		const bAttempt = Object.values(freshRuntime?.attempts ?? {}).find((item) => item.taskId === bLaneId);
+		const checkpointId = freshContext?.latestCheckpointId;
+		const checkpoint = checkpointId ? freshRuntime?.checkpoints[checkpointId] : undefined;
+		observations.bCheckpoint = {
+			checkpointId,
+			attemptId: checkpoint?.attemptId,
+			bAttemptId: bAttempt?.attemptId,
+			listedByAttempt: !!checkpointId && !!bAttempt?.checkpointIds.includes(checkpointId),
+		};
 		observations.fresh = {
 			pid: world.processTable.self,
 			parentSessionId: fresh.sessionManager.getSessionId(),
@@ -366,6 +421,8 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 			claims: fresh.session.getResourceSnapshot().workers?.ownedProjectClaims,
 			goalId: fresh.session.getGoalStateSnapshot()?.goalId,
 			goalTokensUsed: fresh.session.getGoalStateSnapshot()?.tokensUsed,
+			originalResumeContext: agent.resumeContext,
+			freshResumeContext: freshContext,
 			warningCount: world.warnings.length - warningsBefore,
 			warnings: world.warnings
 				.slice(warningsBefore)
@@ -402,7 +459,13 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 		expect(bStart?.skipReason, diagnostic).toBeUndefined();
 		if (!bRequest || !bLaneId) throw new Error(`${label}: no actual B request/lane`);
 		assertRead(bRequest);
-		expect(freshRuntime?.agents[agent.agentId]?.resumeContext, diagnostic).toEqual(agent.resumeContext);
+		if (!freshContext) throw new Error(`${label}: no resumed worker context`);
+		expect(sameAgentResumeIdentity(freshContext, agent.resumeContext), diagnostic).toBe(true);
+		expect(freshContext.sessionId, diagnostic).toBe(agent.resumeContext.sessionId);
+		expect(freshContext.sessionFile, diagnostic).toBe(workerFile);
+		if (!bAttempt || !checkpointId) throw new Error(`${label}: missing B attempt/checkpoint identity`);
+		expect(checkpoint?.attemptId, diagnostic).toBe(bAttempt.attemptId);
+		expect(bAttempt.checkpointIds, diagnostic).toContain(checkpointId);
 		expect(freshRuntime?.tasks[bLaneId]?.task.objectiveId, diagnostic).toBe(goalObjectiveId(b.state.goalId));
 		expect(
 			Object.values(freshRuntime?.attempts ?? {}).filter((item) => item.taskId === bLaneId),
@@ -413,10 +476,15 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 		expect(JSON.stringify(bRequest.context.messages), diagnostic).not.toContain(
 			`[Worker control ${queued.messageId}`,
 		);
+		const bFrames = requestTexts(bRequest).filter((value) => value.includes(bWords));
+		expect(bFrames, diagnostic).toHaveLength(2);
+		const bTaskFrames = bFrames.filter(isWorkerTaskPrompt);
+		expect(bTaskFrames, diagnostic).toHaveLength(1);
+		expect(bTaskFrames[0], diagnostic).toContain(`TASK\n${bWords}\nEND TASK\n`);
 		expect(
-			requestTexts(bRequest).filter((value) => value.includes(bWords)),
+			bFrames.filter((value) => !isWorkerTaskPrompt(value)),
 			diagnostic,
-		).toHaveLength(1);
+		).toEqual([`[Worker control ${bMessageId}]\n${bWords}`]);
 		freshGate.release();
 		await withDeadline(world.trace, `${label}: B terminal parent`, terminalReached.promise);
 		await withDeadline(world.trace, `${label}: B parent idle`, fresh.session.waitForForegroundIdle());
@@ -485,15 +553,23 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 	if (failures.length > 1) throw new AggregateError(failures, `${label}: diagnostic and cleanup failed`);
 	if (!resumedWorkerFile) throw new Error(`${label}: no canonical worker transcript`);
 	const transcript = world.openSessionManager(resumedWorkerFile, agentDir).getBranch();
-	expect(
-		transcript.filter(
+	const durableBFrames = transcript
+		.filter(
 			(entry) =>
 				entry.type === "message" &&
 				entry.message.role === "user" &&
 				JSON.stringify(entry.message.content).includes(bWords),
-		),
-	).toHaveLength(1);
-	expect(JSON.stringify(transcript)).toContain(`[Worker control ${bMessageId}`);
+		)
+		.map((entry) => (entry.type === "message" && entry.message.role === "user" ? entry.message.content : undefined));
+	expect(durableBFrames).toHaveLength(2);
+	const durableBTaskFrames = durableBFrames.filter(
+		(content): content is string => typeof content === "string" && isWorkerTaskPrompt(content),
+	);
+	expect(durableBTaskFrames).toHaveLength(1);
+	expect(durableBTaskFrames[0]).toContain(`TASK\n${bWords}\nEND TASK\n`);
+	expect(durableBFrames.filter((content) => typeof content !== "string" || !isWorkerTaskPrompt(content))).toEqual([
+		`[Worker control ${bMessageId}]\n${bWords}`,
+	]);
 	expect(JSON.stringify(transcript)).not.toContain(pendingWords);
 	expect(oldTerminalPostsAfterCleanup).toBeLessThanOrEqual(1);
 	expect({
