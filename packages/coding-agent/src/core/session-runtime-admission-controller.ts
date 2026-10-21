@@ -36,24 +36,24 @@ export class SessionRuntimeAdmissionController {
 		}
 	}
 
-	async admit(
+	admit(
 		kind: string,
 		label: string,
 		signal?: AbortSignal,
 		runtimeLease?: RuntimeWorkLease,
-	): Promise<RuntimeWorkLease> {
+	): RuntimeWorkLease | Promise<RuntimeWorkLease> {
 		const admissionSignal = signal ? AbortSignal.any([signal, this.closed.signal]) : this.closed.signal;
 		admissionSignal.throwIfAborted();
-		const reader =
-			runtimeLease ??
-			(await this.admission.admitWork({
-				kind,
-				label,
-				signal: admissionSignal,
-				report: this.report,
-			}));
+		const immediate = runtimeLease ?? this.admission.tryAdmitWork({ kind, label });
+		if (immediate) return this.validateAdmission(immediate, admissionSignal);
+		return this.admission
+			.admitWork({ kind, label, signal: admissionSignal, report: this.report })
+			.then((reader) => this.validateAdmission(reader, admissionSignal));
+	}
+
+	private validateAdmission(reader: RuntimeWorkLease, signal: AbortSignal): RuntimeWorkLease {
 		try {
-			admissionSignal.throwIfAborted();
+			signal.throwIfAborted();
 			this.admission.assertOwnWorkCurrent(reader);
 			return reader;
 		} catch (error) {
@@ -69,7 +69,8 @@ export class SessionRuntimeAdmissionController {
 		signal?: AbortSignal,
 		borrowed?: RuntimeWorkLease,
 	): Promise<T> {
-		const reader = await this.admit(kind, label, signal, borrowed);
+		const admitted = this.admit(kind, label, signal, borrowed);
+		const reader = admitted instanceof Promise ? await admitted : admitted;
 		try {
 			return await operation(reader);
 		} finally {

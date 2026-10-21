@@ -231,7 +231,10 @@ export class RuntimeGenerationAdmission {
 			return Promise.reject(error);
 		}
 		return candidateCallbacks.exit(async () => {
-			const lease = await this.admitWork({ kind: "extension-message", label: "extension message delivery" });
+			const options = { kind: "extension-message", label: "extension message delivery" };
+			// Void extension APIs still publish ordinary queue effects in their calling stack.
+			// Candidate messages and messages during replacement retain the deferred path.
+			const lease = this.tryAdmitWork(options) ?? (await this.admitWork(options));
 			try {
 				if (origin && origin.attempt.status !== "committed") {
 					throw new RuntimeGenerationAdmissionError(

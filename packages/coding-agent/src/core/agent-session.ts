@@ -4662,13 +4662,13 @@ export class AgentSession {
 		options: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" } | undefined,
 		runtimeLease?: RuntimeWorkLease,
 	): Promise<void> {
-		const reader = await this._runtimeAdmission.admit("custom-message", message.customType, undefined, runtimeLease);
-		try {
-			reader.assertCurrent();
-			await this._sendAdmittedCustomMessage(message, options, reader);
-		} finally {
-			reader.release();
-		}
+		return this._runtimeAdmission.run(
+			"custom-message",
+			message.customType,
+			(reader) => this._sendAdmittedCustomMessage(message, options, reader),
+			undefined,
+			runtimeLease,
+		);
 	}
 
 	private async _sendAdmittedCustomMessage<T>(

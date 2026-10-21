@@ -1412,16 +1412,21 @@ export class WorkerDelegationController {
 		const completion = Promise.withResolvers<T>();
 		this.retainWorkerCompletion(completion.promise);
 		void (async () => {
-			const runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir())
-				.admitWork({
-					kind: "lane",
-					label: "worker admission",
-					signal: signal ? AbortSignal.any([this.workerAbort.signal, signal]) : this.workerAbort.signal,
-				})
-				.catch((error: unknown) => {
-					if (this.workerAbort.signal.aborted || signal?.aborted) return undefined;
-					throw error;
-				});
+			const runtime = runtimeGenerationAdmission(this.deps.getAgentDir());
+			const admissionSignal = signal ? AbortSignal.any([this.workerAbort.signal, signal]) : this.workerAbort.signal;
+			// The scheduler observes durable start/refusal as soon as runOnce returns. Preserve
+			// that prefix when admitted; only an actual replacement may defer preparation.
+			const immediate = admissionSignal.aborted
+				? undefined
+				: runtime.tryAdmitWork({ kind: "lane", label: "worker admission" });
+			const runtimeLease =
+				immediate ??
+				(await runtime
+					.admitWork({ kind: "lane", label: "worker admission", signal: admissionSignal })
+					.catch((error: unknown) => {
+						if (admissionSignal.aborted) return undefined;
+						throw error;
+					}));
 			if (!runtimeLease) return aborted();
 			try {
 				runtimeLease.assertCurrent();
