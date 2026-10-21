@@ -342,6 +342,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 	pi.on("session_shutdown", async () => {
 		close();
 	});
+	pi.onDispose(close);
 
 	const prepare = async (
 		ctx: ExtensionContext,

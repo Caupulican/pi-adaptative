@@ -3,6 +3,7 @@ import { piCollaborationExtension } from "../../../../src/core/collaboration/ext
 import { collaborationLaneId } from "../../../../src/core/collaboration/job-record.ts";
 import { CollaborationJobStore } from "../../../../src/core/collaboration/job-store.ts";
 import { deriveWorkerLaunchProfile } from "../../../../src/core/collaboration/launch-profile.ts";
+import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import { getInFlightWorkUnits } from "../../../../src/core/reload-blockers.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
@@ -26,6 +27,7 @@ export async function runManagedReloadRecoveryInteraction(world: HarnessWorld): 
 		const providerReached = createBarrier();
 		const providerRelease = createBarrier();
 		const errors: string[] = [];
+		const notifications: string[] = [];
 		const warningMark = world.warnings.length;
 		let enabled = ordering === "normal-startup";
 		let backendCalls = 0;
@@ -107,7 +109,14 @@ export async function runManagedReloadRecoveryInteraction(world: HarnessWorld): 
 		let replacing: Promise<void> | undefined;
 		try {
 			await owner.session.bindExtensions({
-				uiContext: world.humanInput.ui,
+				uiContext: {
+					askQuestions: world.humanInput.ui.askQuestions,
+					notify: (message, type) => {
+						const diagnostic = `${label}: ${type ?? "info"}: ${message}`;
+						notifications.push(diagnostic);
+						world.warnings.push(diagnostic);
+					},
+				} as ExtensionUIContext,
 				onError: (error) => errors.push(error.error),
 			});
 			if (ordering === "held-reload") {
@@ -188,6 +197,7 @@ export async function runManagedReloadRecoveryInteraction(world: HarnessWorld): 
 			if (replacing) await withDeadline(world.trace, `${label} replacement joined`, replacing);
 			expect(await world.disposeSessionInBody(owner.session)).toBeUndefined();
 		}
+		expect(notifications, "managed recovery emits no UI failure before or after physical teardown").toEqual([]);
 		expect(world.warnings.slice(warningMark), "saved terminal recovery discloses no lost handoff").toEqual([]);
 		world.trace.mark("root", `${label}.terminal-delivered`);
 	}
