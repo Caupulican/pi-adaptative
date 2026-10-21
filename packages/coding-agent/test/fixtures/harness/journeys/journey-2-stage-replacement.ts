@@ -17,11 +17,23 @@ interface StageJudgments {
 export async function verifyStageReplacement(world: HarnessWorld, judgments: StageJudgments): Promise<void> {
 	if (!world.systemOne.enabled) return;
 	for (const stage of ["preflight", "postflight"] as const) {
-		for (const ordering of ["same-a", "fresh-b", "accepted-a", "late-a", "late-a-same-words"] as const) {
-			const late = ordering === "late-a" || ordering === "late-a-same-words";
+		const orderings = [
+			"same-a",
+			"fresh-b",
+			"accepted-a",
+			"late-a",
+			"late-a-same-words",
+			...(stage === "postflight" ? (["before-stage-a", "before-stage-a-same-words"] as const) : []),
+		] as const;
+		for (const ordering of orderings) {
+			const providerHeld = ordering === "before-stage-a" || ordering === "before-stage-a-same-words";
+			const late = ordering === "late-a" || ordering === "late-a-same-words" || providerHeld;
 			const label = `${stage === "preflight" ? "goal-stage" : "goal-postflight-stage"}-${ordering}`;
 			const aWords = `Inspect the original ${label} source boundary.`;
-			const bWords = ordering === "late-a-same-words" ? aWords : `Inspect the replacement ${label} source boundary.`;
+			const bWords =
+				ordering === "late-a-same-words" || ordering === "before-stage-a-same-words"
+					? aWords
+					: `Inspect the replacement ${label} source boundary.`;
 			const readPath = projectPath("src", `${label}-${ordering === "fresh-b" ? "b" : "a"}.txt`);
 			const readWords = `Evidence line for ${label}-${ordering === "fresh-b" ? "b" : "a"}.`;
 			const manager = world.createSessionManager(`${world.agentDir}-${label}`);
@@ -83,7 +95,7 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 							);
 							projection = JSON.stringify(request.state);
 							observedGoalId = session.getGoalStateSnapshot()?.goalId;
-							expect(observedGoalId).toBe(`${label}-${ordering === "fresh-b" ? "b" : "a"}`);
+							expect(observedGoalId).toBe(`${label}-${ordering === "fresh-b" || providerHeld ? "b" : "a"}`);
 							if (stage === "preflight") {
 								expect(projection).toContain(ordering === "fresh-b" ? bWords : aWords);
 								if (aWords !== bWords)
@@ -170,6 +182,7 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 				const stageAnswer =
 					stage === "preflight" && late ? nextAnswer : `The observed ${label} boundary remains under inspection.`;
 				const requestsBeforeStage = world.provider.requests.length;
+				const warningsBeforeStage = world.warnings.length;
 				if (stage === "postflight")
 					world.provider.enqueue(
 						"root",
@@ -177,6 +190,7 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 					);
 				world.provider.enqueue("root", {
 					...text(`${label}-stage-answer`, stageAnswer),
+					...(providerHeld ? { gate: release.promise } : {}),
 					check: (request) => {
 						if (stage === "postflight") {
 							const read = latestBatchResults(request).find((result) => result.toolName === "read");
@@ -184,7 +198,13 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 							expect(read?.text, `${label}: real source receipt reaches the final provider request`).toContain(
 								readWords,
 							);
+							if (providerHeld)
+								expect(
+									session.getGoalStateSnapshot()?.goalId,
+									`${label}: A owns the admitted final response`,
+								).toBe(`${label}-a`);
 							holdStage();
+							if (providerHeld) reached.release();
 						} else if (!stageSettled && !late)
 							world.systemOne.enterPhase(`${label}-stage-postflight`, postflight);
 					},
@@ -195,8 +215,13 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 					processSlashCommands: false,
 					autoContinueGoal: false,
 				});
-				await withDeadline(world.trace, `${label}: real ${stage} transport held`, reached.promise);
+				await withDeadline(
+					world.trace,
+					`${label}: real ${providerHeld ? "final provider response" : stage} held`,
+					reached.promise,
+				);
 				const requestsAtHeld = world.provider.requests.length;
+				const projectionAtHeld = projection;
 				if (stage === "postflight") {
 					expect(requestsAtHeld - requestsBeforeStage, `${label}: read and final reply precede postflight`).toBe(
 						2,
@@ -204,14 +229,14 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 					expect(
 						durableReplies(stageAnswer),
 						`${label}: original response is durable before replacement`,
-					).toHaveLength(1);
+					).toHaveLength(providerHeld ? 0 : 1);
 				}
 				const entriesAtHeld = manager.getBranch().length;
 				if (late) replace();
 				const goalAtRelease = session.getGoalStateSnapshot();
 				// A superseded stage interrupts before any later provider round. Ordinary preflight controls
 				// install postflight from their provider callback; postflight's original answer already persisted.
-				world.systemOne.enterPhase(`${label}-released-stage`, {});
+				if (!providerHeld) world.systemOne.enterPhase(`${label}-released-stage`, {});
 				release.release();
 				const stageOutcome = await withDeadline(world.trace, `${label}: held stage settles`, pending).then(
 					() => "resolved",
@@ -228,6 +253,16 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 					.getBranch()
 					.slice(entriesAtHeld)
 					.filter((entry) => entry.type === "message");
+				const unmatchedUsageWarning = `Goal usage cursor is no longer resolvable for '${label}-a'; 24 pending tokens and $0.000000 pending spend could not be attributed and were dropped.`;
+				const stageWarnings = world.warnings.slice(warningsBeforeStage);
+				const unmatchedUsageWarnings = providerHeld
+					? stageWarnings.filter((message) => message === unmatchedUsageWarning)
+					: [];
+				// Classify only this exact paid A-response disclosure. Every unrelated warning remains
+				// in the world's strict terminal warning check.
+				if (providerHeld)
+					for (let index = world.warnings.length - 1; index >= warningsBeforeStage; index--)
+						if (world.warnings[index] === unmatchedUsageWarning) world.warnings.splice(index, 1);
 				if (ordering === "accepted-a") replace();
 				const beforeNext = world.provider.requests.length;
 				world.systemOne.enterPhase(
@@ -264,12 +299,16 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 					stage,
 					ordering,
 					projection,
+					projectionAtHeld,
 					observedGoalId,
 					goalAtRelease,
 					goalAfterStage,
 					stageOutcome,
 					stageProviderRequests,
 					stageMessages,
+					stageWarnings,
+					unmatchedUsageWarnings,
+					originalResponse: durableReplies(stageAnswer),
 					nextSubmitted: next.submitted,
 					nextRoute: session.objectiveExecutionController?.getLastRoute(),
 					goalAfterNext: session.getGoalStateSnapshot(),
@@ -280,6 +319,13 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 					expect(stageProviderRequests, observations).toBe(stage === "preflight" ? 1 : 0);
 				}
 				if (stage === "postflight") expect(durableReplies(stageAnswer), observations).toHaveLength(1);
+				if (providerHeld) {
+					expect(projectionAtHeld, observations).toBe("");
+					expect(durableReplies(stageAnswer), observations).toMatchObject([
+						{ message: { usage: { totalTokens: 24 } } },
+					]);
+					expect(unmatchedUsageWarnings, observations).toEqual([unmatchedUsageWarning]);
+				}
 				// Already accepted guidance remains valid. The diagnostic isolates an answer admitted only after its observed goal was replaced.
 				expect(session.objectiveExecutionController?.getLastRoute()?.route, observations).toBe(
 					late ? "implement" : "blocked_external",
@@ -295,9 +341,11 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 				expect(next.submitted, observations).toBe(late);
 				expect(world.provider.requests.length - beforeNext, observations).toBe(late ? 1 : 0);
 				if (late) {
-					expect(stageError, observations).toBeInstanceOf(ObjectiveExecutionInterruptedError);
-					if (stageError instanceof ObjectiveExecutionInterruptedError)
-						expect(stageError.reason, observations).toBe("goal_replaced");
+					if (!providerHeld) {
+						expect(stageError, observations).toBeInstanceOf(ObjectiveExecutionInterruptedError);
+						if (stageError instanceof ObjectiveExecutionInterruptedError)
+							expect(stageError.reason, observations).toBe("goal_replaced");
+					}
 					expect(stageProviderRequests, observations).toBe(0);
 					expect(goalAfterStage, observations).toEqual(goalAtRelease);
 					expect(durableReplies(nextAnswer), observations).toHaveLength(1);
