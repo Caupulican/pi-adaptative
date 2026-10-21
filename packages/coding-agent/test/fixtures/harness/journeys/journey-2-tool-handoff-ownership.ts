@@ -16,7 +16,7 @@ export async function verifyToolHandoffOwnership(
 	world: HarnessWorld,
 	turnJudgments: Readonly<Record<string, ScriptedJudgment>>,
 ): Promise<void> {
-	for (const variant of ["clock-a", "manual-a", "adopt-b", "replace-b"] as const) {
+	for (const variant of ["clock-a", "clock-unbound-a", "manual-a", "adopt-b", "replace-b"] as const) {
 		const label = `tool-handoff-origin-${variant}`;
 		const callId = `${label}-call`;
 		const command = `node ${label}`;
@@ -98,6 +98,7 @@ export async function verifyToolHandoffOwnership(
 			const receipt = record();
 			const essential = {
 				variant,
+				explicitExecutionGoal: variant !== "clock-unbound-a",
 				systemOneEnabled: world.systemOne.enabled,
 				executionLoopMode: session.executionLoopMode,
 				boundary,
@@ -230,7 +231,7 @@ export async function verifyToolHandoffOwnership(
 			pending = session
 				.prompt("Inspect the current source boundary.", {
 					internalContextType: "tool-origin-control",
-					goalExecutionId: `${label}-a`,
+					...(variant === "clock-unbound-a" ? {} : { goalExecutionId: `${label}-a` }),
 					processSlashCommands: false,
 					autoContinueGoal: false,
 				})
