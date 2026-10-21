@@ -443,70 +443,77 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 			world.trace.mark("root", `h2-shutdown-observations:${JSON.stringify(diagnostic)}`);
 			// Collect both candidates before asserting: an early terminal close must not hide
 			// a distinct public reload that enters a new factory after completed disposal.
-			expect(shutdownError, "physical session disposal succeeds").toBeUndefined();
-			expect(heldObservation?.factoryExited, "actual inline candidate stays physically held before shutdown").toBe(
-				false,
-			);
-			expect(heldObservation?.entries, "waiting owner input has no durable effect behind the factory").toBe(
-				entriesAtShutdown,
-			);
-			expect(heldObservation?.requests, "held candidate starts no owner provider request").toEqual(
-				requestsAtShutdown,
-			);
-			expect(closeRequested, "shutdown entered the real foreground close state").toBe(true);
-			expect(inputError, "the pending owner intent is refused by shutdown").toBeInstanceOf(Error);
-			world.trace.claimRejection(inputError, "Runtime admission ended aborted: prompt submission");
-			expect(inputRejections, "the pending owner promise rejects exactly once").toBe(1);
-			expect(
-				orderAfterJoined
-					.slice(orderAfterJoined.indexOf("close-terminal") + 1)
-					.filter(
-						(event) =>
-							event.startsWith("factory-") &&
-							(event.endsWith("-exited") || event.endsWith("-session-start") || event.endsWith("-disposed")),
-					),
-				"no physical factory work, lifecycle publication or resource release continues after terminal close",
-			).toEqual([]);
-			expect(
-				atClose?.disposedFactories.sort((a, b) => a - b),
-				"terminal close has physically released every constructed generation resource",
-			).toEqual(Array.from({ length: atClose?.factoryCalls ?? 0 }, (_, index) => index + 1));
-			expect(atClose?.entries, "no durable work lands after physical terminal close").toBe(afterJoined.entries);
-			expect(atClose?.factoryCalls, "no factory begins after physical terminal close").toBe(
-				afterJoined.factoryCalls,
-			);
-			expect(
-				owner.sessionManager
-					.getEntries()
-					.filter(
-						(entry) =>
-							entry.type === "message" &&
-							entry.message.role === "user" &&
-							JSON.stringify(entry.message.content).includes(shutdownWords),
-					),
-				"shutdown never persists the refused owner input",
-			).toEqual([]);
-			expect(world.provider.reached, "shutdown starts no provider request for pending owner input").toEqual(
-				requestsAtShutdown,
-			);
-			expect(closedReloadError, "public reload refuses a physically disposed session").toBeInstanceOf(Error);
-			expect(closedSetterError, "public resource mutation refuses a physically disposed session").toBeInstanceOf(
-				Error,
-			);
-			expect(toolsAfterClosedSetter, "closed resource mutation refuses before changing live tools").toEqual(
-				toolsBeforeClosedSetter,
-			);
-			expect(factoryCalls, "reload after terminal disposal never enters a fresh extension factory").toBe(
-				factoriesBeforeClosedReload,
-			);
-			expect(JSON.stringify(owner.sessionManager.getEntries()), "closed reload has no durable effects").toBe(
-				afterJoined.entries,
-			);
-			expect(
-				[...disposedFactories].sort((a, b) => a - b),
-				"every constructed generation releases its resource exactly once",
-			).toEqual(Array.from({ length: factoryCalls }, (_, index) => index + 1));
-			expect(errors, "shutdown and closed reload disclose no unclassified extension errors").toEqual([]);
+			try {
+				expect(shutdownError, "physical session disposal succeeds").toBeUndefined();
+				expect(
+					heldObservation?.factoryExited,
+					"actual inline candidate stays physically held before shutdown",
+				).toBe(false);
+				expect(heldObservation?.entries, "waiting owner input has no durable effect behind the factory").toBe(
+					entriesAtShutdown,
+				);
+				expect(heldObservation?.requests, "held candidate starts no owner provider request").toEqual(
+					requestsAtShutdown,
+				);
+				expect(closeRequested, "shutdown entered the real foreground close state").toBe(true);
+				expect(inputError, "the pending owner intent is refused by shutdown").toBeInstanceOf(Error);
+				world.trace.claimRejection(inputError, "Runtime admission ended aborted: prompt submission");
+				expect(inputRejections, "the pending owner promise rejects exactly once").toBe(1);
+				expect(
+					orderAfterJoined
+						.slice(orderAfterJoined.indexOf("close-terminal") + 1)
+						.filter(
+							(event) =>
+								event.startsWith("factory-") &&
+								(event.endsWith("-exited") || event.endsWith("-session-start") || event.endsWith("-disposed")),
+						),
+					"no physical factory work, lifecycle publication or resource release continues after terminal close",
+				).toEqual([]);
+				expect(
+					atClose?.disposedFactories.sort((a, b) => a - b),
+					"terminal close has physically released every constructed generation resource",
+				).toEqual(Array.from({ length: atClose?.factoryCalls ?? 0 }, (_, index) => index + 1));
+				expect(atClose?.entries, "no durable work lands after physical terminal close").toBe(afterJoined.entries);
+				expect(atClose?.factoryCalls, "no factory begins after physical terminal close").toBe(
+					afterJoined.factoryCalls,
+				);
+				expect(
+					owner.sessionManager
+						.getEntries()
+						.filter(
+							(entry) =>
+								entry.type === "message" &&
+								entry.message.role === "user" &&
+								JSON.stringify(entry.message.content).includes(shutdownWords),
+						),
+					"shutdown never persists the refused owner input",
+				).toEqual([]);
+				expect(world.provider.reached, "shutdown starts no provider request for pending owner input").toEqual(
+					requestsAtShutdown,
+				);
+				expect(closedReloadError, "public reload refuses a physically disposed session").toBeInstanceOf(Error);
+				expect(closedSetterError, "public resource mutation refuses a physically disposed session").toBeInstanceOf(
+					Error,
+				);
+				expect(toolsAfterClosedSetter, "closed resource mutation refuses before changing live tools").toEqual(
+					toolsBeforeClosedSetter,
+				);
+				expect(factoryCalls, "reload after terminal disposal never enters a fresh extension factory").toBe(
+					factoriesBeforeClosedReload,
+				);
+				expect(JSON.stringify(owner.sessionManager.getEntries()), "closed reload has no durable effects").toBe(
+					afterJoined.entries,
+				);
+				expect(
+					[...disposedFactories].sort((a, b) => a - b),
+					"every constructed generation releases its resource exactly once",
+				).toEqual(Array.from({ length: factoryCalls }, (_, index) => index + 1));
+				expect(errors, "shutdown and closed reload disclose no unclassified extension errors").toEqual([]);
+			} catch (error: unknown) {
+				throw new Error(`H2 shutdown invariant failed; observations=${JSON.stringify(diagnostic)}`, {
+					cause: error,
+				});
+			}
 		}
 		unsubscribe();
 		expect(
