@@ -14,6 +14,7 @@ import { goalObjectiveId } from "../../../../src/core/orchestration/work-state-p
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { verifyEvaluationOccupancy } from "./journey-2-evaluation-occupancy.ts";
 
 /**
  * The real proper-lockfile runs its exclusion and lease logic; only its filesystem is redirected to the
@@ -740,6 +741,7 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 	await verifyGoalWorkerDeadlineAndQuietHandoff(world);
 	await verifyGoalAutoContinueWake(world);
 	await verifyWorkerLeaseRenewalFailure(world);
+	await verifyEvaluationOccupancy(world);
 }
 
 /**
