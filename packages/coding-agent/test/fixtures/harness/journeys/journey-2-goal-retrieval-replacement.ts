@@ -31,12 +31,15 @@ export async function verifyGoalRetrievalReplacement(
 	const agentDir = `${world.agentDir}-${label}`;
 	const manager = world.createSessionManager(agentDir);
 	const registry = ModelRegistry.inMemory(world.authStorage);
+	const credential = world.authStorage.get(HARNESS_PROVIDER);
+	if (credential?.type !== "api_key") throw new Error(`${label}: scripted provider API credential missing`);
 	const models = SCRIPTED_TRACKS.map((id) => ({
 		...world.provider.model(id),
 		...(id === "root" ? { cost: { input: 1, output: 0, cacheRead: 1, cacheWrite: 1 } } : {}),
 	}));
 	registry.registerProvider(HARNESS_PROVIDER, {
 		api: HARNESS_API,
+		apiKey: credential.key,
 		baseUrl: world.provider.model("root").baseUrl,
 		models: models.map(({ id, name, reasoning, input, cost, contextWindow, maxTokens }) => ({
 			id,
