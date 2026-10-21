@@ -104,6 +104,7 @@ export interface PromptSubmissionControllerDeps {
 		ForegroundRecoveryController,
 		| "tryAcquireSubmission"
 		| "releaseSubmission"
+		| "ownsSubmission"
 		| "hasLiveConsumer"
 		| "acquireSubmissionOrJoinLiveConsumer"
 		| "bindSubmissionSignal"
@@ -541,22 +542,37 @@ export class PromptSubmissionController {
 			failure = { error };
 			throw error;
 		} finally {
-			prepared?.();
-			// Every exit that did not admit or deliver its input (cancelled, handled, a command, an error, a turn that ended
-			// before persisting it) ends that input here, visibly: a queued one is withdrawn while pending, or held when its own
-			// turn took it and never delivered it; any other ends refused or cancelled, and its words are released with it.
-			this.endSubmissionInput(lifecycle, this.submissionEnd(signal.aborted, failure, lifecycle.handled));
-			if (this.submissionAbort === submissionAbort) this.submissionAbort = undefined;
-			if (submission.lease) {
-				if (this.foregroundPromptLeaseValue === submission.lease) this.foregroundPromptLeaseValue = undefined;
-				this.deps.foregroundRecovery.releaseSubmission(submission.lease);
-			}
-			// Input admitted to the agent's queue waits for a run to drain it. When this submission leaves no live
-			// consumer behind (its preparation ended without a run), that input is held rather than stranded.
-			if (!this.deps.foregroundRecovery.hasLiveConsumer && this.deps.agent.hasQueuedMessages()) {
-				this.deps.holdUndeliveredQueue();
-			}
-			giveVerdict(false, lifecycle.input?.ended);
+			runReleaseSteps(
+				[
+					() => prepared?.(),
+					// Every undelivered input ends visibly; a queued input its own turn took is held instead of lost.
+					() => this.endSubmissionInput(lifecycle, this.submissionEnd(signal.aborted, failure, lifecycle.handled)),
+					() => {
+						if (this.submissionAbort === submissionAbort) this.submissionAbort = undefined;
+					},
+					() => {
+						// Only this foreground owner may hold its stranded queue, before release publishes availability.
+						// Release can synchronously hand input to a new run that has not become a live consumer yet.
+						if (
+							submission.lease &&
+							this.deps.foregroundRecovery.ownsSubmission(submission.lease) &&
+							!this.deps.foregroundRecovery.hasLiveConsumer &&
+							this.deps.agent.hasQueuedMessages()
+						)
+							this.deps.holdUndeliveredQueue();
+					},
+					() => {
+						if (submission.lease) {
+							if (this.foregroundPromptLeaseValue === submission.lease)
+								this.foregroundPromptLeaseValue = undefined;
+							this.deps.foregroundRecovery.releaseSubmission(submission.lease);
+						}
+					},
+					() => giveVerdict(false, lifecycle.input?.ended),
+				],
+				"Prompt submission cleanup failed.",
+				failure,
+			);
 		}
 		// Started after the lease is released, never before: the reflection turn is an ordinary
 		// submission and would deadlock against the lease this one still holds inside the try above.
