@@ -4,6 +4,7 @@ import { createGoalState } from "../../../../src/core/goals/goal-state.ts";
 import { applyGoalAction } from "../../../../src/core/goals/goal-tool-core.ts";
 import { text } from "../scripted-provider.ts";
 import { type HarnessWorld, type ScriptedJudgment, withDeadline } from "../session-fixture.ts";
+import { verifyCancelledWorkerCleanReopen } from "./journey-2-cancelled-worker-reopen.ts";
 
 /** Cancellation must dominate an earlier requirement's recovery advice in a fresh idle pass. */
 export async function verifyGoalCancellation(
@@ -202,4 +203,5 @@ export async function verifyGoalCancellation(
 	if (failures.length === 1) throw failures[0];
 	if (failures.length > 1) throw new AggregateError(failures, `${label}: invariant and cleanup failures`);
 	world.trace.mark("root", label);
+	await verifyCancelledWorkerCleanReopen(world);
 }
