@@ -1138,30 +1138,25 @@ export class PromptSubmissionController {
 			return;
 		}
 
-		// Commit consumption of the next-turn messages only now: after every fallible preflight hook has
-		// succeeded AND after the cancellation point above, so a turn that never runs never consumes them.
-		// Everything between the last hook and here is synchronous and infallible, which is what lets the
-		// commit sit this late without ever landing for a turn a hook rejected. Messages added while the
-		// hooks were running sit past `pendingNextTurnCount` and remain queued for the following turn.
-		this.deps.pendingNextTurnMessages.splice(0, pendingNextTurnCount);
-
-		preflightResult?.(true);
-		// The turn's goal execution and start authority belong to this submission: both end when it releases the
-		// foreground (`runPromptSubmission`), whatever the run's outcome, retries and stranded rounds included.
-		this.deps.goals.beginExecution(admittedGoalId, {
-			adoptNewGoal: goalToolStartAuthority !== undefined,
-			provisionalTokenBudget: goalToolStartAuthority?.tokenBudget,
-			routedPrompt:
-				options?.internalContextType === GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE &&
-				promptMessage.role === "custom" &&
-				typeof promptMessage.content === "string" &&
-				promptMessage.content.startsWith(OBJECTIVE_ROUTE_PROMPT_PREFIX)
-					? { content: promptMessage.content, timestamp: promptMessage.timestamp }
-					: undefined,
-		});
-		this.deps.goals.setStartAuthority(goalToolStartAuthority);
 		let submissionFailure: { readonly error: unknown } | undefined;
 		try {
+			// The captured goal must still own this turn after the awaited hooks, before context is consumed
+			// or acceptance is reported. Its execution ends with the foreground submission on every outcome.
+			this.deps.goals.beginExecution(admittedGoalId, {
+				adoptNewGoal: goalToolStartAuthority !== undefined,
+				provisionalTokenBudget: goalToolStartAuthority?.tokenBudget,
+				routedPrompt:
+					options?.internalContextType === GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE &&
+					promptMessage.role === "custom" &&
+					typeof promptMessage.content === "string" &&
+					promptMessage.content.startsWith(OBJECTIVE_ROUTE_PROMPT_PREFIX)
+						? { content: promptMessage.content, timestamp: promptMessage.timestamp }
+						: undefined,
+			});
+			this.deps.goals.setStartAuthority(goalToolStartAuthority);
+			// Messages added while hooks ran remain past this captured count for the following turn.
+			this.deps.pendingNextTurnMessages.splice(0, pendingNextTurnCount);
+			preflightResult?.(true);
 			this.deps.toolProtocol.resetTurnState();
 			let taskDirectoryUnavailableNoted = false;
 			const noteTaskDirectoryUnavailable = (error: unknown): void => {

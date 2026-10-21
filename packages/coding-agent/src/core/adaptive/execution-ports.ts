@@ -693,6 +693,7 @@ export class RealWorkerDispatcher {
 
 	async dispatch(route: ObjectiveRoute, _signal?: AbortSignal, binding?: unknown): Promise<void> {
 		await this.session.runWorkerDelegationOnce({
+			objectiveId: route.objective_id,
 			instructions: this.withOwnerRules(
 				`Execute objective route ${(route as { action?: string }).action ?? route.route}`,
 			),
@@ -702,6 +703,7 @@ export class RealWorkerDispatcher {
 
 	async continueWorker(route: ObjectiveRoute, _signal?: AbortSignal, binding?: unknown): Promise<void> {
 		await this.session.runWorkerDelegationOnce({
+			objectiveId: route.objective_id,
 			instructions: this.withOwnerRules(
 				`Continue worker for route ${(route as { action?: string }).action ?? route.route}`,
 			),
@@ -711,6 +713,7 @@ export class RealWorkerDispatcher {
 
 	async dispatchEscalated(route: ObjectiveRoute, _signal?: AbortSignal, binding?: unknown): Promise<void> {
 		await this.session.runWorkerDelegationOnce({
+			objectiveId: route.objective_id,
 			instructions: this.withOwnerRules(
 				`Execute escalated route ${(route as { action?: string }).action ?? route.route}`,
 			),
@@ -719,6 +722,7 @@ export class RealWorkerDispatcher {
 	}
 
 	async dispatchSpecialist(input: {
+		objectiveId: string;
 		specialist: MaterializedSpecialist;
 		taskId: string;
 		attemptId?: string;
@@ -728,6 +732,7 @@ export class RealWorkerDispatcher {
 		signal?: AbortSignal;
 	}): Promise<WorkerResultContract> {
 		const outcome = await this.session.runWorkerDelegationOnce({
+			objectiveId: input.objectiveId,
 			instructions: this.withOwnerRules(input.specialist.spec.mission),
 			profileId: input.specialist.profileId,
 			expertBinding: input.specialist.expert,

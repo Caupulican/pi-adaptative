@@ -32,8 +32,14 @@ export interface SessionWorkStateProjection {
 	runningToolTaskIds: readonly string[];
 }
 
+const GOAL_OBJECTIVE_PREFIX = "goal:";
+
 export function goalObjectiveId(goalId: string): string {
-	return `goal:${goalId}`;
+	return `${GOAL_OBJECTIVE_PREFIX}${goalId}`;
+}
+
+export function isGoalObjectiveId(objectiveId: string): boolean {
+	return objectiveId.startsWith(GOAL_OBJECTIVE_PREFIX);
 }
 
 export function projectGoalObjective(goal: GoalState): GoalObjectiveProjection {

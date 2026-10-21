@@ -63,6 +63,10 @@ import {
 } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
+import {
+	assertCurrentGoalObjective,
+	ObjectiveExecutionInterruptedError,
+} from "../objective-execution/current-objective-execution.ts";
 import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
 import { sharesRepository } from "../objective-execution/repo-delivery-fingerprint.ts";
 import type { RepositoryMutationObserver } from "../objective-execution/repository-mutation-observer.ts";
@@ -2998,7 +3002,7 @@ export class WorkerDelegationController {
 				attempt: lifecycle.getActiveAttempt(existingRecord.laneId),
 			};
 		}
-		const goal = this.deps.getGoalStateSnapshot();
+		const goal = this.goalForWorkerRequest(request);
 		const mode = this.workerContextForkMode(request, admission.executionContract);
 		const birth = this.workerBirth(request, mode);
 		const project = this.projectSelections.get(request);
@@ -3732,7 +3736,7 @@ export class WorkerDelegationController {
 		try {
 			return this.withProjectContextAdmission(agent, () => {
 				admittedClaim = true;
-				const goal = this.deps.getGoalStateSnapshot();
+				const goal = this.goalForWorkerRequest(request);
 				const taskContext = request.taskContext;
 				const accepted = this.agentControl.startWorkerAgentTask(agentId, request.instructions, {
 					...(taskContext?.dependsOnTaskIds?.length ? { dependsOnTaskIds: taskContext.dependsOnTaskIds } : {}),
@@ -3759,6 +3763,12 @@ export class WorkerDelegationController {
 			if (admittedClaim) throw error;
 			return { started: false, skipReason: "worker_specialist_context_unavailable" };
 		}
+	}
+
+	/** Fresh route work keeps its original goal across awaited directory and specialist admission. */
+	private goalForWorkerRequest(request: WorkerDelegationRequest): GoalState | undefined {
+		const goal = this.deps.getGoalStateSnapshot();
+		return request.objectiveId === undefined ? goal : assertCurrentGoalObjective(request.objectiveId, goal);
 	}
 
 	/** Fresh unbound workers choose among profiles compiled by the mandatory host authority owner. */
@@ -4285,6 +4295,7 @@ export class WorkerDelegationController {
 			try {
 				prepared = this.prepareWorkerAttempt(request, admission);
 			} catch (error) {
+				if (error instanceof ObjectiveExecutionInterruptedError) throw error;
 				this.safeWarn(
 					`Worker dispatch was not persisted: ${error instanceof Error ? error.message : String(error)}`,
 				);
@@ -4470,6 +4481,7 @@ export class WorkerDelegationController {
 			}
 			return outcome;
 		} catch (error) {
+			if (error instanceof ObjectiveExecutionInterruptedError) throw error;
 			const message = error instanceof Error ? error.message : String(error);
 			this.safeWarn(`Worker setup failed: ${message}`);
 			if (preparedRecord) {

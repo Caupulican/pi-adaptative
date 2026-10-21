@@ -127,7 +127,9 @@ Session replacement APIs such as new-session, resume, fork, and import live on `
 Use the runtime API when you need to replace the active session and rebuild cwd-bound runtime state.
 This is the same layer used by the built-in interactive, print, and RPC modes.
 
-`createAgentSessionRuntime()` takes a runtime factory plus the initial cwd/session target. The factory closes over process-global fixed inputs, recreates cwd-bound services for the effective cwd, resolves session options against those services, and returns a full runtime result.
+`createAgentSessionRuntime()` takes a runtime factory plus the initial cwd/session target. The factory prepares cwd-bound services and returns a `PreparedAgentSessionRuntime` with `activate(sessionManager)` and `dispose()` methods. Construct the SDK session only inside `activate()`, using the manager supplied to that callback for history reads and session creation.
+
+The runtime prepares resources while the current session remains active, then retires that session before activation. When resuming the same normalized file path, it refreshes the manager from the retired session's final durable history before activation. `prepareAgentSessionRuntime()` owns one-shot activation and cleanup of unused prepared resources; after successful activation, the constructed session owns those resources.
 
 ```typescript
 import {
@@ -135,21 +137,25 @@ import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
+  prepareAgentSessionRuntime,
   getAgentDir,
   SessionManager,
 } from "@caupulican/pi-adaptative";
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-  const services = await createAgentSessionServices({ cwd });
-  return {
-    ...(await createAgentSessionFromServices({
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionStartEvent }) => {
+  const services = await createAgentSessionServices({ cwd, agentDir });
+  return prepareAgentSessionRuntime({
+    activate: async (sessionManager) => ({
+      ...(await createAgentSessionFromServices({
+        services,
+        sessionManager,
+        sessionStartEvent,
+      })),
       services,
-      sessionManager,
-      sessionStartEvent,
-    })),
-    services,
-    diagnostics: services.diagnostics,
-  };
+      diagnostics: services.diagnostics,
+    }),
+    dispose: () => services.resourceLoader.dispose?.(),
+  });
 };
 
 const runtime = await createAgentSessionRuntime(createRuntime, {
@@ -697,6 +703,7 @@ import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
+  prepareAgentSessionRuntime,
   getAgentDir,
   SessionManager,
 } from "@caupulican/pi-adaptative";
@@ -729,17 +736,20 @@ const currentProjectSessions = await SessionManager.list(process.cwd());
 const allSessions = await SessionManager.listAll(process.cwd());
 
 // Session replacement API for /new, /resume, /fork, /clone, and import flows.
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-  const services = await createAgentSessionServices({ cwd });
-  return {
-    ...(await createAgentSessionFromServices({
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionStartEvent }) => {
+  const services = await createAgentSessionServices({ cwd, agentDir });
+  return prepareAgentSessionRuntime({
+    activate: async (sessionManager) => ({
+      ...(await createAgentSessionFromServices({
+        services,
+        sessionManager,
+        sessionStartEvent,
+      })),
       services,
-      sessionManager,
-      sessionStartEvent,
-    })),
-    services,
-    diagnostics: services.diagnostics,
-  };
+      diagnostics: services.diagnostics,
+    }),
+    dispose: () => services.resourceLoader.dispose?.(),
+  });
 };
 
 const runtime = await createAgentSessionRuntime(createRuntime, {
@@ -990,18 +1000,26 @@ import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
+  prepareAgentSessionRuntime,
   getAgentDir,
   InteractiveMode,
   SessionManager,
 } from "@caupulican/pi-adaptative";
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-  const services = await createAgentSessionServices({ cwd });
-  return {
-    ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
-    services,
-    diagnostics: services.diagnostics,
-  };
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionStartEvent }) => {
+  const services = await createAgentSessionServices({ cwd, agentDir });
+  return prepareAgentSessionRuntime({
+    activate: async (sessionManager) => ({
+      ...(await createAgentSessionFromServices({
+        services,
+        sessionManager,
+        sessionStartEvent,
+      })),
+      services,
+      diagnostics: services.diagnostics,
+    }),
+    dispose: () => services.resourceLoader.dispose?.(),
+  });
 };
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
@@ -1030,18 +1048,26 @@ import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
+  prepareAgentSessionRuntime,
   getAgentDir,
   runPrintMode,
   SessionManager,
 } from "@caupulican/pi-adaptative";
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-  const services = await createAgentSessionServices({ cwd });
-  return {
-    ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
-    services,
-    diagnostics: services.diagnostics,
-  };
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionStartEvent }) => {
+  const services = await createAgentSessionServices({ cwd, agentDir });
+  return prepareAgentSessionRuntime({
+    activate: async (sessionManager) => ({
+      ...(await createAgentSessionFromServices({
+        services,
+        sessionManager,
+        sessionStartEvent,
+      })),
+      services,
+      diagnostics: services.diagnostics,
+    }),
+    dispose: () => services.resourceLoader.dispose?.(),
+  });
 };
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
@@ -1067,18 +1093,26 @@ import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
+  prepareAgentSessionRuntime,
   getAgentDir,
   runRpcMode,
   SessionManager,
 } from "@caupulican/pi-adaptative";
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-  const services = await createAgentSessionServices({ cwd });
-  return {
-    ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
-    services,
-    diagnostics: services.diagnostics,
-  };
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionStartEvent }) => {
+  const services = await createAgentSessionServices({ cwd, agentDir });
+  return prepareAgentSessionRuntime({
+    activate: async (sessionManager) => ({
+      ...(await createAgentSessionFromServices({
+        services,
+        sessionManager,
+        sessionStartEvent,
+      })),
+      services,
+      diagnostics: services.diagnostics,
+    }),
+    dispose: () => services.resourceLoader.dispose?.(),
+  });
 };
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
@@ -1120,6 +1154,7 @@ The main entry point exports:
 // Factory
 createAgentSession
 createAgentSessionRuntime
+prepareAgentSessionRuntime
 AgentSessionRuntime
 
 // Auth and Models
@@ -1147,6 +1182,8 @@ createGrepTool, createFindTool, createLsTool
 // Types
 type CreateAgentSessionOptions
 type CreateAgentSessionResult
+type CreateAgentSessionRuntimeFactory
+type PreparedAgentSessionRuntime
 type ExtensionFactory
 type ExtensionAPI
 type ToolDefinition

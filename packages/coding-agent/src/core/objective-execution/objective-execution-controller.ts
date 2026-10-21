@@ -121,6 +121,8 @@ type RouteAcknowledgment =
 export interface ObjectiveExecutionControllerDeps {
 	runtime: {
 		reconcileObjective(objectiveId: string): Promise<TaskRuntimeProjection>;
+		/** Session adapters fence superseded goal routes without changing historical objective state. */
+		assertExecutionCurrent?(objectiveId: string): void;
 		ensureRepairTasks?(objectiveId: string, repairs: readonly RepairWork[]): Promise<void>;
 		requestReplan?(objectiveId: string, stall: StallEvaluation): Promise<void>;
 		isBudgetExhausted?(objectiveId: string): boolean;
@@ -189,6 +191,7 @@ export interface ObjectiveExecutionControllerDeps {
 		continueWorker(route: ObjectiveRoute, signal?: AbortSignal, binding?: ExpertBinding): Promise<void>;
 		dispatchEscalated(route: ObjectiveRoute, signal?: AbortSignal, binding?: ExpertBinding): Promise<void>;
 		dispatchSpecialist?(input: {
+			objectiveId: string;
 			specialist: MaterializedSpecialist;
 			taskId: string;
 			attemptId?: string;
@@ -428,20 +431,6 @@ function routeStateProjection(
 	});
 }
 
-/**
- * The loop's host ended underneath it while it waited (the session was disposed). Not a failure of
- * the objective and not progress: the loop stops, and whoever drives it stops without recording one.
- */
-export class ObjectiveExecutionInterruptedError extends Error {
-	readonly reason: "session_disposed";
-
-	constructor(reason: "session_disposed") {
-		super(`The objective loop was interrupted: ${reason}.`);
-		this.name = "ObjectiveExecutionInterruptedError";
-		this.reason = reason;
-	}
-}
-
 /** Reason code of a completion route held back because running work exists anywhere in the runtime. */
 export const COMPLETION_FENCED_REASON_CODE = "completion_fenced_by_running_work";
 
@@ -471,6 +460,10 @@ export class ObjectiveExecutionController {
 	private _lastBinding?: ExpertBinding;
 	private _lastRoute?: ObjectiveRoute;
 	private _lastExecutor?: string;
+
+	private assertExecutionCurrent(objectiveId: string): void {
+		this.deps.runtime.assertExecutionCurrent?.(objectiveId);
+	}
 
 	/**
 	 * Record who executes a route the moment it is decided, before the route runs: how many requests a
@@ -623,6 +616,7 @@ export class ObjectiveExecutionController {
 	}): Promise<{ action: string; executed: boolean; result?: unknown }> {
 		const { objectiveId, action = "escalate_capability", input, signal } = options;
 		signal?.throwIfAborted();
+		this.assertExecutionCurrent(objectiveId);
 
 		if (action === "escalate_capability") {
 			const route: ObjectiveRoute = {
@@ -703,6 +697,7 @@ export class ObjectiveExecutionController {
 		const routeSnapshot = captureOptionalSnapshot(this.deps.repoRoot);
 		const initialDigest = routeSnapshot?.digest ?? "unknown";
 		options?.signal?.throwIfAborted();
+		this.assertExecutionCurrent(objectiveId);
 		const cycleId = this.nextCycleId();
 
 		const runtime = await this.deps.runtime.reconcileObjective(objectiveId);
@@ -840,6 +835,7 @@ export class ObjectiveExecutionController {
 		// Readiness is read after the asynchronous judgment above, so cancellation, budget and work
 		// admitted while System One was answering all reach this route.
 		const current = await this.deps.runtime.reconcileObjective(objectiveId);
+		this.assertExecutionCurrent(objectiveId);
 		const cancelled =
 			this.deps.runtime.isCancelled?.(objectiveId) ??
 			current.objectives[objectiveId]?.objective.status === "cancelled";
@@ -1029,6 +1025,7 @@ export class ObjectiveExecutionController {
 		/** The reasons that are requests for the model's account: answered with an account, never held as findings. */
 		accountRequests: readonly string[] = [],
 	): Promise<ObjectiveTerminalResult> {
+		this.assertExecutionCurrent(objectiveId);
 		const findings = reasonCodes.filter((reason) => !accountRequests.includes(reason));
 		if (findings.length > 0) this.deps.systemOne?.noteControlDirective?.(sameLaneVerificationDirective(findings));
 		else if (accountRequests.length > 0)
@@ -1087,6 +1084,7 @@ export class ObjectiveExecutionController {
 			signal?.throwIfAborted();
 
 			const runtime = await this.deps.runtime.reconcileObjective(objectiveId);
+			this.assertExecutionCurrent(objectiveId);
 
 			// PH-110..PH-112: Objective admission certificates
 			if (this.deps.steeringPlane && !this.admittedObjectives.has(objectiveId)) {
@@ -1117,6 +1115,7 @@ export class ObjectiveExecutionController {
 				}
 				this.admissionCerts.set(objectiveId, admitted);
 			}
+			this.assertExecutionCurrent(objectiveId);
 
 			// 1. Check deterministic terminals
 			if (
@@ -1165,6 +1164,7 @@ export class ObjectiveExecutionController {
 
 			// 3. Evaluate route
 			const route = await this.evaluateRouteOnce(objectiveId, { signal });
+			this.assertExecutionCurrent(objectiveId);
 			this._lastRoute = route;
 			this._lastExecutor = undefined;
 			const verificationRecovery = route.reason_codes.includes(SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE);
@@ -1299,11 +1299,13 @@ export class ObjectiveExecutionController {
 			}
 
 			// 5. Dispatch based on route (FIN-051, FIN-052: Explicit failure if executor is missing)
+			this.assertExecutionCurrent(objectiveId);
 			switch (route.route) {
 				case "retrieve":
 					if (!this.deps.retrieval?.execute && this.deps.rootExecutor) {
 						// No dedicated retrieval executor: the root reads, with the route's brief.
 						await this._noteExecutor(route, "root");
+						this.assertExecutionCurrent(objectiveId);
 						await this.deps.rootExecutor.execute(route, signal);
 						break;
 					}
@@ -1324,6 +1326,7 @@ export class ObjectiveExecutionController {
 						if (!this.deps.rootExecutor)
 							throw new Error("Same-lane verification requires the receiving root executor.");
 						await this._noteExecutor(route, "root");
+						this.assertExecutionCurrent(objectiveId);
 						await this.deps.rootExecutor.execute(route, signal);
 						break;
 					}
@@ -1386,6 +1389,7 @@ export class ObjectiveExecutionController {
 						};
 					}
 					await this.deps.workerDispatcher.continueWorker(route, signal, this._lastBinding);
+					this.assertExecutionCurrent(objectiveId);
 					this.acknowledgeRouteRequests(route);
 					await this._runObjectivePostflight(objectiveId, route, runtime, signal);
 					break;
@@ -1398,6 +1402,7 @@ export class ObjectiveExecutionController {
 							currentExpert: this._lastBinding?.model_id,
 							signal,
 						});
+						this.assertExecutionCurrent(objectiveId);
 
 						if (resolution.dimension === "specialist" && this.deps.specialistSynthesis) {
 							// FC-023, FC-024, FC-025: Real dynamic SpecialistNeed from resolution (never adaptation node id)
@@ -1412,6 +1417,7 @@ export class ObjectiveExecutionController {
 								charter,
 								signal,
 							});
+							this.assertExecutionCurrent(objectiveId);
 
 							// ERC-040..ERC-045: Materialized specialist becomes durable task, attempt, and worker execution
 							const specTaskId = `${objectiveId}-spec-${this.cycleCounter}`;
@@ -1453,9 +1459,11 @@ export class ObjectiveExecutionController {
 
 				case "completion_candidate": {
 					await this.deps.waitForRepositoryQuiescence?.(objectiveId, signal);
+					this.assertExecutionCurrent(objectiveId);
 					// A checked requirement is proven by rerunning its check, before any judgment. A failed
 					// check is repair work for the loop, never a terminal state.
 					const checkProof = await this.deps.proveRequirementChecks?.(signal);
+					this.assertExecutionCurrent(objectiveId);
 					const checkRefusal = checkProof ? describeRequirementCheckRefusal(checkProof) : undefined;
 					if (checkProof && checkRefusal) {
 						const failedChecks = checkProof.unrunnable
@@ -1638,10 +1646,12 @@ export class ObjectiveExecutionController {
 						semanticEvaluator: this.deps.systemOne?.executeCompletionTransaction
 							? {
 									evaluateCompletion: async (_objId, opts) => {
+										this.assertExecutionCurrent(objectiveId);
 										const verdict = await this.deps.systemOne!.executeCompletionTransaction!(bugFix, {
 											...opts,
 											persistTerminal: false,
 										});
+										this.assertExecutionCurrent(objectiveId);
 										completionAdvice.push(...(verdict.advisories ?? []).map((advice) => advice.reason));
 										completionFinding = verdict;
 										return {
@@ -1660,6 +1670,7 @@ export class ObjectiveExecutionController {
 					const evalResult = await CompletionCoordinator.evaluate(objectiveId, profile, completionContext, {
 						signal,
 					});
+					this.assertExecutionCurrent(objectiveId);
 					this.acknowledgeRouteRequests(route);
 					if (completionFinding?.verdict === "verify_more") {
 						const describe = (finding: { id: string; reason: string; required_next_proof: string }) =>
@@ -1830,7 +1841,10 @@ export class ObjectiveExecutionController {
 								? applyLocalCommitCharter(activeCharter)
 								: activeCharter;
 						const sideEffects = await executeDelivery({
-							beforeEffect: () => assertVerificationResolved(this.deps.systemOne?.peekControlDirective?.()),
+							beforeEffect: () => {
+								this.assertExecutionCurrent(objectiveId);
+								assertVerificationResolved(this.deps.systemOne?.peekControlDirective?.());
+							},
 							charter: deliveryCharter,
 							git: this.deps.gitExecutor,
 							release: this.deps.releaseExecutor,
@@ -1843,6 +1857,7 @@ export class ObjectiveExecutionController {
 							worktreeClean,
 							expectedArtifactDigest: packageArtifact?.integrity,
 						});
+						this.assertExecutionCurrent(objectiveId);
 						if (isSameLaneVerificationDirective(this.deps.systemOne?.peekControlDirective?.())) {
 							const reasons = this.deps.systemOne?.peekControlDirective?.()?.reasonCodes ?? [];
 							return {
@@ -1915,11 +1930,14 @@ export class ObjectiveExecutionController {
 							steeringPlane: this.deps.steeringPlane,
 							systemOne: this.deps.systemOne?.commitTerminalCompletion
 								? {
-										commitTerminalCompletion: (proof, options) =>
-											this.deps.systemOne!.commitTerminalCompletion!(proof, options),
+										commitTerminalCompletion: (proof, options) => {
+											this.assertExecutionCurrent(objectiveId);
+											return this.deps.systemOne!.commitTerminalCompletion!(proof, options);
+										},
 									}
 								: undefined,
 						});
+						this.assertExecutionCurrent(objectiveId);
 						if (finished.status !== "complete") {
 							if (finished.status === "incomplete")
 								this.deps.systemOne?.noteControlDirective?.(
@@ -2015,12 +2033,14 @@ export class ObjectiveExecutionController {
 				}
 			}
 
+			this.assertExecutionCurrent(objectiveId);
 			this.acknowledgeRouteRequests(route);
 			await this.deps.checkpoints?.recordRouteOutcome?.(route, this._lastExecutor ?? route.route);
 			this._lastExecutor = undefined;
 
 			// 6. Ingest evidence & validate postflight
 			await this.deps.evidence?.ingestLatest?.(objectiveId);
+			this.assertExecutionCurrent(objectiveId);
 			await this.deps.systemOne?.validateObjectivePostflight?.(objectiveId);
 			// A returned root recovery, unlike a decided route or interrupted executor, spent this
 			// evidence's recovery allowance. New diagnostic/check evidence changes the fingerprint.
@@ -2040,6 +2060,7 @@ export class ObjectiveExecutionController {
 					boundedDiffEvidence: postflightState,
 					signal,
 				});
+				this.assertExecutionCurrent(objectiveId);
 				if (blocksRuleTransition(postflight)) {
 					if (postflight.verificationRequired) {
 						this.deps.systemOne?.noteControlDirective?.(
@@ -2083,6 +2104,7 @@ export class ObjectiveExecutionController {
 		escalated: boolean,
 		signal?: AbortSignal,
 	): Promise<ObjectiveTerminalResult | undefined> {
+		this.assertExecutionCurrent(objectiveId);
 		// The root executes what System One did not hand to an independent worker: a review and an
 		// escalation always go to a worker, so does a verification that must be independent.
 		const sameLaneVerificationRecovery = route.reason_codes.includes(SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE);
@@ -2095,6 +2117,7 @@ export class ObjectiveExecutionController {
 					(!this.deps.workerDispatcher?.dispatch || (this.deps.chooseExecutor?.(route) ?? "root") === "root")))
 		) {
 			await this._noteExecutor(route, "root");
+			this.assertExecutionCurrent(objectiveId);
 			await this.deps.rootExecutor.execute(route, signal);
 			return undefined;
 		}
@@ -2178,7 +2201,9 @@ export class ObjectiveExecutionController {
 		}
 
 		try {
+			this.assertExecutionCurrent(objectiveId);
 			await dispatcher(route, signal, binding);
+			this.assertExecutionCurrent(objectiveId);
 
 			// FC-041: Post-mutation responsibility guard before task acceptance
 			if (route.route === "implement" && this.deps.responsibilityController && responsibilityStatement) {
@@ -2254,6 +2279,7 @@ export class ObjectiveExecutionController {
 		const requirePostflightCertificate = async (
 			...args: Parameters<SystemOneSteeringPlane["requireCertificate"]>
 		): Promise<void> => {
+			this.assertExecutionCurrent(objectiveId);
 			try {
 				await steeringPlane.requireCertificate(...args);
 			} catch (error) {
@@ -2261,6 +2287,7 @@ export class ObjectiveExecutionController {
 					throw error;
 				}
 			}
+			this.assertExecutionCurrent(objectiveId);
 		};
 
 		// FC-050: JEV-017 worker claim support
@@ -2469,6 +2496,7 @@ export class ObjectiveExecutionController {
 		signal?: AbortSignal,
 		evidenceRevision?: number,
 	): Promise<WorkerResultContract | undefined> {
+		this.assertExecutionCurrent(objectiveId);
 		const specTask = runtime?.createTask?.({
 			objectiveId,
 			title: specialist.spec.mission,
@@ -2495,6 +2523,7 @@ export class ObjectiveExecutionController {
 		let workerResult: WorkerResultContract | undefined;
 		if (this.deps.workerDispatcher?.dispatchSpecialist) {
 			workerResult = await this.deps.workerDispatcher.dispatchSpecialist({
+				objectiveId,
 				specialist,
 				taskId: specTask.taskId,
 				attemptId: specAttempt.attemptId,
@@ -2525,6 +2554,7 @@ export class ObjectiveExecutionController {
 				fencingToken: specLease?.fencingToken ?? workerResult.fencingToken,
 			};
 			runtime?.finishAttempt?.(aligned);
+			this.assertExecutionCurrent(objectiveId);
 
 			const normalizedEvidence = {
 				resultId: workerResult.resultId,

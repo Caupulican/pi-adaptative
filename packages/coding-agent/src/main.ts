@@ -30,6 +30,7 @@ import {
 	type CreateAgentSessionRuntimeFactory,
 	CreatedSessionFailure,
 	createAgentSessionRuntime,
+	prepareAgentSessionRuntime,
 } from "./core/agent-session-runtime.ts";
 import {
 	type AgentSessionRuntimeDiagnostic,
@@ -903,133 +904,148 @@ export async function main(args: string[], options?: MainOptions) {
 				extensionFactories: options?.extensionFactories,
 			},
 		});
-		const { settingsManager, modelRegistry, resourceLoader } = services;
-		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
-			...services.diagnostics,
-			...orchestrationDiagnostics,
-			...collectSettingsDiagnostics(settingsManager, "runtime creation"),
-			...resourceLoader.getExtensions().errors.map(({ path, error }) => ({
-				type: "warning" as const,
-				message: `Failed to load extension "${path}": ${error}`,
-			})),
-		];
-
-		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
-		const scopedModels =
-			modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
-		const {
-			options: sessionOptions,
-			cliThinkingFromModel,
-			diagnostics: sessionOptionDiagnostics,
-		} = buildSessionOptions(
-			parsed,
-			scopedModels,
-			sessionManager.buildSessionContext().messages.length > 0,
-			modelRegistry,
-			settingsManager,
-			cwd,
-		);
-		diagnostics.push(...sessionOptionDiagnostics);
-		let orchestrationModel: ReturnType<typeof resolveConfiguredOrchestrationModel>;
-		if (orchestrationProfile) {
-			orchestrationModel = resolveConfiguredOrchestrationModel(orchestrationProfile, modelRegistry);
-			if (!orchestrationModel) {
-				diagnostics.push({
-					type: "error",
-					message: `Orchestration profile '${orchestrationProfile.profileId}' has no configured, authenticated model that supports its exact thinking level.`,
-				});
-			} else {
-				// The profile owns the model, thinking level, cycling scope and tools; the SDK derives
-				// every one of them from the profile itself, and rejects a caller that also supplies
-				// them. So the CLI hands over the profile and nothing it owns. The router's candidate
-				// pool is not owned by a profile and is still passed (it is the operator's Models
-				// configuration, which a profiled session routes across).
-				sessionOptions.orchestrationProfile = orchestrationProfile;
-			}
-		}
-
-		// A profiled session's model comes from the profile, not from sessionOptions.
-		const launchModel = orchestrationModel?.model ?? sessionOptions.model;
-		if (parsed.apiKey) {
-			if (!launchModel) {
-				diagnostics.push({
-					type: "error",
-					message: "--api-key requires a model to be specified via --model, --provider/--model, or --models",
-				});
-			} else {
-				authStorage.setRuntimeApiKey(launchModel.provider, parsed.apiKey);
-			}
-		}
-
-		const created = await createAgentSessionFromServices({
-			services,
-			sessionManager,
-			sessionStartEvent,
-			serviceTier: sessionOptions.serviceTier,
-			// Never owned by an orchestration profile: the pool is the operator's Models configuration.
-			routerPool: sessionOptions.routerPool,
-			customTools: sessionOptions.customTools,
-			...(sessionOptions.orchestrationProfile
-				? { orchestrationProfile: sessionOptions.orchestrationProfile }
-				: {
-						model: sessionOptions.model,
-						thinkingLevel: sessionOptions.thinkingLevel,
-						isExplicitModel: sessionOptions.isExplicitModel,
-						isExplicitThinking: sessionOptions.isExplicitThinking,
-						scopedModels: sessionOptions.scopedModels,
-						tools: sessionOptions.tools,
-						excludeTools: sessionOptions.excludeTools,
-						noTools: sessionOptions.noTools,
-						toolProfileFilter: settingsManager.getResourceProfileFilter("tools"),
-					}),
-		});
 		try {
-			// After the session exists: an unset `modelRouter.enabled` follows whether it has System One.
-			diagnostics.push(
-				...collectModelRouterConfigDiagnostics(
-					settingsManager.getModelRouterSettings(),
-					modelRegistry,
-					agentDir,
-				).map((message) => ({
+			const { settingsManager, modelRegistry, resourceLoader } = services;
+			const diagnostics: AgentSessionRuntimeDiagnostic[] = [
+				...services.diagnostics,
+				...orchestrationDiagnostics,
+				...collectSettingsDiagnostics(settingsManager, "runtime creation"),
+				...resourceLoader.getExtensions().errors.map(({ path, error }) => ({
 					type: "warning" as const,
-					message,
+					message: `Failed to load extension "${path}": ${error}`,
 				})),
-			);
-			const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
-			if (created.session.model && cliThinkingOverride) {
-				created.session.setThinkingLevel(created.session.thinkingLevel);
-			}
-			if (orchestrationProfile && orchestrationModel) {
-				const capabilities = [...orchestrationProfile.capabilityCeiling];
-				created.session.capabilityEnvelope = {
-					id: `orchestration-profile:${orchestrationProfile.profileId}`,
-					profileId: orchestrationProfile.profileId,
-					capabilities,
-					allowedTools: [...orchestrationProfile.toolNames],
-					...(capabilities.some(
-						(capability) =>
-							capability === "filesystem.read" ||
-							capability === "filesystem.write" ||
-							capability === "worktree.read" ||
-							capability === "worktree.mutate",
-					)
-						? { allowedPaths: [cwd] }
-						: {}),
-					...(orchestrationProfile.budget.maxCostUsd !== undefined
-						? { maxEstimatedUsd: orchestrationProfile.budget.maxCostUsd }
-						: {}),
-					createdAt: new Date().toISOString(),
-				};
-			}
+			];
 
-			return {
-				...created,
-				services,
-				diagnostics,
-			};
+			const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
+			const scopedModels =
+				modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
+			return prepareAgentSessionRuntime({
+				activate: async (freshManager) => {
+					const {
+						options: sessionOptions,
+						cliThinkingFromModel,
+						diagnostics: sessionOptionDiagnostics,
+					} = buildSessionOptions(
+						parsed,
+						scopedModels,
+						freshManager.buildSessionContext().messages.length > 0,
+						modelRegistry,
+						settingsManager,
+						cwd,
+					);
+					diagnostics.push(...sessionOptionDiagnostics);
+					let orchestrationModel: ReturnType<typeof resolveConfiguredOrchestrationModel>;
+					if (orchestrationProfile) {
+						orchestrationModel = resolveConfiguredOrchestrationModel(orchestrationProfile, modelRegistry);
+						if (!orchestrationModel) {
+							diagnostics.push({
+								type: "error",
+								message: `Orchestration profile '${orchestrationProfile.profileId}' has no configured, authenticated model that supports its exact thinking level.`,
+							});
+						} else {
+							// The profile owns the model, thinking level, cycling scope and tools; the SDK derives
+							// every one of them from the profile itself, and rejects a caller that also supplies
+							// them. So the CLI hands over the profile and nothing it owns. The router's candidate
+							// pool is not owned by a profile and is still passed (it is the operator's Models
+							// configuration, which a profiled session routes across).
+							sessionOptions.orchestrationProfile = orchestrationProfile;
+						}
+					}
+
+					// A profiled session's model comes from the profile, not from sessionOptions.
+					const launchModel = orchestrationModel?.model ?? sessionOptions.model;
+					if (parsed.apiKey) {
+						if (!launchModel) {
+							diagnostics.push({
+								type: "error",
+								message:
+									"--api-key requires a model to be specified via --model, --provider/--model, or --models",
+							});
+						} else {
+							authStorage.setRuntimeApiKey(launchModel.provider, parsed.apiKey);
+						}
+					}
+
+					const created = await createAgentSessionFromServices({
+						services,
+						sessionManager: freshManager,
+						sessionStartEvent,
+						serviceTier: sessionOptions.serviceTier,
+						// Never owned by an orchestration profile: the pool is the operator's Models configuration.
+						routerPool: sessionOptions.routerPool,
+						customTools: sessionOptions.customTools,
+						...(sessionOptions.orchestrationProfile
+							? { orchestrationProfile: sessionOptions.orchestrationProfile }
+							: {
+									model: sessionOptions.model,
+									thinkingLevel: sessionOptions.thinkingLevel,
+									isExplicitModel: sessionOptions.isExplicitModel,
+									isExplicitThinking: sessionOptions.isExplicitThinking,
+									scopedModels: sessionOptions.scopedModels,
+									tools: sessionOptions.tools,
+									excludeTools: sessionOptions.excludeTools,
+									noTools: sessionOptions.noTools,
+									toolProfileFilter: settingsManager.getResourceProfileFilter("tools"),
+								}),
+					});
+					try {
+						// After the session exists: an unset `modelRouter.enabled` follows whether it has System One.
+						diagnostics.push(
+							...collectModelRouterConfigDiagnostics(
+								settingsManager.getModelRouterSettings(),
+								modelRegistry,
+								agentDir,
+							).map((message) => ({
+								type: "warning" as const,
+								message,
+							})),
+						);
+						const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
+						if (created.session.model && cliThinkingOverride) {
+							created.session.setThinkingLevel(created.session.thinkingLevel);
+						}
+						if (orchestrationProfile && orchestrationModel) {
+							const capabilities = [...orchestrationProfile.capabilityCeiling];
+							created.session.capabilityEnvelope = {
+								id: `orchestration-profile:${orchestrationProfile.profileId}`,
+								profileId: orchestrationProfile.profileId,
+								capabilities,
+								allowedTools: [...orchestrationProfile.toolNames],
+								...(capabilities.some(
+									(capability) =>
+										capability === "filesystem.read" ||
+										capability === "filesystem.write" ||
+										capability === "worktree.read" ||
+										capability === "worktree.mutate",
+								)
+									? { allowedPaths: [cwd] }
+									: {}),
+								...(orchestrationProfile.budget.maxCostUsd !== undefined
+									? { maxEstimatedUsd: orchestrationProfile.budget.maxCostUsd }
+									: {}),
+								createdAt: new Date().toISOString(),
+							};
+						}
+
+						return {
+							...created,
+							services,
+							diagnostics,
+						};
+					} catch (error) {
+						// Hand the created session back: the runtime disposes it in full rather than leaking it.
+						throw new CreatedSessionFailure(created.session, created.sessionManager, error);
+					}
+				},
+				dispose: () => services.resourceLoader.dispose?.(),
+			});
 		} catch (error) {
-			// Hand the created session back: the runtime disposes it in full rather than leaking it.
-			throw new CreatedSessionFailure(created.session, created.sessionManager, error);
+			try {
+				await services.resourceLoader.dispose?.();
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], "Runtime service preparation and cleanup failed");
+			}
+			throw error;
 		}
 	};
 	time("createRuntime");

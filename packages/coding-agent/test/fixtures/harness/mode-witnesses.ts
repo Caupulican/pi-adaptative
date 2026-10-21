@@ -5,7 +5,12 @@ import type * as Undici from "undici";
 import undiciDefault from "undici";
 import { expect, type Mock, vi } from "vitest";
 import { AgentSession } from "../../../src/core/agent-session.ts";
-import { type AgentSessionRuntime, createAgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
+import {
+	type AgentSessionRuntime,
+	createAgentSessionRuntime,
+	prepareAgentSessionRuntime,
+} from "../../../src/core/agent-session-runtime.ts";
+import { createAgentSessionServices } from "../../../src/core/agent-session-services.ts";
 import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
 import { FooterDataProvider } from "../../../src/core/footer-data-provider.ts";
 import { PROVIDER_RETRY_CUSTOM_TYPE } from "../../../src/core/foreground-lifecycle-controller.ts";
@@ -489,34 +494,38 @@ async function createInteractiveHarness(
 	});
 	const disposalWarnings: string[] = [];
 	const runtime = await createAgentSessionRuntime(
-		async ({ cwd, agentDir, sessionManager }) => {
-			const root = await world.createRootSession("root", {
-				agentDir,
-				sessionManager,
-				settings: {
-					memorySystem: "okf",
-					autoLearn: { enabled: false },
-					terminal: { showTerminalProgress: true },
+		async ({ cwd, agentDir }) =>
+			prepareAgentSessionRuntime({
+				activate: async (freshManager) => {
+					const root = await world.createRootSession("root", {
+						agentDir,
+						sessionManager: freshManager,
+						settings: {
+							memorySystem: "okf",
+							autoLearn: { enabled: false },
+							terminal: { showTerminalProgress: true },
+						},
+						extensionFactories: options.extensionFactories ? [...options.extensionFactories] : undefined,
+					});
+					return {
+						session: root.session,
+						sessionManager: root.sessionManager,
+						getExtensionRunner: root.getExtensionRunner,
+						extensionsResult: root.extensionsResult,
+						services: {
+							cwd,
+							agentDir,
+							authStorage: world.authStorage,
+							settingsManager: root.settingsManager,
+							modelRegistry: world.modelRegistry,
+							resourceLoader: root.session.resourceLoader,
+							diagnostics: [],
+						},
+						diagnostics: [],
+					};
 				},
-				extensionFactories: options.extensionFactories ? [...options.extensionFactories] : undefined,
-			});
-			return {
-				session: root.session,
-				sessionManager: root.sessionManager,
-				getExtensionRunner: root.getExtensionRunner,
-				extensionsResult: root.extensionsResult,
-				services: {
-					cwd,
-					agentDir,
-					authStorage: world.authStorage,
-					settingsManager: root.settingsManager,
-					modelRegistry: world.modelRegistry,
-					resourceLoader: root.session.resourceLoader,
-					diagnostics: [],
-				},
-				diagnostics: [],
-			};
-		},
+				dispose: () => {},
+			}),
 		{
 			cwd: HARNESS_PROJECT_CWD,
 			agentDir: world.agentDir,
@@ -1838,7 +1847,179 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	await verifyRetryClosingAndUnicodeQueue(world);
 	await verifyQueuedGoalRetryRelease(world);
 	await verifyBillingContinuation(world);
+	await verifyPreparedRuntimeResourceCleanup(world);
 	await verifyPrintOwner(world);
+}
+
+/** A setup failure retires unused prepared extensions without constructing a recovery owner or closing the live session. */
+async function verifyPreparedRuntimeResourceCleanup(world: HarnessWorld): Promise<void> {
+	const label = "mode-prepared-runtime-resources";
+	const agentDir = `${world.agentDir}-${label}`;
+	const loaded: number[] = [];
+	const activated: number[] = [];
+	const disposed: number[] = [];
+	const started: number[] = [];
+	const closingWarnings: string[] = [];
+	let creations = 0;
+	world.systemOne.enterPhase(label, {});
+	const runtime = await createAgentSessionRuntime(
+		async ({ cwd, agentDir: directory }) => {
+			const generation = ++creations;
+			const services = await createAgentSessionServices({
+				cwd,
+				agentDir: directory,
+				authStorage: world.authStorage,
+				modelRegistry: world.modelRegistry,
+				settingsManager: world.settingsManager,
+				resourceLoaderOptions: {
+					extensionFactories: [
+						(pi) => {
+							loaded.push(generation);
+							pi.onDispose(() => {
+								disposed.push(generation);
+							});
+							pi.on("session_start", () => {
+								started.push(generation);
+							});
+						},
+					],
+				},
+			});
+			return prepareAgentSessionRuntime({
+				activate: async (freshManager) => {
+					activated.push(generation);
+					const root = await world.createRootSession("root", {
+						agentDir: directory,
+						sessionManager: freshManager,
+						resourceLoader: services.resourceLoader,
+						systemOneEnabled: false,
+						settings: { memorySystem: "okf", autoLearn: { enabled: false } },
+					});
+					return { ...root, services: { ...services, settingsManager: root.settingsManager }, diagnostics: [] };
+				},
+				dispose: () => services.resourceLoader.dispose?.(),
+			});
+		},
+		{
+			cwd: HARNESS_PROJECT_CWD,
+			agentDir,
+			sessionManager: world.createSessionManager(agentDir),
+			onTerminalWarnings: (warnings) => closingWarnings.push(...warnings),
+		},
+	);
+	const original = runtime.session;
+	const warningMark = world.warnings.length;
+	const failures: unknown[] = [];
+	try {
+		runtime.setRebindSession((session) => session.bindExtensions({ uiContext: world.humanInput.ui }));
+		await original.bindExtensions({ uiContext: world.humanInput.ui });
+		expect({ loaded, activated, started, disposed }, "the real initial loader transfers to its SDK session").toEqual({
+			loaded: [1],
+			activated: [1],
+			started: [1],
+			disposed: [],
+		});
+		const setupFailure = new Error("Prepared runtime witness: owner setup rejected the new session.");
+		const sessionsBefore = world.sessions.length;
+		const requestsBefore = world.provider.requests.length;
+		let setupCalls = 0;
+		let rejectedFile: string | undefined;
+		const failure = await runtime
+			.newSession({
+				setup: async (sessionManager) => {
+					setupCalls++;
+					rejectedFile = sessionManager.getSessionFile();
+					expect(
+						{ loaded, activated, started, disposed },
+						"setup runs after resource preparation and before SDK activation",
+					).toEqual({
+						loaded: [1, 2],
+						activated: [1],
+						started: [1],
+						disposed: [],
+					});
+					throw setupFailure;
+				},
+			})
+			.then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+		expect(failure, "unused resource cleanup preserves the owner setup failure").toBe(setupFailure);
+		expect(setupCalls, "the actual setup boundary was reached once").toBe(1);
+		expect(runtime.session, "rejected preparation leaves the original SDK owner installed").toBe(original);
+		expect(
+			original.getResourceSnapshot().foregroundRecovery.shutdown,
+			"rejected preparation never closes the original owner",
+		).toBe(false);
+		expect(
+			{ loaded, activated, started, disposed },
+			"the rejected real extension closes once without candidate recovery or lifecycle startup",
+		).toEqual({
+			loaded: [1, 2],
+			activated: [1],
+			started: [1],
+			disposed: [2],
+		});
+		expect(world.sessions.length, "rejected setup constructs no additional SDK session").toBe(sessionsBefore);
+		expect(world.provider.requests.length, "rejected preparation makes no provider request").toBe(requestsBefore);
+		if (!rejectedFile) throw new Error("Prepared runtime witness: rejected setup had no candidate file identity.");
+		expect(world.io.peekFile(rejectedFile), "the unused candidate leaves no durable session file").toBeUndefined();
+		const originalReply = "The original owner answers after rejected preparation.";
+		world.provider.enqueue("root", text(`${label}-original`, originalReply));
+		await withDeadline(
+			world.trace,
+			"prepared runtime: original owner still answers",
+			original.prompt("Answer after the rejected replacement."),
+		);
+		expect(
+			world.io.peekFile(original.sessionFile!)?.includes(originalReply),
+			"the still-live original owner durably commits its actual response",
+		).toBe(true);
+		expect(await runtime.newSession(), "normal replacement accepts the same prepared resource path").toEqual({
+			cancelled: false,
+		});
+		expect(runtime.session, "normal replacement installs a distinct actual SDK owner").not.toBe(original);
+		expect(
+			{ loaded, activated, started, disposed },
+			"normal replacement activates once and retains its transferred loader until session disposal",
+		).toEqual({
+			loaded: [1, 2, 3],
+			activated: [1, 3],
+			started: [1, 3],
+			disposed: [2, 1],
+		});
+		const replacementReply = "The accepted replacement answers with its transferred resource.";
+		world.provider.enqueue("root", text(`${label}-replacement`, replacementReply));
+		await withDeadline(
+			world.trace,
+			"prepared runtime: replacement answers",
+			runtime.session.prompt("Answer after the accepted replacement."),
+		);
+		expect(
+			world.io.peekFile(runtime.session.sessionFile!)?.includes(replacementReply),
+			"the replacement durably commits its actual response",
+		).toBe(true);
+		await runtime.dispose();
+		expect(disposed, "the accepted candidate's session releases its transferred extension exactly once").toEqual([
+			2, 1, 3,
+		]);
+		expect(closingWarnings, "prepared resource ownership adds no unclassified terminal disclosure").toEqual([]);
+		expect(
+			world.warnings.splice(warningMark),
+			"both ordinary owners and unused resource cleanup emit no warning",
+		).toEqual([]);
+	} catch (error) {
+		failures.push(error);
+	} finally {
+		try {
+			await runtime.dispose();
+		} catch (error) {
+			failures.push(error);
+		}
+	}
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, "Prepared runtime witness and cleanup failed");
 }
 
 /** The account the listing describes: the synthetic token carries its claim, and nothing signs or verifies it. */

@@ -204,6 +204,8 @@ export function parseWorkerParallelWorkIntent(value: unknown): WorkerParallelWor
 /** A profile is an optional preset; authority is compiled and persisted by the host. */
 export interface WorkerDelegationRequest {
 	instructions: string;
+	/** Host-owned objective of an automatic route; checked again when fresh work becomes durable. */
+	objectiveId?: string;
 	/** Host-admitted task context for a fresh dispatch; never exposed in the model schema. */
 	executionContext?: ExecutionContext;
 	profileId?: string;

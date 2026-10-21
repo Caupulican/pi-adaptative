@@ -70,10 +70,12 @@ export class SessionRuntimeAdmissionController {
 		operation: (reader: RuntimeWorkLease) => Promise<T>,
 		signal?: AbortSignal,
 		borrowed?: RuntimeWorkLease,
+		assertCurrent?: () => void,
 	): Promise<T> {
 		const admitted = this.admit(kind, label, signal, borrowed);
 		const reader = admitted instanceof Promise ? await admitted : admitted;
 		try {
+			assertCurrent?.();
 			return await operation(reader);
 		} finally {
 			reader.release();

@@ -11,6 +11,7 @@ import {
 	countUniquePaidRows,
 	createAgentSessionRuntime,
 	DEFAULT_DISCARD_SCAN_LIMITS,
+	prepareAgentSessionRuntime,
 } from "../../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import {
@@ -39,7 +40,7 @@ import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
 import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../../src/core/reflection-controller.ts";
 import { getInFlightWorkUnits } from "../../../src/core/reload-blockers.ts";
-import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
+import { DefaultResourceLoader, type ResourceLoader } from "../../../src/core/resource-loader.ts";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -1222,14 +1223,47 @@ export class VirtualGit {
 		return { code: 0, stdout: hashes.map((hash) => `${hash}\n`).join(""), stderr: "" };
 	}
 
-	/** `read-tree --empty` or `read-tree <commit>` into the scratch index named by GIT_INDEX_FILE. */
+	/** Scratch index reads, or the two-tree carry-forward merge used to refresh a landed checkout. */
 	private readTree(
 		args: readonly string[],
 		cwd: string,
 		env: Readonly<Record<string, string | undefined>>,
 	): GitOutcome {
 		const indexFile = env.GIT_INDEX_FILE;
-		if (indexFile === undefined) throw new Error(`Unscripted read-tree without a scratch index: ${args.join(" ")}`);
+		if (indexFile === undefined) {
+			if (args.length !== 4 || args[0] !== "-m" || args[1] !== "-u")
+				throw new Error(`Unscripted read-tree without a scratch index: ${args.join(" ")}`);
+			const worktree = this.worktreeFor(cwd);
+			if (!worktree) return { code: 128, stdout: "", stderr: NOT_A_REPOSITORY };
+			const prior = this.resolveCommit(args[2] ?? "", cwd);
+			const target = this.resolveCommit(args[3] ?? "", cwd);
+			if (prior === undefined || target === undefined)
+				return { code: 128, stdout: "", stderr: "fatal: not a valid tree object\n" };
+			if (worktree.unmerged.size !== 0)
+				return { code: 128, stdout: "", stderr: "fatal: You need to resolve your current index first\n" };
+			const before = this.treeOf(prior);
+			const after = this.treeOf(target);
+			const updates = new Map<string, string | undefined>();
+			for (const path of new Set([...before.keys(), ...after.keys(), ...worktree.index.keys()])) {
+				const old = before.get(path);
+				const next = after.get(path);
+				const indexed = worktree.index.get(path);
+				// Git's two-tree carry-forward rows14/15 and18/19: unchanged tree paths and already-applied entries keep
+				// their exact index and working bytes, including a distinct staged blob and unstaged working edit.
+				if (old === next || indexed === next) continue;
+				if (indexed !== old || this.readWorking(worktree, path) !== indexed) {
+					return { code: 128, stdout: "", stderr: `error: Entry '${path}' would be overwritten by merge.\n` };
+				}
+				updates.set(path, next);
+			}
+			// Conflict checks precede every write, as read-tree verifies the two-tree merge before updating the checkout.
+			for (const [path, next] of updates) this.writeWorking(worktree, path, next);
+			for (const [path, next] of updates) {
+				if (next === undefined) worktree.index.delete(path);
+				else worktree.index.set(path, next);
+			}
+			return { code: 0, stdout: "", stderr: "" };
+		}
 		if (args.includes("--empty")) {
 			this.indexFiles.set(indexFile, new Map());
 			return { code: 0, stdout: "", stderr: "" };
@@ -2522,6 +2556,8 @@ export class HarnessWorld {
 			 * fire only once the scenario binds the session (`bindExtensions`), as production modes do.
 			 */
 			readonly extensionFactories?: readonly ExtensionFactory[];
+			/** An already-loaded caller resource owner, transferred to the actual SDK session without another factory load. */
+			readonly resourceLoader?: ResourceLoader;
 			/**
 			 * This creation's closing sink in place of the world's warnings. `null` passes none, so a creation that fails after construction carries
 			 * its held closing warnings on the failure.
@@ -2569,6 +2605,12 @@ export class HarnessWorld {
 		this.closeSystemOneWindow(sessionManager, intentBefore);
 		this.systemOneWindows.set(sessionManager, { enabled: systemOneEnabled, before: intentBefore });
 		const agentDir = options.agentDir ?? this.agentDir;
+		if (
+			options.resourceLoader !== undefined &&
+			(options.extensionFactories !== undefined || options.extensionReadFailure !== undefined)
+		) {
+			throw new Error("A supplied harness resource loader cannot also request fixture-owned extension loading.");
+		}
 		// A supplied loader is not reloaded by createAgentSession, and only reload() runs the extension factories: load them here,
 		// as the SDK does for the loader it builds itself. The session still has to be bound (bindExtensions) to emit session_start.
 		let extensionLoader: DefaultResourceLoader | undefined;
@@ -2607,7 +2649,9 @@ export class HarnessWorld {
 			modelRegistry: this.modelRegistry,
 			settingsManager,
 			sessionManager,
-			...(extensionLoader === undefined ? {} : { resourceLoader: extensionLoader }),
+			...(options.resourceLoader === undefined && extensionLoader === undefined
+				? {}
+				: { resourceLoader: options.resourceLoader ?? extensionLoader }),
 			...(options.executionLoopMode === undefined ? {} : { executionLoopMode: options.executionLoopMode }),
 			...(options.maxRetainedTerminalTasks === undefined
 				? {}
@@ -3467,29 +3511,33 @@ export async function runDiscardThroughRuntime(world: HarnessWorld): Promise<Dis
 	const { trace } = world;
 	const routed: string[] = [];
 	const runtime = await createAgentSessionRuntime(
-		async ({ cwd, agentDir, sessionManager }) => {
-			const root = await world.createRootSession("root", {
-				agentDir,
-				sessionManager,
-				settings: { memorySystem: "okf", autoLearn: { enabled: false } },
-			});
-			return {
-				session: root.session,
-				sessionManager: root.sessionManager,
-				getExtensionRunner: root.getExtensionRunner,
-				extensionsResult: root.extensionsResult,
-				services: {
-					cwd,
-					agentDir,
-					authStorage: world.authStorage,
-					settingsManager: root.settingsManager,
-					modelRegistry: world.modelRegistry,
-					resourceLoader: root.session.resourceLoader,
-					diagnostics: [],
+		async ({ cwd, agentDir }) =>
+			prepareAgentSessionRuntime({
+				activate: async (freshManager) => {
+					const root = await world.createRootSession("root", {
+						agentDir,
+						sessionManager: freshManager,
+						settings: { memorySystem: "okf", autoLearn: { enabled: false } },
+					});
+					return {
+						session: root.session,
+						sessionManager: root.sessionManager,
+						getExtensionRunner: root.getExtensionRunner,
+						extensionsResult: root.extensionsResult,
+						services: {
+							cwd,
+							agentDir,
+							authStorage: world.authStorage,
+							settingsManager: root.settingsManager,
+							modelRegistry: world.modelRegistry,
+							resourceLoader: root.session.resourceLoader,
+							diagnostics: [],
+						},
+						diagnostics: [],
+					};
 				},
-				diagnostics: [],
-			};
-		},
+				dispose: () => {},
+			}),
 		{
 			cwd: HARNESS_PROJECT_CWD,
 			agentDir: world.agentDir,
@@ -5738,37 +5786,43 @@ async function unwrittenForkWitness(world: HarnessWorld): Promise<SdkConstructio
 	let copiedPaidRowsAtConstruction = 0;
 	const routed: string[] = [];
 	const runtime = await createAgentSessionRuntime(
-		async ({ cwd, agentDir, sessionManager }) => {
-			if (sessionManager.getSessionId() !== reopened.getSessionId()) {
-				candidateFile = sessionManager.getSessionFile();
-				absentAtRuntimeConstruction = candidateFile !== undefined && !world.io.existsSync(candidateFile);
-				copiedPaidRowsAtConstruction = sessionManager
-					.getEntries()
-					.filter((entry) => entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE).length;
-			}
-			const root = await world.createRootSession("root", {
-				agentDir,
-				sessionManager,
-				systemOneEnabled: false,
-				settings: { memorySystem: "okf", autoLearn: { enabled: false } },
-			});
-			return {
-				session: root.session,
-				sessionManager: root.sessionManager,
-				getExtensionRunner: root.getExtensionRunner,
-				extensionsResult: root.extensionsResult,
-				services: {
-					cwd,
-					agentDir,
-					authStorage: world.authStorage,
-					settingsManager: root.settingsManager,
-					modelRegistry: world.modelRegistry,
-					resourceLoader: root.session.resourceLoader,
-					diagnostics: [],
+		async ({ cwd, agentDir }) =>
+			prepareAgentSessionRuntime({
+				activate: async (freshManager) => {
+					if (freshManager.getSessionId() !== reopened.getSessionId()) {
+						candidateFile = freshManager.getSessionFile();
+						absentAtRuntimeConstruction = candidateFile !== undefined && !world.io.existsSync(candidateFile);
+						copiedPaidRowsAtConstruction = freshManager
+							.getEntries()
+							.filter(
+								(entry) => entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE,
+							).length;
+					}
+					const root = await world.createRootSession("root", {
+						agentDir,
+						sessionManager: freshManager,
+						systemOneEnabled: false,
+						settings: { memorySystem: "okf", autoLearn: { enabled: false } },
+					});
+					return {
+						session: root.session,
+						sessionManager: root.sessionManager,
+						getExtensionRunner: root.getExtensionRunner,
+						extensionsResult: root.extensionsResult,
+						services: {
+							cwd,
+							agentDir,
+							authStorage: world.authStorage,
+							settingsManager: root.settingsManager,
+							modelRegistry: world.modelRegistry,
+							resourceLoader: root.session.resourceLoader,
+							diagnostics: [],
+						},
+						diagnostics: [],
+					};
 				},
-				diagnostics: [],
-			};
-		},
+				dispose: () => {},
+			}),
 		{
 			cwd: HARNESS_PROJECT_CWD,
 			agentDir: world.agentDir,
@@ -6352,29 +6406,33 @@ export async function runRpcHost(
 		sinkWarnings.push(...released);
 	});
 	const runtime = await createAgentSessionRuntime(
-		async ({ cwd, agentDir, sessionManager }) => {
-			const root = await world.createRootSession("root", {
-				agentDir,
-				sessionManager,
-				settings: { memorySystem: "okf", autoLearn: { enabled: false } },
-			});
-			return {
-				session: root.session,
-				sessionManager: root.sessionManager,
-				getExtensionRunner: root.getExtensionRunner,
-				extensionsResult: root.extensionsResult,
-				services: {
-					cwd,
-					agentDir,
-					authStorage: world.authStorage,
-					settingsManager: root.settingsManager,
-					modelRegistry: world.modelRegistry,
-					resourceLoader: root.session.resourceLoader,
-					diagnostics: [],
+		async ({ cwd, agentDir }) =>
+			prepareAgentSessionRuntime({
+				activate: async (freshManager) => {
+					const root = await world.createRootSession("root", {
+						agentDir,
+						sessionManager: freshManager,
+						settings: { memorySystem: "okf", autoLearn: { enabled: false } },
+					});
+					return {
+						session: root.session,
+						sessionManager: root.sessionManager,
+						getExtensionRunner: root.getExtensionRunner,
+						extensionsResult: root.extensionsResult,
+						services: {
+							cwd,
+							agentDir,
+							authStorage: world.authStorage,
+							settingsManager: root.settingsManager,
+							modelRegistry: world.modelRegistry,
+							resourceLoader: root.session.resourceLoader,
+							diagnostics: [],
+						},
+						diagnostics: [],
+					};
 				},
-				diagnostics: [],
-			};
-		},
+				dispose: () => {},
+			}),
 		{
 			cwd: HARNESS_PROJECT_CWD,
 			agentDir: world.agentDir,

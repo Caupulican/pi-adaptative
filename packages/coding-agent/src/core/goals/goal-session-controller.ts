@@ -17,9 +17,12 @@ import {
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import { GoalLoopController } from "../goal-loop-controller.ts";
+import {
+	assertCurrentGoalObjective,
+	ObjectiveExecutionInterruptedError,
+} from "../objective-execution/current-objective-execution.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "../objective-execution/index.ts";
 import type { ObjectiveExecutionControllerDeps } from "../objective-execution/objective-execution-controller.ts";
-import { ObjectiveExecutionInterruptedError } from "../objective-execution/objective-execution-controller.ts";
 import type { ObjectiveTerminalResult } from "../objective-execution/objective-route.ts";
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
@@ -608,7 +611,8 @@ export class GoalSessionController {
 		const ownerEpoch = this.deps.getForegroundSubmissionEpoch();
 		if (ownerEpoch === undefined) throw new Error("Goal execution attribution needs a foreground submission");
 		const state = this.getState();
-		if (goalId && (!state || state.goalId !== goalId || !isGoalExecutionActive(state.status))) return undefined;
+		if (goalId) assertCurrentGoalObjective(goalObjectiveId(goalId), state);
+		if (goalId && (!state || !isGoalExecutionActive(state.status))) return undefined;
 		const lease: MutableGoalExecutionLease = {
 			ownerEpoch,
 			...(goalId ? { goalId } : {}),
@@ -978,15 +982,18 @@ export class GoalSessionController {
 		return {
 			execute: async (route, signal) => {
 				signal?.throwIfAborted();
+				const goal = assertCurrentGoalObjective(route.objective_id, this.getState());
 				const firstTurnEntryIndex = this.deps.getSessionManager().getEntryCount();
-				this.primaryRootTurns++;
 				this.lastPrimaryTurnOutcome = undefined;
 				await this.deps.prompt(buildObjectiveRoutePrompt(route).text, {
 					expandPromptTemplates: false,
 					processSlashCommands: false,
 					autoContinueGoal: false,
 					internalContextType: GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
-					goalExecutionId: this.getState()?.goalId,
+					goalExecutionId: goal?.goalId,
+					preflightResult: (accepted) => {
+						if (accepted) this.primaryRootTurns++;
+					},
 				});
 				const outcome = this.getContinuationTurnOutcome(firstTurnEntryIndex);
 				this.lastPrimaryTurnOutcome = outcome.outcome;
@@ -1192,7 +1199,7 @@ export class GoalSessionController {
 			const submitted = this.primaryRootTurns > before;
 			return {
 				result: { submitted, snapshot: snapshot(), ...(submitted ? { turnOutcome: "interrupted" as const } : {}) },
-				disposed: true,
+				disposed: error.reason === "session_disposed",
 			};
 		}
 	}

@@ -22,6 +22,8 @@ export {
 	type CreateAgentSessionRuntimeResult,
 	CreatedSessionFailure,
 	createAgentSessionRuntime,
+	type PreparedAgentSessionRuntime,
+	prepareAgentSessionRuntime,
 	SessionReplacementCallbackError,
 	SessionReplacementRuntimeError,
 } from "./agent-session-runtime.ts";

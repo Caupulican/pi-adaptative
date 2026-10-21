@@ -159,69 +159,78 @@ export async function createAgentSessionServices(
 		agentDir,
 		settingsManager,
 	});
-	await resourceLoader.reload();
+	try {
+		await resourceLoader.reload();
 
-	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
-	const extensionsResult = resourceLoader.getExtensions();
-	const activeProfileNames = settingsManager.getActiveResourceProfileNames();
-	const runtimeExtensionPaths = new Set(
-		extensionsResult.extensions
-			.filter((extension) => {
-				if (extension.sourceInfo.source === "inline") return true;
-				if (isDefaultOnBundledExtension(extension.path, extension.sourceInfo.source)) {
-					return isExtensionPathAllowedForImport(
-						settingsManager,
-						extension.path,
-						"default-on",
-						extension.sourceInfo.baseDir,
+		const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
+		const extensionsResult = resourceLoader.getExtensions();
+		const activeProfileNames = settingsManager.getActiveResourceProfileNames();
+		const runtimeExtensionPaths = new Set(
+			extensionsResult.extensions
+				.filter((extension) => {
+					if (extension.sourceInfo.source === "inline") return true;
+					if (isDefaultOnBundledExtension(extension.path, extension.sourceInfo.source)) {
+						return isExtensionPathAllowedForImport(
+							settingsManager,
+							extension.path,
+							"default-on",
+							extension.sourceInfo.baseDir,
+						);
+					}
+					return (
+						activeProfileNames.length > 0 &&
+						settingsManager.isResourceAllowedByProfile("extensions", extension.path, extension.sourceInfo.baseDir)
 					);
+				})
+				.map((extension) => extension.path),
+		);
+		for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
+			// Initial model resolution needs providers before AgentSession binds its runner, but it must
+			// observe the same UAC-filtered extension generation as RuntimeBuilder. Registrations from
+			// withheld extensions remain inert and are discarded with the pending queue below.
+			if (!runtimeExtensionPaths.has(extensionPath)) continue;
+			try {
+				modelRegistry.registerProvider(name, config);
+				let ownedProviders = extensionsResult.runtime.providersByExtension.get(extensionPath);
+				if (!ownedProviders) {
+					ownedProviders = new Set();
+					extensionsResult.runtime.providersByExtension.set(extensionPath, ownedProviders);
 				}
-				return (
-					activeProfileNames.length > 0 &&
-					settingsManager.isResourceAllowedByProfile("extensions", extension.path, extension.sourceInfo.baseDir)
-				);
-			})
-			.map((extension) => extension.path),
-	);
-	for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
-		// Initial model resolution needs providers before AgentSession binds its runner, but it must
-		// observe the same UAC-filtered extension generation as RuntimeBuilder. Registrations from
-		// withheld extensions remain inert and are discarded with the pending queue below.
-		if (!runtimeExtensionPaths.has(extensionPath)) continue;
-		try {
-			modelRegistry.registerProvider(name, config);
-			let ownedProviders = extensionsResult.runtime.providersByExtension.get(extensionPath);
-			if (!ownedProviders) {
-				ownedProviders = new Set();
-				extensionsResult.runtime.providersByExtension.set(extensionPath, ownedProviders);
+				ownedProviders.add(name);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				diagnostics.push({
+					type: "error",
+					message: `Extension "${extensionPath}" error: ${message}`,
+				});
 			}
-			ownedProviders.add(name);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			diagnostics.push({
-				type: "error",
-				message: `Extension "${extensionPath}" error: ${message}`,
-			});
 		}
-	}
-	extensionsResult.runtime.pendingProviderRegistrations = [];
-	diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
-	// A worker's tool-grant extension runs whole but only its granted tools take effect; name what it asked for
-	// beyond that so the narrowing is visible, not silent.
-	for (const extension of extensionsResult.extensions) {
-		const ignored = describeToolOnlyIgnored(extension);
-		if (ignored) diagnostics.push({ type: "warning", message: ignored });
-	}
+		extensionsResult.runtime.pendingProviderRegistrations = [];
+		diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
+		// A worker's tool-grant extension runs whole but only its granted tools take effect; name what it asked for
+		// beyond that so the narrowing is visible, not silent.
+		for (const extension of extensionsResult.extensions) {
+			const ignored = describeToolOnlyIgnored(extension);
+			if (ignored) diagnostics.push({ type: "warning", message: ignored });
+		}
 
-	return {
-		cwd,
-		agentDir,
-		authStorage,
-		settingsManager,
-		modelRegistry,
-		resourceLoader,
-		diagnostics,
-	};
+		return {
+			cwd,
+			agentDir,
+			authStorage,
+			settingsManager,
+			modelRegistry,
+			resourceLoader,
+			diagnostics,
+		};
+	} catch (error) {
+		try {
+			await resourceLoader.dispose();
+		} catch (cleanupError) {
+			throw new AggregateError([error, cleanupError], "Session service preparation and cleanup failed.");
+		}
+		throw error;
+	}
 }
 
 /**

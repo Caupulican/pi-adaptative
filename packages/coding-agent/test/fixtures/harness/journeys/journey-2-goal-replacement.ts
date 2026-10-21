@@ -42,13 +42,30 @@ const TURN_JUDGMENTS = {
 	next_status: { kind: "choice", choice: "continue", confidence: 0.97 },
 } as const;
 
+// The completed cancel/start control in CI asks none of these three judgments for B's turn.
+const {
+	claim_supported: _claimSupported,
+	patch_matches_requirements: _patchMatchesRequirements,
+	side_effects_acceptable: _sideEffectsAcceptable,
+	...REPLACEMENT_TURN_JUDGMENTS
+} = TURN_JUDGMENTS;
+
 /** Extend journey 2's goal orchestration across a late route judgment and a real goal replacement. */
 export async function verifyGoalReplacementDuringRoute(world: HarnessWorld): Promise<void> {
 	for (const directReplacement of [false, true]) await verifyReplacementVariant(world, directReplacement);
+	await verifyReplacementVariant(world, true, true);
 }
 
-async function verifyReplacementVariant(world: HarnessWorld, directReplacement: boolean): Promise<void> {
-	const label = directReplacement ? "goal-direct-replacement-during-route" : "goal-cancel-start-during-route";
+async function verifyReplacementVariant(
+	world: HarnessWorld,
+	directReplacement: boolean,
+	holdAtPreflight = false,
+): Promise<void> {
+	const label = holdAtPreflight
+		? "goal-direct-replacement-during-preflight"
+		: directReplacement
+			? "goal-direct-replacement-during-route"
+			: "goal-cancel-start-during-route";
 	const agentDir = `${world.agentDir}-${label}`;
 	const manager = world.createSessionManager(agentDir);
 	const now = new Date().toISOString();
@@ -56,13 +73,29 @@ async function verifyReplacementVariant(world: HarnessWorld, directReplacement: 
 		manager,
 		createGoalState({ goalId: `${label}-a`, userGoal: "Inspect the first source boundary.", now }),
 	);
+	const routeReached = createBarrier();
+	const releaseRoute = createBarrier();
+	let preflightArmed = false;
+	const extensionErrors: string[] = [];
 	const { session } = await world.createRootSession("root", {
 		agentDir,
 		sessionManager: manager,
 		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
+		extensionFactories: [
+			(pi) => {
+				pi.on("before_agent_start", async () => {
+					if (!preflightArmed) return;
+					preflightArmed = false;
+					routeReached.release();
+					await releaseRoute.promise;
+				});
+			},
+		],
 	});
-	const routeReached = createBarrier();
-	const releaseRoute = createBarrier();
+	await session.bindExtensions({
+		uiContext: world.humanInput.ui,
+		onError: (error) => extensionErrors.push(error.error),
+	});
 	let oldPass: ReturnType<typeof session.continueGoalOnce> | undefined;
 	const failures: unknown[] = [];
 	try {
@@ -81,20 +114,31 @@ async function verifyReplacementVariant(world: HarnessWorld, directReplacement: 
 		await withDeadline(world.trace, `${label}: A foreground released`, session.waitForForegroundIdle());
 		const beforeRequests = world.provider.requests.length;
 		const beforeEntries = manager.getBranch().length;
+		const pendingContext = `${label}: retained next-turn evidence`;
 		if (world.systemOne.enabled) {
-			world.systemOne.enterPhase(`${label}-held-a-route`, ROUTE_JUDGMENTS, {
-				gate: releaseRoute.promise,
-				expect: (request) => {
-					expect(
-						"completion_plausible" in request.questions,
-						`${label}: the held transport is the route judgment`,
-					).toBe(true);
-					expect(JSON.stringify(request.state), `${label}: the judge reads A's objective`).toContain(`${label}-a`);
-				},
-				onAdmit: () => routeReached.release(),
-			});
+			if (holdAtPreflight) {
+				await session.sendCustomMessage(
+					{ customType: "goal-replacement-context", content: pendingContext, display: false },
+					{ deliverAs: "nextTurn" },
+				);
+				preflightArmed = true;
+				world.systemOne.enterPhase(`${label}-held-a-preflight`, ROUTE_JUDGMENTS);
+			} else
+				world.systemOne.enterPhase(`${label}-held-a-route`, ROUTE_JUDGMENTS, {
+					gate: releaseRoute.promise,
+					expect: (request) => {
+						expect(
+							"completion_plausible" in request.questions,
+							`${label}: the held transport is the route judgment`,
+						).toBe(true);
+						expect(JSON.stringify(request.state), `${label}: the judge reads A's objective`).toContain(
+							`${label}-a`,
+						);
+					},
+					onAdmit: () => routeReached.release(),
+				});
 			oldPass = session.continueGoalOnce({ maxStallTurns: 3 });
-			await withDeadline(world.trace, `${label}: A route reaches real transport`, routeReached.promise);
+			await withDeadline(world.trace, `${label}: A reaches the held production boundary`, routeReached.promise);
 		}
 		const current = session.getGoalStateSnapshot();
 		if (current === undefined) throw new Error(`${label}: no goal A to cancel`);
@@ -117,7 +161,7 @@ async function verifyReplacementVariant(world: HarnessWorld, directReplacement: 
 		expect(world.provider.requests, `${label}: replacement needs no provider turn`).toHaveLength(beforeRequests);
 		// A held transport request answers from its captured phase. B's script is ready before it
 		// settles, so an unintended old turn is observed as a real request rather than an unscripted-I/O failure.
-		world.systemOne.enterPhase(`${label}-b-control`, TURN_JUDGMENTS);
+		world.systemOne.enterPhase(`${label}-b-control`, REPLACEMENT_TURN_JUDGMENTS);
 		const answer = "The second boundary remains under inspection.";
 		world.provider.enqueue("root", text(`${label}-b-control`, answer));
 		releaseRoute.release();
@@ -164,6 +208,15 @@ async function verifyReplacementVariant(world: HarnessWorld, directReplacement: 
 			outcome: "completed",
 		});
 		await withDeadline(world.trace, `${label}: B foreground released`, session.waitForForegroundIdle());
+		if (holdAtPreflight && world.systemOne.enabled) {
+			const request = world.provider.requests[beforeRequests];
+			expect(request, `${label}: B owns the preserved context request`).toBeDefined();
+			expect(
+				JSON.stringify(request?.context.messages).split(pendingContext).length - 1,
+				`${label}: refused A consumes no next-turn evidence; B receives it once`,
+			).toBe(1);
+		}
+		expect(extensionErrors, `${label}: actual lifecycle hook reports no errors`).toEqual([]);
 		expect(world.provider.requests, `${label}: B submits exactly one normal continuation`).toHaveLength(
 			beforeRequests + 1,
 		);

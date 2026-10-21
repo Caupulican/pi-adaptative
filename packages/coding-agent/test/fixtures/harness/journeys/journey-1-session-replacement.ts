@@ -3,6 +3,7 @@ import { expect } from "vitest";
 import {
 	type CreateAgentSessionRuntimeResult,
 	createAgentSessionRuntime,
+	prepareAgentSessionRuntime,
 } from "../../../../src/core/agent-session-runtime.ts";
 import {
 	BACKGROUND_TOOL_TASK_CUSTOM_TYPE,
@@ -30,40 +31,43 @@ export async function verifySessionReplacementTerminalIdentity(world: HarnessWor
 		const candidateTrack = `${label}-unavailable`;
 		let taskId: string | undefined;
 		let creations = 0;
-		let candidate: CreateAgentSessionRuntimeResult | undefined;
+		let activations = 0;
 		const terminalRequests: string[][] = [];
 		world.systemOne.enterPhase(label, {});
 		const routedWarnings: string[] = [];
 		const runtime = await createAgentSessionRuntime(
-			async ({ cwd, agentDir: directory, sessionManager }) => {
-				const root = await world.createRootSession("worker-b", {
-					agentDir: directory,
-					sessionManager,
-					// Host identity and persistence are independent of semantic classification; both world modes use this binding.
-					systemOneEnabled: false,
-					settings: { memorySystem: "okf", autoLearn: { enabled: false } },
-				});
-				const result: CreateAgentSessionRuntimeResult = {
-					...root,
-					services: {
-						cwd,
-						agentDir: directory,
-						authStorage: world.authStorage,
-						settingsManager: root.settingsManager,
-						modelRegistry: world.modelRegistry,
-						resourceLoader: root.session.resourceLoader,
-						diagnostics: [],
-					},
-					diagnostics: [],
-				};
+			async ({ cwd, agentDir: directory }) => {
 				creations++;
 				if (creations === 2) {
-					candidate = result;
-					await root.session.waitForForegroundIdle();
 					prepared.release();
 					await prepareRelease.promise;
 				}
-				return result;
+				return prepareAgentSessionRuntime({
+					activate: async (sessionManager): Promise<CreateAgentSessionRuntimeResult> => {
+						activations++;
+						const root = await world.createRootSession("worker-b", {
+							agentDir: directory,
+							sessionManager,
+							// Host identity and persistence are independent of semantic classification; both world modes use this binding.
+							systemOneEnabled: false,
+							settings: { memorySystem: "okf", autoLearn: { enabled: false } },
+						});
+						return {
+							...root,
+							services: {
+								cwd,
+								agentDir: directory,
+								authStorage: world.authStorage,
+								settingsManager: root.settingsManager,
+								modelRegistry: world.modelRegistry,
+								resourceLoader: root.session.resourceLoader,
+								diagnostics: [],
+							},
+							diagnostics: [],
+						};
+					},
+					dispose: () => {},
+				});
 			},
 			{
 				cwd: HARNESS_PROJECT_CWD,
@@ -138,11 +142,11 @@ export async function verifySessionReplacementTerminalIdentity(world: HarnessWor
 				await withDeadline(world.trace, `${label}: actual terminal settled`, original.waitForForegroundIdle());
 			}
 			replacement = runtime.switchSession(file);
-			// Observe the real factory after construction/recovery and before commit can retire the original session.
+			// Hold actual resource preparation before retirement; SDK recovery starts only after that handoff.
 			await withDeadline(world.trace, `${label}: replacement preparation held`, prepared.promise);
-			if (!candidate) throw new Error(`${label}: prepared runtime is absent`);
 			const originalAtPrepare = original.getResourceSnapshot().backgroundToolTasks;
-			const candidateAtPrepare = selectTask(candidate.sessionManager);
+			const candidateAtPrepare = { activations };
+			expect(activations, "preparation has not constructed a second recovery owner").toBe(1);
 			if (order === "completed-during-prepare") {
 				expect(originalAtPrepare.physicalExecutions, "the original executor is live during preparation").toBe(1);
 				expect(originalAtPrepare.runningTaskIds).toEqual([taskId]);
@@ -153,6 +157,7 @@ export async function verifySessionReplacementTerminalIdentity(world: HarnessWor
 			const actual = selectTask(originalManager);
 			prepareRelease.release();
 			expect(await withDeadline(world.trace, `${label}: switch settles`, replacement)).toEqual({ cancelled: false });
+			expect(activations, "the replacement activates exactly once after retirement").toBe(2);
 			await withDeadline(world.trace, `${label}: active session settled`, runtime.session.waitForForegroundIdle());
 			const reopened = SessionManager.open(file, agentDir);
 			const observations = {

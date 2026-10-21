@@ -6,6 +6,8 @@
  *
  * The important pattern is: after the runtime replaces the active session,
  * rebind any session-local subscriptions and extension bindings to `runtime.session`.
+ * Prepare cwd-bound services first; construct the session only in activate(),
+ * using the manager supplied after the previous session has retired.
  */
 
 import {
@@ -14,20 +16,24 @@ import {
 	createAgentSessionRuntime,
 	createAgentSessionServices,
 	getAgentDir,
+	prepareAgentSessionRuntime,
 	SessionManager,
 } from "@caupulican/pi-adaptative";
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-	const services = await createAgentSessionServices({ cwd });
-	return {
-		...(await createAgentSessionFromServices({
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionStartEvent }) => {
+	const services = await createAgentSessionServices({ cwd, agentDir });
+	return prepareAgentSessionRuntime({
+		activate: async (sessionManager) => ({
+			...(await createAgentSessionFromServices({
+				services,
+				sessionManager,
+				sessionStartEvent,
+			})),
 			services,
-			sessionManager,
-			sessionStartEvent,
-		})),
-		services,
-		diagnostics: services.diagnostics,
-	};
+			diagnostics: services.diagnostics,
+		}),
+		dispose: () => services.resourceLoader.dispose?.(),
+	});
 };
 const runtime = await createAgentSessionRuntime(createRuntime, {
 	cwd: process.cwd(),

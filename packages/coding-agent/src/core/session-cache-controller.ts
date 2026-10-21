@@ -35,6 +35,7 @@ import type { WorkerResponseObservation } from "./delegation/worker-attempt-exec
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import type { ContextUsage } from "./extensions/index.ts";
 import { buildObjectiveRoutePrompt } from "./goals/goal-continuation-prompt.ts";
+import type { GoalState } from "./goals/goal-state.ts";
 import {
 	formatGatheredEvidence,
 	GATHERED_EVIDENCE_CUSTOM_TYPE,
@@ -43,6 +44,7 @@ import {
 	minionInstructions,
 } from "./minion-gathering.ts";
 import { sideTripBrief } from "./model-router/side-trip-brief.ts";
+import { assertCurrentGoalObjective } from "./objective-execution/current-objective-execution.ts";
 import type { ObjectiveRoute } from "./objective-execution/objective-route.ts";
 import type { CacheDecisionRow, DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import { latestRequestSnapshot } from "./request-snapshot-fingerprints.ts";
@@ -72,10 +74,13 @@ export interface SessionCacheControllerDeps {
 	refreshBaseSystemPrompt(): void;
 	resetSanitizerPrefixHorizon(): void;
 	previewWorkerModel(): Model<Api> | undefined;
-	getGoalUserGoal(): string | undefined;
+	getGoalState(): GoalState | undefined;
 	executeObjectiveRootRoute(route: ObjectiveRoute, signal?: AbortSignal): Promise<unknown>;
 	runWorkerDelegationOnce(request: WorkerDelegationRequest): Promise<WorkerDelegationRunOutcome>;
-	sendNextTurnCustomMessage(message: { customType: string; content: string; display: boolean }): Promise<void>;
+	sendNextTurnCustomMessage(
+		message: { customType: string; content: string; display: boolean },
+		assertCurrent: () => void,
+	): Promise<void>;
 	/** Reports a host failure the session keeps running through. */
 	warn(message: string): void;
 }
@@ -470,7 +475,8 @@ export class SessionCacheController {
 	 * record on its next turn.
 	 */
 	async retrieveForObjective(route: ObjectiveRoute, signal?: AbortSignal): Promise<"root" | "worker"> {
-		const objective = this.deps.getGoalUserGoal() ?? route.objective_id;
+		const goal = assertCurrentGoalObjective(route.objective_id, this.deps.getGoalState());
+		const objective = goal?.userGoal ?? route.objective_id;
 		const questions = gatheringQuestions(objective, route.target_requirement_ids ?? []);
 		const executor = this.chooseRetrieveExecutor(route, questions);
 		// Recorded before the route runs, so an interrupted route still teaches its request count.
@@ -481,7 +487,9 @@ export class SessionCacheController {
 		}
 		const reports = await gatherWithMinions(questions, async (question) => {
 			signal?.throwIfAborted();
+			assertCurrentGoalObjective(route.objective_id, this.deps.getGoalState());
 			const run = await this.deps.runWorkerDelegationOnce({
+				objectiveId: route.objective_id,
 				instructions: minionInstructions(question),
 				authority: { readOnly: true },
 				forkTurns: "none",
@@ -494,11 +502,14 @@ export class SessionCacheController {
 				? { question, accepted: true, summary: run.outcome.claim.summary }
 				: { question, accepted: false, reason: run.outcome.reasonCode };
 		});
-		await this.deps.sendNextTurnCustomMessage({
-			customType: GATHERED_EVIDENCE_CUSTOM_TYPE,
-			content: formatGatheredEvidence(reports, MAX_DELEGATE_STATUS_OUTPUT_BYTES),
-			display: true,
-		});
+		await this.deps.sendNextTurnCustomMessage(
+			{
+				customType: GATHERED_EVIDENCE_CUSTOM_TYPE,
+				content: formatGatheredEvidence(reports, MAX_DELEGATE_STATUS_OUTPUT_BYTES),
+				display: true,
+			},
+			() => assertCurrentGoalObjective(route.objective_id, this.deps.getGoalState()),
+		);
 		return "worker";
 	}
 }

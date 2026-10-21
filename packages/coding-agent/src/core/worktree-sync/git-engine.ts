@@ -590,6 +590,12 @@ async function reconcileLandingTransaction(
 			message: `landing transaction is ambiguous: main is ${currentMainSha?.slice(0, 12) ?? "missing"}, expected prior ${transaction.priorMainSha.slice(0, 12)} or tested ${transaction.testedTipSha.slice(0, 12)}`,
 		};
 	}
+	if (transaction.stage === "ready_to_merge") {
+		const refresh = await refreshLandedHub(deps, ctx, transaction);
+		if (refresh) return refresh;
+		transaction = { ...transaction, stage: "main_moved" };
+		await writeLandingTransaction(ctx.paths, transaction, ctx.write);
+	}
 
 	const previous = await readEpoch(ctx.paths);
 	let epoch = previous?.epoch ?? 0;
@@ -822,10 +828,13 @@ async function isRebaseActive(deps: WorktreeSyncEngineDeps, worktreePath: string
 		.some((path) => fileExists(deps, path));
 }
 
-/** Paths with local modifications (`status --porcelain`), rename targets included. Capped. */
-async function dirtyPaths(deps: WorktreeSyncEngineDeps, worktreePath: string): Promise<string[]> {
+/** Complete paths with local modifications; unreadable/truncated status is not evidence of cleanliness. */
+async function dirtyPaths(
+	deps: WorktreeSyncEngineDeps,
+	worktreePath: string,
+): Promise<string[] | WorktreeSyncRefusal<"git_error">> {
 	const status = await runGit(deps, worktreePath, ["status", "--porcelain"]);
-	if (status.code !== 0) return [];
+	if (status.code !== 0 || status.stdoutTruncated) return gitError("could not read complete worktree status", status);
 	return status.stdout
 		.split(/\r?\n/)
 		.filter((line) => line.length > 3)
@@ -833,8 +842,57 @@ async function dirtyPaths(deps: WorktreeSyncEngineDeps, worktreePath: string): P
 			const path = line.slice(3);
 			const renameArrow = path.indexOf(" -> ");
 			return renameArrow >= 0 ? path.slice(renameArrow + 4) : path;
-		})
-		.slice(0, 100);
+		});
+}
+
+async function checkHubLandChanges(
+	deps: WorktreeSyncEngineDeps,
+	hubPath: string,
+	changed: ReadonlySet<string>,
+): Promise<WorktreeSyncRefusal<"hub_dirty" | "git_error"> | undefined> {
+	const dirty = await dirtyPaths(deps, hubPath);
+	if (!Array.isArray(dirty)) return dirty;
+	const endangered = dirty.filter((path) => changed.has(path));
+	if (endangered.length === 0) return undefined;
+	return {
+		code: "hub_dirty",
+		message: `hub checkout has local modifications to ${endangered.length} file(s) this land would update; commit/stash them first (G6)`,
+		paths: endangered.slice(0, 50),
+	};
+}
+
+/** Carry local index/worktree changes forward from the actual prior tree, including on transaction replay. */
+async function refreshLandedHub(
+	deps: WorktreeSyncEngineDeps,
+	ctx: RepoContext,
+	transaction: LandingTransaction,
+): Promise<WorktreeSyncRefusal<"git_error"> | undefined> {
+	const incomplete = "main advanced, but its checkout refresh is incomplete; retain the landing record and reconcile";
+	if (!ctx.hubPath) return { code: "git_error", message: `${incomplete}: main has no hub checkout` };
+	const checkedOut = await runGit(deps, ctx.hubPath, ["symbolic-ref", "--short", "HEAD"]);
+	if (checkedOut.code !== 0 || checkedOut.stdout.trim() !== ctx.mainBranch) {
+		return {
+			code: "git_error",
+			message: `${incomplete}: refusing to refresh a checkout outside '${ctx.mainBranch}'`,
+		};
+	}
+	if ((await revParseBranch(deps, ctx.topLevel, ctx.mainBranch)) !== transaction.testedTipSha) {
+		return { code: "git_error", message: `${incomplete}: main no longer names the tested tip` };
+	}
+	// Two-tree merge carries unchanged paths' index entries forward and refuses conflicting local edits. Replaying after
+	// a successful refresh also keeps entries already at the target; reset --merge would erase unrelated staged work.
+	const refresh = await runGit(deps, ctx.hubPath, [
+		"read-tree",
+		"-m",
+		"-u",
+		transaction.priorMainSha,
+		transaction.testedTipSha,
+	]);
+	if (refresh.code !== 0) return gitError(incomplete, refresh);
+	if ((await revParseBranch(deps, ctx.topLevel, ctx.mainBranch)) !== transaction.testedTipSha) {
+		return { code: "git_error", message: `${incomplete}: main changed during checkout refresh` };
+	}
+	return undefined;
 }
 
 async function unmergedFiles(deps: WorktreeSyncEngineDeps, worktreePath: string): Promise<string[]> {
@@ -1029,10 +1087,12 @@ export async function syncLane(deps: WorktreeSyncEngineDeps, args: SyncLaneArgs)
 			return { code: "sync_clean", laneKey: lane.laneKey, alreadyFresh: true, autoContinued: 0 };
 		}
 		if (facts.dirty) {
+			const paths = await dirtyPaths(deps, lane.worktreePath);
+			if (!Array.isArray(paths)) return paths;
 			return {
 				code: "lane_dirty",
 				message: `lane '${lane.laneKey}' has uncommitted changes; commit them on the lane branch, then sync`,
-				paths: await dirtyPaths(deps, lane.worktreePath),
+				paths,
 			};
 		}
 
@@ -1208,6 +1268,7 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 				};
 			}
 			const laneDirty = await dirtyPaths(deps, lane.worktreePath);
+			if (!Array.isArray(laneDirty)) return laneDirty;
 			if (laneDirty.length > 0) {
 				return {
 					code: "lane_dirty",
@@ -1249,16 +1310,9 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 			// G6, overlap-based: an ff merge only touches the land's changed files, and git itself
 			// refuses to clobber local modifications -- so the deterministic pre-check refuses exactly
 			// when hub-dirty paths intersect the incoming change set (not on unrelated hub dirt).
-			const hubDirty = await dirtyPaths(deps, ctx.hubPath);
 			const changedSet = new Set(changed);
-			const endangered = hubDirty.filter((path) => changedSet.has(path));
-			if (endangered.length > 0) {
-				return {
-					code: "hub_dirty",
-					message: `hub checkout has local modifications to ${endangered.length} file(s) this land would update; commit/stash them first (G6)`,
-					paths: endangered.slice(0, 50),
-				};
-			}
+			const hubConflict = await checkHubLandChanges(deps, ctx.hubPath, changedSet);
+			if (hubConflict) return hubConflict;
 
 			if (args.gate === "on") {
 				const gateCommand = (args.gateCommand ?? "").trim();
@@ -1288,6 +1342,8 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 						message: `lane '${lane.laneKey}' changed during the gate (tested ${tipSha.slice(0, 12)}, current ${postGateTip?.slice(0, 12) ?? "missing"}); rerun land`,
 					};
 				}
+				const postGateConflict = await checkHubLandChanges(deps, ctx.hubPath, changedSet);
+				if (postGateConflict) return postGateConflict;
 			}
 
 			const landingTransaction: LandingTransaction = {
@@ -1320,18 +1376,8 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 					message: `main resolved to ${landedSha?.slice(0, 12) ?? "missing"} after the guarded ref update; expected gated tip ${tipSha.slice(0, 12)}`,
 				};
 			}
-			// `update-ref` deliberately leaves a checked-out worktree untouched. Refresh only when
-			// the hub is still on main, preserving unrelated local changes with reset --merge.
-			const checkedOut = await runGit(deps, ctx.hubPath, ["symbolic-ref", "--short", "HEAD"]);
-			if (checkedOut.code !== 0 || checkedOut.stdout.trim() !== ctx.mainBranch) {
-				return {
-					code: "git_error",
-					message: `main advanced safely, but hub checkout is no longer '${ctx.mainBranch}'; refusing to refresh another branch`,
-				};
-			}
-			const refresh = await runGit(deps, ctx.hubPath, ["reset", "--merge", tipSha]);
-			if (refresh.code !== 0)
-				return gitError(`could not refresh hub checkout after landing '${lane.laneKey}'`, refresh);
+			const refresh = await refreshLandedHub(deps, ctx, landingTransaction);
+			if (refresh) return refresh;
 
 			await writeLandingTransaction(ctx.paths, { ...landingTransaction, stage: "main_moved" }, ctx.write);
 			const previous = await readEpoch(ctx.paths);
@@ -1405,7 +1451,9 @@ export async function buildSyncStatus(deps: WorktreeSyncEngineDeps, args: SyncSt
 
 	let hub: { path: string; clean: boolean } | undefined;
 	if (ctx.hubPath) {
-		hub = { path: ctx.hubPath, clean: (await dirtyPaths(deps, ctx.hubPath)).length === 0 };
+		const dirty = await dirtyPaths(deps, ctx.hubPath);
+		if (!Array.isArray(dirty)) return dirty;
+		hub = { path: ctx.hubPath, clean: dirty.length === 0 };
 	}
 
 	const lanes: LaneStatusEntry[] = [];

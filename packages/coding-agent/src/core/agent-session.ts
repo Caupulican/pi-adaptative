@@ -220,9 +220,9 @@ import { ModelAdaptationStore, type ModelToolProbe } from "./models/adaptation-s
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
+import { ObjectiveExecutionInterruptedError } from "./objective-execution/current-objective-execution.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import { RULE_CONFLICT_NOTE } from "./objective-execution/local-commit-delivery.ts";
-import { ObjectiveExecutionInterruptedError } from "./objective-execution/objective-execution-controller.ts";
 import { ObjectiveMutationLedger } from "./objective-execution/objective-mutation-ledger.ts";
 import type { ObjectiveRoute } from "./objective-execution/objective-route.ts";
 import { type TrustedDeployAdapter, TrustedDeployAdapterRegistry } from "./objective-execution/release-delivery.ts";
@@ -655,10 +655,11 @@ export class AgentSession {
 			refreshBaseSystemPrompt: () => this._refreshBaseSystemPrompt(),
 			resetSanitizerPrefixHorizon: () => this.agent.resetSanitizerPrefixHorizon(),
 			previewWorkerModel: () => this._backgroundLanes.previewWorkerModel(),
-			getGoalUserGoal: () => this._goals.getState()?.userGoal,
+			getGoalState: () => this._goals.getState(),
 			executeObjectiveRootRoute: (route, signal) => this._goals.objectiveRootExecutor().execute(route, signal),
 			runWorkerDelegationOnce: (request) => this.runWorkerDelegationOnce(request),
-			sendNextTurnCustomMessage: (message) => this.sendCustomMessage(message, { deliverAs: "nextTurn" }),
+			sendNextTurnCustomMessage: (message, assertCurrent) =>
+				this._sendCustomMessageWithRuntimeLease(message, { deliverAs: "nextTurn" }, undefined, assertCurrent),
 			warn: (message) => this.emitHostWarning(message),
 		});
 		this._edgeIntent = new SessionEdgeIntentController({
@@ -4659,6 +4660,7 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" } | undefined,
 		runtimeLease?: RuntimeWorkLease,
+		assertCurrent?: () => void,
 	): Promise<void> {
 		return this._runtimeAdmission.run(
 			"custom-message",
@@ -4666,6 +4668,7 @@ export class AgentSession {
 			(reader) => this._sendAdmittedCustomMessage(message, options, reader),
 			undefined,
 			runtimeLease,
+			assertCurrent,
 		);
 	}
 

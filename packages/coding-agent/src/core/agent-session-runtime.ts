@@ -35,6 +35,22 @@ export interface CreateAgentSessionRuntimeResult extends CreateAgentSessionResul
 	diagnostics: AgentSessionRuntimeDiagnostic[];
 }
 
+/** Prepared resources have no session recovery effects until the previous session has retired. */
+export interface PreparedAgentSessionRuntime {
+	activate(sessionManager: SessionManager): Promise<CreateAgentSessionRuntimeResult>;
+	dispose(): void | Promise<void>;
+}
+
+interface PreparedReplacement {
+	readonly runtime: PreparedAgentSessionRuntime;
+	readonly sessionManager: SessionManager;
+}
+
+interface FailedReplacement extends PreparedReplacement {
+	readonly result?: CreateAgentSessionRuntimeResult;
+	readonly handedSession?: AgentSession;
+}
+
 interface AgentSessionRuntimeState {
 	session: AgentSession;
 	sessionManager: SessionManager;
@@ -181,6 +197,46 @@ export class CreatedSessionFailure extends Error {
 	}
 }
 
+/** One owner for preparation, activation transfer and cleanup of resources the session never took. */
+export function prepareAgentSessionRuntime(options: PreparedAgentSessionRuntime): PreparedAgentSessionRuntime {
+	let activation: Promise<CreateAgentSessionRuntimeResult> | undefined;
+	let disposal: Promise<void> | undefined;
+	let transferred = false;
+	let closed = false;
+	return {
+		activate(sessionManager) {
+			if (closed || activation)
+				return Promise.reject(new Error("Prepared session runtime activation is unavailable."));
+			activation = Promise.resolve().then(() => options.activate(sessionManager));
+			void activation.then(
+				() => {
+					transferred = true;
+				},
+				(error: unknown) => {
+					if (error instanceof CreatedSessionFailure) transferred = true;
+				},
+			);
+			return activation;
+		},
+		dispose() {
+			if (disposal) return disposal;
+			closed = true;
+			// Publish the join before any external cleanup callback can re-enter this owner.
+			disposal = Promise.resolve().then(async () => {
+				if (activation) {
+					try {
+						await activation;
+					} catch {
+						/* Activation reports its own failure to its caller. */
+					}
+				}
+				if (!transferred) await options.dispose();
+			});
+			return disposal;
+		},
+	};
+}
+
 /**
  * Disposes a session a failed startup handed back. No runtime exists to take its warnings, so they join the error the caller
  * shows; a failed disposal is reported with the cause rather than replacing it.
@@ -226,18 +282,19 @@ interface SessionReplacementCommitOptions {
 }
 
 /**
- * Creates a full runtime for a target cwd and session manager.
+ * Prepares resources for a target cwd without constructing a session.
  *
  * The factory closes over process-global fixed inputs, recreates cwd-bound
- * services for the effective cwd, resolves session options against those
- * services, and finally creates the AgentSession.
+ * services for the effective cwd, and returns deferred activation. Activation
+ * resolves history-sensitive options and creates the AgentSession using its
+ * supplied manager, after the preceding session has retired.
  */
 export type CreateAgentSessionRuntimeFactory = (options: {
 	cwd: string;
 	agentDir: string;
 	sessionManager: SessionManager;
 	sessionStartEvent?: SessionStartEvent;
-}) => Promise<CreateAgentSessionRuntimeResult>;
+}) => Promise<PreparedAgentSessionRuntime>;
 
 /**
  * Thrown when /import references a JSONL file path that does not exist.
@@ -317,8 +374,9 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
 /**
  * Owns the current AgentSession plus its cwd-bound services.
  *
- * Session replacement methods construct the candidate runtime before retiring
- * the current one. If preparation fails, the working session remains active.
+ * Session replacement methods prepare resources before retiring the current
+ * session, then construct its successor. Preparation failure leaves the working
+ * session active.
  */
 export class AgentSessionRuntime implements ActiveSessionContext {
 	private rebindSession?: (session: AgentSession) => Promise<void>;
@@ -578,6 +636,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		created: CreatedSession | undefined,
 		error: unknown,
 		handed?: AgentSession,
+		prepared?: PreparedAgentSessionRuntime,
 	): Promise<void> {
 		const session = error instanceof CreatedSessionFailure ? error.session : handed;
 		const discard = this.beginDiscard({ session, sessionManager, created });
@@ -587,6 +646,16 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				await this.discardPrepared({ session });
 			} catch (failure: unknown) {
 				disposalError = failure;
+			}
+		}
+		if (prepared) {
+			try {
+				await prepared.dispose();
+			} catch (failure: unknown) {
+				disposalError =
+					disposalError === undefined
+						? failure
+						: new AggregateError([disposalError, failure], "Prepared runtime cleanup failed.");
 			}
 		}
 		this.finishDiscard(discard);
@@ -599,19 +668,20 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		}
 	}
 
-	/** Creates the candidate's runtime. A failure discards the candidate (see discardCreatedSession) and is rethrown as the factory raised it. */
+	/** Prepares candidate resources. A failure discards its artifacts and is rethrown as the factory raised it. */
 	private async prepareReplacement(
 		sessionManager: SessionManager,
 		sessionStartEvent: SessionStartEvent,
 		created: CreatedSession | undefined,
-	): Promise<CreateAgentSessionRuntimeResult> {
+	): Promise<PreparedReplacement> {
 		try {
-			return await this.createRuntime({
+			const runtime = await this.createRuntime({
 				cwd: sessionManager.getCwd(),
 				agentDir: this.services.agentDir,
 				sessionManager,
 				sessionStartEvent,
 			});
+			return { runtime, sessionManager };
 		} catch (error: unknown) {
 			await this.discardCreatedSession(sessionManager, created, error);
 			throw unwrapCreation(error);
@@ -619,14 +689,14 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 	}
 
 	private async commitReplacement(
-		result: CreateAgentSessionRuntimeResult,
+		prepared: PreparedReplacement,
 		options: SessionReplacementCommitOptions,
 	): Promise<void> {
 		const previous = this.snapshot();
 		try {
 			await this.teardownCurrent(options.reason, options.targetSessionFile);
 		} catch (transitionError: unknown) {
-			const restore = await this.restorePreviousAfterRuntimeFailure(previous, result, options, false);
+			const restore = await this.restorePreviousAfterRuntimeFailure(previous, prepared, options, false);
 			throw new SessionReplacementRuntimeError(
 				"teardown",
 				transitionError,
@@ -635,11 +705,27 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				restore?.undeliveredWarnings,
 			);
 		}
-		this.apply(result);
+		let result: CreateAgentSessionRuntimeResult | undefined;
 		try {
+			const file = prepared.sessionManager.getSessionFile();
+			// Same-file preparation took a snapshot while the predecessor still owned its writes. Only
+			// reload it after physical retirement, before constructing any branch-bound recovery owner.
+			if (file && file === previous.session.sessionFile && existsSync(file))
+				prepared.sessionManager.setSessionFile(file);
+			result = await prepared.runtime.activate(prepared.sessionManager);
+			this.apply(result);
 			await this.activateReplacement(options);
 		} catch (activationError: unknown) {
-			const restore = await this.restorePreviousAfterRuntimeFailure(previous, result, options, true);
+			const restore = await this.restorePreviousAfterRuntimeFailure(
+				previous,
+				{
+					...prepared,
+					...(result ? { result } : {}),
+					...(activationError instanceof CreatedSessionFailure ? { handedSession: activationError.session } : {}),
+				},
+				options,
+				result !== undefined,
+			);
 			throw new SessionReplacementRuntimeError(
 				"activation",
 				activationError,
@@ -692,21 +778,37 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 
 	private async restorePreviousAfterRuntimeFailure(
 		previous: AgentSessionRuntimeState,
-		failed: CreateAgentSessionRuntimeResult,
+		failed: FailedReplacement,
 		options: SessionReplacementCommitOptions,
 		candidateActivated: boolean,
 	): Promise<RestoreFailure | undefined> {
 		// The candidate's owner handoff is produced when shutdown disposes it: it is routed before that, and delivered once the
 		// restored session is live (the previous session was disposed at the commit boundary).
 		const discard = this.beginDiscard({
-			session: failed.session,
+			session: failed.result?.session ?? failed.handedSession,
 			sessionManager: failed.sessionManager,
 			created: options.createdSession,
 		});
-		const cleanupErrors = await this.shutdownRuntime(failed, options.reason, previous.session.sessionFile, {
-			stopResources: candidateActivated,
-			invalidateHost: candidateActivated,
-		});
+		const cleanupErrors: unknown[] = [];
+		if (failed.result) {
+			cleanupErrors.push(
+				...(await this.shutdownRuntime(failed.result, options.reason, previous.session.sessionFile, {
+					stopResources: candidateActivated,
+					invalidateHost: candidateActivated,
+				})),
+			);
+		} else if (failed.handedSession) {
+			try {
+				await this.discardPrepared({ session: failed.handedSession });
+			} catch (error) {
+				cleanupErrors.push(error);
+			}
+		}
+		try {
+			await failed.runtime.dispose();
+		} catch (error) {
+			cleanupErrors.push(error);
+		}
 		// The old AgentSession was disposed at the commit boundary, but its SessionManager remains the
 		// durable reconstruction source. Restore the old snapshot temporarily so rollback-only artifact
 		// cleanup cannot mistake the failed candidate for the active session.
@@ -718,17 +820,19 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		}
 
 		let restored: CreateAgentSessionRuntimeResult | undefined;
+		let restoration: PreparedAgentSessionRuntime | undefined;
 		try {
-			restored = await this.createRuntime({
+			restoration = await this.createRuntime({
 				cwd: previous.services.cwd,
 				agentDir: previous.services.agentDir,
 				sessionManager: previous.sessionManager,
 				sessionStartEvent: {
 					type: "session_start",
 					reason: "resume",
-					previousSessionFile: failed.session.sessionFile,
+					previousSessionFile: failed.sessionManager.getSessionFile(),
 				},
 			});
+			restored = await restoration.activate(previous.sessionManager);
 			this.apply(restored);
 			if (this.rebindSession) await this.rebindSession(this.session);
 			for (const resource of this.sessionResources) await resource.start(this.session, this);
@@ -742,7 +846,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 					sessionManager: restored.sessionManager,
 				});
 				cleanupErrors.push(
-					...(await this.shutdownRuntime(restored, "resume", failed.session.sessionFile, {
+					...(await this.shutdownRuntime(restored, "resume", failed.sessionManager.getSessionFile(), {
 						stopResources: true,
 						invalidateHost: true,
 					})),
@@ -760,6 +864,13 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 					cleanupErrors.push(disposeError);
 				}
 				this.finishDiscard(handedBack);
+			}
+			if (restoration) {
+				try {
+					await restoration.dispose();
+				} catch (error) {
+					cleanupErrors.push(error);
+				}
 			}
 			this.apply(previous);
 			// No restored session survives this failure: the routed warnings travel with the error the host renders.
@@ -920,16 +1031,13 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		if (options?.setup) {
 			try {
 				await options.setup(prepared.sessionManager);
-				prepared.session.agent.state.messages = prepared.sessionManager.buildSessionContext().messages;
-				// New/replacement session (see "session_start" above): a fresh lineage, never the one
-				// any pre-existing sanitizer mark was tracking.
-				prepared.session.agent.resetSanitizerPrefixHorizon();
 			} catch (error) {
 				await this.discardCreatedSession(
 					sessionManager,
 					{ sessionManager, copyBaseline: undefined },
 					error,
-					prepared.session,
+					undefined,
+					prepared.runtime,
 				);
 				throw error;
 			}
@@ -1133,11 +1241,18 @@ export async function createAgentSessionRuntime(
 ): Promise<AgentSessionRuntime> {
 	assertSessionCwdExists(options.sessionManager, options.cwd);
 	let result: CreateAgentSessionRuntimeResult;
+	let prepared: PreparedAgentSessionRuntime | undefined;
 	try {
-		result = await createRuntime(options);
+		prepared = await createRuntime(options);
+		result = await prepared.activate(options.sessionManager);
 	} catch (error: unknown) {
-		if (error instanceof CreatedSessionFailure) throw await disposeAbandonedSession(error);
-		throw error;
+		const failure = error instanceof CreatedSessionFailure ? await disposeAbandonedSession(error) : error;
+		try {
+			await prepared?.dispose();
+		} catch (cleanupError) {
+			throw new AggregateError([failure, cleanupError], "Session creation and prepared resource cleanup failed.");
+		}
+		throw failure;
 	}
 	return new AgentSessionRuntime(result, createRuntime, options.onTerminalWarnings ?? writeTerminalWarnings);
 }

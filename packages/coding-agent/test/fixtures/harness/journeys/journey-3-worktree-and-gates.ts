@@ -1780,6 +1780,8 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 				"Create the e12 lane, commit its module, and land it through the gate.",
 				"Land the e12 lane again while its gate runs.",
 				"Land the e12 lane once its gate passes.",
+				"Revise the e12 module and recover its checkout record.",
+				"Reconcile the checkout record.",
 			),
 		},
 	);
@@ -1873,6 +1875,172 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		world.git.refSha("refs/heads/pi/wt/e12"),
 	);
 	trace.mark("root", "e12.landed");
+	// E12 persistence (post-CAS): the epoch record fails after main has moved, with the gate ON for both landings. The landing
+	// transaction is the only durable record. Each reconcile is checked against the raw persisted epoch, transaction and event
+	// log: the first on its own, the second against the first's bytes. No session getter stands in for persisted state here.
+	const e12Record = (name: string): string | undefined => {
+		for (const [path, content] of world.io.fileEntries()) {
+			if (basename(path) === name) return content;
+		}
+		return undefined;
+	};
+	const e12EventLog = (): string => e12Record("events.jsonl") ?? "";
+	let e12PreSecond:
+		| { readonly epoch: string | undefined; readonly transaction: string | undefined; readonly events: string }
+		| undefined;
+	const e12Snapshot = () => ({
+		epoch: e12Record("epoch.json"),
+		transaction: e12Record("landing-transaction.json"),
+		events: e12EventLog(),
+	});
+	const e12EpochEvents = (log: string): number =>
+		log.split("\n").filter((line) => line.includes('"event":"epoch_reconciled"')).length;
+	const e12EpochRecord = (): { readonly epoch?: number; readonly mainSha?: string } | undefined => {
+		const text = e12Record("epoch.json");
+		return text === undefined
+			? undefined
+			: (JSON.parse(text) as { readonly epoch?: number; readonly mainSha?: string });
+	};
+	const e12Transaction = (): { readonly stage?: string; readonly testedTipSha?: string } | undefined => {
+		const text = e12Record("landing-transaction.json");
+		return text === undefined
+			? undefined
+			: (JSON.parse(text) as { readonly stage?: string; readonly testedTipSha?: string });
+	};
+	const e12EpochFault = () =>
+		world.io.failNext({
+			name: "e12-epoch-rename-fails",
+			kind: "rename",
+			matches: (operation) => operation.destination?.endsWith("epoch.json") === true,
+			code: "EIO",
+			times: 1,
+		});
+	// A physical carry-forward succeeds, but persisting its completed marker fails. The old ready_to_merge record must
+	// cause reconcile to repeat that same checkout transition before publishing an epoch, preserving live owner input.
+	world.shell.enqueue({ name: "e12-checkout-gate", command: E12_GATE, output: "check passed", exitCode: 0 });
+	world.provider.enqueue(
+		"root",
+		calls("e12-checkout-write", [
+			{
+				id: "e12-checkout-write-1",
+				name: "write",
+				arguments: { path: `${e12LanePath}/src/e12.ts`, content: "export const E12 = 2;\n" },
+			},
+		]),
+		calls("e12-checkout-commit", [
+			{
+				id: "e12-checkout-add-1",
+				name: "worktree_sync",
+				arguments: { action: "git_add", laneKey: "e12", paths: ["src/e12.ts"] },
+			},
+			{
+				id: "e12-checkout-commit-1",
+				name: "worktree_sync",
+				arguments: { action: "git_commit", laneKey: "e12", message: "Revise the E12 module" },
+			},
+		]),
+		calls("e12-checkout-land", [e12LandCall("e12-checkout-land-1")]),
+		text("e12-checkout-read", "The checkout record needs recovery."),
+		calls("e12-checkout-reconcile", [
+			{ id: "e12-checkout-reconcile-1", name: "worktree_sync", arguments: { action: "reconcile" } },
+		]),
+		text("e12-checkout-reconciled", "The checkout record is settled."),
+	);
+	const replayOwnerStaged = "E12 owner index survives checkout recovery.\n";
+	const replayOwnerWorking = `${replayOwnerStaged}Unstaged owner continuation.\n`;
+	world.io.writeFileSync(notesPath, replayOwnerStaged);
+	expect(world.git.run(["add", "--", "src/notes.md"], HARNESS_PROJECT_CWD, {}).code).toBe(0);
+	const replayStagedIndex = ownerNotesIndex();
+	expect(replayStagedIndex, "checkout recovery starts with an actual staged owner blob").toMatch(/^1 M\./);
+	const replayEpochBefore = e12EpochRecord()?.epoch;
+	world.io.failNext({
+		name: "e12-checkout-marker-write-fails",
+		kind: "write",
+		code: "EIO",
+		matches: (operation, data) =>
+			operation.path.includes("landing-transaction.json") && data?.includes('"stage": "main_moved"') === true,
+	});
+	let replayFailure: { readonly error: unknown } | undefined;
+	try {
+		await withDeadline(
+			trace,
+			"E12 physical checkout before marker refusal",
+			session.prompt("Revise the e12 module and recover its checkout record."),
+			120_000,
+		);
+		const replayTip = world.git.refSha("refs/heads/pi/wt/e12");
+		const replayBefore = {
+			fault: world.io.consumedFaults.includes("e12-checkout-marker-write-fails"),
+			transaction: e12Transaction(),
+			main: world.git.refSha("refs/heads/main"),
+			module: String(world.io.readFileSync(projectPath("src", "e12.ts"), "utf8")),
+			epoch: e12EpochRecord()?.epoch,
+			ownerBytes: String(world.io.readFileSync(notesPath, "utf8")),
+			ownerIndex: ownerNotesIndex(),
+			result: e12ToolText("e12-checkout-land-1"),
+		};
+		expect(
+			replayBefore,
+			`physical checkout completed before marker refusal: ${JSON.stringify(replayBefore)}`,
+		).toMatchObject({
+			fault: true,
+			transaction: { stage: "ready_to_merge", testedTipSha: replayTip },
+			main: replayTip,
+			module: "export const E12 = 2;\n",
+			epoch: replayEpochBefore,
+			ownerBytes: replayOwnerStaged,
+			ownerIndex: replayStagedIndex,
+		});
+		expect(replayBefore.result, "a failed completion marker never reports LANDED").not.toContain("LANDED");
+		// An owner continues writing after the first physical refresh. Recovery must keep this distinct working copy too.
+		world.io.writeFileSync(notesPath, replayOwnerWorking);
+		const replayWorkingIndex = ownerNotesIndex();
+		expect(replayWorkingIndex, "the recovery boundary carries staged plus unstaged owner edits").toMatch(/^1 MM/);
+		const replayEventsBefore = e12EventLog();
+		await withDeadline(
+			trace,
+			"E12 ready-to-merge checkout replay",
+			session.prompt("Reconcile the checkout record."),
+			120_000,
+		);
+		expect(
+			e12ToolText("e12-checkout-reconcile-1"),
+			"the actual owner reconciles the retained checkout record",
+		).toContain("reconciled");
+		expect(e12Transaction(), "checkout replay clears its durable transaction").toBeUndefined();
+		expect(e12EpochRecord(), "checkout replay publishes exactly the next epoch for the tested tip").toMatchObject({
+			epoch: (replayEpochBefore ?? 0) + 1,
+			mainSha: replayTip,
+		});
+		expect(
+			e12EpochEvents(e12EventLog()) - e12EpochEvents(replayEventsBefore),
+			"checkout replay emits one epoch recovery event",
+		).toBe(1);
+		expect(world.io.readFileSync(notesPath, "utf8"), "checkout replay preserves the newer unstaged owner bytes").toBe(
+			replayOwnerWorking,
+		);
+		expect(ownerNotesIndex(), "checkout replay preserves the exact staged blob and working-state record").toBe(
+			replayWorkingIndex,
+		);
+		expect(world.git.refSha("refs/heads/main"), "replay does not move main beyond the tested tip").toBe(replayTip);
+	} catch (error) {
+		replayFailure = { error };
+	}
+	let restorationFailure: { readonly error: unknown } | undefined;
+	try {
+		world.io.writeFileSync(notesPath, ownerNotesBefore);
+		const restored = world.git.run(["add", "--", "src/notes.md"], HARNESS_PROJECT_CWD, {});
+		if (restored.code !== 0) throw new Error(`checkout recovery notes restoration failed: ${restored.stderr}`);
+	} catch (error) {
+		restorationFailure = { error };
+	}
+	if (replayFailure && restorationFailure)
+		throw new AggregateError(
+			[replayFailure.error, restorationFailure.error],
+			"checkout recovery and restoration failed",
+		);
+	if (replayFailure) throw replayFailure.error;
+	if (restorationFailure) throw restorationFailure.error;
 	world.shell.enqueue(
 		{
 			name: "e12-persist-gate-first",
@@ -1920,46 +2088,6 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			}
 		},
 	});
-	// E12 persistence (post-CAS): the epoch record fails after main has moved, with the gate ON for both landings. The landing
-	// transaction is the only durable record. Each reconcile is checked against the raw persisted epoch, transaction and event
-	// log: the first on its own, the second against the first's bytes. No session getter stands in for persisted state here.
-	const e12Record = (name: string): string | undefined => {
-		for (const [path, content] of world.io.fileEntries()) {
-			if (basename(path) === name) return content;
-		}
-		return undefined;
-	};
-	const e12EventLog = (): string => e12Record("events.jsonl") ?? "";
-	let e12PreSecond:
-		| { readonly epoch: string | undefined; readonly transaction: string | undefined; readonly events: string }
-		| undefined;
-	const e12Snapshot = () => ({
-		epoch: e12Record("epoch.json"),
-		transaction: e12Record("landing-transaction.json"),
-		events: e12EventLog(),
-	});
-	const e12EpochEvents = (log: string): number =>
-		log.split("\n").filter((line) => line.includes('"event":"epoch_reconciled"')).length;
-	const e12EpochRecord = (): { readonly epoch?: number; readonly mainSha?: string } | undefined => {
-		const text = e12Record("epoch.json");
-		return text === undefined
-			? undefined
-			: (JSON.parse(text) as { readonly epoch?: number; readonly mainSha?: string });
-	};
-	const e12Transaction = (): { readonly stage?: string; readonly testedTipSha?: string } | undefined => {
-		const text = e12Record("landing-transaction.json");
-		return text === undefined
-			? undefined
-			: (JSON.parse(text) as { readonly stage?: string; readonly testedTipSha?: string });
-	};
-	const e12EpochFault = () =>
-		world.io.failNext({
-			name: "e12-epoch-rename-fails",
-			kind: "rename",
-			matches: (operation) => operation.destination?.endsWith("epoch.json") === true,
-			code: "EIO",
-			times: 1,
-		});
 	// The gate stays on for both persistence landings: each runs its scripted gate command at the tested tip before the epoch fails.
 	world.settingsManager.applyOverrides({ worktreeSync: { gate: "on", gateCommand: E12_GATE } });
 	world.systemOne.enterPhase(

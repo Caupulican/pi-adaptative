@@ -18,6 +18,7 @@ import type { GoalState } from "../goals/goal-state.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
+import { assertCurrentGoalObjective } from "./current-objective-execution.ts";
 import type { RepairWork } from "./objective-repair-work.ts";
 import type { StallEvaluation } from "./objective-stall-fingerprint.ts";
 
@@ -92,6 +93,10 @@ export class SessionObjectiveRuntime {
 		return this.deps.runtime.getSnapshot();
 	}
 
+	assertExecutionCurrent(objectiveId: string): void {
+		assertCurrentGoalObjective(objectiveId, this.deps.getGoalState());
+	}
+
 	isCancelled(objectiveId: string): boolean {
 		if (this.goalFor(objectiveId)?.status === "cancelled") return true;
 		return this.deps.runtime.getSnapshot().objectives[objectiveId]?.objective.status === "cancelled";
@@ -105,6 +110,7 @@ export class SessionObjectiveRuntime {
 
 	/** One durable implementer task per repair record; a repeated request is idempotent. */
 	async ensureRepairTasks(objectiveId: string, repairs: readonly RepairWork[]): Promise<void> {
+		this.assertExecutionCurrent(objectiveId);
 		const snapshot = this.deps.runtime.getSnapshot();
 		for (const repair of repairs) {
 			const taskId = repairTaskId(repair);
@@ -124,6 +130,7 @@ export class SessionObjectiveRuntime {
 	}
 
 	async requestReplan(objectiveId: string, stall: StallEvaluation): Promise<void> {
+		this.assertExecutionCurrent(objectiveId);
 		this.deps.noteDecision?.(
 			"replan",
 			`${objectiveId}: ${stall.reason ?? "strategy repeated without new evidence"} (stall turns ${stall.stallTurns})`,
