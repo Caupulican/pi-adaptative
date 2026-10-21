@@ -22,23 +22,29 @@ export async function runManagedReloadRecoveryInteraction(world: HarnessWorld): 
 		const evidence = `Saved ${label} evidence reached the parent exactly once.`;
 		const handoffHeader = `- ${laneId}: succeeded`;
 		const answer = `The parent received ${label}.`;
+		const rollbackReason = `${label}: scripted lifecycle rollback`;
 		const reached = createBarrier();
 		const release = createBarrier();
 		const providerReached = createBarrier();
 		const providerRelease = createBarrier();
-		const errors: string[] = [];
+		const errors: Array<{ event: string; error: string }> = [];
 		const notifications: string[] = [];
 		const warningMark = world.warnings.length;
 		let enabled = ordering === "normal-startup";
 		let backendCalls = 0;
 		let held = false;
 		let exited = false;
+		let rejectNextReload = ordering === "held-reload";
+		let rejectedCandidateDisposals = 0;
+		let reloadLifecycles = 0;
+		let acceptedCandidateExited = false;
 		const owner = await world.createRootSession("root", {
 			agentDir,
 			sessionManager: manager,
 			extensionFactories: [
 				(pi) => {
 					if (!enabled) return;
+					const rejectThisCandidate = rejectNextReload;
 					piCollaborationExtension(pi, {
 						stateDirectory,
 						// This saved process is positively closed. Recovery must publish its retained
@@ -48,12 +54,20 @@ export async function runManagedReloadRecoveryInteraction(world: HarnessWorld): 
 							throw new Error(`${label}: closed native work must not be contacted`);
 						},
 					});
+					pi.onDispose(() => {
+						if (rejectThisCandidate) rejectedCandidateDisposals++;
+					});
 					pi.on("session_start", async (event) => {
 						if (ordering !== "held-reload" || event.reason !== "reload") return;
-						held = true;
-						reached.release();
-						await release.promise;
-						exited = true;
+						reloadLifecycles++;
+						if (rejectThisCandidate) {
+							held = true;
+							reached.release();
+							await release.promise;
+							exited = true;
+							throw new Error(rollbackReason);
+						}
+						acceptedCandidateExited = true;
 					});
 				},
 			],
@@ -94,7 +108,7 @@ export async function runManagedReloadRecoveryInteraction(world: HarnessWorld): 
 		world.provider.enqueue("root", {
 			name: `${label}-parent`,
 			check: (request) => {
-				if (ordering === "held-reload" && !exited)
+				if (ordering === "held-reload" && (!exited || !acceptedCandidateExited || reloadLifecycles !== 2))
 					throw new Error(`${label}: parent provider escaped held replacement`);
 				const matching = request.context.messages.filter((message) =>
 					JSON.stringify(message.content).includes(handoffHeader),
@@ -117,11 +131,15 @@ export async function runManagedReloadRecoveryInteraction(world: HarnessWorld): 
 						world.warnings.push(diagnostic);
 					},
 				} as ExtensionUIContext,
-				onError: (error) => errors.push(error.error),
+				onError: (error) => errors.push({ event: error.event, error: error.error }),
 			});
 			if (ordering === "held-reload") {
 				enabled = true;
-				replacing = owner.session.reload();
+				const rejectedReload = owner.session.reload().then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+				replacing = rejectedReload.then(() => undefined);
 				await withDeadline(world.trace, `${label} reached real lifecycle`, reached.promise);
 				expect(held).toBe(true);
 				expect(exited).toBe(false);
@@ -131,8 +149,35 @@ export async function runManagedReloadRecoveryInteraction(world: HarnessWorld): 
 				});
 				expect(owner.session.getLaneRecords().filter((record) => record.laneId === laneId)).toEqual([]);
 				expect(world.provider.reached.slice(requestsBefore), "no parent provider escapes the writer").toEqual([]);
+				expect(backendCalls, "the held candidate never contacts saved closed work").toBe(0);
+				expect(rejectedCandidateDisposals, "the reached candidate is still alive while held").toBe(0);
 				release.release();
-				await withDeadline(world.trace, `${label} reload settled`, replacing);
+				const rollback = await withDeadline(world.trace, `${label} rejected reload settled`, rejectedReload);
+				expect(
+					rollback instanceof Error ? rollback.message : undefined,
+					"the first reload really rolls back",
+				).toContain(rollbackReason);
+				expect(exited).toBe(true);
+				expect(reloadLifecycles, "only the rejected lifecycle has run").toBe(1);
+				expect(rejectedCandidateDisposals, "rollback physically disposes the candidate retry owner").toBe(1);
+				expect(store.load(jobId).agents[0], "the discarded candidate acknowledges no saved receipt").toMatchObject({
+					closed: true,
+					notifiedDispatchTurn: 0,
+					notifiedTurn: 0,
+				});
+				expect(owner.session.getLaneRecords().filter((record) => record.laneId === laneId)).toEqual([]);
+				expect(owner.session.getWorkerClaimSnapshots().filter((claim) => claim.requestId === laneId)).toEqual([]);
+				expect(world.provider.reached.slice(requestsBefore), "no discarded retry opens a parent turn").toEqual([]);
+				expect(backendCalls, "rollback never replays or reconnects saved closed work").toBe(0);
+				expect(getInFlightWorkUnits(agentDir), "rollback leaves no leaked native ownership").toEqual([]);
+				expect(errors, "the expected lifecycle failure is reported once").toEqual([
+					{ event: "session_start", error: rollbackReason },
+				]);
+				expect(notifications, "discarded retries emit no UI handoff failure").toEqual([]);
+				expect(world.warnings.slice(warningMark), "rollback discloses no unknown lost handoff").toEqual([]);
+				rejectNextReload = false;
+				replacing = owner.session.reload();
+				await withDeadline(world.trace, `${label} successful reload settled`, replacing);
 			}
 			await withDeadline(world.trace, `${label} parent receives saved terminal`, providerReached.promise);
 			expect(store.load(jobId).agents[0], "production recovery acknowledges the exact saved turn").toMatchObject({
@@ -189,7 +234,7 @@ export async function runManagedReloadRecoveryInteraction(world: HarnessWorld): 
 			).toHaveLength(1);
 			expect(manager.inspectSessionLifecycle().balanced).toBe(true);
 			expect(backendCalls, "known closed work is never replayed or reconnected").toBe(0);
-			expect(errors).toEqual([]);
+			expect(errors).toEqual(ordering === "held-reload" ? [{ event: "session_start", error: rollbackReason }] : []);
 			expect(getInFlightWorkUnits(agentDir), "terminal and closure release native work ownership").toEqual([]);
 		} finally {
 			release.release();
