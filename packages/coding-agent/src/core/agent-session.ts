@@ -1375,6 +1375,7 @@ export class AgentSession {
 				if (!this._disposed) this._reconnectToAgent();
 			},
 			abortForeground: () => this.abort("compaction"),
+			assertCanStartManualCompaction: () => this._foregroundRecovery.assertCanStartManualCompaction(),
 			emit: (event) => this._emit(event),
 			estimateCurrentContextTokens: (messages) => this._pipeline.estimateCurrentContextTokens(messages),
 			buildPreDigest: () => this._buildCompactionPreDigest(),

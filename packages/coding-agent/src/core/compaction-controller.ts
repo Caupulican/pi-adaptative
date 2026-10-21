@@ -239,6 +239,8 @@ export interface CompactionControllerDeps {
 	disconnectAgent(): void;
 	reconnectAgent(): void;
 	abortForeground(): Promise<void>;
+	/** Refuse a manual compaction while another owner is replacing its history, before publishing compaction occupancy. */
+	assertCanStartManualCompaction(): void;
 	emit(event: CompactionControllerEvent): void;
 	estimateCurrentContextTokens(messages: AgentMessage[]): number;
 	buildPreDigest(): ((text: string, signal?: AbortSignal) => Promise<string>) | undefined;
@@ -1131,7 +1133,8 @@ export class CompactionController {
 		if (this.isRunning()) {
 			throw new Error("Compaction already in progress");
 		}
-		this.cancelIdlePreparation();
+		this.deps.assertCanStartManualCompaction();
+		// Admission and occupancy publication stay synchronous: a history rewrite must see this compaction before it starts.
 		const abortController = new AbortController();
 		this.manualAbortController = abortController;
 		this.ineffectiveThresholdFrontier = undefined;
@@ -1141,6 +1144,7 @@ export class CompactionController {
 		let cleanupError: unknown;
 
 		try {
+			this.cancelIdlePreparation();
 			this.deps.disconnectAgent();
 			await this.deps.abortForeground();
 			// The foreground wait can outlive the session: a compaction that arrives here after the close plans nothing and starts

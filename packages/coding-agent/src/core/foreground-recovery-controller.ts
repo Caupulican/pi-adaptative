@@ -630,6 +630,11 @@ export class ForegroundRecoveryController {
 	 * supersedes the older ones itself.
 	 */
 	beginHistoryRewrite(): () => void {
+		if (this.deps.isCompacting?.() === true) {
+			throw new Error(
+				"Cannot rewrite session history while compaction is running. Wait for compaction to finish first.",
+			);
+		}
 		if (this.runOwnsHistory || this.preparingTurn !== undefined) {
 			throw new Error(
 				"Cannot navigate the session tree while a turn is running. Wait for the turn to finish or interrupt it first.",
@@ -642,6 +647,15 @@ export class ForegroundRecoveryController {
 			// The rewrite occupied the foreground: a submission, run or idle waiter parked behind it resumes now.
 			this.wakeIdleWaiters();
 		};
+	}
+
+	/** A manual compaction may abort a run, but cannot replace history another operation is already rewriting. */
+	assertCanStartManualCompaction(): void {
+		if (this.historyRewrites.size > 0) {
+			throw new Error(
+				"Cannot compact while session history is being rewritten. Wait for the rewrite to finish first.",
+			);
+		}
 	}
 
 	/**
