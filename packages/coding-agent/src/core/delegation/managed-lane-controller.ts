@@ -235,7 +235,12 @@ export class ManagedLaneController {
 					},
 					() => {
 						const runtime = runtimeGenerationAdmission(this.deps.getAgentDir());
-						runtimeLease = runtime.tryAdmitWork({ kind: "lane", label: `managed dispatch:${event.laneId}` });
+						// A recovery callback may outlive its awaited candidate hook while the writer
+						// still owns replacement. Refuse preparation before requesting new authority;
+						// the retained report retries through its live extension after settlement.
+						runtimeLease = runtime.isReplacing
+							? undefined
+							: runtime.tryAdmitWork({ kind: "lane", label: `managed dispatch:${event.laneId}` });
 						if (!runtimeLease) {
 							throw new ManagedLaneRuntimeAdmissionError((retry) => {
 								let active = true;
