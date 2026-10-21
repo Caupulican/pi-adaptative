@@ -4,23 +4,36 @@ import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 
 /** Lifecycle-created callbacks use their settled originating runtime, including terminal delivery verdicts. */
 export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld): Promise<void> {
+	const noDeliveryClaims = {
+		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+		states_committed: { kind: "noul", probability: 0.02 },
+		states_pushed: { kind: "noul", probability: 0.02 },
+		states_published: { kind: "noul", probability: 0.02 },
+		states_files_changed: { kind: "noul", probability: 0.02 },
+	} as const;
 	for (const outcome of ["startup", "committed", "rolled-back"] as const) {
 		const label = `h2-callback-${outcome}`;
 		const words = `Answer the callback input from ${label}.`;
 		const response = `The ${label} callback input was answered.`;
+		const pendingWords = `Pending candidate input from ${label}.`;
+		const acceptanceCallbackError = new Error(`${label}: scripted acceptance callback failure`);
 		const created = createBarrier();
 		const releaseLifecycle = createBarrier();
 		const trigger = createBarrier();
 		const customSettled = createBarrier();
 		const acceptanceSettled = createBarrier();
 		const refusalObserved = createBarrier();
+		const pendingAcceptanceSettled = createBarrier();
 		const reloadTrigger = createBarrier();
 		const secondLifecycleEntered = createBarrier();
 		const releaseSecondLifecycle = createBarrier();
 		const ownerInputWaiting = createBarrier();
 		const errors: { event: string; error: string }[] = [];
 		const resourceErrors: unknown[] = [];
+		const customErrors: unknown[] = [];
+		const userErrors: unknown[] = [];
 		const verdicts: boolean[] = [];
+		const pendingVerdicts: boolean[] = [];
 		let armed = false;
 		let lifecycleEntered = false;
 		let lifecycleExited = false;
@@ -51,6 +64,13 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 							armed = false;
 						}
 						lifecycleEntered = true;
+						if (outcome === "rolled-back")
+							pi.sendUserMessage(pendingWords, {
+								onAccepted: (accepted) => {
+									pendingVerdicts.push(accepted);
+									pendingAcceptanceSettled.release();
+								},
+							});
 						if (outcome === "committed")
 							callbackReloadDone = reloadTrigger.promise
 								.then(() => ctx.reload())
@@ -69,14 +89,23 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 								} catch (error) {
 									resourceErrors.push(error);
 								}
-								pi.sendMessage({ customType: "h2-callback-message", content: label, display: false });
-								await customSettled.promise;
-								pi.sendUserMessage(words, {
-									onAccepted: (accepted) => {
-										verdicts.push(accepted);
-										acceptanceSettled.release();
-									},
-								});
+								try {
+									pi.sendMessage({ customType: "h2-callback-message", content: label, display: false });
+								} catch (error) {
+									customErrors.push(error);
+								}
+								if (outcome !== "rolled-back") await customSettled.promise;
+								try {
+									pi.sendUserMessage(words, {
+										onAccepted: (accepted) => {
+											verdicts.push(accepted);
+											acceptanceSettled.release();
+											if (outcome === "rolled-back") throw acceptanceCallbackError;
+										},
+									});
+								} catch (error) {
+									userErrors.push(error);
+								}
 								await acceptanceSettled.promise;
 							})
 							.then(
@@ -118,13 +147,14 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 			)
 				customSettled.release();
 		});
-		world.systemOne.enterPhase(`${label}-baseline`, {});
+		world.systemOne.enterPhase(`${label}-baseline`, outcome === "committed" ? noDeliveryClaims : {});
 		world.provider.enqueue("root", {
 			name: `${label}-baseline`,
 			reply: { content: [{ type: "text", text: `The ${label} baseline is ready.` }] },
 		});
 		await withDeadline(world.trace, `${label} durable baseline`, owner.session.prompt(`Hello from ${label}.`));
 		const originalRead = owner.session.getToolDefinition("read");
+		const requestsBeforeReplacement = world.provider.reached.length;
 		let reloadError: unknown;
 		if (outcome !== "startup") {
 			armed = true;
@@ -146,6 +176,13 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 				);
 				expect(runtimeSettled, "the callback was created before runtime settlement").toBe(false);
 				expect(callbackEntered, "the deferred callback has not run inside the lifecycle").toBe(false);
+				expect(pendingVerdicts, "a valid candidate user intent cannot settle while its lifecycle is held").toEqual(
+					[],
+				);
+				expect(
+					JSON.stringify(owner.sessionManager.getEntries()),
+					"the candidate input cannot persist before its generation settles",
+				).not.toContain(pendingWords);
 			} finally {
 				releaseLifecycle.release();
 				reloadError = await withDeadline(world.trace, `${label} reload disposition joined`, replacing);
@@ -155,6 +192,7 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 			runtimeSettled = true;
 		}
 		if (outcome === "rolled-back") {
+			await withDeadline(world.trace, `${label} valid pending sender refused`, pendingAcceptanceSettled.promise);
 			expect(
 				reloadError instanceof Error ? reloadError.message : undefined,
 				"rollback remains a reload failure",
@@ -191,6 +229,7 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 			outcome === "rolled-back"
 				? {}
 				: {
+						...(outcome === "committed" ? noDeliveryClaims : {}),
 						// The prior text-only owner greeting is screened aside at this turn's backlog boundary.
 						carries_0: { kind: "noul", probability: 0.97 },
 						// Extension input asks owner-policy questions without optional-tool intent.
@@ -216,6 +255,15 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 		expect(resourceErrors, "only the discarded runtime loses resource mutation authority").toHaveLength(
 			outcome === "rolled-back" ? 1 : 0,
 		);
+		expect(customErrors, "late discarded custom API rejects synchronously before binding").toHaveLength(
+			outcome === "rolled-back" ? 1 : 0,
+		);
+		expect(userErrors, "late discarded user API preserves its synchronous refusal").toHaveLength(
+			outcome === "rolled-back" ? 1 : 0,
+		);
+		expect(pendingVerdicts, "the valid pending user intent receives exactly one rollback refusal").toEqual(
+			outcome === "rolled-back" ? [false] : [],
+		);
 		const entries = owner.sessionManager.getEntries();
 		expect(
 			entries.filter((entry) => entry.type === "custom" && entry.customType === "h2-callback-resource"),
@@ -234,15 +282,39 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 			),
 			"accepted callback input persists once; refused candidate input never enters the branch",
 		).toHaveLength(outcome === "rolled-back" ? 0 : 1);
+		expect(
+			entries.some(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "user" &&
+					JSON.stringify(entry.message.content).includes(pendingWords),
+			),
+			"the rejected pending candidate intent never persists",
+		).toBe(false);
 		if (outcome === "rolled-back") {
+			expect(resourceErrors[0]).toBeInstanceOf(Error);
+			expect((resourceErrors[0] as Error).message).toContain("This extension ctx was discarded");
+			expect(customErrors[0]).toBeInstanceOf(Error);
+			expect((customErrors[0] as Error).message).toContain("This extension ctx was discarded");
+			expect(userErrors[0], "throwing refusal callback retains both failures").toBeInstanceOf(AggregateError);
+			const refusalFailures = (userErrors[0] as AggregateError).errors;
+			expect(refusalFailures).toHaveLength(2);
+			expect(refusalFailures[0]).toBeInstanceOf(Error);
+			expect((refusalFailures[0] as Error).message).toContain("This extension ctx was discarded");
+			expect(refusalFailures[1], "the original callback error identity is retained").toBe(acceptanceCallbackError);
 			expect(
 				errors.filter((error) => error.event === "send_message"),
-				"custom refusal reaches current host once",
-			).toHaveLength(1);
+				"late custom API refusal happens before the binding's host reporter",
+			).toHaveLength(0);
 			expect(
 				errors.filter((error) => error.event === "send_user_message"),
-				"user refusal reaches current host once",
-			).toHaveLength(1);
+				"the valid pending user intent's rollback refusal reaches current host once",
+			).toEqual([
+				{
+					event: "send_user_message",
+					error: "Deferred extension message was discarded because its runtime candidate did not commit.",
+				},
+			]);
 			expect(
 				errors.filter((error) => error.error.includes("scripted lifecycle rollback")),
 				"lifecycle rollback is disclosed once",
@@ -250,6 +322,10 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 			expect(world.provider.reached.slice(requestsBefore), "no refused candidate input reaches a provider").toEqual(
 				[],
 			);
+			expect(
+				world.provider.reached.slice(requestsBeforeReplacement),
+				"neither the valid pending intent nor late discarded input reaches a provider",
+			).toEqual([]);
 		} else {
 			expect(errors, "ordinary startup and accepted-runtime callbacks emit no refusal").toEqual([]);
 			expect(
@@ -263,7 +339,7 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 			const ownerResponse = `${label}: the waiting owner received a response.`;
 			const readBeforeSecondReload = owner.session.getToolDefinition("read");
 			const requestsBeforeSecondReload = world.provider.reached.length;
-			world.systemOne.enterPhase(`${label}-second-reload`, {});
+			world.systemOne.enterPhase(`${label}-second-reload`, noDeliveryClaims);
 			world.provider.enqueue("root", {
 				name: `${label}-second-reload-answer`,
 				check: (request) => {
@@ -341,6 +417,18 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 		}
 		const sessionFile = owner.sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error(`${label}: the callback owner has no persisted session`);
+		expect(
+			world
+				.openSessionManager(sessionFile)
+				.getBranch()
+				.some(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						JSON.stringify(entry.message.content).includes(pendingWords),
+				),
+			"reopening excludes the valid pending intent rejected with its candidate",
+		).toBe(false);
 		expect(
 			world
 				.openSessionManager(sessionFile)

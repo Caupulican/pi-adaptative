@@ -76,6 +76,16 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 			...ICM_INTAKE_JUDGMENTS,
 			// The second owner prompt settles the first text-only turn's delivered words.
 			carries_0: { kind: "noul", probability: 0.02 },
+			// The runtime-disposition label reaches claim screening; it claims no git or verification result.
+			...(outcome === "committed"
+				? {
+						states_tests_pass: { kind: "choice" as const, choice: "no_current_success", confidence: 0.97 },
+						states_committed: { kind: "noul" as const, probability: 0.02 },
+						states_pushed: { kind: "noul" as const, probability: 0.02 },
+						states_published: { kind: "noul" as const, probability: 0.02 },
+						states_files_changed: { kind: "noul" as const, probability: 0.02 },
+					}
+				: {}),
 		});
 		world.provider.enqueue("root", {
 			name: `${label}-baseline`,

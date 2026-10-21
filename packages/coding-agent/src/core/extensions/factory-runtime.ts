@@ -229,7 +229,16 @@ export function createExtensionAPI(
 			runtime.sendMessage(message, options);
 		},
 		sendUserMessage(content, options): void {
-			runtime.assertActive();
+			try {
+				runtime.assertActive();
+			} catch (error) {
+				try {
+					options?.onAccepted?.(false);
+				} catch (callbackError) {
+					throw new AggregateError([error, callbackError], "Extension message refusal callback failed");
+				}
+				throw error;
+			}
 			runtime.sendUserMessage(content, options);
 		},
 		appendEntry(customType, data): void {
