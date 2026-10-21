@@ -316,6 +316,8 @@ superseded by words with no submission order, is screened and classified at the 
 classification produces (a rule conflict, a settled rule) reach the model at the start of the next turn.
 Delivered words survive cancellation of their original turn. A later reader classifies them under its
 own settle signal; an aborted originating signal cannot permanently cancel retained instructions.
+A cancelled reader takes no new batch or further classification work. Its unreached words return to
+the queue for the next live reader; cancellation is not reported as an evaluator outage.
 
 Measured on 70 messages in ten languages (English, Portuguese, Spanish, French, German, Chinese, Japanese,
 Russian, Arabic, Hindi; seven kinds each) against the live model: the full classification answered the

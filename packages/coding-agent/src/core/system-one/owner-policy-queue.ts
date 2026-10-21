@@ -104,17 +104,15 @@ export class OwnerPolicyQueue<Judgment = never> {
 	 * failed settle never rejects: its failure is reported and the words it did not reach are kept.
 	 */
 	settle(mode: OwnerPolicySettleMode = "latest", signal?: AbortSignal): Promise<void> {
-		let settled = this.tail;
-		if (this.pending.length > 0 || mode === "backlog") {
-			const run = this.tail.then(() => this.drain(mode, signal));
-			this.tail = run.catch(() => undefined);
-			settled = run;
-		}
+		// Every reader gets a drain: an earlier reader may return cancelled words while this one waits.
+		const settled = this.tail.then(() => this.drain(mode, signal));
+		this.tail = settled.catch(() => undefined);
 		// The chain ahead may be a classification that outlives this caller's interrupt; the caller stops waiting for it.
 		return signal ? settledOrAborted(settled, signal) : settled;
 	}
 
 	private async drain(mode: OwnerPolicySettleMode, signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) return;
 		const batch = this.pending.splice(0);
 		if (batch.length === 0) return;
 		const latest = mode === "latest" ? batch.pop() : undefined;
@@ -122,6 +120,7 @@ export class OwnerPolicyQueue<Judgment = never> {
 		// Words judged at submission are applied as judged: screening them would judge them a second time.
 		const screened = batch.filter((words) => words.judgment === undefined);
 		let done = 0;
+		let activeSignal = signal;
 		try {
 			const carries =
 				screened.length > 0
@@ -130,7 +129,9 @@ export class OwnerPolicyQueue<Judgment = never> {
 							signal,
 						)
 					: undefined;
+			signal?.throwIfAborted();
 			for (const [index, words] of order.entries()) {
+				signal?.throwIfAborted();
 				// An unavailable screen, or one that is not sure, classifies the message in full.
 				if (words !== latest && words.judgment === undefined && !(carries?.[screened.indexOf(words)] ?? true)) {
 					this.deps.setAside(words);
@@ -144,13 +145,20 @@ export class OwnerPolicyQueue<Judgment = never> {
 					classificationSignal = words.signal;
 					if (classificationSignal?.aborted) classificationSignal = undefined;
 				}
+				activeSignal = classificationSignal;
+				activeSignal?.throwIfAborted();
 				await this.deps.classify({ ...words, signal: classificationSignal });
 				done = index + 1;
+				activeSignal?.throwIfAborted();
 			}
 		} catch (error) {
 			// A failed classification loses no instruction: what was not reached is kept, ahead of anything newer, and is
 			// settled again after its `wake`. Words that arrived during this settle are newer and settle as usual.
 			const unreached = order.slice(done);
+			if (activeSignal?.aborted) {
+				this.pending.unshift(...unreached);
+				return;
+			}
 			if (this.pending.length > 0) this.pending.unshift(...unreached);
 			else this.parked.push(...unreached);
 			this.deps.reportFailure(error);
