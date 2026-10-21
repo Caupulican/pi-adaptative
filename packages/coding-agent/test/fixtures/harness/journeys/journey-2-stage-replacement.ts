@@ -1,6 +1,7 @@
 import { expect } from "vitest";
 import { replaceGoal } from "../../../../src/core/goals/goal-lifecycle.ts";
 import { createGoalState } from "../../../../src/core/goals/goal-state.ts";
+import { ObjectiveExecutionInterruptedError } from "../../../../src/core/objective-execution/current-objective-execution.ts";
 import { goalObjectiveId } from "../../../../src/core/orchestration/work-state-projection.ts";
 import { createBarrier, text } from "../scripted-provider.ts";
 import { type HarnessWorld, type ScriptedJudgment, withDeadline } from "../session-fixture.ts";
@@ -75,6 +76,7 @@ export async function verifyPreflightReplacement(world: HarnessWorld, judgments:
 		});
 		let pending: Promise<void> | undefined;
 		let stageSettled = false;
+		let stageError: unknown;
 		const failures: unknown[] = [];
 		try {
 			await session.bindExtensions({ uiContext: world.humanInput.ui, onError: (error) => errors.push(error.error) });
@@ -127,14 +129,16 @@ export async function verifyPreflightReplacement(world: HarnessWorld, judgments:
 			const entriesAtHeld = manager.getBranch().length;
 			if (late) replace();
 			const goalAtRelease = session.getGoalStateSnapshot();
-			// Provider admission can refuse A before its queued answer's callback runs. The current
-			// prompt owner still validates postflight after that local error, so script its actual pack here.
-			// An earlier ownership interruption may change this protocol; the assertions below require effects, not this callback.
-			world.systemOne.enterPhase(`${label}-released-stage`, late ? postflight : {});
+			// A superseded preflight now interrupts before the provider and postflight. Ordinary controls
+			// still install their postflight pack from the real provider callback above.
+			world.systemOne.enterPhase(`${label}-released-stage`, {});
 			release.release();
 			const stageOutcome = await withDeadline(world.trace, `${label}: held stage settles`, pending).then(
 				() => "resolved",
-				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+				(error: unknown) => {
+					stageError = error;
+					return error instanceof Error ? error.message : String(error);
+				},
 			);
 			stageSettled = true;
 			await withDeadline(world.trace, `${label}: stage released`, session.waitForForegroundIdle());
@@ -207,6 +211,9 @@ export async function verifyPreflightReplacement(world: HarnessWorld, judgments:
 			expect(next.submitted, observations).toBe(late);
 			expect(world.provider.requests.length - beforeNext, observations).toBe(late ? 1 : 0);
 			if (late) {
+				expect(stageError, observations).toBeInstanceOf(ObjectiveExecutionInterruptedError);
+				if (stageError instanceof ObjectiveExecutionInterruptedError)
+					expect(stageError.reason, observations).toBe("goal_replaced");
 				expect(stageProviderRequests, observations).toBe(0);
 				expect(goalAfterStage, observations).toEqual(goalAtRelease);
 				expect(

@@ -188,7 +188,11 @@ import type { SystemOneController } from "./system-one/controller.ts";
 import { FileLocator } from "./system-one/locate.ts";
 import { redactSecrets } from "./system-one/projector.ts";
 import type { SemanticUncertaintyPort } from "./system-one/semantic-doubts.ts";
-import { createSessionVerificationHost, wrapToolWithVerification } from "./system-one/session-verification-host.ts";
+import {
+	createSessionStageExecutionScope,
+	createSessionVerificationHost,
+	wrapToolWithVerification,
+} from "./system-one/session-verification-host.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
@@ -1376,10 +1380,17 @@ export class RuntimeBuilder {
 	}): (() => void) | undefined {
 		if (options.mutationLease) options.mutationLease.assertCurrent();
 		else runtimeGenerationAdmission(this.deps.getAgentDir()).assertResourceMutation(this.deps.getExtensionRunner());
-		this.deps.getSystemOneController?.()?.setVerificationHost(
-			createSessionVerificationHost(
-				() => this.deps.getSessionManager(),
-				() => this._taskDirectories.cwd,
+		const verificationHost = createSessionVerificationHost(
+			() => this.deps.getSessionManager(),
+			() => this._taskDirectories.cwd,
+		);
+		const systemOne = this.deps.getSystemOneController?.();
+		systemOne?.setVerificationHost(verificationHost);
+		systemOne?.setStageExecutionScopeSource(
+			createSessionStageExecutionScope(
+				verificationHost,
+				() => this.deps.getGoalStateSnapshot()?.goalId,
+				() => this._mutationAdmissionClosed,
 			),
 		);
 		const settingsManager = this.deps.getSettingsManager();

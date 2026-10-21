@@ -8,6 +8,7 @@ import {
 } from "../expert-routing/system-one-choice.ts";
 import type { IntegrityGateResult } from "../hooks/index.ts";
 import { MODEL_POOLS, type ModelPool, type ModelPoolChange } from "../model-router/owner-model-policy.ts";
+import { ObjectiveExecutionInterruptedError } from "../objective-execution/current-objective-execution.ts";
 import {
 	MAX_OPTIONAL_TOOL_INTENT_TOOLS,
 	MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS,
@@ -182,6 +183,22 @@ interface StageValidation {
 	evaluationId: string | undefined;
 }
 
+interface StageExecutionScope {
+	readonly stage: ValidationStage;
+	readonly interruption: () => ObjectiveExecutionInterruptedError["reason"] | undefined;
+}
+
+export type StageExecutionScopeSource = () => () => ObjectiveExecutionInterruptedError["reason"] | undefined;
+
+/** A completed judgment remains history, but its former goal cannot publish new control. */
+export class SystemOneStageInterruptedError extends ObjectiveExecutionInterruptedError {
+	constructor(stage: ValidationStage, reason: ObjectiveExecutionInterruptedError["reason"]) {
+		super(reason);
+		this.message = `System One ${stage} result was superseded by a goal or session change.`;
+		this.name = "SystemOneStageInterruptedError";
+	}
+}
+
 /** The consequence class a stage's tool impact maps to, for the evaluation record. */
 function consequenceForImpact(impact: ToolImpact): Consequence {
 	switch (impact) {
@@ -228,6 +245,7 @@ export class SystemOneController {
 	private truthSource?: () => CanonicalHydration | undefined;
 	private workDiffSource?: (signal?: AbortSignal) => Promise<WorkDiff | undefined> | WorkDiff | undefined;
 	private pendingDirective?: SystemOneControlDirective;
+	private stageExecutionScopeSource?: StageExecutionScopeSource;
 	readonly verification: VerificationCoordinator;
 
 	constructor(deps: SystemOneControllerDeps) {
@@ -292,6 +310,21 @@ export class SystemOneController {
 		this.truthSource = source;
 	}
 
+	/** Host authority for goal-stage publications; explicit-payload/global evaluations do not use it. */
+	setStageExecutionScopeSource(source: StageExecutionScopeSource | undefined): void {
+		this.stageExecutionScopeSource = source;
+	}
+
+	private captureStageExecution(stage: ValidationStage): StageExecutionScope | undefined {
+		const interruption = this.stageExecutionScopeSource?.();
+		return interruption ? { stage, interruption } : undefined;
+	}
+
+	private assertStageCurrent(scope: StageExecutionScope | undefined): void {
+		const reason = scope?.interruption();
+		if (scope && reason) throw new SystemOneStageInterruptedError(scope.stage, reason);
+	}
+
 	syncCanonicalTruth(): void {
 		const hydration = this.truthSource?.();
 		if (hydration) this.store.hydrateFromCanonical(hydration);
@@ -336,15 +369,25 @@ export class SystemOneController {
 		evaluationId: string | undefined,
 		reasons?: readonly string[],
 		questionStates?: readonly SemanticQuestionState[],
+		scope?: StageExecutionScope,
 	): void {
-		decision.policy_result = policyResult;
+		const superseded = scope?.interruption() !== undefined;
+		decision.policy_result = superseded ? "superseded" : policyResult;
 		const { id: _provisional, timestamp: _drafted, ...draft } = decision;
 		const sealed = this.store.recordDecision(draft);
 		decision.id = sealed.id;
 		decision.timestamp = sealed.timestamp;
 		this.audit.recordDecision(this.store.runId, sealed);
 		if (evaluationId !== undefined)
-			this.evaluationObserver?.noteVerdict(evaluationId, policyResult, reasons, questionStates);
+			this.evaluationObserver?.noteVerdict(evaluationId, decision.policy_result, reasons, questionStates);
+		const interruption = scope?.interruption();
+		if (scope && interruption) {
+			// Verdict observers may synchronously replace the goal too. The completed evaluation
+			// stays visible, but the caller must not apply its phase or directive to the successor.
+			if (!superseded && evaluationId !== undefined)
+				this.evaluationObserver?.noteVerdict(evaluationId, "superseded");
+			throw new SystemOneStageInterruptedError(scope.stage, interruption);
+		}
 	}
 
 	/** The model's latest account of its work; the completion transaction reads it, whoever asks. */
@@ -700,7 +743,9 @@ export class SystemOneController {
 		externalBlockerPresent: boolean;
 		decision: ValidationDecision;
 	}> {
+		const scope = this.captureStageExecution("intake");
 		this.syncCanonicalTruth();
+		this.assertStageCurrent(scope);
 		const projection = this.projector.intake(this.store.snapshot());
 		const { decision, answers, evaluationId } = await this.runStageValidation("intake", projection);
 
@@ -713,7 +758,14 @@ export class SystemOneController {
 		const blockerAns = (answers.external_blocker_present as { noul?: number } | undefined)?.noul ?? 0;
 		const externalBlockerPresent = evaluateNoul(blockerAns, "required_false", this.config.thresholds) === "hard_fail";
 
-		this.sealDecision(decision, objectiveClear && !externalBlockerPresent ? "accepted" : "blocked", evaluationId);
+		this.sealDecision(
+			decision,
+			objectiveClear && !externalBlockerPresent ? "accepted" : "blocked",
+			evaluationId,
+			undefined,
+			undefined,
+			scope,
+		);
 
 		if (externalBlockerPresent) {
 			this.store.transitionPhase("blocked_external", true);
@@ -732,12 +784,14 @@ export class SystemOneController {
 		route: "allow" | "retrieve" | "replan" | "test" | "block" | "escalate";
 		decision: ValidationDecision;
 	}> {
+		const scope = this.captureStageExecution("preflight");
 		this.syncCanonicalTruth();
+		this.assertStageCurrent(scope);
 		const projection = this.projector.preflight(this.store.snapshot(), stepId);
 		const { decision, answers, evaluationId } = await this.runStageValidation("preflight", projection);
 
 		const route = decidePreflight(answers, this.config);
-		this.sealDecision(decision, route, evaluationId);
+		this.sealDecision(decision, route, evaluationId, undefined, undefined, scope);
 
 		if (route === "replan") {
 			this.store.transitionPhase("replan_required", true);
@@ -761,10 +815,13 @@ export class SystemOneController {
 		decision?: ValidationDecision;
 		toolEventId?: string;
 	}> {
+		const scope = this.captureStageExecution("tool_gate");
 		this.syncCanonicalTruth();
+		this.assertStageCurrent(scope);
 		// 1. Run deterministic checks first (R-020, R-034)
 		if (deterministicCheck) {
 			const det = deterministicCheck();
+			this.assertStageCurrent(scope);
 			if (!det.allowed) {
 				// Deterministic failure cannot be overridden by Jev (R-035)
 				const denied = this.store.recordToolEvent({
@@ -796,12 +853,13 @@ export class SystemOneController {
 		);
 
 		const outcome = decideToolGate(answers, toolRequest.impact, this.config, { relevanceEvaluable });
-		this.sealDecision(decision, outcome, evaluationId);
+		this.sealDecision(decision, outcome, evaluationId, undefined, undefined, scope);
 
 		const status = outcome === "block" ? "denied" : outcome === "replan" ? "refused" : "allowed";
 		if (outcome === "replan") {
 			this.noteControlDirective(directiveFromToolReplan(toolRequest.tool));
 		}
+		this.assertStageCurrent(scope);
 		const event = this.store.recordToolEvent({
 			tool: toolRequest.tool,
 			intent: toolRequest.intent,
@@ -1153,12 +1211,14 @@ export class SystemOneController {
 		nextStatus: "continue" | "verify" | "retrieve_more" | "replan" | "rollback" | "completion_candidate" | "blocked";
 		decision: ValidationDecision;
 	}> {
+		const scope = this.captureStageExecution("postflight");
 		this.syncCanonicalTruth();
+		this.assertStageCurrent(scope);
 		const projection = this.projector.postflight(this.store.snapshot(), stepId);
 		const { decision, answers, evaluationId } = await this.runStageValidation("postflight", projection);
 
 		const nextStatus = decidePostflight(answers, this.config);
-		this.sealDecision(decision, nextStatus, evaluationId);
+		this.sealDecision(decision, nextStatus, evaluationId, undefined, undefined, scope);
 
 		if (nextStatus === "rollback") {
 			this.store.transitionPhase("rollback_required", true);
@@ -1275,7 +1335,9 @@ export class SystemOneController {
 		staleContextDependency: boolean;
 		decision: ValidationDecision;
 	}> {
+		const scope = this.captureStageExecution("drift_loop");
 		this.syncCanonicalTruth();
+		this.assertStageCurrent(scope);
 		const projection = this.projector.driftCheck(this.store.snapshot());
 		const { decision, answers, evaluationId } = await this.runStageValidation("drift_loop", projection);
 
@@ -1292,6 +1354,9 @@ export class SystemOneController {
 			decision,
 			goalDrift || repeatedStrategy || staleContextDependency ? "drift_detected" : "aligned",
 			evaluationId,
+			undefined,
+			undefined,
+			scope,
 		);
 
 		if (repeatedStrategy || goalDrift) {
@@ -1306,7 +1371,9 @@ export class SystemOneController {
 	 * and runs the terminal hook once. A duplicate proof does not transition or hook again.
 	 */
 	async commitTerminalCompletion(input: TerminalCompletionProof, options?: { signal?: AbortSignal }): Promise<void> {
+		const scope = this.captureStageExecution("completion");
 		this.verification.assertResolved();
+		this.assertStageCurrent(scope);
 		const ref = terminalProofRef(input);
 		const classified = this.store.classifyTerminalProof(ref);
 		if (classified.outcome === "duplicate") return;
@@ -1327,11 +1394,13 @@ export class SystemOneController {
 				},
 				{ signal: options?.signal },
 			);
+			this.assertStageCurrent(scope);
 			if (hookResult.decision !== "allow") {
 				throw new TerminalHookRejectedError(hookResult.reasonCodes.join("; ") || hookResult.decision);
 			}
 		}
 		this.verification.assertResolved();
+		this.assertStageCurrent(scope);
 		const noted = this.store.noteTerminalProof(ref);
 		if (noted.outcome === "duplicate") return;
 		if (noted.outcome === "rejected") {
@@ -1358,8 +1427,11 @@ export class SystemOneController {
 	 * criterion; the repository diff only when the goal changed the repository) and whether it did.
 	 */
 	async completionView(signal?: AbortSignal): Promise<{ view: Record<string, unknown>; repositoryOutcome: boolean }> {
+		const scope = this.captureStageExecution("completion");
 		this.syncCanonicalTruth();
+		this.assertStageCurrent(scope);
 		const work = await this.workDiffSource?.(signal);
+		this.assertStageCurrent(scope);
 		const snapshot = this.store.snapshot();
 		return {
 			view: this.projector.completion(snapshot, work),
@@ -1396,9 +1468,12 @@ export class SystemOneController {
 			persistTerminal?: boolean;
 		},
 	): Promise<FinalCompletionVerdict> {
+		const scope = this.captureStageExecution("completion");
 		options?.signal?.throwIfAborted();
 		this.syncCanonicalTruth();
+		this.assertStageCurrent(scope);
 		const pendingVerification = this.verification.status().obligations;
+		this.assertStageCurrent(scope);
 		if (pendingVerification.length)
 			return {
 				verdict: "verify_more",
@@ -1425,6 +1500,7 @@ export class SystemOneController {
 		// 2. Cold primary completion pack (R-048, R-049). Code-only questions are asked only when the goal
 		// changed the repository; a machine, service or answer outcome is judged on its outcome evidence.
 		const work = await this.workDiffSource?.(options?.signal);
+		this.assertStageCurrent(scope);
 		if (work?.diagnostic) {
 			return {
 				verdict: "blocked_external",
@@ -1508,14 +1584,23 @@ export class SystemOneController {
 			}
 		}
 		options?.signal?.throwIfAborted();
+		const sealSuperseded = (): void => {
+			if (!scope?.interruption()) return;
+			for (const stage of stages.values()) this.sealDecision(stage.decision, "superseded", stage.evaluationId);
+			this.assertStageCurrent(scope);
+		};
 		let accountFailures: CompletionRejectionDetail[] = [];
 		let accountAdvisories: CompletionRejectionDetail[] = [];
 		if (judgingAccount) {
 			try {
 				const judged = await judgingAccount;
+				sealSuperseded();
+				this.assertStageCurrent(scope);
 				this.readAccountPasses();
+				this.assertStageCurrent(scope);
 				({ failures: accountFailures, advisories: accountAdvisories } = accountOutcome(judged, this.accountPasses));
 				this.writeAccountPasses(judged.unsettled);
+				this.assertStageCurrent(scope);
 				if (this.accountPassFailure)
 					accountAdvisories.push({
 						id: "account_passes_not_kept",
@@ -1523,6 +1608,7 @@ export class SystemOneController {
 						required_next_proof: "None required.",
 					});
 			} catch (error) {
+				if (error instanceof SystemOneStageInterruptedError) throw error;
 				options?.signal?.throwIfAborted();
 				unavailable.push({
 					id: "JEV-account-unavailable",
@@ -1531,6 +1617,8 @@ export class SystemOneController {
 				});
 			}
 		}
+		sealSuperseded();
+		this.assertStageCurrent(scope);
 
 		// 4. Policy engine final verdict
 		const finalVerdict = decideFinalCompletion({
@@ -1553,19 +1641,30 @@ export class SystemOneController {
 				),
 			);
 		}
+		this.assertStageCurrent(scope);
+		let interruption: SystemOneStageInterruptedError | undefined;
 		for (const stage of stages.values()) {
-			this.sealDecision(
-				stage.decision,
-				finalVerdict.verdict,
-				stage.evaluationId,
-				finalVerdict.advisories?.map((item) => `Advice: ${item.reason}`),
-			);
+			try {
+				this.sealDecision(
+					stage.decision,
+					finalVerdict.verdict,
+					stage.evaluationId,
+					finalVerdict.advisories?.map((item) => `Advice: ${item.reason}`),
+					undefined,
+					scope,
+				);
+			} catch (error) {
+				if (!(error instanceof SystemOneStageInterruptedError)) throw error;
+				interruption = error;
+			}
 		}
+		if (interruption) throw interruption;
 
 		// 5. External completion gate and hooks check (PI-021)
 		if (finalVerdict.verdict === "complete") {
 			if (options?.externalGate) {
 				const extGateResult = await options.externalGate(this.store.snapshot());
+				this.assertStageCurrent(scope);
 				if (extGateResult && extGateResult.decision !== "allow") {
 					finalVerdict.verdict = extGateResult.decision === "replan" ? "rework" : "blocked_external";
 					finalVerdict.failed_gates.push({
@@ -1589,6 +1688,7 @@ export class SystemOneController {
 					},
 					{ signal: options?.signal },
 				);
+				this.assertStageCurrent(scope);
 				const mutationRequested = hookResult.reasonCodes.some(
 					(code) => code === "mutation_requested" || code === "repo_mutation",
 				);
@@ -1613,6 +1713,7 @@ export class SystemOneController {
 				})),
 			);
 		}
+		this.assertStageCurrent(scope);
 
 		// 6. Update state phase according to verdict. Omitted or explicit
 		// persistTerminal does not persist terminal complete. Only

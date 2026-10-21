@@ -17,7 +17,7 @@ import {
 } from "./agent-session-contracts.ts";
 import type { CapabilityTierDemotion } from "./capability-tier.ts";
 import type { GoalGuardRecovery } from "./goals/goal-session-controller.ts";
-import type { SystemOneController } from "./system-one/controller.ts";
+import { type SystemOneController, SystemOneStageInterruptedError } from "./system-one/controller.ts";
 
 export interface SessionGuardDeps {
 	getModel(): Model<Api> | undefined;
@@ -123,7 +123,8 @@ export async function executeSystemOnePreflight(
 		if (!controller.hasLiveObjective()) return { proceed: true };
 		// The route is recorded for the objective loop. It does not skip the owner's turn.
 		await controller.validatePreflight(String(messageCount + 1));
-	} catch {
+	} catch (error) {
+		if (error instanceof SystemOneStageInterruptedError) throw error;
 		// Classification unavailable does not skip the turn.
 	}
 	return { proceed: true };

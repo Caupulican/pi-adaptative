@@ -7,6 +7,7 @@ import type { SessionManager } from "../../kernel/node.ts";
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { captureCandidateSnapshot } from "./candidate-snapshot.ts";
+import type { StageExecutionScopeSource } from "./controller.ts";
 import type { VerificationCoordinator, VerificationHost } from "./verification-coordinator.ts";
 import { VERIFICATION_OBLIGATIONS_CUSTOM_TYPE } from "./verification-obligations.ts";
 
@@ -65,6 +66,22 @@ export function createSessionVerificationHost(
 				);
 			};
 		},
+	};
+}
+
+/** A pending goal-stage answer retains its exact goal and the verification host's branch ancestry. */
+export function createSessionStageExecutionScope(
+	host: Pick<VerificationHost, "captureFence">,
+	getGoalId: () => string | undefined,
+	isClosed: () => boolean,
+): StageExecutionScopeSource {
+	return () => {
+		const branchCurrent = host.captureFence();
+		const goalId = getGoalId();
+		return () => {
+			if (isClosed()) return "session_disposed";
+			return branchCurrent() && getGoalId() === goalId ? undefined : "goal_replaced";
+		};
 	};
 }
 
