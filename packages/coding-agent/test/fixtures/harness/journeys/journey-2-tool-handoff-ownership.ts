@@ -50,6 +50,13 @@ export async function verifyToolHandoffOwnership(
 		const preflight = {
 			...Object.fromEntries(Object.entries(turnJudgments).filter(([id]) => stageIds.includes(id))),
 			route: { kind: "choice", choice: "reason", confidence: 0.97 },
+			// The actual foreground bash calls are judged in this phase after preflight.
+			// Their scripted local output has no external effect, and the internal prompt records no owner request.
+			leaves_machine: { kind: "noul", probability: 0.02 },
+			cannot_be_undone: { kind: "noul", probability: 0.02 },
+			touches_outside_task: { kind: "noul", probability: 0.02 },
+			acquires_external_code: { kind: "noul", probability: 0.02 },
+			request_authorizes: { kind: "noul", probability: 0.02 },
 		} as const;
 		const postflight = Object.fromEntries(Object.entries(turnJudgments).filter(([id]) => postIds.includes(id)));
 		const { session, settingsManager } = await world.createRootSession("root", {
