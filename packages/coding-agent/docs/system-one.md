@@ -314,6 +314,8 @@ again. A judgment superseded by a newer owner input is carried the same way, sin
 words again would be refused as stale. Only an input whose judgment System One could not give, or one
 superseded by words with no submission order, is screened and classified at the queue. A failed classification keeps the messages it did not reach. Notes the
 classification produces (a rule conflict, a settled rule) reach the model at the start of the next turn.
+Delivered words survive cancellation of their original turn. A later reader classifies them under its
+own settle signal; an aborted originating signal cannot permanently cancel retained instructions.
 
 Measured on 70 messages in ten languages (English, Portuguese, Spanish, French, German, Chinese, Japanese,
 Russian, Arabic, Hindi; seven kinds each) against the live model: the full classification answered the
@@ -530,14 +532,17 @@ evidence the last one did not have:
 2. A stronger model (the router's expensive tier) names the fact in those results that settles it;
    System One judges that the results state the fact and that the fact settles the item. The model
    finds; System One decides.
-3. What stays open goes to the owner. With the owner in the loop the parent is told to ask them;
-   under a handoff it is written to `<agentDir>/follow-ups/<sessionId>.md` and the run continues with
-   everything that does not depend on it. It never closes an objective and never authorizes an
+3. What stays open remains in the worker claim for parent investigation or a worker follow-up.
+   At the turn boundary, the host separately classifies whether an item requires an owner-reserved
+   decision. Only a decisive owner-reserved judgment creates an owner question; under a handoff it
+   is written to `<agentDir>/follow-ups/<sessionId>.md`. Technical unknowns and unavailable or
+   uncertain classifications remain parent-owned. None closes an objective or authorizes an
    irreversible action.
 
 Settled items return to the parent as `System One settled: …` and no longer hold the claim for
 review. Collaboration and tmux workers, whose transcripts the host cannot read, mark such findings
-with `INCONCLUSIVE:` lines in their report; those go straight to step 3.
+with `INCONCLUSIVE:` lines in their report; those enter the same parent-review and owner-decision
+routing in step 3 without the host claiming to have inspected the worker's evidence.
 
 The root agent's own answer climbs the same ladder: a claim no receipt backs (the harness reads
 receipts only from the tools it knows) is judged against the turn's tool results. Confirmed, it

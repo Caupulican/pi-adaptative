@@ -18,7 +18,7 @@ export interface OwnerWords<Judgment = never> {
 	readonly text: string;
 	/** Submission order, so a stale judgment never overwrites newer owner policy. */
 	readonly acceptedOrder?: number;
-	/** The submission's own cancellation: its classification is cancelled with it. */
+	/** Originating submission cancellation; a later settle supplies its own classification lifetime. */
 	readonly signal?: AbortSignal;
 	/**
 	 * The full classification these words already received when they were submitted (a queued owner input is judged
@@ -137,7 +137,14 @@ export class OwnerPolicyQueue<Judgment = never> {
 					done = index + 1;
 					continue;
 				}
-				await this.deps.classify(words);
+				// Delivered words outlive their originating turn. A later reader owns their classification;
+				// an already-aborted original signal must not permanently cancel these retained instructions.
+				let classificationSignal = signal;
+				if (classificationSignal === undefined) {
+					classificationSignal = words.signal;
+					if (classificationSignal?.aborted) classificationSignal = undefined;
+				}
+				await this.deps.classify({ ...words, signal: classificationSignal });
 				done = index + 1;
 			}
 		} catch (error) {
