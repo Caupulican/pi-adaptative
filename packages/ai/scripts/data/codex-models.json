@@ -1,10 +1,10 @@
 {
 	"source": {
 		"repository": "openai/codex",
-		"tag": "b1e72963c3b71a9265a551e54beff078384efed9",
-		"clientTag": "rust-v0.159.0",
+		"tag": "rust-v0.163.0",
+		"clientTag": "rust-v0.163.0",
 		"path": "codex-rs/models-manager/models.json",
-		"clientVersion": "0.159.0"
+		"clientVersion": "0.163.0"
 	},
 	"models": [
 		{

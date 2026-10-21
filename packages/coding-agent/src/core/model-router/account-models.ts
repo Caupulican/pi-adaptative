@@ -180,8 +180,21 @@ export class AccountModelCatalog {
 		}
 		const state = this.states.get(model.provider);
 		if (state?.kind === "rejected") return { cause: "model_account_rejected", reason: state.reason };
-		if (state?.kind === "listed" && !state.models.has(model.id)) {
-			return { cause: "model_account_unlisted", reason: `not offered to this ${model.provider} account` };
+		if (state?.kind === "listed") {
+			const listed = state.models.get(model.id);
+			if (!listed) {
+				return { cause: "model_account_unlisted", reason: `not offered to this ${model.provider} account` };
+			}
+			if (
+				model.openaiCodexAccessProgram &&
+				listed.availableAccessPrograms &&
+				!listed.availableAccessPrograms.cyber.includes(model.openaiCodexAccessProgram)
+			) {
+				return {
+					cause: "model_account_unlisted",
+					reason: `${model.openaiCodexAccessProgram} is not offered to this ${model.provider} account`,
+				};
+			}
 		}
 		return undefined;
 	}

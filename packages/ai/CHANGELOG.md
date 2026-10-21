@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Added the account-gated Daybreak Blue model for ChatGPT Codex subscriptions, including its explicit Responses access-program selection.
+
+### Changed
+
+- Updated the Codex model protocol to 0.163.0, the reviewed Claude OAuth identity to 2.1.305, and the Antigravity client identity to AGY 1.4.1.
+
 ## [0.103.10] - 2026-10-15
 
 ## [0.103.9] - 2026-10-15

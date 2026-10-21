@@ -109,6 +109,7 @@ export interface ModelServiceTier {
 	name: string;
 	description: string;
 }
+export type OpenAICodexCyberAccessProgram = "standard" | "daybreak_blue" | "daybreak_red";
 export type SessionAffinityFormat = "openai" | "openai-nosession" | "openrouter";
 
 export interface ProviderResponse {
@@ -772,6 +773,8 @@ export interface Model<TApi extends Api> {
 	samplingParams?: Record<string, unknown>;
 	/** Use the ChatGPT Codex Responses Lite request framing for this model. */
 	openaiResponsesLite?: boolean;
+	/** Explicit ChatGPT Codex access program selected for this model; account entitlement remains server-owned. */
+	openaiCodexAccessProgram?: OpenAICodexCyberAccessProgram;
 	/** Advertised processing tiers. Missing metadata is distinct from an explicitly empty list. */
 	serviceTiers?: readonly ModelServiceTier[];
 	defaultServiceTier?: string;

@@ -13,6 +13,7 @@
 
 ### Changed
 
+- Account model admission now honors caller-specific Codex access-program metadata for Daybreak models.
 - Collaboration peers authenticate with a per-member credential file (mode 0600 in a 0700 job directory under the state directory) instead of an environment variable. Peer commands carry identifiers, and the agent directory only when it is overridden, so Codex, Claude and agy members can report even when their tool shells do not inherit the pane environment. Jobs admitted before this change keep authenticating through their original launch environment and are not reused.
 - Worker and pin model refusals now carry the exact cause: `model_not_found`, `model_out_of_scope`, `auth_missing`, `model_quota_exhausted`, `model_account_*`, `model_unusable` or `thinking_level_unsupported`. Reasons read `orchestration_model_unavailable:<causes>` and `worker_model_pin_unavailable:<role>:<causes>`.
 - A completed goal that lacks trusted requirement evidence is reopened active (new persisted event `reopen_unproven_completion`; older builds reject goal states containing it) with one warning instead of throwing on objective routes. An unproven objective completion keeps the goal active and continues gathering evidence, and the unproven requirement ids appear in the model-facing goal record. Completed and cancelled objectives are settled by goal sync instead of throwing.

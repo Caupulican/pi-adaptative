@@ -141,6 +141,7 @@ interface RequestBody {
 	include?: string[];
 	prompt_cache_key?: string;
 	client_metadata?: Record<string, string>;
+	access_programs?: { cyber: NonNullable<Model<Api>["openaiCodexAccessProgram"]> };
 	[key: string]: unknown;
 }
 
@@ -751,6 +752,7 @@ function buildRequestBody(
 		prompt_cache_key: cacheSessionId,
 		tool_choice: options?.toolChoice ?? "auto",
 		parallel_tool_calls: !lite,
+		...(model.openaiCodexAccessProgram ? { access_programs: { cyber: model.openaiCodexAccessProgram } } : {}),
 	};
 
 	if (options?.temperature !== undefined) {

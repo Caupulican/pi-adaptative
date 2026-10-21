@@ -2051,7 +2051,8 @@ async function generateModels() {
 		models: CodexCatalogueModel[];
 	};
 	for (const entry of codexCatalogue.models) {
-		if (entry.visibility !== "list") continue;
+		const accessProgram = entry.slug === "gpt-daybreak-blue-latest" ? ("daybreak_blue" as const) : undefined;
+		if (entry.visibility !== "list" && accessProgram === undefined) continue;
 		const listing =
 			allModels.find((model) => model.provider === "openai" && model.id === entry.slug) ??
 			allModels.find((model) => model.provider === "openrouter" && model.id === `openai/${entry.slug}`);
@@ -2071,6 +2072,7 @@ async function generateModels() {
 			...(entry.default_reasoning_level ? { defaultThinkingLevel: entry.default_reasoning_level } : {}),
 			thinkingLevelMap: codexThinkingLevelMap(entry),
 			...(entry.use_responses_lite ? { openaiResponsesLite: true } : {}),
+			...(accessProgram ? { openaiCodexAccessProgram: accessProgram } : {}),
 			...(entry.service_tiers !== undefined ? { serviceTiers: entry.service_tiers } : {}),
 			...(typeof entry.default_service_tier === "string" ? { defaultServiceTier: entry.default_service_tier } : {}),
 			input: entry.input_modalities.filter((modality): modality is "text" | "image" =>
@@ -2431,6 +2433,9 @@ export const MODELS: Readonly<Record<string, Readonly<Record<string, Model<Api>>
 			}
 			if (model.openaiResponsesLite) {
 				output += `\t\t\topenaiResponsesLite: true,\n`;
+			}
+			if (model.openaiCodexAccessProgram) {
+				output += `\t\t\topenaiCodexAccessProgram: "${model.openaiCodexAccessProgram}",\n`;
 			}
 			if (model.serviceTiers !== undefined) {
 				output += `\t\t\tserviceTiers: ${JSON.stringify(model.serviceTiers)},\n`;

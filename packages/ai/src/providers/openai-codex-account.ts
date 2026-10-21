@@ -1,4 +1,4 @@
-import type { ModelServiceTier } from "../types.ts";
+import type { ModelServiceTier, OpenAICodexCyberAccessProgram } from "../types.ts";
 import { isRecord } from "../utils/value-guards.ts";
 import { requestBoundedAccountJson } from "./account-request.ts";
 import { buildOpenAICodexHeaders, DEFAULT_OPENAI_CODEX_BASE_URL } from "./openai-codex-auth.ts";
@@ -194,7 +194,11 @@ export async function consumeOpenAICodexRateLimitResetCredit(
  * It is the client release recorded in scripts/data/codex-models.json (scripts/sync-codex-models.ts).
  * The catalogue can include newer upstream commits while retaining a released client identity.
  */
-export const OPENAI_CODEX_CLIENT_VERSION = "0.159.0";
+export const OPENAI_CODEX_CLIENT_VERSION = "0.163.0";
+
+export interface OpenAICodexAccessPrograms {
+	cyber: readonly OpenAICodexCyberAccessProgram[];
+}
 
 export interface OpenAICodexAccountModel {
 	slug: string;
@@ -206,6 +210,26 @@ export interface OpenAICodexAccountModel {
 	priority: number;
 	serviceTiers?: readonly ModelServiceTier[];
 	defaultServiceTier?: string;
+	availableAccessPrograms?: OpenAICodexAccessPrograms;
+}
+
+const OPENAI_CODEX_CYBER_ACCESS_PROGRAMS = new Set<OpenAICodexCyberAccessProgram>([
+	"standard",
+	"daybreak_blue",
+	"daybreak_red",
+]);
+
+function parseAccessPrograms(value: unknown): OpenAICodexAccessPrograms | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (!isRecord(value) || !Array.isArray(value.cyber) || value.cyber.length > 32) {
+		throw new OpenAICodexAccountError("OpenAI Codex models response has invalid available_access_programs");
+	}
+	const cyber = value.cyber.filter(
+		(program): program is OpenAICodexCyberAccessProgram =>
+			typeof program === "string" &&
+			OPENAI_CODEX_CYBER_ACCESS_PROGRAMS.has(program as OpenAICodexCyberAccessProgram),
+	);
+	return { cyber };
 }
 
 function parseAccountModel(value: unknown): OpenAICodexAccountModel {
@@ -239,6 +263,7 @@ function parseAccountModel(value: unknown): OpenAICodexAccountModel {
 		});
 	}
 	const defaultServiceTier = optionalString(value, "default_service_tier");
+	const availableAccessPrograms = parseAccessPrograms(value.available_access_programs);
 	return {
 		slug: requiredString(value, "slug"),
 		displayName: optionalString(value, "display_name") ?? requiredString(value, "slug"),
@@ -247,6 +272,7 @@ function parseAccountModel(value: unknown): OpenAICodexAccountModel {
 		priority: requiredInteger(value, "priority"),
 		...(serviceTiers !== undefined ? { serviceTiers } : {}),
 		...(defaultServiceTier !== undefined ? { defaultServiceTier } : {}),
+		...(availableAccessPrograms !== undefined ? { availableAccessPrograms } : {}),
 	};
 }
 
