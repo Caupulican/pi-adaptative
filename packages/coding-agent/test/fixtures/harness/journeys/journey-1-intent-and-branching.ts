@@ -1161,7 +1161,6 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 			}
 			world.systemOne.enterPhase(`${label}-steer`, {
 				...e4Judgments,
-				carries_0: { kind: "noul", probability: 0.97 },
 			});
 			const admitted = await withDeadline(trace, `${label} owner steer admitted`, owner.session.steer(words));
 			expect(cleanupEntered, "only the cleanup witness has entered the real command handler").toBe(heldCleanup);
