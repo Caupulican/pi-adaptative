@@ -1,7 +1,10 @@
 import type { AssistantMessage, Message } from "@caupulican/pi-ai";
 import type {
 	Agent,
+	AgentEvent,
+	AgentMessage,
 	AgentMessageOrigin,
+	CustomMessage,
 	ProviderRequestSnapshotContext,
 	ToolCallStartContext,
 } from "../kernel/index.ts";
@@ -25,6 +28,7 @@ const MAX_HELD_WARNINGS = 100;
 const MAX_HELD_WARNING_CHARS = 500;
 
 export class ForegroundLifecycleAdapter {
+	private readonly agent: Agent;
 	private readonly lifecycle: ForegroundLifecycleController;
 	private readonly sessionManager: SessionManager;
 	private readonly providerLimitStore: ProviderLimitStore | undefined;
@@ -54,6 +58,7 @@ export class ForegroundLifecycleAdapter {
 		observeProviderRequest?: (context: ProviderRequestSnapshotContext) => void,
 		prewarmToolCalls?: (calls: readonly ToolCallStartContext[], signal?: AbortSignal) => void,
 	) {
+		this.agent = agent;
 		this.sessionManager = sessionManager;
 		this.providerLimitStore = providerLimitStore;
 		this.observeMessagePersisted = observeMessagePersisted;
@@ -96,7 +101,7 @@ export class ForegroundLifecycleAdapter {
 		this.lifecycle.commitRoutedPromptPrefix();
 	}
 
-	getPersistedMessageEntryId(message: Message): string | undefined {
+	getPersistedMessageEntryId(message: AgentMessage): string | undefined {
 		return this.lifecycle.getPersistedMessageEntryId(message);
 	}
 
@@ -105,6 +110,43 @@ export class ForegroundLifecycleAdapter {
 		this.lifecycle.onMessagePersisted(message, entryId, origin);
 		this.observeMessagePersisted?.(message, entryId);
 		return entryId;
+	}
+
+	/** Custom inputs share the canonical append owner, whether committed by a run or by the host. */
+	appendCustomMessage(message: CustomMessage<unknown>): string {
+		const entryId = this.sessionManager.appendCustomMessageEntry(
+			message.customType,
+			message.content,
+			message.display,
+			message.details,
+			message,
+		);
+		this.lifecycle.notePersistedMessage(message, entryId);
+		return entryId;
+	}
+
+	/** Commit a host turn through normal extension events, accepting only its exact durable receipt. */
+	async commitCustomPrompt(
+		message: CustomMessage<unknown>,
+		emit: (event: Extract<AgentEvent, { type: "message_start" | "message_end" }>) => Promise<void>,
+		assertCurrent: () => void,
+	): Promise<void> {
+		assertCurrent();
+		await emit({ type: "message_start", message });
+		assertCurrent();
+		this.agent.state.messages.push(message);
+		try {
+			await emit({ type: "message_end", message });
+			if (!this.getPersistedMessageEntryId(message)) throw new Error("Custom-message input was not persisted.");
+		} catch (error) {
+			if (this.getPersistedMessageEntryId(message)) {
+				this.warn(`Custom-message input was persisted, but its event failed: ${String(error)}`);
+				return;
+			}
+			const index = this.agent.state.messages.indexOf(message);
+			if (index >= 0) this.agent.state.messages.splice(index, 1);
+			throw error;
+		}
 	}
 
 	recordTransportTelemetry(message: AssistantMessage): void {

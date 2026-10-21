@@ -1,4 +1,4 @@
-import type { CustomMessage } from "../kernel/index.ts";
+import { type CustomMessage, createCustomMessage } from "../kernel/index.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { runReleaseSteps } from "./util/resource-release.ts";
@@ -8,6 +8,8 @@ interface DurableCustomMessageTurnControllerDeps {
 	/** A turn's goal execution belongs to its submission and ends when that submission releases the foreground. */
 	goals: Pick<GoalSessionController, "beginExecution">;
 	enqueueSteeringMessage(message: CustomMessage<unknown>): void;
+	/** Commit under the held foreground lease before provider preparation can wait. */
+	appendMessage(message: CustomMessage<unknown>, lease: ForegroundSubmissionLease): Promise<void>;
 	/**
 	 * Runs after the turn's model run and before its lease is released, with that lease and the turn's opening
 	 * message (the custom message the run sent first, by which the turn is found in the history): the claim check
@@ -66,28 +68,18 @@ export class DurableCustomMessageTurnController {
 		submissionLease: ForegroundSubmissionLease,
 		goalId?: string,
 	): Promise<{ completion: Promise<void> }> {
-		const { appMessage, acceptedPromise, rejectAccepted } = this.prepare(message);
-		let completion: Promise<void>;
-		try {
-			this.deps.goals.beginExecution(goalId);
-			completion = this.deps.foreground
-				.runAgentPrompt(appMessage, submissionLease)
-				.then(() => this.deps.afterTurn?.(appMessage, submissionLease));
-		} catch (error) {
-			this.pending.delete(appMessage);
-			throw error;
-		}
-		void completion.then(
-			() => {
-				if (!this.pending.delete(appMessage)) return;
-				rejectAccepted(new Error("Custom-message turn ended before its input was persisted"));
-			},
-			(error: unknown) => {
-				if (!this.pending.delete(appMessage)) return;
-				rejectAccepted(error);
-			},
+		const appMessage = createCustomMessage(
+			message.customType,
+			message.content,
+			message.display,
+			message.details,
+			new Date().toISOString(),
 		);
-		await acceptedPromise;
+		this.deps.goals.beginExecution(goalId);
+		await this.deps.appendMessage(appMessage, submissionLease);
+		const completion = this.deps.foreground.runCommittedPrompt(appMessage, submissionLease).then(() => {
+			if (!submissionLease.signal.aborted) return this.deps.afterTurn?.(appMessage, submissionLease);
+		});
 		return { completion };
 	}
 

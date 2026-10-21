@@ -13,6 +13,8 @@ export interface SlashCommandInfo {
 export interface BuiltinSlashCommand {
 	name: string;
 	description: string;
+	/** Safe to execute locally while a foreground submission holds the session. Others require idle. */
+	duringWork?: "local";
 }
 
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
@@ -41,8 +43,8 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		name: "fitness",
 		description: "Pick and probe a model for local/heavy-lifter roles, then assign it (/fitness [model] [trials])",
 	},
-	{ name: "context", description: "Context composition dashboard: what rides on every request" },
-	{ name: "toolhealth", description: "Show tool repair diagnostics and learned standing rules" },
+	{ name: "context", description: "Context composition dashboard: what rides on every request", duringWork: "local" },
+	{ name: "toolhealth", description: "Show tool repair diagnostics and learned standing rules", duringWork: "local" },
 	{ name: "toolprobe", description: "Probe native/text tool-call support (/toolprobe [provider/model])" },
 	{
 		name: "toolrule-remove",
@@ -77,16 +79,18 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
 	{ name: "import", description: "Import and resume a session from a JSONL file" },
 	{ name: "share", description: "Share session as a secret GitHub gist" },
-	{ name: "copy", description: "Copy last agent message to clipboard" },
+	{ name: "copy", description: "Copy last agent message to clipboard", duringWork: "local" },
 	{ name: "name", description: "Set session display name" },
-	{ name: "session", description: "Show session info and stats" },
+	{ name: "session", description: "Show session info and stats", duringWork: "local" },
+	{ name: "cost", description: "Show session cost breakdown", duringWork: "local" },
 	{
 		name: "usage",
+		duringWork: "local",
 		description:
 			"Usage and limits: session, today, machine and each signed-in account (/usage reset redeems an earned reset)",
 	},
-	{ name: "changelog", description: "Show changelog entries" },
-	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
+	{ name: "changelog", description: "Show changelog entries", duringWork: "local" },
+	{ name: "hotkeys", description: "Show all keyboard shortcuts", duringWork: "local" },
 	{ name: "fork", description: "Create a new fork from a previous user message (optional name: /fork <name>)" },
 	{
 		name: "clone",
@@ -100,6 +104,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "compact", description: "Manually compact the session context" },
 	{
 		name: "self-compact-info",
+		duringWork: "local",
 		description: "Show self-compaction usage, lines, phase, cycles, prompts and any saved note (no model turn)",
 	},
 	{

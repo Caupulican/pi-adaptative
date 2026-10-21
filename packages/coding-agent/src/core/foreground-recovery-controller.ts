@@ -74,6 +74,8 @@ const foregroundSubmissionLeaseMarker: unique symbol = Symbol("foregroundSubmiss
 /** Identity-bound authority to prepare and execute one logical foreground submission. */
 export interface ForegroundSubmissionLease {
 	readonly [foregroundSubmissionLeaseMarker]: true;
+	/** Cancellation belongs to the submission, including preparation before an Agent run exists. */
+	readonly signal: AbortSignal;
 	/** Monotonic submission epoch assigned when this lease was acquired -- see
 	 * `ForegroundRecoveryController.getCurrentSubmissionEpoch`. */
 	readonly epoch: number;
@@ -135,7 +137,7 @@ export interface ForegroundRecoveryControllerDeps {
 	onUsageLimitReached?(message: AssistantMessage): void;
 	onSuccessfulAssistant(): void;
 	prepareRun(): Promise<void>;
-	afterRun(beginRuntimeHandoff: () => RuntimeMutationHandoff): Promise<void>;
+	afterRun(beginRuntimeHandoff: () => RuntimeMutationHandoff, signal: AbortSignal): Promise<void>;
 	/** Runs at an idle Agent boundary while foreground submission authority is still held. */
 	settleRuntimeUpdate?(
 		signal: AbortSignal | undefined,
@@ -182,6 +184,7 @@ export class ForegroundRecoveryController {
 	 */
 	private preparingTurn: ForegroundSubmissionLease | undefined;
 	private submissionLease: ForegroundSubmissionLease | undefined;
+	private submissionAbort: AbortController | undefined;
 	/** Next epoch to assign. Starts at 1 so the first successful `tryAcquireSubmission()` yields
 	 * epoch 1; only ever increases, including across releases -- it identifies a submission, not a
 	 * count of currently-held leases. */
@@ -279,10 +282,13 @@ export class ForegroundRecoveryController {
 			runtimeLease ?? this.deps.runtimeAdmission.tryAdmitWork({ kind: "foreground", label: "continuation" });
 		if (!reader) return undefined;
 		this.deps.runtimeAdmission.assertOwnWorkCurrent(reader);
+		const cancellation = new AbortController();
 		const lease: ForegroundSubmissionLease = {
 			[foregroundSubmissionLeaseMarker]: true,
 			epoch: this.nextSubmissionEpoch++,
+			signal: cancellation.signal,
 		};
+		this.submissionAbort = cancellation;
 		this.submissionLease = lease;
 		this.runtimeLeases.set(lease, { lease: reader, owned: runtimeLease === undefined });
 		this.notifyActivity();
@@ -321,7 +327,7 @@ export class ForegroundRecoveryController {
 	bindSubmissionSignal(signal: AbortSignal): () => void {
 		const onAbort = () => {
 			this.abortRetry();
-			this.deps.agent.abort("submission superseded");
+			this.deps.agent.abort(typeof signal.reason === "string" ? signal.reason : "submission superseded");
 		};
 		signal.addEventListener("abort", onAbort, { once: true });
 		return () => signal.removeEventListener("abort", onAbort);
@@ -746,6 +752,11 @@ export class ForegroundRecoveryController {
 		return lease !== undefined && lease === this.submissionLease;
 	}
 
+	/** Cancel the held submission without releasing authority before its actual cleanup ends. */
+	abortSubmission(reason: string): void {
+		this.submissionAbort?.abort(reason);
+	}
+
 	/**
 	 * The submission holding `lease` takes the turn of the input it carries: until a run of it owns the history, or it
 	 * releases the foreground, no navigation rewrites the history that input was accepted in (`beginHistoryRewrite`).
@@ -771,6 +782,7 @@ export class ForegroundRecoveryController {
 			this.runtimeLeases.delete(lease);
 			if (this.preparingTurn === lease) this.preparingTurn = undefined;
 			this.submissionLease = undefined;
+			this.submissionAbort = undefined;
 			if (runtime?.owned) runtime.lease.release();
 			this.notifyActivity();
 			if (this.activeRuns === 0) {
@@ -796,6 +808,13 @@ export class ForegroundRecoveryController {
 	/** Continue from the already canonical agent history without replaying the original user message. */
 	async runAgentContinuation(submissionLease?: ForegroundSubmissionLease, signal?: AbortSignal): Promise<void> {
 		await this.runAgentExecution("continue", undefined, submissionLease, signal);
+	}
+
+	/** A host input was already committed: start a fresh logical prompt without appending or emitting it again. */
+	async runCommittedPrompt(message: AgentMessage, submissionLease: ForegroundSubmissionLease): Promise<void> {
+		if (this.deps.agent.state.messages.at(-1) !== message)
+			throw new Error("A committed prompt must be the current transcript tail.");
+		await this.runAgentExecution("committed", message, submissionLease);
 	}
 
 	/**
@@ -909,7 +928,7 @@ export class ForegroundRecoveryController {
 	}
 
 	private async runAgentExecution(
-		mode: "prompt" | "continue",
+		mode: "prompt" | "committed" | "continue",
 		messages: AgentMessage | AgentMessage[] | undefined,
 		submissionLease?: ForegroundSubmissionLease,
 		signal?: AbortSignal,
@@ -929,6 +948,8 @@ export class ForegroundRecoveryController {
 			if (releaseLease && lease) this.releaseSubmission(lease);
 			throw new AgentBusyError("Agent is already processing.");
 		}
+		signal = signal ? AbortSignal.any([signal, lease.signal]) : lease.signal;
+		const detachAbort = this.bindSubmissionSignal(signal);
 
 		this.activeRuns++;
 		// Set once the submission reached its stranded-input delivery, which holds what stays queued; every other exit holds it below.
@@ -952,7 +973,7 @@ export class ForegroundRecoveryController {
 			if (this.isClosing(signal)) return;
 			// The chat turn begins where the run reaches its first provider call; a run closed before that begins none.
 			endChatTurn = await this.beginChatTurn(
-				() => (mode === "prompt" ? this.promptStartOf(messages) : this.continuationStartOf()),
+				() => (mode === "continue" ? this.continuationStartOf() : this.promptStartOf(messages)),
 				signal,
 			);
 			// Re-checked after that await: no await separates this read from the run below.
@@ -969,9 +990,11 @@ export class ForegroundRecoveryController {
 			// From here the run delivers what the agent's queue holds, until its last round.
 			this.setConsumingRun(true);
 			this.recoveryRoundAvailable = !atRoundCap();
-			if (mode === "prompt") {
+			if (mode !== "continue") {
 				if (!messages) throw new Error("Foreground prompt execution requires messages.");
-				await this.deps.agent.prompt(messages);
+				// prompt([]) creates fresh loop limits and recovery state over the committed transcript.
+				// continue() would inherit the previous prompt's provider-turn and failure budgets.
+				await this.deps.agent.prompt(mode === "committed" ? [] : messages);
 			} else {
 				await this.deps.agent.continue();
 			}
@@ -1044,7 +1067,7 @@ export class ForegroundRecoveryController {
 			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
 			afterRunSettled = true;
 			try {
-				await this.atRuntimeMutationBoundary(lease, true, (begin) => this.deps.afterRun(begin));
+				await this.atRuntimeMutationBoundary(lease, true, (begin) => this.deps.afterRun(begin, signal));
 			} catch (afterRunError: unknown) {
 				throw new AggregateError(
 					[error, afterRunError],
@@ -1065,10 +1088,11 @@ export class ForegroundRecoveryController {
 			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
 			try {
 				if (!afterRunSettled)
-					await this.atRuntimeMutationBoundary(lease, true, (begin) => this.deps.afterRun(begin));
+					await this.atRuntimeMutationBoundary(lease, true, (begin) => this.deps.afterRun(begin, signal));
 			} finally {
 				// After the run's cleanup, so the turn covers every provider round the run made.
 				endChatTurn?.();
+				detachAbort();
 				this.activeRuns--;
 				if (releaseLease && lease && this.ownsSubmission(lease)) this.releaseSubmission(lease);
 				if (this.activeRuns === 0 && this.submissionLease === undefined) {
@@ -1177,6 +1201,7 @@ export class ForegroundRecoveryController {
 
 	shutdown(): void {
 		this.shutdownReason ??= new Error("Session disposed before foreground submission authority was acquired");
+		this.submissionAbort?.abort(this.shutdownReason);
 		this.unsubscribeRuntime();
 		for (const resolve of this.idleWaiters) resolve();
 		this.idleWaiters.clear();

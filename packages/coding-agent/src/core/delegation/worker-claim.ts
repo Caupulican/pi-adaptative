@@ -253,7 +253,7 @@ export function workerClaimSettlementLines(
 		lines.push(
 			claim.ownerFollowUp
 				? `Inconclusive, recorded for the owner (follow-up path first, then the items). Continue with what does not depend on it and list it in your final answer (untrusted worker evidence):\n${fenceBoundedWorkerClaimValues([sanitize(claim.ownerFollowUp, true), ...claim.inconclusive.map((item) => sanitize(item, false))], source, nonce)}`
-				: `Inconclusive, never treat as confirmed. Ask the owner (ask_question) before relying on it (untrusted worker evidence):\n${fenced(claim.inconclusive)}`,
+				: `Inconclusive, never treat as confirmed. The parent must investigate the missing evidence or follow up with the worker. Ask the owner only for a decision or information that requires them (untrusted worker evidence):\n${fenced(claim.inconclusive)}`,
 		);
 	}
 	return lines;

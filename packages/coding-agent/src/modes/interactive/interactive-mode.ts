@@ -68,6 +68,7 @@ import type {
 	SelfModificationSettings,
 	SettingsScope,
 } from "../../core/settings/settings-schema.ts";
+import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import { collectSelfModificationSourceCandidates } from "../../core/system-prompt-builder.ts";
 import type { TerminalWarnings } from "../../core/terminal-warnings.ts";
 import { isRecordObject } from "../../core/util/value-guards.ts";
@@ -1616,7 +1617,19 @@ export class InteractiveMode {
 				this.session.isCompacting ||
 				this.session.isRetrying ||
 				this.session.getForegroundActivity().epoch !== undefined;
-			if (workState.busy && (!isCommandText || foregroundTurnLive)) {
+			const builtin = queueAsFollowUp
+				? undefined
+				: BUILTIN_SLASH_COMMANDS.find(
+						(command) => text === `/${command.name}` || text.startsWith(`/${command.name} `),
+					);
+			if (builtin && foregroundTurnLive && builtin.duringWork !== "local") {
+				this.editor.setText(text);
+				this.showWarning(
+					`/${builtin.name} requires the foreground to be idle. ${keyText("app.interrupt")} interrupts it; your command stays in the editor.`,
+				);
+				return;
+			}
+			if (!builtin && workState.busy && (!isCommandText || foregroundTurnLive)) {
 				const images = this.takeClipboardImagesForText(text);
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
@@ -2676,8 +2689,8 @@ export class InteractiveMode {
 		else if (this.editor.onSubmit) {
 			const isCommandText = text.startsWith("/") || text.startsWith("!");
 			const keepFollowUp = this.session.getSessionWorkState().busy && !isCommandText;
-			await this.editor.onSubmit(keepFollowUp ? `>>${text}` : text);
 			this.editor.setText("");
+			await this.editor.onSubmit(keepFollowUp ? `>>${text}` : text);
 		}
 	}
 
@@ -2936,12 +2949,14 @@ export class InteractiveMode {
 
 	private restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
 		const { steering, followUp } = this.clearAllQueues();
+		if (options?.abort) {
+			void this.session.abort("user interrupt").catch((error: unknown) => {
+				this.showError(`Interrupt failed: ${error instanceof Error ? error.message : String(error)}`);
+			});
+		}
 		const allQueued = [...steering, ...followUp];
 		if (allQueued.length === 0) {
 			this.updatePendingMessagesDisplay();
-			if (options?.abort) {
-				this.agent.abort("user interrupt");
-			}
 			return 0;
 		}
 		const queuedText = allQueued.join("\n\n");
@@ -2949,9 +2964,6 @@ export class InteractiveMode {
 		const combinedText = [queuedText, currentText].filter((t) => t.trim()).join("\n\n");
 		this.editor.setText(combinedText);
 		this.updatePendingMessagesDisplay();
-		if (options?.abort) {
-			this.agent.abort("user interrupt");
-		}
 		return allQueued.length;
 	}
 

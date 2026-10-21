@@ -1116,7 +1116,7 @@ export class AgentSession {
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerClaimSnapshot: (claim, request, options) => this.saveWorkerClaimSnapshot(claim, request, options),
 			reportWorkerTerminal: (handoff) => this.reportWorkerTerminal(handoff),
-			recordUnsettledForOwner: (items) => this._deliverToOwner(items),
+			recordUnsettledForOwner: (items) => this._unsettledLadder.queueWorkerUnsettled(items),
 			notifyWorktreeLane: (text) => this._steerSessionNotice("worktree-sync-notice", text),
 			notifyParentSession: (customType, text) => this._steerSessionNotice(customType, text),
 			createLaneMemoryBroker: (capacity) => this._memory.createLaneMemoryBroker(capacity),
@@ -1596,8 +1596,8 @@ export class AgentSession {
 				this.agent.state.systemPrompt = this._systemPromptBuilder.enforceSystemPromptBudget(this.systemPrompt);
 				await this._toolProtocol.ensureActiveModelProtocol();
 			},
-			afterRun: async (beginRuntimeHandoff) => {
-				if (!isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason)) {
+			afterRun: async (beginRuntimeHandoff, signal) => {
+				if (!signal.aborted && !isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason)) {
 					this._selfCompaction.schedule();
 				}
 				this._toolProtocol.restoreWithheldTools();
@@ -1635,9 +1635,15 @@ export class AgentSession {
 			foreground: this._foregroundRecovery,
 			goals: this._goals,
 			enqueueSteeringMessage: (message) => this.agent.steer(message),
+			appendMessage: (message, lease) =>
+				this._foregroundLifecycle.commitCustomPrompt(message, this._handleAgentEvent, () => {
+					if (this._disposed || !this._foregroundRecovery.ownsSubmission(lease))
+						throw new Error("Custom-message persistence requires its live foreground submission.");
+				}),
 			// Wake turns relay worker results: their answer's claims are checked like any other answer's.
 			afterTurn: async (turnOpening, lease) => {
-				const correction = await this._claimCorrection(turnOpening);
+				const correction = await this._unsettledLadder.claimCorrection(turnOpening);
+				if (lease.signal.aborted) return;
 				if (correction)
 					await this._foregroundRecovery.runAgentPrompt(
 						createCustomMessage("claim_delivery", correction, true, undefined, new Date().toISOString()),
@@ -2362,7 +2368,7 @@ export class AgentSession {
 				this._enableCapabilitiesAuthorizedByUser(userRequest, signal, trustedOwner, acceptedOrder),
 			announceOwnerFollowUpsWhenPresent: () => this._announceOwnerFollowUpsWhenPresent(),
 			runToolkitHit: (scriptName, messages, signal) => this._runToolkitHit(scriptName, messages, signal),
-			claimCorrection: (turnOpening) => this._claimCorrection(turnOpening),
+			claimCorrection: (turnOpening) => this._unsettledLadder.claimCorrection(turnOpening),
 			flushOwnerItems: (lease) => this._flushOwnerItems(lease),
 			scheduleIdleWork: (options, afterPrompt) => this._scheduleIdleWork(options, afterPrompt),
 			hasPendingIdleContinuation: () => this._backgroundLanes.hasPendingIdleContinuation(),
@@ -3631,13 +3637,7 @@ export class AgentSession {
 			if (this._modelRouter.captureSessionMessage(event.message, event.origin)) {
 				// buffered by the router; persistence is deferred to the routed-turn flush
 			} else if (event.message.role === "custom") {
-				this.sessionManager.appendCustomMessageEntry(
-					event.message.customType,
-					event.message.content,
-					event.message.display,
-					event.message.details,
-					event.message,
-				);
+				this._foregroundLifecycle.appendCustomMessage(event.message);
 				this._durableCustomMessageTurns.notePersisted(event.message);
 				messagePersisted = true;
 			} else if (
@@ -4049,9 +4049,12 @@ export class AgentSession {
 		return this.agent.state.thinkingLevel;
 	}
 
-	/** A submission is preparing its turn (routing, System One classification): no response streams yet. */
+	/** Foreground preparation or settlement holds the submission while no response streams. */
 	get isPreparingSubmission(): boolean {
-		return this._promptSubmission.isPreparingSubmission;
+		return (
+			this._promptSubmission.isPreparingSubmission ||
+			(!this.isStreaming && this._foregroundRecovery.getCurrentSubmissionEpoch() !== undefined)
+		);
 	}
 
 	/** Whether agent is currently streaming a response */
@@ -4489,10 +4492,6 @@ export class AgentSession {
 		return this._cache.chooseObjectiveExecutor(route);
 	}
 
-	private _claimCorrection(turnOpening: AgentMessage): Promise<string | undefined> {
-		return this._unsettledLadder.claimCorrection(turnOpening);
-	}
-
 	private async _runToolkitHit(
 		scriptName: string,
 		turnMessages: readonly AgentMessage[],
@@ -4728,14 +4727,8 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else {
+			this._foregroundLifecycle.appendCustomMessage(appMessage);
 			this.agent.state.messages.push(appMessage);
-			this.sessionManager.appendCustomMessageEntry(
-				message.customType,
-				message.content,
-				message.display,
-				message.details,
-				appMessage,
-			);
 			this._emit({ type: "message_start", message: appMessage });
 			this._emit({ type: "message_end", message: appMessage });
 		}
@@ -4873,8 +4866,9 @@ export class AgentSession {
 		// The interrupt cancels queued input whose admission is still undecided; admitted input stays queued.
 		this._pendingQueue.cancelAwaiting();
 		this._emitQueueUpdate();
-		// A submission still preparing has no run to abort: cancel the submission itself.
-		if (!this.agent.state.isStreaming) this._promptSubmission.abortSubmission(reason);
+		// Cancel the entire submission, including preparation, recovery and postflight around a live run.
+		this._promptSubmission.abortSubmission(reason);
+		this._foregroundRecovery.abortSubmission(reason);
 		this.runtimeUpdates.cancel();
 		this.abortRetry();
 		this.agent.abort(reason);
@@ -5825,9 +5819,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * A worker's inconclusive findings on the ladder. What stays open goes to the owner: under a handoff
-	 * it is written to the follow-up document so the run moves on around it; with the owner in the
-	 * loop the parent is told to ask them.
+	 * A worker's missing evidence remains parent-owned; the ladder separately routes owner-reserved decisions.
 	 */
 	private async _settleWorkerInconclusive(input: {
 		items: readonly string[];

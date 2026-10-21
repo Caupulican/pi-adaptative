@@ -8,6 +8,7 @@ import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session-contracts.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
+import { isDecisivelyTrue } from "./decision/noul.ts";
 import type { ExtensionUIContext } from "./extensions/index.ts";
 import type { ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import {
@@ -34,6 +35,7 @@ import {
 	itemConsultMessage,
 	type LadderOutcome,
 	parseItemConsult,
+	RESERVED_DECISION_KINDS,
 	settleUnsettledItems,
 	toolResultEvidence,
 	UNSETTLED_ITEM_CONSULT_PROMPT,
@@ -70,6 +72,8 @@ export class SessionUnsettledLadderController {
 	readonly codeDuplicates: CodeDuplicateReviewer;
 	readonly answerClaims: AnswerClaimChecker;
 	private pendingOwnerItems: string[] = [];
+	private pendingWorkerItems: { item: string; request: string; sessionId: string }[] = [];
+	private ownerItemsFlush = Promise.resolve();
 	/** Set while a paused goal holds items the owner was told about; its end posts them. */
 	private heldForPausedGoal = false;
 	private lastAnnouncedFollowUp?: { sessionId: string; bytes: number };
@@ -169,9 +173,8 @@ export class SessionUnsettledLadderController {
 	}
 
 	/**
-	 * A worker's inconclusive findings on the ladder. What stays open goes to the owner: under a handoff
-	 * it is written to the follow-up document so the run moves on around it; with the owner in the
-	 * loop the parent is told to ask them.
+	 * Missing worker evidence remains with the parent. Only owner-reserved decisions are surfaced to
+	 * the owner, classified at the turn boundary so missing evidence never delays the terminal handoff.
 	 */
 	async settleWorkerInconclusive(input: {
 		items: readonly string[];
@@ -183,8 +186,23 @@ export class SessionUnsettledLadderController {
 			(entry) => `${entry.verdict}: ${entry.item} (${entry.by}${entry.basis ? `; basis: ${entry.basis}` : ""})`,
 		);
 		const unsettled = outcome.unsettled.map((entry) => `${entry.item} (missing: ${entry.missing})`);
-		const ownerFollowUp = this.deliverToOwner(unsettled);
-		return { settled, unsettled, ...(ownerFollowUp ? { ownerFollowUp } : {}) };
+		this.queueWorkerUnsettled(unsettled);
+		return { settled, unsettled };
+	}
+
+	/** Both in-process and managed worker reports retain their unknowns for parent review. */
+	queueWorkerUnsettled(items: readonly string[]): undefined {
+		const request = this.deps.getLastUserRequest();
+		const sessionId = this.deps.getSessionManager().getSessionId();
+		for (const item of items) {
+			if (
+				!this.pendingWorkerItems.some(
+					(entry) => entry.item === item && entry.sessionId === sessionId && entry.request === request,
+				)
+			)
+				this.pendingWorkerItems.push({ item, request, sessionId });
+		}
+		return undefined;
 	}
 
 	announceOwnerFollowUpsWhenPresent(): void {
@@ -245,10 +263,52 @@ export class SessionUnsettledLadderController {
 	}
 
 	/** Post this turn's unsettled items to the owner as one displayed message, then clear them. */
-	async flushOwnerItems(lease: ForegroundSubmissionLease | undefined): Promise<void> {
-		if (this.pendingOwnerItems.length === 0) return;
+	flushOwnerItems(lease: ForegroundSubmissionLease | undefined): Promise<void> {
+		const flush = this.ownerItemsFlush.then(() => this.flushOwnerItemsNow(lease));
+		this.ownerItemsFlush = flush.catch(() => {});
+		return flush;
+	}
+
+	private async flushOwnerItemsNow(lease: ForegroundSubmissionLease | undefined): Promise<void> {
+		if (lease?.signal.aborted) return;
+		const sessionId = this.deps.getSessionManager().getSessionId();
+		const request = this.deps.getLastUserRequest();
+		const isCurrent = () =>
+			!lease?.signal.aborted &&
+			sessionId === this.deps.getSessionManager().getSessionId() &&
+			request === this.deps.getLastUserRequest();
+		const judge = this.deps.getSystemOneController();
+		const workerItems = this.pendingWorkerItems
+			.splice(0)
+			.filter((entry) => entry.sessionId === sessionId && entry.request === request);
+		let reservedWorkerItems: string[] = [];
+		if (judge) {
+			const decisions = await Promise.all(
+				workerItems.map(async (entry) => {
+					try {
+						const answers = await judge.evaluateReservedDecision(
+							{ question: entry.item, request: entry.request },
+							lease?.signal,
+						);
+						return Object.keys(RESERVED_DECISION_KINDS).some((id) => isDecisivelyTrue(answers[id]))
+							? entry
+							: undefined;
+					} catch (error) {
+						this.deps.emitWarning(
+							`Worker owner-decision routing unavailable; findings remain with the parent: ${error instanceof Error ? error.message : String(error)}`,
+						);
+						return undefined;
+					}
+				}),
+			);
+			reservedWorkerItems = decisions.flatMap((entry) => (entry ? [entry.item] : []));
+		}
+		if (this.pendingOwnerItems.length === 0 && reservedWorkerItems.length === 0) return;
 		// Whether the owner handed decisions off decides where these items go.
-		await this.deps.settleLatestOwnerPolicy();
+		await this.deps.settleLatestOwnerPolicy(lease?.signal);
+		// Classified worker decisions stay local until both waits finish and their publication scope is current.
+		if (!isCurrent()) return;
+		this.deliverToOwner(reservedWorkerItems);
 		const items = this.pendingOwnerItems;
 		// A flush that ran during the wait already took them: there is nothing left to post.
 		if (items.length === 0) return;
@@ -273,10 +333,9 @@ export class SessionUnsettledLadderController {
 		}
 		this.pendingOwnerItems = [];
 		this.heldForPausedGoal = false;
-		const content = [
-			"Needs you: nothing the agents could check settled these. Answer before relying on them:",
-			...items.map((item) => `- ${item}`),
-		].join("\n");
+		const content = ["Owner input requested for unresolved decisions:", ...items.map((item) => `- ${item}`)].join(
+			"\n",
+		);
 		await this.deps.sendOwnerItemsMessage(items, content, lease);
 	}
 
