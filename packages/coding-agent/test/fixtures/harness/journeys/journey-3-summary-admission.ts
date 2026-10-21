@@ -11,6 +11,7 @@ import { requestTexts } from "./shared.ts";
 export async function runJourney3SummaryAdmissionPhase(world: HarnessWorld): Promise<void> {
 	const label = "h5-summary-admission";
 	const requestsBefore = world.provider.requests.length;
+	const warningsBefore = world.warnings.length;
 	const agentDir = `${world.agentDir}-${label}`;
 	const manager = world.createSessionManager(agentDir);
 	const seed = await world.createRootSession("root", {
@@ -227,5 +228,16 @@ export async function runJourney3SummaryAdmissionPhase(world: HarnessWorld): Pro
 		judgeMayAnswer.release();
 	}
 	expect(await world.disposeSessionInBody(session)).toBeUndefined();
+	if (!world.systemOne.enabled) {
+		const expectedWarning =
+			"History summaries: 1 model summary job(s) are held: System One is not bound to this session, so no admission judgment can run. Exact copies and exact history recall are unaffected.";
+		const warningIndex = world.warnings.indexOf(expectedWarning, warningsBefore);
+		expect(warningIndex, "the unbound admission hold is disclosed to its owner").toBeGreaterThanOrEqual(
+			warningsBefore,
+		);
+		// Consume only the exact diagnostic this negative control requires. Every other warning,
+		// including an unexpected duplicate, remains subject to the world closing classifier.
+		expect(world.warnings.splice(warningIndex, 1)).toEqual([expectedWarning]);
+	}
 	world.trace.mark("root", label);
 }
