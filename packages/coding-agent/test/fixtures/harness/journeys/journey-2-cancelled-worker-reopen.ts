@@ -134,6 +134,35 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 		},
 	);
 	try {
+		// A new manager buffers custom goal entries until a real reply/lifecycle publication.
+		// Establish this parent's durable identity through its public conversation before relying on reopen.
+		const warmReply = "The limits boundary remains under inspection.";
+		const warmRequestsBefore = world.provider.requests.length;
+		world.systemOne.enterPhase(`${label}-persist-parent`, {});
+		world.provider.enqueue("root", text(`${label}-persist-parent`, warmReply));
+		await withDeadline(world.trace, `${label}: real parent reply`, owner.session.prompt("Hello."));
+		await withDeadline(world.trace, `${label}: parent reply settles`, owner.session.waitForForegroundIdle());
+		const persistedFile = owner.sessionManager.getSessionFile();
+		if (!persistedFile) throw new Error(`${label}: parent reply has no canonical file`);
+		const persistedParent = world.openSessionManager(persistedFile, agentDir);
+		const persistedReplies = persistedParent
+			.getBranch()
+			.filter(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "assistant" &&
+					entry.message.content.some((part) => part.type === "text" && part.text === warmReply),
+			);
+		observations.parentPersistence = {
+			parentSessionId: owner.sessionManager.getSessionId(),
+			coldParentSessionId: persistedParent.getSessionId(),
+			assistantReplies: persistedReplies.length,
+			providerRequests: world.provider.requests.length - warmRequestsBefore,
+		};
+		expect(persistedParent.getSessionId(), report()).toBe(owner.sessionManager.getSessionId());
+		expect(persistedReplies).toHaveLength(1);
+		expect(world.provider.requests.length - warmRequestsBefore).toBe(1);
+		world.systemOne.enterPhase(`${label}-start`, {});
 		const a = createGoalState({
 			goalId: `${label}-a`,
 			userGoal: "Inspect the first limits boundary.",
