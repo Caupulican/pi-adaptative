@@ -4,6 +4,7 @@
 
 - `createAgentSession` takes one `timers` option (a `TimerSource` that gives each timer owner a `TimerPort` with `now()`, `setTimeout` and `clearTimeout`) in place of `historyTimeSource` and `writeReservationTimers`. The worker retry ladder and its task runtime clock, the worker handoff retry and watchdog, background tool task watchdogs, wait bound and wake-up retry, the write-reservation release backoff and the summary hierarchy arm their alarms on it. `TranscriptSummaryTimeSource` and `WorkerWriteReservationTimers` were removed.
 - `AgentSession.steer()` and `followUp()` resolve with an `OwnerInputOutcome` (`{ inputId, ended? }`): `ended` says how the message ended without delivery (`withdrawn`, `held`, `cancelled` or `refused`, with a reason). `PromptOptions.preflightResult` is called exactly once and receives that end as its second argument when the prompt was not accepted. `RpcClient.prompt()`, `steer()` and `followUp()` throw when the response is `success: false`.
+- Sessions persisted with specialist-context `handoff` ownership metadata require a reader that recognizes `handoff`; earlier versions reject that ownership state as invalid.
 
 ### Added
 
@@ -24,6 +25,9 @@
 
 ### Fixed
 
+- System One discards a stage judgment when the goal's objective text changes, even if the goal ID stays the same.
+- A clean session shutdown hands settled unfinished worker contexts back to the same parent for resumption.
+- Background tool tasks retain the goal of the execution that started them when the active goal changes.
 - A worker's report request quotes each changed file and each command the host recorded as one span. The activity lane now says how a provider admission wait ended (admitted, admitted at its wait budget, refused by the emergency stop, cancelled, not admitted) instead of always "admitted". Model quota exhaustions read the provider admission gate's clock, so the gate's wait for a model's reset ends when the exhaustion expires.
 - A prompt being prepared is written to a side file beside the session file and restored as held after a restart, a goal execution ends exactly when its foreground submission releases, a locked or busy decision-ledger database is retried on the next use instead of failing for the whole session, and the harness gained persistent SQLite faults with snapshot rewind and scripted connection, quota and partial-stream provider replies.
 - Retry, provider-admission and lease-heartbeat waits run on the shared timer port, provider admission reports how each wait ended, and the synchronous lock's final ELOCKED message says how long the thread was blocked.
