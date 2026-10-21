@@ -1389,7 +1389,7 @@ export class RuntimeBuilder {
 		systemOne?.setStageExecutionScopeSource(
 			createSessionStageExecutionScope(
 				verificationHost,
-				() => this.deps.getGoalStateSnapshot()?.goalId,
+				() => this.deps.getGoalStateSnapshot(),
 				() => this._mutationAdmissionClosed,
 			),
 		);

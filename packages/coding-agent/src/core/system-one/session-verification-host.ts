@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import type { TSchema } from "typebox";
 import type { AgentTool } from "../../kernel/index.ts";
 import type { SessionManager } from "../../kernel/node.ts";
+import type { GoalState } from "../goals/goal-state.ts";
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { captureCandidateSnapshot } from "./candidate-snapshot.ts";
@@ -69,18 +70,22 @@ export function createSessionVerificationHost(
 	};
 }
 
-/** A pending goal-stage answer retains its exact goal and the verification host's branch ancestry. */
+/** A pending goal-stage answer retains its goal identity, objective words and branch ancestry. */
 export function createSessionStageExecutionScope(
 	host: Pick<VerificationHost, "captureFence">,
-	getGoalId: () => string | undefined,
+	getGoal: () => Pick<GoalState, "goalId" | "userGoal"> | undefined,
 	isClosed: () => boolean,
 ): StageExecutionScopeSource {
 	return () => {
 		const branchCurrent = host.captureFence();
-		const goalId = getGoalId();
+		const goal = getGoal();
+		const goalId = goal?.goalId;
+		const userGoal = goal?.userGoal;
 		return () => {
 			if (isClosed()) return "session_disposed";
-			return branchCurrent() && getGoalId() === goalId ? undefined : "goal_replaced";
+			if (!branchCurrent()) return "goal_replaced";
+			const current = getGoal();
+			return current?.goalId === goalId && current?.userGoal === userGoal ? undefined : "goal_replaced";
 		};
 	};
 }
