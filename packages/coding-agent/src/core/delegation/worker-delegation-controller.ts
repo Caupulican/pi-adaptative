@@ -1402,27 +1402,30 @@ export class WorkerDelegationController {
 						)
 							continue;
 						this.runTeardownStep(`handoff suspended worker ${agent.agentId} context`, () => {
-							this.conversations.handoffProjectContext({
-								agentDir: this.deps.getAgentDir(),
-								resumeContext: agent.resumeContext,
-								expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
-								projectClaim: claim,
-								parentSessionId: claim.parentSessionId,
-								agentId: agent.agentId,
-								assertSettled: () => {
-									const current = this.lifecycle.getLatestAgentAttempt(agent.agentId);
-									if (
-										this.projectClaims.get(sessionId) !== claim ||
-										!this.isSpecialistSettled(agent.agentId) ||
-										!isDeepStrictEqual(this.lifecycle.getAgent(agent.agentId), agent) ||
-										current?.attemptId !== attempt.attemptId ||
-										current.status !== "suspended" ||
-										current.lease?.ownerId !== lease.ownerId ||
-										current.lease.leaseId !== lease.leaseId ||
-										current.lease.fencingToken !== lease.fencingToken
-									)
-										throw new Error(`Worker ${agent.agentId} shutdown handoff ownership changed.`);
-								},
+							this.agentControl.handoffSettledContext(agent.agentId, claim, (assertMailboxSettled) => {
+								this.conversations.handoffProjectContext({
+									agentDir: this.deps.getAgentDir(),
+									resumeContext: agent.resumeContext,
+									expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+									projectClaim: claim,
+									parentSessionId: claim.parentSessionId,
+									agentId: agent.agentId,
+									assertSettled: () => {
+										assertMailboxSettled();
+										const current = this.lifecycle.getLatestAgentAttempt(agent.agentId);
+										if (
+											this.projectClaims.get(sessionId) !== claim ||
+											!this.isSpecialistSettled(agent.agentId) ||
+											!isDeepStrictEqual(this.lifecycle.getAgent(agent.agentId), agent) ||
+											current?.attemptId !== attempt.attemptId ||
+											current.status !== "suspended" ||
+											current.lease?.ownerId !== lease.ownerId ||
+											current.lease.leaseId !== lease.leaseId ||
+											current.lease.fencingToken !== lease.fencingToken
+										)
+											throw new Error(`Worker ${agent.agentId} shutdown handoff ownership changed.`);
+									},
+								});
 							});
 							this.projectClaims.delete(sessionId);
 						});

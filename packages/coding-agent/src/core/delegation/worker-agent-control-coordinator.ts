@@ -2544,6 +2544,34 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return this.getMailbox(agentId).withQuiescentMailbox(release);
 	}
 
+	/** End only this closed owner's cached view after its exact context is durably handed off. */
+	handoffSettledContext(
+		agentId: string,
+		claim: SpecialistContextClaim,
+		publish: (assertSettled: () => void) => void,
+	): void {
+		// Do not load a mailbox: an admission that never loaded one has no local view to retire.
+		const mailbox = this.mailboxes.get(agentId);
+		const assertSettled = (): void => {
+			if (
+				!this.disposed ||
+				this.mailboxes.get(agentId) !== mailbox ||
+				this.reconcilingTaskBearingAgentIds.has(agentId) ||
+				this.taskBearingContinuationAgentIds.has(agentId) ||
+				this.runtimeWaiters.has(agentId) ||
+				(mailbox &&
+					(!isDeepStrictEqual(mailbox.getProjectClaim(), claim) ||
+						mailbox.getResourceSnapshot().listenerCount !== 0))
+			)
+				throw new Error(`Worker ${agentId} mailbox handoff still has local ownership or observers.`);
+		};
+		assertSettled();
+		// The publisher rechecks this guard under its mailbox/transcript locks before the durable write.
+		publish(assertSettled);
+		assertSettled();
+		if (mailbox) this.mailboxes.delete(agentId);
+	}
+
 	private isAcceptedControlReplay(agentId: string, idempotencyKey: string | undefined): boolean {
 		if (idempotencyKey === undefined) return false;
 		const messageId = workerAgentMessageId(this.options.parentSessionId, idempotencyKey);
