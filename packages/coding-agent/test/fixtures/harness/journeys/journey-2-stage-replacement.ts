@@ -113,7 +113,7 @@ export async function verifyPreflightReplacement(world: HarnessWorld, judgments:
 			world.provider.enqueue("root", {
 				...text(`${label}-stage-answer`, stageAnswer),
 				check: () => {
-					if (!stageSettled) world.systemOne.enterPhase(`${label}-stage-postflight`, postflight);
+					if (!stageSettled && !late) world.systemOne.enterPhase(`${label}-stage-postflight`, postflight);
 				},
 			});
 			pending = session.prompt(`Inspect the ${label} boundary.`, {
@@ -127,7 +127,10 @@ export async function verifyPreflightReplacement(world: HarnessWorld, judgments:
 			const entriesAtHeld = manager.getBranch().length;
 			if (late) replace();
 			const goalAtRelease = session.getGoalStateSnapshot();
-			world.systemOne.enterPhase(`${label}-released-stage`, {});
+			// Provider admission can refuse A before its queued answer's callback runs. The current
+			// prompt owner still validates postflight after that local error, so script its actual pack here.
+			// An earlier ownership interruption may change this protocol; the assertions below require effects, not this callback.
+			world.systemOne.enterPhase(`${label}-released-stage`, late ? postflight : {});
 			release.release();
 			const stageOutcome = await withDeadline(world.trace, `${label}: held stage settles`, pending).then(
 				() => "resolved",
