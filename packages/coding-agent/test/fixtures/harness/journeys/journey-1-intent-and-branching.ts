@@ -13,7 +13,13 @@ import {
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import type { ScriptedRequest } from "../scripted-provider.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
-import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
+import {
+	HARNESS_PROJECT_CWD,
+	type HarnessWorld,
+	holdCompactionSummary,
+	projectPath,
+	withDeadline,
+} from "../session-fixture.ts";
 
 /**
  * The real proper-lockfile runs its exclusion and lease logic; only its filesystem is redirected to the
@@ -897,6 +903,21 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 	world.systemOne.enterPhase("s4-held", {});
 	const s4Summary = s4Session.navigateTree(s4FirstUser.id, { summarize: true });
 	await withDeadline(trace, "S4 summary held", s4SummaryAdmitted.promise);
+	const s4BeforeCompact = { leaf: s4Manager.getLeafId(), entries: s4Manager.getEntries().length };
+	const s4CompactRefusalText =
+		"Cannot compact while session history is being rewritten. Wait for the rewrite to finish first.";
+	const s4CompactRefusal = await s4Session.compact().then(
+		() => "compacted",
+		(error: unknown) => {
+			trace.claimRejection(error, s4CompactRefusalText);
+			return error instanceof Error ? error.message : String(error);
+		},
+	);
+	expect(s4CompactRefusal, "manual compaction cannot enter the held navigation's history").toBe(s4CompactRefusalText);
+	expect(
+		{ leaf: s4Manager.getLeafId(), entries: s4Manager.getEntries().length },
+		"refused compaction neither moves the branch nor starts a durable transaction",
+	).toEqual(s4BeforeCompact);
 	// An idle waiter parks behind the held navigation's history rewrite: its wait starts before the call returns. It resumes once the
 	// navigations settle, and its one end reports the foreground activity it waited on.
 	const s4IdleWaits: Array<{ seq: number; phase: string; end?: unknown }> = [];
@@ -1011,6 +1032,184 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 		"the reopened S4 owner disposes cleanly",
 	).toBeUndefined();
 	trace.mark("root", "e4.summary-superseded");
+
+	// H1 reverse ordering: an extension holds a real manual compaction after preparation. Navigation is refused before
+	// any branch mutation. Once the checkpoint settles, the same navigation succeeds, then compaction succeeds on that branch.
+	const h1Reached = createBarrier();
+	const h1Release = createBarrier();
+	const h1Owner = await world.createRootSession("root", {
+		sessionManager: world.createSessionManager(),
+		extensionFactories: [holdCompactionSummary(h1Release, h1Reached)],
+	});
+	await h1Owner.session.bindExtensions({ uiContext: world.humanInput.ui });
+	world.provider.enqueue(
+		"root",
+		{ name: "h1-seed-a", reply: { content: [{ type: "text", text: "The first branch is ready." }] } },
+		{ name: "h1-seed-b", reply: { content: [{ type: "text", text: "The second branch is ready." }] } },
+	);
+	world.systemOne.enterPhase("h1-seed-a", {});
+	await withDeadline(trace, "H1 first branch turn", h1Owner.session.prompt("Plan branch A."));
+	const h1Target = h1Owner.sessionManager.getLeafId();
+	if (h1Target === null) throw new Error("H1 first branch has no navigation target");
+	world.systemOne.enterPhase("h1-seed-b", { ...e4Judgments, carries_0: { kind: "noul", probability: 0.02 } });
+	await withDeadline(trace, "H1 second branch turn", h1Owner.session.prompt("Plan branch B."));
+	world.systemOne.enterPhase("h1-compaction-navigation", {});
+	const h1Compaction = h1Owner.session.compact();
+	try {
+		await withDeadline(trace, "H1 manual compaction reached its extension", h1Reached.promise);
+		expect(h1Owner.session.isCompacting, "the manual compaction owns the reached boundary").toBe(true);
+		const before = { leaf: h1Owner.sessionManager.getLeafId(), entries: h1Owner.sessionManager.getEntries().length };
+		const refusalText =
+			"Cannot rewrite session history while compaction is running. Wait for compaction to finish first.";
+		const refusal = await h1Owner.session.navigateTree(h1Target).then(
+			() => "navigated",
+			(error: unknown) => {
+				trace.claimRejection(error, refusalText);
+				return error instanceof Error ? error.message : String(error);
+			},
+		);
+		expect(refusal, "navigation cannot enter a held manual compaction").toBe(refusalText);
+		expect(
+			{ leaf: h1Owner.sessionManager.getLeafId(), entries: h1Owner.sessionManager.getEntries().length },
+			"refused navigation leaves the compaction branch and transaction intact",
+		).toEqual(before);
+	} finally {
+		h1Release.release();
+	}
+	expect((await withDeadline(trace, "H1 compaction settled", h1Compaction)).summary).toBe("The held summary.");
+	expect(
+		h1Owner.sessionManager.getEntries().filter((entry) => entry.type === "compaction"),
+		"the held compaction commits exactly once",
+	).toHaveLength(1);
+	expect((await h1Owner.session.navigateTree(h1Target)).cancelled, "normal-order navigation follows compaction").toBe(
+		false,
+	);
+	expect((await h1Owner.session.compact()).summary, "normal-order compaction follows navigation").toBe(
+		"The held summary.",
+	);
+	expect(
+		h1Owner.sessionManager.inspectSessionLifecycle().balanced,
+		"both normal-order operations keep lifecycle balanced",
+	).toBe(true);
+	expect(await world.disposeSessionInBody(h1Owner.session), "the H1 owner disposes cleanly").toBeUndefined();
+	trace.mark("root", "h1.compaction-navigation");
+
+	// H3: direct owner steering during the real run's queued-command cleanup waits admitted while the old submission
+	// still holds the foreground. Its release must deliver the input in a new run, never sweep it back into held input.
+	// The control sends the same direct steer while the provider run is live, so the original run delivers it itself.
+	for (const heldCleanup of [true, false]) {
+		const label = heldCleanup ? "h3-cleanup" : "h3-live-control";
+		const words = `Owner steering at ${label}.`;
+		const reached = createBarrier();
+		const release = createBarrier();
+		const providerReached = createBarrier();
+		const providerRelease = createBarrier();
+		let cleanupEntered = false;
+		let cleanupExited = false;
+		const owner = await world.createRootSession("root", {
+			sessionManager: world.createSessionManager(),
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("h3-cleanup", {
+						description: "Hold the reached run cleanup until its owner input is admitted.",
+						handler: async () => {
+							cleanupEntered = true;
+							reached.release();
+							await release.promise;
+							cleanupExited = true;
+						},
+					});
+				},
+			],
+		});
+		const response = `The ${label} steering was answered.`;
+		const warningsBefore = world.warnings.length;
+		const withdrawn: string[] = [];
+		const unsubscribe = owner.session.subscribe((event) => {
+			if (event.type === "user_message_withdrawn") withdrawn.push(JSON.stringify(event.message));
+		});
+		world.provider.enqueue(
+			"root",
+			{
+				name: `${label}-original`,
+				check: () => providerReached.release(),
+				gate: providerRelease.promise,
+				reply: { content: [{ type: "text", text: "The original response is complete." }] },
+			},
+			{
+				name: `${label}-steering-response`,
+				check: (request) => {
+					if (!JSON.stringify(request.context.messages).includes(words))
+						throw new Error(`${label}: steering was not delivered`);
+				},
+				reply: { content: [{ type: "text", text: response }] },
+			},
+		);
+		world.systemOne.enterPhase(`${label}-original`, {});
+		const original = owner.session.prompt(`Start the ${label} conversation.`);
+		try {
+			await withDeadline(trace, `${label} original provider reached`, providerReached.promise);
+			if (heldCleanup) {
+				await owner.session.sendUserMessage("/h3-cleanup", { processSlashCommands: true, deliverAs: "steer" });
+				providerRelease.release();
+				await withDeadline(trace, `${label} real run cleanup reached`, reached.promise);
+				expect(owner.session.isStreaming, "the cleanup witness is past the provider run").toBe(false);
+				expect(
+					owner.session.getResourceSnapshot().foregroundRecovery.activeRuns,
+					"the reached cleanup still belongs to the old run",
+				).toBe(1);
+			}
+			world.systemOne.enterPhase(`${label}-steer`, {
+				...e4Judgments,
+				carries_0: { kind: "noul", probability: 0.97 },
+			});
+			const admitted = await withDeadline(trace, `${label} owner steer admitted`, owner.session.steer(words));
+			expect(cleanupEntered, "only the cleanup witness has entered the real command handler").toBe(heldCleanup);
+			expect(cleanupExited, "the command cleanup has not exited while owner steering is admitted").toBe(false);
+			expect(owner.session.isStreaming, "only the normal-order control still has a streaming consumer").toBe(
+				!heldCleanup,
+			);
+			expect(admitted.ended, "the direct steer is admitted, never held or refused").toBeUndefined();
+			expect(owner.session.getSteeringMessages(), "the reached input remains visible before delivery").toEqual([
+				words,
+			]);
+			expect(
+				owner.session.agent.hasQueuedMessages(),
+				"only the live-run control hands its input to an existing consumer",
+			).toBe(!heldCleanup);
+		} finally {
+			providerRelease.release();
+			release.release();
+		}
+		await withDeadline(trace, `${label} original submission completed`, original);
+		await withDeadline(trace, `${label} automatic input delivery settled`, owner.session.waitForForegroundIdle());
+		const delivered = owner.sessionManager
+			.getEntries()
+			.filter(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "user" &&
+					JSON.stringify(entry.message.content).includes(words),
+			);
+		expect(delivered, "the exact admitted input is persisted once").toHaveLength(1);
+		expect(owner.session.getLastAssistantText(), "the delivered input receives its final response").toBe(response);
+		expect(owner.session.getSteeringMessages(), "no delivered input remains held in the queue").toEqual([]);
+		expect(
+			withdrawn.filter((message) => message.includes(words)),
+			"no input echo is withdrawn by old cleanup",
+		).toEqual([]);
+		expect(
+			world.warnings.slice(warningsBefore).filter((message) => message.includes(words)),
+			"delivery emits no held-input warning",
+		).toEqual([]);
+		expect(
+			owner.session.getResourceSnapshot().foregroundRecovery,
+			"the replacement delivery releases its foreground",
+		).toMatchObject({ activeRuns: 0, submissionEpoch: undefined });
+		unsubscribe();
+		expect(await world.disposeSessionInBody(owner.session), "the H3 owner disposes cleanly").toBeUndefined();
+		trace.mark("root", `${label}.delivered`);
+	}
 
 	// E4 (delegated memory read): a read-only worker inherits the bounded memory read, never the mutation tool. Its valid query returns the saved
 	// preference source-labelled; an over-bound query is refused; a mutation attempt and a raw path read do not reach the stored content.
