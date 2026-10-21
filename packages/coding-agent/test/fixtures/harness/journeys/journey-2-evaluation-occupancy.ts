@@ -1,5 +1,6 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
+import type { AgentSessionEvent } from "../../../../src/core/agent-session.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import { AgentBusyError } from "../../../../src/kernel/agent.ts";
 import { calls, createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
@@ -31,6 +32,30 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 	const supervisionMayAnswer = createBarrier();
 	const supervisionSettled = createBarrier();
 	const handoffReached = createBarrier();
+	const summaryReached = createBarrier();
+	const summaryMayAnswer = createBarrier();
+	const compactionStarted = createBarrier();
+	const queuedInputRegistered = createBarrier();
+	const queuedReplyReached = createBarrier();
+	const queuedInput = "Acknowledge the owner input queued during this inspection checkpoint.";
+	const queuedReply = "The checkpoint input is acknowledged.";
+	const warmInputs = [`${label} context alpha.`, `${label} context beta.`];
+	const warmReplies = warmInputs.map((_, turn) =>
+		Array.from(
+			{ length: 80 },
+			(_, index) =>
+				`${label}-context-${turn}-${index}: Inspection context item ${index} concerns source value ${index + turn * 80}, its local name, and its enclosing module.`,
+		).join("\n"),
+	);
+	const compactionEnds: Extract<AgentSessionEvent, { type: "compaction_end" }>[] = [];
+	const compositionWork: Promise<unknown>[] = [];
+	const failures: unknown[] = [];
+	let handoffRequests = 0;
+	const unsubscribeComposition = session.subscribe((event) => {
+		if (event.type === "compaction_start" && event.reason === "manual") compactionStarted.release();
+		if (event.type === "compaction_end" && event.reason === "manual") compactionEnds.push(event);
+		if (event.type === "queue_update" && event.followUp.includes(queuedInput)) queuedInputRegistered.release();
+	});
 	let minimumAgeTimer: ReturnType<typeof setTimeout> | undefined;
 	let agentId: string | undefined;
 	const reads = world.systemOne.enabled ? 5 : 1;
@@ -62,6 +87,11 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 	});
 	world.provider.enqueue(
 		"root",
+		...warmReplies.map((reply, index) => ({
+			...text(`${label}-warm-${index}`, reply),
+			check: (request: Parameters<typeof requestTexts>[0]) =>
+				expect(requestTexts(request).some((value) => value.includes(warmInputs[index]))).toBe(true),
+		})),
 		calls(`${label}-dispatch`, [
 			{
 				id: `${label}-start`,
@@ -83,8 +113,20 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 			},
 		},
 	);
-	world.systemOne.enterPhase(`${label}-dispatch`, ownerJudgments);
 	try {
+		for (const [index, input] of warmInputs.entries()) {
+			// Tool-free words are screened as backlog only when the next owner turn starts.
+			world.systemOne.enterPhase(
+				`${label}-warm-${index}`,
+				index === 0 ? {} : { carries_0: { kind: "noul", probability: 0.02 }, ...ownerJudgments },
+			);
+			await withDeadline(world.trace, `${label}: actual warm turn ${index}`, session.prompt(input));
+			await withDeadline(world.trace, `${label}: warm turn ${index} settles`, session.waitForForegroundIdle());
+		}
+		world.systemOne.enterPhase(`${label}-dispatch`, {
+			carries_0: { kind: "noul", probability: 0.02 },
+			...ownerJudgments,
+		});
 		await withDeadline(
 			world.trace,
 			`${label}: real delegate dispatch`,
@@ -173,6 +215,148 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 					message.content.some((block) => block.type === "text" && block.text === ownerReply),
 			),
 		).toBe(true);
+
+		// The exact same advisory assessment stays held while compaction owns the history and
+		// newly registered owner input waits for that history's durable checkpoint.
+		const assessment = session
+			.getSemanticPlaneHealth()
+			.inFlightEvaluations?.find((item) => item.occupancy === "background");
+		const beforeCompact = created.sessionManager.getBranch();
+		const earlierWarmReply = beforeCompact.find(
+			(entry) =>
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.content.some((block) => block.type === "text" && block.text === warmReplies[0]),
+		);
+		expect(earlierWarmReply, `${label}: earlier large context was actually admitted`).toBeDefined();
+		const checkpointSummary = [
+			"## Active Task",
+			`User: ${ownerInput}`,
+			"",
+			"### Mandatory Rules",
+			"(none)",
+			"",
+			"## Working Set",
+			"(none)",
+			"",
+			"## Files",
+			"(none)",
+			"",
+			"## Open Problems",
+			"(none)",
+			"",
+			"## Done",
+			"1. DELEGATE (unknown)",
+			"",
+			"## Context",
+			`${label}-checkpoint: ${warmInputs[0]} ${warmInputs[1]}`,
+			`Read-only inspection agent ${agentId} remains running; its report has not arrived.`,
+		].join("\n");
+		world.systemOne.enterPhase(`${label}-compaction`, {});
+		world.provider.enqueue("root", {
+			...text(`${label}-summary`, checkpointSummary),
+			check: (request) => {
+				expect(request.model.id, `${label}: actual default summarizer lane`).toBe("root");
+				expect(
+					requestTexts(request).some(
+						(value) =>
+							value.includes("Create a replacement checkpoint for the conversation above.") &&
+							value.includes("verification demands:"),
+					),
+					`${label}: actual summary control request`,
+				).toBe(true);
+				expect(
+					requestTexts(request).some((value) => value.includes(`${label}-context-0-79`)),
+					`${label}: actual summary request covers earlier substantial context`,
+				).toBe(true);
+				summaryReached.release();
+			},
+			gate: summaryMayAnswer.promise,
+		});
+		const compaction = world.trace.track(session.compact("Retain the read-only inspection and owner context."));
+		compositionWork.push(compaction);
+		await withDeadline(world.trace, `${label}: manual compaction starts`, compactionStarted.promise);
+		await withDeadline(world.trace, `${label}: actual summary provider held`, summaryReached.promise);
+		const requestsWhileSummaryHeld = world.provider.requests.filter((request) => request.model.id === "root").length;
+		world.systemOne.enterPhase(`${label}-queued-owner`, {
+			...ownerJudgments,
+			// The preceding tool-free ordinary owner turn is screened when this turn resumes.
+			carries_0: { kind: "noul", probability: 0.02 },
+		});
+		world.provider.enqueue("root", {
+			...text(`${label}-queued-owner`, queuedReply),
+			check: (request) => {
+				expect(requestTexts(request).some((value) => value.includes(queuedInput))).toBe(true);
+				expect(requestTexts(request).some((value) => value.includes(`${label}-checkpoint`))).toBe(true);
+				queuedReplyReached.release();
+			},
+		});
+		const queued = world.trace.track(session.prompt(queuedInput, { streamingBehavior: "followUp" }));
+		compositionWork.push(queued);
+		await withDeadline(world.trace, `${label}: owner input publicly registered`, queuedInputRegistered.promise);
+		expect(session.getFollowUpMessages()).toEqual([queuedInput]);
+		expect(world.provider.requests.filter((request) => request.model.id === "root")).toHaveLength(
+			requestsWhileSummaryHeld,
+		);
+		expect(compactionEnds).toHaveLength(0);
+		expect(created.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+		summaryMayAnswer.release();
+		const result = await withDeadline(world.trace, `${label}: checkpoint physically applied`, compaction);
+		await withDeadline(world.trace, `${label}: queued owner admitted`, queued);
+		await withDeadline(world.trace, `${label}: queued owner reaches provider`, queuedReplyReached.promise);
+		await withDeadline(world.trace, `${label}: queued owner response settles`, session.waitForForegroundIdle());
+		const afterCompact = created.sessionManager.getBranch();
+		const checkpoint = afterCompact.find((entry) => entry.type === "compaction");
+		// The kept second warm assistant splits its turn: production mechanically preserves
+		// that turn's one earlier user message after the verified provider checkpoint.
+		const expectedSummary = [
+			checkpointSummary,
+			"",
+			"---",
+			"",
+			"**Turn Context (split turn):**",
+			"",
+			"## Original Request",
+			warmInputs[1],
+			"",
+			"## Early Progress",
+			"- 1 earlier message(s) compacted; durable facts are in the main checkpoint.",
+			"",
+			"## Context for Suffix",
+			"- Retained messages continue the original request.",
+		].join("\n");
+		expect(result.summary).toBe(expectedSummary);
+		expect(checkpoint?.type === "compaction" && checkpoint.summary).toBe(result.summary);
+		expect(checkpoint?.type === "compaction" && checkpoint.firstKeptEntryId).toBe(result.firstKeptEntryId);
+		expect(
+			beforeCompact.findIndex((entry) => entry.id === result.firstKeptEntryId),
+			`${label}: substantial earlier reply lies strictly before the checkpoint cut`,
+		).toBeGreaterThan(beforeCompact.findIndex((entry) => entry.id === earlierWarmReply?.id));
+		expect(compactionEnds).toHaveLength(1);
+		expect(compactionEnds[0]).toMatchObject({ aborted: false, result: { summary: expectedSummary } });
+		expect(afterCompact.filter((entry) => entry.type === "compaction_end")).toMatchObject([
+			{ outcome: "success", compactionEntryId: checkpoint?.id },
+		]);
+		for (const words of [queuedInput, queuedReply]) {
+			expect(
+				afterCompact.filter(
+					(entry) =>
+						entry.type === "message" &&
+						(entry.message.role === "user" || entry.message.role === "assistant") &&
+						(typeof entry.message.content === "string"
+							? entry.message.content === words
+							: entry.message.content.some((block) => block.type === "text" && block.text === words)),
+				),
+				`${label}: queued words and actual answer persist exactly once`,
+			).toHaveLength(1);
+		}
+		if (world.systemOne.enabled) {
+			expect(assessment?.evaluationId).toBeDefined();
+			expect(
+				session.getSemanticPlaneHealth().inFlightEvaluations?.filter((item) => item.occupancy === "background"),
+			).toEqual([assessment]);
+		}
+		expect(handoffRequests, `${label}: no worker terminal before report release`).toBe(0);
 		if (world.systemOne.enabled) {
 			expect(session.getSemanticPlaneHealth().state, `${label}: response arrived while assessment still held`).toBe(
 				"evaluating",
@@ -244,6 +428,8 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 				expect(requestTexts(request).some((value) => value.includes("Background worker terminal handoff"))).toBe(
 					true,
 				);
+				expect(requestTexts(request).some((value) => value.includes(agentId ?? "missing-worker"))).toBe(true);
+				handoffRequests++;
 				handoffReached.release();
 			},
 		});
@@ -269,12 +455,43 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 			`${label}: the refused foreground input never reaches a later request`,
 		).toBe(true);
 		if (!world.systemOne.enabled) expect(world.systemOne.requests).toEqual([]);
+	} catch (error) {
+		failures.push(error);
 	} finally {
 		if (minimumAgeTimer !== undefined) clearTimeout(minimumAgeTimer);
 		workerMayRead.release();
 		workerMayReport.release();
 		supervisionMayAnswer.release();
+		summaryMayAnswer.release();
+		const joined = await Promise.allSettled(
+			compositionWork.map((work, index) =>
+				withDeadline(world.trace, `${label}: composition cleanup ${index}`, work),
+			),
+		);
+		for (const result of joined) {
+			if (result.status === "rejected" && !failures.includes(result.reason)) failures.push(result.reason);
+		}
+		try {
+			expect(await world.disposeSessionInBody(session), `${label}: auxiliary root disposes cleanly`).toBeUndefined();
+		} catch (error) {
+			failures.push(error);
+		} finally {
+			unsubscribeComposition();
+		}
 	}
-	expect(await world.disposeSessionInBody(session), `${label}: auxiliary root disposes cleanly`).toBeUndefined();
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, `${label}: interaction and cleanup failed`);
+	expect(handoffRequests, `${label}: worker terminal reaches one parent provider through cleanup`).toBe(1);
+	expect(
+		created.sessionManager
+			.getEntries()
+			.filter(
+				(entry) =>
+					entry.type === "custom_message" &&
+					entry.customType === "background-worker-completion" &&
+					JSON.stringify(entry.content).includes(agentId ?? "missing-worker"),
+			),
+		`${label}: one durable worker terminal survives cleanup`,
+	).toHaveLength(1);
 	world.trace.mark("root", label);
 }
