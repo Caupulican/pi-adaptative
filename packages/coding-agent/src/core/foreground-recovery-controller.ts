@@ -1201,7 +1201,7 @@ export class ForegroundRecoveryController {
 
 	shutdown(): void {
 		this.shutdownReason ??= new Error("Session disposed before foreground submission authority was acquired");
-		this.submissionAbort?.abort(this.shutdownReason);
+		this.submissionAbort?.abort("session dispose");
 		this.unsubscribeRuntime();
 		for (const resolve of this.idleWaiters) resolve();
 		this.idleWaiters.clear();
