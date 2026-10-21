@@ -7,6 +7,7 @@ import { appendGoalStateSnapshot } from "../../../../src/core/goals/session-goal
 import { createBarrier, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { verifyGoalRetrievalReplacement } from "./journey-2-goal-retrieval-replacement.ts";
+import { verifyPreflightReplacement } from "./journey-2-stage-replacement.ts";
 
 const ROUTE_JUDGMENTS = {
 	work_remaining: { kind: "noul", probability: 0.97 },
@@ -68,6 +69,11 @@ export async function verifyGoalReplacementDuringRoute(world: HarnessWorld): Pro
 		bootstrap: TURN_JUDGMENTS,
 		first: REPLACEMENT_TURN_JUDGMENTS,
 		later: CONTINUATION_TURN_JUDGMENTS,
+		route: ROUTE_JUDGMENTS,
+	});
+	await verifyPreflightReplacement(world, {
+		first: TURN_JUDGMENTS,
+		replacement: TURN_JUDGMENTS,
 		route: ROUTE_JUDGMENTS,
 	});
 }
