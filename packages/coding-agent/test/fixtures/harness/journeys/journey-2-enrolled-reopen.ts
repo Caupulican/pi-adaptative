@@ -1,13 +1,16 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
+import { readWorkerMailboxRecord, workerMailboxPath } from "../../../../src/core/delegation/worker-mailbox-record.ts";
+import { isPlainRecord } from "../../../../src/core/util/value-guards.ts";
 import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
-import { type HarnessWorld, type WorkerProjectClaims, withDeadline } from "../session-fixture.ts";
+import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { assertBatchOk, LIMITS_PATH, lastToolResultDetails, requestTexts } from "./shared.ts";
 
 /** Clean shutdown/reopen of enrolled, previously running work; E7's unsafe crash control stays separate. */
-export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld): Promise<void> {
-	const label = "e7-enrolled-clean-reopen";
+export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendingFollowUp = false): Promise<void> {
+	const label = pendingFollowUp ? "e7-enrolled-pending-reopen" : "e7-enrolled-clean-reopen";
+	const pendingWords = `${label}: Include the original source observation in the resumed report.`;
 	const agentDir = `${world.agentDir}-${label}`;
 	const instructions = "Read the limits file and report its current value after the owner resumes this inspection.";
 	const sourceBytes = world.io.readFileSync(LIMITS_PATH, "utf8").toString();
@@ -30,11 +33,14 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld): Prom
 	let resumedRequests = 0;
 	let terminalRequests = 0;
 	let terminalPostsAfterCleanup = 0;
+	let pendingMessageId: string | undefined;
+	let pendingMailbox: unknown;
 	let unsubscribeFresh = (): void => {};
 	const failures: unknown[] = [];
 	const observations: Record<string, unknown> = {
 		pid: world.processTable.self,
 		systemOneEnabled: world.systemOne.enabled,
+		pendingFollowUp,
 	};
 	const report = (): string => {
 		const serialized = JSON.stringify({
@@ -158,7 +164,9 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld): Prom
 		const agent = before?.agents[agentId];
 		const attempt = Object.values(before?.attempts ?? {}).find((item) => item.taskId === laneId);
 		const file = owner.sessionManager.getSessionFile();
-		if (!agent || !attempt || !file) throw new Error(`${label}: no admitted worker/session record`);
+		if (!agent || !attempt || !file || !agent.resumeContext.sessionFile)
+			throw new Error(`${label}: no admitted worker/session record`);
+		const workerFile = agent.resumeContext.sessionFile;
 		const binding = new WorkerConversationStore().getProjectContextBinding({
 			agentDir,
 			resumeContext: agent.resumeContext,
@@ -172,31 +180,35 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld): Prom
 		if (!admittedClaim) throw new Error(`${label}: no admitted project claim`);
 		if (binding?.ownership.state !== "busy") throw new Error(`${label}: missing busy native enrollment`);
 		expect(binding.ownership.claim).toEqual(admittedClaim.claim);
-		// Fixed before shutdown from the admitted identity, never copied from a failed close snapshot.
-		const retainedClaims: WorkerProjectClaims = [
-			{
-				sessionId: admittedClaim.sessionId,
-				claim: admittedClaim.claim,
-				agents: [
+		if (pendingFollowUp) {
+			// No await before close: the consumed old report remains gated while this native intent is persisted.
+			const queued = owner.session.backgroundLanes.followUpWorkerAgent(agentId, pendingWords);
+			pendingMessageId = queued.messageId;
+			const native = readWorkerMailboxRecord(
+				workerMailboxPath(agentDir, owner.sessionManager.getSessionId(), agentId),
+			);
+			observations.pending = { queued, native };
+			pendingMailbox = native.mailbox;
+			expect(queued).toMatchObject({ started: false, steering: true });
+			expect(queued.skipReason).toBeUndefined();
+			expect(pendingMessageId).not.toBe("");
+			expect(native.mailbox).toMatchObject({
+				messages: [
 					{
-						agentId,
-						agentStatus: "suspended",
-						attemptId: attempt.attemptId,
-						attemptStatus: "suspended",
-						executingHoldCount: 0,
-						mailboxLoaded: true,
-						mailbox: {
-							parentSessionId: owner.sessionManager.getSessionId(),
-							agentId,
-							listenerCount: 0,
-							hasOpenObligation: false,
-							pendingMessageIds: [],
-							replyAcknowledgementIds: [],
-						},
+						messageId: pendingMessageId,
+						kind: "steer",
+						content: pendingWords,
+						task: { kind: "agent_turn" },
 					},
 				],
-			},
-		];
+			});
+			if (!isPlainRecord(native.mailbox) || !Array.isArray(native.mailbox.messages))
+				throw new Error(`${label}: missing native mailbox messages`);
+			const receipt: unknown = native.mailbox.messages[0];
+			if (!isPlainRecord(receipt)) throw new Error(`${label}: missing native pending receipt`);
+			expect(receipt.deliveredAt).toBeUndefined();
+			expect(receipt.failedAt).toBeUndefined();
+		}
 		observations.admitted = {
 			parentSessionId: owner.sessionManager.getSessionId(),
 			workerSessionId: agent.resumeContext.sessionId,
@@ -219,10 +231,31 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld): Prom
 			claims: closed?.ownedProjectClaims,
 		};
 		expect(disposal, report()).toBeUndefined();
-		world.certifyDisposedOwner(owner.session, retainedClaims);
+		world.certifyDisposedOwner(owner.session, []);
+		expect(closed?.ownedProjectClaims, `${label}: the closed owner retains no executable claim`).toEqual([]);
 		expect(closed?.executionPromiseCount).toBe(0);
 		expect(closed?.executingHolds).toEqual([]);
 		expect(closed?.inFlightLedgerCount).toBe(0);
+		const suspended = owner.session.backgroundLanes.getTaskRuntimeSnapshot();
+		expect(suspended?.agents[agentId]?.status).toBe("suspended");
+		expect(suspended?.attempts[attempt.attemptId]?.status).toBe("suspended");
+		expect(suspended?.attempts[attempt.attemptId]?.dispatch).toEqual(attempt.dispatch);
+		const handoff = new WorkerConversationStore().getProjectContextBinding({
+			agentDir,
+			resumeContext: agent.resumeContext,
+			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agentId,
+		});
+		observations.handoff = handoff?.ownership;
+		expect(handoff?.ownership).toEqual({ ...binding.ownership, state: "handoff" });
+		if (pendingFollowUp) {
+			const native = readWorkerMailboxRecord(
+				workerMailboxPath(agentDir, owner.sessionManager.getSessionId(), agentId),
+			);
+			observations.pendingAfterClose = native.reference;
+			expect(native.mailbox, `${label}: close preserves the exact undelivered intent and acknowledgements`).toEqual(
+				pendingMailbox,
+			);
+		}
 		world.systemOne.enterPhase(`${label}-resume`, {});
 		// Reopening can itself recover; enroll both real response tracks before constructing its SDK owner.
 		world.provider.enqueue("worker-c", {
@@ -235,6 +268,13 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld): Prom
 			]),
 			check: (request) => {
 				assertRead(request);
+				if (pendingFollowUp) {
+					const pending = requestTexts(request).filter((value) => value.includes(pendingWords));
+					observations.resumedPending = pending;
+					expect(pending, `${label}: admitted pending words reach the resumed provider once`).toHaveLength(1);
+					expect(pending[0]?.split(pendingWords)).toHaveLength(2);
+					expect(pending[0]).toContain(`[Worker control ${pendingMessageId}`);
+				}
 				resumedRequests++;
 				freshReached.release();
 			},
@@ -317,6 +357,16 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld): Prom
 		};
 		expect(disposition, report()).toBe("provider");
 		const resumed = fresh.session.backgroundLanes.getTaskRuntimeSnapshot();
+		const acquired = new WorkerConversationStore().getProjectContextBinding({
+			agentDir,
+			resumeContext: agent.resumeContext,
+			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agentId,
+		});
+		observations.acquired = acquired?.ownership;
+		expect(acquired?.ownership.state).toBe("busy");
+		expect(acquired?.ownership.claim.parentSessionId).toBe(binding.ownership.claim.parentSessionId);
+		expect(acquired?.ownership.claim.generation).toBe(binding.ownership.claim.generation + 1);
+		expect(acquired?.ownership.claim.incarnation).not.toBe(binding.ownership.claim.incarnation);
 		expect(resumed?.agents[agentId]?.resumeContext).toEqual(agent.resumeContext);
 		expect(resumed?.attempts[attempt.attemptId]?.dispatch).toEqual(attempt.dispatch);
 		expect(Object.values(resumed?.attempts ?? {}).filter((item) => item.taskId === laneId)).toHaveLength(1);
@@ -338,6 +388,24 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld): Prom
 		expect(ready).toMatchObject({ timedOut: false, status: "idle" });
 		expect(terminal?.attempts[attempt.attemptId]?.status).toBe("completed");
 		expect(terminal?.notifications[`worker-terminal:${attempt.attemptId}`]?.status).toBe("delivered");
+		if (pendingFollowUp) {
+			const pendingEntries = world
+				.openSessionManager(workerFile, agentDir)
+				.getBranch()
+				.filter(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						JSON.stringify(entry.message.content).includes(pendingWords),
+				);
+			observations.durablePending = pendingEntries;
+			expect(
+				pendingEntries,
+				`${label}: admitted pending words persist once in the same worker transcript`,
+			).toHaveLength(1);
+			expect(JSON.stringify(pendingEntries[0])).toContain(`[Worker control ${pendingMessageId}`);
+			expect(JSON.stringify(pendingEntries[0]).split(pendingWords)).toHaveLength(2);
+		}
 		expect(terminalRequests).toBe(1);
 		expect(
 			fresh.sessionManager

@@ -17,7 +17,7 @@ import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import type { ScriptedRequest } from "../scripted-provider.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
-import { type HarnessWorld, type WorkerProjectClaims, withDeadline } from "../session-fixture.ts";
+import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { verifyEnrolledWorkerCleanReopen } from "./journey-2-enrolled-reopen.ts";
 
 /**
@@ -225,11 +225,6 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 	// Owned files: the auxiliary session file, captured with the bounded referenced manifest below before any owner ends.
 	const e7AuxFile = e7Owner.sessionManager.getSessionFile();
 	if (e7AuxFile === undefined) throw new Error("the auxiliary root has no session file");
-	const e7Context = (agentId: string): string => {
-		const sessionId = e7Runtime.agents[agentId]?.resumeContext.sessionId;
-		if (sessionId === undefined) throw new Error(`no resume context for ${agentId}`);
-		return sessionId;
-	};
 	// Native conversation reads, taken once before the cut: each worker's validated project-context binding (enrollment included,
 	// read-only) and its durable birth fork reference, which exists even for an empty fresh-birth snapshot.
 	const e7Store = new WorkerConversationStore();
@@ -326,42 +321,14 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 			expect(e7Capture.has(forkFile), `${agentId}'s birth fork reference names a captured file`).toBe(true);
 		}
 	}
-	// A's exact retained claim, predeclared from its pre-cut identity: the original owner keeps it by design after disposal.
-	const e7APreClaim = (e7Owner.session.getResourceSnapshot().workers?.ownedProjectClaims ?? []).find(
-		(claim) => claim.sessionId === e7Context(e7StartA.agentId),
-	);
-	if (e7APreClaim === undefined) throw new Error("A holds no project claim before the cut");
-	const e7ARetainedClaims: WorkerProjectClaims = [
-		{
-			...e7APreClaim,
-			agents: [
-				{
-					agentId: e7StartA.agentId,
-					agentStatus: "suspended",
-					attemptId: e7AttemptOf(e7StartA.laneId)?.attemptId,
-					attemptStatus: "suspended",
-					executingHoldCount: 0,
-					mailboxLoaded: true,
-					mailbox: {
-						parentSessionId: e7Owner.sessionManager.getSessionId(),
-						agentId: e7StartA.agentId,
-						listenerCount: 0,
-						hasOpenObligation: false,
-						pendingMessageIds: [],
-						replyAcknowledgementIds: [],
-					},
-				},
-			],
-		},
-	];
-	// The crash cut: certified from the disposed owner itself, before any prefix is restored, the receipt names exactly A's
-	// predeclared claim; the owned files are cut back to the capture; SQLite is not rewound.
+	// Physical clean disposal releases all owner claims. The crash cut then restores the PRE-CUT busy
+	// files, preserving A's unsafe-recovery refusal; SQLite is not rewound.
 	const e7Fresh = await world.restart({
 		owner: e7Owner.session,
 		sessionFile: e7AuxFile,
 		cut: { manifest: e7Manifest, capture: e7Capture },
 		rewindSqlite: false,
-		retainedClaims: e7ARetainedClaims,
+		retainedClaims: [],
 		check: crashCutChecks("the auxiliary owner disposes cleanly"),
 	});
 	expect(
@@ -822,6 +789,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		"the queued-context guard refuses A's busy lease",
 	).toBe(true);
 	expect(await world.disposeSessionInBody(e7Fresh.session), "the recovered owner disposes cleanly").toBeUndefined();
+	await verifyEnrolledWorkerCleanReopen(world, true);
 	await verifyEnrolledWorkerCleanReopen(world);
 	await keptAndLateQueuedSubmissions(world);
 	// R21, System One off (the background start and the wake turn ask on-mode questions no reading of this phase derives): a crash
