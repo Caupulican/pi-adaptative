@@ -1357,6 +1357,13 @@ export class VirtualGit {
 		const subject = messageIndex >= 0 ? (args[messageIndex + 1] ?? "") : undefined;
 		if (subject === undefined || worktree.rebase) throw new Error(`Unscripted commit: ${args.join(" ")}`);
 		const parent = this.headSha(worktree);
+		if (
+			parent !== undefined &&
+			!args.includes("--allow-empty") &&
+			isDeepStrictEqual(worktree.index, this.treeOf(parent))
+		) {
+			return { code: 1, stdout: "nothing to commit\n", stderr: "" };
+		}
 		const next = this.commit(worktree.index, parent, subject);
 		if (worktree.head.kind === "branch") this.refs.set(worktree.head.ref, next);
 		else worktree.head = { kind: "detached", sha: next };
@@ -2531,6 +2538,10 @@ export class HarnessWorld {
 		options: {
 			readonly sessionManager?: SessionManager;
 			readonly agentDir?: string;
+			/** Caller-owned SDK model metadata; omitted keeps the world's scripted descriptor. */
+			readonly model?: CreateAgentSessionOptions["model"];
+			/** A real SDK registry containing every scripted routing track; omitted keeps the world's registry and metadata. */
+			readonly modelRegistry?: ModelRegistry;
 			/** This session's System One mode: the world's transport and settings stay as they are; only this session's binding changes. */
 			readonly systemOneEnabled?: boolean;
 			/** An owner-authored host profile owns the root's model and tools; the SDK forbids a model option alongside it. */
@@ -2585,6 +2596,21 @@ export class HarnessWorld {
 		extensionsResult: CreateAgentSessionResult["extensionsResult"];
 	}> {
 		const sessionManager = options.sessionManager ?? SessionManager.inMemory(HARNESS_PROJECT_CWD);
+		const modelRegistry = options.modelRegistry ?? this.modelRegistry;
+		const routerModels = SCRIPTED_TRACKS.map((id) => {
+			if (options.modelRegistry === undefined) return { model: this.provider.model(id) };
+			const model = modelRegistry.find(HARNESS_PROVIDER, id);
+			if (model === undefined)
+				throw new Error(`The supplied harness registry has no ${HARNESS_PROVIDER}/${id} track`);
+			return { model };
+		});
+		const model =
+			options.model ??
+			(options.modelRegistry === undefined
+				? this.provider.model(modelId)
+				: modelRegistry.find(HARNESS_PROVIDER, modelId));
+		if (model === undefined && options.orchestrationProfile === undefined)
+			throw new Error(`The supplied harness registry has no ${HARNESS_PROVIDER}/${modelId} model`);
 		const systemOneEnabled = options.systemOneEnabled ?? this.systemOne.enabled;
 		const omitShellOperations = options.omitShellOperations ?? process.platform === "win32";
 		// A session that selects the other mode or its own settings gets its own settings clone; every other setting is the world's.
@@ -2646,7 +2672,7 @@ export class HarnessWorld {
 					? (warnings) => this.warnings.push(...warnings)
 					: (options.closingSink ?? undefined),
 			authStorage: this.authStorage,
-			modelRegistry: this.modelRegistry,
+			modelRegistry,
 			settingsManager,
 			sessionManager,
 			...(options.resourceLoader === undefined && extensionLoader === undefined
@@ -2660,12 +2686,15 @@ export class HarnessWorld {
 				? {}
 				: { workerTerminalDelivery: options.workerTerminalDelivery }),
 			...(options.orchestrationProfile === undefined
-				? { model: this.provider.model(modelId) }
-				: { orchestrationProfile: options.orchestrationProfile }),
+				? { model }
+				: {
+						orchestrationProfile: options.orchestrationProfile,
+						...(options.model === undefined ? {} : { model: options.model }),
+					}),
 			// Worker tracks are admitted through the router pool: with routing on, delegation accepts only pool members.
 			routerPool: {
 				source: "sdk_models",
-				models: SCRIPTED_TRACKS.map((id) => ({ model: this.provider.model(id) })),
+				models: routerModels,
 			},
 			systemOneFetch: this.systemOne.fetch,
 			timers: this.timers,

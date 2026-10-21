@@ -1918,28 +1918,91 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	// A physical carry-forward succeeds, but persisting its completed marker fails. The old ready_to_merge record must
 	// cause reconcile to repeat that same checkout transition before publishing an epoch, preserving live owner input.
 	world.shell.enqueue({ name: "e12-checkout-gate", command: E12_GATE, output: "check passed", exitCode: 0 });
+	const beforeEmptyCommit = world.git.refSha("refs/heads/pi/wt/e12");
 	world.provider.enqueue(
 		"root",
-		calls("e12-checkout-write", [
+		calls("e12-checkout-empty-commit", [
 			{
-				id: "e12-checkout-write-1",
-				name: "write",
-				arguments: { path: `${e12LanePath}/src/e12.ts`, content: "export const E12 = 2;\n" },
+				id: "e12-checkout-empty-commit-1",
+				name: "worktree_sync",
+				arguments: { action: "git_commit", laneKey: "e12", message: "No changes before checkout recovery" },
 			},
 		]),
-		calls("e12-checkout-commit", [
-			{
-				id: "e12-checkout-add-1",
-				name: "worktree_sync",
-				arguments: { action: "git_add", laneKey: "e12", paths: ["src/e12.ts"] },
+		dynamicCalls(
+			"e12-checkout-edit",
+			() => [
+				{
+					id: "e12-checkout-edit-1",
+					name: "edit",
+					arguments: {
+						path: `${e12LanePath}/src/e12.ts`,
+						edits: [{ oldText: "export const E12 = 1;", newText: "export const E12 = 2;" }],
+					},
+				},
+			],
+			() => {
+				expect(
+					lastToolResultDetails(session, "worktree_sync"),
+					"ordinary empty commit returns the actual typed Git failure",
+				).toMatchObject({ code: "git_failed", action: "git_commit", exitCode: 1 });
+				expect(
+					e12ToolText("e12-checkout-empty-commit-1"),
+					"the empty-commit refusal is durably recorded",
+				).toContain("nothing to commit");
+				expect(
+					world.git.refSha("refs/heads/pi/wt/e12"),
+					"ordinary empty commit cannot manufacture a candidate revision",
+				).toBe(beforeEmptyCommit);
+				expect(world.git.refSha("refs/heads/main"), "ordinary empty commit leaves main unchanged").toBe(
+					beforeEmptyCommit,
+				);
 			},
-			{
-				id: "e12-checkout-commit-1",
-				name: "worktree_sync",
-				arguments: { action: "git_commit", laneKey: "e12", message: "Revise the E12 module" },
+		),
+		dynamicCalls(
+			"e12-checkout-stage",
+			() => [
+				{
+					id: "e12-checkout-add-1",
+					name: "worktree_sync",
+					arguments: { action: "git_add", laneKey: "e12", paths: ["src/e12.ts"] },
+				},
+			],
+			(request) => {
+				assertBatchOk(request, "E12 checkout edit");
+				expect(
+					world.io.readFileSync(`${e12LanePath}/src/e12.ts`, "utf8"),
+					"the actual edit prepares module2 before staging",
+				).toBe("export const E12 = 2;\n");
 			},
-		]),
-		calls("e12-checkout-land", [e12LandCall("e12-checkout-land-1")]),
+		),
+		dynamicCalls(
+			"e12-checkout-commit",
+			() => [
+				{
+					id: "e12-checkout-commit-1",
+					name: "worktree_sync",
+					arguments: { action: "git_commit", laneKey: "e12", message: "Revise the E12 module" },
+				},
+			],
+			(request) => assertBatchOk(request, "E12 checkout stage"),
+		),
+		dynamicCalls(
+			"e12-checkout-land",
+			() => [e12LandCall("e12-checkout-land-1")],
+			(request) => {
+				assertBatchOk(request, "E12 checkout commit");
+				const changed = world.git.run(
+					["diff", "--name-only", "refs/heads/main..refs/heads/pi/wt/e12"],
+					HARNESS_PROJECT_CWD,
+					{},
+				);
+				expect(changed.code, "the committed candidate diff is readable before land").toBe(0);
+				expect(
+					changed.stdout.trim().split(/\r?\n/),
+					"the actual candidate contains the module2 change before gate/refresh",
+				).toContain("src/e12.ts");
+			},
+		),
 		text("e12-checkout-read", "The checkout record needs recovery."),
 		calls("e12-checkout-reconcile", [
 			{ id: "e12-checkout-reconcile-1", name: "worktree_sync", arguments: { action: "reconcile" } },
