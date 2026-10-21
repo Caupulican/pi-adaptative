@@ -45,10 +45,11 @@ session module under `packages/coding-agent/src/core`. Regenerate after adding o
 | `scout-controller.ts` | no | (no header comment) |
 | `session-cache-controller.ts` | no | Prompt-cache custody, survival observation recording, cold-moment transitions, worker early-compaction economics, and cache-priced objective executor selection for a session. |
 | `session-edge-intent-controller.ts` | no | Owner request classification, optional-tool intent checkpointing, rule-authority and local-commit delivery bindings, model-pool policy updates, and session edge grants. |
+| `session-runtime-admission-controller.ts` | no | Adapts session lifetime and resource mutation to the shared runtime generation admission owner. |
 | `session-semantic-plane-controller.ts` | no | Session semantic-plane health recorder, evaluation-recording decision-engine wrapper, and lazy SQLite decision-ledger lifecycle. |
 | `session-unsettled-ladder-controller.ts` | no | Post-turn answer claim verification, unsettled-item ladder escalation (System One and stronger-model consults), owner follow-up recording, and goal-completion owner decisions. |
 | `tool-gate-controller.ts` | no | Agent tool-call gate: model-router escalation, autonomy gating, extension tool hooks, and the untrusted-content output boundary. |
 | `tool-protocol-controller.ts` | no | (no header comment) |
 
-42 modules, 0 with a test file of the same name.
+43 modules, 0 with a test file of the same name.
 

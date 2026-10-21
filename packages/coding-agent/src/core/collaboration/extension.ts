@@ -10,6 +10,7 @@ import {
 	encodeWorkerSessionAllowedPaths,
 	PI_WORKER_ALLOWED_PATHS_ENV,
 } from "../autonomy/worker-session-private-scope.ts";
+import { ManagedLaneRuntimeAdmissionError } from "../extensions/managed-lane-records.ts";
 import type { ExtensionAPI, ExtensionContext } from "../extensions/types.ts";
 import { orchestrationThinkingLevelSchema } from "../orchestration/thinking-level-schema.ts";
 import { PI_ORCHESTRATION_AGENT_ID_ENV } from "../process-identity.ts";
@@ -172,6 +173,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				deadlines: CollaborationDeadlines;
 				controls: CollaborationControlHandoffs;
 				readyJobs: Set<string>;
+				cancelRuntimeRetry(): void;
 				recover(): Promise<void>;
 		  }
 		| undefined;
@@ -197,6 +199,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 			});
 		});
 	const close = () => {
+		binding?.cancelRuntimeRetry();
 		binding?.coordinator.dispose();
 		binding?.watcher.close();
 		binding?.deadlines.dispose();
@@ -252,6 +255,11 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		);
 		let recovered = false;
 		const readyJobs = new Set<string>();
+		let unsubscribeRuntimeRetry: (() => void) | undefined;
+		const cancelRuntimeRetry = () => {
+			unsubscribeRuntimeRetry?.();
+			unsubscribeRuntimeRetry = undefined;
+		};
 		const refresh = () => {
 			try {
 				coordinator.refresh();
@@ -277,6 +285,13 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 					),
 				);
 			} catch (error) {
+				if (error instanceof ManagedLaneRuntimeAdmissionError) {
+					unsubscribeRuntimeRetry ??= error.onRuntimeAvailable(() => {
+						cancelRuntimeRetry();
+						if (binding?.store === store) refresh();
+					});
+					return;
+				}
 				ctx.ui.notify(`Collaboration handoff failed: ${String(error).slice(0, 1000)}`, "error");
 			}
 		};
@@ -313,7 +328,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 			});
 			return reattaching;
 		};
-		binding = { store, coordinator, watcher, deadlines, controls, readyJobs, recover };
+		binding = { store, coordinator, watcher, deadlines, controls, readyJobs, cancelRuntimeRetry, recover };
 		refresh();
 		void recover().catch((error: unknown) => {
 			if (binding?.store === store)

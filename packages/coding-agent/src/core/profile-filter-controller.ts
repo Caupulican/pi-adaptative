@@ -55,7 +55,7 @@ export interface ProfileFilterControllerDeps {
 	/** Whether the thinking level was set by an explicit launch flag. */
 	isExplicitThinking(): boolean;
 	/** Apply a thinking level (delegates to model-selection). */
-	setThinkingLevel(level: ThinkingLevel): void;
+	setThinkingLevel(level: ThinkingLevel, assertCurrent?: () => void): void;
 }
 
 export interface ProfileFilterReloadSnapshot {
@@ -248,7 +248,7 @@ export class ProfileFilterController {
 	 * explicit launch flag — so live profile edits apply on reload without clobbering an explicit
 	 * --model/--thinking. A no-op for profiles that don't bind a model.
 	 */
-	async reapplyActiveProfileModelSettings(): Promise<void> {
+	async reapplyActiveProfileModelSettings(assertCurrent?: () => void): Promise<void> {
 		if (this.deps.isExplicitModel() && this.deps.isExplicitThinking()) return;
 		const settingsManager = this.deps.getSettingsManager();
 		const activeProfileNames = settingsManager.getActiveResourceProfileNames();
@@ -279,6 +279,7 @@ export class ProfileFilterController {
 						modelRegistry: this.deps.getModelRegistry(),
 					})
 				: undefined;
+		assertCurrent?.();
 		let modelChanged = false;
 		const nextModel = profileSettings.model ?? (mustRestoreBaseModel ? baseSelection?.model : undefined);
 		if (!this.deps.isExplicitModel() && nextModel) {
@@ -297,13 +298,13 @@ export class ProfileFilterController {
 		}
 		this._profileControlledModel = !this.deps.isExplicitModel() && Boolean(profileSettings.model);
 		if (!this.deps.isExplicitThinking() && profileSettings.thinkingLevel) {
-			this.deps.setThinkingLevel(profileSettings.thinkingLevel);
+			this.deps.setThinkingLevel(profileSettings.thinkingLevel, assertCurrent);
 		} else if (mustRestoreBaseThinking && baseSelection) {
-			this.deps.setThinkingLevel(baseSelection.thinkingLevel);
+			this.deps.setThinkingLevel(baseSelection.thinkingLevel, assertCurrent);
 		} else if (modelChanged) {
 			// A model-only situation switch still has to clamp the inherited/explicit level. This
 			// prevents Sol/Terra Ultra from leaking into Luna or another model that stops at Max.
-			this.deps.setThinkingLevel(this.deps.getAgent().state.thinkingLevel);
+			this.deps.setThinkingLevel(this.deps.getAgent().state.thinkingLevel, assertCurrent);
 		}
 		this._profileControlledThinking = !this.deps.isExplicitThinking() && Boolean(profileSettings.thinkingLevel);
 	}

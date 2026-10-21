@@ -3,6 +3,7 @@ import { Value } from "typebox/value";
 import type { AgentMessage } from "../kernel/index.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { ToolDefinition } from "./extensions/types.ts";
+import type { RuntimeMutationHandoff } from "./runtime-generation-admission.ts";
 
 const UPDATE_ENTRY = "runtime-update";
 const MAX_ATTEMPTS = 3;
@@ -55,7 +56,7 @@ export interface RuntimeUpdateControllerDeps {
 	>;
 	getMessages(): readonly AgentMessage[];
 	/** This is the transactional runtime reload, NOT session/history reconstruction. */
-	reload(extensionPath?: string): Promise<void>;
+	reload(extensionPath?: string, ownerHandoff?: RuntimeMutationHandoff): Promise<void>;
 	appendNotice(content: string): Promise<void>;
 	isRoot(): boolean;
 	onStopped?(): void;
@@ -250,7 +251,10 @@ export class RuntimeUpdateController {
 	}
 
 	/** Called only with the complete tool batch persisted and Agent.isStreaming=false. */
-	async settle(signal?: AbortSignal): Promise<"continue" | "stop" | undefined> {
+	async settle(
+		signal?: AbortSignal,
+		beginRuntimeHandoff?: () => RuntimeMutationHandoff,
+	): Promise<"continue" | "stop" | undefined> {
 		const updateSignal = signal ? AbortSignal.any([signal, this.cancellation.signal]) : this.cancellation.signal;
 		if (this.stopPending) {
 			this.stopPending = false;
@@ -295,7 +299,12 @@ export class RuntimeUpdateController {
 					this.save({ ...this.state, status: "restarting" });
 					await this.restart({ id: this.state.id, sessionId: this.state.sessionId, sessionFile }, updateSignal);
 				} else {
-					await this.deps.reload(this.state.extensionPath);
+					const handoff = beginRuntimeHandoff?.();
+					try {
+						await this.deps.reload(this.state.extensionPath, handoff);
+					} finally {
+						handoff?.release();
+					}
 				}
 				if (updateSignal.aborted)
 					return this.stop("Runtime update cancelled after reload; verify the loaded change before continuing.");

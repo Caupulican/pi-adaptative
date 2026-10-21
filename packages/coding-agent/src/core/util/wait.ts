@@ -156,7 +156,16 @@ export function createWaitStatus(spec: WaitStatusSpec): WaitStatus {
 		extra: Pick<WaitStatusEvent, "holder" | "progress" | "end">,
 	): void => {
 		if (startedAt === undefined || ended) return;
-		spec.report?.({ ...base, phase, elapsedMs: Math.max(0, now() - startedAt), ...extra });
+		try {
+			spec.report?.({ ...base, phase, elapsedMs: Math.max(0, now() - startedAt), ...extra });
+		} catch (error) {
+			// Status delivery observes a wait; it does not own its result. In particular, an end
+			// observer must not strand a promise after its resource-valued wake has already won.
+			// Surface the diagnostic failure independently instead of losing the semantic outcome.
+			process.emitWarning(error instanceof Error ? error : "Wait status observer threw a non-Error value.", {
+				code: "PI_WAIT_STATUS_OBSERVER_FAILED",
+			});
+		}
 	};
 	return {
 		start: () => {

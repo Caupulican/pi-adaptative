@@ -1,5 +1,20 @@
 import type { Usage } from "@caupulican/pi-ai";
 
+/** A report needs new host preparation after replacement settles; its producer must retain the report. */
+export class ManagedLaneRuntimeAdmissionError extends Error {
+	private readonly subscribeRetry: (retry: () => void) => () => void;
+
+	constructor(subscribeRetry: (retry: () => void) => () => void) {
+		super("Cannot prepare a managed worker report during runtime generation replacement.");
+		this.name = "ManagedLaneRuntimeAdmissionError";
+		this.subscribeRetry = subscribeRetry;
+	}
+
+	onRuntimeAvailable(retry: () => void): () => void {
+		return this.subscribeRetry(retry);
+	}
+}
+
 /**
  * Report for an out-of-process managed lane (e.g. a tmux worker) at dispatch or terminal. `laneId` is
  * a stable identifier the CALLER chooses (e.g. a tmux job id or slug) and reuses unchanged across both

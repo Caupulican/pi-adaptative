@@ -17,6 +17,11 @@ import type { IcmTurnCoordinator, IcmTurnHandle } from "./memory/continuous-chat
 import type { ModelRegistry } from "./model-registry.ts";
 import type { ModelRouterFailoverStatus } from "./model-router/status.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
+import type {
+	RuntimeGenerationAdmission,
+	RuntimeMutationHandoff,
+	RuntimeWorkLease,
+} from "./runtime-generation-admission.ts";
 import type { AutonomySettings, FailoverSettings } from "./settings/settings-schema.ts";
 import { SYSTEM_TIMER_SOURCE, type TimerSource } from "./util/timer-port.ts";
 import {
@@ -103,6 +108,7 @@ export interface ForegroundRecoveryResourceSnapshot {
 
 export interface ForegroundRecoveryControllerDeps {
 	agent: Agent;
+	runtimeAdmission: RuntimeGenerationAdmission;
 	/**
 	 * The session timers: the `foreground` port runs the overdue watchdog of the foreground waits, the `foreground-retry`
 	 * port the auto-retry backoff, and the `provider-admission` port's clock the model exhaustions' resets. Defaults to the
@@ -129,9 +135,12 @@ export interface ForegroundRecoveryControllerDeps {
 	onUsageLimitReached?(message: AssistantMessage): void;
 	onSuccessfulAssistant(): void;
 	prepareRun(): Promise<void>;
-	afterRun(): Promise<void>;
+	afterRun(beginRuntimeHandoff: () => RuntimeMutationHandoff): Promise<void>;
 	/** Runs at an idle Agent boundary while foreground submission authority is still held. */
-	settleRuntimeUpdate?(signal?: AbortSignal): Promise<"continue" | "stop" | undefined>;
+	settleRuntimeUpdate?(
+		signal: AbortSignal | undefined,
+		beginRuntimeHandoff: () => RuntimeMutationHandoff,
+	): Promise<"continue" | "stop" | undefined>;
 	/** Input admitted to the agent's queue that no round could deliver returns to the pending queue, held. */
 	holdUndeliveredQueue?(): void;
 	/**
@@ -187,9 +196,12 @@ export class ForegroundRecoveryController {
 	private readonly idleWaiters = new Set<() => void>();
 	private readonly activityListeners = new IndependentObserverSet<() => void>();
 	private readonly deps: ForegroundRecoveryControllerDeps;
+	private readonly runtimeLeases = new Map<ForegroundSubmissionLease, { lease: RuntimeWorkLease; owned: boolean }>();
+	private readonly unsubscribeRuntime: () => void;
 
 	constructor(deps: ForegroundRecoveryControllerDeps) {
 		this.deps = deps;
+		this.unsubscribeRuntime = deps.runtimeAdmission.subscribeAvailability(() => this.notifyActivity());
 		const admissionClock = (deps.timers ?? SYSTEM_TIMER_SOURCE).port("provider-admission");
 		this.retry = new RetryController(
 			deps.agent,
@@ -261,13 +273,18 @@ export class ForegroundRecoveryController {
 	}
 
 	/** Atomically reserve the full foreground lifecycle, including asynchronous prompt preparation. */
-	tryAcquireSubmission(): ForegroundSubmissionLease | undefined {
+	tryAcquireSubmission(runtimeLease?: RuntimeWorkLease): ForegroundSubmissionLease | undefined {
 		if (this.shutdownReason || this.hasForegroundOccupancy()) return undefined;
+		const reader =
+			runtimeLease ?? this.deps.runtimeAdmission.tryAdmitWork({ kind: "foreground", label: "continuation" });
+		if (!reader) return undefined;
+		this.deps.runtimeAdmission.assertOwnWorkCurrent(reader);
 		const lease: ForegroundSubmissionLease = {
 			[foregroundSubmissionLeaseMarker]: true,
 			epoch: this.nextSubmissionEpoch++,
 		};
 		this.submissionLease = lease;
+		this.runtimeLeases.set(lease, { lease: reader, owned: runtimeLease === undefined });
 		this.notifyActivity();
 		return lease;
 	}
@@ -462,7 +479,11 @@ export class ForegroundRecoveryController {
 					try {
 						// Register before rechecking. A newly started stream returns to the native idle
 						// wait above instead of depending on a host activity notification for its end.
-						if (this.shutdownReason || !this.hasForegroundOccupancy() || this.deps.agent.state.isStreaming) {
+						if (
+							this.shutdownReason ||
+							(!this.hasForegroundOccupancy() && !this.deps.runtimeAdmission.isReplacing) ||
+							this.deps.agent.state.isStreaming
+						) {
 							stop();
 						}
 					} catch (error) {
@@ -512,6 +533,7 @@ export class ForegroundRecoveryController {
 	 */
 	async acquireSubmissionOrJoinLiveConsumer(
 		signal: AbortSignal,
+		runtimeLease?: RuntimeWorkLease,
 	): Promise<ForegroundSubmissionLease | "live_consumer" | undefined> {
 		const watch = this.watchForegroundWait(
 			"foreground.acquire_or_join",
@@ -523,7 +545,7 @@ export class ForegroundRecoveryController {
 		try {
 			while (!signal.aborted) {
 				if (this.shutdownReason) throw this.shutdownReason;
-				const lease = this.tryAcquireSubmission();
+				const lease = this.tryAcquireSubmission(runtimeLease);
 				if (lease) {
 					end = { kind: "satisfied", by: "foreground.activity" };
 					return lease;
@@ -544,7 +566,13 @@ export class ForegroundRecoveryController {
 					this.idleWaiters.add(stop);
 					signal.addEventListener("abort", stop, { once: true });
 					// Register first, then recheck, so a change landing before the registration is not lost.
-					if (signal.aborted || this.shutdownReason || !this.isBusy || this.hasLiveConsumer) stop();
+					if (
+						signal.aborted ||
+						this.shutdownReason ||
+						(!this.isBusy && !this.deps.runtimeAdmission.isReplacing) ||
+						this.hasLiveConsumer
+					)
+						stop();
 				});
 			}
 			end = { kind: "aborted", reason: signal.reason };
@@ -645,10 +673,13 @@ export class ForegroundRecoveryController {
 				"Cannot navigate the session tree while a turn is running. Wait for the turn to finish or interrupt it first.",
 			);
 		}
+		const reader = this.deps.runtimeAdmission.tryAdmitWork({ kind: "history", label: "session tree navigation" });
+		if (!reader) throw new AgentBusyError("Cannot navigate during runtime generation replacement.");
 		const rewrite = Symbol("historyRewrite");
 		this.historyRewrites.add(rewrite);
 		return () => {
 			if (!this.historyRewrites.delete(rewrite)) return;
+			reader.release();
 			// The rewrite occupied the foreground: a submission, run or idle waiter parked behind it resumes now.
 			this.wakeIdleWaiters();
 		};
@@ -724,6 +755,7 @@ export class ForegroundRecoveryController {
 			throw new AgentBusyError("Foreground submission authority is no longer active.");
 		}
 		this.preparingTurn = lease;
+		this.runtimeLeases.get(lease)?.lease.beginTurnPreparation();
 	}
 
 	releaseSubmission(lease: ForegroundSubmissionLease): void {
@@ -735,8 +767,11 @@ export class ForegroundRecoveryController {
 			// starts another submission beside it.
 			this.deps.onSubmissionReleased?.(lease);
 		} finally {
+			const runtime = this.runtimeLeases.get(lease);
+			this.runtimeLeases.delete(lease);
 			if (this.preparingTurn === lease) this.preparingTurn = undefined;
 			this.submissionLease = undefined;
+			if (runtime?.owned) runtime.lease.release();
 			this.notifyActivity();
 			if (this.activeRuns === 0) {
 				this.resolveIdleWaiters();
@@ -829,6 +864,50 @@ export class ForegroundRecoveryController {
 		return { message: last, alreadyLogged };
 	}
 
+	private async atRuntimeMutationBoundary<T>(
+		lease: ForegroundSubmissionLease,
+		cleanup: boolean,
+		operation: (begin: () => RuntimeMutationHandoff) => Promise<T>,
+	): Promise<T> {
+		let active = true;
+		const handoffs: RuntimeMutationHandoff[] = [];
+		try {
+			return await operation(() => {
+				if (
+					!active ||
+					!this.ownsSubmission(lease) ||
+					this.activeRuns !== 1 ||
+					this.deps.agent.state.isStreaming ||
+					this.isRetrying ||
+					this.deps.isCompacting?.() === true ||
+					(cleanup && (this.consumingRun || this.runOwnsHistory))
+				) {
+					throw new AgentBusyError("Runtime mutation requires the owned settled foreground boundary.");
+				}
+				const reader = this.runtimeLeases.get(lease)?.lease;
+				if (!reader) throw new AgentBusyError("Runtime mutation requires active generation ownership.");
+				const handoff = this.deps.runtimeAdmission.beginMutationHandoff(reader);
+				handoffs.push(handoff);
+				return handoff;
+			});
+		} finally {
+			active = false;
+			for (const handoff of handoffs) handoff.release();
+		}
+	}
+
+	private async settleRuntimeUpdate(
+		lease: ForegroundSubmissionLease,
+		signal: AbortSignal | undefined,
+	): Promise<"continue" | "stop" | undefined> {
+		const result = await this.atRuntimeMutationBoundary(lease, false, async (begin) =>
+			this.deps.settleRuntimeUpdate?.(signal, begin),
+		);
+		this.runtimeLeases.get(lease)?.lease.assertCurrent();
+		if (result === "continue") await this.deps.prepareRun();
+		return result;
+	}
+
 	private async runAgentExecution(
 		mode: "prompt" | "continue",
 		messages: AgentMessage | AgentMessage[] | undefined,
@@ -859,6 +938,7 @@ export class ForegroundRecoveryController {
 		// Ends the chat turn this run began, if it began one; set at the run's first provider call.
 		let endChatTurn: (() => void) | undefined;
 		try {
+			this.runtimeLeases.get(lease)?.lease.beginTurnPreparation();
 			const maxGoalLoopRounds = this.deps.settingsManager.getAutonomySettings().maxStallTurns;
 			// A navigation rewriting the history this run would execute on finishes first; from here no navigation starts.
 			if (!(await this.claimRunHistory(signal))) return;
@@ -905,18 +985,18 @@ export class ForegroundRecoveryController {
 						const capped = this.lastAssistantMessage;
 						this.lastAssistantMessage = undefined;
 						this.finishRetry(false, capped?.errorMessage);
-						await this.deps.settleRuntimeUpdate?.(signal);
+						await this.settleRuntimeUpdate(lease, signal);
 						break;
 					}
 					const recovery = await this.handlePostAgentRun();
 					if (recovery !== "recover") {
 						if (recovery === "usage_limit_stop") stoppedOnUsageLimit = true;
-						await this.deps.settleRuntimeUpdate?.(signal);
+						await this.settleRuntimeUpdate(lease, signal);
 						break;
 					}
 					goalLoopRounds++;
 				} else {
-					const update = await this.deps.settleRuntimeUpdate?.(signal);
+					const update = await this.settleRuntimeUpdate(lease, signal);
 					if (update === "stop") {
 						stoppedForRuntimeUpdate = true;
 						break;
@@ -964,7 +1044,7 @@ export class ForegroundRecoveryController {
 			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
 			afterRunSettled = true;
 			try {
-				await this.deps.afterRun();
+				await this.atRuntimeMutationBoundary(lease, true, (begin) => this.deps.afterRun(begin));
 			} catch (afterRunError: unknown) {
 				throw new AggregateError(
 					[error, afterRunError],
@@ -984,7 +1064,8 @@ export class ForegroundRecoveryController {
 			this.recoveryRoundAvailable = false;
 			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
 			try {
-				if (!afterRunSettled) await this.deps.afterRun();
+				if (!afterRunSettled)
+					await this.atRuntimeMutationBoundary(lease, true, (begin) => this.deps.afterRun(begin));
 			} finally {
 				// After the run's cleanup, so the turn covers every provider round the run made.
 				endChatTurn?.();
@@ -1096,6 +1177,7 @@ export class ForegroundRecoveryController {
 
 	shutdown(): void {
 		this.shutdownReason ??= new Error("Session disposed before foreground submission authority was acquired");
+		this.unsubscribeRuntime();
 		for (const resolve of this.idleWaiters) resolve();
 		this.idleWaiters.clear();
 		this.activityListeners.clear();

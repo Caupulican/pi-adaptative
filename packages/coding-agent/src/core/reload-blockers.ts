@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { getAgentDir } from "../config.ts";
 import { getProcessWorkRun } from "../utils/work-directory.ts";
 import { isProcessAlive } from "./process-liveness.ts";
+import { getInFlightWorkUnits, type InFlightWorkUnit } from "./runtime-generation-admission.ts";
 import { isRecordObject } from "./util/value-guards.ts";
 
 export const ACTIVE_TURN_TTL_MS = 5 * 60_000;
@@ -229,42 +230,13 @@ export function getPendingReloadBlockers(options: ReloadBlockerOptions = {}): Pe
  * un-deregistered unit would wedge the gate forever — so deregistering twice is a safe no-op rather
  * than a footgun for a caller that also deregisters on an early-return path.
  */
-export type InFlightWorkKind = "lane" | "scout" | "isolated-completion";
-
-export interface InFlightWorkUnit {
-	id: number;
-	kind: InFlightWorkKind;
-	label: string;
-	registeredAt: number;
-}
-
-let _nextInFlightWorkId = 1;
-const _inFlightWorkByAgentDir = new Map<string, Map<number, InFlightWorkUnit>>();
-
-/** Registers one in-flight background work unit for `agentDir`. Returns its deregister function. */
-export function registerInFlightWork(agentDir: string, kind: InFlightWorkKind, label: string): () => void {
-	let units = _inFlightWorkByAgentDir.get(agentDir);
-	if (!units) {
-		units = new Map<number, InFlightWorkUnit>();
-		_inFlightWorkByAgentDir.set(agentDir, units);
-	}
-	const scopedUnits = units;
-	const id = _nextInFlightWorkId++;
-	scopedUnits.set(id, { id, kind, label, registeredAt: Date.now() });
-	let deregistered = false;
-	return () => {
-		if (deregistered) return;
-		deregistered = true;
-		scopedUnits.delete(id);
-		if (scopedUnits.size === 0) _inFlightWorkByAgentDir.delete(agentDir);
-	};
-}
-
-/** Live in-flight units for `agentDir`, oldest first. Empty when nothing is registered. */
-export function getInFlightWorkUnits(agentDir: string): InFlightWorkUnit[] {
-	const units = _inFlightWorkByAgentDir.get(agentDir);
-	return units ? [...units.values()].sort((a, b) => a.id - b.id) : [];
-}
+export {
+	getInFlightWorkUnits,
+	type InFlightWorkKind,
+	type InFlightWorkUnit,
+	registerInFlightWork,
+	resetInFlightWorkRegistryForTests,
+} from "./runtime-generation-admission.ts";
 
 export function describeInFlightWorkUnit(unit: InFlightWorkUnit): string {
 	return `${unit.kind}:${unit.label}`;
@@ -279,12 +251,4 @@ export function assertReloadQuiescent(agentDir: string, streaming: boolean, comp
 		throw new Error(
 			`Cannot ${action} while background work is in flight: ${units.map(describeInFlightWorkUnit).join(", ")}`,
 		);
-}
-
-/**
- * Test-only escape hatch: clears every agentDir's registry so one test's leaked registration cannot
- * block another's reload gate or status text.
- */
-export function resetInFlightWorkRegistryForTests(): void {
-	_inFlightWorkByAgentDir.clear();
 }

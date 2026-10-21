@@ -4,6 +4,7 @@ import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../age
 import { runIsolatedTextCompletion } from "../isolated-text-completion.ts";
 import { FitnessStore, type StoredFitnessReport } from "../models/fitness-store.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
+import { runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { reportSpawnedUsage } from "../spawned-usage.ts";
 import type { LaneModelResolver } from "./lane-model-resolver.ts";
 import { type ModelFitnessReport, runModelFitnessProbe } from "./model-fitness.ts";
@@ -40,66 +41,77 @@ export class ModelFitnessController {
 		toolCallId?: string;
 	}): Promise<{ started: true; model: string; report: ModelFitnessReport } | { started: false; skipReason: string }> {
 		if (this.deps.isDisposed()) return { started: false, skipReason: "session_disposed" };
-		const resolved = this.models.resolveModel(args.model.trim() || undefined);
-		if (!resolved) return { started: false, skipReason: "model_unresolved_or_unauthenticated" };
-		const capability = this.models.capabilityProfile(resolved);
-		const deregisterInFlight = registerInFlightWork(
-			this.deps.getAgentDir(),
-			"lane",
-			`fitness:${resolved.provider}/${resolved.id}`,
-		);
+		const runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir()).admitWork({
+			kind: "lane",
+			label: `model fitness:${args.model}`,
+			signal: this.abortController.signal,
+		});
 		try {
-			const spent = createEmptyUsage();
-			const report = await runModelFitnessProbe({
-				trials: args.trials,
-				signal: this.abortController.signal,
-				capacityProbe:
-					resolved.provider === "ollama" && resolved.contextWindow > 0
-						? { registeredContextWindow: resolved.contextWindow }
-						: undefined,
-				complete: async ({ systemPrompt, userPrompt, signal }) => {
-					const callStarted = Date.now();
-					const completion = await runIsolatedTextCompletion(this.deps, {
-						systemPrompt,
-						userPrompt,
-						model: resolved,
-						thinkingLevel: "off",
-						maxTokens: capability.laneMaxOutputTokens,
-						signal,
-						cacheRetention: "short",
-						laneKind: "fitness",
-					});
-					const callMs = Date.now() - callStarted;
-					addUsage(spent, completion.usage);
-					return {
-						text: completion.text,
-						costUsd: completion.costUsd,
-						stopReason: completion.stopReason,
-						outputTokens: completion.usage.output,
-						evalMs: callMs,
-					};
-				},
-			});
-			const modelRef = `${resolved.provider}/${resolved.id}`;
-			if (!this.deps.isDisposed()) {
-				const identity = args.toolCallId
-					? `toolcall:${args.toolCallId}`
-					: `${modelRef} ${args.trials ?? "default"}`;
-				reportSpawnedUsage(this.deps, spent, {
-					kind: "model-fitness",
-					label: "model-fitness",
-					sessionId: this.deps.getSessionId(),
-					identity,
-				});
-			}
+			runtimeLease.assertCurrent();
+			if (this.deps.isDisposed()) return { started: false, skipReason: "session_disposed" };
+			const resolved = this.models.resolveModel(args.model.trim() || undefined);
+			if (!resolved) return { started: false, skipReason: "model_unresolved_or_unauthenticated" };
+			const capability = this.models.capabilityProfile(resolved);
+			const deregisterInFlight = registerInFlightWork(
+				this.deps.getAgentDir(),
+				"lane",
+				`fitness:${resolved.provider}/${resolved.id}`,
+			);
 			try {
-				if (!this.deps.isDisposed()) FitnessStore.forAgentDir(this.deps.getAgentDir()).save(modelRef, report);
-			} catch {
-				// Best-effort persistence must not fail the probe.
+				const spent = createEmptyUsage();
+				const report = await runModelFitnessProbe({
+					trials: args.trials,
+					signal: this.abortController.signal,
+					capacityProbe:
+						resolved.provider === "ollama" && resolved.contextWindow > 0
+							? { registeredContextWindow: resolved.contextWindow }
+							: undefined,
+					complete: async ({ systemPrompt, userPrompt, signal }) => {
+						const callStarted = Date.now();
+						const completion = await runIsolatedTextCompletion(this.deps, {
+							systemPrompt,
+							userPrompt,
+							model: resolved,
+							thinkingLevel: "off",
+							maxTokens: capability.laneMaxOutputTokens,
+							signal,
+							cacheRetention: "short",
+							laneKind: "fitness",
+						});
+						const callMs = Date.now() - callStarted;
+						addUsage(spent, completion.usage);
+						return {
+							text: completion.text,
+							costUsd: completion.costUsd,
+							stopReason: completion.stopReason,
+							outputTokens: completion.usage.output,
+							evalMs: callMs,
+						};
+					},
+				});
+				const modelRef = `${resolved.provider}/${resolved.id}`;
+				if (!this.deps.isDisposed()) {
+					const identity = args.toolCallId
+						? `toolcall:${args.toolCallId}`
+						: `${modelRef} ${args.trials ?? "default"}`;
+					reportSpawnedUsage(this.deps, spent, {
+						kind: "model-fitness",
+						label: "model-fitness",
+						sessionId: this.deps.getSessionId(),
+						identity,
+					});
+				}
+				try {
+					if (!this.deps.isDisposed()) FitnessStore.forAgentDir(this.deps.getAgentDir()).save(modelRef, report);
+				} catch {
+					// Best-effort persistence must not fail the probe.
+				}
+				return { started: true, model: modelRef, report };
+			} finally {
+				deregisterInFlight();
 			}
-			return { started: true, model: modelRef, report };
 		} finally {
-			deregisterInFlight();
+			runtimeLease.release();
 		}
 	}
 

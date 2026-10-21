@@ -2,6 +2,7 @@ import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { IndependentObserverSet } from "../observer-dispatch.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
+import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { workerQueueHasCapacity } from "./worker-fleet-limits.ts";
 
@@ -11,6 +12,7 @@ export type WorkerDispatchWaitReason =
 	| "objective"
 	| "write_reservation"
 	| "foreground"
+	| "runtime_generation"
 	| "preflight";
 
 export type WorkerDispatchAdmission =
@@ -133,6 +135,7 @@ export class WorkerDispatchScheduler {
 	private redrainRequested = false;
 	private reservationAvailabilityRequested = false;
 	private queueCapacityNotificationPending = false;
+	private unsubscribeRuntimeAvailability: (() => void) | undefined;
 
 	constructor(options: WorkerDispatchSchedulerOptions) {
 		this.options = options;
@@ -553,6 +556,12 @@ export class WorkerDispatchScheduler {
 	private beginPreflight(request: WorkerDelegationRequest, record: LaneRecord): void {
 		const laneId = record.laneId;
 		if (this.preflights.has(laneId)) return;
+		// drain retains the generation while this physical preflight acquires its own reader.
+		const runtimeLease = runtimeGenerationAdmission(this.options.agentDir).tryAdmitWork({
+			kind: "lane",
+			label: `worker-preflight:${laneId}`,
+		});
+		if (!runtimeLease) throw new Error("Worker preflight requires runtime admission.");
 		const token = Symbol();
 		this.preflights.set(laneId, token);
 		const terminal = Promise.withResolvers<void>();
@@ -617,7 +626,9 @@ export class WorkerDispatchScheduler {
 			}
 			this.validated.add(laneId);
 			this.redrainBestEffort(laneId);
-		})().then(terminal.resolve, terminal.reject);
+		})()
+			.finally(() => runtimeLease.release())
+			.then(terminal.resolve, terminal.reject);
 	}
 
 	drain(reservationAvailable = false): void {
@@ -628,11 +639,30 @@ export class WorkerDispatchScheduler {
 			return;
 		}
 		this.draining = true;
+		let runtimeLease: RuntimeWorkLease | undefined;
 		try {
 			// Promise settlement and every later scheduler signal retry each retained durable cancellation
 			// once. Keep this outside the redrain loop so a reentrant signal cannot create a busy retry.
 			this.retryPendingCancellations();
 			this.promoteDeferred();
+			const runtime = runtimeGenerationAdmission(this.options.agentDir);
+			runtimeLease = runtime.tryAdmitWork({ kind: "lane", label: "worker dispatch" });
+			if (!runtimeLease) {
+				for (const laneId of this.queued.keys()) {
+					this.recordWait(laneId, {
+						action: "wait",
+						reason: "runtime_generation",
+						detail: "runtime replacement is settling",
+					});
+				}
+				this.unsubscribeRuntimeAvailability ??= runtime.subscribeAvailability(() => {
+					if (runtime.isReplacing) return;
+					this.unsubscribeRuntimeAvailability?.();
+					this.unsubscribeRuntimeAvailability = undefined;
+					this.redrainBestEffort("runtime generation");
+				});
+				return;
+			}
 			do {
 				this.redrainRequested = false;
 				const passReservationAvailable = this.reservationAvailabilityRequested;
@@ -727,12 +757,15 @@ export class WorkerDispatchScheduler {
 			);
 		} finally {
 			this.draining = false;
+			runtimeLease?.release();
 		}
 	}
 
 	/** The controller owns permanent shutdown; ordinary queue cancellation remains reusable. */
 	closeAdmission(): void {
 		this.stopped = true;
+		this.unsubscribeRuntimeAvailability?.();
+		this.unsubscribeRuntimeAvailability = undefined;
 	}
 
 	cancelQueued(): void {

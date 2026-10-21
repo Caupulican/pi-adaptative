@@ -17,6 +17,7 @@ import {
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { terminalAttemptStatus } from "../orchestration/task-runtime-state.ts";
+import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS } from "../settings/settings-rules.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { recordDiscardedObligations } from "./obligation-ledger.ts";
@@ -301,6 +302,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	private readonly sessionRootReconciliationFailures = new Map<string, string>();
 	private readonly workerReplyReconciliationFailures = new Map<string, string>();
 	private readonly laneHalts = new WorkerLaneHalts();
+	private readonly runtimeWaiters = new Map<string, () => void>();
+	private disposed = false;
 
 	constructor(options: WorkerAgentControlCoordinatorOptions) {
 		this.options = options;
@@ -675,6 +678,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			dependsOnTaskIds,
 			newTask,
 			options.newTask?.goal,
+			true,
 		);
 	}
 
@@ -799,47 +803,59 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		dependsOnTaskIds: readonly string[] = [],
 		newTask?: WorkerAgentNewTaskCorrelation,
 		newTaskGoal?: GoalState,
+		requireRuntimeAdmission = false,
 	): { started: boolean; steering: false; messageId: string; record?: LaneRecord; skipReason?: string } {
-		if (!this.isAcceptedControlReplay(agent.agentId, options.idempotencyKey)) {
-			const headroomSkipReason = this.options.taskStartHeadroomSkipReason?.(agent);
-			if (headroomSkipReason)
-				return { started: false, steering: false, messageId: "", skipReason: headroomSkipReason };
-			const skipReason = this.reusableTaskAdmissionSkipReason(agent.agentId);
-			if (skipReason) return { started: false, steering: false, messageId: "", skipReason };
+		const reader = runtimeGenerationAdmission(this.options.agentDir).tryAdmitWork({
+			kind: "worker-control",
+			label: agent.agentId,
+		});
+		if (!reader && requireRuntimeAdmission) {
+			return { started: false, steering: false, messageId: "", skipReason: "runtime_generation_replacement" };
 		}
-		const queued = this.enqueuePeerMessage(
-			agent,
-			"follow_up",
-			message,
-			options,
-			{
-				kind: "agent_turn",
-				...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
-				...(newTask ? { newTask } : {}),
-			},
-			// The goal's acceptance criteria are durable orchestration state that an accepted message
-			// needs on recovery, so they are still written BEFORE the message. The mailbox calls this
-			// only once it has ruled out every deterministic refusal (bounds, replay identity, pending
-			// capacity, encoded-byte admission), so a refused start no longer leaves a new objective.
-			newTaskGoal ? () => this.options.getLifecycle().synchronizeGoalState(newTaskGoal) : undefined,
-		);
-		if (queued.status === "completed_replay") {
+		try {
+			if (!this.isAcceptedControlReplay(agent.agentId, options.idempotencyKey)) {
+				const headroomSkipReason = reader ? this.options.taskStartHeadroomSkipReason?.(agent) : undefined;
+				if (headroomSkipReason)
+					return { started: false, steering: false, messageId: "", skipReason: headroomSkipReason };
+				const skipReason = this.reusableTaskAdmissionSkipReason(agent.agentId);
+				if (skipReason) return { started: false, steering: false, messageId: "", skipReason };
+			}
+			const queued = this.enqueuePeerMessage(
+				agent,
+				"follow_up",
+				message,
+				options,
+				{
+					kind: "agent_turn",
+					...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
+					...(newTask ? { newTask } : {}),
+				},
+				// The goal's acceptance criteria are durable orchestration state that an accepted message
+				// needs on recovery, so they are still written BEFORE the message. The mailbox calls this
+				// only once it has ruled out every deterministic refusal (bounds, replay identity, pending
+				// capacity, encoded-byte admission), so a refused start no longer leaves a new objective.
+				newTaskGoal ? () => this.options.getLifecycle().synchronizeGoalState(newTaskGoal) : undefined,
+			);
+			if (queued.status === "completed_replay") {
+				return {
+					started: false,
+					steering: false,
+					messageId: queued.messageId,
+					skipReason: "worker_message_already_finalized",
+				};
+			}
+			const reconciliation = this.reconcileTaskBearingMailbox(agent.agentId, queued.messageId, reader);
+			this.notifyStateChangedBestEffort();
 			return {
-				started: false,
+				started: reconciliation.started,
 				steering: false,
 				messageId: queued.messageId,
-				skipReason: "worker_message_already_finalized",
+				...(reconciliation.record ? { record: this.withQueuedWaitReason(reconciliation.record) } : {}),
+				...(reconciliation.skipReason ? { skipReason: reconciliation.skipReason } : {}),
 			};
+		} finally {
+			reader?.release();
 		}
-		const reconciliation = this.reconcileTaskBearingMailbox(agent.agentId, queued.messageId);
-		this.notifyStateChangedBestEffort();
-		return {
-			started: reconciliation.started,
-			steering: false,
-			messageId: queued.messageId,
-			...(reconciliation.record ? { record: this.withQueuedWaitReason(reconciliation.record) } : {}),
-			...(reconciliation.skipReason ? { skipReason: reconciliation.skipReason } : {}),
-		};
 	}
 
 	/**
@@ -2098,7 +2114,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		};
 	}
 
-	private reconcileTaskBearingMailbox(agentId: string, expectedMessageId?: string): TaskBearingReconciliation {
+	private reconcileTaskBearingMailbox(
+		agentId: string,
+		expectedMessageId?: string,
+		runtimeLease?: RuntimeWorkLease,
+	): TaskBearingReconciliation {
 		if (this.reconcilingTaskBearingAgentIds.has(agentId)) {
 			return { started: false, skipReason: "worker_task_reconciliation_in_progress" };
 		}
@@ -2157,75 +2177,96 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					if (settled) return settled;
 					continue;
 				}
-				const reuseSkipReason = this.reusableTaskAdmissionSkipReason(agent.agentId);
-				if (reuseSkipReason) {
-					this.reconcileControlTranscript(agent, message, true);
-					this.acknowledgeDeliveredMailboxMessage(agent.agentId, message.messageId);
-					const settlement = {
-						started: false,
-						skipReason: `${reuseSkipReason}:transcript_fallback_delivered`,
-					};
-					if (expectedMessageId === message.messageId) return settlement;
-					continue;
+				if (this.disposed) return { started: false, skipReason: "worker_control_disposed" };
+				const reader =
+					runtimeLease ??
+					runtimeGenerationAdmission(this.options.agentDir).tryAdmitWork({
+						kind: "worker-control",
+						label: agentId,
+					});
+				if (!reader) {
+					this.waitForRuntimeGeneration(agentId);
+					return { started: false, skipReason: "runtime_generation_replacement" };
 				}
 				try {
-					this.enableAttemptAccountingForNextTask(agent);
-					const newTask = message.task?.kind === "agent_turn" ? message.task.newTask : undefined;
-					const prepared = this.options.getLifecycle().prepareAgentTurn({
-						agentId: agent.agentId,
-						instructions: message.content,
-						controlMessageId: message.messageId,
-						...(message.task?.kind === "agent_turn" && message.task.dependsOnTaskIds
-							? { dependsOnTaskIds: message.task.dependsOnTaskIds }
-							: {}),
-						// The persisted declaration of new work, read back from the mailbox: the process that
-						// enqueued it may be long gone, and no caller repeats it after a restart.
-						...(newTask
-							? {
-									...(newTask.goalId ? { goalId: newTask.goalId } : {}),
-									...(newTask.controlForkMode ? { controlForkMode: newTask.controlForkMode } : {}),
-									taskContext: {
-										...(newTask.requirementIds ? { requirementIds: newTask.requirementIds } : {}),
-										...(newTask.acceptanceCriterionIds
-											? { acceptanceCriterionIds: newTask.acceptanceCriterionIds }
-											: {}),
-										...(newTask.resourcePointerIds ? { resourcePointerIds: newTask.resourcePointerIds } : {}),
-									},
-								}
-							: {}),
-					});
-					// `created` is the ledger's own decision, not a reconstruction of it -- a replayed
-					// control message (e.g. a mailbox message redelivered after a resume) returns an
-					// attempt that may predate the current process, and must never be re-stamped with
-					// this process's epoch.
-					if (prepared.created) {
-						const ownerEpoch = this.options.getCurrentSubmissionEpoch?.();
-						if (ownerEpoch !== undefined) this.options.noteLaneOwnerEpoch?.(prepared.record.laneId, ownerEpoch);
-					}
-					return this.scheduleTaskBearingAttempt(prepared.record, prepared.attempt);
-				} catch (error) {
-					const recovered = this.controlMessageAttempt(agent.agentId, message);
-					if (recovered) {
-						const scheduled = this.scheduleCorrelatedTaskBearingAttempt(recovered);
-						if (scheduled.skipReason?.startsWith("worker_task_terminal_")) {
-							const settled = this.settleTerminalTaskBearingMessage(
-								agent,
-								mailbox,
-								message,
-								scheduled,
-								expectedMessageId,
-							);
-							if (settled) return settled;
-							continue;
-						}
-						return {
-							...scheduled,
-							...(scheduled.skipReason
-								? {}
-								: { skipReason: "worker_task_recovered_after_prepare_interruption" }),
+					reader.assertCurrent();
+					const reuseSkipReason =
+						this.options.taskStartHeadroomSkipReason?.(agent) ??
+						this.reusableTaskAdmissionSkipReason(agent.agentId);
+					if (reuseSkipReason) {
+						this.reconcileControlTranscript(agent, message, true);
+						this.acknowledgeDeliveredMailboxMessage(agent.agentId, message.messageId);
+						const settlement = {
+							started: false,
+							skipReason: `${reuseSkipReason}:transcript_fallback_delivered`,
 						};
+						if (expectedMessageId === message.messageId) return settlement;
+						continue;
 					}
-					return { started: false, skipReason: error instanceof Error ? error.message : String(error) };
+					try {
+						this.enableAttemptAccountingForNextTask(agent);
+						const newTask = message.task?.kind === "agent_turn" ? message.task.newTask : undefined;
+						const prepared = this.options.getLifecycle().prepareAgentTurn({
+							agentId: agent.agentId,
+							instructions: message.content,
+							controlMessageId: message.messageId,
+							...(message.task?.kind === "agent_turn" && message.task.dependsOnTaskIds
+								? { dependsOnTaskIds: message.task.dependsOnTaskIds }
+								: {}),
+							// The persisted declaration of new work, read back from the mailbox: the process that
+							// enqueued it may be long gone, and no caller repeats it after a restart.
+							...(newTask
+								? {
+										...(newTask.goalId ? { goalId: newTask.goalId } : {}),
+										...(newTask.controlForkMode ? { controlForkMode: newTask.controlForkMode } : {}),
+										taskContext: {
+											...(newTask.requirementIds ? { requirementIds: newTask.requirementIds } : {}),
+											...(newTask.acceptanceCriterionIds
+												? { acceptanceCriterionIds: newTask.acceptanceCriterionIds }
+												: {}),
+											...(newTask.resourcePointerIds
+												? { resourcePointerIds: newTask.resourcePointerIds }
+												: {}),
+										},
+									}
+								: {}),
+						});
+						// `created` is the ledger's own decision, not a reconstruction of it -- a replayed
+						// control message (e.g. a mailbox message redelivered after a resume) returns an
+						// attempt that may predate the current process, and must never be re-stamped with
+						// this process's epoch.
+						if (prepared.created) {
+							const ownerEpoch = this.options.getCurrentSubmissionEpoch?.();
+							if (ownerEpoch !== undefined)
+								this.options.noteLaneOwnerEpoch?.(prepared.record.laneId, ownerEpoch);
+						}
+						return this.scheduleTaskBearingAttempt(prepared.record, prepared.attempt);
+					} catch (error) {
+						const recovered = this.controlMessageAttempt(agent.agentId, message);
+						if (recovered) {
+							const scheduled = this.scheduleCorrelatedTaskBearingAttempt(recovered);
+							if (scheduled.skipReason?.startsWith("worker_task_terminal_")) {
+								const settled = this.settleTerminalTaskBearingMessage(
+									agent,
+									mailbox,
+									message,
+									scheduled,
+									expectedMessageId,
+								);
+								if (settled) return settled;
+								continue;
+							}
+							return {
+								...scheduled,
+								...(scheduled.skipReason
+									? {}
+									: { skipReason: "worker_task_recovered_after_prepare_interruption" }),
+							};
+						}
+						return { started: false, skipReason: error instanceof Error ? error.message : String(error) };
+					}
+				} finally {
+					if (!runtimeLease) reader.release();
 				}
 			}
 			this.scheduleTaskBearingReconciliationContinuation(agentId);
@@ -2241,6 +2282,26 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		} finally {
 			this.reconcilingTaskBearingAgentIds.delete(agentId);
 		}
+	}
+
+	/** Stop deferred admissions; durable mailbox intent remains available to the next session owner. */
+	dispose(): void {
+		this.disposed = true;
+		for (const unsubscribe of this.runtimeWaiters.values()) unsubscribe();
+		this.runtimeWaiters.clear();
+	}
+
+	private waitForRuntimeGeneration(agentId: string): void {
+		if (this.disposed || this.runtimeWaiters.has(agentId)) return;
+		const admission = runtimeGenerationAdmission(this.options.agentDir);
+		const unsubscribe = admission.subscribeAvailability(() => {
+			if (admission.isReplacing || this.disposed) return;
+			unsubscribe();
+			this.runtimeWaiters.delete(agentId);
+			this.reconcileTaskBearingMailbox(agentId);
+			this.notifyStateChangedBestEffort();
+		});
+		this.runtimeWaiters.set(agentId, unsubscribe);
 	}
 
 	private scheduleTaskBearingReconciliationContinuation(agentId: string): void {

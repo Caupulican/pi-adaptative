@@ -266,7 +266,6 @@ import { ProviderRequestRuntimeController } from "./provider-request-runtime-con
 import { QueuedInputPersistenceController } from "./queued-input-persistence-controller.ts";
 import { ReflectionController } from "./reflection-controller.ts";
 import { ReflectionTurnLifecycle } from "./reflection-turn-lifecycle.ts";
-import { assertReloadQuiescent } from "./reload-blockers.ts";
 import {
 	CONVERSATION_TALKER_CUSTOM_TYPE,
 	type ConversationTalkerRecord,
@@ -283,7 +282,12 @@ import {
 } from "./research/session-evidence-bundle.ts";
 import { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
-import { RuntimeBuilder } from "./runtime-builder.ts";
+import { RuntimeBuilder, type RuntimeReloadOptions } from "./runtime-builder.ts";
+import {
+	type RuntimeMutationHandoff,
+	type RuntimeWorkLease,
+	runtimeGenerationAdmission,
+} from "./runtime-generation-admission.ts";
 import { RuntimeUpdateController } from "./runtime-update-controller.ts";
 import type { CredentialManager } from "./secrets/credential-manager.ts";
 import { SessionAnalytics } from "./session-analytics.ts";
@@ -291,6 +295,7 @@ import { SessionCacheController } from "./session-cache-controller.ts";
 import { SessionEdgeIntentController } from "./session-edge-intent-controller.ts";
 import { SessionImageStore } from "./session-image-store.ts";
 import { isWorkerSession } from "./session-role.ts";
+import { SessionRuntimeAdmissionController } from "./session-runtime-admission-controller.ts";
 import { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
 import { hasRunningBackgroundedToolCall, isSessionSettled } from "./session-settlement.ts";
 import { CLOSING_RUN_SETTLE_MS, createSessionShutdownTracker, runSettlesWithin } from "./session-shutdown.ts";
@@ -519,6 +524,7 @@ export class AgentSession {
 	private readonly _skillVault: SkillVaultController;
 	private _skillCuratorInstance?: SkillCurator;
 	private _disposed = false;
+	private readonly _runtimeAdmission: SessionRuntimeAdmissionController;
 	/** Set when the closing sequence released the internal agent consumer; a handler that was already running must not continue past it. */
 	private _closingConsumerReleased = false;
 	private _disposeCompletion: Promise<void> | undefined;
@@ -858,6 +864,9 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._agentDir = agentDir;
+		this._runtimeAdmission = new SessionRuntimeAdmissionController(runtimeGenerationAdmission(agentDir), (event) =>
+			this._emit(event),
+		);
 		this._isChildSession = (config.isChildSession ?? process.env.PI_CHILD_SESSION === "1") || isWorkerSession();
 		reportGithubOriginPinForSession(this._cwd, this._isChildSession, this.sessionManager);
 		this._durableLearningState = this._isChildSession ? undefined : DurableLearningState.forAgentDir(agentDir);
@@ -1009,6 +1018,7 @@ export class AgentSession {
 			getObjectiveExecutionController: () => this._objectiveExecutionController,
 		});
 		this._pendingQueue = new PendingInputQueueController({
+			reloadRuntime: (authority) => this._reloadWithAuthority(authority),
 			agent: this.agent,
 			skillVault: this._skillVault,
 			goals: this._goals,
@@ -1349,6 +1359,7 @@ export class AgentSession {
 		const toolRepairSettings = this._toolProtocol.getRepairSettings();
 		this._failureCorpus = new FailureCorpusRecorder({ filePath: failureCorpusPath });
 		this._compaction = new CompactionController({
+			runtimeAdmission: runtimeGenerationAdmission(this._agentDir),
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			settingsManager: this.settingsManager,
@@ -1502,8 +1513,11 @@ export class AgentSession {
 			isRoot: () => !this._isChildSession,
 			onStopped: () => this._goals.markTerminalToolFailureBlocked("runtime_update"),
 			resume: (prepare) => this._durableCustomMessageTurns.continue(prepare, this._goals.getOwnershipGoalId()),
-			reload: async (path) => {
-				await (path ? this._runtimeBuilder.reloadExtension(path) : this._runtimeBuilder.reload());
+			reload: async (path, ownerHandoff) => {
+				await this._compaction.cancelIdlePreparationAndWait();
+				await (path
+					? this._runtimeBuilder.reloadExtension(path, { ownerHandoff })
+					: this._runtimeBuilder.reload({ ownerHandoff }));
 				this._notifyExtensionsChanged();
 			},
 			appendNotice: (content) =>
@@ -1521,6 +1535,7 @@ export class AgentSession {
 			timers: config.timers.port("tool-recovery-log"),
 		});
 		this._foregroundRecovery = new ForegroundRecoveryController({
+			runtimeAdmission: runtimeGenerationAdmission(this._agentDir),
 			agent: this.agent,
 			timers: config.timers,
 			chatTurns: () => this._memory.continuousChatHost()?.turns,
@@ -1555,7 +1570,7 @@ export class AgentSession {
 			replaceUnsupportedModel: (message) => this._replaceUnsupportedModel(message),
 			onUsageLimitReached: (message) => void this._offerSubscriptionReset(message),
 			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
-			settleRuntimeUpdate: (signal) => this.runtimeUpdates.settle(signal),
+			settleRuntimeUpdate: (signal, beginRuntimeHandoff) => this.runtimeUpdates.settle(signal, beginRuntimeHandoff),
 			holdUndeliveredQueue: () => {
 				this._pendingQueue.holdUndelivered();
 				this._emitQueueUpdate();
@@ -1576,13 +1591,13 @@ export class AgentSession {
 				this.agent.state.systemPrompt = this._systemPromptBuilder.enforceSystemPromptBudget(this.systemPrompt);
 				await this._toolProtocol.ensureActiveModelProtocol();
 			},
-			afterRun: async () => {
+			afterRun: async (beginRuntimeHandoff) => {
 				if (!isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason)) {
 					this._selfCompaction.schedule();
 				}
 				this._toolProtocol.restoreWithheldTools();
 				this._flushPendingBashMessages();
-				await this._drainQueuedExtensionCommands();
+				await this._drainQueuedExtensionCommands(beginRuntimeHandoff);
 			},
 		});
 		this._pendingQueue.bindForeground(this._foregroundRecovery);
@@ -1860,13 +1875,14 @@ export class AgentSession {
 			createProfileFilterReloadSnapshot: () => this._profileFilter.createReloadSnapshot(),
 			restoreProfileFilterReloadSnapshot: (snapshot) => this._profileFilter.restoreReloadSnapshot(snapshot),
 			getActiveToolNames: () => this.getActiveToolNames(),
-			setActiveToolsByName: (toolNames) => this.setActiveToolsByName(toolNames),
+			setActiveToolsByName: (toolNames, assertCurrent) => this._setActiveToolsByName(toolNames, assertCurrent),
 			normalizePromptSnippet: (text) => this._normalizePromptSnippet(text),
 			normalizePromptGuidelines: (guidelines) => this._normalizePromptGuidelines(guidelines),
 			bindExtensionCore: (runner) => this._extensionBinding.bindExtensionCore(runner),
 			applyExtensionBindings: (runner) => this._extensionBinding.applyExtensionBindings(runner),
 			extendResourcesFromExtensions: (reason) => this._extensionBinding.extendResourcesFromExtensions(reason),
-			reapplyActiveProfileModelSettings: () => this._profileFilter.reapplyActiveProfileModelSettings(),
+			reapplyActiveProfileModelSettings: (assertCurrent) =>
+				this._profileFilter.reapplyActiveProfileModelSettings(assertCurrent),
 			notifyExtensionsChanged: () => this._notifyExtensionsChanged(),
 			getToolArtifactStore: () => this._getToolArtifactStore(),
 			getContextGcStoreDir: () => this._pipeline.contextGcStorageDir(),
@@ -1954,6 +1970,7 @@ export class AgentSession {
 			},
 		});
 		this._extensionBinding = new ExtensionBindingController({
+			getAgentDir: () => this._agentDir,
 			getAgent: () => this.agent,
 			getExtensionRunner: () => this._extensionRunner,
 			getSessionStartEvent: () => this._sessionStartEvent,
@@ -1965,7 +1982,7 @@ export class AgentSession {
 			getModel: () => this.model,
 			getActiveToolNames: () => this.getActiveToolNames(),
 			getAllTools: () => this.getAllTools(),
-			setActiveToolsByName: (toolNames) => this.setActiveToolsByName(toolNames),
+			setActiveToolsByName: (toolNames, assertCurrent) => this._setActiveToolsByName(toolNames, assertCurrent),
 			refreshToolRegistry: () => this._refreshToolRegistry(),
 			rebuildSystemPrompt: (toolNames) => this._rebuildSystemPrompt(toolNames),
 			setBaseSystemPrompt: (prompt) => {
@@ -1973,13 +1990,16 @@ export class AgentSession {
 			},
 			getPromptTemplates: () => this.promptTemplates,
 			getThinkingLevel: () => this.thinkingLevel,
-			setThinkingLevel: (level) => this.setThinkingLevel(level),
-			setModel: (model) => this.setModel(model),
-			sendCustomMessage: (message, options) => this.sendCustomMessage(message, options),
-			sendUserMessage: (content, options) => this.sendUserMessage(content, options),
-			setSessionName: (name) => this.setSessionName(name),
-			registerMemoryProvider: (provider) => this.registerMemoryProvider(provider),
-			registerContextMemoryProvider: (provider) => this.registerContextMemoryProvider(provider),
+			setThinkingLevel: (level, assertCurrent) => this._setThinkingLevel(level, {}, assertCurrent),
+			setModel: (model, assertCurrent) => this._setModel(model, {}, assertCurrent),
+			sendCustomMessage: (message, options, runtimeLease) =>
+				this._sendCustomMessageWithRuntimeLease(message, options, runtimeLease),
+			sendUserMessage: (content, options, runtimeLease) =>
+				this._sendUserMessageWithRuntimeLease(content, options, runtimeLease),
+			setSessionName: (name, assertCurrent) => this._setSessionName(name, assertCurrent),
+			registerMemoryProvider: (provider, assertCurrent) => this._registerMemoryProvider(provider, assertCurrent),
+			registerContextMemoryProvider: (provider, assertCurrent) =>
+				this._registerContextMemoryProvider(provider, assertCurrent),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			recordManagedLane: (event) => this._backgroundLanes.recordManagedLane(event),
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
@@ -2089,7 +2109,7 @@ export class AgentSession {
 			getScopedModels: () => this._scopedModels,
 			getRequestedActiveToolNames: () => this._requestedActiveToolNames,
 			getActiveToolNames: () => this.getActiveToolNames(),
-			setActiveToolsByName: (names) => this.setActiveToolsByName(names),
+			setActiveToolsByName: (names, assertCurrent) => this._setActiveToolsByName(names, assertCurrent),
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			refreshBaseSystemPrompt: () => this._refreshBaseSystemPrompt(),
 			emit: (event) => this._emit(event),
@@ -2119,7 +2139,8 @@ export class AgentSession {
 			getToolProfileFilter: () => this._toolProfileFilter,
 			isExplicitModel: () => this._isExplicitModel,
 			isExplicitThinking: () => this._isExplicitThinking,
-			setThinkingLevel: (level) => this.setThinkingLevel(level, { persistSettings: false }),
+			setThinkingLevel: (level, assertCurrent) =>
+				this._setThinkingLevel(level, { persistSettings: false }, assertCurrent),
 		});
 		// Write-behind: an observation per tool call is advisory statistics, not worth a durable
 		// transaction each (14% of host CPU over 1,500 turns); batches flush on idle, cap, dispose, exit.
@@ -2877,9 +2898,11 @@ export class AgentSession {
 
 	/** Apply an explicit guard choice and invalidate all prior decision/envelope projections immediately. */
 	setCostGuardSettings(settings: CostGuardSettings, scope: SettingsScope = "global"): void {
-		this.settingsManager.setCostGuardSettings(settings, scope);
-		this._costGuard.invalidateDecision();
-		if (this._currentForegroundEnvelope) this._refreshForegroundEnvelope();
+		this._runtimeAdmission.mutateResources("cost guard settings", () => {
+			this.settingsManager.setCostGuardSettings(settings, scope);
+			this._costGuard.invalidateDecision();
+			if (this._currentForegroundEnvelope) this._refreshForegroundEnvelope();
+		});
 	}
 
 	private get _skillCurator(): SkillCurator {
@@ -3862,6 +3885,7 @@ export class AgentSession {
 	dispose(): void {
 		if (this._disposed) return;
 		this._disposed = true;
+		this._runtimeAdmission.close();
 		const { safely, track, trackRequired, finish } = createSessionShutdownTracker();
 		// The first releases are required ones: a failure in any of them is kept for `disposeAndWait()` and never skips the releases below.
 		trackRequired(async () => {
@@ -4127,60 +4151,75 @@ export class AgentSession {
 	 * activate their registered artifact_retrieve companion through this same public boundary;
 	 * other tools require the explicit/default request. Registry presence already encodes grants.
 	 */
+
 	setActiveToolsByName(toolNames: string[]): void {
-		// Model capability: small-window models get a reduced tool surface derived from the model's
-		// own metadata. The unfiltered request is remembered so a later switch to a larger model
-		// restores it (the filter is re-applied on every model change).
-		this._requestedActiveToolNames = [...toolNames];
-		const requested = [...toolNames];
-		if (requested.includes("skill")) {
-			requested.push("skillify", "skill_audit");
-		}
-		if (!this._isChildSession && requested.includes("memory")) {
-			requested.push("zoom", "date");
-		}
-		const capabilityFiltered = filterToolNamesForCapability(requested, this.getModelCapabilityProfile(), this.model);
+		this._setActiveToolsByName(toolNames);
+	}
 
-		const tools: AgentTool[] = [];
-		const validToolNames: string[] = [];
-		const seen = new Set<string>();
-		const addIfRegistered = (name: string): void => {
-			if (seen.has(name)) return;
-			const tool = this._runtimeBuilder.getRegisteredTool(name);
-			if (!tool) return;
-			seen.add(name);
-			tools.push(tool);
-			validToolNames.push(name);
-		};
+	private _setActiveToolsByName(toolNames: string[], assertCurrent?: () => void): void {
+		this._runtimeAdmission.mutateResources(
+			"active tools",
+			() => {
+				// Model capability: small-window models get a reduced tool surface derived from the model's
+				// own metadata. The unfiltered request is remembered so a later switch to a larger model
+				// restores it (the filter is re-applied on every model change).
+				this._requestedActiveToolNames = [...toolNames];
+				const requested = [...toolNames];
+				if (requested.includes("skill")) {
+					requested.push("skillify", "skill_audit");
+				}
+				if (!this._isChildSession && requested.includes("memory")) {
+					requested.push("zoom", "date");
+				}
+				const capabilityFiltered = filterToolNamesForCapability(
+					requested,
+					this.getModelCapabilityProfile(),
+					this.model,
+				);
 
-		for (const name of capabilityFiltered) {
-			addIfRegistered(name);
-		}
-		// A background tool task packs any tool's oversized terminal output (bash included) and names the artifact in its result.
-		if (
-			validToolNames.some((name) => PACKED_TOOL_OUTPUT_TOOLS.has(name)) ||
-			validToolNames.includes("tool_task") ||
-			validToolNames.includes("ask_question")
-		) {
-			addIfRegistered("artifact_retrieve");
-		}
-		this.agent.state.tools = tools.map((tool) =>
-			wrapToolWithPathAliasExpansion(
-				tool,
-				() => this._pipeline.peekPathAliasTable(),
-				this._pathAliasWrappedTools,
-				() => this._cwd,
-			),
+				const tools: AgentTool[] = [];
+				const validToolNames: string[] = [];
+				const seen = new Set<string>();
+				const addIfRegistered = (name: string): void => {
+					if (seen.has(name)) return;
+					const tool = this._runtimeBuilder.getRegisteredTool(name);
+					if (!tool) return;
+					seen.add(name);
+					tools.push(tool);
+					validToolNames.push(name);
+				};
+
+				for (const name of capabilityFiltered) {
+					addIfRegistered(name);
+				}
+				// A background tool task packs any tool's oversized terminal output (bash included) and names the artifact in its result.
+				if (
+					validToolNames.some((name) => PACKED_TOOL_OUTPUT_TOOLS.has(name)) ||
+					validToolNames.includes("tool_task") ||
+					validToolNames.includes("ask_question")
+				) {
+					addIfRegistered("artifact_retrieve");
+				}
+				this.agent.state.tools = tools.map((tool) =>
+					wrapToolWithPathAliasExpansion(
+						tool,
+						() => this._pipeline.peekPathAliasTable(),
+						this._pathAliasWrappedTools,
+						() => this._cwd,
+					),
+				);
+
+				// Rebuild base system prompt with new tool set
+				this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
+				this.agent.state.systemPrompt = this._baseSystemPrompt;
+				this._backgroundLanes.reconcileGoalContinuationToolAvailability(
+					() => this._goals.resumeGoalToolAvailable() !== undefined,
+				);
+
+				this._checkContextWindowUsageWarning();
+			},
+			assertCurrent,
 		);
-
-		// Rebuild base system prompt with new tool set
-		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
-		this.agent.state.systemPrompt = this._baseSystemPrompt;
-		this._backgroundLanes.reconcileGoalContinuationToolAvailability(
-			() => this._goals.resumeGoalToolAvailable() !== undefined,
-		);
-
-		this._checkContextWindowUsageWarning();
 	}
 
 	/** Request immediate transfer of one or all currently-running foreground tool calls. */
@@ -4522,8 +4561,23 @@ export class AgentSession {
 	 * @throws Error if streaming and no streamingBehavior specified
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
+
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
-		return this._promptSubmission.prompt(text, options);
+		return this._promptWithRuntimeLease(text, options);
+	}
+
+	private async _promptWithRuntimeLease(
+		text: string,
+		options?: PromptOptions,
+		runtimeLease?: RuntimeWorkLease,
+	): Promise<void> {
+		return this._runtimeAdmission.run(
+			"foreground",
+			"prompt submission",
+			(reader) => this._promptSubmission.prompt(text, options, reader),
+			options?.signal,
+			runtimeLease,
+		);
 	}
 
 	/** Await the detached end-of-work reflection turn, if one is running; see ReflectionTurnLifecycle. */
@@ -4540,7 +4594,9 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async steer(text: string, images?: ImageContent[]): Promise<OwnerInputOutcome> {
-		return this._queuedInputPersistence.admitQueuedOwnerInput("steer", text, images);
+		return this._runtimeAdmission.run("owner-input", "steer", () =>
+			this._queuedInputPersistence.admitQueuedOwnerInput("steer", text, images),
+		);
 	}
 
 	/**
@@ -4551,7 +4607,9 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async followUp(text: string, images?: ImageContent[]): Promise<OwnerInputOutcome> {
-		return this._queuedInputPersistence.admitQueuedOwnerInput("followUp", text, images);
+		return this._runtimeAdmission.run("owner-input", "followUp", () =>
+			this._queuedInputPersistence.admitQueuedOwnerInput("followUp", text, images),
+		);
 	}
 
 	/**
@@ -4576,8 +4634,8 @@ export class AgentSession {
 		this._queuedInputPersistence.announceRestoredQueuedInput();
 	}
 
-	private async _drainQueuedExtensionCommands(): Promise<void> {
-		return this._queuedInputPersistence.drainQueuedExtensionCommands();
+	private async _drainQueuedExtensionCommands(beginRuntimeHandoff?: () => RuntimeMutationHandoff): Promise<void> {
+		return this._queuedInputPersistence.drainQueuedExtensionCommands(beginRuntimeHandoff);
 	}
 
 	/**
@@ -4596,10 +4654,32 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void> {
+		return this._sendCustomMessageWithRuntimeLease(message, options);
+	}
+
+	private async _sendCustomMessageWithRuntimeLease<T>(
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+		options: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" } | undefined,
+		runtimeLease?: RuntimeWorkLease,
+	): Promise<void> {
+		const reader = await this._runtimeAdmission.admit("custom-message", message.customType, undefined, runtimeLease);
+		try {
+			reader.assertCurrent();
+			await this._sendAdmittedCustomMessage(message, options, reader);
+		} finally {
+			reader.release();
+		}
+	}
+
+	private async _sendAdmittedCustomMessage<T>(
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+		options: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" } | undefined,
+		runtimeLease: RuntimeWorkLease,
+	): Promise<void> {
 		if (options?.deliverAs === "nextTurn") {
 			return this._sendCustomMessage(message, options);
 		}
-		const submissionLease = this._foregroundRecovery.tryAcquireSubmission();
+		const submissionLease = this._foregroundRecovery.tryAcquireSubmission(runtimeLease);
 		if (!submissionLease) {
 			return this._sendCustomMessage(message, options);
 		}
@@ -4671,6 +4751,14 @@ export class AgentSession {
 		content: string | (TextContent | ImageContent)[],
 		options?: SendUserMessageOptions,
 	): Promise<void> {
+		return this._sendUserMessageWithRuntimeLease(content, options);
+	}
+
+	private async _sendUserMessageWithRuntimeLease(
+		content: string | (TextContent | ImageContent)[],
+		options: SendUserMessageOptions | undefined,
+		runtimeLease?: RuntimeWorkLease,
+	): Promise<void> {
 		// Normalize content to text string + optional images
 		let text: string;
 		let images: ImageContent[] | undefined;
@@ -4703,15 +4791,19 @@ export class AgentSession {
 			options?.onAccepted?.(accepted);
 		};
 		try {
-			await this.prompt(text, {
-				expandPromptTemplates: false,
-				processSlashCommands: options?.processSlashCommands ?? false,
-				streamingBehavior: options?.deliverAs,
-				images,
-				source: "extension",
-				...(options?.origin ? { origin: options.origin } : {}),
-				preflightResult: giveVerdict,
-			});
+			await this._promptWithRuntimeLease(
+				text,
+				{
+					expandPromptTemplates: false,
+					processSlashCommands: options?.processSlashCommands ?? false,
+					streamingBehavior: options?.deliverAs,
+					images,
+					source: "extension",
+					...(options?.origin ? { origin: options.origin } : {}),
+					preflightResult: giveVerdict,
+				},
+				runtimeLease,
+			);
 		} finally {
 			giveVerdict(false);
 		}
@@ -4833,32 +4925,62 @@ export class AgentSession {
 	 * the conversation's talker, so the opening route never replaces it.
 	 */
 	async setModel(model: Model<Api>, options: { persistSettings?: boolean } = {}): Promise<void> {
-		await this._switchSessionModel(model, options);
-		this._recordTalker(model, ["model selected"]);
+		return this._setModel(model, options);
 	}
 
-	private async _switchSessionModel(model: Model<Api>, options: { persistSettings?: boolean }): Promise<void> {
+	private async _setModel(
+		model: Model<Api>,
+		options: { persistSettings?: boolean },
+		assertCurrent?: () => void,
+	): Promise<void> {
+		const reader = assertCurrent ? undefined : await this._runtimeAdmission.admit("model", "model selection");
+		const validate = assertCurrent ?? (() => reader!.assertCurrent());
+		try {
+			validate();
+			await this._switchSessionModel(model, options, validate);
+			validate();
+			this._recordTalker(model, ["model selected"]);
+		} finally {
+			reader?.release();
+		}
+	}
+
+	private async _switchSessionModel(
+		model: Model<Api>,
+		options: { persistSettings?: boolean },
+		assertCurrent?: () => void,
+	): Promise<void> {
 		this._compaction.cancelIdlePreparation();
-		await this._modelSelection.setModel(model, options);
+		await this._modelSelection.setModel(model, options, assertCurrent);
 		this._localPrefixWarm.schedule(this.agent.state.model);
 	}
 
 	/** Re-resolve startup profile model/thinking after allowed extension providers are bound. */
 	async reapplyActiveProfileModelSettings(): Promise<void> {
-		const previousModel = this.model;
-		await this._profileFilter.reapplyActiveProfileModelSettings();
-		const activeToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
-		this._refreshToolRegistry({ activeToolNames, includeAllExtensionTools: true });
-		if (!modelsAreEqual(previousModel, this.model)) {
-			this._localPrefixWarm.schedule(this.model);
+		const reader = await this._runtimeAdmission.admit("model", "profile model selection");
+		try {
+			const previousModel = this.model;
+			await this._profileFilter.reapplyActiveProfileModelSettings();
+			const activeToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
+			this._refreshToolRegistry({ activeToolNames, includeAllExtensionTools: true });
+			if (!modelsAreEqual(previousModel, this.model)) {
+				this._localPrefixWarm.schedule(this.model);
+			}
+		} finally {
+			reader.release();
 		}
 	}
 
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		const result = await this._modelSelection.cycleModel(direction);
-		if (result?.model) this._recordTalker(result.model, ["model selected"]);
-		this._localPrefixWarm.schedule(result?.model);
-		return result;
+		const reader = await this._runtimeAdmission.admit("model", "model cycle");
+		try {
+			const result = await this._modelSelection.cycleModel(direction);
+			if (result?.model) this._recordTalker(result.model, ["model selected"]);
+			this._localPrefixWarm.schedule(result?.model);
+			return result;
+		} finally {
+			reader.release();
+		}
 	}
 
 	// =========================================================================
@@ -4866,11 +4988,23 @@ export class AgentSession {
 	// =========================================================================
 
 	setThinkingLevel(level: ThinkingLevel, options: { persistSettings?: boolean } = {}): void {
-		this._modelSelection.setThinkingLevel(level, options);
+		this._setThinkingLevel(level, options);
+	}
+
+	private _setThinkingLevel(
+		level: ThinkingLevel,
+		options: { persistSettings?: boolean },
+		assertCurrent?: () => void,
+	): void {
+		this._runtimeAdmission.mutateResources(
+			"thinking level",
+			() => this._modelSelection.setThinkingLevel(level, options),
+			assertCurrent,
+		);
 	}
 
 	cycleThinkingLevel(): ThinkingLevel | undefined {
-		return this._modelSelection.cycleThinkingLevel();
+		return this._runtimeAdmission.mutateResources("thinking level", () => this._modelSelection.cycleThinkingLevel());
 	}
 
 	getAvailableThinkingLevels(): ThinkingLevel[] {
@@ -4890,8 +5024,10 @@ export class AgentSession {
 	 * Saves to settings.
 	 */
 	setSteeringMode(mode: "all" | "one-at-a-time"): void {
-		this.agent.steeringMode = mode;
-		this.settingsManager.setSteeringMode(mode);
+		this._runtimeAdmission.mutateResources("steering mode", () => {
+			this.agent.steeringMode = mode;
+			this.settingsManager.setSteeringMode(mode);
+		});
 	}
 
 	/**
@@ -4899,8 +5035,10 @@ export class AgentSession {
 	 * Saves to settings.
 	 */
 	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
-		this.agent.followUpMode = mode;
-		this.settingsManager.setFollowUpMode(mode);
+		this._runtimeAdmission.mutateResources("follow-up mode", () => {
+			this.agent.followUpMode = mode;
+			this.settingsManager.setFollowUpMode(mode);
+		});
 	}
 
 	// =========================================================================
@@ -4913,7 +5051,9 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
-		return this._compaction.compact(customInstructions);
+		return this._runtimeAdmission.run("compaction", "manual compaction", () =>
+			this._compaction.compact(customInstructions),
+		);
 	}
 
 	/** Start extension-requested compaction without blocking its event or shortcut handler. */
@@ -5002,7 +5142,9 @@ export class AgentSession {
 	 * Toggle auto-compaction setting.
 	 */
 	setAutoCompactionEnabled(enabled: boolean): void {
-		this.settingsManager.setCompactionEnabled(enabled);
+		this._runtimeAdmission.mutateResources("compaction settings", () => {
+			this.settingsManager.setCompactionEnabled(enabled);
+		});
 	}
 
 	/** Whether auto-compaction is enabled: the effective setting compaction runs with, not only the stored flag. */
@@ -5055,8 +5197,8 @@ export class AgentSession {
 	}
 
 	/** SDK startup and extension rebinding activate the selected provider generation. */
-	initializeMemory(): Promise<void> {
-		return this._memory.initialize();
+	async initializeMemory(): Promise<void> {
+		return this._runtimeAdmission.run("resource", "memory initialization", () => this._memory.initialize());
 	}
 
 	getMemorySystem(): MemorySystem {
@@ -5069,7 +5211,9 @@ export class AgentSession {
 
 	/** Public entry point delegating to {@link ExtensionBindingController.bindExtensions}. */
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
-		return this._extensionBinding.bindExtensions(bindings);
+		return this._runtimeAdmission.run("resource", "extension binding", () =>
+			this._extensionBinding.bindExtensions(bindings),
+		);
 	}
 
 	private _refreshCurrentModelFromRegistry(): void {
@@ -5088,11 +5232,27 @@ export class AgentSession {
 
 	/** Register a memory provider contributed by an extension; applied on the next memory (re)init. */
 	registerMemoryProvider(provider: MemoryProvider): void {
-		this._memory.registerMemoryProvider(provider);
+		this._registerMemoryProvider(provider);
+	}
+
+	private _registerMemoryProvider(provider: MemoryProvider, assertCurrent?: () => void): void {
+		this._runtimeAdmission.mutateResources(
+			"memory provider registration",
+			() => this._memory.registerMemoryProvider(provider),
+			assertCurrent,
+		);
 	}
 
 	registerContextMemoryProvider(provider: ContextMemoryProvider): void {
-		this._memory.registerContextMemoryProvider(provider);
+		this._registerContextMemoryProvider(provider);
+	}
+
+	private _registerContextMemoryProvider(provider: ContextMemoryProvider, assertCurrent?: () => void): void {
+		this._runtimeAdmission.mutateResources(
+			"context memory provider registration",
+			() => this._memory.registerContextMemoryProvider(provider),
+			assertCurrent,
+		);
 	}
 
 	/** The gateway/scheduler registry. A deployment runner registers providers and drives start/stop. */
@@ -5115,15 +5275,22 @@ export class AgentSession {
 	}
 
 	async reload(): Promise<void> {
-		assertReloadQuiescent(this._agentDir, this.isStreaming, this.isCompacting, "reload");
-		this._foregroundLifecycle.reload();
-		this._reflection.invalidateCurrentTurnCueStateCache();
-		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
-		// Extension/settings reload: guarded (see extension-binding-controller.ts) to never overlap
-		// compaction, so this is always a genuine resync, never compaction's own within-lineage pack.
-		this.agent.resetSanitizerPrefixHorizon();
-		this._compaction.cancelIdlePreparation();
-		return this._runtimeBuilder.reload();
+		return this._reloadWithAuthority();
+	}
+
+	private async _reloadWithAuthority(options?: RuntimeReloadOptions): Promise<void> {
+		await this._compaction.cancelIdlePreparationAndWait();
+		return this._runtimeBuilder.reload({
+			...options,
+			beforeReload: () => {
+				options?.beforeReload?.();
+				this._foregroundLifecycle.reload();
+				this._reflection.invalidateCurrentTurnCueStateCache();
+				this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+				this.agent.resetSanitizerPrefixHorizon();
+				this._compaction.cancelIdlePreparation();
+			},
+		});
 	}
 
 	/**
@@ -5133,6 +5300,7 @@ export class AgentSession {
 	 * Falls back to full reload on error.
 	 */
 	async unloadExtensionLive(extensionPath: string): Promise<void> {
+		await this._compaction.cancelIdlePreparationAndWait();
 		return this._runtimeBuilder.unloadExtensionLive(extensionPath);
 	}
 
@@ -5143,6 +5311,7 @@ export class AgentSession {
 	 * Falls back to full reload on error.
 	 */
 	async loadExtensionLive(extensionPath: string): Promise<void> {
+		await this._compaction.cancelIdlePreparationAndWait();
 		return this._runtimeBuilder.loadExtensionLive(extensionPath);
 	}
 
@@ -5152,6 +5321,7 @@ export class AgentSession {
 	 * Falls back to full reload if any individual load/unload fails.
 	 */
 	async reconcileLoadedExtensions(): Promise<void> {
+		await this._compaction.cancelIdlePreparationAndWait();
 		return this._runtimeBuilder.reconcileLoadedExtensions();
 	}
 
@@ -5180,7 +5350,9 @@ export class AgentSession {
 	 * Toggle auto-retry setting.
 	 */
 	setAutoRetryEnabled(enabled: boolean): void {
-		this.settingsManager.setRetryEnabled(enabled);
+		this._runtimeAdmission.mutateResources("retry settings", () => {
+			this.settingsManager.setRetryEnabled(enabled);
+		});
 	}
 
 	// =========================================================================
@@ -5234,8 +5406,18 @@ export class AgentSession {
 	 * Set a display name for the current session.
 	 */
 	setSessionName(name: string): void {
-		this.sessionManager.appendSessionInfo(name);
-		this._emit({ type: "session_info_changed", name: this.sessionManager.getSessionName() });
+		this._setSessionName(name);
+	}
+
+	private _setSessionName(name: string, assertCurrent?: () => void): void {
+		this._runtimeAdmission.mutateResources(
+			"session name",
+			() => {
+				this.sessionManager.appendSessionInfo(name);
+				this._emit({ type: "session_info_changed", name: this.sessionManager.getSessionName() });
+			},
+			assertCurrent,
+		);
 	}
 
 	// =========================================================================

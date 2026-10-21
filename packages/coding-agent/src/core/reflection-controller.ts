@@ -93,6 +93,7 @@ import {
 import type { ModelRegistry } from "./model-registry.ts";
 import { providerLaneForIsolatedLaneKind, runInProviderLane } from "./provider-admission/lane-context.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
+import { runtimeGenerationAdmission } from "./runtime-generation-admission.ts";
 import { redactKnownSecrets } from "./security/secret-text.ts";
 import {
 	appendSessionSnapshot,
@@ -1447,12 +1448,24 @@ export class ReflectionController {
 	 * act, and a model-level error is returned rather than thrown.
 	 */
 	async runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> {
-		// Every provider request this call starts is attributed to its admission lane (worker lanes
-		// to `worker`, everything else to `background`) so the machine-wide admission gate can let
-		// the owner's foreground turn go first; see core/provider-admission/.
-		return runInProviderLane(providerLaneForIsolatedLaneKind(opts.laneKind), () =>
-			this.runIsolatedCompletionInLane(opts),
-		);
+		const runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir()).admitWork({
+			kind: "isolated-completion",
+			label: opts.laneKind ?? DEFAULT_ISOLATED_LANE_KIND,
+			signal: opts.signal
+				? AbortSignal.any([opts.signal, this.deps.getReflectionSignal()])
+				: this.deps.getReflectionSignal(),
+		});
+		try {
+			runtimeLease.assertCurrent();
+			// Every provider request this call starts is attributed to its admission lane (worker lanes
+			// to `worker`, everything else to `background`) so the machine-wide admission gate can let
+			// the owner's foreground turn go first; see core/provider-admission/.
+			return await runInProviderLane(providerLaneForIsolatedLaneKind(opts.laneKind), () =>
+				this.runIsolatedCompletionInLane(opts),
+			);
+		} finally {
+			runtimeLease.release();
+		}
 	}
 
 	private async runIsolatedCompletionInLane(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> {
@@ -1757,62 +1770,70 @@ export class ReflectionController {
 		/** True only when every turn in this pass explicitly asked Pi to remember durable information. */
 		explicitUserMemoryInstruction?: boolean;
 	}): Promise<ReflectionResult | null> {
-		// ICM mode: zero legacy MEMORY.md/USER.md/OKF reads/writes and no automatic reflection jobs.
-		if (this.isIcmMode()) return null;
 		if (this.deps.isChildSession() || this.deps.isDisposed()) return null;
-		const plan = decideDemand(input.signals);
-		if (plan.act === "skip") return null;
-
-		// Bug #21: tie this background pass to the session lifetime. Disposing the session aborts the
-		// in-flight completion (input.signal can add a more specific abort).
 		const signal = input.signal
 			? AbortSignal.any([input.signal, this.deps.getReflectionSignal()])
 			: this.deps.getReflectionSignal();
-
-		const complete = (systemPrompt: string, userPrompt: string) =>
-			this.runIsolatedCompletion({
-				systemPrompt,
-				messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
-				model: input.model,
-				thinkingLevel: input.thinkingLevel ?? "low",
-				maxTokens: plan.tokenBudget,
-				signal,
-				// The reflection system prompt is static (#33) — let the provider cache the prefix so
-				// repeated passes only pay for the variable tail.
-				cacheRetention: "short",
-				laneKind: "reflection",
-			});
-
-		const result = await new ReflectionEngine().reflect({
-			recentTurnText: input.recentTurnText,
-			// Read memory FRESH (not the prefix-cache-frozen system-prompt block) so confront-before-write
-			// sees writes made earlier this session, including bounded structured OKF records.
-			existingMemory: [
-				this.deps.getMemoryManager().buildSystemPromptBlockFresh(),
-				this.deps.getFreshOkfMemoryForReflection(),
-			]
-				.filter((block) => block.trim().length > 0)
-				.join("\n\n"),
-			plan,
-			complete,
-		});
-
-		// Bug #21: if the session was disposed while the completion was in flight, do NOT write memory
-		// or skills against the dead session.
-		if (this.deps.isDisposed()) return result;
-
-		await this._applyGatedWrites(result.writes, {
-			reportId: input.reportId,
-			explicitUserMemoryInstruction: input.explicitUserMemoryInstruction === true,
+		const runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir()).admitWork({
+			kind: "lane",
+			label: "reflection pass",
 			signal,
 		});
+		try {
+			runtimeLease.assertCurrent();
+			// ICM mode: zero legacy MEMORY.md/USER.md/OKF reads/writes and no automatic reflection jobs.
+			if (this.isIcmMode()) return null;
+			if (this.deps.isChildSession() || this.deps.isDisposed()) return null;
+			const plan = decideDemand(input.signals);
+			if (plan.act === "skip") return null;
 
-		// Account the reflection's spend so it surfaces in the footer roll-up (net-token visibility).
-		// Idempotent on reportId so a retried/duplicated pass cannot double-count.
-		if (result.usage.cost.total > 0 || result.usage.totalTokens > 0) {
-			this.deps.addSpawnedUsage(result.usage, { label: "reflection", reportId: input.reportId });
+			const complete = (systemPrompt: string, userPrompt: string) =>
+				this.runIsolatedCompletion({
+					systemPrompt,
+					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+					model: input.model,
+					thinkingLevel: input.thinkingLevel ?? "low",
+					maxTokens: plan.tokenBudget,
+					signal,
+					// The reflection system prompt is static (#33) — let the provider cache the prefix so
+					// repeated passes only pay for the variable tail.
+					cacheRetention: "short",
+					laneKind: "reflection",
+				});
+
+			const result = await new ReflectionEngine().reflect({
+				recentTurnText: input.recentTurnText,
+				// Read memory FRESH (not the prefix-cache-frozen system-prompt block) so confront-before-write
+				// sees writes made earlier this session, including bounded structured OKF records.
+				existingMemory: [
+					this.deps.getMemoryManager().buildSystemPromptBlockFresh(),
+					this.deps.getFreshOkfMemoryForReflection(),
+				]
+					.filter((block) => block.trim().length > 0)
+					.join("\n\n"),
+				plan,
+				complete,
+			});
+
+			// Bug #21: if the session was disposed while the completion was in flight, do NOT write memory
+			// or skills against the dead session.
+			if (this.deps.isDisposed()) return result;
+
+			await this._applyGatedWrites(result.writes, {
+				reportId: input.reportId,
+				explicitUserMemoryInstruction: input.explicitUserMemoryInstruction === true,
+				signal,
+			});
+
+			// Account the reflection's spend so it surfaces in the footer roll-up (net-token visibility).
+			// Idempotent on reportId so a retried/duplicated pass cannot double-count.
+			if (result.usage.cost.total > 0 || result.usage.totalTokens > 0) {
+				this.deps.addSpawnedUsage(result.usage, { label: "reflection", reportId: input.reportId });
+			}
+			return result;
+		} finally {
+			runtimeLease.release();
 		}
-		return result;
 	}
 
 	/**

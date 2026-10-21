@@ -12,7 +12,7 @@ import { getInFlightWorkUnits } from "../../../../src/core/reload-blockers.ts";
 import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../../../../src/core/security/secret-text.ts";
 import { calls, createBarrier, fail } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
-
+import { runRuntimeGenerationReloadInteraction } from "./journey-1-runtime-generation.ts";
 /**
  * The real proper-lockfile runs its exclusion and lease logic; only its filesystem is redirected to the
  * active world's virtual fs through the library's own `fs` option, so no lock directory reaches disk.
@@ -678,6 +678,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	);
 	expect(await world.disposeSessionInBody(hbSession), "the held bash owner disposes cleanly").toBeUndefined();
 	trace.mark("root", "e4.held-bash-reload");
+	await runRuntimeGenerationReloadInteraction(world);
 
 	// R33 (legacy managed lane adoption): a session branch written before managed lanes had a durable lifecycle carries tmux-worker lane
 	// snapshots and no orchestration record. The first lane read of its owner adopts each queued or running one into the durable lifecycle

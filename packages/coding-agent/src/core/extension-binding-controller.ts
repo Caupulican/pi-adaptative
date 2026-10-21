@@ -47,6 +47,7 @@ import type { ModelRegistry } from "./model-registry.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { QUEUED_INPUT_CUSTOM_TYPE } from "./queued-input-record.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
+import { type RuntimeWorkLease, runtimeGenerationAdmission } from "./runtime-generation-admission.ts";
 import type {
 	ResourceProfileFilterSettings,
 	ResourceProfileKind,
@@ -63,6 +64,7 @@ export interface ExtensionBindingControllerSettingsSource {
 }
 
 export interface ExtensionBindingControllerDeps {
+	getAgentDir(): string;
 	getAgent(): Agent;
 	getExtensionRunner(): ExtensionRunner;
 	getSessionStartEvent(): SessionStartEvent;
@@ -74,22 +76,27 @@ export interface ExtensionBindingControllerDeps {
 	getModel(): Model<Api> | undefined;
 	getActiveToolNames(): string[];
 	getAllTools(): ToolInfo[];
-	setActiveToolsByName(toolNames: string[]): void;
+	setActiveToolsByName(toolNames: string[], assertCurrent?: () => void): void;
 	refreshToolRegistry(): void;
 	rebuildSystemPrompt(toolNames: string[]): string;
 	setBaseSystemPrompt(prompt: string): void;
 	getPromptTemplates(): ReadonlyArray<PromptTemplate>;
 	getThinkingLevel(): ThinkingLevel;
-	setThinkingLevel(level: ThinkingLevel): void;
-	setModel(model: Model<Api>): Promise<void>;
+	setThinkingLevel(level: ThinkingLevel, assertCurrent?: () => void): void;
+	setModel(model: Model<Api>, assertCurrent?: () => void): Promise<void>;
 	sendCustomMessage(
 		message: Pick<CustomMessage, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		runtimeLease?: RuntimeWorkLease,
 	): Promise<void>;
-	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): Promise<void>;
-	setSessionName(name: string): void;
-	registerMemoryProvider(provider: MemoryProvider): void;
-	registerContextMemoryProvider(provider: ContextMemoryProvider): void;
+	sendUserMessage(
+		content: string | (TextContent | ImageContent)[],
+		options?: SendUserMessageOptions,
+		runtimeLease?: RuntimeWorkLease,
+	): Promise<void>;
+	setSessionName(name: string, assertCurrent?: () => void): void;
+	registerMemoryProvider(provider: MemoryProvider, assertCurrent?: () => void): void;
+	registerContextMemoryProvider(provider: ContextMemoryProvider, assertCurrent?: () => void): void;
 	addSpawnedUsage(
 		usage: Usage,
 		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
@@ -238,6 +245,19 @@ export class ExtensionBindingController {
 	}
 
 	bindExtensionCore(runner: ExtensionRunner): void {
+		const admission = runtimeGenerationAdmission(this.deps.getAgentDir());
+		const assertResourceMutation = (): void => {
+			runner.assertRuntimeActive();
+			admission.assertResourceMutation(runner);
+		};
+		const sendInSettledGeneration = async (send: (lease: RuntimeWorkLease) => Promise<void>): Promise<void> => {
+			await admission.deliverMessageIntent(async (lease) => {
+				// Rollback invalidates the rejected candidate before publication wakes this intent.
+				// A surviving old generation's rollback-start messages remain deliverable.
+				runner.assertRuntimeActive();
+				await send(lease);
+			});
+		};
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
 				name: command.invocationName,
@@ -269,8 +289,8 @@ export class ExtensionBindingController {
 		runner.bindCore(
 			{
 				sendMessage: (message, options) => {
-					this.deps.sendCustomMessage(message, options).catch((err) => {
-						runner.emitError({
+					sendInSettledGeneration((lease) => this.deps.sendCustomMessage(message, options, lease)).catch((err) => {
+						this.deps.getExtensionRunner().emitError({
 							extensionPath: "<runtime>",
 							event: "send_message",
 							error: err instanceof Error ? err.message : String(err),
@@ -278,8 +298,23 @@ export class ExtensionBindingController {
 					});
 				},
 				sendUserMessage: (content, options) => {
-					this.deps.sendUserMessage(content, options).catch((err) => {
-						runner.emitError({
+					let deliveryEntered = false;
+					sendInSettledGeneration(async (lease) => {
+						deliveryEntered = true;
+						await this.deps.sendUserMessage(content, options, lease);
+					}).catch((err) => {
+						if (!deliveryEntered) {
+							try {
+								options?.onAccepted?.(false);
+							} catch (callbackError) {
+								this.deps.getExtensionRunner().emitError({
+									extensionPath: "<runtime>",
+									event: "send_user_message_acceptance",
+									error: callbackError instanceof Error ? callbackError.message : String(callbackError),
+								});
+							}
+						}
+						this.deps.getExtensionRunner().emitError({
 							extensionPath: "<runtime>",
 							event: "send_user_message",
 							error: err instanceof Error ? err.message : String(err),
@@ -287,6 +322,7 @@ export class ExtensionBindingController {
 					});
 				},
 				appendEntry: (customType, data) => {
+					assertResourceMutation();
 					if (customType === VERIFICATION_OBLIGATIONS_CUSTOM_TYPE)
 						throw new Error("Mandatory verification is a host-owned evidence checkpoint");
 					if (customType === OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)
@@ -296,30 +332,53 @@ export class ExtensionBindingController {
 					this.deps.getSessionManager().appendCustomEntry(customType, data);
 				},
 				setSessionName: (name) => {
-					this.deps.setSessionName(name);
+					assertResourceMutation();
+					this.deps.setSessionName(name, assertResourceMutation);
 				},
 				getSessionName: () => {
 					return this.deps.getSessionManager().getSessionName();
 				},
 				setLabel: (entryId, label) => {
+					assertResourceMutation();
 					this.deps.getSessionManager().appendLabelChange(entryId, label);
 				},
 				getActiveTools: () => this.deps.getActiveToolNames(),
 				getAllTools: () => this.deps.getAllTools(),
-				setActiveTools: (toolNames) => this.deps.setActiveToolsByName(toolNames),
-				refreshTools: () => this.deps.refreshToolRegistry(),
+				setActiveTools: (toolNames) => {
+					assertResourceMutation();
+					this.deps.setActiveToolsByName(toolNames, assertResourceMutation);
+				},
+				refreshTools: () => {
+					assertResourceMutation();
+					this.deps.refreshToolRegistry();
+				},
 				getCommands,
 				setModel: async (model) => {
-					if (!this.deps.getModelRegistry().hasConfiguredAuth(model)) return false;
-					await this.deps.setModel(model);
-					return true;
+					assertResourceMutation();
+					const resource = admission.beginResourceMutation(runner);
+					try {
+						if (!this.deps.getModelRegistry().hasConfiguredAuth(model)) return false;
+						await this.deps.setModel(model, resource.assertCurrent);
+						return true;
+					} finally {
+						resource.release();
+					}
 				},
 				getThinkingLevel: () => this.deps.getThinkingLevel(),
-				setThinkingLevel: (level) => this.deps.setThinkingLevel(level),
+				setThinkingLevel: (level) => {
+					assertResourceMutation();
+					this.deps.setThinkingLevel(level, assertResourceMutation);
+				},
 				getExternalResourceRoots: () => this.deps.getSettingsManager().getEffectiveExternalResourceRoots(),
 				getEffectiveResourceProfile: () => compileEffectiveResourceProfileSnapshot(this.deps.getSettingsManager()),
-				registerMemoryProvider: (provider) => this.deps.registerMemoryProvider(provider),
-				registerContextMemoryProvider: (provider) => this.deps.registerContextMemoryProvider(provider),
+				registerMemoryProvider: (provider) => {
+					assertResourceMutation();
+					this.deps.registerMemoryProvider(provider, assertResourceMutation);
+				},
+				registerContextMemoryProvider: (provider) => {
+					assertResourceMutation();
+					this.deps.registerContextMemoryProvider(provider, assertResourceMutation);
+				},
 				reportSpawnedUsage: (usage, opts) => {
 					this.deps.addSpawnedUsage(usage, opts);
 				},
@@ -370,10 +429,12 @@ export class ExtensionBindingController {
 			},
 			{
 				registerProvider: (name, config) => {
+					assertResourceMutation();
 					this.deps.getModelRegistry().registerProvider(name, config);
 					this.deps.refreshCurrentModelFromRegistry();
 				},
 				unregisterProvider: (name) => {
+					assertResourceMutation();
 					this.deps.getModelRegistry().unregisterProvider(name);
 					this.deps.refreshCurrentModelFromRegistry();
 				},

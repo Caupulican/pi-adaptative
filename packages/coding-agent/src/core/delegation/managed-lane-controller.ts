@@ -9,11 +9,13 @@ import {
 	MAX_MANAGED_LANE_SUMMARY_BYTES,
 	type ManagedLaneDispatch,
 	type ManagedLaneEvent,
+	ManagedLaneRuntimeAdmissionError,
 } from "../extensions/managed-lane-records.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { validateProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { ExecutionGrant } from "../orchestration/contracts.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
+import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { WorktreeLaneLifecycle } from "../worktree-sync/lane-lifecycle.ts";
@@ -211,43 +213,74 @@ export class ManagedLaneController {
 		if (this.deps.isDisposed()) throw new Error("Cannot record a managed lane after its owning session is disposed.");
 		this.ensureHydrated();
 		if (event.phase === "dispatch") {
-			const goal = this.deps.getGoalStateSnapshot();
-			const prepared = this.lifecycle.prepareManaged({
-				laneId: event.laneId,
-				dispatchSequence: event.dispatch.sequence,
-				instructions: event.dispatch.instructions,
-				profileId: event.dispatch.profileId,
-				provider: event.dispatch.provider,
-				authorizationId: event.dispatch.authorizationId,
-				leaseTtlMs: event.dispatch.leaseTtlMs,
-				compileGrant: (target) => this.compileGrant(target, event.laneId, event.dispatch),
-				role: "implementer",
-				riskBudget: { maxAttempts: 1, maxWallClockMs: event.dispatch.leaseTtlMs },
-				...(goal && Array.isArray(goal.requirements) && (!event.goalId || goal.goalId === event.goalId)
-					? { goal }
-					: {}),
-				...(event.goalId ? { goalId: event.goalId } : {}),
-				...(event.worktreeLaneKey ? { worktreeLaneKey: event.worktreeLaneKey } : {}),
-				...(event.worktreeLaneKey && event.worktreeLanePath ? { worktreeLanePath: event.worktreeLanePath } : {}),
-			});
-			if (!prepared.created) return undefined;
-			this.watchProtectedPaths(event.laneId, event.worktreeLanePath);
-			this.ensureRegistration(event.laneId);
-			appendLaneRecordSnapshot(this.deps.getSessionManager(), prepared.record);
-			// Genuine dispatch (guarded by `prepared.created` above -- a replayed/idempotent dispatch of
-			// an already-durable lane returns `undefined` earlier and never reaches here). Capture the
-			// owner epoch exactly once, at this same creation moment, never on a later terminal report
-			// for the same laneId.
-			const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
-			if (ownerEpoch !== undefined) this.noteLaneOwnerEpoch(event.laneId, ownerEpoch);
-			if (event.worktreeLaneKey) {
-				const worktreeLaneKey = event.worktreeLaneKey;
-				const worktreeLanePath = event.worktreeLanePath;
-				this.runWorktreeLaneStep(event.laneId, () =>
-					this.worktreeLanes?.bind(worktreeLaneKey, event.laneId, worktreeLanePath),
+			let runtimeLease: RuntimeWorkLease | undefined;
+			try {
+				const prepared = this.lifecycle.prepareManaged(
+					{
+						laneId: event.laneId,
+						dispatchSequence: event.dispatch.sequence,
+						instructions: event.dispatch.instructions,
+						profileId: event.dispatch.profileId,
+						provider: event.dispatch.provider,
+						authorizationId: event.dispatch.authorizationId,
+						leaseTtlMs: event.dispatch.leaseTtlMs,
+						compileGrant: (target) => this.compileGrant(target, event.laneId, event.dispatch),
+						role: "implementer",
+						riskBudget: { maxAttempts: 1, maxWallClockMs: event.dispatch.leaseTtlMs },
+						...(event.goalId ? { goalId: event.goalId } : {}),
+						...(event.worktreeLaneKey ? { worktreeLaneKey: event.worktreeLaneKey } : {}),
+						...(event.worktreeLaneKey && event.worktreeLanePath
+							? { worktreeLanePath: event.worktreeLanePath }
+							: {}),
+					},
+					() => {
+						const runtime = runtimeGenerationAdmission(this.deps.getAgentDir());
+						runtimeLease = runtime.tryAdmitWork({ kind: "lane", label: `managed dispatch:${event.laneId}` });
+						if (!runtimeLease) {
+							throw new ManagedLaneRuntimeAdmissionError((retry) => {
+								let active = true;
+								const wake = () => {
+									if (!active || runtime.isReplacing) return;
+									active = false;
+									unsubscribe();
+									retry();
+								};
+								const unsubscribe = runtime.subscribeAvailability(wake);
+								if (!runtime.isReplacing) queueMicrotask(wake);
+								return () => {
+									active = false;
+									unsubscribe();
+								};
+							});
+						}
+						runtimeLease.assertCurrent();
+						const goal = this.deps.getGoalStateSnapshot();
+						return goal && Array.isArray(goal.requirements) && (!event.goalId || goal.goalId === event.goalId)
+							? { goal }
+							: {};
+					},
 				);
+				if (!prepared.created) return undefined;
+				this.watchProtectedPaths(event.laneId, event.worktreeLanePath);
+				this.ensureRegistration(event.laneId);
+				appendLaneRecordSnapshot(this.deps.getSessionManager(), prepared.record);
+				// Genuine dispatch (guarded by `prepared.created` above -- a replayed/idempotent dispatch of
+				// an already-durable lane returns `undefined` earlier and never reaches here). Capture the
+				// owner epoch exactly once, at this same creation moment, never on a later terminal report
+				// for the same laneId.
+				const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
+				if (ownerEpoch !== undefined) this.noteLaneOwnerEpoch(event.laneId, ownerEpoch);
+				if (event.worktreeLaneKey) {
+					const worktreeLaneKey = event.worktreeLaneKey;
+					const worktreeLanePath = event.worktreeLanePath;
+					this.runWorktreeLaneStep(event.laneId, () =>
+						this.worktreeLanes?.bind(worktreeLaneKey, event.laneId, worktreeLanePath),
+					);
+				}
+				return prepared.record;
+			} finally {
+				runtimeLease?.release();
 			}
-			return prepared.record;
 		}
 
 		if (event.phase === "lifecycle") {

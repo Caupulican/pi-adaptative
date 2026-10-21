@@ -68,9 +68,11 @@ import type { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { type ContinuousChatWire, resolveContinuousChatTurnStart } from "./memory/continuous-chat-projection.ts";
 import type { IcmTurnHandle } from "./memory/continuous-chat-turn-coordinator.ts";
 import type { RequestAuth } from "./request-auth.ts";
+import type { RuntimeGenerationAdmission } from "./runtime-generation-admission.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-entry-index.ts";
 import type { TimerPort } from "./util/timer-port.ts";
+import { type WaitStatusEvent, waitFor } from "./util/wait.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface CompactionControllerSettingsSource {
@@ -185,6 +187,7 @@ function formatRequestTokenBreakdown(input: ProviderRequestCompactionInput): str
 }
 
 type CompactionControllerEvent =
+	| WaitStatusEvent
 	| { type: "compaction_start"; reason: "manual" | AutoCompactionReason }
 	| {
 			type: "compaction_end";
@@ -207,6 +210,7 @@ type CompactionControllerEvent =
 
 export interface CompactionControllerDeps {
 	agent: Agent;
+	runtimeAdmission: RuntimeGenerationAdmission;
 	sessionManager: SessionManager;
 	settingsManager: CompactionControllerSettingsSource;
 	getModel(): Model<Api> | undefined;
@@ -422,6 +426,7 @@ export class CompactionController {
 		  }
 		| undefined;
 	private idlePreparationSettingsKey: string | undefined;
+	private unsubscribeIdleRuntime: (() => void) | undefined;
 	private idleView: IdlePreparationView | undefined;
 	private compactableHistory: { key: string; value: boolean } | undefined;
 	/** The running ICM turn's entries from its start to the leaf, remembered with the leaf they were walked to. */
@@ -2036,50 +2041,120 @@ export class CompactionController {
 
 	/** Drop the idle timer and abort a preparation in flight (an owner message, a model change, shutdown). */
 	cancelIdlePreparation(): void {
+		this.unsubscribeIdleRuntime?.();
+		this.unsubscribeIdleRuntime = undefined;
 		this.idleTimer.disarm();
 		this.idlePreparation?.abort.abort();
 		this.idlePreparationSettingsKey = undefined;
 		if (this.idleView?.state !== "resumed") this.idleView = undefined;
 	}
 
+	/** Cancellation joins the tracked speculative work before a runtime writer may replace what it reads. */
+	async cancelIdlePreparationAndWait(): Promise<void> {
+		this.cancelIdlePreparation();
+		const preparation = this.idlePreparation;
+		if (!preparation) return;
+		let finished = false;
+		let failure: { error: unknown } | undefined;
+		await waitFor<true>({
+			id: "compaction.idle_preparation_release",
+			signal: undefined,
+			wake: [
+				{
+					id: "compaction.idle_preparation_settled",
+					subscribe: (wake) => {
+						let active = true;
+						void preparation.done.then(
+							() => {
+								finished = true;
+								if (active) wake();
+							},
+							(error: unknown) => {
+								failure = { error };
+								finished = true;
+								if (active) wake();
+							},
+						);
+						return () => {
+							active = false;
+						};
+					},
+					check: () => (finished ? { kind: "satisfied", value: true } : undefined),
+				},
+			],
+			steer: {
+				mode: "exempt",
+				reason: "runtime replacement cannot begin until speculative provider work releases its generation reader",
+			},
+			bound: {
+				kind: "watchdog",
+				overdueMs: 60_000,
+				holder: () => "cancelled idle compaction auth/provider cleanup",
+			},
+			clock: this.deps.retryTimers,
+			report: (event) => this.deps.emit(event),
+		});
+		if (failure) throw failure.error;
+	}
+
 	private startIdlePreparation(): void {
-		if (this.idlePreparation || this.isRunning()) return;
-		const settings = this.deps.getAdaptedSettings();
-		const model = this.deps.getModel();
-		const settingsKey = this.idlePreparationKey(settings);
-		if (!settings.enabled || !model || this.idlePreparationSettingsKey !== settingsKey) {
-			this.cancelIdlePreparation();
+		if (this.closed || this.idlePreparation || this.isRunning()) return;
+		const reader = this.deps.runtimeAdmission.tryAdmitWork({ kind: "compaction", label: "idle preparation" });
+		if (!reader) {
+			// This timer is a host intent, not awaited lifecycle work. Keep one event-driven wake,
+			// without inheriting candidate callback authority or polling the replacement.
+			this.unsubscribeIdleRuntime ??= this.deps.runtimeAdmission.subscribeAvailability(() => {
+				if (this.deps.runtimeAdmission.isReplacing) return;
+				this.unsubscribeIdleRuntime?.();
+				this.unsubscribeIdleRuntime = undefined;
+				this.startIdlePreparation();
+			});
 			return;
 		}
-		this.idleView = { state: "preparing", since: Date.now() };
-		const abort = new AbortController();
-		const preparation: {
-			abort: AbortController;
-			settingsKey: string;
-			done: Promise<PreparedCompactionRecord | undefined>;
-		} = {
-			abort,
-			settingsKey,
-			done: this.runIdlePreparation(abort.signal, settings, settingsKey)
-				.catch((error: unknown) => {
-					if (!abort.signal.aborted) {
-						this.deps.emit({
-							type: "warning",
-							message: `idle compaction preparation failed: ${error instanceof Error ? error.message : String(error)}`,
-						});
-					}
-					return undefined;
-				})
-				.then((prepared) => {
-					if (this.idleView?.state === "preparing")
-						this.idleView = prepared ? { state: "prepared", at: Date.now() } : undefined;
-					return prepared;
-				})
-				.finally(() => {
-					if (this.idlePreparation === preparation) this.idlePreparation = undefined;
-				}),
-		};
-		this.idlePreparation = preparation;
+		let started = false;
+		try {
+			const settings = this.deps.getAdaptedSettings();
+			const model = this.deps.getModel();
+			const settingsKey = this.idlePreparationKey(settings);
+			if (!settings.enabled || !model || this.idlePreparationSettingsKey !== settingsKey) {
+				this.cancelIdlePreparation();
+				return;
+			}
+			this.idleView = { state: "preparing", since: Date.now() };
+			const abort = new AbortController();
+			const preparation: {
+				abort: AbortController;
+				settingsKey: string;
+				done: Promise<PreparedCompactionRecord | undefined>;
+			} = {
+				abort,
+				settingsKey,
+				done: Promise.resolve()
+					.then(() => this.runIdlePreparation(abort.signal, settings, settingsKey))
+					.catch((error: unknown) => {
+						if (!abort.signal.aborted) {
+							this.deps.emit({
+								type: "warning",
+								message: `idle compaction preparation failed: ${error instanceof Error ? error.message : String(error)}`,
+							});
+						}
+						return undefined;
+					})
+					.then((prepared) => {
+						if (this.idleView?.state === "preparing")
+							this.idleView = prepared ? { state: "prepared", at: Date.now() } : undefined;
+						return prepared;
+					})
+					.finally(() => {
+						if (this.idlePreparation === preparation) this.idlePreparation = undefined;
+						reader.release();
+					}),
+			};
+			this.idlePreparation = preparation;
+			started = true;
+		} finally {
+			if (!started) reader.release();
+		}
 	}
 
 	/**
@@ -2093,6 +2168,7 @@ export class CompactionController {
 		settings: CompactionSettings,
 		settingsKey: string,
 	): Promise<PreparedCompactionRecord | undefined> {
+		if (signal.aborted || this.closed) return undefined;
 		const model = this.deps.getModel();
 		if (!model) return undefined;
 		const compactable = this.compactableMessages();
@@ -2108,6 +2184,7 @@ export class CompactionController {
 		const summarizer = this.deps.resolveModel(model);
 		const auth = await this.deps.resolveModelAndAuth(summarizer, model);
 		if (auth.failure) throw new Error(auth.failure);
+		if (signal.aborted || this.closed) return undefined;
 		const runIdleCompact = (budgetScale?: number) =>
 			this.deps.compactWithRetry(
 				() =>

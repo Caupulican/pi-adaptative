@@ -6,6 +6,7 @@ import { PACKED_TOOL_OUTPUT_TOOLS } from "../context/tool-output-packer.ts";
 import { LEAF_WORKER_DELEGATION_LIMITS } from "../delegation/worker-fleet-limits.ts";
 import { resolveWorkerWorkspacePath } from "../delegation/worker-machine-scope.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import { RuntimeGenerationAdmissionError, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import type {
 	OrchestrationModelBinding,
 	OrchestrationModelPolicy,
@@ -117,154 +118,174 @@ export class TaskProfileWriter implements TaskProfileWriterPort {
 	}
 
 	inspectTaskProfileOptions(): TaskProfileInspection {
-		const baseProfiles = this.authorizedBaseProfiles().map((profile) => ({
-			profileId: profile.profileId,
-			role: profile.role,
-			description: profile.description,
-		}));
-		const models = this.options
-			.getModelRegistry()
-			.getAvailable()
-			.filter((model) => this.options.modelUnusableCause(model) === undefined)
-			.sort((left, right) => `${left.provider}/${left.id}`.localeCompare(`${right.provider}/${right.id}`))
-			.slice(0, MAX_INSPECTED_MODELS)
-			.map((model) => ({
-				provider: model.provider,
-				modelId: model.id,
-				thinkingLevels: getSupportedThinkingLevels(model),
+		return this.withRuntimeProfileRead(() => {
+			const baseProfiles = this.authorizedBaseProfiles().map((profile) => ({
+				profileId: profile.profileId,
+				role: profile.role,
+				description: profile.description,
 			}));
-		return {
-			baseProfiles,
-			models,
-			inheritedToolNames: [...(this.options.getInheritedBaseProfile()?.toolNames ?? [])],
-		};
+			const models = this.options
+				.getModelRegistry()
+				.getAvailable()
+				.filter((model) => this.options.modelUnusableCause(model) === undefined)
+				.sort((left, right) => `${left.provider}/${left.id}`.localeCompare(`${right.provider}/${right.id}`))
+				.slice(0, MAX_INSPECTED_MODELS)
+				.map((model) => ({
+					provider: model.provider,
+					modelId: model.id,
+					thinkingLevels: getSupportedThinkingLevels(model),
+				}));
+			return {
+				baseProfiles,
+				models,
+				inheritedToolNames: [...(this.options.getInheritedBaseProfile()?.toolNames ?? [])],
+			};
+		});
 	}
 
 	createTaskProfile(input: TaskProfileCreateInput): TaskProfileCreateResult {
 		try {
-			const task = input.task.trim();
-			if (!task || task.length > MAX_TASK_DESCRIPTION_LENGTH) {
-				return { created: false, reason: "task_profile_description_invalid" };
-			}
-			const requestedBaseProfileId = input.baseProfileId?.trim();
-			let baseProfileId = INHERITED_BASE_PROFILE_ID;
-			let base: OrchestrationProfile | undefined;
-			if (requestedBaseProfileId) {
-				baseProfileId = requestedBaseProfileId;
-				base = this.loadOwnerProfiles().get(baseProfileId);
-				if (!base || base.role === "orchestrator") {
-					return { created: false, reason: "task_profile_base_not_found" };
+			return this.withRuntimeProfileRead(() => {
+				const task = input.task.trim();
+				if (!task || task.length > MAX_TASK_DESCRIPTION_LENGTH) {
+					return { created: false, reason: "task_profile_description_invalid" };
 				}
-				if (!this.authorizedBaseProfiles().some((candidate) => candidate.profileId === baseProfileId)) {
-					return { created: false, reason: "task_profile_base_not_authorized" };
+				const requestedBaseProfileId = input.baseProfileId?.trim();
+				let baseProfileId = INHERITED_BASE_PROFILE_ID;
+				let base: OrchestrationProfile | undefined;
+				if (requestedBaseProfileId) {
+					baseProfileId = requestedBaseProfileId;
+					base = this.loadOwnerProfiles().get(baseProfileId);
+					if (!base || base.role === "orchestrator") {
+						return { created: false, reason: "task_profile_base_not_found" };
+					}
+					if (!this.authorizedBaseProfiles().some((candidate) => candidate.profileId === baseProfileId)) {
+						return { created: false, reason: "task_profile_base_not_authorized" };
+					}
+				} else {
+					base = this.options.getInheritedBaseProfile();
+					if (!base) return { created: false, reason: "task_profile_inherited_base_unavailable" };
 				}
-			} else {
-				base = this.options.getInheritedBaseProfile();
-				if (!base) return { created: false, reason: "task_profile_inherited_base_unavailable" };
-			}
 
-			const compatibleBaseToolNames = base.toolNames.filter((toolName) => toolName !== "delegate");
-			const toolNames = input.toolNames ? [...input.toolNames] : compatibleBaseToolNames;
-			if (!isExactSubset(toolNames, compatibleBaseToolNames)) {
-				return { created: false, reason: "task_profile_tool_authority_expansion" };
-			}
-			// A tool whose output is packed brings artifact_retrieve, as on the root's surface, so the
-			// profile's large outputs are packed and stay retrievable. Only a companion the base already
-			// holds is added: the profile never gains authority its base lacks.
-			const addedTools: string[] = [];
-			if (
-				toolNames.some((toolName) => PACKED_TOOL_OUTPUT_TOOLS.has(toolName)) &&
-				!toolNames.includes("artifact_retrieve") &&
-				compatibleBaseToolNames.includes("artifact_retrieve")
-			) {
-				toolNames.push("artifact_retrieve");
-				addedTools.push("artifact_retrieve");
-			}
-			const budget = structuredClone(base.budget);
+				const compatibleBaseToolNames = base.toolNames.filter((toolName) => toolName !== "delegate");
+				const toolNames = input.toolNames ? [...input.toolNames] : compatibleBaseToolNames;
+				if (!isExactSubset(toolNames, compatibleBaseToolNames)) {
+					return { created: false, reason: "task_profile_tool_authority_expansion" };
+				}
+				// A tool whose output is packed brings artifact_retrieve, as on the root's surface, so the
+				// profile's large outputs are packed and stay retrievable. Only a companion the base already
+				// holds is added: the profile never gains authority its base lacks.
+				const addedTools: string[] = [];
+				if (
+					toolNames.some((toolName) => PACKED_TOOL_OUTPUT_TOOLS.has(toolName)) &&
+					!toolNames.includes("artifact_retrieve") &&
+					compatibleBaseToolNames.includes("artifact_retrieve")
+				) {
+					toolNames.push("artifact_retrieve");
+					addedTools.push("artifact_retrieve");
+				}
+				const budget = structuredClone(base.budget);
 
-			let modelPolicy = structuredClone(base.modelPolicy);
-			if (input.model || input.thinkingLevel) {
-				// Every base carries at least one candidate: owner profiles are validated on load, and an inherited base is
-				// built from a bound shipment, so no empty-policy case reaches this read.
-				const baseBinding = base.modelPolicy.candidates[0];
-				const provider = input.model?.provider ?? baseBinding.provider;
-				const modelId = input.model?.modelId ?? baseBinding.modelId;
-				const model = this.options.getModelRegistry().find(provider, modelId);
-				if (!model) return { created: false, reason: "task_profile_model_unavailable:model_not_found" };
-				const sameModel = provider === baseBinding.provider && modelId === baseBinding.modelId;
-				const binding: OrchestrationModelBinding = {
-					provider,
-					modelId,
-					thinkingLevel:
-						input.thinkingLevel ??
-						(sameModel ? baseBinding.thinkingLevel : resolveModelThinkingLevel(model, undefined)),
-				};
-				const outcome = resolvePinnedOrchestrationModelResolution(
-					binding,
-					this.options.getModelRegistry(),
-					(candidate) => this.options.modelUnusableCause(candidate),
-				);
-				if (!outcome.ok) {
-					return {
-						created: false,
-						reason: `task_profile_model_unavailable:${formatOrchestrationModelRefusals(outcome.refusals)}`,
+				let modelPolicy = structuredClone(base.modelPolicy);
+				if (input.model || input.thinkingLevel) {
+					// Every base carries at least one candidate: owner profiles are validated on load, and an inherited base is
+					// built from a bound shipment, so no empty-policy case reaches this read.
+					const baseBinding = base.modelPolicy.candidates[0];
+					const provider = input.model?.provider ?? baseBinding.provider;
+					const modelId = input.model?.modelId ?? baseBinding.modelId;
+					const model = this.options.getModelRegistry().find(provider, modelId);
+					if (!model) return { created: false, reason: "task_profile_model_unavailable:model_not_found" };
+					const sameModel = provider === baseBinding.provider && modelId === baseBinding.modelId;
+					const binding: OrchestrationModelBinding = {
+						provider,
+						modelId,
+						thinkingLevel:
+							input.thinkingLevel ??
+							(sameModel ? baseBinding.thinkingLevel : resolveModelThinkingLevel(model, undefined)),
 					};
+					const outcome = resolvePinnedOrchestrationModelResolution(
+						binding,
+						this.options.getModelRegistry(),
+						(candidate) => this.options.modelUnusableCause(candidate),
+					);
+					if (!outcome.ok) {
+						return {
+							created: false,
+							reason: `task_profile_model_unavailable:${formatOrchestrationModelRefusals(outcome.refusals)}`,
+						};
+					}
+					modelPolicy = { mode: "fixed", candidates: [binding] };
 				}
-				modelPolicy = { mode: "fixed", candidates: [binding] };
-			}
 
-			let workspacePath = base.workspacePath;
-			if (input.path !== undefined) {
-				const trimmedPath = input.path.trim();
-				if (!trimmedPath) return { created: false, reason: "task_profile_path_invalid" };
-				const requestedPath = resolveWorkerWorkspacePath(this.options.cwd, trimmedPath);
-				if (base.workspacePath && !isPathWithinScope(requestedPath, base.workspacePath)) {
-					return { created: false, reason: "task_profile_path_authority_expansion" };
+				let workspacePath = base.workspacePath;
+				if (input.path !== undefined) {
+					const trimmedPath = input.path.trim();
+					if (!trimmedPath) return { created: false, reason: "task_profile_path_invalid" };
+					const requestedPath = resolveWorkerWorkspacePath(this.options.cwd, trimmedPath);
+					if (base.workspacePath && !isPathWithinScope(requestedPath, base.workspacePath)) {
+						return { created: false, reason: "task_profile_path_authority_expansion" };
+					}
+					workspacePath = requestedPath;
 				}
-				workspacePath = requestedPath;
-			}
 
-			const now = new Date().toISOString();
-			const profile = structuredClone(base);
-			delete profile.sourcePath;
-			profile.profileId = `task-${randomUUID()}`;
-			profile.description = `Task-scoped worker: ${task}`.slice(0, MAX_ORCHESTRATION_DESCRIPTION_LENGTH);
-			profile.modelPolicy = modelPolicy;
-			profile.capabilityCeiling = base.capabilityCeiling.filter(
-				(capability) => capability !== "workflow.delegate" && capability !== "memory.mutate",
-			);
-			profile.toolNames = toolNames;
-			if (workspacePath) profile.workspacePath = workspacePath;
-			else delete profile.workspacePath;
-			profile.resourceProfileNames = [...base.resourceProfileNames];
-			profile.dispatchProfileIds = [];
-			profile.delegationLimits = structuredClone(LEAF_WORKER_DELEGATION_LIMITS);
-			profile.budget = budget;
-			profile.createdAt = now;
-			profile.updatedAt = now;
-			validateOrchestrationProfile(profile);
+				const now = new Date().toISOString();
+				const profile = structuredClone(base);
+				delete profile.sourcePath;
+				profile.profileId = `task-${randomUUID()}`;
+				profile.description = `Task-scoped worker: ${task}`.slice(0, MAX_ORCHESTRATION_DESCRIPTION_LENGTH);
+				profile.modelPolicy = modelPolicy;
+				profile.capabilityCeiling = base.capabilityCeiling.filter(
+					(capability) => capability !== "workflow.delegate" && capability !== "memory.mutate",
+				);
+				profile.toolNames = toolNames;
+				if (workspacePath) profile.workspacePath = workspacePath;
+				else delete profile.workspacePath;
+				profile.resourceProfileNames = [...base.resourceProfileNames];
+				profile.dispatchProfileIds = [];
+				profile.delegationLimits = structuredClone(LEAF_WORKER_DELEGATION_LIMITS);
+				profile.budget = budget;
+				profile.createdAt = now;
+				profile.updatedAt = now;
+				validateOrchestrationProfile(profile);
 
-			const activeProfile = this.options.getActiveOrchestrationProfile();
-			this.options.store.append({
-				baseProfileId,
-				...(activeProfile ? { authorProfileId: activeProfile.profileId } : {}),
-				profile,
+				const activeProfile = this.options.getActiveOrchestrationProfile();
+				this.options.store.append({
+					baseProfileId,
+					...(activeProfile ? { authorProfileId: activeProfile.profileId } : {}),
+					profile,
+				});
+				const changedFields = ["description"];
+				if ((input.model || input.thinkingLevel) && !sameModelPolicy(modelPolicy, base.modelPolicy)) {
+					changedFields.push(input.model ? "model" : "thinking");
+				}
+				if (workspacePath !== base.workspacePath) changedFields.push("path");
+				if (!sameStrings(toolNames, base.toolNames)) changedFields.push("tools");
+				return {
+					created: true,
+					profileId: profile.profileId,
+					baseProfileId,
+					changedFields,
+					...(addedTools.length > 0 ? { addedTools } : {}),
+				};
 			});
-			const changedFields = ["description"];
-			if ((input.model || input.thinkingLevel) && !sameModelPolicy(modelPolicy, base.modelPolicy)) {
-				changedFields.push(input.model ? "model" : "thinking");
-			}
-			if (workspacePath !== base.workspacePath) changedFields.push("path");
-			if (!sameStrings(toolNames, base.toolNames)) changedFields.push("tools");
-			return {
-				created: true,
-				profileId: profile.profileId,
-				baseProfileId,
-				changedFields,
-				...(addedTools.length > 0 ? { addedTools } : {}),
-			};
 		} catch (error) {
 			return { created: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	private withRuntimeProfileRead<T>(operation: () => T): T {
+		const runtimeLease = runtimeGenerationAdmission(this.options.agentDir).tryAdmitWork({
+			kind: "task-profile",
+			label: "task profile policy and authoring",
+		});
+		if (!runtimeLease) {
+			throw new RuntimeGenerationAdmissionError("Task profile policy is being replaced by a runtime generation.");
+		}
+		try {
+			runtimeLease.assertCurrent();
+			return operation();
+		} finally {
+			runtimeLease.release();
 		}
 	}
 

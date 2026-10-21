@@ -48,6 +48,7 @@ import type { ReflectionController } from "./reflection-controller.ts";
 import type { ReflectionTurnLifecycle } from "./reflection-turn-lifecycle.ts";
 import { CONVERSATION_TALKER_CUSTOM_TYPE } from "./reply-route.ts";
 import type { RuntimeBuilder } from "./runtime-builder.ts";
+import type { RuntimeWorkLease } from "./runtime-generation-admission.ts";
 import type { OwnerRequestClassificationOutcome } from "./session-edge-intent-controller.ts";
 import { isSessionSettled, type SessionSettlementState } from "./session-settlement.ts";
 import type { SessionWorkState } from "./session-work-state.ts";
@@ -350,7 +351,7 @@ export class PromptSubmissionController {
 	 * @throws Error if streaming and no streamingBehavior specified
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
-	async prompt(text: string, options?: PromptOptions): Promise<void> {
+	async prompt(text: string, options?: PromptOptions, runtimeLease?: RuntimeWorkLease): Promise<void> {
 		// The owner's submission order, fixed now: every judgment of this submission carries it.
 		const acceptedOrder =
 			options?.internalContextType || options?.source === "extension" ? undefined : ++this.ownerSubmissionOrder;
@@ -424,7 +425,7 @@ export class PromptSubmissionController {
 			options?.preflightResult?.(false, input?.ended);
 			throw error;
 		}
-		const submissionLease = this.deps.foregroundRecovery.tryAcquireSubmission();
+		const submissionLease = this.deps.foregroundRecovery.tryAcquireSubmission(runtimeLease);
 		if (!submissionLease && this.deps.getSessionWorkState().busy && options?.streamingBehavior) {
 			// Queued submissions prepare one at a time, in submission order, but the next one waits only
 			// for this one's PREPARATION (queued, withdrawn, or its own turn started), never its whole turn.
@@ -446,6 +447,7 @@ export class PromptSubmissionController {
 					lateQueuedInput,
 					prepared,
 					input,
+					runtimeLease,
 				);
 			const run = this.streamingPromptSubmissionTail.then(start, start);
 			this.streamingPromptSubmissionTail = preparedGate;
@@ -459,6 +461,7 @@ export class PromptSubmissionController {
 			queuedOwnerInput,
 			undefined,
 			input,
+			runtimeLease,
 		);
 	}
 
@@ -493,6 +496,7 @@ export class PromptSubmissionController {
 		queuedOwnerInput?: PendingInputHandle,
 		prepared?: () => void,
 		input?: AcceptedInput,
+		runtimeLease?: RuntimeWorkLease,
 	): Promise<void> {
 		const submission = { lease: initialSubmissionLease };
 		if (submission.lease) this.foregroundPromptLeaseValue = submission.lease;
@@ -537,6 +541,7 @@ export class PromptSubmissionController {
 				submission,
 				queuedOwnerClassification,
 				lifecycle,
+				runtimeLease,
 			);
 		} catch (error) {
 			failure = { error };
@@ -586,6 +591,7 @@ export class PromptSubmissionController {
 		submission: { lease?: ForegroundSubmissionLease },
 		queuedOwnerClassification: Promise<OwnerRequestClassificationOutcome> | undefined,
 		lifecycle: SubmissionLifecycle,
+		runtimeLease: RuntimeWorkLease | undefined,
 	): Promise<void> {
 		const submissionSignal = options?.signal;
 		// The input queued at submission, if any; one queued here later is `lifecycle.queued` only.
@@ -647,7 +653,7 @@ export class PromptSubmissionController {
 						return;
 					}
 				}
-				const handled = await this.deps.pendingQueue.tryExecuteExtensionCommand(text);
+				const handled = await this.deps.pendingQueue.tryExecuteExtensionCommand(text, runtimeLease);
 				if (handled) {
 					// Extension command executed, no prompt to send
 					lifecycle.handled = "handled as an extension command";
@@ -693,7 +699,7 @@ export class PromptSubmissionController {
 			// operation — queue via steer() or followUp() instead of starting a
 			// concurrent run that would race the pending retry continuation.
 			if (!submission.lease) {
-				submission.lease = this.deps.foregroundRecovery.tryAcquireSubmission();
+				submission.lease = this.deps.foregroundRecovery.tryAcquireSubmission(runtimeLease);
 			}
 			if (!submission.lease && options?.streamingBehavior && !this.deps.foregroundRecovery.hasLiveConsumer) {
 				// Busy, but with no run that would drain the agent's queue (compaction, an answer under
@@ -707,6 +713,7 @@ export class PromptSubmissionController {
 				);
 				const acquired = await this.deps.foregroundRecovery.acquireSubmissionOrJoinLiveConsumer(
 					AbortSignal.any(cancelled),
+					runtimeLease,
 				);
 				if (acquired === undefined) return;
 				if (acquired !== "live_consumer") submission.lease = acquired;
@@ -769,6 +776,7 @@ export class PromptSubmissionController {
 					while (!this.deps.foregroundRecovery.hasLiveConsumer) {
 						const acquired = await this.deps.foregroundRecovery.acquireSubmissionOrJoinLiveConsumer(
 							submissionSignal ? AbortSignal.any([submissionSignal, pending.signal]) : pending.signal,
+							runtimeLease,
 						);
 						if (acquired === undefined) return;
 						// Stored before any further exit, so `runPromptSubmission` releases it on every path.

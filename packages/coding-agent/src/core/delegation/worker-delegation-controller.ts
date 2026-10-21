@@ -107,6 +107,7 @@ import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
+import { RuntimeGenerationAdmissionError, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type {
@@ -1239,6 +1240,8 @@ export class WorkerDelegationController {
 		this.shutdownCompletion = shutdown.promise;
 		void shutdown.promise.catch(() => undefined);
 		this.scheduler.closeAdmission();
+		this.unsubscribeRuntimeRecovery?.();
+		this.unsubscribeRuntimeRecovery = undefined;
 		// Retained releases get one last pass after every execution joined; no alarm fires for them from here on.
 		this.retainedReleases.close();
 		this.laneReleases.close();
@@ -1324,6 +1327,7 @@ export class WorkerDelegationController {
 		}
 		this.inFlightLedgers.clear();
 
+		this.runTeardownStep("dispose worker controls", () => this.agentControl.dispose());
 		this.runTeardownStep("cancel queued worker dispatches", () => this.scheduler.cancelQueued());
 		this.runTeardownStep("dispose worker recovery", () => this.recovery.dispose());
 		this.runTeardownStep("dispose worker terminal handoffs", () => this.terminalHandoffs.dispose());
@@ -1402,18 +1406,34 @@ export class WorkerDelegationController {
 		return completion;
 	}
 
-	private runAdmittedWorker<T>(run: () => Promise<T>): Promise<T> {
+	private runAdmittedWorker<T>(run: () => Promise<T>, aborted: () => T, signal?: AbortSignal): Promise<T> {
 		// Register before invoking admission: onStarted or another synchronous host callback may
 		// initiate disposal before the async method returns its promise to this caller.
 		const completion = Promise.withResolvers<T>();
 		this.retainWorkerCompletion(completion.promise);
-		try {
-			void run().then(completion.resolve, completion.reject);
-		} catch (error) {
-			completion.reject(error);
-		}
+		void (async () => {
+			const runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir())
+				.admitWork({
+					kind: "lane",
+					label: "worker admission",
+					signal: signal ? AbortSignal.any([this.workerAbort.signal, signal]) : this.workerAbort.signal,
+				})
+				.catch((error: unknown) => {
+					if (this.workerAbort.signal.aborted || signal?.aborted) return undefined;
+					throw error;
+				});
+			if (!runtimeLease) return aborted();
+			try {
+				runtimeLease.assertCurrent();
+				return await run();
+			} finally {
+				runtimeLease.release();
+			}
+		})().then(completion.resolve, completion.reject);
 		return completion.promise;
 	}
+
+	private unsubscribeRuntimeRecovery: (() => void) | undefined;
 
 	private async joinWorkerCompletions(): Promise<void> {
 		// Settlements may finish an already-admitted start's cleanup. Await that work's actual promise;
@@ -1610,26 +1630,47 @@ export class WorkerDelegationController {
 	private dispatchRecoveredVerification(
 		recovery: Extract<PendingVerificationRecovery, { action: "dispatch" }>,
 	): WorkerRecoveryDispatchResult {
-		const legacyImplementation = recovery.verifierExecutionContract
-			? undefined
-			: this.resolveWorkerAdmission({
-					instructions: recovery.summary,
-					profileId: recovery.implementationProfileId,
-				});
-		const verifierProfileId =
-			recovery.verifierExecutionContract?.worker.profile.profileId ??
-			(legacyImplementation?.ok ? legacyImplementation.verifierShipment?.profile.profileId : undefined);
-		return verifierProfileId
-			? this.startInternal(
-					this.buildVerifierRequest({
-						subjectTaskId: recovery.subjectTaskId,
-						verifierProfileId,
-						summary: recovery.summary,
-						artifactUris: recovery.artifactUris,
-					}),
-					recovery.verifierExecutionContract,
-				)
-			: { started: false, skipReason: "independent_verifier_unavailable" };
+		const runtime = runtimeGenerationAdmission(this.deps.getAgentDir());
+		const runtimeLease = runtime.tryAdmitWork({ kind: "lane", label: "recovered verifier admission" });
+		if (!runtimeLease) {
+			this.unsubscribeRuntimeRecovery ??= runtime.subscribeAvailability(() => {
+				if (runtime.isReplacing) return;
+				this.unsubscribeRuntimeRecovery?.();
+				this.unsubscribeRuntimeRecovery = undefined;
+				try {
+					this.drain();
+				} catch (error) {
+					this.safeWarn(
+						`Worker runtime recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			});
+			return { started: false, skipReason: "runtime_generation_replacing" };
+		}
+		try {
+			const legacyImplementation = recovery.verifierExecutionContract
+				? undefined
+				: this.resolveWorkerAdmission({
+						instructions: recovery.summary,
+						profileId: recovery.implementationProfileId,
+					});
+			const verifierProfileId =
+				recovery.verifierExecutionContract?.worker.profile.profileId ??
+				(legacyImplementation?.ok ? legacyImplementation.verifierShipment?.profile.profileId : undefined);
+			return verifierProfileId
+				? this.startInternal(
+						this.buildVerifierRequest({
+							subjectTaskId: recovery.subjectTaskId,
+							verifierProfileId,
+							summary: recovery.summary,
+							artifactUris: recovery.artifactUris,
+						}),
+						recovery.verifierExecutionContract,
+					)
+				: { started: false, skipReason: "independent_verifier_unavailable" };
+		} finally {
+			runtimeLease.release();
+		}
 	}
 
 	private laneCapabilityProfile(model: Model<Api>): ModelCapabilityProfile {
@@ -4083,14 +4124,22 @@ export class WorkerDelegationController {
 
 	start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
 		if (this.workerAbort.signal.aborted) return Promise.resolve({ started: false, skipReason: "session_disposed" });
-		return this.runAdmittedWorker(() => this.startWorker(request, signal));
+		const capturedRequest = structuredClone(request);
+		return this.runAdmittedWorker(
+			() => this.startWorker(capturedRequest, signal),
+			() => ({
+				started: false,
+				skipReason: this.workerAbort.signal.aborted ? "session_disposed" : "worker_start_aborted",
+			}),
+			signal,
+		);
 	}
 
 	private async startWorker(
 		request: WorkerDelegationRequest,
 		signal?: AbortSignal,
 	): Promise<QueuedWorkerAttemptOutcome> {
-		const capturedRequest = structuredClone(request);
+		const capturedRequest = request;
 		if (capturedRequest.fanoutRemaining !== undefined && capturedRequest.fanoutRemaining > 1) {
 			const headroomSkipReason = this.fanoutHeadroomSkipReason(capturedRequest, capturedRequest.fanoutRemaining);
 			if (headroomSkipReason) return { started: false, skipReason: headroomSkipReason };
@@ -4296,7 +4345,11 @@ export class WorkerDelegationController {
 		directoryValidated = false,
 	): Promise<WorkerDelegationRunOutcome> {
 		if (this.workerAbort.signal.aborted) return Promise.resolve({ started: false, skipReason: "session_disposed" });
-		return this.runAdmittedWorker(() => this.runWorkerOnce(request, onStarted, existingRecord, directoryValidated));
+		const capturedRequest = structuredClone(request);
+		return this.runAdmittedWorker(
+			() => this.runWorkerOnce(capturedRequest, onStarted, existingRecord, directoryValidated),
+			() => ({ started: false, skipReason: "session_disposed" }),
+		);
 	}
 
 	private async runWorkerOnce(
@@ -4305,7 +4358,6 @@ export class WorkerDelegationController {
 		existingRecord?: LaneRecord,
 		directoryValidated = false,
 	): Promise<WorkerDelegationRunOutcome> {
-		request = structuredClone(request);
 		let admission: Extract<WorkerAdmission, { ok: true }> | undefined;
 		let releaseAllocation: (() => void) | undefined;
 		if (existingRecord) {
@@ -4387,9 +4439,17 @@ export class WorkerDelegationController {
 		preparedAdmission?: Extract<WorkerAdmission, { ok: true }>,
 		newWorkerAdmissionChecked = false,
 	): PreparedWorkerRun {
+		// Public ingress or the scheduler still owns a reader here. Transfer physical execution
+		// to its own reader before setup can persist a task, invoke callbacks, or return acceptance.
+		const runtimeLease = runtimeGenerationAdmission(this.deps.getAgentDir()).tryAdmitWork({
+			kind: "lane",
+			label: "worker execution",
+		});
+		if (!runtimeLease) throw new RuntimeGenerationAdmissionError("Worker setup requires runtime admission.");
+		let executionOwnsLease = false;
 		let preparedRecord = existingRecord;
 		try {
-			return this.prepareAndRunWorker(
+			const outcome = this.prepareAndRunWorker(
 				request,
 				(record) => {
 					preparedRecord = record;
@@ -4399,6 +4459,11 @@ export class WorkerDelegationController {
 				preparedAdmission,
 				newWorkerAdmissionChecked,
 			);
+			if (outcome.started && outcome.completion) {
+				executionOwnsLease = true;
+				return { ...outcome, completion: outcome.completion.finally(() => runtimeLease.release()) };
+			}
+			return outcome;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.safeWarn(`Worker setup failed: ${message}`);
@@ -4407,6 +4472,8 @@ export class WorkerDelegationController {
 				this.cancelAndPublish(this.lifecycle, preparedRecord.laneId, "worker_start_error");
 			}
 			return { started: false, skipReason: `worker_start_error:${message}` };
+		} finally {
+			if (!executionOwnsLease) runtimeLease.release();
 		}
 	}
 

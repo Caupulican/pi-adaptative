@@ -179,6 +179,8 @@ export class WorkerLifecycle {
 			leaseTtlMs: number;
 			compileGrant(target: { objectiveId: string; taskId: string; attemptId: string }): ExecutionGrant;
 		},
+		/** Admit actual preparation only; an exact started/terminal replay has no new runtime work. */
+		beforePreparation?: () => Pick<PrepareManagedDelegationInput, "goal">,
 	): {
 		record: LaneRecord;
 		attempt: AttemptRuntimeState;
@@ -200,6 +202,7 @@ export class WorkerLifecycle {
 				);
 			}
 			if (before.status === "queued") {
+				beforePreparation?.();
 				const handle = this.startPreparedManagedAttempt(before, input.leaseTtlMs, input.compileGrant);
 				const record = this.getManagedRecord(input.laneId);
 				if (!record) throw new Error(`Managed worker '${input.laneId}' was not projected.`);
@@ -225,7 +228,8 @@ export class WorkerLifecycle {
 				`Managed worker '${input.laneId}' cannot dispatch turn ${input.dispatchSequence} while turn ${before.dispatch.dispatchSequence ?? 1} is active.`,
 			);
 		}
-		const attempt = this.ledger.prepareManaged(input);
+		const admitted = beforePreparation?.();
+		const attempt = this.ledger.prepareManaged({ ...input, ...admitted });
 		const handle = this.startPreparedManagedAttempt(attempt, input.leaseTtlMs, input.compileGrant);
 		const record = this.getManagedRecord(input.laneId);
 		if (!record) throw new Error(`Managed worker '${input.laneId}' was not projected after dispatch.`);

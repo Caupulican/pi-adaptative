@@ -19,6 +19,7 @@ import {
 	type QueuedInputOrigin,
 	type RecordableQueuedInput,
 } from "./queued-input-record.ts";
+import type { RuntimeMutationHandoff, RuntimeWorkLease } from "./runtime-generation-admission.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
 import { type SteerDecision, type SteerWake, type WaitStatusEvent, waitFor } from "./util/wait.ts";
 
@@ -112,6 +113,10 @@ export interface PendingInputQueueDeps {
 	/** `_extensionRunner` is assigned after construction (definite-assignment field on AgentSession),
 	 * so it must be read through a thunk rather than captured by value. */
 	getExtensionRunner(): ExtensionRunner;
+	reloadRuntime(authority: {
+		ownerCommandLease?: RuntimeWorkLease;
+		ownerHandoff?: RuntimeMutationHandoff;
+	}): Promise<void>;
 	getPromptTemplates(): ReadonlyArray<PromptTemplate>;
 	/**
 	 * A queued message the operator authored (not an extension), with the operator's ORIGINAL
@@ -462,7 +467,11 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	}
 
 	/** Try to execute an extension command. Returns true if command was found and executed. */
-	async tryExecuteExtensionCommand(text: string): Promise<boolean> {
+	async tryExecuteExtensionCommand(
+		text: string,
+		runtimeLease?: RuntimeWorkLease,
+		beginRuntimeHandoff?: () => RuntimeMutationHandoff,
+	): Promise<boolean> {
 		// Parse command name and args
 		const spaceIndex = text.indexOf(" ");
 		const commandName = this.parseCommandName(text);
@@ -472,21 +481,52 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		const command = runner.getCommand(commandName);
 		if (!command) return false;
 
-		// Get command context from extension runner (includes session control methods)
+		// A command's context cannot escape its invocation. Join every requested reload even if the
+		// extension forgets to await it, so generation replacement ends before foreground cleanup resumes.
 		const ctx = runner.createCommandContext();
-
+		let active = true;
+		const reloads: Promise<void>[] = [];
+		if (beginRuntimeHandoff || runtimeLease) {
+			ctx.reload = () => {
+				const reload = (async () => {
+					if (!active) throw new Error("Extension command runtime authority expired.");
+					const handoff = beginRuntimeHandoff?.();
+					try {
+						await this.deps.reloadRuntime(
+							handoff ? { ownerHandoff: handoff } : { ownerCommandLease: runtimeLease },
+						);
+					} finally {
+						handoff?.release();
+					}
+				})();
+				reloads.push(reload);
+				void reload.catch(() => undefined);
+				return reload;
+			};
+		}
+		const failures: unknown[] = [];
 		try {
 			await command.handler(args, ctx);
-			return true;
-		} catch (err) {
-			// Emit error via extension runner
-			runner.emitError({
+		} catch (error) {
+			failures.push(error);
+		} finally {
+			active = false;
+			for (const result of await Promise.allSettled(reloads)) {
+				if (result.status === "rejected" && !failures.includes(result.reason)) failures.push(result.reason);
+			}
+		}
+		if (failures.length > 0) {
+			const error =
+				failures.length === 1
+					? failures[0]
+					: new AggregateError(failures, "Extension command and runtime replacement failed.");
+			this.deps.getExtensionRunner().emitError({
 				extensionPath: `command:${commandName}`,
 				event: "command",
-				error: err instanceof Error ? err.message : String(err),
+				error: error instanceof Error ? error.message : String(error),
 			});
-			return true;
 		}
+		return true;
 	}
 
 	private _createQueuedUserMessage(

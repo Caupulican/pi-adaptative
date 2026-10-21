@@ -50,7 +50,7 @@ export interface ModelSelectionControllerDeps {
 	/** The user-requested active tool set, re-applied when the model's capability class changes. */
 	getRequestedActiveToolNames(): string[] | undefined;
 	getActiveToolNames(): string[];
-	setActiveToolsByName(toolNames: string[]): void;
+	setActiveToolsByName(toolNames: string[], assertCurrent?: () => void): void;
 	getModelCapabilityProfile(): ModelCapabilityProfile;
 	/** Rebuild the base prompt after a live orchestration-level change without altering requested tools. */
 	refreshBaseSystemPrompt(): void;
@@ -90,7 +90,11 @@ export class ModelSelectionController {
 	 * Validates that auth is configured, saves to session and settings.
 	 * @throws Error if no auth is configured for the model
 	 */
-	async setModel(model: Model<Api>, options: { persistSettings?: boolean } = {}): Promise<void> {
+	async setModel(
+		model: Model<Api>,
+		options: { persistSettings?: boolean } = {},
+		assertCurrent?: () => void,
+	): Promise<void> {
 		if (!this.deps.getModelRegistry().hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
@@ -106,21 +110,21 @@ export class ModelSelectionController {
 
 		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(thinkingLevel, { persistSettings });
-		this._resyncToolSurfaceForModel();
+		this._resyncToolSurfaceForModel(assertCurrent);
 
 		await this._emitModelSelect(model, previousModel, "set");
 		this.deps.checkContextWindowUsageWarning();
 		await this._warnIfManualModelChoiceIsRisky(model);
 	}
 
-	private _resyncToolSurfaceForModel(): void {
+	private _resyncToolSurfaceForModel(assertCurrent?: () => void): void {
 		// Re-derive the model-capability tool surface for the new model (restores the full requested
 		// set when moving small -> large, reduces it when moving large -> small). Every switch path,
 		// including model cycling and RPC commands that delegate to it, must pass through this seam.
 		const requestedActiveToolNames = this.deps.getRequestedActiveToolNames();
 		if (requestedActiveToolNames) {
 			const before = this.deps.getActiveToolNames().join(",");
-			this.deps.setActiveToolsByName(requestedActiveToolNames);
+			this.deps.setActiveToolsByName(requestedActiveToolNames, assertCurrent);
 			const capability = this.deps.getModelCapabilityProfile();
 			if (capability.class !== "full" && this.deps.getActiveToolNames().join(",") !== before) {
 				this.deps.emit({

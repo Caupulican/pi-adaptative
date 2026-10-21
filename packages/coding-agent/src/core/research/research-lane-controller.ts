@@ -18,6 +18,7 @@ import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import type { NormalizedProfile } from "../profile-registry.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
+import { runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import type {
 	AutonomySettings,
 	ResolvedEdgeSettings,
@@ -182,141 +183,154 @@ export class ResearchLaneController {
 	async runOnce(request?: { query?: string; context?: string; goalId?: string }): Promise<ResearchLaneRunOutcome> {
 		if (this._isRunning) return { started: false, skipReason: "research_lane_already_running" };
 		if (this._aborted || this.deps.isDisposed()) return { started: false, skipReason: "session_disposed" };
-
-		const settings = this.deps.getSettingsManager().getResearchLaneSettings();
-		const demand = request?.query
-			? { query: request.query, context: request.context ?? "", goalId: request.goalId }
-			: this.buildDemand();
-		if (!demand) return { started: false, skipReason: this._lastSkipReason ?? "no_research_demand" };
-
-		const shipment = this.models.resolveShipment(settings, "no_research_model");
-		if (!shipment.ok) {
-			this._lastSkipReason = shipment.skipReason;
-			return { started: false, skipReason: shipment.skipReason };
-		}
-		const { model, laneProfile } = shipment;
-		const laneCapability = this.models.capabilityProfile(model);
-		if (!laneCapability.backgroundLanesEnabled) {
-			this._lastSkipReason = "model_research_unsupported";
-			return { started: false, skipReason: "model_research_unsupported" };
-		}
-
-		this._isRunning = true;
-		this.deps.onContinuationActivity?.();
-		this.seedHistory();
-		const startedRecord = this.lanes.start({ type: "research", label: demand.query, goalId: demand.goalId });
-		this._persistedRunCount++;
-		const deregisterInFlight = registerInFlightWork(
-			this.deps.getAgentDir(),
-			"lane",
-			`research:${startedRecord.laneId}`,
-		);
-		let toolSurface: LaneToolSurface | undefined;
+		const runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir()).admitWork({
+			kind: "lane",
+			label: "research lane",
+			signal: this.abortController.signal,
+		});
 		try {
-			let spentUsage: Usage | undefined;
-			const workspaceSources = await this.deps.collectWorkspaceSources({
-				query: `${demand.context}\n${demand.query}`,
-				cwd: this.deps.getCwd(),
-				maxSources: settings.maxSources,
-			});
-			const maxUsd = clampLaneMaxUsd(settings.maxUsd, this.deps.getCapabilityEnvelope()?.maxEstimatedUsd);
-			const activeToolSurface = createLaneToolSurface({
-				yolo: this.deps.getSettingsManager().getEdgeSettings().mode === "yolo",
-				denyCommands: this.deps.getSettingsManager().getEdgeSettings().deny,
-				cwd: this.deps.getCwd(),
-				profile: laneProfile,
-				deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
-				...(this.deps.getPathAliasTable ? { getPathAliasTable: this.deps.getPathAliasTable } : {}),
-			});
-			toolSurface = activeToolSurface;
-			this.warnUnboundToolGrants(laneProfile, activeToolSurface);
-			const result = await runResearch({
-				query: demand.query,
-				context: demand.context,
-				sources: workspaceSources,
-				envelope: this.buildEnvelope(maxUsd, laneProfile, activeToolSurface),
-				maxUsd,
-				maxSources: settings.maxSources,
-				maxFindings: settings.maxFindings,
-				maxWallClockMs: settings.maxWallClockMs,
-				signal: this.abortController.signal,
-				complete: async ({ systemPrompt, userPrompt, signal }) => {
-					const completion = await this.deps.runIsolatedCompletion({
-						systemPrompt: composeSubagentSystemPrompt({
-							soul: laneProfile?.soul,
-							rolePrompt: systemPrompt,
-							override: settings.systemPrompt,
-						}),
-						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
-						model,
-						thinkingLevel: resolveModelThinkingLevel(model, laneProfile?.thinking),
-						maxTokens: laneCapability.laneMaxOutputTokens,
-						tools: activeToolSurface.tools,
-						maxTurns: 6,
-						beforeToolCall: activeToolSurface.beforeToolCall,
-						signal,
-						cacheRetention: "short",
-						laneKind: "research",
-					});
-					spentUsage = completion.usage;
-					return {
-						text: completion.text,
-						costUsd: completion.usage.cost.total,
-						stopReason: String(completion.stopReason),
-					};
-				},
-			});
+			runtimeLease.assertCurrent();
+			// Admission may have waited for a generation replacement while another run or disposal won.
+			if (this._isRunning) return { started: false, skipReason: "research_lane_already_running" };
+			if (this._aborted || this.deps.isDisposed()) return { started: false, skipReason: "session_disposed" };
 
-			if (this.deps.isDisposed()) {
-				const record = this.lanes.complete(startedRecord.laneId, {
-					status: "canceled",
-					reasonCode: "session_disposed",
-				});
-				return { started: true, record, result };
+			const settings = this.deps.getSettingsManager().getResearchLaneSettings();
+			const demand = request?.query
+				? { query: request.query, context: request.context ?? "", goalId: request.goalId }
+				: this.buildDemand();
+			if (!demand) return { started: false, skipReason: this._lastSkipReason ?? "no_research_demand" };
+
+			const shipment = this.models.resolveShipment(settings, "no_research_model");
+			if (!shipment.ok) {
+				this._lastSkipReason = shipment.skipReason;
+				return { started: false, skipReason: shipment.skipReason };
+			}
+			const { model, laneProfile } = shipment;
+			const laneCapability = this.models.capabilityProfile(model);
+			if (!laneCapability.backgroundLanesEnabled) {
+				this._lastSkipReason = "model_research_unsupported";
+				return { started: false, skipReason: "model_research_unsupported" };
 			}
 
-			let evidenceEntryId: string | undefined;
-			if (result.bundle) evidenceEntryId = this.deps.saveEvidenceBundleSnapshot(result.bundle);
-			if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
-				this.deps.addSpawnedUsage(spentUsage, {
-					label: "research-lane",
-					reportId: `research:${this.deps.getSessionId()}:${startedRecord.laneId}`,
-				});
-			}
-
-			const record = this.lanes.complete(startedRecord.laneId, {
-				status: result.status,
-				reasonCode: result.reasonCode,
-				costUsd: result.costUsd,
-				evidenceEntryId,
-			});
-			if (record) {
-				appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
-				this.emitTerminalTelemetry(record);
-			}
-			return { started: true, record, result };
-		} catch (error) {
-			const record = this.lanes.complete(startedRecord.laneId, {
-				status: "failed",
-				reasonCode: "research_lane_error",
-			});
-			if (record && !this.deps.isDisposed()) {
-				appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
-				this.emitTerminalTelemetry(record);
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			this.deps.emit({ type: "warning", message: `Research lane failed: ${message}` });
-			return { started: true, record };
-		} finally {
-			try {
-				await toolSurface?.dispose();
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				this.deps.emit({ type: "warning", message: `Research lane payload cleanup failed: ${message}` });
-			}
-			this._isRunning = false;
+			this._isRunning = true;
 			this.deps.onContinuationActivity?.();
-			deregisterInFlight();
+			this.seedHistory();
+			const startedRecord = this.lanes.start({ type: "research", label: demand.query, goalId: demand.goalId });
+			this._persistedRunCount++;
+			const deregisterInFlight = registerInFlightWork(
+				this.deps.getAgentDir(),
+				"lane",
+				`research:${startedRecord.laneId}`,
+			);
+			let toolSurface: LaneToolSurface | undefined;
+			try {
+				let spentUsage: Usage | undefined;
+				const workspaceSources = await this.deps.collectWorkspaceSources({
+					query: `${demand.context}\n${demand.query}`,
+					cwd: this.deps.getCwd(),
+					maxSources: settings.maxSources,
+				});
+				const maxUsd = clampLaneMaxUsd(settings.maxUsd, this.deps.getCapabilityEnvelope()?.maxEstimatedUsd);
+				const activeToolSurface = createLaneToolSurface({
+					yolo: this.deps.getSettingsManager().getEdgeSettings().mode === "yolo",
+					denyCommands: this.deps.getSettingsManager().getEdgeSettings().deny,
+					cwd: this.deps.getCwd(),
+					profile: laneProfile,
+					deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
+					...(this.deps.getPathAliasTable ? { getPathAliasTable: this.deps.getPathAliasTable } : {}),
+				});
+				toolSurface = activeToolSurface;
+				this.warnUnboundToolGrants(laneProfile, activeToolSurface);
+				const result = await runResearch({
+					query: demand.query,
+					context: demand.context,
+					sources: workspaceSources,
+					envelope: this.buildEnvelope(maxUsd, laneProfile, activeToolSurface),
+					maxUsd,
+					maxSources: settings.maxSources,
+					maxFindings: settings.maxFindings,
+					maxWallClockMs: settings.maxWallClockMs,
+					signal: this.abortController.signal,
+					complete: async ({ systemPrompt, userPrompt, signal }) => {
+						const completion = await this.deps.runIsolatedCompletion({
+							systemPrompt: composeSubagentSystemPrompt({
+								soul: laneProfile?.soul,
+								rolePrompt: systemPrompt,
+								override: settings.systemPrompt,
+							}),
+							messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+							model,
+							thinkingLevel: resolveModelThinkingLevel(model, laneProfile?.thinking),
+							maxTokens: laneCapability.laneMaxOutputTokens,
+							tools: activeToolSurface.tools,
+							maxTurns: 6,
+							beforeToolCall: activeToolSurface.beforeToolCall,
+							signal,
+							cacheRetention: "short",
+							laneKind: "research",
+						});
+						spentUsage = completion.usage;
+						return {
+							text: completion.text,
+							costUsd: completion.usage.cost.total,
+							stopReason: String(completion.stopReason),
+						};
+					},
+				});
+
+				if (this.deps.isDisposed()) {
+					const record = this.lanes.complete(startedRecord.laneId, {
+						status: "canceled",
+						reasonCode: "session_disposed",
+					});
+					return { started: true, record, result };
+				}
+
+				let evidenceEntryId: string | undefined;
+				if (result.bundle) evidenceEntryId = this.deps.saveEvidenceBundleSnapshot(result.bundle);
+				if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
+					this.deps.addSpawnedUsage(spentUsage, {
+						label: "research-lane",
+						reportId: `research:${this.deps.getSessionId()}:${startedRecord.laneId}`,
+					});
+				}
+
+				const record = this.lanes.complete(startedRecord.laneId, {
+					status: result.status,
+					reasonCode: result.reasonCode,
+					costUsd: result.costUsd,
+					evidenceEntryId,
+				});
+				if (record) {
+					appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
+					this.emitTerminalTelemetry(record);
+				}
+				return { started: true, record, result };
+			} catch (error) {
+				const record = this.lanes.complete(startedRecord.laneId, {
+					status: "failed",
+					reasonCode: "research_lane_error",
+				});
+				if (record && !this.deps.isDisposed()) {
+					appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
+					this.emitTerminalTelemetry(record);
+				}
+				const message = error instanceof Error ? error.message : String(error);
+				this.deps.emit({ type: "warning", message: `Research lane failed: ${message}` });
+				return { started: true, record };
+			} finally {
+				try {
+					await toolSurface?.dispose();
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					this.deps.emit({ type: "warning", message: `Research lane payload cleanup failed: ${message}` });
+				}
+				this._isRunning = false;
+				this.deps.onContinuationActivity?.();
+				deregisterInFlight();
+			}
+		} finally {
+			runtimeLease.release();
 		}
 	}
 

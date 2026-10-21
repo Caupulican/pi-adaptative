@@ -13,6 +13,7 @@ import { type Theme, theme } from "../../presentation/theme-model.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import { runRuntimeCandidateHandler } from "../runtime-generation-admission.ts";
 import { DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE } from "./stale-context.ts";
 import { createToolOnlyExtensionContext } from "./tool-only-api.ts";
 import { snapshotToolResultData } from "./tool-result-snapshot.ts";
@@ -585,6 +586,11 @@ export class ExtensionRunner {
 		}
 	}
 
+	/** A live rebuild retires the runner while preserving the shared extension API generation. */
+	assertRuntimeActive(): void {
+		this.runtime.assertActive();
+	}
+
 	onError(listener: ExtensionErrorListener): () => void {
 		this.errorListeners.add(listener);
 		return () => this.errorListeners.delete(listener);
@@ -929,7 +935,7 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await runRuntimeCandidateHandler(this, () => handler(event, ctx));
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;
@@ -972,7 +978,7 @@ export class ExtensionRunner {
 
 		for (const handler of handlers) {
 			try {
-				await handler(event, ctx);
+				await runRuntimeCandidateHandler(this, () => handler(event, ctx));
 			} catch (err) {
 				this.reportHandlerError(extension.path, event.type, err);
 			}
@@ -1280,7 +1286,7 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const event: ResourcesDiscoverEvent = { type: "resources_discover", cwd, reason };
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await runRuntimeCandidateHandler(this, () => handler(event, ctx));
 					const result = handlerResult as ResourcesDiscoverResult | undefined;
 
 					if (result?.skillPaths?.length) {

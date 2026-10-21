@@ -139,6 +139,13 @@ import type { SystemOneUsageSink } from "./review/system-one-review-port.ts";
 import { TypeSafeEvidenceMaterializer } from "./review/typesafe-evidence-materializer.ts";
 import { TypeSafeEvidenceStore } from "./review/typesafe-evidence-store.ts";
 import { SystemOneReviewer } from "./review/typesafe-reviewer.ts";
+import {
+	type RuntimeCandidateAttempt,
+	type RuntimeMutationHandoff,
+	type RuntimeMutationLease,
+	type RuntimeWorkLease,
+	runtimeGenerationAdmission,
+} from "./runtime-generation-admission.ts";
 import { ScoutController } from "./scout-controller.ts";
 import { BitwardenCredentialStorageRouter } from "./secrets/bitwarden-credential-storage-router.ts";
 import {
@@ -405,7 +412,7 @@ export interface RuntimeBuilderDeps {
 	/** Currently-active tool names (reads agent.state.tools; the pre-filter fallback for a rebuild). */
 	getActiveToolNames(): string[];
 	/** Apply the recomputed active set (capability filter + required artifact/delegation companions live here). */
-	setActiveToolsByName(toolNames: string[]): void;
+	setActiveToolsByName(toolNames: string[], assertCurrent?: () => void): void;
 	/** Normalize a tool's prompt snippet / guidelines through the system-prompt builder. */
 	normalizePromptSnippet(text: string | undefined): string | undefined;
 	normalizePromptGuidelines(guidelines: string[] | undefined): string[];
@@ -417,7 +424,7 @@ export interface RuntimeBuilderDeps {
 	/** Re-run resource discovery for the active extensions (reload only). */
 	extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void>;
 	/** Re-apply the active profile's model/thinking from reloaded settings (reload only). */
-	reapplyActiveProfileModelSettings(): Promise<void>;
+	reapplyActiveProfileModelSettings(assertCurrent?: () => void): Promise<void>;
 	/** Notify extensions-changed listeners after a single-extension live op. */
 	notifyExtensionsChanged(): void;
 
@@ -593,6 +600,13 @@ interface RuntimeToolAccessPolicy {
 	allows(name: string): boolean;
 }
 
+export interface RuntimeReloadOptions {
+	ownerCommandLease?: RuntimeWorkLease;
+	ownerHandoff?: RuntimeMutationHandoff;
+	/** Session resynchronization belongs inside the same generation transaction as the rebuild. */
+	beforeReload?: () => void;
+}
+
 /**
  * Owns the tool-registry build and the self-modification-safe extension reload extracted from
  * {@link AgentSession}. See the module header for the snapshot-ownership and host-binding boundaries.
@@ -620,6 +634,7 @@ export class RuntimeBuilder {
 	private readonly _explicitLiveExtensionPaths = new Set<string>();
 	private _reloadPromise: Promise<void> | undefined;
 	private _reloadRequested = false;
+	private readonly _reloadPreludes = new Set<() => void>();
 	private readonly _credentialManager: CredentialManager;
 	private readonly _credentialExposureBoundary: CredentialExposureBoundary;
 	private readonly _credentialBootstrapFiles: readonly string[];
@@ -814,75 +829,99 @@ export class RuntimeBuilder {
 		artifactStore: ArtifactStore | undefined,
 		signal?: AbortSignal,
 	) {
-		const scopeCwd = this.deps.getCwd();
-		const cwd = this._taskDirectories.cwd;
-		const envelope = this.deps.getCapabilityEnvelope?.();
-		const childEnvelope =
-			this.deps.getSettingsManager().getEdgeSettings().mode === "yolo"
-				? undefined
-				: deriveCompositeChildEnvelope("context_scout", ["read", "grep", "find"], envelope);
-		const exposureMode = this.credentialExposureMode();
-		const controller = new ScoutController({
-			resolveScoutModel: async () =>
-				resolveScoutModel(
-					this.deps.getModelRegistry(),
-					this.deps.getSettingsManager().getScoutSettings().model,
-					this.deps.getAgentDir(),
-					(model) => this.deps.isModelExhausted(model),
-					resolveCurrentToolRepairSettings(this.deps.getSettingsManager().settings).textProtocol,
-				),
-			resolveProviderRequestAuth: async (model) => {
-				const auth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
-				if (!auth.ok) throw new Error(auth.error);
-				return auth;
-			},
-			getCwd: () => cwd,
-			buildReadOnlyTools: (toolCwd) => {
-				const readTool = wrapToolWithCapabilityEnvelopeGate(
-					createReadTool(toolCwd),
-					toolCwd,
-					childEnvelope,
-					scopeCwd,
-				);
-				const grepTool = wrapToolWithCapabilityEnvelopeGate(
-					createGrepTool(toolCwd, { artifactStore }),
-					toolCwd,
-					childEnvelope,
-					scopeCwd,
-				);
-				const findTool = wrapToolWithCapabilityEnvelopeGate(
-					createFindTool(toolCwd, { artifactStore }),
-					toolCwd,
-					childEnvelope,
-					scopeCwd,
-				);
-				return [
-					wrapToolWithCredentialExposureGuard(readTool, toolCwd, this._credentialExposureBoundary, exposureMode),
-					wrapToolWithCredentialExposureGuard(grepTool, toolCwd, this._credentialExposureBoundary, exposureMode),
-					wrapToolWithCredentialExposureGuard(findTool, toolCwd, this._credentialExposureBoundary, exposureMode),
-				];
-			},
-			streamFn: this.deps.getAgent().streamFn,
+		const runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir()).admitWork({
+			kind: "scout",
+			label: query.slice(0, 80),
 			signal,
-			fileExists: (path) => {
-				const target = resolveCwdPath(cwd, path);
-				if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd, scopeCwd)) {
-					return false;
-				}
-				return existsSync(target);
-			},
-			countLines: (path) => {
-				const target = resolveCwdPath(cwd, path);
-				if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd, scopeCwd)) {
-					return undefined;
-				}
-				return countFileLines(target);
-			},
-			// Lets the scout register itself in the reload-gate quiesce registry (see
-			// reload-blockers.ts) for its own agentDir — the same key `_assertReloadQuiescent` reads.
-			getAgentDir: () => this.deps.getAgentDir(),
 		});
-		return controller.run(query, maxTurns);
+		try {
+			const scopeCwd = this.deps.getCwd();
+			const cwd = this._taskDirectories.cwd;
+			const envelope = this.deps.getCapabilityEnvelope?.();
+			const childEnvelope =
+				this.deps.getSettingsManager().getEdgeSettings().mode === "yolo"
+					? undefined
+					: deriveCompositeChildEnvelope("context_scout", ["read", "grep", "find"], envelope);
+			const exposureMode = this.credentialExposureMode();
+			const controller = new ScoutController({
+				resolveScoutModel: async () =>
+					resolveScoutModel(
+						this.deps.getModelRegistry(),
+						this.deps.getSettingsManager().getScoutSettings().model,
+						this.deps.getAgentDir(),
+						(model) => this.deps.isModelExhausted(model),
+						resolveCurrentToolRepairSettings(this.deps.getSettingsManager().settings).textProtocol,
+					),
+				resolveProviderRequestAuth: async (model) => {
+					const auth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
+					if (!auth.ok) throw new Error(auth.error);
+					return auth;
+				},
+				getCwd: () => cwd,
+				buildReadOnlyTools: (toolCwd) => {
+					const readTool = wrapToolWithCapabilityEnvelopeGate(
+						createReadTool(toolCwd),
+						toolCwd,
+						childEnvelope,
+						scopeCwd,
+					);
+					const grepTool = wrapToolWithCapabilityEnvelopeGate(
+						createGrepTool(toolCwd, { artifactStore }),
+						toolCwd,
+						childEnvelope,
+						scopeCwd,
+					);
+					const findTool = wrapToolWithCapabilityEnvelopeGate(
+						createFindTool(toolCwd, { artifactStore }),
+						toolCwd,
+						childEnvelope,
+						scopeCwd,
+					);
+					return [
+						wrapToolWithCredentialExposureGuard(
+							readTool,
+							toolCwd,
+							this._credentialExposureBoundary,
+							exposureMode,
+						),
+						wrapToolWithCredentialExposureGuard(
+							grepTool,
+							toolCwd,
+							this._credentialExposureBoundary,
+							exposureMode,
+						),
+						wrapToolWithCredentialExposureGuard(
+							findTool,
+							toolCwd,
+							this._credentialExposureBoundary,
+							exposureMode,
+						),
+					];
+				},
+				streamFn: this.deps.getAgent().streamFn,
+				signal,
+				fileExists: (path) => {
+					const target = resolveCwdPath(cwd, path);
+					if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd, scopeCwd)) {
+						return false;
+					}
+					return existsSync(target);
+				},
+				countLines: (path) => {
+					const target = resolveCwdPath(cwd, path);
+					if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd, scopeCwd)) {
+						return undefined;
+					}
+					return countFileLines(target);
+				},
+				// Lets the scout register itself in the reload-gate quiesce registry (see
+				// reload-blockers.ts) for its own agentDir — the same key `_assertReloadQuiescent` reads.
+				getAgentDir: () => this.deps.getAgentDir(),
+			});
+			return await controller.run(query, maxTurns);
+		} finally {
+			runtimeLease.release();
+		}
 	}
 
 	/** Whether a tool name is present in the live wrapped registry. */
@@ -939,7 +978,16 @@ export class RuntimeBuilder {
 		);
 	}
 
-	refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
+	refreshToolRegistry(options?: {
+		activeToolNames?: string[];
+		includeAllExtensionTools?: boolean;
+		assertCurrent?: () => void;
+	}): void {
+		const assertCurrent =
+			options?.assertCurrent ??
+			(() =>
+				runtimeGenerationAdmission(this.deps.getAgentDir()).assertResourceMutation(this.deps.getExtensionRunner()));
+		assertCurrent();
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		// Re-derive from the pre-filter REQUEST, never from agent.state.tools: the active set is
 		// capability/profile-filtered, so feeding it back through setActiveToolsByName would
@@ -1147,7 +1195,7 @@ export class RuntimeBuilder {
 		// setActiveToolsByName() itself (not duplicated here), so every activation path --
 		// including the public, extension-exposed setActiveTools() -- gets the same
 		// guarantee, not just this settings/profile refresh flow.
-		this.deps.setActiveToolsByName([...new Set(nextActiveToolNames)]);
+		this.deps.setActiveToolsByName([...new Set(nextActiveToolNames)], assertCurrent);
 		// setActiveToolsByName just stored the profile-filtered ACTIVE set as the request; restore
 		// the true pre-filter request (plus non-profile auto-activations) so an internal refresh can
 		// never permanently narrow it. Explicit profile grants are generation-local activations: if
@@ -1263,7 +1311,10 @@ export class RuntimeBuilder {
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
 		onError?: ExtensionErrorListener;
+		mutationLease?: RuntimeMutationLease;
 	}): (() => void) | undefined {
+		if (options.mutationLease) options.mutationLease.assertCurrent();
+		else runtimeGenerationAdmission(this.deps.getAgentDir()).assertResourceMutation(this.deps.getExtensionRunner());
 		this.deps.getSystemOneController?.()?.setVerificationHost(
 			createSessionVerificationHost(
 				() => this.deps.getSessionManager(),
@@ -2030,7 +2081,11 @@ export class RuntimeBuilder {
 		const offBuildErrors = options.onError ? runner.onError(options.onError) : undefined;
 		this.deps.setExtensionRunner(runner);
 		try {
-			this.deps.bindExtensionCore(runner);
+			if (options.mutationLease) {
+				options.mutationLease.runCandidateConstruction(runner, () => this.deps.bindExtensionCore(runner));
+			} else {
+				this.deps.bindExtensionCore(runner);
+			}
 		} catch (error) {
 			offBuildErrors?.();
 			throw error;
@@ -2055,45 +2110,59 @@ export class RuntimeBuilder {
 		this.refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,
+			assertCurrent: options.mutationLease?.assertCurrent,
 		});
 		return offBuildErrors;
 	}
 
 	/** A tool-authored exact path still passes the existing explicit import/profile boundary. */
-	async reloadExtension(extensionPath: string): Promise<void> {
-		this._assertReloadQuiescent("reload extension");
-		const path = resolveToCwd(extensionPath, this.deps.getCwd());
-		this._assertExtensionLoadAllowed(path, "explicit");
-		const alreadyGranted = this._explicitLiveExtensionPaths.has(path);
-		this._explicitLiveExtensionPaths.add(path);
+	async reloadExtension(extensionPath: string, options?: RuntimeReloadOptions): Promise<void> {
+		const writer = this._beginMutation("reload extension", options);
 		try {
-			await this.reload();
-		} catch (error) {
-			if (!alreadyGranted) this._explicitLiveExtensionPaths.delete(path);
-			throw error;
+			const path = resolveToCwd(extensionPath, this.deps.getCwd());
+			this._assertExtensionLoadAllowed(path, "explicit");
+			const alreadyGranted = this._explicitLiveExtensionPaths.has(path);
+			this._explicitLiveExtensionPaths.add(path);
+			try {
+				options?.beforeReload?.();
+				await this._reloadOnce(writer);
+			} catch (error) {
+				if (!alreadyGranted) this._explicitLiveExtensionPaths.delete(path);
+				throw error;
+			}
+		} finally {
+			writer.release();
 		}
 	}
 
-	reload(): Promise<void> {
+	reload(options?: RuntimeReloadOptions): Promise<void> {
+		runtimeGenerationAdmission(this.deps.getAgentDir()).assertExternalMutationRequest();
 		if (this._reloadPromise) {
 			// State can change while a generation is being validated. Coalesce any number of
 			// overlapping requests into one follow-up generation instead of silently treating a
 			// later profile/settings mutation as part of the already-snapshotted generation.
 			this._reloadRequested = true;
+			if (options?.beforeReload) this._reloadPreludes.add(options.beforeReload);
 			return this._reloadPromise;
 		}
-		const reloadPromise = this._drainReloadRequests();
+		const writer = this._beginMutation("reload", options);
+		if (options?.beforeReload) this._reloadPreludes.add(options.beforeReload);
+		// Publish the coalescing promise before a lifecycle callback can request another reload.
+		const reloadPromise = Promise.resolve().then(() => this._drainReloadRequests(writer));
 		this._reloadPromise = reloadPromise;
 		return reloadPromise;
 	}
 
-	private async _drainReloadRequests(): Promise<void> {
+	private async _drainReloadRequests(writer: RuntimeMutationLease): Promise<void> {
 		let finalError: unknown;
 		try {
 			do {
 				this._reloadRequested = false;
 				try {
-					await this._reloadOnce();
+					const preludes = [...this._reloadPreludes];
+					this._reloadPreludes.clear();
+					for (const prelude of preludes) prelude();
+					await this._reloadOnce(writer);
 					finalError = undefined;
 				} catch (error) {
 					finalError = error;
@@ -2103,7 +2172,20 @@ export class RuntimeBuilder {
 		} finally {
 			this._reloadPromise = undefined;
 			this._reloadRequested = false;
+			this._reloadPreludes.clear();
+			writer.release();
 		}
+	}
+
+	private _beginMutation(action: string, options?: RuntimeReloadOptions): RuntimeMutationLease {
+		const admission = runtimeGenerationAdmission(this.deps.getAgentDir());
+		admission.assertExternalMutationRequest();
+		this._assertReloadQuiescent(action);
+		return admission.tryBeginMutation({
+			action,
+			ownerCommandLease: options?.ownerCommandLease,
+			ownerHandoff: options?.ownerHandoff,
+		});
 	}
 
 	/**
@@ -2118,107 +2200,152 @@ export class RuntimeBuilder {
 		assertReloadQuiescent(this.deps.getAgentDir(), this.deps.isStreaming(), this.deps.isCompacting(), action);
 	}
 
-	private async _reloadOnce(): Promise<void> {
-		this._assertReloadQuiescent("reload");
-		const previousRunner = this.deps.getExtensionRunner();
-		const snapshot = this._createReloadRuntimeSnapshot();
-		// Preserve the pre-filter tool REQUEST across the rebuild, not the capability/profile-filtered
-		// active set — otherwise a reload under a small model permanently shrinks the restorable set.
-		const activeToolNames = this.deps.getRequestedActiveToolNames() ?? this.deps.getActiveToolNames();
-		const previousFlagValues = previousRunner.getFlagValues();
-		const previousExtensionProviderNames = previousRunner.getRegisteredProviderNames();
-		const reloadErrors: string[] = [];
-		let newRunner: ExtensionRunner | undefined;
-		let offReloadErrors: (() => void) | undefined;
-		let previousShutdownStarted = false;
+	private async _reloadOnce(writer: RuntimeMutationLease): Promise<void> {
+		writer.assertCurrent();
+		const candidateAttempt = writer.beginCandidateAttempt();
 		try {
-			await this.deps.getSettingsManager().reload();
-			// Re-derive the resource-profile tool filter from the freshly reloaded settings.
-			// Unlike skills/prompts/themes (which re-filter through the resource loader on every
-			// reload), the tool filter is held on the session, so without this a live edit to the
-			// active profile's tools allow/block — or switching the active profile — would not
-			// apply on /reload and allowed tools would stay missing.
-			this.deps.setToolProfileFilter(this.deps.deriveToolProfileFilter());
-			// Resource discovery must consume this exact settings generation. A second settings read here
-			// could combine profile state from one generation with resources from the next.
-			await this.deps.getResourceLoader().reload({
-				failOnExtensionErrors: true,
-				deferExtensionDispose: true,
-				skipSettingsReload: true,
-			});
-			// A live-load call is an exact session-owned grant. Resource discovery deliberately cannot
-			// recreate it without a profile, so restore only those approved paths into the new runtime
-			// generation before binding it.
-			for (const extensionPath of this._explicitLiveExtensionPaths) {
-				if (
-					this.deps.isExtensionPathAllowed(extensionPath, "explicit") &&
-					!this.deps.getResourceLoader().getLoadedExtension(extensionPath)
-				) {
-					await this._importExtension(extensionPath);
-				}
-			}
-			// Replace the previous extension-owned provider generation before binding the new one. The
-			// bulk refresh also preserves API/OAuth streams for surviving non-extension providers.
-			this.deps.getModelRegistry().unregisterProviders(previousExtensionProviderNames);
-			offReloadErrors = this.buildRuntime({
-				activeToolNames,
-				flagValues: previousFlagValues,
-				includeAllExtensionTools: true,
-				onError: (error) => {
-					reloadErrors.push(`${error.extensionPath} ${error.event}: ${error.error}`);
-				},
-			});
-			newRunner = this.deps.getExtensionRunner();
-			// Extensions are now bound and their queued providers/models are registered, so a profile may
-			// safely select a model contributed by an extension granted in that same profile generation.
-			await this.deps.reapplyActiveProfileModelSettings();
-			// Model capability and system-prompt/tool exposure must reflect the newly selected model.
-			this.refreshToolRegistry({ activeToolNames, includeAllExtensionTools: true });
+			const previousRunner = this.deps.getExtensionRunner();
+			const snapshot = this._createReloadRuntimeSnapshot();
+			// Preserve the pre-filter tool REQUEST across the rebuild, not the capability/profile-filtered
+			// active set — otherwise a reload under a small model permanently shrinks the restorable set.
+			const activeToolNames = this.deps.getRequestedActiveToolNames() ?? this.deps.getActiveToolNames();
+			const previousFlagValues = previousRunner.getFlagValues();
+			const previousExtensionProviderNames = previousRunner.getRegisteredProviderNames();
+			const reloadErrors: string[] = [];
+			let newRunner: ExtensionRunner | undefined;
+			let offReloadErrors: (() => void) | undefined;
+			let previousShutdownStarted = false;
 			try {
-				this._doctorReloadRuntime();
-				// Reload starts memory providers fresh; loaded extensions re-register below.
-				this.deps.clearPendingMemoryProviders();
-				const hasBindings =
-					this.deps.getExtensionUIContext() ||
-					this.deps.getExtensionCommandContextActions() ||
-					this.deps.getExtensionShutdownHandler() ||
-					this.deps.getExtensionErrorListener();
-				if (hasBindings) {
-					await newRunner.emit({ type: "session_start", reason: "reload" });
-					await this.deps.extendResourcesFromExtensions("reload");
-					this._doctorReloadRuntime();
-				}
-			} finally {
-				offReloadErrors?.();
-				offReloadErrors = undefined;
-			}
-			if (reloadErrors.length > 0) {
-				throw new Error(`Extension reload failed doctor: ${reloadErrors.slice(0, 6).join("; ")}`);
-			}
-			previousShutdownStarted = previousRunner.hasHandlers("session_shutdown");
-			await emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "reload" });
-			await this.deps.getResourceLoader().commitReload?.();
-		} catch (error) {
-			offReloadErrors?.();
-			if (newRunner && newRunner !== previousRunner) {
-				newRunner.invalidate(
-					"This extension ctx was discarded because reload failed and Pi restored the previous valid runtime.",
+				await this.deps.getSettingsManager().reload();
+				// Re-derive the resource-profile tool filter from the freshly reloaded settings.
+				// Unlike skills/prompts/themes (which re-filter through the resource loader on every
+				// reload), the tool filter is held on the session, so without this a live edit to the
+				// active profile's tools allow/block — or switching the active profile — would not
+				// apply on /reload and allowed tools would stay missing.
+				this.deps.setToolProfileFilter(this.deps.deriveToolProfileFilter());
+				// Resource discovery must consume this exact settings generation. A second settings read here
+				// could combine profile state from one generation with resources from the next.
+				await writer.runCandidateCallback(previousRunner, () =>
+					this.deps.getResourceLoader().reload({
+						failOnExtensionErrors: true,
+						deferExtensionDispose: true,
+						skipSettingsReload: true,
+					}),
 				);
+				// A live-load call is an exact session-owned grant. Resource discovery deliberately cannot
+				// recreate it without a profile, so restore only those approved paths into the new runtime
+				// generation before binding it.
+				for (const extensionPath of this._explicitLiveExtensionPaths) {
+					if (
+						this.deps.isExtensionPathAllowed(extensionPath, "explicit") &&
+						!this.deps.getResourceLoader().getLoadedExtension(extensionPath)
+					) {
+						await this._importExtension(extensionPath, writer);
+					}
+				}
+				// Replace the previous extension-owned provider generation before binding the new one. The
+				// bulk refresh also preserves API/OAuth streams for surviving non-extension providers.
+				this.deps.getModelRegistry().unregisterProviders(previousExtensionProviderNames);
+				offReloadErrors = this.buildRuntime({
+					mutationLease: writer,
+					activeToolNames,
+					flagValues: previousFlagValues,
+					includeAllExtensionTools: true,
+					onError: (error) => {
+						reloadErrors.push(`${error.extensionPath} ${error.event}: ${error.error}`);
+					},
+				});
+				const candidateRunner = this.deps.getExtensionRunner();
+				newRunner = candidateRunner;
+				// Extensions are now bound and their queued providers/models are registered, so a profile may
+				// safely select a model contributed by an extension granted in that same profile generation.
+				await this.deps.reapplyActiveProfileModelSettings(writer.assertCurrent);
+				// Model capability and system-prompt/tool exposure must reflect the newly selected model.
+				this.refreshToolRegistry({
+					activeToolNames,
+					includeAllExtensionTools: true,
+					assertCurrent: writer.assertCurrent,
+				});
+				try {
+					this._doctorReloadRuntime();
+					// Reload starts memory providers fresh; loaded extensions re-register below.
+					this.deps.clearPendingMemoryProviders();
+					const hasBindings =
+						this.deps.getExtensionUIContext() ||
+						this.deps.getExtensionCommandContextActions() ||
+						this.deps.getExtensionShutdownHandler() ||
+						this.deps.getExtensionErrorListener();
+					if (hasBindings) {
+						await writer.runCandidateCallback(candidateRunner, async () => {
+							await candidateRunner.emit({ type: "session_start", reason: "reload" });
+							await this.deps.extendResourcesFromExtensions("reload");
+						});
+						this._doctorReloadRuntime();
+					}
+				} finally {
+					offReloadErrors?.();
+					offReloadErrors = undefined;
+				}
+				if (reloadErrors.length > 0) {
+					throw new Error(`Extension reload failed doctor: ${reloadErrors.slice(0, 6).join("; ")}`);
+				}
+				previousShutdownStarted = previousRunner.hasHandlers("session_shutdown");
+				await writer.runCandidateCallback(previousRunner, () =>
+					emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "reload" }),
+				);
+				await writer.runCandidateCallback(previousRunner, async () =>
+					this.deps.getResourceLoader().commitReload?.(),
+				);
+			} catch (error) {
+				candidateAttempt.discard();
+				offReloadErrors?.();
+				if (newRunner && newRunner !== previousRunner) {
+					newRunner.invalidate(
+						"This extension ctx was discarded because reload failed and Pi restored the previous valid runtime.",
+					);
+				}
+				const cleanupAttempt = writer.beginCandidateAttempt();
+				try {
+					await writer.runCandidateCallback(newRunner ?? previousRunner, async () =>
+						this.deps.getResourceLoader().rollbackReload?.(),
+					);
+				} finally {
+					cleanupAttempt.discard();
+				}
+				this._restoreReloadRuntimeSnapshot(snapshot);
+				// Restoring bindings alone cannot restart session-owned observers closed during shutdown.
+				// Earlier validation failures leave the previous lifecycle untouched and must not restart it.
+				if (previousShutdownStarted) {
+					const restoredAttempt = writer.beginCandidateAttempt();
+					try {
+						await writer.runCandidateCallback(previousRunner, () =>
+							previousRunner.emit({ type: "session_start", reason: "reload" }),
+						);
+						restoredAttempt.commit();
+					} finally {
+						restoredAttempt.discard();
+					}
+				}
+				throw error;
 			}
-			await this.deps.getResourceLoader().rollbackReload?.();
-			this._restoreReloadRuntimeSnapshot(snapshot);
-			// Restoring bindings alone cannot restart session-owned observers closed during shutdown.
-			// Earlier validation failures leave the previous lifecycle untouched and must not restart it.
-			if (previousShutdownStarted) await previousRunner.emit({ type: "session_start", reason: "reload" });
-			throw error;
+			// Accepted resource disposal is the commit boundary. Before it, the previous API must
+			// remain usable for rollback; afterward, restoring that disposed generation is invalid.
+			previousRunner.invalidate();
+			candidateAttempt.commit();
+			// Post-commit failures remain visible to the update repair loop, but retain the new
+			// generation so repair never runs through stale extension APIs or disposed resources.
+			const acceptedMemoryAttempt = writer.beginCandidateAttempt();
+			try {
+				await writer.runCandidateCallback(newRunner, () => this.deps.initializeMemory());
+				this.deps.reconcileLocalRuntimes?.();
+			} finally {
+				// Disposal accepted this generation already. Initialization errors cannot turn its
+				// lifecycle intents into rolled-back candidate messages.
+				acceptedMemoryAttempt.commit();
+			}
+		} finally {
+			candidateAttempt.discard();
 		}
-		// Accepted resource disposal is the commit boundary. Before it, the previous API must
-		// remain usable for rollback; afterward, restoring that disposed generation is invalid.
-		previousRunner.invalidate();
-		// Post-commit failures remain visible to the update repair loop, but retain the new
-		// generation so repair never runs through stale extension APIs or disposed resources.
-		await this.deps.initializeMemory();
-		this.deps.reconcileLocalRuntimes?.();
 	}
 
 	/**
@@ -2227,21 +2354,54 @@ export class RuntimeBuilder {
 	 * disposes its event subscriptions, and rebuilds the runtime.
 	 * Falls back to full reload on error.
 	 */
-	async unloadExtensionLive(extensionPath: string): Promise<void> {
-		this._assertReloadQuiescent("unload extension");
+	async unloadExtensionLive(extensionPath: string, options?: RuntimeReloadOptions): Promise<void> {
+		const writer = this._beginMutation("unload extension", options);
+		return this._settleLiveExtensionMutation(writer, () =>
+			this._unloadExtensionLive(extensionPath, true, true, writer),
+		);
+	}
+
+	/** One recovery/release path for live mutations after their import authority has been validated. */
+	private async _settleLiveExtensionMutation(
+		writer: RuntimeMutationLease,
+		mutate: () => Promise<void>,
+	): Promise<void> {
 		try {
-			await this._unloadExtensionLive(extensionPath, true, true);
+			await mutate();
 		} catch (error) {
-			await this._recoverLiveExtensionFailure();
+			await this._recoverLiveExtensionFailure(writer);
 			throw error;
+		} finally {
+			writer.release();
 		}
+	}
+
+	private _commitLiveExtensionMutation(
+		previousRunner: ExtensionRunner,
+		attempt: RuntimeCandidateAttempt,
+		notify: boolean,
+	): void {
+		previousRunner.retire();
+		attempt.commit();
+		if (notify) this.deps.notifyExtensionsChanged();
+	}
+
+	private _rebuildLiveExtensionRuntime(previousRunner: ExtensionRunner, writer: RuntimeMutationLease): void {
+		this.buildRuntime({
+			mutationLease: writer,
+			activeToolNames: this.deps.getRequestedActiveToolNames() ?? this.deps.getActiveToolNames(),
+			flagValues: previousRunner.getFlagValues(),
+			includeAllExtensionTools: true,
+		});
 	}
 
 	private async _unloadExtensionLive(
 		extensionPath: string,
 		revokeExplicitGrant: boolean,
 		notify: boolean,
+		writer: RuntimeMutationLease,
 	): Promise<void> {
+		writer.assertCurrent();
 		const ext = this.deps.getResourceLoader().getLoadedExtension(extensionPath);
 		const explicitGrantPath = ext?.path ?? extensionPath;
 		const hadExplicitGrant = this._explicitLiveExtensionPaths.has(explicitGrantPath);
@@ -2253,33 +2413,29 @@ export class RuntimeBuilder {
 		}
 
 		const previousRunner = this.deps.getExtensionRunner();
+		const candidateAttempt = writer.beginCandidateAttempt();
 		try {
 			// Run session_shutdown lifecycle for this extension only
-			await this.deps.getExtensionRunner().emitToExtension(ext, { type: "session_shutdown", reason: "unload" });
+			await writer.runCandidateCallback(previousRunner, () =>
+				previousRunner.emitToExtension(ext, { type: "session_shutdown", reason: "unload" }),
+			);
 
 			// Unregister its providers (keyed by the extension's own path, as registered)
 			const runtime = this.deps.getResourceLoader().getExtensions().runtime;
 			const ownedMemoryProviders = runtime.memoryProvidersByExtension.get(ext.path) ?? new Set();
 			const ownedContextMemoryProviders = runtime.contextMemoryProvidersByExtension.get(ext.path) ?? new Set();
 			for (const name of runtime.getProvidersForExtension(ext.path)) {
-				runtime.unregisterProvider(name, ext.path);
+				writer.runCandidateConstruction(previousRunner, () => runtime.unregisterProvider(name, ext.path));
 			}
 
 			// Dispose its event subscriptions and run disposers
-			await disposeExtensionEventSubscriptions([ext]);
+			await writer.runCandidateCallback(previousRunner, () => disposeExtensionEventSubscriptions([ext]));
 
 			// Remove from loaded extensions
 			this.deps.getResourceLoader().removeLoadedExtension(extensionPath);
 
 			// Rebuild runtime with new extension set
-			const activeToolNames = this.deps.getRequestedActiveToolNames() ?? this.deps.getActiveToolNames();
-			const previousFlagValues = previousRunner.getFlagValues();
-			this.buildRuntime({
-				activeToolNames,
-				flagValues: previousFlagValues,
-				includeAllExtensionTools: true,
-			});
-			previousRunner.retire();
+			this._rebuildLiveExtensionRuntime(previousRunner, writer);
 			const memorySnapshot = this.deps.createMemoryReloadSnapshot();
 			this.deps.restoreMemoryReloadSnapshot({
 				...memorySnapshot,
@@ -2292,16 +2448,15 @@ export class RuntimeBuilder {
 			});
 			runtime.memoryProvidersByExtension.delete(ext.path);
 			runtime.contextMemoryProvidersByExtension.delete(ext.path);
-			await this.deps.initializeMemory();
-
-			if (notify) {
-				this.deps.notifyExtensionsChanged();
-			}
+			await writer.runCandidateCallback(this.deps.getExtensionRunner(), () => this.deps.initializeMemory());
+			this._commitLiveExtensionMutation(previousRunner, candidateAttempt, notify);
 		} catch (error) {
 			if (revokeExplicitGrant && hadExplicitGrant) {
 				this._explicitLiveExtensionPaths.add(explicitGrantPath);
 			}
 			throw error;
+		} finally {
+			candidateAttempt.discard();
 		}
 	}
 
@@ -2311,28 +2466,33 @@ export class RuntimeBuilder {
 	 * and runs the extension's session_start lifecycle.
 	 * Falls back to full reload on error.
 	 */
-	async loadExtensionLive(extensionPath: string): Promise<void> {
-		this._assertReloadQuiescent("load extension");
-		this._assertExtensionLoadAllowed(extensionPath, "explicit");
+	async loadExtensionLive(extensionPath: string, options?: RuntimeReloadOptions): Promise<void> {
+		const writer = this._beginMutation("load extension", options);
 		try {
-			await this._loadExtensionLive(extensionPath, "explicit", true);
+			this._assertExtensionLoadAllowed(extensionPath, "explicit");
 		} catch (error) {
-			await this._recoverLiveExtensionFailure();
+			writer.release();
 			throw error;
 		}
+		return this._settleLiveExtensionMutation(writer, () =>
+			this._loadExtensionLive(extensionPath, "explicit", true, writer),
+		);
 	}
 
 	private async _loadExtensionLive(
 		extensionPath: string,
 		authority: ExtensionImportAuthority,
 		notify: boolean,
+		writer: RuntimeMutationLease,
 	): Promise<void> {
+		writer.assertCurrent();
 		const previousRunner = this.deps.getExtensionRunner();
+		const candidateAttempt = writer.beginCandidateAttempt();
 		let explicitGrantPath: string | undefined;
 		let hadExplicitGrant = false;
 		try {
 			// Load the extension with fresh import
-			const extension = await this._importExtension(extensionPath);
+			const extension = await this._importExtension(extensionPath, writer);
 			if (authority === "explicit") {
 				explicitGrantPath = extension.path;
 				hadExplicitGrant = this._explicitLiveExtensionPaths.has(explicitGrantPath);
@@ -2340,34 +2500,30 @@ export class RuntimeBuilder {
 			}
 
 			// Rebuild runtime to aggregate tools/commands/handlers/providers
-			const activeToolNames = this.deps.getRequestedActiveToolNames() ?? this.deps.getActiveToolNames();
-			const previousFlagValues = previousRunner.getFlagValues();
-			this.buildRuntime({
-				activeToolNames,
-				flagValues: previousFlagValues,
-				includeAllExtensionTools: true,
-			});
+			this._rebuildLiveExtensionRuntime(previousRunner, writer);
 
 			// Run session_start lifecycle for the new extension only
-			await this.deps.getExtensionRunner().emitToExtension(extension, { type: "session_start", reason: "load" });
+			await writer.runCandidateCallback(this.deps.getExtensionRunner(), () =>
+				this.deps.getExtensionRunner().emitToExtension(extension, { type: "session_start", reason: "load" }),
+			);
 			// Activate newly registered legacy/context providers immediately. Reinitialization also
 			// refreshes provider tools and preserves all providers owned by existing extensions.
-			await this.deps.initializeMemory();
-			previousRunner.retire();
-
-			if (notify) {
-				this.deps.notifyExtensionsChanged();
-			}
+			await writer.runCandidateCallback(this.deps.getExtensionRunner(), () => this.deps.initializeMemory());
+			this._commitLiveExtensionMutation(previousRunner, candidateAttempt, notify);
 		} catch (error) {
 			if (explicitGrantPath && !hadExplicitGrant) {
 				this._explicitLiveExtensionPaths.delete(explicitGrantPath);
 			}
 			throw error;
+		} finally {
+			candidateAttempt.discard();
 		}
 	}
 
-	private async _importExtension(extensionPath: string): Promise<Extension> {
-		const { extension, error } = await this.deps.getResourceLoader().loadSingleExtension(extensionPath);
+	private async _importExtension(extensionPath: string, writer: RuntimeMutationLease): Promise<Extension> {
+		const { extension, error } = await writer.runCandidateCallback(this.deps.getExtensionRunner(), () =>
+			this.deps.getResourceLoader().loadSingleExtension(extensionPath),
+		);
 		if (error || !extension) {
 			throw new Error(error || `Failed to load extension: ${extensionPath}`);
 		}
@@ -2380,9 +2536,9 @@ export class RuntimeBuilder {
 		}
 	}
 
-	private async _recoverLiveExtensionFailure(): Promise<void> {
+	private async _recoverLiveExtensionFailure(writer: RuntimeMutationLease): Promise<void> {
 		try {
-			await this.reload();
+			await this._reloadOnce(writer);
 		} catch {
 			// Preserve the original live-operation error; recovery is best effort.
 		}
@@ -2393,52 +2549,54 @@ export class RuntimeBuilder {
 	 * Loads extensions that should be enabled but aren't, and unloads extensions that shouldn't be.
 	 * Falls back to full reload if any individual load/unload fails.
 	 */
-	async reconcileLoadedExtensions(): Promise<void> {
-		this._assertReloadQuiescent("reconcile extensions");
+	async reconcileLoadedExtensions(options?: RuntimeReloadOptions): Promise<void> {
+		const writer = this._beginMutation("reconcile extensions", options);
 
 		try {
-			// Get all discoverable extension paths
-			const allDiscoverablePaths = await this.deps.getResourceLoader().getDiscoverableExtensionPaths();
+			try {
+				// Get all discoverable extension paths
+				const allDiscoverablePaths = await this.deps.getResourceLoader().getDiscoverableExtensionPaths();
 
-			const loadedExtensions = this.deps.getResourceLoader().getExtensions().extensions;
-			const targetAuthorities = new Map<string, "loaded" | ExtensionImportAuthority>();
-			for (const extension of this.deps.filterExtensionsForRuntime(
-				loadedExtensions,
-				this._explicitLiveExtensionPaths,
-			)) {
-				targetAuthorities.set(extension.path, "loaded");
-			}
-			for (const path of this._explicitLiveExtensionPaths) {
-				if (this.deps.isExtensionPathAllowed(path, "explicit")) {
-					targetAuthorities.set(path, "explicit");
+				const loadedExtensions = this.deps.getResourceLoader().getExtensions().extensions;
+				const targetAuthorities = new Map<string, "loaded" | ExtensionImportAuthority>();
+				for (const extension of this.deps.filterExtensionsForRuntime(
+					loadedExtensions,
+					this._explicitLiveExtensionPaths,
+				)) {
+					targetAuthorities.set(extension.path, "loaded");
 				}
-			}
-			for (const path of allDiscoverablePaths) {
-				if (this.deps.isExtensionPathAllowed(path, "profile") && !targetAuthorities.has(path)) {
-					targetAuthorities.set(path, "profile");
+				for (const path of this._explicitLiveExtensionPaths) {
+					if (this.deps.isExtensionPathAllowed(path, "explicit")) {
+						targetAuthorities.set(path, "explicit");
+					}
 				}
-			}
+				for (const path of allDiscoverablePaths) {
+					if (this.deps.isExtensionPathAllowed(path, "profile") && !targetAuthorities.has(path)) {
+						targetAuthorities.set(path, "profile");
+					}
+				}
 
-			// Apply unloads first, then loads. A failed mutation stops the generation immediately; the
-			// outer recovery reload restores one coherent runtime instead of compounding partial changes.
-			for (const extension of [...loadedExtensions]) {
-				if (targetAuthorities.has(extension.path) || targetAuthorities.has(extension.resolvedPath)) continue;
-				this._assertReloadQuiescent("reconcile extensions");
-				await this._unloadExtensionLive(extension.path, false, false);
-			}
+				// Apply unloads first, then loads. A failed mutation stops the generation immediately; the
+				// outer recovery reload restores one coherent runtime instead of compounding partial changes.
+				for (const extension of [...loadedExtensions]) {
+					if (targetAuthorities.has(extension.path) || targetAuthorities.has(extension.resolvedPath)) continue;
+					await this._unloadExtensionLive(extension.path, false, false, writer);
+				}
 
-			for (const [path, authority] of targetAuthorities) {
-				if (authority === "loaded" || this.deps.getResourceLoader().getLoadedExtension(path)) continue;
-				this._assertReloadQuiescent("reconcile extensions");
-				this._assertExtensionLoadAllowed(path, authority);
-				await this._loadExtensionLive(path, authority, false);
-			}
+				for (const [path, authority] of targetAuthorities) {
+					if (authority === "loaded" || this.deps.getResourceLoader().getLoadedExtension(path)) continue;
+					this._assertExtensionLoadAllowed(path, authority);
+					await this._loadExtensionLive(path, authority, false, writer);
+				}
 
-			// Single notification at the end
-			this.deps.notifyExtensionsChanged();
-		} catch (error) {
-			await this._recoverLiveExtensionFailure();
-			throw error;
+				// Single notification at the end
+				this.deps.notifyExtensionsChanged();
+			} catch (error) {
+				await this._recoverLiveExtensionFailure(writer);
+				throw error;
+			}
+		} finally {
+			writer.release();
 		}
 	}
 

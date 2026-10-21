@@ -26,6 +26,7 @@ import {
 	recordedSequences,
 	writeOwnTurnInputRecord,
 } from "./queued-input-record.ts";
+import type { RuntimeMutationHandoff } from "./runtime-generation-admission.ts";
 import type { OwnerRequestClassificationOutcome } from "./session-edge-intent-controller.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 
@@ -328,12 +329,12 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		if (notice) this.deps.emitWarning(notice);
 	}
 
-	async drainQueuedExtensionCommands(): Promise<void> {
+	async drainQueuedExtensionCommands(beginRuntimeHandoff?: () => RuntimeMutationHandoff): Promise<void> {
 		const pendingQueue = this.deps.getPendingQueue();
 		while (pendingQueue.getCommands().length > 0 && !this.deps.isStreaming()) {
 			const commandText = pendingQueue.shiftCommand()!;
 			this.deps.emitQueueUpdate();
-			await pendingQueue.tryExecuteExtensionCommand(commandText);
+			await pendingQueue.tryExecuteExtensionCommand(commandText, undefined, beginRuntimeHandoff);
 		}
 	}
 }
