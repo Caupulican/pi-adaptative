@@ -25,10 +25,30 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 		let commandReloads = 0;
 		let inputWaits = 0;
 		let observingOwnerIngress = false;
+		const factoryReached = createBarrier();
+		const factoryRelease = createBarrier();
+		const shutdownOrder: string[] = [];
+		const disposedFactories: number[] = [];
+		let factoryCalls = 0;
+		let holdFactory = false;
+		let heldFactory = 0;
 		const owner = await world.createRootSession("root", {
 			sessionManager: world.createSessionManager(),
 			extensionFactories: [
-				(pi) => {
+				async (pi) => {
+					const factory = ++factoryCalls;
+					pi.onDispose(() => {
+						disposedFactories.push(factory);
+						shutdownOrder.push(`factory-${factory}-disposed`);
+					});
+					if (holdFactory) {
+						holdFactory = false;
+						heldFactory = factory;
+						shutdownOrder.push(`factory-${factory}-entered`);
+						factoryReached.release();
+						await factoryRelease.promise;
+						shutdownOrder.push(`factory-${factory}-exited`);
+					}
 					pi.registerCommand("h2-reload", {
 						description: "Reload through the exact extension command owner.",
 						handler: async (_args, ctx) => {
@@ -37,6 +57,10 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 						},
 					});
 					pi.on("session_start", async (event) => {
+						if (factory === heldFactory) {
+							shutdownOrder.push(`factory-${factory}-session-start`);
+							pi.appendEntry("h2-shutdown-publication", { factory });
+						}
 						if (event.reason !== "reload" || !armReload) return;
 						armReload = false;
 						lifecycleEntered = true;
@@ -253,6 +277,236 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 			await withDeadline(world.trace, "H2 exact command lease reload", owner.session.prompt("/h2-reload"));
 			expect(commandReloads, "a deliberate reload command retains its exact pre-turn upgrade").toBe(1);
 			expect(errors, "the command handoff emits no extension refusal").toEqual([]);
+			const liveTools = owner.session.getActiveToolNames();
+			owner.session.setActiveToolsByName(liveTools);
+			expect(owner.session.getActiveToolNames(), "the live owner can retain its active tool selection").toEqual(
+				liveTools,
+			);
+
+			// Keep the ordinary reload -> provider answer -> command reload control above.
+			// This candidate is held in the retained inline factory, before loader publication.
+			const shutdownWords = "Keep this owner input pending until runtime replacement settles.";
+			const requestsAtShutdown = [...world.provider.reached];
+			const entriesAtShutdown = JSON.stringify(owner.sessionManager.getEntries());
+			const factoriesBeforeShutdown = factoryCalls;
+			const shutdownInputWaiting = createBarrier();
+			const stopObservingShutdown = owner.session.subscribe((event) => {
+				if (event.type === "wait" && event.id === "runtime_generation.admission" && event.phase === "start")
+					shutdownInputWaiting.release();
+			});
+			let replacementSettled = false;
+			let inputRejections = 0;
+			let closeRequested = false;
+			let atClose:
+				| { entries: string; replacementsSettled: boolean; factoryCalls: number; disposedFactories: number[] }
+				| undefined;
+			let shutdown: Promise<unknown> | undefined;
+			let heldObservation: { entries: string; factoryExited: boolean; requests: string[] } | undefined;
+			let rejectionObservation: { closeTerminal: boolean; replacementSettled: boolean } | undefined;
+			holdFactory = true;
+			const replacement = owner.session.reload().then(
+				() => {
+					replacementSettled = true;
+					shutdownOrder.push("replacement-settled");
+					return undefined;
+				},
+				(error: unknown) => {
+					replacementSettled = true;
+					shutdownOrder.push("replacement-rejected");
+					return error;
+				},
+			);
+			let shutdownInput: Promise<unknown> | undefined;
+			let inputError: unknown;
+			let replacementError: unknown;
+			let shutdownError: unknown;
+			const shutdownBoundaryFailures: unknown[] = [];
+			try {
+				await withDeadline(world.trace, "H2 shutdown reaches real inline factory", factoryReached.promise);
+				shutdownInput = owner.session.prompt(shutdownWords).then(
+					() => undefined,
+					(error: unknown) => {
+						inputRejections++;
+						shutdownOrder.push("owner-input-rejected");
+						return error;
+					},
+				);
+				await withDeadline(
+					world.trace,
+					"H2 shutdown owner waits behind actual replacement",
+					shutdownInputWaiting.promise,
+				);
+				heldObservation = {
+					entries: JSON.stringify(owner.sessionManager.getEntries()),
+					factoryExited: shutdownOrder.includes(`factory-${heldFactory}-exited`),
+					requests: [...world.provider.reached],
+				};
+				shutdownOrder.push("close-requested");
+				shutdown = owner.session.disposeAndWait().then(
+					() => {
+						atClose = {
+							entries: JSON.stringify(owner.sessionManager.getEntries()),
+							replacementsSettled: replacementSettled,
+							factoryCalls,
+							disposedFactories: [...disposedFactories],
+						};
+						shutdownOrder.push("close-terminal");
+						return undefined;
+					},
+					(error: unknown) => {
+						shutdownOrder.push("close-rejected");
+						return error;
+					},
+				);
+				closeRequested = owner.session.getResourceSnapshot().foregroundRecovery.shutdown;
+				inputError = await withDeadline(world.trace, "H2 shutdown rejects the waiting owner input", shutdownInput);
+				rejectionObservation = { closeTerminal: atClose !== undefined, replacementSettled };
+				// A real cancellation result releases external factory work. Do not require teardown
+				// to complete first: an owner that joins physical work must remain able to finish.
+			} catch (error: unknown) {
+				shutdownBoundaryFailures.push(error);
+			} finally {
+				factoryRelease.release();
+				const joins = await Promise.allSettled([
+					withDeadline(world.trace, "H2 shutdown replacement physically joined", replacement),
+					shutdown && withDeadline(world.trace, "H2 physical session shutdown joined", shutdown),
+					shutdownInput && withDeadline(world.trace, "H2 cancelled owner input joined", shutdownInput),
+				]);
+				const [replacementJoin, shutdownJoin, inputJoin] = joins;
+				if (replacementJoin.status === "fulfilled") replacementError = replacementJoin.value;
+				if (shutdownJoin.status === "fulfilled") shutdownError = shutdownJoin.value;
+				if (inputJoin.status === "fulfilled") inputError = inputJoin.value;
+				for (const join of joins) {
+					if (join.status === "rejected") shutdownBoundaryFailures.push(join.reason);
+				}
+				stopObservingShutdown();
+			}
+			if (shutdownBoundaryFailures.length > 0)
+				throw new AggregateError(
+					shutdownBoundaryFailures,
+					"H2 shutdown diagnostic boundary or physical join failed",
+				);
+			const afterJoined = {
+				entries: JSON.stringify(owner.sessionManager.getEntries()),
+				factoryCalls,
+			};
+			const orderAfterJoined = [...shutdownOrder];
+			const factoriesBeforeClosedReload = factoryCalls;
+			const closedReloadError = await withDeadline(
+				world.trace,
+				"H2 reload after physical disposal settles",
+				owner.session.reload().then(
+					() => undefined,
+					(error: unknown) => error,
+				),
+			);
+			const toolsBeforeClosedSetter = owner.session.getActiveToolNames();
+			let closedSetterError: unknown;
+			try {
+				owner.session.setActiveToolsByName([]);
+			} catch (error: unknown) {
+				closedSetterError = error;
+			}
+			const toolsAfterClosedSetter = owner.session.getActiveToolNames();
+			const diagnostic = {
+				order: shutdownOrder,
+				factoriesBeforeShutdown,
+				heldFactory,
+				atClose: atClose && {
+					replacementsSettled: atClose.replacementsSettled,
+					factoryCalls: atClose.factoryCalls,
+					disposedFactories: atClose.disposedFactories,
+				},
+				rejectionObservation,
+				heldFactoryExited: heldObservation?.factoryExited,
+				afterJoinedFactoryCalls: afterJoined.factoryCalls,
+				factoriesBeforeClosedReload,
+				factoriesAfterClosedReload: factoryCalls,
+				disposedFactories,
+				inputRejections,
+				inputError: String(inputError),
+				durableChangedAfterClose: atClose?.entries !== afterJoined.entries,
+				orderAfterJoined,
+				publicationEntries: owner.sessionManager
+					.getEntries()
+					.filter((entry) => entry.type === "custom" && entry.customType === "h2-shutdown-publication").length,
+				providerRequestsBefore: requestsAtShutdown,
+				providerRequestsAfter: [...world.provider.reached],
+				extensionErrors: errors,
+				replacementError: String(replacementError),
+				shutdownError: String(shutdownError),
+				closedReloadError: String(closedReloadError),
+				closedSetterError: String(closedSetterError),
+				toolsBeforeClosedSetter,
+				toolsAfterClosedSetter,
+			};
+			world.trace.mark("root", `h2-shutdown-observations:${JSON.stringify(diagnostic)}`);
+			// Collect both candidates before asserting: an early terminal close must not hide
+			// a distinct public reload that enters a new factory after completed disposal.
+			expect(shutdownError, "physical session disposal succeeds").toBeUndefined();
+			expect(heldObservation?.factoryExited, "actual inline candidate stays physically held before shutdown").toBe(
+				false,
+			);
+			expect(heldObservation?.entries, "waiting owner input has no durable effect behind the factory").toBe(
+				entriesAtShutdown,
+			);
+			expect(heldObservation?.requests, "held candidate starts no owner provider request").toEqual(
+				requestsAtShutdown,
+			);
+			expect(closeRequested, "shutdown entered the real foreground close state").toBe(true);
+			expect(inputError, "the pending owner intent is refused by shutdown").toBeInstanceOf(Error);
+			world.trace.claimRejection(inputError, "Runtime admission ended aborted: prompt submission");
+			expect(inputRejections, "the pending owner promise rejects exactly once").toBe(1);
+			expect(
+				orderAfterJoined
+					.slice(orderAfterJoined.indexOf("close-terminal") + 1)
+					.filter(
+						(event) =>
+							event.startsWith("factory-") &&
+							(event.endsWith("-exited") || event.endsWith("-session-start") || event.endsWith("-disposed")),
+					),
+				"no physical factory work, lifecycle publication or resource release continues after terminal close",
+			).toEqual([]);
+			expect(
+				atClose?.disposedFactories.sort((a, b) => a - b),
+				"terminal close has physically released every constructed generation resource",
+			).toEqual(Array.from({ length: atClose?.factoryCalls ?? 0 }, (_, index) => index + 1));
+			expect(atClose?.entries, "no durable work lands after physical terminal close").toBe(afterJoined.entries);
+			expect(atClose?.factoryCalls, "no factory begins after physical terminal close").toBe(
+				afterJoined.factoryCalls,
+			);
+			expect(
+				owner.sessionManager
+					.getEntries()
+					.filter(
+						(entry) =>
+							entry.type === "message" &&
+							entry.message.role === "user" &&
+							JSON.stringify(entry.message.content).includes(shutdownWords),
+					),
+				"shutdown never persists the refused owner input",
+			).toEqual([]);
+			expect(world.provider.reached, "shutdown starts no provider request for pending owner input").toEqual(
+				requestsAtShutdown,
+			);
+			expect(closedReloadError, "public reload refuses a physically disposed session").toBeInstanceOf(Error);
+			expect(closedSetterError, "public resource mutation refuses a physically disposed session").toBeInstanceOf(
+				Error,
+			);
+			expect(toolsAfterClosedSetter, "closed resource mutation refuses before changing live tools").toEqual(
+				toolsBeforeClosedSetter,
+			);
+			expect(factoryCalls, "reload after terminal disposal never enters a fresh extension factory").toBe(
+				factoriesBeforeClosedReload,
+			);
+			expect(JSON.stringify(owner.sessionManager.getEntries()), "closed reload has no durable effects").toBe(
+				afterJoined.entries,
+			);
+			expect(
+				[...disposedFactories].sort((a, b) => a - b),
+				"every constructed generation releases its resource exactly once",
+			).toEqual(Array.from({ length: factoryCalls }, (_, index) => index + 1));
+			expect(errors, "shutdown and closed reload disclose no unclassified extension errors").toEqual([]);
 		}
 		unsubscribe();
 		expect(
