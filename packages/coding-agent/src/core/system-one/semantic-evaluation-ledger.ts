@@ -5,7 +5,7 @@
  * can read. No path may record an evaluation any other way; that is how `S1 eval` under-reported.
  */
 
-import type { SemanticEvaluationScope } from "../decision/engine.ts";
+import type { SemanticEvaluationOccupancy, SemanticEvaluationScope } from "../decision/engine.ts";
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import type { NoulBand } from "../decision/noul.ts";
 import type { Consequence } from "../decision/primitives.ts";
@@ -16,7 +16,7 @@ import type { ValidationStage } from "./types.ts";
 
 export type SemanticEvaluationOutcome = "ok" | "failed" | "cancelled";
 
-export type { SemanticEvaluationScope } from "../decision/engine.ts";
+export type { SemanticEvaluationOccupancy, SemanticEvaluationScope } from "../decision/engine.ts";
 
 /** Collision-free worker question identity for one objective and logical task across retries. */
 export function semanticWorkerTaskScope(objectiveId: string, taskId: string): SemanticEvaluationScope {
@@ -31,6 +31,8 @@ export interface SemanticEvaluationStart {
 	readonly label: string;
 	readonly consequence?: Consequence;
 	readonly evaluationScope?: SemanticEvaluationScope;
+	/** Runtime execution ownership, separate from the scope of the evidence. Omitted means foreground. */
+	readonly occupancy?: SemanticEvaluationOccupancy;
 	/** Stable family for matching repeated invocations whose program ids include run timestamps. */
 	readonly questionNamespace?: string;
 	/** Epoch ms. */
@@ -67,6 +69,7 @@ export interface SemanticEvaluationObserver {
 		consequence?: Consequence;
 		model?: string;
 		evaluationScope?: SemanticEvaluationScope;
+		occupancy?: SemanticEvaluationOccupancy;
 	}): string;
 	settleOk(
 		evaluationId: string,

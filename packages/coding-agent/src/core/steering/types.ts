@@ -3,6 +3,8 @@
  * Normative reference: URN urn:pi:steering:certificate:1.0 and URN urn:pi:steering:worker-mission:1.0
  */
 
+import type { SemanticEvaluationOccupancy } from "../decision/engine.ts";
+
 export class SteeringProtocolError extends Error {
 	readonly checkpointId: string;
 	readonly details?: unknown;
@@ -108,6 +110,7 @@ export interface SteeringCheckpointRequest {
 	readonly consequence?: "low" | "medium" | "high" | "critical";
 	readonly parentCertificateIds?: readonly string[];
 	readonly signal?: AbortSignal;
+	readonly occupancy?: SemanticEvaluationOccupancy;
 }
 
 export interface SteeringCertificatePolicyRef {

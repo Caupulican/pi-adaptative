@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { SemanticDecisionEngine } from "../decision/engine.ts";
+import type { SemanticDecisionEngine, SemanticEvaluationOccupancy } from "../decision/engine.ts";
 import type { DecisionEngineRouter } from "../decision/engine-router.ts";
 import { TypeSafeSystemOneDecisionEngine } from "../decision/engines/typesafe-system-one-engine.ts";
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
@@ -821,6 +821,7 @@ export class SystemOneSteeringPlane {
 			consequence?: "low" | "medium" | "high" | "critical";
 			parentCertificateIds?: readonly string[];
 			signal?: AbortSignal;
+			occupancy?: SemanticEvaluationOccupancy;
 		} = {},
 	): Promise<SteeringResult> {
 		const request: SteeringCheckpointRequest =
@@ -835,6 +836,7 @@ export class SystemOneSteeringPlane {
 						consequence: options.consequence,
 						parentCertificateIds: options.parentCertificateIds,
 						signal: options.signal,
+						occupancy: options.occupancy,
 					}
 				: requestOrCheckpointId;
 		const stateDigest = canonicalDigest(request.state);
@@ -871,6 +873,7 @@ export class SystemOneSteeringPlane {
 		const evaluationId = this.evaluationObserver?.start({
 			programId: program.id,
 			consequence,
+			occupancy: request.occupancy,
 			...(request.objectiveId && request.taskId
 				? { evaluationScope: semanticWorkerTaskScope(request.objectiveId, request.taskId) }
 				: {}),
@@ -925,7 +928,10 @@ export class SystemOneSteeringPlane {
 
 		if (this.router) {
 			try {
-				evaluation = await this.router.evaluateOrFallback(program, request.state, { consequence });
+				evaluation = await this.router.evaluateOrFallback(program, request.state, {
+					consequence,
+					occupancy: request.occupancy,
+				});
 			} catch (err) {
 				if (this.policy.mode === "system_one_required") {
 					throw new SystemOneSteeringUnavailableError(
@@ -938,6 +944,7 @@ export class SystemOneSteeringPlane {
 			try {
 				evaluation = await this.decisionEngine.evaluate(program, request.state, {
 					consequence,
+					occupancy: request.occupancy,
 					...(request.objectiveId && request.taskId
 						? { evaluationScope: semanticWorkerTaskScope(request.objectiveId, request.taskId) }
 						: {}),
@@ -1113,6 +1120,7 @@ export class SystemOneSteeringPlane {
 			consequence?: "low" | "medium" | "high" | "critical";
 			parentCertificateIds?: readonly string[];
 			signal?: AbortSignal;
+			occupancy?: SemanticEvaluationOccupancy;
 			requirePass?: boolean;
 		} = {},
 	): Promise<SteeringCertificate> {
@@ -1137,6 +1145,7 @@ export class SystemOneSteeringPlane {
 				parentCertificateIds: options.parentCertificateIds,
 				// The abort reaches the engine: an aborted checkpoint settles as cancelled, not failed.
 				signal: options.signal,
+				occupancy: options.occupancy,
 			});
 		} catch (error) {
 			if (error instanceof SystemOneSteeringUnavailableError && !(error instanceof SteeringJudgmentUnavailableError))

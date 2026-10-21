@@ -75,6 +75,7 @@ export class SessionSemanticPlaneController {
 					programId: program.id,
 					...(options?.consequence ? { consequence: options.consequence } : {}),
 					...(options?.evaluationScope ? { evaluationScope: options.evaluationScope } : {}),
+					...(options?.occupancy ? { occupancy: options.occupancy } : {}),
 					model: engine.model,
 				});
 				try {

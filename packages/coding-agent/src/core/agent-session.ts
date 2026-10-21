@@ -1567,7 +1567,7 @@ export class AgentSession {
 			isExtendedBusy: () => {
 				return (
 					(this._systemOneController?.isEvaluating ?? false) ||
-					this._semanticPlane.health.getHealth(true).state === "evaluating"
+					this._semanticPlane.health.hasForegroundEvaluations()
 				);
 			},
 			hasPendingIdleContinuation: () =>
@@ -3156,14 +3156,7 @@ export class AgentSession {
 	}
 
 	private _isForegroundPhaseBusy(): boolean {
-		const phase = this.getSessionWorkState().phase;
-		return (
-			phase === "foreground_preparing" ||
-			phase === "llm_streaming" ||
-			phase === "retrying" ||
-			phase === "compacting" ||
-			phase === "system_one_evaluating"
-		);
+		return this._foregroundRecovery.isForegroundOccupied;
 	}
 
 	/** Compatibility seam retained for focused auto-probe regressions. */

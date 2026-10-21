@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { NoulDirection } from "../decision/noul.ts";
 import { compileDecisionProgramForCheckpoint } from "../steering/programs.ts";
 import { type BandedNoulAnswer, bandedNoulAnswer, isAdverseAnswer } from "../system-one/policy.ts";
-import { type SemanticEvaluationScope, semanticWorkerTaskScope } from "../system-one/semantic-evaluation-ledger.ts";
+import {
+	type SemanticEvaluationOccupancy,
+	type SemanticEvaluationScope,
+	semanticWorkerTaskScope,
+} from "../system-one/semantic-evaluation-ledger.ts";
 import type {
 	LiveWorkerAttempt,
 	SupervisionObservationState,
@@ -14,7 +18,13 @@ export interface SteeringPlane {
 	requireCertificate(
 		checkpoint: string,
 		payload: unknown,
-		context?: { objectiveId?: string; taskId?: string; evidenceRevision?: number; signal?: AbortSignal },
+		context?: {
+			objectiveId?: string;
+			taskId?: string;
+			evidenceRevision?: number;
+			signal?: AbortSignal;
+			occupancy?: SemanticEvaluationOccupancy;
+		},
 	): Promise<{ certificate_id: string; answers?: Record<string, unknown> }>;
 }
 
@@ -22,7 +32,12 @@ export interface DecisionEngine {
 	evaluate(
 		program: unknown,
 		state?: Record<string, unknown>,
-		options?: { consequence?: string; signal?: AbortSignal; evaluationScope?: SemanticEvaluationScope },
+		options?: {
+			consequence?: string;
+			signal?: AbortSignal;
+			evaluationScope?: SemanticEvaluationScope;
+			occupancy?: SemanticEvaluationOccupancy;
+		},
 	): Promise<{
 		answers?: Record<string, { type?: string; noul?: number; choice?: string; value?: boolean | number }>;
 		results?: Record<string, { kind?: string; confidence?: { value?: number }; selected?: unknown }>;
@@ -278,6 +293,7 @@ export class WorkerSemanticSupervisor {
 						taskId: attempt.taskId,
 						evidenceRevision: state.evidenceRevision,
 						signal,
+						occupancy: "background",
 					});
 					certId = cert.certificate_id;
 					answers = requireSupervisionAnswers((cert.answers ?? {}) as Record<string, unknown>, directions);
@@ -288,6 +304,7 @@ export class WorkerSemanticSupervisor {
 						state as unknown as Record<string, unknown>,
 						{
 							consequence: "medium",
+							occupancy: "background",
 							signal,
 							evaluationScope: semanticWorkerTaskScope(attempt.objectiveId, attempt.taskId),
 						},

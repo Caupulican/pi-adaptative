@@ -8,11 +8,16 @@ export type SemanticEvaluationScope =
 	| { readonly kind: "session"; readonly id: string }
 	| { readonly kind: "worker-task"; readonly id: string };
 
+/** Execution ownership is independent of the task identity whose evidence is judged. */
+export type SemanticEvaluationOccupancy = "foreground" | "background";
+
 export interface DecisionOptions {
 	readonly signal?: AbortSignal;
 	readonly consequence?: Consequence;
 	readonly timeoutMs?: number;
 	readonly evaluationScope?: SemanticEvaluationScope;
+	/** Omitted evaluations retain foreground ownership; advisory background work opts out explicitly. */
+	readonly occupancy?: SemanticEvaluationOccupancy;
 }
 
 export interface SemanticDecisionEngine {

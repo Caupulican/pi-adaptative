@@ -26,6 +26,7 @@ import {
 } from "./semantic-doubts.ts";
 import {
 	type SemanticEvaluationObserver,
+	type SemanticEvaluationOccupancy,
 	type SemanticEvaluationRecord,
 	type SemanticEvaluationScope,
 	type SemanticEvaluationStart,
@@ -108,6 +109,7 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 		consequence?: Consequence;
 		model?: string;
 		evaluationScope?: SemanticEvaluationScope;
+		occupancy?: SemanticEvaluationOccupancy;
 	}): string {
 		this.refreshSession();
 		const record: SemanticEvaluationStart = {
@@ -116,6 +118,7 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 			label: semanticEvaluationLabel(input.programId),
 			questionNamespace: semanticQuestionNamespace(input.programId),
 			evaluationScope: input.evaluationScope ?? { kind: "session", id: this.sessionId ?? "process-local" },
+			occupancy: input.occupancy ?? "foreground",
 			...(input.consequence ? { consequence: input.consequence } : {}),
 			startedAt: this.now(),
 		};
@@ -219,6 +222,16 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 	getHealth(bound: boolean): SemanticPlaneHealth {
 		this.refreshSession();
 		return { ...this.healthSnapshot(bound), unresolvedDoubts: this.doubts.snapshot() };
+	}
+
+	/** Advisory work remains visible in whole-plane health without taking root submission authority. */
+	hasForegroundEvaluations(): boolean {
+		this.refreshSession();
+		for (const record of this.open.values()) {
+			if (this.evaluationSessions.get(record.evaluationId) === this.sessionId && record.occupancy !== "background")
+				return true;
+		}
+		return false;
 	}
 
 	listOwnSession(): readonly SemanticDoubt[] {

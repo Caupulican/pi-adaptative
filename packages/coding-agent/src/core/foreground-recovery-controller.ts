@@ -243,6 +243,11 @@ export class ForegroundRecoveryController {
 		return this.hasForegroundOccupancy() || this.deps.hasPendingIdleContinuation?.() === true;
 	}
 
+	/** Current foreground ownership, excluding work only armed to continue once this ownership ends. */
+	get isForegroundOccupied(): boolean {
+		return this.hasForegroundOccupancy();
+	}
+
 	private hasForegroundOccupancy(): boolean {
 		return (
 			this.submissionLease !== undefined ||
