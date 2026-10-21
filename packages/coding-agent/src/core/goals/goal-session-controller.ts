@@ -696,7 +696,8 @@ export class GoalSessionController {
 	 * ordinary foreground turn belongs to the goal just the same. Tagging that work is what lets the
 	 * completion gate see it (`findBlockingToolTasks` matches on `goalId`) and stops its terminal
 	 * from waking a parent whose goal already finished (`resolveWake` treats a missing `goalId` as
-	 * goal-independent). A lease id is always the active goal's id, so this subsumes it.
+	 * goal-independent). A bound execution can retain a replaced goal; execution-owned background
+	 * tasks use {@link getBackgroundToolTaskGoalId} to preserve that attribution.
 	 */
 	getOwnershipGoalId(): string | undefined {
 		const state = this.getState();
@@ -709,6 +710,11 @@ export class GoalSessionController {
 		if (!lease) return undefined;
 		this.resolveExecutionState(lease);
 		return lease.goalId;
+	}
+
+	/** Background tool work keeps its execution goal, with current-goal ownership for unbound turns. */
+	getBackgroundToolTaskGoalId(): string | undefined {
+		return this.getExecutionGoalId() ?? this.getOwnershipGoalId();
 	}
 
 	/** Post-turn judgments belong to the held execution, including any goal it legitimately adopted. */

@@ -1345,7 +1345,7 @@ export class AgentSession {
 			timers: config.timers.port("background-tool-task"),
 			maxRetainedTerminalTasks: config.maxRetainedTerminalTasks,
 			getSessionManager: () => this.sessionManager,
-			getGoalId: () => this._goals.getOwnershipGoalId(),
+			getGoalId: () => this._goals.getBackgroundToolTaskGoalId(),
 			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
 			isForegroundWait: (tool, args) => this.getToolDefinition(tool)?.foregroundWait?.(args as never) === true,
 			// An artifact handle in a task result is a promise that artifact_retrieve can resolve it: no store, no handle, while that
