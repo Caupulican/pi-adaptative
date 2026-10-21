@@ -271,22 +271,6 @@ export function evaluateGoalContinuation(args: {
 		};
 	}
 
-	// Repeated blockers are recovery evidence, not permission to abandon the goal. Force another
-	// approach while leaving genuine owner/approval boundaries available through explicit goal state.
-	const MAX_REQUIREMENT_BLOCKS = 3;
-	for (const reqId of blockedRequirementIds) {
-		const blockCount = state.events.filter((e) => e.type === "block_requirement" && e.id === reqId).length;
-
-		if (blockCount >= MAX_REQUIREMENT_BLOCKS) {
-			return {
-				...baseDecision,
-				action: "continue",
-				reasonCode: "stall_limit_reached",
-				message: `Requirement '${reqId}' has been blocked ${blockCount} times. Inspect the blocker evidence and use a distinct recovery approach; ask the owner only when the blocker is a verified owner/approval boundary. ${SHARED_PREMISE_CHECK}`,
-			};
-		}
-	}
-
 	if (state.status === "usage_limited") {
 		return {
 			...baseDecision,
@@ -312,6 +296,22 @@ export function evaluateGoalContinuation(args: {
 			reasonCode: "goal_cancelled",
 			message: "The goal has been cancelled.",
 		};
+	}
+
+	// Only active goals may recover repeated requirement blockers; lifecycle stops above retain
+	// authority over their preserved requirement history. Recovery is not permission to abandon work.
+	const MAX_REQUIREMENT_BLOCKS = 3;
+	for (const reqId of blockedRequirementIds) {
+		const blockCount = state.events.filter((e) => e.type === "block_requirement" && e.id === reqId).length;
+
+		if (blockCount >= MAX_REQUIREMENT_BLOCKS) {
+			return {
+				...baseDecision,
+				action: "continue",
+				reasonCode: "stall_limit_reached",
+				message: `Requirement '${reqId}' has been blocked ${blockCount} times. Inspect the blocker evidence and use a distinct recovery approach; ask the owner only when the blocker is a verified owner/approval boundary. ${SHARED_PREMISE_CHECK}`,
+			};
+		}
 	}
 
 	if (openRequirementIds.length === 0) {
