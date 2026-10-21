@@ -456,6 +456,7 @@ export function createSemanticSummaryAdmission(deps: SemanticSummaryAdmissionDep
 			try {
 				evaluation = await engine.evaluate(program, state, {
 					signal,
+					occupancy: "background",
 					consequence: "medium",
 					timeoutMs: TRANSCRIPT_SUMMARY_ADMISSION_TIMEOUT_MS,
 				});
