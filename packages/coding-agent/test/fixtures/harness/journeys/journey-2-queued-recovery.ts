@@ -18,6 +18,7 @@ import type { SessionManager } from "../../../../src/kernel/session/session-mana
 import type { ScriptedRequest } from "../scripted-provider.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, type WorkerProjectClaims, withDeadline } from "../session-fixture.ts";
+import { verifyEnrolledWorkerCleanReopen } from "./journey-2-enrolled-reopen.ts";
 
 /**
  * The real proper-lockfile runs its exclusion and lease logic; only its filesystem is redirected to the
@@ -821,6 +822,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		"the queued-context guard refuses A's busy lease",
 	).toBe(true);
 	expect(await world.disposeSessionInBody(e7Fresh.session), "the recovered owner disposes cleanly").toBeUndefined();
+	await verifyEnrolledWorkerCleanReopen(world);
 	await keptAndLateQueuedSubmissions(world);
 	// R21, System One off (the background start and the wake turn ask on-mode questions no reading of this phase derives): a crash
 	// cut while a background task is running. An auxiliary root starts a held echo in the background and goes idle, and its session
