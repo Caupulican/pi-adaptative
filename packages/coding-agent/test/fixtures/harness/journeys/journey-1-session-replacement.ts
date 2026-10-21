@@ -26,7 +26,7 @@ export async function verifySessionReplacementTerminalIdentity(world: HarnessWor
 		const unavailable =
 			"The session resumed after the owning process ended; the original tool completion is unavailable.";
 		const command = `echo ${label}`;
-		const output = `${label}: actual executor completed`;
+		const output = `The actual executor completed for ${label}.`;
 		const candidateTrack = `${label}-unavailable`;
 		let taskId: string | undefined;
 		let creations = 0;
