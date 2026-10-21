@@ -9,6 +9,7 @@ import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { verifyGoalCancellation } from "./journey-2-goal-cancellation.ts";
 import { verifyGoalRetrievalReplacement } from "./journey-2-goal-retrieval-replacement.ts";
 import { verifyStageReplacement } from "./journey-2-stage-replacement.ts";
+import { verifyToolHandoffOwnership } from "./journey-2-tool-handoff-ownership.ts";
 
 const ROUTE_JUDGMENTS = {
 	work_remaining: { kind: "noul", probability: 0.97 },
@@ -78,6 +79,7 @@ export async function verifyGoalReplacementDuringRoute(world: HarnessWorld): Pro
 		route: ROUTE_JUDGMENTS,
 	});
 	await verifyGoalCancellation(world, { active: TURN_JUDGMENTS, replacement: REPLACEMENT_TURN_JUDGMENTS });
+	await verifyToolHandoffOwnership(world, TURN_JUDGMENTS);
 }
 
 async function verifyReplacementVariant(
