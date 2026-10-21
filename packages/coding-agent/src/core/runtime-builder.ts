@@ -141,6 +141,7 @@ import { TypeSafeEvidenceStore } from "./review/typesafe-evidence-store.ts";
 import { SystemOneReviewer } from "./review/typesafe-reviewer.ts";
 import {
 	type RuntimeCandidateAttempt,
+	RuntimeGenerationAdmissionError,
 	type RuntimeMutationHandoff,
 	type RuntimeMutationLease,
 	type RuntimeWorkLease,
@@ -235,6 +236,7 @@ import { createToolTaskToolDefinition, type ToolTaskDependencies } from "./tools
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
 import { countFileLinesSync } from "./util/bounded-file.ts";
 import type { TimerPort } from "./util/timer-port.ts";
+import { type WaitStatusEvent, waitFor } from "./util/wait.ts";
 import { readWorkerExtensionToolGrants, registerWorkerExtensionToolPolicies } from "./worker-extension-grants.ts";
 import { isWorkerProcessToolAllowed } from "./worker-tool-ceiling.ts";
 import { createLane, releaseLane } from "./worktree-sync/git-engine.ts";
@@ -635,6 +637,8 @@ export class RuntimeBuilder {
 	private _reloadPromise: Promise<void> | undefined;
 	private _reloadRequested = false;
 	private readonly _reloadPreludes = new Set<() => void>();
+	private _mutationAdmissionClosed = false;
+	private _activeMutation: { writer: RuntimeMutationLease; completion: Promise<void> } | undefined;
 	private readonly _credentialManager: CredentialManager;
 	private readonly _credentialExposureBoundary: CredentialExposureBoundary;
 	private readonly _credentialBootstrapFiles: readonly string[];
@@ -971,11 +975,68 @@ export class RuntimeBuilder {
 
 	/** Release session-owned mutation payload leases retained by the write/edit tool pair. */
 	async dispose(): Promise<void> {
+		this.assertCanAwaitDisposal();
+		this.closeMutationAdmission();
+		if (this.hasPendingMutation) await this.settleMutations();
 		this._credentialManager.lock();
 		await settleIndependentLifecycle(
 			[() => this._fileMutationIntents.dispose(), () => this._taskDirectories.dispose()],
 			"Runtime resource disposal failed",
 		);
+	}
+
+	/** Close only this builder's ingress; sibling sessions retain their shared directory admission. */
+	closeMutationAdmission(): void {
+		this._mutationAdmissionClosed = true;
+	}
+
+	assertCanAwaitDisposal(): void {
+		this._activeMutation?.writer.assertCanAwaitSettlement();
+	}
+
+	get hasPendingMutation(): boolean {
+		return this._activeMutation !== undefined;
+	}
+
+	/** Accepted mutations retain their writer through recovery and normal finally release. */
+	async settleMutations(report?: (event: WaitStatusEvent) => void, clock?: TimerPort): Promise<void> {
+		const mutation = this._activeMutation;
+		if (!mutation) return;
+		let finished = false;
+		const outcome = await waitFor<true>({
+			id: "runtime_generation.mutation_release",
+			wake: [
+				{
+					id: "runtime_generation.mutation_settled",
+					subscribe: (wake) => {
+						let active = true;
+						void mutation.completion.then(() => {
+							finished = true;
+							if (active) wake();
+						});
+						return () => {
+							active = false;
+						};
+					},
+					check: () => (finished ? { kind: "satisfied", value: true } : undefined),
+				},
+			],
+			signal: undefined,
+			steer: {
+				mode: "exempt",
+				reason: "physical runtime mutation must settle before its dependencies are destroyed",
+			},
+			bound: { kind: "watchdog", overdueMs: 60_000, holder: () => "accepted runtime mutation cleanup" },
+			report,
+			clock,
+		});
+		if (outcome.end.kind !== "satisfied")
+			throw new RuntimeGenerationAdmissionError(`Runtime mutation settlement ended ${outcome.end.kind}.`);
+	}
+
+	private _assertMutationAdmissionOpen(): void {
+		if (this._mutationAdmissionClosed)
+			throw new RuntimeGenerationAdmissionError("Cannot replace runtime resources after session disposal began.");
 	}
 
 	refreshToolRegistry(options?: {
@@ -2136,6 +2197,7 @@ export class RuntimeBuilder {
 	}
 
 	reload(options?: RuntimeReloadOptions): Promise<void> {
+		this._assertMutationAdmissionOpen();
 		runtimeGenerationAdmission(this.deps.getAgentDir()).assertExternalMutationRequest();
 		if (this._reloadPromise) {
 			// State can change while a generation is being validated. Coalesce any number of
@@ -2178,14 +2240,29 @@ export class RuntimeBuilder {
 	}
 
 	private _beginMutation(action: string, options?: RuntimeReloadOptions): RuntimeMutationLease {
+		this._assertMutationAdmissionOpen();
 		const admission = runtimeGenerationAdmission(this.deps.getAgentDir());
 		admission.assertExternalMutationRequest();
 		this._assertReloadQuiescent(action);
-		return admission.tryBeginMutation({
+		const writer = admission.tryBeginMutation({
 			action,
 			ownerCommandLease: options?.ownerCommandLease,
 			ownerHandoff: options?.ownerHandoff,
 		});
+		const settled = Promise.withResolvers<void>();
+		const mutation = { writer, completion: settled.promise };
+		this._activeMutation = mutation;
+		return {
+			...writer,
+			release: () => {
+				try {
+					writer.release();
+				} finally {
+					if (this._activeMutation === mutation) this._activeMutation = undefined;
+					settled.resolve();
+				}
+			},
+		};
 	}
 
 	/**

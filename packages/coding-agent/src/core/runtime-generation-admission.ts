@@ -27,6 +27,8 @@ export interface RuntimeWorkLease {
 
 export interface RuntimeMutationLease {
 	assertCurrent(): void;
+	/** Only an active callback holding this exact writer would wait on its own completion. */
+	assertCanAwaitSettlement(): void;
 	beginCandidateAttempt(): RuntimeCandidateAttempt;
 	runCandidateConstruction<T>(runner: RuntimeCandidateRuntime, callback: () => T): T;
 	runCandidateCallback<T>(runner: RuntimeCandidateRuntime, callback: () => Promise<T>): Promise<T>;
@@ -308,6 +310,14 @@ export class RuntimeGenerationAdmission {
 			assertCurrent: () => {
 				if (this.writer !== writer)
 					throw new RuntimeGenerationAdmissionError("Runtime mutation authority expired.");
+			},
+			assertCanAwaitSettlement: () => {
+				const scope = candidateCallbacks.getStore();
+				if (scope?.writer === writer && isCandidateScopeActive(scope)) {
+					throw new RuntimeGenerationAdmissionError(
+						"Cannot await runtime mutation settlement from its active lifecycle callback.",
+					);
+				}
 			},
 			beginCandidateAttempt: () => {
 				writer.assertCurrent();

@@ -24,6 +24,8 @@ export class SessionRuntimeAdmissionController {
 	}
 
 	mutateResources<T>(label: string, operation: () => T, assertCurrent?: () => void): T {
+		// An accepted mutation may finish through its explicit candidate validator during close.
+		if (!assertCurrent) this.closed.signal.throwIfAborted();
 		const reader = assertCurrent ? undefined : this.admission.tryAdmitWork({ kind: "resource", label });
 		if (!assertCurrent && !reader)
 			throw new RuntimeGenerationAdmissionError(`Cannot change ${label} during runtime generation replacement.`);

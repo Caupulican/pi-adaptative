@@ -298,7 +298,7 @@ import { isWorkerSession } from "./session-role.ts";
 import { SessionRuntimeAdmissionController } from "./session-runtime-admission-controller.ts";
 import { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
 import { hasRunningBackgroundedToolCall, isSessionSettled } from "./session-settlement.ts";
-import { CLOSING_RUN_SETTLE_MS, createSessionShutdownTracker, runSettlesWithin } from "./session-shutdown.ts";
+import { createSessionShutdownTracker, settleClosingSessionMemory } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { buildSessionStreamFn, isRawStreamSimpleFn } from "./session-stream-chain.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
@@ -352,6 +352,7 @@ import {
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
+import type { TimerPort } from "./util/timer-port.ts";
 import type { WaitStatusEvent } from "./util/wait.ts";
 import { currentWorkUnit, openWorkUnit, WORKER_RECEIPTS_CUSTOM_TYPE } from "./work-units.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
@@ -525,6 +526,8 @@ export class AgentSession {
 	private _skillCuratorInstance?: SkillCurator;
 	private _disposed = false;
 	private readonly _runtimeAdmission: SessionRuntimeAdmissionController;
+	private readonly _runtimeMutationWaitClock: TimerPort;
+	private _closingRuntimeWaitOnly = false;
 	/** Set when the closing sequence released the internal agent consumer; a handler that was already running must not continue past it. */
 	private _closingConsumerReleased = false;
 	private _disposeCompletion: Promise<void> | undefined;
@@ -867,6 +870,7 @@ export class AgentSession {
 		this._runtimeAdmission = new SessionRuntimeAdmissionController(runtimeGenerationAdmission(agentDir), (event) =>
 			this._emit(event),
 		);
+		this._runtimeMutationWaitClock = config.timers.port("foreground");
 		this._isChildSession = (config.isChildSession ?? process.env.PI_CHILD_SESSION === "1") || isWorkerSession();
 		reportGithubOriginPinForSession(this._cwd, this._isChildSession, this.sessionManager);
 		this._durableLearningState = this._isChildSession ? undefined : DurableLearningState.forAgentDir(agentDir);
@@ -3519,6 +3523,13 @@ export class AgentSession {
 	}
 
 	private _emit(event: AgentSessionEvent): void {
+		if (
+			this._closingRuntimeWaitOnly &&
+			!(event.type === "wait" && event.id === "runtime_generation.mutation_release")
+		) {
+			if (event.type === "warning") this._holdUnlistenedWarning(event.message);
+			return;
+		}
 		if (event.type === "warning" && this._eventListeners.length === 0) {
 			this._holdUnlistenedWarning(event.message);
 			return;
@@ -3884,9 +3895,11 @@ export class AgentSession {
 	 */
 	dispose(): void {
 		if (this._disposed) return;
+		const { completion, safely, trackRequired, finish } = createSessionShutdownTracker();
+		this._disposeCompletion = completion;
 		this._disposed = true;
+		this._runtimeBuilder.closeMutationAdmission();
 		this._runtimeAdmission.close();
-		const { safely, track, trackRequired, finish } = createSessionShutdownTracker();
 		// The first releases are required ones: a failure in any of them is kept for `disposeAndWait()` and never skips the releases below.
 		trackRequired(async () => {
 			this._compaction.cancelIdlePreparation();
@@ -3920,21 +3933,37 @@ export class AgentSession {
 		}
 		safely(() => this.abortBranchSummary());
 		safely(() => this.abortBash());
-		safely(() => this._skillVault.unload());
+		safely(() => this.agent.abort("session dispose"));
+		// Preparing/postflight submissions and reflection preflight have no agent run to abort.
+		safely(() => this._promptSubmission.abortSubmission("session dispose"));
+		safely(() => this._reflectionTurnLifecycle.abort());
+		safely(() => this._reflectionAbort.abort());
 		safely(() => this._unsubscribeSettingsChanges?.());
 		this._unsubscribeSettingsChanges = undefined;
-		trackRequired(() => disposeShellExecutionSessionAndWait(this._shellSessionKey));
 		safely(() => this._localPrefixWarm.cancel());
-		safely(() => this.agent.abort("session dispose"));
-		// A submission still preparing or finishing (owner-policy classification, postflight) has no run for the agent abort to reach:
-		// cancelling the submission itself keeps a closing session from starting paid System One work after the quit.
-		safely(() => this._promptSubmission.abortSubmission("session dispose"));
+		// Existing close-time user events end here; only the physical mutation join remains visible.
+		this._closingRuntimeWaitOnly = true;
+		// Enroll this whole phase now. Its own tracker joins resources added after physical mutation
+		// settlement; the outer tracker is never extended after finish captures its work.
+		trackRequired(() =>
+			this._runtimeBuilder.hasPendingMutation
+				? this._runtimeBuilder
+						.settleMutations((event) => this._emit(event), this._runtimeMutationWaitClock)
+						.then(() => this._disposeRuntimeDependencies())
+				: this._disposeRuntimeDependencies(),
+		);
+		void finish();
+	}
+
+	private _disposeRuntimeDependencies(): Promise<void> {
+		const { safely, track, trackRequired, finish } = createSessionShutdownTracker();
+		safely(() => this._skillVault.unload());
+		trackRequired(() => disposeShellExecutionSessionAndWait(this._shellSessionKey));
 		track(() => this._gatewayRegistry.stop());
 		trackRequired(() => this._backgroundToolTasks.shutdown());
 		track(() => this._runtimeBuilder.dispose());
 		safely(() => this._localRuntimeController.dispose());
 		safely(() => this._reflection.dispose());
-		safely(() => this._reflectionAbort.abort());
 		trackRequired(() => this._backgroundLanes.abortInFlightLanes());
 		safely(() => this._providerRequestRuntime.dispose());
 		safely(() => {
@@ -3953,52 +3982,20 @@ export class AgentSession {
 		});
 		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
 		this._eventListeners = [];
-		// Ordered, not parallel, and that ordering is the point. The lifecycle abort unwinds any in-flight
-		// reflection turn; awaiting it here means its `agent_end` — and the memory turn-sync that boundary
-		// schedules — have both happened BEFORE `_memory.shutdown()` captures the lifecycle tail it
-		// flushes. Tracked concurrently (as this was), the shutdown would capture that tail first and the
-		// reflection turn would append a write nothing awaits: work landing in the agent dir after
-		// `disposeAndWait()` has already returned.
-		// The abort precedes the settle, and is the lifecycle's rather than `agent.abort()` above, because
-		// a reflection turn still in its own preflight has no run for an agent-level abort to reach: that
-		// abort is a no-op, the settle then waits out a full provider turn, and it executes against
-		// infrastructure this method has already torn down.
-		track(async () => {
-			try {
-				this._reflectionTurnLifecycle.abort();
-				// The aborted run still emits its trailing events (its partial message, then agent_end), which this session persists
-				// and syncs to memory. They are handled before the internal subscription is released; the listeners are already gone.
-				try {
-					if (!(await runSettlesWithin(this.agent.waitForIdle(), CLOSING_RUN_SETTLE_MS))) {
-						this._holdUnlistenedWarning(
-							`A run did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its final message may not have been persisted.`,
-						);
-					}
-				} finally {
+		track(() =>
+			settleClosingSessionMemory({
+				waitForAgentIdle: () => this.agent.waitForIdle(),
+				settleReflectionTurn: () => this.settleReflectionTurn(),
+				settleCompaction: () => this._compaction.settled(),
+				releaseAgentConsumer: () => {
 					safely(() => this._disconnectFromAgent());
 					this._closingConsumerReleased = true;
-				}
-				// The reflection turn awaits its own prompt, which an abort-ignoring provider can hold open: it gets the same bound, so a
-				// stuck turn cannot keep the memory shutdown, the owner's dispose and the closing disclosure from ever running.
-				if (!(await runSettlesWithin(this.settleReflectionTurn(), CLOSING_RUN_SETTLE_MS))) {
-					this._holdUnlistenedWarning(
-						`A reflection turn did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its work may not have been persisted.`,
-					);
-				}
-				// A compaction that was running at the quit (a manual one held by an extension's `session_before_compact` handler, or an
-				// automatic one) gets the same bound: it ends cancelled before the session reports closed, or the timeout is disclosed.
-				if (!(await runSettlesWithin(this._compaction.settled(), CLOSING_RUN_SETTLE_MS))) {
-					this._holdUnlistenedWarning(
-						`A compaction did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its result is discarded.`,
-					);
-				}
-				await this._memory.shutdown();
-			} finally {
-				// After memory: a history summary still in flight records its spend through this owner. The listeners are already
-				// dropped, so a handoff raised here is held by the session; the runtime that ends it takes the held warnings.
-				safely(() => this._semanticUsage.dispose());
-			}
-		});
+				},
+				shutdownMemory: () => this._memory.shutdown(),
+				disposeSemanticUsage: () => safely(() => this._semanticUsage.dispose()),
+				holdWarning: (message) => this._holdUnlistenedWarning(message),
+			}),
+		);
 		track(() => this._toolRecoveryLogger.shutdown());
 		safely(() => cleanupSessionResources(this.sessionId));
 		// Final sweep for any grep/find artifact already released (reference count zero) but
@@ -4011,8 +4008,8 @@ export class AgentSession {
 		trackRequired(async () => {
 			this._pipeline.cleanupToolArtifactStoreOnDispose();
 		});
-		this._pipeline.clearWorkerContextPolicyLanes();
-		this._disposeCompletion = finish();
+		trackRequired(async () => this._pipeline.clearWorkerContextPolicyLanes());
+		return finish();
 	}
 
 	/**
@@ -4020,6 +4017,7 @@ export class AgentSession {
 	 * takes them itself: a runtime does, through takeUndeliveredWarnings, and passes `drainClosingWarnings: false`.
 	 */
 	async disposeAndWait(options?: { readonly drainClosingWarnings?: boolean }): Promise<void> {
+		this._runtimeBuilder.assertCanAwaitDisposal();
 		this.dispose();
 		try {
 			await this._disposeCompletion;

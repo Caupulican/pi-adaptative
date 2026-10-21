@@ -1,4 +1,5 @@
 import { expect } from "vitest";
+import { RuntimeGenerationAdmissionError } from "../../../../src/core/runtime-generation-admission.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { runManagedReloadRecoveryInteraction } from "./journey-1-managed-reload.ts";
@@ -32,6 +33,10 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 		let factoryCalls = 0;
 		let holdFactory = false;
 		let heldFactory = 0;
+		let selfJoinArmed = false;
+		let disposeFromLifecycle: (() => Promise<void>) | undefined;
+		const selfJoinErrors: unknown[] = [];
+		const selfJoinClosedStates: boolean[] = [];
 		const owner = await world.createRootSession("root", {
 			sessionManager: world.createSessionManager(),
 			extensionFactories: [
@@ -57,6 +62,13 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 						},
 					});
 					pi.on("session_start", async (event) => {
+						if (event.reason === "reload" && selfJoinArmed) {
+							selfJoinArmed = false;
+							if (!disposeFromLifecycle) throw new Error("The actual SDK disposal callback was not bound");
+							await disposeFromLifecycle();
+							pi.appendEntry("h2-self-join-refused", { factory });
+							return;
+						}
 						if (factory === heldFactory) {
 							shutdownOrder.push(`factory-${factory}-session-start`);
 							pi.appendEntry("h2-shutdown-publication", { factory });
@@ -75,6 +87,14 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 				},
 			],
 		});
+		disposeFromLifecycle = async () => {
+			try {
+				await owner.session.disposeAndWait();
+			} catch (error: unknown) {
+				selfJoinErrors.push(error);
+			}
+			selfJoinClosedStates.push(owner.session.getResourceSnapshot().foregroundRecovery.shutdown);
+		};
 		await owner.session.bindExtensions({
 			uiContext: world.humanInput.ui,
 			onError: (error) => {
@@ -282,6 +302,26 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 			expect(owner.session.getActiveToolNames(), "the live owner can retain its active tool selection").toEqual(
 				liveTools,
 			);
+			const toolsBeforeSelfJoin = owner.session.getToolDefinition("read");
+			selfJoinArmed = true;
+			await withDeadline(world.trace, "H2 actual lifecycle refuses its own disposal join", owner.session.reload());
+			expect(selfJoinErrors, "the exact active candidate receives one typed self-join refusal").toHaveLength(1);
+			expect(selfJoinErrors[0]).toBeInstanceOf(RuntimeGenerationAdmissionError);
+			expect((selfJoinErrors[0] as Error).message).toContain(
+				"Cannot await runtime mutation settlement from its active lifecycle callback",
+			);
+			expect(selfJoinClosedStates, "self-join refusal happens before any close request").toEqual([false]);
+			expect(
+				owner.session.getToolDefinition("read"),
+				"the refused self-join leaves a usable accepted generation",
+			).not.toBe(toolsBeforeSelfJoin);
+			expect(
+				owner.sessionManager
+					.getEntries()
+					.filter((entry) => entry.type === "custom" && entry.customType === "h2-self-join-refused"),
+				"the real candidate continues and persists its marker after self-join refusal",
+			).toHaveLength(1);
+			expect(errors, "caught self-join refusal does not poison the actual reload").toEqual([]);
 
 			// Keep the ordinary reload -> provider answer -> command reload control above.
 			// This candidate is held in the retained inline factory, before loader publication.
@@ -290,9 +330,33 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 			const entriesAtShutdown = JSON.stringify(owner.sessionManager.getEntries());
 			const factoriesBeforeShutdown = factoryCalls;
 			const shutdownInputWaiting = createBarrier();
+			let mutationWaitStarts = 0;
+			let reentrantShutdown: Promise<unknown> | undefined;
+			let reentrantAtClose:
+				| { disposedFactories: number[]; factoryCalls: number; factoryExited: boolean }
+				| undefined;
 			const stopObservingShutdown = owner.session.subscribe((event) => {
 				if (event.type === "wait" && event.id === "runtime_generation.admission" && event.phase === "start")
 					shutdownInputWaiting.release();
+				if (
+					event.type === "wait" &&
+					event.id === "runtime_generation.mutation_release" &&
+					event.phase === "start"
+				) {
+					mutationWaitStarts++;
+					reentrantShutdown = owner.session.disposeAndWait().then(
+						() => {
+							reentrantAtClose = {
+								disposedFactories: [...disposedFactories],
+								factoryCalls,
+								factoryExited: shutdownOrder.includes(`factory-${heldFactory}-exited`),
+							};
+							shutdownOrder.push("reentrant-close-terminal");
+							return undefined;
+						},
+						(error: unknown) => error,
+					);
+				}
 			});
 			let replacementSettled = false;
 			let inputRejections = 0;
@@ -320,6 +384,7 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 			let inputError: unknown;
 			let replacementError: unknown;
 			let shutdownError: unknown;
+			let reentrantShutdownError: unknown;
 			const shutdownBoundaryFailures: unknown[] = [];
 			try {
 				await withDeadline(world.trace, "H2 shutdown reaches real inline factory", factoryReached.promise);
@@ -371,11 +436,14 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 					withDeadline(world.trace, "H2 shutdown replacement physically joined", replacement),
 					shutdown && withDeadline(world.trace, "H2 physical session shutdown joined", shutdown),
 					shutdownInput && withDeadline(world.trace, "H2 cancelled owner input joined", shutdownInput),
+					reentrantShutdown &&
+						withDeadline(world.trace, "H2 reentrant disposal physically joined", reentrantShutdown),
 				]);
-				const [replacementJoin, shutdownJoin, inputJoin] = joins;
+				const [replacementJoin, shutdownJoin, inputJoin, reentrantJoin] = joins;
 				if (replacementJoin.status === "fulfilled") replacementError = replacementJoin.value;
 				if (shutdownJoin.status === "fulfilled") shutdownError = shutdownJoin.value;
 				if (inputJoin.status === "fulfilled") inputError = inputJoin.value;
+				if (reentrantJoin.status === "fulfilled") reentrantShutdownError = reentrantJoin.value;
 				for (const join of joins) {
 					if (join.status === "rejected") shutdownBoundaryFailures.push(join.reason);
 				}
@@ -424,6 +492,9 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 				factoriesAfterClosedReload: factoryCalls,
 				disposedFactories,
 				inputRejections,
+				mutationWaitStarts,
+				reentrantAtClose,
+				reentrantShutdownError: String(reentrantShutdownError),
 				inputError: String(inputError),
 				durableChangedAfterClose: atClose?.entries !== afterJoined.entries,
 				orderAfterJoined,
@@ -445,6 +516,15 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 			// a distinct public reload that enters a new factory after completed disposal.
 			try {
 				expect(shutdownError, "physical session disposal succeeds").toBeUndefined();
+				expect(mutationWaitStarts, "the actual physical mutation join reports its wait once").toBe(1);
+				expect(reentrantShutdownError, "a wait observer can join the same physical disposal").toBeUndefined();
+				expect(reentrantAtClose?.factoryExited, "reentrant disposal cannot finish while its factory is held").toBe(
+					true,
+				);
+				expect(
+					reentrantAtClose?.disposedFactories.sort((a, b) => a - b),
+					"reentrant disposal shares completion only after every generation resource releases",
+				).toEqual(Array.from({ length: reentrantAtClose?.factoryCalls ?? 0 }, (_, index) => index + 1));
 				expect(
 					heldObservation?.factoryExited,
 					"actual inline candidate stays physically held before shutdown",
