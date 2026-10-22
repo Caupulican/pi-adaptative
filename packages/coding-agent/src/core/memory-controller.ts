@@ -1570,8 +1570,10 @@ export class MemoryController {
 			if (projection.content !== undefined) {
 				return [this._hostTransient(USER_PERSONA_CUSTOM_TYPE, projection.content, false)];
 			}
-			const overBudget = `USER PERSONA: USER.md changed (revision ${projection.revision}) beyond this model's memory budget; earlier persona records are stale. Read USER.md when preferences matter.`;
-			return [this._hostTransient(USER_PERSONA_CUSTOM_TYPE, overBudget, true)];
+			const overBudget = projection.unavailable
+				? "USER PERSONA: some preference sources are unavailable or outside this snapshot. Current guidance is incomplete; do not infer removals from missing lines."
+				: `USER PERSONA: USER.md changed (revision ${projection.revision}) beyond this model's memory budget; earlier persona records are stale. Read USER.md when preferences matter.`;
+			return [this._hostTransient(USER_PERSONA_CUSTOM_TYPE, overBudget, false)];
 		} catch {
 			return [];
 		}
@@ -2586,7 +2588,12 @@ export class MemoryController {
 						const admitUserPreference = this.deps.admitUserPreference;
 						const userPreferenceLearning = this.deps.getUserPreferenceLearning?.();
 						writer = new FileStoreProvider({
+							onManagedNotice: () => {
+								if (generation === this._memoryGeneration && writer && writer === this._fileStoreWriter)
+									this._reportManagedNotices(writer);
+							},
 							onDurableMemoryChanged: () => {
+								if (generation !== this._memoryGeneration) return;
 								this._memoryContentRevision++;
 								this._memoryOkfProvider = undefined;
 							},

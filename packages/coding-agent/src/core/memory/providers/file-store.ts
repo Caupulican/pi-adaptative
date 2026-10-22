@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { type Static, Type } from "typebox";
 import { TRANSIENT_RECORD_SUPERSEDING_NOTE } from "../../../kernel/index.ts";
 import {
@@ -68,7 +69,7 @@ import {
 	ROOT_MEMORY_TOOL_NAME,
 	ROOT_MEMORY_WRITE_ACTIONS,
 } from "../worker-memory-tools.ts";
-import { USER_ARCHIVE_POINTER, UserMemoryArchive } from "./user-memory-archive.ts";
+import { USER_ARCHIVE_POINTER, USER_ARCHIVE_PROJECTION_LIMIT, UserMemoryArchive } from "./user-memory-archive.ts";
 import { UserMemoryTransaction } from "./user-memory-transaction.ts";
 
 const NEAR_DUP_THRESHOLD = 0.6;
@@ -253,6 +254,8 @@ type MemoryParams = Static<typeof memoryFields>;
 export interface FileStoreProviderOptions extends HistoryToolBackends {
 	userPreferenceLearning?: UserPreferenceLearningPort;
 	onDurableMemoryChanged?: () => void;
+	/** Synchronous notice-queue signal. The host drains it only for the active provider generation. */
+	onManagedNotice?: () => void;
 	/**
 	 * Admission for a USER.md preference write (the reflection controller). Absent in narrow hosts:
 	 * the write then lands labelled `unverified`, never as an evidence-backed fact.
@@ -363,7 +366,7 @@ export interface ManagedMemoryDriftEntry {
  */
 export interface ManagedMemoryNotice {
 	target: ManagedMemoryTarget;
-	kind: "healed" | "drift" | "archive_unavailable" | "transaction_pending";
+	kind: "healed" | "drift" | "archive_unavailable" | "user_unavailable" | "transaction_pending";
 	/** Digest of the observed content or diagnostic; the dedupe key beside target and kind. */
 	revision: string;
 	message: string;
@@ -371,7 +374,7 @@ export interface ManagedMemoryNotice {
 
 /** The current USER.md working preferences, ready for one provider request (see `userPersonaProjection`). */
 export interface UserPersonaProjection {
-	/** Short digest of the current USER.md preference lines. */
+	/** Short digest of the current preference selection, omissions and availability. */
 	revision: string;
 	/** True when the current preferences differ from what the installed static block renders. */
 	changed: boolean;
@@ -380,6 +383,8 @@ export interface UserPersonaProjection {
 	 * budget. When unchanged: the text that clears an earlier record (only recorded over one).
 	 */
 	content: string | undefined;
+	/** A source is unreadable or truncated; budget fallback must not infer emptiness or removals. */
+	unavailable?: boolean;
 }
 
 /** How much of USER.md the installed static block renders: everything, a truncated head, or nothing. */
@@ -607,15 +612,17 @@ export class FileStoreProvider implements MemoryProvider {
 	private projectRoot = "";
 
 	private lastWrittenMemory = "";
-	private lastWrittenUser = "";
 	private lastWrittenProjectMemory = "";
 	private readonly managedNotices: ManagedMemoryNotice[] = [];
 	/** USER.md as the installed static block renders it; undefined until the block is first frozen. */
-	private frozenUser: { content: string; coverage: FrozenUserCoverage } | undefined;
+	private frozenUser: { content: string; coverage: FrozenUserCoverage; complete: boolean } | undefined;
 	/** Trimmed MEMORY.md lines from the installed frozen static prompt block; undefined before freeze/reset. */
 	private frozenPromptLines: ReadonlySet<string> | undefined;
-	/** Preference lines held by the USER archive shards (with their heading context), refreshed at init and after any archive change. */
-	private archivedUserEntries: Array<{ line: string; section?: string }> = [];
+	/** Undefined means unreadable, never empty. Active and archive views publish as one snapshot. */
+	private userSnapshot: {
+		active: string | undefined;
+		archived: { entries: Array<{ line: string; section?: string }>; truncated: boolean } | undefined;
+	} = { active: undefined, archived: undefined };
 	private userArchive?: UserMemoryArchive;
 	private userTransaction?: UserMemoryTransaction;
 	private okfStore?: OkfProjectMemoryStore;
@@ -673,7 +680,6 @@ export class FileStoreProvider implements MemoryProvider {
 		await fs.mkdir(projectMemoryDir(ctx.agentDir, identity.hash), { recursive: true });
 		this.okfStore = new OkfProjectMemoryStore(ctx.agentDir, ctx.cwd);
 		let memorySnapshot = "";
-		let userSnapshot = "";
 		let projectSnapshot = "";
 		await settleIndependentLifecycle(
 			[
@@ -681,7 +687,7 @@ export class FileStoreProvider implements MemoryProvider {
 					memorySnapshot = await this.initializeManagedFile("memory", this.memoryFilePath, this.memoryStatePath);
 				},
 				async () => {
-					userSnapshot = await this.initializeManagedFile("user", this.userFilePath, this.userStatePath);
+					await this.initializeManagedFile("user", this.userFilePath, this.userStatePath);
 				},
 				async () => {
 					projectSnapshot = await this.initializeManagedFile(
@@ -693,29 +699,85 @@ export class FileStoreProvider implements MemoryProvider {
 			],
 			"Managed memory initialization failed",
 		);
-		[this.lastWrittenMemory, this.lastWrittenUser, this.lastWrittenProjectMemory] = [
-			memorySnapshot,
-			userSnapshot,
-			projectSnapshot,
-		];
+		[this.lastWrittenMemory, this.lastWrittenProjectMemory] = [memorySnapshot, projectSnapshot];
 		this.frozenUser = undefined;
 		this.frozenPromptLines = undefined;
-		await this.refreshArchivedUserLines();
+		await withFileLock(this.userFilePath, () => this.refreshUserSnapshotFromDisk());
 	}
 
-	private async refreshArchivedUserLines(): Promise<void> {
+	private publishUserSnapshot(active: string | undefined, archived: typeof this.userSnapshot.archived): void {
+		const next = { active, archived };
+		if (isDeepStrictEqual(this.userSnapshot, next)) return;
+		this.userSnapshot = next;
+		this.notifyDurableMemoryChanged();
+	}
+
+	private async refreshUserSnapshot(active: string | undefined): Promise<void> {
+		let archived: typeof this.userSnapshot.archived;
 		try {
-			this.archivedUserEntries = this.userArchive ? await this.userArchive.archivedEntries() : [];
+			if (this.userArchive) {
+				const entries = await this.userArchive.archivedEntries(USER_ARCHIVE_PROJECTION_LIMIT + 1);
+				archived = {
+					entries: entries.slice(0, USER_ARCHIVE_PROJECTION_LIMIT),
+					truncated: entries.length > USER_ARCHIVE_PROJECTION_LIMIT,
+				};
+			}
 		} catch (error) {
-			this.archivedUserEntries = [];
-			const diagnostic = String(error).slice(0, 400);
-			this.managedNotices.push({
-				target: "user",
-				kind: "archive_unavailable",
-				revision: contentDigest(diagnostic),
-				message: `Archived USER preferences could not be loaded; the archive projection is unavailable. USER mutations require a complete archive read. ${diagnostic}`,
-			});
+			this.publishUnavailableArchive(active, error);
+			return;
 		}
+		this.publishUserSnapshot(active, archived);
+	}
+
+	/** Caller holds the USER lock, so active and archive bytes describe one observation. */
+	private async refreshUserSnapshotFromDisk(): Promise<void> {
+		let active: string | undefined;
+		let notice: ManagedMemoryNotice | undefined;
+		try {
+			active = await fs.readFile(this.userFilePath, "utf8");
+		} catch (error) {
+			const diagnostic = String(error).slice(0, 400);
+			notice = {
+				target: "user",
+				kind: "user_unavailable",
+				revision: contentDigest(diagnostic),
+				message: `USER preferences could not be read; their prompt projection is unavailable. ${diagnostic}`,
+			};
+		}
+		await this.refreshUserSnapshot(active);
+		if (notice) this.addManagedNotice(notice);
+	}
+
+	private publishUnavailableArchive(active: string | undefined, error: unknown): void {
+		this.publishUserSnapshot(active, undefined);
+		const diagnostic = String(error).slice(0, 400);
+		this.addManagedNotice({
+			target: "user",
+			kind: "archive_unavailable",
+			revision: contentDigest(diagnostic),
+			message: `Archived USER preferences could not be loaded; the archive projection is unavailable. USER mutations require a complete archive read. ${diagnostic}`,
+		});
+	}
+
+	private addManagedNotice(notice: ManagedMemoryNotice): void {
+		this.managedNotices.push(notice);
+		try {
+			this.options.onManagedNotice?.();
+		} catch {
+			// A warning observer cannot change storage or projection outcomes.
+		}
+	}
+
+	private userSnapshotNotice(): string | undefined {
+		const missing = [
+			...(this.userSnapshot.active === undefined ? ["USER.md"] : []),
+			...(this.userSnapshot.archived === undefined ? ["its archive"] : []),
+		];
+		if (missing.length > 0)
+			return `${missing.join(" and ")} could not be read. Available preferences are incomplete; do not infer removals from unavailable sources.`;
+		if (this.userSnapshot.archived?.truncated)
+			return "Additional archived preferences are outside this snapshot; absent lines do not establish removals.";
+		return undefined;
 	}
 
 	/** Where this session's project memory lives, for hosts that render or protect it. */
@@ -734,16 +796,18 @@ export class FileStoreProvider implements MemoryProvider {
 		return estimateTokensFromText(this.lastWrittenMemory) > FileStoreProvider.BUDGET_MEMORY.tokens;
 	}
 
+	private initializeManagedFile(target: "user", filePath: string, statePath: string): Promise<string | undefined>;
+	private initializeManagedFile(target: "memory" | "project", filePath: string, statePath: string): Promise<string>;
 	private async initializeManagedFile(
 		target: ManagedMemoryTarget,
 		filePath: string,
 		statePath: string,
-	): Promise<string> {
+	): Promise<string | undefined> {
 		return withFileLock(filePath, async () => {
 			if (target === "user") {
 				const pending = await this.userTransaction?.recover();
 				if (pending && !pending.clear) {
-					this.managedNotices.push({
+					this.addManagedNotice({
 						target,
 						kind: "transaction_pending",
 						revision: contentDigest(pending.message ?? ""),
@@ -753,19 +817,19 @@ export class FileStoreProvider implements MemoryProvider {
 						return await fs.readFile(filePath, "utf8");
 					} catch (error) {
 						const diagnostic = `USER preferences are unavailable while its transaction is pending: ${String(error).slice(0, 400)}`;
-						this.managedNotices.push({
+						this.addManagedNotice({
 							target,
 							kind: "transaction_pending",
 							revision: contentDigest(diagnostic),
 							message: diagnostic,
 						});
-						return ""; // Unavailable prompt projection; no empty storage is created or adopted.
+						return undefined; // Unavailable projection; no empty storage is created or adopted.
 					}
 				}
 			}
 			const healed = await healEmptyManagedFile(filePath, statePath);
 			if (healed !== undefined) {
-				this.managedNotices.push({
+				this.addManagedNotice({
 					target,
 					kind: "healed",
 					revision: contentDigest(healed),
@@ -810,7 +874,7 @@ export class FileStoreProvider implements MemoryProvider {
 				// write to this target is refused until the operator decides. The notice is the
 				// operator's only signal; the refusal itself surfaces only inside the model's tool errors.
 				const stored = storedManagedContent(stateRead.state);
-				this.managedNotices.push({
+				this.addManagedNotice({
 					target,
 					kind: "drift",
 					revision: currentDigest,
@@ -835,15 +899,14 @@ export class FileStoreProvider implements MemoryProvider {
 	onSystemPromptBlockFrozen(renderedBlock: string): void {
 		if (this.ctx?.isChildSession) return;
 		const selection = this.selectApplicablePreferenceLines();
-		const usr = selection.text;
-		const content = selection.kept.join("\n");
+		const usr = this.renderUserMemory();
 		let coverage: FrozenUserCoverage = "full";
 		if (usr.trim()) {
 			if (!renderedBlock.includes(FileStoreProvider.userSection(usr))) {
 				coverage = renderedBlock.includes(USER_SECTION_HEADER) ? "partial" : "omitted";
 			}
 		}
-		this.frozenUser = { content, coverage };
+		this.frozenUser = { content: selection.text, coverage, complete: this.userSnapshotNotice() === undefined };
 		const lines = new Set<string>();
 		let inMemorySection = false;
 		for (const line of renderedBlock.split("\n")) {
@@ -880,13 +943,20 @@ export class FileStoreProvider implements MemoryProvider {
 	 */
 	userPersonaProjection(budget?: MemoryPromptBudget): UserPersonaProjection | undefined {
 		if (!this.ctx || this.ctx.isChildSession) return undefined;
-		const currentLines = this.selectApplicablePreferenceLines().kept;
-		const current = currentLines.join("\n");
-		const revision = contentDigest(current).slice(0, 8);
-		const frozen = this.frozenUser ?? { content: "", coverage: "omitted" as const };
+		const selection = this.selectApplicablePreferenceLines();
+		const currentLines = selection.kept;
+		const current = selection.text;
+		const notice = this.userSnapshotNotice();
+		const revision = contentDigest(JSON.stringify({ current, notice })).slice(0, 8);
+		const frozen = this.frozenUser ?? { content: "", coverage: "omitted" as const, complete: true };
 		const frozenRendered =
 			frozen.coverage === "full" ? FileStoreProvider.preferenceLines(frozen.content).join("\n") : "";
-		if (current === frozenRendered) {
+		if (
+			notice === undefined &&
+			frozen.complete &&
+			current === frozenRendered &&
+			(currentLines.length > 0 || selection.omitted === 0)
+		) {
 			const cleared =
 				current === ""
 					? `USER PERSONA: USER.md is empty (revision ${revision}); no standing preferences apply and earlier persona records are stale.`
@@ -897,7 +967,7 @@ export class FileStoreProvider implements MemoryProvider {
 				content: FileStoreProvider.fitsPersonaBudget(cleared, budget) ? cleared : undefined,
 			};
 		}
-		if (currentLines.length === 0) {
+		if (notice === undefined && currentLines.length === 0 && selection.omitted === 0) {
 			const empty = `USER PERSONA (USER.md revision ${revision}): USER.md is empty; no standing preferences apply and the USER.md section of the static memory block is superseded. ${PERSONA_PROJECTION_RULE}`;
 			return {
 				revision,
@@ -907,11 +977,20 @@ export class FileStoreProvider implements MemoryProvider {
 		}
 		const header = [
 			`USER PERSONA (USER.md revision ${revision}): ${PERSONA_PROJECTION_RULE}`,
-			frozen.coverage === "omitted"
-				? "The static memory block carries no USER.md section on this model; these are the current preferences."
-				: "This record supersedes the USER.md section of the static memory block.",
+			...(notice
+				? [notice]
+				: [
+						frozen.coverage === "omitted"
+							? "The static memory block carries no USER.md section on this model; these are the current preferences."
+							: "This record supersedes the USER.md section of the static memory block.",
+					]),
 		];
-		return { revision, changed: true, content: FileStoreProvider.boundPersonaRecord(header, currentLines, budget) };
+		return {
+			revision,
+			changed: true,
+			...(notice ? { unavailable: true } : {}),
+			content: FileStoreProvider.boundPersonaRecord(header, currentLines, budget, selection.omitted),
+		};
 	}
 
 	/** Non-empty, trimmed, threat-sanitized USER.md lines: the unit a preference is compared and delivered in. */
@@ -967,6 +1046,7 @@ export class FileStoreProvider implements MemoryProvider {
 		header: string[],
 		lines: string[],
 		budget: MemoryPromptBudget | undefined,
+		alreadyOmitted = 0,
 	): string | undefined {
 		const omittedNote = (count: number) =>
 			`(${count} more preference line${count === 1 ? "" : "s"} on disk; not shown within this model's memory budget)`;
@@ -976,8 +1056,12 @@ export class FileStoreProvider implements MemoryProvider {
 			[
 				...header,
 				...kept,
-				...(kept.length < lines.length
-					? [kept.length === 0 ? noneNote(lines.length) : omittedNote(lines.length - kept.length)]
+				...(kept.length < lines.length + alreadyOmitted
+					? [
+							kept.length === 0
+								? noneNote(lines.length + alreadyOmitted)
+								: omittedNote(lines.length + alreadyOmitted - kept.length),
+						]
 					: []),
 			].join("\n");
 		for (let keep = lines.length; keep >= 0; keep--) {
@@ -1002,12 +1086,13 @@ export class FileStoreProvider implements MemoryProvider {
 
 	/** Every preference this session can see (active file plus archive shards), parsed, in file order. */
 	private allPreferences(): Array<{ parsed: ParsedUserPreferenceLine; section?: string }> {
-		return [...FileStoreProvider.activePreferenceEntries(this.lastWrittenUser), ...this.archivedUserEntries].map(
-			(entry) => ({
-				parsed: parseUserPreferenceLine(entry.line),
-				...(entry.section ? { section: entry.section } : {}),
-			}),
-		);
+		return [
+			...FileStoreProvider.activePreferenceEntries(this.userSnapshot.active ?? ""),
+			...(this.userSnapshot.archived?.entries ?? []),
+		].map((entry) => ({
+			parsed: parseUserPreferenceLine(entry.line),
+			...(entry.section ? { section: entry.section } : {}),
+		}));
 	}
 
 	/** Host-checked applicability: global lines plus the lines scoped to this project's key. */
@@ -1062,7 +1147,7 @@ export class FileStoreProvider implements MemoryProvider {
 
 	/** The USER.md text of the static block: the selected whole lines plus the footer when lines were left out. */
 	private renderUserMemory(): string {
-		return this.selectApplicablePreferenceLines().text;
+		return [this.selectApplicablePreferenceLines().text, this.userSnapshotNotice()].filter(Boolean).join("\n");
 	}
 
 	/**
@@ -1080,8 +1165,11 @@ export class FileStoreProvider implements MemoryProvider {
 					(parsed.metadata.basis === "inferred" && parsed.metadata.observations >= 2),
 			)
 			.map((entry) => renderUserPreferenceForPrompt(entry.parsed, entry.section));
-		if (lines.length === 0) return undefined;
-		const header = `OWNER WORKING PREFERENCES (guidance, not grants): ${PERSONA_PROJECTION_RULE}`;
+		const notice = this.userSnapshotNotice();
+		if (lines.length === 0 && notice === undefined) return undefined;
+		const header = [`OWNER WORKING PREFERENCES (guidance, not grants): ${PERSONA_PROJECTION_RULE}`, notice]
+			.filter(Boolean)
+			.join("\n");
 		const selection = FileStoreProvider.selectWholeLines(
 			FileStoreProvider.sanitizeMemory(lines.join("\n")).split("\n"),
 			{
@@ -1094,8 +1182,8 @@ export class FileStoreProvider implements MemoryProvider {
 			},
 			{ header, footer: FileStoreProvider.preferenceFooter },
 		);
-		// Header and footer count against the bound; with no room for even one line there is no guidance.
-		return selection.kept.length > 0 ? selection.text : undefined;
+		// Framing counts against the bound; incomplete source status can travel without a preference line.
+		return selection.kept.length > 0 || notice ? selection.text || undefined : undefined;
 	}
 
 	private static sanitizeMemory(content: string): string {
@@ -1182,7 +1270,7 @@ export class FileStoreProvider implements MemoryProvider {
 	private setPromptSnapshot(target: ManagedMemoryTarget, content: string): void {
 		if (target === "memory") this.lastWrittenMemory = content;
 		else if (target === "project") this.lastWrittenProjectMemory = content;
-		else this.lastWrittenUser = content;
+		else this.publishUserSnapshot(content, this.userSnapshot.archived);
 	}
 
 	private notifyDurableMemoryChanged(): string | undefined {
@@ -1289,12 +1377,16 @@ export class FileStoreProvider implements MemoryProvider {
 		return withFileLock(entry.filePath, async () => {
 			if (target === "user") {
 				const pending = await this.userTransaction?.recover();
-				if (pending && !pending.clear) return { ok: false, message: pending.message ?? "USER transaction pending" };
+				if (pending && !pending.clear) {
+					await this.refreshUserSnapshotFromDisk();
+					return { ok: false, message: pending.message ?? "USER transaction pending" };
+				}
 			}
 			const { currentOnDisk, revision, managedState } = await inspectManagedMemoryFile(
 				entry.filePath,
 				entry.statePath,
 			);
+			if (target === "user") await this.refreshUserSnapshot(currentOnDisk);
 			if (managedState) return { ok: true, message: `${entry.label} ${alreadyManaged}.` };
 			return recover(entry, { currentOnDisk, revision });
 		});
@@ -1489,7 +1581,17 @@ export class FileStoreProvider implements MemoryProvider {
 		const text = action === "remove" ? "" : stripUserPreferenceMetadata(content ?? "").trim();
 		// The caller holds the USER.md lock: read the archive as it is NOW, not as this provider last
 		// saw it, so a peer session's archive change cannot make a write match a stale line.
-		const archivedEntries = await this.userArchive.mutationEntries();
+		let archivedEntries: ReturnType<typeof collectUserPreferenceEntries>;
+		try {
+			archivedEntries = await this.userArchive.mutationEntries();
+		} catch (error) {
+			this.publishUnavailableArchive(currentOnDisk, error);
+			throw error;
+		}
+		this.publishUserSnapshot(currentOnDisk, {
+			entries: archivedEntries.slice(0, USER_ARCHIVE_PROJECTION_LIMIT),
+			truncated: archivedEntries.length > USER_ARCHIVE_PROJECTION_LIMIT,
+		});
 		input.mutationAdmission.assertPending();
 		// Literal lines: matching and mutation never see the rendered, heading-qualified form.
 		const candidates = [...FileStoreProvider.activePreferenceEntries(currentOnDisk), ...archivedEntries].map(
@@ -1642,6 +1744,7 @@ export class FileStoreProvider implements MemoryProvider {
 				},
 			);
 			warning = transaction.warning;
+			await this.refreshUserSnapshot(result.userContent);
 			if (!admission.reference) admission.commit?.({ persisted: true });
 		} catch (error) {
 			if (!delegated || !admission.reference)
@@ -1653,7 +1756,7 @@ export class FileStoreProvider implements MemoryProvider {
 						: {}),
 				});
 			if (error instanceof MemoryMutationOutcomeError) {
-				await this.refreshArchivedUserLines();
+				await this.refreshUserSnapshotFromDisk();
 				this.notifyDurableMemoryChanged();
 			}
 			throw error;
@@ -1987,22 +2090,23 @@ export class FileStoreProvider implements MemoryProvider {
 													? this.lastWrittenMemory
 													: target === "project"
 														? this.lastWrittenProjectMemory
-														: this.lastWrittenUser;
-											const promptDigest = contentDigest(prompt);
+														: this.userSnapshot.active;
+											const promptDigest = prompt === undefined ? undefined : contentDigest(prompt);
 											const promptTokens =
 												target === "memory"
 													? FileStoreProvider.BUDGET_MEMORY.tokens
 													: target === "project"
 														? FileStoreProvider.BUDGET_PROJECT.tokens
 														: FileStoreProvider.BUDGET_USER.tokens;
-											const revisionText = `Current revision: ${revision.currentDigest}; managed revision: ${revision.managedDigest ?? revision.stateStatus}; pending revision: ${revision.pendingDigest ?? "none"}; prompt snapshot: ${promptDigest}.`;
+											const revisionText = `Current revision: ${revision.currentDigest}; managed revision: ${revision.managedDigest ?? revision.stateStatus}; pending revision: ${revision.pendingDigest ?? "none"}; prompt snapshot: ${promptDigest ?? "unavailable"}.`;
 											return {
 												text: `## ${label} (${Buffer.byteLength(currentOnDisk, "utf8")} bytes, ${estimateTokensFromText(currentOnDisk)} approximate tokens, prompt allocation ${promptTokens} tokens, resource ceiling ${FileStoreProvider.RESOURCE_CEILING} bytes)\n${revisionText}\n${revision.drift ? `Drift detected. ${MEMORY_DRIFT_RECOVERY}\n` : ""}${currentOnDisk.trim() || "(empty)"}`,
 												details: {
 													target,
 													path: filePath,
 													...revision,
-													promptDigest,
+													promptAvailable: prompt !== undefined,
+													...(promptDigest ? { promptDigest } : {}),
 													currentBytes: Buffer.byteLength(currentOnDisk, "utf8"),
 													currentChars: Buffer.byteLength(currentOnDisk, "utf8"),
 													promptTokens,
@@ -2061,16 +2165,18 @@ export class FileStoreProvider implements MemoryProvider {
 							mutationAdmission.assertPending();
 							if (target === "user") {
 								const pending = await this.userTransaction?.recover();
-								if (pending && !pending.clear)
+								if (pending && !pending.clear) {
+									await this.refreshUserSnapshotFromDisk();
 									return memoryFailure(
 										"USER transaction pending",
 										pending.message ?? "USER transaction pending",
 										{ partial: true, outcomeUnknown: true, transactionPath: this.userTransaction?.path },
 									);
+								}
 							}
 							const healed = await healEmptyManagedFile(filePath, statePath, signal);
 							if (healed !== undefined)
-								this.managedNotices.push({
+								this.addManagedNotice({
 									target,
 									kind: "healed",
 									revision: contentDigest(healed),
@@ -2109,7 +2215,6 @@ export class FileStoreProvider implements MemoryProvider {
 							// snapshot before applying the caller's mutation to that current content.
 							if (target === "memory") this.lastWrittenMemory = currentOnDisk;
 							else if (target === "project") this.lastWrittenProjectMemory = currentOnDisk;
-							else this.lastWrittenUser = currentOnDisk;
 
 							let newContent = currentOnDisk;
 							let archiveChanged = false;
@@ -2134,7 +2239,6 @@ export class FileStoreProvider implements MemoryProvider {
 								userCommitWarning = outcome.warning;
 								newContent = outcome.userContent;
 								archiveChanged = outcome.archiveChanged;
-								if (archiveChanged) await this.refreshArchivedUserLines();
 								preference = outcome.preference;
 							} else if (action === "add") {
 								if (content === undefined) {
@@ -2192,7 +2296,6 @@ export class FileStoreProvider implements MemoryProvider {
 
 							if (target === "memory") this.lastWrittenMemory = newContent;
 							else if (target === "project") this.lastWrittenProjectMemory = newContent;
-							else this.lastWrittenUser = newContent;
 							const warning = [
 								userCommitWarning,
 								receipt.metadataPending,

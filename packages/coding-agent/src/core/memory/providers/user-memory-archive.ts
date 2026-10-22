@@ -24,6 +24,7 @@ const MAX_ARCHIVE_MUTATION_ENTRIES = 50_000;
 
 export const USER_ARCHIVE_POINTER =
 	"# User profile\n\nArchived preferences: [User preference archive](okf-memory/user-preferences/index.okf.md).\n";
+export const USER_ARCHIVE_PROJECTION_LIMIT = 400;
 
 export type UserMemoryAction =
 	| { action: "add"; content: string }
@@ -203,7 +204,7 @@ export class UserMemoryArchive {
 	 * Preference lines held by the archive shards, in shard order, bounded, each with the heading
 	 * path it was archived under (headings travel with the body into the shard). Blanks skipped.
 	 */
-	async archivedEntries(limit = 400): Promise<Array<{ line: string; section?: string }>> {
+	async archivedEntries(limit = USER_ARCHIVE_PROJECTION_LIMIT): Promise<Array<{ line: string; section?: string }>> {
 		const entries: Array<{ line: string; section?: string }> = [];
 		for (const shard of (await this.readArchive()).shards) {
 			for (const entry of collectUserPreferenceEntries(shard.body)) {
