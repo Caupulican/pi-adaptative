@@ -86,6 +86,19 @@ function detailNumber(details: unknown, key: string): number | undefined {
 	return typeof value === "number" && Number.isInteger(value) ? value : undefined;
 }
 
+/** Exact host identity shared by persisted command evidence and transcript readers. */
+export function workerCommandReceiptId(requestId: string, toolCallId: string): string {
+	return `command-${createHash("sha256")
+		.update(JSON.stringify([requestId, toolCallId]))
+		.digest("hex")}`;
+}
+
+/** A missing exit outcome never establishes success. */
+export function workerCommandOutcome(receipt: WorkerCommandReceipt): "passed" | "failed" | undefined {
+	if (receipt.isError || (receipt.exitCode !== undefined && receipt.exitCode !== 0)) return "failed";
+	return receipt.exitCode === 0 ? "passed" : undefined;
+}
+
 /**
  * The receipt for one finished tool call, or undefined when the tool is not one that runs a command.
  * The command is bounded and withheld entirely when it carries a credential.
@@ -105,9 +118,7 @@ export function commandReceiptFor(input: {
 	const durationMs = detailNumber(input.result.details, "durationMs");
 	const outputRef = detailString(input.result.details, "fullOutputPath");
 	return {
-		id: `command-${createHash("sha256")
-			.update(JSON.stringify([input.requestId, input.toolCallId]))
-			.digest("hex")}`,
+		id: workerCommandReceiptId(input.requestId, input.toolCallId),
 		tool: input.toolName,
 		...workerCommandEvidence(command),
 		isError: input.isError,

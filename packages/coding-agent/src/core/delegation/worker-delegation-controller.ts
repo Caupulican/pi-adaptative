@@ -19,7 +19,7 @@ import type {
 	IsolatedCompletionResult,
 	WorkerDelegationRunOutcome,
 } from "../agent-session-contracts.ts";
-import type { CapabilityEnvelope, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
+import type { CapabilityEnvelope, WorkerClaim, WorkerCommandReceipt, WorkerRequest } from "../autonomy/contracts.ts";
 import {
 	buildToolkitScriptOperation,
 	classifyAllEdgeOperations,
@@ -558,7 +558,7 @@ export interface WorkerDelegationControllerDeps {
 		summary: string;
 		messages: readonly Message[];
 		verifierVerdict?: "accepted" | "rejected";
-		hostVerifiedChecks?: { passed: number; failed: number };
+		hostVerifiedChecks?: readonly WorkerCommandReceipt[];
 	}): Promise<readonly string[]>;
 	/**
 	 * The unsettled-item ladder for a worker's `inconclusive` findings: System One, then a stronger
@@ -5425,6 +5425,8 @@ export class WorkerDelegationController {
 				leaseHeartbeat.stop();
 				leaseHeartbeat.assertHealthy();
 				const rawOutcome = executionResult.rawOutcome;
+				const reviewMessages =
+					recoveredTerminal?.messages ?? conversation.getRawTranscript().slice(transcriptStart);
 				// Attempt ladder: a retryable bounded failure suspends and re-enqueues instead of
 				// terminalizing, resuming from the persisted transcript under a fresh fence.
 				// A halted run is the parent's own stop: its report is the outcome, never a failure to retry.
@@ -5469,7 +5471,7 @@ export class WorkerDelegationController {
 						? await this.deps
 								.settleInconclusive({
 									items: inconclusive,
-									messages: conversation.getRawTranscript().slice(transcriptStart),
+									messages: reviewMessages,
 									signal: workerSignal,
 								})
 								.catch(
@@ -5519,7 +5521,7 @@ export class WorkerDelegationController {
 						? ((await this.deps
 								.reviewWorkerReport?.({
 									summary: workerReportClaimText(settledOutcome.claim),
-									messages: conversation.getRawTranscript().slice(transcriptStart),
+									messages: reviewMessages,
 									...(settledOutcome.claim.verification
 										? { verifierVerdict: settledOutcome.claim.verification.verdict }
 										: {}),
@@ -5527,7 +5529,12 @@ export class WorkerDelegationController {
 										? { hostVerifiedChecks: hostVerifiedChecks(settledOutcome.claim) }
 										: {}),
 								})
-								.catch(() => [])) ?? [])
+								.catch((error: unknown) => [
+									boundedLine(
+										`Worker report review unavailable: ${error instanceof Error ? error.message : String(error)}`,
+										MAX_WORKER_CLAIM_BLOCKER_CHARS,
+									),
+								])) ?? [])
 						: [];
 				const reportReviewedOutcome: WorkerRunOutcome =
 					reportBlockers.length === 0

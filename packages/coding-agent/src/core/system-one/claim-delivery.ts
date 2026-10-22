@@ -13,7 +13,9 @@ import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from 
 import type { AgentMessage } from "../../kernel/index.ts";
 import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
 import { isPassingTestVerification, retainedVerificationDetails } from "../../kernel/verification-obligations.ts";
+import type { WorkerCommandReceipt } from "../autonomy/contracts.ts";
 import { DEFAULT_NOUL_BAND_THRESHOLDS, isNoulProbability, settledAnswer } from "../decision/noul.ts";
+import { commandReceiptFor, workerCommandOutcome, workerCommandReceiptId } from "../delegation/worker-receipts.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import type { LadderOutcome } from "./unsettled-ladder.ts";
 
@@ -70,9 +72,14 @@ function countDelivery(counts: { succeeded: number; failed: number }, ok: boolea
 }
 
 /** Receipts for the messages a single turn appended. */
-export function collectClaimReceipts(turnMessages: readonly AgentMessage[]): ClaimReceipts {
+export function collectClaimReceipts(
+	turnMessages: readonly AgentMessage[],
+	verifiedChecks: readonly WorkerCommandReceipt[] = [],
+): ClaimReceipts {
 	const calls = new Map<string, ToolCall | undefined>();
 	const seenRequests = new Map<string, Set<string>>();
+	const checks = new Map<string, WorkerCommandReceipt | undefined>();
+	for (const check of verifiedChecks) checks.set(check.id, checks.has(check.id) ? undefined : check);
 	const tests = { passed: 0, failed: 0, lastPassed: undefined as boolean | undefined };
 	const commits = { succeeded: 0, failed: 0 };
 	const pushes = { succeeded: 0, failed: 0 };
@@ -114,17 +121,36 @@ export function collectClaimReceipts(turnMessages: readonly AgentMessage[]): Cla
 		toolCalls += 1;
 		if (ok) succeededToolCalls += 1;
 		const record = retainedVerificationDetails(result.details)?.piVerification;
+		let checkPassed: boolean | undefined;
 		if (record?.evidence === "tests" && record.outcome === "executed") {
-			const passed = invocation?.operationStatus !== "error" && isPassingTestVerification(record);
-			if (passed) tests.passed += 1;
-			else tests.failed += 1;
-			tests.lastPassed = passed;
+			checkPassed = invocation?.operationStatus !== "error" && isPassingTestVerification(record);
+		} else if (invocation && checks.size > 0) {
+			const proof = checks.get(workerCommandReceiptId(invocation.requestId, result.toolCallId));
+			const observed = proof
+				? commandReceiptFor({
+						requestId: invocation.requestId,
+						toolCallId: result.toolCallId,
+						toolName: result.toolName,
+						args: call.arguments,
+						isError: !ok,
+						result,
+					})
+				: undefined;
+			if (proof?.commandDigest && observed?.commandDigest === proof.commandDigest && observed.tool === proof.tool) {
+				const outcome = workerCommandOutcome(observed);
+				if (outcome !== undefined && outcome === workerCommandOutcome(proof)) checkPassed = outcome === "passed";
+			}
 		}
-		const checks = GOAL_TOOLS.has(result.toolName) ? goalCheckRuns(result.details) : undefined;
-		if (checks && checks.passed + checks.failed > 0) {
-			tests.passed += checks.passed;
-			tests.failed += checks.failed;
-			tests.lastPassed = checks.failed === 0;
+		if (checkPassed !== undefined) {
+			if (checkPassed) tests.passed += 1;
+			else tests.failed += 1;
+			tests.lastPassed = checkPassed;
+		}
+		const goalChecks = GOAL_TOOLS.has(result.toolName) ? goalCheckRuns(result.details) : undefined;
+		if (goalChecks && goalChecks.passed + goalChecks.failed > 0) {
+			tests.passed += goalChecks.passed;
+			tests.failed += goalChecks.failed;
+			tests.lastPassed = goalChecks.failed === 0;
 		}
 		const args = (call.arguments ?? {}) as Record<string, unknown>;
 		if (SHELL_TOOLS.has(result.toolName) && typeof args.command === "string") {
@@ -140,31 +166,12 @@ export function collectClaimReceipts(turnMessages: readonly AgentMessage[]): Cla
 	return { tests, commits, pushes, publishes, filesChanged, toolCalls, succeededToolCalls };
 }
 
-function hostVerifiedCheckReceipts(
-	checks: { readonly passed: number; readonly failed: number } | undefined,
-): ClaimReceipts[] {
-	if (!checks || checks.passed + checks.failed <= 0) return [];
-	return [
-		{
-			tests: { passed: checks.passed, failed: checks.failed, lastPassed: checks.failed === 0 },
-			commits: { succeeded: 0, failed: 0 },
-			pushes: { succeeded: 0, failed: 0 },
-			publishes: { succeeded: 0, failed: 0 },
-			filesChanged: [],
-			toolCalls: 0,
-			succeededToolCalls: 0,
-		},
-	];
-}
-
-/** Receipts for an accepted worker report, combining its transcript receipts with host-verified check citations. */
+/** Fold cited checks at their actual transcript positions; each invocation contributes once. */
 export function collectWorkerReportClaimReceipts(input: {
 	readonly messages: readonly AgentMessage[];
-	readonly hostVerifiedChecks?: { readonly passed: number; readonly failed: number };
+	readonly hostVerifiedChecks?: readonly WorkerCommandReceipt[];
 }): ClaimReceipts {
-	const base = collectClaimReceipts(input.messages);
-	const checkReceipts = hostVerifiedCheckReceipts(input.hostVerifiedChecks);
-	return checkReceipts.length > 0 ? mergeClaimReceipts([base, ...checkReceipts]) : base;
+	return collectClaimReceipts(input.messages, input.hostVerifiedChecks);
 }
 
 /** Receipts of several sources (the root's window and accepted workers) as one. */
@@ -329,6 +336,7 @@ export class AnswerClaimChecker {
 		finalAnswer: string,
 		messages: readonly AgentMessage[],
 		acceptedWorkerReceipts: readonly ClaimReceipts[] = [],
+		verifiedChecks: readonly WorkerCommandReceipt[] = [],
 	): Promise<ClaimFinding[] | undefined> {
 		const controller = this.deps.getController();
 		if (!controller || !finalAnswer.trim() || !mayContainDeliveryClaims(finalAnswer)) return undefined;
@@ -344,7 +352,10 @@ export class AnswerClaimChecker {
 			return undefined;
 		}
 		this.outageReported = false;
-		return judgeClaims(answers, mergeClaimReceipts([collectClaimReceipts(messages), ...acceptedWorkerReceipts]));
+		return judgeClaims(
+			answers,
+			mergeClaimReceipts([collectClaimReceipts(messages, verifiedChecks), ...acceptedWorkerReceipts]),
+		);
 	}
 
 	/**
@@ -396,11 +407,10 @@ export class AnswerClaimChecker {
 		readonly messages: readonly AgentMessage[];
 		readonly verifierVerdict?: "accepted" | "rejected";
 		/** Checks the report cites against the host's command receipts: they back a "checks passed" claim. */
-		readonly hostVerifiedChecks?: { readonly passed: number; readonly failed: number };
+		readonly hostVerifiedChecks?: readonly WorkerCommandReceipt[];
 	}): Promise<string[]> {
 		const blockers: string[] = [];
-		const checkReceipts = hostVerifiedCheckReceipts(input.hostVerifiedChecks);
-		for (const finding of (await this.findings(input.summary, input.messages, checkReceipts)) ?? []) {
+		for (const finding of (await this.findings(input.summary, input.messages, [], input.hostVerifiedChecks)) ?? []) {
 			if (finding.verdict === "contradicted")
 				blockers.push(`claim contradicted by the worker's own tool results: ${finding.reason}`);
 			else this.deps.warn(`Unverified worker claim: ${finding.reason}`);
@@ -408,7 +418,7 @@ export class AnswerClaimChecker {
 		// "accepted" is itself a claim: it must rest on the verifier's own inspection, and a failing last
 		// test run contradicts it. A subject with no tests (docs, config) is verified by reading it.
 		if (input.verifierVerdict === "accepted") {
-			const receipts = collectClaimReceipts(input.messages);
+			const receipts = collectWorkerReportClaimReceipts(input);
 			if (receipts.tests.lastPassed === false)
 				blockers.push("verification accepted although the verifier's last test run failed");
 			else if (receipts.succeededToolCalls === 0)

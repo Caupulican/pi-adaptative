@@ -37,7 +37,7 @@ import {
 	MAX_WORKER_REPORT_REFS,
 	MAX_WORKER_REPORT_TEXT_CHARS,
 } from "./worker-claim.ts";
-import { workerCommandEvidence } from "./worker-receipts.ts";
+import { workerCommandEvidence, workerCommandOutcome } from "./worker-receipts.ts";
 
 export const SUBMIT_REPORT_TOOL_NAME = "submit_report";
 
@@ -285,10 +285,8 @@ function resolveCheckEvidence(
 	if (!receipt) return { kind: "ambiguous" };
 	if (!receipt.commandDigest || !check.commandDigest) return { kind: "unavailable" };
 	if (receipt.commandDigest !== check.commandDigest) return { kind: "mismatch" };
-	if (receipt.isError || (receipt.exitCode !== undefined && receipt.exitCode !== 0))
-		return { kind: "resolved", receipt, outcome: "failed" };
-	if (receipt.exitCode === 0) return { kind: "resolved", receipt, outcome: "passed" };
-	return { kind: "incomplete" };
+	const outcome = workerCommandOutcome(receipt);
+	return outcome ? { kind: "resolved", receipt, outcome } : { kind: "incomplete" };
 }
 
 function receiptLine(receipt: WorkerCommandReceipt): string {
@@ -506,29 +504,25 @@ export function judgeSubmittedReport(input: {
 }
 
 /**
- * The checks a submitted report states as passed or failed, counted from the host's own receipts: a check
- * counts as passed only when the receipt it cites exited zero, and as failed when that receipt shows a
- * failure. This is what backs a "the checks passed" claim in the claim check, which otherwise counts only
- * recognized test-suite runs and so flags an honest report of an ad-hoc command as unsupported.
+ * Unique host receipts cited by resolved checks. Keep identity and outcome until the transcript
+ * reader reaches each invocation; aggregate counts would duplicate tests and lose execution order.
  */
 export function hostVerifiedChecks(claim: {
 	readonly report?: WorkerSubmittedReport;
 	readonly commandReceipts?: readonly WorkerCommandReceipt[];
-}): { passed: number; failed: number } | undefined {
+}): readonly WorkerCommandReceipt[] | undefined {
 	if (!claim.report || !claim.commandReceipts) return undefined;
 	const receipts = receiptIndex(claim.commandReceipts);
-	let passed = 0;
-	let failed = 0;
+	const verified: WorkerCommandReceipt[] = [];
 	const counted = new Set<string>();
 	for (const check of claim.report.checks) {
 		if (check.result === "not_run") continue;
 		const evidence = resolveCheckEvidence(check, receipts);
 		if (evidence.kind !== "resolved" || counted.has(evidence.receipt.id)) continue;
 		counted.add(evidence.receipt.id);
-		if (evidence.outcome === "failed") failed += 1;
-		else passed += 1;
+		verified.push(evidence.receipt);
 	}
-	return passed + failed > 0 ? { passed, failed } : undefined;
+	return verified.length > 0 ? verified : undefined;
 }
 
 /**

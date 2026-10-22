@@ -66,6 +66,8 @@ import { WorkerUsageAccounting } from "./worker-usage-accounting.ts";
 
 export interface RecoveredWorkerTerminalCompletion {
 	attemptId: string;
+	/** Validated messages of this exact attempt, retained for post-recovery report review. */
+	messages: readonly Message[];
 	text: string;
 	usage: Usage;
 	stopReason: string;

@@ -652,7 +652,7 @@ export class WorkerRecoveryCoordinator {
 					toolCallId: message.toolCallId,
 					toolName: call.name,
 					args: call.arguments,
-					isError: message.isError || invocation.operationStatus === "error",
+					isError: invocation.operationStatus === "error",
 					result: message,
 				});
 				if (receipt) appendCommandReceipt(commandReceipts, receipt);
@@ -667,6 +667,7 @@ export class WorkerRecoveryCoordinator {
 			.join("");
 		return {
 			attemptId,
+			messages: transcript.messages.map(({ message }) => message),
 			text,
 			usage: last.usage,
 			stopReason: last.stopReason,
