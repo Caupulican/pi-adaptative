@@ -4,12 +4,16 @@ import {
 	createReadStream,
 	existsSync,
 	constants as fsConstants,
+	fstatSync,
+	linkSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readSync,
 	renameSync,
+	type Stats,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
@@ -28,6 +32,8 @@ import {
 	createCustomMessage,
 } from "../messages.ts";
 import { ownerInputIdOf } from "../owner-input-stamp.ts";
+import { currentSynchronousFileLockScope, isMissingFileError, withFileLockSync } from "../storage/atomic-file.ts";
+import { sameFileVersion } from "../storage/bounded-file.ts";
 import { classifyTransientRecord } from "../transient-records.ts";
 import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
@@ -80,14 +86,25 @@ export const MAX_SESSION_ENTRY_VISIT_COUNT = 1_024;
 export const MAX_SESSION_MESSAGE_BATCH_ENTRIES = 256;
 const MAX_SESSION_LINEAGE_DEPTH = 64;
 
+/** Share the exact active transcript lock when called from its synchronous owner. */
+function withSessionFileLock<T>(filePath: string, operation: () => T): T {
+	const borrowedScope = currentSynchronousFileLockScope(filePath);
+	return withFileLockSync(filePath, operation, borrowedScope ? { borrowedScope } : undefined);
+}
+
 /** An existing history disappearing is a failed write, never permission to create a suffix-only file. */
-function appendToExistingSessionFile(filePath: string, content: string): void {
-	const fd = openSync(filePath, fsConstants.O_WRONLY | fsConstants.O_APPEND);
-	try {
-		writeFileSync(fd, content);
-	} finally {
-		closeSync(fd);
-	}
+function appendToExistingSessionFile(filePath: string, content: string, expected?: Stats): Stats {
+	return withSessionFileLock(filePath, () => {
+		const fd = openSync(filePath, fsConstants.O_WRONLY | fsConstants.O_APPEND);
+		try {
+			if (expected && !sameFileVersion(expected, fstatSync(fd)))
+				throw new Error("Session file changed before its tail repair; reopen it before retrying.");
+			writeFileSync(fd, content);
+			return fstatSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+	});
 }
 
 export interface SessionHeader {
@@ -233,10 +250,10 @@ export interface SessionInfo {
  * persisted them. `rewritten` marks a whole-file rewrite: earlier byte offsets are no longer valid.
  */
 export interface SessionEntriesPersistedEvent {
-	sessionId: string;
-	sessionFile: string;
-	entryIds: readonly string[];
-	rewritten: boolean;
+	readonly sessionId: string;
+	readonly sessionFile: string;
+	readonly entryIds: readonly string[];
+	readonly rewritten: boolean;
 }
 
 export type SessionEntriesPersistedListener = (event: SessionEntriesPersistedEvent) => void;
@@ -964,9 +981,16 @@ function loadEntriesFromFileInternal(
 	filePath: string,
 	options?: { maxLineChars?: number },
 	onEntry?: (entry: FileEntry, offset: number | undefined, length: number | undefined) => void,
-): { entries: FileEntry[]; indexedBytes: number; unterminatedTail?: boolean } {
+): { entries: FileEntry[]; indexedBytes: number; unterminatedTail?: boolean; revision?: Stats } {
 	const resolvedFilePath = normalizePath(filePath);
-	if (!existsSync(resolvedFilePath)) return { entries: [], indexedBytes: 0 };
+	let revision: Stats;
+	try {
+		revision = statSync(resolvedFilePath);
+	} catch (error) {
+		if (isMissingFileError(error)) return { entries: [], indexedBytes: 0 };
+		throw error;
+	}
+	if (!revision.isFile()) throw new Error("Session history is not a regular file.");
 
 	// A single line beyond this budget can never become a usable entry, and
 	// accumulating it would crash the whole load (RangeError near V8's max string
@@ -986,6 +1010,7 @@ function loadEntriesFromFileInternal(
 	let lineLength = 0;
 	let unterminatedTail = false;
 	try {
+		if (!sameFileVersion(revision, fstatSync(fd))) throw new Error("Session file changed while opening it.");
 		const decoder = new StringDecoder("utf8");
 		const lines = new StreamingLineDecoder(maxLineChars, { overflow: "skip", lineEndings: "lf" });
 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
@@ -1024,18 +1049,20 @@ function loadEntriesFromFileInternal(
 		for (const line of lines.push(decoder.end())) appendLine(line);
 		const finalLine = lines.finish();
 		if (finalLine !== undefined) appendLine(finalLine, lineOffset, lineLength);
+		if (!sameFileVersion(revision, fstatSync(fd)) || !sameFileVersion(revision, statSync(resolvedFilePath)))
+			throw new Error("Session file changed while reading it; reopen it before retrying.");
 	} finally {
 		closeSync(fd);
 	}
 
 	// Validate session header
-	if (entries.length === 0) return { entries, indexedBytes, unterminatedTail };
+	if (entries.length === 0) return { entries, indexedBytes, unterminatedTail, revision };
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
-		return { entries: [], indexedBytes, unterminatedTail };
+		return { entries: [], indexedBytes, unterminatedTail, revision };
 	}
 
-	return { entries, indexedBytes, unterminatedTail };
+	return { entries, indexedBytes, unterminatedTail, revision };
 }
 
 /** Exported for testing */
@@ -1581,6 +1608,7 @@ export class SessionManager {
 		assertAdoptableSessionHeader(resolvePath(sessionFile));
 		const recoveringUncertainWrite = this.persistenceStateUncertain;
 		this.persistenceStateUncertain = true;
+		let receipt: SessionEntriesPersistedEvent | undefined;
 		try {
 			if (recoveringUncertainWrite) {
 				const resolvedSessionFile = resolvePath(sessionFile);
@@ -1601,15 +1629,16 @@ export class SessionManager {
 					}
 				}
 			}
-			this._setSessionFile(sessionFile);
+			receipt = this._setSessionFile(sessionFile);
 			this.persistenceStateUncertain = false;
 		} catch (error) {
 			this.persistenceStateUncertain = true;
 			throw error;
 		}
+		if (receipt) this._emitEntriesPersisted(receipt);
 	}
 
-	private _setSessionFile(sessionFile: string): void {
+	private _setSessionFile(sessionFile: string): SessionEntriesPersistedEvent | undefined {
 		this._invalidateSessionContextCache();
 		this._resetEntryFileIndex(true);
 		this.sessionFile = resolvePath(sessionFile);
@@ -1627,6 +1656,8 @@ export class SessionManager {
 				}
 			});
 			this.fileEntries = loaded.entries;
+			let sourceRevision = loaded.revision;
+			if (!sourceRevision) throw new Error("Session file disappeared while opening it.");
 			let indexedEveryColdPayload = true;
 			for (const id of this.coldPayloadEntryIds) {
 				if (this.entryFileLocations.has(id)) continue;
@@ -1645,13 +1676,13 @@ export class SessionManager {
 				this._resetEntryFileIndex(true);
 				this.newSession();
 				this.sessionFile = explicitPath;
-				this._rewriteFile();
+				const receipt = this._rewriteFile(this.sessionFile, sourceRevision);
 				this.flushed = true;
-				return;
+				return receipt;
 			}
 
 			if (loaded.unterminatedTail) {
-				appendToExistingSessionFile(this.sessionFile, "\n");
+				sourceRevision = appendToExistingSessionFile(this.sessionFile, "\n", sourceRevision);
 				if (this.indexedSessionFileBytes > 0) {
 					this.indexedSessionFileBytes += 1;
 				}
@@ -1667,7 +1698,7 @@ export class SessionManager {
 			// Validate and index the complete parent graph before a migration rewrite can
 			// mutate the source file. Malformed cycles must fail synchronously on cold open.
 			this._buildIndex();
-			if (migrated) this._rewriteFile();
+			const receipt = migrated ? this._rewriteFile(this.sessionFile, sourceRevision) : undefined;
 
 			// Bound in-memory retention: oversized tool result details from disk would
 			// otherwise be pinned in fileEntries for the whole process lifetime.
@@ -1677,6 +1708,7 @@ export class SessionManager {
 
 			this.flushed = true;
 			this._releaseExistingCompactedMessagePayloads();
+			return receipt;
 		} else {
 			const explicitPath = this.sessionFile;
 			this.newSession();
@@ -1792,28 +1824,49 @@ export class SessionManager {
 		if (!existsSync(parentDir)) mkdirSync(parentDir, { recursive: true });
 	}
 
-	private _rewriteFile(targetFile = this.sessionFile): void {
+	private _rewriteFile(targetFile = this.sessionFile, expected?: Stats): SessionEntriesPersistedEvent | undefined {
 		if (!this.persist || !targetFile) return;
+		const assertCurrent = this._capturePersistenceContext();
 		this._ensureSessionFileParent(targetFile);
 		// Write-then-rename keeps the session file valid at every instant: truncating
 		// in place leaves a torn-file window for crashes or a concurrent process
 		// appending to the same session.
 		const tempFile = `${targetFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-		const fd = openSync(tempFile, "wx");
 		try {
-			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${entry.type === "session" ? JSON.stringify(entry) : encodeSessionEntry(entry)}\n`);
+			const fd = openSync(tempFile, "wx");
+			try {
+				for (const entry of this.fileEntries) {
+					writeFileSync(fd, `${entry.type === "session" ? JSON.stringify(entry) : encodeSessionEntry(entry)}\n`);
+				}
+			} finally {
+				closeSync(fd);
 			}
+			withSessionFileLock(targetFile, () => {
+				assertCurrent();
+				if (expected) {
+					if (!sameFileVersion(expected, statSync(targetFile)))
+						throw new Error("Session file changed before its rewrite; reopen it before retrying.");
+					renameSync(tempFile, targetFile);
+				} else {
+					// New branch publication must not replace a file created while serialization ran.
+					linkSync(tempFile, targetFile);
+				}
+			});
 		} finally {
-			closeSync(fd);
+			try {
+				unlinkSync(tempFile);
+			} catch {
+				/* Link/rename publication stands even if temporary cleanup fails. */
+			}
 		}
-		renameSync(tempFile, targetFile);
 		if (targetFile === this.sessionFile) {
 			this._resetEntryFileIndex();
-			this._emitEntriesPersisted(
-				this.fileEntries.flatMap((entry) => (entry.type === "session" ? [] : [entry.id])),
-				true,
-			);
+			return Object.freeze({
+				sessionId: this.sessionId,
+				sessionFile: targetFile,
+				entryIds: Object.freeze(this.fileEntries.flatMap((entry) => (entry.type === "session" ? [] : [entry.id]))),
+				rewritten: true,
+			});
 		}
 	}
 
@@ -2039,9 +2092,14 @@ export class SessionManager {
 		entries: readonly SessionEntry[],
 		encodedEntries: readonly string[],
 		signal?: AbortSignal,
-	): void {
+		assertCurrent: () => void = this._capturePersistenceContext(),
+	): SessionEntriesPersistedEvent | undefined {
 		signal?.throwIfAborted();
+		assertCurrent();
 		if (!this.persist || !this.sessionFile) return;
+		const sessionFile = this.sessionFile;
+		const sessionId = this.sessionId;
+		const fileEntries = this.fileEntries;
 		if (entries.length !== encodedEntries.length) {
 			throw new Error("Session persistence encoding count does not match the entry batch.");
 		}
@@ -2071,33 +2129,73 @@ export class SessionManager {
 						.join("\n")}\n`
 				: `${encodedEntries.join("\n")}\n`;
 		signal?.throwIfAborted();
+		assertCurrent();
 		if (!this.flushed && !shouldFlush) return;
 
 		const initialFlush = !this.flushed;
+		let writeStarted = false;
 		try {
 			if (!this.flushed) {
-				this._ensureSessionFileParent(this.sessionFile);
-				const fd = openSync(this.sessionFile, "wx");
-				try {
-					writeFileSync(fd, encodedPayload);
-				} finally {
-					closeSync(fd);
-				}
+				withSessionFileLock(sessionFile, () => {
+					assertCurrent();
+					writeStarted = true;
+					const fd = openSync(sessionFile, "wx");
+					try {
+						writeFileSync(fd, encodedPayload);
+					} finally {
+						closeSync(fd);
+					}
+				});
 				this.flushed = true;
 			} else if (encodedEntries.length > 0) {
-				appendToExistingSessionFile(this.sessionFile, encodedPayload);
+				withSessionFileLock(sessionFile, () => {
+					assertCurrent();
+					writeStarted = true;
+					appendToExistingSessionFile(sessionFile, encodedPayload);
+				});
 			}
 		} catch (error) {
 			// append/write/close failures may leave a partial JSONL suffix. Do not publish the
 			// entries in memory, and fence every later append until an explicit reload owns the
 			// surviving canonical prefix.
-			this.persistenceStateUncertain = true;
+			if (
+				writeStarted &&
+				this.sessionId === sessionId &&
+				this.sessionFile === sessionFile &&
+				this.fileEntries === fileEntries
+			)
+				this.persistenceStateUncertain = true;
 			throw error;
 		}
-		const persistedIds = initialFlush
-			? [...this.fileEntries, ...entries].flatMap((entry) => (entry.type === "session" ? [] : [entry.id]))
-			: entries.map((entry) => entry.id);
-		this._emitEntriesPersisted(persistedIds, false);
+		return Object.freeze({
+			sessionId,
+			sessionFile,
+			entryIds: Object.freeze(
+				initialFlush
+					? [...fileEntries, ...entries].flatMap((entry) => (entry.type === "session" ? [] : [entry.id]))
+					: entries.map((entry) => entry.id),
+			),
+			rewritten: false,
+		});
+	}
+
+	/** Serialization can call getters; a prepared row must retain the session and branch it was built against. */
+	private _capturePersistenceContext(): () => void {
+		const { sessionId, sessionFile, leafId, byId, fileEntries } = this;
+		const entryCount = fileEntries.length;
+		const indexedCount = byId.size;
+		return () => {
+			if (
+				this.sessionId !== sessionId ||
+				this.sessionFile !== sessionFile ||
+				this.leafId !== leafId ||
+				this.byId !== byId ||
+				this.fileEntries !== fileEntries ||
+				fileEntries.length !== entryCount ||
+				byId.size !== indexedCount
+			)
+				throw new Error("Session context changed while preparing persistence.");
+		};
 	}
 
 	/**
@@ -2111,11 +2209,8 @@ export class SessionManager {
 		};
 	}
 
-	private _emitEntriesPersisted(entryIds: readonly string[], rewritten: boolean): void {
-		const sessionFile = this.sessionFile;
-		if (!sessionFile || this.entriesPersistedListeners.size === 0) return;
-		const event: SessionEntriesPersistedEvent = { sessionId: this.sessionId, sessionFile, entryIds, rewritten };
-		for (const listener of this.entriesPersistedListeners) {
+	private _emitEntriesPersisted(event: SessionEntriesPersistedEvent): void {
+		for (const listener of [...this.entriesPersistedListeners]) {
 			try {
 				listener(event);
 			} catch {
@@ -2125,16 +2220,21 @@ export class SessionManager {
 	}
 
 	_persist(entry: SessionEntry): void {
+		const assertCurrent = this._capturePersistenceContext();
 		const encodedEntry = encodeSessionEntry(entry);
-		this._persistEntries([entry], [encodedEntry]);
+		const receipt = this._persistEntries([entry], [encodedEntry], undefined, assertCurrent);
+		if (receipt) this._emitEntriesPersisted(receipt);
 	}
 
 	private _appendEntries(
 		entries: readonly SessionEntry[],
 		preencodedEntries?: readonly string[],
 		signal?: AbortSignal,
+		publication?: { assertCurrent?: () => void; beforeNotify?: () => void },
 	): void {
 		signal?.throwIfAborted();
+		const assertCurrent = publication?.assertCurrent ?? this._capturePersistenceContext();
+		let receipt: SessionEntriesPersistedEvent | undefined;
 		const encodedEntries =
 			preencodedEntries ??
 			(this.persist && this.sessionFile
@@ -2147,23 +2247,46 @@ export class SessionManager {
 			throw new Error("Session append encoding count does not match the entry batch.");
 		}
 		if (encodedEntries.length > 0) {
-			this._persistEntries(entries, encodedEntries, signal);
+			receipt = this._persistEntries(entries, encodedEntries, signal, assertCurrent);
 		} else {
 			for (const entry of entries) {
 				if (isSessionLifecycleEntry(entry)) encodeSessionEntry(entry);
 			}
 			signal?.throwIfAborted();
 		}
+		assertCurrent();
 		for (const entry of entries) {
 			this.fileEntries.push(entry);
 			this.entries.push(entry);
 			this.byId.set(entry.id, entry);
 			this.leafId = entry.id;
-			if (entry.type === "message" && this.messageEntryIndex?.byId === this.byId) {
-				this.messageEntryIndex.ids.set(entry.message, entry.id);
+		}
+		const assertPublishedContext = this._capturePersistenceContext();
+		const publishedFileEntries = this.fileEntries;
+		const publishedById = this.byId;
+		try {
+			publication?.beforeNotify?.();
+			assertPublishedContext();
+			for (const entry of entries) {
+				if (entry.type === "message" && this.messageEntryIndex?.byId === this.byId) {
+					this.messageEntryIndex.ids.set(entry.message, entry.id);
+				}
+				this._advanceLifecycleActiveCache(entry);
+				assertPublishedContext();
+				this._advanceSessionContextCache(entry);
+				assertPublishedContext();
 			}
-			this._advanceLifecycleActiveCache(entry);
-			this._advanceSessionContextCache(entry);
+		} catch (error) {
+			// A failed projection must not leave partially advanced caches or hide the
+			// already committed rows. Never invalidate a replacement session's caches.
+			if (this.fileEntries === publishedFileEntries && this.byId === publishedById) {
+				this.messageEntryIndex = undefined;
+				this.lifecycleActiveCache = undefined;
+				this._invalidateSessionContextCache();
+			}
+			throw error;
+		} finally {
+			if (receipt) this._emitEntriesPersisted(receipt);
 		}
 	}
 
@@ -2188,8 +2311,8 @@ export class SessionManager {
 			: undefined;
 	}
 
-	private _appendEntry(entry: SessionEntry): void {
-		this._appendEntries([entry]);
+	private _appendEntry(entry: SessionEntry, beforeNotify?: () => void): void {
+		this._appendEntries([entry], undefined, undefined, { beforeNotify });
 	}
 
 	private _getLifecycleActiveCache(): LifecycleActiveCache {
@@ -2358,7 +2481,9 @@ export class SessionManager {
 				`Session message batch cannot contain more than ${MAX_SESSION_MESSAGE_BATCH_ENTRIES} entries.`,
 			);
 		}
+		const assertCurrent = this._capturePersistenceContext();
 		const entries: SessionEntry[] = [];
+		const customBindings: Array<{ message: object; id: string }> = [];
 		const ids = pendingIdSpace(this.byId);
 		let parentId = this.leafId;
 		for (const item of batch) {
@@ -2381,19 +2506,21 @@ export class SessionManager {
 					...deliveredOwnerInput(item.message),
 				};
 			} else if (item.kind === "custom") {
-				if (!item.message || typeof item.message !== "object") {
+				const message = item.message;
+				if (!message || typeof message !== "object") {
 					throw new TypeError("Session message batch custom items require a message object.");
 				}
 				entry = {
 					type: "custom_message",
-					customType: item.message.customType,
-					content: item.message.content,
-					display: item.message.display,
-					details: item.message.details,
+					customType: message.customType,
+					content: message.content,
+					display: message.display,
+					details: message.details,
 					id,
 					parentId,
 					timestamp: new Date().toISOString(),
 				};
+				customBindings.push({ message, id });
 			} else {
 				throw new TypeError("Session message batch items must use kind message or custom.");
 			}
@@ -2402,9 +2529,11 @@ export class SessionManager {
 			parentId = id;
 		}
 		const encodedEntries = entries.map((entry) => encodeSessionEntry(entry));
-		this._appendEntries(entries, encodedEntries);
-		batch.forEach((item, index) => {
-			if (item.kind === "custom") customMessageEntryIds.set(item.message, entries[index]!.id);
+		this._appendEntries(entries, encodedEntries, undefined, {
+			assertCurrent,
+			beforeNotify: () => {
+				for (const { message, id } of customBindings) customMessageEntryIds.set(message, id);
+			},
 		});
 		return entries.map((entry) => entry.id);
 	}
@@ -2481,8 +2610,9 @@ export class SessionManager {
 			usage,
 			fromHook,
 		};
-		this._appendEntry(entry);
-		this._releaseCompactedMessagePayloads(firstKeptEntryId, compactionParentId, retention, entry.id);
+		this._appendEntry(entry, () =>
+			this._releaseCompactedMessagePayloads(firstKeptEntryId, compactionParentId, retention, entry.id),
+		);
 		return entry.id;
 	}
 
@@ -2878,8 +3008,9 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 		};
-		this._appendEntry(entry);
-		if (source !== undefined) customMessageEntryIds.set(source, entry.id);
+		this._appendEntry(entry, () => {
+			if (source !== undefined) customMessageEntryIds.set(source, entry.id);
+		});
 		return entry.id;
 	}
 
@@ -2936,14 +3067,15 @@ export class SessionManager {
 			targetId,
 			label,
 		};
-		this._appendEntry(entry);
-		if (label) {
-			this.labelsById.set(targetId, label);
-			this.labelTimestampsById.set(targetId, entry.timestamp);
-		} else {
-			this.labelsById.delete(targetId);
-			this.labelTimestampsById.delete(targetId);
-		}
+		this._appendEntry(entry, () => {
+			if (label) {
+				this.labelsById.set(targetId, label);
+				this.labelTimestampsById.set(targetId, entry.timestamp);
+			} else {
+				this.labelsById.delete(targetId);
+				this.labelTimestampsById.delete(targetId);
+			}
+		});
 		return entry.id;
 	}
 
@@ -3614,14 +3746,17 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
-
-		// Copy all non-header entries from source
-		for (const entry of sourceEntries) {
-			if (entry.type !== "session") {
-				appendToExistingSessionFile(newSessionFile, `${JSON.stringify(entry)}\n`);
+		withSessionFileLock(newSessionFile, () => {
+			const fd = openSync(newSessionFile, "wx");
+			try {
+				writeFileSync(fd, `${JSON.stringify(newHeader)}\n`);
+				for (const entry of sourceEntries) {
+					if (entry.type !== "session") writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+				}
+			} finally {
+				closeSync(fd);
 			}
-		}
+		});
 
 		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true, agentDir);
 	}

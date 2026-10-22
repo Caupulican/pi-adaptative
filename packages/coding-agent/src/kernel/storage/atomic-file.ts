@@ -19,7 +19,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { promises as fsPromises, mkdirSync, unlinkSync } from "node:fs";
+import { promises as fsPromises, mkdirSync, realpathSync, unlinkSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import type { TimerPort } from "../timer-port.ts";
@@ -62,6 +62,8 @@ async function renameWithRetry(tmpPath: string, filePath: string, options?: Atom
 }
 
 export interface AtomicFileLockOptions {
+	/** Borrow an exact active synchronous callback scope; never extends its owning lock's lifetime. */
+	borrowedScope?: SynchronousFileLockScope;
 	/**
 	 * Bounded retry attempts while waiting for a lock already held elsewhere. Both variants use a
 	 * SHORT, capped backoff (see {@link RETRY_MIN_TIMEOUT_MS}/{@link RETRY_MAX_TIMEOUT_MS}) — these
@@ -113,6 +115,26 @@ export interface AtomicFileLockOptions {
 	 * always released by the operation that took it.
 	 */
 	deadlineAt?: number;
+}
+
+export interface SynchronousFileLockScope {
+	readonly lockfilePath: string;
+}
+
+const synchronousScopes = new Map<string, SynchronousFileLockScope>();
+const scopeLifetimes = new WeakMap<SynchronousFileLockScope, { active: boolean; key: string }>();
+
+function synchronousLockKey(filePath: string, options?: AtomicFileLockOptions): string {
+	const lockPath = options?.lockfilePath ?? `${options?.realpath ? realpathSync(filePath) : resolve(filePath)}.lock`;
+	return pathOperationKey(lockPath);
+}
+
+/** Available only inside the callback whose owner took this exact OS lock. */
+export function currentSynchronousFileLockScope(
+	filePath: string,
+	options?: AtomicFileLockOptions,
+): SynchronousFileLockScope | undefined {
+	return synchronousScopes.get(synchronousLockKey(filePath, options));
 }
 
 /** A lock wait that reached its {@link AtomicFileLockOptions.deadlineAt}: the critical section did not run and no lock is held. */
@@ -357,10 +379,26 @@ export function acquireFileLockSync(filePath: string, options: AtomicFileLockOpt
  * including when `fn` throws.
  */
 export function withFileLockSync<T>(filePath: string, fn: () => T, options?: AtomicFileLockOptions): T {
+	if (options?.borrowedScope) {
+		const lifetime = scopeLifetimes.get(options.borrowedScope);
+		if (!lifetime?.active || lifetime.key !== synchronousLockKey(filePath, options))
+			throw new Error("File lock scope is foreign or no longer active.");
+		return fn();
+	}
 	const release = acquireFileLockSync(filePath, options);
+	let scope: SynchronousFileLockScope | undefined;
 	try {
+		const key = synchronousLockKey(filePath, options);
+		scope = Object.freeze({ lockfilePath: key });
+		scopeLifetimes.set(scope, { active: true, key });
+		synchronousScopes.set(key, scope);
 		return fn();
 	} finally {
+		if (scope) {
+			const lifetime = scopeLifetimes.get(scope)!;
+			lifetime.active = false;
+			if (synchronousScopes.get(lifetime.key) === scope) synchronousScopes.delete(lifetime.key);
+		}
 		// A lock-cleanup failure must never mask fn()'s result (or replace fn()'s own thrown error) —
 		// by this point fn() has already durably committed or failed on its own terms.
 		try {
