@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
-	appendFileSync,
 	closeSync,
 	createReadStream,
 	existsSync,
+	constants as fsConstants,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -79,6 +79,16 @@ export const MAX_SESSION_ENTRY_VISIT_COUNT = 1_024;
 /** Maximum normal message/custom-message records in one atomic append batch. */
 export const MAX_SESSION_MESSAGE_BATCH_ENTRIES = 256;
 const MAX_SESSION_LINEAGE_DEPTH = 64;
+
+/** An existing history disappearing is a failed write, never permission to create a suffix-only file. */
+function appendToExistingSessionFile(filePath: string, content: string): void {
+	const fd = openSync(filePath, fsConstants.O_WRONLY | fsConstants.O_APPEND);
+	try {
+		writeFileSync(fd, content);
+	} finally {
+		closeSync(fd);
+	}
+}
 
 export interface SessionHeader {
 	type: "session";
@@ -1641,7 +1651,7 @@ export class SessionManager {
 			}
 
 			if (loaded.unterminatedTail) {
-				appendFileSync(this.sessionFile, "\n");
+				appendToExistingSessionFile(this.sessionFile, "\n");
 				if (this.indexedSessionFileBytes > 0) {
 					this.indexedSessionFileBytes += 1;
 				}
@@ -2075,8 +2085,7 @@ export class SessionManager {
 				}
 				this.flushed = true;
 			} else if (encodedEntries.length > 0) {
-				this._ensureSessionFileParent(this.sessionFile);
-				appendFileSync(this.sessionFile, encodedPayload);
+				appendToExistingSessionFile(this.sessionFile, encodedPayload);
 			}
 		} catch (error) {
 			// append/write/close failures may leave a partial JSONL suffix. Do not publish the
@@ -3610,7 +3619,7 @@ export class SessionManager {
 		// Copy all non-header entries from source
 		for (const entry of sourceEntries) {
 			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
+				appendToExistingSessionFile(newSessionFile, `${JSON.stringify(entry)}\n`);
 			}
 		}
 
