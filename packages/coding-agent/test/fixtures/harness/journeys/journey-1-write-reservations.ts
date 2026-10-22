@@ -2060,108 +2060,114 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	});
 	await withDeadline(trace, "E13B first writer started", e13bSession.prompt("Start the shell writer."));
 	await withDeadline(trace, "E13B shell admitted", e13bAdmitted.promise);
-
-	const e13bPre = e13bSession.getResourceSnapshot().workers;
-	if (e13bPre === undefined) throw new Error("the E13B owner reports no worker snapshot before teardown");
-	const e13bLeases = e13bPre.reservations.heldLeases;
-	const e13bHolds = e13bPre.executingHolds;
-	const e13bPreClaims = e13bPre.ownedProjectClaims;
-	const e13bLaneAborts = e13bPre.laneAbortControllerCount;
-	expect(e13bLeases, "the shell writer holds exactly one write lease before teardown").toHaveLength(1);
-	expect(e13bPreClaims, "the shell writer owns exactly one project claim before teardown").toHaveLength(1);
-	const e13bPreAgent = e13bPreClaims[0]?.agents[0];
-	if (e13bPreAgent === undefined) throw new Error("the E13B claim carries no agent");
-	const e13bLease = e13bLeases[0];
-	if (e13bLease === undefined) throw new Error("the E13B owner has no exact lease");
-	expect(e13bLease.attemptId, "the exact lease belongs to the admitted attempt").toBe(e13bPreAgent.attemptId);
-	const e13bCompletions = world.isolatedCompletions.slice();
-	// The reload observable: the lane registration and the isolated registration are the in-flight units this owner holds.
-	const e13bUnitsPre = structuredClone(getInFlightWorkUnits(world.agentDir));
-	expect(
-		e13bUnitsPre.map((unit) => unit.kind).sort(),
-		"the shell writer holds exactly its lane and its isolated completion in flight before teardown",
-	).toEqual(["isolated-completion", "lane"]);
-	expect(
-		e13bUnitsPre.find((unit) => unit.kind === "lane")?.label,
-		"the in-flight lane is labelled by its exact worker lane id",
-	).toBe(`worker:${e13bLease.taskId}`);
-	const e13bBefore = await Promise.all(e13bCompletions.map((completion) => settlementState(completion)));
-	expect(
-		e13bBefore.filter((state) => state === "pending"),
-		"exactly one isolated completion is pending while its shell call is gated",
-	).toHaveLength(1);
-	const e13bExpectedClaims: WorkerProjectClaims = e13bPreClaims.map((claim) => ({
-		...claim,
-		agents: [
-			{
-				agentId: e13bPreAgent.agentId,
-				agentStatus: "suspended",
-				attemptId: e13bPreAgent.attemptId,
-				attemptStatus: "suspended",
-				executingHoldCount: e13bPreAgent.executingHoldCount,
-				mailboxLoaded: true,
-				mailbox: {
-					parentSessionId: e13bCreated.sessionManager.getSessionId(),
-					agentId: e13bPreAgent.agentId,
-					listenerCount: 0,
-					hasOpenObligation: false,
-					pendingMessageIds: [],
-					replyAcknowledgementIds: [],
-				},
-			},
-		],
-	}));
-	const e13bJoinPrefix = `Worker ${e13bPreAgent.agentId} attempt ${e13bPreAgent.attemptId} physical settlement timed out after 5000ms with `;
-
+	// The gated shell call ignores abort: whatever fails below, it is released so that teardown can join it.
 	try {
-		const e13bTeardown = await withDeadline(
-			trace,
-			"E13B failed-join teardown",
-			world.disposeSessionInBody(e13bSession),
-			60_000,
-		);
-		const e13bFailure = e13bTeardown === undefined ? "no failure" : failureText(e13bTeardown.error);
-		expect(e13bFailure, "the failed inner join names the exact attempt and the grace bound").toContain(
-			e13bJoinPrefix,
-		);
-		const e13bDuring = await Promise.all(e13bCompletions.map((completion) => settlementState(completion)));
+		const e13bPre = e13bSession.getResourceSnapshot().workers;
+		if (e13bPre === undefined) throw new Error("the E13B owner reports no worker snapshot before teardown");
+		const e13bLeases = e13bPre.reservations.heldLeases;
+		const e13bHolds = e13bPre.executingHolds;
+		const e13bPreClaims = e13bPre.ownedProjectClaims;
+		const e13bLaneAborts = e13bPre.laneAbortControllerCount;
+		expect(e13bLeases, "the shell writer holds exactly one write lease before teardown").toHaveLength(1);
+		expect(e13bPreClaims, "the shell writer owns exactly one project claim before teardown").toHaveLength(1);
+		const e13bPreAgent = e13bPreClaims[0]?.agents[0];
+		if (e13bPreAgent === undefined) throw new Error("the E13B claim carries no agent");
+		const e13bLease = e13bLeases[0];
+		if (e13bLease === undefined) throw new Error("the E13B owner has no exact lease");
+		expect(e13bLease.attemptId, "the exact lease belongs to the admitted attempt").toBe(e13bPreAgent.attemptId);
+		const e13bCompletions = world.isolatedCompletions.slice();
+		// The reload observable: the lane registration and the isolated registration are the in-flight units this owner holds.
+		const e13bUnitsPre = structuredClone(getInFlightWorkUnits(world.agentDir));
 		expect(
-			e13bDuring.filter((state) => state === "pending"),
-			"the public isolated completion is still pending after owner cancellation, before the shell gate is released",
+			e13bUnitsPre.map((unit) => unit.kind).sort(),
+			"the shell writer holds exactly its lane and its isolated completion in flight before teardown",
+		).toEqual(["isolated-completion", "lane"]);
+		expect(
+			e13bUnitsPre.find((unit) => unit.kind === "lane")?.label,
+			"the in-flight lane is labelled by its exact worker lane id",
+		).toBe(`worker:${e13bLease.taskId}`);
+		const e13bBefore = await Promise.all(e13bCompletions.map((completion) => settlementState(completion)));
+		expect(
+			e13bBefore.filter((state) => state === "pending"),
+			"exactly one isolated completion is pending while its shell call is gated",
 		).toHaveLength(1);
+		const e13bExpectedClaims: WorkerProjectClaims = e13bPreClaims.map((claim) => ({
+			...claim,
+			agents: [
+				{
+					agentId: e13bPreAgent.agentId,
+					agentStatus: "suspended",
+					attemptId: e13bPreAgent.attemptId,
+					attemptStatus: "suspended",
+					executingHoldCount: e13bPreAgent.executingHoldCount,
+					mailboxLoaded: true,
+					mailbox: {
+						parentSessionId: e13bCreated.sessionManager.getSessionId(),
+						agentId: e13bPreAgent.agentId,
+						listenerCount: 0,
+						hasOpenObligation: false,
+						pendingMessageIds: [],
+						replyAcknowledgementIds: [],
+					},
+				},
+			],
+		}));
+		const e13bJoinPrefix = `Worker ${e13bPreAgent.agentId} attempt ${e13bPreAgent.attemptId} physical settlement timed out after 5000ms with `;
+
+		try {
+			const e13bDisposal = world.disposeSessionInBody(e13bSession);
+			// The bounded join of the held shell call runs on the worker-settlement port; the scenario drives its alarm.
+			expect(
+				await withDeadline(trace, "E13B settlement alarm armed", world.timers.whenArmed("worker-settlement")),
+				"the held shell call's physical join is bounded by the 5000 ms settlement grace",
+			).toBe(5_000);
+			expect(world.timers.advance("worker-settlement", 5_000), "the grace alarm fires once").toBe(1);
+			const e13bTeardown = await withDeadline(trace, "E13B failed-join teardown", e13bDisposal, 60_000);
+			const e13bFailure = e13bTeardown === undefined ? "no failure" : failureText(e13bTeardown.error);
+			expect(e13bFailure, "the failed inner join names the exact attempt and the grace bound").toContain(
+				e13bJoinPrefix,
+			);
+			const e13bDuring = await Promise.all(e13bCompletions.map((completion) => settlementState(completion)));
+			expect(
+				e13bDuring.filter((state) => state === "pending"),
+				"the public isolated completion is still pending after owner cancellation, before the shell gate is released",
+			).toHaveLength(1);
+			expect(
+				getInFlightWorkUnits(world.agentDir),
+				"the failed join keeps the exact in-flight units while the public completion is pending",
+			).toEqual(e13bUnitsPre);
+			const e13bPost = e13bSession.getResourceSnapshot().workers;
+			expect(e13bPost?.reservations.heldLeases, "the unresolved lane retains its exact fenced lease").toEqual(
+				e13bLeases,
+			);
+			expect(e13bPost?.executingHolds, "the unresolved lane keeps its execution hold").toEqual(e13bHolds);
+			expect(e13bPost?.ownedProjectClaims, "the retained claim is the predeclared shutdown tuple").toEqual(
+				e13bExpectedClaims,
+			);
+			expect(e13bPost?.laneAbortControllerCount, "the unresolved lane keeps its lane abort controller").toBe(
+				e13bLaneAborts,
+			);
+			expect(e13bPost?.reservations.watchCount, "this writer registered no observer").toBe(0);
+			world.certifyDisposedOwner(e13bSession, e13bExpectedClaims, {
+				leases: e13bLeases,
+				executingHolds: e13bHolds,
+				laneAbortControllers: e13bLaneAborts,
+			});
+		} finally {
+			// Released even when the teardown fails: the gated shell call then settles, and the public completion joins.
+			e13bShellGate.release();
+		}
+		await world.provider.waitForProducers();
+		// The shell gate released, the public completion settles and its isolated registration leaves; the lane registration stays,
+		// because a failed physical join never deregisters its lane and its cached failure is not re-run.
+		await Promise.allSettled(e13bCompletions);
 		expect(
 			getInFlightWorkUnits(world.agentDir),
-			"the failed join keeps the exact in-flight units while the public completion is pending",
-		).toEqual(e13bUnitsPre);
-		const e13bPost = e13bSession.getResourceSnapshot().workers;
-		expect(e13bPost?.reservations.heldLeases, "the unresolved lane retains its exact fenced lease").toEqual(
-			e13bLeases,
-		);
-		expect(e13bPost?.executingHolds, "the unresolved lane keeps its execution hold").toEqual(e13bHolds);
-		expect(e13bPost?.ownedProjectClaims, "the retained claim is the predeclared shutdown tuple").toEqual(
-			e13bExpectedClaims,
-		);
-		expect(e13bPost?.laneAbortControllerCount, "the unresolved lane keeps its lane abort controller").toBe(
-			e13bLaneAborts,
-		);
-		expect(e13bPost?.reservations.watchCount, "this writer registered no observer").toBe(0);
-		world.certifyDisposedOwner(e13bSession, e13bExpectedClaims, {
-			leases: e13bLeases,
-			executingHolds: e13bHolds,
-			laneAbortControllers: e13bLaneAborts,
-		});
+			"after the public completion settles only the lane registration remains in flight",
+		).toEqual(e13bUnitsPre.filter((unit) => unit.kind === "lane"));
 	} finally {
-		// Released even when the teardown fails: the gated shell call then settles, and the public completion joins.
 		e13bShellGate.release();
 	}
-	await world.provider.waitForProducers();
-	// The shell gate released, the public completion settles and its isolated registration leaves; the lane registration stays,
-	// because a failed physical join never deregisters its lane and its cached failure is not re-run.
-	await Promise.allSettled(e13bCompletions);
-	expect(
-		getInFlightWorkUnits(world.agentDir),
-		"after the public completion settles only the lane registration remains in flight",
-	).toEqual(e13bUnitsPre.filter((unit) => unit.kind === "lane"));
 
 	// VU verifier UNKNOWN restart (positive). A read-only subject requires independent verification; its verifier is the automatic verifier of
 	// the native profile, never model-manufactured. The verifier's bash check is held at a shell gate after its assistant call is persisted
