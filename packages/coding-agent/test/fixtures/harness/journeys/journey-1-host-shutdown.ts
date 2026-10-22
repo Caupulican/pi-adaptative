@@ -328,7 +328,8 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	const cpRefused = await runCompactionCloseAppendRefused(world);
 	expect(cpRefused).toMatchObject({
 		quitWarnings: [
-			`Closing the running compaction failed at quit: Scripted IO fault compaction-end-refused: append '${cpRefused.file}'`,
+			// The refused terminal append leaves the session's write outcome unknown, which is what the quit discloses.
+			"Closing the running compaction failed at quit: Session write outcome is unknown; reconcile the original session history before retrying these messages.",
 			"A compaction did not settle within 5s of quit; its result is discarded.",
 		],
 		lifecycleAtQuit: [{ type: "compaction_start" }],

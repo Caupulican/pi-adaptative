@@ -51,7 +51,7 @@ export async function runJourney1(): Promise<void> {
 				/^A run did not settle within 5s of quit; its final message may not have been persisted\.$/,
 				/^A compaction did not settle within 5s of quit; its result is discarded\.$/,
 				// The refused terminal write at quit: exact text, the session path narrowed.
-				/^Closing the running compaction failed at quit: Scripted IO fault compaction-end-refused: append '(?:\/harness\/agent-journey-1-system-one-(?:on|off)\/sessions\/[^'\n]+|[A-Z]:\\harness\\agent-journey-1-system-one-(?:on|off)\\sessions\\[^'\n]+)\.jsonl'$/,
+				/^Closing the running compaction failed at quit: Session write outcome is unknown; reconcile the original session history before retrying these messages\.$/,
 				// The closing reflection witness: its held reflection is disclosed at quit, exact text.
 				/^A reflection turn did not settle within 5s of quit; its work may not have been persisted\.$/,
 				// Owner input queued behind a run that the quit ends is held complete with its text (the queued-quit witness): exact text.
