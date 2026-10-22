@@ -35,7 +35,8 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 	const trace = world.trace;
 	// R18-R20, System One off: a background terminal whose wake-up the session file refuses. An auxiliary root with no goal starts a
 	// held echo in the background; once it ends while the root is idle, the wake-up message's append is denied, and that one refused
-	// write fences the SessionManager, so every later attempt is refused by the fence before any write. The retries run on the
+	// write leaves its outcome unknown and fences the SessionManager: the first attempt reports that unknown outcome, and every later
+	// attempt is refused by the fence before any write, which is a changed cause and is reported once. The retries run on the
 	// virtual background-tool-task timers until the queue parks; reopening the canonical file clears the fence, and the next
 	// background task start re-arms the parked wake-up. With System One on these turns ask questions no reading derives, so the
 	// rows declare off only.
@@ -43,6 +44,8 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 		const WAKE_OWNER = "background-tool-task";
 		const FENCE =
 			"Session persistence state is uncertain after a failed write; reopen the session file or start a new session before appending.";
+		const UNCERTAIN =
+			"Session write outcome is unknown; reconcile the original session history before retrying these messages.";
 		const LADDER = [100, 200, 400, 800, 1_600, 3_200, 3_200, 3_200, 3_200];
 		const parkAux = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
 		const parkSession = parkAux.session;
@@ -98,6 +101,7 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 		const parkFile = parkAux.sessionManager.getSessionFile();
 		if (parkFile === undefined) throw new Error("the R18 root has no session file");
 		if (ids.first === undefined) throw new Error("the R18 start result carried no task id");
+		const retryingUncertain = `Failed to notify terminal background tool task batch ${ids.first} (retrying): ${UNCERTAIN}`;
 		const retrying = `Failed to notify terminal background tool task batch ${ids.first} (retrying): ${FENCE}`;
 		const parkedText = `Background tool completion wake-up for ${ids.first} is parked after 10 consecutive failed deliveries (still pending; the session file refused a write and accepts no append until the session is reopened; delivery resumes then; tool_task action=wait collects it now): ${FENCE}`;
 		// Every warning this root emits from here on, in order.
@@ -119,7 +123,9 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			});
 			firstGate.release();
 			await withDeadline(trace, "R18 first wake-up refused", firstRefusal.promise);
-			expect(parkWarnings, "the first refused wake-up reports the fence as its cause").toEqual([retrying]);
+			expect(parkWarnings, "the first refused wake-up reports its unknown write outcome as its cause").toEqual([
+				retryingUncertain,
+			]);
 			expect(denial.hits, "the denial refused the wake-up's own append once").toBe(1);
 			expect(taskRecord(ids.first)?.status, "the held echo's terminal record is completed").toBe("completed");
 			expect(taskRecord(ids.first)?.terminalDelivery, "the refused terminal stays pending on the branch").toBe(
@@ -140,10 +146,10 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			await withDeadline(trace, "R19 wake-up parked", parked.promise);
 			expect(delays, "the retries climb 100, 200, 400, 800, 1600 ms and hold at 3200 ms").toEqual(LADDER);
 			expect(fired, "each advance fires exactly its retry").toEqual(LADDER.map(() => 1));
-			expect(parkWarnings, "one retrying report for the repeated cause, then the park").toEqual([
-				retrying,
-				parkedText,
-			]);
+			expect(
+				parkWarnings,
+				"one retrying report per distinct cause (unknown outcome, then the fence), then the park",
+			).toEqual([retryingUncertain, retrying, parkedText]);
 			expect(world.timers.armedDelays(WAKE_OWNER), "a parked queue arms no retry").toEqual([]);
 			expect(world.timers.advance(WAKE_OWNER, 5_000), "past the capped delay, a parked queue fires nothing").toBe(0);
 			expect(denial.hits, "every retry was refused by the fence before any write").toBe(1);
@@ -217,7 +223,11 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			expect(world.timers.armedDelays(WAKE_OWNER), "a delivery accepted at its first attempt arms no retry").toEqual(
 				[],
 			);
-			expect(parkWarnings, "no refusal follows the reopened file").toEqual([retrying, parkedText]);
+			expect(parkWarnings, "no refusal follows the reopened file").toEqual([
+				retryingUncertain,
+				retrying,
+				parkedText,
+			]);
 			world.faultMatrix.witness("R19", { control: true });
 		} finally {
 			unsubscribeParkWarnings();
