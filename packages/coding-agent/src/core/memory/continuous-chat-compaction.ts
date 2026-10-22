@@ -72,7 +72,7 @@ export interface ContinuousChatCompactionJob {
 	signal?: AbortSignal;
 }
 
-/** Why a run failed. A failed run never publishes a node. */
+/** Why a run failed. A sink error may follow partial publication; the store reconciles before abandoning work. */
 export type ContinuousChatCompactionFailureReason = "empty-reply" | "overflow" | "port-error" | "sink-error";
 
 interface ContinuousChatCompactionCandidate {

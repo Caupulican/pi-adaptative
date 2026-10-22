@@ -139,6 +139,14 @@ export interface ContinuousChatCausalPrefix {
 	viewedMessages: number;
 }
 
+/** Requested disposition when a compaction did not acknowledge a complete publication. */
+export type ContinuousChatWorkAbandonment =
+	| { readonly kind: "release" }
+	| { readonly kind: "fail"; readonly reason: string };
+
+/** Reconciliation may prove publication even when the original append reported an error. */
+export type ContinuousChatWorkSettlement = "published" | "abandoned";
+
 export interface ContinuousChatStoreOptions {
 	agentDir: string;
 	projectKey: string;
@@ -198,6 +206,13 @@ interface LockedState {
 	views: ViewPair;
 	queue: ContinuousChatWorkQueueState;
 	origin: ContinuousChatQueueOrigin;
+}
+
+/** Exact uncertain write; clearing queue marks durability acknowledged, without consuming the caller's receipt. */
+interface PendingWorkAbandonment {
+	abandonment: ContinuousChatWorkAbandonment;
+	origin: ContinuousChatQueueOrigin;
+	queue: ContinuousChatWorkQueueState | undefined;
 }
 
 /** The end of the last segment that holds published or indexed lines: its day, and the bytes consumed in it. */
@@ -497,6 +512,8 @@ export class ContinuousChatStore {
 	readonly nodeIndexDir: string;
 	readonly leaseFile: string;
 	private readonly nodeCache = new Map<string, ContinuousChatTreeNode>();
+	/** No new claim reuses a coordinate until its prior disposition has been acknowledged by its caller. */
+	private readonly pendingAbandonments = new Map<string, PendingWorkAbandonment>();
 	/** The runtime lease this store holds. Undefined before acquisition, after release, and after a loss. */
 	private lease: HeldRuntimeLease | undefined;
 	/**
@@ -581,6 +598,7 @@ export class ContinuousChatStore {
 				: { kind: "retained", cause: retained.cause, retryOwner: this.leaseRelease.retryOwner };
 		}
 		this.lease = undefined;
+		this.pendingAbandonments.clear();
 		try {
 			const result = await this.removeLeaseFile(lease);
 			return result === "released" ? { kind: "released" } : { kind: "superseded", detail: result.superseded };
@@ -632,6 +650,7 @@ export class ContinuousChatStore {
 	/** The next background work item, or undefined when nothing is ready or the running limit is reached. */
 	async claimWork(): Promise<ContinuousChatWorkItem | undefined> {
 		return this.withWriterLock(async () => {
+			if (this.pendingAbandonments.size > 0) return undefined;
 			const state = await this.reconcileLocked();
 			const claim = claimContinuousChatWork(state.queue);
 			if (claim.state !== state.queue) await this.persistQueue(state.origin, claim.state);
@@ -640,18 +659,56 @@ export class ContinuousChatStore {
 	}
 
 	/** A claimed item failed. Its reason remains available for diagnostics after a restart. */
-	async failWork(item: ContinuousChatWorkItem, reason: string): Promise<void> {
-		await this.withWriterLock(async () => {
+	async failWork(item: ContinuousChatWorkItem, reason: string): Promise<ContinuousChatWorkSettlement> {
+		return this.settleUnacknowledgedWork(item, { kind: "fail", reason });
+	}
+
+	async releaseWork(item: ContinuousChatWorkItem): Promise<ContinuousChatWorkSettlement> {
+		return this.settleUnacknowledgedWork(item, { kind: "release" });
+	}
+
+	/** Publication is authoritative; only a still-running, unpublished claim may be abandoned. */
+	private settleUnacknowledgedWork(
+		item: ContinuousChatWorkItem,
+		abandonment: ContinuousChatWorkAbandonment,
+	): Promise<ContinuousChatWorkSettlement> {
+		return this.withWriterLock(async () => {
 			const state = await this.reconcileLocked();
-			await this.persistQueue(state.origin, failContinuousChatWork(state.queue, item, reason));
+			const published = (await this.nodeAt(item)) !== undefined;
+			const key = continuousChatNodeKey(item);
+			const pending = this.pendingAbandonments.get(key);
+			if (pending) {
+				if (
+					pending.abandonment.kind !== abandonment.kind ||
+					(pending.abandonment.kind === "fail" &&
+						abandonment.kind === "fail" &&
+						pending.abandonment.reason !== abandonment.reason)
+				)
+					throw new Error("Continuous-chat pending work disposition does not match its retry.");
+				this.pendingAbandonments.delete(key);
+				return published ? "published" : "abandoned";
+			}
+			if (published) return "published";
+			// Both transitions require running ownership. Missing work without a published node
+			// remains an error, not a successful release or evidence that compaction completed.
+			const queue =
+				abandonment.kind === "release"
+					? releaseContinuousChatWork(state.queue, item)
+					: failContinuousChatWork(state.queue, item, abandonment.reason);
+			this.pendingAbandonments.set(key, { abandonment: { ...abandonment }, origin: state.origin, queue });
+			await this.confirmPendingAbandonmentsLocked();
+			this.pendingAbandonments.delete(key);
+			return "abandoned";
 		});
 	}
 
-	async releaseWork(item: ContinuousChatWorkItem): Promise<void> {
-		await this.withWriterLock(async () => {
-			const state = await this.reconcileLocked();
-			await this.persistQueue(state.origin, releaseContinuousChatWork(state.queue, item));
-		});
+	/** Replay before any later mutation, never after a newer queue revision has been admitted. */
+	private async confirmPendingAbandonmentsLocked(): Promise<void> {
+		for (const pending of this.pendingAbandonments.values()) {
+			if (pending.queue === undefined) continue;
+			await this.persistQueue(pending.origin, pending.queue);
+			pending.queue = undefined;
+		}
 	}
 
 	/** Completes an item whose node is already published. Idempotent. */
@@ -807,6 +864,7 @@ export class ContinuousChatStore {
 		return this.withProjectLock(async () => {
 			try {
 				await this.assertLeaseLocked();
+				await this.confirmPendingAbandonmentsLocked();
 				return await run();
 			} catch (error) {
 				this.indexedRevision = undefined;
@@ -841,6 +899,7 @@ export class ContinuousChatStore {
 		if (owner?.token === lease.token) return;
 		if (owner !== undefined) reason = "another session took it";
 		this.lease = undefined;
+		this.pendingAbandonments.clear();
 		process.off("exit", lease.releaseAtExit);
 		lease.onLost();
 		throw new ContinuousChatLeaseLostError(this.leaseFile, reason);

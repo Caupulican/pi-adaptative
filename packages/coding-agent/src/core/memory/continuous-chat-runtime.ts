@@ -22,7 +22,11 @@ import {
 	normalizeContinuousChatAppend,
 } from "./continuous-chat-contracts.ts";
 import type { ContinuousChatNavigationSource } from "./continuous-chat-navigation.ts";
-import type { ContinuousChatStore, ContinuousChatTurnSnapshot } from "./continuous-chat-store.ts";
+import type {
+	ContinuousChatStore,
+	ContinuousChatTurnSnapshot,
+	ContinuousChatWorkAbandonment,
+} from "./continuous-chat-store.ts";
 import {
 	continuousChatNodeFirstMessage,
 	continuousChatNodeLabel,
@@ -64,9 +68,6 @@ export interface ContinuousChatRuntimeOptions {
 	timers?: TimerPort;
 }
 
-/** What a claim that ended without a published node must record: given back to the queue, or failed with its reason. */
-type WorkAbandonment = { readonly kind: "release" } | { readonly kind: "fail"; readonly reason: string };
-
 type AppendAttempt = { status: "appended"; results: ContinuousChatAppendResult[] };
 
 interface CausalTarget {
@@ -102,7 +103,7 @@ export class ContinuousChatRuntime {
 	 */
 	private readonly workReleases: AsyncRetainedReleases<{
 		readonly item: ContinuousChatWorkItem;
-		readonly abandonment: WorkAbandonment;
+		readonly abandonment: ContinuousChatWorkAbandonment;
 	}>;
 
 	private constructor(options: ContinuousChatRuntimeOptions) {
@@ -418,7 +419,10 @@ export class ContinuousChatRuntime {
 	}
 
 	/** Records how a claim ended; a record that cannot be written is retained, so the claim never leaks its slot. */
-	private async recordOrRetain(item: ContinuousChatWorkItem, abandonment: WorkAbandonment): Promise<void> {
+	private async recordOrRetain(
+		item: ContinuousChatWorkItem,
+		abandonment: ContinuousChatWorkAbandonment,
+	): Promise<void> {
 		try {
 			await this.recordAbandonment(item, abandonment);
 		} catch (error) {
@@ -436,9 +440,20 @@ export class ContinuousChatRuntime {
 		}
 	}
 
-	private async recordAbandonment(item: ContinuousChatWorkItem, abandonment: WorkAbandonment): Promise<void> {
-		if (abandonment.kind === "release") await this.store.releaseWork(item);
-		else await this.fail(item, abandonment.reason);
+	private async recordAbandonment(
+		item: ContinuousChatWorkItem,
+		abandonment: ContinuousChatWorkAbandonment,
+	): Promise<void> {
+		const settlement =
+			abandonment.kind === "release"
+				? await this.store.releaseWork(item)
+				: await this.store.failWork(item, abandonment.reason);
+		if (settlement === "published") {
+			this.emit({ type: "node", level: item.level, ordinal: item.ordinal });
+		} else if (abandonment.kind === "fail") {
+			this.warn(`Continuous-chat compaction ${continuousChatNodeLabel(item)} failed: ${abandonment.reason}`);
+			this.emit({ type: "failed", item, reason: abandonment.reason });
+		}
 	}
 
 	private async compact(item: ContinuousChatWorkItem): Promise<ContinuousChatCompactionOutcome> {
@@ -483,17 +498,11 @@ export class ContinuousChatRuntime {
 				}
 				return;
 			case "failed":
-				await this.fail(item, outcome.message);
+				await this.recordOrRetain(item, { kind: "fail", reason: outcome.message });
 				return;
 			case "cancelled":
-				await this.store.releaseWork(item);
+				await this.recordOrRetain(item, { kind: "release" });
 				return;
 		}
-	}
-
-	private async fail(item: ContinuousChatWorkItem, reason: string): Promise<void> {
-		await this.store.failWork(item, reason);
-		this.warn(`Continuous-chat compaction ${continuousChatNodeLabel(item)} failed: ${reason}`);
-		this.emit({ type: "failed", item, reason });
 	}
 }
