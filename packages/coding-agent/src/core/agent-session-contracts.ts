@@ -40,6 +40,7 @@ import type { AccountModelCatalog } from "./model-router/account-models.ts";
 import type { LocalRuntimeDeps } from "./models/local-runtime.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
+import type { SessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
 import type { OwnerInputEnd } from "./owner-input-ledger.ts";
 import type { PendingInputHandle } from "./pending-input-queue-controller.ts";
 import type { ProviderAdmissionWaitEvent } from "./provider-admission/gate.ts";
@@ -137,6 +138,8 @@ export interface AgentSessionConfig {
 	/** Receives the warnings this session still holds when `disposeAndWait()` closes it. Defaults to stderr (see terminal-warnings). */
 	onClosingWarnings?: (warnings: readonly string[]) => void;
 	sessionManager: SessionManager;
+	/** Required for persisted sessions; acquire before construction and transfer once. */
+	bundleLease?: SessionBundleLease;
 	settingsManager: SettingsManager;
 	cwd: string;
 	/** User-level agent state directory for generated runtime artifacts. */

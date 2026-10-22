@@ -2,6 +2,8 @@
  * Adapts session lifetime and resource mutation to the shared runtime generation admission owner.
  * It owns session cancellation and scoped release; generation authority remains in RuntimeGenerationAdmission.
  */
+
+import type { SessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
 import {
 	type RuntimeGenerationAdmission,
 	RuntimeGenerationAdmissionError,
@@ -13,10 +15,21 @@ export class SessionRuntimeAdmissionController {
 	private readonly admission: RuntimeGenerationAdmission;
 	private readonly report: (event: WaitStatusEvent) => void;
 	private readonly closed = new AbortController();
+	private readonly bundleLease: SessionBundleLease | undefined;
 
-	constructor(admission: RuntimeGenerationAdmission, report: (event: WaitStatusEvent) => void) {
+	constructor(
+		admission: RuntimeGenerationAdmission,
+		report: (event: WaitStatusEvent) => void,
+		bundleLease?: SessionBundleLease,
+	) {
 		this.admission = admission;
 		this.report = report;
+		this.bundleLease = bundleLease;
+	}
+
+	/** The session calls this only after all required shutdown barriers have succeeded. */
+	releaseBundle(): void {
+		this.bundleLease?.release();
 	}
 
 	close(): void {

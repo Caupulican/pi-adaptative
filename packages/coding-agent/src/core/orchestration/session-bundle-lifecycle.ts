@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync, unlinkSync } from "node:fs";
 import { hostname } from "node:os";
+import { resolve } from "node:path";
 import { probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
 import { orchestrationSessionDeletionFile, orchestrationSessionDir } from "../agent-paths.ts";
 import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -34,6 +35,190 @@ const MAX_MARKER_BYTES = 16 * 1024;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PROCESS_INSTANCE_ID = randomUUID();
 const activeOperations = new Set<string>();
+
+interface BundleHolder {
+	token: string;
+	host: string;
+	pid: number;
+	processInstanceId: string;
+}
+
+interface BundleLeaseState {
+	readonly agentDir: string;
+	readonly parentSessionId: string;
+	readonly holder: BundleHolder;
+	claimed: boolean;
+	status: "held" | "releasing" | "released";
+}
+
+/** A persisted session's lifetime hold, acquired before constructing any session-bound owners. */
+export interface SessionBundleLease {
+	release(): void;
+}
+
+const MAX_BUNDLE_HOLDERS = 64;
+const MAX_HOLDER_BYTES = 64 * 1024;
+const bundleLeases = new WeakMap<SessionBundleLease, BundleLeaseState>();
+
+function readHolders(file: string, parentSessionId: string): BundleHolder[] {
+	const text = readOptionalBoundedTextFileSync(file, MAX_HOLDER_BYTES, "Session bundle lifetime leases");
+	if (text === undefined) return [];
+	const value: unknown = JSON.parse(text);
+	if (
+		!isPlainRecord(value) ||
+		Object.keys(value).length !== 3 ||
+		value.schemaVersion !== 1 ||
+		value.parentSessionId !== parentSessionId ||
+		!Array.isArray(value.holders) ||
+		value.holders.length > MAX_BUNDLE_HOLDERS
+	)
+		throw new Error("Session bundle lifetime leases require inspection.");
+	const tokens = new Set<string>();
+	for (const holder of value.holders) {
+		if (
+			!isPlainRecord(holder) ||
+			Object.keys(holder).length !== 4 ||
+			typeof holder.token !== "string" ||
+			!UUID_PATTERN.test(holder.token) ||
+			tokens.has(holder.token) ||
+			typeof holder.processInstanceId !== "string" ||
+			!UUID_PATTERN.test(holder.processInstanceId) ||
+			typeof holder.host !== "string" ||
+			!holder.host ||
+			holder.host.length > 512 ||
+			typeof holder.pid !== "number" ||
+			!Number.isSafeInteger(holder.pid) ||
+			holder.pid < 1
+		)
+			throw new Error("Session bundle lifetime lease identity is invalid.");
+		tokens.add(holder.token);
+	}
+	return value.holders as BundleHolder[];
+}
+
+function writeHolders(file: string, parentSessionId: string, holders: BundleHolder[]): void {
+	if (holders.length === 0) {
+		unlinkSync(file);
+		return;
+	}
+	const text = `${JSON.stringify({ schemaVersion: 1, parentSessionId, holders })}\n`;
+	if (Buffer.byteLength(text) > MAX_HOLDER_BYTES) throw new Error("Session bundle lifetime leases are too large.");
+	writeFileAtomicSync(file, text);
+}
+
+function liveHolders(file: string, parentSessionId: string): BundleHolder[] {
+	const holders = readHolders(file, parentSessionId);
+	const live = holders.filter((holder) => holder.host !== hostname() || probeProcessLiveness(holder.pid) !== "dead");
+	if (live.length !== holders.length) writeHolders(file, parentSessionId, live);
+	return live;
+}
+
+function releaseBundleLease(state: BundleLeaseState): void {
+	if (state.status === "released") return;
+	const tombstone = orchestrationSessionDeletionFile(state.agentDir, state.parentSessionId);
+	const file = `${tombstone}.leases.json`;
+	withFileLockSync(tombstone, () => {
+		const holders = readHolders(file, state.parentSessionId);
+		const index = holders.findIndex((entry) => entry.token === state.holder.token);
+		if (index < 0 && state.status !== "releasing") throw new Error("Session bundle lifetime lease disappeared.");
+		state.status = "releasing";
+		if (index >= 0)
+			writeHolders(
+				file,
+				state.parentSessionId,
+				holders.filter((entry) => entry.token !== state.holder.token),
+			);
+		state.status = "released";
+	});
+}
+
+export function acquireSessionBundleLease(agentDir: string, parentSessionId: string): SessionBundleLease {
+	const directory = resolve(agentDir);
+	const tombstone = orchestrationSessionDeletionFile(directory, parentSessionId);
+	const file = `${tombstone}.leases.json`;
+	const holder: BundleHolder = {
+		token: randomUUID(),
+		host: hostname(),
+		pid: process.pid,
+		processInstanceId: PROCESS_INSTANCE_ID,
+	};
+	withSessionBundleAdmission(directory, parentSessionId, () => {
+		const holders = liveHolders(file, parentSessionId);
+		if (holders.length >= MAX_BUNDLE_HOLDERS) throw new Error("Session bundle lifetime lease capacity reached.");
+		writeHolders(file, parentSessionId, [...holders, holder]);
+	});
+	const state: BundleLeaseState = { agentDir: directory, parentSessionId, holder, claimed: false, status: "held" };
+	const lease: SessionBundleLease = Object.freeze({
+		release() {
+			if (state.claimed) throw new Error("The session owns this bundle lease; close the session to release it.");
+			releaseBundleLease(state);
+		},
+	});
+	bundleLeases.set(lease, state);
+	return lease;
+}
+
+/** Direct construction must transfer a real, unclaimed hold for this exact persisted session. */
+export function claimSessionBundleLease(
+	lease: SessionBundleLease | undefined,
+	agentDir: string,
+	parentSessionId: string,
+	persisted: boolean,
+): SessionBundleLease | undefined {
+	if (!persisted && lease === undefined) return;
+	const state = lease && bundleLeases.get(lease);
+	if (
+		state?.status !== "held" ||
+		state.claimed ||
+		state.agentDir !== resolve(agentDir) ||
+		state.parentSessionId !== parentSessionId
+	)
+		throw new Error("Persisted AgentSession construction requires its own live session bundle lease.");
+	state.claimed = true;
+	return Object.freeze({ release: () => releaseBundleLease(state) });
+}
+
+/** Retains the operation's disposition when only bridge cleanup failed. */
+export class SessionBundleLeaseReleaseError extends AggregateError {
+	readonly operationFailure: { error: unknown } | undefined;
+	constructor(failures: unknown[], operationFailure: { error: unknown } | undefined) {
+		super(failures, "Session transition or bundle lease release failed.");
+		this.operationFailure = operationFailure;
+	}
+}
+
+/** Bridge retirement and activation, retaining both sessions through rollback and unwinding partial acquisition. */
+export async function withSessionBundleLeases<T>(
+	agentDir: string,
+	sessionIds: readonly string[],
+	operation: () => Promise<T>,
+): Promise<T> {
+	const leases: SessionBundleLease[] = [];
+	const releaseFailures: unknown[] = [];
+	let operationFailure: { error: unknown } | undefined;
+	let result: T | undefined;
+	try {
+		for (const id of new Set(sessionIds)) leases.push(acquireSessionBundleLease(agentDir, id));
+		result = await operation();
+	} catch (error) {
+		operationFailure = { error };
+	} finally {
+		for (const lease of leases.reverse()) {
+			try {
+				lease.release();
+			} catch (error) {
+				releaseFailures.push(error);
+			}
+		}
+	}
+	if (releaseFailures.length > 0)
+		throw new SessionBundleLeaseReleaseError(
+			operationFailure ? [operationFailure.error, ...releaseFailures] : releaseFailures,
+			operationFailure,
+		);
+	if (operationFailure) throw operationFailure.error;
+	return result as T;
+}
 
 function readMarker(file: string, parentSessionId: string): DeletionMarker | undefined {
 	const text = readOptionalBoundedTextFileSync(file, MAX_MARKER_BYTES, "Session bundle deletion marker");
@@ -137,6 +322,7 @@ export function reserveSessionBundleDeletion(
 			writeMarker(tombstone, marker);
 		}
 		if (marker?.operation && !canRecoverOperation(marker.operation)) return undefined;
+		if (liveHolders(`${tombstone}.leases.json`, parentSessionId).length > 0) return undefined;
 		if (!canDelete()) return undefined;
 		const token = randomUUID();
 		const next: DeletionMarker = {

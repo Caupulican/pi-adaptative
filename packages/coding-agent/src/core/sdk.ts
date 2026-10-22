@@ -57,6 +57,7 @@ import type { OrchestrationProfile } from "./orchestration/contracts.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
+import { acquireSessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
 import { SessionTaskProfileStore } from "./orchestration/session-task-profile-store.ts";
 import { TaskProfileWriter } from "./orchestration/task-profile-writer.ts";
 import { DurableTaskRuntime } from "./orchestration/task-runtime.ts";
@@ -415,543 +416,617 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const sessionManager =
 		options.sessionManager ?? SessionManager.create(cwd, agentDir, getDefaultSessionDir(cwd, agentDir));
 
-	if (!resourceLoader) {
-		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
-		await resourceLoader.reload();
-		time("resourceLoader.reload");
-	} else if (needsProfileReload) {
-		await resourceLoader.reload();
-		time("resourceLoader.reload");
-	}
-
-	// Check if session has existing data to restore
-	const existingSession = sessionManager.buildSessionContext();
-	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
-
-	const orchestrationModel = orchestrationProfile
-		? resolveConfiguredOrchestrationModel(orchestrationProfile, modelRegistry)
+	const bundleLease = sessionManager.isPersisted()
+		? acquireSessionBundleLease(agentDir, sessionManager.getSessionId())
 		: undefined;
-	if (orchestrationProfile && !orchestrationModel) {
-		throw new TypeError(
-			`Orchestration profile '${orchestrationProfile.profileId}' has no configured, authenticated model that supports its exact thinking level.`,
-		);
-	}
-	let model = orchestrationModel?.model ?? options.model;
-	let modelFallbackMessage: string | undefined;
+	let bundleTransferred = false;
+	try {
+		if (!resourceLoader) {
+			resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await resourceLoader.reload();
+			time("resourceLoader.reload");
+		} else if (needsProfileReload) {
+			await resourceLoader.reload();
+			time("resourceLoader.reload");
+		}
 
-	let thinkingLevel = orchestrationModel?.binding.thinkingLevel ?? options.thinkingLevel;
+		// Check if session has existing data to restore
+		const existingSession = sessionManager.buildSessionContext();
+		const hasExistingSession = existingSession.messages.length > 0;
+		const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
-	const activeProfileNames = settingsManager.getActiveResourceProfileNames();
-	if (!orchestrationProfile && activeProfileNames.length > 0) {
-		const profileSettings = resolveProfileModelSettings({
-			activeProfileNames,
-			registry: settingsManager.getProfileRegistry(),
-			modelRegistry,
-			cwd,
-		});
-		if (profileSettings.error) {
-			modelFallbackMessage = `Profile model resolution error: ${profileSettings.error}`;
+		const orchestrationModel = orchestrationProfile
+			? resolveConfiguredOrchestrationModel(orchestrationProfile, modelRegistry)
+			: undefined;
+		if (orchestrationProfile && !orchestrationModel) {
+			throw new TypeError(
+				`Orchestration profile '${orchestrationProfile.profileId}' has no configured, authenticated model that supports its exact thinking level.`,
+			);
 		}
-		if (!model && profileSettings.model) {
-			model = profileSettings.model;
-		}
-		if (thinkingLevel === undefined && profileSettings.thinkingLevel) {
-			thinkingLevel = profileSettings.thinkingLevel;
-		}
-	}
+		let model = orchestrationModel?.model ?? options.model;
+		let modelFallbackMessage: string | undefined;
 
-	// If session has data, try to restore model from it
-	if (!model && hasExistingSession && existingSession.model) {
-		const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
-		if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
-			model = restoredModel;
+		let thinkingLevel = orchestrationModel?.binding.thinkingLevel ?? options.thinkingLevel;
+
+		const activeProfileNames = settingsManager.getActiveResourceProfileNames();
+		if (!orchestrationProfile && activeProfileNames.length > 0) {
+			const profileSettings = resolveProfileModelSettings({
+				activeProfileNames,
+				registry: settingsManager.getProfileRegistry(),
+				modelRegistry,
+				cwd,
+			});
+			if (profileSettings.error) {
+				modelFallbackMessage = `Profile model resolution error: ${profileSettings.error}`;
+			}
+			if (!model && profileSettings.model) {
+				model = profileSettings.model;
+			}
+			if (thinkingLevel === undefined && profileSettings.thinkingLevel) {
+				thinkingLevel = profileSettings.thinkingLevel;
+			}
 		}
+
+		// If session has data, try to restore model from it
+		if (!model && hasExistingSession && existingSession.model) {
+			const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
+			if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
+				model = restoredModel;
+			}
+			if (!model) {
+				modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
+			}
+		}
+
+		// If still no model, use findInitialModel (checks settings default, then provider defaults)
 		if (!model) {
-			modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
+			const result = await findInitialModel({
+				scopedModels: [],
+				isContinuing: hasExistingSession,
+				defaultProvider: settingsManager.getDefaultProvider(),
+				defaultModelId: settingsManager.getDefaultModel(),
+				defaultThinkingLevel: settingsManager.getDefaultThinkingLevel(),
+				modelRegistry,
+			});
+			model = result.model;
+			if (thinkingLevel === undefined && !(hasExistingSession && hasThinkingEntry)) {
+				thinkingLevel = result.thinkingLevel;
+			}
+			if (!model) {
+				modelFallbackMessage = formatNoModelsAvailableMessage();
+			} else if (modelFallbackMessage) {
+				modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
+			}
 		}
-	}
 
-	// If still no model, use findInitialModel (checks settings default, then provider defaults)
-	if (!model) {
-		const result = await findInitialModel({
-			scopedModels: [],
-			isContinuing: hasExistingSession,
-			defaultProvider: settingsManager.getDefaultProvider(),
-			defaultModelId: settingsManager.getDefaultModel(),
-			defaultThinkingLevel: settingsManager.getDefaultThinkingLevel(),
-			modelRegistry,
-		});
-		model = result.model;
-		if (thinkingLevel === undefined && !(hasExistingSession && hasThinkingEntry)) {
-			thinkingLevel = result.thinkingLevel;
+		// If session has data, restore thinking level from it
+		if (thinkingLevel === undefined && hasExistingSession) {
+			thinkingLevel = hasThinkingEntry
+				? (existingSession.thinkingLevel as ThinkingLevel)
+				: settingsManager.getDefaultThinkingLevel();
 		}
+
+		// Resolve preference, model metadata, harness fallback, and capability clamping through the
+		// same contract used by CLI startup and isolated lanes.
 		if (!model) {
-			modelFallbackMessage = formatNoModelsAvailableMessage();
-		} else if (modelFallbackMessage) {
-			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
+			thinkingLevel = "off";
+		} else {
+			thinkingLevel = resolveModelThinkingLevel(
+				model,
+				thinkingLevel ?? settingsManager.getDefaultThinkingLevel(),
+			) as ThinkingLevel;
 		}
-	}
 
-	// If session has data, restore thinking level from it
-	if (thinkingLevel === undefined && hasExistingSession) {
-		thinkingLevel = hasThinkingEntry
-			? (existingSession.thinkingLevel as ThinkingLevel)
-			: settingsManager.getDefaultThinkingLevel();
-	}
-
-	// Resolve preference, model metadata, harness fallback, and capability clamping through the
-	// same contract used by CLI startup and isolated lanes.
-	if (!model) {
-		thinkingLevel = "off";
-	} else {
-		thinkingLevel = resolveModelThinkingLevel(
-			model,
-			thinkingLevel ?? settingsManager.getDefaultThinkingLevel(),
-		) as ThinkingLevel;
-	}
-
-	const configuredDefaultTools =
-		!isWorkerSession() && !orchestrationProfile ? settingsManager.getDefaultTools() : undefined;
-	const defaultActiveToolNames = configuredDefaultTools
-		? [...configuredDefaultTools]
-		: [...DEFAULT_ACTIVE_TOOL_NAMES, ...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : [])];
-	const toolProfileFilter = orchestrationProfile
-		? settingsManager.getResourceProfileFilter("tools")
-		: (options.toolProfileFilter ?? settingsManager.getResourceProfileFilter("tools"));
-	const allowedToolNames = orchestrationProfile
-		? [...orchestrationProfile.toolNames]
-		: (options.tools ??
-			(options.noTools === "all" ? [] : configuredDefaultTools ? [...configuredDefaultTools] : undefined));
-	const excludedToolNames = orchestrationProfile ? undefined : options.excludeTools;
-	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
-	const initialActiveToolNames: string[] = (
-		orchestrationProfile
+		const configuredDefaultTools =
+			!isWorkerSession() && !orchestrationProfile ? settingsManager.getDefaultTools() : undefined;
+		const defaultActiveToolNames = configuredDefaultTools
+			? [...configuredDefaultTools]
+			: [...DEFAULT_ACTIVE_TOOL_NAMES, ...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : [])];
+		const toolProfileFilter = orchestrationProfile
+			? settingsManager.getResourceProfileFilter("tools")
+			: (options.toolProfileFilter ?? settingsManager.getResourceProfileFilter("tools"));
+		const allowedToolNames = orchestrationProfile
 			? [...orchestrationProfile.toolNames]
-			: options.tools
-				? [...options.tools]
-				: options.noTools
-					? []
-					: defaultActiveToolNames
-	).filter((name) => !excludedToolNameSet?.has(name));
+			: (options.tools ??
+				(options.noTools === "all" ? [] : configuredDefaultTools ? [...configuredDefaultTools] : undefined));
+		const excludedToolNames = orchestrationProfile ? undefined : options.excludeTools;
+		const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
+		const initialActiveToolNames: string[] = (
+			orchestrationProfile
+				? [...orchestrationProfile.toolNames]
+				: options.tools
+					? [...options.tools]
+					: options.noTools
+						? []
+						: defaultActiveToolNames
+		).filter((name) => !excludedToolNameSet?.has(name));
 
-	let agent: Agent;
+		let agent: Agent;
 
-	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
-	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
-		const converted = convertToLlm(messages);
-		// Check setting dynamically so mid-session changes take effect
-		if (!settingsManager.getBlockImages()) {
-			return converted;
-		}
-		// Filter out ImageContent from all messages, replacing with text placeholder
-		return converted.map((msg) => {
-			if (msg.role === "user" || msg.role === "toolResult") {
-				const content = msg.content;
-				if (Array.isArray(content)) {
-					const hasImages = content.some((c) => c.type === "image");
-					if (hasImages) {
-						const filteredContent = content
-							.map((c) =>
-								c.type === "image" ? { type: "text" as const, text: "Image reading is disabled." } : c,
-							)
-							.filter(
-								(c, i, arr) =>
-									// Dedupe consecutive "Image reading is disabled." texts
-									!(
-										c.type === "text" &&
-										c.text === "Image reading is disabled." &&
-										i > 0 &&
-										arr[i - 1].type === "text" &&
-										(arr[i - 1] as { type: "text"; text: string }).text === "Image reading is disabled."
-									),
-							);
-						return { ...msg, content: filteredContent };
+		// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
+		const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
+			const converted = convertToLlm(messages);
+			// Check setting dynamically so mid-session changes take effect
+			if (!settingsManager.getBlockImages()) {
+				return converted;
+			}
+			// Filter out ImageContent from all messages, replacing with text placeholder
+			return converted.map((msg) => {
+				if (msg.role === "user" || msg.role === "toolResult") {
+					const content = msg.content;
+					if (Array.isArray(content)) {
+						const hasImages = content.some((c) => c.type === "image");
+						if (hasImages) {
+							const filteredContent = content
+								.map((c) =>
+									c.type === "image" ? { type: "text" as const, text: "Image reading is disabled." } : c,
+								)
+								.filter(
+									(c, i, arr) =>
+										// Dedupe consecutive "Image reading is disabled." texts
+										!(
+											c.type === "text" &&
+											c.text === "Image reading is disabled." &&
+											i > 0 &&
+											arr[i - 1].type === "text" &&
+											(arr[i - 1] as { type: "text"; text: string }).text === "Image reading is disabled."
+										),
+								);
+							return { ...msg, content: filteredContent };
+						}
 					}
 				}
-			}
-			return msg;
-		});
-	};
-
-	const extensionRunnerRef: { current?: ExtensionRunner } = {};
-	const sessionRef: { current?: AgentSession } = {};
-	const systemOneCredentialBoundary: Pick<
-		CredentialExposureBoundary,
-		"redactSensitiveText" | "createSensitiveTextRedactor" | "getSensitiveValues"
-	> = {
-		getSensitiveValues: async () => {
-			const boundary = sessionRef.current?.credentialExposureBoundary;
-			return boundary ? ((await boundary.getSensitiveValues?.()) ?? []) : modelRegistry.getKnownCredentialValues();
-		},
-		redactSensitiveText: (text, additionalValues = []) => {
-			const boundary = sessionRef.current?.credentialExposureBoundary;
-			return boundary
-				? boundary.redactSensitiveText(text, additionalValues)
-				: redactCredentialValues(text, [...modelRegistry.getKnownCredentialValues(), ...additionalValues]);
-		},
-		createSensitiveTextRedactor: (additionalValues = []) => {
-			const boundary = sessionRef.current?.credentialExposureBoundary;
-			if (boundary?.createSensitiveTextRedactor) return boundary.createSensitiveTextRedactor(additionalValues);
-			const knownValues = modelRegistry.getKnownCredentialValues();
-			return createCredentialTextRedactor([...knownValues, ...additionalValues]);
-		},
-	};
-
-	agent = new Agent({
-		initialState: {
-			systemPrompt: "",
-			model,
-			thinkingLevel,
-			tools: [],
-		},
-		convertToLlm: convertToLlmWithBlockImages,
-		getApiKey: async (_provider, requestModel) => {
-			if (!requestModel) return authStorage.getApiKey(_provider);
-			const auth = await modelRegistry.getApiKeyAndHeaders(requestModel);
-			return auth.ok ? auth.apiKey : undefined;
-		},
-		resolveProviderRequestAuth: async (requestModel) => {
-			const auth = await modelRegistry.getApiKeyAndHeaders(requestModel);
-			if (!auth.ok) throw new Error(auth.error);
-			return materializeRequestAuth(auth);
-		},
-		streamFn: async (model, context, options) => {
-			const bedrockScope =
-				model.provider === BEDROCK_PROVIDER_ID ? getActiveBedrockScope(settingsManager) : undefined;
-			if (model.provider === BEDROCK_PROVIDER_ID && !bedrockScope && !isUnscopedBedrockProxy()) {
-				throw new Error(
-					"Amazon Bedrock requires a verified profile/region scope. Run /login amazon-bedrock before using this model.",
-				);
-			}
-			const requestApiKey = options?.apiKey;
-			const providerRetrySettings = settingsManager.getProviderRetrySettings();
-			const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
-			// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".
-			// Use max int32 to effectively disable the timeout.
-			const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
-			const timeoutMs = options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs;
-			const websocketConnectTimeoutMs =
-				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
-			const attributionHeaders = getAttributionHeaders(model, options?.sessionId);
-			if (model.provider === "openai-codex") {
-				await accountModels.ready(options?.signal);
-				if (options?.signal?.aborted) throw new Error("Request was aborted");
-			}
-			const serviceTiers = accountModels.serviceTiers(model);
-			const fastModeServiceTier = resolveFastModeServiceTier(
-				model,
-				settingsManager.getFastModePreference(model.provider),
-				serviceTiers,
-			);
-			const serviceTier =
-				options?.serviceTier === undefined ? (fastModeServiceTier ?? defaultServiceTier) : options.serviceTier;
-			if (
-				(serviceTier === "ultrafast" || (model.provider === "openai-codex" && serviceTier === "priority")) &&
-				resolveFastModeServiceTier(model, serviceTier === "ultrafast" ? "ultrafast" : true, serviceTiers) !==
-					serviceTier
-			) {
-				throw new Error(
-					`The model/account catalog does not advertise ${serviceTier} for ${model.provider}/${model.id}.`,
-				);
-			}
-			const providerOptions = {
-				...options,
-				serviceTier,
-				...(bedrockScope ? { region: bedrockScope.region, profile: bedrockScope.profile } : {}),
-				interactionMode: forceBackgroundRequests ? "background" : (options?.interactionMode ?? "user"),
-				onInteractiveAuthRecovery: options?.onInteractiveAuthRecovery ?? recoverBedrockSsoAuthentication,
-				apiKey: requestApiKey,
-				onAuthRejection:
-					requestApiKey && (model.provider === "openai-codex" || getOAuthProvider(model.provider) !== undefined)
-						? async () =>
-								fenceRecoveredProviderApiKey(
-									modelRegistry.authStorage,
-									model.provider,
-									await modelRegistry.recoverRejectedOAuthApiKey(model.provider, requestApiKey),
-									options?.providerAccountKey,
-								)
-						: options?.onAuthRejection,
-				timeoutMs,
-				websocketConnectTimeoutMs,
-				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
-				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
-				headers:
-					attributionHeaders || options?.headers ? { ...attributionHeaders, ...options?.headers } : undefined,
-				credentialHeaders: options?.credentialHeaders,
-				credentialHeadersFor: (apiKey: string) =>
-					modelRegistry.authStorage.getOAuthRequestHeaders(model.provider, apiKey),
-			};
-			const requestModel =
-				model.provider === "openai-codex" && serviceTiers !== model.serviceTiers
-					? { ...model, serviceTiers }
-					: model;
-			return streamSimple(requestModel, context, providerOptions);
-		},
-		onPayload: async (payload, _model) => {
-			const runner = extensionRunnerRef.current;
-			if (!runner?.hasHandlers("before_provider_request")) {
-				return payload;
-			}
-			return runner.emitBeforeProviderRequest(payload);
-		},
-		onResponse: async (response, _model) => {
-			const runner = extensionRunnerRef.current;
-			if (!runner?.hasHandlers("after_provider_response")) {
-				return;
-			}
-			await runner.emit({
-				type: "after_provider_response",
-				status: response.status,
-				headers: response.headers,
+				return msg;
 			});
-		},
-		sessionId: sessionManager.getSessionId(),
-		steeringMode: settingsManager.getSteeringMode(),
-		followUpMode: settingsManager.getFollowUpMode(),
-		transport: settingsManager.getTransport(),
-		thinkingBudgets: settingsManager.getThinkingBudgets(),
-		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
-	});
+		};
 
-	let systemOneController = options.systemOneController;
-	const systemOneSettings = settingsManager.getSystemOneSettings();
-	const systemOneEnabled =
-		options.systemOneEnabled ??
-		(options.disableSystemOne === true
-			? false
-			: systemOneSettings.enabled && process.env.PI_SYSTEM_ONE_DISABLED !== "1");
+		const extensionRunnerRef: { current?: ExtensionRunner } = {};
+		const sessionRef: { current?: AgentSession } = {};
+		const systemOneCredentialBoundary: Pick<
+			CredentialExposureBoundary,
+			"redactSensitiveText" | "createSensitiveTextRedactor" | "getSensitiveValues"
+		> = {
+			getSensitiveValues: async () => {
+				const boundary = sessionRef.current?.credentialExposureBoundary;
+				return boundary
+					? ((await boundary.getSensitiveValues?.()) ?? [])
+					: modelRegistry.getKnownCredentialValues();
+			},
+			redactSensitiveText: (text, additionalValues = []) => {
+				const boundary = sessionRef.current?.credentialExposureBoundary;
+				return boundary
+					? boundary.redactSensitiveText(text, additionalValues)
+					: redactCredentialValues(text, [...modelRegistry.getKnownCredentialValues(), ...additionalValues]);
+			},
+			createSensitiveTextRedactor: (additionalValues = []) => {
+				const boundary = sessionRef.current?.credentialExposureBoundary;
+				if (boundary?.createSensitiveTextRedactor) return boundary.createSensitiveTextRedactor(additionalValues);
+				const knownValues = modelRegistry.getKnownCredentialValues();
+				return createCredentialTextRedactor([...knownValues, ...additionalValues]);
+			},
+		};
 
-	const hookCoordinator =
-		options.hookCoordinator ??
-		(options.integrityExtensions ? new IntegrityHookCoordinator(options.integrityExtensions) : undefined);
-	// The session's one usage owner, recovered before any paid work. It exists whether or not System One is bound,
-	// so pending usage from an earlier run is never left unreplayed.
-	// Which models the owner's accounts offer, read by the provider path below; constructing it starts no work.
-	const accountModels = new AccountModelCatalog({
-		getModels: () => modelRegistry.getAll(),
-		hasConfiguredAuth: (model) => modelRegistry.hasConfiguredAuth(model),
-		getRequestAuth: async (model) => {
-			const auth = await modelRegistry.getApiKeyAndHeaders(model);
-			return auth.ok ? { apiKey: auth.apiKey, credentialHeaders: auth.credentialHeaders } : undefined;
-		},
-	});
-	const semanticUsage = sessionSemanticUsageOf(sessionManager);
-	let constructed: AgentSession | undefined;
-	try {
-		if (!systemOneController && systemOneEnabled) {
-			const access = systemOneAccessFromSession(settingsManager, authStorage, options.systemOneProvider);
-			// A session without any System One key starts without System One, as before; with one, every
-			// evaluation resolves provider, model and key anew, so a provider switch needs no restart.
-			if ((await access.resolve()).kind === "ready") {
-				const reviewer = new SystemOneReviewer({
-					access,
-					fetch: options.systemOneFetch,
-					credentialBoundary: systemOneCredentialBoundary,
-					usage: semanticUsage,
+		agent = new Agent({
+			initialState: {
+				systemPrompt: "",
+				model,
+				thinkingLevel,
+				tools: [],
+			},
+			convertToLlm: convertToLlmWithBlockImages,
+			getApiKey: async (_provider, requestModel) => {
+				if (!requestModel) return authStorage.getApiKey(_provider);
+				const auth = await modelRegistry.getApiKeyAndHeaders(requestModel);
+				return auth.ok ? auth.apiKey : undefined;
+			},
+			resolveProviderRequestAuth: async (requestModel) => {
+				const auth = await modelRegistry.getApiKeyAndHeaders(requestModel);
+				if (!auth.ok) throw new Error(auth.error);
+				return materializeRequestAuth(auth);
+			},
+			streamFn: async (model, context, options) => {
+				const bedrockScope =
+					model.provider === BEDROCK_PROVIDER_ID ? getActiveBedrockScope(settingsManager) : undefined;
+				if (model.provider === BEDROCK_PROVIDER_ID && !bedrockScope && !isUnscopedBedrockProxy()) {
+					throw new Error(
+						"Amazon Bedrock requires a verified profile/region scope. Run /login amazon-bedrock before using this model.",
+					);
+				}
+				const requestApiKey = options?.apiKey;
+				const providerRetrySettings = settingsManager.getProviderRetrySettings();
+				const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
+				// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".
+				// Use max int32 to effectively disable the timeout.
+				const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
+				const timeoutMs = options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs;
+				const websocketConnectTimeoutMs =
+					options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
+				const attributionHeaders = getAttributionHeaders(model, options?.sessionId);
+				if (model.provider === "openai-codex") {
+					await accountModels.ready(options?.signal);
+					if (options?.signal?.aborted) throw new Error("Request was aborted");
+				}
+				const serviceTiers = accountModels.serviceTiers(model);
+				const fastModeServiceTier = resolveFastModeServiceTier(
+					model,
+					settingsManager.getFastModePreference(model.provider),
+					serviceTiers,
+				);
+				const serviceTier =
+					options?.serviceTier === undefined ? (fastModeServiceTier ?? defaultServiceTier) : options.serviceTier;
+				if (
+					(serviceTier === "ultrafast" || (model.provider === "openai-codex" && serviceTier === "priority")) &&
+					resolveFastModeServiceTier(model, serviceTier === "ultrafast" ? "ultrafast" : true, serviceTiers) !==
+						serviceTier
+				) {
+					throw new Error(
+						`The model/account catalog does not advertise ${serviceTier} for ${model.provider}/${model.id}.`,
+					);
+				}
+				const providerOptions = {
+					...options,
+					serviceTier,
+					...(bedrockScope ? { region: bedrockScope.region, profile: bedrockScope.profile } : {}),
+					interactionMode: forceBackgroundRequests ? "background" : (options?.interactionMode ?? "user"),
+					onInteractiveAuthRecovery: options?.onInteractiveAuthRecovery ?? recoverBedrockSsoAuthentication,
+					apiKey: requestApiKey,
+					onAuthRejection:
+						requestApiKey && (model.provider === "openai-codex" || getOAuthProvider(model.provider) !== undefined)
+							? async () =>
+									fenceRecoveredProviderApiKey(
+										modelRegistry.authStorage,
+										model.provider,
+										await modelRegistry.recoverRejectedOAuthApiKey(model.provider, requestApiKey),
+										options?.providerAccountKey,
+									)
+							: options?.onAuthRejection,
+					timeoutMs,
+					websocketConnectTimeoutMs,
+					maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
+					headers:
+						attributionHeaders || options?.headers ? { ...attributionHeaders, ...options?.headers } : undefined,
+					credentialHeaders: options?.credentialHeaders,
+					credentialHeadersFor: (apiKey: string) =>
+						modelRegistry.authStorage.getOAuthRequestHeaders(model.provider, apiKey),
+				};
+				const requestModel =
+					model.provider === "openai-codex" && serviceTiers !== model.serviceTiers
+						? { ...model, serviceTiers }
+						: model;
+				return streamSimple(requestModel, context, providerOptions);
+			},
+			onPayload: async (payload, _model) => {
+				const runner = extensionRunnerRef.current;
+				if (!runner?.hasHandlers("before_provider_request")) {
+					return payload;
+				}
+				return runner.emitBeforeProviderRequest(payload);
+			},
+			onResponse: async (response, _model) => {
+				const runner = extensionRunnerRef.current;
+				if (!runner?.hasHandlers("after_provider_response")) {
+					return;
+				}
+				await runner.emit({
+					type: "after_provider_response",
+					status: response.status,
+					headers: response.headers,
 				});
-				const adapter = new SystemOneJevAdapter(reviewer, createSystemOneConfig({ enabled: true }), {
-					access,
-					getUserKeys: () => access.keys(),
-				});
+			},
+			sessionId: sessionManager.getSessionId(),
+			steeringMode: settingsManager.getSteeringMode(),
+			followUpMode: settingsManager.getFollowUpMode(),
+			transport: settingsManager.getTransport(),
+			thinkingBudgets: settingsManager.getThinkingBudgets(),
+			maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
+		});
 
-				let baselineRevision = "unknown";
-				try {
-					baselineRevision =
-						execFileSync("git", ["rev-parse", "HEAD"], {
+		let systemOneController = options.systemOneController;
+		const systemOneSettings = settingsManager.getSystemOneSettings();
+		const systemOneEnabled =
+			options.systemOneEnabled ??
+			(options.disableSystemOne === true
+				? false
+				: systemOneSettings.enabled && process.env.PI_SYSTEM_ONE_DISABLED !== "1");
+
+		const hookCoordinator =
+			options.hookCoordinator ??
+			(options.integrityExtensions ? new IntegrityHookCoordinator(options.integrityExtensions) : undefined);
+		// The session's one usage owner, recovered before any paid work. It exists whether or not System One is bound,
+		// so pending usage from an earlier run is never left unreplayed.
+		// Which models the owner's accounts offer, read by the provider path below; constructing it starts no work.
+		const accountModels = new AccountModelCatalog({
+			getModels: () => modelRegistry.getAll(),
+			hasConfiguredAuth: (model) => modelRegistry.hasConfiguredAuth(model),
+			getRequestAuth: async (model) => {
+				const auth = await modelRegistry.getApiKeyAndHeaders(model);
+				return auth.ok ? { apiKey: auth.apiKey, credentialHeaders: auth.credentialHeaders } : undefined;
+			},
+		});
+		const semanticUsage = sessionSemanticUsageOf(sessionManager);
+		let constructed: AgentSession | undefined;
+		try {
+			if (!systemOneController && systemOneEnabled) {
+				const access = systemOneAccessFromSession(settingsManager, authStorage, options.systemOneProvider);
+				// A session without any System One key starts without System One, as before; with one, every
+				// evaluation resolves provider, model and key anew, so a provider switch needs no restart.
+				if ((await access.resolve()).kind === "ready") {
+					const reviewer = new SystemOneReviewer({
+						access,
+						fetch: options.systemOneFetch,
+						credentialBoundary: systemOneCredentialBoundary,
+						usage: semanticUsage,
+					});
+					const adapter = new SystemOneJevAdapter(reviewer, createSystemOneConfig({ enabled: true }), {
+						access,
+						getUserKeys: () => access.keys(),
+					});
+
+					let baselineRevision = "unknown";
+					try {
+						baselineRevision =
+							execFileSync("git", ["rev-parse", "HEAD"], {
+								cwd,
+								encoding: "utf-8",
+								stdio: ["ignore", "pipe", "ignore"],
+							}).trim() || "unknown";
+					} catch {
+						// Non-git directory
+					}
+					const store = new ExecutionStore({
+						run_id: sessionManager.getSessionId(),
+						objective: {
+							request: "",
+							normalized_goal: "",
+							acceptance_criteria: [],
+							constraints: [],
+						},
+						repo: {
+							root: cwd,
+							baseline_revision: baselineRevision,
+							current_revision: baselineRevision,
+						},
+					});
+					systemOneController = new SystemOneController({
+						store,
+						adapter,
+						userKeys: await access.keys(),
+						hookCoordinator,
+					});
+				}
+			}
+
+			// Routing is judged by System One, so an unset `modelRouter.enabled` follows whether this session has it.
+			settingsManager.setModelRouterDefaultEnabled(systemOneController !== undefined);
+
+			// Restore messages if session has existing data
+			if (hasExistingSession) {
+				agent.state.messages = existingSession.messages;
+				// Loading a prior session's history: the sanitizer mark indexed into whatever array a
+				// previous Agent lifetime built, not this one. See Agent.resetSanitizerPrefixHorizon's doc
+				// comment.
+				agent.resetSanitizerPrefixHorizon();
+				if (!hasThinkingEntry) {
+					sessionManager.appendThinkingLevelChange(thinkingLevel);
+				}
+				if (systemOneController) {
+					try {
+						const currentRevision = execFileSync("git", ["rev-parse", "HEAD"], {
 							cwd,
 							encoding: "utf-8",
 							stdio: ["ignore", "pipe", "ignore"],
-						}).trim() || "unknown";
-				} catch {
-					// Non-git directory
-				}
-				const store = new ExecutionStore({
-					run_id: sessionManager.getSessionId(),
-					objective: {
-						request: "",
-						normalized_goal: "",
-						acceptance_criteria: [],
-						constraints: [],
-					},
-					repo: {
-						root: cwd,
-						baseline_revision: baselineRevision,
-						current_revision: baselineRevision,
-					},
-				});
-				systemOneController = new SystemOneController({
-					store,
-					adapter,
-					userKeys: await access.keys(),
-					hookCoordinator,
-				});
-			}
-		}
-
-		// Routing is judged by System One, so an unset `modelRouter.enabled` follows whether this session has it.
-		settingsManager.setModelRouterDefaultEnabled(systemOneController !== undefined);
-
-		// Restore messages if session has existing data
-		if (hasExistingSession) {
-			agent.state.messages = existingSession.messages;
-			// Loading a prior session's history: the sanitizer mark indexed into whatever array a
-			// previous Agent lifetime built, not this one. See Agent.resetSanitizerPrefixHorizon's doc
-			// comment.
-			agent.resetSanitizerPrefixHorizon();
-			if (!hasThinkingEntry) {
-				sessionManager.appendThinkingLevelChange(thinkingLevel);
-			}
-			if (systemOneController) {
-				try {
-					const currentRevision = execFileSync("git", ["rev-parse", "HEAD"], {
-						cwd,
-						encoding: "utf-8",
-						stdio: ["ignore", "pipe", "ignore"],
-					}).trim();
-					if (currentRevision) {
-						systemOneController.store.revalidateOnResume(currentRevision);
+						}).trim();
+						if (currentRevision) {
+							systemOneController.store.revalidateOnResume(currentRevision);
+						}
+					} catch {
+						// Non-git directory
 					}
-				} catch {
-					// Non-git directory
+					if (systemOneController.hookCoordinator?.hasExtensions()) {
+						await systemOneController.hookCoordinator.runHook("resume", {
+							schema_version: "1.0",
+							run_id: sessionManager.getSessionId(),
+							session_id: sessionManager.getSessionId(),
+							hook: "resume",
+							impact: "read_only",
+						});
+					}
 				}
-				if (systemOneController.hookCoordinator?.hasExtensions()) {
-					await systemOneController.hookCoordinator.runHook("resume", {
+			} else {
+				// Save initial model and thinking level for new sessions so they can be restored on resume
+				if (model) {
+					sessionManager.appendModelChange(model.provider, model.id);
+				}
+				sessionManager.appendThinkingLevelChange(thinkingLevel);
+				if (systemOneController?.hookCoordinator?.hasExtensions()) {
+					await systemOneController.hookCoordinator.runHook("session_start", {
 						schema_version: "1.0",
 						run_id: sessionManager.getSessionId(),
 						session_id: sessionManager.getSessionId(),
-						hook: "resume",
+						hook: "session_start",
 						impact: "read_only",
 					});
 				}
 			}
-		} else {
-			// Save initial model and thinking level for new sessions so they can be restored on resume
-			if (model) {
-				sessionManager.appendModelChange(model.provider, model.id);
-			}
-			sessionManager.appendThinkingLevelChange(thinkingLevel);
-			if (systemOneController?.hookCoordinator?.hasExtensions()) {
-				await systemOneController.hookCoordinator.runHook("session_start", {
-					schema_version: "1.0",
-					run_id: sessionManager.getSessionId(),
-					session_id: sessionManager.getSessionId(),
-					hook: "session_start",
-					impact: "read_only",
-				});
-			}
-		}
 
-		let steeringPlane = options.steeringPlane;
-		const adaptiveReadiness = options.adaptiveReadiness;
-		const objectiveExecutionController = options.objectiveExecutionController;
-		// System One decides the loop whenever it is bound; without a controller the legacy continuation
-		// stays the decider. An explicit option or setting always wins.
-		const executionLoopMode: ExecutionLoopMode =
-			options.executionLoopMode ??
-			systemOneSettings.loopMode ??
-			(systemOneController ? "objective_primary" : "legacy_goal");
+			let steeringPlane = options.steeringPlane;
+			const adaptiveReadiness = options.adaptiveReadiness;
+			const objectiveExecutionController = options.objectiveExecutionController;
+			// System One decides the loop whenever it is bound; without a controller the legacy continuation
+			// stays the decider. An explicit option or setting always wins.
+			const executionLoopMode: ExecutionLoopMode =
+				options.executionLoopMode ??
+				systemOneSettings.loopMode ??
+				(systemOneController ? "objective_primary" : "legacy_goal");
 
-		// Phase A — Core session construction (AgentSession, runtimeUpdates, skillVault, extensionRunner, backgroundLanes)
-		// The account catalog's refresh asks the providers while the session starts; the first turn waits for the answer
-		// before anything is routed.
-		void accountModels.refresh();
+			// Phase A — Core session construction (AgentSession, runtimeUpdates, skillVault, extensionRunner, backgroundLanes)
+			// The account catalog's refresh asks the providers while the session starts; the first turn waits for the answer
+			// before anything is routed.
+			void accountModels.refresh();
 
-		const timers = options.timers ?? SYSTEM_TIMER_SOURCE;
-		const session = new AgentSession({
-			agent,
-			onClosingWarnings: options.onClosingWarnings,
-			sessionManager,
-			settingsManager,
-			cwd,
-			agentDir,
-			scopedModels: orchestrationModel
-				? [{ model: orchestrationModel.model, thinkingLevel: orchestrationModel.binding.thinkingLevel }]
-				: options.scopedModels,
-			routerPool: options.routerPool,
-			resourceLoader,
-			customTools: options.customTools,
-			modelRegistry,
-			initialActiveToolNames,
-			allowedToolNames,
-			excludedToolNames,
-			shellOperations: options.shellOperations,
-			workerTerminalDelivery: options.workerTerminalDelivery,
-			worktreeSyncEnginePorts: options.worktreeSyncEnginePorts,
-			extensionRunnerRef,
-			toolProfileFilter,
-			isExplicitModel: orchestrationProfile ? true : (options.isExplicitModel ?? options.model != null),
-			isExplicitThinking: orchestrationProfile
-				? true
-				: (options.isExplicitThinking ?? options.thinkingLevel !== undefined),
-			isChildSession,
-			orchestrationProfile,
-			sessionStartEvent: options.sessionStartEvent,
-			systemOneController,
-			timers,
-			maxRetainedTerminalTasks: options.maxRetainedTerminalTasks,
-			accountModels,
-			executionLoopMode,
-			objectiveExecutionController,
-			steeringPlane,
-			adaptiveReadiness:
-				adaptiveReadiness ??
-				(steeringPlane || systemOneController ? new AdaptiveRuntimeReadiness({ isUnbound: true }) : undefined),
-		});
-		constructed = session;
-		sessionRef.current = session;
-		// The AgentSession constructor builds the first runner; a reload swaps it through the same ref.
-		const getExtensionRunner = (): ExtensionRunner => {
-			const runner = extensionRunnerRef.current;
-			if (!runner)
-				throw new Error("The session's extension runner is built by its constructor and must exist here.");
-			return runner;
-		};
-		session.setWorkEvidenceJournal(createSessionWorkEvidenceJournal(() => sessionManager));
-		await session.recoverGoalWorkEvidence();
-
-		// Phase B — Adaptive runtime late binding to live session-owned ports
-		if ((steeringPlane || systemOneController) && !options.adaptiveReadiness) {
-			const persistentPath = steeringCertificatesFile(agentDir);
-			const certificates = steeringPlane?.certificates ?? new SteeringCertificateStore(persistentPath);
-			if (!steeringPlane && systemOneController) {
-				steeringPlane = new SystemOneSteeringPlane({
-					adapter: systemOneController.adapter,
-					certificates,
-					policy: DEFAULT_STEERING_POLICY,
-				});
-			}
-
-			const fitnessStore = FitnessStore.forAgentDir(agentDir);
-			const adaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
-			const orchestrationClock = timers.port("orchestration");
-			const orchestrationStore = new OrchestrationEventStore({
+			const timers = options.timers ?? SYSTEM_TIMER_SOURCE;
+			// A throwing constructor can already have live resources; retain its hold until process exit.
+			bundleTransferred = true;
+			const session = new AgentSession({
+				agent,
+				onClosingWarnings: options.onClosingWarnings,
+				sessionManager,
+				bundleLease,
+				settingsManager,
+				cwd,
 				agentDir,
-				sessionId: sessionManager.getSessionId(),
-				now: () => new Date(orchestrationClock.now()).toISOString(),
-				sleepSync: (delayMs) => timers.sleepSync(delayMs),
+				scopedModels: orchestrationModel
+					? [{ model: orchestrationModel.model, thinkingLevel: orchestrationModel.binding.thinkingLevel }]
+					: options.scopedModels,
+				routerPool: options.routerPool,
+				resourceLoader,
+				customTools: options.customTools,
+				modelRegistry,
+				initialActiveToolNames,
+				allowedToolNames,
+				excludedToolNames,
+				shellOperations: options.shellOperations,
+				workerTerminalDelivery: options.workerTerminalDelivery,
+				worktreeSyncEnginePorts: options.worktreeSyncEnginePorts,
+				extensionRunnerRef,
+				toolProfileFilter,
+				isExplicitModel: orchestrationProfile ? true : (options.isExplicitModel ?? options.model != null),
+				isExplicitThinking: orchestrationProfile
+					? true
+					: (options.isExplicitThinking ?? options.thinkingLevel !== undefined),
+				isChildSession,
+				orchestrationProfile,
+				sessionStartEvent: options.sessionStartEvent,
+				systemOneController,
+				timers,
+				maxRetainedTerminalTasks: options.maxRetainedTerminalTasks,
+				accountModels,
+				executionLoopMode,
+				objectiveExecutionController,
+				steeringPlane,
+				adaptiveReadiness:
+					adaptiveReadiness ??
+					(steeringPlane || systemOneController ? new AdaptiveRuntimeReadiness({ isUnbound: true }) : undefined),
 			});
-			const durableTaskRuntime = new DurableTaskRuntime({
-				store: orchestrationStore,
-				// The worker lifecycle's runtime records into this same store on this same clock (see TimerOwner).
-				now: () => orchestrationClock.now(),
-			});
-			const taskProfileStore = new SessionTaskProfileStore(sessionManager);
-			const foregroundBaseProfile =
-				orchestrationProfile ??
-				(model
-					? ({
+			constructed = session;
+			sessionRef.current = session;
+			// The AgentSession constructor builds the first runner; a reload swaps it through the same ref.
+			const getExtensionRunner = (): ExtensionRunner => {
+				const runner = extensionRunnerRef.current;
+				if (!runner)
+					throw new Error("The session's extension runner is built by its constructor and must exist here.");
+				return runner;
+			};
+			session.setWorkEvidenceJournal(createSessionWorkEvidenceJournal(() => sessionManager));
+			await session.recoverGoalWorkEvidence();
+
+			// Phase B — Adaptive runtime late binding to live session-owned ports
+			if ((steeringPlane || systemOneController) && !options.adaptiveReadiness) {
+				const persistentPath = steeringCertificatesFile(agentDir);
+				const certificates = steeringPlane?.certificates ?? new SteeringCertificateStore(persistentPath);
+				if (!steeringPlane && systemOneController) {
+					steeringPlane = new SystemOneSteeringPlane({
+						adapter: systemOneController.adapter,
+						certificates,
+						policy: DEFAULT_STEERING_POLICY,
+					});
+				}
+
+				const fitnessStore = FitnessStore.forAgentDir(agentDir);
+				const adaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
+				const orchestrationClock = timers.port("orchestration");
+				const orchestrationStore = new OrchestrationEventStore({
+					agentDir,
+					sessionId: sessionManager.getSessionId(),
+					now: () => new Date(orchestrationClock.now()).toISOString(),
+					sleepSync: (delayMs) => timers.sleepSync(delayMs),
+				});
+				const durableTaskRuntime = new DurableTaskRuntime({
+					store: orchestrationStore,
+					// The worker lifecycle's runtime records into this same store on this same clock (see TimerOwner).
+					now: () => orchestrationClock.now(),
+				});
+				const taskProfileStore = new SessionTaskProfileStore(sessionManager);
+				const foregroundBaseProfile =
+					orchestrationProfile ??
+					(model
+						? ({
+								schemaVersion: 1,
+								profileId: "default-foreground",
+								description: "Default foreground session profile",
+								role: "implementer",
+								modelPolicy: {
+									mode: "fixed",
+									candidates: [
+										{
+											provider: model.provider,
+											modelId: model.id,
+											thinkingLevel: (thinkingLevel as any) ?? "medium",
+										},
+									],
+								},
+								capabilityCeiling: [
+									"filesystem.read",
+									"filesystem.write",
+									"process.exec",
+									"tests.execute",
+									"repo.read",
+									"worktree.read",
+									"worktree.mutate",
+								],
+								toolNames: allowedToolNames ?? initialActiveToolNames,
+								resourceProfileNames: [],
+								dispatchProfileIds: [],
+								budget: {
+									maxTokens: 100_000,
+									maxCostUsd: 10,
+									maxWallClockMs: 60_000,
+									maxAttempts: 10,
+								},
+								maxConcurrent: 1,
+								leaseTtlMs: 120_000,
+								requireIndependentVerification: false,
+								createdAt: new Date().toISOString(),
+								updatedAt: new Date().toISOString(),
+							} as OrchestrationProfile)
+						: undefined);
+				const taskProfileWriter = new TaskProfileWriter({
+					agentDir,
+					cwd,
+					store: taskProfileStore,
+					getSettingsManager: () => settingsManager,
+					getModelRegistry: () => modelRegistry,
+					modelUnusableCause: () => undefined,
+					getActiveOrchestrationProfile: () => orchestrationProfile ?? foregroundBaseProfile,
+					getInheritedBaseProfile: () => orchestrationProfile ?? foregroundBaseProfile,
+				});
+				const contractFactory = {
+					createContract: (input: {
+						profileId: string;
+						specialistId: string;
+						expertBinding: {
+							providerId: string;
+							modelId: string;
+							routingBand: string;
+							capabilityTier: string;
+						};
+						authorityRole: string;
+						toolNames: readonly string[];
+					}) => {
+						const stored = taskProfileStore.load().registry.get(input.profileId);
+						const profile: OrchestrationProfile = stored?.profile ?? {
 							schemaVersion: 1,
-							profileId: "default-foreground",
-							description: "Default foreground session profile",
-							role: "implementer",
+							profileId: input.profileId,
+							role: (input.authorityRole as any) || "implementer",
+							description: `Specialist worker profile for ${input.specialistId}`,
 							modelPolicy: {
 								mode: "fixed",
 								candidates: [
 									{
-										provider: model.provider,
-										modelId: model.id,
-										thinkingLevel: (thinkingLevel as any) ?? "medium",
+										provider: input.expertBinding.providerId,
+										modelId: input.expertBinding.modelId,
+										thinkingLevel: "high" as const,
 									},
 								],
 							},
@@ -964,347 +1039,295 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 								"worktree.read",
 								"worktree.mutate",
 							],
-							toolNames: allowedToolNames ?? initialActiveToolNames,
+							toolNames: [...input.toolNames],
 							resourceProfileNames: [],
 							dispatchProfileIds: [],
-							budget: {
-								maxTokens: 100_000,
-								maxCostUsd: 10,
-								maxWallClockMs: 60_000,
-								maxAttempts: 10,
-							},
+							budget: { maxTokens: 100_000, maxCostUsd: 10, maxWallClockMs: 60_000, maxAttempts: 10 },
 							maxConcurrent: 1,
 							leaseTtlMs: 120_000,
 							requireIndependentVerification: false,
 							createdAt: new Date().toISOString(),
 							updatedAt: new Date().toISOString(),
-						} as OrchestrationProfile)
-					: undefined);
-			const taskProfileWriter = new TaskProfileWriter({
-				agentDir,
-				cwd,
-				store: taskProfileStore,
-				getSettingsManager: () => settingsManager,
-				getModelRegistry: () => modelRegistry,
-				modelUnusableCause: () => undefined,
-				getActiveOrchestrationProfile: () => orchestrationProfile ?? foregroundBaseProfile,
-				getInheritedBaseProfile: () => orchestrationProfile ?? foregroundBaseProfile,
-			});
-			const contractFactory = {
-				createContract: (input: {
-					profileId: string;
-					specialistId: string;
-					expertBinding: {
-						providerId: string;
-						modelId: string;
-						routingBand: string;
-						capabilityTier: string;
-					};
-					authorityRole: string;
-					toolNames: readonly string[];
-				}) => {
-					const stored = taskProfileStore.load().registry.get(input.profileId);
-					const profile: OrchestrationProfile = stored?.profile ?? {
-						schemaVersion: 1,
-						profileId: input.profileId,
-						role: (input.authorityRole as any) || "implementer",
-						description: `Specialist worker profile for ${input.specialistId}`,
-						modelPolicy: {
-							mode: "fixed",
-							candidates: [
-								{
+						};
+						const contract = createWorkerExecutionContract({
+							worker: {
+								profile,
+								modelBinding: {
 									provider: input.expertBinding.providerId,
 									modelId: input.expertBinding.modelId,
-									thinkingLevel: "high" as const,
+									thinkingLevel:
+										profile.modelPolicy.candidates.find(
+											(candidate) =>
+												candidate.provider === input.expertBinding.providerId &&
+												candidate.modelId === input.expertBinding.modelId,
+										)?.thinkingLevel ??
+										profile.modelPolicy.candidates[0]?.thinkingLevel ??
+										"high",
 								},
-							],
-						},
-						capabilityCeiling: [
-							"filesystem.read",
-							"filesystem.write",
-							"process.exec",
-							"tests.execute",
-							"repo.read",
-							"worktree.read",
-							"worktree.mutate",
-						],
-						toolNames: [...input.toolNames],
-						resourceProfileNames: [],
-						dispatchProfileIds: [],
-						budget: { maxTokens: 100_000, maxCostUsd: 10, maxWallClockMs: 60_000, maxAttempts: 10 },
-						maxConcurrent: 1,
-						leaseTtlMs: 120_000,
-						requireIndependentVerification: false,
-						createdAt: new Date().toISOString(),
-						updatedAt: new Date().toISOString(),
-					};
-					const contract = createWorkerExecutionContract({
-						worker: {
-							profile,
-							modelBinding: {
-								provider: input.expertBinding.providerId,
-								modelId: input.expertBinding.modelId,
-								thinkingLevel:
-									profile.modelPolicy.candidates.find(
-										(candidate) =>
-											candidate.provider === input.expertBinding.providerId &&
-											candidate.modelId === input.expertBinding.modelId,
-									)?.thinkingLevel ??
-									profile.modelPolicy.candidates[0]?.thinkingLevel ??
-									"high",
+								authority: {
+									cwd,
+									capabilities: [...profile.capabilityCeiling],
+									toolNames: [...profile.toolNames],
+									readPaths: profile.capabilityCeiling.some(
+										(cap) => cap === "filesystem.read" || cap === "worktree.read",
+									)
+										? [cwd]
+										: [],
+									writePaths: profile.capabilityCeiling.some(
+										(cap) => cap === "filesystem.write" || cap === "worktree.mutate",
+									)
+										? [cwd]
+										: [],
+									deniedPaths: [],
+									budget: { ...profile.budget },
+								},
+								resourcePointers: [],
 							},
+						});
+						return {
+							...contract,
 							authority: {
-								cwd,
-								capabilities: [...profile.capabilityCeiling],
-								toolNames: [...profile.toolNames],
-								readPaths: profile.capabilityCeiling.some(
-									(cap) => cap === "filesystem.read" || cap === "worktree.read",
-								)
-									? [cwd]
-									: [],
-								writePaths: profile.capabilityCeiling.some(
-									(cap) => cap === "filesystem.write" || cap === "worktree.mutate",
-								)
-									? [cwd]
-									: [],
-								deniedPaths: [],
-								budget: { ...profile.budget },
+								...contract.worker.authority,
+								role: input.authorityRole,
 							},
-							resourcePointers: [],
-						},
-					});
-					return {
-						...contract,
-						authority: {
-							...contract.worker.authority,
-							role: input.authorityRole,
-						},
-						modelBinding: contract.worker.modelBinding,
-					};
-				},
-			};
-
-			const getOwnerRules = () => session.renderOwnerRulesForMission();
-			const workerDispatcher = new RealWorkerDispatcher({
-				session,
-				provenance: "production-live",
-				getOwnerRules,
-			});
-
-			// Synthesized capability artifacts are agent runtime state keyed to the session that built
-			// them, so a synthesis never shows up as a project change.
-			const capabilityArtifactRoot = capabilityArtifactsDir(agentDir, sessionManager.getSessionId());
-
-			const capabilityBuilder = new RealCapabilityBuilder({
-				taskRuntime: durableTaskRuntime,
-				taskProfiles: taskProfileWriter,
-				contractFactory,
-				runWorkerOnce: (req) => session.runWorkerDelegationOnce(req as any),
-				cwd,
-				capabilityArtifactRoot,
-				provenance: "production-live",
-				getOwnerRules,
-			});
-
-			const scriptRegistry = new RealScriptRegistry();
-			const proofRunner = new CapabilityProofRunner();
-			const mechanicalVerifier = new RealMechanicalVerifier({
-				proofRunner,
-				scriptRegistry,
-				extensionRunner: getExtensionRunner(),
-				skillVault: session.getSkillVault(),
-				cwd,
-				provenance: "production-live",
-			});
-
-			const charter =
-				options.charter ??
-				compileExecutionCharter({
-					objectiveId: `obj-${sessionManager.getSessionId()}`,
-					prompt: options.prompt ?? "Perform safe scoped execution with full adaptive runtime",
-					admission: observeDeliveryAdmission(cwd),
-				});
-
-			// The objective loop routes over the goal the owner started: reconcile it into the durable
-			// objective, read budgets from the goal's lease, repairs into durable tasks, limitations from the
-			// open verifications. The raw task runtime alone knows none of that.
-			const objectiveRuntime = new SessionObjectiveRuntime({
-				runtime: durableTaskRuntime,
-				cwd,
-				getGoalState: () => session.getGoalStateSnapshot(),
-				synchronizeGoalState: (goal) => session.backgroundLanes.synchronizeGoalState(goal),
-				saveGoalState: (state, expected) => session.saveGoalStateSnapshot(state, expected),
-				emitWarning: (message) => session.emitHostWarning(message),
-				getVerificationObligations: () => session.getVerificationObligations(),
-				noteDecision: (kind, detail) =>
-					session.operatorProjection.eventBridge.recordPlanMilestone(
-						kind === "repair" ? "Repair requested" : "Replan requested",
-						detail,
-					),
-			});
-			const stack = createProductionAdaptiveRuntimeStack({
-				agentDir,
-				persistentPath,
-				steeringPlane: steeringPlane ?? undefined,
-				modelRegistry,
-				getCandidateModels: () =>
-					session.getRouterCandidatePool().models.filter((candidate) => session.isModelAllowed(candidate)),
-				fitnessStore,
-				adaptationStore,
-				...(systemOneController ? { getSelectionJudge: () => systemOneController } : {}),
-				taskRuntime: durableTaskRuntime,
-				objectiveRuntime,
-				loopMode: executionLoopMode,
-				completionProfile: resolveEffectiveCompletionProfile({
-					requestedProfile: systemOneSettings.completionProfile,
-					steeringMode: steeringPlane?.policy.mode,
-					systemOneBound: Boolean(steeringPlane || systemOneController),
-				}),
-				taskProfiles: taskProfileWriter,
-				contractFactory,
-				capabilityBuilder,
-				runtimeUpdateController: session.runtimeUpdates,
-				workerDispatcher,
-				mechanicalVerifier,
-				scriptRegistry,
-				skillVault: session.getSkillVault(),
-				extensionRunner: getExtensionRunner(),
-				charter,
-				cwd,
-				capabilityArtifactRoot,
-				getOwnerRules,
-				projectRules: session.projectRules,
-				proofRunner,
-				kindSupportContext: {
-					projectInstructionsEnabled: settingsManager.areProjectInstructionsEnabled(),
-				},
-				// The live extension runtime: loads an extension by path and exposes the active registry,
-				// which is what makes `extension` an activatable kind rather than an advertised one.
-				extensionRuntime: {
-					reload: (extensionPath) => session.reloadExtension(extensionPath),
-					listActive: () =>
-						getExtensionRunner().activeExtensions.map((extension) => ({
-							// `resolvedPath` is what the runtime actually loaded, which is what an
-							// activation lookup has to match against the artifact it was given.
-							name: basename(extension.path),
-							path: extension.resolvedPath,
-						})),
-				},
-			});
-
-			session.attachAdaptiveRuntime({ ...stack, charter });
-		}
-
-		if (systemOneController) {
-			const readActiveRepository = () => {
-				const repositoryRoot = readWorkRepositoryRoot(session.taskCwd) ?? session.taskCwd;
-				let currentRevision = "unversioned";
-				try {
-					currentRevision =
-						execFileSync("git", ["rev-parse", "HEAD"], {
-							cwd: repositoryRoot,
-							encoding: "utf-8",
-							stdio: ["ignore", "pipe", "ignore"],
-						}).trim() || currentRevision;
-				} catch {
-					// A non-git task workspace has no repository revision to project.
-				}
-				const baselineRevision =
-					session.getGoalWorkEvidence().find((scope) => scope.baseline?.root === repositoryRoot)?.baseline
-						?.revision ?? currentRevision;
-				return {
-					repositoryRoot,
-					currentRevision,
-					baselineRevision,
+							modelBinding: contract.worker.modelBinding,
+						};
+					},
 				};
-			};
-			systemOneController.setTruthSource(() => {
-				const goal = session.getGoalStateSnapshot();
-				const repository = readActiveRepository();
-				return projectCanonicalTruth({
-					goal,
-					runtime: session.backgroundLanes.getTaskRuntimeSnapshot(),
-					verificationObligations: session.getVerificationObligations(),
-					lastRoute: session.objectiveExecutionController?.getLastRoute(),
-					currentRevision: repository.currentRevision,
-					repository: { root: repository.repositoryRoot, baseline_revision: repository.baselineRevision },
+
+				const getOwnerRules = () => session.renderOwnerRulesForMission();
+				const workerDispatcher = new RealWorkerDispatcher({
+					session,
+					provenance: "production-live",
+					getOwnerRules,
 				});
-			});
-			systemOneController.syncCanonicalTruth();
-			systemOneController.setWorkDiffSource(async (signal) => {
-				const goal = session.getGoalStateSnapshot();
-				return goal
-					? readGoalWorkDiff(session.getGoalWorkEvidence(), {
-							...(signal ? { signal } : {}),
-							deadline: Date.now() + 60_000,
-						})
-					: undefined;
-			});
-		}
-		if (executionLoopMode === "objective_primary" && !session.objectiveExecutionController) {
-			// The outer catch closes the constructed session; the binding error stays the cause.
-			throw new ObjectivePrimaryBindingError("ObjectiveExecutionController");
-		}
-		try {
-			// The initial runtime has now bound providers from profile-granted extensions. Re-resolve the
-			// profile model against that authoritative registry generation, then resync model capability.
-			await session.reapplyActiveProfileModelSettings();
-			if (modelFallbackMessage?.startsWith("Profile model resolution error:")) {
-				modelFallbackMessage = undefined;
+
+				// Synthesized capability artifacts are agent runtime state keyed to the session that built
+				// them, so a synthesis never shows up as a project change.
+				const capabilityArtifactRoot = capabilityArtifactsDir(agentDir, sessionManager.getSessionId());
+
+				const capabilityBuilder = new RealCapabilityBuilder({
+					taskRuntime: durableTaskRuntime,
+					taskProfiles: taskProfileWriter,
+					contractFactory,
+					runWorkerOnce: (req) => session.runWorkerDelegationOnce(req as any),
+					cwd,
+					capabilityArtifactRoot,
+					provenance: "production-live",
+					getOwnerRules,
+				});
+
+				const scriptRegistry = new RealScriptRegistry();
+				const proofRunner = new CapabilityProofRunner();
+				const mechanicalVerifier = new RealMechanicalVerifier({
+					proofRunner,
+					scriptRegistry,
+					extensionRunner: getExtensionRunner(),
+					skillVault: session.getSkillVault(),
+					cwd,
+					provenance: "production-live",
+				});
+
+				const charter =
+					options.charter ??
+					compileExecutionCharter({
+						objectiveId: `obj-${sessionManager.getSessionId()}`,
+						prompt: options.prompt ?? "Perform safe scoped execution with full adaptive runtime",
+						admission: observeDeliveryAdmission(cwd),
+					});
+
+				// The objective loop routes over the goal the owner started: reconcile it into the durable
+				// objective, read budgets from the goal's lease, repairs into durable tasks, limitations from the
+				// open verifications. The raw task runtime alone knows none of that.
+				const objectiveRuntime = new SessionObjectiveRuntime({
+					runtime: durableTaskRuntime,
+					cwd,
+					getGoalState: () => session.getGoalStateSnapshot(),
+					synchronizeGoalState: (goal) => session.backgroundLanes.synchronizeGoalState(goal),
+					saveGoalState: (state, expected) => session.saveGoalStateSnapshot(state, expected),
+					emitWarning: (message) => session.emitHostWarning(message),
+					getVerificationObligations: () => session.getVerificationObligations(),
+					noteDecision: (kind, detail) =>
+						session.operatorProjection.eventBridge.recordPlanMilestone(
+							kind === "repair" ? "Repair requested" : "Replan requested",
+							detail,
+						),
+				});
+				const stack = createProductionAdaptiveRuntimeStack({
+					agentDir,
+					persistentPath,
+					steeringPlane: steeringPlane ?? undefined,
+					modelRegistry,
+					getCandidateModels: () =>
+						session.getRouterCandidatePool().models.filter((candidate) => session.isModelAllowed(candidate)),
+					fitnessStore,
+					adaptationStore,
+					...(systemOneController ? { getSelectionJudge: () => systemOneController } : {}),
+					taskRuntime: durableTaskRuntime,
+					objectiveRuntime,
+					loopMode: executionLoopMode,
+					completionProfile: resolveEffectiveCompletionProfile({
+						requestedProfile: systemOneSettings.completionProfile,
+						steeringMode: steeringPlane?.policy.mode,
+						systemOneBound: Boolean(steeringPlane || systemOneController),
+					}),
+					taskProfiles: taskProfileWriter,
+					contractFactory,
+					capabilityBuilder,
+					runtimeUpdateController: session.runtimeUpdates,
+					workerDispatcher,
+					mechanicalVerifier,
+					scriptRegistry,
+					skillVault: session.getSkillVault(),
+					extensionRunner: getExtensionRunner(),
+					charter,
+					cwd,
+					capabilityArtifactRoot,
+					getOwnerRules,
+					projectRules: session.projectRules,
+					proofRunner,
+					kindSupportContext: {
+						projectInstructionsEnabled: settingsManager.areProjectInstructionsEnabled(),
+					},
+					// The live extension runtime: loads an extension by path and exposes the active registry,
+					// which is what makes `extension` an activatable kind rather than an advertised one.
+					extensionRuntime: {
+						reload: (extensionPath) => session.reloadExtension(extensionPath),
+						listActive: () =>
+							getExtensionRunner().activeExtensions.map((extension) => ({
+								// `resolvedPath` is what the runtime actually loaded, which is what an
+								// activation lookup has to match against the artifact it was given.
+								name: basename(extension.path),
+								path: extension.resolvedPath,
+							})),
+					},
+				});
+
+				session.attachAdaptiveRuntime({ ...stack, charter });
 			}
+
+			if (systemOneController) {
+				const readActiveRepository = () => {
+					const repositoryRoot = readWorkRepositoryRoot(session.taskCwd) ?? session.taskCwd;
+					let currentRevision = "unversioned";
+					try {
+						currentRevision =
+							execFileSync("git", ["rev-parse", "HEAD"], {
+								cwd: repositoryRoot,
+								encoding: "utf-8",
+								stdio: ["ignore", "pipe", "ignore"],
+							}).trim() || currentRevision;
+					} catch {
+						// A non-git task workspace has no repository revision to project.
+					}
+					const baselineRevision =
+						session.getGoalWorkEvidence().find((scope) => scope.baseline?.root === repositoryRoot)?.baseline
+							?.revision ?? currentRevision;
+					return {
+						repositoryRoot,
+						currentRevision,
+						baselineRevision,
+					};
+				};
+				systemOneController.setTruthSource(() => {
+					const goal = session.getGoalStateSnapshot();
+					const repository = readActiveRepository();
+					return projectCanonicalTruth({
+						goal,
+						runtime: session.backgroundLanes.getTaskRuntimeSnapshot(),
+						verificationObligations: session.getVerificationObligations(),
+						lastRoute: session.objectiveExecutionController?.getLastRoute(),
+						currentRevision: repository.currentRevision,
+						repository: { root: repository.repositoryRoot, baseline_revision: repository.baselineRevision },
+					});
+				});
+				systemOneController.syncCanonicalTruth();
+				systemOneController.setWorkDiffSource(async (signal) => {
+					const goal = session.getGoalStateSnapshot();
+					return goal
+						? readGoalWorkDiff(session.getGoalWorkEvidence(), {
+								...(signal ? { signal } : {}),
+								deadline: Date.now() + 60_000,
+							})
+						: undefined;
+				});
+			}
+			if (executionLoopMode === "objective_primary" && !session.objectiveExecutionController) {
+				// The outer catch closes the constructed session; the binding error stays the cause.
+				throw new ObjectivePrimaryBindingError("ObjectiveExecutionController");
+			}
+			try {
+				// The initial runtime has now bound providers from profile-granted extensions. Re-resolve the
+				// profile model against that authoritative registry generation, then resync model capability.
+				await session.reapplyActiveProfileModelSettings();
+				if (modelFallbackMessage?.startsWith("Profile model resolution error:")) {
+					modelFallbackMessage = undefined;
+				}
+			} catch (error) {
+				// Preserve the established non-fatal fallback for a genuinely unresolved profile model.
+				if (!modelFallbackMessage?.startsWith("Profile model resolution error:")) {
+					throw error;
+				}
+			}
+			// File-store memory tools exist only after providers initialize. Do this here so an SDK session
+			// that never calls bindExtensions still has the requested `memory` tool when the grant allows it.
+			await session.initializeMemory();
+			const extensionsResult = resourceLoader.getExtensions();
+
+			return {
+				session,
+				sessionManager,
+				getExtensionRunner,
+				extensionsResult,
+				modelFallbackMessage,
+			};
 		} catch (error) {
-			// Preserve the established non-fatal fallback for a genuinely unresolved profile model.
-			if (!modelFallbackMessage?.startsWith("Profile model resolution error:")) {
+			if (constructed === undefined) {
+				// The owner was made for this session and no session took it: release its timers and listeners before rethrowing.
+				semanticUsage.dispose();
 				throw error;
 			}
-		}
-		// File-store memory tools exist only after providers initialize. Do this here so an SDK session
-		// that never calls bindExtensions still has the requested `memory` tool when the grant allows it.
-		await session.initializeMemory();
-		const extensionsResult = resourceLoader.getExtensions();
-
-		return {
-			session,
-			sessionManager,
-			getExtensionRunner,
-			extensionsResult,
-			modelFallbackMessage,
-		};
-	} catch (error) {
-		if (constructed === undefined) {
-			// The owner was made for this session and no session took it: release its timers and listeners before rethrowing.
-			semanticUsage.dispose();
-			throw error;
-		}
-		// A session that was constructed and then failed (memory initialization, extension discovery) is closed in full: its extensions,
-		// shell and usage owner. The creation failure, a failed disposal and a failing warning sink are all collected and none replaces
-		// another; the held closing warnings are drained on BOTH disposal outcomes (the caller never receives the session to recover
-		// them), and they never go to stderr (the creating host may be running a terminal UI).
-		const failures: unknown[] = [error];
-		try {
-			await constructed.disposeAndWait({ drainClosingWarnings: false });
-		} catch (disposeError: unknown) {
-			failures.push(disposeError);
-		}
-		const closingWarnings = constructed.takeUndeliveredWarnings();
-		let carriedWarnings: string | undefined;
-		if (closingWarnings.length > 0) {
-			if (options.onClosingWarnings) {
-				try {
-					options.onClosingWarnings(closingWarnings);
-				} catch (sinkError: unknown) {
-					// The sink never accepted them and no session is returned to recover them: they ride the failure.
-					failures.push(sinkError);
+			// A session that was constructed and then failed (memory initialization, extension discovery) is closed in full: its extensions,
+			// shell and usage owner. The creation failure, a failed disposal and a failing warning sink are all collected and none replaces
+			// another; the held closing warnings are drained on BOTH disposal outcomes (the caller never receives the session to recover
+			// them), and they never go to stderr (the creating host may be running a terminal UI).
+			const failures: unknown[] = [error];
+			try {
+				await constructed.disposeAndWait({ drainClosingWarnings: false });
+			} catch (disposeError: unknown) {
+				failures.push(disposeError);
+			}
+			const closingWarnings = constructed.takeUndeliveredWarnings();
+			let carriedWarnings: string | undefined;
+			if (closingWarnings.length > 0) {
+				if (options.onClosingWarnings) {
+					try {
+						options.onClosingWarnings(closingWarnings);
+					} catch (sinkError: unknown) {
+						// The sink never accepted them and no session is returned to recover them: they ride the failure.
+						failures.push(sinkError);
+						carriedWarnings = closingWarnings.join(" ");
+					}
+				} else {
 					carriedWarnings = closingWarnings.join(" ");
 				}
-			} else {
-				carriedWarnings = closingWarnings.join(" ");
+			}
+			const originalMessage = error instanceof Error ? error.message : String(error);
+			const failure: unknown =
+				failures.length === 1
+					? error
+					: new AggregateError(failures, `${originalMessage} (its cleanup also failed)`);
+			if (carriedWarnings === undefined) throw failure;
+			throw new Error(`${originalMessage} ${carriedWarnings}`, { cause: failure });
+		}
+	} catch (error) {
+		if (!bundleTransferred) {
+			try {
+				bundleLease?.release();
+			} catch (releaseError) {
+				throw new AggregateError([error, releaseError], "Session creation and bundle lease release failed.");
 			}
 		}
-		const originalMessage = error instanceof Error ? error.message : String(error);
-		const failure: unknown =
-			failures.length === 1 ? error : new AggregateError(failures, `${originalMessage} (its cleanup also failed)`);
-		if (carriedWarnings === undefined) throw failure;
-		throw new Error(`${originalMessage} ${carriedWarnings}`, { cause: failure });
+		throw error;
 	}
 }

@@ -241,6 +241,7 @@ import {
 	resolveConfiguredOrchestrationModel,
 } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
+import { claimSessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
 import { OwnerInputLedger, type OwnerInputOutcome } from "./owner-input-ledger.ts";
 import {
 	ownerSteerWake,
@@ -357,10 +358,6 @@ import type { WaitStatusEvent } from "./util/wait.ts";
 import { currentWorkUnit, openWorkUnit, WORKER_RECEIPTS_CUSTOM_TYPE } from "./work-units.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
-// ============================================================================
-// Stream-idle watchdog wiring
-// ============================================================================
-
 export * from "./agent-session-contracts.ts";
 
 import {
@@ -387,10 +384,6 @@ import type { SpawnedUsageTotals } from "./cost/usage-records.ts";
 
 export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-protocol-controller.ts";
 
-// ============================================================================
-// AgentSession Class
-// ============================================================================
-
 export class AgentSession {
 	readonly agent: Agent;
 	private readonly sessionManager: SessionManager;
@@ -407,7 +400,6 @@ export class AgentSession {
 	/** The router's configured scope; undefined leaves available favorites unrestricted by a scope. */
 	private _routerPool: RouterPoolState | undefined;
 
-	// Event subscription state
 	private _unsubscribeAgent?: () => void;
 	private _unsubscribeSettingsChanges?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
@@ -606,6 +598,12 @@ export class AgentSession {
 	private readonly _agentDirForLedger: string;
 
 	constructor(config: AgentSessionConfig) {
+		const bundleLease = claimSessionBundleLease(
+			config.bundleLease,
+			config.agentDir ?? getAgentDir(),
+			config.sessionManager.getSessionId(),
+			config.sessionManager.isPersisted(),
+		);
 		this.agent = config.agent;
 		this._onClosingWarnings = config.onClosingWarnings ?? writeTerminalWarnings;
 		this._systemOneController = config.systemOneController;
@@ -869,8 +867,10 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._agentDir = agentDir;
-		this._runtimeAdmission = new SessionRuntimeAdmissionController(runtimeGenerationAdmission(agentDir), (event) =>
-			this._emit(event),
+		this._runtimeAdmission = new SessionRuntimeAdmissionController(
+			runtimeGenerationAdmission(agentDir),
+			(event) => this._emit(event),
+			bundleLease,
 		);
 		this._runtimeMutationWaitClock = config.timers.port("foreground");
 		this._isChildSession = (config.isChildSession ?? process.env.PI_CHILD_SESSION === "1") || isWorkerSession();
@@ -3322,7 +3322,6 @@ export class AgentSession {
 		return this._pipeline.buildCompactionPreDigest();
 	}
 
-	/** Drop provider-owned request/continuation caches whose prefix was invalidated by compaction. */
 	/**
 	 * One cache observation per provider response (see CacheObservationRecorder), joined to the request
 	 * snapshot that opened it, so the cache-survival estimator can learn each lane's cache lifetime.
@@ -3427,7 +3426,6 @@ export class AgentSession {
 		return this._toolProtocol.resetProtocolCalibration(model);
 	}
 
-	/** Curation status for diagnostics/dashboard: settings, live telemetry, last refusal reason. */
 	/** Curation status for diagnostics/dashboard (delegates to {@link ContextPipeline.getContextCurationStatus}). */
 	getContextCurationStatus(): {
 		enabled: boolean;
@@ -3519,7 +3517,6 @@ export class AgentSession {
 	// Event Subscription
 	// =========================================================================
 
-	/** Emit an event to all listeners */
 	/** Steer a displayed custom notice to this session's model (may trigger a turn); a delivery failure is a visible warning. */
 	private _steerSessionNotice(customType: string, text: string): void {
 		void this.sendCustomMessage(
@@ -3901,7 +3898,8 @@ export class AgentSession {
 	dispose(): void {
 		if (this._disposed) return;
 		const { completion, safely, trackRequired, finish } = createSessionShutdownTracker();
-		this._disposeCompletion = completion;
+		this._disposeCompletion = completion.then(() => this._runtimeAdmission.releaseBundle());
+		void this._disposeCompletion.catch(() => undefined);
 		this._disposed = true;
 		const humanInputPreparation = this._humanInput.invalidate("session dispose");
 		this._runtimeBuilder.closeMutationAdmission();
@@ -3988,7 +3986,7 @@ export class AgentSession {
 		});
 		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
 		this._eventListeners = [];
-		track(() =>
+		trackRequired(() =>
 			settleClosingSessionMemory({
 				waitForAgentIdle: () => this.agent.waitForIdle(),
 				settleReflectionTurn: () => this.settleReflectionTurn(),

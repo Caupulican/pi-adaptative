@@ -75,10 +75,12 @@ export interface ClosingSessionMemoryPorts {
 
 /** Settle trailing run writes before memory captures its lifecycle tail, then release usage delivery. */
 export async function settleClosingSessionMemory(ports: ClosingSessionMemoryPorts): Promise<void> {
+	let physicallySettled = true;
 	try {
 		// The aborted run's partial message and agent_end reach persistence before its consumer goes.
 		try {
 			if (!(await runSettlesWithin(ports.waitForAgentIdle(), CLOSING_RUN_SETTLE_MS))) {
+				physicallySettled = false;
 				ports.holdWarning(
 					`A run did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its final message may not have been persisted.`,
 				);
@@ -88,12 +90,14 @@ export async function settleClosingSessionMemory(ports: ClosingSessionMemoryPort
 		}
 		// Reflection may be held by an abort-ignoring provider; the same bound keeps memory closable.
 		if (!(await runSettlesWithin(ports.settleReflectionTurn(), CLOSING_RUN_SETTLE_MS))) {
+			physicallySettled = false;
 			ports.holdWarning(
 				`A reflection turn did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its work may not have been persisted.`,
 			);
 		}
 		// Manual and automatic compaction end cancelled, or their outstanding work is disclosed.
 		if (!(await runSettlesWithin(ports.settleCompaction(), CLOSING_RUN_SETTLE_MS))) {
+			physicallySettled = false;
 			ports.holdWarning(
 				`A compaction did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its result is discarded.`,
 			);
@@ -103,6 +107,8 @@ export async function settleClosingSessionMemory(ports: ClosingSessionMemoryPort
 		// A history summary can record spend until memory finishes; later disclosure is held at close.
 		ports.disposeSemanticUsage();
 	}
+	if (!physicallySettled)
+		throw new Error("Session shutdown is incomplete; active work still protects its session bundle.");
 }
 
 /**

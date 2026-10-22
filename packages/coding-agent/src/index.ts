@@ -299,6 +299,7 @@ export * from "./core/orchestration/model-binding.ts";
 export * from "./core/orchestration/policy-compiler.ts";
 export * from "./core/orchestration/profile-registry.ts";
 export * from "./core/orchestration/profile-store.ts";
+export { acquireSessionBundleLease, type SessionBundleLease } from "./core/orchestration/session-bundle-lifecycle.ts";
 export * from "./core/orchestration/task-runtime.ts";
 export { orchestrationThinkingLevelSchema } from "./core/orchestration/thinking-level-schema.ts";
 export type {

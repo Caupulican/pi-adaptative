@@ -20,6 +20,7 @@ import type {
 	SessionStartEvent,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { SessionBundleLeaseReleaseError, withSessionBundleLeases } from "./orchestration/session-bundle-lifecycle.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { writeTerminalWarnings } from "./terminal-warnings.ts";
@@ -317,7 +318,7 @@ interface RestoreFailure {
 
 /** A teardown or activation failure at the replacement boundary, including rollback outcome. */
 export class SessionReplacementRuntimeError extends Error {
-	readonly phase: "teardown" | "activation";
+	readonly phase: "admission" | "teardown" | "activation";
 	readonly recovered: boolean;
 	readonly transitionError: unknown;
 	readonly recoveryError: unknown | undefined;
@@ -325,7 +326,7 @@ export class SessionReplacementRuntimeError extends Error {
 	readonly undeliveredWarnings: readonly string[];
 
 	constructor(
-		phase: "teardown" | "activation",
+		phase: "admission" | "teardown" | "activation",
 		transitionError: unknown,
 		recovered: boolean,
 		recoveryError?: unknown,
@@ -334,9 +335,11 @@ export class SessionReplacementRuntimeError extends Error {
 		const transitionMessage = transitionError instanceof Error ? transitionError.message : String(transitionError);
 		const warnings = undeliveredWarnings.length > 0 ? `. ${undeliveredWarnings.join(" ")}` : "";
 		super(
-			recovered
-				? `Session replacement ${phase} failed; the previous session was restored: ${transitionMessage}`
-				: `Session replacement ${phase} failed and the previous session could not be restored safely: ${transitionMessage}${warnings}`,
+			phase === "admission"
+				? `Session replacement admission failed; the previous session remains active: ${transitionMessage}`
+				: recovered
+					? `Session replacement ${phase} failed; the previous session was restored: ${transitionMessage}`
+					: `Session replacement ${phase} failed and the previous session could not be restored safely: ${transitionMessage}${warnings}`,
 		);
 		this.name = "SessionReplacementRuntimeError";
 		this.phase = phase;
@@ -352,9 +355,9 @@ export class SessionReplacementCallbackError extends Error {
 	readonly replacementCommitted = true;
 	readonly callbackError: unknown;
 
-	constructor(callbackError: unknown) {
+	constructor(callbackError: unknown, stage = "withSession callback") {
 		const callbackMessage = callbackError instanceof Error ? callbackError.message : String(callbackError);
-		super(`Session replacement completed, but its withSession callback failed: ${callbackMessage}`);
+		super(`Session replacement completed, but its ${stage} failed: ${callbackMessage}`);
 		this.name = "SessionReplacementCallbackError";
 		this.callbackError = callbackError;
 	}
@@ -693,54 +696,97 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		options: SessionReplacementCommitOptions,
 	): Promise<void> {
 		const previous = this.snapshot();
+		const heldSessionIds = [previous.sessionManager, prepared.sessionManager]
+			.filter((manager) => manager.isPersisted())
+			.map((manager) => manager.getSessionId());
+		let entered = false;
+		let completed = false;
 		try {
-			await this.teardownCurrent(options.reason, options.targetSessionFile);
-		} catch (transitionError: unknown) {
-			const restore = await this.restorePreviousAfterRuntimeFailure(previous, prepared, options, false);
-			throw new SessionReplacementRuntimeError(
-				"teardown",
-				transitionError,
-				restore === undefined,
-				restore?.error,
-				restore?.undeliveredWarnings,
-			);
-		}
-		let result: CreateAgentSessionRuntimeResult | undefined;
-		try {
-			const file = prepared.sessionManager.getSessionFile();
-			// Same-file preparation took a snapshot while the predecessor still owned its writes. Only
-			// reload it after physical retirement, before constructing any branch-bound recovery owner.
-			if (file && file === previous.session.sessionFile && existsSync(file))
-				prepared.sessionManager.setSessionFile(file);
-			result = await prepared.runtime.activate(prepared.sessionManager);
-			this.apply(result);
-			await this.activateReplacement(options);
-		} catch (activationError: unknown) {
-			const restore = await this.restorePreviousAfterRuntimeFailure(
-				previous,
-				{
-					...prepared,
-					...(result ? { result } : {}),
-					...(activationError instanceof CreatedSessionFailure ? { handedSession: activationError.session } : {}),
-				},
-				options,
-				result !== undefined,
-			);
-			throw new SessionReplacementRuntimeError(
-				"activation",
-				activationError,
-				restore === undefined,
-				restore?.error,
-				restore?.undeliveredWarnings,
-			);
-		}
-		this.flushDiscardedWarnings();
-		if (options.withSession) {
-			try {
-				await options.withSession(this.session.createReplacedSessionContext());
-			} catch (callbackError: unknown) {
-				throw new SessionReplacementCallbackError(callbackError);
+			return await withSessionBundleLeases(previous.services.agentDir, heldSessionIds, async () => {
+				entered = true;
+				try {
+					await this.teardownCurrent(options.reason, options.targetSessionFile);
+				} catch (transitionError: unknown) {
+					const restore = await this.restorePreviousAfterRuntimeFailure(previous, prepared, options, false);
+					throw new SessionReplacementRuntimeError(
+						"teardown",
+						transitionError,
+						restore === undefined,
+						restore?.error,
+						restore?.undeliveredWarnings,
+					);
+				}
+				let result: CreateAgentSessionRuntimeResult | undefined;
+				try {
+					const file = prepared.sessionManager.getSessionFile();
+					// Same-file preparation took a snapshot while the predecessor still owned its writes. Only
+					// reload it after physical retirement, before constructing any branch-bound recovery owner.
+					if (file && file === previous.session.sessionFile && existsSync(file))
+						prepared.sessionManager.setSessionFile(file);
+					result = await prepared.runtime.activate(prepared.sessionManager);
+					this.apply(result);
+					await this.activateReplacement(options);
+				} catch (activationError: unknown) {
+					const restore = await this.restorePreviousAfterRuntimeFailure(
+						previous,
+						{
+							...prepared,
+							...(result ? { result } : {}),
+							...(activationError instanceof CreatedSessionFailure
+								? { handedSession: activationError.session }
+								: {}),
+						},
+						options,
+						result !== undefined,
+					);
+					throw new SessionReplacementRuntimeError(
+						"activation",
+						activationError,
+						restore === undefined,
+						restore?.error,
+						restore?.undeliveredWarnings,
+					);
+				}
+				this.flushDiscardedWarnings();
+				if (options.withSession) {
+					try {
+						await options.withSession(this.session.createReplacedSessionContext());
+					} catch (callbackError: unknown) {
+						throw new SessionReplacementCallbackError(callbackError);
+					}
+				}
+				completed = true;
+			});
+		} catch (error) {
+			if (!entered) {
+				let failure = error;
+				try {
+					await this.discardCreatedSession(
+						prepared.sessionManager,
+						options.createdSession,
+						error,
+						undefined,
+						prepared.runtime,
+					);
+				} catch (cleanupError) {
+					failure = new AggregateError([error, cleanupError], "Session admission and candidate cleanup failed.");
+				}
+				throw new SessionReplacementRuntimeError("admission", failure, true);
 			}
+			if (error instanceof SessionBundleLeaseReleaseError) {
+				const operationError = error.operationFailure?.error;
+				if (completed || operationError instanceof SessionReplacementCallbackError)
+					throw new SessionReplacementCallbackError(error, "bundle lease release");
+				if (operationError instanceof SessionReplacementRuntimeError)
+					throw new SessionReplacementRuntimeError(
+						operationError.phase,
+						error,
+						operationError.recovered,
+						operationError.recoveryError,
+						operationError.undeliveredWarnings,
+					);
+			}
+			throw error;
 		}
 	}
 
