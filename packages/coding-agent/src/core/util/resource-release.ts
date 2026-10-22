@@ -9,6 +9,7 @@
  * promise; both share the backoff and the entry bookkeeping.
  */
 
+import { boundedLine } from "./bounded-line.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "./timer-port.ts";
 
 export type ReleaseOutcome =
@@ -48,6 +49,8 @@ export interface RetainedReleaseSnapshot {
 	readonly retained: readonly { readonly key: string; readonly cause: string; readonly failures: number }[];
 	/** Delay of the armed backoff alarm; absent when none is armed. */
 	readonly armedDelayMs?: number;
+	/** Latest unresolved retry-infrastructure failure; successful releases remain settled. */
+	readonly retryError?: string;
 }
 
 export interface RetainedReleaseRetryOptions<T> {
@@ -68,7 +71,7 @@ interface RetainedReleaseOptionsBase<T> {
 	readonly baseDelayMs?: number;
 	/** Backoff cap. Default 30 s. */
 	readonly maxDelayMs?: number;
-	/** A failure of a reporting pass (the alarm's, or one the owner asked to report). */
+	/** A release failure in a reporting pass, or retry-infrastructure failure affecting a retained entry. */
 	readonly reportFailure?: (entry: RetainedRelease<T>, error: unknown) => void;
 	/** A dependent's wake listener threw; the release it was told about still stands. */
 	readonly reportListenerFailure?: (error: unknown) => void;
@@ -92,6 +95,7 @@ export interface AsyncRetainedReleasesOptions<T> extends RetainedReleaseOptionsB
 
 const DEFAULT_BASE_DELAY_MS = 1_000;
 const DEFAULT_MAX_DELAY_MS = 30_000;
+const MAX_RETRY_ERROR_CHARS = 1_024;
 
 interface MutableEntry<T> {
 	readonly key: string;
@@ -134,8 +138,10 @@ abstract class RetainedReleaseSet<T> {
 	/** The armed alarm's handle, opaque here: only `undefined` means no alarm is armed. */
 	private timer: unknown;
 	private timerDelayMs: number | undefined;
+	private alarmGeneration: symbol | undefined;
 	private failedPasses = 0;
 	private isClosed = false;
+	private retryError: string | undefined;
 
 	protected constructor(options: RetainedReleaseOptionsBase<T>) {
 		this.base = options;
@@ -180,7 +186,7 @@ abstract class RetainedReleaseSet<T> {
 
 	/**
 	 * Keeps a resource whose release failed with `error` and arms the backoff alarm. Retaining a key again replaces its
-	 * value and counts one more failure.
+	 * value and counts one more failure. Alarm failure leaves ownership retained and is reported separately.
 	 */
 	retain(key: string, value: T, error: unknown): Extract<ReleaseOutcome, { kind: "retained" }> {
 		if (this.entries.size === 0) this.failedPasses = 0;
@@ -194,7 +200,7 @@ abstract class RetainedReleaseSet<T> {
 	/** The owner took the resource back (re-adoption) or another path released it: nothing retries it any more. */
 	delete(key: string): boolean {
 		const deleted = this.entries.delete(key);
-		if (deleted && this.entries.size === 0) this.disarm();
+		if (deleted && this.entries.size === 0 && this.disarm().length === 0) this.retryError = undefined;
 		return deleted;
 	}
 
@@ -211,10 +217,11 @@ abstract class RetainedReleaseSet<T> {
 			retryOwner: this.base.retryOwner,
 			retained: [...this.entries.values()].map(({ key, cause, failures }) => ({ key, cause, failures })),
 			...(this.timer !== undefined && this.timerDelayMs !== undefined ? { armedDelayMs: this.timerDelayMs } : {}),
+			...(this.retryError !== undefined ? { retryError: this.retryError } : {}),
 		};
 	}
 
-	/** Disarms the alarm for good. Entries stay, so a last-chance pass and the owner's report can still see them. */
+	/** Invalidates the alarm for good, even if clearing it fails. Entries remain for a last-chance pass. */
 	close(): void {
 		this.isClosed = true;
 		this.disarm();
@@ -258,17 +265,30 @@ abstract class RetainedReleaseSet<T> {
 			},
 			end: () => {
 				if (this.entries.size === 0 && errors.length === 0 && settled.length === 0) return errors;
-				this.finishPass(failed, options.filter !== undefined, settled);
+				this.finishPass(failed, options.filter !== undefined, settled, errors);
 				return errors;
 			},
 		};
 	}
 
-	private finishPass(failed: boolean, filtered: boolean, settled: readonly SettledRelease<T>[]): void {
+	private finishPass(
+		failed: boolean,
+		filtered: boolean,
+		settled: readonly SettledRelease<T>[],
+		errors: unknown[],
+	): void {
 		if (failed) this.failedPasses += 1;
 		else if (!filtered) this.failedPasses = 0;
-		if (this.entries.size === 0) this.disarm();
-		this.arm();
+		try {
+			if (this.entries.size === 0) {
+				const disarmErrors = this.disarm();
+				errors.push(...disarmErrors);
+				if (disarmErrors.length === 0) this.retryError = undefined;
+			}
+			errors.push(...this.arm());
+		} catch (error) {
+			errors.push(...this.reportRetryFailure(error));
+		}
 		if (settled.length === 0) return;
 		for (const listener of [...this.listeners]) {
 			try {
@@ -279,6 +299,22 @@ abstract class RetainedReleaseSet<T> {
 		}
 	}
 
+	/** Infrastructure failure is an explicit result, never cancellation of the serial retry queue. */
+	protected reportRetryFailure(error: unknown): unknown[] {
+		const failure = new Error(`${this.retryOwner} retry infrastructure failed: ${releaseFailureCause(error)}`, {
+			cause: error,
+		});
+		this.retryError = boundedLine(failure.message, MAX_RETRY_ERROR_CHARS);
+		const entry = this.entries.values().next().value;
+		try {
+			if (entry && this.base.reportFailure) this.base.reportFailure({ ...entry }, failure);
+			else this.reportListener(failure);
+		} catch (reportError) {
+			this.reportListener(reportError);
+		}
+		return [error];
+	}
+
 	private reportListener(error: unknown): void {
 		try {
 			this.base.reportListenerFailure?.(error);
@@ -287,22 +323,41 @@ abstract class RetainedReleaseSet<T> {
 		}
 	}
 
-	private arm(): void {
-		if (this.isClosed || this.timer !== undefined || this.entries.size === 0) return;
+	private arm(): unknown[] {
+		if (this.isClosed || this.timer !== undefined || this.entries.size === 0) return [];
 		const delayMs = Math.min(this.maxDelayMs, this.baseDelayMs * 2 ** Math.min(this.failedPasses, 16));
+		const generation = Symbol();
+		this.alarmGeneration = generation;
+		try {
+			this.timer = this.timers.setTimeout(() => {
+				if (this.isClosed || this.alarmGeneration !== generation) return;
+				this.alarmGeneration = undefined;
+				this.timer = undefined;
+				this.timerDelayMs = undefined;
+				this.scheduledRetry();
+			}, delayMs);
+		} catch (error) {
+			this.alarmGeneration = undefined;
+			return this.reportRetryFailure(error);
+		}
 		this.timerDelayMs = delayMs;
-		this.timer = this.timers.setTimeout(() => {
-			this.timer = undefined;
-			this.timerDelayMs = undefined;
-			this.scheduledRetry();
-		}, delayMs);
+		this.retryError = undefined;
+		return [];
 	}
 
-	private disarm(): void {
-		if (this.timer === undefined) return;
-		this.timers.clearTimeout(this.timer);
+	private disarm(): unknown[] {
+		const timer = this.timer;
+		// Invalidate before the adapter call: a failed clear may still leave the callback queued.
+		this.alarmGeneration = undefined;
 		this.timer = undefined;
 		this.timerDelayMs = undefined;
+		if (timer === undefined) return [];
+		try {
+			this.timers.clearTimeout(timer);
+			return [];
+		} catch (error) {
+			return this.reportRetryFailure(error);
+		}
 	}
 }
 
@@ -315,17 +370,21 @@ export class RetainedReleases<T> extends RetainedReleaseSet<T> {
 		this.release = options.release;
 	}
 
-	/** Attempts every (matching) entry once and returns the failures; a failure keeps its entry and its alarm. */
+	/** Attempts matching entries once; failures retain resources and report any unavailable retry alarm. */
 	retry(options: RetainedReleaseRetryOptions<T>): unknown[] {
-		const pass = this.beginPass(options);
-		for (const entry of pass.entries) {
-			try {
-				pass.settle(entry, this.release(entry.value, pass.context(entry)));
-			} catch (error) {
-				pass.fail(entry, error);
+		try {
+			const pass = this.beginPass(options);
+			for (const entry of pass.entries) {
+				try {
+					pass.settle(entry, this.release(entry.value, pass.context(entry)));
+				} catch (error) {
+					pass.fail(entry, error);
+				}
 			}
+			return pass.end();
+		} catch (error) {
+			return this.reportRetryFailure(error);
 		}
-		return pass.end();
 	}
 
 	protected scheduledRetry(): void {
@@ -347,7 +406,7 @@ export class AsyncRetainedReleases<T> extends RetainedReleaseSet<T> {
 	}
 
 	retry(options: RetainedReleaseRetryOptions<T>): Promise<unknown[]> {
-		const pass = this.tail.then(() => this.pass(options));
+		const pass = this.tail.then(() => this.pass(options)).catch((error: unknown) => this.reportRetryFailure(error));
 		this.tail = pass;
 		return pass;
 	}
