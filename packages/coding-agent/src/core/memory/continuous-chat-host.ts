@@ -19,7 +19,6 @@ import {
 	createContinuousChatLegacyImportMarker,
 	createContinuousChatSessionLedger,
 	readContinuousChatLegacySessionFile,
-	streamLegacySessionEntries,
 } from "./continuous-chat-migration.ts";
 import { type ContinuousChatCompactionPrefixHead, ContinuousChatRuntime } from "./continuous-chat-runtime.ts";
 import { ContinuousChatStore } from "./continuous-chat-store.ts";
@@ -261,11 +260,17 @@ export class ContinuousChatHost {
 						`unsettled ICM session ${activeEntry.sessionId} is unreadable: ${reading.reason}`,
 					);
 				}
-				toRecover.set(activeEntry.sessionId, () =>
-					reading.kind === "session" ? reading.session.entries() : streamLegacySessionEntries(file),
-				);
+				if (reading.kind !== "session" || reading.session.sessionId !== activeEntry.sessionId) {
+					throw new ContinuousChatMigrationBlockedError(
+						`unsettled ICM session ${activeEntry.sessionId} has no matching session source at its recorded path`,
+					);
+				}
+				const session = reading.session;
+				toRecover.set(activeEntry.sessionId, () => session.entries());
 			} else {
-				await this.sessionLedger.markSettled([activeEntry.sessionId]);
+				throw new ContinuousChatMigrationBlockedError(
+					`unsettled ICM session ${activeEntry.sessionId} is missing; restore its session source before recovery`,
+				);
 			}
 		}
 

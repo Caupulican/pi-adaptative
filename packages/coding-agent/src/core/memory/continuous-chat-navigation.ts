@@ -305,6 +305,7 @@ export class ContinuousChatNavigator {
 		}
 		const coordinate = { level, ordinal: id / n };
 		const label = continuousChatNodeLabel(coordinate);
+		if (page !== 0) return rejected("page-out-of-range", `Line ${label} has no pages; page must be 0.`);
 		const node = await this.source.readNode(coordinate);
 		signal?.throwIfAborted();
 		if (node === undefined) {
@@ -316,7 +317,6 @@ export class ContinuousChatNavigator {
 			// Not merged yet: the line still opens into its two children, each a summary or a pending line.
 			return this.unmergedChildren(coordinate, id, n, signal);
 		}
-		if (page !== 0) return rejected("page-out-of-range", `Line ${label} has no pages; page must be 0.`);
 		const children = node.children;
 		if (children === undefined) return rejected("incomplete", `Line ${label} has no children.`);
 		// The parent of two adjacent aligned siblings is exact: it equals this line only when the children are
