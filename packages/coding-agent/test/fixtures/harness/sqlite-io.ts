@@ -13,6 +13,8 @@ interface Backing {
 	readOnly: boolean;
 	transactionOwner?: Handle;
 	readonly handles: Set<Handle>;
+	/** The journal mode a real file database would report; the RAM engine can only answer `memory`. */
+	journalMode: string;
 }
 
 interface Handle {
@@ -167,6 +169,16 @@ const SCHEMA_INTROSPECTION_PRAGMAS: ReadonlySet<string> = new Set([
 	"foreign_key_list",
 ]);
 
+const JOURNAL_MODES: ReadonlySet<string> = new Set(["delete", "truncate", "persist", "memory", "wal", "off"]);
+const JOURNAL_MODE_PRAGMA = /^\s*PRAGMA\s+journal_mode\s*(?:=\s*([A-Za-z]+))?\s*;?\s*$/i;
+const JOURNAL_MODE_ASSIGNMENTS = /PRAGMA\s+journal_mode\s*=\s*([A-Za-z]+)/gi;
+
+/** A file database accepts any journal mode a pragma names; an unknown name leaves the mode unchanged, as SQLite does. */
+function applyJournalMode(backing: Backing, requested: string): void {
+	const mode = requested.toLowerCase();
+	if (JOURNAL_MODES.has(mode)) backing.journalMode = mode;
+}
+
 /** Logical file identities persist in the virtual tree; their native SQL backing remains entirely in RAM. */
 export class VirtualSqlite {
 	private readonly files: SqliteFiles;
@@ -207,7 +219,7 @@ export class VirtualSqlite {
 			if (typeof database.setAuthorizer !== "function") throw new Error("RAM SQLite requires native setAuthorizer");
 			database.enableLoadExtension(false);
 			database.exec("PRAGMA temp_store = MEMORY");
-			backing = { database, identity: identity ?? 0, readOnly: false, handles: new Set() };
+			backing = { database, identity: identity ?? 0, readOnly: false, handles: new Set(), journalMode: "delete" };
 			const authorized = backing;
 			database.setAuthorizer((action, first, second) => {
 				const name = first?.toLowerCase();
@@ -316,6 +328,7 @@ export class VirtualSqlite {
 				if (key === "prepare")
 					return (...args: unknown[]) => {
 						const statement = invoke(database, key, args) as object;
+						const journalPragma = memoryOnly ? null : JOURNAL_MODE_PRAGMA.exec(String(args[0]));
 						return new Proxy(statement, {
 							get: (target, name) => {
 								if (name === "db" || name === "constructor")
@@ -323,7 +336,13 @@ export class VirtualSqlite {
 								if (name === "iterate") return () => this.reject("sqlite.statement.iterate");
 								const value: unknown = Reflect.get(target, name, target);
 								if (typeof value !== "function") return value;
-								return (...parameters: unknown[]) => invoke(target, name, parameters);
+								return (...parameters: unknown[]) => {
+									const result = invoke(target, name, parameters);
+									if (!journalPragma || name !== "get" || typeof result !== "object" || result === null)
+										return result;
+									if (journalPragma[1] !== undefined) applyJournalMode(current, journalPragma[1]);
+									return { ...result, journal_mode: current.journalMode };
+								};
 							},
 						});
 					};
@@ -344,7 +363,13 @@ export class VirtualSqlite {
 					check();
 					return value;
 				}
-				return (...args: unknown[]) => invoke(database, key, args);
+				return (...args: unknown[]) => {
+					const result = invoke(database, key, args);
+					if (key === "exec" && !memoryOnly)
+						for (const [, mode] of String(args[0]).matchAll(JOURNAL_MODE_ASSIGNMENTS))
+							applyJournalMode(current, mode!);
+					return result;
+				};
 			},
 		});
 	}
