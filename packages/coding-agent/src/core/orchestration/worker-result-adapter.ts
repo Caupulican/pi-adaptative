@@ -14,6 +14,7 @@ import {
 	type WorkerResultContract,
 } from "./contracts.ts";
 import type { StartedDelegationAttempt } from "./delegation-ledger.ts";
+import { decodeWorkerResultReceipts, type WorkerResultReceipts } from "./worker-result-receipts.ts";
 
 /** Matches the default text-read ceiling while keeping synchronous result capture bounded. */
 export const MAX_WORKER_ARTIFACT_HASH_BYTES = 16 * 1024 * 1024;
@@ -294,6 +295,7 @@ export interface CreateWorkerResultContractInput {
 	reasonCode?: string;
 	createdAt?: string;
 	outputArtifact?: ArtifactContract;
+	receipts?: WorkerResultReceipts;
 }
 
 /** Sole host-owned conversion from an untrusted claim to a fenced durable result. */
@@ -302,6 +304,8 @@ export function createWorkerResultContract(args: CreateWorkerResultContractInput
 	// Result construction is reachable from recovery/error paths as well as the native runner.
 	// Normalize first so no claim can expand file iteration, hashing, evidence, or durable results.
 	const claim = normalizeWorkerClaimForHost(args.claim);
+	const receipts = args.receipts === undefined ? undefined : decodeWorkerResultReceipts(args.receipts);
+	if (args.receipts !== undefined && !receipts) throw new TypeError("Worker result receipts are invalid.");
 	const summary = durableWorkerResultSummary(claim.summary, args.outputArtifact);
 	const status: WorkerResultContract["status"] =
 		claim.status === "completed"
@@ -373,5 +377,6 @@ export function createWorkerResultContract(args: CreateWorkerResultContractInput
 			toolCalls: args.toolCalls,
 		},
 		createdAt,
+		...(receipts ? { receipts } : {}),
 	};
 }

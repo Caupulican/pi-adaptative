@@ -17,29 +17,8 @@ import type { WorkerCommandReceipt } from "../autonomy/contracts.ts";
 import { DEFAULT_NOUL_BAND_THRESHOLDS, isNoulProbability, settledAnswer } from "../decision/noul.ts";
 import { commandReceiptFor, workerCommandOutcome, workerCommandReceiptId } from "../delegation/worker-receipts.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
+import type { ClaimReceipts, DeliveryReceipt } from "../orchestration/claim-receipts.ts";
 import type { LadderOutcome } from "./unsettled-ladder.ts";
-
-/** A counted delivery: how many attempts succeeded and how many failed during the work. */
-export interface DeliveryReceipt {
-	readonly succeeded: number;
-	readonly failed: number;
-}
-
-export interface ClaimReceipts {
-	/**
-	 * Test verifications recorded on the turn's tool results, and requirement checks the goal
-	 * completion reran, in order: the claim they back is "the tests or checks that were run passed".
-	 */
-	readonly tests: { readonly passed: number; readonly failed: number; readonly lastPassed: boolean | undefined };
-	readonly commits: DeliveryReceipt;
-	readonly pushes: DeliveryReceipt;
-	readonly publishes: DeliveryReceipt;
-	/** Paths written by successful edit/write calls. */
-	readonly filesChanged: readonly string[];
-	readonly toolCalls: number;
-	/** Successful tool operations: what an inspection-backed verdict rests on, even if later projection failed. */
-	readonly succeededToolCalls: number;
-}
 
 export type ClaimReceiptEvent =
 	| { readonly kind: "message"; readonly message: AgentMessage }

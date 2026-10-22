@@ -1,5 +1,20 @@
 import { readWireRecord } from "../../kernel/wire-record.ts";
-import type { ClaimReceipts, DeliveryReceipt } from "./claim-delivery.ts";
+
+/** Counts of host-observed delivery operations, independent of a worker's claim text. */
+export interface DeliveryReceipt {
+	readonly succeeded: number;
+	readonly failed: number;
+}
+
+export interface ClaimReceipts {
+	readonly tests: { readonly passed: number; readonly failed: number; readonly lastPassed: boolean | undefined };
+	readonly commits: DeliveryReceipt;
+	readonly pushes: DeliveryReceipt;
+	readonly publishes: DeliveryReceipt;
+	readonly filesChanged: readonly string[];
+	readonly toolCalls: number;
+	readonly succeededToolCalls: number;
+}
 
 const RECEIPT_KEYS = new Set([
 	"tests",
@@ -23,8 +38,11 @@ function delivery(value: unknown): DeliveryReceipt | undefined {
 	return { succeeded: record.succeeded, failed: record.failed };
 }
 
-/** Decode current persisted aggregates without invoking accessors or inventing missing evidence. */
-export function decodeClaimReceipts(value: unknown): ClaimReceipts | undefined {
+/** Decode persisted aggregates without invoking accessors or inventing missing evidence. */
+export function decodeClaimReceipts(
+	value: unknown,
+	maxSourceCharacters = Number.POSITIVE_INFINITY,
+): ClaimReceipts | undefined {
 	const record = readWireRecord(value, RECEIPT_KEYS);
 	if (!record) return undefined;
 	const tests = readWireRecord(record.tests, TEST_KEYS);
@@ -46,13 +64,17 @@ export function decodeClaimReceipts(value: unknown): ClaimReceipts | undefined {
 		!count(record.succeededToolCalls) ||
 		record.succeededToolCalls > record.toolCalls ||
 		!Array.isArray(record.filesChanged) ||
+		record.filesChanged.length > maxSourceCharacters / 2 ||
 		Reflect.ownKeys(record.filesChanged).length !== record.filesChanged.length + 1
 	)
 		return undefined;
 	const filesChanged: string[] = [];
+	let sourceCharacters = 0;
 	for (let index = 0; index < record.filesChanged.length; index++) {
 		const descriptor = Object.getOwnPropertyDescriptor(record.filesChanged, index);
 		if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "string") return undefined;
+		sourceCharacters += descriptor.value.length + 3;
+		if (sourceCharacters > maxSourceCharacters) return undefined;
 		filesChanged.push(descriptor.value);
 	}
 	return {

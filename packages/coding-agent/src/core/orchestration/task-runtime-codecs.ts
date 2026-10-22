@@ -93,6 +93,7 @@ import { assertVerificationRecord, verificationSubjectAttempt } from "./verifica
 import { normalizeWorkerContextForkReference } from "./worker-context-fork-reference.ts";
 import { parseWorkerExecutionContract } from "./worker-execution-contract.ts";
 import { workerReceiptOriginFromValue } from "./worker-receipt-origin.ts";
+import { decodeWorkerResultReceipts } from "./worker-result-receipts.ts";
 
 export const MAX_DATE_EPOCH_MS = 8_640_000_000_000_000;
 
@@ -1133,6 +1134,7 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 		"errors",
 		"nextAction",
 		"usage",
+		"receipts",
 		"createdAt",
 	]);
 	if (result.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION) {
@@ -1223,6 +1225,8 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 		throw new DurableTaskRuntimeError(`${label}.usage.wallClockMs is invalid.`);
 	}
 	const fencingToken = number(result.fencingToken, `${label}.fencingToken`);
+	const receipts = result.receipts === undefined ? undefined : decodeWorkerResultReceipts(result.receipts);
+	if (result.receipts !== undefined && !receipts) throw new DurableTaskRuntimeError(`${label}.receipts is invalid.`);
 	if (!Number.isSafeInteger(fencingToken) || fencingToken < 1) {
 		throw new DurableTaskRuntimeError(`${label}.fencingToken is invalid.`);
 	}
@@ -1252,6 +1256,7 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 			toolCalls: usage.toolCalls as number,
 		},
 		createdAt: isoDate(result.createdAt, `${label}.createdAt`),
+		...(receipts ? { receipts } : {}),
 	};
 }
 

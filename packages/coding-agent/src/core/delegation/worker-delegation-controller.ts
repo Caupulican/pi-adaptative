@@ -106,6 +106,7 @@ import {
 } from "../orchestration/worker-execution-contract.ts";
 import { resolveWorkerModelPin, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import { assertWorkerReceiptAdmission, inheritWorkerReceiptAdmission } from "../orchestration/worker-receipt-origin.ts";
+import { captureWorkerReceiptFacts } from "../orchestration/worker-result-receipts.ts";
 import type { ProfileRegistry } from "../profile-registry.ts";
 import { resolveProviderAccountKey } from "../provider-admission/account-key.ts";
 import { emergencyStopPath, isEmergencyStopEngaged } from "../provider-admission/emergency-stop.ts";
@@ -131,6 +132,7 @@ import type {
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import type { SystemOneProviderChoice } from "../system-one/access.ts";
 import { systemOneAccessFromSession } from "../system-one/access.ts";
+import { collectWorkerReportClaimReceipts } from "../system-one/claim-delivery.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import type { ToolkitScript } from "../toolkit/script-registry.ts";
 import { executeToolkitScript } from "../toolkit/script-runner.ts";
@@ -248,6 +250,7 @@ import {
 } from "./worker-profile-resolver.ts";
 import { type WorkerProjectAdmission, WorkerProjectDirectory } from "./worker-project-directory.ts";
 import { assertQueuedWorkerContextRecoverable } from "./worker-queued-context-recovery.ts";
+import { recordWorkerReceiptAcceptance } from "./worker-receipt-acceptance.ts";
 import { captureWorkerReceiptOrigin } from "./worker-receipt-origin.ts";
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
 import { hostVerifiedChecks, workerReportClaimText } from "./worker-report.ts";
@@ -5501,6 +5504,12 @@ export class WorkerDelegationController {
 				const rawOutcome = executionResult.rawOutcome;
 				const reviewMessages =
 					recoveredTerminal?.messages ?? conversation.getRawTranscript().slice(transcriptStart);
+				const receiptFacts = captureWorkerReceiptFacts(
+					collectWorkerReportClaimReceipts({
+						messages: reviewMessages,
+						hostVerifiedChecks: hostVerifiedChecks(rawOutcome.claim),
+					}),
+				);
 				// Attempt ladder: a retryable bounded failure suspends and re-enqueues instead of
 				// terminalizing, resuming from the persisted transcript under a fresh fence.
 				// A halted run is the parent's own stop: its report is the outcome, never a failure to retry.
@@ -5664,6 +5673,11 @@ export class WorkerDelegationController {
 									].slice(0, MAX_WORKER_CLAIM_BLOCKERS),
 								},
 							};
+				const resultReceipts = recordWorkerReceiptAcceptance(receiptFacts, reviewedOutcome, verificationRequired);
+				if (resultReceipts.status === "unavailable")
+					this.safeWarn(
+						`Worker receipt evidence ${durableHandle.attemptId} is unavailable: ${resultReceipts.reasonCode}.`,
+					);
 				const gatedOutcome: WorkerRunOutcome = verificationRequired
 					? {
 							...reviewedOutcome,
@@ -5709,6 +5723,7 @@ export class WorkerDelegationController {
 					handle: durableHandle,
 					claim: outcome.claim,
 					accepted: outcome.accepted,
+					receipts: resultReceipts,
 					costUsd: finalUsage.costUsd,
 					reasonCode: outcome.reasonCode,
 					cwd: executionPlan.cwd,

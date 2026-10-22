@@ -1,5 +1,6 @@
 import type { AgentIdentityContract, ResourcePointer } from "../../kernel/session/agent-identity.ts";
 import type { WorkerReceiptOrigin } from "./worker-receipt-origin.ts";
+import type { WorkerResultReceipts } from "./worker-result-receipts.ts";
 
 export {
 	type AgentIdentityContract,
@@ -484,6 +485,8 @@ export interface WorkerResultContract {
 	errors: readonly WorkerErrorContract[];
 	nextAction?: string;
 	usage: WorkerUsageContract;
+	/** Exact terminal-slice observations; missing on historical results, never reconstructed. */
+	receipts?: WorkerResultReceipts;
 	createdAt: string;
 }
 

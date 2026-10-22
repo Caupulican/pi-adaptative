@@ -17,9 +17,9 @@ import {
 } from "./goals/goal-completion-owner-decision.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
+import { decodeClaimReceipts } from "./orchestration/claim-receipts.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 import { AnswerClaimChecker, assistantAnswerText, type ClaimReceiptEvent } from "./system-one/claim-delivery.ts";
-import { decodeClaimReceipts } from "./system-one/claim-receipt-codec.ts";
 import { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import {
