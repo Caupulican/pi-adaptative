@@ -27,6 +27,7 @@ import { evaluateWorkerRetry } from "./worker-retry-policy.ts";
 export type WorkerRecoveryDispatchResult = { started: true } | { started: false; skipReason: string };
 
 export type WorkerRetryScheduleResult =
+	/** The retry is durably retained; an unavailable process alarm is reported separately. */
 	| { scheduled: true; record: LaneRecord; retriesUsed: number; notBefore: string }
 	| { scheduled: false; reason: string };
 
@@ -35,7 +36,9 @@ interface PendingRetryDispatch {
 	notBefore: string;
 	request: WorkerDelegationRequest;
 	priority: boolean;
-	timer?: unknown;
+	wakeAt: number;
+	handling: boolean;
+	alarm?: { timer?: unknown };
 	/** Consecutive failed reads or enqueues of this due retry, for its backoff alarm. */
 	failures?: number;
 }
@@ -100,14 +103,12 @@ export class WorkerRecoveryCoordinator {
 	private recoveringDurableState = false;
 	private disposed = false;
 	private readonly verificationRecoveryFailures = new Map<string, string>();
-	private readonly retryTimers = new Map<string, PendingRetryDispatch>();
+	private readonly pendingRetries = new Map<string, PendingRetryDispatch>();
 	private readonly unsubscribeQueueCapacity: (() => void) | undefined;
 
 	constructor(options: WorkerRecoveryCoordinatorOptions) {
 		this.options = options;
 		this.unsubscribeQueueCapacity = options.scheduler.onQueueCapacityAvailable?.(() => {
-			if (this.disposed) return;
-			this.flushDueRetries();
 			// Mandatory verifier dispatches remain derivable from durable subject state even after the
 			// ordinary queue was fully recovered. Every released slot must replay that retained demand.
 			this.recover();
@@ -120,16 +121,21 @@ export class WorkerRecoveryCoordinator {
 		this.recoveringDurableState = true;
 		const { lifecycle } = this.options;
 		try {
+			this.flushDueRetries();
+			if (this.disposed) return;
 			if (!this.queueRecovered) {
 				const newlySuspendedAttemptIds = new Set(lifecycle.suspendBoundInProcessAttemptsForRestart());
+				if (this.disposed) return;
 				try {
 					this.options.recoverWriteReservations();
 				} catch (error) {
-					this.options.warn(
+					this.warnBestEffort(
 						`Worker write reservation recovery failed closed: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
+				if (this.disposed) return;
 				const queued = lifecycle.recoverQueued();
+				if (this.disposed) return;
 				const snapshot = lifecycle.getTaskRuntimeSnapshot();
 				for (const attempt of Object.values(snapshot.attempts)) {
 					if (
@@ -151,6 +157,7 @@ export class WorkerRecoveryCoordinator {
 				}
 				let recoveredAll = true;
 				for (const { attempt, record, verificationOfTaskId } of queued) {
+					if (this.disposed) return;
 					let retained: boolean;
 					try {
 						retained = this.enqueueOrDeferRetry(
@@ -161,7 +168,7 @@ export class WorkerRecoveryCoordinator {
 						);
 					} catch (error) {
 						recoveredAll = false;
-						this.options.warn(
+						this.warnBestEffort(
 							`Failed to recover queued worker ${record.laneId}; retaining durable dispatch: ${error instanceof Error ? error.message : String(error)}`,
 						);
 						continue;
@@ -170,16 +177,21 @@ export class WorkerRecoveryCoordinator {
 					recoveredAll = false;
 					break;
 				}
+				if (this.disposed) return;
 				this.queueRecovered = recoveredAll;
 			}
 
 			for (const recovery of lifecycle.getPendingVerificationRecoveries()) {
+				if (this.disposed) return;
 				if (recovery.action === "reconcile") {
 					try {
-						this.options.publishTerminalRecord(lifecycle.reconcileVerification(recovery));
+						const record = lifecycle.reconcileVerification(recovery);
+						if (this.disposed) return;
+						this.options.publishTerminalRecord(record);
+						if (this.disposed) return;
 						this.verificationRecoveryFailures.delete(recovery.subjectTaskId);
 					} catch (error) {
-						this.options.warn(
+						this.warnBestEffort(
 							`Failed to reconcile recovered verification for ${recovery.subjectTaskId}: ${error instanceof Error ? error.message : String(error)}`,
 						);
 					}
@@ -188,12 +200,14 @@ export class WorkerRecoveryCoordinator {
 				let started: WorkerRecoveryDispatchResult;
 				try {
 					started = this.options.dispatchVerification(recovery);
+					if (this.disposed) return;
 				} catch (error) {
+					if (this.disposed) return;
 					const reason = error instanceof Error ? error.message : String(error);
 					const failureKey = `dispatch_threw:${reason}`;
 					if (this.verificationRecoveryFailures.get(recovery.subjectTaskId) !== failureKey) {
 						this.verificationRecoveryFailures.set(recovery.subjectTaskId, failureKey);
-						this.options.warn(
+						this.warnBestEffort(
 							`Recovered verification for ${recovery.subjectTaskId} threw during dispatch: ${reason}`,
 						);
 					}
@@ -205,22 +219,31 @@ export class WorkerRecoveryCoordinator {
 				}
 				if (this.verificationRecoveryFailures.get(recovery.subjectTaskId) === started.skipReason) continue;
 				this.verificationRecoveryFailures.set(recovery.subjectTaskId, started.skipReason);
-				this.options.warn(
+				this.warnBestEffort(
 					`Recovered verification for ${recovery.subjectTaskId} did not start: ${started.skipReason}`,
 				);
 			}
 
+			if (this.disposed) return;
 			const terminalRecords = lifecycle
 				.getPendingTerminalNotifications()
 				.map((notification) => notification.record)
 				// ManagedLaneController owns tmux projection and durable delivery; replaying it here
 				// creates a second publisher every time unrelated foreground state triggers recovery.
 				.filter((record) => record.type !== "tmux-worker");
+			if (this.disposed) return;
 			if (terminalRecords.length > 0) {
 				if (this.options.publishTerminalRecords) this.options.publishTerminalRecords(terminalRecords);
-				else for (const record of terminalRecords) this.options.publishTerminalRecord(record);
+				else {
+					for (const record of terminalRecords) {
+						if (this.disposed) return;
+						this.options.publishTerminalRecord(record);
+					}
+				}
 			}
+			if (this.disposed) return;
 			this.options.recoverSessionRootReplies();
+			if (this.disposed) return;
 			this.options.recoverTaskBearingMailboxTurns();
 		} finally {
 			this.recoveringDurableState = false;
@@ -266,6 +289,7 @@ export class WorkerRecoveryCoordinator {
 				// Shared-state bookkeeping must never fail the retry it observes.
 			}
 		}
+		if (this.disposed) return { scheduled: false, reason: "disposed" };
 		const nextRetriesUsed = retriesUsed + 1;
 		const notBefore = new Date(this.now() + decision.delayMs).toISOString();
 		let suspended: AttemptRuntimeState;
@@ -278,12 +302,12 @@ export class WorkerRecoveryCoordinator {
 				retry: { retriesUsed: nextRetriesUsed, notBefore },
 			});
 		} catch (error) {
-			this.options.warn(
+			this.warnBestEffort(
 				`Worker ${args.laneId} retry suspension failed; terminalizing instead: ${error instanceof Error ? error.message : String(error)}`,
 			);
 			return { scheduled: false, reason: "retry_suspension_failed" };
 		}
-		this.options.warn(
+		this.warnBestEffort(
 			`Worker ${args.laneId} failed (${decision.reason}); retrying from the persisted transcript in ${Math.ceil(decision.delayMs / 1000)}s (attempt ${nextRetriesUsed + 1}).`,
 		);
 		this.enqueueOrDeferRetry(record, suspended, args.request, args.request.verificationOfTaskId !== undefined);
@@ -294,28 +318,22 @@ export class WorkerRecoveryCoordinator {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
-		for (const entry of this.retryTimers.values()) {
-			if (entry.timer !== undefined) this.options.timers.clearTimeout(entry.timer);
-		}
-		this.retryTimers.clear();
+		const entries = [...this.pendingRetries.values()];
+		this.pendingRetries.clear();
+		for (const entry of entries) this.disarmRetry(entry);
 		try {
 			this.unsubscribeQueueCapacity?.();
 		} catch (error) {
-			try {
-				this.options.warn(
-					`Worker recovery queue-capacity unsubscribe failed during disposal: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			} catch {
-				// Diagnostics cannot reactivate a disposed recovery coordinator.
-			}
+			this.warnBestEffort(
+				`Worker recovery queue-capacity unsubscribe failed during disposal: ${error instanceof Error ? error.message : String(error)}`,
+			);
 		}
 	}
 
 	clearScheduledRetry(attemptId: string): void {
-		const entry = this.retryTimers.get(attemptId);
+		const entry = this.pendingRetries.get(attemptId);
 		if (!entry) return;
-		if (entry.timer !== undefined) this.options.timers.clearTimeout(entry.timer);
-		this.retryTimers.delete(attemptId);
+		this.removeRetry(attemptId, entry);
 	}
 
 	/** Keep an externally requested wake queued while the durable retry deadline is still retained. */
@@ -335,6 +353,7 @@ export class WorkerRecoveryCoordinator {
 		request: WorkerDelegationRequest,
 		priority: boolean,
 	): boolean {
+		if (this.disposed) return false;
 		const retry = attempt.retry;
 		if (!retry) {
 			try {
@@ -345,113 +364,169 @@ export class WorkerRecoveryCoordinator {
 				throw error;
 			}
 		}
-		const existing = this.retryTimers.get(attempt.attemptId);
-		if (existing?.notBefore === retry.notBefore) return true;
-		if (existing?.timer !== undefined) this.options.timers.clearTimeout(existing.timer);
-		const entry: PendingRetryDispatch = {
-			laneId: record.laneId,
-			notBefore: retry.notBefore,
-			request,
-			priority,
-		};
-		this.retryTimers.set(attempt.attemptId, entry);
-		const remainingMs = Date.parse(retry.notBefore) - this.now();
-		if (remainingMs <= 0) {
-			this.tryEnqueueDueRetry(attempt.attemptId, entry);
-			return true;
+		const existing = this.pendingRetries.get(attempt.attemptId);
+		let entry = existing;
+		if (!entry || entry.notBefore !== retry.notBefore) {
+			entry = {
+				laneId: record.laneId,
+				notBefore: retry.notBefore,
+				request,
+				priority,
+				wakeAt: Date.parse(retry.notBefore),
+				handling: false,
+			};
+			this.pendingRetries.set(attempt.attemptId, entry);
+			if (existing) this.disarmRetry(existing);
 		}
-		entry.timer = this.options.timers.setTimeout(
-			() => this.onRetryTimer(attempt.attemptId),
-			Math.min(remainingMs, 2_147_000_000),
-		);
+		this.tryEnqueueDueRetry(attempt.attemptId, entry);
 		return true;
 	}
 
-	private onRetryTimer(attemptId: string): void {
-		if (this.disposed) return;
-		const entry = this.retryTimers.get(attemptId);
-		if (!entry) return;
-		delete entry.timer;
-		this.tryEnqueueDueRetry(attemptId, entry);
+	private armRetry(attemptId: string, entry: PendingRetryDispatch): void {
+		if (this.disposed || this.pendingRetries.get(attemptId) !== entry || entry.alarm || entry.handling) return;
+		const alarm: NonNullable<PendingRetryDispatch["alarm"]> = {};
+		entry.alarm = alarm;
+		try {
+			const timer = this.options.timers.setTimeout(
+				() => {
+					if (this.disposed || this.pendingRetries.get(attemptId) !== entry || entry.alarm !== alarm) return;
+					delete entry.alarm;
+					this.tryEnqueueDueRetry(attemptId, entry);
+				},
+				Math.min(Math.max(0, entry.wakeAt - this.now()), 2_147_000_000),
+			);
+			if (!this.disposed && this.pendingRetries.get(attemptId) === entry && entry.alarm === alarm) {
+				alarm.timer = timer;
+			} else {
+				this.clearRetryTimer(timer, entry.laneId);
+			}
+		} catch (error) {
+			if (entry.alarm === alarm) delete entry.alarm;
+			this.warnBestEffort(
+				`Worker ${entry.laneId} retry alarm is unavailable; the durable retry remains pending until a recovery event or session restart: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	private disarmRetry(entry: PendingRetryDispatch): void {
+		const alarm = entry.alarm;
+		delete entry.alarm;
+		if (alarm) this.clearRetryTimer(alarm.timer, entry.laneId);
+	}
+
+	private clearRetryTimer(timer: unknown, laneId: string): void {
+		try {
+			this.options.timers.clearTimeout(timer);
+		} catch (error) {
+			this.warnBestEffort(
+				`Worker ${laneId} retry alarm could not be cleared; its callback is inactive: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	private removeRetry(attemptId: string, entry: PendingRetryDispatch): void {
+		if (this.pendingRetries.get(attemptId) !== entry) return;
+		this.pendingRetries.delete(attemptId);
+		this.disarmRetry(entry);
 	}
 
 	/**
-	 * A retained retry always owns exactly one wake: its deadline timer, the queue-capacity event when
-	 * the queue is full, or a failure backoff timer when the durable read or enqueue itself failed.
+	 * A retained retry uses its deadline/backoff alarm or the queue-capacity event. Unavailable alarms
+	 * retain the same wake deadline and are retried at the next explicit recovery boundary.
 	 */
 	private tryEnqueueDueRetry(
 		attemptId: string,
 		entry: PendingRetryDispatch,
-	): "enqueued" | "full" | "stale" | "failed" {
-		let attempt: AttemptRuntimeState | undefined;
-		let record: LaneRecord | undefined;
+	): "enqueued" | "full" | "stale" | "retained" {
+		if (this.disposed || this.pendingRetries.get(attemptId) !== entry) return "stale";
+		if (entry.handling || entry.alarm) return "retained";
+		entry.handling = true;
+		let needsAlarm = false;
 		try {
-			attempt = this.options.lifecycle.getActiveAttempt(entry.laneId);
-			record = attempt ? this.options.lifecycle.getRecord(entry.laneId) : undefined;
-		} catch (error) {
-			this.retainFailedRetry(attemptId, entry, "durable read", error);
-			return "failed";
+			let attempt: AttemptRuntimeState | undefined;
+			let record: LaneRecord | undefined;
+			let now: number;
+			try {
+				attempt = this.options.lifecycle.getActiveAttempt(entry.laneId);
+				record = attempt ? this.options.lifecycle.getRecord(entry.laneId) : undefined;
+				now = this.now();
+			} catch (error) {
+				this.retainFailedRetry(attemptId, entry, "durable read", error);
+				needsAlarm = true;
+				return "retained";
+			}
+			if (this.disposed || this.pendingRetries.get(attemptId) !== entry) return "stale";
+			if (
+				!attempt ||
+				attempt.attemptId !== attemptId ||
+				attempt.status !== "suspended" ||
+				attempt.retry?.notBefore !== entry.notBefore
+			) {
+				this.removeRetry(attemptId, entry);
+				return "stale";
+			}
+			if (!record) {
+				this.removeRetry(attemptId, entry);
+				return "stale";
+			}
+			entry.wakeAt = Math.max(entry.wakeAt, Date.parse(entry.notBefore));
+			if (entry.wakeAt > now) {
+				needsAlarm = true;
+				return "retained";
+			}
+			try {
+				this.options.scheduler.enqueue(record, entry.request, true, entry.priority);
+			} catch (error) {
+				if (error instanceof Error && error.message === "worker_dispatch_queue_full") return "full";
+				this.retainFailedRetry(attemptId, entry, "enqueue", error);
+				needsAlarm = true;
+				return "retained";
+			}
+			if (this.disposed || this.pendingRetries.get(attemptId) !== entry) return "stale";
+			this.removeRetry(attemptId, entry);
+			try {
+				this.options.retryReady?.();
+			} catch (error) {
+				// The lane is queued; the wake may run on a timer, where a throw would escape uncaught.
+				// The next scheduler signal drains it.
+				this.warnBestEffort(
+					`Worker ${entry.laneId} retry was queued, but its scheduler wake failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			return "enqueued";
+		} finally {
+			entry.handling = false;
+			if (needsAlarm) this.armRetry(attemptId, entry);
 		}
-		if (
-			!attempt ||
-			attempt.attemptId !== attemptId ||
-			attempt.status !== "suspended" ||
-			attempt.retry?.notBefore !== entry.notBefore
-		) {
-			this.retryTimers.delete(attemptId);
-			return "stale";
-		}
-		if (!record) {
-			this.retryTimers.delete(attemptId);
-			return "stale";
-		}
-		const remainingMs = Date.parse(entry.notBefore) - this.now();
-		if (remainingMs > 0) {
-			entry.timer = this.options.timers.setTimeout(
-				() => this.onRetryTimer(attemptId),
-				Math.min(remainingMs, 2_147_000_000),
-			);
-			return "stale";
-		}
-		try {
-			this.options.scheduler.enqueue(record, entry.request, true, entry.priority);
-		} catch (error) {
-			if (error instanceof Error && error.message === "worker_dispatch_queue_full") return "full";
-			this.retainFailedRetry(attemptId, entry, "enqueue", error);
-			return "failed";
-		}
-		this.retryTimers.delete(attemptId);
-		try {
-			this.options.retryReady?.();
-		} catch (error) {
-			// The lane is queued; the wake may run on a timer, where a throw would escape uncaught.
-			// The next scheduler signal drains it.
-			this.options.warn(
-				`Worker ${entry.laneId} retry was queued, but its scheduler wake failed: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-		return "enqueued";
 	}
 
 	/** Keep the due retry and arm a bounded backoff alarm: no capacity event is coming for this failure. */
 	private retainFailedRetry(attemptId: string, entry: PendingRetryDispatch, step: string, error: unknown): void {
+		if (this.disposed || this.pendingRetries.get(attemptId) !== entry) return;
 		entry.failures = (entry.failures ?? 0) + 1;
 		const delayMs = Math.min(
 			RETRY_ENQUEUE_FAILURE_MAX_MS,
 			RETRY_ENQUEUE_FAILURE_BASE_MS * 2 ** Math.min(entry.failures - 1, 16),
 		);
-		this.options.warn(
-			`Worker ${entry.laneId} retry ${step} failed; retaining the durable retry and trying again in ${Math.ceil(delayMs / 1000)}s: ${error instanceof Error ? error.message : String(error)}`,
+		entry.wakeAt = this.now() + delayMs;
+		this.warnBestEffort(
+			`Worker ${entry.laneId} retry ${step} failed; retaining the durable retry with ${Math.ceil(delayMs / 1000)}s backoff: ${error instanceof Error ? error.message : String(error)}`,
 		);
-		if (entry.timer !== undefined) this.options.timers.clearTimeout(entry.timer);
-		entry.timer = this.options.timers.setTimeout(() => this.onRetryTimer(attemptId), delayMs);
 	}
 
 	private flushDueRetries(): void {
 		if (this.disposed) return;
-		for (const [attemptId, entry] of this.retryTimers) {
-			if (entry.timer !== undefined || Date.parse(entry.notBefore) > this.now()) continue;
+		for (const [attemptId, entry] of [...this.pendingRetries]) {
+			if (this.disposed) return;
 			if (this.tryEnqueueDueRetry(attemptId, entry) === "full") break;
+		}
+	}
+
+	private warnBestEffort(message: string): void {
+		try {
+			this.options.warn(message);
+		} catch {
+			// A diagnostic cannot revoke a committed retry or interrupt timer cleanup.
 		}
 	}
 
