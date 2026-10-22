@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
+import { classifyCustomEntryPersisted } from "../session-entry-persistence.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
-import { classifyCustomEntryPersisted } from "./spawned-usage-receipt.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE, type SemanticUsageReport } from "./usage-records.ts";
 
 export interface SemanticUsageLedgerIdentity {

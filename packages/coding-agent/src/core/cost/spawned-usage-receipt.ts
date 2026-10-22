@@ -1,9 +1,12 @@
 import { isDeepStrictEqual } from "node:util";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
+import { classifyCustomEntryPersisted } from "../session-entry-persistence.ts";
 import type { SpawnedUsageReporter } from "../spawned-usage.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { SPAWNED_USAGE_CUSTOM_TYPE } from "./usage-records.ts";
+
+export { classifyCustomEntryPersisted } from "../session-entry-persistence.ts";
 
 export interface SpawnedUsageReceiptOptions {
 	parentSessionId: string;
@@ -21,37 +24,6 @@ function matchesSpawnedUsageReceipt(data: unknown, usage: Usage, options: Spawne
 		data.sourceSessionId === options.sourceSessionId &&
 		isDeepStrictEqual(data.usage, usage)
 	);
-}
-
-/**
- * Classify the canonical JSONL row of one custom entry. `persisted` only when the row on disk matches; `pending` while it
- * is not readable yet (buffered before the first reply, or no file); `conflict` when a row at that identity differs.
- */
-export function classifyCustomEntryPersisted(
-	session: Pick<SessionManager, "readEntryJsonPrefix">,
-	entryId: string,
-	customType: string,
-	matches: (data: unknown) => boolean,
-): "persisted" | "pending" | "conflict" {
-	const json = session.readEntryJsonPrefix(entryId, 64 * 1024);
-	if (json === undefined) return "pending";
-	let persisted: unknown;
-	try {
-		persisted = JSON.parse(json);
-	} catch (error) {
-		if (error instanceof SyntaxError) return "pending";
-		throw error;
-	}
-	if (
-		!isPlainRecord(persisted) ||
-		persisted.id !== entryId ||
-		persisted.type !== "custom" ||
-		persisted.customType !== customType ||
-		!matches(persisted.data)
-	) {
-		return "conflict";
-	}
-	return "persisted";
 }
 
 /** Confirm physical parent persistence through its existing idempotent ingestion owner. */

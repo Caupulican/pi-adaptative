@@ -1768,6 +1768,7 @@ export class AgentSession {
 			rollbackStructuredReflectionWrite: this._memory.rollbackStructuredReflectionWrite.bind(this._memory),
 			getSettingsManager: () => this.settingsManager,
 			getSessionManager: () => this.sessionManager,
+			getContextGeneration: () => this._branchGeneration,
 			getAgentDir: () => this._agentDir,
 			getDurableLearningState: () => this._durableLearningState,
 			getRuntimeVersion: () => (VERSION_SOURCE_AVAILABLE ? VERSION : undefined),

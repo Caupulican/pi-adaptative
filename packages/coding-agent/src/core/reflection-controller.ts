@@ -40,7 +40,6 @@ import {
 } from "./agent-session-contracts.ts";
 import type { LearningDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
-import { PI_OKF_TYPES, type PiOkfType } from "./context/okf-memory.ts";
 import { isCurrentSessionReflectionEnabled, resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
 import {
 	type DurableLearningClaimToken,
@@ -62,6 +61,7 @@ import {
 	rollbackPlanForReflectionWrite,
 } from "./learning/learning-audit.ts";
 import { type DurableChangeLayer, evaluateLearningDecision } from "./learning/learning-gate.ts";
+import { LearningRollbackController, type PreparedLearningRollback } from "./learning/learning-rollback-controller.ts";
 import { type EvidenceReceipt, ObservationStore, observationKey } from "./learning/observation-store.ts";
 import {
 	type DemandSignals,
@@ -92,7 +92,6 @@ import {
 	type UserPreferenceMetadata,
 } from "./memory/user-preference-metadata.ts";
 import type { ModelRegistry } from "./model-registry.ts";
-import { KeyedSingleFlight } from "./models/runtime-operation-coordinator.ts";
 import { providerLaneForIsolatedLaneKind, runInProviderLane } from "./provider-admission/lane-context.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
 import { runtimeGenerationAdmission } from "./runtime-generation-admission.ts";
@@ -146,6 +145,8 @@ export interface ReflectionControllerDeps {
 	getSettingsManager(): ReflectionControllerSettingsSource;
 	/** Session log — audit snapshots and learning-audit reads go through this. */
 	getSessionManager(): SessionManager;
+	/** Monotone branch generation detects navigation away and back during an awaited inverse. */
+	getContextGeneration?(): number;
 	/** Agent dir — reflection-promoted skills are written under `<agentDir>/skills/`. */
 	getAgentDir(): string;
 	/** Child sessions must not learn — the pass returns null for them. */
@@ -510,15 +511,6 @@ interface ReflectionApplyResult {
 	rollback?: LearningAuditRecord["rollback"];
 }
 
-function parseOkfRollbackTarget(target: string | undefined): { type: PiOkfType; title: string } | undefined {
-	if (!target) return undefined;
-	const separator = target.indexOf("\0");
-	if (separator <= 0 || separator === target.length - 1) return undefined;
-	const type = target.slice(0, separator);
-	if (!PI_OKF_TYPES.includes(type as PiOkfType)) return undefined;
-	return { type: type as PiOkfType, title: target.slice(separator + 1) };
-}
-
 export class ReflectionController {
 	private readonly deps: ReflectionControllerDeps;
 	private readonly unsubscribeSettingsChanges: () => void;
@@ -545,11 +537,18 @@ export class ReflectionController {
 	 * persisted, and the evidence is the original text, never the expanded message content.
 	 */
 	private readonly ownerInputOriginals = new WeakMap<AgentMessage, string>();
-	private readonly pendingRollbacks = new KeyedSingleFlight<{ ok: boolean; reason: string }>();
+	private readonly rollbacks: LearningRollbackController;
 	private _internalExplicitAdmission = false;
 
 	constructor(deps: ReflectionControllerDeps) {
 		this.deps = deps;
+		this.rollbacks = new LearningRollbackController({
+			getSessionManager: deps.getSessionManager,
+			getContextGeneration: deps.getContextGeneration,
+			isDisposed: deps.isDisposed,
+			execute: (rollback) => this.executeLearningRollback(rollback),
+			warn: deps.warn,
+		});
 		this.unsubscribeSettingsChanges = deps.getSettingsManager().subscribeChanges(() => {
 			this.synchronizeCurrentTurnCueWithSettings();
 		});
@@ -2110,40 +2109,24 @@ export class ReflectionController {
 	 * rollback receipt prevents later replay. An inverse whose receipt failed remains uncertain.
 	 */
 	rollbackLearningWrite(auditId: string): Promise<{ ok: boolean; reason: string }> {
-		return this.pendingRollbacks.run(auditId, () => this.rollbackLearningWriteOnce(auditId));
+		if (this.isIcmMode()) return Promise.resolve({ ok: false, reason: "icm_memory_offline" });
+		return this.rollbacks.rollback(auditId);
 	}
 
-	private async rollbackLearningWriteOnce(auditId: string): Promise<{ ok: boolean; reason: string }> {
+	private async executeLearningRollback(rollback: PreparedLearningRollback): Promise<{ ok: boolean; reason: string }> {
 		if (this.isIcmMode()) return { ok: false, reason: "icm_memory_offline" };
 		if (this.deps.isDisposed()) return { ok: false, reason: "session_disposed" };
 
-		const audits = this.getLearningAuditRecords();
-		const matching = audits.filter((record) => record.id === auditId);
-		if (matching.length > 1) return { ok: false, reason: "ambiguous_audit_id" };
-		const audit = matching[0];
-		if (!audit) return { ok: false, reason: "audit_not_found" };
-		if (audit.action !== "apply") return { ok: false, reason: "not_an_applied_change" };
-		if (audits.some((record) => record.action === "rollback" && record.rollbackOf === auditId)) {
-			return { ok: false, reason: "already_rolled_back" };
-		}
-		const rollback = audit.rollback;
-		if (!rollback) return { ok: false, reason: "no_rollback_plan" };
-
-		// Every inverse must be VERIFIED-applied before the rollback audit is appended: a silently
-		// failed inverse that still recorded "rollback" would permanently self-lock the change
-		// behind already_rolled_back while the durable write is in fact still live.
+		// Only a positive storage acknowledgement can authorize a completed rollback receipt.
+		// False or thrown results may follow partial effects and remain inspection-required.
 		switch (rollback.kind) {
 			case "memory_remove": {
-				if (!rollback.target) return { ok: false, reason: "missing_rollback_target" };
 				if (!(await this._applyReflectionWrite({ kind: "memory_remove", target: rollback.target })).applied) {
 					return { ok: false, reason: "rollback_apply_failed" };
 				}
 				break;
 			}
 			case "memory_restore": {
-				if (!rollback.target || rollback.previous === undefined) {
-					return { ok: false, reason: "missing_rollback_target" };
-				}
 				const applied = await this._applyReflectionWrite({
 					kind: "memory_replace",
 					target: rollback.target,
@@ -2153,11 +2136,10 @@ export class ReflectionController {
 				break;
 			}
 			case "memory_add": {
-				if (rollback.previous === undefined) return { ok: false, reason: "missing_rollback_target" };
 				const applied = await this._applyReflectionWrite(
 					{
 						kind: "memory_add",
-						section: rollback.previousTarget === "user" ? "USER" : "MEMORY",
+						section: rollback.section,
 						text: rollback.previous,
 					},
 					undefined,
@@ -2166,40 +2148,23 @@ export class ReflectionController {
 				if (!applied.applied) return { ok: false, reason: "rollback_apply_failed" };
 				break;
 			}
-			case "okf_remove": {
-				// ICM mode: zero legacy OKF reads/writes.
-				if (this.isIcmMode()) return { ok: false, reason: "icm_mode_no_legacy_okf" };
-				const target = parseOkfRollbackTarget(rollback.target);
-				if (!target) return { ok: false, reason: "missing_rollback_target" };
-				const applied = await this.deps.rollbackStructuredReflectionWrite({
-					...target,
-					expectedDigest: rollback.expectedDigest,
-					removeRecord: true,
-				});
-				if (!applied) return { ok: false, reason: "rollback_apply_failed" };
-				break;
-			}
+			case "okf_remove":
 			case "okf_organize": {
-				if (this.isIcmMode()) return { ok: false, reason: "icm_mode_no_legacy_okf" };
-				if (!rollback.target || rollback.previous === undefined) {
-					return { ok: false, reason: "missing_rollback_target" };
-				}
-				const target = parseOkfRollbackTarget(rollback.target);
-				if (!target) return { ok: false, reason: "missing_rollback_target" };
+				const organize = rollback.kind === "okf_organize";
 				const applied = await this.deps.rollbackStructuredReflectionWrite({
-					...target,
-					expectedDigest: rollback.expectedDigest,
-					sourceText: rollback.previous,
-					...(rollback.previousTarget === "memory" || rollback.previousTarget === "project"
-						? { sourceTarget: rollback.previousTarget }
+					type: rollback.type,
+					title: rollback.title,
+					expectedDigest: rollback.plan.expectedDigest,
+					sourceText: organize ? rollback.plan.previous : undefined,
+					...(organize && (rollback.plan.previousTarget === "memory" || rollback.plan.previousTarget === "project")
+						? { sourceTarget: rollback.plan.previousTarget }
 						: {}),
-					removeRecord: rollback.removeOkf === true,
+					removeRecord: !organize || rollback.plan.removeOkf === true,
 				});
 				if (!applied) return { ok: false, reason: "rollback_apply_failed" };
 				break;
 			}
 			case "archive_skill": {
-				if (!rollback.target) return { ok: false, reason: "missing_rollback_target" };
 				if (!this.deps.archivePromotedSkill(rollback.target)) {
 					return { ok: false, reason: "skill_archive_failed" };
 				}
@@ -2208,17 +2173,6 @@ export class ReflectionController {
 			}
 		}
 
-		appendLearningAuditSnapshot(this.deps.getSessionManager(), {
-			id: createLearningAuditId(),
-			proposalId: audit.proposalId,
-			layer: audit.layer,
-			action: "rollback",
-			summary: `Rolled back: ${audit.summary}`,
-			reasonCode: "user_requested_rollback",
-			decision: audit.decision,
-			rollbackOf: audit.id,
-			createdAt: new Date().toISOString(),
-		});
 		return { ok: true, reason: "rollback_applied" };
 	}
 
