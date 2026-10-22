@@ -40,7 +40,7 @@ export interface ContinuousChatHostPorts {
 	/** The session's entry ids in order, and whether each one is durably written to the session file. */
 	entryIds(): readonly string[];
 	isEntryPersisted(entryId: string): boolean;
-	/** The runtime's timers: a waiting turn's retry alarm and the work-claim release backoff. Absent: the system's. */
+	/** The work-claim release backoff's timers. Absent: the system's. */
 	timers?: TimerPort;
 }
 

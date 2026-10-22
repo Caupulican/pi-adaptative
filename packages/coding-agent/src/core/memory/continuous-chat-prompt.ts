@@ -43,6 +43,11 @@ are not merged yet show as "(not merged yet: zoom it)", and zoom opens each one
 into its two lines just as it does any other line. A text too long for one
 message is split over several in a row.
 
+Summary generation runs in the background and never holds up your turn. Pending
+lines are committed history, not missing messages. Open the pending lines needed
+for the user's request with zoom; do not wait for the compactor or assume that
+an unsummarized line contains nothing relevant.
+
 Tools:
 - zoom(id, n) opens line id+n into the two lines it was made from;
 - zoom(id, 1) gives message id whole, with its images

@@ -24,13 +24,7 @@ import type {
 } from "./runtime-generation-admission.ts";
 import type { AutonomySettings, FailoverSettings } from "./settings/settings-schema.ts";
 import { SYSTEM_TIMER_SOURCE, type TimerSource } from "./util/timer-port.ts";
-import {
-	createWaitStatus,
-	type WaitEndReason,
-	type WaitEndReport,
-	type WaitStatusEvent,
-	waitFor,
-} from "./util/wait.ts";
+import { createWaitStatus, type WaitEndReason, type WaitStatusEvent, waitFor } from "./util/wait.ts";
 
 /**
  * How long a wait for the foreground (submission, live-run join, history claim, idle) runs before its status reports it
@@ -59,14 +53,6 @@ type ForegroundRecoveryEvent =
 	| { type: "warning"; message: string }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-	| {
-			type: "continuous_chat_prefix_wait";
-			phase: "start" | "progress" | "end";
-			built: number;
-			needed: number;
-			failed: number;
-			end?: WaitEndReport;
-	  }
 	| WaitStatusEvent;
 
 const foregroundSubmissionLeaseMarker: unique symbol = Symbol("foregroundSubmissionLease");
@@ -832,29 +818,11 @@ export class ForegroundRecoveryController {
 		if (turns === undefined) return undefined;
 		const start = startOf();
 		let turn: IcmTurnHandle;
-		let waitProgress: { built: number; needed: number; failed: number } | undefined;
-		let waitStarted = false;
-		// How the wait ended, carried by its one `end` (the typed reason of util/wait.ts).
-		let end: WaitEndReport = { kind: "satisfied", by: "icm.prefix" };
 		try {
-			turn = await turns.begin(signal, (progress) => {
-				waitProgress = progress;
-				this.deps.emit({
-					type: "continuous_chat_prefix_wait",
-					phase: waitStarted ? "progress" : "start",
-					...progress,
-				});
-				waitStarted = true;
-			});
+			turn = await turns.begin(signal);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			end = signal?.aborted ? { kind: "aborted", reason: message } : { kind: "unavailable", cause: message };
 			if (signal?.aborted) return undefined;
 			throw error;
-		} finally {
-			// One end for every start, whichever way the wait ends: reserved, aborted, unavailable or stopped.
-			if (waitStarted && waitProgress)
-				this.deps.emit({ type: "continuous_chat_prefix_wait", phase: "end", ...waitProgress, end });
 		}
 		turn.markStart(start.message, start.alreadyLogged);
 		return () => turns.end(turn);

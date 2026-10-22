@@ -629,20 +629,17 @@ export class ContinuousChatStore {
 		return this.withWriterLock(() => this.appendNodeLocked(node));
 	}
 
-	/**
-	 * The next unclaimed work item, or undefined when nothing is ready or the running limit is reached. `turnTarget` is a
-	 * waiting turn's: the leaves below it are claimed before parents (see `claimContinuousChatWork`).
-	 */
-	async claimWork(turnTarget?: number): Promise<ContinuousChatWorkItem | undefined> {
+	/** The next background work item, or undefined when nothing is ready or the running limit is reached. */
+	async claimWork(): Promise<ContinuousChatWorkItem | undefined> {
 		return this.withWriterLock(async () => {
 			const state = await this.reconcileLocked();
-			const claim = claimContinuousChatWork(state.queue, turnTarget);
+			const claim = claimContinuousChatWork(state.queue);
 			if (claim.state !== state.queue) await this.persistQueue(state.origin, claim.state);
 			return claim.item;
 		});
 	}
 
-	/** A claimed item failed. The reason is persisted with the item, so a waiting turn reports it after a restart. */
+	/** A claimed item failed. Its reason remains available for diagnostics after a restart. */
 	async failWork(item: ContinuousChatWorkItem, reason: string): Promise<void> {
 		await this.withWriterLock(async () => {
 			const state = await this.reconcileLocked();
@@ -670,8 +667,8 @@ export class ContinuousChatStore {
 	}
 
 	/**
-	 * An arrival that is not a permanent message: a user turn began, or a waiting turn retries its failed leaves. Failed
-	 * work becomes retry-eligible.
+	 * An arrival that is not a permanent message: a user turn began, or the summary model recovered. Failed work
+	 * becomes retry-eligible in the background.
 	 */
 	async noteArrival(): Promise<void> {
 		await this.withWriterLock(async () => {

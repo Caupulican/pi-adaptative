@@ -44,9 +44,8 @@ const WORK_QUEUE_KEYS = [
 export type ContinuousChatWorkItem = ContinuousChatNodeCoordinate;
 
 /**
- * A failed item. It is retried at the next arrival (or a waiting turn's retry, which is one), which moves `generation`
- * past `retryAfterGeneration`. `reason` is the real failure, kept so a turn that waits on this item reports its cause
- * even after a restart.
+ * A failed item. It is retried at the next arrival, which moves `generation`
+ * past `retryAfterGeneration`. `reason` is the real failure, kept for diagnostics even after a restart.
  */
 export interface ContinuousChatBlockedWork {
 	item: ContinuousChatWorkItem;
@@ -58,7 +57,7 @@ export interface ContinuousChatBlockedWork {
 export interface ContinuousChatWorkQueueState {
 	schemaVersion: typeof CONTINUOUS_CHAT_WORK_QUEUE_SCHEMA_VERSION;
 	revision: number;
-	/** Advances on every arrival: a logged message, the start of a user turn, or a waiting turn's retry. */
+	/** Advances on every arrival: a logged message, the start of a user turn, or recovery of the summary model. */
 	generation: number;
 	totalMessages: number;
 	nextLeaf: number;
@@ -301,9 +300,8 @@ function releaseEligible(state: ContinuousChatWorkQueueState): ContinuousChatWor
 }
 
 /**
- * An arrival: a user turn began, or a turn waiting on failed leaves retries them. It advances the generation, releases
- * every failed item for another attempt, and refills the leaf window. Outside a waiting turn a failure waits for an
- * arrival, never for a timer.
+ * An arrival: a user turn began, or the summary model recovered. It advances the generation, releases
+ * every failed item for another attempt, and refills the leaf window. A failure waits for an arrival, never for a timer.
  */
 export function noteContinuousChatArrival(state: ContinuousChatWorkQueueState): ContinuousChatWorkQueueState {
 	return admit(releaseEligible({ ...state, revision: state.revision + 1, generation: state.generation + 1 }));
@@ -333,36 +331,15 @@ export function recordContinuousChatMessages(
 }
 
 /**
- * Claims one ready item. Leaves go first so the turn barrier opens, but a ready parent is claimed once
- * `CONTINUOUS_CHAT_MAX_LEAF_STREAK` leaves were claimed while it waited, so parents cannot starve. While a turn waits
- * for every leaf below `turnTarget`, the lowest ready leaf below it is claimed before any parent: the streak stays at
- * its bound, so a waiting parent goes first once the turn has every leaf it waits for. Nothing runnable returns the
- * same state. `turnTarget` is the waiting turn's, never persisted.
+ * Claims one ready item. Leaves go first, but a ready parent is claimed once
+ * `CONTINUOUS_CHAT_MAX_LEAF_STREAK` leaves were claimed while it waited, so parents cannot starve.
+ * Nothing runnable returns the same state.
  */
-export function claimContinuousChatWork(
-	state: ContinuousChatWorkQueueState,
-	turnTarget?: number,
-): ContinuousChatWorkClaim {
+export function claimContinuousChatWork(state: ContinuousChatWorkQueueState): ContinuousChatWorkClaim {
 	if (state.running.length >= CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS) return { state };
-	// A retried leaf rejoins at the back of `readyLeaves`, so the front is not always the lowest id.
-	let urgent = -1;
-	if (turnTarget !== undefined) {
-		let lowest = turnTarget;
-		for (const [index, id] of state.readyLeaves.entries()) {
-			if (id < lowest) {
-				lowest = id;
-				urgent = index;
-			}
-		}
-	}
-	const leafIndex = urgent >= 0 ? urgent : 0;
-	const leafId = state.readyLeaves[leafIndex];
+	const leafId = state.readyLeaves[0];
 	const parent = state.readyParents[0];
-	if (
-		parent !== undefined &&
-		urgent < 0 &&
-		(leafId === undefined || state.leafStreak >= CONTINUOUS_CHAT_MAX_LEAF_STREAK)
-	) {
+	if (parent !== undefined && (leafId === undefined || state.leafStreak >= CONTINUOUS_CHAT_MAX_LEAF_STREAK)) {
 		return {
 			item: parent,
 			state: {
@@ -381,7 +358,7 @@ export function claimContinuousChatWork(
 		state: {
 			...state,
 			revision: state.revision + 1,
-			readyLeaves: state.readyLeaves.filter((_, index) => index !== leafIndex),
+			readyLeaves: state.readyLeaves.slice(1),
 			running: [...state.running, item],
 			leafStreak: parent === undefined ? 0 : Math.min(CONTINUOUS_CHAT_MAX_LEAF_STREAK, state.leafStreak + 1),
 		},
@@ -457,27 +434,6 @@ export function recoverContinuousChatWorkQueue(state: ContinuousChatWorkQueueSta
 		readyLeaves: [...leafIds, ...state.readyLeaves],
 		readyParents: [...parents, ...state.readyParents],
 	};
-}
-
-/**
- * Leaves below `end` still to build for a turn: admitted-unbuilt ones plus messages below `end` not yet admitted to
- * the leaf window.
- */
-export function continuousChatUnbuiltLeafCount(state: ContinuousChatWorkQueueState, end: number): number {
-	const admitted = unbuiltLeaves(state).filter((item) => item.ordinal < end).length;
-	return admitted + Math.max(0, Math.min(end, state.totalMessages) - state.nextLeaf);
-}
-
-/** Admitted leaves below `end` whose build failed and waits for the next arrival to be retried. */
-export function continuousChatFailedLeafCount(state: ContinuousChatWorkQueueState, end: number): number {
-	return state.blocked.filter((entry) => entry.item.level === 0 && entry.item.ordinal < end).length;
-}
-
-/** Whether a leaf below `end` is ready or running: work that can still open a turn's prefix without a retry. */
-export function continuousChatHasLeafWorkBelow(state: ContinuousChatWorkQueueState, end: number): boolean {
-	return (
-		state.readyLeaves.some((id) => id < end) || state.running.some((item) => item.level === 0 && item.ordinal < end)
-	);
 }
 
 /** Message ids below the returned id are all built. The causal view stops here, so no call sees an unbuilt line. */
