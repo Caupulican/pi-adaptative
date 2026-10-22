@@ -1231,7 +1231,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	expect(delegateResultTexts(session), "a cancelled root starts no worker").toEqual([]);
 	expect(world.provider.reached.filter((step) => !step.startsWith("root:"))).toEqual([]);
 
-	// The background turns ask no judgment of their own; the cleanup turns ask the owner-message question.
+	// The background start turn settles the words a cancelled reader left queued (the owner-message screen); the cleanup turns ask the same question.
 	const backgroundJudgments = {
 		optional_tool_task: { kind: "choice", choice: "continue", confidence: 0.97 },
 		capabilities_authorized: { kind: "noul", probability: 0.02 },
@@ -1277,7 +1277,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		exitCode: 0,
 		gate: backgroundGate.promise,
 	});
-	world.systemOne.enterPhase("background", backgroundJudgments);
+	world.systemOne.enterPhase("background", { ...backgroundJudgments, carries_0: { kind: "noul", probability: 0.97 } });
 	world.provider.enqueue(
 		"root",
 		calls("background-start", [
