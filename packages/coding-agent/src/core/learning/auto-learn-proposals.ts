@@ -241,6 +241,8 @@ export interface AutoLearnReportEntry {
 }
 
 export interface AutoLearnApplyPorts {
+	/** Session-backed callers close admission as soon as their owning session is disposed. */
+	isDisposed?(): boolean;
 	settingsManager: {
 		getAutonomySettings(): { mode: AutonomyMode };
 		getAutoLearnSettings(): AutoLearnSettings;
@@ -300,9 +302,11 @@ export async function applyAutoLearnProposals(
 	ports: AutoLearnApplyPorts,
 ): Promise<AutoLearnReportEntry[]> {
 	const report: AutoLearnReportEntry[] = [];
-	const mode = ports.settingsManager.getAutonomySettings().mode;
-	const autoLearn = ports.settingsManager.getAutoLearnSettings();
-	const skillEvolution = checkSkillEvolutionEligibility(mode, autoLearn);
+	const recordIfDisposed = (index: number, kind: string, subject?: string): boolean => {
+		if (!ports.isDisposed?.()) return false;
+		report.push({ index, kind, subject, outcome: "ineligible", reasonCode: "session_disposed" });
+		return true;
+	};
 
 	for (const entry of set.malformed) {
 		report.push({
@@ -317,6 +321,11 @@ export async function applyAutoLearnProposals(
 	const eligibleWrites: Array<{ index: number; raw: unknown }> = [];
 	for (const write of set.writes) {
 		const kind = isPlainRecord(write.raw) ? String(write.raw.kind) : "unknown";
+		if (recordIfDisposed(write.index, kind, writeSubject(write.raw))) continue;
+		const skillEvolution = checkSkillEvolutionEligibility(
+			ports.settingsManager.getAutonomySettings().mode,
+			ports.settingsManager.getAutoLearnSettings(),
+		);
 		if (kind === "promote_skill" && !skillEvolution.eligible) {
 			report.push({
 				index: write.index,
@@ -358,6 +367,12 @@ export async function applyAutoLearnProposals(
 
 	for (const update of set.skillUpdates) {
 		const base = { index: update.index, kind: "skill_update", subject: update.name };
+		if (recordIfDisposed(base.index, base.kind, base.subject)) continue;
+		// A preceding memory write can await I/O while the owner revokes automatic skill changes.
+		const skillEvolution = checkSkillEvolutionEligibility(
+			ports.settingsManager.getAutonomySettings().mode,
+			ports.settingsManager.getAutoLearnSettings(),
+		);
 		if (!skillEvolution.eligible) {
 			report.push({
 				...base,
@@ -387,6 +402,7 @@ export async function applyAutoLearnProposals(
 
 	for (const setting of set.settings) {
 		const base = { index: setting.index, kind: "settings", subject: setting.key };
+		if (recordIfDisposed(base.index, base.kind, base.subject)) continue;
 		if (!isTunableAutoLearnSetting(setting.key)) {
 			report.push({
 				...base,
@@ -396,6 +412,8 @@ export async function applyAutoLearnProposals(
 			});
 			continue;
 		}
+		const mode = ports.settingsManager.getAutonomySettings().mode;
+		const autoLearn = ports.settingsManager.getAutoLearnSettings();
 		if (mode !== "full" || autoLearn.enabled === false) {
 			report.push({
 				...base,

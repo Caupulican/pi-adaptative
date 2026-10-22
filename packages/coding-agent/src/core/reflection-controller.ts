@@ -95,6 +95,7 @@ import { providerLaneForIsolatedLaneKind, runInProviderLane } from "./provider-a
 import { registerInFlightWork } from "./reload-blockers.ts";
 import { runtimeGenerationAdmission } from "./runtime-generation-admission.ts";
 import { redactKnownSecrets } from "./security/secret-text.ts";
+import { checkSkillEvolutionEligibility } from "./session-skill-policy.ts";
 import {
 	appendSessionSnapshot,
 	decodeSessionSnapshotPayload,
@@ -1847,12 +1848,16 @@ export class ReflectionController {
 	 */
 	private async _applyGatedWrites(
 		writes: readonly ReflectionWrite[],
-		context: { reportId?: string; explicitUserMemoryInstruction: boolean; signal?: AbortSignal },
+		context: {
+			reportId?: string;
+			explicitUserMemoryInstruction: boolean;
+			signal?: AbortSignal;
+			fromLearner?: boolean;
+		},
 	): Promise<GatedWriteOutcome[]> {
 		// Learning apply policy: every durable write is converted to a proposal, decided by the
 		// learning gate, and audited with a rollback plan. When the policy is explicitly disabled,
 		// legacy direct-apply behavior is preserved — but now leaves audit records with rollback info.
-		const policy = this.deps.getSettingsManager().getLearningPolicySettings();
 		// The audit id sequence counts STORED snapshots only: it reseeds from the stored count on
 		// every pass, so advancing it for a no-op (which stores nothing) would make later passes
 		// reuse ids — and rollback keys on the id, so a collision blocks or misdirects rollback.
@@ -1867,9 +1872,32 @@ export class ReflectionController {
 			writeIndex += 1;
 			const proposalId = `${context.reportId ?? "reflection"}-w${writeIndex}`;
 			const proposal = proposalFromReflectionWrite(write, proposalId);
+			if (this.deps.isDisposed() || context.signal?.aborted) {
+				outcomes.push({
+					proposalId,
+					kind: write.kind,
+					layer: proposal.layer,
+					action: "no_op",
+					reasonCode: this.deps.isDisposed() ? "session_disposed" : "learning_interrupted",
+					summary: proposal.summary,
+				});
+				continue;
+			}
+			// Every preceding write may yield. Policy and learner eligibility belong to this write,
+			// not to the batch's initial settings or its outer prefilter.
+			const settingsManager = this.deps.getSettingsManager();
+			const policy = settingsManager.getLearningPolicySettings();
+			let learnerBlock: string | undefined;
+			if (context.fromLearner) {
+				const mode = settingsManager.getAutonomySettings().mode;
+				const autoLearn = settingsManager.getAutoLearnSettings();
+				if (!resolveAutoLearnSettings(mode, autoLearn).enabled) learnerBlock = "auto_learn_disabled";
+				else if (write.kind === "promote_skill" && !checkSkillEvolutionEligibility(mode, autoLearn).eligible)
+					learnerBlock = "skill_evolution_ineligible";
+			}
 			const plannedRollback = rollbackPlanForReflectionWrite(write);
 			let observations = 1;
-			if (policy.enabled) {
+			if (policy.enabled && !learnerBlock) {
 				try {
 					observations = observationStore.increment(observationKey(proposal.layer, proposal.summary));
 				} catch {
@@ -1888,7 +1916,15 @@ export class ReflectionController {
 				policy.enabled && policy.autoApplyEnabled && !policy.allowedAutoApplyLayers.includes("skill");
 			const additiveSkillPromotion = write.kind === "promote_skill" && !ownerExcludedSkillLayer;
 			let decision: LearningDecision;
-			if (explicitUserMemoryWrite) {
+			if (learnerBlock) {
+				decision = {
+					kind: "no-op",
+					reasonCode: learnerBlock,
+					confidence: 0,
+					summary: proposal.summary,
+					requiresApproval: false,
+				};
+			} else if (explicitUserMemoryWrite) {
 				decision = {
 					kind: "apply",
 					reasonCode: "explicit_user_memory_instruction",
@@ -1933,21 +1969,6 @@ export class ReflectionController {
 				};
 			}
 
-			this.deps.saveLearningDecisionSnapshot(decision);
-			this.emitLearningDecisionTelemetry(decision, proposal.layer);
-			// G8: a proposal that needs human sign-off is an approval REQUEST. Codes/layer only —
-			// never the proposal summary/memory text (those live only in the audit snapshot).
-			if (decision.requiresApproval) {
-				this.deps.emitAutonomyTelemetry({
-					type: AUTONOMY_TELEMETRY_EVENT_TYPES.approvalRequest,
-					timestamp: new Date().toISOString(),
-					payload: {
-						kind: decision.kind,
-						reasonCode: decision.reasonCode,
-						layer: proposal.layer,
-					},
-				});
-			}
 			// An automatic skill promotion the gate would otherwise apply must still clear the same
 			// skill_audit overlap check the model-invoked `skillify` tool enforces — otherwise reflection
 			// can silently write a near-duplicate SKILL.md. A non-overlapping skill is unaffected
@@ -2014,6 +2035,23 @@ export class ReflectionController {
 				reasonCode: storedReasonCode,
 				summary: proposal.summary,
 			});
+			// Observers may synchronously change policy. Publish only after this admitted effect
+			// and its audit; the next proposal reads their updated policy before making its decision.
+			this.deps.saveLearningDecisionSnapshot(decision);
+			this.emitLearningDecisionTelemetry(decision, proposal.layer);
+			// G8: a proposal that needs human sign-off is an approval REQUEST. Codes/layer only —
+			// never the proposal summary/memory text (those live only in the audit snapshot).
+			if (decision.requiresApproval) {
+				this.deps.emitAutonomyTelemetry({
+					type: AUTONOMY_TELEMETRY_EVENT_TYPES.approvalRequest,
+					timestamp: new Date().toISOString(),
+					payload: {
+						kind: decision.kind,
+						reasonCode: decision.reasonCode,
+						layer: proposal.layer,
+					},
+				});
+			}
 		}
 		return outcomes;
 	}
@@ -2054,6 +2092,7 @@ export class ReflectionController {
 				reportId: `auto-learn-${options.runId}`,
 				explicitUserMemoryInstruction: false,
 				signal: this.deps.getReflectionSignal(),
+				fromLearner: true,
 			},
 		);
 		for (const [position, entry] of accepted.entries()) {
@@ -2192,6 +2231,7 @@ export class ReflectionController {
 		signal?: AbortSignal,
 		explicit?: boolean,
 	): Promise<ReflectionApplyResult> {
+		if (this.deps.isDisposed() || this.deps.isChildSession() || signal?.aborted) return { applied: false };
 		const prevInternal = this._internalExplicitAdmission;
 		if (explicit) this._internalExplicitAdmission = true;
 		try {
