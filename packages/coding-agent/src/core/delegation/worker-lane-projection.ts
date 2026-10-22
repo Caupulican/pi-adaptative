@@ -1,5 +1,10 @@
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
-import type { AttemptRuntimeState, TaskRuntimeProjection, TaskRuntimeState } from "../orchestration/task-runtime.ts";
+import { selectedTaskAttempt } from "../orchestration/attempt-ordering.ts";
+
+export { attemptVerification } from "../orchestration/verification-identity.ts";
+
+import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { attemptVerification, currentTaskTerminalOverride } from "../orchestration/verification-identity.ts";
 import { deriveWorkerTaskLabel } from "./worker-task-label.ts";
 
 export const ACTIVE_WORKER_ATTEMPT_STATUSES: ReadonlySet<string> = new Set(["queued", "leased", "running"]);
@@ -30,31 +35,13 @@ export function selectedWorkerAttempt(
 	snapshot: TaskRuntimeProjection,
 	taskId: string,
 ): AttemptRuntimeState | undefined {
-	const task = snapshot.tasks[taskId];
-	if (!task) return undefined;
-	const attempts = task.attemptIds.map((attemptId) => snapshot.attempts[attemptId]).filter(Boolean);
-	return (
-		[...attempts].reverse().find((attempt) => attempt && NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)) ??
-		attempts.at(-1)
-	);
-}
-
-/**
- * The task's independent verification as it applies to one attempt. A verification is recorded per
- * task and reconciles a generation that asked for it, so it applies only to an attempt whose own
- * result asked for independent verification; any other generation keeps its own outcome.
- */
-export function attemptVerification(
-	snapshot: TaskRuntimeProjection,
-	attempt: AttemptRuntimeState,
-): TaskRuntimeState["verification"] {
-	if (attempt.result?.nextAction !== "independent_verification_required") return undefined;
-	return snapshot.tasks[attempt.taskId]?.verification;
+	return selectedTaskAttempt(snapshot, taskId);
 }
 
 /** An attempt that asked for independent verification and has none reconciled yet is still in flight. */
 export function attemptAwaitsVerification(snapshot: TaskRuntimeProjection, attempt: AttemptRuntimeState): boolean {
 	return (
+		currentTaskTerminalOverride(snapshot, attempt) === undefined &&
 		attempt.result?.nextAction === "independent_verification_required" &&
 		attemptVerification(snapshot, attempt) === undefined
 	);
@@ -94,17 +81,23 @@ export function projectWorkerAttemptLaneRecord(
 	const objective = snapshot.objectives[task.task.objectiveId];
 	const verification = attemptVerification(snapshot, attempt);
 	const awaitingVerification = attemptAwaitsVerification(snapshot, attempt);
-	const status = awaitingVerification
-		? "running"
-		: verification
-			? verification.verdict === "accepted"
-				? "succeeded"
-				: "failed"
-			: attempt.status === "queued"
-				? "queued"
-				: attempt.status === "leased" || attempt.status === "running" || attempt.status === "suspended"
+	const terminalOverride = currentTaskTerminalOverride(snapshot, attempt);
+	const status =
+		terminalOverride === "cancelled"
+			? "canceled"
+			: terminalOverride === "failed"
+				? "failed"
+				: awaitingVerification
 					? "running"
-					: terminalStatus(attempt);
+					: verification
+						? verification.verdict === "accepted"
+							? "succeeded"
+							: "failed"
+						: attempt.status === "queued"
+							? "queued"
+							: attempt.status === "leased" || attempt.status === "running" || attempt.status === "suspended"
+								? "running"
+								: terminalStatus(attempt);
 	const reasonCode = verification?.reasonCode ?? attempt.result?.reasonCode ?? attempt.reasonCode;
 	const genericTitle = `Delegated ${task.task.role} work`;
 	const label = deriveWorkerTaskLabel(

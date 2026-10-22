@@ -239,9 +239,10 @@ function verificationEvidence(
 	accepted: boolean,
 	criterionIds: readonly string[],
 	createdAt: string,
+	subject?: { taskId: string; attemptId: string },
 ): EvidenceContract[] {
 	if (!claim.verification) return [];
-	const trustedReview = accepted;
+	const trustedReview = accepted && subject !== undefined && claim.verification.subjectTaskId === subject.taskId;
 	return [
 		{
 			evidenceId: "independent-review",
@@ -251,7 +252,8 @@ function verificationEvidence(
 			trusted: trustedReview,
 			createdAt,
 			metadata: {
-				subjectTaskId: claim.verification.subjectTaskId,
+				subjectTaskId: subject?.taskId ?? claim.verification.subjectTaskId,
+				...(subject ? { subjectAttemptId: subject.attemptId } : {}),
 				verdict: claim.verification.verdict,
 				reasonCodes: [...claim.verification.reasonCodes],
 			},
@@ -265,7 +267,10 @@ function verificationEvidence(
 				artifactIds: [],
 				trusted: trustedReview && claim.verification?.verdict === "accepted",
 				createdAt,
-				metadata: { subjectTaskId: claim.verification?.subjectTaskId ?? "" },
+				metadata: {
+					subjectTaskId: subject?.taskId ?? claim.verification?.subjectTaskId ?? "",
+					...(subject ? { subjectAttemptId: subject.attemptId } : {}),
+				},
 			}),
 		),
 	];
@@ -285,6 +290,7 @@ export interface CreateWorkerResultContractInput {
 	toolCalls: number;
 	verificationRequired?: boolean;
 	verificationCriterionIds?: readonly string[];
+	verificationSubject?: { taskId: string; attemptId: string };
 	reasonCode?: string;
 	createdAt?: string;
 	outputArtifact?: ArtifactContract;
@@ -343,7 +349,14 @@ export function createWorkerResultContract(args: CreateWorkerResultContractInput
 						},
 					]
 				: []),
-			...verificationEvidence(claim, summary, args.accepted, args.verificationCriterionIds ?? [], createdAt),
+			...verificationEvidence(
+				claim,
+				summary,
+				args.accepted,
+				args.verificationCriterionIds ?? [],
+				createdAt,
+				args.verificationSubject,
+			),
 		],
 		errors: blockers.map((message) => ({ code: "worker_blocker", message, retryable: false })),
 		...(args.verificationRequired

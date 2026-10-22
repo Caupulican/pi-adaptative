@@ -1,5 +1,6 @@
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
+import { verificationSubjectAttempt } from "../orchestration/verification-identity.ts";
 import {
 	type CreateWorkerResultContractInput,
 	createWorkerResultContract,
@@ -26,7 +27,14 @@ export function finalizeWorkerClaim(lifecycle: WorkerLifecycle, input: FinalizeW
 	const { notify, ...resultInput } = input;
 	// Direct abort/error paths also pass here, so this boundary cannot rely on worker-runner
 	// normalization. Reject before lifecycle mutation, filesystem observation, or notification.
-	const result = createWorkerResultContract({ ...resultInput, claim: normalizeWorkerClaimForHost(resultInput.claim) });
+	const snapshot = lifecycle.getTaskRuntimeSnapshot();
+	const task = snapshot.tasks[input.handle.taskId]?.task;
+	const subject = task ? verificationSubjectAttempt(snapshot, task) : undefined;
+	const result = createWorkerResultContract({
+		...resultInput,
+		verificationSubject: subject ? { taskId: subject.taskId, attemptId: subject.attemptId } : undefined,
+		claim: normalizeWorkerClaimForHost(resultInput.claim),
+	});
 	const record = lifecycle.finish(result, { ...(notify === false ? { notify: false } : {}) });
 	const notification = notify === false ? undefined : lifecycle.getTerminalNotification(record.laneId);
 	return { result, record, ...(notification ? { notification } : {}) };

@@ -15,6 +15,7 @@ import {
 	WORKER_ROLES,
 } from "../orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { attemptVerification, taskStatusWithVerification } from "../orchestration/verification-identity.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { DEFAULT_WORKER_FLEET_LIMITS } from "./worker-fleet-limits.ts";
 
@@ -48,6 +49,7 @@ export interface WorkerTaskView {
 	status: OrchestrationTaskStatus;
 	dependsOn: readonly string[];
 	verificationOfTaskId?: string;
+	verificationOfAttemptId?: string;
 	verificationOutcome?: {
 		verifierTaskId: string;
 		verdict: VerificationVerdict;
@@ -60,7 +62,6 @@ type VerificationVerdict = "accepted" | "rejected" | "inconclusive";
 
 interface TaskViewCandidate {
 	attemptIds: unknown;
-	verification: unknown;
 	taskId: string;
 	title: string;
 	role: WorkerRole;
@@ -68,6 +69,7 @@ interface TaskViewCandidate {
 	dependsOn: readonly string[];
 	createdAt: string;
 	verificationOfTaskId?: string;
+	verificationOfAttemptId?: string;
 }
 
 interface TaskViewSelection {
@@ -116,9 +118,12 @@ function taskViewCandidate(recordTaskId: string, value: unknown): TaskViewCandid
 		return undefined;
 	}
 	const verificationOfTaskId = boundedString(value.task.verificationOfTaskId, MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
+	const verificationOfAttemptId = boundedString(
+		value.task.verificationOfAttemptId,
+		MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	);
 	return {
 		attemptIds: value.attemptIds,
-		verification: value.verification,
 		taskId,
 		title,
 		role: value.task.role,
@@ -126,6 +131,7 @@ function taskViewCandidate(recordTaskId: string, value: unknown): TaskViewCandid
 		dependsOn: boundedIdentifierArray(value.task.dependsOn),
 		createdAt,
 		...(verificationOfTaskId ? { verificationOfTaskId } : {}),
+		...(verificationOfAttemptId ? { verificationOfAttemptId } : {}),
 	};
 }
 
@@ -197,14 +203,22 @@ function projectVerification(value: unknown): WorkerTaskView["verificationOutcom
 
 function projectTask(snapshot: TaskRuntimeProjection, candidate: TaskViewCandidate): WorkerTaskView {
 	const attempt = projectAttempt(latestExistingAttempt(snapshot, candidate.attemptIds), candidate.taskId);
-	const verificationOutcome = projectVerification(candidate.verification);
+	const runtimeAttempt = attempt?.attemptId ? snapshot.attempts[attempt.attemptId] : undefined;
+	const verificationOutcome = projectVerification(
+		runtimeAttempt ? attemptVerification(snapshot, runtimeAttempt) : undefined,
+	);
+	const status =
+		runtimeAttempt?.result?.nextAction === "independent_verification_required"
+			? taskStatusWithVerification(candidate.status, verificationOutcome)
+			: candidate.status;
 	return {
 		taskId: candidate.taskId,
 		title: candidate.title,
 		role: candidate.role,
-		status: candidate.status,
+		status,
 		dependsOn: candidate.dependsOn,
 		...(candidate.verificationOfTaskId ? { verificationOfTaskId: candidate.verificationOfTaskId } : {}),
+		...(candidate.verificationOfAttemptId ? { verificationOfAttemptId: candidate.verificationOfAttemptId } : {}),
 		...(verificationOutcome ? { verificationOutcome } : {}),
 		...(attempt ? { latestAttempt: attempt } : {}),
 	};

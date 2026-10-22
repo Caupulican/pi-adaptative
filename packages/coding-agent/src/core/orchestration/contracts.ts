@@ -210,6 +210,8 @@ export interface TaskContract {
 	acceptanceCriterionIds: readonly string[];
 	/** Implementer task this verifier task must independently reconcile. */
 	verificationOfTaskId?: string;
+	/** Exact implementation generation; absent only in historical records. */
+	verificationOfAttemptId?: string;
 	riskBudget: RiskBudget;
 	createdAt: string;
 	updatedAt: string;

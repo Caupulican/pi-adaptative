@@ -216,6 +216,7 @@ export interface WorkerDelegationRequest {
 	parentAgentId?: string;
 	/** Runtime-owned correlation for an automatically dispatched verifier; never model-settable. */
 	verificationOfTaskId?: string;
+	verificationOfAttemptId?: string;
 	/** Runtime-owned durable task correlation; the delegate tool schema intentionally omits this. */
 	taskContext?: WorkerDelegationTaskContext;
 	/**

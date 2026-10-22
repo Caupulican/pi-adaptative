@@ -111,6 +111,7 @@ import {
 	type TaskRuntimeState,
 	terminalAttemptStatus,
 } from "./task-runtime-state.ts";
+import { assertVerificationDependenciesReady, taskAwaitsVerification } from "./verification-identity.ts";
 
 export { validateTaskDependencyIds } from "./task-runtime-codecs.ts";
 export {
@@ -631,6 +632,7 @@ export class DurableTaskRuntime {
 	leaseAttempt(attemptId: string, ownerId: string, ttlMs: number, agentId?: string): AttemptLease {
 		this.refresh();
 		const attempt = this.requireAttempt(attemptId);
+		assertVerificationDependenciesReady(this.state, attempt);
 		const lease = this.issueLease(attempt, ownerId, ttlMs);
 		assertAttemptLeaseTransition(this.state, attemptId, lease, agentId, this.nowIso());
 		this.commit({
@@ -645,6 +647,7 @@ export class DurableTaskRuntime {
 
 	startAttempt(attemptId: string, leaseId: string, fencingToken: number): AttemptRuntimeState {
 		this.refresh();
+		assertVerificationDependenciesReady(this.state, this.requireAttempt(attemptId));
 		assertAttemptStartTransition(this.state, attemptId, attemptId, leaseId, fencingToken, this.nowIso());
 		this.commit({
 			type: "attempt.started",
@@ -845,7 +848,8 @@ export class DurableTaskRuntime {
 
 	finishVerification(args: VerificationTransitionInput): TaskRuntimeState {
 		this.refresh();
-		assertVerificationTransition(this.state, args.taskId, args);
+		const { subjectAttempt } = assertVerificationTransition(this.state, args.taskId, args);
+		if (subjectAttempt.verification) return structuredClone(this.state.tasks[args.taskId]!);
 		this.commit({
 			type: "task.verification_finished",
 			aggregateId: args.taskId,
@@ -1052,7 +1056,9 @@ export class DurableTaskRuntime {
 	/** Read-only guard used before changing agent state; resumeAttempt repeats it authoritatively. */
 	assertAttemptReadyForResume(attemptId: string): void {
 		this.refresh();
-		this.assertRetryBackoffElapsed(this.requireAttempt(attemptId));
+		const attempt = this.requireAttempt(attemptId);
+		assertVerificationDependenciesReady(this.state, attempt);
+		this.assertRetryBackoffElapsed(attempt);
 	}
 
 	resumeAttempt(attemptId: string, agentId: string, ttlMs: number, ownerId = agentId): AttemptLease {
@@ -1065,6 +1071,7 @@ export class DurableTaskRuntime {
 		if (agent?.status !== "resuming") throw new DurableTaskRuntimeError(`Agent '${agentId}' is not resuming.`);
 		this.assertRetryBackoffElapsed(attempt);
 		this.requireActiveObjectiveForAttempt(attempt);
+		assertVerificationDependenciesReady(this.state, attempt);
 		const lease = this.issueLease(attempt, ownerId, ttlMs);
 		this.commit({
 			type: "attempt.resumed",
@@ -1214,6 +1221,9 @@ export class DurableTaskRuntime {
 	}
 
 	private buildTask(input: CreateTaskInput): { task: TaskContract; objectiveState: ObjectiveRuntimeState } {
+		if (input.verificationOfTaskId && !input.verificationOfAttemptId) {
+			throw new DurableTaskRuntimeError("A new verifier requires an exact subject attempt.");
+		}
 		assertRiskBudget(input.riskBudget, "task.riskBudget");
 		const objectiveState = this.state.objectives[input.objectiveId];
 		if (!objectiveState) throw new DurableTaskRuntimeError(`Unknown objective '${input.objectiveId}'.`);
@@ -1236,6 +1246,7 @@ export class DurableTaskRuntime {
 				requiredCapabilities: [...new Set(input.requiredCapabilities ?? [])],
 				acceptanceCriterionIds,
 				...(input.verificationOfTaskId ? { verificationOfTaskId: input.verificationOfTaskId } : {}),
+				...(input.verificationOfAttemptId ? { verificationOfAttemptId: input.verificationOfAttemptId } : {}),
 				riskBudget: { ...(input.riskBudget ?? {}) },
 				createdAt: now,
 				updatedAt: now,
@@ -1278,6 +1289,14 @@ export class DurableTaskRuntime {
 	): void {
 		this.refresh();
 		const objective = this.requireObjective(objectiveId);
+		if (target === "completed" && payload.completionPolicy === "task_evidence") {
+			const pending = objective.taskIds.filter((taskId) => taskAwaitsVerification(this.state, taskId));
+			if (pending.length > 0) {
+				throw new DurableTaskRuntimeError(
+					`Objective '${objectiveId}' awaits task verification: ${pending.join(", ")}.`,
+				);
+			}
+		}
 		if (objective.objective.status === target) return;
 		assertObjectiveStatusTransition(
 			this.state,

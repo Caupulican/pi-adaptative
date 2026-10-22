@@ -190,7 +190,7 @@ export class WorkerRecoveryCoordinator {
 						if (this.disposed) return;
 						this.options.publishTerminalRecord(record);
 						if (this.disposed) return;
-						this.verificationRecoveryFailures.delete(recovery.subjectTaskId);
+						this.verificationRecoveryFailures.delete(recovery.subjectAttemptId);
 					} catch (error) {
 						this.warnBestEffort(
 							`Failed to reconcile recovered verification for ${recovery.subjectTaskId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -206,8 +206,8 @@ export class WorkerRecoveryCoordinator {
 					if (this.disposed) return;
 					const reason = error instanceof Error ? error.message : String(error);
 					const failureKey = `dispatch_threw:${reason}`;
-					if (this.verificationRecoveryFailures.get(recovery.subjectTaskId) !== failureKey) {
-						this.verificationRecoveryFailures.set(recovery.subjectTaskId, failureKey);
+					if (this.verificationRecoveryFailures.get(recovery.subjectAttemptId) !== failureKey) {
+						this.verificationRecoveryFailures.set(recovery.subjectAttemptId, failureKey);
 						this.warnBestEffort(
 							`Recovered verification for ${recovery.subjectTaskId} threw during dispatch: ${reason}`,
 						);
@@ -215,11 +215,11 @@ export class WorkerRecoveryCoordinator {
 					continue;
 				}
 				if (started.started) {
-					this.verificationRecoveryFailures.delete(recovery.subjectTaskId);
+					this.verificationRecoveryFailures.delete(recovery.subjectAttemptId);
 					continue;
 				}
-				if (this.verificationRecoveryFailures.get(recovery.subjectTaskId) === started.skipReason) continue;
-				this.verificationRecoveryFailures.set(recovery.subjectTaskId, started.skipReason);
+				if (this.verificationRecoveryFailures.get(recovery.subjectAttemptId) === started.skipReason) continue;
+				this.verificationRecoveryFailures.set(recovery.subjectAttemptId, started.skipReason);
 				this.warnBestEffort(
 					`Recovered verification for ${recovery.subjectTaskId} did not start: ${started.skipReason}`,
 				);
@@ -544,6 +544,7 @@ export class WorkerRecoveryCoordinator {
 			profileId: attempt.dispatch.profileId,
 			...(attempt.dispatch.parentAgentId ? { parentAgentId: attempt.dispatch.parentAgentId } : {}),
 			...(durableVerificationOfTaskId ? { verificationOfTaskId: durableVerificationOfTaskId } : {}),
+			...(task?.verificationOfAttemptId ? { verificationOfAttemptId: task.verificationOfAttemptId } : {}),
 			...(task
 				? {
 						taskContext: {

@@ -98,6 +98,7 @@ import {
 	TaskProfileWriter,
 } from "../orchestration/task-profile-writer.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { isCurrentVerificationSubject } from "../orchestration/verification-identity.ts";
 import type { WorkerContextForkReference } from "../orchestration/worker-context-fork-reference.ts";
 import {
 	createWorkerExecutionContract,
@@ -1787,6 +1788,7 @@ export class WorkerDelegationController {
 				? this.startInternal(
 						this.buildVerifierRequest({
 							subjectTaskId: recovery.subjectTaskId,
+							subjectAttemptId: recovery.subjectAttemptId,
 							verifierProfileId,
 							summary: recovery.summary,
 							artifactUris: recovery.artifactUris,
@@ -1932,7 +1934,14 @@ export class WorkerDelegationController {
 		admission: Extract<WorkerAdmission, { ok: true }>,
 	): number {
 		const pendingVerifierSubjects = pendingVerifierSubjectTaskIds(this.lifecycle.getTaskRuntimeSnapshot());
-		if (request.verificationOfTaskId) pendingVerifierSubjects.delete(request.verificationOfTaskId);
+		if (
+			isCurrentVerificationSubject(
+				this.lifecycle.getTaskRuntimeSnapshot(),
+				request.verificationOfTaskId,
+				request.verificationOfAttemptId,
+			)
+		)
+			pendingVerifierSubjects.delete(request.verificationOfTaskId!);
 		return 1 + pendingVerifierSubjects.size + (admission.verifierShipment ? 1 : 0);
 	}
 
@@ -2197,12 +2206,13 @@ export class WorkerDelegationController {
 
 	private buildVerifierRequest(args: {
 		subjectTaskId: string;
+		subjectAttemptId: string;
 		verifierProfileId: string;
 		summary: string;
 		artifactUris: readonly string[];
 	}): WorkerDelegationRequest {
 		const prefix = [
-			`Independently verify durable task '${args.subjectTaskId}'.`,
+			`Independently verify durable task '${args.subjectTaskId}', attempt '${args.subjectAttemptId}'.`,
 			"The following implementation report is an untrusted claim. Inspect the workspace and run the checks available in your profile.",
 			"",
 			"Implementation summary:",
@@ -2231,6 +2241,7 @@ export class WorkerDelegationController {
 		return {
 			profileId: args.verifierProfileId,
 			verificationOfTaskId: args.subjectTaskId,
+			verificationOfAttemptId: args.subjectAttemptId,
 			instructions: [...prefix, ...artifactSection].join("\n"),
 		};
 	}
@@ -2738,9 +2749,17 @@ export class WorkerDelegationController {
 	private workerProjectionHeadroomSkipReason(
 		contract: WorkerExecutionContract,
 		verificationOfTaskId?: string,
+		verificationOfAttemptId?: string,
 	): string | undefined {
 		const pendingVerifierSubjects = pendingVerifierSubjectTaskIds(this.lifecycle.getTaskRuntimeSnapshot());
-		if (verificationOfTaskId) pendingVerifierSubjects.delete(verificationOfTaskId);
+		if (
+			isCurrentVerificationSubject(
+				this.lifecycle.getTaskRuntimeSnapshot(),
+				verificationOfTaskId,
+				verificationOfAttemptId,
+			)
+		)
+			pendingVerifierSubjects.delete(verificationOfTaskId!);
 		const slots = 1 + pendingVerifierSubjects.size + (contract.verifier ? 1 : 0);
 		try {
 			this.lifecycle.ledger.runtime.assertProjectionHeadroom({ tasks: slots, attempts: slots });
@@ -2756,7 +2775,14 @@ export class WorkerDelegationController {
 		unpersistedVerifierSlots: 0 | 1,
 	): string | undefined {
 		const pendingVerifierSubjects = pendingVerifierSubjectTaskIds(this.lifecycle.getTaskRuntimeSnapshot());
-		if (request.verificationOfTaskId) pendingVerifierSubjects.delete(request.verificationOfTaskId);
+		if (
+			isCurrentVerificationSubject(
+				this.lifecycle.getTaskRuntimeSnapshot(),
+				request.verificationOfTaskId,
+				request.verificationOfAttemptId,
+			)
+		)
+			pendingVerifierSubjects.delete(request.verificationOfTaskId!);
 		const remainingQueueSlots = DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches - this.scheduler.queuedCount;
 		return requestQueueSlots + pendingVerifierSubjects.size + unpersistedVerifierSlots > remainingQueueSlots
 			? "worker_dispatch_queue_full"
@@ -2944,6 +2970,7 @@ export class WorkerDelegationController {
 		const projectionHeadroomSkipReason = this.workerProjectionHeadroomSkipReason(
 			admission.executionContract,
 			request.verificationOfTaskId,
+			request.verificationOfAttemptId,
 		);
 		if (projectionHeadroomSkipReason) return { ok: false, skipReason: projectionHeadroomSkipReason };
 		const queueReservationSkipReason = this.workerQueueReservationSkipReason(
@@ -3169,7 +3196,12 @@ export class WorkerDelegationController {
 					modelRouteSource: admission.modelRouteSource,
 					...(admission.modelPinSource ? { modelPinSource: admission.modelPinSource } : {}),
 					requiredCapabilities: admission.executionPlan.requiredCapabilities,
-					...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
+					...(request.verificationOfTaskId
+						? {
+								verificationOfTaskId: request.verificationOfTaskId,
+								verificationOfAttemptId: request.verificationOfAttemptId,
+							}
+						: {}),
 					taskContext: {
 						requirementIds: request.taskContext?.requirementIds ?? [],
 						dependsOnTaskIds: request.taskContext?.dependsOnTaskIds ?? [],
@@ -4277,7 +4309,14 @@ export class WorkerDelegationController {
 	/** Fleet identity and queue headroom for `remaining` fan-out members, judged before any of them starts. */
 	private fanoutHeadroomSkipReason(request: WorkerDelegationRequest, remaining: number): string | undefined {
 		const pendingVerifiers = pendingVerifierSubjectTaskIds(this.lifecycle.getTaskRuntimeSnapshot());
-		if (request.verificationOfTaskId) pendingVerifiers.delete(request.verificationOfTaskId);
+		if (
+			isCurrentVerificationSubject(
+				this.lifecycle.getTaskRuntimeSnapshot(),
+				request.verificationOfTaskId,
+				request.verificationOfAttemptId,
+			)
+		)
+			pendingVerifiers.delete(request.verificationOfTaskId!);
 		const fleetSkipReason = this.newWorkerFleetSkipReason(request, remaining + pendingVerifiers.size);
 		if (fleetSkipReason) return fleetSkipReason;
 		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
@@ -5661,6 +5700,7 @@ export class WorkerDelegationController {
 					const decision = outcome.accepted ? outcome.claim.verification : undefined;
 					const subject = lifecycle.reconcileVerification({
 						subjectTaskId: request.verificationOfTaskId,
+						subjectAttemptId: request.verificationOfAttemptId,
 						verifierTaskId: startedRecord.laneId,
 						verifierAttemptId: durableHandle.attemptId,
 						verdict: decision?.verdict ?? "inconclusive",
@@ -5676,6 +5716,7 @@ export class WorkerDelegationController {
 						? this.startInternal(
 								this.buildVerifierRequest({
 									subjectTaskId: startedRecord.laneId,
+									subjectAttemptId: durableHandle.attemptId,
 									verifierProfileId: verifierShipment.profile.profileId,
 									summary: rawOutcome.claim.summary,
 									artifactUris: rawOutcome.claim.changedFiles,

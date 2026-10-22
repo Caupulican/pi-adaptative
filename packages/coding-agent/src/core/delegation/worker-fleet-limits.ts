@@ -1,4 +1,4 @@
-import { latestAgentAttemptByDurableOrder } from "../orchestration/attempt-ordering.ts";
+import { latestAgentAttemptByDurableOrder, selectedTaskAttempt } from "../orchestration/attempt-ordering.ts";
 import {
 	type AgentBindingContract,
 	MAX_ORCHESTRATION_AGENT_BINDINGS,
@@ -7,6 +7,7 @@ import {
 	type OrchestrationDelegationLimits,
 } from "../orchestration/contracts.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { attemptVerification, verificationSubjectAttempt } from "../orchestration/verification-identity.ts";
 
 /**
  * Process-independent safety ceilings for one durable session fleet. These limits bound persisted
@@ -102,12 +103,9 @@ export function pendingVerifierSubjectTaskIds(
 	for (const taskId in tasks) {
 		if (!Object.hasOwn(tasks, taskId)) continue;
 		const subject = tasks[taskId];
-		if (!subject || subject.verification) continue;
-		let attempt: AttemptRuntimeState | undefined;
-		for (let index = subject.attemptIds.length - 1; index >= 0; index -= 1) {
-			attempt = attempts[subject.attemptIds[index]!];
-			if (attempt) break;
-		}
+		if (!subject) continue;
+		const attempt = selectedTaskAttempt(snapshot, taskId);
+		if (attempt && attemptVerification(snapshot, attempt)) continue;
 		if (!attempt?.dispatch.executionContract?.verifier) continue;
 		if (
 			attempt.status === "queued" ||
@@ -125,6 +123,11 @@ export function pendingVerifierSubjectTaskIds(
 		const verifierTask = tasks[taskId];
 		const verificationOfTaskId = verifierTask?.task.verificationOfTaskId;
 		if (!verifierTask || !verificationOfTaskId || !pending.has(verificationOfTaskId)) continue;
+		if (
+			verificationSubjectAttempt(snapshot, verifierTask.task)?.attemptId !==
+			selectedTaskAttempt(snapshot, verificationOfTaskId)?.attemptId
+		)
+			continue;
 		let verifierAttempt: AttemptRuntimeState | undefined;
 		for (let index = verifierTask.attemptIds.length - 1; index >= 0; index -= 1) {
 			verifierAttempt = attempts[verifierTask.attemptIds[index]!];

@@ -27,6 +27,11 @@ import type {
 	AttemptRuntimeState,
 	TaskRuntimeProjection,
 } from "../orchestration/task-runtime.ts";
+import {
+	attemptVerification,
+	currentTaskTerminalOverride,
+	verificationSubjectAttempt,
+} from "../orchestration/verification-identity.ts";
 import { verifierWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
 import {
 	ACTIVE_WORKER_ATTEMPT_STATUSES,
@@ -47,6 +52,7 @@ export type PendingVerificationRecovery =
 	| {
 			action: "dispatch";
 			subjectTaskId: string;
+			subjectAttemptId: string;
 			implementationProfileId: string;
 			summary: string;
 			artifactUris: readonly string[];
@@ -55,6 +61,7 @@ export type PendingVerificationRecovery =
 	| {
 			action: "reconcile";
 			subjectTaskId: string;
+			subjectAttemptId: string;
 			verifierTaskId: string;
 			verifierAttemptId: string;
 			verdict: "accepted" | "rejected" | "inconclusive";
@@ -474,21 +481,29 @@ export class WorkerLifecycle {
 
 	reconcileVerification(args: {
 		subjectTaskId: string;
+		subjectAttemptId?: string;
 		verifierTaskId: string;
 		verifierAttemptId: string;
 		verdict: "accepted" | "rejected" | "inconclusive";
 		reasonCode: string;
 	}): LaneRecord {
+		const snapshot = this.ledger.runtime.getSnapshot();
+		const verifier = snapshot.tasks[args.verifierTaskId]?.task;
+		const subjectAttemptId =
+			args.subjectAttemptId ?? (verifier ? verificationSubjectAttempt(snapshot, verifier)?.attemptId : undefined);
+		if (!subjectAttemptId) throw new Error(`Verifier '${args.verifierTaskId}' has no unambiguous subject attempt.`);
 		this.ledger.runtime.finishVerification({
 			taskId: args.subjectTaskId,
+			subjectAttemptId,
 			verifierTaskId: args.verifierTaskId,
 			verifierAttemptId: args.verifierAttemptId,
 			verdict: args.verdict,
 			reasonCode: args.reasonCode,
 		});
-		const subject = this.getRecord(args.subjectTaskId);
-		if (!subject) throw new Error(`Verified worker '${args.subjectTaskId}' was not projected.`);
-		this.enqueueTerminalNotification(subject);
+		const settled = this.ledger.runtime.getSnapshot();
+		const subject = projectWorkerAttemptLaneRecord(settled, subjectAttemptId);
+		if (!subject) throw new Error(`Verified worker attempt '${subjectAttemptId}' was not projected.`);
+		this.enqueueAttemptTerminalNotificationFrom(settled, settled.attempts[subjectAttemptId]!, subject);
 		return subject;
 	}
 
@@ -576,14 +591,24 @@ export class WorkerLifecycle {
 	/** Close crash windows between implementation completion, verifier dispatch, and reconciliation. */
 	getPendingVerificationRecoveries(): PendingVerificationRecovery[] {
 		const snapshot = this.ledger.runtime.getSnapshot();
-		return Object.values(snapshot.tasks).flatMap<PendingVerificationRecovery>((subject) => {
-			if (subject.verification) return [];
-			const implementationAttempt = selectedWorkerAttempt(snapshot, subject.task.taskId);
-			if (implementationAttempt?.result?.nextAction !== "independent_verification_required") return [];
-			const verifier = Object.values(snapshot.tasks)
-				.filter((candidate) => candidate.task.verificationOfTaskId === subject.task.taskId)
-				.at(-1);
+		const verifiers = new Map<string, TaskRuntimeProjection["tasks"][string]>();
+		for (const candidate of Object.values(snapshot.tasks)) {
+			const subject = verificationSubjectAttempt(snapshot, candidate.task);
+			if (subject) verifiers.set(subject.attemptId, candidate);
+		}
+		return Object.values(snapshot.attempts).flatMap<PendingVerificationRecovery>((implementationAttempt) => {
+			const subject = snapshot.tasks[implementationAttempt.taskId];
+			if (
+				!subject ||
+				implementationAttempt.result?.nextAction !== "independent_verification_required" ||
+				attemptVerification(snapshot, implementationAttempt)
+			)
+				return [];
+			const verifier = verifiers.get(implementationAttempt.attemptId);
 			if (!verifier) {
+				if (currentTaskTerminalOverride(snapshot, implementationAttempt)) return [];
+				if (selectedWorkerAttempt(snapshot, subject.task.taskId)?.attemptId !== implementationAttempt.attemptId)
+					return [];
 				const verifierExecutionContract = implementationAttempt.dispatch.executionContract
 					? verifierWorkerExecutionContract(implementationAttempt.dispatch.executionContract)
 					: undefined;
@@ -591,6 +616,7 @@ export class WorkerLifecycle {
 					{
 						action: "dispatch" as const,
 						subjectTaskId: subject.task.taskId,
+						subjectAttemptId: implementationAttempt.attemptId,
 						implementationProfileId: implementationAttempt.dispatch.profileId,
 						summary: implementationAttempt.result.summary,
 						artifactUris: implementationAttempt.result.artifacts.map((artifact) => artifact.uri),
@@ -605,6 +631,8 @@ export class WorkerLifecycle {
 					evidence.trusted &&
 					evidence.kind === "review" &&
 					evidence.metadata?.subjectTaskId === subject.task.taskId &&
+					(!verifier.task.verificationOfAttemptId ||
+						evidence.metadata.subjectAttemptId === implementationAttempt.attemptId) &&
 					(evidence.metadata.verdict === "accepted" || evidence.metadata.verdict === "rejected"),
 			);
 			const verdictValue = review?.metadata?.verdict;
@@ -617,6 +645,7 @@ export class WorkerLifecycle {
 				{
 					action: "reconcile" as const,
 					subjectTaskId: subject.task.taskId,
+					subjectAttemptId: implementationAttempt.attemptId,
 					verifierTaskId: verifier.task.taskId,
 					verifierAttemptId: verifierAttempt.attemptId,
 					verdict,

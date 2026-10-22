@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { assertAttemptAgentBinding, nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
+import { selectedTaskAttempt } from "./attempt-ordering.ts";
 import { attemptUsageIncrease, EMPTY_ATTEMPT_USAGE } from "./attempt-usage.ts";
 import {
 	type AttemptUsageAccounting,
@@ -76,7 +77,15 @@ import {
 	type TaskRuntimeProjection,
 	type TaskRuntimeState,
 	terminalAttemptStatus,
+	type VerificationRecord,
 } from "./task-runtime-state.ts";
+import {
+	assertVerificationRecord,
+	attemptVerification,
+	taskAwaitsVerification,
+	taskStatusWithVerification,
+	verificationSubjectAttempt,
+} from "./verification-identity.ts";
 
 function updateObjectiveStatus(
 	state: TaskRuntimeProjection,
@@ -318,6 +327,7 @@ function releaseAttemptAgent(
 function taskDependencyReadiness(
 	state: TaskRuntimeProjection,
 	task: TaskRuntimeState,
+	checkVerification = false,
 ):
 	| { state: "ready" }
 	| { state: "waiting"; dependencyTaskIds: string[] }
@@ -337,7 +347,11 @@ function taskDependencyReadiness(
 				`Task dependency '${dependencyId}' is not in objective '${task.task.objectiveId}'.`,
 			);
 		}
-		if (dependency.task.status === "completed" || dependency.task.status === "blocked") continue;
+		if (
+			!(checkVerification && taskAwaitsVerification(state, dependencyId)) &&
+			(dependency.task.status === "completed" || dependency.task.status === "blocked")
+		)
+			continue;
 		dependencyTaskIds.push(dependencyId);
 		if (dependency.task.status === "failed") failedDependencyTaskIds.push(dependencyId);
 		if (dependency.task.status === "cancelled") cancelledDependencyTaskIds.push(dependencyId);
@@ -356,6 +370,7 @@ function taskDependencyReadiness(
 export function attemptDispatchReadiness(
 	state: TaskRuntimeProjection,
 	attempt: AttemptRuntimeState,
+	checkVerification = true,
 ): AttemptDispatchReadiness {
 	if (attempt.status !== "queued" && attempt.status !== "suspended") {
 		throw new DurableTaskRuntimeError(`Attempt '${attempt.attemptId}' is neither queued nor suspended.`);
@@ -382,7 +397,7 @@ export function attemptDispatchReadiness(
 			objectiveStatus: objective.status,
 		};
 	}
-	const dependencyReadiness = taskDependencyReadiness(state, task);
+	const dependencyReadiness = taskDependencyReadiness(state, task, checkVerification);
 	if (dependencyReadiness.state === "blocked") {
 		return {
 			state: "blocked",
@@ -407,7 +422,7 @@ export function attemptDispatchReadiness(
 }
 
 function assertAttemptDispatchReady(state: TaskRuntimeProjection, attempt: AttemptRuntimeState): void {
-	const readiness = attemptDispatchReadiness(state, attempt);
+	const readiness = attemptDispatchReadiness(state, attempt, false);
 	if (readiness.state === "ready") {
 		const task = state.tasks[attempt.taskId];
 		if (task?.task.status !== "ready") {
@@ -512,6 +527,11 @@ function applyAttemptQueued(state: TaskRuntimeProjection, payload: JsonObject, o
 	) {
 		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' execution contract does not match its dispatch.`);
 	}
+	const preceding = selectedTaskAttempt(state, taskId);
+	const precedingVerification = preceding ? attemptVerification(state, preceding) : undefined;
+	if (preceding && precedingVerification && !preceding.verification) {
+		attempts[preceding.attemptId] = { ...preceding, verification: precedingVerification };
+	}
 	attempts[attemptId] = {
 		attemptId,
 		taskId,
@@ -531,7 +551,6 @@ function applyAttemptQueued(state: TaskRuntimeProjection, payload: JsonObject, o
 		},
 		attemptIds: [...task.attemptIds, attemptId],
 	};
-	delete nextTask.verification;
 	tasks[taskId] = nextTask;
 }
 
@@ -954,6 +973,7 @@ export function assertNotificationTarget(
 
 export interface VerificationTransitionInput {
 	taskId: string;
+	subjectAttemptId: string;
 	verifierTaskId: string;
 	verifierAttemptId: string;
 	verdict: "accepted" | "rejected" | "inconclusive";
@@ -985,50 +1005,38 @@ export function assertVerificationTransition(
 	state: TaskRuntimeProjection,
 	aggregateId: string,
 	args: VerificationTransitionInput,
-): { subject: TaskRuntimeState; verifierAttempt: AttemptRuntimeState } {
-	if (aggregateId !== args.taskId) {
+): { subject: TaskRuntimeState; subjectAttempt: AttemptRuntimeState } {
+	if (aggregateId !== args.taskId)
 		throw new DurableTaskRuntimeError("Verification subject does not match its aggregate.");
-	}
 	const subject = state.tasks[args.taskId];
-	const verifierTask = state.tasks[args.verifierTaskId];
-	const verifierAttempt = state.attempts[args.verifierAttemptId];
-	if (!subject) throw new DurableTaskRuntimeError(`Unknown verification subject '${args.taskId}'.`);
-	if (subject.verification) {
-		throw new DurableTaskRuntimeError(`Verification subject '${args.taskId}' was already reconciled.`);
-	}
-	if (subject.task.status !== "blocked") {
-		throw new DurableTaskRuntimeError(
-			`Verification subject '${args.taskId}' cannot reconcile from '${subject.task.status}'.`,
-		);
-	}
-	if (!verifierTask || verifierTask.task.verificationOfTaskId !== args.taskId) {
-		throw new DurableTaskRuntimeError(`Task '${args.verifierTaskId}' is not the verifier for '${args.taskId}'.`);
-	}
-	if (!verifierAttempt || verifierAttempt.taskId !== args.verifierTaskId) {
-		throw new DurableTaskRuntimeError(`Unknown verifier attempt '${args.verifierAttemptId}'.`);
-	}
-	if (!terminalAttemptStatus(verifierAttempt.status)) {
-		throw new DurableTaskRuntimeError(`Verifier attempt '${args.verifierAttemptId}' is not terminal.`);
-	}
-	if (args.verdict === "accepted" && verifierAttempt.status !== "completed") {
-		throw new DurableTaskRuntimeError(`Verifier attempt '${args.verifierAttemptId}' is not completed.`);
+	const subjectAttempt = state.attempts[args.subjectAttemptId];
+	if (
+		!subject ||
+		subjectAttempt?.taskId !== args.taskId ||
+		subjectAttempt.result?.nextAction !== "independent_verification_required"
+	) {
+		throw new DurableTaskRuntimeError(`Unknown verification subject attempt '${args.subjectAttemptId}'.`);
 	}
 	dispatchIdentifier(args.reasonCode.trim(), "verification reasonCode");
+	assertVerificationRecord(
+		state,
+		args.taskId,
+		{ ...args, completedAt: subjectAttempt.updatedAt },
+		args.subjectAttemptId,
+	);
+	const existing = attemptVerification(state, subjectAttempt);
 	if (
-		args.verdict !== "inconclusive" &&
-		!verifierAttempt.result?.evidence.some(
-			(evidence) =>
-				evidence.trusted &&
-				evidence.kind === "review" &&
-				evidence.metadata?.subjectTaskId === args.taskId &&
-				evidence.metadata.verdict === args.verdict,
-		)
+		existing &&
+		(existing.verifierTaskId !== args.verifierTaskId ||
+			existing.verifierAttemptId !== args.verifierAttemptId ||
+			existing.verdict !== args.verdict ||
+			existing.reasonCode !== args.reasonCode)
 	) {
 		throw new DurableTaskRuntimeError(
-			`${args.verdict === "accepted" ? "Accepted" : "Rejected"} verification requires matching trusted review evidence for the subject task.`,
+			`Verification subject attempt '${args.subjectAttemptId}' was already reconciled differently.`,
 		);
 	}
-	return { subject, verifierAttempt };
+	return { subject, subjectAttempt };
 }
 
 function applyAttemptResumed(
@@ -1238,30 +1246,60 @@ export function reduceOrchestrationEvent(
 				throw new DurableTaskRuntimeError(`Unknown verification verdict '${verdict}'.`);
 			}
 			const reasonCode = string(event.payload.reasonCode, "task.verification_finished.reasonCode");
-			const transition: VerificationTransitionInput = {
-				taskId,
+			const explicitSubjectAttemptId =
+				event.payload.subjectAttemptId === undefined
+					? undefined
+					: dispatchIdentifier(event.payload.subjectAttemptId, "task.verification_finished.subjectAttemptId");
+			const verifierTask = tasks[verifierTaskId]?.task;
+			const subjectAttemptId =
+				explicitSubjectAttemptId ??
+				(verifierTask ? verificationSubjectAttempt(state, verifierTask)?.attemptId : undefined);
+			const verification: VerificationRecord = {
 				verifierTaskId,
 				verifierAttemptId,
 				verdict,
 				reasonCode,
+				completedAt: event.occurredAt,
 			};
-			const { subject: current } = assertVerificationTransition(state, event.aggregateId, transition);
-			tasks[taskId] = {
-				...current,
-				task: {
-					...current.task,
-					status: verdict === "accepted" ? "completed" : "blocked",
-					updatedAt: event.occurredAt,
-				},
-				verification: {
+			if (!subjectAttemptId) {
+				// Old events did not record the reviewed generation. Retain their historical facts;
+				// current execution admission and projections never treat an ambiguous record as proof.
+				if (event.aggregateId !== taskId || !tasks[taskId])
+					throw new DurableTaskRuntimeError("Unknown verification subject.");
+				assertVerificationRecord(state, taskId, verification);
+				const current = tasks[taskId]!;
+				tasks[taskId] = {
+					...current,
+					task: {
+						...current.task,
+						status: verdict === "accepted" ? "completed" : "blocked",
+						updatedAt: event.occurredAt,
+					},
+					verification,
+				};
+			} else {
+				const { subject, subjectAttempt } = assertVerificationTransition(state, event.aggregateId, {
+					taskId,
+					subjectAttemptId,
 					verifierTaskId,
 					verifierAttemptId,
 					verdict,
 					reasonCode,
-					completedAt: event.occurredAt,
-				},
-			};
-			refreshReadyTasks(state, current.task.objectiveId, event.occurredAt);
+				});
+				attempts[subjectAttemptId] = { ...subjectAttempt, verification: { ...verification, subjectAttemptId } };
+				const status = taskStatusWithVerification(subject.task.status, verification);
+				if (selectedTaskAttempt(state, taskId)?.attemptId === subjectAttemptId && status !== subject.task.status) {
+					tasks[taskId] = {
+						...subject,
+						task: {
+							...subject.task,
+							status,
+							updatedAt: event.occurredAt,
+						},
+					};
+				}
+			}
+			refreshReadyTasks(state, tasks[taskId]!.task.objectiveId, event.occurredAt);
 			break;
 		}
 		case "agent.registered": {

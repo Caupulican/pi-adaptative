@@ -48,6 +48,7 @@ export interface PrepareDelegationInput {
 	requiredCapabilities: readonly HarnessCapability[];
 	goal?: GoalState;
 	verificationOfTaskId?: string;
+	verificationOfAttemptId?: string;
 	taskContext?: WorkerDelegationTaskContext;
 	birthContextForkReference?: WorkerContextForkReference;
 	/** Provenance of the admitted model; recorded on the dispatch, never compared as identity. */
@@ -176,7 +177,12 @@ export class DelegationOrchestrationLedger {
 			...(input.parentAgentId ? { parentAgentId: input.parentAgentId } : {}),
 			executionContract: input.executionContract,
 			...(input.goal ? { goal: input.goal } : {}),
-			...(input.verificationOfTaskId ? { verificationOfTaskId: input.verificationOfTaskId } : {}),
+			...(input.verificationOfTaskId
+				? {
+						verificationOfTaskId: input.verificationOfTaskId,
+						verificationOfAttemptId: input.verificationOfAttemptId,
+					}
+				: {}),
 			...(input.taskContext ? { taskContext: input.taskContext } : {}),
 			dispatchMetadata: {
 				logicalLaneId: input.laneId,
@@ -370,6 +376,7 @@ export class DelegationOrchestrationLedger {
 		goal?: GoalState;
 		goalId?: string;
 		verificationOfTaskId?: string;
+		verificationOfAttemptId?: string;
 		taskContext?: WorkerDelegationTaskContext;
 		executionContract?: WorkerExecutionContract;
 		dispatchMetadata?: Pick<
@@ -469,6 +476,7 @@ export class DelegationOrchestrationLedger {
 			...(input.verificationOfTaskId
 				? {
 						verificationOfTaskId: input.verificationOfTaskId,
+						verificationOfAttemptId: input.verificationOfAttemptId,
 						acceptanceCriterionIds: verificationSubject?.task.acceptanceCriterionIds ?? [],
 					}
 				: {}),
@@ -488,6 +496,7 @@ export class DelegationOrchestrationLedger {
 			existingTask &&
 			(existingTask.title !== taskInput.title ||
 				existingTask.verificationOfTaskId !== taskInput.verificationOfTaskId ||
+				existingTask.verificationOfAttemptId !== taskInput.verificationOfAttemptId ||
 				!isDeepStrictEqual(existingTask.requiredCapabilities, [...new Set(taskInput.requiredCapabilities)]) ||
 				!isDeepStrictEqual(existingTask.acceptanceCriterionIds, [...new Set(taskInput.acceptanceCriterionIds)]) ||
 				!isDeepStrictEqual(existingTask.riskBudget, taskInput.riskBudget))

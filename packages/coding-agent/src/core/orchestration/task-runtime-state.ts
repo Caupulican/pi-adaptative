@@ -32,13 +32,20 @@ export interface ObjectiveRuntimeState {
 export interface TaskRuntimeState {
 	task: TaskContract;
 	attemptIds: readonly string[];
-	verification?: {
-		verifierTaskId: string;
-		verifierAttemptId: string;
-		verdict: "accepted" | "rejected" | "inconclusive";
-		reasonCode: string;
-		completedAt: string;
-	};
+	/** Read-only historical evidence. New verdicts belong to the exact subject attempt. */
+	verification?: VerificationRecord;
+}
+
+export interface VerificationRecord {
+	verifierTaskId: string;
+	verifierAttemptId: string;
+	verdict: "accepted" | "rejected" | "inconclusive";
+	reasonCode: string;
+	completedAt: string;
+}
+
+export interface AttemptVerification extends VerificationRecord {
+	subjectAttemptId: string;
 }
 
 export interface AttemptRuntimeState {
@@ -65,6 +72,8 @@ export interface AttemptRuntimeState {
 	/** Parent-report outbox; removal requires acknowledgement after the parent receipt persists. */
 	usageReceipts?: Readonly<Record<string, AttemptUsageReceipt>>;
 	result?: WorkerResultContract;
+	/** Settled independent review of this immutable result, retained across task retries. */
+	verification?: AttemptVerification;
 	/**
 	 * Managed-process attempts only: lifetime of the external process this turn was dispatched to,
 	 * as last observed by its owner. Absent means retained, which is every attempt's initial state.
@@ -186,6 +195,7 @@ export interface CreateTaskInput {
 	requiredCapabilities?: TaskContract["requiredCapabilities"];
 	acceptanceCriterionIds?: readonly string[];
 	verificationOfTaskId?: string;
+	verificationOfAttemptId?: string;
 	riskBudget?: RiskBudget;
 }
 

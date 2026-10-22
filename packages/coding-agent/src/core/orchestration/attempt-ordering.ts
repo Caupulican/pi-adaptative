@@ -8,6 +8,22 @@ import type { AttemptRuntimeState, TaskRuntimeProjection } from "./task-runtime.
  */
 const latestAttemptsMemo = new WeakMap<object, ReadonlyMap<string, AttemptRuntimeState>>();
 
+/** Current task generation: its live attempt, otherwise its last retained attempt. */
+export function selectedTaskAttempt(
+	snapshot: Pick<TaskRuntimeProjection, "tasks" | "attempts">,
+	taskId: string,
+): AttemptRuntimeState | undefined {
+	const ids = snapshot.tasks[taskId]?.attemptIds ?? [];
+	let latest: AttemptRuntimeState | undefined;
+	for (let index = ids.length - 1; index >= 0; index -= 1) {
+		const attempt = snapshot.attempts[ids[index]!];
+		if (!attempt) continue;
+		latest ??= attempt;
+		if (["queued", "leased", "running", "suspended"].includes(attempt.status)) return attempt;
+	}
+	return latest;
+}
+
 export function latestAgentAttemptsByDurableOrder(
 	snapshot: Pick<TaskRuntimeProjection, "agents" | "attempts">,
 ): ReadonlyMap<string, AttemptRuntimeState> {

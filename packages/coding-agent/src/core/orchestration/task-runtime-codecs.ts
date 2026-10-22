@@ -79,6 +79,7 @@ import {
 	type ApprovalRuntimeState,
 	type AttemptRuntimeState,
 	type AttemptUsageReceipt,
+	type AttemptVerification,
 	DurableTaskRuntimeError,
 	missingTrustedCriteria,
 	type NotificationRuntimeState,
@@ -86,7 +87,9 @@ import {
 	type TaskRuntimeProjection,
 	type TaskRuntimeState,
 	terminalAttemptStatus,
+	type VerificationRecord,
 } from "./task-runtime-state.ts";
+import { assertVerificationRecord, verificationSubjectAttempt } from "./verification-identity.ts";
 import { normalizeWorkerContextForkReference } from "./worker-context-fork-reference.ts";
 import { parseWorkerExecutionContract } from "./worker-execution-contract.ts";
 
@@ -582,6 +585,7 @@ export function taskFromValue(value: unknown, label: string): TaskContract {
 		"requiredCapabilities",
 		"acceptanceCriterionIds",
 		"verificationOfTaskId",
+		"verificationOfAttemptId",
 		"riskBudget",
 		"createdAt",
 		"updatedAt",
@@ -618,6 +622,14 @@ export function taskFromValue(value: unknown, label: string): TaskContract {
 		dependsOn: dispatchIdentifierArray(task.dependsOn, `${label}.dependsOn`),
 		requiredCapabilities: requiredCapabilities as TaskContract["requiredCapabilities"],
 		acceptanceCriterionIds: dispatchIdentifierArray(task.acceptanceCriterionIds, `${label}.acceptanceCriterionIds`),
+		...(task.verificationOfAttemptId === undefined
+			? {}
+			: {
+					verificationOfAttemptId: dispatchIdentifier(
+						task.verificationOfAttemptId,
+						`${label}.verificationOfAttemptId`,
+					),
+				}),
 		...(task.verificationOfTaskId === undefined
 			? {}
 			: {
@@ -633,33 +645,39 @@ export function taskFromPayload(payload: JsonObject): TaskContract {
 	return taskFromValue(payload.task, "task");
 }
 
+function verificationFromValue(value: unknown, label: string): VerificationRecord & { subjectAttemptId?: string } {
+	const entry = exactRecord(value, label, [
+		"verifierTaskId",
+		"verifierAttemptId",
+		"subjectAttemptId",
+		"verdict",
+		"reasonCode",
+		"completedAt",
+	]);
+	const verdict = string(entry.verdict, `${label}.verdict`);
+	if (verdict !== "accepted" && verdict !== "rejected" && verdict !== "inconclusive") {
+		throw new DurableTaskRuntimeError(`${label}.verdict is invalid.`);
+	}
+	return {
+		verifierTaskId: dispatchIdentifier(entry.verifierTaskId, `${label}.verifierTaskId`),
+		verifierAttemptId: dispatchIdentifier(entry.verifierAttemptId, `${label}.verifierAttemptId`),
+		...(entry.subjectAttemptId === undefined
+			? {}
+			: { subjectAttemptId: dispatchIdentifier(entry.subjectAttemptId, `${label}.subjectAttemptId`) }),
+		verdict,
+		reasonCode: dispatchIdentifier(entry.reasonCode, `${label}.reasonCode`),
+		completedAt: isoDate(entry.completedAt, `${label}.completedAt`),
+	};
+}
+
 function taskRuntimeStateFromValue(value: unknown, label: string): TaskRuntimeState {
 	const state = exactRecord(value, label, ["task", "attemptIds", "verification"]);
-	let verification: TaskRuntimeState["verification"];
-	if (state.verification !== undefined) {
-		const record = exactRecord(state.verification, `${label}.verification`, [
-			"verifierTaskId",
-			"verifierAttemptId",
-			"verdict",
-			"reasonCode",
-			"completedAt",
-		]);
-		const verdict = string(record.verdict, `${label}.verification.verdict`);
-		if (verdict !== "accepted" && verdict !== "rejected" && verdict !== "inconclusive") {
-			throw new DurableTaskRuntimeError(`${label}.verification.verdict is invalid.`);
-		}
-		verification = {
-			verifierTaskId: dispatchIdentifier(record.verifierTaskId, `${label}.verification.verifierTaskId`),
-			verifierAttemptId: dispatchIdentifier(record.verifierAttemptId, `${label}.verification.verifierAttemptId`),
-			verdict,
-			reasonCode: dispatchIdentifier(record.reasonCode, `${label}.verification.reasonCode`),
-			completedAt: dispatchIdentifier(record.completedAt, `${label}.verification.completedAt`),
-		};
-	}
 	return {
 		task: taskFromValue(state.task, `${label}.task`),
 		attemptIds: retainedIdentifierArray(state.attemptIds, MAX_ORCHESTRATION_ATTEMPTS, `${label}.attemptIds`),
-		...(verification ? { verification } : {}),
+		...(state.verification === undefined
+			? {}
+			: { verification: verificationFromValue(state.verification, `${label}.verification`) }),
 	};
 }
 
@@ -824,6 +842,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		"usageAccounting",
 		"usageReceipts",
 		"result",
+		"verification",
 		"managedLifetime",
 		"executionStartedAt",
 		"createdAt",
@@ -840,6 +859,13 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		dispatchFromValue(attempt.dispatch, `${label}.dispatch`).executionKind !== "managed-process"
 	) {
 		throw new DurableTaskRuntimeError(`${label}.managedLifetime is only defined for managed-process work.`);
+	}
+	const verification =
+		attempt.verification === undefined
+			? undefined
+			: verificationFromValue(attempt.verification, `${label}.verification`);
+	if (verification && verification.subjectAttemptId !== attempt.attemptId) {
+		throw new DurableTaskRuntimeError(`${label}.verification has a different subject attempt.`);
 	}
 	const createdAt = isoDate(attempt.createdAt, `${label}.createdAt`);
 	const updatedAt = isoDate(attempt.updatedAt, `${label}.updatedAt`);
@@ -874,6 +900,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 			`${label}.checkpointIds`,
 		),
 		...(attempt.result === undefined ? {} : { result: resultFromValue(attempt.result, `${label}.result`) }),
+		...(verification ? { verification: verification as AttemptVerification } : {}),
 		...(managedLifetime ? { managedLifetime } : {}),
 		...(attempt.executionStartedAt === undefined
 			? {}
@@ -1542,8 +1569,14 @@ export function validateTaskContractForState(state: TaskRuntimeProjection, task:
 			`${label} references unknown acceptance criteria: ${unknownCriteria.join(", ")}.`,
 		);
 	}
+	if (task.verificationOfAttemptId && !task.verificationOfTaskId) {
+		throw new DurableTaskRuntimeError(`${label} has an attempt binding without a verification subject.`);
+	}
 	if (task.verificationOfTaskId) {
 		const subject = state.tasks[task.verificationOfTaskId];
+		if (task.verificationOfAttemptId && !verificationSubjectAttempt(state, task)) {
+			throw new DurableTaskRuntimeError(`${label} has an invalid verification attempt binding.`);
+		}
 		if (!subject || subject.task.objectiveId !== task.objectiveId) {
 			throw new DurableTaskRuntimeError(`${label} verification subject is not in its objective.`);
 		}
@@ -1612,6 +1645,12 @@ function validateSnapshotTaskGraph(state: TaskRuntimeProjection): void {
 			if (taskDependencyReaches(state.tasks, dependencyId, taskId)) {
 				throw new DurableTaskRuntimeError(`${label} task graph contains a cycle.`);
 			}
+		}
+		if (
+			taskState.task.verificationOfAttemptId &&
+			(!taskState.task.verificationOfTaskId || !verificationSubjectAttempt(state, taskState.task))
+		) {
+			throw new DurableTaskRuntimeError(`${label} task '${taskId}' has an invalid verification attempt binding.`);
 		}
 		if (taskState.task.verificationOfTaskId) {
 			const subject = state.tasks[taskState.task.verificationOfTaskId];
@@ -1908,33 +1947,14 @@ function validateSnapshotTaskGraph(state: TaskRuntimeProjection): void {
 	}
 
 	for (const [taskId, subject] of Object.entries(state.tasks)) {
-		const verification = subject.verification;
-		if (!verification) continue;
-		const verifierTask = state.tasks[verification.verifierTaskId];
-		const verifierAttempt = state.attempts[verification.verifierAttemptId];
-		if (
-			!verifierTask ||
-			verifierTask.task.verificationOfTaskId !== taskId ||
-			!verifierAttempt ||
-			verifierAttempt.taskId !== verification.verifierTaskId ||
-			!terminalAttemptStatus(verifierAttempt.status)
-		) {
-			throw new DurableTaskRuntimeError(`${label} task '${taskId}' has an invalid verification record.`);
-		}
-		if (verification.verdict === "accepted" && subject.task.status !== "completed") {
-			throw new DurableTaskRuntimeError(`${label} accepted verification for '${taskId}' is not completed.`);
-		}
-		if (
-			verification.verdict !== "inconclusive" &&
-			!verifierAttempt.result?.evidence.some(
-				(evidence) =>
-					evidence.trusted &&
-					evidence.kind === "review" &&
-					evidence.metadata?.subjectTaskId === taskId &&
-					evidence.metadata.verdict === verification.verdict,
-			)
-		) {
-			throw new DurableTaskRuntimeError(`${label} task '${taskId}' verification lacks matching evidence.`);
+		if (subject.verification) assertVerificationRecord(state, taskId, subject.verification);
+	}
+	for (const attempt of Object.values(state.attempts)) {
+		if (attempt.verification) {
+			if (attempt.result?.nextAction !== "independent_verification_required") {
+				throw new DurableTaskRuntimeError(`${label} attempt '${attempt.attemptId}' did not request verification.`);
+			}
+			assertVerificationRecord(state, attempt.taskId, attempt.verification, attempt.attemptId);
 		}
 	}
 }
