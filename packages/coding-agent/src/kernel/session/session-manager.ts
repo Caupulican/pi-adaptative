@@ -1555,6 +1555,8 @@ export class SessionManager {
 	 */
 	private agentDir: string;
 	private persist: boolean;
+	private readonly readOnly: boolean;
+	private payloadsHaveStoredIds = true;
 	private flushed: boolean = false;
 	private fileEntries: FileEntry[] = [];
 	private entries: SessionEntry[] = [];
@@ -1589,14 +1591,21 @@ export class SessionManager {
 		persist: boolean,
 		agentDir: string,
 		newSessionOptions?: NewSessionOptions,
+		readOnly = false,
 	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.agentDir = agentDir;
 		this.persist = persist;
+		this.readOnly = readOnly;
 
 		if (sessionFile) {
-			this.setSessionFile(sessionFile);
+			if (readOnly) {
+				assertAdoptableSessionHeader(resolvePath(sessionFile));
+				this._setSessionFile(sessionFile);
+			} else {
+				this.setSessionFile(sessionFile);
+			}
 		} else {
 			this.newSession(newSessionOptions);
 		}
@@ -1604,6 +1613,7 @@ export class SessionManager {
 
 	/** Switch to a different session file (used for resume and branching) */
 	setSessionFile(sessionFile: string): void {
+		this._assertWritable();
 		// Judged before this manager changes any state: a rejected file leaves the manager and the file as they were.
 		assertAdoptableSessionHeader(resolvePath(sessionFile));
 		const recoveringUncertainWrite = this.persistenceStateUncertain;
@@ -1643,12 +1653,19 @@ export class SessionManager {
 		this._resetEntryFileIndex(true);
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
+			let payloadsHaveStoredIds = false;
 			// The session file is the cold payload arena. Release each large payload as
 			// soon as its JSONL record is parsed so GC can reclaim it during this pass;
 			// waiting until the complete history is loaded makes peak heap proportional
 			// to file size and can OOM before post-load compaction cleanup runs.
 			const loaded = loadEntriesFromFileInternal(this.sessionFile, undefined, (entry, offset, length) => {
-				if (entry.type !== "message") return;
+				if (entry.type === "session") {
+					payloadsHaveStoredIds = (entry.version ?? 1) >= FIRST_SESSION_VERSION_WITH_ENTRY_IDS;
+					return;
+				}
+				// Legacy migration mints entry IDs. Its payloads cannot refer back to the
+				// original file until a writable open has published those IDs there.
+				if (entry.type !== "message" || !payloadsHaveStoredIds) return;
 				this._releaseMessageProperty(entry, "content");
 				this._releaseMessageProperty(entry, "output");
 				if (offset !== undefined && length !== undefined && this.coldPayloadEntryIds.has(entry.id)) {
@@ -1656,6 +1673,7 @@ export class SessionManager {
 				}
 			});
 			this.fileEntries = loaded.entries;
+			this.payloadsHaveStoredIds = payloadsHaveStoredIds;
 			let sourceRevision = loaded.revision;
 			if (!sourceRevision) throw new Error("Session file disappeared while opening it.");
 			let indexedEveryColdPayload = true;
@@ -1669,6 +1687,7 @@ export class SessionManager {
 			// Only a genuinely empty file may be initialized in place. Any non-empty file
 			// without a valid header is preserved for explicit recovery rather than destroyed.
 			if (this.fileEntries.length === 0) {
+				if (this.readOnly) throw new Error("Cannot inspect an empty or invalid session file.");
 				if (loaded.indexedBytes > 0) {
 					throw new Error(`Session file does not begin with a valid session header: ${this.sessionFile}`);
 				}
@@ -1681,7 +1700,7 @@ export class SessionManager {
 				return receipt;
 			}
 
-			if (loaded.unterminatedTail) {
+			if (loaded.unterminatedTail && !this.readOnly) {
 				sourceRevision = appendToExistingSessionFile(this.sessionFile, "\n", sourceRevision);
 				if (this.indexedSessionFileBytes > 0) {
 					this.indexedSessionFileBytes += 1;
@@ -1698,7 +1717,8 @@ export class SessionManager {
 			// Validate and index the complete parent graph before a migration rewrite can
 			// mutate the source file. Malformed cycles must fail synchronously on cold open.
 			this._buildIndex();
-			const receipt = migrated ? this._rewriteFile(this.sessionFile, sourceRevision) : undefined;
+			const receipt = migrated && !this.readOnly ? this._rewriteFile(this.sessionFile, sourceRevision) : undefined;
+			if (migrated && !this.readOnly) this.payloadsHaveStoredIds = true;
 
 			// Bound in-memory retention: oversized tool result details from disk would
 			// otherwise be pinned in fileEntries for the whole process lifetime.
@@ -1707,9 +1727,10 @@ export class SessionManager {
 			}
 
 			this.flushed = true;
-			this._releaseExistingCompactedMessagePayloads();
+			if (payloadsHaveStoredIds || !this.readOnly) this._releaseExistingCompactedMessagePayloads();
 			return receipt;
 		} else {
+			if (this.readOnly) throw new Error("Cannot inspect a missing session file.");
 			const explicitPath = this.sessionFile;
 			this.newSession();
 			this.sessionFile = explicitPath; // preserve explicit path from --session flag
@@ -1717,6 +1738,8 @@ export class SessionManager {
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
+		this._assertWritable();
+		this.payloadsHaveStoredIds = true;
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
 		}
@@ -1825,6 +1848,7 @@ export class SessionManager {
 	}
 
 	private _rewriteFile(targetFile = this.sessionFile, expected?: Stats): SessionEntriesPersistedEvent | undefined {
+		this._assertWritable();
 		if (!this.persist || !targetFile) return;
 		const assertCurrent = this._capturePersistenceContext();
 		this._ensureSessionFileParent(targetFile);
@@ -1910,6 +1934,7 @@ export class SessionManager {
 	}
 
 	private _ensureEntryFileLocations(retainedIds: ReadonlySet<string>): void {
+		if (!this.payloadsHaveStoredIds) return;
 		if (retainedIds.size === 0 || !this.sessionFile || !existsSync(this.sessionFile)) return;
 		const fileBytes = statSync(this.sessionFile).size;
 		if (fileBytes < this.indexedSessionFileBytes) this._resetEntryFileIndex();
@@ -1943,6 +1968,7 @@ export class SessionManager {
 	}
 
 	private _getEntryFileLocation(entryId: string): SessionEntryFileLocation | undefined {
+		if (!this.payloadsHaveStoredIds) return undefined;
 		let location = this.entryFileLocations.get(entryId);
 		if (location) return location;
 		this._ensureEntryFileLocations(new Set([entryId]));
@@ -2094,6 +2120,7 @@ export class SessionManager {
 		signal?: AbortSignal,
 		assertCurrent: () => void = this._capturePersistenceContext(),
 	): SessionEntriesPersistedEvent | undefined {
+		this._assertWritable();
 		signal?.throwIfAborted();
 		assertCurrent();
 		if (!this.persist || !this.sessionFile) return;
@@ -2179,6 +2206,10 @@ export class SessionManager {
 		});
 	}
 
+	private _assertWritable(): void {
+		if (this.readOnly) throw new Error("Read-only session inspection cannot mutate history.");
+	}
+
 	/** Serialization can call getters; a prepared row must retain the session and branch it was built against. */
 	private _capturePersistenceContext(): () => void {
 		const { sessionId, sessionFile, leafId, byId, fileEntries } = this;
@@ -2232,6 +2263,7 @@ export class SessionManager {
 		signal?: AbortSignal,
 		publication?: { assertCurrent?: () => void; beforeNotify?: () => void },
 	): void {
+		this._assertWritable();
 		signal?.throwIfAborted();
 		const assertCurrent = publication?.assertCurrent ?? this._capturePersistenceContext();
 		let receipt: SessionEntriesPersistedEvent | undefined;
@@ -3485,6 +3517,7 @@ export class SessionManager {
 	 * are not modified or deleted.
 	 */
 	branch(branchFromId: string): void {
+		this._assertWritable();
 		if (!this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
@@ -3499,6 +3532,7 @@ export class SessionManager {
 	 * Use this when navigating to re-edit the first user message.
 	 */
 	resetLeaf(): void {
+		this._assertWritable();
 		this._invalidateSessionContextCache();
 		this.leafId = null;
 		this.lifecycleActiveCache = undefined;
@@ -3543,6 +3577,7 @@ export class SessionManager {
 	 * retiring the current one.
 	 */
 	createBranchedSessionManager(leafId: string): SessionManager {
+		this._assertWritable();
 		const previousSessionFile = this.sessionFile;
 		const path = this.getBranch(leafId);
 		if (path.length === 0) {
@@ -3623,6 +3658,7 @@ export class SessionManager {
 	 * keep this manager intact until the replacement has been constructed successfully.
 	 */
 	createBranchedSession(leafId: string): string | undefined {
+		this._assertWritable();
 		const branched = this.createBranchedSessionManager(leafId);
 		this._invalidateSessionContextCache();
 		this.sessionId = branched.sessionId;
@@ -3664,13 +3700,28 @@ export class SessionManager {
 	 * @param cwdOverride Optional cwd override instead of the session header cwd.
 	 */
 	static open(path: string, agentDir: string, sessionDir?: string, cwdOverride?: string): SessionManager {
+		return SessionManager._open(path, agentDir, sessionDir, cwdOverride, false);
+	}
+
+	/** Inspect existing history without repairing, migrating or creating any file on disk. */
+	static openReadOnly(path: string, agentDir: string): ReadonlySessionManager {
+		return SessionManager._open(path, agentDir, undefined, undefined, true);
+	}
+
+	private static _open(
+		path: string,
+		agentDir: string,
+		sessionDir: string | undefined,
+		cwdOverride: string | undefined,
+		readOnly: boolean,
+	): SessionManager {
 		const resolvedPath = resolvePath(path);
 		// Read only the header here; the constructor performs the one full session load.
 		const header = readSessionHeader(resolvedPath);
 		const cwd = cwdOverride ?? header?.cwd ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, resolvedPath, true, agentDir);
+		return new SessionManager(cwd, dir, resolvedPath, true, agentDir, undefined, readOnly);
 	}
 
 	/**

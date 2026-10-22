@@ -24,6 +24,7 @@ import {
 	assertValidSessionId,
 	loadEntriesFromFile,
 	MAX_SESSION_ENTRY_VISIT_COUNT,
+	type ReadonlySessionManager,
 	type SessionContext,
 	SessionManager,
 	type SessionRequestSnapshotInput,
@@ -321,7 +322,7 @@ function isWireNativeWorkerTranscriptMessage(message: WorkerTranscriptMessage): 
 }
 
 function visitWorkerSessionEntries(
-	sessionManager: SessionManager,
+	sessionManager: Pick<ReadonlySessionManager, "visitEntries">,
 	startIndex: number,
 	endIndex: number,
 	visitor: (entry: Readonly<WorkerSessionEntry>, index: number, persistedBytes?: number) => void,
@@ -796,10 +797,10 @@ function writeWorkerConversationMetadata(metadataFile: string, metadata: WorkerC
 	writeFileAtomicSync(metadataFile, `${JSON.stringify(encoded)}\n`, { mode: 0o600 });
 }
 
-const projectEnrollmentIndices = new WeakMap<SessionManager, { count: number; key?: string }>();
+const projectEnrollmentIndices = new WeakMap<ReadonlySessionManager, { count: number; key?: string }>();
 
 /** Append-only enrollment makes dropping the metadata envelope a refusal, never a legacy fallback. */
-function projectEnrollmentKey(session: SessionManager): string | undefined {
+function projectEnrollmentKey(session: ReadonlySessionManager): string | undefined {
 	let index = projectEnrollmentIndices.get(session);
 	if (!index || index.count > session.getEntryCount()) index = { count: 0 };
 	const current = index;
@@ -822,7 +823,7 @@ function projectEnrollmentKey(session: SessionManager): string | undefined {
 
 function assertProjectConversationAccess(
 	metadata: WorkerConversationMetadata,
-	session: SessionManager,
+	session: ReadonlySessionManager,
 	claim?: SpecialistContextClaim,
 	intent: "mutation" | "inspection" = "mutation",
 ): void {
@@ -2052,7 +2053,7 @@ export class WorkerConversationStore {
 				claim?.parentSessionId !== parentSessionId
 			)
 				throw new Error("Worker mailbox project claim is missing or foreign.");
-			assertProjectConversationAccess(metadata, SessionManager.open(file, agentDir, dirname(file)), claim);
+			assertProjectConversationAccess(metadata, SessionManager.openReadOnly(file, agentDir), claim);
 			return operation();
 		});
 	}
@@ -2099,9 +2100,7 @@ export class WorkerConversationStore {
 				options.expectedLogicalAgentId,
 			);
 			this.openExisting(options, { recoverBirthContextPrefix: false });
-			const enrollment = projectEnrollmentKey(
-				SessionManager.open(sessionFile, options.agentDir, dirname(sessionFile)),
-			);
+			const enrollment = projectEnrollmentKey(SessionManager.openReadOnly(sessionFile, options.agentDir));
 			if (enrollment !== metadata.projectContext?.specializationKey)
 				throw new Error("Worker project enrollment changed.");
 			if (!metadata.projectContext) return undefined;
@@ -2176,10 +2175,7 @@ export class WorkerConversationStore {
 						);
 						if (conversation.hasActiveTranscriptCommit())
 							throw new Error("Worker transcript commit is still active.");
-						if (
-							projectEnrollmentKey(SessionManager.open(file, agentDir, dirname(file))) !==
-							project?.specializationKey
-						)
+						if (projectEnrollmentKey(SessionManager.openReadOnly(file, agentDir)) !== project?.specializationKey)
 							throw new Error("Worker allocation enrollment evidence changed.");
 					}
 					const claim = { ...input.owner, generation: 1 };
@@ -2266,7 +2262,7 @@ export class WorkerConversationStore {
 						if (inspectedBytes > 32 * 1024 * 1024) return false;
 						scanWorkerSessionFile(sessionFile, metadata.resumeContext.sessionId, metadata.resumeContext.cwd);
 						return (
-							projectEnrollmentKey(SessionManager.open(sessionFile, agentDir, directory)) ===
+							projectEnrollmentKey(SessionManager.openReadOnly(sessionFile, agentDir)) ===
 							metadata.projectContext?.specializationKey
 						);
 					});
@@ -2398,7 +2394,7 @@ export class WorkerConversationStore {
 				if (conversation.hasActiveTranscriptCommit()) throw new Error("Worker transcript commit is still active.");
 				assertProjectConversationAccess(
 					metadata,
-					SessionManager.open(sessionFile, options.agentDir, dirname(sessionFile)),
+					SessionManager.openReadOnly(sessionFile, options.agentDir),
 					claim,
 				);
 				options.assertSettled();
@@ -2592,7 +2588,7 @@ export class WorkerConversationStore {
 		if (birthContext.recoverBirthContextPrefix) {
 			assertProjectConversationAccess(
 				readWorkerConversationMetadata(metadataFile).metadata,
-				SessionManager.open(sessionFile, options.agentDir, sessionDir),
+				SessionManager.openReadOnly(sessionFile, options.agentDir),
 				options.projectClaim,
 			);
 		}
