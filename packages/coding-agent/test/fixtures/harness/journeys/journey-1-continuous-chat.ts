@@ -18,6 +18,7 @@ import {
 	icmContinuousSettings,
 	icmContinuousStore,
 	icmLatestResult,
+	icmReadContinuousNodes,
 	icmReadContinuousRecords,
 	icmReadScheduler,
 	icmWaitForChatIdle,
@@ -45,7 +46,12 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			const warningMark = world.warnings.length;
 			const requestMark = world.provider.requests.length;
 			const caseStore = icmContinuousStore(caseAgentDir);
-			const created = await world.createRootSession("root", { agentDir: caseAgentDir, settings });
+			// A persisting session: the chat logs only entries the session has persisted.
+			const created = await world.createRootSession("root", {
+				agentDir: caseAgentDir,
+				sessionManager: world.createSessionManager(caseAgentDir),
+				settings,
+			});
 			world.provider.enqueue("root", text(`${label}-reply`, "Acknowledged."));
 			// Turn without a tool: its owner words are settled by a later submission, so this phase scripts no judgment.
 			world.systemOne.enterPhase(label, {});
@@ -62,26 +68,48 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 					: undefined,
 				`${label}: the refused summary settings do not stop the root turn`,
 			).toEqual({ stopReason: "stop", text: JSON.stringify([{ type: "text", text: "Acknowledged." }]) });
-			await withDeadline(
-				trace,
-				`${label} message logged`,
-				world.io.waitForMutation(() => {
-					const rootRaw = world.io.peekFile(caseStore.rootFile);
-					const queue = icmReadScheduler(world, caseStore);
-					return (
-						rootRaw !== undefined &&
-						queue !== undefined &&
-						(JSON.parse(rootRaw) as { readonly nextId: number }).nextId >= 2 &&
-						queue.totalMessages === (JSON.parse(rootRaw) as { readonly nextId: number }).nextId
-					);
-				}),
-				60_000,
-			);
-			const queue = icmReadScheduler(world, caseStore);
+			// Settled: both messages are logged and the scheduler has seen them, and the one model-generated leaf (the user message,
+			// id 0) is blocked by the refusal and not yet due a retry. The other message is an exact leaf and needs no model.
+			const settled = (): boolean => {
+				const rootRaw = world.io.peekFile(caseStore.rootFile);
+				const meta = world.guard.peekSqlite(caseStore.queueDatabase, "SELECT body FROM meta WHERE id = 1");
+				const work = world.guard.peekSqlite(
+					caseStore.queueDatabase,
+					"SELECT level, ordinal, status, retry_after, reason FROM work",
+				);
+				if (rootRaw === undefined || meta?.length !== 1 || work === undefined) return false;
+				const state = JSON.parse(String(meta[0]!.body)) as {
+					totalMessages: number;
+					nextLeaf: number;
+					generation: number;
+				};
+				const row = work[0];
+				return (
+					(JSON.parse(rootRaw) as { readonly nextId: number }).nextId === 2 &&
+					state.totalMessages === 2 &&
+					state.nextLeaf === 2 &&
+					work.length === 1 &&
+					row?.level === 0 &&
+					row.ordinal === 0 &&
+					row.status === "blocked" &&
+					Number(row.retry_after) >= state.generation &&
+					row.reason === warning
+				);
+			};
+			await withDeadline(trace, `${label} refused node settled`, world.io.waitForMutation(settled), 60_000);
+			const records = icmReadContinuousRecords(world, caseStore);
 			expect(
-				queue !== undefined && queue.running === 0 && queue.readyLeaves + queue.blocked >= 1,
-				`${label}: the model-generated node stays pending`,
-			).toBe(true);
+				records.map((record) => ({ id: record.id, kind: record.kind })),
+				`${label}: the turn's two messages are logged`,
+			).toEqual([
+				{ id: 0, kind: "user" },
+				{ id: 1, kind: "pi" },
+			]);
+			expect(records[0]?.text, `${label}: the over-512-byte request is logged whole`).toContain("z".repeat(600));
+			expect(
+				icmReadContinuousNodes(world, caseStore).map((node) => [node.level, node.ordinal]),
+				`${label}: the exact leaf is published; the model-generated one stays pending`,
+			).toEqual([[0, 1]]);
 			expect(
 				world.provider.requests.slice(requestMark).filter((request) => request.model.id !== "root"),
 				`${label}: no summary request is sent while the settings are refused`,
