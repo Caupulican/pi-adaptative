@@ -4,6 +4,7 @@ import { lstat, rm, unlink } from "node:fs/promises";
 import { orchestrationSessionDir } from "./agent-paths.ts";
 import { sessionJournalPaths } from "./cost/semantic-usage-journal.ts";
 import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
+import { settleSessionBundleDeletion } from "./orchestration/session-bundle-lifecycle.ts";
 
 export type SessionArtifactDeletionMethod = "trash" | "unlink";
 
@@ -110,12 +111,24 @@ export async function deleteForegroundSessionBundle(
 
 	const journal = await removeJournalSidecars(options.sessionPath, removePath);
 	const workerArtifactsPath = orchestrationSessionDir(options.agentDir, options.parentSessionId);
-	if (!WorkerConversationStore.reserveBundleDeletion(options.agentDir, options.parentSessionId)) {
+	const reservation = WorkerConversationStore.reserveBundleDeletion(
+		options.agentDir,
+		options.parentSessionId,
+		"permanent",
+	);
+	if (!reservation) {
 		return { foreground, journal, workerArtifacts: { ok: false, method: "preserved" }, complete: false };
 	}
-	if (!existsSync(workerArtifactsPath)) {
-		return { foreground, journal, workerArtifacts: { ok: true, method: "absent" }, complete: journal.ok };
+	let outcome: "removed" | "retained" = "retained";
+	try {
+		if (!existsSync(workerArtifactsPath)) {
+			outcome = "removed";
+			return { foreground, journal, workerArtifacts: { ok: true, method: "absent" }, complete: journal.ok };
+		}
+		const workerArtifacts = await removePath(workerArtifactsPath);
+		if (workerArtifacts.ok) outcome = "removed";
+		return { foreground, journal, workerArtifacts, complete: journal.ok && workerArtifacts.ok };
+	} finally {
+		settleSessionBundleDeletion(options.agentDir, reservation, outcome);
 	}
-	const workerArtifacts = await removePath(workerArtifactsPath);
-	return { foreground, journal, workerArtifacts, complete: journal.ok && workerArtifacts.ok };
 }

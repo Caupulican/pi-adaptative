@@ -2,7 +2,6 @@ import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node
 import { readdir, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
-	orchestrationSessionDeletionFile,
 	orchestrationSessionDir,
 	orchestrationSessionsDir,
 	sessionRootMailboxFile,
@@ -13,7 +12,10 @@ import { SessionRootMailbox, sessionRootMailboxHasMandatoryReply } from "./deleg
 import { WorkerAgentMailbox, workerMailboxHasOpenObligation } from "./delegation/worker-agent-control.ts";
 import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "./delegation/worker-mailbox-record.ts";
-import { releaseSessionBundleDeletion } from "./orchestration/session-bundle-lifecycle.ts";
+import {
+	hasPendingSessionBundleRetention,
+	settleSessionBundleDeletion,
+} from "./orchestration/session-bundle-lifecycle.ts";
 import { listEntries } from "./process-matrix/store.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
 
@@ -398,39 +400,55 @@ export async function sweepSessionBundles(
 			try {
 				const parentSessionId = recoverParentSessionId(agentDir, name);
 				if (!parentSessionId || protectedIds.has(parentSessionId)) continue;
+				const resumingDeletion = hasPendingSessionBundleRetention(agentDir, parentSessionId);
 				const sessionMtimeMs = latestMtimeMs(transcripts.get(parentSessionId) ?? []);
-				if (sessionMtimeMs !== undefined && now - sessionMtimeMs <= SESSION_BUNDLE_RESUMABLE_MAX_AGE_MS) continue;
+				if (
+					!resumingDeletion &&
+					sessionMtimeMs !== undefined &&
+					now - sessionMtimeMs <= SESSION_BUNDLE_RESUMABLE_MAX_AGE_MS
+				)
+					continue;
 				const bundleDir = join(root, name);
 				const walk = walkBundle(bundleDir);
 				if (!walk.complete) continue;
 				const quietMs = now - walk.newestMtimeMs;
-				if (quietMs <= SESSION_BUNDLE_QUIET_FLOOR_MS) continue;
-				if (sessionMtimeMs !== undefined && quietMs <= SESSION_BUNDLE_RESUMABLE_MAX_AGE_MS) continue;
-
-				const hadTombstone = existsSync(orchestrationSessionDeletionFile(agentDir, parentSessionId));
-				// The tombstone excludes new worker contexts for this session while the checks and removal run.
-				if (!WorkerConversationStore.reserveBundleDeletion(agentDir, parentSessionId)) continue;
-				if (bundleOwesMailboxWork(agentDir, parentSessionId, bundleDir)) {
-					// Obligations older than the retention age can never be answered: settle them, then re-check.
-					// Only when every one of them expires: a bundle that keeps a younger or unsettleable obligation
-					// is refused untouched, because settling part of it would only postpone its removal.
-					if (!everyOpenObligationExpires(agentDir, parentSessionId, bundleDir, now)) {
-						if (!hadTombstone) releaseSessionBundleDeletion(agentDir, parentSessionId);
-						continue;
-					}
-					const settled = settleExpiredObligations(agentDir, parentSessionId, name, bundleDir, now, report);
-					result.expiredObligations += settled;
-					if (settled === 0 || bundleOwesMailboxWork(agentDir, parentSessionId, bundleDir)) {
-						if (!hadTombstone) releaseSessionBundleDeletion(agentDir, parentSessionId);
-						continue;
-					}
-				}
-				await rm(bundleDir, { recursive: true, force: true });
-				if (existsSync(bundleDir)) {
-					report(`session bundle ${name} was only partly removed; it stays reserved for the next startup`);
+				if (!resumingDeletion && quietMs <= SESSION_BUNDLE_QUIET_FLOOR_MS) continue;
+				if (!resumingDeletion && sessionMtimeMs !== undefined && quietMs <= SESSION_BUNDLE_RESUMABLE_MAX_AGE_MS)
 					continue;
+
+				// The tombstone excludes new worker contexts for this session while the checks and removal run.
+				const reservation = WorkerConversationStore.reserveBundleDeletion(
+					agentDir,
+					parentSessionId,
+					"retention",
+					resumingDeletion,
+				);
+				if (!reservation) continue;
+				let outcome: "removed" | "deferred" | "retained" = "retained";
+				try {
+					if (bundleOwesMailboxWork(agentDir, parentSessionId, bundleDir)) {
+						// Obligations older than the retention age can never be answered: settle them, then re-check.
+						// Only when every one of them expires: a bundle that keeps a younger or unsettleable obligation
+						// is refused untouched, because settling part of it would only postpone its removal.
+						if (!everyOpenObligationExpires(agentDir, parentSessionId, bundleDir, now)) {
+							outcome = "deferred";
+							continue;
+						}
+						const settled = settleExpiredObligations(agentDir, parentSessionId, name, bundleDir, now, report);
+						result.expiredObligations += settled;
+						if (settled === 0 || bundleOwesMailboxWork(agentDir, parentSessionId, bundleDir)) {
+							continue;
+						}
+					}
+					await rm(bundleDir, { recursive: true, force: true });
+					if (existsSync(bundleDir)) {
+						report(`session bundle ${name} was only partly removed; it stays reserved for the next startup`);
+						continue;
+					}
+					outcome = "removed";
+				} finally {
+					settleSessionBundleDeletion(agentDir, reservation, outcome);
 				}
-				releaseSessionBundleDeletion(agentDir, parentSessionId);
 				result.removed++;
 				result.removedBytes += walk.bytes;
 			} catch (error) {
