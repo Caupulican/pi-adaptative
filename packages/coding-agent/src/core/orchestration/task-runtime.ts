@@ -32,13 +32,12 @@ import {
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationActorKind,
 	type OrchestrationDispatchRequest,
-	type OrchestrationEvent,
 	type OrchestrationModelBinding,
 	type TaskContract,
 	toJsonObject,
 	type WorkerResultContract,
 } from "./contracts.ts";
-import { type OrchestrationEventStore, OrchestrationSnapshotRequiredError } from "./event-store.ts";
+import type { OrchestrationEventStore } from "./event-store.ts";
 import {
 	approvalFromPayload,
 	assertAcceptanceCriteria,
@@ -50,7 +49,6 @@ import {
 	dispatchIdentifierArray,
 	executionGrantFromValue,
 	MAX_DATE_EPOCH_MS,
-	projectionFromSnapshot,
 	retryStateFromValue,
 	taskFromValue,
 	usageFromPayload,
@@ -67,6 +65,7 @@ import {
 	projectionCapacity,
 	requestedProjectionSlots,
 } from "./task-runtime-projection.ts";
+import { readTaskRuntimeProjection } from "./task-runtime-reader.ts";
 import {
 	activeTaskAttempt,
 	assertAgentNotRetired,
@@ -89,7 +88,6 @@ import {
 	assertVerificationTransition,
 	attemptDispatchReadiness,
 	type ObjectiveCompletionPolicy,
-	projectOrchestrationEvents,
 	reduceOrchestrationEvent,
 	requireActiveObjectiveForAttemptInProjection,
 	type VerificationTransitionInput,
@@ -159,27 +157,8 @@ export class DurableTaskRuntime {
 		this.store = options.store;
 		this.now = options.now ?? (() => Date.now());
 		this.createId = options.createId ?? randomUUID;
-		const snapshot = this.store.readProjectionSnapshot();
-		if (snapshot) {
-			this.state = deepFreeze(projectionFromSnapshot(snapshot.projection, snapshot.throughOrdinal));
-		} else {
-			const events = this.store.readAll();
-			// Compaction may install a baseline between the first snapshot read and readAll(). In that
-			// case readAll() returns only the new tail, which must be applied to that baseline rather
-			// than projected as a standalone history.
-			const snapshotAfterRead = this.store.readProjectionSnapshot();
-			this.state = deepFreeze(
-				snapshotAfterRead
-					? events
-							.filter((event) => event.ordinal > snapshotAfterRead.throughOrdinal)
-							.reduce(
-								reduceOrchestrationEvent,
-								projectionFromSnapshot(snapshotAfterRead.projection, snapshotAfterRead.throughOrdinal),
-							)
-					: projectOrchestrationEvents(events),
-			);
-		}
-		this.refresh();
+		this.state = deepFreeze(readTaskRuntimeProjection(this.store));
+		this.compactCurrentProjection();
 	}
 
 	/**
@@ -1420,21 +1399,7 @@ export class DurableTaskRuntime {
 	}
 
 	private refresh(lockOptions?: Readonly<AtomicFileLockOptions>): void {
-		let events: OrchestrationEvent[];
-		try {
-			events = this.store.readAfter(this.state.lastOrdinal);
-		} catch (error) {
-			if (!(error instanceof OrchestrationSnapshotRequiredError)) throw error;
-			const snapshot = this.store.readProjectionSnapshot();
-			if (!snapshot || snapshot.throughOrdinal < error.throughOrdinal) {
-				throw new DurableTaskRuntimeError("Required orchestration projection snapshot is unavailable.");
-			}
-			this.state = deepFreeze(projectionFromSnapshot(snapshot.projection, snapshot.throughOrdinal));
-			events = this.store.readAfter(this.state.lastOrdinal);
-		}
-		for (const event of events) {
-			this.state = deepFreeze(reduceOrchestrationEvent(this.state, event));
-		}
+		this.state = deepFreeze(readTaskRuntimeProjection(this.store, this.state));
 		this.compactCurrentProjection(lockOptions);
 	}
 

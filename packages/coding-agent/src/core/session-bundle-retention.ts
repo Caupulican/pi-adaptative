@@ -12,11 +12,15 @@ import { SessionRootMailbox, sessionRootMailboxHasMandatoryReply } from "./deleg
 import { WorkerAgentMailbox, workerMailboxHasOpenObligation } from "./delegation/worker-agent-control.ts";
 import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "./delegation/worker-mailbox-record.ts";
+import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import {
 	hasPendingSessionBundleRetention,
 	type SessionBundleDeletionReservation,
 	settleSessionBundleDeletion,
+	withSessionBundleRetention,
 } from "./orchestration/session-bundle-lifecycle.ts";
+import { readTaskRuntimeProjection } from "./orchestration/task-runtime-reader.ts";
+import { workerReceiptPublicationPending } from "./orchestration/worker-receipt-publication.ts";
 import { listEntries } from "./process-matrix/store.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
 
@@ -32,7 +36,8 @@ import { isPlainRecord } from "./util/value-guards.ts";
  *   {@link SESSION_BUNDLE_RESUMABLE_MAX_AGE_MS} (a paused session that can still be resumed keeps its
  *   persistent-worker context for that long);
  * - `WorkerConversationStore.reserveBundleDeletion` (fail-closed: live claim, busy or enrolled
- *   specialist context, unreadable transcript) accepts, and no worker or session-root mailbox owes work.
+ *   specialist context, unreadable transcript) accepts, and no worker or session-root mailbox owes work;
+ * - no durable usage or accepted-worker receipt is waiting for parent delivery.
  *
  * An obligation older than {@link SESSION_BUNDLE_MAX_AGE_MS} can never be answered, because the session that
  * owed it is long gone. Before a bundle is refused for one, it is settled as failed with
@@ -430,6 +435,24 @@ export async function sweepSessionBundles(
 				if (!reservation) continue;
 				let outcome: "removed" | "deferred" | "retained" = "retained";
 				try {
+					// Refuse before any expiry writes. Unknown evidence is also a deferral: a fresh
+					// tombstone must not prevent the session from resuming to deliver its receipts.
+					outcome = "deferred";
+					const pendingReceipts = withSessionBundleRetention(agentDir, parentSessionId, reservation, () => {
+						const state = readTaskRuntimeProjection(
+							new OrchestrationEventStore({ agentDir, sessionId: parentSessionId }),
+						);
+						return Object.values(state.attempts).some(
+							(attempt) =>
+								Object.keys(attempt.usageReceipts ?? {}).length > 0 ||
+								workerReceiptPublicationPending(state, attempt),
+						);
+					});
+					if (pendingReceipts) {
+						report(`session bundle ${name} retained: worker receipts await parent delivery`);
+						continue;
+					}
+					outcome = "retained";
 					if (bundleOwesMailboxWork(agentDir, parentSessionId, bundleDir)) {
 						// Obligations older than the retention age can never be answered: settle them, then re-check.
 						// Only when every one of them expires: a bundle that keeps a younger or unsettleable obligation

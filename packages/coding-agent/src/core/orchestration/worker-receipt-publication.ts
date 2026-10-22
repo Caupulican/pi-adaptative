@@ -113,11 +113,8 @@ export function decodeWorkerReceiptAcknowledgement(value: unknown): WorkerReceip
 	};
 }
 
-/** Only this resolver authorizes publication; a generic reviewed stamp never supplies acceptance. */
-export function workerReceiptCandidate(
-	state: Pick<TaskRuntimeProjection, "tasks" | "attempts">,
-	attempt: AttemptRuntimeState,
-): WorkerReceiptCandidate | undefined {
+/** Shared immutable requirements for delivery and retention; no workflow status supplies acceptance. */
+function unverifiedWorkerReceiptCandidate(attempt: AttemptRuntimeState): WorkerReceiptCandidate | undefined {
 	const result = attempt.result;
 	const evidence = result?.receipts;
 	const origin = attempt.dispatch.receiptOrigin;
@@ -130,8 +127,6 @@ export function workerReceiptCandidate(
 	if (required !== (result.nextAction === "independent_verification_required")) return undefined;
 	const reviewRequired = evidence.acceptance.disposition === "parent_review";
 	if (result.status !== (required || reviewRequired ? "partial" : "completed")) return undefined;
-	const verification = required ? attemptVerification(state, attempt) : undefined;
-	if (required && verification?.verdict !== "accepted") return undefined;
 	return {
 		parentReviewRequired: reviewRequired,
 		publication: {
@@ -143,9 +138,35 @@ export function workerReceiptCandidate(
 			origin,
 			factsDigest: evidence.factsDigest,
 			receipts: evidence.facts,
-			...(verification ? { verifierAttemptId: verification.verifierAttemptId } : {}),
 		},
 	};
+}
+
+/** Only this resolver authorizes publication; a generic reviewed stamp never supplies acceptance. */
+export function workerReceiptCandidate(
+	state: Pick<TaskRuntimeProjection, "tasks" | "attempts">,
+	attempt: AttemptRuntimeState,
+): WorkerReceiptCandidate | undefined {
+	const candidate = unverifiedWorkerReceiptCandidate(attempt);
+	if (!candidate) return undefined;
+	if (attempt.result?.nextAction !== "independent_verification_required") return candidate;
+	const verification = attemptVerification(state, attempt);
+	if (verification?.verdict !== "accepted") return undefined;
+	return {
+		...candidate,
+		publication: { ...candidate.publication, verifierAttemptId: verification.verifierAttemptId },
+	};
+}
+
+/** Age cannot retire custody while review, verification or physical delivery remains outstanding. */
+export function workerReceiptPublicationPending(
+	state: Pick<TaskRuntimeProjection, "tasks" | "attempts">,
+	attempt: AttemptRuntimeState,
+): boolean {
+	if (attempt.receiptAcknowledgement || !unverifiedWorkerReceiptCandidate(attempt)) return false;
+	const verification = attemptVerification(state, attempt);
+	// An exact settled negative verdict is immutable, unlike the task's current workflow status.
+	return !verification || verification.verdict === "accepted";
 }
 
 export function workerReceiptPublicationAllowed(
