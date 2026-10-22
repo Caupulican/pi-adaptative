@@ -1,5 +1,6 @@
 import type { Message } from "@caupulican/pi-ai";
 import { Value } from "typebox/value";
+import { sessionLifecycleToolIdentityKey } from "../../kernel/session/lifecycle-ledger.ts";
 import { executionContextScope } from "../../kernel/tool-invocation-binding.ts";
 import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
 import type { WorkerCommandReceipt } from "../autonomy/contracts.ts";
@@ -616,13 +617,16 @@ export class WorkerRecoveryCoordinator {
 			if (message.role === "assistant") {
 				for (const content of message.content) {
 					if (content.type !== "toolCall") continue;
-					if (calls.has(content.id)) return undefined;
-					calls.set(content.id, { name: content.name, arguments: content.arguments, entryId });
+					const key = sessionLifecycleToolIdentityKey(undefined, entryId, content.id);
+					if (calls.has(key)) return undefined;
+					calls.set(key, { name: content.name, arguments: content.arguments, entryId });
 				}
 			} else if (message.role === "toolResult") {
-				const call = calls.get(message.toolCallId);
-				if (!call || results.has(message.toolCallId) || call.name !== message.toolName) return undefined;
 				const binding = transcript.toolResults.find((result) => result.resultMessageEntryId === entryId);
+				if (!binding?.assistantMessageEntryId) return undefined;
+				const key = sessionLifecycleToolIdentityKey(undefined, binding.assistantMessageEntryId, message.toolCallId);
+				const call = calls.get(key);
+				if (!call || results.has(key) || call.name !== message.toolName) return undefined;
 				const invocation = retainedToolInvocation(message.details);
 				if (
 					!binding?.requestId ||
@@ -637,7 +641,7 @@ export class WorkerRecoveryCoordinator {
 					return undefined;
 				for (const failure of invocation.postprocessingFailures)
 					blockers.add(`recovered tool ${failure} failure for provider request ${invocation.requestId}`);
-				results.add(message.toolCallId);
+				results.add(key);
 				if (call.name === SUBMIT_REPORT_TOOL_NAME) {
 					if (invocation.operationStatus !== "success") return undefined;
 					if (!Value.Check(submitReportParameters, call.arguments)) return undefined;
