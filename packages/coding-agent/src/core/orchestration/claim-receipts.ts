@@ -7,7 +7,8 @@ export interface DeliveryReceipt {
 }
 
 export interface ClaimReceipts {
-	readonly tests: { readonly passed: number; readonly failed: number; readonly lastPassed: boolean | undefined };
+	/** `lastPassed` is absent, never `undefined`, when no check ran: receipt facts are persisted as JSON. */
+	readonly tests: { readonly passed: number; readonly failed: number; readonly lastPassed?: boolean | undefined };
 	readonly commits: DeliveryReceipt;
 	readonly pushes: DeliveryReceipt;
 	readonly publishes: DeliveryReceipt;
@@ -78,7 +79,11 @@ export function decodeClaimReceipts(
 		filesChanged.push(descriptor.value);
 	}
 	return {
-		tests: { passed: tests.passed, failed: tests.failed, lastPassed: tests.lastPassed },
+		tests: {
+			passed: tests.passed,
+			failed: tests.failed,
+			...(tests.lastPassed === undefined ? {} : { lastPassed: tests.lastPassed }),
+		},
 		commits,
 		pushes,
 		publishes,
