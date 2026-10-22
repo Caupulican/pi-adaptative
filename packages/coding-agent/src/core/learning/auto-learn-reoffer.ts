@@ -38,6 +38,8 @@ export interface AutoLearnReofferPorts {
 	cwdHash: string;
 	/** The current (main) session. */
 	sessionId: string;
+	/** A scan belongs to one session; losing that owner stops admission of further records. */
+	isCurrent?(): boolean;
 	/** Same eligibility gate as a fresh run (`autoLearn.enabled`); when false, records stay pending. */
 	eligible: boolean;
 	/** A held record at least this old counts as expiring (the host names its handoff retention minus a margin). */
@@ -147,6 +149,7 @@ export async function reofferAutoLearnProposals(ports: AutoLearnReofferPorts): P
 
 	let offered = 0;
 	for (const { handoffDir, filePath, mtimeMs } of candidates) {
+		if (ports.isCurrent?.() === false) break;
 		const peek = readRecord(filePath);
 		if (!peek || !isPending(peek)) continue;
 		if (!ports.eligible) {

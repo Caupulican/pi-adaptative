@@ -16,6 +16,7 @@ import type { SelectItem } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../../config.ts";
+import type { AgentSession } from "../../core/agent-session.ts";
 import { PI_WORKER_READABLE_FILES_ENV } from "../../core/autonomy/worker-session-private-scope.ts";
 import { PI_OKF_TYPES } from "../../core/context/okf-memory.ts";
 import { readAutoLearnSessionIdFromFile, reportCompletedAutoLearnUsageHelper } from "../../core/cost/session-usage.ts";
@@ -259,6 +260,11 @@ interface AutoLearnDecision {
 interface AutoLearnReservation {
 	runId: string;
 	startedAt: number;
+}
+
+interface AutoLearnOwner {
+	session: AgentSession;
+	sessionId: string;
 }
 
 type AutoLearnReservationResult = { ok: true; reservation: AutoLearnReservation } | { ok: false; reason: string };
@@ -837,19 +843,31 @@ export class AutoLearnController {
 		});
 	}
 
-	private reportCompletedAutoLearnUsage(runId: string, sessionDir: string, sessionId: string, logPath: string): void {
+	private reportCompletedAutoLearnUsage(
+		runId: string,
+		sessionDir: string,
+		sessionId: string,
+		logPath: string,
+		owner: AutoLearnOwner,
+	): boolean {
+		if (owner.session.sessionId !== owner.sessionId) {
+			this.appendAutoLearnLog(logPath, "Auto Learn usage retained: launching session identity changed.");
+			return false;
+		}
 		try {
 			reportCompletedAutoLearnUsageHelper({
 				runId,
 				sessionDir,
 				sessionId,
 				logPath,
-				parentSession: this.deps.getSession(),
+				parentSession: owner.session,
 				appendLog: (p, msg) => this.appendAutoLearnLog(p, msg),
 			});
+			return true;
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.appendAutoLearnLog(logPath, `Auto Learn usage report failed: ${message}`);
+			return false;
 		}
 	}
 
@@ -860,9 +878,21 @@ export class AutoLearnController {
 			sessionDir: string;
 			sessionId: string;
 			logPath: string;
+			owner: AutoLearnOwner;
 		},
 	): void {
-		this.reportCompletedAutoLearnUsage(runId, options.sessionDir, options.sessionId, options.logPath);
+		if (
+			!this.reportCompletedAutoLearnUsage(
+				runId,
+				options.sessionDir,
+				options.sessionId,
+				options.logPath,
+				options.owner,
+			)
+		) {
+			this.updateAutoLearnFooter();
+			return;
+		}
 		const dataDir = this.getAutoLearnDataDir();
 		for (const filePath of options.artifactPaths) removeAutoLearnArtifactPath(filePath, dataDir);
 		this.withAutoLearnStateLock((current) => {
@@ -958,7 +988,7 @@ export class AutoLearnController {
 		run: {
 			runId: string;
 			kind: "auto" | "reflection";
-			launchSessionId: string;
+			owner: AutoLearnOwner;
 			childSessionId: string;
 			sessionDir: string;
 			logPath: string;
@@ -970,7 +1000,7 @@ export class AutoLearnController {
 		const record: AutoLearnHandoffRecord = {
 			version: 1,
 			runId: run.runId,
-			sessionId: run.launchSessionId,
+			sessionId: run.owner.sessionId,
 			childSessionId: run.childSessionId,
 			kind: run.kind,
 			status: "child_failed",
@@ -1002,14 +1032,17 @@ export class AutoLearnController {
 					record.status = "learner_not_pass";
 					record.detail = `learner reported ${set.verdict}; its proposals were not applied`;
 					retainRaw();
-				} else if (this.deps.getSession().sessionId !== run.launchSessionId) {
+				} else if (
+					this.deps.getSession() !== run.owner.session ||
+					run.owner.session.sessionId !== run.owner.sessionId
+				) {
 					record.status = "parent_session_changed";
-					record.detail = `launching session ${run.launchSessionId} is no longer the active session; proposals were not applied and are retained for the next main session's startup`;
+					record.detail = `launching session ${run.owner.sessionId} is no longer the active session; proposals were not applied and are retained for the next main session's startup`;
 					// The whole validated block: a later session re-offers it (auto-learn-reoffer.ts).
 					retainRaw(true);
 				} else {
 					try {
-						record.entries = await this.deps.getSession().applyAutoLearnProposals(set, run.runId);
+						record.entries = await run.owner.session.applyAutoLearnProposals(set, run.runId);
 						record.status = "reported";
 					} catch (error: unknown) {
 						record.status = "apply_failed";
@@ -1024,15 +1057,15 @@ export class AutoLearnController {
 		if (!persisted) this.appendAutoLearnLog(run.logPath, "Auto Learn handoff record could not be persisted.");
 
 		const note = formatAutoLearnHandoffNote(record);
-		void this.deps
-			.getSession()
-			.sendCustomMessage(
-				{ customType: "auto_learn_handoff", content: note, display: false, details: { runId: run.runId } },
-				{ deliverAs: "nextTurn" },
-			)
-			.catch(() => {
-				// The persisted handoff and status line still carry the outcome.
-			});
+		if (run.owner.session.sessionId === run.owner.sessionId)
+			void run.owner.session
+				.sendCustomMessage(
+					{ customType: "auto_learn_handoff", content: note, display: false, details: { runId: run.runId } },
+					{ deliverAs: "nextTurn" },
+				)
+				.catch(() => {
+					// The persisted handoff and status line still carry the outcome.
+				});
 		const applied = record.entries.filter((entry) => entry.outcome === "applied").length;
 		const open = record.entries.length - applied;
 		this.deps.ui.showStatus(
@@ -1044,6 +1077,7 @@ export class AutoLearnController {
 				sessionDir: run.sessionDir,
 				sessionId: run.childSessionId,
 				logPath: run.logPath,
+				owner: run.owner,
 			});
 		} else {
 			this.updateAutoLearnFooter();
@@ -1058,22 +1092,27 @@ export class AutoLearnController {
 	async reofferUnappliedProposals(): Promise<void> {
 		// Proposals belong to a main session: a worker (zero-footprint, read-only stores) never claims them.
 		if (isWorkerSession()) return;
+		const session = this.deps.getSession();
+		const sessionId = session.sessionId;
+		const isCurrent = () => this.deps.getSession() === session && session.sessionId === sessionId;
 		const settings = this.getEffectiveAutoLearnSettings();
 		const result = await reofferAutoLearnProposals({
 			tenantsDir: path.join(this.getAutoLearnDataDir(), "tenants"),
 			handoffDirName: AUTO_LEARN_HANDOFF_DIR,
 			cwdHash: crypto.createHash("sha256").update(this.deps.getSessionManager().getCwd()).digest("hex").slice(0, 8),
-			sessionId: this.deps.getSession().sessionId,
+			sessionId,
+			isCurrent,
 			eligible: settings.enabled,
 			// The handoff retention discards a held record unapplied; warn a day before it does.
 			expiringAfterMs: AUTO_LEARN_HISTORY_RETENTION_MS - 24 * 60 * 60 * 1000,
-			applyProposals: (set, runId) => this.deps.getSession().applyAutoLearnProposals(set, runId),
+			applyProposals: (set, runId) => session.applyAutoLearnProposals(set, runId),
 			persist: (handoffDir, record) => this.persistAutoLearnHandoff(handoffDir, record),
 		});
+		// Receipts stay on disk for their owner; never enqueue old-project work into a replacement session.
+		if (!isCurrent()) return;
 		for (const record of result.finalized) {
 			const applied = record.entries.filter((entry) => entry.outcome === "applied").length;
-			void this.deps
-				.getSession()
+			void session
 				.sendCustomMessage(
 					{
 						customType: "auto_learn_handoff",
@@ -1134,7 +1173,8 @@ export class AutoLearnController {
 		const sessionId = `auto-learn-${kind}-${this.getAutoLearnTenantId()}-${runId}`;
 		fs.mkdirSync(sessionDir, { recursive: true });
 		const sourceSessionFile = this.deps.getSessionManager().getSessionFile();
-		const launchSessionId = this.deps.getSession().sessionId;
+		const session = this.deps.getSession();
+		const owner: AutoLearnOwner = { session, sessionId: session.sessionId };
 		const prompt = this.buildAutoLearnPrompt(reason, settings, {
 			kind,
 			turnDigest: options.turnDigest,
@@ -1236,7 +1276,7 @@ export class AutoLearnController {
 				{
 					runId: reservation.runId,
 					kind,
-					launchSessionId,
+					owner,
 					childSessionId: sessionId,
 					sessionDir,
 					logPath,
