@@ -273,11 +273,12 @@ function writeRecord(
 			previous !== undefined && JSON.stringify(payload) === JSON.stringify({ version: 1, inputs: previous.inputs });
 		const held = recorded.flatMap((input) => input.images?.map((image) => image.sequence) ?? []);
 		if (
-			previousOwnership === "owned" &&
-			((recorded.length === 0 && previousKey === undefined) ||
-				(unchanged &&
-					(held.length === 0 ||
-						(previous.pinClaim !== undefined && imageStore?.pin(held, previous.pinClaim).length === 0))))
+			// An empty queue over an absent record says nothing new, whoever owns that position.
+			(recorded.length === 0 && previousKey === undefined) ||
+			(previousOwnership === "owned" &&
+				unchanged &&
+				(held.length === 0 ||
+					(previous.pinClaim !== undefined && imageStore?.pin(held, previous.pinClaim).length === 0)))
 		) {
 			if (hasPins) {
 				hasPins = false;
