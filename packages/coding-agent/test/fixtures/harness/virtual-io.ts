@@ -206,6 +206,37 @@ const WATCH_CHANGE_OPERATIONS: ReadonlySet<string> = new Set([
 	"utimes",
 ]);
 
+interface OpenMode {
+	create: boolean;
+	exclusive: boolean;
+	truncate: boolean;
+	append: boolean;
+	writable: boolean;
+}
+
+/** Decode both Node open flag spellings: the string forms and the numeric `fs.constants` bit masks. */
+function decodeOpenFlags(flags: unknown): OpenMode {
+	if (typeof flags === "string") {
+		return {
+			create: flags.startsWith("w") || flags.startsWith("a"),
+			exclusive: flags.includes("x"),
+			truncate: flags.startsWith("w"),
+			append: flags.startsWith("a"),
+			writable: flags.includes("+") || flags.startsWith("w") || flags.startsWith("a"),
+		};
+	}
+	if (typeof flags !== "number" || !Number.isInteger(flags))
+		throw new Error("Virtual open requires string or integer flags");
+	const { O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND } = fs.constants;
+	return {
+		create: (flags & O_CREAT) !== 0,
+		exclusive: (flags & O_EXCL) !== 0,
+		truncate: (flags & O_TRUNC) !== 0,
+		append: (flags & O_APPEND) !== 0,
+		writable: (flags & (O_WRONLY | O_RDWR)) !== 0,
+	};
+}
+
 /** All fixture and production-store bytes live here. Unimplemented operations fail, never fall through. */
 export class VirtualFileSystem {
 	readonly operations: IoOperation[] = [];
@@ -878,19 +909,19 @@ export class VirtualFileSystem {
 
 	openSync(value: unknown, flags: unknown): number {
 		const path = this.path(value);
-		if (typeof flags !== "string") throw new Error("Virtual open requires explicit string flags");
-		this.fault({ kind: "open", path, flags }, "before");
-		if (flags.includes("x") && this.nodes.has(path)) throw this.failure("open", "EEXIST", path, "open");
-		if (flags.startsWith("w")) this.writeFileSync(path, "");
-		else if (flags.startsWith("a") && !this.nodes.has(path)) this.writeFileSync(path, "");
+		const mode = decodeOpenFlags(flags);
+		this.fault({ kind: "open", path, flags: typeof flags === "string" ? flags : String(flags) }, "before");
+		if (mode.exclusive && this.nodes.has(path)) throw this.failure("open", "EEXIST", path, "open");
+		if (mode.truncate && (mode.create || this.nodes.has(path))) this.writeFileSync(path, "");
+		else if (mode.create && !this.nodes.has(path)) this.writeFileSync(path, "");
 		else if (!this.nodes.has(path)) throw this.failure("open", "ENOENT", path, "open");
 		const fd = this.nextDescriptor++;
 		this.descriptors.set(fd, {
 			path,
 			node: this.nodes.get(path)!,
 			position: 0,
-			append: flags.startsWith("a"),
-			writable: flags.includes("+") || flags.startsWith("w") || flags.startsWith("a"),
+			append: mode.append,
+			writable: mode.writable,
 		});
 		return fd;
 	}
