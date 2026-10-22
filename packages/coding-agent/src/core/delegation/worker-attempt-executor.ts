@@ -386,11 +386,14 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	run(): Promise<WorkerAttemptExecutionResult>;
 	/** Logical cancellation may return first; this joins actual admitted inner calls separately. */
 	waitForPhysicalSettlement(): Promise<void>;
+	/** Actual drain evidence, independent of the bounded join's timeout outcome. Closes admission. */
+	whenPhysicallySettled(): Promise<void>;
 } {
 	const physicalSettlements = new Set<Promise<void>>();
 	const settlementTimers = options.settlementTimers ?? SYSTEM_TIMER_PORT;
 	let physicalAdmissionClosed = false;
 	let physicalWait: Promise<void> | undefined;
+	let physicalDrain: Promise<void> | undefined;
 	const trackPhysicalCompletion = <Input, Output>(
 		execute: (input: Input) => Promise<Output>,
 	): ((input: Input) => Promise<Output>) => {
@@ -419,14 +422,19 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	const runIsolatedCompletion = trackPhysicalCompletion((input: IsolatedCompletionOptions) =>
 		options.runIsolatedCompletion(input),
 	);
+	const whenPhysicallySettled = (): Promise<void> => {
+		if (physicalDrain) return physicalDrain;
+		physicalAdmissionClosed = true;
+		physicalDrain = (async () => {
+			while (physicalSettlements.size > 0) await Promise.allSettled([...physicalSettlements]);
+		})();
+		return physicalDrain;
+	};
 	const waitForPhysicalSettlement = (): Promise<void> => {
 		if (physicalWait) return physicalWait;
-		physicalAdmissionClosed = true;
-		const drain = async (): Promise<void> => {
-			while (physicalSettlements.size > 0) await Promise.allSettled([...physicalSettlements]);
-		};
+		const drain = whenPhysicallySettled();
 		if (physicalSettlements.size === 0) {
-			physicalWait = Promise.resolve();
+			physicalWait = drain;
 			return physicalWait;
 		}
 		let watchdogTimer: unknown;
@@ -444,7 +452,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			);
 			// This required join owns the process lifetime even when pending calls are pure promises.
 		});
-		physicalWait = Promise.race([drain(), watchdog]).finally(() => {
+		physicalWait = Promise.race([drain, watchdog]).finally(() => {
 			if (watchdogTimer !== undefined) settlementTimers.clearTimeout(watchdogTimer);
 		});
 		void physicalWait.catch(() => undefined);
@@ -897,6 +905,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		ledger,
 		checkpointUsage,
 		waitForPhysicalSettlement,
+		whenPhysicallySettled,
 		async run(): Promise<WorkerAttemptExecutionResult> {
 			attemptTranscriptStart = options.conversation.getRawTranscript().length;
 			if (ran) throw new Error("A worker attempt executor may run only once.");

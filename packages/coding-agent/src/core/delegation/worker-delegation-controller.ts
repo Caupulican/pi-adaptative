@@ -676,6 +676,9 @@ type InFlightWorkerLedger = {
 export interface WorkerDelegationResourceSnapshot {
 	readonly ingressPromiseCount: number;
 	readonly executionPromiseCount: number;
+	readonly pendingPhysicalCleanups: readonly Readonly<
+		Pick<StartedDelegationAttempt, "attemptId" | "leaseId" | "fencingToken">
+	>[];
 	readonly executingHolds: readonly { readonly agentId: string; readonly count: number }[];
 	readonly inFlightLedgerCount: number;
 	readonly laneAbortControllerCount: number;
@@ -715,7 +718,7 @@ type RetainedWorkerRelease =
 			readonly conversation: WorkerConversation;
 			/** Bookkeeping steps that failed, by label, retried in order before the project release. */
 			readonly failedSteps: Map<string, () => void>;
-			readonly releaseSpecialist: () => void;
+			readonly releaseExecutionResources: () => void;
 	  }
 	| { readonly kind: "project"; readonly agentId: string };
 
@@ -732,6 +735,11 @@ export class WorkerDelegationController {
 	private readonly workerAbort = new AbortController();
 	/** Actual admitted continuations and execution promises, independent of durable lane status. */
 	private readonly workerCompletions = new Map<Promise<unknown>, "ingress" | "execution">();
+	/** Timed-out physical calls retain ownership without making shutdown wait indefinitely. */
+	private readonly pendingPhysicalCleanups = new Set<
+		Readonly<Pick<StartedDelegationAttempt, "attemptId" | "leaseId" | "fencingToken">>
+	>();
+	private physicalCleanupClosed = false;
 	private readonly shutdownErrors = new Set<unknown>();
 	private shutdownCompletion: Promise<void> | undefined;
 	private readonly directories = new WorkerDirectoryAdmission();
@@ -1028,7 +1036,7 @@ export class WorkerDelegationController {
 			release.failedSteps.delete(label);
 		}
 		this.releaseSettledProjectContext(release.agentId, release.conversation, true);
-		release.releaseSpecialist();
+		release.releaseExecutionResources();
 		return "released";
 	}
 
@@ -1143,6 +1151,7 @@ export class WorkerDelegationController {
 		return {
 			ingressPromiseCount: completions.filter((kind) => kind === "ingress").length,
 			executionPromiseCount: completions.filter((kind) => kind === "execution").length,
+			pendingPhysicalCleanups: [...this.pendingPhysicalCleanups],
 			executingHolds: [...this.executingSpecialistIds].map(([agentId, count]) => ({ agentId, count })),
 			inFlightLedgerCount: this.inFlightLedgers.size,
 			laneAbortControllerCount: this.laneAbortControllers.size,
@@ -1358,11 +1367,25 @@ export class WorkerDelegationController {
 			this.joinWorkerCompletions(),
 			this.scheduler.waitForShutdown(),
 			this.settleLaneReleases(),
-		]).then((results) => {
+		]).then(async (results) => {
 			for (const result of results) {
 				if (result.status === "rejected") this.shutdownErrors.add(result.reason);
 			}
-			// Every execution has joined: a retained hold or claim is released now or reported with its cause, and a
+			// Close late-cleanup admission in the same turn that observes the final empty set.
+			// Any physical completion admitted earlier has registered its cleanup and is joined here.
+			await this.joinWorkerCompletions(true);
+			if (this.pendingPhysicalCleanups.size > 0) {
+				const identities = [...this.pendingPhysicalCleanups]
+					.slice(0, 8)
+					.map((handle) => `${handle.attemptId}/${handle.leaseId}/fence-${handle.fencingToken}`)
+					.join(", ");
+				this.shutdownErrors.add(
+					new Error(
+						`Worker shutdown retained ${this.pendingPhysicalCleanups.size} physical cleanup(s): ${identities}. Resources remain held; process restart may be required.`,
+					),
+				);
+			}
+			// Every admitted cleanup has joined: a retained hold or claim is released now or reported with its cause, and a
 			// hold that stays keeps its lane's reservation for the dead-owner reaper.
 			this.runTeardownStep("release retained worker resources", () => {
 				const failures = this.retainedReleases.retry({ report: false, lastChance: true });
@@ -1471,6 +1494,36 @@ export class WorkerDelegationController {
 		return completion;
 	}
 
+	private retainPhysicalCleanup(
+		handle: Pick<StartedDelegationAttempt, "attemptId" | "leaseId" | "fencingToken">,
+		settled: Promise<void>,
+		cleanup: () => Promise<void>,
+	): void {
+		const identity = Object.freeze({
+			attemptId: handle.attemptId,
+			leaseId: handle.leaseId,
+			fencingToken: handle.fencingToken,
+		});
+		this.pendingPhysicalCleanups.add(identity);
+		void settled.then(
+			() => {
+				// Finalized owners no longer support cleanup. Keep the exact hold and failed-shutdown evidence.
+				if (this.physicalCleanupClosed) return;
+				const completion = Promise.withResolvers<void>();
+				this.retainWorkerCompletion(completion.promise, true);
+				this.pendingPhysicalCleanups.delete(identity);
+				// Registration precedes cleanup, which may synchronously trigger disposal through observers.
+				void cleanup().then(completion.resolve, completion.reject);
+			},
+			(error: unknown) => {
+				this.shutdownErrors.add(error);
+				this.safeWarn(
+					`Worker ${identity.attemptId} physical cleanup evidence failed: ${releaseFailureCause(error)}`,
+				);
+			},
+		);
+	}
+
 	private runAdmittedWorker<T>(run: () => Promise<T>, aborted: () => T, signal?: AbortSignal): Promise<T> {
 		// Register before invoking admission: onStarted or another synchronous host callback may
 		// initiate disposal before the async method returns its promise to this caller.
@@ -1505,7 +1558,7 @@ export class WorkerDelegationController {
 
 	private unsubscribeRuntimeRecovery: (() => void) | undefined;
 
-	private async joinWorkerCompletions(): Promise<void> {
+	private async joinWorkerCompletions(finalizePhysicalCleanup = false): Promise<void> {
 		// Settlements may finish an already-admitted start's cleanup. Await that work's actual promise;
 		// neither durable terminals nor absence from the scheduler prove the resource owner has ended.
 		while (this.workerCompletions.size > 0) {
@@ -1514,6 +1567,7 @@ export class WorkerDelegationController {
 				if (result.status === "rejected") this.shutdownErrors.add(result.reason);
 			}
 		}
+		if (finalizePhysicalCleanup) this.physicalCleanupClosed = true;
 	}
 
 	private getWorkerLifecycle(): WorkerLifecycle {
@@ -4530,6 +4584,7 @@ export class WorkerDelegationController {
 				(record) => {
 					preparedRecord = record;
 				},
+				() => runtimeLease.release(),
 				onStarted,
 				existingRecord,
 				preparedAdmission,
@@ -4537,7 +4592,7 @@ export class WorkerDelegationController {
 			);
 			if (outcome.started && outcome.completion) {
 				executionOwnsLease = true;
-				return { ...outcome, completion: outcome.completion.finally(() => runtimeLease.release()) };
+				return outcome;
 			}
 			return outcome;
 		} catch (error) {
@@ -4558,6 +4613,7 @@ export class WorkerDelegationController {
 	private prepareAndRunWorker(
 		request: WorkerDelegationRequest,
 		onPrepared: (record: LaneRecord) => void,
+		releaseExecution: () => void,
 		onStarted?: (record: LaneRecord) => void,
 		existingRecord?: LaneRecord,
 		preparedAdmission?: Extract<WorkerAdmission, { ok: true }>,
@@ -5021,10 +5077,8 @@ export class WorkerDelegationController {
 			},
 		});
 
-		// Registered for the lane's full run so the reload gate waits it out; deregistered in the
-		// finally below no matter how this lane terminates (success, disposal, or a thrown error).
-		// registerInFlightWork is a pure sync map op (cannot throw), so placing it as the last
-		// statement before `try` still guarantees the matching finally always runs.
+		// Registered through physical cleanup so the reload gate also waits for a late completion.
+		// The final release callback is shared with retained cleanup; a bounded timeout cannot release it.
 		const deregisterInFlight = registerInFlightWork(
 			this.deps.getAgentDir(),
 			"lane",
@@ -5119,9 +5173,123 @@ export class WorkerDelegationController {
 		let executor = buildExecutor();
 		// Held for this specialist across the whole execution and released only after the finally has
 		// awaited tool-surface disposal: a terminal record is not evidence that its resources are gone.
-		// Claimed as the last statement before the closure, so its matching finally always runs.
+		// The one cleanup closure owns this hold across both normal and late physical settlement.
 		const cleanupErrors = new Set<unknown>();
 		const releaseSpecialist = this.beginSpecialistExecution(agentId);
+		const releaseExecutionResources = (): void => {
+			releaseSpecialist();
+			deregisterInFlight();
+			releaseExecution();
+		};
+		const completionErrors = new Set<unknown>();
+		let cleanupCompletion: Promise<void> | undefined;
+		const cleanupAfterPhysicalSettlement = (): Promise<void> => {
+			if (cleanupCompletion) return cleanupCompletion;
+			const cleanup = Promise.withResolvers<void>();
+			cleanupCompletion = cleanup.promise;
+			void (async () => {
+				let releaseTransferred = false;
+				this.yieldedCapacityAttemptIds.delete(durableHandle.attemptId);
+				this.yieldedWriteReservations.delete(durableHandle.attemptId);
+				// Bookkeeping steps a retry can repeat: a live owner retains their failure with the hold.
+				const retryable = new Set<unknown>();
+				const failedSteps = new Map<string, () => void>();
+				const runRetryableStep = (label: string, step: () => void): void => {
+					const before = new Set(cleanupErrors);
+					this.runTeardownStep(label, step, cleanupErrors);
+					for (const error of cleanupErrors) {
+						if (before.has(error)) continue;
+						retryable.add(error);
+						failedSteps.set(label, step);
+					}
+				};
+				runRetryableStep("end worker write overlap", () => this.writeOverlaps.end(startedRecord.laneId));
+				this.inFlightLedgers.delete(startedRecord.laneId);
+				this.laneAbortControllers.delete(startedRecord.laneId);
+				runRetryableStep("clear worker lane halt", () => this.agentControl.clearLaneHalt(startedRecord.laneId));
+				let toolsReleased = false;
+				try {
+					await toolSurface.dispose();
+					toolsReleased = true;
+				} catch (error) {
+					cleanupErrors.add(error);
+					this.safeWarn(
+						`Worker mutation payload cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				const shuttingDown = this.deps.isDisposed() || this.workerAbort.signal.aborted;
+				// A child may still write while tool disposal waits for its physical close. Keep its
+				// fenced reservation until that release succeeds, including when shutdown fails. Once
+				// the run is physically settled, a failed durable release is owned and retried by the
+				// reservation coordinator, so it does not hold the specialist or its project claim. A release
+				// that fails while the owner shuts down is not retried by anyone: it keeps all three.
+				if (toolsReleased) {
+					this.runTeardownStep(
+						"release worker write reservation",
+						() =>
+							this.writeReservations.releaseRequired(
+								startedRecord.laneId,
+								durableHandle.attemptId,
+								durableHandle.fencingToken,
+								shuttingDown,
+							),
+						cleanupErrors,
+					);
+				}
+				// A failed synchronous cancellation publication must remain required cleanup even
+				// when shutdown has already stopped the terminal recovery owner.
+				runRetryableStep("settle cancelled worker steers", () => {
+					const terminal = projectWorkerAttemptLaneRecord(
+						lifecycle.getTaskRuntimeSnapshot(),
+						durableHandle.attemptId,
+					);
+					if (terminal) this.agentControl.settleCancelledWorkerSteers(terminal);
+				});
+				// Failed cleanup leaves resource ownership unresolved. Keep both the local execution
+				// hold and the durable project claim until that ownership can be resolved.
+				if (cleanupErrors.size === 0) {
+					try {
+						this.releaseSettledProjectContext(agentId, conversation, true);
+					} catch (error) {
+						cleanupErrors.add(error);
+						retryable.add(error);
+						// A live owner reports the retained release below; shutdown reports the failure itself.
+						if (shuttingDown)
+							this.safeWarn(`Failed to release worker project context: ${releaseFailureCause(error)}`);
+					}
+				}
+				if (cleanupErrors.size > 0 && !shuttingDown) {
+					const failures = [...cleanupErrors];
+					const cause = failures.map(releaseFailureCause).join("; ");
+					if (failures.every((error) => retryable.has(error)) && !this.retainedReleases.closed) {
+						// Live and repeatable: the hold and the claim are retained, not stranded. The retry owner
+						// resumes from the failed steps and wakes everything waiting on this specialist when it succeeds.
+						releaseTransferred = true;
+						this.retainedReleases.retain(
+							`execution:${durableHandle.attemptId}`,
+							{ kind: "execution", agentId, conversation, failedSteps, releaseExecutionResources },
+							failures.length === 1 ? failures[0] : new AggregateError(failures, cause),
+						);
+						this.safeWarn(`Worker ${agentId} resource release failed; retrying: ${cause}`);
+						cleanupErrors.clear();
+					} else {
+						// Nothing can repeat this release (the tool surface's disposal, a fenced reservation): the
+						// hold stays until shutdown, and a refused start names the cause instead of a running worker.
+						this.abandonedReleaseCauses.set(agentId, cause);
+					}
+				}
+				// Notification failures remain reportable but cannot reacquire released resources or
+				// strand runtime admission. A retained release owns the complete final-release callback.
+				const resourcesReleased = cleanupErrors.size === 0 && !releaseTransferred;
+				if (resourcesReleased) releaseSpecialist();
+				this.runTeardownStep("signal worker cleanup", () => this.agentControl.signalStateChanged(), cleanupErrors);
+				if (cleanupErrors.size === 0 && !this.deps.isDisposed() && !this.workerAbort.signal.aborted)
+					this.runTeardownStep("wake worker scheduler", () => this.scheduler.drain(true), cleanupErrors);
+				if (resourcesReleased)
+					this.runTeardownStep("release worker execution resources", releaseExecutionResources, cleanupErrors);
+			})().then(cleanup.resolve, cleanup.reject);
+			return cleanup.promise;
+		};
 		const completion = (async (): Promise<WorkerDelegationRunOutcome> => {
 			try {
 				// Register before the first execution await: disposal sees the live mutable ledger.
@@ -5567,119 +5735,36 @@ export class WorkerDelegationController {
 					await executor.waitForPhysicalSettlement();
 					physicalSettled = true;
 				} catch (error) {
-					cleanupErrors.add(error);
+					// The failed bounded join remains an execution failure even if physical cleanup later succeeds.
+					completionErrors.add(error);
 					this.safeWarn(
 						`Worker inner completion cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
 					);
-				}
-				// A logical timeout/cancellation is not physical release. Keep the live tool surface,
-				// fenced leases, project claim, specialist hold and reload blocker when joining fails.
-				if (physicalSettled) {
-					this.yieldedCapacityAttemptIds.delete(durableHandle.attemptId);
-					this.yieldedWriteReservations.delete(durableHandle.attemptId);
-					// Bookkeeping steps a retry can repeat: a live owner retains their failure with the hold.
-					const retryable = new Set<unknown>();
-					const failedSteps = new Map<string, () => void>();
-					const runRetryableStep = (label: string, step: () => void): void => {
-						const before = new Set(cleanupErrors);
-						this.runTeardownStep(label, step, cleanupErrors);
-						for (const error of cleanupErrors) {
-							if (before.has(error)) continue;
-							retryable.add(error);
-							failedSteps.set(label, step);
-						}
-					};
-					runRetryableStep("end worker write overlap", () => this.writeOverlaps.end(startedRecord.laneId));
-					this.inFlightLedgers.delete(startedRecord.laneId);
-					this.laneAbortControllers.delete(startedRecord.laneId);
-					runRetryableStep("clear worker lane halt", () => this.agentControl.clearLaneHalt(startedRecord.laneId));
-					let toolsReleased = false;
-					try {
-						await toolSurface.dispose();
-						toolsReleased = true;
-					} catch (error) {
-						cleanupErrors.add(error);
-						this.safeWarn(
-							`Worker mutation payload cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-						);
-					}
-					const shuttingDown = this.deps.isDisposed() || this.workerAbort.signal.aborted;
-					// A child may still write while tool disposal waits for its physical close. Keep its
-					// fenced reservation until that release succeeds, including when shutdown fails. Once
-					// the run is physically settled, a failed durable release is owned and retried by the
-					// reservation coordinator, so it does not hold the specialist or its project claim. A release
-					// that fails while the owner shuts down is not retried by anyone: it keeps all three.
-					if (toolsReleased) {
-						this.runTeardownStep(
-							"release worker write reservation",
-							() =>
-								this.writeReservations.releaseRequired(
-									startedRecord.laneId,
-									durableHandle.attemptId,
-									durableHandle.fencingToken,
-									shuttingDown,
-								),
-							cleanupErrors,
-						);
-					}
-					// A failed synchronous cancellation publication must remain required cleanup even
-					// when shutdown has already stopped the terminal recovery owner.
-					runRetryableStep("settle cancelled worker steers", () => {
-						const terminal = projectWorkerAttemptLaneRecord(
-							lifecycle.getTaskRuntimeSnapshot(),
-							durableHandle.attemptId,
-						);
-						if (terminal) this.agentControl.settleCancelledWorkerSteers(terminal);
+					this.retainPhysicalCleanup(durableHandle, executor.whenPhysicallySettled(), async () => {
+						await cleanupAfterPhysicalSettlement();
+						if (cleanupErrors.size > 0)
+							throw new AggregateError([...cleanupErrors], `Worker ${agentId} late resource release failed.`);
 					});
-					// Failed cleanup leaves resource ownership unresolved. Keep both the local execution
-					// hold and the durable project claim until that ownership can be resolved.
-					if (cleanupErrors.size === 0) {
-						try {
-							this.releaseSettledProjectContext(agentId, conversation, true);
-						} catch (error) {
-							cleanupErrors.add(error);
-							retryable.add(error);
-							// A live owner reports the retained release below; shutdown reports the failure itself.
-							if (shuttingDown)
-								this.safeWarn(`Failed to release worker project context: ${releaseFailureCause(error)}`);
-						}
-						if (cleanupErrors.size === 0) releaseSpecialist();
-					}
-					if (cleanupErrors.size > 0 && !shuttingDown) {
-						const failures = [...cleanupErrors];
-						const cause = failures.map(releaseFailureCause).join("; ");
-						if (failures.every((error) => retryable.has(error)) && !this.retainedReleases.closed) {
-							// Live and repeatable: the hold and the claim are retained, not stranded. The retry owner
-							// resumes from the failed steps and wakes everything waiting on this specialist when it succeeds.
-							this.retainedReleases.retain(
-								`execution:${durableHandle.attemptId}`,
-								{ kind: "execution", agentId, conversation, failedSteps, releaseSpecialist },
-								failures.length === 1 ? failures[0] : new AggregateError(failures, cause),
-							);
-							this.safeWarn(`Worker ${agentId} resource release failed; retrying: ${cause}`);
-							cleanupErrors.clear();
-						} else {
-							// Nothing can repeat this release (the tool surface's disposal, a fenced reservation): the
-							// hold stays until shutdown, and a refused start names the cause instead of a running worker.
-							this.abandonedReleaseCauses.set(agentId, cause);
-						}
-					}
 				}
-				this.runTeardownStep("signal worker cleanup", () => this.agentControl.signalStateChanged(), cleanupErrors);
-				if (physicalSettled) this.runTeardownStep("deregister worker execution", deregisterInFlight, cleanupErrors);
-				if (cleanupErrors.size === 0 && !this.deps.isDisposed() && !this.workerAbort.signal.aborted)
-					this.scheduler.drain(true);
+				if (physicalSettled) await cleanupAfterPhysicalSettlement();
+				else
+					this.runTeardownStep(
+						"signal pending worker cleanup",
+						() => this.agentControl.signalStateChanged(),
+						completionErrors,
+					);
+				for (const error of cleanupErrors) completionErrors.add(error);
 			}
 		})().then(
 			(outcome) => {
-				if (cleanupErrors.size > 0)
-					throw new AggregateError([...cleanupErrors], `Worker ${agentId} resource release failed.`);
+				if (completionErrors.size > 0)
+					throw new AggregateError([...completionErrors], `Worker ${agentId} resource release failed.`);
 				return outcome;
 			},
 			(error: unknown) => {
-				if (cleanupErrors.size > 0)
+				if (completionErrors.size > 0)
 					throw new AggregateError(
-						[error, ...cleanupErrors],
+						[error, ...completionErrors],
 						`Worker ${agentId} execution and resource release failed.`,
 					);
 				throw error;
