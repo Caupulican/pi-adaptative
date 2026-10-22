@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { okfMemoryDir } from "../../agent-paths.ts";
 import { formatOkfMemoryDocument, parseOkfMemoryDocument } from "../../context/okf-memory.ts";
 import { hasInvisibleUnicode, scanContextFileThreats } from "../../security/context-threat-scanner.ts";
+import { writeFileAtomic } from "../../util/atomic-file.ts";
+import { MemoryMutationAdmission } from "../memory-mutation-admission.ts";
 import { collectUserPreferenceEntries } from "../user-preference-metadata.ts";
 
 const ARCHIVE_DIR_NAME = "user-preferences";
@@ -67,12 +69,6 @@ function splitArchiveBody(body: string): string[] {
 	return chunks;
 }
 
-async function atomicWrite(path: string, content: string): Promise<void> {
-	const temporaryPath = `${path}.tmp-${process.pid}`;
-	await fs.writeFile(temporaryPath, content, "utf8");
-	await fs.rename(temporaryPath, path);
-}
-
 /**
  * Owns USER.md overflow migration and archived preference mutation. USER.md stays the bounded hot
  * index; canonical overflow content lives in valid OKF documents discovered by the existing memory
@@ -93,10 +89,13 @@ export class UserMemoryArchive {
 		action: UserMemoryAction,
 		budget: number,
 		supersedeNearDuplicate: (existing: string, content: string) => string | null,
+		admission = new MemoryMutationAdmission(),
 	): Promise<UserMemoryMutationResult> {
+		admission.assertPending();
 		// Validate the generated storage boundary before any shard discovery. Otherwise a symlinked
 		// archive directory could redirect a replace/remove before the later index rebuild rejected it.
 		await this.ensureArchiveDir();
+		admission.assertPending();
 		const split = activeUserContent(currentUser);
 		let active = split.active;
 		let archiveChanged = false;
@@ -105,7 +104,7 @@ export class UserMemoryArchive {
 			const supersededActive = supersedeNearDuplicate(active, action.content);
 			if (supersededActive !== null) {
 				active = supersededActive;
-			} else if (await this.supersedeArchivedFact(action.content, supersedeNearDuplicate)) {
+			} else if (await this.supersedeArchivedFact(action.content, supersedeNearDuplicate, admission)) {
 				archiveChanged = true;
 			} else {
 				active = appendLine(active, action.content);
@@ -114,7 +113,7 @@ export class UserMemoryArchive {
 			const replacement = action.action === "replace" ? action.content : "";
 			if (active.includes(action.oldContent)) {
 				active = active.replace(action.oldContent, replacement);
-			} else if (await this.replaceArchivedFact(action.oldContent, replacement)) {
+			} else if (await this.replaceArchivedFact(action.oldContent, replacement, admission)) {
 				archiveChanged = true;
 			} else {
 				throw new Error(`The content to ${action.action} ('oldContent') was not found in the file or its archive.`);
@@ -122,22 +121,24 @@ export class UserMemoryArchive {
 		}
 
 		if (archiveChanged) {
-			await this.rebuildIndex();
+			await this.rebuildIndex(admission);
 			return { userContent: currentUser, archiveChanged: true };
 		}
 
 		const hasArchive = split.managed || (await this.hasArchivedShards());
 		const candidate = `${hasArchive ? USER_ARCHIVE_POINTER : ""}${active}`;
 		if (candidate.length <= budget) {
-			if (hasArchive) await this.rebuildIndex();
+			// An unchanged index is housekeeping; it must not admit the later USER.md mutation.
+			if (hasArchive) await this.rebuildIndex(admission);
+			admission.assertPending();
 			return { userContent: candidate, archiveChanged: false };
 		}
 
 		const body = active.trim();
 		if (!body) throw new Error("USER.md index exceeds its character budget without archivable content.");
 		this.validateArchiveContent(body);
-		await this.archiveBody(body);
-		await this.rebuildIndex();
+		await this.archiveBody(body, admission);
+		await this.rebuildIndex(admission);
 		return { userContent: USER_ARCHIVE_POINTER, archiveChanged: true };
 	}
 
@@ -204,7 +205,7 @@ export class UserMemoryArchive {
 		return (await this.shardFiles()).length > 0;
 	}
 
-	private async archiveBody(body: string): Promise<void> {
+	private async archiveBody(body: string, admission: MemoryMutationAdmission): Promise<void> {
 		await this.ensureArchiveDir();
 		const migrationDigest = createHash("sha256").update(body).digest("hex");
 		const chunks = splitArchiveBody(body);
@@ -212,11 +213,11 @@ export class UserMemoryArchive {
 			const chunk = chunks[index];
 			if (chunk === undefined) continue;
 			const identity = `${migrationDigest}\0${index}`;
-			await this.writeNewShard(chunk, identity);
+			await this.writeNewShard(chunk, identity, admission);
 		}
 	}
 
-	private async writeNewShard(body: string, identity: string): Promise<void> {
+	private async writeNewShard(body: string, identity: string, admission: MemoryMutationAdmission): Promise<void> {
 		const hash = createHash("sha256").update(identity).digest("hex").slice(0, 16);
 		const name = `user-preferences-${hash}.okf.md`;
 		const path = join(this.archiveDir, name);
@@ -230,7 +231,7 @@ export class UserMemoryArchive {
 		}
 
 		const timestamp = new Date().toISOString();
-		await atomicWrite(
+		await writeFileAtomic(
 			path,
 			formatOkfMemoryDocument({
 				type: "User Preference",
@@ -241,11 +242,17 @@ export class UserMemoryArchive {
 				tags: ["user-preferences", "archived"],
 				timestamp,
 			}),
+			{ mode: 0o600, beforeCommit: () => admission.begin() },
 		);
 	}
 
-	private async writeShard(shard: UserPreferenceShard, body: string): Promise<void> {
+	private async writeShard(
+		shard: UserPreferenceShard,
+		body: string,
+		admission: MemoryMutationAdmission,
+	): Promise<void> {
 		if (!body.trim()) {
+			admission.begin();
 			await fs.unlink(shard.path);
 			return;
 		}
@@ -253,7 +260,7 @@ export class UserMemoryArchive {
 		const chunks = splitArchiveBody(body);
 		const first = chunks[0];
 		if (first === undefined) return;
-		await atomicWrite(
+		await writeFileAtomic(
 			shard.path,
 			formatOkfMemoryDocument({
 				type: "User Preference",
@@ -264,44 +271,50 @@ export class UserMemoryArchive {
 				tags: ["user-preferences", "archived"],
 				timestamp: shard.timestamp,
 			}),
+			{ mode: 0o600, beforeCommit: () => admission.begin() },
 		);
 		const mutationDigest = createHash("sha256").update(`${shard.name}\0${body}`).digest("hex");
 		for (let index = 1; index < chunks.length; index++) {
 			const chunk = chunks[index];
-			if (chunk !== undefined) await this.writeNewShard(chunk, `${mutationDigest}\0${index}`);
+			if (chunk !== undefined) await this.writeNewShard(chunk, `${mutationDigest}\0${index}`, admission);
 		}
 	}
 
 	private async supersedeArchivedFact(
 		content: string,
 		supersedeNearDuplicate: (existing: string, content: string) => string | null,
+		admission: MemoryMutationAdmission,
 	): Promise<boolean> {
 		for (const shard of await this.shardFiles()) {
 			const superseded = supersedeNearDuplicate(shard.body, content);
 			if (superseded === null) continue;
-			await this.writeShard(shard, superseded);
+			await this.writeShard(shard, superseded, admission);
 			return true;
 		}
 		return false;
 	}
 
-	private async replaceArchivedFact(oldContent: string, replacement: string): Promise<boolean> {
+	private async replaceArchivedFact(
+		oldContent: string,
+		replacement: string,
+		admission: MemoryMutationAdmission,
+	): Promise<boolean> {
 		for (const shard of await this.shardFiles()) {
 			if (!shard.body.includes(oldContent)) continue;
-			await this.writeShard(shard, shard.body.replace(oldContent, replacement));
+			await this.writeShard(shard, shard.body.replace(oldContent, replacement), admission);
 			return true;
 		}
 		return false;
 	}
 
-	private async rebuildIndex(): Promise<void> {
+	private async rebuildIndex(admission: MemoryMutationAdmission): Promise<void> {
 		await this.ensureArchiveDir();
 		const shards = await this.shardFiles();
 		const body =
 			shards.length === 0
 				? "No archived user preference shards."
 				: shards.map((shard) => `- [${shard.name}](./${shard.name}): ${safeDescription(shard.body)}`).join("\n");
-		await atomicWrite(
+		await writeFileAtomic(
 			this.indexPath,
 			formatOkfMemoryDocument({
 				type: "User Preference",
@@ -311,6 +324,7 @@ export class UserMemoryArchive {
 				body,
 				tags: ["user-preferences", "index"],
 			}),
+			{ mode: 0o600, beforeCommit: () => admission.assertPending() },
 		);
 	}
 }

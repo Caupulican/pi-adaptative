@@ -38,6 +38,7 @@ import {
 	type HistoryToolBackends,
 	memoryFailure,
 } from "../history-tool.ts";
+import { MemoryMutationAdmission } from "../memory-mutation-admission.ts";
 import type { MemoryLifecycleContext } from "../memory-provider.ts";
 import { OkfProjectMemoryStore } from "../okf-project-memory-store.ts";
 import {
@@ -431,8 +432,12 @@ function serializeManagedMemoryState(state: ManagedMemoryState): string {
 	return `${JSON.stringify(state)}\n`;
 }
 
-async function writeManagedMemoryState(statePath: string, state: ManagedMemoryState): Promise<void> {
-	await writeFileAtomic(statePath, serializeManagedMemoryState(state), { mode: 0o600 });
+async function writeManagedMemoryState(
+	statePath: string,
+	state: ManagedMemoryState,
+	beforeCommit?: () => void,
+): Promise<void> {
+	await writeFileAtomic(statePath, serializeManagedMemoryState(state), { mode: 0o600, beforeCommit });
 }
 
 function reconcileManagedMemoryState(
@@ -470,7 +475,11 @@ function storedManagedContent(state: ManagedMemoryState | undefined): string | u
  * authority; the alternative was a session-long lock-out on the harness's own memory. Caller holds
  * the content-file lock. Returns the restored content, or undefined when there was nothing to heal.
  */
-async function healEmptyManagedFile(filePath: string, statePath: string): Promise<string | undefined> {
+async function healEmptyManagedFile(
+	filePath: string,
+	statePath: string,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
 	let currentOnDisk: string;
 	try {
 		currentOnDisk = await fs.readFile(filePath, "utf8");
@@ -486,7 +495,7 @@ async function healEmptyManagedFile(filePath: string, statePath: string): Promis
 	if (stateRead.state.pendingDigest === contentDigest(currentOnDisk)) return undefined;
 	const content = storedManagedContent(stateRead.state);
 	if (!content) return undefined;
-	await writeFileAtomic(filePath, content, { mode: 0o600 });
+	await writeFileAtomic(filePath, content, { mode: 0o600, beforeCommit: () => signal?.throwIfAborted() });
 	return content;
 }
 
@@ -523,6 +532,7 @@ async function commitManagedMemoryContent(
 	statePath: string,
 	managedState: ManagedMemoryState,
 	newContent: string,
+	admission: MemoryMutationAdmission,
 ): Promise<{ metadataPending?: string }> {
 	const newDigest = contentDigest(newContent);
 	const pending: ManagedMemoryState = {
@@ -532,7 +542,7 @@ async function commitManagedMemoryContent(
 		...(managedState.committedContent !== undefined ? { committedContent: managedState.committedContent } : {}),
 	};
 	try {
-		await writeManagedMemoryState(statePath, pending);
+		await writeManagedMemoryState(statePath, pending, () => admission.begin());
 		await writeFileAtomic(filePath, newContent, { mode: 0o600 });
 		await writeManagedMemoryState(statePath, {
 			version: 1,
@@ -1314,10 +1324,12 @@ export class FileStoreProvider implements MemoryProvider {
 		];
 	}
 
-	private async hasExactHotMemoryItem(sourceText: string): Promise<boolean> {
+	private async hasExactHotMemoryItem(sourceText: string, signal?: AbortSignal): Promise<boolean> {
 		for (const file of this.hotMemoryFiles()) {
 			const found = await withFileLock(file.filePath, async () => {
+				signal?.throwIfAborted();
 				const current = await fs.readFile(file.filePath, "utf8");
+				signal?.throwIfAborted();
 				return removeExactHotMemoryItem(current, sourceText) !== undefined;
 			});
 			if (found) return true;
@@ -1328,10 +1340,11 @@ export class FileStoreProvider implements MemoryProvider {
 	/** Removes the exact item from the first hot file that holds it and names that file. */
 	private async removeExactHotMemoryItem(
 		sourceText: string,
+		signal?: AbortSignal,
 	): Promise<{ success: boolean; target?: HotMemoryTarget; error?: string; warning?: string }> {
 		let lastError: string | undefined;
 		for (const file of this.hotMemoryFiles()) {
-			const removed = await this.removeExactHotMemoryItemFrom(file, sourceText);
+			const removed = await this.removeExactHotMemoryItemFrom(file, sourceText, signal);
 			if (removed.success) return { ...removed, target: file.target };
 			// Only "not found here" moves on to the next file; drift or a write failure stops here.
 			if (removed.error !== "Exact hot-memory item was not found") return removed;
@@ -1343,15 +1356,25 @@ export class FileStoreProvider implements MemoryProvider {
 	private async removeExactHotMemoryItemFrom(
 		file: { target: HotMemoryTarget; filePath: string; statePath: string },
 		sourceText: string,
+		signal?: AbortSignal,
 	): Promise<{ success: boolean; error?: string; warning?: string }> {
+		const admission = new MemoryMutationAdmission(signal);
 		try {
 			return await withFileLock(file.filePath, async () => {
+				admission.assertPending();
 				const { currentOnDisk, managedState } = await inspectManagedMemoryFile(file.filePath, file.statePath);
+				admission.assertPending();
 				if (!managedState) return { success: false, error: "Drift detected" };
 
 				const newContent = removeExactHotMemoryItem(currentOnDisk, sourceText);
 				if (newContent === undefined) return { success: false, error: "Exact hot-memory item was not found" };
-				const receipt = await commitManagedMemoryContent(file.filePath, file.statePath, managedState, newContent);
+				const receipt = await commitManagedMemoryContent(
+					file.filePath,
+					file.statePath,
+					managedState,
+					newContent,
+					admission,
+				);
 				if (file.target === "project") this.lastWrittenProjectMemory = newContent;
 				else this.lastWrittenMemory = newContent;
 				const warning = [receipt.metadataPending, this.notifyDurableMemoryChanged()].filter(Boolean).join(" ");
@@ -1379,6 +1402,7 @@ export class FileStoreProvider implements MemoryProvider {
 		requestedEvidence: UserPreferenceEvidenceCitation[];
 		expectedRevision: number | undefined;
 		budget: number;
+		mutationAdmission: MemoryMutationAdmission;
 	}): Promise<
 		| {
 				kind: "applied";
@@ -1402,6 +1426,7 @@ export class FileStoreProvider implements MemoryProvider {
 		// The caller holds the USER.md lock: read the archive as it is NOW, not as this provider last
 		// saw it, so a peer session's archive change cannot make a write match a stale line.
 		await this.refreshArchivedUserLines();
+		input.mutationAdmission.assertPending();
 		// Literal lines: matching and mutation never see the rendered, heading-qualified form.
 		const candidates = [...FileStoreProvider.activePreferenceEntries(currentOnDisk), ...this.archivedUserEntries].map(
 			(entry) => entry.line,
@@ -1516,7 +1541,14 @@ export class FileStoreProvider implements MemoryProvider {
 		// Near-duplicate supersession was resolved above with trailers ignored; the archive applies one exact mutation.
 		let result: Awaited<ReturnType<UserMemoryArchive["apply"]>>;
 		try {
-			result = await this.userArchive.apply(currentOnDisk, mutation, input.budget, () => null);
+			input.mutationAdmission.assertPending();
+			result = await this.userArchive.apply(
+				currentOnDisk,
+				mutation,
+				input.budget,
+				() => null,
+				input.mutationAdmission,
+			);
 		} catch (error) {
 			admission.commit?.({ persisted: false, error: String(error) });
 			throw error;
@@ -1535,7 +1567,7 @@ export class FileStoreProvider implements MemoryProvider {
 		write: StructuredReflectionWrite,
 		signal?: AbortSignal,
 	): Promise<StructuredReflectionApplyResult> {
-		if (write.kind === "okf_organize" && !(await this.hasExactHotMemoryItem(write.sourceText))) {
+		if (write.kind === "okf_organize" && !(await this.hasExactHotMemoryItem(write.sourceText, signal))) {
 			return {
 				applied: false,
 				created: false,
@@ -1573,8 +1605,9 @@ export class FileStoreProvider implements MemoryProvider {
 		}
 		let removed: Awaited<ReturnType<FileStoreProvider["removeExactHotMemoryItem"]>>;
 		try {
+			signal?.throwIfAborted();
 			await this.options.beforeOrganizeHotRemoval?.();
-			removed = await this.removeExactHotMemoryItem(write.sourceText);
+			removed = await this.removeExactHotMemoryItem(write.sourceText, signal);
 		} catch (error) {
 			removed = { success: false, error: String(error) };
 		}
@@ -1639,7 +1672,7 @@ export class FileStoreProvider implements MemoryProvider {
 					HISTORY_TOOL_GUIDELINE,
 				],
 				parameters: memorySchema,
-				execute: async (_toolCallId, params: MemoryParams, _signal, _onUpdate, _execCtx) => {
+				execute: async (_toolCallId, params: MemoryParams, signal, _onUpdate, _execCtx) => {
 					const {
 						action,
 						target: requestedTarget,
@@ -1714,7 +1747,7 @@ export class FileStoreProvider implements MemoryProvider {
 								);
 							}
 							try {
-								const removed = await this.okfStore.remove(type as PiOkfType, title, expectedDigest);
+								const removed = await this.okfStore.remove(type as PiOkfType, title, expectedDigest, signal);
 								const warning = removed.removed ? this.notifyDurableMemoryChanged() : undefined;
 								return {
 									content: [
@@ -1788,15 +1821,18 @@ export class FileStoreProvider implements MemoryProvider {
 						}
 						try {
 							if (this.okfStore === undefined) throw new Error("Memory provider is not initialized.");
-							const stored = await this.okfStore.put({
-								type: type as PiOkfType,
-								title,
-								description,
-								scope,
-								body: content,
-								tags,
-								evidenceRefs,
-							});
+							const stored = await this.okfStore.put(
+								{
+									type: type as PiOkfType,
+									title,
+									description,
+									scope,
+									body: content,
+									tags,
+									evidenceRefs,
+								},
+								signal,
+							);
 							const warning = stored.created ? this.notifyDurableMemoryChanged() : undefined;
 							return {
 								content: [
@@ -1905,6 +1941,7 @@ export class FileStoreProvider implements MemoryProvider {
 					// The admitted USER write's publication boundary: reported once, after the bytes landed
 					// or the write failed, so the learning audit never claims an apply that did not persist.
 					let pendingCommit: ((report: UserPreferenceCommitReport) => void) | undefined;
+					const mutationAdmission = new MemoryMutationAdmission(signal);
 					// A hint, never a reroute: the model decides, the harness names the better target.
 					const projectHint =
 						target === "memory" &&
@@ -1916,7 +1953,8 @@ export class FileStoreProvider implements MemoryProvider {
 
 					try {
 						return await withFileLock(filePath, async () => {
-							const healed = await healEmptyManagedFile(filePath, statePath);
+							mutationAdmission.assertPending();
+							const healed = await healEmptyManagedFile(filePath, statePath, signal);
 							if (healed !== undefined)
 								this.managedNotices.push({
 									target,
@@ -1928,6 +1966,7 @@ export class FileStoreProvider implements MemoryProvider {
 								filePath,
 								statePath,
 							);
+							mutationAdmission.assertPending();
 							if (!managedState) {
 								// Same observed bytes reuse one backup; distinct revisions are preserved for owner review.
 								const backupPath = `${filePath}.bak.sha256-${revision.currentDigest}`;
@@ -1937,7 +1976,10 @@ export class FileStoreProvider implements MemoryProvider {
 										throw new Error(`Drift backup content conflicts at ${backupPath}.`);
 								} catch (error) {
 									if (!isMissingFileError(error)) throw error;
-									await writeFileAtomic(backupPath, currentOnDisk, { mode: 0o600 });
+									await writeFileAtomic(backupPath, currentOnDisk, {
+										mode: 0o600,
+										beforeCommit: () => mutationAdmission.assertPending(),
+									});
 								}
 								return memoryFailure(
 									"Drift detected",
@@ -1945,7 +1987,9 @@ export class FileStoreProvider implements MemoryProvider {
 									{ ...revision, backupPath },
 								);
 							}
-							if (stateChanged) await writeManagedMemoryState(statePath, managedState);
+							if (stateChanged)
+								await writeManagedMemoryState(statePath, managedState, () => mutationAdmission.assertPending());
+							mutationAdmission.assertPending();
 
 							// A peer session's committed write is authoritative. Refresh this provider's prompt
 							// snapshot before applying the caller's mutation to that current content.
@@ -1968,6 +2012,7 @@ export class FileStoreProvider implements MemoryProvider {
 									requestedEvidence: requestedEvidence ?? [],
 									expectedRevision,
 									budget,
+									mutationAdmission,
 								});
 								if (outcome.kind === "refused") return outcome.result;
 								pendingCommit = outcome.commit;
@@ -2021,7 +2066,13 @@ export class FileStoreProvider implements MemoryProvider {
 
 							const receipt =
 								newContent !== currentOnDisk
-									? await commitManagedMemoryContent(filePath, statePath, managedState, newContent)
+									? await commitManagedMemoryContent(
+											filePath,
+											statePath,
+											managedState,
+											newContent,
+											mutationAdmission,
+										)
 									: {};
 
 							if (target === "memory") this.lastWrittenMemory = newContent;

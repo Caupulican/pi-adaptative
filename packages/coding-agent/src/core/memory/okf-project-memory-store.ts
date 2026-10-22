@@ -13,6 +13,7 @@ import { loadOkfMemoryBundle } from "../context/okf-memory-provider.ts";
 import { getDirectoryResourceProfileInfo } from "../settings/settings-rules.ts";
 import { isMissingFileError, withFileLock, writeFileAtomic } from "../util/atomic-file.ts";
 import { readBoundedTextFile } from "../util/bounded-file.ts";
+import { MemoryMutationAdmission } from "./memory-mutation-admission.ts";
 
 const MAX_OKF_DOCUMENT_BYTES = 16_384;
 
@@ -73,7 +74,12 @@ export class OkfProjectMemoryStore {
 		}
 	}
 
-	async put(input: Omit<OkfMemoryDocumentInput, "projectId">): Promise<OkfProjectMemoryPutResult> {
+	async put(
+		input: Omit<OkfMemoryDocumentInput, "projectId">,
+		signal?: AbortSignal,
+	): Promise<OkfProjectMemoryPutResult> {
+		const admission = new MemoryMutationAdmission(signal);
+		admission.assertPending();
 		const errors = validateOkfMemoryDocumentInput(input, { projectOnly: true, requireEvidence: true });
 		if (errors.length > 0) throw new Error(`Invalid OKF record: ${errors.join("; ")}`);
 		const document = formatOkfMemoryDocument({ ...input, projectId: this.projectId });
@@ -81,23 +87,33 @@ export class OkfProjectMemoryStore {
 		const path = this.recordPath(input.type, input.title);
 		this.assertContained(path);
 		return withFileLock(path, async () => {
+			admission.assertPending();
 			this.assertContained(path);
 			try {
 				const existing = await readBoundedTextFile(path, MAX_OKF_DOCUMENT_BYTES, "OKF project record");
+				admission.assertPending();
 				if (existing === document) return { created: false, digest: documentDigest, path };
 				throw new Error("A different structured record already exists for this type and title.");
 			} catch (error) {
 				if (!isMissingFileError(error)) throw error;
 			}
-			await writeFileAtomic(path, document, { mode: 0o600 });
+			await writeFileAtomic(path, document, { mode: 0o600, beforeCommit: () => admission.begin() });
 			return { created: true, digest: documentDigest, path };
 		});
 	}
 
-	async remove(type: PiOkfType, title: string, expectedDigest?: string): Promise<OkfProjectMemoryRemoveResult> {
+	async remove(
+		type: PiOkfType,
+		title: string,
+		expectedDigest?: string,
+		signal?: AbortSignal,
+	): Promise<OkfProjectMemoryRemoveResult> {
+		const admission = new MemoryMutationAdmission(signal);
+		admission.assertPending();
 		const path = this.recordPath(type, title);
 		this.assertContained(path);
 		return withFileLock(path, async () => {
+			admission.assertPending();
 			this.assertContained(path);
 			let existing: string;
 			try {
@@ -109,6 +125,7 @@ export class OkfProjectMemoryStore {
 			if (expectedDigest !== undefined && digest(existing) !== expectedDigest) {
 				throw new Error("OKF record changed after the audited write; refusing removal.");
 			}
+			admission.begin();
 			await fs.unlink(path);
 			return { removed: true };
 		});
