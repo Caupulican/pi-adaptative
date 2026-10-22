@@ -912,7 +912,7 @@ export function sessionContextItems(path: readonly SessionEntry[]): SessionConte
 /**
  * Compute the default session directory for a cwd without creating it.
  * Encodes cwd into a safe directory name under ~/.pi/agent/sessions/; persistence creates the
- * parent only when the first durable response is written.
+ * parent only when the first durable entry is written.
  */
 function getEncodedSessionDirName(cwd: string): string {
 	return `--${encodeURIComponent(resolvePath(cwd))}--`;
@@ -1473,11 +1473,19 @@ async function listSessionsFromDir(
  * handles compaction summaries and follows the path from root to current leaf.
  */
 /**
- * An answer to the owner: the model's reply, or an owner execution (a `!` command, or a toolkit script
- * the harness ran with no model). A session is written to disk once it holds one.
+ * Entries that require physical persistence before publication. Owner input must be durable before its
+ * delivery releases recovery custody, even when the session has no reply yet.
  */
-function isReplyEntry(entry: FileEntry): boolean {
-	return entry.type === "message" && (entry.message.role === "assistant" || entry.message.role === "bashExecution");
+function requiresSessionFile(entry: FileEntry): boolean {
+	if (entry.type === "session") return false;
+	return (
+		(entry.type === "message" &&
+			(entry.ownerInputId !== undefined ||
+				entry.message.role === "assistant" ||
+				entry.message.role === "bashExecution")) ||
+		isSessionLifecycleEntry(entry) ||
+		(entry.type === "custom" && entry.customType === "continuous_chat_work_report")
+	);
 }
 
 export class SessionManager {
@@ -2138,13 +2146,8 @@ export class SessionManager {
 			);
 		}
 
-		const hasReply = this.fileEntries.some(isReplyEntry) || entries.some(isReplyEntry);
-		const forceFlush = entries.some(
-			(entry) =>
-				isSessionLifecycleEntry(entry) ||
-				(entry.type === "custom" && entry.customType === "continuous_chat_work_report"),
-		);
-		const shouldFlush = hasReply || forceFlush || flushBuffered;
+		const shouldFlush =
+			flushBuffered || this.fileEntries.some(requiresSessionFile) || entries.some(requiresSessionFile);
 		// Encoding can invoke extension-owned getters. Prepare the entire initial prefix
 		// before opening the file, then check cancellation at the last pre-write boundary.
 		// Preparation failure is not an uncertain physical write and must remain recoverable.
@@ -3654,9 +3657,9 @@ export class SessionManager {
 		}
 		branched._buildIndex();
 
-		// Only write the file now if it contains a reply. Otherwise defer to _persist(), matching
-		// newSession() and avoiding a duplicate-header write on the first reply.
-		if (this.persist && branched.fileEntries.some(isReplyEntry)) {
+		// Copied owner input and lifecycle evidence retain the same durability rule as an ordinary append.
+		// Empty/non-durable prefixes still defer to _persist(), without a duplicate-header write.
+		if (this.persist && branched.fileEntries.some(requiresSessionFile)) {
 			// Keep the source manager active while cold compacted getters serialize into the copy.
 			branched._rewriteFile();
 			// Reload through the branch owner so every disk-backed getter closes over the new
