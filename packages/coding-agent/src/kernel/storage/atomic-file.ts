@@ -64,6 +64,8 @@ async function renameWithRetry(tmpPath: string, filePath: string, options?: Atom
 export interface AtomicFileLockOptions {
 	/** Borrow an exact active synchronous callback scope; never extends its owning lock's lifetime. */
 	borrowedScope?: SynchronousFileLockScope;
+	/** False locks only in an existing parent; missing directories fail without recreating storage. */
+	createParentDirectories?: boolean;
 	/**
 	 * Bounded retry attempts while waiting for a lock already held elsewhere. Both variants use a
 	 * SHORT, capped backoff (see {@link RETRY_MIN_TIMEOUT_MS}/{@link RETRY_MAX_TIMEOUT_MS}) — these
@@ -344,7 +346,7 @@ export const DEFAULT_FILE_LOCK_RETRY_WINDOW_MS = Array.from({ length: DEFAULT_RE
  * one critical section; callers retain ownership of release ordering and release-error semantics.
  */
 export function acquireFileLockSync(filePath: string, options: AtomicFileLockOptions = {}): () => void {
-	ensureLockDirSync(filePath, options.lockfilePath);
+	if (options.createParentDirectories !== false) ensureLockDirSync(filePath, options.lockfilePath);
 	const attempts = retryCount(options) + 1;
 	const lockOptions = {
 		lockfilePath: options.lockfilePath,
@@ -423,7 +425,7 @@ export async function withFileLock<T>(
 		pendingAsyncFileLockTails,
 		options?.lockfilePath ?? filePath,
 		async () => {
-			await ensureLockDir(filePath, options?.lockfilePath);
+			if (options?.createParentDirectories !== false) await ensureLockDir(filePath, options?.lockfilePath);
 			const lockOptions = {
 				lockfilePath: options?.lockfilePath,
 				realpath: options?.realpath ?? DEFAULT_REALPATH,

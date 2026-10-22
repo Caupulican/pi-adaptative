@@ -116,6 +116,7 @@ import { projectWorkerTranscriptForInspection } from "./worker-transcript-projec
 import { encodeWorkerTranscriptReference, parseWorkerTranscriptReference } from "./worker-transcript-reference.ts";
 
 const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
+const EXISTING_WORKER_FILE_LOCK_OPTIONS = Object.freeze({ createParentDirectories: false });
 const WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE = "worker-attempt-usage-boundary";
 const MAX_PERSISTED_WORKER_DIAGNOSTICS = 8;
 const MAX_WORKER_CONTROL_ENTRY_PREFIX_BYTES = 16 * 1024;
@@ -1264,26 +1265,30 @@ export class WorkerConversation {
 		if (!metadataFile) return;
 		const sessionFile = this.resumeContext.sessionFile;
 		if (!sessionFile) throw new Error("Worker conversation cannot version usage without a session file.");
-		withFileLockSync(sessionFile, () => {
-			this.synchronizeCoreLocked(false);
-			const currentMetadataState = this.core.metadataState;
-			let metadata = assertExactConversationMetadata(
-				metadataFile,
-				this.resumeContext,
-				currentMetadataState?.logicalAgentId,
-				currentMetadataState?.parentSessionId,
-				currentMetadataState?.birthContextForkReference,
-			);
-			assertProjectConversationAccess(metadata, this.sessionManager, this.projectClaim);
-			if (metadata.usageAccountingVersion !== 1) {
-				metadata = { ...metadata, usageAccountingVersion: 1 };
-				writeWorkerConversationMetadata(metadataFile, metadata);
-			}
-			const metadataState = cloneWorkerConversationMetadataState(metadata);
-			const metadataRevision = readWorkerConversationFileRevision(metadataFile);
-			this.core.metadataState = metadataState;
-			this.core.metadataRevision = metadataRevision;
-		});
+		withFileLockSync(
+			sessionFile,
+			() => {
+				this.synchronizeCoreLocked(false);
+				const currentMetadataState = this.core.metadataState;
+				let metadata = assertExactConversationMetadata(
+					metadataFile,
+					this.resumeContext,
+					currentMetadataState?.logicalAgentId,
+					currentMetadataState?.parentSessionId,
+					currentMetadataState?.birthContextForkReference,
+				);
+				assertProjectConversationAccess(metadata, this.sessionManager, this.projectClaim);
+				if (metadata.usageAccountingVersion !== 1) {
+					metadata = { ...metadata, usageAccountingVersion: 1 };
+					writeWorkerConversationMetadata(metadataFile, metadata);
+				}
+				const metadataState = cloneWorkerConversationMetadataState(metadata);
+				const metadataRevision = readWorkerConversationFileRevision(metadataFile);
+				this.core.metadataState = metadataState;
+				this.core.metadataRevision = metadataRevision;
+			},
+			EXISTING_WORKER_FILE_LOCK_OPTIONS,
+		);
 	}
 
 	/**
@@ -1675,7 +1680,7 @@ export class WorkerConversation {
 							)
 						: operation(sessionManager);
 				},
-				borrowedScope ? { borrowedScope } : undefined,
+				{ ...EXISTING_WORKER_FILE_LOCK_OPTIONS, ...(borrowedScope ? { borrowedScope } : {}) },
 			);
 		};
 		if (intent === "mutation" && !this.projectClaim) {
@@ -1839,24 +1844,28 @@ export class WorkerConversationStore {
 		operation: () => T,
 	): T {
 		const file = assertWorkerConversationFile(agentDir, reference.sessionFile, reference.sessionId);
-		return withFileLockSync(file, () => {
-			const metadata = readWorkerConversationMetadata(workerConversationMetadataFile(file)).metadata;
-			assertExactConversationMetadataValue(
-				metadata,
-				metadata.resumeContext,
-				reference.logicalAgentId,
-				reference.parentSessionId,
-			);
-			if (
-				metadata.resumeContext.sessionId !== reference.sessionId ||
-				metadata.resumeContext.sessionFile !== file ||
-				!metadata.projectContext ||
-				claim?.parentSessionId !== parentSessionId
-			)
-				throw new Error("Worker mailbox project claim is missing or foreign.");
-			assertProjectConversationAccess(metadata, SessionManager.openReadOnly(file, agentDir), claim);
-			return operation();
-		});
+		return withFileLockSync(
+			file,
+			() => {
+				const metadata = readWorkerConversationMetadata(workerConversationMetadataFile(file)).metadata;
+				assertExactConversationMetadataValue(
+					metadata,
+					metadata.resumeContext,
+					reference.logicalAgentId,
+					reference.parentSessionId,
+				);
+				if (
+					metadata.resumeContext.sessionId !== reference.sessionId ||
+					metadata.resumeContext.sessionFile !== file ||
+					!metadata.projectContext ||
+					claim?.parentSessionId !== parentSessionId
+				)
+					throw new Error("Worker mailbox project claim is missing or foreign.");
+				assertProjectConversationAccess(metadata, SessionManager.openReadOnly(file, agentDir), claim);
+				return operation();
+			},
+			EXISTING_WORKER_FILE_LOCK_OPTIONS,
+		);
 	}
 
 	bindProjectMailbox(
@@ -1896,28 +1905,32 @@ export class WorkerConversationStore {
 		const context = options.resumeContext;
 		if (!context.sessionFile) return undefined;
 		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
-		return withFileLockSync(sessionFile, () => {
-			const metadata = assertExactConversationMetadata(
-				workerConversationMetadataFile(sessionFile),
-				context,
-				options.expectedLogicalAgentId,
-			);
-			this.openExisting(options, { recoverBirthContextPrefix: false });
-			const enrollment = projectEnrollmentKey(SessionManager.openReadOnly(sessionFile, options.agentDir));
-			if (enrollment !== metadata.projectContext?.specializationKey)
-				throw new Error("Worker project enrollment changed.");
-			if (!metadata.projectContext) return undefined;
-			if (!metadata.parentSessionId) throw new Error("Worker project birth parent is missing.");
-			return {
-				specializationKey: metadata.projectContext.specializationKey,
-				reference: {
-					parentSessionId: metadata.parentSessionId,
-					logicalAgentId: metadata.logicalAgentId,
-					resumeContext: cloneResumeContext(context),
-				},
-				ownership: normalizeSpecialistContextOwnership(metadata.projectContext.ownership),
-			};
-		});
+		return withFileLockSync(
+			sessionFile,
+			() => {
+				const metadata = assertExactConversationMetadata(
+					workerConversationMetadataFile(sessionFile),
+					context,
+					options.expectedLogicalAgentId,
+				);
+				this.openExisting(options, { recoverBirthContextPrefix: false });
+				const enrollment = projectEnrollmentKey(SessionManager.openReadOnly(sessionFile, options.agentDir));
+				if (enrollment !== metadata.projectContext?.specializationKey)
+					throw new Error("Worker project enrollment changed.");
+				if (!metadata.projectContext) return undefined;
+				if (!metadata.parentSessionId) throw new Error("Worker project birth parent is missing.");
+				return {
+					specializationKey: metadata.projectContext.specializationKey,
+					reference: {
+						parentSessionId: metadata.parentSessionId,
+						logicalAgentId: metadata.logicalAgentId,
+						resumeContext: cloneResumeContext(context),
+					},
+					ownership: normalizeSpecialistContextOwnership(metadata.projectContext.ownership),
+				};
+			},
+			EXISTING_WORKER_FILE_LOCK_OPTIONS,
+		);
 	}
 
 	inspectProjectContext(
@@ -2039,11 +2052,15 @@ export class WorkerConversationStore {
 							inspectedBytes += statSync(sessionFile).size;
 							if (inspectedBytes > 32 * 1024 * 1024) return false;
 							// Read-only parsing: opening a SessionManager may repair a partial tail.
-							const enrolled = withFileLockSync(sessionFile, () =>
-								loadEntriesFromFile(sessionFile).some(
-									(record) =>
-										record.type === "custom" && record.customType === WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE,
-								),
+							const enrolled = withFileLockSync(
+								sessionFile,
+								() =>
+									loadEntriesFromFile(sessionFile).some(
+										(record) =>
+											record.type === "custom" &&
+											record.customType === WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE,
+									),
+								EXISTING_WORKER_FILE_LOCK_OPTIONS,
 							);
 							if (enrolled) return false;
 						}
@@ -2052,23 +2069,27 @@ export class WorkerConversationStore {
 					if (!entry.isFile()) return false;
 					const metadataFile = join(directory, entry.name);
 					const sessionFile = metadataFile.slice(0, -".worker.json".length);
-					const deletable = withFileLockSync(sessionFile, () => {
-						const { metadata } = readWorkerConversationMetadata(metadataFile);
-						if (metadata.parentSessionId !== parentSessionId) return false;
-						if (
-							metadata.projectContext?.ownership.state === "busy" ||
-							metadata.projectContext?.ownership.state === "handoff"
-						)
-							return false;
-						if (!existsSync(sessionFile)) return !metadata.projectContext;
-						inspectedBytes += statSync(sessionFile).size;
-						if (inspectedBytes > 32 * 1024 * 1024) return false;
-						scanWorkerSessionFile(sessionFile, metadata.resumeContext.sessionId, metadata.resumeContext.cwd);
-						return (
-							projectEnrollmentKey(SessionManager.openReadOnly(sessionFile, agentDir)) ===
-							metadata.projectContext?.specializationKey
-						);
-					});
+					const deletable = withFileLockSync(
+						sessionFile,
+						() => {
+							const { metadata } = readWorkerConversationMetadata(metadataFile);
+							if (metadata.parentSessionId !== parentSessionId) return false;
+							if (
+								metadata.projectContext?.ownership.state === "busy" ||
+								metadata.projectContext?.ownership.state === "handoff"
+							)
+								return false;
+							if (!existsSync(sessionFile)) return !metadata.projectContext;
+							inspectedBytes += statSync(sessionFile).size;
+							if (inspectedBytes > 32 * 1024 * 1024) return false;
+							scanWorkerSessionFile(sessionFile, metadata.resumeContext.sessionId, metadata.resumeContext.cwd);
+							return (
+								projectEnrollmentKey(SessionManager.openReadOnly(sessionFile, agentDir)) ===
+								metadata.projectContext?.specializationKey
+							);
+						},
+						EXISTING_WORKER_FILE_LOCK_OPTIONS,
+					);
 					if (!deletable) return false;
 				}
 				return false;
@@ -2103,64 +2124,72 @@ export class WorkerConversationStore {
 		const mailbox = workerMailboxPath(options.agentDir, birthParent, birthMetadata.logicalAgentId);
 		return withSessionBundleAdmission(options.agentDir, birthParent, () =>
 			withFileLockSync(mailbox, () =>
-				withFileLockSync(sessionFile, () => {
-					const previous = this.openExisting(options, { recoverBirthContextPrefix: false });
-					if (previous.hasActiveTranscriptCommit()) throw new Error("Worker transcript commit is still active.");
-					const file = workerConversationMetadataFile(sessionFile);
-					const metadata = assertExactConversationMetadata(
-						file,
-						context,
-						options.expectedLogicalAgentId,
-						birthParent,
-					);
-					const session = SessionManager.openCanonical(sessionFile, options.agentDir, dirname(sessionFile));
-					const enrollment = projectEnrollmentKey(session);
-					if (enrollment !== metadata.projectContext?.specializationKey)
-						throw new Error("Worker project enrollment changed.");
-					if (metadata.projectContext && metadata.projectContext.specializationKey !== options.specializationKey)
-						throw new Error("Worker project specialization changed.");
-					if (!metadata.projectContext && metadata.parentSessionId !== options.owner.parentSessionId)
-						throw new Error("Cannot enroll a foreign worker history.");
-					let previousOwnership = metadata.projectContext?.ownership;
-					if (previousOwnership?.state === "busy" && options.assertQueuedRecovery) {
-						options.assertQueuedRecovery(normalizeSpecialistContextOwnership(previousOwnership));
-						previousOwnership = releaseSpecialistContext(previousOwnership, previousOwnership.claim);
-					}
-					const ownership = previousOwnership
-						? acquireSpecialistContext(previousOwnership, options.owner)
-						: createSpecialistContextOwnership(options.owner);
-					bindWorkerMailboxRecord(
-						mailbox,
-						{
-							parentSessionId: birthParent,
-							logicalAgentId: metadata.logicalAgentId,
-							sessionId: context.sessionId,
-							sessionFile,
-						},
-						birthParent,
-						metadata.logicalAgentId,
-					);
-					writeWorkerConversationMetadata(file, {
-						...metadata,
-						projectContext: { specializationKey: options.specializationKey, ownership },
-					});
-					if (!enrollment)
-						withWorkerTranscriptContinuation(
-							options.agentDir,
-							session,
-							ownership.claim,
-							() =>
-								session.appendCustomEntry(WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE, {
-									specializationKey: options.specializationKey,
-								}),
-							true,
+				withFileLockSync(
+					sessionFile,
+					() => {
+						const previous = this.openExisting(options, { recoverBirthContextPrefix: false });
+						if (previous.hasActiveTranscriptCommit())
+							throw new Error("Worker transcript commit is still active.");
+						const file = workerConversationMetadataFile(sessionFile);
+						const metadata = assertExactConversationMetadata(
+							file,
+							context,
+							options.expectedLogicalAgentId,
+							birthParent,
 						);
-					this.cachedCores.delete(sessionFile);
-					return this.openExisting(
-						{ ...options, projectClaim: ownership.claim },
-						{ recoverBirthContextPrefix: false },
-					);
-				}),
+						const session = SessionManager.openCanonical(sessionFile, options.agentDir, dirname(sessionFile));
+						const enrollment = projectEnrollmentKey(session);
+						if (enrollment !== metadata.projectContext?.specializationKey)
+							throw new Error("Worker project enrollment changed.");
+						if (
+							metadata.projectContext &&
+							metadata.projectContext.specializationKey !== options.specializationKey
+						)
+							throw new Error("Worker project specialization changed.");
+						if (!metadata.projectContext && metadata.parentSessionId !== options.owner.parentSessionId)
+							throw new Error("Cannot enroll a foreign worker history.");
+						let previousOwnership = metadata.projectContext?.ownership;
+						if (previousOwnership?.state === "busy" && options.assertQueuedRecovery) {
+							options.assertQueuedRecovery(normalizeSpecialistContextOwnership(previousOwnership));
+							previousOwnership = releaseSpecialistContext(previousOwnership, previousOwnership.claim);
+						}
+						const ownership = previousOwnership
+							? acquireSpecialistContext(previousOwnership, options.owner)
+							: createSpecialistContextOwnership(options.owner);
+						bindWorkerMailboxRecord(
+							mailbox,
+							{
+								parentSessionId: birthParent,
+								logicalAgentId: metadata.logicalAgentId,
+								sessionId: context.sessionId,
+								sessionFile,
+							},
+							birthParent,
+							metadata.logicalAgentId,
+						);
+						writeWorkerConversationMetadata(file, {
+							...metadata,
+							projectContext: { specializationKey: options.specializationKey, ownership },
+						});
+						if (!enrollment)
+							withWorkerTranscriptContinuation(
+								options.agentDir,
+								session,
+								ownership.claim,
+								() =>
+									session.appendCustomEntry(WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE, {
+										specializationKey: options.specializationKey,
+									}),
+								true,
+							);
+						this.cachedCores.delete(sessionFile);
+						return this.openExisting(
+							{ ...options, projectClaim: ownership.claim },
+							{ recoverBirthContextPrefix: false },
+						);
+					},
+					EXISTING_WORKER_FILE_LOCK_OPTIONS,
+				),
 			),
 		);
 	}
@@ -2182,40 +2211,48 @@ export class WorkerConversationStore {
 			throw new Error("Worker handoff claim is missing or foreign.");
 		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
 		const mailbox = workerMailboxPath(options.agentDir, options.parentSessionId, options.agentId);
-		withFileLockSync(mailbox, () =>
-			withFileLockSync(sessionFile, () => {
-				const file = workerConversationMetadataFile(sessionFile);
-				const metadata = assertExactConversationMetadata(file, context, options.expectedLogicalAgentId);
-				const record = readWorkerMailboxRecord(mailbox);
-				if (
-					!metadata.projectContext ||
-					!isDeepStrictEqual(record.reference, {
-						parentSessionId: metadata.parentSessionId,
-						logicalAgentId: metadata.logicalAgentId,
-						sessionId: context.sessionId,
-						sessionFile,
-					}) ||
-					!isPlainRecord(record.mailbox) ||
-					record.mailbox.parentSessionId !== options.parentSessionId ||
-					record.mailbox.agentId !== options.agentId
-				)
-					throw new Error("Worker handoff mailbox context is missing or changed.");
-				const conversation = this.openExisting(options, { recoverBirthContextPrefix: false });
-				if (conversation.hasActiveTranscriptCommit()) throw new Error("Worker transcript commit is still active.");
-				assertProjectConversationAccess(
-					metadata,
-					SessionManager.openReadOnly(sessionFile, options.agentDir),
-					claim,
-				);
-				options.assertSettled();
-				writeWorkerConversationMetadata(file, {
-					...metadata,
-					projectContext: {
-						...metadata.projectContext,
-						ownership: handoffSpecialistContext(metadata.projectContext.ownership, claim),
+		withFileLockSync(
+			mailbox,
+			() =>
+				withFileLockSync(
+					sessionFile,
+					() => {
+						const file = workerConversationMetadataFile(sessionFile);
+						const metadata = assertExactConversationMetadata(file, context, options.expectedLogicalAgentId);
+						const record = readWorkerMailboxRecord(mailbox);
+						if (
+							!metadata.projectContext ||
+							!isDeepStrictEqual(record.reference, {
+								parentSessionId: metadata.parentSessionId,
+								logicalAgentId: metadata.logicalAgentId,
+								sessionId: context.sessionId,
+								sessionFile,
+							}) ||
+							!isPlainRecord(record.mailbox) ||
+							record.mailbox.parentSessionId !== options.parentSessionId ||
+							record.mailbox.agentId !== options.agentId
+						)
+							throw new Error("Worker handoff mailbox context is missing or changed.");
+						const conversation = this.openExisting(options, { recoverBirthContextPrefix: false });
+						if (conversation.hasActiveTranscriptCommit())
+							throw new Error("Worker transcript commit is still active.");
+						assertProjectConversationAccess(
+							metadata,
+							SessionManager.openReadOnly(sessionFile, options.agentDir),
+							claim,
+						);
+						options.assertSettled();
+						writeWorkerConversationMetadata(file, {
+							...metadata,
+							projectContext: {
+								...metadata.projectContext,
+								ownership: handoffSpecialistContext(metadata.projectContext.ownership, claim),
+							},
+						});
 					},
-				});
-			}),
+					EXISTING_WORKER_FILE_LOCK_OPTIONS,
+				),
+			EXISTING_WORKER_FILE_LOCK_OPTIONS,
 		);
 	}
 
@@ -2224,19 +2261,23 @@ export class WorkerConversationStore {
 		const context = conversation.getResumeContext();
 		const claim = conversation.getProjectClaim();
 		if (!context.sessionFile || !claim) throw new Error("Worker project claim is missing.");
-		withFileLockSync(context.sessionFile, () => {
-			if (conversation.hasActiveTranscriptCommit()) throw new Error("Worker transcript commit is still active.");
-			const file = workerConversationMetadataFile(context.sessionFile!);
-			const metadata = assertExactConversationMetadata(file, context);
-			if (!metadata.projectContext) throw new Error("Worker project enrollment is missing.");
-			writeWorkerConversationMetadata(file, {
-				...metadata,
-				projectContext: {
-					...metadata.projectContext,
-					ownership: releaseSpecialistContext(metadata.projectContext.ownership, claim),
-				},
-			});
-		});
+		withFileLockSync(
+			context.sessionFile,
+			() => {
+				if (conversation.hasActiveTranscriptCommit()) throw new Error("Worker transcript commit is still active.");
+				const file = workerConversationMetadataFile(context.sessionFile!);
+				const metadata = assertExactConversationMetadata(file, context);
+				if (!metadata.projectContext) throw new Error("Worker project enrollment is missing.");
+				writeWorkerConversationMetadata(file, {
+					...metadata,
+					projectContext: {
+						...metadata.projectContext,
+						ownership: releaseSpecialistContext(metadata.projectContext.ownership, claim),
+					},
+				});
+			},
+			EXISTING_WORKER_FILE_LOCK_OPTIONS,
+		);
 	}
 
 	clearCache(): void {
@@ -2369,7 +2410,11 @@ export class WorkerConversationStore {
 		}
 		assertValidSessionId(context.sessionId);
 		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
-		return withFileLockSync(sessionFile, () => this.openExisting(options, { recoverBirthContextPrefix: false }));
+		return withFileLockSync(
+			sessionFile,
+			() => this.openExisting(options, { recoverBirthContextPrefix: false }),
+			EXISTING_WORKER_FILE_LOCK_OPTIONS,
+		);
 	}
 
 	private openExisting(
@@ -2727,22 +2772,26 @@ export class WorkerConversationStore {
 		const location = workerTranscriptLocation(agentDir, identity);
 		const { sessionFile } = location;
 		if (!existsSync(sessionFile)) return undefined;
-		return withFileLockSync(sessionFile, () => {
-			const metadata = readWorkerConversationMetadata(workerConversationMetadataFile(sessionFile)).metadata;
-			const context = metadata.resumeContext;
-			if (
-				metadata.parentSessionId !== identity.parentSessionId ||
-				metadata.logicalAgentId !== identity.logicalAgentId ||
-				!matchesWorkerTranscriptLocation(context, location)
-			) {
-				throw new WorkerConversationOwnershipError(
-					"Worker transcript reference disagrees with its stored identity.",
+		return withFileLockSync(
+			sessionFile,
+			() => {
+				const metadata = readWorkerConversationMetadata(workerConversationMetadataFile(sessionFile)).metadata;
+				const context = metadata.resumeContext;
+				if (
+					metadata.parentSessionId !== identity.parentSessionId ||
+					metadata.logicalAgentId !== identity.logicalAgentId ||
+					!matchesWorkerTranscriptLocation(context, location)
+				) {
+					throw new WorkerConversationOwnershipError(
+						"Worker transcript reference disagrees with its stored identity.",
+					);
+				}
+				return this.openExisting(
+					{ agentDir, resumeContext: context, expectedLogicalAgentId: identity.logicalAgentId },
+					{ parentSessionId: identity.parentSessionId, recoverBirthContextPrefix: false },
 				);
-			}
-			return this.openExisting(
-				{ agentDir, resumeContext: context, expectedLogicalAgentId: identity.logicalAgentId },
-				{ parentSessionId: identity.parentSessionId, recoverBirthContextPrefix: false },
-			);
-		});
+			},
+			EXISTING_WORKER_FILE_LOCK_OPTIONS,
+		);
 	}
 }

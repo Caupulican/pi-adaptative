@@ -15,10 +15,11 @@ import {
 import {
 	type SessionBundleDeletionReservation,
 	withSessionBundleAdmission,
+	withSessionBundleInspection,
 	withSessionBundleRetention,
 } from "../orchestration/session-bundle-lifecycle.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
-import { withFileLockSync } from "../util/atomic-file.ts";
+import { isMissingFileError, withFileLockSync } from "../util/atomic-file.ts";
 import type { SteerDecision } from "../util/wait.ts";
 import { createReplaySafeMailboxBounder } from "./replay-safe-mailbox-bounds.ts";
 import type {
@@ -1417,12 +1418,29 @@ export class WorkerAgentMailbox {
 
 	/** Exclude admission until the owner finishes publishing availability under its transcript lock. */
 	withQuiescentMailbox(release: () => void): boolean {
-		return withFileLockSync(this.file, () => {
-			if (workerMailboxHasOpenObligation(this.read())) return false;
-			// The callback validates the exact claim while holding the transcript lock. Taking it
-			// here too would recursively lock the same file. Admission uses this same lock order.
-			release();
-			return true;
+		return withSessionBundleInspection(this.agentDir, this.parentSessionId, () => {
+			const settle = () => {
+				if (workerMailboxHasOpenObligation(this.read())) return false;
+				// The callback validates the exact claim under the transcript lock, after the mailbox.
+				release();
+				return true;
+			};
+			let acquired = false;
+			try {
+				return withFileLockSync(
+					this.file,
+					() => {
+						acquired = true;
+						return settle();
+					},
+					{ createParentDirectories: false },
+				);
+			} catch (error) {
+				if (acquired || !isMissingFileError(error)) throw error;
+				// No mailbox parent exists. Bundle exclusion blocks its writers; read still rejects
+				// a lost known binding. Do not reinterpret a failure inside settlement as absence.
+				return settle();
+			}
 		});
 	}
 

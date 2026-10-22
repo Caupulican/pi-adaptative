@@ -321,6 +321,14 @@ export function withSessionBundleAdmission<T>(agentDir: string, parentSessionId:
 	});
 }
 
+/** Serialize inspection and existing claim settlement without admitting creation into a deleted bundle. */
+export function withSessionBundleInspection<T>(agentDir: string, parentSessionId: string, operation: () => T): T {
+	const tombstone = orchestrationSessionDeletionFile(agentDir, parentSessionId);
+	return withFileLockSync(tombstone, operation, {
+		borrowedScope: currentSynchronousFileLockScope(tombstone),
+	});
+}
+
 /** Reserve before any removal. Refused admission must not publish new destructive intent. */
 export function reserveSessionBundleDeletion(
 	agentDir: string,
