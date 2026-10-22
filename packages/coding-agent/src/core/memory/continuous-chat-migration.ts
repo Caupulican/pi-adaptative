@@ -6,17 +6,21 @@
  * rewritten or turned into chat text.
  */
 
-import { createReadStream, readdirSync, statSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { readdirSync, type Stats, statSync } from "node:fs";
+import { open, readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { createInterface } from "node:readline";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
+import { MAX_SESSION_LINE_CHARS } from "../../kernel/session/session-entry-limits.ts";
+import { readSessionHeaderFromDescriptor, type SessionHeader } from "../../kernel/session/session-header.ts";
+import { MAX_SESSION_HEADER_BYTES } from "../../kernel/session/session-identity.ts";
 import {
 	getDefaultSessionDirCandidates,
 	isValidSessionId,
 	readSessionHeaderResult,
 } from "../../kernel/session/session-manager.ts";
+import { sameFileVersion } from "../../kernel/storage/bounded-file.ts";
 import { isMissingFileError, writeFileAtomic } from "../util/atomic-file.ts";
 import { isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
 import {
@@ -371,6 +375,8 @@ function listSessionFileNames(directory: string): string[] {
 
 type SessionBodyLine = { ok: true; entry: SessionEntry } | { ok: false; fault: string };
 
+type LegacySourceIdentity = { kind: "header"; header: SessionHeader } | { kind: "headerless"; revision: Stats };
+
 /** One non-empty line read as a session body entry, or what keeps it from being one. */
 function parseSessionBodyLine(line: string): SessionBodyLine {
 	let value: unknown;
@@ -384,50 +390,97 @@ function parseSessionBodyLine(line: string): SessionBodyLine {
 }
 
 /**
- * Streams validated body entries. `firstLine` says what the first non-empty line is: the session header, skipped here,
- * or already a body entry, in a session whose header was reconstructed from its file name. A line that is not a
- * session entry throws `ContinuousChatLegacyContentError` naming the file and the line; read failures throw as they are.
+ * Reads the descriptor whose identity was checked before the first entry is yielded. Headerless recovery instead
+ * binds the exact file revision it validated. Changed sources and oversized lines remain retryable read failures;
+ * malformed body entries retain their separate content classification.
  */
 export async function* streamLegacySessionEntries(
 	path: string,
-	firstLine: "header" | "entry" = "header",
+	identity: LegacySourceIdentity,
 	signal?: AbortSignal,
 ): AsyncGenerator<SessionEntry> {
 	signal?.throwIfAborted();
-	const input = createReadStream(path, { encoding: "utf8", signal });
-	const lines = createInterface({
-		input,
-		crlfDelay: Number.POSITIVE_INFINITY,
-	});
-	let readError: Error | undefined;
-	// Readline does not forward input errors to its iterator. Closing it wakes that
-	// iterator, and the explicit check below distinguishes a failed read from EOF.
-	input.on("error", (error: Error) => {
-		readError = error;
-		lines.close();
-	});
-	let header = firstLine === "header";
-	let lineNumber = 0;
+	const before = await stat(path);
+	signal?.throwIfAborted();
+	if (!before.isFile()) throw new Error(`Legacy session ${path} is not a regular file.`);
+	const file = await open(path, "r");
 	try {
-		for await (const line of lines) {
+		const opened = await file.stat();
+		signal?.throwIfAborted();
+		if (!opened.isFile() || !sameFileVersion(before, opened))
+			throw new Error(`Legacy session ${path} changed while opening it.`);
+		if (identity.kind === "headerless") {
+			if (!sameFileVersion(identity.revision, opened))
+				throw new Error(`Headerless legacy session ${path} changed after validation.`);
+		} else {
+			const read = readSessionHeaderFromDescriptor(file.fd, MAX_SESSION_HEADER_BYTES);
+			const expected = identity.header;
+			if (
+				!read.ok ||
+				read.header.id !== expected.id ||
+				read.header.timestamp !== expected.timestamp ||
+				read.header.cwd !== expected.cwd ||
+				read.header.version !== expected.version ||
+				read.header.parentSession !== expected.parentSession
+			)
+				throw new Error(`Legacy session ${path} no longer matches its listed header.`);
+		}
+		const assertUnchanged = async (): Promise<void> => {
+			const current = await file.stat();
+			const currentPath = await stat(path);
 			signal?.throwIfAborted();
+			if (!sameFileVersion(opened, current) || !sameFileVersion(opened, currentPath))
+				throw new Error(`Legacy session ${path} changed during its read; retry the import.`);
+		};
+		const input = file.createReadStream({
+			encoding: "utf8",
+			start: 0,
+			end: opened.size - 1,
+			autoClose: false,
+			signal,
+		});
+		const decoder = new StreamingLineDecoder(MAX_SESSION_LINE_CHARS, { overflow: "throw", lineEndings: "any" });
+		let header = identity.kind === "header";
+		let lineNumber = 0;
+		const body = (line: string): SessionEntry | undefined => {
 			lineNumber++;
-			if (line.trim() === "") continue;
+			if (line.trim() === "") return undefined;
 			if (header) {
 				header = false;
-				continue;
+				return undefined;
 			}
 			const parsed = parseSessionBodyLine(line);
-			if (!parsed.ok) {
+			if (!parsed.ok)
 				throw new ContinuousChatLegacyContentError(path, `${basename(path)}:${lineNumber} ${parsed.fault}`);
+			return parsed.entry;
+		};
+		try {
+			for await (const chunk of input) {
+				signal?.throwIfAborted();
+				if (typeof chunk !== "string") throw new TypeError("Legacy session stream did not decode UTF-8 text.");
+				for (const line of decoder.push(chunk)) {
+					const entry = body(line);
+					if (entry) yield entry;
+				}
 			}
-			yield parsed.entry;
+			signal?.throwIfAborted();
+			const last = decoder.finish();
+			if (last !== undefined) {
+				const entry = body(last);
+				if (entry) yield entry;
+			}
+			await assertUnchanged();
+			signal?.throwIfAborted();
+		} catch (error) {
+			signal?.throwIfAborted();
+			// A racing rewrite is unavailable input, not permanent malformed history.
+			if (error instanceof ContinuousChatLegacyContentError) await assertUnchanged();
+			throw error;
+		} finally {
+			input.destroy();
 		}
-		signal?.throwIfAborted();
-		if (readError) throw readError;
 	} finally {
-		lines.close();
-		input.destroy();
+		await file.close();
 	}
 }
 
@@ -455,6 +508,7 @@ function sessionFileNameIdentity(file: string): { sessionId: string; timestamp: 
 async function readHeaderlessSessionFile(
 	path: string,
 	file: string,
+	revision: Stats,
 	signal?: AbortSignal,
 ): Promise<ContinuousChatLegacySessionReading> {
 	const headerFault = CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.header;
@@ -468,7 +522,7 @@ async function readHeaderlessSessionFile(
 	}
 	let entries = 0;
 	try {
-		for await (const entry of streamLegacySessionEntries(path, "entry", signal)) {
+		for await (const entry of streamLegacySessionEntries(path, { kind: "headerless", revision }, signal)) {
 			void entry;
 			entries++;
 		}
@@ -491,7 +545,7 @@ async function readHeaderlessSessionFile(
 			...identity,
 			file,
 			repaired: CONTINUOUS_CHAT_LEGACY_HEADER_REPAIR,
-			entries: (readSignal) => streamLegacySessionEntries(path, "entry", readSignal),
+			entries: (readSignal) => streamLegacySessionEntries(path, { kind: "headerless", revision }, readSignal),
 		},
 	};
 }
@@ -508,10 +562,9 @@ export async function readContinuousChatLegacySessionFile(
 ): Promise<ContinuousChatLegacySessionReading> {
 	signal?.throwIfAborted();
 	const file = basename(path);
-	let inspection: { file: boolean; size: number };
+	let inspection: Stats;
 	try {
-		const metadata = statSync(path);
-		inspection = { file: metadata.isFile(), size: metadata.size };
+		inspection = statSync(path);
 	} catch (error) {
 		return {
 			kind: "blocked",
@@ -519,7 +572,7 @@ export async function readContinuousChatLegacySessionFile(
 			reason: `${CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.inspection} ${causeText(error)}`,
 		};
 	}
-	if (!inspection.file || inspection.size === 0) return { kind: "empty" };
+	if (!inspection.isFile() || inspection.size === 0) return { kind: "empty" };
 
 	const header = readSessionHeaderResult(path);
 	if (!header.ok) {
@@ -534,7 +587,7 @@ export async function readContinuousChatLegacySessionFile(
 		if (header.reason === "invalid_session_id") {
 			return { kind: "invalid", sessionId: file, reason: CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.id };
 		}
-		return readHeaderlessSessionFile(path, file, signal);
+		return readHeaderlessSessionFile(path, file, inspection, signal);
 	}
 	const sessionId = header.header.id;
 	const timestamp = header.header.timestamp;
@@ -547,7 +600,8 @@ export async function readContinuousChatLegacySessionFile(
 			sessionId,
 			timestamp,
 			file,
-			entries: (readSignal) => streamLegacySessionEntries(path, "header", readSignal),
+			entries: (readSignal) =>
+				streamLegacySessionEntries(path, { kind: "header", header: header.header }, readSignal),
 		},
 	};
 }

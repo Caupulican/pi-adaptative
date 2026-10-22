@@ -1,4 +1,4 @@
-import { MAX_SESSION_ENTRY_VISIT_COUNT } from "./session-entry-limits.ts";
+import { MAX_SESSION_ENTRY_VISIT_COUNT, MAX_SESSION_LINE_CHARS } from "./session-entry-limits.ts";
 import { publishSessionFileExclusive, withSessionFileMutation } from "./session-file-admission.ts";
 import { WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE } from "./worker-project-enrollment.ts";
 
@@ -942,8 +942,6 @@ export function getDefaultSessionDir(cwd: string, agentDir: string): string {
 }
 
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
-// One line must fit comfortably under V8's max string length (~512MiB chars).
-const MAX_SESSION_LINE_CHARS = 256 * 1024 * 1024;
 
 function parseSessionEntryLine(line: string): FileEntry | null {
 	if (!line.trim()) return null;
