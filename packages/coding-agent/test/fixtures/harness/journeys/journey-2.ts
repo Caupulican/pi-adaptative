@@ -33,7 +33,7 @@ export async function runJourney2(): Promise<void> {
 				// stat (the orchestration event store of the auxiliary root): exact text.
 				/^Worker worker-\d+ provider request failed \(server_error\); retrying in \d+s \(attempt [23]\/3\)\.$/,
 				/^Worker worker-\d+ failed \(server_error\); retrying from the persisted transcript in \d+s \(attempt 2\)\.$/,
-				/^Worker worker-\d+ retry durable read failed; retaining the durable retry and trying again in 1s: Scripted IO fault r30-durable-read: stat '(?:\/harness\/agent-journey-2-system-one-(?:on|off)\/state\/orchestration\/sessions\/[^'/\\\n]+\/events\/cursor\.json|[A-Z]:\\harness\\agent-journey-2-system-one-(?:on|off)\\state\\orchestration\\sessions\\[^'/\\\n]+\\events\\cursor\.json)'$/,
+				/^Worker worker-\d+ retry durable read failed; retaining the durable retry with 1s backoff: Scripted IO fault r30-durable-read: stat '(?:\/harness\/agent-journey-2-system-one-(?:on|off)\/state\/orchestration\/sessions\/[^'/\\\n]+\/events\/cursor\.json|[A-Z]:\\harness\\agent-journey-2-system-one-(?:on|off)\\state\\orchestration\\sessions\\[^'/\\\n]+\\events\\cursor\.json)'$/,
 				// R31: the auxiliary root's one refused worker terminal delivery, retried on the outbox backoff: exact text.
 				/^Background worker handoff failed: r31 scripted handoff refusal$/,
 				// R34 (System One off): the restart's disposal of a root whose worker handoff waits for the foreground lease may reject that

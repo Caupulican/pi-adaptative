@@ -2986,7 +2986,7 @@ async function retainedRetryReadFault(world: HarnessWorld, session: AgentSession
 		retryFailures().map((message) => message.replace(/^Worker worker-\d+ /, "Worker <lane> ")),
 		"the failed read is announced once, with its backoff and its cause",
 	).toEqual([
-		`Worker <lane> retry durable read failed; retaining the durable retry and trying again in 1s: Scripted IO fault r30-durable-read: stat '${cursorPath}'`,
+		`Worker <lane> retry durable read failed; retaining the durable retry with 1s backoff: Scripted IO fault r30-durable-read: stat '${cursorPath}'`,
 	]);
 	expect(world.timers.armedDelays("orchestration"), "the failed read re-arms the retry on its first backoff").toEqual([
 		R30_BACKOFF_MS,
