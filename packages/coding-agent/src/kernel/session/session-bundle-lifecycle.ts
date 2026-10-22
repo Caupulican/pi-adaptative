@@ -3,7 +3,13 @@ import { lstatSync, unlinkSync } from "node:fs";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { probeProcessLiveness } from "../reliability/process-tree.ts";
-import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../storage/atomic-file.ts";
+import {
+	currentSynchronousFileLockScope,
+	isMissingFileError,
+	type SynchronousFileLockScope,
+	withFileLockSync,
+	writeFileAtomicSync,
+} from "../storage/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../storage/bounded-file.ts";
 import { isPlainRecord } from "../utils/value-guards.ts";
 import { orchestrationSessionDeletionFile, orchestrationSessionDir } from "./session-bundle-paths.ts";
@@ -35,6 +41,13 @@ const MAX_MARKER_BYTES = 16 * 1024;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PROCESS_INSTANCE_ID = randomUUID();
 const activeOperations = new Set<string>();
+const admittedBundles = new Map<string, SynchronousFileLockScope>();
+
+export function hasCurrentSessionBundleAdmission(agentDir: string, parentSessionId: string): boolean {
+	const file = orchestrationSessionDeletionFile(agentDir, parentSessionId);
+	const scope = currentSynchronousFileLockScope(file);
+	return scope !== undefined && admittedBundles.get(scope.lockfilePath) === scope;
+}
 
 interface BundleHolder {
 	token: string;
@@ -279,6 +292,7 @@ export function hasPendingSessionBundleRetention(agentDir: string, parentSession
 /** Lock order is bundle admission, then transcript. No filesystem lock spans asynchronous removal. */
 export function withSessionBundleAdmission<T>(agentDir: string, parentSessionId: string, operation: () => T): T {
 	const tombstone = orchestrationSessionDeletionFile(agentDir, parentSessionId);
+	if (hasCurrentSessionBundleAdmission(agentDir, parentSessionId)) return operation();
 	return withFileLockSync(tombstone, () => {
 		const marker = readMarker(tombstone, parentSessionId);
 		if (marker) {
@@ -296,7 +310,14 @@ export function withSessionBundleAdmission<T>(agentDir: string, parentSessionId:
 			// marker cleanup here: a directory-only sweep can no longer discover this completed removal.
 			unlinkSync(tombstone);
 		}
-		return operation();
+		const scope = currentSynchronousFileLockScope(tombstone)!;
+		const key = scope.lockfilePath;
+		admittedBundles.set(key, scope);
+		try {
+			return operation();
+		} finally {
+			admittedBundles.delete(key);
+		}
 	});
 }
 

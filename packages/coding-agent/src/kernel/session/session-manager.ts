@@ -1,4 +1,14 @@
-import { assertValidSessionId, isValidSessionId, MAX_SESSION_HEADER_BYTES } from "./session-identity.ts";
+import { MAX_SESSION_ENTRY_VISIT_COUNT } from "./session-entry-limits.ts";
+import { publishSessionFileExclusive, withSessionFileMutation } from "./session-file-admission.ts";
+import { WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE } from "./worker-project-enrollment.ts";
+
+export { MAX_SESSION_ENTRY_VISIT_COUNT } from "./session-entry-limits.ts";
+
+import { readSessionHeaderFromDescriptor, readSessionHeaderResult, type SessionHeader } from "./session-header.ts";
+
+export { readSessionHeaderResult, type SessionHeader, type SessionHeaderReadResult } from "./session-header.ts";
+
+import { assertValidSessionId, MAX_SESSION_HEADER_BYTES } from "./session-identity.ts";
 
 export {
 	assertValidSessionId,
@@ -14,7 +24,6 @@ import {
 	existsSync,
 	constants as fsConstants,
 	fstatSync,
-	linkSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -90,7 +99,6 @@ export const CURRENT_SESSION_VERSION = 4;
 /** First session format version whose entries all carry `id`/`parentId`; earlier files get random ids when migrated. */
 export const FIRST_SESSION_VERSION_WITH_ENTRY_IDS = 2;
 /** Maximum borrowed entries one non-copying SessionManager visit may inspect. */
-export const MAX_SESSION_ENTRY_VISIT_COUNT = 1_024;
 /** Maximum normal message/custom-message records in one atomic append batch. */
 export const MAX_SESSION_MESSAGE_BATCH_ENTRIES = 256;
 const MAX_SESSION_LINEAGE_DEPTH = 64;
@@ -114,15 +122,6 @@ function appendToExistingSessionFile(filePath: string, content: string, expected
 			closeSync(fd);
 		}
 	});
-}
-
-export interface SessionHeader {
-	type: "session";
-	version?: number; // v1 sessions don't have this
-	id: string;
-	timestamp: string;
-	cwd: string;
-	parentSession?: string;
 }
 
 export interface NewSessionOptions {
@@ -1157,59 +1156,6 @@ function retainedStringChars(value: unknown, stopAfter: number): number {
 }
 
 /**
- * Outcome of reading a session file's first line. `unreadable` carries the I/O error so a caller can
- * tell a file it could not open from a file that is simply not a session (`not_a_header`: empty,
- * longer than the byte bound, malformed JSON, or not a `session` record with a string id).
- */
-export type SessionHeaderReadResult =
-	| { ok: true; header: SessionHeader }
-	| { ok: false; reason: "unreadable"; cause: unknown }
-	| { ok: false; reason: "not_a_header" }
-	/** A session header whose id is not a valid session id: the file is not adopted, and nothing is derived from the id. */
-	| { ok: false; reason: "invalid_session_id"; header: SessionHeader };
-
-/** Read and parse the header line of a session file, looking at no more than `maxBytes` of it. */
-export function readSessionHeaderResult(
-	filePath: string,
-	maxBytes: number = MAX_SESSION_HEADER_BYTES,
-): SessionHeaderReadResult {
-	try {
-		const fd = openSync(filePath, "r");
-		try {
-			return readSessionHeaderFromDescriptor(fd, maxBytes);
-		} finally {
-			closeSync(fd);
-		}
-	} catch (cause) {
-		return { ok: false, reason: "unreadable", cause };
-	}
-}
-
-/** Header identity is validated on the same descriptor as the caller's remaining read. */
-function readSessionHeaderFromDescriptor(fd: number, maxBytes: number): SessionHeaderReadResult {
-	const buffer = Buffer.alloc(maxBytes + 1);
-	const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
-	const newlineIndex = buffer.subarray(0, bytesRead).indexOf(0x0a);
-	if (newlineIndex < 0 && bytesRead > maxBytes) return { ok: false, reason: "not_a_header" };
-	const line = buffer.toString("utf8", 0, newlineIndex >= 0 ? newlineIndex : bytesRead);
-	if (!line) return { ok: false, reason: "not_a_header" };
-	let header: Record<string, unknown>;
-	try {
-		header = JSON.parse(line) as Record<string, unknown>;
-	} catch {
-		return { ok: false, reason: "not_a_header" };
-	}
-	if (header === null || typeof header !== "object" || header.type !== "session" || typeof header.id !== "string") {
-		return { ok: false, reason: "not_a_header" };
-	}
-	// The header's fields are returned for diagnostics only: its id is not a valid session id, so nothing may use it as a handle.
-	if (!isValidSessionId(header.id)) {
-		return { ok: false, reason: "invalid_session_id", header: header as unknown as SessionHeader };
-	}
-	return { ok: true, header: header as unknown as SessionHeader };
-}
-
-/**
  * A session file a manager adopts must begin with a valid session header whose id is a valid session id. The id is later
  * a file name (journal sidecars, owner follow-up files), so it is judged here, before anything adopts it or touches the
  * file. The first JSONL record is authoritative: a later valid header must not launder a malformed prefix. An empty file
@@ -1549,7 +1495,9 @@ export class SessionManager {
 	private agentDir: string;
 	private persist: boolean;
 	private readonly readOnly: boolean;
+	private readonly canonicalOnly: boolean;
 	private payloadsHaveStoredIds = true;
+	private storageRevision: Stats | undefined;
 	private flushed: boolean = false;
 	private fileEntries: FileEntry[] = [];
 	private entries: SessionEntry[] = [];
@@ -1585,12 +1533,14 @@ export class SessionManager {
 		agentDir: string,
 		newSessionOptions?: NewSessionOptions,
 		readOnly = false,
+		canonicalOnly = false,
 	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.agentDir = agentDir;
 		this.persist = persist;
 		this.readOnly = readOnly;
+		this.canonicalOnly = canonicalOnly;
 
 		if (sessionFile) {
 			if (readOnly) {
@@ -1665,10 +1615,19 @@ export class SessionManager {
 					this.entryFileLocations.set(entry.id, { offset, length });
 				}
 			});
+			if (
+				this.canonicalOnly &&
+				(loaded.unterminatedTail ||
+					loaded.entries[0]?.type !== "session" ||
+					loaded.entries[0].version !== CURRENT_SESSION_VERSION)
+			) {
+				throw new Error("Worker history must already have a current header and complete records.");
+			}
 			this.fileEntries = loaded.entries;
 			this.payloadsHaveStoredIds = payloadsHaveStoredIds;
 			let sourceRevision = loaded.revision;
 			if (!sourceRevision) throw new Error("Session file disappeared while opening it.");
+			this.storageRevision = sourceRevision;
 			let indexedEveryColdPayload = true;
 			for (const id of this.coldPayloadEntryIds) {
 				if (this.entryFileLocations.has(id)) continue;
@@ -1693,16 +1652,11 @@ export class SessionManager {
 				return receipt;
 			}
 
-			if (loaded.unterminatedTail && !this.readOnly) {
-				sourceRevision = appendToExistingSessionFile(this.sessionFile, "\n", sourceRevision);
-				if (this.indexedSessionFileBytes > 0) {
-					this.indexedSessionFileBytes += 1;
-				}
-			}
+			const loadedHeader = this.fileEntries[0];
+			if (loadedHeader.type !== "session") throw new Error("Session header is missing.");
+			this.sessionId = loadedHeader.id;
 
-			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
-			this.sessionId = header?.id ?? createSessionId();
-			this.inheritedSessionIds = collectParentSessionIds(header?.parentSession, dirname(this.sessionFile));
+			this.inheritedSessionIds = collectParentSessionIds(loadedHeader.parentSession, dirname(this.sessionFile));
 			this._ensureEntryFileLocations(this.coldPayloadEntryIds);
 
 			const migrated = migrateToCurrentVersion(this.fileEntries);
@@ -1710,6 +1664,18 @@ export class SessionManager {
 			// Validate and index the complete parent graph before a migration rewrite can
 			// mutate the source file. Malformed cycles must fail synchronously on cold open.
 			this._buildIndex();
+			if (loaded.unterminatedTail && !this.readOnly) {
+				sourceRevision = withSessionFileMutation(
+					this.agentDir,
+					this.sessionFile,
+					this.sessionId,
+					"append",
+					() => appendToExistingSessionFile(this.sessionFile!, "\n", sourceRevision),
+					{ session: this, revision: this.storageRevision },
+				);
+				this.storageRevision = sourceRevision;
+				if (this.indexedSessionFileBytes > 0) this.indexedSessionFileBytes += 1;
+			}
 			const receipt = migrated && !this.readOnly ? this._rewriteFile(this.sessionFile, sourceRevision) : undefined;
 			if (migrated && !this.readOnly) this.payloadsHaveStoredIds = true;
 
@@ -1723,7 +1689,7 @@ export class SessionManager {
 			if (payloadsHaveStoredIds || !this.readOnly) this._releaseExistingCompactedMessagePayloads();
 			return receipt;
 		} else {
-			if (this.readOnly) throw new Error("Cannot inspect a missing session file.");
+			if (this.readOnly || this.canonicalOnly) throw new Error("Cannot open a missing existing session file.");
 			const explicitPath = this.sessionFile;
 			this.newSession();
 			this.sessionFile = explicitPath; // preserve explicit path from --session flag
@@ -1733,6 +1699,7 @@ export class SessionManager {
 	newSession(options?: NewSessionOptions): string | undefined {
 		this._assertWritable();
 		this.payloadsHaveStoredIds = true;
+		this.storageRevision = undefined;
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
 		}
@@ -1843,48 +1810,67 @@ export class SessionManager {
 	private _rewriteFile(targetFile = this.sessionFile, expected?: Stats): SessionEntriesPersistedEvent | undefined {
 		this._assertWritable();
 		if (!this.persist || !targetFile) return;
-		const assertCurrent = this._capturePersistenceContext();
-		this._ensureSessionFileParent(targetFile);
-		// Write-then-rename keeps the session file valid at every instant: truncating
-		// in place leaves a torn-file window for crashes or a concurrent process
-		// appending to the same session.
-		const tempFile = `${targetFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-		try {
-			const fd = openSync(tempFile, "wx");
-			try {
-				for (const entry of this.fileEntries) {
-					writeFileSync(fd, `${entry.type === "session" ? JSON.stringify(entry) : encodeSessionEntry(entry)}\n`);
+		return withSessionFileMutation(
+			this.agentDir,
+			targetFile,
+			this.sessionId,
+			expected ? (expected.size === 0 ? "initialize" : "rewrite") : "create",
+			() => {
+				const assertCurrent = this._capturePersistenceContext();
+				this._ensureSessionFileParent(targetFile);
+				// Write-then-rename keeps the session file valid at every instant: truncating
+				// in place leaves a torn-file window for crashes or a concurrent process
+				// appending to the same session.
+				const tempFile = `${targetFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+				try {
+					const fd = openSync(tempFile, "wx");
+					try {
+						for (const entry of this.fileEntries) {
+							writeFileSync(
+								fd,
+								`${entry.type === "session" ? JSON.stringify(entry) : encodeSessionEntry(entry)}\n`,
+							);
+						}
+					} finally {
+						closeSync(fd);
+					}
+					withSessionFileLock(targetFile, () => {
+						assertCurrent();
+						if (expected) {
+							if (!sameFileVersion(expected, statSync(targetFile)))
+								throw new Error("Session file changed before its rewrite; reopen it before retrying.");
+							renameSync(tempFile, targetFile);
+						} else {
+							// New branch publication must not replace a file created while serialization ran.
+							publishSessionFileExclusive(tempFile, targetFile);
+						}
+					});
+				} finally {
+					try {
+						unlinkSync(tempFile);
+					} catch {
+						/* Link/rename publication stands even if temporary cleanup fails. */
+					}
 				}
-			} finally {
-				closeSync(fd);
-			}
-			withSessionFileLock(targetFile, () => {
-				assertCurrent();
-				if (expected) {
-					if (!sameFileVersion(expected, statSync(targetFile)))
-						throw new Error("Session file changed before its rewrite; reopen it before retrying.");
-					renameSync(tempFile, targetFile);
-				} else {
-					// New branch publication must not replace a file created while serialization ran.
-					linkSync(tempFile, targetFile);
+				if (targetFile === this.sessionFile) {
+					try {
+						this.storageRevision = statSync(targetFile);
+					} catch {
+						this.storageRevision = undefined;
+					}
+					this._resetEntryFileIndex();
+					return Object.freeze({
+						sessionId: this.sessionId,
+						sessionFile: targetFile,
+						entryIds: Object.freeze(
+							this.fileEntries.flatMap((entry) => (entry.type === "session" ? [] : [entry.id])),
+						),
+						rewritten: true,
+					});
 				}
-			});
-		} finally {
-			try {
-				unlinkSync(tempFile);
-			} catch {
-				/* Link/rename publication stands even if temporary cleanup fails. */
-			}
-		}
-		if (targetFile === this.sessionFile) {
-			this._resetEntryFileIndex();
-			return Object.freeze({
-				sessionId: this.sessionId,
-				sessionFile: targetFile,
-				entryIds: Object.freeze(this.fileEntries.flatMap((entry) => (entry.type === "session" ? [] : [entry.id]))),
-				rewritten: true,
-			});
-		}
+			},
+			{ session: this, revision: expected ?? this.storageRevision },
+		);
 	}
 
 	isPersisted(): boolean {
@@ -2156,23 +2142,35 @@ export class SessionManager {
 		let writeStarted = false;
 		try {
 			if (!this.flushed) {
-				withSessionFileLock(sessionFile, () => {
+				withSessionFileMutation(this.agentDir, sessionFile, sessionId, "create", () => {
 					assertCurrent();
 					writeStarted = true;
 					const fd = openSync(sessionFile, "wx");
 					try {
 						writeFileSync(fd, encodedPayload);
+						this.storageRevision = fstatSync(fd);
 					} finally {
 						closeSync(fd);
 					}
 				});
 				this.flushed = true;
 			} else if (encodedEntries.length > 0) {
-				withSessionFileLock(sessionFile, () => {
-					assertCurrent();
-					writeStarted = true;
-					appendToExistingSessionFile(sessionFile, encodedPayload);
-				});
+				withSessionFileMutation(
+					this.agentDir,
+					sessionFile,
+					sessionId,
+					entries.length === 1 &&
+						entries[0]?.type === "custom" &&
+						entries[0].customType === WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE
+						? { enrollmentKey: (entries[0].data as { specializationKey: string }).specializationKey }
+						: "append",
+					() => {
+						assertCurrent();
+						writeStarted = true;
+						this.storageRevision = appendToExistingSessionFile(sessionFile, encodedPayload);
+					},
+					{ session: this, revision: this.storageRevision },
+				);
 			}
 		} catch (error) {
 			// append/write/close failures may leave a partial JSONL suffix. Do not publish the
@@ -3693,12 +3691,17 @@ export class SessionManager {
 	 * @param cwdOverride Optional cwd override instead of the session header cwd.
 	 */
 	static open(path: string, agentDir: string, sessionDir?: string, cwdOverride?: string): SessionManager {
-		return SessionManager._open(path, agentDir, sessionDir, cwdOverride, false);
+		return SessionManager._open(path, agentDir, sessionDir, cwdOverride, false, false);
 	}
 
 	/** Inspect existing history without repairing, migrating or creating any file on disk. */
 	static openReadOnly(path: string, agentDir: string): ReadonlySessionManager {
-		return SessionManager._open(path, agentDir, undefined, undefined, true);
+		return SessionManager._open(path, agentDir, undefined, undefined, true, false);
+	}
+
+	/** Existing worker histories are canonical; opening them never repairs storage. */
+	static openCanonical(path: string, agentDir: string, sessionDir?: string): SessionManager {
+		return SessionManager._open(path, agentDir, sessionDir, undefined, false, true);
 	}
 
 	private static _open(
@@ -3707,6 +3710,7 @@ export class SessionManager {
 		sessionDir: string | undefined,
 		cwdOverride: string | undefined,
 		readOnly: boolean,
+		canonicalOnly: boolean,
 	): SessionManager {
 		const resolvedPath = resolvePath(path);
 		// Read only the header here; the constructor performs the one full session load.
@@ -3714,7 +3718,7 @@ export class SessionManager {
 		const cwd = cwdOverride ?? header?.cwd ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, resolvedPath, true, agentDir, undefined, readOnly);
+		return new SessionManager(cwd, dir, resolvedPath, true, agentDir, undefined, readOnly, canonicalOnly);
 	}
 
 	/**
@@ -3768,10 +3772,6 @@ export class SessionManager {
 		}
 
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(resolvedTargetCwd, agentDir);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
-
 		// Create new session file with new ID but forked content
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
@@ -3790,7 +3790,7 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		withSessionFileLock(newSessionFile, () => {
+		withSessionFileMutation(agentDir, newSessionFile, newSessionId, "create", () => {
 			const fd = openSync(newSessionFile, "wx");
 			try {
 				writeFileSync(fd, `${JSON.stringify(newHeader)}\n`);
