@@ -25,8 +25,9 @@ export async function runJourney2(): Promise<void> {
 			warningAllowances: [
 				/^Worker conversation setup failed: Worker queued context has no proof of never-started, dead-owner recovery\.$/,
 				/^Memory subsystem init failed: The ICM chat for this project is owned by pid \d+ on [^\n]+, session [^\n]+, started [^\n]+, still running\. Only one session per project may run the ICM chat; close that session first\.$/,
-				// R18/R19 (System One off): the refused idle-root wake-up's one retrying report and its park, both caused by the
-				// session-file fence the one denied append raised.
+				// R18/R19 (System One off): the refused idle-root wake-up reports its unknown write outcome, then the session-file fence that
+				// outcome raised (each cause once), and parks.
+				/^Failed to notify terminal background tool task batch tool-task-\d+ \(retrying\): Session write outcome is unknown; reconcile the original session history before retrying these messages\.$/,
 				/^Failed to notify terminal background tool task batch tool-task-\d+ \(retrying\): Session persistence state is uncertain after a failed write; reopen the session file or start a new session before appending\.$/,
 				/^Background tool completion wake-up for tool-task-\d+ is parked after 10 consecutive failed deliveries \(still pending; the session file refused a write and accepts no append until the session is reopened; delivery resumes then; tool_task action=wait collects it now\): Session persistence state is uncertain after a failed write; reopen the session file or start a new session before appending\.$/,
 				// R30: the flaky worker's two inner provider retries, its one ladder retry, and the due retry's one refused cursor
