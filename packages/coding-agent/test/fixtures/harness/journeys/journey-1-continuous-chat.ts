@@ -19,6 +19,7 @@ import {
 	icmContinuousStore,
 	icmLatestResult,
 	icmReadContinuousRecords,
+	icmReadScheduler,
 	icmWaitForChatIdle,
 } from "./shared.ts";
 
@@ -467,16 +468,8 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		trace,
 		"R10s leaf 1 blocked",
 		world.io.waitForMutation(() => {
-			const raw = world.io.peekFile(store.queueFile);
-			if (raw === undefined) return false;
-			const { queue } = JSON.parse(raw) as {
-				readonly queue: {
-					readonly running: readonly unknown[];
-					readonly readyLeaves: readonly unknown[];
-					readonly blocked: readonly unknown[];
-				};
-			};
-			return queue.running.length === 0 && queue.readyLeaves.length === 0 && queue.blocked.length === 1;
+			const queue = icmReadScheduler(world, store);
+			return queue !== undefined && queue.running === 0 && queue.readyLeaves === 0 && queue.blocked === 1;
 		}),
 		60_000,
 	);

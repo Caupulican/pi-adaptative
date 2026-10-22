@@ -1145,6 +1145,7 @@ export function icmContinuousStore(agentDir: string) {
 		nodesDir: resolve(root, "nodes"),
 		rootFile: resolve(root, "root.json"),
 		queueFile: resolve(root, "queue.json"),
+		queueDatabase: resolve(root, "queue.sqlite"),
 		turnViewFile: resolve(root, "view.json"),
 		causalViewFile: resolve(root, "compaction-view.json"),
 		messagesIdx: resolve(root, "messages.idx"),
@@ -1216,9 +1217,49 @@ export function icmReadContinuousNodes(
 	return nodes;
 }
 
+/** The scheduler's committed work counts. A leaf row exists only once claimed, so unclaimed messages count as ready leaves. */
+export interface IcmSchedulerState {
+	readonly totalMessages: number;
+	readonly running: number;
+	readonly readyLeaves: number;
+	readonly readyParents: number;
+	readonly blocked: number;
+}
+
 /**
- * Waits event-driven on `world.io` until the continuous chat under `agentDir` has published at least `expectedMessages`
- * and its work queue has settled with no running, ready, or blocked work.
+ * Reads the durable work queue the way production stores it: `queue.json` is a marker, the state lives in `queue.sqlite`.
+ * Absent while the queue does not exist yet, is still a legacy file awaiting migration, or has a transaction open on it.
+ * An unrecognised marker fails loudly, so a storage change cannot degrade into a silent timeout.
+ */
+export function icmReadScheduler(
+	world: HarnessWorld,
+	store: ReturnType<typeof icmContinuousStore>,
+): IcmSchedulerState | undefined {
+	const raw = world.io.peekFile(store.queueFile);
+	if (raw === undefined) return undefined;
+	const marker = JSON.parse(raw) as { readonly storage?: unknown; readonly queue?: unknown };
+	if (marker.storage !== "sqlite") {
+		if (marker.queue !== undefined) return undefined;
+		throw new Error(`the ICM queue marker has an unexpected shape: ${raw}`);
+	}
+	const meta = world.guard.peekSqlite(store.queueDatabase, "SELECT body FROM meta WHERE id = 1");
+	const work = world.guard.peekSqlite(store.queueDatabase, "SELECT level, status FROM work");
+	if (meta?.length !== 1 || work === undefined) return undefined;
+	const { totalMessages, nextLeaf } = JSON.parse(String(meta[0]!.body)) as { totalMessages: number; nextLeaf: number };
+	const count = (matches: (row: Record<string, unknown>) => boolean): number =>
+		work.filter((row) => matches(row)).length;
+	return {
+		totalMessages,
+		running: count((row) => row.status === "running"),
+		readyLeaves: count((row) => row.status === "ready" && row.level === 0) + (totalMessages - nextLeaf),
+		readyParents: count((row) => row.status === "ready" && row.level !== 0),
+		blocked: count((row) => row.status === "blocked"),
+	};
+}
+
+/**
+ * Waits event-driven on `world.io` until the continuous chat under `agentDir` has published at least `expectedMessages`,
+ * the scheduler has seen every published message, and its work queue has settled with no running, ready, or blocked work.
  */
 export async function icmWaitForChatIdle(
 	world: HarnessWorld,
@@ -1232,27 +1273,13 @@ export async function icmWaitForChatIdle(
 		`ICM continuous chat idle (${expectedMessages} messages)`,
 		world.io.waitForMutation(() => {
 			const rootRaw = world.io.peekFile(store.rootFile);
-			const queueRaw = world.io.peekFile(store.queueFile);
-			if (rootRaw === undefined || queueRaw === undefined) return false;
+			if (rootRaw === undefined) return false;
 			const root = JSON.parse(rootRaw) as { readonly nextId: number };
 			if (root.nextId < expectedMessages) return false;
-			const queueEnvelope = JSON.parse(queueRaw) as {
-				readonly queue: {
-					readonly running: readonly unknown[];
-					readonly readyLeaves: readonly unknown[];
-					readonly readyParents: readonly unknown[];
-					readonly blocked: readonly unknown[];
-				};
-			};
-			const { queue } = queueEnvelope;
-			if (
-				queue.running.length > 0 ||
-				queue.readyLeaves.length > 0 ||
-				queue.readyParents.length > 0 ||
-				queue.blocked.length > 0
-			) {
-				return false;
-			}
+			const queue = icmReadScheduler(world, store);
+			// The root file is published before the scheduler is told of the new messages: wait out that gap too.
+			if (queue === undefined || queue.totalMessages !== root.nextId) return false;
+			if (queue.running > 0 || queue.readyLeaves > 0 || queue.readyParents > 0 || queue.blocked > 0) return false;
 			return predicate
 				? predicate(icmReadContinuousRecords(world, store), icmReadContinuousNodes(world, store))
 				: true;

@@ -6,7 +6,7 @@ import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import { basename, dirname, resolve, sep } from "node:path";
 import nativeProcess from "node:process";
-import type { DatabaseSync as NativeDatabaseSync } from "node:sqlite";
+import type { DatabaseSync as NativeDatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
 import { PassThrough, Writable } from "node:stream";
 import tls from "node:tls";
 import { fileURLToPath } from "node:url";
@@ -535,6 +535,12 @@ export class VirtualFileSystem {
 	peekFile(path: string): string | undefined {
 		const node = this.nodes.get(this.path(path));
 		return node?.kind === "file" ? node.data.toString() : undefined;
+	}
+
+	/** The identity of a file now, for scenario inspection: no ledger entry, no fault, no hold. */
+	peekIdentity(path: string): number | undefined {
+		const node = this.nodes.get(this.path(path));
+		return node?.kind === "file" ? node.identity : undefined;
 	}
 
 	/** Every file and directory under `root` (inclusive), byte exact, without touching the ledger, faults or holds. */
@@ -1591,6 +1597,11 @@ export class EffectGuard {
 	/** A persistent SQLite fault (see {@link VirtualSqlite.denyUntilCleared}); the close checks it was hit and cleared. */
 	denySqliteUntilCleared(fault: Parameters<VirtualSqlite["denyUntilCleared"]>[0]): SqliteDenial {
 		return this.sqlite.denyUntilCleared(fault);
+	}
+
+	/** Committed rows of one file database, for scenario inspection; see {@link VirtualSqlite.peek}. */
+	peekSqlite(path: string, sql: string, ...parameters: SQLInputValue[]): Record<string, SQLOutputValue>[] | undefined {
+		return this.sqlite.peek(path, sql, ...parameters);
 	}
 
 	/** The committed state of every RAM SQLite backing now: a durable point a crash cut can rewind to. */

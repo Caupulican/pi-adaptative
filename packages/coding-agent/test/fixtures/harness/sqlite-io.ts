@@ -1,10 +1,12 @@
-import { constants, type DatabaseSync, type SQLOutputValue } from "node:sqlite";
+import { constants, type DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
 
 interface SqliteFiles {
 	path(value: unknown): string;
 	existsSync(path: string): boolean;
 	writeFileSync(path: string, data: string): void;
 	statSync(path: string): { ino: number | bigint };
+	/** The file's identity without a ledger entry, fault or hold; `undefined` when it is absent. */
+	peekIdentity(path: string): number | bigint | undefined;
 }
 
 interface Backing {
@@ -430,6 +432,19 @@ export class VirtualSqlite {
 	 * The committed state of every backing now. A backing inside a transaction has no durable point to take, so the snapshot
 	 * refuses it rather than record uncommitted rows the shared connection can see.
 	 */
+	/**
+	 * Read-only scenario inspection of a file database's committed rows. It runs on the fixture-owned RAM backing, outside every
+	 * application handle: no scripted fault or denial is consumed, no handle is opened and nothing is ledgered. Absent when the file
+	 * has no backing yet or a transaction is open on it (never a half-applied view).
+	 */
+	peek(path: string, sql: string, ...parameters: SQLInputValue[]): Record<string, SQLOutputValue>[] | undefined {
+		if (!this.active) return undefined;
+		const identity = this.files.peekIdentity(this.files.path(path));
+		const backing = identity === undefined ? undefined : this.backings.get(identity);
+		if (!backing || backing.database.isTransaction) return undefined;
+		return backing.database.prepare(sql).all(...parameters);
+	}
+
 	snapshot(): VirtualSqliteSnapshot {
 		if (!this.active) return this.reject("sqlite.after_dispose");
 		const images = new Map<number | bigint, BackingImage>();
