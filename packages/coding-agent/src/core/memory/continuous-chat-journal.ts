@@ -1,6 +1,7 @@
 import type { Stats } from "node:fs";
 import { type FileHandle, lstat, open } from "node:fs/promises";
 import { sameFileVersion } from "../../kernel/storage/bounded-file.ts";
+import { readFileRangeInto } from "../../kernel/storage/positioned-file.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
 import { checkpointContinuousChatRecovery } from "./continuous-chat-recovery.ts";
 
@@ -12,23 +13,6 @@ export interface ContinuousChatJournalLine {
 	/** Physical byte position and byte length, excluding the LF separator. */
 	offset: number;
 	length: number;
-}
-
-async function readExactly(
-	handle: FileHandle,
-	buffer: Buffer,
-	length: number,
-	position: number,
-	signal?: AbortSignal,
-): Promise<void> {
-	let filled = 0;
-	while (filled < length) {
-		signal?.throwIfAborted();
-		const { bytesRead } = await handle.read(buffer, filled, length - filled, position + filled);
-		signal?.throwIfAborted();
-		if (bytesRead === 0) throw new Error("Continuous-chat journal changed while being read.");
-		filled += bytesRead;
-	}
 }
 
 async function assertUnchanged(path: string, handle: FileHandle, revision: Stats, signal?: AbortSignal): Promise<void> {
@@ -77,7 +61,7 @@ export async function recoverContinuousChatJournal(
 		for (let end = revision.size; end > fromBytes; ) {
 			const length = Math.min(READ_BYTES, end - fromBytes);
 			const start = end - length;
-			await readExactly(handle, buffer, length, start, signal);
+			await readFileRangeInto(handle, buffer.subarray(0, length), start, path, signal);
 			const newline = buffer.subarray(0, length).lastIndexOf(LINE_FEED);
 			if (newline !== -1) {
 				complete = start + newline + 1;
@@ -93,7 +77,7 @@ export async function recoverContinuousChatJournal(
 		let records = 0;
 		while (position < complete) {
 			const length = Math.min(READ_BYTES, complete - position);
-			await readExactly(handle, buffer, length, position, signal);
+			await readFileRangeInto(handle, buffer.subarray(0, length), position, path, signal);
 			let start = 0;
 			while (start < length) {
 				const next = buffer.subarray(start, length).indexOf(LINE_FEED);

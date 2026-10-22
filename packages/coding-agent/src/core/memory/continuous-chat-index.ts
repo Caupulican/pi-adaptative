@@ -5,9 +5,12 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { type FileHandle, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { type FileHandle, lstat, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
+import { sameFileVersion } from "../../kernel/storage/bounded-file.ts";
+import { readFileRangeInto, writeFileRangeFrom } from "../../kernel/storage/positioned-file.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
+import { checkpointContinuousChatRecovery } from "./continuous-chat-recovery.ts";
 
 /** Message entry: day number (4 bytes), line offset (6), line length (4), sourceKey digest (6). */
 export const CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES = 20;
@@ -149,17 +152,22 @@ async function missingFile(filePath: string): Promise<boolean> {
 	}
 }
 
-async function withDurableStagingFile(filePath: string, write: (handle: FileHandle) => Promise<void>): Promise<void> {
+async function withDurableStagingFile(
+	filePath: string,
+	write: (handle: FileHandle) => Promise<void>,
+	options?: { readWrite?: boolean; beforePublish?: () => Promise<void> },
+): Promise<void> {
 	await ensureDurableDirectory(dirname(filePath));
 	const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 	let handle: FileHandle | undefined;
 	let renamed = false;
 	try {
-		handle = await open(temporaryPath, "wx", 0o600);
+		handle = await open(temporaryPath, options?.readWrite ? "wx+" : "wx", 0o600);
 		await write(handle);
 		await handle.sync();
 		await handle.close();
 		handle = undefined;
+		await options?.beforePublish?.();
 		await rename(temporaryPath, filePath);
 		renamed = true;
 		await fsyncDirectory(dirname(filePath));
@@ -238,8 +246,8 @@ export async function readRecordAt(filePath: string, position: number, bytes: nu
 	if (handle === undefined) return undefined;
 	try {
 		const buffer = Buffer.alloc(bytes);
-		const { bytesRead } = await handle.read(buffer, 0, bytes, position);
-		return bytesRead === bytes ? buffer : undefined;
+		const complete = await readFileRangeInto(handle, buffer, position, filePath, undefined, true);
+		return complete ? buffer : undefined;
 	} finally {
 		await handle.close();
 	}
@@ -250,7 +258,7 @@ export async function writeRecordAt(filePath: string, position: number, record: 
 	if (await missingFile(filePath)) await appendDurably(filePath, "");
 	const handle = await open(filePath, "r+");
 	try {
-		await handle.write(record, 0, record.length, position);
+		await writeFileRangeFrom(handle, record, position, filePath);
 		await handle.sync();
 	} finally {
 		await handle.close();
@@ -268,9 +276,29 @@ function writeSlot(buffer: Buffer, position: number, entry: ContinuousChatKeyEnt
 
 /** The smallest capacity that keeps the table at or below half full, never below the minimum. */
 function keysCapacityFor(count: number): number {
+	if (!Number.isSafeInteger(count) || count < 0) throw new RangeError("Invalid continuous-chat key count.");
 	let capacity = KEYS_MIN_CAPACITY;
 	while (count * 2 >= capacity) capacity *= 2;
+	if (capacity > CONTINUOUS_CHAT_MAX_MESSAGES)
+		throw new RangeError("Continuous-chat key capacity exceeds its format.");
 	return capacity;
+}
+
+async function emptyKeysSlot(
+	digest: number,
+	capacity: number,
+	read: (index: number) => Promise<Buffer>,
+	filePath: string,
+	signal?: AbortSignal,
+): Promise<number> {
+	let index = digest % capacity;
+	for (let probes = 0; probes < capacity; probes++) {
+		if (signal !== undefined) await checkpointContinuousChatRecovery(signal, probes + 1);
+		const slot = await read(index);
+		if (slot.readUIntLE(6, 6) === 0) return index;
+		index = (index + 1) % capacity;
+	}
+	throw new ContinuousChatCorruptError(filePath, "Key index is full");
 }
 
 export async function readKeysHeader(filePath: string): Promise<ContinuousChatKeysHeader | undefined> {
@@ -291,10 +319,7 @@ export function keysHasRoom(header: ContinuousChatKeysHeader, added: number): bo
 
 async function readKeysSlot(handle: FileHandle, filePath: string, index: number): Promise<Buffer> {
 	const slot = Buffer.alloc(KEYS_SLOT_BYTES);
-	const { bytesRead } = await handle.read(slot, 0, KEYS_SLOT_BYTES, slotPosition(index));
-	if (bytesRead !== KEYS_SLOT_BYTES) {
-		throw new ContinuousChatCorruptError(filePath, `Key index slot ${index} is truncated`);
-	}
+	await readFileRangeInto(handle, slot, slotPosition(index), filePath);
 	return slot;
 }
 
@@ -330,47 +355,172 @@ export async function insertKeysEntries(
 	const handle = await open(filePath, "r+");
 	try {
 		for (const entry of entries) {
-			let index = entry.digest % header.capacity;
-			for (let probes = 0; ; probes++) {
-				if (probes === header.capacity) throw new ContinuousChatCorruptError(filePath, "Key index is full");
-				const slot = await readKeysSlot(handle, filePath, index);
-				if (slot.readUIntLE(6, 6) === 0) break;
-				index = (index + 1) % header.capacity;
-			}
+			const index = await emptyKeysSlot(
+				entry.digest,
+				header.capacity,
+				(slot) => readKeysSlot(handle, filePath, slot),
+				filePath,
+			);
 			const slot = Buffer.alloc(KEYS_SLOT_BYTES);
 			writeSlot(slot, 0, entry);
-			await handle.write(slot, 0, KEYS_SLOT_BYTES, slotPosition(index));
+			await writeFileRangeFrom(handle, slot, slotPosition(index), filePath);
 		}
 		const count = Buffer.alloc(6);
 		count.writeUIntLE(header.count + entries.length, 0, 6);
-		await handle.write(count, 0, 6, 6);
+		await writeFileRangeFrom(handle, count, 6, filePath);
 		await handle.sync();
 	} finally {
 		await handle.close();
 	}
 }
 
-/** Every occupied slot of a keys table. Used only when the table grows or is rebuilt. */
-export async function readKeysEntries(filePath: string): Promise<ContinuousChatKeyEntry[]> {
-	const image = await readFile(filePath);
-	const entries: ContinuousChatKeyEntry[] = [];
-	for (let position = KEYS_HEADER_BYTES; position + KEYS_SLOT_BYTES <= image.length; position += KEYS_SLOT_BYTES) {
-		const idPlusOne = image.readUIntLE(position + 6, 6);
-		if (idPlusOne !== 0) entries.push({ digest: image.readUIntLE(position, 6), id: idPlusOne - 1 });
-	}
-	return entries;
+const KEYS_PAGE_SLOTS = 4096;
+const KEYS_PAGE_BYTES = KEYS_PAGE_SLOTS * KEYS_SLOT_BYTES;
+const KEYS_CACHED_PAGES = Math.floor((8 * 1024 * 1024) / KEYS_PAGE_BYTES);
+const MESSAGE_READ_ENTRIES = 4096;
+
+interface KeysPage {
+	bytes: Buffer;
+	dirty: boolean;
 }
 
-/** A complete keys table holding `entries`, sized for their count, with every entry placed by linear probing. */
-export function buildKeysImage(entries: readonly ContinuousChatKeyEntry[]): Buffer {
-	const capacity = keysCapacityFor(entries.length);
-	const image = Buffer.alloc(KEYS_HEADER_BYTES + capacity * KEYS_SLOT_BYTES);
-	image.writeUIntLE(capacity, 0, 6);
-	image.writeUIntLE(entries.length, 6, 6);
-	for (const entry of entries) {
-		let index = entry.digest % capacity;
-		while (image.readUIntLE(slotPosition(index) + 6, 6) !== 0) index = (index + 1) % capacity;
-		writeSlot(image, slotPosition(index), entry);
+/** Bounded write-back cache for an unpublished, zero-initialized keys table. */
+class KeysPageCache {
+	private readonly handle: FileHandle;
+	private readonly capacity: number;
+	private readonly path: string;
+	private readonly pages = new Map<number, KeysPage>();
+
+	constructor(handle: FileHandle, capacity: number, path: string) {
+		this.handle = handle;
+		this.capacity = capacity;
+		this.path = path;
 	}
-	return image;
+
+	async read(index: number): Promise<Buffer> {
+		const page = await this.page(index);
+		const offset = (index % KEYS_PAGE_SLOTS) * KEYS_SLOT_BYTES;
+		return page.bytes.subarray(offset, offset + KEYS_SLOT_BYTES);
+	}
+
+	async write(index: number, entry: ContinuousChatKeyEntry): Promise<void> {
+		const page = await this.page(index);
+		writeSlot(page.bytes, (index % KEYS_PAGE_SLOTS) * KEYS_SLOT_BYTES, entry);
+		page.dirty = true;
+	}
+
+	async flush(): Promise<void> {
+		for (const [ordinal, page] of this.pages) await this.flushPage(ordinal, page);
+	}
+
+	private async flushPage(ordinal: number, page: KeysPage): Promise<void> {
+		if (!page.dirty) return;
+		await writeFileRangeFrom(this.handle, page.bytes, KEYS_HEADER_BYTES + ordinal * KEYS_PAGE_BYTES, this.path);
+		page.dirty = false;
+	}
+
+	private async page(index: number): Promise<KeysPage> {
+		const ordinal = Math.floor(index / KEYS_PAGE_SLOTS);
+		const cached = this.pages.get(ordinal);
+		if (cached !== undefined) {
+			this.pages.delete(ordinal);
+			this.pages.set(ordinal, cached);
+			return cached;
+		}
+		if (this.pages.size >= KEYS_CACHED_PAGES) {
+			const oldest = this.pages.entries().next().value;
+			if (oldest !== undefined) {
+				await this.flushPage(oldest[0], oldest[1]);
+				this.pages.delete(oldest[0]);
+			}
+		}
+		const slots = Math.min(KEYS_PAGE_SLOTS, this.capacity - ordinal * KEYS_PAGE_SLOTS);
+		const page: KeysPage = { bytes: Buffer.alloc(slots * KEYS_SLOT_BYTES), dirty: false };
+		await readFileRangeInto(this.handle, page.bytes, KEYS_HEADER_BYTES + ordinal * KEYS_PAGE_BYTES, this.path);
+		this.pages.set(ordinal, page);
+		return page;
+	}
+}
+
+/** Rebuild the keys table from exactly the authoritative message-index prefix, with bounded resident memory. */
+export async function rebuildKeysIndex(
+	filePath: string,
+	messageIndexPath: string,
+	count: number,
+	signal?: AbortSignal,
+): Promise<void> {
+	signal?.throwIfAborted();
+	const capacity = keysCapacityFor(count);
+	const expectedBytes = count * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES;
+	const revision = await lstat(messageIndexPath).catch((error: unknown) => {
+		if (count === 0 && isMissingFileError(error)) return undefined;
+		throw error;
+	});
+	if (revision !== undefined && (!revision.isFile() || revision.size !== expectedBytes)) {
+		throw new ContinuousChatCorruptError(messageIndexPath, "Message index does not match the key rebuild count");
+	}
+	const source = revision === undefined ? undefined : await open(messageIndexPath, "r");
+	try {
+		const validateSource = async (): Promise<void> => {
+			signal?.throwIfAborted();
+			const current = await lstat(messageIndexPath).catch((error: unknown) => {
+				if (revision === undefined && isMissingFileError(error)) return undefined;
+				throw error;
+			});
+			if (revision === undefined) {
+				if (current !== undefined) throw new Error("Message index appeared during key rebuild.");
+			} else if (
+				source === undefined ||
+				current === undefined ||
+				!sameFileVersion(revision, current) ||
+				!sameFileVersion(revision, await source.stat())
+			) {
+				throw new Error("Message index changed during key rebuild.");
+			}
+			signal?.throwIfAborted();
+		};
+		await validateSource();
+		await withDurableStagingFile(
+			filePath,
+			async (handle) => {
+				await handle.truncate(KEYS_HEADER_BYTES + capacity * KEYS_SLOT_BYTES);
+				const header = Buffer.alloc(KEYS_HEADER_BYTES);
+				header.writeUIntLE(capacity, 0, 6);
+				header.writeUIntLE(count, 6, 6);
+				await writeFileRangeFrom(handle, header, 0, filePath);
+				const pages = new KeysPageCache(handle, capacity, filePath);
+				const chunk = Buffer.alloc(MESSAGE_READ_ENTRIES * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES);
+				for (let first = 0; first < count; first += MESSAGE_READ_ENTRIES) {
+					if (source === undefined) throw new Error("Message index is missing during key rebuild.");
+					const rows = Math.min(MESSAGE_READ_ENTRIES, count - first);
+					await readFileRangeInto(
+						source,
+						chunk.subarray(0, rows * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES),
+						first * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES,
+						messageIndexPath,
+						signal,
+					);
+					for (let row = 0; row < rows; row++) {
+						await checkpointContinuousChatRecovery(signal, first + row);
+						const entry = {
+							digest: chunk.readUIntLE(row * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES + 14, 6),
+							id: first + row,
+						};
+						const slot = await emptyKeysSlot(
+							entry.digest,
+							capacity,
+							(index) => pages.read(index),
+							filePath,
+							signal,
+						);
+						await pages.write(slot, entry);
+					}
+				}
+				await pages.flush();
+			},
+			{ readWrite: true, beforePublish: validateSource },
+		);
+	} finally {
+		await source?.close();
+	}
 }

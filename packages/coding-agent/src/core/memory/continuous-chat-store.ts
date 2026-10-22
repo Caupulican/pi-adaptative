@@ -27,7 +27,6 @@ import {
 } from "./continuous-chat-contracts.ts";
 import {
 	appendDurably,
-	buildKeysImage,
 	CONTINUOUS_CHAT_MAX_MESSAGES,
 	CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES,
 	CONTINUOUS_CHAT_NODE_INDEX_ENTRY_BYTES,
@@ -47,9 +46,9 @@ import {
 	insertKeysEntries,
 	keysHasRoom,
 	readJsonFile,
-	readKeysEntries,
 	readKeysHeader,
 	readRecordAt,
+	rebuildKeysIndex,
 	writeDurableAtomic,
 	writeNodeIndexAtomic,
 	writeRecordAt,
@@ -905,7 +904,7 @@ export class ContinuousChatStore {
 				id: indexed + offset,
 			}));
 			await appendDurably(this.messageIndexFile, Buffer.concat(unindexed.locations.map(encodeMessageIndexEntry)));
-			await this.insertKeysLocked(entries);
+			await this.insertKeysLocked(entries, signal);
 		}
 		if (unindexed.nextId === root.nextId) return root;
 		const newest: SegmentEnd | undefined =
@@ -927,19 +926,7 @@ export class ContinuousChatStore {
 		const header = await readKeysHeader(this.keysIndexFile);
 		signal?.throwIfAborted();
 		if (header !== undefined && header.count === indexed) return;
-		const entries: ContinuousChatKeyEntry[] = [];
-		if (indexed > 0) {
-			const index = await readFile(this.messageIndexFile, { signal });
-			for (let id = 0; id < indexed; id++) {
-				await checkpointContinuousChatRecovery(signal, id);
-				const start = id * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES;
-				const end = start + CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES;
-				const location = decodeMessageIndexEntry(index.subarray(start, end));
-				entries.push({ digest: location.digest, id });
-			}
-		}
-		signal?.throwIfAborted();
-		await writeDurableAtomic(this.keysIndexFile, buildKeysImage(entries));
+		await rebuildKeysIndex(this.keysIndexFile, this.messageIndexFile, indexed, signal);
 	}
 
 	/** Log lines after the indexed prefix, in id order. A torn segment tail is cut off: it was never published. */
@@ -1077,9 +1064,10 @@ export class ContinuousChatStore {
 		this.nodeCache.clear();
 	}
 
-	/** Places keys in the table, growing it (by rebuilding from its own entries) when it would pass half full. */
-	private async insertKeysLocked(entries: ContinuousChatKeyEntry[]): Promise<void> {
+	/** Places keys in the table, rebuilding from the message index when it would pass half full. */
+	private async insertKeysLocked(entries: ContinuousChatKeyEntry[], signal?: AbortSignal): Promise<void> {
 		const header = await readKeysHeader(this.keysIndexFile);
+		signal?.throwIfAborted();
 		if (header === undefined) {
 			throw new ContinuousChatCorruptError(this.keysIndexFile, "Continuous-chat key index is missing");
 		}
@@ -1087,8 +1075,8 @@ export class ContinuousChatStore {
 			await insertKeysEntries(this.keysIndexFile, header, entries);
 			return;
 		}
-		const existing = await readKeysEntries(this.keysIndexFile);
-		await writeDurableAtomic(this.keysIndexFile, buildKeysImage([...existing, ...entries]));
+		// The new rows are already durable in messages.idx; rebuilding reads them exactly once there.
+		await rebuildKeysIndex(this.keysIndexFile, this.messageIndexFile, header.count + entries.length, signal);
 	}
 
 	/**
