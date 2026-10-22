@@ -1516,6 +1516,7 @@ export class ReflectionController {
 				cacheRetention: opts.cacheRetention,
 				reasoning: thinkingLevel,
 				sessionId: affinityKey,
+				requestGuard: opts.requestGuard,
 			};
 
 			// When streamFn is the raw streamSimple (e.g. in tests), auth must be injected explicitly.
@@ -1580,6 +1581,7 @@ export class ReflectionController {
 				transformContext: opts.transformContext,
 				planContext: opts.planContext,
 				requestPreflight: opts.requestPreflight,
+				requestGuard: opts.requestGuard,
 				onProviderRequestSnapshot: opts.onProviderRequestSnapshot,
 				...(maxTurns === undefined
 					? {}

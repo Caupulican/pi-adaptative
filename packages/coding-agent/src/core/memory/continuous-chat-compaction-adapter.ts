@@ -99,6 +99,20 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		return summary.model;
 	}
 
+	private guardSummaryRequest(model: Model<Api>, signal: AbortSignal | undefined): undefined {
+		signal?.throwIfAborted();
+		const current = this.summaryModel();
+		if (
+			current.provider !== model.provider ||
+			current.id !== model.id ||
+			current.api !== model.api ||
+			current.baseUrl !== model.baseUrl
+		) {
+			throw new Error("Continuous-chat summary model changed before its request could start.");
+		}
+		return undefined;
+	}
+
 	/**
 	 * The job's own system prompt and tools are not sent: the accepted request's snapshot is. The conversation's first
 	 * message carries the causal view; each send appends its task. Every paid call's report id names the job, the node it
@@ -127,6 +141,15 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 				const runTurn = async (activeTools: Tool[] = tools) => {
 					signal?.throwIfAborted();
 					const model = this.summaryModel();
+					let guardRejected = false;
+					const requestGuard = (requestModel: Model<Api>, requestSignal: AbortSignal | undefined): undefined => {
+						try {
+							return this.guardSummaryRequest(requestModel, requestSignal);
+						} catch (error) {
+							guardRejected = true;
+							throw error;
+						}
+					};
 					const attemptNumber = ++attempt;
 					const completion = await this.deps.complete({
 						systemPrompt,
@@ -136,19 +159,9 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 						thinkingLevel: CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL,
 						cacheRetention: "short",
 						laneKind: "continuous-chat",
-						requestPreflight: ({ model: requestModel }, requestSignal) => {
-							requestSignal?.throwIfAborted();
-							const current = this.summaryModel();
-							if (
-								current.provider !== requestModel.provider ||
-								current.id !== requestModel.id ||
-								current.api !== requestModel.api ||
-								current.baseUrl !== requestModel.baseUrl
-							) {
-								throw new Error("Continuous-chat summary model changed before its request could start.");
-							}
-							return undefined;
-						},
+						requestPreflight: ({ model: requestModel }, requestSignal) =>
+							requestGuard(requestModel, requestSignal),
+						requestGuard,
 						signal,
 					});
 					const reply = completion.messages?.at(-1);
@@ -162,14 +175,14 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 							attempt: attemptNumber,
 						});
 					}
-					return { completion, assistant, model };
+					return { completion, assistant, model, guardRejected };
 				};
-				let { completion: result, assistant, model: summaryModel } = await runTurn();
-				if (result.stopReason === "error") {
+				let { completion: result, assistant, model: summaryModel, guardRejected } = await runTurn();
+				if (result.stopReason === "error" && !guardRejected) {
 					this.deps.onModelFailure?.(summaryModel, result.errorMessage);
 					const nextSummary = this.deps.summary();
 					if (nextSummary.ok) {
-						({ completion: result, assistant, model: summaryModel } = await runTurn());
+						({ completion: result, assistant, model: summaryModel, guardRejected } = await runTurn());
 					}
 				}
 				if (

@@ -158,6 +158,12 @@ export interface StreamOptions {
 	temperature?: number;
 	maxTokens?: number;
 	signal?: AbortSignal;
+	/**
+	 * Synchronous host policy checked at the last harness-owned provider handoff, after admission
+	 * and credential loading. Throw to withhold the request. Consumed before provider dispatch;
+	 * asynchronous guards are invalid. Does not cancel requests already handed to a provider.
+	 */
+	requestGuard?: (model: Model<Api>, signal: AbortSignal | undefined) => undefined;
 	apiKey?: string;
 	/**
 	 * Non-secret host identity for the exact credential frozen into this request. Infrastructure

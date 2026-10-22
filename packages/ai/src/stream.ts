@@ -1,5 +1,6 @@
 import { getApiProvider } from "./api-registry.ts";
 import { getEnvApiKey, getEnvAuthHeaders } from "./env-api-keys.ts";
+import { dispatchGuardedProviderRequest } from "./provider-request-guard.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -22,6 +23,7 @@ import {
 import { TextProtocolLiveFilter } from "./utils/tool-repair/text-protocol-live-filter.ts";
 
 export { getEnvApiKey } from "./env-api-keys.ts";
+export { dispatchGuardedProviderRequest } from "./provider-request-guard.ts";
 
 let textToolProtocolBatchSequence = 0;
 
@@ -429,17 +431,18 @@ function startTextToolProtocolStream<TOptions extends StreamOptions>(
 	) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
 	const request = materializeProviderRequest(context, options);
-	if (!request.usesTextToolProtocol) return startProviderStream(request.context, options);
+	const dispatch = (providerOptions: TOptions | undefined) =>
+		dispatchGuardedProviderRequest(model, providerOptions, (guardedOptions) =>
+			startProviderStream(request.context, guardedOptions),
+		);
+	if (!request.usesTextToolProtocol) return dispatch(options);
 	const abortController = new AbortController();
 	const combined = combineAbortSignals([options?.signal, abortController.signal]);
 	const providerOptions = { ...options, signal: combined.signal } as TOptions;
-	return withTextToolProtocolResult(
-		startProviderStream(request.context, providerOptions),
-		model,
-		request.sourceContext,
-		providerOptions,
-		{ abortController, cleanup: combined.cleanup },
-	);
+	return withTextToolProtocolResult(dispatch(providerOptions), model, request.sourceContext, providerOptions, {
+		abortController,
+		cleanup: combined.cleanup,
+	});
 }
 
 /**

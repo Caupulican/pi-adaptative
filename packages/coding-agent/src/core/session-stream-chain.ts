@@ -1,6 +1,6 @@
 import type { AssistantMessage, Context } from "@caupulican/pi-ai";
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
-import { streamSimple } from "@caupulican/pi-ai/stream";
+import { dispatchGuardedProviderRequest, streamSimple } from "@caupulican/pi-ai/stream";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import type { StreamFn } from "../kernel/index.ts";
 import { type StreamIdleOptions, withStreamIdleWatchdog } from "../kernel/reliability/index.ts";
@@ -295,7 +295,9 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 			return failedRedactionStream(model, new Error(reason, { cause: error }));
 		}
 		// Provider failures retain the transport owner's classification and retry behavior.
-		return baseStreamFn(model, redactedContext, redactedOptions);
+		return dispatchGuardedProviderRequest(model, redactedOptions, (providerOptions) =>
+			baseStreamFn(model, redactedContext, providerOptions),
+		);
 	};
 	const credentialed: StreamFn =
 		baseStreamFn === streamSimple

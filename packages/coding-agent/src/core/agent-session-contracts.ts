@@ -352,6 +352,8 @@ export interface IsolatedCompletionOptions {
 	planContext?: AgentLoopConfig["planContext"];
 	/** Request-local budget/authority check, invoked immediately before every child provider transport. */
 	requestPreflight?: AgentLoopConfig["requestPreflight"];
+	/** Final synchronous policy check after harness admission/auth waits, before provider handoff. */
+	requestGuard?: AgentLoopConfig["requestGuard"];
 	/**
 	 * Durable per-request boundary, invoked once per accepted child provider request with the exact
 	 * materialization sent. A child conversation that owns a transcript records its own
