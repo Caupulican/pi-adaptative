@@ -1011,6 +1011,11 @@ function loadEntriesFromFileInternal(
 	let unterminatedTail = false;
 	try {
 		if (!sameFileVersion(revision, fstatSync(fd))) throw new Error("Session file changed while opening it.");
+		// The preliminary path check can observe a different file. Validate the first
+		// physical record on this descriptor before the permissive row parser runs.
+		if (revision.size > 0 && !readSessionHeaderFromDescriptor(fd, MAX_SESSION_HEADER_BYTES).ok) {
+			return { entries: [], indexedBytes: revision.size, revision };
+		}
 		const decoder = new StringDecoder("utf8");
 		const lines = new StreamingLineDecoder(maxLineChars, { overflow: "skip", lineEndings: "lf" });
 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
@@ -1184,21 +1189,25 @@ export function readSessionHeaderResult(
 	filePath: string,
 	maxBytes: number = MAX_SESSION_HEADER_BYTES,
 ): SessionHeaderReadResult {
-	let line: string;
 	try {
 		const fd = openSync(filePath, "r");
 		try {
-			const buffer = Buffer.alloc(maxBytes + 1);
-			const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
-			const newlineIndex = buffer.subarray(0, bytesRead).indexOf(0x0a);
-			if (newlineIndex < 0 && bytesRead > maxBytes) return { ok: false, reason: "not_a_header" };
-			line = buffer.toString("utf8", 0, newlineIndex >= 0 ? newlineIndex : bytesRead);
+			return readSessionHeaderFromDescriptor(fd, maxBytes);
 		} finally {
 			closeSync(fd);
 		}
 	} catch (cause) {
 		return { ok: false, reason: "unreadable", cause };
 	}
+}
+
+/** Header identity is validated on the same descriptor as the caller's remaining read. */
+function readSessionHeaderFromDescriptor(fd: number, maxBytes: number): SessionHeaderReadResult {
+	const buffer = Buffer.alloc(maxBytes + 1);
+	const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+	const newlineIndex = buffer.subarray(0, bytesRead).indexOf(0x0a);
+	if (newlineIndex < 0 && bytesRead > maxBytes) return { ok: false, reason: "not_a_header" };
+	const line = buffer.toString("utf8", 0, newlineIndex >= 0 ? newlineIndex : bytesRead);
 	if (!line) return { ok: false, reason: "not_a_header" };
 	let header: Record<string, unknown>;
 	try {
