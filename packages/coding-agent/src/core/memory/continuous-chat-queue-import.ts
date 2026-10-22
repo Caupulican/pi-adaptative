@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import { hasOnlyKeys, isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
 import { ContinuousChatCorruptError } from "./continuous-chat-index.ts";
+import { checkpointContinuousChatRecovery } from "./continuous-chat-recovery.ts";
 import { parseContinuousChatNodeCoordinate } from "./continuous-chat-tree.ts";
 import type { ContinuousChatBlockedWork, ContinuousChatWorkItem } from "./continuous-chat-work-queue.ts";
 import { CONTINUOUS_CHAT_MAX_FAILURE_REASON_CHARACTERS } from "./continuous-chat-work-queue.ts";
@@ -25,11 +26,12 @@ export interface LegacyQueueEntry {
 }
 
 /** Strict JSON tokens, bounded even for damaged input. No whole-file or whole-array buffer. */
-async function* tokens(path: string): AsyncGenerator<string> {
+async function* tokens(path: string, signal?: AbortSignal): AsyncGenerator<string> {
 	let pending = "";
 	let quoted = false;
 	let escaped = false;
-	for await (const chunk of createReadStream(path, { encoding: "utf8", highWaterMark: 64 * 1024 })) {
+	for await (const chunk of createReadStream(path, { encoding: "utf8", highWaterMark: 64 * 1024, signal })) {
+		await checkpointContinuousChatRecovery(signal);
 		for (const char of chunk) {
 			if (quoted) {
 				pending += char;
@@ -58,6 +60,7 @@ async function* tokens(path: string): AsyncGenerator<string> {
 			}
 		}
 	}
+	signal?.throwIfAborted();
 	if (quoted) throw new ContinuousChatCorruptError(path, "Unterminated legacy queue string");
 	if (pending) yield pending;
 }
@@ -67,9 +70,9 @@ class QueueJsonReader {
 	private readonly path: string;
 	private peeked: string | undefined;
 
-	constructor(path: string) {
+	constructor(path: string, signal?: AbortSignal) {
 		this.path = path;
-		this.source = tokens(path)[Symbol.asyncIterator]();
+		this.source = tokens(path, signal)[Symbol.asyncIterator]();
 	}
 	async next(): Promise<string | undefined> {
 		if (this.peeked !== undefined) {
@@ -156,11 +159,14 @@ function parseEntry(path: string, list: QueueArray, value: unknown): LegacyQueue
 export async function importLegacyQueue(
 	path: string,
 	consume: (entry: LegacyQueueEntry) => void | Promise<void>,
+	signal?: AbortSignal,
 ): Promise<LegacyQueueHeader> {
-	const reader = new QueueJsonReader(path);
+	signal?.throwIfAborted();
+	const reader = new QueueJsonReader(path, signal);
 	const envelope = new Set<string>();
 	const fields = new Map<string, unknown>();
 	let origin: unknown;
+	let visited = 0;
 	try {
 		await reader.expect("{");
 		for (;;) {
@@ -180,6 +186,7 @@ export async function importLegacyQueue(
 						if ((await reader.peek()) === "]") await reader.next();
 						else
 							for (;;) {
+								await checkpointContinuousChatRecovery(signal, visited++);
 								await consume(parseEntry(path, name as QueueArray, await reader.value()));
 								const separator = await reader.next();
 								if (separator === "]") break;
@@ -216,6 +223,7 @@ export async function importLegacyQueue(
 		const leafStreak = fields.get("leafStreak") as number;
 		if (nextLeaf > totalMessages || leafStreak > 4)
 			throw new ContinuousChatCorruptError(path, "Contradictory legacy queue counters");
+		signal?.throwIfAborted();
 		return {
 			origin,
 			revision: fields.get("revision") as number,

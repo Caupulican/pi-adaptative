@@ -139,11 +139,17 @@ export class ContinuousChatRuntime {
 	 * `ContinuousChatLeaseHeldError`, and nothing is retried. Dispatch begins at `start()`. A lease lost later stops the
 	 * runtime (see `handleLeaseLost`); `stop()` releases the lease.
 	 */
-	static async open(options: ContinuousChatRuntimeOptions): Promise<ContinuousChatRuntime> {
+	static async open(options: ContinuousChatRuntimeOptions, signal?: AbortSignal): Promise<ContinuousChatRuntime> {
+		signal?.throwIfAborted();
 		const runtime = new ContinuousChatRuntime(options);
-		await options.store.acquireRuntimeLease({ label: options.label, onLost: () => runtime.handleLeaseLost() });
+		await options.store.acquireRuntimeLease(
+			{ label: options.label, onLost: () => runtime.handleLeaseLost() },
+			signal,
+		);
 		try {
-			await options.store.recover();
+			signal?.throwIfAborted();
+			await options.store.recover(signal);
+			signal?.throwIfAborted();
 		} catch (error) {
 			runtime.reportLeaseRelease(await options.store.releaseRuntimeLease(), "after a failed recovery");
 			throw error;

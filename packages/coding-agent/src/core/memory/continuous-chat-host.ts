@@ -123,26 +123,33 @@ export class ContinuousChatHost {
 	 * Opens the runtime independently of summary-model availability. Opening takes the project's lease and fails once, with the
 	 * runtime's error, when a live session already holds it. A failure after the runtime opens releases the lease.
 	 */
-	static async open(options: ContinuousChatHostOptions): Promise<ContinuousChatHost> {
+	static async open(options: ContinuousChatHostOptions, signal?: AbortSignal): Promise<ContinuousChatHost> {
+		signal?.throwIfAborted();
 		// Before the runtime opens: no compaction can resolve the pre-activation prefix a reloaded session accepted.
 		options.resetCompactionPrefix();
+		signal?.throwIfAborted();
 		const store = new ContinuousChatStore({
 			agentDir: options.agentDir,
 			projectKey: options.projectKey,
 			warn: options.warn,
 		});
 		// Takes the project's lease. A live owner refuses it once (`ContinuousChatLeaseHeldError`), before anything opens.
-		const runtime = await ContinuousChatRuntime.open({
-			store,
-			port: options.compaction,
-			prefixHead: () => options.prefixHead(),
-			warn: options.warn,
-			label: options.sessionId,
-			...(options.timers !== undefined ? { timers: options.timers } : {}),
-		});
+		const runtime = await ContinuousChatRuntime.open(
+			{
+				store,
+				port: options.compaction,
+				prefixHead: () => options.prefixHead(),
+				warn: options.warn,
+				label: options.sessionId,
+				...(options.timers !== undefined ? { timers: options.timers } : {}),
+			},
+			signal,
+		);
 		try {
+			signal?.throwIfAborted();
 			const sessionLedger = createContinuousChatSessionLedger(runtime.store);
-			await sessionLedger.recordAttached(options.sessionId, options.sessionFile);
+			await sessionLedger.recordAttached(options.sessionId, options.sessionFile, signal);
+			signal?.throwIfAborted();
 			const started = createSettlement();
 			const ingestor = new ContinuousChatIngestor({
 				appender: runtime,

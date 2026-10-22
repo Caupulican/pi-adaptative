@@ -606,6 +606,8 @@ export class MemoryController {
 	private _shutdownPromise: Promise<void> | undefined;
 	private _activeMemorySystem: MemorySystem | undefined;
 	private _memoryGeneration = 0;
+	/** Cancels this activation's opening work, never the lifetime of a retained live chat. */
+	private _activationAbort: AbortController | undefined;
 	/** Monotone process-local revision advanced by the durable writer's authoritative change callback. */
 	private _memoryContentRevision = 0;
 	/** Active equivalent reads only. Completed snapshots are not cached across possible external file changes. */
@@ -931,6 +933,9 @@ export class MemoryController {
 		this._shutdownPromise ??= (async () => {
 			const legacy = this._legacyMemoryEnabled();
 			this._memoryGeneration++;
+			const activation = this._activationAbort;
+			this._activationAbort = undefined;
+			activation?.abort(new Error("Memory activation stopped by shutdown."));
 			this._fileStoreWriter = undefined;
 			// The coordinator stops, and persists its terminal record, before the reader it uses is released.
 			const hierarchyStopped = this._hierarchy?.detach();
@@ -2097,7 +2102,8 @@ export class MemoryController {
 	 * Opens the project chat for an ICM root generation and takes the project's lease, independent of its summary model.
 	 * Nothing is imported or subscribed yet; `_activateContinuousChat` starts the chat once its block is installed.
 	 */
-	private async _openContinuousChat(generation: number): Promise<void> {
+	private async _openContinuousChat(generation: number, signal: AbortSignal): Promise<void> {
+		signal.throwIfAborted();
 		const ports = this.deps.continuousChat;
 		const subscribe = this.deps.subscribeEntriesPersisted;
 		if (!ports || !subscribe || !this.deps.providerRequest) {
@@ -2105,16 +2111,19 @@ export class MemoryController {
 				"ICM project chat is not wired to this session: its ports and the provider request runtime are required.",
 			);
 		}
-		const host = await ContinuousChatHost.open({
-			...ports,
-			agentDir: this.deps.getAgentDir(),
-			projectKey: this._projectId(),
-			sessionId: this.deps.getSessionId(),
-			sessionFile: this.deps.getSessionFile?.(),
-			legacy: this._continuousChatLegacySource(),
-			subscribeEntriesPersisted: subscribe,
-			warn: (message) => this.deps.emitWarning(message),
-		});
+		const host = await ContinuousChatHost.open(
+			{
+				...ports,
+				agentDir: this.deps.getAgentDir(),
+				projectKey: this._projectId(),
+				sessionId: this.deps.getSessionId(),
+				sessionFile: this.deps.getSessionFile?.(),
+				legacy: this._continuousChatLegacySource(),
+				subscribeEntriesPersisted: subscribe,
+				warn: (message) => this.deps.emitWarning(message),
+			},
+			signal,
+		);
 		if (generation !== this._memoryGeneration) {
 			await host.dispose();
 			return;
@@ -2484,13 +2493,18 @@ export class MemoryController {
 	 * reach `onActivation`, so a host observes an activation it did not await (a recovery).
 	 */
 	initialize(cause: MemoryActivationCause = "load"): Promise<void> {
+		const previousActivation = this._activationAbort;
+		const activation = new AbortController();
+		this._activationAbort = activation;
 		const generation = ++this._memoryGeneration;
+		previousActivation?.abort(new Error("Memory activation was superseded."));
 		const system = this.deps.getSettingsManager().getMemorySystem();
 		this.deps.onActivation?.({ phase: "start", generation, system, cause });
 		let ended = false;
 		const end = (error: string | undefined): void => {
 			if (ended) return;
 			ended = true;
+			if (this._activationAbort === activation) this._activationAbort = undefined;
 			let outcome: "activated" | "failed" | "superseded" = "activated";
 			if (generation !== this._memoryGeneration) outcome = "superseded";
 			else if (error !== undefined) outcome = "failed";
@@ -2642,8 +2656,9 @@ export class MemoryController {
 					this._transcriptRecall = transcriptRecall;
 					if (system === "icm" && !this.deps.isChildSession()) {
 						if (keptChat !== undefined && this._continuousChat === keptChat) this._keepContinuousChat(keptChat);
-						else await this._openContinuousChat(generation);
+						else await this._openContinuousChat(generation, activation.signal);
 					}
+					if (generation !== this._memoryGeneration) return;
 					if (transcriptRecall) {
 						// Started in the background: the store load must not hold up memory initialization. It is
 						// current only while this generation serves history, whatever transitions happen later.

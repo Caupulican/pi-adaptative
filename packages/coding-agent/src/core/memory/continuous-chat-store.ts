@@ -63,6 +63,7 @@ import {
 	readContinuousChatLease,
 	releaseContinuousChatLeaseSync,
 } from "./continuous-chat-lease.ts";
+import { checkpointContinuousChatRecovery } from "./continuous-chat-recovery.ts";
 import type {
 	ContinuousChatClaim,
 	ContinuousChatScheduler,
@@ -226,7 +227,8 @@ function readLineAt(filePath: string, offset: number, length: number): Promise<L
  * Complete lines appended after `fromBytes`. Bytes after the last newline are not a line yet and stay unconsumed. Only
  * a segment that grew is opened, so an unchanged segment costs one stat.
  */
-async function readLogLines(filePath: string, fromBytes: number): Promise<LogLines> {
+async function readLogLines(filePath: string, fromBytes: number, signal?: AbortSignal): Promise<LogLines> {
+	signal?.throwIfAborted();
 	let size: number;
 	try {
 		size = (await stat(filePath)).size;
@@ -241,10 +243,17 @@ async function readLogLines(filePath: string, fromBytes: number): Promise<LogLin
 	if (size === fromBytes) return { lines: [], bytes: fromBytes, size };
 	const handle = await open(filePath, "r");
 	try {
+		signal?.throwIfAborted();
 		const buffer = Buffer.alloc(size - fromBytes);
 		let filled = 0;
 		while (filled < buffer.length) {
-			const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, fromBytes + filled);
+			signal?.throwIfAborted();
+			const { bytesRead } = await handle.read(
+				buffer,
+				filled,
+				Math.min(buffer.length - filled, 64 * 1024),
+				fromBytes + filled,
+			);
 			if (bytesRead === 0) {
 				throw new ContinuousChatCorruptError(filePath, "Continuous-chat segment changed while read");
 			}
@@ -254,6 +263,7 @@ async function readLogLines(filePath: string, fromBytes: number): Promise<LogLin
 		const lines: LogLine[] = [];
 		let start = 0;
 		while (start < complete) {
+			await checkpointContinuousChatRecovery(signal, lines.length);
 			const end = buffer.indexOf(LINE_FEED, start);
 			if (end > start) {
 				lines.push({ text: buffer.toString("utf8", start, end), offset: fromBytes + start, length: end - start });
@@ -519,7 +529,8 @@ export class ContinuousChatStore {
 	 * provably dead raises `ContinuousChatLeaseHeldError` once and is never taken over. A lease whose owner is proven
 	 * dead on this host is replaced. Every later locked operation fences on the token (see `withWriterLock`).
 	 */
-	async acquireRuntimeLease(options: ContinuousChatRuntimeLeaseOptions): Promise<void> {
+	async acquireRuntimeLease(options: ContinuousChatRuntimeLeaseOptions, signal?: AbortSignal): Promise<void> {
+		signal?.throwIfAborted();
 		if (this.lease !== undefined || this.leaseRelease.size > 0)
 			throw new Error("Continuous-chat runtime lease is held or still releasing.");
 		const record = createContinuousChatLeaseRecord({ label: options.label, now: new Date() });
@@ -528,10 +539,12 @@ export class ContinuousChatStore {
 		const candidate: HeldRuntimeLease = { token, onLost: options.onLost, releaseAtExit };
 		try {
 			await this.withProjectLock(async () => {
+				signal?.throwIfAborted();
 				// Another acquisition may have passed the first check while this one waited for the lock.
 				if (this.lease !== undefined || this.leaseRelease.size > 0)
 					throw new Error("Continuous-chat runtime lease is held or still releasing.");
 				const existing = await readContinuousChatLease(this.leaseFile);
+				signal?.throwIfAborted();
 				if (existing !== undefined && !isContinuousChatLeaseOwnerProvenDead(existing)) {
 					throw new ContinuousChatLeaseHeldError(existing);
 				}
@@ -603,9 +616,11 @@ export class ContinuousChatStore {
 	}
 
 	/** Startup recovery under the writer lock: reconciles everything, then requeues work claimed by a dead process. */
-	async recover(): Promise<void> {
+	async recover(signal?: AbortSignal): Promise<void> {
+		signal?.throwIfAborted();
 		await this.withWriterLock(async () => {
-			await this.reconcileLocked();
+			await this.reconcileLocked(signal);
+			signal?.throwIfAborted();
 			this.requireScheduler().recover();
 		});
 	}
@@ -906,19 +921,21 @@ export class ContinuousChatStore {
 	 * Brings the caches to the disk: reconciles the indexes and settles the views when the root moved, then reads the
 	 * queue. Steady-state work is one root read, plus index and view work only when the root revision changed.
 	 */
-	private async reconcileLocked(): Promise<LockedState> {
+	private async reconcileLocked(signal?: AbortSignal): Promise<LockedState> {
+		await checkpointContinuousChatRecovery(signal);
 		let root = await loadRoot(this.rootFile);
 		if (this.indexedRevision !== root.revision) {
-			root = await this.indexLocked(root);
-			await this.reconcileNodeIndexesLocked(root.nextId);
+			root = await this.indexLocked(root, signal);
+			await this.reconcileNodeIndexesLocked(root.nextId, signal);
 			this.indexedRevision = root.revision;
 		}
+		await checkpointContinuousChatRecovery(signal);
 		let settled = this.settled;
 		if (settled === undefined || settled.revision !== root.revision) {
-			settled = { revision: root.revision, views: await this.loadViewsLocked(root.nextId) };
+			settled = { revision: root.revision, views: await this.loadViewsLocked(root.nextId, signal) };
 			this.settled = settled;
 		}
-		const queue = await this.reconcileQueueLocked(root);
+		const queue = await this.reconcileQueueLocked(root, signal);
 		return { root, views: settled.views, queue, origin: queue.origin };
 	}
 
@@ -927,8 +944,9 @@ export class ContinuousChatStore {
 	 * index entry or an unterminated log tail is cut off; its line is still in the log and is indexed again. Runs only
 	 * when the root moved without this process (a crash, or another process), never on an ordinary operation.
 	 */
-	private async indexLocked(root: ContinuousChatRoot): Promise<ContinuousChatRoot> {
+	private async indexLocked(root: ContinuousChatRoot, signal?: AbortSignal): Promise<ContinuousChatRoot> {
 		const size = await fileSize(this.messageIndexFile);
+		signal?.throwIfAborted();
 		const indexed = Math.floor(size / CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES);
 		if (size !== indexed * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES) {
 			await truncate(this.messageIndexFile, indexed * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES);
@@ -939,9 +957,10 @@ export class ContinuousChatStore {
 				"Message index does not cover the published range",
 			);
 		}
-		await this.reconcileKeysLocked(indexed);
+		await this.reconcileKeysLocked(indexed, signal);
 		const last = indexed === 0 ? undefined : await this.readMessageLocation(indexed - 1);
-		const unindexed = await this.scanLogLocked(indexed, last);
+		const unindexed = await this.scanLogLocked(indexed, last, signal);
+		signal?.throwIfAborted();
 		if (unindexed.locations.length > 0) {
 			const entries = unindexed.locations.map((location, offset) => ({
 				digest: location.digest,
@@ -966,19 +985,22 @@ export class ContinuousChatStore {
 	}
 
 	/** The key index is derived from the message index. A missing or mismatched table is rebuilt from it. */
-	private async reconcileKeysLocked(indexed: number): Promise<void> {
+	private async reconcileKeysLocked(indexed: number, signal?: AbortSignal): Promise<void> {
 		const header = await readKeysHeader(this.keysIndexFile);
+		signal?.throwIfAborted();
 		if (header !== undefined && header.count === indexed) return;
 		const entries: ContinuousChatKeyEntry[] = [];
 		if (indexed > 0) {
-			const index = await readFile(this.messageIndexFile);
+			const index = await readFile(this.messageIndexFile, { signal });
 			for (let id = 0; id < indexed; id++) {
+				await checkpointContinuousChatRecovery(signal, id);
 				const start = id * CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES;
 				const end = start + CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES;
 				const location = decodeMessageIndexEntry(index.subarray(start, end));
 				entries.push({ digest: location.digest, id });
 			}
 		}
+		signal?.throwIfAborted();
 		await writeDurableAtomic(this.keysIndexFile, buildKeysImage(entries));
 	}
 
@@ -986,19 +1008,23 @@ export class ContinuousChatStore {
 	private async scanLogLocked(
 		indexed: number,
 		last: ContinuousChatMessageLocation | undefined,
+		signal?: AbortSignal,
 	): Promise<UnindexedLog> {
 		const lastDay = last === undefined ? undefined : continuousChatDayName(last.dayNo);
 		const locations: ContinuousChatMessageLocation[] = [];
 		let nextId = indexed;
 		let newest: SegmentEnd | undefined;
 		for (const file of await listSegments(this.mainDir)) {
+			await checkpointContinuousChatRecovery(signal);
 			const day = dayOfSegment(file);
 			if (lastDay !== undefined && day < lastDay) continue;
 			const filePath = join(this.mainDir, file);
 			const from = last !== undefined && day === lastDay ? last.offset + last.length + 1 : 0;
-			const read = await readLogLines(filePath, from);
+			const read = await readLogLines(filePath, from, signal);
+			signal?.throwIfAborted();
 			if (read.size > read.bytes) await truncate(filePath, read.bytes);
 			for (const line of read.lines) {
+				await checkpointContinuousChatRecovery(signal, nextId);
 				const record = decodeLine(filePath, line, "continuous-chat", parseContinuousChatRecord);
 				if (record.id !== nextId) throw new ContinuousChatCorruptError(filePath, `Expected message id ${nextId}`);
 				locations.push({
@@ -1019,7 +1045,7 @@ export class ContinuousChatStore {
 	 * without its slot, or a torn slot; neither is trusted. Exact duplicate journal lines are inert, while a conflicting
 	 * coordinate is corruption. This runs only on startup or after a failed/external publication.
 	 */
-	private async reconcileNodeIndexesLocked(published: number): Promise<void> {
+	private async reconcileNodeIndexesLocked(published: number, signal?: AbortSignal): Promise<void> {
 		const byLevel = new Map<
 			number,
 			{
@@ -1034,12 +1060,16 @@ export class ContinuousChatStore {
 				>;
 			}
 		>();
+		let visited = 0;
 		for (const file of await listSegments(this.treeDir)) {
+			await checkpointContinuousChatRecovery(signal);
 			const day = dayOfSegment(file);
 			const filePath = join(this.treeDir, file);
-			const read = await readLogLines(filePath, 0);
+			const read = await readLogLines(filePath, 0, signal);
+			signal?.throwIfAborted();
 			if (read.size > read.bytes) await truncate(filePath, read.bytes);
 			for (const line of read.lines) {
+				await checkpointContinuousChatRecovery(signal, visited++);
 				const node = decodeLine(filePath, line, "continuous-chat tree", parseContinuousChatTreeNode);
 				const coveredUntil = continuousChatNodeFirstMessage(node) + continuousChatNodeMessageCount(node.level);
 				if (!Number.isSafeInteger(coveredUntil) || coveredUntil > published) {
@@ -1074,6 +1104,7 @@ export class ContinuousChatStore {
 		}
 		for (const [level, levelData] of byLevel) {
 			for (const [ordinal, entry] of levelData.entries) {
+				await checkpointContinuousChatRecovery(signal, visited++);
 				for (const child of entry.children ?? []) {
 					if (byLevel.get(child.level)?.entries.has(child.ordinal) !== true) {
 						throw new ContinuousChatCorruptError(
@@ -1084,15 +1115,18 @@ export class ContinuousChatStore {
 				}
 			}
 		}
+		signal?.throwIfAborted();
 		await ensureDurableDirectory(this.nodeIndexDir);
 		const written = new Set<string>();
 		for (const [level, levelData] of byLevel) {
+			await checkpointContinuousChatRecovery(signal);
 			const name = `${level}.idx`;
 			written.add(name);
 			await writeNodeIndexAtomic(join(this.nodeIndexDir, name), levelData.highest, levelData.entries);
 			byLevel.delete(level);
 		}
 		for (const name of await readdir(this.nodeIndexDir)) {
+			signal?.throwIfAborted();
 			if (!/^\d+\.idx$/.test(name) || written.has(name)) continue;
 			await unlink(join(this.nodeIndexDir, name));
 		}
@@ -1117,10 +1151,11 @@ export class ContinuousChatStore {
 	 * The persisted views caught up to `expected`. A view never stored is created here, valid only while nothing is
 	 * logged: the empty view is persisted before the first log or root write.
 	 */
-	private async loadViewsLocked(expected: number): Promise<ViewPair> {
+	private async loadViewsLocked(expected: number, signal?: AbortSignal): Promise<ViewPair> {
 		const views: ViewPair = [createContinuousChatView("turn"), createContinuousChatView("causal")];
 		const persisted: [boolean, boolean] = [true, true];
 		for (const index of [0, 1] as const) {
+			signal?.throwIfAborted();
 			const kind: ContinuousChatViewKind = index === 0 ? "turn" : "causal";
 			const filePath = join(this.rootDir, viewFileName(kind));
 			const stored = await readViewFile(this.rootDir, kind);
@@ -1132,7 +1167,7 @@ export class ContinuousChatStore {
 			if (stored.totalMessages > expected) throw new ContinuousChatCorruptError(filePath, "Invalid persisted view");
 			views[index] = stored;
 		}
-		return this.settleViewsLocked(views, persisted, expected);
+		return this.settleViewsLocked(views, persisted, expected, signal);
 	}
 
 	/** Catches both views up to `expected`, and persists each one that was never stored or whose layout changed. */
@@ -1140,18 +1175,21 @@ export class ContinuousChatStore {
 		views: ViewPair,
 		persisted: [boolean, boolean],
 		expected: number,
+		signal?: AbortSignal,
 	): Promise<ViewPair> {
 		const coordinates = [
 			...views[0].entries,
 			...views[1].entries,
 			...leafCoordinates(Math.min(views[0].totalMessages, views[1].totalMessages), expected),
 		];
-		const nodes = await this.presentNodes(coordinates, true);
+		const nodes = await this.presentNodes(coordinates, true, signal);
+		signal?.throwIfAborted();
 		const turnAdvance = catchUpView(views[0], expected, nodes);
 		const causalAdvance = catchUpView(views[1], expected, nodes);
 		const causal = applyContinuousChatViewMerges(causalAdvance.state, turnAdvance.mergedParents, nodes);
 		const settled: ViewPair = [turnAdvance.state, causal];
 		for (const index of [0, 1] as const) {
+			signal?.throwIfAborted();
 			if (!persisted[index] || !sameLayout(views[index], settled[index])) {
 				await persistView(this.rootDir, settled[index]);
 			}
@@ -1163,12 +1201,18 @@ export class ContinuousChatStore {
 	 * The queue for the published range. A missing queue file for a non-empty chat predates the queue, and is rebuilt
 	 * once from the tree and marked `legacy-replay-v1`. Built items are completed, so the queue agrees with the tree.
 	 */
-	private async reconcileQueueLocked(root: ContinuousChatRoot): Promise<ContinuousChatSchedulerSnapshot> {
+	private async reconcileQueueLocked(
+		root: ContinuousChatRoot,
+		signal?: AbortSignal,
+	): Promise<ContinuousChatSchedulerSnapshot> {
+		signal?.throwIfAborted();
 		this.scheduler ??= await openContinuousChatScheduler(
 			this.queueFile,
 			root.nextId,
 			async (item) => (await this.nodeAt(item)) !== undefined,
+			signal,
 		);
+		signal?.throwIfAborted();
 		let state = this.scheduler.snapshot();
 		if (state.totalMessages > root.nextId) {
 			throw new ContinuousChatCorruptError(this.queueFile, "Work queue is ahead of the published log");
@@ -1403,11 +1447,13 @@ export class ContinuousChatStore {
 	private async presentNodes(
 		coordinates: Iterable<ContinuousChatNodeCoordinate>,
 		ancestors: boolean,
+		signal?: AbortSignal,
 	): Promise<Map<string, ContinuousChatTreeNode>> {
 		const nodes = new Map<string, ContinuousChatTreeNode>();
 		const visited = new Set<string>();
 		const pending = [...coordinates];
 		for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+			await checkpointContinuousChatRecovery(signal, visited.size);
 			const key = continuousChatNodeKey(next);
 			if (visited.has(key)) continue;
 			visited.add(key);
