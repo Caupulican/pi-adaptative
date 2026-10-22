@@ -80,7 +80,7 @@ interface QueuedInputPayload {
 	inputs: RecordedInput[];
 }
 
-/** Stored image sequence per image object, so an image already retained is not written again per snapshot. */
+/** Preferred sequence per image object; the receiving store always validates its scope and current bytes. */
 const retainedSequences = new WeakMap<ImageContent, number>();
 
 export interface QueuedInputRecordResult {
@@ -158,16 +158,12 @@ function writeRecord(
 		imageCount += input.images?.length ?? 0;
 		const images: RecordedImage[] = [];
 		for (const image of input.images ?? []) {
-			let sequence = retainedSequences.get(image);
-			let mimeType = image.mimeType;
-			if (sequence === undefined) {
-				if (!imageStore) throw new Error("Queued input carries an image but the session has no image store");
-				const stored = imageStore.retainContent(image);
-				sequence = stored.sequence;
-				mimeType = stored.mimeType;
-				retainedSequences.set(image, sequence);
-			}
-			images.push({ sequence, mimeType });
+			if (!imageStore) throw new Error("Queued input carries an image but the session has no image store");
+			// Image objects can move between sessions or change after a prior snapshot. A cached
+			// number is only a hint; retainContent owns current-store byte/MIME identity validation.
+			const stored = imageStore.retainContent(image, retainedSequences.get(image));
+			retainedSequences.set(image, stored.sequence);
+			images.push({ sequence: stored.sequence, mimeType: stored.mimeType });
 		}
 		recorded.push({
 			id: input.id,
