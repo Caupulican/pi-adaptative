@@ -9,6 +9,7 @@ import {
 } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { createSessionWorkEvidenceJournal } from "../../../../src/core/system-one/session-work-diff.ts";
+import { encodeWorkerTranscriptReference } from "../../../../src/kernel/session/worker-transcript-reference.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 
@@ -337,7 +338,10 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 					workerNavResults.dateDisabledMidRead?.isError === true &&
 					/Memory retrieval is disabled/i.test(workerNavResults.dateDisabledMidRead.text),
 				workRecordCount: wWorkRecords.length,
-				workRecordPrefix: wWorkRecords[0]?.text === "[worker-1] Observed #2 and #0 in continuous chat.",
+				// A native worker's report carries the exact reference to its transcript, as the production encoder spells it.
+				workRecordPrefix:
+					wWorkRecords[0]?.text ===
+					`[worker-1] [transcript ${encodeWorkerTranscriptReference({ parentSessionId: wRoot.sessionManager.getSessionId(), logicalAgentId: "worker-1" })}] Observed #2 and #0 in continuous chat.`,
 				rootWorkerLogHasHeader: rootWorkerLogText.startsWith("agent worker-1 page 1"),
 				rootWorkerLogHasReply: rootWorkerLogText.includes("Observed #2 and #0 in continuous chat."),
 			},
