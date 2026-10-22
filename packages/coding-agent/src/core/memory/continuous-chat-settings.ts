@@ -8,6 +8,7 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
 import type { MemorySystem } from "../settings/settings-schema.ts";
+import { CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS } from "./continuous-chat-work-queue.ts";
 import type { TranscriptSummarizerDeps } from "./transcript-summarizer.ts";
 
 export interface ContinuousChatViewBudget {
@@ -37,8 +38,6 @@ export interface ContinuousChatSettingsSource {
 export const CONTINUOUS_CHAT_TURN_VIEW_BUDGET: ContinuousChatViewBudget = { lowBytes: 64_000, highBytes: 128_000 };
 /** Intrinsic to ICM: a compaction's causal view is merged down to `lowBytes` once it passes `highBytes`. */
 export const CONTINUOUS_CHAT_CAUSAL_VIEW_BUDGET: ContinuousChatViewBudget = { lowBytes: 16_000, highBytes: 32_000 };
-/** Compactions that may run at once. */
-export const CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS = 8;
 /** The reasoning effort every compaction requests: the reference's xhigh, through the model's own thinking levels. */
 export const CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL = "xhigh" as const;
 

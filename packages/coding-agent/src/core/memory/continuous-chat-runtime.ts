@@ -22,11 +22,8 @@ import {
 	normalizeContinuousChatAppend,
 } from "./continuous-chat-contracts.ts";
 import type { ContinuousChatNavigationSource } from "./continuous-chat-navigation.ts";
-import type {
-	ContinuousChatStore,
-	ContinuousChatTurnSnapshot,
-	ContinuousChatWorkAbandonment,
-} from "./continuous-chat-store.ts";
+import type { ContinuousChatClaim } from "./continuous-chat-scheduler.ts";
+import type { ContinuousChatStore, ContinuousChatTurnSnapshot } from "./continuous-chat-store.ts";
 import {
 	continuousChatNodeFirstMessage,
 	continuousChatNodeLabel,
@@ -34,6 +31,7 @@ import {
 } from "./continuous-chat-tree.ts";
 import {
 	CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS,
+	type ContinuousChatWorkAbandonment,
 	type ContinuousChatWorkItem,
 	continuousChatWorkItemKey,
 } from "./continuous-chat-work-queue.ts";
@@ -102,7 +100,7 @@ export class ContinuousChatRuntime {
 	 * a success wakes background dispatch.
 	 */
 	private readonly workReleases: AsyncRetainedReleases<{
-		readonly item: ContinuousChatWorkItem;
+		readonly item: ContinuousChatClaim;
 		readonly abandonment: ContinuousChatWorkAbandonment;
 	}>;
 
@@ -393,7 +391,7 @@ export class ContinuousChatRuntime {
 		}
 	}
 
-	private startJob(item: ContinuousChatWorkItem): void {
+	private startJob(item: ContinuousChatClaim): void {
 		const key = continuousChatWorkItemKey(item);
 		// `finally` runs after the job is registered, so the map entry is always present when it is removed.
 		const job = this.runJob(item).finally(() => {
@@ -403,7 +401,7 @@ export class ContinuousChatRuntime {
 		this.jobs.set(key, job);
 	}
 
-	private async runJob(item: ContinuousChatWorkItem): Promise<void> {
+	private async runJob(item: ContinuousChatClaim): Promise<void> {
 		try {
 			await this.settle(item, await this.compact(item));
 		} catch (error) {
@@ -419,10 +417,7 @@ export class ContinuousChatRuntime {
 	}
 
 	/** Records how a claim ended; a record that cannot be written is retained, so the claim never leaks its slot. */
-	private async recordOrRetain(
-		item: ContinuousChatWorkItem,
-		abandonment: ContinuousChatWorkAbandonment,
-	): Promise<void> {
+	private async recordOrRetain(item: ContinuousChatClaim, abandonment: ContinuousChatWorkAbandonment): Promise<void> {
 		try {
 			await this.recordAbandonment(item, abandonment);
 		} catch (error) {
@@ -441,7 +436,7 @@ export class ContinuousChatRuntime {
 	}
 
 	private async recordAbandonment(
-		item: ContinuousChatWorkItem,
+		item: ContinuousChatClaim,
 		abandonment: ContinuousChatWorkAbandonment,
 	): Promise<void> {
 		const settlement =
@@ -485,7 +480,7 @@ export class ContinuousChatRuntime {
 		return { target: { kind: "merge", left, right }, end };
 	}
 
-	private async settle(item: ContinuousChatWorkItem, outcome: ContinuousChatCompactionOutcome): Promise<void> {
+	private async settle(item: ContinuousChatClaim, outcome: ContinuousChatCompactionOutcome): Promise<void> {
 		// After a lost lease the store refuses every write: the outcome is dropped and the claim left for recovery.
 		if (this.leaseLost) return;
 		switch (outcome.status) {

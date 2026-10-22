@@ -8,7 +8,7 @@ import { stateFile } from "../agent-paths.ts";
 import { isMissingFileError, withFileLock } from "../util/atomic-file.ts";
 import { AsyncRetainedReleases, type ReleaseOutcome, releaseFailureCause } from "../util/resource-release.ts";
 import type { TimerPort } from "../util/timer-port.ts";
-import { hasOnlyKeys, isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
+import { isNonNegativeSafeInteger } from "../util/value-guards.ts";
 import {
 	CONTINUOUS_CHAT_SCHEMA_VERSION,
 	type ContinuousChatAppendInput,
@@ -62,6 +62,12 @@ import {
 	readContinuousChatLease,
 	releaseContinuousChatLeaseSync,
 } from "./continuous-chat-lease.ts";
+import type {
+	ContinuousChatClaim,
+	ContinuousChatScheduler,
+	ContinuousChatSchedulerSnapshot,
+} from "./continuous-chat-scheduler.ts";
+import { openContinuousChatScheduler } from "./continuous-chat-scheduler-store.ts";
 import {
 	type ContinuousChatNodeCoordinate,
 	type ContinuousChatTreeNode,
@@ -87,19 +93,8 @@ import {
 } from "./continuous-chat-view.ts";
 import {
 	CONTINUOUS_CHAT_TOP_LEVEL,
+	type ContinuousChatWorkAbandonment,
 	type ContinuousChatWorkItem,
-	type ContinuousChatWorkQueueState,
-	claimContinuousChatWork,
-	completeContinuousChatWork,
-	continuousChatBuiltLeafPrefix,
-	createContinuousChatWorkQueue,
-	failContinuousChatWork,
-	noteContinuousChatArrival,
-	parseContinuousChatWorkQueue,
-	queuedItems,
-	recordContinuousChatMessages,
-	recoverContinuousChatWorkQueue,
-	releaseContinuousChatWork,
 } from "./continuous-chat-work-queue.ts";
 
 const PROJECT_KEY_PATTERN = /^[a-f0-9]{16}$/i;
@@ -107,7 +102,6 @@ const SEGMENT_PATTERN = /^\d{4}-\d{2}-\d{2}\.jsonl$/;
 const SEGMENT_SUFFIX = ".jsonl";
 const ROOT_FILE = "root.json";
 const QUEUE_FILE = "queue.json";
-const QUEUE_FILE_SCHEMA_VERSION = 2;
 const LOCK_FILE = "writer";
 const TURN_VIEW_FILE = "view.json";
 const CAUSAL_VIEW_FILE = "compaction-view.json";
@@ -127,7 +121,7 @@ export type ContinuousChatQueueOrigin = "fresh" | "legacy-replay-v1";
 
 /** A consistent read for a turn boundary: the queue that proves the prefix, and the rendered turn view it covers. */
 export interface ContinuousChatTurnSnapshot {
-	queue: ContinuousChatWorkQueueState;
+	queue: ContinuousChatSchedulerSnapshot;
 	totalMessages: number;
 	viewRevision: number;
 	view: string;
@@ -138,11 +132,6 @@ export interface ContinuousChatCausalPrefix {
 	text: string;
 	viewedMessages: number;
 }
-
-/** Requested disposition when a compaction did not acknowledge a complete publication. */
-export type ContinuousChatWorkAbandonment =
-	| { readonly kind: "release" }
-	| { readonly kind: "fail"; readonly reason: string };
 
 /** Reconciliation may prove publication even when the original append reported an error. */
 export type ContinuousChatWorkSettlement = "published" | "abandoned";
@@ -187,11 +176,6 @@ interface LogLines {
 	size: number;
 }
 
-interface StoredQueue {
-	origin: ContinuousChatQueueOrigin;
-	queue: ContinuousChatWorkQueueState;
-}
-
 /** Turn view, then causal view. */
 type ViewPair = [ContinuousChatViewState, ContinuousChatViewState];
 
@@ -204,15 +188,15 @@ interface SettledViews {
 interface LockedState {
 	root: ContinuousChatRoot;
 	views: ViewPair;
-	queue: ContinuousChatWorkQueueState;
+	queue: ContinuousChatSchedulerSnapshot;
 	origin: ContinuousChatQueueOrigin;
 }
 
-/** Exact uncertain write; clearing queue marks durability acknowledged, without consuming the caller's receipt. */
+/** Exact uncertain command; acknowledgement does not consume the caller's disposition receipt. */
 interface PendingWorkAbandonment {
+	claim: ContinuousChatClaim;
 	abandonment: ContinuousChatWorkAbandonment;
-	origin: ContinuousChatQueueOrigin;
-	queue: ContinuousChatWorkQueueState | undefined;
+	acknowledged: boolean;
 }
 
 /** The end of the last segment that holds published or indexed lines: its day, and the bytes consumed in it. */
@@ -370,22 +354,6 @@ async function persistView(rootDir: string, view: ContinuousChatViewState): Prom
 	await writeDurableAtomic(join(rootDir, viewFileName(view.kind)), `${JSON.stringify(view)}\n`);
 }
 
-/** The queue file, or undefined when it was never written. The envelope and the queue are parsed strictly. */
-async function readStoredQueue(filePath: string): Promise<StoredQueue | undefined> {
-	const parsed = await readJsonFile(filePath, "continuous-chat work queue");
-	if (parsed === undefined) return undefined;
-	if (!isPlainRecord(parsed) || !hasOnlyKeys(parsed, ["schemaVersion", "origin", "queue"])) {
-		throw new ContinuousChatCorruptError(filePath, "Invalid continuous-chat work queue envelope");
-	}
-	const { origin } = parsed;
-	if (parsed.schemaVersion !== QUEUE_FILE_SCHEMA_VERSION || (origin !== "fresh" && origin !== "legacy-replay-v1")) {
-		throw new ContinuousChatCorruptError(filePath, "Invalid continuous-chat work queue envelope");
-	}
-	const queue = parseContinuousChatWorkQueue(parsed.queue);
-	if (queue === undefined) throw new ContinuousChatCorruptError(filePath, "Invalid continuous-chat work queue");
-	return { origin, queue };
-}
-
 /** Advances a view one leaf at a time to `expectedMessages`, then refreshes its lines against the current tree. */
 function catchUpView(
 	view: ContinuousChatViewState,
@@ -419,20 +387,6 @@ function sameLayout(a: ContinuousChatViewState, b: ContinuousChatViewState): boo
 			);
 		})
 	);
-}
-
-/** Completes every queued item whose node is already published, so the queue agrees with the tree. */
-function completeBuiltWork(
-	state: ContinuousChatWorkQueueState,
-	nodes: ReadonlyMap<string, ContinuousChatTreeNode>,
-): ContinuousChatWorkQueueState {
-	let current = state;
-	let built = queuedItems(current).find((item) => nodes.has(continuousChatNodeKey(item)));
-	while (built !== undefined) {
-		current = completeContinuousChatWork(current, built);
-		built = queuedItems(current).find((item) => nodes.has(continuousChatNodeKey(item)));
-	}
-	return current;
 }
 
 /** Coordinates of the message leaves [from, to). */
@@ -486,7 +440,8 @@ async function persistImages(imagesDir: string, images: ContinuousChatImageInput
 
 /**
  * One project-scoped writer and reader. Daily segments are authoritative. The message index, the key index and the
- * node index are derived from them, and `root.json` publishes the message range. `queue.json` holds the work queue.
+ * node index are derived from them, and `root.json` publishes the message range. `queue.sqlite` owns deferred work;
+ * `queue.json` marks the indexed scheduler as authoritative.
  *
  * Every mutation runs under the writer lock. Each locked operation first fences itself: it re-reads the runtime lease
  * and fails, once and permanently for this store, when the lease on disk is no longer its own. Then it starts with
@@ -512,6 +467,7 @@ export class ContinuousChatStore {
 	readonly nodeIndexDir: string;
 	readonly leaseFile: string;
 	private readonly nodeCache = new Map<string, ContinuousChatTreeNode>();
+	private scheduler: ContinuousChatScheduler | undefined;
 	/** No new claim reuses a coordinate until its prior disposition has been acknowledged by its caller. */
 	private readonly pendingAbandonments = new Map<string, PendingWorkAbandonment>();
 	/** The runtime lease this store holds. Undefined before acquisition, after release, and after a loss. */
@@ -563,7 +519,8 @@ export class ContinuousChatStore {
 	 * dead on this host is replaced. Every later locked operation fences on the token (see `withWriterLock`).
 	 */
 	async acquireRuntimeLease(options: ContinuousChatRuntimeLeaseOptions): Promise<void> {
-		if (this.lease !== undefined) throw new Error("Continuous-chat runtime lease is already held by this store.");
+		if (this.lease !== undefined || this.leaseRelease.size > 0)
+			throw new Error("Continuous-chat runtime lease is held or still releasing.");
 		const record = createContinuousChatLeaseRecord({ label: options.label, now: new Date() });
 		await this.withProjectLock(async () => {
 			const existing = await readContinuousChatLease(this.leaseFile);
@@ -610,6 +567,7 @@ export class ContinuousChatStore {
 	/** Removes the lease file when it still names `lease`; the exit hook goes only once the file is not this lease's. */
 	private async removeLeaseFile(lease: HeldRuntimeLease): Promise<"released" | { superseded: string }> {
 		const removed = await this.withProjectLock(async () => {
+			this.closeScheduler();
 			const current = await readContinuousChatLease(this.leaseFile);
 			if (current?.token !== lease.token) return false;
 			await unlink(this.leaseFile);
@@ -619,12 +577,16 @@ export class ContinuousChatStore {
 		return removed ? "released" : { superseded: "the lease file no longer names this store's token" };
 	}
 
+	private closeScheduler(): void {
+		this.scheduler?.close();
+		this.scheduler = undefined;
+	}
+
 	/** Startup recovery under the writer lock: reconciles everything, then requeues work claimed by a dead process. */
 	async recover(): Promise<void> {
 		await this.withWriterLock(async () => {
-			const state = await this.reconcileLocked();
-			const queue = recoverContinuousChatWorkQueue(state.queue);
-			if (queue !== state.queue) await this.persistQueue(state.origin, queue);
+			await this.reconcileLocked();
+			this.requireScheduler().recover();
 		});
 	}
 
@@ -648,37 +610,40 @@ export class ContinuousChatStore {
 	}
 
 	/** The next background work item, or undefined when nothing is ready or the running limit is reached. */
-	async claimWork(): Promise<ContinuousChatWorkItem | undefined> {
+	async claimWork(): Promise<ContinuousChatClaim | undefined> {
 		return this.withWriterLock(async () => {
 			if (this.pendingAbandonments.size > 0) return undefined;
-			const state = await this.reconcileLocked();
-			const claim = claimContinuousChatWork(state.queue);
-			if (claim.state !== state.queue) await this.persistQueue(state.origin, claim.state);
-			return claim.item;
+			await this.reconcileLocked();
+			for (;;) {
+				const claim = this.requireScheduler().claim();
+				if (!claim || (await this.nodeAt(claim)) === undefined) return claim;
+				await this.completePublishedWorkLocked(claim);
+			}
 		});
 	}
 
 	/** A claimed item failed. Its reason remains available for diagnostics after a restart. */
-	async failWork(item: ContinuousChatWorkItem, reason: string): Promise<ContinuousChatWorkSettlement> {
+	async failWork(item: ContinuousChatClaim, reason: string): Promise<ContinuousChatWorkSettlement> {
 		return this.settleUnacknowledgedWork(item, { kind: "fail", reason });
 	}
 
-	async releaseWork(item: ContinuousChatWorkItem): Promise<ContinuousChatWorkSettlement> {
+	async releaseWork(item: ContinuousChatClaim): Promise<ContinuousChatWorkSettlement> {
 		return this.settleUnacknowledgedWork(item, { kind: "release" });
 	}
 
 	/** Publication is authoritative; only a still-running, unpublished claim may be abandoned. */
 	private settleUnacknowledgedWork(
-		item: ContinuousChatWorkItem,
+		item: ContinuousChatClaim,
 		abandonment: ContinuousChatWorkAbandonment,
 	): Promise<ContinuousChatWorkSettlement> {
 		return this.withWriterLock(async () => {
-			const state = await this.reconcileLocked();
+			await this.reconcileLocked();
 			const published = (await this.nodeAt(item)) !== undefined;
 			const key = continuousChatNodeKey(item);
 			const pending = this.pendingAbandonments.get(key);
 			if (pending) {
 				if (
+					pending.claim.claimId !== item.claimId ||
 					pending.abandonment.kind !== abandonment.kind ||
 					(pending.abandonment.kind === "fail" &&
 						abandonment.kind === "fail" &&
@@ -691,11 +656,11 @@ export class ContinuousChatStore {
 			if (published) return "published";
 			// Both transitions require running ownership. Missing work without a published node
 			// remains an error, not a successful release or evidence that compaction completed.
-			const queue =
-				abandonment.kind === "release"
-					? releaseContinuousChatWork(state.queue, item)
-					: failContinuousChatWork(state.queue, item, abandonment.reason);
-			this.pendingAbandonments.set(key, { abandonment: { ...abandonment }, origin: state.origin, queue });
+			this.pendingAbandonments.set(key, {
+				claim: { ...item },
+				abandonment: { ...abandonment },
+				acknowledged: false,
+			});
 			await this.confirmPendingAbandonmentsLocked();
 			this.pendingAbandonments.delete(key);
 			return "abandoned";
@@ -705,21 +670,22 @@ export class ContinuousChatStore {
 	/** Replay before any later mutation, never after a newer queue revision has been admitted. */
 	private async confirmPendingAbandonmentsLocked(): Promise<void> {
 		for (const pending of this.pendingAbandonments.values()) {
-			if (pending.queue === undefined) continue;
-			await this.persistQueue(pending.origin, pending.queue);
-			pending.queue = undefined;
+			if (pending.acknowledged) continue;
+			if ((await this.nodeAt(pending.claim)) === undefined)
+				this.requireScheduler().abandon(pending.claim, pending.abandonment);
+			else await this.completePublishedWorkLocked(pending.claim);
+			pending.acknowledged = true;
 		}
 	}
 
 	/** Completes an item whose node is already published. Idempotent. */
 	async completeWork(item: ContinuousChatWorkItem): Promise<void> {
 		await this.withWriterLock(async () => {
-			const state = await this.reconcileLocked();
+			await this.reconcileLocked();
 			if ((await this.nodeAt(item)) === undefined) {
 				throw new RangeError("Continuous-chat work item has no published node to complete it with.");
 			}
-			const queue = completeContinuousChatWork(state.queue, item);
-			if (queue !== state.queue) await this.persistQueue(state.origin, queue);
+			await this.completePublishedWorkLocked(item);
 		});
 	}
 
@@ -729,8 +695,8 @@ export class ContinuousChatStore {
 	 */
 	async noteArrival(): Promise<void> {
 		await this.withWriterLock(async () => {
-			const state = await this.reconcileLocked();
-			await this.persistQueue(state.origin, noteContinuousChatArrival(state.queue));
+			await this.reconcileLocked();
+			this.requireScheduler().arrival();
 		});
 	}
 
@@ -748,11 +714,8 @@ export class ContinuousChatStore {
 		});
 	}
 
-	async readQueue(): Promise<ContinuousChatWorkQueueState> {
-		const stored = await readStoredQueue(this.queueFile);
-		if (stored !== undefined) return stored.queue;
-		if ((await loadRoot(this.rootFile)).nextId === 0) return createContinuousChatWorkQueue();
-		throw new ContinuousChatCorruptError(this.queueFile, "Persisted continuous-chat work queue is missing");
+	async readQueue(): Promise<ContinuousChatSchedulerSnapshot> {
+		return this.withWriterLock(async () => (await this.reconcileLocked()).queue);
 	}
 
 	/** Published messages. */
@@ -782,7 +745,7 @@ export class ContinuousChatStore {
 		if (!Number.isSafeInteger(endMessage) || endMessage < 0) {
 			throw new TypeError("Continuous-chat prefix end must be a non-negative integer.");
 		}
-		const built = continuousChatBuiltLeafPrefix(await this.readQueue());
+		const built = (await this.readQueue()).builtLeafPrefix;
 		const viewed = Math.min(endMessage, built);
 		if (viewed === 0) {
 			const empty = new Map<string, ContinuousChatTreeNode>();
@@ -901,6 +864,12 @@ export class ContinuousChatStore {
 		this.lease = undefined;
 		this.pendingAbandonments.clear();
 		process.off("exit", lease.releaseAtExit);
+		try {
+			this.closeScheduler();
+		} catch (error) {
+			this.leaseRelease.retain(RUNTIME_LEASE_RELEASE_KEY, lease, error);
+			reason += `; scheduler close failed (${releaseFailureCause(error)})`;
+		}
 		lease.onLost();
 		throw new ContinuousChatLeaseLostError(this.leaseFile, reason);
 	}
@@ -921,8 +890,8 @@ export class ContinuousChatStore {
 			settled = { revision: root.revision, views: await this.loadViewsLocked(root.nextId) };
 			this.settled = settled;
 		}
-		const stored = await this.reconcileQueueLocked(root);
-		return { root, views: settled.views, queue: stored.queue, origin: stored.origin };
+		const queue = await this.reconcileQueueLocked(root);
+		return { root, views: settled.views, queue, origin: queue.origin };
 	}
 
 	/**
@@ -1166,23 +1135,37 @@ export class ContinuousChatStore {
 	 * The queue for the published range. A missing queue file for a non-empty chat predates the queue, and is rebuilt
 	 * once from the tree and marked `legacy-replay-v1`. Built items are completed, so the queue agrees with the tree.
 	 */
-	private async reconcileQueueLocked(root: ContinuousChatRoot): Promise<StoredQueue> {
-		const stored = await readStoredQueue(this.queueFile);
-		const origin: ContinuousChatQueueOrigin = stored?.origin ?? (root.nextId === 0 ? "fresh" : "legacy-replay-v1");
-		const base = stored?.queue ?? createContinuousChatWorkQueue();
-		if (base.totalMessages > root.nextId) {
+	private async reconcileQueueLocked(root: ContinuousChatRoot): Promise<ContinuousChatSchedulerSnapshot> {
+		this.scheduler ??= await openContinuousChatScheduler(
+			this.queueFile,
+			root.nextId,
+			async (item) => (await this.nodeAt(item)) !== undefined,
+		);
+		let state = this.scheduler.snapshot();
+		if (state.totalMessages > root.nextId) {
 			throw new ContinuousChatCorruptError(this.queueFile, "Work queue is ahead of the published log");
 		}
-		const counted = recordContinuousChatMessages(base, root.nextId);
-		const nodes = await this.presentNodes(queuedItems(counted), true);
-		const queue = completeBuiltWork(counted, nodes);
-		if (stored === undefined || queue !== stored.queue) await this.persistQueue(origin, queue);
-		return { origin, queue };
+		if (state.totalMessages < root.nextId) this.scheduler.arrival(root.nextId);
+		for (const claim of state.running)
+			if ((await this.nodeAt(claim)) !== undefined) await this.completePublishedWorkLocked(claim);
+		state = this.scheduler.snapshot();
+		return state;
 	}
 
-	private persistQueue(origin: ContinuousChatQueueOrigin, queue: ContinuousChatWorkQueueState): Promise<void> {
-		const envelope = { schemaVersion: QUEUE_FILE_SCHEMA_VERSION, origin, queue };
-		return writeDurableAtomic(this.queueFile, `${JSON.stringify(envelope)}\n`);
+	private requireScheduler(): ContinuousChatScheduler {
+		if (!this.scheduler) throw new Error("ICM scheduler has not been opened under its writer lease");
+		return this.scheduler;
+	}
+
+	private async completePublishedWorkLocked(item: ContinuousChatWorkItem): Promise<void> {
+		let parent: ContinuousChatWorkItem | undefined;
+		if (item.level < CONTINUOUS_CHAT_TOP_LEVEL) {
+			const sibling = { level: item.level, ordinal: item.ordinal % 2 === 0 ? item.ordinal + 1 : item.ordinal - 1 };
+			const candidate = { level: item.level + 1, ordinal: Math.floor(item.ordinal / 2) };
+			if ((await this.nodeAt(sibling)) !== undefined && (await this.nodeAt(candidate)) === undefined)
+				parent = candidate;
+		}
+		this.requireScheduler().complete(item, parent);
 	}
 
 	/** Writes the root. Its index files are durable first, so the root never names an entry that is not on disk. */
@@ -1234,8 +1217,7 @@ export class ContinuousChatStore {
 		const root = await this.commitRecordsLocked(created, state.root);
 		const views = await this.settleViewsLocked(state.views, [true, true], root.nextId);
 		this.settled = { revision: root.revision, views };
-		const queue = recordContinuousChatMessages(state.queue, root.nextId);
-		if (queue !== state.queue) await this.persistQueue(state.origin, queue);
+		this.requireScheduler().arrival(root.nextId);
 		return outcomes.map((outcome) => ({ revision: root.revision, ...outcome }));
 	}
 
@@ -1310,8 +1292,7 @@ export class ContinuousChatStore {
 			const views = await this.settleViewsLocked(state.views, [true, true], root.nextId);
 			this.settled = { revision: root.revision, views };
 		}
-		const queue = completeContinuousChatWork(state.queue, validated);
-		if (queue !== state.queue) await this.persistQueue(state.origin, queue);
+		await this.completePublishedWorkLocked(validated);
 		return existing === undefined;
 	}
 

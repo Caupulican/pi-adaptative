@@ -117,7 +117,7 @@ export function decodeNodeIndexEntry(buffer: Buffer): ContinuousChatSegmentLocat
 	return { dayNo: buffer.readUInt32LE(0), offset: buffer.readUIntLE(4, 6), length };
 }
 
-async function fsyncDirectory(directory: string): Promise<void> {
+export async function fsyncDirectory(directory: string): Promise<void> {
 	let handle: FileHandle | undefined;
 	try {
 		handle = await open(directory, "r");
