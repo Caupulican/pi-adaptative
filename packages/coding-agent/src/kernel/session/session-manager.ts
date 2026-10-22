@@ -74,6 +74,7 @@ import {
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import {
 	captureSessionAppendIdentity,
+	captureSessionAppendWriteIdentity,
 	SessionAppendCommittedError,
 	type SessionAppendIdentity,
 	type SessionAppendReceipt,
@@ -2224,7 +2225,8 @@ export class SessionManager {
 				this.fileEntries === fileEntries
 			)
 				this.persistenceStateUncertain = true;
-			if (writeStarted) throw new SessionAppendUncertainError(identity, error);
+			if (writeStarted)
+				throw new SessionAppendUncertainError(captureSessionAppendWriteIdentity(identity, encodedEntries), error);
 			throw error;
 		}
 		return Object.freeze({
@@ -2285,8 +2287,9 @@ export class SessionManager {
 
 	_persist(entry: SessionEntry): void {
 		const assertCurrent = this._capturePersistenceContext();
+		const identity = captureSessionAppendIdentity(this.sessionId, this.sessionFile, [entry]);
 		const encodedEntry = encodeSessionEntry(entry);
-		const receipt = this._persistEntries([entry], [encodedEntry], undefined, assertCurrent);
+		const receipt = this._persistEntries([entry], [encodedEntry], undefined, assertCurrent, { identity });
 		if (receipt) this._emitEntriesPersisted(receipt);
 	}
 

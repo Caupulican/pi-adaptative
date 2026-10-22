@@ -14,6 +14,7 @@ import {
 	type SessionAppendIdentity,
 	type SessionAppendReceipt,
 	SessionAppendUncertainError,
+	type SessionAppendWriteIdentity,
 } from "../kernel/session/session-append-receipt.ts";
 import type { SessionManager, SessionMessageBatchEntry } from "../kernel/session/session-manager.ts";
 import { ForegroundLifecycleController, type ProviderRetryLifecycleEvent } from "./foreground-lifecycle-controller.ts";
@@ -44,7 +45,7 @@ export class ForegroundLifecycleAdapter {
 		| ((message: Message, entryId: string, publication: SessionAppendIdentity) => void)
 		| undefined;
 	private readonly observeMessageUncertain:
-		| ((message: Message, entryId: string, publication: SessionAppendIdentity) => void)
+		| ((message: Message, entryId: string, publication: SessionAppendWriteIdentity) => void)
 		| undefined;
 	private readonly liveWarningSink: (() => ((message: string) => void) | undefined) | undefined;
 	private pendingWarnings: string[] = [];
@@ -70,7 +71,7 @@ export class ForegroundLifecycleAdapter {
 		liveWarningSink?: () => ((message: string) => void) | undefined,
 		observeProviderRequest?: (context: ProviderRequestSnapshotContext) => void,
 		prewarmToolCalls?: (calls: readonly ToolCallStartContext[], signal?: AbortSignal) => void,
-		observeMessageUncertain?: (message: Message, entryId: string, publication: SessionAppendIdentity) => void,
+		observeMessageUncertain?: (message: Message, entryId: string, publication: SessionAppendWriteIdentity) => void,
 	) {
 		this.agent = agent;
 		this.sessionManager = sessionManager;

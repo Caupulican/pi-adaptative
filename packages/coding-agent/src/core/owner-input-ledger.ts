@@ -1,5 +1,5 @@
 import { type OwnerInputId, ownerInputIdOf } from "../kernel/owner-input-stamp.ts";
-import type { SessionAppendIdentity } from "../kernel/session/session-append-receipt.ts";
+import type { SessionAppendIdentity, SessionAppendWriteIdentity } from "../kernel/session/session-append-receipt.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { uuidv7 } from "../kernel/uuid.ts";
 import { releaseFailureCause } from "./util/resource-release.ts";
@@ -58,7 +58,7 @@ export interface OwnerInputUncertainty {
 	readonly id: OwnerInputId;
 	readonly message: AgentMessage;
 	readonly entryId: string;
-	readonly publication: SessionAppendIdentity;
+	readonly publication: SessionAppendWriteIdentity;
 }
 
 /** What became of an input its submitter waited for: queued for delivery (no `ended`), or how it ended without delivery. */
@@ -140,7 +140,7 @@ export class OwnerInputLedger {
 	}
 
 	/** Retain both outcomes' effects until this exact write is resolved; repeated observation changes nothing. */
-	noteUncertain(message: AgentMessage, entryId: string, publication: SessionAppendIdentity): void {
+	noteUncertain(message: AgentMessage, entryId: string, publication: SessionAppendWriteIdentity): void {
 		if (message.role !== "user") return;
 		const id = ownerInputIdOf(message);
 		if (id === undefined) return;
@@ -148,7 +148,11 @@ export class OwnerInputLedger {
 		if (!record) return;
 		if (
 			!publication.entries.some(
-				(entry) => entry.id === entryId && entry.type === "message" && entry.source === message,
+				(entry) =>
+					entry.id === entryId &&
+					entry.type === "message" &&
+					entry.source === message &&
+					entry.ownerInputId === id,
 			)
 		)
 			throw new Error("Uncertain owner input does not match its publication identity.");

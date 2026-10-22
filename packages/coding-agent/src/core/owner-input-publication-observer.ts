@@ -1,5 +1,5 @@
 import type { Message } from "@caupulican/pi-ai";
-import type { SessionAppendIdentity } from "../kernel/session/session-append-receipt.ts";
+import type { SessionAppendIdentity, SessionAppendWriteIdentity } from "../kernel/session/session-append-receipt.ts";
 import type { OwnerInputLedger } from "./owner-input-ledger.ts";
 import { runReleaseSteps } from "./util/resource-release.ts";
 
@@ -18,7 +18,7 @@ export function createOwnerInputPublicationObserver(deps: OwnerInputPublicationD
 				[() => deps.noteEvidence(message, entryId), () => deps.inputs.notePersisted(message, entryId, publication)],
 				"Owner input persistence notifications failed.",
 			),
-		uncertain: (message: Message, entryId: string, publication: SessionAppendIdentity): void =>
+		uncertain: (message: Message, entryId: string, publication: SessionAppendWriteIdentity): void =>
 			runReleaseSteps(
 				[
 					() => deps.protectRecovery(publication.sessionFile),
