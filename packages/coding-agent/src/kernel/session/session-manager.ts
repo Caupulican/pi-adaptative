@@ -72,6 +72,7 @@ import {
 	validateSessionLifecycleEntry,
 } from "./lifecycle-ledger.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
+import { SessionAppendCommittedError, type SessionAppendReceipt } from "./session-append-receipt.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEndEntry,
@@ -2278,7 +2279,12 @@ export class SessionManager {
 		entries: readonly SessionEntry[],
 		preencodedEntries?: readonly string[],
 		signal?: AbortSignal,
-		publication?: { assertCurrent?: () => void; beforeNotify?: () => void },
+		publication?: {
+			assertCurrent?: () => void;
+			beforeNotify?: () => void;
+			sourceMessages?: readonly object[];
+			onCommitted?: (receipt: SessionAppendReceipt) => void;
+		},
 	): void {
 		this._assertWritable();
 		signal?.throwIfAborted();
@@ -2313,8 +2319,25 @@ export class SessionManager {
 		const assertPublishedContext = this._capturePersistenceContext();
 		const publishedFileEntries = this.fileEntries;
 		const publishedById = this.byId;
+		const committed: SessionAppendReceipt = Object.freeze({
+			sessionId: this.sessionId,
+			sessionFile: this.sessionFile,
+			durability: receipt ? "persisted" : this.persist ? "buffered" : "memory",
+			entries: Object.freeze(
+				entries.map((entry, index) =>
+					Object.freeze({
+						id: entry.id,
+						type: entry.type,
+						source:
+							publication?.sourceMessages?.[index] ?? (entry.type === "message" ? entry.message : undefined),
+					}),
+				),
+			),
+		});
 		try {
 			publication?.beforeNotify?.();
+			assertPublishedContext();
+			publication?.onCommitted?.(committed);
 			assertPublishedContext();
 			for (const entry of entries) {
 				if (entry.type === "message" && this.messageEntryIndex?.byId === this.byId) {
@@ -2333,7 +2356,7 @@ export class SessionManager {
 				this.lifecycleActiveCache = undefined;
 				this._invalidateSessionContextCache();
 			}
-			throw error;
+			throw new SessionAppendCommittedError(committed, error);
 		} finally {
 			if (receipt) this._emitEntriesPersisted(receipt);
 		}
@@ -2523,7 +2546,10 @@ export class SessionManager {
 	 * Append a bounded mixed message/custom-message batch as one durable publication.
 	 * Every item is encoded before the session tree or persistence state is mutated.
 	 */
-	appendMessageBatch(batch: readonly SessionMessageBatchEntry[]): string[] {
+	appendMessageBatch(
+		batch: readonly SessionMessageBatchEntry[],
+		onCommitted?: (receipt: SessionAppendReceipt) => void,
+	): string[] {
 		if (batch.length === 0) return [];
 		if (batch.length > MAX_SESSION_MESSAGE_BATCH_ENTRIES) {
 			throw new RangeError(
@@ -2532,6 +2558,7 @@ export class SessionManager {
 		}
 		const assertCurrent = this._capturePersistenceContext();
 		const entries: SessionEntry[] = [];
+		const sourceMessages: object[] = [];
 		const customBindings: Array<{ message: object; id: string }> = [];
 		const ids = pendingIdSpace(this.byId);
 		let parentId = this.leafId;
@@ -2542,7 +2569,8 @@ export class SessionManager {
 			const id = generateId(ids);
 			let entry: SessionEntry;
 			if (item.kind === "message") {
-				if (!item.message || typeof item.message !== "object") {
+				const message = item.message;
+				if (!message || typeof message !== "object") {
 					throw new TypeError("Session message batch message items require a message object.");
 				}
 				entry = {
@@ -2550,10 +2578,11 @@ export class SessionManager {
 					id,
 					parentId,
 					timestamp: new Date().toISOString(),
-					message: item.message,
+					message,
 					...(item.origin === undefined ? {} : { origin: item.origin }),
-					...deliveredOwnerInput(item.message),
+					...deliveredOwnerInput(message),
 				};
+				sourceMessages.push(message);
 			} else if (item.kind === "custom") {
 				const message = item.message;
 				if (!message || typeof message !== "object") {
@@ -2570,6 +2599,7 @@ export class SessionManager {
 					timestamp: new Date().toISOString(),
 				};
 				customBindings.push({ message, id });
+				sourceMessages.push(message);
 			} else {
 				throw new TypeError("Session message batch items must use kind message or custom.");
 			}
@@ -2580,6 +2610,8 @@ export class SessionManager {
 		const encodedEntries = entries.map((entry) => encodeSessionEntry(entry));
 		this._appendEntries(entries, encodedEntries, undefined, {
 			assertCurrent,
+			sourceMessages,
+			onCommitted,
 			beforeNotify: () => {
 				for (const { message, id } of customBindings) customMessageEntryIds.set(message, id);
 			},

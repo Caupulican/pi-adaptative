@@ -8,12 +8,18 @@ import type {
 	ProviderRequestSnapshotContext,
 	ToolCallStartContext,
 } from "../kernel/index.ts";
+import {
+	receiptMatchesMessageBatch,
+	SessionAppendCommittedError,
+	type SessionAppendReceipt,
+} from "../kernel/session/session-append-receipt.ts";
 import type { SessionManager, SessionMessageBatchEntry } from "../kernel/session/session-manager.ts";
 import { ForegroundLifecycleController, type ProviderRetryLifecycleEvent } from "./foreground-lifecycle-controller.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import { type ProviderLimitStore, providerLimitFromFailure } from "./provider-admission/limit-state.ts";
 import { ProviderCompatibilityWarnings } from "./provider-compatibility-warnings.ts";
 import { truncateWithEllipsis } from "./provider-tool-text.ts";
+import { runReleaseSteps } from "./util/resource-release.ts";
 
 /**
  * Host-side adapter for the foreground lifecycle boundary.
@@ -106,23 +112,12 @@ export class ForegroundLifecycleAdapter {
 	}
 
 	appendMessage(message: Message, origin?: AgentMessageOrigin): string {
-		const entryId = this.sessionManager.appendMessage(message, origin);
-		this.lifecycle.onMessagePersisted(message, entryId, origin);
-		this.observeMessagePersisted?.(message, entryId);
-		return entryId;
+		return this.appendMessageBatch([{ kind: "message", message, ...(origin === undefined ? {} : { origin }) }])[0]!;
 	}
 
 	/** Custom inputs share the canonical append owner, whether committed by a run or by the host. */
 	appendCustomMessage(message: CustomMessage<unknown>): string {
-		const entryId = this.sessionManager.appendCustomMessageEntry(
-			message.customType,
-			message.content,
-			message.display,
-			message.details,
-			message,
-		);
-		this.lifecycle.notePersistedMessage(message, entryId);
-		return entryId;
+		return this.appendMessageBatch([{ kind: "custom", message }])[0]!;
 	}
 
 	/** Commit a host turn through normal extension events, accepting only its exact durable receipt. */
@@ -174,14 +169,50 @@ export class ForegroundLifecycleAdapter {
 	}
 
 	appendMessageBatch(batch: readonly SessionMessageBatchEntry[]): string[] {
-		const entryIds = this.sessionManager.appendMessageBatch(batch);
-		for (let index = 0; index < batch.length; index += 1) {
-			const item = batch[index]!;
-			if (item.kind !== "message") continue;
-			this.lifecycle.onMessagePersisted(item.message, entryIds[index]!, item.origin);
-			this.observeMessagePersisted?.(item.message, entryIds[index]!);
+		if (batch.length === 0) return [];
+		const assertCurrent = this.sessionManager.captureBranchContext();
+		const submitted = batch.map((item) => Object.freeze({ ...item }));
+		assertCurrent();
+		const publication: { receipt?: SessionAppendReceipt } = {};
+		let failure: { error: unknown } | undefined;
+		try {
+			this.sessionManager.appendMessageBatch(submitted, (receipt) => {
+				publication.receipt = receipt;
+			});
+		} catch (error) {
+			if (error instanceof SessionAppendCommittedError) publication.receipt = error.receipt;
+			if (!publication.receipt) throw error;
+			failure = { error };
 		}
-		return entryIds;
+		const receipt = publication.receipt;
+		if (!receipt || !receiptMatchesMessageBatch(receipt, submitted))
+			throw new Error("Session append did not return its exact publication receipt.", { cause: failure?.error });
+		// The rows are canonical now. A failing lifecycle effect cannot suppress another row's delivery,
+		// and the caller receives the same receipt even when one or more effects fail.
+		const steps = submitted.flatMap((item, index) => {
+			const entryId = receipt.entries[index]!.id;
+			const noteLifecycle = () => {
+				assertCurrent();
+				if (item.kind === "message") this.lifecycle.onMessagePersisted(item.message, entryId, item.origin);
+				else this.lifecycle.notePersistedMessage(item.message, entryId);
+			};
+			return item.kind === "message"
+				? [
+						noteLifecycle,
+						() => {
+							assertCurrent();
+							this.observeMessagePersisted?.(item.message, entryId);
+						},
+					]
+				: [noteLifecycle];
+		});
+		try {
+			runReleaseSteps(steps, "Session publication notifications failed.", failure);
+		} catch (error) {
+			throw new SessionAppendCommittedError(receipt, error);
+		}
+		if (failure) throw new SessionAppendCommittedError(receipt, failure.error);
+		return receipt.entries.map((entry) => entry.id);
 	}
 
 	/**
