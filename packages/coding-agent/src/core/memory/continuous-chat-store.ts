@@ -1,7 +1,7 @@
 /** Durable, append-only storage adapter for the project-wide ICM conversation. */
 
 import { createHash } from "node:crypto";
-import { open, readdir, readFile, stat, truncate, unlink } from "node:fs/promises";
+import { readdir, readFile, stat, truncate, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { safeErrorMessage } from "../../kernel/types.ts";
 import { stateFile } from "../agent-paths.ts";
@@ -54,6 +54,7 @@ import {
 	writeNodeIndexAtomic,
 	writeRecordAt,
 } from "./continuous-chat-index.ts";
+import { type ContinuousChatJournalLine, recoverContinuousChatJournal } from "./continuous-chat-journal.ts";
 import {
 	ContinuousChatLeaseHeldError,
 	ContinuousChatLeaseLostError,
@@ -111,7 +112,6 @@ const MESSAGE_INDEX_FILE = "messages.idx";
 const KEYS_INDEX_FILE = "keys.idx";
 const NODE_INDEX_DIR = "nodes";
 const RUNTIME_LEASE_FILE = "runtime.lease.json";
-const LINE_FEED = 0x0a;
 
 /** Most messages one bulk append may carry. Inputs may carry images, so the bound keeps one publication small. */
 export const CONTINUOUS_CHAT_MAX_BULK_INPUTS = 256;
@@ -164,20 +164,6 @@ interface HeldRuntimeLease {
 	releaseAtExit: () => void;
 }
 
-interface LogLine {
-	text: string;
-	offset: number;
-	length: number;
-}
-
-interface LogLines {
-	lines: LogLine[];
-	/** Bytes consumed through the last complete line. An unterminated tail is not consumed. */
-	bytes: number;
-	/** Size of the file when it was read. A larger size than `bytes` is an unterminated tail. */
-	size: number;
-}
-
 /** Turn view, then causal view. */
 type ViewPair = [ContinuousChatViewState, ContinuousChatViewState];
 
@@ -214,7 +200,7 @@ interface UnindexedLog {
 	newest: SegmentEnd | undefined;
 }
 
-function readLineAt(filePath: string, offset: number, length: number): Promise<LogLine> {
+function readLineAt(filePath: string, offset: number, length: number): Promise<ContinuousChatJournalLine> {
 	return readRecordAt(filePath, offset, length).then((buffer) => {
 		if (buffer === undefined) {
 			throw new ContinuousChatCorruptError(filePath, `Continuous-chat line at byte ${offset} is truncated`);
@@ -223,60 +209,12 @@ function readLineAt(filePath: string, offset: number, length: number): Promise<L
 	});
 }
 
-/**
- * Complete lines appended after `fromBytes`. Bytes after the last newline are not a line yet and stay unconsumed. Only
- * a segment that grew is opened, so an unchanged segment costs one stat.
- */
-async function readLogLines(filePath: string, fromBytes: number, signal?: AbortSignal): Promise<LogLines> {
-	signal?.throwIfAborted();
-	let size: number;
-	try {
-		size = (await stat(filePath)).size;
-	} catch (error) {
-		if (!isMissingFileError(error)) throw error;
-		if (fromBytes > 0) throw new ContinuousChatCorruptError(filePath, "Continuous-chat segment disappeared");
-		return { lines: [], bytes: 0, size: 0 };
-	}
-	if (size < fromBytes) {
-		throw new ContinuousChatCorruptError(filePath, "Continuous-chat segment is shorter than its indexed bytes");
-	}
-	if (size === fromBytes) return { lines: [], bytes: fromBytes, size };
-	const handle = await open(filePath, "r");
-	try {
-		signal?.throwIfAborted();
-		const buffer = Buffer.alloc(size - fromBytes);
-		let filled = 0;
-		while (filled < buffer.length) {
-			signal?.throwIfAborted();
-			const { bytesRead } = await handle.read(
-				buffer,
-				filled,
-				Math.min(buffer.length - filled, 64 * 1024),
-				fromBytes + filled,
-			);
-			if (bytesRead === 0) {
-				throw new ContinuousChatCorruptError(filePath, "Continuous-chat segment changed while read");
-			}
-			filled += bytesRead;
-		}
-		const complete = buffer.lastIndexOf(LINE_FEED) + 1;
-		const lines: LogLine[] = [];
-		let start = 0;
-		while (start < complete) {
-			await checkpointContinuousChatRecovery(signal, lines.length);
-			const end = buffer.indexOf(LINE_FEED, start);
-			if (end > start) {
-				lines.push({ text: buffer.toString("utf8", start, end), offset: fromBytes + start, length: end - start });
-			}
-			start = end + 1;
-		}
-		return { lines, bytes: fromBytes + complete, size };
-	} finally {
-		await handle.close();
-	}
-}
-
-function decodeLine<T>(filePath: string, line: LogLine, label: string, parse: (value: unknown) => T | undefined): T {
+function decodeLine<T>(
+	filePath: string,
+	line: ContinuousChatJournalLine,
+	label: string,
+	parse: (value: unknown) => T | undefined,
+): T {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(line.text);
@@ -1020,22 +958,24 @@ export class ContinuousChatStore {
 			if (lastDay !== undefined && day < lastDay) continue;
 			const filePath = join(this.mainDir, file);
 			const from = last !== undefined && day === lastDay ? last.offset + last.length + 1 : 0;
-			const read = await readLogLines(filePath, from, signal);
-			signal?.throwIfAborted();
-			if (read.size > read.bytes) await truncate(filePath, read.bytes);
-			for (const line of read.lines) {
-				await checkpointContinuousChatRecovery(signal, nextId);
-				const record = decodeLine(filePath, line, "continuous-chat", parseContinuousChatRecord);
-				if (record.id !== nextId) throw new ContinuousChatCorruptError(filePath, `Expected message id ${nextId}`);
-				locations.push({
-					dayNo: continuousChatDayNumber(day),
-					offset: line.offset,
-					length: line.length,
-					digest: continuousChatSourceKeyDigest(record.sourceKey),
-				});
-				nextId++;
-			}
-			if (read.lines.length > 0) newest = { day, bytes: read.bytes };
+			const read = await recoverContinuousChatJournal(
+				filePath,
+				from,
+				(line) => {
+					const record = decodeLine(filePath, line, "continuous-chat", parseContinuousChatRecord);
+					if (record.id !== nextId)
+						throw new ContinuousChatCorruptError(filePath, `Expected message id ${nextId}`);
+					locations.push({
+						dayNo: continuousChatDayNumber(day),
+						offset: line.offset,
+						length: line.length,
+						digest: continuousChatSourceKeyDigest(record.sourceKey),
+					});
+					nextId++;
+				},
+				signal,
+			);
+			if (read.records > 0) newest = { day, bytes: read.bytes };
 		}
 		return { locations, nextId, newest };
 	}
@@ -1065,42 +1005,46 @@ export class ContinuousChatStore {
 			await checkpointContinuousChatRecovery(signal);
 			const day = dayOfSegment(file);
 			const filePath = join(this.treeDir, file);
-			const read = await readLogLines(filePath, 0, signal);
-			signal?.throwIfAborted();
-			if (read.size > read.bytes) await truncate(filePath, read.bytes);
-			for (const line of read.lines) {
-				await checkpointContinuousChatRecovery(signal, visited++);
-				const node = decodeLine(filePath, line, "continuous-chat tree", parseContinuousChatTreeNode);
-				const coveredUntil = continuousChatNodeFirstMessage(node) + continuousChatNodeMessageCount(node.level);
-				if (!Number.isSafeInteger(coveredUntil) || coveredUntil > published) {
-					throw new ContinuousChatCorruptError(
-						filePath,
-						`Tree node ${continuousChatNodeKey(node)} exceeds the published log`,
-					);
-				}
-				let level = byLevel.get(node.level);
-				if (level === undefined) {
-					level = { highest: -1, entries: new Map() };
-					byLevel.set(node.level, level);
-				}
-				const digest = createHash("sha256").update(JSON.stringify(node)).digest("hex");
-				const existing = level.entries.get(node.ordinal);
-				if (existing !== undefined && existing.digest !== digest) {
-					throw new ContinuousChatCorruptError(filePath, `Conflicting tree node ${continuousChatNodeKey(node)}`);
-				}
-				if (existing === undefined) {
-					level.highest = Math.max(level.highest, node.ordinal);
-					level.entries.set(node.ordinal, {
-						location: {
-							dayNo: continuousChatDayNumber(day),
-							offset: line.offset,
-							length: line.length,
-						},
-						digest,
-						children: node.children,
-					});
-				}
-			}
+			await recoverContinuousChatJournal(
+				filePath,
+				0,
+				(line) => {
+					const node = decodeLine(filePath, line, "continuous-chat tree", parseContinuousChatTreeNode);
+					const coveredUntil = continuousChatNodeFirstMessage(node) + continuousChatNodeMessageCount(node.level);
+					if (!Number.isSafeInteger(coveredUntil) || coveredUntil > published) {
+						throw new ContinuousChatCorruptError(
+							filePath,
+							`Tree node ${continuousChatNodeKey(node)} exceeds the published log`,
+						);
+					}
+					let level = byLevel.get(node.level);
+					if (level === undefined) {
+						level = { highest: -1, entries: new Map() };
+						byLevel.set(node.level, level);
+					}
+					const digest = createHash("sha256").update(JSON.stringify(node)).digest("hex");
+					const existing = level.entries.get(node.ordinal);
+					if (existing !== undefined && existing.digest !== digest) {
+						throw new ContinuousChatCorruptError(
+							filePath,
+							`Conflicting tree node ${continuousChatNodeKey(node)}`,
+						);
+					}
+					if (existing === undefined) {
+						level.highest = Math.max(level.highest, node.ordinal);
+						level.entries.set(node.ordinal, {
+							location: {
+								dayNo: continuousChatDayNumber(day),
+								offset: line.offset,
+								length: line.length,
+							},
+							digest,
+							children: node.children,
+						});
+					}
+				},
+				signal,
+			);
 		}
 		for (const [level, levelData] of byLevel) {
 			for (const [ordinal, entry] of levelData.entries) {
