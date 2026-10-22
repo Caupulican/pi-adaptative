@@ -5289,10 +5289,15 @@ export class WorkerDelegationController {
 		// The one cleanup closure owns this hold across both normal and late physical settlement.
 		const cleanupErrors = new Set<unknown>();
 		const releaseSpecialist = this.beginSpecialistExecution(agentId);
-		const releaseExecutionResources = (): void => {
-			releaseSpecialist();
+		// The physical run has ended: its reload registration and runtime admission end with it, whatever happens to the hold,
+		// the project claim and the reservation, which a failed release keeps. Both releases are idempotent.
+		const releasePhysicalLifetime = (): void => {
 			deregisterInFlight();
 			releaseExecution();
+		};
+		const releaseExecutionResources = (): void => {
+			releaseSpecialist();
+			releasePhysicalLifetime();
 		};
 		const completionErrors = new Set<unknown>();
 		let cleanupCompletion: Promise<void> | undefined;
@@ -5400,6 +5405,8 @@ export class WorkerDelegationController {
 					this.runTeardownStep("wake worker scheduler", () => this.scheduler.drain(true), cleanupErrors);
 				if (resourcesReleased)
 					this.runTeardownStep("release worker execution resources", releaseExecutionResources, cleanupErrors);
+				else if (!releaseTransferred)
+					this.runTeardownStep("release worker physical lifetime", releasePhysicalLifetime, cleanupErrors);
 			})().then(cleanup.resolve, cleanup.reject);
 			return cleanup.promise;
 		};
