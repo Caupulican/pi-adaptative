@@ -498,7 +498,7 @@ export interface WorkerDelegationControllerDeps {
 	getGoalStateSnapshot(): GoalState | undefined;
 	/** Current foreground submission epoch, or undefined when none is held. Read once, at genuine
 	 * lane-creation time in `prepareWorkerAttempt`, to stamp the new lane's owner epoch via
-	 * `WorkerNotificationCoordinator.noteLaneOwnerEpoch` -- see that method's doc comment. */
+	 * `WorkerNotificationCoordinator.noteAttemptOwnerEpoch` -- see that method's doc comment. */
 	getCurrentSubmissionEpoch?(): number | undefined;
 	/**
 	 * The project chat's view a worker is born with, before its task: the delegating turn's pinned view, or the latest
@@ -958,7 +958,8 @@ export class WorkerDelegationController {
 			timers: this.deps.getTimers().port("worker-wait"),
 			warn: (message) => this.safeWarn(message),
 			getCurrentSubmissionEpoch: () => this.deps.getCurrentSubmissionEpoch?.(),
-			noteLaneOwnerEpoch: (laneId, ownerEpoch) => this.notifications.noteLaneOwnerEpoch(laneId, ownerEpoch),
+			noteAttemptOwnerEpoch: (attemptId, ownerEpoch) =>
+				this.notifications.noteAttemptOwnerEpoch(attemptId, ownerEpoch),
 		});
 		this.terminalHandoffs = new WorkerTerminalHandoffCoordinator({
 			deliver: (handoff) => this.deliverTerminalHandoff(handoff),
@@ -3099,7 +3100,7 @@ export class WorkerDelegationController {
 				this.projectAgents.set(laneId, project);
 			}
 			const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
-			if (ownerEpoch !== undefined) this.notifications.noteLaneOwnerEpoch(value.record.laneId, ownerEpoch);
+			if (ownerEpoch !== undefined) this.notifications.noteAttemptOwnerEpoch(value.attempt.attemptId, ownerEpoch);
 			return value;
 		};
 		if (project?.admission.kind === "claimed") {

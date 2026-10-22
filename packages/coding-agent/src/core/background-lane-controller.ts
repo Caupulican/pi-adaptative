@@ -329,26 +329,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? record.laneId;
 	}
 
-	/** Observe only logical-agent terminals explicitly exposed by a bounded model result. */
-	observeWorkerAgentTerminals(agentIds: readonly string[]): void {
-		if (!this._workerLifecycle) return;
-		const targets = new Set(agentIds);
-		this.observeWorkerTerminalRecords(
-			this.getLaneRecords().filter(
-				(record) => isLaneTerminalStatus(record.status) && targets.has(this.workerAgentIdForRecord(record)),
-			),
-		);
-	}
-
-	private observeCapturedWorkerTerminals(laneIds: readonly string[] | undefined): void {
-		if (!this._workerLifecycle) return;
-		const capturedLaneIds = new Set(laneIds ?? []);
-		if (capturedLaneIds.size === 0) return;
-		this.observeWorkerTerminalRecords(
-			this._workerLifecycle
-				.getAllRecords()
-				.filter((record) => isLaneTerminalStatus(record.status) && capturedLaneIds.has(record.laneId)),
-		);
+	/** Acknowledge the captured generations only, without reselecting a task or interpreting a display name. */
+	observeWorkerAttemptTerminals(attemptIds: readonly string[]): void {
+		const snapshot = this._workerLifecycle?.getTaskRuntimeSnapshot();
+		if (snapshot) this._observeExactAttemptTerminals(snapshot, [...new Set(attemptIds)]);
 	}
 
 	observeWorkerTerminalRecords(records: readonly LaneRecord[]): void {
@@ -382,7 +366,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._getWorkerLifecycle(),
 			(record, notificationId) => this._recordWorkerTerminal(record, notificationId),
 			(message) => this._safeWarn(message),
-			(laneId, ownerEpoch) => this._getWorkerNotificationCoordinator().noteLaneOwnerEpoch(laneId, ownerEpoch),
+			(attemptId, ownerEpoch) =>
+				this._getWorkerNotificationCoordinator().noteAttemptOwnerEpoch(attemptId, ownerEpoch),
 			new WorktreeLaneLifecycle(this._worktreeLaneHostDeps()),
 		);
 		return this._managedLanes;
@@ -674,9 +659,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	getWorkerAgentActivity(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentActivity {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		const activity = this._getWorkerController().getAgentControl().getWorkerAgentActivity(agentId, scope);
-		this.observeWorkerAgentTerminals([agentId]);
-		return activity;
+		return this._getWorkerController().getAgentControl().getWorkerAgentActivity(agentId, scope);
 	}
 
 	readWorkerAgentTranscript(
@@ -685,9 +668,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	): ReturnType<WorkerAgentControlPort["readWorkerAgentTranscript"]> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		const page = this._getWorkerController().getAgentControl().readWorkerAgentTranscript(agentId, options);
-		this.observeWorkerAgentTerminals([agentId]);
-		return page;
+		return this._getWorkerController().getAgentControl().readWorkerAgentTranscript(agentId, options);
 	}
 
 	sendWorkerAgentMessage(
@@ -846,7 +827,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return createSteerAwareWait(this.deps.getSessionManager().getSessionId(), signal, report);
 	}
 
-	private async _withWorkerWait<T extends { terminalLaneIds?: readonly string[]; steered?: SteerDecision }>(
+	private async _withWorkerWait<T extends { terminalAttemptIds?: readonly string[]; steered?: SteerDecision }>(
 		scope: WorkerAgentControlScope | undefined,
 		signal: AbortSignal | undefined,
 		run: (control: WorkerAgentControlPort, waitSignal: AbortSignal | undefined) => Promise<T>,
@@ -858,7 +839,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		let result: T;
 		try {
 			result = await run(control, waitSignal.signal);
-			this.observeCapturedWorkerTerminals(result.terminalLaneIds);
+			this.observeWorkerAttemptTerminals(result.terminalAttemptIds ?? []);
 		} catch (error) {
 			await waitSignal.finalize();
 			throw error;

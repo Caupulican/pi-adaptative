@@ -28,6 +28,8 @@ export const MAX_WORKER_TASK_VIEW_ENTRIES = Math.min(
 export const MAX_WORKER_TASK_VIEW_BYTES = 64 * 1024;
 
 export interface WorkerTaskAttemptView {
+	/** Exact generation exposed by this task item; never resolved again from its agent or task. */
+	attemptId?: string;
 	agentId?: string;
 	/** Bounded permission metadata from this attempt's bound grant, never the requested task prose. */
 	grantedCapabilities?: readonly HarnessCapability[];
@@ -139,7 +141,15 @@ function latestExistingAttempt(snapshot: TaskRuntimeProjection, attemptIds: unkn
 }
 
 function projectAttempt(value: unknown, taskId: string): WorkerTaskAttemptView | undefined {
-	if (!isPlainRecord(value) || !isListedValue(value.status, ATTEMPT_STATUSES)) return undefined;
+	if (!isPlainRecord(value) || value.taskId !== taskId || !isListedValue(value.status, ATTEMPT_STATUSES)) {
+		return undefined;
+	}
+	const attemptId =
+		typeof value.attemptId === "string" &&
+		value.attemptId.length > 0 &&
+		value.attemptId.length <= MAX_ORCHESTRATION_IDENTIFIER_LENGTH
+			? value.attemptId
+			: undefined;
 	const dispatch = isPlainRecord(value.dispatch) ? value.dispatch : undefined;
 	const agentId =
 		boundedString(value.agentId, MAX_ORCHESTRATION_IDENTIFIER_LENGTH) ??
@@ -167,6 +177,7 @@ function projectAttempt(value: unknown, taskId: string): WorkerTaskAttemptView |
 			? [...new Set(capabilities)]
 			: undefined;
 	return {
+		...(attemptId ? { attemptId } : {}),
 		...(agentId ? { agentId } : {}),
 		...(grantedCapabilities ? { grantedCapabilities } : {}),
 		status: value.status,

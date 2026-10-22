@@ -1983,8 +1983,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					const text = workerTaskSessionJson(deps.workerAgentControl.getWorkerTaskSessionView(), (tasks) => {
 						exposedTasks = tasks;
 					});
-					deps.workerAgentControl.observeWorkerAgentTerminals?.(
-						exposedTasks.flatMap((task) => (task.latestAttempt?.agentId ? [task.latestAttempt.agentId] : [])),
+					deps.workerAgentControl.observeWorkerAttemptTerminals?.(
+						exposedTasks.flatMap((task) => (task.latestAttempt?.attemptId ? [task.latestAttempt.attemptId] : [])),
 					);
 					return {
 						content: [
@@ -2033,7 +2033,9 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							exposedAgents = selected;
 						},
 					);
-					deps.workerAgentControl.observeWorkerAgentTerminals?.(exposedAgents.map((agent) => agent.agentId));
+					deps.workerAgentControl.observeWorkerAttemptTerminals?.(
+						exposedAgents.flatMap((agent) => (agent.attemptId ? [agent.attemptId] : [])),
+					);
 					return {
 						content: [
 							{

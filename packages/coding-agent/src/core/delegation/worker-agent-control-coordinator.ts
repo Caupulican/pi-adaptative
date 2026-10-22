@@ -146,13 +146,13 @@ export interface WorkerAgentControlCoordinatorOptions {
 	warn?(message: string): void;
 	/** Current foreground submission epoch, or undefined when none is held. Read once, at genuine
 	 * mailbox-turn creation (gated on `prepareAgentTurn`'s own `created` signal), to stamp the new
-	 * attempt's owner epoch via `noteLaneOwnerEpoch` -- mirrors
+	 * attempt's owner epoch via `noteAttemptOwnerEpoch` -- mirrors
 	 * `WorkerDelegationControllerDeps.getCurrentSubmissionEpoch`. */
 	getCurrentSubmissionEpoch?(): number | undefined;
-	/** Mirrors `WorkerNotificationCoordinator.noteLaneOwnerEpoch` -- called only when
+	/** Mirrors `WorkerNotificationCoordinator.noteAttemptOwnerEpoch` -- called only when
 	 * `prepareAgentTurn` reports `created: true`, never for a replayed control message returning an
 	 * attempt that may predate the current process. */
-	noteLaneOwnerEpoch?(laneId: string, ownerEpoch: number): void;
+	noteAttemptOwnerEpoch?(attemptId: string, ownerEpoch: number): void;
 	/** How long an interrupted worker gets to reach a request boundary and report. */
 	haltReportDeadlineMs?(): number;
 }
@@ -1680,6 +1680,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			status: result.statuses[0]?.status ?? "unknown",
 			timedOut: result.timedOut,
 			...(result.terminalLaneIds ? { terminalLaneIds: result.terminalLaneIds } : {}),
+			...(result.terminalAttemptIds ? { terminalAttemptIds: result.terminalAttemptIds } : {}),
 			...(result.foregroundHeldAgentIds ? { foregroundHeld: true } : {}),
 		}));
 	}
@@ -1735,16 +1736,18 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const result = (statuses: typeof baselineStatuses, timedOut: boolean, snapshot: TaskRuntimeProjection) => {
 			const latestAttempts = this.latestAttemptsByAgent(snapshot);
 			const statusByAgentId = new Map(statuses.map(({ agentId, status }) => [agentId, status]));
+			const terminalAttempts = canonicalAgentIds.flatMap((agentId) => {
+				const attempt = latestAttempts.get(agentId);
+				return statusByAgentId.get(agentId) === "idle" && attempt && terminalAttemptStatus(attempt.status)
+					? [attempt]
+					: [];
+			});
 			return {
 				statuses,
 				updatedAgentIds: canonicalAgentIds.filter((agentId) => updatedAgentIds.has(agentId)),
 				timedOut,
-				terminalLaneIds: canonicalAgentIds.flatMap((agentId) => {
-					const attempt = latestAttempts.get(agentId);
-					return statusByAgentId.get(agentId) === "idle" && attempt && terminalAttemptStatus(attempt.status)
-						? [attempt.taskId]
-						: [];
-				}),
+				terminalLaneIds: terminalAttempts.map((attempt) => attempt.taskId),
+				terminalAttemptIds: terminalAttempts.map((attempt) => attempt.attemptId),
 			};
 		};
 		if (waitSatisfied(baselineStatuses)) return Promise.resolve(result(baselineStatuses, false, baselineSnapshot));
@@ -2285,7 +2288,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 						if (prepared.created) {
 							const ownerEpoch = this.options.getCurrentSubmissionEpoch?.();
 							if (ownerEpoch !== undefined)
-								this.options.noteLaneOwnerEpoch?.(prepared.record.laneId, ownerEpoch);
+								this.options.noteAttemptOwnerEpoch?.(prepared.attempt.attemptId, ownerEpoch);
 						}
 						return this.scheduleTaskBearingAttempt(prepared.record, prepared.attempt);
 					} catch (error) {
@@ -2750,7 +2753,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			...(agent.resumeContext.modelRef ? { modelRef: agent.resumeContext.modelRef } : {}),
 			status: agent.status,
 			activity,
-			...(attempt ? { dispatch: attempt.status } : {}),
+			...(attempt ? { attemptId: attempt.attemptId, dispatch: attempt.status } : {}),
 			...(waitState ? { waitReason: formatWorkerDispatchWait(waitState) } : {}),
 			...(attempt?.result
 				? {

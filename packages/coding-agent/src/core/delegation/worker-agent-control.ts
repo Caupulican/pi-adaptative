@@ -336,8 +336,10 @@ export interface WorkerAgentWaitResult {
 	statuses: WorkerAgentWaitStatus[];
 	updatedAgentIds: string[];
 	timedOut: boolean;
-	/** Exact terminal generations included in this wait result; absent means no observation receipt. */
+	/** Task lanes included in this result, for display; these do not identify terminal generations. */
 	terminalLaneIds?: string[];
+	/** Exact terminal generations captured with this result; absent means no observation receipt. */
+	terminalAttemptIds?: string[];
 	/**
 	 * Targets admitted but held until the foreground turn ends (they share its local model). The wait
 	 * returned at once because nothing can satisfy it inside this turn; they start on the turn's release.
@@ -352,8 +354,10 @@ export interface WorkerAgentSingleWaitResult {
 	timedOut: boolean;
 	/** True when the wait returned at once because this worker is held until the foreground turn ends. */
 	foregroundHeld?: boolean;
-	/** Exact terminal generation included in this wait result; absent means no observation receipt. */
+	/** Task lanes included in this result, for display; these do not identify terminal generations. */
 	terminalLaneIds?: string[];
+	/** Exact terminal generations captured with this result; absent means no observation receipt. */
+	terminalAttemptIds?: string[];
 	/** Set when the owner's input ended the wait (the root caller only): how that input's admission settled. */
 	steered?: SteerDecision;
 }
@@ -377,6 +381,8 @@ export interface WorkerGrantSummary {
 
 export interface WorkerAgentView {
 	agentId: string;
+	/** Exact generation whose status this view exposes; omitted before the agent has an attempt. */
+	attemptId?: string;
 	parentAgentId?: string;
 	rootAgentId: string;
 	depth: number;
@@ -431,8 +437,8 @@ export interface WorkerAgentLaneResolution {
 export interface WorkerAgentControlPort {
 	/** Session-root read receipt for exact terminal generations; distinct from mutation review. */
 	observeWorkerTerminalRecords?(records: readonly LaneRecord[]): void;
-	/** Observe only the bounded logical-agent identities exposed by a model-facing control result. */
-	observeWorkerAgentTerminals?(agentIds: readonly string[]): void;
+	/** Observe only the exact attempts retained in a bounded model-facing control result. */
+	observeWorkerAttemptTerminals?(attemptIds: readonly string[]): void;
 	listWorkerAgents(scope?: WorkerAgentControlScope): WorkerAgentView[];
 	getWorkerTaskSessionView(): WorkerTaskSessionView;
 	getWorkerAgentActivity(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentActivity;

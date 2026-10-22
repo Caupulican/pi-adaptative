@@ -75,7 +75,7 @@ export interface ManagedLaneControllerDeps {
 	getGoalStateSnapshot(): GoalState | undefined;
 	/** Current foreground submission epoch, or undefined when none is held. Read once, at genuine
 	 * dispatch-phase lane creation in `record()`, to stamp the new lane's owner epoch via
-	 * `noteLaneOwnerEpoch` -- mirrors `WorkerDelegationControllerDeps.getCurrentSubmissionEpoch`. */
+	 * `noteAttemptOwnerEpoch` -- mirrors `WorkerDelegationControllerDeps.getCurrentSubmissionEpoch`. */
 	getCurrentSubmissionEpoch?(): number | undefined;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
@@ -96,7 +96,7 @@ export class ManagedLaneController {
 	private readonly deps: ManagedLaneControllerDeps;
 	private readonly lifecycle: WorkerLifecycle;
 	private readonly recordTerminal: (record: LaneRecord, durableNotificationId: string) => void;
-	private readonly noteLaneOwnerEpoch: (laneId: string, ownerEpoch: number) => void;
+	private readonly noteAttemptOwnerEpoch: (attemptId: string, ownerEpoch: number) => void;
 	private readonly warn: (message: string) => void;
 	private readonly worktreeLanes: WorktreeLaneLifecycle | undefined;
 	private readonly deregisterByLane = new Map<string, () => void>();
@@ -116,14 +116,14 @@ export class ManagedLaneController {
 		lifecycle: WorkerLifecycle,
 		recordTerminal: (record: LaneRecord, durableNotificationId: string) => void,
 		warn: (message: string) => void = () => {},
-		noteLaneOwnerEpoch: (laneId: string, ownerEpoch: number) => void = () => {},
+		noteAttemptOwnerEpoch: (attemptId: string, ownerEpoch: number) => void = () => {},
 		worktreeLanes?: WorktreeLaneLifecycle,
 	) {
 		this.deps = deps;
 		this.lifecycle = lifecycle;
 		this.recordTerminal = recordTerminal;
 		this.warn = warn;
-		this.noteLaneOwnerEpoch = noteLaneOwnerEpoch;
+		this.noteAttemptOwnerEpoch = noteAttemptOwnerEpoch;
 		this.worktreeLanes = worktreeLanes;
 	}
 
@@ -274,7 +274,7 @@ export class ManagedLaneController {
 				// owner epoch exactly once, at this same creation moment, never on a later terminal report
 				// for the same laneId.
 				const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
-				if (ownerEpoch !== undefined) this.noteLaneOwnerEpoch(event.laneId, ownerEpoch);
+				if (ownerEpoch !== undefined) this.noteAttemptOwnerEpoch(prepared.attempt.attemptId, ownerEpoch);
 				if (event.worktreeLaneKey) {
 					const worktreeLaneKey = event.worktreeLaneKey;
 					const worktreeLanePath = event.worktreeLanePath;
