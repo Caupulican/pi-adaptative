@@ -7,6 +7,7 @@ import { expandArgumentsForDisplay, expandMessageTextForDisplay } from "../../co
 import type { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import { latestAssistantCommentaryLabel } from "../../core/message-phase.ts";
 import type { ProviderAdmissionWaitEvent } from "../../core/provider-admission/gate.ts";
+import { isRecordObject } from "../../core/util/value-guards.ts";
 import type { WaitEndReport } from "../../core/util/wait.ts";
 import { getToolCallRepairInfo } from "../../kernel/agent-loop.ts";
 import { type AgentMessage, retainedToolInvocation, type ToolCallRepairInfo } from "../../kernel/index.ts";
@@ -481,6 +482,11 @@ export class InteractiveEventController {
 					kind: this.port.toolActivityKind(event.toolName),
 					label: this.port.toolActivityLabel(event.toolName),
 					tag: event.toolName,
+					...(event.toolName === "delegate" &&
+					isRecordObject(event.args) &&
+					(event.args.action === "wait" || event.args.action === "wait_many")
+						? { phase: "worker-wait" as const }
+						: {}),
 				});
 				let component = this.port.activeToolCalls.getActive(event.toolCallId);
 				if (!component) {

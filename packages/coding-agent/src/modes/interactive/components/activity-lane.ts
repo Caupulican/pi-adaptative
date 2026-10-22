@@ -4,6 +4,14 @@ import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import { type GoalState, isGoalExecutionActive, isGoalUnfinishedStatus } from "../../../core/goals/goal-state.ts";
 import type { TaskStep, TaskStepsState } from "../../../core/tasks/task-state.ts";
 import type { Theme, ThemeColor } from "../../../presentation/theme-model.ts";
+import {
+	ACTIVITY_FRAME_MS,
+	type ActivityStatusMode,
+	activityStatusPhrase,
+	activityStatusPulse,
+	renderActivityStatusText,
+} from "./activity-status-animation.ts";
+import { reducedMotionFromEnv } from "./flow-animator.ts";
 
 export type ActivityLaneKind = "runtime" | "tool" | "task" | "worker" | "goal" | "queue" | "notice";
 export type ActivityLaneStatus = "active" | "waiting" | "success" | "warning" | "failure" | "neutral";
@@ -20,7 +28,7 @@ export interface ActivityLaneItem {
 	/** Short aggregation key (e.g. "bash", "python", "agent") for the concurrency slot. */
 	tag?: string;
 	toolCallId?: string;
-	phase?: "input";
+	phase?: "input" | "worker-wait";
 	scope?: "foreground" | "background" | "worker";
 	/** Epoch ms when the work began; the live row shows the elapsed time next to its subject. */
 	startedAt?: number;
@@ -236,6 +244,7 @@ export function projectActivityLane(snapshot: ActivityLaneCanonicalSnapshot): Ac
  * Color carries status only; labels stay in the text/muted hierarchy.
  */
 const TURN_TEXT_MAX = 32;
+const ANIMATED_TURN_TEXT_MAX = 44;
 /** The subject keeps at least this much of the slot when the timing suffix is long. */
 const TURN_TEXT_MIN_LABEL = 8;
 const EVENT_TEXT_MAX = 36;
@@ -336,6 +345,13 @@ function classifySlots(items: readonly ActivityLaneItem[]): LaneSlots {
 		queue,
 		event,
 	};
+}
+
+/** Match the displayed activity, including a wait overlay suppressing the parent pulse. */
+function hasAnimatedActivity(slots: LaneSlots): boolean {
+	if (slots.running.some((item) => isActivityRunning(item.status))) return true;
+	const primary = slots.overlay ?? (!slots.turn ? slots.externalWait : undefined) ?? slots.turn;
+	return primary !== undefined && isActivityRunning(primary.status);
 }
 
 function oldestTimedItem(items: readonly ActivityLaneItem[]): ActivityLaneItem | undefined {
@@ -442,6 +458,7 @@ export function renderActivityLaneLine(
 	items: readonly ActivityLaneItem[],
 	width: number,
 	now?: number,
+	animate = false,
 ): string[] {
 	const safeWidth = Math.max(1, width);
 	if (items.length === 0 || safeWidth < 3) return [];
@@ -456,22 +473,22 @@ export function renderActivityLaneLine(
 	// glyph of its own: the row's only glyph is the status dot. The first-token half appears only
 	// once the wait is long enough to mean something (FIRST_TOKEN_NOTICE_MS), so a fast provider
 	// renders exactly what it always did.
-	const elapsed = (item: ActivityLaneItem | undefined): string => {
+	const elapsed = (item: ActivityLaneItem | undefined, compact = false): string => {
 		if (item?.startedAt === undefined || now === undefined) return "";
 		const total = formatElapsed((item.completedAt ?? now) - item.startedAt);
 		const kind = item.clockKind === "observed" ? "observed " : item.timingRole === "oldest" ? "oldest " : "";
 		if (!isTurnActivityItem(item) || slots.overlay) return ` (${kind}${total})`;
 		const totalMs = (item.completedAt ?? now) - item.startedAt;
 		if (totalMs < FIRST_TOKEN_NOTICE_MS) return ` (${kind}${total})`;
-		if (item.firstTokenAt === undefined) return ` (${kind}${total}, no token yet)`;
+		if (item.firstTokenAt === undefined) return ` (${kind}${total}, no token${compact ? "" : " yet"})`;
 		const providerWaitMs = item.firstTokenAt - item.startedAt;
 		if (item.firstVisibleTokenAt === undefined) {
-			return ` (${kind}${total}, hidden thinking after ${formatElapsed(providerWaitMs)})`;
+			return ` (${kind}${total}, ${compact ? "hidden +" : "hidden thinking after "}${formatElapsed(providerWaitMs)})`;
 		}
 		const visibleWaitMs = item.firstVisibleTokenAt - item.startedAt;
 		return item.firstVisibleTokenAt === item.firstTokenAt
 			? ` (${kind}${total}, first ${formatElapsed(providerWaitMs)})`
-			: ` (${kind}${total}, first visible ${formatElapsed(visibleWaitMs)})`;
+			: ` (${kind}${total}, ${compact ? "visible +" : "first visible "}${formatElapsed(visibleWaitMs)})`;
 	};
 
 	// Turn slot: alive-anchor glyph plus the subject of the work and how long it has run. The one
@@ -485,9 +502,20 @@ export function renderActivityLaneLine(
 	if (subject) {
 		const status = externalRunning ? "active" : (wait?.status ?? subject.status);
 		const dotColor: ThemeColor = status === "waiting" ? "warning" : "accent";
+		const elapsedMs = now === undefined || subject.startedAt === undefined ? 0 : Math.max(0, now - subject.startedAt);
+		let mode: ActivityStatusMode | undefined;
+		if (!slots.overlay) {
+			if (slots.running.some((item) => item.phase === "worker-wait")) mode = "worker-wait";
+			else if (slots.turn?.label === "Thinking...") mode = "thinking";
+			else if (slots.turn?.label === "Working...") mode = "working";
+			else if (backgroundSubject?.id.startsWith("worker:") && isActivityRunning(backgroundSubject.status))
+				mode = "workers";
+		}
+		const turnTextMax = mode && !slots.queue ? ANIMATED_TURN_TEXT_MAX : TURN_TEXT_MAX;
+		let animatedLabel = "";
 		const withTiming = (label: string, item: ActivityLaneItem): string => {
-			let suffix = elapsed(item);
-			const available = Math.max(0, safeWidth - 3);
+			let suffix = elapsed(item, mode !== undefined);
+			const available = Math.max(0, Math.min(turnTextMax, safeWidth - 3));
 			if (
 				visibleWidth(suffix) + TURN_TEXT_MIN_LABEL > available &&
 				item.startedAt !== undefined &&
@@ -497,9 +525,12 @@ export function renderActivityLaneLine(
 				suffix = ` (${kind}${formatElapsed((item.completedAt ?? now) - item.startedAt)})`;
 			}
 			if (!label) return suffix.trim();
-			const labelWidth = Math.max(0, Math.min(TURN_TEXT_MAX, available) - visibleWidth(suffix));
+			const labelWidth = Math.max(0, Math.min(turnTextMax, available) - visibleWidth(suffix));
+			if (mode) label = activityStatusPhrase(mode, elapsedMs, labelWidth, animate);
 			if (safeWidth < 24 && visibleWidth(label) > labelWidth) label = status === "waiting" ? "Waiting" : "Working";
-			return `${truncateToWidth(label, labelWidth, "…")}${suffix}`;
+			const renderedLabel = truncateToWidth(label, labelWidth, "…");
+			if (mode) animatedLabel = renderedLabel;
+			return `${renderedLabel}${suffix}`;
 		};
 		let text = "";
 		if (slots.turn) {
@@ -522,7 +553,16 @@ export function renderActivityLaneLine(
 		} else if (slots.overlay) {
 			text = withTiming(slots.overlay.label, slots.overlay);
 		}
-		turnPart = text ? `${theme.fg(dotColor, "●")} ${theme.fg("muted", text)}` : `${theme.fg(dotColor, "●")}`;
+		const motion = animate && hasAnimatedActivity(slots);
+		const pulse = theme.fg(dotColor, activityStatusPulse(elapsedMs, motion));
+		const renderedText = animatedLabel
+			? renderActivityStatusText(theme, animatedLabel, elapsedMs, motion) +
+				theme.fg("muted", text.slice(animatedLabel.length))
+			: theme.fg("muted", text);
+		turnPart = text ? `${pulse} ${renderedText}` : pulse;
+		// Rotating phrases occupy a stable slot so the plan does not sway every six seconds.
+		if (mode && slots.plan && !slots.queue && safeWidth >= 80)
+			turnPart += " ".repeat(Math.max(0, turnTextMax + 2 - visibleWidth(turnPart)));
 	} else if (slots.plan) {
 		turnPart = theme.fg("muted", "Paused");
 	}
@@ -609,6 +649,7 @@ export class ActivityLaneComponent implements Component {
 	private parentVisible = true;
 	/** Runs only while timed work is live, so the elapsed figure advances; never keeps the process alive. */
 	private ticker?: ReturnType<typeof setInterval>;
+	private tickerIntervalMs = ELAPSED_TICK_MS;
 	/** Clocks on screen the lane does not own (the Decision graph's stage and System One evaluation). */
 	private readonly externalClocks = new Set<string>();
 
@@ -640,15 +681,19 @@ export class ActivityLaneComponent implements Component {
 	}
 
 	private syncTicker(): void {
-		const timed =
-			this.externalClocks.size > 0 ||
-			[...this.live.values(), ...this.canonical.values()]
-				.filter((item) => this.parentVisible || !isParentRuntimeItem(item))
-				.some(
-					(item) => item.startedAt !== undefined && (isActivityRunning(item.status) || item.status === "waiting"),
-				);
+		const visible = [...this.live.values(), ...this.canonical.values()].filter(
+			(item) => this.parentVisible || !isParentRuntimeItem(item),
+		);
+		const timed = this.externalClocks.size > 0 || visible.some((item) => item.startedAt !== undefined);
+		const intervalMs =
+			!reducedMotionFromEnv() && hasAnimatedActivity(classifySlots(visible)) ? ACTIVITY_FRAME_MS : ELAPSED_TICK_MS;
+		if (this.ticker && intervalMs !== this.tickerIntervalMs) {
+			clearInterval(this.ticker);
+			this.ticker = undefined;
+		}
 		if (timed && !this.ticker) {
-			this.ticker = setInterval(() => this.requestRender(), ELAPSED_TICK_MS);
+			this.tickerIntervalMs = intervalMs;
+			this.ticker = setInterval(() => this.requestRender(), intervalMs);
 			this.ticker.unref?.();
 		} else if (!timed && this.ticker) {
 			clearInterval(this.ticker);
@@ -915,6 +960,7 @@ export class ActivityLaneComponent implements Component {
 			this.getItems().filter((item) => this.parentVisible || !isParentRuntimeItem(item)),
 			width,
 			this.now(),
+			!reducedMotionFromEnv(),
 		);
 	}
 

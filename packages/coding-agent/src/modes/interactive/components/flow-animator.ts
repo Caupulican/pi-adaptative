@@ -3,8 +3,8 @@
  * moment the carrier stops being needed (always finite: an open edge's start plus its flight time, a
  * settled edge's end plus its settle time); the animator starts its
  * single interval on the first request and clears it as soon as that moment passes or a frame reports
- * `settled()`. There is never a second timer and never an idle tick: the existing 1 s activity-lane
- * clock is the only permanent one. Each tick only asks the host for a render; where a carrier is comes
+ * `settled()`. There is never a second timer and never an idle tick: the existing activity-lane
+ * clock is the only shared one. Each tick only asks the host for a render; where a carrier is comes
  * from the pure carrier functions, not from the animator.
  */
 
@@ -12,7 +12,7 @@
 export const FLOW_FRAME_MS = 50;
 
 /** `PI_REDUCE_MOTION` set to anything but empty or 0 collapses every carrier to the settled state. */
-function reducedMotionFromEnv(): boolean {
+export function reducedMotionFromEnv(): boolean {
 	const value = process.env.PI_REDUCE_MOTION;
 	return value !== undefined && value !== "" && value !== "0";
 }
