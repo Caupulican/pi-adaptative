@@ -1780,7 +1780,7 @@ export class AgentSession {
 			isDisposed: () => this._disposed,
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			resolveTextToolCallProtocol: (model) => this._resolveModelToolProtocol(model).protocol,
-			archivePromotedSkill: (name) => this.archivePromotedSkill(name),
+			archivePromotedSkill: (name, expectedDigest) => this.archivePromotedSkill(name, expectedDigest),
 			refreshLiveSkills: () => this._resourceLoader.refreshSkills?.(),
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			ensureModelReady: (model) => this._localRuntimeController.ensureIsolatedModelReady(model),
@@ -2946,8 +2946,8 @@ export class AgentSession {
 	}
 
 	/** Archive a promoted skill into `skills/.archive/` (restorable, non-destructive). Returns true if moved. */
-	archivePromotedSkill(name: string): boolean {
-		const archived = this._skillCurator.archiveSkill(name);
+	archivePromotedSkill(name: string, expectedDigest?: string): boolean {
+		const archived = this._skillCurator.archiveSkill(name, expectedDigest);
 		if (archived) this._resourceLoader.refreshSkills?.();
 		return archived;
 	}

@@ -19,7 +19,7 @@ export type PreparedLearningRollback =
 	| { kind: "memory_remove"; target: string }
 	| { kind: "memory_restore"; target: string; previous: string }
 	| { kind: "memory_add"; previous: string; section: "USER" | "MEMORY" }
-	| { kind: "archive_skill"; target: string }
+	| { kind: "archive_skill"; target: string; expectedDigest?: string }
 	| { kind: "okf_remove" | "okf_organize"; type: PiOkfType; title: string; plan: LearningRollbackPlan };
 
 export interface LearningRollbackResult {
@@ -62,8 +62,9 @@ const MAX_SNAPSHOT_BYTES = MAX_PERSISTED_CUSTOM_ENTRY_BYTES - 1024;
 function prepareRollback(plan: LearningRollbackPlan): PreparedLearningRollback | undefined {
 	switch (plan.kind) {
 		case "memory_remove":
-		case "archive_skill":
 			return plan.target ? { kind: plan.kind, target: plan.target } : undefined;
+		case "archive_skill":
+			return plan.target ? { kind: plan.kind, target: plan.target, expectedDigest: plan.expectedDigest } : undefined;
 		case "memory_restore":
 			return plan.target && plan.previous !== undefined
 				? { kind: plan.kind, target: plan.target, previous: plan.previous }

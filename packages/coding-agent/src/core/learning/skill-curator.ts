@@ -8,10 +8,15 @@
  * archive (non-destructive), and consolidation is a flagged suggestion (never an auto-merge).
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { withSkillDefinitionLock } from "../skill-mutation.ts";
+import { computeSkillDigest } from "../skill-repair.ts";
+import { MAX_ACTIVE_SKILL_BODY_BYTES, MAX_SKILL_FRONTMATTER_BYTES } from "../skills.ts";
 import { jaccard, tokenize } from "../tools/skill-audit.ts";
 import { withFileLock, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { readBoundedTextFileSync } from "../util/bounded-file.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 
 /** Per-promoted-skill signal the proposal logic reasons over. Pure data — no I/O. */
 export interface PromotedSkillInfo {
@@ -120,6 +125,24 @@ type UsageMap = Record<string, UsageRecord>;
 
 /** Cap on how much of a skill body feeds keyword extraction (keeps overlap detection cheap). */
 const KEYWORD_SOURCE_CAP = 4000;
+const DEFINITION_ARCHIVE_MARKER = ".pi-definition-archive.json";
+const MAX_SKILL_FILE_BYTES = MAX_ACTIVE_SKILL_BODY_BYTES + MAX_SKILL_FRONTMATTER_BYTES;
+
+function definitionArchiveDigest(directory: string, name: string): string | undefined {
+	const marker = join(directory, DEFINITION_ARCHIVE_MARKER);
+	if (!existsSync(marker)) return undefined;
+	const value: unknown = JSON.parse(readBoundedTextFileSync(marker, 1024, "Skill archive marker"));
+	if (
+		!isPlainRecord(value) ||
+		value.version !== 1 ||
+		value.name !== name ||
+		typeof value.digest !== "string" ||
+		!/^[a-f0-9]{64}$/.test(value.digest)
+	) {
+		throw new Error("Invalid skill definition archive marker");
+	}
+	return value.digest;
+}
 
 export interface CurationDecisionRecord {
 	date: string;
@@ -245,31 +268,68 @@ export class SkillCurator {
 				() => {
 					const archived: string[] = [];
 					for (const a of this.proposeCuration(now, options).archive) {
-						if (this.archiveSkill(a.name)) archived.push(a.name);
+						if (this.archiveSkillLocked(a.name)) archived.push(a.name);
 					}
 					return archived;
 				},
-				{ retries: 2 },
+				{ retries: 2, realpath: true },
 			);
 		} catch {
 			return []; // another session holds the lock, or fs error — skip this run
 		}
 	}
 
-	/** Move a promoted skill into `.archive/` (restorable). Returns true if archived. */
-	archiveSkill(name: string): boolean {
+	/** An exact rollback archives only its definition; manual curation archives the whole directory. */
+	archiveSkill(name: string, expectedDigest?: string): boolean {
+		try {
+			return withFileLockSync(this.skillsDir, () => this.archiveSkillLocked(name, expectedDigest), {
+				retries: 0,
+				realpath: true,
+			});
+		} catch {
+			return false;
+		}
+	}
+
+	private archiveSkillLocked(name: string, expectedDigest?: string): boolean {
 		try {
 			const from = join(this.skillsDir, name);
-			if (!existsSync(join(from, "SKILL.md")) || !this.isPromoted(name)) return false;
-			mkdirSync(this.archiveDir, { recursive: true });
-			renameSync(from, join(this.archiveDir, name));
-			this.recordDecision({
-				name,
-				action: "archive",
-				decision: "applied",
-				reason: "archived",
+			const file = join(from, "SKILL.md");
+			return withSkillDefinitionLock(file, this.skillsDir, (canonicalFile) => {
+				const content = readBoundedTextFileSync(canonicalFile, MAX_SKILL_FILE_BYTES, "Promoted skill");
+				if (!isPromotedFrontmatter(content)) return false;
+				const digest = computeSkillDigest(content);
+				if (expectedDigest !== undefined && digest !== expectedDigest) return false;
+				mkdirSync(this.archiveDir, { recursive: true });
+				const to = join(this.archiveDir, name);
+				if (expectedDigest === undefined) {
+					if (existsSync(to)) {
+						if (readdirSync(to).length !== 0) return false;
+						rmdirSync(to);
+					}
+					renameSync(from, to);
+				} else {
+					if (existsSync(to)) {
+						const entries = readdirSync(to);
+						if (entries.some((entry) => entry !== DEFINITION_ARCHIVE_MARKER)) return false;
+						if (entries.length > 0 && definitionArchiveDigest(to, name) !== digest) return false;
+					} else {
+						mkdirSync(to);
+					}
+					// The marker precedes the move so interrupted publication never looks like a whole-directory archive.
+					writeFileAtomicSync(join(to, DEFINITION_ARCHIVE_MARKER), JSON.stringify({ version: 1, name, digest }), {
+						mode: 0o600,
+					});
+					renameSync(canonicalFile, join(to, "SKILL.md"));
+				}
+				this.recordDecision({
+					name,
+					action: "archive",
+					decision: "applied",
+					reason: "archived",
+				});
+				return true;
 			});
-			return true;
 		} catch {
 			return false;
 		}
@@ -278,18 +338,54 @@ export class SkillCurator {
 	/** Restore an archived skill back into the active skills dir. Returns true if restored. */
 	restoreSkill(name: string): boolean {
 		try {
+			return withFileLockSync(this.skillsDir, () => this.restoreSkillLocked(name), { retries: 0, realpath: true });
+		} catch {
+			return false;
+		}
+	}
+
+	private restoreSkillLocked(name: string): boolean {
+		try {
 			const from = join(this.archiveDir, name);
 			const to = join(this.skillsDir, name);
-			if (!existsSync(join(from, "SKILL.md")) || existsSync(to)) return false;
-			renameSync(from, to);
-			this.recordDecision({
-				name,
-				action: "archive",
-				decision: "rejected",
-				reason: "restored by user",
+			const file = join(from, "SKILL.md");
+			if (!existsSync(file)) return false;
+			return withSkillDefinitionLock(file, this.skillsDir, (canonicalFile) => {
+				const definitionDigest = definitionArchiveDigest(from, name);
+				if (definitionDigest === undefined) {
+					if (existsSync(to)) return false;
+					renameSync(from, to);
+				} else {
+					if (readdirSync(from).some((entry) => entry !== DEFINITION_ARCHIVE_MARKER && entry !== "SKILL.md"))
+						return false;
+					if (
+						computeSkillDigest(readBoundedTextFileSync(canonicalFile, MAX_SKILL_FILE_BYTES, "Archived skill")) !==
+						definitionDigest
+					)
+						return false;
+					mkdirSync(to, { recursive: true });
+					const restored = withSkillDefinitionLock(join(to, "SKILL.md"), this.skillsDir, (destination) => {
+						if (existsSync(destination)) return false;
+						renameSync(canonicalFile, destination);
+						return true;
+					});
+					if (!restored) return false;
+					try {
+						unlinkSync(join(from, DEFINITION_ARCHIVE_MARKER));
+						rmdirSync(from);
+					} catch {
+						/* Restoration already completed; leftover empty archive metadata cannot authorize replay. */
+					}
+				}
+				this.recordDecision({
+					name,
+					action: "archive",
+					decision: "rejected",
+					reason: "restored by user",
+				});
+				this.recordUse(name, Date.now());
+				return true;
 			});
-			this.recordUse(name, Date.now());
-			return true;
 		} catch {
 			return false;
 		}
@@ -326,14 +422,6 @@ export class SkillCurator {
 			});
 		}
 		return out;
-	}
-
-	private isPromoted(name: string): boolean {
-		try {
-			return isPromotedFrontmatter(readFileSync(join(this.skillsDir, name, "SKILL.md"), "utf-8"));
-		} catch {
-			return false;
-		}
 	}
 
 	private loadUsage(): UsageMap {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { type Stats, statSync } from "node:fs";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
+import { withSkillDefinitionLock } from "./skill-mutation.ts";
 import {
 	MAX_ACTIVE_SKILL_BODY_BYTES,
 	MAX_SKILL_DESCRIPTION_LENGTH,
@@ -100,10 +101,24 @@ export function inspectSkillFile(filePath: string, name: string): SkillInspectRe
  * Atomic repair write with frontmatter preservation and stale-source check.
  *
  * Reads current bytes and verifies the exact opaque source version before atomic write.
- * Note: A residual OS-level concurrent-writer race window exists between stat/read and atomic write
- * without cooperative kernel-level file locks, but atomic file replacement ensures no partial writes.
+ * The resource-root lock is shared with promotion, archival and restore. Uncooperative external
+ * filesystem edits remain outside that lock; atomic replacement prevents partial writes.
  */
 export function repairSkillFile(
+	filePath: string,
+	input: SkillRepairInput,
+	fallbackDescription?: string,
+): SkillRepairResult {
+	try {
+		return withSkillDefinitionLock(filePath, undefined, (canonicalFile) =>
+			repairSkillFileLocked(canonicalFile, input, fallbackDescription),
+		);
+	} catch (error) {
+		return { ok: false, reason: "write_failed", message: `Skill mutation lock failed: ${String(error)}` };
+	}
+}
+
+function repairSkillFileLocked(
 	filePath: string,
 	input: SkillRepairInput,
 	fallbackDescription?: string,
