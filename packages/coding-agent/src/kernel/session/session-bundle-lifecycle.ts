@@ -4,6 +4,7 @@ import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { probeProcessLiveness } from "../reliability/process-tree.ts";
 import {
+	type AtomicFileLockOptions,
 	currentSynchronousFileLockScope,
 	isMissingFileError,
 	type SynchronousFileLockScope,
@@ -289,36 +290,83 @@ export function hasPendingSessionBundleRetention(agentDir: string, parentSession
 	);
 }
 
+export type SessionBundleLockOptions = Pick<
+	AtomicFileLockOptions,
+	"retries" | "sleepSync" | "minRetryDelayMs" | "maxRetryDelayMs" | "retryFactor" | "stale"
+>;
+
+type BundleAdmissionResult<T> = { admitted: false } | { admitted: true; value: T };
+
 /** Lock order is bundle admission, then transcript. No filesystem lock spans asynchronous removal. */
-export function withSessionBundleAdmission<T>(agentDir: string, parentSessionId: string, operation: () => T): T {
+export function withSessionBundleAdmission<T>(
+	agentDir: string,
+	parentSessionId: string,
+	operation: () => T,
+	options?: SessionBundleLockOptions,
+): T {
+	const result = admitSessionBundle(agentDir, parentSessionId, operation, options, true);
+	if (!result.admitted) throw new Error("Worker session bundle deletion has been reserved.");
+	return result.value;
+}
+
+/** Optional storage maintenance never revives or writes through a deletion reservation. */
+export function withSessionBundleMaintenance<T>(
+	agentDir: string,
+	parentSessionId: string,
+	operation: () => T,
+	options?: SessionBundleLockOptions,
+): BundleAdmissionResult<T> {
+	return admitSessionBundle(agentDir, parentSessionId, operation, options, false);
+}
+
+function admitSessionBundle<T>(
+	agentDir: string,
+	parentSessionId: string,
+	operation: () => T,
+	options: SessionBundleLockOptions | undefined,
+	recoverCompletedRetention: boolean,
+): BundleAdmissionResult<T> {
 	const tombstone = orchestrationSessionDeletionFile(agentDir, parentSessionId);
-	if (hasCurrentSessionBundleAdmission(agentDir, parentSessionId)) return operation();
-	return withFileLockSync(tombstone, () => {
-		const marker = readMarker(tombstone, parentSessionId);
-		if (marker) {
-			let removalConfirmed = false;
-			if (marker.policy === "retention" && (!marker.operation || canRecoverOperation(marker.operation))) {
-				try {
-					lstatSync(orchestrationSessionDir(agentDir, parentSessionId));
-				} catch (error) {
-					if (!isMissingFileError(error)) throw error;
-					removalConfirmed = true;
+	if (hasCurrentSessionBundleAdmission(agentDir, parentSessionId)) return { admitted: true, value: operation() };
+	return withFileLockSync(
+		tombstone,
+		() => {
+			const marker = readMarker(tombstone, parentSessionId);
+			if (marker) {
+				if (!recoverCompletedRetention) return { admitted: false };
+				let removalConfirmed = false;
+				if (marker.policy === "retention" && (!marker.operation || canRecoverOperation(marker.operation))) {
+					try {
+						lstatSync(orchestrationSessionDir(agentDir, parentSessionId));
+					} catch (error) {
+						if (!isMissingFileError(error)) throw error;
+						removalConfirmed = true;
+					}
 				}
+				if (!removalConfirmed) return { admitted: false };
+				// The original remover is settled/dead and its bundle is absent. Recover an interrupted
+				// marker cleanup here: a directory-only sweep can no longer discover this completed removal.
+				unlinkSync(tombstone);
 			}
-			if (!removalConfirmed) throw new Error("Worker session bundle deletion has been reserved.");
-			// The original remover is settled/dead and its bundle is absent. Recover an interrupted
-			// marker cleanup here: a directory-only sweep can no longer discover this completed removal.
-			unlinkSync(tombstone);
-		}
-		const scope = currentSynchronousFileLockScope(tombstone)!;
-		const key = scope.lockfilePath;
-		admittedBundles.set(key, scope);
-		try {
-			return operation();
-		} finally {
-			admittedBundles.delete(key);
-		}
-	});
+			const scope = currentSynchronousFileLockScope(tombstone)!;
+			const key = scope.lockfilePath;
+			admittedBundles.set(key, scope);
+			try {
+				return { admitted: true, value: operation() };
+			} finally {
+				admittedBundles.delete(key);
+			}
+		},
+		{
+			retries: options?.retries,
+			sleepSync: options?.sleepSync,
+			minRetryDelayMs: options?.minRetryDelayMs,
+			maxRetryDelayMs: options?.maxRetryDelayMs,
+			retryFactor: options?.retryFactor,
+			stale: options?.stale,
+			borrowedScope: currentSynchronousFileLockScope(tombstone),
+		},
+	);
 }
 
 /** Serialize inspection and existing claim settlement without admitting creation into a deleted bundle. */
