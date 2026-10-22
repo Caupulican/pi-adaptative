@@ -1,3 +1,4 @@
+import { nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "./task-runtime.ts";
 
 /**
@@ -19,9 +20,7 @@ export function latestAgentAttemptsByDurableOrder(
 	const agents = snapshot.agents ?? {};
 	const attempts = snapshot.attempts ?? {};
 	for (const attempt of Object.values(attempts)) {
-		// Managed processes have their own lane namespace and never own a persistent native agent.
-		if (attempt.dispatch.executionKind === "managed-process") continue;
-		const agentId = attempt.agentId ?? attempt.dispatch.logicalLaneId;
+		const agentId = nativeAgentIdForAttempt(attempt);
 		if (agentId && agents[agentId]) latest.set(agentId, attempt);
 	}
 	// The binding is the authoritative live lease owner. Prefer it when a recovered legacy snapshot
@@ -29,7 +28,7 @@ export function latestAgentAttemptsByDurableOrder(
 	for (const agent of Object.values(agents)) {
 		if (!agent.activeAttemptId) continue;
 		const activeAttempt = attempts[agent.activeAttemptId];
-		if (activeAttempt && activeAttempt.dispatch.executionKind !== "managed-process") {
+		if (activeAttempt && nativeAgentIdForAttempt(activeAttempt) === agent.agentId) {
 			latest.set(agent.agentId, activeAttempt);
 		}
 	}

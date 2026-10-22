@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { nativeAgentIdForAttempt } from "../orchestration/attempt-agent-identity.ts";
 import type { AgentBindingContract } from "../orchestration/contracts.ts";
 import type { SpecialistContextOwnership } from "../orchestration/specialist-context-ownership.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
@@ -38,8 +39,7 @@ export function assertQueuedWorkerContextRecoverable(
 		attempt.dispatch.executionKind === "managed-process" ||
 		Object.values(snapshot.attempts).some(
 			(candidate) =>
-				candidate.attemptId !== attempt.attemptId &&
-				(candidate.agentId === agent.agentId || candidate.dispatch.logicalLaneId === agent.agentId),
+				candidate.attemptId !== attempt.attemptId && nativeAgentIdForAttempt(candidate) === agent.agentId,
 		)
 	)
 		throw new Error("Worker queued context has no proof of never-started, dead-owner recovery.");

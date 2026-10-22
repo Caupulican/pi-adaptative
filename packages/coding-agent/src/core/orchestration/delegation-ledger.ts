@@ -4,6 +4,7 @@ import type { WorkerDelegationTaskContext } from "../delegation/worker-delegatio
 import { deriveWorkerTaskLabel } from "../delegation/worker-task-label.ts";
 import { getGoalCompletionRefusal, hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import { nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { latestAgentAttemptByDurableOrder } from "./attempt-ordering.ts";
 import { projectAttemptUsage } from "./attempt-usage.ts";
 import type {
@@ -122,13 +123,14 @@ export function projectTaskDescription(instructions: string): string {
 	return `${instructions.slice(0, MAX_ORCHESTRATION_DESCRIPTION_LENGTH - TASK_DESCRIPTION_ELISION.length)}${TASK_DESCRIPTION_ELISION}`;
 }
 
-function mailboxTurnTaskId(agentId: string, controlMessageId: string): string {
-	return `mailbox-turn-${createHash("sha256")
-		.update("pi-worker-agent-mailbox-turn-v1")
+function workerTurnTaskId(agentId: string, identity: { controlMessageId: string } | { sequence: number }): string {
+	const correlated = "controlMessageId" in identity;
+	return `${correlated ? "mailbox-turn" : "native-turn"}-${createHash("sha256")
+		.update(correlated ? "pi-worker-agent-mailbox-turn-v1" : "pi-worker-agent-turn-v1")
 		.update("\0")
 		.update(agentId)
 		.update("\0")
-		.update(controlMessageId)
+		.update(correlated ? identity.controlMessageId : String(identity.sequence))
 		.digest("hex")}`;
 }
 
@@ -236,10 +238,10 @@ export class DelegationOrchestrationLedger {
 		const agent = snapshot.agents[agentId];
 		if (!agent) throw new DurableTaskRuntimeError(`Unknown logical worker agent '${agentId}'.`);
 		const agentAttempts = Object.values(snapshot.attempts).filter(
-			(attempt) => attempt.agentId === agentId || attempt.dispatch.logicalLaneId === agentId,
+			(attempt) => nativeAgentIdForAttempt(attempt) === agentId,
 		);
 		const sequence = agentAttempts.length + 1;
-		const taskId = controlMessageId ? mailboxTurnTaskId(agentId, controlMessageId) : `${agentId}:turn:${sequence}`;
+		const taskId = workerTurnTaskId(agentId, controlMessageId ? { controlMessageId } : { sequence });
 		const existingTask = snapshot.tasks[taskId]?.task;
 		const prior = latestAgentAttemptByDurableOrder(snapshot, agent.agentId);
 		const contract = prior?.dispatch.executionContract;
@@ -316,7 +318,7 @@ export class DelegationOrchestrationLedger {
 			// already existed -- possibly minted in a prior process, before a resume -- shape-identical
 			// to a fresh one otherwise. `created: false` is the only reliable signal a caller has that
 			// this was NOT just dispatched; do not let it be reconstructed from the outside (e.g. via a
-			// before/after snapshot diff keyed on the private `mailboxTurnTaskId` identity) once this
+			// before/after snapshot diff keyed on the private turn-task identity) once this
 			// method already knows the answer with certainty.
 			if (existingAttempt) return { attempt: existingAttempt, created: false };
 		}

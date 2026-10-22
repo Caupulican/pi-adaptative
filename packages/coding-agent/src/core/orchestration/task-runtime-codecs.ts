@@ -1,5 +1,6 @@
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
+import { assertAttemptAgentBinding } from "./attempt-agent-identity.ts";
 import { addAttemptUsage, EMPTY_ATTEMPT_USAGE, validateAttemptUsageSnapshot } from "./attempt-usage.ts";
 import {
 	type AttemptUsageAccounting,
@@ -1644,6 +1645,7 @@ function validateSnapshotTaskGraph(state: TaskRuntimeProjection): void {
 		}
 	}
 	for (const [attemptId, attempt] of Object.entries(state.attempts)) {
+		assertAttemptAgentBinding(attempt);
 		if (attempt.attemptId !== attemptId) {
 			throw new DurableTaskRuntimeError(`${label} attempt '${attemptId}' has a mismatched id.`);
 		}

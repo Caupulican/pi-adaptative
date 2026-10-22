@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
+import { assertAttemptAgentBinding, nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { attemptUsageIncrease, EMPTY_ATTEMPT_USAGE } from "./attempt-usage.ts";
 import {
 	type AttemptUsageAccounting,
@@ -229,8 +230,7 @@ export function assertAgentRetirementEligible(state: TaskRuntimeProjection, agen
 	}
 	const blockingAttempt = Object.values(state.attempts).find(
 		(attempt) =>
-			(attempt.agentId === agentId || attempt.dispatch.logicalLaneId === agentId) &&
-			RETIREMENT_BLOCKING_ATTEMPT_STATUSES.has(attempt.status),
+			nativeAgentIdForAttempt(attempt) === agentId && RETIREMENT_BLOCKING_ATTEMPT_STATUSES.has(attempt.status),
 	);
 	if (blockingAttempt) {
 		throw new DurableTaskRuntimeError(
@@ -773,6 +773,7 @@ export function assertAttemptLeaseTransition(
 	) {
 		throw new DurableTaskRuntimeError(`Attempt '${lease.attemptId}' lease dates are invalid.`);
 	}
+	assertAttemptAgentBinding({ agentId, dispatch: attempt.dispatch });
 	if (agentId) {
 		const agent = state.agents[agentId];
 		const task = state.tasks[attempt.taskId];

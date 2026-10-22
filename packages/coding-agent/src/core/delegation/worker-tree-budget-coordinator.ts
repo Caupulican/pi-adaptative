@@ -1,4 +1,5 @@
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
+import { nativeAgentIdForAttempt } from "../orchestration/attempt-agent-identity.ts";
 import {
 	attemptUsageFromGatewayUsage,
 	EMPTY_ATTEMPT_USAGE,
@@ -15,7 +16,7 @@ import {
 	type ProviderBudgetReservation,
 	type SharedCapabilityBudget,
 } from "../orchestration/capability-gateway.ts";
-import type { AttemptUsageSnapshot, RiskBudget } from "../orchestration/contracts.ts";
+import type { AttemptUsageSnapshot, OrchestrationDispatchRequest, RiskBudget } from "../orchestration/contracts.ts";
 import { intersectRiskBudgets } from "../orchestration/risk-budget.ts";
 
 export type WorkerTreeBudgetField = "maxTokens" | "maxCostUsd" | "maxToolCalls" | "maxWallClockMs" | "maxAttempts";
@@ -73,7 +74,7 @@ export interface WorkerTreeBudgetProjection {
 			{
 				attemptId: string;
 				agentId?: string;
-				dispatch: { logicalLaneId?: string };
+				dispatch: Pick<OrchestrationDispatchRequest, "executionKind" | "logicalLaneId">;
 				checkpointIds: readonly string[];
 				usageAccounting?: { readonly total: AttemptUsageSnapshot };
 			}
@@ -95,7 +96,7 @@ export function collectWorkerTreeBudgetSeeds(
 ): WorkerTreeBudgetSeed[] {
 	const seeds: WorkerTreeBudgetSeed[] = [];
 	for (const attempt of Object.values(snapshot.attempts)) {
-		const attemptAgentId = attempt.agentId ?? attempt.dispatch.logicalLaneId;
+		const attemptAgentId = nativeAgentIdForAttempt(attempt);
 		if (!attemptAgentId || snapshot.agents[attemptAgentId]?.rootAgentId !== rootAgentId) continue;
 		const usage = projectAttemptUsage(attempt, snapshot.checkpoints);
 		seeds.push({ attemptId: attempt.attemptId, usage: usage ?? EMPTY_ATTEMPT_USAGE });
