@@ -46,7 +46,7 @@ function assertStableReadVersion(
 	}
 }
 
-function withStableFileDescriptorSync<T>(
+export function withStableFileDescriptorSync<T>(
 	filePath: string,
 	label: string,
 	read: (fileDescriptor: number, openedVersion: Stats) => T,

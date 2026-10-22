@@ -100,6 +100,7 @@ import type {
 	ThinkingLevelChangeEntry,
 } from "./session-entries.ts";
 import { invalidSessionParentCycle, visitSessionAncestry } from "./session-tree.ts";
+import { confirmSessionFileWrite } from "./session-write-confirmation.ts";
 
 export * from "./lifecycle-ledger.ts";
 
@@ -118,17 +119,57 @@ function withSessionFileLock<T>(filePath: string, operation: () => T): T {
 }
 
 /** An existing history disappearing is a failed write, never permission to create a suffix-only file. */
-function appendToExistingSessionFile(filePath: string, content: string, expected?: Stats): Stats {
+function appendToExistingSessionFile(
+	filePath: string,
+	content: string,
+	expected?: Stats,
+	onRecoveredWrite?: (error: unknown) => void,
+): Stats {
+	return writeSessionFile(filePath, fsConstants.O_WRONLY | fsConstants.O_APPEND, content, expected, onRecoveredWrite);
+}
+
+/** Creation and append share descriptor ownership, close handling, and exact readback after uncertain I/O. */
+function writeSessionFile(
+	filePath: string,
+	flags: "wx" | number,
+	content: string,
+	expected?: Stats,
+	onRecoveredWrite?: (error: unknown) => void,
+): Stats {
 	return withSessionFileLock(filePath, () => {
-		const fd = openSync(filePath, fsConstants.O_WRONLY | fsConstants.O_APPEND);
+		const fd = openSync(filePath, flags);
+		let before: Stats | undefined;
+		let written: Stats | undefined;
+		let attempted = false;
+		let failure: { error: unknown } | undefined;
 		try {
-			if (expected && !sameFileVersion(expected, fstatSync(fd)))
+			before = fstatSync(fd);
+			if (expected && !sameFileVersion(expected, before))
 				throw new Error("Session file changed before its tail repair; reopen it before retrying.");
+			attempted = true;
 			writeFileSync(fd, content);
-			return fstatSync(fd);
+			written = fstatSync(fd);
+		} catch (error) {
+			failure = { error };
 		} finally {
-			closeSync(fd);
+			try {
+				closeSync(fd);
+			} catch (error) {
+				failure = {
+					error: failure ? new AggregateError([failure.error, error], "Session write and close failed.") : error,
+				};
+			}
 		}
+		if (!failure) return written!;
+		if (!attempted || !before || !onRecoveredWrite) throw failure.error;
+		let confirmed: Stats;
+		try {
+			confirmed = confirmSessionFileWrite(filePath, before, content);
+		} catch (error) {
+			throw new AggregateError([failure.error, error], "Session write outcome could not be confirmed.");
+		}
+		onRecoveredWrite(failure.error);
+		return confirmed;
 	});
 }
 
@@ -276,6 +317,12 @@ export interface SessionEntriesPersistedEvent {
 }
 
 export type SessionEntriesPersistedListener = (event: SessionEntriesPersistedEvent) => void;
+
+interface SessionPersistenceResult {
+	readonly event: SessionEntriesPersistedEvent;
+	/** The write was confirmed by readback; its original I/O error must still reach the caller after publication. */
+	readonly recoveredFailure?: { readonly error: unknown };
+}
 
 export type ReadonlySessionManager = Pick<
 	SessionManager,
@@ -1926,10 +1973,15 @@ export class SessionManager {
 	flushBufferedEntries(): void {
 		this._assertWritable();
 		if (!this.persist || this.flushed) return;
-		const receipt = this._persistEntries([], [], undefined, this._capturePersistenceContext(), {
+		const identity = captureSessionAppendIdentity(this.sessionId, this.sessionFile, []);
+		const result = this._persistEntries([], [], undefined, this._capturePersistenceContext(), {
 			flushBuffered: true,
+			identity,
+			canonicalPublication: true,
 		});
-		if (receipt) this._emitEntriesPersisted(receipt);
+		if (result) this._emitEntriesPersisted(result.event);
+		if (result?.recoveredFailure)
+			throw new SessionAppendCommittedError({ ...identity, durability: "persisted" }, result.recoveredFailure.error);
 	}
 
 	getCwd(): string {
@@ -2143,8 +2195,13 @@ export class SessionManager {
 		encodedEntries: readonly string[],
 		signal?: AbortSignal,
 		assertCurrent: () => void = this._capturePersistenceContext(),
-		options: { flushBuffered?: boolean; identity?: SessionAppendIdentity } = {},
-	): SessionEntriesPersistedEvent | undefined {
+		options: {
+			flushBuffered?: boolean;
+			identity?: SessionAppendIdentity;
+			/** Only a caller owning canonical publication may promote a confirmed physical write. */
+			canonicalPublication?: true;
+		} = {},
+	): SessionPersistenceResult | undefined {
 		this._assertWritable();
 		signal?.throwIfAborted();
 		assertCurrent();
@@ -2182,18 +2239,17 @@ export class SessionManager {
 
 		const initialFlush = !this.flushed;
 		let writeStarted = false;
+		let recoveredFailure: { readonly error: unknown } | undefined;
+		const noteRecoveredWrite = (error: unknown): void => {
+			recoveredFailure = { error };
+		};
+		const confirmWrite = options.canonicalPublication ? noteRecoveredWrite : undefined;
 		try {
 			if (!this.flushed) {
 				withSessionFileMutation(this.agentDir, sessionFile, sessionId, "create", () => {
 					assertCurrent();
 					writeStarted = true;
-					const fd = openSync(sessionFile, "wx");
-					try {
-						writeFileSync(fd, encodedPayload);
-						this.storageRevision = fstatSync(fd);
-					} finally {
-						closeSync(fd);
-					}
+					this.storageRevision = writeSessionFile(sessionFile, "wx", encodedPayload, undefined, confirmWrite);
 				});
 				this.flushed = true;
 			} else if (encodedEntries.length > 0) {
@@ -2209,7 +2265,12 @@ export class SessionManager {
 					() => {
 						assertCurrent();
 						writeStarted = true;
-						this.storageRevision = appendToExistingSessionFile(sessionFile, encodedPayload);
+						this.storageRevision = appendToExistingSessionFile(
+							sessionFile,
+							encodedPayload,
+							undefined,
+							confirmWrite,
+						);
 					},
 					{ session: this, revision: this.storageRevision },
 				);
@@ -2226,19 +2287,30 @@ export class SessionManager {
 			)
 				this.persistenceStateUncertain = true;
 			if (writeStarted)
-				throw new SessionAppendUncertainError(captureSessionAppendWriteIdentity(identity, encodedEntries), error);
+				throw new SessionAppendUncertainError(
+					captureSessionAppendWriteIdentity(identity, encodedEntries),
+					recoveredFailure
+						? new AggregateError(
+								[recoveredFailure.error, error],
+								"Session write readback succeeded, but admission failed.",
+							)
+						: error,
+				);
 			throw error;
 		}
-		return Object.freeze({
-			sessionId,
-			sessionFile,
-			entryIds: Object.freeze(
-				initialFlush
-					? [...fileEntries, ...entries].flatMap((entry) => (entry.type === "session" ? [] : [entry.id]))
-					: entries.map((entry) => entry.id),
-			),
-			rewritten: false,
-		});
+		return {
+			event: Object.freeze({
+				sessionId,
+				sessionFile,
+				entryIds: Object.freeze(
+					initialFlush
+						? [...fileEntries, ...entries].flatMap((entry) => (entry.type === "session" ? [] : [entry.id]))
+						: entries.map((entry) => entry.id),
+				),
+				rewritten: false,
+			}),
+			...(recoveredFailure ? { recoveredFailure } : {}),
+		};
 	}
 
 	private _assertWritable(): void {
@@ -2289,8 +2361,8 @@ export class SessionManager {
 		const assertCurrent = this._capturePersistenceContext();
 		const identity = captureSessionAppendIdentity(this.sessionId, this.sessionFile, [entry]);
 		const encodedEntry = encodeSessionEntry(entry);
-		const receipt = this._persistEntries([entry], [encodedEntry], undefined, assertCurrent, { identity });
-		if (receipt) this._emitEntriesPersisted(receipt);
+		const result = this._persistEntries([entry], [encodedEntry], undefined, assertCurrent, { identity });
+		if (result) this._emitEntriesPersisted(result.event);
 	}
 
 	private _appendEntries(
@@ -2309,6 +2381,7 @@ export class SessionManager {
 		const assertCurrent = publication?.assertCurrent ?? this._capturePersistenceContext();
 		const identity = publication?.identity ?? captureSessionAppendIdentity(this.sessionId, this.sessionFile, entries);
 		let receipt: SessionEntriesPersistedEvent | undefined;
+		let recoveredFailure: { readonly error: unknown } | undefined;
 		const encodedEntries =
 			preencodedEntries ??
 			(this.persist && this.sessionFile
@@ -2321,7 +2394,12 @@ export class SessionManager {
 			throw new Error("Session append encoding count does not match the entry batch.");
 		}
 		if (encodedEntries.length > 0) {
-			receipt = this._persistEntries(entries, encodedEntries, signal, assertCurrent, { identity });
+			const result = this._persistEntries(entries, encodedEntries, signal, assertCurrent, {
+				identity,
+				canonicalPublication: true,
+			});
+			receipt = result?.event;
+			recoveredFailure = result?.recoveredFailure;
 		} else {
 			for (const entry of entries) {
 				if (isSessionLifecycleEntry(entry)) encodeSessionEntry(entry);
@@ -2364,10 +2442,16 @@ export class SessionManager {
 				this.lifecycleActiveCache = undefined;
 				this._invalidateSessionContextCache();
 			}
-			throw new SessionAppendCommittedError(committed, error);
+			throw new SessionAppendCommittedError(
+				committed,
+				recoveredFailure
+					? new AggregateError([recoveredFailure.error, error], "Session write recovered, but publication failed.")
+					: error,
+			);
 		} finally {
 			if (receipt) this._emitEntriesPersisted(receipt);
 		}
+		if (recoveredFailure) throw new SessionAppendCommittedError(committed, recoveredFailure.error);
 	}
 
 	/**
