@@ -413,6 +413,9 @@ export class PromptSubmissionController {
 						acceptedOrder,
 					)
 				: undefined;
+		// Classification can fail while preemption or an earlier queued submission still owns
+		// preparation. Observe it now, retaining the original promise for normal failure propagation.
+		void queuedOwnerClassification?.catch(() => undefined);
 		try {
 			// The owner spoke: a summary being prepared while the lane idled never makes them wait.
 			this.deps.compaction.cancelIdlePreparation();
