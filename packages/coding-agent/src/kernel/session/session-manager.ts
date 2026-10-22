@@ -953,14 +953,19 @@ export function getDefaultSessionDir(cwd: string, agentDir: string): string {
 
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
 
-function parseSessionEntryLine(line: string): FileEntry | null {
+function parseSessionEntryLine(line: string, requireComplete = false): FileEntry | null {
 	if (!line.trim()) return null;
+	let parsed: unknown;
 	try {
-		return JSON.parse(line) as FileEntry;
-	} catch {
-		// Skip malformed lines
+		parsed = JSON.parse(line);
+	} catch (error) {
+		if (requireComplete) throw new Error("Session history contains a malformed JSONL record.", { cause: error });
+		// Ordinary history viewing may retain its readable records.
 		return null;
 	}
+	if (requireComplete && (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)))
+		throw new Error("Session history contains a non-object JSONL record.");
+	return parsed as FileEntry;
 }
 
 interface SessionEntryFileLocation {
@@ -970,7 +975,7 @@ interface SessionEntryFileLocation {
 
 function loadEntriesFromFileInternal(
 	filePath: string,
-	options?: { maxLineChars?: number },
+	options?: { maxLineChars?: number; requireComplete?: boolean },
 	onEntry?: (entry: FileEntry, offset: number | undefined, length: number | undefined) => void,
 ): { entries: FileEntry[]; indexedBytes: number; unterminatedTail?: boolean; revision?: Stats } {
 	const resolvedFilePath = normalizePath(filePath);
@@ -983,14 +988,13 @@ function loadEntriesFromFileInternal(
 	}
 	if (!revision.isFile()) throw new Error("Session history is not a regular file.");
 
-	// A single line beyond this budget can never become a usable entry, and
-	// accumulating it would crash the whole load (RangeError near V8's max string
-	// length) — bricking session resume. Drop it like any other unparseable line.
+	// Bound every row before parsing. Ordinary viewing can skip an unusable row;
+	// canonical recovery must report it rather than infer absence from a partial view.
 	const maxLineChars = options?.maxLineChars ?? MAX_SESSION_LINE_CHARS;
 
 	const entries: FileEntry[] = [];
 	const appendLine = (line: string, offset?: number, length?: number): void => {
-		const entry = parseSessionEntryLine(line);
+		const entry = parseSessionEntryLine(line, options?.requireComplete);
 		if (!entry) return;
 		onEntry?.(entry, offset, length);
 		entries.push(entry);
@@ -1008,7 +1012,13 @@ function loadEntriesFromFileInternal(
 			return { entries: [], indexedBytes: revision.size, revision };
 		}
 		const decoder = new StringDecoder("utf8");
-		const lines = new StreamingLineDecoder(maxLineChars, { overflow: "skip", lineEndings: "lf" });
+		const strictDecoder = options?.requireComplete
+			? new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
+			: undefined;
+		const lines = new StreamingLineDecoder(maxLineChars, {
+			overflow: options?.requireComplete ? "throw" : "skip",
+			lineEndings: "lf",
+		});
 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
 
 		while (true) {
@@ -1031,7 +1041,10 @@ function loadEntriesFromFileInternal(
 				segmentStart = newlineIndex + 1;
 			}
 			lineLength += bytesRead - segmentStart;
-			const decodedLines = lines.push(decoder.write(buffer.subarray(0, bytesRead)));
+			const bytes = buffer.subarray(0, bytesRead);
+			const decodedLines = lines.push(
+				strictDecoder ? strictDecoder.decode(bytes, { stream: true }) : decoder.write(bytes),
+			);
 			const locationsMatch = decodedLines.length === offsets.length;
 			for (let index = 0; index < decodedLines.length; index++) {
 				appendLine(
@@ -1042,11 +1055,13 @@ function loadEntriesFromFileInternal(
 			}
 		}
 
-		for (const line of lines.push(decoder.end())) appendLine(line);
+		for (const line of lines.push(strictDecoder ? strictDecoder.decode() : decoder.end())) appendLine(line);
 		const finalLine = lines.finish();
 		if (finalLine !== undefined) appendLine(finalLine, lineOffset, lineLength);
 		if (!sameFileVersion(revision, fstatSync(fd)) || !sameFileVersion(revision, statSync(resolvedFilePath)))
 			throw new Error("Session file changed while reading it; reopen it before retrying.");
+		if (options?.requireComplete && unterminatedTail)
+			throw new Error("Session history ends with an incomplete JSONL record; its write remains unresolved.");
 	} finally {
 		closeSync(fd);
 	}
@@ -1581,26 +1596,7 @@ export class SessionManager {
 		this.persistenceStateUncertain = true;
 		let receipt: SessionEntriesPersistedEvent | undefined;
 		try {
-			if (recoveringUncertainWrite) {
-				const resolvedSessionFile = resolvePath(sessionFile);
-				if (existsSync(resolvedSessionFile)) {
-					const fileBytes = statSync(resolvedSessionFile).size;
-					if (fileBytes > 0) {
-						const fd = openSync(resolvedSessionFile, "r");
-						const finalByte = Buffer.allocUnsafe(1);
-						try {
-							if (readSync(fd, finalByte, 0, 1, fileBytes - 1) !== 1 || finalByte[0] !== 0x0a) {
-								throw new Error(
-									"Session file ends with an incomplete JSONL record after a failed write; repair it or start a new session.",
-								);
-							}
-						} finally {
-							closeSync(fd);
-						}
-					}
-				}
-			}
-			receipt = this._setSessionFile(sessionFile);
+			receipt = this._setSessionFile(sessionFile, recoveringUncertainWrite);
 			this.persistenceStateUncertain = false;
 		} catch (error) {
 			this.persistenceStateUncertain = true;
@@ -1609,7 +1605,8 @@ export class SessionManager {
 		if (receipt) this._emitEntriesPersisted(receipt);
 	}
 
-	private _setSessionFile(sessionFile: string): SessionEntriesPersistedEvent | undefined {
+	private _setSessionFile(sessionFile: string, requireComplete = false): SessionEntriesPersistedEvent | undefined {
+		const mustReadComplete = requireComplete || this.canonicalOnly;
 		this._invalidateSessionContextCache();
 		this._resetEntryFileIndex(true);
 		this.sessionFile = resolvePath(sessionFile);
@@ -1619,27 +1616,31 @@ export class SessionManager {
 			// soon as its JSONL record is parsed so GC can reclaim it during this pass;
 			// waiting until the complete history is loaded makes peak heap proportional
 			// to file size and can OOM before post-load compaction cleanup runs.
-			const loaded = loadEntriesFromFileInternal(this.sessionFile, undefined, (entry, offset, length) => {
-				if (entry.type === "session") {
-					payloadsHaveStoredIds = (entry.version ?? 1) >= FIRST_SESSION_VERSION_WITH_ENTRY_IDS;
-					return;
-				}
-				// Legacy migration mints entry IDs. Its payloads cannot refer back to the
-				// original file until a writable open has published those IDs there.
-				if (entry.type !== "message" || !payloadsHaveStoredIds) return;
-				this._releaseMessageProperty(entry, "content");
-				this._releaseMessageProperty(entry, "output");
-				if (offset !== undefined && length !== undefined && this.coldPayloadEntryIds.has(entry.id)) {
-					this.entryFileLocations.set(entry.id, { offset, length });
-				}
-			});
+			const loaded = loadEntriesFromFileInternal(
+				this.sessionFile,
+				{ requireComplete: mustReadComplete },
+				(entry, offset, length) => {
+					if (entry.type === "session") {
+						payloadsHaveStoredIds = (entry.version ?? 1) >= FIRST_SESSION_VERSION_WITH_ENTRY_IDS;
+						return;
+					}
+					// Legacy migration mints entry IDs. Its payloads cannot refer back to the
+					// original file until a writable open has published those IDs there.
+					if (entry.type !== "message" || !payloadsHaveStoredIds) return;
+					this._releaseMessageProperty(entry, "content");
+					this._releaseMessageProperty(entry, "output");
+					if (offset !== undefined && length !== undefined && this.coldPayloadEntryIds.has(entry.id)) {
+						this.entryFileLocations.set(entry.id, { offset, length });
+					}
+				},
+			);
 			if (
-				this.canonicalOnly &&
+				mustReadComplete &&
 				(loaded.unterminatedTail ||
 					loaded.entries[0]?.type !== "session" ||
 					loaded.entries[0].version !== CURRENT_SESSION_VERSION)
 			) {
-				throw new Error("Worker history must already have a current header and complete records.");
+				throw new Error("Canonical history must already have a current header and complete records.");
 			}
 			this.fileEntries = loaded.entries;
 			this.payloadsHaveStoredIds = payloadsHaveStoredIds;
@@ -1707,7 +1708,7 @@ export class SessionManager {
 			if (payloadsHaveStoredIds || !this.readOnly) this._releaseExistingCompactedMessagePayloads();
 			return receipt;
 		} else {
-			if (this.readOnly || this.canonicalOnly) throw new Error("Cannot open a missing existing session file.");
+			if (this.readOnly || mustReadComplete) throw new Error("Cannot open a missing existing session file.");
 			const explicitPath = this.sessionFile;
 			this.newSession();
 			this.sessionFile = explicitPath; // preserve explicit path from --session flag
