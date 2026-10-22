@@ -12,6 +12,7 @@ import {
 } from "../../kernel/reliability/index.ts";
 import type { SessionRequestSnapshotInput } from "../../kernel/session/session-manager.ts";
 import { sanitizeToolFailureContext } from "../../kernel/tool-failure-memory.ts";
+import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
 import type { AgentMessage, ThinkingLevel } from "../../kernel/types.ts";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
@@ -973,8 +974,6 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							);
 						}
 						const retentionPolicy = createRetentionPolicy(signal);
-						const persistedToolAssistantIds = new Set<string>();
-						const pendingToolAssistants = new Map<string, AssistantMessage>();
 						let activeProviderTurn: WorkerProviderTurnProtocol | undefined;
 						const closeActiveProviderTurn = (): void => {
 							const active = activeProviderTurn;
@@ -996,6 +995,14 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							const historyLength = history.length;
 							const transcriptCursor = transcriptCommit.cursor;
 							const durableCallbackMessages: WorkerTranscriptMessage[] = [];
+							let currentRequest:
+								| {
+										requestId: string;
+										assistant?: AssistantMessage;
+										callIds: Set<string>;
+										persisted: boolean;
+								  }
+								| undefined;
 							let callbackFailed = false;
 							let callbackFailure: unknown;
 							const retainCallbackFailure = (error: unknown): void => {
@@ -1013,16 +1020,38 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 									: {}),
 							});
 							activeProviderTurn = providerTurn;
-							const persistToolRequest = (message: AssistantMessage): void => {
+							const assertProviderTurn = (): void => {
+								if (activeProviderTurn !== providerTurn)
+									throw new WorkerCompletionProtocolError(
+										"Worker callback belongs to a closed provider attempt.",
+									);
+							};
+							const requireRequest = (requestId: string | undefined) => {
+								assertProviderTurn();
+								if (!currentRequest || currentRequest.requestId !== requestId)
+									throw new WorkerCompletionProtocolError(
+										"Worker callback belongs to a stale or missing provider request.",
+									);
+								return currentRequest;
+							};
+							const persistToolRequest = (message: AssistantMessage, requestId: string | undefined): void => {
 								signal.throwIfAborted();
+								const request = requireRequest(requestId);
 								const toolCallIds = message.content.flatMap((content) =>
 									content.type === "toolCall" ? [content.id] : [],
 								);
-								if (toolCallIds.length === 0 || toolCallIds.every((id) => persistedToolAssistantIds.has(id)))
-									return;
-								const observed = toolCallIds
-									.map((id) => pendingToolAssistants.get(id))
-									.find((item) => item !== undefined);
+								if (toolCallIds.length === 0) return;
+								if (
+									new Set(toolCallIds).size !== toolCallIds.length ||
+									(request.callIds.size > 0 &&
+										(request.callIds.size !== toolCallIds.length ||
+											toolCallIds.some((id) => !request.callIds.has(id))))
+								)
+									throw new WorkerCompletionProtocolError(
+										"Worker tool request call identities changed or are duplicated.",
+									);
+								if (request.persisted) return;
+								const observed = request.assistant;
 								if (observed) {
 									if (!isDeepStrictEqual(observed.usage, message.usage)) {
 										throw new WorkerCompletionProtocolError(
@@ -1032,10 +1061,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								} else providerTurn.accountAssistantUsage(message.usage);
 								options.toolSurface.gateway?.flushUsage();
 								options.conversation.appendMessage(message);
-								for (const id of toolCallIds) {
-									persistedToolAssistantIds.add(id);
-									pendingToolAssistants.delete(id);
-								}
+								request.persisted = true;
+								request.callIds = new Set(toolCallIds);
+								request.assistant = undefined;
 								checkpointUsage("Persisted worker assistant tool request and its cumulative provider usage.");
 								providerTurn.consumeToolAssistantAndRelease();
 								durableCallbackMessages.push(message);
@@ -1083,7 +1111,17 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										// request start and reasoning level survive in its own conversation.
 										onProviderRequestSnapshot: (context) => {
 											signal.throwIfAborted();
+											assertProviderTurn();
+											if (currentRequest && currentRequest.callIds.size > 0 && !currentRequest.persisted)
+												throw new WorkerCompletionProtocolError(
+													"Worker provider request advanced before its tool assistant was persisted.",
+												);
 											const { snapshot } = options.conversation.appendRequestSnapshot(context);
+											currentRequest = {
+												requestId: snapshot.requestId,
+												callIds: new Set(),
+												persisted: false,
+											};
 											const firstRequest = lastRequest === undefined;
 											lastRequest = { snapshot, openedAt: Date.now() };
 											lastSent = {
@@ -1109,11 +1147,12 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										beforeToolCall: async (context, toolSignal) => {
 											try {
 												signal.throwIfAborted();
-												persistToolRequest(context.assistantMessage);
+												persistToolRequest(context.assistantMessage, context.requestId);
 												// The report tool records arguments and ends the run; it is not a granted tool.
 												if (context.toolCall.name === SUBMIT_REPORT_TOOL_NAME) return undefined;
 												const decision = await options.toolSurface.beforeToolCall(context, toolSignal);
 												signal.throwIfAborted();
+												requireRequest(context.requestId);
 												if (!decision?.block) {
 													checkpointUsage(
 														`Authorized worker tool '${context.toolCall.name}' under its durable grant.`,
@@ -1144,8 +1183,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												throw error;
 											}
 										},
-										afterToolCall: async ({ toolCall, args, result, isError }) => {
+										afterToolCall: async ({ toolCall, args, result, isError, requestId }) => {
 											try {
+												requireRequest(requestId);
 												if (callbackBoundarySealed) {
 													signal.throwIfAborted();
 													throw new WorkerCompletionProtocolError(
@@ -1169,6 +1209,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 														cwd: options.cwd,
 													});
 												signal.throwIfAborted();
+												requireRequest(requestId);
 												const receipt = commandReceiptFor({
 													toolCallId: toolCall.id,
 													toolName: toolCall.name,
@@ -1202,7 +1243,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													options.toolSurface.toolUsage.settle(message.toolCallId, message.usage);
 												}
 												signal.throwIfAborted();
+												assertProviderTurn();
 												if (message.role === "assistant" && origin !== "local") {
+													requireRequest(currentRequest?.requestId);
 													providerTurn.accountAssistantUsage(message.usage);
 													options.toolSurface.gateway?.flushUsage();
 													// Every provider response, tool use included, against the history its request carried
@@ -1225,18 +1268,28 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													// Known calls are normalized before beforeToolCall and persist from that hook.
 													// Retain the request only so immediate unknown/malformed results can close the
 													// transcript without freezing pre-repair arguments into durable history.
-													for (const content of message.content) {
-														if (content.type === "toolCall")
-															pendingToolAssistants.set(content.id, message);
-													}
+													if (!currentRequest)
+														throw new WorkerCompletionProtocolError(
+															"Worker tool assistant has no provider request.",
+														);
+													currentRequest.assistant = message;
+													currentRequest.callIds = new Set(
+														message.content.flatMap((content) =>
+															content.type === "toolCall" ? [content.id] : [],
+														),
+													);
 													return;
 												}
-												if (
-													message.role === "toolResult" &&
-													!persistedToolAssistantIds.has(message.toolCallId)
-												) {
-													const pending = pendingToolAssistants.get(message.toolCallId);
-													if (pending) persistToolRequest(pending);
+												if (message.role === "toolResult") {
+													const request = requireRequest(
+														retainedToolInvocation(message.details)?.requestId,
+													);
+													if (!request.callIds.has(message.toolCallId))
+														throw new WorkerCompletionProtocolError(
+															"Worker tool result does not belong to its provider request.",
+														);
+													if (!request.persisted && request.assistant)
+														persistToolRequest(request.assistant, request.requestId);
 												}
 												if (message.role === "toolResult") {
 													// Validate before persistence and retain billed usage if the append fails.
