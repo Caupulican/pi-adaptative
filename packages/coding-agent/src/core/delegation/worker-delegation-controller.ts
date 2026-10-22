@@ -105,6 +105,7 @@ import {
 	verifierWorkerExecutionContract,
 } from "../orchestration/worker-execution-contract.ts";
 import { resolveWorkerModelPin, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
+import { assertWorkerReceiptAdmission, inheritWorkerReceiptAdmission } from "../orchestration/worker-receipt-origin.ts";
 import type { ProfileRegistry } from "../profile-registry.ts";
 import { resolveProviderAccountKey } from "../provider-admission/account-key.ts";
 import { emergencyStopPath, isEmergencyStopEngaged } from "../provider-admission/emergency-stop.ts";
@@ -247,6 +248,7 @@ import {
 } from "./worker-profile-resolver.ts";
 import { type WorkerProjectAdmission, WorkerProjectDirectory } from "./worker-project-directory.ts";
 import { assertQueuedWorkerContextRecoverable } from "./worker-queued-context-recovery.ts";
+import { captureWorkerReceiptOrigin } from "./worker-receipt-origin.ts";
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
 import { hostVerifiedChecks, workerReportClaimText } from "./worker-report.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
@@ -967,6 +969,7 @@ export class WorkerDelegationController {
 			timers: this.deps.getTimers().port("worker-wait"),
 			warn: (message) => this.safeWarn(message),
 			getCurrentSubmissionEpoch: () => this.deps.getCurrentSubmissionEpoch?.(),
+			captureReceiptOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
 			noteAttemptOwnerEpoch: (attemptId, ownerEpoch) =>
 				this.notifications.noteAttemptOwnerEpoch(attemptId, ownerEpoch),
 		});
@@ -2238,8 +2241,11 @@ export class WorkerDelegationController {
 						...artifacts,
 						...(omitted > 0 ? [`- [${omitted} artifact URI(s) omitted to keep verifier request bounded]`] : []),
 					];
+		const receiptOrigin =
+			this.lifecycle.getTaskRuntimeSnapshot().attempts[args.subjectAttemptId]?.dispatch.receiptOrigin;
 		return {
 			profileId: args.verifierProfileId,
+			...(receiptOrigin ? { receiptOrigin } : {}),
 			verificationOfTaskId: args.subjectTaskId,
 			verificationOfAttemptId: args.subjectAttemptId,
 			instructions: [...prefix, ...artifactSection].join("\n"),
@@ -3179,6 +3185,7 @@ export class WorkerDelegationController {
 		const birth = this.workerBirth(request, mode);
 		const project = this.projectSelections.get(request);
 		const prepare = (birthContextForkReference: WorkerContextForkReference, laneId: string) => {
+			assertWorkerReceiptAdmission(request.receiptOrigin);
 			const allocation = project?.admission.kind === "allocated" ? project.admission.allocation : undefined;
 			const controlMessageId =
 				this.controlMessageIdFor(request.messageReplayKey) ??
@@ -3188,6 +3195,7 @@ export class WorkerDelegationController {
 			const value = lifecycle.prepare(
 				{
 					instructions: admission.instructions,
+					...(request.receiptOrigin ? { receiptOrigin: request.receiptOrigin } : {}),
 					...(controlMessageId ? { controlMessageId } : {}),
 					...(request.parentAgentId ? { parentAgentId: request.parentAgentId } : {}),
 					birthContextForkReference,
@@ -3917,10 +3925,12 @@ export class WorkerDelegationController {
 		let admittedClaim = false;
 		try {
 			return this.withProjectContextAdmission(agent, () => {
+				assertWorkerReceiptAdmission(request.receiptOrigin);
 				admittedClaim = true;
 				const goal = this.goalForWorkerRequest(request);
 				const taskContext = request.taskContext;
 				const accepted = this.agentControl.startWorkerAgentTask(agentId, request.instructions, {
+					...(request.receiptOrigin ? { receiptOrigin: request.receiptOrigin } : {}),
 					...(taskContext?.dependsOnTaskIds?.length ? { dependsOnTaskIds: taskContext.dependsOnTaskIds } : {}),
 					...(request.messageReplayKey ? { idempotencyKey: request.messageReplayKey } : {}),
 					newTask: {
@@ -4326,9 +4336,34 @@ export class WorkerDelegationController {
 		return queueSlotsNeeded > queueSlotsFree ? "worker_dispatch_queue_full" : undefined;
 	}
 
+	private captureWorkerRequest(request: WorkerDelegationRequest, existing = false): WorkerDelegationRequest {
+		const { assertReceiptAdmission, ...cloneable } = request;
+		const capturedRequest = structuredClone(cloneable);
+		inheritWorkerReceiptAdmission(request.receiptOrigin, capturedRequest.receiptOrigin);
+		if (existing) return capturedRequest;
+		const replay = this.replayedWorkerAttempt(request.messageReplayKey);
+		if (replay) {
+			capturedRequest.receiptOrigin = replay.dispatch.receiptOrigin;
+		} else if (request.parentAgentId) {
+			const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
+			const parentAttemptId = snapshot.agents[request.parentAgentId]?.activeAttemptId;
+			capturedRequest.receiptOrigin = parentAttemptId
+				? snapshot.attempts[parentAttemptId]?.dispatch.receiptOrigin
+				: undefined;
+		} else {
+			assertReceiptAdmission?.();
+			capturedRequest.receiptOrigin ??= captureWorkerReceiptOrigin(
+				this.deps.getSessionManager(),
+				assertReceiptAdmission,
+				request.receiptOriginAnchor,
+			);
+		}
+		return capturedRequest;
+	}
+
 	start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
 		if (this.workerAbort.signal.aborted) return Promise.resolve({ started: false, skipReason: "session_disposed" });
-		const capturedRequest = structuredClone(request);
+		const capturedRequest = this.captureWorkerRequest(request);
 		return this.runAdmittedWorker(
 			() => this.startWorker(capturedRequest, signal),
 			() => ({
@@ -4550,7 +4585,7 @@ export class WorkerDelegationController {
 		directoryValidated = false,
 	): Promise<WorkerDelegationRunOutcome> {
 		if (this.workerAbort.signal.aborted) return Promise.resolve({ started: false, skipReason: "session_disposed" });
-		const capturedRequest = structuredClone(request);
+		const capturedRequest = this.captureWorkerRequest(request, existingRecord !== undefined);
 		return this.runAdmittedWorker(
 			() => this.runWorkerOnce(capturedRequest, onStarted, existingRecord, directoryValidated),
 			() => ({ started: false, skipReason: "session_disposed" }),

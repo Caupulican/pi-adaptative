@@ -29,6 +29,7 @@ import {
 	normalizeWorkerContextForkReference,
 	type WorkerContextForkReference,
 } from "./worker-context-fork-reference.ts";
+import { assertWorkerReceiptAdmission } from "./worker-receipt-origin.ts";
 
 export interface DelegationLedgerOptions {
 	agentDir: string;
@@ -38,6 +39,7 @@ export interface DelegationLedgerOptions {
 }
 
 export interface PrepareDelegationInput {
+	receiptOrigin?: OrchestrationDispatchRequest["receiptOrigin"];
 	laneId: string;
 	instructions: string;
 	/** Durable identity of the caller turn that admitted this dispatch; replays resolve back to it. */
@@ -81,6 +83,7 @@ export interface StartedDelegationAttempt {
 }
 
 export interface PrepareAgentTurnInput {
+	receiptOrigin?: OrchestrationDispatchRequest["receiptOrigin"];
 	agentId: string;
 	instructions: string;
 	controlMessageId?: string;
@@ -185,6 +188,7 @@ export class DelegationOrchestrationLedger {
 				: {}),
 			...(input.taskContext ? { taskContext: input.taskContext } : {}),
 			dispatchMetadata: {
+				...(input.receiptOrigin ? { receiptOrigin: input.receiptOrigin } : {}),
 				logicalLaneId: input.laneId,
 				...(input.controlMessageId ? { controlMessageId: input.controlMessageId } : {}),
 				...(input.controlForkMode ? { controlForkMode: input.controlForkMode } : {}),
@@ -352,6 +356,7 @@ export class DelegationOrchestrationLedger {
 				},
 				executionContract: contract,
 				dispatchMetadata: {
+					...(input.receiptOrigin ? { receiptOrigin: input.receiptOrigin } : {}),
 					logicalLaneId: agentId,
 					dispatchSequence: sequence,
 					...(controlMessageId ? { controlMessageId } : {}),
@@ -381,6 +386,7 @@ export class DelegationOrchestrationLedger {
 		executionContract?: WorkerExecutionContract;
 		dispatchMetadata?: Pick<
 			OrchestrationDispatchRequest,
+			| "receiptOrigin"
 			| "executionKind"
 			| "logicalLaneId"
 			| "dispatchSequence"
@@ -514,6 +520,7 @@ export class DelegationOrchestrationLedger {
 		) {
 			throw new DurableTaskRuntimeError(`Task '${input.laneId}' has conflicting durable dispatch identity.`);
 		}
+		assertWorkerReceiptAdmission(input.dispatchMetadata?.receiptOrigin);
 		if (!snapshot.tasks[input.laneId]) {
 			return this.runtime.prepareTaskAttempt(
 				{

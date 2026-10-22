@@ -92,6 +92,7 @@ import {
 import { assertVerificationRecord, verificationSubjectAttempt } from "./verification-identity.ts";
 import { normalizeWorkerContextForkReference } from "./worker-context-fork-reference.ts";
 import { parseWorkerExecutionContract } from "./worker-execution-contract.ts";
+import { workerReceiptOriginFromValue } from "./worker-receipt-origin.ts";
 
 export const MAX_DATE_EPOCH_MS = 8_640_000_000_000_000;
 
@@ -304,6 +305,7 @@ export function validateTaskDependencyIds(
 }
 
 const DISPATCH_FIELDS = new Set([
+	"receiptOrigin",
 	"taskId",
 	"profileId",
 	"instructions",
@@ -387,6 +389,9 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 		profileId: dispatchIdentifier(dispatch.profileId, `${label}.profileId`),
 		instructions: dispatchInstructions(dispatch.instructions, `${label}.instructions`),
 		resourcePointerIds: dispatchIdentifierArray(dispatch.resourcePointerIds, `${label}.resourcePointerIds`),
+		...(dispatch.receiptOrigin === undefined
+			? {}
+			: { receiptOrigin: workerReceiptOriginFromValue(dispatch.receiptOrigin) }),
 		...(parentAgentId ? { parentAgentId } : {}),
 		requirementIds:
 			dispatch.requirementIds === undefined

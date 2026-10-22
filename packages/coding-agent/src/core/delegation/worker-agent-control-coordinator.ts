@@ -17,6 +17,8 @@ import {
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { terminalAttemptStatus } from "../orchestration/task-runtime-state.ts";
+import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
+import { assertWorkerReceiptAdmission } from "../orchestration/worker-receipt-origin.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS } from "../settings/settings-rules.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
@@ -149,6 +151,7 @@ export interface WorkerAgentControlCoordinatorOptions {
 	 * attempt's owner epoch via `noteAttemptOwnerEpoch` -- mirrors
 	 * `WorkerDelegationControllerDeps.getCurrentSubmissionEpoch`. */
 	getCurrentSubmissionEpoch?(): number | undefined;
+	captureReceiptOrigin?(): WorkerReceiptOrigin;
 	/** Mirrors `WorkerNotificationCoordinator.noteAttemptOwnerEpoch` -- called only when
 	 * `prepareAgentTurn` reports `created: true`, never for a replayed control message returning an
 	 * attempt that may predate the current process. */
@@ -679,6 +682,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			newTask,
 			options.newTask?.goal,
 			true,
+			options.receiptOrigin,
 		);
 	}
 
@@ -804,6 +808,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		newTask?: WorkerAgentNewTaskCorrelation,
 		newTaskGoal?: GoalState,
 		requireRuntimeAdmission = false,
+		receiptOrigin?: WorkerReceiptOrigin,
 	): { started: boolean; steering: false; messageId: string; record?: LaneRecord; skipReason?: string } {
 		const reader = runtimeGenerationAdmission(this.options.agentDir).tryAdmitWork({
 			kind: "worker-control",
@@ -835,6 +840,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				// only once it has ruled out every deterministic refusal (bounds, replay identity, pending
 				// capacity, encoded-byte admission), so a refused start no longer leaves a new objective.
 				newTaskGoal ? () => this.options.getLifecycle().synchronizeGoalState(newTaskGoal) : undefined,
+				receiptOrigin,
 			);
 			if (queued.status === "completed_replay") {
 				return {
@@ -1024,6 +1030,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				content: message,
 				senderAgentId: sourceAgentId,
 				replyToMessageId: request.messageId,
+				...(request.receiptOrigin ? { receiptOrigin: request.receiptOrigin } : {}),
 				...(request.threadId ? { threadId: request.threadId } : {}),
 				idempotencyKey,
 				task: { kind: "agent_turn" },
@@ -2139,12 +2146,15 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				skipReason: "terminal_handoff_retired_target_transcript_delivery",
 			};
 		}
+		const receiptOrigin = this.options.getLifecycle().getTaskRuntimeSnapshot().attempts[args.terminalAttemptId]
+			?.dispatch.receiptOrigin;
 		const queued = this.getMailbox(parent.agentId).enqueueWithReceipt({
 			kind: active ? "steer" : "follow_up",
 			content,
 			senderAgentId: args.childAgentId,
 			idempotencyKey,
 			task: { kind: "terminal_handoff", sourceAttemptId: args.terminalAttemptId },
+			...(receiptOrigin ? { receiptOrigin } : {}),
 		});
 		if (queued.status === "completed_replay") {
 			this.notifyStateChangedBestEffort();
@@ -2260,6 +2270,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 							agentId: agent.agentId,
 							instructions: message.content,
 							controlMessageId: message.messageId,
+							...(message.receiptOrigin ? { receiptOrigin: message.receiptOrigin } : {}),
 							...(message.task?.kind === "agent_turn" && message.task.dependsOnTaskIds
 								? { dependsOnTaskIds: message.task.dependsOnTaskIds }
 								: {}),
@@ -2702,18 +2713,42 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		options: WorkerAgentMessageOptions,
 		task?: WorkerAgentTaskMetadata,
 		onAdmitted?: () => void,
+		admittedOrigin?: WorkerReceiptOrigin,
 	): QueuedPeerMessage {
 		if (options.idempotencyKey !== undefined) {
 			this.assertIdempotencyTarget(target.agentId, options.idempotencyKey);
 		}
-		const enqueue = () =>
-			this.getMailbox(target.agentId).enqueueWithReceipt({
+		const mailbox = this.getMailbox(target.agentId);
+		const replayId =
+			options.idempotencyKey === undefined
+				? undefined
+				: workerAgentMessageId(this.options.parentSessionId, options.idempotencyKey);
+		const replay =
+			replayId !== undefined &&
+			(mailbox.getMessage(replayId) !== undefined || mailbox.hasControlReplayReceipt(replayId));
+		const sender = options.senderAgentId;
+		const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
+		const activeSender =
+			sender && sender !== this.sessionRootAddress ? snapshot.agents[sender]?.activeAttemptId : undefined;
+		const receiptOrigin = replay
+			? undefined
+			: (admittedOrigin ??
+				(sender && sender !== this.sessionRootAddress
+					? activeSender
+						? snapshot.attempts[activeSender]?.dispatch.receiptOrigin
+						: undefined
+					: this.options.captureReceiptOrigin?.()));
+		const enqueue = () => {
+			assertWorkerReceiptAdmission(receiptOrigin);
+			return mailbox.enqueueWithReceipt({
 				kind,
 				content,
 				...options,
+				...(receiptOrigin ? { receiptOrigin } : {}),
 				...(task ? { task } : {}),
 				...(onAdmitted ? { onAdmitted } : {}),
 			});
+		};
 		return this.options.withConversationAdmission
 			? this.options.withConversationAdmission(target, enqueue)
 			: enqueue();

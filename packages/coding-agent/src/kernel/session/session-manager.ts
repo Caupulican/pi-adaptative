@@ -1522,6 +1522,7 @@ export class SessionManager {
 	private latestCustomEntryCache: LatestCustomEntryCache | undefined;
 	private branchCustomEntriesCache: BranchCustomEntriesCache | undefined;
 	private persistenceStateUncertain = false;
+	private navigationRevision = 0;
 	private inheritedSessionIds = new Set<string>();
 	private readonly entriesPersistedListeners = new Set<SessionEntriesPersistedListener>();
 
@@ -1559,6 +1560,7 @@ export class SessionManager {
 		this._assertWritable();
 		// Judged before this manager changes any state: a rejected file leaves the manager and the file as they were.
 		assertAdoptableSessionHeader(resolvePath(sessionFile));
+		this.navigationRevision++;
 		const recoveringUncertainWrite = this.persistenceStateUncertain;
 		this.persistenceStateUncertain = true;
 		let receipt: SessionEntriesPersistedEvent | undefined;
@@ -1698,6 +1700,7 @@ export class SessionManager {
 
 	newSession(options?: NewSessionOptions): string | undefined {
 		this._assertWritable();
+		this.navigationRevision++;
 		this.payloadsHaveStoredIds = true;
 		this.storageRevision = undefined;
 		if (options?.id !== undefined) {
@@ -1885,6 +1888,27 @@ export class SessionManager {
 	/** Whether a failed write left the file's state unknown: appends are refused until the file is reopened. */
 	isPersistenceStateUncertain(): boolean {
 		return this.persistenceStateUncertain;
+	}
+
+	/** Fence work across navigation while allowing ordinary appends on its original branch. */
+	captureBranchContext(): () => void {
+		const { sessionId, sessionFile, navigationRevision } = this;
+		return () => {
+			if (
+				this.sessionId !== sessionId ||
+				this.sessionFile !== sessionFile ||
+				this.navigationRevision !== navigationRevision
+			)
+				throw new Error("Session branch changed before work was admitted.");
+		};
+	}
+
+	/** Persist the buffered prefix when another durable owner is about to reference it. */
+	flushBufferedEntries(): void {
+		this._assertWritable();
+		if (!this.persist || this.flushed) return;
+		const receipt = this._persistEntries([], [], undefined, this._capturePersistenceContext(), true);
+		if (receipt) this._emitEntriesPersisted(receipt);
 	}
 
 	getCwd(): string {
@@ -2098,6 +2122,7 @@ export class SessionManager {
 		encodedEntries: readonly string[],
 		signal?: AbortSignal,
 		assertCurrent: () => void = this._capturePersistenceContext(),
+		flushBuffered = false,
 	): SessionEntriesPersistedEvent | undefined {
 		this._assertWritable();
 		signal?.throwIfAborted();
@@ -2121,7 +2146,7 @@ export class SessionManager {
 				isSessionLifecycleEntry(entry) ||
 				(entry.type === "custom" && entry.customType === "continuous_chat_work_report"),
 		);
-		const shouldFlush = hasReply || forceFlush;
+		const shouldFlush = hasReply || forceFlush || flushBuffered;
 		// Encoding can invoke extension-owned getters. Prepare the entire initial prefix
 		// before opening the file, then check cancellation at the last pre-write boundary.
 		// Preparation failure is not an uncertain physical write and must remain recoverable.
@@ -3512,6 +3537,7 @@ export class SessionManager {
 		if (!this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
+		this.navigationRevision++;
 		this._invalidateSessionContextCache();
 		this.leafId = branchFromId;
 		this.lifecycleActiveCache = undefined;
@@ -3524,6 +3550,7 @@ export class SessionManager {
 	 */
 	resetLeaf(): void {
 		this._assertWritable();
+		this.navigationRevision++;
 		this._invalidateSessionContextCache();
 		this.leafId = null;
 		this.lifecycleActiveCache = undefined;
@@ -3545,6 +3572,7 @@ export class SessionManager {
 		if (branchFromId !== null && !this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
+		this.navigationRevision++;
 		// The canonical append publishes the new leaf and advances/invalidates its caches
 		// after persistence. Moving the leaf first strands navigation on a failed write.
 		const entry: BranchSummaryEntry = {
@@ -3651,6 +3679,7 @@ export class SessionManager {
 	createBranchedSession(leafId: string): string | undefined {
 		this._assertWritable();
 		const branched = this.createBranchedSessionManager(leafId);
+		this.navigationRevision++;
 		this._invalidateSessionContextCache();
 		this.sessionId = branched.sessionId;
 		this.sessionFile = branched.sessionFile;

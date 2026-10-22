@@ -541,6 +541,7 @@ export class WorkerRecoveryCoordinator {
 		const durableVerificationOfTaskId = verificationOfTaskId ?? task?.verificationOfTaskId;
 		return {
 			instructions: attempt.dispatch.instructions,
+			...(attempt.dispatch.receiptOrigin ? { receiptOrigin: attempt.dispatch.receiptOrigin } : {}),
 			profileId: attempt.dispatch.profileId,
 			...(attempt.dispatch.parentAgentId ? { parentAgentId: attempt.dispatch.parentAgentId } : {}),
 			...(durableVerificationOfTaskId ? { verificationOfTaskId: durableVerificationOfTaskId } : {}),

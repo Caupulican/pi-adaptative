@@ -10,6 +10,7 @@ import {
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	MAX_WORKER_AUTHORITY_PATH_LENGTH,
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
 import {
@@ -19,6 +20,11 @@ import {
 	withSessionBundleRetention,
 } from "../orchestration/session-bundle-lifecycle.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
+import {
+	assertWorkerReceiptAdmission,
+	type WorkerReceiptOrigin,
+	workerReceiptOriginFromValue,
+} from "../orchestration/worker-receipt-origin.ts";
 import { withFileLockSync } from "../util/atomic-file.ts";
 import type { SteerDecision } from "../util/wait.ts";
 import { createReplaySafeMailboxBounder } from "./replay-safe-mailbox-bounds.ts";
@@ -92,6 +98,11 @@ const MAX_ENCODED_MANDATORY_MESSAGE_BYTES =
 					),
 				},
 			},
+			receiptOrigin: {
+				sessionId: "\0".repeat(MAX_ORCHESTRATION_IDENTIFIER_LENGTH),
+				leafId: "\0".repeat(MAX_ORCHESTRATION_IDENTIFIER_LENGTH),
+				sessionFile: "\0".repeat(MAX_WORKER_AUTHORITY_PATH_LENGTH),
+			},
 			createdAt: MAX_MAILBOX_TRANSITION_TIMESTAMP,
 			deliveredAt: MAX_MAILBOX_TRANSITION_TIMESTAMP,
 		}),
@@ -132,6 +143,8 @@ export type WorkerAgentTaskMetadata =
 	| { kind: "terminal_handoff"; sourceAttemptId: string };
 
 export interface WorkerAgentMessage {
+	/** Host-owned lineage captured at acceptance; excluded from replay intent and never recaptured. */
+	receiptOrigin?: WorkerReceiptOrigin;
 	messageId: string;
 	kind: WorkerAgentMessageKind;
 	content: string;
@@ -309,6 +322,8 @@ export interface WorkerAgentControlScope {
 }
 
 export interface WorkerAgentTaskStartOptions extends WorkerAgentControlScope {
+	/** Host-captured origin of a start admitted through asynchronous specialization. */
+	receiptOrigin?: WorkerReceiptOrigin;
 	/** Host-derived replay identity scoped to the caller, session, tool invocation, and action. */
 	idempotencyKey?: string;
 	/** Existing same-objective durable tasks that must complete before this turn may run. */
@@ -804,6 +819,8 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 		) {
 			throw new Error("Worker agent mailbox contains an invalid message.");
 		}
+		const receiptOrigin =
+			message.receiptOrigin === undefined ? undefined : workerReceiptOriginFromValue(message.receiptOrigin);
 		const createdAt = requiredMailboxTimestamp(message.createdAt, "creation timestamp");
 		const deliveredAt =
 			message.deliveredAt === undefined
@@ -843,6 +860,7 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 		}
 		return {
 			...message,
+			...(receiptOrigin ? { receiptOrigin } : {}),
 			createdAt,
 			...(deliveredAt ? { deliveredAt } : {}),
 			...(repliedAt ? { repliedAt } : {}),
@@ -1434,6 +1452,7 @@ export class WorkerAgentMailbox {
 		replyToMessageId?: string;
 		expectReply?: boolean;
 		task?: WorkerAgentTaskMetadata;
+		receiptOrigin?: WorkerReceiptOrigin;
 	}): WorkerAgentMessage {
 		const accepted = this.enqueueWithReceipt(input);
 		if (accepted.status !== "retained") throw new Error("Unkeyed worker control unexpectedly resolved as a replay.");
@@ -1457,6 +1476,7 @@ export class WorkerAgentMailbox {
 		replyToMessageId?: string;
 		expectReply?: boolean;
 		task?: WorkerAgentTaskMetadata;
+		receiptOrigin?: WorkerReceiptOrigin;
 		idempotencyKey?: string;
 		onAdmitted?: () => void;
 	}): WorkerAgentEnqueueReceipt {
@@ -1492,6 +1512,7 @@ export class WorkerAgentMailbox {
 			...(replyToMessageId ? { replyToMessageId } : {}),
 			...(input.expectReply === true ? { expectReply: true } : {}),
 			...(task ? { task } : {}),
+			...(input.receiptOrigin ? { receiptOrigin: workerReceiptOriginFromValue(input.receiptOrigin) } : {}),
 			createdAt: new Date().toISOString(),
 		};
 		const intentDigest = idempotencyKey ? controlIntentDigest(message) : undefined;
@@ -1582,7 +1603,10 @@ export class WorkerAgentMailbox {
 			!externallyReplayOwned,
 			true,
 			() => {
-				if (created) input.onAdmitted?.();
+				if (created) {
+					input.onAdmitted?.();
+					assertWorkerReceiptAdmission(input.receiptOrigin);
+				}
 			},
 		);
 		if (created) this.notify();
@@ -1650,6 +1674,7 @@ export class WorkerAgentMailbox {
 			replyToMessageId?: string;
 			expectReply?: boolean;
 			task?: WorkerAgentTaskMetadata;
+			receiptOrigin?: WorkerReceiptOrigin;
 		},
 	): boolean | undefined {
 		const normalized = messageId.trim();

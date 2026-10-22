@@ -87,6 +87,7 @@ import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-claim.
 import type { WorkerAgentControlPort, WorkerGrantSummary } from "./delegation/worker-agent-control.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { deriveWorkerDispositionFacts } from "./delegation/worker-disposition.ts";
+import { captureWorkerReceiptAnchor } from "./delegation/worker-receipt-origin.ts";
 import { execCommand } from "./exec.ts";
 import { PeerReviewController } from "./expert-routing/peer-review.ts";
 import type { ExtensionImportAuthority } from "./extension-import-authority.ts";
@@ -1935,11 +1936,22 @@ export class RuntimeBuilder {
 							branchId: sessionManager.getLeafId() ?? sessionManager.getSessionId(),
 						};
 					},
-					startWorkerDelegation: (args, signal) =>
-						this._taskDirectories.withContext(
-							(executionContext) => this.deps.startWorkerDelegation({ ...args, executionContext }, signal),
-							signal,
-						),
+					startWorkerDelegation: (args, signal) => {
+						const sessionManager = this.deps.getSessionManager();
+						const receiptOriginAnchor = captureWorkerReceiptAnchor(sessionManager);
+						const assertBranchCurrent = sessionManager.captureBranchContext();
+						const assertReceiptAdmission = () => {
+							if (sessionManager !== this.deps.getSessionManager())
+								throw new Error("Session changed before worker admission.");
+							assertBranchCurrent();
+						};
+						return this._taskDirectories.withContext((executionContext) => {
+							return this.deps.startWorkerDelegation(
+								{ ...args, executionContext, assertReceiptAdmission, receiptOriginAnchor },
+								signal,
+							);
+						}, signal);
+					},
 					runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
 					getGoalStateSnapshot: () => this.deps.getGoalStateSnapshot(),
 					...(this.deps.describeWorkerGrant

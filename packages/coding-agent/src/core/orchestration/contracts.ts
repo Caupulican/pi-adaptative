@@ -1,4 +1,5 @@
 import type { AgentIdentityContract, ResourcePointer } from "../../kernel/session/agent-identity.ts";
+import type { WorkerReceiptOrigin } from "./worker-receipt-origin.ts";
 
 export {
 	type AgentIdentityContract,
@@ -316,6 +317,8 @@ export type WorkerModelRouteSource = (typeof WORKER_MODEL_ROUTE_SOURCES)[number]
 
 export interface OrchestrationDispatchRequest {
 	taskId: string;
+	/** Parent lineage captured for this dispatch, never inherited from worker birth identity. */
+	receiptOrigin?: WorkerReceiptOrigin;
 	profileId: string;
 	instructions: string;
 	resourcePointerIds: readonly string[];

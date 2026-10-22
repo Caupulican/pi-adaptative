@@ -13,6 +13,7 @@ import {
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
 import { parseRiskBudget } from "../orchestration/risk-budget.ts";
+import type { WorkerReceiptAnchor, WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 
 /** Upper bound on extra write roots one delegation may name. */
@@ -204,6 +205,12 @@ export function parseWorkerParallelWorkIntent(value: unknown): WorkerParallelWor
 /** A profile is an optional preset; authority is compiled and persisted by the host. */
 export interface WorkerDelegationRequest {
 	instructions: string;
+	/** Host-captured parent lineage. Never exposed in the model-facing schema. */
+	receiptOrigin?: WorkerReceiptOrigin;
+	/** Process-local command fence, omitted from durable requests. */
+	assertReceiptAdmission?: () => void;
+	/** Storage-free original command position, before task-directory admission awaits. */
+	receiptOriginAnchor?: WorkerReceiptAnchor;
 	/** Host-owned objective of an automatic route; checked again when fresh work becomes durable. */
 	objectiveId?: string;
 	/** Host-admitted task context for a fresh dispatch; never exposed in the model schema. */

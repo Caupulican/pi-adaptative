@@ -112,6 +112,7 @@ import {
 	terminalAttemptStatus,
 } from "./task-runtime-state.ts";
 import { assertVerificationDependenciesReady, taskAwaitsVerification } from "./verification-identity.ts";
+import { assertWorkerReceiptAdmission } from "./worker-receipt-origin.ts";
 
 export { validateTaskDependencyIds } from "./task-runtime-codecs.ts";
 export {
@@ -559,19 +560,23 @@ export class DurableTaskRuntime {
 		assertIdentifierListHasCapacity(objectiveState.taskIds, MAX_ORCHESTRATION_TASKS, "objective task list");
 		assertRecordHasCapacity(this.state.attempts, MAX_ORCHESTRATION_ATTEMPTS, "attempt");
 		const attemptId = `attempt-${this.createId()}`;
-		this.commit({
-			type: "task.attempt_prepared",
-			aggregateId: task.taskId,
-			actor: "runtime",
-			idempotencyKey: `task-attempt-prepared:${task.taskId}:${attemptId}`,
-			payload: toJsonObject({
-				task,
-				attemptId,
-				taskId: task.taskId,
-				dispatch: normalizedDispatch,
-				...(grantId ? { grantId } : {}),
-			}),
-		});
+		this.commit(
+			{
+				type: "task.attempt_prepared",
+				aggregateId: task.taskId,
+				actor: "runtime",
+				idempotencyKey: `task-attempt-prepared:${task.taskId}:${attemptId}`,
+				payload: toJsonObject({
+					task,
+					attemptId,
+					taskId: task.taskId,
+					dispatch: normalizedDispatch,
+					...(grantId ? { grantId } : {}),
+				}),
+			},
+			undefined,
+			() => assertWorkerReceiptAdmission(dispatch.receiptOrigin),
+		);
 		return {
 			task: structuredClone(this.state.tasks[task.taskId]!.task),
 			attempt: structuredClone(this.state.attempts[attemptId]!),
@@ -592,13 +597,17 @@ export class DurableTaskRuntime {
 		assertRecordHasCapacity(this.state.attempts, MAX_ORCHESTRATION_ATTEMPTS, "attempt");
 		assertIdentifierListHasCapacity(task.attemptIds, MAX_ORCHESTRATION_ATTEMPTS, "task attempt list");
 		const attemptId = `attempt-${this.createId()}`;
-		this.commit({
-			type: "attempt.queued",
-			aggregateId: taskId,
-			actor: "runtime",
-			idempotencyKey: `attempt-queued:${attemptId}`,
-			payload: toJsonObject({ attemptId, taskId, dispatch: normalizedDispatch, ...(grantId ? { grantId } : {}) }),
-		});
+		this.commit(
+			{
+				type: "attempt.queued",
+				aggregateId: taskId,
+				actor: "runtime",
+				idempotencyKey: `attempt-queued:${attemptId}`,
+				payload: toJsonObject({ attemptId, taskId, dispatch: normalizedDispatch, ...(grantId ? { grantId } : {}) }),
+			},
+			undefined,
+			() => assertWorkerReceiptAdmission(dispatch.receiptOrigin),
+		);
 		return structuredClone(this.state.attempts[attemptId]!);
 	}
 
@@ -1408,13 +1417,18 @@ export class DurableTaskRuntime {
 		this.compactCurrentProjection(lockOptions);
 	}
 
-	private commit(input: AppendOrchestrationEventInput, lockOptions?: Readonly<AtomicFileLockOptions>): void {
+	private commit(
+		input: AppendOrchestrationEventInput,
+		lockOptions?: Readonly<AtomicFileLockOptions>,
+		assertAdmission?: () => void,
+	): void {
 		this.compactCurrentProjection(lockOptions);
 		let admittedProjection: TaskRuntimeProjection | undefined;
 		const event = this.store.append(input, {
 			expectedLastOrdinal: this.state.lastOrdinal,
 			validateBeforeCommit: (candidate) => {
 				if (candidate.ordinal > this.state.lastOrdinal) {
+					assertAdmission?.();
 					admittedProjection = reduceOrchestrationEvent(this.state, candidate);
 				}
 			},
