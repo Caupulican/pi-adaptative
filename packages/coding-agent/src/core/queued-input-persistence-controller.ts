@@ -242,6 +242,10 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		);
 	}
 
+	keepsQueuedInput(inputId: OwnerInputId): boolean {
+		return this.queuedRecord.ownership === "owned" && recordedIds(this.queuedRecord.key).has(inputId);
+	}
+
 	keepsOwnTurnInput(inputId: OwnerInputId): boolean {
 		return recordedIds(this.ownTurnRecord.key).has(inputId);
 	}

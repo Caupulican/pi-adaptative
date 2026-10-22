@@ -830,10 +830,12 @@ export class PromptSubmissionController {
 				const promoted = this.deps.pendingQueue.promote(lifecycle.queued);
 				this.deps.emitQueueUpdate();
 				if (!promoted) return;
+			} else if (lifecycle.input && !this.deps.pendingQueue.claimOwnTurn(lifecycle.input.inputId)) {
+				this.deps.emitQueueUpdate();
+				return;
 			}
 			lifecycle.ownsForeground();
 			if (lifecycle.input) {
-				this.deps.ownerInputs.move(lifecycle.input.inputId, "own_turn");
 				// The input was accepted in this history: no navigation rewrites it while its turn is prepared.
 				if (submission.lease) this.deps.foregroundRecovery.beginTurnPreparation(submission.lease);
 			}

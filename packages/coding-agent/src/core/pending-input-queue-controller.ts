@@ -153,6 +153,8 @@ export interface PendingInputRecord {
 	recordQueuedInput(inputs: readonly RecordableQueuedInput[]): void;
 	/** The set of prompts whose own turn is being prepared changed (`PendingInputQueueController.trackOwnTurn`). */
 	recordOwnTurnInput(inputs: readonly RecordableQueuedInput[]): void;
+	/** Whether this controller's committed queued record names `inputId`; borrowed branch history is not a transfer. */
+	keepsQueuedInput(inputId: OwnerInputId): boolean;
 	/** Whether the own-turn record as last written names `inputId`: a restart restores that prompt held. */
 	keepsOwnTurnInput(inputId: OwnerInputId): boolean;
 }
@@ -583,18 +585,20 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		origin?: SendUserMessageOrigin,
 		inputId?: OwnerInputId,
 	): PendingInputHandle {
-		const entry = this._newEntry(
-			inputId ?? this.deps.ownerInputs.accept(origin ? "extension" : kind),
-			kind,
-			{ text, images },
-			origin,
-			new AbortController(),
-		);
-		(kind === "steer" ? this._steering : this._followUp).push(entry);
+		const preparing = this._preparing.find((entry) => entry.inputId === inputId);
+		const entry = preparing
+			? { ...preparing, kind }
+			: this._newEntry(
+					inputId ?? this.deps.ownerInputs.accept(origin ? "extension" : kind),
+					kind,
+					{ text, images },
+					origin,
+					new AbortController(),
+				);
+		this._insertEntry(entry);
 		this._changed();
-		// A prompt being prepared that queues instead is the queued record's from here, named there before it leaves its own.
-		if (inputId !== undefined) this._leavePreparing(inputId);
-		if (kind === "steer") this._notifySteerQueued();
+		if (!this._contextCurrent(entry)) this._hold(entry, "context_changed");
+		else if (kind === "steer") this._notifySteerQueued();
 		return { id: entry.id, inputId: entry.inputId, signal: entry.abort.signal };
 	}
 
@@ -611,8 +615,23 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	): void {
 		if (this._closed) return;
 		this._preparing.push(this._newEntry(inputId, kind, { text, images }, origin, new AbortController()));
-		this.deps.ownerInputs.whenUndelivered(inputId, () => this._leavePreparing(inputId));
+		this.deps.ownerInputs.whenUndelivered(inputId, (end) => this._leavePreparing(inputId, end.state !== "held"));
 		this._ownTurnChanged();
+	}
+
+	/** Claim a direct prompt's original context only after unhandled input hooks finish. Stale input stays held. */
+	claimOwnTurn(inputId: OwnerInputId): boolean {
+		const entry = this._preparing.find((candidate) => candidate.inputId === inputId);
+		const state = this.deps.ownerInputs.stateOf(inputId);
+		if (this._closed || !entry || (state !== "accepted" && state !== "judged")) return false;
+		if (this._contextCurrent(entry)) {
+			this.deps.ownerInputs.move(inputId, "own_turn");
+			return true;
+		}
+		this._insertEntry(entry);
+		this._changed();
+		this._hold(entry, "context_changed");
+		return false;
 	}
 
 	/**
@@ -627,10 +646,19 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		return this.deps.ownerInputs.end(inputId, { state: "held", reason: "closed" });
 	}
 
-	/** A prompt being prepared leaves the own-turn record; false when it is not there. */
-	private _leavePreparing(inputId: OwnerInputId): boolean {
+	/** Retire preparation after delivery, explicit withdrawal, or a confirmed transfer to the queued record. */
+	private _leavePreparing(inputId: OwnerInputId, force = false): boolean {
 		const index = this._preparing.findIndex((entry) => entry.inputId === inputId);
 		if (index === -1) return false;
+		if (
+			!force &&
+			this.deps.record?.keepsOwnTurnInput(inputId) &&
+			[...this._steering, ...this._followUp, ...this._owned, ...this._awaitingPersistence].some(
+				(entry) => entry.inputId === inputId,
+			) &&
+			!this.deps.record.keepsQueuedInput(inputId)
+		)
+			return false;
 		this._preparing.splice(index, 1);
 		this._ownTurnChanged();
 		return true;
@@ -693,6 +721,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		if (!entry) return false;
 		this._removeEntry(entry);
 		this.deps.ownerInputs.end(entry.inputId, { state: "withdrawn", reason: "submitted" });
+		this._leavePreparing(entry.inputId, true);
 		return true;
 	}
 
@@ -771,11 +800,12 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 * yet is still named.
 	 */
 	private _changed(): void {
-		if (!this.deps.record) return;
 		const entries = [...this._steering, ...this._followUp, ...this._owned, ...this._awaitingPersistence].sort(
 			(left, right) => left.id - right.id,
 		);
-		this.deps.record.recordQueuedInput(entries.map(recordableInput));
+		this.deps.record?.recordQueuedInput(entries.map(recordableInput));
+		// Only transferred preparations may retire here. Failed or bounded-out writes keep the source record intact.
+		for (const entry of entries) this._leavePreparing(entry.inputId);
 	}
 
 	/**
@@ -820,7 +850,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 * either way it leaves the durable record now. What its delivery decides runs in the ledger. No other point delivers.
 	 */
 	private _delivered(inputId: OwnerInputId): void {
-		this._leavePreparing(inputId);
+		this._leavePreparing(inputId, true);
 		for (const entries of [this._awaitingPersistence, this._owned]) {
 			const index = entries.findIndex((entry) => entry.inputId === inputId);
 			if (index === -1) continue;
@@ -845,11 +875,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	/** An input its own turn took returns to the pending queue at its submission position, held for `reason`. */
 	private _returnOwned(entry: PendingEntry, reason: PendingInputHoldReason): void {
 		this._owned = this._owned.filter((candidate) => candidate !== entry);
-		if (!this._closed) {
-			const entries = entry.kind === "steer" ? this._steering : this._followUp;
-			entries.push(entry);
-			entries.sort((left, right) => left.id - right.id);
-		}
+		if (!this._closed) this._insertEntry(entry);
 		this._hold(entry, reason);
 		this._changed();
 		if (entry.kind === "steer") this._notifySteerDecision();
@@ -989,6 +1015,13 @@ export class PendingInputQueueController implements ForegroundInputPort {
 
 	private _findEntry(id: number): PendingEntry | undefined {
 		return this._steering.find((entry) => entry.id === id) ?? this._followUp.find((entry) => entry.id === id);
+	}
+
+	/** A preparation can join after newer submissions: preserve its original position within its kind. */
+	private _insertEntry(entry: PendingEntry): void {
+		const entries = entry.kind === "steer" ? this._steering : this._followUp;
+		entries.push(entry);
+		entries.sort((left, right) => left.id - right.id);
 	}
 
 	private _removeEntry(entry: PendingEntry): void {
@@ -1174,6 +1207,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 			entry.abort.abort(PENDING_INPUT_WITHDRAWN);
 			this._removeEntry(entry);
 			this.deps.ownerInputs.end(entry.inputId, { state: "withdrawn", reason });
+			this._leavePreparing(entry.inputId, true);
 			taken.push(input);
 		}
 		return taken;
