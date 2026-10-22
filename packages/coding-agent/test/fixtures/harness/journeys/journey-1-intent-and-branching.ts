@@ -6,6 +6,7 @@ import {
 	type OrchestrationProfile,
 } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
+import { QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/core/queued-input-record.ts";
 import {
 	OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
 	readOptionalToolIntent,
@@ -953,11 +954,26 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 	});
 	const s4SecondResult = await withDeadline(trace, "S4 superseding navigation", s4Second);
 	expect(s4SecondResult.cancelled, "the superseding navigation applies").toBe(false);
-	const s4Leaf = s4Manager.getEntries().find((entry) => entry.id === s4Manager.getLeafId());
+	// Navigation publishes the held owner input as a record on the destination branch, so a restart cannot lose it; only custom
+	// bookkeeping entries (such as the discarded summary's usage) may follow it. Never a message or a branch summary.
+	const s4Branch = s4Manager.getBranch();
+	const s4TurnAPosition = s4Branch.findIndex((entry) => entry.id === s4TurnA);
+	expect(s4TurnAPosition, "the turn A reply is on the active branch").toBeGreaterThanOrEqual(0);
+	const s4Tail = s4Branch.slice(s4TurnAPosition + 1);
+	const s4Record = s4Tail[0];
 	expect(
-		{ type: s4Leaf?.type, parentId: s4Leaf?.parentId },
-		"the superseding navigation leaves a settled entry on the turn A reply",
-	).toEqual({ type: "custom", parentId: s4TurnA });
+		{ type: s4Record?.type, customType: s4Record?.type === "custom" ? s4Record.customType : undefined },
+		"the superseding navigation records the held owner input on the turn A reply",
+	).toEqual({ type: "custom", customType: QUEUED_INPUT_CUSTOM_TYPE });
+	expect(
+		JSON.stringify(s4Record?.type === "custom" ? s4Record.data : undefined),
+		"the record carries the held owner input",
+	).toContain(s4Queued);
+	expect(
+		s4Tail.map((entry) => entry.type),
+		"only custom entries settle after the turn A reply",
+	).toEqual(s4Tail.map(() => "custom"));
+	expect(s4Manager.getLeafId(), "the navigation settles on the last entry of that tail").toBe(s4Tail.at(-1)?.id);
 	expect(
 		s4Manager.getEntries().some((entry) => entry.type === "branch_summary"),
 		"no branch summary entry is applied",
