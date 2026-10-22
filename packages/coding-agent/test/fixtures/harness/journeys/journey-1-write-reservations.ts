@@ -2507,12 +2507,19 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	const vuDone = vuFresh.session.backgroundLanes.getTaskRuntimeSnapshot();
 	const vuSubject = vuDone?.tasks[vuSubjectTaskId];
 	expect(vuSubject?.task.status, "the verified subject completes on its accepted verdict").toBe("completed");
-	expect(vuSubject?.verification?.verdict, "the real verifier's typed verdict is accepted").toBe("accepted");
-	expect(vuSubject?.verification?.reasonCode, "the accepted verdict names the independent verification").toBe(
+	// A verdict belongs to the exact subject attempt it reviewed; the task-level record is read-only history.
+	const vuSubjectAttemptId = vuSubject?.attemptIds.at(-1);
+	const vuSubjectVerification =
+		vuSubjectAttemptId === undefined ? undefined : vuDone?.attempts[vuSubjectAttemptId]?.verification;
+	expect(vuSubjectVerification?.verdict, "the real verifier's typed verdict is accepted").toBe("accepted");
+	expect(vuSubjectVerification?.subjectAttemptId, "the verdict names the exact subject attempt it reviewed").toBe(
+		vuSubjectAttemptId,
+	);
+	expect(vuSubjectVerification?.reasonCode, "the accepted verdict names the independent verification").toBe(
 		"independent_verification_accepted",
 	);
-	expect(vuSubject?.verification?.verifierTaskId, "the verdict names the same verifier task").toBe(vuVerifierTaskId);
-	expect(vuSubject?.verification?.verifierAttemptId, "the verdict names the same verifier attempt").toBe(
+	expect(vuSubjectVerification?.verifierTaskId, "the verdict names the same verifier task").toBe(vuVerifierTaskId);
+	expect(vuSubjectVerification?.verifierAttemptId, "the verdict names the same verifier attempt").toBe(
 		vuAttempt.attemptId,
 	);
 	const vuFinal = vuDone?.attempts[vuAttempt.attemptId];

@@ -59,6 +59,8 @@ export async function runJourney1(): Promise<void> {
 				/^Worker worker-1 rejected: Worker worker-1 resource release failed\.$/,
 				/^Failed to dispose worker write reservations: Worker write reservation shutdown failed\.$/,
 				/^Worker shutdown failed: Worker worker-1 resource release failed\.$/,
+				// E13B: the held shell call outlives its 5000 ms physical join, so the owner's shutdown reports the one retained cleanup.
+				/^Worker shutdown failed: Worker shutdown retained 1 physical cleanup\(s\): attempt-[0-9a-f-]+\/lease-[0-9a-f-]+\/fence-\d+\. Resources remain held; process restart may be required\.$/,
 				/^Worker shutdown failed: Worker scheduler shutdown failed\.$/,
 				/^Worker shutdown failed: Worker write reservation shutdown failed\.$/,
 				/^Worker shutdown failed: Worker shutdown retained unresolved specialist execution resources\.$/,
