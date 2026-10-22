@@ -363,15 +363,36 @@ export function withPermanentSessionBundleDeletion<T>(
 	reservation: SessionBundleDeletionReservation,
 	operation: () => T,
 ): T {
+	return withReservedSessionBundleDeletion(agentDir, reservation, "permanent", operation);
+}
+
+/** Expiry may settle existing obligations only for this exact active retention reservation. */
+export function withSessionBundleRetention<T>(
+	agentDir: string,
+	parentSessionId: string,
+	reservation: SessionBundleDeletionReservation,
+	operation: () => T,
+): T {
+	if (reservation.parentSessionId !== parentSessionId)
+		throw new Error("Session bundle retention belongs to another session.");
+	return withReservedSessionBundleDeletion(agentDir, reservation, "retention", operation);
+}
+
+function withReservedSessionBundleDeletion<T>(
+	agentDir: string,
+	reservation: SessionBundleDeletionReservation,
+	policy: SessionBundleDeletionPolicy,
+	operation: () => T,
+): T {
 	const tombstone = orchestrationSessionDeletionFile(agentDir, reservation.parentSessionId);
 	return withFileLockSync(tombstone, () => {
 		const marker = readMarker(tombstone, reservation.parentSessionId);
 		if (
-			marker?.policy !== "permanent" ||
+			marker?.policy !== policy ||
 			marker.operation?.token !== reservation.token ||
 			!activeOperations.has(reservation.token)
 		)
-			throw new Error("Permanent session bundle deletion ownership changed before inspection.");
+			throw new Error("Session bundle deletion ownership changed before reserved work.");
 		return operation();
 	});
 }

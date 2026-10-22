@@ -12,6 +12,11 @@ import {
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
+import {
+	type SessionBundleDeletionReservation,
+	withSessionBundleAdmission,
+	withSessionBundleRetention,
+} from "../orchestration/session-bundle-lifecycle.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import { withFileLockSync } from "../util/atomic-file.ts";
 import type { SteerDecision } from "../util/wait.ts";
@@ -25,7 +30,12 @@ import type {
 import { WorkerConversationStore } from "./worker-conversation-store.ts";
 import type { WorkerDispositionAdvice, WorkerHostVerdictView } from "./worker-disposition.ts";
 import type { FanoutGroupReport } from "./worker-fanout.ts";
-import { readWorkerMailboxRecord, workerMailboxPath, writeWorkerMailboxRecord } from "./worker-mailbox-record.ts";
+import {
+	readWorkerMailboxRecord,
+	type WorkerMailboxContextReference,
+	workerMailboxPath,
+	writeWorkerMailboxRecord,
+} from "./worker-mailbox-record.ts";
 import type { WorkerTaskSessionView } from "./worker-task-view.ts";
 
 const MAX_MAILBOX_MESSAGES = 64;
@@ -1376,6 +1386,7 @@ export class WorkerAgentMailbox {
 	private readonly agentId: string;
 	private readonly file: string;
 	private readonly listeners = new Set<() => void>();
+	private observedProjectReference?: WorkerMailboxContextReference;
 
 	constructor(options: WorkerAgentMailboxOptions) {
 		this.agentDir = options.agentDir;
@@ -1884,6 +1895,7 @@ export class WorkerAgentMailbox {
 		cutoffMs: number,
 		reason: string,
 		recordBeforeSettling: (settled: readonly ExpiredWorkerObligation[]) => void,
+		retention?: SessionBundleDeletionReservation,
 	): ExpiredWorkerObligation[] {
 		const failureReason = reason.trim();
 		if (!failureReason || failureReason.length > MAX_MAILBOX_IDENTITY_CHARS) {
@@ -1899,6 +1911,7 @@ export class WorkerAgentMailbox {
 			false,
 			false,
 			() => recordBeforeSettling(expired),
+			retention,
 		);
 		if (expired.length > 0) this.notify();
 		return expired;
@@ -2047,8 +2060,19 @@ export class WorkerAgentMailbox {
 		}
 	}
 
-	private read(): WorkerAgentMailboxState {
+	private readRecord(): ReturnType<typeof readWorkerMailboxRecord> {
 		const record = readWorkerMailboxRecord(this.file);
+		if ((this.projectClaim || this.observedProjectReference) && !record.reference)
+			throw new Error("Worker project mailbox binding is missing.");
+		if (this.observedProjectReference && !isDeepStrictEqual(this.observedProjectReference, record.reference))
+			throw new Error("Worker project mailbox binding changed.");
+		if (record.reference && !this.observedProjectReference)
+			this.observedProjectReference = structuredClone(record.reference);
+		return record;
+	}
+
+	private read(): WorkerAgentMailboxState {
+		const record = this.readRecord();
 		if (record.mailbox === undefined) {
 			return {
 				version: 1,
@@ -2070,79 +2094,83 @@ export class WorkerAgentMailbox {
 		ordinaryAdmission = false,
 		replayEvidenceAdmission = false,
 		beforeWrite?: () => void,
+		retention?: SessionBundleDeletionReservation,
 	): void {
-		withFileLockSync(this.file, () => {
-			const record = readWorkerMailboxRecord(this.file);
-			const update = () => {
-				const state = this.read();
-				const previousOrdinaryBytes = ordinaryAdmissionEncodedBytes(state);
-				const previousReplayEvidenceSlots = projectedReplayEvidenceSlots(state);
-				const mutated = mutator(state);
-				const retained = pruneDeliveredHistory(
-					this.parentSessionId,
-					this.agentId,
-					mutated.messages,
-					mutated.replyAcknowledgements,
-					mutated.replayReceipts,
-					ordinaryAdmission,
-				);
-				const next = {
-					...mutated,
-					messages: retained.messages,
-					replayReceipts: retained.replayReceipts,
+		const mutate = () =>
+			withFileLockSync(this.file, () => {
+				const record = this.readRecord();
+				const update = () => {
+					const state = this.read();
+					const previousOrdinaryBytes = ordinaryAdmissionEncodedBytes(state);
+					const previousReplayEvidenceSlots = projectedReplayEvidenceSlots(state);
+					const mutated = mutator(state);
+					const retained = pruneDeliveredHistory(
+						this.parentSessionId,
+						this.agentId,
+						mutated.messages,
+						mutated.replyAcknowledgements,
+						mutated.replayReceipts,
+						ordinaryAdmission,
+					);
+					const next = {
+						...mutated,
+						messages: retained.messages,
+						replayReceipts: retained.replayReceipts,
+					};
+					const addedReplayReceipt = mutated.replayReceipts.length > state.replayReceipts.length;
+					const bytesWithoutAddedReceipt = addedReplayReceipt
+						? encodedStateBytes({ ...next, replayReceipts: next.replayReceipts.slice(0, -1) })
+						: undefined;
+					const changed = JSON.stringify(next) !== JSON.stringify(state);
+					const nextOrdinaryBytes = ordinaryAdmissionEncodedBytes(next);
+					if (
+						ordinaryAdmission &&
+						changed &&
+						nextOrdinaryBytes > MAX_ORDINARY_MAILBOX_BYTES &&
+						nextOrdinaryBytes > previousOrdinaryBytes
+					) {
+						throw new Error(
+							addedReplayReceipt
+								? "Worker agent mailbox replay receipt storage exhausted its mandatory control byte reserve."
+								: "Worker agent mailbox passive control storage exhausted its mandatory control byte reserve.",
+						);
+					}
+					const nextReplayEvidenceSlots = projectedReplayEvidenceSlots(next);
+					if (nextReplayEvidenceSlots > MAX_MAILBOX_REPLAY_RECEIPTS) {
+						throw new Error("Worker agent mailbox exceeds its projected replay evidence bound.");
+					}
+					if (
+						replayEvidenceAdmission &&
+						nextReplayEvidenceSlots > MAX_REPLAY_EVIDENCE_SLOTS &&
+						nextReplayEvidenceSlots > previousReplayEvidenceSlots
+					) {
+						throw new Error(
+							`Worker agent mailbox replay evidence capacity reached its ${MAX_REPLAY_EVIDENCE_SLOTS} slot limit.`,
+						);
+					}
+					assertWorkerAgentMailboxBounds(
+						next.messages.length,
+						next.replayReceipts.length,
+						state.replayReceipts.length,
+						encodedStateBytes(next),
+						bytesWithoutAddedReceipt,
+					);
+					if (changed) {
+						beforeWrite?.();
+						writeWorkerMailboxRecord(this.file, next, record.reference);
+					}
 				};
-				const addedReplayReceipt = mutated.replayReceipts.length > state.replayReceipts.length;
-				const bytesWithoutAddedReceipt = addedReplayReceipt
-					? encodedStateBytes({ ...next, replayReceipts: next.replayReceipts.slice(0, -1) })
-					: undefined;
-				const changed = JSON.stringify(next) !== JSON.stringify(state);
-				const nextOrdinaryBytes = ordinaryAdmissionEncodedBytes(next);
-				if (
-					ordinaryAdmission &&
-					changed &&
-					nextOrdinaryBytes > MAX_ORDINARY_MAILBOX_BYTES &&
-					nextOrdinaryBytes > previousOrdinaryBytes
-				) {
-					throw new Error(
-						addedReplayReceipt
-							? "Worker agent mailbox replay receipt storage exhausted its mandatory control byte reserve."
-							: "Worker agent mailbox passive control storage exhausted its mandatory control byte reserve.",
+				if (record.reference)
+					WorkerConversationStore.withProjectMailboxMutation(
+						this.agentDir,
+						record.reference,
+						this.parentSessionId,
+						this.projectClaim,
+						update,
 					);
-				}
-				const nextReplayEvidenceSlots = projectedReplayEvidenceSlots(next);
-				if (nextReplayEvidenceSlots > MAX_MAILBOX_REPLAY_RECEIPTS) {
-					throw new Error("Worker agent mailbox exceeds its projected replay evidence bound.");
-				}
-				if (
-					replayEvidenceAdmission &&
-					nextReplayEvidenceSlots > MAX_REPLAY_EVIDENCE_SLOTS &&
-					nextReplayEvidenceSlots > previousReplayEvidenceSlots
-				) {
-					throw new Error(
-						`Worker agent mailbox replay evidence capacity reached its ${MAX_REPLAY_EVIDENCE_SLOTS} slot limit.`,
-					);
-				}
-				assertWorkerAgentMailboxBounds(
-					next.messages.length,
-					next.replayReceipts.length,
-					state.replayReceipts.length,
-					encodedStateBytes(next),
-					bytesWithoutAddedReceipt,
-				);
-				if (changed) {
-					beforeWrite?.();
-					writeWorkerMailboxRecord(this.file, next, record.reference);
-				}
-			};
-			if (record.reference)
-				WorkerConversationStore.withProjectMailboxMutation(
-					this.agentDir,
-					record.reference,
-					this.parentSessionId,
-					this.projectClaim,
-					update,
-				);
-			else update();
-		});
+				else update();
+			});
+		if (retention) withSessionBundleRetention(this.agentDir, this.parentSessionId, retention, mutate);
+		else withSessionBundleAdmission(this.agentDir, this.parentSessionId, mutate);
 	}
 }

@@ -1875,13 +1875,15 @@ export class WorkerConversationStore {
 			sessionFile: context.sessionFile,
 		};
 		const mailbox = workerMailboxPath(agentDir, parentSessionId, agentId);
-		withFileLockSync(mailbox, () =>
-			WorkerConversationStore.withProjectMailboxMutation(
-				agentDir,
-				reference,
-				parentSessionId,
-				conversation.getProjectClaim(),
-				() => bindWorkerMailboxRecord(mailbox, reference, parentSessionId, agentId),
+		withSessionBundleAdmission(agentDir, parentSessionId, () =>
+			withFileLockSync(mailbox, () =>
+				WorkerConversationStore.withProjectMailboxMutation(
+					agentDir,
+					reference,
+					parentSessionId,
+					conversation.getProjectClaim(),
+					() => bindWorkerMailboxRecord(mailbox, reference, parentSessionId, agentId),
+				),
 			),
 		);
 	}

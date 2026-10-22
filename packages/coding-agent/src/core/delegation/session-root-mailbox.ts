@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { sessionRootMailboxFile } from "../agent-paths.ts";
+import {
+	type SessionBundleDeletionReservation,
+	withSessionBundleAdmission,
+	withSessionBundleRetention,
+} from "../orchestration/session-bundle-lifecycle.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import { type SteerDecision, type WaitStatusEvent, type WaitSteer, type WakeSource, waitFor } from "../util/wait.ts";
@@ -513,6 +518,7 @@ function abortReason(signal: AbortSignal): unknown {
 
 /** Bounded durable inbox for accepted worker replies addressed to one foreground session root. */
 export class SessionRootMailbox {
+	private readonly agentDir: string;
 	private readonly parentSessionId: string;
 	private readonly file: string;
 	/**
@@ -529,6 +535,7 @@ export class SessionRootMailbox {
 	private parsed: { readonly text: string; readonly state: SessionRootMailboxState } | undefined;
 
 	constructor(options: SessionRootMailboxOptions) {
+		this.agentDir = options.agentDir;
 		this.parentSessionId = requiredIdentity(options.parentSessionId, "parent session id");
 		this.file = sessionRootMailboxFile(options.agentDir, this.parentSessionId);
 	}
@@ -678,6 +685,7 @@ export class SessionRootMailbox {
 		cutoffMs: number,
 		reason: string,
 		recordBeforeSettling: (settled: readonly ExpiredSessionRootReply[]) => void,
+		retention?: SessionBundleDeletionReservation,
 	): ExpiredSessionRootReply[] {
 		const expiredReason = requiredBoundedString(reason.trim(), MAX_IDENTITY_CHARS, "expiry reason");
 		let expired: ExpiredSessionRootReply[] = [];
@@ -700,6 +708,7 @@ export class SessionRootMailbox {
 			},
 			false,
 			() => recordBeforeSettling(expired),
+			retention,
 		);
 		if (expired.length > 0) this.notify();
 		return expired;
@@ -830,54 +839,58 @@ export class SessionRootMailbox {
 		mutator: (state: SessionRootMailboxState) => SessionRootMailboxState,
 		defaultAdmission = false,
 		beforeWrite?: () => void,
+		retention?: SessionBundleDeletionReservation,
 	): void {
-		withFileLockSync(this.file, () => {
-			const state = this.read();
-			// Every full-state encode below is a pass over up to MAX_MAILBOX_BYTES, and one durable
-			// transaction used to make seven of them. Each projection is now computed once, only on the
-			// path that reads it, and the encoding written to disk is the one the change check compared.
-			const previousDefaultBytes = defaultAdmission ? lifecycleProjectedEncodedBytes(state) : undefined;
-			const mutated = mutator(state);
-			let next = {
-				...mutated,
-				replies: pruneRetainedReplies(mutated.replies),
-				replayReceipts: [...mutated.replayReceipts],
-			};
-			const admissionCapBytes = defaultAdmission ? MAX_DEFAULT_MAILBOX_BYTES : MAX_MAILBOX_BYTES;
-			let nextDefaultBytes = lifecycleProjectedEncodedBytes(next);
-			while (nextDefaultBytes > admissionCapBytes) {
-				const oldestCompletedIndex = next.replies.findIndex((reply) => !isMandatory(reply));
-				if (oldestCompletedIndex < 0) break;
-				next = { ...next, replies: next.replies.filter((_, index) => index !== oldestCompletedIndex) };
-				nextDefaultBytes = lifecycleProjectedEncodedBytes(next);
-			}
-			for (const reply of next.replies) assertReplyEncodedByteBound(reply);
-			const addedReplayReceipt = mutated.replayReceipts.length > state.replayReceipts.length;
-			const bytesWithoutAddedReceipt = addedReplayReceipt
-				? lifecycleProjectedEncodedBytes({ ...next, replayReceipts: next.replayReceipts.slice(0, -1) })
-				: undefined;
-			if (
-				previousDefaultBytes !== undefined &&
-				nextDefaultBytes > MAX_DEFAULT_MAILBOX_BYTES &&
-				nextDefaultBytes > previousDefaultBytes
-			) {
-				throw new Error("Session root mailbox default replay receipt storage reserve is exhausted.");
-			}
-			assertSessionRootMailboxBounds(
-				next.replies.length,
-				next.replayReceipts.length,
-				state.replayReceipts.length,
-				nextDefaultBytes,
-				bytesWithoutAddedReceipt,
-			);
-			const encodedNext = JSON.stringify(next);
-			if (encodedNext !== JSON.stringify(state)) {
-				const text = `${encodedNext}\n`;
-				beforeWrite?.();
-				writeFileAtomicSync(this.file, text, { mode: 0o600 });
-				// What was just written is what the next read will find, unless someone else writes first.
-				this.parsed = { text, state: next };
-			}
-		});
+		const mutate = () =>
+			withFileLockSync(this.file, () => {
+				const state = this.read();
+				// Every full-state encode below is a pass over up to MAX_MAILBOX_BYTES, and one durable
+				// transaction used to make seven of them. Each projection is now computed once, only on the
+				// path that reads it, and the encoding written to disk is the one the change check compared.
+				const previousDefaultBytes = defaultAdmission ? lifecycleProjectedEncodedBytes(state) : undefined;
+				const mutated = mutator(state);
+				let next = {
+					...mutated,
+					replies: pruneRetainedReplies(mutated.replies),
+					replayReceipts: [...mutated.replayReceipts],
+				};
+				const admissionCapBytes = defaultAdmission ? MAX_DEFAULT_MAILBOX_BYTES : MAX_MAILBOX_BYTES;
+				let nextDefaultBytes = lifecycleProjectedEncodedBytes(next);
+				while (nextDefaultBytes > admissionCapBytes) {
+					const oldestCompletedIndex = next.replies.findIndex((reply) => !isMandatory(reply));
+					if (oldestCompletedIndex < 0) break;
+					next = { ...next, replies: next.replies.filter((_, index) => index !== oldestCompletedIndex) };
+					nextDefaultBytes = lifecycleProjectedEncodedBytes(next);
+				}
+				for (const reply of next.replies) assertReplyEncodedByteBound(reply);
+				const addedReplayReceipt = mutated.replayReceipts.length > state.replayReceipts.length;
+				const bytesWithoutAddedReceipt = addedReplayReceipt
+					? lifecycleProjectedEncodedBytes({ ...next, replayReceipts: next.replayReceipts.slice(0, -1) })
+					: undefined;
+				if (
+					previousDefaultBytes !== undefined &&
+					nextDefaultBytes > MAX_DEFAULT_MAILBOX_BYTES &&
+					nextDefaultBytes > previousDefaultBytes
+				) {
+					throw new Error("Session root mailbox default replay receipt storage reserve is exhausted.");
+				}
+				assertSessionRootMailboxBounds(
+					next.replies.length,
+					next.replayReceipts.length,
+					state.replayReceipts.length,
+					nextDefaultBytes,
+					bytesWithoutAddedReceipt,
+				);
+				const encodedNext = JSON.stringify(next);
+				if (encodedNext !== JSON.stringify(state)) {
+					const text = `${encodedNext}\n`;
+					beforeWrite?.();
+					writeFileAtomicSync(this.file, text, { mode: 0o600 });
+					// What was just written is what the next read will find, unless someone else writes first.
+					this.parsed = { text, state: next };
+				}
+			});
+		if (retention) withSessionBundleRetention(this.agentDir, this.parentSessionId, retention, mutate);
+		else withSessionBundleAdmission(this.agentDir, this.parentSessionId, mutate);
 	}
 }

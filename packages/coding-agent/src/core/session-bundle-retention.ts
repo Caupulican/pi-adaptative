@@ -14,6 +14,7 @@ import { WorkerConversationStore } from "./delegation/worker-conversation-store.
 import { readWorkerMailboxRecord, workerMailboxPath } from "./delegation/worker-mailbox-record.ts";
 import {
 	hasPendingSessionBundleRetention,
+	type SessionBundleDeletionReservation,
 	settleSessionBundleDeletion,
 } from "./orchestration/session-bundle-lifecycle.ts";
 import { listEntries } from "./process-matrix/store.ts";
@@ -290,6 +291,7 @@ function settleExpiredObligations(
 	bundleDir: string,
 	now: number,
 	report: (message: string) => void,
+	reservation: SessionBundleDeletionReservation,
 ): number {
 	const cutoffMs = now - SESSION_BUNDLE_MAX_AGE_MS;
 	const at = new Date(now).toISOString();
@@ -311,6 +313,7 @@ function settleExpiredObligations(
 				cutoffMs,
 				SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON,
 				(settled) => record("session_root_mailbox", undefined, settled),
+				reservation,
 			).length;
 		}
 	} catch (error) {
@@ -335,6 +338,7 @@ function settleExpiredObligations(
 					cutoffMs,
 					SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON,
 					(settled) => record("worker_mailbox", agentId, settled),
+					reservation,
 				).length;
 			} catch (error) {
 				report(`session bundle ${bundleName} mailbox ${name} obligations not settled: ${describe(error)}`);
@@ -434,7 +438,15 @@ export async function sweepSessionBundles(
 							outcome = "deferred";
 							continue;
 						}
-						const settled = settleExpiredObligations(agentDir, parentSessionId, name, bundleDir, now, report);
+						const settled = settleExpiredObligations(
+							agentDir,
+							parentSessionId,
+							name,
+							bundleDir,
+							now,
+							report,
+							reservation,
+						);
 						result.expiredObligations += settled;
 						if (settled === 0 || bundleOwesMailboxWork(agentDir, parentSessionId, bundleDir)) {
 							continue;
