@@ -21,11 +21,15 @@
 
 import { createHash } from "node:crypto";
 import {
+	closeSync,
 	existsSync,
+	fstatSync,
 	lstatSync,
 	mkdirSync,
+	openSync,
 	readdirSync,
 	readFileSync,
+	readSync,
 	rmdirSync,
 	unlinkSync,
 	writeFileSync,
@@ -48,6 +52,11 @@ export interface ArtifactWriteRequest {
 export interface ArtifactRecord {
 	ref: ContextArtifactRef;
 	content: string;
+}
+
+export interface ArtifactReadOptions {
+	/** Hard payload byte limit, enforced before allocating or reading payload contents. */
+	maxBytes: number;
 }
 
 /** Unavailable preserves read/corruption failures; it is not evidence of absence. */
@@ -110,7 +119,7 @@ function createArtifactRef(id: string, request: ArtifactWriteRequest): ContextAr
 
 export interface ArtifactStore {
 	write(request: ArtifactWriteRequest): ArtifactRecord;
-	read(id: string): ArtifactRecord | MissingArtifactMarker;
+	read(id: string, options?: ArtifactReadOptions): ArtifactRecord | MissingArtifactMarker;
 	/**
 	 * Metadata-only lookup: the ref if `id` resolves to a live artifact, `undefined`
 	 * otherwise. Never loads the payload -- for the file store this must not touch the
@@ -140,6 +149,35 @@ interface StoredArtifact {
 	references: Set<string>;
 }
 
+function allowsArtifactBytes(size: number, options: ArtifactReadOptions | undefined): boolean {
+	return (
+		options === undefined ||
+		(Number.isSafeInteger(options.maxBytes) && options.maxBytes >= 0 && size <= options.maxBytes)
+	);
+}
+
+/** A descriptor pins the payload; the extra byte detects growth without an unbounded read. */
+function readArtifactPayload(path: string, options?: ArtifactReadOptions): string {
+	if (!options) return readFileSync(path, "utf8");
+	const fd = openSync(path, "r");
+	try {
+		const stat = fstatSync(fd);
+		if (!stat.isFile() || !allowsArtifactBytes(stat.size, options))
+			throw new Error("Artifact payload exceeds read limit");
+		const buffer = Buffer.alloc(stat.size + 1);
+		let used = 0;
+		while (used < buffer.length) {
+			const count = readSync(fd, buffer, used, buffer.length - used, null);
+			if (count === 0) break;
+			used += count;
+		}
+		if (used > stat.size) throw new Error("Artifact payload changed during bounded read");
+		return buffer.subarray(0, used).toString("utf8");
+	} finally {
+		closeSync(fd);
+	}
+}
+
 export function createInMemoryArtifactStore(): ArtifactStore {
 	const artifacts = new Map<string, StoredArtifact>();
 	const cleanedUp = new Set<string>();
@@ -159,11 +197,13 @@ export function createInMemoryArtifactStore(): ArtifactStore {
 			return { ref, content: request.content };
 		},
 
-		read(id: string): ArtifactRecord | MissingArtifactMarker {
+		read(id: string, options?: ArtifactReadOptions): ArtifactRecord | MissingArtifactMarker {
 			const stored = artifacts.get(id);
 			if (!stored) {
 				return { id, missing: true, reason: cleanedUp.has(id) ? "cleaned_up" : "not_found" };
 			}
+			if (!allowsArtifactBytes(estimateByteLength(stored.content), options))
+				return { id, missing: true, reason: "unavailable" };
 			return { ref: stored.ref, content: stored.content };
 		},
 
@@ -251,6 +291,7 @@ function referencePath(baseDir: string, id: string, holderId: string): string {
 
 const VALID_ARTIFACT_KINDS: ReadonlySet<ContextArtifactRef["kind"]> = new Set([
 	"tool_output",
+	"image",
 	"file_snapshot",
 	"test_output",
 	"diff",
@@ -393,7 +434,7 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 				const existingPayloadPath = payloadPath(baseDir, id);
 				if (existingMeta && existsSync(existingPayloadPath)) {
 					cleanedUpThisInstance.delete(id);
-					return { ref: existingMeta.ref, content: readFileSync(existingPayloadPath, "utf8") };
+					return { ref: existingMeta.ref, content: readArtifactPayload(existingPayloadPath) };
 				}
 
 				const ref = createArtifactRef(id, request);
@@ -404,7 +445,7 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 			});
 		},
 
-		read(id: string): ArtifactRecord | MissingArtifactMarker {
+		read(id: string, options?: ArtifactReadOptions): ArtifactRecord | MissingArtifactMarker {
 			if (!isSafeArtifactId(id)) return { id, missing: true, reason: "not_found" };
 			try {
 				if (!ensureExistingBaseDir()) {
@@ -435,7 +476,7 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 					}
 					if (meta.ref.id !== id) return { id, missing: true, reason: "unavailable" };
 					// A metadata record without a readable payload is an incomplete capture.
-					return { ref: meta.ref, content: readFileSync(pPath, "utf8") };
+					return { ref: meta.ref, content: readArtifactPayload(pPath, options) };
 				});
 			} catch {
 				return { id, missing: true, reason: "unavailable" };
@@ -550,11 +591,11 @@ export function createLineageArtifactStore(
 		isMissingArtifactMarker(value) && value.reason !== "unavailable";
 	return {
 		write: (request) => own.write(request),
-		read(id: string): ArtifactRecord | MissingArtifactMarker {
-			const owned = own.read(id);
+		read(id: string, options?: ArtifactReadOptions): ArtifactRecord | MissingArtifactMarker {
+			const owned = own.read(id, options);
 			if (!confirmedAbsent(owned)) return owned;
 			for (const ancestor of lineage()) {
-				const inherited = ancestor.read(id);
+				const inherited = ancestor.read(id, options);
 				if (!confirmedAbsent(inherited)) return inherited;
 			}
 			return owned;

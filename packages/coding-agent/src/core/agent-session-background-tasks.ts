@@ -29,6 +29,7 @@ export interface SessionBackgroundToolTaskDeps {
 	getCurrentSubmissionEpoch(): number | undefined;
 	isForegroundWait(toolName: string, args: unknown): boolean;
 	getArtifactStore(): ReturnType<BackgroundToolTaskControllerDeps["getArtifactStore"]>;
+	canRetrieveTextArtifacts?(): boolean;
 	/** Resolves with the ids whose output the delivered wake-up carried; those count as observed. */
 	notifyTerminal(
 		records: readonly BackgroundToolTaskRecord[],
@@ -57,6 +58,7 @@ export function createSessionBackgroundToolTasks(deps: SessionBackgroundToolTask
 		getMutationScope: () => deps.getMutationScope(),
 		getMutationAnnouncer: () => deps.getMutationAnnouncer(),
 		getArtifactStore: () => deps.getArtifactStore(),
+		canRetrieveTextArtifacts: () => deps.canRetrieveTextArtifacts?.() ?? true,
 		loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(deps.getSessionManager()),
 		persist: (record, kind) => {
 			if (kind === "delivery_receipt") {

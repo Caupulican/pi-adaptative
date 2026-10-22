@@ -33,7 +33,7 @@ export type ContextSource = "user" | "assistant" | "tool" | "runtime" | "session
 
 export interface ContextArtifactRef {
 	id: string;
-	kind: "tool_output" | "file_snapshot" | "test_output" | "diff" | "transcript_slice";
+	kind: "tool_output" | "image" | "file_snapshot" | "test_output" | "diff" | "transcript_slice";
 	storagePath?: string;
 	sessionEntryId?: string;
 	toolName?: string;

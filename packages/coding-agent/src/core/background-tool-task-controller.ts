@@ -1,4 +1,4 @@
-import type { Usage } from "@caupulican/pi-ai";
+import type { ImageContent, Usage } from "@caupulican/pi-ai";
 import {
 	type BackgroundToolCallCompletion,
 	type BackgroundToolCallContext,
@@ -19,6 +19,14 @@ import {
 	retainedVerificationDetails,
 	type VerificationRecord,
 } from "../kernel/verification-obligations.ts";
+import {
+	type BackgroundToolImageCapture,
+	type BackgroundToolImageManifest,
+	type BackgroundToolImageRead,
+	captureBackgroundToolImages,
+	decodeBackgroundToolImageManifest,
+	readBackgroundToolImage,
+} from "./background-tool-images.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "./context/tool-output-packer.ts";
 import { oneLine } from "./provider-tool-text.ts";
@@ -106,6 +114,7 @@ const RECORD_KEYS = [
 	"summary",
 	"output",
 	"artifactId",
+	"images",
 	"usage",
 	"cancellationRequested",
 	"terminalDelivery",
@@ -199,6 +208,8 @@ export interface BackgroundToolTaskRecord {
 	summary: string;
 	output: string;
 	artifactId?: string;
+	/** Durable manifest of all original image blocks; tool_task image retrieves one at a time. */
+	images?: BackgroundToolImageManifest;
 	usage?: Usage;
 	cancellationRequested?: boolean;
 	/** Durable terminal handoff state. Undefined on legacy records, which are treated as delivered. */
@@ -298,6 +309,8 @@ export interface BackgroundToolTaskControllerDeps {
 	/** Current session followed by the authoritative fork ancestry whose branch records remain visible. */
 	getSessionLineageIds?(): readonly string[];
 	getArtifactStore(): ArtifactStore | undefined;
+	/** Text artifact handles require the optional artifact_retrieve surface; task images use tool_task. */
+	canRetrieveTextArtifacts?(): boolean;
 	/** Durable task records on the active branch, newest first, without rebuilding full model context. */
 	loadPersistedRecordsNewestFirst?(): readonly unknown[];
 	/** Snapshot writes own complete task state; delivery receipts own only the exact post-notification transition. */
@@ -590,8 +603,9 @@ export function createBackgroundToolTerminalMessage(
 }
 
 function renderCompletionOutput(completion: BackgroundToolCallCompletion): string {
+	let imageIndex = 0;
 	const blocks = completion.result.content.map((block) =>
-		block.type === "text" ? block.text : "[Image output retained outside the foreground transcript]",
+		block.type === "text" ? block.text : `[Image ${++imageIndex}]`,
 	);
 	return blocks.join("\n") || "Tool completed without text output.";
 }
@@ -752,6 +766,8 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 	}
 	const usage = value.usage === undefined ? undefined : cloneUsage(value.usage);
 	if (value.usage !== undefined && !usage) return undefined;
+	const images = value.images === undefined ? undefined : decodeBackgroundToolImageManifest(value.images);
+	if (value.images !== undefined && !images) return undefined;
 	const invocation = retainedToolInvocation(value);
 	const executionContext = decodeExecutionContext(ownDataValue(value, "executionContext"));
 	if (
@@ -789,6 +805,7 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 		summary: value.summary,
 		output: value.output,
 		...(value.artifactId ? { artifactId: value.artifactId } : {}),
+		...(images ? { images } : {}),
 		...(usage ? { usage } : {}),
 		...(value.cancellationRequested !== undefined ? { cancellationRequested: value.cancellationRequested } : {}),
 		...(value.terminalDelivery !== undefined ? { terminalDelivery: value.terminalDelivery } : {}),
@@ -941,6 +958,14 @@ export class BackgroundToolTaskController {
 
 	list(): BackgroundToolTaskRecord[] {
 		return [...this.tasks.values()].map((state) => ({ ...state.record }));
+	}
+
+	async readImage(taskId: string, imageIndex: number): Promise<BackgroundToolImageRead> {
+		const record = this.tasks.get(taskId)?.record ?? this.loadRetiredTerminalRecord(taskId);
+		if (!record?.images) return { found: false, reason: "No retained images for this task." };
+		const store = this.deps.getArtifactStore();
+		if (!store) return { found: false, reason: "Image artifact storage is unavailable." };
+		return readBackgroundToolImage(store, record.images, imageIndex);
 	}
 
 	getResourceSnapshot(): BackgroundToolTaskResourceSnapshot {
@@ -1217,6 +1242,7 @@ export class BackgroundToolTaskController {
 			completion.result.usage,
 			retainedToolVerification(completion.result.details),
 			invocation,
+			completion.result.content.filter((block): block is ImageContent => block.type === "image"),
 		);
 	}
 
@@ -1368,6 +1394,7 @@ export class BackgroundToolTaskController {
 		usage: Usage | undefined,
 		verification?: VerificationRecord,
 		invocation?: ToolInvocationReceipt,
+		images: readonly ImageContent[] = [],
 	): void {
 		if (state.terminalWatchdog !== undefined) this.deps.timers.clearTimeout(state.terminalWatchdog);
 		state.terminalWatchdog = undefined;
@@ -1385,6 +1412,16 @@ export class BackgroundToolTaskController {
 						postprocessingFailures: [],
 					})
 			: undefined;
+		let imageCapture: BackgroundToolImageCapture | undefined;
+		if (images.length > 0) {
+			try {
+				const store = this.deps.getArtifactStore();
+				if (!store) throw new Error("Image artifact storage is unavailable");
+				imageCapture = captureBackgroundToolImages(store, images, state.record);
+			} catch (error) {
+				this.reportError(`Failed to retain images for background tool task ${state.record.taskId}`, error);
+			}
+		}
 		const packed = packToolOutput(
 			{
 				toolName: state.record.toolName,
@@ -1394,12 +1431,20 @@ export class BackgroundToolTaskController {
 				reproducible: false,
 				truncation: { maxBytes: MAX_INLINE_OUTPUT_BYTES, maxLines: MAX_INLINE_OUTPUT_LINES },
 			},
-			() => this.deps.getArtifactStore(),
+			() => (this.deps.canRetrieveTextArtifacts?.() === false ? undefined : this.deps.getArtifactStore()),
 			state.artifactHolderId,
 		);
-		const output = packed.artifactId
+		const textOutput = packed.artifactId
 			? `${packed.content}\n\n[${formatArtifactNotice(packed.artifactId)}]`
 			: packed.content;
+		const output =
+			images.length === 0
+				? textOutput
+				: `${textOutput}\n\n${
+						imageCapture
+							? `[${images.length} image(s) retained. View each with tool_task action=image taskId=${state.record.taskId} imageIndex=1..${images.length}.]`
+							: `[${images.length} image(s) could not be retained: storage failed or image data exceeded the supported bounds. Do not repeat the operation merely to recover them.]`
+					}`;
 		const record: BackgroundToolTaskRecord = {
 			...state.record,
 			status,
@@ -1410,6 +1455,7 @@ export class BackgroundToolTaskController {
 			summary: summaryFor(status, state.record.toolName, output),
 			output,
 			...(packed.artifactId ? { artifactId: packed.artifactId } : {}),
+			...(imageCapture ? { images: imageCapture.manifest } : {}),
 			...(usage ? { usage } : {}),
 			...(state.cancellationRequested ? { cancellationRequested: true } : {}),
 			// Every terminal is owed a wake-up; only the drained delivery's receipt records it delivered.
@@ -1422,6 +1468,7 @@ export class BackgroundToolTaskController {
 		};
 		delete record.observedAt;
 		if (!packed.artifactId) delete record.artifactId;
+		if (!imageCapture) delete record.images;
 		if (!usage) delete record.usage;
 		if (
 			!verification ||
@@ -1429,6 +1476,13 @@ export class BackgroundToolTaskController {
 		)
 			delete record.piVerification;
 		const persisted = this.persist(record);
+		if (!persisted && imageCapture) {
+			try {
+				imageCapture.discard();
+			} catch (error) {
+				this.reportError(`Failed to release images for background tool task ${record.taskId}`, error);
+			}
+		}
 		if (!persisted && packed.artifactId) {
 			// No saved record cites this artifact, so nothing owns it: release the pack-time holder
 			// instead of leaving an unowned artifact behind an output that reports itself unavailable.
@@ -1443,7 +1497,12 @@ export class BackgroundToolTaskController {
 		const terminalRecord = persisted
 			? record
 			: (() => {
-					const { piVerification: _verification, artifactId: _artifactId, ...unavailableRecord } = record;
+					const {
+						piVerification: _verification,
+						artifactId: _artifactId,
+						images: _images,
+						...unavailableRecord
+					} = record;
 					return {
 						...unavailableRecord,
 						status: "failed" as const,

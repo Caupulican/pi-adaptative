@@ -1348,10 +1348,9 @@ export class AgentSession {
 			getGoalId: () => this._goals.getBackgroundToolTaskGoalId(),
 			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
 			isForegroundWait: (tool, args) => this.getToolDefinition(tool)?.foregroundWait?.(args as never) === true,
-			// An artifact handle in a task result is a promise that artifact_retrieve can resolve it: no store, no handle, while that
-			// tool is outside the session's allowed surface (the same rule as grep, find and webfetch).
-			getArtifactStore: () =>
-				this._runtimeBuilder.getRegisteredTool("artifact_retrieve") ? this._getToolArtifactStore() : undefined,
+			// Task images are retrievable through tool_task itself; text handles need artifact_retrieve.
+			getArtifactStore: () => this._getToolArtifactStore(),
+			canRetrieveTextArtifacts: () => this._runtimeBuilder.getRegisteredTool("artifact_retrieve") !== undefined,
 			getMutationScope: () => this.mutationScope,
 			getMutationAnnouncer: () => this._shellSessionKey,
 			notifyTerminal: (records, wakeParent) => this._terminalHandoffs.notifyTools(records, wakeParent),
@@ -1900,6 +1899,7 @@ export class AgentSession {
 			getDecisionLedger: () => this.getDecisionLedger(),
 			getToolTaskDependencies: () => ({
 				list: () => this._backgroundToolTasks.list(),
+				readImage: (taskId, imageIndex) => this._backgroundToolTasks.readImage(taskId, imageIndex),
 				cancel: (taskId) => this._backgroundToolTasks.cancel(taskId),
 				// An owner steer ends the wait so the model reads it at once instead of after the bound.
 				wait: (taskId, signal, timeoutMs) => {

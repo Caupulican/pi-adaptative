@@ -1,4 +1,5 @@
 import { type Static, Type } from "typebox";
+import type { BackgroundToolImageRead } from "../background-tool-images.ts";
 import type { BackgroundToolTaskRecord, BackgroundToolTaskWait } from "../background-tool-task-controller.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { WaitEndKind, WaitEndReason } from "../util/wait.ts";
@@ -10,8 +11,8 @@ const MAX_WAIT_TIMEOUT_MS = 300_000;
 const schema = Type.Object(
 	{
 		action: Type.String({
-			enum: ["list", "wait", "cancel"],
-			description: "List once, wait once for a dependency, or cancel. Never poll.",
+			enum: ["list", "wait", "image", "cancel"],
+			description: "List once, wait once for a dependency, view a retained image, or cancel. Never poll.",
 		}),
 		taskId: Type.Optional(
 			Type.String({
@@ -26,6 +27,9 @@ const schema = Type.Object(
 				description: "How long wait may block, in ms; default 300000.",
 			}),
 		),
+		imageIndex: Type.Optional(
+			Type.Integer({ minimum: 1, description: "For image: one-based image number (default 1)." }),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -36,15 +40,17 @@ export interface ToolTaskDependencies {
 	list(): BackgroundToolTaskRecord[];
 	/** The caller's signal and bound; the session decides whether an owner steer ends the wait. */
 	wait(taskId: string, signal?: AbortSignal, timeoutMs?: number): Promise<BackgroundToolTaskWait>;
+	readImage?(taskId: string, imageIndex: number): Promise<BackgroundToolImageRead>;
 	cancel(taskId: string): boolean;
 }
 
 export interface ToolTaskDetails {
-	kind: "list" | "wait" | "cancel" | "error";
+	kind: "list" | "wait" | "image" | "cancel" | "error";
 	count?: number;
 	taskId?: string;
 	status?: BackgroundToolTaskRecord["status"];
 	artifactId?: string;
+	imageIndex?: number;
 	reason?: string;
 	/** `wait` only: why the wait returned. A running task's wait ends `steered`, `aborted` or `timed_out`. */
 	waitEnd?: WaitEndKind;
@@ -105,11 +111,12 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 		name: "tool_task",
 		label: "tool_task",
 		description:
-			"List, wait for, or cancel this session's background tool calls. list shows status only and never delivers a result; continue other work, and wait blocks until the task ends or timeoutMs (default 300000), never poll. Cite a completed taskId as goal evidence or task_steps evidence.",
+			"List, wait for, view retained images from, or cancel this session's background tool calls. list shows status only; wait blocks until the task ends or timeoutMs (default 300000), never poll. image retrieves one stored image by taskId and imageIndex, resizing large images for display. Cite a completed taskId as goal evidence or task_steps evidence.",
 		promptSnippet: "Event-driven background tool control; wait once, never poll.",
 		promptGuidelines: [
 			"A completion wake-up carries the result; wait once with taskId only for a task it marks output omitted.",
 			"list reports status only and never consumes a pending completion; the wake-up still carries the output afterwards.",
+			"When a result names retained images, use action=image and its taskId with imageIndex (1-based) to view each image.",
 			"Cite the taskId on the matching task_steps step and as goal add_evidence kind=tool uri.",
 		],
 		parameters: schema,
@@ -130,6 +137,29 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 					details: { kind: "error" as const, reason: "invalid_task_id" },
 					isError: true,
 					errorKind: "tool_failure" as const,
+				};
+			}
+
+			if (input.action === "image") {
+				const imageIndex = input.imageIndex ?? 1;
+				const result = await deps.readImage?.(taskId, imageIndex);
+				if (!result?.found) {
+					return {
+						content: [{ type: "text" as const, text: result?.reason ?? "Image retrieval is unavailable." }],
+						details: { kind: "error" as const, taskId, imageIndex },
+						isError: true,
+						errorKind: "operation_outcome" as const,
+					};
+				}
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Image ${imageIndex} from ${taskId}.${result.note ? `\n${result.note}` : ""}`,
+						},
+						result.image,
+					],
+					details: { kind: "image" as const, taskId, imageIndex },
 				};
 			}
 

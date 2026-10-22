@@ -70,7 +70,8 @@ export function retrieveArtifactSlice(
 	}
 
 	const mode = request.mode ?? "head";
-	if (mode === "metadata") {
+	// Read preserves authoritative lineage failures; image payloads never become raw text slices.
+	if (mode === "metadata" || record.ref.kind === "image") {
 		return { found: true, mode: "metadata", ref: record.ref };
 	}
 	return { found: true, ref: record.ref, ...sliceText(record.content, { ...request, mode }) };
