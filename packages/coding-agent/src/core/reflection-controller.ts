@@ -90,7 +90,9 @@ import {
 	newUserPreferenceId,
 	type UserPreferenceAdmissionRequest,
 	type UserPreferenceAdmissionResult,
+	type UserPreferenceCommitReference,
 	type UserPreferenceCommitReport,
+	type UserPreferenceLearningPort,
 	type UserPreferenceMetadata,
 } from "./memory/user-preference-metadata.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -523,6 +525,7 @@ interface ReflectionApplyResult {
 }
 
 export class ReflectionController {
+	readonly userPreferenceLearning: UserPreferenceLearningPort;
 	private readonly deps: ReflectionControllerDeps;
 	private readonly unsubscribeSettingsChanges: () => void;
 	private readonly durableLearningOwnerId = randomUUID();
@@ -558,6 +561,10 @@ export class ReflectionController {
 	constructor(deps: ReflectionControllerDeps) {
 		this.deps = deps;
 		this.writes = new LearningWriteJournal(deps);
+		this.userPreferenceLearning = {
+			admit: (request) => this.admitUserPreference(request),
+			settle: (reference, report) => this.settleUserPreference(reference, report),
+		};
 		this.rollbacks = new LearningRollbackController({
 			getSessionManager: deps.getSessionManager,
 			getContextGeneration: deps.getContextGeneration,
@@ -1464,28 +1471,46 @@ export class ReflectionController {
 		};
 		// Publication happens once, with the storage owner's actual result; nothing claims an apply
 		// (or a rollback-eligible change) before the bytes landed.
-		let published = false;
+		const reference = { id: ticket.id, data: this.writes.reference(ticket) };
+		let frozenReport: UserPreferenceCommitReport | undefined;
+		let observed = false;
 		const commit = (report: UserPreferenceCommitReport): void => {
-			if (published) return;
-			published = true;
-			const record = report.persisted
-				? audit("apply", decision.reasonCode, true)
-				: audit(
-						"apply_failed",
-						report.outcome === "unknown"
-							? "outcome_unknown"
-							: report.outcome === "partial"
-								? "partial_apply"
-								: APPLY_WRITE_REFUSED_REASON_CODE,
-						false,
-					);
-			if (!report.persisted && report.outcome) {
-				record.summary = `${record.summary} — ${report.error.slice(0, 600)}`;
+			frozenReport ??= { ...report, settledAt: report.settledAt ?? new Date().toISOString() };
+			this.settleUserPreference(reference, frozenReport);
+			if (!observed) {
+				observed = true;
+				observeDecision();
 			}
-			this.writes.settle(ticket, record);
-			observeDecision();
 		};
-		return { outcome: "apply", metadata, reasonCode: decision.reasonCode, commit };
+		return { outcome: "apply", metadata, reasonCode: decision.reasonCode, reference, commit };
+	}
+
+	/** The same deterministic receipt builder serves live completion and storage recovery. */
+	private settleUserPreference(reference: UserPreferenceCommitReference, report: UserPreferenceCommitReport): boolean {
+		if (
+			!reference.data ||
+			typeof reference.data !== "object" ||
+			!("id" in reference.data) ||
+			reference.data.id !== reference.id
+		)
+			return false;
+		return this.writes.acceptExternal(reference.data, (planned) => ({
+			...planned,
+			action: report.persisted ? "apply" : "apply_failed",
+			reasonCode: report.persisted
+				? planned.reasonCode
+				: report.outcome === "unknown"
+					? "outcome_unknown"
+					: report.outcome === "partial"
+						? "partial_apply"
+						: APPLY_WRITE_REFUSED_REASON_CODE,
+			rollback: report.persisted ? planned.rollback : undefined,
+			summary:
+				!report.persisted && report.outcome
+					? `${planned.summary} — ${report.error.slice(0, 600)}`
+					: planned.summary,
+			createdAt: report.settledAt ?? planned.createdAt,
+		}));
 	}
 
 	analyzeCompletedTurn(messages: AgentMessage[]): ReflectionTurnAnalysis {

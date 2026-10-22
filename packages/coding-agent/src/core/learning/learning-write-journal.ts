@@ -3,20 +3,25 @@ import { existsSync, mkdirSync, realpathSync, unlinkSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { isPositiveSafePid, probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
+import { probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { stateFile } from "../agent-paths.ts";
-import { classifyCustomEntryPersisted, MAX_PERSISTED_CUSTOM_ENTRY_BYTES } from "../session-entry-persistence.ts";
+import { classifyCustomEntryPersisted } from "../session-entry-persistence.ts";
 import { isSessionAppendAnchorCurrent, type SessionAppendAnchor } from "../session-snapshot.ts";
 import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { appendLearningAuditSnapshot, LEARNING_AUDIT_CUSTOM_TYPE, type LearningAuditRecord } from "./learning-audit.ts";
+
+import { LearningReceiptStore } from "./learning-receipt-store.ts";
 import {
-	appendLearningAuditSnapshot,
-	isLearningAuditRecord,
-	LEARNING_AUDIT_CUSTOM_TYPE,
-	type LearningAuditRecord,
-} from "./learning-audit.ts";
+	canonicalLearningWriteRecord as canonicalRecord,
+	type LearningWriteRecord as JournalRecord,
+	MAX_LEARNING_WRITE_RECORD_BYTES as MAX_RECORD_BYTES,
+	parseLearningWriteRecord,
+	sameLearningWriteIntent,
+	sameLearningWriteOutcome as sameOutcome,
+} from "./learning-write-record.ts";
 
 export type LearningApplicationGuard = () => "session_disposed" | "learning_context_changed" | undefined;
 
@@ -25,17 +30,6 @@ interface CapturedContext {
 	sessionFile: string | undefined;
 	anchor: SessionAppendAnchor;
 	generation: number | undefined;
-}
-
-interface JournalRecord {
-	version: 1;
-	id: string;
-	sessionFile: string | null;
-	anchor: SessionAppendAnchor;
-	phase: "intent" | "settled" | "publishing" | "cancelled";
-	planned: LearningAuditRecord;
-	receipt?: LearningAuditRecord;
-	publisher?: { host: string; pid: number; ownerId: string; active: boolean };
 }
 
 interface PendingWrite {
@@ -59,29 +53,6 @@ interface JournalDeps {
 
 const INTENT_TYPE = "learning_write_intent";
 const MAX_PENDING = 64;
-const MAX_AUDIT_BYTES = MAX_PERSISTED_CUSTOM_ENTRY_BYTES - 4096;
-const MAX_RECORD_BYTES = 2 * MAX_AUDIT_BYTES + 4096;
-
-function canonicalRecord(record: JournalRecord): JournalRecord {
-	for (const audit of [record.planned, record.receipt]) {
-		if (
-			audit !== undefined &&
-			(!isLearningAuditRecord(audit) || Buffer.byteLength(JSON.stringify(audit)) > MAX_AUDIT_BYTES)
-		)
-			throw new Error("Learning audit is invalid or exceeds its publication bound");
-	}
-	const text = JSON.stringify(record);
-	if (Buffer.byteLength(text) > MAX_RECORD_BYTES) throw new Error("Learning write journal exceeds its byte bound");
-	return JSON.parse(text) as JournalRecord;
-}
-
-function sameOutcome(left: JournalRecord, right: JournalRecord): boolean {
-	return isDeepStrictEqual(
-		JSON.parse(JSON.stringify({ ...left, phase: "settled", publisher: undefined })),
-		JSON.parse(JSON.stringify({ ...right, phase: "settled", publisher: undefined })),
-	);
-}
-
 function cachedReceipts(manager: SessionManager, auditId: string): Array<{ id: string; data: unknown }> {
 	return manager
 		.getEntries()
@@ -101,6 +72,7 @@ export class LearningWriteJournal {
 	private readonly deps: JournalDeps;
 	private readonly contexts = new WeakMap<LearningApplicationGuard, CapturedContext>();
 	private readonly pending = new Map<string, PendingWrite>();
+	private readonly receipts: LearningReceiptStore;
 	private readonly publisher = { host: hostname(), pid: process.pid, ownerId: randomUUID() };
 	private recovering = false;
 	private recoveryOffset = 0;
@@ -108,6 +80,7 @@ export class LearningWriteJournal {
 
 	constructor(deps: JournalDeps) {
 		this.deps = deps;
+		this.receipts = new LearningReceiptStore(deps.getAgentDir(), (message) => this.warn("terminal-history", message));
 	}
 
 	capture(): LearningApplicationGuard {
@@ -160,29 +133,7 @@ export class LearningWriteJournal {
 		const value: unknown = JSON.parse(
 			readBoundedTextFileSync(this.file(id), MAX_RECORD_BYTES, "learning write journal"),
 		);
-		if (
-			!isPlainRecord(value) ||
-			value.version !== 1 ||
-			value.id !== id ||
-			(value.sessionFile !== null && typeof value.sessionFile !== "string") ||
-			!isPlainRecord(value.anchor) ||
-			typeof value.anchor.sessionId !== "string" ||
-			(value.anchor.leafId !== null && typeof value.anchor.leafId !== "string") ||
-			!["intent", "settled", "publishing", "cancelled"].includes(String(value.phase)) ||
-			!isLearningAuditRecord(value.planned) ||
-			value.planned.id !== id ||
-			((value.phase === "settled" || value.phase === "publishing") &&
-				(!isLearningAuditRecord(value.receipt) || value.receipt.id !== id)) ||
-			(value.phase === "publishing" &&
-				(!isPlainRecord(value.publisher) ||
-					typeof value.publisher.host !== "string" ||
-					!isPositiveSafePid(value.publisher.pid) ||
-					typeof value.publisher.active !== "boolean" ||
-					typeof value.publisher.ownerId !== "string" ||
-					!/^[a-f0-9-]{36}$/.test(value.publisher.ownerId)))
-		)
-			throw new Error("Invalid learning write journal");
-		return canonicalRecord(value as unknown as JournalRecord);
+		return parseLearningWriteRecord(value, id);
 	}
 
 	private write(record: JournalRecord, create = false): void {
@@ -306,14 +257,88 @@ export class LearningWriteJournal {
 		}
 	}
 
+	/** Frozen admission identity for receipt-only recovery; never a renewed mutation permit. */
+	reference(ticket: LearningWriteTicket): unknown {
+		const record = this.pending.get(ticket.id)?.record;
+		if (record?.phase !== "intent" || !record.anchor.leafId) throw new Error("Learning intent is not admitted");
+		return canonicalRecord(record);
+	}
+
+	/** Accept durable custody independently of branch publication. The caller freezes the report first. */
+	acceptExternal(reference: unknown, buildReceipt: (planned: LearningAuditRecord) => LearningAuditRecord): boolean {
+		try {
+			if (!isPlainRecord(reference) || typeof reference.id !== "string")
+				throw new Error("Invalid learning receipt reference");
+			const intent = parseLearningWriteRecord(reference, reference.id);
+			if (intent.phase !== "intent" || !intent.anchor.leafId || intent.receipt || intent.publisher)
+				throw new Error("Expected an admitted learning intent reference");
+			const settled = canonicalRecord({ ...intent, phase: "settled", receipt: buildReceipt(intent.planned) });
+			if (settled.receipt?.id !== intent.id) throw new Error("Learning receipt changed audit identity");
+			const retained = this.pending.get(intent.id);
+			if (retained) {
+				if (
+					!sameLearningWriteIntent(retained.record, intent) ||
+					(retained.record.receipt !== undefined && !sameOutcome(retained.record, settled))
+				)
+					throw new Error("Conflicting retained learning receipt");
+				// Retain the actual live outcome before any fallible lock or I/O, as settle() does.
+				retained.record = settled;
+			}
+			this.locked(() => {
+				let current: JournalRecord | undefined;
+				try {
+					current = this.read(intent.id);
+				} catch (error) {
+					if (!isMissingFileError(error)) throw error;
+				}
+				const terminal = this.receipts.get(intent.id);
+				if (terminal && !sameOutcome(terminal, settled)) throw new Error("Conflicting terminal learning receipt");
+				if (
+					current &&
+					(!sameLearningWriteIntent(current, intent) ||
+						current.phase === "cancelled" ||
+						(current.receipt !== undefined && !sameOutcome(current, settled)))
+				)
+					throw new Error("Conflicting pending learning receipt");
+				if (
+					retained &&
+					(!sameLearningWriteIntent(retained.record, intent) ||
+						(retained.record.receipt !== undefined && !sameOutcome(retained.record, settled)))
+				)
+					throw new Error("Conflicting retained learning receipt");
+				// A physical conflict is fatal even when a cached terminal receipt happens to agree.
+				const published =
+					intent.sessionFile !== null && existsSync(intent.sessionFile)
+						? this.findPublishedReceipt(this.deps.getSessionManager(), settled)
+						: false;
+				if (!current && !published && this.names().length >= MAX_PENDING)
+					throw new Error("Learning publication capacity reached");
+				this.receipts.put(settled);
+				// The sole reconstruction exception restores a settled receipt obligation, never an intent.
+				if (!published && !current) this.write(settled, true);
+				else if (current?.phase === "intent") this.write(settled);
+				if (retained) retained.record = current?.phase === "publishing" ? current : settled;
+			});
+			this.recover();
+			return true;
+		} catch (error) {
+			this.warn("external-receipt", error);
+			return false;
+		}
+	}
+
 	private persistOutcome(pending: PendingWrite): void {
 		this.locked(() => {
+			const terminal = this.receipts.get(pending.record.id);
+			if (terminal && !sameOutcome(terminal, pending.record))
+				throw new Error("Conflicting terminal learning receipt");
 			const current = this.read(pending.record.id);
 			if (current.phase === "publishing" && sameOutcome(current, pending.record)) {
 				pending.record = current;
 				return;
 			}
 			this.write(pending.record);
+			this.receipts.put(pending.record);
 		});
 	}
 
@@ -385,6 +410,8 @@ export class LearningWriteJournal {
 					)
 						return false;
 				}
+				// Memory-only publication is process-local. Transfer to durable terminal history first.
+				this.receipts.put(current);
 				unlinkSync(this.file(record.id));
 				this.pending.delete(record.id);
 				return true;
@@ -406,7 +433,8 @@ export class LearningWriteJournal {
 	/** A prior uncertain append is resolved from canonical bytes, never another manager's cached entries. */
 	private findPublishedReceipt(manager: SessionManager, record: JournalRecord): boolean {
 		const expected = { version: 1, record: record.receipt };
-		if (!manager.isPersisted()) {
+		if (record.sessionFile === null) {
+			if (manager.getSessionId() !== record.anchor.sessionId) return false;
 			const entries = cachedReceipts(manager, record.id);
 			if (entries.length === 0) return false;
 			if (
@@ -427,6 +455,7 @@ export class LearningWriteJournal {
 			throw new Error("Learning receipt session identity changed");
 		const parents = new Map<string, string | null>();
 		let receiptId: string | undefined;
+		let intentFound = false;
 		for (const row of rows.slice(1)) {
 			if (!row) continue;
 			const entry: unknown = JSON.parse(row);
@@ -438,6 +467,15 @@ export class LearningWriteJournal {
 			)
 				throw new Error("Invalid learning receipt session entry");
 			parents.set(entry.id, entry.parentId);
+			if (entry.id === record.anchor.leafId) {
+				if (
+					entry.type !== "custom" ||
+					entry.customType !== INTENT_TYPE ||
+					!isDeepStrictEqual(entry.data, { version: 1, auditId: record.id })
+				)
+					throw new Error("Learning receipt intent changed");
+				intentFound = true;
+			}
 			if (
 				entry.type !== "custom" ||
 				entry.customType !== LEARNING_AUDIT_CUSTOM_TYPE ||
@@ -451,6 +489,7 @@ export class LearningWriteJournal {
 			receiptId = entry.id;
 		}
 		const seen = new Set<string>();
+		if (!intentFound) throw new Error("Learning receipt intent is missing");
 		if (receiptId === undefined) return false;
 		while (receiptId && !seen.has(receiptId)) {
 			if (receiptId === record.anchor.leafId) return true;
@@ -482,6 +521,32 @@ export class LearningWriteJournal {
 				try {
 					let record = this.pending.get(id)?.record ?? this.locked(() => this.read(id));
 					const retained = this.pending.get(id);
+					const terminal = this.receipts.get(id);
+					if (terminal) {
+						if (!sameLearningWriteIntent(record, terminal) || (record.receipt && !sameOutcome(record, terminal)))
+							throw new Error("Terminal receipt conflicts with pending work");
+						if (!existsSync(this.file(id))) {
+							// A peer can publish and retire the pending file before this controller observes it.
+							// Exact terminal custody is still durable; check any physical record for conflicts.
+							if (terminal.sessionFile && existsSync(terminal.sessionFile))
+								this.findPublishedReceipt(context.manager, terminal);
+							this.pending.delete(id);
+							continue;
+						}
+						if (record.phase === "intent") {
+							record = this.locked(() => {
+								const current = this.read(id);
+								if (current.phase === "intent") {
+									this.write(terminal);
+									return terminal;
+								}
+								if (!sameOutcome(current, terminal))
+									throw new Error("Learning transfer conflicts with current publication");
+								return current;
+							});
+							if (retained) retained.record = record;
+						}
+					}
 					if (retained && !existsSync(this.file(id))) {
 						if (
 							record.phase === "cancelled" ||

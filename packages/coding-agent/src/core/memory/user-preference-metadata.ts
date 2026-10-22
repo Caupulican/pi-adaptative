@@ -223,15 +223,29 @@ export interface UserPreferenceAdmissionRequest {
 }
 
 /** What the storage owner reports back once the admitted write reached its terminal outcome. */
-export type UserPreferenceCommitReport =
+export type UserPreferenceCommitReport = (
 	| { persisted: true }
-	| { persisted: false; error: string; outcome?: "partial" | "unknown"; storageChanged?: boolean };
+	| { persisted: false; error: string; outcome?: "partial" | "unknown"; storageChanged?: boolean }
+) & { settledAt?: string };
+
+/** Opaque journal-owned admission seed; storage keeps it with the frozen terminal report. */
+export interface UserPreferenceCommitReference {
+	id: string;
+	data: unknown;
+}
+
+export interface UserPreferenceLearningPort {
+	admit(request: UserPreferenceAdmissionRequest): Promise<UserPreferenceAdmissionResult>;
+	/** True acknowledges durable receipt custody, independently of branch publication. */
+	settle(reference: UserPreferenceCommitReference, report: UserPreferenceCommitReport): boolean;
+}
 
 export type UserPreferenceAdmissionResult =
 	| {
 			outcome: "apply";
 			metadata: UserPreferenceMetadata;
 			reasonCode: string;
+			reference?: UserPreferenceCommitReference;
 			/**
 			 * Publication boundary: the storage owner calls it exactly once with the actual result of the
 			 * commit. The audit record ("apply" with a rollback plan, or "apply_failed") is written here,
