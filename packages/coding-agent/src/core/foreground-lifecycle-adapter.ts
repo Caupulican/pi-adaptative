@@ -11,7 +11,9 @@ import type {
 import {
 	receiptMatchesMessageBatch,
 	SessionAppendCommittedError,
+	type SessionAppendIdentity,
 	type SessionAppendReceipt,
+	SessionAppendUncertainError,
 } from "../kernel/session/session-append-receipt.ts";
 import type { SessionManager, SessionMessageBatchEntry } from "../kernel/session/session-manager.ts";
 import { ForegroundLifecycleController, type ProviderRetryLifecycleEvent } from "./foreground-lifecycle-controller.ts";
@@ -38,7 +40,12 @@ export class ForegroundLifecycleAdapter {
 	private readonly lifecycle: ForegroundLifecycleController;
 	private readonly sessionManager: SessionManager;
 	private readonly providerLimitStore: ProviderLimitStore | undefined;
-	private readonly observeMessagePersisted: ((message: Message, entryId: string) => void) | undefined;
+	private readonly observeMessagePersisted:
+		| ((message: Message, entryId: string, publication: SessionAppendIdentity) => void)
+		| undefined;
+	private readonly observeMessageUncertain:
+		| ((message: Message, entryId: string, publication: SessionAppendIdentity) => void)
+		| undefined;
 	private readonly liveWarningSink: (() => ((message: string) => void) | undefined) | undefined;
 	private pendingWarnings: string[] = [];
 	private pendingWarningsDropped = 0;
@@ -59,15 +66,17 @@ export class ForegroundLifecycleAdapter {
 		getMutationScope?: () => string,
 		getAnnouncer?: () => string,
 		providerLimitStore?: ProviderLimitStore,
-		observeMessagePersisted?: (message: Message, entryId: string) => void,
+		observeMessagePersisted?: (message: Message, entryId: string, publication: SessionAppendIdentity) => void,
 		liveWarningSink?: () => ((message: string) => void) | undefined,
 		observeProviderRequest?: (context: ProviderRequestSnapshotContext) => void,
 		prewarmToolCalls?: (calls: readonly ToolCallStartContext[], signal?: AbortSignal) => void,
+		observeMessageUncertain?: (message: Message, entryId: string, publication: SessionAppendIdentity) => void,
 	) {
 		this.agent = agent;
 		this.sessionManager = sessionManager;
 		this.providerLimitStore = providerLimitStore;
 		this.observeMessagePersisted = observeMessagePersisted;
+		this.observeMessageUncertain = observeMessageUncertain;
 		this.liveWarningSink = liveWarningSink;
 		this.lifecycle = new ForegroundLifecycleController({
 			agent,
@@ -189,7 +198,34 @@ export class ForegroundLifecycleAdapter {
 		} catch (error) {
 			if (error instanceof SessionAppendCommittedError && error.receipt.attempt === attempt)
 				publication.receipt = error.receipt;
-			if (!publication.receipt) throw error;
+			if (!publication.receipt) {
+				if (
+					error instanceof SessionAppendUncertainError &&
+					receiptMatchesMessageBatch(error.identity, submitted, attempt)
+				) {
+					try {
+						runReleaseSteps(
+							submitted.flatMap((item, index) =>
+								item.kind === "message"
+									? [
+											() =>
+												this.observeMessageUncertain?.(
+													item.message,
+													error.identity.entries[index]!.id,
+													error.identity,
+												),
+										]
+									: [],
+							),
+							"Uncertain input notifications failed.",
+							{ error },
+						);
+					} catch (notificationError) {
+						throw new SessionAppendUncertainError(error.identity, notificationError);
+					}
+				}
+				throw error;
+			}
 			failure = { error };
 		}
 		const receipt = publication.receipt;
@@ -207,7 +243,7 @@ export class ForegroundLifecycleAdapter {
 				},
 				() => {
 					assertCurrent();
-					this.observeMessagePersisted?.(item.message, entryId);
+					this.observeMessagePersisted?.(item.message, entryId, receipt);
 				},
 			];
 		});

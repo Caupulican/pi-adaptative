@@ -165,6 +165,7 @@ export type PendingInputHoldReason = "context_changed" | "undelivered" | "closed
 /** Where an input was accepted: its session and that session's branch generation. */
 export interface PendingInputContext {
 	readonly sessionId: string;
+	readonly sessionFile?: string;
 	/** Advanced by every branch navigation; ordinary turns and compaction leave it unchanged. */
 	readonly branchGeneration: number;
 }
@@ -339,7 +340,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 
 	/** A steer the session's model has not read yet: still deciding, or admitted and waiting for the steering poll. */
 	hasUnreadSteer(): boolean {
-		return !this._closed && this._steering.some((entry) => !entry.held);
+		return !this._closed && this._steering.some((entry) => !entry.held && !this._isUncertain(entry));
 	}
 
 	/**
@@ -363,7 +364,8 @@ export class PendingInputQueueController implements ForegroundInputPort {
 						};
 					},
 					check: () =>
-						this._closed || !this._steering.some((entry) => !entry.admission && !entry.held)
+						this._closed ||
+						!this._steering.some((entry) => !entry.admission && !entry.held && !this._isUncertain(entry))
 							? { kind: "satisfied", value: true }
 							: undefined,
 				},
@@ -389,7 +391,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	}
 
 	get count(): number {
-		return this._steering.length + this._followUp.length + this._queuedExtensionCommands.length;
+		return this._visibleEntries().length + this._queuedExtensionCommands.length;
 	}
 
 	/**
@@ -399,22 +401,65 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 */
 	get deliverableCount(): number {
 		return (
-			[...this._steering, ...this._followUp].filter((entry) => !entry.held).length +
+			[...this._steering, ...this._followUp].filter((entry) => !entry.held && !this._isUncertain(entry)).length +
 			this._queuedExtensionCommands.length
 		);
 	}
 
 	/** The text the owner sees for an input: the third party's words under their sender for a framed message. */
 	private _ownerText(entry: PendingEntry): string {
-		return entry.origin ? ownerVisibleQueuedText(entry.origin.text, entry.origin) : entry.text;
+		const uncertain = this._isUncertain(entry);
+		const text = entry.origin
+			? ownerVisibleQueuedText(entry.origin.text, entry.origin)
+			: uncertain
+				? entry.original.text
+				: entry.text;
+		return uncertain ? `Write unresolved: ${text}` : text;
+	}
+
+	private _isUncertain(entry: PendingEntry): boolean {
+		return this.deps.ownerInputs.stateOf(entry.inputId) === "uncertain";
+	}
+
+	/** One row per accepted input, including unresolved writes retained outside the ordinary queue. */
+	private _visibleEntries(): PendingEntry[] {
+		const ordinaryCount = this._steering.length + this._followUp.length;
+		const ids = new Set<OwnerInputId>();
+		return [...this._steering, ...this._followUp, ...this._awaitingPersistence, ...this._owned, ...this._preparing]
+			.filter((entry, index) => {
+				if ((index >= ordinaryCount && !this._isUncertain(entry)) || ids.has(entry.inputId)) return false;
+				ids.add(entry.inputId);
+				return true;
+			})
+			.sort((left, right) => left.id - right.id);
+	}
+
+	/** An unresolved input keeps its original file's record; navigation cannot publish it into another session. */
+	private _recordableEntries(entries: readonly PendingEntry[]): RecordableQueuedInput[] {
+		const context = this.deps.getInputContext?.();
+		return entries
+			.filter((entry) => {
+				const uncertain = this.deps.ownerInputs.uncertaintyOf(entry.inputId);
+				return (
+					!uncertain ||
+					!context ||
+					(uncertain.publication.sessionId === context.sessionId &&
+						uncertain.publication.sessionFile === context.sessionFile)
+				);
+			})
+			.map(recordableInput);
 	}
 
 	getSteering(): readonly string[] {
-		return this._steering.map((entry) => this._ownerText(entry));
+		return this._visibleEntries()
+			.filter((entry) => entry.kind === "steer")
+			.map((entry) => this._ownerText(entry));
 	}
 
 	getFollowUp(): readonly string[] {
-		return this._followUp.map((entry) => this._ownerText(entry));
+		return this._visibleEntries()
+			.filter((entry) => entry.kind === "followUp")
+			.map((entry) => this._ownerText(entry));
 	}
 
 	getCommands(): readonly string[] {
@@ -585,6 +630,8 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		origin?: SendUserMessageOrigin,
 		inputId?: OwnerInputId,
 	): PendingInputHandle {
+		if (inputId !== undefined && this.deps.ownerInputs.stateOf(inputId) === "uncertain")
+			throw new Error("An unresolved owner input cannot be queued again.");
 		const preparing = this._preparing.find((entry) => entry.inputId === inputId);
 		const entry = preparing
 			? { ...preparing, kind }
@@ -648,6 +695,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 
 	/** Retire preparation after delivery, explicit withdrawal, or a confirmed transfer to the queued record. */
 	private _leavePreparing(inputId: OwnerInputId, force = false): boolean {
+		if (this.deps.ownerInputs.stateOf(inputId) === "uncertain") return false;
 		const index = this._preparing.findIndex((entry) => entry.inputId === inputId);
 		if (index === -1) return false;
 		if (
@@ -666,7 +714,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 
 	/** Report the prompts being prepared, as submitted and in submission order, to the own-turn record. */
 	private _ownTurnChanged(): void {
-		this.deps.record?.recordOwnTurnInput(this._preparing.map(recordableInput));
+		this.deps.record?.recordOwnTurnInput(this._recordableEntries(this._preparing));
 	}
 
 	/**
@@ -728,7 +776,9 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	/** The entry `handle` names while it is a held input nothing handed on, matched by its identity as well as its number. */
 	private _keptEntry(handle: PendingInputHandle): PendingEntry | undefined {
 		const entry = this._findEntry(handle.id);
-		return entry?.inputId === handle.inputId && entry.held && !entry.message ? entry : undefined;
+		return entry?.inputId === handle.inputId && entry.held && !entry.message && !this._isUncertain(entry)
+			? entry
+			: undefined;
 	}
 
 	/** A pending entry as submitted, in the context it is accepted in now, with the next submission number. */
@@ -803,7 +853,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		const entries = [...this._steering, ...this._followUp, ...this._owned, ...this._awaitingPersistence].sort(
 			(left, right) => left.id - right.id,
 		);
-		this.deps.record?.recordQueuedInput(entries.map(recordableInput));
+		this.deps.record?.recordQueuedInput(this._recordableEntries(entries));
 		// Only transferred preparations may retire here. Failed or bounded-out writes keep the source record intact.
 		for (const entry of entries) this._leavePreparing(entry.inputId);
 	}
@@ -814,7 +864,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 */
 	admit(handle: PendingInputHandle, admission: QueuedInputAdmission): boolean {
 		const entry = this._findEntry(handle.id);
-		if (!entry || entry.admission || entry.held || this._closed) return false;
+		if (!entry || entry.admission || entry.held || this._closed || this._isUncertain(entry)) return false;
 		entry.admission = admission;
 		this.deps.ownerInputs.move(entry.inputId, "pending");
 		this._admitInOrder();
@@ -830,7 +880,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 */
 	promote(handle: PendingInputHandle): boolean {
 		const entry = this._findEntry(handle.id);
-		if (!entry || entry.admission || entry.held || this._closed) return false;
+		if (!entry || entry.admission || entry.held || this._closed || this._isUncertain(entry)) return false;
 		if (!this._contextCurrent(entry)) {
 			this._hold(entry, "context_changed");
 			if (entry.kind === "steer") this._notifySteerDecision();
@@ -867,13 +917,14 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 */
 	reclaim(handle: PendingInputHandle): boolean {
 		const entry = this._owned.find((candidate) => candidate.id === handle.id);
-		if (entry === undefined) return false;
+		if (entry === undefined || this._isUncertain(entry)) return false;
 		this._returnOwned(entry, "undelivered");
 		return true;
 	}
 
 	/** An input its own turn took returns to the pending queue at its submission position, held for `reason`. */
 	private _returnOwned(entry: PendingEntry, reason: PendingInputHoldReason): void {
+		if (this._isUncertain(entry)) return;
 		this._owned = this._owned.filter((candidate) => candidate !== entry);
 		if (!this._closed) this._insertEntry(entry);
 		this._hold(entry, reason);
@@ -893,7 +944,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 * decided or held input is never withdrawn: it keeps its place in the queue. */
 	withdraw(handle: PendingInputHandle, end: OwnerInputEnd): boolean {
 		const entry = this._findEntry(handle.id);
-		if (!entry || entry.admission || entry.held) return false;
+		if (!entry || entry.admission || entry.held || this._isUncertain(entry)) return false;
 		this._removeEntry(entry);
 		entry.abort.abort(PENDING_INPUT_WITHDRAWN);
 		this.deps.ownerInputs.end(entry.inputId, end);
@@ -910,7 +961,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	cancelAwaiting(): void {
 		let removed = false;
 		for (const entry of [...this._steering, ...this._followUp]) {
-			if (entry.admission || entry.held) continue;
+			if (entry.admission || entry.held || this._isUncertain(entry)) continue;
 			this._removeEntry(entry);
 			entry.abort.abort(PENDING_INPUT_WITHDRAWN);
 			this.deps.ownerInputs.end(entry.inputId, { state: "cancelled", reason: "interrupted" });
@@ -950,7 +1001,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	reconcileContext(): void {
 		this.deps.record?.beginBranch();
 		for (const entry of [...this._steering, ...this._followUp]) {
-			if (entry.held || this._contextCurrent(entry)) continue;
+			if (entry.held || this._isUncertain(entry) || this._contextCurrent(entry)) continue;
 			if (entry.message && !this._takeBackFromAgent(entry)) continue;
 			this._hold(entry, "context_changed");
 		}
@@ -972,13 +1023,14 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 */
 	holdUndelivered(): void {
 		for (const entry of [...this._steering, ...this._followUp]) {
-			if (entry.held || !entry.message || !this._takeBackFromAgent(entry)) continue;
+			if (entry.held || this._isUncertain(entry) || !entry.message || !this._takeBackFromAgent(entry)) continue;
 			this._hold(entry, "undelivered");
 		}
 	}
 
 	/** Withdraws the entry's exact message from the agent's queue and returns the input to its submitted form; false when the agent no longer holds it. */
 	private _takeBackFromAgent(entry: PendingEntry): boolean {
+		if (this._isUncertain(entry)) return false;
 		if (!entry.message || !this.deps.agent.withdrawQueuedMessage(entry.message)) return false;
 		this._retractEcho(entry);
 		entry.message = undefined;
@@ -1007,6 +1059,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 
 	/** Keep the input for its owner: what decides its admission is cancelled, it ends held in the ledger, and its one notice is given. */
 	private _hold(entry: PendingEntry, reason: PendingInputHoldReason): void {
+		if (this._isUncertain(entry)) return;
 		entry.held = true;
 		entry.abort.abort(PENDING_INPUT_WITHDRAWN);
 		this.deps.ownerInputs.end(entry.inputId, { state: "held", reason });
@@ -1047,7 +1100,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	hasHandableInput(): boolean {
 		if (this._closed) return false;
 		for (const entries of [this._steering, this._followUp]) {
-			const next = entries.find((entry) => !entry.message && !entry.held);
+			const next = entries.find((entry) => !entry.message && !entry.held && !this._isUncertain(entry));
 			if (next?.admission) return true;
 		}
 		return false;
@@ -1067,7 +1120,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 			[this._followUp, (message: AgentMessage) => this.deps.agent.followUp(message)],
 		] as const) {
 			for (const entry of entries) {
-				if (entry.message || entry.held) continue;
+				if (entry.message || entry.held || this._isUncertain(entry)) continue;
 				const admission = entry.admission;
 				if (!admission) break;
 				// The handoff to the agent is the delivery point: the input's context is checked here.
@@ -1111,7 +1164,8 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		if (inputId === undefined) return false;
 		// Only an input handed to the agent can be read; its identity is the whole match.
 		const entry = [...this._steering, ...this._followUp].find(
-			(candidate) => candidate.inputId === inputId && candidate.message !== undefined,
+			(candidate) =>
+				candidate.inputId === inputId && candidate.message !== undefined && !this._isUncertain(candidate),
 		);
 		if (!entry) return false;
 		this._removeEntry(entry);
@@ -1129,9 +1183,12 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	returnUnpersisted(messages: readonly AgentMessage[]): boolean {
 		if (this._closed) return false;
 		const dropped = new Set(messages.flatMap((message) => ownerInputIdOf(message) ?? []));
-		const returned = this._awaitingPersistence.filter((entry) => dropped.has(entry.inputId));
+		const returned = this._awaitingPersistence.filter(
+			(entry) => dropped.has(entry.inputId) && !this._isUncertain(entry),
+		);
 		if (returned.length === 0) return false;
-		this._awaitingPersistence = this._awaitingPersistence.filter((entry) => !dropped.has(entry.inputId));
+		const returnedIds = new Set(returned.map((entry) => entry.inputId));
+		this._awaitingPersistence = this._awaitingPersistence.filter((entry) => !returnedIds.has(entry.inputId));
 		for (const kind of ["steer", "followUp"] as const) {
 			const back = returned.filter((entry) => entry.kind === kind);
 			if (back.length === 0) continue;
@@ -1140,7 +1197,9 @@ export class PendingInputQueueController implements ForegroundInputPort {
 			entries.sort((left, right) => left.id - right.id);
 			// The agent's queue is rebuilt for this kind in submission order: every later input still queued there is taken out
 			// and handed back after the returned ones. Messages that are not pending input (host turns) keep their place.
-			const handed = entries.flatMap((entry) => (entry.message !== undefined && !entry.held ? [entry.message] : []));
+			const handed = entries.flatMap((entry) =>
+				entry.message !== undefined && !entry.held && !this._isUncertain(entry) ? [entry.message] : [],
+			);
 			for (const message of handed) this.deps.agent.withdrawQueuedMessage(message);
 			for (const message of handed) {
 				if (kind === "steer") this.deps.agent.steer(message);
@@ -1195,6 +1254,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	private _takeEntries(kind: "steer" | "followUp", reason: string, forReuse = false): QueuedInput[] {
 		const taken: QueuedInput[] = [];
 		for (const entry of kind === "steer" ? [...this._steering] : [...this._followUp]) {
+			if (this._isUncertain(entry)) continue;
 			const delivered = entry.message ? { text: entry.text, images: entry.images } : { ...entry.original };
 			// A framed third-party message returns as what the owner saw, never as the extension's frame.
 			let input = entry.origin ? { ...delivered, text: this._ownerText(entry) } : delivered;

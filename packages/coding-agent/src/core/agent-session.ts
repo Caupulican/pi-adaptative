@@ -243,6 +243,7 @@ import {
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import { claimSessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
 import { OwnerInputLedger, type OwnerInputOutcome } from "./owner-input-ledger.ts";
+import { createOwnerInputPublicationObserver } from "./owner-input-publication-observer.ts";
 import {
 	ownerSteerWake,
 	type PendingInputHandle,
@@ -352,7 +353,6 @@ import {
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
-import { runReleaseSteps } from "./util/resource-release.ts";
 import type { TimerPort } from "./util/timer-port.ts";
 import type { WaitStatusEvent } from "./util/wait.ts";
 import { currentWorkUnit, openWorkUnit } from "./work-units.ts";
@@ -1033,6 +1033,7 @@ export class AgentSession {
 			noteOwnerAuthoredMessage: (message, originalText) => this._reflection.markOwnerInput(message, originalText),
 			getInputContext: () => ({
 				sessionId: this.sessionManager.getSessionId(),
+				sessionFile: this.sessionManager.getSessionFile(),
 				branchGeneration: this._branchGeneration,
 			}),
 			// Navigation is the only owner that changes the branch an input was written against.
@@ -1704,6 +1705,12 @@ export class AgentSession {
 			getRouteJudge: () => this._systemOneController,
 			isUsingSubscription: (model) => this._modelRegistry.isUsingSubscription(model),
 		});
+		const ownerInputPublications = createOwnerInputPublicationObserver({
+			inputs: this._ownerInputs,
+			noteEvidence: (message, entryId) => this._reflection.noteOwnerInputPersisted(message, entryId),
+			protectRecovery: (sessionFile) => this._queuedInputPersistence.noteUncertainHistory(sessionFile),
+			queueChanged: () => this._emitQueueUpdate(),
+		});
 		this._foregroundLifecycle = new ForegroundLifecycleAdapter(
 			this.agent,
 			this.sessionManager,
@@ -1712,14 +1719,7 @@ export class AgentSession {
 			() => this._shellSessionKey,
 			this._providerLimitStore,
 			// Every persisted message, single or batched (a routed turn's flush included), passes here: the one Delivered point.
-			(message, entryId) =>
-				runReleaseSteps(
-					[
-						() => this._reflection.noteOwnerInputPersisted(message, entryId),
-						() => this._ownerInputs.notePersisted(message, entryId),
-					],
-					"Owner input persistence notifications failed.",
-				),
+			ownerInputPublications.persisted,
 			() =>
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
 			({ requestId, model, context, sourceContext }) => {
@@ -1750,6 +1750,7 @@ export class AgentSession {
 					.catch(() => undefined);
 				return undefined;
 			},
+			ownerInputPublications.uncertain,
 		);
 		this._foregroundLifecycle.start();
 		this._reflection = new ReflectionController({

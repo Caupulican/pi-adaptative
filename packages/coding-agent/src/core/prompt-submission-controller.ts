@@ -39,6 +39,7 @@ import {
 	type OwnerInputId,
 	type OwnerInputLedger,
 	type OwnerInputSource,
+	ownerInputIdOf,
 	stampOwnerInput,
 } from "./owner-input-ledger.ts";
 import type { PendingInputHandle, PendingInputQueueController } from "./pending-input-queue-controller.ts";
@@ -492,6 +493,8 @@ export class PromptSubmissionController {
 	 * the echo, and its input is held.
 	 */
 	private retractUnpersistedOwnedEcho(message: AgentMessage): void {
+		const inputId = ownerInputIdOf(message);
+		if (inputId !== undefined && this.deps.ownerInputs.stateOf(inputId) === "uncertain") return;
 		if (this.deps.sessionManager.getMessageEntryId(message) === undefined) {
 			this.deps.emit({ type: "user_message_withdrawn", message });
 		}

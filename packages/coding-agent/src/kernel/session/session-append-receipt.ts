@@ -43,12 +43,17 @@ export function captureSessionAppendIdentity(
 	});
 }
 
-/** A physical write was attempted without a confirmed outcome. Only reopening can reconcile its rows. */
+/** A physical write was attempted without a confirmed outcome; the original history needs reconciliation. */
 export class SessionAppendUncertainError extends Error {
 	readonly identity: SessionAppendIdentity;
 
 	constructor(identity: SessionAppendIdentity, cause: unknown) {
-		super("Session write outcome is unknown; reopen the session before retrying these messages.", { cause });
+		super(
+			"Session write outcome is unknown; reconcile the original session history before retrying these messages.",
+			{
+				cause,
+			},
+		);
 		this.name = "SessionAppendUncertainError";
 		this.identity = identity;
 	}

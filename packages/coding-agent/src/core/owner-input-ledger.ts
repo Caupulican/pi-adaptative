@@ -1,4 +1,5 @@
 import { type OwnerInputId, ownerInputIdOf } from "../kernel/owner-input-stamp.ts";
+import type { SessionAppendIdentity } from "../kernel/session/session-append-receipt.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { uuidv7 } from "../kernel/uuid.ts";
 import { releaseFailureCause } from "./util/resource-release.ts";
@@ -19,7 +20,8 @@ export type OwnerInputSource = "prompt" | "steer" | "followUp" | "extension";
 /**
  * The one state of an accepted input. `judged`: its words received their judgment. `pending`: admitted, waiting for its
  * turn to be handed to the agent's queue. `own_turn`: it runs as its own turn (that turn's preparation or run). `handed`:
- * in the agent's queue, or read by a run that has not persisted it yet. `held`: kept in full and visible, never delivered
+ * in the agent's queue, or read by a run that has not persisted it yet. `uncertain`: an attempted write still needs
+ * canonical reconciliation and cannot be withdrawn or replayed. `held`: kept in full and visible, never delivered
  * on its own; it leaves only when the owner takes it back. The rest are terminals.
  */
 export type OwnerInputState =
@@ -28,6 +30,7 @@ export type OwnerInputState =
 	| "pending"
 	| "own_turn"
 	| "handed"
+	| "uncertain"
 	| "delivered"
 	| "withdrawn"
 	| "held"
@@ -50,6 +53,14 @@ export interface OwnerInputDelivery {
 	readonly entryId: string;
 }
 
+/** An exact attempted publication that must be reconciled before this input can end or be resent. */
+export interface OwnerInputUncertainty {
+	readonly id: OwnerInputId;
+	readonly message: AgentMessage;
+	readonly entryId: string;
+	readonly publication: SessionAppendIdentity;
+}
+
 /** What became of an input its submitter waited for: queued for delivery (no `ended`), or how it ended without delivery. */
 export interface OwnerInputOutcome {
 	readonly inputId: OwnerInputId;
@@ -61,8 +72,9 @@ const NEXT_STATES: Readonly<Record<OwnerInputState, readonly OwnerInputState[]>>
 	accepted: ["judged", "pending", "own_turn", "withdrawn", "held", "cancelled", "refused"],
 	judged: ["pending", "own_turn", "withdrawn", "held", "cancelled", "refused"],
 	pending: ["handed", "withdrawn", "held", "cancelled"],
-	own_turn: ["delivered", "held", "cancelled", "refused"],
-	handed: ["delivered", "withdrawn", "held"],
+	own_turn: ["delivered", "uncertain", "held", "cancelled", "refused"],
+	handed: ["delivered", "uncertain", "withdrawn", "held"],
+	uncertain: ["delivered"],
 	held: ["withdrawn"],
 	delivered: [],
 	withdrawn: [],
@@ -76,6 +88,7 @@ const TERMINAL_STATES: ReadonlySet<OwnerInputState> = new Set(["delivered", "wit
 interface InputRecord {
 	readonly source: OwnerInputSource;
 	state: OwnerInputState;
+	uncertainty?: OwnerInputUncertainty;
 	readonly onDelivered: Array<(delivery: OwnerInputDelivery) => void>;
 	readonly onUndelivered: Array<(end: OwnerInputEnd) => void>;
 }
@@ -122,6 +135,37 @@ export class OwnerInputLedger {
 		return this.records.get(id)?.state;
 	}
 
+	uncertaintyOf(id: OwnerInputId): OwnerInputUncertainty | undefined {
+		return this.records.get(id)?.uncertainty;
+	}
+
+	/** Retain both outcomes' effects until this exact write is resolved; repeated observation changes nothing. */
+	noteUncertain(message: AgentMessage, entryId: string, publication: SessionAppendIdentity): void {
+		if (message.role !== "user") return;
+		const id = ownerInputIdOf(message);
+		if (id === undefined) return;
+		const record = this.records.get(id);
+		if (!record) return;
+		if (
+			!publication.entries.some(
+				(entry) => entry.id === entryId && entry.type === "message" && entry.source === message,
+			)
+		)
+			throw new Error("Uncertain owner input does not match its publication identity.");
+		if (record.uncertainty) {
+			if (
+				record.uncertainty.publication.attempt !== publication.attempt ||
+				record.uncertainty.publication.sessionId !== publication.sessionId ||
+				record.uncertainty.publication.sessionFile !== publication.sessionFile ||
+				record.uncertainty.entryId !== entryId
+			)
+				throw new Error("Owner input already has a different unresolved publication.");
+			return;
+		}
+		this.transition(id, record, "uncertain");
+		record.uncertainty = Object.freeze({ id, message, entryId, publication });
+	}
+
 	/** A step on the way to delivery. Repeating the current state is no step; any transition the table forbids throws. */
 	move(id: OwnerInputId, to: "judged" | "pending" | "own_turn" | "handed"): void {
 		const record = this.records.get(id);
@@ -137,6 +181,7 @@ export class OwnerInputLedger {
 	end(id: OwnerInputId, end: OwnerInputEnd): boolean {
 		const record = this.records.get(id);
 		if (record === undefined) return false;
+		if (record.state === "uncertain") return false;
 		if (record.state === end.state) return false;
 		const firstEnd = record.state !== "held";
 		this.transition(id, record, end.state);
@@ -173,12 +218,22 @@ export class OwnerInputLedger {
 	 * message delivers nothing, and a message persisted again delivers nothing again. A message the model read but that was
 	 * never persisted (a routed turn that dropped it) is not delivered.
 	 */
-	notePersisted(message: AgentMessage, entryId: string): void {
+	notePersisted(message: AgentMessage, entryId: string, publication?: SessionAppendIdentity): void {
 		if (message.role !== "user") return;
 		const id = ownerInputIdOf(message);
 		if (id === undefined) return;
 		const record = this.records.get(id);
 		if (record === undefined) return;
+		const uncertain = record.uncertainty;
+		if (
+			uncertain &&
+			(publication === undefined ||
+				publication.attempt !== uncertain.publication.attempt ||
+				publication.sessionId !== uncertain.publication.sessionId ||
+				publication.sessionFile !== uncertain.publication.sessionFile ||
+				entryId !== uncertain.entryId)
+		)
+			throw new Error("Owner input delivery does not resolve its exact uncertain publication.");
 		this.transition(id, record, "delivered");
 		record.onUndelivered.length = 0;
 		const delivery: OwnerInputDelivery = { id, message, entryId };

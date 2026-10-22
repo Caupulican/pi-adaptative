@@ -258,6 +258,11 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		return this.queuedRecord.ownership === "owned" && recordedIds(this.queuedRecord.key).has(inputId);
 	}
 
+	/** Retain the original file's recovery data even after navigation clears the manager's write fence. */
+	noteUncertainHistory(sessionFile: string | undefined): void {
+		if (sessionFile !== undefined) this.uncertainOwnTurnFiles.add(sessionFile);
+	}
+
 	keepsOwnTurnInput(inputId: OwnerInputId): boolean {
 		const sessionFile = this.deps.getSessionManager().getSessionFile();
 		return sessionFile !== undefined && recordedIds(this.ownTurnRecords.get(sessionFile)?.key).has(inputId);
