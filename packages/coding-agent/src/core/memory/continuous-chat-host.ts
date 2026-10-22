@@ -1,6 +1,6 @@
 /**
  * Composition root of ICM's project chat. The memory controller owns one host per ICM root session generation.
- * `open` validates the compaction model and opens the runtime, which takes the project's lease; nothing is imported,
+ * `open` opens the runtime, which takes the project's lease; nothing is imported,
  * subscribed or dispatched yet. `start` then finishes the legacy import, subscribes live announcements, replays the
  * durable entries and starts dispatch. Nothing else appends to the chat or dispatches its work.
  */
@@ -28,7 +28,7 @@ import { ContinuousChatWorkerLog, type ContinuousChatWorkerTranscript } from "./
 
 /** The session-side ports a host needs. The session supplies them; the host never reaches into the session. */
 export interface ContinuousChatHostPorts {
-	/** Validated first in `open`: an unusable model aborts activation before anything opens or imports. */
+	/** Background summary execution; its availability never gates storage activation or root turns. */
 	compaction: ContinuousChatCompactionAdapterPort;
 	/** The foreground system prompt and tools every compaction repeats (the accepted request's, or the current ones). */
 	prefixHead(): ContinuousChatCompactionPrefixHead;
@@ -118,11 +118,10 @@ export class ContinuousChatHost {
 	}
 
 	/**
-	 * Validates the compaction model, then opens the runtime. Opening takes the project's lease and fails once, with the
+	 * Opens the runtime independently of summary-model availability. Opening takes the project's lease and fails once, with the
 	 * runtime's error, when a live session already holds it. A failure after the runtime opens releases the lease.
 	 */
 	static async open(options: ContinuousChatHostOptions): Promise<ContinuousChatHost> {
-		options.compaction.validate();
 		// Before the runtime opens: no compaction can resolve the pre-activation prefix a reloaded session accepted.
 		options.resetCompactionPrefix();
 		const store = new ContinuousChatStore({

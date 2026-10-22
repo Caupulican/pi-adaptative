@@ -62,7 +62,8 @@ export type ContinuousChatSummaryModelResolution =
 /**
  * Resolves the configured cheap model through the existing summary-model resolver (the one the transcript summarizer
  * uses), then checks its egress and its xhigh thinking level. Every refusal names the setting to change. Nothing falls
- * back to another model, and no result is cached: the next call resolves again.
+ * back for invalid settings; the shared resolver may recover a valid catalog model's failed credential or quota.
+ * No result is cached: the next call resolves again.
  */
 export function validateContinuousChatSummaryModel(
 	settings: Pick<ContinuousChatSettings, "summaryModel" | "allowExternalSummaryEgress">,

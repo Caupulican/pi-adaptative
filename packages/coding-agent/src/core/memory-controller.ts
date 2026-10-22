@@ -654,11 +654,6 @@ export class MemoryController {
 		const compaction = this.deps.continuousChat?.compaction;
 		if (!compaction) return;
 		if (this._initializationFailed || (this._activeMemorySystem === "icm" && this._continuousChat === undefined)) {
-			const refusal = this._summaryRefusal(compaction);
-			if (refusal !== undefined) {
-				this._setContinuousChatWire({ kind: "blocked", reason: refusal });
-				return;
-			}
 			this._recoverSettingsWhenIdle();
 			return;
 		}
@@ -2095,7 +2090,7 @@ export class MemoryController {
 	}
 
 	/**
-	 * Opens the project chat for an ICM root generation: validates the compaction model and takes the project's lease.
+	 * Opens the project chat for an ICM root generation and takes the project's lease, independent of its summary model.
 	 * Nothing is imported or subscribed yet; `_activateContinuousChat` starts the chat once its block is installed.
 	 */
 	private async _openContinuousChat(generation: number): Promise<void> {

@@ -63,7 +63,7 @@ export class ContinuousChatPrefixSource {
 	}
 }
 
-/** The compaction port the host activates. `validate()` runs before any legacy import, runtime start or dispatch. */
+/** Background compaction port. `validate()` reports availability without controlling chat activation. */
 export interface ContinuousChatCompactionAdapterPort extends ContinuousChatCompactionPort {
 	/** Throws one actionable Error when the configured summary model cannot run the chat's compactions. */
 	validate(): void;
@@ -90,8 +90,13 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 	}
 
 	validate(): void {
+		this.summaryModel();
+	}
+
+	private summaryModel(): Model<Api> {
 		const summary = this.deps.summary();
 		if (!summary.ok) throw new Error(summary.reason);
+		return summary.model;
 	}
 
 	/**
@@ -109,9 +114,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		const head = this.deps.prefixHead();
 		const systemPrompt = head.systemPrompt;
 		const tools = [...head.tools];
-		const summary = this.deps.summary();
-		if (!summary.ok) throw new Error(summary.reason);
-		let summaryModel = summary.model;
+		this.validate();
 		let history: Message[] = [
 			{ role: "user", content: renderContinuousChatViewBlocks(prefix.view), timestamp: Date.now() },
 		];
@@ -121,7 +124,9 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 				let attempt = 0;
 				const task: Message = { role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() };
 				const request = [...history, task];
-				const runTurn = async (model: Model<Api>, activeTools: Tool[] = tools) => {
+				const runTurn = async (activeTools: Tool[] = tools) => {
+					signal?.throwIfAborted();
+					const model = this.summaryModel();
 					const attemptNumber = ++attempt;
 					const completion = await this.deps.complete({
 						systemPrompt,
@@ -131,6 +136,19 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 						thinkingLevel: CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL,
 						cacheRetention: "short",
 						laneKind: "continuous-chat",
+						requestPreflight: ({ model: requestModel }, requestSignal) => {
+							requestSignal?.throwIfAborted();
+							const current = this.summaryModel();
+							if (
+								current.provider !== requestModel.provider ||
+								current.id !== requestModel.id ||
+								current.api !== requestModel.api ||
+								current.baseUrl !== requestModel.baseUrl
+							) {
+								throw new Error("Continuous-chat summary model changed before its request could start.");
+							}
+							return undefined;
+						},
 						signal,
 					});
 					const reply = completion.messages?.at(-1);
@@ -144,22 +162,21 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 							attempt: attemptNumber,
 						});
 					}
-					return { completion, assistant };
+					return { completion, assistant, model };
 				};
-				let { completion: result, assistant } = await runTurn(summaryModel);
+				let { completion: result, assistant, model: summaryModel } = await runTurn();
 				if (result.stopReason === "error") {
 					this.deps.onModelFailure?.(summaryModel, result.errorMessage);
 					const nextSummary = this.deps.summary();
 					if (nextSummary.ok) {
-						summaryModel = nextSummary.model;
-						({ completion: result, assistant } = await runTurn(summaryModel));
+						({ completion: result, assistant, model: summaryModel } = await runTurn());
 					}
 				}
 				if (
 					tools.length > 0 &&
 					(result.stopReason === "toolUse" || assistant?.content.some((block) => block.type === "toolCall"))
 				) {
-					({ completion: result, assistant } = await runTurn(summaryModel, []));
+					({ completion: result, assistant } = await runTurn([]));
 				}
 				if (assistant === undefined) throw new Error("Continuous-chat compaction produced no assistant reply.");
 				if (result.stopReason !== "stop") {
