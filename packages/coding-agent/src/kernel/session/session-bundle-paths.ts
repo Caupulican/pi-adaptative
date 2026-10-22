@@ -38,3 +38,12 @@ export function orchestrationSessionDir(agentDir: string, parentSessionId: strin
 export function orchestrationSessionDeletionFile(agentDir: string, parentSessionId: string): string {
 	return stateFile(agentDir, "orchestration", "deletions", `${orchestrationSessionKey(parentSessionId)}.json`);
 }
+
+/**
+ * `<orchestrationSessionDir>/worker-conversations` -- durable Pi worker transcripts owned by one
+ * foreground session. Worker conversations remain in SessionManager's established JSONL format,
+ * but are intentionally outside the foreground session picker namespace.
+ */
+export function workerConversationSessionsDir(agentDir: string, parentSessionId: string): string {
+	return join(orchestrationSessionDir(agentDir, parentSessionId), "worker-conversations");
+}

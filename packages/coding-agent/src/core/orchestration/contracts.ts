@@ -1,3 +1,15 @@
+import type { AgentIdentityContract, ResourcePointer } from "../../kernel/session/agent-identity.ts";
+
+export {
+	type AgentIdentityContract,
+	type AgentResumeContext,
+	isResourcePointerKind,
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	RESOURCE_POINTER_KINDS,
+	type ResourcePointer,
+	type ResourcePointerKind,
+} from "../../kernel/session/agent-identity.ts";
+
 import type { ExecutionContext } from "../../kernel/utils/paths.ts";
 import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
 import type { JsonObject, JsonValue } from "../autonomy/contracts.ts";
@@ -16,7 +28,6 @@ export { HARNESS_CAPABILITIES, type HarnessCapability } from "../capability-cont
 export const ORCHESTRATION_SCHEMA_VERSION = 1 as const;
 
 /** Shared durable-control bounds. Keep persisted orchestration records small enough to replay safely. */
-export const MAX_ORCHESTRATION_IDENTIFIER_LENGTH = 512;
 export const MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH = 128;
 export const MAX_ORCHESTRATION_MODEL_ID_LENGTH = 512;
 export const MAX_ORCHESTRATION_DESCRIPTION_LENGTH = 4 * 1024;
@@ -133,26 +144,6 @@ export type WorkerResultContractStatus = (typeof WORKER_RESULT_STATUSES)[number]
 export const AGENT_BINDING_STATUSES = ["registered", "active", "suspended", "resuming", "retired"] as const;
 export type AgentBindingStatus = (typeof AGENT_BINDING_STATUSES)[number];
 
-export interface AgentResumeContext {
-	provider: "pi" | "external";
-	sessionId: string;
-	sessionDir?: string;
-	sessionFile?: string;
-	cwd: string;
-	worktreeLaneKey?: string;
-	orchestrationProfileId?: string;
-	resourceProfileNames: readonly string[];
-	modelRef?: string;
-	contextPointers: readonly ResourcePointer[];
-	latestCheckpointId?: string;
-}
-
-/** Provider-neutral logical identity shared by durable orchestration and process supervision. */
-export interface AgentIdentityContract {
-	agentId: string;
-	resumeContext: AgentResumeContext;
-}
-
 /** Durable logical identity. A replacement OS process resumes this same binding after interruption. */
 export interface AgentBindingContract extends AgentIdentityContract {
 	schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
@@ -222,31 +213,6 @@ export interface TaskContract {
 	riskBudget: RiskBudget;
 	createdAt: string;
 	updatedAt: string;
-}
-
-export const RESOURCE_POINTER_KINDS = [
-	"repository",
-	"worktree",
-	"artifact",
-	"evidence",
-	"memory-query",
-	"skill",
-	"prompt",
-	"service",
-] as const;
-export type ResourcePointerKind = (typeof RESOURCE_POINTER_KINDS)[number];
-
-export function isResourcePointerKind(value: unknown): value is ResourcePointerKind {
-	return RESOURCE_POINTER_KINDS.some((kind) => kind === value);
-}
-
-export interface ResourcePointer {
-	id: string;
-	kind: ResourcePointerKind;
-	uri: string;
-	readOnly: boolean;
-	digest?: string;
-	metadata?: JsonObject;
 }
 
 /** Bounded metadata-only resources retained in one worker execution contract. */

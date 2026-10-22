@@ -1,10 +1,8 @@
-import type { HarnessCapability } from "../capability-contract.ts";
+import type { JsonObject } from "../../kernel/utils/json-types.ts";
 
-export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
-export interface JsonObject {
-	[key: string]: JsonValue;
-}
+export type { JsonObject, JsonPrimitive, JsonValue } from "../../kernel/utils/json-types.ts";
+
+import type { HarnessCapability } from "../capability-contract.ts";
 
 export type ModelTier = "cheap" | "medium" | "expensive" | "learning";
 

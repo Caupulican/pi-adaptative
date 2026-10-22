@@ -45,6 +45,7 @@ import {
 	orchestrationSessionDeletionFile,
 	orchestrationSessionDir,
 	orchestrationSessionsDir,
+	workerConversationSessionsDir,
 } from "../kernel/session/session-bundle-paths.ts";
 import { sessionsDir, stateDir, stateFile } from "../kernel/storage/paths.ts";
 
@@ -55,6 +56,7 @@ export {
 	sessionsDir,
 	stateDir,
 	stateFile,
+	workerConversationSessionsDir,
 };
 
 import {
@@ -288,15 +290,6 @@ export function workerProjectSpecializationFile(agentDir: string, specialization
 /** `<orchestrationSessionDir>/events` -- append-only event tail, snapshot, cursor, and idempotency state. */
 export function orchestrationEventStoreDir(agentDir: string, parentSessionId: string): string {
 	return join(orchestrationSessionDir(agentDir, parentSessionId), "events");
-}
-
-/**
- * `<orchestrationSessionDir>/worker-conversations` -- durable Pi worker transcripts owned by one
- * foreground session. Worker conversations remain in SessionManager's established JSONL format,
- * but are intentionally outside the foreground session picker namespace.
- */
-export function workerConversationSessionsDir(agentDir: string, parentSessionId: string): string {
-	return join(orchestrationSessionDir(agentDir, parentSessionId), "worker-conversations");
 }
 
 /** `<orchestrationSessionDir>/worker-context-forks` -- immutable sanitized worker birth snapshots. */

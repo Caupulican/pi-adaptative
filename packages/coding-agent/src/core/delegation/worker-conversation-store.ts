@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
 import { existsSync, opendirSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AssistantMessageDiagnostic, Message, Usage } from "@caupulican/pi-ai";
 import {
@@ -18,6 +17,7 @@ import {
 	isWireNativeAgentMessageRole,
 } from "../../kernel/messages.ts";
 import { measureJsonStringUtf8Bytes } from "../../kernel/provider-request-estimator.ts";
+import { cloneResumeContext } from "../../kernel/session/agent-identity.ts";
 import { indexSessionLifecycle, type SessionLifecycleToolResult } from "../../kernel/session/lifecycle-ledger.ts";
 import { compactToolResultDetailsForRetention } from "../../kernel/session/message-retention.ts";
 import {
@@ -29,10 +29,24 @@ import {
 	SessionManager,
 	type SessionRequestSnapshotInput,
 } from "../../kernel/session/session-manager.ts";
+import {
+	assertExactConversationMetadata,
+	assertExactConversationMetadataValue,
+	MAX_WORKER_CONVERSATION_METADATA_BYTES,
+	readWorkerConversationMetadata,
+	type WorkerConversationMetadata,
+	writeWorkerConversationMetadata,
+} from "../../kernel/session/worker-conversation-metadata.ts";
+import {
+	assertWorkerConversationFile,
+	matchesWorkerTranscriptLocation,
+	workerConversationMetadataFile,
+	workerTranscriptLocation,
+} from "../../kernel/session/worker-storage-identity.ts";
 import { createToolFailureContextMemory } from "../../kernel/tool-failure-memory.ts";
 import type { AgentMessage, AgentMessageOrigin } from "../../kernel/types.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
-import { orchestrationSessionsDir, workerConversationSessionsDir } from "../agent-paths.ts";
+import { workerConversationSessionsDir } from "../agent-paths.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
 import {
 	usageDeltaFromProviderUsage,
@@ -63,10 +77,7 @@ import {
 	type SpecialistContextOwner,
 	type SpecialistContextOwnership,
 } from "../orchestration/specialist-context-ownership.ts";
-import {
-	normalizeWorkerContextForkReference,
-	type WorkerContextForkReference,
-} from "../orchestration/worker-context-fork-reference.ts";
+import type { WorkerContextForkReference } from "../orchestration/worker-context-fork-reference.ts";
 import { buildRequestSnapshotInput } from "../request-snapshot-fingerprints.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -94,13 +105,8 @@ import {
 	workerMailboxPath,
 } from "./worker-mailbox-record.ts";
 import { projectWorkerTranscriptForInspection } from "./worker-transcript-projection.ts";
-import {
-	encodeWorkerTranscriptReference,
-	parseWorkerTranscriptReference,
-	type WorkerTranscriptIdentity,
-} from "./worker-transcript-reference.ts";
+import { encodeWorkerTranscriptReference, parseWorkerTranscriptReference } from "./worker-transcript-reference.ts";
 
-const MAX_WORKER_CONVERSATION_METADATA_BYTES = 256 * 1024;
 const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
 const WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE = "worker-attempt-usage-boundary";
 const WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE = "worker-project-enrollment-v1";
@@ -161,11 +167,6 @@ interface OpenWorkerConversationOptions {
 	projectClaim?: SpecialistContextClaim;
 }
 
-interface WorkerProjectContext {
-	specializationKey: string;
-	ownership: SpecialistContextOwnership;
-}
-
 /**
  * Explicit, token-based retention for a durable worker transcript.
  *
@@ -205,17 +206,6 @@ interface WorkerConversationRetentionOutcome {
 	contextUsage: ReturnType<typeof estimateContextTokens>;
 	/** For a compaction: the context it started from, and what its summarizer spent. */
 	compacted?: { tokensBefore: number; usage?: Usage };
-}
-
-interface WorkerConversationMetadata {
-	logicalAgentId: string;
-	/** Present on current metadata; omitted only by conversations created before context forks. */
-	parentSessionId?: string;
-	resumeContext: AgentResumeContext;
-	birthContextForkReference?: WorkerContextForkReference;
-	/** Version 1 makes a missing current-attempt boundary authoritative zero usage. */
-	usageAccountingVersion?: 1;
-	projectContext?: WorkerProjectContext;
 }
 
 interface WorkerConversationMetadataState {
@@ -504,45 +494,6 @@ function workerMessageForPersistence(message: WorkerTranscriptMessage): WorkerTr
 	return persisted;
 }
 
-function stableWorkerSessionId(parentSessionId: string, logicalAgentId: string): string {
-	const normalizedAgentId = logicalAgentId.trim();
-	if (!normalizedAgentId) throw new TypeError("A logical worker agent id is required.");
-	const digest = createHash("sha256")
-		.update("pi-worker-conversation-v1")
-		.update("\0")
-		.update(parentSessionId)
-		.update("\0")
-		.update(normalizedAgentId)
-		.digest("hex")
-		.slice(0, 32);
-	return `worker-${digest}`;
-}
-
-function cloneResumeContext(context: AgentResumeContext): AgentResumeContext {
-	return structuredClone(context);
-}
-
-function workerTranscriptLocation(agentDir: string, identity: WorkerTranscriptIdentity) {
-	const sessionDir = workerConversationSessionsDir(agentDir, identity.parentSessionId);
-	const sessionId = stableWorkerSessionId(identity.parentSessionId, identity.logicalAgentId);
-	assertValidSessionId(sessionId);
-	return { sessionDir, sessionId, sessionFile: joinWorkerSessionFile(sessionDir, sessionId) };
-}
-
-function matchesWorkerTranscriptLocation(
-	context: AgentResumeContext,
-	location: ReturnType<typeof workerTranscriptLocation>,
-): boolean {
-	return (
-		context.provider === "pi" &&
-		context.sessionId === location.sessionId &&
-		typeof context.sessionFile === "string" &&
-		context.sessionFile.length > 0 &&
-		resolve(context.sessionFile) === resolve(location.sessionFile) &&
-		(context.sessionDir === undefined || resolve(context.sessionDir) === resolve(location.sessionDir))
-	);
-}
-
 function expectedResumeContext(options: CreateWorkerConversationOptions): AgentResumeContext {
 	const location = workerTranscriptLocation(options.agentDir, options);
 	if (!options.cwd.trim()) throw new TypeError("A worker conversation working directory is required.");
@@ -557,94 +508,11 @@ function expectedResumeContext(options: CreateWorkerConversationOptions): AgentR
 	};
 }
 
-interface WorkerConversationMetadataRead {
-	metadata: WorkerConversationMetadata;
-	content: string;
-}
-
 /** Immutable birth identity, separate from a claiming parent's local worker handle. */
 export interface WorkerProjectContextReference {
 	parentSessionId: string;
 	logicalAgentId: string;
 	resumeContext: AgentResumeContext;
-}
-
-function readWorkerConversationMetadata(metadataFile: string): WorkerConversationMetadataRead {
-	let content: string;
-	let metadata: unknown;
-	try {
-		content = readBoundedTextFileSync(
-			metadataFile,
-			MAX_WORKER_CONVERSATION_METADATA_BYTES,
-			"Worker conversation metadata durable size bound",
-		);
-		metadata = JSON.parse(content);
-	} catch {
-		throw new Error(
-			existsSync(metadataFile)
-				? "Worker conversation metadata is invalid or exceeds its durable size bound."
-				: "Worker conversation metadata is missing or invalid.",
-		);
-	}
-	if (!isPlainRecord(metadata)) {
-		throw new Error("Worker conversation metadata is invalid.");
-	}
-	let projectContext: WorkerProjectContext | undefined;
-	if ("format" in metadata) {
-		if (
-			metadata.format !== "worker-project-context-v1" ||
-			Object.keys(metadata).length !== 3 ||
-			!isPlainRecord(metadata.metadata) ||
-			!isPlainRecord(metadata.projectContext) ||
-			Object.keys(metadata.projectContext).length !== 2 ||
-			typeof metadata.projectContext.specializationKey !== "string" ||
-			!/^[a-f0-9]{64}$/.test(metadata.projectContext.specializationKey)
-		)
-			throw new Error("Worker project context metadata is invalid.");
-		projectContext = {
-			specializationKey: metadata.projectContext.specializationKey,
-			ownership: normalizeSpecialistContextOwnership(metadata.projectContext.ownership),
-		};
-		metadata = metadata.metadata;
-	}
-	const logicalAgentId = (metadata as { logicalAgentId?: unknown }).logicalAgentId;
-	const parentSessionId = (metadata as { parentSessionId?: unknown }).parentSessionId;
-	const resumeContext = (metadata as { resumeContext?: unknown }).resumeContext;
-	const birthContextForkReference = (metadata as { birthContextForkReference?: unknown }).birthContextForkReference;
-	const usageAccountingVersion = (metadata as { usageAccountingVersion?: unknown }).usageAccountingVersion;
-	if (
-		typeof logicalAgentId !== "string" ||
-		!logicalAgentId.trim() ||
-		(parentSessionId !== undefined &&
-			(typeof parentSessionId !== "string" || !parentSessionId.trim() || parentSessionId.length > 512)) ||
-		!resumeContext ||
-		(birthContextForkReference !== undefined && parentSessionId === undefined) ||
-		(usageAccountingVersion !== undefined && usageAccountingVersion !== 1)
-	) {
-		throw new Error("Worker conversation metadata is invalid.");
-	}
-	let normalizedBirthContextForkReference: WorkerContextForkReference | undefined;
-	try {
-		normalizedBirthContextForkReference =
-			birthContextForkReference === undefined
-				? undefined
-				: normalizeWorkerContextForkReference(birthContextForkReference);
-	} catch {
-		throw new Error("Worker conversation metadata is invalid.");
-	}
-	return {
-		content,
-		metadata: {
-			logicalAgentId,
-			...(typeof parentSessionId === "string" ? { parentSessionId } : {}),
-			resumeContext: cloneResumeContext(resumeContext as AgentResumeContext),
-			...(normalizedBirthContextForkReference
-				? { birthContextForkReference: normalizedBirthContextForkReference }
-				: {}),
-			...(usageAccountingVersion === 1 ? { usageAccountingVersion } : {}),
-			...(projectContext ? { projectContext } : {}),
-		},
-	};
 }
 
 function cloneWorkerConversationMetadataState(
@@ -688,44 +556,6 @@ function assertWorkerConversationUsageAccountingVersion(previous: 1 | undefined,
 	if (previous === 1 && next !== 1) {
 		throw new Error("Worker conversation usage accounting version cannot be downgraded.");
 	}
-}
-
-function assertExactConversationMetadataValue(
-	metadata: WorkerConversationMetadata,
-	expected: AgentResumeContext,
-	logicalAgentId?: string,
-	parentSessionId?: string,
-	birthContextForkReference?: WorkerContextForkReference,
-): WorkerConversationMetadata {
-	if (logicalAgentId && metadata.logicalAgentId !== logicalAgentId) {
-		throw new Error("Worker conversation logical agent identity conflicts with the persisted transcript.");
-	}
-	if (!sameAgentResumeIdentity(metadata.resumeContext, expected)) {
-		throw new Error("Worker conversation resume context conflicts with the persisted transcript.");
-	}
-	if (parentSessionId && metadata.parentSessionId && metadata.parentSessionId !== parentSessionId) {
-		throw new Error("Worker conversation parent session identity conflicts with the persisted transcript.");
-	}
-	if (birthContextForkReference && !isDeepStrictEqual(metadata.birthContextForkReference, birthContextForkReference)) {
-		throw new Error("Worker conversation birth context reference conflicts with the persisted transcript.");
-	}
-	return metadata;
-}
-
-function assertExactConversationMetadata(
-	metadataFile: string,
-	expected: AgentResumeContext,
-	logicalAgentId?: string,
-	parentSessionId?: string,
-	birthContextForkReference?: WorkerContextForkReference,
-): WorkerConversationMetadata {
-	return assertExactConversationMetadataValue(
-		readWorkerConversationMetadata(metadataFile).metadata,
-		expected,
-		logicalAgentId,
-		parentSessionId,
-		birthContextForkReference,
-	);
 }
 
 function assertStableExactConversationMetadata(
@@ -787,14 +617,6 @@ function assertWorkerConversationMetadataContent(
 		if (error instanceof WorkerConversationOwnershipError) throw error;
 		throw new WorkerConversationOwnershipError(errorMessage);
 	}
-}
-
-function writeWorkerConversationMetadata(metadataFile: string, metadata: WorkerConversationMetadata): void {
-	const { projectContext, ...identity } = metadata;
-	const encoded = projectContext
-		? { format: "worker-project-context-v1", metadata: identity, projectContext }
-		: identity;
-	writeFileAtomicSync(metadataFile, `${JSON.stringify(encoded)}\n`, { mode: 0o600 });
 }
 
 const projectEnrollmentIndices = new WeakMap<ReadonlySessionManager, { count: number; key?: string }>();
@@ -1009,27 +831,6 @@ function scanWorkerControlTranscript(
 		matchCounts.set(messageId, count);
 	});
 	return new Set(matchCounts.keys());
-}
-
-function assertWorkerConversationFile(agentDir: string, sessionFile: string, sessionId: string): string {
-	const workersRoot = resolve(orchestrationSessionsDir(agentDir));
-	const resolvedFile = resolve(sessionFile);
-	const fileRelativeToWorkersRoot = relative(workersRoot, resolvedFile);
-	if (
-		fileRelativeToWorkersRoot === "" ||
-		fileRelativeToWorkersRoot.startsWith("..") ||
-		isAbsolute(fileRelativeToWorkersRoot)
-	) {
-		throw new Error("Worker conversation session file must remain under the canonical worker sessions directory.");
-	}
-	const segments = fileRelativeToWorkersRoot.split(/[\\/]/);
-	if (segments.length !== 3 || segments[1] !== "worker-conversations") {
-		throw new Error("Worker conversation session file must remain under the canonical worker sessions directory.");
-	}
-	if (basename(resolvedFile) !== `${sessionId}.jsonl`) {
-		throw new Error("Worker conversation session file does not match its durable session id.");
-	}
-	return resolvedFile;
 }
 
 /**
@@ -2933,12 +2734,4 @@ export class WorkerConversationStore {
 			);
 		});
 	}
-}
-
-function joinWorkerSessionFile(sessionDir: string, sessionId: string): string {
-	return resolve(sessionDir, `${sessionId}.jsonl`);
-}
-
-function workerConversationMetadataFile(sessionFile: string): string {
-	return `${sessionFile}.worker.json`;
 }

@@ -1,5 +1,19 @@
 /** Persistent complete-view state machine for ICM's sawtooth compaction policy. */
 
+import {
+	CONTINUOUS_CHAT_CAUSAL_VIEW_HIGH_BYTES,
+	CONTINUOUS_CHAT_CAUSAL_VIEW_LOW_BYTES,
+	CONTINUOUS_CHAT_TURN_VIEW_HIGH_BYTES,
+	CONTINUOUS_CHAT_TURN_VIEW_LOW_BYTES,
+} from "../../kernel/session/continuous-chat-view-limits.ts";
+
+export {
+	CONTINUOUS_CHAT_CAUSAL_VIEW_HIGH_BYTES,
+	CONTINUOUS_CHAT_CAUSAL_VIEW_LOW_BYTES,
+	CONTINUOUS_CHAT_TURN_VIEW_HIGH_BYTES,
+	CONTINUOUS_CHAT_TURN_VIEW_LOW_BYTES,
+} from "../../kernel/session/continuous-chat-view-limits.ts";
+
 import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	CONTINUOUS_CHAT_NOT_MERGED,
@@ -15,11 +29,6 @@ import {
 } from "./continuous-chat-tree.ts";
 
 export const CONTINUOUS_CHAT_VIEW_SCHEMA_VERSION = 1;
-export const CONTINUOUS_CHAT_TURN_VIEW_LOW_BYTES = 64_000;
-export const CONTINUOUS_CHAT_TURN_VIEW_HIGH_BYTES = 128_000;
-export const CONTINUOUS_CHAT_CAUSAL_VIEW_LOW_BYTES = 16_000;
-export const CONTINUOUS_CHAT_CAUSAL_VIEW_HIGH_BYTES = 32_000;
-
 export type ContinuousChatViewKind = "turn" | "causal";
 
 export interface ContinuousChatViewEntry extends ContinuousChatNodeCoordinate {
