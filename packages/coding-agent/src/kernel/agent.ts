@@ -183,6 +183,9 @@ export interface AgentOptions {
 
 class PendingMessageQueue {
 	private messages: AgentMessage[] = [];
+	/** Drained occurrences belong to the run until their start event, or return when that run ends. */
+	private unstarted: Array<AgentMessage | undefined> = [];
+	private unstartedHead = 0;
 	public mode: QueueMode;
 
 	constructor(mode: QueueMode) {
@@ -203,20 +206,40 @@ class PendingMessageQueue {
 	}
 
 	drain(): AgentMessage[] {
-		if (this.mode === "all") {
-			const drained = this.messages.slice();
-			this.messages = [];
-			return drained;
-		}
-
-		const first = this.messages[0];
-		if (!first) {
-			return [];
-		}
-		this.messages = this.messages.slice(1);
-		return [first];
+		const drained = this.messages.splice(0, this.mode === "all" ? this.messages.length : 1);
+		for (const message of drained) this.unstarted.push(message);
+		return drained;
 	}
 
+	/** Consume exactly one retained occurrence before listeners can fail or mutate its history. */
+	noteStarted(message: AgentMessage): boolean {
+		const index = this.unstarted.indexOf(message, this.unstartedHead);
+		if (index === -1) return false;
+		this.unstarted[index] = undefined;
+		// Starts normally follow drain order. Advancing a cursor avoids shifting a whole batch per message.
+		while (this.unstartedHead < this.unstarted.length && this.unstarted[this.unstartedHead] === undefined)
+			this.unstartedHead++;
+		if (this.unstartedHead === this.unstarted.length) {
+			this.unstarted = [];
+			this.unstartedHead = 0;
+		}
+		return true;
+	}
+
+	/** Return only messages the ended run never started, ahead of anything queued since its drain. */
+	returnUnstarted(): void {
+		if (this.unstarted.length === 0) return;
+		const returned: AgentMessage[] = [];
+		for (let index = this.unstartedHead; index < this.unstarted.length; index++) {
+			const message = this.unstarted[index];
+			if (message !== undefined) returned.push(message);
+		}
+		this.messages = returned.concat(this.messages);
+		this.unstarted = [];
+		this.unstartedHead = 0;
+	}
+
+	/** Clear waiting input only: a drained batch is still owned by its active run. */
 	clear(): void {
 		this.messages = [];
 	}
@@ -817,11 +840,18 @@ export class Agent {
 	}
 
 	private finishRun(): void {
+		// Idempotent fallback if a failure prevented the terminal event from reaching its normal boundary.
+		this.returnUnstartedMessages();
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
 		this.activeRun?.resolve();
 		this.activeRun = undefined;
+	}
+
+	private returnUnstartedMessages(): void {
+		this.steeringQueue.returnUnstarted();
+		this.followUpQueue.returnUnstarted();
 	}
 
 	/**
@@ -832,9 +862,14 @@ export class Agent {
 	 * and `finishRun()` clears runtime-owned state.
 	 */
 	private async processEvents(event: AgentEvent): Promise<void> {
-		if (event.type === "agent_end") this.agentEndDelivered = true;
+		if (event.type === "agent_end") {
+			this.returnUnstartedMessages();
+			this.agentEndDelivered = true;
+		}
 		switch (event.type) {
 			case "message_start":
+				// A started message may already have effects when a listener fails. Only unstarted occurrences return.
+				if (!this.steeringQueue.noteStarted(event.message)) this.followUpQueue.noteStarted(event.message);
 				this._state.streamingMessage = event.message;
 				break;
 
