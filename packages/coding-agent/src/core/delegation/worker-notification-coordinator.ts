@@ -77,6 +77,11 @@ interface PendingWorkerNotification {
 	reportedInStatus?: boolean;
 }
 
+interface NotificationAlarm {
+	readonly purpose: "retry" | "handoff watchdog";
+	timer?: unknown;
+}
+
 export interface WorkerNotificationCoordinatorOptions {
 	/** The session's `worker-notification` port: the delivery retry backoff and the handoff observation watchdog. */
 	timers: TimerPort;
@@ -130,8 +135,8 @@ export class WorkerNotificationCoordinator {
 	private scheduled = false;
 	private disposed = false;
 	private deliveryTail = Promise.resolve();
-	private retryTimer: unknown;
-	private readonly handoffWatchdogs = new Set<unknown>();
+	private retryAlarm: NotificationAlarm | undefined;
+	private readonly alarms = new Set<NotificationAlarm>();
 	private retryCount = 0;
 
 	constructor(options: WorkerNotificationCoordinatorOptions) {
@@ -151,11 +156,12 @@ export class WorkerNotificationCoordinator {
 	 * simply has no entry, which `recordTerminal` treats as absent ownership, not a match.
 	 */
 	noteAttemptOwnerEpoch(attemptId: string, ownerEpoch: number): void {
+		if (this.disposed) return;
 		if (!this.attemptOwnerEpochs.has(attemptId)) this.attemptOwnerEpochs.set(attemptId, ownerEpoch);
 	}
 
 	recordTerminal(record: LaneRecord, durableNotificationId?: string): void {
-		if (record.status === "queued" || record.status === "running") return;
+		if (this.disposed || record.status === "queued" || record.status === "running") return;
 		const key = durableNotificationId ?? `transient:${workerTerminalGenerationIdentity(record)}`;
 		const inFlight = this.inFlight.get(key);
 		if (inFlight) {
@@ -200,6 +206,7 @@ export class WorkerNotificationCoordinator {
 		records: readonly Pick<LaneRecord, "laneId" | "status" | "completedAt" | "reasonCode" | "attemptId">[],
 		observedAt = new Date().toISOString(),
 	): void {
+		if (this.disposed) return;
 		const identities = new Set(records.map(workerTerminalGenerationIdentity));
 		for (const identity of identities) this.rememberObserved(identity, observedAt);
 		for (const notification of [...this.pending.values(), ...this.inFlight.values()]) {
@@ -226,32 +233,75 @@ export class WorkerNotificationCoordinator {
 	dispose(): void {
 		this.disposed = true;
 		this.scheduled = false;
-		if (this.retryTimer !== undefined) this.options.timers.clearTimeout(this.retryTimer);
-		this.retryTimer = undefined;
-		for (const watchdog of this.handoffWatchdogs) this.options.timers.clearTimeout(watchdog);
-		this.handoffWatchdogs.clear();
+		this.retryAlarm = undefined;
+		const alarms = [...this.alarms];
+		this.alarms.clear();
 		this.pending.clear();
 		this.inFlight.clear();
 		this.observedTerminals.clear();
 		this.attemptOwnerEpochs.clear();
+		for (const alarm of alarms) this.clearTimerBestEffort(alarm.timer, alarm.purpose);
 	}
 
 	private schedule(): void {
 		if (this.disposed || this.scheduled) return;
-		if (this.retryTimer !== undefined) this.options.timers.clearTimeout(this.retryTimer);
-		this.retryTimer = undefined;
 		this.scheduled = true;
+		const retryAlarm = this.retryAlarm;
+		this.retryAlarm = undefined;
+		this.disarmAlarm(retryAlarm);
 		queueMicrotask(() => this.flush());
 	}
 
 	private scheduleRetry(): void {
-		if (this.disposed || this.scheduled || this.retryTimer !== undefined) return;
+		if (this.disposed || this.scheduled || this.retryAlarm !== undefined) return;
 		const delayMs = Math.min(100 * 2 ** Math.min(this.retryCount, 5), 5_000);
 		this.retryCount++;
-		this.retryTimer = this.options.timers.setTimeout(() => {
-			this.retryTimer = undefined;
+		const alarm: NotificationAlarm = { purpose: "retry" };
+		this.retryAlarm = alarm;
+		const armed = this.armAlarm(alarm, delayMs, () => {
+			if (this.retryAlarm !== alarm) return;
+			this.retryAlarm = undefined;
 			this.schedule();
-		}, delayMs);
+		});
+		if (!armed && this.retryAlarm === alarm) this.retryAlarm = undefined;
+	}
+
+	/** Timer adapters cannot change delivery outcomes or reject the serialized delivery tail. */
+	private armAlarm(alarm: NotificationAlarm, delayMs: number, onFire: () => void): boolean {
+		this.alarms.add(alarm);
+		try {
+			const timer = this.options.timers.setTimeout(() => {
+				if (!this.alarms.delete(alarm) || this.disposed) return;
+				onFire();
+			}, delayMs);
+			if (this.alarms.has(alarm)) {
+				alarm.timer = timer;
+				return true;
+			}
+			// An injected adapter can fire or dispose this owner before returning the handle.
+			this.clearTimerBestEffort(timer, alarm.purpose);
+		} catch (error) {
+			this.alarms.delete(alarm);
+			this.warnBestEffort(
+				`Background worker ${alarm.purpose} timer could not be armed: ${error instanceof Error ? error.message : String(error)}. Pending handoffs remain available to the next notification event or session recovery.`,
+			);
+		}
+		return false;
+	}
+
+	private disarmAlarm(alarm: NotificationAlarm | undefined): void {
+		if (!alarm || !this.alarms.delete(alarm)) return;
+		this.clearTimerBestEffort(alarm.timer, alarm.purpose);
+	}
+
+	private clearTimerBestEffort(timer: unknown, purpose: NotificationAlarm["purpose"]): void {
+		try {
+			this.options.timers.clearTimeout(timer);
+		} catch (error) {
+			this.warnBestEffort(
+				`Background worker ${purpose} timer could not be cleared; its callback is inactive: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	private warnBestEffort(message: string): void {
@@ -265,22 +315,16 @@ export class WorkerNotificationCoordinator {
 	/**
 	 * Observe-only: warns once if the in-flight notify() call has not settled after
 	 * HANDOFF_WATCHDOG_MS. Never re-dispatches and never creates a second notify() consumer —
-	 * callers must clear() it once the awaited notify() settles, success or failure.
+	 * callers disarm it once the awaited notify() settles, success or failure.
 	 */
-	private startHandoffWatchdog(laneIds: readonly string[]): { clear(): void } {
-		const timer: unknown = this.options.timers.setTimeout(() => {
-			this.handoffWatchdogs.delete(timer);
+	private startHandoffWatchdog(laneIds: readonly string[]): NotificationAlarm {
+		const alarm: NotificationAlarm = { purpose: "handoff watchdog" };
+		this.armAlarm(alarm, HANDOFF_WATCHDOG_MS, () => {
 			this.warnBestEffort(
 				`Background worker handoff has not settled after ${HANDOFF_WATCHDOG_MS}ms for lane(s): ${laneIds.join(", ")}. Observation only; no redispatch will occur.`,
 			);
-		}, HANDOFF_WATCHDOG_MS);
-		this.handoffWatchdogs.add(timer);
-		return {
-			clear: () => {
-				this.options.timers.clearTimeout(timer);
-				this.handoffWatchdogs.delete(timer);
-			},
-		};
+		});
+		return alarm;
 	}
 
 	private flush(): void {
@@ -296,6 +340,7 @@ export class WorkerNotificationCoordinator {
 				`Background worker status projection failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+		if (this.disposed) return;
 		const queued = workerRecords.filter((record) => record.status === "queued").length;
 		const running = workerRecords.filter((record) => record.status === "running").length;
 		// Delivery retries the whole batch; the status event reports only terminals no earlier event counted.
@@ -304,6 +349,7 @@ export class WorkerNotificationCoordinator {
 			.filter((notification) => !notification.reportedInStatus)
 			.map((notification) => notification.record);
 		for (const notification of batch) {
+			if (this.disposed) return;
 			if (notification.durableNotificationId) continue;
 			try {
 				notification.durableNotificationId = this.options.ensureDurableNotification?.(notification.record);
@@ -315,6 +361,7 @@ export class WorkerNotificationCoordinator {
 				);
 			}
 		}
+		if (this.disposed) return;
 		const status = {
 			active: queued + running,
 			queued,
@@ -332,6 +379,7 @@ export class WorkerNotificationCoordinator {
 				`Background worker status observer failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+		if (this.disposed) return;
 		for (const notification of batch) notification.reportedInStatus = true;
 		if (batch.length === 0) return;
 		// Moved into `inFlight`, not merely captured by the closure below: if notify() never
@@ -346,9 +394,10 @@ export class WorkerNotificationCoordinator {
 			// Explicit rejection remains retryable; process restart replays the durable pending record.
 			const watchdog = this.startHandoffWatchdog(batchRecords.map((record) => record.laneId));
 			try {
+				if (this.disposed) return;
 				await this.options.notify(batchRecords);
 			} finally {
-				watchdog.clear();
+				this.disarmAlarm(watchdog);
 			}
 			// Disposal clears the process-local outbox but deliberately leaves its durable receipt
 			// pending for the next session owner. A late notifier must not write through the retired
