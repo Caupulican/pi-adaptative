@@ -79,6 +79,7 @@ import {
 	type ReflectionTurnAnalysis,
 } from "./learning/reflection-turn-analysis.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
+import { MemoryMutationOutcomeError } from "./memory/memory-mutation-outcome.ts";
 import type {
 	StructuredReflectionApplyResult,
 	StructuredReflectionRollback,
@@ -514,8 +515,10 @@ function hasStrictSuccessfulAssistantTerminal(messages: AgentMessage[]): boolean
 
 interface ReflectionApplyResult {
 	applied: boolean;
-	rollback?: LearningAuditRecord["rollback"];
+	/** Null explicitly prohibits the generic rollback fallback for incomplete effects. */
+	rollback?: LearningAuditRecord["rollback"] | null;
 	partial?: boolean;
+	outcomeUnknown?: boolean;
 	detail?: string;
 }
 
@@ -1465,12 +1468,21 @@ export class ReflectionController {
 		const commit = (report: UserPreferenceCommitReport): void => {
 			if (published) return;
 			published = true;
-			this.writes.settle(
-				ticket,
-				report.persisted
-					? audit("apply", decision.reasonCode, true)
-					: audit("apply_failed", APPLY_WRITE_REFUSED_REASON_CODE, false),
-			);
+			const record = report.persisted
+				? audit("apply", decision.reasonCode, true)
+				: audit(
+						"apply_failed",
+						report.outcome === "unknown"
+							? "outcome_unknown"
+							: report.outcome === "partial"
+								? "partial_apply"
+								: APPLY_WRITE_REFUSED_REASON_CODE,
+						false,
+					);
+			if (!report.persisted && report.outcome) {
+				record.summary = `${record.summary} — ${report.error.slice(0, 600)}`;
+			}
+			this.writes.settle(ticket, record);
 			observeDecision();
 		};
 		return { outcome: "apply", metadata, reasonCode: decision.reasonCode, commit };
@@ -2084,11 +2096,13 @@ export class ReflectionController {
 						: "propose";
 			const storedReasonCode = skillPromotionBlock
 				? skillPromotionBlock.reasonCode
-				: writeFailed
-					? APPLY_WRITE_REFUSED_REASON_CODE
+				: applyResult.outcomeUnknown
+					? "outcome_unknown"
 					: applyResult.partial
 						? "partial_apply"
-						: decision.reasonCode;
+						: writeFailed
+							? APPLY_WRITE_REFUSED_REASON_CODE
+							: decision.reasonCode;
 			if (ticket) {
 				this.writes.settle(ticket, {
 					...audit,
@@ -2100,8 +2114,10 @@ export class ReflectionController {
 					// A rollback needs a confirmed applied result. Failed multi-step writes can still
 					// require inspection; a refusal is not authority to invent a successful inverse.
 					rollback:
-						decision.kind === "apply" && !skillPromotionBlock && !writeFailed
-							? (applyResult.rollback ?? plannedRollback)
+						decision.kind === "apply" && !skillPromotionBlock && !writeFailed && applyResult.rollback !== null
+							? applyResult.rollback === undefined
+								? plannedRollback
+								: applyResult.rollback
 							: undefined,
 					createdAt: new Date().toISOString(),
 				});
@@ -2224,7 +2240,8 @@ export class ReflectionController {
 		// False or thrown results may follow partial effects and remain inspection-required.
 		switch (rollback.kind) {
 			case "memory_remove": {
-				if (!(await this._applyReflectionWrite({ kind: "memory_remove", target: rollback.target })).applied) {
+				const result = await this._applyReflectionWrite({ kind: "memory_remove", target: rollback.target });
+				if (!result.applied || result.partial || result.outcomeUnknown) {
 					return { ok: false, reason: "rollback_apply_failed" };
 				}
 				break;
@@ -2235,7 +2252,8 @@ export class ReflectionController {
 					target: rollback.target,
 					text: rollback.previous,
 				});
-				if (!applied.applied) return { ok: false, reason: "rollback_apply_failed" };
+				if (!applied.applied || applied.partial || applied.outcomeUnknown)
+					return { ok: false, reason: "rollback_apply_failed" };
 				break;
 			}
 			case "memory_add": {
@@ -2248,7 +2266,8 @@ export class ReflectionController {
 					undefined,
 					true,
 				);
-				if (!applied.applied) return { ok: false, reason: "rollback_apply_failed" };
+				if (!applied.applied || applied.partial || applied.outcomeUnknown)
+					return { ok: false, reason: "rollback_apply_failed" };
 				break;
 			}
 			case "okf_remove":
@@ -2336,6 +2355,14 @@ export class ReflectionController {
 		if (write.kind === "okf_add" || write.kind === "okf_organize") {
 			try {
 				const result = await this.deps.applyStructuredReflectionWrite(write, signal);
+				if (result.outcomeUnknown)
+					return {
+						applied: result.applied,
+						partial: true,
+						outcomeUnknown: true,
+						rollback: null,
+						detail: result.error,
+					};
 				if (!result.applied || result.digest === undefined) return { applied: false };
 				if (result.warning) this.warnOnce(`structured-write-${result.digest}`, result.warning);
 				return {
@@ -2360,12 +2387,26 @@ export class ReflectionController {
 										"Restore the exact hot-memory source first, then remove only the OKF record created by this reflection.",
 								},
 				};
-			} catch {
-				return { applied: false };
+			} catch (error) {
+				return { applied: false, partial: true, outcomeUnknown: true, rollback: null, detail: String(error) };
 			}
 		}
 
-		type MemResult = { details?: { success?: boolean; error?: string; warning?: string } };
+		type MemResult = {
+			details?: { success?: boolean; error?: string; warning?: string; partial?: boolean; outcomeUnknown?: boolean };
+		};
+		const incomplete = (details: NonNullable<MemResult["details"]>): ReflectionApplyResult => ({
+			applied: false,
+			partial: true,
+			outcomeUnknown: details.outcomeUnknown === true,
+			rollback: null,
+			detail: details.error,
+		});
+		const incompleteError = (error: unknown): ReflectionApplyResult =>
+			incomplete({
+				error: String(error),
+				outcomeUnknown: !(error instanceof MemoryMutationOutcomeError) || error.outcome === "unknown",
+			});
 		type MemExec = (
 			toolCallId: string,
 			params: {
@@ -2408,10 +2449,10 @@ export class ReflectionController {
 					content: write.text,
 					basis: explicit ? "explicit" : "inferred",
 				});
+				if (res.details?.partial || res.details?.outcomeUnknown) return incomplete(res.details);
 				return { applied: res?.details?.success === true };
-			} catch {
-				// best-effort; reflection writes must never throw into the turn loop
-				return { applied: false };
+			} catch (error) {
+				return incompleteError(error);
 			}
 		}
 
@@ -2447,6 +2488,7 @@ export class ReflectionController {
 								basis,
 							};
 				const res = await run(params);
+				if (res.details?.partial || res.details?.outcomeUnknown) return incomplete(res.details);
 				if (res?.details?.success === true) {
 					return {
 						applied: true,
@@ -2466,8 +2508,9 @@ export class ReflectionController {
 				}
 				if (!/not found/i.test(String(res?.details?.error ?? ""))) return { applied: false }; // real failure
 				// substring simply absent from this file — try the next target
-			} catch {
-				// defensive: if the tool ever does throw, try the next target
+			} catch (error) {
+				// An exception is not proof of absence; never mutate a second target after it.
+				return incompleteError(error);
 			}
 		}
 		return { applied: false };

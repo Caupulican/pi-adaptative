@@ -223,7 +223,9 @@ export interface UserPreferenceAdmissionRequest {
 }
 
 /** What the storage owner reports back once the admitted write reached its terminal outcome. */
-export type UserPreferenceCommitReport = { persisted: true } | { persisted: false; error: string };
+export type UserPreferenceCommitReport =
+	| { persisted: true }
+	| { persisted: false; error: string; outcome?: "partial" | "unknown"; storageChanged?: boolean };
 
 export type UserPreferenceAdmissionResult =
 	| {

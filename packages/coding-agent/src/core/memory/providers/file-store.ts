@@ -39,6 +39,7 @@ import {
 	memoryFailure,
 } from "../history-tool.ts";
 import { MemoryMutationAdmission } from "../memory-mutation-admission.ts";
+import { MemoryMutationOutcomeError, memoryMutationFailureDetails } from "../memory-mutation-outcome.ts";
 import type { MemoryLifecycleContext } from "../memory-provider.ts";
 import { OkfProjectMemoryStore } from "../okf-project-memory-store.ts";
 import {
@@ -289,6 +290,7 @@ export interface StructuredReflectionApplyResult {
 	digest?: string;
 	sourceRemoved?: boolean;
 	sourceTarget?: HotMemoryTarget;
+	outcomeUnknown?: boolean;
 	error?: string;
 	warning?: string;
 }
@@ -301,6 +303,14 @@ export interface StructuredReflectionRollback {
 	/** Where `sourceText` came from; absent means the general file (records written before project memory). */
 	sourceTarget?: HotMemoryTarget;
 	removeRecord: boolean;
+}
+
+interface HotMemoryRemovalResult {
+	success: boolean;
+	target?: HotMemoryTarget;
+	error?: string;
+	warning?: string;
+	outcomeUnknown?: boolean;
 }
 
 /**
@@ -541,9 +551,11 @@ async function commitManagedMemoryContent(
 		pendingDigest: newDigest,
 		...(managedState.committedContent !== undefined ? { committedContent: managedState.committedContent } : {}),
 	};
+	let contentCommitted = false;
 	try {
 		await writeManagedMemoryState(statePath, pending, () => admission.begin());
 		await writeFileAtomic(filePath, newContent, { mode: 0o600 });
+		contentCommitted = true;
 		await writeManagedMemoryState(statePath, {
 			version: 1,
 			committedDigest: newDigest,
@@ -568,9 +580,10 @@ async function commitManagedMemoryContent(
 					cause: error,
 				});
 		} catch (inspectionError) {
-			throw new AggregateError(
-				[error, inspectionError],
-				"Memory commit could not be reconciled; content may have changed",
+			throw new MemoryMutationOutcomeError(
+				new AggregateError([error, inspectionError], "Memory commit could not be reconciled"),
+				"unknown",
+				contentCommitted,
 			);
 		}
 		throw error;
@@ -1345,10 +1358,7 @@ export class FileStoreProvider implements MemoryProvider {
 	}
 
 	/** Removes the exact item from the first hot file that holds it and names that file. */
-	private async removeExactHotMemoryItem(
-		sourceText: string,
-		signal?: AbortSignal,
-	): Promise<{ success: boolean; target?: HotMemoryTarget; error?: string; warning?: string }> {
+	private async removeExactHotMemoryItem(sourceText: string, signal?: AbortSignal): Promise<HotMemoryRemovalResult> {
 		let lastError: string | undefined;
 		for (const file of this.hotMemoryFiles()) {
 			const removed = await this.removeExactHotMemoryItemFrom(file, sourceText, signal);
@@ -1364,7 +1374,7 @@ export class FileStoreProvider implements MemoryProvider {
 		file: { target: HotMemoryTarget; filePath: string; statePath: string },
 		sourceText: string,
 		signal?: AbortSignal,
-	): Promise<{ success: boolean; error?: string; warning?: string }> {
+	): Promise<HotMemoryRemovalResult> {
 		const admission = new MemoryMutationAdmission(signal);
 		try {
 			return await withFileLock(file.filePath, async () => {
@@ -1388,7 +1398,11 @@ export class FileStoreProvider implements MemoryProvider {
 				return { success: true, ...(warning ? { warning } : {}) };
 			});
 		} catch (error) {
-			return { success: false, error: String(error) };
+			return {
+				success: false,
+				error: String(error),
+				...(error instanceof MemoryMutationOutcomeError ? { outcomeUnknown: true } : {}),
+			};
 		}
 	}
 
@@ -1415,6 +1429,7 @@ export class FileStoreProvider implements MemoryProvider {
 				kind: "applied";
 				userContent: string;
 				archiveChanged: boolean;
+				storageChanged: boolean;
 				preference: UserPreferenceMetadata | undefined;
 				/** The admission owner's publication boundary; called once with the terminal result. */
 				commit: ((report: UserPreferenceCommitReport) => void) | undefined;
@@ -1557,13 +1572,24 @@ export class FileStoreProvider implements MemoryProvider {
 				input.mutationAdmission,
 			);
 		} catch (error) {
-			admission.commit?.({ persisted: false, error: String(error) });
+			admission.commit?.({
+				persisted: false,
+				error: String(error),
+				...(error instanceof MemoryMutationOutcomeError
+					? { outcome: error.outcome, storageChanged: error.storageChanged }
+					: {}),
+			});
+			if (error instanceof MemoryMutationOutcomeError) {
+				await this.refreshArchivedUserLines();
+				this.notifyDurableMemoryChanged();
+			}
 			throw error;
 		}
 		return {
 			kind: "applied",
 			userContent: result.userContent,
 			archiveChanged: result.archiveChanged,
+			storageChanged: result.storageChanged,
 			preference: action === "remove" ? undefined : admission.metadata,
 			commit: admission.commit,
 		};
@@ -1626,6 +1652,7 @@ export class FileStoreProvider implements MemoryProvider {
 			created,
 			...(storedDigest ? { digest: storedDigest } : {}),
 			sourceRemoved,
+			...(removed.outcomeUnknown ? { outcomeUnknown: true } : {}),
 			...(removed.target ? { sourceTarget: removed.target } : {}),
 			...(added.details.warning || removed.warning
 				? { warning: [added.details.warning, removed.warning].filter(Boolean).join(" ") }
@@ -1948,6 +1975,7 @@ export class FileStoreProvider implements MemoryProvider {
 					// The admitted USER write's publication boundary: reported once, after the bytes landed
 					// or the write failed, so the learning audit never claims an apply that did not persist.
 					let pendingCommit: ((report: UserPreferenceCommitReport) => void) | undefined;
+					let archiveEffects = false;
 					const mutationAdmission = new MemoryMutationAdmission(signal);
 					// A hint, never a reroute: the model decides, the harness names the better target.
 					const projectHint =
@@ -2023,6 +2051,7 @@ export class FileStoreProvider implements MemoryProvider {
 								});
 								if (outcome.kind === "refused") return outcome.result;
 								pendingCommit = outcome.commit;
+								archiveEffects = outcome.storageChanged;
 								newContent = outcome.userContent;
 								archiveChanged = outcome.archiveChanged;
 								if (archiveChanged) await this.refreshArchivedUserLines();
@@ -2063,6 +2092,7 @@ export class FileStoreProvider implements MemoryProvider {
 								overBudget &&
 								Buffer.byteLength(newContent, "utf8") >= Buffer.byteLength(currentOnDisk, "utf8")
 							) {
+								if (archiveEffects) throw new Error("Resource overflow after archive changes");
 								pendingCommit?.({ persisted: false, error: "Resource overflow" });
 								pendingCommit = undefined;
 								return memoryFailure(
@@ -2124,9 +2154,28 @@ export class FileStoreProvider implements MemoryProvider {
 							};
 						});
 					} catch (err) {
-						pendingCommit?.({ persisted: false, error: String(err) });
+						const error = archiveEffects
+							? new MemoryMutationOutcomeError(
+									err,
+									err instanceof MemoryMutationOutcomeError ? err.outcome : "partial",
+									true,
+									err instanceof MemoryMutationOutcomeError ? err.evidence : [],
+								)
+							: err;
+						pendingCommit?.({
+							persisted: false,
+							error: String(error),
+							...(error instanceof MemoryMutationOutcomeError
+								? { outcome: error.outcome, storageChanged: error.storageChanged }
+								: {}),
+						});
 						pendingCommit = undefined;
-						return memoryFailure(String(err), `Error: Failed to perform memory operation: ${String(err)}`);
+						if (error instanceof MemoryMutationOutcomeError) this.notifyDurableMemoryChanged();
+						return memoryFailure(
+							String(error),
+							`Error: Failed to perform memory operation: ${String(error)}`,
+							memoryMutationFailureDetails(error),
+						);
 					}
 				},
 			},

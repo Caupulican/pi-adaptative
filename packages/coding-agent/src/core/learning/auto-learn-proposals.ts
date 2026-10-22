@@ -288,7 +288,7 @@ function outcomeFromGate(outcome: GatedWriteOutcome): AutoLearnEntryOutcome {
 		case "propose":
 			return "proposed";
 		case "apply_failed":
-			return "failed";
+			return outcome.partial ? "partial" : "failed";
 		default:
 			return "ineligible";
 	}

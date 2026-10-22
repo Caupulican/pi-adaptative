@@ -42,7 +42,8 @@ export interface LearningRollbackPlan {
 
 // "apply_failed" is distinct from "apply": the gate decided to apply, but the underlying write tool
 // (e.g. the memory tool) refused it (budget exceeded, drift, threat) without throwing. It must never
-// be treated as "apply" by a rollback-eligibility check — there is nothing durable to undo.
+// be treated as "apply" by a rollback-eligibility check. A partial_apply/outcome_unknown reason
+// retains possible or confirmed storage effects without claiming that the requested write completed.
 export type LearningAuditAction = "apply" | "apply_failed" | "propose" | "rollback";
 
 /** reasonCode for an "apply_failed" audit — distinct from the gate's own reasonCode (e.g.

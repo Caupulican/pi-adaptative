@@ -7,6 +7,7 @@ import { hasInvisibleUnicode, scanContextFileThreats } from "../../security/cont
 import { isMissingFileError, writeFileAtomic } from "../../util/atomic-file.ts";
 import { readBoundedTextFile } from "../../util/bounded-file.ts";
 import { MemoryMutationAdmission } from "../memory-mutation-admission.ts";
+import { type MemoryMutationEvidence, MemoryMutationOutcomeError } from "../memory-mutation-outcome.ts";
 import { collectUserPreferenceEntries } from "../user-preference-metadata.ts";
 
 const ARCHIVE_DIR_NAME = "user-preferences";
@@ -32,6 +33,7 @@ export type UserMemoryAction =
 export interface UserMemoryMutationResult {
 	userContent: string;
 	archiveChanged: boolean;
+	storageChanged: boolean;
 }
 
 interface UserPreferenceShard {
@@ -49,7 +51,7 @@ interface ArchiveFileChange {
 	after: string | null;
 }
 
-interface ArchiveMutationPlan extends UserMemoryMutationResult {
+interface ArchiveMutationPlan extends Omit<UserMemoryMutationResult, "storageChanged"> {
 	shards: ArchiveFileChange[];
 	index?: ArchiveFileChange;
 }
@@ -119,22 +121,59 @@ export class UserMemoryArchive {
 		admission.assertPending();
 		const plan = await this.prepare(currentUser, action, budget, supersedeNearDuplicate);
 		admission.assertPending();
-		for (const change of [...plan.shards, ...(plan.index ? [plan.index] : [])]) {
-			const current = await this.readOptional(change.path);
-			if (current !== change.before) throw new Error(`User archive changed after preparation: ${change.path}.`);
-			if (change.after === null) {
-				admission.begin();
-				await fs.unlink(change.path);
-			} else {
-				await writeFileAtomic(change.path, change.after, {
-					mode: 0o600,
-					// A derived index refresh must not admit the pending outer USER mutation.
-					beforeCommit: () => (change === plan.index ? admission.assertPending() : admission.begin()),
-				});
+		const changes = [...plan.shards, ...(plan.index ? [plan.index] : [])];
+		const attempted = new Set<string>();
+		const completed = new Set<string>();
+		try {
+			for (const change of changes) {
+				const current = await this.readOptional(change.path);
+				if (current !== change.before) throw new Error(`User archive changed after preparation: ${change.path}.`);
+				if (change.after === null) {
+					admission.begin();
+					attempted.add(change.path);
+					await fs.unlink(change.path);
+				} else {
+					await writeFileAtomic(change.path, change.after, {
+						mode: 0o600,
+						// A derived index refresh must not admit the pending outer USER mutation.
+						beforeCommit: () => {
+							if (change === plan.index) admission.assertPending();
+							else admission.begin();
+							attempted.add(change.path);
+						},
+					});
+				}
+				completed.add(change.path);
 			}
+			admission.assertPending();
+			return {
+				userContent: plan.userContent,
+				archiveChanged: plan.archiveChanged,
+				storageChanged: completed.size > 0,
+			};
+		} catch (error) {
+			const evidence: MemoryMutationEvidence[] = [];
+			let changed = completed.size > 0;
+			let unknown = false;
+			for (const change of changes) {
+				const wasAttempted = attempted.has(change.path);
+				let state: MemoryMutationEvidence["state"] = "unknown";
+				try {
+					const actual = await this.readOptional(change.path);
+					if (actual === change.before) state = "before";
+					else if (wasAttempted && actual === change.after) {
+						state = "after";
+						changed = true;
+					}
+				} catch {
+					// Unknown evidence never becomes absence or a successful commit.
+				}
+				if (state === "unknown") unknown = true;
+				evidence.push({ path: change.path, state, attempted: wasAttempted });
+			}
+			if (!changed && !unknown) throw error;
+			throw new MemoryMutationOutcomeError(error, unknown ? "unknown" : "partial", changed, evidence);
 		}
-		admission.assertPending();
-		return { userContent: plan.userContent, archiveChanged: plan.archiveChanged };
 	}
 
 	/**
