@@ -898,6 +898,19 @@ export class VirtualFileSystem {
 		this.fault({ kind: "rename", path: from, destination: to }, "after");
 	}
 
+	/** A hard link is a second path to the same node: shared bytes, identity and link count. */
+	linkSync(existing: unknown, created: unknown): void {
+		const from = this.path(existing, "link");
+		const to = this.path(created, "link");
+		const node = this.nodes.get(from);
+		if (!node || !this.nodes.has(dirname(to))) throw this.failure("link", "ENOENT", from, "link", to);
+		if (node.kind === "directory") throw this.failure("link", "EPERM", from, "link", to);
+		if (this.nodes.has(to)) throw this.failure("link", "EEXIST", to, "link", from);
+		this.nodes.set(to, node);
+		this.log({ kind: "link", path: from, destination: to });
+		this.note("change", to);
+	}
+
 	copyFileSync(source: unknown, destination: unknown, flags = 0): void {
 		const from = this.realpathSync(source, "copyfile", "copy");
 		const to = this.path(destination, "copyfile");
@@ -1109,6 +1122,7 @@ export class VirtualFileSystem {
 			rmdirSync: (path: unknown) => this.rmSync(path, undefined, "rmdir"),
 			renameSync: (from: unknown, to: unknown) => this.renameSync(from, to),
 			copyFileSync: (from: unknown, to: unknown, flags?: number) => this.copyFileSync(from, to, flags),
+			linkSync: (existing: unknown, created: unknown) => this.linkSync(existing, created),
 			truncateSync: (path: unknown, length = 0) => this.truncateSync(path, Number(length)),
 			ftruncateSync: (fd: unknown, length = 0) => this.truncateSync(fd, Number(length)),
 			chmodSync: (path: unknown) => {
