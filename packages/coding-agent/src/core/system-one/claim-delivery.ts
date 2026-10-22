@@ -41,6 +41,22 @@ export interface ClaimReceipts {
 	readonly succeededToolCalls: number;
 }
 
+export type ClaimReceiptEvent =
+	| { readonly kind: "message"; readonly message: AgentMessage }
+	| { readonly kind: "worker"; readonly entryId: string; readonly receipts: ClaimReceipts };
+
+function emptyClaimReceipts() {
+	return {
+		tests: { passed: 0, failed: 0, lastPassed: undefined as boolean | undefined },
+		commits: { succeeded: 0, failed: 0 },
+		pushes: { succeeded: 0, failed: 0 },
+		publishes: { succeeded: 0, failed: 0 },
+		filesChanged: [] as string[],
+		toolCalls: 0,
+		succeededToolCalls: 0,
+	};
+}
+
 export type ClaimKind = "tests_pass" | "committed" | "pushed" | "published" | "files_changed";
 
 export interface ClaimFinding {
@@ -76,18 +92,34 @@ export function collectClaimReceipts(
 	turnMessages: readonly AgentMessage[],
 	verifiedChecks: readonly WorkerCommandReceipt[] = [],
 ): ClaimReceipts {
+	return collectClaimReceiptEvents(
+		turnMessages.map((message) => ({ kind: "message", message })),
+		verifiedChecks,
+	);
+}
+
+/** One stateful fold: a worker record does not interrupt an outstanding root tool call. */
+export function collectClaimReceiptEvents(
+	events: readonly ClaimReceiptEvent[],
+	verifiedChecks: readonly WorkerCommandReceipt[] = [],
+): ClaimReceipts {
 	const calls = new Map<string, ToolCall | undefined>();
 	const seenRequests = new Map<string, Set<string>>();
+	const seenWorkerEntries = new Set<string>();
+	const segments: ClaimReceipts[] = [];
 	const checks = new Map<string, WorkerCommandReceipt | undefined>();
 	for (const check of verifiedChecks) checks.set(check.id, checks.has(check.id) ? undefined : check);
-	const tests = { passed: 0, failed: 0, lastPassed: undefined as boolean | undefined };
-	const commits = { succeeded: 0, failed: 0 };
-	const pushes = { succeeded: 0, failed: 0 };
-	const publishes = { succeeded: 0, failed: 0 };
-	const filesChanged: string[] = [];
-	let toolCalls = 0;
-	let succeededToolCalls = 0;
-	for (const message of turnMessages) {
+	let totals = emptyClaimReceipts();
+	for (const event of events) {
+		if (event.kind === "worker") {
+			if (seenWorkerEntries.has(event.entryId)) continue;
+			seenWorkerEntries.add(event.entryId);
+			segments.push(totals, event.receipts);
+			totals = emptyClaimReceipts();
+			continue;
+		}
+		const message = event.message;
+		const { tests, commits, pushes, publishes, filesChanged } = totals;
 		if (message.role === "assistant") {
 			// Provider call IDs belong to this assistant request, never to later requests.
 			calls.clear();
@@ -118,8 +150,8 @@ export function collectClaimReceipts(
 			seenRequests.set(invocation.requestId, seen);
 		}
 		const ok = invocation ? invocation.operationStatus === "success" : !result.isError;
-		toolCalls += 1;
-		if (ok) succeededToolCalls += 1;
+		totals.toolCalls += 1;
+		if (ok) totals.succeededToolCalls += 1;
 		const record = retainedVerificationDetails(result.details)?.piVerification;
 		let checkPassed: boolean | undefined;
 		if (record?.evidence === "tests" && record.outcome === "executed") {
@@ -163,7 +195,7 @@ export function collectClaimReceipts(
 			if (typeof path === "string" && !filesChanged.includes(path)) filesChanged.push(path);
 		}
 	}
-	return { tests, commits, pushes, publishes, filesChanged, toolCalls, succeededToolCalls };
+	return segments.length > 0 ? mergeClaimReceipts([...segments, totals]) : totals;
 }
 
 /** Fold cited checks at their actual transcript positions; each invocation contributes once. */
@@ -335,7 +367,7 @@ export class AnswerClaimChecker {
 	async findings(
 		finalAnswer: string,
 		messages: readonly AgentMessage[],
-		acceptedWorkerReceipts: readonly ClaimReceipts[] = [],
+		events?: readonly ClaimReceiptEvent[],
 		verifiedChecks: readonly WorkerCommandReceipt[] = [],
 	): Promise<ClaimFinding[] | undefined> {
 		const controller = this.deps.getController();
@@ -354,7 +386,7 @@ export class AnswerClaimChecker {
 		this.outageReported = false;
 		return judgeClaims(
 			answers,
-			mergeClaimReceipts([collectClaimReceipts(messages, verifiedChecks), ...acceptedWorkerReceipts]),
+			events ? collectClaimReceiptEvents(events, verifiedChecks) : collectClaimReceipts(messages, verifiedChecks),
 		);
 	}
 
@@ -366,9 +398,9 @@ export class AnswerClaimChecker {
 	async check(
 		finalAnswer: string,
 		turnMessages: readonly AgentMessage[],
-		acceptedWorkerReceipts: readonly ClaimReceipts[] = [],
+		events?: readonly ClaimReceiptEvent[],
 	): Promise<string | undefined> {
-		const findings = await this.findings(finalAnswer, turnMessages, acceptedWorkerReceipts);
+		const findings = await this.findings(finalAnswer, turnMessages, events);
 		if (!findings) return undefined;
 		const contradicted = findings.filter((finding) => finding.verdict === "contradicted");
 		const unsupported = findings.filter((finding) => finding.verdict === "unsupported");
@@ -410,7 +442,8 @@ export class AnswerClaimChecker {
 		readonly hostVerifiedChecks?: readonly WorkerCommandReceipt[];
 	}): Promise<string[]> {
 		const blockers: string[] = [];
-		for (const finding of (await this.findings(input.summary, input.messages, [], input.hostVerifiedChecks)) ?? []) {
+		for (const finding of (await this.findings(input.summary, input.messages, undefined, input.hostVerifiedChecks)) ??
+			[]) {
 			if (finding.verdict === "contradicted")
 				blockers.push(`claim contradicted by the worker's own tool results: ${finding.reason}`);
 			else this.deps.warn(`Unverified worker claim: ${finding.reason}`);

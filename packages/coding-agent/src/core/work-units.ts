@@ -65,58 +65,60 @@ export function openWorkUnit(
 /** Session custom entry recording a worker's receipts once its report was accepted (see claim-delivery.ts). */
 export const WORKER_RECEIPTS_CUSTOM_TYPE = "worker_receipts";
 
-/**
- * What the most recent work unit produced, from its start to now: the branch's messages (its first tool
- * call included, so a delivery's arguments are read) and the payloads of the given custom entries (the
- * accepted workers' receipts). Read from the branch, not the live context, so a compaction inside the unit
- * loses none of it. Undefined when no work unit was ever opened on the branch.
- */
-export function workUnitWindow(
+export type WorkWindowEntry =
+	| { kind: "message"; message: AgentMessage }
+	| { kind: "custom"; entryId: string; data: unknown };
+
+function collectWorkWindow(
 	manager: Pick<SessionManager, "getLeafEntry" | "getEntry">,
 	customType: string,
-): { messages: AgentMessage[]; customs: unknown[] } | undefined {
-	const collected: { messages: AgentMessage[]; customs: unknown[] } = { messages: [], customs: [] };
-	let startEntryId: string | null | undefined;
+	openingEntryId?: string,
+): WorkWindowEntry[] | undefined {
+	const entries: WorkWindowEntry[] = [];
+	let startEntryId: string | null | undefined = openingEntryId;
+	let reachedOpening = false;
 	for (
 		let entry = manager.getLeafEntry();
 		entry;
 		entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined
 	) {
-		if (entry.type === "message") collected.messages.push(entry.message);
-		else if (entry.type === "custom" && entry.customType === customType) collected.customs.push(entry.data);
+		if (entry.type === "message") entries.push({ kind: "message", message: entry.message });
+		else if (entry.type === "custom" && entry.customType === customType)
+			entries.push({ kind: "custom", entryId: entry.id, data: entry.data });
 		else if (entry.type === "custom" && entry.customType === WORK_UNIT_CUSTOM_TYPE && startEntryId === undefined) {
 			startEntryId = (entry.data as WorkUnitRecord | undefined)?.startEntryId ?? null;
 			if (startEntryId === null) break;
 		}
-		if (startEntryId !== undefined && entry.id === startEntryId) break;
-	}
-	if (startEntryId === undefined) return undefined;
-	collected.messages.reverse();
-	collected.customs.reverse();
-	return collected;
-}
-
-/**
- * Custom entries of `customType` recorded on the branch since the latest owner (`user`) message.
- * Used when no `work_unit` was opened (e.g. a read-only worker delegation turn) so accepted worker
- * receipts recorded during the turn still back the root answer's claims.
- */
-export function turnCustomEntries(
-	manager: Pick<SessionManager, "getLeafEntry" | "getEntry">,
-	customType: string,
-): unknown[] {
-	const customs: unknown[] = [];
-	for (
-		let entry = manager.getLeafEntry();
-		entry;
-		entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined
-	) {
-		if (entry.type === "custom" && entry.customType === customType) {
-			customs.push(entry.data);
-		} else if (entry.type === "message" && entry.message.role === "user") {
+		if (startEntryId !== undefined && entry.id === startEntryId) {
+			reachedOpening = true;
 			break;
 		}
 	}
-	customs.reverse();
-	return customs;
+	if (openingEntryId !== undefined && !reachedOpening)
+		throw new Error(`Turn opening entry ${openingEntryId} is not on the active branch.`);
+	return startEntryId === undefined ? undefined : entries.reverse();
+}
+
+/**
+ * The most recent work unit's messages and custom records in branch order. Reading the branch
+ * preserves both sides of a tool call across compaction and the position of intervening worker receipts.
+ * Undefined when no work unit was ever opened on the branch.
+ */
+export function workUnitWindow(
+	manager: Pick<SessionManager, "getLeafEntry" | "getEntry">,
+	customType: string,
+): WorkWindowEntry[] | undefined {
+	return collectWorkWindow(manager, customType);
+}
+
+/**
+ * The same ordered view for a turn with no work unit, bounded by its exact opening entry.
+ * A later steering message is not a new boundary for work already performed in this turn.
+ */
+export function turnWorkWindow(
+	manager: Pick<SessionManager, "getLeafEntry" | "getEntry">,
+	customType: string,
+	openingEntryId: string,
+): WorkWindowEntry[] {
+	return collectWorkWindow(manager, customType, openingEntryId)!;
 }

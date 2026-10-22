@@ -18,7 +18,8 @@ import {
 import type { GoalState } from "./goals/goal-state.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
-import { AnswerClaimChecker, assistantAnswerText, type ClaimReceipts } from "./system-one/claim-delivery.ts";
+import { AnswerClaimChecker, assistantAnswerText, type ClaimReceiptEvent } from "./system-one/claim-delivery.ts";
+import { decodeClaimReceipts } from "./system-one/claim-receipt-codec.ts";
 import { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import {
@@ -41,7 +42,7 @@ import {
 	UNSETTLED_ITEM_CONSULT_PROMPT,
 } from "./system-one/unsettled-ladder.ts";
 import { resolveTurnMessages } from "./turn-window.ts";
-import { turnCustomEntries, WORKER_RECEIPTS_CUSTOM_TYPE, workUnitWindow } from "./work-units.ts";
+import { turnWorkWindow, WORKER_RECEIPTS_CUSTOM_TYPE, workUnitWindow } from "./work-units.ts";
 
 export interface SessionUnsettledLadderControllerDeps {
 	getSessionManager(): SessionManager;
@@ -104,11 +105,11 @@ export class SessionUnsettledLadderController {
 	async claimCorrection(turnOpening: AgentMessage): Promise<string | undefined> {
 		const turnMessages = resolveTurnMessages(this.deps.getSessionManager(), turnOpening, this.deps.getMessages());
 		if (turnMessages === undefined) return undefined;
-		const window = this.claimWindow(turnMessages);
+		const window = this.claimWindow(turnOpening, turnMessages);
 		return this.answerClaims.check(
 			assistantAnswerText(this.deps.findLastAssistantMessage()),
 			window.messages,
-			window.workerReceipts,
+			window.events,
 		);
 	}
 
@@ -116,19 +117,47 @@ export class SessionUnsettledLadderController {
 	 * What an answer's claims are checked against: the current or most recent work unit, boundary to now,
 	 * with the receipts of workers accepted during it; the turn alone when no work unit was ever opened.
 	 */
-	claimWindow(turnMessages: readonly AgentMessage[]): {
+	claimWindow(
+		turnOpening: AgentMessage,
+		turnMessages: readonly AgentMessage[],
+	): {
 		messages: readonly AgentMessage[];
-		workerReceipts: readonly ClaimReceipts[];
+		events: readonly ClaimReceiptEvent[];
 	} {
 		const manager = this.deps.getSessionManager();
-		const window = workUnitWindow(manager, WORKER_RECEIPTS_CUSTOM_TYPE);
-		if (!window) {
-			return {
-				messages: turnMessages,
-				workerReceipts: turnCustomEntries(manager, WORKER_RECEIPTS_CUSTOM_TYPE) as ClaimReceipts[],
-			};
+		let window = workUnitWindow(manager, WORKER_RECEIPTS_CUSTOM_TYPE);
+		if (window === undefined) {
+			const openingEntryId = manager.getMessageEntryId(turnOpening);
+			if (openingEntryId === undefined)
+				return { messages: turnMessages, events: turnMessages.map((message) => ({ kind: "message", message })) };
+			window = turnWorkWindow(manager, WORKER_RECEIPTS_CUSTOM_TYPE, openingEntryId);
 		}
-		return { messages: window.messages, workerReceipts: window.customs as ClaimReceipts[] };
+		const events: ClaimReceiptEvent[] = [];
+		for (const entry of window) {
+			if (entry.kind === "message") events.push(entry);
+			else {
+				const receipts = decodeClaimReceipts(entry.data);
+				if (receipts) events.push({ kind: "worker", entryId: entry.entryId, receipts });
+				else this.deps.emitWarning(`Worker receipt ${entry.entryId} is malformed; its evidence is unavailable.`);
+			}
+		}
+		const tail: AgentMessage[] = [];
+		let unpersistedToolEvidence = false;
+		for (const message of turnMessages) {
+			if (message.role === "compactionSummary") continue;
+			if (manager.getMessageEntryId(message) !== undefined) {
+				if (unpersistedToolEvidence)
+					throw new Error("Unpersisted claim evidence precedes persisted messages; its branch order is unknown.");
+			} else {
+				tail.push(message);
+				unpersistedToolEvidence ||= message.role === "assistant" || message.role === "toolResult";
+			}
+		}
+		for (const message of tail) events.push({ kind: "message", message });
+		return {
+			messages: events.flatMap((event) => (event.kind === "message" ? [event.message] : [])),
+			events,
+		};
 	}
 
 	/** One bounded completion on the router's expensive-tier model, or undefined when none is configured. */
