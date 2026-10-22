@@ -132,6 +132,9 @@ export interface QueuedInputRecordResult {
 	readonly cleanupError?: string;
 }
 
+/** History may share a claim with another branch; only this owner's publication may be released. */
+export type QueuedInputRecordOwnership = "borrowed" | "owned";
+
 type RecordImageStore = Pick<
 	SessionImageStore,
 	"retainPinnedContent" | "retainPinnedReference" | "pin" | "sealPinClaim" | "releasePinClaim"
@@ -140,16 +143,22 @@ type RecordImageStore = Pick<
 /**
  * Append the whole current queue as the latest record on the active branch, bounded in count and bytes
  * (the first inputs in submission order are kept). Returns undefined, writing nothing, when `previousKey`
- * already describes the record being written. Every publication owns an independent image pin claim.
+ * already describes an owned record. Borrowed history is always replaced without releasing its claim.
+ * Every publication owns an independent image pin claim.
  */
 export function appendQueuedInputRecord(
 	sessionManager: Pick<SessionManager, "appendCustomEntry">,
 	imageStore: RecordImageStore | undefined,
 	inputs: readonly RecordableQueuedInput[],
 	previousKey: string | undefined,
+	previousOwnership: QueuedInputRecordOwnership,
 ): QueuedInputRecordResult | undefined {
-	return writeRecord(imageStore, inputs, previousKey, (payload) =>
-		sessionManager.appendCustomEntry(QUEUED_INPUT_CUSTOM_TYPE, payload),
+	return writeRecord(
+		imageStore,
+		inputs,
+		previousKey,
+		(payload) => sessionManager.appendCustomEntry(QUEUED_INPUT_CUSTOM_TYPE, payload),
+		previousOwnership,
 	);
 }
 
@@ -168,25 +177,32 @@ export function writeOwnTurnInputRecord(
 	inputs: readonly RecordableQueuedInput[],
 	previousKey: string | undefined,
 ): QueuedInputRecordResult | undefined {
-	return writeRecord(imageStore, inputs, previousKey, (payload, key) => {
-		if (payload.inputs.length > 0) {
-			writeFileAtomicSync(path, key);
-			return;
-		}
-		try {
-			unlinkSync(path);
-		} catch (error) {
-			if (!isMissingFileError(error)) throw error;
-		}
-	});
+	return writeRecord(
+		imageStore,
+		inputs,
+		previousKey,
+		(payload, key) => {
+			if (payload.inputs.length > 0) {
+				writeFileAtomicSync(path, key);
+				return;
+			}
+			try {
+				unlinkSync(path);
+			} catch (error) {
+				if (!isMissingFileError(error)) throw error;
+			}
+		},
+		"owned",
+	);
 }
 
-/** One bounded record write, through `write`; undefined, writing nothing, when it would not change `previousKey`. */
+/** Publish a bounded snapshot, skipping only unchanged owned records; borrowed history always gets a fresh record. */
 function writeRecord(
 	imageStore: RecordImageStore | undefined,
 	inputs: readonly RecordableQueuedInput[],
 	previousKey: string | undefined,
 	write: (payload: QueuedInputPayload, key: string) => void,
+	previousOwnership: QueuedInputRecordOwnership,
 ): QueuedInputRecordResult | undefined {
 	const recorded: RecordedInput[] = [];
 	const claimId = randomUUID();
@@ -239,10 +255,11 @@ function writeRecord(
 			previous !== undefined && JSON.stringify(payload) === JSON.stringify({ version: 1, inputs: previous.inputs });
 		const held = recorded.flatMap((input) => input.images?.map((image) => image.sequence) ?? []);
 		if (
-			(recorded.length === 0 && previousKey === undefined) ||
-			(unchanged &&
-				(held.length === 0 ||
-					(previous.pinClaim !== undefined && imageStore?.pin(held, previous.pinClaim).length === 0)))
+			previousOwnership === "owned" &&
+			((recorded.length === 0 && previousKey === undefined) ||
+				(unchanged &&
+					(held.length === 0 ||
+						(previous.pinClaim !== undefined && imageStore?.pin(held, previous.pinClaim).length === 0))))
 		) {
 			if (hasPins) {
 				hasPins = false;
@@ -259,7 +276,7 @@ function writeRecord(
 		publicationStarted = true;
 		write(payload, key);
 		let cleanupError: string | undefined;
-		if (imageStore && previous?.pinClaim) {
+		if (previousOwnership === "owned" && imageStore && previous?.pinClaim) {
 			try {
 				imageStore.releasePinClaim(previous.pinClaim);
 			} catch (error) {
@@ -347,6 +364,14 @@ export interface RestoredQueuedInputs {
 	pinError?: string;
 	/** The record as written, to seed change detection. */
 	key: string;
+}
+
+/** The selected branch's raw queue baseline, without reading images or filtering delivered input. */
+export function readQueuedInputRecordKey(
+	sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch">,
+): string | undefined {
+	const payload = recordedPayloadOf(sessionManager.getLatestCustomEntryOnBranch(QUEUED_INPUT_CUSTOM_TYPE)?.data);
+	return payload === undefined ? undefined : JSON.stringify(payload);
 }
 
 /**

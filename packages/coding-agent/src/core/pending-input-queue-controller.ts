@@ -145,6 +145,8 @@ export interface PendingInputQueueDeps {
 
 /** Where the undelivered input is recorded for a restart. Each call carries its complete set, in submission order, as submitted. */
 export interface PendingInputRecord {
+	/** Select a borrowed history baseline before any queue reconciliation can publish on a new branch. */
+	beginBranch(): void;
 	/** Materialize preserved references before take-back; refusal leaves the input and its record queued. */
 	prepareInputForTake(input: QueuedInput): QueuedInput | undefined;
 	/** The set of queued inputs changed (an input arrived, was delivered, taken back or withdrawn). */
@@ -920,6 +922,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 * run already consumed belongs to that run's history and is left alone.
 	 */
 	reconcileContext(): void {
+		this.deps.record?.beginBranch();
 		for (const entry of [...this._steering, ...this._followUp]) {
 			if (entry.held || this._contextCurrent(entry)) continue;
 			if (entry.message && !this._takeBackFromAgent(entry)) continue;
@@ -930,6 +933,8 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		for (const entry of [...this._owned]) {
 			if (!this._contextCurrent(entry)) this._returnOwned(entry, "context_changed");
 		}
+		// Even an unchanged or empty live queue must replace the destination's historical snapshot.
+		this._changed();
 		this._admitInOrder();
 		this._notifySteerDecision();
 	}

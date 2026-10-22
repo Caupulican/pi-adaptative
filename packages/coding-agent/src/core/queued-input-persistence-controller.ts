@@ -18,11 +18,13 @@ import { truncateWithEllipsis } from "./provider-tool-text.ts";
 import {
 	appendQueuedInputRecord,
 	ownTurnInputRecordPath,
+	type QueuedInputRecordOwnership,
 	type QueuedInputRecordResult,
 	type RecordableQueuedInput,
 	type RestoredQueuedInputs,
 	readOwnTurnInputRecord,
 	readQueuedInputRecord,
+	readQueuedInputRecordKey,
 	recordedIds,
 	recoverQueuedImages,
 	writeOwnTurnInputRecord,
@@ -64,6 +66,7 @@ export interface QueuedInputPersistenceControllerDeps {
 interface RecordState {
 	readonly key: string | undefined;
 	readonly omitted: number;
+	readonly ownership: QueuedInputRecordOwnership;
 }
 
 /** How each record's warnings read: what could not be recorded, and what its bound leaves out. */
@@ -75,9 +78,9 @@ const RECORD_TEXT = {
 export class QueuedInputPersistenceController implements PendingInputRecord {
 	private readonly deps: QueuedInputPersistenceControllerDeps;
 	/** The session's queued record (`appendQueuedInputRecord`). */
-	private queuedRecord: RecordState = { key: undefined, omitted: 0 };
+	private queuedRecord: RecordState = { key: undefined, omitted: 0, ownership: "borrowed" };
 	/** The own-turn record beside the session file (`writeOwnTurnInputRecord`). */
-	private ownTurnRecord: RecordState = { key: undefined, omitted: 0 };
+	private ownTurnRecord: RecordState = { key: undefined, omitted: 0, ownership: "owned" };
 	private restoredQueuedInputNotice: { head: string; tail: string } | undefined;
 	/** Why the own-turn record could not be restored on resume; reported with the restore notice. */
 	private ownTurnRestoreFailure: string | undefined;
@@ -99,6 +102,15 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 			);
 			return undefined;
 		}
+	}
+
+	/** History on the selected branch is borrowed. Its claim can still protect another parked branch. */
+	beginBranch(): void {
+		this.queuedRecord = {
+			key: readQueuedInputRecordKey(this.deps.getSessionManager()),
+			omitted: 0,
+			ownership: "borrowed",
+		};
 	}
 
 	/** Keep owner input that cannot be submitted yet as held, recorded pending input (`PendingInputQueueController.keep`). */
@@ -208,8 +220,8 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 	recordQueuedInput(inputs: readonly RecordableQueuedInput[]): void {
 		const sessionManager = this.deps.getSessionManager();
 		if (this.deps.isDisposed() || !sessionManager.isPersisted()) return;
-		this.writeRecord("queued", (previousKey, imageStore) =>
-			appendQueuedInputRecord(sessionManager, imageStore, inputs, previousKey),
+		this.writeRecord("queued", (previousKey, imageStore, ownership) =>
+			appendQueuedInputRecord(sessionManager, imageStore, inputs, previousKey, ownership),
 		);
 	}
 
@@ -240,16 +252,18 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		write: (
 			previousKey: string | undefined,
 			imageStore: SessionImageStore | undefined,
+			ownership: QueuedInputRecordOwnership,
 		) => QueuedInputRecordResult | undefined,
 	): void {
 		const state = record === "queued" ? this.queuedRecord : this.ownTurnRecord;
 		const { subject, one, many } = RECORD_TEXT[record];
 		try {
-			const written = write(state.key, this.deps.getSessionImageStore());
+			const written = write(state.key, this.deps.getSessionImageStore(), state.ownership);
 			if (!written) return;
 			// Publication is already committed. Diagnostics or obsolete-claim cleanup cannot leave this key stale.
-			if (record === "queued") this.queuedRecord = { key: written.key, omitted: written.omitted };
-			else this.ownTurnRecord = { key: written.key, omitted: written.omitted };
+			const published: RecordState = { key: written.key, omitted: written.omitted, ownership: "owned" };
+			if (record === "queued") this.queuedRecord = published;
+			else this.ownTurnRecord = published;
 			if (written.omitted > 0 && state.omitted === 0) {
 				this.deps.emitWarning(
 					`${written.omitted} ${written.omitted > 1 ? many : one} beyond the durable record's bound will not survive a restart.`,
@@ -282,8 +296,8 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		const ownTurn = this.readOwnTurnRecord(recordedIds(queued?.key));
 		if (!queued && !ownTurn) return;
 		// The records as written are what a rewrite replaces: change detection starts from them.
-		this.queuedRecord = { key: queued?.key, omitted: 0 };
-		this.ownTurnRecord = { key: ownTurn?.key, omitted: 0 };
+		this.queuedRecord = { key: queued?.key, omitted: 0, ownership: "borrowed" };
+		this.ownTurnRecord = { key: ownTurn?.key, omitted: 0, ownership: "owned" };
 		const inputs = [...(queued?.inputs ?? []), ...(ownTurn?.inputs ?? [])];
 		this.deps.getPendingQueue().restore(inputs, (queued?.delivered ?? 0) > 0 || ownTurn !== undefined);
 		if (ownTurn) {
