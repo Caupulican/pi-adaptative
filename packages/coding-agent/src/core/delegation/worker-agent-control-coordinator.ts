@@ -2718,14 +2718,16 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (options.idempotencyKey !== undefined) {
 			this.assertIdempotencyTarget(target.agentId, options.idempotencyKey);
 		}
-		const mailbox = this.getMailbox(target.agentId);
 		const replayId =
 			options.idempotencyKey === undefined
 				? undefined
 				: workerAgentMessageId(this.options.parentSessionId, options.idempotencyKey);
+		// Observation only: this view may predate the claim that admission acquires below, so it never mutates.
+		const observer = replayId === undefined ? undefined : this.getMailbox(target.agentId);
 		const replay =
 			replayId !== undefined &&
-			(mailbox.getMessage(replayId) !== undefined || mailbox.hasControlReplayReceipt(replayId));
+			observer !== undefined &&
+			(observer.getMessage(replayId) !== undefined || observer.hasControlReplayReceipt(replayId));
 		const sender = options.senderAgentId;
 		const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
 		const activeSender =
@@ -2740,7 +2742,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					: this.options.captureReceiptOrigin?.()));
 		const enqueue = () => {
 			assertWorkerReceiptAdmission(receiptOrigin);
-			return mailbox.enqueueWithReceipt({
+			// Resolved inside admission: the mailbox mutation must carry the claim admission just acquired.
+			return this.getMailbox(target.agentId).enqueueWithReceipt({
 				kind,
 				content,
 				...options,
