@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { safeErrorMessage } from "../../kernel/types.ts";
 import { stateFile } from "../agent-paths.ts";
 import { isMissingFileError, withFileLock } from "../util/atomic-file.ts";
+import { boundedLine } from "../util/bounded-line.ts";
 import { AsyncRetainedReleases, type ReleaseOutcome, releaseFailureCause } from "../util/resource-release.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { isNonNegativeSafeInteger } from "../util/value-guards.ts";
@@ -522,21 +523,40 @@ export class ContinuousChatStore {
 		if (this.lease !== undefined || this.leaseRelease.size > 0)
 			throw new Error("Continuous-chat runtime lease is held or still releasing.");
 		const record = createContinuousChatLeaseRecord({ label: options.label, now: new Date() });
-		await this.withProjectLock(async () => {
-			const existing = await readContinuousChatLease(this.leaseFile);
-			if (existing !== undefined && !isContinuousChatLeaseOwnerProvenDead(existing)) {
-				throw new ContinuousChatLeaseHeldError(existing);
-			}
-			await writeDurableAtomic(this.leaseFile, `${JSON.stringify(record)}\n`);
-		});
 		const token = record.token;
 		const releaseAtExit = (): void => releaseContinuousChatLeaseSync(this.leaseFile, token);
-		this.lease = { token, onLost: options.onLost, releaseAtExit };
+		const candidate: HeldRuntimeLease = { token, onLost: options.onLost, releaseAtExit };
+		try {
+			await this.withProjectLock(async () => {
+				// Another acquisition may have passed the first check while this one waited for the lock.
+				if (this.lease !== undefined || this.leaseRelease.size > 0)
+					throw new Error("Continuous-chat runtime lease is held or still releasing.");
+				const existing = await readContinuousChatLease(this.leaseFile);
+				if (existing !== undefined && !isContinuousChatLeaseOwnerProvenDead(existing)) {
+					throw new ContinuousChatLeaseHeldError(existing);
+				}
+				// Rename can succeed before directory flush fails. Own cleanup before any publication.
+				process.on("exit", releaseAtExit);
+				this.lease = candidate;
+				await writeDurableAtomic(this.leaseFile, `${JSON.stringify(record)}\n`);
+			});
+		} catch (error) {
+			if (this.lease === candidate) {
+				// Release outside the project lock; its existing owner retains uncertain cleanup for retry.
+				const released = await this.releaseRuntimeLease();
+				if (released.kind === "retained") {
+					throw new AggregateError(
+						[error, new Error(`${released.retryOwner} retained lease cleanup: ${released.cause}`)],
+						`Continuous-chat lease acquisition failed: ${boundedLine(safeErrorMessage(error, "unknown error"), 512)}; ${released.retryOwner} retained cleanup: ${boundedLine(released.cause, 512)}`,
+					);
+				}
+			}
+			throw error;
+		}
 		// Caches built before this lease may describe another owner's later writes; the next locked step reloads them.
 		this.indexedRevision = undefined;
 		this.settled = undefined;
 		this.rendered = undefined;
-		process.on("exit", releaseAtExit);
 	}
 
 	/**
