@@ -90,6 +90,7 @@ export class ContinuousChatHost {
 	private readonly halt: Settlement;
 	private unsubscribe: (() => void) | undefined;
 	private starting: Promise<void> | undefined;
+	private disposal: Promise<void> | undefined;
 	private closed = false;
 	private replayed = false;
 
@@ -139,7 +140,7 @@ export class ContinuousChatHost {
 			...(options.timers !== undefined ? { timers: options.timers } : {}),
 		});
 		try {
-			const sessionLedger = createContinuousChatSessionLedger(runtime.store.rootDir);
+			const sessionLedger = createContinuousChatSessionLedger(runtime.store);
 			await sessionLedger.recordAttached(options.sessionId, options.sessionFile);
 			const started = createSettlement();
 			const ingestor = new ContinuousChatIngestor({
@@ -179,13 +180,14 @@ export class ContinuousChatHost {
 	 * again without importing, subscribing or dispatching twice.
 	 */
 	start(): Promise<void> {
+		if (this.closed) return Promise.reject(new Error("Continuous chat cannot start after it has closed."));
 		this.starting ??= this.runStart();
 		return this.starting;
 	}
 
 	private async runStart(): Promise<void> {
 		try {
-			const marker = createContinuousChatLegacyImportMarker(this.runtime.store.rootDir);
+			const marker = createContinuousChatLegacyImportMarker(this.runtime.store);
 			const markerBefore = await marker.read();
 			const ledgerBefore = await this.sessionLedger.read();
 			const activeIds = new Set(ledgerBefore.active.map((entry) => entry.sessionId));
@@ -218,7 +220,7 @@ export class ContinuousChatHost {
 	}
 
 	private async recoverPriorSessions(ledger: ContinuousChatSessionsState, firstMigration: boolean): Promise<void> {
-		const marker = createContinuousChatLegacyImportMarker(this.runtime.store.rootDir);
+		const marker = createContinuousChatLegacyImportMarker(this.runtime.store);
 		const markerAfter = await marker.read();
 		const listing = await this.options.legacy.sessions();
 		const activeIds = new Set(ledger.active.map((entry) => entry.sessionId));
@@ -330,12 +332,24 @@ export class ContinuousChatHost {
 	 * Ends an active turn, closes the host, lets queued records finish, then stops the runtime. The runtime's stop
 	 * releases the project lease on every path, including a host that never started.
 	 */
-	async dispose(): Promise<void> {
+	dispose(): Promise<void> {
+		if (!this.disposal) {
+			const disposal = createSettlement();
+			this.disposal = disposal.promise;
+			void this.stop().then(disposal.resolve, disposal.reject);
+		}
+		return this.disposal;
+	}
+
+	private async stop(): Promise<void> {
 		const cleanStop = !this.closed && this.replayed;
 		const active = this.turns.current();
 		if (active !== undefined) this.turns.end(active);
 		this.close("Continuous chat was disposed before it started.");
 		try {
+			// Startup also owns metadata writes that are not ingestor tasks. Keep its lease
+			// until those writes settle, even when closing causes startup to reject.
+			await this.starting?.catch(() => undefined);
 			await this.ingestor.settled();
 			if (cleanStop) await this.sessionLedger.markSettled([this.options.sessionId]);
 		} catch {

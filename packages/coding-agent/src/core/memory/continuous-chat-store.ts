@@ -590,6 +590,11 @@ export class ContinuousChatStore {
 		});
 	}
 
+	/** Host metadata shares the project lease and writer exclusion through the complete read/write transaction. */
+	mutateMetadata<T>(operation: () => Promise<T>): Promise<T> {
+		return this.withWriterLock(operation);
+	}
+
 	/**
 	 * Appends up to `CONTINUOUS_CHAT_MAX_BULK_INPUTS` messages, each split into units, in one locked publication: one
 	 * write per day touched, one index write, one root publication, one view and queue persist. Units already logged

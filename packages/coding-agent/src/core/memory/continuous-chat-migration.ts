@@ -31,6 +31,12 @@ import type { TranscriptSummaryStore } from "./transcript-summary-store.ts";
 export const CONTINUOUS_CHAT_MIGRATION_SCHEMA_VERSION = 1;
 export const CONTINUOUS_CHAT_MIGRATION_FILE = "migration.json";
 
+/** The live project's storage authority; metadata never gets an unfenced file-only writer. */
+export interface ContinuousChatMetadataStore {
+	readonly rootDir: string;
+	mutateMetadata<T>(operation: () => Promise<T>): Promise<T>;
+}
+
 /** The file's envelope. Its schema version is the file's own; `state.version` is the import state's. */
 interface ContinuousChatMigrationFile {
 	schemaVersion: typeof CONTINUOUS_CHAT_MIGRATION_SCHEMA_VERSION;
@@ -158,8 +164,10 @@ async function readMarkerState(path: string): Promise<ContinuousChatLegacyImport
  * `read` is undefined until the import writes its state. `write` replaces the file atomically with the normalized state
  * and refuses a state that does not match the schema.
  */
-export function createContinuousChatLegacyImportMarker(rootDir: string): ContinuousChatLegacyImportMarker {
-	const path = join(rootDir, CONTINUOUS_CHAT_MIGRATION_FILE);
+export function createContinuousChatLegacyImportMarker(
+	store: ContinuousChatMetadataStore,
+): ContinuousChatLegacyImportMarker {
+	const path = join(store.rootDir, CONTINUOUS_CHAT_MIGRATION_FILE);
 	return {
 		read: () => readMarkerState(path),
 		write: async (state) => {
@@ -173,7 +181,7 @@ export function createContinuousChatLegacyImportMarker(rootDir: string): Continu
 				schemaVersion: CONTINUOUS_CHAT_MIGRATION_SCHEMA_VERSION,
 				state: normalized,
 			};
-			await writeFileAtomic(path, `${JSON.stringify(file, null, 2)}\n`);
+			await store.mutateMetadata(() => writeFileAtomic(path, `${JSON.stringify(file, null, 2)}\n`));
 		},
 	};
 }
@@ -243,23 +251,12 @@ async function readSessionsState(path: string): Promise<ContinuousChatSessionsSt
 	return state;
 }
 
-export function createContinuousChatSessionLedger(rootDir: string): ContinuousChatSessionLedger {
-	const path = join(rootDir, CONTINUOUS_CHAT_SESSIONS_FILE);
-	let tail: Promise<void> = Promise.resolve();
-
-	const runSerialized = <T>(action: () => Promise<T>): Promise<T> => {
-		const next = tail.then(action);
-		tail = next.then(
-			() => undefined,
-			() => undefined,
-		);
-		return next;
-	};
-
+export function createContinuousChatSessionLedger(store: ContinuousChatMetadataStore): ContinuousChatSessionLedger {
+	const path = join(store.rootDir, CONTINUOUS_CHAT_SESSIONS_FILE);
 	return {
 		read: () => readSessionsState(path),
 		recordAttached: (sessionId: string, sessionFile?: string) =>
-			runSerialized(async () => {
+			store.mutateMetadata(async () => {
 				const current = await readSessionsState(path);
 				const existing = current.active.find((entry) => entry.sessionId === sessionId);
 				const resolvedSessionFile = sessionFile ?? existing?.sessionFile;
@@ -277,7 +274,7 @@ export function createContinuousChatSessionLedger(rootDir: string): ContinuousCh
 				await writeFileAtomic(path, `${JSON.stringify(file, null, 2)}\n`);
 			}),
 		markSettled: (sessionIds: readonly string[]) =>
-			runSerialized(async () => {
+			store.mutateMetadata(async () => {
 				const current = await readSessionsState(path);
 				const toSettle = new Set(sessionIds.filter((id) => id.length > 0));
 				const nextActive = current.active.filter((entry) => !toSettle.has(entry.sessionId));
