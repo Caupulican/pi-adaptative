@@ -232,9 +232,22 @@ export interface BackgroundToolTaskLiveView {
 }
 
 /** What a delivered wake-up actually read on the model's behalf. */
+export type BackgroundToolTerminalIdentity = Pick<BackgroundToolTaskRecord, "sessionId" | "taskId"> & {
+	completedAt: string;
+};
+
+export function sameBackgroundToolTerminal(
+	left: Pick<BackgroundToolTaskRecord, "sessionId" | "taskId" | "completedAt">,
+	right: Pick<BackgroundToolTaskRecord, "sessionId" | "taskId" | "completedAt">,
+): boolean {
+	return left.sessionId === right.sessionId && left.taskId === right.taskId && left.completedAt === right.completedAt;
+}
+
 export interface BackgroundToolTerminalDeliveryReceipt {
-	/** Task ids whose final output rode the delivered message in full (never an `output omitted` one). */
+	/** Display summary only; task ids cannot distinguish a late result from its cancellation notice. */
 	deliveredTaskIds: readonly string[];
+	/** Exact terminal revisions whose output rode the delivered message in full. */
+	deliveredTerminals?: readonly BackgroundToolTerminalIdentity[];
 }
 
 /** A notifier's answer: the receipt, or nothing when it delivered no output. */
@@ -290,7 +303,7 @@ export interface BackgroundToolTaskControllerDeps {
 	/** Snapshot writes own complete task state; delivery receipts own only the exact post-notification transition. */
 	persist(record: BackgroundToolTaskRecord, kind: BackgroundToolTaskPersistenceKind): void;
 	/**
-	 * Deliver a terminal batch. The receipt names the task ids whose final output the delivered
+	 * Deliver a terminal batch. The receipt names the exact revisions whose final output the delivered
 	 * message carried in full; the controller marks exactly those observed. A notifier that
 	 * returns nothing delivered no output (a record then stays unread until its own wait).
 	 */
@@ -497,9 +510,20 @@ export function backgroundToolTerminalDeliveredTaskIds(
 	records: readonly BackgroundToolTaskRecord[],
 	options?: { wakeParent?: boolean },
 ): string[] {
-	if (records.length === 0) return [];
-	const { projections } = terminalOutputProjectionsFor(records, options?.wakeParent ?? true);
-	return projections.filter((projection) => projection.omissionLine === undefined).map((p) => p.taskId);
+	return deliveredBackgroundToolTerminals(records, options?.wakeParent ?? true).map((record) => record.taskId);
+}
+
+function deliveredBackgroundToolTerminals(
+	records: readonly BackgroundToolTaskRecord[],
+	wakeParent: boolean,
+): BackgroundToolTerminalIdentity[] {
+	const { projections } = terminalOutputProjectionsFor(records, wakeParent);
+	return projections.flatMap((projection, index) => {
+		const record = records[index];
+		return projection.omissionLine === undefined && record?.completedAt
+			? [{ sessionId: record.sessionId, taskId: record.taskId, completedAt: record.completedAt }]
+			: [];
+	});
 }
 
 /**
@@ -513,9 +537,10 @@ export function projectBackgroundToolTerminalDelivery(
 ): { message: BackgroundToolTerminalMessage; receipt: BackgroundToolTerminalDeliveryReceipt } {
 	const wakeParent = options?.wakeParent ?? true;
 	const message = createBackgroundToolTerminalMessage(records, { wakeParent });
+	const deliveredTerminals = wakeParent ? deliveredBackgroundToolTerminals(records, wakeParent) : [];
 	return {
 		message,
-		receipt: { deliveredTaskIds: wakeParent ? backgroundToolTerminalDeliveredTaskIds(records, { wakeParent }) : [] },
+		receipt: { deliveredTaskIds: deliveredTerminals.map((record) => record.taskId), deliveredTerminals },
 	};
 }
 
@@ -945,16 +970,15 @@ export class BackgroundToolTaskController {
 	 * notifier delivers only records still unobserved, so consuming here would drop the output the
 	 * listing never showed.
 	 */
-	private observe(taskIds?: string | readonly string[]): BackgroundToolTaskRecord[] {
-		const ids = typeof taskIds === "string" ? [taskIds] : taskIds;
-		const states = ids
-			? ids.flatMap((taskId) => {
-					const state = this.tasks.get(taskId);
-					return state === undefined ? [] : [state];
-				})
-			: [...this.tasks.values()];
-		for (const state of states) this.observeState(state);
-		return states.map((state) => ({ ...state.record }));
+	private observe(terminals: readonly BackgroundToolTerminalIdentity[]): void {
+		for (const terminal of terminals) {
+			const state = this.tasks.get(terminal.taskId);
+			if (state && sameBackgroundToolTerminal(state.record, terminal)) {
+				this.observeState(state);
+			} else {
+				this.observeNotificationCopies(terminal, this.now().toISOString());
+			}
+		}
 	}
 
 	/**
@@ -1153,12 +1177,13 @@ export class BackgroundToolTaskController {
 			completion.toolCall.id === state.record.toolCallId && completion.toolCall.name === state.record.toolName
 				? retainedToolInvocation(completion.result.details)
 				: undefined;
+		const admitted = state.record.piToolInvocation;
+		const correlated =
+			invocation !== undefined &&
+			admitted !== undefined &&
+			invocation.requestId === admitted.requestId &&
+			invocation.executionScope === admitted.executionScope;
 		if (invocation?.postprocessingFailures.includes("cleanup")) {
-			const admitted = state.record.piToolInvocation;
-			const correlated =
-				admitted !== undefined &&
-				invocation.requestId === admitted.requestId &&
-				invocation.executionScope === admitted.executionScope;
 			this.retainExecutionFailure(
 				new Error(
 					correlated
@@ -1166,16 +1191,25 @@ export class BackgroundToolTaskController {
 						: `Background tool cleanup receipt identity mismatch: ${state.record.taskId}`,
 				),
 			);
-			if (state.record.status !== "running" && correlated) {
-				// Keep execution evidence after a canceled terminal without treating a cleanup failure
-				// as permission to repeat the operation or as passing verification.
-				state.record = { ...state.record, piToolInvocation: invocation };
-				this.persist(state.record);
-			}
 		}
-		if (state.record.status !== "running") return;
-		const status = state.cancellationRequested ? "canceled" : completion.isError ? "failed" : "completed";
-		const output = renderCompletionOutput(completion);
+		const late = state.record.status !== "running";
+		// A fenced terminal does not settle the physical operation. Keep its eventual evidence,
+		// but never accept another invocation's result or turn cancellation into successful verification.
+		if (late && !correlated) {
+			this.retainExecutionFailure(
+				new Error(`Late background tool receipt identity mismatch: ${state.record.taskId}`),
+			);
+			return;
+		}
+		const status =
+			state.record.status !== "running"
+				? state.record.status
+				: state.cancellationRequested
+					? "canceled"
+					: completion.isError
+						? "failed"
+						: "completed";
+		const output = `${late ? "Physical execution settled after the earlier terminal notice; its status remains unchanged.\n" : ""}${renderCompletionOutput(completion)}`;
 		this.finishState(
 			state,
 			status,
@@ -1190,9 +1224,10 @@ export class BackgroundToolTaskController {
 		// Operation failures are fulfilled tool results with isError. A rejected physical completion
 		// instead carries finalization/cleanup failure, even after the record was fenced canceled.
 		this.retainExecutionFailure(error);
-		if (state.record.status !== "running") return;
-		const status = state.cancellationRequested ? "canceled" : "failed";
-		const output = error instanceof Error ? error.message : String(error);
+		const late = state.record.status !== "running";
+		const status =
+			state.record.status !== "running" ? state.record.status : state.cancellationRequested ? "canceled" : "failed";
+		const output = `${late ? "Physical execution failed to finalize after the earlier terminal notice; its status remains unchanged.\n" : ""}${error instanceof Error ? error.message : String(error)}`;
 		this.finishState(state, status, output, undefined);
 	}
 
@@ -1368,7 +1403,10 @@ export class BackgroundToolTaskController {
 		const record: BackgroundToolTaskRecord = {
 			...state.record,
 			status,
-			completedAt: this.now().toISOString(),
+			// This timestamp also identifies a delivery revision, including with a frozen/backward clock.
+			completedAt: new Date(
+				Math.max(this.now().getTime(), state.record.completedAt ? Date.parse(state.record.completedAt) + 1 : 0),
+			).toISOString(),
 			summary: summaryFor(status, state.record.toolName, output),
 			output,
 			...(packed.artifactId ? { artifactId: packed.artifactId } : {}),
@@ -1382,6 +1420,14 @@ export class BackgroundToolTaskController {
 				? { piVerification: { ...verification, originTaskId: state.record.taskId } }
 				: {}),
 		};
+		delete record.observedAt;
+		if (!packed.artifactId) delete record.artifactId;
+		if (!usage) delete record.usage;
+		if (
+			!verification ||
+			(verification.status === "passed" && !permitsPassingBackgroundVerification(status, terminalInvocation))
+		)
+			delete record.piVerification;
 		const persisted = this.persist(record);
 		if (!persisted && packed.artifactId) {
 			// No saved record cites this artifact, so nothing owns it: release the pack-time holder
@@ -1451,7 +1497,7 @@ export class BackgroundToolTaskController {
 		const delivered = { ...record, terminalDelivery: "delivered" as const };
 		if (this.persist(delivered, "delivery_receipt")) {
 			const state = this.tasks.get(record.taskId);
-			if (state && state.record.completedAt === record.completedAt) state.record = delivered;
+			if (state && sameBackgroundToolTerminal(state.record, record)) state.record = delivered;
 		}
 	}
 
@@ -1464,11 +1510,11 @@ export class BackgroundToolTaskController {
 
 	/** A queued or in-flight wake-up must not re-deliver a terminal a read already consumed. */
 	private observeNotificationCopies(
-		terminal: Pick<BackgroundToolTaskRecord, "taskId" | "completedAt">,
+		terminal: Pick<BackgroundToolTaskRecord, "sessionId" | "taskId" | "completedAt">,
 		observedAt: string,
 	): void {
 		for (const record of this.activeNotificationRecords) {
-			if (record.taskId === terminal.taskId && record.completedAt === terminal.completedAt) {
+			if (sameBackgroundToolTerminal(record, terminal)) {
 				record.observedAt = observedAt;
 			}
 		}
@@ -1580,8 +1626,10 @@ export class BackgroundToolTaskController {
 			// message inlined (it builds that message from the records still unread at delivery, which
 			// can be fewer than this batch), so the receipt is the only source for what was read. A
 			// record left with an `output omitted` line stays unobserved until its own wait collects it.
-			const deliveredTaskIds = receipt?.deliveredTaskIds ?? [];
-			if (deliveredTaskIds.length > 0) this.observe(deliveredTaskIds);
+			const deliveredTerminals = (receipt?.deliveredTerminals ?? []).filter((terminal) =>
+				records.some((record) => sameBackgroundToolTerminal(record, terminal)),
+			);
+			this.observe(deliveredTerminals);
 			for (const record of records) {
 				this.activeNotificationRecords.delete(record);
 			}
