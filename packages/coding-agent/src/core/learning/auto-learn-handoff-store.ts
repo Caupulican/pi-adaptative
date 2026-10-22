@@ -332,6 +332,26 @@ export class AutoLearnHandoffStore {
 		});
 	}
 
+	/** Accounting can acknowledge a publication even after its UI notice has been consumed. */
+	hasPublished(
+		directory: string,
+		origin: Pick<AutoLearnHandoffRecord, "runId" | "sessionId" | "childSessionId">,
+	): boolean {
+		return this.locked(directory, (canonical) => {
+			try {
+				const record = readRecord(this.file(canonical, origin.runId));
+				return (
+					record.runId === origin.runId &&
+					record.sessionId === origin.sessionId &&
+					record.childSessionId === origin.childSessionId
+				);
+			} catch (error) {
+				if (isMissingFileError(error)) return false;
+				throw error;
+			}
+		});
+	}
+
 	claim(
 		directory: string,
 		runId: string,

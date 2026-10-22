@@ -24,6 +24,7 @@ export const PI_WORK_ROOT_ENV = "PI_WORK_ROOT";
 export const WORK_RUN_MANIFEST_FILE = ".pi-work-run.json";
 
 const LEASES_DIRECTORY = ".leases";
+const HOLDS_DIRECTORY = ".holds";
 const CLEANUP_MARKER_FILE = ".cleanup.json";
 const MAX_METADATA_BYTES = 4 * 1024;
 const MAX_LEASE_MARKERS = 256;
@@ -127,6 +128,90 @@ export interface WorkRunLease {
 	readonly runId: string;
 	touch(): void;
 	release(): void;
+}
+
+export interface WorkRunHold {
+	id: string;
+	token: string;
+}
+
+/** A durable obligation keeps its work evidence beyond the creating process's lifetime. */
+export function holdWorkRun(lease: WorkRunLease, hold: WorkRunHold): void {
+	const file = workHoldFile(lease, hold);
+	if (cleanupMarkerBlocksAcquisition(lease.path)) throw new Error("Work run is being cleaned");
+	if (!isManifest(readSmallJson(join(lease.path, WORK_RUN_MANIFEST_FILE)), lease.category, lease.tenant, lease.runId))
+		throw new Error("Work hold requires its exact run manifest");
+	const directory = join(lease.path, HOLDS_DIRECTORY);
+	ensureDirectory(directory);
+	const text = JSON.stringify({ version: 1, ...hold });
+	if (existsSync(file)) {
+		if (readSmallMetadata(file) !== text) throw new Error("Work hold identity changed");
+	} else {
+		if (readHoldCount(directory) >= MAX_LEASE_MARKERS) throw new Error("Work hold capacity reached");
+		writeFileAtomicSync(file, text, { mode: 0o600 });
+	}
+	if (
+		cleanupMarkerBlocksAcquisition(lease.path) ||
+		!isManifest(readSmallJson(join(lease.path, WORK_RUN_MANIFEST_FILE)), lease.category, lease.tenant, lease.runId) ||
+		readSmallMetadata(file) !== text
+	)
+		throw new Error("Work hold changed during admission");
+}
+
+export function releaseWorkRunHold(lease: WorkRunLease, hold: WorkRunHold): void {
+	const directory = join(lease.path, HOLDS_DIRECTORY);
+	const file = workHoldFile(lease, hold);
+	let value: unknown;
+	try {
+		value = readSmallJson(file);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	if (
+		!value ||
+		typeof value !== "object" ||
+		(value as { version?: unknown }).version !== 1 ||
+		(value as { id?: unknown }).id !== hold.id ||
+		(value as { token?: unknown }).token !== hold.token
+	)
+		throw new Error("Work hold identity changed");
+	unlinkSync(file);
+	try {
+		rmdirSync(directory);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY" && (error as NodeJS.ErrnoException).code !== "EEXIST")
+			throw error;
+	}
+}
+
+function workHoldFile(lease: WorkRunLease, hold: WorkRunHold): string {
+	assertPortablePathSegment("Work hold id", hold.id);
+	if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(hold.token))
+		throw new Error("Invalid work hold token");
+	return join(lease.path, HOLDS_DIRECTORY, `${hold.id}.${hold.token}.json`);
+}
+
+function readHoldCount(directory: string): number {
+	const handle = opendirSync(directory);
+	let count = 0;
+	try {
+		while (handle.readSync()) {
+			count++;
+			if (count >= MAX_LEASE_MARKERS) break;
+		}
+	} finally {
+		handle.closeSync();
+	}
+	return count;
+}
+
+function hasDurableHold(runDir: string): boolean {
+	try {
+		return readHoldCount(join(runDir, HOLDS_DIRECTORY)) > 0;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code !== "ENOENT";
+	}
 }
 
 const processWorkRuns = new Map<string, WorkRunLease>();
@@ -293,7 +378,7 @@ function hasActiveLease(runDir: string): boolean {
  * of the check; malformed or foreign-host markers remain fail-closed and count as active.
  */
 export function hasActiveWorkRunLease(runDir: string): boolean {
-	return cleanupMarkerBlocksAcquisition(runDir) || hasActiveLease(runDir);
+	return cleanupMarkerBlocksAcquisition(runDir) || hasDurableHold(runDir) || hasActiveLease(runDir);
 }
 
 function measureDirectory(path: string, budget: ScanBudget, depth = 0): { bytes: number; complete: boolean } {
@@ -407,7 +492,7 @@ function removeRunContent(runPath: string): void {
 function removeRunIfInactive(runPath: string, now: number): boolean {
 	const cleanupMarker = createCleanupMarker(runPath, now);
 	if (!cleanupMarker) return false;
-	if (hasActiveLease(runPath)) {
+	if (hasDurableHold(runPath) || hasActiveLease(runPath)) {
 		removeFile(cleanupMarker);
 		return false;
 	}

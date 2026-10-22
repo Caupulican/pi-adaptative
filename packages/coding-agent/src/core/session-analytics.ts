@@ -373,8 +373,17 @@ export class SessionAnalytics {
 	 * record read back from the owning parent's file permits the sender to discard its receipt.
 	 * New sessions buffer entries before their first assistant; successful append alone is insufficient.
 	 */
-	deliverSpawnedUsageReceipt(usage: Usage, options: SpawnedUsageReceiptOptions): SpawnedUsageReceiptDisposition {
-		return deliverSpawnedUsageReceipt(this.deps.getSessionManager(), this, usage, options);
+	createSpawnedUsageReceiptPort(isCurrent: () => boolean): {
+		isCurrent(): boolean;
+		deliver(usage: Usage, options: SpawnedUsageReceiptOptions): SpawnedUsageReceiptDisposition;
+	} {
+		return {
+			isCurrent,
+			deliver: (usage, options) => {
+				if (!isCurrent()) return "foreign_session";
+				return deliverSpawnedUsageReceipt(this.deps.getSessionManager(), this, usage, options);
+			},
+		};
 	}
 
 	private getAccountingSession(): SessionManager {

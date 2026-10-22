@@ -8,7 +8,6 @@ import { validateProviderUsage } from "../orchestration/attempt-usage.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync, readFilePrefixSync } from "../util/bounded-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { aggregateCumulativeUsageFromSessionEntries } from "./session-usage.ts";
-import type { SpawnedUsageReceiptDisposition, SpawnedUsageReceiptOptions } from "./spawned-usage-receipt.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE, SPAWNED_USAGE_CUSTOM_TYPE } from "./usage-records.ts";
 
 const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
@@ -21,31 +20,14 @@ export interface AutoLearnUsageSnapshot {
 	sourceDigest: string;
 }
 
-export function reportCompletedAutoLearnUsageHelper(args: {
-	runId: string;
-	sessionDir: string;
-	sessionId: string;
-	parentSessionId: string;
-	parentSession: {
-		deliverSpawnedUsageReceipt(usage: Usage, options: SpawnedUsageReceiptOptions): SpawnedUsageReceiptDisposition;
-	};
-}): SpawnedUsageReceiptDisposition {
-	const snapshot = readAutoLearnUsageSnapshot(args.sessionDir, args.sessionId);
-	const disposition = args.parentSession.deliverSpawnedUsageReceipt(snapshot.usage, {
-		parentSessionId: args.parentSessionId,
-		label: "auto-learn",
-		sourceSessionId: args.sessionId,
-		reportId: `auto-learn:${args.runId}:${args.sessionId}`,
-	});
+export function assertAutoLearnUsageSourceCurrent(snapshot: AutoLearnUsageSnapshot): void {
 	if (
-		disposition === "persisted" &&
 		createHash("sha256")
 			.update(readBoundedTextFileSync(snapshot.sourceFile, MAX_SOURCE_BYTES, "Auto Learn child ledger"))
 			.digest("hex") !== snapshot.sourceDigest
 	) {
 		throw new Error("Auto Learn child ledger changed during receipt delivery");
 	}
-	return disposition;
 }
 
 /** Read one exact child ledger. Damaged or ambiguous evidence never certifies a zero charge. */

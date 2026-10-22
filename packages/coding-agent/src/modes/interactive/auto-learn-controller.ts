@@ -16,10 +16,15 @@ import type { SelectItem } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../../config.ts";
+import { stateFile } from "../../core/agent-paths.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { PI_WORKER_READABLE_FILES_ENV } from "../../core/autonomy/worker-session-private-scope.ts";
 import { PI_OKF_TYPES } from "../../core/context/okf-memory.ts";
-import { reportCompletedAutoLearnUsageHelper } from "../../core/cost/auto-learn-usage.ts";
+import {
+	AutoLearnAccounting,
+	type AutoLearnAccountingOwner,
+	withAutoLearnAccountingProtection,
+} from "../../core/cost/auto-learn-accounting.ts";
 import { readAutoLearnSessionIdFromFile } from "../../core/cost/session-usage.ts";
 import { AutoLearnHandoffStore } from "../../core/learning/auto-learn-handoff-store.ts";
 import {
@@ -73,6 +78,7 @@ export interface AutoLearnHistoryPruneResult {
 
 export interface AutoLearnHistoryPruneOptions {
 	dataDir: string;
+	accountingDir: string;
 	now?: number;
 	retentionMs?: number;
 	activeRunIds?: Iterable<string | undefined>;
@@ -114,22 +120,6 @@ function removeOldAutoLearnArtifact(
 		result[counter]++;
 	} catch {
 		result.errors++;
-	}
-}
-
-function isPathInside(target: string, root: string): boolean {
-	const resolvedTarget = path.resolve(target);
-	const resolvedRoot = path.resolve(root);
-	return resolvedTarget === resolvedRoot || resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`);
-}
-
-function removeAutoLearnArtifactPath(filePath: string, root: string): boolean {
-	if (!isPathInside(filePath, root)) return false;
-	try {
-		fs.rmSync(filePath, { recursive: true, force: true });
-		return true;
-	} catch {
-		return false;
 	}
 }
 
@@ -177,11 +167,15 @@ function shouldPruneAutoLearnArtifact(
 function pruneAutoLearnSessionFiles(
 	dir: string,
 	activeSessionIds: ReadonlySet<string>,
+	protectedRuns: ReadonlySet<string>,
 	now: number,
 	retentionMs: number,
 	result: AutoLearnHistoryPruneResult,
 ): void {
 	visitAutoLearnFiles(dir, (filePath, fileName) => {
+		const segments = path.relative(dir, filePath).split(path.sep);
+		const sessionsAt = segments.indexOf("sessions");
+		if (sessionsAt >= 0 && protectedRuns.has(segments[sessionsAt + 1])) return;
 		if (!fileName.endsWith(".jsonl") || !shouldPruneAutoLearnArtifact(filePath, now, retentionMs, result)) return;
 		const sessionId = readAutoLearnSessionIdFromFile(filePath) ?? getAutoLearnSessionIdFromFileName(fileName);
 		if (!sessionId || !isAutoLearnSessionId(sessionId) || activeSessionIds.has(sessionId)) return;
@@ -215,8 +209,16 @@ export function pruneAutoLearnConversationHistory(options: AutoLearnHistoryPrune
 	const activeSessionIds = definedStringSet(options.activeSessionIds);
 	if (retentionMs <= 0 || !fs.existsSync(dataDir)) return result;
 
-	pruneAutoLearnRunArtifacts(dataDir, activeRunIds, now, retentionMs, result);
-	pruneAutoLearnSessionFiles(dataDir, activeSessionIds, now, retentionMs, result);
+	try {
+		withAutoLearnAccountingProtection(options.accountingDir, (protectedRuns) => {
+			for (const runId of protectedRuns) activeRunIds.add(runId);
+			pruneAutoLearnRunArtifacts(dataDir, activeRunIds, now, retentionMs, result);
+			pruneAutoLearnSessionFiles(dataDir, activeSessionIds, protectedRuns, now, retentionMs, result);
+		});
+	} catch {
+		// Contention or unreadable obligations cannot authorize deletion or break foreground input.
+		result.errors++;
+	}
 	return result;
 }
 
@@ -267,6 +269,7 @@ interface AutoLearnReservation {
 interface AutoLearnOwner {
 	session: AgentSession;
 	sessionId: string;
+	sessionFile: string | undefined;
 }
 
 type AutoLearnReservationResult = { ok: true; reservation: AutoLearnReservation } | { ok: false; reason: string };
@@ -323,6 +326,7 @@ export interface AutoLearnControllerUi {
 }
 
 export interface AutoLearnControllerDeps extends LiveSessionServices {
+	isActive(): boolean;
 	resolveSelfModificationSource(settings: { sourcePath?: string; sourcePaths?: string[] }): string | undefined;
 	ui: AutoLearnControllerUi;
 }
@@ -336,6 +340,9 @@ export class AutoLearnController {
 
 	private readonly deps: AutoLearnControllerDeps;
 	private readonly handoffs = new AutoLearnHandoffStore(AUTO_LEARN_HISTORY_RETENTION_MS);
+	private accounting: AutoLearnAccounting | undefined;
+	private accountingRecoveryScheduled = false;
+	private accountingRecoveryRequested = false;
 
 	constructor(deps: AutoLearnControllerDeps) {
 		this.deps = deps;
@@ -422,6 +429,66 @@ export class AutoLearnController {
 
 	getAutoLearnDataDir(): string {
 		return getProcessWorkRun(getAgentDir(), "learning", "auto-learn", "state").path;
+	}
+
+	private getAccounting(): AutoLearnAccounting {
+		const workRun = getProcessWorkRun(getAgentDir(), "learning", "auto-learn", "state");
+		this.accounting ??= new AutoLearnAccounting(
+			stateFile(getAgentDir(), "learning", "auto-learn-accounting"),
+			workRun,
+			(message) => this.deps.ui.showStatus(message),
+			(origin) =>
+				this.handoffs.hasPublished(
+					path.join(workRun.path, "tenants", origin.tenant, AUTO_LEARN_HANDOFF_DIR),
+					origin,
+				),
+		);
+		return this.accounting;
+	}
+
+	private accountingOwner(owner: AutoLearnOwner): AutoLearnAccountingOwner {
+		return {
+			sessionId: owner.sessionId,
+			sessionFile: owner.sessionFile,
+			isCurrent: () =>
+				this.deps.isActive() &&
+				this.deps.getSession() === owner.session &&
+				owner.session.sessionId === owner.sessionId &&
+				owner.session.sessionFile === owner.sessionFile &&
+				owner.session.spawnedUsageReceipts.isCurrent(),
+			deliver: (usage, options) => owner.session.spawnedUsageReceipts.deliver(usage, options),
+		};
+	}
+
+	private scheduleAccountingRecovery(): void {
+		if (!this.deps.isActive()) return;
+		this.accountingRecoveryRequested = true;
+		if (this.accountingRecoveryScheduled) return;
+		this.accountingRecoveryScheduled = true;
+		queueMicrotask(async () => {
+			try {
+				while (this.accountingRecoveryRequested && this.deps.isActive()) {
+					this.accountingRecoveryRequested = false;
+					const session = this.deps.getSession();
+					await this.getAccounting().recover(
+						this.accountingOwner({ session, sessionId: session.sessionId, sessionFile: session.sessionFile }),
+					);
+				}
+			} catch (error) {
+				if (this.deps.isActive())
+					this.deps.ui.showStatus(`Auto Learn accounting recovery unavailable: ${String(error)}`);
+			} finally {
+				this.accountingRecoveryScheduled = false;
+			}
+		});
+	}
+
+	private cancelPreparedAccounting(runId: string, logPath: string): void {
+		try {
+			this.getAccounting().cancelBeforeSpawn(runId);
+		} catch (error) {
+			this.appendAutoLearnLog(logPath, `Auto Learn pre-spawn accounting cleanup remains pending: ${String(error)}`);
+		}
 	}
 
 	private getAutoLearnStatePath(): string {
@@ -525,6 +592,7 @@ export class AutoLearnController {
 		const prunedState = this.pruneAutoLearnState(state, now);
 		pruneAutoLearnConversationHistory({
 			dataDir: this.getAutoLearnDataDir(),
+			accountingDir: this.getAccounting().directory,
 			now,
 			activeRunIds: Object.keys(prunedState.runs ?? {}),
 			activeSessionIds: Object.values(prunedState.runs ?? {}).map((run) => run.sessionId),
@@ -846,68 +914,6 @@ export class AutoLearnController {
 		});
 	}
 
-	private reportCompletedAutoLearnUsage(
-		runId: string,
-		sessionDir: string,
-		sessionId: string,
-		logPath: string,
-		owner: AutoLearnOwner,
-	): boolean {
-		if (owner.session.sessionId !== owner.sessionId) {
-			this.appendAutoLearnLog(logPath, "Auto Learn usage retained: launching session identity changed.");
-			return false;
-		}
-		try {
-			const disposition = reportCompletedAutoLearnUsageHelper({
-				runId,
-				sessionDir,
-				sessionId,
-				parentSessionId: owner.sessionId,
-				parentSession: owner.session,
-			});
-			if (disposition !== "persisted")
-				this.appendAutoLearnLog(logPath, `Auto Learn usage receipt retained: ${disposition}`);
-			return disposition === "persisted";
-		} catch (error: unknown) {
-			const message = error instanceof Error ? error.message : String(error);
-			this.appendAutoLearnLog(logPath, `Auto Learn usage report failed: ${message}`);
-			return false;
-		}
-	}
-
-	private cleanupCompletedAutoLearnRun(
-		runId: string,
-		options: {
-			artifactPaths: string[];
-			sessionDir: string;
-			sessionId: string;
-			logPath: string;
-			owner: AutoLearnOwner;
-		},
-	): void {
-		if (
-			!this.reportCompletedAutoLearnUsage(
-				runId,
-				options.sessionDir,
-				options.sessionId,
-				options.logPath,
-				options.owner,
-			)
-		) {
-			this.updateAutoLearnFooter();
-			return;
-		}
-		const dataDir = this.getAutoLearnDataDir();
-		for (const filePath of options.artifactPaths) removeAutoLearnArtifactPath(filePath, dataDir);
-		this.withAutoLearnStateLock((current) => {
-			const state = this.pruneAutoLearnState(current);
-			const runs = { ...(state.runs ?? {}) };
-			delete runs[runId];
-			return { result: undefined, next: { ...state, runs } };
-		});
-		this.updateAutoLearnFooter();
-	}
-
 	private markAutoLearnReservationRunning(
 		reservation: AutoLearnReservation,
 		pid: number,
@@ -975,7 +981,6 @@ export class AutoLearnController {
 			childSessionId: string;
 			sessionDir: string;
 			logPath: string;
-			artifactPaths: string[];
 			handoffDir: string;
 		},
 		exit: { code: number | null; signal: NodeJS.Signals | null },
@@ -1038,6 +1043,17 @@ export class AutoLearnController {
 		record.completedAt = new Date().toISOString();
 		const publication = this.handoffs.publish(run.handoffDir, record);
 		const persisted = publication.status === "persisted";
+		if (persisted) {
+			try {
+				this.getAccounting().handoffPersisted(run.runId);
+			} catch (error) {
+				this.appendAutoLearnLog(
+					run.logPath,
+					`Auto Learn accounting handoff acknowledgement failed: ${String(error)}`,
+				);
+			}
+		}
+		this.getAccounting().deliver(run.runId, this.accountingOwner(run.owner));
 		if (publication.status === "held" || publication.status === "conflict")
 			this.appendAutoLearnLog(run.logPath, `Auto Learn handoff not persisted: ${publication.reason}`);
 
@@ -1049,6 +1065,7 @@ export class AutoLearnController {
 					{ deliverAs: "nextTurn" },
 				)
 				.then(() => {
+					if (persisted) this.getAccounting().handoffPersisted(run.runId);
 					if (persisted && !this.handoffs.acknowledge(run.handoffDir, record))
 						this.appendAutoLearnLog(run.logPath, "Auto Learn notice delivered; receipt cleanup remains pending.");
 				})
@@ -1060,17 +1077,7 @@ export class AutoLearnController {
 		this.deps.ui.showStatus(
 			`Auto Learn ${run.runId}: ${record.status}${record.detail ? ` (${record.detail})` : ""}; ${applied} applied, ${open} recorded as findings${persisted ? "" : " (handoff not persisted)"}`,
 		);
-		if (exit.code === 0 && persisted) {
-			this.cleanupCompletedAutoLearnRun(run.runId, {
-				artifactPaths: run.artifactPaths,
-				sessionDir: run.sessionDir,
-				sessionId: run.childSessionId,
-				logPath: run.logPath,
-				owner: run.owner,
-			});
-		} else {
-			this.updateAutoLearnFooter();
-		}
+		this.updateAutoLearnFooter();
 	}
 
 	/**
@@ -1081,6 +1088,7 @@ export class AutoLearnController {
 	async reofferUnappliedProposals(): Promise<void> {
 		// Proposals belong to a main session: a worker (zero-footprint, read-only stores) never claims them.
 		if (isWorkerSession()) return;
+		this.scheduleAccountingRecovery();
 		const session = this.deps.getSession();
 		const sessionId = session.sessionId;
 		const isCurrent = () => this.deps.getSession() === session && session.sessionId === sessionId;
@@ -1106,6 +1114,11 @@ export class AutoLearnController {
 		}
 		for (const { directory, record } of result.finalized) {
 			if (!isCurrent()) break;
+			try {
+				this.getAccounting().handoffPersisted(record.runId);
+			} catch (error) {
+				this.deps.ui.showStatus(`Auto Learn accounting handoff acknowledgement failed: ${String(error)}`);
+			}
 			const applied = record.entries.filter((entry) => entry.outcome === "applied").length;
 			await session
 				.sendCustomMessage(
@@ -1118,6 +1131,7 @@ export class AutoLearnController {
 					{ deliverAs: "nextTurn" },
 				)
 				.then(() => {
+					this.getAccounting().handoffPersisted(record.runId);
 					if (!this.handoffs.acknowledge(directory, record))
 						this.deps.ui.showStatus(
 							`Auto Learn ${record.runId}: notice delivered; receipt cleanup remains pending.`,
@@ -1139,6 +1153,7 @@ export class AutoLearnController {
 				}`,
 			);
 		}
+		this.scheduleAccountingRecovery();
 	}
 
 	launchAutoLearn(
@@ -1175,7 +1190,7 @@ export class AutoLearnController {
 		fs.mkdirSync(sessionDir, { recursive: true });
 		const sourceSessionFile = this.deps.getSessionManager().getSessionFile();
 		const session = this.deps.getSession();
-		const owner: AutoLearnOwner = { session, sessionId: session.sessionId };
+		const owner: AutoLearnOwner = { session, sessionId: session.sessionId, sessionFile: session.sessionFile };
 		const prompt = this.buildAutoLearnPrompt(reason, settings, {
 			kind,
 			turnDigest: options.turnDigest,
@@ -1229,6 +1244,18 @@ export class AutoLearnController {
 		let child: ReturnType<typeof spawn> | undefined;
 		let outFd: number | undefined;
 		try {
+			this.getAccounting().register({
+				runId,
+				tenant: path.basename(dir),
+				parentSessionId: owner.sessionId,
+				parentSessionFile: owner.sessionFile,
+				childSessionId: sessionId,
+			});
+		} catch (error) {
+			this.releaseAutoLearnReservation(reservation, options.cooldownKind);
+			return `Auto Learn not started: accounting obligation unavailable (${String(error)}).`;
+		}
+		try {
 			outFd = fs.openSync(logPath, "a");
 			child = spawn(spawnTarget.command, args, {
 				cwd: this.deps.getSessionManager().getCwd(),
@@ -1250,6 +1277,7 @@ export class AutoLearnController {
 			});
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : String(error);
+			this.cancelPreparedAccounting(runId, logPath);
 			this.releaseAutoLearnReservation(reservation, options.cooldownKind);
 			this.appendAutoLearnLog(logPath, `Auto Learn failed to start: ${message}`);
 			this.updateAutoLearnFooter();
@@ -1264,6 +1292,7 @@ export class AutoLearnController {
 			}
 		}
 		if (!child || typeof child.pid !== "number" || child.pid <= 0) {
+			this.cancelPreparedAccounting(runId, logPath);
 			this.releaseAutoLearnReservation(reservation, options.cooldownKind);
 			this.updateAutoLearnFooter();
 			return `Auto Learn not started: failed to spawn background learner. Log: ${logPath}`;
@@ -1273,6 +1302,11 @@ export class AutoLearnController {
 		// the learner's returned proposals, applying them in this (main) session, persisting a bounded
 		// handoff and notifying the session. Nothing polls the learner's output to detect completion.
 		child.once("exit", (code, signal) => {
+			try {
+				this.getAccounting().terminal(runId, childPid, code);
+			} catch (error) {
+				this.appendAutoLearnLog(logPath, `Auto Learn terminal accounting remains pending: ${String(error)}`);
+			}
 			void this.settleAutoLearnRun(
 				{
 					runId: reservation.runId,
@@ -1281,7 +1315,6 @@ export class AutoLearnController {
 					childSessionId: sessionId,
 					sessionDir,
 					logPath,
-					artifactPaths: [promptPath, logPath, sessionDir],
 					handoffDir: path.join(dir, AUTO_LEARN_HANDOFF_DIR),
 				},
 				{ code, signal },
@@ -1293,6 +1326,11 @@ export class AutoLearnController {
 			});
 		});
 		child.unref();
+		try {
+			this.getAccounting().started(runId, childPid);
+		} catch (error) {
+			this.appendAutoLearnLog(logPath, `Auto Learn launch accounting remains pending: ${String(error)}`);
+		}
 		this.markAutoLearnReservationRunning(reservation, childPid, settings);
 
 		this.updateAutoLearnFooter();
@@ -1336,6 +1374,7 @@ export class AutoLearnController {
 	}
 
 	maybeRunNativeReflection(messages: AgentMessage[]): void {
+		this.scheduleAccountingRecovery();
 		this.checkTaskStepsContractNudge();
 		// Reflection scheduling is session-owned in AgentSession/ReflectionController so print, RPC,
 		// and interactive modes share one deduplicated lifecycle. This interactive hook only owns the
@@ -1344,6 +1383,7 @@ export class AutoLearnController {
 	}
 
 	maybeStartAutoLearn(): boolean {
+		this.scheduleAccountingRecovery();
 		// Preserve the deterministic task-contract monitor, but never buy an automatic learner turn.
 		this.checkTaskStepsContractNudge();
 		this.updateAutoLearnFooter();

@@ -443,6 +443,7 @@ export class InteractiveMode {
 		});
 		this.footer = new FooterComponent(this.session, this.footerServices(), this.footerDataProvider);
 		this.autoLearnController = new AutoLearnController({
+			isActive: () => this.isInitialized,
 			getSession: () => this.runtimeHost.session,
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
@@ -4207,6 +4208,8 @@ export class InteractiveMode {
 	}
 
 	stop(): void {
+		const wasInitialized = this.isInitialized;
+		this.isInitialized = false;
 		// Each teardown step runs whatever the earlier ones did, and every failure is kept: a failing widget, overlay or footer must not skip
 		// the subscriptions and the terminal restore (`ui.stop`) and the release of the warnings held for the TUI must not be skipped either.
 		const failures: unknown[] = [];
@@ -4244,9 +4247,8 @@ export class InteractiveMode {
 		attempt(() => this.unsubscribe?.());
 		attempt(() => this.unsubscribeExtensionsChanged?.());
 		try {
-			if (this.isInitialized) {
+			if (wasInitialized) {
 				this.ui.stop();
-				this.isInitialized = false;
 			}
 		} catch (error: unknown) {
 			failures.push(error);
