@@ -11,6 +11,7 @@
 
 import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/index.ts";
+import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
 import { isPassingTestVerification, retainedVerificationDetails } from "../../kernel/verification-obligations.ts";
 import { DEFAULT_NOUL_BAND_THRESHOLDS, isNoulProbability, settledAnswer } from "../decision/noul.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
@@ -34,7 +35,7 @@ export interface ClaimReceipts {
 	/** Paths written by successful edit/write calls. */
 	readonly filesChanged: readonly string[];
 	readonly toolCalls: number;
-	/** Tool calls that returned without error: what an inspection-backed verdict rests on. */
+	/** Successful tool operations: what an inspection-backed verdict rests on, even if later projection failed. */
 	readonly succeededToolCalls: number;
 }
 
@@ -70,11 +71,8 @@ function countDelivery(counts: { succeeded: number; failed: number }, ok: boolea
 
 /** Receipts for the messages a single turn appended. */
 export function collectClaimReceipts(turnMessages: readonly AgentMessage[]): ClaimReceipts {
-	const calls = new Map<string, ToolCall>();
-	for (const message of turnMessages) {
-		if (message.role !== "assistant") continue;
-		for (const block of message.content) if (block.type === "toolCall") calls.set(block.id, block);
-	}
+	const calls = new Map<string, ToolCall | undefined>();
+	const seenRequests = new Map<string, Set<string>>();
 	const tests = { passed: 0, failed: 0, lastPassed: undefined as boolean | undefined };
 	const commits = { succeeded: 0, failed: 0 };
 	const pushes = { succeeded: 0, failed: 0 };
@@ -83,13 +81,41 @@ export function collectClaimReceipts(turnMessages: readonly AgentMessage[]): Cla
 	let toolCalls = 0;
 	let succeededToolCalls = 0;
 	for (const message of turnMessages) {
+		if (message.role === "assistant") {
+			// Provider call IDs belong to this assistant request, never to later requests.
+			calls.clear();
+			for (const block of message.content) {
+				if (block.type !== "toolCall") continue;
+				calls.set(block.id, calls.has(block.id) ? undefined : block);
+			}
+			continue;
+		}
 		if (message.role !== "toolResult") continue;
 		const result = message as ToolResultMessage;
+		const call = calls.get(result.toolCallId);
+		if (!call || call.name !== result.toolName) continue;
+		calls.delete(result.toolCallId);
+		const invocation = retainedToolInvocation(result.details);
+		if (
+			!invocation &&
+			result.details &&
+			typeof result.details === "object" &&
+			Object.hasOwn(result.details, "piToolInvocation")
+		)
+			continue;
+		if (invocation) {
+			if (invocation.execution !== "completed") continue;
+			const seen = seenRequests.get(invocation.requestId) ?? new Set<string>();
+			if (seen.has(result.toolCallId)) continue;
+			seen.add(result.toolCallId);
+			seenRequests.set(invocation.requestId, seen);
+		}
+		const ok = invocation ? invocation.operationStatus === "success" : !result.isError;
 		toolCalls += 1;
-		if (!result.isError) succeededToolCalls += 1;
+		if (ok) succeededToolCalls += 1;
 		const record = retainedVerificationDetails(result.details)?.piVerification;
 		if (record?.evidence === "tests" && record.outcome === "executed") {
-			const passed = isPassingTestVerification(record);
+			const passed = invocation?.operationStatus !== "error" && isPassingTestVerification(record);
 			if (passed) tests.passed += 1;
 			else tests.failed += 1;
 			tests.lastPassed = passed;
@@ -100,9 +126,7 @@ export function collectClaimReceipts(turnMessages: readonly AgentMessage[]): Cla
 			tests.failed += checks.failed;
 			tests.lastPassed = checks.failed === 0;
 		}
-		const call = calls.get(result.toolCallId);
-		const args = (call?.arguments ?? {}) as Record<string, unknown>;
-		const ok = !result.isError;
+		const args = (call.arguments ?? {}) as Record<string, unknown>;
 		if (SHELL_TOOLS.has(result.toolName) && typeof args.command === "string") {
 			if (COMMIT.test(args.command)) countDelivery(commits, ok);
 			if (PUSH.test(args.command)) countDelivery(pushes, ok);
