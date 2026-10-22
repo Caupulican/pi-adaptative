@@ -73,12 +73,20 @@ export async function runJourney(
 				{ ...options, name: `${options.name}-system-one-${systemOneEnabled ? "on" : "off"}`, systemOneEnabled },
 				async (world) => {
 					lockfileFs.current = world.io.nodeFsExports();
-					await withDeadline(
-						world.trace,
-						`the journey's time budget (${JOURNEY_BUDGET_MS}ms across both modes)`,
-						body(world),
-						Math.max(1, budgetEnd - Date.now()),
-					);
+					try {
+						await withDeadline(
+							world.trace,
+							`the journey's time budget (${JOURNEY_BUDGET_MS}ms across both modes)`,
+							body(world),
+							Math.max(1, budgetEnd - Date.now()),
+						);
+					} catch (error) {
+						// Teardown can wait on the very work that failed; the cause must be visible before it does.
+						process.stderr.write(
+							`[${options.name} System One ${systemOneEnabled ? "on" : "off"}] ${failureText(error)}\n`,
+						);
+						throw error;
+					}
 				},
 			);
 		} catch (error) {
