@@ -1672,7 +1672,7 @@ export class AgentSession {
 			getModel: () => this.model ?? undefined,
 			getSettingsManager: () => this.settingsManager,
 			getSessionManager: () => this.sessionManager,
-			appendSessionMessageBatch: (batch) => this._foregroundLifecycle.appendMessageBatch(batch),
+			appendSessionMessageBatch: (batch, attempt) => this._foregroundLifecycle.appendMessageBatch(batch, attempt),
 			returnUnpersistedInput: (messages) => {
 				if (this._pendingQueue.returnUnpersisted(messages)) this._emitQueueUpdate();
 			},

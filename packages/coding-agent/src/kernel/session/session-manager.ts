@@ -72,7 +72,13 @@ import {
 	validateSessionLifecycleEntry,
 } from "./lifecycle-ledger.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
-import { SessionAppendCommittedError, type SessionAppendReceipt } from "./session-append-receipt.ts";
+import {
+	captureSessionAppendIdentity,
+	SessionAppendCommittedError,
+	type SessionAppendIdentity,
+	type SessionAppendReceipt,
+	SessionAppendUncertainError,
+} from "./session-append-receipt.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEndEntry,
@@ -1918,7 +1924,9 @@ export class SessionManager {
 	flushBufferedEntries(): void {
 		this._assertWritable();
 		if (!this.persist || this.flushed) return;
-		const receipt = this._persistEntries([], [], undefined, this._capturePersistenceContext(), true);
+		const receipt = this._persistEntries([], [], undefined, this._capturePersistenceContext(), {
+			flushBuffered: true,
+		});
 		if (receipt) this._emitEntriesPersisted(receipt);
 	}
 
@@ -2133,7 +2141,7 @@ export class SessionManager {
 		encodedEntries: readonly string[],
 		signal?: AbortSignal,
 		assertCurrent: () => void = this._capturePersistenceContext(),
-		flushBuffered = false,
+		options: { flushBuffered?: boolean; identity?: SessionAppendIdentity } = {},
 	): SessionEntriesPersistedEvent | undefined {
 		this._assertWritable();
 		signal?.throwIfAborted();
@@ -2142,6 +2150,7 @@ export class SessionManager {
 		const sessionFile = this.sessionFile;
 		const sessionId = this.sessionId;
 		const fileEntries = this.fileEntries;
+		const identity = options.identity ?? captureSessionAppendIdentity(sessionId, sessionFile, entries);
 		if (entries.length !== encodedEntries.length) {
 			throw new Error("Session persistence encoding count does not match the entry batch.");
 		}
@@ -2152,7 +2161,7 @@ export class SessionManager {
 		}
 
 		const shouldFlush =
-			flushBuffered || this.fileEntries.some(requiresSessionFile) || entries.some(requiresSessionFile);
+			options.flushBuffered || this.fileEntries.some(requiresSessionFile) || entries.some(requiresSessionFile);
 		// Encoding can invoke extension-owned getters. Prepare the entire initial prefix
 		// before opening the file, then check cancellation at the last pre-write boundary.
 		// Preparation failure is not an uncertain physical write and must remain recoverable.
@@ -2214,6 +2223,7 @@ export class SessionManager {
 				this.fileEntries === fileEntries
 			)
 				this.persistenceStateUncertain = true;
+			if (writeStarted) throw new SessionAppendUncertainError(identity, error);
 			throw error;
 		}
 		return Object.freeze({
@@ -2285,14 +2295,15 @@ export class SessionManager {
 		signal?: AbortSignal,
 		publication?: {
 			assertCurrent?: () => void;
+			identity?: SessionAppendIdentity;
 			beforeNotify?: () => void;
-			sourceMessages?: readonly object[];
 			onCommitted?: (receipt: SessionAppendReceipt) => void;
 		},
 	): void {
 		this._assertWritable();
 		signal?.throwIfAborted();
 		const assertCurrent = publication?.assertCurrent ?? this._capturePersistenceContext();
+		const identity = publication?.identity ?? captureSessionAppendIdentity(this.sessionId, this.sessionFile, entries);
 		let receipt: SessionEntriesPersistedEvent | undefined;
 		const encodedEntries =
 			preencodedEntries ??
@@ -2306,7 +2317,7 @@ export class SessionManager {
 			throw new Error("Session append encoding count does not match the entry batch.");
 		}
 		if (encodedEntries.length > 0) {
-			receipt = this._persistEntries(entries, encodedEntries, signal, assertCurrent);
+			receipt = this._persistEntries(entries, encodedEntries, signal, assertCurrent, { identity });
 		} else {
 			for (const entry of entries) {
 				if (isSessionLifecycleEntry(entry)) encodeSessionEntry(entry);
@@ -2324,19 +2335,8 @@ export class SessionManager {
 		const publishedFileEntries = this.fileEntries;
 		const publishedById = this.byId;
 		const committed: SessionAppendReceipt = Object.freeze({
-			sessionId: this.sessionId,
-			sessionFile: this.sessionFile,
+			...identity,
 			durability: receipt ? "persisted" : this.persist ? "buffered" : "memory",
-			entries: Object.freeze(
-				entries.map((entry, index) =>
-					Object.freeze({
-						id: entry.id,
-						type: entry.type,
-						source:
-							publication?.sourceMessages?.[index] ?? (entry.type === "message" ? entry.message : undefined),
-					}),
-				),
-			),
 		});
 		try {
 			publication?.beforeNotify?.();
@@ -2555,6 +2555,7 @@ export class SessionManager {
 	appendMessageBatch(
 		batch: readonly SessionMessageBatchEntry[],
 		onCommitted?: (receipt: SessionAppendReceipt) => void,
+		attempt?: symbol,
 	): string[] {
 		if (batch.length === 0) return [];
 		if (batch.length > MAX_SESSION_MESSAGE_BATCH_ENTRIES) {
@@ -2613,10 +2614,11 @@ export class SessionManager {
 			ids.add(id);
 			parentId = id;
 		}
+		const identity = captureSessionAppendIdentity(this.sessionId, this.sessionFile, entries, sourceMessages, attempt);
 		const encodedEntries = entries.map((entry) => encodeSessionEntry(entry));
 		this._appendEntries(entries, encodedEntries, undefined, {
 			assertCurrent,
-			sourceMessages,
+			identity,
 			onCommitted,
 			beforeNotify: () => {
 				for (const { message, entry } of customBindings) customMessageEntries.set(message, entry);

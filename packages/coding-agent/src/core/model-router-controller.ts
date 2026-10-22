@@ -208,7 +208,7 @@ export interface ModelRouterControllerDeps {
 	/** Session log: routed-turn message buffering/persistence, decision persistence, recent-decision status. */
 	getSessionManager(): SessionManager;
 	/** Canonical host-owned mixed message batch persistence; one validated publication for lifecycle linking. */
-	appendSessionMessageBatch(batch: readonly SessionMessageBatchEntry[]): string[];
+	appendSessionMessageBatch(batch: readonly SessionMessageBatchEntry[], attempt?: symbol): string[];
 	/** Messages a routed turn read but never persisted (escalated or thrown): the owner input among them is undelivered. */
 	returnUnpersistedInput?(messages: readonly AgentMessage[]): void;
 	/** Resolves configured route/judge/executor model patterns against configured auth. */
@@ -522,15 +522,17 @@ export class ModelRouterController {
 	commitSessionBuffer(): Map<AgentMessage, string> {
 		const modelRouterBuffer = this._modelRouterSessionBuffer;
 		if (!modelRouterBuffer) return new Map();
-		return flushModelRouterSessionBuffer(modelRouterBuffer, (batch) => this.deps.appendSessionMessageBatch(batch));
+		return flushModelRouterSessionBuffer(modelRouterBuffer, (batch, attempt) =>
+			this.deps.appendSessionMessageBatch(batch, attempt),
+		);
 	}
 
 	/** Commit only the prompt prefix before a provider request; keep the assistant/tool suffix buffered. */
 	commitSessionBufferPrefix(): Map<AgentMessage, string> {
 		const modelRouterBuffer = this._modelRouterSessionBuffer;
 		if (!modelRouterBuffer) return new Map();
-		return flushModelRouterSessionBufferPrefix(modelRouterBuffer, (batch) =>
-			this.deps.appendSessionMessageBatch(batch),
+		return flushModelRouterSessionBufferPrefix(modelRouterBuffer, (batch, attempt) =>
+			this.deps.appendSessionMessageBatch(batch, attempt),
 		);
 	}
 
@@ -1444,7 +1446,7 @@ export class ModelRouterController {
 					intent: routeDecision.tier === "cheap" ? "research" : "modify",
 				}
 			: undefined;
-		let thrownError: unknown;
+		let failure: { error: unknown } | undefined;
 		// Every statement that installs swap state runs INSIDE the try whose finally restores it.
 		// A throw during setup — a settings read, thinking clamp, capability derivation, tool
 		// filtering, the system-prompt build — would otherwise leave the session on the routed
@@ -1540,6 +1542,10 @@ export class ModelRouterController {
 			}
 			if (continueFromCanonicalHistory) await this.deps.runAgentContinuation(signal);
 			else await this.deps.runAgentPrompt(messages, signal);
+			// A provider hook can report a persistence failure as a turn result. It still cannot
+			// authorize escalation or replay of messages whose write outcome remains unresolved.
+			if (bufferRoutedTurn && this._modelRouterSessionBuffer?.uncertain)
+				throw this._modelRouterSessionBuffer.uncertain;
 			if (bufferRoutedTurn && this._modelRouterEscalationRequested) {
 				const bufferCommitted = this._modelRouterSessionBuffer?.committed === true;
 				const prefixCommitted = this._modelRouterSessionBuffer?.prefixCommitted === true;
@@ -1560,17 +1566,27 @@ export class ModelRouterController {
 				};
 				this._lastModelRouterDecision = completedDecision;
 			} else if (bufferRoutedTurn && this._modelRouterSessionBuffer) {
-				flushModelRouterSessionBuffer(this._modelRouterSessionBuffer, (batch) =>
-					this.deps.appendSessionMessageBatch(batch),
+				flushModelRouterSessionBuffer(this._modelRouterSessionBuffer, (batch, attempt) =>
+					this.deps.appendSessionMessageBatch(batch, attempt),
 				);
 			}
 		} catch (error) {
-			thrownError = error;
-			// Mirror the escalation path above: a buffered cheap-tier turn never flushes its live messages to the
-			// session on a genuine throw, so they must leave agent.state.messages here too — otherwise the
-			// never-persisted buffered messages permanently diverge from the persisted session (same shape as the
-			// W1.3 ghost-turn bug, but on the error path instead of the success/escalation paths).
-			if (bufferRoutedTurn) this.dropUnpersistedRoutedMessages();
+			const uncertain = bufferRoutedTurn ? this._modelRouterSessionBuffer?.uncertain : undefined;
+			failure = {
+				error:
+					uncertain && uncertain !== error
+						? new AggregateError([uncertain, error], "Routed turn failed with an unresolved session write.")
+						: error,
+			};
+			// Return only the buffer's never-attempted messages. Confirmed and uncertain publications
+			// already retired their exact descriptors from that replayable set and stay in live history.
+			try {
+				if (bufferRoutedTurn) this.dropUnpersistedRoutedMessages();
+			} catch (cleanupError) {
+				failure = {
+					error: new AggregateError([failure.error, cleanupError], "Routed turn and input return failed."),
+				};
+			}
 			if (completedDecision) {
 				completedDecision = { ...completedDecision, outcome: "failed" };
 				this._lastModelRouterDecision = completedDecision;
@@ -1598,7 +1614,15 @@ export class ModelRouterController {
 				}
 				// The registry may have changed mid-turn (command-time registerProvider): re-resolve
 				// the restored model so a provider override is not dropped with the routed model.
-				this.deps.refreshCurrentModelFromRegistry();
+				try {
+					this.deps.refreshCurrentModelFromRegistry();
+				} catch (error) {
+					failure = {
+						error: failure
+							? new AggregateError([failure.error, error], "Routed turn and model restoration failed.")
+							: error,
+					};
+				}
 			}
 			this._activeModelRouterIntent = previousActiveModelRouterIntent;
 			this._activeModelRouterRoute = previousActiveModelRouterRoute;
@@ -1608,7 +1632,7 @@ export class ModelRouterController {
 		}
 
 		// The escalation retry is more provider work, which a cancelled submission does not get.
-		if (retryModel && !thrownError && !signal?.aborted) {
+		if (retryModel && !failure && !signal?.aborted) {
 			const previousIsModelRouterRetry = this._isModelRouterRetry;
 			try {
 				this._isModelRouterRetry = true;
@@ -1624,7 +1648,7 @@ export class ModelRouterController {
 				await this.runRoutedTurn(messages, retryModel, retryDecision, false, retryFromCanonicalHistory, signal);
 				this._lastModelRouterDecision = completedDecision;
 			} catch (error) {
-				thrownError = error;
+				failure = { error };
 				if (completedDecision) {
 					completedDecision = { ...completedDecision, outcome: "failed" };
 					this._lastModelRouterDecision = completedDecision;
@@ -1635,24 +1659,29 @@ export class ModelRouterController {
 		}
 
 		if (persistDecision && completedDecision) {
-			persistModelRouterDecision(this.deps.getSessionManager(), completedDecision);
-			// One route event per user-facing routed turn (the escalation retry runs with
-			// persistDecision=false, so it does not double-emit). Codes/numbers only — no prompt text.
-			this.deps.emitAutonomyTelemetry({
-				type: AUTONOMY_TELEMETRY_EVENT_TYPES.routeDecision,
-				timestamp: new Date().toISOString(),
-				payload: {
-					tier: completedDecision.route.tier,
-					risk: completedDecision.route.risk,
-					reasonCode: completedDecision.route.reasonCode,
-					confidence: completedDecision.route.confidence,
-					outcome: completedDecision.outcome,
-				},
-			});
+			try {
+				persistModelRouterDecision(this.deps.getSessionManager(), completedDecision);
+				// One route event per user-facing routed turn (the escalation retry runs with
+				// persistDecision=false, so it does not double-emit). Codes/numbers only — no prompt text.
+				this.deps.emitAutonomyTelemetry({
+					type: AUTONOMY_TELEMETRY_EVENT_TYPES.routeDecision,
+					timestamp: new Date().toISOString(),
+					payload: {
+						tier: completedDecision.route.tier,
+						risk: completedDecision.route.risk,
+						reasonCode: completedDecision.route.reasonCode,
+						confidence: completedDecision.route.confidence,
+						outcome: completedDecision.outcome,
+					},
+				});
+			} catch (error) {
+				if (!failure) throw error;
+				throw new AggregateError([failure.error, error], "Routed turn and decision publication failed.");
+			}
 		}
 
-		if (thrownError) {
-			throw thrownError;
+		if (failure) {
+			throw failure.error;
 		}
 	}
 }

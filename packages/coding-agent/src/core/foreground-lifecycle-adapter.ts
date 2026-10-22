@@ -168,7 +168,10 @@ export class ForegroundLifecycleAdapter {
 		}
 	}
 
-	appendMessageBatch(batch: readonly SessionMessageBatchEntry[]): string[] {
+	appendMessageBatch(
+		batch: readonly SessionMessageBatchEntry[],
+		attempt = Symbol("foreground session append"),
+	): string[] {
 		if (batch.length === 0) return [];
 		const assertCurrent = this.sessionManager.captureBranchContext();
 		const submitted = batch.map((item) => Object.freeze({ ...item }));
@@ -176,16 +179,21 @@ export class ForegroundLifecycleAdapter {
 		const publication: { receipt?: SessionAppendReceipt } = {};
 		let failure: { error: unknown } | undefined;
 		try {
-			this.sessionManager.appendMessageBatch(submitted, (receipt) => {
-				publication.receipt = receipt;
-			});
+			this.sessionManager.appendMessageBatch(
+				submitted,
+				(receipt) => {
+					publication.receipt = receipt;
+				},
+				attempt,
+			);
 		} catch (error) {
-			if (error instanceof SessionAppendCommittedError) publication.receipt = error.receipt;
+			if (error instanceof SessionAppendCommittedError && error.receipt.attempt === attempt)
+				publication.receipt = error.receipt;
 			if (!publication.receipt) throw error;
 			failure = { error };
 		}
 		const receipt = publication.receipt;
-		if (!receipt || !receiptMatchesMessageBatch(receipt, submitted))
+		if (!receipt || !receiptMatchesMessageBatch(receipt, submitted, attempt))
 			throw new Error("Session append did not return its exact publication receipt.", { cause: failure?.error });
 		// The rows are canonical now. A failing lifecycle effect cannot suppress another row's delivery,
 		// and the caller receives the same receipt even when one or more effects fail.

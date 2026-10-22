@@ -3,6 +3,7 @@ import type { AgentMessage, AgentMessageOrigin } from "../../kernel/index.ts";
 import {
 	receiptMatchesMessageBatch,
 	SessionAppendCommittedError,
+	SessionAppendUncertainError,
 } from "../../kernel/session/session-append-receipt.ts";
 
 export type ModelRouterBufferedSessionMessage =
@@ -22,6 +23,8 @@ export type ModelRouterSessionBuffer = {
 	committed: boolean;
 	/** True after the prompt prefix was accepted; the storage receipt separately identifies physical durability. */
 	prefixCommitted: boolean;
+	/** An attempted write has no confirmed result; its messages must never return to the replay queue. */
+	uncertain?: SessionAppendUncertainError;
 };
 
 export function createModelRouterSessionBuffer(): ModelRouterSessionBuffer {
@@ -45,7 +48,7 @@ export function bufferModelRouterSessionCustomMessage(
 
 export function flushModelRouterSessionBuffer(
 	buffer: ModelRouterSessionBuffer,
-	appendBatch: (entries: readonly ModelRouterBufferedSessionMessage[]) => readonly string[],
+	appendBatch: (entries: readonly ModelRouterBufferedSessionMessage[], attempt: symbol) => readonly string[],
 ): Map<AgentMessage, string> {
 	return flushBufferedMessages(buffer, appendBatch, false);
 }
@@ -53,7 +56,7 @@ export function flushModelRouterSessionBuffer(
 /** Commit only the prompt prefix before provider transport; later assistant/tool messages remain buffered. */
 export function flushModelRouterSessionBufferPrefix(
 	buffer: ModelRouterSessionBuffer,
-	appendBatch: (entries: readonly ModelRouterBufferedSessionMessage[]) => readonly string[],
+	appendBatch: (entries: readonly ModelRouterBufferedSessionMessage[], attempt: symbol) => readonly string[],
 ): Map<AgentMessage, string> {
 	return flushBufferedMessages(buffer, appendBatch, true);
 }
@@ -63,22 +66,41 @@ const publishingBuffers = new WeakSet<ModelRouterSessionBuffer>();
 
 function flushBufferedMessages(
 	buffer: ModelRouterSessionBuffer,
-	appendBatch: (entries: readonly ModelRouterBufferedSessionMessage[]) => readonly string[],
+	appendBatch: (entries: readonly ModelRouterBufferedSessionMessage[], attempt: symbol) => readonly string[],
 	prefixOnly: boolean,
 ): Map<AgentMessage, string> {
+	if (buffer.uncertain) throw buffer.uncertain;
 	if (buffer.committed || (prefixOnly && buffer.prefixCommitted)) return new Map();
 	if (publishingBuffers.has(buffer)) throw new Error("A routed session buffer is already being published.");
 	publishingBuffers.add(buffer);
 	try {
+		const attempt = Symbol("routed session append");
 		const original = buffer.messages.slice();
 		const entries = original.map((entry) => Object.freeze({ ...entry }));
 		let ids: readonly string[] = [];
 		let failure: SessionAppendCommittedError | undefined;
 		if (entries.length > 0) {
 			try {
-				ids = appendBatch(entries);
+				ids = appendBatch(entries, attempt);
 			} catch (error) {
-				if (!(error instanceof SessionAppendCommittedError) || !receiptMatchesMessageBatch(error.receipt, entries))
+				if (
+					error instanceof SessionAppendUncertainError &&
+					receiptMatchesMessageBatch(error.identity, entries, attempt)
+				) {
+					buffer.uncertain = error;
+					// Retain these messages in live history and the owner's durable recovery record. Only
+					// never-attempted suffixes remain eligible for the router's ordinary drop/requeue path.
+					if (!removeSubmittedMessages(buffer, original))
+						throw new AggregateError(
+							[error, new Error("The routed session buffer changed its publishing prefix.")],
+							"Unresolved routed publication also changed its source buffer.",
+						);
+					throw error;
+				}
+				if (
+					!(error instanceof SessionAppendCommittedError) ||
+					!receiptMatchesMessageBatch(error.receipt, entries, attempt)
+				)
 					throw error;
 				ids = error.receipt.entries.map((entry) => entry.id);
 				failure = error;
@@ -93,15 +115,7 @@ function flushBufferedMessages(
 		}
 		// Remove exactly the submitted descriptor occurrences. A callback may append a suffix, but cannot
 		// replace the prefix silently or make unrelated entries disappear through a count-only splice.
-		const prefixCurrent = original.every((entry, index) => buffer.messages[index] === entry);
-		const published = new Map<ModelRouterBufferedSessionMessage, number>();
-		for (const entry of original) published.set(entry, (published.get(entry) ?? 0) + 1);
-		buffer.messages = buffer.messages.filter((entry) => {
-			const remaining = published.get(entry) ?? 0;
-			if (remaining === 0) return true;
-			published.set(entry, remaining - 1);
-			return false;
-		});
+		const prefixCurrent = removeSubmittedMessages(buffer, original);
 		buffer.prefixCommitted = true;
 		buffer.committed = !prefixOnly && buffer.messages.length === 0;
 		const failures: unknown[] = failure ? [failure] : [];
@@ -116,4 +130,21 @@ function flushBufferedMessages(
 	} finally {
 		publishingBuffers.delete(buffer);
 	}
+}
+
+/** Retire exact descriptor occurrences after a confirmed or unresolved write, preserving later arrivals. */
+function removeSubmittedMessages(
+	buffer: ModelRouterSessionBuffer,
+	original: readonly ModelRouterBufferedSessionMessage[],
+): boolean {
+	const prefixCurrent = original.every((entry, index) => buffer.messages[index] === entry);
+	const submitted = new Map<ModelRouterBufferedSessionMessage, number>();
+	for (const entry of original) submitted.set(entry, (submitted.get(entry) ?? 0) + 1);
+	buffer.messages = buffer.messages.filter((entry) => {
+		const remaining = submitted.get(entry) ?? 0;
+		if (remaining === 0) return true;
+		submitted.set(entry, remaining - 1);
+		return false;
+	});
+	return prefixCurrent;
 }
