@@ -55,18 +55,30 @@ for (const name of ["lock", "lockSync", "unlock", "unlockSync", "check", "checkS
 	});
 }
 
+/**
+ * The time both modes of one journey share, kept under the test runner's own timeout: a stall then fails with the trace's last
+ * step instead of an anonymous timeout.
+ */
+const JOURNEY_BUDGET_MS = 285_000;
+
 /** Each of the three journeys runs completely in both modes, with fresh storage and the same native owners. */
 export async function runJourney(
 	options: Omit<HarnessWorldOptions, "systemOneEnabled">,
 	body: (world: HarnessWorld) => Promise<void>,
 ): Promise<void> {
+	const budgetEnd = Date.now() + JOURNEY_BUDGET_MS;
 	for (const systemOneEnabled of [true, false]) {
 		try {
 			await runHarnessWorld(
 				{ ...options, name: `${options.name}-system-one-${systemOneEnabled ? "on" : "off"}`, systemOneEnabled },
 				async (world) => {
 					lockfileFs.current = world.io.nodeFsExports();
-					await body(world);
+					await withDeadline(
+						world.trace,
+						`the journey's time budget (${JOURNEY_BUDGET_MS}ms across both modes)`,
+						body(world),
+						Math.max(1, budgetEnd - Date.now()),
+					);
 				},
 			);
 		} catch (error) {
