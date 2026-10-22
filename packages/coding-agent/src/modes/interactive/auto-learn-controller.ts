@@ -20,6 +20,7 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import { PI_WORKER_READABLE_FILES_ENV } from "../../core/autonomy/worker-session-private-scope.ts";
 import { PI_OKF_TYPES } from "../../core/context/okf-memory.ts";
 import { readAutoLearnSessionIdFromFile, reportCompletedAutoLearnUsageHelper } from "../../core/cost/session-usage.ts";
+import { AutoLearnHandoffStore } from "../../core/learning/auto-learn-handoff-store.ts";
 import {
 	AUTO_LEARN_LEARNER_TOOLS,
 	AUTO_LEARN_PROPOSAL_TAG,
@@ -333,6 +334,7 @@ export class AutoLearnController {
 	private _taskContractStreak: TaskContractStreak = INITIAL_TASK_CONTRACT_STREAK;
 
 	private readonly deps: AutoLearnControllerDeps;
+	private readonly handoffs = new AutoLearnHandoffStore(AUTO_LEARN_HISTORY_RETENTION_MS);
 
 	constructor(deps: AutoLearnControllerDeps) {
 		this.deps = deps;
@@ -957,27 +959,6 @@ export class AutoLearnController {
 		}
 	}
 
-	private persistAutoLearnHandoff(handoffDir: string, record: AutoLearnHandoffRecord): boolean {
-		try {
-			fs.mkdirSync(handoffDir, { recursive: true });
-			const now = Date.now();
-			for (const name of fs.readdirSync(handoffDir)) {
-				const filePath = path.join(handoffDir, name);
-				if (name.endsWith(".json") && isOldAutoLearnArtifact(filePath, now, AUTO_LEARN_HISTORY_RETENTION_MS)) {
-					fs.rmSync(filePath, { force: true });
-				}
-			}
-			fs.writeFileSync(
-				path.join(handoffDir, `${sanitizeAutoLearnPathPart(record.runId, "run")}.json`),
-				`${JSON.stringify(record, null, 2)}\n`,
-				"utf-8",
-			);
-			return true;
-		} catch {
-			return false;
-		}
-	}
-
 	/**
 	 * Terminal handling for one learner. The learner is read-only, so its output is a claim: it is
 	 * applied here only when the child exited cleanly, reported PASS, still belongs to the launching
@@ -1053,16 +1034,22 @@ export class AutoLearnController {
 			}
 		}
 		record.completedAt = new Date().toISOString();
-		const persisted = this.persistAutoLearnHandoff(run.handoffDir, record);
-		if (!persisted) this.appendAutoLearnLog(run.logPath, "Auto Learn handoff record could not be persisted.");
+		const publication = this.handoffs.publish(run.handoffDir, record);
+		const persisted = publication.status === "persisted";
+		if (publication.status === "held" || publication.status === "conflict")
+			this.appendAutoLearnLog(run.logPath, `Auto Learn handoff not persisted: ${publication.reason}`);
 
 		const note = formatAutoLearnHandoffNote(record);
 		if (run.owner.session.sessionId === run.owner.sessionId)
-			void run.owner.session
+			await run.owner.session
 				.sendCustomMessage(
 					{ customType: "auto_learn_handoff", content: note, display: false, details: { runId: run.runId } },
 					{ deliverAs: "nextTurn" },
 				)
+				.then(() => {
+					if (persisted && !this.handoffs.acknowledge(run.handoffDir, record))
+						this.appendAutoLearnLog(run.logPath, "Auto Learn notice delivered; receipt cleanup remains pending.");
+				})
 				.catch(() => {
 					// The persisted handoff and status line still carry the outcome.
 				});
@@ -1103,16 +1090,22 @@ export class AutoLearnController {
 			sessionId,
 			isCurrent,
 			eligible: settings.enabled,
-			// The handoff retention discards a held record unapplied; warn a day before it does.
-			expiringAfterMs: AUTO_LEARN_HISTORY_RETENTION_MS - 24 * 60 * 60 * 1000,
+			// Age is advisory: pending claims and notice obligations remain protected from cleanup.
+			retentionWarningAfterMs: AUTO_LEARN_HISTORY_RETENTION_MS - 24 * 60 * 60 * 1000,
 			applyProposals: (set, runId) => session.applyAutoLearnProposals(set, runId),
-			persist: (handoffDir, record) => this.persistAutoLearnHandoff(handoffDir, record),
+			handoffs: this.handoffs,
 		});
 		// Receipts stay on disk for their owner; never enqueue old-project work into a replacement session.
 		if (!isCurrent()) return;
-		for (const record of result.finalized) {
+		if (result.unresolved.length > 0) {
+			this.deps.ui.showStatus(
+				`Auto Learn: ${result.unresolved.length} retained handoff issue(s): ${result.unresolved.join("; ")}`,
+			);
+		}
+		for (const { directory, record } of result.finalized) {
+			if (!isCurrent()) break;
 			const applied = record.entries.filter((entry) => entry.outcome === "applied").length;
-			void session
+			await session
 				.sendCustomMessage(
 					{
 						customType: "auto_learn_handoff",
@@ -1122,6 +1115,12 @@ export class AutoLearnController {
 					},
 					{ deliverAs: "nextTurn" },
 				)
+				.then(() => {
+					if (!this.handoffs.acknowledge(directory, record))
+						this.deps.ui.showStatus(
+							`Auto Learn ${record.runId}: notice delivered; receipt cleanup remains pending.`,
+						);
+				})
 				.catch(() => {
 					// The persisted record and status line still carry the outcome.
 				});
@@ -1132,8 +1131,8 @@ export class AutoLearnController {
 		if (result.deferred > 0) {
 			this.deps.ui.showStatus(
 				`Auto Learn: ${result.deferred} unapplied proposal set${result.deferred > 1 ? "s are" : " is"} held for this project; they are offered when autoLearn is enabled.${
-					result.deferredExpiring > 0
-						? ` ${result.deferredExpiring} will be discarded unapplied within a day: enable autoLearn now to apply ${result.deferredExpiring > 1 ? "them" : "it"}.`
+					result.deferredNearRetention > 0
+						? ` ${result.deferredNearRetention} deferred set${result.deferredNearRetention === 1 ? " is" : "s are"} approaching or beyond the normal retention age; review before cleanup.`
 						: ""
 				}`,
 			);

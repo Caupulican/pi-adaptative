@@ -1,186 +1,97 @@
-/**
- * Durable re-offer of Auto Learn proposals the launching session could not apply.
- *
- * When the session that launched a learner is no longer active at exit, the learner's validated
- * proposal block is kept in its handoff record (`status: parent_session_changed`, attributed to the run
- * id). A later main session offers it again at startup, under exactly the eligibility the original run
- * would have had (`AutoLearnApplyPorts` decides every entry), then finalizes the record: applied or
- * reported, the retained proposals cleared, never offered again.
- *
- * Never applied twice: a record is claimed by an atomic rename before anything is applied, so two
- * sessions cannot both hold it. A claim whose owner died before finalizing is not re-applied (the
- * outcome of a partial apply is unknowable); it is finalized as `apply_failed` with the proposals kept
- * for review and reported.
- */
-
-import * as fs from "node:fs";
-import * as path from "node:path";
+/** Reoffer retained proposals through the handoff store's single-claim application protocol. */
+import { isMissingFileError } from "../util/atomic-file.ts";
+import type { AutoLearnHandoffStore, AutoLearnPublication } from "./auto-learn-handoff-store.ts";
 import {
 	AUTO_LEARN_PROPOSAL_TAG,
 	type AutoLearnHandoffRecord,
 	type AutoLearnProposalSet,
 	type AutoLearnReportEntry,
-	MAX_AUTO_LEARN_BLOCK_BYTES,
 	parseAutoLearnProposals,
 } from "./auto-learn-proposals.ts";
 
-export const AUTO_LEARN_REOFFER_CLAIM_SUFFIX = ".reoffer-claimed";
-/** A claim older than this has no live owner: its proposals are reported, never applied. */
-export const AUTO_LEARN_REOFFER_CLAIM_STALE_MS = 10 * 60 * 1000;
 export const MAX_AUTO_LEARN_REOFFER_RECORDS = 32;
-/** A handoff record is a few KiB plus at most one proposal block; anything larger is not one of ours. */
-const MAX_AUTO_LEARN_REOFFER_FILE_BYTES = MAX_AUTO_LEARN_BLOCK_BYTES + 64 * 1024;
+const MAX_REOFFER_DIAGNOSTICS = 32;
 
 export interface AutoLearnReofferPorts {
-	/** Tenant directory holding `<tenant>/handoffs`; only tenants whose name ends with `-<cwdHash>` are offered. */
 	tenantsDir: string;
 	handoffDirName: string;
 	cwdHash: string;
-	/** The current (main) session. */
 	sessionId: string;
-	/** A scan belongs to one session; losing that owner stops admission of further records. */
+	/** Losing the captured session stops admission of further records. */
 	isCurrent?(): boolean;
-	/** Same eligibility gate as a fresh run (`autoLearn.enabled`); when false, records stay pending. */
 	eligible: boolean;
-	/** A held record at least this old counts as expiring (the host names its handoff retention minus a margin). */
-	expiringAfterMs?: number;
+	retentionWarningAfterMs?: number;
+	handoffs: AutoLearnHandoffStore;
 	applyProposals(set: AutoLearnProposalSet, runId: string): Promise<AutoLearnReportEntry[]>;
-	/** Persist a final record over `<runId>.json` (same writer the original settle uses). */
-	persist(handoffDir: string, record: AutoLearnHandoffRecord): boolean;
 	now?: () => number;
 }
 
 export interface AutoLearnReofferResult {
-	/** Finalized records (applied, reported, failed or interrupted), for the host to announce. */
-	finalized: AutoLearnHandoffRecord[];
-	/** Eligible-by-shape records left pending because autoLearn is not enabled now. */
+	/** Only exact records acknowledged by the storage owner appear here. */
+	finalized: Array<{ directory: string; record: AutoLearnHandoffRecord }>;
 	deferred: number;
-	/** Of those, records old enough that the handoff retention will soon discard them unapplied. */
-	deferredExpiring: number;
+	deferredNearRetention: number;
+	/** Bounded diagnostics for claims/receipts requiring another publication attempt or inspection. */
+	unresolved: string[];
 }
 
-function readRecord(filePath: string): AutoLearnHandoffRecord | undefined {
-	try {
-		const stats = fs.lstatSync(filePath);
-		if (!stats.isFile() || stats.size > MAX_AUTO_LEARN_REOFFER_FILE_BYTES) return undefined;
-		const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-		if (typeof parsed !== "object" || parsed === null) return undefined;
-		const record = parsed as Partial<AutoLearnHandoffRecord>;
-		if (record.version !== 1 || typeof record.runId !== "string" || !Array.isArray(record.entries)) return undefined;
-		return record as AutoLearnHandoffRecord;
-	} catch {
-		return undefined;
-	}
-}
-
-function isPending(record: AutoLearnHandoffRecord): boolean {
-	return (
-		record.status === "parent_session_changed" &&
-		record.verdict === "PASS" &&
-		typeof record.unappliedProposals === "string" &&
-		record.unappliedProposals.length > 0 &&
-		record.reoffered === undefined
-	);
-}
-
-function listHandoffDirs(ports: AutoLearnReofferPorts): string[] {
-	let tenants: string[];
-	try {
-		tenants = fs.readdirSync(ports.tenantsDir);
-	} catch {
-		return [];
-	}
-	return tenants
-		.filter((name) => name.endsWith(`-${ports.cwdHash}`))
-		.map((name) => path.join(ports.tenantsDir, name, ports.handoffDirName));
-}
-
-function listFiles(dir: string, suffix: string): string[] {
-	try {
-		return fs
-			.readdirSync(dir)
-			.filter((name) => name.endsWith(suffix))
-			.map((name) => path.join(dir, name));
-	} catch {
-		return [];
-	}
-}
-
-/** Offer every pending record of this project once; see the module header for the guarantees. */
 export async function reofferAutoLearnProposals(ports: AutoLearnReofferPorts): Promise<AutoLearnReofferResult> {
 	const now = ports.now ?? Date.now;
-	const result: AutoLearnReofferResult = { finalized: [], deferred: 0, deferredExpiring: 0 };
-	const handoffDirs = listHandoffDirs(ports);
-
-	// Claims whose owner is gone: report, never re-apply.
-	for (const handoffDir of handoffDirs) {
-		for (const claimed of listFiles(handoffDir, AUTO_LEARN_REOFFER_CLAIM_SUFFIX)) {
-			let age: number;
-			try {
-				age = now() - fs.lstatSync(claimed).mtimeMs;
-			} catch {
-				continue;
-			}
-			if (age <= AUTO_LEARN_REOFFER_CLAIM_STALE_MS) continue;
-			const record = readRecord(claimed);
-			if (!record) continue;
-			record.status = "apply_failed";
-			record.detail =
-				"a re-offer of the retained proposals was interrupted after they were claimed; they were not re-applied (applying twice is never done). Review unappliedProposals in this record.";
-			record.completedAt = new Date(now()).toISOString();
-			if (ports.persist(handoffDir, record)) {
-				fs.rmSync(claimed, { force: true });
-				result.finalized.push(record);
-			}
-		}
+	const result: AutoLearnReofferResult = { finalized: [], deferred: 0, deferredNearRetention: 0, unresolved: [] };
+	const recordProblem = (reason: string) => {
+		if (result.unresolved.length < MAX_REOFFER_DIAGNOSTICS) result.unresolved.push(reason);
+	};
+	const recordPublication = (directory: string, runId: string, publication: AutoLearnPublication) => {
+		if (publication.status === "persisted") {
+			result.finalized.push({ directory, record: publication.record });
+		} else if (publication.status !== "acknowledged") recordProblem(`${runId}: ${publication.reason}`);
+	};
+	let selected: Array<{ directory: string; runId: string }>;
+	try {
+		const batch = ports.handoffs.scanProject(ports.tenantsDir, ports.cwdHash, ports.handoffDirName);
+		selected = batch.records;
+		for (const issue of batch.issues) recordProblem(issue);
+	} catch (error) {
+		if (!isMissingFileError(error))
+			recordProblem(`Cannot inspect Auto Learn tenants: ${String(error).slice(0, 512)}`);
+		return result;
 	}
-
-	const candidates: Array<{ handoffDir: string; filePath: string; mtimeMs: number }> = [];
-	for (const handoffDir of handoffDirs) {
-		for (const filePath of listFiles(handoffDir, ".json")) {
-			try {
-				candidates.push({ handoffDir, filePath, mtimeMs: fs.lstatSync(filePath).mtimeMs });
-			} catch {
-				// A record that vanished is another session's finalization.
+	const candidates: Array<{ handoffDir: string; runId: string; mtimeMs: number }> = [];
+	for (const { directory, runId } of selected) {
+		try {
+			const item = ports.handoffs.inspect(directory, runId);
+			if (item.kind === "pending") candidates.push({ handoffDir: directory, runId, mtimeMs: item.mtimeMs });
+			else if (item.kind === "recovery" && result.finalized.length < MAX_AUTO_LEARN_REOFFER_RECORDS) {
+				const publication = ports.handoffs.recover(directory, runId, ports.sessionId, now());
+				const ready = publication.status === "persisted" ? ports.handoffs.inspect(directory, runId) : undefined;
+				if (ready?.kind === "pending") candidates.push({ handoffDir: directory, runId, mtimeMs: ready.mtimeMs });
+				else recordPublication(directory, runId, publication);
 			}
+		} catch (error) {
+			if (!isMissingFileError(error)) recordProblem(`${runId}: ${String(error).slice(0, 512)}`);
 		}
 	}
 	candidates.sort((a, b) => a.mtimeMs - b.mtimeMs);
-
+	// Pending notices have their own bound; cleanup/delivery retries never consume fresh apply capacity.
 	let offered = 0;
-	for (const { handoffDir, filePath, mtimeMs } of candidates) {
+	for (const { handoffDir, runId, mtimeMs } of candidates) {
 		if (ports.isCurrent?.() === false) break;
-		const peek = readRecord(filePath);
-		if (!peek || !isPending(peek)) continue;
-		if (!ports.eligible) {
+		if (!ports.eligible || offered >= MAX_AUTO_LEARN_REOFFER_RECORDS) {
 			result.deferred++;
-			if (ports.expiringAfterMs !== undefined && now() - mtimeMs >= ports.expiringAfterMs) result.deferredExpiring++;
+			if (ports.retentionWarningAfterMs !== undefined && now() - mtimeMs >= ports.retentionWarningAfterMs)
+				result.deferredNearRetention++;
 			continue;
 		}
-		if (offered >= MAX_AUTO_LEARN_REOFFER_RECORDS) {
-			result.deferred++;
-			continue;
-		}
-		offered++;
-		const claimed = `${filePath}${AUTO_LEARN_REOFFER_CLAIM_SUFFIX}`;
+		let owned: ReturnType<AutoLearnHandoffStore["claim"]>;
 		try {
-			fs.renameSync(filePath, claimed);
-			// A rename keeps the record's own mtime; staleness must measure the age of the claim.
-			const claimedAt = new Date(now());
-			fs.utimesSync(claimed, claimedAt, claimedAt);
-		} catch {
+			owned = ports.handoffs.claim(handoffDir, runId, ports.sessionId);
+		} catch (error) {
+			recordProblem(`${runId}: claim not acquired (${String(error).slice(0, 512)})`);
 			continue;
 		}
-		const record = readRecord(claimed);
-		if (!record || !isPending(record)) {
-			// Another session finalized it between the peek and the claim; give the final record back.
-			try {
-				if (!fs.existsSync(filePath)) fs.renameSync(claimed, filePath);
-			} catch {
-				// Nothing more to restore.
-			}
-			continue;
-		}
+		if (!owned) continue;
+		offered++;
+		const record = owned.record;
 		const wasDetail = record.detail;
 		const parsed = parseAutoLearnProposals(
 			`<${AUTO_LEARN_PROPOSAL_TAG}>${record.unappliedProposals}</${AUTO_LEARN_PROPOSAL_TAG}>`,
@@ -193,21 +104,18 @@ export async function reofferAutoLearnProposals(ports: AutoLearnReofferPorts): P
 			record.detail = `retained proposals report ${parsed.set.verdict}; not applied`;
 		} else {
 			try {
-				record.entries = await ports.applyProposals(parsed.set, record.runId);
+				record.entries = await ports.applyProposals(parsed.set, runId);
 				record.status = "reported";
 				record.detail = `re-offered at the startup of session ${ports.sessionId}${wasDetail ? ` (originally: ${wasDetail})` : ""}`;
 				delete record.unappliedProposals;
-			} catch (error: unknown) {
+			} catch (error) {
 				record.status = "apply_failed";
-				record.detail = `re-offered proposals failed to apply: ${error instanceof Error ? error.message : String(error)}`;
+				record.detail = `re-offered proposals failed to apply: ${String(error).slice(0, 512)}`;
 			}
 		}
 		record.reoffered = { sessionId: ports.sessionId, at: new Date(now()).toISOString() };
 		record.completedAt = record.reoffered.at;
-		// Finalizing replaces the pending record, then the claim is released; a failed write leaves the claim
-		// for the stale-claim report above rather than reopening the record.
-		if (ports.persist(handoffDir, record)) fs.rmSync(claimed, { force: true });
-		result.finalized.push(record);
+		recordPublication(handoffDir, runId, ports.handoffs.complete(owned.claim, record));
 	}
 	return result;
 }
