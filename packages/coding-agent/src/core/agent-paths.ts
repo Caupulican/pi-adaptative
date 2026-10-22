@@ -40,8 +40,23 @@
  * `mkdirSync(dirname(filePath), { recursive: true })`), so duplicating that here would be redundant
  * and would blur the "pure function" contract readers rely on.
  */
-import { createHash } from "node:crypto";
 import { join } from "node:path";
+import {
+	orchestrationSessionDeletionFile,
+	orchestrationSessionDir,
+	orchestrationSessionsDir,
+} from "../kernel/session/session-bundle-paths.ts";
+import { sessionsDir, stateDir, stateFile } from "../kernel/storage/paths.ts";
+
+export {
+	orchestrationSessionDeletionFile,
+	orchestrationSessionDir,
+	orchestrationSessionsDir,
+	sessionsDir,
+	stateDir,
+	stateFile,
+};
+
 import {
 	acquireWorkRun,
 	assertPortablePathSegment,
@@ -55,7 +70,6 @@ import {
 	pruneWorkTenant,
 } from "../utils/work-directory.ts";
 import { getReloadCoordinationDir } from "./reload-blockers.ts";
-import { requireBoundedTrimmedText } from "./util/bounded-value.ts";
 
 /** Root entries reserved for user-authored configuration and memory. */
 export const AGENT_ROOT_FILE_NAMES = [
@@ -151,16 +165,6 @@ export function okfProjectMemoryDir(agentDir: string, projectKey: string): strin
 		throw new TypeError("OKF project key must be a 16-character hexadecimal digest.");
 	}
 	return join(okfMemoryDir(agentDir), "projects", projectKey.toLowerCase());
-}
-
-/** `<agentDir>/state` -- durable machine-managed state. Deleting it loses real history, not just cache. */
-export function stateDir(agentDir: string): string {
-	return join(agentDir, "state");
-}
-
-/** `<agentDir>/state/<segments…>` */
-export function stateFile(agentDir: string, ...segments: string[]): string {
-	return join(stateDir(agentDir), ...segments);
 }
 
 /** `<agentDir>/state/steering/certificates.json` -- durable System One steering certificates. */
@@ -260,42 +264,6 @@ export function modelsDir(kind: string, agentDir: string): string {
 	return join(agentDir, "models", kind);
 }
 
-/** `<agentDir>/sessions` -- session transcript storage (large, established; not a "loose file"). */
-export function sessionsDir(agentDir: string): string {
-	return join(agentDir, "sessions");
-}
-
-function orchestrationSessionKey(parentSessionId: string): string {
-	const normalized = requireBoundedTrimmedText(parentSessionId, 512, "Parent session id");
-	const readable =
-		encodeURIComponent(normalized)
-			.replaceAll("%", "_")
-			// encodeURIComponent deliberately leaves `*` unescaped, but Windows forbids it in paths.
-			// Restrict the readable prefix to a portable ASCII subset; the digest retains exact identity.
-			.replaceAll(/[^a-zA-Z0-9._~-]/g, "_")
-			.slice(0, 80) || "session";
-	const digest = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
-	return `${readable}-${digest}`;
-}
-
-/**
- * `<agentDir>/state/orchestration/sessions/<session-key>` -- the one durable control-plane
- * bundle owned by a foreground session. Event state, worker mailboxes, mutation journals, and
- * worker transcripts must stay beneath this boundary so explicit session deletion can remove
- * exactly its companion artifacts without scanning global state.
- */
-export function orchestrationSessionsDir(agentDir: string): string {
-	return stateFile(agentDir, "orchestration", "sessions");
-}
-
-/**
- * `<agentDir>/state/orchestration/sessions/<session-key>` -- the one durable control-plane
- * bundle owned by a foreground session.
- */
-export function orchestrationSessionDir(agentDir: string, parentSessionId: string): string {
-	return join(orchestrationSessionsDir(agentDir), orchestrationSessionKey(parentSessionId));
-}
-
 /** Durable review evidence shared by a foreground session and its worker agents. */
 export function typeSafeEvidenceDir(agentDir: string, parentSessionId: string): string {
 	return join(orchestrationSessionDir(agentDir, parentSessionId), "typesafe-reviews");
@@ -309,11 +277,6 @@ export function typeSafeEvidenceDir(agentDir: string, parentSessionId: string): 
  */
 export function decisionLedgerFile(agentDir: string): string {
 	return stateFile(agentDir, "decision-ledger.sqlite");
-}
-
-/** Outside the deleted bundle: a durable tombstone prevents recreating deleted worker contexts. */
-export function orchestrationSessionDeletionFile(agentDir: string, parentSessionId: string): string {
-	return stateFile(agentDir, "orchestration", "deletions", `${orchestrationSessionKey(parentSessionId)}.json`);
 }
 
 /** Bounded discovery for one effective native specialization; transcript metadata owns execution. */
