@@ -135,6 +135,13 @@ export interface QueuedInputRecordResult {
 /** History may share a claim with another branch; only this owner's publication may be released. */
 export type QueuedInputRecordOwnership = "borrowed" | "owned";
 
+interface RecordPublicationOptions {
+	/** An unresolved main-history write still owns these input records and their image claims. */
+	readonly preserveIds?: ReadonlySet<string>;
+	/** Preparation can invoke image adapters; publication must still belong to its original record. */
+	readonly assertCurrent?: () => void;
+}
+
 type RecordImageStore = Pick<
 	SessionImageStore,
 	"retainPinnedContent" | "retainPinnedReference" | "pin" | "sealPinClaim" | "releasePinClaim"
@@ -152,6 +159,7 @@ export function appendQueuedInputRecord(
 	inputs: readonly RecordableQueuedInput[],
 	previousKey: string | undefined,
 	previousOwnership: QueuedInputRecordOwnership,
+	options: RecordPublicationOptions = {},
 ): QueuedInputRecordResult | undefined {
 	return writeRecord(
 		imageStore,
@@ -159,6 +167,7 @@ export function appendQueuedInputRecord(
 		previousKey,
 		(payload) => sessionManager.appendCustomEntry(QUEUED_INPUT_CUSTOM_TYPE, payload),
 		previousOwnership,
+		options,
 	);
 }
 
@@ -176,6 +185,7 @@ export function writeOwnTurnInputRecord(
 	imageStore: RecordImageStore | undefined,
 	inputs: readonly RecordableQueuedInput[],
 	previousKey: string | undefined,
+	options: RecordPublicationOptions = {},
 ): QueuedInputRecordResult | undefined {
 	return writeRecord(
 		imageStore,
@@ -193,6 +203,7 @@ export function writeOwnTurnInputRecord(
 			}
 		},
 		"owned",
+		options,
 	);
 }
 
@@ -203,7 +214,9 @@ function writeRecord(
 	previousKey: string | undefined,
 	write: (payload: QueuedInputPayload, key: string) => void,
 	previousOwnership: QueuedInputRecordOwnership,
+	options: RecordPublicationOptions,
 ): QueuedInputRecordResult | undefined {
+	assertPreservedInputIds(inputs, options.preserveIds, "An unresolved input's recovery record cannot be removed.");
 	const recorded: RecordedInput[] = [];
 	const claimId = randomUUID();
 	let hasPins = false;
@@ -249,6 +262,11 @@ function writeRecord(
 			});
 			textBytes += bytes;
 		}
+		assertPreservedInputIds(
+			recorded,
+			options.preserveIds,
+			"An unresolved input exceeds the recovery record's bounds.",
+		);
 		const previous = previousKey === undefined ? undefined : recordedPayloadOf(JSON.parse(previousKey));
 		const payload: QueuedInputPayload = { version: 1, inputs: recorded };
 		const unchanged =
@@ -272,11 +290,19 @@ function writeRecord(
 			payload.pinClaim = claimId;
 		}
 		const key = JSON.stringify(payload);
+		options.assertCurrent?.();
 		// After entering publication, an error may still leave the record durable. Keep its claim.
 		publicationStarted = true;
 		write(payload, key);
 		let cleanupError: string | undefined;
-		if (previousOwnership === "owned" && imageStore && previous?.pinClaim) {
+		try {
+			options.assertCurrent?.();
+		} catch (error) {
+			// The record is committed. A changed context retains the previous claim too;
+			// it cannot turn this publication into a failed preparation or lose its key.
+			cleanupError = error instanceof Error ? error.message : String(error);
+		}
+		if (cleanupError === undefined && previousOwnership === "owned" && imageStore && previous?.pinClaim) {
 			try {
 				imageStore.releasePinClaim(previous.pinClaim);
 			} catch (error) {
@@ -294,6 +320,21 @@ function writeRecord(
 		}
 		throw error;
 	}
+}
+
+/** Validate protection with memory bounded by the existing record, even when the live queue is larger. */
+function assertPreservedInputIds(
+	inputs: readonly { id?: string }[],
+	preserveIds: ReadonlySet<string> | undefined,
+	message: string,
+): void {
+	if (!preserveIds?.size) return;
+	const missing = new Set(preserveIds);
+	for (const input of inputs) {
+		if (input.id !== undefined) missing.delete(input.id);
+		if (missing.size === 0) return;
+	}
+	throw new Error(message);
 }
 
 /** The inputs a serialized record names. */

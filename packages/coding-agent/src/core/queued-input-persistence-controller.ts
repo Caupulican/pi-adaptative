@@ -3,7 +3,6 @@
  * pinning for undelivered steering/follow-up messages, and resume-time restoration notices.
  */
 
-import { existsSync } from "node:fs";
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { OwnerInputEnd, OwnerInputId, OwnerInputLedger, OwnerInputOutcome } from "./owner-input-ledger.ts";
@@ -79,8 +78,10 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 	private readonly deps: QueuedInputPersistenceControllerDeps;
 	/** The session's queued record (`appendQueuedInputRecord`). */
 	private queuedRecord: RecordState = { key: undefined, omitted: 0, ownership: "borrowed" };
-	/** The own-turn record beside the session file (`writeOwnTurnInputRecord`). */
-	private ownTurnRecord: RecordState = { key: undefined, omitted: 0, ownership: "owned" };
+	/** Own-turn records retain their original file and image claims across session replacement. */
+	private readonly ownTurnRecords = new Map<string, RecordState>();
+	/** A replacement manager's clear fence does not settle a previous write to this file. */
+	private readonly uncertainOwnTurnFiles = new Set<string>();
 	private restoredQueuedInputNotice: { head: string; tail: string } | undefined;
 	/** Why the own-turn record could not be restored on resume; reported with the restore notice. */
 	private ownTurnRestoreFailure: string | undefined;
@@ -220,25 +221,36 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 	recordQueuedInput(inputs: readonly RecordableQueuedInput[]): void {
 		const sessionManager = this.deps.getSessionManager();
 		if (this.deps.isDisposed() || !sessionManager.isPersisted()) return;
-		this.writeRecord("queued", (previousKey, imageStore, ownership) =>
-			appendQueuedInputRecord(sessionManager, imageStore, inputs, previousKey, ownership),
+		this.writeRecord("queued", (previousKey, imageStore, ownership, assertCurrent) =>
+			appendQueuedInputRecord(sessionManager, imageStore, inputs, previousKey, ownership, { assertCurrent }),
 		);
 	}
 
 	/**
 	 * Keep the prompts whose own turn is being prepared (accepted, their user entry not persisted yet) in the own-turn record
-	 * beside the session file, so a crash or a restart before their delivery restores them held. A session whose file is not
-	 * written yet (no reply so far) is no session a restart resumes: nothing is recorded for it. A failed write is reported,
-	 * never swallowed: the prompts themselves are unaffected.
+	 * beside the session file, including before its first user entry. An unresolved history write cannot remove or truncate
+	 * its previous recovery record. A failed write is reported; its previous record and image claim remain owned.
 	 */
 	recordOwnTurnInput(inputs: readonly RecordableQueuedInput[]): void {
 		const sessionManager = this.deps.getSessionManager();
 		const sessionFile = sessionManager.getSessionFile();
 		if (this.deps.isDisposed() || !sessionManager.isPersisted() || sessionFile === undefined) return;
-		if (!existsSync(sessionFile)) return;
 		const path = ownTurnInputRecordPath(sessionFile);
-		this.writeRecord("ownTurn", (previousKey, imageStore) =>
-			writeOwnTurnInputRecord(path, imageStore, inputs, previousKey),
+		if (sessionManager.isPersistenceStateUncertain()) this.uncertainOwnTurnFiles.add(sessionFile);
+		const protectedAtStart = this.uncertainOwnTurnFiles.has(sessionFile);
+		this.writeRecord(
+			"ownTurn",
+			(previousKey, imageStore, _ownership, assertCurrent) =>
+				writeOwnTurnInputRecord(path, imageStore, inputs, previousKey, {
+					assertCurrent: () => {
+						if (sessionManager.isPersistenceStateUncertain()) this.uncertainOwnTurnFiles.add(sessionFile);
+						assertCurrent();
+						if (!protectedAtStart && this.uncertainOwnTurnFiles.has(sessionFile))
+							throw new Error("Session write became uncertain while preparing its recovery record.");
+					},
+					...(protectedAtStart ? { preserveIds: recordedIds(previousKey) } : {}),
+				}),
+			sessionFile,
 		);
 	}
 
@@ -247,7 +259,8 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 	}
 
 	keepsOwnTurnInput(inputId: OwnerInputId): boolean {
-		return recordedIds(this.ownTurnRecord.key).has(inputId);
+		const sessionFile = this.deps.getSessionManager().getSessionFile();
+		return sessionFile !== undefined && recordedIds(this.ownTurnRecords.get(sessionFile)?.key).has(inputId);
 	}
 
 	/** One write of `record`: the record it wrote is kept, its bound reported once when first reached, a failure every time. */
@@ -257,17 +270,38 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 			previousKey: string | undefined,
 			imageStore: SessionImageStore | undefined,
 			ownership: QueuedInputRecordOwnership,
+			assertCurrent: () => void,
 		) => QueuedInputRecordResult | undefined,
+		sessionFile?: string,
 	): void {
-		const state = record === "queued" ? this.queuedRecord : this.ownTurnRecord;
+		const previousState = record === "queued" ? this.queuedRecord : this.ownTurnRecords.get(sessionFile!);
+		const state: RecordState = previousState ?? { key: undefined, omitted: 0, ownership: "owned" };
+		const sessionManager = this.deps.getSessionManager();
+		const assertBranch = sessionManager.captureBranchContext();
+		const assertCurrent = (): void => {
+			if (this.deps.isDisposed() || this.deps.getSessionManager() !== sessionManager)
+				throw new Error("Input recovery context changed during publication.");
+			assertBranch();
+			const current = record === "queued" ? this.queuedRecord : this.ownTurnRecords.get(sessionFile!);
+			if (current !== previousState) throw new Error("Input recovery record changed during publication.");
+		};
 		const { subject, one, many } = RECORD_TEXT[record];
 		try {
-			const written = write(state.key, this.deps.getSessionImageStore(), state.ownership);
+			const written = write(state.key, this.deps.getSessionImageStore(), state.ownership, assertCurrent);
 			if (!written) return;
 			// Publication is already committed. Diagnostics or obsolete-claim cleanup cannot leave this key stale.
 			const published: RecordState = { key: written.key, omitted: written.omitted, ownership: "owned" };
-			if (record === "queued") this.queuedRecord = published;
-			else this.ownTurnRecord = published;
+			if (record === "queued") {
+				try {
+					assertCurrent();
+					this.queuedRecord = published;
+				} catch {
+					this.deps.emitWarning("Queued input was recorded in its original context; the active record changed.");
+				}
+			} else if (this.ownTurnRecords.get(sessionFile!) === previousState) {
+				if (recordedIds(written.key).size > 0) this.ownTurnRecords.set(sessionFile!, published);
+				else this.ownTurnRecords.delete(sessionFile!);
+			}
 			if (written.omitted > 0 && state.omitted === 0) {
 				this.deps.emitWarning(
 					`${written.omitted} ${written.omitted > 1 ? many : one} beyond the durable record's bound will not survive a restart.`,
@@ -295,13 +329,29 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 	restoreRecordedQueuedInput(): void {
 		const sessionManager = this.deps.getSessionManager();
 		if (!sessionManager.isPersisted()) return;
+		const sessionFile = sessionManager.getSessionFile();
+		const assertCertain = (): void => {
+			if (!sessionManager.isPersistenceStateUncertain()) return;
+			if (sessionFile !== undefined) this.uncertainOwnTurnFiles.add(sessionFile);
+			throw new Error("Unresolved session history cannot restore input as undelivered.");
+		};
+		assertCertain();
+		const assertCurrent = sessionManager.captureBranchContext();
 		const imageStore = this.deps.getSessionImageStore();
 		const queued = readQueuedInputRecord(sessionManager, imageStore);
 		const ownTurn = this.readOwnTurnRecord(recordedIds(queued?.key));
+		assertCertain();
+		if (this.deps.isDisposed() || this.deps.getSessionManager() !== sessionManager)
+			throw new Error("Input recovery context changed during restoration.");
+		assertCurrent();
 		if (!queued && !ownTurn) return;
 		// The records as written are what a rewrite replaces: change detection starts from them.
 		this.queuedRecord = { key: queued?.key, omitted: 0, ownership: "borrowed" };
-		this.ownTurnRecord = { key: ownTurn?.key, omitted: 0, ownership: "owned" };
+		if (sessionFile !== undefined && this.ownTurnRestoreFailure === undefined) {
+			this.uncertainOwnTurnFiles.delete(sessionFile);
+			if (ownTurn) this.ownTurnRecords.set(sessionFile, { key: ownTurn.key, omitted: 0, ownership: "owned" });
+			else this.ownTurnRecords.delete(sessionFile);
+		}
 		const inputs = [...(queued?.inputs ?? []), ...(ownTurn?.inputs ?? [])];
 		this.deps.getPendingQueue().restore(inputs, (queued?.delivered ?? 0) > 0 || ownTurn !== undefined);
 		if (ownTurn) {
@@ -339,6 +389,7 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		const sessionFile = sessionManager.getSessionFile();
 		if (sessionFile === undefined) return undefined;
 		const path = ownTurnInputRecordPath(sessionFile);
+		this.ownTurnRestoreFailure = undefined;
 		try {
 			return readOwnTurnInputRecord(path, sessionManager, this.deps.getSessionImageStore(), namedElsewhere);
 		} catch (error) {
