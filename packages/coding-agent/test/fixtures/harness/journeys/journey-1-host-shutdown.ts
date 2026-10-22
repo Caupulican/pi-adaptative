@@ -1469,7 +1469,18 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		],
 		routed: [],
 	});
-	expect(await runSdkConstructionFailure(world)).toEqual(SDK_CONSTRUCTION_FAILURE_EXPECTED);
+	// Compared witness by witness, so a mismatch names its witness and prints its own readable diff.
+	const sdkWitness = await runSdkConstructionFailure(world);
+	expect(Object.keys(sdkWitness).sort(), "the SDK construction witness covers the same witnesses").toEqual(
+		Object.keys(SDK_CONSTRUCTION_FAILURE_EXPECTED).sort(),
+	);
+	for (const witness of Object.keys(
+		SDK_CONSTRUCTION_FAILURE_EXPECTED,
+	) as (keyof typeof SDK_CONSTRUCTION_FAILURE_EXPECTED)[]) {
+		expect(sdkWitness[witness], `SDK construction witness ${witness}`).toEqual(
+			SDK_CONSTRUCTION_FAILURE_EXPECTED[witness],
+		);
+	}
 	// The expected witness holds each fault outcome next to its control (control, disposalControl, workDirectory's controls).
 	for (const id of ["R40", "R41", "R42"]) {
 		world.faultMatrix.witness(id, { control: false });
