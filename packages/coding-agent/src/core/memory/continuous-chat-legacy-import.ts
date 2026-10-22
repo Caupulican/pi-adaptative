@@ -20,7 +20,7 @@ export interface ContinuousChatLegacySession {
 	 * Opens this session's entries on demand. Only one session is resident/importing at a time. A line that is not a
 	 * session entry throws `ContinuousChatLegacyContentError`; any other failure is an I/O failure.
 	 */
-	entries(): AsyncIterable<SessionEntry>;
+	entries(signal?: AbortSignal): AsyncIterable<SessionEntry>;
 }
 
 export interface ContinuousChatLegacySkip {
@@ -71,14 +71,14 @@ export interface ContinuousChatLegacyImportState {
 
 /** The import's marker. The migration ledger (`migration.json`) implements it; no other marker exists. */
 export interface ContinuousChatLegacyImportMarker {
-	read(): Promise<ContinuousChatLegacyImportState | undefined>;
-	write(state: ContinuousChatLegacyImportState): Promise<void>;
+	read(signal?: AbortSignal): Promise<ContinuousChatLegacyImportState | undefined>;
+	write(state: ContinuousChatLegacyImportState, signal?: AbortSignal): Promise<void>;
 }
 
 /** Where the earlier sessions come from, and which of them were forgotten. */
 export interface ContinuousChatLegacySource {
-	sessions(): Promise<ContinuousChatLegacyListing>;
-	isForgotten(sessionId: string): Promise<boolean>;
+	sessions(signal?: AbortSignal): Promise<ContinuousChatLegacyListing>;
+	isForgotten(sessionId: string, signal?: AbortSignal): Promise<boolean>;
 }
 
 export interface ContinuousChatLegacyImportOptions {
@@ -88,6 +88,7 @@ export interface ContinuousChatLegacyImportOptions {
 	currentSessionId: string;
 	/** Attached ICM sessions recover through the host's canonical path, never as legacy notes. */
 	activeSessionIds: ReadonlySet<string>;
+	signal?: AbortSignal;
 	ingestor: Pick<ContinuousChatIngestor, "importLegacySession" | "settled">;
 	now(): string;
 	/** Reports each repaired source and each skipped malformed source once, when the marker first records it. */
@@ -110,11 +111,16 @@ const CONTINUOUS_CHAT_MAX_IMPORTED_LEGACY_SESSIONS = 8;
  * The content fault that keeps a session's entries from being imported, or undefined when every entry reads. Read
  * failures rethrow: they are transient and keep the import incomplete.
  */
-async function contentFault(session: ContinuousChatLegacySession): Promise<string | undefined> {
+async function contentFault(session: ContinuousChatLegacySession, signal?: AbortSignal): Promise<string | undefined> {
 	try {
-		for await (const entry of session.entries()) void entry;
+		for await (const entry of session.entries(signal)) {
+			signal?.throwIfAborted();
+			void entry;
+		}
+		signal?.throwIfAborted();
 		return undefined;
 	} catch (error) {
+		signal?.throwIfAborted();
 		if (error instanceof ContinuousChatLegacyContentError) return error.reason;
 		throw error;
 	}
@@ -135,7 +141,10 @@ function skipKey(entry: ContinuousChatLegacySkip): string {
  * settled; source keys make interrupted retries safe.
  */
 export async function importContinuousChatLegacyHistory(options: ContinuousChatLegacyImportOptions): Promise<void> {
-	const previous = await options.marker.read();
+	const signal = options.signal;
+	signal?.throwIfAborted();
+	const previous = await options.marker.read(signal);
+	signal?.throwIfAborted();
 	const retryEntries: ContinuousChatLegacySkip[] = [];
 	const skipped: ContinuousChatLegacySkip[] = [];
 	const intentional = new Set<string>();
@@ -144,6 +153,7 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 	/** Skips whose source is malformed: each is reported when first recorded. */
 	const malformed = new Set<string>();
 	for (const entry of previous?.skipped ?? []) {
+		signal?.throwIfAborted();
 		if (entry.reason === CONTINUOUS_CHAT_LEGACY_DUPLICATE_REASON) {
 			// An ignored duplicate copy is not an exclusion of the canonical session's failed import.
 			skipped.push(entry);
@@ -159,7 +169,8 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 		}
 	}
 	if (previous !== undefined && retryEntries.length === 0) return;
-	const listing = await options.source.sessions();
+	const listing = await options.source.sessions(signal);
+	signal?.throwIfAborted();
 	const excluded = new Set([...options.activeSessionIds, options.currentSessionId]);
 	const blocked: ContinuousChatLegacySkip[] = [];
 	let candidates = listing.sessions;
@@ -167,12 +178,14 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 		const byId = new Map(listing.sessions.map((session) => [session.sessionId, session]));
 		const byFile = new Map<string, ContinuousChatLegacySession[]>();
 		for (const session of listing.sessions) {
+			signal?.throwIfAborted();
 			const copies = byFile.get(session.file) ?? [];
 			copies.push(session);
 			byFile.set(session.file, copies);
 		}
 		const retryIds = new Set<string>();
 		for (const entry of retryEntries) {
+			signal?.throwIfAborted();
 			const filenameIdentity = Object.values(CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS).some((reason) =>
 				entry.reason.startsWith(reason),
 			);
@@ -192,7 +205,9 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 			// A filename alias must not override an intentional exclusion of the canonical identity.
 			if (sessionId !== undefined && intentional.has(sessionId)) continue;
 			if (session === undefined) {
-				if (sessionId !== undefined && (await options.source.isForgotten(sessionId))) {
+				const forgotten = sessionId !== undefined && (await options.source.isForgotten(sessionId, signal));
+				signal?.throwIfAborted();
+				if (forgotten) {
 					// A known forgotten identity needs no readable source, and must never be resurrected by repair.
 					skipped.push({ sessionId, reason: "forgotten" });
 					continue;
@@ -233,8 +248,11 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 	}
 	const eligible: ContinuousChatLegacySession[] = [];
 	for (const session of candidates) {
+		signal?.throwIfAborted();
 		if (excluded.has(session.sessionId)) continue;
-		if (await options.source.isForgotten(session.sessionId)) {
+		const forgotten = await options.source.isForgotten(session.sessionId, signal);
+		signal?.throwIfAborted();
+		if (forgotten) {
 			skipped.push({ sessionId: session.sessionId, reason: "forgotten" });
 			continue;
 		}
@@ -254,7 +272,7 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 		cutoff--;
 		const session = eligible[cutoff];
 		if (!session) continue;
-		const fault = await contentFault(session);
+		const fault = await contentFault(session, signal);
 		if (fault === undefined) {
 			selected.unshift(session);
 			continue;
@@ -269,16 +287,23 @@ export async function importContinuousChatLegacyHistory(options: ContinuousChatL
 	}
 	let importedSessions = importedBefore;
 	for (const session of selected) {
-		await options.ingestor.importLegacySession(session.sessionId, session.entries());
+		signal?.throwIfAborted();
+		await options.ingestor.importLegacySession(session.sessionId, session.entries(signal), signal);
+		signal?.throwIfAborted();
 		importedSessions++;
 	}
 	await options.ingestor.settled();
-	await options.marker.write({
-		version: 1,
-		completedAt: previous?.completedAt ?? options.now(),
-		importedSessions,
-		skipped,
-	});
+	signal?.throwIfAborted();
+	await options.marker.write(
+		{
+			version: 1,
+			completedAt: previous?.completedAt ?? options.now(),
+			importedSessions,
+			skipped,
+		},
+		signal,
+	);
+	signal?.throwIfAborted();
 	const repaired = new Map(
 		listing.sessions
 			.filter((session) => session.repaired !== undefined)

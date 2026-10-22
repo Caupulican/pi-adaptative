@@ -2175,15 +2175,18 @@ export class MemoryController {
 	 * first session that needs it, so an import that already completed never reads it; an unknown state rejects here.
 	 */
 	private _continuousChatLegacySource(): ContinuousChatLegacySource {
-		let forgets: Promise<(sessionId: string) => Promise<boolean>> | undefined;
+		let forgets: Promise<(sessionId: string, signal?: AbortSignal) => Promise<boolean>> | undefined;
 		return {
-			sessions: () =>
-				listContinuousChatLegacySessions({ cwd: this.deps.getCwd(), agentDir: this.deps.getAgentDir() }),
-			isForgotten: async (sessionId) => {
+			sessions: (signal) =>
+				listContinuousChatLegacySessions({ cwd: this.deps.getCwd(), agentDir: this.deps.getAgentDir() }, signal),
+			isForgotten: async (sessionId, signal) => {
+				signal?.throwIfAborted();
 				forgets ??= createContinuousChatLegacyForgetPredicate(
 					new TranscriptSummaryStore({ agentDir: this.deps.getAgentDir(), projectId: this._projectId() }),
+					undefined,
+					signal,
 				);
-				return (await forgets)(sessionId);
+				return (await forgets)(sessionId, signal);
 			},
 		};
 	}

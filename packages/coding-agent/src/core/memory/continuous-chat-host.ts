@@ -88,6 +88,7 @@ export class ContinuousChatHost {
 	private readonly sessionLedger: ContinuousChatSessionLedger;
 	private readonly started: Settlement;
 	private readonly halt: Settlement;
+	private readonly startupAbort = new AbortController();
 	private unsubscribe: (() => void) | undefined;
 	private starting: Promise<void> | undefined;
 	private disposal: Promise<void> | undefined;
@@ -186,16 +187,19 @@ export class ContinuousChatHost {
 	}
 
 	private async runStart(): Promise<void> {
+		const signal = this.startupAbort.signal;
 		try {
 			const marker = createContinuousChatLegacyImportMarker(this.runtime.store);
-			const markerBefore = await marker.read();
-			const ledgerBefore = await this.sessionLedger.read();
+			const markerBefore = await marker.read(signal);
+			const ledgerBefore = await this.sessionLedger.read(signal);
+			signal.throwIfAborted();
 			const activeIds = new Set(ledgerBefore.active.map((entry) => entry.sessionId));
 			await importContinuousChatLegacyHistory({
 				source: this.options.legacy,
 				marker,
 				currentSessionId: this.options.sessionId,
 				activeSessionIds: activeIds,
+				signal,
 				ingestor: this.ingestor,
 				now: () => new Date().toISOString(),
 				note: (message) => this.options.warn(message),
@@ -203,7 +207,7 @@ export class ContinuousChatHost {
 			if (this.closed) throw new Error("Continuous chat stopped before it started.");
 			await this.recoverPriorSessions(ledgerBefore, markerBefore === undefined);
 			if (this.closed) throw new Error("Continuous chat stopped before it started.");
-			await this.sessionLedger.recordAttached(this.options.sessionId, this.options.sessionFile);
+			await this.sessionLedger.recordAttached(this.options.sessionId, this.options.sessionFile, signal);
 			if (this.closed) throw new Error("Continuous chat stopped before it started.");
 			// Subscribed before the replay, so no durable write falls between the two.
 			this.unsubscribe = this.options.subscribeEntriesPersisted((event) =>
@@ -220,9 +224,11 @@ export class ContinuousChatHost {
 	}
 
 	private async recoverPriorSessions(ledger: ContinuousChatSessionsState, firstMigration: boolean): Promise<void> {
+		const signal = this.startupAbort.signal;
 		const marker = createContinuousChatLegacyImportMarker(this.runtime.store);
-		const markerAfter = await marker.read();
-		const listing = await this.options.legacy.sessions();
+		const markerAfter = await marker.read(signal);
+		const listing = await this.options.legacy.sessions(signal);
+		signal.throwIfAborted();
 		const activeIds = new Set(ledger.active.map((entry) => entry.sessionId));
 
 		if (firstMigration) {
@@ -231,7 +237,7 @@ export class ContinuousChatHost {
 				.map((s) => s.sessionId)
 				.filter((id) => !activeIds.has(id))
 				.concat(skippedIds);
-			await this.sessionLedger.markSettled(legacySessionIds);
+			await this.sessionLedger.markSettled(legacySessionIds, signal);
 		}
 
 		const toRecover = new Map<string, () => AsyncIterable<SessionEntry>>();
@@ -240,6 +246,7 @@ export class ContinuousChatHost {
 		// a malformed source as a skip, recovery never drops such a session: a source that cannot be read now (blocked)
 		// or never can (invalid) stops the start with its cause. A repaired source recovers through its repaired reader.
 		for (const activeEntry of ledger.active) {
+			signal.throwIfAborted();
 			if (activeEntry.sessionId === this.options.sessionId) continue;
 			const unreadable =
 				listing.blocked.find((entry) => entry.sessionId === activeEntry.sessionId) ??
@@ -251,11 +258,12 @@ export class ContinuousChatHost {
 			}
 			const candidate = listing.sessions.find((s) => s.sessionId === activeEntry.sessionId);
 			if (candidate) {
-				toRecover.set(activeEntry.sessionId, () => candidate.entries());
+				toRecover.set(activeEntry.sessionId, () => candidate.entries(signal));
 			} else if (activeEntry.sessionFile && existsSync(activeEntry.sessionFile)) {
 				const file = activeEntry.sessionFile;
 				// Listed failures are keyed by file name, so the recorded file is classified here by the same reader.
-				const reading = await readContinuousChatLegacySessionFile(file);
+				const reading = await readContinuousChatLegacySessionFile(file, signal);
+				signal.throwIfAborted();
 				if (reading.kind === "blocked" || reading.kind === "invalid") {
 					throw new ContinuousChatMigrationBlockedError(
 						`unsettled ICM session ${activeEntry.sessionId} is unreadable: ${reading.reason}`,
@@ -267,7 +275,7 @@ export class ContinuousChatHost {
 					);
 				}
 				const session = reading.session;
-				toRecover.set(activeEntry.sessionId, () => session.entries());
+				toRecover.set(activeEntry.sessionId, () => session.entries(signal));
 			} else {
 				throw new ContinuousChatMigrationBlockedError(
 					`unsettled ICM session ${activeEntry.sessionId} is missing; restore its session source before recovery`,
@@ -281,23 +289,29 @@ export class ContinuousChatHost {
 			const skippedSet = new Set(markerAfter.skipped.map((s) => s.sessionId));
 
 			for (const session of listing.sessions) {
+				signal.throwIfAborted();
 				if (session.sessionId === this.options.sessionId) continue;
 				if (settledSet.has(session.sessionId)) continue;
 				if (skippedSet.has(session.sessionId)) continue;
 				if (Number.isNaN(completedAtMs) || Date.parse(session.timestamp) < completedAtMs) continue;
-				if (await this.options.legacy.isForgotten(session.sessionId)) continue;
+				const forgotten = await this.options.legacy.isForgotten(session.sessionId, signal);
+				signal.throwIfAborted();
+				if (forgotten) continue;
 
 				if (!toRecover.has(session.sessionId)) {
-					toRecover.set(session.sessionId, () => session.entries());
+					toRecover.set(session.sessionId, () => session.entries(signal));
 				}
 			}
 		}
 
 		for (const [sessionId, getEntries] of toRecover) {
-			await this.ingestor.importCanonicalSession(sessionId, getEntries());
+			signal.throwIfAborted();
+			await this.ingestor.importCanonicalSession(sessionId, getEntries(), signal);
 			await this.ingestor.settled();
-			await this.sessionLedger.markSettled([sessionId]);
+			signal.throwIfAborted();
+			await this.sessionLedger.markSettled([sessionId], signal);
 		}
+		signal.throwIfAborted();
 	}
 
 	/** The chat view a worker born now starts from: see `IcmTurnCoordinator.birthView`. */
@@ -321,7 +335,9 @@ export class ContinuousChatHost {
 	private close(reason: string): void {
 		if (this.closed) return;
 		this.closed = true;
-		this.started.reject(new Error(reason));
+		const error = new Error(reason);
+		this.startupAbort.abort(error);
+		this.started.reject(error);
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		this.ingestor.dispose();

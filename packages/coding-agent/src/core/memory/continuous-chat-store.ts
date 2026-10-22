@@ -591,8 +591,11 @@ export class ContinuousChatStore {
 	}
 
 	/** Host metadata shares the project lease and writer exclusion through the complete read/write transaction. */
-	mutateMetadata<T>(operation: () => Promise<T>): Promise<T> {
-		return this.withWriterLock(operation);
+	mutateMetadata<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+		return this.withWriterLock(() => {
+			signal?.throwIfAborted();
+			return operation();
+		});
 	}
 
 	/**

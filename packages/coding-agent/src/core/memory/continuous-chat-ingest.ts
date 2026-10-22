@@ -203,21 +203,29 @@ export class ContinuousChatIngestor {
 	}
 
 	/** The entries of one earlier session, streamed into bounded bulk appends in file order. */
-	async importLegacySession(sessionId: string, entries: AsyncIterable<SessionEntry>): Promise<void> {
+	async importLegacySession(
+		sessionId: string,
+		entries: AsyncIterable<SessionEntry>,
+		signal?: AbortSignal,
+	): Promise<void> {
 		// Refused, never skipped: a silent return would let the import mark itself complete without these entries.
 		if (this.closed) throw new Error("Continuous-chat ingestion is closed; the legacy import cannot run.");
-		await this.logSessionEntries(sessionId, entries, false);
+		await this.logSessionEntries(sessionId, entries, false, signal);
 	}
 
 	/**
 	 * Recovers an earlier unsettled ICM session in bounded bulk calls, preserving canonical message kinds,
 	 * occurrence timestamps, and source keys (including `work:<claimId>`).
 	 */
-	importCanonicalSession(sessionId: string, entries: AsyncIterable<SessionEntry>): Promise<void> {
+	importCanonicalSession(
+		sessionId: string,
+		entries: AsyncIterable<SessionEntry>,
+		signal?: AbortSignal,
+	): Promise<void> {
 		if (this.closed) {
 			return Promise.reject(new Error("Continuous-chat ingestion is closed; cannot recover session entries."));
 		}
-		const run = this.tail.then(() => this.logSessionEntries(sessionId, entries, true));
+		const run = this.tail.then(() => this.logSessionEntries(sessionId, entries, true, signal));
 		this.tail = run.catch(() => undefined);
 		return run;
 	}
@@ -304,10 +312,13 @@ export class ContinuousChatIngestor {
 		sessionId: string,
 		entries: AsyncIterable<SessionEntry>,
 		canonical: boolean,
+		signal?: AbortSignal,
 	): Promise<void> {
+		signal?.throwIfAborted();
 		const maxLegacyParts = 32;
 		let batch: ContinuousChatAppendInput[] = [];
 		for await (const entry of entries) {
+			signal?.throwIfAborted();
 			for (const piece of continuousChatEntryParts(entry)) {
 				if (!canonical && piece.kind === "echo") continue;
 				batch.push({
@@ -322,16 +333,19 @@ export class ContinuousChatIngestor {
 				});
 				if (canonical && batch.length === CONTINUOUS_CHAT_MAX_BULK_INPUTS) {
 					await this.deps.appender.appendMany(batch);
+					signal?.throwIfAborted();
 					batch = [];
 				} else if (!canonical && batch.length > maxLegacyParts * 2) {
 					batch = batch.slice(-maxLegacyParts);
 				}
 			}
 		}
+		signal?.throwIfAborted();
 		if (!canonical && batch.length > maxLegacyParts) {
 			batch = batch.slice(-maxLegacyParts);
 		}
 		if (batch.length > 0) await this.deps.appender.appendMany(batch);
+		signal?.throwIfAborted();
 	}
 
 	/**

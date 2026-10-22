@@ -10,6 +10,7 @@ import { createReadStream, readdirSync, statSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import {
 	getDefaultSessionDirCandidates,
@@ -34,7 +35,7 @@ export const CONTINUOUS_CHAT_MIGRATION_FILE = "migration.json";
 /** The live project's storage authority; metadata never gets an unfenced file-only writer. */
 export interface ContinuousChatMetadataStore {
 	readonly rootDir: string;
-	mutateMetadata<T>(operation: () => Promise<T>): Promise<T>;
+	mutateMetadata<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
 }
 
 /** The file's envelope. Its schema version is the file's own; `state.version` is the import state's. */
@@ -70,11 +71,14 @@ type ContinuousChatLegacyForgets =
 	| { status: "ok"; isForgotten(sessionId: string): boolean }
 	| { status: "unknown" | "unavailable"; reason: string };
 
-async function directoryExists(path: string): Promise<boolean> {
+async function directoryExists(path: string, signal?: AbortSignal): Promise<boolean> {
+	signal?.throwIfAborted();
 	try {
 		await stat(path);
+		signal?.throwIfAborted();
 		return true;
 	} catch (error) {
+		signal?.throwIfAborted();
 		if (isMissingFileError(error)) return false;
 		throw error;
 	}
@@ -82,17 +86,17 @@ async function directoryExists(path: string): Promise<boolean> {
 
 /**
  * Reads the legacy forget state without a writer. A legacy root that does not exist has recorded no forget, since the
- * forget file lives beside it. Anything else goes through the store's own load, and what that cannot prove is returned
- * with its reason.
+ * forget file lives beside it. Otherwise read only the store's permanent-forget view; unrelated summary nodes and
+ * their integrity scans are not prerequisites for deciding which sessions may be imported.
  */
 async function readLegacyForgets(
-	legacy: Pick<TranscriptSummaryStore, "root" | "load">,
+	legacy: Pick<TranscriptSummaryStore, "root" | "readForgottenSessions">,
 	deadlineAt?: number,
+	signal?: AbortSignal,
 ): Promise<ContinuousChatLegacyForgets> {
-	if (!(await directoryExists(legacy.root))) return { status: "ok", isForgotten: () => false };
-	const state = await legacy.load(deadlineAt === undefined ? {} : { deadlineAt });
-	if ("status" in state) return { status: "unavailable", reason: state.reason };
-	const { forgotten } = state;
+	if (!(await directoryExists(legacy.root, signal))) return { status: "ok", isForgotten: () => false };
+	const forgotten = await legacy.readForgottenSessions(deadlineAt === undefined ? {} : { deadlineAt });
+	signal?.throwIfAborted();
 	if (forgotten.status !== "ok") return { status: forgotten.status, reason: forgotten.reason };
 	const { sessions } = forgotten;
 	return { status: "ok", isForgotten: (sessionId) => sessions.has(sessionId) };
@@ -104,12 +108,16 @@ async function readLegacyForgets(
  * decided, so no import rests on evidence that cannot be proven.
  */
 export async function createContinuousChatLegacyForgetPredicate(
-	legacy: Pick<TranscriptSummaryStore, "root" | "load">,
+	legacy: Pick<TranscriptSummaryStore, "root" | "readForgottenSessions">,
 	deadlineAt?: number,
-): Promise<(sessionId: string) => Promise<boolean>> {
-	const forgets = await readLegacyForgets(legacy, deadlineAt);
+	signal?: AbortSignal,
+): Promise<(sessionId: string, signal?: AbortSignal) => Promise<boolean>> {
+	const forgets = await readLegacyForgets(legacy, deadlineAt, signal);
 	if (forgets.status !== "ok") throw new ContinuousChatMigrationBlockedError(forgets.reason);
-	return async (sessionId) => forgets.isForgotten(sessionId);
+	return async (sessionId, currentSignal) => {
+		currentSignal?.throwIfAborted();
+		return forgets.isForgotten(sessionId);
+	};
 }
 
 /**
@@ -132,14 +140,17 @@ function parseImportState(value: unknown): ContinuousChatLegacyImportState | und
 	return { version: 1, completedAt, importedSessions, skipped: normalized };
 }
 
-async function readMigrationJsonFile(path: string): Promise<unknown> {
+async function readMigrationJsonFile(path: string, signal?: AbortSignal): Promise<unknown> {
+	signal?.throwIfAborted();
 	let raw: string;
 	try {
-		raw = await readFile(path, "utf8");
+		raw = await readFile(path, { encoding: "utf8", signal });
 	} catch (error) {
+		signal?.throwIfAborted();
 		if (isMissingFileError(error)) return undefined;
 		throw error;
 	}
+	signal?.throwIfAborted();
 	try {
 		return JSON.parse(raw);
 	} catch {
@@ -148,8 +159,11 @@ async function readMigrationJsonFile(path: string): Promise<unknown> {
 }
 
 /** The recorded import state, or undefined while no import has completed. A damaged file is an error, never rebuilt. */
-async function readMarkerState(path: string): Promise<ContinuousChatLegacyImportState | undefined> {
-	const value = await readMigrationJsonFile(path);
+async function readMarkerState(
+	path: string,
+	signal?: AbortSignal,
+): Promise<ContinuousChatLegacyImportState | undefined> {
+	const value = await readMigrationJsonFile(path, signal);
 	if (value === undefined) return undefined;
 	if (!isPlainRecord(value) || value.schemaVersion !== CONTINUOUS_CHAT_MIGRATION_SCHEMA_VERSION) {
 		throw new ContinuousChatMigrationCorruptError(path, "schema mismatch");
@@ -169,8 +183,8 @@ export function createContinuousChatLegacyImportMarker(
 ): ContinuousChatLegacyImportMarker {
 	const path = join(store.rootDir, CONTINUOUS_CHAT_MIGRATION_FILE);
 	return {
-		read: () => readMarkerState(path),
-		write: async (state) => {
+		read: (signal) => readMarkerState(path, signal),
+		write: async (state, signal) => {
 			const normalized = parseImportState(state);
 			if (normalized === undefined) {
 				throw new TypeError(
@@ -181,7 +195,7 @@ export function createContinuousChatLegacyImportMarker(
 				schemaVersion: CONTINUOUS_CHAT_MIGRATION_SCHEMA_VERSION,
 				state: normalized,
 			};
-			await store.mutateMetadata(() => writeFileAtomic(path, `${JSON.stringify(file, null, 2)}\n`));
+			await store.mutateMetadata(() => writeFileAtomic(path, `${JSON.stringify(file, null, 2)}\n`), signal);
 		},
 	};
 }
@@ -200,9 +214,9 @@ export interface ContinuousChatSessionsState {
 }
 
 export interface ContinuousChatSessionLedger {
-	read(): Promise<ContinuousChatSessionsState>;
-	recordAttached(sessionId: string, sessionFile?: string): Promise<void>;
-	markSettled(sessionIds: readonly string[]): Promise<void>;
+	read(signal?: AbortSignal): Promise<ContinuousChatSessionsState>;
+	recordAttached(sessionId: string, sessionFile?: string, signal?: AbortSignal): Promise<void>;
+	markSettled(sessionIds: readonly string[], signal?: AbortSignal): Promise<void>;
 }
 
 interface ContinuousChatSessionsFile {
@@ -241,8 +255,8 @@ function parseSessionsState(value: unknown): ContinuousChatSessionsState | undef
 	return { active: normalizedActive, settled: normalizedSettled };
 }
 
-async function readSessionsState(path: string): Promise<ContinuousChatSessionsState> {
-	const value = await readMigrationJsonFile(path);
+async function readSessionsState(path: string, signal?: AbortSignal): Promise<ContinuousChatSessionsState> {
+	const value = await readMigrationJsonFile(path, signal);
 	if (value === undefined) return { active: [], settled: [] };
 	const state = parseSessionsState(value);
 	if (state === undefined) {
@@ -254,8 +268,8 @@ async function readSessionsState(path: string): Promise<ContinuousChatSessionsSt
 export function createContinuousChatSessionLedger(store: ContinuousChatMetadataStore): ContinuousChatSessionLedger {
 	const path = join(store.rootDir, CONTINUOUS_CHAT_SESSIONS_FILE);
 	return {
-		read: () => readSessionsState(path),
-		recordAttached: (sessionId: string, sessionFile?: string) =>
+		read: (signal) => readSessionsState(path, signal),
+		recordAttached: (sessionId: string, sessionFile?: string, signal?: AbortSignal) =>
 			store.mutateMetadata(async () => {
 				const current = await readSessionsState(path);
 				const existing = current.active.find((entry) => entry.sessionId === sessionId);
@@ -272,8 +286,8 @@ export function createContinuousChatSessionLedger(store: ContinuousChatMetadataS
 					settled: nextSettled,
 				};
 				await writeFileAtomic(path, `${JSON.stringify(file, null, 2)}\n`);
-			}),
-		markSettled: (sessionIds: readonly string[]) =>
+			}, signal),
+		markSettled: (sessionIds: readonly string[], signal?: AbortSignal) =>
 			store.mutateMetadata(async () => {
 				const current = await readSessionsState(path);
 				const toSettle = new Set(sessionIds.filter((id) => id.length > 0));
@@ -289,7 +303,7 @@ export function createContinuousChatSessionLedger(store: ContinuousChatMetadataS
 					settled: nextSettled,
 				};
 				await writeFileAtomic(path, `${JSON.stringify(file, null, 2)}\n`);
-			}),
+			}, signal),
 	};
 }
 
@@ -327,6 +341,7 @@ export const CONTINUOUS_CHAT_LEGACY_HEADER_REPAIR = "session header reconstructe
 
 /** The kernel's session file name: `<start time with ':' and '.' as '-'>_<session id>.jsonl`. */
 const SESSION_FILE_NAME = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z_(.+)\.jsonl$/;
+const LEGACY_LIST_YIELD_BATCH = 32;
 
 function causeText(cause: unknown): string {
 	return cause instanceof Error ? cause.message : String(cause);
@@ -376,25 +391,43 @@ function parseSessionBodyLine(line: string): SessionBodyLine {
 export async function* streamLegacySessionEntries(
 	path: string,
 	firstLine: "header" | "entry" = "header",
+	signal?: AbortSignal,
 ): AsyncGenerator<SessionEntry> {
+	signal?.throwIfAborted();
+	const input = createReadStream(path, { encoding: "utf8", signal });
 	const lines = createInterface({
-		input: createReadStream(path, { encoding: "utf8" }),
+		input,
 		crlfDelay: Number.POSITIVE_INFINITY,
+	});
+	let readError: Error | undefined;
+	// Readline does not forward input errors to its iterator. Closing it wakes that
+	// iterator, and the explicit check below distinguishes a failed read from EOF.
+	input.on("error", (error: Error) => {
+		readError = error;
+		lines.close();
 	});
 	let header = firstLine === "header";
 	let lineNumber = 0;
-	for await (const line of lines) {
-		lineNumber++;
-		if (line.trim() === "") continue;
-		if (header) {
-			header = false;
-			continue;
+	try {
+		for await (const line of lines) {
+			signal?.throwIfAborted();
+			lineNumber++;
+			if (line.trim() === "") continue;
+			if (header) {
+				header = false;
+				continue;
+			}
+			const parsed = parseSessionBodyLine(line);
+			if (!parsed.ok) {
+				throw new ContinuousChatLegacyContentError(path, `${basename(path)}:${lineNumber} ${parsed.fault}`);
+			}
+			yield parsed.entry;
 		}
-		const parsed = parseSessionBodyLine(line);
-		if (!parsed.ok) {
-			throw new ContinuousChatLegacyContentError(path, `${basename(path)}:${lineNumber} ${parsed.fault}`);
-		}
-		yield parsed.entry;
+		signal?.throwIfAborted();
+		if (readError) throw readError;
+	} finally {
+		lines.close();
+		input.destroy();
 	}
 }
 
@@ -419,7 +452,11 @@ function sessionFileNameIdentity(file: string): { sessionId: string; timestamp: 
  * is a permanent fault of the file, listed as invalid with its cause. The whole body is checked here, before listing,
  * so a repaired session never fails midway through an import or a recovery.
  */
-async function readHeaderlessSessionFile(path: string, file: string): Promise<ContinuousChatLegacySessionReading> {
+async function readHeaderlessSessionFile(
+	path: string,
+	file: string,
+	signal?: AbortSignal,
+): Promise<ContinuousChatLegacySessionReading> {
 	const headerFault = CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.header;
 	const identity = sessionFileNameIdentity(file);
 	if (identity === undefined) {
@@ -429,27 +466,21 @@ async function readHeaderlessSessionFile(path: string, file: string): Promise<Co
 			reason: `${headerFault}; the file name carries no valid session id and start time`,
 		};
 	}
-	let text: string;
+	let entries = 0;
 	try {
-		text = await readFile(path, "utf8");
+		for await (const entry of streamLegacySessionEntries(path, "entry", signal)) {
+			void entry;
+			entries++;
+		}
 	} catch (error) {
+		signal?.throwIfAborted();
+		if (error instanceof ContinuousChatLegacyContentError)
+			return { kind: "invalid", sessionId: file, reason: `${headerFault}; ${error.reason}` };
 		return {
 			kind: "blocked",
 			sessionId: file,
 			reason: `${CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.read} ${causeText(error)}`,
 		};
-	}
-	let entries = 0;
-	let lineNumber = 0;
-	// The line breaks `streamLegacySessionEntries` reads through `readline`, so line numbers agree.
-	for (const line of text.split(/\r\n|\r|\n/)) {
-		lineNumber++;
-		if (line.trim() === "") continue;
-		const parsed = parseSessionBodyLine(line);
-		if (!parsed.ok) {
-			return { kind: "invalid", sessionId: file, reason: `${headerFault}; line ${lineNumber} ${parsed.fault}` };
-		}
-		entries++;
 	}
 	if (entries === 0) {
 		return { kind: "invalid", sessionId: file, reason: `${headerFault}; the file holds no session entry` };
@@ -460,7 +491,7 @@ async function readHeaderlessSessionFile(path: string, file: string): Promise<Co
 			...identity,
 			file,
 			repaired: CONTINUOUS_CHAT_LEGACY_HEADER_REPAIR,
-			entries: () => streamLegacySessionEntries(path, "entry"),
+			entries: (readSignal) => streamLegacySessionEntries(path, "entry", readSignal),
 		},
 	};
 }
@@ -471,7 +502,11 @@ async function readHeaderlessSessionFile(path: string, file: string): Promise<Co
  * is not a time, or whose first line is not a session header and that cannot be repaired from its file name is invalid:
  * the fault is in the content and permanent. A zero-byte file holds no session and is not listed.
  */
-export async function readContinuousChatLegacySessionFile(path: string): Promise<ContinuousChatLegacySessionReading> {
+export async function readContinuousChatLegacySessionFile(
+	path: string,
+	signal?: AbortSignal,
+): Promise<ContinuousChatLegacySessionReading> {
+	signal?.throwIfAborted();
 	const file = basename(path);
 	let inspection: { file: boolean; size: number };
 	try {
@@ -499,7 +534,7 @@ export async function readContinuousChatLegacySessionFile(path: string): Promise
 		if (header.reason === "invalid_session_id") {
 			return { kind: "invalid", sessionId: file, reason: CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS.id };
 		}
-		return readHeaderlessSessionFile(path, file);
+		return readHeaderlessSessionFile(path, file, signal);
 	}
 	const sessionId = header.header.id;
 	const timestamp = header.header.timestamp;
@@ -508,7 +543,12 @@ export async function readContinuousChatLegacySessionFile(path: string): Promise
 	}
 	return {
 		kind: "session",
-		session: { sessionId, timestamp, file, entries: () => streamLegacySessionEntries(path) },
+		session: {
+			sessionId,
+			timestamp,
+			file,
+			entries: (readSignal) => streamLegacySessionEntries(path, "header", readSignal),
+		},
 	};
 }
 
@@ -529,14 +569,22 @@ function compareLegacySessions(left: ContinuousChatLegacySession, right: Continu
  */
 export async function listContinuousChatLegacySessions(
 	scope: ContinuousChatLegacySessionScope,
+	signal?: AbortSignal,
 ): Promise<ContinuousChatLegacySessionListing> {
+	signal?.throwIfAborted();
 	const sessions: ContinuousChatLegacySession[] = [];
 	const blocked: ContinuousChatLegacySessionSkip[] = [];
 	const invalid: ContinuousChatLegacySessionSkip[] = [];
 	const listedAt = new Map<string, number>();
+	let inspected = 0;
 	for (const directory of getDefaultSessionDirCandidates(scope.cwd, scope.agentDir)) {
+		signal?.throwIfAborted();
 		for (const file of listSessionFileNames(directory)) {
-			const reading = await readContinuousChatLegacySessionFile(join(directory, file));
+			// Valid headers use synchronous bounded reads. Yield between batches so an
+			// actual close/abort event can arrive instead of living only in microtasks.
+			if (inspected++ % LEGACY_LIST_YIELD_BATCH === 0) await yieldToEventLoop(undefined, { signal });
+			const reading = await readContinuousChatLegacySessionFile(join(directory, file), signal);
+			signal?.throwIfAborted();
 			if (reading.kind === "empty") continue;
 			if (reading.kind === "blocked") {
 				blocked.push({ sessionId: reading.sessionId, reason: reading.reason });
@@ -562,6 +610,7 @@ export async function listContinuousChatLegacySessions(
 			}
 		}
 	}
+	signal?.throwIfAborted();
 	sessions.sort(compareLegacySessions);
 	return { sessions, blocked, invalid };
 }
