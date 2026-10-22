@@ -15,6 +15,7 @@ import {
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import {
 	ownerVisibleQueuedText,
+	type PreservedQueuedImages,
 	type QueuedInputKind,
 	type QueuedInputOrigin,
 	type RecordableQueuedInput,
@@ -33,6 +34,7 @@ export interface PendingQueueSnapshot {
 export interface QueuedInput {
 	text: string;
 	images?: ImageContent[];
+	preservedImages?: PreservedQueuedImages;
 }
 
 /**
@@ -89,6 +91,7 @@ function recordableInput(entry: PendingEntry): RecordableQueuedInput {
 		kind: entry.kind,
 		text: entry.origin ? entry.origin.text : entry.original.text,
 		...(entry.original.images ? { images: entry.original.images } : {}),
+		...(entry.original.preservedImages ? { preservedImages: entry.original.preservedImages } : {}),
 		...(entry.origin
 			? {
 					origin: {
@@ -712,7 +715,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 			kind,
 			text,
 			images,
-			original: { text, ...(images ? { images } : {}) },
+			original: { ...submitted },
 			...(origin ? { origin } : {}),
 			abort,
 			...(held ? { held } : {}),
@@ -733,6 +736,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 			text: string;
 			images?: ImageContent[];
 			origin?: QueuedInputOrigin;
+			preservedImages?: PreservedQueuedImages;
 		}>,
 		recordChanged = false,
 	): void {
@@ -743,7 +747,11 @@ export class PendingInputQueueController implements ForegroundInputPort {
 				// Open again, held, under the identity it was accepted with; re-sending it later is a new input.
 				this.deps.ownerInputs.restoreHeld(input.origin ? "extension" : input.kind, input.id),
 				input.kind,
-				{ text: input.text, images: input.images },
+				{
+					text: input.text,
+					images: input.images,
+					...(input.preservedImages ? { preservedImages: input.preservedImages } : {}),
+				},
 				input.origin ? { ...input.origin, text: input.text } : undefined,
 				abort,
 				true,

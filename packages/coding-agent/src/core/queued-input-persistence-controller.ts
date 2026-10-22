@@ -23,7 +23,6 @@ import {
 	readOwnTurnInputRecord,
 	readQueuedInputRecord,
 	recordedIds,
-	recordedSequences,
 	writeOwnTurnInputRecord,
 } from "./queued-input-record.ts";
 import type { RuntimeMutationHandoff } from "./runtime-generation-admission.ts";
@@ -192,9 +191,8 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 	recordQueuedInput(inputs: readonly RecordableQueuedInput[]): void {
 		const sessionManager = this.deps.getSessionManager();
 		if (this.deps.isDisposed() || !sessionManager.isPersisted()) return;
-		const alsoHeld = this.ownTurnRecord.key;
 		this.writeRecord("queued", (previousKey, imageStore) =>
-			appendQueuedInputRecord(sessionManager, imageStore, inputs, previousKey, recordedSequences(alsoHeld)),
+			appendQueuedInputRecord(sessionManager, imageStore, inputs, previousKey),
 		);
 	}
 
@@ -210,9 +208,8 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		if (this.deps.isDisposed() || !sessionManager.isPersisted() || sessionFile === undefined) return;
 		if (!existsSync(sessionFile)) return;
 		const path = ownTurnInputRecordPath(sessionFile);
-		const alsoHeld = this.queuedRecord.key;
 		this.writeRecord("ownTurn", (previousKey, imageStore) =>
-			writeOwnTurnInputRecord(path, imageStore, inputs, previousKey, recordedSequences(alsoHeld)),
+			writeOwnTurnInputRecord(path, imageStore, inputs, previousKey),
 		);
 	}
 
@@ -233,13 +230,18 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		try {
 			const written = write(state.key, this.deps.getSessionImageStore());
 			if (!written) return;
+			// Publication is already committed. Diagnostics or obsolete-claim cleanup cannot leave this key stale.
+			if (record === "queued") this.queuedRecord = { key: written.key, omitted: written.omitted };
+			else this.ownTurnRecord = { key: written.key, omitted: written.omitted };
 			if (written.omitted > 0 && state.omitted === 0) {
 				this.deps.emitWarning(
 					`${written.omitted} ${written.omitted > 1 ? many : one} beyond the durable record's bound will not survive a restart.`,
 				);
 			}
-			if (record === "queued") this.queuedRecord = { key: written.key, omitted: written.omitted };
-			else this.ownTurnRecord = { key: written.key, omitted: written.omitted };
+			if (written.cleanupError)
+				this.deps.emitWarning(
+					`${subject} was recorded, but an obsolete image claim could not be released: ${written.cleanupError}`,
+				);
 		} catch (error) {
 			this.deps.emitWarning(
 				`${subject} could not be recorded for restart recovery: ${error instanceof Error ? error.message : String(error)}`,
@@ -276,6 +278,9 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		const fromPeers = inputs.filter((input) => input.origin).length;
 		const missingImages = (queued?.missingImages ?? 0) + (ownTurn?.missingImages ?? 0);
 		const pinError = [queued?.pinError, ownTurn?.pinError].filter((error) => error !== undefined).join("; ");
+		const imageReadError = [queued?.imageReadError, ownTurn?.imageReadError]
+			.filter((error) => error !== undefined)
+			.join("; ");
 		const queuedCount = queued?.inputs.length ?? 0;
 		const preparing = ownTurn?.inputs.length ?? 0;
 		const restored = [
@@ -288,7 +293,8 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 				`${fromPeers > 0 ? ` (${fromPeers} from other senders, shown under who sent them)` : ""}`,
 			tail:
 				`${missingImages > 0 ? ` (${missingImages} attached image${missingImages > 1 ? "s were" : " was"} no longer available)` : ""}` +
-				`${pinError ? `; its images could not be held against pruning: ${pinError}` : ""}.`,
+				`${pinError ? `; its images could not be held against pruning: ${pinError}` : ""}` +
+				`${imageReadError ? `; image storage could not be read: ${imageReadError}` : ""}.`,
 		};
 	}
 

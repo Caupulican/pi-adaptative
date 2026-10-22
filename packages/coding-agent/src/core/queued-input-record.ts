@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { readFileSync, unlinkSync } from "node:fs";
+import { basename } from "node:path";
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionEntry, SessionManager } from "../kernel/node.ts";
 import type { SendUserMessageOrigin } from "./extensions/types.ts";
-import type { SessionImageStore } from "./session-image-store.ts";
+import { isImagePinClaimId, type SessionImageStore } from "./session-image-store.ts";
 import { isMissingFileError, writeFileAtomicSync } from "./util/atomic-file.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
 
@@ -45,11 +47,20 @@ export interface RecordableQueuedInput {
 	text: string;
 	images?: readonly ImageContent[];
 	origin?: QueuedInputOrigin;
+	preservedImages?: PreservedQueuedImages;
 }
 
 interface RecordedImage {
 	sequence: number;
 	mimeType: string;
+	/** Exact filename; absent only in older records. */
+	name?: string;
+}
+
+/** Exact storage references retained when image bytes are temporarily unreadable during restore. */
+export interface PreservedQueuedImages {
+	readonly images: readonly RecordedImage[];
+	readonly pinClaim?: string;
 }
 
 interface RecordedInput {
@@ -78,6 +89,7 @@ export function ownerVisibleQueuedText(text: string, origin: QueuedInputOrigin |
 interface QueuedInputPayload {
 	version: 1;
 	inputs: RecordedInput[];
+	pinClaim?: string;
 }
 
 /** Preferred sequence per image object; the receiving store always validates its scope and current bytes. */
@@ -88,24 +100,27 @@ export interface QueuedInputRecordResult {
 	readonly key: string;
 	/** Inputs left out of the record because the count or byte bound was reached. */
 	readonly omitted: number;
+	/** Publication succeeded, but obsolete claim cleanup remains pending until expiry. */
+	readonly cleanupError?: string;
 }
 
-type RecordImageStore = Pick<SessionImageStore, "retainContent" | "pin" | "unpinExcept">;
+type RecordImageStore = Pick<
+	SessionImageStore,
+	"retainPinnedContent" | "retainPinnedReference" | "pin" | "sealPinClaim" | "releasePinClaim"
+>;
 
 /**
  * Append the whole current queue as the latest record on the active branch, bounded in count and bytes
  * (the first inputs in submission order are kept). Returns undefined, writing nothing, when `previousKey`
- * already is the record that would be written. `alsoHeld` are the image sequences the own-turn record names: their
- * pins are its own, never released here.
+ * already describes the record being written. Every publication owns an independent image pin claim.
  */
 export function appendQueuedInputRecord(
 	sessionManager: Pick<SessionManager, "appendCustomEntry">,
 	imageStore: RecordImageStore | undefined,
 	inputs: readonly RecordableQueuedInput[],
 	previousKey: string | undefined,
-	alsoHeld: readonly number[] = [],
 ): QueuedInputRecordResult | undefined {
-	return writeRecord(imageStore, inputs, previousKey, alsoHeld, (payload) =>
+	return writeRecord(imageStore, inputs, previousKey, (payload) =>
 		sessionManager.appendCustomEntry(QUEUED_INPUT_CUSTOM_TYPE, payload),
 	);
 }
@@ -117,17 +132,15 @@ export function ownTurnInputRecordPath(sessionFile: string): string {
 
 /**
  * Write the prompts whose own turn is being prepared as the own-turn record at `path`, replacing it atomically, or remove
- * the file once none is left; bounded, returned and pinned exactly as the queued record (`appendQueuedInputRecord`), with
- * `alsoHeld` the image sequences the session's queued record names.
+ * the file once none is left; bounded, returned and pinned exactly as the queued record (`appendQueuedInputRecord`).
  */
 export function writeOwnTurnInputRecord(
 	path: string,
 	imageStore: RecordImageStore | undefined,
 	inputs: readonly RecordableQueuedInput[],
 	previousKey: string | undefined,
-	alsoHeld: readonly number[],
 ): QueuedInputRecordResult | undefined {
-	return writeRecord(imageStore, inputs, previousKey, alsoHeld, (payload, key) => {
+	return writeRecord(imageStore, inputs, previousKey, (payload, key) => {
 		if (payload.inputs.length > 0) {
 			writeFileAtomicSync(path, key);
 			return;
@@ -145,59 +158,104 @@ function writeRecord(
 	imageStore: RecordImageStore | undefined,
 	inputs: readonly RecordableQueuedInput[],
 	previousKey: string | undefined,
-	alsoHeld: readonly number[],
 	write: (payload: QueuedInputPayload, key: string) => void,
 ): QueuedInputRecordResult | undefined {
 	const recorded: RecordedInput[] = [];
+	const claimId = randomUUID();
+	let hasPins = false;
+	let publicationStarted = false;
 	let textBytes = 0;
 	let imageCount = 0;
-	for (const input of inputs) {
-		const bytes = Buffer.byteLength(input.text, "utf8");
-		if (recorded.length >= MAX_RECORDED_QUEUED_INPUTS || textBytes + bytes > MAX_RECORDED_QUEUED_TEXT_BYTES) break;
-		if (imageCount + (input.images?.length ?? 0) > MAX_RECORDED_QUEUED_IMAGES) break;
-		imageCount += input.images?.length ?? 0;
-		const images: RecordedImage[] = [];
-		for (const image of input.images ?? []) {
-			if (!imageStore) throw new Error("Queued input carries an image but the session has no image store");
-			// Image objects can move between sessions or change after a prior snapshot. A cached
-			// number is only a hint; retainContent owns current-store byte/MIME identity validation.
-			const stored = imageStore.retainContent(image, retainedSequences.get(image));
-			retainedSequences.set(image, stored.sequence);
-			images.push({ sequence: stored.sequence, mimeType: stored.mimeType });
+	try {
+		for (const input of inputs) {
+			const bytes = Buffer.byteLength(input.text, "utf8");
+			if (recorded.length >= MAX_RECORDED_QUEUED_INPUTS || textBytes + bytes > MAX_RECORDED_QUEUED_TEXT_BYTES) break;
+			const count = input.preservedImages?.images.length ?? input.images?.length ?? 0;
+			if (imageCount + count > MAX_RECORDED_QUEUED_IMAGES) break;
+			imageCount += count;
+			const images: RecordedImage[] = [];
+			for (const image of input.preservedImages ? [] : (input.images ?? [])) {
+				if (!imageStore) throw new Error("Queued input carries an image but the session has no image store");
+				hasPins = true;
+				const stored = imageStore.retainPinnedContent(claimId, image, retainedSequences.get(image));
+				retainedSequences.set(image, stored.sequence);
+				images.push({ sequence: stored.sequence, mimeType: stored.mimeType, name: basename(stored.path) });
+			}
+			for (const image of input.preservedImages?.images ?? []) {
+				if (!imageStore) throw new Error("Restored image references require the session image store.");
+				hasPins = true;
+				const reference = imageStore.retainPinnedReference(
+					claimId,
+					image.sequence,
+					image.mimeType,
+					image.name,
+					input.preservedImages?.pinClaim,
+				);
+				// Legacy identities are resolved once, before publication can retire the source claim.
+				// These are private restoration copies, never the session's historical entry objects.
+				image.name = reference.name;
+				images.push(reference);
+			}
+			recorded.push({
+				id: input.id,
+				kind: input.kind,
+				text: input.text,
+				...(images.length > 0 ? { images } : {}),
+				...(input.origin ? { origin: input.origin } : {}),
+			});
+			textBytes += bytes;
 		}
-		recorded.push({
-			id: input.id,
-			kind: input.kind,
-			text: input.text,
-			...(images.length > 0 ? { images } : {}),
-			...(input.origin ? { origin: input.origin } : {}),
-		});
-		textBytes += bytes;
+		const previous = previousKey === undefined ? undefined : recordedPayloadOf(JSON.parse(previousKey));
+		const payload: QueuedInputPayload = { version: 1, inputs: recorded };
+		const unchanged =
+			previous !== undefined && JSON.stringify(payload) === JSON.stringify({ version: 1, inputs: previous.inputs });
+		const held = recorded.flatMap((input) => input.images?.map((image) => image.sequence) ?? []);
+		if (
+			(recorded.length === 0 && previousKey === undefined) ||
+			(unchanged &&
+				(held.length === 0 ||
+					(previous.pinClaim !== undefined && imageStore?.pin(held, previous.pinClaim).length === 0)))
+		) {
+			if (hasPins) {
+				hasPins = false;
+				imageStore!.releasePinClaim(claimId);
+			}
+			return undefined;
+		}
+		if (hasPins) {
+			imageStore!.sealPinClaim(claimId);
+			payload.pinClaim = claimId;
+		}
+		const key = JSON.stringify(payload);
+		// After entering publication, an error may still leave the record durable. Keep its claim.
+		publicationStarted = true;
+		write(payload, key);
+		let cleanupError: string | undefined;
+		if (imageStore && previous?.pinClaim) {
+			try {
+				imageStore.releasePinClaim(previous.pinClaim);
+			} catch (error) {
+				cleanupError = error instanceof Error ? error.message : String(error);
+			}
+		}
+		return { key, omitted: inputs.length - recorded.length, ...(cleanupError ? { cleanupError } : {}) };
+	} catch (error) {
+		if (hasPins && !publicationStarted) {
+			try {
+				imageStore!.releasePinClaim(claimId);
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], "Queued image preparation and claim cleanup failed.");
+			}
+		}
+		throw error;
 	}
-	const payload: QueuedInputPayload = { version: 1, inputs: recorded };
-	const key = JSON.stringify(payload);
-	// Nothing queued and nothing recorded by this process: there is no record to clear.
-	if (key === previousKey || (recorded.length === 0 && previousKey === undefined)) return undefined;
-	// A recorded image is held against the store's pruning from before the record names it until after the
-	// record stops naming it, so a record never points at an image the store may delete.
-	const held = recorded.flatMap((input) => input.images?.map((image) => image.sequence) ?? []);
-	if (held.length > 0) {
-		if (!imageStore) throw new Error("Queued input carries an image but the session has no image store");
-		imageStore.pin(held);
-	}
-	write(payload, key);
-	if (imageStore && recordedSequences(previousKey).some((sequence) => !held.includes(sequence))) {
-		imageStore.unpinExcept([...held, ...alsoHeld]);
-	}
-	return { key, omitted: inputs.length - recorded.length };
 }
 
 /** The inputs a serialized record names. */
 function recordedInputs(key: string | undefined): RecordedInput[] {
 	if (key === undefined) return [];
 	const parsed: unknown = JSON.parse(key);
-	if (!isPlainRecord(parsed) || !Array.isArray(parsed.inputs)) return [];
-	return parsed.inputs as RecordedInput[];
+	return recordedPayloadOf(parsed)?.inputs ?? [];
 }
 
 /** The image sequences a serialized record names. */
@@ -230,7 +288,10 @@ function isRecordedInput(value: unknown): value is RecordedInput {
 		(Array.isArray(value.images) &&
 			value.images.every(
 				(image) =>
-					isPlainRecord(image) && Number.isSafeInteger(image.sequence) && typeof image.mimeType === "string",
+					isPlainRecord(image) &&
+					Number.isSafeInteger(image.sequence) &&
+					typeof image.mimeType === "string" &&
+					(image.name === undefined || typeof image.name === "string"),
 			))
 	);
 }
@@ -242,6 +303,7 @@ export interface RestoredQueuedInputs {
 		text: string;
 		images?: ImageContent[];
 		origin?: QueuedInputOrigin;
+		preservedImages?: PreservedQueuedImages;
 	}>;
 	/**
 	 * Inputs the record names whose user entry is on the branch (in the session, for the own-turn record): delivered, by a
@@ -251,6 +313,8 @@ export interface RestoredQueuedInputs {
 	delivered: number;
 	/** Images the restored inputs name that the image store no longer holds. */
 	missingImages: number;
+	/** A store read failed; text is still restored and the durable reference is left intact. */
+	imageReadError?: string;
 	/** Why the restored images could not be pinned in the image store again; undefined when they were. */
 	pinError?: string;
 	/** The record as written, to seed change detection. */
@@ -266,9 +330,9 @@ export function readQueuedInputRecord(
 	sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch" | "getBranch">,
 	imageStore: Pick<SessionImageStore, "read" | "pin"> | undefined,
 ): RestoredQueuedInputs | undefined {
-	const recorded = recordedInputsOf(sessionManager.getLatestCustomEntryOnBranch(QUEUED_INPUT_CUSTOM_TYPE)?.data);
-	if (recorded === undefined || recorded.length === 0) return undefined;
-	return restoreRecordedInputs(recorded, recorded, deliveredInputIds(sessionManager.getBranch()), imageStore);
+	const payload = recordedPayloadOf(sessionManager.getLatestCustomEntryOnBranch(QUEUED_INPUT_CUSTOM_TYPE)?.data);
+	if (payload === undefined || payload.inputs.length === 0) return undefined;
+	return restoreRecordedInputs(payload, payload.inputs, deliveredInputIds(sessionManager.getBranch()), imageStore);
 }
 
 /**
@@ -290,16 +354,18 @@ export function readOwnTurnInputRecord(
 		if (isMissingFileError(error)) return undefined;
 		throw error;
 	}
-	const recorded = recordedInputsOf(JSON.parse(text));
-	if (recorded === undefined) throw new Error(`${path} is not an own-turn input record`);
-	const restorable = recorded.filter((input) => input.id === undefined || !namedElsewhere.has(input.id));
-	return restoreRecordedInputs(recorded, restorable, deliveredInputIds(sessionManager.getEntries()), imageStore);
+	const payload = recordedPayloadOf(JSON.parse(text));
+	if (payload === undefined) throw new Error(`${path} is not an own-turn input record`);
+	const restorable = payload.inputs.filter((input) => input.id === undefined || !namedElsewhere.has(input.id));
+	return restoreRecordedInputs(payload, restorable, deliveredInputIds(sessionManager.getEntries()), imageStore);
 }
 
 /** The inputs of a record's payload; undefined when `data` is no record. */
-function recordedInputsOf(data: unknown): RecordedInput[] | undefined {
+function recordedPayloadOf(data: unknown): QueuedInputPayload | undefined {
 	if (!isPlainRecord(data) || data.version !== 1 || !Array.isArray(data.inputs)) return undefined;
-	return data.inputs.every(isRecordedInput) ? data.inputs : undefined;
+	if (!data.inputs.every(isRecordedInput) || (data.pinClaim !== undefined && !isImagePinClaimId(data.pinClaim)))
+		return undefined;
+	return { version: 1, inputs: data.inputs, ...(data.pinClaim === undefined ? {} : { pinClaim: data.pinClaim }) };
 }
 
 /** The input identities the user entries among `entries` deliver (`SessionMessageEntry.ownerInputId`). */
@@ -316,17 +382,38 @@ function deliveredInputIds(entries: readonly SessionEntry[]): Set<string> {
  * again; the key is the whole record as written.
  */
 function restoreRecordedInputs(
-	recorded: readonly RecordedInput[],
+	payload: QueuedInputPayload,
 	restorable: readonly RecordedInput[],
 	deliveredIds: ReadonlySet<string>,
 	imageStore: Pick<SessionImageStore, "read" | "pin"> | undefined,
 ): RestoredQueuedInputs {
 	const undelivered = restorable.filter((input) => input.id === undefined || !deliveredIds.has(input.id));
 	let missingImages = 0;
+	let imageReadError: string | undefined;
+	let pinError: string | undefined;
+	const held = undelivered.flatMap((input) => input.images?.map((image) => image.sequence) ?? []);
+	if (imageStore && held.length > 0) {
+		try {
+			const refused = imageStore.pin(held, payload.pinClaim);
+			if (refused.length > 0) pinError = `${refused.length} recorded image(s) could not be protected from pruning.`;
+		} catch (error) {
+			pinError = error instanceof Error ? error.message : String(error);
+		}
+	}
 	const inputs = undelivered.map((input) => {
 		const images: ImageContent[] = [];
+		const preserved: RecordedImage[] = [];
+		let readFailed = false;
 		for (const image of input.images ?? []) {
-			const stored = imageStore?.read(image.sequence);
+			let stored: ReturnType<SessionImageStore["read"]>;
+			try {
+				stored = imageStore?.read(image.sequence, payload.pinClaim, image.name);
+			} catch (error) {
+				imageReadError ??= error instanceof Error ? error.message : String(error);
+				readFailed = true;
+				preserved.push({ ...image });
+				continue;
+			}
 			if (!stored) {
 				missingImages++;
 				continue;
@@ -338,6 +425,7 @@ function restoreRecordedInputs(
 			};
 			retainedSequences.set(content, image.sequence);
 			images.push(content);
+			preserved.push({ ...image, name: basename(stored.path) });
 		}
 		return {
 			...(input.id === undefined ? {} : { id: input.id }),
@@ -345,24 +433,17 @@ function restoreRecordedInputs(
 			text: input.text,
 			...(images.length > 0 ? { images } : {}),
 			...(input.origin ? { origin: input.origin } : {}),
+			...(readFailed
+				? { preservedImages: { images: preserved, ...(payload.pinClaim ? { pinClaim: payload.pinClaim } : {}) } }
+				: {}),
 		};
 	});
-	// The record is live again in this process: refresh the pins it holds (and establish them for a record
-	// written before images were pinned) so the images outlive the restored queue's time before delivery.
-	let pinError: string | undefined;
-	const held = undelivered.flatMap((input) => input.images?.map((image) => image.sequence) ?? []);
-	if (imageStore && held.length > 0) {
-		try {
-			imageStore.pin(held);
-		} catch (error) {
-			pinError = error instanceof Error ? error.message : String(error);
-		}
-	}
 	return {
 		inputs,
 		delivered: restorable.length - undelivered.length,
 		missingImages,
+		...(imageReadError ? { imageReadError } : {}),
 		...(pinError ? { pinError } : {}),
-		key: JSON.stringify({ version: 1, inputs: recorded }),
+		key: JSON.stringify(payload),
 	};
 }
