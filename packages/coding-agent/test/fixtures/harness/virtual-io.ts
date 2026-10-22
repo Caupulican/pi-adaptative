@@ -962,6 +962,27 @@ export class VirtualFileSystem {
 				return { bytesWritten: this.writeDescriptor(descriptor, selected, position), buffer };
 			},
 			readFile: async (options?: unknown) => this.readDescriptorFile(descriptor, options),
+			createReadStream: (options?: {
+				encoding?: BufferEncoding;
+				start?: number;
+				end?: number;
+				signal?: AbortSignal;
+			}) => {
+				const stream = new PassThrough({
+					...(options?.encoding ? { encoding: options.encoding } : {}),
+					...(options?.signal ? { signal: options.signal } : {}),
+				});
+				this.streams.add(stream);
+				stream.once("close", () => this.streams.delete(stream));
+				queueMicrotask(() => {
+					try {
+						stream.end(this.readDescriptorRange(descriptor, options?.start ?? 0, options?.end));
+					} catch (error) {
+						stream.destroy(error instanceof Error ? error : new Error(String(error)));
+					}
+				});
+				return stream;
+			},
 			writeFile: async (data: unknown) => {
 				this.writeDescriptor(descriptor, bytes(data));
 			},
@@ -1268,6 +1289,16 @@ export class VirtualFileSystem {
 		const encoding = typeof options === "string" ? options : (options as { encoding?: string } | undefined)?.encoding;
 		this.note("read", descriptor.path);
 		return encoding ? result.toString(encoding as BufferEncoding) : Buffer.from(result);
+	}
+
+	/** An inclusive byte range of the open file, as a handle read stream delivers it; the descriptor position is untouched. */
+	private readDescriptorRange(fd: number, start: number, end?: number): Buffer {
+		const descriptor = this.fileDescriptor(fd);
+		this.fault({ kind: "read", path: descriptor.path }, "before");
+		const data = descriptor.node.data;
+		const result = Buffer.from(data.subarray(start, end === undefined ? data.length : end + 1));
+		this.note("read", descriptor.path);
+		return result;
 	}
 
 	private readDescriptor(
