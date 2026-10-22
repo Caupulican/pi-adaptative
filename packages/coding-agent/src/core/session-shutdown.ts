@@ -71,45 +71,48 @@ export interface ClosingSessionMemoryPorts {
 	shutdownMemory(): Promise<void>;
 	disposeSemanticUsage(): void;
 	holdWarning(message: string): void;
+	/** Work that outlived its bounded wait; it keeps the session bundle protected until it has physically ended. */
+	holdLateWork(work: Promise<void>): void;
 }
 
-/** Settle trailing run writes before memory captures its lifecycle tail, then release usage delivery. */
+/**
+ * Settle trailing run writes before memory captures its lifecycle tail, then release usage delivery.
+ * A wait that times out is disclosed and its work handed to `holdLateWork`; the quit itself still completes.
+ */
 export async function settleClosingSessionMemory(ports: ClosingSessionMemoryPorts): Promise<void> {
-	let physicallySettled = true;
+	const settlesWithin = async (run: Promise<void>, warning: string): Promise<void> => {
+		if (await runSettlesWithin(run, CLOSING_RUN_SETTLE_MS)) return;
+		ports.holdLateWork(run.then(noop, noop));
+		ports.holdWarning(warning);
+	};
 	try {
 		// The aborted run's partial message and agent_end reach persistence before its consumer goes.
 		try {
-			if (!(await runSettlesWithin(ports.waitForAgentIdle(), CLOSING_RUN_SETTLE_MS))) {
-				physicallySettled = false;
-				ports.holdWarning(
-					`A run did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its final message may not have been persisted.`,
-				);
-			}
+			await settlesWithin(
+				ports.waitForAgentIdle(),
+				`A run did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its final message may not have been persisted.`,
+			);
 		} finally {
 			ports.releaseAgentConsumer();
 		}
 		// Reflection may be held by an abort-ignoring provider; the same bound keeps memory closable.
-		if (!(await runSettlesWithin(ports.settleReflectionTurn(), CLOSING_RUN_SETTLE_MS))) {
-			physicallySettled = false;
-			ports.holdWarning(
-				`A reflection turn did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its work may not have been persisted.`,
-			);
-		}
+		await settlesWithin(
+			ports.settleReflectionTurn(),
+			`A reflection turn did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its work may not have been persisted.`,
+		);
 		// Manual and automatic compaction end cancelled, or their outstanding work is disclosed.
-		if (!(await runSettlesWithin(ports.settleCompaction(), CLOSING_RUN_SETTLE_MS))) {
-			physicallySettled = false;
-			ports.holdWarning(
-				`A compaction did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its result is discarded.`,
-			);
-		}
+		await settlesWithin(
+			ports.settleCompaction(),
+			`A compaction did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its result is discarded.`,
+		);
 		await ports.shutdownMemory();
 	} finally {
 		// A history summary can record spend until memory finishes; later disclosure is held at close.
 		ports.disposeSemanticUsage();
 	}
-	if (!physicallySettled)
-		throw new Error("Session shutdown is incomplete; active work still protects its session bundle.");
 }
+
+function noop(): void {}
 
 /**
  * Resolves true once `run` has ended, false when `ms` pass first. A run that ENDED IN FAILURE has still ended: its failure belongs to

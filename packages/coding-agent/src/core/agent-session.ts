@@ -3997,6 +3997,7 @@ export class AgentSession {
 				shutdownMemory: () => this._memory.shutdown(),
 				disposeSemanticUsage: () => safely(() => this._semanticUsage.dispose()),
 				holdWarning: (message) => this._holdUnlistenedWarning(message),
+				holdLateWork: (work) => this._runtimeAdmission.holdBundleUntil(work),
 			}),
 		);
 		track(() => this._toolRecoveryLogger.shutdown());

@@ -16,6 +16,7 @@ export class SessionRuntimeAdmissionController {
 	private readonly report: (event: WaitStatusEvent) => void;
 	private readonly closed = new AbortController();
 	private readonly bundleLease: SessionBundleLease | undefined;
+	private readonly lateWork: Promise<void>[] = [];
 
 	constructor(
 		admission: RuntimeGenerationAdmission,
@@ -27,9 +28,25 @@ export class SessionRuntimeAdmissionController {
 		this.bundleLease = bundleLease;
 	}
 
+	/** Work that outlived its bounded quit wait keeps the bundle protected until it has physically ended. */
+	holdBundleUntil(work: Promise<void>): void {
+		this.lateWork.push(work);
+	}
+
 	/** The session calls this only after all required shutdown barriers have succeeded. */
 	releaseBundle(): void {
-		this.bundleLease?.release();
+		if (this.lateWork.length === 0) {
+			this.bundleLease?.release();
+			return;
+		}
+		void Promise.all(this.lateWork)
+			.then(() => this.bundleLease?.release())
+			.catch((error: unknown) => {
+				// The quit already resolved, so no caller can receive this; surface it independently.
+				process.emitWarning(error instanceof Error ? error : "Session bundle release threw a non-Error value.", {
+					code: "PI_SESSION_BUNDLE_LATE_RELEASE_FAILED",
+				});
+			});
 	}
 
 	close(): void {
