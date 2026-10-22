@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
 import { workerTerminalOutputArtifactFile } from "../agent-paths.ts";
 import type { ArtifactContract, WorkerResultContract } from "../orchestration/contracts.ts";
+import { withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedTextFileSync } from "../util/bounded-file.ts";
 
@@ -45,28 +46,30 @@ export function captureWorkerTerminalOutputArtifact(
 		attemptDigest,
 		contentDigest,
 	);
-	const artifactDirectory = dirname(filePath);
-	mkdirSync(artifactDirectory, { recursive: true, mode: 0o700 });
-	if (process.platform !== "win32") chmodSync(artifactDirectory, 0o700);
-	writeFileAtomicSync(filePath, input.text, { mode: 0o600 });
-	const persisted = readBoundedTextFileSync(filePath, sizeBytes, "Worker terminal output artifact");
-	const persistedDigest = createHash("sha256").update(persisted).digest("hex");
-	if (persistedDigest !== contentDigest || Buffer.byteLength(persisted, "utf8") !== sizeBytes) {
-		throw new Error("Worker terminal output artifact failed post-write verification.");
-	}
+	return withSessionBundleAdmission(input.agentDir, input.parentSessionId, () => {
+		const artifactDirectory = dirname(filePath);
+		mkdirSync(artifactDirectory, { recursive: true, mode: 0o700 });
+		if (process.platform !== "win32") chmodSync(artifactDirectory, 0o700);
+		writeFileAtomicSync(filePath, input.text, { mode: 0o600 });
+		const persisted = readBoundedTextFileSync(filePath, sizeBytes, "Worker terminal output artifact");
+		const persistedDigest = createHash("sha256").update(persisted).digest("hex");
+		if (persistedDigest !== contentDigest || Buffer.byteLength(persisted, "utf8") !== sizeBytes) {
+			throw new Error("Worker terminal output artifact failed post-write verification.");
+		}
 
-	return {
-		artifactId: `worker-output-${attemptDigest.slice(0, 16)}-${contentDigest.slice(0, 16)}`,
-		kind: "report",
-		uri: pathToFileURL(filePath).href,
-		digest: contentDigest,
-		sizeBytes,
-		createdAt: input.createdAt,
-		metadata: {
-			source: "worker_terminal_output",
-			contentType: "text/plain; charset=utf-8",
-			complete: true,
-			digestAlgorithm: "sha256",
-		},
-	};
+		return {
+			artifactId: `worker-output-${attemptDigest.slice(0, 16)}-${contentDigest.slice(0, 16)}`,
+			kind: "report",
+			uri: pathToFileURL(filePath).href,
+			digest: contentDigest,
+			sizeBytes,
+			createdAt: input.createdAt,
+			metadata: {
+				source: "worker_terminal_output",
+				contentType: "text/plain; charset=utf-8",
+				complete: true,
+				digestAlgorithm: "sha256",
+			},
+		};
+	});
 }

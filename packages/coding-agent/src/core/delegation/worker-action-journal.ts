@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
 import path from "node:path";
 import { workerActionJournalFile } from "../agent-paths.ts";
 import { usesWindowsPath } from "../autonomy/path-scope.ts";
+import {
+	withSessionBundleAdmission,
+	withSessionBundleFileInspection,
+} from "../orchestration/session-bundle-lifecycle.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
-import { readBoundedTextFileSync } from "../util/bounded-file.ts";
+import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import { requireBoundedTrimmedText } from "../util/bounded-value.ts";
 
 const JOURNAL_SCHEMA_VERSION = 1;
@@ -265,7 +268,7 @@ export class WorkerActionJournal {
 
 	inspect(actionIdentity: string): WorkerActionJournalInspection {
 		const actionId = requireBoundedTrimmedText(actionIdentity, 128, "Worker action id");
-		return withFileLockSync(this.filePath, () => {
+		return withSessionBundleFileInspection(this.agentDir, this.scope.parentSessionId, this.filePath, () => {
 			const entry = this.readLocked().entries.find((candidate) => candidate.actionId === actionId);
 			if (!entry) return { state: "not_started", actionId };
 			return this.inspectionFor(entry);
@@ -280,7 +283,7 @@ export class WorkerActionJournal {
 		if (normalizedTarget.length > MAX_TARGET_CHARS) throw new TypeError("Worker action target is too long.");
 		const digest = actionDigest(input, normalizedTarget);
 		const id = actionId(this.scope, input.index, digest);
-		return withFileLockSync(this.filePath, () => {
+		return this.withMutation(() => {
 			const journal = this.readLocked();
 			const existing = journal.entries.find((entry) => entry.actionId === id);
 			if (existing) {
@@ -294,6 +297,8 @@ export class WorkerActionJournal {
 					entry.normalizedTarget === normalizedTarget,
 			);
 			if (previousFence) return this.inspectionFor(previousFence, true);
+			if (journal.entries.length >= MAX_ENTRIES)
+				throw new Error(`Worker action journal reached its ${MAX_ENTRIES} entry limit.`);
 			const timestamp = now();
 			journal.entries.push({
 				actionId: id,
@@ -338,7 +343,7 @@ export class WorkerActionJournal {
 		const boundedEvidence = evidencePointer
 			? requireBoundedTrimmedText(evidencePointer, MAX_EVIDENCE_POINTER_CHARS, "Worker action evidence pointer")
 			: undefined;
-		withFileLockSync(this.filePath, () => {
+		this.withMutation(() => {
 			const journal = this.readLocked();
 			const entry = journal.entries.find((candidate) => candidate.actionId === permit.actionId);
 			if (
@@ -360,10 +365,10 @@ export class WorkerActionJournal {
 	}
 
 	private readLocked(): PersistedJournal {
-		if (!existsSync(this.filePath)) {
+		const content = readOptionalBoundedTextFileSync(this.filePath, MAX_JOURNAL_BYTES, "Worker action journal");
+		if (content === undefined) {
 			return { schemaVersion: JOURNAL_SCHEMA_VERSION, scope: structuredClone(this.identity), entries: [] };
 		}
-		const content = readBoundedTextFileSync(this.filePath, MAX_JOURNAL_BYTES, "Worker action journal");
 		let raw: unknown;
 		try {
 			raw = JSON.parse(content);
@@ -371,6 +376,12 @@ export class WorkerActionJournal {
 			throw new Error("Worker action journal is unreadable; refusing mutation replay.");
 		}
 		return parseJournal(raw, this.identity);
+	}
+
+	private withMutation<T>(operation: () => T): T {
+		return withSessionBundleAdmission(this.agentDir, this.scope.parentSessionId, () =>
+			withFileLockSync(this.filePath, operation),
+		);
 	}
 
 	private writeLocked(journal: PersistedJournal): void {

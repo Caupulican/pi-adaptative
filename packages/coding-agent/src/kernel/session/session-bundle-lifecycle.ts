@@ -377,6 +377,33 @@ export function withSessionBundleInspection<T>(agentDir: string, parentSessionId
 	});
 }
 
+/** Inspect a possibly absent bundle file without recreating its parent or bypassing concurrent writers. */
+export function withSessionBundleFileInspection<T>(
+	agentDir: string,
+	parentSessionId: string,
+	file: string,
+	operation: () => T,
+): T {
+	return withSessionBundleInspection(agentDir, parentSessionId, () => {
+		let acquired = false;
+		try {
+			return withFileLockSync(
+				file,
+				() => {
+					acquired = true;
+					return operation();
+				},
+				{ createParentDirectories: false },
+			);
+		} catch (error) {
+			if (acquired || !isMissingFileError(error)) throw error;
+			// The file's parent is absent, and bundle exclusion blocks its writers. The caller
+			// still validates absence; its own IO/identity errors are never treated as lock failure.
+			return operation();
+		}
+	});
+}
+
 /** Reserve before any removal. Refused admission must not publish new destructive intent. */
 export function reserveSessionBundleDeletion(
 	agentDir: string,
