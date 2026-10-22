@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { workerAgentMailboxFile } from "../agent-paths.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
-import { readBoundedTextFileSync } from "../util/bounded-file.ts";
+import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 /** Storage framing ceiling; the mailbox owner separately enforces its smaller payload budgets. */
@@ -30,12 +29,14 @@ export function readWorkerMailboxRecord(file: string): {
 	reference?: WorkerMailboxContextReference;
 	mailbox?: unknown;
 } {
-	if (!existsSync(file)) return {};
-	const value: unknown = JSON.parse(readBoundedTextFileSync(file, MAX_RECORD_BYTES, "Worker mailbox record"));
+	const text = readOptionalBoundedTextFileSync(file, MAX_RECORD_BYTES, "Worker mailbox record");
+	if (text === undefined) return {};
+	const value: unknown = JSON.parse(text);
 	if (!isPlainRecord(value) || value.format === undefined) return { mailbox: value };
 	if (
 		value.format !== "worker-project-mailbox-v1" ||
 		Object.keys(value).length !== 3 ||
+		!Object.hasOwn(value, "mailbox") ||
 		!isPlainRecord(value.reference)
 	)
 		throw new Error("Worker project mailbox envelope is invalid.");
@@ -81,14 +82,17 @@ export function bindWorkerMailboxRecord(
 	const current = readWorkerMailboxRecord(file);
 	if (current.reference && !isDeepStrictEqual(current.reference, reference))
 		throw new Error("Worker mailbox context identity changed.");
-	const mailbox = current.mailbox ?? {
-		version: 1,
-		parentSessionId,
-		agentId,
-		messages: [],
-		replyAcknowledgements: [],
-		replayReceipts: [],
-	};
+	const mailbox =
+		current.mailbox === undefined
+			? {
+					version: 1,
+					parentSessionId,
+					agentId,
+					messages: [],
+					replyAcknowledgements: [],
+					replayReceipts: [],
+				}
+			: current.mailbox;
 	if (
 		!isPlainRecord(mailbox) ||
 		mailbox.version !== 1 ||

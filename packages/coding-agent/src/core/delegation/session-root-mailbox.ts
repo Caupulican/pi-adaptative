@@ -1,8 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { sessionRootMailboxFile } from "../agent-paths.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
-import { readBoundedTextFileSync } from "../util/bounded-file.ts";
+import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import { type SteerDecision, type WaitStatusEvent, type WaitSteer, type WakeSource, waitFor } from "../util/wait.ts";
 import { createReplaySafeMailboxBounder } from "./replay-safe-mailbox-bounds.ts";
 
@@ -812,11 +811,15 @@ export class SessionRootMailbox {
 	}
 
 	private read(): SessionRootMailboxState {
-		if (!existsSync(this.file)) {
+		const text = readOptionalBoundedTextFileSync(
+			this.file,
+			MAX_MAILBOX_BYTES,
+			"Session root mailbox durable size bound",
+		);
+		if (text === undefined) {
 			this.parsed = undefined;
 			return { version: 1, parentSessionId: this.parentSessionId, replies: [], replayReceipts: [] };
 		}
-		const text = readBoundedTextFileSync(this.file, MAX_MAILBOX_BYTES, "Session root mailbox durable size bound");
 		if (this.parsed?.text === text) return this.parsed.state;
 		const state = parseState(text, this.parentSessionId);
 		this.parsed = { text, state };

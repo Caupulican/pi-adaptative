@@ -1,5 +1,6 @@
 import { closeSync, fstatSync, lstatSync, opendirSync, openSync, readSync, type Stats } from "node:fs";
 import { type FileHandle, lstat as lstatAsync, open as openAsync } from "node:fs/promises";
+import { isMissingFileError } from "./atomic-file.ts";
 
 const READ_CHUNK_BYTES = 64 * 1024;
 
@@ -110,6 +111,18 @@ export function readBoundedTextFileSync(filePath: string, maxBytes: number, labe
 		}
 		return content.toString("utf-8");
 	});
+}
+
+/** Only absence at initial lookup is empty; unavailable paths and interrupted reads remain errors. */
+export function readOptionalBoundedTextFileSync(filePath: string, maxBytes: number, label: string): string | undefined {
+	validateByteLimit(maxBytes);
+	try {
+		lstatSync(filePath);
+	} catch (error) {
+		if (isMissingFileError(error)) return undefined;
+		throw error;
+	}
+	return readBoundedTextFileSync(filePath, maxBytes, label);
 }
 
 export interface BoundedFilePrefix {
