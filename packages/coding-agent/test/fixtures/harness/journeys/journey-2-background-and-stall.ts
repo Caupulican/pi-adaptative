@@ -1021,8 +1021,9 @@ async function verifyWorkerLeaseRenewalFailure(world: HarnessWorld): Promise<voi
  * port by DEFAULT_GOAL_WORKER_WAIT_MS fires that wake: the continuation pass reads `worker_wait_timeout`, and its one turn spends
  * the token budget the owner set (`editPersistedGoal`), so the goal stops as budget_limited with nothing armed and no warning
  * (R29 fault). The worker then reports with one inconclusive item: the ladder leaves it unsettled and buffers it for the owner.
- * The goal no longer executes, so the terminal handoff wakes no turn: it posts its follow-up and then flushes the buffered item
- * as the owner items message, with no root request (R35 fault); nothing reached the owner before the worker ended (R35 control).
+ * The goal no longer executes, so the terminal handoff wakes no turn: it posts its follow-up, which carries the unsettled item as a
+ * parent-owned inconclusive finding, and posts no owner items message because no judge reserved the item for the owner, with no root
+ * request (R35 fault); nothing reached the owner before the worker ended (R35 control).
  */
 async function verifyGoalWorkerDeadlineAndQuietHandoff(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -1263,35 +1264,39 @@ async function verifyGoalWorkerDeadlineAndQuietHandoff(world: HarnessWorld): Pro
 		);
 	expect(ownerPosts(), `${label}: nothing reached the owner before the worker ended`).toEqual([]);
 	world.faultMatrix.witness("R35", { control: true });
-	const ownerItemsPosted = createBarrier();
+	const handoffPosted = createBarrier();
 	const unsubscribe = session.subscribe((event) => {
 		if (
 			event.type === "message_end" &&
 			event.message.role === "custom" &&
-			event.message.customType === "owner_items"
+			event.message.customType === "background-worker-completion"
 		) {
-			ownerItemsPosted.release();
+			handoffPosted.release();
 		}
 	});
 	const rootRequests = () => world.provider.requests.filter((request) => request.model.id === "root").length;
 	const rootRequestsBefore = rootRequests();
 	try {
 		workerRelease.release();
-		await withDeadline(trace, `${label} owner items posted`, ownerItemsPosted.promise, 90_000);
+		await withDeadline(trace, `${label} handoff posted`, handoffPosted.promise, 90_000);
+		// The handoff's delivery lease also covers the owner-item flush; idle means that flush has run.
+		await withDeadline(trace, `${label} foreground idle after the handoff`, session.waitForForegroundIdle(), 30_000);
 	} finally {
 		unsubscribe();
 	}
 	const posted = ownerPosts();
+	// With no judge bound, an unsettled worker item is a technical unknown the parent owns, never an owner question.
 	expect(
 		posted.map((entry) => entry.customType),
-		`${label}: the handoff's follow-up comes first, then its flush posts the owner items`,
-	).toEqual(["background-worker-completion", "owner_items"]);
+		`${label}: the handoff's follow-up is the only post; nothing is posted to the owner`,
+	).toEqual(["background-worker-completion"]);
 	expect(posted[0]?.content, `${label}: the handoff wakes no turn`).toContain(
 		"Parent was not woken. Wait for explicit user input before reading a lane or starting more work.",
 	);
-	expect(posted[1]?.content, `${label}: the buffered unsettled item is posted to the owner`).toBe(
-		`Needs you: nothing the agents could check settled these. Answer before relying on them:\n- ${UNSETTLED}`,
+	expect(posted[0]?.content, `${label}: the handoff leaves the unsettled item with the parent`).toContain(
+		"Inconclusive, never treat as confirmed. The parent must investigate the missing evidence or follow up with the worker.",
 	);
+	expect(posted[0]?.content, `${label}: the parent-owned block names the item`).toContain(ITEM);
 	expect(rootRequests(), `${label}: no root request follows the quiet handoff`).toBe(rootRequestsBefore);
 	const agentId = laneRecord()?.agentId;
 	if (agentId === undefined) throw new Error(`${label}: the bound lane carries no worker agent`);
