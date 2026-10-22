@@ -56,8 +56,8 @@ import {
 	stripUserPreferenceMetadata,
 	type UserPreferenceAdmissionRequest,
 	type UserPreferenceAdmissionResult,
-	type UserPreferenceCommitReport,
 	type UserPreferenceEvidenceCitation,
+	type UserPreferenceLearningPort,
 	type UserPreferenceMetadata,
 	type UserPreferenceScope,
 } from "../user-preference-metadata.ts";
@@ -69,6 +69,7 @@ import {
 	ROOT_MEMORY_WRITE_ACTIONS,
 } from "../worker-memory-tools.ts";
 import { USER_ARCHIVE_POINTER, UserMemoryArchive } from "./user-memory-archive.ts";
+import { UserMemoryTransaction } from "./user-memory-transaction.ts";
 
 const NEAR_DUP_THRESHOLD = 0.6;
 
@@ -250,6 +251,7 @@ type MemoryParams = Static<typeof memoryFields>;
 
 /** The history backends come from the shared history owner (see `history-tool.ts`), resolved per call. */
 export interface FileStoreProviderOptions extends HistoryToolBackends {
+	userPreferenceLearning?: UserPreferenceLearningPort;
 	onDurableMemoryChanged?: () => void;
 	/**
 	 * Admission for a USER.md preference write (the reflection controller). Absent in narrow hosts:
@@ -361,7 +363,7 @@ export interface ManagedMemoryDriftEntry {
  */
 export interface ManagedMemoryNotice {
 	target: ManagedMemoryTarget;
-	kind: "healed" | "drift" | "archive_unavailable";
+	kind: "healed" | "drift" | "archive_unavailable" | "transaction_pending";
 	/** Digest of the observed content or diagnostic; the dedupe key beside target and kind. */
 	revision: string;
 	message: string;
@@ -615,6 +617,7 @@ export class FileStoreProvider implements MemoryProvider {
 	/** Preference lines held by the USER archive shards (with their heading context), refreshed at init and after any archive change. */
 	private archivedUserEntries: Array<{ line: string; section?: string }> = [];
 	private userArchive?: UserMemoryArchive;
+	private userTransaction?: UserMemoryTransaction;
 	private okfStore?: OkfProjectMemoryStore;
 	private readonly options: FileStoreProviderOptions;
 
@@ -648,6 +651,18 @@ export class FileStoreProvider implements MemoryProvider {
 		this.memoryStatePath = managedMemoryStateFile(ctx.agentDir, "MEMORY.md");
 		this.userStatePath = managedMemoryStateFile(ctx.agentDir, "USER.md");
 		this.userArchive = new UserMemoryArchive(ctx.agentDir);
+		this.userTransaction = new UserMemoryTransaction({
+			userPath: this.userFilePath,
+			statePath: this.userStatePath,
+			archiveDir: this.userArchive.directoryPath,
+			inspectUser: async () => {
+				const inspected = await inspectManagedMemoryFile(this.userFilePath, this.userStatePath);
+				return { content: inspected.currentOnDisk, recognized: inspected.managedState !== undefined };
+			},
+			...(this.options.userPreferenceLearning
+				? { settle: (reference, report) => this.options.userPreferenceLearning!.settle(reference, report) }
+				: {}),
+		});
 		const identity = getDirectoryResourceProfileInfo(ctx.cwd, ctx.agentDir);
 		this.projectKey = identity.hash;
 		this.projectRoot = identity.root;
@@ -725,6 +740,29 @@ export class FileStoreProvider implements MemoryProvider {
 		statePath: string,
 	): Promise<string> {
 		return withFileLock(filePath, async () => {
+			if (target === "user") {
+				const pending = await this.userTransaction?.recover();
+				if (pending && !pending.clear) {
+					this.managedNotices.push({
+						target,
+						kind: "transaction_pending",
+						revision: contentDigest(pending.message ?? ""),
+						message: pending.message ?? "USER transaction pending",
+					});
+					try {
+						return await fs.readFile(filePath, "utf8");
+					} catch (error) {
+						const diagnostic = `USER preferences are unavailable while its transaction is pending: ${String(error).slice(0, 400)}`;
+						this.managedNotices.push({
+							target,
+							kind: "transaction_pending",
+							revision: contentDigest(diagnostic),
+							message: diagnostic,
+						});
+						return ""; // Unavailable prompt projection; no empty storage is created or adopted.
+					}
+				}
+			}
 			const healed = await healEmptyManagedFile(filePath, statePath);
 			if (healed !== undefined) {
 				this.managedNotices.push({
@@ -1249,6 +1287,10 @@ export class FileStoreProvider implements MemoryProvider {
 		const entry = this.managedTargets().find((candidate) => candidate.target === target);
 		if (!entry || !this.ctx) return { ok: false, message: `Unknown memory target ${target}.` };
 		return withFileLock(entry.filePath, async () => {
+			if (target === "user") {
+				const pending = await this.userTransaction?.recover();
+				if (pending && !pending.clear) return { ok: false, message: pending.message ?? "USER transaction pending" };
+			}
 			const { currentOnDisk, revision, managedState } = await inspectManagedMemoryFile(
 				entry.filePath,
 				entry.statePath,
@@ -1424,6 +1466,7 @@ export class FileStoreProvider implements MemoryProvider {
 		expectedRevision: number | undefined;
 		budget: number;
 		mutationAdmission: MemoryMutationAdmission;
+		commitUser(content: string): Promise<{ metadataPending?: string }>;
 	}): Promise<
 		| {
 				kind: "applied";
@@ -1431,8 +1474,7 @@ export class FileStoreProvider implements MemoryProvider {
 				archiveChanged: boolean;
 				storageChanged: boolean;
 				preference: UserPreferenceMetadata | undefined;
-				/** The admission owner's publication boundary; called once with the terminal result. */
-				commit: ((report: UserPreferenceCommitReport) => void) | undefined;
+				warning?: string;
 		  }
 		| { kind: "refused"; result: AgentToolResult<Record<string, unknown>> }
 	> {
@@ -1526,20 +1568,22 @@ export class FileStoreProvider implements MemoryProvider {
 			basis: input.requestedBasis ?? "inferred",
 			evidence: input.requestedEvidence,
 		};
-		const admission: UserPreferenceAdmissionResult = this.options.admitUserPreference
-			? await this.options.admitUserPreference(request)
-			: {
-					outcome: "apply",
-					reasonCode: "no_admission_owner",
-					metadata: {
-						id: existing?.metadata?.id ?? newUserPreferenceId(text || existing?.text || "", scope),
-						scope,
-						basis: "unverified",
-						observations: 0,
-						revision: (existing?.metadata?.revision ?? 0) + 1,
-						sources: [],
-					},
-				};
+		const admission: UserPreferenceAdmissionResult = this.options.userPreferenceLearning
+			? await this.options.userPreferenceLearning.admit(request)
+			: this.options.admitUserPreference
+				? await this.options.admitUserPreference(request)
+				: {
+						outcome: "apply",
+						reasonCode: "no_admission_owner",
+						metadata: {
+							id: existing?.metadata?.id ?? newUserPreferenceId(text || existing?.text || "", scope),
+							scope,
+							basis: "unverified",
+							observations: 0,
+							revision: (existing?.metadata?.revision ?? 0) + 1,
+							sources: [],
+						},
+					};
 		if (admission.outcome === "candidate") {
 			return {
 				kind: "refused",
@@ -1561,24 +1605,53 @@ export class FileStoreProvider implements MemoryProvider {
 					: undefined;
 		if (mutation === undefined) throw new Error("The content to remove ('oldContent') was not found in the file.");
 		// Near-duplicate supersession was resolved above with trailers ignored; the archive applies one exact mutation.
-		let result: Awaited<ReturnType<UserMemoryArchive["apply"]>>;
+		let result = { userContent: currentOnDisk, archiveChanged: false, storageChanged: false };
+		let warning: string | undefined;
+		let delegated = false;
 		try {
 			input.mutationAdmission.assertPending();
-			result = await this.userArchive.apply(
+			const plan = await this.userArchive.prepare(currentOnDisk, mutation, input.budget, () => null);
+			if (!this.userTransaction) throw new Error("USER transaction owner is not initialized.");
+			if (admission.reference && !this.options.userPreferenceLearning)
+				throw new Error("USER audit settlement owner is unavailable");
+			if (
+				Buffer.byteLength(plan.userContent, "utf8") > FileStoreProvider.RESOURCE_CEILING &&
+				Buffer.byteLength(plan.userContent, "utf8") >= Buffer.byteLength(currentOnDisk, "utf8")
+			)
+				throw new Error("USER resource overflow before transaction admission");
+			result = {
+				userContent: plan.userContent,
+				archiveChanged: plan.archiveChanged,
+				storageChanged: plan.shards.length > 0 || !!plan.index || plan.userContent !== currentOnDisk,
+			};
+			const transaction = await this.userTransaction.run(
+				plan,
 				currentOnDisk,
-				mutation,
-				input.budget,
-				() => null,
+				admission.reference ?? null,
 				input.mutationAdmission,
+				async (progress) => {
+					await this.userArchive!.applyPrepared(plan, input.mutationAdmission, progress);
+					if (plan.userContent === currentOnDisk) return undefined;
+					await progress.beforeUser();
+					const committed = await input.commitUser(plan.userContent);
+					await progress.afterUser();
+					return committed.metadataPending;
+				},
+				() => {
+					delegated = true;
+				},
 			);
+			warning = transaction.warning;
+			if (!admission.reference) admission.commit?.({ persisted: true });
 		} catch (error) {
-			admission.commit?.({
-				persisted: false,
-				error: String(error),
-				...(error instanceof MemoryMutationOutcomeError
-					? { outcome: error.outcome, storageChanged: error.storageChanged }
-					: {}),
-			});
+			if (!delegated || !admission.reference)
+				admission.commit?.({
+					persisted: false,
+					error: String(error),
+					...(error instanceof MemoryMutationOutcomeError
+						? { outcome: error.outcome, storageChanged: error.storageChanged }
+						: {}),
+				});
 			if (error instanceof MemoryMutationOutcomeError) {
 				await this.refreshArchivedUserLines();
 				this.notifyDurableMemoryChanged();
@@ -1591,7 +1664,7 @@ export class FileStoreProvider implements MemoryProvider {
 			archiveChanged: result.archiveChanged,
 			storageChanged: result.storageChanged,
 			preference: action === "remove" ? undefined : admission.metadata,
-			commit: admission.commit,
+			...(warning ? { warning } : {}),
 		};
 	}
 
@@ -1972,10 +2045,7 @@ export class FileStoreProvider implements MemoryProvider {
 							: target === "project"
 								? FileStoreProvider.RESOURCE_CEILING
 								: FileStoreProvider.BUDGET_USER.chars;
-					// The admitted USER write's publication boundary: reported once, after the bytes landed
-					// or the write failed, so the learning audit never claims an apply that did not persist.
-					let pendingCommit: ((report: UserPreferenceCommitReport) => void) | undefined;
-					let archiveEffects = false;
+					let userCommitWarning: string | undefined;
 					const mutationAdmission = new MemoryMutationAdmission(signal);
 					// A hint, never a reroute: the model decides, the harness names the better target.
 					const projectHint =
@@ -1989,6 +2059,15 @@ export class FileStoreProvider implements MemoryProvider {
 					try {
 						return await withFileLock(filePath, async () => {
 							mutationAdmission.assertPending();
+							if (target === "user") {
+								const pending = await this.userTransaction?.recover();
+								if (pending && !pending.clear)
+									return memoryFailure(
+										"USER transaction pending",
+										pending.message ?? "USER transaction pending",
+										{ partial: true, outcomeUnknown: true, transactionPath: this.userTransaction?.path },
+									);
+							}
 							const healed = await healEmptyManagedFile(filePath, statePath, signal);
 							if (healed !== undefined)
 								this.managedNotices.push({
@@ -2048,10 +2127,11 @@ export class FileStoreProvider implements MemoryProvider {
 									expectedRevision,
 									budget,
 									mutationAdmission,
+									commitUser: (value) =>
+										commitManagedMemoryContent(filePath, statePath, managedState, value, mutationAdmission),
 								});
 								if (outcome.kind === "refused") return outcome.result;
-								pendingCommit = outcome.commit;
-								archiveEffects = outcome.storageChanged;
+								userCommitWarning = outcome.warning;
 								newContent = outcome.userContent;
 								archiveChanged = outcome.archiveChanged;
 								if (archiveChanged) await this.refreshArchivedUserLines();
@@ -2089,12 +2169,10 @@ export class FileStoreProvider implements MemoryProvider {
 
 							const overBudget = Buffer.byteLength(newContent, "utf8") > FileStoreProvider.RESOURCE_CEILING;
 							if (
+								target !== "user" &&
 								overBudget &&
 								Buffer.byteLength(newContent, "utf8") >= Buffer.byteLength(currentOnDisk, "utf8")
 							) {
-								if (archiveEffects) throw new Error("Resource overflow after archive changes");
-								pendingCommit?.({ persisted: false, error: "Resource overflow" });
-								pendingCommit = undefined;
 								return memoryFailure(
 									"Resource overflow",
 									`Error: Resource overflow. ${fileLabel} storage ceiling is ${FileStoreProvider.RESOURCE_CEILING} UTF-8 bytes. Current operation would result in ${Buffer.byteLength(newContent, "utf8")} bytes. Remove or shorten an existing line first; already-over-budget content must strictly shrink on each repair.`,
@@ -2102,7 +2180,7 @@ export class FileStoreProvider implements MemoryProvider {
 							}
 
 							const receipt =
-								newContent !== currentOnDisk
+								target !== "user" && newContent !== currentOnDisk
 									? await commitManagedMemoryContent(
 											filePath,
 											statePath,
@@ -2116,15 +2194,12 @@ export class FileStoreProvider implements MemoryProvider {
 							else if (target === "project") this.lastWrittenProjectMemory = newContent;
 							else this.lastWrittenUser = newContent;
 							const warning = [
+								userCommitWarning,
 								receipt.metadataPending,
 								archiveChanged || newContent !== currentOnDisk ? this.notifyDurableMemoryChanged() : undefined,
 							]
 								.filter(Boolean)
 								.join(" ");
-							// Content is confirmed; metadata can remain pending and is disclosed above. Archive
-							// work (when touched) preceded this commit. Report the actual content outcome.
-							pendingCommit?.({ persisted: true });
-							pendingCommit = undefined;
 
 							return {
 								content: [
@@ -2153,23 +2228,7 @@ export class FileStoreProvider implements MemoryProvider {
 								},
 							};
 						});
-					} catch (err) {
-						const error = archiveEffects
-							? new MemoryMutationOutcomeError(
-									err,
-									err instanceof MemoryMutationOutcomeError ? err.outcome : "partial",
-									true,
-									err instanceof MemoryMutationOutcomeError ? err.evidence : [],
-								)
-							: err;
-						pendingCommit?.({
-							persisted: false,
-							error: String(error),
-							...(error instanceof MemoryMutationOutcomeError
-								? { outcome: error.outcome, storageChanged: error.storageChanged }
-								: {}),
-						});
-						pendingCommit = undefined;
+					} catch (error) {
 						if (error instanceof MemoryMutationOutcomeError) this.notifyDurableMemoryChanged();
 						return memoryFailure(
 							String(error),

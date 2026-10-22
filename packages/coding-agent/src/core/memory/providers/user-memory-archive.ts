@@ -45,15 +45,24 @@ interface UserPreferenceShard {
 	timestamp?: string;
 }
 
-interface ArchiveFileChange {
+export interface ArchiveFileChange {
 	path: string;
 	before: string | null;
 	after: string | null;
 }
 
-interface ArchiveMutationPlan extends Omit<UserMemoryMutationResult, "storageChanged"> {
+export interface ArchiveMutationPlan extends Omit<UserMemoryMutationResult, "storageChanged"> {
 	shards: ArchiveFileChange[];
 	index?: ArchiveFileChange;
+}
+
+export function isUserArchiveFileName(name: string): boolean {
+	return name === ARCHIVE_INDEX_NAME || SHARD_NAME_RE.test(name);
+}
+
+export interface ArchiveMutationProgress {
+	before(change: ArchiveFileChange): Promise<void>;
+	after(change: ArchiveFileChange): Promise<void>;
 }
 
 interface ArchiveSnapshot {
@@ -111,6 +120,10 @@ export class UserMemoryArchive {
 		this.indexPath = join(this.archiveDir, ARCHIVE_INDEX_NAME);
 	}
 
+	get directoryPath(): string {
+		return this.archiveDir;
+	}
+
 	async apply(
 		currentUser: string,
 		action: UserMemoryAction,
@@ -120,6 +133,14 @@ export class UserMemoryArchive {
 	): Promise<UserMemoryMutationResult> {
 		admission.assertPending();
 		const plan = await this.prepare(currentUser, action, budget, supersedeNearDuplicate);
+		return this.applyPrepared(plan, admission);
+	}
+
+	async applyPrepared(
+		plan: ArchiveMutationPlan,
+		admission: MemoryMutationAdmission,
+		progress?: ArchiveMutationProgress,
+	): Promise<UserMemoryMutationResult> {
 		admission.assertPending();
 		const changes = [...plan.shards, ...(plan.index ? [plan.index] : [])];
 		const attempted = new Set<string>();
@@ -128,6 +149,7 @@ export class UserMemoryArchive {
 			for (const change of changes) {
 				const current = await this.readOptional(change.path);
 				if (current !== change.before) throw new Error(`User archive changed after preparation: ${change.path}.`);
+				await progress?.before(change);
 				if (change.after === null) {
 					admission.begin();
 					attempted.add(change.path);
@@ -144,6 +166,7 @@ export class UserMemoryArchive {
 					});
 				}
 				completed.add(change.path);
+				await progress?.after(change);
 			}
 			admission.assertPending();
 			return {
@@ -285,7 +308,7 @@ export class UserMemoryArchive {
 		}
 	}
 
-	private async prepare(
+	async prepare(
 		currentUser: string,
 		action: UserMemoryAction,
 		budget: number,

@@ -1236,7 +1236,7 @@ export class AgentSession {
 			getGoalState: () => this.getGoalStateSnapshot(),
 			emitWarning: (message) => this._foregroundLifecycle.warn(message),
 			onActivation: (event) => this._emit({ type: "memory_activation", ...event }),
-			admitUserPreference: (request) => this._reflection.admitUserPreference(request),
+			getUserPreferenceLearning: () => this._reflection.userPreferenceLearning,
 			subscribeEntriesPersisted: (listener) => this.sessionManager.onEntriesPersisted(listener),
 			// ICM's project chat: each turn projects onto the provider runtime, and its compactions repeat the accepted prefix.
 			providerRequest: {

@@ -141,6 +141,7 @@ import { TranscriptSummaryStore } from "./memory/transcript-summary-store.ts";
 import type {
 	UserPreferenceAdmissionRequest,
 	UserPreferenceAdmissionResult,
+	UserPreferenceLearningPort,
 } from "./memory/user-preference-metadata.ts";
 import type {
 	LaneMemoryCapacity,
@@ -500,6 +501,7 @@ export interface MemoryControllerDeps {
 	 * gate, audit). Absent only in narrow hosts; the file-store then labels writes unverified.
 	 */
 	admitUserPreference?(request: UserPreferenceAdmissionRequest): Promise<UserPreferenceAdmissionResult>;
+	getUserPreferenceLearning?(): UserPreferenceLearningPort;
 	/**
 	 * Durable-publication events of this session's entries, for incremental history ingestion. The
 	 * returned function unsubscribes. Absent in narrow hosts: recall then covers only what it indexed
@@ -2582,12 +2584,14 @@ export class MemoryController {
 						);
 					} else {
 						const admitUserPreference = this.deps.admitUserPreference;
+						const userPreferenceLearning = this.deps.getUserPreferenceLearning?.();
 						writer = new FileStoreProvider({
 							onDurableMemoryChanged: () => {
 								this._memoryContentRevision++;
 								this._memoryOkfProvider = undefined;
 							},
 							...(admitUserPreference ? { admitUserPreference: (request) => admitUserPreference(request) } : {}),
+							...(userPreferenceLearning ? { userPreferenceLearning } : {}),
 							...history,
 						});
 						manager.registerProvider(writer);
