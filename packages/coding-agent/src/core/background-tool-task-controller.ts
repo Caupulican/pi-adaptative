@@ -1234,7 +1234,9 @@ export class BackgroundToolTaskController {
 					: completion.isError
 						? "failed"
 						: "completed";
-		const output = `${late ? "Physical execution settled after the earlier terminal notice; its status remains unchanged.\n" : ""}${renderCompletionOutput(completion)}`;
+		const output = late
+			? this.lateRevisionOutput(state, "Physical execution settled", renderCompletionOutput(completion))
+			: renderCompletionOutput(completion);
 		this.finishState(
 			state,
 			status,
@@ -1246,6 +1248,16 @@ export class BackgroundToolTaskController {
 		);
 	}
 
+	/**
+	 * A late revision becomes the newest snapshot, the only one a resume restores and delivers. Until the terminal it supersedes
+	 * was delivered, it therefore carries that terminal's own output (a cancellation's cause included).
+	 */
+	private lateRevisionOutput(state: BackgroundToolTaskState, settlement: string, detail: string): string {
+		if (state.record.terminalDelivery === "delivered")
+			return `${settlement} after the earlier terminal notice; its status remains unchanged.\n${detail}`;
+		return `${state.record.output}\n${settlement} after the terminal recorded above; its status remains unchanged.\n${detail}`;
+	}
+
 	private settleRejected(state: BackgroundToolTaskState, error: unknown): void {
 		// Operation failures are fulfilled tool results with isError. A rejected physical completion
 		// instead carries finalization/cleanup failure, even after the record was fenced canceled.
@@ -1253,7 +1265,8 @@ export class BackgroundToolTaskController {
 		const late = state.record.status !== "running";
 		const status =
 			state.record.status !== "running" ? state.record.status : state.cancellationRequested ? "canceled" : "failed";
-		const output = `${late ? "Physical execution failed to finalize after the earlier terminal notice; its status remains unchanged.\n" : ""}${error instanceof Error ? error.message : String(error)}`;
+		const detail = error instanceof Error ? error.message : String(error);
+		const output = late ? this.lateRevisionOutput(state, "Physical execution failed to finalize", detail) : detail;
 		this.finishState(state, status, output, undefined);
 	}
 
