@@ -5079,6 +5079,8 @@ export class WorkerDelegationController {
 					: undefined,
 				warn: (message) => this.safeWarn(message),
 				providerRetryTimers: this.deps.getTimers().port("worker-provider-retry"),
+				accountingTimers: this.deps.getTimers().port("worker-accounting"),
+				settlementTimers: this.deps.getTimers().port("worker-settlement"),
 				...(this.deps.observeWorkerProgress ? { observeWorkerProgress: this.deps.observeWorkerProgress } : {}),
 				...(this.deps.observeWorkerRequest ? { observeWorkerRequest: this.deps.observeWorkerRequest } : {}),
 				onRequestAccepted: (context) => laneMemoryCapacity.noteRequestAccepted(context),

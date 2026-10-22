@@ -29,7 +29,7 @@ import type { ArtifactContract, AttemptUsageSnapshot, ExecutionGrant } from "../
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
-import type { TimerPort } from "../util/timer-port.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { WorkerActionJournal } from "./worker-action-journal.ts";
 import type { AppliedActionsReport, WorkerAction } from "./worker-actions.ts";
 import type { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
@@ -234,6 +234,10 @@ export interface WorkerAttemptExecutorOptions {
 	warn(message: string): void;
 	/** The `worker-provider-retry` port a transiently failed provider request backs off on; default: system timers. */
 	providerRetryTimers?: TimerPort;
+	/** The worker-accounting port; receipt retries outlive cancellation. */
+	accountingTimers?: TimerPort;
+	/** The worker-settlement port; bounds the required physical completion join. */
+	settlementTimers?: TimerPort;
 	/**
 	 * Live worker supervision. Called once per executed tool call with what actually happened on this
 	 * attempt. Supervision is advisory: it never blocks the call it observes, and a failure inside it
@@ -384,6 +388,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	waitForPhysicalSettlement(): Promise<void>;
 } {
 	const physicalSettlements = new Set<Promise<void>>();
+	const settlementTimers = options.settlementTimers ?? SYSTEM_TIMER_PORT;
 	let physicalAdmissionClosed = false;
 	let physicalWait: Promise<void> | undefined;
 	const trackPhysicalCompletion = <Input, Output>(
@@ -424,19 +429,23 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			physicalWait = Promise.resolve();
 			return physicalWait;
 		}
-		let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+		let watchdogTimer: unknown;
 		const watchdog = new Promise<never>((_, reject) => {
-			watchdogTimer = setTimeout(() => {
-				reject(
-					new Error(
-						`Worker ${options.agentId} attempt ${options.durableHandle.attemptId} physical settlement timed out after ${WORKER_PHYSICAL_SETTLEMENT_GRACE_MS}ms with ${physicalSettlements.size} inner call(s) still pending.`,
-					),
-				);
-			}, WORKER_PHYSICAL_SETTLEMENT_GRACE_MS);
+			watchdogTimer = settlementTimers.setTimeout(
+				() => {
+					reject(
+						new Error(
+							`Worker ${options.agentId} attempt ${options.durableHandle.attemptId} physical settlement timed out after ${WORKER_PHYSICAL_SETTLEMENT_GRACE_MS}ms with ${physicalSettlements.size} inner call(s) still pending.`,
+						),
+					);
+				},
+				WORKER_PHYSICAL_SETTLEMENT_GRACE_MS,
+				{ keepAlive: true },
+			);
 			// This required join owns the process lifetime even when pending calls are pure promises.
 		});
 		physicalWait = Promise.race([drain(), watchdog]).finally(() => {
-			if (watchdogTimer) clearTimeout(watchdogTimer);
+			if (watchdogTimer !== undefined) settlementTimers.clearTimeout(watchdogTimer);
 		});
 		void physicalWait.catch(() => undefined);
 		return physicalWait;
@@ -901,6 +910,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 						warn: options.warn,
 						label: `Worker ${options.laneId}`,
 						afterRecord: () => gateway.publishUsage(),
+						timers: options.accountingTimers,
 					}),
 				);
 				if (options.signal) observeUsageSignal(options.signal);

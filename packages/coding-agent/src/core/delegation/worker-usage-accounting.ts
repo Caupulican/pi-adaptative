@@ -2,6 +2,7 @@ import { attemptUsageIncrease, validateAttemptUsageSnapshot } from "../orchestra
 import type { GatewayUsageAccountingPort } from "../orchestration/capability-gateway.ts";
 import type { AttemptUsageSnapshot } from "../orchestration/contracts.ts";
 import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 
 const INITIAL_RETRY_DELAY_MS = 250;
 const MAX_RETRY_DELAY_MS = 30_000;
@@ -29,9 +30,10 @@ export class WorkerUsageAccounting implements GatewayUsageAccountingPort {
 	private readonly warn: (message: string) => void;
 	private readonly label: string;
 	private readonly afterRecord: () => void;
+	private readonly timers: TimerPort;
 	private latest: AttemptUsageSnapshot;
 	private pending: AttemptUsageSnapshot | undefined;
-	private retryTimer: ReturnType<typeof setTimeout> | undefined;
+	private retryTimer: unknown;
 	private retryDelayMs = INITIAL_RETRY_DELAY_MS;
 	private writing = false;
 
@@ -40,12 +42,14 @@ export class WorkerUsageAccounting implements GatewayUsageAccountingPort {
 		warn(message: string): void;
 		label: string;
 		afterRecord(): void;
+		timers?: TimerPort;
 	}) {
 		this.port = options.port;
 		this.identity = Object.freeze({ ...options.port.identity });
 		this.warn = options.warn;
 		this.label = options.label;
 		this.afterRecord = options.afterRecord;
+		this.timers = options.timers ?? SYSTEM_TIMER_PORT;
 		this.baseline = Object.freeze(validateAttemptUsageSnapshot(options.port.baseline));
 		this.latest = this.baseline;
 	}
@@ -73,34 +77,47 @@ export class WorkerUsageAccounting implements GatewayUsageAccountingPort {
 			// succeeds but publication fails. Both direct calls and retries use the gateway owner.
 			this.afterRecord();
 			this.pending = undefined;
-			if (this.retryTimer !== undefined) clearTimeout(this.retryTimer);
+			if (this.retryTimer !== undefined) this.timers.clearTimeout(this.retryTimer);
 			this.retryTimer = undefined;
 			this.retryDelayMs = INITIAL_RETRY_DELAY_MS;
 		} catch (error) {
 			if (this.retryTimer === undefined) {
 				const delayMs = this.retryDelayMs;
 				this.retryDelayMs = Math.min(MAX_RETRY_DELAY_MS, delayMs * 2);
-				this.retryTimer = setTimeout(() => {
-					this.retryTimer = undefined;
-					try {
-						this.flush(RETRY_LOCK_OPTIONS);
-					} catch {
-						// flush retains the receipt, reports the failure and schedules its next write.
-					}
-				}, delayMs);
-				// Failed storage must not keep a closing CLI process alive indefinitely.
-				this.retryTimer.unref();
 				try {
-					this.warn(
-						`${this.label} usage persistence or publication failed; receipt retained for retry in ${delayMs}ms: ${error instanceof Error ? error.message : String(error)}`,
+					// Accounting survives worker cancellation; this recovery alarm does not keep the CLI alive.
+					this.retryTimer = this.timers.setTimeout(() => {
+						this.retryTimer = undefined;
+						try {
+							this.flush(RETRY_LOCK_OPTIONS);
+						} catch {
+							// flush retains the receipt and reports whether another alarm was armed.
+						}
+					}, delayMs);
+				} catch (scheduleError) {
+					this.reportFailure(
+						`${this.label} usage receipt remains pending without a retry alarm; persistence/publication failed (${String(error)}), then retry scheduling failed (${String(scheduleError)}).`,
 					);
-				} catch {
-					// Diagnostic failure must not replace the storage error or abandon its retry.
+					throw new AggregateError(
+						[error, scheduleError],
+						"Worker usage persistence and retry scheduling failed.",
+					);
 				}
+				this.reportFailure(
+					`${this.label} usage persistence or publication failed; receipt retained for retry in ${delayMs}ms: ${error instanceof Error ? error.message : String(error)}`,
+				);
 			}
 			throw error;
 		} finally {
 			this.writing = false;
+		}
+	}
+
+	private reportFailure(message: string): void {
+		try {
+			this.warn(message);
+		} catch {
+			// Diagnostic failure cannot discard the retained receipt or replace its error.
 		}
 	}
 }

@@ -36,6 +36,8 @@ export {
  * - `worker-wait`: the bound of a delegate wait and the watchdog of its blocked write-reservation restore.
  * - `compaction-retry`: the backoff between attempts of a compaction whose summarizer request failed transiently.
  * - `worker-provider-retry`: the backoff between a worker's transiently failed provider request and its retry.
+ * - `worker-accounting`: retry of a received worker usage receipt whose persistence or publication failed.
+ * - `worker-settlement`: the bounded join of a worker's physically executing inner calls after logical completion.
  * - `branch-summary-retry`: the backoff between attempts of a tree navigation's branch summary request.
  * - `worktree-sync`: the backoff between rename attempts of a worktree store record replacement (epoch, landing
  *   transaction, lane registration) whose rename failed transiently.
@@ -58,6 +60,8 @@ export type TimerOwner =
 	| "worker-wait"
 	| "compaction-retry"
 	| "worker-provider-retry"
+	| "worker-accounting"
+	| "worker-settlement"
 	| "branch-summary-retry"
 	| "worktree-sync"
 	| "continuous-chat"
