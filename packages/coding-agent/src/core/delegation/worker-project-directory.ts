@@ -7,7 +7,12 @@ import type {
 	SpecialistContextOwner,
 	SpecialistContextOwnership,
 } from "../orchestration/specialist-context-ownership.ts";
-import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import {
+	currentSynchronousFileLockScope,
+	type SynchronousFileLockScope,
+	withFileLockSync,
+	writeFileAtomicSync,
+} from "../util/atomic-file.ts";
 import { readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { requireBoundedTrimmedText } from "../util/bounded-value.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -44,6 +49,7 @@ export type WorkerProjectAdmission =
 export class WorkerProjectDirectory {
 	private readonly agentDir: string;
 	private readonly conversations: WorkerConversationStore;
+	private preparationScope?: { allocation: WorkerProjectAllocation; lock: SynchronousFileLockScope };
 
 	constructor(agentDir: string, conversations: WorkerConversationStore) {
 		this.agentDir = agentDir;
@@ -131,18 +137,43 @@ export class WorkerProjectDirectory {
 		});
 	}
 
+	/** Take the specialization lock before birth capture; only its exact journal may borrow it. */
+	withPreparationScope<T>(allocation: WorkerProjectAllocation, operation: () => T): T {
+		if (this.preparationScope) throw new Error("Worker preparation scope is already active.");
+		return this.withAllocation(allocation, (entry) => {
+			if (entry.reference || entry.phase !== "allocating")
+				throw new Error("Worker allocation is no longer preparing.");
+			const file = workerProjectSpecializationFile(this.agentDir, allocation.specializationKey);
+			const lock = currentSynchronousFileLockScope(file);
+			if (!lock) throw new Error("Worker preparation lock is missing.");
+			this.preparationScope = { allocation: structuredClone(allocation), lock };
+			try {
+				return operation();
+			} finally {
+				this.preparationScope = undefined;
+			}
+		});
+	}
+
 	/** Journal exact command identity BEFORE durable task preparation can leave executable work. */
 	notePreparation(allocation: WorkerProjectAllocation, preparation: WorkerProjectPreparation): void {
 		const normalized = this.normalizePreparation(preparation);
-		this.updateAllocation(allocation, (entry) => {
-			if (
-				entry.reference ||
-				entry.phase !== "allocating" ||
-				(entry.preparation && !isDeepStrictEqual(entry.preparation, normalized))
-			)
-				throw new Error("Worker allocation preparation identity changed.");
-			return { ...entry, preparation: normalized };
-		});
+		const scope = this.preparationScope;
+		if (scope && !isDeepStrictEqual(scope.allocation, allocation))
+			throw new Error("Worker preparation scope belongs to another allocation.");
+		this.withAllocation(
+			allocation,
+			(entry, save) => {
+				if (
+					entry.reference ||
+					entry.phase !== "allocating" ||
+					(entry.preparation && !isDeepStrictEqual(entry.preparation, normalized))
+				)
+					throw new Error("Worker allocation preparation identity changed.");
+				save({ ...entry, preparation: normalized });
+			},
+			scope?.lock,
+		);
 	}
 
 	/** Persist the planned birth identity before the caller creates its transcript or task binding. */
@@ -226,23 +257,28 @@ export class WorkerProjectDirectory {
 		this.withAllocation(allocation, (entry, save) => save(update(entry)));
 	}
 
-	private withAllocation(
+	private withAllocation<T>(
 		allocation: WorkerProjectAllocation,
-		operation: (entry: DirectoryEntry, save: (next: DirectoryEntry | undefined) => void) => void,
-	): void {
+		operation: (entry: DirectoryEntry, save: (next: DirectoryEntry | undefined) => void) => T,
+		borrowedScope?: SynchronousFileLockScope,
+	): T {
 		const file = workerProjectSpecializationFile(this.agentDir, allocation.specializationKey);
-		withFileLockSync(file, () => {
-			const entries = this.read(file);
-			const index = entries.findIndex((entry) => entry.allocationId === allocation.allocationId);
-			const entry = entries[index];
-			if (!entry || !isDeepStrictEqual(entry.allocatedBy, allocation.owner))
-				throw new Error("Worker allocation receipt is stale.");
-			operation(entry, (next) => {
-				if (next) entries[index] = next;
-				else entries.splice(index, 1);
-				this.write(file, entries);
-			});
-		});
+		return withFileLockSync(
+			file,
+			() => {
+				const entries = this.read(file);
+				const index = entries.findIndex((entry) => entry.allocationId === allocation.allocationId);
+				const entry = entries[index];
+				if (!entry || !isDeepStrictEqual(entry.allocatedBy, allocation.owner))
+					throw new Error("Worker allocation receipt is stale.");
+				return operation(entry, (next) => {
+					if (next) entries[index] = next;
+					else entries.splice(index, 1);
+					this.write(file, entries);
+				});
+			},
+			{ borrowedScope },
+		);
 	}
 
 	private normalizeOwner(value: unknown): SpecialistContextOwner {

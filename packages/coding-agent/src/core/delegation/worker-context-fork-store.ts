@@ -8,6 +8,7 @@ import {
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 } from "../orchestration/contracts.ts";
+import { withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
 import {
 	MAX_WORKER_BIRTH_SNAPSHOT_BYTES,
 	MAX_WORKER_BIRTH_SNAPSHOT_MESSAGES,
@@ -605,7 +606,7 @@ export class WorkerContextForkStore {
 
 	capture(request: CaptureWorkerContextForkRequest): WorkerContextForkReference {
 		const prepared = this.prepareCapture(request);
-		return withFileLockSync(this.lockFile, () => this.captureLocked(prepared).reference);
+		return this.withCaptureAdmission(() => this.captureLocked(prepared).reference);
 	}
 
 	/**
@@ -618,7 +619,7 @@ export class WorkerContextForkStore {
 		request: CaptureAndPrepareWorkerContextForkRequest<T>,
 	): CaptureAndPrepareWorkerContextForkResult<T> {
 		const prepared = this.prepareCapture(request);
-		return withFileLockSync(this.lockFile, () => {
+		return this.withCaptureAdmission(() => {
 			if (request.isLogicalIdentityClaimed?.()) {
 				throw new WorkerContextForkStoreError(
 					"identity_claimed",
@@ -635,6 +636,12 @@ export class WorkerContextForkStore {
 				throw error;
 			}
 		});
+	}
+
+	private withCaptureAdmission<T>(operation: () => T): T {
+		return withSessionBundleAdmission(this.agentDir, this.parentSessionId, () =>
+			withFileLockSync(this.lockFile, operation),
+		);
 	}
 
 	open(request: OpenWorkerContextForkRequest): WorkerContextForkSnapshot {

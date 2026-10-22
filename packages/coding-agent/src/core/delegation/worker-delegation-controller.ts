@@ -3215,25 +3215,30 @@ export class WorkerDelegationController {
 			const laneId = lifecycle.getNextAvailableLaneIdCandidate();
 			let proposedReference: WorkerContextForkReference | undefined;
 			try {
-				const captured = this.contextForks.captureAndPrepare({
-					logicalAgentId: laneId,
-					messages: birth.messages,
-					view: birth.view,
-					forkMode: mode,
-					readDurableReferences: () => this.durableWorkerContextForkReferences(),
-					isLogicalIdentityClaimed: () => {
-						const snapshot = lifecycle.getTaskRuntimeSnapshot();
-						return (
-							snapshot.tasks[laneId]?.attemptIds.some(
-								(attemptId) => snapshot.attempts[attemptId] !== undefined,
-							) ?? false
-						);
-					},
-					prepare: (birthContextForkReference) => {
-						proposedReference = birthContextForkReference;
-						return prepare(birthContextForkReference, laneId);
-					},
-				});
+				const capture = () =>
+					this.contextForks.captureAndPrepare({
+						logicalAgentId: laneId,
+						messages: birth.messages,
+						view: birth.view,
+						forkMode: mode,
+						readDurableReferences: () => this.durableWorkerContextForkReferences(),
+						isLogicalIdentityClaimed: () => {
+							const snapshot = lifecycle.getTaskRuntimeSnapshot();
+							return (
+								snapshot.tasks[laneId]?.attemptIds.some(
+									(attemptId) => snapshot.attempts[attemptId] !== undefined,
+								) ?? false
+							);
+						},
+						prepare: (birthContextForkReference) => {
+							proposedReference = birthContextForkReference;
+							return prepare(birthContextForkReference, laneId);
+						},
+					});
+				const captured =
+					project?.admission.kind === "allocated"
+						? this.projectDirectory.withPreparationScope(project.admission.allocation, capture)
+						: capture();
 				// Genuine lane creation (not a retry/resume/drain -- those all supply `existingRecord`
 				// and return earlier, above). Capture the owner epoch exactly once, here, at the same
 				// moment `goal`/`goalId` above is fixed into the durable dispatch -- never re-read on a
