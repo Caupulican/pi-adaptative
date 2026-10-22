@@ -506,6 +506,7 @@ export class AgentSession {
 	/** Usage/cost/stats accounting, /context estimate, and session export (see session-analytics.ts);
 	 * owns the spawned-usage and daily-usage memo caches. */
 	private readonly _analytics: SessionAnalytics;
+	readonly deliverSpawnedUsageReceipt: SessionAnalytics["deliverSpawnedUsageReceipt"];
 	/** The session manager's usage owner: pending paid usage, admission confirmations, and the reviewer's sink. */
 	private readonly _semanticUsage: SessionSemanticUsageDelivery;
 	private readonly _treeNavigator: SessionTreeNavigator;
@@ -2069,6 +2070,7 @@ export class AgentSession {
 				return "error" in start ? undefined : start.index;
 			},
 		});
+		this.deliverSpawnedUsageReceipt = this._analytics.deliverSpawnedUsageReceipt.bind(this._analytics);
 		const previousToolArgumentValidation = this.agent.onToolArgumentValidation;
 		this.agent.onToolArgumentValidation = (event) => {
 			const taggedEvent = this._toolProtocol.tagAdaptationRuleTeaching(event);

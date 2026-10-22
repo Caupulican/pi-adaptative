@@ -19,7 +19,8 @@ import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { PI_WORKER_READABLE_FILES_ENV } from "../../core/autonomy/worker-session-private-scope.ts";
 import { PI_OKF_TYPES } from "../../core/context/okf-memory.ts";
-import { readAutoLearnSessionIdFromFile, reportCompletedAutoLearnUsageHelper } from "../../core/cost/session-usage.ts";
+import { reportCompletedAutoLearnUsageHelper } from "../../core/cost/auto-learn-usage.ts";
+import { readAutoLearnSessionIdFromFile } from "../../core/cost/session-usage.ts";
 import { AutoLearnHandoffStore } from "../../core/learning/auto-learn-handoff-store.ts";
 import {
 	AUTO_LEARN_LEARNER_TOOLS,
@@ -857,15 +858,16 @@ export class AutoLearnController {
 			return false;
 		}
 		try {
-			reportCompletedAutoLearnUsageHelper({
+			const disposition = reportCompletedAutoLearnUsageHelper({
 				runId,
 				sessionDir,
 				sessionId,
-				logPath,
+				parentSessionId: owner.sessionId,
 				parentSession: owner.session,
-				appendLog: (p, msg) => this.appendAutoLearnLog(p, msg),
 			});
-			return true;
+			if (disposition !== "persisted")
+				this.appendAutoLearnLog(logPath, `Auto Learn usage receipt retained: ${disposition}`);
+			return disposition === "persisted";
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.appendAutoLearnLog(logPath, `Auto Learn usage report failed: ${message}`);

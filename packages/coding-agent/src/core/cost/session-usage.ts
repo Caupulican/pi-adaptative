@@ -1,8 +1,6 @@
 import * as fs from "node:fs";
-import { basename, join } from "node:path";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
-import { loadEntriesFromFile } from "../../kernel/session/session-manager.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
 import {
 	SEMANTIC_USAGE_CUSTOM_TYPE,
@@ -53,47 +51,6 @@ export function readAutoLearnSessionIdFromFile(filePath: string): string | undef
 	}
 }
 
-export function findChildSessionFile(sessionDir: string, sessionId: string): string | undefined {
-	if (!fs.existsSync(sessionDir)) return undefined;
-
-	const jsonlFiles: string[] = [];
-
-	function collectJsonlFiles(dirPath: string) {
-		let currentEntries: fs.Dirent[];
-		try {
-			currentEntries = fs.readdirSync(dirPath, { withFileTypes: true });
-		} catch {
-			return;
-		}
-		for (const entry of currentEntries) {
-			const fullPath = join(dirPath, entry.name);
-			if (entry.isDirectory()) {
-				collectJsonlFiles(fullPath);
-			} else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-				jsonlFiles.push(fullPath);
-			}
-		}
-	}
-
-	collectJsonlFiles(sessionDir);
-
-	for (const file of jsonlFiles) {
-		const base = basename(file);
-		if (base === `${sessionId}.jsonl` || base.endsWith(`_${sessionId}.jsonl`)) {
-			return file;
-		}
-	}
-
-	for (const file of jsonlFiles) {
-		const headerId = readAutoLearnSessionIdFromFile(file);
-		if (headerId === sessionId) {
-			return file;
-		}
-	}
-
-	return undefined;
-}
-
 /**
  * Whole-session spend, including direct entry charges and already-rolled-up descendants. `pending` are held semantic
  * reports the ledger does not carry yet; a report already in `entries` is counted once, from its row.
@@ -134,44 +91,4 @@ export function aggregateCumulativeUsageFromSessionEntries(
 	// Paid history spend the bounded journal had no room for: live only.
 	if (overflow !== undefined && isUsage(overflow)) addUsage(total, overflow);
 	return total;
-}
-
-export function reportCompletedAutoLearnUsageHelper(args: {
-	runId: string;
-	sessionDir: string;
-	sessionId: string;
-	logPath?: string;
-	parentSession: {
-		addSpawnedUsage: (
-			usage: Usage,
-			opts: { label: string; sourceSessionId: string; reportId: string },
-		) => string | undefined;
-	};
-	appendLog?: (logPath: string, message: string) => void;
-}): void {
-	const { runId, sessionDir, sessionId, logPath, parentSession, appendLog } = args;
-	const sessionFile = findChildSessionFile(sessionDir, sessionId);
-	if (!sessionFile) {
-		if (logPath && appendLog) {
-			appendLog(logPath, `Auto Learn usage report skipped: no child session file found for ${sessionId}.`);
-		}
-		return;
-	}
-	const fileEntries = loadEntriesFromFile(sessionFile);
-	const sessionEntries = fileEntries.filter((entry): entry is SessionEntry => entry.type !== "session");
-	const usage = aggregateCumulativeUsageFromSessionEntries(sessionEntries);
-	if (usage.cost.total === 0 && usage.totalTokens === 0) {
-		if (logPath && appendLog) {
-			appendLog(logPath, `Auto Learn usage report skipped: child session had no usage for ${sessionId}.`);
-		}
-		return;
-	}
-	parentSession.addSpawnedUsage(usage, {
-		label: "auto-learn",
-		sourceSessionId: sessionId,
-		reportId: `auto-learn:${runId}:${sessionId}`,
-	});
-	if (logPath && appendLog) {
-		appendLog(logPath, `Auto Learn usage reported: ${sessionId}.`);
-	}
 }
