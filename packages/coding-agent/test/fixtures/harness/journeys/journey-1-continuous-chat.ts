@@ -525,6 +525,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		const meta = world.guard.peekSqlite(store.queueDatabase, "SELECT body FROM meta WHERE id = 1")?.[0];
 		return meta === undefined ? undefined : (JSON.parse(String(meta.body)) as { generation: number }).generation;
 	};
+	const turnBJudgments = { ...ICM_INTAKE_JUDGMENTS, carries_0: { kind: "noul", probability: 0.02 } } as const;
 	const retryHeld = createBarrier();
 	const turnMark = world.provider.reached.length;
 	world.provider.enqueue(
@@ -533,68 +534,72 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		unavailable("arrival-b"),
 	);
 	world.provider.enqueue("root", { name: `${label}-turn-b`, reply: { content: [{ type: "text", text: "Done." }] } });
-	const waits: string[] = [];
-	const unsubscribe = root.session.subscribe((event) => {
-		if (event.type === "continuous_chat_prefix_wait") {
-			waits.push(`${event.phase} ${event.built}/${event.needed}/${event.failed}`);
-		}
-	});
-	const turnBJudgments = { ...ICM_INTAKE_JUDGMENTS, carries_0: { kind: "noul", probability: 0.02 } } as const;
-	world.systemOne.enterPhase(`${label}-turn-b`, turnBJudgments);
-	await withDeadline(trace, "R10s turn B", root.session.prompt("Answer after the R10s retries."));
-	unsubscribe();
-	await withDeadline(
-		trace,
-		"R10s retry running with every turn B arrival absorbed",
-		world.io.waitForMutation(() => {
-			const queue = icmReadScheduler(world, store);
-			return queue !== undefined && queue.totalMessages === 4 && queue.running === 1;
-		}),
-		60_000,
-	);
-	expect(
-		{
-			waits,
-			armed: world.timers.armedDelays("continuous-chat"),
-			steps: workerSteps(turnMark),
-			warnings: world.warnings.slice(warningMark),
-		},
-		"the root turn is answered while the leaf's retry is still in flight: no wait, no alarm, no new failure yet",
-	).toEqual({
-		waits: [],
-		armed: [],
-		steps: [`worker-c:${label}-arrival-a`],
-		warnings: [failedLine],
-	});
-	const generationBeforeFailure = generation();
-	retryHeld.release();
-	await withDeadline(
-		trace,
-		"R10s retry failed",
-		world.io.waitForMutation(() => {
-			const queue = icmReadScheduler(world, store);
-			return queue !== undefined && queue.running === 0 && queue.blocked === 1;
-		}),
-		60_000,
-	);
-	expect(
-		{
-			armed: world.timers.armedDelays("continuous-chat"),
-			steps: workerSteps(turnMark),
-			warnings: world.warnings.slice(warningMark),
-			row: leafRow(),
-			dueForRetry: (leafRow()?.retry_after as number) < (generation() ?? Number.NEGATIVE_INFINITY),
-			generationUnchanged: generation() === generationBeforeFailure,
-		},
-		"the retried leaf fails again, stays blocked until a later arrival, and arms no alarm",
-	).toEqual({
-		armed: [],
-		steps: [`worker-c:${label}-arrival-a`, `worker-c:${label}-arrival-b`],
-		warnings: [failedLine, failedLine],
-		row: expect.objectContaining({ status: "blocked", attempts: 2, reason: R10S_STOPPED, last_action: "fail" }),
-		dueForRetry: false,
-		generationUnchanged: true,
-	});
+	try {
+		const waits: string[] = [];
+		const unsubscribe = root.session.subscribe((event) => {
+			if (event.type === "continuous_chat_prefix_wait") {
+				waits.push(`${event.phase} ${event.built}/${event.needed}/${event.failed}`);
+			}
+		});
+		world.systemOne.enterPhase(`${label}-turn-b`, turnBJudgments);
+		await withDeadline(trace, "R10s turn B", root.session.prompt("Answer after the R10s retries."));
+		unsubscribe();
+		await withDeadline(
+			trace,
+			"R10s retry running with every turn B arrival absorbed",
+			world.io.waitForMutation(() => {
+				const queue = icmReadScheduler(world, store);
+				return queue !== undefined && queue.totalMessages === 4 && queue.running === 1;
+			}),
+			60_000,
+		);
+		expect(
+			{
+				waits,
+				armed: world.timers.armedDelays("continuous-chat"),
+				steps: workerSteps(turnMark),
+				warnings: world.warnings.slice(warningMark),
+			},
+			"the root turn is answered while the leaf's retry is still in flight: no wait, no alarm, no new failure yet",
+		).toEqual({
+			waits: [],
+			armed: [],
+			steps: [`worker-c:${label}-arrival-a`],
+			warnings: [failedLine],
+		});
+		const generationBeforeFailure = generation();
+		retryHeld.release();
+		await withDeadline(
+			trace,
+			"R10s retry failed",
+			world.io.waitForMutation(() => {
+				const queue = icmReadScheduler(world, store);
+				return queue !== undefined && queue.running === 0 && queue.blocked === 1;
+			}),
+			60_000,
+		);
+		expect(
+			{
+				armed: world.timers.armedDelays("continuous-chat"),
+				steps: workerSteps(turnMark),
+				warnings: world.warnings.slice(warningMark),
+				row: leafRow(),
+				dueForRetry: (leafRow()?.retry_after as number) < (generation() ?? Number.NEGATIVE_INFINITY),
+				generationUnchanged: generation() === generationBeforeFailure,
+			},
+			"the retried leaf fails again, stays blocked until a later arrival, and arms no alarm",
+		).toEqual({
+			armed: [],
+			steps: [`worker-c:${label}-arrival-a`, `worker-c:${label}-arrival-b`],
+			warnings: [failedLine, failedLine],
+			row: expect.objectContaining({ status: "blocked", attempts: 2, reason: R10S_STOPPED, last_action: "fail" }),
+			dueForRetry: false,
+			generationUnchanged: true,
+		});
+	} finally {
+		// The held request must never outlive a failed assertion: teardown joins it.
+		retryHeld.release();
+	}
 
 	// Turn C is the next arrival: it makes the blocked leaf eligible again and its retry publishes the summary.
 	const turnCMark = world.provider.reached.length;
