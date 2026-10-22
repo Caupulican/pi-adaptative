@@ -228,7 +228,14 @@ export function parseAutoLearnProposals(output: string): AutoLearnParseResult {
 	return { ok: true, set };
 }
 
-export type AutoLearnEntryOutcome = "applied" | "proposed" | "ineligible" | "failed" | "rejected" | "forwarded";
+export type AutoLearnEntryOutcome =
+	| "applied"
+	| "partial"
+	| "proposed"
+	| "ineligible"
+	| "failed"
+	| "rejected"
+	| "forwarded";
 
 export interface AutoLearnReportEntry {
 	index: number;
@@ -277,7 +284,7 @@ function validateSettingValue(key: TunableAutoLearnSettingKey, value: unknown): 
 function outcomeFromGate(outcome: GatedWriteOutcome): AutoLearnEntryOutcome {
 	switch (outcome.action) {
 		case "apply":
-			return "applied";
+			return outcome.partial ? "partial" : "applied";
 		case "propose":
 			return "proposed";
 		case "apply_failed":
@@ -365,6 +372,7 @@ export async function applyAutoLearnProposals(
 				outcome: outcomeFromGate(outcome),
 				reasonCode: outcome.reasonCode,
 				proposalId: outcome.proposalId,
+				...(outcome.detail ? { detail: outcome.detail } : {}),
 			});
 		});
 	}
@@ -478,7 +486,15 @@ export interface AutoLearnHandoffRecord {
 	completedAt: string;
 }
 
-const OUTCOME_ORDER: AutoLearnEntryOutcome[] = ["applied", "proposed", "forwarded", "ineligible", "failed", "rejected"];
+const OUTCOME_ORDER: AutoLearnEntryOutcome[] = [
+	"applied",
+	"partial",
+	"proposed",
+	"forwarded",
+	"ineligible",
+	"failed",
+	"rejected",
+];
 
 /** Bounded parent notice. Child-authored text is wrapped as untrusted evidence; the host decides, not the learner. */
 export function formatAutoLearnHandoffNote(record: AutoLearnHandoffRecord): string {

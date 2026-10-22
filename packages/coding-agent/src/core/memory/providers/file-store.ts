@@ -289,6 +289,7 @@ export interface StructuredReflectionApplyResult {
 	sourceRemoved?: boolean;
 	sourceTarget?: HotMemoryTarget;
 	error?: string;
+	warning?: string;
 }
 
 export interface StructuredReflectionRollback {
@@ -480,6 +481,9 @@ async function healEmptyManagedFile(filePath: string, statePath: string): Promis
 	if (currentOnDisk !== "") return undefined;
 	const stateRead = await readManagedMemoryState(statePath);
 	if (stateRead.status !== "valid") return undefined;
+	// An authorized clear may have committed its bytes before final metadata publication failed.
+	// It must be reconciled as that pending revision, never healed back to the deleted content.
+	if (stateRead.state.pendingDigest === contentDigest(currentOnDisk)) return undefined;
 	const content = storedManagedContent(stateRead.state);
 	if (!content) return undefined;
 	await writeFileAtomic(filePath, content, { mode: 0o600 });
@@ -519,16 +523,48 @@ async function commitManagedMemoryContent(
 	statePath: string,
 	managedState: ManagedMemoryState,
 	newContent: string,
-): Promise<void> {
+): Promise<{ metadataPending?: string }> {
 	const newDigest = contentDigest(newContent);
-	await writeManagedMemoryState(statePath, {
+	const pending: ManagedMemoryState = {
 		version: 1,
 		committedDigest: managedState.committedDigest,
 		pendingDigest: newDigest,
 		...(managedState.committedContent !== undefined ? { committedContent: managedState.committedContent } : {}),
-	});
-	await writeFileAtomic(filePath, newContent, { mode: 0o600 });
-	await writeManagedMemoryState(statePath, { version: 1, committedDigest: newDigest, committedContent: newContent });
+	};
+	try {
+		await writeManagedMemoryState(statePath, pending);
+		await writeFileAtomic(filePath, newContent, { mode: 0o600 });
+		await writeManagedMemoryState(statePath, {
+			version: 1,
+			committedDigest: newDigest,
+			committedContent: newContent,
+		});
+		return {};
+	} catch (error) {
+		// Under the same content lock, distinguish landed bytes from an unsuccessful admission.
+		// The existing pending-state protocol repairs metadata on the next managed read/write.
+		try {
+			const actual = await fs.readFile(filePath, "utf8");
+			const state = await readManagedMemoryState(statePath);
+			if (actual === newContent && state.status === "valid") {
+				if (state.state.committedDigest === newDigest && state.state.pendingDigest === undefined) return {};
+				if (state.state.committedDigest === pending.committedDigest && state.state.pendingDigest === newDigest)
+					return {
+						metadataPending: `Content committed; managed metadata remains pending (${String(error).slice(0, 400)}).`,
+					};
+			}
+			if (contentDigest(actual) !== managedState.committedDigest)
+				throw new Error("Memory commit outcome is uncertain; inspect current content before retrying", {
+					cause: error,
+				});
+		} catch (inspectionError) {
+			throw new AggregateError(
+				[error, inspectionError],
+				"Memory commit could not be reconciled; content may have changed",
+			);
+		}
+		throw error;
+	}
 }
 
 export class FileStoreProvider implements MemoryProvider {
@@ -1081,6 +1117,15 @@ export class FileStoreProvider implements MemoryProvider {
 		else this.lastWrittenUser = content;
 	}
 
+	private notifyDurableMemoryChanged(): string | undefined {
+		try {
+			this.options.onDurableMemoryChanged?.();
+		} catch (error) {
+			return `Memory content changed, but its change notification failed (${String(error).slice(0, 400)}).`;
+		}
+		return undefined;
+	}
+
 	/** Read-only report of every managed file's on-disk revision against its managed revision. */
 	async driftReport(): Promise<ManagedMemoryDriftEntry[]> {
 		if (!this.ctx) return [];
@@ -1120,10 +1165,10 @@ export class FileStoreProvider implements MemoryProvider {
 					committedContent: drift.currentOnDisk,
 				});
 				this.setPromptSnapshot(target, drift.currentOnDisk);
-				this.options.onDurableMemoryChanged?.();
+				const warning = this.notifyDurableMemoryChanged();
 				return {
 					ok: true,
-					message: `${entry.label}: adopted the on-disk content (${Buffer.byteLength(drift.currentOnDisk, "utf8")} bytes) as the managed revision.`,
+					message: `${entry.label}: adopted the on-disk content (${Buffer.byteLength(drift.currentOnDisk, "utf8")} bytes) as the managed revision.${warning ? ` ${warning}` : ""}`,
 				};
 			},
 		);
@@ -1150,10 +1195,10 @@ export class FileStoreProvider implements MemoryProvider {
 				}
 				await writeFileAtomic(entry.filePath, content, { mode: 0o600 });
 				this.setPromptSnapshot(target, content);
-				this.options.onDurableMemoryChanged?.();
+				const warning = this.notifyDurableMemoryChanged();
 				return {
 					ok: true,
-					message: `${entry.label}: restored the managed revision (${Buffer.byteLength(content, "utf8")} bytes)${currentOnDisk !== "" ? "; the drifted content is kept beside it as a backup" : ""}.`,
+					message: `${entry.label}: restored the managed revision (${Buffer.byteLength(content, "utf8")} bytes)${currentOnDisk !== "" ? "; the drifted content is kept beside it as a backup" : ""}.${warning ? ` ${warning}` : ""}`,
 				};
 			},
 		);
@@ -1243,6 +1288,7 @@ export class FileStoreProvider implements MemoryProvider {
 			created?: boolean;
 			digest?: string;
 			removed?: boolean;
+			warning?: string;
 		};
 	}> {
 		const tool = this.getToolDefinitions()[0];
@@ -1255,6 +1301,7 @@ export class FileStoreProvider implements MemoryProvider {
 				created?: boolean;
 				digest?: string;
 				removed?: boolean;
+				warning?: string;
 			};
 		};
 	}
@@ -1281,11 +1328,11 @@ export class FileStoreProvider implements MemoryProvider {
 	/** Removes the exact item from the first hot file that holds it and names that file. */
 	private async removeExactHotMemoryItem(
 		sourceText: string,
-	): Promise<{ success: boolean; target?: HotMemoryTarget; error?: string }> {
+	): Promise<{ success: boolean; target?: HotMemoryTarget; error?: string; warning?: string }> {
 		let lastError: string | undefined;
 		for (const file of this.hotMemoryFiles()) {
 			const removed = await this.removeExactHotMemoryItemFrom(file, sourceText);
-			if (removed.success) return { success: true, target: file.target };
+			if (removed.success) return { ...removed, target: file.target };
 			// Only "not found here" moves on to the next file; drift or a write failure stops here.
 			if (removed.error !== "Exact hot-memory item was not found") return removed;
 			lastError = removed.error;
@@ -1296,7 +1343,7 @@ export class FileStoreProvider implements MemoryProvider {
 	private async removeExactHotMemoryItemFrom(
 		file: { target: HotMemoryTarget; filePath: string; statePath: string },
 		sourceText: string,
-	): Promise<{ success: boolean; error?: string }> {
+	): Promise<{ success: boolean; error?: string; warning?: string }> {
 		try {
 			return await withFileLock(file.filePath, async () => {
 				const { currentOnDisk, managedState } = await inspectManagedMemoryFile(file.filePath, file.statePath);
@@ -1304,11 +1351,11 @@ export class FileStoreProvider implements MemoryProvider {
 
 				const newContent = removeExactHotMemoryItem(currentOnDisk, sourceText);
 				if (newContent === undefined) return { success: false, error: "Exact hot-memory item was not found" };
-				await commitManagedMemoryContent(file.filePath, file.statePath, managedState, newContent);
+				const receipt = await commitManagedMemoryContent(file.filePath, file.statePath, managedState, newContent);
 				if (file.target === "project") this.lastWrittenProjectMemory = newContent;
 				else this.lastWrittenMemory = newContent;
-				this.options.onDurableMemoryChanged?.();
-				return { success: true };
+				const warning = [receipt.metadataPending, this.notifyDurableMemoryChanged()].filter(Boolean).join(" ");
+				return { success: true, ...(warning ? { warning } : {}) };
 			});
 		} catch (error) {
 			return { success: false, error: String(error) };
@@ -1520,11 +1567,17 @@ export class FileStoreProvider implements MemoryProvider {
 				applied: created,
 				created,
 				...(storedDigest ? { digest: storedDigest } : {}),
+				...(added.details.warning ? { warning: added.details.warning } : {}),
 				...(!created ? { error: "Exact OKF record already exists" } : {}),
 			};
 		}
-		await this.options.beforeOrganizeHotRemoval?.();
-		const removed = await this.removeExactHotMemoryItem(write.sourceText);
+		let removed: Awaited<ReturnType<FileStoreProvider["removeExactHotMemoryItem"]>>;
+		try {
+			await this.options.beforeOrganizeHotRemoval?.();
+			removed = await this.removeExactHotMemoryItem(write.sourceText);
+		} catch (error) {
+			removed = { success: false, error: String(error) };
+		}
 		const sourceRemoved = removed.success;
 		return {
 			// A newly-created OKF record is a real durable change even if exact hot cleanup was
@@ -1534,6 +1587,9 @@ export class FileStoreProvider implements MemoryProvider {
 			...(storedDigest ? { digest: storedDigest } : {}),
 			sourceRemoved,
 			...(removed.target ? { sourceTarget: removed.target } : {}),
+			...(added.details.warning || removed.warning
+				? { warning: [added.details.warning, removed.warning].filter(Boolean).join(" ") }
+				: {}),
 			...(!sourceRemoved ? { error: removed.error ?? "Hot-memory removal failed" } : {}),
 		};
 	}
@@ -1659,17 +1715,17 @@ export class FileStoreProvider implements MemoryProvider {
 							}
 							try {
 								const removed = await this.okfStore.remove(type as PiOkfType, title, expectedDigest);
-								if (removed.removed) this.options.onDurableMemoryChanged?.();
+								const warning = removed.removed ? this.notifyDurableMemoryChanged() : undefined;
 								return {
 									content: [
 										{
 											type: "text",
 											text: removed.removed
-												? "Successfully removed structured OKF project memory."
+												? `Successfully removed structured OKF project memory.${warning ? ` ${warning}` : ""}`
 												: "Structured OKF project memory was already absent.",
 										},
 									],
-									details: { success: true, removed: removed.removed },
+									details: { success: true, removed: removed.removed, ...(warning ? { warning } : {}) },
 								};
 							} catch (err) {
 								const error = String(err);
@@ -1741,17 +1797,22 @@ export class FileStoreProvider implements MemoryProvider {
 								tags,
 								evidenceRefs,
 							});
-							if (stored.created) this.options.onDurableMemoryChanged?.();
+							const warning = stored.created ? this.notifyDurableMemoryChanged() : undefined;
 							return {
 								content: [
 									{
 										type: "text",
 										text: stored.created
-											? "Successfully added structured OKF project memory."
+											? `Successfully added structured OKF project memory.${warning ? ` ${warning}` : ""}`
 											: "Structured OKF project memory already contained this exact record.",
 									},
 								],
-								details: { success: true, created: stored.created, digest: stored.digest },
+								details: {
+									success: true,
+									created: stored.created,
+									digest: stored.digest,
+									...(warning ? { warning } : {}),
+								},
 							};
 						} catch (err) {
 							return memoryFailure(String(err), `Error: Failed to write structured OKF memory: ${String(err)}`);
@@ -1958,17 +2019,22 @@ export class FileStoreProvider implements MemoryProvider {
 								);
 							}
 
-							if (newContent !== currentOnDisk) {
-								await commitManagedMemoryContent(filePath, statePath, managedState, newContent);
-							}
+							const receipt =
+								newContent !== currentOnDisk
+									? await commitManagedMemoryContent(filePath, statePath, managedState, newContent)
+									: {};
 
 							if (target === "memory") this.lastWrittenMemory = newContent;
 							else if (target === "project") this.lastWrittenProjectMemory = newContent;
 							else this.lastWrittenUser = newContent;
-							if (archiveChanged || newContent !== currentOnDisk) this.options.onDurableMemoryChanged?.();
-							// The managed file and its state are committed; the archive (when touched) was written
-							// before them. A crash between those writes is recovered by the drift/heal protocol,
-							// not by this report, which only ever describes what completed.
+							const warning = [
+								receipt.metadataPending,
+								archiveChanged || newContent !== currentOnDisk ? this.notifyDurableMemoryChanged() : undefined,
+							]
+								.filter(Boolean)
+								.join(" ");
+							// Content is confirmed; metadata can remain pending and is disclosed above. Archive
+							// work (when touched) preceded this commit. Report the actual content outcome.
 							pendingCommit?.({ persisted: true });
 							pendingCommit = undefined;
 
@@ -1976,11 +2042,12 @@ export class FileStoreProvider implements MemoryProvider {
 								content: [
 									{
 										type: "text",
-										text: `Successfully updated ${fileLabel}.${projectHint}${overBudget ? `\nResource ceiling exceeded (${Buffer.byteLength(newContent, "utf8")}/${FileStoreProvider.RESOURCE_CEILING} bytes); the file on disk is preserved; remove or shorten facts to comply.` : ""}`,
+										text: `Successfully updated ${fileLabel}.${projectHint}${warning ? `\n${warning}` : ""}${overBudget ? `\nResource ceiling exceeded (${Buffer.byteLength(newContent, "utf8")}/${FileStoreProvider.RESOURCE_CEILING} bytes); the file on disk is preserved; remove or shorten facts to comply.` : ""}`,
 									},
 								],
 								details: {
 									success: true,
+									...(warning ? { warning } : {}),
 									overBudget,
 									currentBytes: Buffer.byteLength(newContent, "utf8"),
 									resourceCeilingBytes: FileStoreProvider.RESOURCE_CEILING,

@@ -203,6 +203,8 @@ export interface GatedWriteOutcome {
 	action: LearningAuditAction | "no_op";
 	reasonCode: string;
 	summary: string;
+	partial?: boolean;
+	detail?: string;
 }
 
 // reasonCode when an automatic skill promotion is blocked by an overlap with an existing skill
@@ -513,6 +515,8 @@ function hasStrictSuccessfulAssistantTerminal(messages: AgentMessage[]): boolean
 interface ReflectionApplyResult {
 	applied: boolean;
 	rollback?: LearningAuditRecord["rollback"];
+	partial?: boolean;
+	detail?: string;
 }
 
 export class ReflectionController {
@@ -2082,10 +2086,15 @@ export class ReflectionController {
 				? skillPromotionBlock.reasonCode
 				: writeFailed
 					? APPLY_WRITE_REFUSED_REASON_CODE
-					: decision.reasonCode;
+					: applyResult.partial
+						? "partial_apply"
+						: decision.reasonCode;
 			if (ticket) {
 				this.writes.settle(ticket, {
 					...audit,
+					...(applyResult.partial && applyResult.detail
+						? { summary: `${audit.summary} — ${applyResult.detail}` }
+						: {}),
 					action: storedAction,
 					reasonCode: storedReasonCode,
 					// A rollback needs a confirmed applied result. Failed multi-step writes can still
@@ -2104,6 +2113,7 @@ export class ReflectionController {
 				action: decision.kind === "no-op" ? "no_op" : storedAction,
 				reasonCode: storedReasonCode,
 				summary: proposal.summary,
+				...(applyResult.partial ? { partial: true, detail: applyResult.detail } : {}),
 			});
 			// Observers may synchronously change policy. Publish only after this admitted effect
 			// and its audit; the next proposal reads their updated policy before making its decision.
@@ -2327,10 +2337,12 @@ export class ReflectionController {
 			try {
 				const result = await this.deps.applyStructuredReflectionWrite(write, signal);
 				if (!result.applied || result.digest === undefined) return { applied: false };
+				if (result.warning) this.warnOnce(`structured-write-${result.digest}`, result.warning);
 				return {
 					applied: true,
+					...(result.error ? { partial: true, detail: result.error } : {}),
 					rollback:
-						write.kind === "okf_add"
+						write.kind === "okf_add" || !result.sourceRemoved
 							? {
 									kind: "okf_remove",
 									target: `${write.type}\0${write.title}`,
@@ -2341,7 +2353,7 @@ export class ReflectionController {
 									kind: "okf_organize",
 									target: `${write.type}\0${write.title}`,
 									previous: write.sourceText,
-									...(result.sourceTarget ? { previousTarget: result.sourceTarget } : {}),
+									previousTarget: result.sourceTarget,
 									expectedDigest: result.digest,
 									removeOkf: result.created,
 									instructions:
@@ -2353,7 +2365,7 @@ export class ReflectionController {
 			}
 		}
 
-		type MemResult = { details?: { success?: boolean; error?: string } };
+		type MemResult = { details?: { success?: boolean; error?: string; warning?: string } };
 		type MemExec = (
 			toolCallId: string,
 			params: {
@@ -2380,10 +2392,13 @@ export class ReflectionController {
 		const exec = memTool?.execute as unknown as MemExec | undefined;
 		if (!exec) return { applied: false };
 
-		const run = (params: Parameters<MemExec>[1]): Promise<MemResult> =>
-			guard?.() || signal?.aborted
-				? Promise.resolve({ details: { success: false, error: "Learning context changed or interrupted" } })
-				: exec("reflection", params, signal, undefined, undefined);
+		const run = async (params: Parameters<MemExec>[1]): Promise<MemResult> => {
+			if (guard?.() || signal?.aborted)
+				return { details: { success: false, error: "Learning context changed or interrupted" } };
+			const result = await exec("reflection", params, signal, undefined, undefined);
+			if (result.details?.warning) this.warnOnce("reflection-memory-write-warning", result.details.warning);
+			return result;
+		};
 
 		if (write.kind === "memory_add") {
 			try {

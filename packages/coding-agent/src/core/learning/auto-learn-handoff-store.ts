@@ -111,7 +111,9 @@ function isHandoffRecord(value: unknown): value is AutoLearnHandoffRecord {
 				isPlainRecord(entry) &&
 				Number.isSafeInteger(entry.index) &&
 				typeof entry.kind === "string" &&
-				["applied", "proposed", "ineligible", "failed", "rejected", "forwarded"].includes(String(entry.outcome)) &&
+				["applied", "partial", "proposed", "ineligible", "failed", "rejected", "forwarded"].includes(
+					String(entry.outcome),
+				) &&
 				typeof entry.reasonCode === "string" &&
 				optionalString(entry.subject) &&
 				optionalString(entry.detail) &&
