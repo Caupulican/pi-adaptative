@@ -347,8 +347,8 @@ export class WorkerLifecycle {
 			record: (usage, lockOptions) => {
 				runtime.recordAttemptUsage(identity, usage, lockOptions);
 			},
-			read: () => {
-				const accounting = runtime.getSnapshot().attempts[identity.attemptId]?.usageAccounting;
+			read: (lockOptions) => {
+				const accounting = runtime.getSnapshot(lockOptions).attempts[identity.attemptId]?.usageAccounting;
 				const generation = accounting?.generations[identity.leaseId];
 				if (!accounting || !generation || generation.fencingToken !== identity.fencingToken) {
 					throw new Error("Worker usage accounting lost its registered generation.");

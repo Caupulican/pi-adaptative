@@ -15,6 +15,7 @@ const RETRY_LOCK_OPTIONS: Readonly<AtomicFileLockOptions> = Object.freeze({ retr
 /** The durable receipt port this adapter retries through; `lockOptions` bounds its store-lock waits. */
 export interface WorkerUsageAccountingStoragePort extends GatewayUsageAccountingPort {
 	record(usage: AttemptUsageSnapshot, lockOptions?: Readonly<AtomicFileLockOptions>): void;
+	read(lockOptions?: Readonly<AtomicFileLockOptions>): ReturnType<GatewayUsageAccountingPort["read"]>;
 }
 
 /**
@@ -36,6 +37,7 @@ export class WorkerUsageAccounting implements GatewayUsageAccountingPort {
 	private retryTimer: unknown;
 	private retryDelayMs = INITIAL_RETRY_DELAY_MS;
 	private writing = false;
+	private activeLockOptions: Readonly<AtomicFileLockOptions> | undefined;
 
 	constructor(options: {
 		port: WorkerUsageAccountingStoragePort;
@@ -55,7 +57,7 @@ export class WorkerUsageAccounting implements GatewayUsageAccountingPort {
 	}
 
 	read(): ReturnType<GatewayUsageAccountingPort["read"]> {
-		return this.port.read();
+		return this.port.read(this.activeLockOptions);
 	}
 
 	record(usage: AttemptUsageSnapshot): void {
@@ -71,6 +73,10 @@ export class WorkerUsageAccounting implements GatewayUsageAccountingPort {
 	private flush(lockOptions?: Readonly<AtomicFileLockOptions>): void {
 		if (!this.pending) return;
 		this.writing = true;
+		const previousLockOptions = this.activeLockOptions;
+		// Publication reads the durable projection synchronously through this adapter. Keep its
+		// compaction lock under the same policy as the write without exposing storage policy to the gateway.
+		this.activeLockOptions = lockOptions;
 		try {
 			this.port.record(this.pending, lockOptions);
 			// Keep publication in the retained obligation, including when the first storage write
@@ -109,6 +115,7 @@ export class WorkerUsageAccounting implements GatewayUsageAccountingPort {
 			}
 			throw error;
 		} finally {
+			this.activeLockOptions = previousLockOptions;
 			this.writing = false;
 		}
 	}

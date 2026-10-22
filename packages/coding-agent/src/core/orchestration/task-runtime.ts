@@ -180,8 +180,8 @@ export class DurableTaskRuntime {
 	 * new object, so holding a snapshot across appends is safe and its identity is a valid memo key
 	 * for derived indexes. Cloning it per read cost a third of a delegation-heavy session's host CPU.
 	 */
-	getSnapshot(): TaskRuntimeProjection {
-		this.refresh();
+	getSnapshot(lockOptions?: Readonly<AtomicFileLockOptions>): TaskRuntimeProjection {
+		this.refresh(lockOptions);
 		return this.state;
 	}
 
