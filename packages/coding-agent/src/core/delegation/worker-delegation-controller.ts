@@ -1186,12 +1186,14 @@ export class WorkerDelegationController {
 	recordTerminal(record: LaneRecord): void {
 		if (record.status === "queued" || record.status === "running") return;
 		if (record.type === "worker") {
-			const notification = this.lifecycle.getTerminalNotification(record.laneId);
+			const terminal = this.resolveTerminalRecord(record);
+			const notification = this.lifecycle.getAttemptTerminalNotification(terminal.attempt.attemptId);
 			if (notification?.status === "delivered") return;
 			if (notification) {
-				this.notifications.recordTerminal(record, notification.notificationId);
+				this.notifications.recordTerminal(terminal.record, notification.notificationId);
 				return;
 			}
+			throw new Error(`Worker terminal notification is missing for attempt ${terminal.attempt.attemptId}.`);
 		}
 		this.notifications.recordTerminal(record);
 	}
@@ -2272,7 +2274,7 @@ export class WorkerDelegationController {
 			return "retained";
 		}
 		this.deps.reportWorkerTerminal?.(handoff);
-		const notification = this.lifecycle.getTerminalNotification(handoff.record.laneId);
+		const notification = this.lifecycle.getAttemptTerminalNotification(handoff.terminalAttemptId);
 		if (notification?.status === "pending") {
 			this.lifecycle.markNotificationsDelivered([notification.notificationId]);
 		}
@@ -2295,17 +2297,49 @@ export class WorkerDelegationController {
 		return "delivered";
 	}
 
+	/** Resolve an already-captured terminal by attempt, never by the lane's mutable latest selection. */
+	private resolveTerminalRecord(record: LaneRecord): {
+		record: LaneRecord;
+		attempt: AttemptRuntimeState;
+		childAgentId: string;
+		parentAgentId: string | undefined;
+	} {
+		const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
+		const attempt = record.attemptId ? snapshot.attempts[record.attemptId] : undefined;
+		if (!attempt || attempt.taskId !== record.laneId)
+			throw new Error(
+				`Worker terminal ${record.laneId} has no matching attempt ${record.attemptId ?? "(missing)"}.`,
+			);
+		const current = projectWorkerAttemptLaneRecord(snapshot, attempt.attemptId);
+		if (!current || !isLaneTerminalStatus(current.status))
+			throw new Error(`Worker attempt ${attempt.attemptId} has no terminal projection.`);
+		const childAgentId = attempt.agentId ?? attempt.dispatch.logicalLaneId ?? record.laneId;
+		return {
+			record: current,
+			attempt,
+			childAgentId,
+			parentAgentId: snapshot.agents[childAgentId]?.parentAgentId ?? attempt.dispatch.parentAgentId,
+		};
+	}
+
 	private publishRecoveredTerminalRecords(records: readonly LaneRecord[]): void {
 		const handoffs: WorkerTerminalHandoff[] = [];
 		const directRecords: LaneRecord[] = [];
-		for (const record of records) {
+		for (const input of records) {
+			let terminal: ReturnType<WorkerDelegationController["resolveTerminalRecord"]>;
+			try {
+				terminal = this.resolveTerminalRecord(input);
+			} catch (error) {
+				this.safeWarn(
+					`Worker terminal recovery retained invalid identity: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				continue;
+			}
+			const { record, attempt, childAgentId, parentAgentId } = terminal;
 			this.agentControl.settleCancelledWorkerSteers(record);
-			this.recovery.clearScheduledRetry(record.laneId);
-			const attempt = this.lifecycle.getActiveAttempt(record.laneId);
-			if (attempt && this.publishedTerminalAttemptIds.has(attempt.attemptId)) continue;
-			const childAgentId = attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? record.laneId;
-			const parentAgentId = this.lifecycle.getAgent(childAgentId)?.parentAgentId ?? attempt?.dispatch.parentAgentId;
-			if (attempt && parentAgentId) {
+			this.recovery.clearScheduledRetry(attempt.attemptId);
+			if (this.publishedTerminalAttemptIds.has(attempt.attemptId)) continue;
+			if (parentAgentId) {
 				handoffs.push({
 					terminalAttemptId: attempt.attemptId,
 					parentAgentId,
@@ -2462,18 +2496,17 @@ export class WorkerDelegationController {
 
 	private publishTerminalRecord(record: LaneRecord): void {
 		if (!isLaneTerminalStatus(record.status)) return;
+		const { record: current, attempt, childAgentId, parentAgentId } = this.resolveTerminalRecord(record);
+		record = current;
 		this.agentControl.settleCancelledWorkerSteers(record);
 		this.settleVerifiedSubjectClaim(record);
 		this.retryRaceCancels();
 		this.settleFanoutRace(record);
-		this.recovery.clearScheduledRetry(record.laneId);
-		const attempt = this.lifecycle.getActiveAttempt(record.laneId);
-		const attemptId = attempt?.attemptId;
-		if (attemptId && this.publishedTerminalAttemptIds.has(attemptId)) return;
-		const childAgentId = attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? record.laneId;
-		if (attempt?.status === "cancelled") this.releaseSettledProjectContext(childAgentId);
-		const parentAgentId = this.lifecycle.getAgent(childAgentId)?.parentAgentId ?? attempt?.dispatch.parentAgentId;
-		if (attemptId && parentAgentId) {
+		this.recovery.clearScheduledRetry(attempt.attemptId);
+		const attemptId = attempt.attemptId;
+		if (this.publishedTerminalAttemptIds.has(attemptId)) return;
+		if (attempt.status === "cancelled") this.releaseSettledProjectContext(childAgentId);
+		if (parentAgentId) {
 			try {
 				this.terminalHandoffs.retain({
 					parentAgentId,
@@ -2490,9 +2523,7 @@ export class WorkerDelegationController {
 			return;
 		}
 		this.recordTerminal(record);
-		if (attemptId) {
-			this.publishedTerminalAttemptIds.add(attemptId);
-		}
+		this.publishedTerminalAttemptIds.add(attemptId);
 		this.publishTerminalObserversBestEffort(record);
 		this.agentControl.signalStateChanged();
 	}

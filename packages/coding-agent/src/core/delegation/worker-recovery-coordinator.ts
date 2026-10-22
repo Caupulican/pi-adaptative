@@ -311,12 +311,11 @@ export class WorkerRecoveryCoordinator {
 		}
 	}
 
-	clearScheduledRetry(laneId: string): void {
-		for (const [attemptId, entry] of this.retryTimers) {
-			if (entry.laneId !== laneId) continue;
-			if (entry.timer !== undefined) this.options.timers.clearTimeout(entry.timer);
-			this.retryTimers.delete(attemptId);
-		}
+	clearScheduledRetry(attemptId: string): void {
+		const entry = this.retryTimers.get(attemptId);
+		if (!entry) return;
+		if (entry.timer !== undefined) this.options.timers.clearTimeout(entry.timer);
+		this.retryTimers.delete(attemptId);
 	}
 
 	/** Keep an externally requested wake queued while the durable retry deadline is still retained. */

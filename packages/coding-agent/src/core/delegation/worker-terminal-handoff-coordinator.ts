@@ -107,6 +107,9 @@ function snapshotHandoff(handoff: WorkerTerminalHandoff): WorkerTerminalHandoff 
 	if (!isLaneTerminalStatus(handoff.record.status)) {
 		throw new TypeError("Worker terminal handoff requires a terminal lane record.");
 	}
+	if (handoff.record.attemptId !== handoff.terminalAttemptId) {
+		throw new TypeError("Worker terminal handoff attempt must match its lane record.");
+	}
 	const source = handoff.record;
 	// Only the declared lane-record fields are retained, each within its durable bound.
 	const record: Partial<Record<keyof LaneRecord, string | number>> = {};
