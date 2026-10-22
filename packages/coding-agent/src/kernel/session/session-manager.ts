@@ -1593,8 +1593,8 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
-	private readonly entryFileLocations = new Map<string, SessionEntryFileLocation>();
-	private readonly coldPayloadEntryIds = new Set<string>();
+	private entryFileLocations = new Map<string, SessionEntryFileLocation>();
+	private coldPayloadEntryIds = new Set<string>();
 	private indexedSessionFileBytes = 0;
 	private sessionContextCache: SessionContextCache | undefined;
 	private lifecycleActiveCache: LifecycleActiveCache | undefined;
@@ -1639,6 +1639,7 @@ export class SessionManager {
 		this._assertWritable();
 		// Judged before this manager changes any state: a rejected file leaves the manager and the file as they were.
 		assertAdoptableSessionHeader(resolvePath(sessionFile));
+		const previousNavigationRevision = this.navigationRevision;
 		this.navigationRevision++;
 		const recoveringUncertainWrite = this.persistenceStateUncertain;
 		this.persistenceStateUncertain = true;
@@ -1647,7 +1648,10 @@ export class SessionManager {
 			receipt = this._setSessionFile(sessionFile, recoveringUncertainWrite);
 			this.persistenceStateUncertain = false;
 		} catch (error) {
-			this.persistenceStateUncertain = true;
+			if (recoveringUncertainWrite || this.canonicalOnly) {
+				this.navigationRevision = previousNavigationRevision;
+				this.persistenceStateUncertain = recoveringUncertainWrite;
+			} else this.persistenceStateUncertain = true;
 			throw error;
 		}
 		if (receipt) this._emitEntriesPersisted(receipt);
@@ -1655,6 +1659,43 @@ export class SessionManager {
 
 	private _setSessionFile(sessionFile: string, requireComplete = false): SessionEntriesPersistedEvent | undefined {
 		const mustReadComplete = requireComplete || this.canonicalOnly;
+		if (!mustReadComplete) return this._loadSessionFile(sessionFile, false);
+		// Strict loads never repair or migrate storage. Their in-memory adoption is therefore
+		// transactional too: a failed parse/index/read leaves the original live view intact.
+		const previous = {
+			sessionId: this.sessionId,
+			sessionFile: this.sessionFile,
+			fileEntries: this.fileEntries,
+			entries: this.entries,
+			byId: this.byId,
+			messageEntryIndex: this.messageEntryIndex,
+			labelsById: this.labelsById,
+			labelTimestampsById: this.labelTimestampsById,
+			leafId: this.leafId,
+			entryFileLocations: this.entryFileLocations,
+			coldPayloadEntryIds: this.coldPayloadEntryIds,
+			indexedSessionFileBytes: this.indexedSessionFileBytes,
+			sessionContextCache: this.sessionContextCache,
+			lifecycleActiveCache: this.lifecycleActiveCache,
+			latestCustomEntryCache: this.latestCustomEntryCache,
+			branchCustomEntriesCache: this.branchCustomEntriesCache,
+			payloadsHaveStoredIds: this.payloadsHaveStoredIds,
+			storageRevision: this.storageRevision,
+			flushed: this.flushed,
+			inheritedSessionIds: this.inheritedSessionIds,
+		};
+		// Parsing releases payloads into these two indexes; never clear or populate the old view's maps.
+		this.entryFileLocations = new Map();
+		this.coldPayloadEntryIds = new Set();
+		try {
+			return this._loadSessionFile(sessionFile, true);
+		} catch (error) {
+			Object.assign(this, previous);
+			throw error;
+		}
+	}
+
+	private _loadSessionFile(sessionFile: string, mustReadComplete: boolean): SessionEntriesPersistedEvent | undefined {
 		this._invalidateSessionContextCache();
 		this._resetEntryFileIndex(true);
 		this.sessionFile = resolvePath(sessionFile);
