@@ -23,6 +23,7 @@ import {
 import { sameFileVersion } from "../../kernel/storage/bounded-file.ts";
 import { isMissingFileError, writeFileAtomic } from "../util/atomic-file.ts";
 import { isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
+import { continuousChatDay } from "./continuous-chat-contracts.ts";
 import {
 	CONTINUOUS_CHAT_LEGACY_DUPLICATE_REASON,
 	CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS,
@@ -132,6 +133,11 @@ function parseImportState(value: unknown): ContinuousChatLegacyImportState | und
 	if (!isPlainRecord(value) || value.version !== 1) return undefined;
 	const { completedAt, importedSessions, skipped } = value;
 	if (typeof completedAt !== "string" || !isNonNegativeSafeInteger(importedSessions)) return undefined;
+	try {
+		continuousChatDay(completedAt);
+	} catch {
+		return undefined;
+	}
 	if (!Array.isArray(skipped)) return undefined;
 	const normalized: { sessionId: string; reason: string }[] = [];
 	for (const entry of skipped) {

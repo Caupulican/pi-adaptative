@@ -293,7 +293,7 @@ export class ContinuousChatHost {
 				if (session.sessionId === this.options.sessionId) continue;
 				if (settledSet.has(session.sessionId)) continue;
 				if (skippedSet.has(session.sessionId)) continue;
-				if (Number.isNaN(completedAtMs) || Date.parse(session.timestamp) < completedAtMs) continue;
+				if (Date.parse(session.timestamp) < completedAtMs) continue;
 				const forgotten = await this.options.legacy.isForgotten(session.sessionId, signal);
 				signal.throwIfAborted();
 				if (forgotten) continue;
