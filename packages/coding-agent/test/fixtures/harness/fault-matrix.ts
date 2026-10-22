@@ -211,12 +211,13 @@ const rows: readonly FaultMatrixRow[] = [
 	},
 	{
 		id: "R10s",
-		owner: "core/memory/continuous-chat-runtime.ts",
+		owner: "core/memory/continuous-chat-scheduler.ts",
 		journey: 1,
-		phase: "continuous-chat turn retry spacing",
-		fault: "the leaf retry backoff spacing",
-		witness: "the waiting turn retries its failed leaf after 1 s, then 2 s, and its third attempt opens the turn",
-		control: "a leaf that fails with no turn waiting arms no retry alarm",
+		phase: "continuous-chat failed-leaf retry on arrival",
+		fault: "a 503 on a fresh chat's leaf 1",
+		witness:
+			"a later arrival retries the failed leaf while the root turn proceeds, the leaf stays blocked after a second failure, and the next arrival publishes it",
+		control: "a leaf that fails with no later arrival stays blocked and arms no retry alarm",
 		estSeconds: 1,
 		status: "covered",
 		modes: BOTH,
