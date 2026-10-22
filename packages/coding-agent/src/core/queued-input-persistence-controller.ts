@@ -12,6 +12,7 @@ import type {
 	PendingInputHoldReason,
 	PendingInputQueueController,
 	PendingInputRecord,
+	QueuedInput,
 } from "./pending-input-queue-controller.ts";
 import { truncateWithEllipsis } from "./provider-tool-text.ts";
 import {
@@ -23,6 +24,7 @@ import {
 	readOwnTurnInputRecord,
 	readQueuedInputRecord,
 	recordedIds,
+	recoverQueuedImages,
 	writeOwnTurnInputRecord,
 } from "./queued-input-record.ts";
 import type { RuntimeMutationHandoff } from "./runtime-generation-admission.ts";
@@ -82,6 +84,21 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 
 	constructor(deps: QueuedInputPersistenceControllerDeps) {
 		this.deps = deps;
+	}
+
+	prepareInputForTake(input: QueuedInput): QueuedInput | undefined {
+		if (!input.preservedImages) return input;
+		try {
+			return {
+				text: input.text,
+				images: recoverQueuedImages(this.deps.getSessionImageStore(), input.preservedImages),
+			};
+		} catch (error) {
+			this.deps.emitWarning(
+				`A message stays queued because its images could not be recovered: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return undefined;
+		}
 	}
 
 	/** Keep owner input that cannot be submitted yet as held, recorded pending input (`PendingInputQueueController.keep`). */

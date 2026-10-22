@@ -145,6 +145,8 @@ export interface PendingInputQueueDeps {
 
 /** Where the undelivered input is recorded for a restart. Each call carries its complete set, in submission order, as submitted. */
 export interface PendingInputRecord {
+	/** Materialize preserved references before take-back; refusal leaves the input and its record queued. */
+	prepareInputForTake(input: QueuedInput): QueuedInput | undefined;
 	/** The set of queued inputs changed (an input arrived, was delivered, taken back or withdrawn). */
 	recordQueuedInput(inputs: readonly RecordableQueuedInput[]): void;
 	/** The set of prompts whose own turn is being prepared changed (`PendingInputQueueController.trackOwnTurn`). */
@@ -1118,8 +1120,8 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 */
 	takeMessages(): { steering: QueuedInput[]; followUp: QueuedInput[] } {
 		const taken = {
-			steering: this._takeEntries("steer", "taken back"),
-			followUp: this._takeEntries("followUp", "taken back"),
+			steering: this._takeEntries("steer", "taken back", true),
+			followUp: this._takeEntries("followUp", "taken back", true),
 		};
 		this._changed();
 		// A steer taken back while its admission was undecided ends that decision: its waiter wakes now, not at the deadline.
@@ -1152,12 +1154,17 @@ export class PendingInputQueueController implements ForegroundInputPort {
 	 * anything still deciding its admission is cancelled, and a handed input's exact message leaves the agent's queue. A
 	 * handed input the agent no longer holds is a run's already and stays to be delivered: it is not taken.
 	 */
-	private _takeEntries(kind: "steer" | "followUp", reason: string): QueuedInput[] {
+	private _takeEntries(kind: "steer" | "followUp", reason: string, forReuse = false): QueuedInput[] {
 		const taken: QueuedInput[] = [];
 		for (const entry of kind === "steer" ? [...this._steering] : [...this._followUp]) {
 			const delivered = entry.message ? { text: entry.text, images: entry.images } : { ...entry.original };
 			// A framed third-party message returns as what the owner saw, never as the extension's frame.
-			const input = entry.origin ? { ...delivered, text: this._ownerText(entry) } : delivered;
+			let input = entry.origin ? { ...delivered, text: this._ownerText(entry) } : delivered;
+			if (forReuse && input.preservedImages) {
+				const prepared = this.deps.record?.prepareInputForTake(input);
+				if (!prepared) continue;
+				input = prepared;
+			}
 			if (entry.message && !this._takeBackFromAgent(entry)) continue;
 			entry.abort.abort(PENDING_INPUT_WITHDRAWN);
 			this._removeEntry(entry);

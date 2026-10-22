@@ -144,7 +144,7 @@ function nextClipboardImageLabel(host: ClipboardQueueHost): string {
 		host.clipboardImageCounter = 0;
 	}
 	host.clipboardImageCounter += 1;
-	return `[Image #${host.clipboardImageCounter}]`;
+	return `[Attachment #${host.clipboardImageCounter}]`;
 }
 
 export function takeClipboardImagesForText(host: ClipboardQueueHost, text: string): ImageContent[] | undefined {
@@ -152,10 +152,13 @@ export function takeClipboardImagesForText(host: ClipboardQueueHost, text: strin
 		return undefined;
 	}
 
-	const images = host.pendingClipboardImages
-		.filter((image) => text.includes(image.label))
-		.map((image) => image.content);
-	for (const stored of host.clipboardImageStore?.resolveReferences(text) ?? []) {
+	const matched = host.pendingClipboardImages.filter((image) => text.includes(image.label));
+	const images = matched.map((image) => image.content);
+	// A pending label owns its bytes. Do not resolve it a second time through durable sequence lookup.
+	const remainingText = matched.reduce((remaining, image) => remaining.split(image.label).join(""), text);
+	for (const stored of host.clipboardImageStore?.resolveReferences(remainingText, {
+		allowLatest: matched.length === 0,
+	}) ?? []) {
 		if (!images.some((image) => image.mimeType === stored.mimeType && image.data === stored.data))
 			images.push(stored);
 	}
@@ -164,10 +167,10 @@ export function takeClipboardImagesForText(host: ClipboardQueueHost, text: strin
 	return images.length > 0 ? images : undefined;
 }
 
-const IMAGE_LABEL = /\[Image #(\d+)\]/g;
+const IMAGE_LABEL = /\[(?:Image|Attachment) #(\d+)\]/g;
 
 function imageLabelNumber(label: string): number {
-	return Number(/\[Image #(\d+)\]/.exec(label)?.[1] ?? 0);
+	return Number(/\[(?:Image|Attachment) #(\d+)\]/.exec(label)?.[1] ?? 0);
 }
 
 function sameImage(stored: { mimeType: string; bytes: Uint8Array } | undefined, image: ImageContent): boolean {
@@ -193,43 +196,51 @@ export interface ClipboardRestoreHost extends ClipboardQueueState {
 export function restoreClipboardImages(host: ClipboardRestoreHost, inputs: readonly UserInputSubmission[]): string[] {
 	const store = host.clipboardImageStore;
 	const restored: PendingClipboardImage[] = [];
+	let storageUnavailable = false;
+	const readStored = (label: string): ReturnType<SessionImageStore["read"]> => {
+		if (!store || storageUnavailable || label.startsWith("[Attachment #")) return undefined;
+		try {
+			return store.read(imageLabelNumber(label));
+		} catch {
+			storageUnavailable = true;
+			return undefined;
+		}
+	};
 	const labelTaken = (label: string, image: ImageContent) =>
 		[...restored, ...host.pendingClipboardImages].some(
 			(pending) =>
 				pending.label === label &&
 				(pending.content.data !== image.data || pending.content.mimeType !== image.mimeType),
 		) ||
-		(store !== undefined &&
-			store.read(imageLabelNumber(label)) !== undefined &&
-			!sameImage(store.read(imageLabelNumber(label)), image));
-	const freeNumber = (): number => {
-		let candidate =
+		(label.startsWith("[Image #") &&
+			((readStored(label) !== undefined && !sameImage(readStored(label), image)) || storageUnavailable));
+	const localLabel = (): string =>
+		`[Attachment #${
 			Math.max(
 				host.clipboardImageCounter,
 				...[...restored, ...host.pendingClipboardImages].map((pending) => imageLabelNumber(pending.label)),
-			) + 1;
-		while (store?.read(candidate) !== undefined) candidate++;
-		return candidate;
-	};
+			) + 1
+		}]`;
 	const texts = inputs.map((input) => {
 		let text = input.text;
 		const available = [...new Set([...text.matchAll(IMAGE_LABEL)].map((match) => match[0]))];
 		for (const image of input.images ?? []) {
 			let label =
-				available.find(
-					(candidate) => store !== undefined && sameImage(store.read(imageLabelNumber(candidate)), image),
-				) ?? available.find((candidate) => !labelTaken(candidate, image));
+				available.find((candidate) => sameImage(readStored(candidate), image) && !labelTaken(candidate, image)) ??
+				available.find((candidate) => !labelTaken(candidate, image));
 			if (label) {
 				available.splice(available.indexOf(label), 1);
 			} else {
-				let sequence: number;
-				try {
-					sequence = store ? store.retainContent(image).sequence : freeNumber();
-				} catch {
-					// Durable retention is an optimization of identity, not a condition of recovery.
-					sequence = freeNumber();
+				if (store && !storageUnavailable) {
+					try {
+						const candidate = `[Image #${store.retainContent(image).sequence}]`;
+						if (!labelTaken(candidate, image)) label = candidate;
+					} catch {
+						storageUnavailable = true;
+					}
 				}
-				label = `[Image #${sequence}]`;
+				// Local labels never alias the store's numeric references, even if storage is unavailable.
+				label ??= localLabel();
 				const replaced = available.shift();
 				text = replaced ? text.split(replaced).join(label) : `${text} ${label}`;
 			}

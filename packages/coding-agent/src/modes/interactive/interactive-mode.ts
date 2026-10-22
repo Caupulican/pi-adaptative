@@ -2697,7 +2697,11 @@ export class InteractiveMode {
 	private handleDequeue(): void {
 		const restored = this.restoreQueuedMessagesToEditor();
 		if (restored === 0) {
-			this.showStatus("No queued messages to restore");
+			this.showStatus(
+				this.hasQueuedMessages()
+					? "Messages remain queued until their images can be read"
+					: "No queued messages to restore",
+			);
 		} else {
 			this.showStatus(`Restored ${restored} queued message${restored > 1 ? "s" : ""} to editor`);
 		}
@@ -2851,20 +2855,24 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Clear all queued messages and return their contents. Taking the session's queue takes the messages kept for after
-	 * compaction with it, so nothing is left for that queue to send.
+	 * Take recoverable queued messages and return their contents. Inputs with unreadable image references stay queued.
 	 */
 	private clearAllQueues(): { steering: string[]; followUp: string[] } {
 		const { steering, followUp, commands } = this.session.takeAllQueuedInput();
 		this.compactionQueuedMessages = [];
 		// The text returns to the editor and the images to the pending clipboard queue, so a resubmit
 		// sends the complete input again.
-		const restore = (inputs: readonly clipboardInput.UserInputSubmission[]) =>
-			clipboardInput.restoreClipboardImages(
-				clipboardInput.bindClipboardQueue(this.clipboardQueue, { clipboardImageStore: this.clipboardImageStore }),
-				inputs,
-			);
-		return { steering: restore(steering), followUp: [...restore(followUp), ...commands] };
+		return {
+			steering: this.restoreInputImages(steering),
+			followUp: [...this.restoreInputImages(followUp), ...commands],
+		};
+	}
+
+	private restoreInputImages(inputs: readonly clipboardInput.UserInputSubmission[]): string[] {
+		return clipboardInput.restoreClipboardImages(
+			clipboardInput.bindClipboardQueue(this.clipboardQueue, { clipboardImageStore: this.clipboardImageStore }),
+			inputs,
+		);
 	}
 
 	/** Steering and follow-up messages waiting on the running turn; queued extension commands do not count. */
@@ -2900,13 +2908,13 @@ export class InteractiveMode {
 			await this.session.waitForForegroundIdle();
 			await this.session.prompt(text, { images: images.length ? images : undefined, processSlashCommands: false });
 		} catch (error) {
-			// The operator's words are not lost with the failed submission: they return to the editor
-			// (images do not survive an editor round-trip; the failure says so).
+			// Failed submission returns the complete input through the same clipboard owner as take-back.
 			const current = this.editor.getText();
-			this.editor.setText([text, current].filter((part) => part.trim()).join("\n\n"));
+			const restored = this.restoreInputImages(entries).join("\n\n");
+			this.editor.setText([restored, current].filter((part) => part.trim()).join("\n\n"));
 			const detail = error instanceof Error ? error.message : String(error);
 			this.showError(
-				`Send now failed: ${detail}. The queued text is back in the editor${images.length ? "; its images were dropped" : ""}.`,
+				`Send now failed: ${detail}. The queued input is back in the editor${images.length ? " with its images" : ""}.`,
 			);
 		} finally {
 			this.refreshAutonomyFooterStatus();

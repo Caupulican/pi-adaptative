@@ -487,7 +487,7 @@ export class SessionImageStore {
 		return undefined;
 	}
 
-	resolveReferences(text: string): ImageContent[] {
+	resolveReferences(text: string, options: { allowLatest?: boolean } = {}): ImageContent[] {
 		try {
 			const explicitSequences: number[] = [];
 			const explicitPattern = /(?:\[\s*)?(?:image|screenshot|picture|photo)\s*#?\s*(\d{1,6})(?:\s*\])?/gi;
@@ -499,7 +499,7 @@ export class SessionImageStore {
 			const resolved = explicitSequences
 				.map((sequence) => this.read(sequence))
 				.filter((image): image is StoredSessionImage => image !== undefined);
-			if (resolved.length === 0 && this.referencesLatestImage(text)) {
+			if (resolved.length === 0 && options.allowLatest !== false && this.referencesLatestImage(text)) {
 				const latest = this.readLatest();
 				if (latest) resolved.push(latest);
 			}

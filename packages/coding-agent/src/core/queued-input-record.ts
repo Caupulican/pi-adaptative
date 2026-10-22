@@ -63,6 +63,34 @@ export interface PreservedQueuedImages {
 	readonly pinClaim?: string;
 }
 
+/** Resolve every preserved image before its queue owner releases the durable input. */
+export function recoverQueuedImages(
+	imageStore: Pick<SessionImageStore, "read"> | undefined,
+	preserved: PreservedQueuedImages,
+): ImageContent[] {
+	return preserved.images.map((image) => {
+		const restored = readRecordedImage(imageStore, image, preserved.pinClaim);
+		if (!restored) throw new Error(`Queued image ${image.sequence} is unavailable.`);
+		return restored.content;
+	});
+}
+
+function readRecordedImage(
+	imageStore: Pick<SessionImageStore, "read"> | undefined,
+	image: RecordedImage,
+	pinClaim: string | undefined,
+): { content: ImageContent; name: string } | undefined {
+	const stored = imageStore?.read(image.sequence, pinClaim, image.name);
+	if (!stored) return undefined;
+	const content: ImageContent = {
+		type: "image",
+		data: Buffer.from(stored.bytes).toString("base64"),
+		mimeType: stored.mimeType,
+	};
+	retainedSequences.set(content, image.sequence);
+	return { content, name: basename(stored.path) };
+}
+
 interface RecordedInput {
 	/** Absent only in a record written before inputs carried their identity. */
 	id?: string;
@@ -405,27 +433,21 @@ function restoreRecordedInputs(
 		const preserved: RecordedImage[] = [];
 		let readFailed = false;
 		for (const image of input.images ?? []) {
-			let stored: ReturnType<SessionImageStore["read"]>;
+			let restored: ReturnType<typeof readRecordedImage>;
 			try {
-				stored = imageStore?.read(image.sequence, payload.pinClaim, image.name);
+				restored = readRecordedImage(imageStore, image, payload.pinClaim);
 			} catch (error) {
 				imageReadError ??= error instanceof Error ? error.message : String(error);
 				readFailed = true;
 				preserved.push({ ...image });
 				continue;
 			}
-			if (!stored) {
+			if (!restored) {
 				missingImages++;
 				continue;
 			}
-			const content: ImageContent = {
-				type: "image",
-				data: Buffer.from(stored.bytes).toString("base64"),
-				mimeType: stored.mimeType,
-			};
-			retainedSequences.set(content, image.sequence);
-			images.push(content);
-			preserved.push({ ...image, name: basename(stored.path) });
+			images.push(restored.content);
+			preserved.push({ ...image, name: restored.name });
 		}
 		return {
 			...(input.id === undefined ? {} : { id: input.id }),
