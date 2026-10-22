@@ -51,6 +51,7 @@ import type {
 	WorkerGrantSummary,
 } from "./delegation/worker-agent-control.ts";
 import { boundWorkerWaitTimeoutMs } from "./delegation/worker-agent-control-coordinator.ts";
+import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
 import {
 	WorkerDelegationController,
 	type WorkerDelegationControllerDeps,
@@ -58,7 +59,7 @@ import {
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { deriveFanoutGroups, type FanoutGroupReport } from "./delegation/worker-fanout.ts";
 import { WorkerLaneIsolation } from "./delegation/worker-lane-isolation.ts";
-import { projectWorkerAttemptLaneRecord } from "./delegation/worker-lane-projection.ts";
+import { isManagedWorkerAttempt, projectWorkerAttemptLaneRecord } from "./delegation/worker-lane-projection.ts";
 import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import { WorkerUsageReceiptDelivery } from "./delegation/worker-usage-receipt-delivery.ts";
@@ -207,6 +208,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getWorkerController().openWorkerTranscript(agentId);
 	}
 
+	/** Capture immutable transcript provenance without constructing a worker runtime or opening its files. */
+	workerTranscriptReference(record: Pick<LaneRecord, "laneId" | "attemptId">): string | undefined {
+		const binding = this.nativeWorkerForRecord(record)?.binding;
+		return binding
+			? WorkerConversationStore.transcriptReferenceForBinding(
+					this.deps.getAgentDir(),
+					this.deps.getSessionId(),
+					binding,
+				)
+			: undefined;
+	}
+
 	private _getWorkerController(): WorkerDelegationController {
 		this._workers ??= new WorkerDelegationController(
 			this.deps,
@@ -302,11 +315,17 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._workerNotifications;
 	}
 
-	/** The agent a worker lane is addressed by: its attempt's agent, else the logical lane, else the lane id. */
-	workerAgentIdForRecord(record: Pick<LaneRecord, "laneId">): string {
-		const attempt =
-			this._workerLifecycle?.getActiveAttempt(record.laneId) ??
-			this._workerLifecycle?.getManagedAttempt(record.laneId);
+	/** Resolve one native generation, never the lane's newer attempt or a same-named managed process. */
+	private nativeWorkerForRecord(record: Pick<LaneRecord, "laneId" | "attemptId">) {
+		const snapshot = this._workerLifecycle?.getTaskRuntimeSnapshot();
+		const attempt = record.attemptId === undefined ? undefined : snapshot?.attempts[record.attemptId];
+		if (!attempt || attempt.taskId !== record.laneId || isManagedWorkerAttempt(attempt)) return undefined;
+		return { attempt, binding: attempt.agentId ? snapshot?.agents[attempt.agentId] : undefined };
+	}
+
+	/** Display the exact generation's native agent, or retain the lane label when no native identity exists. */
+	workerAgentIdForRecord(record: Pick<LaneRecord, "laneId" | "attemptId">): string {
+		const attempt = this.nativeWorkerForRecord(record)?.attempt;
 		return attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? record.laneId;
 	}
 

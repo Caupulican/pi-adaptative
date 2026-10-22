@@ -267,6 +267,7 @@ import {
 	WorkerTerminalHandoffCoordinator,
 	type WorkerTerminalHandoffDelivery,
 } from "./worker-terminal-handoff-coordinator.ts";
+import { WORKER_TRANSCRIPT_REFERENCE_PREFIX } from "./worker-transcript-reference.ts";
 import {
 	collectWorkerTreeBudgetSeeds,
 	WorkerTreeBudgetCoordinator,
@@ -2687,16 +2688,13 @@ export class WorkerDelegationController {
 		return { provider: parent.provider, model: parent.id };
 	}
 
-	/** A worker agent's durable chat, for the ICM worker log. Undefined when no such agent exists. */
+	/** Exact historical reference or current-session alias. A historical name alone never selects a transcript. */
 	openWorkerTranscript(agentId: string): WorkerConversation | undefined {
-		const agent = this.lifecycle.getAgent(agentId);
-		if (!agent) {
-			return this.conversations.findHistoricalWorkerConversation({
-				agentDir: this.deps.getAgentDir(),
-				name: agentId,
-				cwd: this.deps.getCwd(),
-			});
+		if (agentId.startsWith(WORKER_TRANSCRIPT_REFERENCE_PREFIX)) {
+			return this.conversations.openTranscriptReference(this.deps.getAgentDir(), agentId);
 		}
+		const agent = this.lifecycle.getAgent(agentId);
+		if (!agent) return undefined;
 		return this.conversations.open({
 			agentDir: this.deps.getAgentDir(),
 			resumeContext: agent.resumeContext,

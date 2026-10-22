@@ -1,5 +1,6 @@
 /** Stable system prompt, tool descriptions and the exact compaction task texts of the continuous chat. */
 
+import { MAX_WORKER_TRANSCRIPT_REFERENCE_CHARACTERS } from "../delegation/worker-transcript-reference.ts";
 import type { ContinuousChatRecord } from "./continuous-chat-contracts.ts";
 import {
 	CONTINUOUS_CHAT_NODE_TARGET_BYTES,
@@ -51,8 +52,14 @@ an unsummarized line contains nothing relevant.
 Tools:
 - zoom(id, n) opens line id+n into the two lines it was made from;
 - zoom(id, 1) gives message id whole, with its images
-- zoom("Name") gives an agent's whole chat
+- zoom("Name") gives a current-session agent's chat
+- zoom("worker-ref:...") opens the exact transcript named in a work report,
+  even across sessions or worktrees. Copy the whole reference exactly.
 - date(id) gives the date and time of message id
+
+Agent names repeat across sessions. For historical work, use its worker-ref
+reference, never a name alone. Older reports may have no reference; their names
+do not identify a historical transcript reliably.
 
 # Turns
 
@@ -104,7 +111,10 @@ Use the space up to the limit, and give it by value:
 
 Avoid omissions. Name a minor item in a word or two rather than drop it: an
 absent item can never be found. Copy names, numbers, ids, paths and errors
-exactly. Tag each item with its kind ("user: ...; echo: ..."), and credit quoted
+exactly. Keep a work report's worker-ref reference intact when retaining it.
+If it cannot fit, retain the report's subject and message id so Pi can zoom the
+original report. Never truncate or rewrite a transcript reference.
+Tag each item with its kind ("user: ...; echo: ..."), and credit quoted
 text to its real author. Never make anything look further along than it was. If
 told the line is too long, shorten it. Non-ASCII characters cost 2-4 bytes.`;
 
@@ -133,17 +143,17 @@ export const CONTINUOUS_CHAT_TOOL_DEFINITIONS: readonly ContinuousChatToolDefini
 	{
 		name: "zoom",
 		description:
-			'Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. n is a power of 2, and id a multiple of n. A long message comes in pages. zoom("Name") gives an agent\'s whole chat.',
+			'Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. n is a power of 2, and id a multiple of n. A long message comes in pages. zoom("Name") reads a current-session agent; zoom("worker-ref:...") reads the exact historical transcript named in a work report.',
 		parameters: {
 			type: "object",
 			additionalProperties: false,
 			required: ["id"],
 			properties: {
 				id: {
-					description: "Message id (with n), or an agent name",
+					description: "Message id (with n), current-session agent name, or exact worker-ref transcript reference",
 					anyOf: [
 						{ type: "integer", minimum: 0 },
-						{ type: "string", minLength: 1, maxLength: 128 },
+						{ type: "string", minLength: 1, maxLength: MAX_WORKER_TRANSCRIPT_REFERENCE_CHARACTERS },
 					],
 				},
 				n: { type: "integer", minimum: 1, description: "Messages covered by the line; a power of 2" },

@@ -3,6 +3,10 @@
  * through the ports declared here. `readMessageDate` yields the exact persisted RFC 3339 timestamp.
  */
 
+import {
+	parseWorkerTranscriptReference,
+	WORKER_TRANSCRIPT_REFERENCE_PREFIX,
+} from "../delegation/worker-transcript-reference.ts";
 import { isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
 import {
 	CONTINUOUS_CHAT_MAX_IMAGE_BYTES,
@@ -203,8 +207,13 @@ export function parseContinuousChatNavigationCommand(
 	if (typeof id === "string") {
 		if (args.n !== undefined) return invalidArguments("zoom with an agent name takes no n.");
 		if (id !== id.trim()) return invalidArguments("Agent name must not have leading or trailing whitespace.");
-		const problem = workerNameProblem(id);
-		if (problem !== undefined) return invalidArguments(problem);
+		if (id.startsWith(WORKER_TRANSCRIPT_REFERENCE_PREFIX)) {
+			if (parseWorkerTranscriptReference(id) === undefined)
+				return invalidArguments("Invalid worker transcript reference.");
+		} else {
+			const problem = workerNameProblem(id);
+			if (problem !== undefined) return invalidArguments(problem);
+		}
 		return { tool: "zoom", kind: "worker", name: id, page };
 	}
 	if (typeof id !== "number" || !isNonNegativeSafeInteger(id)) {

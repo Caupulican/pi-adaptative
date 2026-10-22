@@ -7,6 +7,7 @@
 
 import type { ImageContent } from "@caupulican/pi-ai";
 import { type TSchema, Type } from "typebox";
+import { MAX_WORKER_TRANSCRIPT_REFERENCE_CHARACTERS } from "../delegation/worker-transcript-reference.ts";
 import type { AgentToolResult, ToolDefinition } from "../extensions/types.ts";
 import {
 	CONTINUOUS_CHAT_ZOOM_IMAGE_MAX_BYTES,
@@ -65,9 +66,15 @@ const ZOOM_PAGE_PARAMETER = Type.Optional(
 );
 const ZOOM_PARAMETERS = Type.Object(
 	{
-		id: Type.Union([Type.Integer({ minimum: 0 }), Type.String({ minLength: 1, maxLength: 128 })], {
-			description: "Message id (with n), or an agent name",
-		}),
+		id: Type.Union(
+			[
+				Type.Integer({ minimum: 0 }),
+				Type.String({ minLength: 1, maxLength: MAX_WORKER_TRANSCRIPT_REFERENCE_CHARACTERS }),
+			],
+			{
+				description: "Message id (with n), current-session agent name, or exact worker-ref transcript reference",
+			},
+		),
 		n: ZOOM_N_PARAMETER,
 		page: ZOOM_PAGE_PARAMETER,
 	},

@@ -9,6 +9,7 @@ import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/index.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionEntriesPersistedEvent } from "../../kernel/session/session-manager.ts";
+import { parseWorkerTranscriptReference } from "../delegation/worker-transcript-reference.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type {
@@ -40,6 +41,8 @@ export interface ContinuousChatWorkReportEntry {
 	claimId: string;
 	text: string;
 	timestamp: number;
+	/** Exact birth transcript; the display name is only a session-local alias. */
+	transcriptReference?: string;
 }
 
 function workReportEntry(value: unknown): ContinuousChatWorkReportEntry | undefined {
@@ -55,7 +58,18 @@ function workReportEntry(value: unknown): ContinuousChatWorkReportEntry | undefi
 		return undefined;
 	}
 	if ("status" in parseContinuousChatNavigationCommand("zoom", { id: value.name, page: 0 })) return undefined;
-	return { version: 1, name: value.name, claimId: value.claimId, text: value.text, timestamp: value.timestamp };
+	const transcriptReference =
+		typeof value.transcriptReference === "string" && parseWorkerTranscriptReference(value.transcriptReference)
+			? value.transcriptReference
+			: undefined;
+	return {
+		version: 1,
+		name: value.name,
+		claimId: value.claimId,
+		text: value.text,
+		timestamp: value.timestamp,
+		...(transcriptReference ? { transcriptReference } : {}),
+	};
 }
 
 type ContentBlock = TextContent | ImageContent;
@@ -140,7 +154,10 @@ export function continuousChatEntryParts(entry: SessionEntry): ContinuousChatMes
 		{
 			part: 0,
 			kind: "work",
-			text: `[${report.name}] ${report.text}`,
+			// Old entries retain their exact bytes: chunk idempotency depends on the original text boundaries.
+			text: report.transcriptReference
+				? `[${report.name}] [transcript ${report.transcriptReference}] ${report.text}`
+				: `[${report.name}] ${report.text}`,
 			sourceKey: `work:${report.claimId}`,
 			date: new Date(report.timestamp).toISOString(),
 		},

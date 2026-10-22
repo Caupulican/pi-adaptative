@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, opendirSync, readdirSync, statSync } from "node:fs";
+import { existsSync, opendirSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AssistantMessageDiagnostic, Message, Usage } from "@caupulican/pi-ai";
@@ -38,7 +38,12 @@ import {
 	validateAttemptUsageSnapshot,
 	validateProviderUsage,
 } from "../orchestration/attempt-usage.ts";
-import type { AgentResumeContext, AttemptUsageSnapshot, ResourcePointer } from "../orchestration/contracts.ts";
+import type {
+	AgentBindingContract,
+	AgentResumeContext,
+	AttemptUsageSnapshot,
+	ResourcePointer,
+} from "../orchestration/contracts.ts";
 import { reserveSessionBundleDeletion, withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
 import {
 	acquireSpecialistContext,
@@ -82,6 +87,11 @@ import {
 	workerMailboxPath,
 } from "./worker-mailbox-record.ts";
 import { projectWorkerTranscriptForInspection } from "./worker-transcript-projection.ts";
+import {
+	encodeWorkerTranscriptReference,
+	parseWorkerTranscriptReference,
+	type WorkerTranscriptIdentity,
+} from "./worker-transcript-reference.ts";
 
 const MAX_WORKER_CONVERSATION_METADATA_BYTES = 256 * 1024;
 const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
@@ -505,16 +515,33 @@ function cloneResumeContext(context: AgentResumeContext): AgentResumeContext {
 	return structuredClone(context);
 }
 
-function expectedResumeContext(options: CreateWorkerConversationOptions): AgentResumeContext {
-	const sessionDir = workerConversationSessionsDir(options.agentDir, options.parentSessionId);
-	const sessionId = stableWorkerSessionId(options.parentSessionId, options.logicalAgentId);
+function workerTranscriptLocation(agentDir: string, identity: WorkerTranscriptIdentity) {
+	const sessionDir = workerConversationSessionsDir(agentDir, identity.parentSessionId);
+	const sessionId = stableWorkerSessionId(identity.parentSessionId, identity.logicalAgentId);
 	assertValidSessionId(sessionId);
+	return { sessionDir, sessionId, sessionFile: joinWorkerSessionFile(sessionDir, sessionId) };
+}
+
+function matchesWorkerTranscriptLocation(
+	context: AgentResumeContext,
+	location: ReturnType<typeof workerTranscriptLocation>,
+): boolean {
+	return (
+		context.provider === "pi" &&
+		context.sessionId === location.sessionId &&
+		typeof context.sessionFile === "string" &&
+		context.sessionFile.length > 0 &&
+		resolve(context.sessionFile) === resolve(location.sessionFile) &&
+		(context.sessionDir === undefined || resolve(context.sessionDir) === resolve(location.sessionDir))
+	);
+}
+
+function expectedResumeContext(options: CreateWorkerConversationOptions): AgentResumeContext {
+	const location = workerTranscriptLocation(options.agentDir, options);
 	if (!options.cwd.trim()) throw new TypeError("A worker conversation working directory is required.");
 	return {
 		provider: "pi",
-		sessionId,
-		sessionDir,
-		sessionFile: joinWorkerSessionFile(sessionDir, sessionId),
+		...location,
 		cwd: resolve(options.cwd),
 		...(options.orchestrationProfileId ? { orchestrationProfileId: options.orchestrationProfileId } : {}),
 		...(options.modelRef ? { modelRef: options.modelRef } : {}),
@@ -1971,6 +1998,25 @@ function assertApplicableCompactionResult(result: CompactionResult, preparation:
 export class WorkerConversationStore {
 	private readonly cachedCores = new Map<string, CachedWorkerConversationCore>();
 
+	/** Projects an existing native binding without opening, creating or claiming its transcript. */
+	static transcriptReferenceForBinding(
+		agentDir: string,
+		parentSessionId: string,
+		binding: Pick<AgentBindingContract, "agentId" | "contextOrigin" | "resumeContext">,
+	): string | undefined {
+		const context = binding.resumeContext;
+		if (context.provider !== "pi" || !context.sessionFile) return undefined;
+		const identity = binding.contextOrigin ?? { parentSessionId, logicalAgentId: binding.agentId };
+		try {
+			const reference = encodeWorkerTranscriptReference(identity);
+			const location = workerTranscriptLocation(agentDir, identity);
+			if (!matchesWorkerTranscriptLocation(context, location)) return undefined;
+			return reference;
+		} catch {
+			return undefined;
+		}
+	}
+
 	/** Pure planned identity for allocation journaling before the transcript is created. */
 	static describe(options: CreateWorkerConversationOptions): AgentResumeContext {
 		return expectedResumeContext(options);
@@ -2841,85 +2887,30 @@ export class WorkerConversationStore {
 		return conversation;
 	}
 
-	findHistoricalWorkerConversation(options: {
-		agentDir: string;
-		name: string;
-		cwd: string;
-	}): WorkerConversation | undefined {
-		const root = orchestrationSessionsDir(options.agentDir);
-		if (!existsSync(root)) return undefined;
-
-		let best:
-			| {
-					metadata: WorkerConversationMetadata;
-					sessionFile: string;
-					mtime: number;
-			  }
-			| undefined;
-
-		let parentEntries: string[];
-		try {
-			parentEntries = readdirSync(root).sort();
-		} catch {
-			return undefined;
-		}
-
-		const resolvedTargetCwd = resolve(options.cwd);
-
-		for (const parentEntry of parentEntries) {
-			const dir = workerConversationSessionsDir(options.agentDir, parentEntry);
-			if (!existsSync(dir)) continue;
-			let files: string[];
-			try {
-				files = readdirSync(dir).sort();
-			} catch {
-				continue;
+	/** Opens one exact birth transcript. Names, execution directories and modification times never select history. */
+	openTranscriptReference(agentDir: string, reference: string): WorkerConversation | undefined {
+		const identity = parseWorkerTranscriptReference(reference);
+		if (identity === undefined) return undefined;
+		const location = workerTranscriptLocation(agentDir, identity);
+		const { sessionFile } = location;
+		if (!existsSync(sessionFile)) return undefined;
+		return withFileLockSync(sessionFile, () => {
+			const metadata = readWorkerConversationMetadata(workerConversationMetadataFile(sessionFile)).metadata;
+			const context = metadata.resumeContext;
+			if (
+				metadata.parentSessionId !== identity.parentSessionId ||
+				metadata.logicalAgentId !== identity.logicalAgentId ||
+				!matchesWorkerTranscriptLocation(context, location)
+			) {
+				throw new WorkerConversationOwnershipError(
+					"Worker transcript reference disagrees with its stored identity.",
+				);
 			}
-
-			for (const file of files) {
-				if (!file.endsWith(".worker.json")) continue;
-				const metadataFilePath = join(dir, file);
-				let read: WorkerConversationMetadataRead;
-				try {
-					read = readWorkerConversationMetadata(metadataFilePath);
-				} catch {
-					continue;
-				}
-
-				const metadata = read.metadata;
-				if (resolve(metadata.resumeContext.cwd) !== resolvedTargetCwd) continue;
-				if (metadata.logicalAgentId !== options.name && metadata.resumeContext.sessionId !== options.name) {
-					continue;
-				}
-
-				const sessionFile = metadata.resumeContext.sessionFile;
-				if (!sessionFile || !existsSync(sessionFile)) continue;
-
-				let mtime: number;
-				try {
-					mtime = statSync(sessionFile).mtimeMs;
-				} catch {
-					continue;
-				}
-
-				if (!best || mtime > best.mtime || (mtime === best.mtime && sessionFile > best.sessionFile)) {
-					best = { metadata, sessionFile, mtime };
-				}
-			}
-		}
-
-		const chosen = best;
-		if (!chosen) return undefined;
-
-		try {
-			return this.open({
-				agentDir: options.agentDir,
-				resumeContext: chosen.metadata.resumeContext,
-				expectedLogicalAgentId: chosen.metadata.logicalAgentId,
-			});
-		} catch {
-			return undefined;
-		}
+			return this.openExisting(
+				{ agentDir, resumeContext: context, expectedLogicalAgentId: identity.logicalAgentId },
+				{ parentSessionId: identity.parentSessionId, recoverBirthContextPrefix: false },
+			);
+		});
 	}
 }
 

@@ -5618,12 +5618,14 @@ export class AgentSession {
 			return;
 		}
 		const reason = terminal.reasonCode ? ` (${terminal.reasonCode})` : "";
+		const transcriptReference = this._backgroundLanes.workerTranscriptReference(terminal);
 		const report: ContinuousChatWorkReportEntry = {
 			version: 1,
 			name,
 			claimId,
 			text: claim ? workerReportClaimText(claim) : `Terminal status ${terminal.status}${reason}.`,
 			timestamp: Date.now(),
+			...(transcriptReference ? { transcriptReference } : {}),
 		};
 		this.sessionManager.appendCustomEntry(CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE, report);
 	}
