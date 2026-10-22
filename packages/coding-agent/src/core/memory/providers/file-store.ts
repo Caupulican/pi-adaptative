@@ -351,8 +351,8 @@ export interface ManagedMemoryDriftEntry {
  */
 export interface ManagedMemoryNotice {
 	target: ManagedMemoryTarget;
-	kind: "healed" | "drift";
-	/** Digest of the on-disk content the notice describes; the dedupe key beside target and kind. */
+	kind: "healed" | "drift" | "archive_unavailable";
+	/** Digest of the observed content or diagnostic; the dedupe key beside target and kind. */
 	revision: string;
 	message: string;
 }
@@ -678,8 +678,15 @@ export class FileStoreProvider implements MemoryProvider {
 	private async refreshArchivedUserLines(): Promise<void> {
 		try {
 			this.archivedUserEntries = this.userArchive ? await this.userArchive.archivedEntries() : [];
-		} catch {
+		} catch (error) {
 			this.archivedUserEntries = [];
+			const diagnostic = String(error).slice(0, 400);
+			this.managedNotices.push({
+				target: "user",
+				kind: "archive_unavailable",
+				revision: contentDigest(diagnostic),
+				message: `Archived USER preferences could not be loaded; the archive projection is unavailable. USER mutations require a complete archive read. ${diagnostic}`,
+			});
 		}
 	}
 
@@ -1425,10 +1432,10 @@ export class FileStoreProvider implements MemoryProvider {
 		const text = action === "remove" ? "" : stripUserPreferenceMetadata(content ?? "").trim();
 		// The caller holds the USER.md lock: read the archive as it is NOW, not as this provider last
 		// saw it, so a peer session's archive change cannot make a write match a stale line.
-		await this.refreshArchivedUserLines();
+		const archivedEntries = await this.userArchive.mutationEntries();
 		input.mutationAdmission.assertPending();
 		// Literal lines: matching and mutation never see the rendered, heading-qualified form.
-		const candidates = [...FileStoreProvider.activePreferenceEntries(currentOnDisk), ...this.archivedUserEntries].map(
+		const candidates = [...FileStoreProvider.activePreferenceEntries(currentOnDisk), ...archivedEntries].map(
 			(entry) => entry.line,
 		);
 		const requestedScope =

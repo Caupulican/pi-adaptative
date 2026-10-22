@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { type Dirent, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { okfMemoryDir } from "../../agent-paths.ts";
 import { formatOkfMemoryDocument, parseOkfMemoryDocument } from "../../context/okf-memory.ts";
 import { hasInvisibleUnicode, scanContextFileThreats } from "../../security/context-threat-scanner.ts";
-import { writeFileAtomic } from "../../util/atomic-file.ts";
+import { isMissingFileError, writeFileAtomic } from "../../util/atomic-file.ts";
+import { readBoundedTextFile } from "../../util/bounded-file.ts";
 import { MemoryMutationAdmission } from "../memory-mutation-admission.ts";
 import { collectUserPreferenceEntries } from "../user-preference-metadata.ts";
 
@@ -12,6 +13,13 @@ const ARCHIVE_DIR_NAME = "user-preferences";
 const ARCHIVE_INDEX_NAME = "index.okf.md";
 const SHARD_NAME_RE = /^user-preferences-([a-f0-9]{16})\.okf\.md$/;
 const MAX_SHARD_BODY_CHARS = 64_000;
+// Scan bounds are separate from the small prompt projection. Reaching one refuses mutation;
+// it never turns an incomplete view into authoritative absence of a preference.
+const MAX_ARCHIVE_SHARDS = 1_024;
+const MAX_ARCHIVE_DIRECTORY_ENTRIES = 2 * MAX_ARCHIVE_SHARDS + 64;
+const MAX_ARCHIVE_SHARD_BYTES = 1_048_576;
+const MAX_ARCHIVE_SCAN_BYTES = 16 * MAX_ARCHIVE_SHARD_BYTES;
+const MAX_ARCHIVE_MUTATION_ENTRIES = 50_000;
 
 export const USER_ARCHIVE_POINTER =
 	"# User profile\n\nArchived preferences: [User preference archive](okf-memory/user-preferences/index.okf.md).\n";
@@ -29,9 +37,26 @@ export interface UserMemoryMutationResult {
 interface UserPreferenceShard {
 	path: string;
 	name: string;
+	content: string;
 	body: string;
 	title: string;
 	timestamp?: string;
+}
+
+interface ArchiveFileChange {
+	path: string;
+	before: string | null;
+	after: string | null;
+}
+
+interface ArchiveMutationPlan extends UserMemoryMutationResult {
+	shards: ArchiveFileChange[];
+	index?: ArchiveFileChange;
+}
+
+interface ArchiveSnapshot {
+	shards: UserPreferenceShard[];
+	directoryEntries: number;
 }
 
 function appendLine(existing: string, content: string): string {
@@ -92,54 +117,24 @@ export class UserMemoryArchive {
 		admission = new MemoryMutationAdmission(),
 	): Promise<UserMemoryMutationResult> {
 		admission.assertPending();
-		// Validate the generated storage boundary before any shard discovery. Otherwise a symlinked
-		// archive directory could redirect a replace/remove before the later index rebuild rejected it.
-		await this.ensureArchiveDir();
+		const plan = await this.prepare(currentUser, action, budget, supersedeNearDuplicate);
 		admission.assertPending();
-		const split = activeUserContent(currentUser);
-		let active = split.active;
-		let archiveChanged = false;
-
-		if (action.action === "add") {
-			const supersededActive = supersedeNearDuplicate(active, action.content);
-			if (supersededActive !== null) {
-				active = supersededActive;
-			} else if (await this.supersedeArchivedFact(action.content, supersedeNearDuplicate, admission)) {
-				archiveChanged = true;
+		for (const change of [...plan.shards, ...(plan.index ? [plan.index] : [])]) {
+			const current = await this.readOptional(change.path);
+			if (current !== change.before) throw new Error(`User archive changed after preparation: ${change.path}.`);
+			if (change.after === null) {
+				admission.begin();
+				await fs.unlink(change.path);
 			} else {
-				active = appendLine(active, action.content);
-			}
-		} else {
-			const replacement = action.action === "replace" ? action.content : "";
-			if (active.includes(action.oldContent)) {
-				active = active.replace(action.oldContent, replacement);
-			} else if (await this.replaceArchivedFact(action.oldContent, replacement, admission)) {
-				archiveChanged = true;
-			} else {
-				throw new Error(`The content to ${action.action} ('oldContent') was not found in the file or its archive.`);
+				await writeFileAtomic(change.path, change.after, {
+					mode: 0o600,
+					// A derived index refresh must not admit the pending outer USER mutation.
+					beforeCommit: () => (change === plan.index ? admission.assertPending() : admission.begin()),
+				});
 			}
 		}
-
-		if (archiveChanged) {
-			await this.rebuildIndex(admission);
-			return { userContent: currentUser, archiveChanged: true };
-		}
-
-		const hasArchive = split.managed || (await this.hasArchivedShards());
-		const candidate = `${hasArchive ? USER_ARCHIVE_POINTER : ""}${active}`;
-		if (candidate.length <= budget) {
-			// An unchanged index is housekeeping; it must not admit the later USER.md mutation.
-			if (hasArchive) await this.rebuildIndex(admission);
-			admission.assertPending();
-			return { userContent: candidate, archiveChanged: false };
-		}
-
-		const body = active.trim();
-		if (!body) throw new Error("USER.md index exceeds its character budget without archivable content.");
-		this.validateArchiveContent(body);
-		await this.archiveBody(body, admission);
-		await this.rebuildIndex(admission);
-		return { userContent: USER_ARCHIVE_POINTER, archiveChanged: true };
+		admission.assertPending();
+		return { userContent: plan.userContent, archiveChanged: plan.archiveChanged };
 	}
 
 	/**
@@ -148,13 +143,20 @@ export class UserMemoryArchive {
 	 */
 	async archivedEntries(limit = 400): Promise<Array<{ line: string; section?: string }>> {
 		const entries: Array<{ line: string; section?: string }> = [];
-		for (const shard of await this.shardFiles()) {
+		for (const shard of (await this.readArchive()).shards) {
 			for (const entry of collectUserPreferenceEntries(shard.body)) {
 				entries.push(entry);
 				if (entries.length >= limit) return entries;
 			}
 		}
 		return entries;
+	}
+
+	/** Complete mutation input, never the truncated display projection. Caller holds the USER lock. */
+	async mutationEntries(): Promise<Array<{ line: string; section?: string }>> {
+		const { shards } = await this.readArchive();
+		this.validateMutationCapacity(shards);
+		return shards.flatMap((shard) => collectUserPreferenceEntries(shard.body));
 	}
 
 	private validateArchiveContent(body: string): void {
@@ -171,98 +173,128 @@ export class UserMemoryArchive {
 		}
 	}
 
-	private async shardFiles(): Promise<UserPreferenceShard[]> {
-		let entries: Dirent[];
+	private async readArchive(): Promise<ArchiveSnapshot> {
+		// Missing archive is empty. All other failures are unknown storage, never empty storage.
 		try {
-			entries = await fs.readdir(this.archiveDir, { withFileTypes: true, encoding: "utf8" });
-		} catch {
-			return [];
-		}
-		const shards: UserPreferenceShard[] = [];
-		for (const entry of entries) {
-			if (!entry.isFile() || !SHARD_NAME_RE.test(entry.name)) continue;
-			const path = join(this.archiveDir, entry.name);
-			let content: string;
-			try {
-				content = await fs.readFile(path, "utf8");
-			} catch {
-				continue;
+			const stat = await fs.lstat(this.archiveDir);
+			if (!stat.isDirectory() || stat.isSymbolicLink()) {
+				throw new Error("User memory archive path must be a real directory, not a symlink.");
 			}
-			const parsed = parseOkfMemoryDocument(content, { uri: `okf:${ARCHIVE_DIR_NAME}/${entry.name}` });
-			if (parsed.diagnostics.length > 0 || parsed.item?.kind !== "user_preference") continue;
+		} catch (error) {
+			if (isMissingFileError(error)) return { shards: [], directoryEntries: 0 };
+			throw error;
+		}
+		const names: string[] = [];
+		let count = 0;
+		const directory = await fs.opendir(this.archiveDir);
+		for await (const entry of directory) {
+			if (++count > MAX_ARCHIVE_DIRECTORY_ENTRIES)
+				throw new Error("User preference archive directory is too large.");
+			if (!SHARD_NAME_RE.test(entry.name)) continue;
+			if (!entry.isFile()) throw new Error(`User preference shard is not a regular file: ${entry.name}.`);
+			if (names.length === MAX_ARCHIVE_SHARDS) throw new Error("User preference archive exceeds its shard limit.");
+			names.push(entry.name);
+		}
+		names.sort((left, right) => left.localeCompare(right));
+		const shards: UserPreferenceShard[] = [];
+		let scannedBytes = 0;
+		for (const name of names) {
+			const path = join(this.archiveDir, name);
+			const content = await readBoundedTextFile(
+				path,
+				Math.min(MAX_ARCHIVE_SHARD_BYTES, MAX_ARCHIVE_SCAN_BYTES - scannedBytes),
+				`User preference shard ${name}`,
+			);
+			scannedBytes += Buffer.byteLength(content, "utf8");
+			const parsed = parseOkfMemoryDocument(content, { uri: `okf:${ARCHIVE_DIR_NAME}/${name}` });
+			if (parsed.diagnostics.length > 0 || parsed.item?.kind !== "user_preference" || parsed.item.scope !== "user") {
+				throw new Error(`Invalid user preference shard: ${name}.`);
+			}
 			shards.push({
 				path,
-				name: entry.name,
+				name,
+				content,
 				body: parsed.body,
-				title: parsed.item.title ?? `User preference shard ${entry.name.slice(17, 33)}`,
+				title: parsed.item.title ?? `User preference shard ${name.slice(17, 33)}`,
 				timestamp: parsed.item.timestamp,
 			});
 		}
-		return shards.sort((left, right) => left.name.localeCompare(right.name));
+		return { shards, directoryEntries: count };
 	}
 
-	private async hasArchivedShards(): Promise<boolean> {
-		return (await this.shardFiles()).length > 0;
-	}
-
-	private async archiveBody(body: string, admission: MemoryMutationAdmission): Promise<void> {
-		await this.ensureArchiveDir();
-		const migrationDigest = createHash("sha256").update(body).digest("hex");
-		const chunks = splitArchiveBody(body);
-		for (let index = 0; index < chunks.length; index++) {
-			const chunk = chunks[index];
-			if (chunk === undefined) continue;
-			const identity = `${migrationDigest}\0${index}`;
-			await this.writeNewShard(chunk, identity, admission);
-		}
-	}
-
-	private async writeNewShard(body: string, identity: string, admission: MemoryMutationAdmission): Promise<void> {
-		const hash = createHash("sha256").update(identity).digest("hex").slice(0, 16);
-		const name = `user-preferences-${hash}.okf.md`;
-		const path = join(this.archiveDir, name);
+	private async readOptional(path: string): Promise<string | null> {
 		try {
-			const existing = await fs.readFile(path, "utf8");
-			const parsed = parseOkfMemoryDocument(existing);
-			if (parsed.diagnostics.length === 0 && parsed.body.trim() === body) return;
-			throw new Error(`User memory shard hash collision at ${name}.`);
+			return await readBoundedTextFile(path, MAX_ARCHIVE_SHARD_BYTES, "User preference archive file");
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			if (isMissingFileError(error)) return null;
+			throw error;
 		}
+	}
 
-		const timestamp = new Date().toISOString();
-		await writeFileAtomic(
-			path,
-			formatOkfMemoryDocument({
+	private validateMutationCapacity(shards: readonly UserPreferenceShard[]): void {
+		if (shards.length > MAX_ARCHIVE_SHARDS) throw new Error("User preference archive exceeds its shard limit.");
+		let bytes = 0;
+		let entries = 0;
+		for (const shard of shards) {
+			const shardBytes = Buffer.byteLength(shard.content, "utf8");
+			if (shardBytes > MAX_ARCHIVE_SHARD_BYTES) throw new Error("User preference shard exceeds its byte limit.");
+			bytes += shardBytes;
+			entries += collectUserPreferenceEntries(shard.body).length;
+			if (bytes > MAX_ARCHIVE_SCAN_BYTES) throw new Error("User preference archive exceeds its byte limit.");
+			if (entries > MAX_ARCHIVE_MUTATION_ENTRIES)
+				throw new Error("User preference archive exceeds its entry limit.");
+		}
+	}
+
+	private async prepare(
+		currentUser: string,
+		action: UserMemoryAction,
+		budget: number,
+		supersedeNearDuplicate: (existing: string, content: string) => string | null,
+	): Promise<ArchiveMutationPlan> {
+		await this.ensureArchiveDir();
+		const snapshot = await this.readArchive();
+		const original = snapshot.shards;
+		this.validateMutationCapacity(original);
+		const projected = new Map(original.map((shard) => [shard.name, shard]));
+		const changes: ArchiveFileChange[] = [];
+		const planNewShard = (body: string, identity: string): void => {
+			const hash = createHash("sha256").update(identity).digest("hex").slice(0, 16);
+			const name = `user-preferences-${hash}.okf.md`;
+			const existing = projected.get(name);
+			if (existing) {
+				if (existing.body.trim() === body) return;
+				throw new Error(`User memory shard hash collision at ${name}.`);
+			}
+			const path = join(this.archiveDir, name);
+			const timestamp = new Date().toISOString();
+			const title = `User preference shard ${hash}`;
+			const content = formatOkfMemoryDocument({
 				type: "User Preference",
-				title: `User preference shard ${hash}`,
+				title,
 				description: safeDescription(body),
 				scope: "user",
 				body,
 				tags: ["user-preferences", "archived"],
 				timestamp,
-			}),
-			{ mode: 0o600, beforeCommit: () => admission.begin() },
-		);
-	}
-
-	private async writeShard(
-		shard: UserPreferenceShard,
-		body: string,
-		admission: MemoryMutationAdmission,
-	): Promise<void> {
-		if (!body.trim()) {
-			admission.begin();
-			await fs.unlink(shard.path);
-			return;
-		}
-		this.validateArchiveContent(body);
-		const chunks = splitArchiveBody(body);
-		const first = chunks[0];
-		if (first === undefined) return;
-		await writeFileAtomic(
-			shard.path,
-			formatOkfMemoryDocument({
+			});
+			projected.set(name, { path, name, content, body, title, timestamp });
+			this.validateMutationCapacity([...projected.values()]);
+			changes.push({ path, before: null, after: content });
+		};
+		const planReplacement = (shard: UserPreferenceShard, body: string): void => {
+			if (!body.trim()) {
+				projected.delete(shard.name);
+				changes.push({ path: shard.path, before: shard.content, after: null });
+				return;
+			}
+			this.validateArchiveContent(body);
+			const [first, ...overflow] = splitArchiveBody(body);
+			if (first === undefined) throw new Error("User preference replacement has no content.");
+			const mutationDigest = createHash("sha256").update(`${shard.name}\0${body}`).digest("hex");
+			// Preserve overflow before shortening its source; a later write error cannot discard the tail.
+			for (const [index, chunk] of overflow.entries()) planNewShard(chunk, `${mutationDigest}\0${index + 1}`);
+			const content = formatOkfMemoryDocument({
 				type: "User Preference",
 				title: shard.title,
 				description: safeDescription(first),
@@ -270,61 +302,78 @@ export class UserMemoryArchive {
 				body: first,
 				tags: ["user-preferences", "archived"],
 				timestamp: shard.timestamp,
-			}),
-			{ mode: 0o600, beforeCommit: () => admission.begin() },
-		);
-		const mutationDigest = createHash("sha256").update(`${shard.name}\0${body}`).digest("hex");
-		for (let index = 1; index < chunks.length; index++) {
-			const chunk = chunks[index];
-			if (chunk !== undefined) await this.writeNewShard(chunk, `${mutationDigest}\0${index}`, admission);
+			});
+			projected.set(shard.name, { ...shard, content, body: first });
+			if (content !== shard.content) changes.push({ path: shard.path, before: shard.content, after: content });
+		};
+		const split = activeUserContent(currentUser);
+		let active = split.active;
+		let archiveChanged = false;
+		if (action.action === "add") {
+			const superseded = supersedeNearDuplicate(active, action.content);
+			if (superseded !== null) active = superseded;
+			else {
+				for (const shard of original) {
+					const body = supersedeNearDuplicate(shard.body, action.content);
+					if (body === null) continue;
+					planReplacement(shard, body);
+					archiveChanged = true;
+					break;
+				}
+				if (!archiveChanged) active = appendLine(active, action.content);
+			}
+		} else {
+			const replacement = action.action === "replace" ? action.content : "";
+			if (active.includes(action.oldContent)) active = active.replace(action.oldContent, replacement);
+			else {
+				const shard = original.find((candidate) => candidate.body.includes(action.oldContent));
+				if (!shard)
+					throw new Error(
+						`The content to ${action.action} ('oldContent') was not found in the file or its archive.`,
+					);
+				planReplacement(shard, shard.body.replace(action.oldContent, replacement));
+				archiveChanged = true;
+			}
 		}
-	}
-
-	private async supersedeArchivedFact(
-		content: string,
-		supersedeNearDuplicate: (existing: string, content: string) => string | null,
-		admission: MemoryMutationAdmission,
-	): Promise<boolean> {
-		for (const shard of await this.shardFiles()) {
-			const superseded = supersedeNearDuplicate(shard.body, content);
-			if (superseded === null) continue;
-			await this.writeShard(shard, superseded, admission);
-			return true;
+		const hasArchive = split.managed || original.length > 0;
+		let userContent = archiveChanged ? currentUser : `${hasArchive ? USER_ARCHIVE_POINTER : ""}${active}`;
+		if (!archiveChanged && userContent.length > budget) {
+			const body = active.trim();
+			if (!body) throw new Error("USER.md index exceeds its character budget without archivable content.");
+			this.validateArchiveContent(body);
+			const migrationDigest = createHash("sha256").update(body).digest("hex");
+			for (const [index, chunk] of splitArchiveBody(body).entries())
+				planNewShard(chunk, `${migrationDigest}\0${index}`);
+			userContent = USER_ARCHIVE_POINTER;
+			archiveChanged = true;
 		}
-		return false;
-	}
-
-	private async replaceArchivedFact(
-		oldContent: string,
-		replacement: string,
-		admission: MemoryMutationAdmission,
-	): Promise<boolean> {
-		for (const shard of await this.shardFiles()) {
-			if (!shard.body.includes(oldContent)) continue;
-			await this.writeShard(shard, shard.body.replace(oldContent, replacement), admission);
-			return true;
-		}
-		return false;
-	}
-
-	private async rebuildIndex(admission: MemoryMutationAdmission): Promise<void> {
-		await this.ensureArchiveDir();
-		const shards = await this.shardFiles();
-		const body =
-			shards.length === 0
-				? "No archived user preference shards."
-				: shards.map((shard) => `- [${shard.name}](./${shard.name}): ${safeDescription(shard.body)}`).join("\n");
-		await writeFileAtomic(
-			this.indexPath,
-			formatOkfMemoryDocument({
+		const shards = [...projected.values()].sort((left, right) => left.name.localeCompare(right.name));
+		this.validateMutationCapacity(shards);
+		let index: ArchiveFileChange | undefined;
+		if (archiveChanged || hasArchive) {
+			const body =
+				shards.length === 0
+					? "No archived user preference shards."
+					: shards.map((shard) => `- [${shard.name}](./${shard.name}): ${safeDescription(shard.body)}`).join("\n");
+			const after = formatOkfMemoryDocument({
 				type: "User Preference",
 				title: "User preference archive index",
 				description: "Index of archived durable user preference shards.",
 				scope: "user",
 				body,
 				tags: ["user-preferences", "index"],
-			}),
-			{ mode: 0o600, beforeCommit: () => admission.assertPending() },
-		);
+			});
+			if (Buffer.byteLength(after, "utf8") > MAX_ARCHIVE_SHARD_BYTES)
+				throw new Error("User preference index exceeds its byte limit.");
+			const before = await this.readOptional(this.indexPath);
+			if (before !== after) index = { path: this.indexPath, before, after };
+		}
+		// Overflow is staged before a source shard is shortened. Bound that peak too, including
+		// unrelated directory entries and a newly-created derived index, so failures stay readable.
+		const newFiles = changes.filter((change) => change.before === null).length;
+		if (snapshot.directoryEntries + newFiles + (index?.before === null ? 1 : 0) > MAX_ARCHIVE_DIRECTORY_ENTRIES) {
+			throw new Error("User preference archive directory would exceed its entry limit.");
+		}
+		return { userContent, archiveChanged, shards: changes, ...(index ? { index } : {}) };
 	}
 }
