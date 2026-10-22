@@ -300,35 +300,29 @@ export function withSessionBundleAdmission<T>(agentDir: string, parentSessionId:
 	});
 }
 
-/** One removal owns a token; permanent intent can be promoted without admitting a second remover. */
+/** Reserve before any removal. Refused admission must not publish new destructive intent. */
 export function reserveSessionBundleDeletion(
 	agentDir: string,
 	parentSessionId: string,
 	policy: SessionBundleDeletionPolicy,
-	canDelete: () => boolean,
+	canDelete: (existingPolicy: SessionBundleDeletionPolicy | undefined) => boolean,
 	/** A caller that bypassed age checks must not acquire a fresh deletion after a stale hint. */
 	requireExistingRetention = false,
 ): SessionBundleDeletionReservation | undefined {
 	const tombstone = orchestrationSessionDeletionFile(agentDir, parentSessionId);
 	return withFileLockSync(tombstone, () => {
-		let marker = readMarker(tombstone, parentSessionId);
+		const marker = readMarker(tombstone, parentSessionId);
 		if (requireExistingRetention && marker?.policy !== "retention") return undefined;
 		const fresh = marker === undefined;
 		if (marker?.policy === "permanent" && policy === "retention") return undefined;
-		// Explicit foreground deletion may already have happened, so preserve its intent even while
-		// another remover or a live worker prevents this request from acquiring removal ownership.
-		if (policy === "permanent" && marker?.policy !== "permanent") {
-			marker = { ...(marker ?? { schemaVersion: 2, parentSessionId }), policy };
-			writeMarker(tombstone, marker);
-		}
 		if (marker?.operation && !canRecoverOperation(marker.operation)) return undefined;
 		if (liveHolders(`${tombstone}.leases.json`, parentSessionId).length > 0) return undefined;
-		if (!canDelete()) return undefined;
+		if (!canDelete(marker?.policy)) return undefined;
 		const token = randomUUID();
 		const next: DeletionMarker = {
 			schemaVersion: 2,
 			parentSessionId,
-			policy: marker?.policy ?? policy,
+			policy,
 			operation: { token, host: hostname(), pid: process.pid, processInstanceId: PROCESS_INSTANCE_ID, fresh },
 		};
 		activeOperations.add(token);
@@ -339,6 +333,25 @@ export function reserveSessionBundleDeletion(
 			activeOperations.delete(token);
 			throw error;
 		}
+	});
+}
+
+/** Inspect artifact eligibility only while this exact permanent remover still owns the bundle. */
+export function withPermanentSessionBundleDeletion<T>(
+	agentDir: string,
+	reservation: SessionBundleDeletionReservation,
+	operation: () => T,
+): T {
+	const tombstone = orchestrationSessionDeletionFile(agentDir, reservation.parentSessionId);
+	return withFileLockSync(tombstone, () => {
+		const marker = readMarker(tombstone, reservation.parentSessionId);
+		if (
+			marker?.policy !== "permanent" ||
+			marker.operation?.token !== reservation.token ||
+			!activeOperations.has(reservation.token)
+		)
+			throw new Error("Permanent session bundle deletion ownership changed before inspection.");
+		return operation();
 	});
 }
 
@@ -355,8 +368,7 @@ export function settleSessionBundleDeletion(
 			if (!marker?.operation || marker.operation.token !== reservation.token) {
 				throw new Error("Session bundle deletion ownership changed before settlement.");
 			}
-			// Consult current durable policy: an explicit deletion may have promoted this reservation
-			// while its original retention owner was awaiting physical removal.
+			// The durable reservation owns policy until physical removal and its settlement finish.
 			if (
 				marker.policy === "retention" &&
 				(outcome === "removed" || (outcome === "deferred" && marker.operation.fresh))

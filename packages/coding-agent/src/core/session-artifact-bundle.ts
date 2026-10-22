@@ -1,12 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { lstat, rm, unlink } from "node:fs/promises";
+import { readSessionHeaderResult } from "../kernel/session/session-manager.ts";
 import { orchestrationSessionDir } from "./agent-paths.ts";
 import { sessionJournalPaths } from "./cost/semantic-usage-journal.ts";
 import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
-import { settleSessionBundleDeletion } from "./orchestration/session-bundle-lifecycle.ts";
+import { reserveSessionBundleDeletion, settleSessionBundleDeletion } from "./orchestration/session-bundle-lifecycle.ts";
+import { isMissingFileError } from "./util/atomic-file.ts";
 
-export type SessionArtifactDeletionMethod = "trash" | "unlink";
+export type SessionArtifactDeletionMethod = "trash" | "unlink" | "preserved";
 
 export interface SessionArtifactPathDeletion {
 	ok: boolean;
@@ -49,10 +50,14 @@ function describeTrashError(result: ReturnType<typeof spawnSync>): string | unde
 export async function removePathWithTrashFallback(path: string): Promise<SessionArtifactPathDeletion> {
 	const trashArgs = path.startsWith("-") ? ["--", path] : [path];
 	const trashResult = spawnSync("trash", trashArgs, { encoding: "utf-8", timeout: 10_000 });
-	if (trashResult.status === 0 || !existsSync(path)) return { ok: true, method: "trash" };
+	if (trashResult.status === 0) return { ok: true, method: "trash" };
 
 	try {
-		const stat = await lstat(path);
+		const stat = await lstat(path).catch((error: unknown) => {
+			if (isMissingFileError(error)) return undefined;
+			throw error;
+		});
+		if (stat === undefined) return { ok: true, method: "trash" };
 		if (stat.isDirectory()) {
 			await rm(path, { recursive: true, force: false });
 		} else {
@@ -70,11 +75,6 @@ export async function removePathWithTrashFallback(path: string): Promise<Session
 	}
 }
 
-/**
- * Explicitly delete one foreground session together with its exact session-owned control-plane
- * namespace. No age-based cleanup is performed. If the foreground file moves first but its worker
- * bundle cannot, the result reports that partial state rather than claiming a full deletion.
- */
 /** Every usage-journal sidecar of the session file, removed one by one under the same policy; preserved when they cannot be listed. */
 async function removeJournalSidecars(
 	sessionPath: string,
@@ -95,40 +95,80 @@ async function removeJournalSidecars(
 	return last;
 }
 
+/** One deletion reservation spans foreground, journal and optional worker-artifact removal. */
 export async function deleteForegroundSessionBundle(
 	options: DeleteForegroundSessionBundleOptions,
 ): Promise<ForegroundSessionBundleDeletion> {
 	const removePath = options.removePath ?? removePathWithTrashFallback;
-	const foreground = await removePath(options.sessionPath);
-	if (!foreground.ok) {
+	const reservation = reserveSessionBundleDeletion(
+		options.agentDir,
+		options.parentSessionId,
+		"permanent",
+		(existingPolicy) => {
+			const read = readSessionHeaderResult(options.sessionPath);
+			// A prior admitted deletion can retry its remaining sidecars after the foreground is gone.
+			if (
+				!read.ok &&
+				read.reason === "unreadable" &&
+				isMissingFileError(read.cause) &&
+				existingPolicy === "permanent"
+			)
+				return true;
+			if (!read.ok || read.header.id !== options.parentSessionId)
+				throw new Error("Selected session identity changed or could not be read; refresh the session list.");
+			return true;
+		},
+	);
+	if (!reservation) {
 		return {
-			foreground,
+			foreground: { ok: false, method: "preserved", error: "Session is active or another deletion owns it." },
 			journal: { ok: false, method: "preserved" },
 			workerArtifacts: { ok: false, method: "preserved" },
 			complete: false,
 		};
 	}
 
-	const journal = await removeJournalSidecars(options.sessionPath, removePath);
 	const workerArtifactsPath = orchestrationSessionDir(options.agentDir, options.parentSessionId);
-	const reservation = WorkerConversationStore.reserveBundleDeletion(
-		options.agentDir,
-		options.parentSessionId,
-		"permanent",
-	);
-	if (!reservation) {
-		return { foreground, journal, workerArtifacts: { ok: false, method: "preserved" }, complete: false };
-	}
 	let outcome: "removed" | "retained" = "retained";
+	const failures: unknown[] = [];
+	let result: ForegroundSessionBundleDeletion | undefined;
 	try {
-		if (!existsSync(workerArtifactsPath)) {
-			outcome = "removed";
-			return { foreground, journal, workerArtifacts: { ok: true, method: "absent" }, complete: journal.ok };
-		}
-		const workerArtifacts = await removePath(workerArtifactsPath);
-		if (workerArtifacts.ok) outcome = "removed";
-		return { foreground, journal, workerArtifacts, complete: journal.ok && workerArtifacts.ok };
-	} finally {
-		settleSessionBundleDeletion(options.agentDir, reservation, outcome);
+		result = await (async (): Promise<ForegroundSessionBundleDeletion> => {
+			const foreground = await removePath(options.sessionPath);
+			if (!foreground.ok)
+				return {
+					foreground,
+					journal: { ok: false, method: "preserved" },
+					workerArtifacts: { ok: false, method: "preserved" },
+					complete: false,
+				};
+			const journal = await removeJournalSidecars(options.sessionPath, removePath);
+			if (!WorkerConversationStore.canDeleteReservedBundle(options.agentDir, reservation))
+				return { foreground, journal, workerArtifacts: { ok: false, method: "preserved" }, complete: false };
+			const exists = await lstat(workerArtifactsPath).then(
+				() => true,
+				(error: unknown) => {
+					if (isMissingFileError(error)) return false;
+					throw error;
+				},
+			);
+			if (!exists) {
+				outcome = "removed";
+				return { foreground, journal, workerArtifacts: { ok: true, method: "absent" }, complete: journal.ok };
+			}
+			const workerArtifacts = await removePath(workerArtifactsPath);
+			if (workerArtifacts.ok) outcome = "removed";
+			return { foreground, journal, workerArtifacts, complete: journal.ok && workerArtifacts.ok };
+		})();
+	} catch (error) {
+		failures.push(error);
 	}
+	try {
+		settleSessionBundleDeletion(options.agentDir, reservation, outcome);
+	} catch (settlementError) {
+		failures.push(settlementError);
+	}
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, "Session deletion and reservation settlement failed.");
+	return result!;
 }

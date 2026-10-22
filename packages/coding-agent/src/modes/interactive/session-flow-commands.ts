@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { EditorComponent } from "@caupulican/pi-tui";
 import { type Component, type Container, Loader, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import { sessionsDir } from "../../core/agent-paths.ts";
 import type {
 	AgentSession,
 	GoalContinuationLoopOptions,
@@ -46,7 +47,6 @@ import {
 } from "../../core/model-resolver.ts";
 import { routerPoolModelRefs } from "../../core/model-router/candidate-pool.ts";
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { listAllSessions, listSessions, openSession } from "../../core/session-manager-factory.ts";
 import type { ModelFavorite } from "../../core/settings/settings-schema.ts";
 import { parseTaskCommand } from "../../core/tasks/task-command.ts";
 import {
@@ -60,7 +60,7 @@ import {
 } from "../../core/tasks/task-state.ts";
 import { ProjectTrustStore } from "../../core/trust-manager.ts";
 import type { ThinkingLevel } from "../../kernel/index.ts";
-import type { SessionManager } from "../../kernel/node.ts";
+import { SessionManager } from "../../kernel/node.ts";
 import { keyText } from "../../presentation/keybinding-hints.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
@@ -481,13 +481,20 @@ export function showTrustSelector(host: SessionFlowHost): void {
 }
 
 export function showSessionSelector(host: SessionFlowHost): void {
+	const agentDir = host.runtimeHost.services.agentDir;
 	host.showSelector((done) => {
 		const selector = new SessionSelectorComponent(
-			(onProgress) => listSessions(host.sessionManager.getCwd(), host.sessionManager.getSessionDir(), onProgress),
+			(onProgress) =>
+				SessionManager.list(
+					host.sessionManager.getCwd(),
+					agentDir,
+					host.sessionManager.getSessionDir(),
+					onProgress,
+				),
 			(onProgress) =>
 				host.sessionManager.usesDefaultSessionDir()
-					? listAllSessions(onProgress)
-					: listAllSessions(host.sessionManager.getSessionDir(), onProgress),
+					? SessionManager.listAll(sessionsDir(agentDir), onProgress)
+					: SessionManager.listAll(sessionsDir(agentDir), host.sessionManager.getSessionDir(), onProgress),
 			async (sessionPath) => {
 				done();
 				await handleResumeSession(host, sessionPath);
@@ -500,10 +507,11 @@ export function showSessionSelector(host: SessionFlowHost): void {
 			},
 			() => host.ui.requestRender(),
 			{
+				agentDir,
 				renameSession: async (sessionFilePath: string, nextName: string | undefined) => {
 					const next = (nextName ?? "").trim();
 					if (!next) return;
-					const mgr = openSession(sessionFilePath);
+					const mgr = SessionManager.open(sessionFilePath, agentDir);
 					mgr.appendSessionInfo(next);
 				},
 				showRenameHint: true,

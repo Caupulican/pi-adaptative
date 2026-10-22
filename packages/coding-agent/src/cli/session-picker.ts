@@ -3,6 +3,7 @@
  */
 
 import { ProcessTerminal, setKeybindings, TUI } from "@caupulican/pi-tui";
+import { getAgentDir } from "../config.ts";
 import { KeybindingsManager } from "../core/keybindings.ts";
 import type { SessionInfo, SessionListProgress } from "../kernel/node.ts";
 import { SessionSelectorComponent } from "../modes/interactive/components/session-selector.ts";
@@ -42,7 +43,7 @@ export async function selectSession(
 				process.exit(0);
 			},
 			() => ui.requestRender(),
-			{ showRenameHint: false, keybindings },
+			{ agentDir: getAgentDir(), showRenameHint: false, keybindings },
 		);
 
 		ui.addChild(selector);

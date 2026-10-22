@@ -10,7 +10,6 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@caupulican/pi-tui";
-import { getAgentDir } from "../../../config.ts";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
 import { deleteForegroundSessionBundle } from "../../../core/session-artifact-bundle.ts";
 import type { SessionInfo, SessionListProgress } from "../../../kernel/node.ts";
@@ -700,7 +699,8 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		onCancel: () => void,
 		onExit: () => void,
 		requestRender: () => void,
-		options?: {
+		options: {
+			agentDir: string;
 			renameSession?: (sessionPath: string, currentName: string | undefined) => Promise<void>;
 			showRenameHint?: boolean;
 			keybindings?: KeybindingsManager;
@@ -788,41 +788,60 @@ export class SessionSelectorComponent extends Container implements Focusable {
 				this.requestRender();
 				return;
 			}
-			const result = await deleteForegroundSessionBundle({
-				agentDir: getAgentDir(),
-				parentSessionId: selected.id,
-				sessionPath,
-			});
+			try {
+				const result = await deleteForegroundSessionBundle({
+					agentDir: options.agentDir,
+					parentSessionId: selected.id,
+					sessionPath,
+				});
 
-			if (result.foreground.ok) {
-				if (this.currentSessions) {
-					this.currentSessions = this.currentSessions.filter((s) => s.path !== sessionPath);
-				}
-				if (this.allSessions) {
-					this.allSessions = this.allSessions.filter((s) => s.path !== sessionPath);
-				}
+				if (result.foreground.ok) {
+					if (this.currentSessions) {
+						this.currentSessions = this.currentSessions.filter((s) => s.path !== sessionPath);
+					}
+					if (this.allSessions) {
+						this.allSessions = this.allSessions.filter((s) => s.path !== sessionPath);
+					}
 
-				const sessions = this.scope === "all" ? (this.allSessions ?? []) : (this.currentSessions ?? []);
-				const showCwd = this.scope === "all";
-				this.sessionList.setSessions(sessions, showCwd);
+					const sessions = this.scope === "all" ? (this.allSessions ?? []) : (this.currentSessions ?? []);
+					const showCwd = this.scope === "all";
+					this.sessionList.setSessions(sessions, showCwd);
 
-				if (result.complete) {
-					const msg = result.foreground.method === "trash" ? "Session moved to trash" : "Session deleted";
-					this.header.setStatusMessage({ type: "info", message: msg }, 2000);
+					if (result.complete) {
+						const msg = result.foreground.method === "trash" ? "Session moved to trash" : "Session deleted";
+						this.header.setStatusMessage({ type: "info", message: msg }, 2000);
+					} else {
+						const remaining = [
+							["usage journals", result.journal],
+							["worker artifacts", result.workerArtifacts],
+						] as const;
+						const detail = remaining
+							.filter(([, part]) => !part.ok)
+							.map(([label, part]) => ("error" in part && part.error ? `${label} (${part.error})` : label))
+							.join(" and ");
+						this.header.setStatusMessage(
+							{
+								type: "error",
+								message: `Session removed; ${detail} remain.`,
+							},
+							5000,
+						);
+					}
+					await this.refreshSessionsAfterMutation();
 				} else {
-					const artifactError = "error" in result.workerArtifacts ? result.workerArtifacts.error : undefined;
-					this.header.setStatusMessage(
-						{
-							type: "error",
-							message: `Session removed; worker artifacts remain: ${artifactError ?? "unknown error"}`,
-						},
-						5000,
-					);
+					const errorMessage = result.foreground.error ?? "Unknown error";
+					this.header.setStatusMessage({ type: "error", message: `Failed to delete: ${errorMessage}` }, 3000);
 				}
+			} catch (error) {
+				// A remover or settlement may fail after partial effects. Refresh actual state, never claim success.
 				await this.refreshSessionsAfterMutation();
-			} else {
-				const errorMessage = result.foreground.error ?? "Unknown error";
-				this.header.setStatusMessage({ type: "error", message: `Failed to delete: ${errorMessage}` }, 3000);
+				this.header.setStatusMessage(
+					{
+						type: "error",
+						message: `Session deletion did not finish: ${error instanceof Error ? error.message : String(error)}`,
+					},
+					5000,
+				);
 			}
 
 			this.requestRender();
