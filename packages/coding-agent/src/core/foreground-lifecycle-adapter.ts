@@ -190,24 +190,21 @@ export class ForegroundLifecycleAdapter {
 		// The rows are canonical now. A failing lifecycle effect cannot suppress another row's delivery,
 		// and the caller receives the same receipt even when one or more effects fail.
 		const steps = submitted.flatMap((item, index) => {
+			if (item.kind !== "message") return [];
 			const entryId = receipt.entries[index]!.id;
-			const noteLifecycle = () => {
-				assertCurrent();
-				if (item.kind === "message") this.lifecycle.onMessagePersisted(item.message, entryId, item.origin);
-				else this.lifecycle.notePersistedMessage(item.message, entryId);
-			};
-			return item.kind === "message"
-				? [
-						noteLifecycle,
-						() => {
-							assertCurrent();
-							this.observeMessagePersisted?.(item.message, entryId);
-						},
-					]
-				: [noteLifecycle];
+			return [
+				() => {
+					assertCurrent();
+					this.lifecycle.onMessagePersisted(item.message, entryId, item.origin);
+				},
+				() => {
+					assertCurrent();
+					this.observeMessagePersisted?.(item.message, entryId);
+				},
+			];
 		});
 		try {
-			runReleaseSteps(steps, "Session publication notifications failed.", failure);
+			runReleaseSteps([assertCurrent, ...steps], "Session publication notifications failed.", failure);
 		} catch (error) {
 			throw new SessionAppendCommittedError(receipt, error);
 		}

@@ -1,4 +1,4 @@
-import type { AssistantMessage, Message, ToolResultMessage } from "@caupulican/pi-ai";
+import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai";
 import type {
 	Agent,
 	AgentMessage,
@@ -46,8 +46,6 @@ export type ProviderRetryLifecycleEvent =
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
 const MAX_WARNING_LENGTH = 500;
 const MAX_RETRY_ERROR_MESSAGE_LENGTH = 2_000;
-
-type AppendMessage = (message: Message) => string;
 
 /**
  * The subset of `Agent` this controller actually touches: setting the provider-request/tool-call
@@ -162,11 +160,10 @@ function isAmbiguousInspection(inspection: SessionLifecycleInspection): boolean 
  */
 export class ForegroundLifecycleController {
 	private readonly deps: ForegroundLifecycleControllerDeps;
-	private readonly persistedMessages = new WeakMap<object, string>();
 	private readonly startedTools = new Map<string, StartedToolIdentity>();
 	private readonly pendingToolsByCall = new Map<string, Set<string>>();
-	private readonly completedResultMessages = new WeakSet<object>();
-	private readonly completedProviderMessages = new WeakSet<object>();
+	private completedResultMessages = new WeakSet<object>();
+	private completedProviderMessages = new WeakSet<object>();
 	private readonly terminalProviderRequests = new Set<string>();
 	/**
 	 * The requestId of the most recently snapshotted provider request, captured in
@@ -190,10 +187,6 @@ export class ForegroundLifecycleController {
 		this.deps.agent.onToolCallStart = (calls, signal) => this.onToolCallStart(calls, signal);
 	}
 
-	notePersistedMessage(message: AgentMessage, entryId: string): void {
-		this.persistedMessages.set(message, entryId);
-	}
-
 	/** Drop in-flight associations when the host swaps/reloads the active session branch. */
 	resetForSessionReload(): void {
 		const scope = this.deps.getMutationScope?.();
@@ -201,13 +194,15 @@ export class ForegroundLifecycleController {
 		for (const identity of this.startedTools.values()) retireToolCall(identity.callId, scope, announcer);
 		this.startedTools.clear();
 		this.pendingToolsByCall.clear();
+		this.completedResultMessages = new WeakSet();
+		this.completedProviderMessages = new WeakSet();
 		this.terminalProviderRequests.clear();
 		this.lastRequestId = undefined;
 		this.lastRequestModel = undefined;
 	}
 
 	getPersistedMessageEntryId(message: AgentMessage): string | undefined {
-		return this.persistedMessages.get(message);
+		return this.deps.sessionManager.getMessageEntryId(message);
 	}
 
 	/**
@@ -239,12 +234,6 @@ export class ForegroundLifecycleController {
 		signal?.throwIfAborted();
 		this.deps.observeProviderRequest?.(context);
 	}
-
-	private appendMessage: AppendMessage = (message) => {
-		const entryId = this.deps.sessionManager.appendMessage(message);
-		this.notePersistedMessage(message, entryId);
-		return entryId;
-	};
 
 	private async onToolCallPreflightRejected(
 		context: ToolCallPreflightRejectionContext,
@@ -456,7 +445,6 @@ export class ForegroundLifecycleController {
 
 	/** Called after the canonical message entry has been appended by AgentSession. */
 	onMessagePersisted(message: AgentMessage, entryId: string, origin?: AgentMessageOrigin): void {
-		this.notePersistedMessage(message, entryId);
 		if (message.role === "assistant") {
 			if (this.completedProviderMessages.has(message)) return;
 			const requestId = this.lastRequestId;
@@ -646,6 +634,6 @@ export class ForegroundLifecycleController {
 			errorKind: "tool_failure",
 			timestamp: Date.now(),
 		};
-		return this.appendMessage(message);
+		return this.deps.sessionManager.appendMessage(message);
 	}
 }

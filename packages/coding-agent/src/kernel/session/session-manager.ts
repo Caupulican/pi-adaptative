@@ -215,11 +215,14 @@ const synthesizedSessionContextMessages = new WeakSet<AgentMessage>();
  * rebuilt from its entry's fields, so unlike a message entry its object identity is not the entry's: this map is
  * the only link from the object back to its entry.
  */
-const customMessageEntryIds = new WeakMap<object, string>();
+const customMessageEntries = new WeakMap<object, CustomMessageEntry>();
 
-function retainSynthesizedSessionContextMessage<T extends AgentMessage>(message: T, customEntryId?: string): T {
+function retainSynthesizedSessionContextMessage<T extends AgentMessage>(
+	message: T,
+	customEntry?: CustomMessageEntry,
+): T {
 	synthesizedSessionContextMessages.add(message);
-	if (customEntryId !== undefined) customMessageEntryIds.set(message, customEntryId);
+	if (customEntry !== undefined) customMessageEntries.set(message, customEntry);
 	return message;
 }
 
@@ -228,8 +231,8 @@ function cloneSessionContext(context: SessionContext): SessionContext {
 		messages: context.messages.map((message) => {
 			if (!synthesizedSessionContextMessages.has(message)) return message;
 			const copy = { ...message };
-			const customEntryId = customMessageEntryIds.get(message);
-			if (customEntryId !== undefined) customMessageEntryIds.set(copy, customEntryId);
+			const customEntry = customMessageEntries.get(message);
+			if (customEntry !== undefined) customMessageEntries.set(copy, customEntry);
 			return copy;
 		}),
 		thinkingLevel: context.thinkingLevel,
@@ -841,7 +844,7 @@ function sessionContextMessage(entry: SessionEntry): AgentMessage | undefined {
 	if (entry.type === "custom_message") {
 		return retainSynthesizedSessionContextMessage(
 			createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
-			entry.id,
+			entry,
 		);
 	}
 	if (entry.type === "branch_summary" && entry.summary) {
@@ -1727,6 +1730,7 @@ export class SessionManager {
 		this.fileEntries = [header];
 		this.entries = [];
 		this.byId.clear();
+		this.messageEntryIndex = undefined;
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
@@ -2376,11 +2380,13 @@ export class SessionManager {
 			this.messageEntryIndex = { byId: this.byId, ids };
 		}
 		const messageEntryId = this.messageEntryIndex.ids.get(message);
-		if (messageEntryId !== undefined) return messageEntryId;
-		const customEntryId = customMessageEntryIds.get(message);
-		return customEntryId !== undefined && this.byId.get(customEntryId)?.type === "custom_message"
-			? customEntryId
-			: undefined;
+		if (messageEntryId !== undefined) {
+			const entry = this.byId.get(messageEntryId);
+			if (entry?.type === "message" && entry.message === message) return messageEntryId;
+			this.messageEntryIndex.ids.delete(message);
+		}
+		const customEntry = customMessageEntries.get(message);
+		return customEntry !== undefined && this.byId.get(customEntry.id) === customEntry ? customEntry.id : undefined;
 	}
 
 	private _appendEntry(entry: SessionEntry, beforeNotify?: () => void): void {
@@ -2499,7 +2505,7 @@ export class SessionManager {
 				cached.context.messages.push(
 					retainSynthesizedSessionContextMessage(
 						createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
-						entry.id,
+						entry,
 					),
 				);
 				break;
@@ -2559,7 +2565,7 @@ export class SessionManager {
 		const assertCurrent = this._capturePersistenceContext();
 		const entries: SessionEntry[] = [];
 		const sourceMessages: object[] = [];
-		const customBindings: Array<{ message: object; id: string }> = [];
+		const customBindings: Array<{ message: object; entry: CustomMessageEntry }> = [];
 		const ids = pendingIdSpace(this.byId);
 		let parentId = this.leafId;
 		for (const item of batch) {
@@ -2598,7 +2604,7 @@ export class SessionManager {
 					parentId,
 					timestamp: new Date().toISOString(),
 				};
-				customBindings.push({ message, id });
+				customBindings.push({ message, entry });
 				sourceMessages.push(message);
 			} else {
 				throw new TypeError("Session message batch items must use kind message or custom.");
@@ -2613,7 +2619,7 @@ export class SessionManager {
 			sourceMessages,
 			onCommitted,
 			beforeNotify: () => {
-				for (const { message, id } of customBindings) customMessageEntryIds.set(message, id);
+				for (const { message, entry } of customBindings) customMessageEntries.set(message, entry);
 			},
 		});
 		return entries.map((entry) => entry.id);
@@ -3090,7 +3096,7 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 		};
 		this._appendEntry(entry, () => {
-			if (source !== undefined) customMessageEntryIds.set(source, entry.id);
+			if (source !== undefined) customMessageEntries.set(source, entry);
 		});
 		return entry.id;
 	}
