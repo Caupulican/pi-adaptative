@@ -68,10 +68,10 @@ export async function runJourney1(): Promise<void> {
 				/^A queued message was not delivered because the session context changed before it was admitted\. It is kept in full in the pending queue; restore it to the editor to send it again: Queued owner input while the summary is held\.$/,
 				// The promoted directive the restart interrupts while its own turn is prepared returns to the queue held (R7): exact text.
 				/^A queued message was not delivered because its turn ended before it could be delivered\. It is kept in full in the pending queue; restore it to the editor to send it again: Owner directive promoted before the cut: skip the full test suite\.$/,
-				// ICM continuous-chat fail-closed admission checks (missing summaryModel, missing egress opt-in, and missing xhigh thinking).
-				/^Memory subsystem init failed: The ICM chat needs a cheap model for its compactions, and contextPolicy\.memory\.history\.summaryModel is not set: set it to a configured model, for example "<provider>\/<model>"\. If that model is not local, also set contextPolicy\.memory\.history\.allowExternalSummaryEgress to true\.$/,
-				/^Memory subsystem init failed: The ICM chat's summary model harness-script\/worker-c is not local, and external summary egress is not allowed: set contextPolicy\.memory\.history\.allowExternalSummaryEgress to true to allow it\.$/,
-				/^Memory subsystem init failed: The ICM chat's summary model harness-script\/worker-b does not support xhigh thinking, which its compactions require: set contextPolicy\.memory\.history\.summaryModel to a reasoning model that supports xhigh, for example "<provider>\/<model>"\.$/,
+				// ICM summary-settings refusals (missing summaryModel, missing egress opt-in, and missing xhigh thinking): one warning each, the chat keeps running.
+				/^The ICM chat needs a cheap model for its compactions, and contextPolicy\.memory\.history\.summaryModel is not set: set it to a configured model, for example "<provider>\/<model>"\. If that model is not local, also set contextPolicy\.memory\.history\.allowExternalSummaryEgress to true\.$/,
+				/^The ICM chat's summary model harness-script\/worker-c is not local, and external summary egress is not allowed: set contextPolicy\.memory\.history\.allowExternalSummaryEgress to true to allow it\.$/,
+				/^The ICM chat's summary model harness-script\/worker-b does not support xhigh thinking, which its compactions require: set contextPolicy\.memory\.history\.summaryModel to a reasoning model that supports xhigh, for example "<provider>\/<model>"\.$/,
 				// R10s: each failed attempt of the fresh chat's leaf 1 (both requests met the scripted 503): exact text.
 				/^Continuous-chat compaction 1\+1 failed: Continuous-chat compaction stopped \(error\): HTTP 503 Service Unavailable: upstream overloaded$/,
 				// An owner that disposes with paid usage still unconfirmed keeps it in its journal. The pending form is for a file that exists

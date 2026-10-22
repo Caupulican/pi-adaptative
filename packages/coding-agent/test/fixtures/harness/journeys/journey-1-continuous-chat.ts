@@ -4,7 +4,7 @@ import { expect } from "vitest";
 import { AuthStorage } from "../../../../src/core/auth-storage.ts";
 import { CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES } from "../../../../src/core/memory/continuous-chat-index.ts";
 import { CONTINUOUS_CHAT_SYSTEM_PROMPT } from "../../../../src/core/memory/continuous-chat-prompt.ts";
-import { fail, type ScriptedRequest, type ScriptStep } from "../scripted-provider.ts";
+import { fail, type ScriptedRequest, type ScriptStep, text } from "../scripted-provider.ts";
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 
 /**
@@ -25,105 +25,102 @@ import {
 
 export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
-	// ICM continuous chat (Pi-adaptative-memory): fail-closed summaryModel validation, append-only daily logs + 16-byte index,
+	// ICM continuous chat (Pi-adaptative-memory): summaryModel refusal that warns without stopping the chat, append-only daily logs + 16-byte index,
 	// exact <=512 B leaf vs >512 B model compaction + size-retry loop, 30,000-char tool clipping vs assistant splitting,
 	// stable system prompt + <chat> view + Current time injection, and root zoom / date navigation.
 	const icmAgentDir = `${world.agentDir}-icm`;
 	const icmStore = icmContinuousStore(icmAgentDir);
 	world.setModelReasoning("worker-c", true, { xhigh: "xhigh" });
 
-	// I1 (fail-closed validation): missing summaryModel, disallowed external summary egress, and non-xhigh summaryModel each
-	// emit a session warning, leave continuous-chat storage untouched, and block provider turns via createBlockedContinuousChatPlanWrapper.
+	// I1 (summary-model refusal): a missing summaryModel, a disallowed external summary egress, and a non-xhigh summaryModel each warn
+	// once and never stop the chat: the root turn is served, the message is logged, and the model-generated node it needs stays
+	// pending without one summary request, because every summary attempt rechecks the settings before it sends anything.
 	{
-		const missingModel = await world.createRootSession("root", {
-			agentDir: `${icmAgentDir}-fail-missing`,
-			settings: { memorySystem: "icm" },
-		});
-		await withDeadline(
-			trace,
-			"missing summaryModel blocked turn",
-			missingModel.session.prompt("Attempt turn without summaryModel."),
+		const refusedSummaryCase = async (
+			label: string,
+			caseAgentDir: string,
+			settings: NonNullable<Parameters<typeof world.createRootSession>[1]>["settings"],
+			warning: string,
+		): Promise<void> => {
+			const warningMark = world.warnings.length;
+			const requestMark = world.provider.requests.length;
+			const caseStore = icmContinuousStore(caseAgentDir);
+			const created = await world.createRootSession("root", { agentDir: caseAgentDir, settings });
+			world.provider.enqueue("root", text(`${label}-reply`, "Acknowledged."));
+			// Turn without a tool: its owner words are settled by a later submission, so this phase scripts no judgment.
+			world.systemOne.enterPhase(label, {});
+			// A message over 512 B cannot be an exact leaf: it needs a model-generated node.
+			await withDeadline(
+				trace,
+				`${label} turn`,
+				created.session.prompt(`Summarize this request. ${"z".repeat(600)}`),
+			);
+			const last = created.session.messages.at(-1);
+			expect(
+				last?.role === "assistant"
+					? { stopReason: last.stopReason, text: JSON.stringify(last.content) }
+					: undefined,
+				`${label}: the refused summary settings do not stop the root turn`,
+			).toEqual({ stopReason: "stop", text: JSON.stringify([{ type: "text", text: "Acknowledged." }]) });
+			await withDeadline(
+				trace,
+				`${label} message logged`,
+				world.io.waitForMutation(() => {
+					const rootRaw = world.io.peekFile(caseStore.rootFile);
+					const queue = icmReadScheduler(world, caseStore);
+					return (
+						rootRaw !== undefined &&
+						queue !== undefined &&
+						(JSON.parse(rootRaw) as { readonly nextId: number }).nextId >= 2 &&
+						queue.totalMessages === (JSON.parse(rootRaw) as { readonly nextId: number }).nextId
+					);
+				}),
+				60_000,
+			);
+			const queue = icmReadScheduler(world, caseStore);
+			expect(
+				queue !== undefined && queue.running === 0 && queue.readyLeaves + queue.blocked >= 1,
+				`${label}: the model-generated node stays pending`,
+			).toBe(true);
+			expect(
+				world.provider.requests.slice(requestMark).filter((request) => request.model.id !== "root"),
+				`${label}: no summary request is sent while the settings are refused`,
+			).toEqual([]);
+			expect(
+				world.warnings.slice(warningMark).filter((message) => message === warning),
+				`${label}: the refusal is reported once`,
+			).toEqual([warning]);
+			expect(await world.disposeSessionInBody(created.session)).toBeUndefined();
+		};
+		await refusedSummaryCase(
+			"icm-missing-summary-model",
+			`${icmAgentDir}-fail-missing`,
+			{ memorySystem: "icm" },
+			'The ICM chat needs a cheap model for its compactions, and contextPolicy.memory.history.summaryModel is not set: set it to a configured model, for example "<provider>/<model>". If that model is not local, also set contextPolicy.memory.history.allowExternalSummaryEgress to true.',
 		);
-		const missingLast = missingModel.session.messages.at(-1);
-		expect(
-			missingLast?.role === "assistant"
-				? { stopReason: missingLast.stopReason, error: missingLast.errorMessage }
-				: undefined,
-			"missing summaryModel blocks ICM provider requests fail-closed",
-		).toEqual({
-			stopReason: "error",
-			error: expect.stringContaining(
-				"ICM project chat is unavailable: The ICM chat needs a cheap model for its compactions, and contextPolicy.memory.history.summaryModel is not set",
-			),
-		});
-		expect(await world.disposeSessionInBody(missingModel.session)).toBeUndefined();
-
-		const missingEgress = await world.createRootSession("root", {
-			agentDir: `${icmAgentDir}-fail-egress`,
-			settings: {
+		await refusedSummaryCase(
+			"icm-summary-egress-denied",
+			`${icmAgentDir}-fail-egress`,
+			{
 				memorySystem: "icm",
 				contextPolicy: {
-					memory: {
-						history: {
-							summaryModel: "harness-script/worker-c",
-							allowExternalSummaryEgress: false,
-						},
-					},
+					memory: { history: { summaryModel: "harness-script/worker-c", allowExternalSummaryEgress: false } },
 				},
 			},
-		});
-		await withDeadline(
-			trace,
-			"missing egress blocked turn",
-			missingEgress.session.prompt("Attempt turn without summary egress."),
+			"The ICM chat's summary model harness-script/worker-c is not local, and external summary egress is not allowed: set contextPolicy.memory.history.allowExternalSummaryEgress to true to allow it.",
 		);
-		const egressLast = missingEgress.session.messages.at(-1);
-		expect(
-			egressLast?.role === "assistant"
-				? { stopReason: egressLast.stopReason, error: egressLast.errorMessage }
-				: undefined,
-			"remote summaryModel without allowExternalSummaryEgress blocks ICM provider requests",
-		).toEqual({
-			stopReason: "error",
-			error: expect.stringContaining(
-				"ICM project chat is unavailable: The ICM chat's summary model harness-script/worker-c is not local, and external summary egress is not allowed",
-			),
-		});
-		expect(await world.disposeSessionInBody(missingEgress.session)).toBeUndefined();
-
-		const noXhigh = await world.createRootSession("root", {
-			agentDir: `${icmAgentDir}-fail-xhigh`,
-			settings: {
+		await refusedSummaryCase(
+			"icm-summary-model-not-xhigh",
+			`${icmAgentDir}-fail-xhigh`,
+			{
 				memorySystem: "icm",
 				contextPolicy: {
-					memory: {
-						history: {
-							summaryModel: "harness-script/worker-b",
-							allowExternalSummaryEgress: true,
-						},
-					},
+					memory: { history: { summaryModel: "harness-script/worker-b", allowExternalSummaryEgress: true } },
 				},
 			},
-		});
-		await withDeadline(
-			trace,
-			"non-xhigh summaryModel blocked turn",
-			noXhigh.session.prompt("Attempt turn with non-xhigh summaryModel."),
+			'The ICM chat\'s summary model harness-script/worker-b does not support xhigh thinking, which its compactions require: set contextPolicy.memory.history.summaryModel to a reasoning model that supports xhigh, for example "<provider>/<model>".',
 		);
-		const xhighLast = noXhigh.session.messages.at(-1);
-		expect(
-			xhighLast?.role === "assistant"
-				? { stopReason: xhighLast.stopReason, error: xhighLast.errorMessage }
-				: undefined,
-			"summaryModel without xhigh thinking blocks ICM provider requests",
-		).toEqual({
-			stopReason: "error",
-			error: expect.stringContaining(
-				"ICM project chat is unavailable: The ICM chat's summary model harness-script/worker-b does not support xhigh thinking",
-			),
-		});
-		expect(await world.disposeSessionInBody(noXhigh.session)).toBeUndefined();
-		trace.mark("root", "icm.fail-closed");
+		trace.mark("root", "icm.summary-refusal");
 	}
 
 	// I2 (continuous chat storage, leaf threshold, model compaction + size retry, and 30,000-char bounds):
