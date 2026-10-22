@@ -4013,7 +4013,7 @@ export const SDK_CONSTRUCTION_FAILURE_EXPECTED: SdkConstructionFailureWitness = 
 						message: "failure-record refusal",
 						errors: ["original run failure", "failure-record refusal", "failed-end refusal"],
 					},
-					"scripted IO fault bash-second-append-refused (EIO)",
+					"Session write outcome is unknown; reconcile the original session history before retrying these messages.",
 				],
 			},
 			firstEnds: 1,
