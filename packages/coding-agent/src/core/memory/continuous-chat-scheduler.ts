@@ -99,7 +99,7 @@ export class ContinuousChatScheduler {
 			throw new ContinuousChatCorruptError(path, "Committed scheduler database is missing");
 		return constructSqliteDatabase({ databasePath: path }, (db) => {
 			db.exec(
-				"PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA mmap_size=0; PRAGMA temp_store=FILE;",
+				"PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;",
 			);
 			const version = db.prepare("PRAGMA user_version").get()?.user_version;
 			if ((!create && version !== 1) || (create && version !== 0 && version !== 1))
