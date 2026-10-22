@@ -1209,8 +1209,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 														cwd: options.cwd,
 													});
 												signal.throwIfAborted();
-												requireRequest(requestId);
+												const request = requireRequest(requestId);
 												const receipt = commandReceiptFor({
+													requestId: request.requestId,
 													toolCallId: toolCall.id,
 													toolName: toolCall.name,
 													args,

@@ -298,6 +298,13 @@ function optionalWorkerClaimInteger(value: unknown, label: string): number | und
 	return value;
 }
 
+function optionalCommandDigest(value: unknown, label: string): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value))
+		invalidWorkerClaim(`${label} must be a SHA-256 digest.`);
+	return value;
+}
+
 function normalizeCommandReceipts(value: unknown): WorkerCommandReceipt[] {
 	return workerClaimRecordArray(value, "claim.commandReceipts", MAX_WORKER_CLAIM_COMMAND_RECEIPTS).map(
 		(entry, index) => {
@@ -305,6 +312,7 @@ function normalizeCommandReceipts(value: unknown): WorkerCommandReceipt[] {
 			if (typeof entry.isError !== "boolean") invalidWorkerClaim(`${label}.isError must be boolean.`);
 			const exitCode = optionalWorkerClaimInteger(entry.exitCode, `${label}.exitCode`);
 			const durationMs = optionalWorkerClaimInteger(entry.durationMs, `${label}.durationMs`);
+			const commandDigest = optionalCommandDigest(entry.commandDigest, `${label}.commandDigest`);
 			const outputRef = optionalWorkerClaimString(
 				entry.outputRef,
 				`${label}.outputRef`,
@@ -314,6 +322,7 @@ function normalizeCommandReceipts(value: unknown): WorkerCommandReceipt[] {
 				id: requiredWorkerClaimString(entry.id, `${label}.id`, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS),
 				tool: requiredWorkerClaimString(entry.tool, `${label}.tool`, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS),
 				command: requiredWorkerClaimString(entry.command, `${label}.command`, MAX_WORKER_CLAIM_COMMAND_CHARS),
+				...(commandDigest ? { commandDigest } : {}),
 				isError: entry.isError,
 				...(exitCode !== undefined ? { exitCode } : {}),
 				...(durationMs !== undefined ? { durationMs } : {}),
@@ -356,8 +365,10 @@ function normalizeSubmittedReport(value: unknown): WorkerSubmittedReport {
 					MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS,
 				);
 				const note = optionalWorkerClaimString(entry.note, `${label}.note`, MAX_WORKER_REPORT_TEXT_CHARS);
+				const commandDigest = optionalCommandDigest(entry.commandDigest, `${label}.commandDigest`);
 				return {
 					command: requiredWorkerClaimString(entry.command, `${label}.command`, MAX_WORKER_CLAIM_COMMAND_CHARS),
+					...(commandDigest ? { commandDigest } : {}),
 					...(receiptId !== undefined ? { receiptId } : {}),
 					result: entry.result,
 					...(note !== undefined ? { note } : {}),

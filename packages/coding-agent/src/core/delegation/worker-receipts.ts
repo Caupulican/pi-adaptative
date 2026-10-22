@@ -4,6 +4,7 @@
  * report says about a command against what the receipt holds (exit code, error state).
  */
 
+import { createHash } from "node:crypto";
 import type { WorkerCommandReceipt } from "../autonomy/contracts.ts";
 import { containsCredential } from "../system-one/projector.ts";
 import { boundedText } from "../util/bounded-line.ts";
@@ -20,8 +21,37 @@ function commandOf(toolName: string, args: unknown): string | undefined {
 	if (toolName === "bash") return typeof record.command === "string" ? record.command : undefined;
 	if (toolName === "python") return typeof record.code === "string" ? record.code : undefined;
 	if (typeof record.executable !== "string") return undefined;
-	const rest = Array.isArray(record.args) ? record.args.filter((arg): arg is string => typeof arg === "string") : [];
-	return [record.executable, ...rest].join(" ").trim();
+	if (record.args !== undefined && (!Array.isArray(record.args) || record.args.some((arg) => typeof arg !== "string")))
+		return undefined;
+	return JSON.stringify({ executable: record.executable, args: record.args ?? [] });
+}
+
+/** Preserve command semantics in proof; only its presentation collapses whitespace and truncates. */
+export function workerCommandEvidence(command: string): Pick<WorkerCommandReceipt, "command" | "commandDigest"> {
+	let containsSecret = containsCredential(command);
+	if (!containsSecret) {
+		// JSON escaping must not hide credentials in run_process argument values.
+		let decoded: unknown;
+		try {
+			decoded = JSON.parse(command);
+		} catch {
+			// Shell commands and Python code are not required to be JSON.
+		}
+		if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
+			const processCommand = decoded as Record<string, unknown>;
+			if (
+				typeof processCommand.executable === "string" &&
+				Array.isArray(processCommand.args) &&
+				processCommand.args.every((arg): arg is string => typeof arg === "string")
+			)
+				containsSecret = containsCredential([processCommand.executable, ...processCommand.args].join(" "));
+		}
+	}
+	if (containsSecret) return { command: REDACTED_COMMAND };
+	return {
+		command: boundedText(command.replace(/\s+/g, " ").trim(), MAX_WORKER_CLAIM_COMMAND_CHARS),
+		commandDigest: createHash("sha256").update(command).digest("hex"),
+	};
 }
 
 /** The shell tool's own status line for a command that ran and exited non-zero. */
@@ -61,6 +91,7 @@ function detailNumber(details: unknown, key: string): number | undefined {
  * The command is bounded and withheld entirely when it carries a credential.
  */
 export function commandReceiptFor(input: {
+	requestId: string;
 	toolCallId: string;
 	toolName: string;
 	args: unknown;
@@ -73,11 +104,12 @@ export function commandReceiptFor(input: {
 	const exitCode = exitCodeOf(input.result);
 	const durationMs = detailNumber(input.result.details, "durationMs");
 	const outputRef = detailString(input.result.details, "fullOutputPath");
-	const flat = command.replace(/\s+/g, " ").trim();
 	return {
-		id: input.toolCallId,
+		id: `command-${createHash("sha256")
+			.update(JSON.stringify([input.requestId, input.toolCallId]))
+			.digest("hex")}`,
 		tool: input.toolName,
-		command: containsCredential(flat) ? REDACTED_COMMAND : boundedText(flat, MAX_WORKER_CLAIM_COMMAND_CHARS),
+		...workerCommandEvidence(command),
 		isError: input.isError,
 		...(exitCode !== undefined ? { exitCode } : {}),
 		...(durationMs !== undefined ? { durationMs } : {}),

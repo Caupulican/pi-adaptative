@@ -648,6 +648,7 @@ export class WorkerRecoveryCoordinator {
 					submittedReport = submittedReportFromArguments(call.arguments);
 				}
 				const receipt = commandReceiptFor({
+					requestId: invocation.requestId,
 					toolCallId: message.toolCallId,
 					toolName: call.name,
 					args: call.arguments,

@@ -14,12 +14,14 @@
  * through normal worker validation. The root still owns lifecycle and independent verification.
  */
 
+import { createHash } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import { type Static, Type } from "typebox";
 import type { AgentTool } from "../../kernel/index.ts";
 import type {
 	WorkerCommandReceipt,
 	WorkerHostVerdict,
+	WorkerReportCheck,
 	WorkerReportRequirementStatus,
 	WorkerSubmittedReport,
 } from "../autonomy/contracts.ts";
@@ -28,7 +30,6 @@ import {
 	MAX_WORKER_CLAIM_BLOCKER_CHARS,
 	MAX_WORKER_CLAIM_BLOCKERS,
 	MAX_WORKER_CLAIM_CHANGED_FILE_CHARS,
-	MAX_WORKER_CLAIM_COMMAND_CHARS,
 	MAX_WORKER_CLAIM_REASON_CODE_CHARS,
 	MAX_WORKER_CLAIM_REASON_CODES,
 	MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS,
@@ -36,6 +37,7 @@ import {
 	MAX_WORKER_REPORT_REFS,
 	MAX_WORKER_REPORT_TEXT_CHARS,
 } from "./worker-claim.ts";
+import { workerCommandEvidence } from "./worker-receipts.ts";
 
 export const SUBMIT_REPORT_TOOL_NAME = "submit_report";
 
@@ -64,7 +66,7 @@ export const submitReportParameters = Type.Object({
 				evidence: Type.Optional(
 					Type.Array(Type.String(), {
 						description:
-							"What shows it: receipt names (c1, c2) of commands you ran, changed file paths, or finding ids.",
+							"What shows it: stable receipt names (c-...) of commands you ran, changed file paths, or finding ids.",
 					}),
 				),
 				note: Type.Optional(Type.String()),
@@ -75,9 +77,11 @@ export const submitReportParameters = Type.Object({
 	checks: Type.Optional(
 		Type.Array(
 			Type.Object({
-				command: Type.String(),
+				command: Type.String({
+					description: "Exact command or code, preserving whitespace; for run_process use executable/args JSON.",
+				}),
 				receiptId: Type.Optional(
-					Type.String({ description: "The host receipt name (c1, c2, ...) or id of that command." }),
+					Type.String({ description: "The stable host receipt name (c-...) or id of that command." }),
 				),
 				result: Type.Union([Type.Literal("passed"), Type.Literal("failed"), Type.Literal("not_run")]),
 				note: Type.Optional(Type.String()),
@@ -193,13 +197,13 @@ export function submittedReportFromArguments(args: SubmitReportArguments): Submi
 				];
 			}),
 			checks: (args.checks ?? []).slice(0, MAX_WORKER_REPORT_ENTRIES).flatMap((check) => {
-				const command = boundedText(check.command.trim(), MAX_WORKER_CLAIM_COMMAND_CHARS);
-				if (!command) return [];
+				if (!check.command.trim()) return [];
+				const command = workerCommandEvidence(check.command);
 				const receiptId = check.receiptId?.trim();
 				const note = text(check.note);
 				return [
 					{
-						command,
+						...command,
 						...(receiptId ? { receiptId: receiptId.slice(0, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS) } : {}),
 						result: check.result,
 						...(note ? { note } : {}),
@@ -251,25 +255,46 @@ export function reportWorthRequesting(input: {
 	return input.context.requirementIds.length > 0 || input.receipts.length > 0 || input.changedFiles.length > 0;
 }
 
-/** The short name a report may use for the n-th receipt (call ids are long); the host accepts either. */
-export function receiptAlias(index: number): string {
-	return `c${index + 1}`;
+/** A short, stable receipt name that does not change when bounded history evicts older commands. */
+export function receiptAlias(receipt: WorkerCommandReceipt): string {
+	return `c-${createHash("sha256").update(receipt.id).digest("hex").slice(0, 12)}`;
 }
 
 /** Receipts by id and by alias, for resolving what a report cites. */
-function receiptIndex(receipts: readonly WorkerCommandReceipt[]): Map<string, WorkerCommandReceipt> {
-	const index = new Map<string, WorkerCommandReceipt>();
-	receipts.forEach((receipt, position) => {
-		index.set(receipt.id, receipt);
-		index.set(receiptAlias(position), receipt);
-	});
+function receiptIndex(receipts: readonly WorkerCommandReceipt[]): Map<string, WorkerCommandReceipt | undefined> {
+	const index = new Map<string, WorkerCommandReceipt | undefined>();
+	for (const receipt of receipts) {
+		for (const ref of [receipt.id, receiptAlias(receipt)]) {
+			if (index.has(ref) && index.get(ref) !== receipt) index.set(ref, undefined);
+			else index.set(ref, receipt);
+		}
+	}
 	return index;
 }
 
-function receiptLine(receipt: WorkerCommandReceipt, position: number): string {
-	const outcome =
-		receipt.exitCode !== undefined ? `exit ${receipt.exitCode}` : receipt.isError ? "error" : "completed";
-	return `- ${receiptAlias(position)} ${receipt.tool}: ${quotedSpan(receipt.command)} -> ${outcome}`;
+type CheckEvidence =
+	| { kind: "missing" | "ambiguous" | "unavailable" | "mismatch" | "incomplete" }
+	| { kind: "resolved"; receipt: WorkerCommandReceipt; outcome: "passed" | "failed" };
+
+function resolveCheckEvidence(
+	check: WorkerReportCheck,
+	receipts: ReadonlyMap<string, WorkerCommandReceipt | undefined>,
+): CheckEvidence {
+	if (!check.receiptId || !receipts.has(check.receiptId)) return { kind: "missing" };
+	const receipt = receipts.get(check.receiptId);
+	if (!receipt) return { kind: "ambiguous" };
+	if (!receipt.commandDigest || !check.commandDigest) return { kind: "unavailable" };
+	if (receipt.commandDigest !== check.commandDigest) return { kind: "mismatch" };
+	if (receipt.isError || (receipt.exitCode !== undefined && receipt.exitCode !== 0))
+		return { kind: "resolved", receipt, outcome: "failed" };
+	if (receipt.exitCode === 0) return { kind: "resolved", receipt, outcome: "passed" };
+	return { kind: "incomplete" };
+}
+
+function receiptLine(receipt: WorkerCommandReceipt): string {
+	const exit = receipt.exitCode !== undefined ? `exit ${receipt.exitCode}` : "exit outcome unavailable";
+	const outcome = receipt.isError ? `error, ${exit}` : exit;
+	return `- ${receiptAlias(receipt)} ${receipt.tool}: ${quotedSpan(receipt.command)} -> ${outcome}`;
 }
 
 /** The request the worker receives when it declares itself done: what to report and how to prove it. */
@@ -293,12 +318,10 @@ export function buildReportRequest(input: {
 		);
 	}
 	if (receipts.length > 0) {
-		lines.push("Commands the host recorded; cite the receipt name (c1, c2, ...) for each check:");
 		lines.push(
-			...receipts
-				.slice(-24)
-				.map((receipt, offset) => receiptLine(receipt, receipts.length - Math.min(receipts.length, 24) + offset)),
+			"Commands the host recorded; cite the stable receipt name (c-...) for each check. Display snippets may be shortened; checks.command must repeat the exact tool input, preserving whitespace (run_process: executable/args JSON):",
 		);
+		lines.push(...receipts.slice(-24).map(receiptLine));
 	}
 	if (changedFiles.length > 0) {
 		lines.push(
@@ -316,6 +339,10 @@ const ACTIONABLE_REASON_CODES: ReadonlySet<string> = new Set([
 	"check_without_receipt",
 	"check_unknown_receipt",
 	"check_contradicted_by_receipt",
+	"check_ambiguous_receipt",
+	"check_command_unavailable",
+	"check_command_mismatch",
+	"check_incomplete_receipt",
 	"change_not_recorded",
 	"unreported_changes",
 	"requirement_missing",
@@ -392,19 +419,33 @@ export function judgeSubmittedReport(input: {
 	const reasons: string[] = [];
 
 	for (const check of submitted.report.checks) {
-		const receipt = check.receiptId ? receipts.get(check.receiptId) : undefined;
-		if (check.result !== "passed") continue;
+		if (check.result === "not_run") continue;
+		const evidence = resolveCheckEvidence(check, receipts);
 		if (!check.receiptId) {
-			missing.push(`check ${quotedSpan(check.command)} is reported passed with no receipt id`);
+			missing.push(`check ${quotedSpan(check.command)} is reported ${check.result} with no receipt id`);
 			reasons.push("check_without_receipt");
-		} else if (!receipt) {
+		} else if (evidence.kind === "missing") {
 			missing.push(
 				`check ${quotedSpan(check.command)} cites receipt ${check.receiptId}, which the host has no record of`,
 			);
 			reasons.push("check_unknown_receipt");
-		} else if (receipt.isError || (receipt.exitCode !== undefined && receipt.exitCode !== 0)) {
+		} else if (evidence.kind === "ambiguous") {
+			missing.push(`check ${quotedSpan(check.command)} cites ambiguous receipt ${check.receiptId}`);
+			reasons.push("check_ambiguous_receipt");
+		} else if (evidence.kind === "unavailable") {
+			missing.push(`check ${quotedSpan(check.command)} lacks exact command identity evidence`);
+			reasons.push("check_command_unavailable");
+		} else if (evidence.kind === "mismatch") {
 			contradicted.push(
-				`check ${quotedSpan(check.command)} is reported passed but receipt ${receipt.id} shows ${receipt.exitCode !== undefined ? `exit ${receipt.exitCode}` : "an error"}`,
+				`check ${quotedSpan(check.command)} does not match the command in receipt ${check.receiptId}`,
+			);
+			reasons.push("check_command_mismatch");
+		} else if (evidence.kind === "incomplete") {
+			missing.push(`check ${quotedSpan(check.command)} has no explicit exit outcome in receipt ${check.receiptId}`);
+			reasons.push("check_incomplete_receipt");
+		} else if (evidence.kind === "resolved" && evidence.outcome !== check.result) {
+			contradicted.push(
+				`check ${quotedSpan(check.command)} is reported ${check.result} but receipt ${evidence.receipt.id} shows ${evidence.outcome}`,
 			);
 			reasons.push("check_contradicted_by_receipt");
 		}
@@ -424,7 +465,7 @@ export function judgeSubmittedReport(input: {
 		}
 	}
 
-	const evidenceKnown = (ref: string) => receipts.has(ref) || changed.has(spelled(ref));
+	const evidenceKnown = (ref: string) => receipts.get(ref) !== undefined || changed.has(spelled(ref));
 	const entries = new Map(submitted.report.requirements.map((entry) => [entry.id, entry]));
 	const covered: string[] = [];
 	for (const id of context.requirementIds) {
@@ -478,10 +519,13 @@ export function hostVerifiedChecks(claim: {
 	const receipts = receiptIndex(claim.commandReceipts);
 	let passed = 0;
 	let failed = 0;
+	const counted = new Set<string>();
 	for (const check of claim.report.checks) {
-		const receipt = check.receiptId ? receipts.get(check.receiptId) : undefined;
-		if (!receipt) continue;
-		if (receipt.isError || (receipt.exitCode !== undefined && receipt.exitCode !== 0)) failed += 1;
+		if (check.result === "not_run") continue;
+		const evidence = resolveCheckEvidence(check, receipts);
+		if (evidence.kind !== "resolved" || counted.has(evidence.receipt.id)) continue;
+		counted.add(evidence.receipt.id);
+		if (evidence.outcome === "failed") failed += 1;
 		else passed += 1;
 	}
 	return passed + failed > 0 ? { passed, failed } : undefined;

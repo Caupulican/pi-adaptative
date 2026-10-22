@@ -149,11 +149,13 @@ export type WorkerClaimOutputFormat = "structured" | "plain_text" | "report" | "
 
 /** A command a worker ran, as the host recorded it: what the worker later claims about it is checked against this. */
 export interface WorkerCommandReceipt {
-	/** The tool call id; a report cites it as the evidence for a check. */
+	/** Host identity scoped to one provider request and tool call. */
 	readonly id: string;
 	readonly tool: string;
 	/** The command's head, bounded and never carrying a credential. */
 	readonly command: string;
+	/** SHA-256 of the exact command representation, absent for redacted or historical evidence. */
+	readonly commandDigest?: string;
 	readonly isError: boolean;
 	/** Absent when the tool reported none (killed, or a tool that does not run a process). */
 	readonly exitCode?: number;
@@ -175,6 +177,8 @@ export interface WorkerReportRequirement {
 
 export interface WorkerReportCheck {
 	readonly command: string;
+	/** Host-derived from the submitted command before display truncation. */
+	readonly commandDigest?: string;
 	readonly receiptId?: string;
 	readonly result: "passed" | "failed" | "not_run";
 	readonly note?: string;
