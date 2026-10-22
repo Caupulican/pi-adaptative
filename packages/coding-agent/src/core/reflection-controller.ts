@@ -7,6 +7,7 @@
  * durable effect goes through the bundled memory tool, the session log (via deps), or the skills dir.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -51,7 +52,6 @@ import {
 } from "./learning/durable-learning-state.ts";
 import {
 	APPLY_WRITE_REFUSED_REASON_CODE,
-	appendLearningAuditSnapshot,
 	contradictionsForReflectionWrite,
 	createLearningAuditId,
 	getLearningAuditSnapshots,
@@ -62,6 +62,7 @@ import {
 } from "./learning/learning-audit.ts";
 import { type DurableChangeLayer, evaluateLearningDecision } from "./learning/learning-gate.ts";
 import { LearningRollbackController, type PreparedLearningRollback } from "./learning/learning-rollback-controller.ts";
+import { type LearningApplicationGuard, LearningWriteJournal } from "./learning/learning-write-journal.ts";
 import { type EvidenceReceipt, ObservationStore, observationKey } from "./learning/observation-store.ts";
 import {
 	type DemandSignals,
@@ -148,7 +149,7 @@ export interface ReflectionControllerDeps {
 	getSettingsManager(): ReflectionControllerSettingsSource;
 	/** Session log — audit snapshots and learning-audit reads go through this. */
 	getSessionManager(): SessionManager;
-	/** Monotone branch generation detects navigation away and back during an awaited inverse. */
+	/** Monotone branch generation fences forward writes and inverses across navigation away and back. */
 	getContextGeneration?(): number;
 	/** Agent dir — reflection-promoted skills are written under `<agentDir>/skills/`. */
 	getAgentDir(): string;
@@ -541,10 +542,15 @@ export class ReflectionController {
 	 */
 	private readonly ownerInputOriginals = new WeakMap<AgentMessage, string>();
 	private readonly rollbacks: LearningRollbackController;
-	private _internalExplicitAdmission = false;
+	private readonly writes: LearningWriteJournal;
+	private readonly applicationContext = new AsyncLocalStorage<{
+		guard?: LearningApplicationGuard;
+		explicit: boolean;
+	}>();
 
 	constructor(deps: ReflectionControllerDeps) {
 		this.deps = deps;
+		this.writes = new LearningWriteJournal(deps);
 		this.rollbacks = new LearningRollbackController({
 			getSessionManager: deps.getSessionManager,
 			getContextGeneration: deps.getContextGeneration,
@@ -626,6 +632,13 @@ export class ReflectionController {
 		this.cueStateCacheInitialized = false;
 		this.cueStateCache = undefined;
 		this.ownerEvidence = undefined;
+		this.writes.recover();
+	}
+
+	/** One execution authority for the whole learner batch, including its later settings/skill edits. */
+	captureLearningContext(): LearningApplicationGuard {
+		this.writes.recover();
+		return this.writes.capture();
 	}
 
 	private persistCurrentTurnCueState(state: CurrentTurnReflectionCueState): void {
@@ -637,7 +650,11 @@ export class ReflectionController {
 	private warnOnce(code: string, message: string): void {
 		if (this.emittedWarningCodes.has(code)) return;
 		this.emittedWarningCodes.add(code);
-		this.deps.warn?.(message);
+		try {
+			this.deps.warn?.(message);
+		} catch {
+			/* Diagnostics cannot discard an admitted effect's result. */
+		}
 	}
 
 	private dismissCurrentTurnCue(): void {
@@ -1208,6 +1225,14 @@ export class ReflectionController {
 	 * sentence means is model work and is not judged here.
 	 */
 	async admitUserPreference(request: UserPreferenceAdmissionRequest): Promise<UserPreferenceAdmissionResult> {
+		const guard = this.applicationContext.getStore()?.guard ?? this.captureLearningContext();
+		const contextFailure = guard();
+		if (contextFailure)
+			return {
+				outcome: "candidate",
+				reasonCode: contextFailure,
+				message: "The originating learning context is no longer active.",
+			};
 		if (this.isIcmMode())
 			return {
 				outcome: "candidate",
@@ -1267,7 +1292,7 @@ export class ReflectionController {
 			} else
 				notes.push(`${citation.source}: the owner's sentence carries no explicit preference or correction wording`);
 		}
-		if (request.basis === "explicit" && this._internalExplicitAdmission) {
+		if (request.basis === "explicit" && this.applicationContext.getStore()?.explicit) {
 			explicitVerified = true;
 		}
 		const basis: "explicit" | "inferred" = request.basis === "explicit" && explicitVerified ? "explicit" : "inferred";
@@ -1351,54 +1376,61 @@ export class ReflectionController {
 			.map((receipt) => receipt.at)
 			.sort()
 			.at(-1);
-		try {
-			this.deps.saveLearningDecisionSnapshot(decision);
-			this.emitLearningDecisionTelemetry(decision, "memory");
-		} catch {
-			// Telemetry and decision snapshots never block the write decision.
-		}
 		const auditSummary = `${summary} [${basis}; ${observations} source${observations === 1 ? "" : "s"}${
 			notes.length > 0 ? `; ${notes.join("; ")}` : ""
 		}`.slice(0, 600);
-		const audit = (action: "apply" | "apply_failed" | "propose", reasonCode: string, withRollback: boolean) => {
+		const auditId = createLearningAuditId();
+		const audit = (
+			action: "apply" | "apply_failed" | "propose",
+			reasonCode: string,
+			withRollback: boolean,
+		): LearningAuditRecord => ({
+			id: auditId,
+			proposalId,
+			layer: "memory",
+			action,
+			summary: auditSummary,
+			reasonCode,
+			decision,
+			rollback: withRollback
+				? request.action === "remove"
+					? {
+							kind: "memory_add",
+							previous: request.existing?.text,
+							previousTarget: "user",
+							instructions: "Re-add the removed USER.md preference line.",
+						}
+					: request.existing
+						? {
+								kind: "memory_restore",
+								target: request.text,
+								previous: request.existing.text,
+								instructions: "Replace the new USER.md preference with the line it superseded.",
+							}
+						: {
+								kind: "memory_remove",
+								target: request.text,
+								instructions: "Remove the added USER.md preference line.",
+							}
+				: undefined,
+			createdAt: new Date().toISOString(),
+		});
+		const observeDecision = (): void => {
 			try {
-				appendLearningAuditSnapshot(this.deps.getSessionManager(), {
-					id: createLearningAuditId(),
-					proposalId,
-					layer: "memory",
-					action,
-					summary: auditSummary,
-					reasonCode,
-					decision,
-					rollback: withRollback
-						? request.action === "remove"
-							? {
-									kind: "memory_add",
-									previous: request.existing?.text,
-									previousTarget: "user",
-									instructions: "Re-add the removed USER.md preference line.",
-								}
-							: request.existing
-								? {
-										kind: "memory_restore",
-										target: request.text,
-										previous: request.existing.text,
-										instructions: "Replace the new USER.md preference with the line it superseded.",
-									}
-								: {
-										kind: "memory_remove",
-										target: request.text,
-										instructions: "Remove the added USER.md preference line.",
-									}
-						: undefined,
-					createdAt: new Date().toISOString(),
-				});
+				if (!guard()) this.deps.saveLearningDecisionSnapshot(decision);
+				if (!guard()) this.emitLearningDecisionTelemetry(decision, "memory");
 			} catch {
-				this.warnOnce("user-preference-audit-failed", "A USER preference learning decision could not be audited.");
+				this.warnOnce(
+					"user-preference-observer-failed",
+					"A preference decision observer failed; its actual audit outcome was retained.",
+				);
 			}
 		};
 		if (!applied) {
-			audit("propose", decision.reasonCode, false);
+			const record = audit("propose", decision.reasonCode, false);
+			const ticket = this.writes.begin(guard, record);
+			if (ticket) this.writes.settle(ticket, record);
+			observeDecision();
 			return {
 				outcome: "candidate",
 				reasonCode: decision.reasonCode,
@@ -1407,6 +1439,13 @@ export class ReflectionController {
 				}.`,
 			};
 		}
+		const ticket = this.writes.begin(guard, audit("apply", decision.reasonCode, true));
+		if (!ticket)
+			return {
+				outcome: "candidate",
+				reasonCode: guard() ?? "learning_journal_unavailable",
+				message: "The preference was not admitted because its audit obligation could not be retained.",
+			};
 		const metadata: UserPreferenceMetadata = {
 			id,
 			scope: request.scope,
@@ -1422,8 +1461,13 @@ export class ReflectionController {
 		const commit = (report: UserPreferenceCommitReport): void => {
 			if (published) return;
 			published = true;
-			if (report.persisted) audit("apply", decision.reasonCode, true);
-			else audit("apply_failed", APPLY_WRITE_REFUSED_REASON_CODE, false);
+			this.writes.settle(
+				ticket,
+				report.persisted
+					? audit("apply", decision.reasonCode, true)
+					: audit("apply_failed", APPLY_WRITE_REFUSED_REASON_CODE, false),
+			);
+			observeDecision();
 		};
 		return { outcome: "apply", metadata, reasonCode: decision.reasonCode, commit };
 	}
@@ -1777,6 +1821,7 @@ export class ReflectionController {
 		explicitUserMemoryInstruction?: boolean;
 	}): Promise<ReflectionResult | null> {
 		if (this.deps.isChildSession() || this.deps.isDisposed()) return null;
+		const guard = this.captureLearningContext();
 		const signal = input.signal
 			? AbortSignal.any([input.signal, this.deps.getReflectionSignal()])
 			: this.deps.getReflectionSignal();
@@ -1826,6 +1871,7 @@ export class ReflectionController {
 			if (this.deps.isDisposed()) return result;
 
 			await this._applyGatedWrites(result.writes, {
+				guard,
 				reportId: input.reportId,
 				explicitUserMemoryInstruction: input.explicitUserMemoryInstruction === true,
 				signal,
@@ -1852,6 +1898,7 @@ export class ReflectionController {
 	private async _applyGatedWrites(
 		writes: readonly ReflectionWrite[],
 		context: {
+			guard: LearningApplicationGuard;
 			reportId?: string;
 			explicitUserMemoryInstruction: boolean;
 			signal?: AbortSignal;
@@ -1871,13 +1918,14 @@ export class ReflectionController {
 			writeIndex += 1;
 			const proposalId = `${context.reportId ?? "reflection"}-w${writeIndex}`;
 			const proposal = proposalFromReflectionWrite(write, proposalId);
-			if (this.deps.isDisposed() || context.signal?.aborted) {
+			const contextFailure = context.guard();
+			if (contextFailure || context.signal?.aborted) {
 				outcomes.push({
 					proposalId,
 					kind: write.kind,
 					layer: proposal.layer,
 					action: "no_op",
-					reasonCode: this.deps.isDisposed() ? "session_disposed" : "learning_interrupted",
+					reasonCode: contextFailure ?? "learning_interrupted",
 					summary: proposal.summary,
 				});
 				continue;
@@ -1976,6 +2024,37 @@ export class ReflectionController {
 				write.kind === "promote_skill" && decision.kind === "apply"
 					? this._checkSkillPromotionOverlap(write)
 					: undefined;
+			const audit: LearningAuditRecord = {
+				id: createLearningAuditId(),
+				proposalId,
+				layer: proposal.layer,
+				action: skillPromotionBlock ? "propose" : decision.kind === "apply" ? "apply" : "propose",
+				summary: skillPromotionBlock ? `${proposal.summary} — ${skillPromotionBlock.note}` : proposal.summary,
+				reasonCode: skillPromotionBlock?.reasonCode ?? decision.reasonCode,
+				decision: skillPromotionBlock
+					? {
+							...decision,
+							kind: "proposal",
+							reasonCode: skillPromotionBlock.reasonCode,
+							summary: `${decision.summary} — ${skillPromotionBlock.note}`,
+							requiresApproval: true,
+						}
+					: decision,
+				rollback: decision.kind === "apply" && !skillPromotionBlock ? plannedRollback : undefined,
+				createdAt: new Date().toISOString(),
+			};
+			const ticket = decision.kind === "no-op" ? undefined : this.writes.begin(context.guard, audit);
+			if (decision.kind !== "no-op" && !ticket) {
+				outcomes.push({
+					proposalId,
+					kind: write.kind,
+					layer: proposal.layer,
+					action: "no_op",
+					reasonCode: context.guard() ?? "learning_journal_unavailable",
+					summary: proposal.summary,
+				});
+				continue;
+			}
 
 			// The gate's decision and the write's actual outcome are two different questions: the memory
 			// tool can refuse a write (budget exceeded, drift, threat) via details.success:false without
@@ -1984,7 +2063,12 @@ export class ReflectionController {
 			// not-found (or, worse, misfires against whatever now occupies that text).
 			const applyResult =
 				decision.kind === "apply" && !skillPromotionBlock
-					? await this._applyReflectionWrite(write, context.signal, context.explicitUserMemoryInstruction)
+					? await this._applyReflectionWrite(
+							write,
+							context.signal,
+							context.explicitUserMemoryInstruction,
+							context.guard,
+						)
 					: { applied: false };
 			const writeFailed = decision.kind === "apply" && !skillPromotionBlock && !applyResult.applied;
 			const storedAction: LearningAuditAction = skillPromotionBlock
@@ -1999,25 +2083,13 @@ export class ReflectionController {
 				: writeFailed
 					? APPLY_WRITE_REFUSED_REASON_CODE
 					: decision.reasonCode;
-			if (decision.kind !== "no-op") {
-				appendLearningAuditSnapshot(this.deps.getSessionManager(), {
-					id: createLearningAuditId(),
-					proposalId,
-					layer: proposal.layer,
+			if (ticket) {
+				this.writes.settle(ticket, {
+					...audit,
 					action: storedAction,
-					summary: skillPromotionBlock ? `${proposal.summary} — ${skillPromotionBlock.note}` : proposal.summary,
 					reasonCode: storedReasonCode,
-					decision: skillPromotionBlock
-						? {
-								...decision,
-								kind: "proposal",
-								reasonCode: skillPromotionBlock.reasonCode,
-								summary: `${decision.summary} — ${skillPromotionBlock.note}`,
-								requiresApproval: true,
-							}
-						: decision,
-					// No rollback plan on a failed apply or a held/proposed promotion — nothing durable
-					// landed in either case, so there is nothing to undo.
+					// A rollback needs a confirmed applied result. Failed multi-step writes can still
+					// require inspection; a refusal is not authority to invent a successful inverse.
 					rollback:
 						decision.kind === "apply" && !skillPromotionBlock && !writeFailed
 							? (applyResult.rollback ?? plannedRollback)
@@ -2035,20 +2107,35 @@ export class ReflectionController {
 			});
 			// Observers may synchronously change policy. Publish only after this admitted effect
 			// and its audit; the next proposal reads their updated policy before making its decision.
-			this.deps.saveLearningDecisionSnapshot(decision);
-			this.emitLearningDecisionTelemetry(decision, proposal.layer);
+			if (context.guard()) continue;
+			try {
+				this.deps.saveLearningDecisionSnapshot(decision);
+				if (!context.guard()) this.emitLearningDecisionTelemetry(decision, proposal.layer);
+			} catch {
+				this.warnOnce(
+					"learning-observer-failed",
+					"A learning decision observer failed; actual write outcomes were retained.",
+				);
+			}
 			// G8: a proposal that needs human sign-off is an approval REQUEST. Codes/layer only —
 			// never the proposal summary/memory text (those live only in the audit snapshot).
-			if (decision.requiresApproval) {
-				this.deps.emitAutonomyTelemetry({
-					type: AUTONOMY_TELEMETRY_EVENT_TYPES.approvalRequest,
-					timestamp: new Date().toISOString(),
-					payload: {
-						kind: decision.kind,
-						reasonCode: decision.reasonCode,
-						layer: proposal.layer,
-					},
-				});
+			if (decision.requiresApproval && !context.guard()) {
+				try {
+					this.deps.emitAutonomyTelemetry({
+						type: AUTONOMY_TELEMETRY_EVENT_TYPES.approvalRequest,
+						timestamp: new Date().toISOString(),
+						payload: {
+							kind: decision.kind,
+							reasonCode: decision.reasonCode,
+							layer: proposal.layer,
+						},
+					});
+				} catch {
+					this.warnOnce(
+						"learning-approval-observer-failed",
+						"A learning approval observer failed; the proposal audit was retained.",
+					);
+				}
 			}
 		}
 		return outcomes;
@@ -2063,7 +2150,7 @@ export class ReflectionController {
 	 */
 	async applyLearnerWrites(
 		rawWrites: readonly unknown[],
-		options: { runId: string },
+		options: { runId: string; guard?: LearningApplicationGuard },
 	): Promise<
 		| { applied: true; entries: Array<{ index: number; outcome?: GatedWriteOutcome }> }
 		| { applied: false; reason: "icm_memory_offline" | "child_session" | "session_disposed" }
@@ -2071,6 +2158,7 @@ export class ReflectionController {
 		if (this.isIcmMode()) return { applied: false, reason: "icm_memory_offline" };
 		if (this.deps.isChildSession()) return { applied: false, reason: "child_session" };
 		if (this.deps.isDisposed()) return { applied: false, reason: "session_disposed" };
+		const guard = options.guard ?? this.captureLearningContext();
 		const existingMemory = [
 			this.deps.getMemoryManager().buildSystemPromptBlockFresh(),
 			this.deps.getFreshOkfMemoryForReflection(),
@@ -2087,6 +2175,7 @@ export class ReflectionController {
 		const outcomes = await this._applyGatedWrites(
 			accepted.map((entry) => entry.write),
 			{
+				guard,
 				reportId: `auto-learn-${options.runId}`,
 				explicitUserMemoryInstruction: false,
 				signal: this.deps.getReflectionSignal(),
@@ -2101,6 +2190,7 @@ export class ReflectionController {
 	}
 
 	getLearningAuditRecords(): LearningAuditRecord[] {
+		this.writes.recover();
 		return getLearningAuditSnapshots(this.deps.getSessionManager().getEntries());
 	}
 
@@ -2186,167 +2276,186 @@ export class ReflectionController {
 	 * actually applied so callers that MUST know — rollback's once-only accounting — can react instead
 	 * of recording a success that never happened.
 	 */
-	private async _applyReflectionWrite(
+	private _applyReflectionWrite(
 		write: ReflectionWrite,
 		signal?: AbortSignal,
 		explicit?: boolean,
+		guard?: LearningApplicationGuard,
 	): Promise<ReflectionApplyResult> {
-		if (this.deps.isDisposed() || this.deps.isChildSession() || signal?.aborted) return { applied: false };
-		const prevInternal = this._internalExplicitAdmission;
-		if (explicit) this._internalExplicitAdmission = true;
-		try {
-			// ICM mode: zero legacy MEMORY.md/USER.md/OKF reads/writes. Promote_skill still lands
-			// under the skills dir (ICM reference), never OKF bookkeeping.
-			if (
-				this.isIcmMode() &&
-				(write.kind === "okf_add" ||
-					write.kind === "okf_organize" ||
-					write.kind === "memory_add" ||
-					write.kind === "memory_replace" ||
-					write.kind === "memory_remove")
-			) {
+		return this.applicationContext.run({ guard, explicit: explicit === true }, () =>
+			this._executeReflectionWrite(write, signal, explicit, guard),
+		);
+	}
+
+	private async _executeReflectionWrite(
+		write: ReflectionWrite,
+		signal?: AbortSignal,
+		explicit?: boolean,
+		guard?: LearningApplicationGuard,
+	): Promise<ReflectionApplyResult> {
+		if (this.deps.isDisposed() || this.deps.isChildSession() || signal?.aborted || guard?.())
+			return { applied: false };
+		// ICM mode: zero legacy MEMORY.md/USER.md/OKF reads/writes. Promote_skill still lands
+		// under the skills dir (ICM reference), never OKF bookkeeping.
+		if (
+			this.isIcmMode() &&
+			(write.kind === "okf_add" ||
+				write.kind === "okf_organize" ||
+				write.kind === "memory_add" ||
+				write.kind === "memory_replace" ||
+				write.kind === "memory_remove")
+		) {
+			return { applied: false };
+		}
+		// R7 memory-to-behavior: a recurring procedure is compiled into an executable skill file rather
+		// than stored as a flat fact. Written under the agent skills dir so it loads like any user skill.
+		if (write.kind === "promote_skill") {
+			const promoted = this._promoteReflectionSkill(write.name, write.description, write.body);
+			if (promoted.applied) {
+				try {
+					this.deps.refreshLiveSkills?.();
+				} catch {
+					this.warnOnce(
+						"learning-skill-refresh-failed",
+						"The promoted skill was written, but refreshing the live skill list failed.",
+					);
+				}
+			}
+			return promoted;
+		}
+		if (write.kind === "okf_add" || write.kind === "okf_organize") {
+			try {
+				const result = await this.deps.applyStructuredReflectionWrite(write, signal);
+				if (!result.applied || result.digest === undefined) return { applied: false };
+				return {
+					applied: true,
+					rollback:
+						write.kind === "okf_add"
+							? {
+									kind: "okf_remove",
+									target: `${write.type}\0${write.title}`,
+									expectedDigest: result.digest,
+									instructions: "Remove only the exact structured OKF record created by this reflection.",
+								}
+							: {
+									kind: "okf_organize",
+									target: `${write.type}\0${write.title}`,
+									previous: write.sourceText,
+									...(result.sourceTarget ? { previousTarget: result.sourceTarget } : {}),
+									expectedDigest: result.digest,
+									removeOkf: result.created,
+									instructions:
+										"Restore the exact hot-memory source first, then remove only the OKF record created by this reflection.",
+								},
+				};
+			} catch {
 				return { applied: false };
 			}
-			// R7 memory-to-behavior: a recurring procedure is compiled into an executable skill file rather
-			// than stored as a flat fact. Written under the agent skills dir so it loads like any user skill.
-			if (write.kind === "promote_skill") {
-				const promoted = this._promoteReflectionSkill(write.name, write.description, write.body);
-				if (promoted.applied) this.deps.refreshLiveSkills?.();
-				return promoted;
+		}
+
+		type MemResult = { details?: { success?: boolean; error?: string } };
+		type MemExec = (
+			toolCallId: string,
+			params: {
+				action: string;
+				target: string;
+				content?: string;
+				oldContent?: string;
+				basis?: "explicit" | "inferred";
+				type?: string;
+				title?: string;
+				description?: string;
+				scope?: string;
+				tags?: string[];
+				evidenceRefs?: string[];
+			},
+			signal: AbortSignal | undefined,
+			onUpdate: undefined,
+			ctx: undefined,
+		) => Promise<MemResult>;
+		const memTool = this.deps
+			.getMemoryManager()
+			.getToolDefinitions()
+			.find((t) => t.name === "memory");
+		const exec = memTool?.execute as unknown as MemExec | undefined;
+		if (!exec) return { applied: false };
+
+		const run = (params: Parameters<MemExec>[1]): Promise<MemResult> =>
+			guard?.() || signal?.aborted
+				? Promise.resolve({ details: { success: false, error: "Learning context changed or interrupted" } })
+				: exec("reflection", params, signal, undefined, undefined);
+
+		if (write.kind === "memory_add") {
+			try {
+				const res = await run({
+					action: "add",
+					target: write.section === "USER" ? "user" : "memory",
+					content: write.text,
+					basis: explicit ? "explicit" : "inferred",
+				});
+				return { applied: res?.details?.success === true };
+			} catch {
+				// best-effort; reflection writes must never throw into the turn loop
+				return { applied: false };
 			}
-			if (write.kind === "okf_add" || write.kind === "okf_organize") {
-				try {
-					const result = await this.deps.applyStructuredReflectionWrite(write, signal);
-					if (!result.applied || result.digest === undefined) return { applied: false };
+		}
+
+		// replace / remove: honor an explicit section when present. Otherwise try MEMORY.md, then
+		// USER.md. The memory tool reports outcomes via `details.success` (it catches its own errors
+		// rather than throwing). Only a genuine "not found in the file" justifies trying the other
+		// file; a real failure for a file (budget exceeded / drift) must NOT fall through and mutate
+		// the wrong target.
+		const basis: "explicit" | "inferred" = explicit ? "explicit" : "inferred";
+		const section =
+			write.kind === "memory_remove" || write.kind === "memory_replace"
+				? "section" in write
+					? write.section
+					: undefined
+				: undefined;
+		const targets: ReadonlyArray<"project" | "memory" | "user"> =
+			section === "USER" ? ["user"] : section === "MEMORY" ? ["memory"] : ["memory", "user"];
+		for (const target of targets) {
+			try {
+				const params =
+					write.kind === "memory_replace"
+						? {
+								action: "replace",
+								target,
+								oldContent: write.target,
+								content: write.text,
+								basis,
+							}
+						: {
+								action: "remove",
+								target,
+								oldContent: write.target,
+								basis,
+							};
+				const res = await run(params);
+				if (res?.details?.success === true) {
 					return {
 						applied: true,
 						rollback:
-							write.kind === "okf_add"
+							write.kind === "memory_remove"
 								? {
-										kind: "okf_remove",
-										target: `${write.type}\0${write.title}`,
-										expectedDigest: result.digest,
-										instructions: "Remove only the exact structured OKF record created by this reflection.",
-									}
-								: {
-										kind: "okf_organize",
-										target: `${write.type}\0${write.title}`,
-										previous: write.sourceText,
-										...(result.sourceTarget ? { previousTarget: result.sourceTarget } : {}),
-										expectedDigest: result.digest,
-										removeOkf: result.created,
+										kind: "memory_add",
+										previous: write.target,
+										previousTarget: target,
 										instructions:
-											"Restore the exact hot-memory source first, then remove only the OKF record created by this reflection.",
-									},
+											target === "user"
+												? "Re-add the removed text to the USER memory section."
+												: "Re-add the removed text to the MEMORY file (it may originally have lived in USER).",
+									}
+								: undefined,
 					};
-				} catch {
-					return { applied: false };
 				}
+				if (!/not found/i.test(String(res?.details?.error ?? ""))) return { applied: false }; // real failure
+				// substring simply absent from this file — try the next target
+			} catch {
+				// defensive: if the tool ever does throw, try the next target
 			}
-
-			type MemResult = { details?: { success?: boolean; error?: string } };
-			type MemExec = (
-				toolCallId: string,
-				params: {
-					action: string;
-					target: string;
-					content?: string;
-					oldContent?: string;
-					basis?: "explicit" | "inferred";
-					type?: string;
-					title?: string;
-					description?: string;
-					scope?: string;
-					tags?: string[];
-					evidenceRefs?: string[];
-				},
-				signal: AbortSignal | undefined,
-				onUpdate: undefined,
-				ctx: undefined,
-			) => Promise<MemResult>;
-			const memTool = this.deps
-				.getMemoryManager()
-				.getToolDefinitions()
-				.find((t) => t.name === "memory");
-			const exec = memTool?.execute as unknown as MemExec | undefined;
-			if (!exec) return { applied: false };
-
-			const run = (params: Parameters<MemExec>[1]) => exec("reflection", params, signal, undefined, undefined);
-
-			if (write.kind === "memory_add") {
-				try {
-					const res = await run({
-						action: "add",
-						target: write.section === "USER" ? "user" : "memory",
-						content: write.text,
-						basis: explicit ? "explicit" : "inferred",
-					});
-					return { applied: res?.details?.success === true };
-				} catch {
-					// best-effort; reflection writes must never throw into the turn loop
-					return { applied: false };
-				}
-			}
-
-			// replace / remove: honor an explicit section when present. Otherwise try MEMORY.md, then
-			// USER.md. The memory tool reports outcomes via `details.success` (it catches its own errors
-			// rather than throwing). Only a genuine "not found in the file" justifies trying the other
-			// file; a real failure for a file (budget exceeded / drift) must NOT fall through and mutate
-			// the wrong target.
-			const basis: "explicit" | "inferred" = explicit ? "explicit" : "inferred";
-			const section =
-				write.kind === "memory_remove" || write.kind === "memory_replace"
-					? "section" in write
-						? write.section
-						: undefined
-					: undefined;
-			const targets: ReadonlyArray<"project" | "memory" | "user"> =
-				section === "USER" ? ["user"] : section === "MEMORY" ? ["memory"] : ["memory", "user"];
-			for (const target of targets) {
-				try {
-					const params =
-						write.kind === "memory_replace"
-							? {
-									action: "replace",
-									target,
-									oldContent: write.target,
-									content: write.text,
-									basis,
-								}
-							: {
-									action: "remove",
-									target,
-									oldContent: write.target,
-									basis,
-								};
-					const res = await run(params);
-					if (res?.details?.success === true) {
-						return {
-							applied: true,
-							rollback:
-								write.kind === "memory_remove"
-									? {
-											kind: "memory_add",
-											previous: write.target,
-											previousTarget: target,
-											instructions:
-												target === "user"
-													? "Re-add the removed text to the USER memory section."
-													: "Re-add the removed text to the MEMORY file (it may originally have lived in USER).",
-										}
-									: undefined,
-						};
-					}
-					if (!/not found/i.test(String(res?.details?.error ?? ""))) return { applied: false }; // real failure
-					// substring simply absent from this file — try the next target
-				} catch {
-					// defensive: if the tool ever does throw, try the next target
-				}
-			}
-			return { applied: false };
-		} finally {
-			this._internalExplicitAdmission = prevInternal;
 		}
+		return { applied: false };
 	}
 
 	/**

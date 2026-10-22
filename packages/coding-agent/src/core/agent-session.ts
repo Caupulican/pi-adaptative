@@ -5911,10 +5911,10 @@ export class AgentSession {
 	 */
 	applyAutoLearnProposals(set: AutoLearnProposalSet, runId: string): Promise<AutoLearnReportEntry[]> {
 		return decideAutoLearnProposals(set, runId, {
-			isDisposed: () => this._disposed,
+			context: this._reflection.captureLearningContext(),
 			settingsManager: this.settingsManager,
 			skillVault: this._skillVault,
-			applyWrites: (rawWrites, id) => this._reflection.applyLearnerWrites(rawWrites, { runId: id }),
+			applyWrites: (rawWrites, id, guard) => this._reflection.applyLearnerWrites(rawWrites, { runId: id, guard }),
 		});
 	}
 

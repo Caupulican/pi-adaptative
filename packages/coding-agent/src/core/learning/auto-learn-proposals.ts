@@ -17,6 +17,7 @@ import { MAX_ACTIVE_SKILL_BODY_BYTES } from "../skill-vault.ts";
 import { MAX_SKILL_DESCRIPTION_LENGTH, MAX_SKILL_NAME_LENGTH } from "../skills.ts";
 import { utf8PrefixByBytes } from "../util/bounded-value.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import type { LearningApplicationGuard } from "./learning-write-journal.ts";
 import { MAX_REFLECTION_WRITES } from "./reflection-engine.ts";
 
 export const AUTO_LEARN_PROPOSAL_TAG = "auto_learn_proposals";
@@ -241,8 +242,8 @@ export interface AutoLearnReportEntry {
 }
 
 export interface AutoLearnApplyPorts {
-	/** Session-backed callers close admission as soon as their owning session is disposed. */
-	isDisposed?(): boolean;
+	/** Captured before the whole batch; navigation never renews its execution authority. */
+	context: LearningApplicationGuard;
 	settingsManager: {
 		getAutonomySettings(): { mode: AutonomyMode };
 		getAutoLearnSettings(): AutoLearnSettings;
@@ -256,6 +257,7 @@ export interface AutoLearnApplyPorts {
 	applyWrites(
 		rawWrites: readonly unknown[],
 		runId: string,
+		context: LearningApplicationGuard,
 	): Promise<
 		| { applied: true; entries: Array<{ index: number; outcome?: GatedWriteOutcome }> }
 		| { applied: false; reason: string }
@@ -302,9 +304,10 @@ export async function applyAutoLearnProposals(
 	ports: AutoLearnApplyPorts,
 ): Promise<AutoLearnReportEntry[]> {
 	const report: AutoLearnReportEntry[] = [];
-	const recordIfDisposed = (index: number, kind: string, subject?: string): boolean => {
-		if (!ports.isDisposed?.()) return false;
-		report.push({ index, kind, subject, outcome: "ineligible", reasonCode: "session_disposed" });
+	const recordIfContextChanged = (index: number, kind: string, subject?: string): boolean => {
+		const reasonCode = ports.context();
+		if (!reasonCode) return false;
+		report.push({ index, kind, subject, outcome: "ineligible", reasonCode });
 		return true;
 	};
 
@@ -321,7 +324,7 @@ export async function applyAutoLearnProposals(
 	const eligibleWrites: Array<{ index: number; raw: unknown }> = [];
 	for (const write of set.writes) {
 		const kind = isPlainRecord(write.raw) ? String(write.raw.kind) : "unknown";
-		if (recordIfDisposed(write.index, kind, writeSubject(write.raw))) continue;
+		if (recordIfContextChanged(write.index, kind, writeSubject(write.raw))) continue;
 		const skillEvolution = checkSkillEvolutionEligibility(
 			ports.settingsManager.getAutonomySettings().mode,
 			ports.settingsManager.getAutoLearnSettings(),
@@ -343,6 +346,7 @@ export async function applyAutoLearnProposals(
 		const applied = await ports.applyWrites(
 			eligibleWrites.map((write) => write.raw),
 			runId,
+			ports.context,
 		);
 		eligibleWrites.forEach((write, position) => {
 			const kind = isPlainRecord(write.raw) ? String(write.raw.kind) : "unknown";
@@ -367,7 +371,7 @@ export async function applyAutoLearnProposals(
 
 	for (const update of set.skillUpdates) {
 		const base = { index: update.index, kind: "skill_update", subject: update.name };
-		if (recordIfDisposed(base.index, base.kind, base.subject)) continue;
+		if (recordIfContextChanged(base.index, base.kind, base.subject)) continue;
 		// A preceding memory write can await I/O while the owner revokes automatic skill changes.
 		const skillEvolution = checkSkillEvolutionEligibility(
 			ports.settingsManager.getAutonomySettings().mode,
@@ -402,7 +406,7 @@ export async function applyAutoLearnProposals(
 
 	for (const setting of set.settings) {
 		const base = { index: setting.index, kind: "settings", subject: setting.key };
-		if (recordIfDisposed(base.index, base.kind, base.subject)) continue;
+		if (recordIfContextChanged(base.index, base.kind, base.subject)) continue;
 		if (!isTunableAutoLearnSetting(setting.key)) {
 			report.push({
 				...base,
