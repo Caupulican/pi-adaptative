@@ -10,6 +10,7 @@ import {
 	getResumableHumanInputSnapshot,
 	OWNER_UNAVAILABLE_REASON,
 	resolveHumanInput,
+	restoreHumanInputImages,
 	unansweredOwnerQuestionText,
 } from "./human-input.ts";
 import { type HumanInputRequest, humanInputToolName } from "./human-input-request.ts";
@@ -73,13 +74,7 @@ export class HumanInputController {
 				snapshot = resolved.snapshot;
 				imageContents = resolved.imageContents;
 			} else if (pending.status === "answered") {
-				const imageStore = this.deps.getImageStore();
-				if (imageStore) {
-					const referencedText = snapshot.answers
-						.flatMap((answer) => [answer.custom ?? "", ...(answer.images?.map((image) => image.label) ?? [])])
-						.join(" ");
-					imageContents = imageStore.resolveReferences(referencedText);
-				}
+				imageContents = restoreHumanInputImages(snapshot, this.deps.getImageStore());
 			}
 
 			// The objective that asked this question may be several process lifetimes away; its ledger

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionEntry, SessionManager } from "../kernel/node.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
@@ -29,6 +30,8 @@ export function unansweredOwnerQuestionText(path: string | undefined): string {
 export interface HumanInputAnswerImage {
 	label: string;
 	mimeType: string;
+	/** Assigned only by the persistence owner, never accepted from a presentation client. */
+	stored?: { sequence: number; name: string };
 }
 
 export interface HumanInputAnswer {
@@ -121,7 +124,7 @@ function cloneAnswer(answer: HumanInputAnswer): HumanInputAnswer {
 		...answer,
 		selected: [...answer.selected],
 		customArtifact: answer.customArtifact ? { ...answer.customArtifact } : undefined,
-		images: answer.images?.map((image) => ({ ...image })),
+		images: answer.images?.map((image) => ({ ...image, ...(image.stored ? { stored: { ...image.stored } } : {}) })),
 	};
 }
 
@@ -177,7 +180,14 @@ function isAnswer(value: unknown): value is HumanInputAnswer {
 		(value.images === undefined ||
 			(Array.isArray(value.images) &&
 				value.images.every(
-					(image) => isPlainRecord(image) && typeof image.label === "string" && typeof image.mimeType === "string",
+					(image) =>
+						isPlainRecord(image) &&
+						typeof image.label === "string" &&
+						typeof image.mimeType === "string" &&
+						(image.stored === undefined ||
+							(isPlainRecord(image.stored) &&
+								Number.isSafeInteger(image.stored.sequence) &&
+								typeof image.stored.name === "string")),
 				))) &&
 		typeof value.skipped === "boolean"
 	);
@@ -222,6 +232,9 @@ function normalizePresentationResult(request: HumanInputRequest, value: unknown)
 		if (!isAnswer(candidate)) throw new Error("Invalid human-input response: malformed answer");
 		if (candidate.customArtifact !== undefined) {
 			throw new Error("Invalid human-input response: artifact references are harness-owned");
+		}
+		if (candidate.images?.some((image) => image.stored !== undefined)) {
+			throw new Error("Invalid human-input response: image storage references are harness-owned");
 		}
 		if (answersById.has(candidate.id)) {
 			throw new Error(`Invalid human-input response: duplicate answer '${candidate.id}'`);
@@ -300,7 +313,11 @@ function persistPresentationImages(
 				data: Buffer.from(stored.bytes).toString("base64"),
 				mimeType: stored.mimeType,
 			});
-			return { label: durableLabel, mimeType: stored.mimeType };
+			return {
+				label: durableLabel,
+				mimeType: stored.mimeType,
+				stored: { sequence: stored.sequence, name: basename(stored.path) },
+			};
 		});
 		return {
 			...cloneAnswer(answer),
@@ -309,6 +326,34 @@ function persistPresentationImages(
 		};
 	});
 	return { ...result, answers, imageContents: durableContents };
+}
+
+/** Replay submitted attachments only, in answer order, never inferring images from the owner's prose. */
+export function restoreHumanInputImages(
+	snapshot: HumanInputSnapshot,
+	imageStore: Pick<SessionImageStore, "read"> | undefined,
+): ImageContent[] {
+	if (!imageStore || snapshot.status !== "answered") return [];
+	const images: ImageContent[] = [];
+	for (const answer of snapshot.answers) {
+		for (const image of answer.images ?? []) {
+			const legacySequence = /^\[Image #([1-9]\d{0,5})\]$/iu.exec(image.label)?.[1];
+			const sequence = image.stored?.sequence ?? (legacySequence === undefined ? undefined : Number(legacySequence));
+			if (sequence === undefined) continue;
+			try {
+				const stored = imageStore.read(sequence, undefined, image.stored?.name);
+				if (!stored || stored.mimeType !== image.mimeType) continue;
+				images.push({
+					type: "image",
+					data: Buffer.from(stored.bytes).toString("base64"),
+					mimeType: stored.mimeType,
+				});
+			} catch {
+				// The replay caller discloses each attachment that could not be restored.
+			}
+		}
+	}
+	return images;
 }
 
 function isRequest(value: unknown): value is HumanInputRequest {
