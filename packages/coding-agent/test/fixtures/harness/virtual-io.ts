@@ -1331,7 +1331,8 @@ export class VirtualFileSystem {
 		if (!descriptor.writable) throw this.failure("write", "EBADF", descriptor.path, "write");
 		const node = descriptor.node;
 		if (node?.kind !== "file") throw this.failure("write", "EISDIR", descriptor.path, "write");
-		this.fault({ kind: "write", path: descriptor.path }, "before", data);
+		const operation = descriptor.append ? "append" : "write";
+		this.fault({ kind: operation, path: descriptor.path }, "before", data);
 		const start = descriptor.append ? node.data.length : (position ?? descriptor.position);
 		const replacement = Buffer.alloc(Math.max(node.data.length, start + data.length));
 		node.data.copy(replacement);
@@ -1339,8 +1340,8 @@ export class VirtualFileSystem {
 		node.data = replacement;
 		node.modified = this.stamp();
 		if (position === null || position === undefined) descriptor.position = start + data.length;
-		this.note("write", descriptor.path);
-		this.fault({ kind: "write", path: descriptor.path }, "after", data);
+		this.note(operation, descriptor.path);
+		this.fault({ kind: operation, path: descriptor.path }, "after", data);
 		return data.length;
 	}
 
