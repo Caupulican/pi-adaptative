@@ -981,7 +981,7 @@ export class AgentSession {
 			getModel: () => this.model,
 			getArtifactStore: () => this._getToolArtifactStore(),
 			getImageStore: () => this._getSessionImageStore(),
-			runAgentPrompt: (messages) => this._foregroundRecovery.runAgentPrompt(messages),
+			runAgentPrompt: (messages, signal) => this._foregroundRecovery.runAgentPrompt(messages, undefined, signal),
 			recordObjectiveClarification: (objectiveId, event) => {
 				recordObjectiveClarification(
 					{
@@ -2099,6 +2099,7 @@ export class AgentSession {
 			beginHistoryRewrite: () => this._foregroundRecovery.beginHistoryRewrite(),
 			summaryRetryTimers: config.timers.port("branch-summary-retry"),
 			onBranchChanged: () => {
+				void this._humanInput.invalidate("session branch changed");
 				this._branchGeneration++;
 				// Owner input accepted on the old branch is held in full, never delivered on the new one.
 				this._pendingQueue.reconcileContext();
@@ -3899,6 +3900,7 @@ export class AgentSession {
 		const { completion, safely, trackRequired, finish } = createSessionShutdownTracker();
 		this._disposeCompletion = completion;
 		this._disposed = true;
+		const humanInputPreparation = this._humanInput.invalidate("session dispose");
 		this._runtimeBuilder.closeMutationAdmission();
 		this._runtimeAdmission.close();
 		// The first releases are required ones: a failure in any of them is kept for `disposeAndWait()` and never skips the releases below.
@@ -3946,13 +3948,13 @@ export class AgentSession {
 		this._closingRuntimeWaitOnly = true;
 		// Enroll this whole phase now. Its own tracker joins resources added after physical mutation
 		// settlement; the outer tracker is never extended after finish captures its work.
-		trackRequired(() =>
-			this._runtimeBuilder.hasPendingMutation
-				? this._runtimeBuilder
-						.settleMutations((event) => this._emit(event), this._runtimeMutationWaitClock)
-						.then(() => this._disposeRuntimeDependencies())
-				: this._disposeRuntimeDependencies(),
-		);
+		trackRequired(async () => {
+			await humanInputPreparation;
+			if (this._runtimeBuilder.hasPendingMutation) {
+				await this._runtimeBuilder.settleMutations((event) => this._emit(event), this._runtimeMutationWaitClock);
+			}
+			await this._disposeRuntimeDependencies();
+		});
 		void finish();
 	}
 
@@ -4862,6 +4864,7 @@ export class AgentSession {
 	 * abort in the persisted aborted message; use a short, stable, lower-case label.
 	 */
 	async abort(reason: string): Promise<void> {
+		this._humanInput.interrupt(reason);
 		this._edgeIntent.abortOptionalIntent();
 		// The interrupt cancels queued input whose admission is still undecided; admitted input stays queued.
 		this._pendingQueue.cancelAwaiting();

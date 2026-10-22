@@ -108,6 +108,8 @@ export interface ResolveHumanInputOptions {
 	artifactStore?: ArtifactStore;
 	getImageStore?: () => Pick<SessionImageStore, "retainContent"> | undefined;
 	signal?: AbortSignal;
+	/** Replay authority must still own the branch and request before publishing any answer data. */
+	assertCurrent?: () => void;
 	now?: () => string;
 	timeoutMs?: number;
 }
@@ -445,12 +447,22 @@ export function getHumanInputSnapshots(entries: readonly SessionEntry[]): HumanI
 	return snapshots;
 }
 
-export function getLatestHumanInputSnapshots(source: SessionBranchEntrySource): HumanInputSnapshot[] {
-	const latest = new Map<string, HumanInputSnapshot>();
-	for (const snapshot of getHumanInputSnapshots(getActiveSessionBranchEntries(source))) {
-		latest.set(snapshot.request.requestId, snapshot);
+export interface HumanInputSnapshotEntry {
+	entryId: string;
+	snapshot: HumanInputSnapshot;
+}
+
+function getLatestHumanInputEntries(entries: readonly SessionEntry[]): HumanInputSnapshotEntry[] {
+	const latest = new Map<string, HumanInputSnapshotEntry>();
+	for (const entry of entries) {
+		const snapshot = decodeHumanInputSnapshotEntry(entry);
+		if (snapshot) latest.set(snapshot.request.requestId, { entryId: entry.id, snapshot });
 	}
 	return [...latest.values()];
+}
+
+export function getLatestHumanInputSnapshots(source: SessionBranchEntrySource): HumanInputSnapshot[] {
+	return getLatestHumanInputEntries(getActiveSessionBranchEntries(source)).map((entry) => entry.snapshot);
 }
 
 /** Incremental active-branch projection for worker questions that still need context-visible delivery. */
@@ -521,6 +533,11 @@ export function getWorkerHumanInputsRequiringDelivery(source: SessionBranchEntry
 }
 
 export function getResumableHumanInputSnapshot(source: SessionBranchEntrySource): HumanInputSnapshot | undefined {
+	return getResumableHumanInputEntry(source)?.snapshot;
+}
+
+/** The exact durable revision, so a resumed dialog cannot overwrite a newer answer to the same request. */
+export function getResumableHumanInputEntry(source: SessionBranchEntrySource): HumanInputSnapshotEntry | undefined {
 	const entries = getActiveSessionBranchEntries(source);
 	const requestedToolCalls = new Set(
 		entries.flatMap((entry) =>
@@ -534,15 +551,15 @@ export function getResumableHumanInputSnapshot(source: SessionBranchEntrySource)
 			entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.toolCallId] : [],
 		),
 	);
-	return getLatestHumanInputSnapshots(source)
+	return getLatestHumanInputEntries(entries)
 		.filter(
-			(snapshot) =>
+			({ snapshot }) =>
 				snapshot.request.source === "tool" &&
 				snapshot.request.toolCallId !== undefined &&
 				requestedToolCalls.has(snapshot.request.toolCallId) &&
 				!answeredToolCalls.has(snapshot.request.toolCallId),
 		)
-		.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+		.sort((left, right) => right.snapshot.updatedAt.localeCompare(left.snapshot.updatedAt))[0];
 }
 
 function preview(value: string): string {
@@ -578,6 +595,7 @@ function externalizeAnswer(
 
 export async function resolveHumanInput(options: ResolveHumanInputOptions): Promise<{
 	snapshot: HumanInputSnapshot;
+	snapshotEntryId: string;
 	imageContents: readonly ImageContent[];
 }> {
 	const now = options.now ?? (() => new Date().toISOString());
@@ -593,8 +611,9 @@ export async function resolveHumanInput(options: ResolveHumanInputOptions): Prom
 		const onAbort = () => controller.abort();
 		options.signal?.addEventListener("abort", onAbort, { once: true });
 		if (options.signal?.aborted) controller.abort();
-		const presentation = Promise.resolve().then(() =>
-			controller.signal.aborted
+		const presentation = Promise.resolve().then(() => {
+			options.assertCurrent?.();
+			return controller.signal.aborted
 				? ({ answers: [], cancelled: true, reason: "interrupted", imageContents: [] } as const)
 				: options.present(
 						{
@@ -603,8 +622,8 @@ export async function resolveHumanInput(options: ResolveHumanInputOptions): Prom
 							acceptsImages: options.request.acceptsImages,
 						},
 						{ signal: controller.signal },
-					),
-		);
+					);
+		});
 		publishHumanInputActivity(options.sessionManager, { phase: "waiting", request: options.request });
 		let deadline: ReturnType<typeof setTimeout> | undefined;
 		let onPresentationAbort: (() => void) | undefined;
@@ -629,12 +648,9 @@ export async function resolveHumanInput(options: ResolveHumanInputOptions): Prom
 								}, options.timeoutMs);
 							}),
 						]);
-			result = persistPresentationImages(
-				timedOut
-					? { answers: [], cancelled: true, reason: "owner_unavailable", imageContents: [] }
-					: normalizePresentationResult(options.request, presented),
-				options.getImageStore?.(),
-			);
+			result = timedOut
+				? { answers: [], cancelled: true, reason: "owner_unavailable", imageContents: [] }
+				: normalizePresentationResult(options.request, presented);
 		} finally {
 			if (deadline) clearTimeout(deadline);
 			if (onPresentationAbort) controller.signal.removeEventListener("abort", onPresentationAbort);
@@ -642,6 +658,14 @@ export async function resolveHumanInput(options: ResolveHumanInputOptions): Prom
 			publishHumanInputActivity(options.sessionManager, { phase: "settled", request: options.request });
 		}
 	}
+	// Cancellation can race a resolved presentation or its activity observers. It wins until publication.
+	if (options.signal?.aborted) {
+		timedOut = false;
+		result = { answers: [], cancelled: true, reason: "interrupted", imageContents: [] };
+	}
+	options.assertCurrent?.();
+	result = persistPresentationImages(result, options.getImageStore?.());
+	options.assertCurrent?.();
 	const answers = result.answers.map((answer) => externalizeAnswer(options.request, answer, options.artifactStore));
 	const snapshot: HumanInputSnapshot = {
 		request: cloneRequest(options.request),
@@ -650,8 +674,9 @@ export async function resolveHumanInput(options: ResolveHumanInputOptions): Prom
 		...(result.reason ? { reason: result.reason } : {}),
 		updatedAt: now(),
 	};
-	appendHumanInputSnapshot(options.sessionManager, snapshot);
-	return { snapshot, imageContents: result.cancelled ? [] : result.imageContents };
+	options.assertCurrent?.();
+	const snapshotEntryId = appendHumanInputSnapshot(options.sessionManager, snapshot);
+	return { snapshot, snapshotEntryId, imageContents: result.cancelled ? [] : result.imageContents };
 }
 
 export function formatHumanInputAnswerText(snapshot: HumanInputSnapshot): string {
