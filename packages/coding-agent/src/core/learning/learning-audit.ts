@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { SessionEntry, SessionManager } from "../../kernel/node.ts";
 import type { LearningDecision } from "../autonomy/contracts.ts";
 import {
@@ -223,6 +224,11 @@ export function cloneLearningAuditRecordForStorage(record: LearningAuditRecord):
 }
 
 export const LEARNING_AUDIT_CUSTOM_TYPE = "learning_audit";
+
+/** Audit identities name effects, independently of batch timing, history length or process lifetime. */
+export function createLearningAuditId(): string {
+	return `audit-${randomUUID()}`;
+}
 
 export type LearningAuditSnapshotPayload = SessionSnapshotPayload<"record", LearningAuditRecord>;
 

@@ -54,6 +54,7 @@ import {
 	APPLY_WRITE_REFUSED_REASON_CODE,
 	appendLearningAuditSnapshot,
 	contradictionsForReflectionWrite,
+	createLearningAuditId,
 	getLearningAuditSnapshots,
 	type LearningAuditAction,
 	type LearningAuditRecord,
@@ -91,6 +92,7 @@ import {
 	type UserPreferenceMetadata,
 } from "./memory/user-preference-metadata.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { KeyedSingleFlight } from "./models/runtime-operation-coordinator.ts";
 import { providerLaneForIsolatedLaneKind, runInProviderLane } from "./provider-admission/lane-context.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
 import { runtimeGenerationAdmission } from "./runtime-generation-admission.ts";
@@ -543,7 +545,7 @@ export class ReflectionController {
 	 * persisted, and the evidence is the original text, never the expanded message content.
 	 */
 	private readonly ownerInputOriginals = new WeakMap<AgentMessage, string>();
-	private userPreferenceAuditSequence = 0;
+	private readonly pendingRollbacks = new KeyedSingleFlight<{ ok: boolean; reason: string }>();
 	private _internalExplicitAdmission = false;
 
 	constructor(deps: ReflectionControllerDeps) {
@@ -1357,10 +1359,9 @@ export class ReflectionController {
 			notes.length > 0 ? `; ${notes.join("; ")}` : ""
 		}`.slice(0, 600);
 		const audit = (action: "apply" | "apply_failed" | "propose", reasonCode: string, withRollback: boolean) => {
-			this.userPreferenceAuditSequence += 1;
 			try {
 				appendLearningAuditSnapshot(this.deps.getSessionManager(), {
-					id: `audit-user-${this.userPreferenceAuditSequence}-${id}-r${revision}`,
+					id: createLearningAuditId(),
 					proposalId,
 					layer: "memory",
 					action,
@@ -1858,10 +1859,6 @@ export class ReflectionController {
 		// Learning apply policy: every durable write is converted to a proposal, decided by the
 		// learning gate, and audited with a rollback plan. When the policy is explicitly disabled,
 		// legacy direct-apply behavior is preserved — but now leaves audit records with rollback info.
-		// The audit id sequence counts STORED snapshots only: it reseeds from the stored count on
-		// every pass, so advancing it for a no-op (which stores nothing) would make later passes
-		// reuse ids — and rollback keys on the id, so a collision blocks or misdirects rollback.
-		let auditSequence = getLearningAuditSnapshots(this.deps.getSessionManager().getEntries()).length;
 		// G6 evidence strength: durable proposals accumulate observation counts across passes/sessions
 		// so the gate can distinguish a one-off cue from a repeatedly-confirmed lesson. Built once per
 		// pass; every increment is best-effort (store IO must never break reflection).
@@ -2001,9 +1998,8 @@ export class ReflectionController {
 					? APPLY_WRITE_REFUSED_REASON_CODE
 					: decision.reasonCode;
 			if (decision.kind !== "no-op") {
-				auditSequence += 1;
 				appendLearningAuditSnapshot(this.deps.getSessionManager(), {
-					id: `audit-${auditSequence}`,
+					id: createLearningAuditId(),
 					proposalId,
 					layer: proposal.layer,
 					action: storedAction,
@@ -2110,14 +2106,21 @@ export class ReflectionController {
 	 * Roll back one applied durable learning change by executing the inverse operation recorded in
 	 * its audit record (memory ops run through the same bundled memory-tool path as the original
 	 * apply; promoted skills are archived). Appends a linked "rollback" audit record on success so
-	 * the change history stays complete and a change cannot be rolled back twice.
+	 * the change history stays complete. Concurrent requests share the inverse operation; a stored
+	 * rollback receipt prevents later replay. An inverse whose receipt failed remains uncertain.
 	 */
-	async rollbackLearningWrite(auditId: string): Promise<{ ok: boolean; reason: string }> {
+	rollbackLearningWrite(auditId: string): Promise<{ ok: boolean; reason: string }> {
+		return this.pendingRollbacks.run(auditId, () => this.rollbackLearningWriteOnce(auditId));
+	}
+
+	private async rollbackLearningWriteOnce(auditId: string): Promise<{ ok: boolean; reason: string }> {
 		if (this.isIcmMode()) return { ok: false, reason: "icm_memory_offline" };
 		if (this.deps.isDisposed()) return { ok: false, reason: "session_disposed" };
 
 		const audits = this.getLearningAuditRecords();
-		const audit = audits.find((record) => record.id === auditId);
+		const matching = audits.filter((record) => record.id === auditId);
+		if (matching.length > 1) return { ok: false, reason: "ambiguous_audit_id" };
+		const audit = matching[0];
 		if (!audit) return { ok: false, reason: "audit_not_found" };
 		if (audit.action !== "apply") return { ok: false, reason: "not_an_applied_change" };
 		if (audits.some((record) => record.action === "rollback" && record.rollbackOf === auditId)) {
@@ -2206,7 +2209,7 @@ export class ReflectionController {
 		}
 
 		appendLearningAuditSnapshot(this.deps.getSessionManager(), {
-			id: `${audit.id}-rollback`,
+			id: createLearningAuditId(),
 			proposalId: audit.proposalId,
 			layer: audit.layer,
 			action: "rollback",
