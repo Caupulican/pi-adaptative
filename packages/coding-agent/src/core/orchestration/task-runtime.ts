@@ -113,6 +113,11 @@ import {
 } from "./task-runtime-state.ts";
 import { assertVerificationDependenciesReady, taskAwaitsVerification } from "./verification-identity.ts";
 import { assertWorkerReceiptAdmission } from "./worker-receipt-origin.ts";
+import {
+	assertWorkerReceiptAcknowledgement,
+	decodeWorkerReceiptAcknowledgement,
+	type WorkerReceiptAcknowledgement,
+} from "./worker-receipt-publication.ts";
 
 export { validateTaskDependencyIds } from "./task-runtime-codecs.ts";
 export {
@@ -839,6 +844,22 @@ export class DurableTaskRuntime {
 			actor: "runtime",
 			idempotencyKey: `attempt-usage-delivered:${attemptId}:${receipt}`,
 			payload: toJsonObject({ attemptId, receiptId: receipt }),
+		});
+	}
+
+	acknowledgeWorkerReceipts(attemptId: string, input: WorkerReceiptAcknowledgement): void {
+		this.refresh();
+		const attempt = this.requireAttempt(attemptId);
+		const acknowledgement = decodeWorkerReceiptAcknowledgement(input);
+		if (!acknowledgement) throw new DurableTaskRuntimeError("Invalid worker receipt acknowledgement.");
+		assertWorkerReceiptAcknowledgement(this.state, attempt, acknowledgement);
+		if (attempt.receiptAcknowledgement) return;
+		this.commit({
+			type: "attempt.receipts_delivered",
+			aggregateId: attemptId,
+			actor: "runtime",
+			idempotencyKey: `attempt-receipts-delivered:${attemptId}:${acknowledgement.receiptId}`,
+			payload: toJsonObject({ attemptId, acknowledgement }),
 		});
 	}
 

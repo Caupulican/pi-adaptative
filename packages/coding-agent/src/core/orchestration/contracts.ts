@@ -553,6 +553,7 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"attempt.usage_registered",
 	"attempt.usage_recorded",
 	"attempt.usage_delivered",
+	"attempt.receipts_delivered",
 	"attempt.suspended",
 	"attempt.resumed",
 	"attempt.cancelled",

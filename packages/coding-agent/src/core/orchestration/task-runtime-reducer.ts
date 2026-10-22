@@ -86,6 +86,10 @@ import {
 	taskStatusWithVerification,
 	verificationSubjectAttempt,
 } from "./verification-identity.ts";
+import {
+	assertWorkerReceiptAcknowledgement,
+	decodeWorkerReceiptAcknowledgement,
+} from "./worker-receipt-publication.ts";
 
 function updateObjectiveStatus(
 	state: TaskRuntimeProjection,
@@ -1583,6 +1587,16 @@ export function reduceOrchestrationEvent(
 						}
 					: {}),
 			};
+			break;
+		}
+		case "attempt.receipts_delivered": {
+			const attemptId = dispatchIdentifier(event.payload.attemptId, "attempt.receipts_delivered.attemptId");
+			assertEventAggregateId(event, attemptId, "Worker receipt attempt");
+			const acknowledgement = decodeWorkerReceiptAcknowledgement(event.payload.acknowledgement);
+			const attempt = attempts[attemptId];
+			if (!attempt || !acknowledgement) throw new DurableTaskRuntimeError("Invalid worker receipt acknowledgement.");
+			assertWorkerReceiptAcknowledgement(state, attempt, acknowledgement);
+			attempts[attemptId] = { ...attempt, receiptAcknowledgement: acknowledgement };
 			break;
 		}
 		case "attempt.usage_delivered": {

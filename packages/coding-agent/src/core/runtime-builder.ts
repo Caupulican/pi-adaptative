@@ -1968,7 +1968,12 @@ export class RuntimeBuilder {
 							? { getWorkerResult: (attemptId: string) => this.deps.getWorkerResult?.(attemptId) }
 							: {}),
 						acknowledgeWorkerReview: (requestId) => {
-							const result = acknowledgeWorkerClaimReview(this.deps.getSessionManager(), requestId);
+							const result = acknowledgeWorkerClaimReview(
+								this.deps.getSessionManager(),
+								requestId,
+								undefined,
+								(attemptId) => this.deps.getWorkerResult?.(attemptId),
+							);
 							if (result.ok) this.deps.onWorkerReviewAcknowledged?.();
 							return result;
 						},

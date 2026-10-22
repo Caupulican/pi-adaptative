@@ -14,7 +14,9 @@
  * controller never touches `prompt()`, the last-assistant-message, retry, or streaming state.
  */
 
+import { lstatSync } from "node:fs";
 import type { Api, Model } from "@caupulican/pi-ai";
+import { orchestrationEventStoreDir } from "./agent-paths.ts";
 import type {
 	GoalContinuationLoopOptions,
 	GoalContinuationLoopResult,
@@ -62,6 +64,7 @@ import { WorkerLaneIsolation } from "./delegation/worker-lane-isolation.ts";
 import { isManagedWorkerAttempt, projectWorkerAttemptLaneRecord } from "./delegation/worker-lane-projection.ts";
 import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
+import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
 import { WorkerUsageReceiptDelivery } from "./delegation/worker-usage-receipt-delivery.ts";
 import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
@@ -85,6 +88,7 @@ import { ModelFitnessController, type ModelFitnessControllerDeps } from "./resea
 import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import type { SettingsManager } from "./settings-manager.ts";
+import { isMissingFileError } from "./util/atomic-file.ts";
 import { type SteerDecision, type WaitStatusEvent, type WakeSource, waitFor } from "./util/wait.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
@@ -154,6 +158,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private readonly _runningAttemptWaits = new Set<() => void>();
 	/** Durable usage delivery shares the lifecycle's event store, independently of terminal handoffs. */
 	private _workerUsage: WorkerUsageReceiptDelivery | undefined;
+	private _workerReceipts: WorkerReceiptDelivery | undefined;
 	/** Shared terminal outbox for managed and in-process workers; lazy under UAC omission. */
 	private _workerNotifications: WorkerNotificationCoordinator | undefined;
 	private readonly _continuationListeners = new IndependentObserverSet<() => void>();
@@ -196,6 +201,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			onContinuationActivity: () => this._notifyContinuationActivity(),
 			timers: deps.getTimers().port("goal-continuation"),
 		});
+		queueMicrotask(() => this.signalWorkerReceiptDelivery());
 	}
 
 	/** The model a fresh worker would run on now (see WorkerDelegationController.previewWorkerModel). */
@@ -282,6 +288,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			deliver: (usage, options) =>
 				deliverSpawnedUsageReceipt(this.deps.getSessionManager(), this.deps, usage, options),
 			isDisposed: () => Boolean(this.deps.isDisposed?.()),
+			warn: (message) => this._safeWarn(message),
+		});
+		this._workerReceipts = new WorkerReceiptDelivery({
+			agentDir: this.deps.getAgentDir(),
+			runtime: lifecycle.ledger.runtime,
+			getSessionManager: () => this.deps.getSessionManager(),
+			subscribe: (listener) => store.subscribe(listener),
+			isDisposed: () => Boolean(this.deps.isDisposed()),
 			warn: (message) => this._safeWarn(message),
 		});
 		for (const notification of lifecycle.getPendingTerminalNotifications()) {
@@ -534,6 +548,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			workerShutdown = this._workers?.abort() ?? Promise.resolve();
 		});
 		this._runTeardownStep("dispose worker usage delivery", () => this._workerUsage?.dispose());
+		this._runTeardownStep("dispose worker receipt delivery", () => this._workerReceipts?.dispose());
 		this._runTeardownStep("dispose worker notifications", () => this._workerNotifications?.dispose());
 		const unsubscribeLaneRecordStore = this._unsubscribeLaneRecordStore;
 		this._unsubscribeLaneRecordStore = undefined;
@@ -996,7 +1011,27 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Start every capacity-eligible queued worker at the owner session's foreground-idle boundary. */
 	drainQueuedWorkerDelegations(): void {
 		this._workerUsage?.signal();
+		this.signalWorkerReceiptDelivery();
 		if (this.deps.isDelegateToolActive?.()) this._getWorkerController().drain();
+	}
+
+	/** Recover existing obligations even when the current tool surface cannot start new workers. */
+	signalWorkerReceiptDelivery(): void {
+		if (this.deps.isDisposed()) return;
+		if (!this._workerLifecycle) {
+			try {
+				const existing = lstatSync(orchestrationEventStoreDir(this.deps.getAgentDir(), this.deps.getSessionId()));
+				if (!existing.isDirectory()) throw new Error("Worker orchestration storage is not a directory.");
+				this._getWorkerLifecycle();
+			} catch (error) {
+				if (!isMissingFileError(error))
+					this._safeWarn(
+						`Worker receipt recovery unavailable: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				return;
+			}
+		}
+		this._workerReceipts?.signal();
 	}
 
 	/** Fitness reports persisted for THIS host (measured evidence for architect/profile decisions). */

@@ -1,5 +1,7 @@
 import type { SessionEntry, SessionManager } from "../../kernel/node.ts";
 import type { WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
+import type { WorkerResultContract } from "../orchestration/contracts.ts";
+import { decodeWorkerReceiptReview, type WorkerReceiptReview } from "../orchestration/worker-receipt-publication.ts";
 import {
 	decodeSessionSnapshotPayload,
 	getActiveSessionBranchEntries,
@@ -23,6 +25,8 @@ export type WorkerClaimSnapshotPayload = SessionSnapshotPayload<"claim", WorkerC
 	/** The originating request, when the host has one, makes a claim auditable against the
 	 * instructions, route, and capability envelope that bounded it. */
 	request?: WorkerRequest;
+	/** Host-authored exact receipt authorization; never copied from an untrusted claim. */
+	receiptReview?: WorkerReceiptReview;
 };
 
 const WORKER_CLAIM_SNAPSHOT_CODEC: SessionSnapshotCodec<WorkerClaim, "claim"> = {
@@ -39,7 +43,7 @@ export function appendWorkerClaimSnapshot(
 	/** Baseline for relative changedFiles when re-deriving the review marker; forwarded to
 	 * `isParentReviewRequired`/`validateWorkerClaim`. Defaults to `process.cwd()`, matching the
 	 * validator's own documented default for single-cwd-per-process callers. */
-	options?: { cwd?: string },
+	options?: { cwd?: string; receiptReview?: WorkerReceiptReview },
 ): string {
 	const normalizedClaim = normalizeWorkerClaimForHost(claim);
 	const stored = cloneWorkerClaimForStorage(normalizedClaim);
@@ -55,6 +59,7 @@ export function appendWorkerClaimSnapshot(
 		version: 1,
 		claim: stored,
 		...(request ? { request: structuredClone(request) } : {}),
+		...(options?.receiptReview ? { receiptReview: { ...options.receiptReview } } : {}),
 	};
 	return sessionManager.appendCustomEntry(WORKER_CLAIM_CUSTOM_TYPE, payload);
 }
@@ -118,9 +123,11 @@ function latestWorkerClaimSnapshot(
 		const claim = decodeSessionSnapshotPayload(payload, WORKER_CLAIM_SNAPSHOT_CODEC);
 		if (!claim || !matches(claim)) continue;
 		const request = payload.request;
+		const receiptReview = decodeWorkerReceiptReview(payload.receiptReview);
 		latest = {
 			version: 1,
 			claim,
+			...(receiptReview ? { receiptReview } : {}),
 			...(isPlainRecord(request) && typeof request.id === "string"
 				? { request: structuredClone(request) as unknown as WorkerRequest }
 				: {}),
@@ -146,12 +153,26 @@ export function acknowledgeWorkerClaimReview(
 	sessionManager: Pick<SessionManager, "appendCustomEntry"> & SessionBranchEntrySource,
 	requestId: string,
 	now: () => string = () => new Date().toISOString(),
+	getResult?: (attemptId: string) => WorkerResultContract | undefined,
 ): AcknowledgeWorkerReviewResult {
 	const latest = getLatestWorkerClaimSnapshot(getActiveSessionBranchEntries(sessionManager), requestId);
 	if (!latest) return { ok: false, reason: "unknown_worker_claim" };
 	if (!latest.claim.parentReviewRequired) return { ok: false, reason: "not_flagged" };
-	if (latest.claim.parentReviewedAt) return { ok: false, reason: "already_reviewed" };
+	const result = latest.claim.terminalAttemptId ? getResult?.(latest.claim.terminalAttemptId) : undefined;
+	const receipts = result?.receipts;
+	const receiptReview =
+		result &&
+		result.taskId === requestId &&
+		result.attemptId === latest.claim.terminalAttemptId &&
+		receipts?.status === "captured" &&
+		receipts.acceptance.disposition === "parent_review"
+			? { attemptId: result.attemptId, resultId: result.resultId, factsDigest: receipts.factsDigest }
+			: undefined;
+	if (latest.claim.parentReviewedAt && (!receiptReview || latest.receiptReview))
+		return { ok: false, reason: "already_reviewed" };
 	const reviewedAt = now();
-	appendWorkerClaimSnapshot(sessionManager, { ...latest.claim, parentReviewedAt: reviewedAt }, latest.request);
+	appendWorkerClaimSnapshot(sessionManager, { ...latest.claim, parentReviewedAt: reviewedAt }, latest.request, {
+		receiptReview,
+	});
 	return { ok: true, requestId, reviewedAt };
 }

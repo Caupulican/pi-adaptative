@@ -313,7 +313,6 @@ import { skillsForSessionRole, workerEligibleSkills } from "./skills.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
 import { accountPassBindings } from "./system-one/account-pass-wiring.ts";
-import { collectWorkerReportClaimReceipts } from "./system-one/claim-delivery.ts";
 import { formatClarificationQuestion } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import { prewarmOperationGate } from "./system-one/operation-gate-wiring.ts";
@@ -355,7 +354,7 @@ import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
 import type { TimerPort } from "./util/timer-port.ts";
 import type { WaitStatusEvent } from "./util/wait.ts";
-import { currentWorkUnit, openWorkUnit, WORKER_RECEIPTS_CUSTOM_TYPE } from "./work-units.ts";
+import { currentWorkUnit, openWorkUnit } from "./work-units.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 export * from "./agent-session-contracts.ts";
@@ -1153,17 +1152,7 @@ export class AgentSession {
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 			getPathAliasTable: () => this._pipeline.peekPathAliasTable(),
 			reviewNewCode: ({ toolName, args, cwd }) => this._unsettledLadder.codeDuplicates.review(toolName, args, cwd),
-			reviewWorkerReport: async (input) => {
-				const blockers = await this._unsettledLadder.answerClaims.workerReportBlockers(input);
-				// An accepted report's receipts back the root's claims for the rest of the work unit.
-				if (blockers.length === 0) {
-					this.sessionManager.appendCustomEntry(
-						WORKER_RECEIPTS_CUSTOM_TYPE,
-						collectWorkerReportClaimReceipts(input),
-					);
-				}
-				return blockers;
-			},
+			reviewWorkerReport: (input) => this._unsettledLadder.answerClaims.workerReportBlockers(input),
 			settleInconclusive: (input) => this._settleWorkerInconclusive(input),
 			isModelAllowed: (model) =>
 				this._edgeIntent.modelPolicy.allows(model) &&
@@ -1957,7 +1946,10 @@ export class AgentSession {
 			getOrchestrationProfileCatalog: () => this._backgroundLanes.getOrchestrationProfileCatalog(),
 			getWorkerLaneRecords: () => this._backgroundLanes.getLaneRecords(),
 			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
-			onWorkerReviewAcknowledged: () => this.recordAcceptedWorkerEvidence(),
+			onWorkerReviewAcknowledged: () => {
+				this.recordAcceptedWorkerEvidence();
+				this._backgroundLanes.signalWorkerReceiptDelivery();
+			},
 			getWorkerClaimSnapshots: () => this.getWorkerClaimSnapshots(),
 			getWorkerClaimSnapshot: (taskId, attemptId) =>
 				getWorkerClaimSnapshotForAttempt(getActiveSessionBranchEntries(this.sessionManager), taskId, attemptId),
@@ -2104,6 +2096,7 @@ export class AgentSession {
 			onBranchChanged: () => {
 				void this._humanInput.invalidate("session branch changed");
 				this._branchGeneration++;
+				this._backgroundLanes.signalWorkerReceiptDelivery();
 				// Owner input accepted on the old branch is held in full, never delivered on the new one.
 				this._pendingQueue.reconcileContext();
 				this._emitQueueUpdate();

@@ -22,6 +22,7 @@ import type {
 	TaskContract,
 	WorkerResultContract,
 } from "./contracts.ts";
+import type { WorkerReceiptAcknowledgement } from "./worker-receipt-publication.ts";
 
 export interface ObjectiveRuntimeState {
 	objective: ObjectiveContract;
@@ -72,6 +73,8 @@ export interface AttemptRuntimeState {
 	/** Parent-report outbox; removal requires acknowledgement after the parent receipt persists. */
 	usageReceipts?: Readonly<Record<string, AttemptUsageReceipt>>;
 	result?: WorkerResultContract;
+	/** Physical parent receipt, independent of notification and usage delivery. */
+	receiptAcknowledgement?: WorkerReceiptAcknowledgement;
 	/** Settled independent review of this immutable result, retained across task retries. */
 	verification?: AttemptVerification;
 	/**

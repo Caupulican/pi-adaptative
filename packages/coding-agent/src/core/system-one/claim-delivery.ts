@@ -9,6 +9,7 @@
  * the turn ends; a claim no receipt backs stays visible as a doubt.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/index.ts";
 import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
@@ -22,7 +23,12 @@ import type { LadderOutcome } from "./unsettled-ladder.ts";
 
 export type ClaimReceiptEvent =
 	| { readonly kind: "message"; readonly message: AgentMessage }
-	| { readonly kind: "worker"; readonly entryId: string; readonly receipts: ClaimReceipts };
+	| {
+			readonly kind: "worker";
+			readonly entryId: string;
+			readonly receipts: ClaimReceipts;
+			readonly identity?: { readonly id: string; readonly signature: string };
+	  };
 
 function emptyClaimReceipts() {
 	return {
@@ -85,14 +91,30 @@ export function collectClaimReceiptEvents(
 	const calls = new Map<string, ToolCall | undefined>();
 	const seenRequests = new Map<string, Set<string>>();
 	const seenWorkerEntries = new Set<string>();
+	const workerEvidence = new Map<string, Extract<ClaimReceiptEvent, { kind: "worker" }> | undefined>();
+	for (const event of events) {
+		if (event.kind !== "worker") continue;
+		const key = event.identity?.id ?? event.entryId;
+		if (!workerEvidence.has(key)) workerEvidence.set(key, event);
+		else {
+			const earlier = workerEvidence.get(key);
+			if (
+				!earlier ||
+				earlier.identity?.signature !== event.identity?.signature ||
+				!isDeepStrictEqual(earlier.receipts, event.receipts)
+			)
+				workerEvidence.set(key, undefined);
+		}
+	}
 	const segments: ClaimReceipts[] = [];
 	const checks = new Map<string, WorkerCommandReceipt | undefined>();
 	for (const check of verifiedChecks) checks.set(check.id, checks.has(check.id) ? undefined : check);
 	let totals = emptyClaimReceipts();
 	for (const event of events) {
 		if (event.kind === "worker") {
-			if (seenWorkerEntries.has(event.entryId)) continue;
-			seenWorkerEntries.add(event.entryId);
+			const key = event.identity?.id ?? event.entryId;
+			if (!workerEvidence.get(key) || seenWorkerEntries.has(key)) continue;
+			seenWorkerEntries.add(key);
 			segments.push(totals, event.receipts);
 			totals = emptyClaimReceipts();
 			continue;

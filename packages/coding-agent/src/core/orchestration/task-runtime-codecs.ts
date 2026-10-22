@@ -93,6 +93,10 @@ import { assertVerificationRecord, verificationSubjectAttempt } from "./verifica
 import { normalizeWorkerContextForkReference } from "./worker-context-fork-reference.ts";
 import { parseWorkerExecutionContract } from "./worker-execution-contract.ts";
 import { workerReceiptOriginFromValue } from "./worker-receipt-origin.ts";
+import {
+	assertWorkerReceiptAcknowledgement,
+	decodeWorkerReceiptAcknowledgement,
+} from "./worker-receipt-publication.ts";
 import { decodeWorkerResultReceipts } from "./worker-result-receipts.ts";
 
 export const MAX_DATE_EPOCH_MS = 8_640_000_000_000_000;
@@ -848,6 +852,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		"usageAccounting",
 		"usageReceipts",
 		"result",
+		"receiptAcknowledgement",
 		"verification",
 		"managedLifetime",
 		"executionStartedAt",
@@ -874,6 +879,12 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		throw new DurableTaskRuntimeError(`${label}.verification has a different subject attempt.`);
 	}
 	const createdAt = isoDate(attempt.createdAt, `${label}.createdAt`);
+	const receiptAcknowledgement =
+		attempt.receiptAcknowledgement === undefined
+			? undefined
+			: decodeWorkerReceiptAcknowledgement(attempt.receiptAcknowledgement);
+	if (attempt.receiptAcknowledgement !== undefined && !receiptAcknowledgement)
+		throw new DurableTaskRuntimeError(`${label}.receiptAcknowledgement is invalid.`);
 	const updatedAt = isoDate(attempt.updatedAt, `${label}.updatedAt`);
 	if (Date.parse(updatedAt) < Date.parse(createdAt)) {
 		throw new DurableTaskRuntimeError(`${label}.updatedAt is before createdAt.`);
@@ -906,6 +917,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 			`${label}.checkpointIds`,
 		),
 		...(attempt.result === undefined ? {} : { result: resultFromValue(attempt.result, `${label}.result`) }),
+		...(receiptAcknowledgement ? { receiptAcknowledgement } : {}),
 		...(verification ? { verification: verification as AttemptVerification } : {}),
 		...(managedLifetime ? { managedLifetime } : {}),
 		...(attempt.executionStartedAt === undefined
@@ -1694,6 +1706,8 @@ function validateSnapshotTaskGraph(state: TaskRuntimeProjection): void {
 		}
 	}
 	for (const [attemptId, attempt] of Object.entries(state.attempts)) {
+		if (attempt.receiptAcknowledgement)
+			assertWorkerReceiptAcknowledgement(state, attempt, attempt.receiptAcknowledgement);
 		assertAttemptAgentBinding(attempt);
 		if (attempt.attemptId !== attemptId) {
 			throw new DurableTaskRuntimeError(`${label} attempt '${attemptId}' has a mismatched id.`);

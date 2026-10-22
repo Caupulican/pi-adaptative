@@ -17,8 +17,9 @@ import {
 } from "./goals/goal-completion-owner-decision.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
-import { decodeClaimReceipts } from "./orchestration/claim-receipts.ts";
+import { decodeWorkerReceiptPublication } from "./orchestration/worker-receipt-publication.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
+import { isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
 import { AnswerClaimChecker, assistantAnswerText, type ClaimReceiptEvent } from "./system-one/claim-delivery.ts";
 import { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
@@ -133,13 +134,44 @@ export class SessionUnsettledLadderController {
 			window = turnWorkWindow(manager, WORKER_RECEIPTS_CUSTOM_TYPE, openingEntryId);
 		}
 		const events: ClaimReceiptEvent[] = [];
+		let malformedPublication = false;
 		for (const entry of window) {
 			if (entry.kind === "message") events.push(entry);
 			else {
-				const receipts = decodeClaimReceipts(entry.data);
-				if (receipts) events.push({ kind: "worker", entryId: entry.entryId, receipts });
-				else this.deps.emitWarning(`Worker receipt ${entry.entryId} is malformed; its evidence is unavailable.`);
+				const publication = decodeWorkerReceiptPublication(entry.data);
+				if (
+					publication &&
+					publication.origin.sessionFile === manager.getSessionFile() &&
+					isSessionAppendAnchorCurrent(
+						{
+							getSessionId: () => manager.getSessionId(),
+							getLeafId: () => entry.entryId,
+							getEntry: (id) => manager.getEntry(id),
+						},
+						publication.origin,
+					)
+				)
+					events.push({
+						kind: "worker",
+						entryId: entry.entryId,
+						receipts: publication.receipts,
+						identity: { id: publication.receiptId, signature: JSON.stringify(publication) },
+					});
+				else {
+					malformedPublication ||= Boolean(
+						entry.data && typeof entry.data === "object" && "version" in entry.data && entry.data.version === 2,
+					);
+					this.deps.emitWarning(
+						`Worker receipt ${entry.entryId} is malformed or lacks final acceptance identity; its evidence is unavailable.`,
+					);
+				}
 			}
+		}
+		if (malformedPublication) {
+			// A corrupt v2 row may be a conflicting copy of a valid identity. Do not let
+			// skipping it leave the surviving copy authoritative.
+			for (let index = events.length - 1; index >= 0; index--)
+				if (events[index]?.kind === "worker") events.splice(index, 1);
 		}
 		const tail: AgentMessage[] = [];
 		let unpersistedToolEvidence = false;
