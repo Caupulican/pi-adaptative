@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Resource reload resolves each instruction path to its canonical form once per reload instead of once per resource path for the cwd, every project root and every trusted root. With project instructions disabled this removed thousands of native realpath calls from startup (about 1.8 s per start on Windows, which put the Windows first-shell release budget within runner noise).
 - Uncertain session writes keep immutable evidence, live owner inputs, own-turn recovery records and exact commits; lossy history recovery after them is rejected, they stay out of routed replay, and complete writes are confirmed before uncertainty is reported.
 - Owner input is persisted before delivery is published and survives branch navigation, failed queue batches, reflection notification failures and input handoffs; queued images keep independent pin ownership and validated identity, and resumed owner questions bind to their session context.
 - Learning and USER memory effects are journaled through audit custody with unique effect identities, originating-branch binding, exact rollback outcomes and durable accounting obligations; learner sessions keep ownership across handoffs, and learning authority is rechecked between proposals.

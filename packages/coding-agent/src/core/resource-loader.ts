@@ -485,6 +485,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private readonly projectInstructionRoots: string[];
 	private readonly alwaysTrustedInstructionRoots: string[];
 	private pendingReloadSnapshot: ResourceLoaderSnapshot | undefined;
+	private reloadCanonicalPaths: Map<string, string> | undefined;
 
 	constructor(options: DefaultResourceLoaderOptions) {
 		this.cwd = resolvePath(options.cwd);
@@ -684,13 +685,29 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return this.appendSystemPrompt;
 	}
 
+	/**
+	 * Instruction admission canonicalizes the cwd, every project root and every trusted root once per
+	 * candidate path, so one reload costs thousands of native realpath calls (about 1.8 s of Windows
+	 * startup). The file system is read once per reload: each path resolves once within it.
+	 */
+	private canonicalInstructionPath(path: string): string {
+		const memo = this.reloadCanonicalPaths;
+		if (memo === undefined) return canonicalizePath(path);
+		let canonical = memo.get(path);
+		if (canonical === undefined) {
+			canonical = canonicalizePath(path);
+			memo.set(path, canonical);
+		}
+		return canonical;
+	}
+
 	private isAlwaysTrustedInstructionLocation(candidatePath: string): boolean {
-		const canonicalCandidate = canonicalizePath(candidatePath);
+		const canonicalCandidate = this.canonicalInstructionPath(candidatePath);
 		return this.alwaysTrustedInstructionRoots.some((root) => {
 			const resolvedRoot = resolvePath(root);
 			return (
 				isPathWithin(candidatePath, resolvedRoot) &&
-				isPathWithin(canonicalCandidate, canonicalizePath(resolvedRoot))
+				isPathWithin(canonicalCandidate, this.canonicalInstructionPath(resolvedRoot))
 			);
 		});
 	}
@@ -698,12 +715,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private isProjectInstructionPath(resourcePath: string): boolean {
 		if (!isLocalPath(resourcePath)) return false;
 		const resolvedCwd = resolvePath(this.cwd);
-		const canonicalCwd = canonicalizePath(resolvedCwd);
-		const canonicalRoots = this.projectInstructionRoots.map((root) => canonicalizePath(root));
+		const canonicalCwd = this.canonicalInstructionPath(resolvedCwd);
+		const canonicalRoots = this.projectInstructionRoots.map((root) => this.canonicalInstructionPath(root));
 		const candidates = new Set([resolvePath(resourcePath), resolvePath(resourcePath, this.cwd)]);
 		for (const candidate of candidates) {
 			if (this.isAlwaysTrustedInstructionLocation(candidate)) continue;
-			const canonicalCandidate = canonicalizePath(candidate);
+			const canonicalCandidate = this.canonicalInstructionPath(candidate);
 			if (
 				isProjectInstructionLocation(candidate, resolvedCwd, this.projectInstructionRoots) ||
 				isProjectInstructionLocation(canonicalCandidate, canonicalCwd, canonicalRoots)
@@ -1016,6 +1033,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 	async reload(options: ResourceReloadOptions = {}): Promise<void> {
 		const snapshot = this.createSnapshot();
 		this.pendingReloadSnapshot = undefined;
+		const reloadCanonicalPaths = new Map<string, string>();
+		this.reloadCanonicalPaths = reloadCanonicalPaths;
 		try {
 			if (!options.skipSettingsReload) {
 				await this.settingsManager.reload();
@@ -1515,6 +1534,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 			}
 			this.restoreSnapshot(snapshot);
 			throw error;
+		} finally {
+			if (this.reloadCanonicalPaths === reloadCanonicalPaths) this.reloadCanonicalPaths = undefined;
 		}
 	}
 
