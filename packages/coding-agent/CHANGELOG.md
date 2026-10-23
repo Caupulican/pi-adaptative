@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Startup no longer spawns child processes synchronously. Executable lookup (`git.exe`, `pwsh.exe`, `bash`) searches PATH in-process instead of running `where`/`which` (about 175 ms per lookup on Windows; the current directory is no longer searched), and the GitHub origin pin runs `git` asynchronously and records a diagnostic only while the session is live. These spawns blocked the first shell command and pushed the Windows first-shell release budget over its limit.
+
 ## [0.104.2] - 2026-10-23
 
 ### Fixed

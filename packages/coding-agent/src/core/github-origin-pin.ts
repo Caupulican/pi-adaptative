@@ -1,11 +1,14 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { statSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const GH_RESOLVED_LINE = /^remote\.(.+)\.gh-resolved(?:\s+(.*))?$/;
 const MAX_PIN_REASON_CHARS = 240;
 
-export type GithubOriginGitRunner = (args: string[], options?: { allowFail?: boolean }) => string;
+export type GithubOriginGitRunner = (args: string[], options?: { allowFail?: boolean }) => Promise<string>;
 
 export type GithubOriginPinResult =
 	| { status: "pinned"; slug: string }
@@ -17,7 +20,12 @@ export function githubOriginPinDiagnostic(result: GithubOriginPinResult): string
 	return result.status === "failed" ? `GitHub origin pin failed: ${result.reason}` : undefined;
 }
 
-export function reportGithubOriginPinForSession(
+/**
+ * Pins the origin without blocking the caller: each git child costs tens of milliseconds on Windows,
+ * and the session must answer its first request without waiting for them. A completed pin that is
+ * not a failure records nothing; a failure is appended only while the session is still live.
+ */
+export async function reportGithubOriginPinForSession(
 	cwd: string,
 	isChildSession: boolean,
 	sessionManager: {
@@ -28,16 +36,23 @@ export function reportGithubOriginPinForSession(
 			details?: { status: GithubOriginPinResult["status"]; reason?: string },
 		): string;
 	},
+	host: { isDisposed: () => boolean; warn: (message: string) => void },
 	git?: GithubOriginGitRunner,
-): void {
+): Promise<void> {
 	if (isChildSession) return;
-	const pin = pinGithubOriginForSession(cwd, git);
-	const diagnostic = githubOriginPinDiagnostic(pin);
-	if (!diagnostic) return;
-	sessionManager.appendCustomMessageEntry("github_origin_pin", diagnostic, true, {
-		status: pin.status,
-		reason: pin.status === "failed" ? pin.reason : undefined,
-	});
+	try {
+		const pin = await pinGithubOriginForSession(cwd, git);
+		const diagnostic = githubOriginPinDiagnostic(pin);
+		if (!diagnostic || host.isDisposed()) return;
+		sessionManager.appendCustomMessageEntry("github_origin_pin", diagnostic, true, {
+			status: pin.status,
+			reason: pin.status === "failed" ? pin.reason : undefined,
+		});
+	} catch (error) {
+		host.warn(
+			`github_origin_pin: failed to record pin diagnostic: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 }
 
 function boundedReason(reason: string): string {
@@ -74,15 +89,12 @@ export function githubOriginPinPlan(
 }
 
 function defaultGit(cwd: string): GithubOriginGitRunner {
-	return (args, options = {}) => {
+	return async (args, options = {}) => {
 		try {
-			return execFileSync("git", args, {
-				cwd,
-				encoding: "utf8",
-				stdio: ["ignore", "pipe", "pipe"],
-			});
+			const { stdout } = await execFileAsync("git", args, { cwd, encoding: "utf8", windowsHide: true });
+			return stdout;
 		} catch (error) {
-			const status = (error as { status?: number }).status;
+			const status = (error as { code?: unknown }).code;
 			const stdout = (error as { stdout?: unknown }).stdout;
 			// git config --get-regexp exits 1 when there are no matches; --unset-all exits 5 when absent.
 			if (options.allowFail && (status === 1 || status === 5)) {
@@ -113,13 +125,13 @@ function insideLinkedWorktree(cwd: string): boolean {
 	}
 }
 
-export function pinGithubOriginForSession(
+export async function pinGithubOriginForSession(
 	cwd: string,
 	git: GithubOriginGitRunner = defaultGit(cwd),
-): GithubOriginPinResult {
+): Promise<GithubOriginPinResult> {
 	if (insideLinkedWorktree(cwd)) return { status: "skipped", reason: "linked worktree" };
 	try {
-		const originUrl = git(["remote", "get-url", "origin"]).trim();
+		const originUrl = (await git(["remote", "get-url", "origin"])).trim();
 		if (!originUrl) return { status: "skipped", reason: "no origin remote" };
 		let slug: string;
 		try {
@@ -127,16 +139,16 @@ export function pinGithubOriginForSession(
 		} catch {
 			return { status: "skipped", reason: "not a GitHub origin" };
 		}
-		const resolvedText = git(["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"], { allowFail: true });
+		const resolvedText = await git(["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"], { allowFail: true });
 		const initial = parseGhResolvedMap(resolvedText);
 		const plan = githubOriginPinPlan(originUrl, initial);
 		const mutated = plan.setOrigin || plan.unset.length > 0;
-		if (plan.setOrigin) git(["config", "remote.origin.gh-resolved", "base"]);
+		if (plan.setOrigin) await git(["config", "remote.origin.gh-resolved", "base"]);
 		for (const remote of plan.unset) {
-			git(["config", "--unset-all", `remote.${remote}.gh-resolved`], { allowFail: true });
+			await git(["config", "--unset-all", `remote.${remote}.gh-resolved`], { allowFail: true });
 		}
 		const verified = mutated
-			? parseGhResolvedMap(git(["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"], { allowFail: true }))
+			? parseGhResolvedMap(await git(["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"], { allowFail: true }))
 			: initial;
 		if (verified.origin !== "base") {
 			return { status: "failed", reason: "origin gh-resolved is not base after pin" };

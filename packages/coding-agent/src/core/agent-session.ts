@@ -874,7 +874,8 @@ export class AgentSession {
 		);
 		this._runtimeMutationWaitClock = config.timers.port("foreground");
 		this._isChildSession = (config.isChildSession ?? process.env.PI_CHILD_SESSION === "1") || isWorkerSession();
-		reportGithubOriginPinForSession(this._cwd, this._isChildSession, this.sessionManager);
+		const pinHost = { isDisposed: () => this._disposed, warn: (message: string) => this.emitHostWarning(message) };
+		void reportGithubOriginPinForSession(this._cwd, this._isChildSession, this.sessionManager, pinHost);
 		this._durableLearningState = this._isChildSession ? undefined : DurableLearningState.forAgentDir(agentDir);
 		this._skillVault = new SkillVaultController({
 			getSkills: () => skillsForSessionRole(this._resourceLoader.getActiveSkills()),

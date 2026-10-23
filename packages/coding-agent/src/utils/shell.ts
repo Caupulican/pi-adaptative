@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import { spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
@@ -26,20 +26,24 @@ export function getPlatformShellToolName(platform: NodeJS.Platform = process.pla
 	return platform === "win32" ? "powershell" : "bash";
 }
 
+/**
+ * First `executable` on PATH, searched in-process. A `where`/`which` child costs about 175 ms per
+ * lookup on Windows and sits on the startup path of the first shell command. Unlike `where`, the
+ * current directory is not searched, so a repository cannot shadow a tool by carrying its own copy.
+ * `executable` carries its extension on Windows (`git.exe`).
+ */
 function findExecutableOnPath(executable: string): string | null {
-	const locator = process.platform === "win32" ? "where" : "which";
-	try {
-		const result = spawnSync(locator, [executable], {
-			encoding: "utf-8",
-			timeout: 5_000,
-			windowsHide: true,
-		});
-		if (result.status === 0 && result.stdout) {
-			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
-			if (firstMatch && (process.platform !== "win32" || existsSync(firstMatch))) return firstMatch;
+	for (const entry of (process.env.PATH ?? process.env.Path ?? "").split(delimiter)) {
+		const directory = entry.trim().replace(/^"(.*)"$/, "$1");
+		if (!directory) continue;
+		const candidate = join(directory, executable);
+		try {
+			if (!statSync(candidate).isFile()) continue;
+			if (process.platform !== "win32") accessSync(candidate, constants.X_OK);
+			return candidate;
+		} catch {
+			// Not present or not executable in this directory; keep searching.
 		}
-	} catch {
-		// Resolution falls through to known paths or the platform fallback.
 	}
 	return null;
 }
