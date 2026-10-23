@@ -2,7 +2,7 @@
 
 ### Added
 
-- `PI_CACHE_TRACE=<file>` appends one JSON line per provider request with a hash and size for the system prompt, each tool and each message, in wire order. A provider caches the longest byte-identical prefix, so the first segment that differs between consecutive requests of a session is where the cache stops matching. No prompt text is written.
+- A provider prompt cache matches the longest byte-identical prefix, so the session now compares each provider request with its previous one and warns when the system prompt, the tool set, a tool's schema, the tool order or (within a turn) an earlier message changed, naming the first segment and its size change. `PI_CACHE_TRACE=<file>` also appends one JSON line per request with a hash and size per segment, in wire order, without prompt text.
 
 ### Fixed
 

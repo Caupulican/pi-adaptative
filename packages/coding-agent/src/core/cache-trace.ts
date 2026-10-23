@@ -3,14 +3,20 @@ import { appendFileSync } from "node:fs";
 import type { Api, Context, Model } from "@caupulican/pi-ai";
 
 /**
- * Opt-in request fingerprints for finding where a provider prompt cache stops matching.
+ * Prompt-prefix stability. A provider caches the longest byte-identical prefix of a request, so a
+ * miss starts at the first segment (system prompt, tool, message) that differs from the previous
+ * request. Within one turn the system prompt, the tool list and every earlier message must be
+ * unchanged (OpenAI Codex tracks the same invariant as `tools_changed` and tests that tools are
+ * identical across requests). The monitor compares each request with the session's previous one and
+ * names the first segment that changed, so a cache miss is reported when it happens.
  *
- * A provider caches the longest byte-identical prefix of a request, so a miss starts at the first
- * segment (system prompt, tool, message) that differs from the previous request. With
- * `PI_CACHE_TRACE=<file>` every provider request appends one JSON line holding a hash and size per
- * segment, in wire order. No prompt text is written. Comparing consecutive lines of one session
- * names the first segment that changed.
+ * `PI_CACHE_TRACE=<file>` additionally appends one JSON line per request with a hash and size per
+ * segment, in wire order. No prompt text is written.
  */
+
+/** Warnings reported per session before further changes are only counted. */
+const MAX_REPORTS_PER_SESSION = 5;
+const MAX_TRACKED_SESSIONS = 32;
 
 function digest(value: unknown): string {
 	return createHash("sha1")
@@ -25,18 +31,90 @@ function segment(label: string, value: unknown): SegmentFingerprint {
 	return [label, digest(value), (JSON.stringify(value) ?? "").length];
 }
 
-export function traceProviderRequest(model: Model<Api>, context: Context, sessionId: string | undefined): void {
-	const path = process.env.PI_CACHE_TRACE;
-	if (!path) return;
-	const record = {
-		at: new Date().toISOString(),
-		session: sessionId,
+interface RequestFingerprint {
+	model: string;
+	system: SegmentFingerprint;
+	tools: SegmentFingerprint[];
+	messages: SegmentFingerprint[];
+	/** True when the request continues a turn: its last message is a tool result. */
+	continuation: boolean;
+}
+
+function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerprint {
+	return {
 		model: `${model.provider}/${model.id}`,
 		system: segment("system", context.systemPrompt ?? ""),
 		tools: (context.tools ?? []).map((tool) => segment(tool.name, tool)),
 		messages: context.messages.map((message, index) =>
 			segment(`${index}:${message.role}`, { role: message.role, content: message.content }),
 		),
+		continuation: context.messages.at(-1)?.role === "toolResult",
 	};
-	appendFileSync(path, `${JSON.stringify(record)}\n`);
+}
+
+/** Why `current` does not extend `previous`'s cached prefix, or undefined when it does. */
+function prefixChange(previous: RequestFingerprint, current: RequestFingerprint): string | undefined {
+	if (previous.model !== current.model) return undefined;
+	if (previous.system[1] !== current.system[1]) {
+		return `system prompt changed (${previous.system[2]} to ${current.system[2]} chars)`;
+	}
+	const previousNames = previous.tools.map(([name]) => name);
+	const currentNames = current.tools.map(([name]) => name);
+	const added = currentNames.filter((name) => !previousNames.includes(name));
+	const removed = previousNames.filter((name) => !currentNames.includes(name));
+	if (added.length > 0 || removed.length > 0) {
+		return `tool set changed (${[...added.map((name) => `+${name}`), ...removed.map((name) => `-${name}`)].join(", ")})`;
+	}
+	for (let index = 0; index < previous.tools.length; index++) {
+		const before = previous.tools[index];
+		const after = current.tools[index];
+		if (before === undefined || after === undefined) break;
+		if (before[0] !== after[0]) return `tool order changed (${before[0]} became ${after[0]} at position ${index})`;
+		if (before[1] !== after[1]) return `tool ${before[0]} changed (${before[2]} to ${after[2]} chars)`;
+	}
+	// Earlier messages are only fixed within a turn: a new turn legitimately rebuilds its frame.
+	if (!current.continuation) return undefined;
+	for (let index = 0; index < previous.messages.length; index++) {
+		const before = previous.messages[index];
+		const after = current.messages[index];
+		if (before === undefined) break;
+		if (after === undefined) return `message ${before[0]} is missing from the continuation`;
+		if (before[1] !== after[1]) return `message ${before[0]} changed (${before[2]} to ${after[2]} chars)`;
+	}
+	return undefined;
+}
+
+export class PromptPrefixMonitor {
+	private readonly previous = new Map<string, RequestFingerprint>();
+	private readonly reports = new Map<string, number>();
+
+	/** Fingerprint a request, optionally trace it, and describe how it broke the previous request's prefix. */
+	check(model: Model<Api>, context: Context, sessionId: string | undefined): string | undefined {
+		const key = sessionId ?? "";
+		const current = fingerprintRequest(model, context);
+		this.writeTrace(sessionId, current);
+		const previous = this.previous.get(key);
+		this.previous.delete(key);
+		this.previous.set(key, current);
+		while (this.previous.size > MAX_TRACKED_SESSIONS) {
+			const oldest = this.previous.keys().next().value;
+			if (oldest === undefined) break;
+			this.previous.delete(oldest);
+			this.reports.delete(oldest);
+		}
+		if (previous === undefined) return undefined;
+		const change = prefixChange(previous, current);
+		if (change === undefined) return undefined;
+		const reported = (this.reports.get(key) ?? 0) + 1;
+		this.reports.set(key, reported);
+		if (reported > MAX_REPORTS_PER_SESSION) return undefined;
+		const suffix = reported === MAX_REPORTS_PER_SESSION ? " Further changes in this session are not reported." : "";
+		return `Prompt cache prefix changed between requests: ${change}. The provider re-bills the prompt from that point at full price.${suffix}`;
+	}
+
+	private writeTrace(sessionId: string | undefined, fingerprint: RequestFingerprint): void {
+		const path = process.env.PI_CACHE_TRACE;
+		if (!path) return;
+		appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), session: sessionId, ...fingerprint })}\n`);
+	}
 }
