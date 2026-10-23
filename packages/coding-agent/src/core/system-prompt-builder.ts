@@ -80,9 +80,9 @@ export interface SystemPromptBuilderDeps {
 	 * The evidence-gated tool-selection hints active for the session's current model (see
 	 * `tool-selection/promotion.ts` and `ToolSelectionController.getActiveHints`). Optional: a
 	 * session that has not wired a `ToolSelectionController` into this builder simply renders no
-	 * hint block, same as an empty list. Changes RARELY (only when the underlying evidence flips
-	 * which tool is promoted for an intent) — never per turn — so it does not threaten the
-	 * single-cached-system-prompt-block invariant (see system-prompt.ts).
+	 * hint block, same as an empty list. The evidence moves with every observed tool call, so the
+	 * builder freezes the hints at its first build (and again when the model changes): a rebuild
+	 * mid-session must not move bytes of the single cached system prompt block (see system-prompt.ts).
 	 */
 	getToolSelectionHints?(): readonly ToolSelectionHint[];
 	/** The session's currently active extensions. */
@@ -275,12 +275,31 @@ export class SystemPromptBuilder {
 		return `MODEL TOOL SHAPE RULES\n${lines.join("\n")}`;
 	}
 
+	/**
+	 * The session's hints, frozen at the first build. Live evidence changes on every observed tool call, and each
+	 * rebuild of the base prompt re-read it, moving a mid-prompt section and invalidating the provider's cached prefix
+	 * from there on. A model change refreshes them, since the evidence is per model; new evidence otherwise applies
+	 * from the next session.
+	 */
+	private _frozenToolSelectionHints: { modelRef: string | undefined; hints: readonly ToolSelectionHint[] } | undefined;
+
+	private _sessionToolSelectionHints(): readonly ToolSelectionHint[] {
+		const current = this.deps.getToolSelectionHints?.() ?? [];
+		const frozen = this._frozenToolSelectionHints;
+		const currentModelRef = current[0]?.modelRef;
+		const modelChanged =
+			frozen?.modelRef !== undefined && currentModelRef !== undefined && frozen.modelRef !== currentModelRef;
+		if (frozen === undefined || modelChanged) {
+			this._frozenToolSelectionHints = { modelRef: currentModelRef, hints: [...current] };
+			return current;
+		}
+		return frozen.hints;
+	}
+
 	/** The evidence-gated tool-selection hint block (see `getToolSelectionHints` on the deps). */
 	private _buildToolSelectionHintPrompt(validToolNames: readonly string[]): string | undefined {
 		const available = new Set(validToolNames);
-		return formatToolSelectionHints(
-			(this.deps.getToolSelectionHints?.() ?? []).filter((hint) => available.has(hint.tool)),
-		);
+		return formatToolSelectionHints(this._sessionToolSelectionHints().filter((hint) => available.has(hint.tool)));
 	}
 
 	private _buildToolApplicabilityPrompt(

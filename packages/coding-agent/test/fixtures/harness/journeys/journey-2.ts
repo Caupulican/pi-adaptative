@@ -23,6 +23,11 @@ export async function runJourney2(): Promise<void> {
 			modelOptions: { root: { contextWindow: 131_072 } },
 			// Exact expected refusal of the E7 negative control: the busy, dead-owner A is never resumed, and nothing else is allowed.
 			warningAllowances: [
+				// The prompt-prefix monitor's two intentional rewrites of an already-sent request, each reported once per rewrite: a halted
+				// worker's closing turn adds its HALT CLOSING TURN section to the system prompt (and the next request drops it), and a
+				// worker's reconciled transcript replaces an earlier user message of the previous request with a shorter one.
+				/^Prompt cache prefix changed between requests: system prompt changed \(\d+ to \d+ chars\) from char \d+ of \d+: .*HALT CLOSING TURN.*\. The provider re-bills the prompt from that point at full price\.$/,
+				/^Prompt cache prefix changed between requests: message \d+:user changed \(\d+ to \d+ chars\)\. The provider re-bills the prompt from that point at full price\.$/,
 				/^Worker conversation setup failed: Worker queued context has no proof of never-started, dead-owner recovery\.$/,
 				/^Memory subsystem init failed: The ICM chat for this project is owned by pid \d+ on [^\n]+, session [^\n]+, started [^\n]+, still running\. Only one session per project may run the ICM chat; close that session first\.$/,
 				// R18/R19 (System One off): the refused idle-root wake-up reports its unknown write outcome, then the session-file fence that

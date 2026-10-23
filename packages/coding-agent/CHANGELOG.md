@@ -7,6 +7,7 @@
 
 ### Fixed
 
+- The evidence-gated tool shortlist no longer moves the cached system prompt. Each rebuild of the base prompt re-read live tool statistics, so a mid-prompt section changed between requests and the provider re-billed everything after it (the prefix warning showed a 126-char shortlist change at about 24k of a 25k-char prompt). The shortlist is now fixed for the session, and again when the model changes; new evidence applies from the next session.
 - The context dashboard (`/context`) measures what an ICM request carries: the chat frame (turn view and live state) plus the running turn's own messages. It previously counted the whole session history, which ICM never sends, and omitted the turn view, so its estimate undercounted by the view size (about 30k tokens on a long-lived project chat).
 
 ## [0.104.3] - 2026-10-23
