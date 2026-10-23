@@ -28,6 +28,9 @@ export async function runJourney2(): Promise<void> {
 				// worker's reconciled transcript replaces an earlier user message of the previous request with a shorter one.
 				/^Prompt cache prefix changed between requests: system prompt changed \(\d+ to \d+ chars\) from char \d+ of \d+: .*HALT CLOSING TURN.*\. The provider re-bills the prompt from that point at full price\.$/,
 				/^Prompt cache prefix changed between requests: message \d+:user changed \(\d+ to \d+ chars\)\. The provider re-bills the prompt from that point at full price\.$/,
+				// The continuous-chat phase turns memory retrieval off mid-read and back on, so the memory tool leaves and returns: the
+				// system prompt's tool list changes between requests at its memory/delegate entry, in either direction.
+				/^Prompt cache prefix changed between requests: system prompt changed \(\d+ to \d+ chars\) from char \d+ of \d+: ".*\\n- (?:delegate|memory): .*" became ".*\\n- (?:delegate|memory): .*"\. The provider re-bills the prompt from that point at full price\.$/,
 				/^Worker conversation setup failed: Worker queued context has no proof of never-started, dead-owner recovery\.$/,
 				/^Memory subsystem init failed: The ICM chat for this project is owned by pid \d+ on [^\n]+, session [^\n]+, started [^\n]+, still running\. Only one session per project may run the ICM chat; close that session first\.$/,
 				// R18/R19 (System One off): the refused idle-root wake-up reports its unknown write outcome, then the session-file fence that
