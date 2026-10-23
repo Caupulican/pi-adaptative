@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- The prompt-prefix warning no longer reports earlier messages changing within a turn. Those are the context shrinker's priced rewrites, which the cache custody guard already classifies as sanctioned or unsanctioned and the decision ledger records (`cache_decisions`, kind `cache_break`); the warning flagged sanctioned ones as defects. It still reports the system prompt, the tool list and the chat view.
+
 ## [0.104.6] - 2026-10-23
 
 ## [0.104.5] - 2026-10-23
