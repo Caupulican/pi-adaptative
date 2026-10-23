@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `PI_CACHE_TRACE=<file>` appends one JSON line per provider request with a hash and size for the system prompt, each tool and each message, in wire order. A provider caches the longest byte-identical prefix, so the first segment that differs between consecutive requests of a session is where the cache stops matching. No prompt text is written.
+
 ### Fixed
 
 - The context dashboard (`/context`) measures what an ICM request carries: the chat frame (turn view and live state) plus the running turn's own messages. It previously counted the whole session history, which ICM never sends, and omitted the turn view, so its estimate undercounted by the view size (about 30k tokens on a long-lived project chat).

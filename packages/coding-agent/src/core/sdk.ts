@@ -37,6 +37,7 @@ import {
 	isUnscopedBedrockProxy,
 } from "./bedrock-scope.ts";
 import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
+import { traceProviderRequest } from "./cache-trace.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { resolveEffectiveCompletionProfile } from "./decision/completion-profile.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
@@ -694,6 +695,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					model.provider === "openai-codex" && serviceTiers !== model.serviceTiers
 						? { ...model, serviceTiers }
 						: model;
+				traceProviderRequest(requestModel, context, providerOptions.sessionId);
 				return streamSimple(requestModel, context, providerOptions);
 			},
 			onPayload: async (payload, _model) => {
