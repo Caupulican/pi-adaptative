@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { Api, Context, Model } from "@caupulican/pi-ai";
+import type { Api, Context, Message, Model } from "@caupulican/pi-ai";
 
 /**
  * Prompt-prefix stability. A provider caches the longest byte-identical prefix of a request, so a
@@ -36,10 +36,37 @@ interface RequestFingerprint {
 	system: SegmentFingerprint;
 	/** The system prompt text, kept only to show where it changed; never written to the trace file. */
 	systemText: string;
+	/** The ICM chat view the request opens with, kept only to compare it across turns; never written to the trace file. */
+	viewText: string | undefined;
 	tools: SegmentFingerprint[];
 	messages: SegmentFingerprint[];
 	/** True when the request continues a turn: its last message is a tool result. */
 	continuation: boolean;
+}
+
+const CHAT_VIEW_OPENING = "<chat>\n";
+const CHAT_VIEW_CLOSING = "\n</chat>";
+
+/** The text of the ICM chat view when the request's first message is that view; undefined otherwise. */
+function chatViewText(messages: readonly Message[]): string | undefined {
+	const first = messages[0];
+	if (first?.role !== "user" || typeof first.content === "string") return undefined;
+	const text = first.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+	return text.startsWith(CHAT_VIEW_OPENING) ? text : undefined;
+}
+
+/**
+ * A new turn rebuilds its chat view. A provider caches the byte-identical prefix, so the cache survives the turn
+ * only while the view grows at its end: the old text, up to its closing tag, must open the new text.
+ */
+function chatViewChange(before: string, after: string): string | undefined {
+	const stable = before.endsWith(CHAT_VIEW_CLOSING) ? before.length - CHAT_VIEW_CLOSING.length : before.length;
+	let index = 0;
+	const limit = Math.min(before.length, after.length);
+	while (index < limit && before.charCodeAt(index) === after.charCodeAt(index)) index++;
+	if (index >= stable) return undefined;
+	const line = before.slice(0, index).split("\n").length - 1;
+	return `chat view changed at char ${index} of ${before.length} (line ${line}): ${snippet(before, index)} became ${snippet(after, index)}`;
 }
 
 function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerprint {
@@ -47,6 +74,7 @@ function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerp
 		model: `${model.provider}/${model.id}`,
 		system: segment("system", context.systemPrompt ?? ""),
 		systemText: context.systemPrompt ?? "",
+		viewText: chatViewText(context.messages),
 		tools: (context.tools ?? []).map((tool) => segment(tool.name, tool)),
 		messages: context.messages.map((message, index) =>
 			segment(`${index}:${message.role}`, { role: message.role, content: message.content }),
@@ -89,8 +117,13 @@ function prefixChange(previous: RequestFingerprint, current: RequestFingerprint)
 		if (before[0] !== after[0]) return `tool order changed (${before[0]} became ${after[0]} at position ${index})`;
 		if (before[1] !== after[1]) return `tool ${before[0]} changed (${before[2]} to ${after[2]} chars)`;
 	}
-	// Earlier messages are only fixed within a turn: a new turn legitimately rebuilds its frame.
-	if (!current.continuation) return undefined;
+	// Earlier messages are only fixed within a turn. A new turn rebuilds its frame, but the chat view in it must keep
+	// the previous view as its prefix.
+	if (!current.continuation) {
+		return previous.viewText !== undefined && current.viewText !== undefined
+			? chatViewChange(previous.viewText, current.viewText)
+			: undefined;
+	}
 	for (let index = 0; index < previous.messages.length; index++) {
 		const before = previous.messages[index];
 		const after = current.messages[index];
@@ -132,7 +165,7 @@ export class PromptPrefixMonitor {
 	private writeTrace(sessionId: string | undefined, fingerprint: RequestFingerprint): void {
 		const path = process.env.PI_CACHE_TRACE;
 		if (!path) return;
-		const { systemText: _systemText, ...traced } = fingerprint;
+		const { systemText: _systemText, viewText: _viewText, ...traced } = fingerprint;
 		appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), session: sessionId, ...traced })}\n`);
 	}
 }
