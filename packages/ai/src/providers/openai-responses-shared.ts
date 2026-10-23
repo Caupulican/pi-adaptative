@@ -354,7 +354,7 @@ export function convertResponsesMessages<TApi extends Api>(
 						nativeSearchCalls.set(callId, toolCall.toolSearch);
 						output.push({
 							type: "tool_search_call",
-							...(toolCall.toolSearch ? { id: toolCall.toolSearch.id } : {}),
+							...(toolCall.toolSearch?.id ? { id: toolCall.toolSearch.id } : {}),
 							call_id: callId,
 							execution: "client",
 							status: "completed",
@@ -494,11 +494,9 @@ export async function processResponsesStream<TApi extends Api>(
 	model: Model<TApi>,
 	options?: OpenAIResponsesStreamOptions,
 ): Promise<void> {
-	const normalizeToolSearchItem = (item: ResponseOutputItem) => {
-		if (item.type !== "tool_search_call") return item;
-		// Server searches do not request a local execution. A missing call id cannot pair with a result.
-		if (item.execution !== "client" || !item.call_id) return undefined;
-		const args: unknown = typeof item.arguments === "string" ? parseStreamingJson(item.arguments) : item.arguments;
+	/** The definitions a search returns, captured at the request that made it so a replay never re-derives them. */
+	const captureToolSearch = (rawArguments: unknown, id: string | undefined): NonNullable<ToolCall["toolSearch"]> => {
+		const args: unknown = typeof rawArguments === "string" ? parseStreamingJson(rawArguments) : rawArguments;
 		const details = {
 			kind: TOOL_SCHEMA_SEARCH_DETAILS_KIND,
 			...(args && typeof args === "object" && !Array.isArray(args) ? args : {}),
@@ -509,8 +507,8 @@ export async function processResponsesStream<TApi extends Api>(
 			search && isToolSchemaSearchDetails(details)
 				? searchDeferredToolSchemas(search.plan, details.query, details.maxResults)
 				: [];
-		const toolSearch: NonNullable<ToolCall["toolSearch"]> = {
-			id: item.id,
+		return {
+			...(id ? { id } : {}),
 			strict: search?.strict ?? null,
 			tools: structuredClone(
 				tools.map((tool) => ({
@@ -520,13 +518,26 @@ export async function processResponsesStream<TApi extends Api>(
 				})),
 			),
 		};
+	};
+	const normalizeToolSearchItem = (item: ResponseOutputItem) => {
+		// Responses Lite delivers the search as a plain function call named for the tool; it is answered with the same
+		// `tool_search_output` item, so its definitions are captured like a native call's.
+		if (item.type === "function_call") {
+			const name = options?.toolNameMap?.toOriginalName(item.name) ?? item.name;
+			return options?.toolSearch && name === TOOL_SCHEMA_SEARCH_NAME
+				? { ...item, toolSearch: captureToolSearch(item.arguments, undefined) }
+				: item;
+		}
+		if (item.type !== "tool_search_call") return item;
+		// Server searches do not request a local execution. A missing call id cannot pair with a result.
+		if (item.execution !== "client" || !item.call_id) return undefined;
 		return {
 			type: "function_call" as const,
 			id: item.id,
 			call_id: item.call_id,
 			name: TOOL_SCHEMA_SEARCH_NAME,
 			arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? {}),
-			toolSearch,
+			toolSearch: captureToolSearch(item.arguments, item.id),
 		};
 	};
 	let currentItem: ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall | null = null;

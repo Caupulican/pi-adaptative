@@ -2180,7 +2180,20 @@ function getCachedWebSocketInputDelta(
  * not byte-identical any more (a rewritten message). `no_response_id`: the previous response never
  * yielded an id to continue from.
  */
-type DeltaSkipReason = "no_continuation" | "shape_mismatch" | "input_prefix_mismatch" | "no_response_id";
+type DeltaSkipReason =
+	| "no_continuation"
+	| "shape_mismatch"
+	| "input_prefix_mismatch"
+	| "no_response_id"
+	| "empty_tool_search_output";
+
+/**
+ * The server does not count a `tool_search_output` with no tools as the answer to its call: a delta that carries one
+ * is refused with "No tool output found for function call". A search that loaded nothing goes out as a full request.
+ */
+function deltaAnswersSearchWithNothing(delta: ResponseInput): boolean {
+	return delta.some((item) => item.type === "tool_search_output" && item.tools.length === 0);
+}
 
 function prepareFullWebSocketRequest(entry: CachedWebSocketConnection, body: RequestBody): PreparedWebSocketRequest {
 	const continuation = entry.continuation;
@@ -2199,6 +2212,7 @@ function prepareFullWebSocketRequest(entry: CachedWebSocketConnection, body: Req
 		entry.continuation = undefined;
 		return full("input_prefix_mismatch");
 	}
+	if (deltaAnswersSearchWithNothing(delta)) return full("empty_tool_search_output");
 	if (!continuation.lastResponseId) {
 		entry.continuation = undefined;
 		return full("no_response_id");
@@ -2247,6 +2261,7 @@ function prepareIncrementalWebSocketRequest(
 		}
 	}
 	const delta = tailInput.slice(continuation.responseItems.length);
+	if (deltaAnswersSearchWithNothing(delta)) return undefined;
 	return {
 		requestBody: { ...tailBody, previous_response_id: continuation.lastResponseId, input: delta },
 		currentInputTail: appendCachedWebSocketInput(continuation.baselineInputTail, delta),

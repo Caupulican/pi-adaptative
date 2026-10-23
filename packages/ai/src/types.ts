@@ -378,8 +378,8 @@ export interface ToolCall {
 	source?: "text-protocol";
 	errorMessage?: string;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
-	/** Native client tool-search identity and definitions captured from its accepted request. */
-	toolSearch?: ToolSearchResult & { id: string };
+	/** Client tool-search definitions captured from its accepted request, with the native item id when the call was one. */
+	toolSearch?: ToolSearchResult & { id?: string };
 }
 
 export interface UsageCredit {
