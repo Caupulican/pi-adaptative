@@ -14,6 +14,12 @@ import type {
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
 import { calculateCost } from "../models.ts";
+import {
+	isToolSchemaSearchDetails,
+	searchDeferredToolSchemas,
+	TOOL_SCHEMA_SEARCH_NAME,
+	type ToolSchemaDisclosurePlan,
+} from "../tool-schema-disclosure.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -113,6 +119,12 @@ export interface ConvertResponsesMessagesOptions {
 	includeMessageType?: boolean;
 	requestFormat?: "openai" | "xai-cli";
 	toolNameMap?: ToolNameMap;
+	/**
+	 * Client-executed tool search (ChatGPT Codex). A `tool_search` call and its result are sent as
+	 * `tool_search_call` / `tool_search_output` items, and the output carries the loaded definitions, so the
+	 * request's tool list never changes.
+	 */
+	toolSearch?: ToolSchemaDisclosurePlan;
 }
 
 interface InputTokenDetailsWithOrchestration {
@@ -331,6 +343,18 @@ export function convertResponsesMessages<TApi extends Api>(
 					const [callId, itemIdRaw] = toolCall.id.split("|");
 					let itemId: string | undefined = itemIdRaw;
 
+					if (options?.toolSearch?.enabled && toolCall.name === TOOL_SCHEMA_SEARCH_NAME) {
+						// The server's item id is not resent: the call is identified by its call id.
+						output.push({
+							type: "tool_search_call",
+							call_id: callId,
+							execution: "client",
+							status: "completed",
+							arguments: toolCall.arguments,
+						} as ResponseInput[number]);
+						continue;
+					}
+
 					// For different-model messages, set id to undefined to avoid pairing validation.
 					// OpenAI tracks which fc_xxx IDs were paired with rs_xxx reasoning items.
 					// By omitting the id, we avoid triggering that validation (like cross-provider does).
@@ -350,6 +374,26 @@ export function convertResponsesMessages<TApi extends Api>(
 			if (output.length === 0) continue;
 			messages.push(...output);
 		} else if (msg.role === "toolResult") {
+			if (
+				options?.toolSearch?.enabled &&
+				msg.toolName === TOOL_SCHEMA_SEARCH_NAME &&
+				isToolSchemaSearchDetails(msg.details)
+			) {
+				const [searchCallId] = (msg.toolCallId || "").split("|");
+				const matches = searchDeferredToolSchemas(options.toolSearch, msg.details.query, msg.details.maxResults);
+				messages.push({
+					type: "tool_search_output",
+					call_id: searchCallId,
+					status: "completed",
+					execution: "client",
+					tools: convertResponsesTools(matches, { toolNameMap: options.toolNameMap }).map((tool) => ({
+						...tool,
+						defer_loading: true,
+					})),
+				} as ResponseInput[number]);
+				msgIndex++;
+				continue;
+			}
 			const textResult = joinTextContent(msg.content);
 			const hasImages = msg.content.some((c): c is ImageContent => c.type === "image");
 			const hasText = textResult.length > 0;

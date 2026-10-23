@@ -2,6 +2,7 @@
 
 ### Added
 
+- ChatGPT Codex GPT-6 models use the client-executed `tool_search` the Codex CLI uses. A request carries only `read`, `bash`, `edit`, `write` and `tool_search`; the model searches for any other tool and the result returns its definition in a `tool_search_output` item. The request's tool list never changes, so the provider cache holds, and about 8k tokens of schemas stop riding every request. `/context` counts only the resident schemas and marks the rest as deferred.
 - A provider prompt cache matches the longest byte-identical prefix, so the session now compares each provider request with its previous one and warns when the system prompt, the tool set, a tool's schema, the tool order or (within a turn) an earlier message changed, naming the first segment and its size change. `PI_CACHE_TRACE=<file>` also appends one JSON line per request with a hash and size per segment, in wire order, without prompt text.
 
 ### Fixed

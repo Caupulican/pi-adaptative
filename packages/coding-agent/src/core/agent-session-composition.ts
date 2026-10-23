@@ -11,6 +11,7 @@ import {
 	listOpenAICodexRateLimitResetCredits,
 	type Message,
 	type Model,
+	planToolSchemaDisclosure,
 } from "@caupulican/pi-ai";
 import type { Agent } from "../kernel/agent.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
@@ -643,8 +644,12 @@ export function buildSessionContextCompositionReport(deps: SessionContextComposi
 				item.enforced && item.projectionPlacement === "tail_overlay" && typeof item.originalChars === "number",
 		)
 		.reduce((sum, item) => sum + projectionTokens(item), 0);
+	const deferredToolNames = deps.model
+		? planToolSchemaDisclosure(deps.model, deps.agent.state.tools).deferredToolNames
+		: undefined;
 	return buildContextCompositionReport({
 		systemPrompt: requestSystemPrompt ?? "",
+		deferredToolNames,
 		tools: deps.agent.state.tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,

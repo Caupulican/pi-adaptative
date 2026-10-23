@@ -92,11 +92,21 @@ function disclosureMetrics(
 	};
 }
 
-/** Capability gate shared by activation and the Anthropic adapter. Unknown endpoints fail open. */
+/**
+ * ChatGPT Codex serves client-executed `tool_search` (verified against `gpt-6.1-sol`): the request carries only the
+ * resident tools plus the search spec, a search answers with a `tool_search_output` item that holds the loaded
+ * definitions, and the request's tool list never changes. GPT-6 models are the ones verified; others stay on full schemas.
+ */
+function supportsCodexToolSearch(model: ToolSchemaDisclosureModel): boolean {
+	return model.provider === "openai-codex" && /^gpt-[6-9](?:[.-]|$)/u.test(model.id);
+}
+
+/** Capability gate shared by activation and the provider adapters. Unknown endpoints fail open. */
 export function supportsToolSchemaDisclosure(model: ToolSchemaDisclosureModel): boolean {
-	if (model.api !== "anthropic-messages") return false;
+	if (model.api !== "anthropic-messages" && model.api !== "openai-codex-responses") return false;
 	const override = (model.compat as { supportsToolSearch?: boolean } | undefined)?.supportsToolSearch;
 	if (override !== undefined) return override;
+	if (model.api === "openai-codex-responses") return supportsCodexToolSearch(model);
 	return (
 		model.provider === "anthropic" && isFirstPartyAnthropicHost(model.baseUrl) && supportsToolReferences(model.id)
 	);

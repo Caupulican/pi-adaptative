@@ -23,6 +23,12 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 
 import { isModelServiceTierAdvertised } from "../model-capabilities.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
+import {
+	measureToolSchemaDisclosureRequest,
+	planToolSchemaDisclosure,
+	TOOL_SCHEMA_SEARCH_NAME,
+	type ToolSchemaDisclosurePlan,
+} from "../tool-schema-disclosure.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -355,6 +361,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			if (!apiKey) {
 				throw new Error(`No API key for provider: ${model.provider}`);
 			}
+			const requestStartedAt = Date.now();
 
 			const accountId = requireOpenAICodexAccountId(apiKey);
 			const cacheSessionId =
@@ -529,6 +536,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					}
 
 					assertSuccessfulTerminalResponse(output);
+					appendToolSearchDiagnostic(output, model, context, requestStartedAt);
 					stream.push({
 						type: "done",
 						reason: output.stopReason as "stop" | "length" | "toolUse",
@@ -659,6 +667,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			markSseSuccess(cacheSessionId);
 
 			assertSuccessfulTerminalResponse(output);
+			appendToolSearchDiagnostic(output, model, context, requestStartedAt);
 			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
 			stream.end();
 		} catch (error) {
@@ -701,6 +710,64 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 // Request Building
 // ============================================================================
 
+/** The deferred-schema plan when this model serves client-executed tool search and enough tools are active. */
+function planCodexToolSearch(
+	model: Model<"openai-codex-responses">,
+	context: Pick<Context, "tools">,
+): ToolSchemaDisclosurePlan | undefined {
+	if (!context.tools || context.tools.length === 0) return undefined;
+	const plan = planToolSchemaDisclosure(model, context.tools);
+	return plan.enabled ? plan : undefined;
+}
+
+/**
+ * Request tools under tool search: the resident tools and the search spec. Deferred tools are left out; a search
+ * returns their definitions in a `tool_search_output` item, so this list is the same on every request.
+ */
+function convertCodexToolSearchTools(
+	plan: ToolSchemaDisclosurePlan,
+	toolNameMap: ReturnType<typeof createOpenAIResponsesToolNameMap>,
+	lite: boolean,
+): OpenAITool[] {
+	const searchTools: OpenAITool[] = [];
+	const functionTools: OpenAITool[] = [];
+	for (const tool of plan.tools) {
+		if (tool.name === TOOL_SCHEMA_SEARCH_NAME) {
+			searchTools.push({
+				type: "tool_search",
+				execution: "client",
+				description: tool.description,
+				parameters: tool.parameters,
+			});
+		} else if (plan.eagerToolNames.has(tool.name)) {
+			functionTools.push(...convertResponsesTools([tool], { strict: lite ? false : null, toolNameMap }));
+		}
+	}
+	// Responses Lite carries every function in one namespace, next to the search spec.
+	return lite ? [...groupCodexResponsesLiteTools(functionTools), ...searchTools] : [...functionTools, ...searchTools];
+}
+
+/** Records what the tool search saved and how it resolved, the same record the Anthropic adapter writes. */
+function appendToolSearchDiagnostic(
+	output: AssistantMessage,
+	model: Model<"openai-codex-responses">,
+	context: Context,
+	startedAt: number,
+): void {
+	const plan = planCodexToolSearch(model, context);
+	if (!plan) return;
+	appendAssistantMessageDiagnostic(output, {
+		type: "tool_schema_disclosure",
+		timestamp: Date.now(),
+		details: {
+			provider: model.provider,
+			model: model.id,
+			...measureToolSchemaDisclosureRequest(plan, context.messages),
+			providerResponseMs: Math.max(0, Date.now() - startedAt),
+		},
+	});
+}
+
 function buildRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
@@ -709,18 +776,21 @@ function buildRequestBody(
 ): RequestBody {
 	const lite = model.openaiResponsesLite === true;
 	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
+	const toolSearch = planCodexToolSearch(model, context);
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		imageDetail: lite ? null : "auto",
 		includeMessageType: lite,
 		toolNameMap,
+		toolSearch,
 	});
 	const configuredInstructions = buildResponsesInstructions(context);
 	const instructions = configuredInstructions || "You are a helpful assistant.";
-	const convertedTools =
-		context.tools && context.tools.length > 0
+	const convertedTools = toolSearch
+		? convertCodexToolSearchTools(toolSearch, toolNameMap, lite)
+		: context.tools && context.tools.length > 0
 			? convertResponsesTools(context.tools, { strict: lite ? false : null, toolNameMap })
 			: [];
-	const tools = lite ? groupCodexResponsesLiteTools(convertedTools) : convertedTools;
+	const tools = lite && !toolSearch ? groupCodexResponsesLiteTools(convertedTools) : convertedTools;
 	const input: ResponseInput = lite
 		? [
 				{
@@ -961,10 +1031,32 @@ function formatCodexEventError(prefix: string, event: Record<string, unknown>, c
 	return `${prefix}${metadata.length > 0 ? ` (${metadata.join(", ")})` : ""}: ${detail}`;
 }
 
+/**
+ * A `tool_search_call` item is the model calling the host's search tool. It enters the shared stream processor as the
+ * function call it is, named for that tool; the host runs it like any other tool and the history conversion sends the
+ * result back as a `tool_search_output` item.
+ */
+function normalizeToolSearchCallItem<T>(item: T): T {
+	if (!item || typeof item !== "object" || (item as { type?: unknown }).type !== "tool_search_call") return item;
+	const call = item as { id?: string; call_id?: string | null; arguments?: unknown; status?: string };
+	return {
+		type: "function_call",
+		id: call.id,
+		call_id: call.call_id ?? call.id,
+		name: TOOL_SCHEMA_SEARCH_NAME,
+		arguments: typeof call.arguments === "string" ? call.arguments : JSON.stringify(call.arguments ?? {}),
+		status: call.status,
+	} as T;
+}
+
 async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): AsyncGenerator<ResponseStreamEvent> {
-	for await (const event of events) {
-		const type = typeof event.type === "string" ? event.type : undefined;
+	for await (const rawEvent of events) {
+		const type = typeof rawEvent.type === "string" ? rawEvent.type : undefined;
 		if (!type) continue;
+		const event =
+			type === "response.output_item.added" || type === "response.output_item.done"
+				? { ...rawEvent, item: normalizeToolSearchCallItem(rawEvent.item) }
+				: rawEvent;
 
 		if (type === "error") {
 			const nestedError =
@@ -1012,7 +1104,13 @@ async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): 
 		if (type === "response.done" || type === "response.completed" || type === "response.incomplete") {
 			const response = (event as { response?: { status?: unknown } }).response;
 			const normalizedResponse = response
-				? { ...response, status: normalizeCodexStatus(response.status) }
+				? {
+						...response,
+						status: normalizeCodexStatus(response.status),
+						...(Array.isArray((response as { output?: unknown }).output)
+							? { output: (response as { output: unknown[] }).output.map(normalizeToolSearchCallItem) }
+							: {}),
+					}
 				: response;
 			yield { ...event, type: "response.completed", response: normalizedResponse } as ResponseStreamEvent;
 			return;
@@ -2195,6 +2293,7 @@ async function processWebSocketStream(
 		} else if (useCachedContext && entry && output.responseId) {
 			const responseItems = convertResponsesMessages(model, { messages: [output] }, CODEX_TOOL_CALL_PROVIDERS, {
 				toolNameMap,
+				toolSearch: planCodexToolSearch(model, context),
 			}).filter((item) => item.type !== "function_call_output");
 			entry.continuation = {
 				requestShape: requestBodyWithoutInput(requestBody),

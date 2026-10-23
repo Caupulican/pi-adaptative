@@ -27,6 +27,8 @@ export interface ToolCompositionRow {
 	/** Estimated tokens for the tool's name+description+schema as sent to the provider. */
 	schemaTokens: number;
 	source: "built-in" | "extension";
+	/** Not sent with the request: the provider loads its schema when a tool search returns it. */
+	deferred?: true;
 }
 
 export interface ExtensionCompositionRow {
@@ -103,6 +105,8 @@ export interface BuildContextCompositionInput {
 		parameters?: unknown;
 		source?: "built-in" | "extension";
 	}>;
+	/** Tools the provider hides behind tool search: listed, but not part of the per-request schema cost. */
+	deferredToolNames?: ReadonlySet<string>;
 	extensions: Array<{
 		name: string;
 		path: string;
@@ -245,10 +249,12 @@ export function buildContextCompositionReport(input: BuildContextCompositionInpu
 				}),
 			),
 			source: tool.source ?? ("built-in" as const),
+			...(input.deferredToolNames?.has(tool.name) ? { deferred: true as const } : {}),
 		}))
-		.sort((a, b) => b.schemaTokens - a.schemaTokens);
-	const toolSchemaTokens = tools.reduce((sum, tool) => sum + tool.schemaTokens, 0);
-	const toolTokensByName = new Map(tools.map((tool) => [tool.name, tool.schemaTokens]));
+		.sort((a, b) => Number(a.deferred === true) - Number(b.deferred === true) || b.schemaTokens - a.schemaTokens);
+	const resident = tools.filter((tool) => tool.deferred !== true);
+	const toolSchemaTokens = resident.reduce((sum, tool) => sum + tool.schemaTokens, 0);
+	const toolTokensByName = new Map(resident.map((tool) => [tool.name, tool.schemaTokens]));
 
 	const extensions: ExtensionCompositionRow[] = input.extensions
 		.map((extension) => ({
@@ -293,7 +299,7 @@ export function buildContextCompositionReport(input: BuildContextCompositionInpu
 
 	const observations: string[] = [...(input.extraObservations ?? [])];
 	const toolSchemaDisclosure = latestToolSchemaDisclosure(input.messages);
-	const heaviestTool = tools[0];
+	const heaviestTool = resident[0];
 	if (heaviestTool && toolSchemaTokens > 0 && heaviestTool.schemaTokens > Math.max(500, toolSchemaTokens * 0.3)) {
 		observations.push(
 			`tool "${heaviestTool.name}" alone is ~${heaviestTool.schemaTokens} tokens of schema on EVERY request — trim its description/schema if you own it`,
@@ -360,10 +366,10 @@ export function formatContextCompositionDashboard(report: ContextCompositionRepo
 		}`,
 		"",
 		`system prompt: ~${report.systemPromptTokens} tokens (${report.systemPromptChars} chars)`,
-		`tool schemas:  ~${report.toolSchemaTokens} tokens across ${report.tools.length} active tool(s)`,
+		`tool schemas:  ~${report.toolSchemaTokens} tokens across ${report.tools.filter((tool) => tool.deferred !== true).length} of ${report.tools.length} active tool(s) (the rest load through tool search)`,
 	];
 	for (const tool of report.tools.slice(0, maxToolRows)) {
-		lines.push(`  - ${tool.name}: ~${tool.schemaTokens} tok [${tool.source}]`);
+		lines.push(`  - ${tool.name}: ~${tool.schemaTokens} tok [${tool.source}${tool.deferred ? ", deferred" : ""}]`);
 	}
 	if (report.tools.length > maxToolRows) {
 		const rest = report.tools.slice(maxToolRows).reduce((sum, tool) => sum + tool.schemaTokens, 0);
