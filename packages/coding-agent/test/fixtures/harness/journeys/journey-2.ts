@@ -23,11 +23,9 @@ export async function runJourney2(): Promise<void> {
 			modelOptions: { root: { contextWindow: 131_072 } },
 			// Exact expected refusal of the E7 negative control: the busy, dead-owner A is never resumed, and nothing else is allowed.
 			warningAllowances: [
-				// The prompt-prefix monitor's two intentional rewrites of an already-sent request, each reported once per rewrite: a halted
-				// worker's closing turn adds its HALT CLOSING TURN section to the system prompt (and the next request drops it), and a
-				// worker's reconciled transcript replaces an earlier user message of the previous request with a shorter one.
+				// The prompt-prefix monitor's intentional rewrite of an already-sent request, reported once per rewrite: a halted
+				// worker's closing turn adds its HALT CLOSING TURN section to the system prompt (and the next request drops it).
 				/^Prompt cache prefix changed between requests: system prompt changed \(\d+ to \d+ chars\) from char \d+ of \d+: .*HALT CLOSING TURN.*\. The provider re-bills the prompt from that point at full price\.$/,
-				/^Prompt cache prefix changed between requests: message \d+:user changed \(\d+ to \d+ chars\)\. The provider re-bills the prompt from that point at full price\.$/,
 				// The continuous-chat phase turns memory retrieval off mid-read and back on, so the memory tool leaves and returns: the
 				// system prompt's tool list changes between requests at its memory/delegate entry, in either direction.
 				/^Prompt cache prefix changed between requests: system prompt changed \(\d+ to \d+ chars\) from char \d+ of \d+: ".*\\n- (?:delegate|memory): .*" became ".*\\n- (?:delegate|memory): .*"\. The provider re-bills the prompt from that point at full price\.$/,

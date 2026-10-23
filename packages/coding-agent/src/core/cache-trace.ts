@@ -5,10 +5,14 @@ import type { Api, Context, Message, Model } from "@caupulican/pi-ai";
 /**
  * Prompt-prefix stability. A provider caches the longest byte-identical prefix of a request, so a
  * miss starts at the first segment (system prompt, tool, message) that differs from the previous
- * request. Within one turn the system prompt, the tool list and every earlier message must be
- * unchanged (OpenAI Codex tracks the same invariant as `tools_changed` and tests that tools are
- * identical across requests). The monitor compares each request with the session's previous one and
+ * request. The system prompt and the tool list must not change between requests (OpenAI Codex tracks
+ * the same invariant as `tools_changed` and tests that tools are identical across requests), and the
+ * chat view may only grow. The monitor compares each request with the session's previous one and
  * names the first segment that changed, so a cache miss is reported when it happens.
+ *
+ * It does not judge rewrites of already-sent messages. Those belong to the context shrinker, and the
+ * cache custody guard classifies each one as a priced (sanctioned) rewrite or an unsanctioned break
+ * and records it in the decision ledger; a second opinion here only flagged priced rewrites.
  *
  * `PI_CACHE_TRACE=<file>` additionally appends one JSON line per request with a hash and size per
  * segment, in wire order. No prompt text is written.
@@ -40,8 +44,6 @@ interface RequestFingerprint {
 	viewText: string | undefined;
 	tools: SegmentFingerprint[];
 	messages: SegmentFingerprint[];
-	/** True when the request continues a turn: its last message is a tool result. */
-	continuation: boolean;
 }
 
 const CHAT_VIEW_OPENING = "<chat>\n";
@@ -83,7 +85,6 @@ function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerp
 		messages: context.messages.map((message, index) =>
 			segment(`${index}:${message.role}`, { role: message.role, content: message.content }),
 		),
-		continuation: context.messages.at(-1)?.role === "toolResult",
 	};
 }
 
@@ -121,21 +122,10 @@ function prefixChange(previous: RequestFingerprint, current: RequestFingerprint)
 		if (before[0] !== after[0]) return `tool order changed (${before[0]} became ${after[0]} at position ${index})`;
 		if (before[1] !== after[1]) return `tool ${before[0]} changed (${before[2]} to ${after[2]} chars)`;
 	}
-	// Earlier messages are only fixed within a turn. A new turn rebuilds its frame, but the chat view in it must keep
-	// the previous view as its prefix.
-	if (!current.continuation) {
-		return previous.viewText !== undefined && current.viewText !== undefined
-			? chatViewChange(previous.viewText, current.viewText)
-			: undefined;
-	}
-	for (let index = 0; index < previous.messages.length; index++) {
-		const before = previous.messages[index];
-		const after = current.messages[index];
-		if (before === undefined) break;
-		if (after === undefined) return `message ${before[0]} is missing from the continuation`;
-		if (before[1] !== after[1]) return `message ${before[0]} changed (${before[2]} to ${after[2]} chars)`;
-	}
-	return undefined;
+	// The chat view, within a turn and across turns, must keep the previous view as its prefix.
+	return previous.viewText !== undefined && current.viewText !== undefined
+		? chatViewChange(previous.viewText, current.viewText)
+		: undefined;
 }
 
 export class PromptPrefixMonitor {
