@@ -34,6 +34,8 @@ function segment(label: string, value: unknown): SegmentFingerprint {
 interface RequestFingerprint {
 	model: string;
 	system: SegmentFingerprint;
+	/** The system prompt text, kept only to show where it changed; never written to the trace file. */
+	systemText: string;
 	tools: SegmentFingerprint[];
 	messages: SegmentFingerprint[];
 	/** True when the request continues a turn: its last message is a tool result. */
@@ -44,6 +46,7 @@ function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerp
 	return {
 		model: `${model.provider}/${model.id}`,
 		system: segment("system", context.systemPrompt ?? ""),
+		systemText: context.systemPrompt ?? "",
 		tools: (context.tools ?? []).map((tool) => segment(tool.name, tool)),
 		messages: context.messages.map((message, index) =>
 			segment(`${index}:${message.role}`, { role: message.role, content: message.content }),
@@ -52,11 +55,25 @@ function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerp
 	};
 }
 
+const CHANGE_SNIPPET_CHARS = 70;
+
+function snippet(text: string, from: number): string {
+	return JSON.stringify(text.slice(Math.max(0, from - 20), from + CHANGE_SNIPPET_CHARS));
+}
+
+/** Where two texts first differ, with a short bounded excerpt of each side. */
+function describeTextChange(before: string, after: string): string {
+	let index = 0;
+	const limit = Math.min(before.length, after.length);
+	while (index < limit && before.charCodeAt(index) === after.charCodeAt(index)) index++;
+	return `from char ${index} of ${before.length}: ${snippet(before, index)} became ${snippet(after, index)}`;
+}
+
 /** Why `current` does not extend `previous`'s cached prefix, or undefined when it does. */
 function prefixChange(previous: RequestFingerprint, current: RequestFingerprint): string | undefined {
 	if (previous.model !== current.model) return undefined;
 	if (previous.system[1] !== current.system[1]) {
-		return `system prompt changed (${previous.system[2]} to ${current.system[2]} chars)`;
+		return `system prompt changed (${previous.system[2]} to ${current.system[2]} chars) ${describeTextChange(previous.systemText, current.systemText)}`;
 	}
 	const previousNames = previous.tools.map(([name]) => name);
 	const currentNames = current.tools.map(([name]) => name);
@@ -115,6 +132,7 @@ export class PromptPrefixMonitor {
 	private writeTrace(sessionId: string | undefined, fingerprint: RequestFingerprint): void {
 		const path = process.env.PI_CACHE_TRACE;
 		if (!path) return;
-		appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), session: sessionId, ...fingerprint })}\n`);
+		const { systemText: _systemText, ...traced } = fingerprint;
+		appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), session: sessionId, ...traced })}\n`);
 	}
 }
