@@ -2,7 +2,7 @@
 
 ### Added
 
-- The prompt-prefix warning also covers the turn boundary: a new turn's ICM chat view must keep the previous turn's view as its prefix (it may only grow at its end). When it does not, the warning gives the character and line where the view first changed and a short excerpt of both sides. Whole-message fingerprints cannot tell this case from plain growth.
+- The prompt-prefix warning also covers the turn boundary: a new turn's ICM chat view must keep the previous turn's view as its prefix (it may only grow at its end; the last tenth may change, where a pending line becomes its summary). When an earlier part changes, the warning gives the character and line where the view first changed and a short excerpt of both sides. Whole-message fingerprints cannot tell this case from plain growth.
 
 ## [0.104.4] - 2026-10-23
 

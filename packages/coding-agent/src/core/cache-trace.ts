@@ -45,7 +45,9 @@ interface RequestFingerprint {
 }
 
 const CHAT_VIEW_OPENING = "<chat>\n";
-const CHAT_VIEW_CLOSING = "\n</chat>";
+const CHAT_VIEW_CLOSING = "</chat>";
+/** A change in the last tenth of the previous view (a pending line becoming its summary) loses little; earlier ones are reported. */
+const CHAT_VIEW_TAIL_FRACTION = 0.1;
 
 /** The text of the ICM chat view when the request's first message is that view; undefined otherwise. */
 function chatViewText(messages: readonly Message[]): string | undefined {
@@ -57,10 +59,12 @@ function chatViewText(messages: readonly Message[]): string | undefined {
 
 /**
  * A new turn rebuilds its chat view. A provider caches the byte-identical prefix, so the cache survives the turn
- * only while the view grows at its end: the old text, up to its closing tag, must open the new text.
+ * only while the view grows at its end: the old text, up to its closing tag, must open the new text, apart from
+ * the old tail where a pending line may turn into its summary.
  */
 function chatViewChange(before: string, after: string): string | undefined {
-	const stable = before.endsWith(CHAT_VIEW_CLOSING) ? before.length - CHAT_VIEW_CLOSING.length : before.length;
+	const body = before.endsWith(CHAT_VIEW_CLOSING) ? before.length - CHAT_VIEW_CLOSING.length : before.length;
+	const stable = Math.floor(body * (1 - CHAT_VIEW_TAIL_FRACTION));
 	let index = 0;
 	const limit = Math.min(before.length, after.length);
 	while (index < limit && before.charCodeAt(index) === after.charCodeAt(index)) index++;
