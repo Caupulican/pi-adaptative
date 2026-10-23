@@ -44,6 +44,7 @@ import type { GoalState } from "./goals/goal-state.ts";
 import { proveRequirementChecks } from "./goals/prove-requirement-checks.ts";
 import { runRequirementCheck } from "./goals/requirement-checks.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
+import { type ContinuousChatRequestSource, splitContinuousChatRequest } from "./memory/continuous-chat-projection.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import { assertCurrentGoalObjective } from "./objective-execution/current-objective-execution.ts";
 import { createRepoGitDelivery } from "./objective-execution/delivery-proof.ts";
@@ -593,6 +594,7 @@ export interface SessionContextCompositionDeps {
 		lastSkipReason?: string;
 	};
 	getSpawnedUsage(): SpawnedUsageTotals;
+	continuousChat(): ContinuousChatRequestSource;
 	getMemoryPromptInclusionReport(): MemoryPromptInclusionReport;
 	getCurrentForegroundEnvelope(): CapabilityEnvelope | undefined;
 	buildForegroundEnvelopeFromState(): CapabilityEnvelope;
@@ -604,8 +606,10 @@ export function buildSessionContextCompositionReport(deps: SessionContextComposi
 	// mark lives inside the agent-core loop for the duration of one active plan() call and is
 	// not readable from here, so this shows full packing potential (0 = no freeze) rather than a
 	// stale or guessed mark.
-	const gcResult = deps.applyContextGc(rawMessages, false, 0);
-	const requestMessages = gcResult.messages;
+	// Under ICM a request carries the chat frame and the running turn's own messages, never durable history.
+	const chatRequest = splitContinuousChatRequest(deps.continuousChat(), rawMessages);
+	const gcResult = deps.applyContextGc(chatRequest ? chatRequest.own : rawMessages, false, 0);
+	const requestMessages = chatRequest ? [...chatRequest.frame, ...gcResult.messages] : gcResult.messages;
 	const requestSystemPrompt = deps.skillVault.previewRequestSystemPrompt(deps.systemPrompt);
 	const extensions = deps.resourceLoader.getExtensions().extensions;
 	const extensionToolNames = new Set(extensions.flatMap((extension) => [...extension.tools.keys()]));

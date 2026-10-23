@@ -8,7 +8,7 @@ import type { AgentContextPlanFn } from "../../kernel/loop-config.ts";
 import { createCustomMessage } from "../../kernel/messages.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { ContinuousChatAudit } from "../extensions/builtin.ts";
-import type { IcmTurnHandle } from "./continuous-chat-turn-coordinator.ts";
+import type { IcmTurnCoordinator, IcmTurnHandle } from "./continuous-chat-turn-coordinator.ts";
 
 export const CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE = "continuous_chat_view";
 export const CONTINUOUS_CHAT_STATE_CUSTOM_TYPE = "continuous_chat_state";
@@ -78,17 +78,60 @@ export function continuousChatFrameMessages(
 	handle: Pick<IcmTurnHandle, "boundary" | "startedAt">,
 	stateText: string,
 ): AgentMessage[] {
-	const timestamp = new Date(handle.startedAt).toISOString();
+	return continuousChatViewFrameMessages(handle.boundary.view, handle.startedAt, stateText);
+}
+
+function continuousChatViewFrameMessages(view: string, startedAt: number, stateText: string): AgentMessage[] {
+	const timestamp = new Date(startedAt).toISOString();
 	return [
 		createCustomMessage(
 			CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE,
-			renderContinuousChatViewBlocks(handle.boundary.view),
+			renderContinuousChatViewBlocks(view),
 			false,
 			undefined,
 			timestamp,
 		),
 		createCustomMessage(CONTINUOUS_CHAT_STATE_CUSTOM_TYPE, stateText, false, undefined, timestamp),
 	];
+}
+
+/** The projection and turns a dashboard reads to measure what a request carries under ICM. */
+export interface ContinuousChatRequestSource {
+	wire: ContinuousChatWire | undefined;
+	host: { turns: Pick<IcmTurnCoordinator, "current" | "birthView"> } | undefined;
+}
+
+/**
+ * What a request carries under ICM, split for measurement: the frame (turn view and live state) and the running turn's
+ * own messages. Durable history before the turn is not sent, so it is not part of either. Between turns no request is
+ * sent; the split then previews the next turn, which opens with the latest pinned view and no messages of its own.
+ * Absent when no chat projection owns the wire, so the session's own history is what a request carries.
+ */
+export function splitContinuousChatRequest(
+	source: ContinuousChatRequestSource,
+	messages: readonly AgentMessage[],
+): { frame: AgentMessage[]; own: AgentMessage[] } | undefined {
+	if (source.wire?.kind !== "chat" || source.host === undefined) return undefined;
+	const turn = source.host.turns.current();
+	if (turn !== undefined) {
+		const resolved = resolveContinuousChatTurnStart(turn, messages);
+		return {
+			frame: continuousChatFrameMessages(turn, renderContinuousChatTurnState(turn)),
+			own: "error" in resolved ? [] : messages.slice(resolved.index),
+		};
+	}
+	const next = source.host.turns.birthView();
+	return {
+		frame:
+			next === undefined
+				? []
+				: continuousChatViewFrameMessages(
+						next.view,
+						next.timestamp,
+						renderContinuousChatTurnState({ startedAt: next.timestamp }),
+					),
+		own: [],
+	};
 }
 
 /**

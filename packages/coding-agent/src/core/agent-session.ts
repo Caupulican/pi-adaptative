@@ -3395,6 +3395,7 @@ export class AgentSession {
 			getPromptEnforcementReport: () => this.getPromptEnforcementReport(),
 			getContextCurationStatus: () => this.getContextCurationStatus(),
 			getSpawnedUsage: () => this.getSpawnedUsage(),
+			continuousChat: () => ({ wire: this._continuousChatWire(), host: this._memory.continuousChatHost() }),
 			getMemoryPromptInclusionReport: () => this.getMemoryPromptInclusionReport(),
 			getCurrentForegroundEnvelope: () => this._currentForegroundEnvelope,
 			buildForegroundEnvelopeFromState: () => this._buildForegroundEnvelopeFromState(),
