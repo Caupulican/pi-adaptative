@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Codex tool search under Responses Lite (GPT-6 models) works again. The server delivers the search there as a plain function call, which was never captured, so every result went back as an empty `tool_search_output`: the model never received the tools it searched for and kept searching, and the empty output made the next websocket delta fail with "No tool output found for function call". Lite searches are now captured like native ones, and a delta that would carry an empty search output is sent as a full request instead.
+
 ## [0.104.5] - 2026-10-23
 
 ### Fixed
