@@ -63,6 +63,7 @@ import {
 	convertResponsesMessages,
 	convertResponsesTools,
 	createOpenAIResponsesToolNameMap,
+	type OpenAIResponsesStreamOptions,
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
 import { buildClampedSimpleOptions } from "./provider-runtime.ts";
@@ -129,6 +130,8 @@ type CodexRateLimitSnapshot = {
 	primary?: CodexRateLimitWindow;
 	secondary?: CodexRateLimitWindow;
 };
+
+type CodexCreditsSnapshot = { hasCredits: boolean; unlimited: boolean; balance?: string };
 
 interface RequestBody {
 	model: string;
@@ -272,9 +275,7 @@ function parseCodexSubscriptionRateLimits(headers: Headers): CodexRateLimitSnaps
 }
 
 /** Codex's credits beside the windows: usage past a window draws on them. Both flags or nothing. */
-function parseCodexCreditsSnapshot(
-	headers: Headers,
-): { hasCredits: boolean; unlimited: boolean; balance?: string } | undefined {
+function parseCodexCreditsSnapshot(headers: Headers): CodexCreditsSnapshot | undefined {
 	const flag = (name: string): boolean | undefined => {
 		const raw = headers.get(name)?.trim().toLowerCase();
 		return raw === "true" || raw === "1" ? true : raw === "false" || raw === "0" ? false : undefined;
@@ -287,8 +288,19 @@ function parseCodexCreditsSnapshot(
 }
 
 function appendCodexSubscriptionRateLimitDiagnostics(output: AssistantMessage, headers: Headers): void {
-	const snapshots = parseCodexSubscriptionRateLimits(headers);
-	const credits = parseCodexCreditsSnapshot(headers);
+	appendCodexRateLimitDiagnostic(
+		output,
+		parseCodexSubscriptionRateLimits(headers),
+		parseCodexCreditsSnapshot(headers),
+	);
+}
+
+/** One `openai_codex_subscription_rate_limits` diagnostic, the record the host's limit state reads from either transport. */
+function appendCodexRateLimitDiagnostic(
+	output: AssistantMessage,
+	snapshots: CodexRateLimitSnapshot[],
+	credits: CodexCreditsSnapshot | undefined,
+): void {
 	if (snapshots.length === 0 && !credits) return;
 	output.diagnostics = [
 		...(output.diagnostics ?? []),
@@ -303,6 +315,55 @@ function appendCodexSubscriptionRateLimitDiagnostics(output: AssistantMessage, h
 			},
 		},
 	];
+}
+
+function codexEventRateLimitWindow(value: unknown): CodexRateLimitWindow | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const raw = value as Record<string, unknown>;
+	const window: CodexRateLimitWindow = {};
+	if (typeof raw.used_percent === "number") window.usedPercent = raw.used_percent;
+	if (typeof raw.window_minutes === "number") window.windowMinutes = raw.window_minutes;
+	if (typeof raw.reset_at === "number") window.resetsAt = raw.reset_at;
+	return Object.keys(window).length > 0 ? window : undefined;
+}
+
+/**
+ * The WebSocket carries the subscription windows as `codex.rate_limits` events, where SSE carries them as response
+ * headers (the Codex CLI reads both). They are consumed here, never forwarded, and recorded as the same diagnostic.
+ */
+async function* withCodexRateLimitEvents(
+	events: AsyncIterable<Record<string, unknown>>,
+	output: AssistantMessage,
+): AsyncGenerator<Record<string, unknown>> {
+	for await (const event of events) {
+		if (event.type !== "codex.rate_limits") {
+			yield event;
+			continue;
+		}
+		const details =
+			event.rate_limits && typeof event.rate_limits === "object"
+				? (event.rate_limits as Record<string, unknown>)
+				: {};
+		const limitName = [event.metered_limit_name, event.limit_name].find(
+			(name) => typeof name === "string" && name.length > 0,
+		);
+		const primary = codexEventRateLimitWindow(details.primary);
+		const secondary = codexEventRateLimitWindow(details.secondary);
+		const rawCredits =
+			event.credits && typeof event.credits === "object" ? (event.credits as Record<string, unknown>) : undefined;
+		const credits: CodexCreditsSnapshot | undefined =
+			typeof rawCredits?.has_credits === "boolean" && typeof rawCredits.unlimited === "boolean"
+				? {
+						hasCredits: rawCredits.has_credits,
+						unlimited: rawCredits.unlimited,
+						...(typeof rawCredits.balance === "string" && rawCredits.balance.length > 0
+							? { balance: rawCredits.balance }
+							: {}),
+					}
+				: undefined;
+		const limitId = normalizeCodexLimitId(typeof limitName === "string" ? limitName : "codex");
+		appendCodexRateLimitDiagnostic(output, primary || secondary ? [{ limitId, primary, secondary }] : [], credits);
+	}
 }
 
 /**
@@ -934,14 +995,30 @@ async function processStream(
 	context: Context,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
+	await processResponsesStream(
+		mapCodexEvents(parseSSE(response, options?.signal)),
+		output,
+		stream,
+		model,
+		codexResponsesStreamOptions(model, context, createOpenAIResponsesToolNameMap(context.tools ?? []), options),
+	);
+}
+
+/** The stream-processing options both transports share: tool names, the tool-search snapshot plan and tier pricing. */
+function codexResponsesStreamOptions(
+	model: Model<"openai-codex-responses">,
+	context: Context,
+	toolNameMap: ReturnType<typeof createOpenAIResponsesToolNameMap>,
+	options: OpenAICodexResponsesOptions | undefined,
+): OpenAIResponsesStreamOptions {
 	const toolSearch = planCodexToolSearch(model, context);
-	await processResponsesStream(mapCodexEvents(parseSSE(response, options?.signal)), output, stream, model, {
-		toolNameMap: createOpenAIResponsesToolNameMap(context.tools ?? []),
+	return {
+		toolNameMap,
 		toolSearch: toolSearch ? { plan: toolSearch, strict: model.openaiResponsesLite ? false : null } : undefined,
 		serviceTier: options?.serviceTier,
 		resolveServiceTier: resolveCodexServiceTier,
 		applyServiceTierPricing: (usage, serviceTier) => applyOpenAIServiceTierPricing(usage, serviceTier, model),
-	});
+	};
 }
 
 /**
@@ -1043,10 +1120,9 @@ function formatCodexEventError(prefix: string, event: Record<string, unknown>, c
 }
 
 async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): AsyncGenerator<ResponseStreamEvent> {
-	for await (const rawEvent of events) {
-		const type = typeof rawEvent.type === "string" ? rawEvent.type : undefined;
+	for await (const event of events) {
+		const type = typeof event.type === "string" ? event.type : undefined;
 		if (!type) continue;
-		const event = rawEvent;
 
 		if (type === "error") {
 			const nestedError =
@@ -1080,7 +1156,9 @@ async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): 
 					? "This request was blocked due to a misalignment policy violation."
 					: code === "bio_policy"
 						? "This content was flagged for possible biological risk."
-						: "");
+						: code === "cyber_policy"
+							? "This request has been flagged for possible cybersecurity risk."
+							: "");
 			const explained = misalignment?.detailedExplanation
 				? `${message} ${misalignment.detailedExplanation}`
 				: message;
@@ -2260,22 +2338,15 @@ async function processWebSocketStream(
 	}
 	try {
 		socket.send(JSON.stringify({ type: "response.create", ...wireRequestBody }));
-		const toolSearch = planCodexToolSearch(model, context);
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
-				mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs)),
+				mapCodexEvents(withCodexRateLimitEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs), output)),
 				onStart,
 			),
 			output,
 			stream,
 			model,
-			{
-				toolNameMap,
-				toolSearch: toolSearch ? { plan: toolSearch, strict: model.openaiResponsesLite ? false : null } : undefined,
-				serviceTier: options?.serviceTier,
-				resolveServiceTier: resolveCodexServiceTier,
-				applyServiceTierPricing: (usage, serviceTier) => applyOpenAIServiceTierPricing(usage, serviceTier, model),
-			},
+			codexResponsesStreamOptions(model, context, toolNameMap, options),
 		);
 		if (options?.signal?.aborted) {
 			keepConnection = false;

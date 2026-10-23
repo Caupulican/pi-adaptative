@@ -1,14 +1,16 @@
 ## [Unreleased]
 
+### Fixed
+
+- Codex WebSocket sessions record the subscription rate-limit windows and credits. The server sends them as `codex.rate_limits` events (SSE carries them as response headers); they were dropped, so the host's provider limit state saw no `openai_codex_subscription_rate_limits` diagnostic on the default transport. The events are consumed and recorded as that same diagnostic.
+- A Codex `cyber_policy` rejection with no server message now reads "This request has been flagged for possible cybersecurity risk.", as the Codex CLI does for the other policy codes.
+- Codex client tool searches retain their native item IDs and captured schemas across SSE, WebSocket, and session replay. Rejected or cancelled searches return `tool_search_output` with an empty tools list. Server searches do not run locally. Historical results without captured schemas use an empty tools list; search again to load tools instead of reconstructing past results from the current registry.
+
 ## [0.104.4] - 2026-10-23
 
 ### Added
 
 - `supportsToolSchemaDisclosure` accepts the `openai-codex-responses` API for GPT-6 models (`compat.supportsToolSearch` still overrides). The Codex adapter then sends the resident tools plus a client-executed `tool_search` spec, converts a `tool_search` call and its result to `tool_search_call` and `tool_search_output` items that carry the loaded definitions, and records the same `tool_schema_disclosure` diagnostic as the Anthropic adapter. Responses Lite groups the resident functions in its `functions` namespace next to the search spec.
-
-### Fixed
-
-- Codex client tool searches retain their native item IDs and captured schemas across SSE, WebSocket, and session replay. Rejected or cancelled searches return `tool_search_output` with an empty tools list. Server searches do not run locally. Historical results without captured schemas use an empty tools list; search again to load tools instead of reconstructing past results from the current registry.
 
 ## [0.104.3] - 2026-10-23
 
