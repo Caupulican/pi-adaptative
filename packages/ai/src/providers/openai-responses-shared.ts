@@ -7,6 +7,7 @@ import type {
 	ResponseInputContent,
 	ResponseInputImage,
 	ResponseInputText,
+	ResponseOutputItem,
 	ResponseOutputMessage,
 	ResponseOutputRefusal,
 	ResponseOutputText,
@@ -17,6 +18,7 @@ import { calculateCost } from "../models.ts";
 import {
 	isToolSchemaSearchDetails,
 	searchDeferredToolSchemas,
+	TOOL_SCHEMA_SEARCH_DETAILS_KIND,
 	TOOL_SCHEMA_SEARCH_NAME,
 	type ToolSchemaDisclosurePlan,
 } from "../tool-schema-disclosure.ts";
@@ -97,6 +99,7 @@ function parseTextSignature(
 
 export interface OpenAIResponsesStreamOptions {
 	toolNameMap?: ToolNameMap;
+	toolSearch?: { plan: ToolSchemaDisclosurePlan; strict: boolean | null };
 	serviceTier?: ServiceTier;
 	resolveServiceTier?: (
 		responseServiceTier: ServiceTier | undefined,
@@ -202,6 +205,7 @@ export function convertResponsesMessages<TApi extends Api>(
 	options?: ConvertResponsesMessagesOptions,
 ): ResponseInput {
 	const messages: ResponseInput = [];
+	const nativeSearchCalls = new Map<string, ToolCall["toolSearch"]>();
 	const imageDetail = options?.imageDetail === undefined ? "auto" : options.imageDetail;
 	const useXaiCliFormat = options?.requestFormat === "xai-cli";
 	const includeMessageType = useXaiCliFormat || options?.includeMessageType === true;
@@ -343,15 +347,19 @@ export function convertResponsesMessages<TApi extends Api>(
 					const [callId, itemIdRaw] = toolCall.id.split("|");
 					let itemId: string | undefined = itemIdRaw;
 
-					if (options?.toolSearch?.enabled && toolCall.name === TOOL_SCHEMA_SEARCH_NAME) {
-						// The server's item id is not resent: the call is identified by its call id.
+					if (
+						model.api === "openai-codex-responses" &&
+						(toolCall.toolSearch || (options?.toolSearch?.enabled && toolCall.name === TOOL_SCHEMA_SEARCH_NAME))
+					) {
+						nativeSearchCalls.set(callId, toolCall.toolSearch);
 						output.push({
 							type: "tool_search_call",
+							...(toolCall.toolSearch ? { id: toolCall.toolSearch.id } : {}),
 							call_id: callId,
 							execution: "client",
 							status: "completed",
 							arguments: toolCall.arguments,
-						} as ResponseInput[number]);
+						});
 						continue;
 					}
 
@@ -374,23 +382,22 @@ export function convertResponsesMessages<TApi extends Api>(
 			if (output.length === 0) continue;
 			messages.push(...output);
 		} else if (msg.role === "toolResult") {
-			if (
-				options?.toolSearch?.enabled &&
-				msg.toolName === TOOL_SCHEMA_SEARCH_NAME &&
-				isToolSchemaSearchDetails(msg.details)
-			) {
-				const [searchCallId] = (msg.toolCallId || "").split("|");
-				const matches = searchDeferredToolSchemas(options.toolSearch, msg.details.query, msg.details.maxResults);
+			const [searchCallId] = (msg.toolCallId || "").split("|");
+			if (nativeSearchCalls.has(searchCallId)) {
+				// Old transcripts lack a captured result. Never reconstruct their past from today's registry.
+				const captured = msg.toolSearch ?? nativeSearchCalls.get(searchCallId);
 				messages.push({
 					type: "tool_search_output",
 					call_id: searchCallId,
 					status: "completed",
 					execution: "client",
-					tools: convertResponsesTools(matches, { toolNameMap: options.toolNameMap }).map((tool) => ({
+					tools: convertResponsesTools(msg.isError ? [] : (captured?.tools ?? []), {
+						strict: captured?.strict ?? null,
+					}).map((tool) => ({
 						...tool,
 						defer_loading: true,
 					})),
-				} as ResponseInput[number]);
+				});
 				msgIndex++;
 				continue;
 			}
@@ -487,6 +494,41 @@ export async function processResponsesStream<TApi extends Api>(
 	model: Model<TApi>,
 	options?: OpenAIResponsesStreamOptions,
 ): Promise<void> {
+	const normalizeToolSearchItem = (item: ResponseOutputItem) => {
+		if (item.type !== "tool_search_call") return item;
+		// Server searches do not request a local execution. A missing call id cannot pair with a result.
+		if (item.execution !== "client" || !item.call_id) return undefined;
+		const args: unknown = typeof item.arguments === "string" ? parseStreamingJson(item.arguments) : item.arguments;
+		const details = {
+			kind: TOOL_SCHEMA_SEARCH_DETAILS_KIND,
+			...(args && typeof args === "object" && !Array.isArray(args) ? args : {}),
+			maxResults: args && typeof args === "object" && "maxResults" in args ? args.maxResults : 5,
+		};
+		const search = options?.toolSearch;
+		const tools =
+			search && isToolSchemaSearchDetails(details)
+				? searchDeferredToolSchemas(search.plan, details.query, details.maxResults)
+				: [];
+		const toolSearch: NonNullable<ToolCall["toolSearch"]> = {
+			id: item.id,
+			strict: search?.strict ?? null,
+			tools: structuredClone(
+				tools.map((tool) => ({
+					name: options?.toolNameMap?.toProviderName(tool.name) ?? tool.name,
+					description: tool.description,
+					parameters: tool.parameters,
+				})),
+			),
+		};
+		return {
+			type: "function_call" as const,
+			id: item.id,
+			call_id: item.call_id,
+			name: TOOL_SCHEMA_SEARCH_NAME,
+			arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? {}),
+			toolSearch,
+		};
+	};
 	let currentItem: ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall | null = null;
 	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson?: string }) | null = null;
 	let currentReasoningSummaryPartText = "";
@@ -568,9 +610,15 @@ export async function processResponsesStream<TApi extends Api>(
 	};
 	const contentIndexOf = (block: AssistantMessage["content"][number]): number => output.content.indexOf(block);
 	const applyCompletedOutputItem = (
-		item: ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall,
+		responseItem:
+			| ResponseReasoningItem
+			| ResponseOutputMessage
+			| ResponseFunctionToolCall
+			| Extract<ResponseOutputItem, { type: "tool_search_call" }>,
 		emit: boolean,
 	): void => {
+		const item = normalizeToolSearchItem(responseItem);
+		if (!item || (item.type !== "reasoning" && item.type !== "message" && item.type !== "function_call")) return;
 		const keys = outputItemKeys(item);
 		if (keys.some((key) => finalizedOutputItemKeys.has(key))) return;
 
@@ -673,7 +721,10 @@ export async function processResponsesStream<TApi extends Api>(
 			block.id = id;
 			block.name = options?.toolNameMap?.toOriginalName(item.name) ?? item.name;
 		}
-		block.arguments = parseStreamingJson(block.partialJson || item.arguments || "{}");
+		block.arguments = parseStreamingJson(
+			"toolSearch" in item ? item.arguments : block.partialJson || item.arguments || "{}",
+		);
+		if ("toolSearch" in item) block.toolSearch = item.toolSearch;
 		delete block.partialJson;
 		registerFunctionCallBlock(item, block);
 		if (emit) {
@@ -692,7 +743,12 @@ export async function processResponsesStream<TApi extends Api>(
 		>,
 	): void => {
 		for (const item of responseOutput) {
-			if (item.type === "reasoning" || item.type === "message" || item.type === "function_call") {
+			if (
+				item.type === "reasoning" ||
+				item.type === "message" ||
+				item.type === "function_call" ||
+				item.type === "tool_search_call"
+			) {
 				applyCompletedOutputItem(item, true);
 			}
 		}
@@ -804,7 +860,8 @@ export async function processResponsesStream<TApi extends Api>(
 			if (event.type === "response.created") {
 				output.responseId = event.response.id;
 			} else if (event.type === "response.output_item.added") {
-				const item = event.item;
+				const item = normalizeToolSearchItem(event.item);
+				if (!item) continue;
 				if (item.type === "reasoning") {
 					currentItem = item;
 					currentBlock = { type: "thinking", thinking: "" };
@@ -828,6 +885,7 @@ export async function processResponsesStream<TApi extends Api>(
 						name: options?.toolNameMap?.toOriginalName(item.name) ?? item.name,
 						arguments: {},
 						partialJson: item.arguments || "",
+						...("toolSearch" in item ? { toolSearch: item.toolSearch } : {}),
 					};
 					output.content.push(currentBlock);
 					registerFunctionCallBlock(item, currentBlock);
@@ -945,7 +1003,12 @@ export async function processResponsesStream<TApi extends Api>(
 				}
 			} else if (event.type === "response.output_item.done") {
 				const item = event.item;
-				if (item.type === "reasoning" || item.type === "message" || item.type === "function_call") {
+				if (
+					item.type === "reasoning" ||
+					item.type === "message" ||
+					item.type === "function_call" ||
+					item.type === "tool_search_call"
+				) {
 					applyCompletedOutputItem(item, true);
 				}
 			} else if (event.type === "response.completed" || event.type === "response.incomplete") {

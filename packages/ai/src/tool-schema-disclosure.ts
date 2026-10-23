@@ -266,9 +266,14 @@ export function measureToolSchemaDisclosureRequest(
 		for (let index = messages.length - 1; index >= 0; index--) {
 			const message = messages[index];
 			if (message?.role !== "toolResult") break;
-			if (message.toolName !== TOOL_SCHEMA_SEARCH_NAME || !isToolSchemaSearchDetails(message.details)) continue;
+			if (message.toolName !== TOOL_SCHEMA_SEARCH_NAME) continue;
 			searchCount++;
-			const matches = searchDeferredToolSchemas(plan, message.details.query, message.details.maxResults);
+			const matches = message.isError
+				? []
+				: (message.toolSearch?.tools ??
+					(isToolSchemaSearchDetails(message.details)
+						? searchDeferredToolSchemas(plan, message.details.query, message.details.maxResults)
+						: []));
 			if (matches.length === 0) searchMissCount++;
 			referencedToolCount += matches.length;
 			if (Number.isFinite(now) && Number.isFinite(message.timestamp)) {

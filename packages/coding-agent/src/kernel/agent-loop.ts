@@ -2933,6 +2933,14 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 		role: "toolResult",
 		toolCallId: finalized.toolCall.id,
 		toolName: finalized.toolCall.name,
+		...(finalized.toolCall.toolSearch
+			? {
+					toolSearch: {
+						strict: finalized.toolCall.toolSearch.strict,
+						tools: finalized.isError ? [] : structuredClone(finalized.toolCall.toolSearch.tools),
+					},
+				}
+			: {}),
 		content: finalized.result.content,
 		details: finalized.result.details,
 		usage: finalized.result.usage,

@@ -6,6 +6,10 @@
 
 - `supportsToolSchemaDisclosure` accepts the `openai-codex-responses` API for GPT-6 models (`compat.supportsToolSearch` still overrides). The Codex adapter then sends the resident tools plus a client-executed `tool_search` spec, converts a `tool_search` call and its result to `tool_search_call` and `tool_search_output` items that carry the loaded definitions, and records the same `tool_schema_disclosure` diagnostic as the Anthropic adapter. Responses Lite groups the resident functions in its `functions` namespace next to the search spec.
 
+### Fixed
+
+- Codex client tool searches retain their native item IDs and captured schemas across SSE, WebSocket, and session replay. Rejected or cancelled searches return `tool_search_output` with an empty tools list. Server searches do not run locally. Historical results without captured schemas use an empty tools list; search again to load tools instead of reconstructing past results from the current registry.
+
 ## [0.104.3] - 2026-10-23
 
 ## [0.104.2] - 2026-10-23

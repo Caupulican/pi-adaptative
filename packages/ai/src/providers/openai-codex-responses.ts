@@ -357,6 +357,15 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 		};
 
 		try {
+			// A tool reload during the request must not change the definitions returned by its search.
+			context = {
+				...context,
+				tools: context.tools?.map((tool) => ({
+					name: tool.name,
+					description: tool.description,
+					parameters: structuredClone(tool.parameters),
+				})),
+			};
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
 				throw new Error(`No API key for provider: ${model.provider}`);
@@ -925,8 +934,10 @@ async function processStream(
 	context: Context,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
+	const toolSearch = planCodexToolSearch(model, context);
 	await processResponsesStream(mapCodexEvents(parseSSE(response, options?.signal)), output, stream, model, {
 		toolNameMap: createOpenAIResponsesToolNameMap(context.tools ?? []),
+		toolSearch: toolSearch ? { plan: toolSearch, strict: model.openaiResponsesLite ? false : null } : undefined,
 		serviceTier: options?.serviceTier,
 		resolveServiceTier: resolveCodexServiceTier,
 		applyServiceTierPricing: (usage, serviceTier) => applyOpenAIServiceTierPricing(usage, serviceTier, model),
@@ -1031,32 +1042,11 @@ function formatCodexEventError(prefix: string, event: Record<string, unknown>, c
 	return `${prefix}${metadata.length > 0 ? ` (${metadata.join(", ")})` : ""}: ${detail}`;
 }
 
-/**
- * A `tool_search_call` item is the model calling the host's search tool. It enters the shared stream processor as the
- * function call it is, named for that tool; the host runs it like any other tool and the history conversion sends the
- * result back as a `tool_search_output` item.
- */
-function normalizeToolSearchCallItem<T>(item: T): T {
-	if (!item || typeof item !== "object" || (item as { type?: unknown }).type !== "tool_search_call") return item;
-	const call = item as { id?: string; call_id?: string | null; arguments?: unknown; status?: string };
-	return {
-		type: "function_call",
-		id: call.id,
-		call_id: call.call_id ?? call.id,
-		name: TOOL_SCHEMA_SEARCH_NAME,
-		arguments: typeof call.arguments === "string" ? call.arguments : JSON.stringify(call.arguments ?? {}),
-		status: call.status,
-	} as T;
-}
-
 async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): AsyncGenerator<ResponseStreamEvent> {
 	for await (const rawEvent of events) {
 		const type = typeof rawEvent.type === "string" ? rawEvent.type : undefined;
 		if (!type) continue;
-		const event =
-			type === "response.output_item.added" || type === "response.output_item.done"
-				? { ...rawEvent, item: normalizeToolSearchCallItem(rawEvent.item) }
-				: rawEvent;
+		const event = rawEvent;
 
 		if (type === "error") {
 			const nestedError =
@@ -1107,9 +1097,6 @@ async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): 
 				? {
 						...response,
 						status: normalizeCodexStatus(response.status),
-						...(Array.isArray((response as { output?: unknown }).output)
-							? { output: (response as { output: unknown[] }).output.map(normalizeToolSearchCallItem) }
-							: {}),
 					}
 				: response;
 			yield { ...event, type: "response.completed", response: normalizedResponse } as ResponseStreamEvent;
@@ -2273,6 +2260,7 @@ async function processWebSocketStream(
 	}
 	try {
 		socket.send(JSON.stringify({ type: "response.create", ...wireRequestBody }));
+		const toolSearch = planCodexToolSearch(model, context);
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
 				mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs)),
@@ -2283,6 +2271,7 @@ async function processWebSocketStream(
 			model,
 			{
 				toolNameMap,
+				toolSearch: toolSearch ? { plan: toolSearch, strict: model.openaiResponsesLite ? false : null } : undefined,
 				serviceTier: options?.serviceTier,
 				resolveServiceTier: resolveCodexServiceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyOpenAIServiceTierPricing(usage, serviceTier, model),

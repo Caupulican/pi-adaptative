@@ -362,6 +362,12 @@ export interface ImageContent {
 	mimeType: string; // e.g., "image/jpeg", "image/png"
 }
 
+/** Captured native tool-search definitions. Names already use the provider's wire spelling. */
+export interface ToolSearchResult {
+	tools: Tool[];
+	strict: boolean | null;
+}
+
 export interface ToolCall {
 	type: "toolCall";
 	id: string;
@@ -372,6 +378,8 @@ export interface ToolCall {
 	source?: "text-protocol";
 	errorMessage?: string;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
+	/** Native client tool-search identity and definitions captured from its accepted request. */
+	toolSearch?: ToolSearchResult & { id: string };
 }
 
 export interface UsageCredit {
@@ -469,6 +477,8 @@ export interface ToolResultMessage<TDetails = any> {
 	role: "toolResult";
 	toolCallId: string;
 	toolName: string;
+	/** Persisted search output; failed or cancelled searches carry an empty tools list. */
+	toolSearch?: ToolSearchResult;
 	content: (TextContent | ImageContent)[]; // Supports text and images
 	details?: TDetails;
 	/** Provider usage spent inside a model-backed tool, when reported by that tool. */
