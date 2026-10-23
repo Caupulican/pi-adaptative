@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `StreamOptions.requestGuard`: a synchronous host policy consumed at the last harness-owned provider handoff, after admission and credential loading. Throwing withholds the request and surfaces as a terminal stream error; asynchronous guards are rejected. The guard never reaches a provider, and `dispatchGuardedProviderRequest` is exported for providers that dispatch outside `stream`.
+
 ## [0.104.0] - 2026-10-21
 
 ### Added

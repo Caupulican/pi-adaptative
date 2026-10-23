@@ -1,5 +1,27 @@
 ## [Unreleased]
 
+### Added
+
+- Working and subagent status messages animate in the interactive UI.
+
+### Changed
+
+- Memory chat startup and root turns no longer wait for summaries. The summary policy is rechecked at the final provider handoff, background summary judgments stay out of foreground admission, and ICM work runs on bounded durable queues with streamed journal recovery and bounded-memory key index rebuilds.
+- Worker recall binds to immutable transcript references, and worker work records carry the transcript reference.
+- Worker receipts publish only after exact acceptance and retain their exact facts, check identities, command receipts and acceptance requirements; independent verification binds to exact attempts, and terminal observation and ownership are fenced by attempt.
+- Session storage coordination and worker storage identity are shared below the session and orchestration layers. Session bundle deletion takes exclusive ownership, live bundles are protected through runtime transitions, and deleted histories are not recreated by late appends.
+
+### Fixed
+
+- Uncertain session writes keep immutable evidence, live owner inputs, own-turn recovery records and exact commits; lossy history recovery after them is rejected, they stay out of routed replay, and complete writes are confirmed before uncertainty is reported.
+- Owner input is persisted before delivery is published and survives branch navigation, failed queue batches, reflection notification failures and input handoffs; queued images keep independent pin ownership and validated identity, and resumed owner questions bind to their session context.
+- Learning and USER memory effects are journaled through audit custody with unique effect identities, originating-branch binding, exact rollback outcomes and durable accounting obligations; learner sessions keep ownership across handoffs, and learning authority is rechecked between proposals.
+- Worker retry wakes, cleanup, usage publication and settlement timers survive timer faults and physical settlement timeouts; notification delivery is isolated from timer failures, and the no-wait policy is preserved through worker usage publication.
+- Background tool results, including images, are retained and retrievable, and late results attach by revision.
+- A failed strict reload preserves live session state; a settled worker's reload registration and runtime lease end despite a failed resource release; late quit work releases the session bundle instead of failing the quit.
+- ICM startup reads and activation cancel at host shutdown and before host publication, cleanup ownership is retained through lease publication and shutdown, and invalid migration recovery cutoffs are rejected.
+- Session shutdown preserves its cancellation reason, cancelled owner-policy readers are fenced, and worker handoffs and preparation interrupt promptly.
+
 ## [0.104.0] - 2026-10-21
 
 ### Breaking Changes

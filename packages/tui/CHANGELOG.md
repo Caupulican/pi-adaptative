@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Working and subagent status messages animate.
+
 ## [0.104.0] - 2026-10-21
 
 ## [0.103.10] - 2026-10-15
