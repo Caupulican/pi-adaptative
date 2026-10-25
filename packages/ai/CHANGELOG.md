@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated reviewed provider client identities to Claude Code 2.1.310, Grok CLI 1.0.62, and AGY 1.4.5; Claude's packaged OAuth fallback now follows the same reviewed release.
+
 ## [0.104.6] - 2026-10-23
 
 ### Fixed
