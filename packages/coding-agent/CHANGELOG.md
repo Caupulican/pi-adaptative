@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Standalone release builds retain the committed dependency lockfile when installing cross-platform native bindings, preventing dependency drift before compilation with the pinned TypeScript toolchain.
+
 ## [0.104.7] - 2026-10-25
 
 ### Changed
