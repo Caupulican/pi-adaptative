@@ -2196,11 +2196,17 @@ export class WorkerDelegationController {
 			executionPlan,
 			// Same precedence as selectModelBinding: a pin wins, then the caller's explicit model, then
 			// the profile's binding, else the parent's or foreground's model (account routing included).
+			// Report the source of the model that was actually chosen: allocateAllowedModel can move shipment.model
+			// off the requested authority or pin, so match the bound model rather than the request.
 			modelRouteSource: pinnedContract
 				? "contract"
-				: modelPin
+				: modelPin &&
+						shipment.model.provider === modelPin.binding.provider &&
+						shipment.model.id === modelPin.binding.modelId
 					? "model_pin"
-					: authority?.model
+					: authority?.model &&
+							shipment.model.provider === authority.model.provider &&
+							shipment.model.id === authority.model.modelId
 						? "authority"
 						: basePreset
 							? "profile"

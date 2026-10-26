@@ -145,6 +145,8 @@ export interface DecisionGraphModel {
  * a turn is in flight or the flow trace recorded an event. A graph with none of that earns no width, like the work area.
  */
 export function graphHasContent(model: DecisionGraphModel): boolean {
+	// A completed goal that has settled cleans the pane up: its graph is no longer content.
+	if (goalClosure(model).delivered && !model.turnRunning && !model.hasRunningClock) return false;
 	return (
 		!model.stageLogEmpty ||
 		model.plan.length > 0 ||
@@ -377,15 +379,27 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		capability: 3,
 		tool: 4,
 	};
-	const laneParticipants = lanes
-		.filter((lane) => lane.type === "research" || lane.type === "worker" || lane.type === "tmux-worker")
-		.map((lane): DecisionParticipant => {
+	// Active outranks settled; among equals the later timestamp wins.
+	const rankLane = (lane: LaneRecord): number => {
+		const active = lane.status === "running" || lane.status === "queued" ? 1 : 0;
+		return active * Number.MAX_SAFE_INTEGER + (parseTime(lane.completedAt ?? lane.startedAt) ?? 0);
+	};
+	// One specialist reused by follow_up appears once: its active record, or else its most recent one.
+	const laneByKey = new Map<string, LaneRecord>();
+	for (const lane of lanes) {
+		if (lane.type !== "research" && lane.type !== "worker" && lane.type !== "tmux-worker") continue;
+		const key = lane.agentId ?? lane.laneId;
+		const previous = laneByKey.get(key);
+		if (!previous || rankLane(lane) >= rankLane(previous)) laneByKey.set(key, lane);
+	}
+	const laneParticipants = [...laneByKey.entries()]
+		.map(([key, lane]): DecisionParticipant => {
 			const startedAt = lane.status === "running" ? parseTime(lane.startedAt) : undefined;
 			const routeText = workerRouteText(lane);
 			return {
-				id: lane.laneId,
+				id: key,
 				kind: participantKind(lane),
-				label: lane.label ?? `worker ${lane.laneId.slice(0, 8)}`,
+				label: lane.agentId ?? lane.label ?? `worker ${key.slice(0, 8)}`,
 				...(lane.modelRef ? { model: shortModelName(lane.modelRef) } : {}),
 				...(routeText ? { routeText } : {}),
 				...(startedAt !== undefined ? { startedAt } : {}),

@@ -229,6 +229,8 @@ export class DecisionStageLog {
 		const entry: DecisionStageEntry = {
 			stage,
 			enteredAt: now,
+			// "done" is terminal: close it on arrival so its clock does not tick forever.
+			...(stage === "done" ? { endedAt: now } : {}),
 			loop: this.loop,
 			...(projection.control.reasonCode ? { reasonCode: projection.control.reasonCode } : {}),
 			...(projection.current_action ? { note: boundedNote(projection.current_action) } : {}),

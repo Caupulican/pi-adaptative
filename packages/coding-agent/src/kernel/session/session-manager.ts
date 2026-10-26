@@ -1160,8 +1160,13 @@ function indexSessionEntryFileLocations(
 				prefixParts.length === 1
 					? prefixParts[0].toString("utf8")
 					: Buffer.concat(prefixParts, prefixLength).toString("utf8");
-			const id = /"id"\s*:\s*"([A-Za-z0-9_-]+)"/.exec(prefix)?.[1];
-			if (id && pendingIds.delete(id)) locations.set(id, { offset: lineOffset, length: lineLength });
+			for (const match of prefix.matchAll(/"id"\s*:\s*"([A-Za-z0-9_-]+)"/g)) {
+				const id = match[1];
+				if (id && pendingIds.delete(id)) {
+					locations.set(id, { offset: lineOffset, length: lineLength });
+					break;
+				}
+			}
 		}
 		lineLength = 0;
 		prefixLength = 0;
@@ -3148,11 +3153,11 @@ export class SessionManager {
 	appendCustomEntry(customType: string, data?: unknown): string {
 		const entry: CustomEntry = {
 			type: "custom",
-			customType,
-			data,
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
+			customType,
+			data,
 		};
 		this._appendEntry(entry);
 		return entry.id;

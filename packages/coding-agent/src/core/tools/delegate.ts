@@ -1611,12 +1611,22 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 		prepareArguments(args: unknown) {
 			if (!args || typeof args !== "object" || Array.isArray(args)) return args as DelegateToolInput;
 			const input = args as Record<string, unknown>;
-			const action = input.action ?? "start";
-			if (action !== "start" || typeof input.task !== "string" || typeof input.instructions === "string") {
-				return args as DelegateToolInput;
+			if (input.action !== undefined && input.action !== "start") return args as DelegateToolInput;
+			const next: Record<string, unknown> = { ...input };
+			if (typeof input.task === "string") {
+				const task = input.task;
+				const taskText = task.trim();
+				const instructions = input.instructions;
+				if (typeof instructions !== "string" || instructions.trim().length === 0) {
+					next.instructions = task;
+				} else if (!instructions.includes(taskText)) {
+					next.instructions = `${taskText}\n\n${instructions}`;
+				}
+				delete next.task;
 			}
-			const { task, ...rest } = input;
-			return { ...rest, instructions: task } as DelegateToolInput;
+			// A descriptive laneId on a fresh start is not an existing lane; drop it before validation.
+			if (typeof input.laneId === "string" && input.agentId === undefined) delete next.laneId;
+			return next as DelegateToolInput;
 		},
 		renderShell: "self",
 		foregroundWait: (input: { action?: unknown }) =>

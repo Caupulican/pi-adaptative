@@ -321,7 +321,9 @@ export class FlowTrace {
 			if (previous === record.status) continue;
 			this.laneStatus.set(record.laneId, record.status);
 			const lane = record.label ?? record.laneId;
-			const laneFields = { lane: short(lane), laneKey: lane };
+			// A reused specialist (agentId) keeps one lifeline across its lanes; a one-shot lane keys on its own id.
+			const laneKey = record.agentId ?? record.laneId;
+			const laneFields = { lane: short(lane), laneKey };
 			const key = `worker:${record.laneId}`;
 			const queueKey = `queue:${record.laneId}`;
 			const outcome = LANE_OUTCOME[record.status];
@@ -357,6 +359,12 @@ export class FlowTrace {
 			if (record.status === "running") {
 				const startedAt = timeOf(record.startedAt);
 				this.finish(queueKey, "ok", startedAt);
+				// A reused specialist never shows two running bars on one lifeline: an older lane's open run ends here.
+				for (const [openKey, eventId] of [...this.open]) {
+					if (openKey === key || !openKey.startsWith("worker:")) continue;
+					const older = this.events.find((event) => event.id === `${eventId}`);
+					if (older?.kind === "worker" && older.laneKey === laneKey) this.finish(openKey, "ok", startedAt);
+				}
 				this.begin(key, { actor: "worker", kind: "worker", label: short(lane), ...laneFields }, startedAt);
 			}
 			if (outcome !== "open" && previous !== undefined && LANE_OUTCOME[previous] === "open") {

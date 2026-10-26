@@ -68,7 +68,7 @@ const PLAN_GLYPH: Readonly<Record<DecisionPlanStepStatus, readonly [string, Them
 
 export function participantText(participant: DecisionParticipant): string {
 	// The session's own model is on the status line; the session itself is just the agent.
-	if (participant.kind === "root") return "agent";
+	if (participant.kind === "root") return participant.model ? `brain · ${participant.model}` : "brain";
 	const head = `${participant.kind} ${participant.label}`;
 	return participant.model ? `${head} · ${participant.model}` : head;
 }
@@ -90,6 +90,16 @@ function distinctTask(participant: DecisionParticipant): string | undefined {
 	return task.toLowerCase() !== participant.label.trim().toLowerCase() ? task : undefined;
 }
 
+/** The root's subtitle names the subagents it is orchestrating while any of them is active. */
+function orchestratingText(model: DecisionGraphModel): string | undefined {
+	const activeSubagents = model.participants.filter(
+		(p) => (p.kind === "specialist" || p.kind === "worker") && (p.running || p.queued),
+	).length;
+	return activeSubagents > 0
+		? `orchestrating ${activeSubagents} subagent${activeSubagents === 1 ? "" : "s"}`
+		: undefined;
+}
+
 /** What an executor is doing, in one line. Route text names who chose the model; it is never System One's tone. */
 export function participantSubText(
 	participant: DecisionParticipant,
@@ -98,8 +108,10 @@ export function participantSubText(
 	if (participant.queued) return { text: queuedText(participant), tone: "warning" };
 	const task = distinctTask(participant);
 	if (participant.running) {
+		const orchestrating = participant.kind === "root" ? orchestratingText(model) : undefined;
 		const text = [
 			task,
+			orchestrating,
 			participant.routeText,
 			participant.startedAt !== undefined ? formatCompactDuration(model.nowMs - participant.startedAt) : "",
 		]
@@ -109,6 +121,8 @@ export function participantSubText(
 		return { text, tone: "muted" };
 	}
 	if (participant.kind === "root") {
+		const orchestrating = orchestratingText(model);
+		if (orchestrating) return { text: orchestrating, tone: "muted" };
 		if (model.you.waiting) return { text: "waiting for you", tone: "dim" };
 		if (model.decider.evaluating) return { text: "waiting for System One", tone: "dim" };
 		if (model.idleText) return { text: model.idleText, tone: "dim" };
@@ -334,22 +348,34 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	}
 	const executors: DiagramNode[] = model.participants.map((participant) => {
 		const sub = participantSubText(participant, model);
+		const subagentActive = model.participants.some(
+			(p) => (p.kind === "specialist" || p.kind === "worker") && p.running,
+		);
 		return {
 			text: participantText(participant),
-			tone: participant.running
-				? participant.kind === "capability"
-					? SYSTEM_ONE_TONE
-					: "accent"
-				: participant.acted
-					? undefined
-					: "dim",
-			bold: participant.running,
+			tone:
+				participant.kind === "root"
+					? participant.running || subagentActive
+						? "accent"
+						: participant.acted
+							? undefined
+							: "dim"
+					: participant.running
+						? participant.kind === "capability"
+							? SYSTEM_ONE_TONE
+							: "accent"
+						: participant.acted
+							? undefined
+							: "dim",
+			bold: participant.kind === "root" || participant.running,
 			current: participant.running,
 			stage: participant.kind === "root" ? "build" : participant.kind === "capability" ? undefined : "dispatch",
 			...(sub ? { sub: sub.text, subTone: sub.tone } : {}),
 		};
 	});
-	levels.push({ kind: "level", nodes: executors });
+	// Brain on its own level; delegated subagents, capabilities and tools branch down beneath it.
+	levels.push({ kind: "level", nodes: executors.slice(0, 1) });
+	if (executors.length > 1) levels.push({ kind: "level", nodes: executors.slice(1) });
 	const evidenceNodes: DiagramNode[] = [];
 	if (model.evidence.actions > 0 || model.evidence.fileEffects > 0 || model.evidence.failures > 0) {
 		evidenceNodes.push({

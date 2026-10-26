@@ -168,11 +168,14 @@ export class SessionOperatorProjection {
 
 	/**
 	 * The projection controller the session owns. It is rebuilt when the objective changes, because
-	 * a projection's `objective_id` is immutable; subscribers and events carry across.
+	 * a projection's `objective_id` is immutable; subscribers carry across while prior objective events reset.
 	 */
 	get projectionController(): OperatorProjectionController {
 		const objectiveId = this.deps.getObjectiveId();
 		if (this.controller && this.controllerObjectiveId === objectiveId) return this.controller;
+		if (this.controllerObjectiveId !== undefined && this.controllerObjectiveId !== objectiveId) {
+			this.events.length = 0;
+		}
 		const controller = new OperatorProjectionController({
 			objectiveId,
 			hasGoal: this.deps.getGoalState() !== undefined,
@@ -442,7 +445,11 @@ export class SessionOperatorProjection {
 	): OperatorPhase {
 		if (blocker) return "blocked";
 		if (goal?.status === "blocked") return "blocked";
-		if (goal?.status === "completed") return "done";
+		if (goal?.status === "completed") {
+			if (!this.deps.isForegroundBusy() && lanes.length === 0 && !adaptation) return "done";
+			if (adaptation) return "adapt";
+			return "build";
+		}
 		if (this.deps.getDeliveryState() === "in_progress" && proof.pending === 0 && proof.failing === 0) {
 			return "deliver";
 		}

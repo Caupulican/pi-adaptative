@@ -174,6 +174,7 @@ function buildOverview(host: UsageCommandHost, accounts: readonly AuthenticatedA
 		accounts: [...accounts],
 		fetchState: (account) => host.usageMonitor.state(account, registry),
 		canRedeemReset,
+		...(model ? { activeProvider: model.provider } : {}),
 	});
 }
 
@@ -190,11 +191,11 @@ function openUsageDashboard(host: UsageCommandHost, client: OpenAICodexUsageRese
 		const refresh = (force: boolean) => {
 			accounts = listAuthenticatedAccounts(registry);
 			const running = host.usageMonitor.refresh(accounts, registry, { force, currentAccountKey });
-			dashboard.update(buildOverview(host, accounts));
+			dashboard.update(buildOverview(host, accounts), accounts.some(canRedeemReset));
 			host.requestRender();
 			void running.then(() => {
 				if (!open) return;
-				dashboard.update(buildOverview(host, accounts));
+				dashboard.update(buildOverview(host, accounts), accounts.some(canRedeemReset));
 				host.requestRender();
 			});
 		};
@@ -202,6 +203,7 @@ function openUsageDashboard(host: UsageCommandHost, client: OpenAICodexUsageRese
 			overview: buildOverview(host, accounts),
 			canRedeemReset: accounts.some(canRedeemReset),
 			maxRows: () => host.terminalRows(),
+			requestRender: () => host.requestRender(),
 			onAction: (action) => {
 				if (action === "refresh") {
 					refresh(true);

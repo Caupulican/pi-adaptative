@@ -16,6 +16,7 @@ import {
 	formatCollapsedToolOutputHint,
 	getTextOutput as getRenderedTextOutput,
 } from "../../../core/tools/render-utils.ts";
+import { isRecordObject } from "../../../core/util/value-guards.ts";
 import {
 	compactRetainedDetails,
 	MAX_TUI_RETAINED_DETAILS_BYTES,
@@ -145,6 +146,86 @@ function getBuiltInToolDefinitions(cwd: string): ReturnType<typeof createAllTool
 		builtInDefinitionsByCwd.delete(oldest);
 	}
 	return definitions;
+}
+
+/** Tools whose calls narrate the root's orchestration in the root chat. */
+const ORCHESTRATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "create_goal", "goal"]);
+const DELEGATE_PROGRESS_ACTIONS: ReadonlySet<string> = new Set(["start", "follow_up", "send", "race", "slices"]);
+
+/** First non-empty line of a request, stripped of a `Task:` or heading prefix and bounded. */
+function oneLinePreview(value: unknown, max = 96): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const line = value
+		.split("\n")
+		.map((text) => text.trim())
+		.find((text) => text.length > 0);
+	const cleaned = (line ?? "")
+		.replace(/^(task:|#+)\s*/i, "")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!cleaned) return undefined;
+	return cleaned.length > max ? `${cleaned.slice(0, max - 1)}…` : cleaned;
+}
+
+/** The root chat's one-line narration of a delegation, goal or goal-state change; undefined when silent. */
+function orchestrationConversationText(
+	toolName: string,
+	args: unknown,
+	result: ToolExecutionResult | undefined,
+	isPartial: boolean,
+): string | undefined {
+	const input: Record<string, unknown> = isRecordObject(args) ? args : {};
+	const details: Record<string, unknown> = isRecordObject(result?.details) ? result.details : {};
+	if (toolName === "delegate") {
+		const action = typeof input.action === "string" ? input.action : "start";
+		if (result?.isError) return `${theme.fg("error", "✗")} ${theme.fg("muted", `Brain · delegate ${action} failed`)}`;
+		if (DELEGATE_PROGRESS_ACTIONS.has(action)) {
+			const target =
+				typeof details.agentId === "string"
+					? details.agentId
+					: typeof details.laneId === "string"
+						? details.laneId
+						: typeof input.agentId === "string"
+							? input.agentId
+							: action === "slices"
+								? "parallel slices"
+								: action === "race"
+									? "race workers"
+									: "subagent";
+			const inputModel = isRecordObject(input.model) ? input.model : undefined;
+			const model =
+				typeof details.modelRef === "string"
+					? details.modelRef
+					: typeof inputModel?.modelId === "string"
+						? `${String(inputModel.provider ?? "")}/${inputModel.modelId}`
+						: undefined;
+			const summary = oneLinePreview(input.task ?? input.instructions ?? input.message);
+			const suffix = `${model ? theme.fg("dim", ` [${model}]`) : ""}${summary ? theme.fg("muted", ` — ${summary}`) : ""}`;
+			if (isPartial || !result) {
+				return `${theme.fg("accent", "◆")} ${theme.fg("accent", "Brain")} ${theme.fg("muted", `→ delegating (${action}) to`)} ${theme.fg("text", String(target))}${suffix}`;
+			}
+			return `${theme.fg("success", "◆")} ${theme.fg("accent", "Brain")} ${theme.fg("muted", `→ delegated (${action}) to`)} ${theme.fg("text", String(target))}${suffix}`;
+		}
+		if ((action === "wait" || action === "wait_many") && (isPartial || !result)) {
+			return `${theme.fg("accent", "◌")} ${theme.fg("accent", "Brain")} ${theme.fg("muted", "→ waiting for subagent handoff…")}`;
+		}
+		return undefined;
+	}
+	if (toolName === "create_goal") {
+		const objective = oneLinePreview(input.objective);
+		if (!objective) return undefined;
+		return `${theme.fg("accent", "◆")} ${theme.fg("accent", "Brain")} ${theme.fg("muted", "→ goal started:")} ${theme.fg("text", objective)}`;
+	}
+	if (toolName === "goal" && result && !result.isError) {
+		if (input.action === "complete") {
+			return `${theme.fg("success", "✓")} ${theme.fg("accent", "Brain")} ${theme.fg("success", "→ goal completed")}`;
+		}
+		if (input.action === "satisfy_requirement" || input.action === "increment") {
+			const requirement = typeof input.requirementId === "string" ? ` (${input.requirementId})` : "";
+			return `${theme.fg("success", "✓")} ${theme.fg("accent", "Brain")} ${theme.fg("muted", `→ requirement satisfied${requirement}`)}`;
+		}
+	}
+	return undefined;
 }
 
 export class ToolExecutionComponent extends Container {
@@ -490,7 +571,36 @@ export class ToolExecutionComponent extends Container {
 		return createWorkbenchToolPreview(this.toolName, this.args, this.result, by, cwd);
 	}
 
+	/** Root-chat view of an orchestration call; the text is derived each time the view is first drawn. */
+	private orchestrationView(): Component {
+		const action = this;
+		this.questionView ??= {
+			get renderRevision() {
+				return action.questionRevision;
+			},
+			render(width) {
+				if (!action.questionText) {
+					const text = orchestrationConversationText(
+						action.toolName,
+						action.args,
+						action.result,
+						action.isPartial,
+					);
+					if (!text) return [];
+					action.questionText = new Text(text, 1, 0);
+				}
+				return action.questionText.render(width);
+			},
+			invalidate() {
+				action.questionText = undefined;
+				action.questionRevision++;
+			},
+		};
+		return this.questionView;
+	}
+
 	getConversationComponent(): Component | undefined {
+		if (ORCHESTRATION_TOOLS.has(this.toolName)) return this.orchestrationView();
 		if (this.toolName !== "ask_question") return undefined;
 		const action = this;
 		this.questionView ??= {

@@ -227,7 +227,8 @@ export class WorkbenchController {
 		return this.ports.attribution?.();
 	}
 
-	private resetSystemOneEvidence(): void {
+	/** Forgets System One evidence for the objective that just ended or completed. */
+	resetSystemOneEvidence(): void {
 		this.systemOneFailures.clear();
 	}
 
@@ -721,7 +722,7 @@ function renderRootRow(facts: WorkbenchTeamFacts): string {
 	const model = shortModelName(route.activeModel ?? route.rootModel);
 	const glyph = running ? theme.fg("accent", "●") : theme.fg("muted", "○");
 	const task = running ? `  ${theme.fg("muted", projection.current_action)}` : "";
-	return `  ${glyph} ${theme.fg(running ? "accent" : "text", model)}${task}`;
+	return `  ${glyph} ${theme.fg("muted", "brain")} ${theme.fg(running ? "accent" : "text", model)}${task}`;
 }
 
 /** Routed choices that are live: who chose which model for whom, in the operator's words. */
@@ -855,9 +856,9 @@ export function buildWorkbenchSections(
 				return [
 					group("Decider"),
 					...renderDeciderRows(facts, Date.now()),
-					group("Executors"),
+					group("Brain"),
 					renderRootRow(facts),
-					...(hasSpecialists ? executorRows(width) : []),
+					...(hasSpecialists ? [group("Subagents"), ...executorRows(width)] : []),
 					...(routing.length ? [group("Routing"), ...routing] : []),
 				].map((line) => truncateToWidth(line, Math.max(1, width), ""));
 			},

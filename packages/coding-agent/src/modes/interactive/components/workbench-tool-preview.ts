@@ -285,8 +285,15 @@ export function createWorkbenchToolPreview(
 	by?: PreviewAttribution,
 	cwd?: string,
 ): ExecutionPreview | undefined {
-	if (!result.isError && !["edit", "write", "bash", "python", "shell"].includes(name)) return undefined;
 	const parameters = isRecordObject(args) ? args : {};
+	// A delegation dispatch is a receipt for the Execution pane; its reads and waits are not.
+	const delegateDispatch =
+		name === "delegate" &&
+		(result.isError ||
+			parameters.action === undefined ||
+			["start", "follow_up", "send", "race", "slices"].includes(String(parameters.action)));
+	if (!result.isError && !delegateDispatch && !["edit", "write", "bash", "python", "shell"].includes(name))
+		return undefined;
 	const details = isRecordObject(result.details) ? result.details : {};
 	const path = typeof parameters.path === "string" ? parameters.path : "";
 	let body = "";
@@ -321,7 +328,8 @@ export function createWorkbenchToolPreview(
 	}
 	// What the receipt is about: the file for an edit, the command for a shell, so the bar says what ran.
 	const command = typeof parameters.command === "string" ? (parameters.command.split("\n", 1)[0] ?? "").trim() : "";
-	const subject = sanitizeBinaryOutput(stripAnsi(path || command)).slice(0, 512);
+	const delegateSubject = name === "delegate" ? String(parameters.agentId ?? parameters.action ?? "start") : "";
+	const subject = sanitizeBinaryOutput(stripAnsi(path || command || delegateSubject)).slice(0, 512);
 	const truncated = body.length > bounded.length + 1;
 	const lines = bounded.trim() ? bounded.trimEnd().split("\n").length : 0;
 	const sourceLines = bounded.trim() ? bounded.trimEnd().split("\n") : [];

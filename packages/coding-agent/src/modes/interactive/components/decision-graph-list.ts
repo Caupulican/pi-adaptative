@@ -209,8 +209,28 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 	}
 	if (model.next && model.goal.branch !== "delivered") item(ITEM_INDENT, "›", "dim", `next → ${model.next}`, "dim");
 
-	head("EXECUTORS");
-	for (const participant of model.participants.filter((p) => p.kind !== "capability")) {
+	head("BRAIN");
+	const brain = model.participants.filter((p) => p.kind === "root");
+	const subagents = model.participants.filter((p) => p.kind !== "root" && p.kind !== "capability");
+	for (const participant of brain) {
+		const detail = participantSubText(participant, model);
+		item(
+			ITEM_INDENT,
+			participant.running ? "●" : participant.queued ? "◌" : "○",
+			participant.running ? "success" : participant.queued ? "warning" : "dim",
+			participantText(participant),
+			participant.running ? "accent" : "muted",
+			{ meta: detail },
+		);
+	}
+	if (subagents.length > 0) {
+		const activeCount = subagents.filter((p) => p.running || p.queued).length;
+		head("SUBAGENTS", {
+			text: `${activeCount} active · ${subagents.length} total`,
+			tone: activeCount > 0 ? "accent" : "muted",
+		});
+	}
+	for (const participant of subagents) {
 		const detail = participantSubText(participant, model);
 		item(
 			ITEM_INDENT,

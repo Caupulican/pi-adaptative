@@ -215,6 +215,7 @@ export class WorkbenchComponent extends Container {
 	private workLeft = 0;
 	private workWidth = 0;
 	private dismissedShell?: BashExecutionComponent;
+	private readonly frameExecutionLines = new Map<string, string[]>();
 	private headerButtons: { action: "latest" | "layout" | "showGraph"; start: number; end: number }[] = [];
 	conversationTop = 0;
 	conversationLeft = 1;
@@ -309,6 +310,7 @@ export class WorkbenchComponent extends Container {
 		return this.operatorStatus;
 	}
 	setExecution(component: Component | undefined, compact = false, evidence = component, meta = ""): void {
+		this.frameExecutionLines.clear();
 		if (evidence !== this.executionEvidence || compact !== this.executionCompact) this.executionPane.reset();
 		this.execution = component;
 		this.executionEvidence = evidence;
@@ -369,6 +371,7 @@ export class WorkbenchComponent extends Container {
 		return this.executionPane.pageBy(direction);
 	}
 	dismissUserShell(): void {
+		this.frameExecutionLines.clear();
 		this.dismissedShell = this.options.conversation.children.findLast(
 			(child): child is BashExecutionComponent => child instanceof BashExecutionComponent,
 		);
@@ -590,6 +593,7 @@ export class WorkbenchComponent extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
+		this.frameExecutionLines.clear();
 		this.conversation.invalidate();
 		this.execution?.invalidate();
 		this.options.activity?.invalidate();
@@ -700,7 +704,8 @@ export class WorkbenchComponent extends Container {
 
 	/** The thinking level as a meter that fills and warms with the level, then its name; shift+tab steps it. */
 	private thinkingMeter(level: string): { text: string; width: number } {
-		const filled = Math.min(THINKING_METER_CELLS, THINKING_METER_LEVELS.indexOf(level) + 1 || THINKING_METER_CELLS);
+		const index = THINKING_METER_LEVELS.indexOf(level);
+		const filled = level === "off" || level === "none" ? 0 : index >= 0 ? index + 1 : THINKING_METER_CELLS;
 		const tone = theme.getThinkingBorderColor(level as Parameters<typeof theme.getThinkingBorderColor>[0]);
 		const pips = tone("█".repeat(filled)) + theme.fg("dim", "░".repeat(THINKING_METER_CELLS - filled));
 		return { text: `${pips} ${tone(level)}`, width: THINKING_METER_CELLS + 1 + visibleWidth(level) };
@@ -759,13 +764,24 @@ export class WorkbenchComponent extends Container {
 		return !this.inspectorHidden && !this.executionMaximized && this.sections.some((section) => !section.quiet);
 	}
 
+	private renderSourceLines(source: Component | undefined, kind: "shell" | "exec", width: number): string[] {
+		if (!source) return [];
+		const clamped = Math.max(1, width);
+		const key = `${kind}:${clamped}`;
+		const cached = this.frameExecutionLines.get(key);
+		if (cached) return cached;
+		const lines = source.render(clamped);
+		this.frameExecutionLines.set(key, lines);
+		return lines;
+	}
+
 	/** A user shell on show, or a command or file effect that renders rows: what Execution would draw. */
 	private hasExecutionEvidence(columns: number): boolean {
 		const shell = this.options.conversation.children.findLast(
 			(child): child is BashExecutionComponent => child instanceof BashExecutionComponent,
 		);
 		if (shell && shell !== this.dismissedShell) return true;
-		return (this.execution?.render(Math.max(1, columns - 2)).length ?? 0) > 0;
+		return this.renderSourceLines(this.execution, "exec", columns - 2).length > 0;
 	}
 
 	/** Neither a command or file effect nor a plan to show: the work area takes no rows and has no divider. */
@@ -785,10 +801,10 @@ export class WorkbenchComponent extends Container {
 		if (visibleShell !== this.displayedShell) this.executionPane.reset();
 		this.displayedShell = visibleShell;
 		const executionSource = visibleShell ? visibleShell.getWorkbenchPreview() : this.execution;
-		const executionLines = (width: number): string[] => executionSource?.render(width) ?? [];
+		const sourceKind = visibleShell ? "shell" : "exec";
+		const executionLines = (width: number): string[] => this.renderSourceLines(executionSource, sourceKind, width);
 		const executionMeta = visibleShell ? "" : this.executionMeta;
-		// A user shell opens at its command; the cycle's evidence follows its newest rows instead.
-		const follow = !visibleShell;
+		const follow = Boolean(executionSource);
 		const fullWidthLines = executionLines(Math.max(1, columns - 2));
 		const hasExecution = fullWidthLines.length > 0;
 		if (!this.showsInspector()) {
@@ -1018,6 +1034,7 @@ export class WorkbenchComponent extends Container {
 		this.paneRuleColumn = -1;
 		this.graphRuleColumn = -1;
 		this.frameGraphModel = undefined;
+		this.frameExecutionLines.clear();
 		this.headerButtons = [];
 		const columns = Math.max(1, width);
 		this.lastColumns = columns;

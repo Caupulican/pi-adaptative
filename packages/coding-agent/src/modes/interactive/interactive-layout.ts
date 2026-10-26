@@ -113,6 +113,10 @@ export class InteractiveLayout {
 	/** When the provider's prompt cache for the last request expires; the POV bar counts it down. */
 	private readonly cacheClock = new CacheClock(() => resolveCacheRetention());
 	private cacheTicker: ReturnType<typeof setInterval> | undefined;
+	/** The objective the graph last composed for; a change clears the flow trace and System One evidence. */
+	private lastObjectiveId: string | undefined;
+	/** The completed goal whose graph was already cleared, so the clear runs once per goal. */
+	private clearedCompletedGoalId: string | undefined;
 
 	constructor(port: InteractiveLayoutPort) {
 		this.port = port;
@@ -140,6 +144,16 @@ export class InteractiveLayout {
 				: { asked: 0, answered: 0 };
 		const task = session.getTaskStepsStateSnapshot();
 		const goal = session.getGoalStateSnapshot();
+		if (this.lastObjectiveId !== undefined && this.lastObjectiveId !== projection.objective_id) {
+			this.flowTrace.reset();
+			this.workbenchController?.resetSystemOneEvidence();
+		}
+		this.lastObjectiveId = projection.objective_id;
+		const allLanes = session.getLaneRecords();
+		const hasActiveLanes = allLanes.some((lane) => lane.status === "running" || lane.status === "queued");
+		// The projection carries no execution record; an open flow event is the one in-progress fact.
+		const flowOpen = this.flowTrace.snapshot().some((event) => event.endedAt === undefined);
+		const goalDoneAndIdle = goal?.status === "completed" && !session.isStreaming && !flowOpen && !hasActiveLanes;
 		const plan: DecisionGraphInput["plan"] = task
 			? task.steps.map((step) => ({ title: step.content, status: PLAN_STEP_STATUS[step.status] }))
 			: (goal?.requirements ?? []).map((requirement) => ({
@@ -169,13 +183,54 @@ export class InteractiveLayout {
 			.getSemanticVerificationObligations()
 			.map(({ id, reason, scope }) => ({ id, reason, scope }));
 		const idlePreparation = session.getIdlePreparationView();
+		const health = session.getSemanticPlaneHealth();
+		const route = session.getForegroundRouteSnapshot();
+		if (goalDoneAndIdle) {
+			// A settled, completed goal cleans the graph up: nothing of its work is drawn once it is done.
+			if (goal && this.clearedCompletedGoalId !== goal.goalId) {
+				this.clearedCompletedGoalId = goal.goalId;
+				this.flowTrace.reset();
+				this.workbenchController?.resetSystemOneEvidence();
+			}
+			return buildDecisionGraphModel({
+				projection,
+				stageLog: { loop: 1, stages: [], entries: [] },
+				health,
+				evaluations: [],
+				route,
+				lanes: [],
+				plan: [],
+				checks: [],
+				peerFindings: [],
+				receipts: { actions: 0, fileEffects: 0, failures: 0 },
+				humanInput: { asked: 0, answered: 0 },
+				events: [],
+				flow: [],
+				backgroundTools: [],
+				nowMs: now,
+			});
+		}
+		const stageLog = session.operatorProjection.getStageLog(now);
+		// Lanes and evaluations from an earlier objective or completed goal do not linger in this one.
+		const entryStart = stageLog.entries[0]?.enteredAt;
+		const lanes =
+			entryStart === undefined
+				? allLanes.filter((lane) => lane.status === "running" || lane.status === "queued")
+				: allLanes.filter((lane) => {
+						if (lane.status === "running" || lane.status === "queued") return true;
+						return Date.parse(lane.completedAt ?? lane.startedAt ?? "") >= entryStart - 1000;
+					});
+		const evaluations =
+			entryStart === undefined
+				? session.getSemanticEvaluations()
+				: session.getSemanticEvaluations().filter((record) => record.endedAt >= entryStart - 1000);
 		return buildDecisionGraphModel({
 			projection,
-			stageLog: session.operatorProjection.getStageLog(now),
-			health: session.getSemanticPlaneHealth(),
-			evaluations: session.getSemanticEvaluations(),
-			route: session.getForegroundRouteSnapshot(),
-			lanes: session.getLaneRecords(),
+			stageLog,
+			health,
+			evaluations,
+			route,
+			lanes,
 			plan,
 			checks,
 			peerFindings,

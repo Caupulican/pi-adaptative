@@ -1,27 +1,14 @@
-import {
-	type Component,
-	Container,
-	getKeybindings,
-	SelectList,
-	type SelectListLayoutOptions,
-	Spacer,
-	truncateToWidth,
-} from "@caupulican/pi-tui";
+import { type Component, getKeybindings, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type {
 	AccountOverview,
 	AccountUsageSnapshot,
 	UsageOverview,
-	UsageWindow,
 } from "../../../core/provider-admission/usage-overview.ts";
-import { getSelectListTheme, theme } from "../../../presentation/theme-model.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
-import { SelectorNavigationFooter } from "./selector-list.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 
 export const USAGE_STALE_AFTER_MS = 15 * 60_000;
 
 export type UsageDashboardAction = "refresh" | "reset" | "close";
-
-const ACTION_LAYOUT: SelectListLayoutOptions = { minPrimaryColumnWidth: 16, maxPrimaryColumnWidth: 28 };
 const AUTH_LABELS: Readonly<Record<AccountOverview["auth"], string>> = {
 	subscription: "subscription",
 	oauth: "oauth",
@@ -57,181 +44,209 @@ function dollars(value: number): string {
 
 function percentTone(percent: number): (text: string) => string {
 	if (percent >= 100) return (text) => theme.fg("error", text);
-	if (percent >= 80) return (text) => theme.fg("warning", text);
-	return (text) => theme.fg("text", text);
+	if (percent >= 75) return (text) => theme.fg("warning", text);
+	return (text) => theme.fg("accent", text);
 }
 
-function observed(snapshot: AccountUsageSnapshot, now: number): string {
-	const verb = snapshot.source === "account_api" ? "fetched" : "seen in responses";
-	const age = now - snapshot.observedAt;
-	const text = `${verb} ${clock(snapshot.observedAt)} (${span(age)} ago)`;
-	return age > USAGE_STALE_AFTER_MS ? theme.fg("warning", `${text} · stale`) : theme.fg("dim", text);
+function quotaBar(usedPercent: number, cells = 12): string {
+	const clamped = Math.max(0, Math.min(100, usedPercent));
+	const filled = Math.max(0, Math.min(cells, Math.round((clamped / 100) * cells)));
+	const free = cells - filled;
+	const bar = "█".repeat(filled) + "░".repeat(free);
+	return percentTone(usedPercent)(bar);
 }
 
-function windowLine(window: UsageWindow, now: number, labelWidth: number): string {
-	const percent = `${Math.round(window.usedPercent)}%`.padStart(4);
-	const reset =
-		window.resetsAt === undefined
-			? ""
-			: theme.fg("dim", `  resets ${clock(window.resetsAt)} (in ${span(window.resetsAt - now)})`);
-	const detail = window.detail ? theme.fg("dim", `  ${window.detail}`) : "";
-	return `    ${theme.fg("text", window.label.padEnd(labelWidth))} ${percentTone(window.usedPercent)(percent)}${reset}${detail}`;
-}
-
-function fetchLine(account: AccountOverview): { line?: string; snapshot?: AccountUsageSnapshot } {
-	const fetch = account.fetch;
-	switch (fetch.kind) {
+function accountSnapshot(account: AccountOverview): AccountUsageSnapshot | undefined {
+	switch (account.fetch.kind) {
 		case "fetched":
-			return { snapshot: fetch.snapshot };
+			return account.fetch.snapshot;
 		case "pending":
-			return { line: theme.fg("dim", "refreshing account usage…"), snapshot: fetch.last ?? account.passive };
 		case "failed":
-			return {
-				line: theme.fg("warning", `account usage unavailable: ${fetch.error} (${clock(fetch.at)})`),
-				snapshot: fetch.last ?? account.passive,
-			};
+			return account.fetch.last ?? account.passive;
 		case "idle":
-			return { line: account.passive ? undefined : theme.fg("dim", "not fetched yet"), snapshot: account.passive };
 		case "unsupported":
-			return {
-				line: theme.fg("dim", "account usage is not available in Pi for this provider"),
-				snapshot: account.passive,
-			};
+			return account.passive;
 	}
 }
 
-function accountLines(account: AccountOverview, now: number): string[] {
-	const lines: string[] = [];
-	const { line, snapshot } = fetchLine(account);
+function accountSortRank(account: AccountOverview): number {
+	if (account.active) return 1;
+	const snapshot = accountSnapshot(account);
+	const maxUsed = snapshot?.windows.length ? Math.max(...snapshot.windows.map((w) => w.usedPercent)) : 0;
+	if (account.limit !== undefined || snapshot?.limitReached !== undefined || maxUsed >= 80) return 2;
 	const inflight = account.inflight.foreground + account.inflight.worker + account.inflight.background;
-	const meta = [
-		account.accountLabel,
-		AUTH_LABELS[account.auth],
-		snapshot?.plan,
-		inflight > 0
-			? `${inflight} in flight (${account.inflight.foreground} fg, ${account.inflight.worker} worker, ${account.inflight.background} bg)`
-			: undefined,
-	]
-		.filter(Boolean)
-		.join(" · ");
-	lines.push(`  ${theme.bold(account.displayName)}${meta ? theme.fg("dim", ` ${meta}`) : ""}`);
-	if (account.limit) {
-		lines.push(
-			`    ${theme.fg("warning", `limited until ${clock(account.limit.until)} (${account.limit.reason.replace("_", " ")}, in ${span(account.limit.until - now)})`)}`,
-		);
+	if (account.fetch.kind === "unsupported" && !account.passive && !account.limit && inflight === 0) return 4;
+	return 3;
+}
+
+function formatKpiRows(overview: UsageOverview, width: number): [string, string] {
+	const session = overview.session;
+	const subText = session.subscription ? " (sub)" : "";
+	const subagentText = session.subagentCostUsd > 0 ? ` ($${session.subagentCostUsd.toFixed(2)} subagents)` : "";
+	const left1 = `${theme.fg("dim", "SESSION  ")}${theme.fg("text", `${dollars(session.costUsd)}${subText}${subagentText}`)}${theme.fg("dim", " · Today ")}${theme.fg("text", dollars(overview.today.costUsd))}`;
+
+	const cacheTotal = session.tokens.input + session.tokens.cacheRead + session.tokens.cacheWrite;
+	const cacheSummary =
+		cacheTotal > 0 ? `${Math.round((session.tokens.cacheRead / cacheTotal) * 100)}% cached` : "0% cached";
+	const right1 = `${theme.fg("dim", "TOKENS  ")}${theme.fg("text", `${tokens(session.tokens.input)} in · ${tokens(session.tokens.output)} out · ${cacheSummary}`)}`;
+
+	let contextGauge: string;
+	if (!session.context) {
+		contextGauge = theme.fg("dim", "unavailable");
+	} else {
+		const win = session.context.window;
+		const pct =
+			session.context.percent ??
+			(session.context.tokens !== null && win > 0 ? (session.context.tokens / win) * 100 : 0);
+		const used = session.context.tokens ?? 0;
+		const clamped = Math.max(0, Math.min(100, pct));
+		const filled = Math.max(0, Math.min(12, Math.round((clamped / 100) * 12)));
+		const free = 12 - filled;
+		const bar = "█".repeat(filled) + "░".repeat(free);
+		const tone = pct >= 95 ? "error" : pct >= 75 ? "warning" : "accent";
+		contextGauge = `${theme.fg(tone, bar)} ${Math.round(pct)}% (${tokens(used)} / ${tokens(win)})`;
 	}
-	if (line) lines.push(`    ${line}`);
-	if (snapshot) {
-		const labelWidth = Math.min(22, Math.max(0, ...snapshot.windows.map((window) => window.label.length)));
-		for (const window of snapshot.windows) lines.push(windowLine(window, now, labelWidth));
-		if (snapshot.balance) lines.push(`    ${snapshot.balance}`);
-		for (const detail of snapshot.details ?? []) lines.push(`    ${theme.fg("dim", detail)}`);
-		if (snapshot.limitReached) lines.push(`    ${theme.fg("warning", `limit reached: ${snapshot.limitReached}`)}`);
-		if (snapshot.resetCredits !== undefined && snapshot.resetCredits > 0) {
-			lines.push(
-				`    ${snapshot.resetCredits} earned ${snapshot.resetCredits === 1 ? "reset" : "resets"} available`,
+	const left2 = `${theme.fg("dim", "CONTEXT  ")}${contextGauge}`;
+
+	const machine = overview.machine;
+	let loadSummary: string;
+	if (machine.emergencyStop.engaged) {
+		loadSummary = theme.fg("error", "ESTOP ENGAGED");
+	} else if (machine.inflight > 0) {
+		const other = machine.otherAccountsInflight > 0 ? ` · ${machine.otherAccountsInflight} other` : "";
+		loadSummary = `${machine.inflight} in flight${other}`;
+	} else {
+		const other = machine.otherAccountsInflight > 0 ? ` · ${machine.otherAccountsInflight} other` : "";
+		loadSummary = `idle${other}`;
+	}
+	const right2 = `${theme.fg("dim", "LOAD  ")}${theme.fg("text", loadSummary)}`;
+
+	if (width >= 76) {
+		const maxLeft = Math.max(visibleWidth(left1), visibleWidth(left2));
+		const rightW = Math.max(visibleWidth(right1), visibleWidth(right2));
+		const colWidth = Math.max(maxLeft + 2, Math.min(width - rightW - 1, Math.floor(width * 0.52)));
+		const r1 = `${left1}${" ".repeat(Math.max(1, colWidth - visibleWidth(left1)))}${right1}`;
+		const r2 = `${left2}${" ".repeat(Math.max(1, colWidth - visibleWidth(left2)))}${right2}`;
+		return [truncateToWidth(r1, width, "…"), truncateToWidth(r2, width, "…")];
+	}
+	const r1 = `${left1}${theme.fg("dim", " · ")}${right1}`;
+	const r2 = `${left2}${theme.fg("dim", " · ")}${right2}`;
+	return [truncateToWidth(r1, width, "…"), truncateToWidth(r2, width, "…")];
+}
+
+function formatProviderCardLines(overview: UsageOverview, width: number, now: number): string[] {
+	if (overview.accounts.length === 0) {
+		return [theme.fg("dim", "  No provider has credentials in this session.")];
+	}
+
+	const sorted = [...overview.accounts].sort((a, b) => accountSortRank(a) - accountSortRank(b));
+	const cards = sorted.filter((a) => accountSortRank(a) < 4);
+	const quiet = sorted.filter((a) => accountSortRank(a) === 4);
+
+	const cardBlocks: string[][] = [];
+
+	for (const account of cards) {
+		const lines: string[] = [];
+		const snapshot = accountSnapshot(account);
+		const maxUsed = snapshot?.windows.length ? Math.max(...snapshot.windows.map((w) => w.usedPercent)) : 0;
+		const bullet = account.active
+			? theme.fg("accent", "●")
+			: account.limit || snapshot?.limitReached || maxUsed >= 80
+				? theme.fg("warning", "▲")
+				: theme.fg("dim", "○");
+		const authLabel = AUTH_LABELS[account.auth] ?? account.auth;
+		const planText = snapshot?.plan ? `${snapshot.plan} · ${authLabel}` : authLabel;
+		const planOrAuth = theme.fg("dim", account.accountLabel ? `${account.accountLabel} · ${planText}` : planText);
+		const leftHeader = `  ${bullet} ${theme.bold(account.displayName)} ${planOrAuth}`;
+
+		const badges: string[] = [];
+		const totalInflight = account.inflight.foreground + account.inflight.worker + account.inflight.background;
+		if (totalInflight > 0) {
+			badges.push(`${totalInflight} in flight`);
+		}
+		if (snapshot?.resetCredits !== undefined && snapshot.resetCredits > 0) {
+			badges.push(`${snapshot.resetCredits} reset${snapshot.resetCredits === 1 ? "" : "s"} earned`);
+		}
+		if (account.fetch.kind === "pending") {
+			badges.push(theme.fg("dim", "refreshing…"));
+		} else if (account.fetch.kind === "failed") {
+			badges.push(theme.fg("warning", "fetch failed"));
+		} else if (snapshot) {
+			const age = now - snapshot.observedAt;
+			badges.push(
+				age > USAGE_STALE_AFTER_MS
+					? theme.fg("warning", `stale · ${span(age)}`)
+					: theme.fg("dim", `${span(age)} ago`),
 			);
 		}
-		lines.push(`    ${observed(snapshot, now)}`);
+		const rightHeader = badges.join(theme.fg("dim", " · "));
+
+		const leftW = visibleWidth(leftHeader);
+		const rightW = visibleWidth(rightHeader);
+		if (rightW > 0 && leftW + rightW + 2 <= width) {
+			const gap = " ".repeat(width - leftW - rightW);
+			lines.push(`${leftHeader}${gap}${rightHeader}`);
+		} else if (rightW > 0) {
+			lines.push(truncateToWidth(`${leftHeader}  ${rightHeader}`, width, "…"));
+		} else {
+			lines.push(truncateToWidth(leftHeader, width, "…"));
+		}
+
+		if (snapshot && snapshot.windows.length > 0) {
+			const labelWidth = Math.min(24, Math.max(0, ...snapshot.windows.map((w) => w.label.length)));
+			for (const w of snapshot.windows) {
+				const label = theme.fg("text", w.label.padEnd(labelWidth));
+				const bar = quotaBar(w.usedPercent, 12);
+				const percentStr = percentTone(w.usedPercent)(`${Math.round(w.usedPercent)}%`.padEnd(4));
+				const resetStr = w.resetsAt !== undefined ? theme.fg("dim", `  ↻ ${span(w.resetsAt - now)}`) : "";
+				const detailStr = w.detail ? theme.fg("dim", `  ${w.detail}`) : "";
+				lines.push(`    ${label}  ${bar} ${percentStr}${resetStr}${detailStr}`);
+			}
+		}
+
+		if (account.limit) {
+			lines.push(
+				`    ${theme.fg("warning", `limited until ${clock(account.limit.until)} (${account.limit.reason.replace(/_/g, " ")}, in ${span(account.limit.until - now)})`)}`,
+			);
+		}
+		if (snapshot?.limitReached) {
+			lines.push(`    ${theme.fg("warning", `limit reached: ${snapshot.limitReached}`)}`);
+		}
+		if (snapshot?.balance) {
+			lines.push(`    ${theme.fg("text", snapshot.balance)}`);
+		}
+		for (const detail of snapshot?.details ?? []) {
+			lines.push(`    ${theme.fg("dim", detail)}`);
+		}
+		if (account.fetch.kind === "failed" && !snapshot) {
+			lines.push(`    ${theme.fg("warning", `account usage unavailable: ${account.fetch.error}`)}`);
+		}
+
+		cardBlocks.push(lines);
 	}
-	const fetch = account.fetch;
-	if ((fetch.kind === "fetched" || fetch.kind === "failed") && fetch.nextRefreshAt !== undefined) {
-		lines.push(
-			`    ${theme.fg("dim", `next refresh from ${clock(fetch.nextRefreshAt)} (in ${span(fetch.nextRefreshAt - now)})`)}`,
-		);
+
+	const result: string[] = [];
+	for (let i = 0; i < cardBlocks.length; i++) {
+		if (i > 0) result.push("");
+		result.push(...cardBlocks[i]);
 	}
-	return lines;
+
+	if (quiet.length > 0) {
+		if (result.length > 0) result.push("");
+		const list = quiet.map((a) => `${a.displayName} (${AUTH_LABELS[a.auth] ?? a.auth})`).join(" · ");
+		result.push(`  ${theme.fg("dim", "○ Other credentials")}   ${theme.fg("dim", list)}`);
+	}
+
+	return result;
 }
 
 export function formatUsageOverviewLines(overview: UsageOverview, width: number, now = overview.at): string[] {
-	const session = overview.session;
-	const context = session.context
-		? session.context.percent === null
-			? `context ?/${tokens(session.context.window)}`
-			: `context ${Math.round(session.context.percent)}% of ${tokens(session.context.window)}${session.context.tokens === null ? "" : ` (${tokens(session.context.tokens)} used)`}`
-		: undefined;
-	const text = (value: string) => theme.fg("text", value);
-	const join = (parts: Array<string | undefined>) => parts.filter(Boolean).join(text(" · "));
-	const sessionParts = [
-		`${text(`${dollars(session.costUsd)}${session.subscription ? " (sub)" : ""}`)}${session.subagentCostUsd > 0 ? theme.fg("dim", ` incl. subagents ${dollars(session.subagentCostUsd)}`) : ""}`,
-		text(
-			`in ${tokens(session.tokens.input)} out ${tokens(session.tokens.output)} cache ${tokens(session.tokens.cacheRead)}/${tokens(session.tokens.cacheWrite)}`,
-		),
-	];
-	const machine = overview.machine;
-	const machineParts = [
-		text(machine.inflight > 0 ? `${machine.inflight} in flight` : "idle · 0 in flight"),
-		machine.otherAccountsInflight > 0 ? text(`${machine.otherAccountsInflight} on other accounts`) : undefined,
-		machine.otherAccountLimits > 0 ? text(`${machine.otherAccountLimits} limits on other accounts`) : undefined,
-		machine.emergencyStop.engaged
-			? theme.fg("error", `estop ENGAGED${machine.emergencyStop.reason ? ` (${machine.emergencyStop.reason})` : ""}`)
-			: text("estop off"),
-	];
-	const label = (text: string) => theme.fg("dim", text.padEnd(9));
-	const lines = [
-		`${theme.bold("Usage & limits")}${theme.fg("dim", `  as of ${clock(now)}`)}`,
-		`${label("Session")}${join(sessionParts)}`,
-		`${label("Today")}${text(dollars(overview.today.costUsd))}${overview.today.subagentCostUsd > 0 ? theme.fg("dim", ` incl. subagents ${dollars(overview.today.subagentCostUsd)}`) : ""}`,
-		`${label("Status")}${join(machineParts)}`,
-		`${label("Context")}${text(context ?? "context unavailable")}`,
-		"",
-	];
-	if (overview.accounts.length === 0) lines.push(theme.fg("dim", "  No provider has credentials in this session."));
-	for (const [index, account] of overview.accounts.entries()) {
-		if (index > 0) lines.push("");
-		lines.push(...accountLines(account, now));
-	}
-	return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
+	const [kpi1, kpi2] = formatKpiRows(overview, width);
+	const providerLines = formatProviderCardLines(overview, width, now);
+	return [kpi1, kpi2, "", ...providerLines].map((line) => truncateToWidth(line, Math.max(1, width), "…"));
 }
 
-export const USAGE_OVERVIEW_HEADER_LINES = 6;
-
-class UsageOverviewBody implements Component {
-	overview: UsageOverview;
-	offset = 0;
-	private readonly now: () => number;
-	private readonly maxRows: () => number;
-
-	constructor(overview: UsageOverview, now: () => number, maxRows: () => number) {
-		this.overview = overview;
-		this.now = now;
-		this.maxRows = maxRows;
-	}
-
-	scroll(direction: 1 | -1): void {
-		this.offset = Math.max(0, this.offset + direction * Math.max(1, this.accountRows() - 1));
-	}
-
-	private accountRows(): number {
-		return Math.max(3, this.maxRows() - USAGE_OVERVIEW_HEADER_LINES - 1);
-	}
-
-	render(width: number): string[] {
-		const lines = formatUsageOverviewLines(this.overview, Math.max(1, width - 2), this.now());
-		const header = lines.slice(0, USAGE_OVERVIEW_HEADER_LINES);
-		const accounts = lines.slice(USAGE_OVERVIEW_HEADER_LINES);
-		const rows = this.accountRows();
-		if (accounts.length <= rows) {
-			this.offset = 0;
-			return lines.map((line) => ` ${line}`);
-		}
-		const visible = rows - 1;
-		this.offset = Math.min(this.offset, accounts.length - visible);
-		const shown = accounts.slice(this.offset, this.offset + visible);
-		const keys = getKeybindings();
-		const position = theme.fg(
-			"dim",
-			truncateToWidth(
-				`lines ${this.offset + 1}–${this.offset + shown.length} of ${accounts.length} · ${keys.getKeys("tui.select.pageUp").join("/")} ${keys.getKeys("tui.select.pageDown").join("/")} to scroll`,
-				Math.max(1, width - 2),
-				"…",
-			),
-		);
-		return [...header, ...shown, position].map((line) => ` ${line}`);
-	}
-
-	invalidate(): void {}
-}
+export const USAGE_OVERVIEW_HEADER_LINES = 3;
 
 export interface UsageDashboardOptions {
 	overview: UsageOverview;
@@ -239,52 +254,120 @@ export interface UsageDashboardOptions {
 	now?: () => number;
 	maxRows?: () => number;
 	onAction(action: UsageDashboardAction): void;
+	requestRender?: () => void;
 }
 
-export class UsageDashboardComponent extends Container {
-	private readonly body: UsageOverviewBody;
-	private readonly actions: SelectList;
+export class UsageDashboardComponent implements Component {
+	private overview: UsageOverview;
+	private canRedeemReset: boolean;
+	private readonly options: UsageDashboardOptions;
+	private readonly now: () => number;
 	private readonly maxRows: () => number;
-	private bodyRows = 40;
+	private offset = 0;
+	private bodyRows = 1;
+	private totalRows = 0;
 
 	constructor(options: UsageDashboardOptions) {
-		super();
+		this.options = options;
+		this.overview = options.overview;
+		this.canRedeemReset = options.canRedeemReset;
+		this.now = options.now ?? Date.now;
 		this.maxRows = options.maxRows ?? (() => 40);
-		this.body = new UsageOverviewBody(options.overview, options.now ?? Date.now, () => this.bodyRows);
-		const items = [
-			{ value: "refresh", label: "Refresh", description: "Fetch account usage now" },
-			...(options.canRedeemReset
-				? [{ value: "reset", label: "Redeem earned reset", description: "OpenAI Codex · asks before using one" }]
-				: []),
-			{ value: "close", label: "Close", description: "Back to the conversation" },
-		];
-		this.actions = new SelectList(items, items.length, getSelectListTheme(), ACTION_LAYOUT);
-		this.actions.onSelect = (item) => options.onAction(item.value as UsageDashboardAction);
-		this.actions.onCancel = () => options.onAction("close");
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
-		this.addChild(this.body);
-		this.addChild(new Spacer(1));
-		this.addChild(this.actions);
-		this.addChild(new SelectorNavigationFooter("select"));
 	}
 
-	update(overview: UsageOverview): void {
-		this.body.overview = overview;
+	update(overview: UsageOverview, canRedeemReset?: boolean): void {
+		this.overview = overview;
+		if (canRedeemReset !== undefined) {
+			this.canRedeemReset = canRedeemReset;
+		}
 	}
 
-	override render(width: number): string[] {
-		const chrome = this.children
-			.filter((child) => child !== this.body)
-			.reduce((rows, child) => rows + child.render(width).length, 0);
-		this.bodyRows = this.maxRows() - chrome;
-		return super.render(width);
-	}
+	invalidate(): void {}
 
 	handleInput(data: string): void {
 		const keys = getKeybindings();
-		if (keys.matches(data, "tui.select.pageUp")) this.body.scroll(-1);
-		else if (keys.matches(data, "tui.select.pageDown")) this.body.scroll(1);
-		else this.actions.handleInput(data);
+		const maxOffset = Math.max(0, this.totalRows - this.bodyRows);
+		const scroll = (delta: number) => {
+			this.offset = Math.max(0, Math.min(maxOffset, this.offset + delta));
+			this.options.requestRender?.();
+		};
+		if (keys.matches(data, "tui.select.up") || data === "k") scroll(-1);
+		else if (keys.matches(data, "tui.select.down") || data === "j") scroll(1);
+		else if (keys.matches(data, "tui.select.pageUp")) scroll(-this.bodyRows);
+		else if (keys.matches(data, "tui.select.pageDown")) scroll(this.bodyRows);
+		else if (data === "r" || data === "R") this.options.onAction("refresh");
+		else if ((data === "x" || data === "X") && this.canRedeemReset) this.options.onAction("reset");
+		else if (
+			keys.matches(data, "tui.select.cancel") ||
+			keys.matches(data, "tui.select.confirm") ||
+			data === "q" ||
+			data === "Q"
+		)
+			this.options.onAction("close");
+	}
+
+	render(width: number): string[] {
+		const surface = (text: string) => theme.bg("customMessageBg", text);
+		const border = (text: string) => surface(theme.fg("borderMuted", text));
+		const inner = Math.max(1, width - 4);
+		const now = this.now();
+
+		const total = this.maxRows();
+		const budget = Math.max(6, Math.min(26, Math.floor(total * 0.68), total - 8));
+
+		const titleText = " Usage & Quotas ";
+		const title = surface(theme.bold(theme.fg("text", titleText)));
+		const titleWidth = visibleWidth(titleText);
+		const timeText = ` updated ${clock(now)} `;
+		const timeStr = surface(theme.fg("dim", timeText));
+		const timeWidth = visibleWidth(timeText);
+		let top: string;
+		if (width >= 2 + titleWidth + timeWidth + 2) {
+			const dashes = width - 2 - titleWidth - timeWidth - 2;
+			top = `${border("╭─")}${title}${border("─".repeat(dashes))}${timeStr}${border("─╮")}`;
+		} else {
+			const available = Math.max(0, width - 2 - titleWidth - 1);
+			top = `${border("╭─")}${title}${border(`${"─".repeat(available)}╮`)}`;
+			top = truncateToWidth(top, width, "…");
+		}
+
+		const padRow = (row: string) => {
+			const truncated = truncateToWidth(row, inner, "…");
+			const pad = " ".repeat(Math.max(0, inner - visibleWidth(truncated)));
+			return `${border("│")}${surface(` ${truncated}${pad} `)}${border("│")}`;
+		};
+
+		const [kpi1, kpi2] = formatKpiRows(this.overview, inner);
+		const kpiRow1 = padRow(kpi1);
+		const kpiRow2 = padRow(kpi2);
+		const divider = `${border(`├${"─".repeat(Math.max(0, width - 2))}┤`)}`;
+
+		const content = formatProviderCardLines(this.overview, inner, now);
+		this.totalRows = content.length;
+		const bodyBudget = Math.max(1, budget - 5);
+		this.bodyRows = Math.max(1, Math.min(content.length, bodyBudget));
+		const maxOffset = Math.max(0, content.length - this.bodyRows);
+		this.offset = Math.min(this.offset, maxOffset);
+		const shown = content.slice(this.offset, this.offset + this.bodyRows);
+		const body = shown.map((row) => padRow(row));
+
+		const more = content.length > this.bodyRows;
+		const position = more ? `${this.offset + 1}-${this.offset + shown.length}/${content.length} · ` : "";
+		const hints = ["↑↓ scroll", "r refresh", ...(this.canRedeemReset ? ["x redeem reset"] : []), "Esc close"].join(
+			" · ",
+		);
+		const footer = ` ${position}${hints} `;
+		const footerWidth = visibleWidth(footer);
+		let bottom: string;
+		if (width >= footerWidth + 3) {
+			const dashes = width - 3 - footerWidth;
+			bottom = `${border(`╰${"─".repeat(dashes)}`)}${surface(theme.fg("dim", footer))}${border("─╯")}`;
+		} else {
+			const truncatedFooter = truncateToWidth(footer, Math.max(0, width - 4), "…");
+			const dashes = Math.max(0, width - 3 - visibleWidth(truncatedFooter));
+			bottom = `${border(`╰${"─".repeat(dashes)}`)}${surface(theme.fg("dim", truncatedFooter))}${border("─╯")}`;
+		}
+
+		return [top, kpiRow1, kpiRow2, divider, ...body, bottom];
 	}
 }
