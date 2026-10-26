@@ -43,6 +43,7 @@ export interface KeyHandlersHost {
 	toggleToolOutputExpansion(): void;
 	showTranscriptPager(): void;
 	toggleAgentsOverlay(): void;
+	showBotTeamSelector?(): void;
 	toggleThinkingBlockVisibility(): Promise<void>;
 	openExternalEditor(): Promise<void>;
 	handleFollowUp(): Promise<void>;
@@ -103,6 +104,7 @@ export function setupKeyHandlers(host: KeyHandlersHost): void {
 	host.defaultEditor.onBackgroundTool = () => host.session.backgroundRunningToolCalls() > 0;
 	host.defaultEditor.onAction("app.transcript.open", () => host.showTranscriptPager());
 	host.defaultEditor.onAction("app.agents.open", () => host.toggleAgentsOverlay());
+	host.defaultEditor.onAction("app.chat.switch", () => host.showBotTeamSelector?.());
 	host.defaultEditor.onAction("app.thinking.toggle", () => void host.toggleThinkingBlockVisibility());
 	host.defaultEditor.onAction("app.editor.external", () => host.openExternalEditor());
 	host.defaultEditor.onAction("app.message.followUp", () => host.handleFollowUp());

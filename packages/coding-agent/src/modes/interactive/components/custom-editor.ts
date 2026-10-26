@@ -32,6 +32,13 @@ export class CustomEditor extends Editor {
 	}
 
 	/**
+	 * Dynamically update the placeholder hint text shown when the editor is empty.
+	 */
+	setPlaceholder(placeholder?: string): void {
+		Reflect.set(this, "placeholder", placeholder);
+	}
+
+	/**
 	 * Register a handler for an app action.
 	 */
 	onAction(action: AppKeybinding, handler: () => void): void {

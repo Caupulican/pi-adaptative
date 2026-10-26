@@ -238,6 +238,11 @@ export interface WorkerDelegationRequest {
 	 */
 	messageReplayKey?: string;
 	/**
+	 * Optional preferred agent/lane identifier for this delegation start (for example, persistent bot names).
+	 * If available, the worker attempt will bind directly to this id instead of a generic candidate id.
+	 */
+	preferredAgentId?: string;
+	/**
 	 * The caller named this exact specialist AND supplied explicit options. Admission compiles those
 	 * options and the specialization decision must land on this agent; anything else means the options
 	 * describe different work, which is refused rather than silently started somewhere else.

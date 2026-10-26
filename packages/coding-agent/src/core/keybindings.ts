@@ -28,6 +28,7 @@ export interface AppKeybindings {
 	"app.tools.background": true;
 	"app.agents.open": true;
 	"app.agents.close": true;
+	"app.chat.switch": true;
 	"app.thinking.toggle": true;
 	"app.session.toggleNamedFilter": true;
 	"app.editor.external": true;
@@ -140,6 +141,10 @@ export const KEYBINDINGS = {
 	"app.tools.background": { defaultKeys: "ctrl+b", description: "Move active tool calls to background" },
 	"app.agents.open": { defaultKeys: "ctrl+q", description: "Toggle goal, plan, and agent details" },
 	"app.agents.close": { defaultKeys: "escape", description: "Close work details" },
+	"app.chat.switch": {
+		defaultKeys: "alt+a",
+		description: "Switch live chat between Brain, persistent bots, and teams",
+	},
 	"app.thinking.toggle": {
 		defaultKeys: "shift+pageUp",
 		description: "Toggle thinking blocks",

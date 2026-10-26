@@ -15,7 +15,8 @@
  */
 
 import { lstatSync } from "node:fs";
-import type { Api, Model } from "@caupulican/pi-ai";
+import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
+import type { AgentMessage } from "../kernel/types.ts";
 import { orchestrationEventStoreDir } from "./agent-paths.ts";
 import type {
 	GoalContinuationLoopOptions,
@@ -28,12 +29,26 @@ import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/l
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
 import { ManagedLaneController, type ManagedLaneControllerDeps } from "./delegation/managed-lane-controller.ts";
+import {
+	type BotOperatorMessageDispatchResult,
+	normalizeBotOrTeamId,
+	type PersistentBotRecord,
+	PersistentBotTeamStore,
+	type PersistentBotView,
+	type PersistentTeamMemberDelivery,
+	type PersistentTeamMessage,
+	type PersistentTeamRecord,
+	type TeamOperatorMessageDispatchResult,
+	type UpsertPersistentBotInput,
+	type UpsertPersistentTeamInput,
+} from "./delegation/persistent-bot-team-store.ts";
 import type {
 	SessionRootReply,
 	SessionRootReplyQuery,
 	SessionRootReplyWaitOptions,
 	SessionRootReplyWaitResult,
 } from "./delegation/session-root-mailbox.ts";
+import { getWorkerClaimSnapshots } from "./delegation/session-worker-claim.ts";
 import type {
 	SessionRootWorkerAgentMessageOptions,
 	WorkerAgentActivity,
@@ -48,6 +63,7 @@ import type {
 	WorkerAgentRetireResult,
 	WorkerAgentTaskStartOptions,
 	WorkerAgentTranscriptOptions,
+	WorkerAgentView,
 	WorkerAgentWaitMode,
 	WorkerAgentWaitResult,
 	WorkerGrantSummary,
@@ -65,15 +81,20 @@ import { isManagedWorkerAttempt, projectWorkerAttemptLaneRecord } from "./delega
 import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
+import { workerReportClaimText } from "./delegation/worker-report.ts";
 import { WorkerUsageReceiptDelivery } from "./delegation/worker-usage-receipt-delivery.ts";
 import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
+import {
+	CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
+	type ContinuousChatWorkReportEntry,
+} from "./memory/continuous-chat-ingest.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
-import type { WorkerResultContract } from "./orchestration/contracts.ts";
+import type { OrchestrationThinkingLevel, WorkerResultContract } from "./orchestration/contracts.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import type {
 	TaskProfileCreateInput,
@@ -123,6 +144,8 @@ export interface BackgroundLaneControllerDeps
 	markGoalToolUnavailable(): void;
 	/** Tell the parent session that a closed worker's worktree lane was kept because it holds work. */
 	notifyWorktreeLane?(text: string): void;
+	/** Thinking level of the active session model. */
+	getThinkingLevel?(): OrchestrationThinkingLevel;
 }
 
 /** How one bounded wait on exact running attempts ended. */
@@ -148,6 +171,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _managedLanes: ManagedLaneController | undefined;
 	/** Leaf already scanned with no persisted active managed lane. A new leaf rescans. */
 	private _managedLaneAbsenceLeafId: string | null | undefined;
+	private _botTeamStore: PersistentBotTeamStore | undefined;
 	/** Lazily materialized so a UAC surface without `delegate` allocates no worker runtime state. */
 	private _workers: WorkerDelegationController | undefined;
 	/** One durable lifecycle shared by every worker execution adapter. */
@@ -1037,5 +1061,556 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Fitness reports persisted for THIS host (measured evidence for architect/profile decisions). */
 	getStoredFitnessReports(): StoredFitnessReport[] {
 		return this._fitness.getStoredReports();
+	}
+
+	getBotTeamStore(): PersistentBotTeamStore {
+		if (!this._botTeamStore) {
+			this._botTeamStore = new PersistentBotTeamStore(this.deps.getAgentDir());
+		}
+		return this._botTeamStore;
+	}
+
+	listPersistentBots(defaultModelRef = this.getRootModelLabel()): PersistentBotView[] {
+		let liveAgents: WorkerAgentView[] = [];
+		try {
+			liveAgents = this.listWorkerAgents();
+		} catch {
+			liveAgents = [];
+		}
+		return this.getBotTeamStore().projectBotViews(liveAgents, this.getLaneRecords(), defaultModelRef);
+	}
+
+	resolveModelSpec(rawModel?: string): { provider: string; modelId: string; thinkingLevel?: string } {
+		const fgThinking = this.deps.getThinkingLevel
+			? String(this.deps.getThinkingLevel())
+			: this.deps.getForegroundThinkingLevel
+				? String(this.deps.getForegroundThinkingLevel())
+				: undefined;
+
+		const trimmed = rawModel?.trim();
+		if (trimmed && trimmed.length > 0) {
+			const all = this.deps.getModelRegistry().getAll();
+			const match = all.find((m) => `${m.provider}/${m.id}` === trimmed || m.id === trimmed);
+			if (match) {
+				return {
+					provider: match.provider,
+					modelId: match.id,
+					thinkingLevel: match.defaultThinkingLevel ?? fgThinking,
+				};
+			}
+			if (trimmed.includes("/")) {
+				const slash = trimmed.indexOf("/");
+				return {
+					provider: trimmed.slice(0, slash),
+					modelId: trimmed.slice(slash + 1),
+					thinkingLevel: fgThinking,
+				};
+			}
+			const curModel = this.deps.getModel();
+			if (curModel) {
+				return {
+					provider: curModel.provider,
+					modelId: trimmed,
+					thinkingLevel: fgThinking,
+				};
+			}
+			return {
+				provider: "anthropic",
+				modelId: trimmed,
+				thinkingLevel: fgThinking,
+			};
+		}
+
+		const curModel = this.deps.getModel();
+		if (curModel) {
+			return {
+				provider: curModel.provider,
+				modelId: curModel.id,
+				thinkingLevel: fgThinking,
+			};
+		}
+
+		const def = this.deps.getSettingsManager().getDefaultModel();
+		if (def) {
+			if (def.includes("/")) {
+				const slash = def.indexOf("/");
+				return {
+					provider: def.slice(0, slash),
+					modelId: def.slice(slash + 1),
+					thinkingLevel: fgThinking,
+				};
+			}
+			return {
+				provider: "anthropic",
+				modelId: def,
+				thinkingLevel: fgThinking,
+			};
+		}
+
+		return {
+			provider: "anthropic",
+			modelId: "claude-haiku-5-5",
+			thinkingLevel: fgThinking,
+		};
+	}
+
+	getRootModelLabel(): string {
+		const m = this.deps.getModel();
+		return m ? `${m.provider}/${m.id}` : "no-model";
+	}
+
+	/** Store changes and lane status changes: an open bot chat follows both, so it refreshes when a bot starts, finishes or fails. */
+	subscribeBotTeamUpdates(listener: () => void): () => void {
+		const offStore = this.getBotTeamStore().subscribe(listener);
+		const offLanes = this.subscribeLaneRecords(() => listener());
+		return () => {
+			offStore();
+			offLanes();
+		};
+	}
+
+	listPersistentTeams(): PersistentTeamRecord[] {
+		return this.getBotTeamStore().listTeams();
+	}
+
+	getPersistentTeam(teamId: string): PersistentTeamRecord | undefined {
+		return this.getBotTeamStore().getTeam(teamId);
+	}
+
+	upsertPersistentBot(input: UpsertPersistentBotInput): PersistentBotRecord {
+		return this.getBotTeamStore().upsertBot(input);
+	}
+
+	retirePersistentBot(agentId: string): { retired: boolean; detail: string } {
+		this.getBotTeamStore().retireBot(agentId);
+		try {
+			this.retireWorkerAgent(agentId, undefined, { discardPending: true });
+		} catch {
+			// Worker may not exist or may already be retired
+		}
+		return { retired: true, detail: `Bot ${agentId} retired.` };
+	}
+
+	stopPersistentBot(agentId: string): { stopped: boolean; detail: string } {
+		try {
+			const res = this.interruptWorkerAgent(agentId, undefined, { force: false });
+			return {
+				stopped: res.interrupted,
+				detail: res.interrupted
+					? `Stopped ${agentId} (${res.mode ?? "halt"}).`
+					: (res.reason ?? `${agentId} is not running.`),
+			};
+		} catch (error) {
+			return {
+				stopped: false,
+				detail: error instanceof Error ? error.message : `${agentId} is not running.`,
+			};
+		}
+	}
+
+	upsertPersistentTeam(input: UpsertPersistentTeamInput): PersistentTeamRecord {
+		return this.getBotTeamStore().upsertTeam(input);
+	}
+
+	setPersistentTeamMembers(teamId: string, memberAgentIds: readonly string[]): PersistentTeamRecord {
+		return this.getBotTeamStore().setTeamMembers(teamId, memberAgentIds);
+	}
+
+	deletePersistentTeam(teamId: string): boolean {
+		return this.getBotTeamStore().deleteTeam(teamId);
+	}
+
+	private isOrchestrationThinkingLevel(value: string | undefined): value is OrchestrationThinkingLevel {
+		return (
+			value === "off" ||
+			value === "minimal" ||
+			value === "low" ||
+			value === "medium" ||
+			value === "high" ||
+			value === "xhigh" ||
+			value === "max" ||
+			value === "ultra"
+		);
+	}
+
+	private createSyntheticBotSummaryMessage(bot: PersistentBotRecord | undefined, summary: string): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "text", text: `[Prior turn summary]: ${summary}` }],
+			api: "anthropic-messages",
+			provider: bot?.provider ?? "anthropic",
+			model: bot?.modelId ?? "claude-haiku-5-5",
+			usage: {
+				totalTokens: 0,
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			},
+			stopReason: "stop",
+			timestamp: bot?.lastMessageAt ?? Date.now(),
+		};
+	}
+
+	readBotChatMessages(agentId: string): AgentMessage[] {
+		const normId = normalizeBotOrTeamId(agentId, "agentId");
+		let conv = this.openWorkerTranscript(normId);
+		const bot = this.getBotTeamStore().getBot(normId);
+		if (!conv && bot?.lastTranscriptRef) {
+			conv = this.openWorkerTranscript(bot.lastTranscriptRef);
+		}
+		if (conv) {
+			const msgs = conv.getProviderContext().messages;
+			const filtered = msgs.filter((msg) => {
+				if (msg.role !== "user") return true;
+				let text = "";
+				if (typeof msg.content === "string") {
+					text = msg.content;
+				} else if (Array.isArray(msg.content)) {
+					text = msg.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+				}
+				const trimmed = text.trimStart();
+				const isSyntheticBirth =
+					(trimmed.startsWith("<chat>\n") || trimmed.startsWith("<chat>")) &&
+					(trimmed.includes("The view") || trimmed.includes("id+n|"));
+				return !isSyntheticBirth;
+			});
+			if (filtered.length > 0) {
+				return filtered;
+			}
+		}
+
+		const store = this.getBotTeamStore();
+		const allTeams = store.listTeams();
+		const memberTeamIds = allTeams.filter((t) => t.memberAgentIds.includes(normId)).map((t) => t.teamId);
+		const relevantTeamMessages = memberTeamIds.flatMap((tId) =>
+			store.listTeamMessages(tId).filter((m) => m.targetAgentIds.includes(normId)),
+		);
+		const laneRecords = this.getLaneRecords().filter((r) => r.agentId === normId || r.laneId === normId);
+
+		if (relevantTeamMessages.length === 0 && laneRecords.length === 0) {
+			return bot?.lastSummary ? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)] : [];
+		}
+
+		const fallbackMessages: AgentMessage[] = [];
+		for (const record of laneRecords) {
+			const label = record.label;
+			if (label) {
+				fallbackMessages.push({
+					role: "user",
+					content: [{ type: "text", text: label }],
+					timestamp: record.startedAt ? new Date(record.startedAt).getTime() : Date.now(),
+				});
+			}
+			if (record.status !== "running" && record.status !== "queued") {
+				fallbackMessages.push({
+					role: "custom",
+					customType: "bot-lane-status",
+					content: `[${normId}] ${record.reasonCode ?? `Task ${record.status}`}`,
+					display: true,
+					timestamp: record.completedAt ? new Date(record.completedAt).getTime() : Date.now(),
+				});
+			}
+		}
+		for (const tm of relevantTeamMessages) {
+			fallbackMessages.push({
+				role: "user",
+				content: [{ type: "text", text: `[Team ${tm.teamId}] ${tm.text}` }],
+				timestamp: tm.timestamp,
+			});
+		}
+		if (fallbackMessages.length === 0 && bot?.lastSummary) {
+			fallbackMessages.push(this.createSyntheticBotSummaryMessage(bot, bot.lastSummary));
+		}
+		fallbackMessages.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+		return fallbackMessages;
+	}
+
+	readTeamChatMessages(teamId: string): AgentMessage[] {
+		const store = this.getBotTeamStore();
+		const team = store.getTeam(teamId);
+		const teamMessages = store.listTeamMessages(teamId);
+		const result: AgentMessage[] = [];
+
+		for (const msg of teamMessages) {
+			if (msg.sender.kind === "operator") {
+				result.push({
+					role: "user",
+					content: [{ type: "text", text: `[to team:${teamId} -> ${msg.targetAgentIds.join(", ")}] ${msg.text}` }],
+					timestamp: msg.timestamp,
+				});
+			} else if (msg.sender.kind === "bot") {
+				result.push({
+					role: "custom",
+					customType: "team-bot-message",
+					content: `**[bot: ${msg.sender.agentId}]**\n${msg.text}`,
+					display: true,
+					timestamp: msg.timestamp,
+				});
+			} else {
+				result.push({
+					role: "custom",
+					customType: "team-brain-message",
+					content: `**[brain]**\n${msg.text}`,
+					display: true,
+					timestamp: msg.timestamp,
+				});
+			}
+		}
+
+		const firstTeamMsgTimestamp = teamMessages.length > 0 ? teamMessages[0].timestamp : 0;
+		const memberAgentIds = team?.memberAgentIds ?? [];
+
+		for (const memberId of memberAgentIds) {
+			const conv = this.openWorkerTranscript(memberId);
+			if (!conv) continue;
+			const msgs = conv.getProviderContext().messages;
+			for (const msg of msgs) {
+				if (msg.role === "assistant" && (msg.timestamp === undefined || msg.timestamp >= firstTeamMsgTimestamp)) {
+					let prefixed = false;
+					const updatedContent = msg.content.map((part) => {
+						if (!prefixed && part.type === "text") {
+							prefixed = true;
+							return { ...part, text: `**[bot: ${memberId}]**\n${part.text}` };
+						}
+						return part;
+					});
+					result.push({
+						...msg,
+						content: updatedContent,
+					});
+				}
+			}
+		}
+
+		result.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+		return result;
+	}
+
+	subscribeOrchestrationStore(listener: () => void): () => void {
+		if (this._orchestrationStore) {
+			return this._orchestrationStore.subscribe(listener);
+		}
+		return this.subscribeLaneRecords(() => listener());
+	}
+
+	async sendOperatorMessageToBot(
+		agentId: string,
+		message: string,
+		options?: { mode?: "follow_up" | "queue" | "start" },
+	): Promise<BotOperatorMessageDispatchResult> {
+		const normId = normalizeBotOrTeamId(agentId, "agentId");
+		const store = this.getBotTeamStore();
+		store.ensureBotMemoryFile(normId);
+		let bot = store.getBot(normId);
+		let liveAgents: WorkerAgentView[] = [];
+		try {
+			liveAgents = this.listWorkerAgents();
+		} catch {
+			liveAgents = [];
+		}
+		if (!bot) {
+			const live = liveAgents.find((a) => a.agentId === normId);
+			const spec = this.resolveModelSpec(live?.modelRef);
+			bot = store.upsertBot({
+				agentId: normId,
+				provider: spec.provider,
+				modelId: spec.modelId,
+				thinkingLevel: spec.thinkingLevel,
+				lastMessageAt: Date.now(),
+			});
+		} else {
+			store.upsertBot({ agentId: normId, lastMessageAt: Date.now() });
+		}
+
+		const spec = this.resolveModelSpec(bot ? `${bot.provider}/${bot.modelId}` : undefined);
+		const requestedMode = options?.mode ?? "follow_up";
+
+		const existingAgent = liveAgents.find((a) => a.agentId === normId && a.status !== "retired");
+
+		const memoryCtx = store.composeBotUnifiedMemoryContext(normId);
+
+		if (existingAgent && (requestedMode === "follow_up" || requestedMode === "queue")) {
+			// The bot received its memory block when it started and edits its blackboards directly; repeating the
+			// block in every operator message would bloat its transcript and the chat the operator reads.
+			const modelRef = existingAgent.modelRef ?? `${spec.provider}/${spec.modelId}`;
+			if (requestedMode === "queue") {
+				const res = this.sendSessionRootWorkerAgentMessage(normId, message);
+				return { agentId: normId, mode: "queued", messageId: res.messageId, modelRef };
+			}
+			const res = this.followUpSessionRootWorkerAgent(normId, message);
+			return {
+				agentId: normId,
+				mode: res.steering ? "steered" : res.started ? "followed_up" : "queued",
+				messageId: res.messageId,
+				laneId: res.record?.laneId,
+				modelRef,
+			};
+		}
+
+		if (bot.retired) {
+			bot = store.upsertBot({ ...bot, retired: false });
+		}
+
+		// Fresh worker start with preferredAgentId so lane and worker identity match the persistent bot
+		const baseInstructions = bot.instructions ? `${bot.instructions}\n\nTask:\n${message}` : message;
+		const fullInstructions =
+			memoryCtx.promptBlock.length > 0 ? `${memoryCtx.promptBlock}\n\n---\n\n${baseInstructions}` : baseInstructions;
+
+		const activeIds = Array.from(
+			new Set(
+				this.getLaneRecords()
+					.filter((r) => r.status === "running" || r.status === "queued")
+					.map((r) => r.agentId ?? r.laneId)
+					.filter((id): id is string => typeof id === "string" && id.length > 0 && id !== normId),
+			),
+		);
+
+		const started = await this.startWorkerDelegation({
+			instructions: fullInstructions,
+			authority: {
+				model: { provider: spec.provider, modelId: spec.modelId },
+				// Only this bot's blackboard and its teams' blackboards: the rest of the memory directory is the owner's.
+				writePaths: [this.deps.getCwd(), ...memoryCtx.memoryFiles],
+				...(this.isOrchestrationThinkingLevel(bot.thinkingLevel) ? { thinkingLevel: bot.thinkingLevel } : {}),
+			},
+			preferredAgentId: normId,
+			...(activeIds.length > 0
+				? {
+						parallelWork: {
+							independentOf: activeIds,
+							justification: `Direct operator chat with persistent bot ${normId}`,
+						},
+					}
+				: {}),
+		});
+
+		if (!started.started) {
+			throw new Error(`Failed to start persistent bot agent "${normId}": ${started.skipReason ?? "unknown error"}`);
+		}
+
+		return {
+			mode: "started",
+			agentId: started.record.agentId ?? normId,
+			laneId: started.record.laneId,
+			modelRef: started.record.modelRef ?? `${spec.provider}/${spec.modelId}`,
+			messageId: `bot-msg-${Date.now()}`,
+		};
+	}
+
+	async sendOperatorMessageToTeam(teamIdRaw: string, message: string): Promise<TeamOperatorMessageDispatchResult> {
+		const teamId = normalizeBotOrTeamId(teamIdRaw, "teamId");
+		const store = this.getBotTeamStore();
+		const team = store.getTeam(teamId);
+		if (!team) {
+			throw new Error(`Cannot send message to nonexistent team "${teamId}". Create the team first.`);
+		}
+
+		const members = team.memberAgentIds;
+		if (members.length === 0) {
+			throw new Error(`Team "${teamId}" has no members to receive messages.`);
+		}
+
+		store.ensureTeamMemoryFile(teamId);
+		const timestamp = Date.now();
+		const messageId = `team-msg-${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
+		const deliveries: PersistentTeamMemberDelivery[] = [];
+
+		const trimmedMessage = message.trim();
+		let targetAgentIds: string[] = [];
+		let contentForBots = trimmedMessage;
+
+		if (trimmedMessage.startsWith("@")) {
+			const spaceIdx = trimmedMessage.indexOf(" ");
+			const targetRaw = (spaceIdx === -1 ? trimmedMessage.slice(1) : trimmedMessage.slice(1, spaceIdx)).replace(
+				/[:,;]+$/,
+				"",
+			);
+			const matched = members.find((m) => m.toLowerCase() === targetRaw.toLowerCase());
+			if (matched) {
+				targetAgentIds = [matched];
+				contentForBots = spaceIdx === -1 ? "" : trimmedMessage.slice(spaceIdx + 1).trim();
+			}
+		}
+
+		const targets = targetAgentIds.length > 0 ? targetAgentIds : members;
+
+		for (const memberId of targets) {
+			try {
+				const botResult = await this.sendOperatorMessageToBot(memberId, contentForBots);
+				deliveries.push({
+					agentId: memberId,
+					outcome: botResult.mode === "started" ? "started" : botResult.mode === "queued" ? "queued" : "steering",
+					messageId: botResult.messageId,
+				});
+			} catch (err) {
+				deliveries.push({
+					agentId: memberId,
+					outcome: "failed",
+					detail: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+
+		const teamMsg: PersistentTeamMessage = {
+			messageId,
+			teamId,
+			sender: { kind: "operator" },
+			text: message,
+			timestamp,
+			targetAgentIds,
+			deliveries,
+		};
+		store.appendTeamMessage(teamMsg);
+
+		return {
+			teamId,
+			message: teamMsg,
+			deliveries,
+		};
+	}
+
+	persistWorkerTerminalReport(
+		name: string,
+		terminal: { laneId: string; attemptId?: string; status: string; completedAt?: string; reasonCode?: string },
+	): void {
+		const entries = this.deps.getSessionManager().getEntries();
+		const claim =
+			terminal.attemptId === undefined
+				? undefined
+				: getWorkerClaimSnapshots(entries).find((candidate) => candidate.terminalAttemptId === terminal.attemptId);
+		const claimId = terminal.attemptId ?? `lane:${terminal.laneId}:${terminal.completedAt ?? ""}:${terminal.status}`;
+		if (
+			entries.some(
+				(entry) =>
+					entry.type === "custom" &&
+					entry.customType === CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE &&
+					(entry.data as { claimId?: unknown } | undefined)?.claimId === claimId,
+			)
+		) {
+			return;
+		}
+		const reason = terminal.reasonCode ? ` (${terminal.reasonCode})` : "";
+		const transcriptReference = this.workerTranscriptReference(terminal);
+		const report: ContinuousChatWorkReportEntry = {
+			version: 1,
+			name,
+			claimId,
+			text: claim ? workerReportClaimText(claim) : `Terminal status ${terminal.status}${reason}.`,
+			timestamp: Date.now(),
+			...(transcriptReference ? { transcriptReference } : {}),
+		};
+		this.deps.getSessionManager().appendCustomEntry(CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE, report);
+		try {
+			this.getBotTeamStore().recordBotTurnOutcome({
+				agentId: name,
+				summary: report.text,
+				transcriptRef: transcriptReference,
+				timestamp: report.timestamp,
+			});
+		} catch {
+			// Outcome recording is advisory; must not fail terminal report persistence
+		}
 	}
 }

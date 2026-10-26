@@ -7,6 +7,7 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import { CacheClock } from "../../core/cache-clock.ts";
 import { onCiStatusChange, readCiStatusView } from "../../core/ci-status-view.ts";
 import { expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
+import type { ActiveChatTarget } from "../../core/delegation/persistent-bot-team-store.ts";
 import type { ReadonlyFooterDataProvider } from "../../core/footer-data-contract.ts";
 import { GenerationRate } from "../../core/generation-rate.ts";
 import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
@@ -28,7 +29,7 @@ import {
 import type { FooterComponent } from "./components/footer.ts";
 import { OperatorPovBarComponent } from "./components/operator-pov-bar.ts";
 import { isConversationMessage } from "./components/question-conversation.ts";
-import { WorkbenchComponent } from "./components/workbench.ts";
+import { type WorkbenchChatRosterSnapshot, WorkbenchComponent } from "./components/workbench.ts";
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
 import { WorkbenchController } from "./workbench-controller.ts";
 
@@ -64,6 +65,16 @@ export interface InteractiveLayoutPort {
 	getStreamingMessage(): AssistantMessage | undefined;
 	/** The display name of a `provider/model` ref, as the status line shows it; undefined for an unknown model. */
 	findModelName(modelRef: string): string | undefined;
+	/** The header's conversation name (e.g. the live bot or team); absent shows "Conversation". */
+	getConversationTitle?: () => string;
+	/** Label of the header chip that opens the Bot & Team chat switcher; absent hides the chip. */
+	getSwitchChatChip?: () => string | undefined;
+	/** Opens the Bot & Team chat switcher from the header chip. */
+	onSwitchChat?: () => void;
+	/** The Chats & Teams roster for the left pane; absent, the pane offers only the Graph. */
+	getChatRoster?: () => WorkbenchChatRosterSnapshot | undefined;
+	/** Resumes the chat the operator clicked on the Chats & Teams roster. */
+	onSelectChatTarget?: (target: ActiveChatTarget) => void;
 }
 
 /** Active obligations are unresolved open work, not a failed requirement branch. */
@@ -403,6 +414,9 @@ export class InteractiveLayout {
 			operatorStatus,
 			brand: APP_NAME,
 			title: () => port.getSessionManager().getSessionName() || path.basename(port.getSessionManager().getCwd()),
+			conversationTitle: () => port.getConversationTitle?.() ?? "Conversation",
+			switchChatChip: () => port.getSwitchChatChip?.(),
+			chatRoster: () => port.getChatRoster?.(),
 			branch: () => port.footerDataProvider.getGitBranch(),
 			model: () => {
 				const { model, thinkingLevel } = port.getSession().state;
@@ -439,6 +453,9 @@ export class InteractiveLayout {
 			copy: copyToClipboard,
 			notice: (text, error) => port.activityLane?.announce(text, error ? "failure" : "neutral"),
 			previewLimit: () => port.getSettings().getWorkbenchSettings().previews,
+			onSwitchChat: () => port.onSwitchChat?.(),
+			onSelectChatTarget: (target) => port.onSelectChatTarget?.(target),
+			persistentTeams: () => port.getSession().listPersistentTeams(),
 			semanticEvaluations: () => port.getSession().getSemanticEvaluations(),
 			activeForegroundCount: () => {
 				const handedOff = new Set(

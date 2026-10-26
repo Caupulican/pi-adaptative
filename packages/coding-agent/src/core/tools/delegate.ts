@@ -899,7 +899,7 @@ const ASYNC_DELEGATE_PROMPT_GUIDELINES = [
 	"Stable agentId returns immediately; terminal handoff wakes parent. Dependency waits are event-driven; never poll.",
 	"Fan-out: slices (partition, coverage reported) or race (first accepted result wins, rest cancelled) start one fresh worker each.",
 	"Transcript pages are bounded; follow nextCursor; omittedMessages marks omissions. status reads claims.",
-	"Explicit replies: inbox/inbox_wait then inbox_ack. Completion: wait/wait_many. 64 pending max; retry backpressure.",
+	"Explicit replies: inbox/inbox_wait then inbox_ack. Completion arrives as a handoff that wakes the parent: end the turn after start instead of calling wait/wait_many, which only fits a result the same turn cannot proceed without. 64 pending max; retry backpressure.",
 	"Timeout alone is nonterminal, never stall proof; never interrupt from timeout alone",
 	CAVEMAN_DELEGATE_GUIDELINE,
 	CAVEMAN_PROFILE_GUIDELINE,

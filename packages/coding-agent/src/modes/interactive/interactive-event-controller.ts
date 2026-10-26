@@ -93,6 +93,8 @@ export interface InteractiveEventPort {
 	getWorkbench(): WorkbenchController | undefined;
 	isInitialized(): boolean;
 	isThinkingHidden(): boolean;
+	/** False while the operator views a live Bot or Team chat in `chatContainer` instead of the Root Brain chat. */
+	isRootChatActive?: () => boolean;
 	init(): Promise<void>;
 	clearActiveToolCalls(): void;
 	updatePendingMessagesDisplay(): void;
@@ -382,15 +384,21 @@ export class InteractiveEventController {
 			case "message_start":
 				if (event.message.role === "custom") {
 					this.port.getWorkbench()?.recordBackground(event.message);
-					this.port.addMessageToChat(event.message);
+					if (this.port.isRootChatActive?.() !== false) {
+						this.port.addMessageToChat(event.message);
+					}
 					this.port.ui.requestRender();
 				} else if (event.message.role === "user") {
-					this.port.addMessageToChat(event.message);
+					if (this.port.isRootChatActive?.() !== false) {
+						this.port.addMessageToChat(event.message);
+					}
 					this.port.updatePendingMessagesDisplay();
 					this.port.ui.requestRender();
 				} else if (event.message.role === "bashExecution") {
 					// A run the harness made for the owner (an exact toolkit hit) shows like a `!` command.
-					this.port.addMessageToChat(event.message);
+					if (this.port.isRootChatActive?.() !== false) {
+						this.port.addMessageToChat(event.message);
+					}
 					this.port.ui.requestRender();
 				} else if (event.message.role === "assistant") {
 					this.clearPendingStreamingUiUpdate();
@@ -415,10 +423,14 @@ export class InteractiveEventController {
 						},
 					);
 					this.streamingMessage = event.message;
-					this.port.chatContainer.addChild(this.streamingComponent);
+					if (this.port.isRootChatActive?.() !== false) {
+						this.port.chatContainer.addChild(this.streamingComponent);
+					}
 					this.updateCommentaryActivity(this.streamingMessage);
 					this.applyStreamingMessageUpdate(this.streamingMessage, { force: true });
-					this.port.trimLiveTuiHistory();
+					if (this.port.isRootChatActive?.() !== false) {
+						this.port.trimLiveTuiHistory();
+					}
 				}
 				break;
 
@@ -489,17 +501,20 @@ export class InteractiveEventController {
 						: {}),
 				});
 				let component = this.port.activeToolCalls.getActive(event.toolCallId);
-				if (!component) {
+				// A root tool call does not attach into a Bot or Team chat that the operator is viewing.
+				if (!component && this.port.isRootChatActive?.() !== false) {
 					component = this.port.attachToolExecutionComponent(
 						event.toolName,
 						event.toolCallId,
 						event.args,
 						event.repair,
 					);
-				} else {
+				} else if (component) {
 					component.updateArgs(event.args, event.repair);
 				}
-				component.markExecutionStarted(event.repair);
+				if (component) {
+					component.markExecutionStarted(event.repair);
+				}
 				this.port.ui.requestRender();
 				break;
 			}

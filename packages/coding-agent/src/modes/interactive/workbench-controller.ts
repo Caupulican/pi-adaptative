@@ -7,6 +7,7 @@ import {
 } from "@caupulican/pi-tui";
 import type { LaneRecord } from "../../core/autonomy/lane-tracker.ts";
 import { backgroundToolInvocationObservations } from "../../core/background-tool-task-controller.ts";
+import type { ActiveChatTarget } from "../../core/delegation/persistent-bot-team-store.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import type { ForegroundRouteSnapshot } from "../../core/model-router-controller.ts";
 import type { OperatorProjection } from "../../core/operator-projection/types.ts";
@@ -83,6 +84,16 @@ interface WorkbenchPorts {
 	attribution?: () => PreviewAttribution;
 	/** The folder the session works in: output paths are shown relative to it. */
 	workingDirectory?: () => string;
+	/** Opens the Bot & Team chat switcher from the header chip. */
+	onSwitchChat?: () => void;
+	/** Resumes the chat the operator clicked on the Chats & Teams roster (the left pane). */
+	onSelectChatTarget?: (target: ActiveChatTarget) => void;
+	/** Persistent teams listed under the inspector's Teams group. */
+	persistentTeams?: () => readonly {
+		readonly teamId: string;
+		readonly name: string;
+		readonly memberAgentIds: readonly string[];
+	}[];
 }
 
 /** Live facts behind the Team hierarchy: the decider's state, the root's model and route, the lanes. */
@@ -439,7 +450,15 @@ export class WorkbenchController {
 
 	refresh(snapshot: AgentsOverlaySnapshot): void {
 		this.snapshot = snapshot;
-		this.view.setInspector(buildWorkbenchSections(snapshot, Date.now(), this.ports.team, () => this.view.graphShown));
+		this.view.setInspector(
+			buildWorkbenchSections(
+				snapshot,
+				Date.now(),
+				this.ports.team,
+				() => this.view.graphShown,
+				this.ports.persistentTeams,
+			),
+		);
 		this.workTitle = workTitle(snapshot.items);
 		this.publishHeadline();
 	}
@@ -538,6 +557,7 @@ export class WorkbenchController {
 				if (headerAction === "latest") conversation.latest();
 				else if (headerAction === "layout") this.changeGeometry(() => this.view.toggleLayout());
 				else if (headerAction === "showGraph") this.changeGeometry(() => this.view.toggleGraph());
+				else if (headerAction === "switchChat") this.ports.onSwitchChat?.();
 			} else if (action === "down" && button === "left" && hit === "divider") {
 				this.geometryDrag = {
 					kind: "rows",
@@ -575,7 +595,16 @@ export class WorkbenchController {
 				if (titleAction === "graphCycle") this.changeGeometry(() => this.view.cycleGraphView());
 				else if (titleAction === "followCurrent") this.changeGeometry(() => this.view.followCurrentGraph());
 				else if (titleAction === "hideGraph") this.changeGeometry(() => this.view.toggleGraph());
+				else if (titleAction === "toggleLeftPaneMode") this.changeGeometry(() => this.view.toggleLeftPaneMode());
+				else if (titleAction === "switchChat") this.ports.onSwitchChat?.();
 			} else if (action === "down" && button === "left" && hit === "graph") {
+				// A chat row on the Chats & Teams roster resumes that conversation.
+				const chatTarget = this.view.chatTargetAt(column, row);
+				if (chatTarget !== undefined) {
+					this.ports.onSelectChatTarget?.(chatTarget);
+					this.ports.requestRender();
+					return { consume: true };
+				}
 				// A stage row opens its detail; the detail lives in the List view, so the view may switch.
 				const stage = this.view.graphStageAt(column, row);
 				if (stage) this.changeGeometry(() => this.view.toggleGraphStage(stage));
@@ -630,7 +659,13 @@ export class WorkbenchController {
 		mutate();
 		if (this.snapshot) {
 			this.view.setInspector(
-				buildWorkbenchSections(this.snapshot, Date.now(), this.ports.team, () => this.view.graphShown),
+				buildWorkbenchSections(
+					this.snapshot,
+					Date.now(),
+					this.ports.team,
+					() => this.view.graphShown,
+					this.ports.persistentTeams,
+				),
 			);
 		}
 		this.ports.geometry?.save(this.view.geometry());
@@ -751,6 +786,11 @@ export function buildWorkbenchSections(
 	nowMs: number,
 	team?: () => WorkbenchTeamFacts,
 	graphShown?: () => boolean,
+	persistentTeams?: () => readonly {
+		readonly teamId: string;
+		readonly name: string;
+		readonly memberAgentIds: readonly string[];
+	}[],
 ): WorkbenchSection[] {
 	const model = buildWorkPanelModel(snapshot, nowMs);
 	const rows = model.rows ?? [];
@@ -806,7 +846,7 @@ export function buildWorkbenchSections(
 	// The team is its specialists, not its task history: a specialist with three finished tasks and
 	// nothing running is one idle agent, and it keeps its section even though it contributes no row.
 	const specialists = projectSpecialistLanes(snapshot.laneRecords);
-	if (teamRows.length || specialists.length || team) {
+	if (teamRows.length || specialists.length || team || (persistentTeams?.().length ?? 0) > 0) {
 		const panel = compactWorkPanel({ ...model, rows: teamRows }, 4);
 		const shown = panel.rows ?? [];
 		const workers = specialists.flatMap((specialist) => (specialist.current ? [specialist.current] : []));
@@ -853,11 +893,21 @@ export function buildWorkbenchSections(
 				}
 				const facts = team();
 				const routing = renderRoutingRows(facts);
+				const teams = persistentTeams?.() ?? [];
 				return [
 					group("Decider"),
 					...renderDeciderRows(facts, Date.now()),
 					group("Brain"),
 					renderRootRow(facts),
+					...(teams.length
+						? [
+								group("Teams"),
+								...teams.map(
+									(t) =>
+										`  ${theme.fg("accent", "◆")} ${theme.fg("text", t.name || t.teamId)} ${theme.fg("muted", `[${t.memberAgentIds.join(", ") || "empty"}]`)}`,
+								),
+							]
+						: []),
 					...(hasSpecialists ? [group("Subagents"), ...executorRows(width)] : []),
 					...(routing.length ? [group("Routing"), ...routing] : []),
 				].map((line) => truncateToWidth(line, Math.max(1, width), ""));

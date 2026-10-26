@@ -1,0 +1,1097 @@
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { getAgentDir } from "../../config.ts";
+import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import { isRecordObject } from "../util/value-guards.ts";
+import type { WorkerAgentView } from "./worker-agent-control.ts";
+
+export type ActiveChatTarget =
+	| { readonly kind: "root" }
+	| { readonly kind: "bot"; readonly agentId: string }
+	| { readonly kind: "team"; readonly teamId: string };
+
+export type PersistentBotLiveState = "running" | "queued" | "idle" | "awaiting_parent" | "failed" | "retired";
+
+export interface PersistentBotRecord {
+	readonly agentId: string;
+	readonly displayName: string;
+	readonly description?: string;
+	readonly provider: string;
+	readonly modelId: string;
+	readonly thinkingLevel?: string;
+	readonly instructions?: string;
+	readonly profileId?: string;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+	readonly retired?: boolean;
+	readonly lastTranscriptRef?: string;
+	readonly lastSummary?: string;
+	readonly lastMessageAt?: number;
+}
+
+export interface PersistentBotView {
+	readonly agentId: string;
+	readonly displayName: string;
+	readonly description?: string;
+	readonly provider: string;
+	readonly modelId: string;
+	readonly modelRef: string;
+	readonly thinkingLevel?: string;
+	readonly instructions?: string;
+	readonly profileId?: string;
+	readonly state: PersistentBotLiveState;
+	readonly currentTaskId?: string;
+	readonly currentSummary?: string;
+	readonly teamIds: readonly string[];
+	readonly persistent: boolean;
+	readonly controllable: boolean;
+	readonly updatedAt: string;
+	readonly lastTranscriptRef?: string;
+	readonly lastSummary?: string;
+	readonly lastMessageAt?: number;
+	readonly memoryFilePath?: string;
+}
+
+export interface PersistentTeamRecord {
+	readonly teamId: string;
+	readonly name: string;
+	readonly description?: string;
+	readonly memberAgentIds: readonly string[];
+	readonly createdAt: string;
+	readonly updatedAt: string;
+	readonly lastMessageAt?: number;
+	readonly memoryFilePath?: string;
+}
+
+export interface PersistentTeamMemberDelivery {
+	readonly agentId: string;
+	readonly outcome: "started" | "steering" | "queued" | "failed";
+	readonly messageId?: string;
+	readonly detail?: string;
+}
+
+export interface PersistentTeamMessage {
+	readonly messageId: string;
+	readonly teamId: string;
+	readonly sender:
+		| { readonly kind: "operator" }
+		| { readonly kind: "brain" }
+		| { readonly kind: "bot"; readonly agentId: string };
+	readonly text: string;
+	readonly timestamp: number;
+	readonly targetAgentIds: readonly string[];
+	readonly deliveries: readonly PersistentTeamMemberDelivery[];
+}
+
+export interface UpsertPersistentBotInput {
+	readonly agentId: string;
+	readonly displayName?: string;
+	readonly description?: string;
+	readonly provider?: string;
+	readonly modelId?: string;
+	readonly thinkingLevel?: string;
+	readonly instructions?: string;
+	readonly profileId?: string;
+	readonly retired?: boolean;
+	readonly lastTranscriptRef?: string;
+	readonly lastSummary?: string;
+	readonly lastMessageAt?: number;
+}
+
+export interface UpsertPersistentTeamInput {
+	readonly teamId: string;
+	readonly name?: string;
+	readonly description?: string;
+	readonly memberAgentIds: readonly string[];
+}
+
+export interface BotOperatorMessageDispatchResult {
+	readonly agentId: string;
+	readonly mode: "started" | "followed_up" | "steered" | "queued";
+	readonly messageId?: string;
+	readonly laneId?: string;
+	readonly modelRef: string;
+}
+
+export interface TeamOperatorMessageDispatchResult {
+	readonly teamId: string;
+	readonly message: PersistentTeamMessage;
+	readonly deliveries: readonly PersistentTeamMemberDelivery[];
+}
+
+const BOT_OR_TEAM_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const MAX_TEAM_MESSAGES_PER_TEAM = 200;
+const STORE_FILE_NAME = "bots-and-teams.json";
+
+export function normalizeBotOrTeamId(raw: string, label = "identifier"): string {
+	const trimmed = raw.trim();
+	if (!BOT_OR_TEAM_ID_REGEX.test(trimmed)) {
+		throw new Error(
+			`Invalid ${label}: "${raw}". Identifiers must start with an alphanumeric character, contain only letters, numbers, underscores, dots, or hyphens, and be 1 to 128 characters long.`,
+		);
+	}
+	return trimmed;
+}
+
+export function sameActiveChatTarget(a: ActiveChatTarget, b: ActiveChatTarget): boolean {
+	switch (a.kind) {
+		case "root":
+			return b.kind === "root";
+		case "bot":
+			return b.kind === "bot" && a.agentId === b.agentId;
+		case "team":
+			return b.kind === "team" && a.teamId === b.teamId;
+		default: {
+			const _exhaustive: never = a;
+			return false;
+		}
+	}
+}
+
+export function formatActiveChatTargetBadge(
+	target: ActiveChatTarget,
+	bots?: readonly PersistentBotView[],
+	teams?: readonly PersistentTeamRecord[],
+): string {
+	switch (target.kind) {
+		case "root":
+			return "Brain (root)";
+		case "bot": {
+			const bot = bots?.find((b) => b.agentId === target.agentId);
+			if (bot) {
+				return `Bot: ${target.agentId} · ${bot.state}`;
+			}
+			return `Bot: ${target.agentId}`;
+		}
+		case "team": {
+			const team = teams?.find((t) => t.teamId === target.teamId);
+			if (team) {
+				return `Team: ${target.teamId} (${team.memberAgentIds.length} bots)`;
+			}
+			return `Team: ${target.teamId}`;
+		}
+		default: {
+			const _exhaustive: never = target;
+			return "Brain (root)";
+		}
+	}
+}
+
+export function parseDirectChatAddress(
+	text: string,
+	knownBotIds: ReadonlySet<string>,
+	knownTeamIds: ReadonlySet<string>,
+): { readonly target: ActiveChatTarget; readonly body: string } | undefined {
+	const trimmed = text.trimStart();
+	if (!trimmed.startsWith("@")) {
+		return undefined;
+	}
+	const match = trimmed.match(/^@(\S+)\s+([\s\S]+)$/);
+	if (!match) {
+		return undefined;
+	}
+	const rawTarget = match[1];
+	const body = match[2].trim();
+	if (body.length === 0) {
+		return undefined;
+	}
+
+	if (rawTarget === "root" || rawTarget === "brain") {
+		return { target: { kind: "root" }, body };
+	}
+
+	if (rawTarget.startsWith("team:")) {
+		const teamId = rawTarget.slice(5);
+		if (!teamId || !BOT_OR_TEAM_ID_REGEX.test(teamId)) {
+			return undefined;
+		}
+		return { target: { kind: "team", teamId }, body };
+	}
+
+	if (rawTarget.startsWith("bot:")) {
+		const agentId = rawTarget.slice(4);
+		if (!agentId || !BOT_OR_TEAM_ID_REGEX.test(agentId)) {
+			return undefined;
+		}
+		return { target: { kind: "bot", agentId }, body };
+	}
+
+	if (knownTeamIds.has(rawTarget)) {
+		return { target: { kind: "team", teamId: rawTarget }, body };
+	}
+
+	if (knownBotIds.has(rawTarget)) {
+		return { target: { kind: "bot", agentId: rawTarget }, body };
+	}
+
+	return undefined;
+}
+
+function parseModelRef(rawRef: string): { provider: string; modelId: string } {
+	const trimmed = rawRef.trim();
+	const slashIndex = trimmed.indexOf("/");
+	if (slashIndex > 0 && slashIndex < trimmed.length - 1) {
+		return {
+			provider: trimmed.slice(0, slashIndex),
+			modelId: trimmed.slice(slashIndex + 1),
+		};
+	}
+	if (slashIndex === 0) {
+		return {
+			provider: "unknown",
+			modelId: trimmed.slice(1) || "default",
+		};
+	}
+	return {
+		provider: "unknown",
+		modelId: trimmed || "default",
+	};
+}
+
+function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
+	if (!isRecordObject(value)) {
+		return undefined;
+	}
+	const {
+		agentId,
+		displayName,
+		description,
+		provider,
+		modelId,
+		thinkingLevel,
+		instructions,
+		profileId,
+		createdAt,
+		updatedAt,
+		retired,
+		lastTranscriptRef,
+		lastSummary,
+		lastMessageAt,
+	} = value;
+
+	if (
+		typeof agentId !== "string" ||
+		!BOT_OR_TEAM_ID_REGEX.test(agentId) ||
+		typeof displayName !== "string" ||
+		typeof provider !== "string" ||
+		typeof modelId !== "string" ||
+		typeof createdAt !== "string" ||
+		typeof updatedAt !== "string"
+	) {
+		return undefined;
+	}
+
+	return {
+		agentId,
+		displayName,
+		description: typeof description === "string" ? description : undefined,
+		provider,
+		modelId,
+		thinkingLevel: typeof thinkingLevel === "string" ? thinkingLevel : undefined,
+		instructions: typeof instructions === "string" ? instructions : undefined,
+		profileId: typeof profileId === "string" ? profileId : undefined,
+		createdAt,
+		updatedAt,
+		retired: typeof retired === "boolean" ? retired : undefined,
+		lastTranscriptRef: typeof lastTranscriptRef === "string" ? lastTranscriptRef : undefined,
+		lastSummary: typeof lastSummary === "string" ? lastSummary : undefined,
+		lastMessageAt: typeof lastMessageAt === "number" && Number.isFinite(lastMessageAt) ? lastMessageAt : undefined,
+	};
+}
+
+function parseTeamRecord(value: unknown): PersistentTeamRecord | undefined {
+	if (!isRecordObject(value)) {
+		return undefined;
+	}
+	const { teamId, name, description, memberAgentIds, createdAt, updatedAt, lastMessageAt, memoryFilePath } = value;
+
+	if (
+		typeof teamId !== "string" ||
+		!BOT_OR_TEAM_ID_REGEX.test(teamId) ||
+		typeof createdAt !== "string" ||
+		typeof updatedAt !== "string" ||
+		!Array.isArray(memberAgentIds)
+	) {
+		return undefined;
+	}
+
+	const validMembers: string[] = [];
+	for (const id of memberAgentIds) {
+		if (typeof id === "string" && BOT_OR_TEAM_ID_REGEX.test(id)) {
+			validMembers.push(id);
+		}
+	}
+
+	return {
+		teamId,
+		name: typeof name === "string" ? name : teamId,
+		description: typeof description === "string" ? description : undefined,
+		memberAgentIds: validMembers,
+		createdAt,
+		updatedAt,
+		lastMessageAt: typeof lastMessageAt === "number" && Number.isFinite(lastMessageAt) ? lastMessageAt : undefined,
+		memoryFilePath: typeof memoryFilePath === "string" ? memoryFilePath : undefined,
+	};
+}
+
+function parseTeamMessage(value: unknown): PersistentTeamMessage | undefined {
+	if (!isRecordObject(value)) {
+		return undefined;
+	}
+	const { messageId, teamId, sender, text, timestamp, targetAgentIds, deliveries } = value;
+
+	if (
+		typeof messageId !== "string" ||
+		typeof teamId !== "string" ||
+		!BOT_OR_TEAM_ID_REGEX.test(teamId) ||
+		typeof text !== "string" ||
+		typeof timestamp !== "number" ||
+		!Number.isFinite(timestamp) ||
+		!isRecordObject(sender) ||
+		!Array.isArray(targetAgentIds) ||
+		!Array.isArray(deliveries)
+	) {
+		return undefined;
+	}
+
+	let parsedSender: PersistentTeamMessage["sender"] | undefined;
+	if (sender.kind === "operator") {
+		parsedSender = { kind: "operator" };
+	} else if (sender.kind === "brain") {
+		parsedSender = { kind: "brain" };
+	} else if (sender.kind === "bot" && typeof sender.agentId === "string") {
+		parsedSender = { kind: "bot", agentId: sender.agentId };
+	}
+	if (!parsedSender) {
+		return undefined;
+	}
+
+	const validTargets: string[] = [];
+	for (const t of targetAgentIds) {
+		if (typeof t === "string") {
+			validTargets.push(t);
+		}
+	}
+
+	const validDeliveries: PersistentTeamMemberDelivery[] = [];
+	for (const d of deliveries) {
+		if (isRecordObject(d) && typeof d.agentId === "string") {
+			const outcome = d.outcome;
+			if (outcome === "started" || outcome === "steering" || outcome === "queued" || outcome === "failed") {
+				validDeliveries.push({
+					agentId: d.agentId,
+					outcome,
+					messageId: typeof d.messageId === "string" ? d.messageId : undefined,
+					detail: typeof d.detail === "string" ? d.detail : undefined,
+				});
+			}
+		}
+	}
+
+	return {
+		messageId,
+		teamId,
+		sender: parsedSender,
+		text,
+		timestamp,
+		targetAgentIds: validTargets,
+		deliveries: validDeliveries,
+	};
+}
+
+function appendBoundedFile(filePath: string, line: string, maxLines = 80): void {
+	let lines: string[] = [];
+	if (existsSync(filePath)) {
+		try {
+			lines = readFileSync(filePath, "utf8").split(/\r?\n/);
+		} catch {
+			lines = [];
+		}
+	}
+	lines.push(line);
+	if (lines.length > maxLines) {
+		lines = lines.slice(-maxLines);
+	}
+	mkdirSync(dirname(filePath), { recursive: true });
+	writeFileSync(filePath, lines.join("\n"), "utf8");
+}
+
+export class PersistentBotTeamStore {
+	private readonly agentDir: string;
+	private readonly filePath: string;
+	private readonly bots = new Map<string, PersistentBotRecord>();
+	private readonly teams = new Map<string, PersistentTeamRecord>();
+	private readonly teamMessages = new Map<string, PersistentTeamMessage[]>();
+	private readonly listeners = new Set<() => void>();
+
+	constructor(agentDir: string = getAgentDir()) {
+		this.agentDir = agentDir;
+		this.filePath = join(agentDir, STORE_FILE_NAME);
+		this.reload();
+	}
+
+	subscribe(listener: () => void): () => void {
+		this.listeners.add(listener);
+		return () => {
+			this.listeners.delete(listener);
+		};
+	}
+
+	private notify(): void {
+		for (const listener of this.listeners) {
+			try {
+				listener();
+			} catch {
+				// Suppress listener errors during broadcast
+			}
+		}
+	}
+
+	private save(): void {
+		mkdirSync(this.agentDir, { recursive: true });
+		const tempPath = join(this.agentDir, `bots-and-teams.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
+		const data = {
+			version: 1,
+			bots: Array.from(this.bots.values()),
+			teams: Array.from(this.teams.values()),
+			teamMessages: Object.fromEntries(this.teamMessages),
+		};
+		try {
+			writeFileSync(tempPath, JSON.stringify(data, null, 2), "utf8");
+			renameSync(tempPath, this.filePath);
+		} catch (error) {
+			try {
+				if (existsSync(tempPath)) {
+					unlinkSync(tempPath);
+				}
+			} catch {
+				// Suppress cleanup error
+			}
+			throw error;
+		}
+		this.notify();
+	}
+
+	/** Re-reads the shared store file. Every mutation starts here so another session's changes are not overwritten. */
+	reload(): void {
+		this.bots.clear();
+		this.teams.clear();
+		this.teamMessages.clear();
+
+		if (!existsSync(this.filePath)) {
+			return;
+		}
+
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(readFileSync(this.filePath, "utf8"));
+		} catch {
+			parsed = undefined;
+		}
+
+		if (!isRecordObject(parsed)) {
+			// The next save would replace an unreadable store with an empty one and destroy every bot and team:
+			// keep the unreadable file beside the store before continuing.
+			renameSync(this.filePath, join(this.agentDir, `bots-and-teams.corrupt-${Date.now()}.json`));
+			return;
+		}
+
+		if (Array.isArray(parsed.bots)) {
+			for (const rawBot of parsed.bots) {
+				const bot = parseBotRecord(rawBot);
+				if (bot) {
+					this.bots.set(bot.agentId, bot);
+				}
+			}
+		}
+
+		if (Array.isArray(parsed.teams)) {
+			for (const rawTeam of parsed.teams) {
+				const team = parseTeamRecord(rawTeam);
+				if (team) {
+					this.teams.set(team.teamId, team);
+				}
+			}
+		}
+
+		if (isRecordObject(parsed.teamMessages)) {
+			for (const [teamId, rawMessages] of Object.entries(parsed.teamMessages)) {
+				if (BOT_OR_TEAM_ID_REGEX.test(teamId) && Array.isArray(rawMessages)) {
+					const validMessages: PersistentTeamMessage[] = [];
+					for (const rawMsg of rawMessages) {
+						const msg = parseTeamMessage(rawMsg);
+						if (msg && msg.teamId === teamId) {
+							validMessages.push(msg);
+						}
+					}
+					if (validMessages.length > 0) {
+						this.teamMessages.set(teamId, validMessages.slice(-MAX_TEAM_MESSAGES_PER_TEAM));
+					}
+				}
+			}
+		}
+	}
+
+	listBots(options?: { includeRetired?: boolean }): PersistentBotRecord[] {
+		const all = Array.from(this.bots.values());
+		if (options?.includeRetired) {
+			return all;
+		}
+		return all.filter((b) => !b.retired);
+	}
+
+	getBot(agentId: string): PersistentBotRecord | undefined {
+		return this.bots.get(agentId.trim());
+	}
+
+	upsertBot(input: UpsertPersistentBotInput, nowIso?: string): PersistentBotRecord {
+		this.reload();
+		const agentId = normalizeBotOrTeamId(input.agentId, "agentId");
+		const existing = this.bots.get(agentId);
+		const provider = (input.provider !== undefined ? input.provider.trim() : existing?.provider) || "anthropic";
+		const modelId = (input.modelId !== undefined ? input.modelId.trim() : existing?.modelId) || "claude-haiku-5-5";
+
+		const now = nowIso ?? new Date().toISOString();
+
+		const record: PersistentBotRecord = {
+			agentId,
+			displayName: input.displayName?.trim() || existing?.displayName || agentId,
+			description: input.description !== undefined ? input.description.trim() || undefined : existing?.description,
+			provider,
+			modelId,
+			thinkingLevel:
+				input.thinkingLevel !== undefined ? input.thinkingLevel.trim() || undefined : existing?.thinkingLevel,
+			instructions:
+				input.instructions !== undefined ? input.instructions.trim() || undefined : existing?.instructions,
+			profileId: input.profileId !== undefined ? input.profileId.trim() || undefined : existing?.profileId,
+			createdAt: existing?.createdAt ?? now,
+			updatedAt: now,
+			retired: input.retired ?? existing?.retired ?? false,
+			lastTranscriptRef:
+				input.lastTranscriptRef !== undefined
+					? input.lastTranscriptRef.trim() || undefined
+					: existing?.lastTranscriptRef,
+			lastSummary:
+				input.lastSummary !== undefined
+					? input.lastSummary.trim().slice(0, 500) || undefined
+					: existing?.lastSummary,
+			lastMessageAt:
+				input.lastMessageAt !== undefined && Number.isFinite(input.lastMessageAt)
+					? input.lastMessageAt
+					: existing?.lastMessageAt,
+		};
+
+		this.bots.set(agentId, record);
+		this.ensureBotMemoryFile(agentId);
+		this.save();
+		return record;
+	}
+
+	retireBot(agentId: string, nowIso?: string): PersistentBotRecord | undefined {
+		this.reload();
+		const normalizedId = normalizeBotOrTeamId(agentId, "agentId");
+		const existing = this.bots.get(normalizedId);
+		if (!existing) {
+			return undefined;
+		}
+		const now = nowIso ?? new Date().toISOString();
+		const updated: PersistentBotRecord = {
+			...existing,
+			retired: true,
+			updatedAt: now,
+			lastTranscriptRef: existing.lastTranscriptRef,
+			lastSummary: existing.lastSummary,
+			lastMessageAt: existing.lastMessageAt,
+		};
+		this.bots.set(normalizedId, updated);
+		this.save();
+		return updated;
+	}
+
+	deleteBot(agentId: string): boolean {
+		this.reload();
+		const normalizedId = normalizeBotOrTeamId(agentId, "agentId");
+		if (!this.bots.has(normalizedId)) {
+			return false;
+		}
+		this.bots.delete(normalizedId);
+
+		const now = new Date().toISOString();
+		for (const [teamId, team] of this.teams.entries()) {
+			if (team.memberAgentIds.includes(normalizedId)) {
+				const filteredMembers = team.memberAgentIds.filter((id) => id !== normalizedId);
+				this.teams.set(teamId, {
+					...team,
+					memberAgentIds: filteredMembers,
+					updatedAt: now,
+				});
+			}
+		}
+
+		this.save();
+		return true;
+	}
+
+	listTeams(): PersistentTeamRecord[] {
+		return Array.from(this.teams.values()).map((team) => ({
+			...team,
+			memoryFilePath: this.getTeamMemoryFilePath(team.teamId),
+		}));
+	}
+
+	getTeam(teamId: string): PersistentTeamRecord | undefined {
+		const team = this.teams.get(teamId.trim());
+		if (!team) return undefined;
+		return {
+			...team,
+			memoryFilePath: this.getTeamMemoryFilePath(team.teamId),
+		};
+	}
+
+	upsertTeam(input: UpsertPersistentTeamInput, nowIso?: string): PersistentTeamRecord {
+		this.reload();
+		const teamId = normalizeBotOrTeamId(input.teamId, "teamId");
+		const now = nowIso ?? new Date().toISOString();
+		const existing = this.teams.get(teamId);
+
+		const memberSet = new Set<string>();
+		for (const id of input.memberAgentIds) {
+			const trimmed = id.trim();
+			if (trimmed) {
+				memberSet.add(normalizeBotOrTeamId(trimmed, "memberAgentId"));
+			}
+		}
+		const memberAgentIds = Array.from(memberSet);
+
+		const record: PersistentTeamRecord = {
+			teamId,
+			name: input.name?.trim() || existing?.name || teamId,
+			description: input.description !== undefined ? input.description.trim() || undefined : existing?.description,
+			memberAgentIds,
+			createdAt: existing?.createdAt ?? now,
+			updatedAt: now,
+			lastMessageAt: existing?.lastMessageAt,
+			memoryFilePath: this.getTeamMemoryFilePath(teamId),
+		};
+
+		this.teams.set(teamId, record);
+		this.ensureTeamMemoryFile(teamId);
+		this.save();
+		return record;
+	}
+
+	setTeamMembers(teamId: string, memberAgentIds: readonly string[], nowIso?: string): PersistentTeamRecord {
+		this.reload();
+		const normalizedId = normalizeBotOrTeamId(teamId, "teamId");
+		const existing = this.teams.get(normalizedId);
+		if (!existing) {
+			throw new Error(`Team not found: "${teamId}".`);
+		}
+
+		const memberSet = new Set<string>();
+		for (const id of memberAgentIds) {
+			const trimmed = id.trim();
+			if (trimmed) {
+				memberSet.add(normalizeBotOrTeamId(trimmed, "memberAgentId"));
+			}
+		}
+
+		const now = nowIso ?? new Date().toISOString();
+		const updated: PersistentTeamRecord = {
+			...existing,
+			memberAgentIds: Array.from(memberSet),
+			updatedAt: now,
+			memoryFilePath: this.getTeamMemoryFilePath(normalizedId),
+		};
+
+		this.teams.set(normalizedId, updated);
+		this.ensureTeamMemoryFile(normalizedId);
+		this.save();
+		return updated;
+	}
+
+	deleteTeam(teamId: string): boolean {
+		this.reload();
+		const normalizedId = normalizeBotOrTeamId(teamId, "teamId");
+		if (!this.teams.has(normalizedId)) {
+			return false;
+		}
+		this.teams.delete(normalizedId);
+		this.teamMessages.delete(normalizedId);
+		this.save();
+		return true;
+	}
+
+	appendTeamMessage(message: PersistentTeamMessage): void {
+		this.reload();
+		const teamId = normalizeBotOrTeamId(message.teamId, "teamId");
+		const messages = this.teamMessages.get(teamId) ?? [];
+		messages.push(message);
+		if (messages.length > MAX_TEAM_MESSAGES_PER_TEAM) {
+			this.teamMessages.set(teamId, messages.slice(-MAX_TEAM_MESSAGES_PER_TEAM));
+		} else {
+			this.teamMessages.set(teamId, messages);
+		}
+		const team = this.teams.get(teamId);
+		if (team) {
+			this.teams.set(teamId, {
+				...team,
+				lastMessageAt: message.timestamp,
+				updatedAt: new Date(message.timestamp).toISOString(),
+			});
+		}
+		this.save();
+	}
+
+	getBotMemoryFilePath(agentId: string): string {
+		return join(this.agentDir, "memory", "bots", `${normalizeBotOrTeamId(agentId, "agentId")}.md`);
+	}
+
+	getTeamMemoryFilePath(teamId: string): string {
+		return join(this.agentDir, "memory", "teams", `${normalizeBotOrTeamId(teamId, "teamId")}.md`);
+	}
+
+	ensureBotMemoryFile(agentId: string): string {
+		const normId = normalizeBotOrTeamId(agentId, "agentId");
+		const filePath = this.getBotMemoryFilePath(normId);
+		if (!existsSync(filePath)) {
+			mkdirSync(dirname(filePath), { recursive: true });
+			const bot = this.bots.get(normId);
+			const displayName = bot?.displayName ?? normId;
+			const model = bot ? `${bot.provider}/${bot.modelId}` : "anthropic/claude-haiku-5-5";
+			const role = bot?.instructions || "general specialist";
+			const header = `# Bot Memory: ${displayName} (${normId})\n\n- Model: ${model}\n- Role: ${role}\n\n## Continuity & Notes\n`;
+			writeFileSync(filePath, header, "utf8");
+		}
+		return filePath;
+	}
+
+	ensureTeamMemoryFile(teamId: string): string {
+		const normId = normalizeBotOrTeamId(teamId, "teamId");
+		const filePath = this.getTeamMemoryFilePath(normId);
+		if (!existsSync(filePath)) {
+			mkdirSync(dirname(filePath), { recursive: true });
+			const team = this.teams.get(normId);
+			const name = team?.name ?? normId;
+			const members = team?.memberAgentIds.join(", ") || "none";
+			const mission = team?.description || "collaborative agent team";
+			const header = `# Team Blackboard: ${name} (${normId})\n\n- Members: ${members}\n- Mission: ${mission}\n\n## Shared Findings & Decisions\n`;
+			writeFileSync(filePath, header, "utf8");
+		}
+		return filePath;
+	}
+
+	recordBotTurnOutcome(input: { agentId: string; summary: string; transcriptRef?: string; timestamp?: number }): void {
+		const normId = normalizeBotOrTeamId(input.agentId, "agentId");
+		this.reload();
+		const bot = this.bots.get(normId);
+		const belongsToAnyTeam = Array.from(this.teams.values()).some((t) => t.memberAgentIds.includes(normId));
+
+		if (!bot && !belongsToAnyTeam) {
+			return;
+		}
+
+		const timestamp = input.timestamp ?? Date.now();
+		const iso = new Date(timestamp).toISOString();
+		const oneLineSummary = input.summary
+			.trim()
+			.replace(/\r?\n+/g, " ")
+			.slice(0, 300);
+
+		if (bot) {
+			const updatedBot: PersistentBotRecord = {
+				...bot,
+				lastSummary: input.summary.trim().slice(0, 400),
+				lastTranscriptRef: input.transcriptRef ?? bot.lastTranscriptRef,
+				lastMessageAt: timestamp,
+				updatedAt: iso,
+			};
+			this.bots.set(normId, updatedBot);
+			this.save();
+		}
+
+		this.ensureBotMemoryFile(normId);
+		const botFile = this.getBotMemoryFilePath(normId);
+		const refSuffix = input.transcriptRef ? ` (${input.transcriptRef})` : "";
+		appendBoundedFile(botFile, `- [${iso}] ${oneLineSummary}${refSuffix}`, 80);
+
+		for (const team of this.teams.values()) {
+			if (team.memberAgentIds.includes(normId)) {
+				const teamMsg: PersistentTeamMessage = {
+					messageId: `team-msg-${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
+					teamId: team.teamId,
+					sender: { kind: "bot", agentId: normId },
+					text: input.summary.slice(0, 600),
+					timestamp,
+					targetAgentIds: [],
+					deliveries: [],
+				};
+				this.appendTeamMessage(teamMsg);
+				this.ensureTeamMemoryFile(team.teamId);
+				const teamFile = this.getTeamMemoryFilePath(team.teamId);
+				appendBoundedFile(teamFile, `- [${iso}] **${normId}**: ${oneLineSummary}`, 80);
+			}
+		}
+	}
+
+	composeBotUnifiedMemoryContext(agentId: string): {
+		promptBlock: string;
+		memoryDir: string;
+		memoryFiles: string[];
+	} {
+		const normId = normalizeBotOrTeamId(agentId, "agentId");
+		const memoryDir = join(this.agentDir, "memory");
+		const memoryFiles: string[] = [];
+
+		const botMemoryPath = this.getBotMemoryFilePath(normId);
+		memoryFiles.push(botMemoryPath);
+
+		let botExcerpt = "";
+		if (existsSync(botMemoryPath)) {
+			try {
+				const content = readFileSync(botMemoryPath, "utf8").trim();
+				botExcerpt = content.length > 1200 ? content.slice(-1200) : content;
+			} catch {
+				botExcerpt = "";
+			}
+		}
+
+		const bot = this.bots.get(normId);
+		const memberTeams: PersistentTeamRecord[] = [];
+		const teamMemoryExcerpts: string[] = [];
+		const allRecentTeamMessages: PersistentTeamMessage[] = [];
+
+		for (const team of this.teams.values()) {
+			if (team.memberAgentIds.includes(normId)) {
+				memberTeams.push(team);
+				const teamPath = this.getTeamMemoryFilePath(team.teamId);
+				memoryFiles.push(teamPath);
+				if (existsSync(teamPath)) {
+					try {
+						const teamContent = readFileSync(teamPath, "utf8").trim();
+						const excerpt = teamContent.length > 1200 ? teamContent.slice(-1200) : teamContent;
+						teamMemoryExcerpts.push(`### Team Blackboard [${team.teamId}]:\n${excerpt}`);
+					} catch {
+						// Ignore unreadable team memory file
+					}
+				}
+				const msgs = this.listTeamMessages(team.teamId, 5);
+				allRecentTeamMessages.push(...msgs);
+			}
+		}
+
+		allRecentTeamMessages.sort((a, b) => a.timestamp - b.timestamp);
+		const recent5TeamMsgs = allRecentTeamMessages.slice(-5);
+
+		const lines: string[] = [
+			"### UNIFIED MEMORY & TEAM BLACKBOARD",
+			`You are persistent bot "${normId}". You have persistent memory files you can read and update.`,
+			`- Bot memory file: ${botMemoryPath}`,
+		];
+
+		if (memberTeams.length > 0) {
+			lines.push(
+				`- Member of teams: ${memberTeams.map((t) => `${t.name ?? t.teamId} (${this.getTeamMemoryFilePath(t.teamId)})`).join(", ")}`,
+			);
+		}
+		if (bot?.lastTranscriptRef) {
+			lines.push(`- Prior transcript reference: ${bot.lastTranscriptRef}`);
+		}
+		if (bot?.lastSummary) {
+			lines.push(`- Prior turn summary: ${bot.lastSummary}`);
+		}
+
+		if (botExcerpt.length > 0) {
+			lines.push(`\n#### Your Memory Blackboard Excerpt:\n${botExcerpt}`);
+		}
+
+		if (teamMemoryExcerpts.length > 0) {
+			lines.push(`\n#### Team Blackboards:\n${teamMemoryExcerpts.join("\n\n")}`);
+		}
+
+		if (recent5TeamMsgs.length > 0) {
+			lines.push(
+				"\n#### Recent Team Activity:\n" +
+					recent5TeamMsgs
+						.map((m) => {
+							const sender = m.sender.kind === "bot" ? m.sender.agentId : m.sender.kind;
+							return `- [${new Date(m.timestamp).toISOString()}] **${sender}**: ${m.text}`;
+						})
+						.join("\n"),
+			);
+		}
+
+		lines.push(
+			"\nYou can inspect and edit your memory blackboard and your team blackboard files directly to record findings and coordinate. You can also use `zoom` to inspect root <chat> message IDs if needed.",
+		);
+
+		return {
+			promptBlock: lines.join("\n"),
+			memoryDir,
+			memoryFiles,
+		};
+	}
+
+	listTeamMessages(teamId: string, limit?: number): PersistentTeamMessage[] {
+		const messages = this.teamMessages.get(teamId.trim()) ?? [];
+		if (limit !== undefined && limit > 0) {
+			return messages.slice(-limit);
+		}
+		return [...messages];
+	}
+
+	projectBotViews(
+		liveAgents: readonly WorkerAgentView[],
+		laneRecords: readonly LaneRecord[],
+		defaultModelRef: string,
+	): PersistentBotView[] {
+		const workerLanes = laneRecords.filter((lane) => lane.type === "worker" || lane.type === "tmux-worker");
+
+		const laneByAgentId = new Map<string, LaneRecord>();
+		for (const lane of workerLanes) {
+			const id = lane.agentId ?? lane.laneId;
+			const existing = laneByAgentId.get(id);
+			if (!existing) {
+				laneByAgentId.set(id, lane);
+			} else if (lane.status === "running") {
+				laneByAgentId.set(id, lane);
+			} else if (lane.status === "queued" && existing.status !== "running") {
+				laneByAgentId.set(id, lane);
+			} else if (existing.status !== "running" && existing.status !== "queued") {
+				const existingTs = existing.completedAt ?? existing.startedAt ?? existing.queuedAt ?? "";
+				const laneTs = lane.completedAt ?? lane.startedAt ?? lane.queuedAt ?? "";
+				if (laneTs >= existingTs) {
+					laneByAgentId.set(id, lane);
+				}
+			}
+		}
+
+		const liveAgentById = new Map<string, WorkerAgentView>();
+		for (const agent of liveAgents) {
+			liveAgentById.set(agent.agentId, agent);
+		}
+
+		const allAgentIds = new Set<string>();
+		for (const botId of this.bots.keys()) {
+			allAgentIds.add(botId);
+		}
+		for (const agentId of liveAgentById.keys()) {
+			allAgentIds.add(agentId);
+		}
+		for (const agentId of laneByAgentId.keys()) {
+			allAgentIds.add(agentId);
+		}
+
+		const views: PersistentBotView[] = [];
+
+		for (const agentId of allAgentIds) {
+			const botRecord = this.bots.get(agentId);
+			const liveAgent = liveAgentById.get(agentId);
+			const lane = laneByAgentId.get(agentId);
+
+			let state: PersistentBotLiveState;
+			if (
+				liveAgent?.dispatch === "running" ||
+				lane?.status === "running" ||
+				(liveAgent?.activity === "active" && liveAgent.dispatch !== "queued")
+			) {
+				state = "running";
+			} else if (liveAgent?.dispatch === "queued" || lane?.status === "queued") {
+				state = "queued";
+			} else if (botRecord?.retired || liveAgent?.status === "retired") {
+				state = "retired";
+			} else if (liveAgent?.awaitingParent) {
+				state = "awaiting_parent";
+			} else if (liveAgent?.lastResult?.status === "failed" || lane?.status === "failed") {
+				state = "failed";
+			} else {
+				state = "idle";
+			}
+
+			let modelRef = "";
+			let provider = "";
+			let modelId = "";
+
+			if (botRecord) {
+				provider = botRecord.provider;
+				modelId = botRecord.modelId;
+				modelRef = `${provider}/${modelId}`;
+			} else {
+				modelRef = liveAgent?.modelRef ?? lane?.modelRef ?? defaultModelRef;
+				const parsed = parseModelRef(modelRef);
+				provider = parsed.provider;
+				modelId = parsed.modelId;
+			}
+
+			const displayName = botRecord?.displayName ?? lane?.label ?? liveAgent?.agentId ?? agentId;
+			const description = botRecord?.description;
+			const thinkingLevel =
+				botRecord?.thinkingLevel ?? (lane?.thinkingLevel !== undefined ? String(lane.thinkingLevel) : undefined);
+			const instructions = botRecord?.instructions;
+			const profileId = botRecord?.profileId ?? lane?.profileId;
+
+			const currentTaskId = liveAgent?.attemptId ?? lane?.attemptId ?? lane?.laneId;
+			const currentSummary =
+				liveAgent?.waitReason ??
+				lane?.label ??
+				lane?.reasonCode ??
+				liveAgent?.lastResult?.reasonCode ??
+				botRecord?.lastSummary;
+
+			const teamIds: string[] = [];
+			for (const team of this.teams.values()) {
+				if (team.memberAgentIds.includes(agentId)) {
+					teamIds.push(team.teamId);
+				}
+			}
+
+			const persistent = botRecord !== undefined;
+			const controllable = liveAgent?.controllable ?? !botRecord?.retired;
+
+			const updatedAt =
+				liveAgent?.updatedAt ??
+				lane?.completedAt ??
+				lane?.startedAt ??
+				lane?.queuedAt ??
+				botRecord?.updatedAt ??
+				new Date().toISOString();
+
+			views.push({
+				agentId,
+				displayName,
+				description,
+				provider,
+				modelId,
+				modelRef,
+				thinkingLevel,
+				instructions,
+				profileId,
+				state,
+				currentTaskId,
+				currentSummary,
+				teamIds,
+				persistent,
+				controllable,
+				updatedAt,
+				lastTranscriptRef: botRecord?.lastTranscriptRef,
+				lastSummary: botRecord?.lastSummary,
+				lastMessageAt: botRecord?.lastMessageAt,
+				memoryFilePath: this.getBotMemoryFilePath(agentId),
+			});
+		}
+
+		views.sort((a, b) => {
+			const aActive = a.state === "running" || a.state === "queued";
+			const bActive = b.state === "running" || b.state === "queued";
+			if (aActive !== bActive) {
+				return aActive ? -1 : 1;
+			}
+			if (a.persistent !== b.persistent) {
+				return a.persistent ? -1 : 1;
+			}
+			return b.updatedAt.localeCompare(a.updatedAt);
+		});
+
+		return views;
+	}
+}

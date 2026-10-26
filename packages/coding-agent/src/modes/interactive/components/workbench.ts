@@ -1,4 +1,9 @@
 import { type Component, Container, hyperlink, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import type {
+	ActiveChatTarget,
+	PersistentBotView,
+	PersistentTeamRecord,
+} from "../../../core/delegation/persistent-bot-team-store.ts";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { PullRequestView } from "../../../core/pull-request-view.ts";
 import {
@@ -37,6 +42,20 @@ export interface WorkbenchSection {
 	quiet?: boolean;
 }
 
+export type WorkbenchHeaderButtonAction = "latest" | "layout" | "showGraph" | "switchChat";
+
+/** What the left pane shows: the Decision graph, or the Chats & Teams roster. */
+export type WorkbenchLeftPaneMode = "chats" | "graph";
+
+/** The live facts behind the Chats & Teams roster: the active target, the Brain's state, every bot and team. */
+export interface WorkbenchChatRosterSnapshot {
+	readonly activeTarget: ActiveChatTarget;
+	readonly rootModelLabel: string;
+	readonly rootRunning: boolean;
+	readonly bots: readonly PersistentBotView[];
+	readonly teams: readonly PersistentTeamRecord[];
+}
+
 export interface WorkbenchOptions {
 	conversation: Container;
 	editor: Container;
@@ -49,6 +68,12 @@ export interface WorkbenchOptions {
 	brand: string;
 	/** Fallback title when no plan or goal names the work. */
 	title?: () => string;
+	/** The live conversation's name in the header, e.g. the active bot or team; "Conversation" when absent. */
+	conversationTitle?: () => string;
+	/** Label of the header chip that opens the Bot & Team chat switcher; absent hides the chip. */
+	switchChatChip?: () => string | undefined;
+	/** The Chats & Teams roster for the left pane: Brain, teams and bots. Absent, the pane offers only the Graph. */
+	chatRoster?: () => WorkbenchChatRosterSnapshot | undefined;
 	/** The checked-out branch, shown at the left of the status line under the input. */
 	branch?: () => string | null;
 	/** The current branch's pull request, shown after the branch; absent when there is none. */
@@ -99,6 +124,8 @@ export const MAX_UPPER_ROWS = 60;
 export const MIN_GRAPH_WIDTH = 48;
 /** The chat keeps a readable measure: the graph folds before the conversation is squeezed under this many columns. */
 export const MIN_CHAT_WIDTH = 60;
+/** The Chats & Teams roster keeps its names and state glyphs readable at this many columns. */
+export const MIN_CHAT_ROSTER_WIDTH = 26;
 
 /** Explicit rows the operator chose, or "auto": a proportional split that follows the terminal's height. */
 export type WorkAreaRows = number | "auto";
@@ -194,10 +221,19 @@ export class WorkbenchComponent extends Container {
 	private readonly inspectorPane = new WorkbenchPane();
 	private readonly executionPane = new WorkbenchPane();
 	private readonly graphPane = new DecisionGraphPane();
+	/** The left pane's Chats & Teams roster; drawn in the same place as the Decision graph, one of the two at a time. */
+	private readonly chatRosterPane = new WorkbenchPane();
+	private leftPaneMode: WorkbenchLeftPaneMode = "chats";
+	/** The roster row index → the chat target it selects; aligned with the rows the roster drew this frame. */
+	private chatTargetsByRow: readonly (ActiveChatTarget | undefined)[] = [];
+	/** What the left pane drew this frame; undefined while folded or hidden. */
+	private leftPaneKind?: WorkbenchLeftPaneMode;
 	/** Composes the Decision graph's model per frame; unset, the zone is chat only. */
 	private graphSource?: () => DecisionGraphModel | undefined;
 	/** This frame's graph model: composed once, and only when the graph is wanted and has something to show. */
 	private frameGraphModel?: DecisionGraphModel;
+	/** This frame's chat roster: composed once per frame when the left pane is shown. */
+	private frameChatRoster?: WorkbenchChatRosterSnapshot;
 	/** Told after every frame whether the drawn graph carries a running clock (the lane's ticker). */
 	private graphClock?: (running: boolean) => void;
 	/** The one timer that moves the flow views' carriers; present while the graph has a render trigger. */
@@ -216,7 +252,7 @@ export class WorkbenchComponent extends Container {
 	private workWidth = 0;
 	private dismissedShell?: BashExecutionComponent;
 	private readonly frameExecutionLines = new Map<string, string[]>();
-	private headerButtons: { action: "latest" | "layout" | "showGraph"; start: number; end: number }[] = [];
+	private headerButtons: { action: WorkbenchHeaderButtonAction; start: number; end: number }[] = [];
 	conversationTop = 0;
 	conversationLeft = 1;
 	conversationWidth = 0;
@@ -345,17 +381,28 @@ export class WorkbenchComponent extends Container {
 	}
 	/** Whether the Decision graph is shown (drawn in the current/last frame, or active at the current zone width with content). */
 	get graphShown(): boolean {
-		if (this.graphRuleColumn >= 0) return true;
+		if (this.graphRuleColumn >= 0) return this.leftPaneKind === "graph";
 		const zoneWidth = this.zoneWidth > 0 ? this.zoneWidth : this.lastColumns > 0 ? this.lastColumns : 120;
-		return this.frameGraphModel !== undefined && this.resolvedGraphWidth(zoneWidth) > 0;
+		return (
+			this.frameGraphModel !== undefined &&
+			this.effectiveLeftPaneMode() === "graph" &&
+			this.resolvedGraphWidth(zoneWidth) > 0
+		);
 	}
 	scrollGraph(column: number, row: number, delta: number): boolean {
-		return this.graphPane.scrollAt(column, row, delta);
+		return this.graphPane.scrollAt(column, row, delta) || this.chatRosterPane.scrollAt(column, row, delta);
 	}
 	/** The stage under a pointer on the Decision graph, for click-to-expand. */
 	graphStageAt(column: number, row: number): DecisionStage | undefined {
 		return this.graphPane.stageAtPoint(column, row);
 	}
+	/** The chat target under a pointer on the Chats & Teams roster; undefined while the roster is not the left pane. */
+	chatTargetAt(column: number, row: number): ActiveChatTarget | undefined {
+		if (this.effectiveLeftPaneMode() !== "chats") return undefined;
+		const index = this.chatRosterPane.rowAt(column, row);
+		return index !== undefined ? this.chatTargetsByRow[index] : undefined;
+	}
+
 	/** Open or close a stage's detail; the detail is drawn by the List view, so a click switches to it. */
 	toggleGraphStage(stage: DecisionStage): void {
 		this.graphPane.toggleStage(stage);
@@ -480,6 +527,7 @@ export class WorkbenchComponent extends Container {
 			if (this.inspectorPane.containsTitle(column, row)) return this.inspectorPane.titleAction(column);
 			if (this.executionPane.containsTitle(column, row)) return this.executionPane.titleAction(column);
 			if (this.graphPane.containsTitle(column, row)) return this.graphPane.titleAction(column);
+			if (this.chatRosterPane.containsTitle(column, row)) return this.chatRosterPane.titleAction(column);
 			return undefined;
 		}
 		return (
@@ -522,10 +570,13 @@ export class WorkbenchComponent extends Container {
 		if (this.graphPane.isPinned() || this.graphPane.hasNewerProgress()) {
 			buttons.push({ action: "followCurrent", label: "Follow current" });
 		}
+		if (this.frameChatRoster !== undefined) {
+			buttons.push({ action: "toggleLeftPaneMode", label: "Chats", raised: true });
+		}
 		buttons.push({ action: "graphCycle", label, raised: true });
 		return buttons;
 	}
-	headerAction(column: number): "latest" | "layout" | "showGraph" | undefined {
+	headerAction(column: number): WorkbenchHeaderButtonAction | undefined {
 		return this.headerButtons.find((button) => column >= button.start && column < button.end)?.action;
 	}
 
@@ -538,7 +589,9 @@ export class WorkbenchComponent extends Container {
 		) {
 			return "conversation";
 		}
-		if (this.graphPane.containsTitle(column, row)) return "graphTitle";
+		if (this.graphPane.containsTitle(column, row) || this.chatRosterPane.containsTitle(column, row)) {
+			return "graphTitle";
+		}
 		if (
 			this.graphRuleColumn >= 0 &&
 			row >= this.conversationTop - 1 &&
@@ -547,7 +600,9 @@ export class WorkbenchComponent extends Container {
 		) {
 			return "graphSplit";
 		}
-		if (this.graphPane.rowAt(column, row) !== undefined) return "graph";
+		if (this.graphPane.rowAt(column, row) !== undefined || this.chatRosterPane.rowAt(column, row) !== undefined) {
+			return "graph";
+		}
 		if (
 			row === this.conversationTop - 1 &&
 			column >= this.conversationLeft - 1 &&
@@ -616,12 +671,25 @@ export class WorkbenchComponent extends Container {
 		const inner = Math.max(0, columns - 2);
 		const following = this.conversation.following;
 		const stateText = following ? " · Following latest" : " · Reading";
-		const heading = theme.bold(theme.fg("text", "Conversation")) + theme.fg("muted", stateText);
-		const headingWidth = "Conversation".length + stateText.length;
-		const canShowGraph = this.graphHidden && Boolean(this.graphSource) && this.zoneWidth >= SIDE_BY_SIDE_MIN_COLUMNS;
-		const buttons: { action: "latest" | "layout" | "showGraph"; label: string }[] = [
+		const convTitle = this.options.conversationTitle?.() || "Conversation";
+		const heading = theme.bold(theme.fg("text", convTitle)) + theme.fg("muted", stateText);
+		const headingWidth = visibleWidth(convTitle) + stateText.length;
+		const canShowLeftPane =
+			this.graphHidden &&
+			this.zoneWidth >= SIDE_BY_SIDE_MIN_COLUMNS &&
+			(Boolean(this.graphSource) || Boolean(this.options.chatRoster));
+		const switchChatLabel = this.options.switchChatChip?.();
+		const buttons: { action: WorkbenchHeaderButtonAction; label: string }[] = [
+			...(switchChatLabel ? [{ action: "switchChat" as const, label: switchChatLabel }] : []),
 			...(this.columns ? [{ action: "layout" as const, label: "Stacked" }] : []),
-			...(canShowGraph ? [{ action: "showGraph" as const, label: "Show graph" }] : []),
+			...(canShowLeftPane
+				? [
+						{
+							action: "showGraph" as const,
+							label: this.leftPaneMode === "chats" ? "Show chats" : "Show graph",
+						},
+					]
+				: []),
 			...(following ? [] : [{ action: "latest" as const, label: "Latest ↓" }]),
 		];
 		const chipTone = this.mouseMode ? "accent" : "muted";
@@ -933,12 +1001,39 @@ export class WorkbenchComponent extends Container {
 	 * A fold never writes the setting; the operator's fraction returns with the width.
 	 */
 	resolvedGraphWidth(zoneWidth: number): number {
-		if (this.graphHidden || !this.graphSource || zoneWidth < SIDE_BY_SIDE_MIN_COLUMNS) return 0;
-		const width = Math.min(
-			Math.max(MIN_GRAPH_WIDTH, Math.floor(zoneWidth * this.graphFraction)),
-			zoneWidth - 2 - MIN_CHAT_WIDTH,
-		);
-		return width >= MIN_GRAPH_WIDTH ? width : 0;
+		const mode = this.effectiveLeftPaneMode();
+		if (!mode) return 0;
+		const minWidth = mode === "chats" ? MIN_CHAT_ROSTER_WIDTH : MIN_GRAPH_WIDTH;
+		if (zoneWidth < minWidth + 2 + MIN_CHAT_WIDTH) return 0;
+		return Math.max(minWidth, Math.min(zoneWidth - 2 - MIN_CHAT_WIDTH, Math.round(zoneWidth * this.graphFraction)));
+	}
+
+	/**
+	 * What the left pane shows now: the Decision graph or the Chats & Teams roster, or nothing while folded.
+	 * The graph is preferred only when the operator chose it; a missing side falls back to the other.
+	 */
+	private effectiveLeftPaneMode(): WorkbenchLeftPaneMode | undefined {
+		if (this.graphHidden) return undefined;
+		const hasGraph = this.frameGraphModel !== undefined;
+		const hasChats = (this.frameChatRoster ?? this.options.chatRoster?.()) !== undefined;
+		if (this.leftPaneMode === "graph") {
+			if (hasGraph) return "graph";
+			return hasChats ? "chats" : undefined;
+		}
+		if (hasChats) return "chats";
+		return hasGraph ? "graph" : undefined;
+	}
+
+	/** The left pane's mode: the Decision graph or the Chats & Teams roster. */
+	get leftSidebarMode(): WorkbenchLeftPaneMode {
+		return this.leftPaneMode;
+	}
+
+	/** Flip the left pane between Chats and Graph; a folded pane opens, since neither mode draws while folded. */
+	toggleLeftPaneMode(): void {
+		this.leftPaneMode = this.leftPaneMode === "chats" ? "graph" : "chats";
+		this.graphHidden = false;
+		this.invalidate();
 	}
 
 	/**
@@ -953,11 +1048,15 @@ export class WorkbenchComponent extends Container {
 		this.conversationTop = top + 1;
 		this.conversationHeight = height;
 		const graphWidth = this.resolvedGraphWidth(zoneWidth);
-		const model = graphWidth > 0 ? this.frameGraphModel : undefined;
+		const mode = graphWidth > 0 ? this.effectiveLeftPaneMode() : undefined;
+		const model = mode === "graph" ? this.frameGraphModel : undefined;
 		this.graphClock?.(model?.hasRunningClock === true);
-		if (!model) {
+		if (!mode) {
+			this.leftPaneKind = undefined;
 			this.graphAnimator?.settled();
 			this.graphPane.hide();
+			this.chatRosterPane.hide();
+			this.chatTargetsByRow = [];
 			const inner = Math.max(1, zoneWidth - 2);
 			this.conversationLeft = originX + 1;
 			this.conversationWidth = inner;
@@ -971,26 +1070,135 @@ export class WorkbenchComponent extends Container {
 		this.conversationLeft = originX + rightX + 1;
 		this.conversationWidth = inner;
 		this.graphRuleColumn = originX + graphWidth;
-		const left = this.graphPane.draw(
-			model,
-			this.graphView,
-			originX,
-			top,
-			graphWidth,
-			height + 1,
-			this.graphTitleButtons(),
-			this.graphAnimator?.enabled ?? false,
-			this.mouseMode,
-		);
-		// The frame says whether it drew a carrier: the timer runs only while one is needed.
-		const motionUntil = this.graphPane.motionUntil;
-		if (motionUntil === undefined) this.graphAnimator?.settled();
-		else this.graphAnimator?.request(motionUntil);
+		this.leftPaneKind = mode;
+		let left: string[];
+		if (model) {
+			this.chatRosterPane.hide();
+			this.chatTargetsByRow = [];
+			left = this.graphPane.draw(
+				model,
+				this.graphView,
+				originX,
+				top,
+				graphWidth,
+				height + 1,
+				this.graphTitleButtons(),
+				this.graphAnimator?.enabled ?? false,
+				this.mouseMode,
+			);
+			// The frame says whether it drew a carrier: the timer runs only while one is needed.
+			const motionUntil = this.graphPane.motionUntil;
+			if (motionUntil === undefined) this.graphAnimator?.settled();
+			else this.graphAnimator?.request(motionUntil);
+		} else {
+			this.graphAnimator?.settled();
+			this.graphPane.hide();
+			const roster = this.frameChatRoster ?? this.options.chatRoster?.();
+			if (roster) {
+				left = this.drawChatRosterPane(roster, originX, top, graphWidth, height + 1);
+			} else {
+				this.chatRosterPane.hide();
+				this.chatTargetsByRow = [];
+				left = Array.from({ length: height + 1 }, () => " ".repeat(graphWidth));
+			}
+		}
 		const body = this.conversation.render(inner, height).map((line) => gutter(line, inner));
 		while (body.length < height) body.push("");
 		const right = [this.conversationHeader(rightWidth, originX + rightX), ...body];
 		const rule = theme.fg("borderMuted", "│");
 		return left.map((line, row) => `${line}${rule} ${right[row] ?? ""}`);
+	}
+
+	/**
+	 * The Chats & Teams roster: Brain, teams, then bots. Each row names the target it selects; the main line and
+	 * its subtitle select the same target. Rows are drawn at the graph pane's origin so hit-testing matches.
+	 */
+	private drawChatRosterPane(
+		roster: WorkbenchChatRosterSnapshot,
+		originX: number,
+		top: number,
+		width: number,
+		height: number,
+	): string[] {
+		const active = roster.activeTarget;
+		const rows: string[] = [];
+		const targets: (ActiveChatTarget | undefined)[] = [];
+		const add = (row: string, target?: ActiveChatTarget): void => {
+			rows.push(row);
+			targets.push(target);
+		};
+		const isRoot = active.kind === "root";
+		add(theme.fg("muted", " BRAIN"));
+		add(
+			`${isRoot ? theme.fg("accent", "▸ ") : "  "}${roster.rootRunning ? theme.fg("accent", "●") : theme.fg("success", "●")} ${isRoot ? theme.bold(theme.fg("accent", "Brain (root)")) : theme.fg("text", "Brain (root)")}`,
+			{ kind: "root" },
+		);
+		add(`    ${theme.fg("muted", `${roster.rootModelLabel} · ${roster.rootRunning ? "working" : "ready"}`)}`, {
+			kind: "root",
+		});
+		add(theme.fg("muted", ` TEAMS (${roster.teams.length})`));
+		if (roster.teams.length === 0) add(`  ${theme.fg("dim", "No teams · /team create")}`);
+		for (const team of roster.teams) {
+			const isSelected = active.kind === "team" && active.teamId === team.teamId;
+			const target: ActiveChatTarget = { kind: "team", teamId: team.teamId };
+			const name = team.name || team.teamId;
+			add(
+				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${theme.fg("accent", "◆")} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)} ${theme.fg("muted", `[${team.memberAgentIds.length}]`)}`,
+				target,
+			);
+			add(`    ${theme.fg("muted", team.description || team.memberAgentIds.join(", ") || "no members")}`, target);
+		}
+		add(theme.fg("muted", ` BOTS (${roster.bots.length})`));
+		if (roster.bots.length === 0) add(`  ${theme.fg("dim", "No bots · /bot new <id>")}`);
+		for (const bot of roster.bots) {
+			const isSelected = active.kind === "bot" && active.agentId === bot.agentId;
+			const target: ActiveChatTarget = { kind: "bot", agentId: bot.agentId };
+			const name = bot.displayName || bot.agentId;
+			const glyph =
+				bot.state === "running" || bot.state === "queued"
+					? theme.fg("accent", "●")
+					: bot.state === "awaiting_parent"
+						? theme.fg("warning", "◐")
+						: bot.state === "failed"
+							? theme.fg("error", "✗")
+							: theme.fg("muted", "○");
+			add(
+				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)} ${theme.fg("muted", bot.modelId || bot.modelRef)}`,
+				target,
+			);
+			const detail = `${bot.state}${bot.teamIds.length > 0 ? ` · [${bot.teamIds.join(",")}]` : ""}${bot.currentSummary ? ` · ${bot.currentSummary}` : ""}`;
+			add(`    ${theme.fg("muted", detail)}`, target);
+		}
+		add(`  ${theme.fg("dim", "Click row to resume · @id to msg")}`);
+		this.chatTargetsByRow = targets;
+		const teams = roster.teams.length;
+		const bots = roster.bots.length;
+		const meta = `${bots} bot${bots === 1 ? "" : "s"}${teams > 0 ? ` · ${teams} team${teams === 1 ? "" : "s"}` : ""}`;
+		const actions: WorkbenchPaneTitleButton[] = [
+			{ action: "hideGraph", label: "▾", leading: true },
+			...(this.frameGraphModel !== undefined
+				? [
+						{
+							action: "toggleLeftPaneMode" as const,
+							label: `Graph (${GRAPH_VIEW_NAMES[this.graphView]})`,
+							raised: true,
+						},
+					]
+				: []),
+			{ action: "switchChat", label: "Modal", raised: true },
+		];
+		return this.chatRosterPane.render(
+			"Chats",
+			meta,
+			rows,
+			originX,
+			top,
+			width,
+			height,
+			false,
+			actions,
+			this.mouseMode,
+		);
 	}
 
 	private renderColumns(
@@ -1027,13 +1235,16 @@ export class WorkbenchComponent extends Container {
 		this.inspectorPane.hide();
 		this.executionPane.hide();
 		this.graphPane.hide();
+		this.chatRosterPane.hide();
 		this.splitStart = -1;
 		this.splitEnd = -1;
 		this.columnSplitStart = -1;
 		this.columnSplitEnd = -1;
 		this.paneRuleColumn = -1;
 		this.graphRuleColumn = -1;
+		this.leftPaneKind = undefined;
 		this.frameGraphModel = undefined;
+		this.frameChatRoster = undefined;
 		this.frameExecutionLines.clear();
 		this.headerButtons = [];
 		const columns = Math.max(1, width);
@@ -1058,6 +1269,9 @@ export class WorkbenchComponent extends Container {
 		if (!this.graphHidden && this.graphSource && columns >= SIDE_BY_SIDE_MIN_COLUMNS) {
 			const model = this.graphSource();
 			if (model && graphHasContent(model)) this.frameGraphModel = model;
+		}
+		if (!this.graphHidden && this.options.chatRoster) {
+			this.frameChatRoster = this.options.chatRoster();
 		}
 		// Title strip, divider, conversation header, three conversation rows, the live row and the POV
 		// row stay; the editor's rendering already carries its own two rules.

@@ -54,7 +54,9 @@ export type WorkbenchPaneTitleAction =
 	| "layout"
 	| "graphCycle"
 	| "hideGraph"
-	| "followCurrent";
+	| "followCurrent"
+	| "toggleLeftPaneMode"
+	| "switchChat";
 
 export interface WorkbenchPaneTitleButton {
 	action: WorkbenchPaneTitleAction;

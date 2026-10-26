@@ -111,6 +111,13 @@ import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import type { CostGuardDecision, CostGuardSettings } from "./cost-guard.ts";
 import { CostGuardController } from "./cost-guard-controller.ts";
 import type { SemanticDecisionEngine } from "./decision/engine.ts";
+import type {
+	PersistentBotRecord,
+	PersistentBotView,
+	PersistentTeamRecord,
+	UpsertPersistentBotInput,
+	UpsertPersistentTeamInput,
+} from "./delegation/persistent-bot-team-store.ts";
 import {
 	appendWorkerClaimSnapshot,
 	getWorkerClaimSnapshotForAttempt,
@@ -120,7 +127,6 @@ import type { WorkerResponseObservation } from "./delegation/worker-attempt-exec
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { fanoutNoteForLane } from "./delegation/worker-fanout.ts";
 import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
-import { workerReportClaimText } from "./delegation/worker-report.ts";
 import type { WorkerTerminalHandoff } from "./delegation/worker-terminal-handoff-coordinator.ts";
 import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
 import { ExtensionBindingController } from "./extension-binding-controller.ts";
@@ -179,10 +185,6 @@ import {
 	continuousChatPrefixOf,
 	createContinuousChatCompactionAdapter,
 } from "./memory/continuous-chat-compaction-adapter.ts";
-import {
-	CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
-	type ContinuousChatWorkReportEntry,
-} from "./memory/continuous-chat-ingest.ts";
 import {
 	type ContinuousChatWire,
 	continuousChatTurnAudit,
@@ -1072,6 +1074,7 @@ export class AgentSession {
 			modelUnusableCause: (model) => this._modelUnusableCause(model),
 			getModel: () => this.model ?? undefined,
 			getForegroundThinkingLevel: () => this.thinkingLevel,
+			getThinkingLevel: () => this.thinkingLevel,
 			getRouteChoiceJudge: () => this._systemOneController,
 			getForegroundToolNames: () => this.getActiveToolNames(),
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
@@ -5360,11 +5363,7 @@ export class AgentSession {
 	// Bash Execution
 	// =========================================================================
 
-	/**
-	 * Warm this session's shell so the first command does not pay its startup. A long-lived mode
-	 * (interactive, RPC) calls this once the session is running; a short-lived or embedded caller
-	 * that may never run a command leaves it alone.
-	 */
+	/** Warm this session's shell so the first command does not pay startup. */
 	prewarmShell(): Promise<void> {
 		return this._bash.prewarmShell();
 	}
@@ -5467,11 +5466,7 @@ export class AgentSession {
 		return this._analytics.getDailyUsageBreakdown(formatLabel, now);
 	}
 
-	/**
-	 * Save a snapshot of the goal state to the session log.
-	 *
-	 * @returns the id of the appended custom entry
-	 */
+	/** Save a snapshot of the goal state to the session log. */
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string {
 		return this._goals.saveState(state, expected);
 	}
@@ -5481,18 +5476,12 @@ export class AgentSession {
 		return this._goals.clearState(state, now);
 	}
 
-	/**
-	 * Retrieve the latest valid goal state snapshot from the session log.
-	 */
+	/** Retrieve the latest valid goal state snapshot from the session log. */
 	getGoalStateSnapshot(): GoalState | undefined {
 		return this._goals.getState();
 	}
 
-	/**
-	 * Persist one submitted continuation pass's turn and active-wall-clock telemetry. Provider usage
-	 * is charged separately at every assistant-response boundary under an identity-bound goal lease.
-	 * A no-op when no goal state exists.
-	 */
+	/** Persist one submitted continuation pass's turn and active-wall-clock telemetry. */
 	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number }): void {
 		this._goals.recordContinuationTelemetry(pass);
 	}
@@ -5531,18 +5520,12 @@ export class AgentSession {
 		return getLatestPipelineRunSnapshot(this.sessionManager);
 	}
 
-	/**
-	 * Save a snapshot of the evidence bundle to the session log.
-	 *
-	 * @returns the id of the appended custom entry
-	 */
+	/** Save a snapshot of the evidence bundle to the session log. */
 	saveEvidenceBundleSnapshot(bundle: EvidenceBundle): string {
 		return appendEvidenceBundleSnapshot(this.sessionManager, bundle);
 	}
 
-	/**
-	 * Retrieve the latest valid evidence bundle snapshot from the active branch.
-	 */
+	/** Retrieve the latest valid evidence bundle snapshot from the active branch. */
 	getEvidenceBundleSnapshot(): EvidenceBundle | undefined {
 		return getLatestEvidenceBundleSnapshot(getActiveSessionBranchEntries(this.sessionManager));
 	}
@@ -5606,34 +5589,7 @@ export class AgentSession {
 		name: string,
 		terminal: { laneId: string; attemptId?: string; status: string; completedAt?: string; reasonCode?: string },
 	): void {
-		// Every entry, not the active branch: the attempt's terminal is this process's, whichever branch is active now.
-		const entries = this.sessionManager.getEntries();
-		const claim =
-			terminal.attemptId === undefined
-				? undefined
-				: getWorkerClaimSnapshots(entries).find((candidate) => candidate.terminalAttemptId === terminal.attemptId);
-		const claimId = terminal.attemptId ?? `lane:${terminal.laneId}:${terminal.completedAt ?? ""}:${terminal.status}`;
-		if (
-			entries.some(
-				(entry) =>
-					entry.type === "custom" &&
-					entry.customType === CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE &&
-					(entry.data as { claimId?: unknown } | undefined)?.claimId === claimId,
-			)
-		) {
-			return;
-		}
-		const reason = terminal.reasonCode ? ` (${terminal.reasonCode})` : "";
-		const transcriptReference = this._backgroundLanes.workerTranscriptReference(terminal);
-		const report: ContinuousChatWorkReportEntry = {
-			version: 1,
-			name,
-			claimId,
-			text: claim ? workerReportClaimText(claim) : `Terminal status ${terminal.status}${reason}.`,
-			timestamp: Date.now(),
-			...(transcriptReference ? { transcriptReference } : {}),
-		};
-		this.sessionManager.appendCustomEntry(CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE, report);
+		this._backgroundLanes.persistWorkerTerminalReport(name, terminal);
 	}
 
 	/** The prefix a chat compaction repeats: the accepted request's, or the agent's current one before any request. */
@@ -5724,10 +5680,7 @@ export class AgentSession {
 		return this.laneWorkerRefusalFor(this.model);
 	}
 
-	/**
-	 * Parent-side pre-launch check for a child `pi` process: the model the CHILD will resolve (its
-	 * explicit selection, else its own startup resolution), never this session's model.
-	 */
+	/** Parent-side pre-launch check for child pi process. */
 	async getLaunchedWorkerLaneRefusal(
 		selection: { provider?: string; model?: string } = {},
 	): Promise<LaneWorkerRefusal | undefined> {
@@ -5742,13 +5695,7 @@ export class AgentSession {
 		return child ? this.laneWorkerRefusalFor(child) : { reason: "model_unresolved", capabilityClass: "chat" };
 	}
 
-	/**
-	 * Lane-worker eligibility of `model` (see `evaluateLaneWorkerModelRefusal` in model-capability.ts):
-	 * full capability class, a DECLARED (not registry-defaulted) context window, and a native tool-call
-	 * path that is declared or probe-proven and not demoted -- the transport facts come from the single
-	 * `resolveModelToolProtocol` resolver. Unknown metadata or a missing model refuses. `undefined`
-	 * means eligible.
-	 */
+	/** Lane-worker eligibility of model. */
 	private laneWorkerRefusalFor(model: Model<Api> | undefined): LaneWorkerRefusal | undefined {
 		if (!model) return { reason: "model_unresolved", capabilityClass: "chat" };
 		return evaluateLaneWorkerModelRefusal({
@@ -5758,10 +5705,7 @@ export class AgentSession {
 		});
 	}
 
-	/**
-	 * Run one bounded, read-only research pass and persist its results. Delegates to
-	 * {@link BackgroundLaneController}; see there for the full gating/budget/dedupe contract.
-	 */
+	/** Run one bounded, read-only research pass and persist its results. */
 	async runResearchLaneOnce(request?: {
 		query?: string;
 		context?: string;
@@ -5770,18 +5714,12 @@ export class AgentSession {
 		return this._backgroundLanes.runResearchLaneOnce(request);
 	}
 
-	/**
-	 * Run one durable worker-agent turn. Delegates to {@link BackgroundLaneController};
-	 * consumed by the `delegate` tool.
-	 */
+	/** Run one durable worker-agent turn. */
 	async runWorkerDelegationOnce(request: WorkerDelegationRequest): Promise<WorkerDelegationRunOutcome> {
 		return this._backgroundLanes.runWorkerDelegationOnce(request);
 	}
 
-	/**
-	 * Probe a candidate model against the subagent contracts. Delegates to
-	 * {@link BackgroundLaneController}; probe spend is reported through spawned-usage accounting.
-	 */
+	/** Probe a candidate model against the subagent contracts. */
 	async runModelFitness(args: {
 		model: string;
 		trials?: number;
@@ -5798,13 +5736,7 @@ export class AgentSession {
 		return this._goals.continueOnce(options);
 	}
 
-	/**
-	 * Public entry point for BOTH idle autosteer and manual (`/goal start`, `/goal-continue`)
-	 * continuation. Delegates to {@link BackgroundLaneController.continueGoalLoopExclusive}, the
-	 * single-flight guard that prevents two goal loops from racing to submit prompts through the
-	 * same session (which throws "Agent is already processing" from the second submission). Do not
-	 * call `this._goals.continueLoop` directly from here — that bypasses the guard.
-	 */
+	/** Public entry point for both autosteer and manual continuation. */
 	async continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
 		return this._backgroundLanes.continueGoalLoopExclusive(options);
 	}
@@ -5846,10 +5778,7 @@ export class AgentSession {
 		return this._unsettledLadder.resolveGoalCompletionOwnerDecision(input, signal);
 	}
 
-	/**
-	 * Items nothing could settle go to the owner by the host, never by trusting a model to relay them:
-	 * written to the follow-up document under a handoff, and posted to the owner when the turn ends.
-	 */
+	/** Items nothing could settle go to the owner by the host. */
 	private _deliverToOwner(items: readonly string[]): string | undefined {
 		return this._unsettledLadder.deliverToOwner(items);
 	}
@@ -5878,10 +5807,7 @@ export class AgentSession {
 		return liftEmergencyStop(this._agentDir);
 	}
 
-	/**
-	 * Explicit compatibility/application reflection pass. Automatic reflection never calls this
-	 * method; it returns null when the demand gate skips or in a child session.
-	 */
+	/** Explicit compatibility/application reflection pass. */
 	async runReflectionPass(input: {
 		signals: DemandSignals;
 		recentTurnText: string;
@@ -5921,31 +5847,24 @@ export class AgentSession {
 	getSelfCompactionView(): SelfCompactionView {
 		return this._selfCompaction.view();
 	}
-
 	resumeSelfCompaction(): boolean {
 		return this._selfCompaction.schedule();
 	}
-
 	waitForSelfCompactionHandoff(): Promise<void> {
 		return this._selfCompaction.whenSettled();
 	}
-
 	getSelfCompactionInfo(): SelfCompactionInfo {
 		return this._selfCompaction.info();
 	}
-
 	selfCompactNow(): Promise<SelfCompactionNowOutcome> {
 		return this._selfCompaction.compactNow();
 	}
-
 	getContextUsage(): ContextUsage | undefined {
 		return this._analytics.getContextUsage();
 	}
-
 	async exportToHtml(outputPath?: string): Promise<string> {
 		return this._analytics.exportToHtml(outputPath);
 	}
-
 	exportToJsonl(outputPath?: string): string {
 		return this._analytics.exportToJsonl(outputPath);
 	}
@@ -5996,5 +5915,73 @@ export class AgentSession {
 	/** Owner control-plane access for the native /secrets TUI. Never exposed as an agent tool. */
 	get credentialManager(): CredentialManager {
 		return this._runtimeBuilder.credentialManager;
+	}
+
+	// =========================================================================
+	// Persistent Bots & Teams (BotTeamChatSessionPort)
+	// =========================================================================
+
+	get modelRegistry(): ModelRegistry {
+		return this._modelRegistry;
+	}
+	listPersistentBots(defaultModelRef?: string): PersistentBotView[] {
+		return this._backgroundLanes.listPersistentBots(defaultModelRef);
+	}
+	listPersistentTeams(): PersistentTeamRecord[] {
+		return this._backgroundLanes.listPersistentTeams();
+	}
+	getPersistentTeam(teamId: string): PersistentTeamRecord | undefined {
+		return this._backgroundLanes.getPersistentTeam(teamId);
+	}
+	upsertPersistentBot(input: UpsertPersistentBotInput): PersistentBotRecord {
+		return this._backgroundLanes.upsertPersistentBot(input);
+	}
+	retirePersistentBot(agentId: string): { retired: boolean; detail: string } {
+		return this._backgroundLanes.retirePersistentBot(agentId);
+	}
+	stopPersistentBot(agentId: string): { stopped: boolean; detail: string } {
+		return this._backgroundLanes.stopPersistentBot(agentId);
+	}
+	upsertPersistentTeam(input: UpsertPersistentTeamInput): PersistentTeamRecord {
+		return this._backgroundLanes.upsertPersistentTeam(input);
+	}
+	setPersistentTeamMembers(teamId: string, memberAgentIds: readonly string[]): PersistentTeamRecord {
+		return this._backgroundLanes.setPersistentTeamMembers(teamId, memberAgentIds);
+	}
+	deletePersistentTeam(teamId: string): boolean {
+		return this._backgroundLanes.deletePersistentTeam(teamId);
+	}
+	readBotChatMessages(agentId: string): AgentMessage[] {
+		return this._backgroundLanes.readBotChatMessages(agentId);
+	}
+	readTeamChatMessages(teamId: string): AgentMessage[] {
+		return this._backgroundLanes.readTeamChatMessages(teamId);
+	}
+	subscribeOrchestrationStore(listener: () => void): () => void {
+		return this._backgroundLanes.subscribeOrchestrationStore(listener);
+	}
+	subscribeBotTeamUpdates(listener: () => void): () => void {
+		return this._backgroundLanes.subscribeBotTeamUpdates(listener);
+	}
+	resolveModelSpec(rawModel?: string) {
+		return this._backgroundLanes.resolveModelSpec(rawModel);
+	}
+	getRootModelLabel(): string {
+		return this._backgroundLanes.getRootModelLabel();
+	}
+	getRootStatusLabel(): string {
+		return this.isStreaming ? "streaming" : "idle";
+	}
+	sendSessionRootWorkerAgentMessage(agentId: string, message: string) {
+		return this._backgroundLanes.sendSessionRootWorkerAgentMessage(agentId, message);
+	}
+	followUpSessionRootWorkerAgent(agentId: string, message: string) {
+		return this._backgroundLanes.followUpSessionRootWorkerAgent(agentId, message);
+	}
+	sendOperatorMessageToBot(agentId: string, message: string, options?: { mode?: "follow_up" | "queue" | "start" }) {
+		return this._backgroundLanes.sendOperatorMessageToBot(agentId, message, options);
+	}
+	sendOperatorMessageToTeam(teamId: string, message: string) {
+		return this._backgroundLanes.sendOperatorMessageToTeam(teamId, message);
 	}
 }

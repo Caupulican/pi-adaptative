@@ -3261,7 +3261,14 @@ export class WorkerDelegationController {
 			return { executionPlan: admission.executionPlan, lifecycle, ...value };
 		}
 		for (let allocation = 0; allocation < DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession; allocation++) {
-			const laneId = lifecycle.getNextAvailableLaneIdCandidate();
+			const preferred = allocation === 0 ? request.preferredAgentId?.trim() : undefined;
+			const snapshotBefore = preferred ? lifecycle.getTaskRuntimeSnapshot() : undefined;
+			const preferredAvailable =
+				preferred !== undefined &&
+				/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(preferred) &&
+				snapshotBefore?.tasks[preferred] === undefined &&
+				snapshotBefore?.agents[preferred] === undefined;
+			const laneId = preferredAvailable ? preferred : lifecycle.getNextAvailableLaneIdCandidate();
 			let proposedReference: WorkerContextForkReference | undefined;
 			try {
 				const capture = () =>
@@ -3766,50 +3773,57 @@ export class WorkerDelegationController {
 		const materialized = materializeWorkerResourceBundle(selected.pointers);
 		if (!materialized.ok)
 			return { outcome: "unavailable", skipReason: `worker_resource_materialization_${materialized.code}` };
-		const decision = selectReusableWorkerSpecialist({
-			snapshot,
-			candidate,
-			...(request.reuseAgentId ? { agentId: request.reuseAgentId } : {}),
-			isInitializationCompatible: (agent, attempt) => {
-				if (agent && !isDeepStrictEqual(agent.resumeContext.contextPointers, materialized.pointers)) return false;
-				if (forkMode.kind === "none") return true;
-				const reference = attempt.dispatch.birthContextForkReference;
-				if (!reference) return false;
-				let birth: WorkerContextForkSnapshot;
-				try {
-					const forks = agent?.contextOrigin
-						? new WorkerContextForkStore({
-								agentDir: this.deps.getAgentDir(),
-								parentSessionId: agent.contextOrigin.parentSessionId,
-							})
-						: this.contextForks;
-					birth = forks.open({
-						logicalAgentId:
-							agent?.contextOrigin?.logicalAgentId ?? agent?.agentId ?? attempt.dispatch.logicalLaneId!,
-						reference,
+		const decision =
+			request.preferredAgentId && !request.reuseAgentId
+				? ({ outcome: "fresh" } as const)
+				: selectReusableWorkerSpecialist({
+						snapshot,
+						candidate,
+						...(request.reuseAgentId ? { agentId: request.reuseAgentId } : {}),
+						isInitializationCompatible: (agent, attempt) => {
+							if (agent && !isDeepStrictEqual(agent.resumeContext.contextPointers, materialized.pointers))
+								return false;
+							if (forkMode.kind === "none") return true;
+							const reference = attempt.dispatch.birthContextForkReference;
+							if (!reference) return false;
+							let birth: WorkerContextForkSnapshot;
+							try {
+								const forks = agent?.contextOrigin
+									? new WorkerContextForkStore({
+											agentDir: this.deps.getAgentDir(),
+											parentSessionId: agent.contextOrigin.parentSessionId,
+										})
+									: this.contextForks;
+								birth = forks.open({
+									logicalAgentId:
+										agent?.contextOrigin?.logicalAgentId ?? agent?.agentId ?? attempt.dispatch.logicalLaneId!,
+									reference,
+								});
+							} catch {
+								// Preserve the unreadable-context refusal instead of allocating a duplicate.
+								return true;
+							}
+							if (birth.declaration) return birth.declaration.forkMode === forkRequest;
+							// A legacy birth declares nothing: only the full birth it was captured with can prove identity.
+							return isDeepStrictEqual(birth.messages, this.workerBirth(request, forkMode).messages);
+						},
+						namespaceKeyOf,
+						// A specialist that was started in its own worktree lane is matched by everything but its directory,
+						// and only when its bound lane was made from the candidate's repository. Reusing it continues the
+						// worker in its own lane; no other worker's lane can be reached this way.
+						matches: (specialization, specialist, specialistId) =>
+							sameWorkerSpecialization(specialization, specialist) ||
+							(laneRepositories.specialists.get(specialistId) !== undefined &&
+								laneRepositories.specialists.get(specialistId) === laneRepositories.candidate &&
+								sameWorkerSpecialization(
+									specialization,
+									this.withAdmittedLaneDirectory(specialization, specialist),
+								)),
+						isSettled: (agentId) => this.isSpecialistSettled(agentId),
+						releaseHold: (agentId) => this.specialistReleaseHold(agentId),
+						isContextReadable: (agent) => this.isSpecialistContextReadable(agent),
+						...(independentParallelIntent ? { independentParallelIntent: true } : {}),
 					});
-				} catch {
-					// Preserve the unreadable-context refusal instead of allocating a duplicate.
-					return true;
-				}
-				if (birth.declaration) return birth.declaration.forkMode === forkRequest;
-				// A legacy birth declares nothing: only the full birth it was captured with can prove identity.
-				return isDeepStrictEqual(birth.messages, this.workerBirth(request, forkMode).messages);
-			},
-			namespaceKeyOf,
-			// A specialist that was started in its own worktree lane is matched by everything but its directory,
-			// and only when its bound lane was made from the candidate's repository. Reusing it continues the
-			// worker in its own lane; no other worker's lane can be reached this way.
-			matches: (specialization, specialist, specialistId) =>
-				sameWorkerSpecialization(specialization, specialist) ||
-				(laneRepositories.specialists.get(specialistId) !== undefined &&
-					laneRepositories.specialists.get(specialistId) === laneRepositories.candidate &&
-					sameWorkerSpecialization(specialization, this.withAdmittedLaneDirectory(specialization, specialist))),
-			isSettled: (agentId) => this.isSpecialistSettled(agentId),
-			releaseHold: (agentId) => this.specialistReleaseHold(agentId),
-			isContextReadable: (agent) => this.isSpecialistContextReadable(agent),
-			...(independentParallelIntent ? { independentParallelIntent: true } : {}),
-		});
 		if (request.reuseAgentId) {
 			// The caller named a specialist and described its work explicitly. Equal effective options
 			// are honoured only after compilation proves they match that specialist; they are never
@@ -3831,7 +3845,7 @@ export class WorkerDelegationController {
 				project = this.projectDirectory.admit({
 					specializationKey,
 					owner: { parentSessionId: sessionId, incarnation: this.agentControl.getProcessOwnerId() },
-					independent: independentParallelIntent,
+					independent: independentParallelIntent || Boolean(request.preferredAgentId),
 					isCompatible: (reference, ownership) => {
 						const ownerLifecycle =
 							ownership.claim.parentSessionId === sessionId
@@ -5994,3 +6008,5 @@ function rejudgedOutcome(
 	const acceptance = validateWorkerClaim({ request, claim: normalized, cwd });
 	return { ...outcome, claim: normalized, acceptance, accepted: acceptance.outcome === "allow" };
 }
+
+export type { WorkerDelegationRequest } from "./worker-delegation-request.ts";

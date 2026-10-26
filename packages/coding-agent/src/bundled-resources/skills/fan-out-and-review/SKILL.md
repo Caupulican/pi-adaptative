@@ -30,7 +30,7 @@ Parallel work and review give more evidence than one pass. Aggregate the evidenc
 2. Start each worker with the delegate tool. The tool refuses a second compatible worker unless you pass `parallelWork` with `independentOf` and a justification. Name the running workers in `independentOf`.
    For a partition or a race, use the built-in primitive: `delegate start` with `slices` (2 to 8 entries of `id` and `instructions`) dispatches one worker per slice under one group, and `race` (2 to 4) dispatches that many attempts of the same brief. `delegate status` lists each group. A slice with no accepted result shows as a `COVERAGE GAP`. In a race the first accepted result cancels the other attempts that are still running or queued, and a later accepted result is attributed, not cancelled.
 3. Give each worker its own output: its own path, directory or lane. Remove the sharing before you add a lock.
-4. Wait for several workers with the delegate `wait_many` action. Do not poll their output.
+4. After starting the workers, end the turn. Each worker's terminal handoff wakes you with a completion notification, so do not call `wait` or `wait_many` and do not poll their output. Use `wait_many` only when the very next step of this same turn cannot proceed without the result.
 5. If a worker drops out, continue with the rest and record the drop.
 
 ### Aggregate a partition or a race

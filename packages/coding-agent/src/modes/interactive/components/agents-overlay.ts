@@ -42,6 +42,8 @@ export interface AgentsOverlayOptions {
 	snapshot: () => AgentsOverlaySnapshot;
 	requestRender: () => void;
 	onClose: () => void;
+	/** Opens the Bot & Team chat switcher; the overlay closes first. */
+	onSwitchChat?: () => void;
 	/** Injectable clock for tests. */
 	now?: () => number;
 	/** Terminal row budget used by the scrollable inspector. */
@@ -342,6 +344,15 @@ export class AgentsOverlay implements Component {
 
 	handleInput(data: string): void {
 		if (
+			this.options.onSwitchChat &&
+			(this.options.keybindings.matches(data, "app.chat.switch") || data === "c" || data === "\r")
+		) {
+			this.dispose();
+			this.options.onClose();
+			this.options.onSwitchChat();
+			return;
+		}
+		if (
 			this.options.keybindings.matches(data, "app.agents.close") ||
 			this.options.keybindings.matches(data, "app.agents.open")
 		) {
@@ -382,7 +393,7 @@ export class AgentsOverlay implements Component {
 		const visible = body.slice(this.scrollTop, this.scrollTop + pageRows);
 		const position =
 			this.lastMaxScroll > 0 ? ` · ${this.scrollTop + 1}-${this.scrollTop + visible.length}/${body.length}` : "";
-		const footer = ` ${key("app.transcript.scrollUp")}/${key("app.transcript.scrollDown")} scroll · ${key("app.transcript.pageUp")}/${key("app.transcript.pageDown")} page · ${key("app.transcript.top")}/${key("app.transcript.bottom")} jump · ${key("app.agents.close")} close${position}`;
+		const footer = ` ${key("app.transcript.scrollUp")}/${key("app.transcript.scrollDown")} scroll · ${key("app.transcript.pageUp")}/${key("app.transcript.pageDown")} page · ${key("app.transcript.top")}/${key("app.transcript.bottom")} jump ${this.options.onSwitchChat ? " · Enter/c switch chat" : ""} · ${key("app.agents.close")} close${position}`;
 		return [surface(""), ...visible.map((line) => surface(` ${line}`)), surface(theme.fg("muted", footer))];
 	}
 

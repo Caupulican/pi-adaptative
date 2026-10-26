@@ -71,6 +71,34 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		name: "steps",
 		description: "Alias for /task",
 	},
+	{
+		name: "chat",
+		duringWork: "local",
+		description:
+			"Switch live chat view between Brain (root), a persistent bot, or a team (/chat [root|<bot>|team:<id>])",
+	},
+	{
+		name: "bot",
+		duringWork: "local",
+		description:
+			"Manage and message persistent bots directly (/bot [list|new <id> [model] [role]|open <id>|msg <id> <text>|stop <id>|retire <id>])",
+	},
+	{
+		name: "bots",
+		duringWork: "local",
+		description: "Open live Bot & Team chat switcher (/bots or /bot)",
+	},
+	{
+		name: "team",
+		duringWork: "local",
+		description:
+			"Manage and message multi-bot teams (/team [list|create <id> <bots> [desc]|members <id> <bots>|open <id>|msg <id> <text>|delete <id>])",
+	},
+	{
+		name: "teams",
+		duringWork: "local",
+		description: "Alias for /team",
+	},
 	{ name: "model", description: "Select model (opens selector UI)" },
 	{ name: "thinking", description: "Select thinking level (/thinking [level])" },
 	{ name: "fast", description: "Select provider processing tier (/fast [on|off|priority|ultrafast|status])" },

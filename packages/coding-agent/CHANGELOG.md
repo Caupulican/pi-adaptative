@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- Persistent bots and teams: `/bot` and `/team` commands, `@<bot>` and `@team:<id>` direct messages, a `/chat` switcher (`Alt+A`), and a clickable Chats & Teams roster on the left of the Workbench that hot-swaps with the Decision Graph. Bots and teams persist in `bots-and-teams.json` with per-bot and per-team memory blackboards under the agent memory directory.
+
+### Fixed
+
+- A bot's write grant covers only its own and its teams' blackboard files, not the whole agent memory directory, and operator follow-ups no longer repeat the memory block in every message.
+- The bots-and-teams store keeps an unreadable file as `bots-and-teams.corrupt-<time>.json` instead of replacing it with an empty store, and every mutation re-reads the file so concurrent sessions do not overwrite each other.
+- An open bot or team chat refreshes when a bot's lane starts, finishes or fails, not only when the store is saved.
+- Read-only shell classification screens the parsed arguments for nested execution, so a quoted flag such as `find . "-delete"` is no longer treated as observational.
+- The fan-out skill and async `delegate` guidance tell the orchestrator to end the turn after starting workers and let the completion handoff wake it, instead of calling `wait` or `wait_many`.
+
 ## [0.104.10] - 2026-10-26
 
 ### Fixed

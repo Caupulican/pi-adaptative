@@ -91,6 +91,7 @@ import { AuthDialogsController } from "./auth-dialogs-controller.ts";
 import { AutoLearnController, type AutoLearnState } from "./auto-learn-controller.ts";
 import * as autocompleteProvider from "./autocomplete-provider.ts";
 import * as autonomyCommands from "./autonomy-commands.ts";
+import { BotTeamChatController } from "./bot-team-chat-controller.ts";
 import * as compactionQueue from "./compaction-queue.ts";
 import { ActionTranscriptComponent } from "./components/action-transcript.ts";
 import { ActiveToolCallRegistry } from "./components/active-tool-call-registry.ts";
@@ -98,6 +99,7 @@ import { ActivityLaneComponent, type ActivityLaneKind } from "./components/activ
 import { AgentsOverlay } from "./components/agents-overlay.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
+import { BotTeamSelectorComponent } from "./components/bot-team-selector.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
@@ -292,6 +294,9 @@ export class InteractiveMode {
 	private readonly layout: InteractiveLayout;
 	/** Owns the streaming reply and the retry/compaction escape handlers; see interactive-event-controller.ts. */
 	private readonly events: InteractiveEventController;
+	/** Owns the live-chat target (Brain, Bot, Team) and the bot/team chat rendering; see bot-team-chat-controller.ts. */
+	private readonly botTeamChat: BotTeamChatController;
+	private readonly botPendingToolCalls = new Map<string, ToolExecutionComponent>();
 
 	// Track if editor is in bash mode (text starts with !)
 	private isBashMode = false;
@@ -556,6 +561,26 @@ export class InteractiveMode {
 				showError: (message) => this.showError(message),
 			},
 		});
+		this.botTeamChat = new BotTeamChatController({
+			chatContainer: this.chatContainer,
+			ui: this.ui,
+			getSessionPort: () => this.session,
+			renderRootConversation: async () => {
+				await this.renderCurrentSessionState();
+			},
+			appendRenderedMessageToChat: (message) => {
+				this.renderBotOrTeamMessage(message);
+			},
+			showStatus: (message) => this.showStatus(message),
+			showWarning: (message) => this.showWarning(message),
+			showError: (message) => this.showError(message),
+			openSelectorModal: () => this.showBotTeamSelector(),
+			onActiveTargetChanged: () => {
+				this.defaultEditor.setPlaceholder(this.editorPlaceholder());
+				this.updateEditorBorderColor();
+				this.ui.requestRender();
+			},
+		});
 		this.events = new InteractiveEventController({
 			hasHumanAudience: this.hasHumanAudience,
 			ui: this.ui,
@@ -577,6 +602,7 @@ export class InteractiveMode {
 			isInitialized: () => this.isInitialized,
 			isThinkingHidden: () => this.hideThinkingBlock,
 			init: () => this.init(),
+			isRootChatActive: () => this.botTeamChat.isRootChatActive(),
 			clearActiveToolCalls: () => this.clearActiveToolCalls(),
 			updatePendingMessagesDisplay: () => this.updatePendingMessagesDisplay(),
 			updateTerminalTitle: () => this.updateTerminalTitle(),
@@ -623,6 +649,19 @@ export class InteractiveMode {
 			getEditor: () => this.editor,
 			getSettings: () => this.settingsManager,
 			getStreamingMessage: () => this.events.getStreamingMessage(),
+			getConversationTitle: () => this.botTeamChat.getConversationTitleLabel(),
+			getSwitchChatChip: () => this.botTeamChat.getSwitchChipLabel(),
+			getChatRoster: () => ({
+				activeTarget: this.botTeamChat.getActiveTarget(),
+				rootModelLabel: this.session.getRootModelLabel(),
+				rootRunning: this.session.isStreaming,
+				bots: this.session.listPersistentBots(),
+				teams: this.session.listPersistentTeams(),
+			}),
+			onSelectChatTarget: (target) => {
+				void this.botTeamChat.switchTarget(target);
+			},
+			onSwitchChat: () => this.showBotTeamSelector(),
 		});
 		// The edge asks here, once, with one key: an ungranted operation waits for the answer in the
 		// workbench instead of failing the model's call. Escape declines.
@@ -1262,6 +1301,7 @@ export class InteractiveMode {
 		this.applyRuntimeSettings();
 		await this.bindCurrentSessionExtensions();
 		this.subscribeToAgent();
+		this.botTeamChat.bindSession();
 		if (this.hasHumanAudience) {
 			// The Workbench's own listeners (projection, stage log, System One ledger, questions) follow the session too.
 			this.layout.rebindSession();
@@ -1494,6 +1534,7 @@ export class InteractiveMode {
 			toggleToolOutputExpansion: () => this.toggleToolOutputExpansion(),
 			showTranscriptPager: () => this.showTranscriptPager(),
 			toggleAgentsOverlay: () => this.toggleAgentsOverlay(),
+			showBotTeamSelector: () => this.showBotTeamSelector(),
 			toggleThinkingBlockVisibility: () => this.toggleThinkingBlockVisibility(),
 			openExternalEditor: () => this.openExternalEditor(),
 			handleFollowUp: () => this.handleFollowUp(),
@@ -1605,6 +1646,33 @@ export class InteractiveMode {
 				this.editor.setText("");
 				await handleEstopCommand(this.loadHost(), text);
 				return;
+			}
+			if (text === "/chat" || text.startsWith("/chat ")) {
+				this.editor.addToHistory?.(text);
+				this.editor.setText("");
+				await this.botTeamChat.handleChatCommand(text);
+				return;
+			}
+			if (text === "/bot" || text.startsWith("/bot ") || text === "/bots" || text.startsWith("/bots ")) {
+				this.editor.addToHistory?.(text);
+				this.editor.setText("");
+				await this.botTeamChat.handleBotCommand(text);
+				return;
+			}
+			if (text === "/team" || text.startsWith("/team ") || text === "/teams" || text.startsWith("/teams ")) {
+				this.editor.addToHistory?.(text);
+				this.editor.setText("");
+				await this.botTeamChat.handleTeamCommand(text);
+				return;
+			}
+			if (!text.startsWith("/") && !text.startsWith("!")) {
+				const intercepted = await this.botTeamChat.tryInterceptSubmission(text);
+				if (intercepted) {
+					this.editor.addToHistory?.(text);
+					this.editor.setText("");
+					return;
+				}
+				text = this.botTeamChat.stripLeadingRootAddress(text);
 			}
 
 			// Other input submitted during work is steering. Slash/bang text must not execute
@@ -2167,6 +2235,7 @@ export class InteractiveMode {
 			}),
 			requestRender: () => this.ui.requestRender(),
 			onClose: () => this.closeAgentsOverlay(overlay),
+			onSwitchChat: () => this.showBotTeamSelector(),
 			viewportRows: () => this.ui.terminal.rows,
 		});
 		this.agentsOverlay = overlay;
@@ -2582,7 +2651,56 @@ export class InteractiveMode {
 		});
 	}
 
+	private renderBotOrTeamMessage(message: AgentMessage): void {
+		if (this.chatContainer.children.length <= 3) {
+			this.botPendingToolCalls.clear();
+		}
+		if (message.role === "assistant") {
+			this.addMessageToChat(message);
+			for (const content of message.content) {
+				if (content.type !== "toolCall") continue;
+				const toolDefinition = this.getRegisteredToolDefinition(content.name);
+				const component = new ToolExecutionComponent(
+					content.name,
+					content.id,
+					expandArgumentsForDisplay(this.session.peekPathAliasTable(), content.arguments),
+					{
+						showImages: this.settingsManager.getShowImages(),
+						imageWidthCells: this.settingsManager.getImageWidthCells(),
+						deferResultUntilExpanded: true,
+					},
+					toolDefinition,
+					this.ui,
+					this.sessionManager.getCwd(),
+				);
+				this.appendTranscriptAction(component);
+				if (message.stopReason === "aborted" || message.stopReason === "error") {
+					component.updateResult({
+						content: [{ type: "text", text: message.errorMessage || "Operation aborted" }],
+						isError: true,
+					});
+				} else {
+					this.botPendingToolCalls.set(content.id, component);
+				}
+			}
+			return;
+		}
+		if (message.role === "toolResult") {
+			const component = this.botPendingToolCalls.get(message.toolCallId);
+			if (component) {
+				component.updateResult(expandMessageForDisplay(this.session.peekPathAliasTable(), message));
+				this.botPendingToolCalls.delete(message.toolCallId);
+			}
+			return;
+		}
+		this.addMessageToChat(message);
+	}
+
 	private async rebuildChatFromMessages(options?: { checkpointWhenDeferred?: boolean }): Promise<boolean> {
+		if (this.botTeamChat && !this.botTeamChat.isRootChatActive()) {
+			await this.botTeamChat.refreshActiveChatView();
+			return true;
+		}
 		if (!this.tuiHistoryLoaded && !options?.checkpointWhenDeferred) {
 			this.showDeferredHistoryPlaceholder({ requestRender: true });
 			return false;
@@ -3033,6 +3151,27 @@ export class InteractiveMode {
 	 * Shows a selector component in place of the editor.
 	 * @param create Factory that receives a `done` callback and returns the component and focus target
 	 */
+	private showBotTeamSelector(): void {
+		this.showSelector((done) => {
+			const selector = new BotTeamSelectorComponent({
+				activeTarget: this.botTeamChat.getActiveTarget(),
+				rootModelLabel: this.session.getRootModelLabel(),
+				rootStatusLabel: this.session.getRootStatusLabel(),
+				bots: this.session.listPersistentBots(),
+				teams: this.session.listPersistentTeams(),
+				onSelectTarget: (target) => {
+					done();
+					void this.botTeamChat.switchTarget(target);
+				},
+				onCancel: () => {
+					done();
+					this.ui.requestRender();
+				},
+			});
+			return { component: selector, focus: selector.getSelectList() };
+		});
+	}
+
 	private showSelector(
 		create: (done: () => void) => {
 			component: Component;
@@ -3987,6 +4126,9 @@ export class InteractiveMode {
 
 	/** The input's own hints: what to type and the few keys that matter every turn; `?` lists the rest. */
 	private editorPlaceholder(): string {
+		if (this.botTeamChat && !this.botTeamChat.isRootChatActive()) {
+			return `Message ${this.botTeamChat.getActiveTargetBadge()} directly · @bot · /chat root or Alt+A to switch`;
+		}
 		const key = (binding: Parameters<typeof keyText>[0], text: string) => {
 			const keys = keyText(binding);
 			return keys ? `${keys} ${text}` : "";
@@ -4224,6 +4366,7 @@ export class InteractiveMode {
 		attempt(() => this.unsubscribeHumanInputActivity?.());
 		this.unsubscribeHumanInputActivity = undefined;
 		attempt(() => this.layout.dispose());
+		attempt(() => this.botTeamChat.dispose());
 		attempt(() => {
 			// A quit keeps the process guards armed through its dispose: they go with the process (see SignalLifecycle.shutdown).
 			if (!this.signals.isShuttingDown) this.unregisterSignalHandlers();

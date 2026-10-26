@@ -307,6 +307,9 @@ function isReadOnlyInvocation(args: readonly string[], depth: number, admitTestR
 		return depth < MAX_READ_ONLY_WRAPPER_DEPTH && isReadOnlyPowerShellInvocation(commandArgs, depth, admitTestRuns);
 	}
 	const segment = commandArgs.join(" ");
+	// The raw command was already screened for nested execution, but quoting hides a flag from that
+	// screen (`find . "-delete"`): the parsed arguments are screened again with the quotes removed.
+	if (UNSAFE_NESTED_SHELL_EXECUTION_RE.test(segment)) return false;
 	return (
 		(admitTestRuns && isTestRunSegment(segment)) ||
 		(!MUTATING_SHELL_TOKEN_RE.test(segment) && isReadOnlyCommandSegment(segment))
