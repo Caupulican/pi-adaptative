@@ -658,14 +658,7 @@ export class InteractiveMode {
 					activeTarget,
 					rootModelLabel: this.session.getRootModelLabel(),
 					rootRunning: this.session.isStreaming,
-					// A retired bot or finished worker is history, not a chat to resume; the open chat stays listed.
-					bots: this.session
-						.listPersistentBots()
-						.filter(
-							(bot) =>
-								bot.state !== "retired" ||
-								(activeTarget.kind === "bot" && activeTarget.agentId === bot.agentId),
-						),
+					bots: this.chatBots(),
 					teams: this.session.listPersistentTeams(),
 				};
 			},
@@ -3167,13 +3160,23 @@ export class InteractiveMode {
 	 * Shows a selector component in place of the editor.
 	 * @param create Factory that receives a `done` callback and returns the component and focus target
 	 */
+	/** The bots a chat list shows: a retired bot or finished worker is history, not a chat to resume; the open chat stays listed. */
+	private chatBots() {
+		const activeTarget = this.botTeamChat.getActiveTarget();
+		return this.session
+			.listPersistentBots()
+			.filter(
+				(bot) => bot.state !== "retired" || (activeTarget.kind === "bot" && activeTarget.agentId === bot.agentId),
+			);
+	}
+
 	private showBotTeamSelector(): void {
 		this.showSelector((done) => {
 			const selector = new BotTeamSelectorComponent({
 				activeTarget: this.botTeamChat.getActiveTarget(),
 				rootModelLabel: this.session.getRootModelLabel(),
 				rootStatusLabel: this.session.getRootStatusLabel(),
-				bots: this.session.listPersistentBots(),
+				bots: this.chatBots(),
 				teams: this.session.listPersistentTeams(),
 				onSelectTarget: (target) => {
 					done();

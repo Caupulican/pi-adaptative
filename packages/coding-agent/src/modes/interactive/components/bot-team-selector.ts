@@ -93,7 +93,7 @@ export class BotTeamSelectorComponent extends Container {
 		super();
 
 		const activeValue = formatActiveTargetValue(options.activeTarget);
-		const subtitleText = `Active: ${formatActiveTargetLabel(options.activeTarget)}  ·  /bot new <id> [model] [role] · /team create <id> <bot1,bot2> · @<bot> <msg> · Esc close`;
+		const subtitleText = `Active: ${formatActiveTargetLabel(options.activeTarget)}  ·  /bot new <id> [--write] [model] [role] · /team create <id> <bot1,bot2> · @<bot> <msg> · Esc close`;
 
 		this.addChild(new DynamicBorder());
 		this.addChild(new Text(theme.fg("accent", theme.bold("Live Chats · Bots & Teams")), 1, 0));
