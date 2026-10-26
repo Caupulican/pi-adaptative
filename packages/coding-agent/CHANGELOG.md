@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Release reruns select the newest uploaded benchmarks and binary archives by creation time, verify their commit and digest, and reject ambiguous evidence instead of reusing an older artifact with a higher numeric ID.
+
 ## [0.104.8] - 2026-10-25
 
 ### Fixed
