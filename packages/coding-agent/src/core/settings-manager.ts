@@ -209,7 +209,6 @@ export interface SettingsManagerCreateOptions {
 
 export interface SettingsStorage {
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
-	readGlobalSettings?(): string | undefined;
 	getProfilesDir?(): string;
 	/** Base directory used to resolve explicit ./ or ../ profile references. */
 	getProfileResolutionBaseDir?(): string;
@@ -249,10 +248,6 @@ export class FileSettingsStorage implements SettingsStorage {
 
 	getProfileResolutionBaseDir(): string {
 		return this.profileResolutionBaseDir;
-	}
-
-	readGlobalSettings(): string | undefined {
-		return existsSync(this.globalSettingsPath) ? readFileSync(this.globalSettingsPath, "utf-8") : undefined;
 	}
 
 	readDirectoryResourceProfile(): string | undefined {
@@ -3050,18 +3045,6 @@ export class SettingsManager {
 	}
 
 	getModelFavorites(): ModelFavorite[] {
-		if (!this.modifiedFields.has("modelFavorites") && !isWorkerSession() && this.storage.readGlobalSettings) {
-			try {
-				const raw = this.storage.readGlobalSettings();
-				if (raw !== undefined) {
-					const parsed = SettingsManager.migrateSettings(JSON.parse(stripBom(raw)) as Record<string, unknown>);
-					this.globalSettings.modelFavorites = parsed.modelFavorites;
-					this.settings.modelFavorites = parsed.modelFavorites;
-				}
-			} catch {
-				// Keep in-memory favorites if the disk file is mid-write or invalid.
-			}
-		}
 		const favorites = this.settings.modelFavorites;
 		if (!Array.isArray(favorites)) return [];
 		const seen = new Set<string>();

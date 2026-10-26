@@ -209,10 +209,7 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 	}
 	if (model.next && model.goal.branch !== "delivered") item(ITEM_INDENT, "›", "dim", `next → ${model.next}`, "dim");
 
-	head("BRAIN");
-	const brain = model.participants.filter((p) => p.kind === "root");
-	const subagents = model.participants.filter((p) => p.kind !== "root" && p.kind !== "capability");
-	for (const participant of brain) {
+	const participantItem = (participant: (typeof model.participants)[number]) => {
 		const detail = participantSubText(participant, model);
 		item(
 			ITEM_INDENT,
@@ -222,6 +219,13 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 			participant.running ? "accent" : "muted",
 			{ meta: detail },
 		);
+	};
+
+	head("BRAIN");
+	const brain = model.participants.filter((p) => p.kind === "root");
+	const subagents = model.participants.filter((p) => p.kind !== "root" && p.kind !== "capability");
+	for (const participant of brain) {
+		participantItem(participant);
 	}
 	if (subagents.length > 0) {
 		const activeCount = subagents.filter((p) => p.running || p.queued).length;
@@ -231,15 +235,7 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 		});
 	}
 	for (const participant of subagents) {
-		const detail = participantSubText(participant, model);
-		item(
-			ITEM_INDENT,
-			participant.running ? "●" : participant.queued ? "◌" : "○",
-			participant.running ? "success" : participant.queued ? "warning" : "dim",
-			participantText(participant),
-			participant.running ? "accent" : "muted",
-			{ meta: detail },
-		);
+		participantItem(participant);
 	}
 	for (const capability of model.participants.filter((p) => p.kind === "capability")) {
 		const tone: ThemeColor = capability.running ? "accent" : "muted";

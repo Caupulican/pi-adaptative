@@ -428,6 +428,14 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		return model !== undefined && (!input.isModelAllowed || input.isModelAllowed(model));
 	});
 	if (input.isModelAllowed && !input.isModelAllowed(boundModel.model)) {
+		// An explicit caller model is a request, not a default: running a different model would hide the
+		// refusal behind a mislabelled success, so it fails closed and names the model and its way out.
+		if (!input.modelPin && input.authority?.model !== undefined) {
+			return {
+				ok: false,
+				reason: `worker_model_not_allowed:${boundModel.model.provider}/${boundModel.model.id}`,
+			};
+		}
 		fallbacks = [];
 		const allowed = input.allocateAllowedModel?.();
 		if (!allowed) return { ok: false, reason: "orchestration_model_policy_no_allowed_model" };

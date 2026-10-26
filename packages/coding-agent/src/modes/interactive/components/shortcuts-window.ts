@@ -1,5 +1,6 @@
 import { type Component, getKeybindings, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import { theme } from "../../../presentation/theme-model.ts";
+import { cardPalette, scrollDelta, scrolledOffset } from "./card-frame.ts";
 
 export interface ShortcutRow {
 	/** The key as the operator types it, already in display form. */
@@ -44,16 +45,11 @@ export class ShortcutsWindow implements Component {
 
 	handleInput(data: string): void {
 		const keys = getKeybindings();
-		const maxOffset = Math.max(0, this.totalRows - this.bodyRows);
-		const scroll = (delta: number) => {
-			this.offset = Math.max(0, Math.min(maxOffset, this.offset + delta));
+		const delta = scrollDelta(data, this.bodyRows, false);
+		if (delta !== undefined) {
+			this.offset = scrolledOffset(this.offset, delta, this.totalRows, this.bodyRows);
 			this.options.requestRender();
-		};
-		if (keys.matches(data, "tui.select.up")) scroll(-1);
-		else if (keys.matches(data, "tui.select.down")) scroll(1);
-		else if (keys.matches(data, "tui.select.pageUp")) scroll(-this.bodyRows);
-		else if (keys.matches(data, "tui.select.pageDown")) scroll(this.bodyRows);
-		else if (keys.matches(data, "tui.select.cancel") || keys.matches(data, "tui.select.confirm"))
+		} else if (keys.matches(data, "tui.select.cancel") || keys.matches(data, "tui.select.confirm"))
 			this.options.onClose();
 		else if (this.options.isCloseKey(data)) this.options.onClose();
 	}
@@ -77,8 +73,7 @@ export class ShortcutsWindow implements Component {
 	}
 
 	render(width: number): string[] {
-		const surface = (text: string) => theme.bg("customMessageBg", text);
-		const border = (text: string) => surface(theme.fg("borderMuted", text));
+		const { surface, border } = cardPalette();
 		const inner = Math.max(1, width - 4);
 		const content = this.contentRows(inner);
 		this.totalRows = content.length;

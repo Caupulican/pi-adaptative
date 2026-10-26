@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- `delegate start` with an explicit `model` outside the owner's model policy or favorite pool now fails closed with `worker_model_not_allowed:<provider>/<model>` instead of running a reallocated model. Omitted or inherited models are still reallocated into the pool.
+- Reverted the live disk re-read of `modelFavorites` and the lenient `delegate` argument folding: neither had a demonstrated cause, and the favorites sync read the settings file on every call behind a silent catch.
+- The shortcuts and usage windows share one card frame and scroll helper, and the Decision Graph participant rows share one renderer, restoring the production clone gate.
+
 ## [0.104.9] - 2026-10-26
 
 ### Fixed

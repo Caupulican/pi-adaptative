@@ -5,6 +5,7 @@ import type {
 	UsageOverview,
 } from "../../../core/provider-admission/usage-overview.ts";
 import { theme } from "../../../presentation/theme-model.ts";
+import { cardPalette, scrollDelta, scrolledOffset } from "./card-frame.ts";
 
 export const USAGE_STALE_AFTER_MS = 15 * 60_000;
 
@@ -286,16 +287,11 @@ export class UsageDashboardComponent implements Component {
 
 	handleInput(data: string): void {
 		const keys = getKeybindings();
-		const maxOffset = Math.max(0, this.totalRows - this.bodyRows);
-		const scroll = (delta: number) => {
-			this.offset = Math.max(0, Math.min(maxOffset, this.offset + delta));
+		const delta = scrollDelta(data, this.bodyRows, true);
+		if (delta !== undefined) {
+			this.offset = scrolledOffset(this.offset, delta, this.totalRows, this.bodyRows);
 			this.options.requestRender?.();
-		};
-		if (keys.matches(data, "tui.select.up") || data === "k") scroll(-1);
-		else if (keys.matches(data, "tui.select.down") || data === "j") scroll(1);
-		else if (keys.matches(data, "tui.select.pageUp")) scroll(-this.bodyRows);
-		else if (keys.matches(data, "tui.select.pageDown")) scroll(this.bodyRows);
-		else if (data === "r" || data === "R") this.options.onAction("refresh");
+		} else if (data === "r" || data === "R") this.options.onAction("refresh");
 		else if ((data === "x" || data === "X") && this.canRedeemReset) this.options.onAction("reset");
 		else if (
 			keys.matches(data, "tui.select.cancel") ||
@@ -307,8 +303,7 @@ export class UsageDashboardComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		const surface = (text: string) => theme.bg("customMessageBg", text);
-		const border = (text: string) => surface(theme.fg("borderMuted", text));
+		const { surface, border } = cardPalette();
 		const inner = Math.max(1, width - 4);
 		const now = this.now();
 

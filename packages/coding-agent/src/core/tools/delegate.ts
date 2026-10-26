@@ -1380,6 +1380,9 @@ function delegateStartSkipText(reason: string): string {
 	if (reason.includes("worker_model_pin_conflict:")) {
 		return `delegate not started: CAVEMAN MODE - MANDATORY: ${reason} means the explicit model/thinking request conflicts with an owner pin. No different model was started. Do not silently omit or replace the requested binding; report the exact role so the user can choose whether to change the request or owner policy.`;
 	}
+	if (reason.startsWith("worker_model_not_allowed:")) {
+		return `delegate not started: CAVEMAN MODE - MANDATORY: ${reason} means the requested model is outside the owner's model policy or favorite pool. No different model was started. Do not omit the model or pick another silently; report the exact model so the user can pin it as a favorite, allow its provider, or choose a pooled model.`;
+	}
 	if (reason === "orchestration_profile_not_found") {
 		return "delegate not started: CAVEMAN MODE - MANDATORY: orchestration_profile_not_found is expected routing policy, not harness failure. Retry once with profileId omitted to use adaptive authority, or use an exact listed profile; never invent profile IDs.";
 	}
@@ -1611,22 +1614,12 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 		prepareArguments(args: unknown) {
 			if (!args || typeof args !== "object" || Array.isArray(args)) return args as DelegateToolInput;
 			const input = args as Record<string, unknown>;
-			if (input.action !== undefined && input.action !== "start") return args as DelegateToolInput;
-			const next: Record<string, unknown> = { ...input };
-			if (typeof input.task === "string") {
-				const task = input.task;
-				const taskText = task.trim();
-				const instructions = input.instructions;
-				if (typeof instructions !== "string" || instructions.trim().length === 0) {
-					next.instructions = task;
-				} else if (!instructions.includes(taskText)) {
-					next.instructions = `${taskText}\n\n${instructions}`;
-				}
-				delete next.task;
+			const action = input.action ?? "start";
+			if (action !== "start" || typeof input.task !== "string" || typeof input.instructions === "string") {
+				return args as DelegateToolInput;
 			}
-			// A descriptive laneId on a fresh start is not an existing lane; drop it before validation.
-			if (typeof input.laneId === "string" && input.agentId === undefined) delete next.laneId;
-			return next as DelegateToolInput;
+			const { task, ...rest } = input;
+			return { ...rest, instructions: task } as DelegateToolInput;
 		},
 		renderShell: "self",
 		foregroundWait: (input: { action?: unknown }) =>
