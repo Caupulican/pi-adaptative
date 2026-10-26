@@ -819,7 +819,7 @@ Reusable profile files live under `~/.pi/agent/profiles/<name>.json`. They use a
 {
   "name": "reviewer",
   "description": "Safe review profile",
-  "model": "anthropic/claude-sonnet-4",
+  "model": "anthropic/claude-sonnet-5-5",
   "thinking": "low",
   "resources": {
     "tools": { "allow": ["read", "grep", "context_audit"] },

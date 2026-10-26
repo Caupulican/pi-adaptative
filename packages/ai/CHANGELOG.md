@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Refreshed the generated model and image catalogs from live upstream data.
+
+### Fixed
+
+- The model-catalog drift check matches whole model ids (`claude-sonnet-4` no longer counts as a reference to `claude-sonnet-4-5`) and ignores released changelog sections and the catalog generators, so only real consumers of a removed id fail the weekly check.
+
 ## [0.104.10] - 2026-10-26
 
 ## [0.104.9] - 2026-10-26

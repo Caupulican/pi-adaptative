@@ -332,8 +332,8 @@ Use `modelOverrides` to customize specific built-in models without replacing the
   "providers": {
     "openrouter": {
       "modelOverrides": {
-        "anthropic/claude-sonnet-4": {
-          "name": "Claude Sonnet 4 (Bedrock Route)",
+        "anthropic/claude-sonnet-5.5": {
+          "name": "Claude Sonnet 5.5 (Bedrock Route)",
           "compat": {
             "openRouterRouting": {
               "only": ["amazon-bedrock"]

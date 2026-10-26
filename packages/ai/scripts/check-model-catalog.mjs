@@ -49,12 +49,20 @@ function extractModelIds(source) {
 	return ids;
 }
 
+/** True when `line` names `id` as a whole model id: `claude-sonnet-4` is not a reference to `claude-sonnet-4-5`. */
+function namesModelId(line, id) {
+	const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`(?<![A-Za-z0-9._-])${escaped}(?![A-Za-z0-9_-]|\\.[A-Za-z0-9])`).test(line);
+}
+
+// Released changelog sections are immutable history, and the catalog generators are the catalog's own source:
+// neither is a consumer that a removal would break.
 function isReferencedElsewhere(id) {
 	const result = spawnSync(
 		"rg",
 		[
 			"-F",
-			"-l",
+			"-n",
 			"--no-heading",
 			"-g",
 			"!node_modules",
@@ -63,6 +71,10 @@ function isReferencedElsewhere(id) {
 			"-g",
 			"!**/*.generated.ts",
 			"-g",
+			"!**/CHANGELOG.md",
+			"-g",
+			"!packages/ai/scripts/generate-*models.ts",
+			"-g",
 			"!package-lock.json",
 			"-g",
 			"!**/npm-shrinkwrap.json",
@@ -70,7 +82,7 @@ function isReferencedElsewhere(id) {
 			id,
 			repoRoot,
 		],
-		{ encoding: "utf8" },
+		{ encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
 	);
 	if (result.error) {
 		throw new Error(`Failed to run ripgrep while searching for ${JSON.stringify(id)}: ${result.error.message}`);
@@ -78,7 +90,7 @@ function isReferencedElsewhere(id) {
 	if (result.status !== 0 && result.status !== 1) {
 		throw new Error(`ripgrep exited ${result.status} while searching for ${JSON.stringify(id)}: ${result.stderr}`);
 	}
-	return result.status === 0;
+	return result.stdout.split("\n").some((line) => namesModelId(line, id));
 }
 
 function regenerate(catalog, tempDir) {

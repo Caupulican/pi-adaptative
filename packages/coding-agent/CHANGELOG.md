@@ -10,6 +10,7 @@
 - The bots-and-teams store keeps an unreadable file as `bots-and-teams.corrupt-<time>.json` instead of replacing it with an empty store, and every mutation re-reads the file so concurrent sessions do not overwrite each other.
 - An open bot or team chat refreshes when a bot's lane starts, finishes or fails, not only when the store is saved.
 - Read-only shell classification screens the parsed arguments for nested execution, so a quoted flag such as `find . "-delete"` is no longer treated as observational.
+- The Chats & Teams roster no longer lists retired bots and finished workers; the open chat stays listed.
 - The fan-out skill and async `delegate` guidance tell the orchestrator to end the turn after starting workers and let the completion handoff wake it, instead of calling `wait` or `wait_many`.
 
 ## [0.104.10] - 2026-10-26

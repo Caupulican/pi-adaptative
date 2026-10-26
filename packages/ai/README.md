@@ -868,8 +868,8 @@ const litellmModel: Model<'openai-completions'> = {
 
 // Example: Custom endpoint with headers (bypassing Cloudflare bot detection)
 const proxyModel: Model<'anthropic-messages'> = {
-  id: 'claude-sonnet-4',
-  name: 'Claude Sonnet 4 (Proxied)',
+  id: 'claude-sonnet-5-5',
+  name: 'Claude Sonnet 5.5 (Proxied)',
   api: 'anthropic-messages',
   provider: 'custom-proxy',
   baseUrl: 'https://proxy.example.com/v1',

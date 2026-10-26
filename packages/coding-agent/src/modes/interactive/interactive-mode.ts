@@ -651,13 +651,23 @@ export class InteractiveMode {
 			getStreamingMessage: () => this.events.getStreamingMessage(),
 			getConversationTitle: () => this.botTeamChat.getConversationTitleLabel(),
 			getSwitchChatChip: () => this.botTeamChat.getSwitchChipLabel(),
-			getChatRoster: () => ({
-				activeTarget: this.botTeamChat.getActiveTarget(),
-				rootModelLabel: this.session.getRootModelLabel(),
-				rootRunning: this.session.isStreaming,
-				bots: this.session.listPersistentBots(),
-				teams: this.session.listPersistentTeams(),
-			}),
+			getChatRoster: () => {
+				const activeTarget = this.botTeamChat.getActiveTarget();
+				return {
+					activeTarget,
+					rootModelLabel: this.session.getRootModelLabel(),
+					rootRunning: this.session.isStreaming,
+					// A retired bot or finished worker is history, not a chat to resume; the open chat stays listed.
+					bots: this.session
+						.listPersistentBots()
+						.filter(
+							(bot) =>
+								bot.state !== "retired" ||
+								(activeTarget.kind === "bot" && activeTarget.agentId === bot.agentId),
+						),
+					teams: this.session.listPersistentTeams(),
+				};
+			},
 			onSelectChatTarget: (target) => {
 				void this.botTeamChat.switchTarget(target);
 			},
