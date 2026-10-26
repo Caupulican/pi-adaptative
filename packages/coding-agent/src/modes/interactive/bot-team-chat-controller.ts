@@ -318,7 +318,7 @@ export class BotTeamChatController {
 				}
 				default:
 					this.host.showWarning(
-						"Usage: /bot [list] | /bot new <id> [model] [instructions...] | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot stop <id> | /bot retire <id>",
+						"Usage: /bot [list] | /bot new <id> [--write] [model] [instructions...] | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot stop <id> | /bot retire <id>",
 					);
 			}
 		} catch (error) {
@@ -573,8 +573,12 @@ export class BotTeamChatController {
 	}
 
 	private async createBot(rest: string, port: BotTeamChatSessionPort): Promise<void> {
-		const [rawId, afterId] = splitHead(rest);
+		const [rawId, afterIdRaw] = splitHead(rest);
 		const agentId = normalizeBotOrTeamId(rawId, "agentId");
+		// --write lets the bot edit files; its replies are then structured reports rather than chat.
+		const [maybeFlag, afterFlag] = splitHead(afterIdRaw);
+		const canWrite = maybeFlag === "--write";
+		const afterId = canWrite ? afterFlag : afterIdRaw;
 		const [maybeModel, afterModel] = splitHead(afterId);
 		// A token containing "/" is a model reference; anything else begins the instructions.
 		const hasModel = maybeModel.includes("/");
@@ -586,6 +590,7 @@ export class BotTeamChatController {
 			modelId: modelSpec.modelId,
 			thinkingLevel: modelSpec.thinkingLevel,
 			instructions: instructions.length > 0 ? instructions : undefined,
+			...(canWrite ? { canWrite } : {}),
 		});
 		await this.switchTarget({ kind: "bot", agentId: bot.agentId });
 		this.host.showStatus(
@@ -656,7 +661,7 @@ export class BotTeamChatController {
 
 	private formatBotList(bots: readonly PersistentBotView[]): string {
 		if (bots.length === 0) {
-			return "No bots. Create one with /bot new <id> [model] [instructions...].";
+			return "No bots. Create one with /bot new <id> [--write] [model] [instructions...].";
 		}
 		return bots.map((b) => `${b.agentId} · ${b.state} · ${b.modelRef}`).join("\n");
 	}

@@ -30,8 +30,11 @@ import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autono
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
 import { ManagedLaneController, type ManagedLaneControllerDeps } from "./delegation/managed-lane-controller.ts";
 import {
+	BOT_MEMORY_BLOCK_SEPARATOR,
 	type BotOperatorMessageDispatchResult,
+	botReplyText,
 	normalizeBotOrTeamId,
+	operatorTextOf,
 	type PersistentBotRecord,
 	PersistentBotTeamStore,
 	type PersistentBotView,
@@ -1277,7 +1280,38 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				return !isSyntheticBirth;
 			});
 			if (filtered.length > 0) {
-				return filtered;
+				const shown: AgentMessage[] = [];
+				for (const msg of filtered) {
+					if (msg.role === "assistant") {
+						shown.push({
+							...msg,
+							content: msg.content.map((part) =>
+								part.type === "text" ? { ...part, text: botReplyText(part.text) } : part,
+							),
+						});
+						continue;
+					}
+					if (msg.role !== "user") {
+						shown.push(msg);
+						continue;
+					}
+					const text = operatorTextOf(
+						typeof msg.content === "string"
+							? msg.content
+							: msg.content.map((part) => (part.type === "text" ? part.text : "")).join("\n"),
+					);
+					// A follow-up reaches the bot twice, as its wake task and as its mailbox message: one line in the chat.
+					const previous = shown.at(-1);
+					if (previous?.role === "user" && previous.timestamp !== undefined && msg.timestamp !== undefined) {
+						const previousText =
+							typeof previous.content === "string"
+								? previous.content
+								: previous.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+						if (previousText === text) continue;
+					}
+					shown.push({ ...msg, content: [{ type: "text", text }] });
+				}
+				return shown;
 			}
 		}
 
@@ -1329,7 +1363,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	readTeamChatMessages(teamId: string): AgentMessage[] {
 		const store = this.getBotTeamStore();
-		const team = store.getTeam(teamId);
 		const teamMessages = store.listTeamMessages(teamId);
 		const result: AgentMessage[] = [];
 
@@ -1337,7 +1370,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			if (msg.sender.kind === "operator") {
 				result.push({
 					role: "user",
-					content: [{ type: "text", text: `[to team:${teamId} -> ${msg.targetAgentIds.join(", ")}] ${msg.text}` }],
+					content: [
+						{
+							type: "text",
+							text: `[to team:${teamId} -> ${msg.targetAgentIds.length > 0 ? msg.targetAgentIds.join(", ") : "all members"}] ${msg.text}`,
+						},
+					],
 					timestamp: msg.timestamp,
 				});
 			} else if (msg.sender.kind === "bot") {
@@ -1356,31 +1394,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					display: true,
 					timestamp: msg.timestamp,
 				});
-			}
-		}
-
-		const firstTeamMsgTimestamp = teamMessages.length > 0 ? teamMessages[0].timestamp : 0;
-		const memberAgentIds = team?.memberAgentIds ?? [];
-
-		for (const memberId of memberAgentIds) {
-			const conv = this.openWorkerTranscript(memberId);
-			if (!conv) continue;
-			const msgs = conv.getProviderContext().messages;
-			for (const msg of msgs) {
-				if (msg.role === "assistant" && (msg.timestamp === undefined || msg.timestamp >= firstTeamMsgTimestamp)) {
-					let prefixed = false;
-					const updatedContent = msg.content.map((part) => {
-						if (!prefixed && part.type === "text") {
-							prefixed = true;
-							return { ...part, text: `**[bot: ${memberId}]**\n${part.text}` };
-						}
-						return part;
-					});
-					result.push({
-						...msg,
-						content: updatedContent,
-					});
-				}
 			}
 		}
 
@@ -1455,8 +1468,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 		// Fresh worker start with preferredAgentId so lane and worker identity match the persistent bot
 		const baseInstructions = bot.instructions ? `${bot.instructions}\n\nTask:\n${message}` : message;
+		// The memory block follows the task: the lane label, the roster line and the chat open on what the operator sent.
 		const fullInstructions =
-			memoryCtx.promptBlock.length > 0 ? `${memoryCtx.promptBlock}\n\n---\n\n${baseInstructions}` : baseInstructions;
+			memoryCtx.promptBlock.length > 0
+				? `${baseInstructions}${BOT_MEMORY_BLOCK_SEPARATOR}${memoryCtx.promptBlock}`
+				: baseInstructions;
 
 		const activeIds = Array.from(
 			new Set(
@@ -1471,8 +1487,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			instructions: fullInstructions,
 			authority: {
 				model: { provider: spec.provider, modelId: spec.modelId },
-				// Only this bot's blackboard and its teams' blackboards: the rest of the memory directory is the owner's.
-				writePaths: [this.deps.getCwd(), ...memoryCtx.memoryFiles],
+				// A chat bot answers in plain text, which only a read-only worker may do; a write-capable one reports in the claim envelope.
+				readOnly: bot.canWrite !== true,
 				...(this.isOrchestrationThinkingLevel(bot.thinkingLevel) ? { thinkingLevel: bot.thinkingLevel } : {}),
 			},
 			preferredAgentId: normId,

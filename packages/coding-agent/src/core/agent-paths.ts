@@ -174,6 +174,11 @@ export function steeringCertificatesFile(agentDir: string): string {
 	return stateFile(agentDir, "steering", "certificates.json");
 }
 
+/** `<agentDir>/state/bots/store.json` -- the persistent bots, teams and team transcripts. */
+export function botTeamStoreFile(agentDir: string): string {
+	return stateFile(agentDir, "bots", "store.json");
+}
+
 /** `<agentDir>/state/follow-ups` -- per-session owner follow-up documents. */
 export function ownerFollowUpsDir(agentDir: string): string {
 	return stateFile(agentDir, "follow-ups");

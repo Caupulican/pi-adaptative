@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "../../config.ts";
+import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
@@ -21,6 +22,8 @@ export interface PersistentBotRecord {
 	readonly thinkingLevel?: string;
 	readonly instructions?: string;
 	readonly profileId?: string;
+	/** A bot edits files only when asked to: its replies are then structured reports, not chat. */
+	readonly canWrite?: boolean;
 	readonly createdAt: string;
 	readonly updatedAt: string;
 	readonly retired?: boolean;
@@ -92,6 +95,7 @@ export interface UpsertPersistentBotInput {
 	readonly thinkingLevel?: string;
 	readonly instructions?: string;
 	readonly profileId?: string;
+	readonly canWrite?: boolean;
 	readonly retired?: boolean;
 	readonly lastTranscriptRef?: string;
 	readonly lastSummary?: string;
@@ -119,9 +123,41 @@ export interface TeamOperatorMessageDispatchResult {
 	readonly deliveries: readonly PersistentTeamMemberDelivery[];
 }
 
+/** Where a bot's memory block joins its task: the operator's words come first, so chat views cut the text here. */
+export const BOT_MEMORY_BLOCK_SEPARATOR = "\n\n---\n\n";
+const BOT_MEMORY_BLOCK_HEADER = "### UNIFIED MEMORY & TEAM BLACKBOARD";
+
+/** The text a bot's chat shows for a message: without the memory block the host appended to it. */
+export function withoutBotMemoryBlock(text: string): string {
+	const at = text.indexOf(`${BOT_MEMORY_BLOCK_SEPARATOR}${BOT_MEMORY_BLOCK_HEADER}`);
+	return at < 0 ? text : text.slice(0, at);
+}
+
+/** What the operator typed, from a user message of a bot's conversation: without the host's task wrapper, control header and memory block. */
+export function operatorTextOf(text: string): string {
+	let shown = withoutBotMemoryBlock(text);
+	const control = /^\[Worker control [^\]\n]*\]\n/u.exec(shown);
+	if (control) shown = shown.slice(control[0].length);
+	const task = /^TASK\n([\s\S]*?)(?:\nEND TASK(?:\n[\s\S]*)?)?$/u.exec(shown);
+	return (task ? (task[1] ?? shown) : shown).trim();
+}
+
+/** A bot answers a follow-up in the worker claim envelope; the chat shows what it said, which is the envelope's summary. */
+export function botReplyText(text: string): string {
+	const trimmed = text.trim();
+	if (!trimmed.startsWith("{")) return text;
+	try {
+		const claim: unknown = JSON.parse(trimmed);
+		if (isRecordObject(claim) && typeof claim.summary === "string" && typeof claim.status === "string")
+			return claim.summary;
+	} catch {
+		// Not an envelope: the text is the reply.
+	}
+	return text;
+}
+
 const BOT_OR_TEAM_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const MAX_TEAM_MESSAGES_PER_TEAM = 200;
-const STORE_FILE_NAME = "bots-and-teams.json";
 
 export function normalizeBotOrTeamId(raw: string, label = "identifier"): string {
 	const trimmed = raw.trim();
@@ -261,6 +297,7 @@ function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
 		thinkingLevel,
 		instructions,
 		profileId,
+		canWrite,
 		createdAt,
 		updatedAt,
 		retired,
@@ -290,6 +327,7 @@ function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
 		thinkingLevel: typeof thinkingLevel === "string" ? thinkingLevel : undefined,
 		instructions: typeof instructions === "string" ? instructions : undefined,
 		profileId: typeof profileId === "string" ? profileId : undefined,
+		canWrite: typeof canWrite === "boolean" ? canWrite : undefined,
 		createdAt,
 		updatedAt,
 		retired: typeof retired === "boolean" ? retired : undefined,
@@ -426,7 +464,7 @@ export class PersistentBotTeamStore {
 
 	constructor(agentDir: string = getAgentDir()) {
 		this.agentDir = agentDir;
-		this.filePath = join(agentDir, STORE_FILE_NAME);
+		this.filePath = botTeamStoreFile(agentDir);
 		this.reload();
 	}
 
@@ -448,8 +486,8 @@ export class PersistentBotTeamStore {
 	}
 
 	private save(): void {
-		mkdirSync(this.agentDir, { recursive: true });
-		const tempPath = join(this.agentDir, `bots-and-teams.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
+		mkdirSync(dirname(this.filePath), { recursive: true });
+		const tempPath = join(dirname(this.filePath), `store.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
 		const data = {
 			version: 1,
 			bots: Array.from(this.bots.values()),
@@ -492,7 +530,7 @@ export class PersistentBotTeamStore {
 		if (!isRecordObject(parsed)) {
 			// The next save would replace an unreadable store with an empty one and destroy every bot and team:
 			// keep the unreadable file beside the store before continuing.
-			renameSync(this.filePath, join(this.agentDir, `bots-and-teams.corrupt-${Date.now()}.json`));
+			renameSync(this.filePath, join(dirname(this.filePath), `store.corrupt-${Date.now()}.json`));
 			return;
 		}
 
@@ -564,6 +602,7 @@ export class PersistentBotTeamStore {
 			instructions:
 				input.instructions !== undefined ? input.instructions.trim() || undefined : existing?.instructions,
 			profileId: input.profileId !== undefined ? input.profileId.trim() || undefined : existing?.profileId,
+			canWrite: input.canWrite ?? existing?.canWrite,
 			createdAt: existing?.createdAt ?? now,
 			updatedAt: now,
 			retired: input.retired ?? existing?.retired ?? false,
@@ -724,6 +763,11 @@ export class PersistentBotTeamStore {
 
 	appendTeamMessage(message: PersistentTeamMessage): void {
 		this.reload();
+		this.recordTeamMessage(message);
+	}
+
+	/** Adds a message to the loaded state and saves. The caller has re-read the file: re-reading here would reset what it is iterating. */
+	private recordTeamMessage(message: PersistentTeamMessage): void {
 		const teamId = normalizeBotOrTeamId(message.teamId, "teamId");
 		const messages = this.teamMessages.get(teamId) ?? [];
 		messages.push(message);
@@ -815,7 +859,7 @@ export class PersistentBotTeamStore {
 		const refSuffix = input.transcriptRef ? ` (${input.transcriptRef})` : "";
 		appendBoundedFile(botFile, `- [${iso}] ${oneLineSummary}${refSuffix}`, 80);
 
-		for (const team of this.teams.values()) {
+		for (const team of [...this.teams.values()]) {
 			if (team.memberAgentIds.includes(normId)) {
 				const teamMsg: PersistentTeamMessage = {
 					messageId: `team-msg-${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
@@ -826,7 +870,7 @@ export class PersistentBotTeamStore {
 					targetAgentIds: [],
 					deliveries: [],
 				};
-				this.appendTeamMessage(teamMsg);
+				this.recordTeamMessage(teamMsg);
 				this.ensureTeamMemoryFile(team.teamId);
 				const teamFile = this.getTeamMemoryFilePath(team.teamId);
 				appendBoundedFile(teamFile, `- [${iso}] **${normId}**: ${oneLineSummary}`, 80);
@@ -884,8 +928,8 @@ export class PersistentBotTeamStore {
 		const recent5TeamMsgs = allRecentTeamMessages.slice(-5);
 
 		const lines: string[] = [
-			"### UNIFIED MEMORY & TEAM BLACKBOARD",
-			`You are persistent bot "${normId}". You have persistent memory files you can read and update.`,
+			BOT_MEMORY_BLOCK_HEADER,
+			`You are persistent bot "${normId}". You have persistent memory files you can read; the host appends a line to them from each report you finish.`,
 			`- Bot memory file: ${botMemoryPath}`,
 		];
 
@@ -922,7 +966,7 @@ export class PersistentBotTeamStore {
 		}
 
 		lines.push(
-			"\nYou can inspect and edit your memory blackboard and your team blackboard files directly to record findings and coordinate. You can also use `zoom` to inspect root <chat> message IDs if needed.",
+			"\nRead your memory blackboard and your team blackboards for continuity; they are outside your workspace, so you cannot edit them. Put what should be remembered in your final report. You can also use `zoom` to inspect root <chat> message IDs if needed.",
 		);
 
 		return {

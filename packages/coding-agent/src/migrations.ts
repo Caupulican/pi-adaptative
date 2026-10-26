@@ -19,6 +19,7 @@ import {
 import { dirname, join } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getBinDir } from "./config.ts";
 import {
+	botTeamStoreFile,
 	configBackupsDir,
 	directoryProfilesDir,
 	extensionStateDir,
@@ -588,6 +589,9 @@ export function migrateAgentDirLayout(agentDir: string): void {
 	// legacy-layout/ on every start and leave the live store empty.
 	try {
 		migrateLegacyAgentFile(agentDir, "certificates.json", steeringCertificatesFile(agentDir));
+	} catch {}
+	try {
+		migrateLegacyAgentFile(agentDir, "bots-and-teams.json", botTeamStoreFile(agentDir));
 	} catch {}
 	for (const [legacyName, canonicalDir] of [
 		["follow-ups", ownerFollowUpsDir(agentDir)],

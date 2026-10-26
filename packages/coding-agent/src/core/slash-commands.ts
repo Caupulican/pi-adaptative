@@ -81,7 +81,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		name: "bot",
 		duringWork: "local",
 		description:
-			"Manage and message persistent bots directly (/bot [list|new <id> [model] [role]|open <id>|msg <id> <text>|stop <id>|retire <id>])",
+			"Manage and message persistent bots directly (/bot [list|new <id> [--write] [model] [role]|open <id>|msg <id> <text>|stop <id>|retire <id>])",
 	},
 	{
 		name: "bots",
