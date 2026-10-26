@@ -145,6 +145,7 @@ import * as signalLifecycle from "./signal-lifecycle.ts";
 import * as startupChecks from "./startup-checks.ts";
 import { terminalCapabilityOverridesFromSettings } from "./terminal-capability-settings.ts";
 import * as usageCommands from "./usage-commands.ts";
+import { handleVerificationCommand } from "./verification-commands.ts";
 import { handleVerifyCommand } from "./verify-commands.ts";
 
 const TUI_HISTORY_RELOAD_CHUNK_SIZE = 20;
@@ -1650,6 +1651,11 @@ export class InteractiveMode {
 			if (text === "/load" || text.startsWith("/load ")) {
 				this.editor.setText("");
 				await handleLoadCommand(this.loadHost(), text);
+				return;
+			}
+			if (text === "/verification" || text.startsWith("/verification ")) {
+				this.editor.setText("");
+				await handleVerificationCommand(this.verificationHost(), text);
 				return;
 			}
 			if (text === "/estop" || text.startsWith("/estop ")) {
@@ -3470,6 +3476,15 @@ export class InteractiveMode {
 		return {
 			getLoadView: () => this.session.getProviderLoadView(),
 			setEmergencyStop: (engaged: boolean, reason?: string) => this.session.setEmergencyStop(engaged, reason),
+			...this.operatorCommandOutput(),
+		};
+	}
+
+	private verificationHost() {
+		return {
+			listVerificationFindings: () => this.session.listVerificationFindings(),
+			waiveVerificationFindings: (ids: readonly string[] | "all", note: string) =>
+				this.session.waiveVerificationFindings(ids, note),
 			...this.operatorCommandOutput(),
 		};
 	}

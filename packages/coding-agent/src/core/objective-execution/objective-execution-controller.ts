@@ -1172,7 +1172,12 @@ export class ObjectiveExecutionController {
 				? this.verificationRecoveryFingerprint(objectiveId, await this.deps.runtime.reconcileObjective(objectiveId))
 				: undefined;
 			if (recoveryFingerprint && this.completedVerificationRecoveries.get(objectiveId) === recoveryFingerprint) {
-				const reasonCodes = ["same_lane_verification_recovery_exhausted", ...route.reason_codes];
+				// The model cannot clear this: the owner can, with /verification (list, or waive with a reason).
+				const reasonCodes = [
+					"same_lane_verification_recovery_exhausted",
+					"owner_exit:/verification",
+					...route.reason_codes,
+				];
 				return {
 					status: "blocked",
 					reasonCodes,

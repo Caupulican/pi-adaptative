@@ -44,6 +44,7 @@ import {
 	judgeAccountClaims,
 	patchPaths,
 } from "./completion-account.ts";
+import { concretizeOutcomeFinding } from "./completion-evidence-gaps.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import {
 	directiveFromPostflight,
@@ -52,7 +53,6 @@ import {
 	isSameLaneVerificationDirective,
 	SAME_LANE_VERIFICATION_REASON_CODE,
 	type SystemOneControlDirective,
-	sameLaneVerificationDirective,
 } from "./control-directive.ts";
 import type { CanonicalHydration, ExecutionStore } from "./execution-state.ts";
 import type { IntegrityHookCoordinator } from "./integrity-hooks.ts";
@@ -77,7 +77,11 @@ import {
 } from "./semantic-evaluation-ledger.ts";
 import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
 import { CONSULT_GROUNDING_QUESTIONS, RESERVED_DECISION_KINDS, unsettledQuestionId } from "./unsettled-ladder.ts";
-import { VerificationCoordinator, type VerificationHost } from "./verification-coordinator.ts";
+import {
+	COMPLETION_FINDING_SOURCE,
+	VerificationCoordinator,
+	type VerificationHost,
+} from "./verification-coordinator.ts";
 import { hasRepositoryOutcome, type WorkDiff } from "./work-diff.ts";
 
 /** The four questions that only mean something when written rules were supplied. */
@@ -1472,7 +1476,11 @@ export class SystemOneController {
 		options?.signal?.throwIfAborted();
 		this.syncCanonicalTruth();
 		this.assertStageCurrent(scope);
-		const pendingVerification = this.verification.status().obligations;
+		// A completion finding is answered by judging completion again on the evidence now recorded, so only the
+		// other findings hold it back.
+		const pendingVerification = this.verification
+			.status()
+			.obligations.filter((finding) => finding.source !== COMPLETION_FINDING_SOURCE);
 		this.assertStageCurrent(scope);
 		if (pendingVerification.length)
 			return {
@@ -1631,16 +1639,29 @@ export class SystemOneController {
 
 		if (unavailable.length > 0 || accountAdvisories.length > 0)
 			finalVerdict.advisories = [...unavailable, ...accountAdvisories, ...(finalVerdict.advisories ?? [])];
+		// Completion asks about the outcomes as a whole, so its finding names none: name them here.
+		const outcomeRows = this.projector.outcomeEvidence(snapshot);
+		finalVerdict.failed_gates = finalVerdict.failed_gates.map((finding) =>
+			concretizeOutcomeFinding(finding, outcomeRows),
+		);
 		// A claim in the model's own account is answered with better evidence, not with a verification obligation
 		// that holds every other operation until it is resolved.
 		const verifiable = finalVerdict.failed_gates.filter((finding) => !finding.id.startsWith("account_"));
-		if (finalVerdict.verdict === "verify_more" && verifiable.length > 0) {
-			this.noteControlDirective(
-				sameLaneVerificationDirective(
-					verifiable.map((finding) => `${finding.id}: ${finding.reason}. ${finding.required_next_proof}`),
-				),
-			);
-		}
+		// The findings this evaluation raised are the open completion findings. Stale ones are closed only when both
+		// questions were judged: an unavailable evaluator says nothing about a finding it did not re-judge.
+		this.verification.syncCompletionFindings(
+			finalVerdict.verdict === "verify_more"
+				? verifiable.map((finding) =>
+						// The probability changes between evaluations of the same finding; the finding does not.
+						`${finding.id}: ${finding.reason.replace(/\s*\(System One: [^)]*\)/gu, "")} ${finding.required_next_proof}`.slice(
+							0,
+							3_900,
+						),
+					)
+				: [],
+			stages.get("completion")?.evaluationId ?? "completion-evaluation",
+			stages.has("completion") && stages.has("completion_challenge"),
+		);
 		this.assertStageCurrent(scope);
 		let interruption: SystemOneStageInterruptedError | undefined;
 		for (const stage of stages.values()) {

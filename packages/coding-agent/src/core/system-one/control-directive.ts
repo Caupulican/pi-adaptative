@@ -24,13 +24,16 @@ export interface SystemOneControlDirective {
 
 export const SAME_LANE_VERIFICATION_REASON_CODE = "same_lane_verification_required";
 
+/** A finding that names the outcomes it concerns must reach the root whole: it is what the next proof is chosen from. */
+const MAX_FINDING_REASON_LENGTH = 1500;
+
 export function sameLaneVerificationDirective(reasonCodes: readonly string[]): SystemOneControlDirective {
 	return {
 		source: "postflight",
 		objectiveRoute: "deterministic_test",
 		reasonCodes: [
 			SAME_LANE_VERIFICATION_REASON_CODE,
-			...reasonCodes.slice(0, 12).map((reason) => reason.slice(0, 500)),
+			...reasonCodes.slice(0, 12).map((reason) => reason.slice(0, MAX_FINDING_REASON_LENGTH)),
 		],
 	};
 }

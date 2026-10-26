@@ -99,6 +99,12 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		duringWork: "local",
 		description: "Alias for /team",
 	},
+	{
+		name: "verification",
+		duringWork: "local",
+		description:
+			"List open verification findings, or waive them with a reason when only you can answer them (/verification [list|waive <id|all> <reason>])",
+	},
 	{ name: "model", description: "Select model (opens selector UI)" },
 	{ name: "thinking", description: "Select thinking level (/thinking [level])" },
 	{ name: "fast", description: "Select provider processing tier (/fast [on|off|priority|ultrafast|status])" },

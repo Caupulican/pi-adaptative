@@ -3071,6 +3071,19 @@ export class AgentSession {
 		return this._edgeIntent.getEdgeGrants();
 	}
 
+	/** The open semantic verification findings, for the owner's `/verification` command. */
+	listVerificationFindings(): readonly SemanticVerificationObligationView[] {
+		return this._systemOneController?.verification.status().obligations ?? [];
+	}
+
+	/** The owner's decision to close findings (ids, or every one) without proof; no tool reaches it. */
+	waiveVerificationFindings(
+		ids: readonly string[] | "all",
+		note: string,
+	): readonly SemanticVerificationObligationView[] {
+		return this._systemOneController?.verification.waive(ids, note) ?? [];
+	}
+
 	/**
 	 * AGENTS.md and standing user-rule lines for one System One classification.
 	 */

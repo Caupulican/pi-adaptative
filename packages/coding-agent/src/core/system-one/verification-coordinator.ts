@@ -10,7 +10,14 @@ import {
 	sameLaneVerificationDirective,
 } from "./control-directive.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./tool-names.ts";
-import { MIN_RESOLUTION_CONFIDENCE, SemanticVerificationObligationTracker } from "./verification-obligations.ts";
+import {
+	MIN_RESOLUTION_CONFIDENCE,
+	SemanticVerificationObligationTracker,
+	type SemanticVerificationObligationView,
+} from "./verification-obligations.ts";
+
+/** The source of findings a completion evaluation opens: a later completion evaluation of the same questions replaces them. */
+export const COMPLETION_FINDING_SOURCE = "completion";
 
 type StoragePort = ConstructorParameters<typeof SemanticVerificationObligationTracker>[0];
 export type VerificationResolutionRequest = Parameters<SemanticVerificationObligationTracker["prepareResolution"]>[0];
@@ -61,6 +68,17 @@ function isVerificationRecoveryOperation(input: { tool: string; args: unknown; r
 		if (["get", "add_evidence", "satisfy_requirement", "reopen_requirement"].includes(String(action))) return true;
 	}
 	return isProvablyObservationalToolCall(input.tool, input.args, input.readOnly);
+}
+
+/**
+ * Re-running completion is how a completion finding is answered: it judges the same questions on the evidence now recorded
+ * and replaces the findings it opened. Holding it behind the finding it re-judges would make the finding unanswerable.
+ */
+function isCompletionReevaluation(input: { tool: string; args: unknown }): boolean {
+	if (!input.args || typeof input.args !== "object") return false;
+	if (input.tool === "goal") return "action" in input.args && input.args.action === "complete";
+	if (input.tool === GOAL_LIFECYCLE_TOOL_NAMES[2]) return "status" in input.args && input.args.status === "complete";
+	return false;
 }
 
 function verificationResolutionQuestions(disposition: VerificationResolutionRequest["disposition"]): QuestionPack {
@@ -226,6 +244,44 @@ export class VerificationCoordinator {
 		}
 	}
 
+	/**
+	 * Makes the open completion findings exactly `reasons`: findings no longer raised are closed as superseded by `reference`
+	 * (only when `closeStale`, which a caller sets only after every question was actually judged), and new ones are opened.
+	 */
+	syncCompletionFindings(reasons: readonly string[], reference: string, closeStale: boolean): void {
+		const wanted = new Set(reasons);
+		const candidate = this.host.getCandidate();
+		if (closeStale)
+			this.tracker.close({
+				kind: "superseded",
+				candidateId: candidate.id,
+				reference,
+				select: (item) => item.source === COMPLETION_FINDING_SOURCE && !wanted.has(item.reason),
+			});
+		const open = new Set(
+			this.tracker
+				.active()
+				.filter((item) => item.source === COMPLETION_FINDING_SOURCE)
+				.map((item) => item.reason),
+		);
+		this.require(
+			COMPLETION_FINDING_SOURCE,
+			reasons.filter((reason) => !open.has(reason)),
+		);
+	}
+
+	/** The owner's decision to close findings (`ids`, or every active one) without proof. Reaches the model through no tool. */
+	waive(ids: readonly string[] | "all", note: string): readonly SemanticVerificationObligationView[] {
+		const wanted = ids === "all" ? undefined : new Set(ids);
+		return this.tracker.close({
+			kind: "waived",
+			candidateId: this.host.getCandidate().id,
+			reference: `owner-waiver-${randomUUID()}`,
+			note,
+			select: (item) => wanted === undefined || wanted.has(item.id),
+		});
+	}
+
 	directive(): SystemOneControlDirective | undefined {
 		const active = this.tracker.active();
 		if (!active.length) {
@@ -271,6 +327,7 @@ export class VerificationCoordinator {
 		if (!active.length) return;
 		// These calls gather evidence or enter the canonical completion/obligation gate themselves.
 		if (isVerificationRecoveryOperation(input)) return;
+		if (active.every((item) => item.source === COMPLETION_FINDING_SOURCE) && isCompletionReevaluation(input)) return;
 		if (input.tool === SYSTEM_ONE_TOOL_NAME && input.args && typeof input.args === "object") {
 			const action = "action" in input.args ? input.args.action : undefined;
 			// Diagnostics and owner advisory dispositions cannot discharge mandatory findings.

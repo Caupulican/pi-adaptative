@@ -19,6 +19,12 @@ export const MIN_RESOLUTION_CONFIDENCE = 0.95;
 
 export type VerificationReceiptRole = "reproduction" | "repair" | "recheck";
 export type VerificationDisposition = "rejected" | "repaired";
+/**
+ * How an obligation was closed. `rejected` and `repaired` rest on receipts and a decisive judgment; `superseded` means a later
+ * evaluation of the same question replaced the finding, and `waived` is the owner's own decision. Neither of the last two is proof.
+ */
+export type VerificationResolutionKind = VerificationDisposition | "superseded" | "waived";
+const MAX_RESOLUTION_NOTE_LENGTH = 500;
 
 export type SemanticVerificationObligation = {
 	id: string;
@@ -31,11 +37,12 @@ export type SemanticVerificationObligation = {
 	sequence: number;
 	status: "active" | "resolved";
 	resolution?: {
-		disposition: VerificationDisposition;
+		disposition: VerificationResolutionKind;
 		candidateId: string;
 		evidenceIds: string[];
 		judgmentId: string;
 		resolvedAt: string;
+		note?: string;
 	};
 };
 
@@ -293,9 +300,13 @@ function readObligation(candidate: unknown): SemanticVerificationObligation | un
 		return { id, source, reason, receiverId, candidateKind, candidateId, scope, sequence, status };
 	}
 	if (!isRecord(resolution)) return undefined;
-	const { disposition, candidateId: resolvedCandidateId, evidenceIds, judgmentId, resolvedAt } = resolution;
+	const { disposition, candidateId: resolvedCandidateId, evidenceIds, judgmentId, resolvedAt, note } = resolution;
 	if (
-		(disposition !== "rejected" && disposition !== "repaired") ||
+		(disposition !== "rejected" &&
+			disposition !== "repaired" &&
+			disposition !== "superseded" &&
+			disposition !== "waived") ||
+		(note !== undefined && !isBoundedText(note, MAX_RESOLUTION_NOTE_LENGTH)) ||
 		!isBoundedText(resolvedCandidateId, MAX_ID_LENGTH) ||
 		!Array.isArray(evidenceIds) ||
 		evidenceIds.length < 1 ||
@@ -323,6 +334,7 @@ function readObligation(candidate: unknown): SemanticVerificationObligation | un
 			evidenceIds: [...evidenceIds],
 			judgmentId,
 			resolvedAt,
+			...(note !== undefined ? { note } : {}),
 		},
 	};
 }
@@ -677,6 +689,54 @@ export class SemanticVerificationObligationTracker {
 		const receipts = [...snapshot.receipts, receipt];
 		if (receipts.length > MAX_RECEIPTS) receipts.splice(0, receipts.length - MAX_RECEIPTS);
 		this.save(branchKey, { ...snapshot, receipts }, true);
+	}
+
+	/**
+	 * Closes active obligations by a decision that is not receipt proof: a later evaluation of the same question replaced them
+	 * (`superseded`), or the owner waived them (`waived`). The closing is recorded on each obligation with its reference.
+	 */
+	close(input: {
+		kind: "superseded" | "waived";
+		candidateId: string;
+		reference: string;
+		note?: string;
+		select: (obligation: SemanticVerificationObligationView) => boolean;
+	}): readonly SemanticVerificationObligationView[] {
+		if (!isBoundedText(input.candidateId, MAX_ID_LENGTH) || !isBoundedText(input.reference, MAX_ID_LENGTH))
+			throw new Error("Closing a verification obligation requires a bounded candidate and reference.");
+		if (input.note !== undefined && !isBoundedText(input.note, MAX_RESOLUTION_NOTE_LENGTH))
+			throw new Error("A verification closing note must be bounded text.");
+		const { branchKey, snapshot } = this.load();
+		const closed: SemanticVerificationObligation[] = [];
+		const obligations = snapshot.obligations.map((item) => {
+			if (item.status !== "active" || !input.select(cloneObligation(item))) return item;
+			const updated: SemanticVerificationObligation = {
+				...item,
+				status: "resolved",
+				resolution: {
+					disposition: input.kind,
+					candidateId: input.candidateId,
+					evidenceIds: [input.reference],
+					judgmentId: input.reference,
+					resolvedAt: this.now(),
+					...(input.note !== undefined ? { note: input.note } : {}),
+				},
+			};
+			closed.push(updated);
+			return updated;
+		});
+		if (closed.length === 0) return [];
+		const closedIds = new Set(closed.map((item) => item.id));
+		this.save(
+			branchKey,
+			{
+				...snapshot,
+				obligations,
+				judgedTokens: snapshot.judgedTokens.filter((item) => !closedIds.has(item.obligationId)),
+			},
+			true,
+		);
+		return closed.map(cloneObligation);
 	}
 
 	prepareResolution(input: PrepareVerificationResolutionInput): PreparedVerificationResolution {

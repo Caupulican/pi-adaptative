@@ -1,3 +1,4 @@
+import type { OutcomeEvidenceRow } from "./completion-evidence-gaps.ts";
 import type { ExecutionState, ToolImpact } from "./types.ts";
 import { hasRepositoryOutcome, type WorkDiff } from "./work-diff.ts";
 
@@ -338,6 +339,37 @@ export class StateProjector {
 	}
 
 	/**
+	 * Each required outcome with what shows it: the harness's own checks first, then the evidence the criterion cites.
+	 * This, not a repository diff, is what completion is judged on.
+	 */
+	outcomeEvidence(state: ExecutionState): OutcomeEvidenceRow[] {
+		const observationsById = new Map(state.observations.map((observation) => [observation.id, observation]));
+		const observationView = (id: string) => {
+			const observation = observationsById.get(id) ?? observationsById.get(`OBS-${id}`);
+			return observation
+				? { id: observation.id, text: this.redactText(observation.text), trust: observation.source.trust }
+				: undefined;
+		};
+		// Each required outcome with what shows it: the harness's own checks first, then the evidence
+		// the criterion cites. This, not a repository diff, is what completion is judged on.
+		return state.objective.acceptance_criteria.map((criterion) => {
+			const checks = state.verification.filter((run) => run.covers_acceptance_ids?.includes(criterion.id));
+			return {
+				criterion_id: criterion.id,
+				text: this.redactText(criterion.text),
+				required: criterion.required,
+				status: criterion.status,
+				checks: checks.map((run) => ({
+					command: run.command ? this.redactText(run.command) : (run.command ?? null),
+					status: run.status,
+					observed: (run.observation_ids ?? []).map(observationView).filter((view) => view !== undefined),
+				})),
+				evidence: criterion.evidence_ids.map(observationView).filter((view) => view !== undefined),
+			};
+		});
+	}
+
+	/**
 	 * Cold completion projection: built cold from authoritative state.
 	 * R-048: Built cold from source evidence, diff, acceptance matrix, and verification results.
 	 * R-049: The worker final summary MUST NOT be the primary state.
@@ -394,30 +426,7 @@ export class StateProjector {
 				severity: r.severity,
 			}));
 
-		const observationsById = new Map(state.observations.map((observation) => [observation.id, observation]));
-		const observationView = (id: string) => {
-			const observation = observationsById.get(id) ?? observationsById.get(`OBS-${id}`);
-			return observation
-				? { id: observation.id, text: this.redactText(observation.text), trust: observation.source.trust }
-				: undefined;
-		};
-		// Each required outcome with what shows it: the harness's own checks first, then the evidence
-		// the criterion cites. This, not a repository diff, is what completion is judged on.
-		const outcomeEvidence = state.objective.acceptance_criteria.map((criterion) => {
-			const checks = state.verification.filter((run) => run.covers_acceptance_ids?.includes(criterion.id));
-			return {
-				criterion_id: criterion.id,
-				text: this.redactText(criterion.text),
-				required: criterion.required,
-				status: criterion.status,
-				checks: checks.map((run) => ({
-					command: run.command ? this.redactText(run.command) : (run.command ?? null),
-					status: run.status,
-					observed: (run.observation_ids ?? []).map(observationView).filter((view) => view !== undefined),
-				})),
-				evidence: criterion.evidence_ids.map(observationView).filter((view) => view !== undefined),
-			};
-		});
+		const outcomeEvidence = this.outcomeEvidence(state);
 
 		return {
 			objective: {

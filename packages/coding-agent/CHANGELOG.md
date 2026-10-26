@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- A completion finding no longer deadlocks the session. The outcome findings name each required outcome the evidence does not show and what would show it; a later completion evaluation replaces the findings it re-judged (and `goal complete` is admitted while only completion findings are open); and the owner can close findings with `/verification waive <id|all> <reason>`, recorded as waived on the finding. A blocked verification loop reports the owner exit.
 - A bot's write grant covers only its own and its teams' blackboard files, not the whole agent memory directory, and operator follow-ups no longer repeat the memory block in every message.
 - The bots-and-teams store keeps an unreadable file as `bots-and-teams.corrupt-<time>.json` instead of replacing it with an empty store, and every mutation re-reads the file so concurrent sessions do not overwrite each other.
 - An open bot or team chat refreshes when a bot's lane starts, finishes or fails, not only when the store is saved.
