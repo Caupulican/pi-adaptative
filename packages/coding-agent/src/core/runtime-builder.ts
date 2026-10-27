@@ -1542,11 +1542,11 @@ export class RuntimeBuilder {
 							isExhausted: (model) => this.deps.isModelExhausted(model),
 							getJudge: () => this.deps.getSystemOneController?.(),
 							runCompletion: (options) => this.deps.runIsolatedCompletion(options),
-							captureVerificationFence: () =>
-								this.deps.getSystemOneController?.()?.verification.captureReviewFence() ??
-								(() => {
-									throw new Error("System One verification is unavailable");
-								}),
+							captureVerificationFence: async () => {
+								const verification = this.deps.getSystemOneController?.()?.verification;
+								if (!verification) throw new Error("System One verification is unavailable");
+								return verification.captureReviewFence();
+							},
 							requestVerification: (findings) =>
 								this.deps.getSystemOneController?.()?.verification.require(
 									"peer_review",

@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Fixed
+
+- A peer review is no longer discarded whole when one quoted piece of evidence is not found in the supplied snapshot. A quote is compared without line-number prefixes and layout, a finding whose quote is still absent is dropped and disclosed in the review's limitations and `droppedFindings` (it opens no obligation), and a review whose findings all drop reports insufficient evidence, never a clean result. The `evidence` description now says the reviewer cannot read files, so file:line pointers are not evidence; a pointer-only request was what failed four of five reviews in a measured session.
+- A peer review is no longer cut off by a fixed 4000-token cap that its own reasoning tokens shared; it uses the reviewer model's output limit, as a worker turn does. Its candidate fence is checked asynchronously, not with a synchronous capture on each check.
+- A worker whose last reply is empty (no text, no tool call; a thinking-only reply counts) is asked once for its report, even when it has no receipts or changes to report, and a run that still ends empty is recorded as `empty_output` instead of "not valid structured JSON".
+- Released changelog sections are checked against their tags (`scripts/check-changelog-immutable.mjs`, part of `npm run check`).
+
 ## [0.104.14] - 2026-10-27
 
 ### Fixed

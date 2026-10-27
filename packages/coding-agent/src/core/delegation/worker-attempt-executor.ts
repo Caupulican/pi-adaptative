@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, AssistantMessage, Context, Message, Model, Usage } from "@caupulican/pi-ai";
 import { compact } from "../../kernel/compaction/compaction.ts";
 import type { AgentContextPlan, AgentContextPlanRequest } from "../../kernel/index.ts";
+import type { FollowUpState } from "../../kernel/loop-config.ts";
 import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
 import {
 	classifyFailure,
@@ -48,6 +49,7 @@ import {
 	buildNeedsMoreRequest,
 	buildReportRequest,
 	createSubmitReportTool,
+	EMPTY_REPLY_REQUEST,
 	judgeSubmittedReport,
 	MAX_NEEDS_MORE_ROUNDS,
 	MAX_REPORT_REQUESTS,
@@ -481,6 +483,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	};
 	const submitReportTool = createSubmitReportTool(reportCapture);
 	let reportRequests = 0;
+	let emptyReplyRequests = 0;
 	let needsMoreRounds = 0;
 	const judgeReport = (submitted: SubmittedWorkerReport): WorkerHostVerdict =>
 		judgeSubmittedReport({
@@ -505,7 +508,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	 * a worker that has not submitted is asked once, and once more if it answered in text. Anything else
 	 * lets the run end: the host never forces a report and never fails a worker for not giving one.
 	 */
-	const reportFollowUp = (state: { providerTurns: number; providerTurnLimit: number }): AgentMessage[] => {
+	const reportFollowUp = (state: FollowUpState): AgentMessage[] => {
 		const budgetLeft = state.providerTurnLimit <= 0 || state.providerTurns < state.providerTurnLimit;
 		const message = (content: string): AgentMessage[] => [{ role: "user", content, timestamp: Date.now() }];
 		const submitted = reportCapture.submitted;
@@ -518,6 +521,12 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				return message(buildNeedsMoreRequest(hostVerdict));
 			}
 			return [];
+		}
+		// A reply with nothing in it is a missing report, not a decision to end: ask once for what the worker found,
+		// whether or not it has receipts or changes to report (a read-only audit has neither).
+		if (state.lastReplyEmpty && emptyReplyRequests < 1 && budgetLeft) {
+			emptyReplyRequests++;
+			return message(EMPTY_REPLY_REQUEST);
 		}
 		if (
 			reportRequests >= MAX_REPORT_REQUESTS ||

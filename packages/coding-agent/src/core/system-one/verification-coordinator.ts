@@ -307,11 +307,11 @@ export class VerificationCoordinator {
 		};
 	}
 
-	captureReviewFence(): () => void {
-		const candidate = this.host.getCandidate();
+	async captureReviewFence(): Promise<() => Promise<void>> {
+		const candidate = await this.host.captureCandidate();
 		const fence = this.host.captureFence();
-		return () => {
-			if (!fence() || this.host.getCandidate().id !== candidate.id)
+		return async () => {
+			if (!fence() || (await this.host.captureCandidate()).id !== candidate.id)
 				throw new Error("Peer review candidate or branch changed; review is stale and grants no validation.");
 		};
 	}

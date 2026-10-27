@@ -43,6 +43,13 @@ export const SUBMIT_REPORT_TOOL_NAME = "submit_report";
 
 /** Report requests one worker run may receive: the first, and one repair when it did not submit. */
 export const MAX_REPORT_REQUESTS = 2;
+
+/** The one request the host sends when a worker's last reply had nothing in it. */
+export const EMPTY_REPLY_REQUEST = [
+	"REPORT REQUEST",
+	"Your last reply was empty: it had no text and no tool call, so the host has nothing to hand to the lead.",
+	"Reply now with what you found and did, including anything unfinished or blocked. If you cannot continue, say what stopped you.",
+].join("\n");
 /** Follow-up turns the host spends on a `needs_more` verdict: one. */
 export const MAX_NEEDS_MORE_ROUNDS = 1;
 

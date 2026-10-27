@@ -468,6 +468,8 @@ export interface FollowUpState {
 	readonly providerTurns: number;
 	/** The run's provider-turn limit; 0 or less means unlimited. */
 	readonly providerTurnLimit: number;
+	/** The run is stopping on an assistant reply with no text and no tool call (a thinking-only reply counts): it said nothing. */
+	readonly lastReplyEmpty: boolean;
 }
 
 export interface AgentLoopConfig extends SimpleStreamOptions {

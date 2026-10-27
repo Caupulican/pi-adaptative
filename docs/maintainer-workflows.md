@@ -48,7 +48,7 @@ Sections under `## [Unreleased]`: `### Breaking Changes` (API changes requiring 
 Rules:
 
 - All new entries go under `## [Unreleased]`. Read the full section first and append to existing subsections; never duplicate them.
-- Released version sections (e.g. `## [0.12.2]`) are immutable; never modify them.
+- Released version sections (e.g. `## [0.12.2]`) are immutable; never modify them. `scripts/check-changelog-immutable.mjs` (part of `npm run check`) compares each released section from v0.104.14 on with its tag and skips, saying so, when the tag is not available locally.
 
 Attribution:
 

@@ -13,7 +13,7 @@
 		"clean": "npm run clean --workspaces",
 		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../coding-agent && npm run build",
 		"check": "npm run check:static",
-		"check:static": "biome check --error-on-warnings . && node scripts/check-pinned-deps.mjs && node scripts/check-ts-relative-imports.mjs && node scripts/check-coordinator-boundaries.mjs && node scripts/check-kernel-layer.mjs && node scripts/check-production-clones.mjs && node scripts/check-contract-doctrine.mjs && node scripts/architecture-map.mjs --check && node scripts/run-tsc.mjs --noEmit",
+		"check:static": "biome check --error-on-warnings . && node scripts/check-pinned-deps.mjs && node scripts/check-ts-relative-imports.mjs && node scripts/check-coordinator-boundaries.mjs && node scripts/check-kernel-layer.mjs && node scripts/check-production-clones.mjs && node scripts/check-contract-doctrine.mjs && node scripts/check-changelog-immutable.mjs && node scripts/architecture-map.mjs --check && node scripts/run-tsc.mjs --noEmit",
 		"check:harness-journeys": "npm exec --workspace packages/coding-agent -- vitest run test/harness-interactions.test.ts",
 		"check:sandbox-fork-install": "node scripts/check-sandbox-fork-install.mjs",
 		"format": "biome format --write .",

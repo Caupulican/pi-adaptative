@@ -664,6 +664,8 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		// reported as invalid JSON). Name the real cause so the parent re-runs with a tighter ask
 		// instead of blaming the worker's output format.
 		const truncated = completion.stopReason === "length";
+		// A run that ends with no text at all is neither a format failure nor a truncation: the provider returned nothing.
+		const emptyOutput = !truncated && completion.text.trim().length === 0;
 		const unparseableEvidence =
 			completion.text.trim().length > 0
 				? buildWorkerEvidenceBundle({
@@ -679,7 +681,9 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				status: "failed",
 				summary: truncated
 					? "Worker output was cut off at the provider output-token limit (stop reason 'length') before a valid claim envelope closed."
-					: "Worker output was not valid structured JSON.",
+					: emptyOutput
+						? `Worker ended with an empty reply (stop reason '${completion.stopReason}') and, when asked once more, still reported nothing; its tool work is in its transcript.`
+						: "Worker output was not valid structured JSON.",
 				...(changedFilesOverflowed
 					? {
 							blockers: [
@@ -690,7 +694,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				...(unparseableEvidence ? { evidence: unparseableEvidence } : {}),
 			},
 			laneStatus: "failed",
-			reasonCode: truncated ? "output_truncated" : "unparseable_output",
+			reasonCode: truncated ? "output_truncated" : emptyOutput ? "empty_output" : "unparseable_output",
 			costUsd,
 		});
 	}

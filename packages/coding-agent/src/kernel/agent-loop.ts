@@ -837,8 +837,11 @@ async function runLoop(
 		// Agent would stop here. Check for follow-up messages (never for an aborted run, see above).
 		if (signal?.aborted) break;
 		const followUpMessages =
-			(await config.getFollowUpMessages?.({ providerTurns: continuationState.providerTurns, providerTurnLimit })) ||
-			[];
+			(await config.getFollowUpMessages?.({
+				providerTurns: continuationState.providerTurns,
+				providerTurnLimit,
+				lastReplyEmpty: endedOnEmptyReply(newMessages),
+			})) || [];
 		if (followUpMessages.length > 0) {
 			// Set as pending so inner loop processes them
 			pendingMessages = followUpMessages;
@@ -850,6 +853,15 @@ async function runLoop(
 	}
 
 	await emit({ type: "agent_end", messages: newMessages });
+}
+
+/** Whether the run's last message is an assistant reply that carries no visible text and no tool call. */
+function endedOnEmptyReply(messages: readonly AgentMessage[]): boolean {
+	const last = messages.at(-1);
+	if (last?.role !== "assistant") return false;
+	return !last.content.some(
+		(block) => block.type === "toolCall" || (block.type === "text" && block.text.trim().length > 0),
+	);
 }
 
 const RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT = [
