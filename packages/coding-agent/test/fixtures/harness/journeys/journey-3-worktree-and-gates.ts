@@ -46,6 +46,7 @@ import {
 	dynamicCalls,
 	type E0Counters,
 	evidenceIdsOf,
+	evidenceKeyOf,
 	expectOwnerWords,
 	isGateCommandRefusal,
 	isStaleRefusal,
@@ -2815,7 +2816,11 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			checkCompletionItems(
 				{
 					...linkedRequest,
-					state: { ...linkedState, [`e${index}`]: "ev-00000000: an evidence line the goal never admitted" },
+					state: {
+						...linkedState,
+						[evidenceKeyOf(linkedRequest, index) ?? `e${index}`]:
+							"ev-00000000: an evidence line the goal never admitted",
+					},
 				},
 				native,
 			),

@@ -702,9 +702,19 @@ export function durableGoalEvidenceIds(sessionManager: SessionManager): string[]
 }
 
 /**
- * The unsettled-item family of a completion request carries `sN` statements and `eN` evidence; each `shows_*` question names one
- * such pair. Before any answer: every named pair must be carried, a criterion statement must name the admitted requirement
- * text, and any evidence a statement cites must be an admitted evidence id. Returns how many statements cite admitted evidence.
+ * The evidence key a `shows_*` question of item `index` names. Items whose redacted evidence is identical share one
+ * evidence key, so the payload carries that evidence once; the first such item's key holds it.
+ */
+export function evidenceKeyOf(request: SystemOneDecodedRequest, index: string): string | undefined {
+	const instructions = request.questions[`shows_true_${index}`]?.instructions ?? "";
+	return /`(e\d+)`/.exec(instructions)?.[1];
+}
+
+/**
+ * The unsettled-item family of a completion request carries `sN` statements and `eK` evidence; each `shows_*` question names
+ * one statement and the evidence key that holds its evidence (items with identical evidence share a key). Before any answer:
+ * every named pair must be carried, a criterion statement must name the admitted requirement text, and any evidence a
+ * statement cites must be an admitted evidence id. Returns how many statements cite admitted evidence.
  */
 export function checkCompletionItems(
 	request: SystemOneDecodedRequest,
@@ -716,26 +726,28 @@ export function checkCompletionItems(
 		if (shown === null) continue;
 		const index = shown[1];
 		const instructions = question.instructions ?? "";
-		if (!instructions.includes(`\`s${index}\``) || !instructions.includes(`\`e${index}\``)) {
-			throw new Error(`question ${id} does not name s${index} and e${index} in its instructions`);
+		const evidenceKey = /`(e\d+)`/.exec(instructions)?.[1];
+		if (!instructions.includes(`\`s${index}\``) || evidenceKey === undefined) {
+			throw new Error(`question ${id} does not name s${index} and an evidence key in its instructions`);
 		}
-		if (typeof state[`s${index}`] !== "string" || typeof state[`e${index}`] !== "string") {
-			throw new Error(`question ${id} names s${index} and e${index}, which the decoded state does not carry`);
+		if (typeof state[`s${index}`] !== "string" || typeof state[evidenceKey] !== "string") {
+			throw new Error(`question ${id} names s${index} and ${evidenceKey}, which the decoded state does not carry`);
 		}
 	}
 	let checked = 0;
 	for (const [key, statement] of Object.entries(state)) {
 		if (!/^s\d+$/.test(key) || typeof statement !== "string") continue;
-		const evidence = state[`e${key.slice(1)}`];
+		const evidenceKey = evidenceKeyOf(request, key.slice(1)) ?? `e${key.slice(1)}`;
+		const evidence = state[evidenceKey];
 		if (
 			statement.startsWith(CRITERION_STATEMENT_PREFIX) &&
 			statement !== `${CRITERION_STATEMENT_PREFIX}${native.requirementText}.`
 		)
 			throw new Error(`statement ${key} does not name the native requirement: ${statement}`);
-		if (typeof evidence !== "string") throw new Error(`statement ${key} has no evidence e${key.slice(1)}`);
+		if (typeof evidence !== "string") throw new Error(`statement ${key} has no evidence ${evidenceKey}`);
 		const cited = [...evidence.matchAll(/^(ev-[0-9a-f]+):/gm)].map((match) => match[1] ?? "");
 		if (cited.some((id) => !native.evidenceIds.includes(id))) {
-			throw new Error(`e${key.slice(1)} cites evidence the goal never admitted: ${cited.join(", ")}`);
+			throw new Error(`${evidenceKey} cites evidence the goal never admitted: ${cited.join(", ")}`);
 		}
 		// A statement that cites admitted evidence is linked; a change may cite none.
 		if (cited.length > 0) checked += 1;
