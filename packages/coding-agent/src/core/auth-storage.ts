@@ -307,6 +307,11 @@ export class AuthStorage {
 		this.runtimeOverrides.set(provider, apiKey);
 	}
 
+	/** Effective explicit override, without refreshing credentials or executing key commands. */
+	getRuntimeApiKey(provider: string): string | undefined {
+		return this.runtimeOverrides.get(provider);
+	}
+
 	/**
 	 * Remove a runtime API key override.
 	 */
@@ -895,7 +900,7 @@ export class AuthStorage {
 	 */
 	async getApiKey(providerId: string, options?: { includeFallback?: boolean }): Promise<string | undefined> {
 		// Runtime override takes highest priority
-		const runtimeKey = this.runtimeOverrides.get(providerId);
+		const runtimeKey = this.getRuntimeApiKey(providerId);
 		if (runtimeKey) {
 			return runtimeKey;
 		}

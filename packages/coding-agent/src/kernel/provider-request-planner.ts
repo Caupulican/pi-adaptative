@@ -1,3 +1,4 @@
+import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import { materializeProviderRequest, startMaterializedProviderStream, streamSimple } from "@caupulican/pi-ai/stream";
 import type { Context, Message } from "@caupulican/pi-ai/types";
 import type {
@@ -191,8 +192,9 @@ export async function resolveProviderRequestAuthOptions(
 		| "providerAccountKey"
 		| "getApiKey"
 		| "resolveProviderRequestAuth"
+		| "requestGuard"
 	>,
-): Promise<ResolvedProviderRequestAuth> {
+): Promise<ResolvedProviderRequestAuth & { model: AgentLoopConfig["model"] }> {
 	const resolved = config.resolveProviderRequestAuth
 		? await config.resolveProviderRequestAuth(config.model)
 		: undefined;
@@ -203,17 +205,52 @@ export async function resolveProviderRequestAuthOptions(
 	const headers = resolved?.headers || config.headers ? { ...resolved?.headers, ...config.headers } : undefined;
 	const credentialHeaders = resolverOwnsAuth ? resolved.credentialHeaders : config.credentialHeaders;
 	const providerAccountKey = resolverOwnsAuth ? resolved.providerAccountKey : config.providerAccountKey;
+	const model = resolved?.model ?? config.model;
+	if (model.provider !== config.model.provider || model.id !== config.model.id) {
+		throw new Error("Request authentication cannot change the routed model identity");
+	}
+	const requestGuard =
+		resolved?.requestGuard && config.requestGuard
+			? (requestModel: typeof model, signal: AbortSignal | undefined): undefined => {
+					resolved.requestGuard?.(requestModel, signal);
+					config.requestGuard?.(requestModel, signal);
+					return undefined;
+				}
+			: (resolved?.requestGuard ?? config.requestGuard);
 	return {
+		model,
 		apiKey,
 		headers,
 		credentialHeaders,
 		providerAccountKey,
+		requestGuard,
 	};
 }
 
 export interface StartedAgentProviderRequest {
 	requestId: AgentRequestId;
 	stream: Awaited<ReturnType<StreamFn>>;
+	usesTextToolProtocol: boolean;
+}
+
+/** Auth and host model preparation share one ordering for planned and direct requests. */
+export async function resolveProviderRequestOptions(
+	config: Parameters<typeof resolveProviderRequestAuthOptions>[0] &
+		Pick<AgentLoopConfig, "prepareProviderRequest" | "reasoning">,
+	signal?: AbortSignal,
+) {
+	const auth = await resolveProviderRequestAuthOptions(config);
+	signal?.throwIfAborted();
+	auth.requestGuard?.(auth.model, signal);
+	const options = await config.prepareProviderRequest?.(auth.model, signal);
+	signal?.throwIfAborted();
+	auth.requestGuard?.(auth.model, signal);
+	const reasoning = options?.reasoning ?? config.reasoning;
+	return {
+		...auth,
+		...options,
+		reasoning: reasoning === undefined ? undefined : resolveModelThinkingLevel(auth.model, reasoning, "off"),
+	};
 }
 
 async function buildContextPlan(
@@ -223,7 +260,8 @@ async function buildContextPlan(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<AgentContextPlan> {
-	if (config.planContext) return await config.planContext({ messages, attempt, sentPrefixCount }, signal);
+	if (config.planContext)
+		return await config.planContext({ messages, attempt, sentPrefixCount, model: config.model }, signal);
 	return {
 		messages: config.transformContext ? await config.transformContext(messages, signal) : messages,
 	};
@@ -353,15 +391,22 @@ export async function startPlannedAgentProviderRequest(
 /** Start one accepted request while retaining its opaque lifecycle identity for the agent loop. */
 export async function startPlannedAgentProviderRequestWithId(
 	initialContext: AgentContext,
-	config: AgentLoopConfig,
+	baseConfig: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	streamFn?: StreamFn,
 ): Promise<StartedAgentProviderRequest> {
 	let sourceContext = initialContext;
 	let admissionAttempt = 0;
 	let stalePlanCount = 0;
+	const prefixState: ProviderRequestPrefixState =
+		baseConfig.providerRequestPrefixState ?? readFallbackEntry(baseConfig);
+	if (!baseConfig.providerRequestPrefixState) sentPrefixFallback.set(baseConfig, prefixState);
 	while (true) {
 		signal?.throwIfAborted();
+		const requestAuth = await resolveProviderRequestOptions(baseConfig, signal);
+		signal?.throwIfAborted();
+		const config = { ...baseConfig, ...requestAuth, providerRequestPrefixState: prefixState };
+		requestAuth.requestGuard?.(config.model, signal);
 		// TWO DELIBERATELY DIFFERENT marks (see ProviderRequestPrefixState in types.ts - do not merge
 		// these back into one value; that recreates either the cache defect or the unbounded-context
 		// defect the split exists to keep apart):
@@ -540,8 +585,6 @@ export async function startPlannedAgentProviderRequestWithId(
 			});
 			signal?.throwIfAborted();
 
-			const requestAuth = await resolveProviderRequestAuthOptions(config);
-			signal?.throwIfAborted();
 			const requestReasoning = config.resolveRequestReasoning
 				? config.resolveRequestReasoning(config.reasoning, {
 						model: config.model,
@@ -591,6 +634,7 @@ export async function startPlannedAgentProviderRequestWithId(
 				config,
 				Math.max(readSanitizerSentPrefixCount(config), sourceContext.messages.length),
 			);
+			requestAuth.requestGuard?.(config.model, signal);
 			plan.commit?.();
 			adoptReplannedMessages(initialContext, sourceContext);
 			keepPlan = true;
@@ -611,6 +655,7 @@ export async function startPlannedAgentProviderRequestWithId(
 				signal,
 			);
 			signal?.throwIfAborted();
+			requestAuth.requestGuard?.(config.model, signal);
 			const stream = (await startMaterializedProviderStream(
 				config.model,
 				materialized,
@@ -623,7 +668,7 @@ export async function startPlannedAgentProviderRequestWithId(
 				},
 				(providerContext, providerOptions) => streamFunction(config.model, providerContext, providerOptions),
 			)) as Awaited<ReturnType<StreamFn>>;
-			return { requestId, stream };
+			return { requestId, stream, usesTextToolProtocol: materialized.usesTextToolProtocol };
 		} finally {
 			if (!keepPlan) plan.discard?.();
 		}

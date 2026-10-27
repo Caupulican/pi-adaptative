@@ -334,6 +334,8 @@ export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
 /** Input for one replay-safe context-planning attempt. */
 export interface AgentContextPlanRequest {
+	/** Effective model captured with this request's authentication before planning. */
+	model?: Model<Api>;
 	/** Sanitized durable history used as the compactable portion of this request. */
 	messages: AgentMessage[];
 	/** Zero-based admission generation; freshness-only retries repeat the same value. */
@@ -449,14 +451,21 @@ export interface ProviderRequestSnapshotContext extends ProviderRequestAdmission
 	attempt: number;
 }
 
-/** Ephemeral request auth resolved once before lifecycle snapshot and transport dispatch. */
+/** Ephemeral model/auth snapshot resolved before model-dependent request preparation. */
 export interface ResolvedProviderRequestAuth {
+	model?: Model<Api>;
 	apiKey?: string;
 	headers?: Record<string, string>;
 	credentialHeaders?: Record<string, string>;
 	/** Non-secret account scope derived from `apiKey`; never sent to a provider. */
 	providerAccountKey?: string;
+	requestGuard?: SimpleStreamOptions["requestGuard"];
 }
+
+export type ProviderRequestModelOptions = Pick<
+	SimpleStreamOptions,
+	"reasoning" | "textToolCallProtocol" | "temperature"
+>;
 
 export type ProviderRequestAdmissionResult =
 	| { action: "send"; maxTokens?: number }
@@ -657,14 +666,19 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	getApiKey?: (provider: string, model?: Model<Api>) => Promise<string | undefined> | string | undefined;
 
 	/**
-	 * Resolve the complete auth projection for one routed model exactly once. When present, this is
-	 * authoritative over `getApiKey`; the planner freezes its key, ordinary auth headers,
-	 * credential-routing headers, and account scope into the accepted request before any lifecycle
-	 * callback runs. Throwing prevents request acceptance and transport.
+	 * Resolve one routed model and its complete auth projection before request preparation. When present,
+	 * this is authoritative over `getApiKey`; a returned model must retain the routed provider and ID.
+	 * Its model, key, headers and account scope serve preparation, admission and transport together.
+	 * Throwing or a request guard refusal prevents request acceptance and transport.
 	 */
 	resolveProviderRequestAuth?: (
 		model: Model<Api>,
 	) => ResolvedProviderRequestAuth | Promise<ResolvedProviderRequestAuth>;
+	/** Prepare model-specific options from the resolved request snapshot, before materializing context. */
+	prepareProviderRequest?: (
+		model: Model<Api>,
+		signal?: AbortSignal,
+	) => ProviderRequestModelOptions | Promise<ProviderRequestModelOptions>;
 
 	/**
 	 * Called after each turn fully completes and `turn_end` has been emitted.

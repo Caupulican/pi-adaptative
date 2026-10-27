@@ -1,4 +1,5 @@
 import type { Model } from "@caupulican/pi-ai";
+import type { ResolvedProviderRequestAuth } from "../loop-config.ts";
 import { classifyFailure } from "../reliability/classifier.ts";
 import type { SessionEntry } from "../session/session-entries.ts";
 import { isWholePathCompaction } from "../session/session-manager.ts";
@@ -16,12 +17,8 @@ export interface CompactionCycleParams {
 
 const MAX_SUMMARY_BUDGET_SCALE = 4;
 
-export interface ModelAndAuth {
+export interface ModelAndAuth extends ResolvedProviderRequestAuth {
 	model: Model<any>;
-	apiKey?: string;
-	headers?: Record<string, string>;
-	credentialHeaders?: Record<string, string>;
-	providerAccountKey?: string;
 	failure?: string;
 }
 
@@ -39,6 +36,7 @@ export interface CompactionLoopDeps {
 		credentialHeaders: Record<string, string> | undefined,
 		providerAccountKey: string | undefined,
 		branch: SessionEntry[],
+		requestGuard?: ResolvedProviderRequestAuth["requestGuard"],
 	): Promise<{ result: CompactionResult }>;
 	buildDeterministicCheckpoint(
 		params: CompactionCycleParams,
@@ -200,6 +198,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 				modelInfo.credentialHeaders,
 				modelInfo.providerAccountKey,
 				branch,
+				modelInfo.requestGuard,
 			));
 		} catch (error) {
 			if (deps.signal?.aborted) {

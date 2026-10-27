@@ -227,7 +227,8 @@ export class AccountModelCatalog {
 	defaultServiceTier(model: Model<Api>): string | undefined {
 		if (this.availability(model) === "unavailable") return undefined;
 		const state = this.states.get(model.provider);
-		if (state?.kind === "listed") return state.models.get(model.id)?.defaultServiceTier ?? model.defaultServiceTier;
+		// A listed model's absent/null default means standard, even if bundled metadata selected a tier.
+		if (state?.kind === "listed") return state.models.get(model.id)?.defaultServiceTier;
 		return model.defaultServiceTier;
 	}
 

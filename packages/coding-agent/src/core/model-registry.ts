@@ -5,7 +5,12 @@
 import { registerApiProvider, unregisterApiProviders } from "@caupulican/pi-ai/api-registry";
 import { getEnvAuthHeaders } from "@caupulican/pi-ai/env-api-keys";
 import { getModels, getProviders } from "@caupulican/pi-ai/models";
-import { type OAuthProviderInterface, registerOAuthProvider, unregisterOAuthProviders } from "@caupulican/pi-ai/oauth";
+import {
+	getOAuthProvider,
+	type OAuthProviderInterface,
+	registerOAuthProvider,
+	unregisterOAuthProviders,
+} from "@caupulican/pi-ai/oauth";
 import type {
 	AnthropicMessagesCompat,
 	Api,
@@ -38,9 +43,10 @@ import {
 	type ProviderOverride,
 	type ProviderRequestConfig,
 } from "./models-config-schema.ts";
-import { resolveProviderAccountKey } from "./provider-admission/account-key.ts";
+import { fenceRecoveredProviderApiKey, resolveProviderAccountKey } from "./provider-admission/account-key.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.ts";
 import { hasAuthenticationHeaders, hasUsableRequestAuth } from "./request-auth.ts";
+import { applyOAuthModelModifier, RequestModelSnapshots } from "./request-model-snapshots.ts";
 import {
 	clearConfigValueCache,
 	getCachedConfigValue,
@@ -291,6 +297,9 @@ export class ModelRegistry implements ModelRegistryContract {
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
 	private providerModelScopes: Map<string, Set<string>> = new Map();
 	private syncedOAuthCredentials: Map<string, OAuthCredential | undefined> = new Map();
+	private readonly requestModels = new RequestModelSnapshots();
+	private readonly nonOAuthRequestCatalogs = new Map<string, Model<Api>[]>();
+	private readonly providerCatalogGenerations = new Map<string, number>();
 	private loadError: string | undefined = undefined;
 	readonly authStorage: AuthStorage;
 	private modelsJsonPath: string | undefined;
@@ -358,7 +367,10 @@ export class ModelRegistry implements ModelRegistryContract {
 		this.baseModels = this.mergeCustomModels(builtInModels, customModels);
 	}
 
-	private computeModels(registeredProviders: ReadonlyMap<string, ProviderConfigInput>): {
+	private computeModels(
+		registeredProviders: ReadonlyMap<string, ProviderConfigInput>,
+		withoutOAuthProvider?: string,
+	): {
 		models: Model<Api>[];
 		synced: Map<string, OAuthCredential | undefined>;
 	} {
@@ -367,6 +379,7 @@ export class ModelRegistry implements ModelRegistryContract {
 		for (const oauthProvider of this.authStorage.getOAuthProviders()) {
 			if (!oauthProvider.modifyModels) continue;
 			if (
+				oauthProvider.id === withoutOAuthProvider ||
 				this.oauthIntegrationProviders.has(oauthProvider.id) ||
 				registeredProviders.get(oauthProvider.id)?.oauth !== undefined
 			) {
@@ -376,20 +389,45 @@ export class ModelRegistry implements ModelRegistryContract {
 			const oauthCred = cred?.type === "oauth" ? cred : undefined;
 			const clonedCred = oauthCred ? structuredClone(oauthCred) : undefined;
 			if (clonedCred) {
-				models = cloneModels(oauthProvider.modifyModels(cloneModels(models), structuredClone(clonedCred)));
+				models = applyOAuthModelModifier(models, clonedCred, oauthProvider);
 			}
 			synced.set(oauthProvider.id, clonedCred);
 		}
 		for (const [providerName, config] of registeredProviders.entries()) {
-			models = this.applyRegisteredProviderModels(models, providerName, config, synced);
+			models = this.applyRegisteredProviderModels(
+				models,
+				providerName,
+				config,
+				synced,
+				providerName !== withoutOAuthProvider,
+			);
 		}
 		return { models, synced };
 	}
 
 	private recomputeModels(): void {
 		const { models, synced } = this.computeModels(this.registeredProviders);
+		this.publishModels(models, synced);
+	}
+
+	private publishModels(models: Model<Api>[], synced: Map<string, OAuthCredential | undefined>): void {
+		const [previous, next] = [this.models, models].map((catalog) => {
+			const byProvider = new Map<string, Model<Api>[]>();
+			for (const model of catalog) {
+				const group = byProvider.get(model.provider);
+				if (group) group.push(model);
+				else byProvider.set(model.provider, [model]);
+			}
+			return byProvider;
+		});
+		for (const provider of new Set([...previous.keys(), ...next.keys()])) {
+			if (isDeepStrictEqual(previous.get(provider), next.get(provider))) continue;
+			this.providerCatalogGenerations.set(provider, (this.providerCatalogGenerations.get(provider) ?? 0) + 1);
+		}
 		this.models = models;
 		this.syncedOAuthCredentials = synced;
+		this.requestModels.publishRegistry(models);
+		this.nonOAuthRequestCatalogs.clear();
 	}
 
 	private isProviderOAuthUnsynced(providerId: string, activeModifierIds: Set<string>): boolean {
@@ -799,16 +837,41 @@ export class ModelRegistry implements ModelRegistryContract {
 	 */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
-			const providerConfig = this.providerRequestConfigs.get(model.provider);
+			const previousCredential = structuredClone(this.authStorage.get(model.provider));
+			const previousRuntimeApiKey = this.authStorage.getRuntimeApiKey(model.provider);
 			const apiKeyFromAuthStorage = await this.authStorage.getApiKey(model.provider, { includeFallback: false });
-			try {
-				this.syncOAuthModels();
-			} catch {}
+			this.syncOAuthModels();
+			const providerConfig = this.providerRequestConfigs.get(model.provider);
 			const apiKey =
 				apiKeyFromAuthStorage ??
 				(providerConfig?.apiKey
 					? resolveConfigValueOrThrow(providerConfig.apiKey, `API key for provider "${model.provider}"`)
 					: undefined);
+			const credential = this.authStorage.get(model.provider);
+			const oauthProvider = getOAuthProvider(model.provider);
+			const runtimeApiKey = this.authStorage.getRuntimeApiKey(model.provider);
+			if (
+				previousRuntimeApiKey !== runtimeApiKey ||
+				(!isDeepStrictEqual(previousCredential, credential) &&
+					!(previousCredential?.type === "oauth" && credential?.type === "oauth"))
+			) {
+				throw new Error(`Credentials changed while resolving ${model.provider}/${model.id}; retry the request`);
+			}
+			const runtimeOverride = Boolean(runtimeApiKey);
+			const oauthCredential = credential?.type === "oauth" && !runtimeOverride ? credential : undefined;
+			if (oauthCredential && oauthProvider?.getApiKey(oauthCredential) !== apiKeyFromAuthStorage) {
+				throw new Error(`Credentials changed while resolving ${model.provider}/${model.id}; retry the request`);
+			}
+			let catalog = this.models;
+			if (runtimeOverride && credential?.type === "oauth") {
+				let nonOAuthCatalog = this.nonOAuthRequestCatalogs.get(model.provider);
+				if (!nonOAuthCatalog) {
+					nonOAuthCatalog = this.computeModels(this.registeredProviders, model.provider).models;
+					this.nonOAuthRequestCatalogs.set(model.provider, nonOAuthCatalog);
+				}
+				catalog = nonOAuthCatalog;
+			}
+			const requestModel = this.requestModels.resolve(model, catalog, oauthProvider, oauthCredential);
 
 			const providerHeaders = resolveHeadersOrThrow(providerConfig?.headers, `provider "${model.provider}"`);
 			const modelHeaders = resolveHeadersOrThrow(
@@ -817,11 +880,7 @@ export class ModelRegistry implements ModelRegistryContract {
 			);
 
 			const envAuthHeaders = getEnvAuthHeaders(model.provider);
-			const hasSyncedOAuthModifier = this.syncedOAuthCredentials.has(model.provider);
-			const syncedModel = hasSyncedOAuthModifier
-				? this.models.find((m) => m.provider === model.provider && m.id === model.id)
-				: undefined;
-			const effectiveModelHeaders = hasSyncedOAuthModifier ? syncedModel?.headers : model.headers;
+			const effectiveModelHeaders = requestModel.headers;
 			let headers =
 				envAuthHeaders || effectiveModelHeaders || providerHeaders || modelHeaders
 					? { ...envAuthHeaders, ...effectiveModelHeaders, ...providerHeaders, ...modelHeaders }
@@ -837,12 +896,38 @@ export class ModelRegistry implements ModelRegistryContract {
 			const credentialHeaders = apiKeyFromAuthStorage
 				? this.authStorage.getOAuthRequestHeaders(model.provider, apiKeyFromAuthStorage)
 				: undefined;
+			const generation = this.providerCatalogGenerations.get(model.provider);
+			const capturedCredential = structuredClone(credential);
+			const capturedProviderConfig = structuredClone(providerConfig);
+			const capturedModelHeaders = structuredClone(
+				this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id)),
+			);
 			return {
 				ok: true,
+				model: requestModel,
 				apiKey,
 				headers: headers && Object.keys(headers).length > 0 ? headers : undefined,
 				...(credentialHeaders ? { credentialHeaders } : {}),
 				providerAccountKey: resolveProviderAccountKey(this.authStorage, model.provider, apiKey),
+				requestGuard: (_model, signal) => {
+					signal?.throwIfAborted();
+					if (
+						generation !== this.providerCatalogGenerations.get(model.provider) ||
+						!isDeepStrictEqual(capturedCredential, this.authStorage.get(model.provider)) ||
+						runtimeApiKey !== this.authStorage.getRuntimeApiKey(model.provider) ||
+						!isDeepStrictEqual(capturedProviderConfig, this.providerRequestConfigs.get(model.provider)) ||
+						!isDeepStrictEqual(
+							capturedModelHeaders,
+							this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id)),
+						) ||
+						(oauthCredential !== undefined && Date.now() >= oauthCredential.expires)
+					) {
+						throw new Error(
+							`Model or credentials changed before sending ${model.provider}/${model.id}; retry the request`,
+						);
+					}
+					return undefined;
+				},
 			};
 		} catch (error) {
 			try {
@@ -856,19 +941,23 @@ export class ModelRegistry implements ModelRegistryContract {
 	}
 
 	/** Recover a locally stored OAuth credential rejected by the provider. */
-	async recoverRejectedOAuthApiKey(providerId: string, rejectedApiKey: string): Promise<string | undefined> {
-		try {
-			const recovered = await this.authStorage.recoverRejectedOAuthApiKey(providerId, rejectedApiKey);
-			try {
-				this.syncOAuthModels();
-			} catch {}
-			return recovered;
-		} catch (error) {
-			try {
-				this.syncOAuthModels();
-			} catch {}
-			throw error;
-		}
+	async recoverRejectedOAuthApiKey(
+		model: Model<Api>,
+		rejectedApiKey: string,
+		expectedAccountKey?: string,
+	): Promise<string | undefined> {
+		const recovered = fenceRecoveredProviderApiKey(
+			this.authStorage,
+			model.provider,
+			await this.authStorage.recoverRejectedOAuthApiKey(model.provider, rejectedApiKey),
+			expectedAccountKey,
+		);
+		if (!recovered) return undefined;
+		const refreshed = await this.getApiKeyAndHeaders(model);
+		// A key-only retry cannot change the admitted endpoint, protocol, capabilities or identity headers.
+		return refreshed.ok && refreshed.apiKey === recovered && isDeepStrictEqual(refreshed.model, model)
+			? recovered
+			: undefined;
 	}
 
 	/**
@@ -989,8 +1078,7 @@ export class ModelRegistry implements ModelRegistryContract {
 		}
 		this.applyProviderRequestConfig(providerName, mergedConfig);
 		this.registeredProviders = nextRegisteredProviders;
-		this.models = nextModels;
-		this.syncedOAuthCredentials = nextSynced;
+		this.publishModels(nextModels, nextSynced);
 	}
 
 	/** Capture all mutable registry state before a runtime generation is rebuilt. */
@@ -1018,7 +1106,7 @@ export class ModelRegistry implements ModelRegistryContract {
 	/** Restore a captured generation, including global API/OAuth registrations. */
 	restoreReloadSnapshot(snapshot: ModelRegistryReloadSnapshot): void {
 		this.baseModels = cloneModels(snapshot.baseModels);
-		this.models = cloneModels(snapshot.models);
+		const restoredModels = cloneModels(snapshot.models);
 		this.providerRequestConfigs = new Map(
 			Array.from(snapshot.providerRequestConfigs, ([name, config]) => [name, { ...config }]),
 		);
@@ -1043,6 +1131,7 @@ export class ModelRegistry implements ModelRegistryContract {
 				cred ? structuredClone(cred) : undefined,
 			]),
 		);
+		this.publishModels(restoredModels, this.syncedOAuthCredentials);
 		this.syncOAuthModels();
 	}
 
@@ -1173,6 +1262,7 @@ export class ModelRegistry implements ModelRegistryContract {
 		providerName: string,
 		config: ProviderConfigInput,
 		syncedOAuthCredentials: Map<string, OAuthCredential | undefined>,
+		applyOAuth = true,
 	): Model<Api>[] {
 		const modelOverrides = config.modelOverrides ? new Map(Object.entries(config.modelOverrides)) : undefined;
 		let nextModels = cloneModels(models);
@@ -1217,12 +1307,12 @@ export class ModelRegistry implements ModelRegistryContract {
 		}
 
 		// Apply OAuth modifyModels if credentials exist (e.g., to update baseUrl)
-		if (config.oauth?.modifyModels) {
+		if (applyOAuth && config.oauth?.modifyModels) {
 			const cred = this.authStorage.get(providerName);
 			const oauthCred = cred?.type === "oauth" ? cred : undefined;
 			const clonedCred = oauthCred ? structuredClone(oauthCred) : undefined;
 			if (clonedCred) {
-				nextModels = cloneModels(config.oauth.modifyModels(cloneModels(nextModels), structuredClone(clonedCred)));
+				nextModels = applyOAuthModelModifier(nextModels, clonedCred, config.oauth);
 			}
 			syncedOAuthCredentials.set(providerName, clonedCred);
 		}

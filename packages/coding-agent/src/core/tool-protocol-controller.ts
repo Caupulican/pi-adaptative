@@ -529,30 +529,19 @@ export class ToolProtocolController {
 
 	private async streamForProbe(run: ToolProbeRun, context: Context, options: SimpleStreamOptions) {
 		this.assertCurrentProbe(run);
-		const model = run.model;
-		let requestOptions: SimpleStreamOptions;
-		if (this.deps.isRawStreamSimple(this.deps.agent.streamFn) && !this.deps.agent.resolveProviderRequestAuth) {
-			const auth = await this.deps.getRequiredRequestAuth(model);
-			requestOptions = {
-				...options,
-				apiKey: auth.apiKey,
-				headers: auth.headers || options.headers ? { ...auth.headers, ...options.headers } : undefined,
-				credentialHeaders: auth.credentialHeaders ?? options.credentialHeaders,
-				providerAccountKey: auth.providerAccountKey ?? options.providerAccountKey,
-			};
-		} else {
-			requestOptions = {
-				...options,
-				...(await resolveProviderRequestAuthOptions({
-					model,
-					...options,
-					getApiKey: this.deps.agent.getApiKey,
-					resolveProviderRequestAuth: this.deps.agent.resolveProviderRequestAuth,
-				})),
-			};
-		}
+		const auth = await resolveProviderRequestAuthOptions({
+			model: run.model,
+			...options,
+			getApiKey: this.deps.agent.getApiKey,
+			resolveProviderRequestAuth:
+				this.deps.agent.resolveProviderRequestAuth ??
+				(this.deps.isRawStreamSimple(this.deps.agent.streamFn)
+					? (model) => this.deps.getRequiredRequestAuth(model)
+					: undefined),
+		});
 		this.assertCurrentProbe(run);
-		return this.deps.agent.streamFn(model, context, requestOptions);
+		auth.requestGuard?.(auth.model, options.signal);
+		return this.deps.agent.streamFn(auth.model, context, { ...options, ...auth });
 	}
 
 	private nextProbeUsageReportId(model: Model<Api>, kind: string): string {

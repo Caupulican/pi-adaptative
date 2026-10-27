@@ -33,6 +33,7 @@ export type ClaimReceiptEvent =
 function emptyClaimReceipts() {
 	return {
 		tests: { passed: 0, failed: 0, lastPassed: undefined as boolean | undefined },
+		checks: { passed: 0, failed: 0, lastPassed: undefined as boolean | undefined },
 		commits: { succeeded: 0, failed: 0 },
 		pushes: { succeeded: 0, failed: 0 },
 		publishes: { succeeded: 0, failed: 0 },
@@ -42,7 +43,7 @@ function emptyClaimReceipts() {
 	};
 }
 
-export type ClaimKind = "tests_pass" | "committed" | "pushed" | "published" | "files_changed";
+export type ClaimKind = "tests_pass" | "checks_pass" | "committed" | "pushed" | "published" | "files_changed";
 
 export interface ClaimFinding {
 	readonly kind: ClaimKind;
@@ -120,7 +121,7 @@ export function collectClaimReceiptEvents(
 			continue;
 		}
 		const message = event.message;
-		const { tests, commits, pushes, publishes, filesChanged } = totals;
+		const { tests, checks: nonTestChecks, commits, pushes, publishes, filesChanged } = totals;
 		if (message.role === "assistant") {
 			// Provider call IDs belong to this assistant request, never to later requests.
 			calls.clear();
@@ -155,8 +156,11 @@ export function collectClaimReceiptEvents(
 		if (ok) totals.succeededToolCalls += 1;
 		const record = retainedVerificationDetails(result.details)?.piVerification;
 		let checkPassed: boolean | undefined;
-		if (record?.evidence === "tests" && record.outcome === "executed") {
-			checkPassed = invocation?.operationStatus !== "error" && isPassingTestVerification(record);
+		let counts = nonTestChecks;
+		if (record?.evidence !== undefined && record.outcome === "executed") {
+			counts = record.evidence === "tests" ? tests : nonTestChecks;
+			checkPassed =
+				ok && (record.evidence === "tests" ? isPassingTestVerification(record) : record.status === "passed");
 		} else if (invocation && checks.size > 0) {
 			const proof = checks.get(workerCommandReceiptId(invocation.requestId, result.toolCallId));
 			const observed = proof
@@ -175,15 +179,16 @@ export function collectClaimReceiptEvents(
 			}
 		}
 		if (checkPassed !== undefined) {
-			if (checkPassed) tests.passed += 1;
-			else tests.failed += 1;
-			tests.lastPassed = checkPassed;
+			if (checkPassed) counts.passed += 1;
+			else counts.failed += 1;
+			counts.lastPassed = checkPassed;
 		}
 		const goalChecks = GOAL_TOOLS.has(result.toolName) ? goalCheckRuns(result.details) : undefined;
 		if (goalChecks && goalChecks.passed + goalChecks.failed > 0) {
-			tests.passed += goalChecks.passed;
-			tests.failed += goalChecks.failed;
-			tests.lastPassed = goalChecks.failed === 0;
+			// Goal requirements and cited worker commands have no executed-test provenance.
+			nonTestChecks.passed += goalChecks.passed;
+			nonTestChecks.failed += goalChecks.failed;
+			nonTestChecks.lastPassed = goalChecks.failed === 0;
 		}
 		const args = (call.arguments ?? {}) as Record<string, unknown>;
 		if (SHELL_TOOLS.has(result.toolName) && typeof args.command === "string") {
@@ -214,11 +219,17 @@ export function mergeClaimReceipts(receipts: readonly ClaimReceipts[]): ClaimRec
 		failed: receipts.reduce((total, r) => total + pick(r).failed, 0),
 	});
 	const lastTests = [...receipts].reverse().find((r) => r.tests.lastPassed !== undefined)?.tests.lastPassed;
+	const lastChecks = [...receipts].reverse().find((r) => r.checks?.lastPassed !== undefined)?.checks?.lastPassed;
 	return {
 		tests: {
 			passed: receipts.reduce((total, r) => total + r.tests.passed, 0),
 			failed: receipts.reduce((total, r) => total + r.tests.failed, 0),
 			lastPassed: lastTests,
+		},
+		checks: {
+			passed: receipts.reduce((total, r) => total + (r.checks?.passed ?? 0), 0),
+			failed: receipts.reduce((total, r) => total + (r.checks?.failed ?? 0), 0),
+			lastPassed: lastChecks,
 		},
 		commits: sum((r) => r.commits),
 		pushes: sum((r) => r.pushes),
@@ -240,15 +251,16 @@ export function mayContainDeliveryClaims(finalAnswer: string): boolean {
 /** The claim questions' ids, in the order the catalog asks them. */
 export const CLAIM_QUESTION_IDS: Readonly<Record<ClaimKind, string>> = {
 	tests_pass: "states_tests_pass",
+	checks_pass: "states_checks_pass",
 	committed: "states_committed",
 	pushed: "states_pushed",
 	published: "states_published",
 	files_changed: "states_files_changed",
 };
 
-type TestClaimProvenance = "current_success" | "historical_only" | "no_current_success";
+type VerificationClaimProvenance = "current_success" | "historical_only" | "no_current_success";
 
-function settledTestClaimProvenance(answer: unknown): TestClaimProvenance | undefined {
+function settledVerificationClaimProvenance(answer: unknown): VerificationClaimProvenance | undefined {
 	if (!answer || typeof answer !== "object") return undefined;
 	const record = answer as { choice?: unknown; confidence?: unknown };
 	if (!isNoulProbability(record.confidence) || record.confidence < DEFAULT_NOUL_BAND_THRESHOLDS.requiredTrue.softPass)
@@ -282,18 +294,23 @@ function judgeDelivery(kind: ClaimKind, receipt: DeliveryReceipt, label: string)
 export function judgeClaims(answers: Record<string, unknown>, receipts: ClaimReceipts): ClaimFinding[] {
 	const findings: ClaimFinding[] = [];
 	const states = (kind: ClaimKind) => settledAnswer(answers[CLAIM_QUESTION_IDS[kind]]) === true;
-	if (settledTestClaimProvenance(answers[CLAIM_QUESTION_IDS.tests_pass]) === "current_success") {
-		if (receipts.tests.lastPassed === false)
+	const verifications = [
+		["tests_pass", receipts.tests, "tests"],
+		["checks_pass", receipts.checks, "non-test checks"],
+	] as const;
+	for (const [kind, receipt, label] of verifications) {
+		if (settledVerificationClaimProvenance(answers[CLAIM_QUESTION_IDS[kind]]) !== "current_success") continue;
+		if (receipt?.lastPassed === false)
 			findings.push({
-				kind: "tests_pass",
+				kind,
 				verdict: "contradicted",
-				reason: `the answer says tests pass, but the last test run during this work failed (${receipts.tests.failed} failed)`,
+				reason: `the answer says ${label} pass, but the last recorded run during this work failed (${receipt.failed} failed)`,
 			});
-		else if (receipts.tests.passed === 0)
+		else if (!receipt?.passed)
 			findings.push({
-				kind: "tests_pass",
+				kind,
 				verdict: "unsupported",
-				reason: "the answer says tests pass; no test run during this work recorded a pass",
+				reason: `the answer says ${label} pass; no matching run during this work recorded a pass`,
 			});
 	}
 	const deliveries: [ClaimKind, DeliveryReceipt, string][] = [
@@ -327,8 +344,9 @@ export function claimCorrectionPrompt(findings: readonly ClaimFinding[]): string
 
 /** What each claim kind asserts, as a statement System One can judge against the turn's own results. */
 const CLAIM_STATEMENTS: Readonly<Record<ClaimKind, string>> = {
-	// The claim the question detects (tests, checks, builds the agent ran), so a passing check in the results settles it.
-	tests_pass: "The tests or checks that were run passed",
+	tests_pass:
+		"Actual tests executed during this work passed; static checks, lint and builds alone do not establish this",
+	checks_pass: "The non-test verification performed during this work passed",
 	committed: "The changes were committed with git",
 	pushed: "The changes were pushed to a git remote",
 	published: "The package or release was published",
@@ -455,6 +473,8 @@ export class AnswerClaimChecker {
 			const receipts = collectWorkerReportClaimReceipts(input);
 			if (receipts.tests.lastPassed === false)
 				blockers.push("verification accepted although the verifier's last test run failed");
+			else if (receipts.checks?.lastPassed === false)
+				blockers.push("verification accepted although the verifier's last non-test check failed");
 			else if (receipts.succeededToolCalls === 0)
 				blockers.push("verification accepted with no successful inspection in the verifier's own transcript");
 		}

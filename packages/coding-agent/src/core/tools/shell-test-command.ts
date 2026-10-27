@@ -74,7 +74,7 @@ function verificationArguments(invocation: string[]): string[] {
 	return parsed.args;
 }
 
-function isTestInvocation(invocation: string[], allowCheckScript = false): boolean {
+function isTestInvocation(invocation: string[]): boolean {
 	const args = verificationArguments(invocation);
 	if (args.length === 0) return false;
 	const executable = executableStem(args[0]);
@@ -98,7 +98,7 @@ function isTestInvocation(invocation: string[], allowCheckScript = false): boole
 		const action = args[1]?.toLowerCase();
 		if (action === "test" || action === "t" || action === "tst") return true;
 		if (action === "run" || action === "run-script") {
-			return isTestScriptName(args[2]) || (allowCheckScript && args[2]?.toLowerCase() === "check");
+			return isTestScriptName(args[2]);
 		}
 		if (action === "exec") return isRunnerToken(firstNonOption(args, 2));
 		return false;
@@ -121,6 +121,41 @@ function isTestInvocation(invocation: string[], allowCheckScript = false): boole
 	}
 	if (executable === "mvn" || executable === "mvnw" || executable === "gradle" || executable === "gradlew") {
 		return args.slice(1).some((token) => token.toLowerCase() === "test");
+	}
+	return false;
+}
+
+/** Static verification has command-exit evidence; it never certifies executed tests. */
+function isVerificationInvocation(invocation: string[]): boolean {
+	if (isTestInvocation(invocation)) return true;
+	const args = verificationArguments(invocation);
+	// Information, configuration generation and dry-run modes supply no compile/lint/build evidence.
+	if (
+		args
+			.slice(1)
+			.some((arg) =>
+				/^(?:--(?:help|version|showConfig|print-config|inspect-config|dry-run|init|listFilesOnly|clean)(?:=|$)|-[hHvV]$)/u.test(
+					arg,
+				),
+			)
+	)
+		return false;
+	const executable = executableStem(args[0] ?? "");
+	if (executable === "tsc" || executable === "tsrs" || executable === "eslint") return true;
+	if (executable === "biome") return args[1] === "check" || args[1] === "lint";
+	if (executable === "ruff") return args[1] === "check";
+	if (executable === "cargo") return args[1] === "check" || args[1] === "build" || args[1] === "clippy";
+	if (executable === "go") return args[1] === "build" || args[1] === "vet";
+	if (executable === "dotnet") return args[1] === "build";
+	const isCheckScript = (name: string | undefined) =>
+		name !== undefined && /^(?:check|typecheck|lint|build)(?::[a-z0-9_-]+)*$/iu.test(name);
+	if (executable === "npm") return (args[1] === "run" || args[1] === "run-script") && isCheckScript(args[2]);
+	if (executable === "pnpm" || executable === "yarn" || executable === "bun") {
+		return isCheckScript(args[1] === "run" ? args[2] : args[1]);
+	}
+	if (executable === "node") {
+		const script = executableName(firstNonOption(args, 1) ?? "");
+		return script === "run-tsc.mjs" || /^check-[a-z0-9-]+\.mjs$/u.test(script);
 	}
 	return false;
 }
@@ -196,7 +231,7 @@ function hasOnlyVerificationStages(sequence: ShellCommandSequence): boolean {
 	// Every path out of this loop is a return: past the last stage `invocations[index]` is undefined,
 	// which is not a test invocation, so the trailing stage decides and no statement follows the loop.
 	for (; ; index++) {
-		if (!isTestInvocation(sequence.invocations[index] ?? [], true)) return false;
+		if (!isVerificationInvocation(sequence.invocations[index] ?? [])) return false;
 		const connector = sequence.connectors[index];
 		if (connector === undefined) return true;
 		if (connector === "&&") continue;
@@ -282,7 +317,7 @@ export function classifyShellVerificationCommand(
 	return {
 		kind: "test",
 		runners: sequence.invocations
-			.filter((args) => isTestInvocation(args, true))
+			.filter((args) => isVerificationInvocation(args))
 			.map((invocation): VerificationRunner => {
 				const args = verificationArguments(invocation);
 				const executable = executableStem(args[0] ?? "");

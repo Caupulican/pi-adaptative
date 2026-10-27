@@ -225,6 +225,7 @@ export class ProviderRequestRuntimeController {
 			const nonCompactableTokens = estimateProviderRequestTokens(request.nonCompactableContext, request.model);
 			const requestTokens = this.estimateRequestTokens(request, fallbackTokens, nonCompactableTokens);
 			const decision = await this.deps.compaction.admitProviderRequest({
+				model: request.model,
 				requestTokens,
 				nonCompactableTokens,
 				attempt: request.attempt,

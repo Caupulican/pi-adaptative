@@ -63,7 +63,6 @@ import { SessionTaskProfileStore } from "./orchestration/session-task-profile-st
 import { TaskProfileWriter } from "./orchestration/task-profile-writer.ts";
 import { DurableTaskRuntime } from "./orchestration/task-runtime.ts";
 import { createWorkerExecutionContract } from "./orchestration/worker-execution-contract.ts";
-import { fenceRecoveredProviderApiKey } from "./provider-admission/account-key.ts";
 import { materializeRequestAuth } from "./request-auth.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
@@ -676,12 +675,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					onAuthRejection:
 						requestApiKey && (model.provider === "openai-codex" || getOAuthProvider(model.provider) !== undefined)
 							? async () =>
-									fenceRecoveredProviderApiKey(
-										modelRegistry.authStorage,
-										model.provider,
-										await modelRegistry.recoverRejectedOAuthApiKey(model.provider, requestApiKey),
-										options?.providerAccountKey,
-									)
+									modelRegistry.recoverRejectedOAuthApiKey(model, requestApiKey, options?.providerAccountKey)
 							: options?.onAuthRejection,
 					timeoutMs,
 					websocketConnectTimeoutMs,

@@ -6,9 +6,17 @@ export interface DeliveryReceipt {
 	readonly failed: number;
 }
 
+export interface VerificationReceipt {
+	readonly passed: number;
+	readonly failed: number;
+	readonly lastPassed?: boolean | undefined;
+}
+
 export interface ClaimReceipts {
 	/** `lastPassed` is absent, never `undefined`, when no check ran: receipt facts are persisted as JSON. */
-	readonly tests: { readonly passed: number; readonly failed: number; readonly lastPassed?: boolean | undefined };
+	readonly tests: VerificationReceipt;
+	/** Non-test verification; absence in a retained receipt supplies no check evidence. */
+	readonly checks?: VerificationReceipt;
 	readonly commits: DeliveryReceipt;
 	readonly pushes: DeliveryReceipt;
 	readonly publishes: DeliveryReceipt;
@@ -19,6 +27,7 @@ export interface ClaimReceipts {
 
 const RECEIPT_KEYS = new Set([
 	"tests",
+	"checks",
 	"commits",
 	"pushes",
 	"publishes",
@@ -26,7 +35,7 @@ const RECEIPT_KEYS = new Set([
 	"toolCalls",
 	"succeededToolCalls",
 ]);
-const TEST_KEYS = new Set(["passed", "failed", "lastPassed"]);
+const VERIFICATION_KEYS = new Set(["passed", "failed", "lastPassed"]);
 const DELIVERY_KEYS = new Set(["succeeded", "failed"]);
 
 function count(value: unknown): value is number {
@@ -39,6 +48,25 @@ function delivery(value: unknown): DeliveryReceipt | undefined {
 	return { succeeded: record.succeeded, failed: record.failed };
 }
 
+function verification(value: unknown): VerificationReceipt | undefined {
+	const record = readWireRecord(value, VERIFICATION_KEYS);
+	if (
+		!record ||
+		!count(record.passed) ||
+		!count(record.failed) ||
+		(record.lastPassed !== undefined && typeof record.lastPassed !== "boolean") ||
+		(record.lastPassed === true && record.passed === 0) ||
+		(record.lastPassed === false && record.failed === 0) ||
+		(record.lastPassed === undefined && record.passed + record.failed > 0)
+	)
+		return undefined;
+	return {
+		passed: record.passed,
+		failed: record.failed,
+		...(record.lastPassed === undefined ? {} : { lastPassed: record.lastPassed }),
+	};
+}
+
 /** Decode persisted aggregates without invoking accessors or inventing missing evidence. */
 export function decodeClaimReceipts(
 	value: unknown,
@@ -46,18 +74,14 @@ export function decodeClaimReceipts(
 ): ClaimReceipts | undefined {
 	const record = readWireRecord(value, RECEIPT_KEYS);
 	if (!record) return undefined;
-	const tests = readWireRecord(record.tests, TEST_KEYS);
+	const tests = verification(record.tests);
+	const checks = record.checks === undefined ? undefined : verification(record.checks);
 	const commits = delivery(record.commits);
 	const pushes = delivery(record.pushes);
 	const publishes = delivery(record.publishes);
 	if (
 		!tests ||
-		!count(tests.passed) ||
-		!count(tests.failed) ||
-		(tests.lastPassed !== undefined && typeof tests.lastPassed !== "boolean") ||
-		(tests.lastPassed === true && tests.passed === 0) ||
-		(tests.lastPassed === false && tests.failed === 0) ||
-		(tests.lastPassed === undefined && tests.passed + tests.failed > 0) ||
+		(record.checks !== undefined && !checks) ||
 		!commits ||
 		!pushes ||
 		!publishes ||
@@ -79,11 +103,8 @@ export function decodeClaimReceipts(
 		filesChanged.push(descriptor.value);
 	}
 	return {
-		tests: {
-			passed: tests.passed,
-			failed: tests.failed,
-			...(tests.lastPassed === undefined ? {} : { lastPassed: tests.lastPassed }),
-		},
+		tests,
+		...(checks ? { checks } : {}),
 		commits,
 		pushes,
 		publishes,

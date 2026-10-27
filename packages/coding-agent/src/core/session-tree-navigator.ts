@@ -205,7 +205,7 @@ export class SessionTreeNavigator {
 				const branchSummarySettings = this.deps.getSettingsManager().getBranchSummarySettings();
 				const extensionUsage = summaryUsage;
 				const result = await generateBranchSummary(entriesToSummarize, {
-					model,
+					model: requestAuth.model ?? model,
 					apiKey: requestAuth.apiKey,
 					headers: requestAuth.headers,
 					signal: branchSummaryAbort.signal,
@@ -215,6 +215,7 @@ export class SessionTreeNavigator {
 					streamFn: (streamModel, context, streamOptions) =>
 						this.deps.getAgent().streamFn(streamModel, context, {
 							...streamOptions,
+							requestGuard: requestAuth.requestGuard,
 							...(requestAuth.credentialHeaders !== undefined
 								? { credentialHeaders: requestAuth.credentialHeaders }
 								: {}),

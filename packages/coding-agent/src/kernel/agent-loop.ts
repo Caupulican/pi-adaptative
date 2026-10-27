@@ -1044,7 +1044,7 @@ async function streamAssistantResponse(
 	const providerMessage = await response.stream.result();
 	let finalMessage = policy?.rejectToolCalls
 		? rejectToolCallsFromToolFreeResponse(providerMessage, policy.withheldTools)
-		: rejectNativeToolProtocolResidue(providerMessage, context.tools ?? [], Boolean(config.textToolCallProtocol));
+		: rejectNativeToolProtocolResidue(providerMessage, context.tools ?? [], response.usesTextToolProtocol);
 	if (abortedForDegeneration && !signal?.aborted && finalMessage.stopReason === "aborted") {
 		finalMessage = { ...finalMessage, stopReason: "stop" };
 		delete finalMessage.errorMessage;

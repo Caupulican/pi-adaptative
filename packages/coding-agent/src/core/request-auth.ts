@@ -1,8 +1,13 @@
+import type { Api, Model, SimpleStreamOptions } from "@caupulican/pi-ai/types";
+
 export interface RequestAuth {
+	/** Effective model resolved with this credential, before request preparation. */
+	model?: Model<Api>;
 	apiKey?: string;
 	headers?: Record<string, string>;
 	credentialHeaders?: Record<string, string>;
 	providerAccountKey?: string;
+	requestGuard?: SimpleStreamOptions["requestGuard"];
 }
 
 /**
@@ -16,10 +21,12 @@ export function materializeRequestAuth(
 ): RequestAuth {
 	const providerAccountKey = auth.providerAccountKey ?? resolveProviderAccountKey?.();
 	return {
+		...(auth.model !== undefined ? { model: auth.model } : {}),
 		...(auth.apiKey !== undefined ? { apiKey: auth.apiKey } : {}),
 		...(auth.headers !== undefined ? { headers: auth.headers } : {}),
 		...(auth.credentialHeaders !== undefined ? { credentialHeaders: auth.credentialHeaders } : {}),
 		...(providerAccountKey !== undefined ? { providerAccountKey } : {}),
+		...(auth.requestGuard !== undefined ? { requestGuard: auth.requestGuard } : {}),
 	};
 }
 

@@ -1,7 +1,8 @@
 /** Best-effort, preemptible standing-prefix warmup for loopback OpenAI-compatible models. */
 
 import type { Api, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
-import type { StreamFn } from "../kernel/index.ts";
+import type { AgentLoopConfig, StreamFn } from "../kernel/index.ts";
+import { resolveProviderRequestAuthOptions } from "../kernel/provider-request-planner.ts";
 import { projectToolsForProvider } from "../kernel/provider-tool-projection.ts";
 import type { AgentTool } from "../kernel/types.ts";
 import { formatModelRouterModel } from "./model-router-controller.ts";
@@ -16,6 +17,7 @@ export interface LocalPrefixWarmControllerDeps {
 	getRequestHooks(): Pick<SimpleStreamOptions, "onPayload" | "onResponse">;
 	isRawStreamSimple(streamFn: StreamFn): boolean;
 	getRequiredRequestAuth(model: Model<Api>): Promise<RequestAuth>;
+	getRequestAuthResolver?(): AgentLoopConfig["resolveProviderRequestAuth"];
 	ensureManagedModelReady(model: Model<Api>): Promise<void>;
 }
 
@@ -64,16 +66,23 @@ export class LocalPrefixWarmController {
 				signal: controller.signal,
 				...this.deps.getRequestHooks(),
 			};
-			if (this.deps.isRawStreamSimple(streamFn)) {
-				const auth = await this.deps.getRequiredRequestAuth(model);
-				options.apiKey = auth.apiKey;
-				options.headers = auth.headers;
-			}
+			const { model: requestModel, ...auth } = await resolveProviderRequestAuthOptions({
+				model,
+				resolveProviderRequestAuth:
+					this.deps.getRequestAuthResolver?.() ??
+					(this.deps.isRawStreamSimple(streamFn)
+						? (selected) => this.deps.getRequiredRequestAuth(selected)
+						: undefined),
+			});
+			model = requestModel;
+			Object.assign(options, auth);
+			if (!isWarmableLocalModel(model)) return;
 			if (controller.signal.aborted) return;
 			if (model.provider === OLLAMA_PROVIDER || model.provider === HF_TRANSFORMERS_PROVIDER) {
 				await this.deps.ensureManagedModelReady(model);
 			}
 			if (controller.signal.aborted) return;
+			auth.requestGuard?.(model, controller.signal);
 			const stream = await streamFn(
 				model,
 				{

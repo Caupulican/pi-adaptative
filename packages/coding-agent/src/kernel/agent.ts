@@ -142,6 +142,7 @@ export interface AgentOptions {
 	streamFn?: StreamFn;
 	getApiKey?: AgentLoopConfig["getApiKey"];
 	resolveProviderRequestAuth?: AgentLoopConfig["resolveProviderRequestAuth"];
+	prepareProviderRequest?: AgentLoopConfig["prepareProviderRequest"];
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
 	textToolCallProtocol?: SimpleStreamOptions["textToolCallProtocol"];
@@ -293,6 +294,7 @@ export class Agent {
 	public streamFn: StreamFn;
 	public getApiKey?: AgentLoopConfig["getApiKey"];
 	public resolveProviderRequestAuth?: AgentLoopConfig["resolveProviderRequestAuth"];
+	public prepareProviderRequest?: AgentLoopConfig["prepareProviderRequest"];
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];
 	public textToolCallProtocol?: SimpleStreamOptions["textToolCallProtocol"];
@@ -378,6 +380,7 @@ export class Agent {
 		this.streamFn = options.streamFn ?? streamSimple;
 		this.getApiKey = options.getApiKey;
 		this.resolveProviderRequestAuth = options.resolveProviderRequestAuth;
+		this.prepareProviderRequest = options.prepareProviderRequest;
 		this.onPayload = options.onPayload;
 		this.onResponse = options.onResponse;
 		this.textToolCallProtocol = options.textToolCallProtocol;
@@ -750,6 +753,7 @@ export class Agent {
 			requestPreflight: this.requestPreflight,
 			getApiKey: this.getApiKey,
 			resolveProviderRequestAuth: this.resolveProviderRequestAuth,
+			prepareProviderRequest: this.prepareProviderRequest,
 			getSteeringMessages: async () => {
 				await this.beforeSteeringPoll?.(this.signal);
 				if (skipInitialSteeringPoll) {

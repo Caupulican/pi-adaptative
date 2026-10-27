@@ -766,6 +766,12 @@ export class AgentSession {
 		// Perf samples (one per provider stream) are deferred; everything else persists at once.
 		const modelAdaptationStore = ModelAdaptationStore.forAgentDir(agentDir, { deferPerfSamples: true });
 		this._modelAdaptationStore = modelAdaptationStore;
+		const previousPrepareProviderRequest = this.agent.prepareProviderRequest?.bind(this.agent);
+		this.agent.prepareProviderRequest = async (model, signal) => {
+			const options = await previousPrepareProviderRequest?.(model, signal);
+			const textToolCallProtocol = options?.textToolCallProtocol ?? this._resolveModelToolProtocol(model).protocol;
+			return { ...options, textToolCallProtocol, temperature: textToolCallProtocol ? 0 : options?.temperature };
+		};
 		const previousResolveRequestReasoning = this.agent.resolveRequestReasoning?.bind(this.agent);
 		this.agent.resolveRequestReasoning = (reasoning, request) => {
 			const resolvedReasoning = previousResolveRequestReasoning
@@ -929,6 +935,7 @@ export class AgentSession {
 			getRequestHooks: () => ({ onPayload: this.agent.onPayload, onResponse: this.agent.onResponse }),
 			isRawStreamSimple: (streamFn) => isRawStreamSimpleFn(streamFn),
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
+			getRequestAuthResolver: () => this.agent.resolveProviderRequestAuth,
 			ensureManagedModelReady: (model) => this._localRuntimeController.ensureIsolatedModelReady(model),
 		});
 		this._systemPromptBuilder = new SystemPromptBuilder({
@@ -1287,6 +1294,7 @@ export class AgentSession {
 			getModelRegistry: () => this._modelRegistry,
 			isRawStream: () => isRawStreamSimpleFn(this.agent.streamFn),
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
+			getRequestAuthResolver: () => this.agent.resolveProviderRequestAuth,
 			isModelExhausted: (ref) => {
 				const [provider, ...id] = ref.split("/");
 				const model = provider ? this._modelRegistry.find(provider, id.join("/")) : undefined;
@@ -1356,7 +1364,7 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			settingsManager: this.settingsManager,
 			getModel: () => this.model,
-			getAdaptedSettings: () => this._getAdaptedCompactionSettings(),
+			getAdaptedSettings: (model) => this._getAdaptedCompactionSettings(model),
 			getContinuousChatWire: () => this._continuousChatWire(),
 			getContinuousChatTurn: () => this._memory.continuousChatHost()?.turns.current(),
 			commitPendingTurnMessages: () => this._foregroundLifecycle.commitRoutedPromptPrefix(),
@@ -2872,10 +2880,8 @@ export class AgentSession {
 				headers,
 			});
 			return {
-				apiKey: result.apiKey,
+				...result,
 				headers,
-				credentialHeaders: result.credentialHeaders,
-				providerAccountKey: result.providerAccountKey,
 			};
 		}
 
@@ -5103,8 +5109,8 @@ export class AgentSession {
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
 	 */
-	private _getAdaptedCompactionSettings(): CompactionSettings {
-		return this._compactionSupport.getAdaptedSettings();
+	private _getAdaptedCompactionSettings(model?: Model<Api>): CompactionSettings {
+		return this._compactionSupport.getAdaptedSettings(model);
 	}
 
 	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: Accessed by unit tests for compaction model resolution

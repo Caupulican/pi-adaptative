@@ -11,7 +11,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import { streamSimple } from "@caupulican/pi-ai/stream";
 import type {
 	Api,
@@ -25,10 +24,7 @@ import type {
 import type { Agent } from "../kernel/agent.ts";
 import { createAgentLoopContinuationState, runAgentLoop, startAgentProviderRequest } from "../kernel/agent-loop.ts";
 import type { AgentContext, AgentLoopConfig } from "../kernel/index.ts";
-import {
-	resolveProviderRequestAuthOptions,
-	resolveRequestPreflightMaxTokens,
-} from "../kernel/provider-request-planner.ts";
+import { resolveProviderRequestOptions, resolveRequestPreflightMaxTokens } from "../kernel/provider-request-planner.ts";
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
@@ -1565,8 +1561,6 @@ export class ReflectionController {
 		if (!model) {
 			throw new Error("runIsolatedCompletion: no model available");
 		}
-		await this.deps.ensureModelReady(model);
-		const thinkingLevel = resolveModelThinkingLevel(model, opts.thinkingLevel, "off");
 
 		// Registered for the full isolated-completion call (one-shot or child-loop) so the
 		// reload gate waits it out — this is the SINGLE choke point every isolated completion in the
@@ -1603,28 +1597,13 @@ export class ReflectionController {
 				signal: opts.signal,
 				interactionMode: "background",
 				cacheRetention: opts.cacheRetention,
-				reasoning: thinkingLevel,
 				sessionId: affinityKey,
 				requestGuard: opts.requestGuard,
 			};
 
-			// When streamFn is the raw streamSimple (e.g. in tests), auth must be injected explicitly.
-			// Throw only when auth genuinely fails — providers that authenticate without an API key
-			// (OAuth, local no-key) legitimately return ok with an undefined apiKey.
-			if (this.deps.isRawStreamSimple()) {
-				const auth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
-				if (!auth.ok) {
-					throw new Error(auth.error);
-				}
-				options.apiKey = auth.apiKey;
-				options.headers = auth.headers;
-				options.credentialHeaders = auth.credentialHeaders;
-				options.providerAccountKey = auth.providerAccountKey;
-			}
 			const agent = this.deps.getAgent();
 			const foregroundModel = agent.state.model;
 			const usesForegroundModel = foregroundModel?.provider === model.provider && foregroundModel.id === model.id;
-			const textToolCallProtocol = this.deps.resolveTextToolCallProtocol(model);
 			const maxTurns = opts.maxTurns;
 			let completedTurns = 0;
 			const loopConfig: AgentLoopConfig = {
@@ -1632,7 +1611,6 @@ export class ReflectionController {
 				interactionMode: "background",
 				maxTokens: opts.maxTokens,
 				cacheRetention: opts.cacheRetention,
-				reasoning: thinkingLevel,
 				// Same synthetic per-lane affinity key as the one-shot path above — never the real sessionId.
 				sessionId: affinityKey,
 				...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
@@ -1640,15 +1618,33 @@ export class ReflectionController {
 				...(options.credentialHeaders !== undefined ? { credentialHeaders: options.credentialHeaders } : {}),
 				...(options.providerAccountKey !== undefined ? { providerAccountKey: options.providerAccountKey } : {}),
 				getApiKey: agent.getApiKey,
-				resolveProviderRequestAuth: agent.resolveProviderRequestAuth,
+				resolveProviderRequestAuth:
+					agent.resolveProviderRequestAuth ??
+					(this.deps.isRawStreamSimple()
+						? async (requestModel) => {
+								const auth = await this.deps.getModelRegistry().getApiKeyAndHeaders(requestModel);
+								if (!auth.ok) throw new Error(auth.error);
+								return auth;
+							}
+						: undefined),
+				prepareProviderRequest: async (requestModel) => {
+					await this.deps.ensureModelReady(requestModel);
+					// Explicit requestContext is already a wire payload and must not gain a protocol primer.
+					const textToolCallProtocol = opts.requestContext
+						? undefined
+						: this.deps.resolveTextToolCallProtocol(requestModel);
+					return {
+						reasoning: opts.thinkingLevel ?? "off",
+						textToolCallProtocol,
+						temperature: textToolCallProtocol ? 0 : undefined,
+					};
+				},
 				// The host's reasoning policy, applied to this conversation's own state.
 				resolveRequestReasoning:
 					opts.conversationId !== undefined && agent.resolveRequestReasoning
 						? (reasoning, request) =>
 								agent.resolveRequestReasoning!(reasoning, { ...request, sessionId: opts.conversationId })
 						: agent.resolveRequestReasoning,
-				temperature: textToolCallProtocol ? 0 : undefined,
-				textToolCallProtocol,
 				onTextToolProtocolParse: usesForegroundModel ? agent.onTextToolProtocolParse : undefined,
 				transport: agent.transport,
 				thinkingBudgets: agent.thinkingBudgets,
@@ -1786,16 +1782,18 @@ export class ReflectionController {
 				// Sent exactly as given: the lane's own budget preflight, then one request with the lane's
 				// affinity, retention and auth, never through request planning.
 				const requestContext = opts.requestContext;
+				const requestAuth = await resolveProviderRequestOptions(loopConfig, opts.signal);
+				opts.signal?.throwIfAborted();
 				const maxTokens = await resolveRequestPreflightMaxTokens({
 					requestPreflight: opts.requestPreflight,
-					model,
+					model: requestAuth.model,
 					context: requestContext,
 					maxTokens: opts.maxTokens,
 					signal: opts.signal,
 				});
-				const requestAuth = await resolveProviderRequestAuthOptions(loopConfig);
+				requestAuth.requestGuard?.(requestAuth.model, opts.signal);
 				const streamFunction = agent.streamFn ?? streamSimple;
-				const rawStream = await streamFunction(model, requestContext, {
+				const rawStream = await streamFunction(requestAuth.model, requestContext, {
 					...options,
 					...requestAuth,
 					...(maxTokens !== undefined ? { maxTokens } : {}),

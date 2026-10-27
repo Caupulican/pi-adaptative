@@ -5,7 +5,7 @@ import type { ModelOverride, ProviderRequestConfig } from "./models-config-schem
 import type { RequestAuth } from "./request-auth.ts";
 
 export type ResolvedRequestAuth =
-	| ({ ok: true; providerAccountKey: string } & RequestAuth)
+	| ({ ok: true; model: Model<Api>; providerAccountKey: string } & RequestAuth)
 	| {
 			ok: false;
 			error: string;
@@ -75,7 +75,11 @@ export interface ModelRegistryContract {
 		auth: ResolvedRequestAuth,
 	): auth is Extract<ResolvedRequestAuth, { ok: true }>;
 	getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth>;
-	recoverRejectedOAuthApiKey(providerId: string, rejectedApiKey: string): Promise<string | undefined>;
+	recoverRejectedOAuthApiKey(
+		model: Model<Api>,
+		rejectedApiKey: string,
+		expectedAccountKey?: string,
+	): Promise<string | undefined>;
 	getProviderAuthStatus(provider: string): AuthStatus;
 	getProviderDisplayName(provider: string): string;
 	getApiKeyForProvider(provider: string): Promise<string | undefined>;

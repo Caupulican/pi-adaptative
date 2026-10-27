@@ -14,7 +14,7 @@ import {
 	type StructuredCompactionRequest,
 	summarizerCanIngest,
 } from "../kernel/compaction/compaction.ts";
-import type { ResolvedProviderRequestAuth } from "../kernel/index.ts";
+import type { AgentLoopConfig, ResolvedProviderRequestAuth } from "../kernel/index.ts";
 import { convertToLlm } from "../kernel/messages.ts";
 import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
 import type {
@@ -171,6 +171,7 @@ export interface CompactionSupportDeps {
 	isRawStream(): boolean;
 	/** Host auth resolution that THROWS with a user-actionable message when no key exists. */
 	getRequiredRequestAuth(model: Model<Api>): Promise<RequestAuth>;
+	getRequestAuthResolver?(): AgentLoopConfig["resolveProviderRequestAuth"];
 	isModelExhausted(ref: string): boolean;
 	getStoredFitnessReport(ref: string): ModelFitnessReport | undefined;
 	/** Estimated tokens of the summarization input (live context; over-estimates, which is safe). */
@@ -197,11 +198,11 @@ export class CompactionSupport {
 		return this.lastSelectionReason;
 	}
 
-	getAdaptedSettings(): CompactionSettings {
+	getAdaptedSettings(requestModel?: Model<Api>): CompactionSettings {
 		const settingsManager = this.deps.getSettingsManager();
 		// Under ICM compaction follows `compaction.enabled` too: the compaction controller scopes it to the running turn.
 		const settings = settingsManager.getCompactionSettings();
-		const model = this.deps.getModel();
+		const model = requestModel ?? this.deps.getModel();
 		if (!model) return settings;
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return settings;
@@ -235,19 +236,14 @@ export class CompactionSupport {
 	}
 
 	async getRequestAuth(model: Model<Api>): Promise<RequestAuth> {
+		const resolver = this.deps.getRequestAuthResolver?.();
+		if (resolver) return resolver(model);
 		if (this.deps.isRawStream()) {
 			return this.deps.getRequiredRequestAuth(model);
 		}
 
 		const result = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
-		return result.ok
-			? {
-					apiKey: result.apiKey,
-					headers: result.headers,
-					credentialHeaders: result.credentialHeaders,
-					providerAccountKey: result.providerAccountKey,
-				}
-			: {};
+		return result.ok ? result : {};
 	}
 
 	private freezeRequestAuth(model: Model<Api>, auth: RequestAuth): ResolvedProviderRequestAuth {
@@ -291,16 +287,16 @@ export class CompactionSupport {
 			let auth = await registry.getApiKeyAndHeaders(compactionModel);
 			let readiness: string | undefined;
 			if (registry.canUseResolvedRequestAuth(compactionModel, auth)) {
-				readiness = await this.readinessFailure(compactionModel);
-				if (!readiness) return { model: compactionModel, ...this.freezeRequestAuth(compactionModel, auth) };
+				readiness = await this.readinessFailure(auth.model);
+				if (!readiness) return { ...this.freezeRequestAuth(auth.model, auth), model: auth.model };
 			}
 			const isSameModel =
 				compactionModel.provider === sessionModel.provider && compactionModel.id === sessionModel.id;
 			if (!isSameModel) {
 				auth = await registry.getApiKeyAndHeaders(sessionModel);
 				if (registry.canUseResolvedRequestAuth(sessionModel, auth)) {
-					readiness = await this.readinessFailure(sessionModel);
-					if (!readiness) return { model: sessionModel, ...this.freezeRequestAuth(sessionModel, auth) };
+					readiness = await this.readinessFailure(auth.model);
+					if (!readiness) return { ...this.freezeRequestAuth(auth.model, auth), model: auth.model };
 				}
 			}
 			return {
@@ -311,18 +307,19 @@ export class CompactionSupport {
 			};
 		}
 
-		// Custom streamFn owns auth injection (CLI path) — resolve best-effort, never fail on auth
-		// here; a managed-local summarizer must still pass the readiness gate before compact() runs.
+		// A host resolver owns snapshot failures. Only a custom stream without that resolver owns
+		// its own auth injection; every managed-local summarizer still passes the readiness gate.
 		const requestAuth = this.freezeRequestAuth(compactionModel, await this.getRequestAuth(compactionModel));
-		const readiness = await this.readinessFailure(compactionModel);
+		const requestModel = requestAuth.model ?? compactionModel;
+		const readiness = await this.readinessFailure(requestModel);
 		if (readiness) {
 			return {
-				model: compactionModel,
 				...requestAuth,
+				model: requestModel,
 				failure: `summarizer ${compactionModel.id} not ready: ${readiness}`,
 			};
 		}
-		return { model: compactionModel, ...requestAuth };
+		return { ...requestAuth, model: requestModel };
 	}
 
 	private getExplicitCompactionModelSetting(): string | undefined {

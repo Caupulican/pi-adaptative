@@ -82,6 +82,7 @@ export interface CompactionControllerSettingsSource {
 export type AutoCompactionReason = "overflow" | "provider_recovery" | "threshold";
 
 export interface ProviderRequestCompactionInput {
+	model?: Model<Api>;
 	requestTokens: number;
 	nonCompactableTokens: number;
 	attempt: number;
@@ -96,6 +97,7 @@ type CompactionScope =
 	| { kind: "turn"; turn: IcmTurnHandle; startEntryId: string; entries: readonly SessionEntry[] };
 
 interface AutoCompactionRunOptions {
+	model?: Model<Api>;
 	initialTokens?: number;
 	singlePass?: boolean;
 	allowTrailingCompactionAsPrevious?: boolean;
@@ -214,7 +216,7 @@ export interface CompactionControllerDeps {
 	sessionManager: SessionManager;
 	settingsManager: CompactionControllerSettingsSource;
 	getModel(): Model<Api> | undefined;
-	getAdaptedSettings(): CompactionSettings;
+	getAdaptedSettings(model?: Model<Api>): CompactionSettings;
 	/**
 	 * The ICM projection that owns this session's provider wire (an ICM root session), undefined when none does. Under
 	 * the chat, history before the running chat turn is never sent, so host compaction is scoped to that turn's own
@@ -761,11 +763,13 @@ export class CompactionController {
 	private streamWithFrozenAuth(
 		credentialHeaders: Record<string, string> | undefined,
 		providerAccountKey: string | undefined,
+		requestGuard?: ResolvedProviderRequestAuth["requestGuard"],
 	): StreamFn {
 		const streamFn = this.deps.agent.streamFn;
 		return (model, context, options) =>
 			streamFn(model, context, {
 				...options,
+				...(requestGuard ? { requestGuard } : {}),
 				...(credentialHeaders !== undefined ? { credentialHeaders } : {}),
 				...(providerAccountKey !== undefined ? { providerAccountKey } : {}),
 			});
@@ -932,9 +936,9 @@ export class CompactionController {
 			const turn = this.deps.getContinuousChatTurn?.();
 			this.turnRequestFloor = turn === undefined ? undefined : { turn, tokens: input.nonCompactableTokens };
 		}
-		const settings = this.deps.getAdaptedSettings();
+		const settings = this.deps.getAdaptedSettings(input.model);
 		if (!settings.enabled) this.cancelIdlePreparation();
-		const model = this.deps.getModel();
+		const model = input.model ?? this.deps.getModel();
 		const contextWindow = model?.contextWindow ?? 0;
 		if (!model || contextWindow <= 0) return { action: "send" };
 		// Held tool results and owner messages alike reach the lane through here: a summary prepared
@@ -1029,6 +1033,7 @@ export class CompactionController {
 		// Written by the run's skip callback; a holder, since a closure assignment does not widen a narrowed local.
 		const skipped: { reason?: string } = {};
 		await this.runAuto("threshold", false, {
+			model,
 			initialTokens: input.requestTokens,
 			singlePass: true,
 			allowTrailingCompactionAsPrevious: input.attempt > 0,
@@ -1257,7 +1262,16 @@ export class CompactionController {
 				const model = modelTier === "cheap" ? selectedCompactionModel : sessionModel;
 				return this.deps.resolveModelAndAuth(model, sessionModel);
 			},
-			summarizeAndVerify: async (params, model, apiKey, headers, credentialHeaders, providerAccountKey, branch) => {
+			summarizeAndVerify: async (
+				params,
+				model,
+				apiKey,
+				headers,
+				credentialHeaders,
+				providerAccountKey,
+				branch,
+				requestGuard,
+			) => {
 				const preparation = this.prepareCompactionWithPackedHostRecords(
 					branch,
 					{ ...settings, keepRecentTokens: params.keepRecentTokens },
@@ -1275,7 +1289,7 @@ export class CompactionController {
 							effectiveInstructions,
 							signal,
 							compactionThinkingLevel,
-							this.streamWithFrozenAuth(credentialHeaders, providerAccountKey),
+							this.streamWithFrozenAuth(credentialHeaders, providerAccountKey, requestGuard),
 							this.deps.buildPreDigest(),
 							this.buildExecutionOptions(
 								preparation,
@@ -1577,8 +1591,8 @@ export class CompactionController {
 		signal: AbortSignal,
 		options: AutoCompactionRunOptions,
 	): Promise<boolean> {
-		const settings = this.deps.getAdaptedSettings();
-		const model = this.deps.getModel();
+		const model = options.model ?? this.deps.getModel();
+		const settings = this.deps.getAdaptedSettings(model);
 		this.deps.emit({ type: "compaction_start", reason });
 		const hadQueuedMessages = this.deps.agent.hasQueuedMessages();
 		let fromExtension = false;
@@ -1642,6 +1656,7 @@ export class CompactionController {
 					credentialHeaders,
 					providerAccountKey,
 					branchEntries,
+					requestGuard,
 				) => {
 					fromExtension = false;
 					const preparation = this.prepareCompactionWithPackedHostRecords(
@@ -1684,7 +1699,7 @@ export class CompactionController {
 								effectiveInstructions,
 								signal,
 								compactionThinkingLevel,
-								this.streamWithFrozenAuth(credentialHeaders, providerAccountKey),
+								this.streamWithFrozenAuth(credentialHeaders, providerAccountKey, requestGuard),
 								this.deps.buildPreDigest(),
 								this.buildExecutionOptions(
 									preparation,
@@ -2196,7 +2211,7 @@ export class CompactionController {
 						undefined,
 						signal,
 						this.deps.resolveThinkingLevel(auth.model, model),
-						this.streamWithFrozenAuth(auth.credentialHeaders, auth.providerAccountKey),
+						this.streamWithFrozenAuth(auth.credentialHeaders, auth.providerAccountKey, auth.requestGuard),
 						this.deps.buildPreDigest(),
 						this.buildExecutionOptions(preparation, auth.model, model, false, budgetScale),
 					),
@@ -2316,7 +2331,7 @@ export class CompactionController {
 		if (this.idlePreparation && !inFlight) this.idlePreparation.abort.abort();
 		const recorded = this.findPreparedCompaction(model, settingsKey);
 		if (!recorded && !inFlight) return false;
-		const settings = this.deps.getAdaptedSettings();
+		const settings = this.deps.getAdaptedSettings(model);
 		const compactable = this.compactableMessages();
 		const compactableTokens = compactable === undefined ? 0 : estimateCharacterTokens(compactable);
 		if (compactable === undefined || compactableTokens <= settings.keepRecentTokens) {
@@ -2384,7 +2399,7 @@ export class CompactionController {
 		try {
 			const compactionEntryId = await this.applyResult(result, false);
 			this.recordAppliedCompaction(compactionEntryId);
-			this.pendingRequestFrontier = this.pendingFrontier(compactionEntryId, model, this.deps.getAdaptedSettings());
+			this.pendingRequestFrontier = this.pendingFrontier(compactionEntryId, model, settings);
 			this.finishCompactionLifecycle(result.deterministic ? "fallback" : "success", result.deterministic?.cause);
 		} catch (error) {
 			// Ended like an automatic run's failure: the lifecycle and the UI hear it. A checkpoint already committed

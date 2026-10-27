@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { type OptionalToolRequestContext, optionalToolRelationAsked } from "../tool-applicability-gate.ts";
 import type { ValidationStage } from "./types.ts";
 
-export const SYSTEM_ONE_CATALOG_VERSION = "1.4.0";
+export const SYSTEM_ONE_CATALOG_VERSION = "1.5.0";
 export const SYSTEM_ONE_PINNED_MODEL = "jev-1.13.0";
 export const SYSTEM_ONE_PREVIEW_MODEL = "jev-preview";
 
@@ -191,6 +191,13 @@ const DRIFT_PACK: Readonly<QuestionPack> = Object.freeze({
 	}),
 });
 
+const VERIFICATION_CLAIM_PROVENANCE = Object.freeze({
+	historical_only:
+		"The answer reports only a prior-session run or saved baseline as historical evidence, and makes no current-work success claim for this verification kind.",
+	no_current_success:
+		"The answer only quotes a script or log, says this verification failed or was not run, predicts future success, or makes no successful current-work claim for this verification kind.",
+});
+
 const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>> = Object.freeze({
 	intake: Object.freeze({
 		objective_clear: Object.freeze({
@@ -299,14 +306,21 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 		states_tests_pass: Object.freeze({
 			type: "choice",
 			instructions:
-				"Classify only whether `final_answer` asserts that tests or another verification performed during this work passed. Distinguish a current-work result from an explicitly historical run or saved baseline. If both historical and current results are asserted, choose current_success. A quotation or report of what a script or build log printed, without asserting that the agent verified it, is no_current_success. Failures, non-runs and predictions about future verification are no_current_success.",
+				"Classify only whether `final_answer` asserts that actual tests executed during this work passed. Static checks, lint, type checking, compilation and builds alone are not tests. Distinguish current work from historical runs. If both current and historical test success are asserted, choose current_success. Quoted logs, failed tests, non-runs and predictions are no_current_success.",
 			criteria: Object.freeze({
+				...VERIFICATION_CLAIM_PROVENANCE,
 				current_success:
-					"The answer directly claims that a test, check, lint, compile, or build performed during this work passed, succeeded, was clean, or had no errors. A concise direct result such as The build completed successfully counts. If historical results are also mentioned, choose this when a current-work pass is claimed.",
-				historical_only:
-					"The answer reports a prior-session run or saved baseline as historical evidence and explicitly distinguishes that no verification was run in the current work. It makes no current-work success claim.",
-				no_current_success:
-					"The answer only quotes a script or log, says checks failed or were not run, predicts future success, or makes no successful verification claim for this work.",
+					"The answer directly asserts that executed tests or a test suite passed during this work. A lint, compiler or build success without an actual test-success claim does not qualify.",
+			}),
+		}),
+		states_checks_pass: Object.freeze({
+			type: "choice",
+			instructions:
+				"Classify only whether `final_answer` asserts that non-test verification performed during this work passed: static checks, lint, type checking, compilation, builds, or other identified checks. Test-suite success alone is not a non-test check claim. Distinguish current work from historical runs. If both current and historical check success are asserted, choose current_success. Quoted logs, failures, non-runs and predictions are no_current_success.",
+			criteria: Object.freeze({
+				...VERIFICATION_CLAIM_PROVENANCE,
+				current_success:
+					"The answer directly claims that an identified non-test check, lint, typecheck, compile or build passed, succeeded, was clean or had no errors during this work. The build completed successfully qualifies; tests passed alone does not.",
 			}),
 		}),
 		states_committed: Object.freeze({
