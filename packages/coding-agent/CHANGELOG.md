@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Codex speed tiers follow the Codex client. `/ultrafast` is added next to `/fast`, and each toggles its own tier (`priority` or `ultrafast`) of the model's account catalog: the tier in effect returns to standard, another tier switches. The account catalog's default tier applies when no choice is saved and the model still advertises it. Standard processing, including an explicit `/fast off`, sends no `service_tier` field instead of `service_tier: "default"`.
+
 ## [0.104.15] - 2026-10-27
 
 ### Fixed

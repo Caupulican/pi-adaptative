@@ -348,7 +348,7 @@ export class FooterComponent implements Component {
 		const fastModeEnabled = getFastModeStatus({
 			model: this.session.model,
 			settingsManager: this.services.settingsManager,
-			getFastModeServiceTiers: (model) => this.session.getFastModeServiceTiers(model),
+			getFastModeCatalog: (model) => this.session.getFastModeCatalog(model),
 		}).enabled;
 		const modelDisplayName = fastModeEnabled ? `${modelName} ${FAST_MODE_BADGE}` : modelName;
 

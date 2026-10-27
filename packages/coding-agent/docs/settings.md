@@ -38,7 +38,9 @@ Edit directly or use `/settings` for common options.
 
 #### Processing tiers
 
-`/fast on` and `/fast priority` select priority processing; `/fast off` selects the default tier. `/fast ultrafast` selects Codex Ultrafast only when the current model/account catalog advertises it. `/fast status` reports the selection and an unavailable saved tier. These commands preserve the model and thinking level.
+`/fast` and `/ultrafast` each toggle one tier of the model's catalog, as in Codex: `/fast` toggles the `priority` (Fast) tier, `/ultrafast` the `ultrafast` tier. Choosing the tier already in effect returns to standard processing; choosing the other tier switches to it. `/fast on`, `/fast priority`, `/fast ultrafast`, `/fast off`, `/ultrafast on` and `/ultrafast off` set a tier explicitly (`off` is standard processing), and `/fast status` and `/ultrafast status` report the selection and an unavailable saved tier. A tier the current model/account catalog does not advertise is refused. These commands preserve the model and thinking level.
+
+Standard processing sends no `service_tier` field, as Codex does; the explicit `default` choice is never put on the wire. When no choice is saved, the account catalog's default tier for the model applies if the model still advertises it (`/fast status` says so); otherwise the request is standard.
 
 Preferences are stored per provider:
 

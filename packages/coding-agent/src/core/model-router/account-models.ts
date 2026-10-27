@@ -218,6 +218,19 @@ export class AccountModelCatalog {
 		return model.serviceTiers;
 	}
 
+	/** The model's speed tiers and the one the catalog applies when the user chose none. */
+	speedCatalog(model: Model<Api>) {
+		return { tiers: this.serviceTiers(model), defaultTier: this.defaultServiceTier(model) };
+	}
+
+	/** The tier the account catalog applies when the user chose none, if the model still advertises it. */
+	defaultServiceTier(model: Model<Api>): string | undefined {
+		if (this.availability(model) === "unavailable") return undefined;
+		const state = this.states.get(model.provider);
+		if (state?.kind === "listed") return state.models.get(model.id)?.defaultServiceTier ?? model.defaultServiceTier;
+		return model.defaultServiceTier;
+	}
+
 	/** Why a model is unavailable on this account, for status and skip reasons. */
 	unavailableReason(model: Model<Api>): string | undefined {
 		return this.unavailability(model)?.reason;

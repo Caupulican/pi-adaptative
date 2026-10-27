@@ -653,6 +653,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					model,
 					settingsManager.getFastModePreference(model.provider),
 					serviceTiers,
+					accountModels.defaultServiceTier(model),
 				);
 				const serviceTier =
 					options?.serviceTier === undefined ? (fastModeServiceTier ?? defaultServiceTier) : options.serviceTier;

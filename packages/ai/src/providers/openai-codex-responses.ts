@@ -899,7 +899,8 @@ function buildRequestBody(
 		body.temperature = options.temperature;
 	}
 
-	if (options?.serviceTier !== undefined) {
+	// "default" is the explicit standard choice, not a tier the backend knows: standard is the absence of the field, as in Codex.
+	if (options?.serviceTier !== undefined && options.serviceTier !== "default") {
 		body.service_tier = options.serviceTier;
 	}
 

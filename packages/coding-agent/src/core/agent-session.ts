@@ -1,14 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import type {
-	Api,
-	AssistantMessage,
-	ImageContent,
-	Model,
-	ModelServiceTier,
-	TextContent,
-	Usage,
-} from "@caupulican/pi-ai";
+import type { Api, AssistantMessage, ImageContent, Model, TextContent, Usage } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
@@ -2519,9 +2511,9 @@ export class AgentSession {
 		});
 	}
 
-	/** Account-advertised speed tiers, with bundled capabilities before account discovery. */
-	getFastModeServiceTiers(model: Model<Api>): readonly ModelServiceTier[] | undefined {
-		return this._accountModels.serviceTiers(model);
+	/** Account-advertised speed tiers and the tier the catalog applies when none is saved, with bundled capabilities before discovery. */
+	getFastModeCatalog(model: Model<Api>) {
+		return this._accountModels.speedCatalog(model);
 	}
 
 	/** The persisted `/toolprobe` record for a model, or undefined when never probed. */

@@ -1820,13 +1820,13 @@ export class InteractiveMode {
 				await this.showModelsSelector();
 				return;
 			}
-			if (text === "/fast" || text.startsWith("/fast ")) {
+			if (text === "/fast" || text.startsWith("/fast ") || text === "/ultrafast" || text.startsWith("/ultrafast ")) {
 				handleFastModeCommand(
 					{
 						session: {
 							model: this.session.model,
 							settingsManager: this.settingsManager,
-							getFastModeServiceTiers: (model) => this.session.getFastModeServiceTiers(model),
+							getFastModeCatalog: (model) => this.session.getFastModeCatalog(model),
 						},
 						showStatus: (message) => this.showStatus(message),
 					},
