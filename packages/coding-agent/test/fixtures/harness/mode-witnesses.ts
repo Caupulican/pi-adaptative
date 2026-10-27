@@ -2536,19 +2536,30 @@ async function verifyAccountPreflightAbort(world: HarnessWorld, agentDir: string
 		};
 		const claimPhase = `mode-account-preflight-${closeFirst ? "closed" : "control"}`;
 		const claimRequestMark = world.systemOne.decoded.length;
+		const controlPrompt = "Run the account preflight control.";
 		world.systemOne.enterPhase(claimPhase, closeFirst ? {} : claimJudgments, {
 			expect: ({ state, questions }) => {
 				expect(closeFirst, "the closed preflight publishes no answer to judge").toBe(false);
 				expect(Object.keys(questions).sort(), "the live preflight reaches the real claim question pack").toEqual(
 					Object.keys(claimJudgments).sort(),
 				);
+				const ownerEntries = created.sessionManager
+					.getBranch()
+					.filter((entry) => entry.type === "message" && entry.message.role === "user");
+				expect(ownerEntries, "the control has one actual owner message as its claim boundary").toHaveLength(1);
 				expect(state, "the claim check reads this control's actual final answer").toEqual({
 					final_answer: reply,
+					work_scope: {
+						request: controlPrompt,
+						request_truncated: false,
+						boundary: "turn",
+						opening_entry_id: ownerEntries[0]?.id,
+					},
 				});
 			},
 		});
 		const prompt = session
-			.prompt("Run the account preflight control.", {
+			.prompt(controlPrompt, {
 				preflightResult: (passed) => {
 					preflightResults.push(passed);
 				},
