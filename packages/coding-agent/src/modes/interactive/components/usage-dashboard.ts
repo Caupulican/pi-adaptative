@@ -83,7 +83,11 @@ function accountSortRank(account: AccountOverview): number {
 function formatKpiRows(overview: UsageOverview, width: number): [string, string] {
 	const session = overview.session;
 	const subText = session.subscription ? " (sub)" : "";
-	const subagentText = session.subagentCostUsd > 0 ? ` ($${session.subagentCostUsd.toFixed(2)} subagents)` : "";
+	const backgroundParts = [
+		...(session.subagentCostUsd > 0 ? [`$${session.subagentCostUsd.toFixed(2)} agents`] : []),
+		...(session.icmCostUsd > 0 ? [`$${session.icmCostUsd.toFixed(2)} ICM`] : []),
+	];
+	const subagentText = backgroundParts.length > 0 ? ` (${backgroundParts.join(" · ")})` : "";
 	const left1 = `${theme.fg("dim", "SESSION  ")}${theme.fg("text", `${dollars(session.costUsd)}${subText}${subagentText}`)}${theme.fg("dim", " · Today ")}${theme.fg("text", dollars(overview.today.costUsd))}`;
 
 	const cacheTotal = session.tokens.input + session.tokens.cacheRead + session.tokens.cacheWrite;

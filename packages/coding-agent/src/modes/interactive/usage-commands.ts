@@ -39,7 +39,16 @@ export interface UsageCommandHost {
 		readonly model: Model<Api> | undefined;
 		/** A redeemed reset: the provider's recorded limits no longer hold, so it is routed to again. */
 		noteSubscriptionUsageReset(provider: string): void;
-		getCostSummary(): Pick<SessionCostSummary, "currentCost" | "subagentCost" | "todayCost" | "todaySubagentCost">;
+		getCostSummary(): Pick<
+			SessionCostSummary,
+			| "currentCost"
+			| "subagentCost"
+			| "subagentReports"
+			| "historySummaryCost"
+			| "historySummaryReports"
+			| "todayCost"
+			| "todaySubagentCost"
+		>;
 		getSessionStats(): { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number } };
 		getContextUsage(): { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
 		getProviderLoadView(): ProviderLoadView;

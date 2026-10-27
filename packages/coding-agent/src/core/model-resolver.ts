@@ -158,12 +158,21 @@ export function findExactModelReferenceMatch(
 	return idMatches.length === 1 ? idMatches[0] : undefined;
 }
 
-/** True when `token` is the id of a model in `models`, or a `<provider>/<id>` reference to one. */
+/**
+ * True when `token` names a model: the id of one of `models`, or `<provider>/<anything>` with the provider of one of
+ * them. A provider-qualified token is always a model reference, so the resolver either finds it or reports the failure
+ * instead of the token turning into instruction text. A bare token must be an exact id: a fuzzy match would read an
+ * instruction word as a model.
+ */
 export function isModelReference(token: string, models: readonly Model<Api>[]): boolean {
 	const lower = token.trim().toLowerCase();
 	if (!lower) return false;
+	const slash = lower.indexOf("/");
+	const provider = slash > 0 ? lower.slice(0, slash) : undefined;
 	return models.some(
-		(model) => model.id.toLowerCase() === lower || `${model.provider}/${model.id}`.toLowerCase() === lower,
+		(model) =>
+			model.id.toLowerCase() === lower ||
+			(provider !== undefined && model.provider.toLowerCase() === provider && lower.length > slash + 1),
 	);
 }
 

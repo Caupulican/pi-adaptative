@@ -9,7 +9,7 @@ import type {
 	XaiAccountUsage,
 } from "@caupulican/pi-ai";
 import type { AuthCredential } from "../auth-storage.ts";
-import type { SessionCostSummary } from "../cost/cost-summary.ts";
+import { backgroundCostBreakdown, type SessionCostSummary } from "../cost/cost-summary.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { describeProviderAccountKey, providerAccountKey } from "./account-key.ts";
 import { entryKey } from "./ledger.ts";
@@ -64,7 +64,9 @@ export interface UsageOverview {
 	at: number;
 	session: {
 		costUsd: number;
+		/** Delegated workers and bots only; the ICM history summaries are `icmCostUsd`. */
 		subagentCostUsd: number;
+		icmCostUsd: number;
 		subscription: boolean;
 		tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		context: { tokens: number | null; window: number; percent: number | null } | null;
@@ -493,7 +495,16 @@ export function openRouterUsageSnapshot(
 
 export interface UsageOverviewInput {
 	now: number;
-	cost: Pick<SessionCostSummary, "currentCost" | "subagentCost" | "todayCost" | "todaySubagentCost">;
+	cost: Pick<
+		SessionCostSummary,
+		| "currentCost"
+		| "subagentCost"
+		| "subagentReports"
+		| "historySummaryCost"
+		| "historySummaryReports"
+		| "todayCost"
+		| "todaySubagentCost"
+	>;
 	tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	context?: { tokens: number | null; contextWindow: number; percent: number | null };
 	subscription: boolean;
@@ -505,6 +516,7 @@ export interface UsageOverviewInput {
 }
 
 export function buildUsageOverview(input: UsageOverviewInput): UsageOverview {
+	const background = backgroundCostBreakdown(input.cost);
 	const current = new Set(input.accounts.map((account) => account.accountKey));
 	const otherInflight = input.load.inflight.filter((entry) => !current.has(entryKey(entry))).length;
 	const otherLimits = input.load.limits.filter((limit) => !current.has(limit.provider)).length;
@@ -512,7 +524,8 @@ export function buildUsageOverview(input: UsageOverviewInput): UsageOverview {
 		at: input.now,
 		session: {
 			costUsd: input.cost.currentCost,
-			subagentCostUsd: input.cost.subagentCost,
+			subagentCostUsd: background.agentCost,
+			icmCostUsd: background.icmCost,
 			subscription: input.subscription,
 			tokens: input.tokens,
 			context: input.context

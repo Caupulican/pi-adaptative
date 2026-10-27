@@ -103,6 +103,7 @@ export class BotTeamChatController {
 
 	/** Subscribe to bot and team updates. Re-binding replaces the previous subscription. */
 	bindSession(): void {
+		this.lastRenderedChatSignature = undefined;
 		this.unsubscribeUpdates?.();
 		this.unsubscribeUpdates = this.host.getSessionPort().subscribeBotTeamUpdates(() => {
 			if (!this.isRootChatActive()) {
