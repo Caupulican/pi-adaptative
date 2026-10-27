@@ -2,12 +2,12 @@
  * One worktree-rooted candidate identity shared by CompletionProof, JEV-024..027, and DeliveryBundle.
  * Never uses process.cwd() as the repo identity.
  */
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { promisify } from "node:util";
+import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 
 export interface UntrackedFileBytes {
 	readonly path: string;
@@ -25,7 +25,7 @@ export interface CandidateSnapshot {
 
 const GIT_BYTES_LIMIT = 32 * 1024 * 1024;
 const GIT_TEXT_LIMIT = 8 * 1024 * 1024;
-const execFileAsync = promisify(execFile);
+const GIT_ASYNC_TIMEOUT_MS = 30_000;
 
 function gitBytes(repoRoot: string, args: readonly string[]): Buffer {
 	return execFileSync("git", args, { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"], maxBuffer: GIT_BYTES_LIMIT });
@@ -41,12 +41,25 @@ function gitText(repoRoot: string, args: readonly string[]): string {
 }
 
 async function gitBytesAsync(repoRoot: string, args: readonly string[]): Promise<Buffer> {
-	const { stdout } = await execFileAsync("git", [...args], {
-		cwd: repoRoot,
-		encoding: "buffer",
-		maxBuffer: GIT_BYTES_LIMIT,
+	const child = spawn("git", [...args], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+	const stdout: Buffer[] = [];
+	const stderr: Buffer[] = [];
+	let stdoutBytes = 0;
+	child.stdout?.on("data", (chunk: Buffer) => {
+		stdoutBytes += chunk.length;
+		if (stdoutBytes <= GIT_BYTES_LIMIT) stdout.push(chunk);
 	});
-	return stdout;
+	child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+	const terminal = await waitForChildProcessWithTermination(child, {
+		timeoutMs: GIT_ASYNC_TIMEOUT_MS,
+		killGraceMs: 1_000,
+	});
+	if (terminal.reason === "timeout") throw new Error(`git ${args[0] ?? ""} exceeded ${GIT_ASYNC_TIMEOUT_MS}ms`);
+	if (stdoutBytes > GIT_BYTES_LIMIT) throw new Error(`git ${args[0] ?? ""} output exceeded ${GIT_BYTES_LIMIT} bytes`);
+	if (terminal.code !== 0) {
+		throw new Error(Buffer.concat(stderr).toString("utf8").trim() || `git ${args[0] ?? ""} exited ${terminal.code}`);
+	}
+	return Buffer.concat(stdout);
 }
 
 async function gitTextAsync(repoRoot: string, args: readonly string[]): Promise<string> {
