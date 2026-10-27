@@ -31,6 +31,8 @@ export interface SessionCostSummary extends CurrentSessionCostTotals {
 	todayCost: number;
 	todayOwnCost: number;
 	todaySubagentCost: number;
+	/** The ICM history-summary share of `todaySubagentCost`. */
+	todayHistorySummaryCost: number;
 	todayWindow: DailyUsageWindow;
 	todayRollover: "local-midnight";
 }
@@ -183,6 +185,7 @@ export function createSessionCostSummary(args: {
 		todayCost: args.dailyTotals.totalCost,
 		todayOwnCost: args.dailyTotals.ownCost,
 		todaySubagentCost: args.dailyTotals.spawnedCost,
+		todayHistorySummaryCost: args.dailyTotals.historySummaryCost,
 		todayWindow: args.todayWindow,
 		todayRollover: "local-midnight",
 	};

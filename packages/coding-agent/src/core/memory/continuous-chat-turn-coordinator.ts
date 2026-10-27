@@ -158,7 +158,7 @@ export class IcmTurnCoordinator {
 		}
 		const turn = new IcmTurn(++this.turnCount, boundary, Date.now());
 		this.turn = turn;
-		this.pinned = { view: boundary.view, timestamp: turn.startedAt };
+		this.pinned = { view: boundary.birthView, timestamp: turn.startedAt };
 		if (signal) {
 			const onAbort = () => {
 				if (this.turn === turn && this.currentPhase === "running") this.setPhase("stopping");
@@ -184,10 +184,10 @@ export class IcmTurnCoordinator {
 		return this.turn;
 	}
 
-	/** The chat view a worker is born with: the running turn's pinned view, else the view the latest turn pinned. */
+	/** The chat view a worker is born with: the running turn's pinned view, else the view the latest turn pinned, each collapsed to the causal budget. */
 	birthView(): { view: string; timestamp: number } | undefined {
 		const running = this.turn;
-		return running ? { view: running.boundary.view, timestamp: running.startedAt } : this.pinned;
+		return running ? { view: running.boundary.birthView, timestamp: running.startedAt } : this.pinned;
 	}
 
 	phase(): IcmTurnPhase {

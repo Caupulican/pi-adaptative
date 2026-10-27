@@ -11,6 +11,9 @@ export type ActiveChatTarget =
 	| { readonly kind: "bot"; readonly agentId: string }
 	| { readonly kind: "team"; readonly teamId: string };
 
+/** What a bot-and-team update touched: `"all"` for a store change, otherwise the agents whose lane state changed. */
+export type BotTeamChange = "all" | readonly string[];
+
 export type PersistentBotLiveState = "running" | "queued" | "idle" | "awaiting_parent" | "failed" | "retired";
 
 export interface PersistentBotRecord {

@@ -272,11 +272,8 @@ export class SystemOneController {
 					},
 				},
 				getReceiverId: () => this.store.runId,
-				getCandidate: () => ({
-					id: this.store.snapshot().repo.baseline_revision,
-					scope: this.store.snapshot().repo.root,
-					kind: "repository",
-				}),
+				getCandidate: () => this.controllerCandidate(),
+				captureCandidate: async () => this.controllerCandidate(),
 				captureFence: () => () => true,
 			},
 			async (state, questions, signal) => {
@@ -285,6 +282,11 @@ export class SystemOneController {
 				return { id: result.decision.id, answers: result.answers };
 			},
 		);
+	}
+
+	private controllerCandidate(): { id: string; scope: string; kind: "repository" } {
+		const repo = this.store.snapshot().repo;
+		return { id: repo.baseline_revision, scope: repo.root, kind: "repository" };
 	}
 
 	setVerificationHost(host: VerificationHost): void {

@@ -8,6 +8,11 @@
 - `/bot new <id> <model>` and team members resolve the model through the registry's resolver (authenticated models first) and name an unknown model instead of guessing a provider. A model token is a `<provider>/<model>` reference or an exact model id from the registry, for example `claude-haiku-5-5`; the bare aliases `haiku`, `sonnet` and `opus` are not accepted, so instructions that start with a model-like word stay instructions. A bot messaged later runs on its stored model.
 - A completion check sees every file a large diff changes, not only those in the first 24,000 characters of the patch.
 - System One no longer sends the same redacted evidence once per unsettled item (a nine-item settlement sent it nine times and the request failed).
+- Every tool call no longer freezes the terminal while a verification obligation is open: the candidate identity (four git processes and every untracked file) is captured asynchronously on the tool-call, completion and route paths, with the same digest as before.
+- The ICM compaction reasoning effort is a setting, `contextPolicy.memory.history.compactionThinkingLevel`, and defaults to `low` instead of a fixed `xhigh`: each compaction writes one line of at most 512 bytes, and `xhigh` runs spent thousands of reasoning tokens on it. The summary model must support the level.
+- A new worker or bot is born with the chat view collapsed to the compaction view's budget (16-32 KB) instead of the root's whole 64-128 KB view; `zoom` opens any collapsed line.
+- A read-only `delegate` with `requirementIds` and no tool that runs a command is refused at dispatch, because its report could never meet a requirement.
+- An open bot or team chat refreshes only for its own agent, its team's members or a store change, and today's usage splits ICM history summaries from agent spend.
 - The workbench inspector names `/verification waive` under peer findings, and the Live Chats modal keeps its selector documentation with the selector.
 
 ## [0.104.13] - 2026-10-26

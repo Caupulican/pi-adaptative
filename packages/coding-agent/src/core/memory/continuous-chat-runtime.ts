@@ -42,6 +42,8 @@ export interface ContinuousChatTurnBoundary {
 	readonly viewRevision: number;
 	/** Rendered `<chat>` of messages [0, totalMessages). It excludes the arriving user message. */
 	readonly view: string;
+	/** `view` collapsed to the causal view's budget: the view a worker is born with. */
+	readonly birthView: string;
 	/** Idempotent no-op release hook retained on the boundary handle. */
 	release(): void;
 }
@@ -332,6 +334,7 @@ export class ContinuousChatRuntime {
 			totalMessages: snapshot.totalMessages,
 			viewRevision: snapshot.viewRevision,
 			view: snapshot.view,
+			birthView: snapshot.birthView,
 			release: () => undefined,
 		};
 	}

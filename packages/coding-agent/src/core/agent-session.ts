@@ -5973,7 +5973,7 @@ export class AgentSession {
 	subscribeOrchestrationStore(listener: () => void): () => void {
 		return this._backgroundLanes.subscribeOrchestrationStore(listener);
 	}
-	subscribeBotTeamUpdates(listener: () => void): () => void {
+	subscribeBotTeamUpdates(listener: Parameters<BackgroundLaneController["subscribeBotTeamUpdates"]>[0]): () => void {
 		return this._backgroundLanes.subscribeBotTeamUpdates(listener);
 	}
 	resolveModelSpec(rawModel?: string) {

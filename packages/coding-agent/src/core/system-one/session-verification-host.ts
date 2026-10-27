@@ -7,10 +7,35 @@ import type { SessionManager } from "../../kernel/node.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
-import { captureCandidateSnapshot } from "./candidate-snapshot.ts";
+import { captureCandidateSnapshot, captureCandidateSnapshotAsync } from "./candidate-snapshot.ts";
 import type { StageExecutionScopeSource } from "./controller.ts";
 import type { VerificationCoordinator, VerificationHost } from "./verification-coordinator.ts";
 import { VERIFICATION_OBLIGATIONS_CUSTOM_TYPE } from "./verification-obligations.ts";
+
+type CandidateLocation = { kind: "repository"; root: string } | { kind: "outcome"; cwd: string };
+
+/** The git worktree root above `cwd`, or `cwd` itself when none contains it. Reads only a few directory entries. */
+function locateCandidate(cwd: string): CandidateLocation {
+	let root = cwd;
+	while (
+		!(
+			existsSync(join(root, ".git")) &&
+			(statSync(join(root, ".git")).isFile() || existsSync(join(root, ".git", "HEAD")))
+		)
+	) {
+		const parent = dirname(root);
+		if (parent === root) return { kind: "outcome", cwd };
+		root = parent;
+	}
+	return { kind: "repository", root };
+}
+
+function outcomeCandidate(sessionId: string, cwd: string): { id: string; scope: string; kind: "outcome" } {
+	const identity = createHash("sha256")
+		.update(JSON.stringify([sessionId, cwd]))
+		.digest("hex");
+	return { id: `outcome:${identity}`, scope: cwd, kind: "outcome" };
+}
 
 /** Infrastructure adapter: the active branch journal and actual worktree own identity. */
 export function createSessionVerificationHost(
@@ -38,24 +63,16 @@ export function createSessionVerificationHost(
 		},
 		getReceiverId: () => getManager().getSessionId(),
 		getCandidate: (operationCwd) => {
-			const cwd = operationCwd ?? getCwd();
-			let root = cwd;
-			while (
-				!(
-					existsSync(join(root, ".git")) &&
-					(statSync(join(root, ".git")).isFile() || existsSync(join(root, ".git", "HEAD")))
-				)
-			) {
-				const parent = dirname(root);
-				if (parent === root) {
-					const identity = createHash("sha256")
-						.update(JSON.stringify([getManager().getSessionId(), cwd]))
-						.digest("hex");
-					return { id: `outcome:${identity}`, scope: cwd, kind: "outcome" };
-				}
-				root = parent;
-			}
-			return { id: captureCandidateSnapshot(root).digest, scope: root, kind: "repository" };
+			const where = locateCandidate(operationCwd ?? getCwd());
+			return where.kind === "outcome"
+				? outcomeCandidate(getManager().getSessionId(), where.cwd)
+				: { id: captureCandidateSnapshot(where.root).digest, scope: where.root, kind: "repository" };
+		},
+		captureCandidate: async (operationCwd) => {
+			const where = locateCandidate(operationCwd ?? getCwd());
+			return where.kind === "outcome"
+				? outcomeCandidate(getManager().getSessionId(), where.cwd)
+				: { id: (await captureCandidateSnapshotAsync(where.root)).digest, scope: where.root, kind: "repository" };
 		},
 		captureFence: () => {
 			const manager = getManager();
@@ -116,10 +133,10 @@ export function wrapToolWithVerification<TParameters extends TSchema, TDetails>(
 				signal,
 			);
 			signal?.throwIfAborted();
-			const receiptCallId = verification.beginCall(invocationReceiverId, tool.name, invocationCwd);
+			const receiptCallId = await verification.beginCall(invocationReceiverId, tool.name, invocationCwd);
 			try {
 				const result = await executor.execute(callId, input, signal, onUpdate);
-				verification.finishCall({
+				await verification.finishCall({
 					callId: receiptCallId,
 					tool: tool.name,
 					args: input,
@@ -128,7 +145,7 @@ export function wrapToolWithVerification<TParameters extends TSchema, TDetails>(
 				});
 				return result;
 			} catch (error) {
-				verification.finishCall({
+				await verification.finishCall({
 					callId: receiptCallId,
 					tool: tool.name,
 					args: input,

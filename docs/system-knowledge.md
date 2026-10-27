@@ -36,6 +36,7 @@ anything fully encoded in code, tests, or docs does not belong here.
 
 ## TUI and Terminal
 
+- Nothing on the render path or the per-tool-call path runs a synchronous process or reads untracked files: the verification candidate digest is captured with `captureCandidateSnapshotAsync` (the same digest as the synchronous `captureCandidateSnapshot`, which remains only for cold, once-per-event paths). The bot roster is a cached projection in `BackgroundLaneController`, dropped by bot-store, lane-tracker and orchestration events; read it per frame, never rebuild it per frame.
 - East Asian ambiguous characters occupy 2 columns on CJK-codepage consoles; width mode is probed at startup (print `·`, DSR `6n`, read the CPR column) because locale sniffing cannot detect it. All width math goes through `visibleWidth`/`graphemeWidth`; ambiguous width is never hardcoded to 1; probe consumers must not outlive startup (CPR is byte-identical to modified-F3 sequences); `PI_AMBIGUOUS_WIDTH=wide|narrow` overrides.
 
 ## Compaction and Long Sessions

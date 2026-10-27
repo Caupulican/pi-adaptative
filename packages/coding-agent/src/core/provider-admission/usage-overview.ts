@@ -71,7 +71,7 @@ export interface UsageOverview {
 		tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		context: { tokens: number | null; window: number; percent: number | null } | null;
 	};
-	today: { costUsd: number; subagentCostUsd: number };
+	today: { costUsd: number; subagentCostUsd: number; icmCostUsd: number };
 	machine: {
 		inflight: number;
 		otherAccountsInflight: number;
@@ -504,6 +504,7 @@ export interface UsageOverviewInput {
 		| "historySummaryReports"
 		| "todayCost"
 		| "todaySubagentCost"
+		| "todayHistorySummaryCost"
 	>;
 	tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	context?: { tokens: number | null; contextWindow: number; percent: number | null };
@@ -532,7 +533,11 @@ export function buildUsageOverview(input: UsageOverviewInput): UsageOverview {
 				? { tokens: input.context.tokens, window: input.context.contextWindow, percent: input.context.percent }
 				: null,
 		},
-		today: { costUsd: input.cost.todayCost, subagentCostUsd: input.cost.todaySubagentCost },
+		today: {
+			costUsd: input.cost.todayCost,
+			subagentCostUsd: Math.max(0, input.cost.todaySubagentCost - input.cost.todayHistorySummaryCost),
+			icmCostUsd: input.cost.todayHistorySummaryCost,
+		},
 		machine: {
 			inflight: input.load.inflight.length,
 			otherAccountsInflight: otherInflight,

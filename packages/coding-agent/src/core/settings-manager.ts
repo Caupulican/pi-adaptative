@@ -2479,6 +2479,7 @@ export class SettingsManager {
 	getMemoryHistorySettings(): {
 		hierarchy: boolean;
 		summaryModel: string | undefined;
+		compactionThinkingLevel: MemoryHistorySettings["compactionThinkingLevel"];
 		allowExternalSummaryEgress: boolean;
 		allowExternalAdmissionEgress: boolean;
 		maxConcurrentSummaries: number;
@@ -2491,6 +2492,11 @@ export class SettingsManager {
 			// string names a model, so a hand-edited "false" or a number never starts or breaks history construction.
 			hierarchy: history?.hierarchy === true,
 			summaryModel: typeof history?.summaryModel === "string" ? history.summaryModel.trim() || undefined : undefined,
+			compactionThinkingLevel: ["minimal", "low", "medium", "high", "xhigh"].includes(
+				String(history?.compactionThinkingLevel),
+			)
+				? history?.compactionThinkingLevel
+				: undefined,
 			allowExternalSummaryEgress: history?.allowExternalSummaryEgress === true,
 			allowExternalAdmissionEgress: history?.allowExternalAdmissionEgress === true,
 			maxConcurrentSummaries: clampMemoryHistoryMaxConcurrentSummaries(
@@ -2507,6 +2513,7 @@ export class SettingsManager {
 		const normalized: MemoryHistorySettings = {
 			hierarchy: settings.hierarchy,
 			summaryModel: settings.summaryModel?.trim() || undefined,
+			compactionThinkingLevel: settings.compactionThinkingLevel,
 			allowExternalSummaryEgress: settings.allowExternalSummaryEgress,
 			allowExternalAdmissionEgress: settings.allowExternalAdmissionEgress,
 			maxConcurrentSummaries:

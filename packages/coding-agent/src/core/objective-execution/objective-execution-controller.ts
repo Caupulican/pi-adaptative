@@ -47,7 +47,7 @@ import { requestsBugFix } from "../system-one/bug-fix.ts";
 import {
 	type CandidateSnapshot,
 	candidateSnapshotIdentity,
-	captureCandidateSnapshot,
+	captureCandidateSnapshotAsync,
 } from "../system-one/candidate-snapshot.ts";
 import {
 	accountRequestDirective,
@@ -418,13 +418,14 @@ function routeStateProjection(
 	history: readonly RouteHistoryEntry[],
 	initialDigest: string,
 	routeSnapshot: CandidateSnapshot | undefined,
+	afterDigest: string,
 ) {
 	return projectBoundedCombinedState(objectiveId, runtime, {
 		stallTurns: stall.stallTurns,
 		strategyFingerprint: stall.fingerprint,
 		history,
 		beforeDigest: initialDigest,
-		afterDigest: captureOptionalSnapshot(deps.repoRoot)?.digest ?? "unknown",
+		afterDigest,
 		systemOneState: deps.systemOne?.snapshot?.(),
 		candidateDigest: routeSnapshot?.digest,
 		integrityState: deps.systemOne?.snapshot ? "available" : "unavailable",
@@ -434,10 +435,10 @@ function routeStateProjection(
 /** Reason code of a completion route held back because running work exists anywhere in the runtime. */
 export const COMPLETION_FENCED_REASON_CODE = "completion_fenced_by_running_work";
 
-function captureOptionalSnapshot(repoRoot: string | undefined): CandidateSnapshot | undefined {
+async function captureOptionalSnapshot(repoRoot: string | undefined): Promise<CandidateSnapshot | undefined> {
 	if (!repoRoot) return undefined;
 	try {
-		return captureCandidateSnapshot(repoRoot);
+		return await captureCandidateSnapshotAsync(repoRoot);
 	} catch {
 		return undefined;
 	}
@@ -694,7 +695,7 @@ export class ObjectiveExecutionController {
 		objectiveId: string,
 		options?: { signal?: AbortSignal; legacyActionHint?: string },
 	): Promise<ObjectiveRoute> {
-		const routeSnapshot = captureOptionalSnapshot(this.deps.repoRoot);
+		const routeSnapshot = await captureOptionalSnapshot(this.deps.repoRoot);
 		const initialDigest = routeSnapshot?.digest ?? "unknown";
 		options?.signal?.throwIfAborted();
 		this.assertExecutionCurrent(objectiveId);
@@ -734,6 +735,7 @@ export class ObjectiveExecutionController {
 					history,
 					initialDigest,
 					routeSnapshot,
+					(await captureOptionalSnapshot(this.deps.repoRoot))?.digest ?? "unknown",
 				);
 
 				const evaluation = await this.deps.decisions.evaluateOrFallback(ROUTE_DECISION_PROGRAM, stateProjection, {
@@ -791,6 +793,7 @@ export class ObjectiveExecutionController {
 					history,
 					initialDigest,
 					routeSnapshot,
+					(await captureOptionalSnapshot(this.deps.repoRoot))?.digest ?? "unknown",
 				);
 				const cert = await this.deps.steeringPlane.requireCertificate("JEV-004", stateProjection, {
 					objectiveId,
@@ -1515,7 +1518,7 @@ export class ObjectiveExecutionController {
 						(await this.deps.runtime.getSourceRevision?.(objectiveId)) ?? String(evidenceRevision);
 					const limitations = (await this.deps.runtime.getLimitations?.(objectiveId)) ?? [];
 					const acceptanceEvidence = objRecord?.evidence ?? [];
-					const candidateSnapshot = captureOptionalSnapshot(this.deps.repoRoot);
+					const candidateSnapshot = await captureOptionalSnapshot(this.deps.repoRoot);
 					const diffDigest = candidateSnapshot?.digest ?? "unknown";
 					const snapshotIdentity = candidateSnapshot ? candidateSnapshotIdentity(candidateSnapshot) : undefined;
 					const charterForFreeze = this.deps.executionCharter;

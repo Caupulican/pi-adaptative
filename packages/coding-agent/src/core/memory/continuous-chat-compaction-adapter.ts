@@ -19,10 +19,7 @@ import type {
 } from "./continuous-chat-compaction.ts";
 import { renderContinuousChatViewBlocks } from "./continuous-chat-projection.ts";
 import { CONTINUOUS_CHAT_SYSTEM_PROMPT } from "./continuous-chat-prompt.ts";
-import {
-	CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL,
-	type ContinuousChatSummaryModelResolution,
-} from "./continuous-chat-settings.ts";
+import type { ContinuousChatSummaryModelResolution } from "./continuous-chat-settings.ts";
 import type { ContinuousChatNodeCoordinate } from "./continuous-chat-tree.ts";
 
 /** Report-id prefix of a compaction reply's paid spend in the history-usage owner. */
@@ -110,9 +107,13 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 	}
 
 	private summaryModel(): Model<Api> {
+		return this.summaryResolution().model;
+	}
+
+	private summaryResolution(): Extract<ContinuousChatSummaryModelResolution, { ok: true }> {
 		const summary = this.deps.summary();
 		if (!summary.ok) throw new Error(summary.reason);
-		return summary.model;
+		return summary;
 	}
 
 	private guardSummaryRequest(model: Model<Api>, signal: AbortSignal | undefined): undefined {
@@ -155,7 +156,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 				const request = [...history, task];
 				const runTurn = async (toolFree = false) => {
 					signal?.throwIfAborted();
-					const model = this.summaryModel();
+					const { model, thinkingLevel } = this.summaryResolution();
 					const sharesCache = head.model !== undefined && sameCacheModel(head.model, model);
 					const systemPrompt = sharesCache ? head.systemPrompt : CONTINUOUS_CHAT_SYSTEM_PROMPT;
 					const activeTools = sharesCache && !toolFree ? [...head.tools] : [];
@@ -174,7 +175,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 						messages: [],
 						requestContext: { systemPrompt, tools: activeTools, messages: request },
 						model,
-						thinkingLevel: CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL,
+						thinkingLevel,
 						cacheRetention: "short",
 						laneKind: "continuous-chat",
 						requestPreflight: ({ model: requestModel }, requestSignal) =>

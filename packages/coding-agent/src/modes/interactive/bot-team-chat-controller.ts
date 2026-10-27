@@ -2,6 +2,7 @@ import { type Container, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import {
 	type ActiveChatTarget,
 	type BotOperatorMessageDispatchResult,
+	type BotTeamChange,
 	formatActiveChatTargetBadge,
 	normalizeBotOrTeamId,
 	type PersistentBotRecord,
@@ -36,7 +37,7 @@ export interface BotTeamChatSessionPort {
 	sendOperatorMessageToTeam(teamId: string, message: string): Promise<TeamOperatorMessageDispatchResult>;
 	readBotChatMessages(agentId: string): AgentMessage[];
 	readTeamChatMessages(teamId: string): AgentMessage[];
-	subscribeBotTeamUpdates(listener: () => void): () => void;
+	subscribeBotTeamUpdates(listener: (change: BotTeamChange) => void): () => void;
 	resolveModelSpec(rawModel?: string): { provider: string; modelId: string; thinkingLevel?: string };
 	readonly modelRegistry: Pick<ModelRegistry, "getAll">;
 	getRootModelLabel(): string;
@@ -105,13 +106,23 @@ export class BotTeamChatController {
 	bindSession(): void {
 		this.lastRenderedChatSignature = undefined;
 		this.unsubscribeUpdates?.();
-		this.unsubscribeUpdates = this.host.getSessionPort().subscribeBotTeamUpdates(() => {
+		this.unsubscribeUpdates = this.host.getSessionPort().subscribeBotTeamUpdates((change) => {
 			if (!this.isRootChatActive()) {
-				this.scheduleRefresh();
+				if (this.changeTouchesActiveChat(change)) this.scheduleRefresh();
 			} else {
 				this.host.ui.requestRender();
 			}
 		});
+	}
+
+	/** Whether `change` can alter what the open bot or team chat shows: a store change, its bot, or a member of its team. */
+	private changeTouchesActiveChat(change: BotTeamChange): boolean {
+		if (change === "all") return true;
+		const target = this.activeTarget;
+		if (target.kind === "bot") return change.includes(target.agentId);
+		if (target.kind !== "team") return false;
+		const members = this.host.getSessionPort().getPersistentTeam(target.teamId)?.memberAgentIds ?? [];
+		return change.some((agentId) => members.includes(agentId));
 	}
 
 	dispose(): void {

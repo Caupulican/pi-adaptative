@@ -19,7 +19,10 @@ export type DailyUsageWindow = {
 export type DailyUsageTotals = {
 	costEstimate?: "base-rates";
 	ownCost: number;
+	/** Background spend: spawned workers plus the history summaries below. */
 	spawnedCost: number;
+	/** The ICM history-summary share of `spawnedCost`. */
+	historySummaryCost: number;
 	totalCost: number;
 	input: number;
 	output: number;
@@ -34,6 +37,7 @@ function createZeroTotals(): DailyUsageTotals {
 	return {
 		ownCost: 0,
 		spawnedCost: 0,
+		historySummaryCost: 0,
 		totalCost: 0,
 		input: 0,
 		output: 0,
@@ -98,6 +102,7 @@ function addDailyUsageFromEntries(
 			// History summary spend is background spend, as its row was when it was a spawned report.
 			if (data.route === "history_summary") {
 				totals.spawnedCost += data.usage.cost.total;
+				totals.historySummaryCost += data.usage.cost.total;
 				totals.reports += 1;
 			} else totals.ownCost += data.usage.cost.total;
 			addUsage(totals, data.usage);
@@ -196,7 +201,8 @@ export function formatDailyUsageBreakdown(
 	return [
 		`${formatLabel("Today:")} ${totals.costEstimate ? "~" : ""}$${totals.totalCost.toFixed(4)}${totals.costEstimate ? " (base-rate estimate)" : ""}`,
 		`${formatLabel("Own/session messages:")} $${totals.ownCost.toFixed(4)}`,
-		`${formatLabel("Spawned/background reports:")} $${totals.spawnedCost.toFixed(4)}`,
+		`${formatLabel("Spawned/background reports:")} $${(totals.spawnedCost - totals.historySummaryCost).toFixed(4)}`,
+		`${formatLabel("ICM history summaries:")} $${totals.historySummaryCost.toFixed(4)}`,
 		`${formatLabel("Sessions scanned:")} ${totals.sessions}`,
 		`${formatLabel("Spawned/background report count:")} ${totals.reports}`,
 	].join("\n");

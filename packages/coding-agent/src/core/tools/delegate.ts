@@ -25,6 +25,7 @@ import {
 	MAX_FANOUT_PARTITION_SLICES,
 	MAX_FANOUT_RACE_CANDIDATES,
 } from "../delegation/worker-fanout-header.ts";
+import { isReceiptTool } from "../delegation/worker-receipts.ts";
 import type { WorkerRunOutcome } from "../delegation/worker-runner.ts";
 import type { WorkerTaskSessionView } from "../delegation/worker-task-view.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
@@ -1286,6 +1287,18 @@ function buildDelegateStartRequest(input: {
 	reuseAgentId?: string;
 }): WorkerDelegationRequest {
 	const tool = input.toolInput;
+	// A requirement is met on a command receipt or a recorded change. A read-only worker whose tools run no command has neither,
+	// so its report could never meet a requirement: refuse the dispatch instead of burning a run that ends needs_more.
+	if (
+		input.requirementIds.length > 0 &&
+		tool.readOnly === true &&
+		tool.toolNames !== undefined &&
+		!tool.toolNames.some(isReceiptTool)
+	) {
+		throw new Error(
+			"requirementIds need proof a read-only worker can only give through a command: add bash, run_process or python to toolNames, or drop requirementIds.",
+		);
+	}
 	const profileId = tool.profileId?.trim();
 	const hasAuthority =
 		tool.model !== undefined ||

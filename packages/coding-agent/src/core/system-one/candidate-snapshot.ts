@@ -2,10 +2,12 @@
  * One worktree-rooted candidate identity shared by CompletionProof, JEV-024..027, and DeliveryBundle.
  * Never uses process.cwd() as the repo identity.
  */
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 export interface UntrackedFileBytes {
 	readonly path: string;
@@ -21,12 +23,12 @@ export interface CandidateSnapshot {
 	readonly digest: string;
 }
 
+const GIT_BYTES_LIMIT = 32 * 1024 * 1024;
+const GIT_TEXT_LIMIT = 8 * 1024 * 1024;
+const execFileAsync = promisify(execFile);
+
 function gitBytes(repoRoot: string, args: readonly string[]): Buffer {
-	return execFileSync("git", args, {
-		cwd: repoRoot,
-		stdio: ["ignore", "pipe", "pipe"],
-		maxBuffer: 32 * 1024 * 1024,
-	});
+	return execFileSync("git", args, { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"], maxBuffer: GIT_BYTES_LIMIT });
 }
 
 function gitText(repoRoot: string, args: readonly string[]): string {
@@ -34,14 +36,59 @@ function gitText(repoRoot: string, args: readonly string[]): string {
 		cwd: repoRoot,
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "pipe"],
-		maxBuffer: 8 * 1024 * 1024,
+		maxBuffer: GIT_TEXT_LIMIT,
 	}).trim();
 }
 
-export function captureCandidateSnapshot(repoRoot: string): CandidateSnapshot {
-	if (!repoRoot) {
-		throw new Error("Candidate snapshot requires an explicit repo root");
+async function gitBytesAsync(repoRoot: string, args: readonly string[]): Promise<Buffer> {
+	const { stdout } = await execFileAsync("git", [...args], {
+		cwd: repoRoot,
+		encoding: "buffer",
+		maxBuffer: GIT_BYTES_LIMIT,
+	});
+	return stdout;
+}
+
+async function gitTextAsync(repoRoot: string, args: readonly string[]): Promise<string> {
+	return (await gitBytesAsync(repoRoot, args)).toString("utf8").trim();
+}
+
+function requireRepoRoot(repoRoot: string): void {
+	if (!repoRoot) throw new Error("Candidate snapshot requires an explicit repo root");
+}
+
+/** The identity of a worktree: its revisions, tracked diff and untracked bytes, hashed in a fixed order. */
+function buildCandidateSnapshot(parts: {
+	repoRoot: string;
+	baseRevision: string;
+	candidateRevision: string;
+	trackedDiffBytes: Buffer;
+	untracked: readonly UntrackedFileBytes[];
+}): CandidateSnapshot {
+	const hash = createHash("sha256");
+	hash.update(parts.repoRoot);
+	hash.update("\0");
+	hash.update(parts.baseRevision);
+	hash.update("\0");
+	hash.update(parts.candidateRevision);
+	hash.update("\0");
+	hash.update(parts.trackedDiffBytes);
+	hash.update("\0");
+	for (const file of parts.untracked) {
+		hash.update(file.path);
+		hash.update("\0");
+		hash.update(file.bytes);
+		hash.update("\0");
 	}
+	return { ...parts, digest: hash.digest("hex") };
+}
+
+function untrackedNamesOf(listing: string): string[] {
+	return listing.split("\0").filter(Boolean);
+}
+
+export function captureCandidateSnapshot(repoRoot: string): CandidateSnapshot {
+	requireRepoRoot(repoRoot);
 	const candidateRevision = gitText(repoRoot, ["rev-parse", "HEAD"]);
 	let baseRevision = candidateRevision;
 	try {
@@ -50,36 +97,28 @@ export function captureCandidateSnapshot(repoRoot: string): CandidateSnapshot {
 		// First commit: base equals candidate.
 	}
 	const trackedDiffBytes = gitBytes(repoRoot, ["diff", "HEAD"]);
-	const untrackedNames = gitText(repoRoot, ["ls-files", "-z", "--others", "--exclude-standard"])
-		.split("\0")
-		.filter(Boolean);
-	const untracked = untrackedNames.map((path) => ({
-		path,
-		bytes: readFileSync(join(repoRoot, path)),
-	}));
-	const hash = createHash("sha256");
-	hash.update(repoRoot);
-	hash.update("\0");
-	hash.update(baseRevision);
-	hash.update("\0");
-	hash.update(candidateRevision);
-	hash.update("\0");
-	hash.update(trackedDiffBytes);
-	hash.update("\0");
-	for (const file of untracked) {
-		hash.update(file.path);
-		hash.update("\0");
-		hash.update(file.bytes);
-		hash.update("\0");
-	}
-	return {
-		repoRoot,
-		baseRevision,
-		candidateRevision,
-		trackedDiffBytes,
-		untracked,
-		digest: hash.digest("hex"),
-	};
+	const untracked = untrackedNamesOf(gitText(repoRoot, ["ls-files", "-z", "--others", "--exclude-standard"])).map(
+		(path) => ({ path, bytes: readFileSync(join(repoRoot, path)) }),
+	);
+	return buildCandidateSnapshot({ repoRoot, baseRevision, candidateRevision, trackedDiffBytes, untracked });
+}
+
+/**
+ * The same snapshot without blocking the event loop: the git processes and the untracked-file reads are asynchronous.
+ * The tool-call path uses this one; a synchronous capture on a render thread froze the terminal.
+ */
+export async function captureCandidateSnapshotAsync(repoRoot: string): Promise<CandidateSnapshot> {
+	requireRepoRoot(repoRoot);
+	const candidateRevision = await gitTextAsync(repoRoot, ["rev-parse", "HEAD"]);
+	const [baseRevision, trackedDiffBytes, listing] = await Promise.all([
+		gitTextAsync(repoRoot, ["rev-parse", "HEAD^"]).catch(() => candidateRevision),
+		gitBytesAsync(repoRoot, ["diff", "HEAD"]),
+		gitTextAsync(repoRoot, ["ls-files", "-z", "--others", "--exclude-standard"]),
+	]);
+	const untracked = await Promise.all(
+		untrackedNamesOf(listing).map(async (path) => ({ path, bytes: await readFile(join(repoRoot, path)) })),
+	);
+	return buildCandidateSnapshot({ repoRoot, baseRevision, candidateRevision, trackedDiffBytes, untracked });
 }
 
 export function candidateSnapshotIdentity(snapshot: CandidateSnapshot): {

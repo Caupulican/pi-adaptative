@@ -99,6 +99,11 @@ export function workerCommandOutcome(receipt: WorkerCommandReceipt): "passed" | 
 	return receipt.exitCode === 0 ? "passed" : undefined;
 }
 
+/** Whether a worker holding this tool can produce a command receipt, the proof a report cites for a requirement it checked. */
+export function isReceiptTool(toolName: string): boolean {
+	return COMMAND_TOOLS.has(toolName);
+}
+
 /**
  * The receipt for one finished tool call, or undefined when the tool is not one that runs a command.
  * The command is bounded and withheld entirely when it carries a credential.

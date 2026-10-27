@@ -82,6 +82,8 @@ import {
 import {
 	advanceContinuousChatView,
 	applyContinuousChatViewMerges,
+	CONTINUOUS_CHAT_CAUSAL_VIEW_HIGH_BYTES,
+	CONTINUOUS_CHAT_CAUSAL_VIEW_LOW_BYTES,
 	type ContinuousChatViewAdvance,
 	type ContinuousChatViewEntry,
 	type ContinuousChatViewKind,
@@ -126,6 +128,8 @@ export interface ContinuousChatTurnSnapshot {
 	totalMessages: number;
 	viewRevision: number;
 	view: string;
+	/** The same view collapsed to the causal view's budget: what a worker is born with, so a new worker does not pay for the root's whole view. */
+	birthView: string;
 }
 
 /** The built part of the causal view: `<chat>` text covering messages [0, viewedMessages). */
@@ -431,6 +435,7 @@ export class ContinuousChatStore {
 	private settled: SettledViews | undefined;
 	/** The rendered turn view for one root revision. */
 	private rendered: { revision: number; text: string } | undefined;
+	private renderedBirth: { revision: number; text: string } | undefined;
 
 	constructor(options: ContinuousChatStoreOptions) {
 		if (!PROJECT_KEY_PATTERN.test(options.projectKey)) {
@@ -507,6 +512,7 @@ export class ContinuousChatStore {
 		this.indexedRevision = undefined;
 		this.settled = undefined;
 		this.rendered = undefined;
+		this.renderedBirth = undefined;
 	}
 
 	/**
@@ -690,6 +696,7 @@ export class ContinuousChatStore {
 				totalMessages: state.root.nextId,
 				viewRevision: turn.revision,
 				view: await this.renderTurnLocked(state.root.revision, turn),
+				birthView: await this.renderBirthLocked(state.root.revision, turn),
 			};
 		});
 	}
@@ -813,6 +820,7 @@ export class ContinuousChatStore {
 				this.indexedRevision = undefined;
 				this.settled = undefined;
 				this.rendered = undefined;
+				this.renderedBirth = undefined;
 				throw error;
 			}
 		});
@@ -1423,6 +1431,23 @@ export class ContinuousChatStore {
 		};
 		for (const entry of entries) await visit(entry);
 		return cut;
+	}
+
+	/** The turn view collapsed to the causal view's budget, rendered once per root revision. */
+	private async renderBirthLocked(revision: number, turn: ContinuousChatViewState): Promise<string> {
+		const rendered = this.renderedBirth;
+		if (rendered !== undefined && rendered.revision === revision) return rendered.text;
+		const nodes = await this.presentNodes(turn.entries, true);
+		const text = renderContinuousChatTurnView(
+			{
+				...turn,
+				lowBytes: CONTINUOUS_CHAT_CAUSAL_VIEW_LOW_BYTES,
+				highBytes: CONTINUOUS_CHAT_CAUSAL_VIEW_HIGH_BYTES,
+			},
+			nodes,
+		);
+		this.renderedBirth = { revision, text };
+		return text;
 	}
 
 	/** The turn view's text, rendered once per root revision. */

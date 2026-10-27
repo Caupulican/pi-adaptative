@@ -32,6 +32,7 @@ import { ManagedLaneController, type ManagedLaneControllerDeps } from "./delegat
 import {
 	BOT_MEMORY_BLOCK_SEPARATOR,
 	type BotOperatorMessageDispatchResult,
+	type BotTeamChange,
 	botReplyText,
 	normalizeBotOrTeamId,
 	operatorTextOf,
@@ -1166,10 +1167,34 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return m ? `${m.provider}/${m.id}` : "no-model";
 	}
 
-	/** Store changes and lane status changes: an open bot chat follows both, so it refreshes when a bot starts, finishes or fails. */
-	subscribeBotTeamUpdates(listener: () => void): () => void {
-		const offStore = this.getBotTeamStore().subscribe(listener);
-		const offLanes = this.subscribeLaneRecords(() => listener());
+	/**
+	 * Store changes and lane changes: an open bot chat follows both, so it refreshes when a bot starts, finishes, fails or
+	 * takes a turn. A lane change names only the agents whose record differs from the last one this subscription saw, so an
+	 * event for another agent wakes nobody.
+	 */
+	subscribeBotTeamUpdates(listener: (change: BotTeamChange) => void): () => void {
+		const offStore = this.getBotTeamStore().subscribe(() => listener("all"));
+		const seen = new Map<string, string>();
+		const offLanes = this.subscribeLaneRecords((records) => {
+			const changed: string[] = [];
+			for (const record of records) {
+				const agentId = record.agentId ?? record.laneId;
+				// A turn adds cost, a start or finish changes status or time: each moves this signature.
+				const signature = JSON.stringify([
+					record.status,
+					record.attemptId,
+					record.costUsd,
+					record.startedAt,
+					record.completedAt,
+					record.reasonCode,
+					record.label,
+				]);
+				if (seen.get(agentId) === signature) continue;
+				seen.set(agentId, signature);
+				changed.push(agentId);
+			}
+			if (changed.length > 0) listener(changed);
+		});
 		return () => {
 			offStore();
 			offLanes();

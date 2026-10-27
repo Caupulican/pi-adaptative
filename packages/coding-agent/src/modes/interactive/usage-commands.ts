@@ -48,6 +48,7 @@ export interface UsageCommandHost {
 			| "historySummaryReports"
 			| "todayCost"
 			| "todaySubagentCost"
+			| "todayHistorySummaryCost"
 		>;
 		getSessionStats(): { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number } };
 		getContextUsage(): { tokens: number | null; contextWindow: number; percent: number | null } | undefined;

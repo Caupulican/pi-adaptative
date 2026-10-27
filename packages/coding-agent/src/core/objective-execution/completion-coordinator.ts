@@ -1,4 +1,4 @@
-import { type CandidateSnapshot, captureCandidateSnapshot } from "../system-one/candidate-snapshot.ts";
+import { type CandidateSnapshot, captureCandidateSnapshotAsync } from "../system-one/candidate-snapshot.ts";
 import { buildCompletionProof } from "../system-one/completion-proof.ts";
 /**
  * Completion Coordinator.
@@ -145,7 +145,7 @@ export class CompletionCoordinator {
 		let snapshot = context.candidateSnapshot;
 		if (!snapshot && repoRoot) {
 			try {
-				snapshot = captureCandidateSnapshot(repoRoot);
+				snapshot = await captureCandidateSnapshotAsync(repoRoot);
 			} catch (error) {
 				if (profile === "system_one_required") {
 					return {

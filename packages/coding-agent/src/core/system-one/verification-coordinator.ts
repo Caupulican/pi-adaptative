@@ -26,6 +26,8 @@ export interface VerificationHost {
 	readonly storage: StoragePort;
 	getReceiverId(): string;
 	getCandidate(cwd?: string): { id: string; scope: string; kind: "repository" | "outcome" };
+	/** The same identity without blocking the event loop; the per-tool-call path reads it here, never through `getCandidate`. */
+	captureCandidate(cwd?: string): Promise<{ id: string; scope: string; kind: "repository" | "outcome" }>;
 	/** Captures ancestry before an await; ordinary appends retain it, switching branches does not. */
 	captureFence(): () => boolean;
 }
@@ -338,7 +340,7 @@ export class VerificationCoordinator {
 				return;
 		}
 		const fence = this.host.captureFence();
-		const candidate = this.host.getCandidate(input.cwd);
+		const candidate = await this.host.captureCandidate(input.cwd);
 		const operation = {
 			tool: input.tool,
 			args: input.args,
@@ -372,7 +374,7 @@ export class VerificationCoordinator {
 			throw new Error(
 				"same_lane_verification_required: verification_receiving_lane_changed_during_classification. Retry classification in the current receiving lane; the finding remains active.",
 			);
-		if (this.host.getCandidate(input.cwd).id !== candidate.id)
+		if ((await this.host.captureCandidate(input.cwd)).id !== candidate.id)
 			throw new Error(
 				"same_lane_verification_required: verification_candidate_changed_during_classification. Re-read current evidence and retry; the finding remains active.",
 			);
@@ -391,34 +393,36 @@ export class VerificationCoordinator {
 			);
 	}
 
-	beginCall(receiverId?: string, tool?: string, cwd?: string): string | undefined {
+	async beginCall(receiverId?: string, tool?: string, cwd?: string): Promise<string | undefined> {
 		// Reviews and routing do not create fresh receiving-lane check evidence or a reroll budget.
 		if (tool && ["peer", SYSTEM_ONE_TOOL_NAME, "delegate", "tool_task", "goal"].includes(tool)) return;
 		if (!this.tracker.active().length || this.starts.size >= 64) return;
-		const candidate = this.host.getCandidate(cwd);
+		const fence = this.host.captureFence();
+		const candidate = await this.host.captureCandidate(cwd);
 		// Provider tool-call IDs can collide between lanes or turns. Only the host identifies receipts.
 		const callId = randomUUID();
 		this.starts.set(callId, {
 			receiverId: receiverId ?? this.host.getReceiverId(),
 			candidateBefore: candidate.id,
 			...(cwd !== undefined ? { cwd } : {}),
-			fence: this.host.captureFence(),
+			fence,
 		});
 		return callId;
 	}
 
-	finishCall(input: {
+	async finishCall(input: {
 		callId: string | undefined;
 		tool: string;
 		args: unknown;
 		output: unknown;
 		succeeded: boolean;
-	}): void {
+	}): Promise<void> {
 		if (!input.callId) return;
 		const start = this.starts.get(input.callId);
 		this.starts.delete(input.callId);
 		if (!start?.fence()) return;
-		const candidate = this.host.getCandidate(start.cwd);
+		const candidate = await this.host.captureCandidate(start.cwd);
+		if (!start.fence()) return;
 		this.tracker.recordReceipt({
 			...input,
 			callId: input.callId,
@@ -433,7 +437,7 @@ export class VerificationCoordinator {
 		receiverId?: string,
 		signal?: AbortSignal,
 	) {
-		const candidate = this.host.getCandidate();
+		const candidate = await this.host.captureCandidate();
 		const input: VerificationResolutionRequest = {
 			...structuredClone(request),
 			receiverId: receiverId ?? this.host.getReceiverId(),
@@ -455,7 +459,7 @@ export class VerificationCoordinator {
 				signal,
 			);
 			signal?.throwIfAborted();
-			if (!fence() || this.host.getCandidate().id !== candidate.id)
+			if (!fence() || (await this.host.captureCandidate()).id !== candidate.id)
 				return {
 					status: "unresolved" as const,
 					reason:
