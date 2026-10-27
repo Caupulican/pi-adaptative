@@ -383,7 +383,8 @@ export class WorkerRecoveryCoordinator {
 		return true;
 	}
 
-	private armRetry(attemptId: string, entry: PendingRetryDispatch): void {
+	/** Arms the wake for what `now` leaves of `entry.wakeAt`; `now` is the one clock read of the decision that needs the alarm. */
+	private armRetry(attemptId: string, entry: PendingRetryDispatch, now: number): void {
 		if (this.disposed || this.pendingRetries.get(attemptId) !== entry || entry.alarm || entry.handling) return;
 		const alarm: NonNullable<PendingRetryDispatch["alarm"]> = {};
 		entry.alarm = alarm;
@@ -394,7 +395,7 @@ export class WorkerRecoveryCoordinator {
 					delete entry.alarm;
 					this.tryEnqueueDueRetry(attemptId, entry);
 				},
-				Math.min(Math.max(0, entry.wakeAt - this.now()), 2_147_000_000),
+				Math.min(Math.max(0, entry.wakeAt - now), 2_147_000_000),
 			);
 			if (!this.disposed && this.pendingRetries.get(attemptId) === entry && entry.alarm === alarm) {
 				alarm.timer = timer;
@@ -441,18 +442,18 @@ export class WorkerRecoveryCoordinator {
 	): "enqueued" | "full" | "stale" | "retained" {
 		if (this.disposed || this.pendingRetries.get(attemptId) !== entry) return "stale";
 		if (entry.handling || entry.alarm) return "retained";
+		// One clock read per decision: a failure's backoff deadline and the alarm armed for it measure from the same instant.
+		const now = this.now();
 		entry.handling = true;
 		let needsAlarm = false;
 		try {
 			let attempt: AttemptRuntimeState | undefined;
 			let record: LaneRecord | undefined;
-			let now: number;
 			try {
 				attempt = this.options.lifecycle.getActiveAttempt(entry.laneId);
 				record = attempt ? this.options.lifecycle.getRecord(entry.laneId) : undefined;
-				now = this.now();
 			} catch (error) {
-				this.retainFailedRetry(attemptId, entry, "durable read", error);
+				this.retainFailedRetry(attemptId, entry, "durable read", error, now);
 				needsAlarm = true;
 				return "retained";
 			}
@@ -479,7 +480,7 @@ export class WorkerRecoveryCoordinator {
 				this.options.scheduler.enqueue(record, entry.request, true, entry.priority);
 			} catch (error) {
 				if (error instanceof Error && error.message === "worker_dispatch_queue_full") return "full";
-				this.retainFailedRetry(attemptId, entry, "enqueue", error);
+				this.retainFailedRetry(attemptId, entry, "enqueue", error, now);
 				needsAlarm = true;
 				return "retained";
 			}
@@ -497,19 +498,25 @@ export class WorkerRecoveryCoordinator {
 			return "enqueued";
 		} finally {
 			entry.handling = false;
-			if (needsAlarm) this.armRetry(attemptId, entry);
+			if (needsAlarm) this.armRetry(attemptId, entry, now);
 		}
 	}
 
 	/** Keep the due retry and arm a bounded backoff alarm: no capacity event is coming for this failure. */
-	private retainFailedRetry(attemptId: string, entry: PendingRetryDispatch, step: string, error: unknown): void {
+	private retainFailedRetry(
+		attemptId: string,
+		entry: PendingRetryDispatch,
+		step: string,
+		error: unknown,
+		now: number,
+	): void {
 		if (this.disposed || this.pendingRetries.get(attemptId) !== entry) return;
 		entry.failures = (entry.failures ?? 0) + 1;
 		const delayMs = Math.min(
 			RETRY_ENQUEUE_FAILURE_MAX_MS,
 			RETRY_ENQUEUE_FAILURE_BASE_MS * 2 ** Math.min(entry.failures - 1, 16),
 		);
-		entry.wakeAt = this.now() + delayMs;
+		entry.wakeAt = now + delayMs;
 		this.warnBestEffort(
 			`Worker ${entry.laneId} retry ${step} failed; retaining the durable retry with ${Math.ceil(delayMs / 1000)}s backoff: ${error instanceof Error ? error.message : String(error)}`,
 		);
