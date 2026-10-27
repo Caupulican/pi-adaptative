@@ -19,6 +19,7 @@ import { DEFAULT_NOUL_BAND_THRESHOLDS, isNoulProbability, settledAnswer } from "
 import { commandReceiptFor, workerCommandOutcome, workerCommandReceiptId } from "../delegation/worker-receipts.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import type { ClaimReceipts, DeliveryReceipt } from "../orchestration/claim-receipts.ts";
+import type { WorkUnitRecord } from "../work-units.ts";
 import type { LadderOutcome } from "./unsettled-ladder.ts";
 
 export type ClaimReceiptEvent =
@@ -44,6 +45,40 @@ function emptyClaimReceipts() {
 }
 
 export type ClaimKind = "tests_pass" | "checks_pass" | "committed" | "pushed" | "published" | "files_changed";
+
+/** Describes the receipt boundary, never whether an action succeeded. */
+export interface AnswerClaimScope {
+	readonly request: string;
+	readonly boundary: "work_unit" | "turn";
+	readonly openingEntryId: string | null;
+	readonly workUnit?: WorkUnitRecord;
+}
+
+const ANSWER_CLAIM_SCOPE_TEXT_LIMIT = 8_000;
+
+/** One bounded projection for extraction and fallback settlement; descriptive context never becomes a receipt. */
+export function projectAnswerClaimScope(
+	scope: AnswerClaimScope,
+	redact: (text: string) => string,
+): Record<string, unknown> {
+	return {
+		request: redact(scope.request.slice(0, ANSWER_CLAIM_SCOPE_TEXT_LIMIT)),
+		request_truncated: scope.request.length > ANSWER_CLAIM_SCOPE_TEXT_LIMIT,
+		boundary: scope.boundary,
+		opening_entry_id: scope.openingEntryId,
+		...(scope.workUnit
+			? {
+					workUnit: {
+						kind: scope.workUnit.kind,
+						startEntryId: scope.workUnit.startEntryId,
+						openedAt: scope.workUnit.openedAt,
+						reason: redact(scope.workUnit.reason.slice(0, ANSWER_CLAIM_SCOPE_TEXT_LIMIT)),
+						reason_truncated: scope.workUnit.reason.length > ANSWER_CLAIM_SCOPE_TEXT_LIMIT,
+					},
+				}
+			: {}),
+	};
+}
 
 export interface ClaimFinding {
 	readonly kind: ClaimKind;
@@ -347,21 +382,27 @@ const CLAIM_STATEMENTS: Readonly<Record<ClaimKind, string>> = {
 	tests_pass:
 		"Actual tests executed during this work passed; static checks, lint and builds alone do not establish this",
 	checks_pass: "The non-test verification performed during this work passed",
-	committed: "The changes were committed with git",
-	pushed: "The changes were pushed to a git remote",
-	published: "The package or release was published",
-	files_changed: "Files in the workspace were changed",
+	committed: "The agent created a new git commit during this work",
+	pushed: "The agent pushed changes to a git remote during this work",
+	published: "The agent published a package or release during this work",
+	files_changed: "The agent created, edited or wrote workspace files during this work",
 };
 
 export interface AnswerClaimCheckerDeps {
 	/** The session's System One controller; absent, no claim is checked. */
-	getController(): { evaluateAnswerClaims(finalAnswer: string): Promise<Record<string, unknown>> } | undefined;
+	getController():
+		| { evaluateAnswerClaims(finalAnswer: string, scope?: AnswerClaimScope): Promise<Record<string, unknown>> }
+		| undefined;
 	warn(message: string): void;
 	/**
 	 * The unsettled-item ladder over the turn's own tool results, for a claim no receipt backs: the
 	 * harness reads receipts only from the tools it knows, so the results may still settle it.
 	 */
-	settle?(items: readonly string[], messages: readonly AgentMessage[]): Promise<LadderOutcome>;
+	settle?(
+		items: readonly string[],
+		messages: readonly AgentMessage[],
+		interpretationContext?: string,
+	): Promise<LadderOutcome>;
 	/** Claims nothing settled, delivered to the owner by the host. */
 	deliverToOwner?(items: readonly string[]): void;
 }
@@ -388,12 +429,13 @@ export class AnswerClaimChecker {
 		messages: readonly AgentMessage[],
 		events?: readonly ClaimReceiptEvent[],
 		verifiedChecks: readonly WorkerCommandReceipt[] = [],
+		scope?: AnswerClaimScope,
 	): Promise<ClaimFinding[] | undefined> {
 		const controller = this.deps.getController();
 		if (!controller || !finalAnswer.trim() || !mayContainDeliveryClaims(finalAnswer)) return undefined;
 		let answers: Record<string, unknown>;
 		try {
-			answers = await controller.evaluateAnswerClaims(finalAnswer);
+			answers = await controller.evaluateAnswerClaims(finalAnswer, scope);
 		} catch (error) {
 			if (!this.outageReported)
 				this.deps.warn(
@@ -418,17 +460,22 @@ export class AnswerClaimChecker {
 		finalAnswer: string,
 		turnMessages: readonly AgentMessage[],
 		events?: readonly ClaimReceiptEvent[],
+		scope?: AnswerClaimScope,
 	): Promise<string | undefined> {
-		const findings = await this.findings(finalAnswer, turnMessages, events);
+		const findings = await this.findings(finalAnswer, turnMessages, events, [], scope);
 		if (!findings) return undefined;
 		const contradicted = findings.filter((finding) => finding.verdict === "contradicted");
 		const unsupported = findings.filter((finding) => finding.verdict === "unsupported");
 		if (unsupported.length > 0 && this.deps.settle) {
-			const outcome = await this.deps.settle(
-				unsupported.map((finding) => CLAIM_STATEMENTS[finding.kind]),
-				turnMessages,
-			);
 			const byStatement = new Map(unsupported.map((finding) => [CLAIM_STATEMENTS[finding.kind], finding]));
+			const outcome = await this.deps.settle(
+				[...byStatement.keys()],
+				turnMessages,
+				JSON.stringify({
+					final_answer: finalAnswer,
+					...(scope ? { work_scope: projectAnswerClaimScope(scope, (text) => text) } : {}),
+				}),
+			);
 			for (const settled of outcome.settled) {
 				const finding = byStatement.get(settled.item);
 				if (finding && settled.verdict === "refuted")

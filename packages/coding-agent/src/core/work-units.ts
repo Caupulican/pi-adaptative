@@ -73,8 +73,9 @@ function collectWorkWindow(
 	manager: Pick<SessionManager, "getLeafEntry" | "getEntry">,
 	customType: string,
 	openingEntryId?: string,
-): WorkWindowEntry[] | undefined {
+): { entries: WorkWindowEntry[]; startEntryId: string | null; workUnit?: WorkUnitRecord } | undefined {
 	const entries: WorkWindowEntry[] = [];
+	let workUnit: WorkUnitRecord | undefined;
 	let startEntryId: string | null | undefined = openingEntryId;
 	let reachedOpening = false;
 	for (
@@ -86,7 +87,24 @@ function collectWorkWindow(
 		else if (entry.type === "custom" && entry.customType === customType)
 			entries.push({ kind: "custom", entryId: entry.id, data: entry.data });
 		else if (entry.type === "custom" && entry.customType === WORK_UNIT_CUSTOM_TYPE && startEntryId === undefined) {
-			startEntryId = (entry.data as WorkUnitRecord | undefined)?.startEntryId ?? null;
+			const record = entry.data as WorkUnitRecord | undefined;
+			startEntryId = record?.startEntryId ?? null;
+			if (
+				record &&
+				(record.kind === "declared" || record.kind === "enforced") &&
+				typeof record.reason === "string" &&
+				typeof record.openedAt === "number" &&
+				Number.isFinite(record.openedAt) &&
+				record.openedAt >= 0 &&
+				(record.startEntryId === null || typeof record.startEntryId === "string")
+			)
+				workUnit = {
+					kind: record.kind,
+					reason: record.reason,
+					openedAt: record.openedAt,
+					startEntryId: record.startEntryId,
+					...(typeof record.goalId === "string" ? { goalId: record.goalId } : {}),
+				};
 			if (startEntryId === null) break;
 		}
 		if (startEntryId !== undefined && entry.id === startEntryId) {
@@ -96,7 +114,9 @@ function collectWorkWindow(
 	}
 	if (openingEntryId !== undefined && !reachedOpening)
 		throw new Error(`Turn opening entry ${openingEntryId} is not on the active branch.`);
-	return startEntryId === undefined ? undefined : entries.reverse();
+	return startEntryId === undefined
+		? undefined
+		: { entries: entries.reverse(), startEntryId, ...(workUnit ? { workUnit } : {}) };
 }
 
 /**
@@ -107,7 +127,7 @@ function collectWorkWindow(
 export function workUnitWindow(
 	manager: Pick<SessionManager, "getLeafEntry" | "getEntry">,
 	customType: string,
-): WorkWindowEntry[] | undefined {
+): { entries: WorkWindowEntry[]; startEntryId: string | null; workUnit?: WorkUnitRecord } | undefined {
 	return collectWorkWindow(manager, customType);
 }
 
@@ -120,5 +140,5 @@ export function turnWorkWindow(
 	customType: string,
 	openingEntryId: string,
 ): WorkWindowEntry[] {
-	return collectWorkWindow(manager, customType, openingEntryId)!;
+	return collectWorkWindow(manager, customType, openingEntryId)!.entries;
 }

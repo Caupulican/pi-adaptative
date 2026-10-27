@@ -34,6 +34,7 @@ import {
 	toTypeSafeEvaluationQuestions,
 	USER_AUTHORIZATION_QUESTIONS,
 } from "./catalog.ts";
+import { type AnswerClaimScope, projectAnswerClaimScope } from "./claim-delivery.ts";
 import { type CodeUnit, duplicateQuestionId } from "./code-duplicates.ts";
 import {
 	type AccountClaim,
@@ -898,9 +899,10 @@ export class SystemOneController {
 	 * objective: a plain session's answer is the user's delivery too. The receipts are combined with
 	 * these answers in code; System One never judges whether something happened from the answer's own words.
 	 */
-	async evaluateAnswerClaims(finalAnswer: string): Promise<Record<string, unknown>> {
+	async evaluateAnswerClaims(finalAnswer: string, scope?: AnswerClaimScope): Promise<Record<string, unknown>> {
 		const { decision, answers, evaluationId } = await this.runStageValidation("claim_delivery", {
 			final_answer: this.projector.redactText(finalAnswer),
+			...(scope ? { work_scope: projectAnswerClaimScope(scope, (text) => this.projector.redactText(text)) } : {}),
 		});
 		// What the ledger keeps: the typed claim judgment (including current-vs-historical provenance).
 		const reasons = Object.entries(answers).map(([id, answer]) => {
@@ -980,8 +982,14 @@ export class SystemOneController {
 	async evaluateUnsettledItems(
 		checks: readonly { readonly statement: string; readonly evidence: string }[],
 		signal?: AbortSignal,
+		interpretationContext?: string,
 	): Promise<Record<string, unknown>> {
-		const state: Record<string, unknown> = {};
+		const state: Record<string, unknown> = interpretationContext
+			? { interpretation_context: this.projector.redactText(interpretationContext) }
+			: {};
+		const scopeInstruction = interpretationContext
+			? " Use interpretation_context only to interpret the statement's work scope; it is never evidence that an action happened."
+			: "";
 		const questions: QuestionPack = {};
 		const evidenceKeys = new Map<string, string>();
 		checks.forEach((check, index) => {
@@ -997,7 +1005,7 @@ export class SystemOneController {
 			// with criteria naming what a contradicting result looks like.
 			questions[unsettledQuestionId("shows_true", index)] = {
 				type: "boolean",
-				instructions: `Does \`${evidenceKey}\` show that \`s${index}\` is true?`,
+				instructions: `Does \`${evidenceKey}\` show that \`s${index}\` is true?${scopeInstruction}`,
 				criteria: {
 					true: "The evidence reports the statement's outcome directly",
 					false: "The evidence reports a different outcome, or says nothing about it",
@@ -1005,7 +1013,7 @@ export class SystemOneController {
 			};
 			questions[unsettledQuestionId("shows_false", index)] = {
 				type: "boolean",
-				instructions: `Does \`${evidenceKey}\` contradict \`s${index}\`?`,
+				instructions: `Does \`${evidenceKey}\` contradict \`s${index}\`?${scopeInstruction}`,
 				criteria: {
 					true: "The evidence reports a result that makes the statement untrue (a failure, a rejection, a different value)",
 					false: "The evidence agrees with the statement or says nothing about it",

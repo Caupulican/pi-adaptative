@@ -50,13 +50,19 @@ export interface UnsettledItemJudge {
 	evaluateUnsettledItems(
 		checks: readonly { readonly statement: string; readonly evidence: string }[],
 		signal?: AbortSignal,
+		interpretationContext?: string,
 	): Promise<Record<string, unknown>>;
 }
 
 export interface UnsettledLadderDeps {
 	getJudge(): UnsettledItemJudge | undefined;
 	/** The stronger model's rung; absent when no stronger model is configured. */
-	consult?(input: { item: string; evidence: string; signal?: AbortSignal }): Promise<ItemConsult | undefined>;
+	consult?(input: {
+		item: string;
+		evidence: string;
+		signal?: AbortSignal;
+		interpretationContext?: string;
+	}): Promise<ItemConsult | undefined>;
 }
 
 /**
@@ -119,8 +125,14 @@ export const UNSETTLED_ITEM_CONSULT_PROMPT = [
 	"MISSING: <what evidence would settle it, in one sentence>",
 ].join("\n");
 
-export function itemConsultMessage(input: { item: string; evidence: string }): string {
-	return [`Item to settle:\n${input.item}`, `Evidence:\n${input.evidence || "(none)"}`].join("\n\n");
+export function itemConsultMessage(input: { item: string; evidence: string; interpretationContext?: string }): string {
+	return [
+		`Item to settle:\n${input.item}`,
+		...(input.interpretationContext
+			? [`Interpretation context (scope only, never outcome evidence):\n${input.interpretationContext}`]
+			: []),
+		`Evidence:\n${input.evidence || "(none)"}`,
+	].join("\n\n");
 }
 
 /** The stronger model's one-line reply, or undefined when it answered neither way. */
@@ -152,7 +164,12 @@ function errorText(error: unknown): string {
 
 export async function settleUnsettledItems(
 	deps: UnsettledLadderDeps,
-	input: { readonly items: readonly string[]; readonly evidence: string; readonly signal?: AbortSignal },
+	input: {
+		readonly items: readonly string[];
+		readonly evidence: string;
+		readonly signal?: AbortSignal;
+		readonly interpretationContext?: string;
+	},
 ): Promise<LadderOutcome> {
 	const items = [...new Set(input.items.map((item) => item.trim()).filter((item) => item.length > 0))];
 	if (items.length === 0) return { settled: [], unsettled: [] };
@@ -171,6 +188,7 @@ export async function settleUnsettledItems(
 		const answers = await judge.evaluateUnsettledItems(
 			items.map((item) => ({ statement: item, evidence: input.evidence })),
 			input.signal,
+			input.interpretationContext,
 		);
 		open = [];
 		items.forEach((item, index) => {
@@ -195,6 +213,7 @@ export async function settleUnsettledItems(
 					item: entry.item,
 					evidence: input.evidence,
 					...(input.signal ? { signal: input.signal } : {}),
+					...(input.interpretationContext ? { interpretationContext: input.interpretationContext } : {}),
 				})
 				.catch(() => undefined),
 		),
@@ -221,7 +240,7 @@ export async function settleUnsettledItems(
 			const settlementIndex = checks.push({ statement: entry.item, evidence: consult.fact }) - 1;
 			return { entry, consult, quoted, groundingIndex, settlementIndex };
 		});
-		const answers = await judge.evaluateUnsettledItems(checks, input.signal);
+		const answers = await judge.evaluateUnsettledItems(checks, input.signal, input.interpretationContext);
 		judgments.forEach(({ entry, consult, quoted, groundingIndex, settlementIndex }) => {
 			const grounded = quoted || verdictAt(answers, groundingIndex!) === "confirmed";
 			const verdict = grounded ? verdictAt(answers, settlementIndex) : undefined;

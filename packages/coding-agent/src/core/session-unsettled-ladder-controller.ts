@@ -20,7 +20,12 @@ import type { ModelRouterController } from "./model-router-controller.ts";
 import { decodeWorkerReceiptPublication } from "./orchestration/worker-receipt-publication.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 import { isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
-import { AnswerClaimChecker, assistantAnswerText, type ClaimReceiptEvent } from "./system-one/claim-delivery.ts";
+import {
+	AnswerClaimChecker,
+	type AnswerClaimScope,
+	assistantAnswerText,
+	type ClaimReceiptEvent,
+} from "./system-one/claim-delivery.ts";
 import { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import {
@@ -90,7 +95,8 @@ export class SessionUnsettledLadderController {
 		this.answerClaims = new AnswerClaimChecker({
 			getController: () => this.deps.getSystemOneController(),
 			warn: (message) => this.deps.emitWarning(message),
-			settle: (items, messages) => this.settleInconclusive({ items, messages }),
+			settle: (items, messages, interpretationContext) =>
+				this.settleInconclusive({ items, messages, interpretationContext }),
 			deliverToOwner: (items) => {
 				this.deliverToOwner(items);
 			},
@@ -111,6 +117,7 @@ export class SessionUnsettledLadderController {
 			assistantAnswerText(this.deps.findLastAssistantMessage()),
 			window.messages,
 			window.events,
+			window.scope,
 		);
 	}
 
@@ -124,13 +131,25 @@ export class SessionUnsettledLadderController {
 	): {
 		messages: readonly AgentMessage[];
 		events: readonly ClaimReceiptEvent[];
+		scope: AnswerClaimScope;
 	} {
 		const manager = this.deps.getSessionManager();
-		let window = workUnitWindow(manager, WORKER_RECEIPTS_CUSTOM_TYPE);
+		const work = workUnitWindow(manager, WORKER_RECEIPTS_CUSTOM_TYPE);
+		const scope: AnswerClaimScope = {
+			request: this.deps.getLastUserRequest(),
+			boundary: work ? "work_unit" : "turn",
+			openingEntryId: work ? work.startEntryId : (manager.getMessageEntryId(turnOpening) ?? null),
+			...(work?.workUnit ? { workUnit: work.workUnit } : {}),
+		};
+		let window = work?.entries;
 		if (window === undefined) {
 			const openingEntryId = manager.getMessageEntryId(turnOpening);
 			if (openingEntryId === undefined)
-				return { messages: turnMessages, events: turnMessages.map((message) => ({ kind: "message", message })) };
+				return {
+					messages: turnMessages,
+					events: turnMessages.map((message) => ({ kind: "message", message })),
+					scope,
+				};
 			window = turnWorkWindow(manager, WORKER_RECEIPTS_CUSTOM_TYPE, openingEntryId);
 		}
 		const events: ClaimReceiptEvent[] = [];
@@ -189,6 +208,7 @@ export class SessionUnsettledLadderController {
 		return {
 			messages: events.flatMap((event) => (event.kind === "message" ? [event.message] : [])),
 			events,
+			scope,
 		};
 	}
 
@@ -436,14 +456,15 @@ export class SessionUnsettledLadderController {
 		items: readonly string[];
 		messages: Parameters<typeof toolResultEvidence>[0];
 		signal?: AbortSignal;
+		interpretationContext?: string;
 	}): Promise<LadderOutcome> {
 		return settleUnsettledItems(
 			{
 				getJudge: () => this.deps.getSystemOneController(),
-				consult: async ({ item, evidence, signal }) => {
+				consult: async ({ item, evidence, signal, interpretationContext }) => {
 					const reply = await this.consultExpensiveModel({
 						systemPrompt: UNSETTLED_ITEM_CONSULT_PROMPT,
-						message: itemConsultMessage({ item, evidence }),
+						message: itemConsultMessage({ item, evidence, interpretationContext }),
 						laneKind: "unsettled-item-consult",
 						...(signal ? { signal } : {}),
 					});
@@ -453,6 +474,7 @@ export class SessionUnsettledLadderController {
 			{
 				items: input.items,
 				evidence: toolResultEvidence(input.messages),
+				...(input.interpretationContext ? { interpretationContext: input.interpretationContext } : {}),
 				...(input.signal ? { signal: input.signal } : {}),
 			},
 		);
