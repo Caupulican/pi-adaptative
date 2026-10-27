@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Codex requests omit `service_tier` for standard processing instead of sending the unsupported `default` value.
 - `getOAuthApiKey` now keeps unexpired credentials that only requested a `needsRefresh` upgrade in use when a non-rotating refresh attempt fails, and `refreshAnthropicToken` avoids duplicate `invalid_scope` retries when the fallback scope set matches the initial request while preserving existing scopes if a refresh response omits `scope`.
 
 ## [0.104.15] - 2026-10-27

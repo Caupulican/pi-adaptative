@@ -2,6 +2,9 @@
 
 ### Fixed
 
+- ICM compaction commits background view merges in batches, prioritizes selected historical merges by context, and sends only the latest shortening note with each summary correction to reduce unnecessary cache rewrites and repeated input. Existing scheduler databases migrate to schema 2; older builds cannot open the upgraded database.
+- OAuth requests bind the effective model and credentials together before preparation and dispatch, preserving caller-owned model definitions and account-specific catalog changes across refreshes.
+- Worker verification receipts distinguish non-test checks from tests, so a passing build or static check no longer counts as a passing test.
 - Codex speed tiers follow the Codex client. `/ultrafast` is added next to `/fast`, and each toggles its own tier (`priority` or `ultrafast`) of the model's account catalog: the tier in effect returns to standard, another tier switches. The account catalog's default tier applies when no choice is saved and the model still advertises it. Standard processing, including an explicit `/fast off`, sends no `service_tier` field instead of `service_tier: "default"`.
 - Stale OAuth credential upgrades (`needsRefresh`) stay usable when post-rotation account discovery fails (`OAuthRefreshCompletedError`), track attempted stale state per credential rather than permanently blocking later credentials on the same provider, avoid rotating a second time on the next request after a failed discovery, and immediately synchronize `ModelRegistry` models when `AuthStorage` updates an OAuth provider's catalog.
 
