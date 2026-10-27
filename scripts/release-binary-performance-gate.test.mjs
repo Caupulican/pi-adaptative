@@ -71,7 +71,7 @@ test("rejects a Windows slowdown even when the Linux comparison is also slow", (
 	});
 	const windows = [
 		benchmark("windows-arm64", {
-			firstShellReady: metric(2_100, 2_700),
+			firstShellReady: metric(3_001, 3_001),
 		}),
 	];
 
@@ -80,7 +80,7 @@ test("rejects a Windows slowdown even when the Linux comparison is also slow", (
 	assert.equal(report.passed, false);
 	assert.deepEqual(
 		report.platforms[0].checks.filter((check) => !check.passed).map((check) => check.name),
-		["firstShellReady.medianMs"],
+		["firstShellReady.medianMs", "firstShellReady.p95Ms"],
 	);
 });
 
