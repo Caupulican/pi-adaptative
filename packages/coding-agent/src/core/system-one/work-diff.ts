@@ -12,6 +12,7 @@ import { bindChildProcessAbort, waitForChildProcessWithTermination } from "../..
 import { withoutInheritedGitLocation } from "../exec.ts";
 import { parseRepositoryHeadRecord } from "../objective-execution/repository-head-state.ts";
 import { createProcessScratchDirectory } from "../process-scratch.ts";
+import { patchPaths } from "./completion-account.ts";
 import { type AddedSuppression, addedSuppressions } from "./suppression-scan.ts";
 
 export interface WorkBaseline {
@@ -26,6 +27,8 @@ export interface WorkDiff {
 	readonly base: string;
 	/** Raw Git tree diff from the admitted working bytes, bounded. */
 	readonly patch: string;
+	/** Every tracked path the diff changes, read from the whole diff: `patch` carries only its first part. */
+	readonly files: readonly string[];
 	/** Characters of the patch left out to keep the check bounded; 0 when complete. */
 	readonly omittedChars: number;
 	/** New files git does not track yet, which `git diff` does not show. */
@@ -57,6 +60,7 @@ export function hasRepositoryOutcome(work: WorkDiff | undefined, recordedChanges
 /** Enough for any focused change; larger work is judged on its first part and the file list. */
 export const WORK_DIFF_PATCH_LIMIT = 24_000;
 export const WORK_DIFF_UNTRACKED_LIMIT = 50;
+export const WORK_DIFF_FILES_LIMIT = 1_000;
 /** Suppression hits kept; every path with a hit is still listed before the cap is reached. */
 export const WORK_DIFF_SUPPRESSION_LIMIT = 500;
 const GIT_TIMEOUT_MS = 20_000;
@@ -526,6 +530,7 @@ export async function readWorkDiff(
 		return {
 			base: baseline.revision,
 			patch: full.slice(0, WORK_DIFF_PATCH_LIMIT),
+			files: patchPaths(full).slice(0, WORK_DIFF_FILES_LIMIT),
 			omittedChars: Math.max(0, full.length - WORK_DIFF_PATCH_LIMIT),
 			untracked: untracked.slice(0, WORK_DIFF_UNTRACKED_LIMIT),
 			// The whole diff, not the bounded patch: a new file's content is in it, and so is everything the
@@ -536,6 +541,7 @@ export async function readWorkDiff(
 		return {
 			base: baseline.revision,
 			patch: "",
+			files: [],
 			omittedChars: 0,
 			untracked: [],
 			diagnostic: workEvidenceDiagnostic(error),

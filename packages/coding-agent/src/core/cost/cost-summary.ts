@@ -12,8 +12,12 @@ import {
 export interface CurrentSessionCostTotals {
 	costEstimate?: "base-rates";
 	ownCost: number;
+	/** Background spend: worker subagents plus the ICM history summaries below. The cost guard reads it as one total. */
 	subagentCost: number;
 	subagentReports: number;
+	/** The ICM history-summary share of the background spend, so a display can name where the money goes. */
+	historySummaryCost: number;
+	historySummaryReports: number;
 	currentCost: number;
 }
 
@@ -45,6 +49,8 @@ export function createCurrentSessionCostAccumulator(): CurrentSessionCostAccumul
 		ownCost: 0,
 		subagentCost: 0,
 		subagentReports: 0,
+		historySummaryCost: 0,
+		historySummaryReports: 0,
 		currentCost: 0,
 		seenSubagentReportIds: new Set<string>(),
 		seenSemanticReportIds: new Set<string>(),
@@ -76,6 +82,8 @@ export function accumulateCurrentSessionCostsFromEntries(
 			if (report.route === "history_summary") {
 				accumulator.subagentCost += total;
 				accumulator.subagentReports += 1;
+				accumulator.historySummaryCost += total;
+				accumulator.historySummaryReports += 1;
 			} else accumulator.ownCost += total;
 			if (report.usage.cost.estimate === "base-rates") accumulator.costEstimate = "base-rates";
 			continue;
@@ -118,6 +126,8 @@ export function projectPendingSemanticCost(
 	let ownCost = accumulator.ownCost;
 	let subagentCost = accumulator.subagentCost;
 	let subagentReports = accumulator.subagentReports;
+	let historySummaryCost = accumulator.historySummaryCost;
+	let historySummaryReports = accumulator.historySummaryReports;
 	let costEstimate = accumulator.costEstimate;
 	for (const report of pending) {
 		const total = getUsageTotalCost(report.usage);
@@ -126,6 +136,8 @@ export function projectPendingSemanticCost(
 		if (report.route === "history_summary") {
 			subagentCost += total;
 			subagentReports += 1;
+			historySummaryCost += total;
+			historySummaryReports += 1;
 		} else ownCost += total;
 		if (report.usage.cost.estimate === "base-rates") costEstimate = "base-rates";
 	}
@@ -134,6 +146,8 @@ export function projectPendingSemanticCost(
 	if (overflow !== undefined && overflowCost !== undefined) {
 		subagentCost += overflowCost;
 		subagentReports += overflow.reports;
+		historySummaryCost += overflowCost;
+		historySummaryReports += overflow.reports;
 		if (overflow.usage.cost.estimate === "base-rates") costEstimate = "base-rates";
 	}
 	return {
@@ -141,6 +155,8 @@ export function projectPendingSemanticCost(
 		ownCost,
 		subagentCost,
 		subagentReports,
+		historySummaryCost,
+		historySummaryReports,
 		currentCost: ownCost + subagentCost,
 	};
 }
@@ -157,6 +173,8 @@ export function createSessionCostSummary(args: {
 		ownCost: currentSource.ownCost,
 		subagentCost: currentSource.subagentCost,
 		subagentReports: currentSource.subagentReports,
+		historySummaryCost: currentSource.historySummaryCost,
+		historySummaryReports: currentSource.historySummaryReports,
 		currentCost: currentSource.currentCost,
 	};
 	return {
@@ -178,6 +196,43 @@ export function hasSubagentCostSignal(summary: Pick<SessionCostSummary, "subagen
 	return summary.subagentReports > 0 || summary.subagentCost > 0;
 }
 
+/** Background spend split by where it goes: delegated workers and bots, and the ICM history summaries. */
+export interface BackgroundCostBreakdown {
+	agentCost: number;
+	agentReports: number;
+	icmCost: number;
+	icmReports: number;
+}
+
+export function backgroundCostBreakdown(
+	summary: Pick<
+		SessionCostSummary,
+		"subagentCost" | "subagentReports" | "historySummaryCost" | "historySummaryReports"
+	>,
+): BackgroundCostBreakdown {
+	return {
+		agentCost: Math.max(0, summary.subagentCost - summary.historySummaryCost),
+		agentReports: Math.max(0, summary.subagentReports - summary.historySummaryReports),
+		icmCost: summary.historySummaryCost,
+		icmReports: summary.historySummaryReports,
+	};
+}
+
+/** The non-empty background shares, each with the label a display shows and its formatted amount. */
+export function backgroundCostShares(
+	summary: Pick<
+		SessionCostSummary,
+		"subagentCost" | "subagentReports" | "historySummaryCost" | "historySummaryReports"
+	>,
+	precision: number,
+): { label: "AGENTS" | "ICM"; amount: string }[] {
+	const { agentCost, agentReports, icmCost, icmReports } = backgroundCostBreakdown(summary);
+	const shares: { label: "AGENTS" | "ICM"; amount: string }[] = [];
+	if (agentReports > 0 || agentCost > 0) shares.push({ label: "AGENTS", amount: formatCost(agentCost, precision) });
+	if (icmReports > 0 || icmCost > 0) shares.push({ label: "ICM", amount: formatCost(icmCost, precision) });
+	return shares;
+}
+
 function formatCost(value: number, precision: number): string {
 	return `$${value.toFixed(precision)}`;
 }
@@ -196,9 +251,8 @@ export function formatFooterCostParts(
 	if (summary.todayCost > 0) {
 		parts.push(`TODAY:${summary.todayCostEstimate ? "~" : ""}${formatCost(summary.todayCost, precision)}`);
 	}
-	if (hasSubagentCostSignal(summary)) {
-		parts.push(`SUBAGENTS:${formatCost(summary.subagentCost, precision)} in CURRENT`);
-	}
+	for (const share of backgroundCostShares(summary, precision))
+		parts.push(`${share.label}:${share.amount} in CURRENT`);
 	return parts;
 }
 
@@ -207,8 +261,7 @@ export function formatStatusCostSummary(summary: SessionCostSummary, precision =
 		`CURRENT ${summary.costEstimate ? "~" : ""}${formatCost(summary.currentCost, precision)}${summary.costEstimate ? " (base-rate estimate)" : ""}`,
 		`TODAY ${summary.todayCostEstimate ? "~" : ""}${formatCost(summary.todayCost, precision)}${summary.todayCostEstimate ? " (base-rate estimate)" : ""}`,
 	];
-	if (hasSubagentCostSignal(summary)) {
-		parts.push(`SUBAGENTS ${formatCost(summary.subagentCost, precision)} (included in CURRENT)`);
-	}
+	for (const share of backgroundCostShares(summary, precision))
+		parts.push(`${share.label} ${share.amount} (included in CURRENT)`);
 	return parts.join(", ");
 }

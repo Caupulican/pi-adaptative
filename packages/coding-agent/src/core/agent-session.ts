@@ -1728,7 +1728,7 @@ export class AgentSession {
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
 			({ requestId, model, context, sourceContext }) => {
 				this._cache.lastSentRequest = { model, context, sourceMessages: sourceContext.messages };
-				this._continuousChatPrefix.record({ systemPrompt: context.systemPrompt ?? "", tools: context.tools ?? [] });
+				this._continuousChatPrefix.record(context, model);
 				// A surface the loop changed on purpose (a safety removal) is mandatory: sanctioned for this request.
 				if (sourceContext.surfaceChange) {
 					this._cache.custody.sanction("safety_removal", sourceContext.surfaceChange, {

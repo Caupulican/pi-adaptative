@@ -14,7 +14,7 @@ import type { Container, Keybinding, MarkdownTheme, TUI } from "@caupulican/pi-t
 import { Markdown, Spacer, Text, visibleWidth } from "@caupulican/pi-tui";
 import { getDebugLogPath } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
-import { hasSubagentCostSignal, type SessionCostSummary } from "../../core/cost/cost-summary.ts";
+import { backgroundCostBreakdown, type SessionCostSummary } from "../../core/cost/cost-summary.ts";
 import type { ExtensionRunner } from "../../core/extensions/index.ts";
 import type { AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
@@ -64,9 +64,15 @@ export function formatCostReport(costs: SessionCostSummary, usingSubscription = 
 	const lines = [
 		`${theme.fg("dim", "CURRENT (session):")} $${costs.currentCost.toFixed(4)}${usingSubscription ? " (sub)" : ""}`,
 	];
-	if (hasSubagentCostSignal(costs)) {
+	const { agentCost, agentReports, icmCost, icmReports } = backgroundCostBreakdown(costs);
+	if (agentReports > 0 || agentCost > 0) {
 		lines.push(
-			`${theme.fg("dim", "SUBAGENTS (included in CURRENT):")} $${costs.subagentCost.toFixed(4)} (${costs.subagentReports} reports)`,
+			`${theme.fg("dim", "AGENTS (included in CURRENT):")} $${agentCost.toFixed(4)} (${agentReports} reports)`,
+		);
+	}
+	if (icmReports > 0 || icmCost > 0) {
+		lines.push(
+			`${theme.fg("dim", "ICM history summaries (included in CURRENT):")} $${icmCost.toFixed(4)} (${icmReports} calls)`,
 		);
 	}
 	lines.push(

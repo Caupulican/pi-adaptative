@@ -3156,11 +3156,7 @@ export class InteractiveMode {
 	// Selectors
 	// =========================================================================
 
-	/**
-	 * Shows a selector component in place of the editor.
-	 * @param create Factory that receives a `done` callback and returns the component and focus target
-	 */
-	/** The bots a chat list shows: a retired bot or finished worker is history, not a chat to resume; the open chat stays listed. */
+	/** The bots a chat list shows: a retired bot or worker is history, not a chat to resume; the open chat stays listed. */
 	private chatBots() {
 		const activeTarget = this.botTeamChat.getActiveTarget();
 		return this.session
@@ -3191,6 +3187,10 @@ export class InteractiveMode {
 		});
 	}
 
+	/**
+	 * Shows a selector component in place of the editor.
+	 * @param create Factory that receives a `done` callback and returns the component and focus target
+	 */
 	private showSelector(
 		create: (done: () => void) => {
 			component: Component;

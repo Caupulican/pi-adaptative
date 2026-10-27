@@ -398,6 +398,10 @@ export class InteractiveLayout {
 			getRouteSnapshot: () => port.getSession().getForegroundRouteSnapshot(),
 			getSemanticPlaneHealth: () => port.getSession().getSemanticPlaneHealth(),
 			getCostSummary: () => port.getSession().getCostSummary(),
+			isUsingSubscription: () => {
+				const session = port.getSession();
+				return session.model ? session.modelRegistry.isUsingSubscription(session.model) : false;
+			},
 			getSessionWorkState: () => port.getSession().getSessionWorkState(),
 			getSelfCompactionView: () => port.getSession().getSelfCompactionView(),
 			getCiStatus: () => readCiStatusView(port.getSessionManager().getCwd()),

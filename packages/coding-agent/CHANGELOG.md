@@ -1,8 +1,27 @@
 ## [Unreleased]
 
+### Fixed
+
+- Background history summaries no longer repeat the foreground's system prompt and tool schemas to a summary model that shares no cache with the turns: they send the chat's own stable prompt and no tools, which was most of the input and cache-read spend of a long session. A summary on the foreground's own model still repeats the accepted prefix. A tool-free retry is paid only when the first call carried tools.
+- The cost bar, footer, `/status`, `/cost` and diagnostics name where background spend goes: `agents` for delegated workers and bots, `ICM` for history summaries, instead of one `sub` or `SUBAGENTS` total. The cost bar marks base-rate estimates with `~` and a flat-rate subscription with `(sub)`.
+- The TUI no longer polls the bot roster on every render frame: the roster is projected once and served until a bot-store save, a lane change or an orchestration event drops it, and a session with no worker state never builds the worker runtime to read it. An open bot or team chat skips its rebuild when nothing it shows changed.
+- `/bot new <id> <model>` and team members resolve the model through the registry's resolver (authenticated models first) and name an unknown model instead of guessing a provider; the model token is recognised by looking it up in the registry, so instructions that start with a model-like word stay instructions. A bot messaged later runs on its stored model.
+- A completion check sees every file a large diff changes, not only those in the first 24,000 characters of the patch.
+- System One no longer sends the same redacted evidence once per unsettled item (a nine-item settlement sent it nine times and the request failed).
+- The workbench inspector names `/verification waive` under peer findings, and the Live Chats modal keeps its selector documentation with the selector.
+
 ## [0.104.13] - 2026-10-26
 
+### Fixed
+
+- The Live Chats modal hides retired bots and workers like the roster does.
+
 ## [0.104.12] - 2026-10-26
+
+### Fixed
+
+- Messaging a team member no longer hangs pi at full CPU: recording a bot's turn re-read the shared store inside a loop over the teams it had just cleared, so the loop never ended and the team transcript filled with copies. The bots-and-teams store now lives under `state/bots/store.json`; at the agent root, the startup layout sweep archived it on every start, so bots and teams did not survive a restart (an existing root file is migrated).
+- Persistent bots start again: the write grant outside the workspace made every start fail with `write_reservation_scope_invalid`. A bot is read-only by default and answers in plain text; `/bot new <id> --write` lets it edit files, with replies as structured reports. Bot chats show what you typed and what the bot said, not the task wrapper, the memory block, the control header or the claim envelope, and the team chat shows the durable team transcript once.
 
 ## [0.104.11] - 2026-10-26
 
@@ -12,9 +31,6 @@
 
 ### Fixed
 
-- Messaging a team member no longer hangs pi at full CPU: recording a bot's turn re-read the shared store inside a loop over the teams it had just cleared, so the loop never ended and the team transcript filled with copies. The bots-and-teams store now lives under `state/bots/store.json`; at the agent root, the startup layout sweep archived it on every start, so bots and teams did not survive a restart (an existing root file is migrated).
-- The Live Chats modal hides retired bots and finished workers like the roster does.
-- Persistent bots start again: the write grant outside the workspace made every start fail with `write_reservation_scope_invalid`. A bot is read-only by default and answers in plain text; `/bot new <id> --write` lets it edit files, with replies as structured reports. Bot chats show what you typed and what the bot said, not the task wrapper, the memory block, the control header or the claim envelope, and the team chat shows the durable team transcript once.
 - A completion finding no longer deadlocks the session. The outcome findings name each required outcome the evidence does not show and what would show it; a later completion evaluation replaces the findings it re-judged (and `goal complete` is admitted while only completion findings are open); and the owner can close findings with `/verification waive <id|all> <reason>`, recorded as waived on the finding. A blocked verification loop reports the owner exit.
 - A bot's write grant covers only its own and its teams' blackboard files, not the whole agent memory directory, and operator follow-ups no longer repeat the memory block in every message.
 - The bots-and-teams store keeps an unreadable file as `bots-and-teams.corrupt-<time>.json` instead of replacing it with an empty store, and every mutation re-reads the file so concurrent sessions do not overwrite each other.

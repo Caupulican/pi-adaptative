@@ -1,7 +1,9 @@
 /**
- * Compaction port over the foreground's accepted provider prefix. Each compaction repeats the accepted request's system
- * prompt and tools, then sends its view and task through the isolated request path. The conversation is plain text: a
- * tool call or a stop other than "stop" fails the node.
+ * Compaction port over the foreground's accepted provider prefix. A summary model that is the accepted request's own
+ * model repeats that request's system prompt and tools, so the compaction reads the turns' cached prefix. Any other
+ * summary model shares no cache with the turns: it gets the chat's own stable system prompt and no tools, so a call does
+ * not pay for the foreground's prompt and tool schemas. The view and task go through the isolated request path. The
+ * conversation is plain text: a tool call or a stop other than "stop" fails the node.
  */
 
 import { randomUUID } from "node:crypto";
@@ -16,6 +18,7 @@ import type {
 	ContinuousChatCompactionPrefix,
 } from "./continuous-chat-compaction.ts";
 import { renderContinuousChatViewBlocks } from "./continuous-chat-projection.ts";
+import { CONTINUOUS_CHAT_SYSTEM_PROMPT } from "./continuous-chat-prompt.ts";
 import {
 	CONTINUOUS_CHAT_COMPACTION_THINKING_LEVEL,
 	type ContinuousChatSummaryModelResolution,
@@ -25,17 +28,29 @@ import type { ContinuousChatNodeCoordinate } from "./continuous-chat-tree.ts";
 /** Report-id prefix of a compaction reply's paid spend in the history-usage owner. */
 const CONTINUOUS_CHAT_USAGE_KIND = "memory-continuous-chat-compaction";
 
-/** The exact system prompt and tools of a provider request. A compaction repeats both. */
+/** The model a request ran on, as far as a provider's prompt cache tells models apart. */
+export type ContinuousChatPrefixModel = Pick<Model<Api>, "provider" | "id" | "api" | "baseUrl">;
+
+/** The exact system prompt, tools and model of a provider request. A compaction on the same model repeats all three. */
 export interface ContinuousChatPrefixSnapshot {
 	systemPrompt: string;
 	tools: readonly Tool[];
+	model: ContinuousChatPrefixModel | undefined;
+}
+
+function sameCacheModel(a: ContinuousChatPrefixModel, b: ContinuousChatPrefixModel): boolean {
+	return a.provider === b.provider && a.id === b.id && a.api === b.api && a.baseUrl === b.baseUrl;
 }
 
 /** The prefix an agent context sends, with its tools projected the way the request planner projects them. */
 export function continuousChatPrefixOf(
-	context: Pick<AgentContext, "systemPrompt" | "tools">,
+	context: Pick<AgentContext, "systemPrompt" | "tools"> & { model?: ContinuousChatPrefixModel },
 ): ContinuousChatPrefixSnapshot {
-	return { systemPrompt: context.systemPrompt, tools: projectToolsForProvider(context.tools ?? []) };
+	return {
+		systemPrompt: context.systemPrompt,
+		tools: projectToolsForProvider(context.tools ?? []),
+		model: context.model,
+	};
 }
 
 /**
@@ -45,8 +60,9 @@ export function continuousChatPrefixOf(
 export class ContinuousChatPrefixSource {
 	private accepted: ContinuousChatPrefixSnapshot | undefined;
 
-	record(snapshot: ContinuousChatPrefixSnapshot): void {
-		this.accepted = snapshot;
+	/** Records what an accepted provider request sent: its system prompt and tools, and the model that cached them. */
+	record(context: { systemPrompt?: string; tools?: readonly Tool[] }, model: ContinuousChatPrefixModel): void {
+		this.accepted = { systemPrompt: context.systemPrompt ?? "", tools: context.tools ?? [], model };
 	}
 
 	/** Discards the recorded snapshot, so `resolve` falls back to the agent's current prefix again. */
@@ -114,8 +130,9 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 	}
 
 	/**
-	 * The job's own system prompt and tools are not sent: the accepted request's snapshot is. The conversation's first
-	 * message carries the causal view; each send appends its task. Every paid call's report id names the job, the node it
+	 * The job's own system prompt and tools are not sent: the accepted request's snapshot is, when the summary model
+	 * shares its cache, and the chat's stable system prompt without tools otherwise. The conversation's first message
+	 * carries the causal view; each send appends its task. Every paid call's report id names the job, the node it
 	 * builds, the reply and the attempt, so one ledger row maps to exactly one call.
 	 */
 	open(
@@ -126,8 +143,6 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		const node = `node-${target.level}-${target.ordinal}`;
 		let replyIndex = 0;
 		const head = this.deps.prefixHead();
-		const systemPrompt = head.systemPrompt;
-		const tools = [...head.tools];
 		this.validate();
 		let history: Message[] = [
 			{ role: "user", content: renderContinuousChatViewBlocks(prefix.view), timestamp: Date.now() },
@@ -138,9 +153,12 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 				let attempt = 0;
 				const task: Message = { role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() };
 				const request = [...history, task];
-				const runTurn = async (activeTools: Tool[] = tools) => {
+				const runTurn = async (toolFree = false) => {
 					signal?.throwIfAborted();
 					const model = this.summaryModel();
+					const sharesCache = head.model !== undefined && sameCacheModel(head.model, model);
+					const systemPrompt = sharesCache ? head.systemPrompt : CONTINUOUS_CHAT_SYSTEM_PROMPT;
+					const activeTools = sharesCache && !toolFree ? [...head.tools] : [];
 					let guardRejected = false;
 					const requestGuard = (requestModel: Model<Api>, requestSignal: AbortSignal | undefined): undefined => {
 						try {
@@ -175,21 +193,21 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 							attempt: attemptNumber,
 						});
 					}
-					return { completion, assistant, model, guardRejected };
+					return { completion, assistant, model, guardRejected, sentTools: activeTools.length > 0 };
 				};
-				let { completion: result, assistant, model: summaryModel, guardRejected } = await runTurn();
+				let { completion: result, assistant, model: summaryModel, guardRejected, sentTools } = await runTurn();
 				if (result.stopReason === "error" && !guardRejected) {
 					this.deps.onModelFailure?.(summaryModel, result.errorMessage);
 					const nextSummary = this.deps.summary();
 					if (nextSummary.ok) {
-						({ completion: result, assistant, model: summaryModel, guardRejected } = await runTurn());
+						({ completion: result, assistant, model: summaryModel, guardRejected, sentTools } = await runTurn());
 					}
 				}
 				if (
-					tools.length > 0 &&
+					sentTools &&
 					(result.stopReason === "toolUse" || assistant?.content.some((block) => block.type === "toolCall"))
 				) {
-					({ completion: result, assistant } = await runTurn([]));
+					({ completion: result, assistant } = await runTurn(true));
 				}
 				if (assistant === undefined) throw new Error("Continuous-chat compaction produced no assistant reply.");
 				if (result.stopReason !== "stop") {

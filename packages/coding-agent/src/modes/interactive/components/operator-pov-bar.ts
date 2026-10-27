@@ -1,7 +1,7 @@
 import { type Component, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { CiStatusView } from "../../../core/ci-status-view.ts";
 import type { SelfCompactionView } from "../../../core/compaction/self-compaction-controller.ts";
-import type { SessionCostSummary } from "../../../core/cost/cost-summary.ts";
+import { backgroundCostShares, type SessionCostSummary } from "../../../core/cost/cost-summary.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
 import { isIdleProjection } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
@@ -20,7 +20,17 @@ export interface OperatorPovSource {
 	getProjection(): OperatorProjection;
 	getRouteSnapshot(): ForegroundRouteSnapshot;
 	getSemanticPlaneHealth(): SemanticPlaneHealth;
-	getCostSummary(): Pick<SessionCostSummary, "currentCost" | "subagentCost" | "subagentReports">;
+	getCostSummary(): Pick<
+		SessionCostSummary,
+		| "currentCost"
+		| "costEstimate"
+		| "subagentCost"
+		| "subagentReports"
+		| "historySummaryCost"
+		| "historySummaryReports"
+	>;
+	/** True when the foreground model runs on a flat-rate subscription: the dollars shown are catalog estimates. */
+	isUsingSubscription(): boolean;
 	getSessionWorkState?(): SessionWorkState;
 	getSelfCompactionView?(): SelfCompactionView;
 	/** The branch's recorded CI verdict (core/ci-status-view.ts); absent when none is recorded. */
@@ -249,13 +259,15 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		});
 	}
 
+	const costParts = backgroundCostShares(cost, 3).map(
+		(share) => `${share.label === "AGENTS" ? "agents" : share.label} ${share.amount}`,
+	);
+	const subscription = source.isUsingSubscription();
 	segments.push({
 		id: "cost",
 		label: "COST",
-		value: formatCost(cost.currentCost),
-		...(cost.subagentReports > 0 || cost.subagentCost > 0
-			? { extension: `(sub ${formatCost(cost.subagentCost)})` }
-			: {}),
+		value: `${cost.costEstimate ? "~" : ""}${formatCost(cost.currentCost)}${subscription ? " (sub)" : ""}`,
+		...(costParts.length > 0 ? { extension: `(${costParts.join(" · ")})` } : {}),
 		dropOrder: 0,
 		bare: true,
 	});

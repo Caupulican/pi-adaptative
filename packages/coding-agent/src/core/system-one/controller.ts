@@ -42,7 +42,6 @@ import {
 	type CompletionAccount,
 	checkCompletionAccount,
 	judgeAccountClaims,
-	patchPaths,
 } from "./completion-account.ts";
 import { concretizeOutcomeFinding } from "./completion-evidence-gaps.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
@@ -982,14 +981,21 @@ export class SystemOneController {
 	): Promise<Record<string, unknown>> {
 		const state: Record<string, unknown> = {};
 		const questions: QuestionPack = {};
+		const evidenceKeys = new Map<string, string>();
 		checks.forEach((check, index) => {
 			state[`s${index}`] = this.projector.redactText(check.statement);
-			state[`e${index}`] = this.projector.redactText(check.evidence);
+			const redactedEvidence = this.projector.redactText(check.evidence);
+			let evidenceKey = evidenceKeys.get(redactedEvidence);
+			if (!evidenceKey) {
+				evidenceKey = `e${index}`;
+				evidenceKeys.set(redactedEvidence, evidenceKey);
+				state[evidenceKey] = redactedEvidence;
+			}
 			// Wording measured against live System One (docs/system-one.md): refutation is asked as "contradict",
 			// with criteria naming what a contradicting result looks like.
 			questions[unsettledQuestionId("shows_true", index)] = {
 				type: "boolean",
-				instructions: `Does \`e${index}\` show that \`s${index}\` is true?`,
+				instructions: `Does \`${evidenceKey}\` show that \`s${index}\` is true?`,
 				criteria: {
 					true: "The evidence reports the statement's outcome directly",
 					false: "The evidence reports a different outcome, or says nothing about it",
@@ -997,7 +1003,7 @@ export class SystemOneController {
 			};
 			questions[unsettledQuestionId("shows_false", index)] = {
 				type: "boolean",
-				instructions: `Does \`e${index}\` contradict \`s${index}\`?`,
+				instructions: `Does \`${evidenceKey}\` contradict \`s${index}\`?`,
 				criteria: {
 					true: "The evidence reports a result that makes the statement untrue (a failure, a rejection, a different value)",
 					false: "The evidence agrees with the statement or says nothing about it",
@@ -1536,7 +1542,7 @@ export class SystemOneController {
 				})),
 				changedPaths: [
 					...new Set([
-						...patchPaths(work?.patch ?? ""),
+						...(work?.files ?? []),
 						...(work?.untracked ?? []),
 						...snapshot.changes.map((change) => change.path),
 					]),

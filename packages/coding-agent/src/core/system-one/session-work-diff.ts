@@ -12,6 +12,7 @@ import {
 	discoverWorkRepositoryAsync,
 	readWorkDiff,
 	retainWorkBaseline,
+	WORK_DIFF_FILES_LIMIT,
 	WORK_DIFF_PATCH_LIMIT,
 	WORK_DIFF_SUPPRESSION_LIMIT,
 	WORK_DIFF_UNTRACKED_LIMIT,
@@ -328,6 +329,7 @@ export async function readGoalWorkDiff(
 	}));
 	let patch = "";
 	let omittedChars = 0;
+	const files: string[] = [];
 	const untracked: string[] = [];
 	const suppressions: AddedSuppression[] = [];
 	const diagnostics: string[] = [];
@@ -347,6 +349,9 @@ export async function readGoalWorkDiff(
 		const available = Math.max(0, WORK_DIFF_PATCH_LIMIT - patch.length);
 		patch += section.slice(0, available);
 		omittedChars += work.omittedChars + Math.max(0, section.length - available);
+		for (const path of work.files) {
+			if (files.length < WORK_DIFF_FILES_LIMIT) files.push(path);
+		}
 		for (const hit of work.suppressions ?? []) {
 			if (suppressions.length < WORK_DIFF_SUPPRESSION_LIMIT) suppressions.push(hit);
 		}
@@ -357,6 +362,7 @@ export async function readGoalWorkDiff(
 	return {
 		base: repositories.length === 1 ? repositories[0]!.base : "multiple repositories",
 		patch,
+		files,
 		omittedChars,
 		untracked,
 		suppressions,

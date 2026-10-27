@@ -95,6 +95,7 @@ import {
 	type ContinuousChatWorkReportEntry,
 } from "./memory/continuous-chat-ingest.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
+import { resolveCliModel } from "./model-resolver.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
 import type { OrchestrationThinkingLevel, WorkerResultContract } from "./orchestration/contracts.ts";
@@ -165,6 +166,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private readonly _laneTracker = new LaneTracker({ onChange: () => this._laneRecordsChanged() });
 	private readonly _laneRecordListeners = new Set<(records: readonly LaneRecord[]) => void>();
 	private _laneRecordsNotifyQueued = false;
+	/** The projected bot roster, dropped by every input change. */
+	private _botViews: { defaultModelRef: string; delegateActive: boolean; views: PersistentBotView[] } | undefined;
 	private _unsubscribeLaneRecordStore: (() => void) | undefined;
 	private readonly _laneModels: LaneModelResolver;
 	private readonly _goalAutoContinue: GoalAutoContinueController;
@@ -440,6 +443,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	private _laneRecordsChanged(): void {
+		this._botViews = undefined;
 		if (this._laneRecordListeners.size === 0 || this._laneRecordsNotifyQueued) return;
 		this._laneRecordsNotifyQueued = true;
 		queueMicrotask(() => {
@@ -1069,20 +1073,60 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	getBotTeamStore(): PersistentBotTeamStore {
 		if (!this._botTeamStore) {
 			this._botTeamStore = new PersistentBotTeamStore(this.deps.getAgentDir());
+			this._botTeamStore.subscribe(() => {
+				this._botViews = undefined;
+			});
 		}
 		return this._botTeamStore;
 	}
 
-	listPersistentBots(defaultModelRef = this.getRootModelLabel()): PersistentBotView[] {
-		let liveAgents: WorkerAgentView[] = [];
+	/** True once this session has a worker runtime or a persisted orchestration store: only then can workers or managed lanes exist. */
+	private _hasWorkerState(): boolean {
+		if (this._workers || this._workerLifecycle) return true;
 		try {
-			liveAgents = this.listWorkerAgents();
+			return lstatSync(orchestrationEventStoreDir(this.deps.getAgentDir(), this.deps.getSessionId())).isDirectory();
 		} catch {
-			liveAgents = [];
+			return false;
 		}
-		return this.getBotTeamStore().projectBotViews(liveAgents, this.getLaneRecords(), defaultModelRef);
 	}
 
+	/**
+	 * The bot roster. The TUI reads it on every render frame, so it is projected once and served until an input reports a
+	 * change: a bot-store save, a lane-tracker change or an orchestration event drops it (see `_laneRecordsChanged`).
+	 * Reading it never constructs the worker runtime for a session that has no worker state.
+	 */
+	listPersistentBots(defaultModelRef = this.getRootModelLabel()): PersistentBotView[] {
+		const delegateActive = this.deps.isDelegateToolActive();
+		const cached = this._botViews;
+		if (cached && cached.defaultModelRef === defaultModelRef && cached.delegateActive === delegateActive) {
+			return [...cached.views];
+		}
+		const hasWorkerState = this._hasWorkerState();
+		let liveAgents: WorkerAgentView[] = [];
+		if (hasWorkerState && delegateActive) {
+			try {
+				liveAgents = this.listWorkerAgents();
+			} catch {
+				liveAgents = [];
+			}
+		}
+		let laneRecords: LaneRecord[];
+		if (hasWorkerState) {
+			laneRecords = this.getLaneRecords();
+		} else {
+			this._hydrateManagedLanes();
+			laneRecords = this._laneTracker.getRecords();
+		}
+		const views = this.getBotTeamStore().projectBotViews(liveAgents, laneRecords, defaultModelRef);
+		this._botViews = { defaultModelRef, delegateActive, views };
+		return [...views];
+	}
+
+	/**
+	 * The model a bot or team member runs on. With no reference it runs on the foreground model. A reference resolves
+	 * through the registry's resolver, authenticated models first; one the registry cannot resolve is an error, never a
+	 * guessed provider.
+	 */
 	resolveModelSpec(rawModel?: string): { provider: string; modelId: string; thinkingLevel?: string } {
 		const fgThinking = this.deps.getThinkingLevel
 			? String(this.deps.getThinkingLevel())
@@ -1090,70 +1134,30 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				? String(this.deps.getForegroundThinkingLevel())
 				: undefined;
 
-		const trimmed = rawModel?.trim();
-		if (trimmed && trimmed.length > 0) {
-			const all = this.deps.getModelRegistry().getAll();
-			const match = all.find((m) => `${m.provider}/${m.id}` === trimmed || m.id === trimmed);
-			if (match) {
-				return {
-					provider: match.provider,
-					modelId: match.id,
-					thinkingLevel: match.defaultThinkingLevel ?? fgThinking,
-				};
-			}
-			if (trimmed.includes("/")) {
-				const slash = trimmed.indexOf("/");
-				return {
-					provider: trimmed.slice(0, slash),
-					modelId: trimmed.slice(slash + 1),
-					thinkingLevel: fgThinking,
-				};
-			}
-			const curModel = this.deps.getModel();
-			if (curModel) {
-				return {
-					provider: curModel.provider,
-					modelId: trimmed,
-					thinkingLevel: fgThinking,
-				};
-			}
-			return {
-				provider: "anthropic",
-				modelId: trimmed,
-				thinkingLevel: fgThinking,
-			};
+		const reference = rawModel?.trim();
+		if (!reference) {
+			const current = this.deps.getModel();
+			if (!current) throw new Error("No model is selected: give the model as <provider>/<model>.");
+			return { provider: current.provider, modelId: current.id, thinkingLevel: fgThinking };
 		}
-
-		const curModel = this.deps.getModel();
-		if (curModel) {
-			return {
-				provider: curModel.provider,
-				modelId: curModel.id,
-				thinkingLevel: fgThinking,
-			};
-		}
-
-		const def = this.deps.getSettingsManager().getDefaultModel();
-		if (def) {
-			if (def.includes("/")) {
-				const slash = def.indexOf("/");
-				return {
-					provider: def.slice(0, slash),
-					modelId: def.slice(slash + 1),
-					thinkingLevel: fgThinking,
-				};
-			}
-			return {
-				provider: "anthropic",
-				modelId: def,
-				thinkingLevel: fgThinking,
-			};
-		}
-
+		const registry = this.deps.getModelRegistry();
+		const authenticated = resolveCliModel({
+			cliModel: reference,
+			modelRegistry: {
+				find: (provider, modelId) => registry.find(provider, modelId),
+				getAll: () => registry.getAvailable(),
+				getAvailable: () => registry.getAvailable(),
+				hasConfiguredAuth: (model) => registry.hasConfiguredAuth(model),
+			},
+		});
+		const resolved = authenticated.model
+			? authenticated
+			: resolveCliModel({ cliModel: reference, modelRegistry: registry });
+		if (!resolved.model) throw new Error(resolved.error ?? `Model "${reference}" not found.`);
 		return {
-			provider: "anthropic",
-			modelId: "claude-haiku-5-5",
-			thinkingLevel: fgThinking,
+			provider: resolved.model.provider,
+			modelId: resolved.model.id,
+			thinkingLevel: resolved.thinkingLevel ?? resolved.model.defaultThinkingLevel ?? fgThinking,
 		};
 	}
 
@@ -1437,7 +1441,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			store.upsertBot({ agentId: normId, lastMessageAt: Date.now() });
 		}
 
-		const spec = this.resolveModelSpec(bot ? `${bot.provider}/${bot.modelId}` : undefined);
+		// The bot's stored model was resolved when it was created or first messaged; it runs on that model as stored.
+		const spec = { provider: bot.provider, modelId: bot.modelId };
 		const requestedMode = options?.mode ?? "follow_up";
 
 		const existingAgent = liveAgents.find((a) => a.agentId === normId && a.status !== "retired");

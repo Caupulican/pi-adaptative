@@ -23,7 +23,12 @@ import {
 	type AutonomyTelemetryEvent,
 	redactTelemetryValue,
 } from "./autonomy/telemetry-events.ts";
-import { hasCostSummarySignal, hasSubagentCostSignal, type SessionCostSummary } from "./cost/cost-summary.ts";
+import {
+	backgroundCostShares,
+	hasCostSummarySignal,
+	hasSubagentCostSignal,
+	type SessionCostSummary,
+} from "./cost/cost-summary.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import { getRecentModelRouterDecisions, type ModelRouterDecisionStatus } from "./model-router/status.ts";
@@ -212,11 +217,8 @@ export class AutonomyTelemetry {
 		if (costSummary.todayCost > 0) {
 			costs.push({ title: "TODAY", summary: `$${costSummary.todayCost.toFixed(4)}` });
 		}
-		if (hasSubagentCostSignal(costSummary)) {
-			costs.push({
-				title: "SUBAGENTS",
-				summary: `$${costSummary.subagentCost.toFixed(4)} included in CURRENT`,
-			});
+		for (const share of backgroundCostShares(costSummary, 4)) {
+			costs.push({ title: share.label, summary: `${share.amount} included in CURRENT` });
 		}
 		if (costs.length > 0) snapshot.costs = costs;
 

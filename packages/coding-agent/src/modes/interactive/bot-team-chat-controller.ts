@@ -12,6 +12,8 @@ import {
 	type UpsertPersistentBotInput,
 	type UpsertPersistentTeamInput,
 } from "../../core/delegation/persistent-bot-team-store.ts";
+import type { ModelRegistry } from "../../core/model-registry.ts";
+import { isModelReference } from "../../core/model-resolver.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
@@ -36,6 +38,7 @@ export interface BotTeamChatSessionPort {
 	readTeamChatMessages(teamId: string): AgentMessage[];
 	subscribeBotTeamUpdates(listener: () => void): () => void;
 	resolveModelSpec(rawModel?: string): { provider: string; modelId: string; thinkingLevel?: string };
+	readonly modelRegistry: Pick<ModelRegistry, "getAll">;
 	getRootModelLabel(): string;
 	getRootStatusLabel(): string;
 }
@@ -78,11 +81,21 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * What a rendered chat shows: its header facts plus the message count and the last message's time. A transcript only
+ * grows, so these change whenever a message is added; hashing every message on each event would cost more than it saves.
+ */
+function chatSignature(header: object, messages: readonly AgentMessage[]): string {
+	return JSON.stringify({ header, count: messages.length, last: messages.at(-1)?.timestamp ?? null });
+}
+
 export class BotTeamChatController {
 	private activeTarget: ActiveChatTarget = { kind: "root" };
 	private unsubscribeUpdates?: () => void;
 	private refreshQueued = false;
 	private readonly host: BotTeamChatHost;
+	/** What the chat container shows for the open bot or team chat. An unchanged one skips the rebuild. */
+	private lastRenderedChatSignature: string | undefined;
 
 	constructor(host: BotTeamChatHost) {
 		this.host = host;
@@ -104,6 +117,7 @@ export class BotTeamChatController {
 		this.unsubscribeUpdates?.();
 		this.unsubscribeUpdates = undefined;
 		this.refreshQueued = false;
+		this.lastRenderedChatSignature = undefined;
 	}
 
 	getActiveTarget(): ActiveChatTarget {
@@ -153,6 +167,7 @@ export class BotTeamChatController {
 
 	async switchTarget(target: ActiveChatTarget): Promise<void> {
 		this.activeTarget = target;
+		this.lastRenderedChatSignature = undefined;
 		this.host.onActiveTargetChanged?.(target);
 		await this.refreshActiveChatView();
 	}
@@ -161,6 +176,7 @@ export class BotTeamChatController {
 		const target = this.activeTarget;
 		switch (target.kind) {
 			case "root":
+				this.lastRenderedChatSignature = undefined;
 				await this.host.renderRootConversation();
 				return;
 			case "bot":
@@ -408,9 +424,8 @@ export class BotTeamChatController {
 	private renderBotChat(agentId: string): void {
 		const port = this.host.getSessionPort();
 		const bot = port.listPersistentBots().find((b) => b.agentId === agentId);
-		const chat = this.host.chatContainer;
-		chat.clear();
-		chat.addChild(new DynamicBorder());
+		const messages = port.readBotChatMessages(agentId);
+		if (!this.beginChatRender(chatSignature({ kind: "bot", agentId, bot: bot ?? null }, messages))) return;
 
 		const modelLabel = bot?.modelRef ?? "unknown model";
 		const thinking = bot?.thinkingLevel ?? "default";
@@ -436,26 +451,35 @@ export class BotTeamChatController {
 				`Direct chat active: messages you submit here go directly to ${agentId} · /chat root or Alt+A to return to Brain · /bot stop ${agentId} to halt`,
 			),
 		);
-		chat.addChild(new Text(lines.join("\n"), 1, 0));
+		this.finishChatRender(
+			lines,
+			messages,
+			`  No messages with ${agentId} yet. Type below and press Enter to message ${agentId} directly.`,
+		);
+	}
+
+	/** Starts rebuilding the chat container for `signature`. False when it already shows exactly that. */
+	private beginChatRender(signature: string): boolean {
+		if (signature === this.lastRenderedChatSignature) {
+			this.host.ui.requestRender();
+			return false;
+		}
+		this.lastRenderedChatSignature = signature;
+		this.host.chatContainer.clear();
+		this.host.chatContainer.addChild(new DynamicBorder());
+		return true;
+	}
+
+	/** Adds the header lines and the messages, or the empty-chat hint, to the chat `beginChatRender` opened. */
+	private finishChatRender(header: readonly string[], messages: readonly AgentMessage[], emptyHint: string): void {
+		const chat = this.host.chatContainer;
+		chat.addChild(new Text(header.join("\n"), 1, 0));
 		chat.addChild(new DynamicBorder());
 		chat.addChild(new Spacer(1));
-
-		const messages = port.readBotChatMessages(agentId);
 		if (messages.length === 0) {
-			chat.addChild(
-				new Text(
-					theme.fg(
-						"muted",
-						`  No messages with ${agentId} yet. Type below and press Enter to message ${agentId} directly.`,
-					),
-					1,
-					0,
-				),
-			);
+			chat.addChild(new Text(theme.fg("muted", emptyHint), 1, 0));
 		} else {
-			for (const message of messages) {
-				this.host.appendRenderedMessageToChat(message);
-			}
+			for (const message of messages) this.host.appendRenderedMessageToChat(message);
 		}
 		this.host.ui.requestRender();
 	}
@@ -471,9 +495,9 @@ export class BotTeamChatController {
 				return `${memberId} (${bot?.state ?? "unknown"})`;
 			})
 			.join(" · ");
-		const chat = this.host.chatContainer;
-		chat.clear();
-		chat.addChild(new DynamicBorder());
+		const messages = port.readTeamChatMessages(teamId);
+		if (!this.beginChatRender(chatSignature({ kind: "team", teamId, team: team ?? null, memberStatus }, messages)))
+			return;
 
 		const memoryPath = team?.memoryFilePath ?? `~/.pi/agent/memory/teams/${teamId}.md`;
 		const lines = [
@@ -486,28 +510,11 @@ export class BotTeamChatController {
 				"Direct team chat active: messages you submit here dispatch to all team members (or prefix @<botId> for one member) · /chat root or Alt+A to return to Brain",
 			),
 		];
-		chat.addChild(new Text(lines.join("\n"), 1, 0));
-		chat.addChild(new DynamicBorder());
-		chat.addChild(new Spacer(1));
-
-		const messages = port.readTeamChatMessages(teamId);
-		if (messages.length === 0) {
-			chat.addChild(
-				new Text(
-					theme.fg(
-						"muted",
-						`  No messages in team ${teamId} yet. Type below and press Enter to message the team.`,
-					),
-					1,
-					0,
-				),
-			);
-		} else {
-			for (const message of messages) {
-				this.host.appendRenderedMessageToChat(message);
-			}
-		}
-		this.host.ui.requestRender();
+		this.finishChatRender(
+			lines,
+			messages,
+			`  No messages in team ${teamId} yet. Type below and press Enter to message the team.`,
+		);
 	}
 
 	/**
@@ -580,8 +587,8 @@ export class BotTeamChatController {
 		const canWrite = maybeFlag === "--write";
 		const afterId = canWrite ? afterFlag : afterIdRaw;
 		const [maybeModel, afterModel] = splitHead(afterId);
-		// A token containing "/" is a model reference; anything else begins the instructions.
-		const hasModel = maybeModel.includes("/");
+		// A token that names a registry model is the model; anything else begins the instructions.
+		const hasModel = isModelReference(maybeModel, port.modelRegistry.getAll());
 		const modelSpec = port.resolveModelSpec(hasModel ? maybeModel : undefined);
 		const instructions = (hasModel ? afterModel : afterId).trim();
 		const bot = port.upsertPersistentBot({

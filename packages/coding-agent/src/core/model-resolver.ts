@@ -158,6 +158,15 @@ export function findExactModelReferenceMatch(
 	return idMatches.length === 1 ? idMatches[0] : undefined;
 }
 
+/** True when `token` is the id of a model in `models`, or a `<provider>/<id>` reference to one. */
+export function isModelReference(token: string, models: readonly Model<Api>[]): boolean {
+	const lower = token.trim().toLowerCase();
+	if (!lower) return false;
+	return models.some(
+		(model) => model.id.toLowerCase() === lower || `${model.provider}/${model.id}`.toLowerCase() === lower,
+	);
+}
+
 /**
  * Try to match a pattern to a model from the available models list.
  * Returns the matched model or undefined if no match found.

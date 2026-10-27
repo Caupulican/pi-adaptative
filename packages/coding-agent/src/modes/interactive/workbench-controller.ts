@@ -840,6 +840,7 @@ export function buildWorkbenchSections(
 			.slice(0, 3)
 			.map((finding) => `  ${theme.fg("warning", "!")} ${theme.fg("text", `${finding.id}: ${finding.reason}`)}`);
 		if (peerFindings.length > 3) rows.push(`  ${theme.fg("dim", `+${peerFindings.length - 3} more`)}`);
+		rows.push(`  ${theme.fg("dim", "answer with evidence, or /verification waive <id|all> <reason>")}`);
 		sections.push({ title: "Peer findings", meta: `${peerFindings.length} active`, body: rows });
 	}
 	// Edge grants stay armed in the host; they are not a workbench inspector section.
