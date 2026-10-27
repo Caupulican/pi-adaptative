@@ -81,10 +81,8 @@ import {
 } from "./continuous-chat-tree.ts";
 import {
 	advanceContinuousChatView,
-	applyContinuousChatViewMerges,
 	CONTINUOUS_CHAT_CAUSAL_VIEW_HIGH_BYTES,
 	CONTINUOUS_CHAT_CAUSAL_VIEW_LOW_BYTES,
-	type ContinuousChatViewAdvance,
 	type ContinuousChatViewEntry,
 	type ContinuousChatViewKind,
 	type ContinuousChatViewState,
@@ -306,21 +304,18 @@ async function persistView(rootDir: string, view: ContinuousChatViewState): Prom
 	await writeDurableAtomic(join(rootDir, viewFileName(view.kind)), `${JSON.stringify(view)}\n`);
 }
 
-/** Advances a view one leaf at a time to `expectedMessages`, then refreshes its lines against the current tree. */
+/**
+ * Advances a view one arriving leaf at a time to `expectedMessages`, then refreshes its lines against the current tree.
+ * Only the arrivals commit a pending batch; the closing refresh is a background fit.
+ */
 function catchUpView(
 	view: ContinuousChatViewState,
 	expectedMessages: number,
 	nodes: ReadonlyMap<string, ContinuousChatTreeNode>,
-): ContinuousChatViewAdvance {
+): ContinuousChatViewState {
 	let next = view;
-	const mergedParents: ContinuousChatNodeCoordinate[] = [];
-	while (next.totalMessages < expectedMessages) {
-		const advanced = advanceContinuousChatView(next, next.totalMessages, nodes);
-		next = advanced.state;
-		mergedParents.push(...advanced.mergedParents);
-	}
-	const refreshed = refreshContinuousChatView(next, nodes);
-	return { state: refreshed.state, mergedParents: [...mergedParents, ...refreshed.mergedParents] };
+	while (next.totalMessages < expectedMessages) next = advanceContinuousChatView(next, next.totalMessages, nodes);
+	return refreshContinuousChatView(next, nodes, "background");
 }
 
 /** Whether two views have the same partition and the same lines. Revisions are ignored, since a refresh bumps them. */
@@ -401,8 +396,9 @@ async function persistImages(imagesDir: string, images: ContinuousChatImageInput
  * next write. A locked step that throws drops the caches, so the next step reconciles from disk. Locked bodies call
  * only private helpers, never another locked method.
  *
- * Memory: no per-message or per-node state is resident. The working set is the settled views (bounded by their byte
- * high-water marks), the node cache (`CONTINUOUS_CHAT_NODE_CACHE_ENTRIES`), and the rendered turn view. Reads go to the
+ * Memory: no per-message or per-node state is resident. The working set is the settled views (a batch merges a view
+ * down from its high-water mark, but a view stays above it while parents are unbuilt or a background batch is withheld),
+ * the node cache (`CONTINUOUS_CHAT_NODE_CACHE_ENTRIES`), and the rendered turn view. Reads go to the
  * index files by position or hash probe. Steady-state operations touch the root, the queue, the two views when the
  * root moved, and the newest segment; they never list or stat older segments or tree files.
  */
@@ -1124,10 +1120,8 @@ export class ContinuousChatStore {
 		];
 		const nodes = await this.presentNodes(coordinates, true, signal);
 		signal?.throwIfAborted();
-		const turnAdvance = catchUpView(views[0], expected, nodes);
-		const causalAdvance = catchUpView(views[1], expected, nodes);
-		const causal = applyContinuousChatViewMerges(causalAdvance.state, turnAdvance.mergedParents, nodes);
-		const settled: ViewPair = [turnAdvance.state, causal];
+		// Each view is fitted on its own, as the reference fits its two views: the causal view never inherits a merge.
+		const settled: ViewPair = [catchUpView(views[0], expected, nodes), catchUpView(views[1], expected, nodes)];
 		for (const index of [0, 1] as const) {
 			signal?.throwIfAborted();
 			if (!persisted[index] || !sameLayout(views[index], settled[index])) {

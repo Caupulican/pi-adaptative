@@ -46,10 +46,12 @@ export interface ContinuousChatViewState {
 	entries: ContinuousChatViewEntry[];
 }
 
-export interface ContinuousChatViewAdvance {
-	state: ContinuousChatViewState;
-	mergedParents: ContinuousChatNodeCoordinate[];
-}
+/**
+ * What fits a view. A message `arrival` commits the pending batch as far as the tree allows. A `background` fit (a node
+ * was published, a retry became eligible, a view was loaded) refreshes the lines but commits a batch only when it
+ * reaches low water or removes at least one high-water budget, so partial progress never rewrites the view's prefix.
+ */
+export type ContinuousChatViewFit = "arrival" | "background";
 
 export function createContinuousChatView(kind: ContinuousChatViewKind): ContinuousChatViewState {
 	return {
@@ -123,82 +125,72 @@ function mostDuePair(
 	return selected;
 }
 
+/** A copy of the view with the most due available pairs merged until low water or until no built parent remains. */
+function mergeDuePairs(
+	state: ContinuousChatViewState,
+	nodes: ReadonlyMap<string, ContinuousChatTreeNode>,
+): ContinuousChatViewState {
+	const merged: ContinuousChatViewState = { ...state, entries: [...state.entries] };
+	while (continuousChatViewBytes(merged) > merged.lowBytes) {
+		const selected = mostDuePair(merged, nodes);
+		if (selected === undefined) break;
+		merged.entries.splice(selected.index, 2, entryForNode(selected.parent));
+	}
+	return merged;
+}
+
+/**
+ * Refreshes every line against the tree, then fits the view. Past high water (or with a batch pending, on an arrival)
+ * the merge is proposed from a copy. An arrival commits whatever the proposal reached. A background fit commits only a
+ * proposal that reaches low water or saves at least one high-water budget, so the lines are always current while the
+ * partition changes in whole batches.
+ */
 export function refreshContinuousChatView(
 	current: ContinuousChatViewState,
 	nodes: ReadonlyMap<string, ContinuousChatTreeNode>,
-): ContinuousChatViewAdvance {
+	fit: ContinuousChatViewFit,
+): ContinuousChatViewState {
 	const state: ContinuousChatViewState = {
 		...current,
 		revision: current.revision + 1,
 		entries: current.entries.map((entry) => entryForCoordinate(entry, nodes)),
 	};
-	const mergedParents: ContinuousChatNodeCoordinate[] = [];
-	if (continuousChatViewBytes(state) > state.highBytes || state.batchPending) {
-		while (continuousChatViewBytes(state) > state.lowBytes) {
-			const selected = mostDuePair(state, nodes);
-			if (selected === undefined) break;
-			state.entries.splice(selected.index, 2, entryForNode(selected.parent));
-			mergedParents.push({ level: selected.parent.level, ordinal: selected.parent.ordinal });
+	const before = continuousChatViewBytes(state);
+	if (before > state.highBytes || (fit === "arrival" && state.batchPending)) {
+		const proposed = mergeDuePairs(state, nodes);
+		if (
+			fit === "arrival" ||
+			continuousChatViewBytes(proposed) <= Math.max(state.lowBytes, before - state.highBytes)
+		) {
+			state.entries = proposed.entries;
 		}
 		state.batchPending = continuousChatViewBytes(state) > state.lowBytes;
 	}
 	validateCompletePartition(state);
-	return { state, mergedParents };
+	return state;
 }
 
 /**
- * Append exactly one leaf, then perform the current batch if the high-water mark was crossed or an
- * earlier batch is waiting for parents. Every returned state still covers all messages exactly once.
+ * Append exactly one leaf, then perform the current batch if the high-water mark was crossed or an earlier batch is
+ * waiting for parents. Every returned state still covers all messages exactly once.
  */
 export function advanceContinuousChatView(
 	current: ContinuousChatViewState,
 	messageId: number,
 	nodes: ReadonlyMap<string, ContinuousChatTreeNode>,
-): ContinuousChatViewAdvance {
+): ContinuousChatViewState {
 	if (!Number.isSafeInteger(messageId) || messageId !== current.totalMessages) {
 		throw new TypeError("Continuous-chat view can only append its exact next message leaf.");
 	}
 	const state: ContinuousChatViewState = {
 		...current,
-		revision: current.revision + 1,
 		totalMessages: current.totalMessages + 1,
 		entries: [
 			...current.entries.map((entry) => entryForCoordinate(entry, nodes)),
 			entryForCoordinate({ level: 0, ordinal: messageId }, nodes),
 		],
 	};
-	const refreshed = refreshContinuousChatView({ ...state, revision: state.revision - 1 }, nodes);
-	return { state: refreshed.state, mergedParents: refreshed.mergedParents };
-}
-
-/**
- * Applies merges already chosen by the main view to another complete view when it still contains both children. This
- * is the one coupling required by the reference: a main-view merge is never absent from the causal view merely because
- * the causal view has not crossed its own high-water mark yet.
- */
-export function applyContinuousChatViewMerges(
-	current: ContinuousChatViewState,
-	parents: readonly ContinuousChatNodeCoordinate[],
-	nodes: ReadonlyMap<string, ContinuousChatTreeNode>,
-): ContinuousChatViewState {
-	if (parents.length === 0) return current;
-	const state: ContinuousChatViewState = { ...current, entries: [...current.entries] };
-	let changed = false;
-	for (const parentCoordinate of parents) {
-		if (parentCoordinate.level === 0) continue;
-		const left = { level: parentCoordinate.level - 1, ordinal: parentCoordinate.ordinal * 2 };
-		const right = { level: parentCoordinate.level - 1, ordinal: parentCoordinate.ordinal * 2 + 1 };
-		const index = state.entries.findIndex((entry) => entry.level === left.level && entry.ordinal === left.ordinal);
-		const next = state.entries[index + 1];
-		const parent = nodes.get(continuousChatNodeKey(parentCoordinate));
-		if (index < 0 || next?.level !== right.level || next.ordinal !== right.ordinal || parent === undefined) continue;
-		state.entries.splice(index, 2, entryForNode(parent));
-		changed = true;
-	}
-	if (!changed) return current;
-	state.revision = current.revision + 1;
-	validateCompletePartition(state);
-	return state;
+	return refreshContinuousChatView(state, nodes, "arrival");
 }
 
 export function renderContinuousChatView(

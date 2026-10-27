@@ -2,8 +2,8 @@
  * Compaction port over the foreground's accepted provider prefix. A summary model that is the accepted request's own
  * model repeats that request's system prompt and tools, so the compaction reads the turns' cached prefix. Any other
  * summary model shares no cache with the turns: it gets the chat's own stable system prompt and no tools, so a call does
- * not pay for the foreground's prompt and tool schemas. The view and task go through the isolated request path. The
- * conversation is plain text: a tool call or a stop other than "stop" fails the node.
+ * not pay for the foreground's prompt and tool schemas. The view and task go through the isolated request path. A reply
+ * is plain text: a tool call or a stop other than "stop" fails the node.
  */
 
 import { randomUUID } from "node:crypto";
@@ -33,6 +33,10 @@ export interface ContinuousChatPrefixSnapshot {
 	systemPrompt: string;
 	tools: readonly Tool[];
 	model: ContinuousChatPrefixModel | undefined;
+}
+
+function userText(text: string): Message {
+	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
 }
 
 function sameCacheModel(a: ContinuousChatPrefixModel, b: ContinuousChatPrefixModel): boolean {
@@ -132,8 +136,9 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 
 	/**
 	 * The job's own system prompt and tools are not sent: the accepted request's snapshot is, when the summary model
-	 * shares its cache, and the chat's stable system prompt without tools otherwise. The conversation's first message
-	 * carries the causal view; each send appends its task. Every paid call's report id names the job, the node it
+	 * shares its cache, and the chat's stable system prompt without tools otherwise. Every send is an independent request:
+	 * the node's causal view, its task, and only the latest correction note when the send carries one. No earlier reply
+	 * (thinking included) and no earlier note is replayed. Every paid call's report id names the job, the node it
 	 * builds, the reply and the attempt, so one ledger row maps to exactly one call.
 	 */
 	open(
@@ -145,15 +150,17 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		let replyIndex = 0;
 		const head = this.deps.prefixHead();
 		this.validate();
-		let history: Message[] = [
-			{ role: "user", content: renderContinuousChatViewBlocks(prefix.view), timestamp: Date.now() },
-		];
+		const view: Message = {
+			role: "user",
+			content: renderContinuousChatViewBlocks(prefix.view),
+			timestamp: Date.now(),
+		};
 		return {
-			send: async (message, signal) => {
+			send: async ({ task, correction }, signal) => {
 				const replyNumber = ++replyIndex;
 				let attempt = 0;
-				const task: Message = { role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() };
-				const request = [...history, task];
+				const request: Message[] = [view, userText(task)];
+				if (correction !== undefined) request.push(userText(correction));
 				const runTurn = async (toolFree = false) => {
 					signal?.throwIfAborted();
 					const { model, thinkingLevel } = this.summaryResolution();
@@ -218,7 +225,6 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 				if (assistant.content.some((block) => block.type === "toolCall")) {
 					throw new Error("Continuous-chat compaction called a tool; compactions are tool-free.");
 				}
-				history = [...request, assistant];
 				return result.text;
 			},
 		};

@@ -4,6 +4,7 @@ import { hasOnlyKeys, isNonNegativeSafeInteger, isPlainRecord } from "../util/va
 import { ContinuousChatCorruptError } from "./continuous-chat-index.ts";
 import type { LegacyQueueEntry, LegacyQueueHeader } from "./continuous-chat-queue-import.ts";
 import {
+	continuousChatNodeContextEnd,
 	continuousChatNodeFirstMessage,
 	continuousChatNodeMessageCount,
 	parseContinuousChatNodeCoordinate,
@@ -11,7 +12,6 @@ import {
 import {
 	CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS,
 	CONTINUOUS_CHAT_MAX_FAILURE_REASON_CHARACTERS,
-	CONTINUOUS_CHAT_MAX_LEAF_STREAK,
 	type ContinuousChatWorkAbandonment,
 	type ContinuousChatWorkItem,
 } from "./continuous-chat-work-queue.ts";
@@ -26,7 +26,6 @@ interface SchedulerMeta {
 	totalMessages: number;
 	nextLeaf: number;
 	sequence: number;
-	leafStreak: number;
 	leafRetryNext: boolean;
 	parentRetryNext: boolean;
 	origin: "fresh" | "legacy-replay-v1";
@@ -48,6 +47,30 @@ interface WorkRow {
 	retryAfter: number;
 	reason: string | null;
 	lastAction: "release" | "fail" | null;
+}
+
+/** Schema 2 orders deferred work by context endpoint (see `continuousChatNodeContextEnd`); schema 1 ordered it by arrival. */
+const SCHEDULER_SCHEMA_VERSION = 2;
+
+/** SQL form of `continuousChatNodeContextEnd`. The claim indexes and every claim ORDER BY spell it identically. */
+const CONTEXT_END_SQL = "(CASE WHEN level=0 THEN ordinal ELSE (ordinal+1)<<level END)";
+
+/**
+ * Every claim reads at most one row per class from one of these indexes: fresh and released work in context order,
+ * failed work in order of the generation it failed in. Nothing sorts or scans the backlog.
+ */
+const CLAIM_INDEX_SQL = `
+	CREATE INDEX IF NOT EXISTS candidate ON work(kind,status,retry_after,sequence);
+	CREATE INDEX IF NOT EXISTS fresh_by_context ON work(kind,status,attempts,${CONTEXT_END_SQL},level DESC);
+	CREATE INDEX IF NOT EXISTS active_claim ON work(status,sequence);
+	CREATE INDEX IF NOT EXISTS ready_retry_by_context ON work(kind,${CONTEXT_END_SQL},level DESC) WHERE status='ready' AND attempts>0;
+`;
+
+/** Whether `a` is built before `b`: earlier context endpoint first, and at a tie the merge (higher level) first. */
+function precedes(a: ContinuousChatWorkItem, b: ContinuousChatWorkItem): boolean {
+	const left = continuousChatNodeContextEnd(a);
+	const right = continuousChatNodeContextEnd(b);
+	return left < right || (left === right && a.level > b.level);
 }
 
 function decodeWork(row: Record<string, unknown> | undefined): WorkRow | undefined {
@@ -102,9 +125,10 @@ export class ContinuousChatScheduler {
 				"PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;",
 			);
 			const version = db.prepare("PRAGMA user_version").get()?.user_version;
-			if ((!create && version !== 1) || (create && version !== 0 && version !== 1))
+			// Schema 2 opens as is, schema 1 through its atomic migration, and an empty file only when creating.
+			if (version !== SCHEDULER_SCHEMA_VERSION && version !== 1 && !(version === 0 && create))
 				throw new ContinuousChatCorruptError(path, "Unsupported ICM scheduler schema");
-			if (create)
+			if (version === 0)
 				db.exec(`
 				CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL) STRICT;
 				CREATE TABLE IF NOT EXISTS work (
@@ -115,14 +139,13 @@ export class ContinuousChatScheduler {
 				 PRIMARY KEY(level,ordinal), CHECK(level>=0 AND level<=52 AND ordinal>=0),
 				 CHECK(sequence>=0 AND claim_id>=0 AND attempts>=0 AND retry_after>=-1), CHECK(reason IS NULL OR length(reason)<=512)
 				) STRICT, WITHOUT ROWID;
-				CREATE INDEX IF NOT EXISTS candidate ON work(kind,status,retry_after,sequence);
-				CREATE INDEX IF NOT EXISTS fresh_candidate ON work(kind,status,attempts,sequence);
-				CREATE INDEX IF NOT EXISTS active_claim ON work(status,sequence);
-				CREATE INDEX IF NOT EXISTS ready_retry ON work(kind,sequence) WHERE status='ready' AND attempts>0;
+				${CLAIM_INDEX_SQL}
 				CREATE TABLE IF NOT EXISTS legacy_half (level INTEGER NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(level,ordinal)) STRICT, WITHOUT ROWID;
-				PRAGMA user_version=1;
+				PRAGMA user_version=${SCHEDULER_SCHEMA_VERSION};
 			`);
-			return new ContinuousChatScheduler(db, path);
+			const scheduler = new ContinuousChatScheduler(db, path);
+			if (version === 1) scheduler.migrateFromSchema1();
+			return scheduler;
 		});
 	}
 
@@ -132,6 +155,25 @@ export class ContinuousChatScheduler {
 	prepareMigrationMove(): void {
 		if (this.db.prepare("PRAGMA journal_mode=DELETE").get()?.journal_mode !== "delete")
 			throw new Error("Cannot checkpoint provisional scheduler");
+	}
+	/**
+	 * Schema 1 claimed leaves before parents by arrival order and kept a leaf-preference counter in its metadata. In one
+	 * transaction this replaces its claim indexes with the context-ordered ones and drops the counter. Rows, claims, retry
+	 * state and the authority marker are untouched.
+	 */
+	private migrateFromSchema1(): void {
+		this.transaction(() => {
+			this.db.exec("DROP INDEX IF EXISTS fresh_candidate; DROP INDEX IF EXISTS ready_retry;");
+			this.db.exec(CLAIM_INDEX_SQL);
+			const body = this.sql("SELECT body FROM meta WHERE id=1").get()?.body;
+			if (typeof body === "string") {
+				const value: unknown = JSON.parse(body);
+				if (!isPlainRecord(value)) throw new ContinuousChatCorruptError(this.path, "Invalid scheduler metadata");
+				const { leafStreak: _leafStreak, ...meta } = value;
+				this.sql("UPDATE meta SET body=? WHERE id=1").run(JSON.stringify(meta));
+			}
+			this.db.exec(`PRAGMA user_version=${SCHEDULER_SCHEMA_VERSION}`);
+		});
 	}
 	private sql(sql: string): SqliteStatement {
 		let statement = this.statements.get(sql);
@@ -170,13 +212,12 @@ export class ContinuousChatScheduler {
 				"totalMessages",
 				"nextLeaf",
 				"sequence",
-				"leafStreak",
 				"leafRetryNext",
 				"parentRetryNext",
 				"origin",
 				"sourceDigest",
 			]) ||
-			!["revision", "generation", "totalMessages", "nextLeaf", "sequence", "leafStreak"].every((key) =>
+			!["revision", "generation", "totalMessages", "nextLeaf", "sequence"].every((key) =>
 				isNonNegativeSafeInteger(value[key]),
 			) ||
 			typeof value.leafRetryNext !== "boolean" ||
@@ -184,8 +225,7 @@ export class ContinuousChatScheduler {
 			(value.origin !== "fresh" && value.origin !== "legacy-replay-v1") ||
 			typeof value.sourceDigest !== "string" ||
 			!/^(fresh|[a-f0-9]{64})$/.test(value.sourceDigest) ||
-			(value.nextLeaf as number) > (value.totalMessages as number) ||
-			(value.leafStreak as number) > CONTINUOUS_CHAT_MAX_LEAF_STREAK
+			(value.nextLeaf as number) > (value.totalMessages as number)
 		)
 			throw new ContinuousChatCorruptError(this.path, "Invalid scheduler metadata");
 		return value as unknown as SchedulerMeta;
@@ -299,7 +339,6 @@ export class ContinuousChatScheduler {
 				totalMessages,
 				nextLeaf: totalMessages,
 				sequence: 0,
-				leafStreak: 0,
 				leafRetryNext: false,
 				parentRetryNext: false,
 				origin: totalMessages === 0 ? "fresh" : "legacy-replay-v1",
@@ -344,17 +383,23 @@ export class ContinuousChatScheduler {
 			this.save(meta);
 		});
 	}
+	/**
+	 * The head of one class of one kind, from an index. Never-attempted work and released work come in context order
+	 * (earliest endpoint, a merge first at a tie). Failed work, once a later generation makes it eligible, comes oldest
+	 * failure first, behind released work.
+	 */
 	private candidate(kind: number, retry: boolean, generation: number): WorkRow | undefined {
+		const order = `ORDER BY ${CONTEXT_END_SQL},level DESC LIMIT 1`;
 		if (!retry)
 			return decodeWork(
-				this.sql("SELECT * FROM work WHERE kind=? AND status='ready' AND attempts=0 ORDER BY sequence LIMIT 1").get(
-					kind,
-				),
+				this.sql(
+					`SELECT * FROM work INDEXED BY fresh_by_context WHERE kind=? AND status='ready' AND attempts=0 ${order}`,
+				).get(kind),
 			);
 		return (
 			decodeWork(
 				this.sql(
-					"SELECT * FROM work INDEXED BY ready_retry WHERE kind=? AND status='ready' AND attempts>0 ORDER BY sequence LIMIT 1",
+					`SELECT * FROM work INDEXED BY ready_retry_by_context WHERE kind=? AND status='ready' AND attempts>0 ${order}`,
 				).get(kind),
 			) ??
 			decodeWork(
@@ -364,35 +409,39 @@ export class ContinuousChatScheduler {
 			)
 		);
 	}
+	/**
+	 * Claims the selected kind candidate whose context endpoint is earliest, a merge before a leaf at a tie. Each kind
+	 * first names its candidate: fresh and retry work alternate within the kind. The two kinds' candidates
+	 * are then compared by endpoint, so the selected parent candidate precedes a selected leaf with a later or equal
+	 * endpoint. Retry-class selection is not a global chronological order over every eligible row.
+	 */
 	claim(): ContinuousChatClaim | undefined {
 		return this.transaction(() => {
 			const snapshot = this.snapshot();
 			const { running: _running, builtLeafPrefix: _built, ...meta } = snapshot;
 			if (snapshot.running.length >= CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS) return undefined;
-			const oldLeaf = this.candidate(0, true, meta.generation);
-			const readyLeaf = this.candidate(0, false, meta.generation);
-			const freshLeaf = readyLeaf !== undefined || meta.nextLeaf < meta.totalMessages;
-			const newParent = this.candidate(1, false, meta.generation),
-				oldParent = this.candidate(1, true, meta.generation);
-			const parent = meta.parentRetryNext ? (oldParent ?? newParent) : (newParent ?? oldParent);
-			const chooseParent =
-				parent !== undefined && ((!oldLeaf && !freshLeaf) || meta.leafStreak >= CONTINUOUS_CHAT_MAX_LEAF_STREAK);
+			const retryLeaf = this.candidate(0, true, meta.generation);
+			const storedLeaf = this.candidate(0, false, meta.generation);
+			const freshLeaf =
+				storedLeaf ?? (meta.nextLeaf < meta.totalMessages ? { level: 0, ordinal: meta.nextLeaf } : undefined);
+			const leaf = retryLeaf && (!freshLeaf || meta.leafRetryNext) ? retryLeaf : freshLeaf;
+			const freshParent = this.candidate(1, false, meta.generation);
+			const retryParent = this.candidate(1, true, meta.generation);
+			const parent = meta.parentRetryNext ? (retryParent ?? freshParent) : (freshParent ?? retryParent);
 			let selected: ContinuousChatWorkItem;
 			let row: WorkRow | undefined;
-			if (chooseParent) {
+			if (parent && (!leaf || precedes(parent, leaf))) {
 				row = parent;
 				selected = parent;
-				meta.parentRetryNext = parent === newParent;
-				meta.leafStreak = 0;
-			} else if (oldLeaf && (!freshLeaf || meta.leafRetryNext)) {
-				row = oldLeaf;
-				selected = oldLeaf;
+				meta.parentRetryNext = parent === freshParent;
+			} else if (leaf === retryLeaf && retryLeaf) {
+				row = retryLeaf;
+				selected = retryLeaf;
 				meta.leafRetryNext = false;
-				meta.leafStreak = parent ? meta.leafStreak + 1 : 0;
-			} else if (freshLeaf) {
-				if (readyLeaf) {
-					selected = readyLeaf;
-					row = readyLeaf;
+			} else if (leaf) {
+				if (storedLeaf) {
+					selected = storedLeaf;
+					row = storedLeaf;
 				} else {
 					selected = { level: 0, ordinal: meta.nextLeaf++ };
 					if (this.row(selected))
@@ -401,12 +450,6 @@ export class ContinuousChatScheduler {
 					row = this.row(selected);
 				}
 				meta.leafRetryNext = true;
-				meta.leafStreak = parent ? meta.leafStreak + 1 : 0;
-			} else if (parent) {
-				row = parent;
-				selected = parent;
-				meta.parentRetryNext = parent === newParent;
-				meta.leafStreak = 0;
 			} else return undefined;
 			if (continuousChatNodeFirstMessage(selected) + continuousChatNodeMessageCount(selected.level) > meta.nextLeaf)
 				throw new ContinuousChatCorruptError(this.path, "Claim exceeds admitted messages");

@@ -36,9 +36,18 @@ export interface ContinuousChatStableToolDefinition {
 	parameters: unknown;
 }
 
-/** One open compaction conversation. Each send appends to it and resolves with the model's plain-text reply. */
+/**
+ * One request of a node's build. `task` is the node's original task and is the same in every request. `correction` is
+ * only the latest overlength note, absent from the first request: earlier replies and earlier notes are never replayed.
+ */
+export interface ContinuousChatCompactionRequest {
+	task: string;
+	correction?: string;
+}
+
+/** One open node build. Each send is an independent request over the node's frozen view and task, resolved with the model's plain-text reply. */
 export interface ContinuousChatCompactionConversation {
-	send(message: string, signal?: AbortSignal): Promise<string>;
+	send(request: ContinuousChatCompactionRequest, signal?: AbortSignal): Promise<string>;
 }
 
 /**
@@ -94,9 +103,10 @@ export type ContinuousChatCompactionOutcome =
 
 /**
  * Builds one tree node per run, from the cheapest source that fits: an existing node, the message leaf, the joined
- * children, or the model. The model conversation is not resumable across a restart; a restarted node starts a new
- * conversation from its first task. Replies target 512 bytes; after five corrections the shortest is retained when
- * it satisfies the tree's bounded interpretation of the reference's "a few bytes over is fine" exception.
+ * children, or the model. Every model request carries the node's frozen view and task, plus only the latest overlength
+ * note after a reply that was too long; a request never replays an earlier reply or note, so it is independent of the
+ * run's history and a restarted node simply starts again. Replies target 512 bytes; after five replies the shortest is
+ * retained when it satisfies the tree's bounded interpretation of the reference's "a few bytes over is fine" exception.
  */
 export class ContinuousChatCompactionCoordinator {
 	private readonly port: ContinuousChatCompactionPort;
@@ -134,16 +144,17 @@ export class ContinuousChatCompactionCoordinator {
 		} catch (error) {
 			return portFailure(signal, 0, error);
 		}
-		let message =
+		const task =
 			target.kind === "leaf"
 				? renderContinuousChatLeafTask(target.record)
 				: renderContinuousChatMergeTask(target.left, target.right);
+		let correction: string | undefined;
 		let replies = 0;
 		let shortest: ContinuousChatCompactionCandidate | undefined;
 		while (replies < CONTINUOUS_CHAT_COMPACTION_MAX_REPLIES) {
 			let reply: string;
 			try {
-				reply = await conversation.send(message, signal);
+				reply = await conversation.send(correction === undefined ? { task } : { task, correction }, signal);
 			} catch (error) {
 				return portFailure(signal, replies, error, shortest);
 			}
@@ -160,7 +171,7 @@ export class ContinuousChatCompactionCoordinator {
 						: createContinuousChatParent(target.left, target.right, candidate);
 				return this.publish(signal, node, replies, shortest);
 			}
-			message = renderContinuousChatOverlengthCorrection(candidate);
+			correction = renderContinuousChatOverlengthCorrection(candidate);
 		}
 		if (shortest === undefined) return failure("empty-reply", replies, "Compaction produced no candidate.");
 		if (shortest.bytes > CONTINUOUS_CHAT_NODE_MAX_BYTES) {

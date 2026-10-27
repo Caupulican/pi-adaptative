@@ -2,8 +2,6 @@
 import { type ContinuousChatNodeCoordinate, continuousChatNodeKey } from "./continuous-chat-tree.ts";
 
 export const CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS = 8;
-/** Maximum leaf claims while a parent is eligible. */
-export const CONTINUOUS_CHAT_MAX_LEAF_STREAK = 4;
 export const CONTINUOUS_CHAT_MAX_FAILURE_REASON_CHARACTERS = 512;
 export const CONTINUOUS_CHAT_TOP_LEVEL = 52;
 

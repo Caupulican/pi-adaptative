@@ -36,6 +36,15 @@ export function continuousChatNodeFirstMessage(coordinate: ContinuousChatNodeCoo
 	return first;
 }
 
+/**
+ * The context endpoint that orders deferred work: a leaf is its own message, a parent is the message after its range. Work
+ * is built in endpoint order, a merge before a leaf at a tie. The scheduler's indexes spell the same expression in SQL.
+ */
+export function continuousChatNodeContextEnd(coordinate: ContinuousChatNodeCoordinate): number {
+	const first = continuousChatNodeFirstMessage(coordinate);
+	return coordinate.level === 0 ? first : first + continuousChatNodeMessageCount(coordinate.level);
+}
+
 export function continuousChatNodeKey(coordinate: ContinuousChatNodeCoordinate): string {
 	return `${coordinate.level}:${coordinate.ordinal}`;
 }

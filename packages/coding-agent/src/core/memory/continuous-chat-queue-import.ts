@@ -16,7 +16,6 @@ export interface LegacyQueueHeader {
 	generation: number;
 	totalMessages: number;
 	nextLeaf: number;
-	leafStreak: number;
 }
 
 export interface LegacyQueueEntry {
@@ -220,8 +219,8 @@ export async function importLegacyQueue(
 				throw new ContinuousChatCorruptError(path, `Invalid queue ${key}`);
 		const totalMessages = fields.get("totalMessages") as number;
 		const nextLeaf = fields.get("nextLeaf") as number;
-		const leafStreak = fields.get("leafStreak") as number;
-		if (nextLeaf > totalMessages || leafStreak > 4)
+		// The legacy envelope still carries its leaf-preference counter; the scheduler no longer has that policy.
+		if (nextLeaf > totalMessages || (fields.get("leafStreak") as number) > 4)
 			throw new ContinuousChatCorruptError(path, "Contradictory legacy queue counters");
 		signal?.throwIfAborted();
 		return {
@@ -230,7 +229,6 @@ export async function importLegacyQueue(
 			generation: fields.get("generation") as number,
 			totalMessages,
 			nextLeaf,
-			leafStreak,
 		};
 	} finally {
 		await reader.close();
