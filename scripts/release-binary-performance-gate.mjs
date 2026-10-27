@@ -12,7 +12,8 @@ const DEFAULT_BUDGETS = Object.freeze({
 	// variance, not cover for a known regression.
 	coldShellMedianMs: 500,
 	coldShellP95Ms: 500,
-	firstShellReadyMedianMs: 1_750,
+	// Owner decision 2026-10-27: allow three seconds for Windows startup and first shell readiness.
+	firstShellReadyMedianMs: 3_000,
 	firstShellReadyP95Ms: 3_000,
 	firstShellReadyMedianRatio: 1.75,
 	firstShellReadyP95Ratio: 2.5,
