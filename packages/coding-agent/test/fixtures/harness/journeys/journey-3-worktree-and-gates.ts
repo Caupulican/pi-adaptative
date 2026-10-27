@@ -479,6 +479,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		replan_required: { kind: "noul", probability: 0.02 },
 		next_status: { kind: "choice", choice: "continue", confidence: 0.97 },
 		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+		states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
 		states_committed: { kind: "noul", probability: 0.02 },
 		states_pushed: { kind: "noul", probability: 0.02 },
 		states_published: { kind: "noul", probability: 0.02 },
@@ -592,6 +593,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	// Claim-delivery judgments: System One asks for these only while a worker's claim is delivered, so only late-attempt declares them.
 	const lateClaimJudgments = {
 		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+		states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
 		states_committed: { kind: "noul", probability: 0.02 },
 		states_pushed: { kind: "noul", probability: 0.02 },
 		states_published: { kind: "noul", probability: 0.02 },
@@ -1373,6 +1375,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			next_status: { kind: "choice", choice: "continue", confidence: 0.97 },
 			local_commits_only: { kind: "noul", probability: 0.02 },
 			states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+			states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
 			states_committed: { kind: "noul", probability: 0.02 },
 			states_pushed: { kind: "noul", probability: 0.02 },
 			states_published: { kind: "noul", probability: 0.02 },
@@ -2167,6 +2170,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			full_handoff: { kind: "noul", probability: 0.02 },
 			optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
 			states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+			states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
 			states_committed: { kind: "noul", probability: 0.02 },
 			states_pushed: { kind: "noul", probability: 0.02 },
 			states_published: { kind: "noul", probability: 0.02 },

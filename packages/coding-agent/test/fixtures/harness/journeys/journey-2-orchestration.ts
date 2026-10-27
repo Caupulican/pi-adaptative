@@ -778,6 +778,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	} as const;
 	const completionStates = {
 		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+		states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
 		states_committed: { kind: "noul", probability: 0.02 },
 		states_pushed: { kind: "noul", probability: 0.02 },
 		states_published: { kind: "noul", probability: 0.02 },
@@ -987,6 +988,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			...verifyJudgments,
 			...completionStates,
 			states_tests_pass: { kind: "choice", choice: "historical_only", confidence: 0.97 },
+			states_checks_pass: { kind: "choice", choice: "historical_only", confidence: 0.97 },
 		},
 		{ expect: ownerWords("Retire the checks and check completion again.") },
 	);

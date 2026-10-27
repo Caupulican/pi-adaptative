@@ -124,6 +124,7 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 			...(outcome === "committed"
 				? {
 						states_tests_pass: { kind: "choice" as const, choice: "no_current_success", confidence: 0.97 },
+						states_checks_pass: { kind: "choice" as const, choice: "no_current_success", confidence: 0.97 },
 						states_committed: { kind: "noul" as const, probability: 0.02 },
 						states_pushed: { kind: "noul" as const, probability: 0.02 },
 						states_published: { kind: "noul" as const, probability: 0.02 },

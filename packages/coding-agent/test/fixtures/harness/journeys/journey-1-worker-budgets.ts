@@ -618,6 +618,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	world.systemOne.enterPhase("hb-held", {
 		...e4Judgments,
 		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+		states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
 		states_committed: { kind: "noul", probability: 0.02 },
 		states_pushed: { kind: "noul", probability: 0.02 },
 		states_published: { kind: "noul", probability: 0.02 },

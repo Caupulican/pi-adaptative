@@ -1246,6 +1246,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		acquires_external_code: { kind: "noul", probability: 0.02 },
 		request_authorizes: { kind: "noul", probability: 0.02 },
 		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+		states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
 		states_committed: { kind: "noul", probability: 0.02 },
 		states_pushed: { kind: "noul", probability: 0.02 },
 		states_published: { kind: "noul", probability: 0.02 },

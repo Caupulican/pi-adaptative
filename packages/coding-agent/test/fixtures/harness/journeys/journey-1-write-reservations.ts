@@ -2350,6 +2350,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	const vuJudgments = {
 		...e4Judgments,
 		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+		states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
 		states_committed: { kind: "noul", probability: 0.02 },
 		states_pushed: { kind: "noul", probability: 0.02 },
 		states_published: { kind: "noul", probability: 0.02 },
