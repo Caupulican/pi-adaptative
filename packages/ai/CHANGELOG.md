@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Added GPT-6.1 Terra for OpenAI, ChatGPT Codex, GitHub Copilot, OpenRouter, and Vercel AI Gateway, including upstream reasoning defaults, Responses Lite, and pricing.
+
+### Changed
+
+- Refreshed the generated model catalog from live upstream data and updated the Codex catalogue and account client version to `0.165.0` (`rust-v0.165.0`).
+
 ## [0.104.16] - 2026-10-27
 
 ### Changed
