@@ -55,16 +55,18 @@ function parseAnthropicCredentials(
 	data: unknown,
 	previousRefresh?: string,
 	previousAccountId?: string,
+	fallbackScopes?: readonly string[],
 ): OAuthCredentials {
 	const credentials = parseOAuthTokenCredentials(data, "Anthropic", 5 * 60, previousRefresh);
 	const response = data as Record<string, unknown>;
 	const scope = response.scope;
+	const parsedScopes = typeof scope === "string" ? scope.split(" ").filter(Boolean) : [];
 	const account = response.account;
 	const responseAccountId = isRecord(account) ? account.uuid : undefined;
 	const accountId = isValidAnthropicAccountId(responseAccountId) ? responseAccountId : previousAccountId;
 	return {
 		...credentials,
-		scopes: typeof scope === "string" ? scope.split(" ").filter(Boolean) : [],
+		scopes: parsedScopes.length > 0 ? parsedScopes : fallbackScopes ? [...fallbackScopes] : [],
 		...(accountId ? { accountId } : {}),
 	};
 }
@@ -480,20 +482,36 @@ export async function refreshAnthropicToken(
 		: originalScopes.length
 			? originalScopes
 			: protocol.inferenceScopes;
+	const requestedScopes = [...new Set(scopes)];
+	const fallbackScopes = [...new Set(originalScopes)];
+	const requestedScope = requestedScopes.join(" ");
+	const fallbackScope = fallbackScopes.join(" ");
+	const sameScopeSet =
+		fallbackScopes.length === requestedScopes.length &&
+		fallbackScopes.every((scope) => requestedScopes.includes(scope));
 	const body = {
 		grant_type: "refresh_token",
 		client_id: clientId ?? protocol.clientId,
 		refresh_token: refreshToken,
-		scope: [...new Set(scopes)].join(" "),
+		scope: requestedScope,
 	};
 	let data: unknown;
+	let effectiveFallbackScopes: readonly string[] = requestedScopes;
 	try {
 		try {
 			data = await postJson(protocol.tokenUrl, body, options.signal, true);
 		} catch (error) {
-			if (!migrate || !hasInference || !(error instanceof AnthropicOAuthRequestError) || !error.invalidScope)
+			if (
+				!migrate ||
+				!hasInference ||
+				!fallbackScope ||
+				sameScopeSet ||
+				!(error instanceof AnthropicOAuthRequestError) ||
+				!error.invalidScope
+			)
 				throw error;
-			data = await postJson(protocol.tokenUrl, { ...body, scope: originalScopes.join(" ") }, options.signal, true);
+			effectiveFallbackScopes = fallbackScopes;
+			data = await postJson(protocol.tokenUrl, { ...body, scope: fallbackScope }, options.signal, true);
 		}
 	} catch (error) {
 		options.signal?.throwIfAborted();
@@ -515,6 +533,7 @@ export async function refreshAnthropicToken(
 			data,
 			refreshToken,
 			typeof options.accountId === "string" ? options.accountId : undefined,
+			effectiveFallbackScopes,
 		),
 		...(clientId ? { clientId } : {}),
 		...(typeof options.subscriptionType === "string" ? { subscriptionType: options.subscriptionType } : {}),

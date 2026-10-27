@@ -157,7 +157,8 @@ export async function refreshOAuthToken(
 	const refreshToken = credentials.refresh;
 	let refresh = providerRefreshes.get(refreshToken);
 	if (!refresh) {
-		refresh = provider.refreshToken(credentials).finally(() => {
+		const snapshot = structuredClone(credentials);
+		refresh = provider.refreshToken(snapshot).finally(() => {
 			providerRefreshes.delete(refreshToken);
 		});
 		providerRefreshes.set(refreshToken, refresh);
@@ -186,14 +187,19 @@ export async function getOAuthApiKey(
 	}
 
 	// Refresh if expired, or stored by an older provider version that lacks data it now reads
-	if (Date.now() >= creds.expires || provider.needsRefresh?.(creds)) {
+	const expired = Date.now() >= creds.expires;
+	if (expired || provider.needsRefresh?.(creds)) {
+		const fallback = structuredClone(creds);
 		try {
-			creds = await refreshOAuthToken(provider, creds);
+			creds = await refreshOAuthToken(provider, fallback);
 		} catch (error) {
 			if (error instanceof OAuthRefreshCompletedError) throw error;
-			// The provider's own failure (HTTP status, invalid_grant, network) is the reason a caller
-			// can act on; it rides as the cause so the user-facing message can name it.
-			throw new Error(`Failed to refresh OAuth token for ${providerId}`, { cause: error });
+			if (expired || Date.now() >= fallback.expires) {
+				// The provider's own failure (HTTP status, invalid_grant, network) is the reason a caller
+				// can act on; it rides as the cause so the user-facing message can name it.
+				throw new Error(`Failed to refresh OAuth token for ${providerId}`, { cause: error });
+			}
+			creds = fallback;
 		}
 	}
 

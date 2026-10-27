@@ -12,6 +12,18 @@ export const ANTIGRAVITY_ACCOUNT_METADATA = {
 	pluginType: "GEMINI",
 } as const;
 
+/** Exact reviewed AGY images: a reported version alone cannot admit unreviewed OAuth or request headers. */
+export const REVIEWED_ANTIGRAVITY_INSTALLATIONS = Object.freeze([
+	Object.freeze({
+		version: "1.4.5",
+		sha256: "8af8e7a2a68f72fa7164e00bb59b8902c018fa43e528fc401ad7db8c2972583c",
+	}),
+	Object.freeze({
+		version: "1.4.8",
+		sha256: "70b1d27f1812f5ebccc8f13daf2209112447413437dd1ab6d87c58b8a04fe35b",
+	}),
+]);
+
 export function antigravityObject(value: unknown): Record<string, unknown> {
 	if (!isRecord(value)) throw new Error("Invalid Antigravity response");
 	return value;

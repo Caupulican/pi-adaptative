@@ -4,6 +4,11 @@ export interface InstalledCli {
 	size: number;
 }
 
+export interface ReviewedCliInstallation {
+	readonly version: string;
+	readonly sha256: string;
+}
+
 export interface InstalledCliEnvironment {
 	readonly path: string;
 	readonly cwd: string;
@@ -99,4 +104,34 @@ export async function readInstalledCliVersion(
 			settle();
 		});
 	});
+}
+
+const MAX_INSTALLED_CLI_BYTES = 512 * 1024 * 1024;
+
+/** Compute bounded SHA-256 of an inspected executable without loading the whole file in memory. */
+export async function fingerprintInstalledCli(installation: InstalledCli, signal?: AbortSignal): Promise<string> {
+	signal?.throwIfAborted();
+	if (typeof process === "undefined" || typeof process.getBuiltinModule !== "function") {
+		throw new Error("Installed CLI fingerprinting is unavailable in this runtime");
+	}
+	if (installation.size > MAX_INSTALLED_CLI_BYTES) {
+		throw new Error("Installed CLI exceeds inspection bounds");
+	}
+	const { createReadStream } = process.getBuiltinModule("node:fs");
+	const { createHash } = process.getBuiltinModule("node:crypto");
+	const hash = createHash("sha256");
+	const stream = createReadStream(installation.path, { highWaterMark: 64 * 1024, signal });
+	let bytes = 0;
+	try {
+		for await (const chunk of stream) {
+			if (!(chunk instanceof Uint8Array)) throw new Error("Unexpected installed CLI data");
+			bytes += chunk.length;
+			if (bytes > MAX_INSTALLED_CLI_BYTES) throw new Error("Installed CLI exceeds inspection bounds");
+			hash.update(chunk);
+		}
+		if (bytes !== installation.size) throw new Error("Installed CLI changed during inspection");
+		return hash.digest("hex");
+	} finally {
+		stream.destroy();
+	}
 }

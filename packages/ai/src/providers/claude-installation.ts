@@ -1,7 +1,7 @@
 import {
 	captureInstalledCliEnvironment,
 	findInstalledCli,
-	type InstalledCli,
+	fingerprintInstalledCli,
 	type InstalledCliEnvironment,
 	readInstalledCliVersion,
 } from "../utils/installed-cli.ts";
@@ -54,32 +54,12 @@ export class ClaudeInstallationInspector {
 			/^(\d{1,6}\.\d{1,6}\.\d{1,6}) \(Claude Code\)$/,
 			signal,
 		);
-		const sha256 = await this.fingerprint(installation, signal);
+		const sha256 = await fingerprintInstalledCli(installation, signal);
 		const current = await findInstalledCli("claude", override, signal, context);
 		signal.throwIfAborted();
 		if (current?.fileIdentity !== installation.fileIdentity) return { status: "unavailable" };
 		const result: ClaudeInstallationInspection = { status: "inspected", version, sha256 };
 		this.previous = { fileIdentity: installation.fileIdentity, checkedAt: performance.now(), result };
 		return result;
-	}
-
-	private async fingerprint(installation: InstalledCli, signal: AbortSignal): Promise<string> {
-		const { createReadStream } = process.getBuiltinModule("node:fs");
-		const { createHash } = process.getBuiltinModule("node:crypto");
-		const hash = createHash("sha256");
-		const stream = createReadStream(installation.path, { highWaterMark: 64 * 1024, signal });
-		let bytes = 0;
-		try {
-			for await (const chunk of stream) {
-				if (!(chunk instanceof Uint8Array)) throw new Error("Unexpected Claude installation data");
-				bytes += chunk.length;
-				if (bytes > 512 * 1024 * 1024) throw new Error("Claude installation exceeds inspection bounds");
-				hash.update(chunk);
-			}
-			if (bytes !== installation.size) throw new Error("Claude installation changed during inspection");
-			return hash.digest("hex");
-		} finally {
-			stream.destroy();
-		}
 	}
 }

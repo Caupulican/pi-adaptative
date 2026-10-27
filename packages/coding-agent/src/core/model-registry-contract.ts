@@ -1,6 +1,6 @@
 import type { OAuthProviderInterface } from "@caupulican/pi-ai/oauth";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@caupulican/pi-ai/types";
-import type { AuthStatus, AuthStorage } from "./auth-storage.ts";
+import type { AuthStatus, AuthStorage, OAuthCredential } from "./auth-storage.ts";
 import type { ModelOverride, ProviderRequestConfig } from "./models-config-schema.ts";
 import type { RequestAuth } from "./request-auth.ts";
 
@@ -44,11 +44,13 @@ export interface ProviderConfigInput {
 }
 
 export interface ModelRegistryReloadSnapshot {
+	baseModels: Model<Api>[];
 	models: Model<Api>[];
 	providerRequestConfigs: Map<string, ProviderRequestConfig>;
 	modelRequestHeaders: Map<string, Record<string, string>>;
 	registeredProviders: Map<string, ProviderConfigInput>;
 	providerModelScopes: Map<string, Set<string>>;
+	syncedOAuthCredentials: Map<string, OAuthCredential | undefined>;
 	loadError: string | undefined;
 }
 

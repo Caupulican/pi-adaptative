@@ -280,11 +280,12 @@ export const xaiOAuthProvider: OAuthProviderInterface = {
 		const email = nonEmptyString(credentials.email);
 		return models.map((model) => {
 			if (model.provider !== "xai" || model.api !== "openai-responses") return model;
+			const { "x-userid": _previousUserId, "x-email": _previousEmail, ...preservedHeaders } = model.headers ?? {};
 			return {
 				...model,
 				baseUrl: XAI_CLI_PROXY_BASE_URL,
 				headers: {
-					...model.headers,
+					...preservedHeaders,
 					...xaiCliHeaders(userId),
 					...XAI_CLI_PROXY_HEADERS,
 					"x-grok-model-override": model.id,

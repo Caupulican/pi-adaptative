@@ -1,12 +1,38 @@
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findInstalledCli, readInstalledCliVersion } from "../src/utils/installed-cli.ts";
+import {
+	captureInstalledCliEnvironment,
+	findInstalledCli,
+	fingerprintInstalledCli,
+	readInstalledCliVersion,
+} from "../src/utils/installed-cli.ts";
 
-export async function installedCliVersion(command, executableArg, versionPattern, label) {
-	const installation = await findInstalledCli(command, executableArg);
+export async function installedCliVersion(command, executableArg, versionPattern, label, reviewedInstallations) {
+	if (!Array.isArray(reviewedInstallations) || reviewedInstallations.length === 0) {
+		throw new Error(`${label} reviewed installations list is required`);
+	}
+	const context = captureInstalledCliEnvironment();
+	const installation = await findInstalledCli(command, executableArg, undefined, context);
 	if (!installation) throw new Error(`${label} executable was not found on PATH; pass its local path explicitly`);
-	return readInstalledCliVersion(installation, versionPattern);
+	const sha256 = await fingerprintInstalledCli(installation);
+	if (!reviewedInstallations.some((entry) => entry.sha256 === sha256)) {
+		throw new Error(
+			`Installed ${label} binary (${sha256}) has not been verified for OAuth compatibility; identity config was not changed`,
+		);
+	}
+	const version = await readInstalledCliVersion(installation, versionPattern);
+	const current = await findInstalledCli(command, executableArg, undefined, context);
+	if (current?.fileIdentity !== installation.fileIdentity) {
+		throw new Error(`${label} installation changed during inspection; identity config was not changed`);
+	}
+	const reviewed = reviewedInstallations.some((entry) => entry.version === version && entry.sha256 === sha256);
+	if (!reviewed) {
+		throw new Error(
+			`Installed ${label} ${version} (${sha256}) has not been verified for OAuth compatibility; identity config was not changed`,
+		);
+	}
+	return version;
 }
 
 export function writeClientIdentity(outputArg, defaultOutput, constantName, config, label) {

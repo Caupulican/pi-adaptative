@@ -1,3 +1,4 @@
+import { REVIEWED_XAI_INSTALLATIONS } from "../src/providers/xai-cli-identity.ts";
 import { installedCliVersion, writeClientIdentity } from "./sync-client-identity-core.mjs";
 
 const [executableArg, outputArg, ...extra] = process.argv.slice(2);
@@ -7,6 +8,7 @@ const version = await installedCliVersion(
 	executableArg,
 	/^grok (\d+\.\d+\.\d+) \([0-9a-f]+\)(?: \[(?:stable|alpha)\])?$/,
 	"Grok",
+	REVIEWED_XAI_INSTALLATIONS,
 );
 writeClientIdentity(
 	outputArg,

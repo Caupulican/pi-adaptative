@@ -8,7 +8,6 @@
 
 import { findEnvKeys, getEnvApiKey, getEnvAuthHeaders, getEnvCredentialValues } from "@caupulican/pi-ai/env-api-keys";
 import {
-	getOAuthApiKey,
 	getOAuthProvider,
 	getOAuthProviders,
 	type OAuthCredentials,
@@ -273,8 +272,8 @@ export class AuthStorage {
 	private reloadRevision = 0;
 	private providerRevisions = new Map<string, number>();
 	private runtimeOverrides: Map<string, string> = new Map();
-	/** Providers whose stale (unexpired, older-format) credential this process already tried to refresh. */
-	private readonly staleRefreshAttempted = new Set<string>();
+	/** Stale (unexpired, older-format) credential fingerprint this process already tried to refresh per provider. */
+	private readonly staleRefreshAttempted = new Map<string, string>();
 	private readonly refusedRefreshTokens = new Map<string, string>();
 	private fallbackResolver?: (provider: string) => string | undefined;
 	private loadError: Error | null = null;
@@ -346,6 +345,7 @@ export class AuthStorage {
 				return { result: undefined };
 			});
 			this.data = this.parseStorageData(content);
+			this.staleRefreshAttempted.clear();
 			this.refusedRefreshTokens.clear();
 			for (const [providerId, cred] of Object.entries(this.data)) {
 				if (cred?.type === "oauth" && cred.refreshRefused && cred.refresh) {
@@ -396,20 +396,23 @@ export class AuthStorage {
 	 * retains the existing session-only behavior and records its error for the host.
 	 */
 	set(provider: string, credential: AuthCredential): boolean {
-		if (credential.type === "oauth" && credential.refreshRefused && credential.refresh) {
-			this.refusedRefreshTokens.set(provider, credential.refresh);
+		const storedCredential = structuredClone(credential);
+		this.staleRefreshAttempted.delete(provider);
+		if (storedCredential.type === "oauth" && storedCredential.refreshRefused && storedCredential.refresh) {
+			this.refusedRefreshTokens.set(provider, storedCredential.refresh);
 		} else {
 			this.refusedRefreshTokens.delete(provider);
 		}
-		this.data[provider] = credential;
+		this.data[provider] = storedCredential;
 		this.providerRevisions.set(provider, ++this.dataRevision);
-		return this.persistProviderChange(provider, credential);
+		return this.persistProviderChange(provider, storedCredential);
 	}
 
 	/**
 	 * Remove credential for a provider.
 	 */
 	remove(provider: string): void {
+		this.staleRefreshAttempted.delete(provider);
 		this.refusedRefreshTokens.delete(provider);
 		delete this.data[provider];
 		this.providerRevisions.set(provider, ++this.dataRevision);
@@ -596,7 +599,10 @@ export class AuthStorage {
 			// Other providers may change independently while this backend releases its lock.
 			const credential = committed.data[providerId];
 			if (credential) this.data[providerId] = credential;
-			else delete this.data[providerId];
+			else {
+				delete this.data[providerId];
+				this.staleRefreshAttempted.delete(providerId);
+			}
 		}
 		this.providerRevisions.set(providerId, ++this.dataRevision);
 		this.loadError = null;
@@ -614,7 +620,7 @@ export class AuthStorage {
 	): Promise<OAuthCredentials | undefined> {
 		const revision = this.captureOAuthStorageRevision(providerId);
 		let rotation: { posted: OAuthCredential; received: OAuthCredential } | undefined;
-		let discoveryFailure: OAuthRefreshCompletedError | undefined;
+		let discoveryFailure: { error: OAuthRefreshCompletedError; received: OAuthCredential } | undefined;
 		let result: OAuthCredentials | undefined;
 		try {
 			result = await this.withOAuthStorageLock(
@@ -624,12 +630,13 @@ export class AuthStorage {
 					if (credential?.type !== "oauth") return { result: undefined };
 					const posted = structuredClone(credential);
 					let refreshed: OAuthCredentials | undefined;
+					let completedError: OAuthRefreshCompletedError | undefined;
 					try {
 						refreshed = await refresh(credential);
 					} catch (error) {
 						if (!(error instanceof OAuthRefreshCompletedError) || error.providerId !== providerId) throw error;
 						this.recordError(error);
-						discoveryFailure = error;
+						completedError = error;
 						refreshed = error.credentials;
 					}
 					if (!refreshed) {
@@ -641,6 +648,9 @@ export class AuthStorage {
 						return { result: undefined };
 					}
 					const received: OAuthCredential = { type: "oauth", ...refreshed };
+					if (completedError) {
+						discoveryFailure = { error: completedError, received };
+					}
 					if (isDeepStrictEqual(posted, received)) return { result: received };
 					rotation = { posted, received };
 					return { result: received, nextData: { ...current, [providerId]: received } };
@@ -668,7 +678,10 @@ export class AuthStorage {
 		}
 		// Persist a completed rotation before reporting the later discovery failure.
 		// The caller sees the real failure; the next request need not rotate again.
-		if (result && discoveryFailure) throw discoveryFailure;
+		if (result && discoveryFailure && result === discoveryFailure.received) {
+			this.markStaleRefreshAttempted(providerId, result);
+			throw discoveryFailure.error;
+		}
 		// Even a usable sibling can expire while the backend finishes its commit or
 		// releases ownership. Never return a key that is already stale at publication.
 		return result && Date.now() < result.expires ? result : undefined;
@@ -677,17 +690,33 @@ export class AuthStorage {
 	/**
 	 * Whether a stored OAuth credential must be refreshed before use: when it expired, or when the
 	 * provider finds it stale (still valid, stored by an older version that lacks data it now reads).
-	 * A stale credential stays usable, so its upgrade is tried once per process: a provider whose
-	 * refresh keeps failing is not re-asked on every request.
+	 * A stale credential stays usable, so its upgrade is tried once per credential state in this
+	 * process: a provider whose refresh keeps failing is not re-asked on every request, while a
+	 * newly stored or reloaded credential remains eligible.
 	 */
 	private noteRefreshRefusal(providerId: string, credential: OAuthCredentials, error: unknown): void {
 		const rejection = error instanceof Error && !(error instanceof OAuthRefreshRejectedError) ? error.cause : error;
 		if (rejection instanceof OAuthRefreshRejectedError) this.refusedRefreshTokens.set(providerId, credential.refresh);
 	}
 
+	private staleCredentialKey(credential: OAuthCredentials): string {
+		return JSON.stringify(
+			Object.entries(credential)
+				.filter(([key]) => key !== "type")
+				.sort(([left], [right]) => left.localeCompare(right)),
+		);
+	}
+
+	private markStaleRefreshAttempted(providerId: string, credential: OAuthCredentials): void {
+		this.staleRefreshAttempted.set(providerId, this.staleCredentialKey(credential));
+	}
+
 	private needsOAuthRefresh(providerId: string, provider: OAuthProviderInterface, cred: OAuthCredentials): boolean {
 		if (Date.now() >= cred.expires) return true;
-		return provider.needsRefresh?.(cred) === true && !this.staleRefreshAttempted.has(providerId);
+		return (
+			provider.needsRefresh?.(cred) === true &&
+			this.staleRefreshAttempted.get(providerId) !== this.staleCredentialKey(cred)
+		);
 	}
 
 	/**
@@ -696,6 +725,7 @@ export class AuthStorage {
 	 */
 	private async refreshOAuthTokenWithLock(
 		providerId: OAuthProviderId,
+		onStaleUpgrade?: () => void,
 	): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
 		const provider = getOAuthProvider(providerId);
 		if (!provider) {
@@ -709,9 +739,12 @@ export class AuthStorage {
 			if (cred.refreshRefused || this.refusedRefreshTokens.get(providerId) === cred.refresh) {
 				return Date.now() < cred.expires ? cred : undefined;
 			}
-			if (Date.now() < cred.expires) this.staleRefreshAttempted.add(providerId);
+			if (Date.now() < cred.expires) {
+				this.markStaleRefreshAttempted(providerId, cred);
+				onStaleUpgrade?.();
+			}
 			try {
-				return (await getOAuthApiKey(provider, { [providerId]: cred }))?.newCredentials;
+				return await refreshOAuthToken(provider, cred);
 			} catch (error) {
 				this.noteRefreshRefusal(providerId, cred, error);
 				throw error;
@@ -773,9 +806,14 @@ export class AuthStorage {
 		const provider = getOAuthProvider(providerId);
 		if (cred?.type !== "oauth" || !provider || this.loadError) return undefined;
 		if (!this.needsOAuthRefresh(providerId, provider, cred)) return provider.getApiKey(cred);
+		let staleOnlyUpgrade = false;
 		const revision = this.captureOAuthStorageRevision(providerId);
 		try {
-			const refreshed = (await this.refreshOAuthTokenWithLock(providerId))?.apiKey;
+			const refreshed = (
+				await this.refreshOAuthTokenWithLock(providerId, () => {
+					staleOnlyUpgrade = true;
+				})
+			)?.apiKey;
 			if (refreshed !== undefined) return refreshed;
 			// No refresh happened. Either the credential is gone from the file (another process
 			// logged out — then there genuinely is no credential) or it is still the expired one.
@@ -788,7 +826,17 @@ export class AuthStorage {
 				"the stored refresh token was refused or is no longer present",
 			);
 		} catch (error) {
-			if (error instanceof OAuthCredentialUnusableError || error instanceof OAuthRefreshCompletedError) throw error;
+			if (error instanceof OAuthCredentialUnusableError) throw error;
+			if (error instanceof OAuthRefreshCompletedError) {
+				if (!staleOnlyUpgrade) throw error;
+				// A stale-only upgrade already persisted the rotated token and recorded the
+				// discovery error; keep the still-valid credential in use.
+				const current = this.data[providerId];
+				if (current?.type === "oauth" && Date.now() < current.expires) {
+					return provider.getApiKey(current);
+				}
+				throw error;
+			}
 			this.recordError(error);
 			let updated: AuthCredential | null | undefined;
 			try {
@@ -813,6 +861,12 @@ export class AuthStorage {
 					);
 				} catch {
 					this.recordError(recoveryError);
+					if (this.captureOAuthStorageRevision(providerId).provider !== revision.provider) {
+						return undefined;
+					}
+					if (staleOnlyUpgrade && Date.now() < cred.expires) {
+						return provider.getApiKey(cred);
+					}
 					throw new OAuthCredentialUnusableError(providerId, cred.expires, redactRefreshFailureReason(error));
 				}
 			}

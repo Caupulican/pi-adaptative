@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated reviewed provider client identities to Claude Code 2.1.311, Grok CLI 1.0.70, and AGY 1.4.8; Claude's packaged OAuth fallback now follows the same reviewed release, and AGY and Grok identity sync now verify both executable version and reviewed SHA-256 digests before updating generated configs.
+
+### Fixed
+
+- `getOAuthApiKey` now keeps unexpired credentials that only requested a `needsRefresh` upgrade in use when a non-rotating refresh attempt fails, and `refreshAnthropicToken` avoids duplicate `invalid_scope` retries when the fallback scope set matches the initial request while preserving existing scopes if a refresh response omits `scope`.
+
 ## [0.104.15] - 2026-10-27
 
 ## [0.104.14] - 2026-10-27
