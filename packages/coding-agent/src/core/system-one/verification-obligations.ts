@@ -208,7 +208,7 @@ function isSequence(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function normalizeSnapshot(candidate: unknown, branchKey: string): SemanticVerificationSnapshot {
+export function normalizeSnapshot(candidate: unknown, branchKey: string): SemanticVerificationSnapshot {
 	if (candidate === undefined) {
 		return {
 			version: SNAPSHOT_VERSION,

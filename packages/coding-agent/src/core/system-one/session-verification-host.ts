@@ -10,7 +10,7 @@ import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { captureCandidateSnapshot, captureCandidateSnapshotAsync } from "./candidate-snapshot.ts";
 import type { StageExecutionScopeSource } from "./controller.ts";
 import type { VerificationCoordinator, VerificationHost } from "./verification-coordinator.ts";
-import { VERIFICATION_OBLIGATIONS_CUSTOM_TYPE } from "./verification-obligations.ts";
+import { createSessionVerificationStorage } from "./verification-session-storage.ts";
 
 type CandidateLocation = { kind: "repository"; root: string } | { kind: "outcome"; cwd: string };
 
@@ -43,24 +43,7 @@ export function createSessionVerificationHost(
 	getCwd: () => string,
 ): VerificationHost {
 	return {
-		storage: {
-			getBranchKey: () => getManager().getSessionId(),
-			getInheritedBranchKeys: () => getManager().getSessionLineageIds().slice(1),
-			getReceiverId: () => getManager().getSessionId(),
-			readRecords: (branch) => {
-				const manager = getManager();
-				if (manager.getSessionId() !== branch) throw new Error("Verification session changed");
-				// The domain owner validates unknown persisted data before using it.
-				return manager.getLatestCustomEntryOnBranch(VERIFICATION_OBLIGATIONS_CUSTOM_TYPE)?.data as ReturnType<
-					VerificationHost["storage"]["readRecords"]
-				>;
-			},
-			appendRecord: (branch, record) => {
-				const manager = getManager();
-				if (manager.getSessionId() !== branch) throw new Error("Verification session changed");
-				manager.appendCustomEntry(VERIFICATION_OBLIGATIONS_CUSTOM_TYPE, record);
-			},
-		},
+		storage: createSessionVerificationStorage(getManager),
 		getReceiverId: () => getManager().getSessionId(),
 		getCandidate: (operationCwd) => {
 			const where = locateCandidate(operationCwd ?? getCwd());

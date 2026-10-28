@@ -3,10 +3,11 @@
  * ExecutionStore is not a second authority: hydrate it from this before every System One stage.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import type { VerificationObligationView } from "../../kernel/verification-obligations.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
-import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
+import { goalObjectiveId, projectGoalAcceptanceEvidence } from "../orchestration/work-state-projection.ts";
 import type { CanonicalHydration } from "./execution-state.ts";
 import type {
 	AcceptanceCriterion,
@@ -147,8 +148,16 @@ export function projectCanonicalTruth(input: CanonicalTruthInput): CanonicalHydr
 			});
 		}
 	}
+	const goalEvidenceById = new Map(
+		goal ? projectGoalAcceptanceEvidence(goal).map((evidence) => [evidence.evidenceId, evidence]) : [],
+	);
 	for (const item of runtimeObjective?.evidence ?? []) {
-		if (observations.some((observation) => observation.id === `OBS-${item.evidenceId}`)) continue;
+		const goalEvidence = goalEvidenceById.get(item.evidenceId);
+		if (
+			observations.some((observation) => observation.id === `OBS-${item.evidenceId}`) ||
+			(goalEvidence !== undefined && isDeepStrictEqual(item, goalEvidence))
+		)
+			continue;
 		observations.push({
 			id: `OBS-${item.evidenceId}`,
 			text: item.summary,

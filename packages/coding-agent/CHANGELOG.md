@@ -2,7 +2,9 @@
 
 ### Fixed
 
-- `RuntimeBuilder` excludes `COMPLETION_FINDING_SOURCE` obligations from `createGoalToolDefinition`'s `getActiveVerificationIds`, so completion findings do not self-block `goal complete` before `SystemOneController.executeCompletionTransaction` can re-evaluate and supersede them.
+- Completion findings no longer block `goal complete` before the completion evaluator can re-evaluate and supersede them.
+- Canonical goal evidence appears once when its durable objective record is an exact mirror; different runtime evidence remains visible.
+- Verification history stores changed receipt bodies between periodic checkpoints instead of copying the full retained history after every tool call. Existing records remain readable; older binaries cannot resume from a delta record.
 
 ## [0.104.17] - 2026-10-28
 
