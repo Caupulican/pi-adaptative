@@ -265,6 +265,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		// - Root calls zoom(0, 2) (tree children 0 and 1, <=512 B echo), zoom(2, 1, 0) (raw source of clipped record 2;
 		//   30,000 B fits on 1 root page of 32,768 B, and >512 B so worker-c compacts its echo leaf 9), and date(3) (timestamp of Pi's reply).
 		let leaf9RetriedOnWorkerC = false;
+		const leaf9RequestMark = world.provider.reached.length;
 		world.provider.enqueue(
 			"worker-c",
 			{
@@ -341,6 +342,9 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		);
 		world.systemOne.enterPhase("icm-turn-2", ICM_INTAKE_JUDGMENTS);
 		await withDeadline(trace, "ICM turn 2", icmRoot.session.prompt("Inspect the summary tree, raw echo, and date."));
+		await advanceIcmTransportBackoff(world, "ICM leaf 9", 2000, leaf9RequestMark, [
+			"worker-c:icm-leaf-9-transient-503",
+		]);
 		await icmWaitForChatIdle(world, icmAgentDir, 13);
 
 		const icmRecords = icmReadContinuousRecords(world, icmStore);
@@ -446,13 +450,32 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 
 /** The scripted outage every failed attempt of the R10s leaf meets. */
 const R10S_UNAVAILABLE = "HTTP 503 Service Unavailable: upstream overloaded";
-/** How the adapter fails the leaf once both of an attempt's requests met the outage. */
+/** How the adapter fails the leaf once all three of an attempt's requests met the outage. */
 const R10S_STOPPED = `Continuous-chat compaction stopped (error): ${R10S_UNAVAILABLE}`;
 
+/** Observe the real request boundary, prove no early retry, then release exactly one transport alarm. */
+async function advanceIcmTransportBackoff(
+	world: HarnessWorld,
+	label: string,
+	delayMs: number,
+	requestMark: number,
+	expectedSteps: readonly string[],
+): Promise<void> {
+	const steps = () => world.provider.reached.slice(requestMark).filter((step) => step.startsWith("worker-c:"));
+	expect(
+		await withDeadline(world.trace, `${label} transport backoff`, world.timers.whenArmed("continuous-chat")),
+		`${label}: the request arms its bounded transport delay`,
+	).toBe(delayMs);
+	expect(steps(), `${label}: only the requests before this backoff have run`).toEqual(expectedSteps);
+	expect(world.timers.advance("continuous-chat", delayMs - 1), `${label}: no retry fires before its delay`).toBe(0);
+	expect(steps(), `${label}: no provider request escapes the delay`).toEqual(expectedSteps);
+	expect(world.timers.advance("continuous-chat", 1), `${label}: exactly one transport retry becomes due`).toBe(1);
+}
+
 /**
- * R10s: a failed leaf is retried by a later arrival, never by an alarm and never by making a root turn wait, on a fresh chat whose
- * only leaf that needs the summary model is message 1. Each attempt of that leaf costs two worker-c requests: the adapter sends
- * once more at once after an error reply. The control: the same failure with no later arrival stays blocked and arms nothing.
+ * R10s: after transport recovery is exhausted, a failed leaf is retried by a later arrival, never by an alarm and never by making
+ * a root turn wait, on a fresh chat whose only model-generated leaf is message 1. Each scheduler attempt permits three worker-c
+ * requests with 2s/4s transport backoffs. The control: after exhaustion, no later arrival means the leaf stays blocked and arms nothing.
  * Turn B's arrival retries the leaf while its root turn proceeds on the pending reference; the leaf fails again and stays
  * blocked. Turn C's arrival retries it once more and publishes it.
  */
@@ -482,7 +505,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 	// Turn A logs message 0 (an exact leaf) and message 1, whose leaf fails with no turn waiting on it.
 	const warningMark = world.warnings.length;
 	const reachedMark = world.provider.reached.length;
-	world.provider.enqueue("worker-c", unavailable("idle-a"), unavailable("idle-b"));
+	world.provider.enqueue("worker-c", unavailable("idle-a"), unavailable("idle-b"), unavailable("idle-c"));
 	world.provider.enqueue("root", {
 		name: `${label}-turn-a`,
 		reply: { content: [{ type: "text", text: longReply }] },
@@ -490,6 +513,11 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 	// Turn A uses no tool, so its owner words are settled by the next submission: the carries_0 screen and the owner-policy classification are scripted on turn B.
 	world.systemOne.enterPhase(`${label}-turn-a`, {});
 	await withDeadline(trace, "R10s turn A", root.session.prompt("Record the R10s spacing reply."));
+	await advanceIcmTransportBackoff(world, "R10s idle first retry", 2000, reachedMark, ["worker-c:r10s-idle-a"]);
+	await advanceIcmTransportBackoff(world, "R10s idle second retry", 4000, reachedMark, [
+		"worker-c:r10s-idle-a",
+		"worker-c:r10s-idle-b",
+	]);
 	await withDeadline(
 		trace,
 		"R10s leaf 1 blocked",
@@ -508,7 +536,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		"a leaf that fails with no turn waiting arms no retry alarm",
 	).toEqual({
 		armed: [],
-		steps: [`worker-c:${label}-idle-a`, `worker-c:${label}-idle-b`],
+		steps: [`worker-c:${label}-idle-a`, `worker-c:${label}-idle-b`, `worker-c:${label}-idle-c`],
 		warnings: [failedLine],
 	});
 	world.faultMatrix.witness("R10s", { control: true });
@@ -532,6 +560,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		"worker-c",
 		{ ...unavailable("arrival-a"), gate: retryHeld.promise },
 		unavailable("arrival-b"),
+		unavailable("arrival-c"),
 	);
 	world.provider.enqueue("root", { name: `${label}-turn-b`, reply: { content: [{ type: "text", text: "Done." }] } });
 	try {
@@ -569,6 +598,11 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		});
 		const generationBeforeFailure = generation();
 		retryHeld.release();
+		await advanceIcmTransportBackoff(world, "R10s arrival first retry", 2000, turnMark, ["worker-c:r10s-arrival-a"]);
+		await advanceIcmTransportBackoff(world, "R10s arrival second retry", 4000, turnMark, [
+			"worker-c:r10s-arrival-a",
+			"worker-c:r10s-arrival-b",
+		]);
 		await withDeadline(
 			trace,
 			"R10s retry failed",
@@ -590,7 +624,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 			"the retried leaf fails again, stays blocked until a later arrival, and arms no alarm",
 		).toEqual({
 			armed: [],
-			steps: [`worker-c:${label}-arrival-a`, `worker-c:${label}-arrival-b`],
+			steps: [`worker-c:${label}-arrival-a`, `worker-c:${label}-arrival-b`, `worker-c:${label}-arrival-c`],
 			warnings: [failedLine, failedLine],
 			row: expect.objectContaining({ status: "blocked", attempts: 2, reason: R10S_STOPPED, last_action: "fail" }),
 			dueForRetry: false,
