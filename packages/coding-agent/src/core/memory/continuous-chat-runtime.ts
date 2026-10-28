@@ -91,6 +91,8 @@ export class ContinuousChatRuntime {
 	private nextBoundaryId = 0;
 	private started = false;
 	private stopping = false;
+	/** Restart holds stop new claims without cutting already paid requests. */
+	private dispatchHolds = 0;
 	/** Set once the store reports its lease lost. Nothing is written after it; claimed work is left for recovery. */
 	private leaseLost = false;
 	private pumping = false;
@@ -248,6 +250,45 @@ export class ContinuousChatRuntime {
 		this.requestPump();
 	}
 
+	/** Holds new dispatch until released and joins existing work without aborting its requests. */
+	async pauseAndDrain(signal?: AbortSignal): Promise<() => void> {
+		this.assertRunning();
+		signal?.throwIfAborted();
+		this.dispatchHolds++;
+		let released = false;
+		const release = () => {
+			if (released) return;
+			released = true;
+			this.dispatchHolds--;
+			if (this.dispatchHolds === 0) this.requestPump();
+		};
+		const waiting = signal ? AbortSignal.any([signal, this.abort.signal]) : this.abort.signal;
+		try {
+			await new Promise<void>((resolve, reject) => {
+				const onAbort = () => reject(waiting.reason);
+				waiting.addEventListener("abort", onAbort, { once: true });
+				const drained = this.pumpTask.then(() => Promise.all([...this.jobs.values()]));
+				void drained.then(
+					() => {
+						waiting.removeEventListener("abort", onAbort);
+						resolve();
+					},
+					(error: unknown) => {
+						waiting.removeEventListener("abort", onAbort);
+						reject(error);
+					},
+				);
+				if (waiting.aborted) onAbort();
+			});
+			waiting.throwIfAborted();
+			this.assertRunning();
+			return release;
+		} catch (error) {
+			release();
+			throw error;
+		}
+	}
+
 	/**
 	 * Aborts in-flight compactions, releases their claimed work, refuses further appends and turns, then releases the
 	 * project lease. A lease already lost releases nothing.
@@ -351,7 +392,7 @@ export class ContinuousChatRuntime {
 
 	/** Starts a dispatch pass unless one is running. A pass that is running re-checks once more before it exits. */
 	private requestPump(): void {
-		if (!this.started || this.stopping) return;
+		if (!this.started || this.stopping || this.dispatchHolds > 0) return;
 		this.pumpRequested = true;
 		if (this.pumping) return;
 		this.pumping = true;
@@ -364,7 +405,7 @@ export class ContinuousChatRuntime {
 			do {
 				this.pumpRequested = false;
 				await this.claimReady();
-			} while (this.pumpRequested && !this.stopping);
+			} while (this.pumpRequested && !this.stopping && this.dispatchHolds === 0);
 		} catch (error) {
 			// A lost lease was already reported by `handleLeaseLost`.
 			if (!this.leaseLost) {
@@ -385,13 +426,17 @@ export class ContinuousChatRuntime {
 	private async claimReady(): Promise<void> {
 		// A claim that could not be recorded still holds its slot: every dispatch pass retries it first.
 		if (this.workReleases.size > 0) await this.workReleases.retry({ report: false });
-		while (!this.stopping && this.jobs.size < CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS) {
+		while (
+			!this.stopping &&
+			this.dispatchHolds === 0 &&
+			this.jobs.size < CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS
+		) {
 			const item = await this.store.claimWork();
 			if (item === undefined) {
 				if (this.jobs.size === 0) this.emit({ type: "idle" });
 				return;
 			}
-			if (this.stopping) {
+			if (this.stopping || this.dispatchHolds > 0) {
 				// After a lost lease the claim stays persisted for the next owner's recovery to requeue.
 				if (!this.leaseLost) await this.recordOrRetain(item, { kind: "release" });
 				return;

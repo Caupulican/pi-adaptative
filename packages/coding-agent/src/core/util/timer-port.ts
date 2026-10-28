@@ -43,8 +43,8 @@ export {
  *   transaction, lane registration) whose rename failed transiently.
  * - `tool-recovery-log`: the bound of a flush of the tool recovery log, which a closing session waits on for the log
  *   worker's acknowledgement.
- * - `continuous-chat`: the backoff of the chat's retained work-claim releases, armed only when recording a failed claim
- *   itself fails; failed summary work otherwise retries on a later arrival, never on an alarm.
+ * - `continuous-chat`: bounded summary-request transport backoff and the chat's retained work-claim releases. After
+ *   request recovery is exhausted, failed summary work retries on a later arrival, never on an alarm.
  */
 export type TimerOwner =
 	| "write-reservation"

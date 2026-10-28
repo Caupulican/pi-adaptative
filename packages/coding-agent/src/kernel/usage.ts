@@ -4,7 +4,21 @@ import type { SessionEntry } from "./session/session-entries.ts";
 
 export { createEmptyUsage };
 
+function hasTokens(usage: Usage): boolean {
+	return usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0 || usage.totalTokens > 0;
+}
+
 export function addUsage(target: Usage, usage: Usage): void {
+	// Report a complete reasoning subtotal only when every contributing usage supplies it.
+	if (hasTokens(usage)) {
+		const previous = target.details?.reasoningTokens;
+		const reasoning = usage.details?.reasoningTokens;
+		if (reasoning !== undefined && (!hasTokens(target) || previous !== undefined)) {
+			target.details = { ...target.details, reasoningTokens: (previous ?? 0) + reasoning };
+		} else if (target.details !== undefined) {
+			delete target.details.reasoningTokens;
+		}
+	}
 	target.input += usage.input;
 	target.output += usage.output;
 	target.cacheRead += usage.cacheRead;

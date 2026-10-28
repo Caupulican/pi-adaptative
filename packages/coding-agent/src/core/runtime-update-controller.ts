@@ -59,6 +59,8 @@ export interface RuntimeUpdateControllerDeps {
 	reload(extensionPath?: string, ownerHandoff?: RuntimeMutationHandoff): Promise<void>;
 	appendNotice(content: string): Promise<void>;
 	isRoot(): boolean;
+	/** Pause background producers and drain paid work; release resumes them if restart cannot proceed. */
+	acquireRestartQuiescence?(signal: AbortSignal): Promise<(() => void) | undefined>;
 	onStopped?(): void;
 	resume?(prepare: () => Promise<void>): Promise<void>;
 }
@@ -297,7 +299,12 @@ export class RuntimeUpdateController {
 					if (!sessionFile || !this.restart)
 						throw new Error("Core restart adapter or persisted session unavailable.");
 					this.save({ ...this.state, status: "restarting" });
-					await this.restart({ id: this.state.id, sessionId: this.state.sessionId, sessionFile }, updateSignal);
+					const resume = await this.deps.acquireRestartQuiescence?.(updateSignal);
+					try {
+						await this.restart({ id: this.state.id, sessionId: this.state.sessionId, sessionFile }, updateSignal);
+					} finally {
+						resume?.();
+					}
 				} else {
 					const handoff = beginRuntimeHandoff?.();
 					try {

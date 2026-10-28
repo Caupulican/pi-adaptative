@@ -1238,6 +1238,7 @@ export class AgentSession {
 			},
 			continuousChat: {
 				compaction: createContinuousChatCompactionAdapter({
+					timers: config.timers.port("continuous-chat"),
 					complete: (options) => this._reflection.runIsolatedCompletion(options),
 					prefixHead: () => this._continuousChatPrefixHead(),
 					summary: () =>
@@ -1509,6 +1510,7 @@ export class AgentSession {
 		});
 		this.runtimeUpdates = new RuntimeUpdateController({
 			sessionManager: this.sessionManager,
+			acquireRestartQuiescence: async (signal) => this._memory.continuousChatHost()?.runtime.pauseAndDrain(signal),
 			getMessages: () => this.agent.state.messages,
 			isRoot: () => !this._isChildSession,
 			onStopped: () => this._goals.markTerminalToolFailureBlocked("runtime_update"),

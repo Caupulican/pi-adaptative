@@ -137,7 +137,7 @@ interface InputTokenDetailsWithOrchestration {
 	orchestration_input_cached_tokens?: number;
 }
 
-interface OutputTokenDetailsWithOrchestration {
+interface OutputTokenDetailsWithOrchestration extends Partial<OpenAI.Responses.ResponseUsage.OutputTokensDetails> {
 	orchestration_output_tokens?: number;
 }
 
@@ -820,6 +820,15 @@ export async function processResponsesStream<TApi extends Api>(
 				totalTokens,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: providerCost ?? 0 },
 			};
+			const reasoningTokens = outputDetails?.reasoning_tokens;
+			if (
+				typeof reasoningTokens === "number" &&
+				Number.isSafeInteger(reasoningTokens) &&
+				reasoningTokens >= 0 &&
+				reasoningTokens <= (response.usage.output_tokens ?? 0)
+			) {
+				output.usage.details = { reasoningTokens };
+			}
 		}
 		calculateCost(model, output.usage, {
 			// response.usage is absent on some streams; this call sits outside the guard above.

@@ -10,8 +10,11 @@ import { randomUUID } from "node:crypto";
 import type { Api, Message, Model, Tool, Usage } from "@caupulican/pi-ai";
 import type { AgentContext } from "../../kernel/loop-config.ts";
 import { projectToolsForProvider } from "../../kernel/provider-tool-projection.ts";
+import { classifyFailure } from "../../kernel/reliability/classifier.ts";
+import { computeRetryDelayMs, DEFAULT_RETRY_POLICY, sleepAbortable } from "../../kernel/reliability/retry.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { hasReportableUsage } from "../spawned-usage.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import type {
 	ContinuousChatCompactionConversation,
 	ContinuousChatCompactionPort,
@@ -87,6 +90,8 @@ export interface ContinuousChatCompactionAdapterPort extends ContinuousChatCompa
 }
 
 export interface ContinuousChatCompactionAdapterDeps {
+	/** Transport backoff shares the chat owner's injected clock. */
+	timers?: TimerPort;
 	/** The owner's isolated completion, `ReflectionController.runIsolatedCompletion`. */
 	complete(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** The getter the runtime also receives as `prefixHead`, so a compaction and its job agree on the snapshot. */
@@ -204,18 +209,43 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 					return { completion, assistant, model, guardRejected, sentTools: activeTools.length > 0 };
 				};
 				let { completion: result, assistant, model: summaryModel, guardRejected, sentTools } = await runTurn();
-				if (result.stopReason === "error" && !guardRejected) {
-					this.deps.onModelFailure?.(summaryModel, result.errorMessage);
-					const nextSummary = this.deps.summary();
-					if (nextSummary.ok) {
-						({ completion: result, assistant, model: summaryModel, guardRejected, sentTools } = await runTurn());
+				let toolFree = false;
+				while (true) {
+					signal?.throwIfAborted();
+					if (guardRejected) break;
+					const failed = result.stopReason === "error";
+					if (failed) this.deps.onModelFailure?.(summaryModel, result.errorMessage);
+					if (attempt >= DEFAULT_RETRY_POLICY.maxAttempts) break;
+					if (failed) {
+						const nextSummary = this.deps.summary();
+						if (!nextSummary.ok) break;
+						if (sameCacheModel(summaryModel, nextSummary.model)) {
+							const failure = classifyFailure({
+								message: result.errorMessage ?? "",
+								provider: summaryModel.provider,
+							});
+							if (!failure.retryable) break;
+							await sleepAbortable(
+								computeRetryDelayMs(DEFAULT_RETRY_POLICY, attempt, { retryAfterMs: failure.retryAfterMs }),
+								signal,
+								this.deps.timers,
+							);
+						}
+					} else if (
+						sentTools &&
+						(result.stopReason === "toolUse" || assistant?.content.some((block) => block.type === "toolCall"))
+					) {
+						toolFree = true;
+					} else {
+						break;
 					}
-				}
-				if (
-					sentTools &&
-					(result.stopReason === "toolUse" || assistant?.content.some((block) => block.type === "toolCall"))
-				) {
-					({ completion: result, assistant } = await runTurn(true));
+					({
+						completion: result,
+						assistant,
+						model: summaryModel,
+						guardRejected,
+						sentTools,
+					} = await runTurn(toolFree));
 				}
 				if (assistant === undefined) throw new Error("Continuous-chat compaction produced no assistant reply.");
 				if (result.stopReason !== "stop") {
