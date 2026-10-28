@@ -7,6 +7,12 @@
 ### Changed
 
 - Refreshed the generated model catalog from live upstream data and updated the Codex catalogue and account client version to `0.165.0` (`rust-v0.165.0`).
+- Scoped and parallelized upstream catalog fetching, indexed generator metadata, buffered generated output, and removed the redundant runtime model-registry copy built at import.
+
+### Fixed
+
+- Parallel model-catalog checks now wait for every generator and temporary-directory cleanup before reporting a failure.
+- Preserved valid provider-supplied Responses reasoning-token subtotals in usage details without adding them again to billed output or costs.
 
 ## [0.104.16] - 2026-10-27
 

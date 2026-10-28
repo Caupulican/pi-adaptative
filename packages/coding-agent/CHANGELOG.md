@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Fixed
+
+- Core runtime restart pauses new ICM summary claims and drains existing jobs before checking quiescence; cancellation or preparation failure resumes dispatch without aborting paid requests.
+- ICM summary requests use classified transient retries with backoff and one three-attempt bound shared by model recovery and tool-free repair, instead of blindly repeating unchanged-model errors.
+- ICM recall guidance focuses history reads on a specific missing fact, reuses facts already recalled, and keeps commit or push follow-ups from restarting a history survey.
+- Delivery-claim checks retain the current request and work-unit scope through extraction and fallback settlement, distinguishing new edits and commits from reports about existing history.
+- Unresolved completion-account claims remain failures across repeated submissions. Unavailable required evaluators hold completion instead of becoming advice or triggering production repairs.
+- Completion-account reasons, requirement links and dependency links share fresh cited observations or passing checks, and clipped patch evidence is disclosed.
+- Isolated-completion usage preserves a combined reasoning-token subtotal only when every token-bearing response supplies one; missing breakdowns remain unknown.
+
 ## [0.104.16] - 2026-10-27
 
 ### Fixed
