@@ -7,7 +7,7 @@ export class ModelEvaluationBudgetError extends Error {
 	readonly kind = "invalid_request";
 
 	constructor() {
-		super(`Model classification evidence exceeds the ${MODEL_EVALUATION_REQUEST_BYTES}-byte request budget`);
+		super(`Semantic evaluation evidence exceeds the ${MODEL_EVALUATION_REQUEST_BYTES}-byte request budget`);
 		this.name = "ModelEvaluationBudgetError";
 	}
 }

@@ -56,7 +56,7 @@ import {
 } from "./control-directive.ts";
 import type { CanonicalHydration, ExecutionStore } from "./execution-state.ts";
 import type { IntegrityHookCoordinator } from "./integrity-hooks.ts";
-import { planModelEvaluations } from "./model-evaluation-batches.ts";
+import { planEvaluationBatches, planModelEvaluations } from "./model-evaluation-batches.ts";
 import {
 	type CompletionRejectionDetail,
 	decideFinalCompletion,
@@ -976,7 +976,7 @@ export class SystemOneController {
 
 	/**
 	 * Whether each piece of evidence shows its statement true, and separately whether it shows it
-	 * false: two one-condition Nouls per item, every item in ONE request. Evidence that shows neither
+	 * false: two one-condition Nouls per item, grouped into bounded requests. Evidence that shows neither
 	 * leaves the item unsettled; that is an answer, not a failure.
 	 */
 	async evaluateUnsettledItems(
@@ -984,56 +984,81 @@ export class SystemOneController {
 		signal?: AbortSignal,
 		interpretationContext?: string,
 	): Promise<Record<string, unknown>> {
-		const state: Record<string, unknown> = interpretationContext
+		signal?.throwIfAborted();
+		const sharedState: Record<string, unknown> = interpretationContext
 			? { interpretation_context: this.projector.redactText(interpretationContext) }
 			: {};
 		const scopeInstruction = interpretationContext
 			? " Use interpretation_context only to interpret the statement's work scope; it is never evidence that an action happened."
 			: "";
-		const questions: QuestionPack = {};
 		const evidenceKeys = new Map<string, string>();
-		checks.forEach((check, index) => {
-			state[`s${index}`] = this.projector.redactText(check.statement);
+		// Snapshot every input before the first await, including exact shared-evidence identities.
+		const items = checks.map((check, index) => {
+			const statement = this.projector.redactText(check.statement);
 			const redactedEvidence = this.projector.redactText(check.evidence);
 			let evidenceKey = evidenceKeys.get(redactedEvidence);
 			if (!evidenceKey) {
 				evidenceKey = `e${index}`;
 				evidenceKeys.set(redactedEvidence, evidenceKey);
-				state[evidenceKey] = redactedEvidence;
 			}
-			// Wording measured against live System One (docs/system-one.md): refutation is asked as "contradict",
-			// with criteria naming what a contradicting result looks like.
-			questions[unsettledQuestionId("shows_true", index)] = {
-				type: "boolean",
-				instructions: `Does \`${evidenceKey}\` show that \`s${index}\` is true?${scopeInstruction}`,
-				criteria: {
-					true: "The evidence reports the statement's outcome directly",
-					false: "The evidence reports a different outcome, or says nothing about it",
-				},
-			};
-			questions[unsettledQuestionId("shows_false", index)] = {
-				type: "boolean",
-				instructions: `Does \`${evidenceKey}\` contradict \`s${index}\`?${scopeInstruction}`,
-				criteria: {
-					true: "The evidence reports a result that makes the statement untrue (a failure, a rejection, a different value)",
-					false: "The evidence agrees with the statement or says nothing about it",
-				},
-			};
+			return { statement, evidence: redactedEvidence, evidenceKey };
 		});
-		const { decision, answers, evaluationId } = await this.runStageValidation(
-			"unsettled_item",
-			state,
-			"read_only",
-			[],
-			questions,
-			signal,
-		);
-		const reasons = checks.map(
-			(check, index) =>
-				`${check.statement.slice(0, 120)} P(shown true)=${probabilityText(answers[unsettledQuestionId("shows_true", index)])} P(shown false)=${probabilityText(answers[unsettledQuestionId("shows_false", index)])}`,
-		);
-		this.sealDecision(decision, "evaluated", evaluationId, reasons);
-		return answers;
+		const questionId = (index: number) =>
+			unsettledQuestionId(index % 2 === 0 ? "shows_true" : "shows_false", Math.floor(index / 2));
+		const batches = planEvaluationBatches({
+			count: items.length * 2,
+			model: this.config.model.production || SYSTEM_ONE_PINNED_MODEL,
+			empty: () => ({ ...sharedState }),
+			withItem: (state, index) => {
+				const itemIndex = Math.floor(index / 2);
+				const item = items[itemIndex];
+				return { ...state, [`s${itemIndex}`]: item.statement, [item.evidenceKey]: item.evidence };
+			},
+			questionId,
+			question: (index): QuestionDefinition => {
+				const itemIndex = Math.floor(index / 2);
+				const { evidenceKey } = items[itemIndex];
+				// Wording measured against live System One (docs/system-one.md): refutation is asked as "contradict",
+				// with criteria naming what a contradicting result looks like.
+				return index % 2 === 0
+					? {
+							type: "boolean",
+							instructions: `Does \`${evidenceKey}\` show that \`s${itemIndex}\` is true?${scopeInstruction}`,
+							criteria: {
+								true: "The evidence reports the statement's outcome directly",
+								false: "The evidence reports a different outcome, or says nothing about it",
+							},
+						}
+					: {
+							type: "boolean",
+							instructions: `Does \`${evidenceKey}\` contradict \`s${itemIndex}\`?${scopeInstruction}`,
+							criteria: {
+								true: "The evidence reports a result that makes the statement untrue (a failure, a rejection, a different value)",
+								false: "The evidence agrees with the statement or says nothing about it",
+							},
+						};
+			},
+		});
+		const combined: Record<string, unknown> = {};
+		for (const batch of batches) {
+			signal?.throwIfAborted();
+			const { decision, answers, evaluationId } = await this.runStageValidation(
+				"unsettled_item",
+				batch.state,
+				"read_only",
+				[],
+				batch.questions,
+				signal,
+			);
+			const reasons = batch.indexes.map(
+				(index) =>
+					`${items[Math.floor(index / 2)].statement.slice(0, 120)} P(shown ${index % 2 === 0 ? "true" : "false"})=${probabilityText(answers[questionId(index)])}`,
+			);
+			this.sealDecision(decision, "evaluated", evaluationId, reasons);
+			signal?.throwIfAborted();
+			for (const index of batch.indexes) combined[questionId(index)] = answers[questionId(index)];
+		}
+		return combined;
 	}
 
 	/**

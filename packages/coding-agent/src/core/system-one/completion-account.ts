@@ -446,7 +446,7 @@ export function checkCompletionAccount(
 					.join("\n")}`,
 			);
 			// A fix that only silences the symptom leaves the stated cause in place. The same cited evidence and diff
-			// are read against that second claim, in the same System One request: no extra call.
+			// are read against that second claim, sharing evidence within each bounded System One request.
 			if (cause) {
 				const statement = `The diff changes the mechanism that the stated cause describes: "${account.cause.claim.slice(0, 300)}".`;
 				claims.push({
@@ -482,9 +482,9 @@ function probabilityOf(answer: unknown): number | undefined {
 }
 
 /**
- * Every claim in one request. A claim is contradicted only on a decisive reading against it (the same band the
- * unsettled ladder settles on), supported when the evidence is read as showing it and not as contradicting it,
- * and otherwise unsettled: the evidence says nothing clear about it.
+ * Every claim is evaluated with its complete evidence. A claim is contradicted only on a decisive reading
+ * against it (the same band the unsettled ladder settles on), supported when the evidence is read as showing
+ * it and not as contradicting it, and otherwise unsettled: the evidence says nothing clear about it.
  */
 export async function judgeAccountClaims(
 	judge: AccountJudge,

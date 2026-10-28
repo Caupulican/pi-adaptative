@@ -94,6 +94,16 @@ export class StateProjector {
 		return redactSecrets(text, this.userKeys);
 	}
 
+	private constraints(state: ExecutionState) {
+		return state.objective.constraints.map((constraint) => ({
+			id: constraint.id,
+			text: this.redactText(constraint.text),
+			severity: constraint.severity,
+			source: constraint.source,
+			verified: constraint.verified,
+		}));
+	}
+
 	/**
 	 * Intake projection: objective clarity, task kind, external blockers.
 	 */
@@ -107,11 +117,7 @@ export class StateProjector {
 					text: this.redactText(ac.text),
 					required: ac.required,
 				})),
-				constraints: state.objective.constraints.map((c) => ({
-					id: c.id,
-					text: this.redactText(c.text),
-					severity: c.severity,
-				})),
+				constraints: this.constraints(state),
 				non_goals: state.objective.non_goals.map((ng) => this.redactText(ng)),
 			},
 			repo: {
@@ -342,7 +348,7 @@ export class StateProjector {
 	 * Each required outcome with what shows it: the harness's own checks first, then the evidence the criterion cites.
 	 * This, not a repository diff, is what completion is judged on.
 	 */
-	outcomeEvidence(state: ExecutionState): OutcomeEvidenceRow[] {
+	outcomeEvidence(state: ExecutionState) {
 		const observationsById = new Map(state.observations.map((observation) => [observation.id, observation]));
 		const observationView = (id: string) => {
 			const observation = observationsById.get(id) ?? observationsById.get(`OBS-${id}`);
@@ -366,7 +372,7 @@ export class StateProjector {
 				})),
 				evidence: criterion.evidence_ids.map(observationView).filter((view) => view !== undefined),
 			};
-		});
+		}) satisfies OutcomeEvidenceRow[];
 	}
 
 	/**
@@ -426,15 +432,26 @@ export class StateProjector {
 				severity: r.severity,
 			}));
 
-		const outcomeEvidence = this.outcomeEvidence(state);
+		// Store each observation body once. Repeated citations retain their associations by canonical ID.
+		const outcomeEvidence = this.outcomeEvidence(state).map((row) => ({
+			...row,
+			checks: row.checks.map((check) => ({
+				...check,
+				observed: check.observed.map(({ id }) => ({ id })),
+			})),
+			evidence: row.evidence.map(({ id }) => ({ id })),
+		}));
 
 		return {
 			objective: {
 				normalized_goal: this.redactText(state.objective.normalized_goal),
 				non_goals: state.objective.non_goals.map((ng) => this.redactText(ng)),
+				constraints: this.constraints(state),
 			},
 			acceptance_matrix: acceptanceMatrix,
 			outcome_evidence: outcomeEvidence,
+			evidence_reference_contract:
+				"Resolve each outcome evidence or check observation reference by its id in the evidence table. An unresolved reference supplies no evidence. Constraint verified flags are recorded status, not independent proof.",
 			claim_matrix: claimMatrix,
 			verification_matrix: verificationMatrix,
 			// The repository work only when the goal changed the repository; a machine, service or answer
