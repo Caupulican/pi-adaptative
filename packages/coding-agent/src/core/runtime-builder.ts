@@ -195,6 +195,7 @@ import {
 	wrapToolWithVerification,
 } from "./system-one/session-verification-host.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
+import { COMPLETION_FINDING_SOURCE } from "./system-one/verification-coordinator.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
 import type { TaskStepsState } from "./tasks/task-state.ts";
@@ -1697,7 +1698,8 @@ export class RuntimeBuilder {
 						...(this.deps
 							.getSystemOneController?.()
 							?.verification.status()
-							.obligations.map((item) => item.id) ?? []),
+							.obligations.filter((item) => item.source !== COMPLETION_FINDING_SOURCE)
+							.map((item) => item.id) ?? []),
 					],
 					getSystemOneController: () => this.deps.getSystemOneController?.(),
 					getCwd: () => this._taskDirectories.cwd,

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- `RuntimeBuilder` excludes `COMPLETION_FINDING_SOURCE` obligations from `createGoalToolDefinition`'s `getActiveVerificationIds`, so completion findings do not self-block `goal complete` before `SystemOneController.executeCompletionTransaction` can re-evaluate and supersede them.
+
 ## [0.104.17] - 2026-10-28
 
 ### Fixed
