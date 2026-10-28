@@ -264,6 +264,20 @@ export function buildBashOneShotWire(command: string): string {
  */
 export function buildBashWire(command: string, nonce: string, cdTo: string | null): string {
 	const body = cdTo ? `command cd -- '${escapeSingleQuotesPosix(cdTo)}' && {\n${command}\n}` : command;
+	const evaluation =
+		process.platform === "linux"
+			? [
+					// A pathname open creates independent file status flags; dup would retain any
+					// O_NONBLOCK a previous child set. Keep the same pipe and session relay lifetime.
+					'if exec {__pi_command_output_fd}>"/proc/self/fd/$__PI_OUTPUT_RELAY_FD"; then',
+					...buildBashEvaluation(body, nonce, "__pi_command_output_fd"),
+					"__pi_status=$?",
+					"exec {__pi_command_output_fd}>&-",
+					"else",
+					"__pi_status=$?",
+					"fi",
+				]
+			: [...buildBashEvaluation(body, nonce), "__pi_status=$?"];
 	return [
 		// The exported set rides the frame only when it changed since this lane's previous command:
 		// the listing is compared in the shell against the lane's own snapshot (a plain, unexported
@@ -275,8 +289,7 @@ export function buildBashWire(command: string, nonce: string, cdTo: string | nul
 		"__pi_exports_before=",
 		// biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion, not a template literal
 		'if [ -z "${__PI_EXPORT_SNAPSHOT+x}" ]; then __PI_EXPORT_SNAPSHOT=$(unset -v _ PWD OLDPWD SHLVL; export -p); __pi_exports_before=$__PI_EXPORT_SNAPSHOT; fi',
-		...buildBashEvaluation(body, nonce),
-		"__pi_status=$?",
+		...evaluation,
 		// Job-table children stay inside this command. The session relay is lifecycle infrastructure,
 		// not command work; waiting on it would deadlock every command. The saved status is the
 		// command's, not any background job's.
@@ -287,7 +300,7 @@ export function buildBashWire(command: string, nonce: string, cdTo: string | nul
 		// exported value contains the record-separator byte used to terminate the sentinel. The
 		// subshell keeps the LC_ALL change (byte-counting lengths) out of the persistent session.
 		`(LC_ALL=C; printf '\\n\\036%s:v2:%s:%s:%s:%s:%s:%s:%s\\036' '${nonce}' "$__pi_status" "\${#PWD}" "$PWD" "\${#__pi_exports_before}" "$__pi_exports_before" "\${#__pi_exports_out}" "$__pi_exports_out")`,
-		"unset -v __pi_status __pi_exports __pi_exports_before __pi_exports_out",
+		"unset -v __pi_status __pi_exports __pi_exports_before __pi_exports_out __pi_command_output_fd",
 		"",
 	].join("\n");
 }

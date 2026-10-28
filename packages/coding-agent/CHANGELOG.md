@@ -5,6 +5,9 @@
 - Completion findings no longer block `goal complete` before the completion evaluator can re-evaluate and supersede them.
 - Canonical goal evidence appears once when its durable objective record is an exact mirror; different runtime evidence remains visible.
 - Verification history stores changed receipt bodies between periodic checkpoints instead of copying the full retained history after every tool call. Existing records remain readable; older binaries cannot resume from a delta record.
+- Completion reviews share cited evidence by ID instead of repeating its full text, and include the goal's hard constraints in the independent challenge.
+- Completion account checks split complete claim evidence into bounded requests while retaining question identities, cancellation and the caller's completion scope.
+- Linux persistent Bash commands isolate stdout file-status flags, preventing a child that changes stdout to nonblocking from breaking later commands with `Resource temporarily unavailable`.
 
 ## [0.104.17] - 2026-10-28
 
