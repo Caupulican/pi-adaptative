@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated reviewed provider client identities and OAuth compatibility profiles to Claude Code `2.1.312` and AGY `1.4.9`.
+
 ## [0.104.17] - 2026-10-28
 
 ### Added
