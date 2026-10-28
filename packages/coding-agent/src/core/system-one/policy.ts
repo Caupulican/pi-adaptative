@@ -25,11 +25,13 @@ export interface CompletionRejectionDetail {
 	required_next_proof: string;
 }
 
-export interface FinalCompletionVerdict {
-	verdict: "complete" | "verify_more" | "retrieve_more" | "rework" | "blocked_external";
+export type FinalCompletionVerdict = {
 	failed_gates: CompletionRejectionDetail[];
 	advisories?: CompletionRejectionDetail[];
-}
+} & (
+	| { verdict: "complete" | "verify_more" | "retrieve_more" | "rework" }
+	| { verdict: "blocked_external"; diagnostic?: "evaluator_unavailable" }
+);
 
 /**
  * Evaluate a Noul probability against calibrated thresholds.
@@ -649,6 +651,8 @@ export function decideFinalCompletion(input: {
 	challengeAnswers: Record<string, unknown> | undefined;
 	/** What the model's account failed to show, decided by code and by System One against the cited evidence. */
 	accountFailures?: readonly CompletionRejectionDetail[];
+	/** Evaluator diagnostics hold completion without becoming production repair findings. */
+	unavailable?: readonly CompletionRejectionDetail[];
 	config?: SystemOneConfig;
 }): FinalCompletionVerdict {
 	const failedGates: CompletionRejectionDetail[] = [];
@@ -667,10 +671,25 @@ export function decideFinalCompletion(input: {
 		return { verdict: "rework", failed_gates: failedGates };
 	}
 
-	if (input.primaryAnswers !== undefined)
-		failedGates.push(...completionPackFailures("completion", input.primaryAnswers, input));
-	if (input.challengeAnswers !== undefined)
-		failedGates.push(...completionPackFailures("completion_challenge", input.challengeAnswers, input));
+	const unavailable = [...(input.unavailable ?? [])];
+	if (unavailable.length > 0 || input.primaryAnswers === undefined || input.challengeAnswers === undefined) {
+		for (const [stage, answers] of [
+			["completion", input.primaryAnswers],
+			["completion_challenge", input.challengeAnswers],
+		] as const) {
+			if (answers === undefined && !unavailable.some((item) => item.id === `JEV-${stage}-unavailable`))
+				unavailable.push({
+					id: `JEV-${stage}-unavailable`,
+					reason: `${stage} evaluation is unavailable; the objective remains open.`,
+					required_next_proof:
+						"Restore the evaluator and retry completion; this diagnostic is not a production finding.",
+				});
+		}
+		return { verdict: "blocked_external", diagnostic: "evaluator_unavailable", failed_gates: unavailable };
+	}
+
+	failedGates.push(...completionPackFailures("completion", input.primaryAnswers, input));
+	failedGates.push(...completionPackFailures("completion_challenge", input.challengeAnswers, input));
 	failedGates.push(...(input.accountFailures ?? []));
 	return { verdict: failedGates.length > 0 ? "verify_more" : "complete", failed_gates: failedGates };
 }

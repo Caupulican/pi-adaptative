@@ -174,7 +174,7 @@ For a bug fix, code also adds one derived claim to the same System One request: 
 cause describes (a change that only suppresses the symptom does not), read against the cause's cited evidence and the diff. It costs no extra call. A
 contradicted claim refuses completion until the model reproduces the defect against the current code, revises the change so
 it removes the cause, runs the check again and cites that run; an unsettled one asks for a run that fails before the change
-and passes after it, with the same two-pass bound as every other claim. It replaces the former stand-alone patch-review
+and passes after it, within the owner's authorized verification mode. The claim remains open until the evidence settles it. It replaces the former stand-alone patch-review
 stage, which no code called and which saw only file paths and diff hashes.
 
 Code checks everything it can: that the account exists, that every changed path is explained, that every
@@ -183,8 +183,8 @@ verified piece of evidence, and that a bug fix states its cause. System One then
 against the diff or the cited evidence with the same fixed pair of questions the unsettled ladder asks (does the
 evidence show it, does it contradict it), all in one request beside the evidence-matrix questions: it never guesses
 what a diff means, and the model never authors a question. A contradicted claim refuses completion and names the
-claim; a claim the evidence does not settle asks for better evidence, twice for the same claim over the same
-evidence, after which it stands as a recorded doubt. A failure in the account opens no verification obligation: it
+claim; a claim the evidence does not settle keeps completion open. Repeating the same account never turns an
+unresolved claim into support. After two evidence requests the guidance changes, while the failure remains. A failure in the account opens no verification obligation: it
 is answered with evidence, not with a hold on every other operation. An account missing or incomplete is one
 refusal that lists what is missing and the evidence ids the model can cite.
 
@@ -197,7 +197,11 @@ are skipped, because they describe a directive and never apply one. The scan rea
 patch the model sees: the content of new untracked files and every change past the patch limit are scanned (at most 500
 hits are kept).
 
-The count of unsettled claims is kept in the decision ledger per session, so a resumed session continues it. The completion's
+Changed-file diffs are bounded excerpts, and a large patch can omit later files. Fresh authoritative observations and
+passing harness checks cited in `changes[].evidenceIds` supplement the change reason, requirement link and dependency
+link alike. Stale or unverified observations cannot supply that supporting text. Clipped file excerpts identify the omission.
+
+The count of unsettled claims is kept in the decision ledger per session for recovery guidance, never as proof. The completion's
 evidence-matrix stages and the account's claims wait on System One together, in one round trip's time.
 
 The account is held for the session: the objective loop's completion reads the latest one, and a changed path it
@@ -494,8 +498,9 @@ See `docs/doctrine.md`, section "System One", for the invariants; the tests that
 with the doubt visible; an ambiguous judgment asks for evidence at most `GATHER_MORE_LIMIT` (2) times
 per evidence revision. Received nonpassing JEV-024..028 judgments require verification in the
 receiving lane in both policy modes. They keep completion open without dispatching a substitute
-verifier or opening an owner-question latch. `system_one_optional` records evaluator outages as
-diagnostics after deterministic proof; `system_one_required` retains its availability gate.
+verifier or opening an owner-question latch. A bound completion transaction holds if either evidence-matrix stage or
+the account evaluator is unavailable, in either steering mode. The diagnostic remains an evaluator problem; it neither
+clears existing completion findings nor queues production repair tasks.
 An irreversible or outward operation goes to the
 operator, or is refused for a worker; an established outward effect the request does not ask for is refused. Only Choice and Score answers are gated on confidence; a
 Noul's probability is its certainty.

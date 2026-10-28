@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { GATHER_MORE_LIMIT } from "./authority-line.ts";
+import { decideByAuthority } from "./authority-line.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import type { CompletionRejectionDetail } from "./policy.ts";
 import { type AddedSuppression, addedSuppressions } from "./suppression-scan.ts";
@@ -162,6 +162,8 @@ export interface AccountContext {
 	readonly acceptance: readonly { readonly id: string; readonly text: string }[];
 	readonly changedPaths: readonly string[];
 	readonly patch: string;
+	/** Characters omitted from the captured work patch; its final file section may be partial. */
+	readonly patchOmittedChars?: number;
 	/** Suppressions the whole work adds, scanned past the patch bound; read from `patch` when absent. */
 	readonly suppressions?: readonly AddedSuppression[];
 	readonly state: Pick<ExecutionState, "observations" | "verification">;
@@ -190,13 +192,16 @@ export function patchPaths(patch: string): string[] {
 }
 
 /** One changed file's part of the patch, bounded. */
-export function diffForPath(patch: string, path: string): string | undefined {
+export function diffForPath(patch: string, path: string, omittedChars = 0): string | undefined {
 	const sections = patch.split(/^(?=diff --git )/m);
 	const section = sections.find((candidate) => {
 		const header = /^diff --git a\/(.+?) b\/(.+)$/m.exec(candidate);
 		return header !== null && samePath(header[2] ?? "", path);
 	});
-	return section?.slice(0, COMPLETION_ACCOUNT_LIMITS.diffChars);
+	if (section === undefined) return undefined;
+	return section.length > COMPLETION_ACCOUNT_LIMITS.diffChars || (omittedChars > 0 && section === sections.at(-1))
+		? `${section.slice(0, COMPLETION_ACCOUNT_LIMITS.diffChars)}\n[File diff is incomplete; cite verified evidence for changes outside this excerpt.]`
+		: section;
 }
 
 interface ResolvedEvidence {
@@ -286,7 +291,8 @@ export function checkCompletionAccount(
 	}
 
 	const patchHeader = (path: string) =>
-		diffForPath(context.patch, path) ?? "(this file is not in the captured patch, so its content was not captured)";
+		diffForPath(context.patch, path, context.patchOmittedChars) ??
+		"(this file is not in the captured patch, so its content was not captured)";
 	for (const entry of account.changes) {
 		if (!context.changedPaths.some((changed) => samePath(entry.path, changed))) continue;
 		// Which requirement a change serves is the model's call; that the requirement exists is code's.
@@ -301,16 +307,7 @@ export function checkCompletionAccount(
 				reason: `\`${entry.path}\` is said to serve ${unknown.map((target) => `\`${target}\``).join(", ")}, which is neither a requirement nor another changed file.`,
 				required_next_proof: `Name a requirement id${context.acceptance.length ? ` (${context.acceptance.map((criterion) => criterion.id).join(", ")})` : ""} or the changed file it supports, or revert the change.`,
 			});
-		// System One decides only whether the diff does what the model says it does.
-		const evidence = `Change to ${entry.path}:\n${patchHeader(entry.path)}`;
-		claims.push({
-			topic: "scope",
-			label: `change to ${entry.path}`,
-			statement: entry.reason,
-			evidence,
-			fingerprint: fingerprintOf(entry.reason, evidence),
-		});
-		// And whether it does serve what the model says it serves: a requirement's text, or the other change.
+		// Resolve once: a bounded patch can omit this file, so every claim can also use verified citations.
 		const cited = (entry.evidenceIds ?? []).map((id) => ({ id, found: resolveEvidence(id, context.state) }));
 		const unknownCited = cited.filter((item) => !item.found).map((item) => item.id);
 		if (unknownCited.length > 0)
@@ -321,20 +318,32 @@ export function checkCompletionAccount(
 			});
 		const citedText = cited
 			.flatMap((item) =>
-				item.found ? [`${item.id}: ${item.found.text.slice(0, COMPLETION_ACCOUNT_LIMITS.evidenceChars)}`] : [],
+				item.found?.verified
+					? [`${item.id}: ${item.found.text.slice(0, COMPLETION_ACCOUNT_LIMITS.evidenceChars)}`]
+					: [],
 			)
 			.join("\n");
+		const changeEvidence = [patchHeader(entry.path), citedText].filter(Boolean).join("\n");
+		const evidence = `Change to ${entry.path}:\n${changeEvidence}`;
+		claims.push({
+			topic: "scope",
+			label: `change to ${entry.path}`,
+			statement: entry.reason,
+			evidence,
+			fingerprint: fingerprintOf(entry.reason, evidence),
+		});
+		// Whether the change serves its named requirement or another changed file uses the same evidence.
 		for (const target of entry.serves.slice(0, COMPLETION_ACCOUNT_LIMITS.servesJudged)) {
 			const criterion = context.acceptance.find((candidate) => candidate.id === target);
 			const supported = criterion
 				? {
 						statement: `This change helps achieve: ${criterion.text}.`,
-						evidence: citedText ? `${patchHeader(entry.path)}\n${citedText}` : patchHeader(entry.path),
+						evidence: changeEvidence,
 					}
 				: context.changedPaths.some((changed) => samePath(changed, target))
 					? {
 							statement: `This change is a dependency of the change to ${target}.`,
-							evidence: `Change to ${entry.path}:\n${patchHeader(entry.path)}\nChange to ${target}:\n${patchHeader(target)}`,
+							evidence: `${evidence}\nChange to ${target}:\n${patchHeader(target)}`,
 						}
 					: undefined;
 			if (supported)
@@ -432,7 +441,7 @@ export function checkCompletionAccount(
 				account.cause.claim,
 				account.cause.evidenceIds,
 				`The change:\n${context.changedPaths
-					.map((path) => diffForPath(context.patch, path) ?? "")
+					.map((path) => diffForPath(context.patch, path, context.patchOmittedChars) ?? "")
 					.filter((diff) => diff.length > 0)
 					.join("\n")}`,
 			);
@@ -507,15 +516,12 @@ export async function judgeAccountClaims(
 }
 
 /**
- * What System One's reading of an account asks of the model. A contradicted claim refuses, naming it. A claim
- * the cited evidence does not settle asks for better evidence, at most {@link GATHER_MORE_LIMIT} times for the
- * same claim over the same evidence; after that it stands as a doubt shown with the completion, because the
- * model has reasoned and cited twice and System One has found nothing against it.
+ * Unsettled account claims hold the objective transition. Repetition changes recovery guidance, never proof.
  */
 export function accountOutcome(
 	judged: { refuted: readonly AccountClaim[]; unsettled: readonly AccountClaim[] },
 	passes: Map<string, number>,
-): { failures: CompletionRejectionDetail[]; advisories: CompletionRejectionDetail[] } {
+): { failures: CompletionRejectionDetail[] } {
 	const failures: CompletionRejectionDetail[] = judged.refuted.map((claim) => ({
 		id: `account_contradicted:${claim.topic}`,
 		reason: `The evidence cited for the ${claim.label} contradicts the claim.`,
@@ -524,27 +530,22 @@ export function accountOutcome(
 				? "Reproduce the defect against the current code, revise the change so it removes the cause rather than silencing the symptom, run the check again, and cite that run."
 				: "Correct the claim, or fix the work it describes.",
 	}));
-	const advisories: CompletionRejectionDetail[] = [];
 	for (const claim of judged.unsettled) {
 		const count = (passes.get(claim.fingerprint) ?? 0) + 1;
 		passes.set(claim.fingerprint, count);
-		if (count <= GATHER_MORE_LIMIT)
-			failures.push({
-				id: `account_unsettled:${claim.topic}`,
-				reason: `The evidence cited for the ${claim.label} does not settle the claim.`,
-				required_next_proof:
-					claim.topic === "scope"
+		const decision = decideByAuthority("objective_transition", "ambiguous", count - 1);
+		failures.push({
+			id: `account_unsettled:${claim.topic}`,
+			reason: `The evidence cited for the ${claim.label} does not settle the claim.`,
+			required_next_proof:
+				decision.action === "owner_question"
+					? "The claim remains unresolved. Supply fresh verified evidence or correct the claim; repeating the same account cannot complete the objective."
+					: claim.topic === "scope"
 						? "Add evidenceIds to that change (evidence that shows it does what it serves), or rewrite its reason to say what its diff does."
 						: claim.topic === "mask"
 							? "Cite a run that reproduces the defect before the change and passes after it, so the cause is shown removed."
 							: "Cite evidence that shows it directly, or run the check that does.",
-			});
-		else
-			advisories.push({
-				id: `account_doubt:${claim.topic}`,
-				reason: `The ${claim.label} stays unsettled after ${count - 1} evidence passes; it was reasoned and cited, and nothing contradicts it.`,
-				required_next_proof: "None required; the doubt is recorded with the completion.",
-			});
+		});
 	}
-	return { failures, advisories };
+	return { failures };
 }

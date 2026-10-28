@@ -1558,6 +1558,7 @@ export class SystemOneController {
 					]),
 				],
 				patch: work?.patch ?? "",
+				patchOmittedChars: work?.omittedChars ?? 0,
 				...(work?.suppressions ? { suppressions: work.suppressions } : {}),
 				state: snapshot,
 			},
@@ -1602,8 +1603,9 @@ export class SystemOneController {
 				options?.signal?.throwIfAborted();
 				unavailable.push({
 					id: `JEV-${stage}-unavailable`,
-					reason: `${stage} advice unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`,
-					required_next_proof: "Inspect the recorded outcome evidence and evaluator diagnostic.",
+					reason: `${stage} evaluation unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`,
+					required_next_proof:
+						"Restore the evaluator and retry completion; this diagnostic is not a production finding.",
 				});
 			}
 		}
@@ -1614,7 +1616,7 @@ export class SystemOneController {
 			this.assertStageCurrent(scope);
 		};
 		let accountFailures: CompletionRejectionDetail[] = [];
-		let accountAdvisories: CompletionRejectionDetail[] = [];
+		const accountAdvisories: CompletionRejectionDetail[] = [];
 		if (judgingAccount) {
 			try {
 				const judged = await judgingAccount;
@@ -1622,7 +1624,7 @@ export class SystemOneController {
 				this.assertStageCurrent(scope);
 				this.readAccountPasses();
 				this.assertStageCurrent(scope);
-				({ failures: accountFailures, advisories: accountAdvisories } = accountOutcome(judged, this.accountPasses));
+				({ failures: accountFailures } = accountOutcome(judged, this.accountPasses));
 				this.writeAccountPasses(judged.unsettled);
 				this.assertStageCurrent(scope);
 				if (this.accountPassFailure)
@@ -1636,8 +1638,9 @@ export class SystemOneController {
 				options?.signal?.throwIfAborted();
 				unavailable.push({
 					id: "JEV-account-unavailable",
-					reason: `account advice unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`,
-					required_next_proof: "Inspect the recorded outcome evidence and evaluator diagnostic.",
+					reason: `account evaluation unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`,
+					required_next_proof:
+						"Restore the evaluator and retry completion; this diagnostic is not a production finding.",
 				});
 			}
 		}
@@ -1645,16 +1648,17 @@ export class SystemOneController {
 		this.assertStageCurrent(scope);
 
 		// 4. Policy engine final verdict
-		const finalVerdict = decideFinalCompletion({
+		let finalVerdict = decideFinalCompletion({
 			deterministicGates: detResult.gates,
 			primaryAnswers: stages.get("completion")?.answers,
 			challengeAnswers: stages.get("completion_challenge")?.answers,
 			accountFailures,
+			unavailable,
 			config: this.config,
 		});
 
-		if (unavailable.length > 0 || accountAdvisories.length > 0)
-			finalVerdict.advisories = [...unavailable, ...accountAdvisories, ...(finalVerdict.advisories ?? [])];
+		if (accountAdvisories.length > 0)
+			finalVerdict.advisories = [...accountAdvisories, ...(finalVerdict.advisories ?? [])];
 		// Completion asks about the outcomes as a whole, so its finding names none: name them here.
 		const outcomeRows = this.projector.outcomeEvidence(snapshot);
 		finalVerdict.failed_gates = finalVerdict.failed_gates.map((finding) =>
@@ -1676,7 +1680,7 @@ export class SystemOneController {
 					)
 				: [],
 			stages.get("completion")?.evaluationId ?? "completion-evaluation",
-			stages.has("completion") && stages.has("completion_challenge"),
+			unavailable.length === 0 && stages.has("completion") && stages.has("completion_challenge"),
 		);
 		this.assertStageCurrent(scope);
 		let interruption: SystemOneStageInterruptedError | undefined;
@@ -1703,13 +1707,20 @@ export class SystemOneController {
 				const extGateResult = await options.externalGate(this.store.snapshot());
 				this.assertStageCurrent(scope);
 				if (extGateResult && extGateResult.decision !== "allow") {
-					finalVerdict.verdict = extGateResult.decision === "replan" ? "rework" : "blocked_external";
-					finalVerdict.failed_gates.push({
-						id: "external_completion_gate",
-						reason:
-							extGateResult.reasonCodes.join("; ") || `External gate rejected with ${extGateResult.decision}`,
-						required_next_proof: "Pass external integrity completion gate",
-					});
+					finalVerdict = {
+						...finalVerdict,
+						verdict: extGateResult.decision === "replan" ? "rework" : "blocked_external",
+						failed_gates: [
+							...finalVerdict.failed_gates,
+							{
+								id: "external_completion_gate",
+								reason:
+									extGateResult.reasonCodes.join("; ") ||
+									`External gate rejected with ${extGateResult.decision}`,
+								required_next_proof: "Pass external integrity completion gate",
+							},
+						],
+					};
 				}
 			}
 
@@ -1730,12 +1741,19 @@ export class SystemOneController {
 					(code) => code === "mutation_requested" || code === "repo_mutation",
 				);
 				if (hookResult.decision !== "allow" || mutationRequested) {
-					finalVerdict.verdict = hookResult.decision === "replan" ? "rework" : "blocked_external";
-					finalVerdict.failed_gates.push({
-						id: "external_hook_gate",
-						reason: hookResult.reasonCodes.join("; ") || `Completion hook rejected with ${hookResult.decision}`,
-						required_next_proof: "Pass external integrity completion hook",
-					});
+					finalVerdict = {
+						...finalVerdict,
+						verdict: hookResult.decision === "replan" ? "rework" : "blocked_external",
+						failed_gates: [
+							...finalVerdict.failed_gates,
+							{
+								id: "external_hook_gate",
+								reason:
+									hookResult.reasonCodes.join("; ") || `Completion hook rejected with ${hookResult.decision}`,
+								required_next_proof: "Pass external integrity completion hook",
+							},
+						],
+					};
 				}
 			}
 		}

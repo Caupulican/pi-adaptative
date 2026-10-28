@@ -1680,6 +1680,16 @@ export class ObjectiveExecutionController {
 					});
 					this.assertExecutionCurrent(objectiveId);
 					this.acknowledgeRouteRequests(route);
+					if (
+						completionFinding?.verdict === "blocked_external" &&
+						completionFinding.diagnostic === "evaluator_unavailable"
+					) {
+						return this.heldCompletion(
+							objectiveId,
+							runtime,
+							completionFinding.failed_gates.map((finding) => `${finding.id}: ${finding.reason}`),
+						);
+					}
 					if (completionFinding?.verdict === "verify_more") {
 						const describe = (finding: { id: string; reason: string; required_next_proof: string }) =>
 							`${finding.id}: ${finding.reason}. ${finding.required_next_proof}`;

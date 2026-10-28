@@ -184,7 +184,13 @@ async function checkCatalog(catalog) {
 	}
 }
 
-const results = await Promise.all(CATALOGS.map((catalog) => checkCatalog(catalog)));
+// Each check owns a generator and scratch directory. Join every cleanup before a failure leaves the module.
+const settled = await Promise.allSettled(CATALOGS.map((catalog) => checkCatalog(catalog)));
+const failures = settled.filter((result) => result.status === "rejected");
+if (failures.length > 0) {
+	throw new AggregateError(failures.map((result) => result.reason), "Live model catalog checks failed");
+}
+const results = settled.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
 const anyDrift = results.some((result) => result.drifted);
 const anyCritical = results.some((result) => result.criticalRemovals.length > 0);
 
