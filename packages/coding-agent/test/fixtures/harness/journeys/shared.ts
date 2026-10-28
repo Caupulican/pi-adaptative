@@ -350,10 +350,19 @@ export function bindE0Completion(
 		}
 	}
 	if (Array.isArray(state.outcome_evidence)) {
+		if (!Array.isArray(state.evidence)) throw new Error("the completion request carries no evidence table");
 		for (const outcome of state.outcome_evidence) {
 			if (!isRecordObject(outcome) || !Array.isArray(outcome.evidence)) continue;
-			for (const item of outcome.evidence) {
-				if (!isRecordObject(item) || item.id !== observation.id) continue;
+			for (const reference of outcome.evidence) {
+				if (!isRecordObject(reference) || typeof reference.id !== "string" || Object.keys(reference).length !== 1) {
+					throw new Error("the completion outcome evidence is not an id-only reference");
+				}
+				const matches = state.evidence.filter((item) => isRecordObject(item) && item.id === reference.id);
+				const item = matches[0];
+				if (matches.length !== 1 || !isRecordObject(item)) {
+					throw new Error(`the completion evidence reference ${reference.id} does not resolve uniquely`);
+				}
+				if (item.id !== observation.id) continue;
 				expect(item.text, "the selected integration row carries its admitted summary text").toBe(summary);
 				expect(item.trust, "the selected integration row carries its store trust").toBe(observation.source.trust);
 				expect(
