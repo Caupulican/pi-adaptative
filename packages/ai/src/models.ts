@@ -9,25 +9,19 @@ export {
 } from "./model-capabilities.ts";
 export { calculateCost } from "./usage.ts";
 
-const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
-
-// Initialize registry from MODELS on module load
-for (const [provider, models] of Object.entries(MODELS)) {
-	modelRegistry.set(provider, new Map(Object.entries(models)));
-}
-
 /** The catalog model, or undefined when the provider does not list that id. */
 export function getModel(provider: KnownProvider, modelId: string): Model<Api> | undefined {
-	return modelRegistry.get(provider)?.get(modelId);
+	const providerModels = Object.hasOwn(MODELS, provider) ? MODELS[provider] : undefined;
+	return providerModels && Object.hasOwn(providerModels, modelId) ? providerModels[modelId] : undefined;
 }
 
 export function getProviders(): KnownProvider[] {
-	return Array.from(modelRegistry.keys()) as KnownProvider[];
+	return Object.keys(MODELS) as KnownProvider[];
 }
 
 export function getModels(provider: KnownProvider): Model<Api>[] {
-	const models = modelRegistry.get(provider);
-	return models ? Array.from(models.values()) : [];
+	const providerModels = Object.hasOwn(MODELS, provider) ? MODELS[provider] : undefined;
+	return providerModels ? Object.values(providerModels) : [];
 }
 
 /**

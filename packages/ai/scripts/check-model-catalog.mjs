@@ -14,7 +14,7 @@
  * own CI failure/issue rather than blocking every push.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -57,7 +57,8 @@ function namesModelId(line, id) {
 
 // Released changelog sections are immutable history, and the catalog generators are the catalog's own source:
 // neither is a consumer that a removal would break.
-function isReferencedElsewhere(id) {
+function findReferencedModelIds(ids) {
+	if (ids.length === 0) return [];
 	const result = spawnSync(
 		"rg",
 		[
@@ -78,37 +79,54 @@ function isReferencedElsewhere(id) {
 			"!package-lock.json",
 			"-g",
 			"!**/npm-shrinkwrap.json",
+			...ids.flatMap((id) => ["-e", id]),
 			"--",
-			id,
 			repoRoot,
 		],
 		{ encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
 	);
 	if (result.error) {
-		throw new Error(`Failed to run ripgrep while searching for ${JSON.stringify(id)}: ${result.error.message}`);
+		throw new Error(`Failed to run ripgrep while searching for removed model ids: ${result.error.message}`);
 	}
 	if (result.status !== 0 && result.status !== 1) {
-		throw new Error(`ripgrep exited ${result.status} while searching for ${JSON.stringify(id)}: ${result.stderr}`);
+		throw new Error(`ripgrep exited ${result.status} while searching for removed model ids: ${result.stderr}`);
 	}
-	return result.stdout.split("\n").some((line) => namesModelId(line, id));
+	const lines = result.stdout ? result.stdout.split("\n") : [];
+	return ids.filter((id) => lines.some((line) => namesModelId(line, id)));
 }
 
-function regenerate(catalog, tempDir) {
+async function regenerate(catalog, tempDir) {
 	const tempOutputPath = join(tempDir, catalog.label);
-	const result = spawnSync(process.execPath, [catalog.generatorPath], {
-		cwd: packageRoot,
-		encoding: "utf8",
-		env: {
-			...process.env,
-			PI_FETCH_MODELS: "1",
-			PI_MODEL_CATALOG_OUTPUT_PATH: tempOutputPath,
-		},
+	const { status, stdout, stderr } = await new Promise((resolvePromise, rejectPromise) => {
+		const child = spawn(process.execPath, [catalog.generatorPath], {
+			cwd: packageRoot,
+			env: {
+				...process.env,
+				PI_FETCH_MODELS: "1",
+				PI_MODEL_CATALOG_OUTPUT_PATH: tempOutputPath,
+			},
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let out = "";
+		let err = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (chunk) => {
+			out += chunk;
+		});
+		child.stderr.on("data", (chunk) => {
+			err += chunk;
+		});
+		child.on("error", rejectPromise);
+		child.on("close", (code) => {
+			resolvePromise({ status: code, stdout: out, stderr: err });
+		});
 	});
-	if (result.status !== 0) {
-		console.error(result.stdout);
-		console.error(result.stderr);
+	if (status !== 0) {
+		console.error(stdout);
+		console.error(stderr);
 		throw new Error(
-			`Live regeneration of ${catalog.label} failed (exit ${result.status}). This usually means the ` +
+			`Live regeneration of ${catalog.label} failed (exit ${status}). This usually means the ` +
 				"upstream pricing source is unreachable from this environment; rerun where network access is available.",
 		);
 	}
@@ -118,10 +136,10 @@ function regenerate(catalog, tempDir) {
 	return readFileSync(tempOutputPath, "utf8");
 }
 
-function checkCatalog(catalog) {
+async function checkCatalog(catalog) {
 	const tempDir = mkdtempSync(join(tmpdir(), "pi-model-catalog-check-"));
 	try {
-		const freshContent = regenerate(catalog, tempDir);
+		const freshContent = await regenerate(catalog, tempDir);
 		const committedContent = readFileSync(catalog.committedPath, "utf8");
 
 		if (freshContent === committedContent) {
@@ -146,7 +164,7 @@ function checkCatalog(catalog) {
 			console.error("  Model id set is unchanged; pricing/metadata fields differ (e.g. cost, context window).");
 		}
 
-		const criticalRemovals = removedIds.filter((id) => isReferencedElsewhere(id));
+		const criticalRemovals = findReferencedModelIds(removedIds);
 		if (criticalRemovals.length > 0) {
 			console.error("");
 			console.error(`  CRITICAL: the following removed model id(s) are still referenced elsewhere in the repo:`);
@@ -166,13 +184,9 @@ function checkCatalog(catalog) {
 	}
 }
 
-let anyDrift = false;
-let anyCritical = false;
-for (const catalog of CATALOGS) {
-	const { drifted, criticalRemovals } = checkCatalog(catalog);
-	anyDrift = anyDrift || drifted;
-	anyCritical = anyCritical || criticalRemovals.length > 0;
-}
+const results = await Promise.all(CATALOGS.map((catalog) => checkCatalog(catalog)));
+const anyDrift = results.some((result) => result.drifted);
+const anyCritical = results.some((result) => result.criticalRemovals.length > 0);
 
 if (anyDrift) {
 	console.error("");

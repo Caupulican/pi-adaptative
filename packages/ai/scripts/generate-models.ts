@@ -740,14 +740,17 @@ async function fetchOpenRouterModels(): Promise<{
 				contextWindow: model.context_length || 4096,
 				maxTokens: model.top_provider?.max_completion_tokens || 4096,
 			};
+			const catalogMetadata = parseOpenRouterCatalogMetadata(model);
 			models.push(normalizedModel);
-			metadata.set(normalizedModel.id, parseOpenRouterCatalogMetadata(model));
+			metadata.set(normalizedModel.id, catalogMetadata);
 
 			// If OpenRouter assigns a tilde prefix alias (e.g. ~typesafe/jev-latest), also index without tilde
 			if (model.id.startsWith("~")) {
 				const aliasId = model.id.slice(1);
 				models.push({ ...normalizedModel, id: aliasId });
-				metadata.set(aliasId, parseOpenRouterCatalogMetadata(model));
+				if (!metadata.has(aliasId)) {
+					metadata.set(aliasId, catalogMetadata);
+				}
 			}
 		}
 
@@ -1460,35 +1463,83 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 }
 
 async function generateModels() {
-	// Fetch models from both sources
-	// models.dev: Anthropic, Google, OpenAI, Groq, Cerebras
-	// OpenRouter: xAI and other providers (excluding Anthropic, Google, OpenAI)
-	// AI Gateway: OpenAI-compatible catalog with tool-capable models
-	const modelsDevModels = await loadModelsDevData();
-	const { models: openRouterModels, metadata: openRouterMetadata } = await fetchOpenRouterModels();
-	const aiGatewayModels = await fetchAiGatewayModels();
+	const staticOnlyProviders = new Set(["deepseek", "fugu", "google-vertex", "llama-cpp", "typesafe"]);
+	const needOpenRouter =
+		!modelCatalogProvider ||
+		modelCatalogProvider === "openrouter" ||
+		modelCatalogProvider === "openai" ||
+		modelCatalogProvider === "openai-codex" ||
+		modelCatalogProvider === "azure-openai-responses";
+	const needAiGateway = !modelCatalogProvider || modelCatalogProvider === "vercel-ai-gateway";
+	const needModelsDev =
+		!modelCatalogProvider ||
+		(!staticOnlyProviders.has(modelCatalogProvider) &&
+			modelCatalogProvider !== "openrouter" &&
+			modelCatalogProvider !== "vercel-ai-gateway");
+
+	// Fetch required upstream catalogs concurrently
+	const [modelsDevModels, { models: openRouterModels, metadata: openRouterMetadata }, aiGatewayModels] =
+		await Promise.all([
+			needModelsDev ? loadModelsDevData() : Promise.resolve([] as Model<any>[]),
+			needOpenRouter
+				? fetchOpenRouterModels()
+				: Promise.resolve({
+						models: [] as Model<"openai-completions">[],
+						metadata: new Map<string, OpenRouterCatalogMetadata>(),
+					}),
+			needAiGateway ? fetchAiGatewayModels() : Promise.resolve([] as Model<any>[]),
+		]);
 	const compatibilityModelId = (model: Model<Api>): string =>
 		model.provider === "openrouter" ? openRouterMetadata.get(model.id)?.targetId ?? model.id : model.id;
 	// Empty feeds cannot be distinguished from an upstream outage or schema change.
 	// Refuse publication before adding synthetic entries that could hide a failed source.
-	for (const [source, models] of [
-		["models.dev", modelsDevModels],
-		["OpenRouter", openRouterModels],
-		["Vercel AI Gateway", aiGatewayModels],
+	for (const [source, requested, models] of [
+		["models.dev", needModelsDev, modelsDevModels],
+		["OpenRouter", needOpenRouter, openRouterModels],
+		["Vercel AI Gateway", needAiGateway, aiGatewayModels],
 	] as const) {
-		if (models.length === 0) throw new Error(`Refusing to publish model catalog: ${source} returned no usable models`);
+		if (requested && models.length === 0) {
+			throw new Error(`Refusing to publish model catalog: ${source} returned no usable models`);
+		}
 	}
 
-	// Combine models (models.dev has priority)
-	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels, ...FUGU_MODELS, ...TYPESAFE_MODELS].filter(
-		(model) =>
-			!(model.provider === "xai" && XAI_BUILTIN_EXCLUDED_MODEL_IDS.has(model.id)) &&
-			!((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark"),
-	);
+	const minimaxDirectSupportedIds = new Set(["MiniMax-M2.7", "MiniMax-M2.7-highspeed"]);
+	const providers: Record<string, Record<string, Model<any>>> = {};
+	const allModels: Model<any>[] = [];
+	const getIndexedModel = (provider: string, id: string): Model<any> | undefined => providers[provider]?.[id];
+	const hasIndexedModel = (provider: string, id: string): boolean => getIndexedModel(provider, id) !== undefined;
+	const registerModel = (model: Model<any>): void => {
+		let providerModels = providers[model.provider];
+		if (!providerModels) {
+			providerModels = {};
+			providers[model.provider] = providerModels;
+		}
+		// Only add if not already present (models.dev takes priority over OpenRouter)
+		if (providerModels[model.id]) return;
+		providerModels[model.id] = model;
+		allModels.push(model);
+	};
+
+	// Combine models (models.dev has priority) and index by provider + model ID in a single pass
+	for (const group of [modelsDevModels, openRouterModels, aiGatewayModels, FUGU_MODELS, TYPESAFE_MODELS]) {
+		for (const model of group) {
+			if (model.provider === "xai" && XAI_BUILTIN_EXCLUDED_MODEL_IDS.has(model.id)) continue;
+			if ((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark") {
+				continue;
+			}
+			if (
+				(model.provider === "minimax" || model.provider === "minimax-cn") &&
+				!minimaxDirectSupportedIds.has(model.id)
+			) {
+				continue;
+			}
+			registerModel(model);
+		}
+	}
 
 	// Fix incorrect cache pricing for Claude Opus 4.5 from models.dev
 	// models.dev has 3x the correct pricing (1.5/18.75 instead of 0.5/6.25)
-	const opus45 = allModels.find(m => m.provider === "anthropic" && m.id === "claude-opus-4-5");
+	const opus45 = getIndexedModel("anthropic", "claude-opus-4-5");
 	if (opus45) {
 		opus45.cost.cacheRead = 0.5;
 		opus45.cost.cacheWrite = 6.25;
@@ -1558,8 +1609,8 @@ async function generateModels() {
 
 
 	// Add built-in local llama.cpp OpenAI-compatible server profile
-	if (!allModels.some((m) => m.provider === "llama-cpp" && m.id === "local")) {
-		allModels.push({
+	if (!hasIndexedModel("llama-cpp", "local")) {
+		registerModel({
 			id: "local",
 			name: "llama.cpp local server",
 			api: "openai-completions",
@@ -1586,8 +1637,8 @@ async function generateModels() {
 	}
 
 	// Retain referenced public model ids when upstream catalogues delist them.
-	if (!allModels.some((m) => m.provider === "cloudflare-ai-gateway" && m.id === "workers-ai/@cf/moonshotai/kimi-k2.6")) {
-		allModels.push({
+	if (!hasIndexedModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6")) {
+		registerModel({
 			id: "workers-ai/@cf/moonshotai/kimi-k2.6",
 			name: "Kimi K2.6",
 			api: "openai-completions",
@@ -1603,10 +1654,10 @@ async function generateModels() {
 	}
 	// Grok Build Fast costs 2x standard rates, or 1.5x the long-context rate.
 	// https://docs.x.ai/developers/release-notes (Grok 4.7)
-	const grok47 = allModels.find((model) => model.provider === "xai" && model.id === "grok-4.7");
-	if (grok47 && !allModels.some((model) => model.provider === "xai" && model.id === "grok-4.7-build-fast")) {
+	const grok47 = getIndexedModel("xai", "grok-4.7");
+	if (grok47 && !hasIndexedModel("xai", "grok-4.7-build-fast")) {
 		const double = (value: number) => roundCost(value * 2);
-		allModels.push({
+		registerModel({
 			...grok47,
 			id: "grok-4.7-build-fast",
 			name: "Grok 4.7 Fast",
@@ -1629,8 +1680,8 @@ async function generateModels() {
 			},
 		});
 	}
-	if (!allModels.some((m) => m.provider === "openrouter" && m.id === "stealth/ox-alpha")) {
-		allModels.push({
+	if (!hasIndexedModel("openrouter", "stealth/ox-alpha")) {
+		registerModel({
 			id: "stealth/ox-alpha",
 			name: "Ox Alpha",
 			api: "openai-completions",
@@ -1647,8 +1698,8 @@ async function generateModels() {
 	}
 
 	// Add missing EU Opus 4.6 profile
-	if (!allModels.some((m) => m.provider === "amazon-bedrock" && m.id === "eu.anthropic.claude-opus-4-6-v1")) {
-		allModels.push({
+	if (!hasIndexedModel("amazon-bedrock", "eu.anthropic.claude-opus-4-6-v1")) {
+		registerModel({
 			id: "eu.anthropic.claude-opus-4-6-v1",
 			name: "Claude Opus 4.6 (EU)",
 			api: "bedrock-converse-stream",
@@ -1669,8 +1720,8 @@ async function generateModels() {
 
 	for (const version of ["4.6", "4.7", "4.8"]) {
 		const id = `claude-opus-${version.replace(".", "-")}`;
-		if (allModels.some((model) => model.provider === "anthropic" && model.id === id)) continue;
-		allModels.push({
+		if (hasIndexedModel("anthropic", id)) continue;
+		registerModel({
 			id,
 			name: `Claude Opus ${version}`,
 			api: "anthropic-messages",
@@ -1685,8 +1736,8 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Sonnet 4.6
-	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-sonnet-4-6")) {
-		allModels.push({
+	if (!hasIndexedModel("anthropic", "claude-sonnet-4-6")) {
+		registerModel({
 			id: "claude-sonnet-4-6",
 			name: "Claude Sonnet 4.6",
 			api: "anthropic-messages",
@@ -1705,11 +1756,11 @@ async function generateModels() {
 		});
 	}
 
-	const sonnet55 = allModels.find((model) => model.provider === "anthropic" && model.id === "claude-sonnet-5-5");
+	const sonnet55 = getIndexedModel("anthropic", "claude-sonnet-5-5");
 	if (sonnet55) {
 		sonnet55.defaultThinkingLevel = "medium";
 	} else {
-		allModels.push({
+		registerModel({
 			id: "claude-sonnet-5-5",
 			name: "Claude Sonnet 5.5",
 			api: "anthropic-messages",
@@ -1730,8 +1781,8 @@ async function generateModels() {
 	}
 
 	// Add missing Gemini 3.1 Flash Lite Preview until models.dev includes it.
-	if (!allModels.some((m) => m.provider === "google" && m.id === "gemini-3.1-flash-lite-preview")) {
-		allModels.push({
+	if (!hasIndexedModel("google", "gemini-3.1-flash-lite-preview")) {
+		registerModel({
 			id: "gemini-3.1-flash-lite-preview",
 			name: "Gemini 3.1 Flash Lite Preview",
 			api: "google-generative-ai",
@@ -1751,8 +1802,8 @@ async function generateModels() {
 	}
 
 	// Retain Gemini 2.0 Flash while it remains part of the public Google API contract.
-	if (!allModels.some((m) => m.provider === "google" && m.id === "gemini-2.0-flash")) {
-		allModels.push({
+	if (!hasIndexedModel("google", "gemini-2.0-flash")) {
+		registerModel({
 			id: "gemini-2.0-flash",
 			name: "Gemini 2.0 Flash",
 			api: "google-generative-ai",
@@ -1788,12 +1839,21 @@ async function generateModels() {
 		{ id: "gpt-6.1-terra", name: "GPT-6.1 Terra", input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 },
 	] as const;
 	for (const spec of openAiGpt56Models) {
-		const existing = allModels.find((model) => model.provider === "openai" && model.id === spec.id);
+		const existing = getIndexedModel("openai", spec.id);
 		if (existing) {
 			existing.defaultThinkingLevel = "medium";
 			continue;
 		}
-		allModels.push({
+		const openRouterListing = getIndexedModel("openrouter", `openai/${spec.id}`);
+		const fallbackCost =
+			openRouterListing?.cost ??
+			withOpenAiLongContextTier({
+				input: spec.input,
+				output: spec.output,
+				cacheRead: spec.cacheRead,
+				cacheWrite: spec.cacheWrite,
+			});
+		registerModel({
 			id: spec.id,
 			name: spec.name,
 			api: "openai-responses",
@@ -1801,21 +1861,21 @@ async function generateModels() {
 			provider: "openai",
 			reasoning: true,
 			defaultThinkingLevel: "medium",
-			input: ["text", "image"],
-			cost: withOpenAiLongContextTier({
-				input: spec.input,
-				output: spec.output,
-				cacheRead: spec.cacheRead,
-				cacheWrite: spec.cacheWrite,
-			}),
+			input: openRouterListing ? [...openRouterListing.input] : ["text", "image"],
+			cost: {
+				...fallbackCost,
+				...(fallbackCost.tiers
+					? { tiers: fallbackCost.tiers.map((tier: NonNullable<Model<Api>["cost"]["tiers"]>[number]) => ({ ...tier })) }
+					: {}),
+			},
 			contextWindow: OPENAI_LONG_CONTEXT_INPUT_THRESHOLD,
 			maxTokens: 128_000,
 		});
 	}
 
 	// Add missing gpt models
-	if (!allModels.some(m => m.provider === "openai" && m.id === "gpt-5-chat-latest")) {
-		allModels.push({
+	if (!hasIndexedModel("openai", "gpt-5-chat-latest")) {
+		registerModel({
 			id: "gpt-5-chat-latest",
 			name: "GPT-5 Chat Latest",
 			api: "openai-responses",
@@ -1834,8 +1894,8 @@ async function generateModels() {
 		});
 	}
 
-	if (!allModels.some(m => m.provider === "openai" && m.id === "gpt-5.1-codex")) {
-		allModels.push({
+	if (!hasIndexedModel("openai", "gpt-5.1-codex")) {
+		registerModel({
 			id: "gpt-5.1-codex",
 			name: "GPT-5.1 Codex",
 			api: "openai-responses",
@@ -1854,8 +1914,8 @@ async function generateModels() {
 		});
 	}
 
-	if (!allModels.some(m => m.provider === "openai" && m.id === "gpt-5.1-codex-max")) {
-		allModels.push({
+	if (!hasIndexedModel("openai", "gpt-5.1-codex-max")) {
+		registerModel({
 			id: "gpt-5.1-codex-max",
 			name: "GPT-5.1 Codex Max",
 			api: "openai-responses",
@@ -1874,8 +1934,8 @@ async function generateModels() {
 		});
 	}
 
-	if (!allModels.some(m => m.provider === "openai" && m.id === "gpt-5.3-codex-spark")) {
-		allModels.push({
+	if (!hasIndexedModel("openai", "gpt-5.3-codex-spark")) {
+		registerModel({
 			id: "gpt-5.3-codex-spark",
 			name: "GPT-5.3 Codex Spark",
 			api: "openai-responses",
@@ -1894,8 +1954,8 @@ async function generateModels() {
 		});
 	}
 
-	if (!allModels.some((m) => m.provider === "github-copilot" && m.id === "gpt-4.1")) {
-		allModels.push({
+	if (!hasIndexedModel("github-copilot", "gpt-4.1")) {
+		registerModel({
 			id: "gpt-4.1",
 			name: "GPT-4.1",
 			api: "openai-completions",
@@ -1918,8 +1978,8 @@ async function generateModels() {
 
 	for (const version of ["5.2", "5.3"]) {
 		const id = `gpt-${version}-codex`;
-		if (allModels.some((model) => model.provider === "github-copilot" && model.id === id)) continue;
-		allModels.push({
+		if (hasIndexedModel("github-copilot", id)) continue;
+		registerModel({
 			id,
 			name: `GPT-${version} Codex`,
 			api: "openai-responses",
@@ -1935,8 +1995,8 @@ async function generateModels() {
 		});
 	}
 
-	if (!allModels.some((m) => m.provider === "openai" && m.id === "gpt-5.4")) {
-		allModels.push({
+	if (!hasIndexedModel("openai", "gpt-5.4")) {
+		registerModel({
 			id: "gpt-5.4",
 			name: "GPT-5.4",
 			api: "openai-responses",
@@ -1997,7 +2057,9 @@ async function generateModels() {
 			compat: deepseekCompat,
 		},
 	];
-	allModels.push(...deepseekV4Models);
+	for (const model of deepseekV4Models) {
+		registerModel(model);
+	}
 
 	for (const candidate of allModels) {
 		if (
@@ -2017,8 +2079,6 @@ async function generateModels() {
 		}
 	}
 
-	const minimaxDirectSupportedIds = new Set(["MiniMax-M2.7", "MiniMax-M2.7-highspeed"]);
-
 	for (const candidate of allModels) {
 		if (
 			(candidate.provider === "minimax" || candidate.provider === "minimax-cn") &&
@@ -2029,41 +2089,66 @@ async function generateModels() {
 		}
 	}
 
-	for (let i = allModels.length - 1; i >= 0; i--) {
-		const candidate = allModels[i];
-		if (
-			(candidate.provider === "minimax" || candidate.provider === "minimax-cn") &&
-			!minimaxDirectSupportedIds.has(candidate.id)
-		) {
-			allModels.splice(i, 1);
-		}
-	}
-
 	// OpenAI Codex (ChatGPT OAuth) models. ChatGPT subscriptions are not billed per token; the
 	// catalogue mirrors OpenAI's list prices for usage display.
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
-	const codexModels: Model<"openai-codex-responses">[] = [];
 	// Every model Codex's own catalogue offers for picking (scripts/data/codex-models.json, pinned by
 	// scripts/sync-codex-models.ts) is derived from it: which models exist, their context window,
 	// image input, Responses Lite, and reasoning levels. Pricing and the output cap are not in Codex's
 	// catalogue and come from the public listing of the same OpenAI model: models.dev's, then
 	// OpenRouter's. A model neither lists is left out with a warning instead of given invented numbers.
-	const codexCatalogue = JSON.parse(readFileSync(join(__dirname, "data", "codex-models.json"), "utf8")) as {
-		models: CodexCatalogueModel[];
-	};
+	const needCodexCatalogue =
+		!modelCatalogProvider ||
+		modelCatalogProvider === "openai-codex" ||
+		modelCatalogProvider === "openai" ||
+		modelCatalogProvider === "azure-openai-responses";
+	const codexCatalogue = needCodexCatalogue
+		? (JSON.parse(readFileSync(join(__dirname, "data", "codex-models.json"), "utf8")) as {
+				models: CodexCatalogueModel[];
+			})
+		: { models: [] as CodexCatalogueModel[] };
 	for (const entry of codexCatalogue.models) {
 		const accessProgram = entry.slug === "gpt-daybreak-blue-latest" ? ("daybreak_blue" as const) : undefined;
 		if (entry.visibility !== "list" && accessProgram === undefined) continue;
-		const listing =
-			allModels.find((model) => model.provider === "openai" && model.id === entry.slug) ??
-			allModels.find((model) => model.provider === "openrouter" && model.id === `openai/${entry.slug}`);
+		const openRouterListing = getIndexedModel("openrouter", `openai/${entry.slug}`);
+		// When models.dev lags a public OpenAI API launch that Codex and OpenRouter already list,
+		// materialize the direct OpenAI entry from OpenRouter's listing so both `openai` and `openai-codex` stay current.
+		if (
+			entry.supported_in_api &&
+			accessProgram === undefined &&
+			isOpenAiResponsesLiteFamily(entry.slug) &&
+			!hasIndexedModel("openai", entry.slug) &&
+			openRouterListing
+		) {
+			registerModel({
+				id: entry.slug,
+				name: entry.display_name,
+				api: "openai-responses",
+				baseUrl: "https://api.openai.com/v1",
+				provider: "openai",
+				reasoning: entry.supported_reasoning_levels.length > 0,
+				defaultThinkingLevel: "medium",
+				input: entry.input_modalities.filter((modality): modality is "text" | "image" =>
+					modality === "text" || modality === "image",
+				),
+				cost: {
+					...openRouterListing.cost,
+					...(openRouterListing.cost.tiers
+						? { tiers: openRouterListing.cost.tiers.map((tier: NonNullable<Model<Api>["cost"]["tiers"]>[number]) => ({ ...tier })) }
+						: {}),
+				},
+				contextWindow: OPENAI_LONG_CONTEXT_INPUT_THRESHOLD,
+				maxTokens: openRouterListing.maxTokens,
+			});
+		}
+		const listing = getIndexedModel("openai", entry.slug) ?? openRouterListing;
 		if (!listing) {
 			// Published without a price would read as free; it is left out until a listing names one.
 			console.warn(`Codex model ${entry.slug} left out: no OpenAI or OpenRouter listing names its price and output cap`);
 			continue;
 		}
 		const levels = new Set(entry.supported_reasoning_levels);
-		codexModels.push({
+		registerModel({
 			id: entry.slug,
 			name: entry.display_name,
 			api: "openai-codex-responses",
@@ -2081,17 +2166,15 @@ async function generateModels() {
 			),
 			cost: {
 				...listing.cost,
-				...(listing.cost.tiers ? { tiers: listing.cost.tiers.map((tier) => ({ ...tier })) } : {}),
+				...(listing.cost.tiers ? { tiers: listing.cost.tiers.map((tier: NonNullable<Model<Api>["cost"]["tiers"]>[number]) => ({ ...tier })) } : {}),
 			},
 			contextWindow: entry.context_window,
 			maxTokens: listing.maxTokens,
 		});
 	}
-	allModels.push(...codexModels);
-
 	// Add missing Mistral Medium 3.5 model until models.dev includes it
-	if (!allModels.some(m => m.provider === "mistral" && m.id === "mistral-medium-3.5")) {
-		allModels.push({
+	if (!hasIndexedModel("mistral", "mistral-medium-3.5")) {
+		registerModel({
 			id: "mistral-medium-3.5",
 			name: "Mistral Medium 3.5",
 			api: "mistral-conversations",
@@ -2112,8 +2195,8 @@ async function generateModels() {
 
 	// Keep the preview available until models.dev publishes it for both Token Plan regions.
 	for (const { provider, baseUrl } of QWEN_TOKEN_PLAN_VARIANTS) {
-		if (allModels.some((model) => model.provider === provider && model.id === "qwen3.8-max-preview")) continue;
-		allModels.push({
+		if (hasIndexedModel(provider, "qwen3.8-max-preview")) continue;
+		registerModel({
 			id: "qwen3.8-max-preview",
 			name: "Qwen3.8 Max Preview",
 			api: "openai-completions",
@@ -2129,8 +2212,8 @@ async function generateModels() {
 	}
 
 	// Add "auto" alias for openrouter/auto
-	if (!allModels.some(m => m.provider === "openrouter" && m.id === "auto")) {
-		allModels.push({
+	if (!hasIndexedModel("openrouter", "auto")) {
+		registerModel({
 			id: "auto",
 			name: "Auto",
 			api: "openai-completions",
@@ -2155,8 +2238,8 @@ async function generateModels() {
 	// router alias/plugin entry point; its model metadata does not advertise tools,
 	// but the alias resolves to a concrete model that can invoke caller tools and
 	// has the openrouter:fusion server tool auto-injected.
-	if (!allModels.some(m => m.provider === "openrouter" && m.id === "openrouter/fusion")) {
-		allModels.push({
+	if (!hasIndexedModel("openrouter", "openrouter/fusion")) {
+		registerModel({
 			id: "openrouter/fusion",
 			name: "OpenRouter: Fusion",
 			api: "openai-completions",
@@ -2178,8 +2261,8 @@ async function generateModels() {
 	}
 
 	for (const [id, source] of [["typesafe/jev-1.13", TYPESAFE_MODELS[0]], ["typesafe/jev-latest", TYPESAFE_MODELS[1]]] as const) {
-		if (allModels.some((model) => model.provider === "openrouter" && model.id === id)) continue;
-		allModels.push({
+		if (hasIndexedModel("openrouter", id)) continue;
+		registerModel({
 			...source,
 			id,
 			name: `TypeSafe: ${source.name}`,
@@ -2190,10 +2273,10 @@ async function generateModels() {
 		});
 	}
 
-	if (!allModels.some(m => m.provider === "openrouter" && m.id === "mistralai/mistral-large-2512")) {
-		const baseModel = allModels.find(m => m.provider === "openrouter" && m.id === "mistralai/mistral-large");
+	if (!hasIndexedModel("openrouter", "mistralai/mistral-large-2512")) {
+		const baseModel = getIndexedModel("openrouter", "mistralai/mistral-large");
 		if (baseModel) {
-			allModels.push({
+			registerModel({
 				...baseModel,
 				id: "mistralai/mistral-large-2512",
 				name: "Mistral Large 2512",
@@ -2332,23 +2415,20 @@ async function generateModels() {
 		baseUrl: VERTEX_BASE_URL,
 		input: spec.input as ("text" | "image")[],
 	}));
-	allModels.push(...vertexModels);
+	for (const model of vertexModels) {
+		registerModel(model);
+	}
 
-	const azureOpenAiModels: Model<Api>[] = allModels
-		.filter(
-			(model) =>
-				model.provider === "openai" &&
-				model.api === "openai-responses" &&
-				// Azure availability is deployment-specific and is not yet documented for GPT-5.6 / GPT-6.
-				!isOpenAiResponsesLiteFamily(model.id),
-		)
-		.map((model) => ({
+	for (const model of Object.values(providers.openai ?? {})) {
+		// Azure availability is deployment-specific and is not yet documented for GPT-5.6 / GPT-6.
+		if (model.api !== "openai-responses" || isOpenAiResponsesLiteFamily(model.id)) continue;
+		registerModel({
 			...model,
 			api: "azure-openai-responses",
 			provider: "azure-openai-responses",
 			baseUrl: "",
-		}));
-	allModels.push(...azureOpenAiModels);
+		});
+	}
 
 	const bedrockSupportedImageMimeTypes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"];
 	for (const model of allModels) {
@@ -2369,21 +2449,9 @@ async function generateModels() {
 		if (metadata?.defaultThinkingLevel) model.defaultThinkingLevel = metadata.defaultThinkingLevel;
 	}
 
-	// Group by provider and deduplicate by model ID
-	const providers: Record<string, Record<string, Model<any>>> = {};
-	for (const model of allModels) {
-		if (!providers[model.provider]) {
-			providers[model.provider] = {};
-		}
-		// Use model ID as key to automatically deduplicate
-		// Only add if not already present (models.dev takes priority over OpenRouter)
-		if (!providers[model.provider][model.id]) {
-			providers[model.provider][model.id] = model;
-		}
-	}
-
-	// Generate TypeScript file
-	let output = `// This file is auto-generated by scripts/generate-models.ts
+	// Materialize TypeScript file in one join instead of repeated growing-prefix concatenations
+	const outputChunks: string[] = [
+		`// This file is auto-generated by scripts/generate-models.ts
 // Do not edit manually - run 'npm run generate-models' to update
 
 import type { Api, Model } from "./types.ts";
@@ -2393,86 +2461,96 @@ import type { Api, Model } from "./types.ts";
  * regenerations change data, not the type of \`getModel\` that every caller depends on.
  */
 export const MODELS: Readonly<Record<string, Readonly<Record<string, Model<Api>>>>> = {
-`;
+`,
+	];
 
 	// Generate provider sections (sorted for deterministic output)
 	const sortedProviderIds = Object.keys(providers).sort();
 	for (const providerId of sortedProviderIds) {
 		const models = providers[providerId];
-		output += `\t${JSON.stringify(providerId)}: {\n`;
+		outputChunks.push(`\t${JSON.stringify(providerId)}: {\n`);
 
 		const sortedModelIds = Object.keys(models).sort();
 		for (const modelId of sortedModelIds) {
 			const model = models[modelId];
-			output += `\t\t"${model.id}": {\n`;
-			output += `\t\t\tid: "${model.id}",\n`;
-			output += `\t\t\tname: "${model.name}",\n`;
-			output += `\t\t\tapi: "${model.api}",\n`;
-			output += `\t\t\tprovider: "${model.provider}",\n`;
+			outputChunks.push(
+				`\t\t"${model.id}": {\n`,
+				`\t\t\tid: "${model.id}",\n`,
+				`\t\t\tname: "${model.name}",\n`,
+				`\t\t\tapi: "${model.api}",\n`,
+				`\t\t\tprovider: "${model.provider}",\n`,
+			);
 			if (model.baseUrl !== undefined) {
-				output += `\t\t\tbaseUrl: "${model.baseUrl}",\n`;
+				outputChunks.push(`\t\t\tbaseUrl: "${model.baseUrl}",\n`);
 			}
 			if (model.headers) {
-				output += `\t\t\theaders: ${JSON.stringify(model.headers)},\n`;
+				outputChunks.push(`\t\t\theaders: ${JSON.stringify(model.headers)},\n`);
 			}
 			if (model.compat) {
-				output += `			compat: ${JSON.stringify(model.compat)},
-`;
+				outputChunks.push(`\t\t\tcompat: ${JSON.stringify(model.compat)},\n`);
 			}
 			if (model.kind) {
-				output += `\t\t\tkind: "${model.kind}",\n`;
+				outputChunks.push(`\t\t\tkind: "${model.kind}",\n`);
 			}
-			output += `\t\t\treasoning: ${model.reasoning},\n`;
+			outputChunks.push(`\t\t\treasoning: ${model.reasoning},\n`);
 			if (model.defaultThinkingLevel) {
-				output += `\t\t\tdefaultThinkingLevel: "${model.defaultThinkingLevel}",\n`;
+				outputChunks.push(`\t\t\tdefaultThinkingLevel: "${model.defaultThinkingLevel}",\n`);
 			}
 			if (model.thinkingLevelMap) {
-				output += `\t\t\tthinkingLevelMap: ${JSON.stringify(model.thinkingLevelMap)},\n`;
+				outputChunks.push(`\t\t\tthinkingLevelMap: ${JSON.stringify(model.thinkingLevelMap)},\n`);
 			}
 			if (model.textToolCallProtocol) {
-				output += `\t\t\ttextToolCallProtocol: true,\n`;
+				outputChunks.push(`\t\t\ttextToolCallProtocol: true,\n`);
 			}
 			if (model.openaiResponsesLite) {
-				output += `\t\t\topenaiResponsesLite: true,\n`;
+				outputChunks.push(`\t\t\topenaiResponsesLite: true,\n`);
 			}
 			if (model.openaiCodexAccessProgram) {
-				output += `\t\t\topenaiCodexAccessProgram: "${model.openaiCodexAccessProgram}",\n`;
+				outputChunks.push(`\t\t\topenaiCodexAccessProgram: "${model.openaiCodexAccessProgram}",\n`);
 			}
 			if (model.serviceTiers !== undefined) {
-				output += `\t\t\tserviceTiers: ${JSON.stringify(model.serviceTiers)},\n`;
+				outputChunks.push(`\t\t\tserviceTiers: ${JSON.stringify(model.serviceTiers)},\n`);
 			}
 			if (model.defaultServiceTier !== undefined) {
-				output += `\t\t\tdefaultServiceTier: ${JSON.stringify(model.defaultServiceTier)},\n`;
+				outputChunks.push(`\t\t\tdefaultServiceTier: ${JSON.stringify(model.defaultServiceTier)},\n`);
 			}
 			if (model.longContextPricing) {
-				output += `\t\t\tlongContextPricing: ${JSON.stringify(model.longContextPricing)},\n`;
+				outputChunks.push(`\t\t\tlongContextPricing: ${JSON.stringify(model.longContextPricing)},\n`);
 			}
-			output += `\t\t\tinput: [${model.input.map(i => `"${i}"`).join(", ")}],\n`;
+			outputChunks.push(`\t\t\tinput: [${model.input.map((i: string) => `"${i}"`).join(", ")}],\n`);
 			if (model.supportedImageMimeTypes) {
-				output += `\t\t\tsupportedImageMimeTypes: [${model.supportedImageMimeTypes.map((mimeType) => `"${mimeType}"`).join(", ")}],\n`;
+				outputChunks.push(
+					`\t\t\tsupportedImageMimeTypes: [${model.supportedImageMimeTypes.map((mimeType: string) => `"${mimeType}"`).join(", ")}],\n`,
+				);
 			}
-			output += `\t\t\tcost: {\n`;
-			output += `\t\t\t\tinput: ${model.cost.input},\n`;
-			output += `\t\t\t\toutput: ${model.cost.output},\n`;
-			output += `\t\t\t\tcacheRead: ${model.cost.cacheRead},\n`;
-			output += `\t\t\t\tcacheWrite: ${model.cost.cacheWrite},\n`;
+			outputChunks.push(
+				`\t\t\tcost: {\n`,
+				`\t\t\t\tinput: ${model.cost.input},\n`,
+				`\t\t\t\toutput: ${model.cost.output},\n`,
+				`\t\t\t\tcacheRead: ${model.cost.cacheRead},\n`,
+				`\t\t\t\tcacheWrite: ${model.cost.cacheWrite},\n`,
+			);
 			if (model.cost.tiers && model.cost.tiers.length > 0) {
-				output += `\t\t\t\ttiers: ${JSON.stringify(model.cost.tiers)},\n`;
+				outputChunks.push(`\t\t\t\ttiers: ${JSON.stringify(model.cost.tiers)},\n`);
 			}
-			output += `\t\t\t},\n`;
-			output += `\t\t\tcontextWindow: ${model.contextWindow},\n`;
+			outputChunks.push(
+				`\t\t\t},\n`,
+				`\t\t\tcontextWindow: ${model.contextWindow},\n`,
+			);
 			if (model.autoCompactionTriggerTokens !== undefined) {
-				output += `\t\t\tautoCompactionTriggerTokens: ${model.autoCompactionTriggerTokens},\n`;
+				outputChunks.push(`\t\t\tautoCompactionTriggerTokens: ${model.autoCompactionTriggerTokens},\n`);
 			}
-			output += `\t\t\tmaxTokens: ${model.maxTokens},\n`;
-			output += `\t\t} satisfies Model<"${model.api}">,\n`;
+			outputChunks.push(
+				`\t\t\tmaxTokens: ${model.maxTokens},\n`,
+				`\t\t} satisfies Model<"${model.api}">,\n`,
+			);
 		}
 
-		output += `\t},\n`;
+		outputChunks.push(`\t},\n`);
 	}
 
-	output += `};
-`;
+	outputChunks.push(`};\n`);
+	let output = outputChunks.join("");
 
 	// Write file
 	if (modelCatalogProvider) {
