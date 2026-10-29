@@ -69,7 +69,7 @@ export interface UsageOverview {
 		icmCostUsd: number;
 		subscription: boolean;
 		tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
-		context: { tokens: number | null; window: number; percent: number | null } | null;
+		context: { tokens: number | null; window: number; percent: number | null; cachedTokens?: number | null } | null;
 	};
 	today: { costUsd: number; subagentCostUsd: number; icmCostUsd: number };
 	machine: {
@@ -507,7 +507,7 @@ export interface UsageOverviewInput {
 		| "todayHistorySummaryCost"
 	>;
 	tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
-	context?: { tokens: number | null; contextWindow: number; percent: number | null };
+	context?: { tokens: number | null; contextWindow: number; percent: number | null; cachedTokens?: number | null };
 	subscription: boolean;
 	load: ProviderLoadView;
 	accounts: AuthenticatedAccount[];
@@ -530,7 +530,12 @@ export function buildUsageOverview(input: UsageOverviewInput): UsageOverview {
 			subscription: input.subscription,
 			tokens: input.tokens,
 			context: input.context
-				? { tokens: input.context.tokens, window: input.context.contextWindow, percent: input.context.percent }
+				? {
+						tokens: input.context.tokens,
+						window: input.context.contextWindow,
+						percent: input.context.percent,
+						...(input.context.cachedTokens !== undefined ? { cachedTokens: input.context.cachedTokens } : {}),
+					}
 				: null,
 		},
 		today: {

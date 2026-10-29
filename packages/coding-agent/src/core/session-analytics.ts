@@ -582,6 +582,15 @@ export class SessionAnalytics {
 		return { hasCompaction: true, hasPostCompactionUsage: false };
 	}
 
+	private _contextUsageCache?: [
+		readonly AgentMessage[],
+		number,
+		unknown,
+		unknown,
+		unknown,
+		ReturnType<typeof estimateContextTokens>,
+	];
+
 	getContextUsage(): ContextUsage | undefined {
 		const model = this.deps.getModel();
 		if (!model) return undefined;
@@ -598,7 +607,27 @@ export class SessionAnalytics {
 		}
 
 		const messages = this.deps.getMessages();
-		const estimate = estimateContextTokens(messages);
+		const last = messages.at(-1) as { stopReason?: unknown; usage?: { totalTokens?: unknown } } | undefined;
+		let c = this._contextUsageCache;
+		if (
+			!c ||
+			c[0] !== messages ||
+			c[1] !== messages.length ||
+			c[2] !== last ||
+			c[3] !== last?.stopReason ||
+			c[4] !== last?.usage?.totalTokens
+		) {
+			c = [
+				messages,
+				messages.length,
+				last,
+				last?.stopReason,
+				last?.usage?.totalTokens,
+				estimateContextTokens(messages),
+			];
+			this._contextUsageCache = c;
+		}
+		const estimate = c[5];
 		// Under ICM a turn's requests carry only that turn after its chat view: usage recorded before the turn start
 		// measured an earlier turn's request, so until this turn's first response the size is unknown, as after compaction.
 		const turnStart = this.deps.getContinuousChatTurnStartIndex?.(messages);

@@ -52,6 +52,7 @@ export interface UsageCommandHost {
 		>;
 		getSessionStats(): { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number } };
 		getContextUsage(): { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
+		getSelfCompactionView?(): { cachedTokens: number | null };
 		getProviderLoadView(): ProviderLoadView;
 	};
 	readonly usageMonitor: AccountUsageMonitor;
@@ -174,11 +175,12 @@ function buildOverview(host: UsageCommandHost, accounts: readonly AuthenticatedA
 	const registry = host.modelRegistry;
 	const model = session.model;
 	const context = session.getContextUsage();
+	const cachedTokens = session.getSelfCompactionView?.()?.cachedTokens ?? null;
 	return buildUsageOverview({
 		now: Date.now(),
 		cost: session.getCostSummary(),
 		tokens: session.getSessionStats().tokens,
-		...(context ? { context } : {}),
+		...(context ? { context: { ...context, cachedTokens } } : {}),
 		subscription: model ? registry.isUsingSubscription(model) : false,
 		load: session.getProviderLoadView(),
 		accounts: [...accounts],

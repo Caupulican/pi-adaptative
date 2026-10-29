@@ -100,16 +100,22 @@ function formatKpiRows(overview: UsageOverview, width: number): [string, string]
 		contextGauge = theme.fg("dim", "unavailable");
 	} else {
 		const win = session.context.window;
-		const pct =
-			session.context.percent ??
-			(session.context.tokens !== null && win > 0 ? (session.context.tokens / win) * 100 : 0);
-		const used = session.context.tokens ?? 0;
-		const clamped = Math.max(0, Math.min(100, pct));
-		const filled = Math.max(0, Math.min(12, Math.round((clamped / 100) * 12)));
-		const free = 12 - filled;
-		const bar = "█".repeat(filled) + "░".repeat(free);
-		const tone = pct >= 95 ? "error" : pct >= 75 ? "warning" : "accent";
-		contextGauge = `${theme.fg(tone, bar)} ${Math.round(pct)}% (${tokens(used)} / ${tokens(win)})`;
+		const cachedTokens = session.context.cachedTokens ?? null;
+		const cachedSuffix = cachedTokens !== null && cachedTokens > 0 ? ` · ${tokens(cachedTokens)} cached` : "";
+		if (session.context.tokens === null && session.context.percent === null) {
+			contextGauge = `${theme.fg("dim", `? / ${tokens(win)} · awaiting turn`)}${theme.fg("muted", cachedSuffix)}`;
+		} else {
+			const pct =
+				session.context.percent ??
+				(session.context.tokens !== null && win > 0 ? (session.context.tokens / win) * 100 : 0);
+			const used = session.context.tokens ?? 0;
+			const clamped = Math.max(0, Math.min(100, pct));
+			const filled = Math.max(0, Math.min(12, Math.round((clamped / 100) * 12)));
+			const free = 12 - filled;
+			const bar = "█".repeat(filled) + "░".repeat(free);
+			const tone = pct >= 95 ? "error" : pct >= 75 ? "warning" : "accent";
+			contextGauge = `${theme.fg(tone, bar)} ${Math.round(pct)}% (${tokens(used)} / ${tokens(win)}${cachedSuffix})`;
+		}
 	}
 	const left2 = `${theme.fg("dim", "CONTEXT  ")}${contextGauge}`;
 

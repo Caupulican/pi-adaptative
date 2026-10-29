@@ -3001,15 +3001,15 @@ export class AgentSession {
 	repairHistoryForgetState(): Promise<{ ok: boolean; message: string }> {
 		return this._memory.repairHistoryForgetState();
 	}
-
-	/** Operator authority: forget one session's derived history summaries; the canonical session is untouched. */
 	forgetHistorySession(sessionId: string): Promise<{ ok: boolean; message: string }> {
 		return this._memory.forgetHistorySession(sessionId);
 	}
-
-	/** Every active verification obligation with what the operator can read about it. */
+	private _ob?: [unknown[], VerificationObligationView[]];
 	getVerificationObligations(): VerificationObligationView[] {
-		return new VerificationObligationTracker(this.agent.state.messages).getActiveObligations();
+		const k = this.agent.state.messages.flatMap((x) => [x, (x as { details?: unknown }).details]);
+		if (!this._ob || this._ob[0].length !== k.length || !k.every((x, i) => x === this._ob?.[0][i]))
+			this._ob = [k, new VerificationObligationTracker(this.agent.state.messages).getActiveObligations()];
+		return (this._ob?.[1] ?? []).map((v) => ({ ...v }));
 	}
 
 	/** Bind the branch-scoped durable repository outcome journal after session construction. */

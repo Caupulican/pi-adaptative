@@ -510,11 +510,15 @@ export class PersistentBotTeamStore {
 			}
 			throw error;
 		}
+		this._cachedTeamList = undefined;
 		this.notify();
 	}
 
+	private _cachedTeamList?: PersistentTeamRecord[];
+
 	/** Re-reads the shared store file. Every mutation starts here so another session's changes are not overwritten. */
 	reload(): void {
+		this._cachedTeamList = undefined;
 		this.bots.clear();
 		this.teams.clear();
 		this.teamMessages.clear();
@@ -675,9 +679,16 @@ export class PersistentBotTeamStore {
 	}
 
 	listTeams(): PersistentTeamRecord[] {
-		return Array.from(this.teams.values()).map((team) => ({
+		if (this._cachedTeamList === undefined) {
+			this._cachedTeamList = Array.from(this.teams.values()).map((team) => ({
+				...team,
+				memberAgentIds: [...team.memberAgentIds],
+				memoryFilePath: this.getTeamMemoryFilePath(team.teamId),
+			}));
+		}
+		return this._cachedTeamList.map((team) => ({
 			...team,
-			memoryFilePath: this.getTeamMemoryFilePath(team.teamId),
+			memberAgentIds: [...team.memberAgentIds],
 		}));
 	}
 

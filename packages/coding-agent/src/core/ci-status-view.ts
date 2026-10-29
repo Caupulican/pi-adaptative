@@ -83,8 +83,13 @@ export function ciStatusViewFromRecord(record: unknown, branch: string, now = Da
 	return value.conclusion === "success" ? { state: "green", branch } : { state: "red", branch };
 }
 
+const _cachedHeadCommit = new Map<string, { at: number; view: CiStatusView | undefined }>();
+
 /** The current branch's recorded CI verdict, or undefined when there is none to show. */
 export function readCiStatusView(cwd: string): CiStatusView | undefined {
+	const now = Date.now();
+	const cachedHead = _cachedHeadCommit.get(cwd);
+	if (cachedHead && now - cachedHead.at < 1_000) return cachedHead.view;
 	const dirs = gitDirs(cwd);
 	if (!dirs) return undefined;
 	let head: string;
@@ -96,7 +101,10 @@ export function readCiStatusView(cwd: string): CiStatusView | undefined {
 	const branch = head.startsWith("ref: refs/heads/") ? head.slice("ref: refs/heads/".length) : undefined;
 	if (!branch) return undefined;
 	const path = join(dirs.commonDir, "pi-ci", `${branch.replaceAll("/", "__")}.json`);
-	if (!existsSync(path)) return undefined;
+	if (!existsSync(path)) {
+		_cachedHeadCommit.set(cwd, { at: now, view: undefined });
+		return undefined;
+	}
 	let mtimeMs: number;
 	try {
 		mtimeMs = statSync(path).mtimeMs;
@@ -104,7 +112,10 @@ export function readCiStatusView(cwd: string): CiStatusView | undefined {
 		return undefined;
 	}
 	const cached = recordCache.get(path);
-	if (cached?.mtimeMs === mtimeMs) return cached.view;
+	if (cached?.mtimeMs === mtimeMs) {
+		_cachedHeadCommit.set(cwd, { at: now, view: cached.view });
+		return cached.view;
+	}
 	let view: CiStatusView | undefined;
 	try {
 		const record = JSON.parse(readFileSync(path, "utf8")) as unknown;
@@ -115,6 +126,7 @@ export function readCiStatusView(cwd: string): CiStatusView | undefined {
 	}
 	// A stale record is re-read until its reconcile rewrites it (the write changes the mtime).
 	recordCache.set(path, { mtimeMs, view });
+	_cachedHeadCommit.set(cwd, { at: now, view });
 	return view;
 }
 

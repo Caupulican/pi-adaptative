@@ -1015,9 +1015,9 @@ export class WorkbenchComponent extends Container {
 	private effectiveLeftPaneMode(): WorkbenchLeftPaneMode | undefined {
 		if (this.graphHidden) return undefined;
 		const hasGraph = this.frameGraphModel !== undefined;
+		if (this.leftPaneMode === "graph" && hasGraph) return "graph";
 		const hasChats = (this.frameChatRoster ?? this.options.chatRoster?.()) !== undefined;
 		if (this.leftPaneMode === "graph") {
-			if (hasGraph) return "graph";
 			return hasChats ? "chats" : undefined;
 		}
 		if (hasChats) return "chats";
@@ -1270,7 +1270,12 @@ export class WorkbenchComponent extends Container {
 			const model = this.graphSource();
 			if (model && graphHasContent(model)) this.frameGraphModel = model;
 		}
-		if (!this.graphHidden && this.options.chatRoster) {
+		if (
+			!this.graphHidden &&
+			columns >= SIDE_BY_SIDE_MIN_COLUMNS &&
+			this.options.chatRoster &&
+			(this.leftPaneMode === "chats" || this.frameGraphModel === undefined)
+		) {
 			this.frameChatRoster = this.options.chatRoster();
 		}
 		// Title strip, divider, conversation header, three conversation rows, the live row and the POV

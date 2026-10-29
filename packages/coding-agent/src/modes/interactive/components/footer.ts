@@ -244,6 +244,12 @@ export class FooterComponent implements Component {
 	}
 
 	render(width: number): string[] {
+		if (this.operatorFooter && !this.diagnosticsMode) {
+			// Location and branch live on the Workbench title strip; operator truth lives on the POV
+			// lane. Nothing is shown twice, so the band carries only notices and widgets here.
+			return [];
+		}
+
 		const state = this.session.state;
 		const usageSnapshot = this.getUsageSnapshot(state.messages?.length ?? 0);
 		const { totalInput, totalOutput, totalCacheRead, totalCacheWrite, contextUsage, gauge } = usageSnapshot;
@@ -251,12 +257,6 @@ export class FooterComponent implements Component {
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
-
-		if (this.operatorFooter && !this.diagnosticsMode) {
-			// Location and branch live on the Workbench title strip; operator truth lives on the POV
-			// lane. Nothing is shown twice, so the band carries only notices and widgets here.
-			return [];
-		}
 
 		// Replace home directory with ~
 		let pwd = formatCwdForFooter(this.services.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);

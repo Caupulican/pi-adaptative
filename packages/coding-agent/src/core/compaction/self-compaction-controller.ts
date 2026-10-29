@@ -124,8 +124,34 @@ export type SelfCompactionRequestOutcome =
 	| { readonly accepted: true; readonly record: SelfCompactionRequestRecord; readonly replaced: boolean }
 	| { readonly accepted: false; readonly reason: string };
 
+let latestCachedReadTokensMemo:
+	| {
+			ref: readonly AgentMessage[];
+			len: number;
+			last: AgentMessage | undefined;
+			stop: unknown;
+			cacheRead: unknown;
+			result: number | null;
+	  }
+	| undefined;
+
 /** The cache-read tokens of the latest assistant reply in `messages` that has usage and did not fail; null without one. */
 export function latestCachedReadTokens(messages: readonly AgentMessage[]): number | null {
+	const last = messages.at(-1);
+	const stop = (last as { stopReason?: unknown } | undefined)?.stopReason;
+	const cacheRead = (last as { usage?: { cacheRead?: unknown } } | undefined)?.usage?.cacheRead;
+	const m = latestCachedReadTokensMemo;
+	if (
+		m &&
+		m.ref === messages &&
+		m.len === messages.length &&
+		m.last === last &&
+		m.stop === stop &&
+		m.cacheRead === cacheRead
+	) {
+		return m.result;
+	}
+	let result: number | null = null;
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index]!;
 		if (
@@ -134,10 +160,12 @@ export function latestCachedReadTokens(messages: readonly AgentMessage[]): numbe
 			message.stopReason !== "error" &&
 			message.stopReason !== "aborted"
 		) {
-			return message.usage.cacheRead;
+			result = message.usage.cacheRead;
+			break;
 		}
 	}
-	return null;
+	latestCachedReadTokensMemo = { ref: messages, len: messages.length, last, stop, cacheRead, result };
+	return result;
 }
 
 export class SelfCompactionController {

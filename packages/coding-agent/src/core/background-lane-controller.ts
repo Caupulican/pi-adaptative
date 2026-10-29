@@ -443,8 +443,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		};
 	}
 
+	private _cachedLaneRecords?: LaneRecord[];
+
 	private _laneRecordsChanged(): void {
 		this._botViews = undefined;
+		this._cachedLaneRecords = undefined;
 		if (this._laneRecordListeners.size === 0 || this._laneRecordsNotifyQueued) return;
 		this._laneRecordsNotifyQueued = true;
 		queueMicrotask(() => {
@@ -470,14 +473,21 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Live lane records tracked by this process (running and terminal). */
 	getLaneRecords(): LaneRecord[] {
 		this._hydrateManagedLanes();
-		const workerRecords =
-			this._workers?.getRecords() ??
-			(this.deps.isDelegateToolActive?.() ? this._getWorkerController().getRecords() : []);
-		return [
+		if (this._cachedLaneRecords !== undefined) {
+			return this._cachedLaneRecords.map((r) => ({ ...r }));
+		}
+		const workerRecords = this._workers
+			? this._workers.getRecords()
+			: this.deps.isDelegateToolActive?.() && this._hasWorkerState()
+				? this._getWorkerController().getRecords()
+				: [];
+		const records = [
 			...this._laneTracker.getRecords(),
 			...workerRecords,
 			...(this._workerLifecycle?.getManagedRecords() ?? []),
 		];
+		this._cachedLaneRecords = records;
+		return records.map((r) => ({ ...r }));
 	}
 
 	/** Worker resources of the worker controller this session has already loaded. Never constructs one: undefined means none was loaded. */

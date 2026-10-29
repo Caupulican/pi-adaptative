@@ -1,8 +1,7 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
-import { loadEntriesFromFile } from "../../kernel/session/session-manager.ts";
 import { getSessionEntryUsage } from "../../kernel/usage.ts";
 import {
 	SEMANTIC_USAGE_CUSTOM_TYPE,
@@ -140,12 +139,36 @@ export interface LiveSessionDailyUsageSource {
 	entries: readonly SessionEntry[];
 }
 
+const fc = new Map<string, [number, number, number, SessionEntry[]]>();
+
 function getSessionEntries(
 	filePath: string,
 	liveSession: LiveSessionDailyUsageSource | undefined,
 ): readonly SessionEntry[] {
 	if (liveSession && resolve(filePath) === resolve(liveSession.filePath)) return liveSession.entries;
-	return loadEntriesFromFile(filePath).filter((entry): entry is SessionEntry => entry.type !== "session");
+	try {
+		const p = resolve(filePath);
+		const s = statSync(p);
+		const c = fc.get(p);
+		if (c && c[0] === s.mtimeMs && c[1] === s.size && c[2] === s.ino) return c[3];
+		const raw = readFileSync(p, "utf8");
+		const [hdr = "", ...lines] = raw.trim().split("\n");
+		const h = JSON.parse(hdr) as { type?: unknown; id?: unknown };
+		if (h?.type !== "session" || typeof h.id !== "string") return [];
+		const e: SessionEntry[] = [];
+		for (const l of lines) {
+			if (!l.includes('"usage"')) continue;
+			try {
+				const x = JSON.parse(l) as { type?: unknown };
+				if (typeof x?.type === "string" && x.type !== "session") e.push(x as SessionEntry);
+			} catch {}
+		}
+		if (fc.size >= 1024 && !fc.has(p)) fc.delete(fc.keys().next().value!);
+		if (Buffer.byteLength(raw) === s.size) fc.set(p, [s.mtimeMs, s.size, s.ino, e]);
+		return e;
+	} catch {
+		return [];
+	}
 }
 
 export function aggregateDailyUsageFromSessionFiles(

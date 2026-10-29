@@ -102,6 +102,19 @@ export function getLatestSessionSnapshot<Value extends object, ValueKey extends 
 	return undefined;
 }
 
+export const snapshotCache = new WeakMap<
+	object,
+	Map<
+		SessionSnapshotCodec<any, any>,
+		{
+			entryId: string | null;
+			entryRef: ReturnType<SessionManager["getLatestCustomEntryOnBranch"]>;
+			dataRef: unknown;
+			value: unknown;
+		}
+	>
+>();
+
 /**
  * Resolves the newest valid snapshot on the active branch. Malformed entries are skipped while
  * walking leaf to root so they cannot hide an older valid checkpoint.
@@ -110,12 +123,32 @@ export function getLatestSessionSnapshotOnBranch<Value extends object, ValueKey 
 	sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch">,
 	codec: SessionSnapshotCodec<Value, ValueKey>,
 ): Value | undefined {
+	let byCodec = snapshotCache.get(sessionManager);
+	if (!byCodec) {
+		byCodec = new Map();
+		snapshotCache.set(sessionManager, byCodec);
+	}
+	const head = sessionManager.getLatestCustomEntryOnBranch(codec.customType);
+	const cached = byCodec.get(codec);
+	if (cached && cached.entryId === (head?.id ?? null) && cached.entryRef === head && cached.dataRef === head?.data) {
+		return cached.value ? codec.clone(cached.value as Value) : undefined;
+	}
 	let fromId: string | undefined;
 	for (;;) {
-		const entry = sessionManager.getLatestCustomEntryOnBranch(codec.customType, fromId);
-		if (!entry) return undefined;
+		const entry = fromId === undefined ? head : sessionManager.getLatestCustomEntryOnBranch(codec.customType, fromId);
+		if (!entry) {
+			if (fromId === undefined) {
+				byCodec.set(codec, { entryId: null, entryRef: undefined, dataRef: undefined, value: undefined });
+			}
+			return undefined;
+		}
 		const snapshot = decodeSessionSnapshotPayload(entry.data, codec);
-		if (snapshot !== undefined) return snapshot;
+		if (snapshot !== undefined) {
+			if (fromId === undefined) {
+				byCodec.set(codec, { entryId: entry.id, entryRef: entry, dataRef: entry.data, value: snapshot });
+			}
+			return codec.clone(snapshot);
+		}
 		if (entry.parentId === null) return undefined;
 		fromId = entry.parentId;
 	}
