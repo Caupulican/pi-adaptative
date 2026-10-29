@@ -1,5 +1,26 @@
 ## [Unreleased]
 
+### Added
+
+- Native workers can use `bot_message` to discover and message existing peers and reply to parent requests within their granted messaging permissions.
+
+### Changed
+
+- Group chats keep separate bot conversations and memory per group incarnation, with group-scoped discovery, mentions and replies.
+- The root-only `peer` advisor retains review attempts, findings and candidate identity across restarts, and shares its receipts with reviewer-required completion. Failed attempts remain inspectable without counting as a passed review.
+- With model routing and System One enabled, worker admission checks the complete task, model and reasoning effort, including explicit selections and continuation messages. Inadequate or unconfirmed bindings are refused with guidance; unknown model classifications no longer count as strong models.
+
+### Fixed
+
+- TUI obligation, context and cached-token queries reuse message revisions instead of scanning history on each render. Bot and CI status views reuse cached data while reconsidering changes and watcher liveness.
+- Today's usage refreshes asynchronously through the canonical session reader with bounded usage caches. Pending totals are labeled as partial, open `/usage` views refresh when totals arrive, and cached-read and cached-write tokens are shown separately.
+- Exhausted empty or overlength ICM summaries no longer retry after unrelated chat arrivals. Changed summary inputs or explicit recovery can resume them; original messages remain available.
+- Completion and independent review retain complete file evidence instead of silently clipping it. Missing peer evidence remains an explicit limitation requiring current proof or a justified narrower claim.
+- System One disablement applies to saved credentials, SDK options, settings and transport retries. Explicit SDK loop modes retain their required-binding checks, while supplied objective controllers and readiness ports remain usable independently of System One.
+- Persistent bot updates serialize across processes, refresh other sessions' views, and protect blackboard initialization and appends. Stored profiles, concurrent starts, retirement and recreated bot generations preserve their runtime identity.
+- Legitimate host settings writes are attributed through their exact recorded transitions instead of being reported as worker tampering.
+- Queued worker fitness validation stays inside scheduler-owned preflight, preserving capacity, busy-context refusal and cancellation while checking fresh approval before acquiring a lease.
+
 ## [0.104.18] - 2026-10-28
 
 ### Fixed
