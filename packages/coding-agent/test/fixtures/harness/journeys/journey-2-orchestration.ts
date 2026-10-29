@@ -343,6 +343,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	world.systemOne.enterPhase(
 		"orchestration-goal",
 		{
+			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 			capabilities_authorized: { kind: "noul", probability: 0.02 },
 			changes_model_pools: { kind: "noul", probability: 0.02 },
 			local_commits_only: { kind: "noul", probability: 0.02 },
@@ -882,7 +883,11 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	// Revision: the limit is changed to 4, the test fails, and two workers start: one held, one quick.
 	world.systemOne.enterPhase(
 		"verify-revision",
-		{ ...verifyJudgments, ...completionStates },
+		{
+			...verifyJudgments,
+			...completionStates,
+			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
+		},
 		{ expect: ownerWords("Revise the limit to 4, run the test, and start the checks.") },
 	);
 	world.provider.enqueue(
@@ -1298,7 +1303,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	);
 	world.systemOne.enterPhase(
 		"verify-budget-worker",
-		{ ...verifyJudgments },
+		{ ...verifyJudgments, worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 } },
 		{
 			expect: ownerWords("Start the cost-capped check, then check completion."),
 		},
@@ -2237,9 +2242,10 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			]),
 			{ name: "e11-done", reply: { content: [{ type: "text", text: "Both reports are read." }] } },
 		);
-		// This auxiliary root has no goal, so its judgments are the owner-policy keys only: the goal's per-turn families are not
-		// requested here, and no other family is declared.
+		// This auxiliary root has no goal: its owner-policy keys and explicit worker fitness answer are declared here,
+		// without the goal's per-turn families.
 		world.systemOne.enterPhase("e11", {
+			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 			changes_model_pools: { kind: "noul", probability: 0.02 },
 			capabilities_authorized: { kind: "noul", probability: 0.02 },
 			local_commits_only: { kind: "noul", probability: 0.02 },
@@ -2659,7 +2665,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			"the host reads the same bytes from the artifact file",
 		).toBe(largeSha);
 	}
-	// Still in the "e11" phase: the prompts and the steer below are owner words, judged by its six owner-policy keys only.
+	// Still in the "e11" phase: the prompts and steer use its owner-policy keys; worker starts use its fitness answer.
 	await steeredDelegateWait(world, eSession);
 	await heldOrchestrationStoreLock(world, eSession, eAux.sessionManager.getSessionId());
 	const r30AgentId = await retainedRetryReadFault(world, eSession, eAux.sessionManager.getSessionId());
