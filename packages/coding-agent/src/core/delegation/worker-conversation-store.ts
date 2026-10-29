@@ -18,7 +18,11 @@ import {
 } from "../../kernel/messages.ts";
 import { measureJsonStringUtf8Bytes } from "../../kernel/provider-request-estimator.ts";
 import { cloneResumeContext } from "../../kernel/session/agent-identity.ts";
-import { indexSessionLifecycle, type SessionLifecycleToolResult } from "../../kernel/session/lifecycle-ledger.ts";
+import {
+	indexSessionLifecycle,
+	type SessionLifecycleToolResult,
+	sessionLifecycleToolIdentityKey,
+} from "../../kernel/session/lifecycle-ledger.ts";
 import { compactToolResultDetailsForRetention } from "../../kernel/session/message-retention.ts";
 import {
 	withSessionFileMutation,
@@ -909,6 +913,19 @@ export class WorkerConversation {
 	/** Convert the current compacted projection at its transcript owner, never at each consumer. */
 	getProviderMessages(): Message[] {
 		return convertToLlm(this.getProviderContext().messages);
+	}
+
+	/** Resolve a live call only inside the latest accepted request; provider call IDs may repeat later. */
+	toolInvocationIdentity(toolCallId: string, toolName: string): string {
+		const index = this.sessionManager.getSessionLifecycleIndex();
+		const request = index.requestSnapshots.at(-1);
+		if (!request) throw new Error("Worker tool invocation has no accepted provider request.");
+		const calls = index.assistantToolCalls.filter(
+			(call) => call.requestId === request.requestId && call.callId === toolCallId,
+		);
+		if (calls.length !== 1 || calls[0]!.toolName !== toolName)
+			throw new Error("Worker tool invocation is missing or ambiguous in its provider request.");
+		return sessionLifecycleToolIdentityKey(request.requestId, calls[0]!.assistantMessageEntryId, toolCallId);
 	}
 
 	/** True when provider context is a compacted projection rather than the raw transcript prefix. */

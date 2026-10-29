@@ -14,6 +14,7 @@
  * controller never touches `prompt()`, the last-assistant-message, retry, or streaming state.
  */
 
+import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../kernel/types.ts";
@@ -28,7 +29,8 @@ import type {
 import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
-import { BotRuntimeBindings } from "./delegation/bot-runtime-bindings.ts";
+import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
+import { BotRuntimeBindings, type BotRuntimeContext } from "./delegation/bot-runtime-bindings.ts";
 import { ManagedLaneController, type ManagedLaneControllerDeps } from "./delegation/managed-lane-controller.ts";
 import {
 	BOT_MEMORY_BLOCK_SEPARATOR,
@@ -44,6 +46,7 @@ import {
 	type PersistentTeamMessage,
 	type PersistentTeamRecord,
 	type TeamOperatorMessageDispatchResult,
+	teamIncarnation,
 	type UpsertPersistentBotInput,
 	type UpsertPersistentTeamInput,
 } from "./delegation/persistent-bot-team-store.ts";
@@ -53,6 +56,7 @@ import type {
 	SessionRootReplyWaitOptions,
 	SessionRootReplyWaitResult,
 } from "./delegation/session-root-mailbox.ts";
+import { sessionRootAddress } from "./delegation/session-root-mailbox.ts";
 import { getWorkerClaimSnapshots } from "./delegation/session-worker-claim.ts";
 import type {
 	SessionRootWorkerAgentMessageOptions,
@@ -183,6 +187,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _managedLaneAbsenceLeafId: string | null | undefined;
 	private _botTeamStore: PersistentBotTeamStore | undefined;
 	private readonly botBindings: BotRuntimeBindings;
+	/** Includes queued callers: configuration cannot pass a start that has not published its runtime yet. */
+	private readonly botDispatches = new Map<string, Promise<void>>();
 	/** Lazily materialized so a UAC surface without `delegate` allocates no worker runtime state. */
 	private _workers: WorkerDelegationController | undefined;
 	/** One durable lifecycle shared by every worker execution adapter. */
@@ -264,7 +270,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	private _getWorkerController(): WorkerDelegationController {
 		this._workers ??= new WorkerDelegationController(
-			this.deps,
+			{
+				...this.deps,
+				createBotMessageDirectory: (sender, attempt) => this.createBotMessageDirectory(sender, attempt),
+			},
 			this._getWorkerNotificationCoordinator(),
 			this._getWorkerLifecycle(),
 			new WorkerLaneIsolation(this._worktreeLaneHostDeps()),
@@ -1097,6 +1106,146 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._botTeamStore;
 	}
 
+	private createBotMessageDirectory(sender: string, attemptId: string): BotMessageDirectory {
+		const manager = this.deps.getSessionManager();
+		const assertBranch = manager.captureBranchContext();
+		const context = this.botBindings.generationContext(sender);
+		const sourceAlias = context.agentId;
+		const thread = context.teamId ? `team:${context.teamId}:${context.teamIncarnationId}` : undefined;
+		const store = this.getBotTeamStore();
+		const refresh = () => {
+			if (store.reload(true)) this._botViews = undefined;
+		};
+		refresh();
+		const admittedMembers = new Set(context.teamId ? (store.getTeam(context.teamId)?.memberAgentIds ?? []) : []);
+		const requireGroup = (teamId?: string) => {
+			refresh();
+			if (teamId !== undefined && teamId !== context.teamId)
+				throw new Error("This bot conversation is not admitted to the requested group.");
+			if (!context.teamId) return undefined;
+			const team = store.getTeam(context.teamId);
+			if (
+				!team ||
+				teamIncarnation(team) !== context.teamIncarnationId ||
+				!team.memberAgentIds.includes(sourceAlias) ||
+				!admittedMembers.has(sourceAlias)
+			)
+				throw new Error("This bot's group membership was removed or replaced.");
+			return team;
+		};
+		const assertCurrent = () => {
+			if (this.deps.isDisposed() || this.deps.getSessionManager() !== manager)
+				throw new Error("Bot messaging session is no longer current.");
+			assertBranch();
+			const source = this.listWorkerAgents().find((agent) => agent.agentId === sender);
+			if (source?.attemptId !== attemptId || source.dispatch !== "running")
+				throw new Error("Bot messaging sender generation is no longer current.");
+			if (
+				sourceAlias &&
+				this.getBotTeamStore().getBot(sourceAlias) &&
+				this.botBindings.runtime(sourceAlias, context.teamId, context.teamIncarnationId) !== sender
+			)
+				throw new Error("Bot messaging sender alias has been rebound.");
+			requireGroup();
+		};
+		return {
+			assertCurrent,
+			list: (teamId) => {
+				assertCurrent();
+				const group = requireGroup(teamId);
+				const teams = store.listTeams();
+				const groups = teams.filter((team) =>
+					group ? team.teamId === group.teamId : team.memberAgentIds.includes(sourceAlias),
+				);
+				const agents = new Map(this.listWorkerAgents().map((agent) => [agent.agentId, agent]));
+				const peers = store
+					.listBots({ includeRetired: true })
+					.filter(
+						(bot) =>
+							bot.agentId !== sourceAlias &&
+							(group
+								? group.memberAgentIds.includes(bot.agentId) && admittedMembers.has(bot.agentId)
+								: !teams.some((team) => team.memberAgentIds.includes(bot.agentId))),
+					)
+					.map((bot) => {
+						const agent = agents.get(
+							this.botBindings.runtime(bot.agentId, context.teamId, context.teamIncarnationId),
+						);
+						return {
+							agentId: bot.agentId,
+							displayName: bot.displayName,
+							state: bot.retired || agent?.status === "retired" ? "retired" : (agent?.activity ?? "inactive"),
+							available: !bot.retired && agent !== undefined && agent.status !== "retired",
+						};
+					});
+				return {
+					groups: groups.slice(0, 128).map(({ teamId, name }) => ({ teamId, name })),
+					totalGroups: groups.length,
+					peers: peers.slice(0, 128),
+					total: peers.length,
+				};
+			},
+			resolve: (target, teamId) => {
+				assertCurrent();
+				const group = requireGroup(teamId);
+				const alias = normalizeBotOrTeamId(target, "agentId");
+				if (
+					group
+						? !group.memberAgentIds.includes(alias) || !admittedMembers.has(alias)
+						: store
+								.listTeams()
+								.some(
+									(team) => team.memberAgentIds.includes(sourceAlias) || team.memberAgentIds.includes(alias),
+								)
+				)
+					throw new Error("Group messages require a conversation admitted to that group.");
+				const bot = store.getBot(alias);
+				if (!bot || bot.retired) throw new Error(`Bot ${alias} is missing or retired.`);
+				const runtime = this.botBindings.runtime(alias, context.teamId, context.teamIncarnationId);
+				if (runtime === sender) throw new Error("A bot cannot message itself.");
+				const recipient = this.listWorkerAgents().find((agent) => agent.agentId === runtime);
+				if (!recipient || recipient.status === "retired")
+					throw new Error(`Bot ${alias} is inactive in this parent session; ask the parent to start it.`);
+				return runtime;
+			},
+			threadId: (teamId) => {
+				assertCurrent();
+				requireGroup(teamId);
+				return thread;
+			},
+			authorizeReply: (requestThread, requester, teamId) => {
+				assertCurrent();
+				const group = requireGroup(teamId);
+				if (requester === sessionRootAddress(manager.getSessionId())) return;
+				if (requestThread !== thread || !requester) throw new Error("Reply belongs to another conversation group.");
+				const peer = this.botBindings.generationContext(requester);
+				if (
+					peer.teamId !== context.teamId ||
+					peer.teamIncarnationId !== context.teamIncarnationId ||
+					(group
+						? !group.memberAgentIds.includes(peer.agentId) || !admittedMembers.has(peer.agentId)
+						: store.listTeams().some((team) => team.memberAgentIds.includes(peer.agentId)))
+				)
+					throw new Error("Reply requester is outside this conversation group.");
+			},
+			recordSent: (messageId, target, message) => {
+				if (!context.teamId || !context.teamIncarnationId) return;
+				store.appendScopedTeamMessage(
+					{
+						messageId,
+						teamId: context.teamId,
+						sender: { kind: "bot", agentId: sourceAlias },
+						text: message,
+						timestamp: Date.now(),
+						targetAgentIds: [target],
+						deliveries: [{ agentId: target, outcome: "queued", messageId }],
+					},
+					context.teamIncarnationId,
+				);
+			},
+		};
+	}
+
 	/** True once this session has a worker runtime or a persisted orchestration store: only then can workers or managed lanes exist. */
 	private _hasWorkerState(): boolean {
 		if (this._workers || this._workerLifecycle) return true;
@@ -1112,10 +1261,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * change: a bot-store save, a lane-tracker change or an orchestration event drops it (see `_laneRecordsChanged`).
 	 * Reading it never constructs the worker runtime for a session that has no worker state.
 	 */
-	listPersistentBots(defaultModelRef = this.getRootModelLabel()): PersistentBotView[] {
+	listPersistentBots(defaultModelRef = this.getRootModelLabel(), teamId?: string): PersistentBotView[] {
 		const delegateActive = this.deps.isDelegateToolActive();
 		const bindings = this.botBindings.revision();
-		const cached = this._botViews;
+		const cached = teamId ? undefined : this._botViews;
+		const team = teamId ? this.getBotTeamStore().getTeam(teamId) : undefined;
+		const inContext = (runtime: string) => {
+			const context = this.botBindings.generationContext(runtime);
+			return (
+				context.teamId === teamId &&
+				(!teamId || context.teamIncarnationId === (team ? teamIncarnation(team) : undefined))
+			);
+		};
 		if (
 			cached &&
 			cached.defaultModelRef === defaultModelRef &&
@@ -1141,18 +1298,23 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			laneRecords = this._laneTracker.getRecords();
 		}
 		const views = this.getBotTeamStore().projectBotViews(
-			liveAgents.flatMap((agent) => {
-				const alias = this.botBindings.alias(agent.agentId);
-				return alias ? [{ ...agent, agentId: alias }] : [];
-			}),
-			laneRecords.flatMap((record) => {
-				const alias = this.botBindings.alias(record.agentId ?? record.laneId);
-				return alias ? [{ ...record, agentId: alias }] : [];
-			}),
+			liveAgents
+				.filter((agent) => inContext(agent.agentId))
+				.flatMap((agent) => {
+					const alias = this.botBindings.alias(agent.agentId);
+					return alias ? [{ ...agent, agentId: alias }] : [];
+				}),
+			laneRecords
+				.filter((record) => inContext(record.agentId ?? record.laneId))
+				.flatMap((record) => {
+					const alias = this.botBindings.alias(record.agentId ?? record.laneId);
+					return alias ? [{ ...record, agentId: alias }] : [];
+				}),
 			defaultModelRef,
+			teamId === undefined,
 		);
-		this._botViews = { defaultModelRef, delegateActive, bindings, views };
-		return [...views];
+		if (!teamId) this._botViews = { defaultModelRef, delegateActive, bindings, views };
+		return teamId ? views.filter((view) => team?.memberAgentIds.includes(view.agentId)) : [...views];
 	}
 
 	/**
@@ -1245,6 +1407,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	upsertPersistentBot(input: UpsertPersistentBotInput): PersistentBotRecord {
 		const store = this.getBotTeamStore();
 		const agentId = normalizeBotOrTeamId(input.agentId, "agentId");
+		this.assertBotDispatchIdle(agentId);
 		store.reload();
 		const existing = store.getBot(agentId);
 		const bindingFields = ["provider", "modelId", "thinkingLevel", "profileId", "canWrite", "instructions"] as const;
@@ -1261,7 +1424,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			bindingChanged &&
 			this._hasWorkerState() &&
 			this.listWorkerAgents().some(
-				(agent) => agent.agentId === this.botBindings.runtime(agentId) && agent.status !== "retired",
+				(agent) => this.botBindings.runtimes(agentId).includes(agent.agentId) && agent.status !== "retired",
 			)
 		)
 			throw new Error(
@@ -1273,9 +1436,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	retirePersistentBot(agentId: string): { retired: boolean; detail: string } {
 		try {
 			agentId = normalizeBotOrTeamId(agentId, "agentId");
-			const runtime = this.botBindings.runtime(agentId);
-			const hasWorker = this._hasWorkerState() && this.listWorkerAgents().some((agent) => agent.agentId === runtime);
-			if (hasWorker) this.retireWorkerAgent(runtime, undefined, { discardPending: true });
+			this.assertBotDispatchIdle(agentId);
+			const runtimes = new Set(this.botBindings.runtimes(agentId));
+			const workers = this._hasWorkerState()
+				? this.listWorkerAgents().filter((agent) => runtimes.has(agent.agentId))
+				: [];
+			if (workers.some((agent) => agent.status !== "retired" && agent.activity !== "idle"))
+				throw new Error(`Bot ${agentId} still has active group or direct work.`);
+			for (const worker of workers) this.retireWorkerAgent(worker.agentId, undefined, { discardPending: true });
+			const hasWorker = workers.length > 0;
 			const bot = this.getBotTeamStore().retireBot(agentId);
 			return {
 				retired: hasWorker || bot !== undefined,
@@ -1289,7 +1458,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	stopPersistentBot(agentId: string): { stopped: boolean; detail: string } {
 		try {
 			agentId = normalizeBotOrTeamId(agentId, "agentId");
-			const res = this.interruptWorkerAgent(this.botBindings.runtime(agentId), undefined, { force: false });
+			const runtimes = new Set(this.botBindings.runtimes(agentId));
+			const results = this.listWorkerAgents()
+				.filter((agent) => runtimes.has(agent.agentId))
+				.map((agent) => this.interruptWorkerAgent(agent.agentId, undefined, { force: false }));
+			const res = results.find((result) => result.interrupted) ?? results[0] ?? { interrupted: false };
 			return {
 				stopped: res.interrupted,
 				detail: res.interrupted
@@ -1349,12 +1522,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		};
 	}
 
-	readBotChatMessages(agentId: string): AgentMessage[] {
+	readBotChatMessages(agentId: string, teamId?: string): AgentMessage[] {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
-		const runtime = this.botBindings.runtime(normId);
+		const team = teamId ? this.getBotTeamStore().getTeam(teamId) : undefined;
+		const runtime = this.botBindings.runtime(normId, teamId, team ? teamIncarnation(team) : undefined);
 		let conv = this.openWorkerTranscript(runtime);
 		const bot = this.getBotTeamStore().getBot(normId);
-		if (!conv && bot?.lastTranscriptRef) {
+		if (!teamId && !conv && bot?.lastTranscriptRef) {
 			conv = this.openWorkerTranscript(bot.lastTranscriptRef);
 		}
 		if (conv) {
@@ -1410,15 +1584,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		}
 
 		const store = this.getBotTeamStore();
-		const allTeams = store.listTeams();
-		const memberTeamIds = allTeams.filter((t) => t.memberAgentIds.includes(normId)).map((t) => t.teamId);
+		const memberTeamIds = teamId ? [teamId] : [];
 		const relevantTeamMessages = memberTeamIds.flatMap((tId) =>
 			store.listTeamMessages(tId).filter((m) => m.targetAgentIds.includes(normId)),
 		);
 		const laneRecords = this.getLaneRecords().filter((r) => r.agentId === runtime || r.laneId === runtime);
 
 		if (relevantTeamMessages.length === 0 && laneRecords.length === 0) {
-			return bot?.lastSummary ? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)] : [];
+			return !teamId && bot?.lastSummary ? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)] : [];
 		}
 
 		const fallbackMessages: AgentMessage[] = [];
@@ -1448,7 +1621,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				timestamp: tm.timestamp,
 			});
 		}
-		if (fallbackMessages.length === 0 && bot?.lastSummary) {
+		if (!teamId && fallbackMessages.length === 0 && bot?.lastSummary) {
 			fallbackMessages.push(this.createSyntheticBotSummaryMessage(bot, bot.lastSummary));
 		}
 		fallbackMessages.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
@@ -1505,50 +1678,99 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	async sendOperatorMessageToBot(
 		agentId: string,
 		message: string,
-		options?: { mode?: "follow_up" | "queue" | "start" },
+		options?: { mode?: "follow_up" | "queue" | "start"; teamId?: string; teamIncarnationId?: string },
 	): Promise<BotOperatorMessageDispatchResult> {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
+		const manager = this.deps.getSessionManager();
+		const teamId = options?.teamId ? normalizeBotOrTeamId(options.teamId, "teamId") : undefined;
+		const team = teamId ? this.getBotTeamStore().getTeam(teamId) : undefined;
+		if (
+			teamId &&
+			(!team?.memberAgentIds.includes(normId) ||
+				(options?.teamIncarnationId && options.teamIncarnationId !== teamIncarnation(team)))
+		)
+			throw new Error("Bot is not a member of the selected group generation.");
+		const context: BotRuntimeContext = {
+			agentId: normId,
+			...(team ? { teamId: team.teamId, teamIncarnationId: teamIncarnation(team) } : {}),
+		};
+		const assertBranchContext = manager.captureBranchContext();
+		const assertBranch = () => {
+			if (this.deps.isDisposed()) throw new Error("Cannot dispatch a bot message after session disposal.");
+			if (this.deps.getSessionManager() !== manager) throw new Error("Bot message belongs to a previous session.");
+			assertBranchContext();
+		};
+		const key = JSON.stringify([manager.getSessionId(), normId, context.teamId, context.teamIncarnationId]);
+		const previous = this.botDispatches.get(key) ?? Promise.resolve();
+		const result = previous.then(() => {
+			assertBranch();
+			return this.dispatchOperatorMessageToBot(context, message, options, assertBranch);
+		});
+		const settled = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.botDispatches.set(key, settled);
+		void settled.then(() => {
+			if (this.botDispatches.get(key) === settled) this.botDispatches.delete(key);
+		});
+		return result;
+	}
+
+	private assertBotDispatchIdle(agentId: string): void {
+		const sessionId = this.deps.getSessionManager().getSessionId();
+		if (
+			[...this.botDispatches.keys()].some((key) => {
+				const [parent, alias] = JSON.parse(key);
+				return parent === sessionId && alias === agentId;
+			})
+		)
+			throw new Error(
+				`Bot ${agentId} has a pending message dispatch; wait for it before editing or retiring the bot.`,
+			);
+	}
+
+	private async dispatchOperatorMessageToBot(
+		context: BotRuntimeContext,
+		message: string,
+		options: { mode?: "follow_up" | "queue" | "start" } | undefined,
+		assertCurrentBranch: () => void,
+	): Promise<BotOperatorMessageDispatchResult> {
+		const { agentId: normId, teamId, teamIncarnationId } = context;
 		const store = this.getBotTeamStore();
-		const runtime = this.botBindings.runtime(normId);
-		store.ensureBotMemoryFile(normId);
-		let bot = store.getBot(normId);
+		if (teamId) {
+			if (store.reload(true)) this._botViews = undefined;
+			const team = store.getTeam(teamId);
+			if (!team || teamIncarnation(team) !== teamIncarnationId || !team.memberAgentIds.includes(normId))
+				throw new Error("Bot membership or selected group changed before dispatch.");
+		}
+		const runtime = this.botBindings.runtime(normId, teamId, teamIncarnationId);
 		let liveAgents: WorkerAgentView[] = [];
 		try {
 			liveAgents = this.listWorkerAgents();
 		} catch {
 			liveAgents = [];
 		}
-		if (!bot) {
-			const live = liveAgents.find((a) => a.agentId === normId);
-			const spec = this.resolveModelSpec(live?.modelRef);
-			bot = store.upsertBot({
-				agentId: normId,
-				provider: spec.provider,
-				modelId: spec.modelId,
-				thinkingLevel: spec.thinkingLevel,
-				lastMessageAt: Date.now(),
-			});
-		} else {
-			store.upsertBot({ agentId: normId, lastMessageAt: Date.now() });
-		}
+		let bot = store.ensureBotForDispatch(normId, () =>
+			this.resolveModelSpec(liveAgents.find((agent) => agent.agentId === runtime)?.modelRef),
+		);
 
-		// The bot's stored model was resolved when it was created or first messaged; it runs on that model as stored.
-		const spec = { provider: bot.provider, modelId: bot.modelId };
 		const requestedMode = options?.mode ?? "follow_up";
 
 		const existingAgent = liveAgents.find((a) => a.agentId === runtime && a.status !== "retired");
 
-		const memoryCtx = store.composeBotUnifiedMemoryContext(normId);
+		const memoryCtx = store.composeBotUnifiedMemoryContext(normId, teamId, teamIncarnationId);
+		const messageOptions = teamId ? { threadId: `team:${teamId}:${teamIncarnationId}` } : undefined;
 
 		if (existingAgent && (requestedMode === "follow_up" || requestedMode === "queue")) {
 			// The bot received its memory block when it started and edits its blackboards directly; repeating the
 			// block in every operator message would bloat its transcript and the chat the operator reads.
-			const modelRef = existingAgent.modelRef ?? `${spec.provider}/${spec.modelId}`;
+			const modelRef = existingAgent.modelRef ?? `${bot.provider}/${bot.modelId}`;
 			if (requestedMode === "queue") {
-				const res = this.sendSessionRootWorkerAgentMessage(runtime, message);
+				const res = this.sendSessionRootWorkerAgentMessage(runtime, message, messageOptions);
 				return { agentId: normId, mode: "queued", messageId: res.messageId, modelRef };
 			}
-			const res = this.followUpSessionRootWorkerAgent(runtime, message);
+			const res = this.followUpSessionRootWorkerAgent(runtime, message, messageOptions);
 			return {
 				agentId: normId,
 				mode: res.steering ? "steered" : res.started ? "followed_up" : "queued",
@@ -1559,8 +1781,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		}
 
 		if (bot.retired) {
-			bot = store.upsertBot({ ...bot, retired: false });
+			bot = store.upsertBot({ agentId: normId, retired: false });
 		}
+		// Use the current record returned by the locked mutation, including another parent's edits.
+		const spec = { provider: bot.provider, modelId: bot.modelId };
 
 		// Fresh worker start with preferredAgentId so lane and worker identity match the persistent bot
 		const baseInstructions = bot.instructions ? `${bot.instructions}\n\nTask:\n${message}` : message;
@@ -1579,8 +1803,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			),
 		);
 
-		this.botBindings.assertCapacity(normId);
-		const assertCurrentBranch = this.deps.getSessionManager().captureBranchContext();
+		const preferredAgentId = `bot-${randomUUID()}`;
+		// Publish the context before execution: recovery never has to guess a group's origin from its name.
+		assertCurrentBranch();
+		this.botBindings.bind(normId, preferredAgentId, teamId, teamIncarnationId);
 		const started = await this.startWorkerDelegation({
 			instructions: fullInstructions,
 			...(bot.profileId ? { profileId: bot.profileId } : {}),
@@ -1592,7 +1818,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					? { thinkingLevel: bot.thinkingLevel }
 					: {}),
 			},
-			preferredAgentId: normId,
+			preferredAgentId,
 			...(activeIds.length > 0
 				? {
 						parallelWork: {
@@ -1609,7 +1835,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const startedAgentId = started.record.agentId ?? started.record.laneId;
 		try {
 			assertCurrentBranch();
-			this.botBindings.bind(normId, startedAgentId);
+			if (startedAgentId !== preferredAgentId) throw new Error("Bot start returned a different runtime identity.");
+			if (teamId) {
+				if (store.reload(true)) this._botViews = undefined;
+				const current = store.getTeam(teamId);
+				if (!current || teamIncarnation(current) !== teamIncarnationId || !current.memberAgentIds.includes(normId))
+					throw new Error("Bot membership or selected group changed while starting.");
+			}
 		} catch (bindingError) {
 			try {
 				const current = this.listWorkerAgents().find((agent) => agent.agentId === startedAgentId);
@@ -1643,6 +1875,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	async sendOperatorMessageToTeam(teamIdRaw: string, message: string): Promise<TeamOperatorMessageDispatchResult> {
+		const manager = this.deps.getSessionManager();
+		const assertBranch = manager.captureBranchContext();
+		const assertContext = () => {
+			if (this.deps.isDisposed() || this.deps.getSessionManager() !== manager)
+				throw new Error("Group message belongs to a previous session.");
+			assertBranch();
+		};
+		assertContext();
 		const teamId = normalizeBotOrTeamId(teamIdRaw, "teamId");
 		const store = this.getBotTeamStore();
 		const team = store.getTeam(teamId);
@@ -1674,20 +1914,26 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			if (matched) {
 				targetAgentIds = [matched];
 				contentForBots = spaceIdx === -1 ? "" : trimmedMessage.slice(spaceIdx + 1).trim();
-			}
+			} else throw new Error(`Bot ${targetRaw} is not a member of group ${teamId}.`);
 		}
 
 		const targets = targetAgentIds.length > 0 ? targetAgentIds : members;
 
 		for (const memberId of targets) {
+			assertContext();
 			try {
-				const botResult = await this.sendOperatorMessageToBot(memberId, contentForBots);
+				const botResult = await this.sendOperatorMessageToBot(memberId, contentForBots, {
+					teamId,
+					teamIncarnationId: teamIncarnation(team),
+				});
+				assertContext();
 				deliveries.push({
 					agentId: memberId,
 					outcome: botResult.mode === "started" ? "started" : botResult.mode === "queued" ? "queued" : "steering",
 					messageId: botResult.messageId,
 				});
 			} catch (err) {
+				assertContext();
 				deliveries.push({
 					agentId: memberId,
 					outcome: "failed",
@@ -1702,10 +1948,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			sender: { kind: "operator" },
 			text: message,
 			timestamp,
-			targetAgentIds,
+			targetAgentIds: [...targets],
 			deliveries,
 		};
-		store.appendTeamMessage(teamMsg);
+		assertContext();
+		store.appendScopedTeamMessage(teamMsg, teamIncarnation(team));
 
 		return {
 			teamId,
@@ -1746,10 +1993,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		};
 		this.deps.getSessionManager().appendCustomEntry(CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE, report);
 		try {
-			const alias = this.botBindings.alias(name);
-			if (!alias) return;
+			const context = this.botBindings.generationContext(name);
+			const alias = context.agentId;
+			if (!context.teamId && !this.botBindings.alias(name)) return;
 			this.getBotTeamStore().recordBotTurnOutcome({
 				agentId: alias,
+				...(context.teamId ? { teamId: context.teamId, teamIncarnationId: context.teamIncarnationId } : {}),
 				summary: report.text,
 				transcriptRef: transcriptReference,
 				timestamp: report.timestamp,

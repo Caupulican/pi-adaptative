@@ -8,7 +8,7 @@ import {
 	SystemOneUsageRefusal,
 } from "../review/system-one-review-port.ts";
 import { TypeSafeEvidenceError, TypeSafeInputError } from "../review/typesafe-contract.ts";
-import type { SystemOneAccessResolver } from "./access.ts";
+import { type SystemOneAccessResolver, SystemOneDisabledError } from "./access.ts";
 import { SYSTEM_ONE_PINNED_MODEL } from "./catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import { containsCredential } from "./projector.ts";
@@ -192,7 +192,8 @@ export class SystemOneJevAdapter implements JevAdapter {
 				if (input.model !== undefined && !driver.matchesModel(outcome.access.model, input.model))
 					throw new SystemOnePreSendError(`System One runs ${outcome.access.model}; ${input.model} was requested`);
 				targetModel = outcome.access.model;
-			} else credentialHint = outcome.setup;
+			} else if (outcome.kind === "disabled") throw new SystemOnePreSendError(outcome.setup);
+			else credentialHint = outcome.setup;
 		} else userKey = (await this.deps.getApiKey?.())?.trim();
 		if (!userKey) {
 			throw new SystemOnePreSendError(
@@ -325,7 +326,8 @@ export class SystemOneJevAdapter implements JevAdapter {
 			} catch (error) {
 				lastError = error;
 				// A usage lease refused before payment is not an outage: nothing was sent, so it is neither classified nor retried.
-				if (error instanceof SystemOneUsageRefusal) throw new SystemOnePreSendError(error.message);
+				if (error instanceof SystemOneUsageRefusal || error instanceof SystemOneDisabledError)
+					throw new SystemOnePreSendError(error.message);
 				if (error instanceof SystemOneReviewError || error instanceof SystemOneObserverError) {
 					owedReceipts = [...owedReceipts, ...error.receipts];
 				}

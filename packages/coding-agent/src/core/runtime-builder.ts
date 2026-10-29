@@ -90,6 +90,8 @@ import { deriveWorkerDispositionFacts } from "./delegation/worker-disposition.ts
 import { captureWorkerReceiptAnchor } from "./delegation/worker-receipt-origin.ts";
 import { execCommand } from "./exec.ts";
 import { PeerReviewController } from "./expert-routing/peer-review.ts";
+import { capturePeerReviewContext } from "./expert-routing/peer-review-context.ts";
+import { PeerReviewJournal } from "./expert-routing/peer-review-journal.ts";
 import type { ExtensionImportAuthority } from "./extension-import-authority.ts";
 import { type ContinuousChatAudit, createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {
@@ -183,7 +185,7 @@ import type { SkillVaultController } from "./skill-vault.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { SystemOneProviderChoice } from "./system-one/access.ts";
-import { systemOneAccessFromSession } from "./system-one/access.ts";
+import { isSystemOneEnabled, systemOneAccessFromSession } from "./system-one/access.ts";
 import type { ClarificationDecisionEngine } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import { FileLocator } from "./system-one/locate.ts";
@@ -481,6 +483,8 @@ export interface RuntimeBuilderDeps {
 	deliverToOwner?(items: readonly string[]): void;
 	/** System One semantic control plane controller. */
 	getSystemOneController?(): SystemOneController | undefined;
+	/** Configured on/off, independent of a missing credential or unavailable evaluator. */
+	isSystemOneEnabled?(): boolean;
 	/** Foreground session-root view of active semantic uncertainties and advisory dispositions. */
 	getSemanticUncertainties?(): SemanticUncertaintyPort | undefined;
 	/** System One steering plane driving semantic validation and certification. */
@@ -636,6 +640,7 @@ export class RuntimeBuilder {
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
+	private _peerReviewController: PeerReviewController | undefined;
 	/** Root's tool mechanics as the last build resolved them, shared with every worker lane. */
 	private _sharedLaneToolOptions: SharedLaneToolOptions = {};
 	/** Exact extensions the owner approved through the live-load API. Discovery never populates this set. */
@@ -969,6 +974,19 @@ export class RuntimeBuilder {
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
 		return this._toolDefinitions.get(name)?.definition;
+	}
+
+	getPeerReviewController(): PeerReviewController | undefined {
+		return !this._mutationAdmissionClosed &&
+			!isWorkerSession() &&
+			!this.deps.getBaseToolsOverride() &&
+			this._createToolAccessPolicy().allows("peer")
+			? this._peerReviewController
+			: undefined;
+	}
+
+	private isSystemOneEnabled(): boolean {
+		return this.deps.isSystemOneEnabled?.() ?? isSystemOneEnabled(this.deps.getSettingsManager());
 	}
 
 	getToolSourceInfo(name: string): SourceInfo | undefined {
@@ -1522,42 +1540,63 @@ export class RuntimeBuilder {
 			this._baseToolDefinitions.set("tool_task", createToolTaskToolDefinition(toolTaskDependencies));
 		}
 		if (!baseToolsOverride) {
-			const systemOneEvidenceStore = toolAccess.allows(SYSTEM_ONE_TOOL_NAME)
-				? TypeSafeEvidenceStore.file(
-						this.deps.getAgentDir(),
-						this.deps.getSessionManager().getSessionId(),
-						this.deps.getSessionManager().getSessionLineageIds(),
-					)
-				: undefined;
+			const systemOneEvidenceStore =
+				this.isSystemOneEnabled() && this.deps.getSystemOneController?.() && toolAccess.allows(SYSTEM_ONE_TOOL_NAME)
+					? TypeSafeEvidenceStore.file(
+							this.deps.getAgentDir(),
+							this.deps.getSessionManager().getSessionId(),
+							this.deps.getSessionManager().getSessionLineageIds(),
+						)
+					: undefined;
 			if (this.deps.getPeerReviewModels && toolAccess.allows("peer")) {
+				this._peerReviewController ??= new PeerReviewController({
+					getLead: () => {
+						const state = this.deps.getAgent().state;
+						return state.model ? { model: state.model, thinkingLevel: state.thinkingLevel } : undefined;
+					},
+					getModels: () => this.deps.getPeerReviewModels?.() ?? [],
+					hasAuth: (model) => this.deps.getModelRegistry().hasConfiguredAuth(model),
+					isExhausted: (model) => this.deps.isModelExhausted(model),
+					getJudge: () => (this.isSystemOneEnabled() ? this.deps.getSystemOneController?.() : undefined),
+					runCompletion: (options) => this.deps.runIsolatedCompletion(options),
+					runtime: {
+						isRoot: () =>
+							this.getPeerReviewController() === this._peerReviewController &&
+							this._peerReviewController !== undefined,
+						isSystemOneEnabled: () => this.isSystemOneEnabled(),
+						openVerificationCount: () =>
+							this.isSystemOneEnabled()
+								? this.deps.getSystemOneController?.()?.verification.status().obligations.length
+								: 0,
+						journal: new PeerReviewJournal(() => this.deps.getSessionManager()),
+						captureContext: (signal) =>
+							capturePeerReviewContext(
+								{
+									getSessionManager: () => this.deps.getSessionManager(),
+									getGoal: () => this.deps.getGoalStateSnapshot(),
+									getCwd: () => this._taskDirectories.cwd,
+									isCurrent: () =>
+										this.getPeerReviewController() === this._peerReviewController &&
+										this._peerReviewController !== undefined,
+									isSystemOneEnabled: () => this.isSystemOneEnabled(),
+								},
+								signal,
+							),
+					},
+					requestVerification: (findings, kind) => {
+						if (this.isSystemOneEnabled())
+							this.deps.getSystemOneController?.()?.verification.require(
+								kind === "evidence_gap" ? PEER_REVIEW_EVIDENCE_SOURCE : "peer_review",
+								findings.map(
+									(finding) => `${finding.summary}: ${finding.requiredCheck}. Evidence: ${finding.evidence}`,
+								),
+							);
+					},
+				});
 				this._baseToolDefinitions.set(
 					"peer",
-					createPeerReviewToolDefinition(
-						new PeerReviewController({
-							getLead: () => {
-								const state = this.deps.getAgent().state;
-								return state.model ? { model: state.model, thinkingLevel: state.thinkingLevel } : undefined;
-							},
-							getModels: () => this.deps.getPeerReviewModels?.() ?? [],
-							hasAuth: (model) => this.deps.getModelRegistry().hasConfiguredAuth(model),
-							isExhausted: (model) => this.deps.isModelExhausted(model),
-							getJudge: () => this.deps.getSystemOneController?.(),
-							runCompletion: (options) => this.deps.runIsolatedCompletion(options),
-							captureVerificationFence: async () => {
-								const verification = this.deps.getSystemOneController?.()?.verification;
-								if (!verification) throw new Error("System One verification is unavailable");
-								return verification.captureReviewFence();
-							},
-							requestVerification: (findings, kind) =>
-								this.deps.getSystemOneController?.()?.verification.require(
-									kind === "evidence_gap" ? PEER_REVIEW_EVIDENCE_SOURCE : "peer_review",
-									findings.map(
-										(finding) =>
-											`${finding.summary}: ${finding.requiredCheck}. Evidence: ${finding.evidence}`,
-									),
-								),
-						}),
-						() => this.deps.getSystemOneController?.()?.verification,
+					createPeerReviewToolDefinition(this._peerReviewController, () =>
+						this.isSystemOneEnabled() ? this.deps.getSystemOneController?.()?.verification : undefined,
 					),
 				);
 			}

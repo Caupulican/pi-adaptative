@@ -1,5 +1,6 @@
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import type { HarnessCapability } from "./capability-contract.ts";
+import { BOT_MESSAGE_TOOL_NAME } from "./delegation/bot-message-contract.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 import {
 	CONTINUOUS_CHAT_DATE_TOOL_NAME,
@@ -100,6 +101,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["pi_collaboration", policy([["process.exec"], ["workflow.delegate"]], "process-launcher")],
 	["list_peers", policy([["workflow.delegate"]], "control-plane")],
 	["agent_send", policy([["workflow.delegate"]], "control-plane")],
+	[BOT_MESSAGE_TOOL_NAME, policy([["workflow.message"]], "control-plane")],
 	["improvement_loop", policy([["process.exec", "tests.execute"]], "process-launcher")],
 	["task_automation", policy([["process.exec", "tests.execute"]], "process-launcher")],
 ]);
@@ -172,6 +174,7 @@ export function capabilitySurvivesReadOnly(capability: HarnessCapability): boole
 		capability === "process.exec" ||
 		capability === "memory.query" ||
 		capability === "semantic.judge" ||
+		capability === "workflow.message" ||
 		capability === "settings.read"
 	);
 }
@@ -381,6 +384,8 @@ export function describeToolCapabilityAuthority(toolName: string): string {
 			return "judgment";
 		case "workflow.delegate":
 			return "delegation";
+		case "workflow.message":
+			return "messaging";
 		case "skill.read":
 		case "skill.write":
 			return "skill";

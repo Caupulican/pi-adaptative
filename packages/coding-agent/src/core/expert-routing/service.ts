@@ -26,13 +26,13 @@ import type { ExpertOutcomeStore } from "./outcome-store.ts";
 import type { ExpertRankingPolicy } from "./ranking.ts";
 import { buildSelectionTrace } from "./selection-trace.ts";
 import {
+	ALL_ROUTE_CATEGORIES,
 	CATEGORY_THINKING,
 	type CategoryOutcome,
 	cardFitsCategory,
 	chooseRouteCategory,
 	classifyLightweightModels,
 	classifySupersededModels,
-	ROUTE_CATEGORIES,
 	type RouteCategory,
 	type RouteChoiceJudge,
 } from "./system-one-choice.ts";
@@ -164,8 +164,8 @@ export class ExpertSelectionService {
 
 	/**
 	 * System One judges which category of model and thinking the task needs; code picks the model in
-	 * that category from facts. Without a judgment the routing band maps to a category, so the
-	 * fallback is a category too, never the composite score. A team selection keeps the ranking.
+	 * that category from facts. Unbound/disabled callers use deterministic ranking without
+	 * claiming semantic fitness. A team selection keeps the ranking.
 	 */
 	private async chooseWithSystemOne(
 		request: WorkerCapabilityRequest,
@@ -180,6 +180,17 @@ export class ExpertSelectionService {
 			  }
 			| undefined,
 	): Promise<ExpertSelectionPlan> {
+		const judge = this.getJudge();
+		if (!judge || judge.isRouteJudgmentEnabled?.() === false)
+			return {
+				...ranked,
+				decidedBy: {
+					kind: "ranking",
+					reasons: [
+						`${judge ? "System One is off" : "System One is unbound"}; deterministic configured ranking, semantic task fitness unverified`,
+					],
+				},
+			};
 		if (ranked.mode !== "single") return { ...ranked, decidedBy: { kind: "ranking", reasons: ["team selection"] } };
 		const withCards = scored.filter((entry) => entry.candidate.card !== undefined);
 		const unique = [...new Map(withCards.map((entry) => [entry.candidate.card!.ref, entry])).values()].map(
@@ -189,24 +200,21 @@ export class ExpertSelectionService {
 			}),
 		);
 		const cards = withFlashCategory(unique, await this.lightweightModels(unique, options?.signal));
-		const available = (Object.keys(ROUTE_CATEGORIES) as RouteCategory[]).filter((category) =>
-			cards.some((card) => cardFitsCategory(card, category)),
-		);
 		const text =
 			options?.requestText ??
 			(typeof request.task_signature?.prompt === "string" ? request.task_signature.prompt : "");
 		const judged = options?.category;
-		const outcome: CategoryOutcome =
-			judged && available.includes(judged.category)
-				? judged
-				: text.trim()
-					? await chooseRouteCategory(this.getJudge(), {
-							request: text,
-							available,
-							...(options?.signal ? { signal: options.signal } : {}),
-						})
-					: { kind: "fallback", reason: "no request text to judge" };
-		const category = outcome.kind === "chosen" ? outcome.category : fallbackCategory(request.routing_band, available);
+		const outcome: CategoryOutcome = judged
+			? judged
+			: text.trim()
+				? await chooseRouteCategory(this.getJudge(), {
+						request: text,
+						available: ALL_ROUTE_CATEGORIES,
+						...(options?.signal ? { signal: options.signal } : {}),
+					})
+				: { kind: "fallback", reason: "no request text to judge" };
+		if (outcome.kind !== "chosen") throw new NoEligibleExpertError(request, []);
+		const category = outcome.category;
 		const picked = category
 			? await this.pickInCategory(
 					category,
@@ -217,14 +225,7 @@ export class ExpertSelectionService {
 					options?.signal,
 				)
 			: undefined;
-		if (!picked)
-			return {
-				...ranked,
-				decidedBy: {
-					kind: "ranking",
-					reasons: [outcome.kind === "fallback" ? outcome.reason : "no model in the chosen category"],
-				},
-			};
+		if (!picked) throw new NoEligibleExpertError(request, []);
 		const descriptor = picked.entry.candidate.descriptor;
 		const binding: ExpertBinding = {
 			schema_version: EXPERT_ROUTING_SCHEMA_VERSION,
@@ -246,28 +247,25 @@ export class ExpertSelectionService {
 			primary: binding,
 			team: [binding],
 			bindings: [binding],
-			decidedBy:
-				outcome.kind === "chosen"
-					? {
-							kind: "system_one",
-							confidence: outcome.confidence,
-							reasons: [
-								described,
-								`${outcome.stage}: ${outcome.reasons.join("; ")}`,
-								...(outcome.stage === "provisional" ? ["unsure: the choice stands with a doubt"] : []),
-							],
-						}
-					: { kind: "ranking", reasons: [described, `routing band fallback: ${outcome.reason}`] },
+			decidedBy: {
+				kind: "system_one",
+				confidence: outcome.confidence,
+				reasons: [
+					described,
+					`${outcome.stage}: ${outcome.reasons.join("; ")}`,
+					...(outcome.stage === "provisional" ? ["unsure: the choice stands with a doubt"] : []),
+				],
+			},
 		};
 	}
 
 	/** System One's lightweight-variant judgment per exact pool of models; a pool change is a new key. */
-	private readonly lightweight = new Map<string, ReadonlySet<string>>();
+	private readonly lightweight = new Map<string, ReadonlyMap<string, boolean>>();
 
 	private async lightweightModels(
 		cards: readonly ModelCapabilityCard[],
 		signal?: AbortSignal,
-	): Promise<ReadonlySet<string>> {
+	): Promise<ReadonlyMap<string, boolean>> {
 		const key = cards
 			.map((card) => card.ref)
 			.sort()
@@ -280,7 +278,7 @@ export class ExpertSelectionService {
 			signal,
 		);
 		// An outage classifies nothing and is not cached, so the next selection asks again.
-		if (flash.size > 0) this.lightweight.set(key, flash);
+		if (flash.size === cards.length) this.lightweight.set(key, flash);
 		return flash;
 	}
 
@@ -369,18 +367,4 @@ export class ExpertSelectionService {
 	release(plan: ExpertSelectionPlan): void {
 		this.capacity.release(plan.bindings);
 	}
-}
-
-/** The category the classifier's routing band stands for when System One has not judged. */
-function fallbackCategory(
-	band: WorkerCapabilityRequest["routing_band"],
-	available: readonly RouteCategory[],
-): RouteCategory | undefined {
-	const preferred: readonly RouteCategory[] =
-		band === "cheap"
-			? ["flash_light", "strong_medium"]
-			: band === "expensive"
-				? ["strong_deep", "strong_medium"]
-				: ["strong_medium", "flash_deep", "strong_deep"];
-	return preferred.find((category) => available.includes(category)) ?? available[0];
 }

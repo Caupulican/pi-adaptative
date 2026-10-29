@@ -24,6 +24,8 @@ export const HARNESS_CAPABILITIES = [
 	"research.execute",
 	"workflow.plan",
 	"workflow.delegate",
+	/** Send messages to existing parent-owned workers; no creation or lifecycle control. */
+	"workflow.message",
 	"policy.modify",
 	"learning.propose",
 	"publish.execute",

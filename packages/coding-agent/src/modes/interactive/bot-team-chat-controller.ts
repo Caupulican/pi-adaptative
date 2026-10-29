@@ -20,7 +20,7 @@ import { theme } from "../../presentation/theme-model.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 
 export interface BotTeamChatSessionPort {
-	listPersistentBots(): PersistentBotView[];
+	listPersistentBots(defaultModelRef?: string, teamId?: string): PersistentBotView[];
 	listPersistentTeams(): PersistentTeamRecord[];
 	getPersistentTeam(teamId: string): PersistentTeamRecord | undefined;
 	upsertPersistentBot(input: UpsertPersistentBotInput): PersistentBotRecord;
@@ -35,7 +35,7 @@ export interface BotTeamChatSessionPort {
 		options?: { mode?: "follow_up" | "queue" | "start" },
 	): Promise<BotOperatorMessageDispatchResult>;
 	sendOperatorMessageToTeam(teamId: string, message: string): Promise<TeamOperatorMessageDispatchResult>;
-	readBotChatMessages(agentId: string): AgentMessage[];
+	readBotChatMessages(agentId: string, teamId?: string): AgentMessage[];
 	readTeamChatMessages(teamId: string): AgentMessage[];
 	subscribeBotTeamUpdates(listener: (change: BotTeamChange) => void): () => void;
 	resolveModelSpec(rawModel?: string): { provider: string; modelId: string; thinkingLevel?: string };
@@ -224,6 +224,10 @@ export class BotTeamChatController {
 					}
 					return false;
 				case "bot":
+					if (this.activeTarget.kind === "team")
+						return this.dispatchToTeam(this.activeTarget.teamId, `@${target.agentId} ${addressed.body}`, {
+							refreshOnly: true,
+						});
 					return this.dispatchToBot(target.agentId, addressed.body);
 				case "team":
 					return this.dispatchToTeam(target.teamId, addressed.body);
@@ -500,7 +504,7 @@ export class BotTeamChatController {
 		const port = this.host.getSessionPort();
 		const team = port.getPersistentTeam(teamId);
 		const members = team?.memberAgentIds ?? [];
-		const liveBots = port.listPersistentBots();
+		const liveBots = port.listPersistentBots(undefined, teamId);
 		const memberStatus = members
 			.map((memberId) => {
 				const bot = liveBots.find((b) => b.agentId === memberId);

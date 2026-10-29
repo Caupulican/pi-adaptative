@@ -18,6 +18,8 @@ import { confidenceGate } from "../system-one/authority-line.ts";
 import type { ModelCapabilityCard } from "./capability-card.ts";
 
 export interface RouteChoiceJudge {
+	isRouteJudgmentEnabled?(): boolean;
+	evaluateWorkerTaskFit?(input: WorkerTaskFitInput, signal?: AbortSignal): Promise<Record<string, unknown>>;
 	evaluateRouteChoice(
 		input: { readonly request: string; readonly options: readonly { id: string; description: string }[] },
 		signal?: AbortSignal,
@@ -43,6 +45,14 @@ export interface RouteChoiceJudge {
 		input: { readonly models: readonly { id: string; description: string }[] },
 		signal?: AbortSignal,
 	): Promise<Record<string, unknown>>;
+}
+
+export interface WorkerTaskFitInput {
+	readonly instructions: string;
+	readonly objective: string;
+	readonly model: string;
+	readonly thinkingLevel: string;
+	readonly role: string;
 }
 
 export const supersededQuestionId = (index: number): string => `superseded_${index}`;
@@ -277,25 +287,28 @@ export async function classifySupersededModels(
 
 /**
  * Which models are lightweight speed variants, as System One judges from their identities (never a
- * name rule in code). A settled yes is flash; anything else is not. System One unavailable: none.
+ * name rule in code). Settled true/false classify the model; uncertainty stays absent from the map.
  */
 export async function classifyLightweightModels(
 	judge: RouteChoiceJudge | undefined,
 	models: readonly { id: string; description: string }[],
 	signal?: AbortSignal,
-): Promise<Set<string>> {
-	if (!judge?.evaluateLightweightModels || models.length === 0) return new Set();
+): Promise<Map<string, boolean>> {
+	if (!judge?.evaluateLightweightModels || models.length === 0) return new Map();
 	try {
 		const answers = await judge.evaluateLightweightModels({ models }, signal);
-		return new Set(
-			models.filter((_, index) => settledAnswer(answers[lightweightQuestionId(index)]) === true).map((m) => m.id),
-		);
+		const classified = new Map<string, boolean>();
+		models.forEach((model, index) => {
+			const result = settledAnswer(answers[lightweightQuestionId(index)]);
+			if (result !== undefined) classified.set(model.id, result);
+		});
+		return classified;
 	} catch {
-		return new Set();
+		return new Map();
 	}
 }
 
 /** Whether a card belongs to a category's model class: flash models for flash_*, reasoning non-flash models for strong_*. */
 export function cardFitsCategory(card: ModelCapabilityCard, category: RouteCategory): boolean {
-	return category.startsWith("flash") ? card.flash : card.reasoning && !card.flash;
+	return category.startsWith("flash") ? card.flash === true : card.reasoning && card.flash === false;
 }

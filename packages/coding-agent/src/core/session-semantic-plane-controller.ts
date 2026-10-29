@@ -10,6 +10,9 @@ import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
+import { isSystemOneEnabled } from "./system-one/access.ts";
+import { accountPassBindings } from "./system-one/account-pass-wiring.ts";
+import type { SystemOneController } from "./system-one/controller.ts";
 import type { SemanticUncertaintyPort } from "./system-one/semantic-doubts.ts";
 import { type SemanticEvaluationRecord, verdictFromEvaluation } from "./system-one/semantic-evaluation-ledger.ts";
 import {
@@ -22,7 +25,10 @@ export interface SessionSemanticPlaneControllerDeps {
 	readonly agentDirForLedger: string;
 	isDisposed(): boolean;
 	getSessionManager(): SessionManager;
-	getSteeringPlane(): SystemOneSteeringPlane | undefined;
+	getSystemOneSettings(): { enabled?: boolean };
+	readonly systemOneEnabled?: boolean;
+	readonly controller?: SystemOneController;
+	readonly steeringPlane?: SystemOneSteeringPlane;
 }
 
 /** node:sqlite reports a locked (5) or busy (6) database as ERR_SQLITE_ERROR with that errcode. */
@@ -34,6 +40,8 @@ function isSqliteBusy(error: unknown): boolean {
 
 export class SessionSemanticPlaneController {
 	private readonly deps: SessionSemanticPlaneControllerDeps;
+	private readonly configuredController?: SystemOneController;
+	private configuredSteeringPlane?: SystemOneSteeringPlane;
 	readonly health = new SemanticPlaneHealthRecorder();
 	private recordedEngineSource?: SemanticDecisionEngine;
 	private recordedEngine?: SemanticDecisionEngine;
@@ -45,10 +53,44 @@ export class SessionSemanticPlaneController {
 
 	constructor(deps: SessionSemanticPlaneControllerDeps) {
 		this.deps = deps;
+		this.configuredController = deps.controller;
+		this.configuredSteeringPlane = deps.steeringPlane;
+		this.bindSemanticObserver(this.configuredSteeringPlane);
+		this.configuredController?.setEvaluationObserver(this.health);
+		this.configuredController?.setAccountPassStore(
+			accountPassBindings({
+				getLedger: () => this.getDecisionLedger(),
+				getSessionId: () => this.deps.getSessionManager().getSessionId(),
+			}),
+		);
 		this.health.bindDurable(
 			() => this.semanticLedgerSink(),
 			() => this.deps.getSessionManager().getSessionId(),
 		);
+	}
+
+	get enabled(): boolean {
+		return isSystemOneEnabled(this.deps, { enabled: this.deps.systemOneEnabled });
+	}
+
+	get controller(): SystemOneController | undefined {
+		return this.enabled ? this.configuredController : undefined;
+	}
+
+	get steeringPlane(): SystemOneSteeringPlane | undefined {
+		return this.enabled ? this.configuredSteeringPlane : undefined;
+	}
+
+	set steeringPlane(plane: SystemOneSteeringPlane | undefined) {
+		this.configuredSteeringPlane = plane;
+	}
+
+	listVerificationFindings() {
+		return this.configuredController?.verification.status().obligations ?? [];
+	}
+
+	setEvaluationIdleListener(listener: (() => void) | undefined): void {
+		this.configuredController?.setEvaluationIdleListener(listener);
 	}
 
 	/**
@@ -58,7 +100,7 @@ export class SessionSemanticPlaneController {
 	 * Memoized per underlying engine so collaborators wired once keep a stable engine identity.
 	 */
 	recordingSemanticEngine(): SemanticDecisionEngine | undefined {
-		const engine = this.deps.getSteeringPlane()?.decisionEngine;
+		const engine = this.steeringPlane?.decisionEngine;
 		if (!engine) return undefined;
 		if (this.recordedEngineSource === engine && this.recordedEngine) {
 			return this.recordedEngine;
@@ -219,7 +261,7 @@ export class SessionSemanticPlaneController {
 
 	/** Observed health of this session's semantic plane. */
 	getSemanticPlaneHealth(): SemanticPlaneHealth {
-		return this.health.getHealth(Boolean(this.deps.getSteeringPlane()?.decisionEngine));
+		return this.health.getHealth(Boolean(this.steeringPlane?.decisionEngine));
 	}
 
 	/** Live semantic uncertainty decisions, scoped to this root session by the health recorder. */

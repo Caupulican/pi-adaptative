@@ -39,6 +39,7 @@ import {
 	getToolCapabilityPolicy,
 	toolSurvivesReadOnly,
 } from "../tool-capability-policy.ts";
+import { BOT_MESSAGE_TOOL_NAME } from "./bot-message-contract.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
 import { YOLO_WORKER_CAPABILITIES } from "./worker-execution-policy.ts";
 import { LEAF_WORKER_DELEGATION_LIMITS } from "./worker-fleet-limits.ts";
@@ -491,6 +492,13 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	const configuredToolNames = mapToolNamesForPlatform(
 		input.authority?.toolNames ?? input.base?.profile.toolNames ?? inheritedSurfaceNames,
 	).filter((toolName) => !WORKER_ROOT_MEMORY_TOOL_NAMES.has(toolName));
+	// The parent brokers local messages separately from its own external chat tool surface.
+	// Explicit tool lists and profiles remain exact.
+	const defaultBotMessaging =
+		!input.base &&
+		input.authority?.toolNames === undefined &&
+		input.workerToolAdapterNames?.includes(BOT_MESSAGE_TOOL_NAME) === true;
+	if (defaultBotMessaging) configuredToolNames.push(BOT_MESSAGE_TOOL_NAME);
 	const deniedForegroundTools = new Set(input.base ? [] : (input.foregroundEnvelope?.deniedTools ?? []));
 	const requestedToolNames = [
 		...new Set(
@@ -538,7 +546,13 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 			(toolName) =>
 				toolName !== STABLE_SHELL_TOOL_NAME &&
 				!inheritedSurface.has(toolName) &&
-				!(WORKER_MEMORY_BROKER_TOOL_NAME_SET.has(toolName) && boundedMemoryReadInherited),
+				!(WORKER_MEMORY_BROKER_TOOL_NAME_SET.has(toolName) && boundedMemoryReadInherited) &&
+				!(
+					!input.base &&
+					toolName === BOT_MESSAGE_TOOL_NAME &&
+					input.workerToolAdapterNames?.includes(BOT_MESSAGE_TOOL_NAME) &&
+					input.authority?.capabilities?.includes("workflow.message")
+				),
 		);
 		if (uninheritedTools.length > 0) {
 			return { ok: false, reason: `orchestration_tool_unavailable:${uninheritedTools.join(",")}` };
@@ -552,6 +566,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	);
 	capabilities.delete("workflow.delegate");
 	capabilities.delete("memory.mutate");
+	if (defaultBotMessaging && input.authority?.capabilities === undefined) capabilities.add("workflow.message");
 	if (input.yolo) {
 		for (const capability of YOLO_WORKER_CAPABILITIES) {
 			capabilities.add(capability);

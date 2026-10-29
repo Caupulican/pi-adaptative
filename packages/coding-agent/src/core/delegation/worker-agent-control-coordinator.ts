@@ -478,6 +478,19 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return this.followUpAcceptedAgent(agent, message, options);
 	}
 
+	/** Message an existing session peer without acquiring its lifecycle controls. */
+	messageWorkerPeer(
+		agentId: string,
+		message: string,
+		options: WorkerAgentMessageOptions & { senderAgentId: string },
+	): ReturnType<WorkerAgentControlPort["followUpWorkerAgent"]> {
+		this.requireControl();
+		const agent = this.requireSessionPeer(agentId, { callerAgentId: options.senderAgentId });
+		if (agent.agentId === options.senderAgentId) throw new Error("A worker cannot message itself.");
+		this.assertAgentAcceptsNewMessages(agent, options.idempotencyKey);
+		return this.followUpAcceptedAgent(agent, message, options);
+	}
+
 	sendSessionRootWorkerAgentMessage(
 		agentId: string,
 		message: string,
@@ -504,10 +517,20 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		);
 	}
 
-	replyToWorkerAgentMessage(sourceAgentId: string, message: string, replyToMessageId: string): WorkerAgentReplyResult {
+	replyToWorkerAgentMessage(
+		sourceAgentId: string,
+		message: string,
+		replyToMessageId: string,
+		authorizeRequest?: (request: Pick<WorkerAgentMessage, "senderAgentId" | "threadId">) => void,
+	): WorkerAgentReplyResult {
 		this.requireControl();
 		const source = this.requireKnownAgent(sourceAgentId);
 		const sourceMailbox = this.getMailbox(source.agentId);
+		const request = sourceMailbox.getMessage(replyToMessageId);
+		if (authorizeRequest) {
+			if (!request) throw new Error("Reply group provenance is no longer available.");
+			authorizeRequest(request);
+		}
 		const completedReply = sourceMailbox.resolveCompletedReply(replyToMessageId, message);
 		const activeAcknowledgementId = sourceMailbox.getReplyAcknowledgementId(replyToMessageId);
 		if (
@@ -536,7 +559,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				skipReason: "worker_reply_already_accepted",
 			};
 		}
-		const request = sourceMailbox.getMessage(replyToMessageId);
 		if (!request || request.deliveredAt === undefined || request.expectReply !== true) {
 			throw new Error("Worker reply does not reference a delivered reply-expected message.");
 		}

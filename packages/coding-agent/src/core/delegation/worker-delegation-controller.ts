@@ -19,6 +19,7 @@ import type {
 	IsolatedCompletionResult,
 	WorkerDelegationRunOutcome,
 } from "../agent-session-contracts.ts";
+import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
 import type { CapabilityEnvelope, WorkerClaim, WorkerCommandReceipt, WorkerRequest } from "../autonomy/contracts.ts";
 import {
 	buildToolkitScriptOperation,
@@ -42,6 +43,7 @@ import {
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
+import { buildCapabilityCard, describeModelCard } from "../expert-routing/capability-card.ts";
 import {
 	chooseHostRouteProfile,
 	MAX_ROUTE_CHOICE_REQUEST_CHARACTERS,
@@ -54,6 +56,7 @@ import type {
 	HmoeTeamStrategy,
 	HmoeWeights,
 } from "../expert-routing/vocabulary.ts";
+import { WorkerTaskFitness } from "../expert-routing/worker-task-fitness.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import type { LaneMemoryCapacitySource, WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import {
@@ -131,7 +134,7 @@ import type {
 } from "../settings/settings-schema.ts";
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import type { SystemOneProviderChoice } from "../system-one/access.ts";
-import { systemOneAccessFromSession } from "../system-one/access.ts";
+import { isSystemOneEnabled, systemOneAccessFromSession } from "../system-one/access.ts";
 import { collectWorkerReportClaimReceipts } from "../system-one/claim-delivery.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import type { ToolkitScript } from "../toolkit/script-registry.ts";
@@ -148,6 +151,7 @@ import {
 	releaseFailureCause,
 } from "../util/resource-release.ts";
 import type { TimerSource } from "../util/timer-port.ts";
+import { BOT_MESSAGE_TOOL_NAME, type BotMessageDirectory } from "./bot-message-contract.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
 import {
 	type SanitizedContextForkMessage,
@@ -431,6 +435,7 @@ function describeReapedWorkerProcesses(laneId: string, processes: readonly strin
 }
 
 export interface WorkerDelegationControllerDeps {
+	createBotMessageDirectory?(senderAgentId: string, attemptId: string): BotMessageDirectory;
 	isDisposed(): boolean;
 	getSessionId(): string;
 	getCwd(): string;
@@ -445,6 +450,7 @@ export interface WorkerDelegationControllerDeps {
 	getForegroundThinkingLevel?(): OrchestrationThinkingLevel;
 	/** The session's existing System One owner; admission never creates a separate reviewer. */
 	getRouteChoiceJudge?(): RouteChoiceJudge | undefined;
+	isSystemOneEnabled?(): boolean;
 	getForegroundToolNames?(): readonly string[];
 	isDelegateToolActive(): boolean;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
@@ -737,6 +743,7 @@ function boundedReleaseCause(cause: string): string {
 }
 
 export class WorkerDelegationController {
+	private readonly taskFitness = new WorkerTaskFitness();
 	private readonly deps: WorkerDelegationControllerDeps;
 	private readonly workerAbort = new AbortController();
 	/** Actual admitted continuations and execution promises, independent of durable lane status. */
@@ -3029,6 +3036,7 @@ export class WorkerDelegationController {
 			this.deps.getForegroundToolNames?.() ?? this.deps.getCapabilityEnvelope()?.allowedTools ?? [],
 		);
 		const names: string[] = [];
+		if (this.deps.createBotMessageDirectory) names.push(BOT_MESSAGE_TOOL_NAME);
 		if (active.has("artifact_retrieve") && this.deps.getArtifactStore) names.push("artifact_retrieve");
 		if (active.has("skill") && this.deps.getSkillReadBroker) names.push("skill");
 		if (active.has("skill_audit") && this.deps.getSkillAuditSource) names.push("skill_audit");
@@ -3996,6 +4004,61 @@ export class WorkerDelegationController {
 		);
 	}
 
+	/** The same final task/model check covers explicit, inherited and fallback worker bindings. */
+	private async checkWorkerTaskFitness(
+		request: WorkerDelegationRequest,
+		admission: Extract<WorkerAdmission, { ok: true }>,
+		signal?: AbortSignal,
+	): Promise<string | undefined> {
+		if (
+			!this.deps.getSettingsManager().getModelRouterSettings().enabled ||
+			!(this.deps.isSystemOneEnabled?.() ?? isSystemOneEnabled(this.deps.getSettingsManager()))
+		)
+			return;
+		const judge = this.deps.getRouteChoiceJudge?.();
+		if (judge?.isRouteJudgmentEnabled?.() === false) return;
+		const sessionId = this.deps.getSessionId();
+		const cwd = this.deps.getCwd();
+		const objective = this.goalForWorkerRequest(request)?.userGoal ?? "";
+		const binding = admission.shipment.modelBinding;
+		const model = structuredClone(admission.shipment.model);
+		let failure: string | undefined;
+		try {
+			failure = await this.taskFitness.check(
+				judge,
+				{
+					instructions: request.instructions,
+					objective,
+					model: describeModelCard(buildCapabilityCard(model, { subscription: false, evidence: "unprobed" })),
+					thinkingLevel: binding.thinkingLevel,
+					role: admission.shipment.profile.role,
+				},
+				signal ?? this.workerAbort.signal,
+			);
+		} catch (error) {
+			failure = `worker_task_fitness_unavailable:${error instanceof Error ? error.message : String(error)}`;
+		}
+		if (
+			!this.deps.getSettingsManager().getModelRouterSettings().enabled ||
+			!(this.deps.isSystemOneEnabled?.() ?? isSystemOneEnabled(this.deps.getSettingsManager())) ||
+			judge?.isRouteJudgmentEnabled?.() === false
+		)
+			return;
+		const current = this.resolveWorkerAdmission(request, admission.executionContract);
+		if (
+			this.deps.isDisposed() ||
+			this.deps.getSessionId() !== sessionId ||
+			this.deps.getCwd() !== cwd ||
+			this.deps.getRouteChoiceJudge?.() !== judge ||
+			this.goalForWorkerRequest(request)?.userGoal !== (objective || undefined) ||
+			!current.ok ||
+			!isDeepStrictEqual(current.shipment.modelBinding, binding) ||
+			!isDeepStrictEqual(current.shipment.model, model)
+		)
+			return "worker_task_fitness_stale";
+		return failure;
+	}
+
 	private async selectFreshWorkerRoute(
 		request: WorkerDelegationRequest,
 		admission: Extract<WorkerAdmission, { ok: true }>,
@@ -4006,6 +4069,7 @@ export class WorkerDelegationController {
 		const modelPinPolicy = settingsManager.getWorkerModelPinPolicy();
 		if (
 			!judge ||
+			!(this.deps.isSystemOneEnabled?.() ?? isSystemOneEnabled(settingsManager)) ||
 			!settingsManager.getModelRouterSettings().enabled ||
 			request.authority?.model !== undefined ||
 			request.authority?.thinkingLevel !== undefined ||
@@ -4286,6 +4350,11 @@ export class WorkerDelegationController {
 			}
 		}
 		if (reuse.outcome === "unavailable") return { kind: "refused", skipReason: reuse.skipReason };
+		const fitnessFailure = await this.checkWorkerTaskFitness(request, shared, signal);
+		if (fitnessFailure) {
+			if (reuse.outcome === "fresh") reuse.releaseAllocation?.();
+			return { kind: "refused", skipReason: fitnessFailure };
+		}
 		if (reuse.outcome === "reuse") {
 			const current = this.resolveWorkerAdmission(
 				{ ...request, profileId: shared.executionContract.worker.profile.profileId },
@@ -4653,6 +4722,18 @@ export class WorkerDelegationController {
 			releaseAllocation = selected.releaseAllocation;
 			admission = selected.admission;
 		}
+		if (existingRecord) {
+			const attempt = this.lifecycle.getActiveAttempt(existingRecord.laneId);
+			const current = attempt ? this.resolveWorkerAdmission(request, attempt.dispatch.executionContract) : undefined;
+			const failure = current?.ok
+				? await this.checkWorkerTaskFitness(request, current)
+				: "worker_task_fitness_binding_unavailable";
+			if (failure) {
+				if (attempt && this.lifecycle.getActiveAttempt(existingRecord.laneId)?.attemptId === attempt.attemptId)
+					this.cancelAndPublish(this.lifecycle, existingRecord.laneId, failure);
+				return { started: false, skipReason: failure };
+			}
+		}
 		let outcome: PreparedWorkerRun;
 		try {
 			outcome = this.runOnceWithAdmission(request, onStarted, existingRecord, admission, !existingRecord);
@@ -4976,6 +5057,32 @@ export class WorkerDelegationController {
 			? getProcessWorkRun(this.deps.getAgentDir(), "outputs", "tool-streams").path
 			: undefined;
 		const adapterSources: WorkerToolAdapterSources = {};
+		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === BOT_MESSAGE_TOOL_NAME)) {
+			const directory = this.deps.createBotMessageDirectory?.(agentId, durableHandle.attemptId);
+			if (!directory) throw new Error("Bot message directory is unavailable.");
+			adapterSources.botMessages = {
+				list: (teamId) => directory.list(teamId),
+				send: (target, message, expectReply, invocationId, teamId) => {
+					const runtime = directory.resolve(target, teamId);
+					const outcome = this.agentControl.messageWorkerPeer(runtime, message, {
+						senderAgentId: agentId,
+						expectReply,
+						threadId: directory.threadId(teamId),
+						idempotencyKey: conversation.toolInvocationIdentity(invocationId, BOT_MESSAGE_TOOL_NAME),
+					});
+					if (!outcome.messageId)
+						throw new Error(`Bot message was not accepted: ${outcome.skipReason ?? "unknown reason"}`);
+					directory.recordSent(outcome.messageId, target, message);
+					return outcome;
+				},
+				reply: (messageId, message, teamId) => {
+					directory.assertCurrent();
+					return this.agentControl.replyToWorkerAgentMessage(agentId, message, messageId, (request) =>
+						directory.authorizeReply(request.threadId, request.senderAgentId, teamId),
+					);
+				},
+			};
+		}
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === SYSTEM_ONE_TOOL_NAME)) {
 			const credentialBoundary = this.deps.getCredentialExposureBoundary?.();
 			adapterSources.systemOne = {
@@ -5222,6 +5329,10 @@ export class WorkerDelegationController {
 				requirementIds: prepared.attempt!.dispatch.requirementIds ?? [],
 				reportHandshake: this.deps.getSettingsManager().getWorkerDelegationSettings().reportHandshake,
 				request: workerRequest,
+				assertTaskFitness: async (instructions, signal) => {
+					const failure = await this.checkWorkerTaskFitness({ ...request, instructions }, admission, signal);
+					if (failure) throw new BoundedCompletionFailureError("failed", "worker_task_model_inadequate", failure);
+				},
 				grant,
 				executionPlan,
 				toolSurface,

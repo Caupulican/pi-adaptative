@@ -186,6 +186,7 @@ export interface AgentSessionConfig {
 	localRuntimeDeps?: LocalRuntimeDeps;
 	/** System One semantic control plane controller for Jev semantic validation. */
 	systemOneController?: SystemOneController;
+	systemOneEnabled?: boolean;
 	/** The one timer source of the session's recovery, retry and watchdog alarms and of the clocks they are due on. */
 	timers: TimerSource;
 	/** Bound of the background tool-task terminal cache; absent keeps the controller default. */

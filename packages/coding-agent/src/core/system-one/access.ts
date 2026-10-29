@@ -12,6 +12,29 @@ export type SystemOneProviderChoice = "auto" | "typesafe" | "openrouter";
 
 export const SYSTEM_ONE_PROVIDER_CHOICES: readonly SystemOneProviderChoice[] = ["auto", "typesafe", "openrouter"];
 
+/** Explicit disablement wins over retained credentials and injected runtime bindings. */
+export function isSystemOneEnabled(
+	settings: { getSystemOneSettings(): { enabled?: boolean } },
+	options: { enabled?: boolean; disabled?: boolean; env?: NodeJS.ProcessEnv } = {},
+): boolean {
+	return (
+		options.disabled !== true &&
+		options.enabled !== false &&
+		settings.getSystemOneSettings().enabled !== false &&
+		(options.env ?? process.env).PI_SYSTEM_ONE_DISABLED !== "1"
+	);
+}
+
+export class SystemOneDisabledError extends Error {
+	readonly preSend = true;
+	constructor() {
+		super(
+			"System One is disabled. Continue with deterministic checks and root-owned review; no evaluator is called.",
+		);
+		this.name = "SystemOneDisabledError";
+	}
+}
+
 /** The providers a choice may use, in order: `auto` tries the owner's TypeSafe key first. */
 export function providerCandidates(choice: SystemOneProviderChoice): ("typesafe" | "openrouter")[] {
 	return choice === "auto" ? ["typesafe", "openrouter"] : [choice];
@@ -42,12 +65,14 @@ export interface SystemOneAccess {
 
 export interface SystemOneAccessDeps {
 	getChoice(): SystemOneProviderChoice;
+	isEnabled?(): boolean;
 	/** The user's key for a provider (stored credential or its environment variable), if any. */
 	getApiKey(provider: "typesafe" | "openrouter"): Promise<string | undefined>;
 }
 
 export type SystemOneAccessOutcome =
 	| { readonly kind: "ready"; readonly access: SystemOneAccess }
+	| { readonly kind: "disabled"; readonly setup: string }
 	| { readonly kind: "missing_key"; readonly choice: SystemOneProviderChoice; readonly setup: string };
 
 export class SystemOneAccessResolver {
@@ -57,12 +82,19 @@ export class SystemOneAccessResolver {
 		this.deps = deps;
 	}
 
+	assertEnabled(): void {
+		if (this.deps.isEnabled?.() === false) throw new SystemOneDisabledError();
+	}
+
 	/** The access in force right now: an explicit choice uses only that provider's key. */
 	async resolve(): Promise<SystemOneAccessOutcome> {
+		if (this.deps.isEnabled?.() === false) return { kind: "disabled", setup: new SystemOneDisabledError().message };
 		const choice = this.deps.getChoice();
 		const candidates = providerCandidates(choice);
 		for (const provider of candidates) {
 			const apiKey = (await this.deps.getApiKey(provider))?.trim();
+			if (this.deps.isEnabled?.() === false)
+				return { kind: "disabled", setup: new SystemOneDisabledError().message };
 			if (!apiKey) continue;
 			const driver = getSystemOneProviderDriver(provider);
 			return { kind: "ready", access: { driver, model: driver.model, apiKey } };
@@ -88,12 +120,14 @@ export async function systemOneKeys(deps: Pick<SystemOneAccessDeps, "getApiKey">
  */
 export function sessionSystemOneAccess(input: {
 	getChoice(): SystemOneProviderChoice;
+	isEnabled?(): boolean;
 	getStoredKey(provider: "typesafe" | "openrouter"): Promise<string | undefined>;
 	env?: NodeJS.ProcessEnv;
 }): SystemOneAccessResolver & { keys(): Promise<string[]> } {
 	const env = input.env ?? process.env;
 	const deps: SystemOneAccessDeps = {
 		getChoice: input.getChoice,
+		isEnabled: input.isEnabled,
 		getApiKey: async (provider) =>
 			(await input.getStoredKey(provider)) ?? env[getSystemOneProviderDriver(provider).apiKeyEnvVar],
 	};
@@ -105,7 +139,7 @@ export function sessionSystemOneAccess(input: {
  * `systemOne.provider` (unless `choice` pins one), stored keys without the custom-provider fallback.
  */
 export function systemOneAccessFromSession(
-	settings: { getSystemOneSettings(): { provider: SystemOneProviderChoice } },
+	settings: { getSystemOneSettings(): { provider: SystemOneProviderChoice; enabled?: boolean } },
 	credentials: {
 		getApiKey(provider: string, options: { includeFallback: false }): Promise<string | undefined>;
 	},
@@ -113,6 +147,7 @@ export function systemOneAccessFromSession(
 ): SystemOneAccessResolver & { keys(): Promise<string[]> } {
 	return sessionSystemOneAccess({
 		getChoice: () => choice ?? settings.getSystemOneSettings().provider,
+		isEnabled: () => isSystemOneEnabled(settings),
 		getStoredKey: (provider) => credentials.getApiKey(provider, { includeFallback: false }),
 	});
 }

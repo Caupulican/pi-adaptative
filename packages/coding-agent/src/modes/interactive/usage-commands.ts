@@ -9,6 +9,7 @@ import type {
 } from "@caupulican/pi-ai";
 import { consumeOpenAICodexRateLimitResetCredit, listOpenAICodexRateLimitResetCredits } from "@caupulican/pi-ai";
 import type { Component } from "@caupulican/pi-tui";
+import type { AgentSessionEvent } from "../../core/agent-session-contracts.ts";
 import type { SessionCostSummary } from "../../core/cost/cost-summary.ts";
 import { resolveProviderAccountKey } from "../../core/provider-admission/account-key.ts";
 import type { AccountUsageMonitor } from "../../core/provider-admission/account-usage-monitor.ts";
@@ -36,6 +37,8 @@ type UsageSessionModelRegistry = UsageOverviewRegistry & {
 export interface UsageCommandHost {
 	readonly modelRegistry: UsageSessionModelRegistry;
 	readonly session: {
+		readonly sessionId?: string;
+		subscribe?(listener: (event: AgentSessionEvent) => void): () => void;
 		readonly model: Model<Api> | undefined;
 		/** A redeemed reset: the provider's recorded limits no longer hold, so it is routed to again. */
 		noteSubscriptionUsageReset(provider: string): void;
@@ -196,28 +199,45 @@ function openUsageDashboard(host: UsageCommandHost, client: OpenAICodexUsageRese
 	const currentAccountKey = (provider: string) => resolveProviderAccountKey(registry.authStorage, provider);
 	host.showSelector((done) => {
 		let open = true;
+		const session = host.session;
+		const sessionId = session.sessionId;
+		let unsubscribe: (() => void) | undefined;
+		const dispose = () => {
+			open = false;
+			unsubscribe?.();
+			unsubscribe = undefined;
+		};
+		const isCurrent = () => {
+			if (!open) return false;
+			if (host.session === session && session.sessionId === sessionId) return true;
+			dispose();
+			return false;
+		};
 		let accounts = listAuthenticatedAccounts(registry);
 		const close = () => {
-			open = false;
+			dispose();
 			done();
 		};
 		const refresh = (force: boolean) => {
+			if (!isCurrent()) return;
 			accounts = listAuthenticatedAccounts(registry);
 			const running = host.usageMonitor.refresh(accounts, registry, { force, currentAccountKey });
 			dashboard.update(buildOverview(host, accounts), accounts.some(canRedeemReset));
 			host.requestRender();
 			void running.then(() => {
-				if (!open) return;
+				if (!isCurrent()) return;
 				dashboard.update(buildOverview(host, accounts), accounts.some(canRedeemReset));
 				host.requestRender();
 			});
 		};
 		const dashboard = new UsageDashboardComponent({
+			onDispose: dispose,
 			overview: buildOverview(host, accounts),
 			canRedeemReset: accounts.some(canRedeemReset),
 			maxRows: () => host.terminalRows(),
 			requestRender: () => host.requestRender(),
 			onAction: (action) => {
+				if (!isCurrent()) return;
 				if (action === "refresh") {
 					refresh(true);
 					return;
@@ -225,6 +245,11 @@ function openUsageDashboard(host: UsageCommandHost, client: OpenAICodexUsageRese
 				close();
 				if (action === "reset") void loadResetCredits(host, client);
 			},
+		});
+		unsubscribe = session.subscribe?.((event) => {
+			if (event.type !== "usage_updated" || !isCurrent()) return;
+			dashboard.update(buildOverview(host, accounts), accounts.some(canRedeemReset));
+			host.requestRender();
 		});
 		refresh(false);
 		return { component: dashboard, focus: dashboard };

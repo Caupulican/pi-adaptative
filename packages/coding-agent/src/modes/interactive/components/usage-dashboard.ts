@@ -260,6 +260,7 @@ export function formatUsageOverviewLines(overview: UsageOverview, width: number,
 export const USAGE_OVERVIEW_HEADER_LINES = 3;
 
 export interface UsageDashboardOptions {
+	onDispose?(): void;
 	overview: UsageOverview;
 	canRedeemReset: boolean;
 	now?: () => number;
@@ -291,6 +292,10 @@ export class UsageDashboardComponent implements Component {
 		if (canRedeemReset !== undefined) {
 			this.canRedeemReset = canRedeemReset;
 		}
+	}
+
+	dispose(): void {
+		this.options.onDispose?.();
 	}
 
 	invalidate(): void {}

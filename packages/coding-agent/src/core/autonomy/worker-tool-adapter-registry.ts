@@ -2,12 +2,14 @@ import type { Usage } from "@caupulican/pi-ai";
 import type { TSchema } from "typebox";
 import type { AgentTool } from "../../kernel/index.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
+import { BOT_MESSAGE_TOOL_NAME, type BotMessageBroker } from "../delegation/bot-message-contract.ts";
 import { TypeSafeEvidenceMaterializer } from "../review/typesafe-evidence-materializer.ts";
 import type { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import { SystemOneReviewer } from "../review/typesafe-reviewer.ts";
 import { type CredentialExposureBoundary, isProtectedCredentialPath } from "../secrets/credential-exposure-guard.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { createArtifactRetrieveTool } from "../tools/artifact-retrieve.ts";
+import { createBotMessageToolDefinition } from "../tools/bot-message.ts";
 import {
 	createRunToolkitScriptToolDefinition,
 	type RunToolkitScriptDependencies,
@@ -54,6 +56,7 @@ export const WORKER_TOOL_ADAPTER_FORBIDDEN_NAMES: ReadonlySet<string> = new Set(
 
 /** Adapter names with host-owned factories; explicit profiles must have these active in foreground. */
 export const WORKER_TOOL_ADAPTER_NAMES: ReadonlySet<string> = new Set([
+	BOT_MESSAGE_TOOL_NAME,
 	"artifact_retrieve",
 	"run_toolkit_script",
 	"skill",
@@ -66,6 +69,7 @@ export type WorkerToolAdapterMaterialization =
 	| { ok: false; reason: string };
 
 export interface WorkerToolAdapterSources {
+	botMessages?: BotMessageBroker;
 	/** Host-owned credential lookup; workers receive judgments, never credential access. */
 	systemOne?: ConstructorParameters<typeof SystemOneReviewer>[0] & { evidenceStore: TypeSafeEvidenceStore };
 	/** Session-owned packed output store; retrieval is bounded and identifier-only. */
@@ -166,6 +170,20 @@ export class WorkerToolAdapterRegistry {
 /** Build the default safe adapters from host-owned brokers. Omitted sources stay unsupported. */
 export function createWorkerToolAdapterRegistry(sources: WorkerToolAdapterSources = {}): WorkerToolAdapterRegistry {
 	const registry = new WorkerToolAdapterRegistry();
+	if (sources.botMessages) {
+		const broker = sources.botMessages;
+		registry.register({
+			name: BOT_MESSAGE_TOOL_NAME,
+			description: "Message existing bots through the parent-owned mailbox.",
+			create: () => {
+				const definition = createBotMessageToolDefinition(broker);
+				return wrapToolDefinition({
+					...definition,
+					promptSnippet: `${definition.description}\n${definition.promptGuidelines?.join("\n")}`,
+				});
+			},
+		});
+	}
 	if (sources.systemOne) {
 		const dependencies = sources.systemOne;
 		registry.register({

@@ -41,6 +41,7 @@ import { PromptPrefixMonitor } from "./cache-trace.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { resolveEffectiveCompletionProfile } from "./decision/completion-profile.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
+import { PeerReviewJournal } from "./expert-routing/peer-review-journal.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { resolveFastModeServiceTier } from "./fast-mode.ts";
 import type { WorkerTerminalDeliveryInterposer } from "./foreground-terminal-handoff-controller.ts";
@@ -81,7 +82,7 @@ import { SettingsManager } from "./settings-manager.ts";
 import { SteeringCertificateStore } from "./steering/certificate-store.ts";
 import { DEFAULT_STEERING_POLICY } from "./steering/policy.ts";
 import { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
-import { type SystemOneProviderChoice, systemOneAccessFromSession } from "./system-one/access.ts";
+import { isSystemOneEnabled, type SystemOneProviderChoice, systemOneAccessFromSession } from "./system-one/access.ts";
 import { SystemOneJevAdapter } from "./system-one/adapter.ts";
 import { projectCanonicalTruth } from "./system-one/canonical-truth.ts";
 import { createSystemOneConfig } from "./system-one/config.ts";
@@ -89,6 +90,7 @@ import { SystemOneController } from "./system-one/controller.ts";
 import { ExecutionStore } from "./system-one/execution-state.ts";
 import { IntegrityHookCoordinator } from "./system-one/integrity-hooks.ts";
 import { createSessionWorkEvidenceJournal, readGoalWorkDiff } from "./system-one/session-work-diff.ts";
+import { VERIFICATION_OBLIGATIONS_CUSTOM_TYPE } from "./system-one/verification-obligations.ts";
 import { readWorkRepositoryRoot } from "./system-one/work-diff.ts";
 import { time } from "./timings.ts";
 import {
@@ -721,13 +723,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 		});
 
-		let systemOneController = options.systemOneController;
 		const systemOneSettings = settingsManager.getSystemOneSettings();
-		const systemOneEnabled =
-			options.systemOneEnabled ??
-			(options.disableSystemOne === true
-				? false
-				: systemOneSettings.enabled && process.env.PI_SYSTEM_ONE_DISABLED !== "1");
+		let systemOneEnabled = isSystemOneEnabled(settingsManager, {
+			enabled: options.systemOneEnabled,
+			disabled: options.disableSystemOne,
+		});
+		let systemOneController = systemOneEnabled ? options.systemOneController : undefined;
 
 		const hookCoordinator =
 			options.hookCoordinator ??
@@ -750,7 +751,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const access = systemOneAccessFromSession(settingsManager, authStorage, options.systemOneProvider);
 				// A session without any System One key starts without System One, as before; with one, every
 				// evaluation resolves provider, model and key anew, so a provider switch needs no restart.
-				if ((await access.resolve()).kind === "ready") {
+				const resolvedAccess = await access.resolve();
+				if (
+					resolvedAccess.kind === "missing_key" &&
+					options.systemOneEnabled !== true &&
+					settingsManager.settings.systemOne?.enabled !== true &&
+					systemOneSettings.completionProfile !== "system_one_required" &&
+					!options.steeringPlane &&
+					!sessionManager.getLatestCustomEntryOnBranch(VERIFICATION_OBLIGATIONS_CUSTOM_TYPE) &&
+					!new PeerReviewJournal(() => sessionManager).read().some((review) => review.scope.semanticEnabled)
+				) {
+					// A never-configured optional evaluator is absent, not an outage of an active policy.
+					// Existing semantic history or an explicit required/enabled choice never takes this path.
+					systemOneEnabled = false;
+				}
+				if (resolvedAccess.kind === "ready") {
 					const reviewer = new SystemOneReviewer({
 						access,
 						fetch: options.systemOneFetch,
@@ -849,15 +864,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			}
 
-			let steeringPlane = options.steeringPlane;
-			const adaptiveReadiness = options.adaptiveReadiness;
-			const objectiveExecutionController = options.objectiveExecutionController;
+			let steeringPlane = systemOneEnabled ? options.steeringPlane : undefined;
+			const adaptiveReadiness = systemOneEnabled ? options.adaptiveReadiness : undefined;
+			const objectiveExecutionController = systemOneEnabled ? options.objectiveExecutionController : undefined;
 			// System One decides the loop whenever it is bound; without a controller the legacy continuation
 			// stays the decider. An explicit option or setting always wins.
-			const executionLoopMode: ExecutionLoopMode =
-				options.executionLoopMode ??
-				systemOneSettings.loopMode ??
-				(systemOneController ? "objective_primary" : "legacy_goal");
+			const executionLoopMode: ExecutionLoopMode = systemOneEnabled
+				? (options.executionLoopMode ??
+					systemOneSettings.loopMode ??
+					(systemOneController ? "objective_primary" : "legacy_goal"))
+				: "legacy_goal";
 
 			// Phase A — Core session construction (AgentSession, runtimeUpdates, skillVault, extensionRunner, backgroundLanes)
 			// The account catalog's refresh asks the providers while the session starts; the first turn waits for the answer
@@ -898,6 +914,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				orchestrationProfile,
 				sessionStartEvent: options.sessionStartEvent,
 				systemOneController,
+				systemOneEnabled,
 				timers,
 				maxRetainedTerminalTasks: options.maxRetainedTerminalTasks,
 				accountModels,
@@ -1161,7 +1178,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						session.getRouterCandidatePool().models.filter((candidate) => session.isModelAllowed(candidate)),
 					fitnessStore,
 					adaptationStore,
-					...(systemOneController ? { getSelectionJudge: () => systemOneController } : {}),
+					getSelectionJudge: () =>
+						settingsManager.getModelRouterSettings().enabled ? session.systemOneController : undefined,
 					taskRuntime: durableTaskRuntime,
 					objectiveRuntime,
 					loopMode: executionLoopMode,
@@ -1169,7 +1187,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						requestedProfile: systemOneSettings.completionProfile,
 						steeringMode: steeringPlane?.policy.mode,
 						systemOneBound: Boolean(steeringPlane || systemOneController),
+						systemOneEnabled,
 					}),
+					reviewer: {
+						review: (input) =>
+							session.getPeerReviewController()?.reviewCompletion(input) ?? {
+								passed: false,
+								reviewerRef: "root-advisor",
+								blockingIssues: [
+									"Enable the root peer tool and obtain a delivery review of the current objective.",
+								],
+							},
+					},
 					taskProfiles: taskProfileWriter,
 					contractFactory,
 					capabilityBuilder,

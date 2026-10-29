@@ -196,6 +196,7 @@ export interface WorkerResponseObservation {
 }
 
 export interface WorkerAttemptExecutorOptions {
+	assertTaskFitness?(instructions: string, signal: AbortSignal): Promise<void>;
 	request: WorkerRequest;
 	grant: ExecutionGrant;
 	executionPlan: WorkerExecutionPlan;
@@ -394,6 +395,21 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	/** Actual drain evidence, independent of the bounded join's timeout outcome. Closes admission. */
 	whenPhysicallySettled(): Promise<void>;
 } {
+	const checkParentMessages = async (messages: readonly AgentMessage[], signal: AbortSignal): Promise<void> => {
+		if (messages.length === 0 || !options.assertTaskFitness) return;
+		const text = messages
+			.map((message) => {
+				if (!("content" in message)) return "";
+				if (typeof message.content === "string") return message.content;
+				return message.content
+					.map((part) =>
+						part.type === "text" ? part.text : part.type === "image" ? "[Parent attached an image]" : "",
+					)
+					.join("\n");
+			})
+			.join("\n");
+		await options.assertTaskFitness(`${options.request.instructions}\nParent continuation:\n${text}`, signal);
+	};
 	const physicalSettlements = new Set<Promise<void>>();
 	const settlementTimers = options.settlementTimers ?? SYSTEM_TIMER_PORT;
 	let physicalAdmissionClosed = false;
@@ -1334,6 +1350,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													options.conversation,
 													includeFollowUp,
 												);
+												await checkParentMessages(messages, signal);
 												signal.throwIfAborted();
 												return messages;
 											} catch (error) {
@@ -1351,6 +1368,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													options.conversation,
 													true,
 												);
+												await checkParentMessages(messages, signal);
 												signal.throwIfAborted();
 												// The parent's messages come first. Otherwise a worker about to stop is asked for a
 												// checkable report, once, and never when the run has no provider budget left for it.

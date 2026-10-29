@@ -30,7 +30,7 @@ export interface ModelCapabilityCard {
 	/** What the probes know about this model on routed work. */
 	readonly evidence: AutoSelectionEvidenceClass;
 	/** A lightweight variant built for speed and low cost, as System One judged it; see {@link withFlashCategory}. */
-	readonly flash: boolean;
+	readonly flash: boolean | undefined;
 }
 
 export interface CapabilityCardFacts {
@@ -57,7 +57,7 @@ export function buildCapabilityCard(model: Model<Api>, facts: CapabilityCardFact
 		prefillTokensPerSecond: facts.perf?.prefillTokensPerSecond,
 		loadMs: facts.perf?.loadMs,
 		evidence: facts.evidence,
-		flash: false,
+		flash: undefined,
 	};
 }
 
@@ -78,12 +78,12 @@ export function estimatedTurnMs(card: ModelCapabilityCard, promptTokens: number)
 	);
 }
 
-/** Cards with the flash category System One judged: `flashRefs` are the lightweight speed variants. */
+/** Attach settled lightweight judgments; missing entries remain unclassified. */
 export function withFlashCategory(
 	cards: readonly ModelCapabilityCard[],
-	flashRefs: ReadonlySet<string>,
+	flashRefs: ReadonlyMap<string, boolean>,
 ): ModelCapabilityCard[] {
-	return cards.map((card) => ({ ...card, flash: flashRefs.has(card.ref) }));
+	return cards.map((card) => ({ ...card, flash: flashRefs.get(card.ref) }));
 }
 
 /** What a turn needs that code can know for certain, before any judgment. */

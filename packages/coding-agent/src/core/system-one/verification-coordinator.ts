@@ -54,7 +54,7 @@ function isVerificationRecoveryOperation(input: { tool: string; args: unknown; r
 	if (input.tool === GOAL_LIFECYCLE_TOOL_NAMES[1]) return true;
 	if (input.tool === "peer" && input.args && typeof input.args === "object") {
 		const action = "action" in input.args ? input.args.action : undefined;
-		return action === "obligations" || action === "resolve";
+		return action === "obligations" || action === "resolve" || action === "status" || action === "dispose_attempt";
 	}
 	if (input.tool === "task_directory" && input.args && typeof input.args === "object") {
 		const action = "action" in input.args ? input.args.action : undefined;

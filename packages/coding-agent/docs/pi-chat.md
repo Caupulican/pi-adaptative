@@ -2,6 +2,9 @@
 
 pi-chat is the packaged peer-agent message mesh. Agents running on the same machine discover each other and exchange short text messages while they work. It ships as the bundled extension `pi-chat` and is active whenever the active resource profile allows it (`all-active` does).
 
+For persistent bots and their isolated group conversations, use [Bots and group chats](bots-and-groups.md).
+Native workers use that parent-owned mailbox instead of joining this mesh.
+
 ## Tools and command
 
 - `list_peers` lists connected peers (`includeSelf` adds this agent).

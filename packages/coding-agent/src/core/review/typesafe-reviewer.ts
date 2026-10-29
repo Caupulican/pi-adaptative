@@ -4,7 +4,7 @@ import { retryProviderRequest } from "@caupulican/pi-ai/provider-retry";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
 import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
 import { redactCredentialContent } from "../secrets/credential-model-content.ts";
-import type { SystemOneAccessResolver } from "../system-one/access.ts";
+import { type SystemOneAccessResolver, SystemOneDisabledError } from "../system-one/access.ts";
 import { getSystemOneProviderDriver, type SystemOneProviderDriver } from "../system-one/provider-driver.ts";
 import {
 	SYSTEM_ONE_RESPONSES_PER_EVALUATION,
@@ -144,6 +144,7 @@ interface ReviewerConnection {
 	readonly model: string;
 	readonly key: string | undefined;
 	readonly setup: string;
+	readonly disabled?: boolean;
 }
 
 /** Separate judge port: does not generate code, choose tools, or authorize side effects. */
@@ -166,6 +167,8 @@ export class SystemOneReviewer {
 		try {
 			if (this.deps.access) {
 				const outcome = await this.deps.access.resolve();
+				if (outcome.kind === "disabled")
+					return { driver, model, key: undefined, setup: outcome.setup, disabled: true };
 				if (outcome.kind === "ready") {
 					({ driver, model } = outcome.access);
 					key = outcome.access.apiKey;
@@ -180,7 +183,7 @@ export class SystemOneReviewer {
 	}
 
 	async status(signal?: AbortSignal) {
-		const { driver, model, key, setup } = await this.connection();
+		const { driver, model, key, setup, disabled } = await this.connection();
 		const providerName = driver.displayName;
 		const enabled = Boolean(key?.trim());
 		const capabilities = {
@@ -197,7 +200,7 @@ export class SystemOneReviewer {
 				confidence: REVIEW_CONFIDENCE,
 				setup,
 				authenticationVerified: false,
-				message: `${providerName} is not configured. Use ${setup}.`,
+				message: disabled ? setup : `${providerName} is not configured. Use ${setup}.`,
 			};
 		}
 		if (this.verifiedKey !== key) {
@@ -305,7 +308,8 @@ export class SystemOneReviewer {
 		// Snapshot before any await. No omitted fields or context truncation are permitted.
 		const snapshot: EvaluationInput = JSON.parse(serializeEvaluation(input));
 		validateTypeSafeInput("evaluation", snapshot);
-		const { driver, model: scalarModel, key, setup } = await this.connection();
+		const { driver, model: scalarModel, key, setup, disabled } = await this.connection();
+		if (disabled) throw new SystemOneDisabledError();
 		const vision =
 			snapshot.assets !== undefined || Object.values(snapshot.questions).some((question) => question.type === "box");
 		if (vision && !driver.visionModel)
@@ -393,6 +397,7 @@ export class SystemOneReviewer {
 			raw = await retryProviderRequest(
 				async () => {
 					combined.signal?.throwIfAborted();
+					this.deps.access?.assertEnabled();
 					attempts++;
 					raw = undefined;
 					const attempt: SystemOneTransportAttempt = { attempt: attempts };
@@ -521,14 +526,18 @@ export class SystemOneReviewer {
 			if (error instanceof SystemOneInvalidResponseError || error instanceof SystemOneObserverError) throw error;
 			// A refused lease is a typed pre-payment failure: it passes through unwrapped so the adapter can classify it as not sent.
 			if (error instanceof SystemOneUsageRefusal) throw error;
+			if (error instanceof SystemOneDisabledError && receipts.length === 0) throw error;
 			// Keep arbitrary transport messages out; sanitize the accepted diagnostic with the request snapshot.
 			const errorRegex =
 				/^(Invalid (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) HTTP|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) network error|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response exceeds|Empty (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|Server requested)/;
-			const message = combined.signal?.aborted
-				? `${providerName} review cancelled or timed out`
-				: error instanceof Error && errorRegex.test(error.message)
+			const message =
+				error instanceof SystemOneDisabledError
 					? error.message
-					: `${providerName} request failed`;
+					: combined.signal?.aborted
+						? `${providerName} review cancelled or timed out`
+						: error instanceof Error && errorRegex.test(error.message)
+							? error.message
+							: `${providerName} request failed`;
 			throw new SystemOneReviewError(redact(message), requestSha256, safeRequest, raw, transportAttempts, receipts);
 		} finally {
 			clearTimeout(timer);

@@ -122,6 +122,7 @@ import { fanoutNoteForLane } from "./delegation/worker-fanout.ts";
 import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
 import type { WorkerTerminalHandoff } from "./delegation/worker-terminal-handoff-coordinator.ts";
 import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
+import type { PeerReviewController } from "./expert-routing/peer-review.ts";
 import { ExtensionBindingController } from "./extension-binding-controller.ts";
 import type { ContinuousChatAudit } from "./extensions/builtin.ts";
 import type {
@@ -308,7 +309,6 @@ import { skillWorkPathsFromToolCall } from "./skill-work-paths.ts";
 import { skillsForSessionRole, workerEligibleSkills } from "./skills.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
-import { accountPassBindings } from "./system-one/account-pass-wiring.ts";
 import { formatClarificationQuestion } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import { prewarmOperationGate } from "./system-one/operation-gate-wiring.ts";
@@ -559,14 +559,12 @@ export class AgentSession {
 	// The paired _baseSystemPromptOptions and their construction live in SystemPromptBuilder.
 	private _baseSystemPrompt = "";
 	private readonly _pathAliasWrappedTools = new WeakSet<AgentTool>();
-	private _systemOneController?: SystemOneController;
 	private readonly _accountModels: AccountModelCatalog;
 	/** Providers whose usage-limit episode already told the owner about redeemable resets. */
 	private readonly _subscriptionResetOffered = new Set<string>();
 	private readonly _subscriptionResetChecking = new Set<string>();
 	private _executionLoopMode?: ExecutionLoopMode;
 	private _objectiveExecutionController?: ObjectiveExecutionController;
-	private _steeringPlane?: SystemOneSteeringPlane;
 	private _adaptiveReadiness?: AdaptiveRuntimeReadiness;
 	/** Durable owner development rules, restored from disk so they outlive compaction and restart. */
 	private readonly _ownerRules: DurableOwnerRuleStore;
@@ -600,8 +598,8 @@ export class AgentSession {
 			config.sessionManager.isPersisted(),
 		);
 		this.agent = config.agent;
+		this.settingsManager = config.settingsManager;
 		this._onClosingWarnings = config.onClosingWarnings ?? writeTerminalWarnings;
-		this._systemOneController = config.systemOneController;
 		// Without a checked catalog nothing is known up front, but a provider's refusal is still recorded.
 		this._accountModels =
 			config.accountModels ??
@@ -612,22 +610,16 @@ export class AgentSession {
 			});
 		this._executionLoopMode = config.executionLoopMode;
 		this._objectiveExecutionController = config.objectiveExecutionController;
-		this._steeringPlane = config.steeringPlane;
 		this._agentDirForLedger = config.agentDir ?? getAgentDir();
 		this._semanticPlane = new SessionSemanticPlaneController({
 			agentDirForLedger: this._agentDirForLedger,
 			isDisposed: () => this._disposed,
 			getSessionManager: () => this.sessionManager,
-			getSteeringPlane: () => this._steeringPlane,
+			getSystemOneSettings: () => this.settingsManager.getSystemOneSettings(),
+			systemOneEnabled: config.systemOneEnabled,
+			controller: config.systemOneController,
+			steeringPlane: config.steeringPlane,
 		});
-		this._semanticPlane.bindSemanticObserver(this._steeringPlane);
-		this._systemOneController?.setEvaluationObserver(this._semanticPlane.health);
-		this._systemOneController?.setAccountPassStore(
-			accountPassBindings({
-				getLedger: () => this.getDecisionLedger(),
-				getSessionId: () => this.sessionManager.getSessionId(),
-			}),
-		);
 		this._adaptiveReadiness = config.adaptiveReadiness;
 		this._ownerRules = new DurableOwnerRuleStore({
 			agentDir: config.agentDir ?? getAgentDir(),
@@ -665,7 +657,7 @@ export class AgentSession {
 			isChildSession: () => this._isChildSession,
 			isDisposed: () => this._disposed,
 			getReflectionAbortSignal: () => this._reflectionAbort.signal,
-			getSystemOneController: () => this._systemOneController,
+			getSystemOneController: () => this._semanticPlane.controller,
 			getSemanticDecisionEngine: () => this._semanticDecisionEngine(),
 			getDecisionLedger: () => this.getDecisionLedger(),
 			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
@@ -693,7 +685,7 @@ export class AgentSession {
 			getLastUserRequest: () => this._promptSubmission?.lastUserRequest ?? "",
 			getMessages: () => this.agent.state.messages,
 			findLastAssistantMessage: () => this._findLastAssistantMessage(),
-			getSystemOneController: () => this._systemOneController,
+			getSystemOneController: () => this._semanticPlane.controller,
 			resolveExpensiveModel: () => this._modelRouter.resolveExpensiveModel(),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			settleLatestOwnerPolicy: (signal) => this._edgeIntent.ownerPolicy.settle("latest", signal),
@@ -730,7 +722,7 @@ export class AgentSession {
 			ownerRules: this._ownerRules,
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getLaneRecords: () => this._backgroundLanes.getLaneRecords(),
-			getActiveVerificationIds: () => this._getActiveVerificationIds(),
+			getActiveVerificationIds: () => this.getVerificationObligations().map((obligation) => obligation.id),
 			getAdaptationProjection: () => this._adaptationProjection,
 			getDeliveryState: () => this._deliveryState,
 			getContextUsage: () => this.getContextUsage(),
@@ -744,7 +736,7 @@ export class AgentSession {
 		this._workerSupervision = createSessionWorkerSupervision({
 			sessionManager: config.sessionManager,
 			cwd: config.cwd,
-			getSteeringPlane: () => this._steeringPlane,
+			getSteeringPlane: () => this._semanticPlane.steeringPlane,
 			systemOneWorkerControl: this.systemOneWorkerControl,
 			emit: (event) => this._emit(event),
 			getOperatorProjection: () => this._operatorProjection,
@@ -758,7 +750,7 @@ export class AgentSession {
 			getDecisionEngine: () => this._recordingSemanticEngine(),
 			sessionManager: config.sessionManager,
 			emit: (event) => this._emit(event),
-			getSystemOneController: () => this._systemOneController,
+			getSystemOneController: () => this._semanticPlane.controller,
 			getOperatorProjection: () => this._operatorProjection,
 		});
 		// The provider stream chain (perf profile, idle watchdog, machine-wide admission) is built and
@@ -829,7 +821,6 @@ export class AgentSession {
 			getStreamIdleOptionsOverride,
 		});
 		this.sessionManager = config.sessionManager;
-		this.settingsManager = config.settingsManager;
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
 		// Initial load: `config.agent` may be a reused Agent instance carrying a stale sanitizer mark
 		// from a different lineage. See Agent.resetSanitizerPrefixHorizon's doc comment.
@@ -1075,7 +1066,8 @@ export class AgentSession {
 			getModel: () => this.model ?? undefined,
 			getForegroundThinkingLevel: () => this.thinkingLevel,
 			getThinkingLevel: () => this.thinkingLevel,
-			getRouteChoiceJudge: () => this._systemOneController,
+			getRouteChoiceJudge: () => this._semanticPlane.controller,
+			isSystemOneEnabled: () => this.systemOneEnabled,
 			getForegroundToolNames: () => this.getActiveToolNames(),
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
 			// Live worker supervision: one observation per executed worker tool call, applied through
@@ -1584,7 +1576,7 @@ export class AgentSession {
 			isCompacting: () => this._compaction.isRunning(),
 			isExtendedBusy: () => {
 				return (
-					(this._systemOneController?.isEvaluating ?? false) ||
+					(this._semanticPlane.controller?.isEvaluating ?? false) ||
 					this._semanticPlane.health.hasForegroundEvaluations()
 				);
 			},
@@ -1621,13 +1613,13 @@ export class AgentSession {
 		const unsubscribeQueuedWorkers = this._foregroundRecovery.subscribeActivity(() => {
 			if (!this._isForegroundPhaseBusy()) this._backgroundLanes.drainQueuedWorkerDelegations();
 		});
-		this._systemOneController?.setEvaluationIdleListener(wakeIdleOccupancy);
+		this._semanticPlane.setEvaluationIdleListener(wakeIdleOccupancy);
 		this._unsubscribeIdleOccupancy = () => {
 			unsubscribeSemantic();
 			unsubscribeContinuation();
 			unsubscribeOwnerAnswers();
 			unsubscribeQueuedWorkers();
-			this._systemOneController?.setEvaluationIdleListener(undefined);
+			this._semanticPlane.setEvaluationIdleListener(undefined);
 		};
 		this._durableCustomMessageTurns = new DurableCustomMessageTurnController({
 			foreground: this._foregroundRecovery,
@@ -1709,7 +1701,7 @@ export class AgentSession {
 			},
 			isModelAllowed: (model) => this._edgeIntent.modelPolicy.allows(model),
 			getAccountModels: () => this._accountModels,
-			getRouteJudge: () => this._systemOneController,
+			getRouteJudge: () => this._semanticPlane.controller,
 			isUsingSubscription: (model) => this._modelRegistry.isUsingSubscription(model),
 		});
 		const ownerInputPublications = createOwnerInputPublicationObserver({
@@ -1829,6 +1821,7 @@ export class AgentSession {
 		this._shellOperations = config.shellOperations;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._runtimeBuilder = new RuntimeBuilder({
+			isSystemOneEnabled: () => this.systemOneEnabled,
 			getAgent: () => this.agent,
 			getCwd: () => this._cwd,
 			getShellSessionKey: () => this._shellSessionKey,
@@ -1928,9 +1921,9 @@ export class AgentSession {
 			deliverToOwner: (items) => {
 				this._deliverToOwner(items);
 			},
-			getSystemOneController: () => this._systemOneController,
+			getSystemOneController: () => this._semanticPlane.controller,
 			getSemanticUncertainties: () => (this._isChildSession ? undefined : this.getSemanticUncertainties()),
-			getSteeringPlane: () => this._steeringPlane,
+			getSteeringPlane: () => this._semanticPlane.steeringPlane,
 			getSemanticDecisionEngine: () => this._semanticDecisionEngine(),
 			askQuestionRouting: () => ({
 				isHandoff: () => this._edgeIntent.handoff,
@@ -2272,7 +2265,7 @@ export class AgentSession {
 					args,
 					signal,
 				),
-			getSystemOneController: () => this._systemOneController,
+			getSystemOneController: () => this._semanticPlane.controller,
 			reviewNewCode: ({ toolName, args, cwd }) => this._unsettledLadder.codeDuplicates.review(toolName, args, cwd),
 			reviewPlan: ({ toolName, args }) => this._reviewPublishedPlan(toolName, args),
 			validateMutationAcceptance: async ({ changedFiles }) => {
@@ -2376,7 +2369,7 @@ export class AgentSession {
 			isSystemPromptCold: (routedTurnModel) => this._cache.isSystemPromptCold(routedTurnModel),
 			atColdMoment: (reason) => this._cache.atColdMoment(reason),
 			noteSystemOneTaskDirectoryUnavailable: (error) => this._noteSystemOneTaskDirectoryUnavailable(error),
-			getSystemOneController: () => this._systemOneController,
+			getSystemOneController: () => this._semanticPlane.controller,
 			enableCapabilitiesAuthorizedByUser: (userRequest, signal, trustedOwner, acceptedOrder) =>
 				this._enableCapabilitiesAuthorizedByUser(userRequest, signal, trustedOwner, acceptedOrder),
 			announceOwnerFollowUpsWhenPresent: () => this._announceOwnerFollowUpsWhenPresent(),
@@ -2421,8 +2414,12 @@ export class AgentSession {
 	}
 
 	/** System One semantic control plane controller, if active for this session. */
+	get systemOneEnabled(): boolean {
+		return this._semanticPlane.enabled;
+	}
+
 	get systemOneController(): SystemOneController | undefined {
-		return this._systemOneController;
+		return this._semanticPlane.controller;
 	}
 
 	/** Execution loop mode for this session. */
@@ -2446,7 +2443,7 @@ export class AgentSession {
 
 	/** System One steering plane driving semantic validation and certification. */
 	get steeringPlane(): SystemOneSteeringPlane | undefined {
-		return this._steeringPlane;
+		return this._semanticPlane.steeringPlane;
 	}
 
 	/** Diagnostic readiness gate for adaptive runtime components. */
@@ -2485,11 +2482,6 @@ export class AgentSession {
 	/** The stage-log sink bound to the current session id; rebound when the session changes. */
 	private _stageSinkForSession(): { readonly key: string; readonly sink: DecisionStageSink } | undefined {
 		return this._semanticPlane.stageSinkForSession();
-	}
-
-	/** Binds the one evaluation sink onto a steering plane; both plane assignments go through here. */
-	private _bindSemanticObserver(plane: SystemOneSteeringPlane | undefined): void {
-		this._semanticPlane.bindSemanticObserver(plane);
 	}
 
 	/** Recent Jev evaluations: what was judged, when, and what it decided. */
@@ -2694,11 +2686,11 @@ export class AgentSession {
 				sessionManager: this.sessionManager,
 				settingsManager: this.settingsManager,
 				modelRouter: this._modelRouter,
-				getSteeringPlane: () => this._steeringPlane,
+				getSteeringPlane: () => this._semanticPlane.steeringPlane,
 				setSteeringPlane: (plane) => {
-					this._steeringPlane = plane;
+					this._semanticPlane.steeringPlane = plane;
 				},
-				bindSemanticObserver: (plane) => this._bindSemanticObserver(plane),
+				bindSemanticObserver: (plane) => this._semanticPlane.bindSemanticObserver(plane),
 				getExecutionCharter: () => this._executionCharter,
 				setExecutionCharter: (charter) => {
 					this._executionCharter = charter;
@@ -2733,7 +2725,7 @@ export class AgentSession {
 				getLocalCommitBranch: () => this.localCommitBranch(),
 				getRuleAuthority: () => this._edgeIntent.ruleAuthority,
 				deployAdapters: this._deployAdapters,
-				getSystemOneController: () => this._systemOneController,
+				getSystemOneController: () => this._semanticPlane.controller,
 				getExecutionLoopMode: () => this._executionLoopMode,
 				setAdaptationProjection: (adaptation) => this.setAdaptationProjection(adaptation),
 			},
@@ -3041,7 +3033,7 @@ export class AgentSession {
 
 	/** Mandatory System One findings for projections that display them separately from advisory doubts. */
 	getSemanticVerificationObligations(): readonly SemanticVerificationObligationView[] {
-		return this._systemOneController?.verification.status().obligations ?? [];
+		return this._semanticPlane.controller?.verification.status().obligations ?? [];
 	}
 
 	/**
@@ -3085,7 +3077,7 @@ export class AgentSession {
 
 	/** The open semantic verification findings, for the owner's `/verification` command. */
 	listVerificationFindings(): readonly SemanticVerificationObligationView[] {
-		return this._systemOneController?.verification.status().obligations ?? [];
+		return this._semanticPlane.listVerificationFindings();
 	}
 
 	/** The owner's decision to close findings (ids, or every one) without proof; no tool reaches it. */
@@ -3093,7 +3085,7 @@ export class AgentSession {
 		ids: readonly string[] | "all",
 		note: string,
 	): readonly SemanticVerificationObligationView[] {
-		return this._systemOneController?.verification.waive(ids, note) ?? [];
+		return this._semanticPlane.controller?.verification.waive(ids, note) ?? [];
 	}
 
 	/**
@@ -4156,6 +4148,10 @@ export class AgentSession {
 	getToolDefinition(name: string): ToolDefinition | undefined {
 		return this._runtimeBuilder.getToolDefinition(name);
 	}
+
+	getPeerReviewController(): PeerReviewController | undefined {
+		return this._runtimeBuilder.getPeerReviewController();
+	}
 	get nativeActivity(): NativePiActivityPort {
 		return {
 			foreground: this._foregroundRecovery,
@@ -4300,7 +4296,7 @@ export class AgentSession {
 			this.isRetrying ||
 			this._foregroundRecovery.isRunActive ||
 			activity.epoch !== undefined ||
-			(this._systemOneController?.isEvaluating ?? false) ||
+			(this._semanticPlane.controller?.isEvaluating ?? false) ||
 			this._semanticPlane.health.getHealth(true).state === "evaluating" ||
 			hasRunningWorker ||
 			hasRunningTool ||
@@ -4315,7 +4311,7 @@ export class AgentSession {
 			isRetrying: this.isRetrying,
 			hasSubmissionLease: activity.epoch !== undefined,
 			isRunActive: this._foregroundRecovery.isRunActive,
-			isSystemOneEvaluating: this._systemOneController?.isEvaluating ?? false,
+			isSystemOneEvaluating: this._semanticPlane.controller?.isEvaluating ?? false,
 			isSemanticEvaluating: this._semanticPlane.health.getHealth(true).state === "evaluating",
 			hasRunningWorker,
 			hasRunningTool,
@@ -5933,8 +5929,8 @@ export class AgentSession {
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
 	}
-	listPersistentBots(defaultModelRef?: string): PersistentBotView[] {
-		return this._backgroundLanes.listPersistentBots(defaultModelRef);
+	listPersistentBots(defaultModelRef?: string, teamId?: string): PersistentBotView[] {
+		return this._backgroundLanes.listPersistentBots(defaultModelRef, teamId);
 	}
 	listPersistentTeams(): PersistentTeamRecord[] {
 		return this._backgroundLanes.listPersistentTeams();
@@ -5960,8 +5956,8 @@ export class AgentSession {
 	deletePersistentTeam(teamId: string): boolean {
 		return this._backgroundLanes.deletePersistentTeam(teamId);
 	}
-	readBotChatMessages(agentId: string): AgentMessage[] {
-		return this._backgroundLanes.readBotChatMessages(agentId);
+	readBotChatMessages(agentId: string, teamId?: string): AgentMessage[] {
+		return this._backgroundLanes.readBotChatMessages(agentId, teamId);
 	}
 	readTeamChatMessages(teamId: string): AgentMessage[] {
 		return this._backgroundLanes.readTeamChatMessages(teamId);
@@ -5987,7 +5983,11 @@ export class AgentSession {
 	followUpSessionRootWorkerAgent(agentId: string, message: string) {
 		return this._backgroundLanes.followUpSessionRootWorkerAgent(agentId, message);
 	}
-	sendOperatorMessageToBot(agentId: string, message: string, options?: { mode?: "follow_up" | "queue" | "start" }) {
+	sendOperatorMessageToBot(
+		agentId: string,
+		message: string,
+		options?: Parameters<BackgroundLaneController["sendOperatorMessageToBot"]>[2],
+	) {
 		return this._backgroundLanes.sendOperatorMessageToBot(agentId, message, options);
 	}
 	sendOperatorMessageToTeam(teamId: string, message: string) {

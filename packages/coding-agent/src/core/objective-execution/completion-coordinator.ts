@@ -279,6 +279,13 @@ export class CompletionCoordinator {
 			};
 		}
 
+		const assertReviewedCandidateCurrent = async () => {
+			options?.signal?.throwIfAborted();
+			if (snapshot && repoRoot && (await captureCandidateSnapshotAsync(repoRoot)).digest !== snapshot.digest)
+				throw new Error("Candidate changed while the root advisor was checked; evaluate completion again.");
+			options?.signal?.throwIfAborted();
+		};
+
 		// Mandatory stage passed. Now evaluate the requested assurance profile:
 		switch (profile) {
 			case "mechanical": {
@@ -328,6 +335,7 @@ export class CompletionCoordinator {
 						sourceRevision: candidateRevision,
 						acceptanceMatrix: { criteria: requiredCriteria, evidence: evidenceList },
 					});
+					await assertReviewedCandidateCurrent();
 
 					if (!review.passed) {
 						return {
@@ -366,6 +374,7 @@ export class CompletionCoordinator {
 						deliveryBundle: bundle,
 					};
 				} catch (_err) {
+					options?.signal?.throwIfAborted();
 					return {
 						verdict: "not_complete",
 						assuranceProfileRequested: "mechanical_plus_reviewer",
@@ -527,6 +536,7 @@ export class CompletionCoordinator {
 							sourceRevision: candidateRevision,
 							acceptanceMatrix: { criteria: requiredCriteria, evidence: evidenceList },
 						});
+						await assertReviewedCandidateCurrent();
 						if (review.passed) {
 							const bundle = buildDeliveryBundle({
 								objectiveId,
@@ -554,6 +564,7 @@ export class CompletionCoordinator {
 							};
 						}
 					} catch {
+						options?.signal?.throwIfAborted();
 						// Reviewer failed under fallback
 					}
 					return {

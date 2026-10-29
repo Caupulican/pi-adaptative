@@ -364,22 +364,31 @@ The request favors medium effort for clear coding tasks and higher supported eff
 reasoning or strict JSON tasks. This policy applies across providers.
 
 Only a supplied profile with a valid Choice answer and confidence at least 0.90 can replace the
-host default. Uncertainty, malformed answers, evaluator outages and requests exceeding the
-4,000-character judgment budget retain that default. There is no second selection question.
-The host rechecks current admission before persisting the selected model and effort.
-Cancellation prevents a fresh admission; stale judgments cannot authorize a changed grant.
+host default. The optional profile-selection preview retains that default when its answer is
+unavailable or the request exceeds its 4,000-character budget. A separate mandatory admission
+judgment then checks the complete task, parent objective, exact model and effort. It accepts only
+an `adequate` answer at confidence at least 0.90; uncertainty or an unavailable evaluator cannot
+authorize the worker. Exact accepted inputs are cached within a bounded session owner.
 
-Authored model and effort, model pins and configured profiles retain precedence. A read-only or
-path-scoped request still receives model selection without widening its grant. Persistent worker
-reuse and replay preserve the admitted settings without another question. Worker concurrency and
-independent-work requirements remain governed by their existing host admission policy.
+Authored model and effort, model pins and configured profiles select the binding but do not bypass
+task fitness. Reused attempts and parent continuations use the same check. An inadequate explicit
+binding returns guidance to select a stronger model or narrow the task; it is never silently replaced.
+Admission rechecks session identity, objective and model after the judgment. Model selection never
+widens tools, paths, permissions or budgets. Worker concurrency and independent-work requirements
+remain governed by their existing host admission policy.
+
+When System One or the model router is explicitly disabled, deterministic configured routing
+continues without these semantic calls or an assertion of semantic fitness. SDK, settings and
+environment disablement apply even when a controller remains retained for later re-enablement.
+Disabling System One preserves existing verification obligations.
 
 ## Explicit peer review
 
-The root model can request independent plan or delivery review with the native `peer` tool.
+The root model uses the native `peer` advisor for plans with material uncertainty and delivery review.
 It remains the executor; the peer receives only the supplied snapshot and has no tools or inherited
 foreground history. This review uses the host's configured provider connections and spends tokens on
-the chosen peer. Workers cannot launch a peer review.
+the chosen peer. Workers cannot launch a peer review: they send findings and questions to their parent.
+Advisor calls never spawn another advisor or a worker.
 
 Call `peer` with `{"action":"options"}` to discover exact `provider/model` references and
 all supported `thinkingLevels`, plus the strictly higher `strongerThinkingLevels` for explicit
@@ -395,14 +404,30 @@ Then call `peer` with `action: "review"` and a `review` object containing:
 | `peer` | Exact reference disclosed by `options`. |
 | `thinkingLevel` | Any disclosed supported level for independent review; a higher level for stronger review. |
 | `selection` | Optional `independent` (default) or `stronger`. |
+| `recover` | Optional explicit recovery of a previously unavailable attempt after its cause was addressed. Completed reviews cannot be rerolled. |
 | `stage` | `plan` or `delivery`. |
 | `objective` | Requested outcome, up to 2,000 characters. |
 | `artifact` | Relevant complete plan or change snapshot, up to 24,000 characters. |
 | `evidence` | Source with references, checks, adverse findings and limitations, up to 48,000 characters. |
 
-Independent review needs no model-strength judgment and remains available during a strength
-evaluator outage when the host verification journal and candidate fence are bound. It requires
+Independent review needs no System One model-strength judgment and works with System One disabled.
+The root's branch journal and repository fingerprint own its lifetime. Repository discovery or
+fingerprint errors refuse the review; an actual non-repository task is identified as a supplied-snapshot
+review. It requires
 `workflow.delegate`; stronger selection and proof resolution additionally require `semantic.judge`.
+
+`peer status` returns bounded durable review receipts, including pending/unavailable attempts,
+full findings and limitations. Identical live requests coalesce; repeated requests reuse their result
+without charging their usage again. A restarted session retains the attempt and requires explicit
+recovery instead of silently paying for it again. Review receipts bind the root objective, requirement
+definitions, candidate, mode and session branch. Pending or failed attempts never mean review passed.
+The journal retains at most 32 entries and refuses new admission when it cannot evict a settled or
+superseded entry; unresolved same-objective advice is not discarded to make room.
+For a non-running pending or unavailable attempt, use `dispose_attempt` with
+`attempt: {reviewKey, reason}` after inspecting its failure. This records the reason and current
+candidate and releases capacity while preserving the original non-reviewed outcome. It works with
+System One on or off, cannot dispose reviewed findings or an active request, and does not satisfy
+the delivery-review requirement.
 
 For explicit `stronger` selection, System One compares the proposed distinct peer with the lead for
 this task. Admission requires higher supported effort and a `stronger` judgment at confidence at
@@ -418,13 +443,30 @@ or session branch changes.
 The bounded response contains a snapshot digest, lead and peer settings, selection, findings and
 limitations. Only stronger review includes strength judgment provenance. Each finding must quote
 supplied evidence and specify a reproducible check.
-Findings open durable obligations in the receiving lead's own lane: reproduce, revise confirmed
+With System One enabled, findings and stated limitations open durable obligations in the receiving
+lead's own lane: reproduce, revise confirmed
 failures, and recheck before affected work continues. The session branch journal retains the full
 bounded finding, candidate identity and scope across reopening. A trusted fork carries active
 findings into its receiving lane and discards parent proof receipts.
 `no_findings` never clears an earlier unresolved directive or certifies completion. Missing evidence,
 malformed or truncated output, cancellation and service failures grant no validation. Reported peer
 usage is retained even when its response is unusable. Permissions and approval remain host-owned.
+
+With System One off, the same findings remain root-owned advice. After investigating them, use
+`action: "acknowledge"` with `acknowledgement: {reviewKey, evidence}`. This records the root's concrete
+evidence and decision, with the current candidate identity; it is labeled `root_decision_only`, never
+System One validation. A repair may change the candidate before the root acknowledges the original
+finding. An older unresolved finding does not disappear because a later review is clean. When System One
+is on, `acknowledge` is unavailable: use the canonical receipt-based resolution below. A configured but
+unavailable evaluator is not treated as off. A default, never-configured session with no credentials
+uses deterministic operation without requiring a System One login.
+
+The `mechanical_plus_reviewer` completion profile consumes the root's current delivery-review receipt
+through the same advisor owner; it does not dispatch a paid review automatically. Missing, stale,
+incomplete or unresolved review evidence returns instructions to the root and keeps that requested
+stage open. Mechanical criteria and current obligations still apply, and the completion coordinator
+rechecks its candidate after consulting the advisor. Default deterministic completion does not require
+this optional profile or turn System One on.
 
 Use `peer` with `{"action":"obligations"}` to inspect pending findings and host-recorded tool
 receipts. Resolve one with `action: "resolve"` and a `resolution` object:

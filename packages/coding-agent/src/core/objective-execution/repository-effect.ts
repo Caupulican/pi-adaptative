@@ -54,6 +54,7 @@ const CAPABILITY_REPOSITORY_POLICY: Readonly<Record<HarnessCapability, Capabilit
 	"settings.write": { potential: "opaque", observedCall: false },
 	"research.execute": { potential: "opaque", observedCall: false },
 	"workflow.delegate": { potential: "opaque", observedCall: false },
+	"workflow.message": { potential: "opaque", observedCall: false },
 	"policy.modify": { potential: "opaque", observedCall: false },
 	"learning.propose": { potential: "opaque", observedCall: false },
 	"publish.execute": { potential: "opaque", observedCall: false },

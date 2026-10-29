@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, type FSWatcher, mkdirSync, readFileSync, renameSync, watch, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "../../config.ts";
@@ -62,6 +62,7 @@ export interface PersistentBotView {
 
 export interface PersistentTeamRecord {
 	readonly teamId: string;
+	readonly incarnationId?: string;
 	readonly name: string;
 	readonly description?: string;
 	readonly memberAgentIds: readonly string[];
@@ -81,6 +82,7 @@ export interface PersistentTeamMemberDelivery {
 export interface PersistentTeamMessage {
 	readonly messageId: string;
 	readonly teamId: string;
+	readonly teamIncarnationId?: string;
 	readonly sender:
 		| { readonly kind: "operator" }
 		| { readonly kind: "brain" }
@@ -163,6 +165,17 @@ export function botReplyText(text: string): string {
 
 const BOT_OR_TEAM_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const MAX_TEAM_MESSAGES_PER_TEAM = 200;
+
+/** Legacy records retain a deterministic identity; every new group receives a fresh random identity. */
+export function teamIncarnation(team: PersistentTeamRecord): string {
+	return (
+		team.incarnationId ??
+		`legacy-${createHash("sha256")
+			.update(JSON.stringify([team.teamId, team.createdAt]))
+			.digest("hex")
+			.slice(0, 48)}`
+	);
+}
 
 export function normalizeBotOrTeamId(raw: string, label = "identifier"): string {
 	const trimmed = raw.trim();
@@ -346,13 +359,25 @@ function parseTeamRecord(value: unknown): PersistentTeamRecord | undefined {
 	if (!isRecordObject(value)) {
 		return undefined;
 	}
-	const { teamId, name, description, memberAgentIds, createdAt, updatedAt, lastMessageAt, memoryFilePath } = value;
+	const {
+		teamId,
+		incarnationId,
+		name,
+		description,
+		memberAgentIds,
+		createdAt,
+		updatedAt,
+		lastMessageAt,
+		memoryFilePath,
+	} = value;
 
 	if (
 		typeof teamId !== "string" ||
 		!BOT_OR_TEAM_ID_REGEX.test(teamId) ||
 		typeof createdAt !== "string" ||
 		typeof updatedAt !== "string" ||
+		(incarnationId !== undefined &&
+			(typeof incarnationId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(incarnationId))) ||
 		!Array.isArray(memberAgentIds)
 	) {
 		return undefined;
@@ -367,6 +392,7 @@ function parseTeamRecord(value: unknown): PersistentTeamRecord | undefined {
 
 	return {
 		teamId,
+		...(typeof incarnationId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(incarnationId) ? { incarnationId } : {}),
 		name: typeof name === "string" ? name : teamId,
 		description: typeof description === "string" ? description : undefined,
 		memberAgentIds: validMembers,
@@ -381,7 +407,7 @@ function parseTeamMessage(value: unknown): PersistentTeamMessage | undefined {
 	if (!isRecordObject(value)) {
 		return undefined;
 	}
-	const { messageId, teamId, sender, text, timestamp, targetAgentIds, deliveries } = value;
+	const { messageId, teamId, teamIncarnationId, sender, text, timestamp, targetAgentIds, deliveries } = value;
 
 	if (
 		typeof messageId !== "string" ||
@@ -434,6 +460,7 @@ function parseTeamMessage(value: unknown): PersistentTeamMessage | undefined {
 	return {
 		messageId,
 		teamId,
+		...(typeof teamIncarnationId === "string" ? { teamIncarnationId } : {}),
 		sender: parsedSender,
 		text,
 		timestamp,
@@ -685,49 +712,66 @@ export class PersistentBotTeamStore {
 	}
 
 	upsertBot(input: UpsertPersistentBotInput, nowIso?: string): PersistentBotRecord {
+		return this.mutate(() => this.writeBot(input, nowIso));
+	}
+
+	/** Select creation defaults only after the shared record has been reloaded under its lock. */
+	ensureBotForDispatch(
+		agentId: string,
+		defaults: () => Pick<UpsertPersistentBotInput, "provider" | "modelId" | "thinkingLevel">,
+	): PersistentBotRecord {
 		return this.mutate(() => {
-			const agentId = normalizeBotOrTeamId(input.agentId, "agentId");
-			const existing = this.bots.get(agentId);
-			const provider = (input.provider !== undefined ? input.provider.trim() : existing?.provider) || "anthropic";
-			const modelId = (input.modelId !== undefined ? input.modelId.trim() : existing?.modelId) || "claude-haiku-5-5";
-
-			const now = nowIso ?? new Date().toISOString();
-
-			const record: PersistentBotRecord = {
-				agentId,
-				displayName: input.displayName?.trim() || existing?.displayName || agentId,
-				description:
-					input.description !== undefined ? input.description.trim() || undefined : existing?.description,
-				provider,
-				modelId,
-				thinkingLevel:
-					input.thinkingLevel !== undefined ? input.thinkingLevel.trim() || undefined : existing?.thinkingLevel,
-				instructions:
-					input.instructions !== undefined ? input.instructions.trim() || undefined : existing?.instructions,
-				profileId: input.profileId !== undefined ? input.profileId.trim() || undefined : existing?.profileId,
-				canWrite: input.canWrite ?? existing?.canWrite,
-				createdAt: existing?.createdAt ?? now,
-				updatedAt: now,
-				retired: input.retired ?? existing?.retired ?? false,
-				lastTranscriptRef:
-					input.lastTranscriptRef !== undefined
-						? input.lastTranscriptRef.trim() || undefined
-						: existing?.lastTranscriptRef,
-				lastSummary:
-					input.lastSummary !== undefined
-						? input.lastSummary.trim().slice(0, 500) || undefined
-						: existing?.lastSummary,
-				lastMessageAt:
-					input.lastMessageAt !== undefined && Number.isFinite(input.lastMessageAt)
-						? input.lastMessageAt
-						: existing?.lastMessageAt,
-			};
-
-			this.bots.set(agentId, record);
-			this.ensureBotMemoryFile(agentId);
-			this.save();
-			return record;
+			const normalizedId = normalizeBotOrTeamId(agentId, "agentId");
+			return this.writeBot({
+				...(this.bots.has(normalizedId) ? {} : defaults()),
+				agentId: normalizedId,
+				lastMessageAt: Date.now(),
+			});
 		});
+	}
+
+	/** Update loaded state; callers own the single mutation transaction. */
+	private writeBot(input: UpsertPersistentBotInput, nowIso?: string): PersistentBotRecord {
+		const agentId = normalizeBotOrTeamId(input.agentId, "agentId");
+		const existing = this.bots.get(agentId);
+		const provider = (input.provider !== undefined ? input.provider.trim() : existing?.provider) || "anthropic";
+		const modelId = (input.modelId !== undefined ? input.modelId.trim() : existing?.modelId) || "claude-haiku-5-5";
+
+		const now = nowIso ?? new Date().toISOString();
+
+		const record: PersistentBotRecord = {
+			agentId,
+			displayName: input.displayName?.trim() || existing?.displayName || agentId,
+			description: input.description !== undefined ? input.description.trim() || undefined : existing?.description,
+			provider,
+			modelId,
+			thinkingLevel:
+				input.thinkingLevel !== undefined ? input.thinkingLevel.trim() || undefined : existing?.thinkingLevel,
+			instructions:
+				input.instructions !== undefined ? input.instructions.trim() || undefined : existing?.instructions,
+			profileId: input.profileId !== undefined ? input.profileId.trim() || undefined : existing?.profileId,
+			canWrite: input.canWrite ?? existing?.canWrite,
+			createdAt: existing?.createdAt ?? now,
+			updatedAt: now,
+			retired: input.retired ?? existing?.retired ?? false,
+			lastTranscriptRef:
+				input.lastTranscriptRef !== undefined
+					? input.lastTranscriptRef.trim() || undefined
+					: existing?.lastTranscriptRef,
+			lastSummary:
+				input.lastSummary !== undefined
+					? input.lastSummary.trim().slice(0, 500) || undefined
+					: existing?.lastSummary,
+			lastMessageAt:
+				input.lastMessageAt !== undefined && Number.isFinite(input.lastMessageAt)
+					? input.lastMessageAt
+					: existing?.lastMessageAt,
+		};
+
+		this.bots.set(agentId, record);
+		this.ensureBotMemoryFile(agentId);
+		this.save();
+		return record;
 	}
 
 	retireBot(agentId: string, nowIso?: string): PersistentBotRecord | undefined {
@@ -818,6 +862,7 @@ export class PersistentBotTeamStore {
 
 			const record: PersistentTeamRecord = {
 				teamId,
+				incarnationId: existing ? teamIncarnation(existing) : randomUUID(),
 				name: input.name?.trim() || existing?.name || teamId,
 				description:
 					input.description !== undefined ? input.description.trim() || undefined : existing?.description,
@@ -825,13 +870,12 @@ export class PersistentBotTeamStore {
 				createdAt: existing?.createdAt ?? now,
 				updatedAt: now,
 				lastMessageAt: existing?.lastMessageAt,
-				memoryFilePath: this.getTeamMemoryFilePath(teamId),
 			};
 
 			this.teams.set(teamId, record);
 			this.ensureTeamMemoryFile(teamId);
 			this.save();
-			return record;
+			return { ...record, memoryFilePath: this.getTeamMemoryFilePath(teamId) };
 		});
 	}
 
@@ -885,17 +929,35 @@ export class PersistentBotTeamStore {
 		});
 	}
 
+	appendScopedTeamMessage(message: PersistentTeamMessage, incarnationId: string): void {
+		this.mutate(() => {
+			const team = this.teams.get(message.teamId);
+			if (!team || teamIncarnation(team) !== incarnationId)
+				throw new Error("Group was deleted or replaced before message publication.");
+			this.recordTeamMessage(message);
+		});
+	}
+
 	/** Adds a message to the loaded state and saves. The caller has re-read the file: re-reading here would reset what it is iterating. */
 	private recordTeamMessage(message: PersistentTeamMessage): void {
 		const teamId = normalizeBotOrTeamId(message.teamId, "teamId");
 		const messages = this.teamMessages.get(teamId) ?? [];
-		messages.push(structuredClone(message));
+		const existing = messages.find((entry) => entry.messageId === message.messageId);
+		if (existing) {
+			if (
+				JSON.stringify([existing.sender, existing.text, existing.targetAgentIds]) !==
+				JSON.stringify([message.sender, message.text, message.targetAgentIds])
+			)
+				throw new Error("Group message identity conflicts with its recorded content.");
+			return;
+		}
+		const team = this.teams.get(teamId);
+		messages.push(structuredClone({ ...message, ...(team ? { teamIncarnationId: teamIncarnation(team) } : {}) }));
 		if (messages.length > MAX_TEAM_MESSAGES_PER_TEAM) {
 			this.teamMessages.set(teamId, messages.slice(-MAX_TEAM_MESSAGES_PER_TEAM));
 		} else {
 			this.teamMessages.set(teamId, messages);
 		}
-		const team = this.teams.get(teamId);
 		if (team) {
 			this.teams.set(teamId, {
 				...team,
@@ -911,7 +973,11 @@ export class PersistentBotTeamStore {
 	}
 
 	getTeamMemoryFilePath(teamId: string): string {
-		return join(this.agentDir, "memory", "teams", `${normalizeBotOrTeamId(teamId, "teamId")}.md`);
+		const id = normalizeBotOrTeamId(teamId, "teamId");
+		const team = this.teams.get(id);
+		const incarnation = team ? teamIncarnation(team) : undefined;
+		const suffix = incarnation ? `--${incarnation}` : "";
+		return join(this.agentDir, "memory", "teams", `${id}${suffix}.md`);
 	}
 
 	ensureBotMemoryFile(agentId: string): string {
@@ -944,13 +1010,20 @@ export class PersistentBotTeamStore {
 		return filePath;
 	}
 
-	recordBotTurnOutcome(input: { agentId: string; summary: string; transcriptRef?: string; timestamp?: number }): void {
+	recordBotTurnOutcome(input: {
+		agentId: string;
+		summary: string;
+		transcriptRef?: string;
+		timestamp?: number;
+		teamId?: string;
+		teamIncarnationId?: string;
+	}): void {
 		this.mutate(() => {
 			const normId = normalizeBotOrTeamId(input.agentId, "agentId");
 			const bot = this.bots.get(normId);
-			const belongsToAnyTeam = Array.from(this.teams.values()).some((t) => t.memberAgentIds.includes(normId));
-
-			if (!bot && !belongsToAnyTeam) {
+			const team = input.teamId ? this.teams.get(input.teamId) : undefined;
+			if (input.teamId && (!team || teamIncarnation(team) !== input.teamIncarnationId)) return;
+			if (!bot && !team) {
 				return;
 			}
 
@@ -961,7 +1034,7 @@ export class PersistentBotTeamStore {
 				.replace(/\r?\n+/g, " ")
 				.slice(0, 300);
 
-			if (bot) {
+			if (bot && !input.teamId) {
 				const updatedBot: PersistentBotRecord = {
 					...bot,
 					lastSummary: input.summary.trim().slice(0, 400),
@@ -973,32 +1046,36 @@ export class PersistentBotTeamStore {
 				this.save();
 			}
 
-			this.ensureBotMemoryFile(normId);
-			const botFile = this.getBotMemoryFilePath(normId);
-			const refSuffix = input.transcriptRef ? ` (${input.transcriptRef})` : "";
-			appendBoundedFile(botFile, `- [${iso}] ${oneLineSummary}${refSuffix}`, 80);
+			if (!input.teamId) {
+				this.ensureBotMemoryFile(normId);
+				const botFile = this.getBotMemoryFilePath(normId);
+				const refSuffix = input.transcriptRef ? ` (${input.transcriptRef})` : "";
+				appendBoundedFile(botFile, `- [${iso}] ${oneLineSummary}${refSuffix}`, 80);
+			}
 
-			for (const team of [...this.teams.values()]) {
-				if (team.memberAgentIds.includes(normId)) {
-					const teamMsg: PersistentTeamMessage = {
-						messageId: `team-msg-${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
-						teamId: team.teamId,
-						sender: { kind: "bot", agentId: normId },
-						text: input.summary.slice(0, 600),
-						timestamp,
-						targetAgentIds: [],
-						deliveries: [],
-					};
-					this.recordTeamMessage(teamMsg);
-					this.ensureTeamMemoryFile(team.teamId);
-					const teamFile = this.getTeamMemoryFilePath(team.teamId);
-					appendBoundedFile(teamFile, `- [${iso}] **${normId}**: ${oneLineSummary}`, 80);
-				}
+			if (team) {
+				const teamMsg: PersistentTeamMessage = {
+					messageId: `team-msg-${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
+					teamId: team.teamId,
+					sender: { kind: "bot", agentId: normId },
+					text: input.summary.slice(0, 600),
+					timestamp,
+					targetAgentIds: [],
+					deliveries: [],
+				};
+				this.recordTeamMessage(teamMsg);
+				this.ensureTeamMemoryFile(team.teamId);
+				const teamFile = this.getTeamMemoryFilePath(team.teamId);
+				appendBoundedFile(teamFile, `- [${iso}] **${normId}**: ${oneLineSummary}`, 80);
 			}
 		});
 	}
 
-	composeBotUnifiedMemoryContext(agentId: string): {
+	composeBotUnifiedMemoryContext(
+		agentId: string,
+		teamId?: string,
+		teamIncarnationId?: string,
+	): {
 		promptBlock: string;
 		memoryDir: string;
 		memoryFiles: string[];
@@ -1008,10 +1085,10 @@ export class PersistentBotTeamStore {
 		const memoryFiles: string[] = [];
 
 		const botMemoryPath = this.getBotMemoryFilePath(normId);
-		memoryFiles.push(botMemoryPath);
+		if (!teamId) memoryFiles.push(botMemoryPath);
 
 		let botExcerpt = "";
-		if (existsSync(botMemoryPath)) {
+		if (!teamId && existsSync(botMemoryPath)) {
 			try {
 				const content = readFileSync(botMemoryPath, "utf8").trim();
 				botExcerpt = content.length > 1200 ? content.slice(-1200) : content;
@@ -1021,12 +1098,20 @@ export class PersistentBotTeamStore {
 		}
 
 		const bot = this.bots.get(normId);
+		const selectedTeam = teamId ? this.teams.get(teamId) : undefined;
+		if (
+			teamId &&
+			(!selectedTeam ||
+				teamIncarnation(selectedTeam) !== teamIncarnationId ||
+				!selectedTeam.memberAgentIds.includes(normId))
+		)
+			throw new Error("Bot is not a member of this group generation.");
 		const memberTeams: PersistentTeamRecord[] = [];
 		const teamMemoryExcerpts: string[] = [];
 		const allRecentTeamMessages: PersistentTeamMessage[] = [];
 
 		for (const team of this.teams.values()) {
-			if (team.memberAgentIds.includes(normId)) {
+			if (team.teamId === teamId) {
 				memberTeams.push(team);
 				const teamPath = this.getTeamMemoryFilePath(team.teamId);
 				memoryFiles.push(teamPath);
@@ -1039,7 +1124,9 @@ export class PersistentBotTeamStore {
 						// Ignore unreadable team memory file
 					}
 				}
-				const msgs = this.listTeamMessages(team.teamId, 5);
+				const msgs = this.listTeamMessages(team.teamId)
+					.filter((message) => message.teamIncarnationId === teamIncarnation(team))
+					.slice(-5);
 				allRecentTeamMessages.push(...msgs);
 			}
 		}
@@ -1050,7 +1137,9 @@ export class PersistentBotTeamStore {
 		const lines: string[] = [
 			BOT_MEMORY_BLOCK_HEADER,
 			`You are persistent bot "${normId}". You have persistent memory files you can read; the host appends a line to them from each report you finish.`,
-			`- Bot memory file: ${botMemoryPath}`,
+			...(teamId
+				? [`- Group: ${teamId}. This conversation and its messages belong only to this group.`]
+				: [`- Bot memory file: ${botMemoryPath}`]),
 		];
 
 		if (memberTeams.length > 0) {
@@ -1058,10 +1147,10 @@ export class PersistentBotTeamStore {
 				`- Member of teams: ${memberTeams.map((t) => `${t.name ?? t.teamId} (${this.getTeamMemoryFilePath(t.teamId)})`).join(", ")}`,
 			);
 		}
-		if (bot?.lastTranscriptRef) {
+		if (!teamId && bot?.lastTranscriptRef) {
 			lines.push(`- Prior transcript reference: ${bot.lastTranscriptRef}`);
 		}
-		if (bot?.lastSummary) {
+		if (!teamId && bot?.lastSummary) {
 			lines.push(`- Prior turn summary: ${bot.lastSummary}`);
 		}
 
@@ -1108,6 +1197,7 @@ export class PersistentBotTeamStore {
 		liveAgents: readonly WorkerAgentView[],
 		laneRecords: readonly LaneRecord[],
 		defaultModelRef: string,
+		includeDirectContinuity = true,
 	): PersistentBotView[] {
 		const workerLanes = laneRecords.filter((lane) => lane.type === "worker" || lane.type === "tmux-worker");
 
@@ -1149,7 +1239,11 @@ export class PersistentBotTeamStore {
 		const views: PersistentBotView[] = [];
 
 		for (const agentId of allAgentIds) {
-			const botRecord = this.bots.get(agentId);
+			const storedBot = this.bots.get(agentId);
+			const botRecord =
+				storedBot && !includeDirectContinuity
+					? { ...storedBot, lastSummary: undefined, lastTranscriptRef: undefined }
+					: storedBot;
 			const liveAgent = liveAgentById.get(agentId);
 			const lane = laneByAgentId.get(agentId);
 

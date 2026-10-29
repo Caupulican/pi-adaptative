@@ -90,6 +90,8 @@ export interface CreateAdaptiveRuntimeStackOptions {
 	/** Loop mode the objective controller reports (`getMode`); the session's own setting wins at run time. */
 	readonly loopMode?: ObjectiveExecutionControllerDeps["mode"];
 	readonly completionProfile?: ObjectiveExecutionControllerDeps["completionProfile"];
+	/** Root-owned advisor evidence; worker dispatch never receives this port. */
+	readonly reviewer?: ObjectiveExecutionControllerDeps["reviewer"];
 	readonly customTools?: readonly unknown[];
 	readonly modelRegistry?: ModelRegistry;
 	readonly getCandidateModels?: () => readonly Model<Api>[];
@@ -409,6 +411,7 @@ function assembleAdaptiveRuntimeStack(
 		runtime: options.objectiveRuntime ?? (taskRuntime as any),
 		...(options.loopMode ? { mode: options.loopMode } : {}),
 		...(options.completionProfile ? { completionProfile: options.completionProfile } : {}),
+		...(options.reviewer ? { reviewer: options.reviewer } : {}),
 		steeringPlane,
 		adaptiveResolution,
 		specialistSynthesis,

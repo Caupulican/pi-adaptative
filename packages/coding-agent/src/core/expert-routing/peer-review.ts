@@ -8,6 +8,8 @@ import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../age
 import { ORCHESTRATION_THINKING_LEVELS } from "../orchestration/contracts.ts";
 import { ORCHESTRATION_THINKING_LEVEL_SCHEMA } from "../orchestration/thinking-level-schema.ts";
 import { buildCapabilityCard, describeModelCard } from "./capability-card.ts";
+import { peerFindingsSchema } from "./peer-review-contract.ts";
+import { type PeerReviewJournal, type PeerReviewScope, peerReviewDigest } from "./peer-review-journal.ts";
 import {
 	MAX_ROUTE_CHOICE_REQUEST_CHARACTERS,
 	ROUTE_CHOICE_QUESTION_ID,
@@ -23,6 +25,12 @@ export const peerReviewRequestSchema = Type.Object(
 		}),
 		thinkingLevel: ORCHESTRATION_THINKING_LEVEL_SCHEMA,
 		selection: Type.Optional(Type.Enum(["independent", "stronger"])),
+		recover: Type.Optional(
+			Type.Boolean({
+				description:
+					"Explicitly retry a previously unavailable review after its cause was addressed; never reroll a completed review.",
+			}),
+		),
 		stage: Type.Union([Type.Literal("plan"), Type.Literal("delivery")]),
 		objective: Type.String({ minLength: 1, maxLength: MAX_ROUTE_CHOICE_REQUEST_CHARACTERS / 2 }),
 		artifact: Type.String({
@@ -49,17 +57,7 @@ const reportSchema = Type.Object(
 			Type.Literal("insufficient_evidence"),
 		]),
 		summary: Type.String({ minLength: 1, maxLength: 2000 }),
-		findings: Type.Array(
-			Type.Object(
-				{
-					summary: Type.String({ minLength: 1, maxLength: 1000 }),
-					evidence: Type.String({ minLength: 1, maxLength: 1000 }),
-					requiredCheck: Type.String({ minLength: 1, maxLength: 1000 }),
-				},
-				{ additionalProperties: false },
-			),
-			{ maxItems: 8 },
-		),
+		findings: peerFindingsSchema,
 		limitations: Type.Array(Type.String({ minLength: 1, maxLength: 1000 }), { maxItems: 8 }),
 	},
 	{ additionalProperties: false },
@@ -80,8 +78,16 @@ export interface PeerReviewDependencies {
 	runCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Receiving lead's canonical verification lane; never substitutes another reviewer. */
 	requestVerification(findings: PeerReport["findings"], kind?: "evidence_gap"): void;
-	/** Host candidate and receiving-lane fence, captured before any reviewer await. */
-	captureVerificationFence(): Promise<() => Promise<void>>;
+	/** Root-owned lifetime and journal; independent review does not require a semantic evaluator. */
+	runtime?: {
+		isRoot(): boolean;
+		isSystemOneEnabled(): boolean;
+		openVerificationCount(): number | undefined;
+		journal: PeerReviewJournal;
+		captureContext(
+			signal?: AbortSignal,
+		): Promise<{ scope: PeerReviewScope; objective: unknown; assertCurrent(): Promise<void> }>;
+	};
 }
 
 export interface PeerOption {
@@ -106,15 +112,16 @@ interface ReviewedPeerResult {
 	review: PeerReport;
 	/** Ungrounded defect candidates. They remain unverified; their missing evidence is a separate obligation. */
 	droppedFindings?: { summary: string; quotedEvidence: string }[];
-	usage: Usage;
+	usage?: Usage;
 }
-export type PeerReviewResult =
+export type PeerReviewResult = (
 	| { status: "unavailable"; reason: string; usage?: Usage }
 	| (ReviewedPeerResult & { selection: "independent" })
 	| (ReviewedPeerResult & {
 			selection: "stronger";
 			strength: { source: "system_one_task_judgment"; confidence: number };
-	  });
+	  })
+) & { reviewKey?: string; replayed?: true };
 
 const modelRef = (model: Model<Api>): string => `${model.provider}/${model.id}`;
 
@@ -163,6 +170,8 @@ function groundFindings(
 /** Owns admission and review evidence; the foreground remains responsible for execution and checks. */
 export class PeerReviewController {
 	private readonly deps: PeerReviewDependencies;
+	private readonly running = new Map<string, Promise<PeerReviewResult>>();
+	private readonly results = new Map<string, PeerReviewResult>();
 	constructor(deps: PeerReviewDependencies) {
 		this.deps = deps;
 	}
@@ -208,7 +217,246 @@ export class PeerReviewController {
 		};
 	}
 
+	status() {
+		return { status: "advisor" as const, reviews: this.deps.runtime?.journal.read() ?? [] };
+	}
+
+	/** Frees only a failed attempt's capacity; its outcome never becomes a completed review. */
+	async disposeAttempt(reviewKey: string, reason: string, signal?: AbortSignal) {
+		const runtime = this.deps.runtime;
+		if (!runtime?.isRoot()) throw new Error("Only the root may dispose an advisor attempt.");
+		if (!reason.trim() || reason.length > 4000) throw new Error("Attempt disposition requires a bounded reason.");
+		const context = await runtime.captureContext(signal);
+		const record = runtime.journal.read().find((item) => item.key === reviewKey);
+		if (!record || record.outcome === "reviewed" || record.findings.length > 0 || record.limitations.length > 0)
+			throw new Error("Only pending or unavailable attempts without reviewed findings can be disposed.");
+		if (record.scope.sessionId !== context.scope.sessionId || record.scope.objectiveId !== context.scope.objectiveId)
+			throw new Error("Advisor attempt belongs to another root objective.");
+		await context.assertCurrent();
+		if (this.running.has(reviewKey)) throw new Error("An active advisor attempt cannot be disposed.");
+		const current = runtime.journal.read().find((item) => item.key === reviewKey);
+		if (!current || peerReviewDigest(current) !== peerReviewDigest(record))
+			throw new Error("Advisor attempt changed during disposition.");
+		runtime.journal.record({
+			...record,
+			settled: true,
+			attemptDisposition: reason,
+			disposedCandidateId: context.scope.candidateId,
+		});
+		return {
+			status: "attempt_disposed" as const,
+			validation: "no_review_validation" as const,
+			reviewKey,
+			outcome: record.outcome,
+		};
+	}
+
+	async acknowledge(
+		reviewKey: string,
+		evidence: string,
+	): Promise<{ status: "acknowledged"; validation: "root_decision_only" }> {
+		const runtime = this.deps.runtime;
+		if (!runtime?.isRoot()) throw new Error("Only the root may disposition advisor findings.");
+		if (runtime.isSystemOneEnabled())
+			throw new Error("System One is enabled; resolve findings with canonical receiving-lane receipts.");
+		if (!evidence.trim() || evidence.length > 4000)
+			throw new Error("Root disposition requires bounded concrete evidence.");
+		const context = await runtime.captureContext();
+		const record = runtime.journal.read().find((item) => item.key === reviewKey);
+		if (
+			record?.outcome !== "reviewed" ||
+			record.scope.sessionId !== context.scope.sessionId ||
+			record.scope.objectiveId !== context.scope.objectiveId
+		)
+			throw new Error("Advisor review is absent, incomplete or belongs to another objective.");
+		await context.assertCurrent();
+		runtime.journal.record({
+			...record,
+			acknowledgement: evidence,
+			acknowledgedCandidateId: context.scope.candidateId,
+		});
+		return { status: "acknowledged", validation: "root_decision_only" };
+	}
+
+	/** Consumes root review evidence; it never launches a peer or manufactures approval. */
+	async reviewCompletion(input: { objectiveId: string; sourceRevision: string }, signal?: AbortSignal) {
+		const runtime = this.deps.runtime;
+		const refused = (reason: string) => ({ passed: false, reviewerRef: "root-advisor", blockingIssues: [reason] });
+		if (!runtime?.isRoot()) return refused("Root advisor is unavailable; workers report to their parent.");
+		const context = await runtime.captureContext(signal);
+		if (context.scope.objectiveId !== input.objectiveId || context.scope.sourceRevision !== input.sourceRevision)
+			return refused("Obtain a root peer delivery review of this exact objective and source revision.");
+		const objectiveReviews = runtime.journal
+			.read()
+			.filter(
+				(item) =>
+					item.scope.sessionId === context.scope.sessionId && item.scope.objectiveId === context.scope.objectiveId,
+			);
+		const current = objectiveReviews.filter(
+			(item) => peerReviewDigest(item.scope) === peerReviewDigest(context.scope),
+		);
+		const record = [...current].reverse().find((item) => item.stage === "delivery" && !item.attemptDisposition);
+		if (record?.outcome !== "reviewed" || !record.verdict || record.verdict === "insufficient_evidence")
+			return refused(
+				"Use peer review with stage delivery, complete current evidence and the root's selected advisor; incomplete review remains owed.",
+			);
+		if (runtime.isSystemOneEnabled() && runtime.openVerificationCount() !== undefined) {
+			for (const review of objectiveReviews) {
+				if (
+					review.outcome !== "reviewed" ||
+					review.verificationRecorded ||
+					review.acknowledgement ||
+					review.settled
+				)
+					continue;
+				this.requestReportVerification(review.findings, review.limitations, review.stage, review.key);
+				runtime.journal.record({ ...review, verificationRecorded: true });
+			}
+		}
+		if (
+			current.some((review) => review.outcome === "pending" && !review.attemptDisposition) ||
+			(runtime.isSystemOneEnabled()
+				? runtime.openVerificationCount() !== 0
+				: objectiveReviews.some(
+						(review) =>
+							review.outcome === "reviewed" &&
+							(review.verdict !== "no_findings" || review.limitations.length > 0) &&
+							!review.acknowledgement,
+					))
+		)
+			return refused(
+				"Resolve current advisor findings in the root: peer resolve with System One, or an evidenced peer acknowledge when System One is off.",
+			);
+		const journalIdentity = peerReviewDigest(runtime.journal.read());
+		await context.assertCurrent();
+		if (
+			peerReviewDigest(runtime.journal.read()) !== journalIdentity ||
+			(runtime.isSystemOneEnabled() && runtime.openVerificationCount() !== 0)
+		)
+			return refused(
+				"Advisor results or verification obligations changed during completion; inspect current reviews and recheck.",
+			);
+		if (runtime.isSystemOneEnabled()) {
+			for (const review of runtime.journal.read()) {
+				if (peerReviewDigest(review.scope) === peerReviewDigest(context.scope) && review.outcome === "reviewed")
+					runtime.journal.record({ ...review, settled: true });
+			}
+		}
+		return {
+			passed: true,
+			reviewerRef: `${record.peer}:${record.key}`,
+			reasoning: "Current root review evidence is recorded; completion remains the coordinator's decision.",
+		};
+	}
+
 	async review(request: PeerReviewRequest, signal?: AbortSignal): Promise<PeerReviewResult> {
+		const runtime = this.deps.runtime;
+		if (!runtime?.isRoot())
+			return { status: "unavailable", reason: "Advisor reviews are root-only; workers report to their parent." };
+		if (!Value.Check(peerReviewRequestSchema, request))
+			return { status: "unavailable", reason: "Invalid or oversized peer review request" };
+		request = { ...request };
+		const context = await runtime.captureContext(signal);
+		const { recover: _recover, ...content } = request;
+		const key = peerReviewDigest({ content, scope: context.scope, lead: this.deps.getLead() });
+		await context.assertCurrent();
+		const prior = runtime.journal.read().find((record) => record.key === key);
+		const running = this.running.get(key);
+		if (running) {
+			const result = await running;
+			await context.assertCurrent();
+			return { ...result, usage: undefined, replayed: true };
+		}
+		if (prior && !(request.recover && prior.outcome !== "reviewed")) {
+			await context.assertCurrent();
+			const cached = this.results.get(key);
+			return cached
+				? { ...cached, usage: undefined, replayed: true }
+				: {
+						status: "unavailable",
+						reviewKey: key,
+						replayed: true,
+						reason: `Advisor ${prior.outcome} receipt retained: ${prior.summary}. Inspect peer status. Recover only an unavailable review after addressing its cause; changed evidence needs a new review.`,
+					};
+		}
+		const pending = {
+			key,
+			scope: context.scope,
+			stage: request.stage,
+			outcome: "pending" as const,
+			peer: request.peer,
+			summary: "Review is pending; no validation.",
+			limitations: [],
+			findings: [],
+		};
+		runtime.journal.record(pending);
+		const reservation = Promise.withResolvers<PeerReviewResult>();
+		this.running.set(key, reservation.promise);
+		const execute = async (): Promise<PeerReviewResult> => {
+			const result = await this.executeReview(request, context.assertCurrent, context.objective, signal);
+			try {
+				await context.assertCurrent();
+			} catch (error) {
+				// Paid usage still belongs to this invocation, even when its result cannot enter the new branch.
+				return {
+					status: "unavailable",
+					reviewKey: key,
+					reason: error instanceof Error ? error.message.slice(0, 1000) : "Advisor result is stale",
+					...(result.usage ? { usage: result.usage } : {}),
+				};
+			}
+			runtime.journal.record({
+				...pending,
+				outcome: result.status,
+				summary: result.status === "reviewed" ? result.review.summary : result.reason,
+				...(result.status === "reviewed"
+					? {
+							verdict: result.review.verdict,
+							limitations: result.review.limitations,
+							findings: result.review.findings,
+							verificationRecorded:
+								runtime.isSystemOneEnabled() && runtime.openVerificationCount() !== undefined,
+						}
+					: {}),
+			});
+			const recorded = { ...result, reviewKey: key };
+			this.results.set(key, { ...recorded, usage: undefined });
+			while (this.results.size > 32) this.results.delete(this.results.keys().next().value!);
+			return recorded;
+		};
+		void execute().then(reservation.resolve, reservation.reject);
+		try {
+			return await reservation.promise;
+		} finally {
+			this.running.delete(key);
+		}
+	}
+
+	private requestReportVerification(
+		findings: PeerReport["findings"],
+		limitations: readonly string[],
+		stage: PeerReviewRequest["stage"],
+		identity: string,
+	): void {
+		if (findings.length > 0) this.deps.requestVerification(findings);
+		if (limitations.length > 0)
+			this.deps.requestVerification(
+				limitations.map((limitation) => ({
+					summary: `Peer review evidence gap (${stage}, ${identity})`,
+					evidence: limitation,
+					requiredCheck:
+						"Resolve this missing proof with current-candidate source or permitted check evidence in this receiving lane, or establish the stated review scope with its limitation retained. A limitation is not a defect allegation. Optional runtime checks remain limitations when not authorized; this finding does not authorize tests. A successful tool exit or another clean review alone cannot resolve the gap.",
+				})),
+				"evidence_gap",
+			);
+	}
+
+	private async executeReview(
+		request: PeerReviewRequest,
+		verificationFence: () => Promise<void>,
+		objective: unknown,
+		signal?: AbortSignal,
+	): Promise<PeerReviewResult> {
 		let usage: Usage | undefined;
 		try {
 			signal?.throwIfAborted();
@@ -217,7 +465,6 @@ export class PeerReviewController {
 			// Copy caller data before any asynchronous boundary; neither prompts nor settings can drift.
 			const input = { ...request };
 			const selection = input.selection ?? "independent";
-			const verificationFence = await this.deps.captureVerificationFence();
 			const currentLead = this.deps.getLead();
 			if (!currentLead) throw new Error("No foreground model is available");
 			const lead = structuredClone(currentLead);
@@ -298,6 +545,7 @@ export class PeerReviewController {
 			const payload = JSON.stringify({
 				stage: input.stage,
 				objective: input.objective,
+				rootObjective: objective,
 				artifact: input.artifact,
 				evidence: input.evidence,
 			});
@@ -336,19 +584,12 @@ export class PeerReviewController {
 				throw new Error("Peer review verdict contradicts its evidence");
 			const grounded = groundFindings(report, [input.artifact, input.evidence]);
 			const requestSha256 = createHash("sha256").update(payload).digest("hex");
-			if (grounded.report.findings.length > 0) this.deps.requestVerification(grounded.report.findings);
-			const gaps: PeerReport["findings"] = [];
-			if (grounded.report.verdict === "insufficient_evidence" || grounded.dropped.length > 0) {
-				for (const limitation of grounded.report.limitations) {
-					gaps.push({
-						summary: `Peer review evidence gap (${input.stage}, ${requestSha256})`,
-						evidence: limitation,
-						requiredCheck:
-							"Resolve this missing proof with current-candidate source or permitted check evidence in this receiving lane, or narrow the affected delivery claim. Ungrounded defect candidates are not confirmed bugs. Optional runtime checks remain limitations when not authorized; this finding does not authorize tests. A successful tool exit or another clean review alone cannot resolve the gap.",
-					});
-				}
-			}
-			if (gaps.length > 0) this.deps.requestVerification(gaps, "evidence_gap");
+			this.requestReportVerification(
+				grounded.report.findings,
+				grounded.report.limitations,
+				input.stage,
+				requestSha256,
+			);
 			const reviewed: ReviewedPeerResult = {
 				status: "reviewed",
 				validation: "peer_review_only",

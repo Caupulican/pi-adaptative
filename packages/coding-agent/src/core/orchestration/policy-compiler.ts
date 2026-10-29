@@ -105,6 +105,7 @@ const CAPABILITY_ENFORCEMENT = new Map<HarnessCapability, ToolCapabilityManifest
 	["research.execute", "control-plane"],
 	["workflow.plan", "control-plane"],
 	["workflow.delegate", "control-plane"],
+	["workflow.message", "control-plane"],
 	["policy.modify", "control-plane"],
 	["learning.propose", "control-plane"],
 	["publish.execute", "control-plane"],
