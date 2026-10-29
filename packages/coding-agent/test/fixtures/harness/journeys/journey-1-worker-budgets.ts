@@ -132,6 +132,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	);
 	world.systemOne.enterPhase("e8-start", {
 		...e4Judgments,
+		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		leaves_machine: { kind: "noul", probability: 0.02 },
 		cannot_be_undone: { kind: "noul", probability: 0.02 },
 		touches_outside_task: { kind: "noul", probability: 0.02 },
@@ -237,7 +238,10 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 			},
 		},
 	);
-	world.systemOne.enterPhase("e8t-start", e4Judgments);
+	world.systemOne.enterPhase("e8t-start", {
+		...e4Judgments,
+		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
+	});
 	await withDeadline(trace, "E8 transient start turn", e8tSession.prompt("Start the transient reader."));
 	// The first ladder delay is round(5 000 + 0.2 * 5 000 * random), at most 6 000 ms; the alarm is armed with the persisted deadline
 	// less the orchestration clock's time at arming, so it is positive and no longer than that delay.
@@ -352,7 +356,10 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 		{ ...fail("e8o-fail-2", E8_TRANSIENT_ERROR), ...e8oStamp() },
 		{ ...fail("e8o-fail-3", E8_TRANSIENT_ERROR), ...e8oStamp() },
 	);
-	world.systemOne.enterPhase("e8o-start", e4Judgments);
+	world.systemOne.enterPhase("e8o-start", {
+		...e4Judgments,
+		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
+	});
 	await withDeadline(trace, "E8 one-attempt start turn", e8oSession.prompt("Start the one-attempt reader."));
 	await withDeadline(trace, "E8 one-attempt handoff woke the root", e8oWake.promise, 120_000);
 	await withDeadline(trace, "E8 one-attempt root idle", e8oSession.waitForForegroundIdle());
@@ -424,7 +431,10 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	);
 	const e8uWarningsBefore = world.warnings.length;
 	world.provider.enqueue("worker-a", fail("e8u-fail", E8_OPAQUE_ERROR));
-	world.systemOne.enterPhase("e8u-start", e4Judgments);
+	world.systemOne.enterPhase("e8u-start", {
+		...e4Judgments,
+		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
+	});
 	await withDeadline(trace, "E8 opaque start turn", e8uSession.prompt("Start the opaque reader."));
 	await withDeadline(trace, "E8 opaque handoff woke the root", e8uWake.promise, 120_000);
 	await withDeadline(trace, "E8 opaque root idle", e8uSession.waitForForegroundIdle());
@@ -547,7 +557,10 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 			},
 		},
 	});
-	world.systemOne.enterPhase("e8c-start", e4Judgments);
+	world.systemOne.enterPhase("e8c-start", {
+		...e4Judgments,
+		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
+	});
 	await withDeadline(trace, "E8 cost start turn", e8cSession.prompt("Start the cost-capped reader."));
 	await withDeadline(trace, "E8 cost handoff woke the root", e8cWake.promise, 120_000);
 	await withDeadline(trace, "E8 cost root idle", e8cSession.waitForForegroundIdle());

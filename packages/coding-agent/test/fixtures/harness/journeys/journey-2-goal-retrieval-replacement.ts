@@ -144,7 +144,9 @@ export async function verifyGoalRetrievalReplacement(
 			ledger?.learnedRootRouteRequests("retrieve"),
 			`${label}: actual successive route decisions learn root requests`,
 		).toBeGreaterThan(0);
-		world.systemOne.enterPhase(`${label}-worker-prefix-control`, {});
+		world.systemOne.enterPhase(`${label}-worker-prefix-control`, {
+			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
+		});
 		world.provider.enqueue(
 			"worker-a",
 			calls(`${label}-prefix-read`, [
@@ -173,7 +175,10 @@ export async function verifyGoalRetrievalReplacement(
 			`${label}: actual worker request records its fixed prefix`,
 		).toBeGreaterThan(0);
 		const beforeRequests = world.provider.requests.length;
-		world.systemOne.enterPhase(`${label}-held-minion`, judgments.route);
+		world.systemOne.enterPhase(`${label}-held-minion`, {
+			...judgments.route,
+			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
+		});
 		world.provider.enqueue(
 			"worker-a",
 			{
@@ -243,7 +248,10 @@ export async function verifyGoalRetrievalReplacement(
 			route: _preflightRoute,
 			...workerRetrievalJudgments
 		} = judgments.first;
-		world.systemOne.enterPhase(`${label}-b-retrieval`, workerRetrievalJudgments);
+		world.systemOne.enterPhase(`${label}-b-retrieval`, {
+			...workerRetrievalJudgments,
+			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
+		});
 		world.provider.enqueue(
 			"worker-a",
 			calls(`${label}-b-read`, [{ id: `${label}-b-read`, name: "read", arguments: { path: LIMITS_PATH } }]),

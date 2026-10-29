@@ -63,6 +63,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		lifts_delivery_block: { kind: "noul", probability: 0.02 },
 		full_handoff: { kind: "noul", probability: 0.02 },
 		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 	} as const;
 	const e7AHeldReached = createBarrier();
 	const e7AHeld = createBarrier();
@@ -323,6 +324,13 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 	}
 	// Physical clean disposal releases all owner claims. The crash cut then restores the PRE-CUT busy
 	// files, preserving A's unsafe-recovery refusal; SQLite is not rewound.
+	world.systemOne.enterPhase("e7-resume", e7Judgments, {
+		expect: expectOwnerWords({
+			sessionManager: () => e7Fresh.sessionManager,
+			userRequests: ["Continue after the restart."],
+			optionalToolNames: ["secret_store"],
+		}),
+	});
 	const e7Fresh = await world.restart({
 		owner: e7Owner.session,
 		sessionFile: e7AuxFile,
@@ -391,13 +399,6 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 	const e7AfterFirstRecovery = e7Manifest();
 	e7Fresh.session.getLaneRecords();
 	expect(e7Manifest(), "a second recovery pass changes no owned file").toEqual(e7AfterFirstRecovery);
-	world.systemOne.enterPhase("e7-resume", e7Judgments, {
-		expect: expectOwnerWords({
-			sessionManager: () => e7Fresh.sessionManager,
-			userRequests: ["Continue after the restart."],
-			optionalToolNames: ["secret_store"],
-		}),
-	});
 	await withDeadline(trace, "E7 recovered root turn", e7Fresh.session.prompt("Continue after the restart."));
 	await withDeadline(trace, "E7 B wake reached the recovered root", e7WakeReached.promise, 120_000);
 	await withDeadline(trace, "E7 recovered work settled", e7Fresh.session.waitForForegroundIdle(), 120_000);

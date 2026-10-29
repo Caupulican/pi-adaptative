@@ -48,6 +48,7 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 	let oldLaneId: string | undefined;
 	let oldTerminalPostsAfterCleanup: number | undefined;
 	let ownerClassificationObserved = false;
+	let admittingOwnerClassification = false;
 	const failures: unknown[] = [];
 	const observations: Record<string, unknown> = {
 		systemOneEnabled: world.systemOne.enabled,
@@ -138,14 +139,20 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 			lifts_delivery_block: { kind: "noul", probability: 0.02 },
 			full_handoff: { kind: "noul", probability: 0.02 },
 			optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		},
 		{
 			expect: (request) => {
+				admittingOwnerClassification = !("worker_task_fit" in request.questions);
+				if (!admittingOwnerClassification) {
+					expect(request.state).toMatchObject({ instructions, objective: "Inspect the first limits boundary." });
+					return;
+				}
 				if (!isPlainRecord(request.state) || request.state.user_request !== "Hello.")
 					throw new Error(`${label}: classification did not observe the actual warm owner words`);
 			},
 			onAdmit: () => {
-				ownerClassificationObserved = true;
+				if (admittingOwnerClassification) ownerClassificationObserved = true;
 			},
 		},
 	);
@@ -285,7 +292,9 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 			oldControlEntries: oldControlEntries.length,
 		};
 		// Arm both tracks before fresh construction: constructor recovery is itself an observable producer.
-		world.systemOne.enterPhase(`${label}-reopen`, {});
+		world.systemOne.enterPhase(`${label}-reopen`, {
+			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
+		});
 		world.provider.enqueue("worker-c", {
 			...calls(`${label}-potential-b-report`, [
 				{

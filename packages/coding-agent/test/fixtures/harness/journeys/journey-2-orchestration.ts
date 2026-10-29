@@ -520,6 +520,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	world.systemOne.enterPhase(
 		"steer-start",
 		{
+			worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 			capabilities_authorized: { kind: "noul", probability: 0.02 },
 			changes_model_pools: { kind: "noul", probability: 0.02 },
 			local_commits_only: { kind: "noul", probability: 0.02 },
@@ -569,6 +570,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 
 	await withDeadline(trace, "interrupt turn settled", session.waitForForegroundIdle(), 90_000);
 	world.systemOne.enterPhase("objective-cycle", {
+		worker_task_fit: { kind: "choice", choice: "adequate", confidence: 0.97 },
 		objective_coherent: { kind: "noul", probability: 0.97 },
 		ambiguity_severity: { kind: "score", level: 0, confidence: 1 },
 		missing_information: { kind: "noul", probability: 0.02 },
