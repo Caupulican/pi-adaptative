@@ -139,7 +139,7 @@ export class ForegroundLifecycleAdapter {
 		assertCurrent();
 		await emit({ type: "message_start", message });
 		assertCurrent();
-		this.agent.state.messages.push(message);
+		this.agent.appendMessage(message);
 		try {
 			await emit({ type: "message_end", message });
 			if (!this.getPersistedMessageEntryId(message)) throw new Error("Custom-message input was not persisted.");
@@ -148,8 +148,7 @@ export class ForegroundLifecycleAdapter {
 				this.warn(`Custom-message input was persisted, but its event failed: ${String(error)}`);
 				return;
 			}
-			const index = this.agent.state.messages.indexOf(message);
-			if (index >= 0) this.agent.state.messages.splice(index, 1);
+			this.agent.removeMessage(message);
 			throw error;
 		}
 	}

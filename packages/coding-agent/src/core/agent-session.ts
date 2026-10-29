@@ -11,6 +11,7 @@ import {
 	hardCompactionTriggerTokens,
 } from "../kernel/compaction/compaction.ts";
 import type { AgentContext } from "../kernel/index.ts";
+import { messageRevision } from "../kernel/message-revision.ts";
 import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
 import { classifyFailure } from "../kernel/reliability/index.ts";
 import { compactToolResultDetailsForRetention } from "../kernel/session/message-retention.ts";
@@ -2057,6 +2058,9 @@ export class AgentSession {
 		this._semanticUsage = sessionSemanticUsageOf(this.sessionManager);
 		this._semanticUsage.bindDiagnostics((message) => this.emitHostWarning(message));
 		this._analytics = new SessionAnalytics({
+			onDailyUsageUpdated: () => this._emit({ type: "usage_updated" }),
+			isDisposed: () => this._disposed,
+			onDailyUsageError: (error) => this.emitHostWarning(`Daily usage refresh failed: ${String(error)}`),
 			getState: () => this.state,
 			getMessages: () => this.messages,
 			getModel: () => this.model,
@@ -3004,12 +3008,20 @@ export class AgentSession {
 	forgetHistorySession(sessionId: string): Promise<{ ok: boolean; message: string }> {
 		return this._memory.forgetHistorySession(sessionId);
 	}
-	private _ob?: [unknown[], VerificationObligationView[]];
+	private obligationProjection?: {
+		messages: readonly AgentMessage[];
+		revision: number;
+		values: VerificationObligationView[];
+	};
 	getVerificationObligations(): VerificationObligationView[] {
-		const k = this.agent.state.messages.flatMap((x) => [x, (x as { details?: unknown }).details]);
-		if (!this._ob || this._ob[0].length !== k.length || !k.every((x, i) => x === this._ob?.[0][i]))
-			this._ob = [k, new VerificationObligationTracker(this.agent.state.messages).getActiveObligations()];
-		return (this._ob?.[1] ?? []).map((v) => ({ ...v }));
+		const messages = this.agent.state.messages;
+		const revision = messageRevision(messages);
+		const cached = this.obligationProjection;
+		if (revision !== undefined && cached?.messages === messages && cached.revision === revision)
+			return cached.values.map((value) => ({ ...value }));
+		const values = new VerificationObligationTracker(messages).getActiveObligations();
+		this.obligationProjection = revision === undefined ? undefined : { messages, revision, values };
+		return values.map((value) => ({ ...value }));
 	}
 
 	/** Bind the branch-scoped durable repository outcome journal after session construction. */
@@ -3751,22 +3763,6 @@ export class AgentSession {
 		return undefined;
 	}
 
-	private _replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage): void {
-		// Agent-core stores the finalized message object in its state before emitting message_end.
-		// SessionManager persistence happens later in _handleAgentEvent() with event.message.
-		// Mutating this object in place keeps agent state, later turn/agent events, listeners,
-		// and the eventual SessionManager.appendMessage(event.message) persistence in sync.
-		if (target === replacement) {
-			return;
-		}
-
-		const targetRecord = target as unknown as Record<string, unknown>;
-		for (const key of Object.keys(targetRecord)) {
-			delete targetRecord[key];
-		}
-		Object.assign(targetRecord, replacement);
-	}
-
 	/** Emit extension events based on agent events */
 	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
 		if (event.type === "agent_start") {
@@ -3808,7 +3804,7 @@ export class AgentSession {
 				message: event.message,
 			});
 			if (replacement) {
-				this._replaceMessageInPlace(event.message, replacement);
+				this.agent.replaceMessageContents(event.message, replacement);
 			}
 		} else if (event.type === "tool_execution_start") {
 			await this._extensionRunner.emit({
@@ -4749,7 +4745,7 @@ export class AgentSession {
 			}
 		} else {
 			this._foregroundLifecycle.appendCustomMessage(appMessage);
-			this.agent.state.messages.push(appMessage);
+			this.agent.appendMessage(appMessage);
 			this._emit({ type: "message_start", message: appMessage });
 			this._emit({ type: "message_end", message: appMessage });
 		}

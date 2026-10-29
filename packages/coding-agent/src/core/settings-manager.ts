@@ -3,6 +3,7 @@ import { homedir } from "os";
 import { dirname, join, resolve } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { DEFAULT_COMPACTION_SETTINGS } from "../kernel/compaction/compaction.ts";
+import { withHostFileWrite } from "../utils/host-write-transition.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { configFile } from "./agent-paths.ts";
@@ -318,7 +319,7 @@ export class FileSettingsStorage implements SettingsStorage {
 				if (releases.length === 0) {
 					releases.push(acquireFileLockSync(path, LOW_LATENCY_FILE_LOCK_OPTIONS));
 				}
-				writeFileAtomicSync(path, next);
+				withHostFileWrite(path, next, () => writeFileAtomicSync(path, next));
 				migratedLegacy = legacyExists;
 			}
 		} finally {

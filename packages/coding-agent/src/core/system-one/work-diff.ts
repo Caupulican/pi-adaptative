@@ -25,9 +25,9 @@ export interface WorkBaseline {
 export interface WorkDiff {
 	/** The commit the work is measured from. */
 	readonly base: string;
-	/** Raw Git tree diff from the admitted working bytes, bounded. */
+	/** Complete Git tree diff from the admitted working bytes, within the capture byte bound. */
 	readonly patch: string;
-	/** Every tracked path the diff changes, read from the whole diff: `patch` carries only its first part. */
+	/** Every tracked path the diff changes. */
 	readonly files: readonly string[];
 	/** Characters of the patch left out to keep the check bounded; 0 when complete. */
 	readonly omittedChars: number;
@@ -35,7 +35,7 @@ export interface WorkDiff {
 	readonly untracked: readonly string[];
 	/**
 	 * Lint and type-check suppressions the work adds, scanned over the whole diff: the content of new files and
-	 * every change past the {@link WORK_DIFF_PATCH_LIMIT} patch bound, which `patch` itself does not carry.
+	 * every change, independently of the bounded display preview.
 	 * Absent when the source did not scan (the check then reads `patch`).
 	 */
 	readonly suppressions?: readonly AddedSuppression[];
@@ -57,14 +57,15 @@ export function hasRepositoryOutcome(work: WorkDiff | undefined, recordedChanges
 	);
 }
 
-/** Enough for any focused change; larger work is judged on its first part and the file list. */
+/** Display preview only. Completion-account judgments consume the complete captured patch. */
 export const WORK_DIFF_PATCH_LIMIT = 24_000;
+export const WORK_DIFF_CAPTURE_BYTES = 64 * 1024 * 1024;
 export const WORK_DIFF_UNTRACKED_LIMIT = 50;
 export const WORK_DIFF_FILES_LIMIT = 1_000;
 /** Suppression hits kept; every path with a hit is still listed before the cap is reached. */
 export const WORK_DIFF_SUPPRESSION_LIMIT = 500;
 const GIT_TIMEOUT_MS = 20_000;
-const GIT_OUTPUT_LIMIT = 64 * 1024 * 1024;
+const GIT_OUTPUT_LIMIT = WORK_DIFF_CAPTURE_BYTES;
 const HASH_OBJECT_BATCH_PATHS = 256;
 const HASH_OBJECT_BATCH_ARGUMENT_UNITS = process.platform === "win32" ? 24 * 1024 : 64 * 1024;
 
@@ -527,15 +528,27 @@ export async function readWorkDiff(
 		)
 			.split("\0")
 			.filter((path) => added.has(path));
+		const files = patchPaths(full);
+		const suppressions = addedSuppressions(full);
+		if (
+			files.length > WORK_DIFF_FILES_LIMIT ||
+			untracked.length > WORK_DIFF_UNTRACKED_LIMIT ||
+			suppressions.length > WORK_DIFF_SUPPRESSION_LIMIT
+		)
+			throw new WorkEvidenceError(
+				"diff",
+				"invalid",
+				"repository evidence exceeds the file or suppression count bound; partition the work without discarding evidence",
+			);
 		return {
 			base: baseline.revision,
-			patch: full.slice(0, WORK_DIFF_PATCH_LIMIT),
-			files: patchPaths(full).slice(0, WORK_DIFF_FILES_LIMIT),
-			omittedChars: Math.max(0, full.length - WORK_DIFF_PATCH_LIMIT),
-			untracked: untracked.slice(0, WORK_DIFF_UNTRACKED_LIMIT),
+			patch: full,
+			files,
+			omittedChars: 0,
+			untracked,
 			// The whole diff, not the bounded patch: a new file's content is in it, and so is everything the
 			// patch bound cuts off. Prose files are skipped by the scan itself.
-			suppressions: addedSuppressions(full).slice(0, WORK_DIFF_SUPPRESSION_LIMIT),
+			suppressions,
 		};
 	} catch (error) {
 		return {

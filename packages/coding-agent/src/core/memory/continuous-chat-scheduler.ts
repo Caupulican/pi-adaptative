@@ -50,7 +50,12 @@ interface WorkRow {
 }
 
 /** Schema 2 orders deferred work by context endpoint (see `continuousChatNodeContextEnd`); schema 1 ordered it by arrival. */
-const SCHEDULER_SCHEMA_VERSION = 2;
+const SCHEDULER_SCHEMA_VERSION = 3;
+
+const RECOVERY_SCHEMA_SQL = `
+	CREATE TABLE IF NOT EXISTS recovery_only (level INTEGER NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(level,ordinal)) STRICT, WITHOUT ROWID;
+	CREATE TABLE IF NOT EXISTS recovery_configuration (id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL) STRICT;
+`;
 
 /** SQL form of `continuousChatNodeContextEnd`. The claim indexes and every claim ORDER BY spell it identically. */
 const CONTEXT_END_SQL = "(CASE WHEN level=0 THEN ordinal ELSE (ordinal+1)<<level END)";
@@ -126,7 +131,7 @@ export class ContinuousChatScheduler {
 			);
 			const version = db.prepare("PRAGMA user_version").get()?.user_version;
 			// Schema 2 opens as is, schema 1 through its atomic migration, and an empty file only when creating.
-			if (version !== SCHEDULER_SCHEMA_VERSION && version !== 1 && !(version === 0 && create))
+			if (version !== SCHEDULER_SCHEMA_VERSION && version !== 2 && version !== 1 && !(version === 0 && create))
 				throw new ContinuousChatCorruptError(path, "Unsupported ICM scheduler schema");
 			if (version === 0)
 				db.exec(`
@@ -140,11 +145,17 @@ export class ContinuousChatScheduler {
 				 CHECK(sequence>=0 AND claim_id>=0 AND attempts>=0 AND retry_after>=-1), CHECK(reason IS NULL OR length(reason)<=512)
 				) STRICT, WITHOUT ROWID;
 				${CLAIM_INDEX_SQL}
+				${RECOVERY_SCHEMA_SQL}
 				CREATE TABLE IF NOT EXISTS legacy_half (level INTEGER NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(level,ordinal)) STRICT, WITHOUT ROWID;
 				PRAGMA user_version=${SCHEDULER_SCHEMA_VERSION};
 			`);
 			const scheduler = new ContinuousChatScheduler(db, path);
 			if (version === 1) scheduler.migrateFromSchema1();
+			if (version === 1 || version === 2)
+				scheduler.transaction(() => {
+					db.exec(RECOVERY_SCHEMA_SQL);
+					db.exec(`PRAGMA user_version=${SCHEDULER_SCHEMA_VERSION}`);
+				});
 			return scheduler;
 		});
 	}
@@ -172,7 +183,7 @@ export class ContinuousChatScheduler {
 				const { leafStreak: _leafStreak, ...meta } = value;
 				this.sql("UPDATE meta SET body=? WHERE id=1").run(JSON.stringify(meta));
 			}
-			this.db.exec(`PRAGMA user_version=${SCHEDULER_SCHEMA_VERSION}`);
+			this.db.exec("PRAGMA user_version=2");
 		});
 	}
 	private sql(sql: string): SqliteStatement {
@@ -249,7 +260,9 @@ export class ContinuousChatScheduler {
 	/** Only an unpublished database may be reset; caller holds legacy authority until finishImport commits. */
 	beginImport(): void {
 		this.transaction(() => {
-			this.db.exec("DELETE FROM work; DELETE FROM legacy_half; DELETE FROM meta;");
+			this.db.exec(
+				"DELETE FROM recovery_only; DELETE FROM recovery_configuration; DELETE FROM work; DELETE FROM legacy_half; DELETE FROM meta;",
+			);
 		});
 	}
 	importBatch(entries: readonly LegacyQueueEntry[], firstSequence: number): void {
@@ -370,9 +383,20 @@ export class ContinuousChatScheduler {
 			throw new ContinuousChatCorruptError(this.path, "Invalid pending leaf");
 		return { ...meta, running, builtLeafPrefix: Math.min(meta.nextLeaf, minimum ?? meta.nextLeaf) };
 	}
-	arrival(totalMessages?: number): void {
+	arrival(totalMessages?: number, recoveryKey?: string, forceRecovery = false): void {
 		this.transaction(() => {
 			const meta = this.meta();
+			const previous = this.sql("SELECT identity FROM recovery_configuration WHERE id=1").get()?.identity;
+			if (forceRecovery || (recoveryKey !== undefined && recoveryKey !== previous)) {
+				this.sql(
+					"UPDATE work SET retry_after=? WHERE (level,ordinal) IN (SELECT level,ordinal FROM recovery_only)",
+				).run(meta.generation);
+				this.sql("DELETE FROM recovery_only").run();
+				if (recoveryKey !== undefined)
+					this.sql(
+						"INSERT INTO recovery_configuration VALUES(1,?) ON CONFLICT(id) DO UPDATE SET identity=excluded.identity",
+					).run(recoveryKey);
+			}
 			const count = totalMessages ?? meta.totalMessages;
 			if (!isNonNegativeSafeInteger(count) || count < meta.totalMessages)
 				throw new RangeError("Message count must not decrease");
@@ -473,18 +497,24 @@ export class ContinuousChatScheduler {
 			if (!row || row.claimId !== claim.claimId) throw new Error("ICM work claim was superseded");
 			if (row.status !== "running" && (row.lastAction !== action.kind || row.reason !== reason))
 				throw new Error("ICM work disposition does not match retry");
-			if (row.status === "running")
+			if (row.status === "running") {
+				const recoveryIdentity = this.sql("SELECT identity FROM recovery_configuration WHERE id=1").get()?.identity;
+				const waitForRecovery =
+					action.kind === "fail" && action.recoveryOnly === true && action.recoveryKey === recoveryIdentity;
+				if (waitForRecovery)
+					this.sql("INSERT INTO recovery_only VALUES(?,?) ON CONFLICT DO NOTHING").run(claim.level, claim.ordinal);
 				this.sql(
 					"UPDATE work SET status=?,sequence=?,retry_after=?,reason=?,last_action=? WHERE level=? AND ordinal=?",
 				).run(
 					action.kind === "fail" ? "blocked" : "ready",
 					++meta.sequence,
-					action.kind === "fail" ? meta.generation : -1,
+					waitForRecovery ? Number.MAX_SAFE_INTEGER : action.kind === "fail" ? meta.generation : -1,
 					reason,
 					action.kind,
 					claim.level,
 					claim.ordinal,
 				);
+			}
 			meta.revision++;
 			this.save(meta);
 		});
@@ -493,6 +523,7 @@ export class ContinuousChatScheduler {
 		this.transaction(() => {
 			const meta = this.meta();
 			this.sql("DELETE FROM work WHERE level=? AND ordinal=?").run(item.level, item.ordinal);
+			this.sql("DELETE FROM recovery_only WHERE level=? AND ordinal=?").run(item.level, item.ordinal);
 			if (parent) this.insert(parent, ++meta.sequence);
 			meta.revision++;
 			this.save(meta);

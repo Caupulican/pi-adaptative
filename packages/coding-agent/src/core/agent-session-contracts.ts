@@ -76,6 +76,7 @@ export type AgentSessionEvent =
 	| { type: "user_message_withdrawn"; message: AgentMessage }
 	| { type: "compaction_start"; reason: "manual" | AutoCompactionReason }
 	| { type: "session_info_changed"; name: string | undefined }
+	| { type: "usage_updated" }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	/** `severity: "info"` marks routine work flow that is announced but is not a problem (a request to the root). */
 	| { type: "warning"; message: string; severity?: "info" }

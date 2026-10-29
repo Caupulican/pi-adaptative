@@ -1597,7 +1597,7 @@ export class SystemOneController {
 		const unavailable: CompletionRejectionDetail[] = [];
 		// The account's claims are judged beside the stages, in the same round trip's time. Started here and
 		// awaited below; an abandoned wait must not surface as an unhandled rejection.
-		const judgingAccount: Promise<{ refuted: AccountClaim[]; unsettled: AccountClaim[] }> | undefined =
+		const judgingAccount: Promise<Awaited<ReturnType<typeof judgeAccountClaims>>> | undefined =
 			checkedAccount.claims.length > 0
 				? judgeAccountClaims(
 						{ evaluateUnsettledItems: (checks, signal) => this.evaluateUnsettledItems(checks, signal) },

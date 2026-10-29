@@ -79,7 +79,7 @@ export interface PeerReviewDependencies {
 	getJudge(): RouteChoiceJudge | undefined;
 	runCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Receiving lead's canonical verification lane; never substitutes another reviewer. */
-	requestVerification(findings: PeerReport["findings"]): void;
+	requestVerification(findings: PeerReport["findings"], kind?: "evidence_gap"): void;
 	/** Host candidate and receiving-lane fence, captured before any reviewer await. */
 	captureVerificationFence(): Promise<() => Promise<void>>;
 }
@@ -104,7 +104,7 @@ interface ReviewedPeerResult {
 	stage: PeerReviewRequest["stage"];
 	requestSha256: string;
 	review: PeerReport;
-	/** Findings whose quoted evidence is not in the supplied snapshot: not verified, no obligation opened. Supply that text to have them judged. */
+	/** Ungrounded defect candidates. They remain unverified; their missing evidence is a separate obligation. */
 	droppedFindings?: { summary: string; quotedEvidence: string }[];
 	usage: Usage;
 }
@@ -149,8 +149,8 @@ function groundFindings(
 	const disclosure = dropped.map((entry) =>
 		`Not verified, quote absent from the supplied snapshot: ${entry.summary}`.slice(0, 1000),
 	);
-	// Disclosures first: the schema caps limitations at 8, and what was dropped must never be the part that is cut.
-	const limitations = [...disclosure, ...report.limitations].slice(0, 8);
+	// Each input list is bounded to eight. Retain both: grounding must not erase missing proof.
+	const limitations = [...disclosure, ...report.limitations];
 	return {
 		report:
 			kept.length > 0
@@ -335,7 +335,20 @@ export class PeerReviewController {
 			)
 				throw new Error("Peer review verdict contradicts its evidence");
 			const grounded = groundFindings(report, [input.artifact, input.evidence]);
+			const requestSha256 = createHash("sha256").update(payload).digest("hex");
 			if (grounded.report.findings.length > 0) this.deps.requestVerification(grounded.report.findings);
+			const gaps: PeerReport["findings"] = [];
+			if (grounded.report.verdict === "insufficient_evidence" || grounded.dropped.length > 0) {
+				for (const limitation of grounded.report.limitations) {
+					gaps.push({
+						summary: `Peer review evidence gap (${input.stage}, ${requestSha256})`,
+						evidence: limitation,
+						requiredCheck:
+							"Resolve this missing proof with current-candidate source or permitted check evidence in this receiving lane, or narrow the affected delivery claim. Ungrounded defect candidates are not confirmed bugs. Optional runtime checks remain limitations when not authorized; this finding does not authorize tests. A successful tool exit or another clean review alone cannot resolve the gap.",
+					});
+				}
+			}
+			if (gaps.length > 0) this.deps.requestVerification(gaps, "evidence_gap");
 			const reviewed: ReviewedPeerResult = {
 				status: "reviewed",
 				validation: "peer_review_only",
@@ -343,7 +356,7 @@ export class PeerReviewController {
 				lead: { ref: modelRef(lead.model), thinkingLevel: lead.thinkingLevel },
 				peer: { ref: modelRef(peer), thinkingLevel: input.thinkingLevel },
 				stage: input.stage,
-				requestSha256: createHash("sha256").update(payload).digest("hex"),
+				requestSha256,
 				review: grounded.report,
 				...(grounded.dropped.length > 0 ? { droppedFindings: grounded.dropped } : {}),
 				usage,

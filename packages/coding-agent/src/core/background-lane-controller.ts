@@ -28,6 +28,7 @@ import type {
 import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
+import { BotRuntimeBindings } from "./delegation/bot-runtime-bindings.ts";
 import { ManagedLaneController, type ManagedLaneControllerDeps } from "./delegation/managed-lane-controller.ts";
 import {
 	BOT_MEMORY_BLOCK_SEPARATOR,
@@ -168,7 +169,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private readonly _laneRecordListeners = new Set<(records: readonly LaneRecord[]) => void>();
 	private _laneRecordsNotifyQueued = false;
 	/** The projected bot roster, dropped by every input change. */
-	private _botViews: { defaultModelRef: string; delegateActive: boolean; views: PersistentBotView[] } | undefined;
+	private _botViews:
+		| { defaultModelRef: string; delegateActive: boolean; bindings: object; views: PersistentBotView[] }
+		| undefined;
 	private _unsubscribeLaneRecordStore: (() => void) | undefined;
 	private readonly _laneModels: LaneModelResolver;
 	private readonly _goalAutoContinue: GoalAutoContinueController;
@@ -179,6 +182,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Leaf already scanned with no persisted active managed lane. A new leaf rescans. */
 	private _managedLaneAbsenceLeafId: string | null | undefined;
 	private _botTeamStore: PersistentBotTeamStore | undefined;
+	private readonly botBindings: BotRuntimeBindings;
 	/** Lazily materialized so a UAC surface without `delegate` allocates no worker runtime state. */
 	private _workers: WorkerDelegationController | undefined;
 	/** One durable lifecycle shared by every worker execution adapter. */
@@ -211,6 +215,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	constructor(deps: BackgroundLaneControllerDeps) {
 		this.deps = deps;
+		this.botBindings = new BotRuntimeBindings(() => deps.getSessionManager());
 		this._laneModels = new LaneModelResolver(deps);
 		this._research = new ResearchLaneController(
 			{ ...deps, onContinuationActivity: () => this._notifyContinuationActivity() },
@@ -592,6 +597,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._runTeardownStep("dispose worker usage delivery", () => this._workerUsage?.dispose());
 		this._runTeardownStep("dispose worker receipt delivery", () => this._workerReceipts?.dispose());
 		this._runTeardownStep("dispose worker notifications", () => this._workerNotifications?.dispose());
+		this._runTeardownStep("dispose bot and team store", () => this._botTeamStore?.dispose());
 		const unsubscribeLaneRecordStore = this._unsubscribeLaneRecordStore;
 		this._unsubscribeLaneRecordStore = undefined;
 		this._runTeardownStep("unsubscribe lane records", () => unsubscribeLaneRecordStore?.());
@@ -1083,7 +1089,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	getBotTeamStore(): PersistentBotTeamStore {
 		if (!this._botTeamStore) {
-			this._botTeamStore = new PersistentBotTeamStore(this.deps.getAgentDir());
+			this._botTeamStore = new PersistentBotTeamStore(this.deps.getAgentDir(), (message) => this._safeWarn(message));
 			this._botTeamStore.subscribe(() => {
 				this._botViews = undefined;
 			});
@@ -1108,8 +1114,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	listPersistentBots(defaultModelRef = this.getRootModelLabel()): PersistentBotView[] {
 		const delegateActive = this.deps.isDelegateToolActive();
+		const bindings = this.botBindings.revision();
 		const cached = this._botViews;
-		if (cached && cached.defaultModelRef === defaultModelRef && cached.delegateActive === delegateActive) {
+		if (
+			cached &&
+			cached.defaultModelRef === defaultModelRef &&
+			cached.delegateActive === delegateActive &&
+			cached.bindings === bindings
+		) {
 			return [...cached.views];
 		}
 		const hasWorkerState = this._hasWorkerState();
@@ -1128,8 +1140,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._hydrateManagedLanes();
 			laneRecords = this._laneTracker.getRecords();
 		}
-		const views = this.getBotTeamStore().projectBotViews(liveAgents, laneRecords, defaultModelRef);
-		this._botViews = { defaultModelRef, delegateActive, views };
+		const views = this.getBotTeamStore().projectBotViews(
+			liveAgents.flatMap((agent) => {
+				const alias = this.botBindings.alias(agent.agentId);
+				return alias ? [{ ...agent, agentId: alias }] : [];
+			}),
+			laneRecords.flatMap((record) => {
+				const alias = this.botBindings.alias(record.agentId ?? record.laneId);
+				return alias ? [{ ...record, agentId: alias }] : [];
+			}),
+			defaultModelRef,
+		);
+		this._botViews = { defaultModelRef, delegateActive, bindings, views };
 		return [...views];
 	}
 
@@ -1201,7 +1223,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				]);
 				if (seen.get(agentId) === signature) continue;
 				seen.set(agentId, signature);
-				changed.push(agentId);
+				const alias = this.botBindings.alias(agentId);
+				if (alias) changed.push(alias);
 			}
 			if (changed.length > 0) listener(changed);
 		});
@@ -1220,22 +1243,53 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	upsertPersistentBot(input: UpsertPersistentBotInput): PersistentBotRecord {
-		return this.getBotTeamStore().upsertBot(input);
+		const store = this.getBotTeamStore();
+		const agentId = normalizeBotOrTeamId(input.agentId, "agentId");
+		store.reload();
+		const existing = store.getBot(agentId);
+		const bindingFields = ["provider", "modelId", "thinkingLevel", "profileId", "canWrite", "instructions"] as const;
+		const bindingChanged =
+			existing &&
+			bindingFields.some((field) => {
+				const value = input[field];
+				if (value === undefined) return false;
+				const previous = existing[field];
+				const next = typeof value === "string" ? value.trim() || undefined : value;
+				return next !== (typeof previous === "string" ? previous.trim() || undefined : previous);
+			});
+		if (
+			bindingChanged &&
+			this._hasWorkerState() &&
+			this.listWorkerAgents().some(
+				(agent) => agent.agentId === this.botBindings.runtime(agentId) && agent.status !== "retired",
+			)
+		)
+			throw new Error(
+				`Retire bot ${input.agentId} before changing its model, profile, permissions or instructions; an existing worker's grant is immutable.`,
+			);
+		return store.upsertBot({ ...input, agentId });
 	}
 
 	retirePersistentBot(agentId: string): { retired: boolean; detail: string } {
-		this.getBotTeamStore().retireBot(agentId);
 		try {
-			this.retireWorkerAgent(agentId, undefined, { discardPending: true });
-		} catch {
-			// Worker may not exist or may already be retired
+			agentId = normalizeBotOrTeamId(agentId, "agentId");
+			const runtime = this.botBindings.runtime(agentId);
+			const hasWorker = this._hasWorkerState() && this.listWorkerAgents().some((agent) => agent.agentId === runtime);
+			if (hasWorker) this.retireWorkerAgent(runtime, undefined, { discardPending: true });
+			const bot = this.getBotTeamStore().retireBot(agentId);
+			return {
+				retired: hasWorker || bot !== undefined,
+				detail: hasWorker || bot ? `Bot ${agentId} retired.` : `Bot ${agentId} does not exist.`,
+			};
+		} catch (error) {
+			return { retired: false, detail: error instanceof Error ? error.message : String(error) };
 		}
-		return { retired: true, detail: `Bot ${agentId} retired.` };
 	}
 
 	stopPersistentBot(agentId: string): { stopped: boolean; detail: string } {
 		try {
-			const res = this.interruptWorkerAgent(agentId, undefined, { force: false });
+			agentId = normalizeBotOrTeamId(agentId, "agentId");
+			const res = this.interruptWorkerAgent(this.botBindings.runtime(agentId), undefined, { force: false });
 			return {
 				stopped: res.interrupted,
 				detail: res.interrupted
@@ -1297,7 +1351,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	readBotChatMessages(agentId: string): AgentMessage[] {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
-		let conv = this.openWorkerTranscript(normId);
+		const runtime = this.botBindings.runtime(normId);
+		let conv = this.openWorkerTranscript(runtime);
 		const bot = this.getBotTeamStore().getBot(normId);
 		if (!conv && bot?.lastTranscriptRef) {
 			conv = this.openWorkerTranscript(bot.lastTranscriptRef);
@@ -1360,7 +1415,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const relevantTeamMessages = memberTeamIds.flatMap((tId) =>
 			store.listTeamMessages(tId).filter((m) => m.targetAgentIds.includes(normId)),
 		);
-		const laneRecords = this.getLaneRecords().filter((r) => r.agentId === normId || r.laneId === normId);
+		const laneRecords = this.getLaneRecords().filter((r) => r.agentId === runtime || r.laneId === runtime);
 
 		if (relevantTeamMessages.length === 0 && laneRecords.length === 0) {
 			return bot?.lastSummary ? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)] : [];
@@ -1454,6 +1509,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	): Promise<BotOperatorMessageDispatchResult> {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
 		const store = this.getBotTeamStore();
+		const runtime = this.botBindings.runtime(normId);
 		store.ensureBotMemoryFile(normId);
 		let bot = store.getBot(normId);
 		let liveAgents: WorkerAgentView[] = [];
@@ -1480,7 +1536,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const spec = { provider: bot.provider, modelId: bot.modelId };
 		const requestedMode = options?.mode ?? "follow_up";
 
-		const existingAgent = liveAgents.find((a) => a.agentId === normId && a.status !== "retired");
+		const existingAgent = liveAgents.find((a) => a.agentId === runtime && a.status !== "retired");
 
 		const memoryCtx = store.composeBotUnifiedMemoryContext(normId);
 
@@ -1489,10 +1545,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			// block in every operator message would bloat its transcript and the chat the operator reads.
 			const modelRef = existingAgent.modelRef ?? `${spec.provider}/${spec.modelId}`;
 			if (requestedMode === "queue") {
-				const res = this.sendSessionRootWorkerAgentMessage(normId, message);
+				const res = this.sendSessionRootWorkerAgentMessage(runtime, message);
 				return { agentId: normId, mode: "queued", messageId: res.messageId, modelRef };
 			}
-			const res = this.followUpSessionRootWorkerAgent(normId, message);
+			const res = this.followUpSessionRootWorkerAgent(runtime, message);
 			return {
 				agentId: normId,
 				mode: res.steering ? "steered" : res.started ? "followed_up" : "queued",
@@ -1523,13 +1579,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			),
 		);
 
+		this.botBindings.assertCapacity(normId);
+		const assertCurrentBranch = this.deps.getSessionManager().captureBranchContext();
 		const started = await this.startWorkerDelegation({
 			instructions: fullInstructions,
+			...(bot.profileId ? { profileId: bot.profileId } : {}),
 			authority: {
-				model: { provider: spec.provider, modelId: spec.modelId },
+				...(!bot.profileId ? { model: { provider: spec.provider, modelId: spec.modelId } } : {}),
 				// A chat bot answers in plain text, which only a read-only worker may do; a write-capable one reports in the claim envelope.
 				readOnly: bot.canWrite !== true,
-				...(this.isOrchestrationThinkingLevel(bot.thinkingLevel) ? { thinkingLevel: bot.thinkingLevel } : {}),
+				...(!bot.profileId && this.isOrchestrationThinkingLevel(bot.thinkingLevel)
+					? { thinkingLevel: bot.thinkingLevel }
+					: {}),
 			},
 			preferredAgentId: normId,
 			...(activeIds.length > 0
@@ -1545,10 +1606,36 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		if (!started.started) {
 			throw new Error(`Failed to start persistent bot agent "${normId}": ${started.skipReason ?? "unknown error"}`);
 		}
+		const startedAgentId = started.record.agentId ?? started.record.laneId;
+		try {
+			assertCurrentBranch();
+			this.botBindings.bind(normId, startedAgentId);
+		} catch (bindingError) {
+			try {
+				const current = this.listWorkerAgents().find((agent) => agent.agentId === startedAgentId);
+				if (!started.record.attemptId || current?.attemptId !== started.record.attemptId)
+					throw new Error("The started attempt is no longer current; later work was not cancelled.");
+				if (!this.getWorkerAttemptResult(started.record.attemptId)) {
+					const cancelled = this.cancelWorkerAgent(startedAgentId, "bot_binding_publication_failed");
+					if (cancelled?.attemptId !== started.record.attemptId)
+						throw new Error("Cancellation did not confirm the exact started attempt.");
+				}
+			} catch (cleanupError) {
+				throw new AggregateError(
+					[bindingError, cleanupError],
+					`Bot ${normId} binding failed for ${startedAgentId}/${started.record.attemptId ?? "unknown"}; cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+				);
+			}
+			throw new Error(
+				`Bot ${normId} binding failed for ${startedAgentId}/${started.record.attemptId}; its started work was cancelled or already terminal: ${bindingError instanceof Error ? bindingError.message : String(bindingError)}`,
+				{ cause: bindingError },
+			);
+		}
+		this._botViews = undefined;
 
 		return {
 			mode: "started",
-			agentId: started.record.agentId ?? normId,
+			agentId: normId,
 			laneId: started.record.laneId,
 			modelRef: started.record.modelRef ?? `${spec.provider}/${spec.modelId}`,
 			messageId: `bot-msg-${Date.now()}`,
@@ -1659,8 +1746,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		};
 		this.deps.getSessionManager().appendCustomEntry(CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE, report);
 		try {
+			const alias = this.botBindings.alias(name);
+			if (!alias) return;
 			this.getBotTeamStore().recordBotTurnOutcome({
-				agentId: name,
+				agentId: alias,
 				summary: report.text,
 				transcriptRef: transcriptReference,
 				timestamp: report.timestamp,

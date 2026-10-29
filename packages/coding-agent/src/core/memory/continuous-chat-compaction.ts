@@ -55,6 +55,8 @@ export interface ContinuousChatCompactionConversation {
  * rather than execute a tool call, because a reply is plain text.
  */
 export interface ContinuousChatCompactionPort {
+	/** Stable summary configuration identity; changes permit retrying exhausted output failures. */
+	recoveryKey?(): string | undefined;
 	/** The node the conversation builds names its paid spend, so every reply's usage is attributable to it. */
 	open(
 		prefix: ContinuousChatCompactionPrefix,

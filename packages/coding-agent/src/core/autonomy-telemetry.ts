@@ -214,8 +214,11 @@ export class AutonomyTelemetry {
 		if (costSummary.currentCost > 0 || hasSubagentCostSignal(costSummary)) {
 			costs.push({ title: "CURRENT", summary: `$${costSummary.currentCost.toFixed(4)}` });
 		}
-		if (costSummary.todayCost > 0) {
-			costs.push({ title: "TODAY", summary: `$${costSummary.todayCost.toFixed(4)}` });
+		if (costSummary.todayCost > 0 || costSummary.todayPending) {
+			costs.push({
+				title: "TODAY",
+				summary: `$${costSummary.todayCost.toFixed(4)}${costSummary.todayPending ? " (partial; updating)" : ""}`,
+			});
 		}
 		for (const share of backgroundCostShares(costSummary, 4)) {
 			costs.push({ title: share.label, summary: `${share.amount} included in CURRENT` });

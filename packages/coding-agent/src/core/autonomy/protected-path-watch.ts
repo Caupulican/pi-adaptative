@@ -19,6 +19,7 @@
 
 import { lstatSync, readdirSync } from "node:fs";
 import path from "node:path";
+import { hostExplainsFileChange, hostFileIdentity } from "../../utils/host-write-transition.ts";
 import { hostWroteDuring } from "../../utils/host-write-window.ts";
 import { AGENT_ROOT_DIRECTORY_NAMES, AGENT_ROOT_FILE_NAMES } from "../agent-paths.ts";
 import { boundedText, quotedSpan } from "../util/bounded-line.ts";
@@ -90,6 +91,10 @@ function clipBlocker(line: string): string {
 }
 
 function fingerprintOf(target: string): string {
+	if (path.basename(target) === "settings.json") {
+		const exact = hostFileIdentity(target);
+		if (exact !== undefined) return exact;
+	}
 	try {
 		const stat = lstatSync(target);
 		const mtime = Math.trunc(stat.mtimeMs);
@@ -210,7 +215,7 @@ export class ProtectedPathWatch {
 				if (before) {
 					const endedAt = Date.now();
 					for (const change of changesBetween(before, this.snapshot())) {
-						if (!hostWroteDuring(change.path, startedAt, endedAt)) this.record(change, "command");
+						if (!this.hostExplains(change, startedAt, endedAt)) this.record(change, "command");
 					}
 				}
 			} catch {
@@ -229,7 +234,7 @@ export class ProtectedPathWatch {
 				const alreadyReported = new Set(this.recorded.map((finding) => finding.path));
 				const endedAt = Date.now();
 				for (const change of changesBetween(this.runBaseline, this.snapshot())) {
-					if (!alreadyReported.has(change.path) && !hostWroteDuring(change.path, this.runBaselineAt, endedAt)) {
+					if (!alreadyReported.has(change.path) && !this.hostExplains(change, this.runBaselineAt, endedAt)) {
 						this.record(change, "run");
 					}
 				}
@@ -238,6 +243,12 @@ export class ProtectedPathWatch {
 			// See guard(): unreadable paths are skipped, never raised.
 		}
 		return this.recorded;
+	}
+
+	private hostExplains(change: { path: string; before: string; after: string }, from: number, to: number): boolean {
+		return path.basename(change.path) === "settings.json"
+			? hostExplainsFileChange(change.path, change.before, change.after, from, to)
+			: hostWroteDuring(change.path, from, to);
 	}
 
 	/** Run the end-of-run comparison, then return the claim blocker lines for everything recorded. */

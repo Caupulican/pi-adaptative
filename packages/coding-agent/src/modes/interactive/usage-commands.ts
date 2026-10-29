@@ -47,6 +47,7 @@ export interface UsageCommandHost {
 			| "historySummaryCost"
 			| "historySummaryReports"
 			| "todayCost"
+			| "todayPending"
 			| "todaySubagentCost"
 			| "todayHistorySummaryCost"
 		>;

@@ -335,6 +335,11 @@ export class InteractiveEventController {
 				this.port.ui.requestRender();
 				break;
 
+			case "usage_updated":
+				this.port.footer.invalidate();
+				this.port.ui.requestRender();
+				break;
+
 			case "session_info_changed":
 				this.port.updateTerminalTitle();
 				this.port.refreshActivityLane();

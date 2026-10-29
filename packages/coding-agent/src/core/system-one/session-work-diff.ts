@@ -12,8 +12,8 @@ import {
 	discoverWorkRepositoryAsync,
 	readWorkDiff,
 	retainWorkBaseline,
+	WORK_DIFF_CAPTURE_BYTES,
 	WORK_DIFF_FILES_LIMIT,
-	WORK_DIFF_PATCH_LIMIT,
 	WORK_DIFF_SUPPRESSION_LIMIT,
 	WORK_DIFF_UNTRACKED_LIMIT,
 	type WorkBaseline,
@@ -346,19 +346,30 @@ export async function readGoalWorkDiff(
 		);
 		if (work.diagnostic) diagnostics.push(`${scope.repositoryRoot}: ${work.diagnostic}`);
 		const section = work.patch.length ? `Repository ${JSON.stringify(scope.repositoryRoot)}\n${work.patch}` : "";
-		const available = Math.max(0, WORK_DIFF_PATCH_LIMIT - patch.length);
-		patch += section.slice(0, available);
-		omittedChars += work.omittedChars + Math.max(0, section.length - available);
+		if (Buffer.byteLength(patch) + Buffer.byteLength(section) > WORK_DIFF_CAPTURE_BYTES) {
+			diagnostics.push(
+				"Combined repository evidence exceeds the capture byte bound; partition the work without discarding evidence.",
+			);
+			continue;
+		}
+		patch += section;
+		omittedChars += work.omittedChars;
 		for (const path of work.files) {
-			if (files.length < WORK_DIFF_FILES_LIMIT) files.push(path);
+			files.push(path);
 		}
 		for (const hit of work.suppressions ?? []) {
-			if (suppressions.length < WORK_DIFF_SUPPRESSION_LIMIT) suppressions.push(hit);
+			suppressions.push(hit);
 		}
 		for (const path of work.untracked) {
-			if (untracked.length < WORK_DIFF_UNTRACKED_LIMIT) untracked.push(`${scope.repositoryRoot}:${path}`);
+			untracked.push(`${scope.repositoryRoot}:${path}`);
 		}
 	}
+	if (
+		files.length > WORK_DIFF_FILES_LIMIT ||
+		suppressions.length > WORK_DIFF_SUPPRESSION_LIMIT ||
+		untracked.length > WORK_DIFF_UNTRACKED_LIMIT
+	)
+		diagnostics.push("Combined repository evidence exceeds the file or suppression count bound.");
 	return {
 		base: repositories.length === 1 ? repositories[0]!.base : "multiple repositories",
 		patch,

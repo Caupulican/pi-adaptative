@@ -228,7 +228,7 @@ export class BashExecutionController {
 			for (const bashMessage of this._pendingBashMessages) {
 				// Canonical publication may refuse an uncertain write. Do not publish that result into agent state first.
 				this.deps.getSessionManager().appendMessage(bashMessage);
-				this.deps.getAgent().state.messages.push(bashMessage);
+				this.deps.getAgent().appendMessage(bashMessage);
 				published++;
 			}
 		} finally {

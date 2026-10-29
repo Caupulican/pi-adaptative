@@ -88,7 +88,7 @@ function formatKpiRows(overview: UsageOverview, width: number): [string, string]
 		...(session.icmCostUsd > 0 ? [`$${session.icmCostUsd.toFixed(2)} ICM`] : []),
 	];
 	const subagentText = backgroundParts.length > 0 ? ` (${backgroundParts.join(" · ")})` : "";
-	const left1 = `${theme.fg("dim", "SESSION  ")}${theme.fg("text", `${dollars(session.costUsd)}${subText}${subagentText}`)}${theme.fg("dim", " · Today ")}${theme.fg("text", dollars(overview.today.costUsd))}`;
+	const left1 = `${theme.fg("dim", "SESSION  ")}${theme.fg("text", `${dollars(session.costUsd)}${subText}${subagentText}`)}${theme.fg("dim", " · Today ")}${theme.fg("text", `${dollars(overview.today.costUsd)}${overview.today.pending ? " (partial; updating)" : ""}`)}`;
 
 	const cacheTotal = session.tokens.input + session.tokens.cacheRead + session.tokens.cacheWrite;
 	const cacheSummary =

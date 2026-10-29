@@ -76,7 +76,7 @@ export function formatCostReport(costs: SessionCostSummary, usingSubscription = 
 		);
 	}
 	lines.push(
-		`${theme.fg("dim", "TODAY (host local day):")} $${costs.todayCost.toFixed(4)}`,
+		`${theme.fg("dim", "TODAY (host local day):")} $${costs.todayCost.toFixed(4)}${costs.todayPending ? " (partial; updating)" : ""}`,
 		`${theme.fg("dim", "Today rollover:")} local midnight`,
 	);
 	return lines.join("\n");

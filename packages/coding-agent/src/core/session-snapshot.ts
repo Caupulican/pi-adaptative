@@ -105,7 +105,7 @@ export function getLatestSessionSnapshot<Value extends object, ValueKey extends 
 export const snapshotCache = new WeakMap<
 	object,
 	Map<
-		SessionSnapshotCodec<any, any>,
+		object,
 		{
 			entryId: string | null;
 			entryRef: ReturnType<SessionManager["getLatestCustomEntryOnBranch"]>;

@@ -261,6 +261,7 @@ export class FlowTrace {
 		queue_update: () => {},
 		user_message_withdrawn: () => {},
 		session_info_changed: () => {},
+		usage_updated: () => {},
 		thinking_level_changed: () => {},
 		// Memory activation is session state; a failed one reaches the trace as its warning.
 		memory_activation: () => {},

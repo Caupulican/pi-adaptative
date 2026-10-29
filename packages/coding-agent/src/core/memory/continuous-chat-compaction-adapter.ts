@@ -6,7 +6,7 @@
  * is plain text: a tool call or a stop other than "stop" fails the node.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Api, Message, Model, Tool, Usage } from "@caupulican/pi-ai";
 import type { AgentContext } from "../../kernel/loop-config.ts";
 import { projectToolsForProvider } from "../../kernel/provider-tool-projection.ts";
@@ -113,6 +113,27 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 
 	validate(): void {
 		this.summaryModel();
+	}
+
+	recoveryKey(): string | undefined {
+		const summary = this.deps.summary();
+		if (!summary.ok) return undefined;
+		const { provider, id, api, baseUrl } = summary.model;
+		const prefix = this.deps.prefixHead();
+		const shared = prefix.model !== undefined && sameCacheModel(prefix.model, summary.model);
+		return createHash("sha256")
+			.update(
+				JSON.stringify([
+					provider,
+					id,
+					api,
+					baseUrl,
+					summary.thinkingLevel,
+					shared ? prefix.systemPrompt : CONTINUOUS_CHAT_SYSTEM_PROMPT,
+					shared ? prefix.tools : [],
+				]),
+			)
+			.digest("hex");
 	}
 
 	private summaryModel(): Model<Api> {

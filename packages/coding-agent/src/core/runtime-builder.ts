@@ -195,7 +195,7 @@ import {
 	wrapToolWithVerification,
 } from "./system-one/session-verification-host.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
-import { COMPLETION_FINDING_SOURCE } from "./system-one/verification-coordinator.ts";
+import { COMPLETION_FINDING_SOURCE, PEER_REVIEW_EVIDENCE_SOURCE } from "./system-one/verification-coordinator.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
 import type { TaskStepsState } from "./tasks/task-state.ts";
@@ -1548,9 +1548,9 @@ export class RuntimeBuilder {
 								if (!verification) throw new Error("System One verification is unavailable");
 								return verification.captureReviewFence();
 							},
-							requestVerification: (findings) =>
+							requestVerification: (findings, kind) =>
 								this.deps.getSystemOneController?.()?.verification.require(
-									"peer_review",
+									kind === "evidence_gap" ? PEER_REVIEW_EVIDENCE_SOURCE : "peer_review",
 									findings.map(
 										(finding) =>
 											`${finding.summary}: ${finding.requiredCheck}. Evidence: ${finding.evidence}`,

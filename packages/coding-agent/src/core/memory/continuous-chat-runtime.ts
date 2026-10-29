@@ -79,6 +79,7 @@ interface CausalTarget {
 export class ContinuousChatRuntime {
 	readonly store: ContinuousChatStore;
 	private readonly coordinator: ContinuousChatCompactionCoordinator;
+	private readonly port: ContinuousChatCompactionPort;
 	private readonly prefixHead: () => ContinuousChatCompactionPrefixHead;
 	private readonly warn: (message: string) => void;
 	/** Resolves once, when this runtime stops accepting work: at `stop()`, or when its lease is lost. Never rejects. */
@@ -110,6 +111,7 @@ export class ContinuousChatRuntime {
 
 	private constructor(options: ContinuousChatRuntimeOptions) {
 		this.store = options.store;
+		this.port = options.port;
 		this.coordinator = new ContinuousChatCompactionCoordinator(options.port, options.store);
 		this.prefixHead = options.prefixHead;
 		this.warn = options.warn;
@@ -153,6 +155,7 @@ export class ContinuousChatRuntime {
 		try {
 			signal?.throwIfAborted();
 			await options.store.recover(signal);
+			await options.store.noteArrival(options.port.recoveryKey?.());
 			signal?.throwIfAborted();
 		} catch (error) {
 			runtime.reportLeaseRelease(await options.store.releaseRuntimeLease(), "after a failed recovery");
@@ -203,7 +206,7 @@ export class ContinuousChatRuntime {
 	async reserveTurnBoundary(signal?: AbortSignal): Promise<ContinuousChatTurnBoundary> {
 		this.assertRunning();
 		signal?.throwIfAborted();
-		await this.store.noteArrival();
+		await this.store.noteArrival(this.port.recoveryKey?.());
 		this.assertRunning();
 		signal?.throwIfAborted();
 		this.requestPump();
@@ -225,7 +228,7 @@ export class ContinuousChatRuntime {
 	async retryFailedWork(): Promise<void> {
 		if (this.stopping) return;
 		try {
-			await this.store.noteArrival();
+			await this.store.noteArrival(this.port.recoveryKey?.(), true);
 		} catch (error) {
 			if (this.leaseLost) return;
 			throw error;
@@ -457,7 +460,8 @@ export class ContinuousChatRuntime {
 
 	private async runJob(item: ContinuousChatClaim): Promise<void> {
 		try {
-			await this.settle(item, await this.compact(item));
+			const recoveryKey = this.port.recoveryKey?.();
+			await this.settle(item, await this.compact(item), recoveryKey);
 		} catch (error) {
 			// After a lost lease the store refuses every write: the claim is left for recovery.
 			if (this.leaseLost) return;
@@ -496,7 +500,7 @@ export class ContinuousChatRuntime {
 		const settlement =
 			abandonment.kind === "release"
 				? await this.store.releaseWork(item)
-				: await this.store.failWork(item, abandonment.reason);
+				: await this.store.failWork(item, abandonment.reason, abandonment.recoveryOnly, abandonment.recoveryKey);
 		if (settlement === "published") {
 			this.emit({ type: "node", level: item.level, ordinal: item.ordinal });
 		} else if (abandonment.kind === "fail") {
@@ -534,7 +538,11 @@ export class ContinuousChatRuntime {
 		return { target: { kind: "merge", left, right }, end };
 	}
 
-	private async settle(item: ContinuousChatClaim, outcome: ContinuousChatCompactionOutcome): Promise<void> {
+	private async settle(
+		item: ContinuousChatClaim,
+		outcome: ContinuousChatCompactionOutcome,
+		recoveryKey?: string,
+	): Promise<void> {
 		// After a lost lease the store refuses every write: the outcome is dropped and the claim left for recovery.
 		if (this.leaseLost) return;
 		switch (outcome.status) {
@@ -547,7 +555,12 @@ export class ContinuousChatRuntime {
 				}
 				return;
 			case "failed":
-				await this.recordOrRetain(item, { kind: "fail", reason: outcome.message });
+				await this.recordOrRetain(item, {
+					kind: "fail",
+					reason: outcome.message,
+					recoveryOnly: outcome.reason === "overflow" || outcome.reason === "empty-reply",
+					recoveryKey,
+				});
 				return;
 			case "cancelled":
 				await this.recordOrRetain(item, { kind: "release" });

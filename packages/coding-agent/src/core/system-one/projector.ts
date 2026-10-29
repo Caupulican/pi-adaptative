@@ -1,6 +1,6 @@
 import type { OutcomeEvidenceRow } from "./completion-evidence-gaps.ts";
 import type { ExecutionState, ToolImpact } from "./types.ts";
-import { hasRepositoryOutcome, type WorkDiff } from "./work-diff.ts";
+import { hasRepositoryOutcome, WORK_DIFF_PATCH_LIMIT, type WorkDiff } from "./work-diff.ts";
 
 /**
  * Secret redaction patterns.
@@ -461,7 +461,7 @@ export class StateProjector {
 						final_diff: work
 							? {
 									base_commit: this.redactText(work.base),
-									patch: this.redactText(work.patch),
+									patch: this.redactText(work.patch.slice(0, WORK_DIFF_PATCH_LIMIT)),
 									...(work.diagnostic ? { evidence_unavailable: this.redactText(work.diagnostic) } : {}),
 									...(work.repositories
 										? {
@@ -471,7 +471,12 @@ export class StateProjector {
 												})),
 											}
 										: {}),
-									...(work.omittedChars > 0 ? { patch_truncated_chars: work.omittedChars } : {}),
+									...(work.omittedChars + Math.max(0, work.patch.length - WORK_DIFF_PATCH_LIMIT) > 0
+										? {
+												patch_truncated_chars:
+													work.omittedChars + Math.max(0, work.patch.length - WORK_DIFF_PATCH_LIMIT),
+											}
+										: {}),
 									new_untracked_files: work.untracked.map((filePath) => this.redactText(filePath)),
 									recorded_changes: changesManifest,
 								}

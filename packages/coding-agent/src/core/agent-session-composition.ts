@@ -722,7 +722,7 @@ export async function runToolkitHit(
 	if (!tool) return;
 	for (const message of turnMessages) {
 		if (message.role !== "user") continue;
-		deps.agent.state.messages.push(message);
+		deps.agent.appendMessage(message);
 		deps.persistMessage(message);
 		deps.emit({ type: "message_end", message });
 	}

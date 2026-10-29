@@ -1,8 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, type FSWatcher, mkdirSync, readFileSync, renameSync, watch, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "../../config.ts";
 import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
 
@@ -440,21 +442,27 @@ function parseTeamMessage(value: unknown): PersistentTeamMessage | undefined {
 	};
 }
 
+/** A competing initializer or outcome append owns any file that already exists. */
+function createMemoryHeader(filePath: string, header: string): void {
+	try {
+		writeFileSync(filePath, header, { encoding: "utf8", flag: "wx" });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+	}
+}
+
 function appendBoundedFile(filePath: string, line: string, maxLines = 80): void {
-	let lines: string[] = [];
-	if (existsSync(filePath)) {
-		try {
-			lines = readFileSync(filePath, "utf8").split(/\r?\n/);
-		} catch {
-			lines = [];
-		}
-	}
-	lines.push(line);
-	if (lines.length > maxLines) {
-		lines = lines.slice(-maxLines);
-	}
 	mkdirSync(dirname(filePath), { recursive: true });
-	writeFileSync(filePath, lines.join("\n"), "utf8");
+	withFileLockSync(
+		filePath,
+		() => {
+			let lines = existsSync(filePath) ? readFileSync(filePath, "utf8").split(/\r?\n/) : [];
+			lines.push(line);
+			if (lines.length > maxLines) lines = lines.slice(-maxLines);
+			writeFileAtomicSync(filePath, lines.join("\n"));
+		},
+		{ retries: 0 },
+	);
 }
 
 export class PersistentBotTeamStore {
@@ -464,18 +472,79 @@ export class PersistentBotTeamStore {
 	private readonly teams = new Map<string, PersistentTeamRecord>();
 	private readonly teamMessages = new Map<string, PersistentTeamMessage[]>();
 	private readonly listeners = new Set<() => void>();
+	private mutationChanged = false;
+	private watcher: FSWatcher | undefined;
+	private refreshQueued = false;
+	private watchGeneration = 0;
+	private loadedDigest: string | undefined;
+	private readonly onDiagnostic: (message: string) => void;
 
-	constructor(agentDir: string = getAgentDir()) {
+	constructor(
+		agentDir: string = getAgentDir(),
+		onDiagnostic: (message: string) => void = (message) => process.emitWarning(message),
+	) {
 		this.agentDir = agentDir;
+		this.onDiagnostic = onDiagnostic;
 		this.filePath = botTeamStoreFile(agentDir);
 		this.reload();
 	}
 
 	subscribe(listener: () => void): () => void {
 		this.listeners.add(listener);
+		try {
+			this.startWatching();
+		} catch (error) {
+			this.listeners.delete(listener);
+			throw error;
+		}
 		return () => {
 			this.listeners.delete(listener);
+			if (this.listeners.size === 0) this.stopWatching();
 		};
+	}
+
+	dispose(): void {
+		this.stopWatching();
+		this.listeners.clear();
+	}
+
+	private stopWatching(): void {
+		this.watchGeneration++;
+		this.refreshQueued = false;
+		this.watcher?.close();
+		this.watcher = undefined;
+	}
+
+	private startWatching(): void {
+		if (this.watcher) return;
+		mkdirSync(dirname(this.filePath), { recursive: true });
+		const generation = ++this.watchGeneration;
+		const refresh = () => {
+			if (generation !== this.watchGeneration || this.refreshQueued) return;
+			this.refreshQueued = true;
+			queueMicrotask(() => {
+				if (generation !== this.watchGeneration) return;
+				this.refreshQueued = false;
+				try {
+					if (this.reload(true)) this.notify();
+				} catch (error) {
+					this.onDiagnostic(
+						`Bot and team store refresh failed; retaining its last readable state: ${String(error)}`,
+					);
+				}
+			});
+		};
+		// Watch the directory: atomic rename replaces the file inode.
+		this.watcher = watch(dirname(this.filePath), { persistent: false }, (_event, filename) => {
+			if (filename === null || filename.toString() === basename(this.filePath)) refresh();
+		});
+		this.watcher.on("error", (error) => {
+			if (generation !== this.watchGeneration) return;
+			this.stopWatching();
+			this.onDiagnostic(`Bot and team store watcher stopped: ${error.message}`);
+		});
+		// Reconcile writes between construction and subscription after admission is installed.
+		refresh();
 	}
 
 	private notify(): void {
@@ -489,57 +558,81 @@ export class PersistentBotTeamStore {
 	}
 
 	private save(): void {
-		mkdirSync(dirname(this.filePath), { recursive: true });
-		const tempPath = join(dirname(this.filePath), `store.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
 		const data = {
 			version: 1,
 			bots: Array.from(this.bots.values()),
 			teams: Array.from(this.teams.values()),
 			teamMessages: Object.fromEntries(this.teamMessages),
 		};
-		try {
-			writeFileSync(tempPath, JSON.stringify(data, null, 2), "utf8");
-			renameSync(tempPath, this.filePath);
-		} catch (error) {
-			try {
-				if (existsSync(tempPath)) {
-					unlinkSync(tempPath);
-				}
-			} catch {
-				// Suppress cleanup error
-			}
-			throw error;
-		}
+		writeFileAtomicSync(this.filePath, JSON.stringify(data, null, 2));
 		this._cachedTeamList = undefined;
-		this.notify();
+		this.mutationChanged = true;
+	}
+
+	private mutate<T>(action: () => T): T {
+		mkdirSync(dirname(this.filePath), { recursive: true });
+		this.mutationChanged = false;
+		try {
+			return withFileLockSync(
+				this.filePath,
+				() => {
+					this.reload();
+					try {
+						return action();
+					} finally {
+						this.reload();
+					}
+				},
+				{ retries: 0 },
+			);
+		} finally {
+			if (this.mutationChanged) this.notify();
+		}
 	}
 
 	private _cachedTeamList?: PersistentTeamRecord[];
 
 	/** Re-reads the shared store file. Every mutation starts here so another session's changes are not overwritten. */
-	reload(): void {
+	reload(observeOnly = false): boolean {
+		let parsed: unknown;
+		let raw: string | undefined;
+		try {
+			raw = readFileSync(this.filePath, "utf8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+		const digest = raw === undefined ? undefined : createHash("sha256").update(raw).digest("hex");
+		if (observeOnly && digest === this.loadedDigest) return false;
+		if (raw !== undefined) {
+			try {
+				parsed = JSON.parse(raw);
+			} catch (error) {
+				if (observeOnly) throw error;
+			}
+		}
+		if (raw !== undefined && !isRecordObject(parsed)) {
+			if (observeOnly) throw new Error("Bot and team store is not an object.");
+			// The next save would replace an unreadable store with an empty one and destroy every bot and team:
+			// keep the unreadable file beside the store before continuing.
+			renameSync(this.filePath, join(dirname(this.filePath), `store.corrupt-${Date.now()}.json`));
+			parsed = undefined;
+		}
+		if (
+			observeOnly &&
+			raw !== undefined &&
+			(!isRecordObject(parsed) ||
+				parsed.version !== 1 ||
+				!Array.isArray(parsed.bots) ||
+				!Array.isArray(parsed.teams) ||
+				!isRecordObject(parsed.teamMessages))
+		)
+			throw new Error("Bot and team store has an invalid envelope.");
 		this._cachedTeamList = undefined;
 		this.bots.clear();
 		this.teams.clear();
 		this.teamMessages.clear();
-
-		if (!existsSync(this.filePath)) {
-			return;
-		}
-
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(readFileSync(this.filePath, "utf8"));
-		} catch {
-			parsed = undefined;
-		}
-
-		if (!isRecordObject(parsed)) {
-			// The next save would replace an unreadable store with an empty one and destroy every bot and team:
-			// keep the unreadable file beside the store before continuing.
-			renameSync(this.filePath, join(dirname(this.filePath), `store.corrupt-${Date.now()}.json`));
-			return;
-		}
+		this.loadedDigest = digest;
+		if (!isRecordObject(parsed)) return true;
 
 		if (Array.isArray(parsed.bots)) {
 			for (const rawBot of parsed.bots) {
@@ -575,10 +668,11 @@ export class PersistentBotTeamStore {
 				}
 			}
 		}
+		return true;
 	}
 
 	listBots(options?: { includeRetired?: boolean }): PersistentBotRecord[] {
-		const all = Array.from(this.bots.values());
+		const all = Array.from(this.bots.values(), (bot) => ({ ...bot }));
 		if (options?.includeRetired) {
 			return all;
 		}
@@ -586,96 +680,101 @@ export class PersistentBotTeamStore {
 	}
 
 	getBot(agentId: string): PersistentBotRecord | undefined {
-		return this.bots.get(agentId.trim());
+		const bot = this.bots.get(agentId.trim());
+		return bot ? { ...bot } : undefined;
 	}
 
 	upsertBot(input: UpsertPersistentBotInput, nowIso?: string): PersistentBotRecord {
-		this.reload();
-		const agentId = normalizeBotOrTeamId(input.agentId, "agentId");
-		const existing = this.bots.get(agentId);
-		const provider = (input.provider !== undefined ? input.provider.trim() : existing?.provider) || "anthropic";
-		const modelId = (input.modelId !== undefined ? input.modelId.trim() : existing?.modelId) || "claude-haiku-5-5";
+		return this.mutate(() => {
+			const agentId = normalizeBotOrTeamId(input.agentId, "agentId");
+			const existing = this.bots.get(agentId);
+			const provider = (input.provider !== undefined ? input.provider.trim() : existing?.provider) || "anthropic";
+			const modelId = (input.modelId !== undefined ? input.modelId.trim() : existing?.modelId) || "claude-haiku-5-5";
 
-		const now = nowIso ?? new Date().toISOString();
+			const now = nowIso ?? new Date().toISOString();
 
-		const record: PersistentBotRecord = {
-			agentId,
-			displayName: input.displayName?.trim() || existing?.displayName || agentId,
-			description: input.description !== undefined ? input.description.trim() || undefined : existing?.description,
-			provider,
-			modelId,
-			thinkingLevel:
-				input.thinkingLevel !== undefined ? input.thinkingLevel.trim() || undefined : existing?.thinkingLevel,
-			instructions:
-				input.instructions !== undefined ? input.instructions.trim() || undefined : existing?.instructions,
-			profileId: input.profileId !== undefined ? input.profileId.trim() || undefined : existing?.profileId,
-			canWrite: input.canWrite ?? existing?.canWrite,
-			createdAt: existing?.createdAt ?? now,
-			updatedAt: now,
-			retired: input.retired ?? existing?.retired ?? false,
-			lastTranscriptRef:
-				input.lastTranscriptRef !== undefined
-					? input.lastTranscriptRef.trim() || undefined
-					: existing?.lastTranscriptRef,
-			lastSummary:
-				input.lastSummary !== undefined
-					? input.lastSummary.trim().slice(0, 500) || undefined
-					: existing?.lastSummary,
-			lastMessageAt:
-				input.lastMessageAt !== undefined && Number.isFinite(input.lastMessageAt)
-					? input.lastMessageAt
-					: existing?.lastMessageAt,
-		};
+			const record: PersistentBotRecord = {
+				agentId,
+				displayName: input.displayName?.trim() || existing?.displayName || agentId,
+				description:
+					input.description !== undefined ? input.description.trim() || undefined : existing?.description,
+				provider,
+				modelId,
+				thinkingLevel:
+					input.thinkingLevel !== undefined ? input.thinkingLevel.trim() || undefined : existing?.thinkingLevel,
+				instructions:
+					input.instructions !== undefined ? input.instructions.trim() || undefined : existing?.instructions,
+				profileId: input.profileId !== undefined ? input.profileId.trim() || undefined : existing?.profileId,
+				canWrite: input.canWrite ?? existing?.canWrite,
+				createdAt: existing?.createdAt ?? now,
+				updatedAt: now,
+				retired: input.retired ?? existing?.retired ?? false,
+				lastTranscriptRef:
+					input.lastTranscriptRef !== undefined
+						? input.lastTranscriptRef.trim() || undefined
+						: existing?.lastTranscriptRef,
+				lastSummary:
+					input.lastSummary !== undefined
+						? input.lastSummary.trim().slice(0, 500) || undefined
+						: existing?.lastSummary,
+				lastMessageAt:
+					input.lastMessageAt !== undefined && Number.isFinite(input.lastMessageAt)
+						? input.lastMessageAt
+						: existing?.lastMessageAt,
+			};
 
-		this.bots.set(agentId, record);
-		this.ensureBotMemoryFile(agentId);
-		this.save();
-		return record;
+			this.bots.set(agentId, record);
+			this.ensureBotMemoryFile(agentId);
+			this.save();
+			return record;
+		});
 	}
 
 	retireBot(agentId: string, nowIso?: string): PersistentBotRecord | undefined {
-		this.reload();
-		const normalizedId = normalizeBotOrTeamId(agentId, "agentId");
-		const existing = this.bots.get(normalizedId);
-		if (!existing) {
-			return undefined;
-		}
-		const now = nowIso ?? new Date().toISOString();
-		const updated: PersistentBotRecord = {
-			...existing,
-			retired: true,
-			updatedAt: now,
-			lastTranscriptRef: existing.lastTranscriptRef,
-			lastSummary: existing.lastSummary,
-			lastMessageAt: existing.lastMessageAt,
-		};
-		this.bots.set(normalizedId, updated);
-		this.save();
-		return updated;
+		return this.mutate(() => {
+			const normalizedId = normalizeBotOrTeamId(agentId, "agentId");
+			const existing = this.bots.get(normalizedId);
+			if (!existing) {
+				return undefined;
+			}
+			const now = nowIso ?? new Date().toISOString();
+			const updated: PersistentBotRecord = {
+				...existing,
+				retired: true,
+				updatedAt: now,
+				lastTranscriptRef: existing.lastTranscriptRef,
+				lastSummary: existing.lastSummary,
+				lastMessageAt: existing.lastMessageAt,
+			};
+			this.bots.set(normalizedId, updated);
+			this.save();
+			return updated;
+		});
 	}
 
 	deleteBot(agentId: string): boolean {
-		this.reload();
-		const normalizedId = normalizeBotOrTeamId(agentId, "agentId");
-		if (!this.bots.has(normalizedId)) {
-			return false;
-		}
-		this.bots.delete(normalizedId);
-
-		const now = new Date().toISOString();
-		for (const [teamId, team] of this.teams.entries()) {
-			if (team.memberAgentIds.includes(normalizedId)) {
-				const filteredMembers = team.memberAgentIds.filter((id) => id !== normalizedId);
-				this.teams.set(teamId, {
-					...team,
-					memberAgentIds: filteredMembers,
-					updatedAt: now,
-				});
+		return this.mutate(() => {
+			const normalizedId = normalizeBotOrTeamId(agentId, "agentId");
+			if (!this.bots.has(normalizedId)) {
+				return false;
 			}
-		}
+			this.bots.delete(normalizedId);
 
-		this.save();
-		return true;
+			const now = new Date().toISOString();
+			for (const [teamId, team] of this.teams.entries()) {
+				if (team.memberAgentIds.includes(normalizedId)) {
+					const filteredMembers = team.memberAgentIds.filter((id) => id !== normalizedId);
+					this.teams.set(teamId, {
+						...team,
+						memberAgentIds: filteredMembers,
+						updatedAt: now,
+					});
+				}
+			}
+
+			this.save();
+			return true;
+		});
 	}
 
 	listTeams(): PersistentTeamRecord[] {
@@ -697,94 +796,100 @@ export class PersistentBotTeamStore {
 		if (!team) return undefined;
 		return {
 			...team,
+			memberAgentIds: [...team.memberAgentIds],
 			memoryFilePath: this.getTeamMemoryFilePath(team.teamId),
 		};
 	}
 
 	upsertTeam(input: UpsertPersistentTeamInput, nowIso?: string): PersistentTeamRecord {
-		this.reload();
-		const teamId = normalizeBotOrTeamId(input.teamId, "teamId");
-		const now = nowIso ?? new Date().toISOString();
-		const existing = this.teams.get(teamId);
+		return this.mutate(() => {
+			const teamId = normalizeBotOrTeamId(input.teamId, "teamId");
+			const now = nowIso ?? new Date().toISOString();
+			const existing = this.teams.get(teamId);
 
-		const memberSet = new Set<string>();
-		for (const id of input.memberAgentIds) {
-			const trimmed = id.trim();
-			if (trimmed) {
-				memberSet.add(normalizeBotOrTeamId(trimmed, "memberAgentId"));
+			const memberSet = new Set<string>();
+			for (const id of input.memberAgentIds) {
+				const trimmed = id.trim();
+				if (trimmed) {
+					memberSet.add(normalizeBotOrTeamId(trimmed, "memberAgentId"));
+				}
 			}
-		}
-		const memberAgentIds = Array.from(memberSet);
+			const memberAgentIds = Array.from(memberSet);
 
-		const record: PersistentTeamRecord = {
-			teamId,
-			name: input.name?.trim() || existing?.name || teamId,
-			description: input.description !== undefined ? input.description.trim() || undefined : existing?.description,
-			memberAgentIds,
-			createdAt: existing?.createdAt ?? now,
-			updatedAt: now,
-			lastMessageAt: existing?.lastMessageAt,
-			memoryFilePath: this.getTeamMemoryFilePath(teamId),
-		};
+			const record: PersistentTeamRecord = {
+				teamId,
+				name: input.name?.trim() || existing?.name || teamId,
+				description:
+					input.description !== undefined ? input.description.trim() || undefined : existing?.description,
+				memberAgentIds,
+				createdAt: existing?.createdAt ?? now,
+				updatedAt: now,
+				lastMessageAt: existing?.lastMessageAt,
+				memoryFilePath: this.getTeamMemoryFilePath(teamId),
+			};
 
-		this.teams.set(teamId, record);
-		this.ensureTeamMemoryFile(teamId);
-		this.save();
-		return record;
+			this.teams.set(teamId, record);
+			this.ensureTeamMemoryFile(teamId);
+			this.save();
+			return record;
+		});
 	}
 
 	setTeamMembers(teamId: string, memberAgentIds: readonly string[], nowIso?: string): PersistentTeamRecord {
-		this.reload();
-		const normalizedId = normalizeBotOrTeamId(teamId, "teamId");
-		const existing = this.teams.get(normalizedId);
-		if (!existing) {
-			throw new Error(`Team not found: "${teamId}".`);
-		}
-
-		const memberSet = new Set<string>();
-		for (const id of memberAgentIds) {
-			const trimmed = id.trim();
-			if (trimmed) {
-				memberSet.add(normalizeBotOrTeamId(trimmed, "memberAgentId"));
+		return this.mutate(() => {
+			const normalizedId = normalizeBotOrTeamId(teamId, "teamId");
+			const existing = this.teams.get(normalizedId);
+			if (!existing) {
+				throw new Error(`Team not found: "${teamId}".`);
 			}
-		}
 
-		const now = nowIso ?? new Date().toISOString();
-		const updated: PersistentTeamRecord = {
-			...existing,
-			memberAgentIds: Array.from(memberSet),
-			updatedAt: now,
-			memoryFilePath: this.getTeamMemoryFilePath(normalizedId),
-		};
+			const memberSet = new Set<string>();
+			for (const id of memberAgentIds) {
+				const trimmed = id.trim();
+				if (trimmed) {
+					memberSet.add(normalizeBotOrTeamId(trimmed, "memberAgentId"));
+				}
+			}
 
-		this.teams.set(normalizedId, updated);
-		this.ensureTeamMemoryFile(normalizedId);
-		this.save();
-		return updated;
+			const now = nowIso ?? new Date().toISOString();
+			const updated: PersistentTeamRecord = {
+				...existing,
+				memberAgentIds: Array.from(memberSet),
+				updatedAt: now,
+				memoryFilePath: this.getTeamMemoryFilePath(normalizedId),
+			};
+
+			this.teams.set(normalizedId, updated);
+			this.ensureTeamMemoryFile(normalizedId);
+			this.save();
+			return updated;
+		});
 	}
 
 	deleteTeam(teamId: string): boolean {
-		this.reload();
-		const normalizedId = normalizeBotOrTeamId(teamId, "teamId");
-		if (!this.teams.has(normalizedId)) {
-			return false;
-		}
-		this.teams.delete(normalizedId);
-		this.teamMessages.delete(normalizedId);
-		this.save();
-		return true;
+		return this.mutate(() => {
+			const normalizedId = normalizeBotOrTeamId(teamId, "teamId");
+			if (!this.teams.has(normalizedId)) {
+				return false;
+			}
+			this.teams.delete(normalizedId);
+			this.teamMessages.delete(normalizedId);
+			this.save();
+			return true;
+		});
 	}
 
 	appendTeamMessage(message: PersistentTeamMessage): void {
-		this.reload();
-		this.recordTeamMessage(message);
+		this.mutate(() => {
+			this.recordTeamMessage(message);
+		});
 	}
 
 	/** Adds a message to the loaded state and saves. The caller has re-read the file: re-reading here would reset what it is iterating. */
 	private recordTeamMessage(message: PersistentTeamMessage): void {
 		const teamId = normalizeBotOrTeamId(message.teamId, "teamId");
 		const messages = this.teamMessages.get(teamId) ?? [];
-		messages.push(message);
+		messages.push(structuredClone(message));
 		if (messages.length > MAX_TEAM_MESSAGES_PER_TEAM) {
 			this.teamMessages.set(teamId, messages.slice(-MAX_TEAM_MESSAGES_PER_TEAM));
 		} else {
@@ -819,7 +924,7 @@ export class PersistentBotTeamStore {
 			const model = bot ? `${bot.provider}/${bot.modelId}` : "anthropic/claude-haiku-5-5";
 			const role = bot?.instructions || "general specialist";
 			const header = `# Bot Memory: ${displayName} (${normId})\n\n- Model: ${model}\n- Role: ${role}\n\n## Continuity & Notes\n`;
-			writeFileSync(filePath, header, "utf8");
+			createMemoryHeader(filePath, header);
 		}
 		return filePath;
 	}
@@ -834,62 +939,63 @@ export class PersistentBotTeamStore {
 			const members = team?.memberAgentIds.join(", ") || "none";
 			const mission = team?.description || "collaborative agent team";
 			const header = `# Team Blackboard: ${name} (${normId})\n\n- Members: ${members}\n- Mission: ${mission}\n\n## Shared Findings & Decisions\n`;
-			writeFileSync(filePath, header, "utf8");
+			createMemoryHeader(filePath, header);
 		}
 		return filePath;
 	}
 
 	recordBotTurnOutcome(input: { agentId: string; summary: string; transcriptRef?: string; timestamp?: number }): void {
-		const normId = normalizeBotOrTeamId(input.agentId, "agentId");
-		this.reload();
-		const bot = this.bots.get(normId);
-		const belongsToAnyTeam = Array.from(this.teams.values()).some((t) => t.memberAgentIds.includes(normId));
+		this.mutate(() => {
+			const normId = normalizeBotOrTeamId(input.agentId, "agentId");
+			const bot = this.bots.get(normId);
+			const belongsToAnyTeam = Array.from(this.teams.values()).some((t) => t.memberAgentIds.includes(normId));
 
-		if (!bot && !belongsToAnyTeam) {
-			return;
-		}
-
-		const timestamp = input.timestamp ?? Date.now();
-		const iso = new Date(timestamp).toISOString();
-		const oneLineSummary = input.summary
-			.trim()
-			.replace(/\r?\n+/g, " ")
-			.slice(0, 300);
-
-		if (bot) {
-			const updatedBot: PersistentBotRecord = {
-				...bot,
-				lastSummary: input.summary.trim().slice(0, 400),
-				lastTranscriptRef: input.transcriptRef ?? bot.lastTranscriptRef,
-				lastMessageAt: timestamp,
-				updatedAt: iso,
-			};
-			this.bots.set(normId, updatedBot);
-			this.save();
-		}
-
-		this.ensureBotMemoryFile(normId);
-		const botFile = this.getBotMemoryFilePath(normId);
-		const refSuffix = input.transcriptRef ? ` (${input.transcriptRef})` : "";
-		appendBoundedFile(botFile, `- [${iso}] ${oneLineSummary}${refSuffix}`, 80);
-
-		for (const team of [...this.teams.values()]) {
-			if (team.memberAgentIds.includes(normId)) {
-				const teamMsg: PersistentTeamMessage = {
-					messageId: `team-msg-${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
-					teamId: team.teamId,
-					sender: { kind: "bot", agentId: normId },
-					text: input.summary.slice(0, 600),
-					timestamp,
-					targetAgentIds: [],
-					deliveries: [],
-				};
-				this.recordTeamMessage(teamMsg);
-				this.ensureTeamMemoryFile(team.teamId);
-				const teamFile = this.getTeamMemoryFilePath(team.teamId);
-				appendBoundedFile(teamFile, `- [${iso}] **${normId}**: ${oneLineSummary}`, 80);
+			if (!bot && !belongsToAnyTeam) {
+				return;
 			}
-		}
+
+			const timestamp = input.timestamp ?? Date.now();
+			const iso = new Date(timestamp).toISOString();
+			const oneLineSummary = input.summary
+				.trim()
+				.replace(/\r?\n+/g, " ")
+				.slice(0, 300);
+
+			if (bot) {
+				const updatedBot: PersistentBotRecord = {
+					...bot,
+					lastSummary: input.summary.trim().slice(0, 400),
+					lastTranscriptRef: input.transcriptRef ?? bot.lastTranscriptRef,
+					lastMessageAt: timestamp,
+					updatedAt: iso,
+				};
+				this.bots.set(normId, updatedBot);
+				this.save();
+			}
+
+			this.ensureBotMemoryFile(normId);
+			const botFile = this.getBotMemoryFilePath(normId);
+			const refSuffix = input.transcriptRef ? ` (${input.transcriptRef})` : "";
+			appendBoundedFile(botFile, `- [${iso}] ${oneLineSummary}${refSuffix}`, 80);
+
+			for (const team of [...this.teams.values()]) {
+				if (team.memberAgentIds.includes(normId)) {
+					const teamMsg: PersistentTeamMessage = {
+						messageId: `team-msg-${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
+						teamId: team.teamId,
+						sender: { kind: "bot", agentId: normId },
+						text: input.summary.slice(0, 600),
+						timestamp,
+						targetAgentIds: [],
+						deliveries: [],
+					};
+					this.recordTeamMessage(teamMsg);
+					this.ensureTeamMemoryFile(team.teamId);
+					const teamFile = this.getTeamMemoryFilePath(team.teamId);
+					appendBoundedFile(teamFile, `- [${iso}] **${normId}**: ${oneLineSummary}`, 80);
+				}
+			}
+		});
 	}
 
 	composeBotUnifiedMemoryContext(agentId: string): {
@@ -993,9 +1099,9 @@ export class PersistentBotTeamStore {
 	listTeamMessages(teamId: string, limit?: number): PersistentTeamMessage[] {
 		const messages = this.teamMessages.get(teamId.trim()) ?? [];
 		if (limit !== undefined && limit > 0) {
-			return messages.slice(-limit);
+			return structuredClone(messages.slice(-limit));
 		}
-		return [...messages];
+		return structuredClone(messages);
 	}
 
 	projectBotViews(
@@ -1066,25 +1172,16 @@ export class PersistentBotTeamStore {
 				state = "idle";
 			}
 
-			let modelRef = "";
-			let provider = "";
-			let modelId = "";
-
-			if (botRecord) {
-				provider = botRecord.provider;
-				modelId = botRecord.modelId;
-				modelRef = `${provider}/${modelId}`;
-			} else {
-				modelRef = liveAgent?.modelRef ?? lane?.modelRef ?? defaultModelRef;
-				const parsed = parseModelRef(modelRef);
-				provider = parsed.provider;
-				modelId = parsed.modelId;
-			}
+			const modelRef =
+				liveAgent?.modelRef ??
+				lane?.modelRef ??
+				(botRecord ? `${botRecord.provider}/${botRecord.modelId}` : defaultModelRef);
+			const { provider, modelId } = parseModelRef(modelRef);
 
 			const displayName = botRecord?.displayName ?? lane?.label ?? liveAgent?.agentId ?? agentId;
 			const description = botRecord?.description;
 			const thinkingLevel =
-				botRecord?.thinkingLevel ?? (lane?.thinkingLevel !== undefined ? String(lane.thinkingLevel) : undefined);
+				lane?.thinkingLevel !== undefined ? String(lane.thinkingLevel) : botRecord?.thinkingLevel;
 			const instructions = botRecord?.instructions;
 			const profileId = botRecord?.profileId ?? lane?.profileId;
 

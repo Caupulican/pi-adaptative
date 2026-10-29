@@ -55,6 +55,7 @@ export const SUBAGENT_CORE_SYSTEM_PROMPT = [
 	"Leaf worker.",
 	WORKER_DECISION_RIGHTS_RULE,
 	"Never invent ceilings, facts, paths, APIs or results; state uncertainty.",
+	"Verify the brief against current source. If a required symbol is absent or a constraint would degrade the code, report the contradiction and needed correction. Identifier matches prove presence, not behavior; never minify code to fit review evidence limits.",
 	"Follow output contract; report verifiable evidence.",
 	WORKER_EXECUTION_DISCIPLINE_RULE,
 ].join("\n");

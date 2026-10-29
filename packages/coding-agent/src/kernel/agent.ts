@@ -32,6 +32,7 @@ import type {
 	ToolCallPreflightRejectionContext,
 	ToolCallStartHook,
 } from "./loop-config.ts";
+import { advanceMessageRevision } from "./message-revision.ts";
 import { convertToLlm } from "./messages.ts";
 import { createToolFailureContextMemory } from "./tool-failure-memory.ts";
 import type { AgentEvent, AgentMessage, AgentState, AgentTool, QueueMode, ToolExecutionMode } from "./types.ts";
@@ -85,6 +86,7 @@ function createMutableAgentState(
 ): MutableAgentState {
 	let tools = initialState?.tools?.slice() ?? [];
 	let messages = initialState?.messages?.slice() ?? [];
+	advanceMessageRevision(messages);
 
 	return {
 		systemPrompt: initialState?.systemPrompt ?? "",
@@ -101,6 +103,7 @@ function createMutableAgentState(
 		},
 		set messages(nextMessages: AgentMessage[]) {
 			messages = nextMessages.slice();
+			advanceMessageRevision(messages);
 		},
 		isStreaming: false,
 		streamingMessage: undefined,
@@ -434,9 +437,33 @@ export class Agent {
 	 * Current agent state.
 	 *
 	 * Assigning `state.tools` or `state.messages` copies the provided top-level array.
+	 * Use appendMessage, removeMessage, or replaceMessageContents for message mutations;
+	 * direct in-place writes do not publish the revision used by derived projections.
 	 */
 	get state(): AgentState {
 		return this._state;
+	}
+
+	/** Mutations publish one revision for every derived message projection. */
+	appendMessage(message: AgentMessage): void {
+		this._state.messages.push(message);
+		advanceMessageRevision(this._state.messages);
+	}
+
+	removeMessage(message: AgentMessage): void {
+		const index = this._state.messages.indexOf(message);
+		if (index < 0) return;
+		this._state.messages.splice(index, 1);
+		advanceMessageRevision(this._state.messages);
+	}
+
+	/** Preserve the identity shared by finalized events and persistence. */
+	replaceMessageContents(target: AgentMessage, replacement: AgentMessage): void {
+		if (target === replacement) return;
+		const record = target as unknown as Record<string, unknown>;
+		for (const key of Object.keys(record)) delete record[key];
+		Object.assign(record, replacement);
+		advanceMessageRevision(this._state.messages);
 	}
 
 	/** Controls how queued steering messages are drained. */
@@ -883,7 +910,7 @@ export class Agent {
 
 			case "message_end":
 				this._state.streamingMessage = undefined;
-				this._state.messages.push(event.message);
+				this.appendMessage(event.message);
 				break;
 
 			case "tool_execution_start": {

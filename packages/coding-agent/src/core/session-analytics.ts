@@ -12,6 +12,7 @@ import { dirname } from "node:path";
 import type { Model, Usage } from "@caupulican/pi-ai";
 import { getSessionsDir } from "../config.ts";
 import { calculateContextTokens, estimateContextTokens } from "../kernel/compaction/compaction.ts";
+import { messageRevision } from "../kernel/message-revision.ts";
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import {
 	CURRENT_SESSION_VERSION,
@@ -34,8 +35,8 @@ import {
 	type SessionCostSummary,
 } from "./cost/cost-summary.ts";
 import {
-	aggregateDailyUsageFromSessionFiles,
-	aggregateDailyUsageFromSessionRoot,
+	aggregateDailyUsageAsync,
+	aggregateDailyUsageFromEntries,
 	type DailyUsageTotals,
 	formatDailyUsageBreakdown,
 	getLocalDayWindow,
@@ -81,6 +82,9 @@ export interface SessionAnalyticsDeps {
 	getState(): AgentState;
 	/** All messages (agent state view) — used for context-window estimation and last-assistant text. */
 	getMessages(): AgentMessage[];
+	onDailyUsageUpdated?(): void;
+	isDisposed?(): boolean;
+	onDailyUsageError?(error: unknown): void;
 	/** Current session model — its context window bounds the /context estimate. */
 	getModel(): Model<any> | undefined;
 	/** Session log — entries feed spawned-usage roll-up, daily totals, branch export. */
@@ -110,6 +114,8 @@ export interface SessionAnalyticsDeps {
 }
 
 export class SessionAnalytics {
+	private dailyRefresh: Promise<void> | undefined;
+	private dailyRetryAfter = 0;
 	/** All accounting memos belong to one append-only session lineage, not to its entry count. */
 	private _accountingSession?: {
 		session: SessionManager;
@@ -461,6 +467,7 @@ export class SessionAnalytics {
 			cached?.entryCount === entryCount &&
 			cached.pendingRevision === pending.revision &&
 			cached.dailyTotals === dailyTotals &&
+			cached.summary.todayPending === dailyTotals.pending &&
 			cached.windowStartMs === window.startMs &&
 			cached.windowEndMs === window.endMs
 		) {
@@ -500,18 +507,75 @@ export class SessionAnalytics {
 		) {
 			return this._dailyUsageCache.totals;
 		}
+		if (
+			(this.dailyRefresh || nowMs < this.dailyRetryAfter) &&
+			this._dailyUsageCache?.sessionDir === scope &&
+			this._dailyUsageCache.windowStartMs === window.startMs &&
+			this._dailyUsageCache.windowEndMs === window.endMs
+		)
+			return this._dailyUsageCache.totals;
 		const sessionFile = sessionManager.getSessionFile();
+		const sessionId = sessionManager.getSessionId();
 		const liveSession = sessionFile ? { filePath: sessionFile, entries: sessionManager.getEntries() } : undefined;
-		const totals = sessionManager.usesDefaultSessionDir()
-			? aggregateDailyUsageFromSessionRoot(scope, window, liveSession)
-			: aggregateDailyUsageFromSessionFiles(sessionDir, window, liveSession);
-		this._dailyUsageCache = {
-			sessionDir: scope,
-			windowStartMs: window.startMs,
-			windowEndMs: window.endMs,
-			expiresAt: Math.min(nowMs + 10_000, window.endMs),
-			totals,
-		};
+		const previous = this._dailyUsageCache;
+		const sameWindow =
+			previous?.sessionDir === scope &&
+			previous.windowStartMs === window.startMs &&
+			previous.windowEndMs === window.endMs;
+		const totals = sameWindow ? previous.totals : aggregateDailyUsageFromEntries(liveSession?.entries ?? [], window);
+		if (!sameWindow) {
+			this.dailyRetryAfter = 0;
+			this._dailyUsageCache = {
+				sessionDir: scope,
+				windowStartMs: window.startMs,
+				windowEndMs: window.endMs,
+				expiresAt: 0,
+				totals,
+			};
+		}
+		totals.pending = true;
+		if (!this.dailyRefresh && nowMs >= this.dailyRetryAfter) {
+			const projection = this._dailyUsageCache;
+			const sessionIsCurrent = () =>
+				!this.deps.isDisposed?.() &&
+				this.deps.getSessionManager() === sessionManager &&
+				sessionManager.getSessionId() === sessionId &&
+				sessionManager.getSessionFile() === sessionFile;
+			const refreshIsCurrent = () => sessionIsCurrent() && this._dailyUsageCache === projection;
+			this.dailyRefresh = aggregateDailyUsageAsync(
+				scope,
+				sessionManager.usesDefaultSessionDir(),
+				window,
+				liveSession,
+			)
+				.then((refreshed) => {
+					if (!refreshIsCurrent()) return;
+					this._dailyUsageCache = {
+						sessionDir: scope,
+						windowStartMs: window.startMs,
+						windowEndMs: window.endMs,
+						expiresAt: Math.min(Date.now() + 10_000, window.endMs),
+						totals: refreshed,
+					};
+					this.deps.onDailyUsageUpdated?.();
+				})
+				.catch((error: unknown) => {
+					if (!refreshIsCurrent()) return;
+					this.dailyRetryAfter = Date.now() + 10_000;
+					this.deps.onDailyUsageError?.(error);
+				})
+				.finally(() => {
+					this.dailyRefresh = undefined;
+					// A newer projection waited for this slot; let it start without another keystroke.
+					if (
+						!this.deps.isDisposed?.() &&
+						this._dailyUsageCache !== projection &&
+						this._dailyUsageCache?.totals.pending
+					)
+						this.deps.onDailyUsageUpdated?.();
+				});
+		}
+
 		return totals;
 	}
 
@@ -582,14 +646,11 @@ export class SessionAnalytics {
 		return { hasCompaction: true, hasPostCompactionUsage: false };
 	}
 
-	private _contextUsageCache?: [
-		readonly AgentMessage[],
-		number,
-		unknown,
-		unknown,
-		unknown,
-		ReturnType<typeof estimateContextTokens>,
-	];
+	private _contextUsageCache?: {
+		messages: readonly AgentMessage[];
+		revision: number;
+		estimate: ReturnType<typeof estimateContextTokens>;
+	};
 
 	getContextUsage(): ContextUsage | undefined {
 		const model = this.deps.getModel();
@@ -607,27 +668,14 @@ export class SessionAnalytics {
 		}
 
 		const messages = this.deps.getMessages();
-		const last = messages.at(-1) as { stopReason?: unknown; usage?: { totalTokens?: unknown } } | undefined;
-		let c = this._contextUsageCache;
-		if (
-			!c ||
-			c[0] !== messages ||
-			c[1] !== messages.length ||
-			c[2] !== last ||
-			c[3] !== last?.stopReason ||
-			c[4] !== last?.usage?.totalTokens
-		) {
-			c = [
-				messages,
-				messages.length,
-				last,
-				last?.stopReason,
-				last?.usage?.totalTokens,
-				estimateContextTokens(messages),
-			];
-			this._contextUsageCache = c;
-		}
-		const estimate = c[5];
+		const revision = messageRevision(messages);
+		const cached = this._contextUsageCache;
+		const estimate =
+			revision !== undefined && cached?.messages === messages && cached.revision === revision
+				? cached.estimate
+				: estimateContextTokens(messages);
+		this._contextUsageCache = revision === undefined ? undefined : { messages, revision, estimate };
+
 		// Under ICM a turn's requests carry only that turn after its chat view: usage recorded before the turn start
 		// measured an earlier turn's request, so until this turn's first response the size is unknown, as after compaction.
 		const turnStart = this.deps.getContinuousChatTurnStartIndex?.(messages);

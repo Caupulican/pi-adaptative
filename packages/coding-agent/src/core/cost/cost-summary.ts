@@ -28,6 +28,7 @@ export interface CurrentSessionCostAccumulator extends CurrentSessionCostTotals 
 
 export interface SessionCostSummary extends CurrentSessionCostTotals {
 	todayCostEstimate?: "base-rates";
+	todayPending?: boolean;
 	todayCost: number;
 	todayOwnCost: number;
 	todaySubagentCost: number;
@@ -183,6 +184,7 @@ export function createSessionCostSummary(args: {
 		...current,
 		...(args.dailyTotals.costEstimate ? { todayCostEstimate: args.dailyTotals.costEstimate } : {}),
 		todayCost: args.dailyTotals.totalCost,
+		...(args.dailyTotals.pending ? { todayPending: true } : {}),
 		todayOwnCost: args.dailyTotals.ownCost,
 		todaySubagentCost: args.dailyTotals.spawnedCost,
 		todayHistorySummaryCost: args.dailyTotals.historySummaryCost,
@@ -192,7 +194,9 @@ export function createSessionCostSummary(args: {
 }
 
 export function hasCostSummarySignal(summary: SessionCostSummary): boolean {
-	return summary.currentCost > 0 || summary.todayCost > 0 || summary.subagentReports > 0;
+	return (
+		summary.currentCost > 0 || summary.todayCost > 0 || summary.subagentReports > 0 || summary.todayPending === true
+	);
 }
 
 export function hasSubagentCostSignal(summary: Pick<SessionCostSummary, "subagentReports" | "subagentCost">): boolean {
@@ -251,8 +255,10 @@ export function formatFooterCostParts(
 			`CURRENT:${summary.costEstimate ? "~" : ""}${formatCost(summary.currentCost, precision)}${options.subscription ? " (sub)" : ""}`,
 		);
 	}
-	if (summary.todayCost > 0) {
-		parts.push(`TODAY:${summary.todayCostEstimate ? "~" : ""}${formatCost(summary.todayCost, precision)}`);
+	if (summary.todayCost > 0 || summary.todayPending) {
+		parts.push(
+			`TODAY:${summary.todayCostEstimate ? "~" : ""}${formatCost(summary.todayCost, precision)}${summary.todayPending ? " (partial; updating)" : ""}`,
+		);
 	}
 	for (const share of backgroundCostShares(summary, precision))
 		parts.push(`${share.label}:${share.amount} in CURRENT`);
@@ -262,7 +268,7 @@ export function formatFooterCostParts(
 export function formatStatusCostSummary(summary: SessionCostSummary, precision = 4): string {
 	const parts = [
 		`CURRENT ${summary.costEstimate ? "~" : ""}${formatCost(summary.currentCost, precision)}${summary.costEstimate ? " (base-rate estimate)" : ""}`,
-		`TODAY ${summary.todayCostEstimate ? "~" : ""}${formatCost(summary.todayCost, precision)}${summary.todayCostEstimate ? " (base-rate estimate)" : ""}`,
+		`TODAY ${summary.todayCostEstimate ? "~" : ""}${formatCost(summary.todayCost, precision)}${summary.todayCostEstimate ? " (base-rate estimate)" : ""}${summary.todayPending ? " (partial; updating)" : ""}`,
 	];
 	for (const share of backgroundCostShares(summary, precision))
 		parts.push(`${share.label} ${share.amount} (included in CURRENT)`);

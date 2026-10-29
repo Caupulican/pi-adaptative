@@ -605,8 +605,13 @@ export class ContinuousChatStore {
 	}
 
 	/** A claimed item failed. Its reason remains available for diagnostics after a restart. */
-	async failWork(item: ContinuousChatClaim, reason: string): Promise<ContinuousChatWorkSettlement> {
-		return this.settleUnacknowledgedWork(item, { kind: "fail", reason });
+	async failWork(
+		item: ContinuousChatClaim,
+		reason: string,
+		recoveryOnly = false,
+		recoveryKey?: string,
+	): Promise<ContinuousChatWorkSettlement> {
+		return this.settleUnacknowledgedWork(item, { kind: "fail", reason, recoveryOnly, recoveryKey });
 	}
 
 	async releaseWork(item: ContinuousChatClaim): Promise<ContinuousChatWorkSettlement> {
@@ -675,10 +680,10 @@ export class ContinuousChatStore {
 	 * An arrival that is not a permanent message: a user turn began, or the summary model recovered. Failed work
 	 * becomes retry-eligible in the background.
 	 */
-	async noteArrival(): Promise<void> {
+	async noteArrival(recoveryKey?: string, forceRecovery = false): Promise<void> {
 		await this.withWriterLock(async () => {
 			await this.reconcileLocked();
-			this.requireScheduler().arrival();
+			this.requireScheduler().arrival(undefined, recoveryKey, forceRecovery);
 		});
 	}
 

@@ -16,6 +16,7 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { decideByAuthority } from "./authority-line.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
+import { ModelEvaluationBudgetError } from "./model-evaluation-batches.ts";
 import type { CompletionRejectionDetail } from "./policy.ts";
 import { type AddedSuppression, addedSuppressions } from "./suppression-scan.ts";
 import type { ExecutionState } from "./types.ts";
@@ -29,9 +30,6 @@ export const COMPLETION_ACCOUNT_LIMITS = {
 	evidenceIdsPerClaim: 8,
 	textChars: 600,
 	pathChars: 400,
-	/** Per piece of evidence and per changed path's diff, as System One reads them. */
-	evidenceChars: 1_500,
-	diffChars: 2_500,
 	/** Evidence ids listed back to the model when it must cite some. */
 	listedEvidenceIds: 30,
 } as const;
@@ -107,6 +105,14 @@ export const completionAccountSchema = Type.Object(
 				{
 					claim: Type.String({ minLength: 1, maxLength: COMPLETION_ACCOUNT_LIMITS.textChars }),
 					evidenceIds,
+					paths: Type.Optional(
+						Type.Array(Type.String({ minLength: 1, maxLength: COMPLETION_ACCOUNT_LIMITS.pathChars }), {
+							minItems: 1,
+							maxItems: COMPLETION_ACCOUNT_LIMITS.changes,
+							description:
+								"Changed paths whose complete diffs establish this cause. Other paths still receive independent scope review. Omit to include every changed path; never shorten production code to fit a review budget.",
+						}),
+					),
 				},
 				{ additionalProperties: false },
 			),
@@ -191,7 +197,7 @@ export function patchPaths(patch: string): string[] {
 	return paths.filter((path) => path.length > 0);
 }
 
-/** One changed file's part of the patch, bounded. */
+/** One changed file's complete part of the captured patch. */
 export function diffForPath(patch: string, path: string, omittedChars = 0): string | undefined {
 	const sections = patch.split(/^(?=diff --git )/m);
 	const section = sections.find((candidate) => {
@@ -199,9 +205,7 @@ export function diffForPath(patch: string, path: string, omittedChars = 0): stri
 		return header !== null && samePath(header[2] ?? "", path);
 	});
 	if (section === undefined) return undefined;
-	return section.length > COMPLETION_ACCOUNT_LIMITS.diffChars || (omittedChars > 0 && section === sections.at(-1))
-		? `${section.slice(0, COMPLETION_ACCOUNT_LIMITS.diffChars)}\n[File diff is incomplete; cite verified evidence for changes outside this excerpt.]`
-		: section;
+	return omittedChars > 0 && section === sections.at(-1) ? undefined : section;
 }
 
 interface ResolvedEvidence {
@@ -244,7 +248,7 @@ function claimNamesPath(claim: string, path: string): boolean {
 }
 
 const ACCOUNT_SHAPE =
-	"Call goal complete again with `account`: { changes: [{ path, reason, serves: [requirement id or the file it supports] }] for every changed file, assumptions: [{ claim, evidenceIds }], regressions: [{ path, evidenceIds }], cause: { claim, evidenceIds } for a bug fix }. Cite evidence ids from `get`.";
+	"Call goal complete again with `account`: { changes: [{ path, reason, serves: [requirement id or the file it supports] }] for every changed file, assumptions: [{ claim, evidenceIds }], regressions: [{ path, evidenceIds }], cause: { claim, evidenceIds, paths? } for a bug fix }. Cite evidence ids from `get`. cause.paths selects complete changed-file diffs for the causal claim; every other file still receives scope review. Never shrink production code to fit review limits.";
 
 function fingerprintOf(statement: string, evidence: string): string {
 	return createHash("sha256").update(statement).update("\u0000").update(evidence).digest("hex").slice(0, 16);
@@ -260,6 +264,18 @@ export function checkCompletionAccount(
 	options: AccountOptions,
 ): { failures: CompletionRejectionDetail[]; claims: AccountClaim[] } {
 	if (!options.repositoryOutcome) return { failures: [], claims: [] };
+	if ((context.patchOmittedChars ?? 0) > 0)
+		return {
+			failures: [
+				{
+					id: "account_diff_incomplete",
+					reason: "The repository diff is incomplete; a preview cannot establish completion.",
+					required_next_proof:
+						"Recapture complete work evidence against the original baseline. Do not shrink or minify production code to fit review limits.",
+				},
+			],
+			claims: [],
+		};
 	if (!account) {
 		const known = citedEvidenceIds(context.state);
 		return {
@@ -317,11 +333,7 @@ export function checkCompletionAccount(
 				required_next_proof: `Cite ids that exist${known.length ? `: ${known.join(", ")}` : "; record evidence first (add_evidence)"}.`,
 			});
 		const citedText = cited
-			.flatMap((item) =>
-				item.found?.verified
-					? [`${item.id}: ${item.found.text.slice(0, COMPLETION_ACCOUNT_LIMITS.evidenceChars)}`]
-					: [],
-			)
+			.flatMap((item) => (item.found?.verified ? [`${item.id}: ${item.found.text}`] : []))
 			.join("\n");
 		const changeEvidence = [patchHeader(entry.path), citedText].filter(Boolean).join("\n");
 		const evidence = `Change to ${entry.path}:\n${changeEvidence}`;
@@ -383,7 +395,7 @@ export function checkCompletionAccount(
 			return undefined;
 		}
 		const evidence = [
-			...found.map((entry) => `${entry.id}: ${entry.text.slice(0, COMPLETION_ACCOUNT_LIMITS.evidenceChars)}`),
+			...found.map((entry) => `${entry.id}: ${entry.text}`),
 			...(extraEvidence ? [extraEvidence] : []),
 		].join("\n");
 		const claim: AccountClaim = {
@@ -435,12 +447,24 @@ export function checkCompletionAccount(
 				required_next_proof: "Add account.cause: { claim, evidenceIds } (skill root-cause-debugging).",
 			});
 		else {
+			const causePaths = account.cause.paths ?? context.changedPaths;
+			const unknownPaths = causePaths.filter(
+				(path) => !context.changedPaths.some((changed) => samePath(path, changed)),
+			);
+			if (unknownPaths.length > 0) {
+				failures.push({
+					id: "account_cause_unknown_paths",
+					reason: `Cause evidence names unchanged paths: ${unknownPaths.join(", ")}.`,
+					required_next_proof:
+						"Select changed paths that establish the mechanism, and cite verified evidence for surrounding unchanged code.",
+				});
+			}
 			const cause = cited(
 				"cause",
 				"the stated cause",
 				account.cause.claim,
 				account.cause.evidenceIds,
-				`The change:\n${context.changedPaths
+				`The selected mechanism changes (other files receive independent scope review):\n${causePaths
 					.map((path) => diffForPath(context.patch, path, context.patchOmittedChars) ?? "")
 					.filter((diff) => diff.length > 0)
 					.join("\n")}`,
@@ -476,6 +500,12 @@ export interface AccountJudge {
 	): Promise<Record<string, unknown>>;
 }
 
+interface AccountJudgment {
+	refuted: readonly AccountClaim[];
+	unsettled: readonly AccountClaim[];
+	evidenceFailure?: CompletionRejectionDetail;
+}
+
 function probabilityOf(answer: unknown): number | undefined {
 	const value = (answer as { noul?: unknown } | undefined)?.noul;
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -491,12 +521,27 @@ export async function judgeAccountClaims(
 	claims: readonly AccountClaim[],
 	signal?: AbortSignal,
 	config: SystemOneConfig = DEFAULT_SYSTEM_ONE_CONFIG,
-): Promise<{ refuted: AccountClaim[]; unsettled: AccountClaim[] }> {
+): Promise<{ refuted: AccountClaim[]; unsettled: AccountClaim[]; evidenceFailure?: CompletionRejectionDetail }> {
 	if (claims.length === 0) return { refuted: [], unsettled: [] };
-	const answers = await judge.evaluateUnsettledItems(
-		claims.map((claim) => ({ statement: claim.statement, evidence: claim.evidence })),
-		signal,
-	);
+	let answers: Record<string, unknown>;
+	try {
+		answers = await judge.evaluateUnsettledItems(
+			claims.map((claim) => ({ statement: claim.statement, evidence: claim.evidence })),
+			signal,
+		);
+	} catch (error) {
+		if (!(error instanceof ModelEvaluationBudgetError)) throw error;
+		return {
+			refuted: [],
+			unsettled: [],
+			evidenceFailure: {
+				id: "account_evidence_oversized",
+				reason: error.message,
+				required_next_proof:
+					"Use account.cause.paths to select the complete diffs needed for the mechanism, and concise verified evidence for the claim. Split an indivisible large claim into source-backed claims. This is an evidence-budget gap, not an evaluator outage or a reason to minify production code.",
+			},
+		};
+	}
 	const refuted: AccountClaim[] = [];
 	const unsettled: AccountClaim[] = [];
 	claims.forEach((claim, index) => {
@@ -519,9 +564,10 @@ export async function judgeAccountClaims(
  * Unsettled account claims hold the objective transition. Repetition changes recovery guidance, never proof.
  */
 export function accountOutcome(
-	judged: { refuted: readonly AccountClaim[]; unsettled: readonly AccountClaim[] },
+	judged: AccountJudgment,
 	passes: Map<string, number>,
 ): { failures: CompletionRejectionDetail[] } {
+	if (judged.evidenceFailure) return { failures: [judged.evidenceFailure] };
 	const failures: CompletionRejectionDetail[] = judged.refuted.map((claim) => ({
 		id: `account_contradicted:${claim.topic}`,
 		reason: `The evidence cited for the ${claim.label} contradicts the claim.`,

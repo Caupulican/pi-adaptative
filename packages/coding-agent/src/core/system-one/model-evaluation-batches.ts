@@ -6,8 +6,10 @@ export const MODEL_EVALUATION_REQUEST_BYTES = 24 * 1024;
 export class ModelEvaluationBudgetError extends Error {
 	readonly kind = "invalid_request";
 
-	constructor() {
-		super(`Semantic evaluation evidence exceeds the ${MODEL_EVALUATION_REQUEST_BYTES}-byte request budget`);
+	constructor(questionId: string) {
+		super(
+			`Complete evidence for ${questionId} exceeds the ${MODEL_EVALUATION_REQUEST_BYTES}-byte request budget. Partition independent judgments or select complete evidence for a narrower claim; never minify production code or discard evidence to fit.`,
+		);
 		this.name = "ModelEvaluationBudgetError";
 	}
 }
@@ -63,13 +65,13 @@ export function planEvaluationBatches<State>(plan: {
 				fits = true;
 				break;
 			}
-			if (indexes.length === 0) throw new ModelEvaluationBudgetError();
+			if (indexes.length === 0) throw new ModelEvaluationBudgetError(id);
 			batches.push({ state, questions, indexes });
 			state = plan.empty();
 			questions = {};
 			indexes = [];
 		}
-		if (!fits) throw new ModelEvaluationBudgetError();
+		if (!fits) throw new ModelEvaluationBudgetError(id);
 	}
 	if (indexes.length > 0) batches.push({ state, questions, indexes });
 	return batches;

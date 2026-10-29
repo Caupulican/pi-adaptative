@@ -34,7 +34,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { open, readdir, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
@@ -1129,6 +1129,44 @@ export function loadEntriesFromFile(filePath: string, options?: { maxLineChars?:
 	const entries = loadEntriesFromFileInternal(filePath, options).entries;
 	validateLoadedLifecycleEntries(entries);
 	return entries;
+}
+
+/** Read-only projection of selected rows, yielding between bounded I/O chunks. Not a recovery loader. */
+export async function visitSessionEntriesAsync(
+	filePath: string,
+	selectLine: (line: string) => boolean,
+	visit: (entry: SessionEntry) => void,
+): Promise<void> {
+	const file = await open(filePath, "r");
+	try {
+		const before = await file.stat();
+		if (!before.isFile() || !sameFileVersion(before, await stat(filePath)))
+			throw new Error("Session file changed while opening it.");
+		if (!readSessionHeaderFromDescriptor(file.fd, MAX_SESSION_HEADER_BYTES).ok)
+			throw new Error("Session file header is invalid.");
+		const decoder = new StringDecoder("utf8");
+		const lines = new StreamingLineDecoder(MAX_SESSION_LINE_CHARS, { overflow: "skip", lineEndings: "lf" });
+		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
+		let position = 0;
+		const consume = (line: string): void => {
+			if (!selectLine(line)) return;
+			const entry = parseSessionEntryLine(line);
+			if (entry && entry.type !== "session") visit(entry);
+		};
+		for (;;) {
+			const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
+			if (bytesRead === 0) break;
+			position += bytesRead;
+			for (const line of lines.push(decoder.write(buffer.subarray(0, bytesRead)))) consume(line);
+		}
+		for (const line of lines.push(decoder.end())) consume(line);
+		const tail = lines.finish();
+		if (tail !== undefined) consume(tail);
+		if (!sameFileVersion(before, await file.stat()) || !sameFileVersion(before, await stat(filePath)))
+			throw new Error("Session file changed while reading it; reopen it before retrying.");
+	} finally {
+		await file.close();
+	}
 }
 
 const ENTRY_ID_PREFIX_BYTES = 64 * 1024;

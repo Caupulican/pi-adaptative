@@ -10,7 +10,7 @@ export type ContinuousChatWorkItem = ContinuousChatNodeCoordinate;
 /** Requested disposition of a claimed compaction without an acknowledged publication. */
 export type ContinuousChatWorkAbandonment =
 	| { readonly kind: "release" }
-	| { readonly kind: "fail"; readonly reason: string };
+	| { readonly kind: "fail"; readonly reason: string; readonly recoveryOnly?: boolean; readonly recoveryKey?: string };
 
 /** Legacy migration value; current failure records live in the indexed scheduler. */
 export interface ContinuousChatBlockedWork {

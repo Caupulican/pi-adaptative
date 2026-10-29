@@ -3,6 +3,7 @@ import type { AssistantMessage } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { AgentBusyError } from "../../kernel/agent.ts";
 import type { BeforeToolCallResult } from "../../kernel/index.ts";
+import { messageRevision } from "../../kernel/message-revision.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { ContextUsage, ToolDefinition } from "../extensions/types.ts";
@@ -124,33 +125,14 @@ export type SelfCompactionRequestOutcome =
 	| { readonly accepted: true; readonly record: SelfCompactionRequestRecord; readonly replaced: boolean }
 	| { readonly accepted: false; readonly reason: string };
 
-let latestCachedReadTokensMemo:
-	| {
-			ref: readonly AgentMessage[];
-			len: number;
-			last: AgentMessage | undefined;
-			stop: unknown;
-			cacheRead: unknown;
-			result: number | null;
-	  }
-	| undefined;
+let latestCachedReadTokensMemo: { ref: readonly AgentMessage[]; revision: number; result: number | null } | undefined;
 
-/** The cache-read tokens of the latest assistant reply in `messages` that has usage and did not fail; null without one. */
+/** Latest successful assistant cache usage; arbitrary caller arrays are never memoized. */
 export function latestCachedReadTokens(messages: readonly AgentMessage[]): number | null {
-	const last = messages.at(-1);
-	const stop = (last as { stopReason?: unknown } | undefined)?.stopReason;
-	const cacheRead = (last as { usage?: { cacheRead?: unknown } } | undefined)?.usage?.cacheRead;
-	const m = latestCachedReadTokensMemo;
-	if (
-		m &&
-		m.ref === messages &&
-		m.len === messages.length &&
-		m.last === last &&
-		m.stop === stop &&
-		m.cacheRead === cacheRead
-	) {
-		return m.result;
-	}
+	const revision = messageRevision(messages);
+	const cached = latestCachedReadTokensMemo;
+	if (revision !== undefined && cached?.ref === messages && cached.revision === revision) return cached.result;
+
 	let result: number | null = null;
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index]!;
@@ -164,7 +146,7 @@ export function latestCachedReadTokens(messages: readonly AgentMessage[]): numbe
 			break;
 		}
 	}
-	latestCachedReadTokensMemo = { ref: messages, len: messages.length, last, stop, cacheRead, result };
+	latestCachedReadTokensMemo = revision === undefined ? undefined : { ref: messages, revision, result };
 	return result;
 }
 
