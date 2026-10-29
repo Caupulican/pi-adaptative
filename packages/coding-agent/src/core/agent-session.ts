@@ -1832,7 +1832,8 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			integrationBranch: () => this._edgeIntent.localCommitBranch() || undefined,
 			getModelRegistry: () => this._modelRegistry,
-			getPeerReviewModels: () => this.getRouterCandidatePool().models,
+			getPeerReviewModels: (selectedRef) =>
+				this._edgeIntent.modelPolicy.allowed(this.getRouterCandidatePool(selectedRef).models),
 			isModelExhausted: (model) => this._isModelUnusable(model),
 			getResourceLoader: () => this._resourceLoader,
 			getSkillVault: () => this._skillVault,
@@ -2510,9 +2511,10 @@ export class AgentSession {
 	}
 
 	/** The router's candidate pool as the operator configured it, with its provenance. */
-	getRouterCandidatePool(): RouterCandidatePool {
+	getRouterCandidatePool(selectedAdvisorRef?: string): RouterCandidatePool {
 		return resolveRouterCandidatePool(this._routerPool, this._modelRegistry, {
 			favorites: this.settingsManager.getModelFavorites(),
+			selectedAdvisorRef,
 			isRuntimeDisabled: (r) => !this.settingsManager.isLocalRuntimeEnabled(r),
 		});
 	}

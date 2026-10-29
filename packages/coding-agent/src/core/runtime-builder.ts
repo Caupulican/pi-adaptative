@@ -255,6 +255,9 @@ import { buildWorktreeSyncEngineDeps, type WorktreeSyncEnginePorts } from "./wor
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface RuntimeBuilderSettingsSource {
 	createReloadSnapshot(): SettingsReloadSnapshot;
+	getAdvisorSettings(): { enabled: boolean; model?: string; thinkingLevel?: ThinkingLevel; error?: string };
+	getAdvisorSettingsRevision(): number;
+	subscribeChanges(listener: () => void): () => void;
 	getAutoLearnSettings(): AutoLearnSettings;
 	getAutonomySettings(): Required<AutonomySettings>;
 	getEdgeSettings(): ResolvedEdgeSettings;
@@ -361,7 +364,7 @@ export interface RuntimeBuilderDeps {
 	/** Model registry, passed to the extension runner and profile model re-resolution. */
 	getModelRegistry(): ModelRegistry;
 	/** Host routing pool for explicit stronger-peer reviews. */
-	getPeerReviewModels?(): readonly Model<Api>[];
+	getPeerReviewModels?(selectedRef?: string): readonly Model<Api>[];
 	/** Session-scoped provider/model quota exhaustion guard. */
 	isModelExhausted(model: Model<Api>): boolean;
 	/** Extension/skill/prompt/theme discovery + the reload/commit/rollback generation swap. */
@@ -1554,12 +1557,22 @@ export class RuntimeBuilder {
 						const state = this.deps.getAgent().state;
 						return state.model ? { model: state.model, thinkingLevel: state.thinkingLevel } : undefined;
 					},
-					getModels: () => this.deps.getPeerReviewModels?.() ?? [],
+					getModels: (selectedRef) => this.deps.getPeerReviewModels?.(selectedRef) ?? [],
+					getAdvisorSettings: () => ({
+						...this.deps.getSettingsManager().getAdvisorSettings(),
+						revision: this.deps.getSettingsManager().getAdvisorSettingsRevision(),
+					}),
+					subscribeAdvisorSettings: (listener) => this.deps.getSettingsManager().subscribeChanges(listener),
 					hasAuth: (model) => this.deps.getModelRegistry().hasConfiguredAuth(model),
 					isExhausted: (model) => this.deps.isModelExhausted(model),
 					getJudge: () => (this.isSystemOneEnabled() ? this.deps.getSystemOneController?.() : undefined),
 					runCompletion: (options) => this.deps.runIsolatedCompletion(options),
 					runtime: {
+						hasBranchEntry: (entryId) =>
+							this.deps
+								.getSessionManager()
+								.getBranch()
+								.some((entry) => entry.id === entryId),
 						isRoot: () =>
 							this.getPeerReviewController() === this._peerReviewController &&
 							this._peerReviewController !== undefined,
@@ -1583,14 +1596,34 @@ export class RuntimeBuilder {
 								signal,
 							),
 					},
-					requestVerification: (findings, kind) => {
-						if (this.isSystemOneEnabled())
-							this.deps.getSystemOneController?.()?.verification.require(
-								kind === "evidence_gap" ? PEER_REVIEW_EVIDENCE_SOURCE : "peer_review",
-								findings.map(
+					requestVerification: (reportId, findings, evidenceGaps) => {
+						if (!this.isSystemOneEnabled()) return;
+						const verification = this.deps.getSystemOneController?.()?.verification;
+						if (!verification) throw new Error("System One verification is unavailable.");
+						const groups = [
+							{ source: "peer_review", findings },
+							{ source: PEER_REVIEW_EVIDENCE_SOURCE, findings: evidenceGaps },
+						]
+							.filter((group) => group.findings.length > 0)
+							.map((group) => ({
+								source: group.source,
+								reasons: group.findings.map(
 									(finding) => `${finding.summary}: ${finding.requiredCheck}. Evidence: ${finding.evidence}`,
 								),
-							);
+							}));
+						if (groups.length > 0) verification.requireReport(reportId, groups);
+					},
+					releaseVerification: (reportId) => {
+						if (!this.isSystemOneEnabled()) return;
+						const verification = this.deps.getSystemOneController?.()?.verification;
+						if (!verification) throw new Error("System One verification is unavailable.");
+						verification.releaseReport(reportId);
+					},
+					reconcileVerification: (retainedReportIds, inconsistentReportIds) => {
+						if (!this.isSystemOneEnabled()) return;
+						const verification = this.deps.getSystemOneController?.()?.verification;
+						if (!verification) throw new Error("System One verification is unavailable.");
+						verification.reconcileReports("peer_review:", retainedReportIds, inconsistentReportIds);
 					},
 				});
 				this._baseToolDefinitions.set(

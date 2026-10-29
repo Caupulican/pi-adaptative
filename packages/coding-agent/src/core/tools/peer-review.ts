@@ -24,7 +24,16 @@ const resolutionSchema = Type.Object(
 
 const schema = Type.Object(
 	{
-		action: Type.Enum(["options", "review", "status", "dispose_attempt", "acknowledge", "obligations", "resolve"]),
+		action: Type.Enum([
+			"options",
+			"review",
+			"status",
+			"recover_result",
+			"dispose_attempt",
+			"acknowledge",
+			"obligations",
+			"resolve",
+		]),
 		review: Type.Optional(peerReviewRequestSchema),
 		resolution: Type.Optional(resolutionSchema),
 		attempt: Type.Optional(
@@ -58,15 +67,16 @@ export function createPeerReviewToolDefinition(
 		label: "Peer review",
 		readOnly: true,
 		description:
-			"Plan or delivery review by a distinct host-admitted peer. Ordinary review is independent and accepts any supported peer effort; select stronger explicitly to require higher supported effort and System One task-strength confidence >=0.95. Options lists both effort sets. Obligations lists pending findings and host receipts; resolve submits receiving-lane proof without another peer. Lead retains execution, permissions and responsibility. Unavailable or incomplete review grants no validation.",
+			"Plan or delivery review by a distinct host-admitted peer. The owner's /settings > Advisor selection is authoritative; omit peer and thinkingLevel to use configured values. With no configured model, use options to choose a peer. Ordinary review works without System One; stronger selection requires its task-strength judgment. Obligations lists pending findings and host receipts; resolve submits receiving-lane proof without another peer. Unavailable or incomplete review grants no validation.",
 		promptSnippet:
 			"Root-only advisor: review plans with material uncertainty and the final delivery; workers report to their parent. Independent review works without System One.",
 		promptGuidelines: [
+			"If a paid review could not be saved, its retainedReview is visible in status while this session remains alive. After fixing storage, use recover_result with attempt {reviewKey, reason}; it saves that report in its owning branch without another model call, even when the advisor is disabled or its quota is exhausted.",
 			"Use dispose_attempt with attempt {reviewKey, reason} to release a non-running pending/unavailable receipt after inspecting its failure. This works with System One on or off, never disposes reviewed findings and never counts as a successful review. Active requests cannot be disposed.",
 			"The advisor serves the root only. Workers report findings and questions to their parent; never create recursive advisor chains. Use status to inspect durable review receipts. Identical requests reuse their result; recover true is only for explicit recovery after an unavailable review's cause was addressed, never reroll a completed review.",
 			"When System One is off, findings remain advice for the root. Record your evidence and decision with acknowledge and its reviewKey; this is root_decision_only, never System One validation. With System One on, use obligations and resolve. Completion requiring a reviewer consumes a current delivery review; missing, stale, incomplete, or unresolved reviews cannot satisfy that stage.",
 			"A peer_review_evidence obligation is a missing-proof gap, not a confirmed defect. Resolve it with disposition rejected and one fresh current-candidate reproduction receipt containing the missing source/check evidence, or evidence of a justified narrower delivery claim that explicitly retains the limitation. No test is required unless the owner requested it. Ordinary peer_review defect findings still require the normal refutation or causal-repair proof.",
-			"For ordinary independent review, call peer options and request review with the exact peer and any listed supported thinkingLevel; equal effort is allowed. To request a stronger peer, set selection to stronger and choose a listed strongerThinkingLevel. Supply the complete relevant plan/change, source evidence, checks and known limitations; do not hide adverse findings. The reviewer cannot read files: paste the source, diff or check output it must quote, because a file:line pointer alone leaves its findings unverifiable and they are dropped.",
+			"For ordinary independent review, use the owner's configured advisor from peer options; omit peer and thinkingLevel to use it. If no model is configured, choose an exact peer from options and any listed supported thinkingLevel; equal effort is allowed. To request a stronger peer, set selection to stronger and use a listed strongerThinkingLevel. Supply the complete relevant plan/change, source evidence, checks and known limitations; do not hide adverse findings. The reviewer cannot read files: paste the source, diff or check output it must quote, because a file:line pointer alone leaves its findings unverifiable and they are dropped.",
 			"Keep executing as the lead. Reproduce every candidate in your own lane, fix confirmed failures, and recheck the revised result before affected work continues. Report rejected candidates with evidence. Peer no_findings is not a completion or approval gate. Outages and insufficient evidence remain unresolved; never reroll an unchanged request for a favorable review.",
 			"Use peer obligations to inspect mandatory findings and host-recorded tool receipt IDs. After reproducing a candidate, use peer resolve with disposition rejected and reproduction evidence, or repaired with ordered reproduction, repair and recheck receipt IDs. The host checks actual same-lane evidence against the current candidate; your prose or a successful executor return cannot resolve a finding. This action uses System One and never dispatches another peer.",
 		],
@@ -114,14 +124,18 @@ export function createPeerReviewToolDefinition(
 				};
 			}
 			const result =
-				input.action === "options"
-					? controller.options()
-					: input.review
-						? await controller.review(input.review, signal)
-						: {
-								status: "unavailable" as const,
-								reason: "review is required; use peer options to discover eligible peers",
-							};
+				input.action === "recover_result"
+					? input.attempt
+						? await controller.recoverResult(input.attempt.reviewKey, input.attempt.reason, signal)
+						: { status: "unavailable" as const, reason: "attempt with reviewKey and reason is required" }
+					: input.action === "options"
+						? controller.options()
+						: input.review
+							? await controller.review(input.review, signal)
+							: {
+									status: "unavailable" as const,
+									reason: "review is required; use peer options to discover eligible peers",
+								};
 			const { usage, ...receipt } = "usage" in result ? result : { ...result, usage: undefined };
 			return {
 				content: [{ type: "text" as const, text: JSON.stringify(receipt) }],

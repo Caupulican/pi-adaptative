@@ -396,19 +396,35 @@ foreground history. This review uses the host's configured provider connections 
 the chosen peer. Workers cannot launch a peer review: they send findings and questions to their parent.
 Advisor calls never spawn another advisor or a worker.
 
+Choose the advisor in **`/settings` → Advisor**. The submenu provides Enabled, Model,
+Thinking and Save scope controls. Selecting a model enables the advisor. Save globally, for this
+project, or for the directory profile; the highest configured scope replaces the entire lower-scope
+advisor configuration. The selector shows the effective selection and warns when another scope masks
+a change. Selecting or enabling an advisor does not purchase a review: the root requests each review.
+Independent review works with System One off.
+
+An explicit model choice is honored even outside router favorites without changing those favorites.
+Explicit `--models`/SDK scope, model-pool policy, configured authentication, quota and the distinct-lead
+check still apply. An unavailable choice produces a warning and refuses review instead of substituting
+another model. A fixed Thinking choice is enforced exactly. **Agent chooses** permits the root to
+request a supported effort; an omitted effort uses the model default. Selecting a different model
+clears an incompatible effort override. Changing the effective preference cancels an active peer
+request when possible and prevents its stale result from satisfying the new selection.
+
 Call `peer` with `{"action":"options"}` to discover exact `provider/model` references and
 all supported `thinkingLevels`, plus the strictly higher `strongerThinkingLevels` for explicit
-stronger review. Options are limited to the host routing
-pool, configured authentication, available quota and supported effort. They do not assert strength.
+stronger review. Options reflect the configured advisor choice and its supported effort. Without a
+saved choice, they use the host routing pool. Authentication, quota and model scope apply in both
+cases. Options do not assert strength.
 Ordinary independent review works at equal effort, including when the root is at maximum effort.
 Effort is never silently clamped.
 
 Then call `peer` with `action: "review"` and a `review` object containing:
 
-| Field | Required content |
+| Field | Content |
 |---|---|
-| `peer` | Exact reference disclosed by `options`. |
-| `thinkingLevel` | Any disclosed supported level for independent review; a higher level for stronger review. |
+| `peer` | Exact reference disclosed by `options`; omit when an advisor model is configured. A conflicting model is refused. |
+| `thinkingLevel` | Omit to use a configured fixed effort or the model default. Otherwise choose a disclosed supported level; stronger review needs higher effort. A conflicting fixed effort is refused. |
 | `selection` | Optional `independent` (default) or `stronger`. |
 | `recover` | Optional explicit recovery of a previously unavailable attempt after its cause was addressed. Completed reviews cannot be rerolled. |
 | `stage` | `plan` or `delivery`. |
@@ -427,6 +443,19 @@ full findings and limitations. Identical live requests coalesce; repeated reques
 without charging their usage again. A restarted session retains the attempt and requires explicit
 recovery instead of silently paying for it again. Review receipts bind the root objective, requirement
 definitions, candidate, mode and session branch. Pending or failed attempts never mean review passed.
+Disabling the advisor preserves `peer status`, earlier findings and their resolution paths. It only
+prevents new paid reviews; it does not erase an outstanding obligation.
+
+If a completed paid review could not save its receipt, its bounded result remains available in the
+current process. Inspect `peer status` for its `reviewKey`, fix storage, then call `peer` with
+`action: "recover_result"` and `attempt: {reviewKey, reason}`. This republishes the retained result
+without another model call, including when the advisor is now disabled, exhausted or configured
+differently. Recovery requires the original session and a branch that owns the same pending receipt:
+the original branch remains eligible after navigating away and back, and a descendant may recover a
+receipt it explicitly inherits. Unrelated branches cannot inspect or recover the retained report.
+Navigation during recovery is fenced by the fresh recovery context. The retained in-memory result
+is not a durable review receipt and can be lost on process exit until it is successfully saved;
+the original tool result also disclosed the report.
 The journal retains at most 32 entries and refuses new admission when it cannot evict a settled or
 superseded entry; unresolved same-objective advice is not discarded to make room.
 For a non-running pending or unavailable attempt, use `dispose_attempt` with
@@ -473,6 +502,8 @@ incomplete or unresolved review evidence returns instructions to the root and ke
 stage open. Mechanical criteria and current obligations still apply, and the completion coordinator
 rechecks its candidate after consulting the advisor. Default deterministic completion does not require
 this optional profile or turn System One on.
+With a configured advisor model or fixed effort, reviewer-required completion needs a current receipt
+matching that selection. Switching the advisor does not clear older unresolved findings.
 
 Use `peer` with `{"action":"obligations"}` to inspect pending findings and host-recorded tool
 receipts. Resolve one with `action: "resolve"` and a `resolution` object:

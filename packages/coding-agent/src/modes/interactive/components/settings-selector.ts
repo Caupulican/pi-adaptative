@@ -50,6 +50,7 @@ import {
 	MAX_WORKER_DELEGATION_MAX_USD,
 } from "../../../core/settings/settings-rules.ts";
 import type {
+	AdvisorSettings,
 	AutoLearnSettings,
 	AutonomyMode,
 	AutonomySettings,
@@ -455,6 +456,9 @@ export interface SettingsConfig {
 	contextCurationScope?: SettingsScope;
 	learningPolicy: LearningPolicySettings;
 	learningPolicyScope?: SettingsScope;
+	advisor?: AdvisorSettings & { error?: string };
+	advisorScope?: SettingsScope;
+	getAdvisorSettingsScope?: () => SettingsScope | undefined;
 	modelCapability: ModelCapabilitySettings;
 	modelCapabilityScope?: SettingsScope;
 	workerDelegationScope?: SettingsScope;
@@ -519,6 +523,7 @@ export interface SettingsCallbacks {
 	onWorkerDelegationChange: (settings: WorkerDelegationSettings, scope: SettingsScope) => void;
 	onContextCurationChange: (settings: ContextCurationSettings, scope: SettingsScope) => void;
 	onLearningPolicyChange: (settings: LearningPolicySettings, scope: SettingsScope) => void;
+	onAdvisorChange?: (settings: AdvisorSettings, scope: SettingsScope) => AdvisorSettings & { error?: string };
 	onModelCapabilityChange: (settings: ModelCapabilitySettings, scope: SettingsScope) => void;
 	onSystemOneProviderChange?: (choice: SystemOneProviderChoice) => void;
 	onModelRouterChange: (settings: ModelRouterSettings, scope: SettingsScope) => void;
@@ -1212,6 +1217,123 @@ class LearningPolicySettingsSubmenu extends SettingsListSubmenu {
 						return;
 				}
 				onChange({ ...this.state }, this.scope);
+			},
+			onCancel,
+		);
+	}
+}
+
+class AdvisorSettingsSubmenu extends SettingsListSubmenu {
+	constructor(
+		settings: AdvisorSettings,
+		modelOptions: SelectItem[],
+		resolveLevels: (model?: string) => ThinkingLevel[] | undefined,
+		onChange: (settings: AdvisorSettings, scope: SettingsScope) => AdvisorSettings,
+		onCancel: () => void,
+		scope: SettingsScope,
+	) {
+		super();
+		let state = { ...settings };
+		let saveScope = scope;
+		const publish = () => {
+			state = { ...onChange({ ...state }, saveScope) };
+			items.find((item) => item.id === "advisor-enabled")!.currentValue = String(state.enabled ?? true);
+			items.find((item) => item.id === "advisor-model")!.currentValue = state.model ?? "Agent chooses";
+			items.find((item) => item.id === "advisor-thinking")!.currentValue = state.thinkingLevel ?? "Agent chooses";
+		};
+		const items: SettingItem[] = [
+			{
+				id: "advisor-scope",
+				label: "Save scope",
+				description:
+					"Each scope replaces the whole advisor configuration; directory profile overrides project, which overrides global.",
+				currentValue: saveScope,
+				values: ["global", "project", "directoryProfile"],
+			},
+			{
+				id: "advisor-enabled",
+				label: "Enabled",
+				description:
+					"Root-only independent advisor; works with System One off. Disabling preserves earlier findings.",
+				currentValue: String(state.enabled ?? true),
+				values: ["true", "false"],
+			},
+			{
+				id: "advisor-model",
+				label: "Model",
+				description:
+					"Choose an advisor from configured accounts. Lead model, quota and explicit --models/SDK scope can make a choice unavailable.",
+				currentValue: state.model ?? "Agent chooses",
+				submenu: (_value, done) =>
+					new ModelSelectionSubmenu(
+						[
+							{ value: "", label: "Agent chooses", description: "Choose independently for each review" },
+							...modelOptions,
+						],
+						state.model ?? "",
+						(value) => {
+							const model = value || undefined;
+							const levels = model ? resolveLevels(model) : undefined;
+							state = {
+								...state,
+								model,
+								enabled: true,
+								thinkingLevel:
+									state.thinkingLevel && levels?.includes(state.thinkingLevel)
+										? state.thinkingLevel
+										: undefined,
+							};
+							publish();
+							done(state.model ?? "Agent chooses");
+						},
+						() => done(),
+						{
+							title: "Advisor Model",
+							description:
+								"Type to filter configured models. Selecting a model enables the root advisor; unsupported effort resets to Agent chooses.",
+							customTitle: "Advisor Model",
+							customDescription: "Enter an exact provider/model reference.",
+							customEmptyHint: "empty lets the agent choose",
+							customEmptyValue: "",
+						},
+					),
+			},
+			{
+				id: "advisor-thinking",
+				label: "Thinking",
+				description:
+					"Choose a supported effort or let the agent choose. Omitted effort uses the model default. Selecting another model clears an incompatible override.",
+				currentValue: state.thinkingLevel ?? "Agent chooses",
+				submenu: (_value, done) =>
+					new SelectSubmenu(
+						"Advisor Thinking",
+						"Choose an effort or let the agent choose; omitted effort uses the model default",
+						[
+							{ value: "", label: "Agent chooses" },
+							...(state.model ? (resolveLevels(state.model) ?? []) : []).map((level) => ({
+								value: level,
+								label: level,
+							})),
+						],
+						state.thinkingLevel ?? "",
+						(value) => {
+							state = { ...state, thinkingLevel: value ? (value as ThinkingLevel) : undefined };
+							publish();
+							done(state.thinkingLevel ?? "Agent chooses");
+						},
+						() => done(),
+					),
+			},
+		];
+		this.mountSettingsList(
+			items,
+			(id, value) => {
+				if (id === "advisor-scope") {
+					saveScope = value as SettingsScope;
+					return;
+				} else if (id === "advisor-enabled") state = { ...state, enabled: value === "true" };
+				else return;
+				publish();
 			},
 			onCancel,
 		);
@@ -2534,6 +2656,10 @@ export class SettingsSelectorComponent extends Container {
 		let currentResearchLane: ResearchLaneSettings = { ...config.researchLane };
 		let currentContextCuration: ContextCurationSettings = { ...config.contextCuration };
 		let currentLearningPolicy: LearningPolicySettings = { ...config.learningPolicy };
+		let currentAdvisor: AdvisorSettings & { error?: string } = { ...config.advisor };
+		const advisorDescription = () =>
+			currentAdvisor.error ??
+			`Root advisor independent of System One; active scope: ${config.getAdvisorSettingsScope?.() ?? config.advisorScope ?? "global"}. Directory profile overrides project, which overrides global.`;
 		let currentModelCapability: ModelCapabilitySettings = { ...config.modelCapability };
 		let currentWorkerDelegation: WorkerDelegationSettings = { ...config.workerDelegation };
 		let currentModelRouter: ModelRouterSettings = { ...config.modelRouter };
@@ -2776,6 +2902,26 @@ export class SettingsSelectorComponent extends Container {
 						},
 					]
 				: []),
+			{
+				id: "advisor",
+				label: "Advisor",
+				description: advisorDescription(),
+				currentValue: currentAdvisor.enabled === false ? "Off" : (currentAdvisor.model ?? "Agent chooses"),
+				submenu: (_value, done) =>
+					new AdvisorSettingsSubmenu(
+						currentAdvisor,
+						config.autoLearnModelOptions ?? [],
+						(model) => config.resolveModelThinkingLevels?.(model),
+						(settings, scope) => {
+							currentAdvisor = { ...(callbacks.onAdvisorChange?.(settings, scope) ?? settings) };
+							const row = items.find((item) => item.id === "advisor");
+							if (row) row.description = advisorDescription();
+							return currentAdvisor;
+						},
+						() => done(currentAdvisor.enabled === false ? "Off" : (currentAdvisor.model ?? "Agent chooses")),
+						config.getAdvisorSettingsScope?.() ?? config.advisorScope ?? "global",
+					),
+			},
 			{
 				id: "model-router",
 				label: "Model Router",

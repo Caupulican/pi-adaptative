@@ -7,6 +7,7 @@ const SNAPSHOT_VERSION = 1;
 const MAX_OBLIGATIONS = 32;
 const MAX_RECEIPTS = 64;
 const MAX_JUDGED_TOKENS = 128;
+const MAX_REPORT_REGISTRATIONS = 32;
 const MAX_ID_LENGTH = 128;
 const MAX_SOURCE_LENGTH = 100;
 const MAX_REASON_LENGTH = 4_000;
@@ -78,6 +79,8 @@ export type SemanticVerificationSnapshot = {
 	obligations: SemanticVerificationObligation[];
 	receipts: SemanticVerificationReceipt[];
 	judgedTokens: VerificationJudgedProof[];
+	/** Retained until the report owner durably acknowledges registration. Older snapshots omit this field. */
+	reportRegistrations?: { id: string; receiverId: string; digest: string }[];
 };
 
 export interface VerificationStoragePort {
@@ -115,6 +118,33 @@ export type OpenVerificationObligationInput = {
 	candidateId: string;
 	scope: string;
 };
+
+function validateOpenInput(input: OpenVerificationObligationInput): void {
+	if (
+		!isBoundedText(input.source, MAX_SOURCE_LENGTH) ||
+		!isBoundedReason(input.reason) ||
+		!isVerificationIdentity(input.receiverId) ||
+		(input.candidateKind !== "repository" && input.candidateKind !== "outcome") ||
+		!isBoundedText(input.candidateId, MAX_ID_LENGTH) ||
+		!isBoundedText(input.scope, MAX_SCOPE_LENGTH)
+	) {
+		throw new Error(
+			"Semantic verification obligations require bounded source, reason, receiver, candidate and scope.",
+		);
+	}
+}
+
+function matchesOpenInput(item: SemanticVerificationObligation, input: OpenVerificationObligationInput): boolean {
+	return (
+		item.status === "active" &&
+		item.source === input.source &&
+		item.reason === input.reason &&
+		item.receiverId === input.receiverId &&
+		item.candidateKind === input.candidateKind &&
+		item.candidateId === input.candidateId &&
+		item.scope === input.scope
+	);
+}
 
 export type VerificationEvidenceSelection = {
 	receiptId: string;
@@ -241,6 +271,22 @@ export function normalizeSnapshot(candidate: unknown, branchKey: string): Semant
 	const obligations = candidate.obligations.map(readObligation);
 	const receipts = candidate.receipts.map(readReceipt);
 	const judgedTokens = candidate.judgedTokens.map(readJudgedProof);
+	const reportRegistrations = candidate.reportRegistrations === undefined ? [] : candidate.reportRegistrations;
+	if (
+		!Array.isArray(reportRegistrations) ||
+		reportRegistrations.length > MAX_REPORT_REGISTRATIONS ||
+		reportRegistrations.some(
+			(item: unknown) =>
+				!isRecord(item) ||
+				!isBoundedText(item.id, MAX_ID_LENGTH) ||
+				!isVerificationIdentity(item.receiverId) ||
+				typeof item.digest !== "string" ||
+				!/^[0-9a-f]{64}$/u.test(item.digest),
+		) ||
+		new Set(reportRegistrations.map((item) => JSON.stringify([item.receiverId, item.id]))).size !==
+			reportRegistrations.length
+	)
+		throw new Error("Invalid semantic verification report registrations; refusing to replace durable state.");
 	if (
 		obligations.some((item) => item === undefined) ||
 		receipts.some((item) => item === undefined) ||
@@ -268,6 +314,11 @@ export function normalizeSnapshot(candidate: unknown, branchKey: string): Semant
 		obligations: obligations as SemanticVerificationObligation[],
 		receipts: receipts as SemanticVerificationReceipt[],
 		judgedTokens: judgedTokens as VerificationJudgedProof[],
+		reportRegistrations: reportRegistrations.map((item) => ({
+			id: item.id,
+			receiverId: item.receiverId,
+			digest: item.digest,
+		})),
 	};
 }
 
@@ -541,6 +592,7 @@ export class SemanticVerificationObligationTracker {
 					),
 					receipts: [],
 					judgedTokens: [],
+					reportRegistrations: [],
 				},
 				branchKey,
 			);
@@ -571,35 +623,16 @@ export class SemanticVerificationObligationTracker {
 			})),
 			receipts: snapshot.receipts.map((item) => ({ ...item })),
 			judgedTokens: snapshot.judgedTokens.map((item) => ({ ...item })),
+			reportRegistrations: snapshot.reportRegistrations?.map((item) => ({ ...item })),
 		};
 		this.storage.appendRecord(branchKey, next);
 		return next;
 	}
 
 	open(input: OpenVerificationObligationInput): SemanticVerificationObligationView {
-		if (
-			!isBoundedText(input.source, MAX_SOURCE_LENGTH) ||
-			!isBoundedReason(input.reason) ||
-			!isVerificationIdentity(input.receiverId) ||
-			(input.candidateKind !== "repository" && input.candidateKind !== "outcome") ||
-			!isBoundedText(input.candidateId, MAX_ID_LENGTH) ||
-			!isBoundedText(input.scope, MAX_SCOPE_LENGTH)
-		) {
-			throw new Error(
-				"Semantic verification obligations require bounded source, reason, receiver, candidate and scope.",
-			);
-		}
+		validateOpenInput(input);
 		const { branchKey, snapshot } = this.load();
-		const duplicate = snapshot.obligations.find(
-			(item) =>
-				item.status === "active" &&
-				item.source === input.source &&
-				item.reason === input.reason &&
-				item.receiverId === input.receiverId &&
-				item.candidateKind === input.candidateKind &&
-				item.candidateId === input.candidateId &&
-				item.scope === input.scope,
-		);
+		const duplicate = snapshot.obligations.find((item) => matchesOpenInput(item, input));
 		if (duplicate) return cloneObligation(duplicate);
 		if (snapshot.obligations.filter((item) => item.status === "active").length >= MAX_OBLIGATIONS)
 			throw new Error("Semantic verification obligation capacity reached; existing obligations remain active.");
@@ -633,6 +666,111 @@ export class SemanticVerificationObligationTracker {
 			true,
 		);
 		return cloneObligation(next.obligations.find((item) => item.id === obligation.id)!);
+	}
+
+	/** One durable append owns both report registration and every finding, including evidence gaps. */
+	openReport(reportId: string, receiverId: string, inputs: readonly OpenVerificationObligationInput[]): void {
+		if (
+			!isBoundedText(reportId, MAX_ID_LENGTH) ||
+			!isVerificationIdentity(receiverId) ||
+			inputs.length > MAX_OBLIGATIONS
+		)
+			throw new Error("Invalid or oversized semantic verification report registration.");
+		for (const input of inputs) {
+			validateOpenInput(input);
+			if (input.receiverId !== receiverId) throw new Error("Verification report contains another receiving lane.");
+		}
+		// Candidate identity deliberately is not part of report identity: retries after a repair must not reopen it.
+		const digest = createHash("sha256")
+			.update(JSON.stringify(inputs.map(({ source, reason }) => [source, reason])))
+			.digest("hex");
+		const { branchKey, snapshot } = this.load();
+		const registrations = snapshot.reportRegistrations ?? [];
+		const existing = registrations.find((item) => item.id === reportId && item.receiverId === receiverId);
+		if (existing) {
+			if (existing.digest !== digest)
+				throw new Error("Verification report identity was reused with different findings.");
+			return;
+		}
+		if (registrations.length >= MAX_REPORT_REGISTRATIONS)
+			throw new Error("Verification report registration capacity reached; acknowledge registered reports first.");
+		const additions: SemanticVerificationObligation[] = [];
+		const ids = new Set(snapshot.obligations.map((item) => item.id));
+		for (const input of inputs) {
+			if (
+				snapshot.obligations.some((item) => matchesOpenInput(item, input)) ||
+				additions.some((item) => matchesOpenInput(item, input))
+			)
+				continue;
+			const id = this.createId();
+			if (!isBoundedText(id, MAX_ID_LENGTH) || ids.has(id))
+				throw new Error("Invalid or duplicate verification obligation id.");
+			ids.add(id);
+			additions.push({ ...input, id, sequence: snapshot.sequence + 1, status: "active" });
+		}
+		const retained = [...snapshot.obligations];
+		if (retained.filter((item) => item.status === "active").length + additions.length > MAX_OBLIGATIONS)
+			throw new Error("Semantic verification obligation capacity reached; report was not partially registered.");
+		while (retained.length + additions.length > MAX_OBLIGATIONS) {
+			const index = retained.findIndex((item) => item.status === "resolved");
+			if (index < 0)
+				throw new Error("Semantic verification obligation capacity reached; active obligations were retained.");
+			retained.splice(index, 1);
+		}
+		const retainedIds = new Set(retained.map((item) => item.id));
+		this.save(
+			branchKey,
+			{
+				...snapshot,
+				obligations: [...retained, ...additions],
+				judgedTokens: snapshot.judgedTokens.filter((item) => retainedIds.has(item.obligationId)),
+				reportRegistrations: [...registrations, { id: reportId, receiverId, digest }],
+			},
+			additions.length > 0,
+		);
+	}
+
+	/** The caller must first persist its acknowledgement; removing a marker before that permits replay. */
+	releaseReport(reportId: string, receiverId: string): void {
+		if (!isBoundedText(reportId, MAX_ID_LENGTH) || !isVerificationIdentity(receiverId))
+			throw new Error("Invalid semantic verification report acknowledgement.");
+		const { branchKey, snapshot } = this.load();
+		const registrations = snapshot.reportRegistrations ?? [];
+		const retained = registrations.filter((item) => item.id !== reportId || item.receiverId !== receiverId);
+		if (retained.length !== registrations.length)
+			this.save(branchKey, { ...snapshot, reportRegistrations: retained }, false);
+	}
+
+	/** Reconcile one report owner's complete durable inventory before it can publish another report. */
+	reconcileReports(
+		prefix: string,
+		receiverId: string,
+		retainedReportIds: readonly string[],
+		inconsistentReportIds: readonly string[],
+	): void {
+		if (!isBoundedText(prefix, MAX_ID_LENGTH) || !isVerificationIdentity(receiverId))
+			throw new Error("Invalid semantic verification report reconciliation identity.");
+		for (const ids of [retainedReportIds, inconsistentReportIds]) {
+			if (
+				ids.length > MAX_REPORT_REGISTRATIONS ||
+				new Set(ids).size !== ids.length ||
+				ids.some((id) => !isBoundedText(id, MAX_ID_LENGTH) || !id.startsWith(prefix))
+			)
+				throw new Error("Invalid semantic verification report reconciliation inventory.");
+		}
+		const retainedIds = new Set(retainedReportIds);
+		const inconsistentIds = new Set(inconsistentReportIds);
+		if (retainedReportIds.some((id) => inconsistentIds.has(id)))
+			throw new Error("Semantic verification report reconciliation inventories overlap.");
+		const { branchKey, snapshot } = this.load();
+		const registrations = snapshot.reportRegistrations ?? [];
+		const belongsToOwner = (item: { id: string; receiverId: string }) =>
+			item.receiverId === receiverId && item.id.startsWith(prefix);
+		if (registrations.some((item) => belongsToOwner(item) && inconsistentIds.has(item.id)))
+			throw new Error("Semantic verification report registration conflicts with its durable owner inventory.");
+		const retained = registrations.filter((item) => !belongsToOwner(item) || retainedIds.has(item.id));
+		if (retained.length !== registrations.length)
+			this.save(branchKey, { ...snapshot, reportRegistrations: retained }, false);
 	}
 
 	active(): readonly SemanticVerificationObligationView[] {

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
+import { ORCHESTRATION_THINKING_LEVEL_SCHEMA } from "../orchestration/thinking-level-schema.ts";
 import { peerFindingsSchema } from "./peer-review-contract.ts";
 
 const CUSTOM_TYPE = "pi_root_peer_reviews";
@@ -26,6 +27,9 @@ const receiptSchema = Type.Object({
 		Type.Union([Type.Literal("no_findings"), Type.Literal("findings"), Type.Literal("insufficient_evidence")]),
 	),
 	peer: Type.String(),
+	thinkingLevel: Type.Optional(ORCHESTRATION_THINKING_LEVEL_SCHEMA),
+	staleReason: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })),
+	recoveryNote: Type.Optional(Type.String({ minLength: 1, maxLength: 4000 })),
 	summary: Type.String({ maxLength: 2000 }),
 	limitations: Type.Array(Type.String({ maxLength: 1000 }), { maxItems: 16 }),
 	findings: peerFindingsSchema,
@@ -67,7 +71,7 @@ export class PeerReviewJournal {
 		return entry.data.reviews;
 	}
 
-	record(receipt: PeerReviewReceipt): void {
+	record(receipt: PeerReviewReceipt, protectedKeys?: ReadonlySet<string>): string {
 		const manager = this.manager();
 		if (receipt.scope.sessionId !== manager.getSessionId()) throw new Error("Peer review session changed.");
 		if (!Value.Check(receiptSchema, receipt)) throw new Error("Invalid root peer review receipt.");
@@ -75,13 +79,14 @@ export class PeerReviewJournal {
 		if (reviews.length >= MAX_REVIEWS) {
 			const reusable = reviews.findIndex(
 				(previous) =>
-					previous.scope.sessionId !== receipt.scope.sessionId ||
-					previous.scope.objectiveId !== receipt.scope.objectiveId ||
-					previous.settled ||
-					previous.acknowledgement ||
-					(previous.outcome === "reviewed" &&
-						previous.verdict === "no_findings" &&
-						previous.limitations.length === 0),
+					!protectedKeys?.has(previous.key) &&
+					(previous.scope.sessionId !== receipt.scope.sessionId ||
+						previous.scope.objectiveId !== receipt.scope.objectiveId ||
+						previous.settled ||
+						previous.acknowledgement ||
+						(previous.outcome === "reviewed" &&
+							previous.verdict === "no_findings" &&
+							previous.limitations.length === 0)),
 			);
 			if (reusable < 0)
 				throw new Error(
@@ -90,7 +95,7 @@ export class PeerReviewJournal {
 			reviews.splice(reusable, 1);
 		}
 		reviews.push(receipt);
-		manager.appendCustomEntry(CUSTOM_TYPE, {
+		return manager.appendCustomEntry(CUSTOM_TYPE, {
 			version: 1,
 			sessionId: manager.getSessionId(),
 			reviews,

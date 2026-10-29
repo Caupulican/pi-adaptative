@@ -26,6 +26,7 @@ import { describeRouterCalibration, formatRouterCalibrationRow } from "../../cor
 import { formatRouterPoolSummary } from "../../core/model-router/candidate-pool.ts";
 import type { ProfileRegistry } from "../../core/profile-registry.ts";
 import type {
+	AdvisorSettings,
 	AutoLearnSettings,
 	AutonomyMode,
 	AutonomySettings,
@@ -62,6 +63,9 @@ import { type ModelRouterPoolView, SettingsSelectorComponent } from "./component
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface SettingsSelectorFlowSettingsSource {
+	getAdvisorSettings(): AdvisorSettings & { enabled: boolean; error?: string };
+	getAdvisorSettingsScope(): SettingsScope | undefined;
+	setAdvisorSettings(settings: AdvisorSettings, scope?: SettingsScope): void;
 	getActiveResourceProfileNames(): string[];
 	getAutoLearnSettings(): AutoLearnSettings;
 	getAutocompleteMaxVisible(): number;
@@ -292,6 +296,9 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				contextCurationScope: projectSettings.contextPolicy?.curation ? "project" : "global",
 				learningPolicy: host.settingsManager.getLearningPolicySettings(),
 				learningPolicyScope: projectSettings.learningPolicy ? "project" : "global",
+				advisor: host.settingsManager.getAdvisorSettings(),
+				advisorScope: host.settingsManager.getAdvisorSettingsScope() ?? "global",
+				getAdvisorSettingsScope: () => host.settingsManager.getAdvisorSettingsScope(),
 				modelCapability: host.settingsManager.getModelCapabilitySettings(),
 				modelCapabilityScope: projectSettings.modelCapability ? "project" : "global",
 				modelRouter: host.settingsManager.getModelRouterSettings(),
@@ -486,6 +493,38 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				onSystemOneProviderChange: (choice) => {
 					host.settingsManager.setSystemOneProvider(choice);
 					host.showStatus(`System One provider set to ${choice}; the next evaluation uses it.`);
+				},
+				onAdvisorChange: (settings, scope) => {
+					host.settingsManager.setAdvisorSettings(settings, scope);
+					const activeScope = host.settingsManager.getAdvisorSettingsScope();
+					const effective = host.settingsManager.getAdvisorSettings();
+					if (effective.error) {
+						host.showWarning(`Advisor configuration error: ${effective.error}`);
+						return effective;
+					}
+					const selection =
+						effective.enabled === false
+							? "disabled"
+							: `${effective.model ?? "agent chooses"} (${effective.thinkingLevel ?? "agent chooses effort"})`;
+					if (activeScope !== scope) {
+						host.showWarning(
+							`Advisor saved to ${scope}; active ${activeScope} configuration remains ${selection}.`,
+						);
+						return effective;
+					}
+					const options = host.session.getPeerReviewController()?.options();
+					if (effective.enabled && (!options || options.reason)) {
+						host.showWarning(
+							`Advisor settings saved to ${scope}: ${options?.reason ?? "the root peer tool is unavailable in this session"}`,
+						);
+						return effective;
+					}
+					host.showStatus(
+						effective.enabled === false
+							? "Advisor disabled; existing findings remain available."
+							: `Advisor: ${selection}, saved to ${scope}. Applies to the next review; omitted effort uses the model default.`,
+					);
+					return effective;
 				},
 				onModelCapabilityChange: (settings, scope) => {
 					host.settingsManager.setModelCapabilitySettings(settings, scope);

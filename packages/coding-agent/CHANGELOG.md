@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `/settings` now exposes an Advisor section to enable the root-only reviewer and choose its model, thinking effort and save scope independently of System One. Explicit choices are enforced without silent model substitution; changes fence active reviews, and retained unsaved reports can be recovered without another model call.
+
 ## [0.104.19] - 2026-10-29
 
 ### Added

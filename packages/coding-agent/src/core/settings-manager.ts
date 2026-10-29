@@ -137,6 +137,7 @@ import {
 	sanitizeNumberSetting,
 } from "./settings/settings-rules.ts";
 import type {
+	AdvisorSettings,
 	AutoLearnSettings,
 	AutonomySettings,
 	BedrockScopeSettings,
@@ -371,6 +372,8 @@ export class SettingsManager {
 	private modelRouterDefaultEnabled = false;
 	private projectSettingsLoadError: Error | null = null; // Track if project settings file had parse errors
 	private resolvedSelfCompaction: { key: string; value: SelfCompactionSettings } | undefined;
+	private advisorSettingsRevision = 0;
+	private observedAdvisorSettings = "";
 	private directoryProfileSettingsLoadError: Error | null = null;
 	private directoryProfileInfo: DirectoryResourceProfileInfo | null = null;
 	private profileRegistry!: ProfileRegistry;
@@ -404,6 +407,7 @@ export class SettingsManager {
 		this.reportWorkerDelegationDiagnostics("project", this.projectSettings);
 		this.reportWorkerDelegationDiagnostics("directoryProfile", this.directoryProfileSettings);
 		this.settings = this.mergeEffectiveSettings();
+		this.observedAdvisorSettings = JSON.stringify(this.getAdvisorSettings());
 		// Reported at construction as well as from the getter so the startup drain in main.ts
 		// shows it, rather than only a later request-time read.
 		this.reportLegacyStreamStallScopeDiagnostic();
@@ -535,6 +539,9 @@ export class SettingsManager {
 	private mergeEffectiveSettings(): Settings {
 		let merged = deepMergeSettings(this.globalSettings, this.projectSettings);
 		merged = deepMergeSettings(merged, this.directoryProfileSettings);
+		for (const layer of [this.globalSettings, this.projectSettings, this.directoryProfileSettings]) {
+			if (Object.hasOwn(layer, "advisor")) merged.advisor = structuredClone(layer.advisor);
+		}
 		// Favorites are deliberately global user preferences; project and directory overlays must
 		// never shadow the canonical list or make a pin disappear when changing repositories.
 		if (this.globalSettings.modelFavorites !== undefined) merged.modelFavorites = this.globalSettings.modelFavorites;
@@ -568,6 +575,11 @@ export class SettingsManager {
 	}
 
 	private notifyChanges(): void {
+		const advisor = JSON.stringify(this.getAdvisorSettings());
+		if (advisor !== this.observedAdvisorSettings) {
+			this.observedAdvisorSettings = advisor;
+			this.advisorSettingsRevision += 1;
+		}
 		for (const listener of [...this.changeListeners]) {
 			try {
 				void Promise.resolve(listener()).catch(() => {});
@@ -3717,6 +3729,57 @@ export class SettingsManager {
 
 		this.globalSettings.toolkit = { ...settings };
 		this.markModified("toolkit");
+		this.save();
+	}
+
+	getAdvisorSettings(): AdvisorSettings & { enabled: boolean; error?: string } {
+		const configured = this.settings.advisor;
+		if (configured === undefined) return { enabled: true };
+		if (!configured || typeof configured !== "object" || Array.isArray(configured))
+			return { enabled: false, error: "Advisor settings must be an object." };
+		if (configured.enabled !== undefined && typeof configured.enabled !== "boolean")
+			return { enabled: false, error: "Advisor enabled must be a boolean." };
+		if (
+			configured.model !== undefined &&
+			(typeof configured.model !== "string" || !configured.model.trim() || !configured.model.includes("/"))
+		)
+			return { enabled: false, error: "Advisor model must be an exact nonempty provider/model reference." };
+		if (configured.thinkingLevel !== undefined && !isThinkingLevel(configured.thinkingLevel))
+			return { enabled: false, error: "Advisor thinkingLevel is unsupported." };
+		return { enabled: configured.enabled ?? true, model: configured.model, thinkingLevel: configured.thinkingLevel };
+	}
+
+	getAdvisorSettingsScope(): SettingsScope | undefined {
+		if (Object.hasOwn(this.directoryProfileSettings, "advisor")) return "directoryProfile";
+		if (Object.hasOwn(this.projectSettings, "advisor")) return "project";
+		return Object.hasOwn(this.globalSettings, "advisor") ? "global" : undefined;
+	}
+
+	getAdvisorSettingsRevision(): number {
+		return this.advisorSettingsRevision;
+	}
+
+	setAdvisorSettings(settings: AdvisorSettings, scope: SettingsScope = "global"): void {
+		if (scope !== "global" && scope !== "project" && scope !== "directoryProfile")
+			throw new Error("Unknown advisor settings scope.");
+		if (scope === "directoryProfile") {
+			this.persistDirectoryProfiles((current) => {
+				current.advisor = {
+					...(current.advisor ?? this.projectSettings.advisor ?? this.globalSettings.advisor),
+					...settings,
+				};
+			});
+			return;
+		}
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.advisor = { ...(projectSettings.advisor ?? this.globalSettings.advisor), ...settings };
+			this.markProjectModified("advisor");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+		this.globalSettings.advisor = { ...this.globalSettings.advisor, ...settings };
+		this.markModified("advisor");
 		this.save();
 	}
 

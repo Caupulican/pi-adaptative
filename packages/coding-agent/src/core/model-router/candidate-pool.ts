@@ -36,6 +36,8 @@ export function resolveRouterCandidatePool(
 	registry: { getAvailable(): Model<Api>[] },
 	options: {
 		favorites: readonly { provider: string; modelId: string }[];
+		/** Explicit advisor choice only; does not change favorites or the caller's hard model scope. */
+		selectedAdvisorRef?: string;
 		isRuntimeDisabled?: (runtime: "ollama" | "llamacpp" | "transformers") => boolean;
 	},
 ): RouterCandidatePool {
@@ -65,7 +67,8 @@ export function resolveRouterCandidatePool(
 	}
 	const models = available.filter(
 		(model) =>
-			resolvedFavoriteKeys.has(`${model.provider}\0${model.id}`) &&
+			(resolvedFavoriteKeys.has(`${model.provider}\0${model.id}`) ||
+				options.selectedAdvisorRef === `${model.provider}/${model.id}`) &&
 			(!pool || pool.models.some((scoped) => modelsAreEqual(scoped, model))),
 	);
 	return { customized: pool !== undefined, source: pool?.source ?? "favorites", models };

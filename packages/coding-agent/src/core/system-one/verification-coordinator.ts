@@ -273,6 +273,38 @@ export class VerificationCoordinator {
 		}
 	}
 
+	requireReport(reportId: string, groups: readonly { source: string; reasons: readonly string[] }[]): void {
+		const candidate = this.host.getCandidate();
+		const receiverId = this.host.getReceiverId();
+		this.tracker.openReport(
+			reportId,
+			receiverId,
+			groups.flatMap(({ source, reasons }) =>
+				reasons.map((reason) => ({
+					source,
+					reason,
+					receiverId,
+					candidateId: candidate.id,
+					scope: candidate.scope,
+					candidateKind: candidate.kind,
+				})),
+			),
+		);
+	}
+
+	/** Only release after the peer report journal durably records verification registration. */
+	releaseReport(reportId: string): void {
+		this.tracker.releaseReport(reportId, this.host.getReceiverId());
+	}
+
+	reconcileReports(
+		prefix: string,
+		retainedReportIds: readonly string[],
+		inconsistentReportIds: readonly string[],
+	): void {
+		this.tracker.reconcileReports(prefix, this.host.getReceiverId(), retainedReportIds, inconsistentReportIds);
+	}
+
 	/**
 	 * Makes the open completion findings exactly `reasons`: findings no longer raised are closed as superseded by `reference`
 	 * (only when `closeStale`, which a caller sets only after every question was actually judged), and new ones are opened.

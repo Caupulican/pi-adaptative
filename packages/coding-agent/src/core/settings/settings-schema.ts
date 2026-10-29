@@ -471,6 +471,13 @@ export interface ToolkitSettings {
 
 export type ModelCapabilityMode = "auto" | "off" | "full" | "lean" | "minimal" | "chat";
 
+export interface AdvisorSettings {
+	enabled?: boolean;
+	/** Exact provider/model reference; absent lets the root choose for each review. */
+	model?: string;
+	thinkingLevel?: ThinkingLevel;
+}
+
 export interface ModelCapabilitySettings {
 	/**
 	 * default: "auto" — derive the tool/lane surface from the model's context window so small open
@@ -696,6 +703,7 @@ export interface Settings {
 	fileEncodings?: FileEncodingsSettings; // Source charset per EditorConfig-style glob; overrides .editorconfig, loses to an explicit encoding argument
 	edge?: EdgeSettings; // Standing grants for the edge classes that would otherwise ask the operator (core/autonomy/edge-policy)
 	learningPolicy?: LearningPolicySettings; // Default-on audited learning policy; destructive supersessions remain proposal-gated
+	advisor?: AdvisorSettings;
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
 	bedrock?: BedrockScopeSettings; // User-level verified profile/region/model scope for Amazon Bedrock
 	toolkit?: ToolkitSettings; // User's blessed daily-ops script registry for run_toolkit_script
